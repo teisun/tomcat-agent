@@ -14,7 +14,7 @@
 
 - **pi-mono**：作为**兼容性契约与行为基准**。扩展作者面向的是 TypeScript/JS 的 API、事件名、会话与 RPC 协议；「与 pi 生态兼容」的最终标准是**与 pi-mono 的对外行为与接口一致**。事件名、API 形态、payload 结构、协议语义等以 **pi-mono 为权威**。
 - **pi-agent-rust**：作为 **Rust 侧的主要实现参考**。事件拆分（AgentEvent / ExtensionEvent）、hostcall 设计、扩展加载与 QuickJS 集成、会话/工具/权限等实现可优先参考 pi-agent-rust；其已与 pi-mono 对齐的部分可直接沿用。
-- **二者不一致时**：以 **pi-mono 的语义为准**，在 pi-rust-wasm 中按 pi-mono 实现，不把 pi-agent-rust 的当前行为当作最终标准（pi-agent-rust 的 drop-in 认证当前为 NOT_CERTIFIED，存在已知差距）。
+- **二者不一致时**：以 **pi-mono 的语义为准**，在 pi-rust-wasm 中按 pi-mono 实现，再在 pi-rust-wasm 里用 Rust 实现出来, 不把 pi-agent-rust 的当前行为当作最终标准（pi-agent-rust 的 drop-in 认证当前为 NOT_CERTIFIED，存在已知差距）。
 
 ## 整体分层架构
 从宿主可信层到沙箱插件层，单向依赖、边界清晰，架构层级从下到上依次为：
