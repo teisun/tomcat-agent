@@ -25,7 +25,7 @@
 
 ---
 
-## 三、完成定义（Definition of Done）
+## 三、完成定义（Definition of Done） 
 
 功能/迭代/任务视为完成须同时满足：
 
