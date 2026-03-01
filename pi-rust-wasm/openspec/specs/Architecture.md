@@ -24,16 +24,22 @@
 ### 1. 基础设施层
 项目的底层可信基础能力，所有上层模块均依赖该层，无任何业务逻辑，保证跨平台通用，完全基于Rust安全实现。
 - 统一错误处理体系：基于thiserror+anyhow实现统一错误枚举，所有错误包含完整上下文，禁止裸panic与滥用unwrap()
-- 配置管理模块：基于config-rs实现多源配置合并，敏感字段AES-256加密存储，支持配置热更新
+- 配置管理模块：基于config-rs实现多源配置合并，支持配置热更新
 - 日志与审计系统：基于tracing实现分级日志，独立审计日志模块，全链路记录4原语调用、插件执行、高危操作
-- 加密工具模块：统一加解密接口，用于敏感数据、API密钥的加密存储与传输
 - 跨平台基础适配：封装通用文件操作、进程管理、系统信息获取接口，抹平Windows/macOS/Linux平台差异
 - 事件总线：参考pi-agent-rust设计，实现全局同步/异步事件总线，是宿主与插件、插件与插件通信的核心通道，替代原钩子设计
 
 ### 2. 宿主核心能力层
 项目的可信核心引擎，所有业务逻辑的底层支撑，仅在宿主层运行，不向插件开放直接访问权限。
 #### 2.1 会话管理模块
-负责会话全生命周期管理，对话上下文组装、消息持久化、会话关联追溯，完全对齐pi-mono的会话管理规范，支持会话级插件、权限、LLM配置隔离。
+
+负责会话全生命周期管理、对话上下文组装、消息持久化与会话关联追溯；支持会话级插件、权限、LLM 配置隔离。设计面向多 Agent、多 channel。
+
+- **存储约束**：会话内容不使用 SQLite，仅使用 **pi 系 JSONL transcript**；索引与路由由 **sessions.json**（元数据 store）提供。
+- **两层**：元数据 store（sessions.json，`sessionKey -> SessionEntry`）+ 对话 transcript（pi 系 JSONL，与 pi-mono 格式兼容）。
+- **约定**：列表与「当前会话」由 sessions.json 提供；transcript 内容以 JSONL 为准，sessions.json 为元数据与路由的权威。
+
+会话路径、sessionKey/sessionId 约定及 SessionEntry、transcript 格式等见文末 **会话存储数据结构设计**。
 
 #### 2.2 LLM接入模块
 基于适配器模式实现统一LLM Provider Trait，兼容所有OpenAI格式大模型，支持流式响应、限流重试、Token统计、会话级模型配置，是插件调用LLM能力的唯一可信入口。
@@ -104,6 +110,18 @@
 - CLI交互层：基于clap+tokio实现，支持会话管理、对话交互、插件管理、配置管理、审计日志查看
 - IPC接口层：统一的前后端接口规范，为后续Web/移动端界面预留，与CLI复用同一套核心服务
 - 前端交互层（预留）：基于Tauri+React实现，全平台可视化界面，核心能力与CLI完全对齐
+
+### 7. 安全设计核心原则
+
+- **最小权限原则**：插件默认最小权限，仅授予完成任务所需的宿主 API，禁止过度授权
+- **完全隔离原则**：每个插件在独立 WasmEdge 沙箱中，内存与执行环境隔离，故障不扩散
+- **唯一通道原则**：插件仅能通过显式注册的宿主 API 与宿主交互，禁止绕过 API 的系统访问
+- **用户知情权原则**：4 原语与高危操作须告知用户并获二次确认，禁止静默执行
+- **错误完全隔离原则**：插件与事件回调的错误独立捕获，不导致宿主崩溃
+- **全链路审计原则**：4 原语、工具调用、插件生命周期、高危操作留存完整审计日志，可追溯
+- **代码安全校验原则**：插件加载前须安全扫描，禁止恶意或越权代码加载
+
+**TODO**：敏感数据加密（如 LLM API 密钥）后续再考虑。
 
 ## 事件系统设计（替代原钩子设计，完全对齐pi-agent-rust）
 ### 核心设计原则
@@ -180,14 +198,91 @@ pub enum ExtensionEvent {
 - 扩展通过 `agent.emit()` 发布自定义事件（如 Custom 前缀），实现插件间通信
 - 插件卸载时自动注销该插件所有监听，无泄漏
 
-### 安全设计核心原则
 
-- **最小权限原则**：插件默认最小权限，仅授予完成任务所需的宿主 API，禁止过度授权
-- **完全隔离原则**：每个插件在独立 WasmEdge 沙箱中，内存与执行环境隔离，故障不扩散
-- **唯一通道原则**：插件仅能通过显式注册的宿主 API 与宿主交互，禁止绕过 API 的系统访问
-- **用户知情权原则**：4 原语与高危操作须告知用户并获二次确认，禁止静默执行
-- **敏感数据加密原则**：LLM API 密钥、用户配置、审计日志采用 AES-256 加密存储，禁止明文
-- **错误完全隔离原则**：插件与事件回调的错误独立捕获，不导致宿主崩溃
-- **全链路审计原则**：4 原语、工具调用、插件生命周期、高危操作留存完整审计日志，可追溯
-- **代码安全校验原则**：插件加载前须安全扫描，禁止恶意或越权代码加载
+---
 
+## 会话存储数据结构设计
+
+### 元数据 store（sessions.json）
+
+单文件 JSON：`sessionKey -> SessionEntry`。列表与路由由此提供，不另建 SQLite 索引。
+
+```rust
+/// 会话根目录：~/.pi/agent/sessions/ 或 ~/.pi/agent/sessions/<agentId>/
+/// sessionKey 格式：agent:<agentId>:<channelKey>，MVP 单入口用 agent:default:main
+pub type SessionStore = std::collections::HashMap<String, SessionEntry>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEntry {
+    pub session_id: String,           // 当前 transcript 文件 id，对应 <sessionId>.jsonl 或 pi 系 <timestamp>_<uuid>.jsonl
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_file: Option<String>, // 可选显式 transcript 路径
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_count: Option<u32>,
+    // 预留：channel/agent 相关字段供三期多 channel 使用
+}
+```
+
+### 对话 transcript（pi 系 JSONL）
+
+每会话一个 `.jsonl` 文件：**每行一个 JSON 对象**（非管道分隔）；首行 session header，后续每行一条 entry，树形 id/parentId。内存中为结构化类型（pi-mono 为 `SessionEntry` 联合类型），落盘时每行 `JSON.stringify(entry)`。与 pi-mono 格式兼容。
+
+```rust
+/// 首行：session header
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHeader {
+    pub r#type: String, // "session"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>, // 3
+    pub id: String,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// 后续每行：一条 SessionEntry。内存中为 enum 联合类型，落盘时每行序列化一个变体。
+/// JSON 通过 type 字段区分（snake_case），与 pi-mono / pi_agent_rust 一致。
+/// 参考：[session-pi-mono-format.jsonl](examples/session-pi-mono-format.jsonl)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEntry {
+    Message(MessageEntry),
+    ModelChange(ModelChangeEntry),
+    ThinkingLevelChange(ThinkingLevelChangeEntry),
+    Compaction(CompactionEntry),
+    BranchSummary(BranchSummaryEntry),
+    Label(LabelEntry),
+    SessionInfo(SessionInfoEntry),
+    Custom(CustomEntry),
+}
+
+/// 各 entry 变体均包含或 flatten 公共基座：id、parent_id、timestamp，组成树形结构。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryBase {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub timestamp: String,
+}
+```
+
+**会话路径与会话标识**
+- **会话根目录** '~/.pi/agent/sessions/'; 按Agent分子目录预留多Agent设计 (如'~/.pi/agent/sessions/<agentId>/'), mvp先单agentId或固定default。
+- **sessionKey** (路由键，预留多channel)：'agent:<agentId>:<channelKey>', MVP可用'agent:default:main' 后续channnelKey可扩展如: 'agent:mybot:telegram:group:123'
+- **sessionId** 当前对话对应的 transcript 唯一 id(sessionId=<timestamp>_<uuid>)，对应文件名'<sessionId>.jsonl'; SessionEntry中'sessionId'指向改文件
+
+**Source of truth**：transcript 内容以 JSONL 文件为准；sessions.json 为元数据与路由的权威，写入时覆盖该文件。
+
+---

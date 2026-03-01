@@ -31,14 +31,14 @@
 核心错误枚举见 [CODE_BLOCK_P1_001]
 
 #### 1.2 配置管理模块
-设计思路：基于config-rs实现多源配置合并，支持配置文件、环境变量，敏感字段（LLM API密钥）采用AES-256加密存储，支持配置热更新，启动时自动校验配置合法性，默认配置遵循最小权限原则。
+设计思路：基于config-rs实现多源配置合并，支持配置文件、环境变量，支持配置热更新，启动时自动校验配置合法性，默认配置遵循最小权限原则。
 
 核心结构见 [CODE_BLOCK_P1_002]
 
-核心能力：配置加载与合并、热更新、敏感字段加解密、配置合法性校验、配置文件生成与修复。
+核心能力：配置加载与合并、热更新、配置合法性校验、配置文件生成与修复。
 
 #### 1.3 日志与审计系统
-设计思路：基于tracing实现分级日志，分为trace/debug/info/warn/error五个级别，支持控制台/文件双输出，按大小滚动归档；独立审计日志模块，专门记录4原语调用、工具调用、插件生命周期、高危操作，不可篡改、可追溯，加密存储。
+设计思路：基于tracing实现分级日志，分为trace/debug/info/warn/error五个级别，支持控制台/文件双输出，按大小滚动归档；独立审计日志模块，专门记录4原语调用、工具调用、插件生命周期、高危操作，不可篡改、可追溯。（审计日志加密存储 TODO 后续考虑）
 
 核心配置：生产环境默认关闭debug/trace级别日志，所有日志禁止打印敏感信息；审计日志单独存储，保留最近90天记录，支持导出与查询。
 
@@ -62,18 +62,18 @@
 
 ### 2. 宿主核心能力层
 #### 2.1 会话管理模块
-设计思路：负责会话的全生命周期管理，对话记录的持久化，对话上下文的组装，会话级配置隔离，完全对齐pi-mono的会话管理规范。
 
-核心能力：
-- 会话CRUD：创建、查询、更新、归档、删除、搜索
-- 消息管理：对话记录的增删改查，流式消息临时存储，消息持久化
-- 上下文组装：根据会话历史自动组装LLM所需的上下文消息，支持会话级上下文窗口配置
-- 会话级配置隔离：每个会话可独立配置使用的LLM模型、启用的插件、权限策略
-- 会话关联追溯：支持会话来源记录，上下文完整追溯
+设计思路：负责会话全生命周期管理、对话持久化、上下文组装与会话级配置隔离；**设计面向多 Agent、多 channel**（参考 openclaw），**兼容并复用 pi 系 transcript 格式**；多 Agent / 多 channel 实现放三期，MVP 仅落地单 Agent、单入口。**会话内容不使用 SQLite**，仅使用 pi 系 JSONL；索引与路由由 **sessions.json** 提供。
 
-核心数据表设计：
-- sessions表：会话元数据，包含会话ID、名称、创建时间、绑定Agent、会话配置
-- messages表：对话消息，关联会话ID，包含角色、内容、元数据、创建时间、工具调用记录
+- 两层：元数据 store（sessions.json，`sessionKey -> SessionEntry`）+ 对话 transcript（pi 系 JSONL，与 pi-mono 一致）。
+- 核心能力：
+    - 会话CRUD：创建、查询、更新、归档、删除、搜索
+    - 消息管理：有限支持对话记录的增删改查（通过SessionManager写入 JSONL 不落 SQLite）
+    - 上下文组装：根据会话历史自动组装LLM所需的上下文消息，支持会话级上下文窗口配置
+    - 会话级配置隔离：每个会话可独立配置使用的LLM模型、启用的插件
+    - 会话关联追溯：支持会话来源记录，上下文完整追溯，会话列表与「当前会话」由 sessions.json 提供。
+
+> 会话路径、sessionKey/sessionId、SessionEntry 字段及 transcript 格式、其他细节见本文末尾 **会话管理数据结构设计**。
 
 #### 2.2 LLM接入模块
 设计思路：采用适配器模式，定义统一的LLM Provider Trait，不同大模型实现对应的适配器，主程序仅与统一Trait交互，与具体模型解耦，完全对齐pi-mono的LLM调用API规范，支持流式与非流式调用。
@@ -197,10 +197,9 @@ API绑定实现逻辑：
 2.  **最小权限原则**：插件默认仅拥有最小权限，仅开放插件清单中声明、用户确认授权的API，未授权API完全无法访问
 3.  **唯一通道原则**：插件仅能通过显式注册的宿主API与宿主系统交互，禁止任何绕过API的直接系统调用，WASI接口全部经过权限校验
 4.  **用户知情权保障**：所有4原语写入/编辑/bash高危操作，必须清晰展示操作内容、diff预览、风险提示，获得用户明确二次确认后方可执行，禁止任何形式的静默执行
-5.  **敏感数据加密**：LLM API密钥、用户配置、审计日志全部采用AES-256加密存储，禁止明文存储与传输，日志中禁止打印敏感信息
-6.  **错误完全隔离**：插件执行、事件回调、API调用的所有错误，全部独立捕获，不传递到宿主主程序，单个插件崩溃不会影响宿主与其他插件运行
-7.  **全链路审计**：所有4原语调用、工具调用、插件生命周期、高危操作，全部留存完整审计日志，包含操作人、时间、内容、用户确认状态、执行结果、全量输入输出，可追溯、可审计
-8.  **代码安全校验**：插件加载前自动进行安全扫描，检测恶意代码、越权操作、敏感信息泄露风险，风险插件禁止加载
+5.  **错误完全隔离**：插件执行、事件回调、API调用的所有错误，全部独立捕获，不传递到宿主主程序，单个插件崩溃不会影响宿主与其他插件运行
+6.  **全链路审计**：所有4原语调用、工具调用、插件生命周期、高危操作，全部留存完整审计日志，包含操作人、时间、内容、用户确认状态、执行结果、全量输入输出，可追溯、可审计
+7.  **代码安全校验**：插件加载前自动进行安全扫描，检测恶意代码、越权操作、敏感信息泄露风险，风险插件禁止加载
 
 ---
 
@@ -268,7 +267,8 @@ pub struct SecurityConfig {
     pub enable_audit_log: bool,
     pub audit_log_retention_days: u32,
     pub enable_plugin_safety_scan: bool,
-    pub sensitive_data_encryption_key: Option<String>,
+    // TODO: 敏感数据加密后续考虑时再启用
+    // pub sensitive_data_encryption_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -446,3 +446,18 @@ pub enum PluginStatus {
 7.  触发PluginLoad事件，启用插件
     event_bus.emit_sync(AgentEvent::PluginLoad, event_context)?;
     plugin_manager.enable_plugin(plugin_id)?;
+
+---
+
+## 会话管理数据结构设计
+
+- 会话路径、sessionKey/sessionId、元数据 store（sessions.json）、对话 transcript（pi 系 JSONL）及 SessionEntry/SessionHeader/EntryBase 等类型定义，**均以 [Architecture.md](../../specs/Architecture.md) 中「会话存储数据结构设计」为准**；MVP 实现直接引用该节，此处不再重复。
+
+- 消息管理
+    - 增（Create）：通过 SessionManager 的 appendMessage、appendThinkingLevelChange、appendModelChange、appendCompaction、appendSessionInfo、appendLabelChange 等，在内存里追加 entry 并持久化到 JSONL。
+    - 查（Read）：getEntry(id)、getEntries()、getBranch()、getTree()、getChildren()、getLeafEntry() 等，都是对已加载的 session 做查询。
+    - 改（Update）：没有“改某一条 entry”的 API。transcript 设计成 append-only，没有 updateEntry / editEntry。要“改”只能通过分支（branch / branchWithSummary）换一条新路径，或自己改文件。
+    - 删（Delete）：只支持 整场会话 的删除（删掉该会话的 .jsonl 文件，或通过 /resume 里 Ctrl+D）。没有“删某一条 message/entry”的 API。
+
+
+---
