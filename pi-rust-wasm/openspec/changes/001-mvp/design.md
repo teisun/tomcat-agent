@@ -4,7 +4,7 @@
 
 ### 参考文件
 
-- **pi 生态兼容性对齐检查**：本变更下的 [pi-ecosystem-alignment-check.md](./pi-ecosystem-alignment-check.md)，用于核对事件、API、工具定义与 pi_agent_rust / pi-mono 的差异及对齐结论；设计或实现变更影响扩展/事件/宿主 API 时，应据此做一次对齐检查并更新。
+- **pi 生态兼容性对齐检查**：[pi-ecosystem-alignment-check.md](../archive/pi-ecosystem-alignment-check.md)，用于核对事件、API、工具定义与 pi_agent_rust / pi-mono 的差异及对齐结论；设计或实现变更影响扩展/事件/宿主 API 时，应据此做一次对齐检查并更新。
 
 ### pi 生态参考原则（与 Architecture.md 一致）
 
@@ -208,12 +208,11 @@ API绑定实现逻辑：
 ## 一期代码块
 ### [CODE_BLOCK_P1_001] 核心错误枚举
 ```rust
+// MVP 会话与审计均不使用 SQLite，故不包含 Db 变体；若后续引入再扩展。
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("IO错误: {0}")]
     Io(#[from] std::io::Error),
-    #[error("数据库错误: {0}")]
-    Db(#[from] rusqlite::Error),
     #[error("LLM调用错误: {0}")]
     Llm(String),
     #[error("插件错误: {0}")]
