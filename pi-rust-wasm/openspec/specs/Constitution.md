@@ -58,12 +58,12 @@
 
 每次提交前更新本分支对应的 status 文件。**汇总后以分支为 H2，本文件内不写顶层 ##**，仅写元数据块与 ### 小节，便于看板排版清晰。
 
-**格式**：元数据一行（who / date / state / branch）+ 三级标题小节（DONE、INTERFACE、BLOCKED）。
+**格式**：元数据一行（who / date(日期 时分) / state / branch）+ 三级标题小节（DONE、INTERFACE、BLOCKED）。
 
 ```
-| who | date | state | branch |
-|-----|------|-------|--------|
-| specs_test | 2026-03-03 | DONE | feature/specs-test |
+| who | date(日期 时分) | state | branch |
+|-----|----------------|-------|--------|
+| specs_test | 2026-03-03 14:30 | DONE | feature/specs-test |
 
 ### DONE(完成)
 - [DONE] 会话管理完成
