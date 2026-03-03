@@ -10,7 +10,7 @@
 
 ### pi 生态参考原则（双仓对照）
 
-所有影响「兼容 pi 生态」的技术设计，**必须同时参考 pi-mono 与 pi-agent-rust 两个仓库**，并遵循以下分工：
+所有影响「兼容 pi 生态」的技术设计，**必须同时参考 [pi-mono](../../../pi-mono/) 与 [pi-agent-rust](../../../pi_agent_rust/) 两个仓库**，并遵循以下分工：
 
 - **pi-mono**：作为**兼容性契约与行为基准**。扩展作者面向的是 TypeScript/JS 的 API、事件名、会话与 RPC 协议；「与 pi 生态兼容」的最终标准是**与 pi-mono 的对外行为与接口一致**。事件名、API 形态、payload 结构、协议语义等以 **pi-mono 为权威**。
 - **pi-agent-rust**：作为 **Rust 侧的主要实现参考**。事件拆分（AgentEvent / ExtensionEvent）、hostcall 设计、扩展加载与 QuickJS 集成、会话/工具/权限等实现可优先参考 pi-agent-rust；其已与 pi-mono 对齐的部分可直接沿用。

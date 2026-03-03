@@ -1,7 +1,7 @@
 ---
 本文档供 agent 读取；
 使用方式：在Cursor对话框 @xxx_agent.md @PLAN.md 触发以下指令：
- > agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档 + [需求设计文档](../openspec/changes/001-mvp/) 下文档，实现PLAN.md 规划好的功能，完成对应功能后提交代码到各自分支，按要求同步进度到[项目看板](../INTEGRATION.md)
+ > agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档 + [需求设计文档](../openspec/changes/001-mvp/) 下文档，实现PLAN.md 规划好的功能，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [status/feature-xx.md]
  > 请严格加载 .cursor/rules/commit-guard.mdc 提交规则，所有 Git 提交必须按此规则自动执行、自动校验、自动生成正确 commit message，不允许绕过。
 ---
 
@@ -56,7 +56,7 @@
   2. 002/003/004/007 完成后，由 **integration_test** 按依赖顺序合并：先 primitives_tools（005+006），再 wasm_plugin（007→008→009），再 session_cli 的 010，最后 chat 的 011。
   3. 每次合并前：提交方自测通过（build、clippy、单测）；integration_test 合并后跑全量测试与验收清单，失败则反馈给对应角色，修复后重新合并。
 - **验收**
-  - 由 integration_test 维护验收清单（与 task.md/tasks_details.md 一致），合并到 dev 后执行；问题记录到 issue 或任务看板，指派回开发角色。
+  - 由 integration_test 维护验收清单（与 task.md/tasks_details.md 一致），合并到 dev 后执行；问题记录到 issue 或任务看板（INTEGRATION.md 由 status 汇总生成），指派回开发角色。
 
 ---
 
