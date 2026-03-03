@@ -17,7 +17,7 @@
 
 ---
 
-## 二、Agent 与协作规范
+## 二、Agent 协作规范
 
 1. **宪法优先**：Agent 行为、生成代码、执行操作须符合本宪法；与宪法冲突的需求须拒绝并说明原因。
 2. **自测覆盖**: Agent开发的所有功能必须附带单元测试代码，代码覆盖率不得低于85%
@@ -29,36 +29,10 @@
    - **提交前**：更新本分支的 `status/feature-xx.md`（与当前分支对应），再提交。
    - **提交策略**：每个任务完成提交一次，禁止囤积多个任务一次性提交；提交到本地与远端。
 6. **阻塞主动上报**：多 Agent 协作时，遇依赖阻塞、技术问题、需求不明确，**必须在本分支的 `status/<当前分支对应文件名>.md` 中更新状态**（含阻塞原因与预计解决时间），禁止静默阻塞；不直接修改根目录 INTEGRATION.md。
-7. **提交规约** 
-    - 每次提交必须更新**本分支**的 `status/feature-xx.md` 格式如下：
-        ```
-            ## who
-            state(状态)：
-            branch(分支)：
-            DONE(完成)：
-                - [DONE] 会话管理完成
-                - [DOING]
-                - ...
-            INTERFACE(接口): (可选)
-                - ...
-            **BLOCKED(阻塞性)**: blocked details
-        ``` 
-    - 每次Git提交代码时, commit message必须遵循的格式，禁止无意义的提交
-        ```
-            # 类型(模块): 简短描述(what) (不超过50字)
-            # feat: 新功能
-            # fix: 修复bug
-            # docs: 仅文档
-            # style: 格式(不影响代码运行)
-            # refactor: 重构(既不是新功能也不是改bug)
-            # test: 增加测试
-            # chore: 构建/工具/辅助变动
-
-            # 详细描述（why）
-
-            # 测试覆盖率 
-            [cov = xx.x%]
-        ```
+7. **提交规约**  
+    - 每次提交必须更新**本分支**的 `status/feature-xx.md`（与当前分支对应，分支名 `/` 转为 `-`，如 `feature/infra` → `status/feature-infra.md`），并遵循约定的 commit message 格式，禁止无意义提交。  
+    - 具体格式见**附录：提交与 status 格式**。
+8. **技术设计参考**：技术设计或代码实现有疑问时，可参考 **Architecture.md** 中的「pi 生态参考原则（双仓对照）」：以 **pi-mono** 为兼容性契约与行为基准，以 **pi-agent-rust** 为 Rust 侧实现参考；二者不一致时以 pi-mono 为准。
 
 ---
 
@@ -73,3 +47,45 @@
 5. 集成测试通过
 6. E2E测试通过
 7. 文档更新：配套说明或文档到位。
+
+---
+
+## 附录：提交与 status 格式
+
+### A. status/feature-xx.md 进度格式
+
+每次提交前更新本分支对应的 status 文件，内容格式如下：
+
+```
+## who
+date(时间)：
+state(状态)：
+branch(分支)：
+DONE(完成)：
+    - [DONE] 会话管理完成
+    - [DOING]
+    - ...
+INTERFACE(接口): (可选)
+    - ...
+**BLOCKED(阻塞性)**: blocked details
+```
+
+### B. Commit Message 格式
+
+每次 Git 提交的 commit message 须遵循以下格式，禁止无意义提交：
+
+```
+# 类型(模块): 简短描述(what) (不超过50字)
+# feat: 新功能
+# fix: 修复bug
+# docs: 仅文档
+# style: 格式(不影响代码运行)
+# refactor: 重构(既不是新功能也不是改bug)
+# test: 增加测试
+# chore: 构建/工具/辅助变动
+
+# 详细描述（why）
+
+# 测试覆盖率
+[cov = xx.x%]
+```
