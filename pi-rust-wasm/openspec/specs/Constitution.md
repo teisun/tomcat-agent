@@ -27,13 +27,13 @@
    - **开发前**：
         - 检查工作区状态，若处于detached HEAD则自动checkout -b 自己的工作分支
         - 同步 develop 分支，了解全局状态后再开新改动。
-   - **开发流程**：开发 → 测试 → 修 bug → 单测通过且覆盖率达标。
+   - **开发流程**：开发 → 测试 → 修 bug → 单测通过 -> 写技术[文档](../../docs/)
    - **提交前**：更新本分支的 `status/feature-xx.md`（与当前分支对应），再提交。
    - **提交策略**：每个任务完成提交一次，禁止囤积多个任务一次性提交；提交到本地与远端。
 6. **阻塞主动上报**：多 Agent 协作时，遇依赖阻塞、技术问题、需求不明确，**必须在本分支的 `status/<当前分支对应文件名>.md` 中更新状态**（含阻塞原因与预计解决时间），禁止静默阻塞；不直接修改根目录 INTEGRATION.md。
 7. **提交规约**  
-    - 每次提交必须更新**本分支**的 `status/feature-xx.md`（与当前分支对应，分支名 `/` 转为 `-`，如 `feature/infra` → `status/feature-infra.md`），并遵循约定的 commit message 格式，禁止无意义提交。  
-    - 具体格式见**附录：提交与 status 格式**。
+    - 每次提交必须更新**本分支**的 `status/feature-xx.md`，并遵循约定的 commit message 格式(见附录)，禁止无意义提交。  
+    - 具体格式见 [Status规范](./examples/STATUS_GUIDE.md)
 8. **技术设计参考**：技术设计或代码实现有疑问时，可参考 **Architecture.md** 中的「pi 生态参考原则（双仓对照）」：以 **pi-mono** 为兼容性契约与行为基准，以 **pi-agent-rust** 为 Rust 侧实现参考；二者不一致时以 pi-mono 为准。
 
 ---
@@ -49,35 +49,16 @@
 5. 集成测试通过
 6. E2E测试通过
 7. 文档更新：配套说明或文档到位。
+    - [技术文档规范](./examples/DOCUMENTATION_GUIDE.md)
+    - [代码注释规范](./examples/COMMENT_SPEC.md)
+    - [Status规范](./examples/STATUS_GUIDE.md)
+    
 
 ---
 
 ## 附录：提交与 status 格式
 
-### A. status/feature-xx.md 进度格式
-
-每次提交前更新本分支对应的 status 文件。**汇总后以分支为 H2，本文件内不写顶层 ##**，仅写元数据块与 ### 小节，便于看板排版清晰。
-
-**格式**：元数据一行（who / date(日期 时分) / state / branch）+ 三级标题小节（DONE、INTERFACE、BLOCKED）。
-
-```
-| who | date(日期 时分) | state | branch |
-|-----|----------------|-------|--------|
-| specs_test | 2026-03-03 14:30 | DONE | feature/specs-test |
-
-### DONE(完成)
-- [DONE] 会话管理完成
-- [DOING] 进行中项
-- ...
-
-### INTERFACE(接口)
-- 对外接口或模块说明（可选）
-
-### BLOCKED(阻塞)
-无（或有阻塞原因与预计解决时间）
-```
-
-### B. Commit Message 格式
+### A. Commit Message 格式
 
 每次 Git 提交的 commit message 须遵循以下格式，禁止无意义提交：
 
