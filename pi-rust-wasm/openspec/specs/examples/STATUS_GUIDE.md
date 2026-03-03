@@ -9,7 +9,8 @@
 ## 1. 核心规则
 - **命名规范**：文件名必须与当前 Git 分支一一对应。
   - 转换规则：`分支名 / 替换为 -`，并存放于 `status/` 目录。
-  - 示例：`feature/infra-bus` -> `status/feature-infra-bus.md`。
+  - 若非 `feature/*` 分支, 则直接用分支名
+  - 示例：`feature/infra-bus` -> `status/feature-infra-bus.md`, `develop` -> `develop.md`。
 - **排版约束**：
   - **禁止** 使用 `#` (H1) 和 `##` (H2) 标题。
   - 汇总脚本会自动以分支名作为 H2，本文件内仅允许使用 `###` (H3)。

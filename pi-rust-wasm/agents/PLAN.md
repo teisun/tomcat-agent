@@ -12,7 +12,7 @@
 - **首轮**：仅 1 个开发 Agent 完成 T1-P0-001（项目骨架与基础设施），其余等待。
 - **001 完成后**：最多 **4 个开发 Agent 同时开工**，对应 T1-P0-002、003、004、007 四条线。
 - **后续波次**：005/006（2 条）→ 008（1 条）→ 009（1 条）→ 010/011（2 条），按依赖顺序推进。
-- **测试集成**：1 名 **integration_test** 不占开发任务，负责合并分支到 dev、全量测试与验收。
+- **测试集成**：1 名 **integration_test** 不占开发任务，负责合并分支到 develop、全量测试与验收。
 
 **推荐配置**：**4 开发 + 1 集成** 同时在线（在 002/003/004/007 阶段）；其余阶段按依赖表依次启动或收尾。
 
@@ -42,21 +42,21 @@
 | **wasm_plugin** | T1-P0-007, T1-P0-008, T1-P0-009 | WasmEdge+QuickJS、宿主 API 与 JS 绑定、插件生命周期（008 依赖 primitives_tools 的 005/006） |
 | **primitives_tools** | T1-P0-005, T1-P0-006 | 4 原语执行引擎、工具注册中心 |
 | **chat** | T1-P0-011 | CLI 对话模式、流式渲染、4 原语/工具调用展示与确认（依赖 002/003/004/005/006/009） |
-| **integration_test** | — | 合并到 dev、全量测试与验收、问题反馈（不负责具体任务 ID 开发） |
+| **integration_test** | — | 合并到 develop、全量测试与验收、问题反馈（不负责具体任务 ID 开发） |
 
 ---
 
 ## 分支与集成策略
 
 - **分支约定**
-  - 主开发分支：`dev`
+  - 主开发分支：`develop`
   - 功能分支：`feature/infra`、`feature/session-cli`、`feature/llm`、`feature/wasm-plugin`、`feature/primitives-tools`、`feature/chat`（与角色一一对应）
 - **合并顺序**
-  1. 首轮仅合并 `feature/infra`（001+002）到 dev，CI 通过后其余角色基于 dev 拉取并开发。
+  1. 首轮仅合并 `feature/infra`（001+002）到 develop，CI 通过后其余角色基于 develop 拉取并开发。
   2. 002/003/004/007 完成后，由 **integration_test** 按依赖顺序合并：先 primitives_tools（005+006），再 wasm_plugin（007→008→009），再 session_cli 的 010，最后 chat 的 011。
   3. 每次合并前：提交方自测通过（build、clippy、单测）；integration_test 合并后跑全量测试与验收清单，失败则反馈给对应角色，修复后重新合并。
 - **验收**
-  - 由 integration_test 维护验收清单（与 task.md/tasks_details.md 一致），合并到 dev 后执行；问题记录到 issue 或任务看板（INTEGRATION.md 由 status 汇总生成），指派回开发角色。
+  - 由 integration_test 维护验收清单（与 task.md/tasks_details.md 一致），合并到 develop 后执行；问题记录到 issue 或任务看板（INTEGRATION.md 由 status 汇总生成），指派回开发角色。
 
 ---
 

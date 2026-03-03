@@ -28,10 +28,35 @@ BRANCHES=($(git branch --format='%(refname:short)' | grep -E '^feature/' | sort)
 
 OUTPUT="# 项目集成与进度看板
 
-以下由各 feature 分支的 status 碎片自动汇总，执行 \`/aggregate-status\` 更新。
+以下由 develop 与各 feature 分支的 status 碎片自动汇总，执行 \`/aggregate-status\` 更新。
 
 "
-PARTICIPATED=""
+
+# 先汇总 develop 的 status/develop.md（从当前分支读取，建议在 develop 上执行）
+DEVELOP_PATH="$STATUS_PREFIX/develop.md"
+develop_content=""
+if [ -f "$REPO_ROOT/status/develop.md" ]; then
+  develop_content=$(cat "$REPO_ROOT/status/develop.md" 2>/dev/null || true)
+fi
+OUTPUT+="
+## develop
+"
+if [ -z "$develop_content" ]; then
+  OUTPUT+="
+*暂无进度*
+"
+else
+  OUTPUT+="
+$develop_content
+"
+  PARTICIPATED="  - develop ($DEVELOP_PATH)
+"
+fi
+OUTPUT+="
+---
+"
+
+PARTICIPATED="${PARTICIPATED:-}"
 
 for branch in "${BRANCHES[@]}"; do
   # 分支名中 / 转为 -，得到 status 文件名，如 feature/infra -> feature-infra.md
