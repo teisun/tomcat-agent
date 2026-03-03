@@ -24,7 +24,9 @@
 3. **用户知情权**：高危操作前须清晰告知操作内容、风险与影响，获用户明确确认后执行，禁止隐瞒。
 4. **质量与可追溯**：交付代码须可编译、可运行，通过门禁与测试；操作与变更须有日志或记录，可追溯。
 5. **开发流程规则**（Agent 必须遵守）：
-   - **开发前**：同步 develop 分支，了解全局状态后再开新改动。
+   - **开发前**：
+        - 检查工作区状态，若处于detached HEAD则自动checkout -b 自己的工作分支
+        - 同步 develop 分支，了解全局状态后再开新改动。
    - **开发流程**：开发 → 测试 → 修 bug → 单测通过且覆盖率达标。
    - **提交前**：更新本分支的 `status/feature-xx.md`（与当前分支对应），再提交。
    - **提交策略**：每个任务完成提交一次，禁止囤积多个任务一次性提交；提交到本地与远端。
@@ -54,20 +56,23 @@
 
 ### A. status/feature-xx.md 进度格式
 
-每次提交前更新本分支对应的 status 文件，内容格式如下：
+每次提交前更新本分支对应的 status 文件。**汇总后以分支为 H2，本文件内不写顶层 ##**，仅写元数据块与 ### 小节，便于看板排版清晰。
+
+**格式**：元数据一行（who / date / state / branch）+ 三级标题小节（DONE、INTERFACE、BLOCKED）。
 
 ```
-## who
-date(时间)：
-state(状态)：
-branch(分支)：
-DONE(完成)：
-    - [DONE] 会话管理完成
-    - [DOING]
-    - ...
-INTERFACE(接口): (可选)
-    - ...
-**BLOCKED(阻塞性)**: blocked details
+**who** 角色名 · **date** YYYY-MM-DD · **state** DONE|DOING|BLOCKED · **branch** feature/xxx
+
+### DONE(完成)
+- [DONE] 会话管理完成
+- [DOING] 进行中项
+- ...
+
+### INTERFACE(接口)
+- 对外接口或模块说明（可选）
+
+### BLOCKED(阻塞)
+无（或有阻塞原因与预计解决时间）
 ```
 
 ### B. Commit Message 格式

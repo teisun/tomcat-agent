@@ -5,37 +5,49 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [ -z "$GIT_ROOT" ]; then
+  echo "错误：当前目录不在 Git 仓库内。" >&2
+  exit 1
+fi
+
+# status 路径前缀：若仓库根与脚本所在项目根不同（如 monorepo），则带相对前缀
+if [ "$GIT_ROOT" != "$REPO_ROOT" ]; then
+  STATUS_PREFIX="${REPO_ROOT#$GIT_ROOT/}/status"
+else
+  STATUS_PREFIX="status"
+fi
+
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
 if [ "$CURRENT_BRANCH" != "develop" ]; then
   echo "警告：当前分支为 $CURRENT_BRANCH，建议在 develop 上执行本脚本。" >&2
 fi
 
-# 分支与 status 文件名对应（与 status/README.md 一致）
-declare -a BRANCHES=( "feature/infra:status/feature-infra.md"
-                      "feature/session-cli:status/feature-session-cli.md"
-                      "feature/llm:status/feature-llm.md"
-                      "feature/wasm-plugin:status/feature-wasm-plugin.md"
-                      "feature/primitives-tools:status/feature-primitives-tools.md"
-                      "feature/chat:status/feature-chat.md" )
+# 动态获取所有 feature 分支（排序保证顺序稳定）
+BRANCHES=($(git branch --format='%(refname:short)' | grep -E '^feature/' | sort))
 
 OUTPUT="# 项目集成与进度看板
+
+以下由各 feature 分支的 status 碎片自动汇总，执行 \`/aggregate-status\` 更新。
+
 "
 PARTICIPATED=""
 
-for entry in "${BRANCHES[@]}"; do
-  branch="${entry%%:*}"
-  path="${entry##*:}"
-  section_name="${path#status/}"
-  section_name="${section_name%.md}"
+for branch in "${BRANCHES[@]}"; do
+  # 分支名中 / 转为 -，得到 status 文件名，如 feature/infra -> feature-infra.md
+  section_name="${branch//\//-}"
+  path="$STATUS_PREFIX/$section_name.md"
   content=""
   if git rev-parse --verify "$branch" &>/dev/null; then
     content=$(git show "$branch:$path" 2>/dev/null || true)
   fi
+  # 每个分支始终带 H2 标题，再拼内容或占位；块间用 --- 分隔
+  OUTPUT+="
+## $section_name
+"
   if [ -z "$content" ]; then
     OUTPUT+="
-## $section_name
-
-（暂无进度碎片）
+*暂无进度*
 "
   else
     OUTPUT+="
@@ -44,6 +56,9 @@ $content
     PARTICIPATED+="  - $branch ($path)
 "
   fi
+  OUTPUT+="
+---
+"
 done
 
 printf '%s' "$OUTPUT" > INTEGRATION.md

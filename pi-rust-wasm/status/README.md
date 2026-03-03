@@ -18,4 +18,6 @@
 
 ## 内容格式
 
-与 INTEGRATION.md 中「每个角色一节」的格式一致：state、branch、DONE、INTERFACE、BLOCKED、覆盖率等。便于汇总脚本按节拼接。
+**格式与示例**见 [Constitution.md](../openspec/specs/Constitution.md) 附录 A「status/feature-xx.md 进度格式」。本目录仅约定文件名与分支对应关系，不重复书写格式细节。
+
+若已有碎片为旧格式（每个字段单独 `## who`、`## date` 等），建议逐步迁移到 Constitution 约定新格式，以便看板汇总后层次清晰。
