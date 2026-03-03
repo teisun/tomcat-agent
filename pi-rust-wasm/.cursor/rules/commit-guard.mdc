@@ -74,21 +74,29 @@ feat(plugin): 实现插件模块加载逻辑
 
 ## 三、例外豁免规则（满足则不要求覆盖率）
 
-**仅当本次提交唯一修改文件为 `INTEGRATION.md` 时**：
+**仅当本次提交唯一修改的文件均在 `status/*.md` 内，或唯一修改文件为 `INTEGRATION.md` 时**：
 
 - 豁免：不执行测试
 - 豁免：不计算覆盖率、不写 `[cov=...]`
 - 仍必须遵守提交格式：
+  - 仅修改 status 时示例：
+    ```
+    chore(doc): 更新 status/feature-xx.md 进度/阻塞说明
 
-  ```
-  chore(doc): 更新 INTEGRATION.md 进度/阻塞说明
+    用于阻塞上报、进度同步。
 
-  用于阻塞上报、进度同步。
+    （豁免时不写 [cov = xx.x%]）
+    ```
+  - 仅修改 INTEGRATION 时（由汇总 command 使用）：
+    ```
+    chore(doc): 更新 INTEGRATION.md 进度/阻塞说明
 
-  （豁免时不写 [cov = xx.x%]）
-  ```
+    用于看板汇总。
 
-**用途**：阻塞上报、进度同步、状态更新
+    （豁免时不写 [cov = xx.x%]）
+    ```
+
+**用途**：开发分支只改 status 碎片；INTEGRATION.md 仅在 develop 上由汇总 command 更新；两种情形均不要求当次提交跑全量测试/覆盖率。
 
 ---
 
@@ -97,8 +105,9 @@ feat(plugin): 实现插件模块加载逻辑
 在执行 `git commit` 前，Agent 必须自动做以下检查：
 
 1. **检查本次 Git 修改文件列表**
+   - 若修改仅包含：`status/*.md` 内文件 → 走豁免规则
    - 若修改仅包含：`INTEGRATION.md` → 走豁免规则
-   - 若包含任何代码 / 配置 / 测试文件 → 走常规规则
+   - 若包含任何代码 / 配置 / 测试文件或其他文件 → 走常规规则
 
 2. **检查 Commit Message 格式**
    - 首行为「类型(模块): 简短描述」，类型仅限 feat/fix/docs/style/refactor/test/chore，描述不超过 50 字
@@ -111,7 +120,7 @@ feat(plugin): 实现插件模块加载逻辑
 ## 五、Agent 固定执行流程（必须严格遵守）
 
 1. 询问：本次提交修改了哪些文件？
-2. 判断是否仅修改 `INTEGRATION.md`
+2. 判断是否仅修改 `status/*.md` 或仅修改 `INTEGRATION.md`
    - **是** → 按豁免规则生成合规 commit
    - **否** → 自动跑 test → 自动算 coverage → 生成带覆盖率标准 commit
 3. 校验通过 → 允许提交；不通过 → 终止并提示原因

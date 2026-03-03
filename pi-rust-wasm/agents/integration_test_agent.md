@@ -16,7 +16,7 @@
 
 - **依赖**：各开发角色按 PLAN.md 分支策略提交 feature 分支，并自测通过（build、clippy、单测）。
 - **被依赖**：所有开发角色在合并后依赖 dev 的稳定状态拉取更新、解决冲突。
-- **协作**：接收开发角色合并请求；执行合并前检查与合并后全量测试；将失败项与验收不符项反馈给对应角色（issue 和 集成看板[INTERGRATION.md](../INTEGRATION.md)）。
+- **协作**：接收开发角色合并请求；执行合并前检查与合并后全量测试；将失败项与验收不符项反馈给对应角色（issue 和 集成看板 [INTEGRATION.md](../INTEGRATION.md)）。开发角色只维护各自 `status/feature-xx.md`，不直接修改 INTEGRATION.md；INTEGRATION.md 由在 develop 上执行的「汇总 status 到 INTEGRATION」command 自动生成。
 
 ## 参考文档
 
@@ -39,6 +39,7 @@
 
 - **主开发分支**：`develop`
 - **功能分支**：`feature/infra`、`feature/session-cli`、`feature/llm`、`feature/wasm-plugin`、`feature/primitives-tools`、`feature/chat`
+- **看板更新**：INTEGRATION.md 由 status 汇总 command 在 develop 上生成，开发分支不直接改 INTEGRATION.md。
 - 合并顺序按依赖波次：先 infra（001+002）→ 再 session_cli(003)、llm(004)、wasm_plugin(007)、primitives_tools(005+006) → 再 wasm_plugin(008→009) → session_cli(010) → chat(011)。同一波次内可酌情并行合并，冲突由 integration_test 协调或交还提交方处理。
 
 ### 合并前检查（由提交方或 integration_test 执行）
@@ -63,5 +64,5 @@
 
 ### 问题反馈方式
 
-- 在项目 issue 或集成看板[INTERGRATION.md](../INTEGRATION.md)创建条目，标明：合并分支、失败步骤、期望/实际、建议负责角色
+- 在项目 issue 或集成看板 [INTEGRATION.md](../INTEGRATION.md) 创建条目，标明：合并分支、失败步骤、期望/实际、建议负责角色
 - 或直接在协作渠道（如 PR comment、群组）@ 对应角色并附上上述信息
