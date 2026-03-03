@@ -48,7 +48,7 @@ DONE
 feature/specs-test
 
 ## DONE(完成)
-- [DONE] Hello World 与单测达标（lib + main + 集成测试，覆盖率 100%）
+- [DONE] Hello World 与单测达标（lib + main，覆盖率 ≥ 70%）
 
 ## INTERFACE(接口)
 - `pi_rust_wasm::hello()` -> String

@@ -61,7 +61,9 @@
 **格式**：元数据一行（who / date / state / branch）+ 三级标题小节（DONE、INTERFACE、BLOCKED）。
 
 ```
-**who** 角色名 · **date** YYYY-MM-DD · **state** DONE|DOING|BLOCKED · **branch** feature/xxx
+| who | date | state | branch |
+|-----|------|-------|--------|
+| specs_test | 2026-03-03 | DONE | feature/specs-test |
 
 ### DONE(完成)
 - [DONE] 会话管理完成
