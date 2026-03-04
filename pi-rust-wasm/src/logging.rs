@@ -10,7 +10,16 @@ use tracing_subscriber::{
 
 use crate::config::LogConfig;
 
-/// 使用 LogConfig 初始化 tracing。控制台 + 可选文件（按天滚动，保留最多 5 个文件）。
+/// 使用 [`LogConfig`] 初始化 tracing：控制台 stderr + 可选文件（按天滚动，保留最多 5 个文件）。
+///
+/// 优先使用环境变量 `RUST_LOG`，未设置时使用 `cfg.level`。禁止在日志中打印敏感信息（如 API 密钥）。
+///
+/// # Arguments
+/// * `cfg` - 日志配置，见 [`LogConfig`]。
+///
+/// # Errors
+/// * [`crate::error::AppError::Config`] - `cfg.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
+/// * [`crate::error::AppError::Io`] - 启用文件输出且无法创建/打开日志文件时返回。
 pub fn init_logging(cfg: &LogConfig) -> Result<(), crate::error::AppError> {
     let level = cfg.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {

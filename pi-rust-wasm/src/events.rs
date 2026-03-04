@@ -1,5 +1,7 @@
-//! 事件枚举 AgentEvent / ExtensionEvent，与 Architecture.md 事件系统设计一致。
-//! type snake_case，payload camelCase。
+//! # 事件枚举 (AgentEvent / ExtensionEvent)
+//!
+//! 与 Architecture 事件系统设计一致：type 使用 snake_case，payload 字段使用 camelCase。
+//! 扩展侧使用字符串事件名，与 pi-mono 对齐。
 
 use serde::Serialize;
 
@@ -31,13 +33,16 @@ pub struct ContentBlock(pub serde_json::Value);
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageContent(pub serde_json::Value);
 
+/// 宿主侧流式/UI 与生命周期事件，供前端或日志消费。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// Agent 会话开始。
     AgentStart {
         #[serde(rename = "sessionId")]
         session_id: String,
     },
+    /// Agent 会话结束，含消息与可选错误。
     AgentEnd {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -83,6 +88,7 @@ pub enum AgentEvent {
         #[serde(rename = "partialResult")]
         partial_result: ToolOutput,
     },
+    /// 工具执行结束，含结果与是否错误。
     ToolExecutionEnd {
         #[serde(rename = "toolCallId")]
         tool_call_id: String,
@@ -116,6 +122,7 @@ pub enum AgentEvent {
         #[serde(rename = "finalError")]
         final_error: Option<String>,
     },
+    /// 扩展/插件触发错误，含扩展 ID、事件名与错误信息。
     ExtensionError {
         #[serde(rename = "extensionId")]
         extension_id: Option<String>,
@@ -124,9 +131,11 @@ pub enum AgentEvent {
     },
 }
 
+/// 扩展侧钩子事件，与 pi-mono 事件名一致（如 tool_call、input、session_before_switch）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtensionEvent {
+    /// 宿主启动时通知扩展。
     #[serde(rename_all = "camelCase")]
     Startup {
         version: String,
@@ -152,6 +161,7 @@ pub enum ExtensionEvent {
         message: AssistantMessage,
         tool_results: Vec<ToolResultMessage>,
     },
+    /// 工具调用，扩展可在此拦截或记录。
     #[serde(rename_all = "camelCase")]
     ToolCall {
         tool_name: String,
@@ -177,6 +187,7 @@ pub enum ExtensionEvent {
         current_session: Option<String>,
         fork_entry_id: String,
     },
+    /// 用户输入（文本与附件），扩展可在此做预处理。
     #[serde(rename_all = "camelCase")]
     Input {
         #[serde(rename = "text")]
