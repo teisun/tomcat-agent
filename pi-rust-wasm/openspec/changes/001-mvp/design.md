@@ -24,6 +24,15 @@
 基础设施层 → 宿主核心能力层 → 宿主API层 → WasmEdge运行时层 → 沙箱执行层 → CLI交互层
 
 ## 核心模块详细设计
+### 0. 开发与代码组织规范
+- **分层目录结构**：
+  - `src/infra/`: 错误处理、配置、日志、事件总线、平台适配。
+  - `src/core/`: 会话管理、LLM 适配、4原语逻辑、工具注册、权限管控。
+  - `src/ext/`: WasmEdge 运行时、QuickJS 绑定、Node.js 兼容层。
+  - `src/api/`: CLI 子命令实现、交互逻辑。
+- **可见性原则**：内部逻辑优先使用 `pub(crate)`，仅通过 `mod.rs` 重新导出（Re-export）必要 API。
+- **异步优先**：核心链路（LLM、IO、Hostcall）必须支持 `async/await`，基于 `tokio` 调度。
+
 ### 1. 基础设施层
 #### 1.1 统一错误处理体系
 设计思路：基于thiserror定义项目统一错误枚举，基于anyhow做上层错误包装，所有错误必须包含清晰的上下文信息，禁止裸panic、禁止滥用unwrap()/expect()，所有错误可被完整捕获，不传递到主程序。
@@ -72,6 +81,9 @@
     - 上下文组装：根据会话历史自动组装LLM所需的上下文消息，支持会话级上下文窗口配置
     - 会话级配置隔离：每个会话可独立配置使用的LLM模型、启用的插件
     - 会话关联追溯：支持会话来源记录，上下文完整追溯，会话列表与「当前会话」由 sessions.json 提供。
+- **一致性保障**：
+  - **Append-only**：对话 Transcript (JSONL) 仅允许追加，禁止修改历史行，确保审计线索完整。
+  - **Atomic Store**：`sessions.json` 的更新必须采用“写临时文件 -> Rename”模式，确保在断电或崩溃时元数据不损坏。
 
 > 会话路径、sessionKey/sessionId、SessionEntry 字段及 transcript 格式、其他细节见本文末尾 **会话管理数据结构设计**。
 
@@ -152,16 +164,26 @@ API绑定实现逻辑：
 4.  插件调用API时，通过WasmEdge通道将调用请求与参数转发到宿主层
 5.  宿主层执行核心逻辑，将结果按原路返回给插件，转换为JS可识别的类型
 
-### 4. WasmEdge运行时层
-设计思路：基于WasmEdge官方原生JS运行时扩展，全局单例Engine，每个插件对应独立的Wasm实例，内置优化版QuickJS引擎与Node.js兼容层，实现pi-mono插件的沙箱隔离执行，无需手动打包嵌入QuickJS引擎。
+统一hostcall通信协议
+**设计请参考[架构文档](../../specs/Architecture.md)中的3.3章节**
 
-核心组件：
+### 4. WasmEdge运行时层
+
+#### 4.1 设计思路：
+- 设计请参考[架构文档](../../specs/Architecture.md)中的 4. WasmEdge运行时层 章节
+- 基于WasmEdge官方原生JS运行时扩展，全局单例Engine，每个插件对应独立的Wasm实例，内置优化版QuickJS引擎与Node.js兼容层，实现pi-mono插件的沙箱隔离执行，无需手动打包嵌入QuickJS引擎。
+
+#### 4.2 核心组件：
 1.  **全局WasmEdge Engine**：全局唯一初始化，负责Wasm模块编译、内存管理、实例调度，配置全局WasmEdge参数，开启WASI Preview2、WASI-Socket支持，仅一次初始化开销
 2.  **插件独立Wasm实例**：每个插件对应一个独立的Store/Instance，专属线性内存、调用栈、QuickJS上下文，完全隔离，插件间无法互相访问，故障不扩散
 3.  **QuickJS运行时**：WasmEdge官方优化版，内置到Wasm实例中，原生支持ES6+语法、JS/TS代码执行，无需手动编译嵌入
 4.  **Node.js兼容层**：WasmEdge官方原生实现，覆盖Node.js核心模块与全局对象，API行为与Node.js完全对齐，支持CommonJS模块规范
 5.  **宿主导入绑定层**：将宿主API显式注册到Wasm实例导入表，映射为QuickJS全局对象，处理Rust与JS类型转换、错误捕获、异步调用调度
 6.  **WASI系统接口**：基于WASI Preview2实现，文件IO、网络请求、异步调度全部经过宿主权限校验，禁止未授权访问
+#### 4.3 并发调度与异步 Hostcall
+- **多路复用分发**：宿主侧实现统一入口路由器，通过 `(module, method)` 映射业务逻辑，减少 Wasm 导出表维护成本。
+- **异步唤醒机制**：针对 LLM 等高延迟 Hostcall，利用 WasmEdge 的异步转译机制，调用时挂起 Wasm 实例，由 Tokio 在结果返回后唤醒，支撑高并发 Agent 同时运行。
+- **资源配额**：每个实例强制限制内存上限（如 128MB）与指令计数（Gas Limit），防止恶意插件耗尽系统资源。
 
 核心执行流程见 [CODE_BLOCK_P1_009]
 
