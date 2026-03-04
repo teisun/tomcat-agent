@@ -1,18 +1,25 @@
-//! 配置结构体、加载与合并、合法性校验。
+//! # 配置模块 (Config)
+//!
+//! 配置结构体、加载与合并、合法性校验。多源合并顺序：默认值 → 配置文件 → 环境变量（前缀 `PI_AWSM__`，分隔符 `__`）。
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use super::error::AppError;
 
+/// 插件或操作的权限等级，用于 4 原语与工具访问控制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionLevel {
+    /// 受限，仅允许白名单内操作。
     #[default]
     Restricted,
+    /// 普通，需审批的操作按配置处理。
     Normal,
+    /// 可信，放宽审批要求。
     Trusted,
 }
 
+/// 日志配置：级别、是否写文件、路径与滚动大小。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
@@ -46,6 +53,7 @@ impl Default for LogConfig {
     }
 }
 
+/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
     #[serde(default = "default_llm_provider")]
@@ -76,6 +84,7 @@ impl Default for LlmConfig {
     }
 }
 
+/// 存储配置：会话目录等。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
     #[serde(default = "default_sessions_dir")]
@@ -94,6 +103,7 @@ impl Default for StorageConfig {
     }
 }
 
+/// 插件配置：插件目录与启动时自动加载的插件列表。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PluginConfig {
     #[serde(default = "default_plugins_dir")]
@@ -115,6 +125,7 @@ impl Default for PluginConfig {
     }
 }
 
+/// 4 原语配置：路径/命令白名单与黑名单、审批与禁止列表、是否需用户确认等。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PrimitiveConfig {
     #[serde(default)]
@@ -153,6 +164,7 @@ impl Default for PrimitiveConfig {
     }
 }
 
+/// 安全与审计配置：默认插件权限、审计日志开关与保留天数、安全扫描等。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SecurityConfig {
     #[serde(default)]
@@ -183,6 +195,7 @@ impl Default for SecurityConfig {
     }
 }
 
+/// 应用顶层配置，聚合 log / llm / storage / plugin / security / primitive 子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -199,27 +212,46 @@ pub struct AppConfig {
     pub primitive: PrimitiveConfig,
 }
 
-/// 从文件与环境变量加载并合并配置。未找到文件时返回默认配置。
+/// 从可选配置文件与环境变量加载并合并为 [`AppConfig`]。
+///
+/// 合并顺序：若提供且存在的配置文件先加载，再叠加环境变量 `PI_AWSM__*`（`__` 表示嵌套）。未提供或不存在文件时仅用默认值与环境变量。
+///
+/// # Arguments
+/// * `config_path` - 配置文件路径，如 `Some(Path::new("config.toml"))`；`None` 表示仅用默认与环境变量。
+///
+/// # Returns
+/// 合并后的 [`AppConfig`]，可直接用于 [`validate_config`] 校验。
+///
+/// # Errors
+/// * [`AppError::Config`] - 配置文件解析失败或反序列化到 [`AppConfig`] 失败时返回。
 pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
-    let mut builder = config::Config::builder();
+    let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
-            builder = builder.add_source(config::File::from(p));
+            builder = builder.add_source(::config::File::from(p));
         }
     }
     builder = builder.add_source(
-        config::Environment::with_prefix("PI_AWSM")
+        ::config::Environment::with_prefix("PI_AWSM")
             .separator("__")
             .try_parsing(true),
     );
-    let layered = builder.build().map_err(|e| AppError::Config(e.to_string()))?;
+    let layered = builder
+        .build()
+        .map_err(|e| AppError::Config(e.to_string()))?;
     let merged: AppConfig = layered
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;
     Ok(merged)
 }
 
-/// 配置合法性校验入口。
+/// 配置合法性校验入口，应在启动时对 [`load_config`] 得到的配置调用。
+///
+/// # Arguments
+/// * `cfg` - 待校验的 [`AppConfig`]。
+///
+/// # Errors
+/// * [`AppError::Config`] - `audit_log_retention_days` 为 0 或 `log.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
 pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     if cfg.security.audit_log_retention_days == 0 {
         return Err(AppError::Config(

@@ -10,13 +10,13 @@
 
 ## T1-P0-001 项目骨架搭建与基础设施层落地
 
-- **1.1** 使用 `cargo new` 初始化 Rust 项目，配置 workspace（若有多 crate 规划）。
+- **1.1** 使用 `cargo new` 初始化 Rust 项目，创建 `infra/`, `core/`, `ext/`, `api/`, `common/` 文件夹及对应的 `mod.rs`，配置 workspace（若有多 crate 规划）。
 - **1.2** 在 Cargo.toml 中声明并锁定依赖：thiserror、anyhow、config、tracing、tracing-subscriber、serde、serde_json、跨平台所需 crates（如 dirs、path 等）。
 - **1.3** 定义项目统一错误枚举 AppError（参考 design.md CODE_BLOCK_P1_001），实现 From 常见类型，禁止包含 Db(rusqlite)（MVP 不用 SQLite）。
 - **1.4** 实现配置结构体（AppConfig、LogConfig、LlmConfig、StorageConfig、PluginConfig、SecurityConfig、PrimitiveConfig），与 design 一致。
 - **1.5** 实现配置加载与合并（文件 + 环境变量）、默认配置生成、配置合法性校验入口。
 - **1.6** 接入 tracing，实现分级日志（trace/debug/info/warn/error）、控制台与按大小滚动的文件输出。
-- **1.7** 实现跨平台基础适配：路径规范化、通用文件读写封装、进程/系统信息接口；用条件编译区分 Windows/macOS/Linux。
+- **1.7** 实现跨平台基础适配：**重点包含 `write_file_atomic`（临时文件+重命名）与路径规范化**、通用文件读写封装、进程/系统信息接口；用条件编译区分 Windows/macOS/Linux。
 - **1.8** 运行 clippy 全量规则并修复警告；为核心模块编写单元测试，覆盖率≥90%。
 
 ---
@@ -37,7 +37,7 @@
 
 - **3.1** 定义 SessionStore（sessions.json）、SessionEntry 等元数据结构，与 Architecture.md「会话存储数据结构设计」一致；实现 sessionKey→SessionEntry 的读写与持久化。
 - **3.2** 定义 SessionHeader、SessionEntry（JSONL 行类型）及 EntryBase 等，与 pi 系 JSONL 格式兼容；实现单文件 JSONL 读写与追加。
-- **3.3** 实现会话 CRUD：创建、按 sessionKey 查询/更新/归档/删除；会话列表与当前会话路由仅依赖 sessions.json，不建 SQLite。
+- **3.3** 实现会话 CRUD：创建、按 sessionKey 查询/更新/归档/删除；会话列表与当前会话路由仅依赖 sessions.json，不建 SQLite。**重点实现元数据 sessions.json 的原子性更新算法**，确保并发写入下的数据安全性(不允许锁文件，可以用队列)。
 - **3.4** 实现消息管理：appendMessage、appendThinkingLevelChange、appendModelChange、appendCompaction、appendSessionInfo、appendLabelChange 等写入 JSONL；getEntry、getEntries、getBranch、getTree、getChildren、getLeafEntry 等只读查询。
 - **3.5** 实现上下文组装：根据会话历史组装 LLM 所需消息列表，支持会话级上下文窗口配置。
 - **3.6** 实现会话级配置隔离：每会话可独立配置 LLM 模型、启用的插件等，并存于 SessionEntry/配置层。
@@ -81,23 +81,57 @@
 
 ## T1-P0-007 WasmEdge运行时与QuickJS集成
 
-- **7.1** 集成 WasmEdge 库，实现全局 Engine 单例的初始化与生命周期管理（仅一次初始化）。
+- **7.1** 集成 WasmEdge 库，实现 `WasmEngine` 全局单例，**开启异步扩展（Async Options）与统计功能（Statistics）**。
 - **7.2** 实现单插件独立 Wasm 实例的创建与销毁（Store/Instance），保证实例间隔离。
 - **7.3** 启用 WasmEdge 官方 QuickJS 运行时扩展，验证 JS 代码可执行。
 - **7.4** 启用并配置 Node.js 兼容层（fs/path/process/console/http 等高频模块）。
-- **7.5** 实现宿主导入绑定骨架：将宿主侧函数注册到 Wasm 实例导入表，并映射到 QuickJS 全局对象（具体 API 实现在 T1-P0-008）；实现 Rust↔JS 类型转换与错误传递的最小通道。
+- **7.5** 
+    - 实现宿主导入绑定骨架：将宿主侧函数注册到 Wasm 实例导入表，并映射到 QuickJS 全局对象（具体 API 实现在 T1-P0-008）；实现 Rust↔JS 类型转换与错误传递的最小通道。
+    - 实现统一 Hostcall 路由器骨架，定义 `invoke_host_func` 入口。
 - **7.6** 跨平台编译与运行验证（Windows/macOS/Linux 至少各一次）。
 
 ---
 
-## T1-P0-008 宿主API层与JS绑定实现
 
-- **8.1** 按 design「核心API分类与对齐规范」列出全部宿主 API：4原语、LLM、工具、事件、会话、配置、日志。
-- **8.2** 在 Rust 侧实现各 API 的核心逻辑，接入权限校验与审计日志（调用现有 PrimitiveExecutor、ToolRegistry、EventBus、SessionManager、LlmProvider 等）。
-- **8.3** 将上述 API 注册到 WasmEdge 导入表，并在 QuickJS 中暴露为全局 agent 对象（或约定命名空间）。
-- **8.4** 实现 Rust 与 JS 类型双向转换（参数与返回值）、异步调用在宿主侧的调度与回传。
-- **8.5** 实现插件调用 API 时的错误捕获与透传到 JS 侧。
-- **8.6** 单元测试：至少覆盖主要 API 的调用链与错误路径；覆盖率≥80%。
+## T1-P0-008 宿主API层与JS绑定实现 (Hostcall & JS Binding)
+
+### 核心目标
+构建宿主与 Wasm 沙箱间的高性能、异步、安全的通信桥梁。通过统一的 Hostcall 路由器分发请求，并完全对齐 `pi-mono` 的 ExtensionAPI 行为规范。
+
+### 任务细分
+
+- **8.1 协议定义与 DTO 设计 (Protocol & Schema)**
+  - 基于 design 定义统一的 Hostcall 通信协议（JSON 序列化）。
+  - 实现 Rust 侧与 JS 侧对齐的数据传输对象（DTO），强制使用 `#[serde(rename_all = "camelCase")]` 确保与 `pi-mono` 字段一致。
+  - 定义 `HostRequest` 与 `HostResponse` 的标准包格式（包含 `module`, `method`, `params`, `call_id`）。
+
+- **8.2 统一 Hostcall 多路复用分发器 (Dispatcher)**
+  - 实现 `HostApiDispatcher` 模块，采用“单入口多路复用”模式，减少 Wasm 导入表开销。
+  - 路由逻辑设计：支持根据 `module_id` 或字符串快速分发至对应的 Processor（Fs, Llm, Agent 等）。
+  - 实现无状态路由器，确保 `Send + Sync`，支持多 Agent 并发调用。
+
+- **8.3 核心 API 逻辑集成 (Core Logic Integration)**
+  - **4原语集成**：接入 `PrimitiveExecutor`，确保所有文件/命令操作经过权限校验与用户二次确认。
+  - **LLM/工具集成**：接入 `LlmProvider` 与 `ToolRegistry`，支持插件注册自定义工具。
+  - **事件与会话**：接入 `EventBus` 实现跨沙箱事件分发；接入 `SessionManager` 实现上下文读写。
+  - **审计挂钩**：在分发层统一触发 `AuditLogger`，记录每一个 Hostcall 的来源插件、参数及执行状态。
+
+- **8.4 异步 Hostcall 与并发调度 (Async & Concurrency)**
+  - 实现基于 `WasmEdge` 异步扩展的调用机制，确保耗时 API（LLM、网络）不阻塞 Wasm 实例执行。
+  - 接入 `Tokio` 运行时，实现 Hostcall 的异步等待与结果回传（Future-based mapping）。
+  - 优化并发模型，确保多 Agent 同时调用时，宿主侧资源竞争（如 Session 读写）通过分片锁或 `Arc<RwLock>` 解决。
+
+- **8.5 内存安全边界与错误透传 (Safety & Error Handling)**
+  - **内存校验**：实现 Wasm 线性内存边界检查，防止宿主侧在读取参数或写入结果时发生越界攻击。
+  - **所有权管理**：明确 Hostcall 过程中的内存申请与释放责任，防止内存泄漏。
+  - **错误映射**：将宿主侧的 `AppError` 精确映射为 JS 侧的异常（Exception），确保插件能捕获并处理权限拒绝、超时等错误。
+
+- **8.6 验收与测试 (QA)**
+  - **功能测试**：编写集成测试脚本（JS 侧），验证从插件发起调用到宿主执行并返回结果的全链路。
+  - **边界测试**：模拟大并发调用（10+ Agents 同时请求 LLM）验证引擎稳定性。
+  - **安全测试**：验证未授权 API 是否被物理拦截，验证非法内存指针是否被正确阻断。
+  - **覆盖率**：宿主 API 层单测及集成测试覆盖率 ≥85%。
+
 
 ---
 

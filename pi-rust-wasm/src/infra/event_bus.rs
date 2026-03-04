@@ -1,5 +1,7 @@
-//! 全局事件总线：on/once/off/emit_sync/emit_async/remove_plugin_listeners。
-//! 单 listener 抛错不中断其他 listener 与主流程。
+//! # 全局事件总线 (Event Bus)
+//!
+//! 提供 on/once/off/emit_sync/emit_async/remove_plugin_listeners 等能力；单 listener 抛错或 panic 不中断其他 listener 与主流程。
+//! 事件名使用字符串、snake_case，与 pi-mono 对齐。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,13 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use tracing::warn;
 
-use crate::error::AppError;
+use super::error::AppError;
 
-/// 监听器 ID。
+/// 监听器唯一 ID，用于 [`EventBus::off`] 注销。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EventListenerId(pub u64);
 
-/// 事件上下文，传递给回调。
+/// 事件上下文，在触发时传递给回调；可携带事件名、payload、来源插件与优先级。
 #[derive(Debug, Clone)]
 pub struct EventContext {
     pub event_name: String,
@@ -23,6 +25,7 @@ pub struct EventContext {
 }
 
 impl EventContext {
+    /// 构造事件上下文，`plugin_id` 与 `priority` 默认为 None/0，可用 `with_plugin_id`/`with_priority` 链式设置。
     pub fn new(event_name: impl Into<String>, payload: serde_json::Value) -> Self {
         Self {
             event_name: event_name.into(),
@@ -32,17 +35,20 @@ impl EventContext {
         }
     }
 
+    /// 设置来源插件 ID，便于 [`EventBus::remove_plugin_listeners`] 按插件清理。
     pub fn with_plugin_id(mut self, plugin_id: impl Into<String>) -> Self {
         self.plugin_id = Some(plugin_id.into());
         self
     }
 
+    /// 设置优先级，数值越大越先执行。
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
         self
     }
 }
 
+/// 事件回调类型：接收 [`EventContext`]，返回 [`Result`]；需满足 `Send + Sync` 以在跨线程事件总线中使用。
 pub type EventCallback = Box<dyn FnMut(EventContext) -> Result<(), AppError> + Send + Sync>;
 
 struct ListenerEntry {
@@ -53,16 +59,24 @@ struct ListenerEntry {
     callback: EventCallback,
 }
 
+/// 全局事件总线 trait：注册/注销监听、同步/异步触发、按插件清理。单 listener 错误或 panic 仅记录日志，不中断其余回调。
 #[async_trait]
 pub trait EventBus: Send + Sync + 'static {
+    /// 注册持久监听，返回用于 [`EventBus::off`] 的 ID。
     fn on(&self, event_name: &str, callback: EventCallback) -> EventListenerId;
+    /// 注册单次监听，触发一次后自动移除。
     fn once(&self, event_name: &str, callback: EventCallback) -> EventListenerId;
+    /// 按 ID 移除监听器。
     fn off(&self, listener_id: EventListenerId);
+    /// 同步触发事件，按 priority 降序执行回调；不因单个回调返回 Err 或 panic 而返回 Err。
     fn emit_sync(&self, event_name: &str, context: EventContext) -> Result<(), AppError>;
+    /// 异步触发，当前实现内部调用 emit_sync。
     async fn emit_async(&self, event_name: &str, context: EventContext) -> Result<(), AppError>;
+    /// 移除指定插件注册的所有监听，插件卸载时调用以防泄漏。
     fn remove_plugin_listeners(&self, plugin_id: &str);
 }
 
+/// 默认事件总线实现，基于 `RwLock` + `HashMap`，线程安全。
 pub struct DefaultEventBus {
     next_id: AtomicU64,
     listeners: std::sync::RwLock<HashMap<String, Vec<ListenerEntry>>>,
@@ -88,8 +102,22 @@ impl DefaultEventBus {
         EventListenerId(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// 供插件注册时传入 plugin_id，便于 remove_plugin_listeners 清理。
-    pub fn add_listener(&self, event_name: &str, once: bool, plugin_id: Option<String>, priority: i32, callback: EventCallback) -> EventListenerId {
+    /// 供插件注册时传入 `plugin_id`，便于 [`EventBus::remove_plugin_listeners`] 清理。
+    ///
+    /// # Arguments
+    /// * `event_name` - 事件名（字符串，与 pi-mono 一致）
+    /// * `once` - 是否仅触发一次后移除
+    /// * `plugin_id` - 可选插件 ID，卸载时用于批量移除
+    /// * `priority` - 优先级，数值越大越先执行
+    /// * `callback` - 回调
+    pub fn add_listener(
+        &self,
+        event_name: &str,
+        once: bool,
+        plugin_id: Option<String>,
+        priority: i32,
+        callback: EventCallback,
+    ) -> EventListenerId {
         let id = self.next_id();
         let entry = ListenerEntry {
             id,
@@ -99,6 +127,7 @@ impl DefaultEventBus {
             callback,
         };
         {
+            // SAFETY: RwLock 仅在 poison 时 panic，当前无显式 poison 逻辑。
             let mut listeners = self.listeners.write().unwrap();
             listeners
                 .entry(event_name.to_string())
@@ -124,6 +153,7 @@ impl EventBus for DefaultEventBus {
     }
 
     fn off(&self, listener_id: EventListenerId) {
+        // --- 步骤 1: 从 id_to_event 取出事件名并移除映射 ---
         let event_name = {
             let mut id_to_event = self.id_to_event.write().unwrap();
             id_to_event.remove(&listener_id)
@@ -144,6 +174,7 @@ impl EventBus for DefaultEventBus {
                 Some(v) => v,
                 None => return Ok(()),
             };
+            // --- 步骤 1: 按优先级降序排序 ---
             vec.sort_by_key(|e| std::cmp::Reverse(e.priority));
             for (i, entry) in vec.iter_mut().enumerate() {
                 let ctx = context.clone();
@@ -159,10 +190,12 @@ impl EventBus for DefaultEventBus {
                     to_remove.push((i, entry.id));
                 }
             }
+            // --- 步骤 2: 移除 once 监听（逆序避免下标错位）---
             for (idx, _) in to_remove.iter().copied().rev() {
                 vec.remove(idx);
             }
         }
+        // --- 步骤 3: 清理 once 对应的 id_to_event 映射 ---
         let mut id_to_event = self.id_to_event.write().unwrap();
         for (_, id) in to_remove {
             id_to_event.remove(&id);
@@ -177,6 +210,7 @@ impl EventBus for DefaultEventBus {
     fn remove_plugin_listeners(&self, plugin_id: &str) {
         let mut ids_to_remove = Vec::new();
         {
+            // --- 步骤 1: 从各事件下列表移除该 plugin_id 的 entry，收集 ID ---
             let mut listeners = self.listeners.write().unwrap();
             for vec in listeners.values_mut() {
                 let mut to_remove = Vec::new();
@@ -191,6 +225,7 @@ impl EventBus for DefaultEventBus {
                 }
             }
         }
+        // --- 步骤 2: 从 id_to_event 移除上述 ID ---
         let mut id_to_event = self.id_to_event.write().unwrap();
         for id in ids_to_remove {
             id_to_event.remove(&id);
@@ -207,10 +242,13 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        let id = bus.on("test", Box::new(move |_ctx| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        let id = bus.on(
+            "test",
+            Box::new(move |_ctx| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("test", serde_json::Value::Null);
         bus.emit_sync("test", ctx).unwrap();
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
@@ -222,12 +260,17 @@ mod tests {
         let bus = DefaultEventBus::new();
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = count.clone();
-        bus.once("once", Box::new(move |_| {
-            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
-        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null)).unwrap();
-        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null)).unwrap();
+        bus.once(
+            "once",
+            Box::new(move |_| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null))
+            .unwrap();
+        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null))
+            .unwrap();
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -236,11 +279,17 @@ mod tests {
         let bus = DefaultEventBus::new();
         let ok_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ok_c = ok_called.clone();
-        bus.on("err", Box::new(move |_| Err(AppError::Event("fail".to_string()))));
-        bus.on("err", Box::new(move |_| {
-            ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.on(
+            "err",
+            Box::new(move |_| Err(AppError::Event("fail".to_string()))),
+        );
+        bus.on(
+            "err",
+            Box::new(move |_| {
+                ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("err", serde_json::Value::Null);
         let _ = bus.emit_sync("err", ctx);
         assert!(ok_called.load(std::sync::atomic::Ordering::SeqCst));
@@ -251,12 +300,19 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        bus.add_listener("ev", false, Some("plugin_a".to_string()), 0, Box::new(move |_| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.add_listener(
+            "ev",
+            false,
+            Some("plugin_a".to_string()),
+            0,
+            Box::new(move |_| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         bus.remove_plugin_listeners("plugin_a");
-        bus.emit_sync("ev", EventContext::new("ev", serde_json::Value::Null)).unwrap();
+        bus.emit_sync("ev", EventContext::new("ev", serde_json::Value::Null))
+            .unwrap();
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -265,12 +321,19 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        let id = bus.on("off_test", Box::new(move |_| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        let id = bus.on(
+            "off_test",
+            Box::new(move |_| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         bus.off(id);
-        bus.emit_sync("off_test", EventContext::new("off_test", serde_json::Value::Null)).unwrap();
+        bus.emit_sync(
+            "off_test",
+            EventContext::new("off_test", serde_json::Value::Null),
+        )
+        .unwrap();
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -280,15 +343,28 @@ mod tests {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
         let o1 = order.clone();
         let o2 = order.clone();
-        bus.add_listener("pri", false, None, 10, Box::new(move |_| {
-            o1.lock().unwrap().push(10);
-            Ok(())
-        }));
-        bus.add_listener("pri", false, None, 5, Box::new(move |_| {
-            o2.lock().unwrap().push(5);
-            Ok(())
-        }));
-        bus.emit_sync("pri", EventContext::new("pri", serde_json::Value::Null)).unwrap();
+        bus.add_listener(
+            "pri",
+            false,
+            None,
+            10,
+            Box::new(move |_| {
+                o1.lock().unwrap().push(10);
+                Ok(())
+            }),
+        );
+        bus.add_listener(
+            "pri",
+            false,
+            None,
+            5,
+            Box::new(move |_| {
+                o2.lock().unwrap().push(5);
+                Ok(())
+            }),
+        );
+        bus.emit_sync("pri", EventContext::new("pri", serde_json::Value::Null))
+            .unwrap();
         let v = order.lock().unwrap().clone();
         assert_eq!(v, [10, 5]);
     }
@@ -314,10 +390,13 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        bus.on("async_ev", Box::new(move |_| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.on(
+            "async_ev",
+            Box::new(move |_| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("async_ev", serde_json::Value::Null);
         bus.emit_async("async_ev", ctx).await.unwrap();
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
@@ -329,10 +408,13 @@ mod tests {
         let ok_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ok_c = ok_called.clone();
         bus.on("panic_ev", Box::new(move |_| panic!("listener panic")));
-        bus.on("panic_ev", Box::new(move |_| {
-            ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.on(
+            "panic_ev",
+            Box::new(move |_| {
+                ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("panic_ev", serde_json::Value::Null);
         bus.emit_sync("panic_ev", ctx).unwrap();
         assert!(ok_called.load(std::sync::atomic::Ordering::SeqCst));
