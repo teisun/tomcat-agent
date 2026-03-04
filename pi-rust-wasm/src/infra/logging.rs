@@ -3,12 +3,10 @@
 
 use std::path::Path;
 
-use tracing_appender::rolling::{Rotation, RollingFileAppender};
-use tracing_subscriber::{
-    fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
-};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use crate::config::LogConfig;
+use super::config::LogConfig;
 
 /// 使用 [`LogConfig`] 初始化 tracing：控制台 stderr + 可选文件（按天滚动，保留最多 5 个文件）。
 ///
@@ -18,20 +16,21 @@ use crate::config::LogConfig;
 /// * `cfg` - 日志配置，见 [`LogConfig`]。
 ///
 /// # Errors
-/// * [`crate::error::AppError::Config`] - `cfg.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
-/// * [`crate::error::AppError::Io`] - 启用文件输出且无法创建/打开日志文件时返回。
-pub fn init_logging(cfg: &LogConfig) -> Result<(), crate::error::AppError> {
+/// * [`super::error::AppError::Config`] - `cfg.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
+/// * [`super::error::AppError::Io`] - 启用文件输出且无法创建/打开日志文件时返回。
+pub fn init_logging(cfg: &LogConfig) -> Result<(), super::error::AppError> {
     let level = cfg.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {
-        return Err(crate::error::AppError::Config(format!(
+        return Err(super::error::AppError::Config(format!(
             "无效的日志级别: {}",
             cfg.level
         )));
     }
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
 
-    let fmt_layer = fmt::layer().with_writer(std::io::stderr).with_filter(filter);
+    let fmt_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(filter);
 
     let file_layer = if cfg.file_enabled {
         let path = Path::new(&cfg.file_path);
@@ -45,10 +44,10 @@ pub fn init_logging(cfg: &LogConfig) -> Result<(), crate::error::AppError> {
             .max_log_files(5_usize)
             .filename_prefix(prefix)
             .build(dir)
-            .map_err(|e| crate::error::AppError::Io(std::io::Error::other(e.to_string())))?;
+            .map_err(|e| super::error::AppError::Io(std::io::Error::other(e.to_string())))?;
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        let file_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(&cfg.level));
+        let file_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.level));
         let layer = fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false)

@@ -5,13 +5,14 @@
 - **职责**：为上层模块（session_cli、llm、wasm_plugin、primitives_tools、chat）提供统一的错误处理、配置管理、分级日志、跨平台路径与文件操作，以及解耦的全局事件总线。
 - **所在层级**：基础设施层（全项目起点，无上游依赖）。
 - **核心文件**：
-  - `src/error.rs` — 统一错误枚举 `AppError`
-  - `src/config.rs` — 配置结构体与加载/校验
-  - `src/logging.rs` — tracing 分级日志初始化
-  - `src/platform.rs` — 路径规范化、原子写入、系统信息
-  - `src/event_bus.rs` — 事件总线 Trait 与默认实现
-  - `src/events.rs` — `AgentEvent` / `ExtensionEvent` 枚举定义
-  - `src/lib.rs` — 模块导出与对外 API
+  - `src/lib.rs` — 门面，声明 `pub mod infra` 并 re-export 对外 API
+  - `src/infra/mod.rs` — 基础设施层聚合，`pub(crate) mod` 子模块与选择性 `pub use`
+  - `src/infra/error.rs` — 统一错误枚举 `AppError`
+  - `src/infra/config.rs` — 配置结构体与加载/校验
+  - `src/infra/logging.rs` — tracing 分级日志初始化
+  - `src/infra/platform.rs` — 路径规范化、原子写入、系统信息
+  - `src/infra/event_bus.rs` — 事件总线 Trait 与默认实现
+  - `src/infra/events.rs` — `AgentEvent` / `ExtensionEvent` 枚举定义
 
 设计原则：最小依赖、强类型约束、错误完整捕获不导致主流程崩溃。
 
@@ -38,7 +39,7 @@
 ### 3.1 统一错误 (AppError)
 
 ```rust
-// src/error.rs
+// src/infra/error.rs
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("IO错误: {0}")]
@@ -88,7 +89,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 ### 3.3 事件总线 (EventBus)
 
 ```rust
-// src/event_bus.rs
+// src/infra/event_bus.rs
 pub type EventCallback = Box<dyn FnMut(EventContext) -> Result<(), AppError> + Send + Sync>;
 
 #[async_trait]

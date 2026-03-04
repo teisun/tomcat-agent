@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use tracing::warn;
 
-use crate::error::AppError;
+use super::error::AppError;
 
 /// 监听器唯一 ID，用于 [`EventBus::off`] 注销。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,7 +110,14 @@ impl DefaultEventBus {
     /// * `plugin_id` - 可选插件 ID，卸载时用于批量移除
     /// * `priority` - 优先级，数值越大越先执行
     /// * `callback` - 回调
-    pub fn add_listener(&self, event_name: &str, once: bool, plugin_id: Option<String>, priority: i32, callback: EventCallback) -> EventListenerId {
+    pub fn add_listener(
+        &self,
+        event_name: &str,
+        once: bool,
+        plugin_id: Option<String>,
+        priority: i32,
+        callback: EventCallback,
+    ) -> EventListenerId {
         let id = self.next_id();
         let entry = ListenerEntry {
             id,
@@ -235,10 +242,13 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        let id = bus.on("test", Box::new(move |_ctx| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        let id = bus.on(
+            "test",
+            Box::new(move |_ctx| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("test", serde_json::Value::Null);
         bus.emit_sync("test", ctx).unwrap();
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
@@ -250,12 +260,17 @@ mod tests {
         let bus = DefaultEventBus::new();
         let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = count.clone();
-        bus.once("once", Box::new(move |_| {
-            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
-        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null)).unwrap();
-        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null)).unwrap();
+        bus.once(
+            "once",
+            Box::new(move |_| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null))
+            .unwrap();
+        bus.emit_sync("once", EventContext::new("once", serde_json::Value::Null))
+            .unwrap();
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -264,11 +279,17 @@ mod tests {
         let bus = DefaultEventBus::new();
         let ok_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ok_c = ok_called.clone();
-        bus.on("err", Box::new(move |_| Err(AppError::Event("fail".to_string()))));
-        bus.on("err", Box::new(move |_| {
-            ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.on(
+            "err",
+            Box::new(move |_| Err(AppError::Event("fail".to_string()))),
+        );
+        bus.on(
+            "err",
+            Box::new(move |_| {
+                ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("err", serde_json::Value::Null);
         let _ = bus.emit_sync("err", ctx);
         assert!(ok_called.load(std::sync::atomic::Ordering::SeqCst));
@@ -279,12 +300,19 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        bus.add_listener("ev", false, Some("plugin_a".to_string()), 0, Box::new(move |_| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.add_listener(
+            "ev",
+            false,
+            Some("plugin_a".to_string()),
+            0,
+            Box::new(move |_| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         bus.remove_plugin_listeners("plugin_a");
-        bus.emit_sync("ev", EventContext::new("ev", serde_json::Value::Null)).unwrap();
+        bus.emit_sync("ev", EventContext::new("ev", serde_json::Value::Null))
+            .unwrap();
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -293,12 +321,19 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        let id = bus.on("off_test", Box::new(move |_| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        let id = bus.on(
+            "off_test",
+            Box::new(move |_| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         bus.off(id);
-        bus.emit_sync("off_test", EventContext::new("off_test", serde_json::Value::Null)).unwrap();
+        bus.emit_sync(
+            "off_test",
+            EventContext::new("off_test", serde_json::Value::Null),
+        )
+        .unwrap();
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -308,15 +343,28 @@ mod tests {
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
         let o1 = order.clone();
         let o2 = order.clone();
-        bus.add_listener("pri", false, None, 10, Box::new(move |_| {
-            o1.lock().unwrap().push(10);
-            Ok(())
-        }));
-        bus.add_listener("pri", false, None, 5, Box::new(move |_| {
-            o2.lock().unwrap().push(5);
-            Ok(())
-        }));
-        bus.emit_sync("pri", EventContext::new("pri", serde_json::Value::Null)).unwrap();
+        bus.add_listener(
+            "pri",
+            false,
+            None,
+            10,
+            Box::new(move |_| {
+                o1.lock().unwrap().push(10);
+                Ok(())
+            }),
+        );
+        bus.add_listener(
+            "pri",
+            false,
+            None,
+            5,
+            Box::new(move |_| {
+                o2.lock().unwrap().push(5);
+                Ok(())
+            }),
+        );
+        bus.emit_sync("pri", EventContext::new("pri", serde_json::Value::Null))
+            .unwrap();
         let v = order.lock().unwrap().clone();
         assert_eq!(v, [10, 5]);
     }
@@ -342,10 +390,13 @@ mod tests {
         let bus = DefaultEventBus::new();
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let c = called.clone();
-        bus.on("async_ev", Box::new(move |_| {
-            c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.on(
+            "async_ev",
+            Box::new(move |_| {
+                c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("async_ev", serde_json::Value::Null);
         bus.emit_async("async_ev", ctx).await.unwrap();
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
@@ -357,10 +408,13 @@ mod tests {
         let ok_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ok_c = ok_called.clone();
         bus.on("panic_ev", Box::new(move |_| panic!("listener panic")));
-        bus.on("panic_ev", Box::new(move |_| {
-            ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        bus.on(
+            "panic_ev",
+            Box::new(move |_| {
+                ok_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        );
         let ctx = EventContext::new("panic_ev", serde_json::Value::Null);
         bus.emit_sync("panic_ev", ctx).unwrap();
         assert!(ok_called.load(std::sync::atomic::Ordering::SeqCst));

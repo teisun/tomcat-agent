@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppError;
+use super::error::AppError;
 
 /// 插件或操作的权限等级，用于 4 原语与工具访问控制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -225,18 +225,20 @@ pub struct AppConfig {
 /// # Errors
 /// * [`AppError::Config`] - 配置文件解析失败或反序列化到 [`AppConfig`] 失败时返回。
 pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
-    let mut builder = config::Config::builder();
+    let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
-            builder = builder.add_source(config::File::from(p));
+            builder = builder.add_source(::config::File::from(p));
         }
     }
     builder = builder.add_source(
-        config::Environment::with_prefix("PI_AWSM")
+        ::config::Environment::with_prefix("PI_AWSM")
             .separator("__")
             .try_parsing(true),
     );
-    let layered = builder.build().map_err(|e| AppError::Config(e.to_string()))?;
+    let layered = builder
+        .build()
+        .map_err(|e| AppError::Config(e.to_string()))?;
     let merged: AppConfig = layered
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;

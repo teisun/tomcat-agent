@@ -65,13 +65,17 @@ pub enum AgentEvent {
         #[serde(rename = "toolResults")]
         tool_results: Vec<Message>,
     },
-    MessageStart { message: Message },
+    MessageStart {
+        message: Message,
+    },
     MessageUpdate {
         message: Message,
         #[serde(rename = "assistantMessageEvent")]
         assistant_message_event: AssistantMessageEvent,
     },
-    MessageEnd { message: Message },
+    MessageEnd {
+        message: Message,
+    },
     ToolExecutionStart {
         #[serde(rename = "toolCallId")]
         tool_call_id: String,
@@ -98,7 +102,9 @@ pub enum AgentEvent {
         #[serde(rename = "isError")]
         is_error: bool,
     },
-    AutoCompactionStart { reason: String },
+    AutoCompactionStart {
+        reason: String,
+    },
     AutoCompactionEnd {
         result: Option<serde_json::Value>,
         aborted: bool,

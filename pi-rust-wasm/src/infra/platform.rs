@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::AppError;
+use super::error::AppError;
 
 /// 规范化路径：展开 `~` 为当前用户 home、解析 `.`/`..`，失败时返回未 canonicalize 的路径。
 ///
@@ -52,7 +52,10 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
         .parent()
         .ok_or_else(|| AppError::Config("路径无父目录".to_string()))?;
     std::fs::create_dir_all(parent).map_err(AppError::Io)?;
-    let tmp = parent.join(format!(".{}", path.file_name().unwrap_or_default().to_string_lossy()));
+    let tmp = parent.join(format!(
+        ".{}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
     std::fs::write(&tmp, content).map_err(AppError::Io)?;
     std::fs::rename(&tmp, path).map_err(AppError::Io)?;
     Ok(())
@@ -140,7 +143,7 @@ mod tests {
         let dir = std::env::temp_dir().join("pi_awsm_platform_utf8");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad_utf8.bin");
-        std::fs::write(&path, &[0xff, 0xfe]).unwrap();
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
         let r = read_file_utf8(&path);
         assert!(r.is_err());
         let _ = std::fs::remove_file(&path);
