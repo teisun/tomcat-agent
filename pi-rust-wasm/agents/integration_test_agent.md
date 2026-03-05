@@ -7,6 +7,7 @@
 ## 目标
 
 **不负责具体任务 ID 的开发**。负责将各角色的功能分支**合并到 develop**、运行**全量测试与验收**、记录问题并反馈给对应开发角色，保证 develop 可随时构建通过且符合 task.md 验收标准。
+**编写集成测试代码** 根据技术设计与代码 编写集成测试代码，具体参考 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 
 
 ## 负责任务 ID 与顺序
 
@@ -24,6 +25,8 @@
 - [PLAN.md](./PLAN.md) 分支与集成策略、依赖波次表
 - [task.md](../openspec/changes/001-mvp/task.md) 验收标准与完成定义
 - [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) 各任务原子子任务与边界场景
+- [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 集成测试规范：测试目标、目录结构、命名、AAA 模式、外部依赖与 CI；执行全量/验收测试时须参考
+- [INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md) 集成测试实践参考：场景化示例（插件沙箱、事件、LLM+Tool）、三不原则、审计/Teardown/DoD
 
 ## 验收标准
 
@@ -67,6 +70,8 @@
 4. 若存在冲突，由 integration_test 或提交方在本地解决后再推
 
 ### 合并后全量测试与验收清单
+
+执行时须遵循 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)（目录与命名、黑盒/AAA、不 Mock 核心模块等）
 
 1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`cargo test`
 2. **CLI 子命令**：`pi-awsm init`、`pi-awsm doctor`、`pi-awsm config`、`pi-awsm session`、`pi-awsm plugin`、`pi-awsm audit` 可执行且帮助完整
