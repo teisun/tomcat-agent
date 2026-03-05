@@ -7,9 +7,10 @@
 
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| @integration_test | 2025-03-03 18:10 | DONE | develop |
+| @integration_test | 2025-03-05 14:45 | DONE | develop |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 文档与规范：Architecture 渐进式披露（architecture/ 子文档）、examples→guides 重命名、commit-with-status command、Constitution/design 等引用更新 @2025-03-05
 - [✓] **[P0]** 合并 `feature/infra` 至 develop（ort strategy）@2025-03-03
 - [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy`、`cargo test` 通过（32 tests）
 - [✓] **[P0]** 本波次验收（001+002）：项目骨架、AppError、配置/日志/跨平台、EventBus 符合 task.md 标准
@@ -45,6 +46,7 @@
 - [✓] 技术文档：`docs/01-infrastructure.md` 已编写并随结构更新
 - [✓] 按 COMMENT_SPEC 补充基础设施层代码注释 @2025-03-03
 - [✓] 按 Codeing&Architecture_Spec 整理：src/infra/ 分层、pub(crate) mod、lib 门面 re-export，对外 API 不变 @2025-03-04
+- [✓] docs: 修正 `docs/01-infrastructure.md` 中 Architecture 4.5 锚点链接（锚点入链）@2025-03-05
 
 ### 🔌 INTERFACE (接口变更)
 - 对外 API 仍通过 `pi_awsm::` 根路径使用（由 `lib.rs` 从 `infra` 层 re-export），无破坏性变更。
