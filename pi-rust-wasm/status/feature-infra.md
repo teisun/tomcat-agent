@@ -9,6 +9,7 @@
 - [✓] 技术文档：`docs/01-infrastructure.md` 已编写并随结构更新
 - [✓] 按 COMMENT_SPEC 补充基础设施层代码注释 @2025-03-03
 - [✓] 按 Codeing&Architecture_Spec 整理：src/infra/ 分层、pub(crate) mod、lib 门面 re-export，对外 API 不变 @2025-03-04
+- [✓] docs: 修正 `docs/01-infrastructure.md` 中 Architecture 4.5 锚点链接（锚点入链）@2025-03-05
 
 ### 🔌 INTERFACE (接口变更)
 - 对外 API 仍通过 `pi_awsm::` 根路径使用（由 `lib.rs` 从 `infra` 层 re-export），无破坏性变更。

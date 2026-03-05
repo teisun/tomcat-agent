@@ -132,6 +132,8 @@ pub trait EventBus: Send + Sync + 'static {
 | `plugin.plugins_dir` | 插件目录 | ~/.pi/agent/plugins |
 | `security.enable_audit_log` | 是否启用审计日志 | true |
 | `security.audit_log_retention_days` | 审计保留天数 | 90 |
+| **预留** `memory.profile` | low / standard / high / auto，见 [Architecture 4.5 资源与内存模式](../openspec/specs/Architecture.md#45-资源与内存模式-resource--memory-profile) | - |
+| **预留** `memory.*` | 各模式覆盖项（如 wasm_max_pages、js_heap_limit 等），同上 | - |
 
 ---
 
