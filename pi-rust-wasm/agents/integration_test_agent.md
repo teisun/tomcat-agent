@@ -17,7 +17,7 @@
 
 - **依赖**：各开发角色按 PLAN.md 分支策略提交 feature 分支，并自测通过（build、clippy、单测）。
 - **被依赖**：所有开发角色在合并后依赖 develop 的稳定状态拉取更新、解决冲突。
-- **协作**：接收开发角色合并请求；执行合并前检查与合并后全量测试；将失败项与验收不符项反馈给对应角色（issue 和 集成看板 [INTEGRATION.md](../INTEGRATION.md)）。开发角色只维护各自 `status/feature-xx.md`，不直接修改 INTEGRATION.md；INTEGRATION.md 由在 develop 上执行的「汇总 status 到 INTEGRATION」command 自动生成。
+- **协作**：接收开发角色合并请求；执行合并前检查、**编写/补充集成测试代码**（合并后）、合并后全量测试；将失败项与验收不符项反馈给对应角色（issue 和 集成看板 [INTEGRATION.md](../INTEGRATION.md)）。开发角色只维护各自 `status/feature-xx.md`，不直接修改 INTEGRATION.md；INTEGRATION.md 由在 develop 上执行的「汇总 status 到 INTEGRATION」command 自动生成。
 
 ## 参考文档
 
@@ -32,6 +32,7 @@
 
 本角色自身无“任务验收”，但需保证：
 - 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`cargo test`（全量）。
+- **已按 INTEGRATION_TEST_SPEC 编写/补充集成测试代码**，且 `cargo test --test '*'` 包含并通过上述集成测试。
 - 验收清单（见下方）执行通过或问题已记录并指派。
 
 ---
@@ -68,6 +69,18 @@
 2. `cargo clippy` 无警告（全量规则）
 3. `cargo test` 全部通过
 4. 若存在冲突，由 integration_test 或提交方在本地解决后再推
+
+### 编写集成测试代码（合并到 develop 之后、全量验收之前）
+
+本步骤对应「目标」中的**编写集成测试代码**职责，为流程中的必做步骤，避免只跑测试而不补充用例。
+
+1. **时机**：分支合并到 develop 之后，执行「合并后全量测试与验收清单」之前（或与验收迭代进行）。
+2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、日志等）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
+3. **动作**：针对本次合并引入的模块与场景，在项目根目录 `tests/` 下建立或更新：
+   - `tests/common/mod.rs`：共享初始化（如 `setup_logging()`）、公共 fixture；
+   - 按功能划分的 `*_tests.rs`（如 `cli_tests.rs`、`session_tests.rs`、`plugin_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
+4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、LLM+Tool 路由等。
+5. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。
 
 ### 合并后全量测试与验收清单
 
