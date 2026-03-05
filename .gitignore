@@ -31,4 +31,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Env (API keys, do not commit) ###
+.env
 /src/main/resources/application-api.properties
