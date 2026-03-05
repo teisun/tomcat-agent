@@ -53,7 +53,7 @@ impl Default for LogConfig {
     }
 }
 
-/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型。
+/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流与重试。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
     #[serde(default = "default_llm_provider")]
@@ -64,6 +64,15 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     #[serde(default = "default_llm_model")]
     pub default_model: String,
+    /// 最大并发 LLM 请求数，0 表示不限制（不推荐）。
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: u32,
+    /// 非流式请求失败时的重试次数（仅对可重试错误如 429/5xx）。
+    #[serde(default = "default_llm_retry_count")]
+    pub retry_count: u32,
+    /// 流式请求单次读取超时秒数。
+    #[serde(default = "default_stream_timeout_sec")]
+    pub stream_timeout_sec: u64,
 }
 
 fn default_llm_provider() -> String {
@@ -71,6 +80,15 @@ fn default_llm_provider() -> String {
 }
 fn default_llm_model() -> String {
     "gpt-4o-mini".to_string()
+}
+fn default_max_concurrent_requests() -> u32 {
+    4
+}
+fn default_llm_retry_count() -> u32 {
+    3
+}
+fn default_stream_timeout_sec() -> u64 {
+    60
 }
 
 impl Default for LlmConfig {
@@ -80,6 +98,9 @@ impl Default for LlmConfig {
             api_base: None,
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             default_model: default_llm_model(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            retry_count: default_llm_retry_count(),
+            stream_timeout_sec: default_stream_timeout_sec(),
         }
     }
 }

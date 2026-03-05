@@ -15,3 +15,7 @@ dirs = "5.0"
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 tracing-appender = "0.2"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+bytes = "1.0"
