@@ -19,3 +19,6 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
 bytes = "1.0"
+
+[dev-dependencies]
+dotenvy = "0.15"

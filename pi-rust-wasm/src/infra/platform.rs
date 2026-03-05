@@ -65,11 +65,13 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
 ///
 /// # Errors
 /// * [`AppError::Io`] - 获取当前目录失败时返回（如进程无权限或已被删除）。
+#[allow(dead_code)]
 pub fn current_dir() -> Result<PathBuf, AppError> {
     std::env::current_dir().map_err(AppError::Io)
 }
 
 /// 系统信息摘要，用于 doctor 等；平台差异由标准库常量提供。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct SystemInfo {
     /// 操作系统标识，如 `macos`、`linux`、`windows`。
@@ -79,6 +81,7 @@ pub struct SystemInfo {
 }
 
 /// 获取当前运行环境的系统信息（OS 与架构）。
+#[allow(dead_code)]
 pub fn system_info() -> SystemInfo {
     SystemInfo {
         os: std::env::consts::OS.to_string(),

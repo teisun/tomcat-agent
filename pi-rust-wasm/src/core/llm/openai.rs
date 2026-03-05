@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
+use std::error::Error;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -29,11 +30,13 @@ struct OpenAiRequestBody {
     stream: bool,
 }
 
-/// OpenAI 兼容 API 的适配器；限流、重试、超时由本实现负责。
+/// OpenAI 兼容 API 的适配器；限流、重试、超时、代理与 fallback 由本实现负责。
 #[derive(Debug)]
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
+    /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
+    api_base_fallback: Option<String>,
     api_key: String,
     #[allow(dead_code)]
     default_model: String,
@@ -57,8 +60,14 @@ impl OpenAiProvider {
         let api_key = std::env::var(api_key_env)
             .map_err(|_| AppError::Config(format!("环境变量 {} 未设置", api_key_env)))?;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
+        // 若未配置 proxy，不调用 .proxy()，reqwest 会自动使用环境变量 HTTPS_PROXY/HTTP_PROXY（与终端 curl 行为一致）。
+        if let Some(ref proxy_url) = config.proxy {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
+            builder = builder.proxy(proxy);
+        }
+        let client = builder
             .build()
             .map_err(|e| AppError::Llm(format!("创建 HTTP 客户端失败: {}", e)))?;
 
@@ -68,9 +77,15 @@ impl OpenAiProvider {
             None
         };
 
+        let api_base_fallback = config
+            .api_base_fallback
+            .as_deref()
+            .map(|s| s.trim_end_matches('/').to_string());
+
         Ok(Self {
             client,
             base_url,
+            api_base_fallback,
             api_key,
             default_model: config.default_model.clone(),
             semaphore,
@@ -91,8 +106,12 @@ impl OpenAiProvider {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
 
-    /// 非流式请求，带重试（仅对可重试错误）。
-    async fn chat_inner(&self, request: &ChatRequest) -> Result<ChatResponse, AppError> {
+    /// 非流式请求，向给定 base_url 发起一次调用（不含重试与 fallback）。
+    async fn chat_inner(
+        &self,
+        request: &ChatRequest,
+        base_url: &str,
+    ) -> Result<ChatResponse, AppError> {
         let body = OpenAiRequestBody {
             model: self.effective_model(request),
             messages: request.messages.clone(),
@@ -101,7 +120,7 @@ impl OpenAiProvider {
             stream: false,
         };
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
         let (key, value) = self.auth_header();
 
         let resp = self
@@ -111,7 +130,13 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AppError::Llm(format!("请求失败: {}", e)))?;
+            .map_err(|e| {
+                let detail = e
+                    .source()
+                    .map(|s| format!(" 底层: {}", s))
+                    .unwrap_or_default();
+                AppError::Llm(format!("请求失败: {}{}", e, detail))
+            })?;
 
         let status = resp.status();
         let bytes = resp
@@ -143,6 +168,56 @@ impl OpenAiProvider {
             || s.contains("请求失败")
             || s.contains("超时")
     }
+
+    /// 判断是否为连接/网络层面错误（用于触发 api_base_fallback 降级）。
+    fn is_connect_or_network_error(err: &AppError) -> bool {
+        let s = err.to_string();
+        s.contains("请求失败")
+            && (s.contains("Connect")
+                || s.contains("connection")
+                || s.contains("timed out")
+                || s.contains("timeout")
+                || s.contains("dns")
+                || s.contains("connection refused"))
+    }
+
+    /// 流式请求：向给定 base_url 发起一次 POST，成功时返回 Response 供消费 bytes_stream。
+    async fn stream_post_once(
+        &self,
+        base_url: &str,
+        body: &OpenAiRequestBody,
+    ) -> Result<reqwest::Response, AppError> {
+        let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+        let (key, value) = self.auth_header();
+        let resp = self
+            .client
+            .post(&url)
+            .header(key, value)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                let detail = e
+                    .source()
+                    .map(|s| format!(" 底层: {}", s))
+                    .unwrap_or_default();
+                AppError::Llm(format!("流式请求失败: {}{}", e, detail))
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| AppError::Llm(format!("读取错误响应: {}", e)))?;
+            let msg = String::from_utf8_lossy(&bytes);
+            return Err(AppError::Llm(format!(
+                "API 错误 {}: {}",
+                status.as_u16(),
+                msg
+            )));
+        }
+        Ok(resp)
+    }
 }
 
 #[async_trait]
@@ -162,9 +237,10 @@ impl LlmProvider for OpenAiProvider {
             None
         };
 
+        // 先尝试主 base；若为连接/网络错误且配置了 fallback，用 fallback 重试一次。
         let mut last_err = None;
         for attempt in 0..=self.retry_count {
-            match self.chat_inner(&request).await {
+            match self.chat_inner(&request, &self.base_url).await {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
@@ -179,12 +255,23 @@ impl LlmProvider for OpenAiProvider {
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                     } else {
-                        return Err(e);
+                        last_err = Some(e);
+                        break;
                     }
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string())))
+        let err = last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+        // 自动降级：连接/网络错误且配置了 fallback 时，用 fallback base 再试一次。
+        if Self::is_connect_or_network_error(&err) {
+            if let Some(ref fallback) = self.api_base_fallback {
+                warn!("主 API 不可达，尝试 fallback: {}", fallback);
+                if let Ok(r) = self.chat_inner(&request, fallback).await {
+                    return Ok(r);
+                }
+            }
+        }
+        Err(err)
     }
 
     async fn chat_stream(
@@ -210,31 +297,19 @@ impl LlmProvider for OpenAiProvider {
             stream: true,
         };
 
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let (key, value) = self.auth_header();
-
-        let resp = self
-            .client
-            .post(&url)
-            .header(key, value)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AppError::Llm(format!("流式请求失败: {}", e)))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| AppError::Llm(format!("读取错误响应: {}", e)))?;
-            let msg = String::from_utf8_lossy(&bytes);
-            return Err(AppError::Llm(format!(
-                "API 错误 {}: {}",
-                status.as_u16(),
-                msg
-            )));
-        }
+        let resp = self.stream_post_once(&self.base_url, &body).await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) if Self::is_connect_or_network_error(&e) && self.api_base_fallback.is_some() => {
+                warn!(
+                    "流式主 API 不可达，尝试 fallback: {:?}",
+                    self.api_base_fallback
+                );
+                self.stream_post_once(self.api_base_fallback.as_deref().unwrap(), &body)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let bytes_stream = resp
             .bytes_stream()
@@ -409,40 +484,78 @@ fn openai_chunk_to_stream_event(chunk: OpenAiStreamChunk) -> Option<StreamEvent>
 mod tests {
     use super::*;
     use crate::infra::LlmConfig;
+    use std::path::Path;
+
+    /// 从 crate 根目录加载 .env，便于本地有 key 时跑测试（CI 无 .env 则跳过依赖 key 的用例）。
+    fn load_dotenv() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+        let _ = dotenvy::from_path(path);
+    }
 
     #[test]
     fn openai_provider_new_fails_without_api_key() {
+        println!("[TEST] openai_provider_new_fails_without_api_key — 开始");
         let config = LlmConfig {
             api_key_env: Some("PI_AWSM_TEST_NONEXISTENT_ENV_VAR_12345".to_string()),
             ..LlmConfig::default()
         };
+        println!("[TEST] 过程: OpenAiProvider::new(api_key_env=不存在变量)");
         let r = OpenAiProvider::new(&config);
         assert!(r.is_err());
         let err = r.unwrap_err();
-        assert!(err.to_string().contains("未设置"));
+        let msg = err.to_string();
+        println!("[TEST] 过程: 错误信息 = {}", msg);
+        assert!(msg.contains("未设置"));
+        println!("[TEST] 结果: 通过（new 在无 key 时正确返回 Err）");
     }
 
+    /// 依赖 OPENAI_API_KEY：有 key 时断言 new 成功且 provider_name 正确；无 key 时不通过（宪法：核心功能不得跳过）。
+    #[test]
+    fn openai_provider_new_succeeds_with_api_key() {
+        load_dotenv();
+        println!("[TEST] openai_provider_new_succeeds_with_api_key — 开始");
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            panic!("OPENAI_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
+        }
+        println!(
+            "[TEST] 过程: OPENAI_API_KEY 已设置，调用 OpenAiProvider::new(LlmConfig::default())"
+        );
+        let config = LlmConfig::default();
+        let provider = OpenAiProvider::new(&config).expect("OPENAI_API_KEY 已设置时应创建成功");
+        assert_eq!(provider.provider_name(), "openai");
+        println!(
+            "[TEST] 过程: provider_name() = {}",
+            provider.provider_name()
+        );
+        println!("[TEST] 结果: 通过");
+    }
+
+    /// 依赖 OPENAI_API_KEY：有 key 时断言 new 成功且 count_tokens 返回合理值（近似）；无 key 时不通过。
     #[test]
     fn count_tokens_approximate() {
-        let config = LlmConfig {
-            api_key_env: Some("OPENAI_API_KEY".to_string()),
-            ..LlmConfig::default()
-        };
-        if OpenAiProvider::new(&config).is_err() {
-            return;
+        load_dotenv();
+        println!("[TEST] count_tokens_approximate — 开始");
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            panic!("OPENAI_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
         }
-        let provider = OpenAiProvider::new(&config).unwrap();
+        let config = LlmConfig::default();
+        let provider = OpenAiProvider::new(&config).expect("OPENAI_API_KEY 已设置时应创建成功");
         let messages = vec![
             ChatMessage::user("hello world"),
             ChatMessage::assistant("hi there"),
         ];
+        println!("[TEST] 过程: count_tokens(messages) 本地近似计算");
         let n = provider.count_tokens(&messages).unwrap();
-        assert!(n >= 1);
-        assert!(n <= 20);
+        println!("[TEST] 过程: count_tokens 返回 = {}", n);
+        assert!(n >= 1, "count_tokens 应至少为 1");
+        assert!(n <= 20, "count_tokens 近似值应在合理范围");
+        println!("[TEST] 结果: 通过 (n={})", n);
     }
 
     #[test]
     fn is_retriable_detects_429_and_5xx() {
+        println!("[TEST] is_retriable_detects_429_and_5xx — 开始");
+        println!("[TEST] 过程: 检查 429/502 为可重试、400 为不可重试");
         assert!(OpenAiProvider::is_retriable(&AppError::Llm(
             "API 错误 429: rate limit".to_string()
         )));
@@ -452,10 +565,12 @@ mod tests {
         assert!(!OpenAiProvider::is_retriable(&AppError::Llm(
             "API 错误 400: bad request".to_string()
         )));
+        println!("[TEST] 结果: 通过");
     }
 
     #[tokio::test]
     async fn sse_stream_parses_and_yields_events() {
+        println!("[TEST] sse_stream_parses_and_yields_events — 开始");
         use super::*;
         use tokio_stream::StreamExt;
         let chunks: Vec<Result<Bytes, AppError>> = vec![
@@ -469,6 +584,7 @@ mod tests {
                 "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
             )),
         ];
+        println!("[TEST] 过程: 使用 mock SSE 字节流解析");
         let stream = tokio_stream::iter(chunks);
         let mut event_stream = SseEventStream::new(stream);
         let mut events = Vec::new();
@@ -483,5 +599,58 @@ mod tests {
         assert!(
             matches!(&events[2], Ok(StreamEvent::FinishReason { reason } ) if reason == "stop")
         );
+        println!("[TEST] 过程: 解析到 3 个事件 (ContentDelta x2, FinishReason x1)");
+        println!("[TEST] 结果: 通过");
+    }
+
+    /// 依赖 OPENAI_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
+    /// CI/无配额环境默认跳过，本机有配额时可用 `cargo test -- --ignored` 运行。
+    #[tokio::test]
+    #[ignore = "需 OPENAI_API_KEY 且账户有可用配额；CI 与无配额环境跳过，本机验证时运行 cargo test -- --ignored"]
+    async fn chat_real_request_response_print() {
+        load_dotenv();
+        println!("[TEST] chat_real_request_response_print — 开始");
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            panic!("OPENAI_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
+        }
+        let config = LlmConfig::default();
+        let provider = OpenAiProvider::new(&config).expect("OPENAI_API_KEY 已设置时应创建成功");
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user("Say exactly: ok")],
+            model: config.default_model.clone(),
+            temperature: Some(0.0),
+            max_tokens: Some(10),
+            stream: Some(false),
+            model_override: None,
+        };
+        println!("[TEST] 过程: 请求体（发往 OpenAI /chat/completions）:");
+        if let Ok(json) = serde_json::to_string_pretty(&request) {
+            println!("{}", json);
+        }
+        println!("[TEST] 过程: 调用 provider.chat(request).await ...");
+        match provider.chat(request).await {
+            Ok(resp) => {
+                println!("[TEST] 过程: 响应体（OpenAI 返回）:");
+                println!("  id: {:?}", resp.id);
+                for (i, c) in resp.choices.iter().enumerate() {
+                    println!("  choices[{}].message.content: {:?}", i, c.message.content);
+                    println!("  choices[{}].finish_reason: {:?}", i, c.finish_reason);
+                }
+                if let Some(u) = &resp.usage {
+                    println!(
+                        "  usage: prompt_tokens={}, completion_tokens={}, total_tokens={:?}",
+                        u.prompt_tokens, u.completion_tokens, u.total_tokens
+                    );
+                }
+                println!("[TEST] 结果: 通过（已打印请求与响应）");
+            }
+            Err(e) => {
+                println!("[TEST] 过程: 请求失败: {}", e);
+                panic!(
+                    "chat 请求失败: {}（请在本机终端运行 cargo test，并确认可访问 api.openai.com 且已配置 OPENAI_API_KEY）",
+                    e
+                );
+            }
+        }
     }
 }
