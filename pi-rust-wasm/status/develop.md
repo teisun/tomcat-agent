@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| @integration_test | 2025-03-03 18:10 | DONE | develop |
+| @integration_test | 2025-03-05 14:45 | DONE | develop |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 文档与规范：Architecture 渐进式披露（architecture/ 子文档）、examples→guides 重命名、commit-with-status command、Constitution/design 等引用更新 @2025-03-05
 - [✓] **[P0]** 合并 `feature/infra` 至 develop（ort strategy）@2025-03-03
 - [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy`、`cargo test` 通过（32 tests）
 - [✓] **[P0]** 本波次验收（001+002）：项目骨架、AppError、配置/日志/跨平台、EventBus 符合 task.md 标准

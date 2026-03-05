@@ -35,11 +35,15 @@
 
 ## T1-P0-003 存储层与会话管理模块落地
 
+上述**禁止全量加载、BufReader 逐行、最近 N 条、零拷贝解析**等要求遵循 **Architecture.md「2.1 会话管理」下的 Transcript 的存储与读取约定**。
+
 - **3.1** 定义 SessionStore（sessions.json）、SessionEntry 等元数据结构，与 Architecture.md「会话存储数据结构设计」一致；实现 sessionKey→SessionEntry 的读写与持久化。
 - **3.2** 定义 SessionHeader、SessionEntry（JSONL 行类型）及 EntryBase 等，与 pi 系 JSONL 格式兼容；实现单文件 JSONL 读写与追加。
 - **3.3** 实现会话 CRUD：创建、按 sessionKey 查询/更新/归档/删除；会话列表与当前会话路由仅依赖 sessions.json，不建 SQLite。**重点实现元数据 sessions.json 的原子性更新算法**，确保并发写入下的数据安全性(不允许锁文件，可以用队列)。
-- **3.4** 实现消息管理：appendMessage、appendThinkingLevelChange、appendModelChange、appendCompaction、appendSessionInfo、appendLabelChange 等写入 JSONL；getEntry、getEntries、getBranch、getTree、getChildren、getLeafEntry 等只读查询。
-- **3.5** 实现上下文组装：根据会话历史组装 LLM 所需消息列表，支持会话级上下文窗口配置。
+- **3.4** 实现消息管理：appendMessage、appendThinkingLevelChange、appendModelChange、appendCompaction、appendSessionInfo、appendLabelChange 等写入 JSONL；getEntry、getEntries、getBranch、getTree、getChildren、getLeafEntry 等只读查询。**约束**：禁止全量加载 transcript（禁止一次性 `from_str` 整文件）；使用 BufReader 逐行或流式读取；上下文组装仅保留最近 N 条（N 可配置，MVP 可用固定值如 10）。
+- **3.5** 实现上下文组装：根据会话历史组装 LLM 所需消息列表，支持会话级上下文窗口配置（同上，仅保留最近 N 条，不全量加载）。
+- **3.x** `SessionHeader` 读取必须使用流式解析（如 `serde_json::StreamDeserializer`），确保首行再大也不会撑爆内存。
+- **零拷贝**：在生命周期允许的前提下，sessions.json、config.toml、单行 JSONL 解析优先使用 `from_slice` + 借用（`&'a str`），减少分配。
 - **3.6** 实现会话级配置隔离：每会话可独立配置 LLM 模型、启用的插件等，并存于 SessionEntry/配置层。
 - **3.7** 单元测试：空 store、无 sessions.json、无会话列表时的行为与路径约定；覆盖率≥80%。
 
@@ -89,6 +93,8 @@
     - 实现宿主导入绑定骨架：将宿主侧函数注册到 Wasm 实例导入表，并映射到 QuickJS 全局对象（具体 API 实现在 T1-P0-008）；实现 Rust↔JS 类型转换与错误传递的最小通道。
     - 实现统一 Hostcall 路由器骨架，定义 `invoke_host_func` 入口。
 - **7.6** 跨平台编译与运行验证（Windows/macOS/Linux 至少各一次）。
+- **资源上限**：Wasm 实例与 QuickJS 创建时使用固定默认资源上限（与 Standard 模式一致），具体数值见 **Architecture.md「4.5 资源与内存模式」**；后续由内存模式扩展为按 profile 配置。
+- **7.x** 预留 `set_memory_limit`（或等价）接口调用位，MVP 阶段可传固定值，但代码结构需支持从配置层动态传入上限。
 
 ---
 
