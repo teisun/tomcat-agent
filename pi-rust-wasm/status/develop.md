@@ -1,5 +1,28 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 07:10 | DONE | develop |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 合并 `feature/session-cli` 至 develop（003+010）@2026-03-06；解决 Cargo.toml / lib.rs / core/mod.rs 冲突，保留 infra+llm 与 session_cli 依赖与模块
+- [✓] **[P0]** 合并 `feature/wasm-plugin` 至 develop（007+008+009）@2026-03-06；解决 core/mod.rs、lib.rs、llm 目录与单文件冲突，保留 core/llm/ 目录实现，新增 ext、primitives、tools
+- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy --all-targets`、`cargo test --all` 通过（74 passed, 1 ignored）
+- [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
+- [ ] **[P1]** clippy 存在 6 条警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or x2），建议各模块后续消除
+- [ ] **[P0]** 全量单测：1 个用例需 OPENAI_API_KEY 已忽略；无 key 时 74 通过，符合宪法要求
+
+### 🔌 INTERFACE (接口变更)
+- feature/session-cli 合入：lib 导出 api::run_cli、core::session（SessionManager、SessionStore、TranscriptEntry 等）
+- feature/wasm-plugin 合入：lib 导出 ext（WasmEngine、WasmInstance、HostApiDispatcher、PluginManager、PluginManifest 等）、core::primitives、core::tools
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
 | @integration_test | 2026-03-05 22:20 | DONE | develop |
 
 ### ✅ DONE (已完成/进行中)
