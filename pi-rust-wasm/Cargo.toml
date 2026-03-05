@@ -3,6 +3,9 @@ name = "pi_awsm"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+
 [dependencies]
 thiserror = "2.0"
 anyhow = "1.0"
@@ -14,9 +17,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5.0"
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
 tracing-appender = "0.2"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-tokio-stream = "0.1"
 futures-util = "0.3"
 bytes = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

@@ -4,6 +4,8 @@
 
 pub(crate) mod llm;
 pub mod session;
+pub mod primitives;
+pub mod tools;
 
 pub use llm::{
     ChatMessage, ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, SessionTokenUsage,
@@ -13,3 +15,8 @@ pub use session::{
     load_store, save_store, SessionEntry, SessionHeader, SessionManager, SessionStore,
     TranscriptEntry, DEFAULT_SESSION_KEY,
 };
+pub use primitives::{
+    BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
+    PrimitiveOperation, WriteFileResult,
+};
+pub use tools::{Tool, ToolRegistry};
