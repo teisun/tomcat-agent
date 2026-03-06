@@ -1,6 +1,6 @@
 # 集成测试实践参考
 
-> 从 [INTEGRATION_TEST_SPEC.md](INTEGRATION_TEST_SPEC.md) 抽出的理论与实践结合部分，供 Agent 与开发快速查阅；不强制约束。
+> 本文档为《集成测试规范》**第 11 章**子文档；主文档见 [INTEGRATION_TEST_SPEC.md](INTEGRATION_TEST_SPEC.md)。提供场景化示例、三不原则、审计与 Teardown、DoD 及总结表。详细规范与门禁以主文档为准。
 
 ---
 
@@ -149,6 +149,7 @@
 - **路径覆盖**：覆盖所有 `Story 验收标准` 中的勾选项。
 - **错误覆盖**：必须包含至少一个“非法路径访问”和“无效 API Key”的失败分支。
 - **跨平台一致性**：集成测试必须在 CI 的 Windows/macOS/Linux 矩阵中全部通过（Story 1 要求）。
+- **异常与边界**：异常/边界场景的实践与清单见第 10 章 [集成测试鲁棒性保障](INTEGRATION_TEST_ROBUSTNESS.md)。
 
 ---
 

@@ -4,7 +4,7 @@
 mod common;
 
 use pi_awsm::{
-    parse_manifest, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
+    parse_manifest, AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
 };
 use std::sync::Arc;
 
@@ -54,8 +54,9 @@ fn test_parse_manifest_missing_id_returns_err() {
     tracing::info!("Arrange: 准备 id 为空的 JSON manifest");
     let res = parse_manifest(json);
     tracing::info!("Act: 调用 parse_manifest(json)");
-    tracing::info!("Assert: 验证返回 Err");
+    tracing::info!("Assert: 验证返回 Err 且错误类型为 Plugin（鲁棒性：错误分类断言）");
     assert!(res.is_err(), "manifest.id 为空时应返回 Err");
+    assert!(matches!(res, Err(AppError::Plugin(_))), "id 为空应返回 AppError::Plugin");
 }
 
 #[test]
