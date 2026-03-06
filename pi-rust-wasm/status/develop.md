@@ -1,5 +1,32 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 11:26 | DONE | develop |
+
+### 本次执行说明
+- **合并范围**：无（用户选择「本次无分支合并，直接走集成测试流程」）
+- **环境**：macOS / develop 分支，未合并任何 feature 分支
+
+### ✅ 执行的检查与验收项
+- [✓] **构建**：`cargo build`（dev）成功
+- [✓] **单元测试**：`cargo test` — 74 passed，1 ignored（`chat_real_request_response_print`）
+- [✓] **集成测试（非 LLM）**：`cargo test --test session_tests --test event_tests --test plugin_tests` — 9 passed（session_tests 3、event_tests 3、plugin_tests 3）
+- [ ] **集成测试（LLM）**：`cargo test --test llm_tests` — 2 failed；原因：OpenAI API 403 `model_not_found`（Project 无 `gpt-4o-mini` 权限），非 key 缺失，属账号/项目权限配置
+- [ ] **Clippy**：存在 6 条警告（lib：EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2；tests：redundant `use tracing`×4），未满足「无警告」门禁
+- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次未合并新分支）
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| llm_tests 2 失败 | OpenAI API 403，当前 Project 无 gpt-4o-mini 模型权限 | 在 OpenAI 控制台为项目开通该模型或改用有权限的模型/default_model |
+| clippy 6 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
 | @integration_test | 2026-03-06 08:58 | DONE | develop |
 
 ### ✅ DONE (已完成/进行中)

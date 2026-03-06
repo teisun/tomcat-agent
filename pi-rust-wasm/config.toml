@@ -10,7 +10,7 @@
 # 取值：trace | debug | info | warn | error。用于排查问题时可设为 debug。
 level = "info"
 # file_enabled：是否同时把日志写入文件。true 时写入 file_path，便于事后排查。
-file_enabled = false
+file_enabled = true
 # file_path：日志文件路径。仅当 file_enabled = true 时使用；支持 ~ 表示用户目录。
 file_path = "~/.pi/agent/logs"
 # file_roll_size_mb：单个日志文件最大体积（MB），超过后滚动到新文件。仅 file_enabled 时生效。
@@ -23,6 +23,7 @@ file_roll_size_mb = 10
 # provider：当前使用的 LLM 提供商标识。如 "openai"，用于选择对应适配器。
 provider = "openai"
 # api_base：API 根地址。不填则默认 https://api.openai.com；自建或代理时可改写。
+api_base = "https://api.openai.com"
 # api_key_env：存 API Key 的环境变量名。不填则默认从 OPENAI_API_KEY 读取。
 default_model = "gpt-5.2"
 # max_concurrent_requests：允许同时进行的 LLM 请求数，用于限流；0 表示不限制（不推荐）。
@@ -32,9 +33,9 @@ retry_count = 3
 # stream_timeout_sec：流式请求单次读取的超时秒数，超时则中断流式输出。
 stream_timeout_sec = 60
 # proxy：HTTP(S) 代理 URL。设置后所有 LLM 请求经该代理；不填则使用环境变量 HTTPS_PROXY/HTTP_PROXY（若有）。
-# proxy = "http://127.0.0.1:7890"
+proxy = "http://127.0.0.1:7890"
 # api_base_fallback：主 api_base 不可达（连接失败、超时等）时，自动用此 URL 重试；留空则关闭降级。
-# api_base_fallback = "https://api.chatanywhere.tech"
+api_base_fallback = "https://api.chatanywhere.tech"
 
 # ------------------------------------------------------------------------------
 # [storage] 存储配置：会话与 transcript 等持久化路径

@@ -85,7 +85,7 @@ fn default_llm_provider() -> String {
     "openai".to_string()
 }
 fn default_llm_model() -> String {
-    "gpt-4o-mini".to_string()
+    "gpt-5.2".to_string()
 }
 fn default_max_concurrent_requests() -> u32 {
     4
