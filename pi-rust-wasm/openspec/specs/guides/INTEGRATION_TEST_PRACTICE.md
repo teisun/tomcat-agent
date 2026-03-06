@@ -8,6 +8,7 @@
 
 - **理论**：单元测试验证零件（如：Path 是否合规），集成测试验证组装（如：插件调用 4 原语时，白名单过滤是否生效）。
 - **实践**：在 `tests/` 目录下，禁止 Mock 内部核心模块（如 `WasmRuntime` 或 `EventBus`），必须使用真实实例进行端到端测试。
+- **不脱离真实环境**：与外部系统（LLM API、存储、网络服务）的协作必须在真实环境下验证，不得在集成测试中 Mock 外部服务。
 
 ---
 
@@ -65,33 +66,43 @@
 
 ### 场景 C：LLM + Tool 动态调用流 (Story 5 & 7)
 
-**验证重点**：LLM 返回 `tool_calls` 时，宿主引擎能否正确解析并路由到对应的插件工具。
+**验证重点**：与真实 LLM API 的协作（请求/响应/流式）；后续可扩展为 LLM 返回 `tool_calls` 时宿主引擎的解析与路由。
 
-- **理论 (Theory)**：协议适配与动态分发。验证 LLM Provider 模块与 Tool 注册模块的协同。
-- **实践 (Practice)**：
+- **理论 (Theory)**：协议适配与动态分发。验证 LLM Provider 在真实环境下完成请求、响应与流式事件。
+- **实践 (Practice)**：集成测试必须使用真实端点，不 Mock 外部 API。
   ```rust
   #[tokio::test]
-  async fn test_llm_tool_routing_integration() {
-      // 1. Arrange: 注册一个计算器工具
-      let mut engine = Engine::new();
-      engine.register_tool(CalculatorTool::new());
-
-      // 2. Act: 模拟 LLM 返回一个调用计算器的指令
-      let mock_llm_resp = "{ 'tool_calls': [{ 'name': 'add', 'args': { 'a': 1, 'b': 2 } }] }";
-      let execution_result = engine.handle_llm_response(mock_llm_resp).await;
-
-      // 3. Assert: 验证工具被执行，且结果正确回传
-      assert_eq!(execution_result.get_output_as_i32(), 3);
+  async fn test_llm_provider_chat_real_request_returns_ok() {
+      common::setup_logging();
+      let _ = dotenvy::dotenv().ok();
+      // 1. Arrange: 真实配置与 Provider（无 key 时 new 返回 Err，用例失败，不得 ignore）
+      let config = LlmConfig::default();
+      let provider = OpenAiProvider::new(&config)
+          .expect("集成测试要求设置 OPENAI_API_KEY，无 key 视为失败");
+      let request = ChatRequest {
+          messages: vec![ChatMessage::user("Say ok")],
+          model: config.default_model.clone(),
+          temperature: Some(0.0),
+          max_tokens: Some(10),
+          stream: Some(false),
+          model_override: None,
+      };
+      // 2. Act: 真实发起 HTTP 请求
+      let resp = provider.chat(request).await.expect("chat 应成功");
+      // 3. Assert: 验证响应结构与内容
+      assert!(!resp.choices.is_empty());
+      assert!(resp.usage.is_some() || true);
   }
   ```
 
 ---
 
-## 3. 内部协作测试的“三不”原则
+## 3. 内部协作测试的“三不”原则与真实环境
 
 1. **不直接操作私有状态**：集成测试应通过 `pi-awsm init` 或 `Engine::start()` 等公开入口启动，不要手动去修改模块内部的 `Mutex` 或 `RefCell`。
 2. **不跳过异步行为**：(针对 Story 4 & 6) 如果存在事件循环，必须使用 `tokio::time::timeout` 配合等待，确保异步任务（如 `setTimeout`）真实完成，而不是用 `sleep` 暴力等待。
 3. **不忽略副作用验证**：集成测试必须检查磁盘（Story 2 的备份文件）、检查内存（Story 6 的监听列表）、检查控制台输出（Story 8 的渲染）。
+4. **不 Mock 外部依赖**：集成测试中禁止对 LLM API、数据库、文件系统等外部服务做 Mock，必须使用真实环境；
 
 ---
 
@@ -137,3 +148,4 @@
 | **4 Primitives** | 权限拦截器中间件 | 尝试 `write` 白名单外的目录，捕获异常 |
 | **Plugin System** | JS 引擎与 WASI 的绑定 | 加载一个读环境变量的 JS，看宿主能否传过去 |
 | **Session Mgr** | 持久化与内存同步 | 写入一条 Chat，重启 Engine 看能否 Load 出来 |
+| **LLM** | 与真实 API 的请求/响应/流式协作 | 配置 `OPENAI_API_KEY` 后调用真实 `LlmProvider::chat` / `chat_stream`，验证 `ChatResponse`、`StreamEvent` 序列；

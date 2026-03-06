@@ -1,5 +1,66 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 08:58 | DONE | develop |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 全量集成测试执行（按 integration_test_agent 合并后全量测试清单）：`cargo build --release`、`cargo clippy`、`cargo test`（74 单测通过、1 忽略）、`cargo test --test '*'` 执行
+- [✓] **[P0]** 集成测试通过：event_tests 3、plugin_tests 3、session_tests 3 全部通过
+- [ ] **[P0]** llm_tests 2 失败：`test_llm_provider_chat_real_request_returns_ok`、`test_llm_provider_chat_stream_real_request_yields_events` 因 OpenAI API 429（insufficient_quota）失败，非代码缺陷；需账户有可用配额或配置有效 key 后重跑
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次为全量集成测试执行，未合并新分支）
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| llm_tests 集成测 2 失败 | OpenAI API 429 insufficient_quota，当前 key 无可用配额 | 配置有效 OPENAI_API_KEY 或账户充值后重跑 |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 08:05 | DONE | develop |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 集成测试规范整改：INTEGRATION_TEST_SPEC / INTEGRATION_TEST_PRACTICE / integration_test_agent 明确「集成测试不脱离真实环境、外部协作必须真实验证」；Mock 仅限单元测试或未完成建设模块；LLM 集成测试为必写项
+- [✓] **[P0]** 编写集成测试代码：新增 `tests/llm_tests.rs`，在真实环境下验证与 LLM API 的协作（`test_llm_provider_chat_real_request_returns_ok`、`test_llm_provider_chat_stream_real_request_yields_events`）；保留既有 session/plugin/event 集成测试
+- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy --all-targets`、`cargo test --all` 通过（74 单测 + 9 集成测通过，1 单测忽略 + 2 LLM 集成测默认忽略）
+- [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
+- [ ] **[P1]** clippy 存在 6 条警告，建议各模块后续消除
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次为规范与集成测试代码变更，未合并新分支）
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 16:35 | DONE | develop |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 集成测试流程执行（按 integration_test_agent 规范）：合并范围确认为当前 develop，未执行新分支合并
+- [✓] **[P0]** 编写集成测试代码：新增 `tests/common/mod.rs`（setup_logging + Once）、`tests/session_tests.rs`（SessionManager 创建/列表/删除）、`tests/plugin_tests.rs`（parse_manifest、PluginManager 注册/列表）、`tests/event_tests.rs`（EventBus on/emit_sync/off、remove_plugin_listeners），符合 INTEGRATION_TEST_SPEC 与 INTEGRATION_TEST_PRACTICE
+- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy --all-targets`、`cargo test --all` 通过（74 单测 + 9 集成测通过，1 忽略：chat_real_request_response_print 已加 `#[ignore]`）
+- [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
+- [ ] **[P1]** clippy 存在 6 条警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or x2），建议各模块后续消除
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次为集成测试代码与流程执行，未合并新分支）
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
 | @integration_test | 2026-03-06 07:10 | DONE | develop |
 
 ### ✅ DONE (已完成/进行中)

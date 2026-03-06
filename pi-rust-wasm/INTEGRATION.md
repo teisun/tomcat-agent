@@ -7,6 +7,24 @@
 
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 08:58 | DONE | develop |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 全量集成测试执行：`cargo build --release`、`cargo clippy`、`cargo test`、`cargo test --test '*'`；build/clippy/单测（74 通过 1 忽略）/event_tests/plugin_tests/session_tests 均通过
+- [ ] **[P0]** llm_tests 失败：2 用例因 OpenAI API 429（insufficient_quota）失败；期望为 200 正常响应，实际为配额超限；建议负责：配置有效 OPENAI_API_KEY 或账户充值后由 integration_test 重跑
+
+### 🔌 INTERFACE (接口变更)
+- 无
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| llm_tests 2 失败 | API 429 insufficient_quota | 有效 key/配额后重跑 |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
 | @integration_test | 2026-03-06 07:10 | DONE | develop |
 
 ### ✅ DONE (已完成/进行中)
@@ -16,6 +34,7 @@
 - [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
 - [ ] **[P1]** clippy 存在 6 条警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or x2），建议各模块后续消除
 - [ ] **[P0]** 全量单测：1 个用例需 OPENAI_API_KEY 已忽略；无 key 时 74 通过，符合宪法要求
+- 集成测试（含 `llm_tests`）；全量集成测试需配置 `OPENAI_API_KEY` 后执行 `cargo test --all`，详见 [INTEGRATION_TEST_SPEC 7.4](pi-rust-wasm/openspec/specs/guides/INTEGRATION_TEST_SPEC.md#74-全量集成测试含-llm)。
 
 ### 🔌 INTERFACE (接口变更)
 - feature/session-cli 合入：lib 导出 api::run_cli、core::session（SessionManager、SessionStore、TranscriptEntry 等）

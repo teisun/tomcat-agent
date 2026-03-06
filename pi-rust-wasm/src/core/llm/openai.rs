@@ -606,6 +606,7 @@ mod tests {
     /// 依赖 OPENAI_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
     /// CI/无配额环境默认跳过，本机有配额时可用 `cargo test -- --ignored` 运行。
     #[tokio::test]
+    #[ignore = "依赖真实 OpenAI API 与配额，CI 默认跳过"]
     async fn chat_real_request_response_print() {
         load_dotenv();
         println!("[TEST] chat_real_request_response_print — 开始");

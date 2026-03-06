@@ -78,8 +78,9 @@
 2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、日志等）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
 3. **动作**：针对本次合并引入的模块与场景，在项目根目录 `tests/` 下建立或更新：
    - `tests/common/mod.rs`：共享初始化（如 `setup_logging()`）、公共 fixture；
-   - 按功能划分的 `*_tests.rs`（如 `cli_tests.rs`、`session_tests.rs`、`plugin_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
-4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、LLM+Tool 路由等。
+   - 按功能划分的 `*_tests.rs`，**必须包含** `llm_tests.rs`（以及如 `cli_tests.rs`、`session_tests.rs`、`plugin_tests.rs`、`event_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
+   - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
+4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、**LLM+Tool 路由（必选，在真实环境下验证与 LLM 的协作 chat/chat_stream）**。
 5. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。
 
 ### 合并后全量测试与验收清单
