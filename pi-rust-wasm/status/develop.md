@@ -1,5 +1,30 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 12:30 | DONE | develop |
+
+### 本次执行说明
+- **合并范围**：无（用户选择「本次不合并任何分支」，直接走集成测试流程）
+- **环境**：macOS / develop 分支
+
+### ✅ 执行的检查与验收项
+- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase）
+- [✓] **单元测试**：`cargo test` — 74 passed，1 ignored（`chat_real_request_response_print`）
+- [✓] **集成测试**：`cargo test --test '*'` — 11 passed（event_tests 3、llm_tests 2、plugin_tests 3、session_tests 3）；llm_tests 本次全部通过（max_completion_tokens 已适配）
+- [ ] **Clippy**：存在 6 条 lib 警告 + 4 条 tests 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2；tests 冗余 `use tracing`×4），未满足「无警告」门禁
+- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次未合并新分支）
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| clippy 共 10 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
 | @integration_test | 2026-03-06 11:26 | DONE | develop |
 
 ### 本次执行说明

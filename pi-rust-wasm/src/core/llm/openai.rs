@@ -20,12 +20,14 @@ use super::provider::LlmProvider;
 use super::types::{ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent};
 
 /// 发给 OpenAI API 的请求体（不含 model_override，stream 由调用方定）。
+/// 使用 max_completion_tokens 以兼容新模型（部分模型已不再接受 max_tokens）。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 struct OpenAiRequestBody {
     model: String,
     messages: Vec<ChatMessage>,
     temperature: Option<f32>,
+    #[serde(rename = "max_completion_tokens")]
     max_tokens: Option<u32>,
     stream: bool,
 }
