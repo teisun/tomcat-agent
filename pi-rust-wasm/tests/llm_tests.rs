@@ -5,7 +5,6 @@ mod common;
 
 use futures_util::StreamExt;
 use pi_awsm::{ChatMessage, ChatRequest, LlmConfig, LlmProvider, OpenAiProvider};
-use tracing;
 
 /// 真实环境：调用 OpenAiProvider::chat 发起一次非流式请求，验证响应结构。
 /// 无 OPENAI_API_KEY 时用例失败（OpenAiProvider::new 返回 Err），不得 ignore。

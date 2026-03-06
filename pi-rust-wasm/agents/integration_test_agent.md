@@ -82,6 +82,7 @@
    - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
 4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、**LLM+Tool 路由（必选，在真实环境下验证与 LLM 的协作 chat/chat_stream）**。
 5. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。
+   - **日志门禁**：每个集成测试用例必须包含（1）`common::setup_logging()`，（2）`info_span!` 或 `#[instrument]`，（3）Arrange/Act/Assert 关键步骤的 `tracing::info!`（或 `debug!`）；不满足的需补全后再跑全量验收。
 
 ### 合并后全量测试与验收清单
 

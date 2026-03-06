@@ -115,6 +115,16 @@ my_project/
 
 ## 9. 日志与链路追踪规范
 
+### 9.0 强制要求（集成测试门禁）
+
+为保证失败可定位、行为可追溯，**每个集成测试用例必须同时满足**：
+
+1. **初始化**：用例入口调用 `common::setup_logging()`（或共享入口调用一次），避免重复 init（使用 `Once`）。
+2. **上下文**：为每个测试用例创建 `info_span!`（或使用 `#[instrument]`）标注用例名与关键参数（如 plugin_id、session_key）。
+3. **AAA 日志锚点**：在 Arrange / Act / Assert 三个阶段的关键步骤**至少各记录一条** `tracing::info!`（必要时补 `tracing::debug!` 记录关键变量）。
+
+> 说明：默认 `cargo test` 会捕获输出，需使用 `-- --nocapture` 才能在终端实时看到日志（见 9.4）。
+
 ### 9.1 栈技术选型
 *   **日志门面**：统一使用 `tracing` crate 代替 `log`。`tracing` 支持异步、结构化日志，并能完美兼容 `log` 库。
 *   **初始化器**：使用 `tracing-subscriber` 处理日志的输出与过滤。
@@ -156,10 +166,11 @@ my_project/
     ```
 
 ### 9.4 日志查看控制
-*   **静默模式（默认）**：直接运行 `cargo test` 时，日志不会打印，除非断言失败。
-*   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数：
+*   **静默模式（默认）**：直接运行 `cargo test` 时，日志不会打印，除非断言失败；集成测试的 tracing 输出需配合本节的 `--nocapture` 才能实时查看。
+*   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数；**集成测试**建议：`cargo test --test '*' -- --nocapture`（可按需加 `RUST_LOG=debug`），避免误以为未打日志。
     ```bash
     cargo test -- --nocapture
+    cargo test --test '*' -- --nocapture
     ```
 *   **级别控制**：利用 `RUST_LOG` 环境变量动态调整日志等级：
     ```bash

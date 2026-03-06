@@ -23,7 +23,11 @@
   ```rust
   #[tokio::test]
   async fn test_plugin_write_security_boundary() {
+      common::setup_logging();
+      let _span = tracing::info_span!("test_plugin_write_security_boundary").entered();
+
       // 1. Arrange: 准备环境，设置只允许写 /tmp/pi-test
+      tracing::info!("Arrange: 准备引擎与白名单、越权写 /etc/passwd 的插件代码");
       let engine = TestEngine::init().with_whitelist("/tmp/pi-test");
       let plugin_code = r#"
           const fs = require('fs');
@@ -31,9 +35,11 @@
       "#;
 
       // 2. Act: 加载并运行插件
+      tracing::info!("Act: 加载并运行插件");
       let result = engine.load_and_run_js(plugin_code).await;
 
       // 3. Assert: 断言必须失败，且审计日志记录了拦截行为
+      tracing::info!("Assert: 验证返回 Err、审计含拦截记录、/etc/passwd 未被改写");
       assert!(result.is_err());
       assert!(engine.audit_log().contains("Access Denied: /etc/passwd"));
       assert!(!std::path::Path::new("/etc/passwd").exists_ok_with_content("malicious data"));
@@ -49,17 +55,19 @@
   ```rust
   #[test]
   fn test_event_cleanup_on_plugin_unload() {
+      common::setup_logging();
+      let _span = tracing::info_span!("test_event_cleanup_on_plugin_unload", plugin_id = "test-plugin").entered();
+
+      tracing::info!("Arrange: 创建 EventBus，为 test-plugin 注册 session.start 监听");
       let mut bus = EventBus::new();
       let plugin_id = "test-plugin";
-      
-      // 注册事件
       bus.on("session.start", plugin_id, |ev| { ... });
-      
-      // 卸载插件
+
+      tracing::info!("Act: 卸载插件，再发送 session.start");
       bus.unregister_by_plugin(plugin_id);
-      
-      // 发送事件并断言没有任何回调被执行
       let call_count = bus.emit("session.start", data);
+
+      tracing::info!("Assert: 验证无回调被执行");
       assert_eq!(call_count, 0, "插件卸载后不应再有事件回调执行");
   }
   ```
@@ -74,8 +82,10 @@
   #[tokio::test]
   async fn test_llm_provider_chat_real_request_returns_ok() {
       common::setup_logging();
+      let _span = tracing::info_span!("test_llm_provider_chat_real_request_returns_ok").entered();
       let _ = dotenvy::dotenv().ok();
-      // 1. Arrange: 真实配置与 Provider（无 key 时 new 返回 Err，用例失败，不得 ignore）
+
+      tracing::info!("Arrange: 加载 .env，创建 LlmConfig 与 OpenAiProvider、ChatRequest");
       let config = LlmConfig::default();
       let provider = OpenAiProvider::new(&config)
           .expect("集成测试要求设置 OPENAI_API_KEY，无 key 视为失败");
@@ -87,9 +97,11 @@
           stream: Some(false),
           model_override: None,
       };
-      // 2. Act: 真实发起 HTTP 请求
+
+      tracing::info!("Act: 调用 provider.chat(request)");
       let resp = provider.chat(request).await.expect("chat 应成功");
-      // 3. Assert: 验证响应结构与内容
+
+      tracing::info!("Assert: 验证 choices 非空、usage 存在");
       assert!(!resp.choices.is_empty());
       assert!(resp.usage.is_some() || true);
   }

@@ -5,7 +5,6 @@ mod common;
 
 use pi_awsm::{DefaultEventBus, EventBus, EventContext};
 use std::sync::atomic::{AtomicU32, Ordering};
-use tracing;
 
 #[test]
 fn test_event_bus_on_emit_sync_invokes_callback() -> Result<(), Box<dyn std::error::Error>> {

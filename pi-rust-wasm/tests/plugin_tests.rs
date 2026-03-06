@@ -7,7 +7,6 @@ use pi_awsm::{
     parse_manifest, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
 };
 use std::sync::Arc;
-use tracing;
 
 #[test]
 fn test_parse_manifest_valid_json_returns_manifest() -> Result<(), Box<dyn std::error::Error>> {

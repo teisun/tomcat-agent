@@ -6,7 +6,6 @@ mod common;
 use pi_awsm::SessionManager;
 use std::path::PathBuf;
 use tempfile::TempDir;
-use tracing;
 
 #[test]
 fn test_session_manager_create_and_list_sessions_returns_entries() -> Result<(), Box<dyn std::error::Error>> {
