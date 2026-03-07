@@ -20,6 +20,7 @@ pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};
 pub use events::{AgentEvent, ExtensionEvent};
 pub use logging::init_logging;
 pub use audit::{
-    AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry, ToolAuditEntry, TracingAuditRecorder,
+    AuditPrimitiveOp, AuditRecorder, HostcallAuditEntry, PrimitiveAuditEntry, ToolAuditEntry,
+    TracingAuditRecorder,
 };
 pub use platform::{normalize_path, read_file_utf8, write_file_atomic};

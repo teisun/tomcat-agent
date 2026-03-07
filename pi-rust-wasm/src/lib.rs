@@ -22,11 +22,11 @@ pub use core::{
 pub use ext::{
     HostApiDispatcher, HostRequest, HostResponse, PluginInfo, PluginInstance, PluginManager,
     PluginManifest, PluginStatus, WasmEngine, WasmEngineConfig, WasmInstance, invoke_host_func,
-    parse_manifest,
+    invoke_host_func_with, parse_manifest,
 };
 pub use infra::{
     init_logging, load_config, normalize_path, read_file_utf8, validate_config, write_file_atomic,
     AgentEvent, AppConfig, AppError, AuditPrimitiveOp, AuditRecorder, DefaultEventBus, EventBus,
-    EventContext, EventListenerId, ExtensionEvent, LlmConfig, LogConfig, PrimitiveAuditEntry,
-    PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder,
+    EventContext, EventListenerId, ExtensionEvent, HostcallAuditEntry, LlmConfig, LogConfig,
+    PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder,
 };

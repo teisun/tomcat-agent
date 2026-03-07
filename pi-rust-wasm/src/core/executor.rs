@@ -569,6 +569,7 @@ mod tests {
             self.0.lock().unwrap().push(entry);
         }
         fn record_tool_call(&self, _entry: ToolAuditEntry) {}
+        fn record_hostcall(&self, _entry: crate::infra::HostcallAuditEntry) {}
     }
 
     #[tokio::test]

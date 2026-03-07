@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+wasmedge = ["dep:wasmedge-sdk"]
 
 [dependencies]
 thiserror = "2.0"
@@ -26,6 +27,8 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
 toml = "0.8"
+tempfile = "3.10"
+wasmedge-sdk = { version = "0.11", optional = true }
 
 [dev-dependencies]
 dotenvy = "0.15"
