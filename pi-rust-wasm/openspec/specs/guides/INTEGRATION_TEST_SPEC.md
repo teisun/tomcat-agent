@@ -100,6 +100,13 @@ my_project/
 *   集成测试以真实环境为默认：与外部系统（数据库、第三方 API、文件系统等）的协作必须在真实环境下验证。
 *   Mock 仅用于单元测试或尚未完成建设的内部模块；集成测试套件中必须包含与真实外部依赖协作的用例（如 LLM 的 `llm_tests.rs`）；（无 key 或不可达时要求见 5.2）。
 
+### 5.4 Wasm 运行时（真实 WasmEdge）
+*   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：在启用 feature `wasmedge` 且环境已安装 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。
+*   **环境缺失不允许跳过或绕过**。执行全量集成测试前须已安装 WasmEdge 并配置 wasmedge_quickjs.wasm 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`）。
+*   **协助安装**：若环境未安装 WasmEdge，应协助客户全局安装，见 https://wasmedge.org/docs/start/install；可选：提供 `scripts/install-wasmedge.sh` 或等价安装指引），再执行 `cargo build --features wasmedge` 与 `cargo test --features wasmedge --test wasmedge_e2e_tests`。
+*   **失败即失败**：上述构建或测试若失败，视为集成测试不通过，不得以「环境未就绪」为由跳过或记录为通过。
+*   与 5.2 中 LLM 真实 API 要求并列：Wasm 与 LLM 均为「须在真实环境下验证」的外部依赖。
+
 ## 6. 断言与工具库
 推荐集成以下工具以增强测试表达力：
 *   **`pretty_assertions`**：在断言失败时提供更易读的 Diff。

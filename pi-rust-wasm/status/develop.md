@@ -3,20 +3,22 @@
 | @integration_test | 2026-03-08 | DONE | develop |
 
 ### 本次执行说明
-- **合并范围**：feature/wasm-plugin（007、008、009）
-- **环境**：macOS / develop 分支
+- **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、02-wasm-runtime-and-plugin、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
+- **环境**：macOS / develop 分支；按新规范 Wasm 真实运行时为必选，待安装 WasmEdge 后执行 `cargo test --features wasmedge --test wasmedge_e2e_tests` 补跑，否则验收不通过。
 
 ### ✅ 执行的检查与验收项
 - [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
 - [✓] **单元测试**：`cargo test` — 178 passed，1 ignored（`chat_real_request_response_print`）
-- [✓] **集成测试**：`cargo test --test '*'` — 25 passed（event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）
+- [✓] **集成测试**：`cargo test --test '*'` — 不含 wasmedge 时 25 passed（event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）；wasmedge_e2e_tests 须以 `--features wasmedge` 运行且已安装 WasmEdge，否则该用例失败（规范禁止跳过）。
 - [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
-- [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests` 通过；primitives_tools_tests 含路径白名单拒绝、用户拒绝确认等边界用例
-- [ ] **Clippy**：存在 6 条 lib 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2），既有问题，未满足「无警告」门禁
+- [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests` 通过
+- [ ] **Clippy**：存在 6 条 lib 警告，既有问题，未满足「无警告」门禁
 - [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+- [ ] **Wasm 真实运行时（必选）**：按新规范环境缺失不得跳过，须先安装 WasmEdge 后执行 `cargo build --features wasmedge`、`cargo test --features wasmedge --test wasmedge_e2e_tests`，失败即视为验收不通过；待按规范安装依赖后补跑。
 
 ### 🔌 INTERFACE (接口变更)
-- **feature/wasm-plugin 合入**：ext 层新增 WasmEngine、engine_wasmedge、instance_wasmedge、HostApiDispatcher 完整路由（log/fs/llm/tools/events/session）；hostcall_tests 集成测试；插件生命周期与 EventBus/ToolRegistry 清理已由现有 plugin_tests、event_tests、robustness_tests 覆盖。
+- **规范**：INTEGRATION_TEST_SPEC 5.4 修订为环境缺失不允许跳过、须协助安装、失败即失败；integration_test_agent 验收项「Wasm 真实运行时」改为必选；PRACTICE 场景 A 与 docs/02-wasm-runtime-and-plugin 补充集成测试要求。
+- **测试**：`tests/wasmedge_e2e_tests.rs` 去掉跳过逻辑，环境缺失时 panic，须在安装 WasmEdge 后以 `--features wasmedge` 运行。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |

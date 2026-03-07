@@ -83,7 +83,8 @@
    - 按功能划分的 `*_tests.rs`，**必须包含** `llm_tests.rs`（以及如 `session_tests.rs`、`plugin_tests.rs`、`event_tests.rs`、`robustness_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
    - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
 4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、**LLM+Tool 路由（必选，在真实环境下验证与 LLM 的协作 chat/chat_stream）**。
-5. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。须满足规范第 9、10 章门禁（日志 + 鲁棒性），不满足则补全后再跑全量验收。
+5. **Wasm 真实运行时（wasm-plugin 相关合并）**：针对 **wasm-plugin 相关合并**，须包含「Wasm 真实运行时」集成测试（在 feature `wasmedge` 下编译/运行）。至少 1 个用例：创建真实 `WasmEngine`、创建 `WasmInstance`、注册 host_binding、`run_script(js)` 触发 host_call，并断言宿主收到调用且行为符合预期（见 `tests/wasmedge_e2e_tests.rs`）。
+6. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。须满足规范第 9、10 章门禁（日志 + 鲁棒性），不满足则补全后再跑全量验收。
 
 ### 合并后全量测试与验收清单
 
@@ -92,9 +93,10 @@
 1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`cargo test`
 2. **CLI 子命令**：`pi-awsm init`、`pi-awsm doctor`、`pi-awsm config`、`pi-awsm session`、`pi-awsm plugin`、`pi-awsm audit` 可执行且帮助完整
 3. **集成测试（含门禁）**：`cargo test --test '*'` 通过，含日志门禁（第 9 章）与**鲁棒性集成测试**（`cargo test --test robustness_tests` 或全量已包含 robustness_tests 并通过）
-4. **对话模式**：`pi-awsm chat` 或 `pi-awsm` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认、快捷键符合 design 与 task 验收
-5. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常
-6. **跨平台**：若 CI 或本机具备，在 Windows/macOS/Linux 至少各跑一次 build + test
+4. **Wasm 真实运行时（必选）**：按 [INTEGRATION_TEST_SPEC 5.4](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 执行；不通过即视为验收不通过。
+5. **对话模式**：`pi-awsm chat` 或 `pi-awsm` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认、快捷键符合 design 与 task 验收
+6. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常
+7. **跨平台**：若 CI 或本机具备，在 Windows/macOS/Linux 至少各跑一次 build + test
 
 验收项与 [task.md](../openspec/changes/001-mvp/task.md)「验收标准」「完成定义」一致；不通过项记录为问题并指派给对应角色。
 

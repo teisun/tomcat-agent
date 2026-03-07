@@ -19,6 +19,7 @@
 **验证重点**：JS 插件通过 Node.js 兼容层调用宿主的 `fs.write` 时，安全管控是否拦截。
 
 - **理论 (Theory)**：跨语言调用链路闭环。JS (QuickJS) -> WASI -> Host (Rust) -> Security Policy -> Filesystem。
+- **真实运行时要求**：场景 A 的**完整验证**需在 `cargo test --features wasmedge` 下运行，并确保 `WASMEDGE_QUICKJS_PATH` 或配置指向 `wasmedge_quickjs.wasm`（如项目内 `assets/wasm/wasmedge_quickjs.wasm`）。**环境缺失不允许跳过**，须先安装 WasmEdge 并配置路径，再执行上述测试；失败即视为失败。仅默认 `cargo test` 时，现有用例覆盖的是 Dispatcher/PluginManager/事件等**不依赖真实 Wasm 执行 JS** 的路径；「JS 调用 fs.write → 宿主白名单拦截」需真实 WasmEngine + run_script。
 - **实践 (Practice)**：
   ```rust
   #[tokio::test]

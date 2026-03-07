@@ -27,6 +27,10 @@
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
 - **线性内存边界**：Hostcall 时宿主通过 WasmEdge 的 `get_data`/`set_data` 访问线性内存；**边界检查由 WasmEdge 运行时保证**，防止越界访问。响应缓冲区不足时仅回写长度，由 guest 重试更大缓冲区。
 
+### 集成测试要求
+
+- 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install），并配置 quickjs 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`），再执行 `cargo build --features wasmedge`、`cargo test --features wasmedge --test wasmedge_e2e_tests`；若构建或测试失败则视为集成测试失败。未安装时须按规范协助客户安装后再执行，不得以「环境未就绪」为由跳过。
+
 ## 4. 依赖与后续
 
 - **005/006/004**：Dispatcher 通过 with_primitive/with_tools/with_llm 注入；未注入时返回明确错误，待合并后接实线。
