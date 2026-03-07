@@ -1,13 +1,13 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| primitives_tools | 2025-03-06 23:45 | DONE | feature/primitives-tools |
+| primitives_tools | 2025-03-07 | ACTIVE | feature/primitives-tools |
 
 ### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** T1-P0-005 用户确认与审计扩展点：UserConfirmationProvider、AuditRecorder、TracingAuditRecorder、AllowAllConfirmation/DenyAllConfirmation @2025-03-06
-- [✓] **[P0]** T1-P0-005 DefaultPrimitiveExecutor：read_file/list_dir/write_file/edit_file/execute_bash、路径白名单、用户确认、备份与原子写入、审计记录 @2025-03-06
-- [✓] **[P0]** T1-P0-005 单测：各原语成功路径、白名单拒绝、用户拒绝确认边界与审计、覆盖率 @2025-03-06
-- [✓] **[P0]** T1-P0-006 工具注册中心 DefaultToolRegistry、ToolExecutor 注入、call_tool 与审计 @2025-03-06
-- [✓] **[P0]** T1-P0-006 单测：注册/注销/列表/call_tool/卸载插件自动注销、覆盖率 @2025-03-06
+- [✓] **Phase 0** 开发前：已同步 develop（merge）、检查分支、阅读编码规范 @2025-03-07
+- [✓] **Phase 1** 摸底：develop 含 api/core(llm,session)/ext(dispatcher,plugin)/infra；005/006 已整合 core/confirmation、executor、primitives、tools(DefaultToolRegistry,ToolExecutor)、infra/audit；ext 有 HostApiDispatcher，008 可注入 PrimitiveExecutor/ToolRegistry
+- [✓] **[P0]** T1-P0-005 用户确认与审计扩展点、DefaultPrimitiveExecutor、单测 @2025-03-06
+- [✓] **[P0]** T1-P0-006 工具注册中心 DefaultToolRegistry、ToolExecutor、单测 @2025-03-06
+- [✓] merge develop 冲突已解决；session 单测 get_leaf_entry_returns_last 临时目录隔离修复
 
 ### 🔌 INTERFACE (接口变更)
 - **UserConfirmationProvider**：core 层 trait，CLI/chat 实现具体交互；AllowAllConfirmation/DenyAllConfirmation 供测试与默认用。
