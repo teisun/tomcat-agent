@@ -954,4 +954,96 @@ mod tests {
         let res = d.dispatch_async("inst-1", req).await.unwrap();
         assert!(res.ok);
     }
+
+    #[tokio::test]
+    async fn dispatch_unregister_tool_with_registry_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "unregisterTool".to_string(),
+            params: serde_json::json!({ "toolName": "t1", "pluginId": "p1" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_events_once_returns_listener_id() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        let req = HostRequest {
+            module: "events".to_string(),
+            method: "once".to_string(),
+            params: serde_json::json!({ "eventName": "test" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+        let id = res.data.as_ref().and_then(|d| d.get("listenerId")).and_then(|v| v.as_u64());
+        assert!(id.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_events_off_removes_listener() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        let on_req = HostRequest {
+            module: "events".to_string(),
+            method: "on".to_string(),
+            params: serde_json::json!({ "eventName": "e1" }),
+            call_id: None,
+        };
+        let on_res = d.dispatch_async("inst-1", on_req).await.unwrap();
+        assert!(on_res.ok);
+        let listener_id = on_res
+            .data
+            .as_ref()
+            .and_then(|d| d.get("listenerId"))
+            .and_then(|v| v.as_u64())
+            .expect("listenerId");
+        let off_req = HostRequest {
+            module: "events".to_string(),
+            method: "off".to_string(),
+            params: serde_json::json!({ "eventName": "e1", "listenerId": listener_id }),
+            call_id: None,
+        };
+        let off_res = d.dispatch_async("inst-1", off_req).await.unwrap();
+        assert!(off_res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_chat_parses_max_tokens_and_temperature() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+        let req = HostRequest {
+            module: "llm".to_string(),
+            method: "createChatCompletion".to_string(),
+            params: serde_json::json!({
+                "messages": [],
+                "model": "m",
+                "maxTokens": 100,
+                "temperature": 0.7
+            }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_register_tool_missing_name_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "registerTool".to_string(),
+            params: serde_json::json!({ "label": "L", "description": "d" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(!res.ok);
+        assert!(res.error.as_ref().map(|e| e.contains("name")).unwrap_or(false));
+    }
 }

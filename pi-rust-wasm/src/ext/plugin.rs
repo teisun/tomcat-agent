@@ -406,4 +406,22 @@ mod tests {
         let r = manager.unload_plugin("nonexistent");
         assert!(r.is_err());
     }
+
+    #[test]
+    fn enable_plugin_not_found_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let manager = PluginManager::new(bus);
+        let r = manager.enable_plugin("nonexistent");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn disable_plugin_not_found_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let manager = PluginManager::new(bus);
+        let r = manager.disable_plugin("nonexistent");
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("not found"));
+    }
 }

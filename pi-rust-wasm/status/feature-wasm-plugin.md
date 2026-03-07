@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| wasm_plugin_agent | 2026-03-07 18:30 | DONE | feature/wasm-plugin |
+| wasm_plugin_agent | 2026-03-07 21:00 | DONE | feature/wasm-plugin |
 
 **PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](pi-rust-wasm/agents/PLAN.md)。
 
@@ -19,7 +19,7 @@
 - [✓] **core/executor.rs**：list_dir 路径在黑名单返回 Err、read_file 对目录返回 Err。
 - [✓] **ext/plugin.rs**：get_plugin 注册后 Some/未知 None、register_plugin 重复返回 Err。
 - [✓] 全量 lib 单测 144 passed、1 ignored；提交前本地执行 `cargo tarpaulin --lib --packages pi_awsm` 取覆盖率填 commit message `[cov = xx.x%]`。
-- [✓] **宪法流程走查**（2026-03-07）：开发前（分支、同步 develop）、开发流程验证（test/tarpaulin/文档）、提交前（status 更新、全量 add、门禁）、提交规约（commit 含 [cov]）。
+- [✓] **宪法流程走查**（2026-03-07）：开发前（分支、同步 develop）、开发流程验证（test/tarpaulin/文档）、提交前（status 更新、全量 add、门禁）、提交规约（commit 含 [cov]）。session CLI 单测使用 canonicalize 与二次 set_var 稳定 env，建议 `cargo test -- --test-threads=1` 或 CI 单线程跑以避竞态。
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-007 WasmEdge 运行时与 QuickJS 集成：WasmEngine/WasmInstance 桩、宿主导入绑定骨架（HostRequest/HostResponse、invoke_host_func）、Standard 资源上限预留 @2025-03-05

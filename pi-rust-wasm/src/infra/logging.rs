@@ -72,6 +72,9 @@ pub fn init_logging(cfg: &LogConfig) -> Result<(), super::error::AppError> {
 mod tests {
     use super::*;
 
+    /// file_enabled == true 分支（RollingFileAppender、file_layer）：因全局 subscriber 仅能 init 一次，
+    /// 与 a_init_logging_console_only_succeeds 互斥，由集成测试或单独运行覆盖，此处不重复 init。
+
     /// 仅控制台、成功路径。init_logging 内部会 init 全局 subscriber，进程内只能成功一次；
     /// 全量测试若出现 "global default trace subscriber already set" 可单独跑：
     /// cargo test -p pi_awsm infra::logging::tests -- --test-threads=1

@@ -501,4 +501,115 @@ mod tests {
         assert!(header.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn context_cap_returns_default() {
+        let dir = temp_sessions_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        assert_eq!(mgr.context_cap(), 10);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_entry_with_session_returns_option() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"hi"})).unwrap();
+        let opt = mgr.get_entry("unknown_id").unwrap();
+        assert!(opt.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_children_with_session_returns_vec() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        let children = mgr.get_children("parent", 5).unwrap();
+        assert!(children.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_leaf_entry_with_session_returns_last() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"hi"})).unwrap();
+        let leaf = mgr.get_leaf_entry().unwrap();
+        assert!(leaf.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_branch_with_session_returns_vec() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        let branch = mgr.get_branch("any_leaf").unwrap();
+        assert!(branch.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_session_modifies_store() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        let before = mgr.get_session(key).unwrap().unwrap().updated_at;
+        mgr.update_session(key, |e| {
+            e.cwd = Some("/updated".to_string());
+        }).unwrap();
+        let after = mgr.get_session(key).unwrap().unwrap();
+        assert!(after.updated_at >= before);
+        assert_eq!(after.cwd.as_deref(), Some("/updated"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_thinking_level_change_succeeds() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        let r = mgr.append_thinking_level_change("full");
+        assert!(r.is_ok());
+        let entries = mgr.get_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_model_change_succeeds() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        let r = mgr.append_model_change(Some("openai"), Some("gpt-4"));
+        assert!(r.is_ok());
+        let entries = mgr.get_entries(10).unwrap();
+        assert_eq!(entries.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

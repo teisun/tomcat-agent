@@ -412,4 +412,186 @@ mod tests {
         let r = run_chat();
         assert!(r.is_ok());
     }
+
+    #[test]
+    fn run_config_get_with_key_returns_ok() {
+        let r = run_config(ConfigSub::Get {
+            key: Some("log.level".to_string()),
+        });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_config_get_without_key_returns_ok() {
+        let r = run_config(ConfigSub::Get { key: None });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_config_export_writes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.toml");
+        let r = run_config(ConfigSub::Export {
+            path: out.clone(),
+        });
+        assert!(r.is_ok());
+        assert!(out.exists());
+    }
+
+    #[test]
+    fn run_config_import_valid_toml_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import.toml");
+        let toml = toml::to_string_pretty(&AppConfig::default()).unwrap();
+        std::fs::write(&path, toml).unwrap();
+        let r = run_config(ConfigSub::Import { path });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_config_set_returns_ok() {
+        let r = run_config(ConfigSub::Set {
+            key: "log.level".to_string(),
+            value: "debug".to_string(),
+        });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_config_edit_returns_ok() {
+        let r = run_config(ConfigSub::Edit { config: None });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_doctor_invalid_config_path_returns_ok() {
+        let r = run_doctor(Some("/nonexistent/path/config.toml"));
+        assert!(r.is_ok());
+    }
+
+    fn sessions_dir_from_temp(dir: &tempfile::TempDir) -> String {
+        let path = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn run_session_list_empty_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::List);
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_new_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::New { cwd: None });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_list_after_new_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let _ = run_session(SessionSub::New { cwd: None });
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::List);
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_switch_nonexistent_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::Switch {
+            key: "nonexistent".to_string(),
+        });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_switch_existing_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let _ = run_session(SessionSub::New { cwd: None });
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::Switch {
+            key: crate::DEFAULT_SESSION_KEY.to_string(),
+        });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_delete_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let _ = run_session(SessionSub::New { cwd: None });
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::Delete {
+            key: crate::DEFAULT_SESSION_KEY.to_string(),
+        });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok(), "run_session(Delete) failed: {:?}", r);
+    }
+
+    #[test]
+    fn run_session_archive_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let _ = run_session(SessionSub::New { cwd: None });
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::Archive {
+            key: crate::DEFAULT_SESSION_KEY.to_string(),
+        });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_search_empty_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::Search { query: None });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_session_search_with_query_returns_ok() {
+        let _dir = tempfile::tempdir().unwrap();
+        let sessions_dir = sessions_dir_from_temp(&_dir);
+        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
+        let r = run_session(SessionSub::Search {
+            query: Some("q".to_string()),
+        });
+        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_audit_show_and_export_returns_ok() {
+        let r = run_audit(AuditSub::Show {
+            id: "id1".to_string(),
+        });
+        assert!(r.is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        let r2 = run_audit(AuditSub::Export {
+            path: dir.path().join("audit.json"),
+        });
+        assert!(r2.is_ok());
+    }
 }

@@ -699,4 +699,52 @@ mod tests {
         assert!(r.unwrap_err().to_string().contains("目录"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn write_file_auto_confirm_skips_confirmation() {
+        let dir = std::env::temp_dir().join("pi_awsm_exec_autoconfirm");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let f = dir.join("ac.txt");
+        std::fs::write(&f, "old").unwrap();
+        let path_str = f.to_string_lossy().to_string();
+        let mut c = temp_whitelist_config(&dir);
+        c.auto_confirm = true;
+        c.require_approval_for_all_write = true;
+        let exec = DefaultPrimitiveExecutor::new(
+            c,
+            Arc::new(DenyAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+        );
+        let res = exec.write_file(&path_str, "new", true, "p1").await.unwrap();
+        assert!(res.written);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn write_file_overwrite_creates_backup() {
+        let dir = std::env::temp_dir().join("pi_awsm_exec_backup");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let f = dir.join("overwrite.txt");
+        std::fs::write(&f, "original").unwrap();
+        let path_str = f.to_string_lossy().to_string();
+        let config = temp_whitelist_config(&dir);
+        let exec = DefaultPrimitiveExecutor::new(
+            config,
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+        );
+        let res = exec.write_file(&path_str, "overwritten", true, "p1").await.unwrap();
+        assert!(res.written);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "overwritten");
+        let backup = dir.join("overwrite.bak");
+        assert!(backup.exists());
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "original");
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_file(&backup);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
