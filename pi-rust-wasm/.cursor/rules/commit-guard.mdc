@@ -34,33 +34,11 @@ alwaysApply: true
 
 ### 1. 常规代码提交（修改 src/ 代码、Cargo.toml、测试文件等）
 
-必须严格遵循（与 constitution.md 一致）：
+必须严格遵循（与 Constitution 及规范一致）：**格式与 what+why 要求见 [Commit Message 规范](../openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)**。摘要如下：
 
-```
-# 类型(模块): 简短描述(what) (不超过50字)
-# feat: 新功能
-# fix: 修复bug
-# docs: 仅文档
-# style: 格式(不影响代码运行)
-# refactor: 重构(既不是新功能也不是改bug)
-# test: 增加测试
-# chore: 构建/工具/辅助变动
-
-# 详细描述（why）
-
-# 测试覆盖率
-[cov = xx.x%]
-```
-
-**示例**：
-
-```
-feat(plugin): 实现插件模块加载逻辑
-
-补充 Wasm 实例创建与 QuickJS 绑定逻辑，满足 MVP 插件加载闭环。
-
-[cov = 87.2%]
-```
+- 首行：`类型(模块): 简短描述(what)`，不超过 50 字。
+- 详细描述（why）：说明**为什么这么做**——动机、要解决的问题、改动的作用与意义；禁止记流水账。
+- 末尾：`[cov = xx.x%]`，覆盖率与 tarpaulin 实测一致。
 
 ### 2. 禁止行为
 
@@ -111,7 +89,7 @@ feat(plugin): 实现插件模块加载逻辑
 
 2. **检查 Commit Message 格式**
    - 首行为「类型(模块): 简短描述」，类型仅限 feat/fix/docs/style/refactor/test/chore，描述不超过 50 字
-   - 可含详细描述（why）空行后书写
+   - 可含详细描述（why）空行后书写：**必须写清「为什么这么做」——动机、要解决的问题、以及改动带来的作用与意义；禁止只罗列改了哪些文件（流水账）**
    - 常规提交必须包含 `[cov = xx.x%]`（等号两侧留空格），覆盖率数值与刚刚计算的 `COVERAGE` 完全一致
    - 格式 / 数值不匹配 → 立即拒绝提交，并重写正确 message
 

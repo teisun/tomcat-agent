@@ -737,7 +737,10 @@ mod tests {
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
         );
-        let res = exec.write_file(&path_str, "overwritten", true, "p1").await.unwrap();
+        let res = exec
+            .write_file(&path_str, "overwritten", true, "p1")
+            .await
+            .unwrap();
         assert!(res.written);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "overwritten");
         let backup = dir.join("overwrite.bak");

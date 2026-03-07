@@ -431,9 +431,7 @@ mod tests {
     fn run_config_export_writes_file() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.toml");
-        let r = run_config(ConfigSub::Export {
-            path: out.clone(),
-        });
+        let r = run_config(ConfigSub::Export { path: out.clone() });
         assert!(r.is_ok());
         assert!(out.exists());
     }
@@ -470,7 +468,10 @@ mod tests {
     }
 
     fn sessions_dir_from_temp(dir: &tempfile::TempDir) -> String {
-        let path = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+        let path = dir
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| dir.path().to_path_buf());
         path.to_string_lossy().into_owned()
     }
 

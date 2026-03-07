@@ -39,15 +39,7 @@ description: 按宪法执行提交前全量检查、status 更新与合规提交
 
 ## 3. Commit Message 格式（宪法附录）
 
-必须符合 [Constitution 附录](openspec/specs/Constitution.md) 约定：
-
-```
-类型(模块): 简短描述 (不超过50字)
-
-详细描述（why）。可选：说明本次涉及的文件或范围。
-
-[cov = xx.x%]   # 仅当本次包含代码变更且非豁免时必填
-```
+必须符合 [Commit Message 规范](openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)：**首行写做了什么（what），详细描述写为什么这么做、作用与意义（why），禁止记流水账**。
 
 - **类型**：`feat` | `fix` | `docs` | `style` | `refactor` | `test` | `chore`
 - **豁免（可不写覆盖率）**：以下情况**不需要**填写 `[cov = xx.x%]`：

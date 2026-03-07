@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| wasm_plugin_agent | 2026-03-07 22:30 | DONE | feature/wasm-plugin |
+| wasm_plugin_agent | 2026-03-08 10:15 | DONE | feature/wasm-plugin |
 
 **PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](pi-rust-wasm/agents/PLAN.md)。
 
@@ -24,6 +24,10 @@
 ### ✅ 注释规范整改与 wasm quickjs 路径配置（2026-03-07）
 - [✓] **配置**：`AppConfig.wasm`（`WasmConfig`）、`quickjs_path` 纳入 config；`config.toml` / `config.toml.example` / `.env.example` 增加 `[wasm]` 与 `PI_AWSM__WASM__QUICKJS_PATH` 说明；`WasmEngineConfig.quickjs_path`、engine/instance 贯通，优先 config 再回退 `WASMEDGE_QUICKJS_PATH`。
 - [✓] **注释**：按 COMMENT_SPEC 为 engine_wasmedge、instance_wasmedge、host_binding、dispatcher 补充 `# Errors`/`# Arguments`/`# Returns`；dispatcher 中 `Runtime::new().expect` 增加说明。
+
+### ✅ 提交规范与文档（2026-03-08）
+- [✓] **Commit Message**：Constitution 附录增加 what+why 示例；新增 [COMMIT_MESSAGE_SPEC.md](pi-rust-wasm/openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)，commit-guard、commit-with-status 引用该规范；详细描述须写动机、作用与意义，禁止流水账。
+- [✓] **资源**：assets/wasm/wasmedge_quickjs.wasm 纳入仓库，便于本地与 CI 使用配置路径。
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-007 WasmEdge 运行时与 QuickJS 集成：WasmEngine/WasmInstance 桩、宿主导入绑定骨架（HostRequest/HostResponse、invoke_host_func）、Standard 资源上限预留 @2025-03-05

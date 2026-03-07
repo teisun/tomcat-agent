@@ -519,7 +519,8 @@ mod tests {
         let mgr = SessionManager::new(dir.clone());
         let key = mgr.current_session_key();
         mgr.create_session(key, None).unwrap();
-        mgr.append_message(serde_json::json!({"role":"user","content":"hi"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"hi"}))
+            .unwrap();
         let opt = mgr.get_entry("unknown_id").unwrap();
         assert!(opt.is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -546,7 +547,8 @@ mod tests {
         let mgr = SessionManager::new(dir.clone());
         let key = mgr.current_session_key();
         mgr.create_session(key, None).unwrap();
-        mgr.append_message(serde_json::json!({"role":"user","content":"hi"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"hi"}))
+            .unwrap();
         let leaf = mgr.get_leaf_entry().unwrap();
         assert!(leaf.is_some());
         let _ = std::fs::remove_dir_all(&dir);
@@ -576,7 +578,8 @@ mod tests {
         let before = mgr.get_session(key).unwrap().unwrap().updated_at;
         mgr.update_session(key, |e| {
             e.cwd = Some("/updated".to_string());
-        }).unwrap();
+        })
+        .unwrap();
         let after = mgr.get_session(key).unwrap().unwrap();
         assert!(after.updated_at >= before);
         assert_eq!(after.cwd.as_deref(), Some("/updated"));

@@ -37,7 +37,8 @@
 8. **提交规约**  
     - 检查所有区域：提交前不仅要看“已暂存”，还要检查“未暂存”和“未跟踪”区域。
     - 改动不打折：凡是属于本次功能的改动（包括新加的文件），必须全部 git add 并提交，严禁漏提。
-    - 每次提交必须更新**本分支**的 `status/feature-xx.md`，并遵循约定的 commit message 格式(见附录)，禁止无意义提交。  
+    - 每次提交必须更新**本分支**的 `status/feature-xx.md`
+    - 遵循约定的 commit message 格式(见附录)，**讲清楚做了什么和为什么这么做(what+why)**，禁止记流水账或无意义提交。  
     - 具体格式见 [Status规范](./guides/STATUS_GUIDE.md)
 9. **技术设计参考**：技术设计或代码实现有疑问时，可参考 **Architecture.md** 中的「pi 生态参考原则（双仓对照）」：以 **pi-mono** 为兼容性契约与行为基准，以 **pi-agent-rust** 为 Rust 侧实现参考；二者不一致时以 pi-mono 为准。
 
@@ -61,24 +62,9 @@
 
 ---
 
-## 附录：提交与 status 格式
+## 附录：提交格式
 
 ### A. Commit Message 格式
 
-每次 Git 提交的 commit message 须遵循以下格式，禁止无意义提交：
+每次 Git 提交的 commit message 须遵循以下格式，禁止无意义提交：**首行写清楚做了什么（what），详细描述写为什么这么做、作用与意义（why）**。具体格式与更多示例见 [Commit Message 规范](./guides/COMMIT_MESSAGE_SPEC.md)。
 
-```
-# 类型(模块): 简短描述(what) (不超过50字)
-# feat: 新功能
-# fix: 修复bug
-# docs: 仅文档
-# style: 格式(不影响代码运行)
-# refactor: 重构(既不是新功能也不是改bug)
-# test: 增加测试
-# chore: 构建/工具/辅助变动
-
-# 详细描述（why）
-
-# 测试覆盖率
-[cov = xx.x%]
-```
