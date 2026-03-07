@@ -433,7 +433,8 @@ mod tests {
 
     #[test]
     fn get_leaf_entry_returns_last() {
-        let dir = temp_transcript_dir();
+        let dir = std::env::temp_dir().join("pi_awsm_transcript_get_leaf");
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s4.jsonl");
         write_header(
@@ -460,6 +461,6 @@ mod tests {
         let leaf = get_leaf_entry(&path).unwrap().unwrap();
         assert!(matches!(leaf, TranscriptEntry::Message(_)));
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
