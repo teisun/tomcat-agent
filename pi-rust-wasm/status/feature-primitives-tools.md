@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| primitives_tools | 2025-03-07 | ACTIVE | feature/primitives-tools |
+| primitives_tools | 2025-03-07 | DONE | feature/primitives-tools |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **Phase 0** 开发前：已同步 develop（merge）、检查分支、阅读编码规范 @2025-03-07
