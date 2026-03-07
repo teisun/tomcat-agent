@@ -4,6 +4,7 @@
 
 use super::engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
 use crate::infra::error::AppError;
+use std::path::PathBuf;
 use std::sync::Arc;
 use wasmedge_sdk::{
     config::{
@@ -17,10 +18,15 @@ use wasmedge_sdk::{
 #[derive(Debug)]
 pub struct WasmEngine {
     config: Config,
+    /// 已规范化的 QuickJS wasm 路径；None 时 instance 回退到环境变量 WASMEDGE_QUICKJS_PATH。
+    quickjs_path: Option<PathBuf>,
 }
 
 impl WasmEngine {
     /// 获取或初始化全局单例；开启 WASI、统计与内存上限。
+    ///
+    /// # Errors
+    /// * [`AppError::WasmEdge`] - WasmEdge Config 构建失败时返回。
     pub fn global(config: Option<WasmEngineConfig>) -> Result<Arc<Self>, AppError> {
         let cfg = config.unwrap_or_default();
         let common = CommonConfigOptions::default()
@@ -39,12 +45,27 @@ impl WasmEngine {
             .with_host_registration_config(host)
             .build()
             .map_err(|e| AppError::WasmEdge(e.to_string()))?;
-        Ok(Arc::new(Self { config }))
+        let quickjs_path = cfg
+            .quickjs_path
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|s| crate::normalize_path(s.trim()).ok())
+            .filter(|p| p.exists());
+        Ok(Arc::new(Self {
+            config,
+            quickjs_path,
+        }))
     }
 
     /// 创建独立 Wasm 实例（每插件一个实例，实例间隔离）。
+    ///
+    /// # Errors
+    /// * [`AppError::WasmEdge`] - 创建 Vm 或实例失败时返回。
     pub fn create_instance(&self, plugin_id: &str) -> Result<crate::ext::WasmInstance, AppError> {
-        super::instance_wasmedge::WasmInstance::new(self.config.clone(), plugin_id.to_string())
+        super::instance_wasmedge::WasmInstance::new(
+            self.config.clone(),
+            plugin_id.to_string(),
+            self.quickjs_path.clone(),
+        )
     }
 
     /// 预留：从配置层动态设置内存上限（MVP 可传固定值）。

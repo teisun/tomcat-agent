@@ -61,11 +61,32 @@ impl HostResponse {
 }
 
 /// 统一 Hostcall 入口：若传入 dispatcher 则按 module/method 分发，否则返回桩响应。
+///
+/// # Arguments
+/// * `instance_id` - 插件实例 ID，用于审计与会话关联。
+/// * `request_json` - 序列化后的 [`HostRequest`] JSON。
+///
+/// # Returns
+/// 成功时返回 [`HostResponse`]（含 ok/data 或 error）；桩模式下返回 `{ "stub": true }`。
+///
+/// # Errors
+/// * [`AppError::Plugin`] - `request_json` 解析失败时返回。
 pub fn invoke_host_func(instance_id: &str, request_json: &str) -> Result<HostResponse, AppError> {
     invoke_host_func_with(None, instance_id, request_json)
 }
 
 /// 使用指定 HostApiDispatcher 的 Hostcall 入口（插件加载时注入）。
+///
+/// # Arguments
+/// * `dispatcher` - 若为 `Some` 则按 module/method 分发；`None` 时返回桩响应。
+/// * `instance_id` - 插件实例 ID。
+/// * `request_json` - 序列化后的 [`HostRequest`] JSON。
+///
+/// # Returns
+/// 成功时返回 [`HostResponse`]；分发失败时 `HostResponse.ok == false` 且带 error 信息。
+///
+/// # Errors
+/// * [`AppError::Plugin`] - `request_json` 解析失败时返回；分发逻辑内部错误通过 `HostResponse::err` 返回。
 pub fn invoke_host_func_with(
     dispatcher: Option<&super::HostApiDispatcher>,
     instance_id: &str,

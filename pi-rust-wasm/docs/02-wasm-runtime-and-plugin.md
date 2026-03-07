@@ -23,7 +23,7 @@
 
 - **启用方式**：`cargo build --features wasmedge`；需先安装 WasmEdge（见 https://wasmedge.org/docs/start/install）。默认构建（无 feature）仍为桩，保证无 WasmEdge 环境可编译。
 - **WasmEngine**：全局单例，Config 开启 WASI、统计、内存上限（max_memory_pages）；`set_memory_limit` 已预留，MVP 使用固定 Standard 值。
-- **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` 通过 wasmedge_quickjs.wasm 执行 JS（需设置环境变量 `WASMEDGE_QUICKJS_PATH`）。
+- **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` 通过 wasmedge_quickjs.wasm 执行 JS。QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `PI_AWSM__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
 - **线性内存边界**：Hostcall 时宿主通过 WasmEdge 的 `get_data`/`set_data` 访问线性内存；**边界检查由 WasmEdge 运行时保证**，防止越界访问。响应缓冲区不足时仅回写长度，由 guest 重试更大缓冲区。
 

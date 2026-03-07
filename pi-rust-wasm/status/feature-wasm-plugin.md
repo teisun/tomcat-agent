@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| wasm_plugin_agent | 2026-03-07 21:00 | DONE | feature/wasm-plugin |
+| wasm_plugin_agent | 2026-03-07 22:30 | DONE | feature/wasm-plugin |
 
 **PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](pi-rust-wasm/agents/PLAN.md)。
 
@@ -21,6 +21,10 @@
 - [✓] 全量 lib 单测 144 passed、1 ignored；提交前本地执行 `cargo tarpaulin --lib --packages pi_awsm` 取覆盖率填 commit message `[cov = xx.x%]`。
 - [✓] **宪法流程走查**（2026-03-07）：开发前（分支、同步 develop）、开发流程验证（test/tarpaulin/文档）、提交前（status 更新、全量 add、门禁）、提交规约（commit 含 [cov]）。session CLI 单测使用 canonicalize 与二次 set_var 稳定 env，建议 `cargo test -- --test-threads=1` 或 CI 单线程跑以避竞态。
 
+### ✅ 注释规范整改与 wasm quickjs 路径配置（2026-03-07）
+- [✓] **配置**：`AppConfig.wasm`（`WasmConfig`）、`quickjs_path` 纳入 config；`config.toml` / `config.toml.example` / `.env.example` 增加 `[wasm]` 与 `PI_AWSM__WASM__QUICKJS_PATH` 说明；`WasmEngineConfig.quickjs_path`、engine/instance 贯通，优先 config 再回退 `WASMEDGE_QUICKJS_PATH`。
+- [✓] **注释**：按 COMMENT_SPEC 为 engine_wasmedge、instance_wasmedge、host_binding、dispatcher 补充 `# Errors`/`# Arguments`/`# Returns`；dispatcher 中 `Runtime::new().expect` 增加说明。
+
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-007 WasmEdge 运行时与 QuickJS 集成：WasmEngine/WasmInstance 桩、宿主导入绑定骨架（HostRequest/HostResponse、invoke_host_func）、Standard 资源上限预留 @2025-03-05
 - [✓] **T1-P0-007 真实实现（第 4 波次）**（2026-03-07）：feature `wasmedge` 下真实 WasmEngine 单例（Config + WASI/统计/内存上限）、WasmInstance 每插件独立 Vm、宿主导入 `env.__pi_host_call`（线性内存 get_data/set_data 与边界校验）、run_script 通过 wasmedge_quickjs.wasm（需设置 `WASMEDGE_QUICKJS_PATH`）、`set_memory_limit` 预留。默认构建（无 feature）仍为桩；启用 wasmedge 需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install）。7.6 跨平台：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build --features wasmedge` 验证。
@@ -33,6 +37,7 @@
 - **ext 层**：`HostApiDispatcher` 新增 `with_session(s: Arc<SessionManager>)`、`with_audit(a: Arc<dyn AuditRecorder>)`；新增异步入口 `dispatch_async(instance_id, request) -> impl Future<Output = Result<HostResponse, AppError>>`；`dispatch` 保持同步，内部使用 `Runtime::new().block_on(dispatch_async(...))`。
 - **infra 层**：`AuditRecorder` 新增 `record_hostcall(entry: HostcallAuditEntry)`；新增类型 `HostcallAuditEntry`（plugin_id, module, method, success, detail）。
 - **ext 层（沿用）**：`WasmEngine`、`WasmEngineConfig`、`WasmInstance`、`HostRequest`、`HostResponse`、`invoke_host_func`、`invoke_host_func_with`、`PluginManager`、`PluginManifest`、`PluginInstance`、`PluginStatus`、`PluginInfo`、`parse_manifest`。
+- **infra 层**：`AppConfig.wasm.quickjs_path` 纳入配置；优先级与现有一致：默认值 → config 文件 → 环境变量 `PI_AWSM__WASM__QUICKJS_PATH`（env 覆盖 config）；未配置时 instance 回退 `WASMEDGE_QUICKJS_PATH`。`WasmEngineConfig.quickjs_path` 由调用方从 `AppConfig.wasm` 传入。
 - **core 层**：`PrimitiveExecutor`、`ToolRegistry`、`LlmProvider`、`SessionManager` 及配套类型，供 008 分发与 009 卸载对接。
 
 ### ⚠️ BLOCKED (阻塞/风险)

@@ -30,4 +30,5 @@ pub use infra::{
     AgentEvent, AppConfig, AppError, AuditPrimitiveOp, AuditRecorder, DefaultEventBus, EventBus,
     EventContext, EventListenerId, ExtensionEvent, HostcallAuditEntry, LlmConfig, LogConfig,
     PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder,
+    WasmConfig,
 };

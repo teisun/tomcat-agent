@@ -70,16 +70,23 @@ impl HostApiDispatcher {
     }
 
     /// 同步分发入口：在独立 runtime 上 block_on(dispatch_async)，兼容同步调用方（如 host_binding）。
+    ///
+    /// # Errors
+    /// * 与 [`dispatch_async`] 相同；此外若无法创建 tokio Runtime 会 panic（进程启动期单次调用，通常不会失败）。
     pub fn dispatch(
         &self,
         instance_id: &str,
         request: HostRequest,
     ) -> Result<HostResponse, AppError> {
+        // 同步入口仅在 hostcall 时调用，进程内创建 Runtime 在常规环境下不会失败。
         let rt = tokio::runtime::Runtime::new().expect("create runtime for sync dispatch");
         rt.block_on(self.dispatch_async(instance_id, request))
     }
 
     /// 异步分发入口：按 module/method 路由，每笔 Hostcall 可选记录审计。
+    ///
+    /// # Errors
+    /// * 返回的 `HostResponse` 中 `ok == false` 表示业务错误；未注入对应 Processor 时返回明确错误信息（如 "005"）。
     pub async fn dispatch_async(
         &self,
         instance_id: &str,
@@ -981,7 +988,11 @@ mod tests {
         };
         let res = d.dispatch_async("inst-1", req).await.unwrap();
         assert!(res.ok);
-        let id = res.data.as_ref().and_then(|d| d.get("listenerId")).and_then(|v| v.as_u64());
+        let id = res
+            .data
+            .as_ref()
+            .and_then(|d| d.get("listenerId"))
+            .and_then(|v| v.as_u64());
         assert!(id.is_some());
     }
 
@@ -1044,6 +1055,10 @@ mod tests {
         };
         let res = d.dispatch_async("inst-1", req).await.unwrap();
         assert!(!res.ok);
-        assert!(res.error.as_ref().map(|e| e.contains("name")).unwrap_or(false));
+        assert!(res
+            .error
+            .as_ref()
+            .map(|e| e.contains("name"))
+            .unwrap_or(false));
     }
 }

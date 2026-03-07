@@ -224,7 +224,15 @@ impl Default for SecurityConfig {
     }
 }
 
-/// 应用顶层配置，聚合 log / llm / storage / plugin / security / primitive 子配置。
+/// Wasm 运行时配置：QuickJS wasm 路径等（feature "wasmedge" 时使用）。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WasmConfig {
+    /// wasmedge_quickjs.wasm 路径；支持 `~`；空或未设置时 run_script 回退到环境变量 `WASMEDGE_QUICKJS_PATH`。可通过 `PI_AWSM__WASM__QUICKJS_PATH` 覆盖。
+    #[serde(default)]
+    pub quickjs_path: Option<String>,
+}
+
+/// 应用顶层配置，聚合 log / llm / storage / plugin / security / primitive / wasm 子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -239,6 +247,8 @@ pub struct AppConfig {
     pub security: SecurityConfig,
     #[serde(default)]
     pub primitive: PrimitiveConfig,
+    #[serde(default)]
+    pub wasm: WasmConfig,
 }
 
 /// 从可选配置文件与环境变量加载并合并为 [`AppConfig`]。

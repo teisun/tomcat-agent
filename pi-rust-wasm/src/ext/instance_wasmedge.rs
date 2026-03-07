@@ -22,12 +22,21 @@ pub struct WasmInstance {
 }
 
 impl WasmInstance {
-    /// 由 WasmEngine::create_instance 调用。
-    pub fn new(config: Config, plugin_id: String) -> Result<Self, AppError> {
-        let quickjs_path = std::env::var("WASMEDGE_QUICKJS_PATH")
-            .ok()
-            .map(PathBuf::from)
-            .filter(|p| p.exists());
+    /// 由 WasmEngine::create_instance 调用。QuickJS 路径：优先使用 engine 传入的配置（来自 AppConfig/环境变量 PI_AWSM__WASM__QUICKJS_PATH），否则回退到 WASMEDGE_QUICKJS_PATH。
+    ///
+    /// # Errors
+    /// * 当前实现不返回错误；路径未设置时在 [`run_script`] 中返回 [`AppError::QuickJS`]。
+    pub fn new(
+        config: Config,
+        plugin_id: String,
+        quickjs_path_from_engine: Option<PathBuf>,
+    ) -> Result<Self, AppError> {
+        let quickjs_path = quickjs_path_from_engine.filter(|p| p.exists()).or_else(|| {
+            std::env::var("WASMEDGE_QUICKJS_PATH")
+                .ok()
+                .map(PathBuf::from)
+                .filter(|p| p.exists())
+        });
         Ok(Self {
             config,
             plugin_id,
@@ -36,7 +45,12 @@ impl WasmInstance {
         })
     }
 
-    /// 执行 JS 代码：写入临时文件后由 wasmedge_quickjs.wasm 执行；需设置 WASMEDGE_QUICKJS_PATH。
+    /// 执行 JS 代码：写入临时文件后由 wasmedge_quickjs.wasm 执行；需配置 quickjs 路径（config 或环境变量）。
+    ///
+    /// # Errors
+    /// * [`AppError::QuickJS`] - quickjs_path 未设置或路径不存在时返回。
+    /// * [`AppError::WasmEdge`] - 注册/执行 quickjs 模块失败时返回。
+    /// * [`AppError::Io`] - 写入临时脚本文件失败时返回。
     pub fn run_script(&mut self, code: &str) -> Result<serde_json::Value, AppError> {
         let quickjs_path = self
             .quickjs_path
@@ -56,6 +70,9 @@ impl WasmInstance {
     }
 
     /// 注册宿主导入并映射到 QuickJS 全局 agent；内部在 build_vm 时注册 env.__pi_host_call。
+    ///
+    /// # Errors
+    /// * 当前实现不返回错误。
     pub fn register_host_binding(
         &mut self,
         invoke_fn: impl Fn(&str) -> Result<String, AppError> + Send + Sync + 'static,

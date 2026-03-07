@@ -14,6 +14,9 @@ pub const DEFAULT_QUICKJS_HEAP_MB: u32 = 16;
 pub struct WasmEngineConfig {
     pub wasm_max_pages: u32,
     pub quickjs_heap_mb: u32,
+    /// wasmedge_quickjs.wasm 路径；未设置时 instance 层回退到环境变量 WASMEDGE_QUICKJS_PATH。
+    #[allow(dead_code)]
+    pub quickjs_path: Option<String>,
 }
 
 impl Default for WasmEngineConfig {
@@ -21,6 +24,7 @@ impl Default for WasmEngineConfig {
         Self {
             wasm_max_pages: DEFAULT_WASM_MAX_PAGES,
             quickjs_heap_mb: DEFAULT_QUICKJS_HEAP_MB,
+            quickjs_path: None,
         }
     }
 }
@@ -79,5 +83,6 @@ mod tests {
         let c = WasmEngineConfig::default();
         assert_eq!(c.wasm_max_pages, DEFAULT_WASM_MAX_PAGES);
         assert_eq!(c.quickjs_heap_mb, DEFAULT_QUICKJS_HEAP_MB);
+        assert!(c.quickjs_path.is_none());
     }
 }

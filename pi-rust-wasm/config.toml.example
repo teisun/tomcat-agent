@@ -67,6 +67,13 @@ audit_log_retention_days = 90
 enable_plugin_safety_scan = false
 
 # ------------------------------------------------------------------------------
+# [wasm] Wasm 运行时（feature "wasmedge" 时使用）：QuickJS wasm 路径
+# ------------------------------------------------------------------------------
+[wasm]
+# quickjs_path：wasmedge_quickjs.wasm 路径；支持 ~。空或未设置时 run_script 回退到环境变量 WASMEDGE_QUICKJS_PATH。PI_AWSM__WASM__QUICKJS_PATH 可覆盖此项。
+# quickjs_path = "~/.pi/agent/wasm/wasmedge_quickjs.wasm"
+
+# ------------------------------------------------------------------------------
 # [primitive] 4 原语配置：read/write/edit/bash 的审批与自动确认策略
 # ------------------------------------------------------------------------------
 [primitive]
