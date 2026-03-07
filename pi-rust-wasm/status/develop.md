@@ -1,5 +1,32 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop |
+
+### 本次执行说明
+- **合并范围**：feature/wasm-plugin（007、008、009）
+- **环境**：macOS / develop 分支
+
+### ✅ 执行的检查与验收项
+- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
+- [✓] **单元测试**：`cargo test` — 178 passed，1 ignored（`chat_real_request_response_print`）
+- [✓] **集成测试**：`cargo test --test '*'` — 25 passed（event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）
+- [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
+- [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests` 通过；primitives_tools_tests 含路径白名单拒绝、用户拒绝确认等边界用例
+- [ ] **Clippy**：存在 6 条 lib 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2），既有问题，未满足「无警告」门禁
+- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+
+### 🔌 INTERFACE (接口变更)
+- **feature/wasm-plugin 合入**：ext 层新增 WasmEngine、engine_wasmedge、instance_wasmedge、HostApiDispatcher 完整路由（log/fs/llm/tools/events/session）；hostcall_tests 集成测试；插件生命周期与 EventBus/ToolRegistry 清理已由现有 plugin_tests、event_tests、robustness_tests 覆盖。
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| clippy 6 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
 | @integration_test | 2026-03-07 10:26 | DONE | develop |
 
 ### 本次执行说明
