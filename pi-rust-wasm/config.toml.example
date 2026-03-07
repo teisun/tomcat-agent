@@ -1,0 +1,78 @@
+# PI-AWSM 配置示例
+# 复制为 config.toml 后按需修改，通过 load_config(Some(Path::new("config.toml"))) 加载。
+# 环境变量 PI_AWSM__*（如 PI_AWSM__LLM__PROXY）会覆盖同名字段。
+
+# ------------------------------------------------------------------------------
+# [log] 日志配置：控制运行时日志级别与是否写入文件
+# ------------------------------------------------------------------------------
+[log]
+# level：日志级别。控制输出到 stderr 的日志最低等级。
+# 取值：trace | debug | info | warn | error。用于排查问题时可设为 debug。
+level = "info"
+# file_enabled：是否同时把日志写入文件。true 时写入 file_path，便于事后排查。
+file_enabled = false
+# file_path：日志文件路径。仅当 file_enabled = true 时使用；支持 ~ 表示用户目录。
+file_path = "~/.pi/agent/logs"
+# file_roll_size_mb：单个日志文件最大体积（MB），超过后滚动到新文件。仅 file_enabled 时生效。
+file_roll_size_mb = 10
+
+# ------------------------------------------------------------------------------
+# [llm] LLM 接入配置：大模型 API 地址、密钥、限流与重试
+# ------------------------------------------------------------------------------
+[llm]
+# provider：当前使用的 LLM 提供商标识。如 "openai"，用于选择对应适配器。
+provider = "openai"
+# api_base：API 根地址。不填则默认 https://api.openai.com；自建或代理时可改写。
+# api_key_env：存 API Key 的环境变量名。不填则默认从 OPENAI_API_KEY 读取。
+default_model = "gpt-5.2"
+# max_concurrent_requests：允许同时进行的 LLM 请求数，用于限流；0 表示不限制（不推荐）。
+max_concurrent_requests = 4
+# retry_count：非流式请求失败时的重试次数，仅对可重试错误（如 429、5xx）生效。
+retry_count = 3
+# stream_timeout_sec：流式请求单次读取的超时秒数，超时则中断流式输出。
+stream_timeout_sec = 60
+# proxy：HTTP(S) 代理 URL。设置后所有 LLM 请求经该代理；不填则使用环境变量 HTTPS_PROXY/HTTP_PROXY（若有）。
+# proxy = "http://127.0.0.1:7890"
+# api_base_fallback：主 api_base 不可达（连接失败、超时等）时，自动用此 URL 重试；留空则关闭降级。
+# api_base_fallback = "https://api.chatanywhere.tech"
+
+# ------------------------------------------------------------------------------
+# [storage] 存储配置：会话与 transcript 等持久化路径
+# ------------------------------------------------------------------------------
+[storage]
+# sessions_dir：会话数据根目录。会话列表（sessions.json）与各会话 transcript 存放于此；支持 ~。
+sessions_dir = "~/.pi/agent/sessions"
+
+# ------------------------------------------------------------------------------
+# [plugin] 插件配置：插件目录与启动时自动加载列表
+# ------------------------------------------------------------------------------
+[plugin]
+# plugins_dir：插件根目录。从此目录加载 pi-mono 风格插件（含 manifest 与 Wasm/JS）。
+plugins_dir = "~/.pi/agent/plugins"
+# auto_load：启动时自动加载的插件 ID 列表。空则需手动 load；填如 ["my-plugin"] 则启动即加载。
+auto_load = []
+
+# ------------------------------------------------------------------------------
+# [security] 安全与审计：默认插件权限、审计日志、安全扫描
+# ------------------------------------------------------------------------------
+[security]
+# default_plugin_permission_level：新加载插件的默认权限。restricted=仅白名单内操作；normal/trusted 放宽。
+# 取值：restricted | normal | trusted
+default_plugin_permission_level = "restricted"
+# enable_audit_log：是否记录审计日志。true 时 4 原语与高危操作会写入审计，可追溯。
+enable_audit_log = true
+# audit_log_retention_days：审计日志保留天数，超过则可被清理；必须 > 0。
+audit_log_retention_days = 90
+# enable_plugin_safety_scan：是否在加载插件前做安全扫描（恶意/越权检测）。MVP 阶段多为占位。
+enable_plugin_safety_scan = false
+
+# ------------------------------------------------------------------------------
+# [primitive] 4 原语配置：read/write/edit/bash 的审批与自动确认策略
+# ------------------------------------------------------------------------------
+[primitive]
+# auto_confirm：是否对符合条件（如白名单内）的操作自动确认，无需用户逐条确认。
+auto_confirm = false
+# require_approval_for_all_write：是否对所有 write 操作强制要求用户确认后再执行。
+require_approval_for_all_write = true
+# require_approval_for_all_bash：是否对所有 bash 命令强制要求用户确认后再执行。
+require_approval_for_all_bash = true

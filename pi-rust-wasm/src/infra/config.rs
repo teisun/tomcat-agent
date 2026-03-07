@@ -53,7 +53,7 @@ impl Default for LogConfig {
     }
 }
 
-/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型。
+/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流与重试。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
     #[serde(default = "default_llm_provider")]
@@ -64,13 +64,37 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     #[serde(default = "default_llm_model")]
     pub default_model: String,
+    /// 最大并发 LLM 请求数，0 表示不限制（不推荐）。
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: u32,
+    /// 非流式请求失败时的重试次数（仅对可重试错误如 429/5xx）。
+    #[serde(default = "default_llm_retry_count")]
+    pub retry_count: u32,
+    /// 流式请求单次读取超时秒数。
+    #[serde(default = "default_stream_timeout_sec")]
+    pub stream_timeout_sec: u64,
+    /// 显式 HTTP 代理 URL（如 `http://127.0.0.1:7890`）。设置后所有 LLM 请求经该代理；未设置时仍使用环境变量 HTTPS_PROXY/HTTP_PROXY（若存在）。
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// 当对主 api_base 请求不通（连接失败、超时等）时，自动用该 URL 重试；示例 `https://api.chatanywhere.tech`。留空则关闭自动降级。
+    #[serde(default)]
+    pub api_base_fallback: Option<String>,
 }
 
 fn default_llm_provider() -> String {
     "openai".to_string()
 }
 fn default_llm_model() -> String {
-    "gpt-4o-mini".to_string()
+    "gpt-5.2".to_string()
+}
+fn default_max_concurrent_requests() -> u32 {
+    4
+}
+fn default_llm_retry_count() -> u32 {
+    3
+}
+fn default_stream_timeout_sec() -> u64 {
+    60
 }
 
 impl Default for LlmConfig {
@@ -80,6 +104,11 @@ impl Default for LlmConfig {
             api_base: None,
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             default_model: default_llm_model(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+            retry_count: default_llm_retry_count(),
+            stream_timeout_sec: default_stream_timeout_sec(),
+            proxy: None,
+            api_base_fallback: None,
         }
     }
 }
@@ -251,7 +280,7 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
 /// * `cfg` - 待校验的 [`AppConfig`]。
 ///
 /// # Errors
-/// * [`AppError::Config`] - `audit_log_retention_days` 为 0 或 `log.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
+/// * [`AppError::Config`] - `audit_log_retention_days` 为 0、`log.level` 非法，或 `llm.proxy` 格式非法（非 `http://`/`https://` 开头）时返回。
 pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     if cfg.security.audit_log_retention_days == 0 {
         return Err(AppError::Config(
@@ -264,6 +293,15 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             "无效的 log.level: {}",
             cfg.log.level
         )));
+    }
+    if let Some(ref proxy) = cfg.llm.proxy {
+        let u = proxy.trim();
+        if !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err(AppError::Config(format!(
+                "llm.proxy 须以 http:// 或 https:// 开头: {}",
+                proxy
+            )));
+        }
     }
     Ok(())
 }
@@ -307,6 +345,18 @@ mod tests {
     }
 
     #[test]
+    fn validate_config_rejects_invalid_proxy() {
+        let mut cfg = AppConfig::default();
+        cfg.log.level = "info".to_string();
+        cfg.llm.proxy = Some("socks5://127.0.0.1:1080".to_string());
+        assert!(validate_config(&cfg).is_err());
+        cfg.llm.proxy = Some("http://127.0.0.1:7890".to_string());
+        assert!(validate_config(&cfg).is_ok());
+        cfg.llm.proxy = Some("https://proxy.example.com".to_string());
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
     fn load_config_none_path_returns_default_or_env() {
         let r = load_config(None);
         assert!(r.is_ok());
@@ -326,6 +376,28 @@ mod tests {
         assert!(validate_config(&cfg).is_ok());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn load_config_from_example_file() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let example_path = manifest_dir.join("config.toml.example");
+        if !example_path.exists() {
+            return;
+        }
+        // config 库按扩展名识别格式，.example 不被识别；将内容复制到临时 .toml 再加载以验证示例内容合法
+        let content = std::fs::read_to_string(&example_path).unwrap();
+        let dir = std::env::temp_dir().join("pi_awsm_example_config_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let temp_toml = dir.join("config.toml");
+        std::fs::write(&temp_toml, &content).unwrap();
+        let r = load_config(Some(temp_toml.as_path()));
+        let _ = std::fs::remove_file(&temp_toml);
+        let _ = std::fs::remove_dir(&dir);
+        let cfg = r.unwrap_or_else(|e| {
+            panic!("config.toml.example 内容应可被 load_config 反序列化: {}", e)
+        });
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]

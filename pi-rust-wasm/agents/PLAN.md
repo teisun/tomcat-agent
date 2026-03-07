@@ -1,6 +1,6 @@
 ---
 本文档供 agent 读取；
-使用方式：在Cursor对话框 @xxx_agent.md @PLAN.md 触发以下指令：
+使用方式：用户输入 @xxx_agent.md @PLAN.md 时触发以下指令：
  > agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档 + [需求设计文档](../openspec/changes/001-mvp/) 下文档，实现PLAN.md 规划好的功能，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [status/feature-xx.md]
  > 请严格加载 .cursor/rules/commit-guard.mdc 提交规则，所有 Git 提交必须按此规则自动执行、自动校验、自动生成正确 commit message，不允许绕过。
 ---

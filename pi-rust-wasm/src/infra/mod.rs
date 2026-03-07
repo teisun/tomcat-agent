@@ -13,7 +13,7 @@ pub(crate) mod logging;
 pub(crate) mod platform;
 
 pub use config::{
-    load_config, validate_config, AppConfig, LogConfig, PrimitiveConfig, SecurityConfig,
+    load_config, validate_config, AppConfig, LlmConfig, LogConfig, PrimitiveConfig, SecurityConfig,
 };
 pub use error::AppError;
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};

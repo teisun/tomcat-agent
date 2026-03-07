@@ -7,6 +7,7 @@
 ## 目标
 
 **不负责具体任务 ID 的开发**。负责将各角色的功能分支**合并到 develop**、运行**全量测试与验收**、记录问题并反馈给对应开发角色，保证 develop 可随时构建通过且符合 task.md 验收标准。
+**编写集成测试代码** 根据技术设计与代码 编写集成测试代码，具体参考 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 
 
 ## 负责任务 ID 与顺序
 
@@ -16,7 +17,7 @@
 
 - **依赖**：各开发角色按 PLAN.md 分支策略提交 feature 分支，并自测通过（build、clippy、单测）。
 - **被依赖**：所有开发角色在合并后依赖 develop 的稳定状态拉取更新、解决冲突。
-- **协作**：接收开发角色合并请求；执行合并前检查与合并后全量测试；将失败项与验收不符项反馈给对应角色（issue 和 集成看板 [INTEGRATION.md](../INTEGRATION.md)）。开发角色只维护各自 `status/feature-xx.md`，不直接修改 INTEGRATION.md；INTEGRATION.md 由在 develop 上执行的「汇总 status 到 INTEGRATION」command 自动生成。
+- **协作**：接收开发角色合并请求；执行合并前检查、**编写/补充集成测试代码**（合并后）、合并后全量测试；将失败项与验收不符项反馈给对应角色（issue 和 集成看板 [INTEGRATION.md](../INTEGRATION.md)）。开发角色只维护各自 `status/feature-xx.md`，不直接修改 INTEGRATION.md；INTEGRATION.md 由在 develop 上执行的「汇总 status 到 INTEGRATION」command 自动生成。
 
 ## 参考文档
 
@@ -24,11 +25,14 @@
 - [PLAN.md](./PLAN.md) 分支与集成策略、依赖波次表
 - [task.md](../openspec/changes/001-mvp/task.md) 验收标准与完成定义
 - [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) 各任务原子子任务与边界场景
+- [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 集成测试规范：测试目标、目录结构、命名、AAA 模式、外部依赖与 CI；执行全量/验收测试时须参考
+- [INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md) 集成测试实践参考：场景化示例（插件沙箱、事件、LLM+Tool）、三不原则、审计/Teardown/DoD
 
 ## 验收标准
 
 本角色自身无“任务验收”，但需保证：
 - 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`cargo test`（全量）。
+- **已按 INTEGRATION_TEST_SPEC 编写/补充集成测试代码**，且 `cargo test --test '*'` 包含并通过上述集成测试。
 - 验收清单（见下方）执行通过或问题已记录并指派。
 
 ---
@@ -66,7 +70,23 @@
 3. `cargo test` 全部通过
 4. 若存在冲突，由 integration_test 或提交方在本地解决后再推
 
+### 编写集成测试代码（合并到 develop 之后、全量验收之前）
+
+本步骤对应「目标」中的**编写集成测试代码**职责，为流程中的必做步骤，避免只跑测试而不补充用例。
+
+1. **时机**：分支合并到 develop 之后，执行「合并后全量测试与验收清单」之前（或与验收迭代进行）。
+2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、日志等）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
+3. **动作**：针对本次合并引入的模块与场景，在项目根目录 `tests/` 下建立或更新：
+   - `tests/common/mod.rs`：共享初始化（如 `setup_logging()`）、公共 fixture；
+   - 按功能划分的 `*_tests.rs`，**必须包含** `llm_tests.rs`（以及如 `cli_tests.rs`、`session_tests.rs`、`plugin_tests.rs`、`event_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
+   - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
+4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、**LLM+Tool 路由（必选，在真实环境下验证与 LLM 的协作 chat/chat_stream）**。
+5. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。
+   - **日志门禁**：每个集成测试用例必须包含（1）`common::setup_logging()`，（2）`info_span!` 或 `#[instrument]`，（3）Arrange/Act/Assert 关键步骤的 `tracing::info!`（或 `debug!`）；不满足的需补全后再跑全量验收。
+
 ### 合并后全量测试与验收清单
+
+执行时须遵循 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)（目录与命名、黑盒/AAA、不 Mock 核心模块等）
 
 1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`cargo test`
 2. **CLI 子命令**：`pi-awsm init`、`pi-awsm doctor`、`pi-awsm config`、`pi-awsm session`、`pi-awsm plugin`、`pi-awsm audit` 可执行且帮助完整

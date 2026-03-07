@@ -75,7 +75,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 
 - **AppConfig**：顶层配置，包含 `log`、`llm`、`storage`、`plugin`、`security`、`primitive`。
 - **LogConfig**：`level`（trace/debug/info/warn/error）、`file_enabled`、`file_path`、`file_roll_size_mb`。
-- **LlmConfig**：`provider`、`api_base`、`api_key_env`、`default_model`。
+- **LlmConfig**：`provider`、`api_base`、`api_key_env`、`default_model`、`max_concurrent_requests`、`retry_count`、`stream_timeout_sec`；可选 `proxy`（显式 HTTP 代理 URL，如 `http://127.0.0.1:7890`，未设置时仍使用环境变量 `HTTPS_PROXY`/`HTTP_PROXY`）；可选 `api_base_fallback`（当对主 API 地址请求不通时自动用该 URL 重试，示例 `https://api.chatanywhere.tech`，留空关闭自动降级）。
 - **StorageConfig**：`sessions_dir`。
 - **PluginConfig**：`plugins_dir`、`auto_load`。
 - **PrimitiveConfig**：路径/命令白名单与审批、`auto_confirm`、`require_approval_for_all_write` 等。
@@ -85,6 +85,12 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 
 - `load_config(config_path: Option<&Path>) -> Result<AppConfig, AppError>`：从可选配置文件和环境变量合并。
 - `validate_config(cfg: &AppConfig) -> Result<(), AppError>`：校验日志级别、`audit_log_retention_days > 0` 等，启动时调用。
+
+**代理与降级 URL 的配置方式**：
+
+- **方式 A（配置文件）**：在 `config.toml` 的 `[llm]` 段中设置 `proxy`、`api_base_fallback`。项目根目录提供 **config.toml.example**，复制为 `config.toml` 并按需修改后，通过 `load_config(Some(Path::new("config.toml")))` 加载。
+- **方式 B（环境变量）**：通过 `PI_AWSM__LLM__PROXY`、`PI_AWSM__LLM__API_BASE_FALLBACK` 注入（与 `load_config` 的 Environment 前缀一致），会覆盖配置文件中的同名字段。
+- **代理兜底**：未设置 `llm.proxy`（且未通过环境变量指定）时，程序通过 reqwest 使用系统环境变量 `HTTPS_PROXY`/`HTTP_PROXY`（若存在），与终端 curl 行为一致。也可使用项目内 **.env.example**（复制为 `.env` 后按需填写）配置密钥与可选代理/降级项。
 
 ### 3.3 事件总线 (EventBus)
 
@@ -128,6 +134,8 @@ pub trait EventBus: Send + Sync + 'static {
 | `log.file_enabled` | 是否写文件 | false |
 | `log.file_path` | 日志文件路径 | pi_awsm.log |
 | `log.file_roll_size_mb` | 滚动大小（MB） | 10 |
+| `llm.proxy` | 显式 HTTP 代理 URL；不设时 reqwest 使用 `HTTPS_PROXY`/`HTTP_PROXY` | - |
+| `llm.api_base_fallback` | 主 API 不通时自动重试的备用 base | - |
 | `storage.sessions_dir` | 会话目录 | ~/.pi/agent/sessions |
 | `plugin.plugins_dir` | 插件目录 | ~/.pi/agent/plugins |
 | `security.enable_audit_log` | 是否启用审计日志 | true |
