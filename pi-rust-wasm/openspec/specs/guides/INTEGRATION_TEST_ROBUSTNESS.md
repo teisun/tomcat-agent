@@ -130,3 +130,17 @@ fn test_plugin_reload_no_memory_leak() {
 *   [ ] 所有的异常路径在 `Audit Log` 中都有迹可循吗？
 
 **结论：** 只有通过了这些“折磨”的集成测试，我们的 `pi-rust-wasm` 引擎才真正具备了生产级发布的资格。
+
+---
+
+## 5. 鲁棒性用例放置约定
+
+为避免测试文件膨胀、每个模块不必单独再建「某某_robustness_tests.rs」，采用**两层分工**：
+
+| 放置位置 | 适用场景 | 说明 |
+|----------|----------|------|
+| **各功能的 `*_tests.rs`**（如 `session_tests.rs`、`plugin_tests.rs`、`llm_tests.rs`、`primitives_tools_tests.rs`） | 该功能自身的异常与边界 | 主路径用例与**该功能**的鲁棒性/边界用例（错误类型、非法输入、权限拒绝、超时等）写在同一文件内。 |
+| **`robustness_tests.rs`** | 跨模块或通用的鲁棒性 | 仅放无法归到单一功能域的用例，例如：契约/Schema 违规（多模块共用）、错误分类断言、重复加载/卸载导致的状态一致性等。 |
+
+- **不要求**为每个模块单独再建「某某_robustness_tests.rs」。
+- 门禁仍以全量 `cargo test --test '*'` 通过为准；鲁棒性覆盖由「各 `*_tests.rs` 内边界用例」+「`robustness_tests.rs` 中跨模块/通用用例」共同满足。
