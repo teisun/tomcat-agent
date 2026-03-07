@@ -12,6 +12,10 @@ pub(crate) mod events;
 pub(crate) mod logging;
 pub(crate) mod platform;
 
+pub use audit::{
+    AuditPrimitiveOp, AuditRecorder, HostcallAuditEntry, PrimitiveAuditEntry, ToolAuditEntry,
+    TracingAuditRecorder,
+};
 pub use config::{
     load_config, validate_config, AppConfig, LlmConfig, LogConfig, PrimitiveConfig, SecurityConfig,
 };
@@ -19,8 +23,4 @@ pub use error::AppError;
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};
 pub use events::{AgentEvent, ExtensionEvent};
 pub use logging::init_logging;
-pub use audit::{
-    AuditPrimitiveOp, AuditRecorder, HostcallAuditEntry, PrimitiveAuditEntry, ToolAuditEntry,
-    TracingAuditRecorder,
-};
 pub use platform::{normalize_path, read_file_utf8, write_file_atomic};

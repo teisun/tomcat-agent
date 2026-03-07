@@ -12,8 +12,8 @@ pub mod tools;
 pub use confirmation::{AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider};
 pub use executor::DefaultPrimitiveExecutor;
 pub use llm::{
-    ChatMessage, ChatRequest, ChatResponse, LlmProvider, OpenAiProvider, SessionTokenUsage,
-    StreamEvent,
+    ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, OpenAiProvider,
+    SessionTokenUsage, StreamEvent,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,

@@ -61,10 +61,7 @@ impl HostResponse {
 }
 
 /// 统一 Hostcall 入口：若传入 dispatcher 则按 module/method 分发，否则返回桩响应。
-pub fn invoke_host_func(
-    instance_id: &str,
-    request_json: &str,
-) -> Result<HostResponse, AppError> {
+pub fn invoke_host_func(instance_id: &str, request_json: &str) -> Result<HostResponse, AppError> {
     invoke_host_func_with(None, instance_id, request_json)
 }
 

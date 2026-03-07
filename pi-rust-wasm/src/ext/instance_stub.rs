@@ -23,7 +23,10 @@ impl WasmInstance {
     }
 
     /// 注册宿主导入并映射到 QuickJS 全局 `agent`（桩：无操作，真实实现见 008）。
-    pub fn register_host_binding(&mut self, _invoke_fn: impl Fn(&str) -> Result<String, AppError> + Send + Sync + 'static) -> Result<(), AppError> {
+    pub fn register_host_binding(
+        &mut self,
+        _invoke_fn: impl Fn(&str) -> Result<String, AppError> + Send + Sync + 'static,
+    ) -> Result<(), AppError> {
         let _ = self.plugin_id.as_str();
         Ok(())
     }

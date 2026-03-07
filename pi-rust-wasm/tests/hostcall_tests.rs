@@ -3,7 +3,7 @@
 
 mod common;
 
-use pi_awsm::{DefaultEventBus, HostApiDispatcher, invoke_host_func_with};
+use pi_awsm::{invoke_host_func_with, DefaultEventBus, HostApiDispatcher};
 use std::sync::Arc;
 
 #[test]
@@ -28,7 +28,9 @@ fn test_hostcall_log_via_public_api() {
 #[test]
 fn test_hostcall_read_file_without_primitive_returns_err_via_public_api() {
     common::setup_logging();
-    let _span = tracing::info_span!("test_hostcall_read_file_without_primitive_returns_err_via_public_api").entered();
+    let _span =
+        tracing::info_span!("test_hostcall_read_file_without_primitive_returns_err_via_public_api")
+            .entered();
 
     let bus = Arc::new(DefaultEventBus::new());
     let dispatcher = HostApiDispatcher::new(bus);
@@ -42,7 +44,10 @@ fn test_hostcall_read_file_without_primitive_returns_err_via_public_api() {
     let resp = res.unwrap();
     assert!(!resp.ok, "未配置 primitive 时应返回错误响应");
     assert!(
-        resp.error.as_ref().map(|e| e.contains("005")).unwrap_or(false),
+        resp.error
+            .as_ref()
+            .map(|e| e.contains("005"))
+            .unwrap_or(false),
         "错误信息应提示 005/PrimitiveExecutor"
     );
     tracing::info!("Assert: HostResponse::err 透传，符合 008 错误透传规范");
@@ -51,7 +56,8 @@ fn test_hostcall_read_file_without_primitive_returns_err_via_public_api() {
 #[test]
 fn test_hostcall_unknown_api_returns_err_via_public_api() {
     common::setup_logging();
-    let _span = tracing::info_span!("test_hostcall_unknown_api_returns_err_via_public_api").entered();
+    let _span =
+        tracing::info_span!("test_hostcall_unknown_api_returns_err_via_public_api").entered();
 
     let bus = Arc::new(DefaultEventBus::new());
     let dispatcher = HostApiDispatcher::new(bus);

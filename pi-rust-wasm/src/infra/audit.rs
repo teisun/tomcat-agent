@@ -104,6 +104,29 @@ pub fn path_for_audit(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn path_for_audit_returns_path_string() {
+        let path = Path::new("/tmp/foo");
+        let s = path_for_audit(path);
+        assert_eq!(s, path.to_string_lossy().into_owned());
+        assert!(s.contains("tmp"));
+        assert!(s.contains("foo"));
+    }
+
+    #[test]
+    fn tracing_audit_recorder_default_works() {
+        let r = TracingAuditRecorder::default();
+        r.record_primitive(PrimitiveAuditEntry {
+            operation: AuditPrimitiveOp::Read,
+            path_or_cmd: "/x".to_string(),
+            plugin_id: "p1".to_string(),
+            user_approved: true,
+            success: true,
+            detail: None,
+        });
+    }
 
     #[test]
     fn tracing_audit_recorder_records_primitive() {

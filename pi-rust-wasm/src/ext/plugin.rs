@@ -133,9 +133,10 @@ impl PluginManager {
     /// 注册已构造的插件实例（内部使用；加载流程完成后调用）。
     pub fn register_plugin(&self, instance: PluginInstance) -> Result<(), AppError> {
         let id = instance.id.clone();
-        let mut map = self.plugins.write().map_err(|e| {
-            AppError::Plugin(format!("plugins lock poisoned: {}", e))
-        })?;
+        let mut map = self
+            .plugins
+            .write()
+            .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
         if map.contains_key(&id) {
             return Err(AppError::Plugin(format!("plugin already loaded: {}", id)));
         }
@@ -157,24 +158,26 @@ impl PluginManager {
 
     /// 启用插件：仅改状态。
     pub fn enable_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
-        let mut map = self.plugins.write().map_err(|e| {
-            AppError::Plugin(format!("plugins lock poisoned: {}", e))
-        })?;
-        let inst = map.get_mut(plugin_id).ok_or_else(|| {
-            AppError::Plugin(format!("plugin not found: {}", plugin_id))
-        })?;
+        let mut map = self
+            .plugins
+            .write()
+            .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+        let inst = map
+            .get_mut(plugin_id)
+            .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?;
         inst.status = PluginStatus::Enabled;
         Ok(())
     }
 
     /// 禁用插件：仅改状态。
     pub fn disable_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
-        let mut map = self.plugins.write().map_err(|e| {
-            AppError::Plugin(format!("plugins lock poisoned: {}", e))
-        })?;
-        let inst = map.get_mut(plugin_id).ok_or_else(|| {
-            AppError::Plugin(format!("plugin not found: {}", plugin_id))
-        })?;
+        let mut map = self
+            .plugins
+            .write()
+            .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+        let inst = map
+            .get_mut(plugin_id)
+            .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?;
         inst.status = PluginStatus::Disabled;
         Ok(())
     }
@@ -182,12 +185,12 @@ impl PluginManager {
     /// 卸载：移除事件监听、注销工具、销毁 Wasm 实例、从 map 移除。
     pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let instance = {
-            let mut map = self.plugins.write().map_err(|e| {
-                AppError::Plugin(format!("plugins lock poisoned: {}", e))
-            })?;
-            map.remove(plugin_id).ok_or_else(|| {
-                AppError::Plugin(format!("plugin not found: {}", plugin_id))
-            })?
+            let mut map = self
+                .plugins
+                .write()
+                .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+            map.remove(plugin_id)
+                .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?
         };
 
         self.event_bus.remove_plugin_listeners(plugin_id);
@@ -274,6 +277,91 @@ mod tests {
     }
 
     #[test]
+    fn get_plugin_returns_some_after_register_none_for_unknown() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let manager = PluginManager::new(bus);
+        let inst = PluginInstance {
+            id: "p-get".to_string(),
+            manifest: PluginManifest {
+                id: "p-get".to_string(),
+                name: "PGet".to_string(),
+                version: "0.1.0".to_string(),
+                description: String::new(),
+                author: String::new(),
+                main: "index.js".to_string(),
+                required_permissions: vec![],
+                required_api_version: "1.0".to_string(),
+                tags: vec![],
+            },
+            wasm_instance: None,
+            status: PluginStatus::Loaded,
+            registered_tools: vec![],
+            event_listener_ids: vec![],
+            config: serde_json::Value::Null,
+            created_at: 0,
+            loaded_at: 0,
+        };
+        assert!(manager.get_plugin("p-get").is_none());
+        manager.register_plugin(inst).unwrap();
+        let info = manager.get_plugin("p-get").unwrap();
+        assert_eq!(info.id, "p-get");
+        assert_eq!(info.manifest.name, "PGet");
+        assert!(manager.get_plugin("unknown").is_none());
+    }
+
+    #[test]
+    fn register_plugin_duplicate_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let manager = PluginManager::new(bus);
+        let inst = PluginInstance {
+            id: "dup".to_string(),
+            manifest: PluginManifest {
+                id: "dup".to_string(),
+                name: "Dup".to_string(),
+                version: "0.1.0".to_string(),
+                description: String::new(),
+                author: String::new(),
+                main: "index.js".to_string(),
+                required_permissions: vec![],
+                required_api_version: "1.0".to_string(),
+                tags: vec![],
+            },
+            wasm_instance: None,
+            status: PluginStatus::Loaded,
+            registered_tools: vec![],
+            event_listener_ids: vec![],
+            config: serde_json::Value::Null,
+            created_at: 0,
+            loaded_at: 0,
+        };
+        manager.register_plugin(inst).unwrap();
+        let inst2 = PluginInstance {
+            id: "dup".to_string(),
+            manifest: PluginManifest {
+                id: "dup".to_string(),
+                name: "Dup".to_string(),
+                version: "0.1.0".to_string(),
+                description: String::new(),
+                author: String::new(),
+                main: "index.js".to_string(),
+                required_permissions: vec![],
+                required_api_version: "1.0".to_string(),
+                tags: vec![],
+            },
+            wasm_instance: None,
+            status: PluginStatus::Loaded,
+            registered_tools: vec![],
+            event_listener_ids: vec![],
+            config: serde_json::Value::Null,
+            created_at: 0,
+            loaded_at: 0,
+        };
+        let r = manager.register_plugin(inst2);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("already loaded"));
+    }
+
+    #[test]
     fn enable_disable_changes_status() {
         let bus = Arc::new(DefaultEventBus::new());
         let manager = PluginManager::new(bus);
@@ -300,9 +388,15 @@ mod tests {
         };
         manager.register_plugin(inst).unwrap();
         manager.enable_plugin("p2").unwrap();
-        assert_eq!(manager.get_plugin("p2").map(|i| i.status).unwrap(), PluginStatus::Enabled);
+        assert_eq!(
+            manager.get_plugin("p2").map(|i| i.status).unwrap(),
+            PluginStatus::Enabled
+        );
         manager.disable_plugin("p2").unwrap();
-        assert_eq!(manager.get_plugin("p2").map(|i| i.status).unwrap(), PluginStatus::Disabled);
+        assert_eq!(
+            manager.get_plugin("p2").map(|i| i.status).unwrap(),
+            PluginStatus::Disabled
+        );
     }
 
     #[test]

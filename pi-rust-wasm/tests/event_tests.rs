@@ -15,10 +15,13 @@ fn test_event_bus_on_emit_sync_invokes_callback() -> Result<(), Box<dyn std::err
     let count = std::sync::Arc::new(AtomicU32::new(0));
 
     let c = std::sync::Arc::clone(&count);
-    bus.on("test.event", Box::new(move |_ctx| {
-        c.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }));
+    bus.on(
+        "test.event",
+        Box::new(move |_ctx| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
     tracing::info!("Arrange: 创建 DefaultEventBus，注册 test.event 回调");
     let ctx = EventContext::new("test.event", serde_json::json!({}));
     tracing::info!("Act: 调用 emit_sync(test.event, ctx)");
@@ -38,16 +41,25 @@ fn test_event_bus_off_removes_listener() -> Result<(), Box<dyn std::error::Error
     let count = std::sync::Arc::new(AtomicU32::new(0));
 
     let c = std::sync::Arc::clone(&count);
-    let id = bus.on("off.test", Box::new(move |_ctx| {
-        c.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }));
+    let id = bus.on(
+        "off.test",
+        Box::new(move |_ctx| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
     tracing::info!("Arrange: 创建 DefaultEventBus，注册 off.test 回调");
-    bus.emit_sync("off.test", EventContext::new("off.test", serde_json::json!({})))?;
+    bus.emit_sync(
+        "off.test",
+        EventContext::new("off.test", serde_json::json!({})),
+    )?;
     assert_eq!(count.load(Ordering::SeqCst), 1);
     tracing::info!("Act: 调用 off(id)，再次 emit_sync");
     bus.off(id);
-    bus.emit_sync("off.test", EventContext::new("off.test", serde_json::json!({})))?;
+    bus.emit_sync(
+        "off.test",
+        EventContext::new("off.test", serde_json::json!({})),
+    )?;
     tracing::info!("Assert: 验证 off 后不再触发");
     assert_eq!(count.load(Ordering::SeqCst), 1, "off 后不应再触发");
 
@@ -55,9 +67,12 @@ fn test_event_bus_off_removes_listener() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
-fn test_event_bus_remove_plugin_listeners_cleans_up_after_unload() -> Result<(), Box<dyn std::error::Error>> {
+fn test_event_bus_remove_plugin_listeners_cleans_up_after_unload(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_event_bus_remove_plugin_listeners_cleans_up_after_unload").entered();
+    let _span =
+        tracing::info_span!("test_event_bus_remove_plugin_listeners_cleans_up_after_unload")
+            .entered();
 
     let bus = DefaultEventBus::new();
     let count = std::sync::Arc::new(AtomicU32::new(0));
@@ -74,11 +89,17 @@ fn test_event_bus_remove_plugin_listeners_cleans_up_after_unload() -> Result<(),
         }),
     );
     tracing::info!("Arrange: 创建 DefaultEventBus，为 plugin-a 注册 session.start 监听");
-    bus.emit_sync("session.start", EventContext::new("session.start", serde_json::json!({})))?;
+    bus.emit_sync(
+        "session.start",
+        EventContext::new("session.start", serde_json::json!({})),
+    )?;
     assert_eq!(count.load(Ordering::SeqCst), 1, "移除前应触发一次");
     tracing::info!("Act: 调用 remove_plugin_listeners(plugin-a)，再次 emit_sync");
     bus.remove_plugin_listeners("plugin-a");
-    bus.emit_sync("session.start", EventContext::new("session.start", serde_json::json!({})))?;
+    bus.emit_sync(
+        "session.start",
+        EventContext::new("session.start", serde_json::json!({})),
+    )?;
     tracing::info!("Assert: 验证移除后该插件回调不再触发");
     assert_eq!(
         count.load(Ordering::SeqCst),

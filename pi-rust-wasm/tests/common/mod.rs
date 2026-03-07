@@ -2,7 +2,7 @@
 //! 使用 Once 保证并行测试下只初始化一次，避免重复 init 导致 panic。
 
 use std::sync::Once;
-use tracing_subscriber::{fmt, EnvFilter, prelude::*};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INIT: Once = Once::new();
 

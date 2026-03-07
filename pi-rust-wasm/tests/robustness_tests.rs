@@ -13,7 +13,8 @@ use std::sync::Arc;
 #[test]
 fn test_parse_manifest_malformed_json_returns_err_no_panic() {
     common::setup_logging();
-    let _span = tracing::info_span!("test_parse_manifest_malformed_json_returns_err_no_panic").entered();
+    let _span =
+        tracing::info_span!("test_parse_manifest_malformed_json_returns_err_no_panic").entered();
 
     tracing::info!("Arrange: 准备非法 JSON 字符串");
     let invalid = r#"{"id": "x", "name": NOPE}"#; // 无效 JSON
@@ -59,7 +60,8 @@ fn test_parse_manifest_missing_required_api_version_returns_plugin_error() {
 #[test]
 fn test_parse_manifest_missing_main_returns_plugin_error() {
     common::setup_logging();
-    let _span = tracing::info_span!("test_parse_manifest_missing_main_returns_plugin_error").entered();
+    let _span =
+        tracing::info_span!("test_parse_manifest_missing_main_returns_plugin_error").entered();
 
     let json = r#"{
         "id": "p",
@@ -78,16 +80,17 @@ fn test_parse_manifest_missing_main_returns_plugin_error() {
 
 /// 资源/状态边界：多次注册与卸载同一插件，无 panic，最终状态一致且 list 为空。
 #[test]
-fn test_plugin_manager_repeated_register_unload_state_consistent() -> Result<(), Box<dyn std::error::Error>> {
+fn test_plugin_manager_repeated_register_unload_state_consistent(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!(
-        "test_plugin_manager_repeated_register_unload_state_consistent"
-    )
-    .entered();
+    let _span =
+        tracing::info_span!("test_plugin_manager_repeated_register_unload_state_consistent")
+            .entered();
 
     let bus = Arc::new(DefaultEventBus::new());
     let manager = PluginManager::new(bus);
-    let manifest = parse_manifest(r#"{
+    let manifest = parse_manifest(
+        r#"{
         "id": "stress",
         "name": "Stress",
         "version": "0.1.0",
@@ -97,7 +100,8 @@ fn test_plugin_manager_repeated_register_unload_state_consistent() -> Result<(),
         "requiredPermissions": [],
         "requiredApiVersion": "1.0",
         "tags": []
-    }"#)?;
+    }"#,
+    )?;
 
     tracing::info!("Arrange: PluginManager + 合法 manifest");
     let now = std::time::SystemTime::now()
@@ -133,7 +137,8 @@ fn test_plugin_manager_repeated_register_unload_state_consistent() -> Result<(),
 #[test]
 fn test_unload_nonexistent_plugin_returns_plugin_error() {
     common::setup_logging();
-    let _span = tracing::info_span!("test_unload_nonexistent_plugin_returns_plugin_error").entered();
+    let _span =
+        tracing::info_span!("test_unload_nonexistent_plugin_returns_plugin_error").entered();
 
     let bus = Arc::new(DefaultEventBus::new());
     let manager = PluginManager::new(bus);
@@ -141,7 +146,8 @@ fn test_unload_nonexistent_plugin_returns_plugin_error() {
     assert!(matches!(res, Err(AppError::Plugin(_))));
     let err = res.unwrap_err();
     assert!(
-        err.to_string().to_lowercase().contains("not found") || err.to_string().contains("nonexistent"),
+        err.to_string().to_lowercase().contains("not found")
+            || err.to_string().contains("nonexistent"),
         "错误信息应包含 not found 或 plugin_id，got: {}",
         err
     );

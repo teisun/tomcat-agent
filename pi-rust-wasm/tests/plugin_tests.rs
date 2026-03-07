@@ -56,7 +56,10 @@ fn test_parse_manifest_missing_id_returns_err() {
     tracing::info!("Act: 调用 parse_manifest(json)");
     tracing::info!("Assert: 验证返回 Err 且错误类型为 Plugin（鲁棒性：错误分类断言）");
     assert!(res.is_err(), "manifest.id 为空时应返回 Err");
-    assert!(matches!(res, Err(AppError::Plugin(_))), "id 为空应返回 AppError::Plugin");
+    assert!(
+        matches!(res, Err(AppError::Plugin(_))),
+        "id 为空应返回 AppError::Plugin"
+    );
 }
 
 #[test]
@@ -67,7 +70,8 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
     let bus = Arc::new(DefaultEventBus::new());
     let mgr = PluginManager::new(bus);
 
-    let manifest = parse_manifest(r#"{
+    let manifest = parse_manifest(
+        r#"{
         "id": "p1",
         "name": "P1",
         "version": "0.1.0",
@@ -77,7 +81,8 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
         "requiredPermissions": [],
         "requiredApiVersion": "1.0",
         "tags": []
-    }"#)?;
+    }"#,
+    )?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?

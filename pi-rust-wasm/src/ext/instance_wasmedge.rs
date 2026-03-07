@@ -6,10 +6,8 @@ use crate::infra::error::AppError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use wasmedge_sdk::{
-    config::Config,
-    error::HostFuncError,
-    vm::VmBuilder,
-    CallingFrame, ImportObjectBuilder, NeverType, Vm, WasmValue,
+    config::Config, error::HostFuncError, vm::VmBuilder, CallingFrame, ImportObjectBuilder,
+    NeverType, Vm, WasmValue,
 };
 
 /// 单插件独立 Wasm 实例（真实实现：每实例一个 Vm，懒加载 quickjs wasm + 宿主导入）。

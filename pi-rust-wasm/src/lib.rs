@@ -10,19 +10,20 @@ pub mod infra;
 
 pub use api::run_cli;
 pub use core::{
-    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, DenyAllConfirmation, DirEntry, EditFileResult, EditOperation, EditOperationType,
-    LlmProvider, OpenAiProvider, PrimitiveExecutor, PrimitiveOperation, SessionTokenUsage, StreamEvent,
-    Tool, ToolExecutor, ToolRegistry, UserConfirmationProvider, WriteFileResult,
-};
-pub use core::{
     load_store, save_store, SessionEntry, SessionHeader, SessionManager, SessionStore,
     TranscriptEntry, DEFAULT_SESSION_KEY,
 };
+pub use core::{
+    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse,
+    DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation, DirEntry, EditFileResult,
+    EditOperation, EditOperationType, LlmProvider, OpenAiProvider, PrimitiveExecutor,
+    PrimitiveOperation, SessionTokenUsage, StreamEvent, Tool, ToolExecutor, ToolRegistry,
+    UserConfirmationProvider, WriteFileResult,
+};
 pub use ext::{
-    HostApiDispatcher, HostRequest, HostResponse, PluginInfo, PluginInstance, PluginManager,
-    PluginManifest, PluginStatus, WasmEngine, WasmEngineConfig, WasmInstance, invoke_host_func,
-    invoke_host_func_with, parse_manifest,
+    invoke_host_func, invoke_host_func_with, parse_manifest, HostApiDispatcher, HostRequest,
+    HostResponse, PluginInfo, PluginInstance, PluginManager, PluginManifest, PluginStatus,
+    WasmEngine, WasmEngineConfig, WasmInstance,
 };
 pub use infra::{
     init_logging, load_config, normalize_path, read_file_utf8, validate_config, write_file_atomic,

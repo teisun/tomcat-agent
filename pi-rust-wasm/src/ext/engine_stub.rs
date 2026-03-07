@@ -35,7 +35,8 @@ impl WasmEngine {
     /// 获取或初始化全局单例（桩实现返回错误；真实实现需接入 WasmEdge SDK）。
     pub fn global(_config: Option<WasmEngineConfig>) -> Result<Arc<Self>, AppError> {
         Err(AppError::WasmEdge(
-            "WasmEdge runtime stub. Real implementation requires WasmEdge SDK integration.".to_string(),
+            "WasmEdge runtime stub. Real implementation requires WasmEdge SDK integration."
+                .to_string(),
         ))
     }
 

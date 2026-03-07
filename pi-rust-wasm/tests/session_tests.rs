@@ -8,9 +8,12 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
-fn test_session_manager_create_and_list_sessions_returns_entries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_session_manager_create_and_list_sessions_returns_entries(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_session_manager_create_and_list_sessions_returns_entries").entered();
+    let _span =
+        tracing::info_span!("test_session_manager_create_and_list_sessions_returns_entries")
+            .entered();
 
     let tmp = TempDir::new()?;
     let sessions_dir: PathBuf = tmp.path().to_path_buf();
@@ -22,16 +25,21 @@ fn test_session_manager_create_and_list_sessions_returns_entries() -> Result<(),
     let list = mgr.list_sessions()?;
     tracing::info!("Assert: 验证 list 非空且包含当前 key 与对应 entry");
     assert!(!list.is_empty(), "创建会话后 list_sessions 应非空");
-    let (k, e) = list.iter().find(|(k, _)| k.as_str() == key).expect("应找到当前 key");
+    let (k, e) = list
+        .iter()
+        .find(|(k, _)| k.as_str() == key)
+        .expect("应找到当前 key");
     assert_eq!(k, key);
     assert_eq!(e.session_id, entry.session_id);
     Ok(())
 }
 
 #[test]
-fn test_session_manager_get_session_after_create_returns_some() -> Result<(), Box<dyn std::error::Error>> {
+fn test_session_manager_get_session_after_create_returns_some(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_session_manager_get_session_after_create_returns_some").entered();
+    let _span =
+        tracing::info_span!("test_session_manager_get_session_after_create_returns_some").entered();
 
     let tmp = TempDir::new()?;
     let mgr = SessionManager::new(tmp.path().to_path_buf());
@@ -47,9 +55,11 @@ fn test_session_manager_get_session_after_create_returns_some() -> Result<(), Bo
 }
 
 #[test]
-fn test_session_manager_delete_session_removes_from_list() -> Result<(), Box<dyn std::error::Error>> {
+fn test_session_manager_delete_session_removes_from_list() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
-    let _span = tracing::info_span!("test_session_manager_delete_session_removes_from_list").entered();
+    let _span =
+        tracing::info_span!("test_session_manager_delete_session_removes_from_list").entered();
 
     let tmp = TempDir::new()?;
     let mgr = SessionManager::new(tmp.path().to_path_buf());
@@ -60,6 +70,9 @@ fn test_session_manager_delete_session_removes_from_list() -> Result<(), Box<dyn
     tracing::info!("Act: 调用 delete_session(key)");
     mgr.delete_session(key)?;
     tracing::info!("Assert: 验证 list_sessions 为空");
-    assert!(mgr.list_sessions()?.is_empty(), "删除后 list_sessions 应为空");
+    assert!(
+        mgr.list_sessions()?.is_empty(),
+        "删除后 list_sessions 应为空"
+    );
     Ok(())
 }

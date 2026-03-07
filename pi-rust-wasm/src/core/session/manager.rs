@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chrono::Utc;
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
+use chrono::Utc;
 
 use super::store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 use super::transcript::{
@@ -61,9 +61,10 @@ impl SessionManager {
 
     /// 原子写 store；内部用 Mutex 序列化。
     fn save_store(&self, store: &SessionStore) -> Result<(), AppError> {
-        let _guard = self.write_mutex.lock().map_err(|e| {
-            AppError::Config(format!("session store 写入锁异常: {}", e))
-        })?;
+        let _guard = self
+            .write_mutex
+            .lock()
+            .map_err(|e| AppError::Config(format!("session store 写入锁异常: {}", e)))?;
         save_store(&self.store_path, store)
     }
 
@@ -262,7 +263,10 @@ impl SessionManager {
     }
 
     /// 根据会话历史组装 LLM 所需消息列表（最近 N 条，仅 Message 条目）。
-    pub fn build_context_messages(&self, recent_n: usize) -> Result<Vec<serde_json::Value>, AppError> {
+    pub fn build_context_messages(
+        &self,
+        recent_n: usize,
+    ) -> Result<Vec<serde_json::Value>, AppError> {
         let entries = self.get_entries(recent_n)?;
         let mut messages = Vec::new();
         for e in entries {
@@ -358,7 +362,10 @@ mod tests {
 
     fn temp_sessions_dir() -> PathBuf {
         let c = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
         std::env::temp_dir().join(format!("pi_awsm_mgr_{}_{}_{}", std::process::id(), ms, c))
     }
 
@@ -401,7 +408,8 @@ mod tests {
         assert!(entries.is_empty());
         let ctx = mgr.build_context_messages(10).unwrap();
         assert!(ctx.is_empty());
-        mgr.append_message(serde_json::json!({"role":"user","content":"hi"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"hi"}))
+            .unwrap();
         let entries2 = mgr.get_entries(10).unwrap();
         assert_eq!(entries2.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -429,6 +437,68 @@ mod tests {
         let mgr = SessionManager::new(dir.clone());
         let opt = mgr.get_session("unknown:key").unwrap();
         assert!(opt.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_sessions_dir_with_absolute_path() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path_str = dir.to_string_lossy();
+        let mgr = SessionManager::from_sessions_dir(path_str.as_ref()).unwrap();
+        assert!(mgr.store_path().ends_with("sessions.json"));
+        assert!(mgr.load_store().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcript_path_format() {
+        let dir = temp_sessions_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let p = mgr.transcript_path("sid_123");
+        assert!(p.ends_with("sid_123.jsonl"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_session_returns_some_after_create() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        let created = mgr.create_session(key, None).unwrap();
+        let opt = mgr.get_session(key).unwrap();
+        assert!(opt.is_some());
+        let entry = opt.unwrap();
+        assert_eq!(entry.session_id, created.session_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_session_header_after_create() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        let header = mgr.read_session_header().unwrap();
+        assert!(header.is_some());
+        assert!(!header.unwrap().id.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_session_header_none_when_no_session() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let header = mgr.read_session_header().unwrap();
+        assert!(header.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

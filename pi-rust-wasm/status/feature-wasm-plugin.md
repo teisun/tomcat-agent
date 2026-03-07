@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
-| wasm_plugin_agent | 2026-03-07 | DONE | feature/wasm-plugin |
+| wasm_plugin_agent | 2026-03-07 18:30 | DONE | feature/wasm-plugin |
 
 **PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](pi-rust-wasm/agents/PLAN.md)。
 
@@ -10,6 +10,16 @@
 - [✓] 新增 `tests/hostcall_tests.rs`：Hostcall 全链路集成测试（仅公共 API）。
 - [✓] `instance_wasmedge.rs` 中 `host_call_impl` 注释：响应缓冲区不足与线性内存边界由 WasmEdge 保证。
 - [✓] 全量单测通过（`cargo test --all`）；提交前需跑 `cargo tarpaulin --packages pi_awsm` 取覆盖率并填 commit message。
+
+### ✅ 完整研发流程与全模块单测补全（2026-03-07）
+- [✓] **api/cli.rs**：解析（Cli::try_parse_from init/doctor/config/session/plugin/audit/chat）、run_init（temp 目录生成配置）、run_doctor（None/Some 合法配置）、run_plugin/run_audit/run_chat 占位；run_* 改为 pub(crate) 便于同 crate 单测。
+- [✓] **ext/dispatcher.rs**：Mock PrimitiveExecutor/LlmProvider/ToolRegistry；do_read_file/do_write_file/do_edit_file/do_execute_bash、do_chat/do_chat_stream、do_register_tool/do_list_tools/do_call_tool、do_get_current_session/do_get_messages/do_send_message 成功路径（SessionManager 用 tempdir + create_session）。
+- [✓] **core/session**：manager 补 from_sessions_dir、transcript_path、get_session Some  after create、read_session_header；transcript 补 read_header 失败（缺失/空文件）、read_entries_tail 仅 header、get_branch/get_children 边界；write_header_and_read_header 改用 tempfile::tempdir 避免并行冲突。
+- [✓] **core/llm/openai.rs**：is_retriable 对非 Llm 错误返回 false。
+- [✓] **core/executor.rs**：list_dir 路径在黑名单返回 Err、read_file 对目录返回 Err。
+- [✓] **ext/plugin.rs**：get_plugin 注册后 Some/未知 None、register_plugin 重复返回 Err。
+- [✓] 全量 lib 单测 144 passed、1 ignored；提交前本地执行 `cargo tarpaulin --lib --packages pi_awsm` 取覆盖率填 commit message `[cov = xx.x%]`。
+- [✓] **宪法流程走查**（2026-03-07）：开发前（分支、同步 develop）、开发流程验证（test/tarpaulin/文档）、提交前（status 更新、全量 add、门禁）、提交规约（commit 含 [cov]）。
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-007 WasmEdge 运行时与 QuickJS 集成：WasmEngine/WasmInstance 桩、宿主导入绑定骨架（HostRequest/HostResponse、invoke_host_func）、Standard 资源上限预留 @2025-03-05

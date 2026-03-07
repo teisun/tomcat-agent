@@ -52,10 +52,7 @@ impl DefaultPrimitiveExecutor {
             .iter()
             .any(|w| normalized_starts_with(&s, w));
         if !allowed {
-            return Err(AppError::Permission(format!(
-                "路径不在白名单内: {}",
-                path
-            )));
+            return Err(AppError::Permission(format!("路径不在白名单内: {}", path)));
         }
         for b in &self.config.path_blacklist {
             if normalized_starts_with(&s, b) {
@@ -89,7 +86,6 @@ impl DefaultPrimitiveExecutor {
             }
         }
     }
-
 }
 
 fn normalized_starts_with(path: &str, prefix: &str) -> bool {
@@ -104,7 +100,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         let path_buf = self.check_path(path)?;
         let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
         if meta.is_dir() {
-            return Err(AppError::Primitive("路径是目录，无法读取为文件".to_string()));
+            return Err(AppError::Primitive(
+                "路径是目录，无法读取为文件".to_string(),
+            ));
         }
         if meta.len() > MAX_READ_BYTES {
             return Err(AppError::Primitive(format!(
@@ -225,7 +223,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                         )));
                     }
                     let idx = start - 1;
-                    let new_lines: Vec<String> = edit.new_content.lines().map(String::from).collect();
+                    let new_lines: Vec<String> =
+                        edit.new_content.lines().map(String::from).collect();
                     for (i, nl) in new_lines.iter().enumerate() {
                         if idx + i < lines.len() {
                             lines[idx + i] = nl.clone();
@@ -330,7 +329,11 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             .transpose()?
             .unwrap_or_else(|| PathBuf::from("."));
         let first_token = command.split_whitespace().next().unwrap_or("");
-        let in_whitelist = self.config.bash_whitelist.iter().any(|c| c == first_token || command.starts_with(c));
+        let in_whitelist = self
+            .config
+            .bash_whitelist
+            .iter()
+            .any(|c| c == first_token || command.starts_with(c));
         let in_forbidden = self
             .config
             .bash_forbidden
@@ -353,8 +356,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             });
             return Err(AppError::Permission("命令在禁止列表中".to_string()));
         }
-        let need_confirm = (!in_whitelist && !self.config.bash_whitelist.is_empty())
-            || needs_approval;
+        let need_confirm =
+            (!in_whitelist && !self.config.bash_whitelist.is_empty()) || needs_approval;
         if need_confirm && self.needs_confirmation(PrimitiveOperation::Bash) {
             let ok = self
                 .require_user_confirmation(
@@ -400,7 +403,12 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             plugin_id: plugin_id.to_string(),
             user_approved: true,
             success: exit_code == 0,
-            detail: Some(format!("exit_code={} stdout_len={} stderr_len={}", exit_code, stdout.len(), stderr.len())),
+            detail: Some(format!(
+                "exit_code={} stdout_len={} stderr_len={}",
+                exit_code,
+                stdout.len(),
+                stderr.len()
+            )),
         });
         Ok(BashResult {
             stdout,
@@ -546,11 +554,7 @@ mod tests {
         c.require_approval_for_all_write = true;
         let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
-        let exec = DefaultPrimitiveExecutor::new(
-            c,
-            Arc::new(DenyAllConfirmation),
-            audit,
-        );
+        let exec = DefaultPrimitiveExecutor::new(c, Arc::new(DenyAllConfirmation), audit);
         let r = exec.write_file(&path_str, "new", true, "p1").await;
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err(), AppError::Permission(_)));
@@ -657,5 +661,42 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn list_dir_path_in_blacklist_returns_err() {
+        let dir = std::env::temp_dir().join("pi_awsm_exec_blacklist");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let path_str = dir.to_string_lossy().to_string();
+        let mut c = temp_whitelist_config(&dir);
+        c.path_blacklist = vec![path_str.clone()];
+        let exec = DefaultPrimitiveExecutor::new(
+            c,
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+        );
+        let r = exec.list_dir(&path_str, "p1").await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("黑名单"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_on_directory_returns_err() {
+        let dir = std::env::temp_dir().join("pi_awsm_exec_read_dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let path_str = dir.to_string_lossy().to_string();
+        let config = temp_whitelist_config(&dir);
+        let exec = DefaultPrimitiveExecutor::new(
+            config,
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+        );
+        let r = exec.read_file(&path_str, "p1").await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("目录"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

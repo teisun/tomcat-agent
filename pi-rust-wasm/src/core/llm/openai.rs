@@ -570,6 +570,13 @@ mod tests {
         println!("[TEST] 结果: 通过");
     }
 
+    #[test]
+    fn is_retriable_returns_false_for_non_llm_error() {
+        assert!(!OpenAiProvider::is_retriable(&AppError::Config(
+            "config error".to_string()
+        )));
+    }
+
     #[tokio::test]
     async fn sse_stream_parses_and_yields_events() {
         println!("[TEST] sse_stream_parses_and_yields_events — 开始");

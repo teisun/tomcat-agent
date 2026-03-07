@@ -1,7 +1,7 @@
 //! # 工具注册中心 Trait 与类型（与 design CODE_BLOCK_P1_007 一致）
 
-use crate::infra::{AuditRecorder, ToolAuditEntry};
 use crate::infra::error::AppError;
+use crate::infra::{AuditRecorder, ToolAuditEntry};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,7 +53,10 @@ fn tool_key(plugin_id: &str, name: &str) -> String {
 }
 
 /// 返回值形态与 AgentToolResult 一致：content（Vec<ContentBlock> 等价）、details。
-fn wrap_tool_result(content: serde_json::Value, details: Option<serde_json::Value>) -> serde_json::Value {
+fn wrap_tool_result(
+    content: serde_json::Value,
+    details: Option<serde_json::Value>,
+) -> serde_json::Value {
     serde_json::json!({
         "content": content,
         "details": details
@@ -179,7 +182,9 @@ mod tests {
             params: serde_json::Value,
             _caller_plugin_id: &str,
         ) -> Result<serde_json::Value, AppError> {
-            Ok(serde_json::json!({ "output": params.get("x").cloned().unwrap_or(serde_json::Value::Null) }))
+            Ok(
+                serde_json::json!({ "output": params.get("x").cloned().unwrap_or(serde_json::Value::Null) }),
+            )
         }
     }
 
@@ -197,10 +202,8 @@ mod tests {
 
     #[tokio::test]
     async fn register_and_get_tool() {
-        let reg = DefaultToolRegistry::new(
-            Arc::new(MockToolExecutor),
-            Arc::new(TracingAuditRecorder),
-        );
+        let reg =
+            DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
         let t = make_tool("foo", "p1");
         reg.register_tool(t, "p1").await.unwrap();
         let got = reg.get_tool("foo").await.unwrap();
@@ -210,21 +213,19 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_tool() {
-        let reg = DefaultToolRegistry::new(
-            Arc::new(MockToolExecutor),
-            Arc::new(TracingAuditRecorder),
-        );
-        reg.register_tool(make_tool("bar", "p1"), "p1").await.unwrap();
+        let reg =
+            DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
+        reg.register_tool(make_tool("bar", "p1"), "p1")
+            .await
+            .unwrap();
         reg.unregister_tool("bar", "p1").await.unwrap();
         assert!(reg.get_tool("bar").await.is_err());
     }
 
     #[tokio::test]
     async fn list_tools_filters_by_plugin_id() {
-        let reg = DefaultToolRegistry::new(
-            Arc::new(MockToolExecutor),
-            Arc::new(TracingAuditRecorder),
-        );
+        let reg =
+            DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
         reg.register_tool(make_tool("a", "p1"), "p1").await.unwrap();
         reg.register_tool(make_tool("b", "p2"), "p2").await.unwrap();
         let all = reg.list_tools(None).await.unwrap();
@@ -236,10 +237,8 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_plugin_tools_removes_all_plugin_tools() {
-        let reg = DefaultToolRegistry::new(
-            Arc::new(MockToolExecutor),
-            Arc::new(TracingAuditRecorder),
-        );
+        let reg =
+            DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
         reg.register_tool(make_tool("x", "p1"), "p1").await.unwrap();
         reg.register_tool(make_tool("y", "p1"), "p1").await.unwrap();
         reg.register_tool(make_tool("z", "p2"), "p2").await.unwrap();
@@ -252,11 +251,11 @@ mod tests {
 
     #[tokio::test]
     async fn call_tool_returns_content_and_details() {
-        let reg = DefaultToolRegistry::new(
-            Arc::new(MockToolExecutor),
-            Arc::new(TracingAuditRecorder),
-        );
-        reg.register_tool(make_tool("run", "p1"), "p1").await.unwrap();
+        let reg =
+            DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
+        reg.register_tool(make_tool("run", "p1"), "p1")
+            .await
+            .unwrap();
         let out = reg
             .call_tool("run", serde_json::json!({ "x": 42 }), "p1")
             .await

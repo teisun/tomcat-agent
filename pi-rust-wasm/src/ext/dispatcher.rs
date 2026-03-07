@@ -4,13 +4,13 @@
 //! 与 Architecture 03-host-api-layer 3.3 一致；支持 4 原语、LLM、工具、事件、会话 API。
 
 use crate::core::{
-    LlmProvider, PrimitiveExecutor, SessionManager, ToolRegistry,
-    ChatMessage, ChatRequest, EditOperation, StreamEvent, Tool,
+    ChatMessage, ChatRequest, EditOperation, LlmProvider, PrimitiveExecutor, SessionManager,
+    StreamEvent, Tool, ToolRegistry,
 };
-use futures_util::StreamExt;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext, EventListenerId};
 use crate::infra::{AuditRecorder, HostcallAuditEntry};
+use futures_util::StreamExt;
 use std::sync::Arc;
 
 use super::host_binding::{HostRequest, HostResponse};
@@ -90,15 +90,19 @@ impl HostApiDispatcher {
         let params = request.params.clone();
 
         let result = match (request.module.as_str(), request.method.as_str()) {
-            ("log" | "agent", "log") | ("agent", "info") | ("agent", "warn") | ("agent", "error") | ("agent", "debug") => {
-                self.do_log(&method, &params)
-            }
+            ("log" | "agent", "log")
+            | ("agent", "info")
+            | ("agent", "warn")
+            | ("agent", "error")
+            | ("agent", "debug") => self.do_log(&method, &params),
             ("fs" | "primitive", "readFile") => self.do_read_file(instance_id, &params).await,
             ("fs" | "primitive", "writeFile") => self.do_write_file(instance_id, &params).await,
             ("fs" | "primitive", "editFile") => self.do_edit_file(instance_id, &params).await,
             ("fs" | "primitive", "executeBash") => self.do_execute_bash(instance_id, &params).await,
             ("llm", "createChatCompletion") => self.do_chat(instance_id, &params).await,
-            ("llm", "createChatCompletionStream") => self.do_chat_stream(instance_id, &params).await,
+            ("llm", "createChatCompletionStream") => {
+                self.do_chat_stream(instance_id, &params).await
+            }
             ("tools", "registerTool") => self.do_register_tool(instance_id, &params).await,
             ("tools", "unregisterTool") => self.do_unregister_tool(instance_id, &params).await,
             ("tools", "getToolList") => self.do_list_tools(instance_id, &params).await,
@@ -106,7 +110,9 @@ impl HostApiDispatcher {
             ("events", "on") | ("events", "once") | ("events", "off") | ("events", "emit") => {
                 self.do_events(instance_id, &method, &params).await
             }
-            ("session" | "agent", "getCurrentSession") => self.do_get_current_session(&params).await,
+            ("session" | "agent", "getCurrentSession") => {
+                self.do_get_current_session(&params).await
+            }
             ("session", "getMessages") => self.do_get_messages(&params).await,
             ("session", "sendMessage") => self.do_send_message(&params).await,
             _ => Ok(HostResponse::err(format!(
@@ -171,13 +177,15 @@ impl HostApiDispatcher {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::Plugin("writeFile: missing path".to_string()))?;
-        let content = params
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let overwrite = params.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let overwrite = params
+            .get("overwrite")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let result = p.write_file(path, content, overwrite, plugin_id).await?;
-        Ok(HostResponse::ok(serde_json::to_value(result).map_err(AppError::Serialize)?))
+        Ok(HostResponse::ok(
+            serde_json::to_value(result).map_err(AppError::Serialize)?,
+        ))
     }
 
     async fn do_edit_file(
@@ -198,7 +206,9 @@ impl HostApiDispatcher {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
         let result = p.edit_file(path, edits, plugin_id).await?;
-        Ok(HostResponse::ok(serde_json::to_value(result).map_err(AppError::Serialize)?))
+        Ok(HostResponse::ok(
+            serde_json::to_value(result).map_err(AppError::Serialize)?,
+        ))
     }
 
     async fn do_execute_bash(
@@ -216,7 +226,9 @@ impl HostApiDispatcher {
             .ok_or_else(|| AppError::Plugin("executeBash: missing command".to_string()))?;
         let cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
         let result = p.execute_bash(command, cwd.as_deref(), plugin_id).await?;
-        Ok(HostResponse::ok(serde_json::to_value(result).map_err(AppError::Serialize)?))
+        Ok(HostResponse::ok(
+            serde_json::to_value(result).map_err(AppError::Serialize)?,
+        ))
     }
 
     async fn do_chat(
@@ -230,7 +242,9 @@ impl HostApiDispatcher {
         };
         let req = parse_chat_request(params)?;
         let resp = llm.chat(req).await?;
-        Ok(HostResponse::ok(serde_json::to_value(resp).map_err(AppError::Serialize)?))
+        Ok(HostResponse::ok(
+            serde_json::to_value(resp).map_err(AppError::Serialize)?,
+        ))
     }
 
     async fn do_chat_stream(
@@ -297,7 +311,9 @@ impl HostApiDispatcher {
         };
         let filter_plugin = params.get("pluginId").and_then(|v| v.as_str());
         let list = tools.list_tools(filter_plugin).await?;
-        Ok(HostResponse::ok(serde_json::to_value(list).map_err(AppError::Serialize)?))
+        Ok(HostResponse::ok(
+            serde_json::to_value(list).map_err(AppError::Serialize)?,
+        ))
     }
 
     async fn do_call_tool(
@@ -314,7 +330,10 @@ impl HostApiDispatcher {
             .or_else(|| params.get("tool_name"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::Plugin("callTool: missing toolName".to_string()))?;
-        let tool_params = params.get("params").cloned().unwrap_or(serde_json::Value::Null);
+        let tool_params = params
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let result = tools.call_tool(name, tool_params, plugin_id).await?;
         Ok(HostResponse::ok(result))
     }
@@ -345,21 +364,32 @@ impl HostApiDispatcher {
                     .or_else(|| params.get("listener_id"))
                     .and_then(|v| v.as_u64())
                     .map(EventListenerId)
-                    .ok_or_else(|| AppError::Plugin("events.off: missing listenerId".to_string()))?;
+                    .ok_or_else(|| {
+                        AppError::Plugin("events.off: missing listenerId".to_string())
+                    })?;
                 self.event_bus.off(id);
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
             "emit" => {
-                let payload = params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let payload = params
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 let ctx = EventContext::new(event_name, payload).with_plugin_id(plugin_id);
                 self.event_bus.emit_sync(event_name, ctx)?;
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
-            _ => Ok(HostResponse::err(format!("events: unknown method {}", method))),
+            _ => Ok(HostResponse::err(format!(
+                "events: unknown method {}",
+                method
+            ))),
         }
     }
 
-    async fn do_get_current_session(&self, _params: &serde_json::Value) -> Result<HostResponse, AppError> {
+    async fn do_get_current_session(
+        &self,
+        _params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
         let session = match &self.session {
             None => return Ok(HostResponse::err("SessionManager not configured")),
             Some(s) => s,
@@ -378,10 +408,7 @@ impl HostApiDispatcher {
             None => return Ok(HostResponse::err("SessionManager not configured")),
             Some(s) => s,
         };
-        let cap = params
-            .get("cap")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10) as usize;
+        let cap = params.get("cap").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
         let entries = session.get_entries(cap)?;
         let list: Vec<serde_json::Value> = entries
             .into_iter()
@@ -417,8 +444,15 @@ fn parse_chat_request(params: &serde_json::Value) -> Result<ChatRequest, AppErro
     Ok(ChatRequest {
         messages,
         model,
-        temperature: params.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32),
-        max_tokens: params.get("maxTokens").or_else(|| params.get("max_tokens")).and_then(|v| v.as_u64()).map(|u| u as u32),
+        temperature: params
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32),
+        max_tokens: params
+            .get("maxTokens")
+            .or_else(|| params.get("max_tokens"))
+            .and_then(|v| v.as_u64())
+            .map(|u| u as u32),
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
     })
@@ -430,9 +464,20 @@ fn parse_tool(params: &serde_json::Value, plugin_id: &str) -> Result<Tool, AppEr
         .and_then(|v| v.as_str())
         .ok_or_else(|| AppError::Plugin("registerTool: missing name".to_string()))?
         .to_string();
-    let label = params.get("label").and_then(|v| v.as_str()).unwrap_or(&name).to_string();
-    let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let parameters = params.get("parameters").cloned().unwrap_or(serde_json::json!({}));
+    let label = params
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&name)
+        .to_string();
+    let description = params
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let parameters = params
+        .get("parameters")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -451,6 +496,10 @@ fn parse_tool(params: &serde_json::Value, plugin_id: &str) -> Result<Tool, AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{
+        BashResult, ChatResponse, ChatResponseChoice, DirEntry, EditFileResult, PrimitiveOperation,
+        WriteFileResult,
+    };
     use crate::infra::DefaultEventBus;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -595,5 +644,314 @@ mod tests {
         let res = d.dispatch_async("inst-1", req).await.unwrap();
         assert!(!res.ok);
         assert!(res.error.unwrap().contains("004"));
+    }
+
+    struct MockPrimitive;
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for MockPrimitive {
+        async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+            Ok("mock_content".to_string())
+        }
+        async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
+            Ok(vec![])
+        }
+        async fn write_file(
+            &self,
+            path: &str,
+            _content: &str,
+            _overwrite: bool,
+            _plugin_id: &str,
+        ) -> Result<WriteFileResult, AppError> {
+            Ok(WriteFileResult {
+                path: path.to_string(),
+                written: true,
+            })
+        }
+        async fn edit_file(
+            &self,
+            path: &str,
+            _edits: Vec<EditOperation>,
+            _plugin_id: &str,
+        ) -> Result<EditFileResult, AppError> {
+            Ok(EditFileResult {
+                path: path.to_string(),
+                applied: true,
+            })
+        }
+        async fn execute_bash(
+            &self,
+            _command: &str,
+            _cwd: Option<&str>,
+            _plugin_id: &str,
+        ) -> Result<BashResult, AppError> {
+            Ok(BashResult {
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
+        }
+        async fn require_user_confirmation(
+            &self,
+            _op: PrimitiveOperation,
+            _preview: &str,
+            _plugin_id: &str,
+        ) -> Result<bool, AppError> {
+            Ok(true)
+        }
+    }
+
+    struct MockLlm;
+    #[async_trait::async_trait]
+    impl LlmProvider for MockLlm {
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            Ok(ChatResponse {
+                id: Some("id".to_string()),
+                choices: vec![ChatResponseChoice {
+                    index: 0,
+                    message: ChatMessage::assistant("hi"),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: None,
+            })
+        }
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<
+            Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            use futures_util::stream;
+            Ok(Box::new(stream::iter(vec![Ok(
+                StreamEvent::ContentDelta {
+                    delta: "hi".to_string(),
+                },
+            )])))
+        }
+        fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    struct MockToolRegistry;
+    #[async_trait::async_trait]
+    impl ToolRegistry for MockToolRegistry {
+        async fn register_tool(&self, _tool: Tool, _plugin_id: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn unregister_tool(&self, _name: &str, _plugin_id: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+        async fn get_tool(&self, _name: &str) -> Result<Tool, AppError> {
+            Err(AppError::Tool("not found".to_string()))
+        }
+        async fn list_tools(&self, _plugin_id: Option<&str>) -> Result<Vec<Tool>, AppError> {
+            Ok(vec![])
+        }
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _params: serde_json::Value,
+            _plugin_id: &str,
+        ) -> Result<serde_json::Value, AppError> {
+            Ok(serde_json::json!({ "content": "ok", "details": null }))
+        }
+        fn unregister_plugin_tools(&self, _plugin_id: &str) {}
+    }
+
+    #[tokio::test]
+    async fn dispatch_read_file_with_primitive_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(MockPrimitive));
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "readFile".to_string(),
+            params: serde_json::json!({ "path": "/tmp/x", "pluginId": "p1" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+        assert_eq!(
+            res.data
+                .as_ref()
+                .and_then(|d| d.get("content").and_then(|c| c.as_str())),
+            Some("mock_content")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_write_file_with_primitive_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(MockPrimitive));
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "writeFile".to_string(),
+            params: serde_json::json!({ "path": "/tmp/x", "content": "body", "pluginId": "p1" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_edit_file_with_primitive_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(MockPrimitive));
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "editFile".to_string(),
+            params: serde_json::json!({ "path": "/tmp/x", "edits": [], "pluginId": "p1" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_execute_bash_with_primitive_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(MockPrimitive));
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "executeBash".to_string(),
+            params: serde_json::json!({ "command": "echo x", "pluginId": "p1" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_chat_with_llm_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+        let req = HostRequest {
+            module: "llm".to_string(),
+            method: "createChatCompletion".to_string(),
+            params: serde_json::json!({ "messages": [], "model": "gpt-4" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_chat_stream_with_llm_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+        let req = HostRequest {
+            module: "llm".to_string(),
+            method: "createChatCompletionStream".to_string(),
+            params: serde_json::json!({ "messages": [], "model": "gpt-4" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+        assert!(res
+            .data
+            .as_ref()
+            .and_then(|d| d.get("content").and_then(|c| c.as_str()))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_register_tool_with_registry_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "registerTool".to_string(),
+            params: serde_json::json!({ "name": "t1", "label": "T1", "description": "d", "parameters": {} }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_list_tools_with_registry_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "getToolList".to_string(),
+            params: serde_json::json!({}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+        assert!(res.data.as_ref().map(|d| d.is_array()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn dispatch_call_tool_with_registry_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "callTool".to_string(),
+            params: serde_json::json!({ "toolName": "t1", "params": {} }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_session_get_current_with_session_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(dir.path().to_path_buf());
+        let key = mgr.current_session_key();
+        let _ = mgr.create_session(key, None).unwrap();
+        let d = HostApiDispatcher::new(bus).with_session(Arc::new(mgr));
+        let req = HostRequest {
+            module: "session".to_string(),
+            method: "getCurrentSession".to_string(),
+            params: serde_json::json!({}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_messages_with_session_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(dir.path().to_path_buf());
+        let key = mgr.current_session_key();
+        let _ = mgr.create_session(key, None).unwrap();
+        let d = HostApiDispatcher::new(bus).with_session(Arc::new(mgr));
+        let req = HostRequest {
+            module: "session".to_string(),
+            method: "getMessages".to_string(),
+            params: serde_json::json!({ "cap": 5 }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+        assert!(res.data.as_ref().map(|d| d.is_array()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn dispatch_send_message_with_session_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(dir.path().to_path_buf());
+        let key = mgr.current_session_key();
+        let _ = mgr.create_session(key, None).unwrap();
+        let d = HostApiDispatcher::new(bus).with_session(Arc::new(mgr));
+        let req = HostRequest {
+            module: "session".to_string(),
+            method: "sendMessage".to_string(),
+            params: serde_json::json!({ "message": { "role": "user", "content": { "text": "hi" } } }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
     }
 }

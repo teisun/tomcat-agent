@@ -2,7 +2,7 @@
 //!
 //! 依赖 WasmEdge C 库与 wasmedge-sdk；构建时需已安装 WasmEdge（见 https://wasmedge.org/docs/start/install）。
 
-use super::engine_stub::{WasmEngineConfig, DEFAULT_WASM_MAX_PAGES, DEFAULT_QUICKJS_HEAP_MB};
+use super::engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
 use crate::infra::error::AppError;
 use std::sync::Arc;
 use wasmedge_sdk::{

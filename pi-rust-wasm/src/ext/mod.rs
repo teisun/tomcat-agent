@@ -3,11 +3,11 @@
 //! 全局 Engine、独立 Wasm 实例、宿主导入绑定骨架。
 //! 默认为桩实现；启用 feature "wasmedge" 且安装 WasmEdge 后为真实实现。
 
-pub mod host_binding;
 pub mod dispatcher;
-pub mod plugin;
 mod engine_stub;
+pub mod host_binding;
 mod instance_stub;
+pub mod plugin;
 
 #[cfg(feature = "wasmedge")]
 mod engine_wasmedge;
@@ -15,8 +15,8 @@ mod engine_wasmedge;
 mod instance_wasmedge;
 
 pub use dispatcher::HostApiDispatcher;
-pub use host_binding::{HostRequest, HostResponse, invoke_host_func, invoke_host_func_with};
-pub use engine_stub::{WasmEngineConfig, DEFAULT_WASM_MAX_PAGES, DEFAULT_QUICKJS_HEAP_MB};
+pub use engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
+pub use host_binding::{invoke_host_func, invoke_host_func_with, HostRequest, HostResponse};
 
 #[cfg(not(feature = "wasmedge"))]
 pub use engine_stub::WasmEngine;
@@ -28,4 +28,6 @@ pub use instance_stub::WasmInstance;
 #[cfg(feature = "wasmedge")]
 pub use instance_wasmedge::WasmInstance;
 
-pub use plugin::{PluginInfo, PluginInstance, PluginManager, PluginManifest, PluginStatus, parse_manifest};
+pub use plugin::{
+    parse_manifest, PluginInfo, PluginInstance, PluginManager, PluginManifest, PluginStatus,
+};

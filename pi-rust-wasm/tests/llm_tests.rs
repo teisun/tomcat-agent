@@ -12,7 +12,8 @@ use std::time::Duration;
 /// 无 OPENAI_API_KEY 时用例失败（OpenAiProvider::new 返回 Err），不得 ignore。
 /// 超时 60s：依赖挂起时测试快速失败（鲁棒性 2.2）。
 #[tokio::test]
-async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = tracing::info_span!("test_llm_provider_chat_real_request_returns_ok").entered();
     let _ = dotenvy::dotenv().ok();
@@ -29,12 +30,9 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         model_override: None,
     };
     tracing::info!("Arrange: 加载 .env，创建 LlmConfig 与 OpenAiProvider、ChatRequest");
-    let resp = tokio::time::timeout(
-        Duration::from_secs(60),
-        provider.chat(request),
-    )
-    .await
-    .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
+    let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
+        .await
+        .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
     tracing::info!("Act: 调用 provider.chat(request)");
     tracing::info!("Assert: 验证 choices 非空且首条 index 为 0");
     assert!(!resp.choices.is_empty(), "chat 响应应包含 choices");
@@ -50,7 +48,8 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
 async fn test_llm_provider_chat_stream_real_request_yields_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_llm_provider_chat_stream_real_request_yields_events").entered();
+    let _span =
+        tracing::info_span!("test_llm_provider_chat_stream_real_request_yields_events").entered();
     let _ = dotenvy::dotenv().ok();
 
     let config = LlmConfig::default();
@@ -64,11 +63,12 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
         stream: Some(true),
         model_override: None,
     };
-    tracing::info!("Arrange: 加载 .env，创建 LlmConfig 与 OpenAiProvider、ChatRequest(stream=true)");
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(60),
-        async move { provider.chat_stream(request).await },
-    )
+    tracing::info!(
+        "Arrange: 加载 .env，创建 LlmConfig 与 OpenAiProvider、ChatRequest(stream=true)"
+    );
+    let mut stream = tokio::time::timeout(Duration::from_secs(60), async move {
+        provider.chat_stream(request).await
+    })
     .await
     .map_err(|_| "chat_stream 超时 60s，可能网络或上游不可达")??;
     tracing::info!("Act: 调用 provider.chat_stream(request)，消费 stream");

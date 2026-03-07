@@ -131,9 +131,11 @@ pub fn run_cli() -> Result<(), AppError> {
     }
 }
 
-fn run_init(config_path: &str) -> Result<(), AppError> {
+pub(crate) fn run_init(config_path: &str) -> Result<(), AppError> {
     let path = normalize_path(config_path)?;
-    let parent = path.parent().ok_or_else(|| AppError::Config("无效配置路径".to_string()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("无效配置路径".to_string()))?;
     std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     let cfg = AppConfig::default();
     let toml = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
@@ -143,7 +145,7 @@ fn run_init(config_path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
+pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     if config_path.is_none() {
         let default = normalize_path(DEFAULT_CONFIG_PATH)?;
         if !default.exists() {
@@ -173,14 +175,15 @@ fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_config(sub: ConfigSub) -> Result<(), AppError> {
+pub(crate) fn run_config(sub: ConfigSub) -> Result<(), AppError> {
     match sub {
         ConfigSub::Get { key } => {
             let cfg = load_config(None)?;
             if let Some(k) = key {
                 println!("get key: {} (占位)", k);
             } else {
-                let toml = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+                let toml =
+                    toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
                 println!("{}", toml);
             }
         }
@@ -194,14 +197,18 @@ fn run_config(sub: ConfigSub) -> Result<(), AppError> {
         }
         ConfigSub::Import { path } => {
             let content = std::fs::read_to_string(&path).map_err(AppError::Io)?;
-            let _: AppConfig = toml::from_str(&content).map_err(|e| AppError::Config(e.to_string()))?;
-            println!("已从 {} 导入（当前仅校验格式，未写入默认路径）", path.display());
+            let _: AppConfig =
+                toml::from_str(&content).map_err(|e| AppError::Config(e.to_string()))?;
+            println!(
+                "已从 {} 导入（当前仅校验格式，未写入默认路径）",
+                path.display()
+            );
         }
     }
     Ok(())
 }
 
-fn run_session(sub: SessionSub) -> Result<(), AppError> {
+pub(crate) fn run_session(sub: SessionSub) -> Result<(), AppError> {
     let cfg = load_config(None)?;
     let mgr = SessionManager::from_sessions_dir(&cfg.storage.sessions_dir)?;
     match sub {
@@ -252,7 +259,7 @@ fn run_session(sub: SessionSub) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_plugin(sub: PluginSub) -> Result<(), AppError> {
+pub(crate) fn run_plugin(sub: PluginSub) -> Result<(), AppError> {
     match sub {
         PluginSub::List => println!("插件列表（占位，依赖 T1-P0-009）"),
         PluginSub::Load { path } => println!("load {}（占位）", path),
@@ -264,7 +271,7 @@ fn run_plugin(sub: PluginSub) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_audit(sub: AuditSub) -> Result<(), AppError> {
+pub(crate) fn run_audit(sub: AuditSub) -> Result<(), AppError> {
     match sub {
         AuditSub::List { limit } => println!("审计列表（占位）limit={:?}", limit),
         AuditSub::Show { id } => println!("审计 show {}（占位）", id),
@@ -273,7 +280,136 @@ fn run_audit(sub: AuditSub) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_chat() -> Result<(), AppError> {
+pub(crate) fn run_chat() -> Result<(), AppError> {
     println!("对话模式由 chat 角色实现，当前为占位。");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parse_init() {
+        let cli = Cli::try_parse_from(&["pi-awsm", "init"]).unwrap();
+        let cmd = cli.command.expect("subcommand");
+        assert!(matches!(cmd, Commands::Init { config: _ }));
+        if let Commands::Init { config } = cmd {
+            assert!(config.contains("config.toml"));
+        }
+    }
+
+    #[test]
+    fn cli_parse_init_with_config_path() {
+        let cli =
+            Cli::try_parse_from(&["pi-awsm", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
+        let cmd = cli.command.unwrap();
+        if let Commands::Init { config } = cmd {
+            assert_eq!(config, "/tmp/pi/config.toml");
+        }
+    }
+
+    #[test]
+    fn cli_parse_doctor() {
+        let cli = Cli::try_parse_from(&["pi-awsm", "doctor"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Doctor { config: None })
+        ));
+    }
+
+    #[test]
+    fn cli_parse_config_get() {
+        let cli = Cli::try_parse_from(&["pi-awsm", "config", "get"]).unwrap();
+        let cmd = cli.command.unwrap();
+        if let Commands::Config { sub } = cmd {
+            assert!(matches!(sub, ConfigSub::Get { key: None }));
+        }
+    }
+
+    #[test]
+    fn cli_parse_session_list() {
+        let cli = Cli::try_parse_from(&["pi-awsm", "session", "list"]).unwrap();
+        let cmd = cli.command.unwrap();
+        assert!(matches!(
+            cmd,
+            Commands::Session {
+                sub: SessionSub::List
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parse_plugin_list() {
+        let cli = Cli::try_parse_from(&["pi-awsm", "plugin", "list"]).unwrap();
+        let cmd = cli.command.unwrap();
+        assert!(matches!(
+            cmd,
+            Commands::Plugin {
+                sub: PluginSub::List
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parse_audit_list() {
+        let cli = Cli::try_parse_from(&["pi-awsm", "audit", "list"]).unwrap();
+        let cmd = cli.command.unwrap();
+        assert!(matches!(
+            cmd,
+            Commands::Audit {
+                sub: AuditSub::List { limit: None }
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parse_default_chat() {
+        let cli = Cli::try_parse_from(&["pi-awsm"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn run_init_creates_config_in_temp_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let r = run_init(config_path.to_str().unwrap());
+        assert!(r.is_ok());
+        assert!(config_path.exists());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("[log]") || content.contains("log"));
+    }
+
+    #[test]
+    fn run_doctor_none_when_no_default_config_returns_ok() {
+        let r = run_doctor(None);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_doctor_some_with_valid_config_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        run_init(config_path.to_str().unwrap()).unwrap();
+        let r = run_doctor(Some(config_path.to_str().unwrap()));
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_plugin_list_returns_ok() {
+        let r = run_plugin(PluginSub::List);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_audit_list_returns_ok() {
+        let r = run_audit(AuditSub::List { limit: None });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_chat_returns_ok() {
+        let r = run_chat();
+        assert!(r.is_ok());
+    }
 }

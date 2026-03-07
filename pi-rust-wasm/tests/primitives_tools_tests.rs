@@ -40,14 +40,14 @@ fn make_tool(name: &str, plugin_id: &str) -> Tool {
 // ---------- ToolRegistry 集成测试 ----------
 
 #[tokio::test]
-async fn test_tool_registry_register_list_and_call_returns_ok() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_tool_registry_register_list_and_call_returns_ok(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_tool_registry_register_list_and_call_returns_ok").entered();
+    let _span =
+        tracing::info_span!("test_tool_registry_register_list_and_call_returns_ok").entered();
 
-    let registry = DefaultToolRegistry::new(
-        Arc::new(StubToolExecutor),
-        Arc::new(TracingAuditRecorder),
-    );
+    let registry =
+        DefaultToolRegistry::new(Arc::new(StubToolExecutor), Arc::new(TracingAuditRecorder));
     tracing::info!("Arrange: DefaultToolRegistry + StubToolExecutor + TracingAuditRecorder");
     let tool = make_tool("echo", "plugin_a");
     registry.register_tool(tool, "plugin_a").await?;
@@ -66,14 +66,14 @@ async fn test_tool_registry_register_list_and_call_returns_ok() -> Result<(), Bo
 }
 
 #[tokio::test]
-async fn test_tool_registry_unregister_plugin_tools_removes_all() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_tool_registry_unregister_plugin_tools_removes_all(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_tool_registry_unregister_plugin_tools_removes_all").entered();
+    let _span =
+        tracing::info_span!("test_tool_registry_unregister_plugin_tools_removes_all").entered();
 
-    let registry = DefaultToolRegistry::new(
-        Arc::new(StubToolExecutor),
-        Arc::new(TracingAuditRecorder),
-    );
+    let registry =
+        DefaultToolRegistry::new(Arc::new(StubToolExecutor), Arc::new(TracingAuditRecorder));
     registry.register_tool(make_tool("a", "p1"), "p1").await?;
     registry.register_tool(make_tool("b", "p1"), "p1").await?;
     registry.register_tool(make_tool("c", "p2"), "p2").await?;
@@ -93,7 +93,10 @@ async fn test_tool_registry_unregister_plugin_tools_removes_all() -> Result<(), 
 fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
     let mut c = PrimitiveConfig::default();
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let path = canonical.to_string_lossy().trim_end_matches(std::path::MAIN_SEPARATOR).to_string();
+    let path = canonical
+        .to_string_lossy()
+        .trim_end_matches(std::path::MAIN_SEPARATOR)
+        .to_string();
     c.path_whitelist.push(path);
     c.auto_confirm = true;
     c.require_approval_for_all_write = false;
@@ -102,13 +105,18 @@ fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
 }
 
 #[tokio::test]
-async fn test_primitive_executor_read_file_in_whitelist_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_primitive_executor_read_file_in_whitelist_succeeds(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_primitive_executor_read_file_in_whitelist_succeeds").entered();
+    let _span =
+        tracing::info_span!("test_primitive_executor_read_file_in_whitelist_succeeds").entered();
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;
-    let path_whitelist = canonical_dir.to_string_lossy().trim_end_matches(std::path::MAIN_SEPARATOR).to_string();
+    let path_whitelist = canonical_dir
+        .to_string_lossy()
+        .trim_end_matches(std::path::MAIN_SEPARATOR)
+        .to_string();
     let mut config = PrimitiveConfig::default();
     config.path_whitelist.push(path_whitelist);
     let executor = DefaultPrimitiveExecutor::new(
@@ -157,9 +165,11 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
 }
 
 #[tokio::test]
-async fn test_primitive_executor_write_file_with_allow_all_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_primitive_executor_write_file_with_allow_all_succeeds(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_primitive_executor_write_file_with_allow_all_succeeds").entered();
+    let _span =
+        tracing::info_span!("test_primitive_executor_write_file_with_allow_all_succeeds").entered();
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;
@@ -187,8 +197,10 @@ async fn test_primitive_executor_write_file_with_allow_all_succeeds() -> Result<
 async fn test_primitive_executor_write_file_user_denied_returns_permission_error(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_primitive_executor_write_file_user_denied_returns_permission_error")
-        .entered();
+    let _span = tracing::info_span!(
+        "test_primitive_executor_write_file_user_denied_returns_permission_error"
+    )
+    .entered();
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;
@@ -210,7 +222,9 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.to_string().contains("确认") || err.to_string().contains("Permission") || err.to_string().contains("denied"),
+        err.to_string().contains("确认")
+            || err.to_string().contains("Permission")
+            || err.to_string().contains("denied"),
         "期望用户拒绝确认错误，got: {}",
         err
     );
