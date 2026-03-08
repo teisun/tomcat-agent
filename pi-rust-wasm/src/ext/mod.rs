@@ -5,9 +5,9 @@
 
 pub mod dispatcher;
 mod engine_stub;
+mod engine_wasmedge;
 pub mod host_binding;
 mod instance_stub;
-mod engine_wasmedge;
 mod instance_wasmedge;
 pub mod plugin;
 

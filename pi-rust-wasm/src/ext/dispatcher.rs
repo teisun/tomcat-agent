@@ -114,14 +114,33 @@ impl HostApiDispatcher {
             ("tools", "unregisterTool") => self.do_unregister_tool(instance_id, &params).await,
             ("tools", "getToolList") => self.do_list_tools(instance_id, &params).await,
             ("tools", "callTool") => self.do_call_tool(instance_id, &params).await,
-            ("events", "on") | ("events", "once") | ("events", "off") | ("events", "emit") => {
-                self.do_events(instance_id, &method, &params).await
+            ("events", "on")
+            | ("events", "subscribe")
+            | ("events", "once")
+            | ("events", "off")
+            | ("events", "emit") => {
+                let effective_method = if method == "subscribe" { "on" } else { &method };
+                self.do_events(instance_id, effective_method, &params).await
             }
             ("session" | "agent", "getCurrentSession") => {
                 self.do_get_current_session(&params).await
             }
             ("session", "getMessages") => self.do_get_messages(&params).await,
             ("session", "sendMessage") => self.do_send_message(&params).await,
+            ("agent", "sendMessage") => self.do_agent_send_message(&params),
+            ("agent", "sendUserMessage") => self.do_agent_send_user_message(&params),
+            ("context", "isIdle") => Ok(Self::do_context_is_idle()),
+            ("context", "abort") => Ok(Self::do_context_abort()),
+            ("context", "getCwd") => Ok(Self::do_context_get_cwd()),
+            ("context", "getModel") => Ok(Self::do_context_get_model()),
+            ("context", "uiNotify") => Ok(self.do_context_ui_notify(&params)),
+            ("context", "uiSelect") | ("context", "uiConfirm") | ("context", "uiInput") => {
+                Ok(Self::do_context_ui_stub(&method))
+            }
+            ("context", "getSystemPrompt") => Ok(Self::do_context_get_system_prompt()),
+            ("context", "hasPendingMessages") => Ok(Self::do_context_has_pending()),
+            ("context", "shutdown") => Ok(Self::do_context_shutdown()),
+            ("context", "getContextUsage") => Ok(Self::do_context_usage()),
             _ => Ok(HostResponse::err(format!(
                 "unknown API: {}.{}",
                 module, method
@@ -422,6 +441,80 @@ impl HostApiDispatcher {
             .filter_map(|e| serde_json::to_value(e).ok())
             .collect();
         Ok(HostResponse::ok(serde_json::json!(list)))
+    }
+
+    // -- agent module: sendMessage / sendUserMessage -----------------------
+    fn do_agent_send_message(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
+        let message = params
+            .get("message")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        tracing::info!("[plugin sendMessage] {:?}", message);
+        Ok(HostResponse::ok(serde_json::Value::Null))
+    }
+
+    fn do_agent_send_user_message(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let content = params
+            .get("content")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        tracing::info!("[plugin sendUserMessage] {:?}", content);
+        Ok(HostResponse::ok(serde_json::Value::Null))
+    }
+
+    // -- context module (for pi_bridge.js ctx proxy) ----------------------
+    fn do_context_is_idle() -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "idle": true }))
+    }
+
+    fn do_context_abort() -> HostResponse {
+        tracing::info!("[context] abort requested by plugin");
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    fn do_context_get_cwd() -> HostResponse {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        HostResponse::ok(serde_json::json!({ "cwd": cwd }))
+    }
+
+    fn do_context_get_model() -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "model": serde_json::Value::Null }))
+    }
+
+    fn do_context_ui_notify(&self, params: &serde_json::Value) -> HostResponse {
+        let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = params
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
+        tracing::info!("[context.ui.notify] [{}] {}", kind, msg);
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    fn do_context_ui_stub(method: &str) -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "stub": true, "method": method }))
+    }
+
+    fn do_context_get_system_prompt() -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "prompt": "" }))
+    }
+
+    fn do_context_has_pending() -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "pending": false }))
+    }
+
+    fn do_context_shutdown() -> HostResponse {
+        tracing::warn!("[context] shutdown requested by plugin");
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    fn do_context_usage() -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "tokens": null, "contextWindow": 0, "percent": null }))
     }
 
     async fn do_send_message(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {

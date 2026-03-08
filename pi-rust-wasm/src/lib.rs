@@ -26,10 +26,9 @@ pub use ext::{
     WasmEngine, WasmEngineConfig, WasmInstance,
 };
 pub use infra::{
-    ensure_work_dir_structure, get_work_dir, init_logging, load_config, normalize_path, read_file_utf8,
-    validate_config, write_file_atomic,
-    AgentEvent, AppConfig, AppError, AuditPrimitiveOp, AuditRecorder, DefaultEventBus, EventBus,
-    EventContext, EventListenerId, ExtensionEvent, HostcallAuditEntry, LlmConfig, LogConfig,
-    PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder,
-    WasmConfig,
+    ensure_work_dir_structure, get_work_dir, init_logging, load_config, normalize_path,
+    read_file_utf8, validate_config, write_file_atomic, AgentEvent, AppConfig, AppError,
+    AuditPrimitiveOp, AuditRecorder, DefaultEventBus, EventBus, EventContext, EventListenerId,
+    ExtensionEvent, HostcallAuditEntry, LlmConfig, LogConfig, PrimitiveAuditEntry, PrimitiveConfig,
+    SecurityConfig, ToolAuditEntry, TracingAuditRecorder, WasmConfig,
 };

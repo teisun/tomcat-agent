@@ -1,5 +1,48 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| @bridge_layer | 2026-03-08 | DONE | develop | - |
+
+### 本次执行说明（Phase 2：pi-mono 兼容桥接层 + 集成测试）
+- **pi_bridge.js**：新增 `assets/js/pi_bridge.js`，构建 `globalThis.pi` 对象（on/exec/readFile/writeFile/editFile/registerTool/registerCommand/createChatCompletion/session/sendMessage/log 等），全部通过 `__pi_host_call` JSON 路由到宿主 Dispatcher。含 `__pi_dispatch_event`（事件分发入口）与 `__pi_execute_tool`（工具执行入口）。
+- **run_script_file_impl 预加载**：改造 `instance_wasmedge.rs`，`run_script_file_impl` 在执行用户脚本前自动拼接 `pi_bridge.js`（从 `assets/js/` 或 `PI_BRIDGE_JS_PATH` 环境变量加载），确保用户脚本中 `pi` 全局对象可用。
+- **Dispatcher context module**：`dispatcher.rs` 新增 `context.*`（isIdle/abort/getCwd/getModel/uiNotify/uiSelect/uiConfirm/uiInput/getSystemPrompt/hasPendingMessages/shutdown/getContextUsage）和 `agent.*`（sendMessage/sendUserMessage）及 `events.subscribe` 路由，返回 stub 数据。
+- **桥接层集成测试**：新增 `tests/fixtures/wasmedge_quickjs/bridge_test.js` + `test_wasmedge_e2e_bridge_layer`，断言 `pi.readFile/writeFile/editFile/exec` 各触发 1 次 hostCall（共 ≥ 4），`pi.on`/`pi.log`/`pi.session` 无异常。
+
+### ✅ 执行的检查与验收项
+- [✓] `cargo fmt --check` 通过
+- [✓] `cargo clippy --all-targets` 通过（仅既有警告）
+- [✓] `cargo test` — 全量通过（unit + 5 wasm e2e 含 bridge_layer）
+- [✓] 桥接层 e2e `call_count >= 4` 严格断言通过（Constitution 第 24 条 + INTEGRATION_TEST_SPEC 5.4）
+
+### 🔌 INTERFACE (接口变更)
+- `globalThis.pi` 全局对象（pi-mono 兼容）：on/exec/readFile/writeFile/editFile/registerTool/registerCommand/createChatCompletion/session/sendMessage/log 等
+- Dispatcher 新增路由：`context.*`、`agent.*`、`events.subscribe`
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @bridge_layer | 2026-03-08 | DONE | develop | - |
+
+### 本次执行说明（Phase 1：定制 wasmedge_quickjs.wasm 构建，解除 4 原语 e2e 阻塞）
+- **定制 wasm 构建**：clone second-state/wasmedge-quickjs 到 `Tomcat/wasmedge-quickjs/`，新增 `src/host_call.rs`（`#[link(wasm_import_module = "env")] extern "C" { fn __pi_host_call(...) }`）+ `PiHostCallFn`（JsFn 包装）+ `register_pi_host_call(ctx)` 全局注册。修改 `src/main.rs`：`eval_buf` 前调用 `host_call::register_pi_host_call(ctx)`。无 TLS 编译（`--no-default-features`），产物拷贝到 `pi-rust-wasm/assets/wasm/wasmedge_quickjs.wasm`。
+- **宿主侧 ABI 升级**：`host_call_impl` 从 2 参数 `(ptr, len)` 升级为 3 参数 `(buf_ptr, req_len, buf_cap)`，宿主读 `req_len` 字节请求、写回响应时检查 `buf_cap`（而非 `req_len`），支持响应大于请求的场景。
+- **4 原语 e2e 解除阻塞**：`test_wasmedge_e2e_primitives_script_file` 已通过（`call_count >= 4`），JS 脚本成功调用宿主 `__pi_host_call` 4 次。全部 4 个 wasm e2e 测试通过。
+
+### ✅ 执行的检查与验收项
+- [✓] `cargo fmt --check` 通过
+- [✓] `cargo test --lib` — 178 passed, 1 ignored
+- [✓] `cargo test --test wasmedge_e2e_tests` — 4 passed（engine_instance_run_script、hello_world_script_file、hello_world_inline、primitives_script_file）
+- [✓] 4 原语 e2e `call_count >= 4` 严格断言通过（不降低断言，符合 Constitution 第 24 条与 INTEGRATION_TEST_SPEC 5.4）
+
+### 🔌 INTERFACE (接口变更)
+- `env.__pi_host_call` ABI：`(i32, i32) -> i32` → `(i32, i32, i32) -> i32`（新增 `buf_cap` 参数）
+- wasmedge_quickjs.wasm：JS 全局新增 `__pi_host_call(requestJson) -> responseJson`
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | - | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明（host_call 协议与宪法流程）

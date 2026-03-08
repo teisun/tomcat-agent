@@ -4,23 +4,14 @@
 
 use crate::infra::error::AppError;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::fmt;
-use wasmedge_sdk::{
-    config::Config,
-    error::CoreError,
-    vm::SyncInst,
-    wasi::WasiModule,
-    CallingFrame,
-    ImportObjectBuilder,
-    Instance,
-    Module,
-    Store,
-    Vm,
-    WasmValue,
-};
 use wasmedge_sdk::error::CoreExecutionError;
+use wasmedge_sdk::{
+    config::Config, error::CoreError, vm::SyncInst, wasi::WasiModule, CallingFrame,
+    ImportObjectBuilder, Instance, Module, Store, Vm, WasmValue,
+};
 
 /// 宿主导入的 host data：供 __pi_host_call 使用。
 struct HostData {
@@ -121,14 +112,26 @@ impl WasmInstance {
                     "WASMEDGE_QUICKJS_PATH not set or path does not exist. Set it to wasmedge_quickjs.wasm path.".to_string(),
                 )
             })?;
+
+        let combined = self.build_combined_script(script_path)?;
+        let (combined_path, _tmp_dir) = temp_js_file(&combined)?;
+
         let config = self.config.clone();
-        let script_dir = script_path
-            .parent()
-            .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "script path has no parent")))?;
-        let script_name = script_path
+        let script_dir = combined_path.parent().ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "script path has no parent",
+            ))
+        })?;
+        let script_name = combined_path
             .file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "script path has no file name")))?;
+            .ok_or_else(|| {
+                AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "script path has no file name",
+                ))
+            })?;
         let host_dir = script_dir
             .canonicalize()
             .map_err(AppError::Io)
@@ -146,6 +149,38 @@ impl WasmInstance {
             .map_err(|e| AppError::WasmEdge(e.to_string()))?;
         let _ = vm.run_func(Some("quickjs"), "_start", []);
         Ok(serde_json::Value::Null)
+    }
+
+    /// Prepend pi_bridge.js (if present) to the user script content.
+    /// Falls back to the plain user script if bridge is absent.
+    fn build_combined_script(&self, user_script: &Path) -> Result<String, AppError> {
+        let user_code = std::fs::read_to_string(user_script).map_err(AppError::Io)?;
+        let bridge_path = self.resolve_bridge_path();
+        match bridge_path {
+            Some(bp) if bp.exists() => {
+                let bridge_code = std::fs::read_to_string(&bp).map_err(AppError::Io)?;
+                Ok(format!(
+                    "// --- pi_bridge.js (auto-injected) ---\n{bridge_code}\n// --- user script ---\n{user_code}"
+                ))
+            }
+            _ => Ok(user_code),
+        }
+    }
+
+    /// Locate pi_bridge.js: relative to the quickjs wasm path (sibling assets/js/pi_bridge.js)
+    /// or via PI_BRIDGE_JS_PATH env.
+    fn resolve_bridge_path(&self) -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("PI_BRIDGE_JS_PATH") {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+        self.quickjs_path.as_ref().and_then(|qp| {
+            qp.parent()
+                .and_then(|wasm_dir| wasm_dir.parent())
+                .map(|assets_dir| assets_dir.join("js").join("pi_bridge.js"))
+        })
     }
 
     /// 注册宿主导入并映射到 QuickJS 全局 agent；内部在 build_vm 时注册 env.__pi_host_call。
@@ -173,7 +208,7 @@ impl WasmInstance {
             let mut builder = ImportObjectBuilder::new("env", host_data)
                 .map_err(|e| AppError::WasmEdge(e.to_string()))?;
             builder
-                .with_func::<(i32, i32), i32>("__pi_host_call", host_call_impl)
+                .with_func::<(i32, i32, i32), i32>("__pi_host_call", host_call_impl)
                 .map_err(|e| AppError::WasmEdge(e.to_string()))?;
             self.import_object = Some(builder.build());
         }
@@ -188,32 +223,39 @@ impl WasmInstance {
     }
 }
 
-/// 宿主导入 __pi_host_call 的实现：从线性内存读取请求 JSON，调用宿主回调，将响应写回内存。
+/// 宿主导入 __pi_host_call(buf_ptr, req_len, buf_cap) -> resp_len：
+/// 从线性内存 buf_ptr 读取 req_len 字节请求 JSON，调用宿主回调，
+/// 将响应写回 buf_ptr（不超过 buf_cap），返回实际响应长度。
 fn host_call_impl(
     data: &mut HostData,
     _inst: &mut Instance,
     frame: &mut CallingFrame,
     args: Vec<WasmValue>,
 ) -> Result<Vec<WasmValue>, CoreError> {
-    if args.len() < 2 {
+    if args.len() < 3 {
         return Err(CoreError::Execution(CoreExecutionError::HostFuncFailed));
     }
-    let ptr = args[0].to_i32() as u32;
-    let len = args[1].to_i32() as u32;
+    let buf_ptr = args[0].to_i32() as u32;
+    let req_len = args[1].to_i32() as u32;
+    let buf_cap = args[2].to_i32() as u32;
     let invoke = data
         .host_invoke
         .as_ref()
         .ok_or(CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
-    let mut memory = frame.memory_mut(0).ok_or(CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
+    let mut memory = frame
+        .memory_mut(0)
+        .ok_or(CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
     let buf = memory
-        .get_data(ptr, len)
+        .get_data(buf_ptr, req_len)
         .map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
-    let request_json = String::from_utf8(buf).map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
-    let response_json = invoke(&request_json).map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
+    let request_json = String::from_utf8(buf)
+        .map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
+    let response_json = invoke(&request_json)
+        .map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
     let resp_bytes = response_json.as_bytes();
     let out_len = resp_bytes.len() as u32;
-    if out_len <= len {
-        let _ = memory.set_data(resp_bytes.to_vec(), ptr);
+    if out_len <= buf_cap {
+        let _ = memory.set_data(resp_bytes.to_vec(), buf_ptr);
     }
     Ok(vec![WasmValue::from_i32(out_len as i32)])
 }
