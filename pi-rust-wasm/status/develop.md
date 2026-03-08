@@ -2,6 +2,31 @@
 | :--- | :--- | :--- | :--- | :--- |
 | @bridge_layer | 2026-03-08 | DONE | develop | - |
 
+### 本次执行说明（Phase 4：文档完善 + 全量验收）
+- **新增 js-bridge-layer.md**：完整描述 pi_bridge.js、定制 wasm 构建、ABI、pi 对象 API 映射、事件分发机制、ctx 代理对象、工具执行。
+- **更新 host-call-protocol.md**：补充 4.5 agent module（sendMessage/sendUserMessage）、4.6 context module（isIdle/abort/getCwd/getModel/hasPendingMessages/shutdown/getSystemPrompt/getContextUsage/compact/uiNotify/uiSelect/uiConfirm/uiInput）。
+- **更新 host-guest-layer.md**：宿主上下文属性表 10 项从「未实现」更新为 ✅（cwd/model/session/UI/isIdle/systemPrompt/contextUsage/abort/pending/shutdown/compact）。
+- **更新 Architecture.md**：3. 宿主API层新增 JS 桥接层文档引用。
+- **更新 INTEGRATION_TEST_SPEC**：5.4 节新增桥接层（bridge_test.js）与事件分发（event_dispatch_test.js）测试 fixture 说明。
+
+### ✅ 全量验收自检
+- [✓] `cargo fmt --check` 通过
+- [✓] `cargo clippy --all-targets` 通过（仅既有警告）
+- [✓] 单元测试：178 passed, 1 ignored
+- [✓] Wasm E2E：6 passed（engine, hello_file, hello_inline, bridge, event_dispatch, primitives）
+- [✓] 集成测试：23 passed（hostcall 3 + session 3 + event 3 + plugin 3 + primitives_tools 6 + robustness 5）
+- [✓] LLM：1 passed, 1 failed（网络代理问题，既有，非本次变更）
+- [✓] 文档：Architecture.md、host-call-protocol.md、host-guest-layer.md、INTEGRATION_TEST_SPEC、js-bridge-layer.md 已同步
+
+### 🔌 INTERFACE (接口变更)
+- 无新增代码接口（本次为文档与验收）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @bridge_layer | 2026-03-08 | DONE | develop | - |
+
 ### 本次执行说明（Phase 3：事件分发 + ctx 代理对象 + 集成测试）
 - **dispatch_event**：`WasmInstance` 新增 `dispatch_event(plugin_script, event_type, data, context)` 方法，将插件脚本 + `__pi_dispatch_event(envelope)` 调用合并为单次 VM 执行，实现宿主向 JS 分发事件。
 - **ctx 代理对象完善**：`pi_bridge.js` 中 `__pi_dispatch_event` 构建的 ctx 新增 `compact()` 方法；Dispatcher 新增 `context.compact` 路由。ctx 完整属性：cwd（静态）、hasUI（静态）、model（静态）、isIdle()、abort()、hasPendingMessages()、shutdown()、getSystemPrompt()、getContextUsage()、compact()、ui.notify/select/confirm/input、sessionManager.getCurrent。

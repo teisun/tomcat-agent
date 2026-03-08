@@ -9,16 +9,20 @@
 
 | 属性     | pi-mono (TS)                               | pi-agent-rust (Rust+QuickJS)      | pi-rust-wasm 当前状态                     |
 | ------ | ------------------------------------------ | --------------------------------- | ------------------------------------- |
-| 当前工作目录 | `ctx.cwd`                                  | `pi.process.cwd`                  | host-call-protocol 中无对应 module/method |
+| 当前工作目录 | `ctx.cwd`                                  | `pi.process.cwd`                  | ✅ `context.getCwd` + ctx 静态快照 |
 | 命令行参数  | -                                          | `pi.process.args`                 | 未实现                                   |
 | 环境变量   | Node `process.env`                         | `pi.env.get(key)` 受策略过滤           | 未实现                                   |
-| 当前模型   | `ctx.model` / `pi.getModel()`              | `pi.getModel()`                   | host-call-protocol 无对应                |
-| 会话状态   | `ctx.sessionManager`                       | `pi.session(op, args)`            | protocol 有 session module             |
-| UI 能力  | `ctx.ui.*`（select/confirm/notify/editor 等） | `pi.ui(op, args)`                 | 未实现                                   |
+| 当前模型   | `ctx.model` / `pi.getModel()`              | `pi.getModel()`                   | ✅ `context.getModel` + ctx 静态快照 |
+| 会话状态   | `ctx.sessionManager`                       | `pi.session(op, args)`            | ✅ session module + ctx.sessionManager |
+| UI 能力  | `ctx.ui.*`（select/confirm/notify/editor 等） | `pi.ui(op, args)`                 | ✅ `context.uiNotify/Select/Confirm/Input`（stub） |
 | 路径工具   | Node `path`                                | `pi.path.join/basename/normalize` | Node 兼容层提供                            |
-| 是否空闲   | `ctx.isIdle()`                             | -                                 | 未实现                                   |
-| 系统提示   | `ctx.getSystemPrompt()`                    | -                                 | 未实现                                   |
-| 上下文用量  | `ctx.getContextUsage()`                    | -                                 | 未实现                                   |
+| 是否空闲   | `ctx.isIdle()`                             | -                                 | ✅ `context.isIdle` |
+| 系统提示   | `ctx.getSystemPrompt()`                    | -                                 | ✅ `context.getSystemPrompt` |
+| 上下文用量  | `ctx.getContextUsage()`                    | -                                 | ✅ `context.getContextUsage` |
+| 中止     | `ctx.abort()`                              | -                                 | ✅ `context.abort` |
+| 挂起消息   | `ctx.hasPendingMessages()`                 | -                                 | ✅ `context.hasPendingMessages` |
+| 关闭     | `ctx.shutdown()`                           | -                                 | ✅ `context.shutdown` |
+| 压缩     | `ctx.compact()`                            | -                                 | ✅ `context.compact` |
 
 
 ---

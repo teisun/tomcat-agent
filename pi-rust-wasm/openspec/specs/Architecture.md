@@ -39,7 +39,7 @@
 
 宿主向插件开放的唯一可信接口，完全对齐 pi-mono ExtensionAPI 规范；包含核心 Agent API 表、Node.js 兼容层、统一 Hostcall 通信协议（含高并发分发、异步 Hostcall、细粒度锁定及 AI 实现指导）。**Hostcall 请求/响应 JSON 协议**（HostRequest、HostResponse、module/method 与 params 约定）见子文档。
 
-详见 [3. 宿主API层（详细）](architecture/host-api-layer.md)。Hostcall 与 Guest 的 JSON 协议以 [Hostcall JSON 协议（子文档）](architecture/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
+详见 [3. 宿主API层（详细）](architecture/host-api-layer.md)。Hostcall 与 Guest 的 JSON 协议以 [Hostcall JSON 协议（子文档）](architecture/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。pi-mono 兼容桥接层（`pi_bridge.js`、定制 `wasmedge_quickjs.wasm`、事件分发与 ctx 代理）见 [JS 桥接层架构](architecture/js-bridge-layer.md)。
 
 ### 4. WasmEdge运行时层
 
