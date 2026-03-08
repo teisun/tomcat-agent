@@ -2,6 +2,53 @@
 | :--- | :--- | :--- | :--- | :--- |
 | - | 2026-03-08 | DONE | develop | - |
 
+### 本次执行说明（host_call 协议与宪法流程）
+- **协议子文档为权威**：Architecture 第 3 节已写明 Hostcall 与 Guest 的 JSON 协议以 [host-call-protocol.md](openspec/specs/architecture/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
+- **注入与 Guest 侧说明**：host-call-protocol 第 5 节已补充「执行时注入」（每次 run_script/run_script_file 当次 Vm 已挂载 env.__pi_host_call；Guest 须从 env 导入并暴露给 JS，JS 调用约定见第 5 节）；wasmedge-runtime-layer 4.1 已补充宿主导入绑定与 Guest 侧要求。无代码改动，仅文档更新。
+
+### ✅ 执行的检查与验收项
+- [✓] Architecture §3 协议权威表述已存在
+- [✓] host-call-protocol、wasmedge-runtime-layer 注入与 Guest 侧说明已写入
+- [✓] 符合宪法完成定义（文档更新到位）
+
+### 🔌 INTERFACE (接口变更)
+- 无
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-08 | DONE | develop | - |
+
+### 本次执行说明（host_call 协议约定与宪法开发流程）
+- **协议与文档**：Architecture 第 3 节已明确 Hostcall JSON 协议以 architecture/host-call-protocol.md（子文档）为准、实现须与其一致；子文档 host-call-protocol.md 与 wasmedge-runtime-layer.md 已包含「每次 run_script/run_script_file 执行前当次 Vm 已挂载 env.__pi_host_call」及 Guest 侧须从 env 导入并暴露给 JS 的说明。
+- **注入逻辑**：无需改代码，instance_wasmedge 中 build_vm 每次已挂载 env；文档已写明。
+- **宪法流程**：仅文档与 status 变更，无代码变更；单测已跑（178 passed, 1 ignored），门禁通过；提交按豁免规则不要求 [cov]。
+
+### ✅ 执行的检查与验收项
+- [✓] 协议子文档为权威、Architecture 引用已存在
+- [✓] 注入与 Guest 侧说明已存在于 host-call-protocol 与 wasmedge-runtime-layer
+- [✓] `cargo test --lib` 通过
+
+### 🔌 INTERFACE (接口变更)
+- 无
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-08 | 阻塞 | develop | - |
+
+### 本次执行说明（4 原语 e2e 整改 + 阻塞登记）
+- **4 原语 e2e 整改**：已恢复严格断言（`assert!(call_count >= 4)`）与脚本行为（`__pi_host_call` 未定义时抛错）；流程与协议文档已按计划更新。
+- **阻塞**：`test_wasmedge_e2e_primitives_script_file` 依赖 wasmedge_quickjs.wasm 向 JS 暴露 `env.__pi_host_call`。经查，**预编译的 wasmedge_quickjs.wasm 不会自动将 env 中的任意 import 暴露给 QuickJS 脚本**；需定制构建 QuickJS wasm（在 wasm 内显式 import 并绑定到 JS 全局，参见 [Second State: Calling native functions from JavaScript](https://secondstate.io/articles/call-native-functions-from-javascript/)）。在未提供定制 wasm 或胶水层前，该用例保持严格断言，**当前视为失败**，不合并“放宽版”通过；解除阻塞后须保证 4 次 host 调用均触发且断言通过。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-08 | DONE | develop | - |
+
 ### 本次执行说明
 - **提交流程改为从 status 读取覆盖率**：commit-with-status / commit-guard 不再在提交时执行 tests 与 tarpaulin；改为从当前分支对应 `status/*.md` 首个元数据表读取 Cov%，写入 commit message；读不到时提示更新 status 但不阻塞提交。Constitution、STATUS_GUIDE、COMMIT_MESSAGE_SPEC、UNIT_TEST_SPEC 已同步；各 status 文件元数据表增加 Cov% 列。
 
