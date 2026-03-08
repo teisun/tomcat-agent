@@ -1,17 +1,13 @@
-//! # WasmEngine 真实实现（feature "wasmedge" 且已安装 WasmEdge 时使用）
+//! # WasmEngine 真实实现（默认构建即包含）
 //!
 //! 依赖 WasmEdge C 库与 wasmedge-sdk；构建时需已安装 WasmEdge（见 https://wasmedge.org/docs/start/install）。
 
-use super::engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
+use super::engine_stub::WasmEngineConfig;
 use crate::infra::error::AppError;
 use std::path::PathBuf;
 use std::sync::Arc;
-use wasmedge_sdk::{
-    config::{
-        CommonConfigOptions, Config, ConfigBuilder, HostRegistrationConfigOptions,
-        RuntimeConfigOptions, StatisticsConfigOptions,
-    },
-    vm::VmBuilder,
+use wasmedge_sdk::config::{
+    CommonConfigOptions, Config, ConfigBuilder, RuntimeConfigOptions, StatisticsConfigOptions,
 };
 
 /// 全局 Wasm 引擎（真实实现：WasmEdge Config + 单例）。
@@ -38,11 +34,9 @@ impl WasmEngine {
             .measure_cost(true)
             .measure_time(true);
         let runtime = RuntimeConfigOptions::default().max_memory_pages(cfg.wasm_max_pages);
-        let host = HostRegistrationConfigOptions::default().wasi(true);
         let config = ConfigBuilder::new(common)
             .with_statistics_config(stat)
             .with_runtime_config(runtime)
-            .with_host_registration_config(host)
             .build()
             .map_err(|e| AppError::WasmEdge(e.to_string()))?;
         let quickjs_path = cfg

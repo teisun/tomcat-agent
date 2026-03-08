@@ -83,10 +83,12 @@
    - 按功能划分的 `*_tests.rs`，**必须包含** `llm_tests.rs`（以及如 `session_tests.rs`、`plugin_tests.rs`、`event_tests.rs`、`robustness_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
    - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
 4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、**LLM+Tool 路由（必选，在真实环境下验证与 LLM 的协作 chat/chat_stream）**。
-5. **Wasm 真实运行时（wasm-plugin 相关合并）**：针对 **wasm-plugin 相关合并**，须包含「Wasm 真实运行时」集成测试（在 feature `wasmedge` 下编译/运行）。至少 1 个用例：创建真实 `WasmEngine`、创建 `WasmInstance`、注册 host_binding、`run_script(js)` 触发 host_call，并断言宿主收到调用且行为符合预期（见 `tests/wasmedge_e2e_tests.rs`）。
+5. **Wasm 真实运行时（wasm-plugin 相关合并）**：针对 **wasm-plugin 相关合并**，须包含「Wasm 真实运行时」集成测试（默认构建即包含，直接编译/运行）。至少 1 个用例：创建真实 `WasmEngine`、创建 `WasmInstance`、注册 host_binding、`run_script(js)` 触发 host_call，并断言宿主收到调用且行为符合预期（见 `tests/wasmedge_e2e_tests.rs`）。
 6. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。须满足规范第 9、10 章门禁（日志 + 鲁棒性），不满足则补全后再跑全量验收。
 
 ### 合并后全量测试与验收清单
+
+**一键执行（可选）**：运行 `./scripts/run-integration-tests.sh` 会先检查 WasmEdge，未安装则自动执行 `install-wasmedge.sh -y` 并写入 profile（新开终端无需再 source），再执行全量验收命令；也可按下列清单逐项手动执行。
 
 验收项以 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)为准，注意 第 7、9、10 章门禁与验收清单为准；
 

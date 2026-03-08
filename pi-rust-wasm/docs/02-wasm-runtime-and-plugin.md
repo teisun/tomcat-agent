@@ -15,13 +15,13 @@
 
 ## 2. 设计要点
 
-- **007**：WasmEngine 全局单例、单插件独立 WasmInstance、宿主导入绑定骨架；资源上限预留 Standard 默认。**默认构建为桩实现**；启用 feature `wasmedge` 且安装 WasmEdge C 库后为真实实现（见下节）。
+- **007**：WasmEngine 全局单例、单插件独立 WasmInstance、宿主导入绑定骨架；资源上限预留 Standard 默认。**默认构建即包含 WasmEdge 真实实现**（见下节），需安装 WasmEdge C 库。
 - **008**：HostApiDispatcher 单入口多路复用；EventBus 必选，PrimitiveExecutor/ToolRegistry/LlmProvider 可选注入。
 - **009**：PluginManifest 解析与校验；PluginManager 注册/启用/禁用/卸载；卸载时调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools。
 
-## 3. WasmEdge 真实实现（feature wasmedge）
+## 3. WasmEdge 真实实现（默认包含）
 
-- **启用方式**：`cargo build --features wasmedge`；需先安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或运行 `./scripts/install-wasmedge.sh`（Linux/macOS））。默认构建（无 feature）仍为桩，保证无 WasmEdge 环境可编译。
+- **构建方式**：默认即启用 WasmEdge，`cargo build` 即可；需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install，或运行 `./scripts/install-wasmedge.sh`（Linux/macOS））。
 - **WasmEngine**：全局单例，Config 开启 WASI、统计、内存上限（max_memory_pages）；`set_memory_limit` 已预留，MVP 使用固定 Standard 值。
 - **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` 通过 wasmedge_quickjs.wasm 执行 JS。QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `PI_AWSM__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
@@ -29,9 +29,9 @@
 
 ### 集成测试要求
 
-- 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`），再执行 `cargo build --features wasmedge`、`cargo test --features wasmedge --test wasmedge_e2e_tests`；若构建或测试失败则视为集成测试失败。未安装时须按规范协助客户安装后再执行，不得以「环境未就绪」为由跳过。
+- 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。可执行 `./scripts/run-integration-tests.sh` 自动完成环境检查、未安装则安装（并写入 profile，新开终端无需再 source）、再跑集成测试；或须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`；若构建或测试失败则视为集成测试失败。
 
 ## 4. 依赖与后续
 
 - **005/006/004**：Dispatcher 通过 with_primitive/with_tools/with_llm 注入；未注入时返回明确错误，待合并后接实线。
-- **跨平台**：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build --features wasmedge` 验证。
+- **跨平台**：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build` 验证。

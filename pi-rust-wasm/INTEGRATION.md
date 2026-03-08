@@ -2,6 +2,9 @@
 
 以下由 develop 与各 feature 分支的 status 碎片自动汇总，执行 `/aggregate-status` 更新。
 
+### 问题与阻塞（待指派）
+
+（当前无未解决阻塞；develop 全量集成测试已通过，含 wasmedge_e2e_tests。历史条目：wasmedge-sdk 升级至 0.13.5-newapi + 安装脚本固定 C 0.13.5 后已解决。）
 
 ## develop
 
@@ -258,7 +261,7 @@
 
 ### ✅ 007/008 规范审查与补漏（宪法流程）
 - [✓] 导出 `invoke_host_func_with`（ext/mod.rs、lib.rs），与 INTERFACE 一致。
-- [✓] 更新 `docs/02-wasm-runtime-and-plugin.md`：真实 WasmEdge（feature wasmedge）、Node 兼容层、线性内存边界说明。
+- [✓] 更新 `docs/02-wasm-runtime-and-plugin.md`：真实 WasmEdge（默认构建即包含）、Node 兼容层、线性内存边界说明。
 - [✓] 新增 `tests/hostcall_tests.rs`：Hostcall 全链路集成测试（仅公共 API）。
 - [✓] `instance_wasmedge.rs` 中 `host_call_impl` 注释：响应缓冲区不足与线性内存边界由 WasmEdge 保证。
 - [✓] 全量单测通过（`cargo test --all`）；提交前需跑 `cargo tarpaulin --packages pi_awsm` 取覆盖率并填 commit message。
@@ -283,7 +286,7 @@
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-007 WasmEdge 运行时与 QuickJS 集成：WasmEngine/WasmInstance 桩、宿主导入绑定骨架（HostRequest/HostResponse、invoke_host_func）、Standard 资源上限预留 @2025-03-05
-- [✓] **T1-P0-007 真实实现（第 4 波次）**（2026-03-07）：feature `wasmedge` 下真实 WasmEngine 单例（Config + WASI/统计/内存上限）、WasmInstance 每插件独立 Vm、宿主导入 `env.__pi_host_call`（线性内存 get_data/set_data 与边界校验）、run_script 通过 wasmedge_quickjs.wasm（需设置 `WASMEDGE_QUICKJS_PATH`）、`set_memory_limit` 预留。默认构建（无 feature）仍为桩；启用 wasmedge 需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install）。7.6 跨平台：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build --features wasmedge` 验证。
+- [✓] **T1-P0-007 真实实现（第 4 波次）**（2026-03-07）：默认构建即包含真实 WasmEngine 单例（Config + WASI/统计/内存上限）、WasmInstance 每插件独立 Vm、宿主导入 `env.__pi_host_call`（线性内存 get_data/set_data 与边界校验）、run_script 通过 wasmedge_quickjs.wasm（需设置 `WASMEDGE_QUICKJS_PATH`）、`set_memory_limit` 预留。需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install）。7.6 跨平台：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build` 验证。
 - [✓] **[P0]** T1-P0-008 宿主 API 层与 JS 绑定：HostApiDispatcher 单入口多路复用、core Trait（PrimitiveExecutor/ToolRegistry/LlmProvider）定义、log/fs/llm/tools/events 路由与占位、invoke_host_func_with 接入 @2025-03-05
 - [✓] **T1-P0-008 第 4 波次落地**（2026-03-07）：协议与 DTO 保持 camelCase；Dispatcher 实现 4 原语、LLM、工具、事件、会话 API 真实调用（do_read_file / do_write_file / do_edit_file / do_execute_bash、do_chat / do_chat_stream、do_register_tool / do_unregister_tool / do_list_tools / do_call_tool、do_events on/once/off/emit、session getCurrentSession / getMessages / sendMessage）；新增 `dispatch_async` 异步入口，同步 `dispatch` 使用独立 Runtime block_on；注入 SessionManager（with_session）与 AuditRecorder（with_audit）；每笔 Hostcall 审计（HostcallAuditEntry、record_hostcall）；错误统一透传为 HostResponse::err；单测与 host_binding 集成测试通过。
 - [✓] **[P0]** T1-P0-009 插件生命周期管理：PluginManifest/PluginInstance/PluginStatus、parse_manifest 与校验、PluginManager 注册/启用/禁用/卸载、EventBus.remove_plugin_listeners 与 ToolRegistry.unregister_plugin_tools 清理 @2025-03-05

@@ -3,6 +3,44 @@
 | @integration_test | 2026-03-08 | DONE | develop |
 
 ### 本次执行说明
+- **提交**：wasmedge-sdk 升级至 0.13.5-newapi，WasmEdge 改为默认编译（去掉 feature wasmedge）；install-wasmedge.sh 固定 C 库 0.13.5；run-integration-tests.sh 与相关 .md 文档同步更新；规范 Review 与全量集成测试通过后更新 status。
+- **脚本**：run-integration-tests.sh 在已安装 WasmEdge 时也 source `$HOME/.wasmedge/env`，保证 `cargo test --lib` 能加载 libwasmedge。
+
+### ✅ 执行的检查与验收项
+- [✓] **构建**：`cargo build --release` 成功
+- [✓] **单元测试**：`cargo test --lib` — 178 passed，1 ignored
+- [✓] **集成测试**：event_tests、hostcall_tests、llm_tests、plugin_tests、primitives_tools_tests、robustness_tests、session_tests 通过（25 passed）
+- [✓] **Wasm 真实运行时（必选）**：`cargo test --test wasmedge_e2e_tests` 通过（已安装 WasmEdge C 0.13.5，assets/wasm/wasmedge_quickjs.wasm 存在）
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次为 Review + 脚本修正 + 结果记录）
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop |
+
+### 本次执行说明
+- **run-integration-tests.sh 与 install-wasmedge.sh -y**：新增 `scripts/run-integration-tests.sh`（集成测试前检查 WasmEdge，未安装则执行 `install-wasmedge.sh -y` 再跑全量验收）。`install-wasmedge.sh` 支持 `-y` 非交互模式并自动写入 profile，新开终端无需再执行 source。integration_test_agent、INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 已引用 run-integration-tests.sh。
+- **执行 run-integration-tests.sh**：`cargo build --release`、`cargo test --lib`、集成测试（event/hostcall/llm/plugin/primitives_tools/robustness/session）均通过；`cargo build`（默认含 WasmEdge）曾因 wasmedge-sys 与 WasmEdge C 库版本不兼容失败，见 INTEGRATION.md 条目；现已改为 wasmedge-sdk 0.13.5-newapi + 安装脚本固定 C 0.13.5。
+
+### ✅ 执行的检查与验收项
+- [✓] **构建**：`cargo build --release` 成功
+- [✓] **单元测试**：`cargo test --lib` — 179 passed，1 ignored
+- [✓] **集成测试**：event_tests、hostcall_tests、llm_tests、plugin_tests、primitives_tools_tests、robustness_tests、session_tests 通过
+- [✓] **Wasm 真实运行时（必选）**：本次执行已通过（见上方最新条目）
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次为脚本与文档）
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop |
+
+### 本次执行说明
 - **install-wasmedge.sh 与文档引用**：新增 `scripts/install-wasmedge.sh`（调用 WasmEdge 官方安装脚本；用户级安装后可选择将 `source $HOME/.wasmedge/env` 写入 shell profile 使新开终端生效）。INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 增加脚本引用；wasmedge_e2e_tests.rs panic 提示增加「或运行 ./scripts/install-wasmedge.sh」。
 - **环境**：macOS / develop 分支；全量验收清单已执行。
 
@@ -11,7 +49,7 @@
 - [✓] **单元测试**：`cargo test --lib` — 178 passed，1 ignored
 - [✓] **集成测试**：`cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests` — 25 passed（不含 wasmedge_e2e_tests）
 - [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 完整
-- [ ] **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 须先安装 WasmEdge（可运行 `./scripts/install-wasmedge.sh`）后执行 `cargo test --features wasmedge --test wasmedge_e2e_tests`；本次若未安装则待安装后补跑，失败即验收不通过。
+- [ ] **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 须先安装 WasmEdge（可运行 `./scripts/install-wasmedge.sh`）后执行 `cargo test --test wasmedge_e2e_tests`；本次若未安装则待安装后补跑，失败即验收不通过。
 
 ### 🔌 INTERFACE (接口变更)
 - 无（本次为脚本与文档引用，未改 lib/API）
@@ -33,21 +71,21 @@
 
 ### 本次执行说明
 - **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、02-wasm-runtime-and-plugin、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
-- **环境**：macOS / develop 分支；按新规范 Wasm 真实运行时为必选，待安装 WasmEdge 后执行 `cargo test --features wasmedge --test wasmedge_e2e_tests` 补跑，否则验收不通过。
+- **环境**：macOS / develop 分支；按新规范 Wasm 真实运行时为必选，待安装 WasmEdge 后执行 `cargo test --test wasmedge_e2e_tests` 补跑，否则验收不通过。
 
 ### ✅ 执行的检查与验收项
 - [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
 - [✓] **单元测试**：`cargo test` — 178 passed，1 ignored（`chat_real_request_response_print`）
-- [✓] **集成测试**：`cargo test --test '*'` — 不含 wasmedge 时 25 passed（event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）；wasmedge_e2e_tests 须以 `--features wasmedge` 运行且已安装 WasmEdge，否则该用例失败（规范禁止跳过）。
+- [✓] **集成测试**：`cargo test --test '*'` — 不含 wasmedge 时 25 passed（event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）；wasmedge_e2e_tests 默认构建即包含，须已安装 WasmEdge 后运行，否则该用例失败（规范禁止跳过）。
 - [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
 - [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests` 通过
 - [ ] **Clippy**：存在 6 条 lib 警告，既有问题，未满足「无警告」门禁
 - [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
-- [ ] **Wasm 真实运行时（必选）**：按新规范环境缺失不得跳过，须先安装 WasmEdge 后执行 `cargo build --features wasmedge`、`cargo test --features wasmedge --test wasmedge_e2e_tests`，失败即视为验收不通过；待按规范安装依赖后补跑。
+- [ ] **Wasm 真实运行时（必选）**：按新规范环境缺失不得跳过，须先安装 WasmEdge 后执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`，失败即视为验收不通过；待按规范安装依赖后补跑。
 
 ### 🔌 INTERFACE (接口变更)
 - **规范**：INTEGRATION_TEST_SPEC 5.4 修订为环境缺失不允许跳过、须协助安装、失败即失败；integration_test_agent 验收项「Wasm 真实运行时」改为必选；PRACTICE 场景 A 与 docs/02-wasm-runtime-and-plugin 补充集成测试要求。
-- **测试**：`tests/wasmedge_e2e_tests.rs` 去掉跳过逻辑，环境缺失时 panic，须在安装 WasmEdge 后以 `--features wasmedge` 运行。
+- **测试**：`tests/wasmedge_e2e_tests.rs` 去掉跳过逻辑，环境缺失时 panic，须在安装 WasmEdge 后运行（默认构建即包含）。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
