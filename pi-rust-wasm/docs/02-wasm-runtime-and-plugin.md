@@ -27,6 +27,71 @@
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
 - **线性内存边界**：Hostcall 时宿主通过 WasmEdge 的 `get_data`/`set_data` 访问线性内存；**边界检查由 WasmEdge 运行时保证**，防止越界访问。响应缓冲区不足时仅回写长度，由 guest 重试更大缓冲区。
 
+### 3.1 从实例化到 QuickJS 与 host_call 的执行链
+
+本节描述从 WasmEngine 单例创建、WasmInstance 创建与宿主导入注册，到单次 `run_script`/`run_script_file` 执行（新建 Vm、挂载 env 与 WasiModule、加载 quickjs wasm、执行 `_start`），再到 JS 中调用 `__pi_host_call` 时宿主侧处理的完整代码链。宿主导入回调由调用方通过 `register_host_binding` 注入，通常封装 `invoke_host_func_with(Some(&dispatcher), plugin_id, request_json)` 并将 `HostResponse` 序列化为字符串；Dispatcher 按 module/method 路由到 4 原语、LLM、工具、事件、会话等实现。
+
+**执行流程概览（创建与单次运行）**
+
+```mermaid
+flowchart TB
+  subgraph engine [Engine and Instance]
+    global[WasmEngine::global]
+    create[create_instance]
+    newInst[WasmInstance::new]
+    regBind[register_host_binding]
+    global --> create --> newInst --> regBind
+  end
+  subgraph run [run_script_file_impl]
+    wasi[WasiModule::create]
+    buildVm[build_vm]
+    store[Store env plus wasi]
+    loadMod[Module::from_file quickjs]
+    regMod[register_module quickjs]
+    runStart[run_func _start]
+    wasi --> buildVm --> store --> loadMod --> regMod --> runStart
+  end
+  regBind -.->|invoke_fn stored in HostData| buildVm
+  runStart -.->|JS runs in quickjs| guest
+  subgraph guest [Guest: wasmedge_quickjs.wasm]
+    js[JS calls __pi_host_call]
+  end
+```
+
+**JS 调用 __pi_host_call 时（宿主侧）**
+
+```mermaid
+flowchart LR
+  subgraph hostcall [host_call_impl]
+    hc[host_call_impl]
+    getMem[get_data ptr len]
+    invoke[host_invoke request_json]
+    setMem[set_data response]
+    hc --> getMem --> invoke --> setMem
+  end
+  guest2[__pi_host_call ptr len] --> hc
+  invoke -.->|typically| disp[invoke_host_func_with + Dispatcher]
+```
+
+- **build_vm 懒创建 env**：仅在首次调用 `build_vm` 时用 `ImportObjectBuilder` 创建 env 模块（含 `__pi_host_call`），之后复用同一 `import_object`；`HostData` 携带 `plugin_id` 与 `host_invoke`。
+- **每次执行新建 Vm 与 WasiModule**：每次 `run_script`/`run_script_file` 都会先设置当次 `WasiModule`（argv、preopen），再 `build_vm` 得到新 Vm（Store 持有当次 env + wasi），然后加载 quickjs 模块并执行 `_start`。
+- **Guest 侧**：wasmedge_quickjs.wasm 须从 env 导入 `__pi_host_call` 并暴露给 JS，JS 方能通过约定协议调用宿主；协议与调用约定见 [Hostcall JSON 协议](../openspec/specs/architecture/host-call-protocol.md)。
+
+**关键代码节点**
+
+| 阶段 | 文件 | 函数/位置 | 作用 |
+|------|------|-----------|------|
+| A | `src/ext/engine_wasmedge.rs` | `WasmEngine::global` | 构建 WasmEdge Config（WASI/统计/内存上限）、解析 quickjs_path，返回引擎单例 |
+| A | `src/ext/engine_wasmedge.rs` | `WasmEngine::create_instance` | 调用 `WasmInstance::new`，创建单插件独立实例 |
+| A | `src/ext/instance_wasmedge.rs` | `WasmInstance::new` | 保存 config、plugin_id、quickjs_path；import_object / wasi_module 尚未创建 |
+| A | `src/ext/instance_wasmedge.rs` | `WasmInstance::register_host_binding` | 将「request_json → response_json」回调存入 `host_invoke`，供后续 build_vm 的 HostData 使用 |
+| B | `src/ext/instance_wasmedge.rs` | `run_script_file_impl` | 设置 WasiModule（argv/preopen）、build_vm、加载 quickjs 模块、执行 _start |
+| B | `src/ext/instance_wasmedge.rs` | `build_vm` | 懒创建 env（含 __pi_host_call）、将 env + wasi 放入 Store、构造 Vm |
+| B | `src/ext/instance_wasmedge.rs` | `ImportObjectBuilder::new("env", HostData).with_func("__pi_host_call", host_call_impl)` | 将宿主导入函数注册到 env 模块，HostData 携带 plugin_id 与 host_invoke |
+| B | wasmedge_sdk | `Module::from_file` / `Vm::register_module` / `Vm::run_func` | 加载 wasmedge_quickjs.wasm、注册为 "quickjs"、执行 _start 运行 JS |
+| C | `src/ext/instance_wasmedge.rs` | `host_call_impl` | 从线性内存读取 request_json，调用 host_invoke，将 response 写回内存并返回长度 |
+| — | `src/ext/host_binding.rs` | `invoke_host_func_with` | 宿主导入回调通常封装此函数；解析 HostRequest、交给 HostApiDispatcher::dispatch、返回 HostResponse 序列化字符串 |
+
 ### 集成测试要求
 
 - 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。可执行 `./scripts/run-integration-tests.sh` 自动完成环境检查、未安装则安装（并写入 profile，新开终端无需再 source）、再跑集成测试；或须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`；若构建或测试失败则视为集成测试失败。

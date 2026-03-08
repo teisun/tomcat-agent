@@ -4,9 +4,41 @@
 
 ### 问题与阻塞（待指派）
 
-（当前无未解决阻塞；develop 全量集成测试已通过，含 wasmedge_e2e_tests。历史条目：wasmedge-sdk 升级至 0.13.5-newapi + 安装脚本固定 C 0.13.5 后已解决。）
+| 阻塞项 | 分支 | 原因 | 预计解决 |
+| :--- | :--- | :--- | :--- |
+| **wasmedge_quickjs 未向 JS 暴露 __pi_host_call** | develop | `test_wasmedge_e2e_primitives_script_file` 依赖 wasmedge_quickjs.wasm 将 env 中的 `__pi_host_call` 暴露给 QuickJS 脚本；预编译的 wasmedge_quickjs.wasm 不会自动暴露任意 env import | 定制构建 QuickJS wasm（在 wasm 内显式 import 并绑定到 JS 全局），或提供胶水层；参见 [Second State: Calling native functions from JavaScript](https://secondstate.io/articles/call-native-functions-from-javascript/) |
+| clippy 6 条 lib 警告 | develop | 规范要求门禁无警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned 等） | 各模块按 clippy 建议修复 |
+
+历史：wasmedge-sdk 升级至 0.13.5-newapi + 安装脚本固定 C 0.13.5 已解决构建/加载问题；当前阻塞为 4 原语 e2e 用例对 Guest 侧 __pi_host_call 暴露的依赖。
 
 ## develop
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-08 | DONE | develop | - |
+
+### 本次执行说明（host_call 协议与宪法流程）
+- **协议子文档为权威**：Architecture 第 3 节已写明 Hostcall 与 Guest 的 JSON 协议以 host-call-protocol.md 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
+- **注入与 Guest 侧说明**：host-call-protocol 第 5 节、wasmedge-runtime-layer 4.1 已补充「执行时注入」及 Guest 须从 env 导入并暴露给 JS；无代码改动，仅文档更新。
+
+### ✅ 执行的检查与验收项
+- [✓] Architecture §3 协议权威表述、host-call-protocol / wasmedge-runtime-layer 注入与 Guest 侧说明已就绪
+- [✓] 符合宪法完成定义（文档更新到位）
+
+### 🔌 INTERFACE (接口变更)
+- 无
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-08 | 阻塞 | develop | - |
+
+### 本次执行说明（4 原语 e2e 整改 + 阻塞登记）
+- **4 原语 e2e 整改**：已恢复严格断言（`assert!(call_count >= 4)`）与脚本行为（`__pi_host_call` 未定义时抛错）；流程与协议文档已按计划更新。
+- **阻塞**：`test_wasmedge_e2e_primitives_script_file` 依赖 wasmedge_quickjs.wasm 向 JS 暴露 `env.__pi_host_call`；预编译 wasm 不会自动暴露，需定制 wasm 或胶水层；该用例当前视为失败，不合并放宽版通过。
+
+---
 
 | Owner | Update Time | State | Branch |
 | :--- | :--- | :--- | :--- |
