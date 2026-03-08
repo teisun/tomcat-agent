@@ -2,7 +2,7 @@
 | :--- | :--- | :--- | :--- |
 | wasm_plugin_agent | 2026-03-08 10:15 | DONE | feature/wasm-plugin |
 
-**PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](pi-rust-wasm/agents/PLAN.md)。
+**PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](../agents/PLAN.md)。
 
 ### ✅ 007/008 规范审查与补漏（宪法流程）
 - [✓] 导出 `invoke_host_func_with`（ext/mod.rs、lib.rs），与 INTERFACE 一致。
@@ -26,7 +26,7 @@
 - [✓] **注释**：按 COMMENT_SPEC 为 engine_wasmedge、instance_wasmedge、host_binding、dispatcher 补充 `# Errors`/`# Arguments`/`# Returns`；dispatcher 中 `Runtime::new().expect` 增加说明。
 
 ### ✅ 提交规范与文档（2026-03-08）
-- [✓] **Commit Message**：Constitution 附录增加 what+why 示例；新增 [COMMIT_MESSAGE_SPEC.md](pi-rust-wasm/openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)，commit-guard、commit-with-status 引用该规范；详细描述须写动机、作用与意义，禁止流水账。
+- [✓] **Commit Message**：Constitution 附录增加 what+why 示例；新增 [COMMIT_MESSAGE_SPEC.md](../openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)，commit-guard、commit-with-status 引用该规范；详细描述须写动机、作用与意义，禁止流水账。
 - [✓] **资源**：assets/wasm/wasmedge_quickjs.wasm 纳入仓库，便于本地与 CI 使用配置路径。
 
 ### ✅ DONE (已完成)

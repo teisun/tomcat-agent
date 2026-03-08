@@ -3,6 +3,15 @@
 | @integration_test | 2026-03-08 | DONE | develop |
 
 ### 本次执行说明
+- **引用路径修复**：全项目 .md 链接按「相对当前文件」修正。.cursor/commands/commit-with-status.md、.cursor/rules/commit-guard.mdc 使用 `../../openspec/...`；INTEGRATION.md、status/feature-wasm-plugin.md 去掉 `pi-rust-wasm/` 前缀，保证单仓内链接可解析。
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop |
+
+### 本次执行说明
 - **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、02-wasm-runtime-and-plugin、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
 - **环境**：macOS / develop 分支；按新规范 Wasm 真实运行时为必选，待安装 WasmEdge 后执行 `cargo test --features wasmedge --test wasmedge_e2e_tests` 补跑，否则验收不通过。
 

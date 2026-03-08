@@ -28,18 +28,18 @@ description: 按宪法执行提交前全量检查、status 更新与合规提交
 
 ## 2. 更新本分支的 status 文件（每次提交必须）
 
-- **分支与 status 对应**（与 [Status 规范](openspec/specs/guides/STATUS_GUIDE.md) 一致）：
+- **分支与 status 对应**（与 [Status 规范](../../openspec/specs/guides/STATUS_GUIDE.md) 一致）：
   - `feature/xxx` → 更新 `status/feature-xxx.md`
   - `develop` → 更新 `status/develop.md`
   - 其他分支名 → `status/<分支名/替换为->.md`
 - **Agent 必须**：在 commit 前确认本次提交已修改或已包含对上述 status 文件的更新；若未更新，先根据本次改动更新 status 文件（含元数据表时间、DONE/INTERFACE/BLOCKED），再纳入本次提交。
-- Status 格式细节见 [STATUS_GUIDE.md](openspec/specs/guides/STATUS_GUIDE.md)（仅用 H3、表格对齐、State 取值等）。
+- Status 格式细节见 [STATUS_GUIDE.md](../../openspec/specs/guides/STATUS_GUIDE.md)（仅用 H3、表格对齐、State 取值等）。
 
 ---
 
 ## 3. Commit Message 格式（宪法附录）
 
-必须符合 [Commit Message 规范](openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)：**首行写做了什么（what），详细描述写为什么这么做、作用与意义（why），禁止记流水账**。
+必须符合 [Commit Message 规范](../../openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)：**首行写做了什么（what），详细描述写为什么这么做、作用与意义（why），禁止记流水账**。
 
 - **类型**：`feat` | `fix` | `docs` | `style` | `refactor` | `test` | `chore`
 - **豁免（可不写覆盖率）**：以下情况**不需要**填写 `[cov = xx.x%]`：
