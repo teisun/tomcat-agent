@@ -168,6 +168,9 @@
       getContextUsage: function () {
         return hostCall('context', 'getContextUsage', {}).data;
       },
+      compact: function (options) {
+        return hostCall('context', 'compact', { options: options || {} });
+      },
       ui: {
         notify: function (message, type) {
           return hostCall('context', 'uiNotify', { message: message, type: type });

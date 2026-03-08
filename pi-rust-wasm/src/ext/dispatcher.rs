@@ -141,6 +141,7 @@ impl HostApiDispatcher {
             ("context", "hasPendingMessages") => Ok(Self::do_context_has_pending()),
             ("context", "shutdown") => Ok(Self::do_context_shutdown()),
             ("context", "getContextUsage") => Ok(Self::do_context_usage()),
+            ("context", "compact") => Ok(Self::do_context_compact()),
             _ => Ok(HostResponse::err(format!(
                 "unknown API: {}.{}",
                 module, method
@@ -515,6 +516,11 @@ impl HostApiDispatcher {
 
     fn do_context_usage() -> HostResponse {
         HostResponse::ok(serde_json::json!({ "tokens": null, "contextWindow": 0, "percent": null }))
+    }
+
+    fn do_context_compact() -> HostResponse {
+        tracing::info!("[context] compact requested by plugin");
+        HostResponse::ok(serde_json::Value::Null)
     }
 
     async fn do_send_message(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {

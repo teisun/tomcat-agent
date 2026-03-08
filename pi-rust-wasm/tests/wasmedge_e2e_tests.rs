@@ -160,6 +160,64 @@ fn test_wasmedge_e2e_bridge_layer() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 事件分发集成测试：宿主通过 dispatch_event 向插件脚本分发事件，
+/// 验证 pi.on 注册的 handler 被触发、ctx 代理对象的动态方法（isIdle/hasPendingMessages/
+/// getSystemPrompt/getContextUsage/compact/ui.notify）均触发 hostCall。
+/// 断言：events.subscribe 1 + context.* 至少 6 + agent.log 1 = 总计 ≥ 8 次 hostCall。
+#[test]
+fn test_wasmedge_e2e_event_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!("集成测试要求 wasmedge_quickjs.wasm 存在。");
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let plugin_js = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasmedge_quickjs/event_dispatch_test.js");
+    assert!(
+        plugin_js.exists(),
+        "fixture event_dispatch_test.js 必须存在: {:?}",
+        plugin_js
+    );
+    let mut instance = engine.create_instance("event-dispatch-e2e")?;
+    let call_count = std::sync::Arc::new(AtomicU32::new(0));
+    let count = std::sync::Arc::clone(&call_count);
+    instance.register_host_binding(move |request_json: &str| {
+        count.fetch_add(1, Ordering::SeqCst);
+        let req: serde_json::Value =
+            serde_json::from_str(request_json).unwrap_or(serde_json::Value::Null);
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let resp = match method {
+            "isIdle" => serde_json::json!({"ok":true,"data":{"idle":true}}),
+            "hasPendingMessages" => serde_json::json!({"ok":true,"data":{"pending":false}}),
+            "getSystemPrompt" => serde_json::json!({"ok":true,"data":{"prompt":""}}),
+            "getContextUsage" => {
+                serde_json::json!({"ok":true,"data":{"tokens":null,"contextWindow":0,"percent":null}})
+            }
+            _ => serde_json::json!({"ok":true,"data":null}),
+        };
+        Ok(serde_json::to_string(&resp).unwrap())
+    })?;
+    instance.dispatch_event(
+        &plugin_js,
+        "test_event",
+        &serde_json::json!({ "hello": "world" }),
+        &serde_json::json!({ "cwd": "/tmp", "hasUI": false, "model": null }),
+    )?;
+    let n = call_count.load(Ordering::SeqCst);
+    assert!(
+        n >= 8,
+        "事件分发测试须触发 ≥ 8 次 hostCall（subscribe+isIdle+hasPending+getSystemPrompt+getContextUsage+compact+uiNotify+log），实际 {} 次",
+        n
+    );
+    Ok(())
+}
+
 /// 4 原语 .js 测试：执行 primitives_test.js，须断言宿主侧 4 次 host 调用（readFile/writeFile/editFile/executeBash 各 1 次）。
 /// 符合 INTEGRATION_TEST_SPEC 5.4：断言 host_call 被调用、返回符合预期；不得降低断言或改为可选校验（Constitution 第 24 条）。
 #[test]

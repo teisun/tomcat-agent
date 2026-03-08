@@ -2,6 +2,24 @@
 | :--- | :--- | :--- | :--- | :--- |
 | @bridge_layer | 2026-03-08 | DONE | develop | - |
 
+### 本次执行说明（Phase 3：事件分发 + ctx 代理对象 + 集成测试）
+- **dispatch_event**：`WasmInstance` 新增 `dispatch_event(plugin_script, event_type, data, context)` 方法，将插件脚本 + `__pi_dispatch_event(envelope)` 调用合并为单次 VM 执行，实现宿主向 JS 分发事件。
+- **ctx 代理对象完善**：`pi_bridge.js` 中 `__pi_dispatch_event` 构建的 ctx 新增 `compact()` 方法；Dispatcher 新增 `context.compact` 路由。ctx 完整属性：cwd（静态）、hasUI（静态）、model（静态）、isIdle()、abort()、hasPendingMessages()、shutdown()、getSystemPrompt()、getContextUsage()、compact()、ui.notify/select/confirm/input、sessionManager.getCurrent。
+- **事件分发集成测试**：新增 `event_dispatch_test.js` + `test_wasmedge_e2e_event_dispatch`，验证 handler 被触发、ctx 静态属性正确传递、ctx 动态方法（isIdle/hasPendingMessages/getSystemPrompt/getContextUsage/compact/ui.notify）均触发 hostCall，断言总调用 ≥ 8 次。
+
+### ✅ 执行的检查与验收项
+- [✓] `cargo fmt --check` 通过
+- [✓] `cargo clippy --all-targets` 通过（仅既有警告）
+- [✓] `cargo test` — 全量通过（unit + 6 wasm e2e 含 event_dispatch）
+- [✓] 事件分发 e2e `call_count >= 8` 严格断言通过
+
+### 🔌 INTERFACE (接口变更)
+- `WasmInstance::dispatch_event(plugin_script, event_type, data, context)` — 宿主主动向 JS 分发事件
+- Dispatcher 新增路由：`context.compact`
+- `pi_bridge.js` ctx 新增：`compact()`
+
+---
+
 ### 本次执行说明（Phase 2：pi-mono 兼容桥接层 + 集成测试）
 - **pi_bridge.js**：新增 `assets/js/pi_bridge.js`，构建 `globalThis.pi` 对象（on/exec/readFile/writeFile/editFile/registerTool/registerCommand/createChatCompletion/session/sendMessage/log 等），全部通过 `__pi_host_call` JSON 路由到宿主 Dispatcher。含 `__pi_dispatch_event`（事件分发入口）与 `__pi_execute_tool`（工具执行入口）。
 - **run_script_file_impl 预加载**：改造 `instance_wasmedge.rs`，`run_script_file_impl` 在执行用户脚本前自动拼接 `pi_bridge.js`（从 `assets/js/` 或 `PI_BRIDGE_JS_PATH` 环境变量加载），确保用户脚本中 `pi` 全局对象可用。

@@ -195,6 +195,38 @@ impl WasmInstance {
         Ok(())
     }
 
+    /// 向已加载的插件脚本分发事件：重新执行插件脚本（注册 handler），
+    /// 然后调用 `__pi_dispatch_event(envelope)`，触发匹配的 `pi.on(...)` 回调。
+    ///
+    /// 由于 WasmEdge + QuickJS 的 VM 是短生命周期的（每次执行新建），
+    /// 此方法会将 plugin_script + dispatch 代码合并后一次性执行。
+    ///
+    /// # Errors
+    /// * [`AppError::QuickJS`] - 事件 JSON 序列化失败。
+    /// * 其他错误同 [`run_script`]。
+    pub fn dispatch_event(
+        &mut self,
+        plugin_script: &Path,
+        event_type: &str,
+        event_data: &serde_json::Value,
+        context: &serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        let user_code = std::fs::read_to_string(plugin_script).map_err(AppError::Io)?;
+        let envelope = serde_json::json!({
+            "type": event_type,
+            "data": event_data,
+            "context": context,
+        });
+        let envelope_str = serde_json::to_string(&envelope)
+            .map_err(|e| AppError::QuickJS(format!("event serialization: {e}")))?;
+        let escaped = envelope_str
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n");
+        let combined = format!("{user_code}\n__pi_dispatch_event('{escaped}');\n");
+        self.run_script(&combined)
+    }
+
     /// 销毁实例，释放资源。
     pub fn destroy(self) {}
 
