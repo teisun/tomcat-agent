@@ -9,7 +9,7 @@
 - **错误完全隔离原则**：插件与事件回调的错误独立捕获，不导致宿主崩溃
 - **全链路审计原则**：4 原语、工具调用、插件生命周期、高危操作留存完整审计日志，可追溯
 - **代码安全校验原则**：插件加载前须安全扫描，禁止恶意或越权代码加载
-- **资源硬配额 (Hard Quotas)**：配额数值**依 MemoryProfile 而定**，详见 [4.5 资源与内存模式](04-wasmedge-runtime-layer.md#45-资源与内存模式-resource--memory-profile)。
+- **资源硬配额 (Hard Quotas)**：配额数值**依 MemoryProfile 而定**，详见 [4.5 资源与内存模式](wasmedge-runtime-layer.md#45-资源与内存模式-resource--memory-profile)。
   - **内存隔离**：每个 Wasm 实例限制最大物理内存页数（Low 64 Pages，Standard/High 更大），防止插件 OOM 影响宿主。
   - **执行时限 (Gas/Instruction Limit)**：基于 WasmEdge 的指令计数功能，限制单次任务的最大指令数，防止死循环导致宿主 CPU 挂起。
   - **API 调用限流**：在宿主 API 分发层实现逻辑限流，防止插件高频攻击宿主可信原语。

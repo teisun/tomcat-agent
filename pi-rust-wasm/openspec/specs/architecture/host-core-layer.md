@@ -18,7 +18,7 @@
 - **最近 N 条**：上下文组装（如供给 LLM 的对话历史）仅保留「最近 N 条」消息，N 可配置（MVP 可用固定值）；不因会话变长而无界增长内存。
 - **零拷贝解析**：在生命周期允许的前提下，对 **sessions.json、config.toml、单行 JSONL** 的解析优先使用 `serde_json::from_slice` + 借用（`&'a str` 等），减少分配；跨 await 或长期持有的数据不强制零拷贝。
 
-会话路径、sessionKey/sessionId 约定及 SessionEntry、transcript 格式等见 [会话存储数据结构设计](session-storage.md)。
+会话路径、sessionKey/sessionId 约定及 SessionEntry、transcript 格式等见 [会话存储数据结构设计](session-storage.md)。存储根目录与多 agent 目录约定见 [工作目录与数据布局](work-dir-and-data-layout.md)。
 
 #### 2.2 LLM接入模块
 基于适配器模式实现统一LLM Provider Trait，兼容所有OpenAI格式大模型，支持流式响应、限流重试、Token统计、会话级模型配置，是插件调用LLM能力的唯一可信入口。

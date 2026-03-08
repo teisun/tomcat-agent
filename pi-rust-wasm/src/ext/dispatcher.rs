@@ -1,7 +1,7 @@
 //! # 宿主 API 统一分发器 (HostApiDispatcher)
 //!
 //! 单入口多路复用：根据 HostRequest 的 module/method 路由到对应 Processor。
-//! 与 Architecture 03-host-api-layer 3.3 一致；支持 4 原语、LLM、工具、事件、会话 API。
+//! 与 Architecture 宿主API层（host-api-layer）3.3 一致；支持 4 原语、LLM、工具、事件、会话 API。
 
 use crate::core::{
     ChatMessage, ChatRequest, EditOperation, LlmProvider, PrimitiveExecutor, SessionManager,

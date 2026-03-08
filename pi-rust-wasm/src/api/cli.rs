@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use crate::{load_config, normalize_path, validate_config, AppConfig, AppError, SessionManager};
+use crate::{
+    ensure_work_dir_structure, load_config, normalize_path, validate_config, AppConfig, AppError,
+    SessionManager,
+};
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi/agent/config.toml";
 
@@ -169,6 +172,10 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
         println!("配置不合法: {}", e);
         return Ok(());
     }
+    if let Err(e) = ensure_work_dir_structure(&cfg) {
+        println!("创建工作目录失败: {}", e);
+        return Ok(());
+    }
     println!("配置合法。");
     // WasmEdge/QuickJS 可用性：占位，后续由 wasm_plugin 对接
     println!("WasmEdge/QuickJS 检测: 占位（待 T1-P0-009 完成后对接）");
@@ -210,6 +217,7 @@ pub(crate) fn run_config(sub: ConfigSub) -> Result<(), AppError> {
 
 pub(crate) fn run_session(sub: SessionSub) -> Result<(), AppError> {
     let cfg = load_config(None)?;
+    ensure_work_dir_structure(&cfg)?;
     let mgr = SessionManager::from_sessions_dir(&cfg.storage.sessions_dir)?;
     match sub {
         SessionSub::List => {

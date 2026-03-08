@@ -17,8 +17,8 @@ pub use audit::{
     TracingAuditRecorder,
 };
 pub use config::{
-    load_config, validate_config, AppConfig, LlmConfig, LogConfig, PrimitiveConfig, SecurityConfig,
-    WasmConfig,
+    ensure_work_dir_structure, get_work_dir, load_config, validate_config, AppConfig, LlmConfig,
+    LogConfig, PrimitiveConfig, SecurityConfig, WasmConfig,
 };
 pub use error::AppError;
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};

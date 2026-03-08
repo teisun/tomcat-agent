@@ -7,7 +7,7 @@
 - 全局WasmEdge Engine：全局唯一初始化，负责Wasm模块编译、内存管理、实例调度，仅一次初始化开销
 - 插件独立Wasm实例：每个插件对应一个独立的WasmEdge实例，专属线性内存、调用栈、QuickJS上下文，故障不扩散、数据不串扰
 - QuickJS运行时：WasmEdge官方优化版QuickJS引擎，内置到Wasm实例中，原生支持JS/TS代码执行，无需手动打包嵌入
-- 宿主导入绑定：将宿主API显式注册到Wasm实例的导入表，映射为QuickJS全局对象，插件可直接调用，调用请求通过WasmEdge通道转发到宿主层执行
+- 宿主导入绑定：将宿主API显式注册到Wasm实例的导入表；每次 `run_script`/`run_script_file` 执行前当次 Vm 已挂载 env 模块及 `env.__pi_host_call`。Guest 侧（wasmedge_quickjs.wasm）须从 env 导入并暴露给 JS，插件方可直接调用；调用请求通过 WasmEdge 通道转发到宿主层执行（协议见 [host-call-protocol](host-call-protocol.md)）
 - WASI标准支持：原生支持WASI Preview2、WASI-Socket、WASI-HTTP，网络、文件IO能力受宿主权限管控
 
 #### 4.2 插件加载执行流程

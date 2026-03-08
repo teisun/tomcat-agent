@@ -2,9 +2,12 @@
 //!
 //! 配置结构体、加载与合并、合法性校验。多源合并顺序：默认值 → 配置文件 → 环境变量（前缀 `PI_AWSM__`，分隔符 `__`）。
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use super::error::AppError;
+use super::platform::normalize_path;
 
 /// 插件或操作的权限等级，用于 4 原语与工具访问控制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -113,9 +116,12 @@ impl Default for LlmConfig {
     }
 }
 
-/// 存储配置：会话目录等。
+/// 存储配置：工作根目录、会话目录等。详见 openspec/specs/architecture/work-dir-and-data-layout.md。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
+    /// 工作根目录；默认未设置时由 [`get_work_dir`] 解析为可执行文件目录下的 `.pi_wasm`。支持 `~` 与相对路径。
+    #[serde(default)]
+    pub work_dir: Option<String>,
     #[serde(default = "default_sessions_dir")]
     pub sessions_dir: String,
 }
@@ -127,6 +133,7 @@ fn default_sessions_dir() -> String {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
+            work_dir: None,
             sessions_dir: default_sessions_dir(),
         }
     }
@@ -282,6 +289,36 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;
     Ok(merged)
+}
+
+/// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则为可执行文件目录下的 `.pi_wasm`。
+///
+/// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
+pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    if let Some(ref s) = cfg.storage.work_dir {
+        let s = s.trim();
+        if !s.is_empty() {
+            return normalize_path(s);
+        }
+    }
+    let exe = std::env::current_exe().map_err(AppError::Io)?;
+    Ok(exe
+        .parent()
+        .map(|d| d.join(".pi_wasm"))
+        .unwrap_or_else(|| PathBuf::from(".pi_wasm")))
+}
+
+/// 启动时创建工作根目录及多 agent 子目录（当前仅 agentId=default）。若目录已存在则跳过。
+///
+/// 创建：`work_dir`、`work_dir/agents/default/sessions`、`plugins`、`tmp`、`logs`、`wasm`，以及 `work_dir/wasm`（全局）。
+pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
+    let work = get_work_dir(cfg)?;
+    let default_agent = work.join("agents").join("default");
+    for sub in ["sessions", "plugins", "tmp", "logs", "wasm"] {
+        std::fs::create_dir_all(default_agent.join(sub)).map_err(AppError::Io)?;
+    }
+    std::fs::create_dir_all(work.join("wasm")).map_err(AppError::Io)?;
+    Ok(())
 }
 
 /// 配置合法性校验入口，应在启动时对 [`load_config`] 得到的配置调用。

@@ -1,5 +1,7 @@
 //! # WasmInstance 桩实现（未启用 feature "wasm" 时使用）
 
+use std::path::Path;
+
 use crate::infra::error::AppError;
 
 /// 单插件独立 Wasm 实例（桩：无真实 VM）。
@@ -17,6 +19,13 @@ impl WasmInstance {
 
     /// 执行 JS 代码（桩实现返回错误；真实实现需 QuickJS wasm）。
     pub fn run_script(&mut self, _code: &str) -> Result<serde_json::Value, AppError> {
+        Err(AppError::QuickJS(
+            "WasmEdge QuickJS stub. Real implementation requires QuickJS wasm.".to_string(),
+        ))
+    }
+
+    /// 执行指定路径的 .js 文件（桩实现返回错误）。
+    pub fn run_script_file(&mut self, _path: &Path) -> Result<serde_json::Value, AppError> {
         Err(AppError::QuickJS(
             "WasmEdge QuickJS stub. Real implementation requires QuickJS wasm.".to_string(),
         ))

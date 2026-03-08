@@ -482,7 +482,7 @@ pub enum PluginStatus {
 
 ## 会话管理数据结构设计
 
-- 会话路径、sessionKey/sessionId、元数据 store（sessions.json）、对话 transcript（pi 系 JSONL）及 SessionEntry/SessionHeader/EntryBase 等类型定义，**均以 [Architecture.md](../../specs/Architecture.md) 中「会话存储数据结构设计」为准**；MVP 实现直接引用该节，此处不再重复。
+- 会话路径、sessionKey/sessionId、元数据 store（sessions.json）、对话 transcript（pi 系 JSONL）及 SessionEntry/SessionHeader/EntryBase 等类型定义，**均以 [Architecture.md](../../specs/Architecture.md) 中「会话存储数据结构设计」为准**；MVP 实现直接引用该节，此处不再重复。配置与数据布局（工作根目录 work_dir、多 agent 目录）见 [工作目录与数据布局](../../specs/architecture/work-dir-and-data-layout.md)。
 
 - 消息管理
     - 增（Create）：通过 SessionManager 的 appendMessage、appendThinkingLevelChange、appendModelChange、appendCompaction、appendSessionInfo、appendLabelChange 等，在内存里追加 entry 并持久化到 JSONL。

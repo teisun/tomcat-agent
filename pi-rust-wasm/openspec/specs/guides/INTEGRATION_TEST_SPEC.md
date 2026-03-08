@@ -101,10 +101,12 @@ my_project/
 *   Mock 仅用于单元测试或尚未完成建设的内部模块；集成测试套件中必须包含与真实外部依赖协作的用例（如 LLM 的 `llm_tests.rs`）；（无 key 或不可达时要求见 5.2）。
 
 ### 5.4 Wasm 运行时（真实 WasmEdge）
-*   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：默认构建即包含 WasmEdge；在环境已安装 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。
+*   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：默认构建即包含 WasmEdge；在环境已安装 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)` 或 `run_script_file(path)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。
+*   wasmedge_quickjs 集成测试包含真实 .js 脚本：Hello World（`tests/fixtures/wasmedge_quickjs/hello.js`）与 4 原语（`tests/fixtures/wasmedge_quickjs/primitives_test.js`），依赖 WASI argv/preopen 与每次新建 Vm；工作目录与临时文件约定见 [工作目录与数据布局](../architecture/work-dir-and-data-layout.md)。
 *   **环境缺失不允许跳过或绕过**。执行全量集成测试前须已安装 WasmEdge 并配置 wasmedge_quickjs.wasm 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`）。
 *   **协助安装**：若环境未安装 WasmEdge，应协助客户全局安装。可运行 `scripts/run-integration-tests.sh` 自动检查并安装后执行全量集成测试；或运行 `scripts/install-wasmedge.sh`（Linux/macOS），或见 https://wasmedge.org/docs/start/install，再执行 `cargo build` 与 `cargo test --test wasmedge_e2e_tests`。
 *   **失败即失败**：上述构建或测试若失败，视为集成测试不通过，不得以「环境未就绪」为由跳过或记录为通过。
+*   **不得通过降低断言或放宽验收条件使用例通过**：不得通过降低断言或放宽「宿主侧行为」（如 host_call 被调用、返回符合预期）的验收条件来使用例通过；若运行时/环境不满足要求，须查因修复或记录阻塞，用例视为不通过（见 Constitution 第 24 条）。
 *   与 5.2 中 LLM 真实 API 要求并列：Wasm 与 LLM 均为「须在真实环境下验证」的外部依赖。
 
 ## 6. 断言与工具库

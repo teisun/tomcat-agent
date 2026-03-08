@@ -27,41 +27,41 @@
 
 项目的底层可信基础能力，所有上层模块均依赖该层，无任何业务逻辑，保证跨平台通用，完全基于 Rust 安全实现；包含统一错误处理、配置管理、日志与审计、跨平台适配、事件总线。
 
-详见 [1. 基础设施层（详细）](architecture/01-infrastructure-layer.md)。
+详见 [1. 基础设施层（详细）](architecture/infrastructure-layer.md)。
 
 ### 2. 宿主核心能力层
 
 项目的可信核心引擎，所有业务逻辑的底层支撑，仅在宿主层运行，不向插件开放直接访问权限；包含会话管理（含 Transcript 约定）、LLM 接入、4 原语执行引擎、工具注册中心、插件生命周期管理、权限管控。
 
-详见 [2. 宿主核心能力层（详细）](architecture/02-host-core-layer.md)。
+详见 [2. 宿主核心能力层（详细）](architecture/host-core-layer.md)。
 
 ### 3. 宿主API层
 
-宿主向插件开放的唯一可信接口，完全对齐 pi-mono ExtensionAPI 规范；包含核心 Agent API 表、Node.js 兼容层、统一 Hostcall 通信协议（含高并发分发、异步 Hostcall、细粒度锁定及 AI 实现指导）。
+宿主向插件开放的唯一可信接口，完全对齐 pi-mono ExtensionAPI 规范；包含核心 Agent API 表、Node.js 兼容层、统一 Hostcall 通信协议（含高并发分发、异步 Hostcall、细粒度锁定及 AI 实现指导）。**Hostcall 请求/响应 JSON 协议**（HostRequest、HostResponse、module/method 与 params 约定）见子文档。
 
-详见 [3. 宿主API层（详细）](architecture/03-host-api-layer.md)。
+详见 [3. 宿主API层（详细）](architecture/host-api-layer.md)。Hostcall 与 Guest 的 JSON 协议以 [Hostcall JSON 协议（子文档）](architecture/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
 
 ### 4. WasmEdge运行时层
 
 项目的沙箱隔离核心，基于 WasmEdge 官方构建，全局单例 Engine，每个插件对应独立的 Store/Instance；包含核心组件、插件加载执行流程、内存安全与数据交换、并发调度模型、资源与内存模式（MemoryProfile 表、零拷贝与流式、十一期动态切换）。
 
-详见 [4. WasmEdge运行时层（详细）](architecture/04-wasmedge-runtime-layer.md)。
+详见 [4. WasmEdge运行时层（详细）](architecture/wasmedge-runtime-layer.md)。
 
 #### 4.5 资源与内存模式 (Resource & Memory Profile)
 
-资源上限依 MemoryProfile 派生（Low/Standard/High/Auto），参数表与运行时动态切换见详细文档。详见 [4.5 资源与内存模式（详细）](architecture/04-wasmedge-runtime-layer.md#45-资源与内存模式-resource--memory-profile)。
+资源上限依 MemoryProfile 派生（Low/Standard/High/Auto），参数表与运行时动态切换见详细文档。详见 [4.5 资源与内存模式（详细）](architecture/wasmedge-runtime-layer.md#45-资源与内存模式-resource--memory-profile)。
 
 ### 5. 沙箱执行层
 
 插件代码的实际运行环境，完全隔离于宿主系统，仅能通过显式注册的宿主 API 与外界交互；包含执行上下文、权限边界、资源限制、错误隔离、模块加载。
 
-详见 [5. 沙箱执行层（详细）](architecture/05-sandbox-layer.md)。
+详见 [5. 沙箱执行层（详细）](architecture/sandbox-layer.md)。
 
 ### 6. 交互层
 
 用户与引擎交互的入口，优先实现 CLI 工具，后续扩展 Web/移动端界面；包含 CLI 交互层、IPC 接口层、前端交互层（预留）。
 
-详见 [6. 交互层（详细）](architecture/06-interaction-layer.md)。
+详见 [6. 交互层（详细）](architecture/interaction-layer.md)。
 
 ### 7. 安全设计核心原则
 
@@ -69,17 +69,23 @@
 
 详见 [7. 安全设计核心原则（详细）](architecture/security.md)。
 
-## 事件系统设计（替代原钩子设计，完全对齐pi-agent-rust）
+## 8. 事件系统设计（替代原钩子设计，完全对齐pi-agent-rust）
 
 基于发布-订阅的全局事件总线，支持同步/异步监听；事件分为 AgentEvent（流式/UI）与 ExtensionEvent（扩展钩子），与 pi-mono / pi_agent_rust 一致；扩展通过字符串事件名注册钩子，宿主在关键节点发布事件，单次回调错误不影响主流程。
 
 详见 [事件系统设计（详细）](architecture/events.md)。
 
-## 会话存储数据结构设计
+## 9. 会话存储数据结构设计
 
 会话采用元数据 store（sessions.json，sessionKey → SessionEntry）与对话 transcript（pi 系 JSONL）两层；列表与路由由 sessions.json 提供，transcript 按需流式读取、最近 N 条、零拷贝解析；SessionEntry、SessionHeader、EntryBase 及会话路径与 sessionKey/sessionId 约定见详细文档。
 
 详见 [会话存储数据结构设计（详细）](architecture/session-storage.md)。
+
+### 10. 工作目录与数据布局
+
+默认工作根目录为可执行文件目录下的 `.pi_wasm`，可配置；多 agent 子目录（sessions、plugins、tmp、logs、wasm）及全局 wasm 目录约定、启动时创建、与现有 storage/plugins 配置的兼容见详细文档。
+
+详见 [工作目录与数据布局（详细）](architecture/work-dir-and-data-layout.md)。
 
 ---
 
@@ -87,12 +93,14 @@
 
 | 文档 | 说明 |
 |------|------|
-| [architecture/01-infrastructure-layer.md](architecture/01-infrastructure-layer.md) | 基础设施层 |
-| [architecture/02-host-core-layer.md](architecture/02-host-core-layer.md) | 宿主核心能力层 |
-| [architecture/03-host-api-layer.md](architecture/03-host-api-layer.md) | 宿主API层 |
-| [architecture/04-wasmedge-runtime-layer.md](architecture/04-wasmedge-runtime-layer.md) | WasmEdge运行时层 |
-| [architecture/05-sandbox-layer.md](architecture/05-sandbox-layer.md) | 沙箱执行层 |
-| [architecture/06-interaction-layer.md](architecture/06-interaction-layer.md) | 交互层 |
+| [architecture/infrastructure-layer.md](architecture/infrastructure-layer.md) | 基础设施层 |
+| [architecture/host-core-layer.md](architecture/host-core-layer.md) | 宿主核心能力层 |
+| [architecture/host-api-layer.md](architecture/host-api-layer.md) | 宿主API层 |
+| [architecture/wasmedge-runtime-layer.md](architecture/wasmedge-runtime-layer.md) | WasmEdge运行时层 |
+| [architecture/sandbox-layer.md](architecture/sandbox-layer.md) | 沙箱执行层 |
+| [architecture/interaction-layer.md](architecture/interaction-layer.md) | 交互层 |
 | [architecture/security.md](architecture/security.md) | 安全设计核心原则 |
 | [architecture/events.md](architecture/events.md) | 事件系统设计 |
 | [architecture/session-storage.md](architecture/session-storage.md) | 会话存储数据结构设计 |
+| [architecture/work-dir-and-data-layout.md](architecture/work-dir-and-data-layout.md) | 工作目录与数据布局 |
+| [architecture/host-call-protocol.md](architecture/host-call-protocol.md) | Hostcall JSON 协议（请求/响应与 module/method 约定） |

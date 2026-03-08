@@ -1,10 +1,10 @@
 //! # WasmInstance 真实实现（默认构建即包含）
 //!
-//! 每个插件独立 Vm；run_script 通过 wasmedge_quickjs.wasm 执行 JS；宿主导入 __pi_host_call 注册到 env 模块并供 QuickJS 映射到全局 agent。
+//! 每个插件独立 Vm；run_script / run_script_file 通过 wasmedge_quickjs.wasm 执行 JS；每次执行新建 Vm + 当次 WasiModule（argv + preopen），宿主导入 __pi_host_call 注册到 env 模块。
 
 use crate::infra::error::AppError;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::fmt;
 use wasmedge_sdk::{
@@ -35,18 +35,18 @@ impl fmt::Debug for HostData {
     }
 }
 
-/// 单插件独立 Wasm 实例（真实实现：每实例一个 Vm，懒加载 quickjs wasm + 宿主导入）。
+/// 单插件独立 Wasm 实例（真实实现：每次 run_script/run_script_file 新建 Vm + 当次 WasiModule argv/preopen）。
 pub struct WasmInstance {
     config: Config,
     plugin_id: String,
-    /// 宿主导入回调：request_json -> response_json；在 build_vm 时注册到 env.__pi_host_call。
+    /// 宿主导入回调：request_json -> response_json；在构建 Vm 时注册到 env.__pi_host_call。
     #[allow(clippy::type_complexity)]
     host_invoke: Option<Arc<dyn Fn(&str) -> Result<String, AppError> + Send + Sync>>,
     /// QuickJS wasm 路径；未设置时 run_script 返回错误提示设置 WASMEDGE_QUICKJS_PATH。
     quickjs_path: Option<PathBuf>,
-    /// 懒创建：env 宿主导入模块。
+    /// 懒创建：env 宿主导入模块（Store 需持有其引用）。
     import_object: Option<wasmedge_sdk::ImportObject<HostData>>,
-    /// 懒创建：WASI 模块。
+    /// 当次执行的 WasiModule（每次 run_script/run_script_file 时新建并替换，含 argv + preopen）。
     wasi_module: Option<WasiModule>,
 }
 impl fmt::Debug for WasmInstance {
@@ -85,13 +85,34 @@ impl WasmInstance {
         })
     }
 
-    /// 执行 JS 代码：写入临时文件后由 wasmedge_quickjs.wasm 执行；需配置 quickjs 路径（config 或环境变量）。
+    /// 执行 JS 代码：写入临时文件后由 wasmedge_quickjs.wasm 执行；每次执行新建 Vm 与 WasiModule（argv + preopen），脚本会被真正执行。
     ///
     /// # Errors
     /// * [`AppError::QuickJS`] - quickjs_path 未设置或路径不存在时返回。
     /// * [`AppError::WasmEdge`] - 注册/执行 quickjs 模块失败时返回。
     /// * [`AppError::Io`] - 写入临时脚本文件失败时返回。
     pub fn run_script(&mut self, code: &str) -> Result<serde_json::Value, AppError> {
+        let (_script_path, _guard) = temp_js_file(code)?;
+        self.run_script_file_impl(&_script_path)
+    }
+
+    /// 执行指定路径的 .js 文件：由 wasmedge_quickjs.wasm 执行；每次执行新建 Vm 与 WasiModule（argv + preopen）。
+    ///
+    /// # Errors
+    /// * [`AppError::QuickJS`] - quickjs_path 未设置或路径不存在时返回。
+    /// * [`AppError::WasmEdge`] - 注册/执行 quickjs 模块失败时返回。
+    /// * [`AppError::Io`] - 路径不存在或不可读时返回。
+    pub fn run_script_file(&mut self, path: &Path) -> Result<serde_json::Value, AppError> {
+        if !path.exists() {
+            return Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("script file not found: {}", path.display()),
+            )));
+        }
+        self.run_script_file_impl(path)
+    }
+
+    fn run_script_file_impl(&mut self, script_path: &Path) -> Result<serde_json::Value, AppError> {
         let quickjs_path = self
             .quickjs_path
             .clone()
@@ -101,7 +122,23 @@ impl WasmInstance {
                 )
             })?;
         let config = self.config.clone();
-        let (_temp_path, _guard) = temp_js_file(code)?;
+        let script_dir = script_path
+            .parent()
+            .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "script path has no parent")))?;
+        let script_name = script_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| AppError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "script path has no file name")))?;
+        let host_dir = script_dir
+            .canonicalize()
+            .map_err(AppError::Io)
+            .unwrap_or_else(|_| script_dir.to_path_buf());
+        let preopen = format!(".:{}", host_dir.display());
+        let argv: Vec<&str> = vec!["quickjs", script_name];
+        self.wasi_module = Some(
+            WasiModule::create(Some(argv), None, Some(vec![preopen.as_str()]))
+                .map_err(|e| AppError::WasmEdge(e.to_string()))?,
+        );
         let mut vm = self.build_vm()?;
         let module = Module::from_file(Some(&config), &quickjs_path)
             .map_err(|e| AppError::WasmEdge(e.to_string()))?;
@@ -126,6 +163,7 @@ impl WasmInstance {
     /// 销毁实例，释放资源。
     pub fn destroy(self) {}
 
+    /// 构建 Vm：env（宿主导入）+ 当次 WasiModule（已在 run_script_file_impl 中设置）。Store 持有对 self 上 import_object 与 wasi_module 的引用。
     fn build_vm(&mut self) -> Result<Vm<'_, dyn SyncInst>, AppError> {
         if self.import_object.is_none() {
             let host_data = HostData {
@@ -138,11 +176,6 @@ impl WasmInstance {
                 .with_func::<(i32, i32), i32>("__pi_host_call", host_call_impl)
                 .map_err(|e| AppError::WasmEdge(e.to_string()))?;
             self.import_object = Some(builder.build());
-        }
-        if self.wasi_module.is_none() {
-            self.wasi_module = Some(
-                WasiModule::create(None, None, None).map_err(|e| AppError::WasmEdge(e.to_string()))?,
-            );
         }
         let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
         let env = self.import_object.as_mut().unwrap();

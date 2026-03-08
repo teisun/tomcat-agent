@@ -4,7 +4,7 @@
 
 mod common;
 
-use pi_awsm::{WasmEngine, WasmEngineConfig};
+use pi_awsm::{HostResponse, WasmEngine, WasmEngineConfig};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -66,5 +66,88 @@ fn test_wasmedge_e2e_engine_instance_run_script() -> Result<(), Box<dyn std::err
     run_result?;
 
     tracing::info!("Assert: E2E 通过；具备 WasmEdge 时 host_call 可由 quickjs 触发");
+    Ok(())
+}
+
+/// 真实 .js 脚本 Hello World：用 run_script_file 执行 tests/fixtures/wasmedge_quickjs/hello.js，断言返回 Ok。
+#[test]
+fn test_wasmedge_e2e_hello_world_script_file() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let hello_js = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasmedge_quickjs/hello.js");
+    assert!(hello_js.exists(), "fixture hello.js 必须存在: {:?}", hello_js);
+    let mut instance = engine.create_instance("hello-e2e")?;
+    instance.run_script_file(&hello_js)?;
+    Ok(())
+}
+
+/// 真实 .js 脚本 Hello World：用 run_script 内联执行 print('Hello World');，断言返回 Ok。
+#[test]
+fn test_wasmedge_e2e_hello_world_inline() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let mut instance = engine.create_instance("hello-inline")?;
+    instance.run_script("print('Hello World');")?;
+    Ok(())
+}
+
+/// 4 原语 .js 测试：执行 primitives_test.js，须断言宿主侧 4 次 host 调用（readFile/writeFile/editFile/executeBash 各 1 次）。
+/// 符合 INTEGRATION_TEST_SPEC 5.4：断言 host_call 被调用、返回符合预期；不得降低断言或改为可选校验（Constitution 第 24 条）。
+#[test]
+fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let primitives_js = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasmedge_quickjs/primitives_test.js");
+    assert!(primitives_js.exists(), "fixture primitives_test.js 必须存在: {:?}", primitives_js);
+    let mut instance = engine.create_instance("primitives-e2e")?;
+    let call_count = std::sync::Arc::new(AtomicU32::new(0));
+    let count = std::sync::Arc::clone(&call_count);
+    instance.register_host_binding(move |request_json: &str| {
+        let req: serde_json::Value = serde_json::from_str(request_json).unwrap_or(serde_json::Value::Null);
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        if ["readFile", "writeFile", "editFile", "executeBash"].contains(&method) {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(serde_json::to_string(&HostResponse::ok(serde_json::json!({ "content": "" }))).unwrap())
+    })?;
+    instance.run_script_file(&primitives_js)?;
+    let n = call_count.load(Ordering::SeqCst);
+    assert!(
+        n >= 4,
+        "4 原语测试须触发 4 次 host 调用（readFile/writeFile/editFile/executeBash），实际 {} 次；wasmedge_quickjs 须向 JS 暴露 __pi_host_call（见 INTEGRATION_TEST_SPEC 5.4、host-call-protocol.md）",
+        n
+    );
     Ok(())
 }
