@@ -23,7 +23,7 @@ fn test_wasmedge_e2e_engine_instance_run_script() -> Result<(), Box<dyn std::err
     let quickjs_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
     if !quickjs_path.exists() {
         panic!(
-            "集成测试要求 wasmedge_quickjs.wasm 路径存在。请设置 WASMEDGE_QUICKJS_PATH 或确保 {:?} 存在。见 INTEGRATION_TEST_SPEC 5.4 与 docs/02-wasm-runtime-and-plugin.md",
+            "集成测试要求 wasmedge_quickjs.wasm 路径存在。请设置 WASMEDGE_QUICKJS_PATH 或确保 {:?} 存在，或运行 ./scripts/install-wasmedge.sh。见 INTEGRATION_TEST_SPEC 5.4 与 docs/02-wasm-runtime-and-plugin.md",
             quickjs_path
         );
     }
@@ -42,7 +42,7 @@ fn test_wasmedge_e2e_engine_instance_run_script() -> Result<(), Box<dyn std::err
         Err(e) => {
             if e.to_string().contains("stub") || e.to_string().contains("WasmEdge") {
                 panic!(
-                    "集成测试要求已安装 WasmEdge 并以 cargo test --features wasmedge --test wasmedge_e2e_tests 运行，不得跳过。当前: {}。安装见 {}，规范见 INTEGRATION_TEST_SPEC 5.4 与 docs/02-wasm-runtime-and-plugin.md",
+                    "集成测试要求已安装 WasmEdge 并以 cargo test --features wasmedge --test wasmedge_e2e_tests 运行，不得跳过。当前: {}。安装见 {} 或运行 ./scripts/install-wasmedge.sh，规范见 INTEGRATION_TEST_SPEC 5.4 与 docs/02-wasm-runtime-and-plugin.md",
                     e,
                     WASMEDGE_INSTALL_URL
                 );

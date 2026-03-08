@@ -3,6 +3,26 @@
 | @integration_test | 2026-03-08 | DONE | develop |
 
 ### 本次执行说明
+- **install-wasmedge.sh 与文档引用**：新增 `scripts/install-wasmedge.sh`（调用 WasmEdge 官方安装脚本；用户级安装后可选择将 `source $HOME/.wasmedge/env` 写入 shell profile 使新开终端生效）。INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 增加脚本引用；wasmedge_e2e_tests.rs panic 提示增加「或运行 ./scripts/install-wasmedge.sh」。
+- **环境**：macOS / develop 分支；全量验收清单已执行。
+
+### ✅ 执行的检查与验收项
+- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
+- [✓] **单元测试**：`cargo test --lib` — 178 passed，1 ignored
+- [✓] **集成测试**：`cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests` — 25 passed（不含 wasmedge_e2e_tests）
+- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 完整
+- [ ] **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 须先安装 WasmEdge（可运行 `./scripts/install-wasmedge.sh`）后执行 `cargo test --features wasmedge --test wasmedge_e2e_tests`；本次若未安装则待安装后补跑，失败即验收不通过。
+
+### 🔌 INTERFACE (接口变更)
+- 无（本次为脚本与文档引用，未改 lib/API）
+
+---
+
+| Owner | Update Time | State | Branch |
+| :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop |
+
+### 本次执行说明
 - **引用路径修复**：全项目 .md 链接按「相对当前文件」修正。.cursor/commands/commit-with-status.md、.cursor/rules/commit-guard.mdc 使用 `../../openspec/...`；INTEGRATION.md、status/feature-wasm-plugin.md 去掉 `pi-rust-wasm/` 前缀，保证单仓内链接可解析。
 
 ---
