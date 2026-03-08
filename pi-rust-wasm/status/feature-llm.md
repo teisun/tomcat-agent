@@ -1,6 +1,6 @@
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| llm_agent | 2026-03-05 23:54 | ACTIVE | feature/llm |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| llm_agent | 2026-03-05 23:54 | ACTIVE | feature/llm | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** T1-P0-004 LLM 统一接入模块：core/llm 目录与类型（ChatMessage/ChatRequest/ChatResponse/StreamEvent）、LlmProvider Trait、SessionTokenUsage @2025-03-05

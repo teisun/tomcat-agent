@@ -1,6 +1,6 @@
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| infra_agent | 2025-03-04 11:00 | DONE | feature/infra |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| infra_agent | 2025-03-04 11:00 | DONE | feature/infra | - |
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-001 项目骨架与基础设施层：Rust 项目初始化、AppError、配置加载/合并/校验、tracing 分级日志、跨平台 platform 工具 @2025-03-03

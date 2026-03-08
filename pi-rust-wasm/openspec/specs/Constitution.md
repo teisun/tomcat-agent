@@ -31,7 +31,7 @@
         - 阅读 [编码规范](./guides/Codeing&Architecture_Spec.md)
    - **开发流程**：
         - 根据编码规范编码开发(带注释) → 测试 → 修 bug → 单测通过 -> 写技术[文档](../../docs/)
-   - **提交前**：更新本分支的 `status/feature-xx.md`（与当前分支对应），再提交。
+   - **提交前**：更新本分支的 `status/feature-xx.md`（与当前分支对应），再提交。提交时代码变更所需的 `[cov = xx.x%]` 从该 status 文件的 Cov% 读取，不在提交时现跑测试/覆盖率。
    - **提交策略**：每个任务完成提交一次，禁止囤积多个任务一次性提交；提交到本地与远端。
 7. **阻塞主动上报**：多 Agent 协作时，遇依赖阻塞、技术问题、需求不明确，**必须在本分支的 `status/<当前分支对应文件名>.md` 中更新状态**（含阻塞原因与预计解决时间），禁止静默阻塞；不直接修改根目录 INTEGRATION.md。
 8. **提交规约**  
@@ -51,7 +51,7 @@
 1. 符合本宪法及 Architecture.md 约束。
 2. 通过规范门禁（rustfmt/clippy 等）与约定测试， 无静默高危操作、无越权。
 3. 代码review通过，确保符合[编码规范](./guides/Codeing&Architecture_Spec.md)、功能完整、注释完整、无设计缺陷、无需求遗漏
-4. 单元测试通过，算出覆盖率，参考[单元测试规范](./guides/UNIT_TEST_SPEC.md)
+4. 单元测试通过，算出覆盖率写入当前分支对应的 status 文件（如 `status/feature-xx.md`），且**填入该文件元数据表的 Cov% 列**（格式见 [Status规范](./guides/STATUS_GUIDE.md)），参考[单元测试规范](./guides/UNIT_TEST_SPEC.md)
 5. 集成测试通过，参考[集成测试规范](../specs/guides/INTEGRATION_TEST_SPEC.md)
 6. E2E测试通过
 7. 文档更新：配套说明或文档到位。

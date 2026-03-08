@@ -1,6 +1,6 @@
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| session_cli_agent | 2025-03-05 14:00 | DONE | feature/session-cli |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| session_cli_agent | 2025-03-05 14:00 | DONE | feature/session-cli | - |
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** T1-P0-003 存储层与会话管理：SessionStore、SessionEntry、sessions.json 原子写、load_store/save_store

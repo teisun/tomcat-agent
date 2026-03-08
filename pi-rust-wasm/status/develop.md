@@ -1,6 +1,21 @@
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-08 | DONE | develop | - |
+
+### 本次执行说明
+- **提交流程改为从 status 读取覆盖率**：commit-with-status / commit-guard 不再在提交时执行 tests 与 tarpaulin；改为从当前分支对应 `status/*.md` 首个元数据表读取 Cov%，写入 commit message；读不到时提示更新 status 但不阻塞提交。Constitution、STATUS_GUIDE、COMMIT_MESSAGE_SPEC、UNIT_TEST_SPEC 已同步；各 status 文件元数据表增加 Cov% 列。
+
+### ✅ 执行的检查与验收项
+- [✓] 规范与命令、规则文档已更新；status 文件已统一增加 Cov% 列
+
+### 🔌 INTERFACE (接口变更)
+- 无
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
 - **提交**：wasmedge-sdk 升级至 0.13.5-newapi，WasmEdge 改为默认编译（去掉 feature wasmedge）；install-wasmedge.sh 固定 C 库 0.13.5；run-integration-tests.sh 与相关 .md 文档同步更新；规范 Review 与全量集成测试通过后更新 status。
@@ -17,9 +32,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
 - **run-integration-tests.sh 与 install-wasmedge.sh -y**：新增 `scripts/run-integration-tests.sh`（集成测试前检查 WasmEdge，未安装则执行 `install-wasmedge.sh -y` 再跑全量验收）。`install-wasmedge.sh` 支持 `-y` 非交互模式并自动写入 profile，新开终端无需再执行 source。integration_test_agent、INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 已引用 run-integration-tests.sh。
@@ -36,9 +51,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
 - **install-wasmedge.sh 与文档引用**：新增 `scripts/install-wasmedge.sh`（调用 WasmEdge 官方安装脚本；用户级安装后可选择将 `source $HOME/.wasmedge/env` 写入 shell profile 使新开终端生效）。INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 增加脚本引用；wasmedge_e2e_tests.rs panic 提示增加「或运行 ./scripts/install-wasmedge.sh」。
@@ -56,18 +71,18 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
 - **引用路径修复**：全项目 .md 链接按「相对当前文件」修正。.cursor/commands/commit-with-status.md、.cursor/rules/commit-guard.mdc 使用 `../../openspec/...`；INTEGRATION.md、status/feature-wasm-plugin.md 去掉 `pi-rust-wasm/` 前缀，保证单仓内链接可解析。
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
 - **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、02-wasm-runtime-and-plugin、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
@@ -94,9 +109,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-07 10:26 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-07 10:26 | DONE | develop | - |
 
 ### 本次执行说明
 - **合并范围**：feature/primitives-tools（005+006）
@@ -121,9 +136,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 12:30 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 12:30 | DONE | develop | - |
 
 ### 本次执行说明
 - **合并范围**：无（用户选择「本次不合并任何分支」，直接走集成测试流程）
@@ -146,9 +161,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 11:26 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 11:26 | DONE | develop | - |
 
 ### 本次执行说明
 - **合并范围**：无（用户选择「本次无分支合并，直接走集成测试流程」）
@@ -173,9 +188,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 08:58 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 08:58 | DONE | develop | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 全量集成测试执行（按 integration_test_agent 合并后全量测试清单）：`cargo build --release`、`cargo clippy`、`cargo test`（74 单测通过、1 忽略）、`cargo test --test '*'` 执行
@@ -192,9 +207,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 08:05 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 08:05 | DONE | develop | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 集成测试规范整改：INTEGRATION_TEST_SPEC / INTEGRATION_TEST_PRACTICE / integration_test_agent 明确「集成测试不脱离真实环境、外部协作必须真实验证」；Mock 仅限单元测试或未完成建设模块；LLM 集成测试为必写项
@@ -213,9 +228,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 16:35 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 16:35 | DONE | develop | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 集成测试流程执行（按 integration_test_agent 规范）：合并范围确认为当前 develop，未执行新分支合并
@@ -234,9 +249,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 07:10 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-06 07:10 | DONE | develop | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 合并 `feature/session-cli` 至 develop（003+010）@2026-03-06；解决 Cargo.toml / lib.rs / core/mod.rs 冲突，保留 infra+llm 与 session_cli 依赖与模块
@@ -257,9 +272,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-05 22:20 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2026-03-05 22:20 | DONE | develop | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 合并 `feature/llm` 至 develop（ort strategy）@2026-03-05
@@ -277,9 +292,9 @@
 
 ---
 
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @integration_test | 2025-03-05 14:45 | DONE | develop |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @integration_test | 2025-03-05 14:45 | DONE | develop | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 文档与规范：Architecture 渐进式披露（architecture/ 子文档）、examples→guides 重命名、commit-with-status command、Constitution/design 等引用更新 @2025-03-05

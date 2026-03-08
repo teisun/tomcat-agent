@@ -32,8 +32,8 @@ description: 按宪法执行提交前全量检查、status 更新与合规提交
   - `feature/xxx` → 更新 `status/feature-xxx.md`
   - `develop` → 更新 `status/develop.md`
   - 其他分支名 → `status/<分支名/替换为->.md`
-- **Agent 必须**：在 commit 前确认本次提交已修改或已包含对上述 status 文件的更新；若未更新，先根据本次改动更新 status 文件（含元数据表时间、DONE/INTERFACE/BLOCKED），再纳入本次提交。
-- Status 格式细节见 [STATUS_GUIDE.md](../../openspec/specs/guides/STATUS_GUIDE.md)（仅用 H3、表格对齐、State 取值等）。
+- **Agent 必须**：在 commit 前确认本次提交已修改或已包含对上述 status 文件的更新；若未更新，先根据本次改动更新 status 文件（含元数据表时间、DONE/INTERFACE/BLOCKED、有代码变更时建议填 Cov%），再纳入本次提交。若本次提交含代码变更，status 最新元数据块包含 Cov% 时用于 commit message，不包含也可不填、不阻塞提交。
+- Status 格式细节见 [STATUS_GUIDE.md](../../openspec/specs/guides/STATUS_GUIDE.md)（仅用 H3、表格对齐、State 取值、Cov% 列等）。
 
 ---
 
@@ -45,7 +45,7 @@ description: 按宪法执行提交前全量检查、status 更新与合规提交
 - **豁免（可不写覆盖率）**：以下情况**不需要**填写 `[cov = xx.x%]`：
   - 本次**唯一**修改为 `status/*.md` 或 `INTEGRATION.md`；或
   - **仅修改文档、未改代码**：本次变更仅涉及文档（如 `docs/*.md`、`openspec/**`、`*.md`、guides 等），未修改 `src/`、`Cargo.toml`、测试代码等。  
-  其他含代码的提交须跑测试并填写覆盖率（见 .cursor/rules/commit-guard.mdc）。
+  其他含代码的提交：从当前分支对应的 status 文件读取 Cov%，若有则写入 commit message 的 `[cov = xx.x%]`；若读不到则提示更新 status，**但不阻塞提交**（见 .cursor/rules/commit-guard.mdc）。
 
 ---
 
@@ -54,6 +54,6 @@ description: 按宪法执行提交前全量检查、status 更新与合规提交
 1. `git status` → 列出 staged / unstaged / untracked。
 2. **帮用户执行** `git add`：将属于本次改动的文件全部加入暂存区，严禁漏提。
 3. 确认或补充更新 `status/feature-xx.md` 或 `status/develop.md`。
-4. 若含代码变更：运行 `cargo test --all`、跑覆盖率并写入 commit message；**仅文档变更则不填覆盖率**。
+4. 若含代码变更：根据当前分支解析 status 文件路径，读取最新元数据块的 Cov%；若存在则写入 commit message 的 `[cov = xx.x%]`，若不存在则提示更新 status 但不阻塞提交。**仅文档/仅 status 变更则不填覆盖率**。
 5. 按附录格式书写 commit message，执行 `git commit`。
 6. 提示：宪法要求「提交到本地与远端」，如需可执行 `git push`。

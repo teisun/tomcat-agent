@@ -22,9 +22,9 @@
 ## 2. 标准模板 (Template)
 
 ```markdown
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| @YourName | YYYY-MM-DD HH:mm | [ACTIVE/PAUSED/DONE] | branch-name |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @YourName | YYYY-MM-DD HH:mm | [ACTIVE/PAUSED/DONE] | branch-name | 85.2 |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 基础设施层核心 Trait 定义 @date
@@ -53,6 +53,7 @@
   - `PAUSED`: 暂时挂起（需在 BLOCKED 中说明原因）。
   - `DONE`: 本分支任务全部完成，准备合并。
 - **Update Time**: 必须精确到分钟，用于看板识别最新的提交状态。
+- **Cov%**（可选列）：有代码变更且完成单测时，由宪法流程填写当前行覆盖率（与 tarpaulin 一致，如 `85.2`）；仅文档或仅 status 的提交可留空或填 `-`。提交时 commit 命令从**本文件第一个元数据表**（最新块）的 Cov% 列读取；若为空或缺失且本次提交含代码变更，会**提示**先按宪法流程跑单测并更新 status，**但不阻塞提交**。
 
 ### 3.2 任务列表 (Tasks)
 - **优先级标记**：建议在任务前增加 `[P0]` (最高)、`[P1]`、`[P2]`。

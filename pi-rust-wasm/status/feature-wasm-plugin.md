@@ -1,6 +1,6 @@
-| Owner | Update Time | State | Branch |
-| :--- | :--- | :--- | :--- |
-| wasm_plugin_agent | 2026-03-08 10:15 | DONE | feature/wasm-plugin |
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| wasm_plugin_agent | 2026-03-08 10:15 | DONE | feature/wasm-plugin | - |
 
 **PLAN.md 防遗漏表述已更新**：已改为列表与分段表述、无表格，见 [agents/PLAN.md](../agents/PLAN.md)。
 
