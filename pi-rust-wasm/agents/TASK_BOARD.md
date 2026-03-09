@@ -1,0 +1,414 @@
+# 任务总看板
+
+---
+
+## 当前迭代上下文
+
+> 换迭代时只需修改本区块。
+
+| 字段 | 值 |
+|------|----|
+| 当前迭代 | `001-mvp` |
+| specs 规格文档 | [../openspec/specs/](../openspec/specs/)（含 Architecture.md、Constitution.md 及子文档） |
+| 需求设计文档 | [../openspec/changes/001-mvp/](../openspec/changes/001-mvp/)（含 task.md、tasks_details.md、design.md） |
+| 任务原子明细 | [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) |
+| 技术设计 | [Architecture.md](../openspec/specs/Architecture.md)[design.md](../openspec/changes/001-mvp/design.md) |
+
+---
+
+## 已完成任务（波次 1-4）
+
+以下任务已合并到 develop，仅作依赖参考：
+
+| 任务 ID | 名称 | 状态 |
+|---------|------|------|
+| T1-P0-001 | 项目骨架搭建与基础设施层落地 | DONE |
+| T1-P0-002 | 全局事件总线核心实现 | DONE |
+| T1-P0-003 | 存储层与会话管理模块落地 | DONE |
+| T1-P0-004 | LLM 统一接入模块落地 | DONE |
+| T1-P0-005 | 4 原语执行引擎核心实现 | DONE |
+| T1-P0-006 | 工具注册中心核心实现 | DONE |
+| T1-P0-007 | WasmEdge 运行时与 QuickJS 集成 | DONE |
+| T1-P0-008 | 宿主 API 层与 JS 绑定实现 | DONE |
+
+---
+
+## 待办任务
+
+按推荐执行顺序排列。工程师按 [Dispatcher.md](./Dispatcher.md) 流程认领。
+
+---
+
+### TASK-01 | T1-P0-009-completion | 插件生命周期 — 补完加载流程
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-lifecycle` |
+| **阻塞点** | — |
+
+**目标**：补完插件从磁盘加载到初始化运行的完整流程（9.2），使 PluginManager 能真正加载并运行一个 pi-mono 风格插件。
+
+**子项**（参考 tasks_details.md T1-P0-009）：
+- [✓] 9.1 PluginManifest/PluginInstance/PluginStatus 定义与清单解析校验
+- [ ] 9.2 完整加载流程：读取清单与 main 入口代码 → 权限校验与用户确认 → 创建 Wasm 实例 → 注册授权 API → 注入并执行插件初始化代码 → 注册到 PluginManager
+- [✓] 9.3 启用/禁用：状态切换，控制事件响应与工具调用
+- [✓] 9.4 卸载：EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools、销毁 Wasm 实例
+- [✓] 9.5 单元测试
+
+**依赖**：T1-P0-007 (DONE)、T1-P0-008 (DONE)
+
+**被依赖**：TASK-02 (T1-P0-010-completion)、TASK-03 (T1-P0-011)、TASK-05 (T1-P1-002)
+
+**协作接口**：
+- 消费：`WasmEngine::create_instance`、`HostApiDispatcher`、`EventBus`、`ToolRegistry`
+- 提供：`PluginManager::load_plugin(path)` — 完整加载 API，供 CLI plugin 子命令与 chat 调用
+
+**验收标准**：
+- `PluginManager::load_plugin` 可从磁盘路径加载插件清单、创建 Wasm 实例、注入初始化代码并运行
+- 清单非法/权限不满足/Wasm 初始化失败时错误信息清晰，宿主不崩溃、可恢复
+- 加载 → 启用 → 禁用 → 卸载全流程贯通
+- 单测覆盖率 >= 80%
+
+---
+
+### TASK-02 | T1-P0-010-completion | CLI 子命令 — 补完占位部分
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/cli-commands` |
+| **阻塞点** | — |
+
+**目标**：将 CLI 中仍为占位的子命令补充为真实实现，使 `pi-awsm` 所有子命令可正常执行。
+
+**子项**（参考 tasks_details.md T1-P0-010）：
+- [✓] 10.1 CLI 骨架（clap 子命令结构）
+- [✓] 10.2 `pi-awsm init`：引导 LLM 配置、生成配置文件
+- [ ] 10.3 `pi-awsm doctor`：补全 WasmEdge/QuickJS 可用性检测（当前为占位）
+- [ ] 10.4 `pi-awsm config`：补全 set/edit 子命令（当前为占位）
+- [✓] 10.5 `pi-awsm session`：list/new/switch/delete/archive/search
+- [ ] 10.6 `pi-awsm plugin`：list/load/unload/enable/disable/info（当前全为占位），依赖 PluginManager
+- [ ] 10.7 `pi-awsm audit`：list/show/export（当前为占位，P0 阶段可先读已有审计日志）
+- [ ] 10.8 完善帮助文档与参数校验
+
+**依赖**：TASK-01 (T1-P0-009-completion)
+
+**被依赖**：TASK-03 (T1-P0-011)
+
+**协作接口**：
+- 消费：`PluginManager`（plugin 子命令）、`AppConfig`（config 子命令）、`WasmEngine`（doctor 检测）、审计日志模块（audit 子命令）
+- 提供：完整 CLI 入口，供用户与对话模式使用
+
+**验收标准**：
+- `pi-awsm doctor` 能检测 WasmEdge/QuickJS 可用性并输出修复建议
+- `pi-awsm config set/edit` 可修改配置
+- `pi-awsm plugin list/load/unload/enable/disable/info` 可正常执行
+- `pi-awsm audit list/show/export` 可读取审计日志（或合理占位）
+- 所有子命令帮助文档完整、参数校验正确
+- 首次运行无配置时的提示友好
+
+---
+
+### TASK-03 | T1-P0-011 | CLI 对话模式核心实现
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/cli-chat` |
+| **阻塞点** | — |
+
+**目标**：实现 `pi-awsm chat`（或无参数默认进入）的交互式对话模式，支持流式渲染、多轮上下文、4 原语/工具调用与用户确认。
+
+**子项**（参考 tasks_details.md T1-P0-011）：
+- [ ] 11.1 对话主循环：读取用户输入、调用 LLM、输出响应；集成 SessionManager 与 LlmProvider
+- [ ] 11.2 流式响应渲染（crossterm/bat 等），逐字或逐块输出
+- [ ] 11.3 Markdown 与代码块高亮（bat/similar 等）
+- [ ] 11.4 多轮对话上下文：从当前会话加载历史、组装消息列表、写入新消息到 JSONL
+- [ ] 11.5 集成 4 原语与工具调用：LLM 返回 tool_calls 时展示并调用 require_user_confirmation/工具执行，结果回传 LLM
+- [ ] 11.6 快捷键：Ctrl+C 中断生成、Ctrl+D 退出、上下箭头历史导航；`--resume` 行为对齐 pi-mono
+- [ ] 11.7 边界验收：会话切换后会话级 LLM/插件配置正确隔离
+
+**依赖**：T1-P0-002 (DONE)、T1-P0-003 (DONE)、T1-P0-004 (DONE)、T1-P0-005 (DONE)、T1-P0-006 (DONE)、TASK-01 (T1-P0-009-completion)、TASK-02 (T1-P0-010-completion)
+
+**被依赖**：TASK-07 (T1-P1-004)、TASK-08 (T1-P2-001)
+
+**协作接口**：
+- 消费：`LlmProvider`（chat/chat_stream）、`SessionManager`（会话 CRUD/上下文组装）、`PrimitiveExecutor`（4 原语）、`ToolRegistry`（工具调用）、`PluginManager`（插件联动）、`EventBus`（事件通知）
+- 提供：完整 CLI 对话体验，MVP 核心交互入口
+
+**验收标准**：
+- `pi-awsm chat` 或 `pi-awsm` 可进入对话模式
+- 流式输出逐字/逐块渲染，Markdown 与代码高亮
+- 多轮上下文从 JSONL 加载并正确组装
+- LLM 返回 tool_calls 时触发用户确认、执行并回传结果
+- 用户拒绝 4 原语确认时有提示与审计记录
+- 快捷键 Ctrl+C/Ctrl+D/上下箭头正常工作
+- 会话切换后 LLM/插件配置正确隔离
+
+---
+
+### TASK-04 | T1-P1-001 | 审计日志系统完整落地
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/audit-log` |
+| **阻塞点** | — |
+
+**目标**：实现独立审计日志模块，使所有高危操作（4 原语、工具调用、插件生命周期）可追溯、可查询、可导出。
+
+**子项**（参考 tasks_details.md T1-P1-001）：
+- [ ] 1.1 独立审计日志模块：专用存储，仅追加、不可篡改；保留最近 N 天配置
+- [ ] 1.2 在 4 原语、工具调用、插件生命周期、高危操作等关键路径写入审计记录
+- [ ] 1.3 审计日志查询（按时间/类型/插件等）、导出、按策略清理
+- [ ] 1.4 `pi-awsm audit list/show/export` 子命令与审计模块对接
+- [ ] 1.5 （可选）文档说明加密存储为 TODO
+
+**依赖**：T1-P0-005 (DONE)、T1-P0-006 (DONE)
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`AppConfig`（审计配置）、现有审计日志占位接口
+- 提供：`AuditLogger` 完整实现，供 PrimitiveExecutor/ToolRegistry/PluginManager/CLI audit 子命令使用
+
+**验收标准**：
+- 审计日志仅追加、不可篡改
+- 4 原语/工具/插件操作均有完整审计记录（操作人、时间、内容、确认状态、结果）
+- `pi-awsm audit` 子命令可查询、展示、导出审计日志
+- 过期日志按配置自动清理
+
+---
+
+### TASK-05 | T1-P1-002 | pi-mono 插件兼容性测试与适配
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-compat` |
+| **阻塞点** | — |
+
+**目标**：验证并确保主流 pi-mono 社区插件可在本运行时零修改运行。
+
+**子项**（参考 tasks_details.md T1-P1-002）：
+- [ ] 2.1 挑选主流 pi-mono 社区插件（至少 3~5 个），列出依赖的 API 与 Node 模块
+- [ ] 2.2 在本运行时上执行兼容性测试，记录问题
+- [ ] 2.3 修复宿主 API、Node 兼容层、事件 payload 等兼容问题
+- [ ] 2.4 将兼容性用例固化为自动化测试
+
+**依赖**：TASK-01 (T1-P0-009-completion)
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`PluginManager`、`WasmEngine`、`HostApiDispatcher`、Node 兼容层
+- 提供：兼容性测试用例集、修复后的宿主 API / Node 兼容层
+
+**验收标准**：
+- 至少 3 个 pi-mono 主流插件可零修改加载并运行
+- 兼容性问题已修复或记录为已知限制
+- 兼容性用例固化为自动化测试
+
+---
+
+### TASK-06 | T1-P1-003 | 核心模块单元测试全覆盖
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/test-coverage` |
+| **阻塞点** | — |
+
+**目标**：补充单元测试使核心模块覆盖率 >= 80%、核心路径 100%。
+
+**子项**（参考 tasks_details.md T1-P1-003）：
+- [ ] 3.1 对基础设施层、宿主核心能力层、宿主 API 层、WasmEdge 层、CLI 层补充单测
+- [ ] 3.2 确保全部测试用例通过；跨平台编译与测试
+
+**依赖**：—（可随时进行）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：所有模块的 pub API
+- 提供：全量单测用例
+
+**验收标准**：
+- 核心模块覆盖率 >= 80%，核心路径 100%
+- `cargo test` 全部通过
+- 跨平台编译通过（至少 CI 或本地三平台各一次）
+
+---
+
+### TASK-07 | T1-P1-004 | 全平台兼容性测试与 bug 修复
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/cross-platform` |
+| **阻塞点** | — |
+
+**目标**：确保在 Windows/macOS/Linux 上全量功能正常。
+
+**子项**（参考 tasks_details.md T1-P1-004）：
+- [ ] 4.1 在三平台执行全量功能测试
+- [ ] 4.2 修复平台专属 bug（路径、换行、依赖库等）
+- [ ] 4.3 验证跨平台安装包构建；优化 doctor 的自动适配建议
+
+**依赖**：TASK-03 (T1-P0-011)（建议 011 完成后再全量测试）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：所有模块
+- 提供：平台 bug 修复、doctor 适配建议
+
+**验收标准**：
+- Windows/macOS/Linux 全量功能测试通过
+- 平台专属 bug 已修复
+- `pi-awsm doctor` 可准确检测各平台环境并给出建议
+
+---
+
+### TASK-08 | T1-P2-001 | CLI 交互体验优化
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P2 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/cli-ux` |
+| **阻塞点** | — |
+
+**目标**：优化 CLI 交互体验，提升流畅度与可用性。
+
+**子项**（参考 tasks_details.md T1-P2-001）：
+- [ ] 1.1 优化流式渲染流畅度（节律、刷新率等）
+- [ ] 1.2 优化 diff 预览与用户确认交互
+- [ ] 1.3 新增子命令/参数自动补全（shell completion）
+- [ ] 1.4 统一优化错误提示文案，给出可操作的修复建议
+- [ ] 1.5 为耗时操作新增加载状态与进度提示
+
+**依赖**：TASK-03 (T1-P0-011)
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：CLI 模块、LlmProvider（流式）、PrimitiveExecutor（diff 预览）
+- 提供：优化后的 CLI 交互体验
+
+**验收标准**：
+- 流式渲染更流畅，无明显卡顿
+- diff 预览清晰可读，确认流程便捷
+- shell completion 可用
+- 错误提示含可操作的修复建议
+
+---
+
+### TASK-09 | T1-P2-002 | 插件安全扫描基础能力
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P2 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-security` |
+| **阻塞点** | — |
+
+**目标**：在插件加载前增加安全扫描，拦截风险插件。
+
+**子项**（参考 tasks_details.md T1-P2-002）：
+- [ ] 2.1 静态检查恶意模式、越权 API 使用、敏感信息泄露风险（规则可配置）
+- [ ] 2.2 风险插件拦截并提示用户，不静默加载；可选"强制加载"二次确认
+
+**依赖**：TASK-01 (T1-P0-009-completion)
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`PluginManifest`、插件入口代码、`SecurityConfig`
+- 提供：安全扫描接口，嵌入 `PluginManager::load_plugin` 流程
+
+**验收标准**：
+- 加载插件前自动执行安全扫描
+- 风险插件被拦截并给出明确提示
+- 提供"强制加载"二次确认选项
+- 扫描规则可配置
+
+---
+
+### TASK-10 | T1-P3-001 | 项目文档编写
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P3 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/docs` |
+| **阻塞点** | — |
+
+**目标**：编写项目 README、用户使用文档、插件开发文档、API 文档、部署指南。
+
+**子项**（参考 tasks_details.md T1-P3-001）：
+- [ ] 1.1 README.md：简介、快速开始、构建与运行、目录结构
+- [ ] 1.2 用户使用文档：安装、配置、各子命令使用说明
+- [ ] 1.3 插件开发文档：清单格式、宿主 API、事件、工具注册、4 原语使用示例
+- [ ] 1.4 API 文档（或指向 design/Architecture 中 Trait 与结构说明）
+- [ ] 1.5 部署与安装指南：各平台依赖、安装包使用、环境变量与配置路径
+
+**依赖**：—（可随时进行，但建议主要功能稳定后）
+
+**被依赖**：—
+
+**协作接口**：—
+
+**验收标准**：
+- README 简洁完整，新用户可按指引快速上手
+- 各子命令使用文档齐全
+- 插件开发文档含完整示例
+
+---
+
+### TASK-11 | T1-P3-002 | 示例插件开发
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P3 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/example-plugins` |
+| **阻塞点** | — |
+
+**目标**：开发示例插件，覆盖工具注册、事件监听、4 原语调用，作为兼容性测试与开发者参考。
+
+**子项**（参考 tasks_details.md T1-P3-002）：
+- [ ] 2.1 至少 3 个示例插件：工具注册与调用、事件监听、4 原语调用
+- [ ] 2.2 为示例插件补充注释与 README
+
+**依赖**：TASK-01 (T1-P0-009-completion)
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：宿主 API（pi 全局对象）、PluginManifest 格式
+- 提供：示例插件代码与文档
+
+**验收标准**：
+- 至少 3 个示例插件可正常加载并运行
+- 分别覆盖工具注册、事件监听、4 原语调用
+- 每个插件含注释与 README

@@ -1,12 +1,17 @@
 ---
-本文档供 agent 读取；
-使用方式：用户输入 @xxx_agent.md @PLAN.md 时触发以下指令：
- > agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档 + [需求设计文档](../openspec/changes/001-mvp/) 下文档，实现PLAN.md 规划好的功能，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [status/feature-xx.md]
- > 执行某波次时，必须结合本页「依赖与波次」与「波次任务范围说明」逐条确定本波次该角色的**完整任务范围**（含「接续」）；制定单波次实施计划时须覆盖该范围内 tasks_details 的全部子项，不得仅按「任务 ID」字面做主任务而遗漏接续或子项。
- > 请严格加载 .cursor/rules/commit-guard.mdc 提交规则，所有 Git 提交必须按此规则自动执行、自动校验、自动生成正确 commit message，不允许绕过。
+**已归档** — 本文档记录波次 1-4 的历史分工计划，仅供参考。
+
+波次 1-4（T1-P0-001 ~ T1-P0-008）已完成并合并到 develop。
+波次 5-6 部分完成（009 缺 9.2 加载流程，010 有多处占位），波次 7 未开始。
+
+**后续任务管理已迁移至**：[TASK_BOARD.md](./TASK_BOARD.md)
+**新工作流参见**：[Dispatcher.md](./Dispatcher.md) + 工程师 Agent（[Tom.md](./Tom.md) / [Jerry.md](./Jerry.md) / [Spike.md](./Spike.md)）
+**集成测试**：[Nibbles.md](./Nibbles.md)
+
+旧使用方式（@xxx_agent.md @PLAN.md）已废弃，新使用方式：`@Tom.md @Dispatcher.md`
 ---
 
-# 001-mvp 多 Agent 分工总计划
+# 001-mvp 多 Agent 分工总计划（历史存档）
 
 ## 并行度建议
 
