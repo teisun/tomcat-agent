@@ -17,7 +17,7 @@
 
 - **007**：WasmEngine 全局单例、单插件独立 WasmInstance、宿主导入绑定骨架；资源上限预留 Standard 默认。**默认构建即包含 WasmEdge 真实实现**（见下节），需安装 WasmEdge C 库。
 - **008**：HostApiDispatcher 单入口多路复用；EventBus 必选，PrimitiveExecutor/ToolRegistry/LlmProvider 可选注入。
-- **009**：PluginManifest 解析与校验；PluginManager 注册/启用/禁用/卸载；卸载时调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools。
+- **009**：PluginManifest 解析与校验；PluginManager 注册/启用/禁用/卸载；卸载时调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools。**9.2 完整加载流程**：`PluginManager::load_plugin(path)` 从磁盘路径完成「读清单与 main → 权限校验与用户确认 → 创建 Wasm 实例 → 注册授权 API → 注入并执行插件初始化代码 → 注册到 PluginManager」；调用前须通过 `set_wasm_engine` 注入引擎，`set_host_dispatcher` / `set_confirm_permissions` 可选；与 design CODE_BLOCK_P1_009 对齐。
 
 ## 3. WasmEdge 真实实现（默认包含）
 
@@ -97,7 +97,16 @@ flowchart LR
 - 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。可执行 `./scripts/run-integration-tests.sh` 自动完成环境检查、未安装则安装（并写入 profile，新开终端无需再 source）、再跑集成测试；或须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`；若构建或测试失败则视为集成测试失败。
 - wasmedge_quickjs 集成测试包含：**真实 .js Hello World**（`tests/fixtures/wasmedge_quickjs/hello.js`，`run_script` 内联与 `run_script_file` 路径两种方式）、**4 原语 .js**（`tests/fixtures/wasmedge_quickjs/primitives_test.js`），依赖 run_script/run_script_file 的 WASI argv/preopen 与每次新建 Vm。
 
-## 4. 依赖与后续
+## 4. 插件完整加载流程（9.2）
+
+`PluginManager::load_plugin(path)` 实现从磁盘到可用的完整链路，供 CLI plugin 子命令与 chat 调用。
+
+- **路径**：`path` 可为插件根目录（其下需有 `plugin.json` 或 `pi-plugin.json`）或清单文件路径；插件根用于解析 `manifest.main` 及后续 `dispatch_event`。
+- **依赖注入**：须先 `set_wasm_engine(Arc<WasmEngine>)`；可选 `set_host_dispatcher`（未设则 host 调用走桩）、`set_confirm_permissions`（未设则不弹确认、视为同意）。
+- **流程**：解析路径 → 读清单并 `parse_manifest` → 读 main 入口脚本（并校验不逃逸插件根）→ 调用权限确认回调（若已注入）→ `WasmEngine::create_instance` → `instance.register_host_binding`（闭包内 `invoke_host_func_with(dispatcher, instance_id, request_json)`）→ `instance.run_script(plugin_code)` → 构造 `PluginInstance`（含 `plugin_root`）→ `register_plugin` 并 `enable_plugin`。
+- **错误**：清单非法、路径无效、用户拒绝、Wasm/QuickJS 失败均返回 `Result`，信息清晰；若已创建实例则先 `destroy` 再返回。
+
+## 5. 依赖与后续
 
 - **005/006/004**：Dispatcher 通过 with_primitive/with_tools/with_llm 注入；未注入时返回明确错误，待合并后接实线。
 - **跨平台**：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build` 验证。
