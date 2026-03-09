@@ -310,14 +310,16 @@ pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 
 /// 启动时创建工作根目录及多 agent 子目录（当前仅 agentId=default）。若目录已存在则跳过。
 ///
-/// 创建：`work_dir`、`work_dir/agents/default/sessions`、`plugins`、`tmp`、`logs`、`wasm`，以及 `work_dir/wasm`（全局）。
+/// 创建：`work_dir`、`work_dir/agents/default/sessions`、`plugins`、`tmp`、`logs`，
+/// 以及 `work_dir/wasm`（全局运行时引擎）、`work_dir/plugins`（全局共享插件）。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let work = get_work_dir(cfg)?;
     let default_agent = work.join("agents").join("default");
-    for sub in ["sessions", "plugins", "tmp", "logs", "wasm"] {
+    for sub in ["sessions", "plugins", "tmp", "logs"] {
         std::fs::create_dir_all(default_agent.join(sub)).map_err(AppError::Io)?;
     }
     std::fs::create_dir_all(work.join("wasm")).map_err(AppError::Io)?;
+    std::fs::create_dir_all(work.join("plugins")).map_err(AppError::Io)?;
     Ok(())
 }
 

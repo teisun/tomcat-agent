@@ -97,6 +97,7 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
         config: serde_json::json!({}),
         created_at: now,
         loaded_at: now,
+        plugin_root: std::path::PathBuf::from("."),
     };
     tracing::info!("Arrange: 创建 DefaultEventBus、PluginManager 与 PluginInstance p1");
     mgr.register_plugin(instance)?;

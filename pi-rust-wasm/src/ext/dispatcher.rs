@@ -116,9 +116,7 @@ impl HostApiDispatcher {
             ("tools", "callTool") => self.do_call_tool(instance_id, &params).await,
             ("tools", "getActiveTools") => self.do_get_active_tools(instance_id, &params).await,
             ("tools", "setActiveTools") => self.do_set_active_tools(instance_id, &params).await,
-            ("tools", "registerCommand") => {
-                self.do_register_command(instance_id, &params).await
-            }
+            ("tools", "registerCommand") => self.do_register_command(instance_id, &params).await,
             ("events", "on")
             | ("events", "subscribe")
             | ("events", "once")
@@ -382,7 +380,9 @@ impl HostApiDispatcher {
         };
         let list = tools.list_tools(None).await?;
         let names: Vec<&str> = list.iter().map(|t| t.name.as_str()).collect();
-        Ok(HostResponse::ok(serde_json::to_value(names).map_err(AppError::Serialize)?))
+        Ok(HostResponse::ok(
+            serde_json::to_value(names).map_err(AppError::Serialize)?,
+        ))
     }
 
     /// 设置活跃工具集（按名称过滤启用/禁用）。MVP 阶段仅返回确认，不实际变更状态。

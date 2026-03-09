@@ -158,7 +158,10 @@ impl WasmInstance {
                 if msg.contains("exit code 0") || msg.contains("success") {
                     Ok(serde_json::Value::Null)
                 } else {
-                    Err(AppError::QuickJS(format!("script execution failed: {}", msg)))
+                    Err(AppError::QuickJS(format!(
+                        "script execution failed: {}",
+                        msg
+                    )))
                 }
             }
         }

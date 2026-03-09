@@ -1,5 +1,27 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Tom | 2026-03-09 22:00 | DONE | develop | 88.4 |
+
+### 本次执行说明（TASK-01 9.2 插件完整加载流程 + 宪法流程防遗漏整改）
+
+**TASK-01 T1-P0-009-completion 插件生命周期 — 补完加载流程（9.2）**
+- [✓] PluginInstance 增加 `plugin_root: PathBuf`、`main_script_path()`，所有构造处（含单测与 tests/）已更新。
+- [✓] PluginManager 增加 `set_wasm_engine`、`set_host_dispatcher`、`set_confirm_permissions`；类型 `ConfirmPermissionsFn`。
+- [✓] `load_plugin(path)`：解析路径 → 读清单与 main 脚本 → 权限确认回调（可选）→ 创建 Wasm 实例 → 注册 host binding → 执行初始化脚本 → 注册并 enable。main 路径校验不逃逸插件根。
+- [✓] 单测：load_plugin 未设置 wasm_engine、路径不存在、目录无清单、用户拒绝权限；全量 lib + 集成测试通过。
+- [✓] 技术文档：docs/02-wasm-runtime-and-plugin.md 已增「4. 插件完整加载流程（9.2）」与 2 节中 9.2 要点。
+
+**宪法流程防遗漏整改**
+- [✓] STATUS_GUIDE：明确「始终按当前 Git 分支」确定 status 文件名，禁止按任务看板分支写。
+- [✓] Dispatcher：提交前/完成任务/阻塞处理均改为「当前 Git 分支对应的 status 文件」；七、完成任务增加「完成前自检（必做）」清单（当前分支、覆盖率、技术文档、提交含 [cov]、推送）。
+
+### 🔌 INTERFACE (接口变更)
+- **ext/plugin**：`PluginManager::load_plugin(path)`、`set_wasm_engine`、`set_host_dispatcher`、`set_confirm_permissions`；`PluginInstance::plugin_root`、`main_script_path()`；`ConfirmPermissionsFn`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | @code_review | 2026-03-09 21:00 | DONE | develop | 88.4 |
 
 ### 本次执行说明（编码规范整合 + guides 目录重组）

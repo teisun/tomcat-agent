@@ -8,9 +8,10 @@ use crate::infra::event_bus::{EventBus, EventListenerId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::WasmInstance;
+use super::{invoke_host_func_with, HostApiDispatcher, WasmEngine, WasmInstance};
 
 /// 插件清单（与 design CODE_BLOCK_P1_008 一致）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,8 @@ pub struct PluginInstance {
     pub config: serde_json::Value,
     pub created_at: i64,
     pub loaded_at: i64,
+    /// 插件根目录路径，用于解析 main 入口与 dispatch_event 时定位脚本。
+    pub plugin_root: PathBuf,
 }
 
 /// 只读插件信息（不含 Wasm 实例），用于 get_plugin 等查询。
@@ -68,6 +71,11 @@ pub struct PluginInfo {
 impl PluginInstance {
     pub fn plugin_id(&self) -> &str {
         &self.id
+    }
+
+    /// 返回插件 main 入口脚本的绝对路径，供 dispatch_event 等使用。
+    pub fn main_script_path(&self) -> PathBuf {
+        self.plugin_root.join(&self.manifest.main)
     }
 
     pub fn to_info(&self) -> PluginInfo {
@@ -110,11 +118,20 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 用户确认插件权限的回调：传入清单，返回 Ok(true) 同意、Ok(false) 拒绝、Err 表示确认过程出错。
+pub type ConfirmPermissionsFn = dyn Fn(&PluginManifest) -> Result<bool, AppError> + Send + Sync;
+
 /// 插件管理器：加载/卸载/启用/禁用，卸载时调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools。
 pub struct PluginManager {
     event_bus: Arc<dyn EventBus>,
     tools: Option<Arc<dyn ToolRegistry>>,
     plugins: RwLock<HashMap<String, PluginInstance>>,
+    /// 用于 load_plugin 时创建 Wasm 实例；未设置时 load_plugin 返回错误。
+    wasm_engine: Option<Arc<WasmEngine>>,
+    /// 用于 load_plugin 时注册 host binding；未设置时仍可加载，host 调用走桩响应。
+    host_dispatcher: Option<Arc<HostApiDispatcher>>,
+    /// 加载前用户确认权限；未设置时视为自动同意（或由调用方在 load 前自行确认）。
+    confirm_permissions: Option<Arc<ConfirmPermissionsFn>>,
 }
 
 impl PluginManager {
@@ -123,12 +140,155 @@ impl PluginManager {
             event_bus,
             tools: None,
             plugins: RwLock::new(HashMap::new()),
+            wasm_engine: None,
+            host_dispatcher: None,
+            confirm_permissions: None,
         }
     }
 
     /// 注入 ToolRegistry（006 就绪后调用）；卸载时用于 unregister_plugin_tools。
     pub fn set_tool_registry(&mut self, t: Arc<dyn ToolRegistry>) {
         self.tools = Some(t);
+    }
+
+    /// 注入 WasmEngine；load_plugin 前必须设置，否则加载返回错误。
+    pub fn set_wasm_engine(&mut self, engine: Arc<WasmEngine>) {
+        self.wasm_engine = Some(engine);
+    }
+
+    /// 注入 HostApiDispatcher；未设置时 load_plugin 仍可执行，插件内 host 调用走桩响应。
+    pub fn set_host_dispatcher(&mut self, dispatcher: Arc<HostApiDispatcher>) {
+        self.host_dispatcher = Some(dispatcher);
+    }
+
+    /// 注入权限确认回调；未设置时 load_plugin 不调用确认、视为同意。
+    pub fn set_confirm_permissions(&mut self, f: Arc<ConfirmPermissionsFn>) {
+        self.confirm_permissions = Some(f);
+    }
+
+    /// 从磁盘路径完整加载插件：读清单与 main → 权限校验与用户确认 → 创建 Wasm 实例 → 注册宿主 API → 执行初始化代码 → 注册到管理器。
+    ///
+    /// `path` 可为插件根目录（其下需有 plugin.json 或 pi-plugin.json）或清单文件路径。
+    /// 调用前须已通过 [`set_wasm_engine`] 注入引擎；[`set_host_dispatcher`] 与 [`set_confirm_permissions`] 可选。
+    ///
+    /// # Errors
+    /// * 未设置 wasm_engine、路径无效、清单解析失败、main 读取失败、用户拒绝权限、Wasm/QuickJS 执行失败时返回对应错误。
+    pub fn load_plugin(&self, path: impl AsRef<Path>) -> Result<(), AppError> {
+        let path = path.as_ref();
+        let (plugin_root, manifest) = self.resolve_manifest_and_root(path)?;
+        let plugin_code = self.read_main_script(&plugin_root, &manifest)?;
+
+        if let Some(ref confirm) = self.confirm_permissions {
+            let ok = confirm(&manifest)
+                .map_err(|e| AppError::Permission(format!("权限确认失败: {}", e)))?;
+            if !ok {
+                return Err(AppError::Permission("用户拒绝插件授权".to_string()));
+            }
+        }
+
+        let engine = self.wasm_engine.as_ref().ok_or_else(|| {
+            AppError::Plugin("load_plugin 需要先调用 set_wasm_engine 注入引擎".to_string())
+        })?;
+
+        let mut instance = engine
+            .create_instance(&manifest.id)
+            .map_err(|e| AppError::Plugin(format!("创建 Wasm 实例失败: {}", e)))?;
+
+        let instance_id = manifest.id.clone();
+        let dispatcher_opt = self.host_dispatcher.clone();
+        let invoke_fn = move |request_json: &str| {
+            let resp =
+                invoke_host_func_with(dispatcher_opt.as_deref(), &instance_id, request_json)?;
+            serde_json::to_string(&resp).map_err(AppError::from)
+        };
+        instance
+            .register_host_binding(invoke_fn)
+            .map_err(|e| AppError::Plugin(format!("注册 host binding 失败: {}", e)))?;
+
+        if let Err(e) = instance.run_script(&plugin_code) {
+            instance.destroy();
+            return Err(AppError::Plugin(format!("插件初始化脚本执行失败: {}", e)));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let plugin_instance = PluginInstance {
+            id: manifest.id.clone(),
+            manifest: manifest.clone(),
+            wasm_instance: Some(instance),
+            status: PluginStatus::Loaded,
+            registered_tools: vec![],
+            event_listener_ids: vec![],
+            config: serde_json::Value::Null,
+            created_at: now,
+            loaded_at: now,
+            plugin_root: plugin_root.clone(),
+        };
+        self.register_plugin(plugin_instance)?;
+        self.enable_plugin(&manifest.id)?;
+        Ok(())
+    }
+
+    /// 解析路径得到插件根目录与清单；path 为目录时在其下查找 plugin.json / pi-plugin.json，为文件时视为清单路径。
+    fn resolve_manifest_and_root(
+        &self,
+        path: &Path,
+    ) -> Result<(PathBuf, PluginManifest), AppError> {
+        let (root, manifest_path) = if path.is_dir() {
+            let root = path
+                .canonicalize()
+                .map_err(|e| AppError::Plugin(format!("插件目录无效: {}", e)))?;
+            let manifest_path = root
+                .join("plugin.json")
+                .canonicalize()
+                .or_else(|_| root.join("pi-plugin.json").canonicalize())
+                .map_err(|_| {
+                    AppError::Plugin("插件目录下未找到 plugin.json 或 pi-plugin.json".to_string())
+                })?;
+            (root, manifest_path)
+        } else {
+            let manifest_path = path
+                .canonicalize()
+                .map_err(|e| AppError::Plugin(format!("清单文件无效: {}", e)))?;
+            let root = manifest_path
+                .parent()
+                .ok_or_else(|| AppError::Plugin("清单路径无父目录".to_string()))?
+                .canonicalize()
+                .map_err(|e| AppError::Plugin(format!("插件根目录无效: {}", e)))?;
+            (root, manifest_path)
+        };
+        let json = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| AppError::Plugin(format!("读取清单失败: {}", e)))?;
+        let manifest = parse_manifest(&json)?;
+        Ok((root, manifest))
+    }
+
+    /// 读取 main 入口脚本内容；校验 main 路径不逃逸出插件根目录。
+    fn read_main_script(
+        &self,
+        plugin_root: &Path,
+        manifest: &PluginManifest,
+    ) -> Result<String, AppError> {
+        let main_path = plugin_root.join(&manifest.main);
+        let main_path = main_path.canonicalize().map_err(|e| {
+            AppError::Plugin(format!(
+                "main 入口文件无效或不存在: {} ({}): {}",
+                manifest.main,
+                main_path.display(),
+                e
+            ))
+        })?;
+        let root_canon = plugin_root.canonicalize().map_err(AppError::Io)?;
+        if !main_path.starts_with(&root_canon) {
+            return Err(AppError::Permission(format!(
+                "main 路径不得超出插件根目录: {}",
+                main_path.display()
+            )));
+        }
+        std::fs::read_to_string(&main_path)
+            .map_err(|e| AppError::Plugin(format!("读取 main 脚本失败: {}", e)))
     }
 
     /// 注册已构造的插件实例（内部使用；加载流程完成后调用）。
@@ -197,6 +357,7 @@ impl PluginManager {
 mod tests {
     use super::*;
     use crate::infra::DefaultEventBus;
+    use std::path::Path;
 
     #[test]
     fn parse_manifest_valid() {
@@ -258,6 +419,7 @@ mod tests {
             config: serde_json::Value::Null,
             created_at: 0,
             loaded_at: 0,
+            plugin_root: PathBuf::from("."),
         };
         manager.register_plugin(inst).unwrap();
         assert_eq!(manager.list_loaded(), vec!["p1"]);
@@ -289,6 +451,7 @@ mod tests {
             config: serde_json::Value::Null,
             created_at: 0,
             loaded_at: 0,
+            plugin_root: PathBuf::from("."),
         };
         assert!(manager.get_plugin("p-get").is_none());
         manager.register_plugin(inst).unwrap();
@@ -322,6 +485,7 @@ mod tests {
             config: serde_json::Value::Null,
             created_at: 0,
             loaded_at: 0,
+            plugin_root: PathBuf::from("."),
         };
         manager.register_plugin(inst).unwrap();
         let inst2 = PluginInstance {
@@ -344,6 +508,7 @@ mod tests {
             config: serde_json::Value::Null,
             created_at: 0,
             loaded_at: 0,
+            plugin_root: PathBuf::from("."),
         };
         let r = manager.register_plugin(inst2);
         assert!(r.is_err());
@@ -374,6 +539,7 @@ mod tests {
             config: serde_json::Value::Null,
             created_at: 0,
             loaded_at: 0,
+            plugin_root: PathBuf::from("."),
         };
         manager.register_plugin(inst).unwrap();
         manager.enable_plugin("p2").unwrap();
@@ -412,5 +578,76 @@ mod tests {
         let r = manager.disable_plugin("nonexistent");
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn load_plugin_without_wasm_engine_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let manager = PluginManager::new(bus);
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_json = r#"{"id":"x","name":"X","version":"0.1.0","description":"","author":"","main":"index.js","requiredPermissions":[],"requiredApiVersion":"1.0","tags":[]}"#;
+        std::fs::write(tmp.path().join("plugin.json"), plugin_json).unwrap();
+        std::fs::write(tmp.path().join("index.js"), "// empty").unwrap();
+        let r = manager.load_plugin(tmp.path());
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("set_wasm_engine"));
+    }
+
+    #[test]
+    fn load_plugin_nonexistent_path_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let manager = PluginManager::new(bus);
+        let r = manager.load_plugin(Path::new("/nonexistent/dir/12345"));
+        assert!(r.is_err());
+        assert!(matches!(r.unwrap_err(), AppError::Plugin(_)));
+    }
+
+    #[test]
+    fn load_plugin_dir_without_manifest_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let mut manager = PluginManager::new(bus);
+        let _ = crate::ext::WasmEngine::global(None).map(|e| manager.set_wasm_engine(e));
+        let tmp = tempfile::tempdir().unwrap();
+        let r = manager.load_plugin(tmp.path());
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert!(
+            err.to_string().contains("plugin.json")
+                || err.to_string().contains("pi-plugin")
+                || err.to_string().contains("未找到")
+        );
+    }
+
+    #[test]
+    fn load_plugin_user_deny_returns_permission_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let mut manager = PluginManager::new(bus);
+        let engine = match crate::ext::WasmEngine::global(None) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        manager.set_wasm_engine(engine);
+        manager.set_confirm_permissions(Arc::new(|_| Ok(false)));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_json = r#"{
+            "id": "deny-test",
+            "name": "DenyTest",
+            "version": "0.1.0",
+            "description": "",
+            "author": "",
+            "main": "index.js",
+            "requiredPermissions": [],
+            "requiredApiVersion": "1.0",
+            "tags": []
+        }"#;
+        std::fs::write(tmp.path().join("plugin.json"), plugin_json).unwrap();
+        std::fs::write(tmp.path().join("index.js"), "// empty").unwrap();
+
+        let r = manager.load_plugin(tmp.path());
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert!(matches!(err, AppError::Permission(_)));
+        assert!(err.to_string().contains("拒绝"));
     }
 }

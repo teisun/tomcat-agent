@@ -44,8 +44,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DONE` |
+| **负责人** | Tom |
 | **分支** | `feature/plugin-lifecycle` |
 | **阻塞点** | — |
 
@@ -53,7 +53,7 @@
 
 **子项**（参考 tasks_details.md T1-P0-009）：
 - [✓] 9.1 PluginManifest/PluginInstance/PluginStatus 定义与清单解析校验
-- [ ] 9.2 完整加载流程：读取清单与 main 入口代码 → 权限校验与用户确认 → 创建 Wasm 实例 → 注册授权 API → 注入并执行插件初始化代码 → 注册到 PluginManager
+- [✓] 9.2 完整加载流程：读取清单与 main 入口代码 → 权限校验与用户确认 → 创建 Wasm 实例 → 注册授权 API → 注入并执行插件初始化代码 → 注册到 PluginManager
 - [✓] 9.3 启用/禁用：状态切换，控制事件响应与工具调用
 - [✓] 9.4 卸载：EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools、销毁 Wasm 实例
 - [✓] 9.5 单元测试

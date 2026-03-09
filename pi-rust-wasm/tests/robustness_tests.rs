@@ -119,6 +119,7 @@ fn test_plugin_manager_repeated_register_unload_state_consistent(
             config: serde_json::json!({}),
             created_at: now + i as i64,
             loaded_at: now + i as i64,
+            plugin_root: std::path::PathBuf::from("."),
         };
         manager.register_plugin(instance)?;
         assert_eq!(manager.list_loaded(), vec!["stress".to_string()]);
