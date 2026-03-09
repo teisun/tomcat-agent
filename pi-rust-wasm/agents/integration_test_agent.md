@@ -7,7 +7,7 @@
 ## 目标
 
 **不负责具体任务 ID 的开发**。负责将各角色的功能分支**合并到 develop**、运行**全量测试与验收**、记录问题并反馈给对应开发角色，保证 develop 可随时构建通过且符合 task.md 验收标准。
-**编写集成测试代码** 根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）；
+**编写集成测试代码** 根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）；
 
 ## 负责任务 ID 与顺序
 
@@ -25,10 +25,10 @@
 - [PLAN.md](./PLAN.md) 分支与集成策略、依赖波次表
 - [task.md](../openspec/changes/001-mvp/task.md) 验收标准与完成定义
 - [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) 各任务原子子任务与边界场景
-- [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 集成测试规范
-- [INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/INTEGRATION_TEST_LOGGING.md) 第 9 章子文档：日志与链路追踪技术说明
-- [INTEGRATION_TEST_ROBUSTNESS.md](../openspec/specs/guides/INTEGRATION_TEST_ROBUSTNESS.md) 第 10 章子文档：鲁棒性/异常边界要求与清单
-- [INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md) 集成测试实践参考：场景化示例（插件沙箱、事件、LLM+Tool）、三不原则、审计/Teardown/DoD
+- [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 集成测试规范
+- [INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) 第 9 章子文档：日志与链路追踪技术说明
+- [INTEGRATION_TEST_ROBUSTNESS.md](../openspec/specs/guides/testing/INTEGRATION_TEST_ROBUSTNESS.md) 第 10 章子文档：鲁棒性/异常边界要求与清单
+- [INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md) 集成测试实践参考：场景化示例（插件沙箱、事件、LLM+Tool）、三不原则、审计/Teardown/DoD
 
 ## 验收标准
 
@@ -77,11 +77,11 @@
 本步骤对应「目标」中的**编写集成测试代码**职责，为流程中的必做步骤，避免只跑测试而不补充用例。
 
 1. **时机**：分支合并到 develop 之后，执行「合并后全量测试与验收清单」之前（或与验收迭代进行）。
-2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、第 9/10 章门禁与验收）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
+2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、第 9/10 章门禁与验收）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
 3. **动作**：针对本次合并引入的模块与场景，在项目根目录 `tests/` 下建立或更新：
    - `tests/common/mod.rs`：共享初始化（如 `setup_logging()`）、公共 fixture；
    - 按功能划分的 `*_tests.rs`，**必须包含** `llm_tests.rs`（以及如 `session_tests.rs`、`plugin_tests.rs`、`event_tests.rs`、`robustness_tests.rs` 等），仅通过 `pub` API 做黑盒测试，不 Mock 核心模块（如 EventBus、Wasm 运行时）。
-   - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
+   - **LLM 集成测试**：必须包含与真实外部 API 的协作测试（如 `LlmProvider::chat`、`chat_stream`），在配置了 `OPENAI_API_KEY` 等环境变量的真实环境下运行，且不得 Mock 外部服务；无 key 时的要求见 [INTEGRATION_TEST_SPEC](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 5.2 节。
 4. **场景覆盖**：参考 INTEGRATION_TEST_PRACTICE 的插件沙箱与 4 原语、事件与清理、**LLM+Tool 路由（必选，在真实环境下验证与 LLM 的协作 chat/chat_stream）**。
 5. **Wasm 真实运行时（wasm-plugin 相关合并）**：针对 **wasm-plugin 相关合并**，须包含「Wasm 真实运行时」集成测试（默认构建即包含，直接编译/运行）。至少 1 个用例：创建真实 `WasmEngine`、创建 `WasmInstance`、注册 host_binding、`run_script(js)` 触发 host_call，并断言宿主收到调用且行为符合预期（见 `tests/wasmedge_e2e_tests.rs`）。**检查项**：实现或修改 Wasm 相关集成测试前必须阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 第 24 条**；测试失败时**禁止**在未查明根因、未与规范对照的情况下放宽断言或改为“可选”，须先查因 → 修复 或 登记阻塞并保持用例失败。
 6. **验证**：编写或更新后执行 `cargo test --test '*'`（或对应 `--test xxx_tests`），确认集成测试可编译且通过，再执行下方全量验收清单。须满足规范第 9、10 章门禁（日志 + 鲁棒性），不满足则补全后再跑全量验收。
@@ -90,12 +90,12 @@
 
 **一键执行（可选）**：运行 `./scripts/run-integration-tests.sh` 会先检查 WasmEdge，未安装则自动执行 `install-wasmedge.sh -y` 并写入 profile（新开终端无需再 source），再执行全量验收命令；也可按下列清单逐项手动执行。
 
-验收项以 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md)为准，注意 第 7、9、10 章门禁与验收清单为准；
+验收项以 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)为准，注意 第 7、9、10 章门禁与验收清单为准；
 
 1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`cargo test`
 2. **CLI 子命令**：`pi-awsm init`、`pi-awsm doctor`、`pi-awsm config`、`pi-awsm session`、`pi-awsm plugin`、`pi-awsm audit` 可执行且帮助完整
 3. **集成测试（含门禁）**：`cargo test --test '*'` 通过，含日志门禁（第 9 章）与**鲁棒性集成测试**（`cargo test --test robustness_tests` 或全量已包含 robustness_tests 并通过）
-4. **Wasm 真实运行时（必选）**：按 [INTEGRATION_TEST_SPEC 5.4](../openspec/specs/guides/INTEGRATION_TEST_SPEC.md) 执行；不通过即视为验收不通过。
+4. **Wasm 真实运行时（必选）**：按 [INTEGRATION_TEST_SPEC 5.4](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 执行；不通过即视为验收不通过。
 5. **对话模式**：`pi-awsm chat` 或 `pi-awsm` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认、快捷键符合 design 与 task 验收
 6. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常
 7. **跨平台**：若 CI 或本机具备，在 Windows/macOS/Linux 至少各跑一次 build + test

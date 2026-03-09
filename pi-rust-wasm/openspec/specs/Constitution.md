@@ -21,14 +21,14 @@
 
 1. **宪法优先**：Agent 行为、生成代码、执行操作须符合本宪法；与宪法冲突的需求须拒绝并说明原因。
 2. **自测覆盖**: Agent开发的所有功能必须附带单元测试代码，代码覆盖率不得低于85%
-3. **单测不通过则查因改码**：单元测试不通过时须查原因、修改代码，直至通过为止；不得通过跳过、忽略或降低断言来“通过”。详见 [单元测试规范](./guides/UNIT_TEST_SPEC.md)。
+3. **单测不通过则查因改码**：单元测试不通过时须查原因、修改代码，直至通过为止；不得通过跳过、忽略或降低断言来“通过”。详见 [单元测试规范](./guides/testing/UNIT_TEST_SPEC.md)。
 4. **用户知情权**：高危操作前须清晰告知操作内容、风险与影响，获用户明确确认后执行，禁止隐瞒。
 5. **质量与可追溯**：交付代码须可编译、可运行，通过门禁与测试；操作与变更须有日志或记录，可追溯。
 6. **开发流程规则**（Agent 必须遵守）：
    - **开发前**：
         - 检查工作区状态，若处于detached HEAD则自动checkout -b 自己的工作分支
         - 同步 develop 分支，了解全局状态后再开新改动。
-        - 阅读 [编码规范](./guides/Codeing&Architecture_Spec.md)
+        - 阅读 [编码规范](./guides/coding/Codeing&Architecture_Spec.md)
    - **开发流程**：
         - 根据编码规范编码开发(带注释) → 测试 → 修 bug → 单测通过 -> 写技术[文档](../../docs/)
    - **提交前**：更新本分支的 `status/feature-xx.md`（与当前分支对应），再提交。提交时代码变更所需的 `[cov = xx.x%]` 从该 status 文件的 Cov% 读取，不在提交时现跑测试/覆盖率。
@@ -39,7 +39,7 @@
     - 改动不打折：凡是属于本次功能的改动（包括新加的文件），必须全部 git add 并提交，严禁漏提。
     - 每次提交必须更新**本分支**的 `status/feature-xx.md`
     - 遵循约定的 commit message 格式(见附录)，**讲清楚做了什么和为什么这么做(what+why)**，禁止记流水账或无意义提交。  
-    - 具体格式见 [Status规范](./guides/STATUS_GUIDE.md)
+    - 具体格式见 [Status规范](./guides/workflow/STATUS_GUIDE.md)
 9. **技术设计参考**：技术设计或代码实现有疑问时，可参考 **Architecture.md** 中的「pi 生态参考原则（双仓对照）」：以 **pi-mono** 为兼容性契约与行为基准，以 **pi-agent-rust** 为 Rust 侧实现参考；二者不一致时以 pi-mono 为准。
 
 ---
@@ -50,14 +50,14 @@
 
 1. 符合本宪法及 Architecture.md 约束。
 2. 通过规范门禁（rustfmt/clippy 等）与约定测试， 无静默高危操作、无越权。
-3. 代码review通过，确保符合[编码规范](./guides/Codeing&Architecture_Spec.md)、功能完整、注释完整、无设计缺陷、无需求遗漏
-4. 单元测试通过，算出覆盖率写入当前分支对应的 status 文件（如 `status/feature-xx.md`），且**填入该文件元数据表的 Cov% 列**（格式见 [Status规范](./guides/STATUS_GUIDE.md)），参考[单元测试规范](./guides/UNIT_TEST_SPEC.md)
-5. 集成测试通过，参考[集成测试规范](../specs/guides/INTEGRATION_TEST_SPEC.md)
+3. 代码review通过，确保符合[编码规范](./guides/coding/Codeing&Architecture_Spec.md)、功能完整、注释完整、无设计缺陷、无需求遗漏
+4. 单元测试通过，算出覆盖率写入当前分支对应的 status 文件（如 `status/feature-xx.md`），且**填入该文件元数据表的 Cov% 列**（格式见 [Status规范](./guides/workflow/STATUS_GUIDE.md)），参考[单元测试规范](./guides/testing/UNIT_TEST_SPEC.md)
+5. 集成测试通过，参考[集成测试规范](./guides/testing/INTEGRATION_TEST_SPEC.md)
 6. E2E测试通过
 7. 文档更新：配套说明或文档到位。
-    - [技术文档规范](./guides/DOCUMENTATION_GUIDE.md)
-    - [代码注释规范](./guides/COMMENT_SPEC.md)
-    - [Status规范](./guides/STATUS_GUIDE.md)
+    - [技术文档规范](./guides/workflow/DOCUMENTATION_GUIDE.md)
+    - [代码注释规范](./guides/coding/COMMENT_SPEC.md)
+    - [Status规范](./guides/workflow/STATUS_GUIDE.md)
     
 
 ---
@@ -66,5 +66,5 @@
 
 ### A. Commit Message 格式
 
-每次 Git 提交的 commit message 须遵循以下格式，禁止无意义提交：**首行写清楚做了什么（what），详细描述写为什么这么做、作用与意义（why）**。具体格式与更多示例见 [Commit Message 规范](./guides/COMMIT_MESSAGE_SPEC.md)。
+每次 Git 提交的 commit message 须遵循以下格式，禁止无意义提交：**首行写清楚做了什么（what），详细描述写为什么这么做、作用与意义（why）**。具体格式与更多示例见 [Commit Message 规范](./guides/workflow/COMMIT_MESSAGE_SPEC.md)。
 

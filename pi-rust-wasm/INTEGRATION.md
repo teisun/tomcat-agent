@@ -313,7 +313,7 @@
 - [✓] **注释**：按 COMMENT_SPEC 为 engine_wasmedge、instance_wasmedge、host_binding、dispatcher 补充 `# Errors`/`# Arguments`/`# Returns`；dispatcher 中 `Runtime::new().expect` 增加说明。
 
 ### ✅ 提交规范与文档（2026-03-08）
-- [✓] **Commit Message**：Constitution 附录增加 what+why 示例；新增 [COMMIT_MESSAGE_SPEC.md](openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)，commit-guard、commit-with-status 引用该规范；详细描述须写动机、作用与意义，禁止流水账。
+- [✓] **Commit Message**：Constitution 附录增加 what+why 示例；新增 [COMMIT_MESSAGE_SPEC.md](openspec/specs/guides/workflow/COMMIT_MESSAGE_SPEC.md)，commit-guard、commit-with-status 引用该规范；详细描述须写动机、作用与意义，禁止流水账。
 - [✓] **资源**：assets/wasm/wasmedge_quickjs.wasm 纳入仓库，便于本地与 CI 使用配置路径。
 
 ### ✅ DONE (已完成)

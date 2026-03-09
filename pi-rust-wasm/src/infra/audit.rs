@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn tracing_audit_recorder_default_works() {
-        let r = TracingAuditRecorder::default();
+        let r = TracingAuditRecorder;
         r.record_primitive(PrimitiveAuditEntry {
             operation: AuditPrimitiveOp::Read,
             path_or_cmd: "/x".to_string(),

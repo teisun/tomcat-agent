@@ -1,6 +1,6 @@
 # 单元测试编写规范 (Unit Test Spec)
 
-本规范与 [Constitution.md](../Constitution.md) 中的「自测覆盖」「单测不通过则查因改码」及完成定义一致，适用于 `pi_awsm` 及本仓库内所有需单测的模块。与 [STATUS_GUIDE.md](./STATUS_GUIDE.md)、[DOCUMENTATION_GUIDE.md](./DOCUMENTATION_GUIDE.md) 风格一致。
+本规范与 [Constitution.md](../../Constitution.md) 中的「自测覆盖」「单测不通过则查因改码」及完成定义一致，适用于 `pi_awsm` 及本仓库内所有需单测的模块。与 [STATUS_GUIDE.md](../workflow/STATUS_GUIDE.md)、[DOCUMENTATION_GUIDE.md](../workflow/DOCUMENTATION_GUIDE.md) 风格一致。
 
 ---
 
@@ -42,8 +42,8 @@
 
 ## 4. 覆盖率与门禁
 
-- **覆盖率**：核心模块 ≥85%，基础设施/工具类 ≥90%（与 [Constitution.md](../Constitution.md) 一致）；使用 `cargo-tarpaulin` 等统计。各任务（如 [tasks_details.md](../../changes/001-mvp/tasks_details.md)）可有单独要求（如 ≥80%）。
-- 完成定义要求“单元测试通过，算出覆盖率”，写入当前分支对应的 status 文件（如 `status/feature-xx.md`）；具体字段与格式见 [STATUS_GUIDE](./STATUS_GUIDE.md)（Cov% 列）。
+- **覆盖率**：核心模块 ≥85%，基础设施/工具类 ≥90%（与 [Constitution.md](../../Constitution.md) 一致）；使用 `cargo-tarpaulin` 等统计。各任务（如 [tasks_details.md](../../../changes/001-mvp/tasks_details.md)）可有单独要求（如 ≥80%）。
+- 完成定义要求“单元测试通过，算出覆盖率”，写入当前分支对应的 status 文件（如 `status/feature-xx.md`）；具体字段与格式见 [STATUS_GUIDE](../workflow/STATUS_GUIDE.md)（Cov% 列）。
 
 ---
 
@@ -82,7 +82,7 @@
 ## 7. 与宪法、架构的对应关系
 
 - **宪法**：「自测覆盖」要求功能附带单测且覆盖率达标；「单测不通过则查因改码」要求不绕过失败；本规范对 mock 策略与“无 key 即不通过”的约定与宪法条文一致。
-- **架构**：单测应覆盖各层对外契约（Trait、公开 API）；内部实现可用 mock 解耦依赖，见 [Codeing&Architecture_Spec.md](./Codeing&Architecture_Spec.md) 中的可测性与依赖反转。
+- **架构**：单测应覆盖各层对外契约（Trait、公开 API）；内部实现可用 mock 解耦依赖，见 [Codeing&Architecture_Spec.md](../coding/Codeing&Architecture_Spec.md) 中的可测性与依赖反转。
 
 ---
 
@@ -102,6 +102,6 @@
 
 ## 9. 参考
 
-- [Constitution.md](../Constitution.md) 第二节「Agent 协作规范」、第三节「完成定义」
-- [STATUS_GUIDE.md](./STATUS_GUIDE.md)、[DOCUMENTATION_GUIDE.md](./DOCUMENTATION_GUIDE.md)（文档与进度规范）
+- [Constitution.md](../../Constitution.md) 第二节「Agent 协作规范」、第三节「完成定义」
+- [STATUS_GUIDE.md](../workflow/STATUS_GUIDE.md)、[DOCUMENTATION_GUIDE.md](../workflow/DOCUMENTATION_GUIDE.md)（文档与进度规范）
 - 各 Agent 任务中的验收标准（如 llm_agent、tasks_details 中的覆盖率与边界用例要求）

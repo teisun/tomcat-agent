@@ -25,8 +25,40 @@
     // =====================================================================
     on: function (eventName, handler) {
       if (!__pi_hooks[eventName]) __pi_hooks[eventName] = [];
-      __pi_hooks[eventName].push({ id: __pi_nextId++, fn: handler });
-      hostCall('events', 'subscribe', { eventName: eventName });
+      var lid = __pi_nextId++;
+      __pi_hooks[eventName].push({ id: lid, fn: handler });
+      var res = hostCall('events', 'subscribe', { eventName: eventName });
+      return (res && res.listenerId != null) ? res.listenerId : lid;
+    },
+
+    off: function (eventName, listenerId) {
+      if (__pi_hooks[eventName]) {
+        __pi_hooks[eventName] = __pi_hooks[eventName].filter(function (h) {
+          return h.id !== listenerId;
+        });
+      }
+      hostCall('events', 'off', { eventName: eventName, listenerId: listenerId });
+    },
+
+    emit: function (eventName, payload) {
+      return hostCall('events', 'emit', { eventName: eventName, payload: payload || {} });
+    },
+
+    off: function (eventName, handler) {
+      var hooks = __pi_hooks[eventName];
+      if (!hooks) return;
+      for (var i = hooks.length - 1; i >= 0; i--) {
+        if (hooks[i].fn === handler) {
+          var listenerId = hooks[i].id;
+          hooks.splice(i, 1);
+          hostCall('events', 'off', { eventName: eventName, listenerId: listenerId });
+          break;
+        }
+      }
+    },
+
+    emit: function (eventName, payload) {
+      return hostCall('events', 'emit', { eventName: eventName, payload: payload || {} });
     },
 
     // =====================================================================

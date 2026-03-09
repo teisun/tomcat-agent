@@ -114,6 +114,11 @@ impl HostApiDispatcher {
             ("tools", "unregisterTool") => self.do_unregister_tool(instance_id, &params).await,
             ("tools", "getToolList") => self.do_list_tools(instance_id, &params).await,
             ("tools", "callTool") => self.do_call_tool(instance_id, &params).await,
+            ("tools", "getActiveTools") => self.do_get_active_tools(instance_id, &params).await,
+            ("tools", "setActiveTools") => self.do_set_active_tools(instance_id, &params).await,
+            ("tools", "registerCommand") => {
+                self.do_register_command(instance_id, &params).await
+            }
             ("events", "on")
             | ("events", "subscribe")
             | ("events", "once")
@@ -365,6 +370,62 @@ impl HostApiDispatcher {
         Ok(HostResponse::ok(result))
     }
 
+    /// 返回当前已启用的工具名列表（与 pi-mono getActiveTools 对齐）。
+    async fn do_get_active_tools(
+        &self,
+        _plugin_id: &str,
+        _params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let tools = match &self.tools {
+            None => return Ok(HostResponse::err("ToolRegistry not configured (006)")),
+            Some(t) => t,
+        };
+        let list = tools.list_tools(None).await?;
+        let names: Vec<&str> = list.iter().map(|t| t.name.as_str()).collect();
+        Ok(HostResponse::ok(serde_json::to_value(names).map_err(AppError::Serialize)?))
+    }
+
+    /// 设置活跃工具集（按名称过滤启用/禁用）。MVP 阶段仅返回确认，不实际变更状态。
+    async fn do_set_active_tools(
+        &self,
+        _plugin_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let _tools = match &self.tools {
+            None => return Ok(HostResponse::err("ToolRegistry not configured (006)")),
+            Some(t) => t,
+        };
+        let _tool_names = params
+            .get("toolNames")
+            .or_else(|| params.get("tool_names"))
+            .and_then(|v| v.as_array());
+        // MVP: 接受请求但不实际变更工具启用状态，后续迭代实现完整的 active/inactive 切换。
+        Ok(HostResponse::ok(serde_json::Value::Null))
+    }
+
+    /// 注册命令（与 pi-mono ExtensionAPI.registerCommand 对齐）。MVP 阶段仅记录，不执行。
+    async fn do_register_command(
+        &self,
+        plugin_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Plugin("registerCommand: missing name".to_string()))?;
+        let description = params
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        tracing::info!(
+            "[registerCommand] plugin={} cmd={} desc={}",
+            plugin_id,
+            name,
+            description
+        );
+        Ok(HostResponse::ok(serde_json::Value::Null))
+    }
+
     async fn do_events(
         &self,
         plugin_id: &str,
@@ -378,6 +439,8 @@ impl HostApiDispatcher {
             .ok_or_else(|| AppError::Plugin("events: missing eventName".to_string()))?;
         match method {
             "on" => {
+                // 宿主侧注册占位回调；实际 JS 回调由 __pi_dispatch_event 触发 pi_bridge.js 中的 __pi_hooks。
+                // TODO: 长生命周期 VM 就绪后，此处应注入真实回调（通过 WasmInstance 回调到插件 JS）。
                 let id = self.event_bus.on(event_name, Box::new(|_| Ok(())));
                 Ok(HostResponse::ok(serde_json::json!({ "listenerId": id.0 })))
             }
@@ -1159,5 +1222,61 @@ mod tests {
             .as_ref()
             .map(|e| e.contains("name"))
             .unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_active_tools_with_registry_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "getActiveTools".to_string(),
+            params: serde_json::json!({}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_set_active_tools_with_registry_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "setActiveTools".to_string(),
+            params: serde_json::json!({ "toolNames": ["tool_a", "tool_b"] }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_register_command_returns_ok() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "registerCommand".to_string(),
+            params: serde_json::json!({ "name": "myCmd", "description": "test command" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_register_command_missing_name_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "registerCommand".to_string(),
+            params: serde_json::json!({ "description": "no name" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-1", req).await.unwrap();
+        assert!(!res.ok);
     }
 }

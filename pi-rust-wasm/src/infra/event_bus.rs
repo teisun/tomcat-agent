@@ -3,6 +3,7 @@
 //! 提供 on/once/off/emit_sync/emit_async/remove_plugin_listeners 等能力；单 listener 抛错或 panic 不中断其他 listener 与主流程。
 //! 事件名使用字符串、snake_case，与 pi-mono 对齐。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -79,16 +80,16 @@ pub trait EventBus: Send + Sync + 'static {
 /// 默认事件总线实现，基于 `RwLock` + `HashMap`，线程安全。
 pub struct DefaultEventBus {
     next_id: AtomicU64,
-    listeners: std::sync::RwLock<HashMap<String, Vec<ListenerEntry>>>,
-    id_to_event: std::sync::RwLock<HashMap<EventListenerId, String>>,
+    listeners: RwLock<HashMap<String, Vec<ListenerEntry>>>,
+    id_to_event: RwLock<HashMap<EventListenerId, String>>,
 }
 
 impl Default for DefaultEventBus {
     fn default() -> Self {
         Self {
             next_id: AtomicU64::new(0),
-            listeners: std::sync::RwLock::new(HashMap::new()),
-            id_to_event: std::sync::RwLock::new(HashMap::new()),
+            listeners: RwLock::new(HashMap::new()),
+            id_to_event: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -127,15 +128,14 @@ impl DefaultEventBus {
             callback,
         };
         {
-            // SAFETY: RwLock 仅在 poison 时 panic，当前无显式 poison 逻辑。
-            let mut listeners = self.listeners.write().unwrap();
+            let mut listeners = self.listeners.write();
             listeners
                 .entry(event_name.to_string())
                 .or_default()
                 .push(entry);
         }
         {
-            let mut id_to_event = self.id_to_event.write().unwrap();
+            let mut id_to_event = self.id_to_event.write();
             id_to_event.insert(id, event_name.to_string());
         }
         id
@@ -155,11 +155,11 @@ impl EventBus for DefaultEventBus {
     fn off(&self, listener_id: EventListenerId) {
         // --- 步骤 1: 从 id_to_event 取出事件名并移除映射 ---
         let event_name = {
-            let mut id_to_event = self.id_to_event.write().unwrap();
+            let mut id_to_event = self.id_to_event.write();
             id_to_event.remove(&listener_id)
         };
         if let Some(name) = event_name {
-            let mut listeners = self.listeners.write().unwrap();
+            let mut listeners = self.listeners.write();
             if let Some(vec) = listeners.get_mut(&name) {
                 vec.retain(|e| e.id != listener_id);
             }
@@ -169,7 +169,7 @@ impl EventBus for DefaultEventBus {
     fn emit_sync(&self, event_name: &str, context: EventContext) -> Result<(), AppError> {
         let mut to_remove: Vec<(usize, EventListenerId)> = Vec::new();
         {
-            let mut listeners = self.listeners.write().unwrap();
+            let mut listeners = self.listeners.write();
             let vec = match listeners.get_mut(event_name) {
                 Some(v) => v,
                 None => return Ok(()),
@@ -196,7 +196,7 @@ impl EventBus for DefaultEventBus {
             }
         }
         // --- 步骤 3: 清理 once 对应的 id_to_event 映射 ---
-        let mut id_to_event = self.id_to_event.write().unwrap();
+        let mut id_to_event = self.id_to_event.write();
         for (_, id) in to_remove {
             id_to_event.remove(&id);
         }
@@ -211,7 +211,7 @@ impl EventBus for DefaultEventBus {
         let mut ids_to_remove = Vec::new();
         {
             // --- 步骤 1: 从各事件下列表移除该 plugin_id 的 entry，收集 ID ---
-            let mut listeners = self.listeners.write().unwrap();
+            let mut listeners = self.listeners.write();
             for vec in listeners.values_mut() {
                 let mut to_remove = Vec::new();
                 for (i, e) in vec.iter().enumerate() {
@@ -226,7 +226,7 @@ impl EventBus for DefaultEventBus {
             }
         }
         // --- 步骤 2: 从 id_to_event 移除上述 ID ---
-        let mut id_to_event = self.id_to_event.write().unwrap();
+        let mut id_to_event = self.id_to_event.write();
         for id in ids_to_remove {
             id_to_event.remove(&id);
         }

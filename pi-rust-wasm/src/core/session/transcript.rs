@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::infra::error::AppError;
 
@@ -21,7 +22,8 @@ pub struct SessionHeader {
     pub cwd: Option<String>,
 }
 
-/// 公共基座：id、parentId、timestamp，树形结构。
+/// 公共基座：id、parentId、timestamp，树形结构。预留供后续树形操作使用。
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryBase {
@@ -166,7 +168,10 @@ pub fn read_entries_tail(path: &Path, cap: usize) -> Result<Vec<TranscriptEntry>
         }
         match serde_json::from_str::<TranscriptEntry>(trimmed) {
             Ok(entry) => entries.push(entry),
-            Err(_) => continue, // 忽略无法解析的行
+            Err(e) => {
+                warn!(line = trimmed, error = %e, "skipping unparseable JSONL entry");
+                continue;
+            }
         }
     }
     Ok(entries)
@@ -238,7 +243,7 @@ pub fn get_entry(path: &Path, id: &str) -> Result<Option<TranscriptEntry>, AppEr
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(trimmed) {
-            if entry_id(&entry).map_or(false, |s| s == id) {
+            if entry_id(&entry) == Some(id) {
                 return Ok(Some(entry));
             }
         }
@@ -267,7 +272,7 @@ pub fn get_children(
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(trimmed) {
-            if entry_parent_id(&entry).map_or(false, |s| s == parent_id) {
+            if entry_parent_id(&entry) == Some(parent_id) {
                 out.push(entry);
             }
         }

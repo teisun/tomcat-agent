@@ -1,5 +1,18 @@
 这份规范旨在为 `pi_awsm` 项目建立深度架构共识。它不仅告诉 AI “怎么写”，更解释了“为什么要这么写”，通过**理论指引 + 代码实践**的方式，确保项目随着复杂度增加依然保持可维护性。
 
+### 关联子规范
+
+本文档为架构级主规范，以下子文档提供各领域的具体规则：
+
+| 子规范 | 定位 |
+| :--- | :--- |
+| [RUST_IDIOMS_SPEC.md](RUST_IDIOMS_SPEC.md) | Rust 惯用写法与 Clippy 规则速查（Option 组合子、类型别名、数值安全等） |
+| [COMMENT_SPEC.md](COMMENT_SPEC.md) | 代码注释与 Rustdoc 文档规范 |
+| [UNIT_TEST_SPEC.md](../testing/UNIT_TEST_SPEC.md) | 单元测试编写规范（覆盖率、Mock 策略、命名） |
+| [INTEGRATION_TEST_SPEC.md](../testing/INTEGRATION_TEST_SPEC.md) | 集成测试编写规范 |
+| [COMMIT_MESSAGE_SPEC.md](../workflow/COMMIT_MESSAGE_SPEC.md) | 提交信息格式规范 |
+| [STATUS_GUIDE.md](../workflow/STATUS_GUIDE.md) | 进度状态文件规范 |
+
 ---
 
 # 编码与架构设计高级规范 (Architecture & Coding Excellence)
@@ -122,6 +135,65 @@ pub fn load_plugin(id: &str) -> Result<(), AppError> {
     let raw = std::fs::read(path).map_err(|e| anyhow::anyhow!("Failed to read {id}: {e}"))?;
     // ...
     Ok(())
+}
+```
+
+### 错误传播纪律 (Error Propagation Discipline)
+
+以下规则从项目代码审查中沉淀而来，与上述"禁止隐式崩溃"互为补充。
+
+#### 规则 4.1 — 禁止静默丢弃 Result
+
+`let _ = expr_returning_Result` 会将错误完全吞没。调用者无法感知失败，可能导致数据损坏或行为静默降级。
+
+```rust
+// BAD — 写入线性内存失败时 JS 侧拿到损坏数据
+let _ = memory.set_data(resp_bytes, buf_ptr);
+
+// GOOD — 错误上报，最终反映为 hostcall 失败
+memory.set_data(resp_bytes, buf_ptr)
+    .map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
+```
+
+若确实不关心返回值（如 `send` 到已关闭的 channel），需用行内注释说明原因：
+```rust
+let _ = tx.send(msg); // 接收端可能已 drop，此处不影响主流程
+```
+
+#### 规则 4.2 — 可恢复跳过必须带日志
+
+当业务逻辑允许跳过某条失败记录（如 JSONL 逐行解析容错）时，**必须通过 `tracing::warn!` 输出原始数据与错误详情**。选择 `warn` 而非 `error`：单条失败不影响整体功能，但需要在日志中留痕，便于排查数据丢失。
+
+```rust
+// BAD — 静默吞掉解析错误，数据丢失不可追踪
+Err(_) => continue,
+
+// GOOD — 日志包含原始行内容和错误详情
+Err(e) => {
+    warn!(line = trimmed, error = %e, "skipping unparseable JSONL entry");
+    continue;
+}
+```
+
+#### 规则 4.3 — 第三方 API「伪失败」的处理模式
+
+部分第三方 SDK 在正常退出时也可能返回 `Err`（如 WasmEdge QuickJS `_start` 以 exit code 0 退出）。对这种场景：
+1. **必须 `match`**，不得 `let _ =` 或 `unwrap()`
+2. **区分真假错误**：通过错误消息模式匹配（如 `contains("exit code 0")`）识别正常退出
+3. **附注释说明**：解释为何将某个 `Err` 视为成功，避免后续维护者误改
+
+```rust
+match vm.run_func(Some("quickjs"), "_start", []) {
+    Ok(_) => Ok(serde_json::Value::Null),
+    Err(e) => {
+        let msg = e.to_string();
+        // QuickJS _start 正常退出时可能返回 "exit code 0" 类 CoreError，不视为失败
+        if msg.contains("exit code 0") || msg.contains("success") {
+            Ok(serde_json::Value::Null)
+        } else {
+            Err(AppError::QuickJS(format!("script execution failed: {}", msg)))
+        }
+    }
 }
 ```
 
@@ -259,6 +331,28 @@ fn universal_host_handler(
     Ok(vec![WasmValue::from_i32(ret_ptr), WasmValue::from_i32(ret_len)])
 }
 ```
+
+### 协议完整性 (Protocol Completeness)
+
+Hostcall 协议涉及三个端点——协议文档（`host-call-protocol.md`）、宿主分发器（`dispatcher.rs`）、JS 桥接层（`pi_bridge.js`）。任何一端缺失都会导致调用静默失败。以下规则确保三端始终对齐。
+
+#### 规则 7.1 — 协议文档与代码双向对齐
+
+`host-call-protocol.md` 中定义的每条 `(module, method)` 路由，Dispatcher 的 `dispatch_async` 必须有对应的 match arm。反之，`pi_bridge.js` 中每个 `pi.*` 方法所发起的 hostcall，Dispatcher 也必须能接住。
+
+违反此规则的典型后果：JS 侧调用 `pi.registerCommand()` 发起 `tools.registerCommand`，但 Dispatcher 没有对应路由，请求落入 `_ => Err("unknown method")` 分支，插件功能静默失败且无明显错误提示。
+
+#### 规则 7.2 — 新增协议路由时的检查清单
+
+每次新增或修改 Hostcall 路由时，必须同步完成以下四项，缺一不可：
+
+| 步骤 | 文件 | 动作 |
+| :--- | :--- | :--- |
+| 1 | `host-call-protocol.md` | 新增/更新 `(module, method)` 定义、参数与返回值说明 |
+| 2 | `src/ext/dispatcher.rs` | 在 `dispatch_async` 中添加 match arm + 实现方法 |
+| 3 | `assets/js/pi_bridge.js` | 在 `globalThis.pi` 中暴露对应 JS 方法 |
+| 4 | `src/ext/dispatcher.rs` tests | 至少 1 个单元测试覆盖新路由的正常路径 |
+
 ---
 
 ## 8. 存储原子性与状态一致性规范 (Storage Consistency)
@@ -284,6 +378,90 @@ pub async fn save_message(session_id: &str, msg: Message) -> Result<(), AppError
     infra::platform::write_file_atomic(STORE_PATH, &store)?;
     Ok(())
 }
+```
+
+---
+
+## 9. 并发与锁安全 (Concurrency & Lock Safety)
+
+### 理论 (Theory)
+
+`std::sync::RwLock` / `Mutex` 内置"锁中毒"（poison）机制：持锁线程 panic 后，锁被标记为 poisoned，后续所有 `.read()` / `.write()` 返回 `Err(PoisonError)`。如果用 `.unwrap()` 处理，则**一个线程的 panic 会级联导致所有后续访问 panic**——这是生产环境中不可接受的连锁故障模式。
+
+### 实践 (Practice)
+
+#### 规则 9.1 — 优先使用 `parking_lot` 替代 `std::sync`
+
+项目统一使用 `parking_lot::RwLock` / `parking_lot::Mutex`。parking_lot 没有 poison 机制：持锁线程 panic 后锁正常释放，其他线程可继续工作。这是 Rust 社区主流选择（tokio、servo 等项目均采用）。
+
+```rust
+// BAD — std::sync::RwLock + unwrap 级联 panic 风险
+use std::sync::RwLock;
+let guard = self.tools.write().unwrap();
+
+// GOOD — parking_lot::RwLock，无 poison，API 更简洁
+use parking_lot::RwLock;
+let guard = self.tools.write(); // 直接返回 guard
+```
+
+#### 规则 9.2 — 禁止 `.read().unwrap()` / `.write().unwrap()`
+
+即使在无法使用 parking_lot 的场景（如第三方库约束），也必须处理 `PoisonError`，不得用 `.unwrap()` 绕过。
+
+#### 规则 9.3 — 锁选型指南
+
+| 场景 | 推荐 | 理由 |
+| :--- | :--- | :--- |
+| 读多写少（ToolRegistry、EventBus） | `parking_lot::RwLock` | 读锁无互斥，写锁独占 |
+| 写频繁或持锁时间短 | `parking_lot::Mutex` | 比 RwLock 开销更低 |
+| 高并发、大量 key 分片 | `dashmap::DashMap` | 分段锁，避免全局争用 |
+| 跨 await 持锁 | `tokio::sync::RwLock` | 不阻塞 tokio 运行时 |
+
+---
+
+## 10. Dead Code 与预留代码管理 (Dead Code Management)
+
+### 理论 (Theory)
+
+Rust 编译器默认对未使用的代码发出 `dead_code` 警告。但在迭代式开发中，部分代码是**有意预留**的（如 stub 模块、未来特性字段、预留的公共基座类型）。需要区分"遗漏的废弃代码"与"有意预留的代码"，并用一致的标注方式表达意图。
+
+### 实践 (Practice)
+
+#### 规则 10.1 — `#[allow(dead_code)]` 必须附带 doc comment
+
+裸 `#[allow(dead_code)]` 无法区分"有意预留"还是"忘记删除"。必须在上方用 `///` 说明预留用途和预计启用时机。
+
+```rust
+// BAD — 看不出是预留还是废弃
+#[allow(dead_code)]
+pub struct EntryBase { ... }
+
+// GOOD — doc comment 说明意图
+/// 公共基座：id、parentId、timestamp，预留供后续树形操作使用。
+#[allow(dead_code)]
+pub struct EntryBase { ... }
+```
+
+#### 规则 10.2 — stub/mock 模块用模块级标注
+
+当整个模块是降级 stub（如 `engine_stub`、`instance_stub`），在 `mod.rs` 的模块声明处统一标注 `#[allow(dead_code)]`，避免模块内部每个函数逐条标注。
+
+```rust
+// src/ext/mod.rs
+#[allow(dead_code)]
+mod engine_stub;   // WasmEdge 不可用时的降级实现
+#[allow(dead_code)]
+mod instance_stub;
+```
+
+#### 规则 10.3 — 未来特性字段用双重标注
+
+结构体中为未来特性预留的字段，使用 `/// TODO:` + `#[allow(dead_code)]` 双重标注。`TODO` 说明实现方向，`allow` 消除编译警告。
+
+```rust
+/// TODO: 接入 tokio::time::timeout 实现流式超时
+#[allow(dead_code)]
+stream_timeout_sec: u64,
 ```
 
 ---

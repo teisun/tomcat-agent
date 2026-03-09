@@ -4,8 +4,9 @@ use crate::infra::error::AppError;
 use crate::infra::{AuditRecorder, ToolAuditEntry};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,24 +97,24 @@ impl ToolRegistry for DefaultToolRegistry {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        self.tools.write().unwrap().insert(key, t);
+        self.tools.write().insert(key, t);
         Ok(())
     }
 
     async fn unregister_tool(&self, tool_name: &str, plugin_id: &str) -> Result<(), AppError> {
         let key = tool_key(plugin_id, tool_name);
-        self.tools.write().unwrap().remove(&key);
+        self.tools.write().remove(&key);
         Ok(())
     }
 
     async fn get_tool(&self, tool_name: &str) -> Result<Tool, AppError> {
-        let guard = self.tools.read().unwrap();
+        let guard = self.tools.read();
         get_tool_from_map(&guard, tool_name)
             .ok_or_else(|| AppError::Tool(format!("工具不存在或已禁用: {}", tool_name)))
     }
 
     async fn list_tools(&self, plugin_id: Option<&str>) -> Result<Vec<Tool>, AppError> {
-        let guard = self.tools.read().unwrap();
+        let guard = self.tools.read();
         let out: Vec<Tool> = guard
             .values()
             .filter(|t| plugin_id.is_none_or(|p| t.plugin_id.as_str() == p))
@@ -162,7 +163,6 @@ impl ToolRegistry for DefaultToolRegistry {
         let key_prefix = format!("{}::", plugin_id);
         self.tools
             .write()
-            .unwrap()
             .retain(|k, _| !k.starts_with(&key_prefix));
     }
 }

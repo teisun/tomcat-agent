@@ -338,8 +338,8 @@ fn uuid_for_session() -> String {
 
 fn iso_ts(ms: i64) -> String {
     let secs = ms / 1000;
-    let nsecs = ((ms % 1000).abs() as u32) * 1_000_000;
-    let dt = chrono::DateTime::from_timestamp(secs, nsecs).unwrap_or_else(|| Utc::now());
+    let nsecs = (ms % 1000).unsigned_abs() as u32 * 1_000_000;
+    let dt = chrono::DateTime::from_timestamp(secs, nsecs).unwrap_or_else(Utc::now);
     dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 

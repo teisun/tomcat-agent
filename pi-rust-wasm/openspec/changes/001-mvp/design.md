@@ -4,7 +4,7 @@
 
 ### 参考文件
 
-- **pi 生态兼容性对齐检查**：[pi-ecosystem-alignment-check.md](../archive/pi-ecosystem-alignment-check.md)，用于核对事件、API、工具定义与 pi_agent_rust / pi-mono 的差异及对齐结论；设计或实现变更影响扩展/事件/宿主 API 时，应据此做一次对齐检查并更新。
+- **pi 生态兼容性对齐检查**：（原 `archive/pi-ecosystem-alignment-check.md` 已归档移除）用于核对事件、API、工具定义与 pi_agent_rust / pi-mono 的差异及对齐结论；设计或实现变更影响扩展/事件/宿主 API 时，应据 Architecture.md 和 host-call-protocol.md 做一次对齐检查。
 
 ### pi 生态参考原则（与 Architecture.md 一致）
 

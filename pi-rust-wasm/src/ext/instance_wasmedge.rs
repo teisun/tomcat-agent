@@ -13,10 +13,13 @@ use wasmedge_sdk::{
     ImportObjectBuilder, Instance, Module, Store, Vm, WasmValue,
 };
 
+/// Hostcall 回调函数签名：接收 JSON 请求字符串，返回 JSON 响应字符串。
+type HostInvokeFn = dyn Fn(&str) -> Result<String, AppError> + Send + Sync;
+
 /// 宿主导入的 host data：供 __pi_host_call 使用。
 struct HostData {
     plugin_id: String,
-    host_invoke: Option<Arc<dyn Fn(&str) -> Result<String, AppError> + Send + Sync>>,
+    host_invoke: Option<Arc<HostInvokeFn>>,
 }
 impl fmt::Debug for HostData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -147,8 +150,18 @@ impl WasmInstance {
             .map_err(|e| AppError::WasmEdge(e.to_string()))?;
         vm.register_module(Some("quickjs"), module)
             .map_err(|e| AppError::WasmEdge(e.to_string()))?;
-        let _ = vm.run_func(Some("quickjs"), "_start", []);
-        Ok(serde_json::Value::Null)
+        match vm.run_func(Some("quickjs"), "_start", []) {
+            Ok(_) => Ok(serde_json::Value::Null),
+            Err(e) => {
+                let msg = e.to_string();
+                // QuickJS _start 正常退出时可能返回 "exit code 0" 类 CoreError，不视为失败
+                if msg.contains("exit code 0") || msg.contains("success") {
+                    Ok(serde_json::Value::Null)
+                } else {
+                    Err(AppError::QuickJS(format!("script execution failed: {}", msg)))
+                }
+            }
+        }
     }
 
     /// Prepend pi_bridge.js (if present) to the user script content.
@@ -287,7 +300,9 @@ fn host_call_impl(
     let resp_bytes = response_json.as_bytes();
     let out_len = resp_bytes.len() as u32;
     if out_len <= buf_cap {
-        let _ = memory.set_data(resp_bytes.to_vec(), buf_ptr);
+        memory
+            .set_data(resp_bytes, buf_ptr)
+            .map_err(|_| CoreError::Execution(CoreExecutionError::HostFuncFailed))?;
     }
     Ok(vec![WasmValue::from_i32(out_len as i32)])
 }

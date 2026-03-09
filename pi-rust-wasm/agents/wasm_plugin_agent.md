@@ -23,7 +23,7 @@
 - **依赖**：T1-P0-001；T1-P0-002（EventBus、remove_plugin_listeners）；T1-P0-005、006（PrimitiveExecutor、ToolRegistry）；T1-P0-004（LlmProvider）；session_cli 的 SessionManager（会话 API 绑定）。
 - **被依赖**：session_cli（010 的 plugin 子命令依赖 009）；chat（011 依赖 009 的插件与工具联动）。
 - **接口约定**：
-  - **宿主 API**：与 design「核心 API 分类与对齐规范」一致（4 原语、LLM、工具、事件、会话、配置、日志）；在 QuickJS 中暴露为全局 `agent` 对象。
+  - **宿主 API**：与 design「核心 API 分类与对齐规范」一致（4 原语、LLM、工具、事件、会话、配置、日志）；在 QuickJS 中暴露为全局 `pi` 对象（`globalThis.pi`）。
   - **PluginManager**（或等价）：加载/卸载/启用/禁用、清单解析与校验；调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools 做清理。
 
 ## 参考文档

@@ -40,11 +40,11 @@ pub struct OpenAiProvider {
     /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
     api_base_fallback: Option<String>,
     api_key: String,
-    #[allow(dead_code)]
     default_model: String,
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
     semaphore: Option<Semaphore>,
     retry_count: u32,
+    /// TODO: 接入 tokio::time::timeout 实现流式超时
     #[allow(dead_code)]
     stream_timeout_sec: u64,
 }
@@ -100,7 +100,11 @@ impl OpenAiProvider {
         request
             .model_override
             .as_deref()
-            .unwrap_or(&request.model)
+            .unwrap_or(if request.model.is_empty() {
+                &self.default_model
+            } else {
+                &request.model
+            })
             .to_string()
     }
 

@@ -157,8 +157,7 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
         }
     }
     let path: Option<PathBuf> = config_path
-        .map(|s| normalize_path(s).ok())
-        .flatten()
+        .and_then(|s| normalize_path(s).ok())
         .or_else(|| normalize_path(DEFAULT_CONFIG_PATH).ok());
     let path = match path {
         Some(p) if p.exists() => p,
@@ -299,7 +298,7 @@ mod tests {
 
     #[test]
     fn cli_parse_init() {
-        let cli = Cli::try_parse_from(&["pi-awsm", "init"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm", "init"]).unwrap();
         let cmd = cli.command.expect("subcommand");
         assert!(matches!(cmd, Commands::Init { config: _ }));
         if let Commands::Init { config } = cmd {
@@ -310,7 +309,7 @@ mod tests {
     #[test]
     fn cli_parse_init_with_config_path() {
         let cli =
-            Cli::try_parse_from(&["pi-awsm", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
+            Cli::try_parse_from(["pi-awsm", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
         let cmd = cli.command.unwrap();
         if let Commands::Init { config } = cmd {
             assert_eq!(config, "/tmp/pi/config.toml");
@@ -319,7 +318,7 @@ mod tests {
 
     #[test]
     fn cli_parse_doctor() {
-        let cli = Cli::try_parse_from(&["pi-awsm", "doctor"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm", "doctor"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Doctor { config: None })
@@ -328,7 +327,7 @@ mod tests {
 
     #[test]
     fn cli_parse_config_get() {
-        let cli = Cli::try_parse_from(&["pi-awsm", "config", "get"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm", "config", "get"]).unwrap();
         let cmd = cli.command.unwrap();
         if let Commands::Config { sub } = cmd {
             assert!(matches!(sub, ConfigSub::Get { key: None }));
@@ -337,7 +336,7 @@ mod tests {
 
     #[test]
     fn cli_parse_session_list() {
-        let cli = Cli::try_parse_from(&["pi-awsm", "session", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm", "session", "list"]).unwrap();
         let cmd = cli.command.unwrap();
         assert!(matches!(
             cmd,
@@ -349,7 +348,7 @@ mod tests {
 
     #[test]
     fn cli_parse_plugin_list() {
-        let cli = Cli::try_parse_from(&["pi-awsm", "plugin", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm", "plugin", "list"]).unwrap();
         let cmd = cli.command.unwrap();
         assert!(matches!(
             cmd,
@@ -361,7 +360,7 @@ mod tests {
 
     #[test]
     fn cli_parse_audit_list() {
-        let cli = Cli::try_parse_from(&["pi-awsm", "audit", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm", "audit", "list"]).unwrap();
         let cmd = cli.command.unwrap();
         assert!(matches!(
             cmd,
@@ -373,7 +372,7 @@ mod tests {
 
     #[test]
     fn cli_parse_default_chat() {
-        let cli = Cli::try_parse_from(&["pi-awsm"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-awsm"]).unwrap();
         assert!(cli.command.is_none());
     }
 

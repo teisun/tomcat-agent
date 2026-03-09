@@ -1,5 +1,87 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| @code_review | 2026-03-09 21:00 | DONE | develop | 88.4 |
+
+### 本次执行说明（编码规范整合 + guides 目录重组）
+
+**编码规范整合**
+- [✓] `Codeing&Architecture_Spec.md` 扩展 4 处：Section 4 错误传播纪律（3 规则）、Section 7 协议完整性（2 规则）、新增 Section 9 并发与锁安全（3 规则）、新增 Section 10 Dead Code 管理（3 规则）
+- [✓] 新建子文档 `RUST_IDIOMS_SPEC.md`（8 条 Clippy 惯用法规则，含 Before/After 代码对照）
+- [✓] 主文档顶部新增子规范索引表（6 个关联文档链接）
+
+**guides 目录重组**
+- [✓] 12 个文件从 `guides/` 平铺结构重组为 4 个子目录：`coding/`（3）、`testing/`（5）、`workflow/`（3）、`examples/`（1）
+- [✓] 全部通过 `git mv` 移动，保留 git 历史
+- [✓] 更新 8 个外部文件约 25 处引用路径（Constitution、README、agents、.cursor/commands、.cursor/rules、status、INTEGRATION、architecture/session-storage）
+- [✓] 更新 guides 内部跨子目录交叉引用（UNIT_TEST_SPEC ↔ Codeing&Architecture_Spec、COMMIT_MESSAGE_SPEC → Constitution 等）
+- [✓] 全局搜索确认无残留旧路径
+
+### 🔌 INTERFACE (接口变更)
+- 无代码接口变更（纯文档与目录结构优化）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @code_review | 2026-03-09 19:00 | DONE | develop | 88.4 |
+
+### 本次执行说明（代码审查整改 + Constitution DoD 复验）
+
+**审查整改（P0 批次）**
+- [✓] **[P0-1]** Clippy 全量修复：消除全部 19 条警告（11 lib + 8 test），涉及 `empty_line_after_doc_comments`、`dead_code`、`map_flatten`、`cast_abs_to_unsigned`、`redundant_closure`、`unnecessary_map_or`、`type_complexity`、`unnecessary_to_owned`、`needless_borrows_for_generic_args`、`default_constructed_unit_structs`
+- [✓] **[P0-2]** RwLock 防毒化迁移：`std::sync::RwLock` → `parking_lot::RwLock`（`tools.rs`、`event_bus.rs`、`plugin.rs`），消除 ~15 处 `.unwrap()` 潜在 panic
+- [✓] **[P0-3]** WasmEdge QuickJS 已确认修复（用户侧），本地安装 WasmEdge C 库 0.13.5
+- [✓] **[P0-4]** Dispatcher 补齐 3 条 tools 路由（`getActiveTools`/`setActiveTools`/`registerCommand`）+ 4 个单元测试
+- [✓] **[P0-5]** `instance_wasmedge.rs` 错误传播修复：`memory.set_data` 错误上报 + `vm.run_func` 执行结果区分正常退出与异常
+
+**审查整改（P1 批次）**
+- [✓] **[P1-1]** 事件回调添加 TODO 注释（宿主侧占位回调 → 长生命周期 VM 就绪后注入真实回调）
+- [✓] **[P1-2]** JSONL 解析错误日志：`transcript.rs` 增加 `tracing::warn!`
+- [✓] **[P1-3]** `effective_model` 修复：`default_model` 作为 fallback；`stream_timeout_sec` 保留 `#[allow(dead_code)]` + TODO
+- [✓] **[P1-5]** `pi_bridge.js` 补齐 `pi.off` / `pi.emit` 函数
+- [✓] **[P1-4]** 文档修正：`wasm_plugin_agent.md` 全局对象 → `pi`；`design.md` 失效链接修正
+- [✓] **[P1-6]** `dead_code` 审查：`platform.rs` 保留（预留 doctor 功能）
+- [✓] **[P1-7]** 新增 `README.md`（快速开始、项目结构、架构概览、规范引用）
+
+### ✅ Constitution DoD 复验
+- [✓] `cargo clippy --all-targets` — **0 警告**
+- [✓] `cargo test --all -- --test-threads=1` — **213 通过**（182 单元 + 31 集成），0 失败，1 ignored
+- [✓] WasmEdge E2E — 6 passed（engine, hello_file, hello_inline, bridge, event_dispatch, primitives）
+- [✓] LLM 集成测试 — 2 passed（chat + stream）
+- [✓] `cargo llvm-cov` — **行覆盖率 88.4%**（≥ 85% 门槛），函数覆盖率 80.8%
+
+### 覆盖率明细（按模块）
+| 模块 | 行覆盖 | 备注 |
+| :--- | :--- | :--- |
+| core/tools.rs | 100% | |
+| core/confirmation.rs | 100% | |
+| infra/audit.rs | 100% | |
+| infra/event_bus.rs | 96.5% | |
+| ext/plugin.rs | 96.9% | |
+| core/executor.rs | 95.8% | |
+| infra/config.rs | 95.7% | |
+| ext/dispatcher.rs | 88.0% | |
+| api/cli.rs | 90.0% | |
+| core/llm/openai.rs | 67.1% | 流式/重试路径未充分覆盖 |
+| ext/instance_wasmedge.rs | 70.6% | Wasm 运行时内部路径 |
+| infra/logging.rs | 62.0% | 文件日志初始化路径 |
+| **TOTAL** | **88.4%** | |
+
+### 🔌 INTERFACE (接口变更)
+- `parking_lot::RwLock` 替换 `std::sync::RwLock`（`ToolRegistry`、`EventBus`、`PluginManager`）
+- Dispatcher 新增路由：`tools.getActiveTools`、`tools.setActiveTools`、`tools.registerCommand`
+- `pi_bridge.js` 新增：`pi.off()`、`pi.emit()`
+- `OpenAiProvider::effective_model` 支持 `default_model` fallback
+
+### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | @bridge_layer | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明（Phase 4：文档完善 + 全量验收）

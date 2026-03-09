@@ -4,9 +4,11 @@
 //! 默认构建即包含 WasmEdge 真实实现，需安装 WasmEdge C 库。
 
 pub mod dispatcher;
+#[allow(dead_code)]
 mod engine_stub;
 mod engine_wasmedge;
 pub mod host_binding;
+#[allow(dead_code)]
 mod instance_stub;
 mod instance_wasmedge;
 pub mod plugin;

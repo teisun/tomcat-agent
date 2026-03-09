@@ -1,6 +1,6 @@
 # Commit Message 规范
 
-与 [Constitution.md](../Constitution.md) 附录「提交格式」一致；本条规范细化格式要求与 **what+why** 示例。
+与 [Constitution.md](../../Constitution.md) 附录「提交格式」一致；本条规范细化格式要求与 **what+why** 示例。
 
 ---
 

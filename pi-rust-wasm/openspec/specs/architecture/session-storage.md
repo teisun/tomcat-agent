@@ -53,7 +53,7 @@ pub struct SessionHeader {
 
 /// 后续每行：一条 SessionEntry。内存中为 enum 联合类型，落盘时每行序列化一个变体。
 /// JSON 通过 type 字段区分（snake_case），与 pi-mono / pi_agent_rust 一致。
-/// 参考：[session-pi-mono-format.jsonl](../guides/session-pi-mono-format.jsonl)
+/// 参考：[session-pi-mono-format.jsonl](../guides/examples/session-pi-mono-format.jsonl)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEntry {

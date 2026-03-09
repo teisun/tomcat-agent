@@ -20,7 +20,7 @@ alwaysApply: true
 
 ### 1. 常规代码提交（修改 src/ 代码、Cargo.toml、测试文件等）
 
-必须严格遵循（与 Constitution 及规范一致）：**格式与 what+why 要求见 [Commit Message 规范](../../openspec/specs/guides/COMMIT_MESSAGE_SPEC.md)**。摘要如下：
+必须严格遵循（与 Constitution 及规范一致）：**格式与 what+why 要求见 [Commit Message 规范](../../openspec/specs/guides/workflow/COMMIT_MESSAGE_SPEC.md)**。摘要如下：
 
 - 首行：`类型(模块): 简短描述(what)`，不超过 50 字。
 - 详细描述（why）：说明**为什么这么做**——动机、要解决的问题、改动的作用与意义；禁止记流水账。

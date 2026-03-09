@@ -5,6 +5,7 @@
 use crate::core::ToolRegistry;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventListenerId};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -113,7 +114,7 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
 pub struct PluginManager {
     event_bus: Arc<dyn EventBus>,
     tools: Option<Arc<dyn ToolRegistry>>,
-    plugins: std::sync::RwLock<HashMap<String, PluginInstance>>,
+    plugins: RwLock<HashMap<String, PluginInstance>>,
 }
 
 impl PluginManager {
@@ -121,7 +122,7 @@ impl PluginManager {
         Self {
             event_bus,
             tools: None,
-            plugins: std::sync::RwLock::new(HashMap::new()),
+            plugins: RwLock::new(HashMap::new()),
         }
     }
 
@@ -133,10 +134,7 @@ impl PluginManager {
     /// 注册已构造的插件实例（内部使用；加载流程完成后调用）。
     pub fn register_plugin(&self, instance: PluginInstance) -> Result<(), AppError> {
         let id = instance.id.clone();
-        let mut map = self
-            .plugins
-            .write()
-            .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+        let mut map = self.plugins.write();
         if map.contains_key(&id) {
             return Err(AppError::Plugin(format!("plugin already loaded: {}", id)));
         }
@@ -146,22 +144,19 @@ impl PluginManager {
 
     /// 按 ID 获取插件信息（只读，不含 Wasm 实例）。
     pub fn get_plugin(&self, plugin_id: &str) -> Option<PluginInfo> {
-        let map = self.plugins.read().ok()?;
+        let map = self.plugins.read();
         map.get(plugin_id).map(|i| i.to_info())
     }
 
     /// 列出已加载插件 ID。
     pub fn list_loaded(&self) -> Vec<String> {
-        let map = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+        let map = self.plugins.read();
         map.keys().cloned().collect()
     }
 
     /// 启用插件：仅改状态。
     pub fn enable_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
-        let mut map = self
-            .plugins
-            .write()
-            .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+        let mut map = self.plugins.write();
         let inst = map
             .get_mut(plugin_id)
             .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?;
@@ -171,10 +166,7 @@ impl PluginManager {
 
     /// 禁用插件：仅改状态。
     pub fn disable_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
-        let mut map = self
-            .plugins
-            .write()
-            .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+        let mut map = self.plugins.write();
         let inst = map
             .get_mut(plugin_id)
             .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?;
@@ -185,10 +177,7 @@ impl PluginManager {
     /// 卸载：移除事件监听、注销工具、销毁 Wasm 实例、从 map 移除。
     pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let instance = {
-            let mut map = self
-                .plugins
-                .write()
-                .map_err(|e| AppError::Plugin(format!("plugins lock poisoned: {}", e)))?;
+            let mut map = self.plugins.write();
             map.remove(plugin_id)
                 .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?
         };
