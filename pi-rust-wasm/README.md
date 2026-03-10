@@ -1,4 +1,4 @@
-# pi-rust-awsm
+# pi-rust-wasm
 
 基于 Rust + WasmEdge 构建的轻量、高安全、可自进化 AI Agent 核心运行时。通过 WasmEdge 内置的 QuickJS 引擎与 Node.js 兼容层，实现 pi-mono 生态 100% 兼容，提供沙箱隔离的插件系统、原子化 4 原语能力。
 
@@ -20,15 +20,15 @@ source $HOME/.wasmedge/env
 
 ```bash
 cargo build --release
-./target/release/pi_awsm init        # 生成配置文件
-./target/release/pi_awsm doctor      # 检查环境
+./target/release/pi_wasm init        # 生成配置文件
+./target/release/pi_wasm doctor      # 检查环境
 ```
 
 ### 运行测试
 
 ```bash
 # 需要先配置 .env（参考 .env.example）
-RUST_LOG=pi_awsm=debug,info cargo test --all -- --nocapture --test-threads=1
+RUST_LOG=pi_wasm=debug,info cargo test --all -- --nocapture --test-threads=1
 ```
 
 ## 项目结构

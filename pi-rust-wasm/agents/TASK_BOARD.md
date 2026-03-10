@@ -84,16 +84,16 @@
 | **分支** | `feature/cli-commands` |
 | **阻塞点** | — |
 
-**目标**：将 CLI 中仍为占位的子命令补充为真实实现，使 `pi-awsm` 所有子命令可正常执行。
+**目标**：将 CLI 中仍为占位的子命令补充为真实实现，使 `pi-wasm` 所有子命令可正常执行。
 
 **子项**（参考 tasks_details.md T1-P0-010）：
 - [✓] 10.1 CLI 骨架（clap 子命令结构）
-- [✓] 10.2 `pi-awsm init`：引导 LLM 配置、生成配置文件
-- [✓] 10.3 `pi-awsm doctor`：补全 WasmEdge/QuickJS 可用性检测
-- [✓] 10.4 `pi-awsm config`：补全 get(key)/set/edit 子命令
-- [✓] 10.5 `pi-awsm session`：list/new/switch/delete/archive/search
-- [✓] 10.6 `pi-awsm plugin`：list/load/unload/enable/disable/info，对接 PluginManager
-- [✓] 10.7 `pi-awsm audit`：list/show/export，读取 tracing 日志过滤审计记录
+- [✓] 10.2 `pi-wasm init`：引导 LLM 配置、生成配置文件
+- [✓] 10.3 `pi-wasm doctor`：补全 WasmEdge/QuickJS 可用性检测
+- [✓] 10.4 `pi-wasm config`：补全 get(key)/set/edit 子命令
+- [✓] 10.5 `pi-wasm session`：list/new/switch/delete/archive/search
+- [✓] 10.6 `pi-wasm plugin`：list/load/unload/enable/disable/info，对接 PluginManager
+- [✓] 10.7 `pi-wasm audit`：list/show/export，读取 tracing 日志过滤审计记录
 - [✓] 10.8 完善帮助文档与参数校验
 
 **依赖**：TASK-01 (T1-P0-009-completion)
@@ -105,10 +105,10 @@
 - 提供：完整 CLI 入口，供用户与对话模式使用
 
 **验收标准**：
-- `pi-awsm doctor` 能检测 WasmEdge/QuickJS 可用性并输出修复建议
-- `pi-awsm config set/edit` 可修改配置
-- `pi-awsm plugin list/load/unload/enable/disable/info` 可正常执行
-- `pi-awsm audit list/show/export` 可读取审计日志（或合理占位）
+- `pi-wasm doctor` 能检测 WasmEdge/QuickJS 可用性并输出修复建议
+- `pi-wasm config set/edit` 可修改配置
+- `pi-wasm plugin list/load/unload/enable/disable/info` 可正常执行
+- `pi-wasm audit list/show/export` 可读取审计日志（或合理占位）
 - 所有子命令帮助文档完整、参数校验正确
 - 首次运行无配置时的提示友好
 
@@ -124,7 +124,7 @@
 | **分支** | `feature/cli-chat` |
 | **阻塞点** | — |
 
-**目标**：实现 `pi-awsm chat`（或无参数默认进入）的交互式对话模式，支持流式渲染、多轮上下文、4 原语/工具调用与用户确认。
+**目标**：实现 `pi-wasm chat`（或无参数默认进入）的交互式对话模式，支持流式渲染、多轮上下文、4 原语/工具调用与用户确认。
 
 **子项**（参考 tasks_details.md T1-P0-011）：
 - [✓] 11.1 对话主循环：读取用户输入、调用 LLM、输出响应；集成 SessionManager 与 LlmProvider
@@ -144,7 +144,7 @@
 - 提供：完整 CLI 对话体验，MVP 核心交互入口
 
 **验收标准**：
-- `pi-awsm chat` 或 `pi-awsm` 可进入对话模式
+- `pi-wasm chat` 或 `pi-wasm` 可进入对话模式
 - 流式输出逐字/逐块渲染，Markdown 与代码高亮
 - 多轮上下文从 JSONL 加载并正确组装
 - LLM 返回 tool_calls 时触发用户确认、执行并回传结果
@@ -159,8 +159,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DOING` |
+| **负责人** | Tom |
 | **分支** | `feature/audit-log` |
 | **阻塞点** | — |
 
@@ -170,7 +170,7 @@
 - [ ] 1.1 独立审计日志模块：专用存储，仅追加、不可篡改；保留最近 N 天配置
 - [ ] 1.2 在 4 原语、工具调用、插件生命周期、高危操作等关键路径写入审计记录
 - [ ] 1.3 审计日志查询（按时间/类型/插件等）、导出、按策略清理
-- [ ] 1.4 `pi-awsm audit list/show/export` 子命令与审计模块对接
+- [ ] 1.4 `pi-wasm audit list/show/export` 子命令与审计模块对接
 - [ ] 1.5 （可选）文档说明加密存储为 TODO
 
 **依赖**：T1-P0-005 (DONE)、T1-P0-006 (DONE)
@@ -184,7 +184,7 @@
 **验收标准**：
 - 审计日志仅追加、不可篡改
 - 4 原语/工具/插件操作均有完整审计记录（操作人、时间、内容、确认状态、结果）
-- `pi-awsm audit` 子命令可查询、展示、导出审计日志
+- `pi-wasm audit` 子命令可查询、展示、导出审计日志
 - 过期日志按配置自动清理
 
 ---
@@ -281,7 +281,7 @@
 **验收标准**：
 - Windows/macOS/Linux 全量功能测试通过
 - 平台专属 bug 已修复
-- `pi-awsm doctor` 可准确检测各平台环境并给出建议
+- `pi-wasm doctor` 可准确检测各平台环境并给出建议
 
 ---
 

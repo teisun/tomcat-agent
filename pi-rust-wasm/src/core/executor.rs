@@ -469,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_success() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_read");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_read");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let f = dir.join("f.txt");
@@ -502,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_dir_success() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_list");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_list");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), "").unwrap();
         let dir = dir.canonicalize().unwrap();
@@ -521,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_success() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_write");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_write");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let f = dir.join("w.txt");
@@ -544,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_user_denied_returns_permission_and_audit() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_deny");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_deny");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let f = dir.join("d.txt");
@@ -578,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_success() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_edit");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_edit");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let f = dir.join("e.txt");
@@ -610,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_bash_success() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_bash");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_bash");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let path_str = dir.to_string_lossy().to_string();
@@ -631,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_bash_forbidden() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_forbid");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_forbid");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let path_str = dir.to_string_lossy().to_string();
@@ -665,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_dir_path_in_blacklist_returns_err() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_blacklist");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_blacklist");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let path_str = dir.to_string_lossy().to_string();
@@ -684,7 +684,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_on_directory_returns_err() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_read_dir");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_read_dir");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let path_str = dir.to_string_lossy().to_string();
@@ -702,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_auto_confirm_skips_confirmation() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_autoconfirm");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_autoconfirm");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let f = dir.join("ac.txt");
@@ -725,7 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_file_overwrite_creates_backup() {
-        let dir = std::env::temp_dir().join("pi_awsm_exec_backup");
+        let dir = std::env::temp_dir().join("pi_wasm_exec_backup");
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let f = dir.join("overwrite.txt");

@@ -45,7 +45,7 @@
 
 | 子命令 | 说明 |
 |--------|------|
-| `pi-awsm`（无参） | 默认执行 chat（占位） |
+| `pi-wasm`（无参） | 默认执行 chat（占位） |
 | `init` | 生成默认配置文件（默认路径 ~/.pi/agent/config.toml） |
 | `doctor` | 检查配置文件存在与合法性；WasmEdge/QuickJS 检测占位 |
 | `config get/set/edit/export/import` | 配置管理，session 依赖 load_config(None) 与默认路径 |
@@ -60,7 +60,7 @@
 
 ### 5.1 概述
 
-`pi-awsm chat`（或无参默认）进入交互式对话模式。核心文件：
+`pi-wasm chat`（或无参默认）进入交互式对话模式。核心文件：
 - `src/api/chat.rs` — ChatContext、chat_loop、工具调用执行、CliConfirmation
 - `src/api/render.rs` — MarkdownRenderer（流式代码块高亮，基于 syntect）
 

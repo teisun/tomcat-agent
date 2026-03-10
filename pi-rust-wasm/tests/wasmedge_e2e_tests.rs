@@ -4,7 +4,7 @@
 
 mod common;
 
-use pi_awsm::{DefaultEventBus, HostResponse, PluginManager, WasmEngine, WasmEngineConfig};
+use pi_wasm::{DefaultEventBus, HostResponse, PluginManager, WasmEngine, WasmEngineConfig};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;

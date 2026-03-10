@@ -54,10 +54,10 @@ if entry_id(&entry) == Some(id) { ... }
 
 ```rust
 // BAD — 多余的 &
-let cli = Cli::try_parse_from(&["pi-awsm", "init"]).unwrap();
+let cli = Cli::try_parse_from(&["pi-wasm", "init"]).unwrap();
 
 // GOOD — 数组字面量直接满足 IntoIterator
-let cli = Cli::try_parse_from(["pi-awsm", "init"]).unwrap();
+let cli = Cli::try_parse_from(["pi-wasm", "init"]).unwrap();
 ```
 
 ---

@@ -1,9 +1,9 @@
 //! 集成测试：会话管理模块（SessionManager、store、transcript）组合行为。
-//! 黑盒测试，仅通过 pi_awsm 公共 API；使用临时目录隔离数据。
+//! 黑盒测试，仅通过 pi_wasm 公共 API；使用临时目录隔离数据。
 
 mod common;
 
-use pi_awsm::{SessionManager, TranscriptEntry};
+use pi_wasm::{SessionManager, TranscriptEntry};
 use std::path::PathBuf;
 use tempfile::TempDir;
 

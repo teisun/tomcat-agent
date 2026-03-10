@@ -1,9 +1,9 @@
-//! 集成测试：Hostcall 全链路（仅用 pi_awsm 公共 API）。
+//! 集成测试：Hostcall 全链路（仅用 pi_wasm 公共 API）。
 //! 验证 HostApiDispatcher + invoke_host_func_with + HostRequest/HostResponse 的请求/响应与错误透传。
 
 mod common;
 
-use pi_awsm::{
+use pi_wasm::{
     invoke_host_func_with, AllowAllConfirmation, DefaultEventBus, DefaultPrimitiveExecutor,
     HostApiDispatcher, PrimitiveConfig, TracingAuditRecorder,
 };

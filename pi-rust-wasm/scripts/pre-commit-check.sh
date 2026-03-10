@@ -7,11 +7,11 @@ echo "=== 1. 全量测试 ==="
 cargo test --all
 echo ""
 
-echo "=== 2. 覆盖率（pi_awsm lib）==="
-cargo tarpaulin --lib --packages pi_awsm --out stdout --no-fail-fast
+echo "=== 2. 覆盖率（pi_wasm lib）==="
+cargo tarpaulin --lib --packages pi_wasm --out stdout --no-fail-fast
 echo ""
 echo "=== 3. Commit message 模板 ==="
-echo "请从上方 tarpaulin 输出中复制「pi_awsm」对应的覆盖率百分比，替换下方 [cov = xx.x%] 中的 xx.x 后使用。"
+echo "请从上方 tarpaulin 输出中复制「pi_wasm」对应的覆盖率百分比，替换下方 [cov = xx.x%] 中的 xx.x 后使用。"
 echo ""
 cat << 'EOF'
 feat(ext): 007/008 规范审查补漏：导出 invoke_host_func_with、文档与 Hostcall 集成测试

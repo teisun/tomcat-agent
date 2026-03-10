@@ -201,13 +201,13 @@ API绑定实现逻辑：
 - dialoguer：用户确认、选择、输入交互
 
 核心子命令设计：
-1.  `pi-awsm init`：初始化配置，引导用户完成LLM配置、基础安全策略设置，生成配置文件
-2.  `pi-awsm doctor`：检测运行环境、WasmEdge依赖、配置合法性，给出修复建议
-3.  `pi-awsm chat`：启动对话模式，支持自然语言对话、流式响应、工具/4原语调用、会话管理
-4.  `pi-awsm session`：会话管理子命令，包含list/new/switch/delete/archive/search子命令
-5.  `pi-awsm plugin`：插件管理子命令，包含list/load/unload/enable/disable/info子命令
-6.  `pi-awsm config`：配置管理子命令，包含get/set/edit/export/import子命令
-7.  `pi-awsm audit`：审计日志查看子命令，包含list/show/export子命令
+1.  `pi-wasm init`：初始化配置，引导用户完成LLM配置、基础安全策略设置，生成配置文件
+2.  `pi-wasm doctor`：检测运行环境、WasmEdge依赖、配置合法性，给出修复建议
+3.  `pi-wasm chat`：启动对话模式，支持自然语言对话、流式响应、工具/4原语调用、会话管理
+4.  `pi-wasm session`：会话管理子命令，包含list/new/switch/delete/archive/search子命令
+5.  `pi-wasm plugin`：插件管理子命令，包含list/load/unload/enable/disable/info子命令
+6.  `pi-wasm config`：配置管理子命令，包含get/set/edit/export/import子命令
+7.  `pi-wasm audit`：审计日志查看子命令，包含list/show/export子命令
 
 核心交互设计：
 - 对话模式：流式逐字渲染，Markdown/代码高亮，4原语/工具调用实时展示，用户确认弹窗，快捷键支持（Ctrl+C中断生成、Ctrl+D退出、↑↓历史消息导航）
@@ -216,7 +216,7 @@ API绑定实现逻辑：
 - 错误提示：所有错误信息友好可读，给出明确的修复建议，无晦涩的技术报错
 - 状态反馈：所有操作有清晰的加载状态、成功/失败提示，无静默操作
 
-**CLI 与 pi-mono / openclaw 对照**：子命令划分参考 openclaw（init/doctor/chat/session/plugin/config/audit），便于实现与脚本化；**交互行为**与 pi-mono 对齐（流式输出、会话恢复、4 原语确认、快捷键等）。无参数时 `pi-awsm` 默认等价于 `pi-awsm chat`，与 pi 的「直接进对话」一致。会话恢复通过 `pi-awsm chat --resume` 或 `session` 子命令实现，行为对齐 pi-mono 的 `--resume` / `--session`。
+**CLI 与 pi-mono / openclaw 对照**：子命令划分参考 openclaw（init/doctor/chat/session/plugin/config/audit），便于实现与脚本化；**交互行为**与 pi-mono 对齐（流式输出、会话恢复、4 原语确认、快捷键等）。无参数时 `pi-wasm` 默认等价于 `pi-wasm chat`，与 pi 的「直接进对话」一致。会话恢复通过 `pi-wasm chat --resume` 或 `session` 子命令实现，行为对齐 pi-mono 的 `--resume` / `--session`。
 
 ### 6. 安全设计
 1.  **沙箱隔离**：每个插件运行在独立的WasmEdge实例中，内存、上下文、执行环境完全隔离，插件无法直接访问宿主系统内存与资源

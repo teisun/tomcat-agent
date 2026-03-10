@@ -3,7 +3,7 @@
 
 mod common;
 
-use pi_awsm::{DefaultEventBus, EventBus, EventContext};
+use pi_wasm::{DefaultEventBus, EventBus, EventContext};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// [on + emit_sync] 注册回调后 emit_sync 触发一次

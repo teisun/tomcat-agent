@@ -1,9 +1,9 @@
 //! 集成测试：插件清单解析与插件管理器（parse_manifest、PluginManager）与 EventBus 协作。
-//! 黑盒测试，仅通过 pi_awsm 公共 API。
+//! 黑盒测试，仅通过 pi_wasm 公共 API。
 
 mod common;
 
-use pi_awsm::{
+use pi_wasm::{
     parse_manifest, AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
 };
 use std::sync::Arc;

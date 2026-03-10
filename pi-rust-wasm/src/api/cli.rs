@@ -13,12 +13,12 @@ use crate::{
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi_wasm/agent/config.toml";
 
-/// pi-awsm CLI：AI Agent 运行时，支持插件管理、会话、配置、审计与对话模式
+/// pi-wasm CLI：AI Agent 运行时，支持插件管理、会话、配置、审计与对话模式
 #[derive(Parser, Debug)]
 #[command(
-    name = "pi-awsm",
+    name = "pi-wasm",
     about = "PI Agent CLI — 插件化 AI Agent 运行时",
-    long_about = "pi-awsm 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令，无参数时进入对话模式。",
+    long_about = "pi-wasm 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令，无参数时进入对话模式。",
     version
 )]
 pub struct Cli {
@@ -217,7 +217,7 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     if config_path.is_none() {
         let default = normalize_path(DEFAULT_CONFIG_PATH)?;
         if !default.exists() {
-            println!("未找到配置文件。请先运行: pi-awsm init");
+            println!("未找到配置文件。请先运行: pi-wasm init");
             return Ok(());
         }
     }
@@ -227,7 +227,7 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     let path = match path {
         Some(p) if p.exists() => p,
         _ => {
-            println!("未找到配置文件。请先运行: pi-awsm init");
+            println!("未找到配置文件。请先运行: pi-wasm init");
             return Ok(());
         }
     };
@@ -374,7 +374,7 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
         ConfigSub::Set { key, value } => {
             let path = config_file_path(None)?;
             if !path.exists() {
-                println!("配置文件不存在: {}。请先运行: pi-awsm init", path.display());
+                println!("配置文件不存在: {}。请先运行: pi-wasm init", path.display());
                 return Ok(());
             }
             let content = std::fs::read_to_string(&path).map_err(AppError::Io)?;
@@ -403,7 +403,7 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
         ConfigSub::Edit { config } => {
             let path = config_file_path(config.as_deref())?;
             if !path.exists() {
-                println!("配置文件不存在: {}。请先运行: pi-awsm init", path.display());
+                println!("配置文件不存在: {}。请先运行: pi-wasm init", path.display());
                 return Ok(());
             }
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
@@ -639,7 +639,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     let msg = e.to_string();
                     println!("插件加载失败: {}", msg);
                     if msg.contains("WasmEdge") || msg.contains("wasm_engine") {
-                        println!("  提示: 请先运行 pi-awsm doctor 检查运行环境");
+                        println!("  提示: 请先运行 pi-wasm doctor 检查运行环境");
                     }
                 }
             }
@@ -857,7 +857,7 @@ mod tests {
 
     #[test]
     fn cli_parse_init() {
-        let cli = Cli::try_parse_from(["pi-awsm", "init"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm", "init"]).unwrap();
         let cmd = cli.command.expect("subcommand");
         assert!(matches!(cmd, Commands::Init { config: _ }));
         if let Commands::Init { config } = cmd {
@@ -868,7 +868,7 @@ mod tests {
     #[test]
     fn cli_parse_init_with_config_path() {
         let cli =
-            Cli::try_parse_from(["pi-awsm", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
+            Cli::try_parse_from(["pi-wasm", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
         let cmd = cli.command.unwrap();
         if let Commands::Init { config } = cmd {
             assert_eq!(config, "/tmp/pi/config.toml");
@@ -877,7 +877,7 @@ mod tests {
 
     #[test]
     fn cli_parse_doctor() {
-        let cli = Cli::try_parse_from(["pi-awsm", "doctor"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm", "doctor"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Doctor { config: None })
@@ -886,7 +886,7 @@ mod tests {
 
     #[test]
     fn cli_parse_config_get() {
-        let cli = Cli::try_parse_from(["pi-awsm", "config", "get"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm", "config", "get"]).unwrap();
         let cmd = cli.command.unwrap();
         if let Commands::Config { sub } = cmd {
             assert!(matches!(sub, ConfigSub::Get { key: None }));
@@ -895,7 +895,7 @@ mod tests {
 
     #[test]
     fn cli_parse_session_list() {
-        let cli = Cli::try_parse_from(["pi-awsm", "session", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm", "session", "list"]).unwrap();
         let cmd = cli.command.unwrap();
         assert!(matches!(
             cmd,
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn cli_parse_plugin_list() {
-        let cli = Cli::try_parse_from(["pi-awsm", "plugin", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm", "plugin", "list"]).unwrap();
         let cmd = cli.command.unwrap();
         assert!(matches!(
             cmd,
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn cli_parse_audit_list() {
-        let cli = Cli::try_parse_from(["pi-awsm", "audit", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm", "audit", "list"]).unwrap();
         let cmd = cli.command.unwrap();
         assert!(matches!(
             cmd,
@@ -931,7 +931,7 @@ mod tests {
 
     #[test]
     fn cli_parse_default_chat() {
-        let cli = Cli::try_parse_from(["pi-awsm"]).unwrap();
+        let cli = Cli::try_parse_from(["pi-wasm"]).unwrap();
         assert!(cli.command.is_none());
     }
 

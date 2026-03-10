@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn load_store_missing_file_returns_empty() {
-        let dir = std::env::temp_dir().join("pi_awsm_store_test_missing");
+        let dir = std::env::temp_dir().join("pi_wasm_store_test_missing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nonexistent.json");
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn save_and_load_store_roundtrip() {
-        let dir = std::env::temp_dir().join("pi_awsm_store_test_roundtrip");
+        let dir = std::env::temp_dir().join("pi_wasm_store_test_roundtrip");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sessions.json");
         let mut store = SessionStore::new();
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn load_store_empty_file_returns_empty() {
-        let dir = std::env::temp_dir().join("pi_awsm_store_test_empty");
+        let dir = std::env::temp_dir().join("pi_wasm_store_test_empty");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("empty.json");
         std::fs::write(&path, "").unwrap();

@@ -4,7 +4,7 @@
 
 mod common;
 
-use pi_awsm::{
+use pi_wasm::{
     parse_manifest, AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
 };
 use std::sync::Arc;

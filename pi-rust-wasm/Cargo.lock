@@ -1878,7 +1878,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi_awsm"
+name = "pi_wasm"
 version = "0.1.0"
 dependencies = [
  "anyhow",

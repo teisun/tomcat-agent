@@ -19,24 +19,24 @@
 对照 [TASK_BOARD.md](../TASK_BOARD.md) 中 TASK-02 的子项清单：
 
 - 10.1 CLI 骨架（clap 子命令结构） — 已完成
-- 10.2 `pi-awsm init`：引导 LLM 配置、生成配置文件 — 已完成
-- **10.3 `pi-awsm doctor`**：补全 WasmEdge/QuickJS 可用性检测（当前为占位 `println`）
-- **10.4 `pi-awsm config`**：补全 `get key`、`set`、`edit`（当前为占位 `println`）
-- 10.5 `pi-awsm session`：list/new/switch/delete/archive/search — 已完成
-- **10.6 `pi-awsm plugin`**：list/load/unload/enable/disable/info（当前 6 个子命令全为占位）
-- **10.7 `pi-awsm audit`**：list/show/export（当前 3 个子命令全为占位）
+- 10.2 `pi-wasm init`：引导 LLM 配置、生成配置文件 — 已完成
+- **10.3 `pi-wasm doctor`**：补全 WasmEdge/QuickJS 可用性检测（当前为占位 `println`）
+- **10.4 `pi-wasm config`**：补全 `get key`、`set`、`edit`（当前为占位 `println`）
+- 10.5 `pi-wasm session`：list/new/switch/delete/archive/search — 已完成
+- **10.6 `pi-wasm plugin`**：list/load/unload/enable/disable/info（当前 6 个子命令全为占位）
+- **10.7 `pi-wasm audit`**：list/show/export（当前 3 个子命令全为占位）
 - **10.8 完善帮助文档与参数校验**
 
 ## 二、目标与验收
 
-**要做出什么**：将 `pi-awsm` CLI 中仍为占位的 5 组子命令（doctor 检测、config set/edit、plugin 6 个、audit 3 个、帮助文档）补充为真实可执行的实现，使用户可通过命令行完成环境诊断、配置修改、插件管理、审计日志查看的全部操作。
+**要做出什么**：将 `pi-wasm` CLI 中仍为占位的 5 组子命令（doctor 检测、config set/edit、plugin 6 个、audit 3 个、帮助文档）补充为真实可执行的实现，使用户可通过命令行完成环境诊断、配置修改、插件管理、审计日志查看的全部操作。
 
 **验收标准**：
 
-- `pi-awsm doctor` 能实际检测 WasmEdge/QuickJS 可用性并输出修复建议
-- `pi-awsm config set/edit` 能真实修改配置文件
-- `pi-awsm plugin list/load/unload/enable/disable/info` 能实际对接 PluginManager
-- `pi-awsm audit list/show/export` 能读取已有审计日志
+- `pi-wasm doctor` 能实际检测 WasmEdge/QuickJS 可用性并输出修复建议
+- `pi-wasm config set/edit` 能真实修改配置文件
+- `pi-wasm plugin list/load/unload/enable/disable/info` 能实际对接 PluginManager
+- `pi-wasm audit list/show/export` 能读取已有审计日志
 - 所有子命令帮助文档完整、参数校验正确
 - 首次运行无配置时的提示友好
 - `cargo test` 全部通过，门禁（rustfmt/clippy/单测）通过
@@ -45,7 +45,7 @@
 
 **10.3 doctor — WasmEdge/QuickJS 检测**
 
-- **用户场景**：用户初次安装 pi-awsm 或换机后执行 `pi-awsm doctor`，想确认运行环境是否齐备。
+- **用户场景**：用户初次安装 pi-wasm 或换机后执行 `pi-wasm doctor`，想确认运行环境是否齐备。
 - **作用**：尝试初始化 WasmEngine 并检查 QuickJS wasm 文件路径，输出可用/不可用状态与修复建议。
 - **意义**：若不做，用户在 `plugin load` 时才会遇到 WasmEdge 错误，报错信息缺乏引导，排查成本高。
 
@@ -57,19 +57,19 @@
 
 **10.6 plugin — 插件管理**
 
-- **用户场景**：用户下载了一个插件，想通过 `pi-awsm plugin load ./my-plugin` 加载并验证。
+- **用户场景**：用户下载了一个插件，想通过 `pi-wasm plugin load ./my-plugin` 加载并验证。
 - **作用**：将 6 个占位命令对接 PluginManager 的 API。
 - **意义**：若不做，插件系统无法通过 CLI 操作，用户没有入口加载和管理插件。
 
 **10.7 audit — 审计日志查看**
 
-- **用户场景**：运维或用户想追溯"上次 bash 执行了什么命令"，通过 `pi-awsm audit list` 查看近期审计记录。
+- **用户场景**：运维或用户想追溯"上次 bash 执行了什么命令"，通过 `pi-wasm audit list` 查看近期审计记录。
 - **作用**：读取 tracing 日志中的审计记录行，解析并格式化输出；支持导出为 JSON。
 - **意义**：若不做，审计记录只在 tracing 日志中，用户需自行在庞大日志中人肉筛选，实用性为零。
 
 **10.8 帮助文档与参数校验**
 
-- **用户场景**：用户输入 `pi-awsm plugin --help` 或误输入参数时，需要看到清晰的帮助信息。
+- **用户场景**：用户输入 `pi-wasm plugin --help` 或误输入参数时，需要看到清晰的帮助信息。
 - **作用**：补全所有子命令的 clap 文档注释和参数校验逻辑。
 - **意义**：若不做，用户面对简陋的帮助文本和无校验的输入，体验差、易犯错。
 
@@ -113,7 +113,7 @@ run_doctor
 #### 预期的测试要点
 
 - **正常路径**：提供合法配置 + WasmEngine 可初始化 → 函数返回 Ok，输出包含检测结果
-- **边界 1：首次运行无配置文件**：输出"未找到配置文件。请先运行: pi-awsm init"，不崩溃
+- **边界 1：首次运行无配置文件**：输出"未找到配置文件。请先运行: pi-wasm init"，不崩溃
 - **边界 2：WasmEdge 不可用**：输出包含修复建议 URL，不 panic
 - **边界 3：quickjs_path 配置了但文件不存在**：输出"不存在"提示和修复建议
 - **边界 4：quickjs_path 和环境变量均未设置**：输出"未配置"提示

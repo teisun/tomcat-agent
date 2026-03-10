@@ -1,4 +1,4 @@
-//! # pi_awsm 库
+//! # pi_wasm 库
 //!
 //! 基础设施层与核心能力层（含 LLM、会话、4 原语、工具、插件），供 session_cli / wasm_plugin / chat 等模块依赖。
 //! 对外 API 通过 `infra`、`core`、`ext` 统一暴露，符合编码与分层架构规范。

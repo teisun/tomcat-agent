@@ -1,9 +1,9 @@
 //! 集成测试：4 原语执行引擎与工具注册中心（005/006）。
-//! 黑盒测试，仅通过 pi_awsm 公共 API；满足日志门禁（第 9 章）与鲁棒性场景（第 10 章）。
+//! 黑盒测试，仅通过 pi_wasm 公共 API；满足日志门禁（第 9 章）与鲁棒性场景（第 10 章）。
 
 mod common;
 
-use pi_awsm::{
+use pi_wasm::{
     AllowAllConfirmation, DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation,
     EditOperation, EditOperationType, PrimitiveConfig, PrimitiveExecutor, Tool, ToolExecutor,
     ToolRegistry, TracingAuditRecorder,
@@ -21,7 +21,7 @@ impl ToolExecutor for StubToolExecutor {
         _tool: &Tool,
         params: serde_json::Value,
         _caller_plugin_id: &str,
-    ) -> Result<serde_json::Value, pi_awsm::AppError> {
+    ) -> Result<serde_json::Value, pi_wasm::AppError> {
         Ok(serde_json::json!({ "result": "ok", "params": params }))
     }
 }

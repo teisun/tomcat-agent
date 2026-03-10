@@ -23,7 +23,7 @@
 
 - **构建方式**：默认即启用 WasmEdge，`cargo build` 即可；需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install，或运行 `./scripts/install-wasmedge.sh`（Linux/macOS））。
 - **WasmEngine**：全局单例，Config 开启 WASI、统计、内存上限（max_memory_pages）；`set_memory_limit` 已预留，MVP 使用固定 Standard 值。
-- **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` / `run_script_file` 通过 wasmedge_quickjs.wasm 执行 JS，每次执行新建 Vm 与 WasiModule（argv + preopen），脚本会被真正执行。`run_script` 写入的临时 script.js 可放在工作目录的 agent tmp（见 [工作目录与数据布局](../openspec/specs/architecture/work-dir-and-data-layout.md)）；QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `PI_AWSM__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
+- **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` / `run_script_file` 通过 wasmedge_quickjs.wasm 执行 JS，每次执行新建 Vm 与 WasiModule（argv + preopen），脚本会被真正执行。`run_script` 写入的临时 script.js 可放在工作目录的 agent tmp（见 [工作目录与数据布局](../openspec/specs/architecture/work-dir-and-data-layout.md)）；QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `PI_WASM__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
 - **线性内存边界**：Hostcall 时宿主通过 WasmEdge 的 `get_data`/`set_data` 访问线性内存；**边界检查由 WasmEdge 运行时保证**，防止越界访问。响应缓冲区不足时仅回写长度，由 guest 重试更大缓冲区。
 

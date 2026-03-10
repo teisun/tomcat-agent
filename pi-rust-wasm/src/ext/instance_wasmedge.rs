@@ -54,7 +54,7 @@ impl fmt::Debug for WasmInstance {
 }
 
 impl WasmInstance {
-    /// 由 WasmEngine::create_instance 调用。QuickJS 路径：优先使用 engine 传入的配置（来自 AppConfig/环境变量 PI_AWSM__WASM__QUICKJS_PATH），否则回退到 WASMEDGE_QUICKJS_PATH。
+    /// 由 WasmEngine::create_instance 调用。QuickJS 路径：优先使用 engine 传入的配置（来自 AppConfig/环境变量 PI_WASM__WASM__QUICKJS_PATH），否则回退到 WASMEDGE_QUICKJS_PATH。
     ///
     /// # Errors
     /// * 当前实现不返回错误；路径未设置时在 [`run_script`] 中返回 [`AppError::QuickJS`]。

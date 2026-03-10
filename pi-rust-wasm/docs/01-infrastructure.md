@@ -23,7 +23,7 @@
 ### 2.1 设计模式与关键权衡
 
 - **错误处理**：采用 `thiserror` 枚举 + `anyhow` 可选包装；禁止裸 `panic`、慎用 `unwrap()`，所有错误可追溯。
-- **配置**：多源合并（默认值 → 配置文件 → 环境变量），环境变量前缀 `PI_AWSM__`、分隔符 `__`，与 config-rs 约定一致。
+- **配置**：多源合并（默认值 → 配置文件 → 环境变量），环境变量前缀 `PI_WASM__`、分隔符 `__`，与 config-rs 约定一致。
 - **事件总线**：发布-订阅，基于 `Arc` + `RwLock` 的 `HashMap` 存储监听器；单 listener 抛错或 panic 时通过 `catch_unwind` 捕获并打日志，其余 listener 照常执行，主流程不崩溃。
 - **线程安全**：`EventBus`、`DefaultEventBus` 要求 `Send + Sync`；回调类型 `EventCallback` 为 `Box<dyn FnMut(EventContext) -> Result<(), AppError> + Send + Sync>`。
 
@@ -89,7 +89,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 **代理与降级 URL 的配置方式**：
 
 - **方式 A（配置文件）**：在 `config.toml` 的 `[llm]` 段中设置 `proxy`、`api_base_fallback`。项目根目录提供 **config.toml.example**，复制为 `config.toml` 并按需修改后，通过 `load_config(Some(Path::new("config.toml")))` 加载。
-- **方式 B（环境变量）**：通过 `PI_AWSM__LLM__PROXY`、`PI_AWSM__LLM__API_BASE_FALLBACK` 注入（与 `load_config` 的 Environment 前缀一致），会覆盖配置文件中的同名字段。
+- **方式 B（环境变量）**：通过 `PI_WASM__LLM__PROXY`、`PI_WASM__LLM__API_BASE_FALLBACK` 注入（与 `load_config` 的 Environment 前缀一致），会覆盖配置文件中的同名字段。
 - **代理兜底**：未设置 `llm.proxy`（且未通过环境变量指定）时，程序通过 reqwest 使用系统环境变量 `HTTPS_PROXY`/`HTTP_PROXY`（若存在），与终端 curl 行为一致。也可使用项目内 **.env.example**（复制为 `.env` 后按需填写）配置密钥与可选代理/降级项。
 
 ### 3.3 事件总线 (EventBus)
@@ -128,11 +128,11 @@ pub trait EventBus: Send + Sync + 'static {
 
 | 环境变量 / 配置路径 | 说明 | 默认值 |
 |--------------------|------|--------|
-| `PI_AWSM__*`（`__` 为嵌套分隔） | 覆盖对应配置项 | - |
+| `PI_WASM__*`（`__` 为嵌套分隔） | 覆盖对应配置项 | - |
 | 配置文件 | TOML，由 `load_config(Some(path))` 指定 | - |
 | `log.level` | trace / debug / info / warn / error | info |
 | `log.file_enabled` | 是否写文件 | false |
-| `log.file_path` | 日志文件路径 | pi_awsm.log |
+| `log.file_path` | 日志文件路径 | pi_wasm.log |
 | `log.file_roll_size_mb` | 滚动大小（MB） | 10 |
 | `llm.proxy` | 显式 HTTP 代理 URL；不设时 reqwest 使用 `HTTPS_PROXY`/`HTTP_PROXY` | - |
 | `llm.api_base_fallback` | 主 API 不通时自动重试的备用 base | - |
@@ -167,7 +167,7 @@ pub trait EventBus: Send + Sync + 'static {
 ### 6.1 加载配置并初始化日志
 
 ```rust
-use pi_awsm::{load_config, validate_config, init_logging};
+use pi_wasm::{load_config, validate_config, init_logging};
 
 let cfg = load_config(Some(std::path::Path::new("config.toml")))?;
 validate_config(&cfg)?;
@@ -177,7 +177,7 @@ init_logging(&cfg.log)?;
 ### 6.2 注册与触发事件
 
 ```rust
-use pi_awsm::{DefaultEventBus, EventBus, EventContext};
+use pi_wasm::{DefaultEventBus, EventBus, EventContext};
 
 let bus = DefaultEventBus::new();
 let id = bus.on("tool_call", Box::new(|ctx| {

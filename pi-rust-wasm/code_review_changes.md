@@ -71,13 +71,13 @@ if entry_id(&entry) == Some(id) {
 
 ```rust
 // Before:
-let cli = Cli::try_parse_from(&["pi-awsm", "init"]).unwrap();
+let cli = Cli::try_parse_from(&["pi-wasm", "init"]).unwrap();
 
 // After:
-let cli = Cli::try_parse_from(["pi-awsm", "init"]).unwrap();
+let cli = Cli::try_parse_from(["pi-wasm", "init"]).unwrap();
 ```
 
-**为什么改**：`try_parse_from` 接受 `IntoIterator`，数组字面量 `["pi-awsm", "init"]` 本身就实现了该 trait，无需取引用 `&[...]`。多余的 `&` 增加认知负担且无运行时收益。Clippy 规则 `needless_borrows_for_generic_args` 检测此模式。
+**为什么改**：`try_parse_from` 接受 `IntoIterator`，数组字面量 `["pi-wasm", "init"]` 本身就实现了该 trait，无需取引用 `&[...]`。多余的 `&` 增加认知负担且无运行时收益。Clippy 规则 `needless_borrows_for_generic_args` 检测此模式。
 
 ---
 
@@ -407,7 +407,7 @@ emit: function (eventName, payload) {
 
 **改了什么**：保持不变（`#[allow(dead_code)]` 保留）。
 
-**为什么这样决定**：`current_dir()`、`SystemInfo`、`system_info()` 这三个函数/类型虽然当前未被调用，但它们是为 `pi_awsm doctor` 子命令预留的（doctor 需要检测系统环境信息）。删除它们会在 doctor 实现时重新编写，且这些函数已有完整的单元测试覆盖。属于**有意预留**的代码。
+**为什么这样决定**：`current_dir()`、`SystemInfo`、`system_info()` 这三个函数/类型虽然当前未被调用，但它们是为 `pi_wasm doctor` 子命令预留的（doctor 需要检测系统环境信息）。删除它们会在 doctor 实现时重新编写，且这些函数已有完整的单元测试覆盖。属于**有意预留**的代码。
 
 ---
 

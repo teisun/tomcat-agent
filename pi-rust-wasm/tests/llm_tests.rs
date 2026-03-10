@@ -5,7 +5,7 @@
 mod common;
 
 use futures_util::StreamExt;
-use pi_awsm::{ChatMessage, ChatRequest, LlmConfig, LlmProvider, OpenAiProvider};
+use pi_wasm::{ChatMessage, ChatRequest, LlmConfig, LlmProvider, OpenAiProvider};
 use std::time::Duration;
 
 /// [LLM 非流式 chat] 真实 API 调用 OpenAiProvider::chat 返回合法响应

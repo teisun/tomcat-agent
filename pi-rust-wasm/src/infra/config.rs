@@ -1,6 +1,6 @@
 //! # 配置模块 (Config)
 //!
-//! 配置结构体、加载与合并、合法性校验。多源合并顺序：默认值 → 配置文件 → 环境变量（前缀 `PI_AWSM__`，分隔符 `__`）。
+//! 配置结构体、加载与合并、合法性校验。多源合并顺序：默认值 → 配置文件 → 环境变量（前缀 `PI_WASM__`，分隔符 `__`）。
 
 use std::path::PathBuf;
 
@@ -236,7 +236,7 @@ pub struct AppConfig {
 
 /// 从可选配置文件与环境变量加载并合并为 [`AppConfig`]。
 ///
-/// 合并顺序：若提供且存在的配置文件先加载，再叠加环境变量 `PI_AWSM__*`（`__` 表示嵌套）。未提供或不存在文件时仅用默认值与环境变量。
+/// 合并顺序：若提供且存在的配置文件先加载，再叠加环境变量 `PI_WASM__*`（`__` 表示嵌套）。未提供或不存在文件时仅用默认值与环境变量。
 ///
 /// # Arguments
 /// * `config_path` - 配置文件路径，如 `Some(Path::new("config.toml"))`；`None` 表示仅用默认与环境变量。
@@ -254,7 +254,7 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
         }
     }
     builder = builder.add_source(
-        ::config::Environment::with_prefix("PI_AWSM")
+        ::config::Environment::with_prefix("PI_WASM")
             .separator("__")
             .try_parsing(true),
     );
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn load_config_from_existing_file() {
-        let dir = std::env::temp_dir().join("pi_awsm_config_test");
+        let dir = std::env::temp_dir().join("pi_wasm_config_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -458,7 +458,7 @@ mod tests {
         }
         // config 库按扩展名识别格式，.example 不被识别；将内容复制到临时 .toml 再加载以验证示例内容合法
         let content = std::fs::read_to_string(&example_path).unwrap();
-        let dir = std::env::temp_dir().join("pi_awsm_example_config_test");
+        let dir = std::env::temp_dir().join("pi_wasm_example_config_test");
         std::fs::create_dir_all(&dir).unwrap();
         let temp_toml = dir.join("config.toml");
         std::fs::write(&temp_toml, &content).unwrap();

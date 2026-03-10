@@ -154,12 +154,12 @@
 ## T1-P0-010 CLI工具核心子命令实现
 
 - **10.1** 使用 clap 搭建 CLI 骨架，定义子命令结构：init、doctor、chat、session、plugin、config、audit；无参数时默认等价于 chat。
-- **10.2** 实现 `pi-awsm init`：引导 LLM 配置、基础安全策略，生成配置文件。
-- **10.3** 实现 `pi-awsm doctor`：检测运行环境、**WasmEdge 与 QuickJS 可用性**、配置文件存在与合法性，输出修复建议（边界：首次运行无配置时的提示）。
-- **10.4** 实现 `pi-awsm config`：get/set/edit/export/import 子命令。
-- **10.5** 实现 `pi-awsm session`：list/new/switch/delete/archive/search，依赖 SessionManager；**边界：空会话列表、无当前会话时的行为与提示**。
-- **10.6** 实现 `pi-awsm plugin`：list/load/unload/enable/disable/info，依赖插件生命周期管理。
-- **10.7** 实现 `pi-awsm audit`：list/show/export（P0 阶段可先读已有审计日志或占位；完整能力依赖 T1-P1-001）。
+- **10.2** 实现 `pi-wasm init`：引导 LLM 配置、基础安全策略，生成配置文件。
+- **10.3** 实现 `pi-wasm doctor`：检测运行环境、**WasmEdge 与 QuickJS 可用性**、配置文件存在与合法性，输出修复建议（边界：首次运行无配置时的提示）。
+- **10.4** 实现 `pi-wasm config`：get/set/edit/export/import 子命令。
+- **10.5** 实现 `pi-wasm session`：list/new/switch/delete/archive/search，依赖 SessionManager；**边界：空会话列表、无当前会话时的行为与提示**。
+- **10.6** 实现 `pi-wasm plugin`：list/load/unload/enable/disable/info，依赖插件生命周期管理。
+- **10.7** 实现 `pi-wasm audit`：list/show/export（P0 阶段可先读已有审计日志或占位；完整能力依赖 T1-P1-001）。
 - **10.8** 完善帮助文档与参数校验，所有子命令可正常执行。
 
 ---
@@ -181,7 +181,7 @@
 - **1.1** 实现独立审计日志模块：专用存储（文件或按设计约定），仅追加、不可篡改；保留最近 N 天（如 90 天）配置。
 - **1.2** 在 4 原语、工具调用、插件生命周期、高危操作等关键路径写入审计记录（操作人、时间、内容、用户确认状态、结果、必要输入输出）。
 - **1.3** 实现审计日志查询（按时间/类型/插件等）、导出、按策略清理。
-- **1.4** 实现 `pi-awsm audit list/show/export` 子命令，与审计模块对接。
+- **1.4** 实现 `pi-wasm audit list/show/export` 子命令，与审计模块对接。
 - **1.5** （可选）文档说明加密存储为 TODO，当前明文或占位。
 
 ---

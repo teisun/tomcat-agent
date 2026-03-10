@@ -37,7 +37,7 @@
 ```
 feat(ext,infra): 将 wasmedge_quickjs 路径纳入配置
 
-QuickJS wasm 路径原先仅支持环境变量，多环境与 CI 下不便统一管理。纳入 config 后可由配置文件提供默认路径，环境变量 PI_AWSM__WASM__QUICKJS_PATH 覆盖，与现有 llm/storage 等配置优先级一致，便于部署与复现。
+QuickJS wasm 路径原先仅支持环境变量，多环境与 CI 下不便统一管理。纳入 config 后可由配置文件提供默认路径，环境变量 PI_WASM__WASM__QUICKJS_PATH 覆盖，与现有 llm/storage 等配置优先级一致，便于部署与复现。
 
 [cov = 80.7%]
 ```
@@ -50,7 +50,7 @@ QuickJS wasm 路径原先仅支持环境变量，多环境与 CI 下不便统一
 ```
 fix(session): 单测中 session 目录使用 canonicalize 避免并行竞态
 
-run_session 单测依赖 PI_AWSM__STORAGE__SESSIONS_DIR，并行时多用例写同一路径导致偶发失败。改为每用例 tempdir 并 canonicalize 后 set_var，保证进程内路径唯一，消除竞态。
+run_session 单测依赖 PI_WASM__STORAGE__SESSIONS_DIR，并行时多用例写同一路径导致偶发失败。改为每用例 tempdir 并 canonicalize 后 set_var，保证进程内路径唯一，消除竞态。
 
 [cov = 82.1%]
 ```

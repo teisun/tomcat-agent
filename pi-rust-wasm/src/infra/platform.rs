@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn write_file_atomic_and_read_utf8() {
-        let dir = std::env::temp_dir().join("pi_awsm_platform_test");
+        let dir = std::env::temp_dir().join("pi_wasm_platform_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test_atomic.txt");
         let content = "hello 世界";
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn read_file_utf8_invalid_utf8_returns_config_error() {
-        let dir = std::env::temp_dir().join("pi_awsm_platform_utf8");
+        let dir = std::env::temp_dir().join("pi_wasm_platform_utf8");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad_utf8.bin");
         std::fs::write(&path, [0xff, 0xfe]).unwrap();

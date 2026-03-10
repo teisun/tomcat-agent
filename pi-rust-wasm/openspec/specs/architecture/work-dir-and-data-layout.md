@@ -5,7 +5,7 @@
 ## 1. 默认工作根目录（work_dir）
 
 - **默认值**：当前可执行文件所在目录下的 `.pi_wasm`，即 `{可执行文件目录}/.pi_wasm`。在进程启动时通过 `std::env::current_exe()` 的父目录得到 `exe_dir`，默认 `work_dir = exe_dir.join(".pi_wasm")`。
-- **可配置**：支持通过配置文件（如 `storage.work_dir` 或 `app.work_dir`）和环境变量（如 `PI_AWSM__STORAGE__WORK_DIR`）覆盖。路径支持 `~` 与相对路径，经现有 `normalize_path` 展开。
+- **可配置**：支持通过配置文件（如 `storage.work_dir` 或 `app.work_dir`）和环境变量（如 `PI_WASM__STORAGE__WORK_DIR`）覆盖。路径支持 `~` 与相对路径，经现有 `normalize_path` 展开。
 
 ## 2. 多 agent 子目录约定
 

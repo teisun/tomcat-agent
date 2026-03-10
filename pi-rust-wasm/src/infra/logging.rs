@@ -38,7 +38,7 @@ pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), super
         let file_appender = RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
             .max_log_files(5_usize)
-            .filename_prefix("pi_awsm")
+            .filename_prefix("pi_wasm")
             .build(dir)
             .map_err(|e| super::error::AppError::Io(std::io::Error::other(e.to_string())))?;
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -73,7 +73,7 @@ mod tests {
 
     /// 仅控制台、成功路径。init_logging 内部会 init 全局 subscriber，进程内只能成功一次；
     /// 全量测试若出现 "global default trace subscriber already set" 可单独跑：
-    /// cargo test -p pi_awsm infra::logging::tests -- --test-threads=1
+    /// cargo test -p pi_wasm infra::logging::tests -- --test-threads=1
     #[test]
     fn a_init_logging_console_only_succeeds() {
         let cfg = LogConfig {

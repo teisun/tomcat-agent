@@ -404,7 +404,7 @@
 - [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
 - [✓] **单元测试**：`cargo test --lib` — 178 passed，1 ignored
 - [✓] **集成测试**：`cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests` — 25 passed（不含 wasmedge_e2e_tests）
-- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 完整
+- [✓] **CLI 子命令**：`pi_wasm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 完整
 - [ ] **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 须先安装 WasmEdge（可运行 `./scripts/install-wasmedge.sh`）后执行 `cargo test --test wasmedge_e2e_tests`；本次若未安装则待安装后补跑，失败即验收不通过。
 
 ### 🔌 INTERFACE (接口变更)
@@ -436,7 +436,7 @@
 - [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
 - [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests` 通过
 - [ ] **Clippy**：存在 6 条 lib 警告，既有问题，未满足「无警告」门禁
-- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+- [✓] **CLI 子命令**：`pi_wasm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
 - [ ] **Wasm 真实运行时（必选）**：按新规范环境缺失不得跳过，须先安装 WasmEdge 后执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`，失败即视为验收不通过；待按规范安装依赖后补跑。
 
 ### 🔌 INTERFACE (接口变更)
@@ -465,7 +465,7 @@
 - [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
 - [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests` 通过；primitives_tools_tests 含路径白名单拒绝、用户拒绝确认等边界用例
 - [ ] **Clippy**：存在 6 条 lib 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2），既有问题，未满足「无警告」门禁
-- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+- [✓] **CLI 子命令**：`pi_wasm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
 
 ### 🔌 INTERFACE (接口变更)
 - **feature/primitives-tools 合入**：lib 导出 core::DefaultPrimitiveExecutor、DefaultToolRegistry、ToolExecutor、UserConfirmationProvider、AllowAllConfirmation、DenyAllConfirmation；core::confirmation、core::executor；infra::AuditRecorder、TracingAuditRecorder、PrimitiveAuditEntry、ToolAuditEntry、AuditPrimitiveOp；PrimitiveConfig 已存在，本次随 005/006 配套使用。
@@ -490,7 +490,7 @@
 - [✓] **单元测试**：`cargo test` — 74 passed，1 ignored（`chat_real_request_response_print`）
 - [✓] **集成测试**：`cargo test --test '*'` — 11 passed（event_tests 3、llm_tests 2、plugin_tests 3、session_tests 3）；llm_tests 本次全部通过（max_completion_tokens 已适配）
 - [ ] **Clippy**：存在 6 条 lib 警告 + 4 条 tests 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2；tests 冗余 `use tracing`×4），未满足「无警告」门禁
-- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+- [✓] **CLI 子命令**：`pi_wasm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
 
 ### 🔌 INTERFACE (接口变更)
 - 无（本次未合并新分支）
@@ -516,7 +516,7 @@
 - [✓] **集成测试（非 LLM）**：`cargo test --test session_tests --test event_tests --test plugin_tests` — 9 passed（session_tests 3、event_tests 3、plugin_tests 3）
 - [ ] **集成测试（LLM）**：`cargo test --test llm_tests` — 2 failed；原因：OpenAI API 403 `model_not_found`（Project 无 `gpt-4o-mini` 权限），非 key 缺失，属账号/项目权限配置
 - [ ] **Clippy**：存在 6 条警告（lib：EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2；tests：redundant `use tracing`×4），未满足「无警告」门禁
-- [✓] **CLI 子命令**：`pi_awsm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
+- [✓] **CLI 子命令**：`pi_wasm init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
 
 ### 🔌 INTERFACE (接口变更)
 - 无（本次未合并新分支）

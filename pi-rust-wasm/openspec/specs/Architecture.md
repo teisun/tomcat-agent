@@ -1,4 +1,4 @@
-# pi-rust-awsm 整体技术架构
+# pi-rust-wasm 整体技术架构
 
 ## 设计原则
 

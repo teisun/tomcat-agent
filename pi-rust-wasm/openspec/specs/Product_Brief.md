@@ -1,6 +1,6 @@
-# pi-rust-awsm - 安全自进化AI Agent运行时
+# pi-rust-wasm - 安全自进化AI Agent运行时
 ## 项目定位
-pi-rust-awsm是一款参考pi-agent-rust设计、基于Rust+WasmEdge构建的轻量、高安全、可自进化的AI Agent核心运行时。通过WasmEdge内置的QuickJS引擎与Node.js兼容层，实现pi-mono生态100%兼容，提供沙箱隔离的插件系统、原子化4原语能力、可自举的插件生成闭环，打造「人人可扩展、安全可管控」的AI Agent底层引擎。
+pi-rust-wasm是一款参考pi-agent-rust设计、基于Rust+WasmEdge构建的轻量、高安全、可自进化的AI Agent核心运行时。通过WasmEdge内置的QuickJS引擎与Node.js兼容层，实现pi-mono生态100%兼容，提供沙箱隔离的插件系统、原子化4原语能力、可自举的插件生成闭环，打造「人人可扩展、安全可管控」的AI Agent底层引擎。
 
 ## 问题陈述
 1.  pi-mono原生实现存在无限制系统权限风险，插件可直接访问宿主系统，无沙箱隔离，存在严重安全隐患

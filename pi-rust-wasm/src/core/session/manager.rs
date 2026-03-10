@@ -366,7 +366,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        std::env::temp_dir().join(format!("pi_awsm_mgr_{}_{}_{}", std::process::id(), ms, c))
+        std::env::temp_dir().join(format!("pi_wasm_mgr_{}_{}_{}", std::process::id(), ms, c))
     }
 
     #[test]

@@ -540,7 +540,7 @@ mod tests {
     fn openai_provider_new_fails_without_api_key() {
         println!("[TEST] openai_provider_new_fails_without_api_key — 开始");
         let config = LlmConfig {
-            api_key_env: Some("PI_AWSM_TEST_NONEXISTENT_ENV_VAR_12345".to_string()),
+            api_key_env: Some("PI_WASM_TEST_NONEXISTENT_ENV_VAR_12345".to_string()),
             ..LlmConfig::default()
         };
         println!("[TEST] 过程: OpenAiProvider::new(api_key_env=不存在变量)");

@@ -1,4 +1,4 @@
-//! CLI 子命令集成测试：通过 assert_cmd 黑盒测试 pi_awsm 二进制。
+//! CLI 子命令集成测试：通过 assert_cmd 黑盒测试 pi_wasm 二进制。
 //! 覆盖 TASK-02 (T1-P0-010-completion) 验收标准：
 //!   doctor / config get|set / plugin list|load|info / audit list|export / session list|new
 //! 遵循 INTEGRATION_TEST_SPEC：AAA 模式、日志门禁、鲁棒性边界。
@@ -12,31 +12,31 @@ use tracing::{info, info_span};
 
 #[allow(deprecated)]
 fn cmd() -> Command {
-    Command::cargo_bin("pi_awsm").expect("binary pi_awsm should exist")
+    Command::cargo_bin("pi_wasm").expect("binary pi_wasm should exist")
 }
 
 // ────────────────────── help & version ──────────────────────
 
 /// [--help 输出] 验证主帮助页包含所有一级子命令名称
 ///
-/// 验证：exit 0 且 stdout 包含 pi-awsm、init、doctor、config、session、plugin、audit
+/// 验证：exit 0 且 stdout 包含 pi-wasm、init、doctor、config、session、plugin、audit
 /// 意义：CLI 入口完整性门禁（TASK-02 验收：所有子命令帮助文档完整）
 #[test]
-fn test_help_output_contains_pi_awsm_and_exits_ok() {
+fn test_help_output_contains_pi_wasm_and_exits_ok() {
     common::setup_logging();
-    let _span = info_span!("test_help_output_contains_pi_awsm_and_exits_ok").entered();
+    let _span = info_span!("test_help_output_contains_pi_wasm_and_exits_ok").entered();
 
     info!("Arrange: prepare --help command");
     let mut c = cmd();
     c.arg("--help");
 
-    info!("Act: execute pi_awsm --help");
+    info!("Act: execute pi_wasm --help");
     let assert = c.assert();
 
-    info!("Assert: exit 0 and output contains pi-awsm");
+    info!("Assert: exit 0 and output contains pi-wasm");
     assert
         .success()
-        .stdout(predicate::str::contains("pi-awsm"))
+        .stdout(predicate::str::contains("pi-wasm"))
         .stdout(predicate::str::contains("init"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("config"))
@@ -47,7 +47,7 @@ fn test_help_output_contains_pi_awsm_and_exits_ok() {
 
 /// [--version 输出] 验证版本号输出格式
 ///
-/// 验证：exit 0 且 stdout 含 pi-awsm 版本字符串
+/// 验证：exit 0 且 stdout 含 pi-wasm 版本字符串
 /// 意义：发布合规——二进制可报告自身版本
 #[test]
 fn test_version_output_exits_ok() {
@@ -62,7 +62,7 @@ fn test_version_output_exits_ok() {
     let assert = c.assert();
 
     info!("Assert: exit 0 and contains version string");
-    assert.success().stdout(predicate::str::contains("pi-awsm"));
+    assert.success().stdout(predicate::str::contains("pi-wasm"));
 }
 
 // ────────────────────── init ──────────────────────
@@ -566,7 +566,7 @@ fn test_session_list_exits_ok() {
 
     info!("Arrange: temp work dir {:?}", work_dir);
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "list"]);
 
     info!("Act: execute session list");
@@ -593,7 +593,7 @@ fn test_session_new_creates_session() {
 
     info!("Arrange: temp work dir {:?}", work_dir);
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "new"]);
 
     info!("Act: execute session new");
@@ -684,7 +684,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
 
     let mut c = cmd();
     c.arg("chat")
-        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("OPENAI_API_KEY", api_key)
         .write_stdin("hi\n")
         .timeout(std::time::Duration::from_secs(60));
@@ -726,12 +726,12 @@ fn test_chat_with_session_dir_does_not_crash() {
     let mut c_new = cmd();
     c_new
         .args(["session", "new"])
-        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c_new.assert().success();
 
     let mut c = cmd();
     c.arg("chat")
-        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env_remove("OPENAI_API_KEY")
         .write_stdin("\n")
         .timeout(std::time::Duration::from_secs(5));
@@ -847,7 +847,7 @@ fn test_session_switch_nonexistent_shows_error() {
 
     info!("Arrange: switch to nonexistent session key");
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "switch", "nonexistent-key-xyz"]);
 
     info!("Act: execute session switch");
@@ -876,14 +876,14 @@ fn test_session_delete_via_cli_removes_session() {
 
     info!("Arrange: create a session first");
     cmd()
-        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "new"])
         .assert()
         .success();
 
     info!("Act: delete the default session key");
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "delete", "agent:default:main"]);
 
     let assert = c.assert();
@@ -911,13 +911,13 @@ fn test_session_archive_exits_ok() {
 
     info!("Arrange: create session then archive");
     cmd()
-        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "new"])
         .assert()
         .success();
 
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "archive", "agent:default:main"]);
 
     info!("Act: execute session archive");

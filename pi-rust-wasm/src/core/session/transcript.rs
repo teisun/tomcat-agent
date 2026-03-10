@@ -349,7 +349,7 @@ mod tests {
     use super::*;
 
     fn temp_transcript_dir() -> std::path::PathBuf {
-        std::env::temp_dir().join("pi_awsm_transcript_test")
+        std::env::temp_dir().join("pi_wasm_transcript_test")
     }
 
     #[test]
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn get_leaf_entry_returns_last() {
-        let dir = std::env::temp_dir().join("pi_awsm_transcript_get_leaf");
+        let dir = std::env::temp_dir().join("pi_wasm_transcript_get_leaf");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s4.jsonl");
