@@ -1,5 +1,16 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-10 | DONE | develop | - |
+
+### 本次执行说明（计划规范抽子文档与 status 清理）
+
+- [✓] **agents/plan/**：新建 PLAN_SPEC.md（内容要求、质量标准、自检清单），案例单独为 PLAN_EXAMPLE_CLI.md；Dispatcher.md 改为引用 plan/PLAN_SPEC.md。
+- [✓] **删除**：agents/PLAN.md、agents/integration_test_agent.md；status 下除 develop.md 外 7 个 feature 分支 status 文件已删除。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-10 11:00 | INTEGRATION | develop | 65.6 |
 
 ### 集成测试报告（TASK-02 feature/cli-commands 合并）
