@@ -1,5 +1,44 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-09 | DONE | develop | 88.4 |
+
+### 本次执行说明（Nibbles 流程整改 + load_plugin 集成测试补写）
+
+**Nibbles 流程整改**
+- [✓] agents/Nibbles.md：「编写集成测试代码」小节增加**必做检查清单**（列出本次合并模块与场景、对照 tests/ 检查覆盖、无覆盖则本步骤内补充、wasm-plugin 合并须含真实运行时用例）；时机明确为「未完成本步骤不得进入全量验收」。
+
+**集成测试补写**
+- [✓] tests/wasmedge_e2e_tests.rs：新增 `test_wasmedge_e2e_load_plugin_from_disk_succeeds`，使用真实 WasmEngine + 临时插件目录（plugin.json + main.js）调用 `PluginManager::load_plugin(path)`，断言 list_loaded/get_plugin 及 unload 后状态；符合 INTEGRATION_TEST_SPEC 5.4。
+
+**agents 文档**
+- [✓] agents/Dispatcher.md：流程与规范引用微调（若有）。
+
+### 🔌 INTERFACE (接口变更)
+- 无新增对外接口；仅流程说明与集成测试。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-09 | INTEGRATION | develop | - |
+
+### 集成测试报告（合并范围 0 / all）
+
+**合并范围**：按 TASK_BOARD 中 DONE 任务合并。本地无 `feature/plugin-lifecycle` 分支（TASK-01 已在 develop 上完成），未执行 git merge，仅对当前 develop 做全量验收。
+
+**执行的检查与验收项**
+- [✓] 合并前检查：`cargo build`、`cargo clippy --all-targets`、`cargo test` 通过
+- [✓] `./scripts/run-integration-tests.sh`：cargo build --release、cargo test --lib、cargo test（event_tests, hostcall_tests, llm_tests, plugin_tests, primitives_tools_tests, robustness_tests, session_tests）、cargo test --test wasmedge_e2e_tests 全部通过
+- [✓] Wasm 真实运行时（INTEGRATION_TEST_SPEC 5.4）：wasmedge_e2e_tests 6 个用例通过（hello_world、primitives、bridge、event_dispatch 等）
+
+**结果摘要**：全量集成测试通过；无合并冲突。
+
+**环境**：macOS，develop 分支；执行前已 stash 本地未提交修改（agents/Dispatcher.md）。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Tom | 2026-03-09 22:10 | DONE | develop | 88.4 |
 
 ### 本次执行说明（工作目录与数据布局文档修正）

@@ -4,9 +4,10 @@
 
 mod common;
 
-use pi_awsm::{HostResponse, WasmEngine, WasmEngineConfig};
+use pi_awsm::{DefaultEventBus, HostResponse, PluginManager, WasmEngine, WasmEngineConfig};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 const WASMEDGE_INSTALL_URL: &str = "https://wasmedge.org/docs/start/install";
 
@@ -261,5 +262,66 @@ fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::
         "4 原语测试须触发 4 次 host 调用（readFile/writeFile/editFile/executeBash），实际 {} 次；wasmedge_quickjs 须向 JS 暴露 __pi_host_call（见 INTEGRATION_TEST_SPEC 5.4、host-call-protocol.md）",
         n
     );
+    Ok(())
+}
+
+/// 插件完整加载流程 E2E：通过 PluginManager::load_plugin(plugin_dir) 从磁盘加载含 manifest + main 的插件目录，
+/// 使用真实 WasmEngine，断言加载成功后 list_loaded 含该插件、get_plugin 返回正确信息；符合 Nibbles 与 INTEGRATION_TEST_SPEC 5.4。
+#[test]
+fn test_wasmedge_e2e_load_plugin_from_disk_succeeds() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_load_plugin_from_disk_succeeds").entered();
+
+    let quickjs_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let plugin_json = r#"{
+        "id": "e2e-load-plugin-test",
+        "name": "E2E Load Plugin Test",
+        "version": "0.1.0",
+        "description": "",
+        "author": "",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": []
+    }"#;
+    std::fs::write(tmp.path().join("plugin.json"), plugin_json).map_err(|e| e.to_string())?;
+    std::fs::write(tmp.path().join("main.js"), "// init\n1 + 1;").map_err(|e| e.to_string())?;
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let mut manager = PluginManager::new(bus);
+    manager.set_wasm_engine(engine);
+
+    tracing::info!("Act: load_plugin(plugin_dir)");
+    manager.load_plugin(tmp.path()).map_err(|e| e.to_string())?;
+
+    let list = manager.list_loaded();
+    assert!(
+        list.contains(&"e2e-load-plugin-test".to_string()),
+        "list_loaded 应包含刚加载的插件 id，实际: {:?}",
+        list
+    );
+    let info = manager.get_plugin("e2e-load-plugin-test");
+    assert!(info.is_some(), "get_plugin 应返回 Some");
+    assert_eq!(info.as_ref().unwrap().id, "e2e-load-plugin-test");
+
+    manager.unload_plugin("e2e-load-plugin-test").map_err(|e| e.to_string())?;
+    assert!(
+        manager.list_loaded().is_empty(),
+        "unload 后 list_loaded 应为空"
+    );
+
     Ok(())
 }

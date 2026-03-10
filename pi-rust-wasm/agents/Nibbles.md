@@ -66,11 +66,18 @@
 
 ### 编写集成测试代码（合并到 develop 之后、全量验收之前）
 
-1. **时机**：分支合并到 develop 之后，执行全量验收之前。
+1. **时机**：分支合并到 develop 之后，执行全量验收**之前**；未完成本步骤**不得**进入「合并后全量测试与验收清单」。
 2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、第 9/10 章门禁与验收）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
 3. **动作**：针对本次合并引入的模块与场景，在 `tests/` 下建立或更新集成测试文件，仅通过 `pub` API 做黑盒测试。
 4. **Wasm 真实运行时（wasm-plugin 相关合并）**：须包含「Wasm 真实运行时」集成测试。检查项：实现或修改前必须阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 第 24 条**。
 5. **验证**：执行 `cargo test --test '*'`，确认集成测试可编译且通过，再执行全量验收清单。
+
+**必做检查清单（防止遗漏）**：在执行全量验收前，必须逐项完成并自检：
+
+- [ ] **列出本次合并引入的模块与场景**：根据 TASK_BOARD 中本次合并任务、或合并分支的提交/任务描述，明确「本次新增/变更的对外能力与主流程、边界场景」。
+- [ ] **对照 tests/ 检查覆盖**：对上述每一项，在 `tests/` 下查找是否已有集成测试覆盖（黑盒、仅通过 pub API）；若为「从磁盘/路径加载并验证行为」类能力，须有对应端到端用例（如 `load_plugin(plugin_dir)` 后断言插件在 list_loaded 或可响应事件）。
+- [ ] **无覆盖则必须在本步骤内编写或补充**：若某模块或场景尚无对应集成测试，须在本步骤内新增或更新 `tests/` 下用例，不得以「后续补」为由跳过。
+- [ ] **wasm-plugin 合并**：若本次合并涉及插件/Wasm 加载或运行时，须确认已有或本次补充「Wasm 真实运行时」集成测试（见 INTEGRATION_TEST_SPEC 5.4）；例如 `PluginManager::load_plugin(path)` 须至少有一条「真实 WasmEngine + 临时插件目录 → load_plugin → 断言加载成功」的集成测试。
 
 ### 合并后全量测试与验收清单
 
