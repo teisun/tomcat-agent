@@ -27,6 +27,7 @@
 - [INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) — 第 9 章：日志与链路追踪
 - [INTEGRATION_TEST_ROBUSTNESS.md](../openspec/specs/guides/testing/INTEGRATION_TEST_ROBUSTNESS.md) — 第 10 章：鲁棒性/异常边界
 - [INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md) — 集成测试实践参考
+- [STATUS_GUIDE.md](../openspec/specs/guides/workflow/STATUS_GUIDE.md) — 进度状态文件规范（status 块格式与当前分支对应）
 
 ## 验收标准
 
@@ -41,14 +42,18 @@
 
 ### 合并范围选择（必做第一步）
 
-执行合并与集成测试前，**必须先让用户选择合并范围**，而不是默认合并全部分支：
+执行合并与集成测试前，**必须以实际 git 分支为依据**，让用户选择合并范围：
 
-1. **列出 [TASK_BOARD.md](./TASK_BOARD.md) 中状态为 DONE 的任务**及其对应分支，**必须带序号**。
-2. **提示用户选择**（支持序号或关键字）：
-   - **`all`** 或 **`0`**：按依赖顺序合并所有 DONE 状态任务的分支到 develop，并执行全量集成测试。
-   - **序号**（如 `3`）或 **分支名**：仅将对应分支合并到 develop，并针对本次合并做集成测试。
-3. 在用户明确选择之前，**不执行任何合并操作**。
-4. 若选择单分支合并，合并顺序仍须满足依赖：目标分支的依赖分支如尚未在 develop 上，须先提示用户或按依赖顺序先合并。
+1. **扫描本地 git 分支**：执行 `git branch -vv` 列出所有本地分支，再对每个非 develop/main/master 分支执行 `git log develop..{branch} --oneline`，找出**有未合并提交**的分支。
+2. **带序号展示可合并分支**（仅展示有未合并提交的分支）：
+   - 列出：序号、分支名、未合并提交数、最新提交摘要。
+   - 若所有功能分支均无未合并提交，告知用户「当前无待合并分支」，询问是否仅对 develop 现有代码做集成测试与验收。
+3. **提示用户选择**（支持序号或关键字）：
+   - **`all`** 或 **`0`**：合并所有有未合并提交的分支到 develop，并执行全量集成测试。
+   - **序号**（如 `1`）或 **分支名**：仅将对应分支合并到 develop，并针对本次合并做集成测试。
+4. 在用户明确选择之前，**不执行任何合并操作**。
+5. **用户选定后**，对照 [TASK_BOARD.md](./TASK_BOARD.md) 获取所选分支对应的任务信息（任务 ID、依赖关系、验收标准等），用于后续合并前检查与验收。
+6. 若选择单分支合并，合并顺序仍须满足依赖：目标分支的依赖分支如尚未在 develop 上，须先提示用户或按依赖顺序先合并。
 
 ### 分支策略
 
@@ -95,7 +100,14 @@
 
 ### 集成通过
 
-若分支合并成功且集成测试通过，在 [status/](../status/) 目录下生成测试报告（包含：合并分支列表、执行的检查与验收项、结果摘要、时间/环境等）。
+若分支合并成功且集成测试通过，须在**当前 Git 分支对应的 status 文件**中记录，文件名规则见 [STATUS_GUIDE.md](../openspec/specs/guides/workflow/STATUS_GUIDE.md)（如 develop → `status/develop.md`，分支名 `/` 替换为 `-`）。
+
+- **写入目标**：仅写入上述 status 文件，不得在 status/ 下新建独立报告文件（如 `integration-report-*.md`）。
+- **形式**：在该文件**顶部新增一个 status 块**（不覆盖已有内容），包含：
+  - 元数据表：Owner、Update Time、State、Branch、Cov%（与 develop.md 现有块格式一致）；
+  - **### 集成测试报告**（或「本次执行说明」）标题；
+  - 合并分支列表、执行的检查与验收项、结果摘要、时间/环境等。
+- **禁止**：不得新建独立报告文件；所有集成通过记录均写入当前分支的 status 文件。
 
 ### 问题反馈方式
 

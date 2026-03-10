@@ -34,7 +34,7 @@ echo "=== cargo test --lib ==="
 cargo test --lib
 
 echo "=== cargo test 集成测试（不含 wasmedge_e2e_tests）==="
-cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests
+cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests --test cli_tests
 
 if [ $SKIP_WASMEDGE -eq 0 ]; then
   echo "=== cargo build（含 WasmEdge）==="

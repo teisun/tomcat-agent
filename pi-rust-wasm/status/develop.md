@@ -1,5 +1,25 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-10 11:00 | INTEGRATION | develop | 65.6 |
+
+### 集成测试报告（TASK-02 feature/cli-commands 合并）
+
+**合并分支**：`feature/cli-commands` → `develop`（`git merge --no-ff`）。
+
+**合并前检查**：git merge 无冲突；`cargo build`、`cargo clippy --lib --tests`、`cargo test --lib` 通过（211 passed, 0 failed, 1 ignored）。
+
+**集成测试编写**：新建 `tests/cli_tests.rs`，29 个黑盒用例（assert_cmd + predicates），覆盖 help/version、init、doctor、config get/set/export/import、plugin list/load/unload/enable/disable/info、audit list、session list/new、chat 占位及未知子命令与 roundtrip；AAA + 日志门禁 + 鲁棒性边界。
+
+**全量验收**：`cargo build --release`、`cargo clippy --lib --tests` 通过；`cargo test --test '*'` 共 61 个集成测试全通过（cli_tests 29、event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3、wasmedge_e2e_tests 7）。
+
+**结果摘要**：TASK-02 (T1-P0-010-completion) CLI 子命令补完合并成功，doctor/config/plugin/audit 已从占位补完为真实实现，帮助文档完整，异常边界处理正常。
+
+**环境**：macOS (darwin 22.6.0)，Rust nightly，WasmEdge 0.13.5。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-09 | DONE | develop | 88.4 |
 
 ### 本次执行说明（Nibbles 流程整改 + load_plugin 集成测试补写）

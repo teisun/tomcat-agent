@@ -35,3 +35,5 @@ wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot"] }
 [dev-dependencies]
 dotenvy = "0.15"
 tempfile = "3.10"
+assert_cmd = "2"
+predicates = "3"
