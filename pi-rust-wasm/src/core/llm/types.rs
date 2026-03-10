@@ -11,6 +11,7 @@ pub enum ChatMessageRole {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 /// 消息内容：纯文本或 parts 数组（便于扩展多模态）。
@@ -33,36 +34,75 @@ pub struct ChatMessageContentPart {
 #[serde(rename_all = "snake_case")]
 pub struct ChatMessage {
     pub role: ChatMessageRole,
-    pub content: ChatMessageContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<ChatMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl ChatMessage {
-    /// 从纯文本构造一条用户消息。
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::User,
-            content: ChatMessageContent::Text(text.into()),
+            content: Some(ChatMessageContent::Text(text.into())),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
-    /// 从纯文本构造一条助手消息。
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::Assistant,
-            content: ChatMessageContent::Text(text.into()),
+            content: Some(ChatMessageContent::Text(text.into())),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 
-    /// 从纯文本构造一条系统消息。
+    pub fn assistant_with_tool_calls(
+        content: Option<&str>,
+        tool_calls: Vec<serde_json::Value>,
+    ) -> Self {
+        Self {
+            role: ChatMessageRole::Assistant,
+            content: content.map(|s| ChatMessageContent::Text(s.to_string())),
+            name: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool(tool_call_id: &str, content: &str) -> Self {
+        Self {
+            role: ChatMessageRole::Tool,
+            content: Some(ChatMessageContent::Text(content.to_string())),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+        }
+    }
+
     pub fn system(text: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::System,
-            content: ChatMessageContent::Text(text.into()),
+            content: Some(ChatMessageContent::Text(text.into())),
             name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Helper to extract text content (for backward compat).
+    pub fn text_content(&self) -> Option<&str> {
+        match &self.content {
+            Some(ChatMessageContent::Text(s)) => Some(s),
+            _ => None,
         }
     }
 }
@@ -74,7 +114,6 @@ impl ChatMessage {
 #[serde(rename_all = "snake_case")]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
-    /// 实际使用的模型由 model_override 优先，否则由调用方填入默认模型。
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -82,9 +121,12 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    /// 会话级模型覆盖，与 SessionEntry.model_override 对应（不发给 API，仅用于选模型）。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 会话级模型覆盖（不发给 API，仅用于选模型）。
+    #[serde(skip)]
     pub model_override: Option<String>,
+    /// OpenAI function calling: tool definitions sent to the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 /// 单次调用的 token 使用量（与 OpenAI API 一致，snake_case）。
@@ -120,11 +162,19 @@ pub struct ChatResponseChoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    /// 内容增量。
-    ContentDelta { delta: String },
-    /// 结束原因。
-    FinishReason { reason: String },
-    /// 单次调用的 usage（流结束时常在最后一条）。
+    ContentDelta {
+        delta: String,
+    },
+    /// Tool call 增量（OpenAI streaming 格式）。
+    ToolCallDelta {
+        index: u32,
+        id: Option<String>,
+        name: Option<String>,
+        arguments_delta: Option<String>,
+    },
+    FinishReason {
+        reason: String,
+    },
     Usage {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -140,13 +190,31 @@ mod tests {
     fn chat_message_constructors() {
         let u = ChatMessage::user("hello");
         assert!(matches!(u.role, ChatMessageRole::User));
-        assert!(matches!(&u.content, ChatMessageContent::Text(s) if s == "hello"));
+        assert!(matches!(&u.content, Some(ChatMessageContent::Text(s)) if s == "hello"));
 
         let a = ChatMessage::assistant("hi");
         assert!(matches!(a.role, ChatMessageRole::Assistant));
 
         let s = ChatMessage::system("you are helpful");
         assert!(matches!(s.role, ChatMessageRole::System));
+    }
+
+    #[test]
+    fn chat_message_tool() {
+        let t = ChatMessage::tool("call_1", "result");
+        assert!(matches!(t.role, ChatMessageRole::Tool));
+        assert_eq!(t.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(t.text_content(), Some("result"));
+    }
+
+    #[test]
+    fn chat_message_assistant_with_tool_calls() {
+        let tc = vec![
+            serde_json::json!({"id": "c1", "type": "function", "function": {"name": "f1", "arguments": "{}"}}),
+        ];
+        let m = ChatMessage::assistant_with_tool_calls(Some("thinking"), tc);
+        assert!(m.tool_calls.is_some());
+        assert_eq!(m.text_content(), Some("thinking"));
     }
 
     #[test]
@@ -158,6 +226,7 @@ mod tests {
             max_tokens: Some(100),
             stream: Some(false),
             model_override: None,
+            tools: None,
         };
         let j = serde_json::to_string(&req).unwrap();
         assert!(j.contains("model"));
