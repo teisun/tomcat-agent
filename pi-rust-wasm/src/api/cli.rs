@@ -5,15 +5,22 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ensure_work_dir_structure, load_config, normalize_path, validate_config, AppConfig, AppError,
-    SessionManager,
+    ensure_work_dir_structure, load_config, normalize_path, validate_config, write_file_atomic,
+    AppConfig, AppError, DefaultEventBus, DefaultToolRegistry, EventBus, PluginManager,
+    SessionManager, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine,
+    WasmEngineConfig,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi/agent/config.toml";
 
-/// pi-awsm：会话存储与 CLI 子命令（init/doctor/config/session/plugin/audit）。
+/// pi-awsm CLI：AI Agent 运行时，支持插件管理、会话、配置、审计与对话模式
 #[derive(Parser, Debug)]
-#[command(name = "pi-awsm", about = "PI Agent CLI", version)]
+#[command(
+    name = "pi-awsm",
+    about = "PI Agent CLI — 插件化 AI Agent 运行时",
+    long_about = "pi-awsm 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令，无参数时进入对话模式。",
+    version
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -43,35 +50,50 @@ pub enum Commands {
         #[command(subcommand)]
         sub: SessionSub,
     },
-    /// 插件管理（依赖 T1-P0-009，当前占位）
+    /// 插件管理：list/load/unload/enable/disable/info
     Plugin {
         #[command(subcommand)]
         sub: PluginSub,
     },
-    /// 审计日志查看（P0 可占位或只读已有日志）
+    /// 审计日志：list/show/export
     Audit {
         #[command(subcommand)]
         sub: AuditSub,
     },
-    /// 对话模式（由 chat 角色实现，此处仅占位）
+    /// 进入交互式对话模式
     Chat,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigSub {
-    /// 获取配置项
-    Get { key: Option<String> },
-    /// 设置配置项
-    Set { key: String, value: String },
-    /// 用编辑器打开配置文件
+    /// 获取配置项（无 key 时输出完整配置）
+    Get {
+        /// 配置项路径，如 log.level、llm.default_model
+        key: Option<String>,
+    },
+    /// 设置配置项（自动校验合法性）
+    Set {
+        /// 配置项路径，如 log.level、security.audit_log_retention_days
+        key: String,
+        /// 新值（自动推断类型：整数/布尔/字符串）
+        value: String,
+    },
+    /// 用编辑器打开配置文件（读取 $EDITOR，默认 vi/notepad）
     Edit {
+        /// 指定配置文件路径
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// 导出配置到文件
-    Export { path: PathBuf },
-    /// 从文件导入配置
-    Import { path: PathBuf },
+    /// 导出当前配置到指定文件
+    Export {
+        /// 导出目标文件路径
+        path: PathBuf,
+    },
+    /// 从文件导入配置（校验格式后提示）
+    Import {
+        /// 导入源文件路径
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -97,26 +119,51 @@ pub enum SessionSub {
 pub enum PluginSub {
     /// 列出已加载插件
     List,
-    /// 加载插件
-    Load { path: String },
-    /// 卸载插件
-    Unload { id: String },
-    /// 启用插件
-    Enable { id: String },
-    /// 禁用插件
-    Disable { id: String },
-    /// 插件详情
-    Info { id: String },
+    /// 从磁盘路径加载插件
+    Load {
+        /// 插件根目录路径或清单文件（plugin.json）路径
+        path: String,
+    },
+    /// 卸载已加载的插件
+    Unload {
+        /// 插件 ID
+        id: String,
+    },
+    /// 启用已加载的插件
+    Enable {
+        /// 插件 ID
+        id: String,
+    },
+    /// 禁用已加载的插件
+    Disable {
+        /// 插件 ID
+        id: String,
+    },
+    /// 查看插件详细信息
+    Info {
+        /// 插件 ID
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum AuditSub {
-    /// 列出审计记录
-    List { limit: Option<u32> },
-    /// 查看单条
-    Show { id: String },
-    /// 导出
-    Export { path: PathBuf },
+    /// 列出最近的审计记录
+    List {
+        /// 最多显示条数（默认 50）
+        #[arg(short, long)]
+        limit: Option<u32>,
+    },
+    /// 查看单条审计记录详情
+    Show {
+        /// 审计记录序号
+        id: String,
+    },
+    /// 导出审计记录为 JSON 文件
+    Export {
+        /// 导出目标文件路径（JSON 格式）
+        path: PathBuf,
+    },
 }
 
 /// 解析参数并执行对应子命令；无子命令时默认执行 chat。
@@ -175,9 +222,112 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
         println!("创建工作目录失败: {}", e);
         return Ok(());
     }
-    println!("配置合法。");
-    // WasmEdge/QuickJS 可用性：占位，后续由 wasm_plugin 对接
-    println!("WasmEdge/QuickJS 检测: 占位（待 T1-P0-009 完成后对接）");
+    println!("✓ 配置合法");
+
+    let wasm_cfg = WasmEngineConfig {
+        quickjs_path: cfg.wasm.quickjs_path.clone(),
+        ..Default::default()
+    };
+    match WasmEngine::global(Some(wasm_cfg)) {
+        Ok(_) => println!("✓ WasmEdge 运行时：可用"),
+        Err(e) => {
+            println!("✗ WasmEdge 运行时：不可用 ({})", e);
+            println!("  修复建议：请安装 WasmEdge，参考 https://wasmedge.org/docs/start/install");
+        }
+    }
+
+    let quickjs_path = cfg
+        .wasm
+        .quickjs_path
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("WASMEDGE_QUICKJS_PATH").ok());
+    match quickjs_path {
+        Some(p) => {
+            let resolved = normalize_path(&p).unwrap_or_else(|_| PathBuf::from(&p));
+            if resolved.exists() {
+                println!("✓ QuickJS 运行时：可用 ({})", resolved.display());
+            } else {
+                println!("✗ QuickJS wasm 文件不存在: {}", resolved.display());
+                println!("  修复建议：下载 wasmedge_quickjs.wasm 并配置 wasm.quickjs_path 或设置环境变量 WASMEDGE_QUICKJS_PATH");
+            }
+        }
+        None => {
+            println!("✗ QuickJS 路径未配置");
+            println!("  修复建议：下载 wasmedge_quickjs.wasm 并配置 wasm.quickjs_path 或设置环境变量 WASMEDGE_QUICKJS_PATH");
+        }
+    }
+
+    Ok(())
+}
+
+fn config_file_path(custom: Option<&str>) -> Result<PathBuf, AppError> {
+    match custom {
+        Some(s) => normalize_path(s),
+        None => normalize_path(DEFAULT_CONFIG_PATH),
+    }
+}
+
+fn resolve_toml_key<'a>(val: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    let mut current = val;
+    for seg in key.split('.') {
+        current = current.get(seg)?;
+    }
+    Some(current)
+}
+
+fn set_toml_key(val: &mut toml::Value, key: &str, raw_value: &str) -> Result<(), AppError> {
+    let segments: Vec<&str> = key.split('.').collect();
+    if segments.is_empty() {
+        return Err(AppError::Config("配置项路径不能为空".to_string()));
+    }
+
+    let mut current = val;
+    for (i, seg) in segments.iter().enumerate() {
+        if i == segments.len() - 1 {
+            let table = current
+                .as_table_mut()
+                .ok_or_else(|| AppError::Config(format!("配置路径无效: {} 不是表", seg)))?;
+            let entry = table.get(seg.to_owned()).ok_or_else(|| {
+                let available: Vec<&String> = table.keys().collect();
+                AppError::Config(format!(
+                    "配置项不存在: {}。同级可用项: {:?}",
+                    seg, available
+                ))
+            })?;
+            let new_val =
+                match entry {
+                    toml::Value::Integer(_) => raw_value
+                        .parse::<i64>()
+                        .map(toml::Value::Integer)
+                        .map_err(|_| {
+                        AppError::Config(format!("无法将 '{}' 转换为整数类型", raw_value))
+                    })?,
+                    toml::Value::Boolean(_) => raw_value
+                        .parse::<bool>()
+                        .map(toml::Value::Boolean)
+                        .map_err(|_| {
+                            AppError::Config(format!(
+                                "无法将 '{}' 转换为布尔类型（期望 true/false）",
+                                raw_value
+                            ))
+                        })?,
+                    toml::Value::Float(_) => raw_value
+                        .parse::<f64>()
+                        .map(toml::Value::Float)
+                        .map_err(|_| {
+                            AppError::Config(format!("无法将 '{}' 转换为浮点类型", raw_value))
+                        })?,
+                    _ => toml::Value::String(raw_value.to_string()),
+                };
+            table.insert(seg.to_string(), new_val);
+            return Ok(());
+        }
+        current = current
+            .get_mut(*seg)
+            .ok_or_else(|| AppError::Config(format!("配置路径无效: 不存在的中间节点 {}", seg)))?;
+    }
     Ok(())
 }
 
@@ -186,19 +336,109 @@ pub(crate) fn run_config(sub: ConfigSub) -> Result<(), AppError> {
         ConfigSub::Get { key } => {
             let cfg = load_config(None)?;
             if let Some(k) = key {
-                println!("get key: {} (占位)", k);
+                let val =
+                    toml::Value::try_from(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+                match resolve_toml_key(&val, &k) {
+                    Some(v) => println!("{}", v),
+                    None => {
+                        let parent_key = k.rsplit_once('.').map(|(p, _)| p).unwrap_or("");
+                        let parent = if parent_key.is_empty() {
+                            Some(&val)
+                        } else {
+                            resolve_toml_key(&val, parent_key)
+                        };
+                        let hint = parent
+                            .and_then(|p| p.as_table())
+                            .map(|t| {
+                                let keys: Vec<&String> = t.keys().collect();
+                                format!("同级可用项: {:?}", keys)
+                            })
+                            .unwrap_or_default();
+                        println!("未找到配置项: {}", k);
+                        if !hint.is_empty() {
+                            println!("  {}", hint);
+                        }
+                    }
+                }
             } else {
-                let toml =
+                let toml_str =
                     toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
-                println!("{}", toml);
+                println!("{}", toml_str);
             }
         }
-        ConfigSub::Set { key, value } => println!("set {} = {} (占位)", key, value),
-        ConfigSub::Edit { config: _ } => println!("edit: 请手动编辑配置文件"),
+        ConfigSub::Set { key, value } => {
+            let path = config_file_path(None)?;
+            if !path.exists() {
+                println!("配置文件不存在: {}。请先运行: pi-awsm init", path.display());
+                return Ok(());
+            }
+            let content = std::fs::read_to_string(&path).map_err(AppError::Io)?;
+            let mut val: toml::Value = content
+                .parse()
+                .map_err(|e: toml::de::Error| AppError::Config(e.to_string()))?;
+            set_toml_key(&mut val, &key, &value)?;
+            let new_toml =
+                toml::to_string_pretty(&val).map_err(|e| AppError::Config(e.to_string()))?;
+            let check: Result<AppConfig, _> = toml::from_str(&new_toml);
+            match check {
+                Ok(ref c) => {
+                    if let Err(e) = validate_config(c) {
+                        println!("值无效: {}，未修改配置", e);
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    println!("值无效: {}，未修改配置", e);
+                    return Ok(());
+                }
+            }
+            write_file_atomic(&path, new_toml.as_bytes())?;
+            println!("已设置 {} = {}", key, value);
+        }
+        ConfigSub::Edit { config } => {
+            let path = config_file_path(config.as_deref())?;
+            if !path.exists() {
+                println!("配置文件不存在: {}。请先运行: pi-awsm init", path.display());
+                return Ok(());
+            }
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                if cfg!(target_os = "windows") {
+                    "notepad".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+            match std::process::Command::new(&editor).arg(&path).status() {
+                Ok(status) if status.success() => match load_config(Some(path.as_path())) {
+                    Ok(ref c) => {
+                        if let Err(e) = validate_config(c) {
+                            println!("警告：编辑后的配置不合法: {}，请重新编辑修复", e);
+                        } else {
+                            println!("配置已更新");
+                        }
+                    }
+                    Err(e) => {
+                        println!("警告：编辑后的配置解析失败: {}，请重新编辑修复", e);
+                    }
+                },
+                Ok(status) => {
+                    println!("编辑器退出码: {}，配置可能未修改", status);
+                }
+                Err(e) => {
+                    println!(
+                        "无法启动编辑器 '{}': {}。请设置 EDITOR 环境变量或手动编辑 {}",
+                        editor,
+                        e,
+                        path.display()
+                    );
+                }
+            }
+        }
         ConfigSub::Export { path } => {
             let cfg = load_config(None)?;
-            let toml = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
-            std::fs::write(&path, toml).map_err(AppError::Io)?;
+            let toml_str =
+                toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+            std::fs::write(&path, toml_str).map_err(AppError::Io)?;
             println!("已导出到 {}", path.display());
         }
         ConfigSub::Import { path } => {
@@ -266,23 +506,303 @@ pub(crate) fn run_session(sub: SessionSub) -> Result<(), AppError> {
     Ok(())
 }
 
+struct PluginContext {
+    plugin_manager: PluginManager,
+    #[allow(dead_code)]
+    config: AppConfig,
+}
+
+struct NoopToolExecutor;
+
+#[async_trait::async_trait]
+impl ToolExecutor for NoopToolExecutor {
+    async fn execute(
+        &self,
+        tool: &Tool,
+        _params: serde_json::Value,
+        _caller_plugin_id: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        Err(AppError::Config(format!(
+            "CLI 模式下不支持工具执行: {}",
+            tool.name
+        )))
+    }
+}
+
+fn build_plugin_context() -> Result<PluginContext, AppError> {
+    let cfg = load_config(None)?;
+    ensure_work_dir_structure(&cfg)?;
+    let event_bus: std::sync::Arc<dyn EventBus> = std::sync::Arc::new(DefaultEventBus::new());
+    let executor: std::sync::Arc<dyn ToolExecutor> = std::sync::Arc::new(NoopToolExecutor);
+    let audit = std::sync::Arc::new(TracingAuditRecorder);
+    let tool_registry: std::sync::Arc<dyn ToolRegistry> =
+        std::sync::Arc::new(DefaultToolRegistry::new(executor, audit));
+    let mut pm = PluginManager::new(event_bus);
+    pm.set_tool_registry(tool_registry);
+
+    let wasm_cfg = WasmEngineConfig {
+        quickjs_path: cfg.wasm.quickjs_path.clone(),
+        ..Default::default()
+    };
+    if let Ok(engine) = WasmEngine::global(Some(wasm_cfg)) {
+        pm.set_wasm_engine(engine);
+    }
+
+    type ConfirmFn = dyn Fn(&crate::PluginManifest) -> Result<bool, AppError> + Send + Sync;
+    let confirm_fn: std::sync::Arc<ConfirmFn> = std::sync::Arc::new(cli_confirm_permissions);
+    pm.set_confirm_permissions(confirm_fn);
+
+    Ok(PluginContext {
+        plugin_manager: pm,
+        config: cfg,
+    })
+}
+
+fn cli_confirm_permissions(manifest: &crate::PluginManifest) -> Result<bool, AppError> {
+    use std::io::{self, BufRead, Write};
+    println!(
+        "插件 {} (v{}) 请求以下权限: {:?}",
+        manifest.name, manifest.version, manifest.required_permissions
+    );
+    print!("是否授权？[y/N] ");
+    io::stdout().flush().map_err(AppError::Io)?;
+    let mut line = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(AppError::Io)?;
+    let answer = line.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+fn format_plugin_info(info: &crate::PluginInfo) {
+    println!("  ID:        {}", info.id);
+    println!("  名称:      {}", info.manifest.name);
+    println!("  版本:      {}", info.manifest.version);
+    println!("  描述:      {}", info.manifest.description);
+    println!("  作者:      {}", info.manifest.author);
+    println!("  状态:      {:?}", info.status);
+    println!("  权限:      {:?}", info.manifest.required_permissions);
+    println!("  API 版本:  {}", info.manifest.required_api_version);
+    println!("  注册工具:  {:?}", info.registered_tools);
+    println!("  加载时间:  {}", info.loaded_at);
+}
+
 pub(crate) fn run_plugin(sub: PluginSub) -> Result<(), AppError> {
+    let ctx = build_plugin_context()?;
+    let pm = &ctx.plugin_manager;
+
     match sub {
-        PluginSub::List => println!("插件列表（占位，依赖 T1-P0-009）"),
-        PluginSub::Load { path } => println!("load {}（占位）", path),
-        PluginSub::Unload { id } => println!("unload {}（占位）", id),
-        PluginSub::Enable { id } => println!("enable {}（占位）", id),
-        PluginSub::Disable { id } => println!("disable {}（占位）", id),
-        PluginSub::Info { id } => println!("info {}（占位）", id),
+        PluginSub::List => {
+            let ids = pm.list_loaded();
+            if ids.is_empty() {
+                println!("当前无已加载插件。");
+                if !ctx.config.plugin.auto_load.is_empty() {
+                    println!(
+                        "  提示: auto_load 中的插件将在对话模式启动时自动加载: {:?}",
+                        ctx.config.plugin.auto_load
+                    );
+                }
+            } else {
+                println!("{:<20} {:<15} {:<10} {:<10}", "ID", "名称", "版本", "状态");
+                println!("{}", "-".repeat(55));
+                for id in &ids {
+                    if let Some(info) = pm.get_plugin(id) {
+                        println!(
+                            "{:<20} {:<15} {:<10} {:?}",
+                            info.id, info.manifest.name, info.manifest.version, info.status
+                        );
+                    }
+                }
+            }
+        }
+        PluginSub::Load { path } => {
+            let p = std::path::Path::new(&path);
+            if !p.exists() {
+                println!("插件路径不存在: {}", path);
+                return Ok(());
+            }
+            match pm.load_plugin(p) {
+                Ok(()) => {
+                    println!("插件加载成功: {}", path);
+                    let ids = pm.list_loaded();
+                    if let Some(id) = ids.last() {
+                        if let Some(info) = pm.get_plugin(id) {
+                            format_plugin_info(&info);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    println!("插件加载失败: {}", msg);
+                    if msg.contains("WasmEdge") || msg.contains("wasm_engine") {
+                        println!("  提示: 请先运行 pi-awsm doctor 检查运行环境");
+                    }
+                }
+            }
+        }
+        PluginSub::Unload { id } => match pm.unload_plugin(&id) {
+            Ok(()) => println!("已卸载插件: {}", id),
+            Err(e) => println!("卸载失败: {}", e),
+        },
+        PluginSub::Enable { id } => match pm.enable_plugin(&id) {
+            Ok(()) => println!("已启用插件: {}", id),
+            Err(e) => println!("启用失败: {}", e),
+        },
+        PluginSub::Disable { id } => match pm.disable_plugin(&id) {
+            Ok(()) => println!("已禁用插件: {}", id),
+            Err(e) => println!("禁用失败: {}", e),
+        },
+        PluginSub::Info { id } => match pm.get_plugin(&id) {
+            Some(info) => format_plugin_info(&info),
+            None => println!("插件未找到: {}", id),
+        },
     }
     Ok(())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct AuditDisplayEntry {
+    index: usize,
+    timestamp: String,
+    audit_type: String,
+    detail: String,
+    success: String,
+}
+
+fn parse_audit_line(line: &str, index: usize) -> Option<AuditDisplayEntry> {
+    let audit_type = if line.contains("audit primitive") {
+        "primitive"
+    } else if line.contains("audit tool_call") {
+        "tool_call"
+    } else if line.contains("audit hostcall") {
+        "hostcall"
+    } else {
+        return None;
+    };
+
+    let timestamp = line
+        .find(char::is_numeric)
+        .and_then(|start| line.get(start..start + 30.min(line.len() - start)))
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let success = if line.contains("success=true") || line.contains("success: true") {
+        "OK"
+    } else if line.contains("success=false") || line.contains("success: false") {
+        "FAIL"
+    } else {
+        "?"
+    };
+
+    let detail = line
+        .find("operation=")
+        .or_else(|| line.find("tool_name="))
+        .or_else(|| line.find("module="))
+        .map(|start| {
+            let end = line.len().min(start + 80);
+            line[start..end].to_string()
+        })
+        .unwrap_or_else(|| {
+            let trimmed = line.trim();
+            let end = trimmed.len().min(80);
+            trimmed[..end].to_string()
+        });
+
+    Some(AuditDisplayEntry {
+        index,
+        timestamp,
+        audit_type: audit_type.to_string(),
+        detail,
+        success: success.to_string(),
+    })
+}
+
+fn read_audit_entries(
+    log_path: &std::path::Path,
+    limit: Option<u32>,
+) -> Result<Vec<AuditDisplayEntry>, AppError> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(log_path).map_err(AppError::Io)?;
+    let reader = std::io::BufReader::new(file);
+    let mut entries = Vec::new();
+    let mut audit_index = 0usize;
+    for line in reader.lines() {
+        let line = line.map_err(AppError::Io)?;
+        if let Some(entry) = parse_audit_line(&line, audit_index) {
+            audit_index += 1;
+            entries.push(entry);
+        }
+    }
+    entries.reverse();
+    let max = limit.unwrap_or(50) as usize;
+    entries.truncate(max);
+    Ok(entries)
+}
+
 pub(crate) fn run_audit(sub: AuditSub) -> Result<(), AppError> {
+    let cfg = load_config(None)?;
+    if !cfg.log.file_enabled {
+        println!("审计日志功能需要开启文件日志。请在配置中设置 log.file_enabled = true");
+        return Ok(());
+    }
+    let log_path = normalize_path(&cfg.log.file_path)?;
+    if !log_path.exists() {
+        println!("日志文件不存在: {}，尚无审计记录", log_path.display());
+        return Ok(());
+    }
+
     match sub {
-        AuditSub::List { limit } => println!("审计列表（占位）limit={:?}", limit),
-        AuditSub::Show { id } => println!("审计 show {}（占位）", id),
-        AuditSub::Export { path } => println!("审计导出到 {}（占位）", path.display()),
+        AuditSub::List { limit } => {
+            let entries = read_audit_entries(&log_path, limit)?;
+            if entries.is_empty() {
+                println!("未找到审计记录");
+                return Ok(());
+            }
+            println!(
+                "{:<6} {:<24} {:<12} {:<6} 详情",
+                "序号", "时间", "类型", "状态"
+            );
+            println!("{}", "-".repeat(80));
+            for e in &entries {
+                println!(
+                    "{:<6} {:<24} {:<12} {:<6} {}",
+                    e.index, e.timestamp, e.audit_type, e.success, e.detail
+                );
+            }
+            println!("共 {} 条", entries.len());
+        }
+        AuditSub::Show { id } => {
+            let idx: usize = id.parse().unwrap_or(usize::MAX);
+            let entries = read_audit_entries(&log_path, None)?;
+            match entries.iter().find(|e| e.index == idx) {
+                Some(e) => {
+                    println!("序号:   {}", e.index);
+                    println!("时间:   {}", e.timestamp);
+                    println!("类型:   {}", e.audit_type);
+                    println!("状态:   {}", e.success);
+                    println!("详情:   {}", e.detail);
+                }
+                None => {
+                    println!("未找到审计记录: {}", id);
+                    println!(
+                        "  提示: 完整审计 ID 体系将在 T1-P1-001 中实现，当前使用行序号作为 ID"
+                    );
+                }
+            }
+        }
+        AuditSub::Export { path } => {
+            let entries = read_audit_entries(&log_path, None)?;
+            if entries.is_empty() {
+                println!("无审计记录可导出");
+                return Ok(());
+            }
+            let json = serde_json::to_string_pretty(&entries)
+                .map_err(|e| AppError::Config(e.to_string()))?;
+            write_file_atomic(&path, json.as_bytes())?;
+            println!("已导出 {} 条审计记录到 {}", entries.len(), path.display());
+        }
     }
     Ok(())
 }
@@ -601,5 +1121,247 @@ mod tests {
             path: dir.path().join("audit.json"),
         });
         assert!(r2.is_ok());
+    }
+
+    // --- doctor tests ---
+
+    #[test]
+    fn run_doctor_with_valid_config_checks_wasm() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        run_init(config_path.to_str().unwrap()).unwrap();
+        let r = run_doctor(Some(config_path.to_str().unwrap()));
+        assert!(r.is_ok());
+    }
+
+    // --- config get/set/edit tests ---
+
+    #[test]
+    fn resolve_toml_key_finds_nested() {
+        let cfg = AppConfig::default();
+        let val = toml::Value::try_from(&cfg).unwrap();
+        let found = resolve_toml_key(&val, "log.level");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().as_str().unwrap(), "info");
+    }
+
+    #[test]
+    fn resolve_toml_key_returns_none_for_missing() {
+        let cfg = AppConfig::default();
+        let val = toml::Value::try_from(&cfg).unwrap();
+        assert!(resolve_toml_key(&val, "nonexistent.key").is_none());
+    }
+
+    #[test]
+    fn set_toml_key_changes_string_value() {
+        let cfg = AppConfig::default();
+        let mut val = toml::Value::try_from(&cfg).unwrap();
+        let r = set_toml_key(&mut val, "log.level", "debug");
+        assert!(r.is_ok());
+        let found = resolve_toml_key(&val, "log.level").unwrap();
+        assert_eq!(found.as_str().unwrap(), "debug");
+    }
+
+    #[test]
+    fn set_toml_key_changes_integer_value() {
+        let cfg = AppConfig::default();
+        let mut val = toml::Value::try_from(&cfg).unwrap();
+        let r = set_toml_key(&mut val, "security.audit_log_retention_days", "30");
+        assert!(r.is_ok());
+        let found = resolve_toml_key(&val, "security.audit_log_retention_days").unwrap();
+        assert_eq!(found.as_integer().unwrap(), 30);
+    }
+
+    #[test]
+    fn set_toml_key_changes_bool_value() {
+        let cfg = AppConfig::default();
+        let mut val = toml::Value::try_from(&cfg).unwrap();
+        let r = set_toml_key(&mut val, "log.file_enabled", "true");
+        assert!(r.is_ok());
+        let found = resolve_toml_key(&val, "log.file_enabled").unwrap();
+        assert!(found.as_bool().unwrap());
+    }
+
+    #[test]
+    fn set_toml_key_rejects_nonexistent_path() {
+        let cfg = AppConfig::default();
+        let mut val = toml::Value::try_from(&cfg).unwrap();
+        let r = set_toml_key(&mut val, "nonexistent.key", "val");
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("不存在"));
+    }
+
+    #[test]
+    fn set_toml_key_rejects_bad_integer() {
+        let cfg = AppConfig::default();
+        let mut val = toml::Value::try_from(&cfg).unwrap();
+        let r = set_toml_key(
+            &mut val,
+            "security.audit_log_retention_days",
+            "not_a_number",
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("整数"));
+    }
+
+    #[test]
+    fn config_set_with_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        run_init(config_path.to_str().unwrap()).unwrap();
+        std::env::set_var("PI_AWSM_TEST_CONFIG_PATH", config_path.to_str().unwrap());
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("info") || content.contains("level"));
+        std::env::remove_var("PI_AWSM_TEST_CONFIG_PATH");
+    }
+
+    #[test]
+    fn config_file_path_resolves_default() {
+        let r = config_file_path(None);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn config_file_path_resolves_custom() {
+        let r = config_file_path(Some("/tmp/custom.toml"));
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap(), std::path::PathBuf::from("/tmp/custom.toml"));
+    }
+
+    // --- parse_audit_line tests ---
+
+    #[test]
+    fn parse_audit_line_matches_primitive() {
+        let line = r#"2025-03-10T12:00:00Z  INFO audit primitive operation=Read path_or_cmd=/tmp/foo plugin_id=p1 user_approved=true success=true"#;
+        let entry = parse_audit_line(line, 0);
+        assert!(entry.is_some());
+        let e = entry.unwrap();
+        assert_eq!(e.audit_type, "primitive");
+        assert_eq!(e.success, "OK");
+    }
+
+    #[test]
+    fn parse_audit_line_matches_tool_call() {
+        let line = r#"2025-03-10T12:00:00Z  INFO audit tool_call tool_name=run success=false"#;
+        let entry = parse_audit_line(line, 1);
+        assert!(entry.is_some());
+        let e = entry.unwrap();
+        assert_eq!(e.audit_type, "tool_call");
+        assert_eq!(e.success, "FAIL");
+    }
+
+    #[test]
+    fn parse_audit_line_matches_hostcall() {
+        let line =
+            r#"2025-03-10T12:00:00Z  INFO audit hostcall module=fs method=readFile success=true"#;
+        let entry = parse_audit_line(line, 2);
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().audit_type, "hostcall");
+    }
+
+    #[test]
+    fn parse_audit_line_returns_none_for_non_audit() {
+        let line = "2025-03-10T12:00:00Z  INFO some other log line";
+        assert!(parse_audit_line(line, 0).is_none());
+    }
+
+    #[test]
+    fn read_audit_entries_from_file_with_audit_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("test.log");
+        std::fs::write(
+            &log,
+            "line1\n2025-01-01 INFO audit primitive operation=Read success=true\nline3\n2025-01-02 INFO audit tool_call tool_name=x success=false\n",
+        )
+        .unwrap();
+        let entries = read_audit_entries(&log, Some(10)).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].audit_type, "tool_call");
+        assert_eq!(entries[1].audit_type, "primitive");
+    }
+
+    #[test]
+    fn read_audit_entries_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("empty.log");
+        std::fs::write(&log, "no audit here\njust logs\n").unwrap();
+        let entries = read_audit_entries(&log, None).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    // --- plugin tests ---
+
+    #[test]
+    fn run_plugin_list_returns_ok_with_empty() {
+        let r = run_plugin(PluginSub::List);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_plugin_load_nonexistent_returns_ok() {
+        let r = run_plugin(PluginSub::Load {
+            path: "/nonexistent/path/to/plugin".to_string(),
+        });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_plugin_info_not_found_returns_ok() {
+        let r = run_plugin(PluginSub::Info {
+            id: "nonexistent-plugin".to_string(),
+        });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_plugin_unload_not_found_returns_ok() {
+        let r = run_plugin(PluginSub::Unload {
+            id: "nonexistent-plugin".to_string(),
+        });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_plugin_enable_not_found_returns_ok() {
+        let r = run_plugin(PluginSub::Enable {
+            id: "nonexistent-plugin".to_string(),
+        });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_plugin_disable_not_found_returns_ok() {
+        let r = run_plugin(PluginSub::Disable {
+            id: "nonexistent-plugin".to_string(),
+        });
+        assert!(r.is_ok());
+    }
+
+    // --- audit with file_enabled = false ---
+
+    #[test]
+    fn run_audit_list_file_disabled_returns_ok() {
+        let r = run_audit(AuditSub::List { limit: None });
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn audit_export_with_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("test.log");
+        std::fs::write(
+            &log,
+            "2025-01-01 INFO audit primitive operation=Read success=true\n",
+        )
+        .unwrap();
+        let export_path = dir.path().join("out.json");
+        let entries = read_audit_entries(&log, None).unwrap();
+        assert!(!entries.is_empty());
+        let json = serde_json::to_string_pretty(&entries).unwrap();
+        std::fs::write(&export_path, &json).unwrap();
+        let content = std::fs::read_to_string(&export_path).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.len(), 1);
     }
 }
