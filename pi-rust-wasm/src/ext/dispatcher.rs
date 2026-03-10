@@ -624,6 +624,7 @@ fn parse_chat_request(params: &serde_json::Value) -> Result<ChatRequest, AppErro
             .map(|u| u as u32),
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
+        tools: None,
     })
 }
 

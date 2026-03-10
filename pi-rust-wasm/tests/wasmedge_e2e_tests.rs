@@ -317,7 +317,9 @@ fn test_wasmedge_e2e_load_plugin_from_disk_succeeds() -> Result<(), Box<dyn std:
     assert!(info.is_some(), "get_plugin 应返回 Some");
     assert_eq!(info.as_ref().unwrap().id, "e2e-load-plugin-test");
 
-    manager.unload_plugin("e2e-load-plugin-test").map_err(|e| e.to_string())?;
+    manager
+        .unload_plugin("e2e-load-plugin-test")
+        .map_err(|e| e.to_string())?;
     assert!(
         manager.list_loaded().is_empty(),
         "unload 后 list_loaded 应为空"

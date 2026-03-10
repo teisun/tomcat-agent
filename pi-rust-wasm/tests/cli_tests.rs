@@ -54,9 +54,7 @@ fn test_version_output_exits_ok() {
     let assert = c.assert();
 
     info!("Assert: exit 0 and contains version string");
-    assert
-        .success()
-        .stdout(predicate::str::contains("pi-awsm"));
+    assert.success().stdout(predicate::str::contains("pi-awsm"));
 }
 
 // ────────────────────── init ──────────────────────
@@ -203,9 +201,7 @@ fn test_config_export_creates_file() {
     let assert = c.assert();
 
     info!("Assert: exit 0, file exists and contains toml");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已导出"));
+    assert.success().stdout(predicate::str::contains("已导出"));
     assert!(out.exists(), "exported file should exist");
 }
 
@@ -229,9 +225,7 @@ fn test_config_import_valid_toml_succeeds() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions import success");
-    assert
-        .success()
-        .stdout(predicate::str::contains("导入"));
+    assert.success().stdout(predicate::str::contains("导入"));
 }
 
 #[test]
@@ -269,7 +263,9 @@ fn test_config_set_missing_args_shows_error() {
     let assert = c.assert();
 
     info!("Assert: clap rejects missing arguments");
-    assert.failure().stderr(predicate::str::contains("Usage").or(predicate::str::contains("error")));
+    assert
+        .failure()
+        .stderr(predicate::str::contains("Usage").or(predicate::str::contains("error")));
 }
 
 // ────────────────────── config help ──────────────────────
@@ -329,9 +325,7 @@ fn test_plugin_load_nonexistent_path_shows_error() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions path not found");
-    assert
-        .success()
-        .stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains("不存在"));
 }
 
 #[test]
@@ -347,9 +341,7 @@ fn test_plugin_info_not_found_shows_message() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions not found");
-    assert
-        .success()
-        .stdout(predicate::str::contains("未找到"));
+    assert.success().stdout(predicate::str::contains("未找到"));
 }
 
 #[test]
@@ -482,7 +474,10 @@ fn test_session_list_exits_ok() {
 
     info!("Arrange: temp sessions dir {:?}", sessions_dir);
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__SESSIONS_DIR", sessions_dir.to_str().unwrap());
+    c.env(
+        "PI_AWSM__STORAGE__SESSIONS_DIR",
+        sessions_dir.to_str().unwrap(),
+    );
     c.args(["session", "list"]);
 
     info!("Act: execute session list");
@@ -505,7 +500,10 @@ fn test_session_new_creates_session() {
 
     info!("Arrange: temp sessions dir {:?}", sessions_dir);
     let mut c = cmd();
-    c.env("PI_AWSM__STORAGE__SESSIONS_DIR", sessions_dir.to_str().unwrap());
+    c.env(
+        "PI_AWSM__STORAGE__SESSIONS_DIR",
+        sessions_dir.to_str().unwrap(),
+    );
     c.args(["session", "new"]);
 
     info!("Act: execute session new");
@@ -540,24 +538,23 @@ fn test_session_help_lists_subcommands() {
         .stdout(predicate::str::contains("search"));
 }
 
-// ────────────────────── chat (placeholder) ──────────────────────
+// ────────────────────── chat ──────────────────────
 
 #[test]
-fn test_chat_exits_ok_with_placeholder() {
+fn test_chat_without_config_exits_with_error() {
     common::setup_logging();
-    let _span = info_span!("test_chat_exits_ok_with_placeholder").entered();
+    let _span = info_span!("test_chat_without_config_exits_with_error").entered();
 
-    info!("Arrange: chat command");
+    info!("Arrange: chat command without valid config/env");
     let mut c = cmd();
     c.arg("chat");
+    c.env_remove("OPENAI_API_KEY");
 
     info!("Act: execute chat");
     let assert = c.assert();
 
-    info!("Assert: exit 0, placeholder message");
-    assert
-        .success()
-        .stdout(predicate::str::contains("对话模式"));
+    info!("Assert: non-zero exit (no API key or config)");
+    assert.failure();
 }
 
 // ────────────────────── boundary: unknown subcommand ──────────────────────
@@ -627,7 +624,5 @@ fn test_config_export_then_import_roundtrip() {
     let assert = c.assert();
 
     info!("Assert: import succeeds");
-    assert
-        .success()
-        .stdout(predicate::str::contains("导入"));
+    assert.success().stdout(predicate::str::contains("导入"));
 }

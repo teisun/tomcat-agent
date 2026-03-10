@@ -28,6 +28,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         max_tokens: Some(10),
         stream: Some(false),
         model_override: None,
+        tools: None,
     };
     tracing::info!("Arrange: 加载 .env，创建 LlmConfig 与 OpenAiProvider、ChatRequest");
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -62,6 +63,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
         max_tokens: Some(5),
         stream: Some(true),
         model_override: None,
+        tools: None,
     };
     tracing::info!(
         "Arrange: 加载 .env，创建 LlmConfig 与 OpenAiProvider、ChatRequest(stream=true)"

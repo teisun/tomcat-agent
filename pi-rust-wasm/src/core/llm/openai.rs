@@ -30,6 +30,8 @@ struct OpenAiRequestBody {
     #[serde(rename = "max_completion_tokens")]
     max_tokens: Option<u32>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
 }
 
 /// OpenAI 兼容 API 的适配器；限流、重试、超时、代理与 fallback 由本实现负责。
@@ -124,6 +126,7 @@ impl OpenAiProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
+            tools: request.tools.clone(),
         };
 
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
@@ -301,6 +304,7 @@ impl LlmProvider for OpenAiProvider {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,
+            tools: request.tools.clone(),
         };
 
         let resp = self.stream_post_once(&self.base_url, &body).await;
@@ -325,15 +329,15 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, AppError> {
-        // 近似：英文约 4 字符/token，中文约 1.5 字符/token，取 3 字符/token 估算。
         let total_chars: usize = messages
             .iter()
             .map(|m| match &m.content {
-                ChatMessageContent::Text(s) => s.chars().count(),
-                ChatMessageContent::Parts(parts) => parts
+                Some(ChatMessageContent::Text(s)) => s.chars().count(),
+                Some(ChatMessageContent::Parts(parts)) => parts
                     .iter()
                     .map(|p| p.text.as_deref().unwrap_or("").chars().count())
                     .sum::<usize>(),
+                None => 0,
             })
             .sum();
         Ok((total_chars / 3).max(1) as u32)
@@ -440,9 +444,7 @@ fn parse_sse_buffer(
             }
             let parsed: OpenAiStreamChunk = serde_json::from_str(data)
                 .map_err(|e| AppError::Llm(format!("解析 SSE 行失败: {}", e)))?;
-            if let Some(evt) = openai_chunk_to_stream_event(parsed) {
-                events.push(evt);
-            }
+            events.extend(openai_chunk_to_stream_events(parsed));
         }
     }
     Ok(Some(events.into_iter()))
@@ -467,23 +469,59 @@ struct OpenAiStreamDelta {
     content: Option<String>,
     #[allow(dead_code)]
     role: Option<String>,
+    tool_calls: Option<Vec<OpenAiStreamToolCallDelta>>,
 }
 
-fn openai_chunk_to_stream_event(chunk: OpenAiStreamChunk) -> Option<StreamEvent> {
-    let choices = chunk.choices?.into_iter().next()?;
-    if let Some(reason) = choices.finish_reason {
-        if !reason.is_empty() {
-            return Some(StreamEvent::FinishReason { reason });
-        }
-    }
-    if let Some(delta) = choices.delta {
+#[derive(serde::Deserialize)]
+struct OpenAiStreamToolCallDelta {
+    index: Option<u32>,
+    id: Option<String>,
+    function: Option<OpenAiStreamFunctionDelta>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiStreamFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
+    let choices = match chunk.choices {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let choice = match choices.into_iter().next() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let mut events = Vec::new();
+
+    if let Some(delta) = choice.delta {
         if let Some(content) = delta.content {
             if !content.is_empty() {
-                return Some(StreamEvent::ContentDelta { delta: content });
+                events.push(StreamEvent::ContentDelta { delta: content });
+            }
+        }
+        if let Some(tool_calls) = delta.tool_calls {
+            for tc in tool_calls {
+                events.push(StreamEvent::ToolCallDelta {
+                    index: tc.index.unwrap_or(0),
+                    id: tc.id,
+                    name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                    arguments_delta: tc.function.and_then(|f| f.arguments),
+                });
             }
         }
     }
-    None
+
+    if let Some(reason) = choice.finish_reason {
+        if !reason.is_empty() {
+            events.push(StreamEvent::FinishReason { reason });
+        }
+    }
+
+    events
 }
 
 #[cfg(test)]
@@ -635,6 +673,7 @@ mod tests {
             max_tokens: Some(10),
             stream: Some(false),
             model_override: None,
+            tools: None,
         };
         println!("[TEST] 过程: 请求体（发往 OpenAI /chat/completions）:");
         if let Ok(json) = serde_json::to_string_pretty(&request) {

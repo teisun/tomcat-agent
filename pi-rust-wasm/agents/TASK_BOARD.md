@@ -119,21 +119,21 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DONE` |
+| **负责人** | Spike |
 | **分支** | `feature/cli-chat` |
 | **阻塞点** | — |
 
 **目标**：实现 `pi-awsm chat`（或无参数默认进入）的交互式对话模式，支持流式渲染、多轮上下文、4 原语/工具调用与用户确认。
 
 **子项**（参考 tasks_details.md T1-P0-011）：
-- [ ] 11.1 对话主循环：读取用户输入、调用 LLM、输出响应；集成 SessionManager 与 LlmProvider
-- [ ] 11.2 流式响应渲染（crossterm/bat 等），逐字或逐块输出
-- [ ] 11.3 Markdown 与代码块高亮（bat/similar 等）
-- [ ] 11.4 多轮对话上下文：从当前会话加载历史、组装消息列表、写入新消息到 JSONL
-- [ ] 11.5 集成 4 原语与工具调用：LLM 返回 tool_calls 时展示并调用 require_user_confirmation/工具执行，结果回传 LLM
-- [ ] 11.6 快捷键：Ctrl+C 中断生成、Ctrl+D 退出、上下箭头历史导航；`--resume` 行为对齐 pi-mono
-- [ ] 11.7 边界验收：会话切换后会话级 LLM/插件配置正确隔离
+- [✓] 11.1 对话主循环：读取用户输入、调用 LLM、输出响应；集成 SessionManager 与 LlmProvider
+- [✓] 11.2 流式响应渲染（syntect），逐字或逐块输出
+- [✓] 11.3 Markdown 与代码块高亮（syntect）
+- [✓] 11.4 多轮对话上下文：从当前会话加载历史、组装消息列表、写入新消息到 JSONL
+- [✓] 11.5 集成 4 原语与工具调用：LLM 返回 tool_calls 时展示并调用 require_user_confirmation/工具执行，结果回传 LLM
+- [✓] 11.6 快捷键：Ctrl+C 中断生成、Ctrl+D 退出、上下箭头历史导航；`--resume` 行为对齐 pi-mono
+- [✓] 11.7 边界验收：会话切换后会话级 LLM/插件配置正确隔离
 
 **依赖**：T1-P0-002 (DONE)、T1-P0-003 (DONE)、T1-P0-004 (DONE)、T1-P0-005 (DONE)、T1-P0-006 (DONE)、TASK-01 (T1-P0-009-completion)、TASK-02 (T1-P0-010-completion)
 

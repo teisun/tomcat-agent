@@ -52,11 +52,41 @@
 | `session list/new/switch/delete/archive/search` | 依赖 SessionManager，空会话列表时提示 |
 | `plugin list/load/unload/enable/disable/info` | 占位，待 T1-P0-009 对接 |
 | `audit list/show/export` | 占位，待 T1-P1-001 对接 |
-| `chat` | 占位，由 chat 角色实现 |
+| `chat [--resume]` | 进入交互式对话模式（流式渲染、多轮上下文、工具调用） |
 
 ---
 
-## 5. 依赖与验收
+## 5. 对话模式 (Chat Mode, T1-P0-011)
 
-- **依赖**：T1-P0-001（infra：AppError、AppConfig、normalize_path、write_file_atomic）、T1-P0-002（事件总线已就绪，本模块未直接使用）。
-- **验收**：T1-P0-003 单测覆盖率 ≥80%；空 store、无 sessions.json、无会话列表行为明确；T1-P0-010 各子命令可执行、边界有提示。
+### 5.1 概述
+
+`pi-awsm chat`（或无参默认）进入交互式对话模式。核心文件：
+- `src/api/chat.rs` — ChatContext、chat_loop、工具调用执行、CliConfirmation
+- `src/api/render.rs` — MarkdownRenderer（流式代码块高亮，基于 syntect）
+
+### 5.2 架构
+
+`run_chat` → `ChatContext::from_config` → `tokio::Runtime::block_on(chat_loop)`。主循环：rustyline 读输入 → `build_context_messages` 组装历史 → `chat_stream` 流式输出（MarkdownRenderer 高亮）→ 工具调用循环（最多 10 轮）→ 写 transcript。
+
+### 5.3 关键设计
+
+- **流式渲染**：消费 `StreamEvent::ContentDelta`，代码块闭合后 syntect 高亮。
+- **多轮上下文**：`build_context_messages(context_cap())` 取最近 N 条。
+- **工具调用**：`ToolCallDelta` 累积后执行 read_file/write_file/edit_file/execute_bash/list_dir；结果以 `role=tool` 回传 LLM。
+- **用户确认**：`CliConfirmation` 实现 `UserConfirmationProvider`（stdin y/N）。
+- **会话隔离**：`effective_model` 优先用 `SessionEntry.model_override`。
+- **快捷键**：Ctrl+C 中断生成，Ctrl+D 退出，↑↓ 历史。
+
+### 5.4 类型变更
+
+- `ChatMessage.content` → `Option<ChatMessageContent>`；新增 `tool_calls`、`tool_call_id`。
+- `ChatMessageRole` 新增 `Tool`。
+- `ChatRequest` 新增 `tools`。
+- `StreamEvent` 新增 `ToolCallDelta`。
+
+---
+
+## 6. 依赖与验收
+
+- **依赖**：T1-P0-001~006、TASK-01、TASK-02。
+- **验收**：`cargo test --lib` 通过；clippy/rustfmt 通过；chat 可流式对话、多轮上下文、工具调用。

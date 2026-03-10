@@ -61,7 +61,11 @@ pub enum Commands {
         sub: AuditSub,
     },
     /// 进入交互式对话模式
-    Chat,
+    Chat {
+        /// 恢复上次会话（默认行为，显式语义）
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -169,7 +173,7 @@ pub enum AuditSub {
 /// 解析参数并执行对应子命令；无子命令时默认执行 chat。
 pub fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
-    let cmd = cli.command.unwrap_or(Commands::Chat);
+    let cmd = cli.command.unwrap_or(Commands::Chat { resume: false });
     match cmd {
         Commands::Init { config } => run_init(&config),
         Commands::Doctor { config } => run_doctor(config.as_deref()),
@@ -177,7 +181,7 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Session { sub } => run_session(sub),
         Commands::Plugin { sub } => run_plugin(sub),
         Commands::Audit { sub } => run_audit(sub),
-        Commands::Chat => run_chat(),
+        Commands::Chat { resume } => run_chat(resume),
     }
 }
 
@@ -807,9 +811,22 @@ pub(crate) fn run_audit(sub: AuditSub) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn run_chat() -> Result<(), AppError> {
-    println!("对话模式由 chat 角色实现，当前为占位。");
-    Ok(())
+pub(crate) fn run_chat(resume: bool) -> Result<(), AppError> {
+    let cfg = load_config(None)?;
+    ensure_work_dir_structure(&cfg)?;
+
+    let ctx = super::chat::ChatContext::from_config(cfg)?;
+
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::Config(format!("创建 tokio 运行时失败: {}", e)))?;
+
+    let cancelled = ctx.cancelled.clone();
+    ctrlc::set_handler(move || {
+        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    })
+    .ok();
+
+    rt.block_on(super::chat::chat_loop(&ctx, resume))
 }
 
 #[cfg(test)]
@@ -931,12 +948,6 @@ mod tests {
     #[test]
     fn run_audit_list_returns_ok() {
         let r = run_audit(AuditSub::List { limit: None });
-        assert!(r.is_ok());
-    }
-
-    #[test]
-    fn run_chat_returns_ok() {
-        let r = run_chat();
         assert!(r.is_ok());
     }
 
