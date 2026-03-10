@@ -50,14 +50,14 @@
 ## 4. 日志查看控制
 
 *   **静默模式（默认）**：直接运行 `cargo test` 时，日志不会打印，除非断言失败；集成测试的 tracing 输出需配合本节的 `--nocapture` 才能实时查看。
-*   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数；**集成测试**建议：`cargo test --test '*' -- --nocapture`（可按需加 `RUST_LOG=debug`），避免误以为未打日志。
+*   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数；**集成测试**建议：`RUST_LOG=pi_awsm=debug,info cargo test --test '*' -- --nocapture`，避免误以为未打日志。
     ```bash
-    cargo test -- --nocapture
-    cargo test --test '*' -- --nocapture
+    RUST_LOG=pi_awsm=debug,info cargo test -- --nocapture
+    RUST_LOG=pi_awsm=debug,info cargo test --test '*' -- --nocapture
     ```
 *   **级别控制**：利用 `RUST_LOG` 环境变量动态调整日志等级：
     ```bash
-    RUST_LOG=debug cargo test --test api_tests -- --nocapture
+    RUST_LOG=pi_awsm=debug,info cargo test --test api_tests -- --nocapture
     ```
 
 ## 5. 断言日志输出 (可选)

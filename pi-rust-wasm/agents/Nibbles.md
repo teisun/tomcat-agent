@@ -32,8 +32,8 @@
 ## 验收标准
 
 本角色自身无"任务验收"，但需保证：
-- 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`cargo test`（全量）。
-- **已按 INTEGRATION_TEST_SPEC 编写/补充集成测试代码**，且 `cargo test --test '*'` 包含并通过集成测试。
+- 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`RUST_LOG=pi_awsm=debug,info cargo test -- --nocapture`（全量）。
+- **已按 INTEGRATION_TEST_SPEC 编写/补充集成测试代码**，且 `RUST_LOG=pi_awsm=debug,info cargo test --test '*' -- --nocapture` 包含并通过集成测试。
 - 验收清单执行通过或问题已记录并指派。
 
 ---
@@ -66,7 +66,7 @@
 
 1. `cargo build` 无错误
 2. `cargo clippy` 无警告（全量规则）
-3. `cargo test` 全部通过
+3. `RUST_LOG=pi_awsm=debug,info cargo test -- --nocapture` 全部通过
 4. 若存在冲突，由 Nibbles 或提交方在本地解决后再推
 
 ### 编写集成测试代码（合并到 develop 之后、全量验收之前）
@@ -75,7 +75,7 @@
 2. **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、第 9/10 章门禁与验收）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
 3. **动作**：针对本次合并引入的模块与场景，在 `tests/` 下建立或更新集成测试文件，仅通过 `pub` API 做黑盒测试。
 4. **Wasm 真实运行时（wasm-plugin 相关合并）**：须包含「Wasm 真实运行时」集成测试。检查项：实现或修改前必须阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 第 24 条**。
-5. **验证**：执行 `cargo test --test '*'`，确认集成测试可编译且通过，再执行全量验收清单。
+5. **验证**：执行 `RUST_LOG=pi_awsm=debug,info cargo test --test '*' -- --nocapture`，确认集成测试可编译且通过，再执行全量验收清单。
 
 **必做检查清单（防止遗漏）**：在执行全量验收前，必须逐项完成并自检：
 
@@ -90,9 +90,9 @@
 
 验收项以 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章门禁与验收清单为准：
 
-1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`cargo test`
+1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`RUST_LOG=pi_awsm=debug,info cargo test -- --nocapture`
 2. **CLI 子命令**：`pi-awsm init`、`pi-awsm doctor`、`pi-awsm config`、`pi-awsm session`、`pi-awsm plugin`、`pi-awsm audit` 可执行且帮助完整
-3. **集成测试（含门禁）**：`cargo test --test '*'` 通过，含日志门禁与鲁棒性集成测试
+3. **集成测试（含门禁）**：`RUST_LOG=pi_awsm=debug,info cargo test --test '*' -- --nocapture` 通过，含日志门禁与鲁棒性集成测试
 4. **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 执行
 5. **对话模式**：`pi-awsm chat` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
 6. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常

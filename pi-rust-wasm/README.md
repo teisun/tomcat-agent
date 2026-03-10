@@ -28,7 +28,7 @@ cargo build --release
 
 ```bash
 # 需要先配置 .env（参考 .env.example）
-cargo test --all -- --test-threads=1
+RUST_LOG=pi_awsm=debug,info cargo test --all -- --nocapture --test-threads=1
 ```
 
 ## 项目结构

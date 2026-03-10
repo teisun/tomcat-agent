@@ -1,5 +1,4 @@
-# PI-AWSM 配置示例
-# 复制为 config.toml 后按需修改，通过 load_config(Some(Path::new("config.toml"))) 加载。
+# PI-AWSM 配置
 # 环境变量 PI_AWSM__*（如 PI_AWSM__LLM__PROXY）会覆盖同名字段。
 
 # ------------------------------------------------------------------------------
@@ -9,10 +8,8 @@
 # level：日志级别。控制输出到 stderr 的日志最低等级。
 # 取值：trace | debug | info | warn | error。用于排查问题时可设为 debug。
 level = "info"
-# file_enabled：是否同时把日志写入文件。true 时写入 file_path，便于事后排查。
+# file_enabled：是否同时把日志写入文件。true 时写入 work_dir/agents/default/logs/，便于事后排查。
 file_enabled = true
-# file_path：日志文件路径。仅当 file_enabled = true 时使用；支持 ~ 表示用户目录。
-file_path = "~/.pi/agent/logs"
 # file_roll_size_mb：单个日志文件最大体积（MB），超过后滚动到新文件。仅 file_enabled 时生效。
 file_roll_size_mb = 10
 
@@ -38,18 +35,20 @@ proxy = "http://127.0.0.1:7890"
 api_base_fallback = "https://api.chatanywhere.tech"
 
 # ------------------------------------------------------------------------------
-# [storage] 存储配置：会话与 transcript 等持久化路径
+# [storage] 存储配置：工作根目录
+# agent 系统子目录（sessions/plugins/tmp/logs/wasm）全部由 work_dir 按架构推导，不可单独配置。
+# 详见 openspec/specs/architecture/work-dir-and-data-layout.md
 # ------------------------------------------------------------------------------
 [storage]
-# sessions_dir：会话数据根目录。会话列表（sessions.json）与各会话 transcript 存放于此；支持 ~。
-sessions_dir = "~/.pi/agent/sessions"
+# work_dir：工作根目录。所有 agent 系统子目录从此推导。默认 ~/.pi_wasm/
+# 可通过环境变量 PI_AWSM__STORAGE__WORK_DIR 覆盖。
+work_dir = "~/.pi_wasm/"
 
 # ------------------------------------------------------------------------------
-# [plugin] 插件配置：插件目录与启动时自动加载列表
+# [plugin] 插件配置：启动时自动加载列表
+# 插件目录由 work_dir 推导为 work_dir/agents/default/plugins
 # ------------------------------------------------------------------------------
 [plugin]
-# plugins_dir：插件根目录。从此目录加载 pi-mono 风格插件（含 manifest 与 Wasm/JS）。
-plugins_dir = "~/.pi/agent/plugins"
 # auto_load：启动时自动加载的插件 ID 列表。空则需手动 load；填如 ["my-plugin"] 则启动即加载。
 auto_load = []
 
@@ -68,11 +67,11 @@ audit_log_retention_days = 90
 enable_plugin_safety_scan = false
 
 # ------------------------------------------------------------------------------
-# [wasm] Wasm 运行时（feature "wasmedge"）：QuickJS wasm 路径
+# [wasm] Wasm 运行时（feature "wasmedge"）
+# quickjs wasm 文件由 work_dir 推导为 work_dir/wasm/wasmedge_quickjs.wasm，
+# 找不到时回退到环境变量 WASMEDGE_QUICKJS_PATH。
 # ------------------------------------------------------------------------------
 [wasm]
-# quickjs_path：wasmedge_quickjs.wasm 路径；支持 ~。空则不从 config 读，回退到环境变量 WASMEDGE_QUICKJS_PATH。环境变量 PI_AWSM__WASM__QUICKJS_PATH 可覆盖此项。
-quickjs_path = "assets/wasm/wasmedge_quickjs.wasm"
 
 # ------------------------------------------------------------------------------
 # [primitive] 4 原语配置：read/write/edit/bash 的审批与自动确认策略

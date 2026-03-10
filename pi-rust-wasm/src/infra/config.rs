@@ -22,24 +22,19 @@ pub enum PermissionLevel {
     Trusted,
 }
 
-/// 日志配置：级别、是否写文件、路径与滚动大小。
+/// 日志配置：级别、是否写文件、滚动大小。日志目录由 [`resolve_log_dir`] 从 work_dir 推导。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
     #[serde(default)]
     pub file_enabled: bool,
-    #[serde(default = "default_log_path")]
-    pub file_path: String,
     #[serde(default = "default_log_roll_size")]
     pub file_roll_size_mb: u64,
 }
 
 fn default_log_level() -> String {
     "info".to_string()
-}
-fn default_log_path() -> String {
-    "pi_awsm.log".to_string()
 }
 fn default_log_roll_size() -> u64 {
     10
@@ -50,7 +45,6 @@ impl Default for LogConfig {
         Self {
             level: default_log_level(),
             file_enabled: false,
-            file_path: default_log_path(),
             file_roll_size_mb: default_log_roll_size(),
         }
     }
@@ -116,46 +110,31 @@ impl Default for LlmConfig {
     }
 }
 
-/// 存储配置：工作根目录、会话目录等。详见 openspec/specs/architecture/work-dir-and-data-layout.md。
+/// 存储配置：仅 work_dir。agent 系统子目录由 resolve 函数从 work_dir 推导。
+/// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
-    /// 工作根目录；默认未设置时由 [`get_work_dir`] 解析为可执行文件目录下的 `.pi_wasm`。支持 `~` 与相对路径。
+    /// 工作根目录；默认 `~/.pi_wasm/`。支持 `~` 与相对路径。
     #[serde(default)]
     pub work_dir: Option<String>,
-    #[serde(default = "default_sessions_dir")]
-    pub sessions_dir: String,
-}
-
-fn default_sessions_dir() -> String {
-    "~/.pi/agent/sessions".to_string()
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self {
-            work_dir: None,
-            sessions_dir: default_sessions_dir(),
-        }
+        Self { work_dir: None }
     }
 }
 
-/// 插件配置：插件目录与启动时自动加载的插件列表。
+/// 插件配置：启动时自动加载的插件列表。插件目录由 [`resolve_plugins_dir`] 从 work_dir 推导。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PluginConfig {
-    #[serde(default = "default_plugins_dir")]
-    pub plugins_dir: String,
     #[serde(default)]
     pub auto_load: Vec<String>,
-}
-
-fn default_plugins_dir() -> String {
-    "~/.pi/agent/plugins".to_string()
 }
 
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            plugins_dir: default_plugins_dir(),
             auto_load: Vec::new(),
         }
     }
@@ -231,13 +210,10 @@ impl Default for SecurityConfig {
     }
 }
 
-/// Wasm 运行时配置：QuickJS wasm 路径等（feature "wasmedge" 时使用）。
+/// Wasm 运行时配置（feature "wasmedge" 时使用）。
+/// quickjs wasm 路径由 [`resolve_quickjs_path`] 从 work_dir 推导，回退到环境变量。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct WasmConfig {
-    /// wasmedge_quickjs.wasm 路径；支持 `~`；空或未设置时 run_script 回退到环境变量 `WASMEDGE_QUICKJS_PATH`。可通过 `PI_AWSM__WASM__QUICKJS_PATH` 覆盖。
-    #[serde(default)]
-    pub quickjs_path: Option<String>,
-}
+pub struct WasmConfig {}
 
 /// 应用顶层配置，聚合 log / llm / storage / plugin / security / primitive / wasm 子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -291,7 +267,7 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
     Ok(merged)
 }
 
-/// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则为可执行文件目录下的 `.pi_wasm`。
+/// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.pi_wasm/`。
 ///
 /// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
 pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -301,11 +277,57 @@ pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
             return normalize_path(s);
         }
     }
-    let exe = std::env::current_exe().map_err(AppError::Io)?;
-    Ok(exe
-        .parent()
-        .map(|d| d.join(".pi_wasm"))
-        .unwrap_or_else(|| PathBuf::from(".pi_wasm")))
+    normalize_path("~/.pi_wasm/")
+}
+
+// ---------------------------------------------------------------------------
+// resolve 函数：从 work_dir 按架构推导 agent 系统子目录
+// ---------------------------------------------------------------------------
+
+/// `work_dir/agents/default/sessions`
+pub fn resolve_sessions_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?
+        .join("agents")
+        .join("default")
+        .join("sessions"))
+}
+
+/// `work_dir/agents/default/plugins`
+pub fn resolve_plugins_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?
+        .join("agents")
+        .join("default")
+        .join("plugins"))
+}
+
+/// `work_dir/agents/default/tmp`
+pub fn resolve_tmp_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?
+        .join("agents")
+        .join("default")
+        .join("tmp"))
+}
+
+/// `work_dir/agents/default/logs`
+pub fn resolve_log_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?
+        .join("agents")
+        .join("default")
+        .join("logs"))
+}
+
+/// 查找 quickjs wasm：`work_dir/wasm/wasmedge_quickjs.wasm` → 环境变量 `WASMEDGE_QUICKJS_PATH`。
+pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
+    if let Ok(work) = get_work_dir(cfg) {
+        let p = work.join("wasm").join("wasmedge_quickjs.wasm");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    std::env::var("WASMEDGE_QUICKJS_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
 }
 
 /// 启动时创建工作根目录及多 agent 子目录（当前仅 agentId=default）。若目录已存在则跳过。

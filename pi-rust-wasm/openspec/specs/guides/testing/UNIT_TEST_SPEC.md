@@ -65,7 +65,7 @@
   info!：记录测试步骤（如：“开始调用 OpenAI API”）。
   debug!：记录原始报文或中间变量。
   error!：记录非预期的捕获异常。
-  查看日志：执行测试时建议使用 cargo test -- --nocapture 以便在开发阶段实时观察执行流。
+  查看日志：执行测试时建议使用 `RUST_LOG=pi_awsm=debug,info cargo test -- --nocapture` 以便在开发阶段实时观察执行流。
 
 
 ---

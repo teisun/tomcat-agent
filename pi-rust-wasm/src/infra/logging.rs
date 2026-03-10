@@ -18,7 +18,8 @@ use super::config::LogConfig;
 /// # Errors
 /// * [`super::error::AppError::Config`] - `cfg.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
 /// * [`super::error::AppError::Io`] - 启用文件输出且无法创建/打开日志文件时返回。
-pub fn init_logging(cfg: &LogConfig) -> Result<(), super::error::AppError> {
+/// `log_dir` — 日志写入目录（由 `resolve_log_dir` 推导），仅 `cfg.file_enabled == true` 时使用。
+pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), super::error::AppError> {
     let level = cfg.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {
         return Err(super::error::AppError::Config(format!(
@@ -33,16 +34,11 @@ pub fn init_logging(cfg: &LogConfig) -> Result<(), super::error::AppError> {
         .with_filter(filter);
 
     let file_layer = if cfg.file_enabled {
-        let path = Path::new(&cfg.file_path);
-        let dir = path.parent().unwrap_or(Path::new("."));
-        let prefix = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("pi_awsm");
+        let dir = log_dir.unwrap_or(Path::new("."));
         let file_appender = RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
             .max_log_files(5_usize)
-            .filename_prefix(prefix)
+            .filename_prefix("pi_awsm")
             .build(dir)
             .map_err(|e| super::error::AppError::Io(std::io::Error::other(e.to_string())))?;
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -83,10 +79,9 @@ mod tests {
         let cfg = LogConfig {
             level: "info".to_string(),
             file_enabled: false,
-            file_path: String::new(),
             ..LogConfig::default()
         };
-        let r = init_logging(&cfg);
+        let r = init_logging(&cfg, None);
         assert!(r.is_ok(), "init_logging(console only) should succeed");
     }
 
@@ -103,7 +98,7 @@ mod tests {
             file_enabled: false,
             ..Default::default()
         };
-        let r = init_logging(&cfg);
+        let r = init_logging(&cfg, None);
         assert!(r.is_err());
     }
 }

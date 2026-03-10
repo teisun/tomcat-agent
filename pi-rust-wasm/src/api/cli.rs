@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ensure_work_dir_structure, load_config, normalize_path, validate_config, write_file_atomic,
-    AppConfig, AppError, DefaultEventBus, DefaultToolRegistry, EventBus, PluginManager,
-    SessionManager, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine,
-    WasmEngineConfig,
+    ensure_work_dir_structure, load_config, normalize_path, resolve_log_dir, resolve_quickjs_path,
+    resolve_sessions_dir, validate_config, write_file_atomic, AppConfig, AppError, DefaultEventBus,
+    DefaultToolRegistry, EventBus, PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
 
-const DEFAULT_CONFIG_PATH: &str = "~/.pi/agent/config.toml";
+const DEFAULT_CONFIG_PATH: &str = "~/.pi_wasm/agent/config.toml";
 
 /// pi-awsm CLI：AI Agent 运行时，支持插件管理、会话、配置、审计与对话模式
 #[derive(Parser, Debug)]
@@ -174,14 +174,28 @@ pub enum AuditSub {
 pub fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
     let cmd = cli.command.unwrap_or(Commands::Chat { resume: false });
+
     match cmd {
-        Commands::Init { config } => run_init(&config),
-        Commands::Doctor { config } => run_doctor(config.as_deref()),
-        Commands::Config { sub } => run_config(sub),
-        Commands::Session { sub } => run_session(sub),
-        Commands::Plugin { sub } => run_plugin(sub),
-        Commands::Audit { sub } => run_audit(sub),
-        Commands::Chat { resume } => run_chat(resume),
+        Commands::Init { config } => return run_init(&config),
+        Commands::Doctor { config } => return run_doctor(config.as_deref()),
+        _ => {}
+    }
+
+    let config_path = normalize_path(DEFAULT_CONFIG_PATH).ok();
+    let cfg = load_config(config_path.as_deref())?;
+    if let Err(e) = validate_config(&cfg) {
+        eprintln!("配置不合法: {}", e);
+        return Ok(());
+    }
+    ensure_work_dir_structure(&cfg)?;
+
+    match cmd {
+        Commands::Config { sub } => run_config(sub, &cfg),
+        Commands::Session { sub } => run_session(sub, &cfg),
+        Commands::Plugin { sub } => run_plugin(sub, &cfg),
+        Commands::Audit { sub } => run_audit(sub, &cfg),
+        Commands::Chat { resume } => run_chat(resume, &cfg),
+        _ => unreachable!(),
     }
 }
 
@@ -228,8 +242,9 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     }
     println!("✓ 配置合法");
 
+    let resolved_qjs = resolve_quickjs_path(&cfg);
     let wasm_cfg = WasmEngineConfig {
-        quickjs_path: cfg.wasm.quickjs_path.clone(),
+        quickjs_path: resolved_qjs.as_ref().and_then(|p| p.to_str()).map(String::from),
         ..Default::default()
     };
     match WasmEngine::global(Some(wasm_cfg)) {
@@ -240,26 +255,13 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
         }
     }
 
-    let quickjs_path = cfg
-        .wasm
-        .quickjs_path
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .map(String::from)
-        .or_else(|| std::env::var("WASMEDGE_QUICKJS_PATH").ok());
-    match quickjs_path {
+    match resolved_qjs {
         Some(p) => {
-            let resolved = normalize_path(&p).unwrap_or_else(|_| PathBuf::from(&p));
-            if resolved.exists() {
-                println!("✓ QuickJS 运行时：可用 ({})", resolved.display());
-            } else {
-                println!("✗ QuickJS wasm 文件不存在: {}", resolved.display());
-                println!("  修复建议：下载 wasmedge_quickjs.wasm 并配置 wasm.quickjs_path 或设置环境变量 WASMEDGE_QUICKJS_PATH");
-            }
+            println!("✓ QuickJS 运行时：可用 ({})", p.display());
         }
         None => {
             println!("✗ QuickJS 路径未配置");
-            println!("  修复建议：下载 wasmedge_quickjs.wasm 并配置 wasm.quickjs_path 或设置环境变量 WASMEDGE_QUICKJS_PATH");
+            println!("  修复建议：下载 wasmedge_quickjs.wasm 到 work_dir/wasm/ 或设置环境变量 WASMEDGE_QUICKJS_PATH");
         }
     }
 
@@ -335,13 +337,12 @@ fn set_toml_key(val: &mut toml::Value, key: &str, raw_value: &str) -> Result<(),
     Ok(())
 }
 
-pub(crate) fn run_config(sub: ConfigSub) -> Result<(), AppError> {
+pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError> {
     match sub {
         ConfigSub::Get { key } => {
-            let cfg = load_config(None)?;
             if let Some(k) = key {
                 let val =
-                    toml::Value::try_from(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+                    toml::Value::try_from(cfg).map_err(|e| AppError::Config(e.to_string()))?;
                 match resolve_toml_key(&val, &k) {
                     Some(v) => println!("{}", v),
                     None => {
@@ -439,9 +440,8 @@ pub(crate) fn run_config(sub: ConfigSub) -> Result<(), AppError> {
             }
         }
         ConfigSub::Export { path } => {
-            let cfg = load_config(None)?;
             let toml_str =
-                toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+                toml::to_string_pretty(cfg).map_err(|e| AppError::Config(e.to_string()))?;
             std::fs::write(&path, toml_str).map_err(AppError::Io)?;
             println!("已导出到 {}", path.display());
         }
@@ -458,10 +458,10 @@ pub(crate) fn run_config(sub: ConfigSub) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn run_session(sub: SessionSub) -> Result<(), AppError> {
-    let cfg = load_config(None)?;
-    ensure_work_dir_structure(&cfg)?;
-    let mgr = SessionManager::from_sessions_dir(&cfg.storage.sessions_dir)?;
+pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppError> {
+    let sessions_path = resolve_sessions_dir(cfg)?;
+    std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
+    let mgr = SessionManager::new(sessions_path);
     match sub {
         SessionSub::List => {
             let list = mgr.list_sessions()?;
@@ -533,9 +533,7 @@ impl ToolExecutor for NoopToolExecutor {
     }
 }
 
-fn build_plugin_context() -> Result<PluginContext, AppError> {
-    let cfg = load_config(None)?;
-    ensure_work_dir_structure(&cfg)?;
+fn build_plugin_context(cfg: &AppConfig) -> Result<PluginContext, AppError> {
     let event_bus: std::sync::Arc<dyn EventBus> = std::sync::Arc::new(DefaultEventBus::new());
     let executor: std::sync::Arc<dyn ToolExecutor> = std::sync::Arc::new(NoopToolExecutor);
     let audit = std::sync::Arc::new(TracingAuditRecorder);
@@ -544,8 +542,9 @@ fn build_plugin_context() -> Result<PluginContext, AppError> {
     let mut pm = PluginManager::new(event_bus);
     pm.set_tool_registry(tool_registry);
 
+    let resolved_qjs = resolve_quickjs_path(cfg);
     let wasm_cfg = WasmEngineConfig {
-        quickjs_path: cfg.wasm.quickjs_path.clone(),
+        quickjs_path: resolved_qjs.and_then(|p| p.to_str().map(String::from)),
         ..Default::default()
     };
     if let Ok(engine) = WasmEngine::global(Some(wasm_cfg)) {
@@ -558,7 +557,7 @@ fn build_plugin_context() -> Result<PluginContext, AppError> {
 
     Ok(PluginContext {
         plugin_manager: pm,
-        config: cfg,
+        config: cfg.clone(),
     })
 }
 
@@ -592,8 +591,8 @@ fn format_plugin_info(info: &crate::PluginInfo) {
     println!("  加载时间:  {}", info.loaded_at);
 }
 
-pub(crate) fn run_plugin(sub: PluginSub) -> Result<(), AppError> {
-    let ctx = build_plugin_context()?;
+pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError> {
+    let ctx = build_plugin_context(cfg)?;
     let pm = &ctx.plugin_manager;
 
     match sub {
@@ -723,6 +722,19 @@ fn parse_audit_line(line: &str, index: usize) -> Option<AuditDisplayEntry> {
     })
 }
 
+fn find_latest_log_file(dir: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .max_by_key(|p| {
+            p.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        })
+}
+
 fn read_audit_entries(
     log_path: &std::path::Path,
     limit: Option<u32>,
@@ -745,17 +757,24 @@ fn read_audit_entries(
     Ok(entries)
 }
 
-pub(crate) fn run_audit(sub: AuditSub) -> Result<(), AppError> {
-    let cfg = load_config(None)?;
+pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> {
     if !cfg.log.file_enabled {
         println!("审计日志功能需要开启文件日志。请在配置中设置 log.file_enabled = true");
         return Ok(());
     }
-    let log_path = normalize_path(&cfg.log.file_path)?;
-    if !log_path.exists() {
-        println!("日志文件不存在: {}，尚无审计记录", log_path.display());
+    let log_dir = resolve_log_dir(cfg)?;
+    if !log_dir.exists() {
+        println!("日志目录不存在: {}，尚无审计记录", log_dir.display());
         return Ok(());
     }
+    let log_path = find_latest_log_file(&log_dir);
+    let log_path = match log_path {
+        Some(p) => p,
+        None => {
+            println!("日志目录 {} 中无日志文件，尚无审计记录", log_dir.display());
+            return Ok(());
+        }
+    };
 
     match sub {
         AuditSub::List { limit } => {
@@ -811,11 +830,8 @@ pub(crate) fn run_audit(sub: AuditSub) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn run_chat(resume: bool) -> Result<(), AppError> {
-    let cfg = load_config(None)?;
-    ensure_work_dir_structure(&cfg)?;
-
-    let ctx = super::chat::ChatContext::from_config(cfg)?;
+pub(crate) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
+    let ctx = super::chat::ChatContext::from_config(cfg.clone())?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| AppError::Config(format!("创建 tokio 运行时失败: {}", e)))?;
@@ -832,6 +848,12 @@ pub(crate) fn run_chat(resume: bool) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_config(dir: &std::path::Path) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(dir.to_str().unwrap().to_string());
+        cfg
+    }
 
     #[test]
     fn cli_parse_init() {
@@ -941,27 +963,36 @@ mod tests {
 
     #[test]
     fn run_plugin_list_returns_ok() {
-        let r = run_plugin(PluginSub::List);
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(PluginSub::List, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_audit_list_returns_ok() {
-        let r = run_audit(AuditSub::List { limit: None });
+        let cfg = AppConfig::default();
+        let r = run_audit(AuditSub::List { limit: None }, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_config_get_with_key_returns_ok() {
-        let r = run_config(ConfigSub::Get {
-            key: Some("log.level".to_string()),
-        });
+        let cfg = AppConfig::default();
+        let r = run_config(
+            ConfigSub::Get {
+                key: Some("log.level".to_string()),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_config_get_without_key_returns_ok() {
-        let r = run_config(ConfigSub::Get { key: None });
+        let cfg = AppConfig::default();
+        let r = run_config(ConfigSub::Get { key: None }, &cfg);
         assert!(r.is_ok());
     }
 
@@ -969,7 +1000,8 @@ mod tests {
     fn run_config_export_writes_file() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.toml");
-        let r = run_config(ConfigSub::Export { path: out.clone() });
+        let cfg = AppConfig::default();
+        let r = run_config(ConfigSub::Export { path: out.clone() }, &cfg);
         assert!(r.is_ok());
         assert!(out.exists());
     }
@@ -980,22 +1012,28 @@ mod tests {
         let path = dir.path().join("import.toml");
         let toml = toml::to_string_pretty(&AppConfig::default()).unwrap();
         std::fs::write(&path, toml).unwrap();
-        let r = run_config(ConfigSub::Import { path });
+        let cfg = AppConfig::default();
+        let r = run_config(ConfigSub::Import { path }, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_config_set_returns_ok() {
-        let r = run_config(ConfigSub::Set {
-            key: "log.level".to_string(),
-            value: "debug".to_string(),
-        });
+        let cfg = AppConfig::default();
+        let r = run_config(
+            ConfigSub::Set {
+                key: "log.level".to_string(),
+                value: "debug".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_config_edit_returns_ok() {
-        let r = run_config(ConfigSub::Edit { config: None });
+        let cfg = AppConfig::default();
+        let r = run_config(ConfigSub::Edit { config: None }, &cfg);
         assert!(r.is_ok());
     }
 
@@ -1005,132 +1043,135 @@ mod tests {
         assert!(r.is_ok());
     }
 
-    fn sessions_dir_from_temp(dir: &tempfile::TempDir) -> String {
-        let path = dir
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|_| dir.path().to_path_buf());
-        path.to_string_lossy().into_owned()
-    }
+    // --- session tests (direct AppConfig, no env vars) ---
 
     #[test]
     fn run_session_list_empty_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::List);
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_session(SessionSub::List, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_new_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::New { cwd: None });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_session(SessionSub::New { cwd: None }, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_list_after_new_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let _ = run_session(SessionSub::New { cwd: None });
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::List);
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let r = run_session(SessionSub::List, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_switch_nonexistent_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::Switch {
-            key: "nonexistent".to_string(),
-        });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_session(
+            SessionSub::Switch {
+                key: "nonexistent".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_switch_existing_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let _ = run_session(SessionSub::New { cwd: None });
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::Switch {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
-        });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let r = run_session(
+            SessionSub::Switch {
+                key: crate::DEFAULT_SESSION_KEY.to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_delete_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let _ = run_session(SessionSub::New { cwd: None });
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::Delete {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
-        });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let r = run_session(
+            SessionSub::Delete {
+                key: crate::DEFAULT_SESSION_KEY.to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok(), "run_session(Delete) failed: {:?}", r);
     }
 
     #[test]
     fn run_session_archive_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let _ = run_session(SessionSub::New { cwd: None });
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::Archive {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
-        });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let r = run_session(
+            SessionSub::Archive {
+                key: crate::DEFAULT_SESSION_KEY.to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_search_empty_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::Search { query: None });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_session(SessionSub::Search { query: None }, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_session_search_with_query_returns_ok() {
-        let _dir = tempfile::tempdir().unwrap();
-        let sessions_dir = sessions_dir_from_temp(&_dir);
-        std::env::set_var("PI_AWSM__STORAGE__SESSIONS_DIR", &sessions_dir);
-        let r = run_session(SessionSub::Search {
-            query: Some("q".to_string()),
-        });
-        std::env::remove_var("PI_AWSM__STORAGE__SESSIONS_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_session(
+            SessionSub::Search {
+                query: Some("q".to_string()),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_audit_show_and_export_returns_ok() {
-        let r = run_audit(AuditSub::Show {
-            id: "id1".to_string(),
-        });
+        let cfg = AppConfig::default();
+        let r = run_audit(
+            AuditSub::Show {
+                id: "id1".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
         let dir = tempfile::tempdir().unwrap();
-        let r2 = run_audit(AuditSub::Export {
-            path: dir.path().join("audit.json"),
-        });
+        let r2 = run_audit(
+            AuditSub::Export {
+                path: dir.path().join("audit.json"),
+            },
+            &cfg,
+        );
         assert!(r2.is_ok());
     }
 
@@ -1221,10 +1262,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
         run_init(config_path.to_str().unwrap()).unwrap();
-        std::env::set_var("PI_AWSM_TEST_CONFIG_PATH", config_path.to_str().unwrap());
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("info") || content.contains("level"));
-        std::env::remove_var("PI_AWSM_TEST_CONFIG_PATH");
     }
 
     #[test]
@@ -1305,47 +1344,80 @@ mod tests {
 
     #[test]
     fn run_plugin_list_returns_ok_with_empty() {
-        let r = run_plugin(PluginSub::List);
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(PluginSub::List, &cfg);
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_plugin_load_nonexistent_returns_ok() {
-        let r = run_plugin(PluginSub::Load {
-            path: "/nonexistent/path/to/plugin".to_string(),
-        });
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(
+            PluginSub::Load {
+                path: "/nonexistent/path/to/plugin".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_plugin_info_not_found_returns_ok() {
-        let r = run_plugin(PluginSub::Info {
-            id: "nonexistent-plugin".to_string(),
-        });
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(
+            PluginSub::Info {
+                id: "nonexistent-plugin".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_plugin_unload_not_found_returns_ok() {
-        let r = run_plugin(PluginSub::Unload {
-            id: "nonexistent-plugin".to_string(),
-        });
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(
+            PluginSub::Unload {
+                id: "nonexistent-plugin".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_plugin_enable_not_found_returns_ok() {
-        let r = run_plugin(PluginSub::Enable {
-            id: "nonexistent-plugin".to_string(),
-        });
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(
+            PluginSub::Enable {
+                id: "nonexistent-plugin".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
     #[test]
     fn run_plugin_disable_not_found_returns_ok() {
-        let r = run_plugin(PluginSub::Disable {
-            id: "nonexistent-plugin".to_string(),
-        });
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        let r = run_plugin(
+            PluginSub::Disable {
+                id: "nonexistent-plugin".to_string(),
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
     }
 
@@ -1353,7 +1425,8 @@ mod tests {
 
     #[test]
     fn run_audit_list_file_disabled_returns_ok() {
-        let r = run_audit(AuditSub::List { limit: None });
+        let cfg = AppConfig::default();
+        let r = run_audit(AuditSub::List { limit: None }, &cfg);
         assert!(r.is_ok());
     }
 

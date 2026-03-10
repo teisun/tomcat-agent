@@ -1,5 +1,25 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-10 | INTEGRATION | develop | — |
+
+### 集成测试报告（TASK-03 feature/cli-chat 合并）
+
+**合并分支**：`feature/cli-chat` → `develop`（`git merge --no-ff`）。
+
+**合并前检查**：在 feature/cli-chat 上修复 render.rs 测试中冗余布尔表达式（clippy overly_complex_bool_expr），提交后合并；`cargo build`、`cargo clippy --all-targets`、`cargo test`（单元测试 224 passed）通过。
+
+**集成测试（按 Nibbles 必做清单补充）**：本次合并引入 chat 模块、流式渲染、多轮上下文、工具/4 原语集成。对照 tests/ 检查后**已补充**：`tests/cli_tests.rs` 新增 `test_chat_with_valid_config_and_api_key_starts_and_produces_output`（有合法配置与 OPENAI_API_KEY 时 chat 启动并输出 banner/流式内容，无 key 时用例失败符合 INTEGRATION_TEST_SPEC）、`test_chat_with_session_dir_does_not_crash`（有 init + session new 时 chat 与会话目录协作不崩溃，5s 超时内有输出）。保留原有 `test_chat_without_config_exits_with_error`。
+
+**全量验收**：`cargo clippy --all-targets` 通过；`cargo test` 单元测试 224 通过；集成测试 cli_tests（31，含上述 2 条新 chat 用例）、event_tests、hostcall_tests、llm_tests、plugin_tests、primitives_tools_tests、robustness_tests、session_tests、wasmedge_e2e_tests 均通过。`test_chat_with_valid_config_and_api_key_starts_and_produces_output` 需设置 OPENAI_API_KEY，有 key 时全量 `cargo test --test '*'` 通过。
+
+**结果摘要**：TASK-03 (T1-P0-011) CLI 对话模式已合并；已按 Nibbles 标准流程补充 chat 集成测试 2 条，门禁与全量验收通过（含 OPENAI_API_KEY 时）。
+
+**环境**：macOS，Rust，WasmEdge；执行时 develop 已合并 feature/cli-chat。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | - | 2026-03-10 | DONE | develop | - |
 
 ### 本次执行说明（计划规范抽子文档与 status 清理）

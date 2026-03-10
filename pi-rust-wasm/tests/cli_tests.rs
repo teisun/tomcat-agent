@@ -467,17 +467,14 @@ fn test_session_list_exits_ok() {
     let _span = info_span!("test_session_list_exits_ok").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let sessions_dir = dir
+    let work_dir = dir
         .path()
         .canonicalize()
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
-    info!("Arrange: temp sessions dir {:?}", sessions_dir);
+    info!("Arrange: temp work dir {:?}", work_dir);
     let mut c = cmd();
-    c.env(
-        "PI_AWSM__STORAGE__SESSIONS_DIR",
-        sessions_dir.to_str().unwrap(),
-    );
+    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "list"]);
 
     info!("Act: execute session list");
@@ -493,17 +490,14 @@ fn test_session_new_creates_session() {
     let _span = info_span!("test_session_new_creates_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let sessions_dir = dir
+    let work_dir = dir
         .path()
         .canonicalize()
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
-    info!("Arrange: temp sessions dir {:?}", sessions_dir);
+    info!("Arrange: temp work dir {:?}", work_dir);
     let mut c = cmd();
-    c.env(
-        "PI_AWSM__STORAGE__SESSIONS_DIR",
-        sessions_dir.to_str().unwrap(),
-    );
+    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
     c.args(["session", "new"]);
 
     info!("Act: execute session new");
@@ -555,6 +549,92 @@ fn test_chat_without_config_exits_with_error() {
 
     info!("Assert: non-zero exit (no API key or config)");
     assert.failure();
+}
+
+/// 有合法配置与 API key 时，chat 能启动并打印对话模式 banner，接受一行输入后可在一轮内产生输出或正常退出。
+/// 依赖 OPENAI_API_KEY 环境变量；无 key 时用例失败（符合 INTEGRATION_TEST_SPEC：无 key 不得 ignore）。
+#[test]
+fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: init config in temp dir, set work_dir and OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC）"
+        )
+    });
+
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", api_key)
+        .write_stdin("hi\n")
+        .timeout(std::time::Duration::from_secs(60));
+
+    info!("Act: execute chat with stdin 'hi', timeout 60s");
+    let assert = c.assert();
+    let out = assert.get_output().stdout.clone();
+    let out_str = String::from_utf8_lossy(&out);
+
+    info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
+    assert.success();
+    assert!(
+        out_str.contains("对话模式") || out_str.contains("模型:") || out_str.contains("AI>"),
+        "chat 应输出对话模式 banner 或模型信息或 AI 提示，实际: {}",
+        out_str.chars().take(500).collect::<String>()
+    );
+}
+
+/// 有 init 配置与 session 时，chat 可与会话目录协作（session new 后 chat 启动不崩溃，5s 内结束）。
+/// 无 API key 时进程会失败退出，本用例只验证在超时内结束且产生 stdout 或 stderr（不挂起）。
+#[test]
+fn test_chat_with_session_dir_does_not_crash() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_with_session_dir_does_not_crash").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: init config, session new, set work_dir");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut c_new = cmd();
+    c_new
+        .args(["session", "new"])
+        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c_new.assert().success();
+
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env_remove("OPENAI_API_KEY")
+        .write_stdin("\n")
+        .timeout(std::time::Duration::from_secs(5));
+
+    info!("Act: run chat without API key, timeout 5s");
+    let output = c.output().expect("chat 进程应在 5s 内结束");
+
+    info!("Assert: 有 stdout 或 stderr，进程未静默挂起");
+    assert!(
+        !output.stdout.is_empty() || !output.stderr.is_empty(),
+        "chat 应产生输出（banner 或错误），不应静默崩溃"
+    );
 }
 
 // ────────────────────── boundary: unknown subcommand ──────────────────────

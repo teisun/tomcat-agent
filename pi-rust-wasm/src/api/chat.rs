@@ -9,9 +9,9 @@ use tokio_stream::StreamExt;
 use crate::infra::error::AppError;
 use crate::infra::{AuditRecorder, TracingAuditRecorder};
 use crate::{
-    AppConfig, ChatMessage, ChatRequest, DefaultPrimitiveExecutor, DefaultToolRegistry,
-    LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry, SessionManager, StreamEvent,
-    Tool, ToolExecutor, ToolRegistry,
+    resolve_sessions_dir, AppConfig, ChatMessage, ChatRequest, DefaultPrimitiveExecutor,
+    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
+    SessionManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -31,7 +31,9 @@ pub struct ChatContext {
 
 impl ChatContext {
     pub fn from_config(config: AppConfig) -> Result<Self, AppError> {
-        let session = SessionManager::from_sessions_dir(&config.storage.sessions_dir)?;
+        let sessions_path = resolve_sessions_dir(&config)?;
+        std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
+        let session = SessionManager::new(sessions_path);
 
         let llm: Box<dyn LlmProvider> = Box::new(OpenAiProvider::new(&config.llm)?);
 
