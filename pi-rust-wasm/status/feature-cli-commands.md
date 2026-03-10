@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-03-10 | DOING | feature/cli-commands | 65.6 |
+| Jerry | 2026-03-10 | DONE | feature/cli-commands | 65.6 |
 
 ### TASK-02 | T1-P0-010-completion | CLI 子命令补完
 

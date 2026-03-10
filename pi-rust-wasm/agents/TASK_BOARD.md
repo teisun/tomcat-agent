@@ -79,7 +79,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `DOING` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `feature/cli-commands` |
 | **阻塞点** | — |
@@ -89,12 +89,12 @@
 **子项**（参考 tasks_details.md T1-P0-010）：
 - [✓] 10.1 CLI 骨架（clap 子命令结构）
 - [✓] 10.2 `pi-awsm init`：引导 LLM 配置、生成配置文件
-- [ ] 10.3 `pi-awsm doctor`：补全 WasmEdge/QuickJS 可用性检测（当前为占位）
-- [ ] 10.4 `pi-awsm config`：补全 set/edit 子命令（当前为占位）
+- [✓] 10.3 `pi-awsm doctor`：补全 WasmEdge/QuickJS 可用性检测
+- [✓] 10.4 `pi-awsm config`：补全 get(key)/set/edit 子命令
 - [✓] 10.5 `pi-awsm session`：list/new/switch/delete/archive/search
-- [ ] 10.6 `pi-awsm plugin`：list/load/unload/enable/disable/info（当前全为占位），依赖 PluginManager
-- [ ] 10.7 `pi-awsm audit`：list/show/export（当前为占位，P0 阶段可先读已有审计日志）
-- [ ] 10.8 完善帮助文档与参数校验
+- [✓] 10.6 `pi-awsm plugin`：list/load/unload/enable/disable/info，对接 PluginManager
+- [✓] 10.7 `pi-awsm audit`：list/show/export，读取 tracing 日志过滤审计记录
+- [✓] 10.8 完善帮助文档与参数校验
 
 **依赖**：TASK-01 (T1-P0-009-completion)
 
