@@ -8,9 +8,10 @@ use futures_util::StreamExt;
 use pi_awsm::{ChatMessage, ChatRequest, LlmConfig, LlmProvider, OpenAiProvider};
 use std::time::Duration;
 
-/// 真实环境：调用 OpenAiProvider::chat 发起一次非流式请求，验证响应结构。
-/// 无 OPENAI_API_KEY 时用例失败（OpenAiProvider::new 返回 Err），不得 ignore。
-/// 超时 60s：依赖挂起时测试快速失败（鲁棒性 2.2）。
+/// [LLM 非流式 chat] 真实 API 调用 OpenAiProvider::chat 返回合法响应
+///
+/// 验证：choices 非空、首条 index=0（超时 60s）
+/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 OPENAI_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
 #[tokio::test]
 async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -42,9 +43,10 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// 真实环境：调用 OpenAiProvider::chat_stream 发起流式请求，验证至少收到流式事件。
-/// 无 OPENAI_API_KEY 时用例失败，不得 ignore。
-/// 超时 60s：依赖挂起时测试快速失败（鲁棒性 2.2）。
+/// [LLM 流式 chat_stream] 真实 API 调用 OpenAiProvider::chat_stream 产生流式事件
+///
+/// 验证：stream 至少产生一个 StreamEvent（超时 60s）
+/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 OPENAI_API_KEY 时用例必须失败
 #[tokio::test]
 async fn test_llm_provider_chat_stream_real_request_yields_events(
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -9,7 +9,10 @@ use pi_awsm::{
 };
 use std::sync::Arc;
 
-/// 契约边界：非法 JSON 必须返回 Err，不得 panic；错误类型为 Plugin 或 Serialize。
+/// [非法 JSON] parse_manifest 遇到非法 JSON 返回 Err 不 panic
+///
+/// 验证：Err(AppError::Plugin(_))，不 panic
+/// 意义：鲁棒性——契约边界，脏数据不能让系统崩溃
 #[test]
 fn test_parse_manifest_malformed_json_returns_err_no_panic() {
     common::setup_logging();
@@ -30,7 +33,10 @@ fn test_parse_manifest_malformed_json_returns_err_no_panic() {
     );
 }
 
-/// 契约边界：缺少必填字段 required_api_version 时返回 Plugin 错误。
+/// [requiredApiVersion 为空] 缺少 requiredApiVersion 时返回 Plugin 错误
+///
+/// 验证：Err(AppError::Plugin(_))
+/// 意义：鲁棒性——必填字段校验，防止加载不兼容插件
 #[test]
 fn test_parse_manifest_missing_required_api_version_returns_plugin_error() {
     common::setup_logging();
@@ -56,7 +62,10 @@ fn test_parse_manifest_missing_required_api_version_returns_plugin_error() {
     assert!(matches!(res, Err(AppError::Plugin(_))));
 }
 
-/// 契约边界：缺少 main 时返回 Plugin 错误。
+/// [main 为空] manifest.main 为空时返回 Plugin 错误
+///
+/// 验证：Err(AppError::Plugin(_))
+/// 意义：鲁棒性——无入口脚本的插件不得加载
 #[test]
 fn test_parse_manifest_missing_main_returns_plugin_error() {
     common::setup_logging();
@@ -78,7 +87,10 @@ fn test_parse_manifest_missing_main_returns_plugin_error() {
     assert!(matches!(res, Err(AppError::Plugin(_))));
 }
 
-/// 资源/状态边界：多次注册与卸载同一插件，无 panic，最终状态一致且 list 为空。
+/// [重复注册卸载 50 次] 多次 register+unload 不 panic、状态一致
+///
+/// 验证：50 轮 register+unload 后 list_loaded 始终在 unload 后为空
+/// 意义：鲁棒性——资源/状态一致性，防止内存泄漏或状态残留
 #[test]
 fn test_plugin_manager_repeated_register_unload_state_consistent(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -134,7 +146,10 @@ fn test_plugin_manager_repeated_register_unload_state_consistent(
     Ok(())
 }
 
-/// 错误分类断言：卸载不存在的插件必须返回 Plugin 错误且消息包含 not found。
+/// [卸载不存在插件] unload_plugin 对不存在 ID 返回 Plugin 错误
+///
+/// 验证：Err(AppError::Plugin(_)) 且信息含"not found"或 plugin_id
+/// 意义：鲁棒性——错误分类断言，确保错误类型准确
 #[test]
 fn test_unload_nonexistent_plugin_returns_plugin_error() {
     common::setup_logging();

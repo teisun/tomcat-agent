@@ -8,6 +8,10 @@ use pi_awsm::{
 };
 use std::sync::Arc;
 
+/// [parse_manifest 合法] 合法 JSON 解析出完整 PluginManifest
+///
+/// 验证：id/name/required_api_version 字段值正确
+/// 意义：TASK-06 插件清单解析——正向路径
 #[test]
 fn test_parse_manifest_valid_json_returns_manifest() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -35,6 +39,10 @@ fn test_parse_manifest_valid_json_returns_manifest() -> Result<(), Box<dyn std::
     Ok(())
 }
 
+/// [parse_manifest id 为空] manifest.id 为空时返回 Plugin 错误
+///
+/// 验证：Err(AppError::Plugin(_))
+/// 意义：TASK-06 插件清单校验——必填字段缺失的边界防护
 #[test]
 fn test_parse_manifest_missing_id_returns_err() {
     common::setup_logging();
@@ -62,6 +70,10 @@ fn test_parse_manifest_missing_id_returns_err() {
     );
 }
 
+/// [PluginManager register + list] 注册插件后 list_loaded 含该插件
+///
+/// 验证：list_loaded 含 "p1"、get_plugin 返回 Some 且 id 正确
+/// 意义：TASK-06 插件管理——注册与查询端到端
 #[test]
 fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

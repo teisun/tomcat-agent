@@ -27,22 +27,28 @@ if [ $SKIP_WASMEDGE -eq 0 ]; then
   fi
 fi
 
+FAIL=0
+
 echo "=== cargo build --release ==="
 cargo build --release
 
 echo "=== cargo test --lib ==="
-cargo test --lib
+cargo test --lib || FAIL=1
 
 echo "=== cargo test 集成测试（不含 wasmedge_e2e_tests）==="
-cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests --test cli_tests
+cargo test --no-fail-fast --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests --test cli_tests || FAIL=1
 
 if [ $SKIP_WASMEDGE -eq 0 ]; then
   echo "=== cargo build（含 WasmEdge）==="
   cargo build
   echo "=== cargo test --test wasmedge_e2e_tests ==="
-  cargo test --test wasmedge_e2e_tests
+  cargo test --no-fail-fast --test wasmedge_e2e_tests || FAIL=1
 else
   echo "跳过 wasmedge 构建与测试（Windows）。"
 fi
 
+if [ $FAIL -ne 0 ]; then
+  echo "=== 存在失败的测试，请查看上方输出 ==="
+  exit 1
+fi
 echo "=== 全量集成测试通过 ==="

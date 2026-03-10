@@ -11,8 +11,10 @@ use std::sync::Arc;
 
 const WASMEDGE_INSTALL_URL: &str = "https://wasmedge.org/docs/start/install";
 
-/// 真实 Wasm 运行时 E2E：创建引擎与实例、注册 host_binding、run_script，断言宿主可调或脚本执行成功。
-/// 环境缺失不允许跳过：未安装 WasmEdge 或 quickjs 路径不可用时用例失败（panic），见 INTEGRATION_TEST_SPEC 5.4。
+/// [WasmEdge 引擎 + 实例] 创建引擎与实例、注册 host_binding、run_script 空脚本成功
+///
+/// 验证：run_script("") 返回 Ok，引擎无崩溃
+/// 意义：WasmEdge E2E 最小可用路径——引擎创建/实例化/host_binding 链路（INTEGRATION_TEST_SPEC 5.4）
 #[test]
 fn test_wasmedge_e2e_engine_instance_run_script() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -68,7 +70,10 @@ fn test_wasmedge_e2e_engine_instance_run_script() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// 真实 .js 脚本 Hello World：用 run_script_file 执行 tests/fixtures/wasmedge_quickjs/hello.js，断言返回 Ok。
+/// [Hello World 文件执行] run_script_file 执行 hello.js 成功
+///
+/// 验证：run_script_file(hello.js) 返回 Ok
+/// 意义：WasmEdge E2E——真实 JS 文件执行链路
 #[test]
 fn test_wasmedge_e2e_hello_world_script_file() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -96,7 +101,10 @@ fn test_wasmedge_e2e_hello_world_script_file() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// 真实 .js 脚本 Hello World：用 run_script 内联执行 print('Hello World');，断言返回 Ok。
+/// [Hello World 内联执行] run_script 内联执行 print('Hello World') 成功
+///
+/// 验证：run_script("print('Hello World');") 返回 Ok
+/// 意义：WasmEdge E2E——内联脚本执行链路
 #[test]
 fn test_wasmedge_e2e_hello_world_inline() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -117,8 +125,10 @@ fn test_wasmedge_e2e_hello_world_inline() -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// 桥接层集成测试：通过 pi_bridge.js 预加载构建的 pi 全局对象调用 4 原语及事件/日志/会话 API。
-/// 断言：pi.readFile/writeFile/editFile/exec 各触发 1 次 hostCall（共 ≥ 4），pi.on/pi.log/pi.session 不崩溃。
+/// [桥接层 pi 全局对象] pi.readFile/writeFile/editFile/exec 各触发 hostCall
+///
+/// 验证：4 原语触发 ≥4 次 host 调用
+/// 意义：WasmEdge E2E——pi_bridge.js 桥接层 4 原语完整链路
 #[test]
 fn test_wasmedge_e2e_bridge_layer() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -161,10 +171,10 @@ fn test_wasmedge_e2e_bridge_layer() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// 事件分发集成测试：宿主通过 dispatch_event 向插件脚本分发事件，
-/// 验证 pi.on 注册的 handler 被触发、ctx 代理对象的动态方法（isIdle/hasPendingMessages/
-/// getSystemPrompt/getContextUsage/compact/ui.notify）均触发 hostCall。
-/// 断言：events.subscribe 1 + context.* 至少 6 + agent.log 1 = 总计 ≥ 8 次 hostCall。
+/// [事件分发 dispatch_event] 宿主向插件分发事件，ctx 代理方法均触发 hostCall
+///
+/// 验证：hostCall 总次数 ≥8（subscribe+isIdle+hasPending+getSystemPrompt+getContextUsage+compact+uiNotify+log）
+/// 意义：WasmEdge E2E——事件分发与 ctx 代理对象完整链路
 #[test]
 fn test_wasmedge_e2e_event_dispatch() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -219,8 +229,10 @@ fn test_wasmedge_e2e_event_dispatch() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// 4 原语 .js 测试：执行 primitives_test.js，须断言宿主侧 4 次 host 调用（readFile/writeFile/editFile/executeBash 各 1 次）。
-/// 符合 INTEGRATION_TEST_SPEC 5.4：断言 host_call 被调用、返回符合预期；不得降低断言或改为可选校验（Constitution 第 24 条）。
+/// [4 原语 JS 脚本] primitives_test.js 触发 readFile/writeFile/editFile/executeBash 各 1 次
+///
+/// 验证：hostCall 计数 ≥4
+/// 意义：WasmEdge E2E——JS 侧 4 原语调用完整链路（INTEGRATION_TEST_SPEC 5.4）
 #[test]
 fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -265,8 +277,10 @@ fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// 插件完整加载流程 E2E：通过 PluginManager::load_plugin(plugin_dir) 从磁盘加载含 manifest + main 的插件目录，
-/// 使用真实 WasmEngine，断言加载成功后 list_loaded 含该插件、get_plugin 返回正确信息；符合 Nibbles 与 INTEGRATION_TEST_SPEC 5.4。
+/// [插件完整加载] load_plugin 从磁盘加载插件后 list_loaded 含该插件
+///
+/// 验证：load_plugin 成功、list_loaded 含 id、get_plugin 返回 Some；unload 后为空
+/// 意义：WasmEdge E2E——插件从磁盘加载到卸载的完整生命周期（Nibbles + INTEGRATION_TEST_SPEC 5.4）
 #[test]
 fn test_wasmedge_e2e_load_plugin_from_disk_succeeds() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

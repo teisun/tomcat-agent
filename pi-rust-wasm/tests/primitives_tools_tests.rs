@@ -5,7 +5,8 @@ mod common;
 
 use pi_awsm::{
     AllowAllConfirmation, DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation,
-    PrimitiveConfig, PrimitiveExecutor, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder,
+    EditOperation, EditOperationType, PrimitiveConfig, PrimitiveExecutor, Tool, ToolExecutor,
+    ToolRegistry, TracingAuditRecorder,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -39,6 +40,10 @@ fn make_tool(name: &str, plugin_id: &str) -> Tool {
 
 // ---------- ToolRegistry 集成测试 ----------
 
+/// [ToolRegistry CRUD] 注册工具后 list_tools 含该工具、call_tool 可调用
+///
+/// 验证：list_tools 非空、call_tool 返回 content+details 结构
+/// 意义：TASK-04 006 工具注册中心——注册、发现、调用端到端
 #[tokio::test]
 async fn test_tool_registry_register_list_and_call_returns_ok(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -65,6 +70,10 @@ async fn test_tool_registry_register_list_and_call_returns_ok(
     Ok(())
 }
 
+/// [ToolRegistry 卸载] unregister_plugin_tools 移除指定插件全部工具
+///
+/// 验证：卸载 p1 后 get_tool(a)/(b) 返回 Err，p2 的 c 仍在
+/// 意义：TASK-04 006——插件卸载时工具批量释放，不影响其他插件
 #[tokio::test]
 async fn test_tool_registry_unregister_plugin_tools_removes_all(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -104,6 +113,10 @@ fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
     c
 }
 
+/// [read_file 白名单内] 白名单内路径可正常读取文件内容
+///
+/// 验证：read_file 返回写入的内容 "hello"
+/// 意义：TASK-03 005 read_file 正向路径——白名单机制允许合法读取
 #[tokio::test]
 async fn test_primitive_executor_read_file_in_whitelist_succeeds(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -135,6 +148,10 @@ async fn test_primitive_executor_read_file_in_whitelist_succeeds(
     Ok(())
 }
 
+/// [read_file 白名单外] 白名单外路径返回 Permission 错误
+///
+/// 验证：read_file 返回 Err 且信息含"白名单"或"Permission"
+/// 意义：TASK-03 005 安全边界——非法路径被拦截，不得静默成功
 #[tokio::test]
 async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permission_error(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -164,6 +181,10 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
     Ok(())
 }
 
+/// [write_file 用户确认] AllowAllConfirmation + 白名单内路径可写入文件
+///
+/// 验证：write_file 成功且文件内容一致
+/// 意义：TASK-03 005 write_file 正向路径——确认策略与白名单联合验证
 #[tokio::test]
 async fn test_primitive_executor_write_file_with_allow_all_succeeds(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -193,6 +214,10 @@ async fn test_primitive_executor_write_file_with_allow_all_succeeds(
     Ok(())
 }
 
+/// [write_file 用户拒绝] DenyAllConfirmation 时写入被拒绝
+///
+/// 验证：write_file 返回 Err 且信息含"确认"/"Permission"/"denied"
+/// 意义：TASK-03 005 安全边界——用户拒绝时写入操作不执行
 #[tokio::test]
 async fn test_primitive_executor_write_file_user_denied_returns_permission_error(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -229,5 +254,93 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
         err
     );
     tracing::info!("Assert: 返回用户拒绝确认相关错误（鲁棒性：用户拒绝）");
+    Ok(())
+}
+
+/// [edit_file 替换] 白名单内编辑文件替换指定内容成功
+///
+/// 验证：edit_file(Replace) 后文件内容被正确替换
+/// 意义：TASK-03 005 edit_file 正向路径——编辑操作端到端
+#[tokio::test]
+async fn test_primitive_executor_edit_file_replaces_content(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span =
+        tracing::info_span!("test_primitive_executor_edit_file_replaces_content").entered();
+
+    let tmp = TempDir::new()?;
+    let canonical_dir = tmp.path().canonicalize()?;
+    let config = temp_whitelist_config(&canonical_dir);
+    let executor = DefaultPrimitiveExecutor::new(
+        config,
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+    );
+
+    let file_path = canonical_dir.join("edit_target.txt");
+    std::fs::write(&file_path, "hello world")?;
+    let path_str = file_path.to_string_lossy().to_string();
+
+    tracing::info!("Arrange: 白名单临时目录、写入 edit_target.txt='hello world'");
+    let edits = vec![EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: None,
+        end_line: None,
+        old_content: Some("hello".to_string()),
+        new_content: "goodbye".to_string(),
+    }];
+    let result = executor
+        .edit_file(&path_str, edits, "test_plugin")
+        .await?;
+    tracing::info!("Act: edit_file(Replace, 'hello' -> 'goodbye')");
+
+    assert!(result.applied, "edit_file 应返回 applied=true");
+    let content = std::fs::read_to_string(&file_path)?;
+    assert!(
+        content.contains("goodbye"),
+        "编辑后文件应含 'goodbye'，实际: {}",
+        content
+    );
+    tracing::info!("Assert: 文件内容已替换");
+    Ok(())
+}
+
+/// [execute_bash echo] 白名单目录内执行 echo 命令返回输出
+///
+/// 验证：execute_bash 成功且 stdout 包含 "hello"
+/// 意义：TASK-03 005 execute_bash 正向路径——命令执行端到端
+#[tokio::test]
+async fn test_primitive_executor_execute_bash_echo_succeeds(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span =
+        tracing::info_span!("test_primitive_executor_execute_bash_echo_succeeds").entered();
+
+    let tmp = TempDir::new()?;
+    let canonical_dir = tmp.path().canonicalize()?;
+    let config = temp_whitelist_config(&canonical_dir);
+    let executor = DefaultPrimitiveExecutor::new(
+        config,
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+    );
+
+    tracing::info!("Arrange: 白名单临时目录");
+    let result = executor
+        .execute_bash(
+            "echo hello",
+            Some(canonical_dir.to_str().unwrap()),
+            "test_plugin",
+        )
+        .await?;
+    tracing::info!("Act: execute_bash('echo hello')");
+
+    assert_eq!(result.exit_code, 0, "echo 应以 exit_code=0 退出");
+    assert!(
+        result.stdout.contains("hello"),
+        "stdout 应包含 'hello'，实际: {}",
+        result.stdout
+    );
+    tracing::info!("Assert: exit_code=0, stdout 含 'hello'");
     Ok(())
 }

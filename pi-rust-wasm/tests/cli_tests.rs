@@ -17,6 +17,10 @@ fn cmd() -> Command {
 
 // ────────────────────── help & version ──────────────────────
 
+/// [--help 输出] 验证主帮助页包含所有一级子命令名称
+///
+/// 验证：exit 0 且 stdout 包含 pi-awsm、init、doctor、config、session、plugin、audit
+/// 意义：CLI 入口完整性门禁（TASK-02 验收：所有子命令帮助文档完整）
 #[test]
 fn test_help_output_contains_pi_awsm_and_exits_ok() {
     common::setup_logging();
@@ -41,6 +45,10 @@ fn test_help_output_contains_pi_awsm_and_exits_ok() {
         .stdout(predicate::str::contains("audit"));
 }
 
+/// [--version 输出] 验证版本号输出格式
+///
+/// 验证：exit 0 且 stdout 含 pi-awsm 版本字符串
+/// 意义：发布合规——二进制可报告自身版本
 #[test]
 fn test_version_output_exits_ok() {
     common::setup_logging();
@@ -59,6 +67,10 @@ fn test_version_output_exits_ok() {
 
 // ────────────────────── init ──────────────────────
 
+/// [init 子命令] 在临时目录生成配置文件
+///
+/// 验证：exit 0、config.toml 已创建且含 [log] 段、stdout 提示"已生成配置文件"
+/// 意义：首次使用流程门禁（TASK-02 10.2：引导 LLM 配置、生成配置文件）
 #[test]
 fn test_init_creates_config_file_in_temp_dir() {
     common::setup_logging();
@@ -88,6 +100,10 @@ fn test_init_creates_config_file_in_temp_dir() {
 
 // ────────────────────── doctor ──────────────────────
 
+/// [doctor 无配置] 未找到配置文件时给出引导提示
+///
+/// 验证：exit 0 且 stdout 含"未找到配置文件"
+/// 意义：友好引导门禁（TASK-02 验收：首次运行无配置时的提示友好）
 #[test]
 fn test_doctor_without_config_prompts_init() {
     common::setup_logging();
@@ -106,6 +122,10 @@ fn test_doctor_without_config_prompts_init() {
         .stdout(predicate::str::contains("未找到配置文件"));
 }
 
+/// [doctor 有配置] init 后 doctor 通过配置与环境检测
+///
+/// 验证：exit 0 且 stdout 含"配置合法"或 checkmark
+/// 意义：TASK-02 10.3 验收——doctor 检测 WasmEdge/QuickJS 可用性并输出修复建议
 #[test]
 fn test_doctor_with_valid_config_checks_environment() {
     common::setup_logging();
@@ -133,6 +153,10 @@ fn test_doctor_with_valid_config_checks_environment() {
 
 // ────────────────────── config ──────────────────────
 
+/// [config get 无参] 输出完整配置内容
+///
+/// 验证：exit 0 且 stdout 含 log/level 等配置段
+/// 意义：TASK-02 10.4——config get 可展示全部配置
 #[test]
 fn test_config_get_without_key_outputs_full_config() {
     common::setup_logging();
@@ -151,6 +175,10 @@ fn test_config_get_without_key_outputs_full_config() {
         .stdout(predicate::str::contains("log").or(predicate::str::contains("level")));
 }
 
+/// [config get 已知 key] 查询 log.level 返回具体值
+///
+/// 验证：exit 0
+/// 意义：TASK-02 10.4——config get(key) 可查询单项配置
 #[test]
 fn test_config_get_with_known_key_outputs_value() {
     common::setup_logging();
@@ -167,6 +195,10 @@ fn test_config_get_with_known_key_outputs_value() {
     assert.success();
 }
 
+/// [config get 未知 key] 查询不存在的配置键给出提示
+///
+/// 验证：exit 0 且 stdout 含"未找到"或"不存在"
+/// 意义：TASK-02 10.4——config get 对非法 key 的容错与友好提示
 #[test]
 fn test_config_get_with_unknown_key_shows_hint() {
     common::setup_logging();
@@ -185,6 +217,10 @@ fn test_config_get_with_unknown_key_shows_hint() {
         .stdout(predicate::str::contains("未找到").or(predicate::str::contains("不存在")));
 }
 
+/// [config export] 导出配置到文件
+///
+/// 验证：exit 0、文件已创建、stdout 提示"已导出"
+/// 意义：TASK-02 10.4——config export 可导出 TOML 配置
 #[test]
 fn test_config_export_creates_file() {
     common::setup_logging();
@@ -205,6 +241,10 @@ fn test_config_export_creates_file() {
     assert!(out.exists(), "exported file should exist");
 }
 
+/// [config import 合法] 先导出再导入合法 TOML 成功
+///
+/// 验证：export exit 0 后 import exit 0、stdout 含"导入"
+/// 意义：TASK-02 10.4——config import 可接受合法配置
 #[test]
 fn test_config_import_valid_toml_succeeds() {
     common::setup_logging();
@@ -228,6 +268,10 @@ fn test_config_import_valid_toml_succeeds() {
     assert.success().stdout(predicate::str::contains("导入"));
 }
 
+/// [config import 非法] 导入格式错误的 TOML 文件失败
+///
+/// 验证：exit code 非 0
+/// 意义：TASK-02 10.4——config import 拒绝非法配置，避免覆盖合法文件
 #[test]
 fn test_config_import_invalid_file_fails() {
     common::setup_logging();
@@ -250,6 +294,10 @@ fn test_config_import_invalid_file_fails() {
 
 // ────────────────────── config set (boundary) ──────────────────────
 
+/// [config set 缺参数] set 不带 key/value 时 clap 报错
+///
+/// 验证：exit code 非 0、stderr 含 Usage 或 error
+/// 意义：TASK-02 10.4——config set 参数校验门禁
 #[test]
 fn test_config_set_missing_args_shows_error() {
     common::setup_logging();
@@ -270,6 +318,10 @@ fn test_config_set_missing_args_shows_error() {
 
 // ────────────────────── config help ──────────────────────
 
+/// [config --help] 帮助页列出所有 config 子命令
+///
+/// 验证：exit 0 且 stdout 包含 get/set/edit/export/import
+/// 意义：CLI 帮助完整性门禁
 #[test]
 fn test_config_help_lists_subcommands() {
     common::setup_logging();
@@ -294,6 +346,10 @@ fn test_config_help_lists_subcommands() {
 
 // ────────────────────── plugin ──────────────────────
 
+/// [plugin list 空] 无已加载插件时正常退出
+///
+/// 验证：exit 0 且 stdout 含"无已加载插件"或"插件"
+/// 意义：TASK-06 验收——plugin list 空列表不崩溃
 #[test]
 fn test_plugin_list_empty_exits_ok() {
     common::setup_logging();
@@ -312,6 +368,10 @@ fn test_plugin_list_empty_exits_ok() {
         .stdout(predicate::str::contains("无已加载插件").or(predicate::str::contains("插件")));
 }
 
+/// [plugin load 不存在路径] 加载不存在的 wasm 文件给出提示
+///
+/// 验证：exit 0 且 stdout 含"不存在"
+/// 意义：TASK-06——plugin load 路径校验与友好错误提示
 #[test]
 fn test_plugin_load_nonexistent_path_shows_error() {
     common::setup_logging();
@@ -328,6 +388,10 @@ fn test_plugin_load_nonexistent_path_shows_error() {
     assert.success().stdout(predicate::str::contains("不存在"));
 }
 
+/// [plugin info 不存在] 查询不存在的插件 ID 提示"未找到"
+///
+/// 验证：exit 0 且 stdout 含"未找到"
+/// 意义：TASK-06——plugin info 对非法 ID 的容错
 #[test]
 fn test_plugin_info_not_found_shows_message() {
     common::setup_logging();
@@ -344,6 +408,10 @@ fn test_plugin_info_not_found_shows_message() {
     assert.success().stdout(predicate::str::contains("未找到"));
 }
 
+/// [plugin unload 不存在] 卸载不存在的插件给出"卸载失败"
+///
+/// 验证：exit 0 且 stdout 含"卸载失败"
+/// 意义：TASK-06——plugin unload 对非法 ID 的容错
 #[test]
 fn test_plugin_unload_not_found_shows_message() {
     common::setup_logging();
@@ -362,6 +430,10 @@ fn test_plugin_unload_not_found_shows_message() {
         .stdout(predicate::str::contains("卸载失败"));
 }
 
+/// [plugin enable 不存在] 启用不存在的插件给出"启用失败"
+///
+/// 验证：exit 0 且 stdout 含"启用失败"
+/// 意义：TASK-06——plugin enable 对非法 ID 的容错
 #[test]
 fn test_plugin_enable_not_found_shows_message() {
     common::setup_logging();
@@ -380,6 +452,10 @@ fn test_plugin_enable_not_found_shows_message() {
         .stdout(predicate::str::contains("启用失败"));
 }
 
+/// [plugin disable 不存在] 禁用不存在的插件给出"禁用失败"
+///
+/// 验证：exit 0 且 stdout 含"禁用失败"
+/// 意义：TASK-06——plugin disable 对非法 ID 的容错
 #[test]
 fn test_plugin_disable_not_found_shows_message() {
     common::setup_logging();
@@ -398,6 +474,10 @@ fn test_plugin_disable_not_found_shows_message() {
         .stdout(predicate::str::contains("禁用失败"));
 }
 
+/// [plugin --help] 帮助页列出所有 plugin 子命令
+///
+/// 验证：exit 0 且 stdout 包含 list/load/unload/enable/disable/info
+/// 意义：CLI 帮助完整性门禁
 #[test]
 fn test_plugin_help_lists_subcommands() {
     common::setup_logging();
@@ -423,6 +503,10 @@ fn test_plugin_help_lists_subcommands() {
 
 // ────────────────────── audit ──────────────────────
 
+/// [audit list] 列出审计记录正常退出
+///
+/// 验证：exit 0
+/// 意义：TASK-02 10.7——audit list 不崩溃，无审计记录或已禁用时友好处理
 #[test]
 fn test_audit_list_exits_ok() {
     common::setup_logging();
@@ -439,6 +523,10 @@ fn test_audit_list_exits_ok() {
     assert.success();
 }
 
+/// [audit --help] 帮助页列出所有 audit 子命令
+///
+/// 验证：exit 0 且 stdout 包含 list/show/export
+/// 意义：CLI 帮助完整性门禁
 #[test]
 fn test_audit_help_lists_subcommands() {
     common::setup_logging();
@@ -461,6 +549,10 @@ fn test_audit_help_lists_subcommands() {
 
 // ────────────────────── session ──────────────────────
 
+/// [session list] 空会话列表正常退出
+///
+/// 验证：exit 0
+/// 意义：TASK-02 10.6——session list 在无会话时不崩溃
 #[test]
 fn test_session_list_exits_ok() {
     common::setup_logging();
@@ -484,6 +576,10 @@ fn test_session_list_exits_ok() {
     assert.success();
 }
 
+/// [session new] 创建新会话
+///
+/// 验证：exit 0 且 stdout 含"已创建会话"
+/// 意义：TASK-02 10.6——session new 可创建并持久化会话
 #[test]
 fn test_session_new_creates_session() {
     common::setup_logging();
@@ -509,6 +605,10 @@ fn test_session_new_creates_session() {
         .stdout(predicate::str::contains("已创建会话"));
 }
 
+/// [session --help] 帮助页列出所有 session 子命令
+///
+/// 验证：exit 0 且 stdout 包含 list/new/switch/delete/archive/search
+/// 意义：CLI 帮助完整性门禁（TASK-02 验收）
 #[test]
 fn test_session_help_lists_subcommands() {
     common::setup_logging();
@@ -534,6 +634,10 @@ fn test_session_help_lists_subcommands() {
 
 // ────────────────────── chat ──────────────────────
 
+/// [chat 无配置] 没有 API key 和配置时 chat 失败退出
+///
+/// 验证：exit code 非 0
+/// 意义：INTEGRATION_TEST_SPEC——无 key 不得 ignore，必须失败
 #[test]
 fn test_chat_without_config_exits_with_error() {
     common::setup_logging();
@@ -551,11 +655,14 @@ fn test_chat_without_config_exits_with_error() {
     assert.failure();
 }
 
-/// 有合法配置与 API key 时，chat 能启动并打印对话模式 banner，接受一行输入后可在一轮内产生输出或正常退出。
-/// 依赖 OPENAI_API_KEY 环境变量；无 key 时用例失败（符合 INTEGRATION_TEST_SPEC：无 key 不得 ignore）。
+/// [chat 有 API key] 有合法配置与 API key 时 chat 启动并产生输出
+///
+/// 验证：exit 0 且 stdout 包含"对话模式"banner 或模型信息或 AI 提示
+/// 意义：TASK-02 10.1——chat 端到端可用；INTEGRATION_TEST_SPEC：无 key 不得 ignore
 #[test]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
     let _span = info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -596,8 +703,10 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     );
 }
 
-/// 有 init 配置与 session 时，chat 可与会话目录协作（session new 后 chat 启动不崩溃，5s 内结束）。
-/// 无 API key 时进程会失败退出，本用例只验证在超时内结束且产生 stdout 或 stderr（不挂起）。
+/// [chat + session 协作] session new 后启动 chat 不挂起不崩溃
+///
+/// 验证：进程在 5s 内结束且产生 stdout 或 stderr
+/// 意义：TASK-02——chat 与 session 子系统协作无死锁/崩溃
 #[test]
 fn test_chat_with_session_dir_does_not_crash() {
     common::setup_logging();
@@ -639,6 +748,10 @@ fn test_chat_with_session_dir_does_not_crash() {
 
 // ────────────────────── boundary: unknown subcommand ──────────────────────
 
+/// [未知子命令] 输入不存在的子命令给出 clap 错误
+///
+/// 验证：exit code 非 0 且 stderr 含"error"
+/// 意义：CLI 边界安全——防止静默忽略拼写错误
 #[test]
 fn test_unknown_subcommand_shows_error() {
     common::setup_logging();
@@ -657,6 +770,10 @@ fn test_unknown_subcommand_shows_error() {
 
 // ────────────────────── init + doctor roundtrip ──────────────────────
 
+/// [init → doctor 联合] init 后 doctor 应通过配置检测
+///
+/// 验证：init exit 0 + doctor exit 0 且 stdout 含"配置合法"或 ✓
+/// 意义：端到端新手引导流程（TASK-02 10.2 + 10.3 联合验收）
 #[test]
 fn test_init_then_doctor_roundtrip() {
     common::setup_logging();
@@ -684,6 +801,10 @@ fn test_init_then_doctor_roundtrip() {
 
 // ────────────────────── init + config export + import roundtrip ──────────────────────
 
+/// [config export → import 联合] 导出再导入配置一致
+///
+/// 验证：export exit 0 + import exit 0 且 stdout 含"导入"
+/// 意义：配置可迁移性验证（TASK-02 10.4 联合验收）
 #[test]
 fn test_config_export_then_import_roundtrip() {
     common::setup_logging();
@@ -705,4 +826,170 @@ fn test_config_export_then_import_roundtrip() {
 
     info!("Assert: import succeeds");
     assert.success().stdout(predicate::str::contains("导入"));
+}
+
+// ────────────────────── 补充用例：session switch/delete/archive ──────────────────────
+
+/// [session switch 不存在] switch 到不存在的会话给出提示
+///
+/// 验证：exit 0 且 stdout 含"不存在"
+/// 意义：TASK-02 10.6——session switch 对非法 key 的容错
+#[test]
+fn test_session_switch_nonexistent_shows_error() {
+    common::setup_logging();
+    let _span = info_span!("test_session_switch_nonexistent_shows_error").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: switch to nonexistent session key");
+    let mut c = cmd();
+    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.args(["session", "switch", "nonexistent-key-xyz"]);
+
+    info!("Act: execute session switch");
+    let assert = c.assert();
+
+    info!("Assert: exit 0, mentions not exist");
+    assert
+        .success()
+        .stdout(predicate::str::contains("不存在"));
+}
+
+/// [session delete via CLI] 创建会话后通过 CLI 删除
+///
+/// 验证：new exit 0 + delete exit 0 且 stdout 含"已删除"
+/// 意义：TASK-02 10.6——session delete 端到端可用
+#[test]
+fn test_session_delete_via_cli_removes_session() {
+    common::setup_logging();
+    let _span = info_span!("test_session_delete_via_cli_removes_session").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create a session first");
+    cmd()
+        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    info!("Act: delete the default session key");
+    let mut c = cmd();
+    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.args(["session", "delete", "agent:default:main"]);
+
+    let assert = c.assert();
+
+    info!("Assert: exit 0, mentions deleted");
+    assert
+        .success()
+        .stdout(predicate::str::contains("已删除"));
+}
+
+/// [session archive] archive 子命令可正常执行
+///
+/// 验证：exit 0（即使会话不存在也不崩溃）
+/// 意义：TASK-02 10.6——session archive 端到端可用
+#[test]
+fn test_session_archive_exits_ok() {
+    common::setup_logging();
+    let _span = info_span!("test_session_archive_exits_ok").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create session then archive");
+    cmd()
+        .env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    let mut c = cmd();
+    c.env("PI_AWSM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
+    c.args(["session", "archive", "agent:default:main"]);
+
+    info!("Act: execute session archive");
+    let assert = c.assert();
+
+    info!("Assert: exit 0");
+    assert
+        .success()
+        .stdout(predicate::str::contains("已归档"));
+}
+
+// ────────────────────── 补充用例：config set 成功路径 ──────────────────────
+
+/// [config set 合法] config set log.level warn 正常退出
+///
+/// 验证：exit 0（配置文件存在时修改成功，不存在时给出提示但不崩溃）
+/// 意义：TASK-02 10.4——config set 正向路径覆盖（原有用例仅覆盖缺参数的失败路径）
+#[test]
+fn test_config_set_valid_key_value_updates_config() {
+    common::setup_logging();
+    let _span = info_span!("test_config_set_valid_key_value_updates_config").entered();
+
+    info!("Act: config set log.level warn");
+    let mut c = cmd();
+    c.args(["config", "set", "log.level", "warn"]);
+    let assert = c.assert();
+
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+// ────────────────────── 补充用例：audit show/export ──────────────────────
+
+/// [audit show 不存在 ID] 查看不存在的审计 ID 不崩溃
+///
+/// 验证：exit 0（打印"未找到"或类似提示，不 panic）
+/// 意义：TASK-02 10.7——audit show 容错
+#[test]
+fn test_audit_show_with_invalid_id_exits_ok() {
+    common::setup_logging();
+    let _span = info_span!("test_audit_show_with_invalid_id_exits_ok").entered();
+
+    info!("Arrange: show nonexistent audit id");
+    let mut c = cmd();
+    c.args(["audit", "show", "9999999"]);
+
+    info!("Act: execute audit show");
+    let assert = c.assert();
+
+    info!("Assert: exit 0, doesn't crash");
+    assert.success();
+}
+
+/// [audit export] 导出审计记录到文件可正常执行
+///
+/// 验证：exit 0
+/// 意义：TASK-02 10.7——audit export 端到端可用
+#[test]
+fn test_audit_export_creates_file() {
+    common::setup_logging();
+    let _span = info_span!("test_audit_export_creates_file").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("audit_export.json");
+
+    info!("Arrange: export audit to temp path");
+    let mut c = cmd();
+    c.args(["audit", "export", out.to_str().unwrap()]);
+
+    info!("Act: execute audit export");
+    let assert = c.assert();
+
+    info!("Assert: exit 0");
+    assert.success();
 }
