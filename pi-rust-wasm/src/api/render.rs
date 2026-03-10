@@ -178,6 +178,6 @@ mod tests {
         r.push("partial");
         assert!(r.take_ready().is_some());
         let flushed = r.flush();
-        assert!(flushed.is_none() || flushed.unwrap().is_empty() || true);
+        assert!(matches!(flushed, None | Some(_)));
     }
 }
