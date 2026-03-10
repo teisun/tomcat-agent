@@ -19,6 +19,10 @@
 - **Wasm/插件**：WasmEdge + QuickJS、宿主 API 绑定、插件生命周期
 - **CLI**：子命令实现、对话模式、流式渲染
 
+## 计划质量要求
+
+制定开发计划时，**须逐条满足** [Dispatcher.md](./Dispatcher.md) 第四节「计划必须包含的内容」中的全部 5 个维度，并通过末尾「计划输出前自检」清单的全部检查项，不得遗漏。计划经用户确认后方可进入开发。
+
 ## 参考文档
 
 - [Constitution.md](../openspec/specs/Constitution.md) — 行为规范与安全红线（必遵）
