@@ -2,6 +2,13 @@
 | :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-10 | INTEGRATION | develop | — |
 
+### E2E 测试规范体系建立（CLI 重命名为 pi）
+
+- **变更内容**：新建 E2E_TEST_SPEC.md（7 章）、E2E_SCENARIO_LIBRARY.md（39 条 P0 场景）；CLI 二进制名从 `pi_wasm` 改为 `pi`；run-integration-tests.sh 三阶段分层；Nibbles.md 验收清单补 E2E 验收步骤；INTEGRATION_TEST_SPEC.md 添加交叉引用
+- **验证**：`RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests test_help -- --nocapture` 通过（test_help_output_contains_pi_and_exits_ok: ok）
+- **Commit**：91d4744
+- **环境**：macOS darwin 22.6.0 / Rust stable
+
 ### 集成测试报告（TASK-03 feature/cli-chat 合并）
 
 **合并分支**：`feature/cli-chat` → `develop`（`git merge --no-ff`）。
