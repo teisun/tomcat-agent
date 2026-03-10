@@ -221,7 +221,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     if resume {
         println!("恢复会话: {}", ctx.session.current_session_key());
     }
-    println!("pi-wasm 对话模式 (模型: {})", model);
+    println!("pi 对话模式 (模型: {})", model);
     println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。\n");
 
     let mut rl = rustyline::DefaultEditor::new()

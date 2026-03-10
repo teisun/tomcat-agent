@@ -6,7 +6,7 @@
 
 ## 角色定义
 
-**不负责具体任务 ID 的开发**。负责将各工程师的功能分支**合并到 develop**、运行**全量测试与验收**、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
+**集成&E2E测试工程师**。负责将各工程师的功能分支**合并到 develop**、运行**全量测试与验收**、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
 
 **编写集成测试代码**：根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）。
 
@@ -24,6 +24,8 @@
 - [task.md](../openspec/changes/001-mvp/task.md) — 验收标准与完成定义
 - [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) — 各任务原子子任务与边界场景
 - [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) — 集成测试规范
+- [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md) — E2E 测试规范
+- [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) — 用户操作场景库
 - [INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) — 第 9 章：日志与链路追踪
 - [INTEGRATION_TEST_ROBUSTNESS.md](../openspec/specs/guides/testing/INTEGRATION_TEST_ROBUSTNESS.md) — 第 10 章：鲁棒性/异常边界
 - [INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md) — 集成测试实践参考
@@ -83,6 +85,7 @@
 - [ ] **对照 tests/ 检查覆盖**：对上述每一项，在 `tests/` 下查找是否已有集成测试覆盖（黑盒、仅通过 pub API）；若为「从磁盘/路径加载并验证行为」类能力，须有对应端到端用例（如 `load_plugin(plugin_dir)` 后断言插件在 list_loaded 或可响应事件）。
 - [ ] **无覆盖则必须在本步骤内编写或补充**：若某模块或场景尚无对应集成测试，须在本步骤内新增或更新 `tests/` 下用例，不得以「后续补」为由跳过。
 - [ ] **wasm-plugin 合并**：若本次合并涉及插件/Wasm 加载或运行时，须确认已有或本次补充「Wasm 真实运行时」集成测试（见 INTEGRATION_TEST_SPEC 5.4）；例如 `PluginManager::load_plugin(path)` 须至少有一条「真实 WasmEngine + 临时插件目录 → load_plugin → 断言加载成功」的集成测试。
+- [ ] **E2E 用户操作模拟覆盖**：本次合并引入的用户可见操作，须在 cli_tests.rs 或 wasmedge_e2e_tests.rs 中有对应 test_user_* 用例，并同步更新 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)（符合 E2E_TEST_SPEC §6）。
 
 ### 合并后全量测试与验收清单
 
@@ -91,10 +94,11 @@
 验收项以 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章门禁与验收清单为准：
 
 1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture`
-2. **CLI 子命令**：`pi-wasm init`、`pi-wasm doctor`、`pi-wasm config`、`pi-wasm session`、`pi-wasm plugin`、`pi-wasm audit` 可执行且帮助完整
+2. **CLI 子命令**：`pi init`、`pi doctor`、`pi config`、`pi session`、`pi plugin`、`pi audit` 可执行且帮助完整
 3. **集成测试（含门禁）**：`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 通过，含日志门禁与鲁棒性集成测试
+3.5 **E2E 验收（必选）**：`RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests -- --nocapture` 通过；WasmEdge 已就绪时 `RUST_LOG=pi_wasm=debug,info cargo test --test wasmedge_e2e_tests -- --nocapture` 通过；须符合 E2E_TEST_SPEC §6 新功能覆盖规则：本次合并若有用户可见功能变更，必须已补充 test_user_* 用例；失败即视为集成不通过。
 4. **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 执行
-5. **对话模式**：`pi-wasm chat` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
+5. **对话模式**：`pi chat` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
 6. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常
 7. **跨平台**：若条件具备，在 Windows/macOS/Linux 至少各跑一次 build + test
 

@@ -21,6 +21,7 @@
 | 9 | 日志与链路追踪规范 → 子文档 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md) |
 | 10 | 鲁棒性保障：异常与边界（门禁）→ 子文档 [INTEGRATION_TEST_ROBUSTNESS.md](INTEGRATION_TEST_ROBUSTNESS.md) |
 | 11 | 实践参考：场景与示例 → 子文档 [INTEGRATION_TEST_PRACTICE.md](INTEGRATION_TEST_PRACTICE.md) |
+| E2E | E2E 测试规范 → 子文档 [E2E_TEST_SPEC.md](E2E_TEST_SPEC.md)（场景库 → [E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)） |
 
 ---
 
@@ -99,6 +100,7 @@ my_project/
 ### 5.3 真实环境要求
 *   集成测试以真实环境为默认：与外部系统（数据库、第三方 API、文件系统等）的协作必须在真实环境下验证。
 *   Mock 仅用于单元测试或尚未完成建设的内部模块；集成测试套件中必须包含与真实外部依赖协作的用例（如 LLM 的 `llm_tests.rs`）；（无 key 或不可达时要求见 5.2）。
+*   **E2E 测试**（进程边界黑盒 + 用户操作模拟）的定义、场景库与覆盖规则见 [E2E_TEST_SPEC.md](E2E_TEST_SPEC.md)；完整用户场景清单见 [E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)；新功能合并时须符合其 §6 强制覆盖规则。
 
 ### 5.4 Wasm 运行时（真实 WasmEdge）
 *   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：默认构建即包含 WasmEdge；在环境已安装 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)` 或 `run_script_file(path)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。

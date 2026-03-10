@@ -27,22 +27,31 @@ if [ $SKIP_WASMEDGE -eq 0 ]; then
   fi
 fi
 
+export RUST_LOG=pi_wasm=debug,info
 FAIL=0
 
 echo "=== cargo build --release ==="
 cargo build --release
 
-echo "=== cargo test --lib ==="
-cargo test --lib || FAIL=1
+# === 阶段 1：单元测试 ===
+echo "=== [1/3] 单元测试 ==="
+cargo test --lib -- --nocapture || FAIL=1
 
-echo "=== cargo test 集成测试（不含 wasmedge_e2e_tests）==="
-cargo test --no-fail-fast --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests --test cli_tests || FAIL=1
+# === 阶段 2：集成测试（API 级） ===
+echo "=== [2/3] 集成测试（API 级） ==="
+cargo test --no-fail-fast \
+  --test event_tests --test hostcall_tests --test llm_tests \
+  --test plugin_tests --test primitives_tools_tests \
+  --test robustness_tests --test session_tests \
+  -- --nocapture || FAIL=1
 
+# === 阶段 3：E2E 测试（pi CLI + Wasm 运行时） ===
+echo "=== [3/3] E2E 测试（用户操作模拟） ==="
+cargo test --no-fail-fast --test cli_tests -- --nocapture || FAIL=1
 if [ $SKIP_WASMEDGE -eq 0 ]; then
   echo "=== cargo build（含 WasmEdge）==="
   cargo build
-  echo "=== cargo test --test wasmedge_e2e_tests ==="
-  cargo test --no-fail-fast --test wasmedge_e2e_tests || FAIL=1
+  cargo test --no-fail-fast --test wasmedge_e2e_tests -- --nocapture || FAIL=1
 else
   echo "跳过 wasmedge 构建与测试（Windows）。"
 fi

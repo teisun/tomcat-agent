@@ -20,8 +20,8 @@ source $HOME/.wasmedge/env
 
 ```bash
 cargo build --release
-./target/release/pi_wasm init        # 生成配置文件
-./target/release/pi_wasm doctor      # 检查环境
+./target/release/pi init        # 生成配置文件
+./target/release/pi doctor      # 检查环境
 ```
 
 ### 运行测试

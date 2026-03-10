@@ -3,6 +3,10 @@ name = "pi_wasm"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "pi"
+path = "src/main.rs"
+
 [features]
 # default = []
 # wasmedge = ["dep:wasmedge-sdk"]
