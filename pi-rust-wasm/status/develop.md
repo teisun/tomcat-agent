@@ -1,5 +1,19 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Tom | 2026-03-09 22:10 | DONE | develop | 88.4 |
+
+### 本次执行说明（工作目录与数据布局文档修正）
+
+- [✓] **Architecture.md**：第 10 节工作目录与数据布局摘要，补充「全局 plugins」、表述与子文档一致。
+- [✓] **work-dir-and-data-layout.md**：路径表与列表统一为「agents/&lt;agentId&gt;/ 下 sessions、plugins、tmp、logs」+ 全局 `plugins/` 与 `wasm/`；去掉 per-agent wasm，与全局共享插件/wasm 约定一致。
+
+### 🔌 INTERFACE (接口变更)
+- 无代码接口变更（仅规格文档）。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Tom | 2026-03-09 22:00 | DONE | develop | 88.4 |
 
 ### 本次执行说明（TASK-01 9.2 插件完整加载流程 + 宪法流程防遗漏整改）

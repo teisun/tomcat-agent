@@ -14,11 +14,11 @@
 | 路径 | 说明 |
 |------|------|
 | `agents/<agentId>/sessions/` | 该 agent 的会话与 transcript（sessions.json、JSONL 等） |
-| `agents/<agentId>/plugins/` | 该 agent 的插件目录 |
+| `agents/<agentId>/plugins/` | 该 agent 的插件目录（插件可含 JS 或 Wasm 入口） |
 | `agents/<agentId>/tmp/` | 该 agent 的临时文件（如 run_script 写入的 script.js） |
 | `agents/<agentId>/logs/` | 该 agent 的日志（per-agent，若写文件则用此路径） |
-| `agents/<agentId>/wasm/` | 该 agent 的 wasm 目录（如 quickjs 缓存、该 agent 专用 wasm 资源） |
-| `wasm/` | **全局** wasm/quickjs 缓存（共享的 wasmedge_quickjs.wasm 等） |
+| `plugins/` | **全局**共享插件目录（所有 agent 均可加载） |
+| `wasm/` | **全局** wasm 运行时引擎（共享的 wasmedge_quickjs.wasm 等） |
 
 - **当前仅一个 agent**：agentId 固定为 `default`，即使用 `work_dir/agents/default/` 下各子目录。
 - **与现有配置的兼容**：若已显式配置 `sessions_dir`、`plugins_dir` 等，则优先使用（可视为单 agent 或兼容模式）；否则按 work_dir + 上述多 agent 布局推导。设计文档与实现中需统一约定兼容规则。
@@ -32,8 +32,8 @@
   - `work_dir/agents/default/plugins`
   - `work_dir/agents/default/tmp`
   - `work_dir/agents/default/logs`
-  - `work_dir/agents/default/wasm`
-  - `work_dir/wasm`（全局 wasm）
+  - `work_dir/plugins`（全局共享插件）
+  - `work_dir/wasm`（全局 wasm 运行时引擎）
 
 ## 4. run_script 与临时文件
 

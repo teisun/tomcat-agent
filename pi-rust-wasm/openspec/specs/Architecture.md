@@ -83,7 +83,7 @@
 
 ### 10. 工作目录与数据布局
 
-默认工作根目录为可执行文件目录下的 `.pi_wasm`，可配置；多 agent 子目录（sessions、plugins、tmp、logs、wasm）及全局 wasm 目录约定、启动时创建、与现有 storage/plugins 配置的兼容见详细文档。
+默认工作根目录为可执行文件目录下的 `.pi_wasm`，可配置；多 agent 子目录（sessions、plugins、tmp、logs）及全局 wasm、全局 plugins 目录约定、启动时创建、与现有 storage/plugins 配置的兼容见详细文档。
 
 详见 [工作目录与数据布局（详细）](architecture/work-dir-and-data-layout.md)。
 
