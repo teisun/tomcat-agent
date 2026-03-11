@@ -1,28 +1,80 @@
 // pi_bridge.js — pi-mono compatible bridge layer for pi-rust-wasm
 // Constructs globalThis.pi object that routes API calls through __pi_host_call.
 // Loaded by run_script_file_impl before user plugin scripts.
-// See: architecture/js-bridge-layer.md, host-call-protocol.md
+// See: architecture/js-bridge-layer.md, host-call-protocol.md,
+//      architecture/js-api-alignment.md, architecture/async-hostcall-event-loop.md
 (function () {
   'use strict';
 
-  // -- Low-level host call wrapper ----------------------------------------
+  // -- Low-level synchronous host call wrapper --------------------------------
+  // Used for fast APIs that don't need async: logging, event registration, etc.
   function hostCall(module, method, params) {
     var req = JSON.stringify({ module: module, method: method, params: params || {} });
     var res = __pi_host_call(req);
     return typeof res === 'string' ? JSON.parse(res) : res;
   }
 
-  // -- Internal registries ------------------------------------------------
+  // -- Async host call wrapper (submit/poll pattern) -------------------------
+  // Returns a Promise; drives polling via QuickJS built-in event loop.
+  // See: architecture/async-hostcall-event-loop.md §11.4.4
+  var __callSeq = 0;
+  var POLL_INTERVAL_MS = 1;
+  var POLL_MAX_INTERVAL_MS = 50;
+
+  function hostCallAsync(module, method, params) {
+    var callId = '__call_' + (++__callSeq) + '_' + Date.now();
+    var req = JSON.stringify({
+      module: module, method: method,
+      params: params || {}, callId: callId
+    });
+    var submitRes = __pi_host_call(req);
+    var parsed = typeof submitRes === 'string' ? JSON.parse(submitRes) : submitRes;
+
+    if (!parsed.ok) {
+      return Promise.reject(new Error(parsed.error || 'hostcall submit failed'));
+    }
+    // Synchronous path: no pending flag means the result is already inline.
+    if (!parsed.data || !parsed.data.pending) {
+      return Promise.resolve(parsed);
+    }
+
+    return new Promise(function (resolve, reject) {
+      var interval = POLL_INTERVAL_MS;
+      function poll() {
+        var pollReq = JSON.stringify({
+          module: '__async', method: 'poll',
+          params: { callId: callId }
+        });
+        var pollRes = __pi_host_call(pollReq);
+        var pr = typeof pollRes === 'string' ? JSON.parse(pollRes) : pollRes;
+
+        if (!pr.ok) {
+          reject(new Error(pr.error || 'async poll error'));
+          return;
+        }
+        if (pr.data && pr.data.ready) {
+          resolve({ ok: true, data: pr.data.result });
+          return;
+        }
+        // Exponential backoff polling: 1ms → 2ms → … → 50ms cap.
+        interval = Math.min(interval * 2, POLL_MAX_INTERVAL_MS);
+        setTimeout(poll, interval);
+      }
+      setTimeout(poll, POLL_INTERVAL_MS);
+    });
+  }
+
+  // -- Internal registries ----------------------------------------------------
   var __pi_hooks = {};   // eventName -> [{id, fn}, ...]
   var __pi_tools = {};   // toolName  -> handler
   var __pi_nextId = 1;
 
-  // -- Build globalThis.pi ------------------------------------------------
+  // -- Build globalThis.pi ---------------------------------------------------
   globalThis.pi = {
 
-    // =====================================================================
-    // Event Subscription (pi-mono ExtensionAPI.on)
-    // =====================================================================
+    // =========================================================================
+    // Event Subscription (pi-mono ExtensionAPI.on / off / emit / once)
+    // =========================================================================
     on: function (eventName, handler) {
       if (!__pi_hooks[eventName]) __pi_hooks[eventName] = [];
       var lid = __pi_nextId++;
@@ -31,29 +83,31 @@
       return (res && res.listenerId != null) ? res.listenerId : lid;
     },
 
-    off: function (eventName, listenerId) {
-      if (__pi_hooks[eventName]) {
-        __pi_hooks[eventName] = __pi_hooks[eventName].filter(function (h) {
-          return h.id !== listenerId;
-        });
-      }
-      hostCall('events', 'off', { eventName: eventName, listenerId: listenerId });
-    },
-
-    emit: function (eventName, payload) {
-      return hostCall('events', 'emit', { eventName: eventName, payload: payload || {} });
-    },
-
-    off: function (eventName, handler) {
+    // Supports both off(event, handler) [pi-mono style] and
+    // off(event, listenerId) [numeric id, backward-compat].
+    off: function (eventName, handlerOrId) {
       var hooks = __pi_hooks[eventName];
       if (!hooks) return;
-      for (var i = hooks.length - 1; i >= 0; i--) {
-        if (hooks[i].fn === handler) {
-          var listenerId = hooks[i].id;
-          hooks.splice(i, 1);
-          hostCall('events', 'off', { eventName: eventName, listenerId: listenerId });
-          break;
+      var listenerId = null;
+      if (typeof handlerOrId === 'function') {
+        for (var i = hooks.length - 1; i >= 0; i--) {
+          if (hooks[i].fn === handlerOrId) {
+            listenerId = hooks[i].id;
+            hooks.splice(i, 1);
+            break;
+          }
         }
+      } else {
+        for (var j = hooks.length - 1; j >= 0; j--) {
+          if (hooks[j].id === handlerOrId) {
+            listenerId = hooks[j].id;
+            hooks.splice(j, 1);
+            break;
+          }
+        }
+      }
+      if (listenerId != null) {
+        hostCall('events', 'off', { eventName: eventName, listenerId: listenerId });
       }
     },
 
@@ -61,36 +115,57 @@
       return hostCall('events', 'emit', { eventName: eventName, payload: payload || {} });
     },
 
-    // =====================================================================
-    // 4 Primitives (aligned with pi-mono exec/readFile/writeFile/editFile)
-    // =====================================================================
+    // Single-fire listener: auto-unsubscribes after first invocation.
+    once: function (eventName, handler) {
+      var self = this;
+      var wrapped = function (data, ctx) {
+        self.off(eventName, wrapped);
+        handler(data, ctx);
+      };
+      return self.on(eventName, wrapped);
+    },
+
+    // =========================================================================
+    // 4 Primitives — async, aligned with pi-mono Promise-returning signatures
+    // =========================================================================
     exec: function (command, args, options) {
-      return hostCall('fs', 'executeBash', {
+      return hostCallAsync('fs', 'executeBash', {
         command: command,
         args: args,
         cwd: options && options.cwd
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'exec failed');
+        return r.data; // { stdout, stderr, exitCode }
       });
     },
 
+    // File ops use Promise.resolve-wrapping of sync call (files are fast; no
+    // need for submit/poll). Returns Promise<string> matching pi-mono.
     readFile: function (path) {
-      return hostCall('fs', 'readFile', { path: path });
+      var r = hostCall('fs', 'readFile', { path: path });
+      if (!r.ok) return Promise.reject(new Error(r.error || 'readFile failed'));
+      return Promise.resolve(r.data);
     },
 
     writeFile: function (path, content, options) {
-      return hostCall('fs', 'writeFile', {
+      var r = hostCall('fs', 'writeFile', {
         path: path,
         content: content,
         overwrite: options && options.overwrite
       });
+      if (!r.ok) return Promise.reject(new Error(r.error || 'writeFile failed'));
+      return Promise.resolve(r.data);
     },
 
     editFile: function (path, edits) {
-      return hostCall('fs', 'editFile', { path: path, edits: edits });
+      var r = hostCall('fs', 'editFile', { path: path, edits: edits });
+      if (!r.ok) return Promise.reject(new Error(r.error || 'editFile failed'));
+      return Promise.resolve(r.data);
     },
 
-    // =====================================================================
-    // Tool Registration (pi-mono ExtensionAPI.registerTool)
-    // =====================================================================
+    // =========================================================================
+    // Tool Registration (pi-mono ExtensionAPI.registerTool / unregisterTool)
+    // =========================================================================
     registerTool: function (toolDef) {
       if (toolDef && toolDef.name) {
         __pi_tools[toolDef.name] = toolDef;
@@ -103,9 +178,14 @@
       });
     },
 
-    // =====================================================================
+    unregisterTool: function (name) {
+      if (name && __pi_tools[name]) delete __pi_tools[name];
+      return hostCall('tools', 'unregisterTool', { toolName: name });
+    },
+
+    // =========================================================================
     // Command Registration (pi-mono ExtensionAPI.registerCommand)
-    // =====================================================================
+    // =========================================================================
     registerCommand: function (name, options) {
       return hostCall('tools', 'registerCommand', {
         name: name,
@@ -113,16 +193,47 @@
       });
     },
 
-    // =====================================================================
-    // LLM (pi-mono-style createChatCompletion)
-    // =====================================================================
+    // =========================================================================
+    // LLM (pi-mono-style createChatCompletion / complete / setModel / getModel)
+    // =========================================================================
     createChatCompletion: function (params) {
-      return hostCall('llm', 'createChatCompletion', params);
+      return hostCallAsync('llm', 'createChatCompletion', params)
+        .then(function (r) {
+          if (!r.ok) throw new Error(r.error || 'createChatCompletion failed');
+          return r.data; // { message: {role, content}, usage?: {...} }
+        });
     },
 
-    // =====================================================================
+    // Simplified single-turn LLM call — wraps createChatCompletion.
+    // Returns Promise<string> (the assistant reply text).
+    complete: function (prompt, options) {
+      var msgs = (options && options.messages)
+        ? options.messages
+        : [{ role: 'user', content: String(prompt) }];
+      return this.createChatCompletion({ messages: msgs })
+        .then(function (res) {
+          return (res && res.message && res.message.content) ? res.message.content : '';
+        });
+    },
+
+    // Model selection — MVP: acknowledged by host but model change is best-effort.
+    setModel: function (model) {
+      return hostCallAsync('llm', 'setModel', { model: model })
+        .then(function (r) {
+          if (!r.ok) throw new Error(r.error || 'setModel failed');
+          return r.data;
+        });
+    },
+
+    // Returns current model name (sync, matches pi-mono signature).
+    getModel: function () {
+      var r = hostCall('llm', 'getModel', {});
+      return (r && r.data && r.data.model) ? r.data.model : null;
+    },
+
+    // =========================================================================
     // Session (pi-mono sessionManager subset)
-    // =====================================================================
+    // =========================================================================
     session: {
       getCurrent: function () {
         return hostCall('session', 'getCurrentSession', {});
@@ -135,9 +246,9 @@
       }
     },
 
-    // =====================================================================
+    // =========================================================================
     // Messaging (pi-mono ExtensionAPI.sendMessage / sendUserMessage)
-    // =====================================================================
+    // =========================================================================
     sendMessage: function (message, options) {
       return hostCall('agent', 'sendMessage', {
         message: message,
@@ -152,16 +263,16 @@
       });
     },
 
-    // =====================================================================
+    // =========================================================================
     // Logging
-    // =====================================================================
+    // =========================================================================
     log: function (msg) {
       hostCall('agent', 'log', { message: typeof msg === 'string' ? msg : JSON.stringify(msg) });
     },
 
-    // =====================================================================
-    // Model
-    // =====================================================================
+    // =========================================================================
+    // Tool visibility (pi-mono ExtensionAPI.getActiveTools / setActiveTools)
+    // =========================================================================
     getActiveTools: function () {
       return hostCall('tools', 'getActiveTools', {});
     },
@@ -171,7 +282,7 @@
     }
   };
 
-  // -- Event dispatch entry (called by host via __pi_dispatch_event) ------
+  // -- Event dispatch entry (called by host via __pi_dispatch_event) ----------
   globalThis.__pi_dispatch_event = function (eventJson) {
     var envelope = JSON.parse(eventJson);
     var eventType = envelope.type;
@@ -234,7 +345,7 @@
     }
   };
 
-  // -- Tool execution entry (called by host) ------------------------------
+  // -- Tool execution entry (called by host) ----------------------------------
   globalThis.__pi_execute_tool = function (toolCallJson) {
     var call = JSON.parse(toolCallJson);
     var handler = __pi_tools[call.toolName];

@@ -200,10 +200,10 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DOING` |
+| **负责人** | Tom |
 | **分支** | `feature/js-api-alignment` |
-| **阻塞点** | TASK-12 完成后启动 |
+| **阻塞点** | — |
 
 **目标**：pi_bridge.js 的 `globalThis.pi` 接口对齐 pi-mono `ExtensionAPI`，核心 API 返回 Promise，修复已知 bug。
 

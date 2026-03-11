@@ -223,8 +223,7 @@ impl HostApiDispatcher {
         match &self.tokio_handle {
             Some(h) => h.block_on(self.dispatch_async(instance_id, request)),
             None => {
-                let rt = tokio::runtime::Runtime::new()
-                    .expect("create runtime for sync dispatch");
+                let rt = tokio::runtime::Runtime::new().expect("create runtime for sync dispatch");
                 rt.block_on(self.dispatch_async(instance_id, request))
             }
         }
@@ -255,11 +254,8 @@ impl HostApiDispatcher {
         let timeout = self.async_timeout;
 
         handle.spawn(async move {
-            let result = tokio::time::timeout(
-                timeout,
-                dispatcher.dispatch_async(&inst_id, request),
-            )
-            .await;
+            let result =
+                tokio::time::timeout(timeout, dispatcher.dispatch_async(&inst_id, request)).await;
             let status = match result {
                 Ok(Ok(resp)) => AsyncCallStatus::Done(resp),
                 Ok(Err(e)) => AsyncCallStatus::Error(e.to_string()),
@@ -316,6 +312,8 @@ impl HostApiDispatcher {
             ("llm", "createChatCompletionStream") => {
                 self.do_chat_stream(instance_id, &params).await
             }
+            ("llm", "getModel") => Ok(Self::do_llm_get_model()),
+            ("llm", "setModel") => Ok(Self::do_llm_set_model(&params)),
             ("tools", "registerTool") => self.do_register_tool(instance_id, &params).await,
             ("tools", "unregisterTool") => self.do_unregister_tool(instance_id, &params).await,
             ("tools", "getToolList") => self.do_list_tools(instance_id, &params).await,
@@ -505,9 +503,11 @@ impl HostApiDispatcher {
             None => return Ok(HostResponse::err("LlmProvider not configured (004)")),
             Some(l) => l,
         };
-        let _permit = self.llm_semaphore.acquire().await.map_err(|_| {
-            AppError::Plugin("LLM semaphore closed".into())
-        })?;
+        let _permit = self
+            .llm_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
         let req = parse_chat_request(params)?;
         let resp = llm.chat(req).await?;
         Ok(HostResponse::ok(
@@ -524,9 +524,11 @@ impl HostApiDispatcher {
             None => return Ok(HostResponse::err("LlmProvider not configured (004)")),
             Some(l) => l,
         };
-        let _permit = self.llm_semaphore.acquire().await.map_err(|_| {
-            AppError::Plugin("LLM semaphore closed".into())
-        })?;
+        let _permit = self
+            .llm_semaphore
+            .acquire()
+            .await
+            .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
         let req = parse_chat_request(params)?;
         let mut stream = llm.chat_stream(req).await?;
         let mut content = String::new();
@@ -789,6 +791,22 @@ impl HostApiDispatcher {
 
     fn do_context_get_model() -> HostResponse {
         HostResponse::ok(serde_json::json!({ "model": serde_json::Value::Null }))
+    }
+
+    /// Returns the currently configured LLM model name.
+    /// MVP: per-instance model selection is not yet stored; returns null.
+    /// Future: maintain a per-instance model override map.
+    fn do_llm_get_model() -> HostResponse {
+        HostResponse::ok(serde_json::json!({ "model": serde_json::Value::Null }))
+    }
+
+    /// Acknowledges a model-switch request from a plugin.
+    /// MVP: the request is logged but does not alter the active LlmProvider.
+    /// Future: maintain a per-instance model override map.
+    fn do_llm_set_model(params: &serde_json::Value) -> HostResponse {
+        let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        tracing::info!("[llm.setModel] plugin requested model={} (MVP stub)", model);
+        HostResponse::ok(serde_json::json!({ "model": model }))
     }
 
     fn do_context_ui_notify(&self, params: &serde_json::Value) -> HostResponse {
@@ -1543,7 +1561,14 @@ mod tests {
         let submit = d.dispatch("inst-a", req).unwrap();
         assert!(submit.ok);
         assert_eq!(submit.call_id.as_deref(), Some("req-1"));
-        assert!(submit.data.as_ref().unwrap().get("pending").unwrap().as_bool().unwrap());
+        assert!(submit
+            .data
+            .as_ref()
+            .unwrap()
+            .get("pending")
+            .unwrap()
+            .as_bool()
+            .unwrap());
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -1583,7 +1608,8 @@ mod tests {
     async fn async_poll_not_ready_immediately() {
         let bus = Arc::new(DefaultEventBus::new());
         let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
-        d.async_results.insert("pending-1".to_string(), AsyncCallStatus::Pending);
+        d.async_results
+            .insert("pending-1".to_string(), AsyncCallStatus::Pending);
         let poll_req = HostRequest {
             module: "__async".to_string(),
             method: "poll".to_string(),
@@ -1643,19 +1669,54 @@ mod tests {
         struct SlowPrimitive;
         #[async_trait::async_trait]
         impl PrimitiveExecutor for SlowPrimitive {
-            async fn read_file(&self, _: &str, _: &str) -> Result<String, AppError> { Ok(String::new()) }
-            async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, AppError> { Ok(vec![]) }
-            async fn write_file(&self, _: &str, _: &str, _: bool, _: &str) -> Result<WriteFileResult, AppError> {
-                Ok(WriteFileResult { path: String::new(), written: false })
+            async fn read_file(&self, _: &str, _: &str) -> Result<String, AppError> {
+                Ok(String::new())
             }
-            async fn edit_file(&self, _: &str, _: Vec<EditOperation>, _: &str) -> Result<EditFileResult, AppError> {
-                Ok(EditFileResult { path: String::new(), applied: false })
+            async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, AppError> {
+                Ok(vec![])
             }
-            async fn execute_bash(&self, _: &str, _: Option<&str>, _: &str) -> Result<BashResult, AppError> {
+            async fn write_file(
+                &self,
+                _: &str,
+                _: &str,
+                _: bool,
+                _: &str,
+            ) -> Result<WriteFileResult, AppError> {
+                Ok(WriteFileResult {
+                    path: String::new(),
+                    written: false,
+                })
+            }
+            async fn edit_file(
+                &self,
+                _: &str,
+                _: Vec<EditOperation>,
+                _: &str,
+            ) -> Result<EditFileResult, AppError> {
+                Ok(EditFileResult {
+                    path: String::new(),
+                    applied: false,
+                })
+            }
+            async fn execute_bash(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &str,
+            ) -> Result<BashResult, AppError> {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                Ok(BashResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })
+                Ok(BashResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                })
             }
-            async fn require_user_confirmation(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, AppError> {
+            async fn require_user_confirmation(
+                &self,
+                _: PrimitiveOperation,
+                _: &str,
+                _: &str,
+            ) -> Result<bool, AppError> {
                 Ok(true)
             }
         }
@@ -1713,12 +1774,21 @@ mod tests {
     async fn async_cleanup_instance_removes_pending() {
         let bus = Arc::new(DefaultEventBus::new());
         let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
-        d.async_results.insert("ci-1".to_string(), AsyncCallStatus::Pending);
-        d.async_results.insert("ci-2".to_string(), AsyncCallStatus::Pending);
-        d.instance_calls.entry("inst-x".to_string()).or_default().extend(["ci-1".to_string(), "ci-2".to_string()]);
+        d.async_results
+            .insert("ci-1".to_string(), AsyncCallStatus::Pending);
+        d.async_results
+            .insert("ci-2".to_string(), AsyncCallStatus::Pending);
+        d.instance_calls
+            .entry("inst-x".to_string())
+            .or_default()
+            .extend(["ci-1".to_string(), "ci-2".to_string()]);
         // Also add one for a different instance to ensure it's not removed
-        d.async_results.insert("other-1".to_string(), AsyncCallStatus::Pending);
-        d.instance_calls.entry("inst-y".to_string()).or_default().push("other-1".to_string());
+        d.async_results
+            .insert("other-1".to_string(), AsyncCallStatus::Pending);
+        d.instance_calls
+            .entry("inst-y".to_string())
+            .or_default()
+            .push("other-1".to_string());
 
         d.cleanup_instance("inst-x");
 

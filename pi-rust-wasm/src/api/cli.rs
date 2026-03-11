@@ -244,7 +244,10 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
 
     let resolved_qjs = resolve_quickjs_path(&cfg);
     let wasm_cfg = WasmEngineConfig {
-        quickjs_path: resolved_qjs.as_ref().and_then(|p| p.to_str()).map(String::from),
+        quickjs_path: resolved_qjs
+            .as_ref()
+            .and_then(|p| p.to_str())
+            .map(String::from),
         ..Default::default()
     };
     match WasmEngine::global(Some(wasm_cfg)) {
@@ -867,8 +870,7 @@ mod tests {
 
     #[test]
     fn cli_parse_init_with_config_path() {
-        let cli =
-            Cli::try_parse_from(["pi", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
+        let cli = Cli::try_parse_from(["pi", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
         let cmd = cli.command.unwrap();
         if let Commands::Init { config } = cmd {
             assert_eq!(config, "/tmp/pi/config.toml");

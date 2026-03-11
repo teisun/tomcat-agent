@@ -96,8 +96,7 @@ fn test_session_manager_delete_session_removes_from_list() -> Result<(), Box<dyn
 #[test]
 fn test_session_manager_add_and_get_messages_persists() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span =
-        tracing::info_span!("test_session_manager_add_and_get_messages_persists").entered();
+    let _span = tracing::info_span!("test_session_manager_add_and_get_messages_persists").entered();
 
     let tmp = TempDir::new()?;
     let sessions_dir: PathBuf = tmp.path().to_path_buf();

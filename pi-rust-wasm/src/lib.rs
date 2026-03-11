@@ -30,7 +30,6 @@ pub use infra::{
     read_file_utf8, resolve_log_dir, resolve_plugins_dir, resolve_quickjs_path,
     resolve_sessions_dir, resolve_tmp_dir, validate_config, write_file_atomic, AgentEvent,
     AppConfig, AppError, AuditPrimitiveOp, AuditRecorder, DefaultEventBus, EventBus, EventContext,
-    EventListenerId, ExtensionEvent, HostcallAuditEntry, LlmConfig, LogConfig,
-    PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder,
-    WasmConfig,
+    EventListenerId, ExtensionEvent, HostcallAuditEntry, LlmConfig, LogConfig, PrimitiveAuditEntry,
+    PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder, WasmConfig,
 };

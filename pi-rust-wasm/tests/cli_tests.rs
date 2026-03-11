@@ -663,7 +663,8 @@ fn test_chat_without_config_exits_with_error() {
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
     let _ = dotenvy::dotenv().ok();
-    let _span = info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
+    let _span =
+        info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
 
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
@@ -677,9 +678,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
         .success();
 
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC）"
-        )
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC）")
     });
 
     let mut c = cmd();
@@ -854,9 +853,7 @@ fn test_session_switch_nonexistent_shows_error() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions not exist");
-    assert
-        .success()
-        .stdout(predicate::str::contains("不存在"));
+    assert.success().stdout(predicate::str::contains("不存在"));
 }
 
 /// [session delete via CLI] 创建会话后通过 CLI 删除
@@ -889,9 +886,7 @@ fn test_session_delete_via_cli_removes_session() {
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions deleted");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已删除"));
+    assert.success().stdout(predicate::str::contains("已删除"));
 }
 
 /// [session archive] archive 子命令可正常执行
@@ -924,9 +919,7 @@ fn test_session_archive_exits_ok() {
     let assert = c.assert();
 
     info!("Assert: exit 0");
-    assert
-        .success()
-        .stdout(predicate::str::contains("已归档"));
+    assert.success().stdout(predicate::str::contains("已归档"));
 }
 
 // ────────────────────── 补充用例：config set 成功路径 ──────────────────────

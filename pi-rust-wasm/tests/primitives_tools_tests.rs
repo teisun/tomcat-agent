@@ -265,8 +265,7 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
 async fn test_primitive_executor_edit_file_replaces_content(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span =
-        tracing::info_span!("test_primitive_executor_edit_file_replaces_content").entered();
+    let _span = tracing::info_span!("test_primitive_executor_edit_file_replaces_content").entered();
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;
@@ -289,9 +288,7 @@ async fn test_primitive_executor_edit_file_replaces_content(
         old_content: Some("hello".to_string()),
         new_content: "goodbye".to_string(),
     }];
-    let result = executor
-        .edit_file(&path_str, edits, "test_plugin")
-        .await?;
+    let result = executor.edit_file(&path_str, edits, "test_plugin").await?;
     tracing::info!("Act: edit_file(Replace, 'hello' -> 'goodbye')");
 
     assert!(result.applied, "edit_file 应返回 applied=true");
@@ -313,8 +310,7 @@ async fn test_primitive_executor_edit_file_replaces_content(
 async fn test_primitive_executor_execute_bash_echo_succeeds(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span =
-        tracing::info_span!("test_primitive_executor_execute_bash_echo_succeeds").entered();
+    let _span = tracing::info_span!("test_primitive_executor_execute_bash_echo_succeeds").entered();
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;

@@ -92,8 +92,7 @@ fn test_hostcall_unknown_api_returns_err_via_public_api() {
 #[test]
 fn test_hostcall_read_file_with_primitive_returns_ok() {
     common::setup_logging();
-    let _span =
-        tracing::info_span!("test_hostcall_read_file_with_primitive_returns_ok").entered();
+    let _span = tracing::info_span!("test_hostcall_read_file_with_primitive_returns_ok").entered();
 
     let tmp = tempfile::tempdir().unwrap();
     let canonical_dir = tmp.path().canonicalize().unwrap();
@@ -127,7 +126,11 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
 
     assert!(res.is_ok(), "readFile hostcall 应成功: {:?}", res);
     let resp = res.unwrap();
-    assert!(resp.ok, "注入 primitive 后 readFile 应返回 ok，error: {:?}", resp.error);
+    assert!(
+        resp.ok,
+        "注入 primitive 后 readFile 应返回 ok，error: {:?}",
+        resp.error
+    );
     tracing::info!("Assert: HostResponse::ok，readFile 正向路径通过");
 }
 
@@ -140,7 +143,8 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
 #[test]
 fn test_hostcall_async_submit_then_poll_returns_result() {
     common::setup_logging();
-    let _span = tracing::info_span!("test_hostcall_async_submit_then_poll_returns_result").entered();
+    let _span =
+        tracing::info_span!("test_hostcall_async_submit_then_poll_returns_result").entered();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let dispatcher: Arc<HostApiDispatcher> = rt.block_on(async {
@@ -166,13 +170,18 @@ fn test_hostcall_async_submit_then_poll_returns_result() {
         d
     });
 
-    let poll_req = r#"{"module":"__async","method":"poll","params":{"callId":"call-async-1"},"callId":null}"#;
+    let poll_req =
+        r#"{"module":"__async","method":"poll","params":{"callId":"call-async-1"},"callId":null}"#;
     let poll_res = invoke_host_func_with(Some(dispatcher.as_ref()), "inst-async", poll_req);
     tracing::info!("Act: __async.poll(callId=call-async-1)");
 
     assert!(poll_res.is_ok(), "poll 应成功");
     let poll_resp = poll_res.unwrap();
-    assert!(poll_resp.ok, "poll 响应应为 ok，error: {:?}", poll_resp.error);
+    assert!(
+        poll_resp.ok,
+        "poll 响应应为 ok，error: {:?}",
+        poll_resp.error
+    );
     let ready = poll_resp
         .data
         .as_ref()
@@ -180,6 +189,10 @@ fn test_hostcall_async_submit_then_poll_returns_result() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     assert!(ready, "poll 应返回 ready=true");
-    assert!(poll_resp.data.as_ref().and_then(|d| d.get("result")).is_some());
+    assert!(poll_resp
+        .data
+        .as_ref()
+        .and_then(|d| d.get("result"))
+        .is_some());
     tracing::info!("Assert: poll 返回 ready=true 且带 result");
 }
