@@ -200,7 +200,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `DOING` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
 | **分支** | `feature/js-api-alignment` |
 | **阻塞点** | — |
@@ -210,14 +210,14 @@
 **技术方案**：[JS API 与 pi-mono 对齐设计](../openspec/specs/architecture/js-api-alignment.md)
 
 **子项**（参考 tasks_details.md T1-P0-008 的 8.7）：
-- [ ] 8.7.1 `pi_bridge.js`：新增 `hostCallAsync` 函数（submit/poll 包装，返回 Promise）
-- [ ] 8.7.2 `exec` / `createChatCompletion` 改为调用 `hostCallAsync`，返回值解包为 pi-mono 格式
-- [ ] 8.7.3 修复 `off` / `emit` 重复定义 bug
-- [ ] 8.7.4 新增 `pi.once(event, handler)`
-- [ ] 8.7.5 集成测试：`await pi.exec("echo hello")`
-- [ ] 8.7.6 集成测试：`await pi.createChatCompletion({...})`
-- [ ] 8.7.7 （P1）readFile/writeFile/editFile 返回 Promise
-- [ ] 8.7.8 （P1）新增 setModel/getModel/complete/unregisterTool
+- [✓] 8.7.1 `pi_bridge.js`：新增 `hostCallAsync` 函数（submit/poll 包装，返回 Promise）
+- [✓] 8.7.2 `exec` / `createChatCompletion` 改为调用 `hostCallAsync`，返回值解包为 pi-mono 格式
+- [✓] 8.7.3 修复 `off` / `emit` 重复定义 bug
+- [✓] 8.7.4 新增 `pi.once(event, handler)`
+- [✓] 8.7.5 集成测试：`await pi.exec("echo hello")`
+- [✓] 8.7.6 集成测试：`await pi.createChatCompletion({...})`
+- [✓] 8.7.7 （P1）readFile/writeFile/editFile 返回 Promise
+- [✓] 8.7.8 （P1）新增 setModel/getModel/complete/unregisterTool
 
 **依赖**：TASK-12 (T1-P0-008-async)
 
