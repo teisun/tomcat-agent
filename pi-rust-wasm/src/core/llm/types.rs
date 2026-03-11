@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 单条对话消息，与 OpenAI chat completions messages 兼容。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatMessageRole {
     System,

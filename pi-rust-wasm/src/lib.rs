@@ -14,11 +14,12 @@ pub use core::{
     TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use core::{
-    AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse,
+    agent_messages_from_chat, convert_to_llm_format, AllowAllConfirmation, AgentLoop, AgentLoopConfig,
+    AgentMessage, AgentRunResult, BashResult, ChatMessage, ChatRequest, ChatResponse,
     DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation, DirEntry, EditFileResult,
     EditOperation, EditOperationType, LlmProvider, OpenAiProvider, PrimitiveExecutor,
-    PrimitiveOperation, SessionTokenUsage, StreamEvent, Tool, ToolExecutor, ToolRegistry,
-    UserConfirmationProvider, WriteFileResult,
+    PrimitiveOperation, SessionTokenUsage, StreamEvent, Tool, ToolCallInfo, ToolExecutor,
+    ToolRegistry, UserConfirmationProvider, WriteFileResult,
 };
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, HostApiDispatcher, HostRequest,

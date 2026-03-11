@@ -4,28 +4,25 @@ use std::io::{self, Write as IoWrite};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio_stream::StreamExt;
-
 use crate::infra::error::AppError;
-use crate::infra::{AuditRecorder, TracingAuditRecorder};
+use crate::infra::{AuditRecorder, DefaultEventBus, EventBus, TracingAuditRecorder};
 use crate::{
-    resolve_sessions_dir, AppConfig, ChatMessage, ChatRequest, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
-    SessionManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
+    agent_messages_from_chat, resolve_sessions_dir, AgentLoop, AgentLoopConfig, AppConfig,
+    ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
+    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
-
-const MAX_TOOL_ROUNDS: usize = 10;
 
 // ─── ChatContext ──────────────────────────────────────────────────────────────
 
 pub struct ChatContext {
     pub session: SessionManager,
-    pub llm: Box<dyn LlmProvider>,
+    pub llm: Arc<dyn LlmProvider>,
     pub config: AppConfig,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
+    pub event_bus: Arc<dyn EventBus>,
     pub cancelled: Arc<AtomicBool>,
 }
 
@@ -35,7 +32,7 @@ impl ChatContext {
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
 
-        let llm: Box<dyn LlmProvider> = Box::new(OpenAiProvider::new(&config.llm)?);
+        let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(&config.llm)?);
 
         let audit: Arc<dyn AuditRecorder> = Arc::new(TracingAuditRecorder);
         let confirmation = Arc::new(CliConfirmation);
@@ -49,6 +46,7 @@ impl ChatContext {
         let tool_registry: Arc<dyn ToolRegistry> =
             Arc::new(DefaultToolRegistry::new(tool_executor, audit));
 
+        let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
         let cancelled = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
@@ -57,6 +55,7 @@ impl ChatContext {
             config,
             primitive,
             tool_registry,
+            event_bus,
             cancelled,
         })
     }
@@ -227,8 +226,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
 
-    let mut renderer = MarkdownRenderer::new();
-
     loop {
         let input = match rl.readline("你> ") {
             Ok(line) => line,
@@ -256,6 +253,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let entry = ctx.session.get_session(ctx.session.current_session_key())?;
         let model = ctx.effective_model(entry.as_ref());
 
+        let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
         let mut history = ctx
             .session
             .build_context_messages(ctx.session.context_cap())?;
@@ -265,278 +263,56 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         ctx.session
             .append_message(serde_json::to_value(&user_msg)?)?;
 
-        let messages: Vec<ChatMessage> = history
+        let chat_messages: Vec<ChatMessage> = history
             .iter()
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect();
+        let messages = agent_messages_from_chat(&chat_messages);
 
-        let response_text = do_chat_turn(ctx, &mut renderer, &messages, &model).await?;
+        let config = AgentLoopConfig {
+            max_attempts: 3,
+            max_tool_rounds: 10,
+            retry_base_delay_ms: 300,
+            model: model.clone(),
+            session_id: ctx.session.current_session_key().to_string(),
+            tool_definitions: build_tool_definitions(),
+        };
+        let mut agent_loop = AgentLoop::new(
+            ctx.llm.clone(),
+            ctx.primitive.clone(),
+            ctx.event_bus.clone(),
+            config,
+            ctx.cancelled.clone(),
+        );
+        let renderer_clone = Arc::clone(&renderer);
+        agent_loop.set_on_stream_delta(Box::new(move |delta: &str| {
+            renderer_clone.lock().push(delta);
+            while let Some(chunk) = renderer_clone.lock().take_ready() {
+                print!("{}", chunk);
+            }
+        }));
+        print!("\nAI> ");
+        io::stdout().flush().map_err(AppError::Io)?;
 
-        if !response_text.is_empty() {
-            let assistant_msg = ChatMessage::assistant(&response_text);
-            ctx.session
-                .append_message(serde_json::to_value(&assistant_msg)?)?;
+        match agent_loop.run(messages).await {
+            Ok(result) => {
+                if let Some(remaining) = renderer.lock().flush() {
+                    print!("{}", remaining);
+                    io::stdout().flush().map_err(AppError::Io)?;
+                }
+                if !result.final_text.is_empty() {
+                    let assistant_msg = ChatMessage::assistant(&result.final_text);
+                    ctx.session
+                        .append_message(serde_json::to_value(&assistant_msg)?)?;
+                }
+            }
+            Err(e) => return Err(e),
         }
 
         println!();
     }
 
     Ok(())
-}
-
-async fn do_chat_turn(
-    ctx: &ChatContext,
-    renderer: &mut MarkdownRenderer,
-    initial_messages: &[ChatMessage],
-    model: &str,
-) -> Result<String, AppError> {
-    let tool_defs = build_tool_definitions();
-    let mut messages: Vec<ChatMessage> = initial_messages.to_vec();
-    let mut final_text = String::new();
-
-    for _round in 0..MAX_TOOL_ROUNDS {
-        let req = ChatRequest {
-            messages: messages.clone(),
-            model: model.to_string(),
-            temperature: None,
-            max_tokens: None,
-            stream: Some(true),
-            model_override: None,
-            tools: Some(tool_defs.clone()),
-        };
-
-        let mut stream = ctx.llm.chat_stream(req).await?;
-        let mut content_buf = String::new();
-        let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
-
-        print!("\nAI> ");
-        io::stdout().flush().map_err(AppError::Io)?;
-
-        while let Some(event) = stream.next().await {
-            if ctx.cancelled.load(Ordering::SeqCst) {
-                println!("\n[生成已中断]");
-                break;
-            }
-            match event {
-                Ok(StreamEvent::ContentDelta { delta }) => {
-                    renderer.push(&delta);
-                    while let Some(chunk) = renderer.take_ready() {
-                        print!("{}", chunk);
-                        io::stdout().flush().map_err(AppError::Io)?;
-                    }
-                    content_buf.push_str(&delta);
-                }
-                Ok(StreamEvent::ToolCallDelta {
-                    index,
-                    id,
-                    name,
-                    arguments_delta,
-                }) => {
-                    while tool_calls_buf.len() <= index as usize {
-                        tool_calls_buf.push(ToolCallAccumulator::default());
-                    }
-                    let acc = &mut tool_calls_buf[index as usize];
-                    if let Some(id_val) = id {
-                        acc.id = id_val;
-                    }
-                    if let Some(name_val) = name {
-                        acc.name = name_val;
-                    }
-                    if let Some(args) = arguments_delta {
-                        acc.arguments.push_str(&args);
-                    }
-                }
-                Ok(StreamEvent::FinishReason { .. }) => break,
-                Ok(StreamEvent::Usage { .. }) => {}
-                Err(e) => {
-                    eprintln!("\n[流式错误: {}]", e);
-                    break;
-                }
-            }
-        }
-
-        if let Some(remaining) = renderer.flush() {
-            print!("{}", remaining);
-            io::stdout().flush().map_err(AppError::Io)?;
-        }
-        println!();
-
-        final_text.push_str(&content_buf);
-
-        if tool_calls_buf.is_empty() || tool_calls_buf.iter().all(|tc| tc.name.is_empty()) {
-            break;
-        }
-
-        let tool_calls: Vec<ToolCallInfo> = tool_calls_buf
-            .into_iter()
-            .filter(|tc| !tc.name.is_empty())
-            .map(|tc| ToolCallInfo {
-                id: tc.id,
-                name: tc.name,
-                arguments: tc.arguments,
-            })
-            .collect();
-
-        let assistant_with_tools = build_assistant_tool_call_message(&content_buf, &tool_calls);
-        messages.push(assistant_with_tools);
-
-        for tc in &tool_calls {
-            let result = execute_tool_call(ctx, tc).await;
-            let tool_msg = ChatMessage::tool(&tc.id, &result);
-            messages.push(tool_msg);
-        }
-
-        content_buf.clear();
-        *renderer = MarkdownRenderer::new();
-    }
-
-    Ok(final_text)
-}
-
-// ─── Tool call execution ──────────────────────────────────────────────────────
-
-#[derive(Default)]
-struct ToolCallAccumulator {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-struct ToolCallInfo {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-fn build_assistant_tool_call_message(content: &str, tool_calls: &[ToolCallInfo]) -> ChatMessage {
-    let tc_json: Vec<serde_json::Value> = tool_calls
-        .iter()
-        .map(|tc| {
-            serde_json::json!({
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                }
-            })
-        })
-        .collect();
-
-    ChatMessage::assistant_with_tool_calls(
-        if content.is_empty() {
-            None
-        } else {
-            Some(content)
-        },
-        tc_json,
-    )
-}
-
-async fn execute_tool_call(ctx: &ChatContext, tc: &ToolCallInfo) -> String {
-    let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
-        Ok(v) => v,
-        Err(e) => return format!("参数解析失败: {}", e),
-    };
-
-    println!("\n  [工具调用] {} ({})", tc.name, tc.id);
-
-    let plugin_id = "__chat__";
-
-    match tc.name.as_str() {
-        "read_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            match ctx.primitive.read_file(path, plugin_id).await {
-                Ok(content) => content,
-                Err(e) => format!("读取失败: {}", e),
-            }
-        }
-        "write_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let content = args["content"].as_str().unwrap_or("");
-            let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-            match ctx
-                .primitive
-                .write_file(path, content, overwrite, plugin_id)
-                .await
-            {
-                Ok(r) => {
-                    if r.written {
-                        format!("已写入: {}", r.path)
-                    } else {
-                        format!("写入被拒绝: {}", r.path)
-                    }
-                }
-                Err(e) => format!("写入失败: {}", e),
-            }
-        }
-        "edit_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let old_content = args["old_content"].as_str().unwrap_or("");
-            let new_content = args["new_content"].as_str().unwrap_or("");
-            let edits = vec![crate::EditOperation {
-                operation_type: crate::EditOperationType::Replace,
-                start_line: None,
-                end_line: None,
-                old_content: Some(old_content.to_string()),
-                new_content: new_content.to_string(),
-            }];
-            match ctx.primitive.edit_file(path, edits, plugin_id).await {
-                Ok(r) => {
-                    if r.applied {
-                        format!("已编辑: {}", r.path)
-                    } else {
-                        format!("编辑被拒绝: {}", r.path)
-                    }
-                }
-                Err(e) => format!("编辑失败: {}", e),
-            }
-        }
-        "execute_bash" => {
-            let command = args["command"].as_str().unwrap_or("");
-            let cwd = args["cwd"].as_str();
-            match ctx.primitive.execute_bash(command, cwd, plugin_id).await {
-                Ok(r) => {
-                    let mut out = String::new();
-                    if !r.stdout.is_empty() {
-                        out.push_str(&r.stdout);
-                    }
-                    if !r.stderr.is_empty() {
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str("STDERR: ");
-                        out.push_str(&r.stderr);
-                    }
-                    out.push_str(&format!("\n(exit code: {})", r.exit_code));
-                    out
-                }
-                Err(e) => format!("执行失败: {}", e),
-            }
-        }
-        "list_dir" => {
-            let path = args["path"].as_str().unwrap_or("");
-            match ctx.primitive.list_dir(path, plugin_id).await {
-                Ok(entries) => {
-                    let lines: Vec<String> = entries
-                        .iter()
-                        .map(|e| {
-                            if e.is_dir {
-                                format!("  {}/ (dir)", e.name)
-                            } else {
-                                format!("  {}", e.name)
-                            }
-                        })
-                        .collect();
-                    lines.join("\n")
-                }
-                Err(e) => format!("列目录失败: {}", e),
-            }
-        }
-        other => {
-            format!("未知工具: {}", other)
-        }
-    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -581,29 +357,41 @@ mod tests {
     }
 
     #[test]
-    fn build_assistant_tool_call_message_creates_valid_json() {
+    fn convert_to_llm_format_assistant_with_tool_calls() {
+        use crate::{convert_to_llm_format, AgentMessage, ToolCallInfo};
         let tcs = vec![ToolCallInfo {
             id: "call_1".into(),
             name: "read_file".into(),
             arguments: r#"{"path":"/tmp/x"}"#.into(),
         }];
-        let msg = build_assistant_tool_call_message("thinking...", &tcs);
-        assert!(msg.tool_calls.is_some());
-        let tc_val = msg.tool_calls.as_ref().unwrap();
+        let messages = vec![AgentMessage::Assistant {
+            text: "thinking...".into(),
+            tool_calls: tcs,
+        }];
+        let out = convert_to_llm_format(&messages);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].tool_calls.is_some());
+        let tc_val = out[0].tool_calls.as_ref().unwrap();
         assert_eq!(tc_val.len(), 1);
         assert_eq!(tc_val[0]["function"]["name"], "read_file");
     }
 
     #[test]
-    fn build_assistant_tool_call_message_null_content_when_empty() {
+    fn convert_to_llm_format_assistant_tool_calls_null_content_when_empty() {
+        use crate::{convert_to_llm_format, AgentMessage, ToolCallInfo};
         let tcs = vec![ToolCallInfo {
             id: "call_2".into(),
             name: "list_dir".into(),
             arguments: r#"{"path":"."}"#.into(),
         }];
-        let msg = build_assistant_tool_call_message("", &tcs);
-        assert!(msg.content.is_none());
-        assert!(msg.tool_calls.is_some());
+        let messages = vec![AgentMessage::Assistant {
+            text: String::new(),
+            tool_calls: tcs,
+        }];
+        let out = convert_to_llm_format(&messages);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].content.is_none());
+        assert!(out[0].tool_calls.is_some());
     }
 
     #[test]
@@ -648,14 +436,6 @@ mod tests {
             .filter(|s| !s.is_empty())
             .unwrap_or(&config.llm.default_model);
         assert_eq!(model, config.llm.default_model);
-    }
-
-    #[test]
-    fn tool_call_accumulator_default() {
-        let acc = ToolCallAccumulator::default();
-        assert!(acc.id.is_empty());
-        assert!(acc.name.is_empty());
-        assert!(acc.arguments.is_empty());
     }
 
     #[test]
