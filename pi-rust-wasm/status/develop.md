@@ -1,5 +1,19 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-11 14:45 | INTEGRATION | develop | — |
+
+### 新增 OpenAI 接口验证工具（verify-openai-apis）
+
+**新增文件**：
+- `.cursor/commands/verify-openai-apis.md`：Cursor 命令文档，支持从 `.env` 读取 `OPENAI_API_KEY`/`HTTPS_PROXY`，列出并验证 `GET /v1/models`、`POST /v1/responses`、`POST /v1/chat/completions` 三个接口。
+- `scripts/verify-openai-apis.sh`：配套可执行脚本，自动加载 `.env`，支持交互与非交互选择，输出 PASS/FAIL 摘要与错误码排查建议，默认模型 `gpt-5.2`。
+
+**验证结果**：脚本已在当前环境通过验证（PASS=2 FAIL=0 及全部3/3），确认 key 与代理配置可用。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-11 | INTEGRATION | develop | — |
 
 ### 集成测试报告（TASK-12 feature/async-hostcall 合并）
