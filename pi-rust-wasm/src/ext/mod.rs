@@ -13,7 +13,7 @@ mod instance_stub;
 mod instance_wasmedge;
 pub mod plugin;
 
-pub use dispatcher::HostApiDispatcher;
+pub use dispatcher::{AsyncCallStatus, HostApiDispatcher};
 pub use engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
 pub use engine_wasmedge::WasmEngine;
 pub use host_binding::{invoke_host_func, invoke_host_func_with, HostRequest, HostResponse};

@@ -10,13 +10,26 @@ use crate::core::{
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext, EventListenerId};
 use crate::infra::{AuditRecorder, HostcallAuditEntry};
+use dashmap::DashMap;
 use futures_util::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
 
 use super::host_binding::{HostRequest, HostResponse};
 
-/// 宿主 API 分发器：无状态、Send + Sync，支持多 Agent 并发。
+/// 异步 Hostcall 任务状态。
+pub enum AsyncCallStatus {
+    Pending,
+    Done(HostResponse),
+    Error(String),
+}
+
+/// 宿主 API 分发器：Send + Sync，支持多 Agent 并发。
 /// 各 Processor 以 Option 注入，未注入时返回明确错误。
+/// Clone 为浅拷贝（内部均为 Arc），可安全传入 spawn 的 Future。
+#[derive(Clone)]
 pub struct HostApiDispatcher {
     event_bus: Arc<dyn EventBus>,
     primitive: Option<Arc<dyn PrimitiveExecutor>>,
@@ -24,10 +37,18 @@ pub struct HostApiDispatcher {
     llm: Option<Arc<dyn LlmProvider>>,
     session: Option<Arc<SessionManager>>,
     audit: Option<Arc<dyn AuditRecorder>>,
+    async_results: Arc<DashMap<String, AsyncCallStatus>>,
+    /// instance_id -> [callId, ...] 映射，用于实例销毁时清理 pending 任务。
+    instance_calls: Arc<DashMap<String, Vec<String>>>,
+    tokio_handle: Option<Handle>,
+    async_timeout: Duration,
+    llm_semaphore: Arc<Semaphore>,
 }
 
 impl HostApiDispatcher {
     /// 构造分发器；EventBus 必选，其余可选。
+    /// Tokio Handle 默认通过 `Handle::try_current()` 自动获取；
+    /// 可通过 `with_tokio_handle()` 显式注入。
     pub fn new(event_bus: Arc<dyn EventBus>) -> Self {
         Self {
             event_bus,
@@ -36,6 +57,11 @@ impl HostApiDispatcher {
             llm: None,
             session: None,
             audit: None,
+            async_results: Arc::new(DashMap::new()),
+            instance_calls: Arc::new(DashMap::new()),
+            tokio_handle: Handle::try_current().ok(),
+            async_timeout: Duration::from_secs(30),
+            llm_semaphore: Arc::new(Semaphore::new(5)),
         }
     }
 
@@ -69,18 +95,111 @@ impl HostApiDispatcher {
         self
     }
 
-    /// 同步分发入口：在独立 runtime 上 block_on(dispatch_async)，兼容同步调用方（如 host_binding）。
+    /// 显式注入 Tokio Handle（覆盖构造时自动获取的值）。
+    pub fn with_tokio_handle(mut self, h: Handle) -> Self {
+        self.tokio_handle = Some(h);
+        self
+    }
+
+    /// 设置异步 Hostcall 超时时长（默认 30s）。
+    pub fn with_async_timeout(mut self, d: Duration) -> Self {
+        self.async_timeout = d;
+        self
+    }
+
+    /// 设置 LLM 最大并发请求数（默认 5）。
+    pub fn with_llm_concurrency(mut self, max: usize) -> Self {
+        self.llm_semaphore = Arc::new(Semaphore::new(max));
+        self
+    }
+
+    /// 同步分发入口：
+    /// - `request.call_id` 非空且 module != "__async" → 异步提交（spawn Tokio 任务，立即返回 `{pending: true}`）
+    /// - 否则 → 同步路径（block_on dispatch_async）
     ///
     /// # Errors
-    /// * 与 [`dispatch_async`] 相同；此外若无法创建 tokio Runtime 会 panic（进程启动期单次调用，通常不会失败）。
+    /// * 与 [`dispatch_async`] 相同。
     pub fn dispatch(
         &self,
         instance_id: &str,
         request: HostRequest,
     ) -> Result<HostResponse, AppError> {
-        // 同步入口仅在 hostcall 时调用，进程内创建 Runtime 在常规环境下不会失败。
-        let rt = tokio::runtime::Runtime::new().expect("create runtime for sync dispatch");
-        rt.block_on(self.dispatch_async(instance_id, request))
+        // __async.poll 始终走同步路径，不管是否携带 callId
+        let is_async_poll = request.module == "__async";
+
+        if !is_async_poll {
+            if let Some(call_id) = request.call_id.clone() {
+                return self.submit_async(instance_id, &call_id, request);
+            }
+        }
+
+        // 同步路径：优先使用共享 Handle，fallback 到 Runtime::new()
+        match &self.tokio_handle {
+            Some(h) => h.block_on(self.dispatch_async(instance_id, request)),
+            None => {
+                let rt = tokio::runtime::Runtime::new()
+                    .expect("create runtime for sync dispatch");
+                rt.block_on(self.dispatch_async(instance_id, request))
+            }
+        }
+    }
+
+    /// 异步提交：spawn 后台 Tokio 任务，立即返回 `{pending: true}`。
+    fn submit_async(
+        &self,
+        instance_id: &str,
+        call_id: &str,
+        request: HostRequest,
+    ) -> Result<HostResponse, AppError> {
+        let handle = self.tokio_handle.as_ref().ok_or_else(|| {
+            AppError::Plugin("async hostcall requires a Tokio runtime handle".into())
+        })?;
+
+        self.async_results
+            .insert(call_id.to_string(), AsyncCallStatus::Pending);
+
+        self.instance_calls
+            .entry(instance_id.to_string())
+            .or_default()
+            .push(call_id.to_string());
+
+        let dispatcher = self.clone();
+        let inst_id = instance_id.to_string();
+        let cid = call_id.to_string();
+        let timeout = self.async_timeout;
+
+        handle.spawn(async move {
+            let result = tokio::time::timeout(
+                timeout,
+                dispatcher.dispatch_async(&inst_id, request),
+            )
+            .await;
+            let status = match result {
+                Ok(Ok(resp)) => AsyncCallStatus::Done(resp),
+                Ok(Err(e)) => AsyncCallStatus::Error(e.to_string()),
+                Err(_) => AsyncCallStatus::Error(format!(
+                    "async hostcall timeout ({}s)",
+                    timeout.as_secs()
+                )),
+            };
+            dispatcher.async_results.insert(cid, status);
+        });
+
+        Ok(HostResponse {
+            ok: true,
+            data: Some(serde_json::json!({"pending": true})),
+            error: None,
+            call_id: Some(call_id.to_string()),
+        })
+    }
+
+    /// 清理指定实例的所有 pending 异步任务（插件卸载/实例销毁时调用）。
+    pub fn cleanup_instance(&self, instance_id: &str) {
+        if let Some((_, call_ids)) = self.instance_calls.remove(instance_id) {
+            for cid in call_ids {
+                self.async_results.remove(&cid);
+            }
+        }
     }
 
     /// 异步分发入口：按 module/method 路由，每笔 Hostcall 可选记录审计。
@@ -97,6 +216,7 @@ impl HostApiDispatcher {
         let params = request.params.clone();
 
         let result = match (request.module.as_str(), request.method.as_str()) {
+            ("__async", "poll") => self.do_async_poll(&params),
             ("log" | "agent", "log")
             | ("agent", "info")
             | ("agent", "warn")
@@ -175,6 +295,35 @@ impl HostApiDispatcher {
         let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
         tracing::info!("[plugin log] {}", msg);
         Ok(HostResponse::ok(serde_json::Value::Null))
+    }
+
+    fn do_async_poll(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
+        let call_id = params
+            .get("callId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Plugin("__async.poll: missing callId".into()))?;
+        match self.async_results.get(call_id) {
+            Some(entry) => match entry.value() {
+                AsyncCallStatus::Pending => {
+                    Ok(HostResponse::ok(serde_json::json!({"ready": false})))
+                }
+                AsyncCallStatus::Done(resp) => {
+                    let data = resp.data.clone();
+                    drop(entry);
+                    self.async_results.remove(call_id);
+                    Ok(HostResponse::ok(
+                        serde_json::json!({"ready": true, "result": data}),
+                    ))
+                }
+                AsyncCallStatus::Error(e) => {
+                    let err = e.clone();
+                    drop(entry);
+                    self.async_results.remove(call_id);
+                    Ok(HostResponse::err(err))
+                }
+            },
+            None => Ok(HostResponse::err(format!("unknown callId: {call_id}"))),
+        }
     }
 
     async fn do_read_file(
@@ -270,6 +419,9 @@ impl HostApiDispatcher {
             None => return Ok(HostResponse::err("LlmProvider not configured (004)")),
             Some(l) => l,
         };
+        let _permit = self.llm_semaphore.acquire().await.map_err(|_| {
+            AppError::Plugin("LLM semaphore closed".into())
+        })?;
         let req = parse_chat_request(params)?;
         let resp = llm.chat(req).await?;
         Ok(HostResponse::ok(
@@ -286,6 +438,9 @@ impl HostApiDispatcher {
             None => return Ok(HostResponse::err("LlmProvider not configured (004)")),
             Some(l) => l,
         };
+        let _permit = self.llm_semaphore.acquire().await.map_err(|_| {
+            AppError::Plugin("LLM semaphore closed".into())
+        })?;
         let req = parse_chat_request(params)?;
         let mut stream = llm.chat_stream(req).await?;
         let mut content = String::new();
@@ -1279,5 +1434,248 @@ mod tests {
         };
         let res = d.dispatch_async("inst-1", req).await.unwrap();
         assert!(!res.ok);
+    }
+
+    // ========== Async Hostcall Tests (8.4.8) ==========
+
+    fn make_dispatcher_with_primitive() -> HostApiDispatcher {
+        let bus = Arc::new(DefaultEventBus::new());
+        HostApiDispatcher::new(bus)
+            .with_tokio_handle(Handle::current())
+            .with_primitive(Arc::new(MockPrimitive))
+    }
+
+    #[tokio::test]
+    async fn async_submit_poll_full_roundtrip() {
+        let d = make_dispatcher_with_primitive();
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "executeBash".to_string(),
+            params: serde_json::json!({"command": "echo hi"}),
+            call_id: Some("req-1".to_string()),
+        };
+        let submit = d.dispatch("inst-a", req).unwrap();
+        assert!(submit.ok);
+        assert_eq!(submit.call_id.as_deref(), Some("req-1"));
+        assert!(submit.data.as_ref().unwrap().get("pending").unwrap().as_bool().unwrap());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let poll_req = HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({"callId": "req-1"}),
+            call_id: None,
+        };
+        let poll_res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+        assert!(poll_res.ok);
+        let data = poll_res.data.unwrap();
+        assert!(data.get("ready").unwrap().as_bool().unwrap());
+        assert!(data.get("result").is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_path_unchanged_without_call_id() {
+        let d = make_dispatcher_with_primitive();
+        let res = tokio::task::spawn_blocking(move || {
+            let req = HostRequest {
+                module: "fs".to_string(),
+                method: "executeBash".to_string(),
+                params: serde_json::json!({"command": "echo hi"}),
+                call_id: None,
+            };
+            d.dispatch("inst-a", req)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(res.ok);
+        assert!(res.data.as_ref().unwrap().get("stdout").is_some());
+    }
+
+    #[tokio::test]
+    async fn async_poll_not_ready_immediately() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
+        d.async_results.insert("pending-1".to_string(), AsyncCallStatus::Pending);
+        let poll_req = HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({"callId": "pending-1"}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+        assert!(res.ok);
+        assert!(!res.data.unwrap().get("ready").unwrap().as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn async_poll_ready_returns_result() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
+        d.async_results.insert(
+            "done-1".to_string(),
+            AsyncCallStatus::Done(HostResponse::ok(serde_json::json!({"stdout": "hello"}))),
+        );
+        let poll_req = HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({"callId": "done-1"}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+        assert!(res.ok);
+        let data = res.data.unwrap();
+        assert!(data.get("ready").unwrap().as_bool().unwrap());
+        let result = data.get("result").unwrap();
+        assert_eq!(result.get("stdout").unwrap().as_str().unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn async_poll_error_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
+        d.async_results.insert(
+            "err-1".to_string(),
+            AsyncCallStatus::Error("something broke".to_string()),
+        );
+        let poll_req = HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({"callId": "err-1"}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+        assert!(!res.ok);
+        assert!(res.error.unwrap().contains("something broke"));
+    }
+
+    #[tokio::test]
+    async fn async_timeout_produces_error() {
+        let bus = Arc::new(DefaultEventBus::new());
+        // Slow mock: sleeps longer than timeout
+        struct SlowPrimitive;
+        #[async_trait::async_trait]
+        impl PrimitiveExecutor for SlowPrimitive {
+            async fn read_file(&self, _: &str, _: &str) -> Result<String, AppError> { Ok(String::new()) }
+            async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, AppError> { Ok(vec![]) }
+            async fn write_file(&self, _: &str, _: &str, _: bool, _: &str) -> Result<WriteFileResult, AppError> {
+                Ok(WriteFileResult { path: String::new(), written: false })
+            }
+            async fn edit_file(&self, _: &str, _: Vec<EditOperation>, _: &str) -> Result<EditFileResult, AppError> {
+                Ok(EditFileResult { path: String::new(), applied: false })
+            }
+            async fn execute_bash(&self, _: &str, _: Option<&str>, _: &str) -> Result<BashResult, AppError> {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                Ok(BashResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })
+            }
+            async fn require_user_confirmation(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, AppError> {
+                Ok(true)
+            }
+        }
+        let d = HostApiDispatcher::new(bus)
+            .with_tokio_handle(Handle::current())
+            .with_primitive(Arc::new(SlowPrimitive))
+            .with_async_timeout(std::time::Duration::from_millis(100));
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "executeBash".to_string(),
+            params: serde_json::json!({"command": "slow"}),
+            call_id: Some("timeout-1".to_string()),
+        };
+        d.dispatch("inst-a", req).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let poll_req = HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({"callId": "timeout-1"}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+        assert!(!res.ok);
+        assert!(res.error.unwrap().contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn async_multiple_call_ids_concurrent() {
+        let d = make_dispatcher_with_primitive();
+        for i in 0..5 {
+            let req = HostRequest {
+                module: "fs".to_string(),
+                method: "executeBash".to_string(),
+                params: serde_json::json!({"command": format!("echo {i}")}),
+                call_id: Some(format!("multi-{i}")),
+            };
+            let submit = d.dispatch("inst-a", req).unwrap();
+            assert!(submit.ok);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        for i in 0..5 {
+            let poll_req = HostRequest {
+                module: "__async".to_string(),
+                method: "poll".to_string(),
+                params: serde_json::json!({"callId": format!("multi-{i}")}),
+                call_id: None,
+            };
+            let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+            assert!(res.ok);
+            assert!(res.data.unwrap().get("ready").unwrap().as_bool().unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn async_cleanup_instance_removes_pending() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
+        d.async_results.insert("ci-1".to_string(), AsyncCallStatus::Pending);
+        d.async_results.insert("ci-2".to_string(), AsyncCallStatus::Pending);
+        d.instance_calls.entry("inst-x".to_string()).or_default().extend(["ci-1".to_string(), "ci-2".to_string()]);
+        // Also add one for a different instance to ensure it's not removed
+        d.async_results.insert("other-1".to_string(), AsyncCallStatus::Pending);
+        d.instance_calls.entry("inst-y".to_string()).or_default().push("other-1".to_string());
+
+        d.cleanup_instance("inst-x");
+
+        assert!(d.async_results.get("ci-1").is_none());
+        assert!(d.async_results.get("ci-2").is_none());
+        assert!(d.async_results.get("other-1").is_some());
+    }
+
+    #[tokio::test]
+    async fn async_poll_cleans_up_after_ready() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
+        d.async_results.insert(
+            "once-1".to_string(),
+            AsyncCallStatus::Done(HostResponse::ok(serde_json::json!({"v": 42}))),
+        );
+        let poll_req = || HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({"callId": "once-1"}),
+            call_id: None,
+        };
+        let res1 = d.dispatch_async("inst-a", poll_req()).await.unwrap();
+        assert!(res1.ok);
+        assert!(res1.data.unwrap().get("ready").unwrap().as_bool().unwrap());
+
+        let res2 = d.dispatch_async("inst-a", poll_req()).await.unwrap();
+        assert!(!res2.ok);
+        assert!(res2.error.unwrap().contains("unknown callId"));
+    }
+
+    #[tokio::test]
+    async fn async_poll_missing_call_id_returns_err() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_tokio_handle(Handle::current());
+        let poll_req = HostRequest {
+            module: "__async".to_string(),
+            method: "poll".to_string(),
+            params: serde_json::json!({}),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
+        assert!(!res.ok);
+        assert!(res.error.unwrap().contains("missing callId"));
     }
 }

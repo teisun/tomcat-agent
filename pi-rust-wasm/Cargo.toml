@@ -33,6 +33,7 @@ dialoguer = "0.11"
 toml = "0.8"
 tempfile = "3.10"
 parking_lot = "0.12"
+dashmap = "6"
 rustyline = "15"
 syntect = "5"
 ctrlc = { version = "3", features = ["termination"] }
