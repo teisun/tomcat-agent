@@ -90,18 +90,18 @@
 - **7.3** 启用 WasmEdge 官方 QuickJS 运行时扩展，验证 JS 代码可执行。
 - **7.4** 启用并配置 Node.js 兼容层（fs/path/process/console/http 等高频模块）。
 - **7.5** 
-    - 实现宿主导入绑定骨架：将宿主侧函数注册到 Wasm 实例导入表，并映射到 QuickJS 全局对象（具体 API 实现在 T1-P0-008）；实现 Rust↔JS 类型转换与错误传递的最小通道。
-    - 实现统一 Hostcall 路由器骨架，定义 `invoke_host_func` 入口。
+  - 实现宿主导入绑定骨架：将宿主侧函数注册到 Wasm 实例导入表，并映射到 QuickJS 全局对象（具体 API 实现在 T1-P0-008）；实现 Rust↔JS 类型转换与错误传递的最小通道。
+  - 实现统一 Hostcall 路由器骨架，定义 `invoke_host_func` 入口。
 - **7.6** 跨平台编译与运行验证（Windows/macOS/Linux 至少各一次）。
 - **资源上限**：Wasm 实例与 QuickJS 创建时使用固定默认资源上限（与 Standard 模式一致），具体数值见 **Architecture.md「4.5 资源与内存模式」**；后续由内存模式扩展为按 profile 配置。
 - **7.x** 预留 `set_memory_limit`（或等价）接口调用位，MVP 阶段可传固定值，但代码结构需支持从配置层动态传入上限。
 
 ---
 
-
 ## T1-P0-008 宿主API层与JS绑定实现 (Hostcall & JS Binding)
 
 ### 核心目标
+
 构建宿主与 Wasm 沙箱间的高性能、异步、安全的通信桥梁。通过统一的 Hostcall 路由器分发请求，并完全对齐 `pi-mono` 的 ExtensionAPI 行为规范。
 
 ### 任务细分
@@ -110,34 +110,44 @@
   - 基于 design 定义统一的 Hostcall 通信协议（JSON 序列化）。
   - 实现 Rust 侧与 JS 侧对齐的数据传输对象（DTO），强制使用 `#[serde(rename_all = "camelCase")]` 确保与 `pi-mono` 字段一致。
   - 定义 `HostRequest` 与 `HostResponse` 的标准包格式（包含 `module`, `method`, `params`, `call_id`）。
-
 - **8.2 统一 Hostcall 多路复用分发器 (Dispatcher)**
   - 实现 `HostApiDispatcher` 模块，采用“单入口多路复用”模式，减少 Wasm 导入表开销。
   - 路由逻辑设计：支持根据 `module_id` 或字符串快速分发至对应的 Processor（Fs, Llm, Agent 等）。
   - 实现无状态路由器，确保 `Send + Sync`，支持多 Agent 并发调用。
-
 - **8.3 核心 API 逻辑集成 (Core Logic Integration)**
   - **4原语集成**：接入 `PrimitiveExecutor`，确保所有文件/命令操作经过权限校验与用户二次确认。
   - **LLM/工具集成**：接入 `LlmProvider` 与 `ToolRegistry`，支持插件注册自定义工具。
   - **事件与会话**：接入 `EventBus` 实现跨沙箱事件分发；接入 `SessionManager` 实现上下文读写。
   - **审计挂钩**：在分发层统一触发 `AuditLogger`，记录每一个 Hostcall 的来源插件、参数及执行状态。
-
 - **8.4 异步 Hostcall 与并发调度 (Async & Concurrency)**
-  - 实现基于 `WasmEdge` 异步扩展的调用机制，确保耗时 API（LLM、网络）不阻塞 Wasm 实例执行。
-  - 接入 `Tokio` 运行时，实现 Hostcall 的异步等待与结果回传（Future-based mapping）。
-  - 优化并发模型，确保多 Agent 同时调用时，宿主侧资源竞争（如 Session 读写）通过分片锁或 `Arc<RwLock>` 解决。
-
+  - 技术方案见 [异步 Hostcall 与事件循环设计](../../specs/architecture/async-hostcall-event-loop.md)。
+  - **8.4.1** `dispatcher.rs`：新增 `AsyncCallStatus` 枚举（`Pending`/`Done(HostResponse)`/`Error(String)`）和 `async_results: Arc<DashMap<String, AsyncCallStatus>>` 字段到 `HostApiDispatcher`。
+  - **8.4.2** `dispatcher.rs`：改造 `dispatch()` — 若 `request.call_id` 非空，spawn Tokio 任务到共享 `tokio_handle`，将实际 `dispatch_async` 结果写入 `async_results`，立即返回 `{ok: true, data: {pending: true}, callId: "..."}`。
+  - **8.4.3** `dispatcher.rs`：新增 `__async.poll` 路由 — 当 `module == "__async" && method == "poll"` 时，从 `async_results` 查结果并返回 `{ready: true/false, result: ...}`。
+  - **8.4.4** `instance_wasmedge.rs`：将 `dispatch()` 中的 `Runtime::new().block_on(...)` 改为使用宿主全局共享的 `tokio::runtime::Handle`，避免每次创建新 Runtime。
+  - **8.4.5** `dispatcher.rs`：为异步任务添加超时控制（`tokio::time::timeout`，默认 30 秒，可配置）。
+  - **8.4.6** 实例销毁时清理该实例的所有 pending 异步任务（在 `WasmInstance::drop` 中清除 `async_results` 相关条目）。
+  - **8.4.7** 优化并发模型：多 Agent 同时调用时，Session 读写通过分片锁或 `Arc<RwLock>` 解决；LLM 并发通过 `Semaphore` 限制。
+  - **8.4.8** 单元测试：异步提交→轮询→返回全链路；超时处理；多 callId 并发；边界：submit 后实例销毁时的清理。
+- **8.7 JS API 与 pi-mono 对齐 (JS API Alignment)**
+  - 技术方案见 [JS API 与 pi-mono 对齐设计](../../specs/architecture/js-api-alignment.md)。
+  - **8.7.1** `pi_bridge.js`：新增 `hostCallAsync` 函数（submit/poll 包装，返回 Promise），含 callId 生成、指数退避轮询逻辑。
+  - **8.7.2** `pi_bridge.js`：`exec` / `createChatCompletion` 改为调用 `hostCallAsync`，返回 Promise，返回值解包为 pi-mono 格式（`ExecResult` / `CompletionResult`）。
+  - **8.7.3** `pi_bridge.js`：修复 `off` / `emit` 重复定义 bug，合并为单一定义。
+  - **8.7.4** `pi_bridge.js`：新增 `pi.once(event, handler)` 方法。
+  - **8.7.5** 集成测试：JS 插件调用 `await pi.exec("echo hello")`，验证 Promise 正确 resolve 且返回值为 `{stdout, stderr, exitCode}` 格式。
+  - **8.7.6** 集成测试：JS 插件调用 `await pi.createChatCompletion({...})`，验证 Promise 正确 resolve。
+  - **8.7.7** （P1）`readFile`/`writeFile`/`editFile` 改为返回 Promise（可先 `Promise.resolve` 包装同步结果）。
+  - **8.7.8** （P1）新增 `pi.setModel` / `pi.getModel` / `pi.complete` / `pi.unregisterTool`。
 - **8.5 内存安全边界与错误透传 (Safety & Error Handling)**
   - **内存校验**：实现 Wasm 线性内存边界检查，防止宿主侧在读取参数或写入结果时发生越界攻击。
   - **所有权管理**：明确 Hostcall 过程中的内存申请与释放责任，防止内存泄漏。
   - **错误映射**：将宿主侧的 `AppError` 精确映射为 JS 侧的异常（Exception），确保插件能捕获并处理权限拒绝、超时等错误。
-
 - **8.6 验收与测试 (QA)**
   - **功能测试**：编写集成测试脚本（JS 侧），验证从插件发起调用到宿主执行并返回结果的全链路。
   - **边界测试**：模拟大并发调用（10+ Agents 同时请求 LLM）验证引擎稳定性。
   - **安全测试**：验证未授权 API 是否被物理拦截，验证非法内存指针是否被正确阻断。
   - **覆盖率**：宿主 API 层单测及集成测试覆盖率 ≥85%。
-
 
 ---
 
@@ -241,3 +251,18 @@
 
 - **2.1** 开发至少 3 个示例插件，分别覆盖：工具注册与调用、事件监听（如 tool_call/input）、4 原语调用（read/write/edit/bash 至少各一例）。
 - **2.2** 为示例插件补充注释与 README，作为兼容性测试与开发者参考用例。
+
+---
+
+## T1-P1-005 Agent Loop 核心结构化实现
+
+- **5.1** 定义 AgentMessage 枚举：UserMessage、AssistantMessage、ToolResultMessage、SystemMessage、SteeringMessage；实现 convert_to_llm_format()（AgentMessage → LLM Message 的唯一转换边界，参考 agent-loop.md 13.4）。
+- **5.2** 新增 src/core/agent_loop.rs，实现 AgentLoop 结构体；持有 steering_queue/follow_up_queue/abort_signal；实现三层循环骨架（Conversation Loop → Attempt Loop → Reasoning Loop），参考 agent-loop.md 13.3.2 伪代码。
+- **5.3** 实现 Steering 机制：steer(msg) 写入 steering_queue；Reasoning Loop 每个工具执行完毕后检查队列，有则跳过剩余工具、注入消息、进入下一轮 LLM 调用。
+- **5.4** 实现 FollowUp 机制：follow_up(msg) 写入 follow_up_queue；Conversation Loop 尾部检查队列，有则继续循环（one-at-a-time 默认模式）。
+- **5.5** 实现 Abort 信号：abort() 设置 AtomicBool；Reasoning Loop 每个工具执行前检查，已设置则终止循环并发布 agent_end(interrupted)。
+- **5.6** 在 Loop 各关键节点接入 EventBus 发布 AgentEvent，发布时序见 agent-loop.md 13.6（agent_start/end、turn_start/end、message_start/update/end、tool_execution_start/end、auto_retry_start/end）。
+- **5.7** 实现错误分类（参考 agent-loop.md 13.10）：AppError 中识别 RateLimit/Timeout/5xx 为 Retryable，在 Attempt Loop 内指数退避重试（MAX_ATTEMPTS 可配置，默认 3）；401/400/ModelNotFound 为 Fatal；工具执行错误为 ToolError，回注 LLM。
+- **5.8** 重构 src/api/chat.rs：移除直接的 chat_loop + do_chat_turn 实现，改为构造 AgentLoop 并调用 run()；Steering 注册到 CLI Ctrl+C 中断事件。
+- **5.9** 单元测试：Loop 状态机（正常/RateLimit 重试/Fatal 终止/Abort 路径）、Steering 注入时序（当前工具完成后才跳过）、FollowUp 触发、AgentEvent 发布顺序；覆盖率 ≥ 80%。
+

@@ -30,7 +30,9 @@ pi-rust-wasm是一款参考pi-agent-rust设计、基于Rust+WasmEdge构建的轻
 4.  Node.js核心兼容层：基于WasmEdge原生实现，覆盖fs/path/process/console等pi插件高频核心模块
 5.  宿主核心API：LLM统一接入、工具注册、事件系统、配置管理核心能力落地
 6.  极简CLI工具：实现会话管理、对话交互、插件加载/卸载、配置管理核心命令
-7.  基础安全体系：插件级权限管控、沙箱隔离、4原语操作全链路审计（敏感数据加密 TODO 后续考虑）
+7.  Agent Loop 核心运行时：三层嵌套循环（对话管理/容错重试/思考-行动），Steering/FollowUp/Abort 用户中断机制，Rate Limit 指数退避自动重试，完整 AgentEvent/ExtensionEvent 生命周期发布，消息类型边界隔离
+8.  基础安全体系：插件级权限管控、沙箱隔离、4原语操作全链路审计（敏感数据加密 TODO 后续考虑）
+9.  异步 Hostcall 与 JS API 对齐：复用 `__pi_host_call` 的 submit/poll 机制实现异步非阻塞 Hostcall（LLM/exec 等耗时调用），pi_bridge.js 核心 API 返回 Promise 对齐 pi-mono async/await 编程模型。技术方案见 [异步 Hostcall 与事件循环设计](architecture/async-hostcall-event-loop.md)、[JS API 对齐设计](architecture/js-api-alignment.md)
 
 ## 不做（一期Out of Scope）
 1.  多Agent完整体系、自定义Agent能力（三期及以后实现）
@@ -41,6 +43,9 @@ pi-rust-wasm是一款参考pi-agent-rust设计、基于Rust+WasmEdge构建的轻
 6.  容器化运行环境、多平台交叉编译（三期实现）
 7.  插件市场、多模态能力、团队协作（长期规划）
 8.  内存模式多档位与运行时动态切换（一期仅预留设计，十一期实现）
+9.  工具调用循环检测（ToolLoopGuard）：三道防线检测（一期仅有 MAX_TOOL_ROUNDS 硬限制，二期实现）
+10. 上下文自动压缩（Compaction）：Context Overflow 时 LLM 摘要（一期仅做简单截断兜底，二期实现）
+11. 长生命周期 VM（插件跨事件调用状态保持）：一期短生命周期 VM 足以支持无状态 async/await 插件；二期通过 waitForEvent 模式实现 VM 会话级存活，支持 pi-mono 有状态插件（git-checkpoint、todo、plan-mode 等）。方案见 [Phase 2 长生命周期 VM 设计](architecture/phase2-long-lived-vm.md)
 
 ## 十期迭代路线图
 | 期数 | 核心主题 | 核心交付内容 | 预计周期 |

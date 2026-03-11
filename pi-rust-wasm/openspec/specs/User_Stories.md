@@ -76,6 +76,17 @@
 - [ ] 支持Token消耗统计与记录，每次对话显示Token消耗
 - [ ] API密钥可配置并生效，调用支持限流与指数退避重试（加密存储 TODO 后续考虑）
 
+### Story 8a: 异步 Hostcall 与 JS API 对齐
+**作为插件开发者**，我希望在插件中使用 `async/await` 调用宿主 API（如 `await pi.exec("ls")`），耗时操作不阻塞插件执行，与 pi-mono 的异步编程模型一致。
+**验收标准**：
+- [ ] `pi.exec()`、`pi.createChatCompletion()` 等耗时 API 返回 Promise，插件可用 `await` 消费
+- [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞 Wasm 实例，宿主后台异步处理
+- [ ] 返回值格式与 pi-mono 一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
+- [ ] `pi.on`/`pi.off`/`pi.emit` 无重复定义 bug，`pi.once` 可用
+- [ ] 插件内多个并发异步调用（如同时 `await pi.exec()` + `await pi.createChatCompletion()`）可正确运行
+- [ ] 异步操作超时后返回清晰错误，插件可通过 `try/catch` 捕获
+- [ ] 同步 API（`pi.log`、`pi.registerTool`、`pi.on` 等）行为不变，不受异步改造影响
+
 ### Story 8: CLI工具基础对话与会话管理
 **作为用户**，我希望能通过CLI工具与Agent对话，管理会话历史，正常使用插件能力。
 **验收标准**：
@@ -85,8 +96,23 @@
 - [ ] 对话中Agent调用4原语/工具时，清晰展示操作内容，等待用户确认后执行
 - [ ] 支持Markdown/代码块高亮渲染，快捷键支持（Ctrl+C中断、Ctrl+D退出、↑↓历史导航）
 - [ ] `pi-wasm session`系列命令可完整管理会话生命周期
+- [ ] Agent 执行工具期间，用户发送新消息可触发 Steering——完成当前工具后跳过剩余工具，注入新指令并重新调用 LLM（中途换方向不需要重新创建会话）
+- [ ] Ctrl+C 可触发 Abort——当前工具执行完毕后立即终止 Agent，发布 agent_end(interrupted)
+- [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
+- [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在等）给出清晰提示并终止
+- [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
 
 ## P1 二期核心用户故事
+### Story 8b: 长生命周期 VM 与有状态插件支持
+**作为插件开发者**，我希望插件的全局变量、事件监听器、定时器能在整个会话期间保持，不因事件触发而重置，与 pi-mono 的插件运行模型一致。
+**验收标准**：
+- [ ] 插件的全局变量跨多次事件调用保持（如 `let counter = 0` 在多次 `tool_call` 事件间累加）
+- [ ] `pi.on()` 注册的 handler 只需注册一次，后续事件直接触发，无需每次重新执行插件脚本
+- [ ] `setInterval` 定时器在会话期间持续运行（如 mac-system-theme 的 2s 主题轮询）
+- [ ] `session_start` 初始化的数据可在后续 `before_agent_start`、`tool_call` 等事件中读取
+- [ ] 会话结束时（`session_shutdown` 或用户退出）VM 正常关闭，资源完全释放
+- [ ] pi-mono 核心有状态插件（git-checkpoint、todo、plan-mode、ssh 等）可零修改正确运行
+
 ### Story 9: 插件自举全闭环
 **作为用户**，我希望Agent能根据我的自然语言需求，自主生成、编译、加载插件，无需人工干预。
 **验收标准**：
@@ -161,3 +187,7 @@
 - [ ] 实现插件评分、评论、使用量统计，优质内容推荐
 - [ ] 完善插件安全扫描、合规审核门禁，保证市场内容安全
 - [ ] 实现开发者文档、最佳实践、插件开发模板，降低开发门槛
+
+### 注：以下 Agent Loop 能力延迟到二期
+- **工具循环自动检测**：Generic Repeat / Ping Pong / Global Circuit Breaker 三道防线
+- **上下文自动压缩（Compaction）**：Context Overflow 时调用 LLM 生成历史摘要

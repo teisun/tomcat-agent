@@ -41,7 +41,9 @@
 
 ##### **3.3.2 异步非阻塞调用 (Async Hostcalls)**
 - **理论**：对于 LLM 调用、网络 IO、耗时原语，必须使用 **Async Hostcall**。
-- **实践**：利用 WasmEdge 的异步转译机制。当插件发起 LLM 请求时，宿主立即释放当前 Wasm 执行线程，将其挂起（Yield）；待 LLM 结果返回后，由异步运行时（Tokio）重新唤醒该 Wasm 实例。这样可以确保少数几个宿主线程就能支撑成百上千个 Agent 的并发。
+- **原方案（已排除）**：利用 WasmEdge 的异步转译机制（`async_host_function` API）挂起/唤醒 Wasm 实例。**实际验证发现此 API 仅限 Linux 平台**（`#[cfg(target_os = "linux")]` 门控），macOS/Windows 不可用，不满足跨平台要求。
+- **MVP 方案（已采纳）**：复用已有 `__pi_host_call` Wasm 导入的 **submit/poll 模式**。插件通过带 `callId` 的请求提交异步任务，宿主 spawn Tokio 任务后立即返回 `{pending: true}`；JS 侧通过 `setTimeout` 轮询 `__async.poll` 路由获取结果。wasmedge_quickjs 内置事件循环自动驱动 Promise 与 setTimeout 回调。**零 Wasm 改动，三个文件集中修改**。
+- 完整技术设计见 [异步 Hostcall 与事件循环设计](async-hostcall-event-loop.md)。
 
 ##### **3.3.3 细粒度锁定 (Fine-grained Locking)**
 - **规范**：禁止使用全局 `Mutex<AppStatus>`。

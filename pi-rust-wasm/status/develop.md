@@ -1,5 +1,17 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-11 | DONE | develop | - |
+
+### 本次执行说明（openspec 架构子文档与 MVP 设计更新）
+
+- [✓] **Architecture 渐进式披露**：拆分为 architecture/ 子文档，新增 agent-loop.md、async-hostcall-event-loop.md、js-api-alignment.md、phase2-long-lived-vm.md。
+- [✓] **001-mvp**：更新 design.md、task.md、tasks_details.md；同步 Product_Brief、User_Stories；host-api-layer.md 更新。
+- [✓] **agents**：TASK_BOARD.md 同步。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-10 | INTEGRATION | develop | — |
 
 ### E2E 测试规范体系建立（CLI 重命名为 pi）

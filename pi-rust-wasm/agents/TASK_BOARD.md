@@ -154,6 +154,131 @@
 
 ---
 
+### TASK-12 | T1-P0-008-async | 异步 Hostcall 与 submit/poll 机制实现
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/async-hostcall` |
+| **阻塞点** | — |
+
+**目标**：实现异步 Hostcall 的 submit/poll 机制，使 exec/LLM 等耗时调用不阻塞 Wasm 实例，利用 wasmedge_quickjs 内置事件循环自动驱动 Promise 解析。
+
+**技术方案**：[异步 Hostcall 与事件循环设计](../openspec/specs/architecture/async-hostcall-event-loop.md)
+
+**子项**（参考 tasks_details.md T1-P0-008 的 8.4）：
+- [ ] 8.4.1 `dispatcher.rs`：新增 `AsyncCallStatus` + `async_results: Arc<DashMap>`
+- [ ] 8.4.2 `dispatcher.rs`：改造 `dispatch()` — callId 非空时 spawn Tokio 任务，立即返回 pending
+- [ ] 8.4.3 `dispatcher.rs`：新增 `__async.poll` 路由
+- [ ] 8.4.4 `instance_wasmedge.rs`：`dispatch()` 改用共享 Tokio Handle
+- [ ] 8.4.5 异步任务超时控制（默认 30s）
+- [ ] 8.4.6 实例销毁时清理 pending 异步任务
+- [ ] 8.4.7 并发模型优化（Session 分片锁、LLM Semaphore）
+- [ ] 8.4.8 单元测试 + 集成测试
+
+**依赖**：T1-P0-008 (DONE)
+
+**被依赖**：TASK-13 (JS API 对齐)
+
+**涉及文件**：
+- `src/ext/dispatcher.rs`：核心改动（异步任务管理 + poll 路由）
+- `src/ext/instance_wasmedge.rs`：共享 Tokio Handle
+
+**验收标准**：
+- 带 `callId` 的 hostcall 请求立即返回 `{pending: true}`，后台 Tokio 任务异步执行
+- `__async.poll` 路由可正确返回 `{ready: true/false}` 及结果
+- 异步任务超时后返回错误
+- 实例销毁时无 pending 任务泄漏
+- 多 callId 并发场景稳定
+
+---
+
+### TASK-13 | T1-P0-008-jsapi | JS API 与 pi-mono 对齐
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/js-api-alignment` |
+| **阻塞点** | TASK-12 完成后启动 |
+
+**目标**：pi_bridge.js 的 `globalThis.pi` 接口对齐 pi-mono `ExtensionAPI`，核心 API 返回 Promise，修复已知 bug。
+
+**技术方案**：[JS API 与 pi-mono 对齐设计](../openspec/specs/architecture/js-api-alignment.md)
+
+**子项**（参考 tasks_details.md T1-P0-008 的 8.7）：
+- [ ] 8.7.1 `pi_bridge.js`：新增 `hostCallAsync` 函数（submit/poll 包装，返回 Promise）
+- [ ] 8.7.2 `exec` / `createChatCompletion` 改为调用 `hostCallAsync`，返回值解包为 pi-mono 格式
+- [ ] 8.7.3 修复 `off` / `emit` 重复定义 bug
+- [ ] 8.7.4 新增 `pi.once(event, handler)`
+- [ ] 8.7.5 集成测试：`await pi.exec("echo hello")`
+- [ ] 8.7.6 集成测试：`await pi.createChatCompletion({...})`
+- [ ] 8.7.7 （P1）readFile/writeFile/editFile 返回 Promise
+- [ ] 8.7.8 （P1）新增 setModel/getModel/complete/unregisterTool
+
+**依赖**：TASK-12 (T1-P0-008-async)
+
+**被依赖**：TASK-05 (pi-mono 插件兼容性测试)
+
+**涉及文件**：
+- `assets/js/pi_bridge.js`：核心改动
+
+**验收标准**：
+- `pi.exec("...")` 返回 Promise，`await` 可正确获取 `{stdout, stderr, exitCode}`
+- `pi.createChatCompletion({...})` 返回 Promise，结果格式与 pi-mono 一致
+- `off`/`emit` 无重复定义
+- `pi.once` 可用
+- pi-mono 风格插件代码 `const result = await pi.exec("ls")` 可正常运行
+
+---
+
+### TASK-14 | T1-P1-005 | Agent Loop 核心结构化实现
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/agent-loop` |
+| **阻塞点** | — |
+
+**目标**：将现有 chat_loop + do_chat_turn 重构为正式的三层 AgentLoop 结构体，实现 Steering/FollowUp/Abort 中断机制、AgentEvent 完整发布、错误分类与自动重试。
+
+**技术方案**：[Agent Loop 设计](../openspec/specs/architecture/agent-loop.md)
+
+**子项**（参考 tasks_details.md T1-P1-005）：
+- [ ] 5.1 AgentMessage 枚举与 convert_to_llm_format() 转换边界
+- [ ] 5.2 AgentLoop 结构体（src/core/agent_loop.rs），三层循环骨架
+- [ ] 5.3 Steering 机制（steer()，每工具后检查）
+- [ ] 5.4 FollowUp 机制（follow_up()，第一层尾部检查）
+- [ ] 5.5 Abort 信号（abort()，AtomicBool，每工具前检查）
+- [ ] 5.6 AgentEvent 全生命周期节点发布（agent_start/end, turn_*, message_*, tool_execution_*）
+- [ ] 5.7 错误分类与 Retryable 指数退避重试
+- [ ] 5.8 重构 src/api/chat.rs → AgentLoop::run()
+- [ ] 5.9 单元测试（Loop 状态机、Steering 时序、事件顺序）
+
+**依赖**：T1-P0-011（DONE，TASK-03）
+
+**被依赖**：T1-P1-002（插件兼容性测试依赖完整 Loop）
+
+**协作接口**：
+- 消费：LlmProvider、SessionManager、PrimitiveExecutor、ToolRegistry、EventBus
+- 提供：AgentLoop::run()、steer()、follow_up()、abort() 公开 API
+
+**验收标准**：
+- Steering：执行工具批次中途发送消息，当前工具完成后跳过剩余工具并继续
+- FollowUp：Agent 回答后追加消息，在同一会话上下文无缝继续
+- Abort：abort() 调用后当前工具完成即终止，发布 agent_end(interrupted)
+- 事件：agent_start/end、turn_start/end、tool_execution_start/end 均正确发布
+- 重试：RateLimit/Timeout 自动退避重试 ≤ MAX_ATTEMPTS 次；401 立即终止
+- 工具错误：不终止 Loop，错误内容回注 LLM
+- 覆盖率 ≥ 80%
+
+---
+
 ### TASK-04 | T1-P1-001 | 审计日志系统完整落地
 
 | 字段 | 内容 |

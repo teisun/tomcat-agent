@@ -184,7 +184,8 @@ API绑定实现逻辑：
 6.  **WASI系统接口**：基于WASI Preview2实现，文件IO、网络请求、异步调度全部经过宿主权限校验，禁止未授权访问
 #### 4.3 并发调度与异步 Hostcall
 - **多路复用分发**：宿主侧实现统一入口路由器，通过 `(module, method)` 映射业务逻辑，减少 Wasm 导出表维护成本。
-- **异步唤醒机制**：针对 LLM 等高延迟 Hostcall，利用 WasmEdge 的异步转译机制，调用时挂起 Wasm 实例，由 Tokio 在结果返回后唤醒，支撑高并发 Agent 同时运行。
+- **异步 Hostcall 机制（MVP）**：WasmEdge 的 `async_host_function` API 仅限 Linux，不满足跨平台要求。MVP 采用 **submit/poll 模式**：插件发起带 `callId` 的异步请求，宿主 spawn Tokio 任务后立即返回 `{pending: true}`，JS 侧通过 `setTimeout` 驱动的轮询循环调用 `__async.poll` 获取结果。wasmedge_quickjs 内置的 `EventLoop` + `run_loop_without_io()` 自动驱动 Promise 微任务和 setTimeout 回调，`_start` 在所有异步任务完成后自然退出。完整技术设计见 [异步 Hostcall 与事件循环设计](../../specs/architecture/async-hostcall-event-loop.md)。
+- **JS API 对齐**：`pi_bridge.js` 中 `exec`/`createChatCompletion` 等耗时 API 改为返回 Promise，与 pi-mono `async/await` 编程模型兼容。详见 [JS API 与 pi-mono 对齐设计](../../specs/architecture/js-api-alignment.md)。
 - **资源配额**：每个实例强制限制内存上限（如 128MB）与指令计数（Gas Limit），防止恶意插件耗尽系统资源。
 
 核心执行流程见 [CODE_BLOCK_P1_009]

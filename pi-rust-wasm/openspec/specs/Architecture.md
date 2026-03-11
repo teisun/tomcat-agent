@@ -87,6 +87,24 @@
 
 详见 [工作目录与数据布局（详细）](architecture/work-dir-and-data-layout.md)。
 
+### 11. 异步 Hostcall 与事件循环设计
+
+针对 LLM 调用、命令执行等耗时 Hostcall 的异步非阻塞方案。MVP 采用复用 `__pi_host_call` 的 submit/poll 模式，利用 wasmedge_quickjs 内置事件循环自动驱动 Promise 解析，无需修改 wasmedge_quickjs.wasm。宿主侧在 `HostApiDispatcher` 中新增异步任务管理，通过 `callId` 和 `__async.poll` 路由实现请求提交与结果轮询。
+
+详见 [11. 异步 Hostcall 与事件循环设计（详细）](architecture/async-hostcall-event-loop.md)。
+
+### 12. JS API 与 pi-mono 对齐设计
+
+`pi_bridge.js` 的 `globalThis.pi` 接口与 pi-mono `ExtensionAPI` 的对齐方案。核心改动：`exec`/`createChatCompletion` 等耗时 API 从同步改为返回 Promise（依赖第 11 节异步 Hostcall），修复 `off`/`emit` 重复定义 bug，补齐 `once`/`setModel`/`getModel`/`complete` 等缺失 API。
+
+详见 [12. JS API 与 pi-mono 对齐设计（详细）](architecture/js-api-alignment.md)。
+
+### 13. Agent Loop 设计
+
+Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（Steering/FollowUp/Abort）、容错重试（Compaction/Backoff）的完整生命周期。采用三层嵌套循环：对话管理循环（管理用户输入与持久化）→ 容错重试循环（处理 ContextOverflow、RateLimit 等可恢复错误）→ 思考-行动循环（LLM 流式调用 + 工具执行 + Steering 检查）。Loop 是事件系统（第 8 节）的最大发布者，所有 AgentEvent / ExtensionEvent 的发布时机均在本节定义。
+
+详见 [13. Agent Loop 设计（详细）](architecture/agent-loop.md)。
+
 ---
 
 ## 详细设计索引
@@ -104,3 +122,7 @@
 | [architecture/session-storage.md](architecture/session-storage.md) | 会话存储数据结构设计 |
 | [architecture/work-dir-and-data-layout.md](architecture/work-dir-and-data-layout.md) | 工作目录与数据布局 |
 | [architecture/host-call-protocol.md](architecture/host-call-protocol.md) | Hostcall JSON 协议（请求/响应与 module/method 约定） |
+| [architecture/async-hostcall-event-loop.md](architecture/async-hostcall-event-loop.md) | 异步 Hostcall 与事件循环设计 |
+| [architecture/phase2-long-lived-vm.md](architecture/phase2-long-lived-vm.md) | Phase 2 长生命周期 VM 方案设计（方案 A/B 对比） |
+| [architecture/js-api-alignment.md](architecture/js-api-alignment.md) | JS API 与 pi-mono 对齐设计 |
+| [architecture/agent-loop.md](architecture/agent-loop.md) | Agent Loop 设计 |
