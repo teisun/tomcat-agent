@@ -2,6 +2,92 @@
 //!
 //! 单入口多路复用：根据 HostRequest 的 module/method 路由到对应 Processor。
 //! 与 Architecture 宿主API层（host-api-layer）3.3 一致；支持 4 原语、LLM、工具、事件、会话 API。
+//!
+//! ## 结构示意
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────────┐
+//! │                        HostApiDispatcher                                     │
+//! ├─────────────────────────────────────────────────────────────────────────────┤
+//! │ 注入的 Processor（Option）                                                    │
+//! │   event_bus ──────► 事件 on/off/emit/once                                     │
+//! │   primitive ──────► 4 原语 readFile/writeFile/editFile/executeBash           │
+//! │   tools ───────────► 工具 register/call/list/getActive/setActive             │
+//! │   llm ─────────────► LLM createChatCompletion / createChatCompletionStream    │
+//! │   session ─────────► 会话 getCurrent/getMessages/sendMessage                 │
+//! │   audit ───────────► 每笔 Hostcall 记录                                       │
+//! ├─────────────────────────────────────────────────────────────────────────────┤
+//! │ 异步基础设施                                                                  │
+//! │   async_results: DashMap<callId, AsyncCallStatus>   ► 异步任务结果缓存        │
+//! │   instance_calls: DashMap<instance_id, [callId]>   ► 实例→callId 映射（清理） │
+//! │   tokio_handle ───► 共享 Runtime，同步路径 block_on / 异步路径 spawn          │
+//! │   llm_semaphore ──► 限制 LLM 并发（默认 5）                                   │
+//! │   async_timeout ──► 异步任务超时（默认 30s）                                  │
+//! └─────────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 调用流
+//!
+//! ```text
+//!   Wasm __pi_host_call(request_json)
+//!            │
+//!            ▼
+//!   ┌─────────────────────┐
+//!   │  dispatch(instance_id, request)  │  同步入口
+//!   └──────────┬──────────┘
+//!              │
+//!              ├── module == "__async" ？ ──否──► 有 call_id ？
+//!              │         │                            │
+//!              │        是                           是
+//!              │         │                            ▼
+//!              │         │                  submit_async() ──► 写 Pending，spawn 任务
+//!              │         │                            │      立即返回 { pending: true }
+//!              │         │                            │
+//!              │         │                            │  后台: timeout(dispatch_async)
+//!              │         │                            │         │
+//!              │         │                            │         ▼ 结果写入 async_results
+//!              │         │                            │
+//!              │         └────────────────────────────┘
+//!              │
+//!              └── 同步路径: block_on( dispatch_async(instance_id, request) )
+//!                                    │
+//!                                    ▼
+//!              ┌─────────────────────────────────────────────────────────┐
+//!              │  dispatch_async: 按 (module, method) 路由                │
+//!              │    __async.poll ──► do_async_poll (查 async_results)     │
+//!              │    fs.* ──────────► do_read_file / do_write_file / ...   │
+//!              │    llm.* ─────────► do_chat / do_chat_stream (带 Semaphore) │
+//!              │    tools.* ───────► do_register_tool / do_call_tool / ... │
+//!              │    events.* ──────► do_events (on/off/emit/once)          │
+//!              │    session.* ─────► do_get_current_session / getMessages  │
+//!              │    context.* ─────► do_context_* (isIdle/abort/cwd/...)   │
+//!              │    agent.log ─────► do_log                               │
+//!              └─────────────────────────────────────────────────────────┘
+//!                                    │
+//!                                    ▼
+//!              可选 audit.record_hostcall() ──► 返回 HostResponse
+//! ```
+//!
+//! ## 异步 submit/poll 时序
+//!
+//! ```text
+//!  插件(JS)                 dispatch()              async_results         Tokio 任务
+//!     │                        │                         │                    │
+//!     │  hostCall(..., callId)  │                         │                    │
+//!     │───────────────────────►│                         │                    │
+//!     │                        │ insert(Pending)         │                    │
+//!     │                        │────────────────────────►│                    │
+//!     │                        │ spawn( timeout(dispatch_async) )             │
+//!     │                        │─────────────────────────────────────────────►│
+//!     │  { pending: true }     │                         │                    │
+//!     │◄───────────────────────│                         │                    │
+//!     │                        │                         │                    │
+//!     │  __async.poll(callId)  │                         │                    │ 完成
+//!     │───────────────────────►│ get(callId)             │                    │
+//!     │                        │◄────────────────────────│ insert(Done/Error) │
+//!     │  { ready, result }     │                         │                    │
+//!     │◄───────────────────────│ remove(callId)          │                    │
+//! ```
 
 use crate::core::{
     ChatMessage, ChatRequest, EditOperation, LlmProvider, PrimitiveExecutor, SessionManager,
