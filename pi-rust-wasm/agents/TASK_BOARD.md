@@ -159,7 +159,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `DOING` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `feature/async-hostcall` |
 | **阻塞点** | — |
@@ -169,14 +169,14 @@
 **技术方案**：[异步 Hostcall 与事件循环设计](../openspec/specs/architecture/async-hostcall-event-loop.md)
 
 **子项**（参考 tasks_details.md T1-P0-008 的 8.4）：
-- [ ] 8.4.1 `dispatcher.rs`：新增 `AsyncCallStatus` + `async_results: Arc<DashMap>`
-- [ ] 8.4.2 `dispatcher.rs`：改造 `dispatch()` — callId 非空时 spawn Tokio 任务，立即返回 pending
-- [ ] 8.4.3 `dispatcher.rs`：新增 `__async.poll` 路由
-- [ ] 8.4.4 `instance_wasmedge.rs`：`dispatch()` 改用共享 Tokio Handle
-- [ ] 8.4.5 异步任务超时控制（默认 30s）
-- [ ] 8.4.6 实例销毁时清理 pending 异步任务
-- [ ] 8.4.7 并发模型优化（Session 分片锁、LLM Semaphore）
-- [ ] 8.4.8 单元测试 + 集成测试
+- [✓] 8.4.1 `dispatcher.rs`：新增 `AsyncCallStatus` + `async_results: Arc<DashMap>`
+- [✓] 8.4.2 `dispatcher.rs`：改造 `dispatch()` — callId 非空时 spawn Tokio 任务，立即返回 pending
+- [✓] 8.4.3 `dispatcher.rs`：新增 `__async.poll` 路由
+- [✓] 8.4.4 `instance_wasmedge.rs`：`dispatch()` 改用共享 Tokio Handle
+- [✓] 8.4.5 异步任务超时控制（默认 30s）
+- [✓] 8.4.6 实例销毁时清理 pending 异步任务
+- [✓] 8.4.7 并发模型优化（Session 分片锁、LLM Semaphore）
+- [✓] 8.4.8 单元测试 + 集成测试
 
 **依赖**：T1-P0-008 (DONE)
 
