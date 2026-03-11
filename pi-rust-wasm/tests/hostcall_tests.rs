@@ -130,3 +130,56 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
     assert!(resp.ok, "注入 primitive 后 readFile 应返回 ok，error: {:?}", resp.error);
     tracing::info!("Assert: HostResponse::ok，readFile 正向路径通过");
 }
+
+/// [异步 hostcall] 带 callId 的请求立即返回 pending，__async.poll 可轮询到结果
+///
+/// 验证：TASK-12 异步 Hostcall submit/poll 机制；带 callId 的请求返回 ok + data.pending=true；
+/// 随后 __async.poll(callId) 可得到 ready: true 与 result。
+/// 意义：集成测试覆盖 __async 路由与 async_results 生命周期。
+/// 注意：submit 须在 runtime 内执行（以便 Dispatcher 获得 Handle）；poll 在 runtime 外执行，避免 dispatch 内 block_on 嵌套 panic。
+#[test]
+fn test_hostcall_async_submit_then_poll_returns_result() {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_hostcall_async_submit_then_poll_returns_result").entered();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let dispatcher: Arc<HostApiDispatcher> = rt.block_on(async {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = Arc::new(HostApiDispatcher::new(bus));
+        tracing::info!("Arrange: HostApiDispatcher（无 primitive，仅验证 async 路径）");
+        let req_submit = r#"{"module":"agent","method":"log","params":{"message":"async integration"},"callId":"call-async-1"}"#;
+        let res = invoke_host_func_with(Some(d.as_ref()), "inst-async", req_submit);
+        tracing::info!("Act: invoke_host_func_with(agent/log, callId=call-async-1)");
+        assert!(res.is_ok(), "异步提交应返回 Ok");
+        let resp = res.unwrap();
+        assert!(resp.ok, "响应应为 ok");
+        let pending = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("pending"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(pending, "应返回 data.pending=true");
+        assert_eq!(resp.call_id.as_deref(), Some("call-async-1"));
+        tracing::info!("Assert: 收到 pending 响应与 callId");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        d
+    });
+
+    let poll_req = r#"{"module":"__async","method":"poll","params":{"callId":"call-async-1"},"callId":null}"#;
+    let poll_res = invoke_host_func_with(Some(dispatcher.as_ref()), "inst-async", poll_req);
+    tracing::info!("Act: __async.poll(callId=call-async-1)");
+
+    assert!(poll_res.is_ok(), "poll 应成功");
+    let poll_resp = poll_res.unwrap();
+    assert!(poll_resp.ok, "poll 响应应为 ok，error: {:?}", poll_resp.error);
+    let ready = poll_resp
+        .data
+        .as_ref()
+        .and_then(|d| d.get("ready"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ready, "poll 应返回 ready=true");
+    assert!(poll_resp.data.as_ref().and_then(|d| d.get("result")).is_some());
+    tracing::info!("Assert: poll 返回 ready=true 且带 result");
+}

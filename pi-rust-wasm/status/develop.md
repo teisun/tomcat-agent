@@ -1,5 +1,25 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-11 | INTEGRATION | develop | — |
+
+### 集成测试报告（TASK-12 feature/async-hostcall 合并）
+
+**合并分支**：`feature/async-hostcall` → `develop`（fast-forward）。
+
+**合并前检查**：在 `feature/async-hostcall` 上执行 `cargo build`、`cargo clippy`（3 个既有警告：config/logging）、`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture` 全量单测通过；合并无冲突。
+
+**集成测试编写**：针对本次合并引入的异步 Hostcall（submit/poll、`__async.poll` 路由、`async_results`）在 `tests/hostcall_tests.rs` 新增 `test_hostcall_async_submit_then_poll_returns_result`：带 callId 的 agent/log 立即返回 pending，sleep 后 `__async.poll(callId)` 得到 ready: true 与 result；用例在 Runtime 内完成 submit、在 runtime 外执行 poll 以避免 dispatch 内 block_on 嵌套。
+
+**全量验收**：`cargo build`、`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 通过（含 hostcall_tests 5 条、wasmedge_e2e_tests 7 条等）。
+
+**结果摘要**：TASK-12 (T1-P0-008-async) 异步 Hostcall submit/poll 机制已合并至 develop；已补充 __async 路由集成测试 1 条，门禁与全量验收通过。
+
+**环境**：macOS，Rust，WasmEdge。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | - | 2026-03-11 | DONE | develop | - |
 
 ### 新增Event Loop事件循环模型与Angent Loop设计(架构子文档与 MVP 设计/用户故事更新)
