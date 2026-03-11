@@ -1,5 +1,34 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Spike | 2026-03-12 15:00 | DONE | develop | - |
+
+### TASK-14 Agent Loop 核心结构化实现（DONE）
+
+- [✓] **[P1]** 5.1 AgentMessage 枚举与 convert_to_llm_format()
+- [✓] **[P1]** 5.2 AgentLoop 三层循环骨架（src/core/agent_loop.rs，1555 行）
+- [✓] **[P1]** 5.3 Steering 机制
+- [✓] **[P1]** 5.4 FollowUp 机制
+- [✓] **[P1]** 5.5 Abort 信号（AtomicBool）
+- [✓] **[P1]** 5.6 AgentEvent 全生命周期发布
+- [✓] **[P1]** 5.7 错误分类与 Retryable 指数退避重试
+- [✓] **[P1]** 5.8 重构 chat.rs → AgentLoop::run()
+- [✓] **[P1]** 5.9 单元测试（250 passed / 0 failed，0 新增 clippy 警告）
+
+### INTERFACE（新增对外接口）
+
+- `AgentLoop::new(llm, primitive, event_bus, config, abort)` — 标准构造函数
+- `AgentLoop::run(messages) -> Result<AgentRunResult, AppError>` — 主入口
+- `AgentLoop::steer(msg: String)` — 外部线程注入 Steering 消息
+- `AgentLoop::follow_up(msg: String)` — 外部线程追加 FollowUp 消息
+- `AgentLoop::abort()` — Ctrl+C 中断信号
+- `AgentMessage` 枚举（User/Assistant/ToolResult/System/Steering/CompactionSummary）
+- `convert_to_llm_format(messages)` — AgentMessage → ChatMessage 转换
+- `agent_messages_from_chat(messages)` — ChatMessage → AgentMessage 反向转换（供 chat.rs 加载历史用）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-11 14:45 | INTEGRATION | develop | — |
 
 ### 新增 OpenAI 接口验证工具（verify-openai-apis）

@@ -240,8 +240,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DONE` |
+| **负责人** | Spike |
 | **分支** | `feature/agent-loop` |
 | **阻塞点** | — |
 
@@ -250,15 +250,15 @@
 **技术方案**：[Agent Loop 设计](../openspec/specs/architecture/agent-loop.md)
 
 **子项**（参考 tasks_details.md T1-P1-005）：
-- [ ] 5.1 AgentMessage 枚举与 convert_to_llm_format() 转换边界
-- [ ] 5.2 AgentLoop 结构体（src/core/agent_loop.rs），三层循环骨架
-- [ ] 5.3 Steering 机制（steer()，每工具后检查）
-- [ ] 5.4 FollowUp 机制（follow_up()，第一层尾部检查）
-- [ ] 5.5 Abort 信号（abort()，AtomicBool，每工具前检查）
-- [ ] 5.6 AgentEvent 全生命周期节点发布（agent_start/end, turn_*, message_*, tool_execution_*）
-- [ ] 5.7 错误分类与 Retryable 指数退避重试
-- [ ] 5.8 重构 src/api/chat.rs → AgentLoop::run()
-- [ ] 5.9 单元测试（Loop 状态机、Steering 时序、事件顺序）
+- [✓] 5.1 AgentMessage 枚举与 convert_to_llm_format() 转换边界
+- [✓] 5.2 AgentLoop 结构体（src/core/agent_loop.rs），三层循环骨架
+- [✓] 5.3 Steering 机制（steer()，每工具后检查）
+- [✓] 5.4 FollowUp 机制（follow_up()，第一层尾部检查）
+- [✓] 5.5 Abort 信号（abort()，AtomicBool，每工具前检查）
+- [✓] 5.6 AgentEvent 全生命周期节点发布（agent_start/end, turn_*, message_*, tool_execution_*）
+- [✓] 5.7 错误分类与 Retryable 指数退避重试
+- [✓] 5.8 重构 src/api/chat.rs → AgentLoop::run()
+- [✓] 5.9 单元测试（Loop 状态机、Steering 时序、事件顺序）
 
 **依赖**：T1-P0-011（DONE，TASK-03）
 
