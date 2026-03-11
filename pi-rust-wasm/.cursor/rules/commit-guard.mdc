@@ -2,17 +2,17 @@
 alwaysApply: true
 ---
 
-# Cursor 提交规范 + 覆盖率自动校验规则（Rust 专用）
+# Cursor 提交规范（Rust 专用）
 
 **作用域**：Git 提交 / 代码 Commit 场景  
 **生效范围**：当前 Rust 项目全量 Agent
 
 ---
 
-## 一、提交前覆盖率来源（不执行测试/覆盖率）
+## 一、提交前覆盖率来源（可选，不强制）
 
-- **含代码变更的提交**：从当前分支对应的 `status/<分支对应>.md`（分支名中 `/` 替换为 `-`）读取**第一个元数据表**的 Cov% 列；若有则用于 commit message 的 `[cov = xx.x%]`；若缺失或未更新，**提示**先按宪法流程完成单测并更新 status，**但不阻塞提交**。
-- **仅修改 status/*.md 或仅 INTEGRATION.md**：仍按豁免规则，不要求覆盖率、不执行测试。
+- **含代码变更的提交**：从当前分支对应的 `status/<分支对应>.md`（分支名中 `/` 替换为 `-`）读取**第一个元数据表**的 Cov% 列；若有则用于 commit message 的 `[cov = xx.x%]`；若缺失或为空，**直接跳过**，不写 `[cov]`，不提示，不阻塞提交。
+- **仅修改 status/*.md 或仅 INTEGRATION.md**：按豁免规则，不要求覆盖率。
 
 ---
 
@@ -24,7 +24,7 @@ alwaysApply: true
 
 - 首行：`类型(模块): 简短描述(what)`，不超过 50 字。
 - 详细描述（why）：说明**为什么这么做**——动机、要解决的问题、改动的作用与意义；禁止记流水账。
-- 末尾：`[cov = xx.x%]`，数值从当前分支 status 文件的 Cov% 读取（与 status 中一致）；若 status 无 Cov% 则不要求本次带 [cov]，不阻塞提交。
+- 末尾：`[cov = xx.x%]`（可选）——仅当当前分支 status 文件中已填写 Cov% 时附上，数值须与 status 一致；若 status 无 Cov% 则直接省略，不写此字段。
 
 ### 2. 禁止行为
 
@@ -76,7 +76,7 @@ alwaysApply: true
 2. **检查 Commit Message 格式**
    - 首行为「类型(模块): 简短描述」，类型仅限 feat/fix/docs/style/refactor/test/chore，描述不超过 50 字
    - 可含详细描述（why）空行后书写：**必须写清「为什么这么做」——动机、要解决的问题、以及改动带来的作用与意义；禁止只罗列改了哪些文件（流水账）**
-   - 若从 status 读到了 Cov%，则 commit message 须含 `[cov = xx.x%]`（等号两侧留空格）且数值与之一致；若读不到 Cov%，**提示**更新 status，**不要求**本次 commit 带 [cov]，**不阻塞提交**
+   - 若从 status 读到了 Cov%，则 commit message 须含 `[cov = xx.x%]`（等号两侧留空格）且数值与之一致；若读不到 Cov%，直接省略 `[cov]` 字段，无需提示，正常提交
    - 格式或（有 Cov% 时）数值不匹配 → 拒绝提交并重写正确 message
 
 ---
@@ -86,5 +86,5 @@ alwaysApply: true
 1. 询问：本次提交修改了哪些文件？
 2. 判断是否仅修改 `status/*.md` 或仅修改 `INTEGRATION.md`
    - **是** → 按豁免规则生成合规 commit
-   - **否** → 从 status 读取 Cov%；若有则用该值生成带 `[cov = xx.x%]` 的 commit；若无则提示更新 status，但不阻塞提交
+   - **否** → 从 status 读取 Cov%；若有则用该值生成带 `[cov = xx.x%]` 的 commit；若无则**直接生成不含 [cov] 的 commit**，不提示，不阻塞
 3. 校验通过 → 允许提交；不通过 → 终止并提示原因

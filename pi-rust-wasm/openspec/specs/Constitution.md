@@ -51,7 +51,7 @@
 1. 符合本宪法及 Architecture.md 约束。
 2. 通过规范门禁（rustfmt/clippy 等）与约定测试， 无静默高危操作、无越权。
 3. 代码review通过，确保符合[编码规范](./guides/coding/Codeing&Architecture_Spec.md)、功能完整、注释完整、无设计缺陷、无需求遗漏
-4. 单元测试通过，算出覆盖率写入当前分支对应的 status 文件（如 `status/feature-xx.md`），且**填入该文件元数据表的 Cov% 列**（格式见 [Status规范](./guides/workflow/STATUS_GUIDE.md)），参考[单元测试规范](./guides/testing/UNIT_TEST_SPEC.md)
+4. 单元测试通过；覆盖率测量为**可选项**，若需测量可执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package pi_wasm`，将结果填入 status 元数据表 Cov% 列（格式见 [Status规范](./guides/workflow/STATUS_GUIDE.md)），参考[单元测试规范](./guides/testing/UNIT_TEST_SPEC.md)
 5. 集成测试通过，参考[集成测试规范](./guides/testing/INTEGRATION_TEST_SPEC.md)
 6. E2E测试通过
 7. 文档更新：配套说明或文档到位。

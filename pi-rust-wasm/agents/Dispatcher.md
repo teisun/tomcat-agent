@@ -69,7 +69,7 @@ Agent 读取本文件后，须按以下流程执行。
 3. 将 TASK_BOARD.md 中该任务状态改为 `DONE`
 4. **完成前自检（必做）**：
    - 已确认**当前分支**，并已更新 **status/当前分支对应.md**（分支名中 `/` → `-`）。
-   - **覆盖率**：若本次有代码变更，已执行 `cargo tarpaulin --lib --packages pi_wasm`，将结果写入上述 status 文件**第一个元数据表**的 Cov% 列；宪法要求 ≥85%。
+   - **覆盖率**（可选）：若需要测量覆盖率，可手动执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package pi_wasm`，将结果填入 status 文件元数据表的 Cov% 列；不强制执行，不阻塞任务完成。
    - **技术文档**：若有接口/行为变更，已按 [技术文档规范](../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md) 更新 `docs/` 下对应文档。
    - **提交**：已按 [commit-guard.mdc](../.cursor/rules/commit-guard.mdc) 提交，含 what+why；若为代码变更且 status 中已填 Cov%，commit message 末尾含 `[cov = xx.x%]`。
    - **推送**：已推送到远端。

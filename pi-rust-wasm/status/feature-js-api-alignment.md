@@ -2,6 +2,14 @@
 | :--- | :--- | :--- | :--- | :--- |
 | Tom | 2026-03-11 | DONE | feature/js-api-alignment | 60.98% |
 
+### 去掉 tarpaulin 强制执行 + 新增 /update-coverage Command
+
+- [✓] `agents/Dispatcher.md`：覆盖率自检改为可选，引用新 `/update-coverage` Command
+- [✓] `.cursor/rules/commit-guard.mdc`：标题精简，Cov% 缺失时不再提示、直接省略 `[cov]` 字段
+- [✓] `openspec/specs/Constitution.md`：完成定义第 4 条覆盖率改为可选项
+- [✓] `openspec/specs/guides/workflow/STATUS_GUIDE.md`：Cov% 列说明改为纯可选，无提示无阻塞
+- [✓] `.cursor/commands/update-coverage.md`：新增 `/update-coverage` Command，按需运行 tarpaulin 并自动写入 status Cov% 列
+
 ### TASK-13 JS API 与 pi-mono 对齐（T1-P0-008-jsapi）
 
 #### 子任务完成情况
