@@ -105,6 +105,12 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 
 详见 [13. Agent Loop 设计（详细）](architecture/agent-loop.md)。
 
+### 14. 多 Agent 架构设计
+
+系统支持两个维度的多 Agent 能力：**多会话并发**（不同 session 各对应一个独立 AgentLoop 实例，共享基础设施、上下文完全隔离，通过 AgentRegistry 管理全局实例）与**主-子 Agent 编排**（主 Agent 通过 `dispatch_agent` 工具调用创建子 AgentLoop，子任务独立执行后将最终回答回注为 ToolResult，支持嵌套深度限制与级联 Abort）。设计综合参考了 openclaw（SubagentRegistry + spawnDepth）、claude-code（强上下文隔离 + 两层硬限制）、AutoGen（CancellationToken 级联取消）、LangGraph（recursion_limit 软限）的最优实践，与第 8、9、10、13 节共同构成完整的多 Agent 运行基础。
+
+详见 [14. 多 Agent 架构设计（详细）](architecture/multi-agent.md)。
+
 ---
 
 ## 详细设计索引
@@ -126,3 +132,4 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [architecture/phase2-long-lived-vm.md](architecture/phase2-long-lived-vm.md) | Phase 2 长生命周期 VM 方案设计（方案 A/B 对比） |
 | [architecture/js-api-alignment.md](architecture/js-api-alignment.md) | JS API 与 pi-mono 对齐设计 |
 | [architecture/agent-loop.md](architecture/agent-loop.md) | Agent Loop 设计 |
+| [architecture/multi-agent.md](architecture/multi-agent.md) | 多 Agent 架构设计 |

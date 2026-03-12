@@ -1,5 +1,23 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Spike | 2026-03-12 16:30 | DONE | develop | - |
+
+### 多 Agent 架构设计文档（DONE）
+
+- [✓] **[P1]** 竞品调研：openclaw / claude-code / aider / SWE-agent / AutoGen / LangGraph / CrewAI / bolt.diy
+- [✓] **[P1]** 新建 openspec/specs/architecture/multi-agent.md（第 14 节，含 14.0 竞品对比、14.1–14.9 完整方案）
+- [✓] **[P1]** 更新 openspec/specs/Architecture.md：追加第 14 节摘要与索引条目
+
+### DESIGN（新增设计文档）
+
+- `openspec/specs/architecture/multi-agent.md` — 多 Agent 架构（维度A多会话并发 / 维度B主-子Agent编排）
+- 选型：工具调用派发（dispatch_agent 工具）；参考 openclaw SubagentRegistry + spawnDepth、claude-code 强上下文隔离、AutoGen CascadeAbort、LangGraph recursion_limit
+- 分三阶段落地：Phase 1（已有）→ Phase 2（AgentRegistry）→ Phase 3（dispatch_agent 工具）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Spike | 2026-03-12 15:00 | DONE | develop | - |
 
 ### TASK-14 Agent Loop 核心结构化实现（DONE）
