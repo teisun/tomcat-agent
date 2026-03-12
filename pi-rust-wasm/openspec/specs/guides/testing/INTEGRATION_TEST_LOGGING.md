@@ -51,9 +51,12 @@
 
 *   **静默模式（默认）**：直接运行 `cargo test` 时，日志不会打印，除非断言失败；集成测试的 tracing 输出需配合本节的 `--nocapture` 才能实时查看。
 *   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数；**集成测试**建议：`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture`，避免误以为未打日志。
+*   **按顺序输出（便于阅读）**：默认多线程并行跑测试时，各用例的 Arrange/Act/Assert 日志会交错。若希望**同一测试的日志连续、按执行顺序**出现，请加 `--test-threads=1` 串行执行。
     ```bash
     RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture
     RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture
+    # 日志按测试顺序、不交错（推荐排查时使用）：
+    RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture --test-threads=1
     ```
 *   **级别控制**：利用 `RUST_LOG` 环境变量动态调整日志等级：
     ```bash
