@@ -112,32 +112,18 @@ impl Default for LlmConfig {
 
 /// 存储配置：仅 work_dir。agent 系统子目录由 resolve 函数从 work_dir 推导。
 /// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StorageConfig {
     /// 工作根目录；默认 `~/.pi_wasm/`。支持 `~` 与相对路径。
     #[serde(default)]
     pub work_dir: Option<String>,
 }
 
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self { work_dir: None }
-    }
-}
-
 /// 插件配置：启动时自动加载的插件列表。插件目录由 [`resolve_plugins_dir`] 从 work_dir 推导。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PluginConfig {
     #[serde(default)]
     pub auto_load: Vec<String>,
-}
-
-impl Default for PluginConfig {
-    fn default() -> Self {
-        Self {
-            auto_load: Vec::new(),
-        }
-    }
 }
 
 /// 4 原语配置：路径/命令白名单与黑名单、审批与禁止列表、是否需用户确认等。

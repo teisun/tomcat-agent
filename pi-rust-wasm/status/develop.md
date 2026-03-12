@@ -1,5 +1,52 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-12 17:00 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-14 Agent Loop 核心结构化实现
+
+**合并分支**：`feature/agent-loop`（已合并到 develop，本次直接对 develop 现有代码执行集成测试与验收）
+
+#### 本次编写/补充的集成测试
+
+| 文件 | 内容 | 数量 |
+|------|------|------|
+| `tests/agent_loop_tests.rs`（新建） | AgentLoop 黑盒集成测试：纯文本回复、Abort、FollowUp、工具错误不终止、429 重试、401 立即终止、事件顺序、消息格式往返、空消息边界 | 10 |
+| `tests/cli_tests.rs`（新增） | E2E 用户视角：`test_user_chat_non_interactive_with_prompt_flag`（pi chat + stdin 单轮问答） | 1 |
+| `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md`（追加） | Story 9 — E2E-CLI-081 AgentLoop 场景条目 | 1 |
+
+#### 合并前检查（pre-merge，已于合并前通过）
+
+- [✓] `cargo build` 无错误
+- [✓] `cargo clippy` 无警告（本次修复 develop 上 3 条既有 clippy 警告：`StorageConfig`/`PluginConfig` derive Default、`logging.rs` 文档缩进）
+- [✓] 单元测试：250 passed / 0 failed / 1 ignored
+
+#### 合并后全量验收
+
+| 验收项 | 结果 |
+|--------|------|
+| `cargo build --release` | ✓ PASS |
+| `cargo clippy -- -D warnings` | ✓ PASS（修复 3 条既有警告后） |
+| 单元测试（250 用例） | ✓ 250 passed / 0 failed |
+| `agent_loop_tests`（10 用例） | ✓ 10 passed / 0 failed |
+| `event_tests`（3 用例） | ✓ PASS |
+| `session_tests`（4 用例） | ✓ PASS |
+| `robustness_tests`（5 用例） | ✓ PASS |
+| `primitives_tools_tests`（8 用例） | ✓ PASS |
+| `plugin_tests`（7 用例） | ✓ PASS |
+| `hostcall_tests`（2 用例） | ✓ PASS |
+| `js_api_alignment_tests`（2 用例） | ✓ PASS |
+| `cli_tests`（38 用例，含 E2E，含 test_user_chat_non_interactive_with_prompt_flag） | ✓ 38 passed / 0 failed |
+| `llm_tests`（真实 API，2 用例） | ✓ PASS（OPENAI_API_KEY 已配置） |
+| `wasmedge_e2e_tests` | ✓ PASS（WasmEdge 已安装） |
+| 全量 `cargo test --test '*'`（11 套测试文件，含 agent_loop_tests） | ✓ 全部通过 |
+
+**执行时间**：2026-03-12  
+**环境**：macOS（darwin 22.6.0），Rust stable，WasmEdge 已安装
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Spike | 2026-03-12 16:30 | DONE | develop | - |
 
 ### 多 Agent 架构设计文档（DONE）

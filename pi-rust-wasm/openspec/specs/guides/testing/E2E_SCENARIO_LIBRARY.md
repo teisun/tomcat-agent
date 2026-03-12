@@ -110,6 +110,16 @@
 
 ---
 
+## Story 9 — AgentLoop 核心结构（TASK-14，1 条）
+
+> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
+
+| 编号 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
+|------|--------|----------|----------|----------|
+| E2E-CLI-081 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `pi chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `pi init` → `pi chat`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 OPENAI_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复）|
+
+---
+
 ## 边界与健壮性场景（跨 Story）（4 条）
 
 | 编号 | 用例名 | 用户意图 | 操作序列 | 必须断言 |

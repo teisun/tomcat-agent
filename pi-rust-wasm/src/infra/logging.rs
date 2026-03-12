@@ -18,6 +18,7 @@ use super::config::LogConfig;
 /// # Errors
 /// * [`super::error::AppError::Config`] - `cfg.level` 不在 `trace`/`debug`/`info`/`warn`/`error` 之一时返回。
 /// * [`super::error::AppError::Io`] - 启用文件输出且无法创建/打开日志文件时返回。
+///
 /// `log_dir` — 日志写入目录（由 `resolve_log_dir` 推导），仅 `cfg.file_enabled == true` 时使用。
 pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), super::error::AppError> {
     let level = cfg.level.to_lowercase();
