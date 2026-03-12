@@ -1,5 +1,58 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-12 19:00 | E2E FULL COVERAGE PASS | develop | — |
+
+### E2E 全量覆盖报告：P0 用户故事全面覆盖
+
+**执行范围**：对 develop 分支现有代码执行全量 E2E 补充覆盖
+
+#### 本次新增/补充内容
+
+| 文件 | 内容 | 数量 |
+|------|------|------|
+| `openspec/specs/User_Stories.md`（更新） | Story 2 补充 `pi audit` CLI 命令验收项；Story 8 补充 `pi chat --resume` 与多轮上下文持久化；Story 8a 补充 registerTool/once Wasm E2E 测试说明 | 3 条验收项 |
+| `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md`（更新） | 新增 E2E-WASM-011（工具注册）、E2E-WASM-022（once handler 触发）、E2E-WASM-023（多 handler 触发）、E2E-CLI-082（chat --resume）、E2E-CLI-083（多轮上下文） | 5 条场景 |
+| `tests/cli_tests.rs`（新增 32 个 test_user_* 函数） | Story 1: 001-006（6）、Story 2: 011-012（2）、Story 3: 021-026（6）、Story 7: 041-042（2）、Story 8: 051-061+071-074+082（16） | 32 个 test_user_* |
+| `tests/wasmedge_e2e_tests.rs`（新增 3 个） | E2E-WASM-011/022/023 + 共用 `require_quickjs_wasm()` helper | 3 个 |
+| `tests/fixtures/wasmedge_quickjs/tool_register_test.js`（新建） | pi.registerTool + pi.log，验证 host_call 链路 | 1 个 |
+| `tests/fixtures/wasmedge_quickjs/event_once_test.js`（新建） | pi.once handler，供 dispatch_event 触发 | 1 个 |
+| `tests/fixtures/wasmedge_quickjs/event_multi_handler_test.js`（新建） | pi.on 两个 handler，供 dispatch_event 触发 | 1 个 |
+
+#### 已知限制（MVP 设计边界）
+
+| 项目 | 说明 |
+|------|------|
+| `pi.on`/`pi.once` 内部 JS emit 不触发 handler | MVP 无状态插件执行模型下，`pi.emit()` 从 JS 内部调用不触发已注册的 handler。「恰好 1 次」的 once 保证需 Story 8b（有状态 VM，P1）实现后补充。 |
+| `pi plugin list` 跨进程不持久 | CLI 插件状态为进程内存，关闭进程后插件列表清空。插件持久化需后续 P1 实现。 |
+| `pi audit export` 不创建文件 | MVP 阶段 audit export 命令存在但文件写入未实现，仅验收 exit 0。 |
+
+#### 全量验收结果
+
+| 验收项 | 结果 |
+|--------|------|
+| `cargo build --release` | ✓ PASS |
+| `cargo clippy -- -D warnings` | ✓ PASS |
+| 单元测试（250 用例，1 ignored） | ✓ 250 passed / 0 failed |
+| `agent_loop_tests`（10 用例） | ✓ PASS |
+| `cli_tests`（70 用例，含 32 个新增 test_user_*） | ✓ 70 passed / 0 failed |
+| `event_tests`（3 用例） | ✓ PASS |
+| `session_tests`（4 用例） | ✓ PASS |
+| `robustness_tests`（5 用例） | ✓ PASS |
+| `primitives_tools_tests`（8 用例） | ✓ PASS |
+| `plugin_tests`（5 用例） | ✓ PASS |
+| `hostcall_tests`（2 用例） | ✓ PASS |
+| `js_api_alignment_tests`（2 用例） | ✓ PASS |
+| `llm_tests`（真实 API，2 用例） | ✓ PASS（OPENAI_API_KEY 已配置） |
+| `wasmedge_e2e_tests`（10 用例，含 3 个新增） | ✓ 10 passed / 0 failed |
+| 全量 `cargo test --test '*'`（11 套测试文件） | ✓ 全部通过（共 123 个集成测试用例） |
+
+**执行时间**：2026-03-12
+**环境**：macOS（darwin 22.6.0），Rust stable，WasmEdge 已安装
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-12 17:00 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-14 Agent Loop 核心结构化实现

@@ -15,6 +15,10 @@ fn cmd() -> Command {
     Command::cargo_bin("pi").expect("binary pi should exist")
 }
 
+fn trunc(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 // ────────────────────── help & version ──────────────────────
 
 /// [--help 输出] 验证主帮助页包含所有一级子命令名称
@@ -985,6 +989,977 @@ fn test_audit_export_creates_file() {
 
     info!("Assert: exit 0");
     assert.success();
+}
+
+// ══════════════════════════════════════════════════════════════════
+// E2E 全量覆盖：test_user_* 用例（按 E2E_SCENARIO_LIBRARY 编号）
+// ══════════════════════════════════════════════════════════════════
+
+// ──────────────────── Story 1: 宿主初始化与基础配置 (E2E-CLI-001~006) ────────────────────
+
+/// [E2E-CLI-001] 新用户首次安装，完成初始化并验证环境健康
+///
+/// 用户意图：新用户首次安装，完成初始化并验证环境健康
+/// 验证：init exit 0 + stdout 含"已生成配置文件"；doctor exit 0 + stdout 含"✓"或"配置合法"
+#[test]
+fn test_user_first_time_setup_init_and_doctor() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: fresh temp dir, no existing config");
+    info!("Act: pi init");
+    let init_assert = cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert();
+    let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
+    info!("Assert init: exit 0 + stdout 含已生成配置文件；actual: {}", trunc(&init_out, 200));
+    init_assert.success().stdout(
+        predicate::str::contains("已生成配置文件").or(predicate::str::contains("config")),
+    );
+
+    info!("Act: pi doctor");
+    let mut c = cmd();
+    c.args(["doctor", "--config", config_path.to_str().unwrap()]);
+    let doctor_assert = c.assert();
+    let doctor_out = String::from_utf8_lossy(&doctor_assert.get_output().stdout.clone()).to_string();
+    info!("Assert doctor: exit 0 + stdout 含 ✓ 或 配置合法；actual: {}", trunc(&doctor_out, 200));
+    doctor_assert
+        .success()
+        .stdout(predicate::str::contains("✓").or(predicate::str::contains("配置合法")));
+}
+
+/// [E2E-CLI-002] 用户修改日志级别
+///
+/// 用户意图：修改 log.level 为 warn
+/// 验证：exit 0
+#[test]
+fn test_user_sets_config_value() {
+    common::setup_logging();
+    let _span = info_span!("test_user_sets_config_value").entered();
+
+    info!("Arrange: no special setup needed");
+    info!("Act: pi config set log.level warn");
+    let assert = cmd().args(["config", "set", "log.level", "warn"]).assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-003] 用户查看当前全部配置
+///
+/// 用户意图：查看当前全部配置
+/// 验证：exit 0；stdout 含配置段关键字（llm/log/storage）
+#[test]
+fn test_user_views_full_config() {
+    common::setup_logging();
+    let _span = info_span!("test_user_views_full_config").entered();
+
+    info!("Arrange: use default config");
+    info!("Act: pi config get");
+    let assert = cmd().args(["config", "get"]).assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0, stdout 含配置段关键字；actual: {}", trunc(&out, 300));
+    assert.success().stdout(
+        predicate::str::contains("llm")
+            .or(predicate::str::contains("log"))
+            .or(predicate::str::contains("storage")),
+    );
+}
+
+/// [E2E-CLI-004] 用户导出配置备份
+///
+/// 用户意图：导出配置备份
+/// 验证：exit 0；文件存在且非空
+#[test]
+fn test_user_exports_config_to_file() {
+    common::setup_logging();
+    let _span = info_span!("test_user_exports_config_to_file").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let export_path = dir.path().join("pi_cfg_backup.toml");
+
+    info!("Arrange: temp export path = {:?}", export_path);
+    info!("Act: pi config export");
+    let assert = cmd()
+        .args(["config", "export", export_path.to_str().unwrap()])
+        .assert();
+    let out = assert.get_output().stdout.clone();
+    info!("Assert: exit 0 + file exists and non-empty");
+    assert.success();
+    assert!(export_path.exists(), "导出文件应存在：{:?}", export_path);
+    assert!(
+        fs::metadata(&export_path).unwrap().len() > 0,
+        "导出文件不应为空"
+    );
+    let _ = out;
+}
+
+/// [E2E-CLI-005] 用户从备份恢复配置
+///
+/// 用户意图：从备份文件恢复配置
+/// 验证：exit 0；stdout 含"导入"
+#[test]
+fn test_user_imports_config_from_file() {
+    common::setup_logging();
+    let _span = info_span!("test_user_imports_config_from_file").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let export_path = dir.path().join("pi_cfg_export.toml");
+
+    info!("Arrange: first export then import");
+    cmd()
+        .args(["config", "export", export_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi config import");
+    let assert = cmd()
+        .args(["config", "import", export_path.to_str().unwrap()])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含导入；actual: {}", trunc(&out, 200));
+    assert.success().stdout(predicate::str::contains("导入"));
+}
+
+/// [E2E-CLI-006] 用户运行 doctor 检测 WasmEdge/QuickJS 可用性
+///
+/// 用户意图：运行 doctor 检测环境
+/// 验证：exit 0；stdout 含环境检测项（WasmEdge/配置/✓）
+#[test]
+fn test_user_doctor_detects_environment() {
+    common::setup_logging();
+    let _span = info_span!("test_user_doctor_detects_environment").entered();
+
+    info!("Arrange: default config");
+    info!("Act: pi doctor");
+    let assert = cmd().args(["doctor"]).assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含检测项；actual: {}", trunc(&out, 300));
+    assert.success().stdout(
+        predicate::str::contains("WasmEdge")
+            .or(predicate::str::contains("配置"))
+            .or(predicate::str::contains("✓")),
+    );
+}
+
+// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 OPENAI_API_KEY） ────────────────────
+
+/// [E2E-CLI-011] 用户向 pi 提问并收到回答
+///
+/// 用户意图：向 pi 提问，收到 AI 回复
+/// 验证：exit 0；stdout 非空
+/// 要求：OPENAI_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
+#[test]
+fn test_user_asks_pi_a_question() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_asks_pi_a_question").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: pi chat stdin 你好，介绍一下你自己，timeout 60s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("你好，介绍一下你自己\n")
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
+    assert.success();
+    assert!(!out.trim().is_empty(), "AI 应输出非空回复，实际 stdout 为空");
+}
+
+/// [E2E-CLI-012] 用户问技术问题，验证 LLM 回复质量
+///
+/// 用户意图：问 Rust 所有权系统
+/// 验证：exit 0；stdout 含"所有权"或"ownership"
+/// 要求：OPENAI_API_KEY 环境变量已设置
+#[test]
+fn test_user_asks_pi_technical_question() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_asks_pi_technical_question").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: pi chat stdin 问 Rust 所有权，timeout 60s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("用一句话解释什么是 Rust 的所有权系统\n")
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含所有权/ownership；actual: {}", trunc(&out, 300));
+    assert.success();
+    assert!(
+        out.contains("所有权") || out.to_lowercase().contains("ownership"),
+        "stdout 应含 '所有权' 或 'ownership'，实际: {}",
+        trunc(&out, 300)
+    );
+}
+
+// ──────────────────── Story 3: WasmEdge+QuickJS 插件系统（E2E-CLI-021~026） ────────────────────
+
+/// 创建临时插件目录，包含 plugin.json + main.js
+fn make_plugin_dir(id: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugin_json = format!(
+        r#"{{
+            "id": "{id}",
+            "name": "Test Plugin {id}",
+            "version": "0.1.0",
+            "description": "E2E test plugin",
+            "author": "nibbles",
+            "main": "main.js",
+            "requiredPermissions": [],
+            "requiredApiVersion": "1.0",
+            "tags": []
+        }}"#
+    );
+    std::fs::write(tmp.path().join("plugin.json"), plugin_json).expect("write plugin.json");
+    std::fs::write(tmp.path().join("main.js"), "// init\n1 + 1;\n").expect("write main.js");
+    tmp
+}
+
+/// [E2E-CLI-021] 用户从路径加载插件并查看已加载列表
+///
+/// 用户意图：加载插件并验证命令正常执行
+/// 验证：load exit 0；list exit 0（注：插件状态为进程内存，跨进程不持久化——MVP 已知限制）
+#[test]
+fn test_user_loads_plugin_and_lists() {
+    common::setup_logging();
+    let _span = info_span!("test_user_loads_plugin_and_lists").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-test-plugin-list");
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: plugin dir = {:?}", plugin_dir.path());
+    info!("Act: pi plugin load");
+    let load_assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
+        .assert();
+    let load_out = String::from_utf8_lossy(&load_assert.get_output().stdout.clone()).to_string();
+    info!("Assert load: exit 0, stdout 非空；actual: {}", trunc(&load_out, 200));
+    load_assert.success();
+
+    info!("Act: pi plugin list（跨进程，状态不持久）");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "list"])
+        .assert();
+    info!("Assert list: exit 0（不崩溃即可）");
+    assert.success();
+}
+
+/// [E2E-CLI-022] 用户查看插件详情（名称、版本）
+///
+/// 用户意图：查看插件详情
+/// 验证：exit 0；stdout 含 name/version
+#[test]
+fn test_user_views_plugin_info() {
+    common::setup_logging();
+    let _span = info_span!("test_user_views_plugin_info").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-test-plugin-info");
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: load plugin first");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi plugin info <id>");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "info", "e2e-test-plugin-info"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含 name 或 version；actual: {}", trunc(&out, 300));
+    assert.success().stdout(
+        predicate::str::contains("e2e-test-plugin-info")
+            .or(predicate::str::contains("0.1.0"))
+            .or(predicate::str::contains("version")),
+    );
+}
+
+/// [E2E-CLI-023] 用户禁用插件
+///
+/// 用户意图：禁用已加载的插件
+/// 验证：exit 0
+#[test]
+fn test_user_disables_plugin() {
+    common::setup_logging();
+    let _span = info_span!("test_user_disables_plugin").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-test-plugin-disable");
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: load plugin");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi plugin disable <id>");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "disable", "e2e-test-plugin-disable"])
+        .assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-024] 用户重新启用被禁用的插件
+///
+/// 用户意图：重新启用已禁用的插件
+/// 验证：exit 0
+#[test]
+fn test_user_enables_plugin_after_disable() {
+    common::setup_logging();
+    let _span = info_span!("test_user_enables_plugin_after_disable").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-test-plugin-enable");
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: load + disable plugin");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "disable", "e2e-test-plugin-enable"])
+        .assert()
+        .success();
+
+    info!("Act: pi plugin enable <id>");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "enable", "e2e-test-plugin-enable"])
+        .assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-025] 用户卸载插件后从列表消失
+///
+/// 用户意图：卸载插件后列表不含该插件
+/// 验证：unload exit 0；list stdout 不含该 id
+#[test]
+fn test_user_unloads_plugin_removes_from_list() {
+    common::setup_logging();
+    let _span = info_span!("test_user_unloads_plugin_removes_from_list").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-test-plugin-unload");
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: load plugin");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi plugin unload <id>");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "unload", "e2e-test-plugin-unload"])
+        .assert()
+        .success();
+
+    info!("Act: pi plugin list");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["plugin", "list"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: list 不含 id；actual: {}", trunc(&out, 300));
+    assert.success();
+    assert!(
+        !out.contains("e2e-test-plugin-unload"),
+        "卸载后 list 不应含该插件 id，实际 stdout: {}",
+        trunc(&out, 200)
+    );
+}
+
+/// [E2E-CLI-026] 用户加载不存在路径时看到错误提示
+///
+/// 用户意图：加载不存在的插件路径，看到友好错误
+/// 验证：exit 0；stdout 含 error 或"不存在"
+#[test]
+fn test_user_loads_nonexistent_plugin_path_shows_error() {
+    common::setup_logging();
+    let _span = info_span!("test_user_loads_nonexistent_plugin_path_shows_error").entered();
+
+    info!("Arrange: /nonexistent/path/to/plugin 不存在");
+    info!("Act: pi plugin load /nonexistent/path/to/plugin");
+    let assert = cmd()
+        .args(["plugin", "load", "/nonexistent/path/to/plugin"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含 error 提示；actual: {}", trunc(&out, 300));
+    assert.success().stdout(
+        predicate::str::contains("不存在")
+            .or(predicate::str::contains("error"))
+            .or(predicate::str::contains("Error"))
+            .or(predicate::str::contains("找不到")),
+    );
+}
+
+// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 OPENAI_API_KEY） ────────────────────
+
+/// [E2E-CLI-041] 用户与 LLM 对话，获得流式渲染回复
+///
+/// 用户意图：与 LLM 对话，获得非空 AI 回复
+/// 验证：exit 0；stdout 含 AI 回复
+/// 要求：OPENAI_API_KEY 已设置
+#[test]
+fn test_user_chats_with_llm_gets_streaming_response() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_chats_with_llm_gets_streaming_response").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: pi chat + stdin 单句，timeout 60s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("请用一句话回答：1+1 等于几？\n")
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含 AI 回复；actual: {}", trunc(&out, 300));
+    assert.success();
+    assert!(!out.trim().is_empty(), "LLM 应输出非空流式回复，实际 stdout 为空");
+}
+
+/// [E2E-CLI-042] 确认 LLM 回复内容非空（基础连通性）
+///
+/// 用户意图：发送极短提问，验证 LLM 回复非空
+/// 验证：exit 0；stdout 非空
+/// 要求：OPENAI_API_KEY 已设置
+#[test]
+fn test_user_receives_nonempty_llm_response() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_receives_nonempty_llm_response").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: pi chat + stdin 说一个字，timeout 30s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("说一个字\n")
+        .timeout(std::time::Duration::from_secs(30));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
+    assert.success();
+    assert!(!out.trim().is_empty(), "LLM 应输出非空回复，实际 stdout 为空");
+}
+
+// ──────────────────── Story 8: CLI对话与会话管理（E2E-CLI-051~082） ────────────────────
+
+/// [E2E-CLI-051] 用户创建一个新会话
+///
+/// 用户意图：创建新会话
+/// 验证：exit 0；stdout 含"已创建会话"
+#[test]
+fn test_user_creates_new_session() {
+    common::setup_logging();
+    let _span = info_span!("test_user_creates_new_session").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: fresh work dir");
+    info!("Act: pi session new");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含已创建会话；actual: {}", trunc(&out, 200));
+    assert.success().stdout(predicate::str::contains("已创建会话"));
+}
+
+/// [E2E-CLI-052] 用户查看所有会话
+///
+/// 用户意图：列出所有会话
+/// 验证：exit 0
+#[test]
+fn test_user_lists_sessions() {
+    common::setup_logging();
+    let _span = info_span!("test_user_lists_sessions").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create a session first");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    info!("Act: pi session list");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "list"])
+        .assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-053] 用户切换到已存在的会话
+///
+/// 用户意图：创建会话后切换到 default 会话
+/// 验证：exit 0
+#[test]
+fn test_user_switches_to_existing_session() {
+    common::setup_logging();
+    let _span = info_span!("test_user_switches_to_existing_session").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create session");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    info!("Act: pi session switch agent:default:main");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "switch", "agent:default:main"])
+        .assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-054] 用户切换到不存在会话时看到友好提示
+///
+/// 用户意图：切换到不存在会话，看到"不存在"提示
+/// 验证：exit 0；stdout 含"不存在"
+#[test]
+fn test_user_switches_to_nonexistent_session_shows_error() {
+    common::setup_logging();
+    let _span = info_span!("test_user_switches_to_nonexistent_session_shows_error").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: no session pre-created");
+    info!("Act: pi session switch nonexistent-key-e2e");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "switch", "nonexistent-key-e2e"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含不存在；actual: {}", trunc(&out, 200));
+    assert.success().stdout(predicate::str::contains("不存在"));
+}
+
+/// [E2E-CLI-055] 用户删除刚创建的会话
+///
+/// 用户意图：创建后删除会话
+/// 验证：exit 0；stdout 含"已删除"
+#[test]
+fn test_user_deletes_session() {
+    common::setup_logging();
+    let _span = info_span!("test_user_deletes_session").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create session");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    info!("Act: pi session delete agent:default:main");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "delete", "agent:default:main"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含已删除；actual: {}", trunc(&out, 200));
+    assert.success().stdout(predicate::str::contains("已删除"));
+}
+
+/// [E2E-CLI-056] 用户归档会话
+///
+/// 用户意图：归档刚创建的会话
+/// 验证：exit 0；stdout 含"已归档"
+#[test]
+fn test_user_archives_session() {
+    common::setup_logging();
+    let _span = info_span!("test_user_archives_session").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create session");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    info!("Act: pi session archive agent:default:main");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "archive", "agent:default:main"])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 含已归档；actual: {}", trunc(&out, 200));
+    assert.success().stdout(predicate::str::contains("已归档"));
+}
+
+/// [E2E-CLI-057] 用户按关键词搜索会话
+///
+/// 用户意图：搜索含 default 关键词的会话
+/// 验证：exit 0
+#[test]
+fn test_user_searches_sessions_by_keyword() {
+    common::setup_logging();
+    let _span = info_span!("test_user_searches_sessions_by_keyword").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+
+    info!("Arrange: create session");
+    cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
+
+    info!("Act: pi session search default");
+    let assert = cmd()
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "search", "default"])
+        .assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-058] 无 API key 时 chat 快速失败，不挂起
+///
+/// 用户意图：未配置 API Key 时 chat 应快速报错而非挂起
+/// 验证：进程 5s 内结束；stdout 或 stderr 含错误提示
+#[test]
+fn test_user_chat_without_api_key_fails_gracefully() {
+    common::setup_logging();
+    let _span = info_span!("test_user_chat_without_api_key_fails_gracefully").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init，移除 OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi chat without API key，timeout 5s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .env_remove("OPENAI_API_KEY")
+        .write_stdin("hello\n")
+        .timeout(std::time::Duration::from_secs(5));
+    let output = c.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    info!("Assert: 进程 5s 内结束，含错误提示；stdout: {}", trunc(&stdout, 200));
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("error")
+            || combined.contains("Error")
+            || combined.contains("key")
+            || combined.contains("API")
+            || combined.to_lowercase().contains("invalid")
+            || combined.contains("配置")
+            || combined.contains("失败"),
+        "chat 无 API Key 时应含错误提示，实际 combined: {}",
+        trunc(&combined, 300)
+    );
+}
+
+/// [E2E-CLI-059] 用户查看操作审计记录列表
+///
+/// 用户意图：列出审计记录
+/// 验证：exit 0
+#[test]
+fn test_user_views_audit_list() {
+    common::setup_logging();
+    let _span = info_span!("test_user_views_audit_list").entered();
+
+    info!("Arrange: no special setup");
+    info!("Act: pi audit list");
+    let assert = cmd().args(["audit", "list"]).assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-060] 用户导出审计记录到文件
+///
+/// 用户意图：导出审计日志到 JSON 文件
+/// 验证：exit 0（MVP 阶段 audit export 命令可正常执行不崩溃）
+#[test]
+fn test_user_exports_audit_to_file() {
+    common::setup_logging();
+    let _span = info_span!("test_user_exports_audit_to_file").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let out_path = dir.path().join("audit_e2e.json");
+
+    info!("Arrange: temp audit export path = {:?}", out_path);
+    info!("Act: pi audit export");
+    let assert = cmd()
+        .args(["audit", "export", out_path.to_str().unwrap()])
+        .assert();
+    info!("Assert: exit 0");
+    assert.success();
+}
+
+/// [E2E-CLI-061] 用户查看不存在的审计条目时友好提示
+///
+/// 用户意图：查看 ID=9999999 的审计条目，看到友好提示
+/// 验证：exit 0；不 panic
+#[test]
+fn test_user_views_audit_show_invalid_id() {
+    common::setup_logging();
+    let _span = info_span!("test_user_views_audit_show_invalid_id").entered();
+
+    info!("Arrange: no special setup");
+    info!("Act: pi audit show 9999999");
+    let assert = cmd().args(["audit", "show", "9999999"]).assert();
+    info!("Assert: exit 0, 不 panic");
+    assert.success();
+}
+
+// ──────────────────── 边界与健壮性场景（E2E-CLI-071~074） ────────────────────
+
+/// [E2E-CLI-071] 用户查看帮助，所有子命令可见
+///
+/// 用户意图：查看主帮助，所有子命令应在 stdout 中
+/// 验证：exit 0；stdout 含 init/doctor/config/session/plugin/audit
+#[test]
+fn test_user_views_full_help() {
+    common::setup_logging();
+    let _span = info_span!("test_user_views_full_help").entered();
+
+    info!("Act: pi --help");
+    let assert = cmd().arg("--help").assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + 含所有子命令；actual: {}", trunc(&out, 400));
+    assert
+        .success()
+        .stdout(predicate::str::contains("init"))
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("config"))
+        .stdout(predicate::str::contains("session"))
+        .stdout(predicate::str::contains("plugin"))
+        .stdout(predicate::str::contains("audit"));
+}
+
+/// [E2E-CLI-072] 用户查看版本号
+///
+/// 用户意图：查看 pi 的版本号
+/// 验证：exit 0；stdout 含版本号字符串
+#[test]
+fn test_user_views_version() {
+    common::setup_logging();
+    let _span = info_span!("test_user_views_version").entered();
+
+    info!("Act: pi --version");
+    let assert = cmd().arg("--version").assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + 含版本号；actual: {}", trunc(&out, 100));
+    assert.success().stdout(predicate::str::is_match(r"\d+\.\d+").unwrap());
+}
+
+/// [E2E-CLI-073] 用户输入错误命令时看到帮助
+///
+/// 用户意图：输入未知子命令，看到错误提示
+/// 验证：exit 非 0；stderr 含"error"
+#[test]
+fn test_user_runs_unknown_command() {
+    common::setup_logging();
+    let _span = info_span!("test_user_runs_unknown_command").entered();
+
+    info!("Act: pi nonexistent_cmd_e2e");
+    let assert = cmd().arg("nonexistent_cmd_e2e").assert();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr.clone()).to_string();
+    info!("Assert: exit 非 0 + stderr 含 error；actual: {}", trunc(&stderr, 200));
+    assert
+        .failure()
+        .stderr(predicate::str::contains("error").or(predicate::str::contains("unrecognized")));
+}
+
+/// [E2E-CLI-074] 用户 init 后 doctor 通过，完整引导流程
+///
+/// 用户意图：新手引导——init 后 doctor 应检测通过
+/// 验证：两步 exit 0；doctor 含"✓"
+#[test]
+fn test_user_init_then_doctor_roundtrip() {
+    common::setup_logging();
+    let _span = info_span!("test_user_init_then_doctor_roundtrip").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: fresh temp dir");
+    info!("Act: pi init → pi doctor");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let assert = cmd()
+        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + 含 ✓；actual: {}", trunc(&out, 300));
+    assert
+        .success()
+        .stdout(predicate::str::contains("✓").or(predicate::str::contains("配置合法")));
+}
+
+// ──────────────────── Story 9 补充: chat --resume 与多轮上下文（E2E-CLI-082~083） ────────────────────
+
+/// [E2E-CLI-082] 用户用 --resume 恢复上次会话
+///
+/// 用户意图：用 --resume 恢复已有会话，历史消息从 JSONL 加载
+/// 验证：exit 0；进程正常退出（不崩溃）
+/// 要求：OPENAI_API_KEY 已设置
+#[test]
+fn test_user_chat_resumes_last_session() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_chat_resumes_last_session").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: 第一轮 pi chat，建立会话历史");
+    cmd()
+        .arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("请回答：1+1=？\n")
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+
+    info!("Act: 第二轮 pi chat --resume，恢复会话");
+    let mut c = cmd();
+    c.arg("chat")
+        .arg("--resume")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("好的，谢谢\n")
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
+    assert.success();
+    assert!(!out.trim().is_empty(), "--resume 后 AI 应有回复，实际 stdout 为空");
 }
 
 // ────────────────────── TASK-14 AgentLoop E2E 用例 ──────────────────────

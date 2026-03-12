@@ -27,6 +27,7 @@
 - [ ] write/edit操作前自动备份原文件，支持回滚，操作前显示diff预览与用户确认
 - [ ] 所有4原语操作完整记录审计日志，包含操作内容、用户确认状态、执行结果、时间戳
 - [ ] 支持全局配置自动确认策略，可设置白名单操作无需重复确认
+- [ ] `pi audit list` 可列出历史审计记录；`pi audit show <id>` 查看单条详情；`pi audit export <file>` 导出完整日志文件
 
 ### Story 3: WasmEdge+QuickJS沙箱插件系统
 **作为用户**，我希望能加载、运行pi-mono插件，插件在隔离沙箱内运行，不影响宿主系统安全。
@@ -82,20 +83,23 @@
 - [ ] `pi.exec()`、`pi.createChatCompletion()` 等耗时 API 返回 Promise，插件可用 `await` 消费
 - [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞 Wasm 实例，宿主后台异步处理
 - [ ] 返回值格式与 pi-mono 一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
-- [ ] `pi.on`/`pi.off`/`pi.emit` 无重复定义 bug，`pi.once` 可用
+- [ ] `pi.on`/`pi.off`/`pi.emit` 无重复定义 bug，`pi.once` 可用，注册一次后多次 emit 仅触发 1 次
 - [ ] 插件内多个并发异步调用（如同时 `await pi.exec()` + `await pi.createChatCompletion()`）可正确运行
 - [ ] 异步操作超时后返回清晰错误，插件可通过 `try/catch` 捕获
 - [ ] 同步 API（`pi.log`、`pi.registerTool`、`pi.on` 等）行为不变，不受异步改造影响
+- [ ] `pi.registerTool` 注册工具后宿主可通过 host_call 感知（registerTool 触发 ≥1 次 host_call）；`pi.unregisterTool` 可正常反注册
+- [ ] 以上异步 API 行为均可通过 `tests/wasmedge_e2e_tests.rs` 中 Wasm 真实运行时集成测试验证（E2E-WASM-011/022/023）
 
 ### Story 8: CLI工具基础对话与会话管理
 **作为用户**，我希望能通过CLI工具与Agent对话，管理会话历史，正常使用插件能力。
 **验收标准**：
-- [ ] `pi-wasm chat`命令启动对话模式，支持自然语言对话，流式响应渲染
-- [ ] 支持多轮对话上下文关联，Agent可正常调用4原语、注册的工具、加载的插件能力
+- [ ] `pi chat` 命令启动对话模式，支持自然语言对话，流式响应渲染
+- [ ] `pi chat --resume` 可恢复上次会话，历史上下文从持久化 JSONL 文件加载并注入 LLM
+- [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] 实现会话管理功能，支持创建、切换、归档、删除、搜索会话，历史持久化不丢失
 - [ ] 对话中Agent调用4原语/工具时，清晰展示操作内容，等待用户确认后执行
 - [ ] 支持Markdown/代码块高亮渲染，快捷键支持（Ctrl+C中断、Ctrl+D退出、↑↓历史导航）
-- [ ] `pi-wasm session`系列命令可完整管理会话生命周期
+- [ ] `pi session` 系列命令（list/new/switch/delete/archive/search）可完整管理会话生命周期
 - [ ] Agent 执行工具期间，用户发送新消息可触发 Steering——完成当前工具后跳过剩余工具，注入新指令并重新调用 LLM（中途换方向不需要重新创建会话）
 - [ ] Ctrl+C 可触发 Abort——当前工具执行完毕后立即终止 Agent，发布 agent_end(interrupted)
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化

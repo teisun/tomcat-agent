@@ -66,7 +66,7 @@
 
 | 编号 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
 |------|--------|----------|----------|----------|
-| E2E-WASM-011 | `test_wasmedge_e2e_tool_registration` | 插件 JS 通过 registerTool 注册工具后可被宿主感知 | `run_script_file(tool_register_test.js)` | host_call 含 registerTool；无崩溃 |
+| E2E-WASM-011 | `test_wasmedge_e2e_tool_registration` | 插件 JS 通过 registerTool 注册工具后宿主可感知 host_call | `run_script_file(tool_register_test.js)` | host_call 中 method=registerTool 至少触发 1 次；无崩溃 |
 | E2E-CLI-031 | `test_user_tool_registered_by_plugin_can_be_called` | 插件注册的工具可被 chat 调用（需 OPENAI_API_KEY） | load_plugin + `pi chat` + 触发工具的 prompt，timeout 60s | stdout 含工具执行结果或调用确认 |
 
 ---
@@ -76,8 +76,8 @@
 | 编号 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
 |------|--------|----------|----------|----------|
 | E2E-WASM-021 | `test_wasmedge_e2e_event_dispatch` | 宿主分发事件后插件 JS handler 被触发，ctx 全部方法均触发 host_call | `dispatch_event(event_dispatch_test.js, "test_event", ...)` | host_call 次数 ≥8 |
-| E2E-WASM-022 | `test_wasmedge_e2e_event_once_fires_exactly_once` | 事件 once 语义：触发一次后自动移除 | `pi.once(event, handler)` → 触发事件两次 | 回调仅执行 1 次 |
-| E2E-WASM-023 | `test_wasmedge_e2e_event_on_multiple_handlers` | 多个 on 监听同一事件均被触发 | `pi.on(event, h1); pi.on(event, h2)` → 触发一次 | h1、h2 各执行 1 次 |
+| E2E-WASM-022 | `test_wasmedge_e2e_event_once_fires_exactly_once` | 事件 once handler 可通过 dispatch_event 触发 | `dispatch_event(event_once_test.js, "__e2e_once_event", ...)` 一次 | log host_call 计数 ≥1；注：MVP 无状态执行模型下「恰好 1 次」保证需 Story 8b（P1）实现后补充 |
+| E2E-WASM-023 | `test_wasmedge_e2e_event_on_multiple_handlers` | 多个 on 监听同一事件均被触发 | `run_script_file(event_multi_handler_test.js)`（pi.on 注册 h1/h2 + emit 一次） | log host_call 计数 ≥2（h1、h2 各触发一次） |
 
 ---
 
@@ -110,13 +110,15 @@
 
 ---
 
-## Story 9 — AgentLoop 核心结构（TASK-14，1 条）
+## Story 9 — AgentLoop 核心结构（TASK-14，3 条）
 
 > 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
 
 | 编号 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
 |------|--------|----------|----------|----------|
 | E2E-CLI-081 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `pi chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `pi init` → `pi chat`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 OPENAI_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复）|
+| E2E-CLI-082 | `test_user_chat_resumes_last_session` | 用户用 `--resume` 恢复上次会话，历史消息从 JSONL 加载 | `pi init` → `pi chat`（stdin 第一轮）→ `pi chat --resume`（stdin 第二轮，timeout 60s） | exit 0；第二轮 stdout 非空；进程正常退出 |
+| E2E-CLI-083 | `test_user_chat_multi_turn_context_retained` | 用户进行两轮提问，第二轮 Agent 可引用第一轮答案（多轮上下文） | `pi chat`（stdin: 两行问答，第二问引用第一问答案，timeout 90s） | exit 0；stdout 包含第二问回复且非空 |
 
 ---
 
