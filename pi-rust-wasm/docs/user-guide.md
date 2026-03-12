@@ -117,7 +117,7 @@ pi --version
 pi init
 ```
 
-默认在 `~/.pi_wasm/agent/config.toml` 生成初始配置文件。也可以指定自定义路径：
+默认在 `~/.pi_wasm/agent_default/config.toml` 生成初始配置文件。也可以指定自定义路径：
 
 ```bash
 pi init --config /tmp/my-pi/config.toml
@@ -126,8 +126,8 @@ pi init --config /tmp/my-pi/config.toml
 预期输出：
 
 ```
-已生成配置文件: ~/.pi_wasm/agent/config.toml
-请编辑 ~/.pi_wasm/agent/config.toml 填写 LLM API 与安全策略。
+已生成配置文件: ~/.pi_wasm/agent_default/config.toml
+请编辑 ~/.pi_wasm/agent_default/config.toml 填写 LLM API 与安全策略。
 ```
 
 生成后**至少需要**在配置文件中确认 `[llm]` 段的 `api_key_env` 指向你的环境变量名（默认已配置为 `OPENAI_API_KEY`）。

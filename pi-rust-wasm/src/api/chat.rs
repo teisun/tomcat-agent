@@ -7,9 +7,10 @@ use std::sync::Arc;
 use crate::infra::error::AppError;
 use crate::infra::{AuditRecorder, DefaultEventBus, EventBus, TracingAuditRecorder};
 use crate::{
-    agent_messages_from_chat, resolve_sessions_dir, AgentLoop, AgentLoopConfig, AppConfig,
-    ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
-    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    agent_messages_from_chat, resolve_sessions_dir, resolve_workspace_dir, AgentLoop,
+    AgentLoopConfig, AppConfig, ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry,
+    LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool,
+    ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -24,6 +25,8 @@ pub struct ChatContext {
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub event_bus: Arc<dyn EventBus>,
     pub cancelled: Arc<AtomicBool>,
+    /// Agent 默认工作目录，用于 system prompt 和路径白名单默认值。
+    pub workspace_dir: std::path::PathBuf,
 }
 
 impl ChatContext {
@@ -31,6 +34,9 @@ impl ChatContext {
         let sessions_path = resolve_sessions_dir(&config)?;
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
+
+        let workspace_dir = resolve_workspace_dir(&config)?;
+        std::fs::create_dir_all(&workspace_dir).map_err(AppError::Io)?;
 
         let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(&config.llm)?);
 
@@ -40,6 +46,7 @@ impl ChatContext {
             config.primitive.clone(),
             confirmation,
             audit.clone(),
+            workspace_dir.clone(),
         ));
 
         let tool_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
@@ -57,6 +64,7 @@ impl ChatContext {
             tool_registry,
             event_bus,
             cancelled,
+            workspace_dir,
         })
     }
 
@@ -257,6 +265,20 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let mut history = ctx
             .session
             .build_context_messages(ctx.session.context_cap())?;
+
+        // 在历史消息最前面注入 system message（仅当首条不是 system 时）。
+        let workspace_str = ctx.workspace_dir.to_string_lossy();
+        let system_text =
+            crate::core::system_prompt::build_system_prompt(&workspace_str);
+        let system_msg = ChatMessage::system(system_text);
+        if history
+            .first()
+            .and_then(|v| v["role"].as_str())
+            != Some("system")
+        {
+            history.insert(0, serde_json::to_value(&system_msg)?);
+        }
+
         let user_msg = ChatMessage::user(&input);
         history.push(serde_json::to_value(&user_msg)?);
 

@@ -136,6 +136,7 @@ async fn test_primitive_executor_read_file_in_whitelist_succeeds(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
     );
     let file_path = canonical_dir.join("hello.txt");
     std::fs::write(&file_path, "hello")?;
@@ -166,6 +167,7 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        std::path::PathBuf::from("/nonexistent_pi_workspace"),
     );
     tracing::info!("Arrange: PrimitiveConfig 空 path_whitelist");
     let res = executor.read_file("/etc/hosts", "test_plugin").await;
@@ -178,6 +180,51 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
         err
     );
     tracing::info!("Assert: 返回 Permission/白名单 错误（鲁棒性：非法路径）");
+    Ok(())
+}
+
+/// [空 path_whitelist + workspace_dir] 仅 workspace 内路径可访问，workspace 外仍 Permission
+///
+/// 验证：read_file(workspace 内) 成功；read_file(workspace 外) 返回 Err 且为 Permission/白名单
+/// 意义：INTEGRATION_TEST_SPEC 主路径覆盖——空 path_whitelist 时默认 workspace 白名单
+#[tokio::test]
+async fn test_primitive_executor_empty_whitelist_allows_workspace_dir_only(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!(
+        "test_primitive_executor_empty_whitelist_allows_workspace_dir_only"
+    )
+    .entered();
+
+    let tmp = TempDir::new()?;
+    let canonical_dir = tmp.path().canonicalize()?;
+    let config = PrimitiveConfig::default();
+    let executor = DefaultPrimitiveExecutor::new(
+        config,
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
+    );
+    let allowed_path = canonical_dir.join("allowed.txt");
+    std::fs::write(&allowed_path, "workspace_content")?;
+    let allowed_str = allowed_path.to_string_lossy().to_string();
+
+    tracing::info!("Arrange: 空 path_whitelist、workspace_dir=临时目录、allowed.txt");
+    let content = executor.read_file(&allowed_str, "test_plugin").await?;
+    tracing::info!("Act: read_file(workspace 内 allowed.txt)");
+    assert_eq!(content, "workspace_content");
+    tracing::info!("Assert: 返回文件内容");
+
+    let res = executor.read_file("/etc/hosts", "test_plugin").await;
+    tracing::info!("Act: read_file(/etc/hosts)");
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(
+        err.to_string().contains("白名单") || err.to_string().contains("Permission"),
+        "workspace 外路径应返回 Permission/白名单 错误，got: {}",
+        err
+    );
+    tracing::info!("Assert: workspace 外返回 Permission/白名单 错误");
     Ok(())
 }
 
@@ -200,6 +247,7 @@ async fn test_primitive_executor_write_file_with_allow_all_succeeds(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
     );
     let file_path = canonical_dir.join("out.txt");
     let path_str = file_path.to_string_lossy().to_string();
@@ -236,6 +284,7 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
         config,
         Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
     );
     let file_path = canonical_dir.join("denied.txt");
     let path_str = file_path.to_string_lossy().to_string();
@@ -274,6 +323,7 @@ async fn test_primitive_executor_edit_file_replaces_content(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
     );
 
     let file_path = canonical_dir.join("edit_target.txt");
@@ -319,6 +369,7 @@ async fn test_primitive_executor_execute_bash_echo_succeeds(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
     );
 
     tracing::info!("Arrange: 白名单临时目录");

@@ -11,7 +11,7 @@ use crate::{
     TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
 
-const DEFAULT_CONFIG_PATH: &str = "~/.pi_wasm/agent/config.toml";
+const DEFAULT_CONFIG_PATH: &str = "~/.pi_wasm/agent_default/config.toml";
 
 /// pi CLI：AI Agent 运行时，支持插件管理、会话、配置、审计与对话模式
 #[derive(Parser, Debug)]

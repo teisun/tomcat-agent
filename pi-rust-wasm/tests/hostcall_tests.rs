@@ -111,6 +111,7 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        canonical_dir.clone(),
     );
 
     let bus = Arc::new(DefaultEventBus::new());

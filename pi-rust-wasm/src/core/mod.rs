@@ -8,6 +8,7 @@ pub mod executor;
 pub(crate) mod llm;
 pub mod primitives;
 pub mod session;
+pub mod system_prompt;
 pub mod tools;
 
 pub use confirmation::{AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider};

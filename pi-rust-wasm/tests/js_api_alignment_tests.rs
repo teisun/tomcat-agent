@@ -29,6 +29,7 @@ fn build_async_dispatcher() -> Arc<HostApiDispatcher> {
         cfg,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
+        std::path::PathBuf::from("/tmp"),
     );
     Arc::new(
         HostApiDispatcher::new(bus)

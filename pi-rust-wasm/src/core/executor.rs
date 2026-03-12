@@ -27,6 +27,8 @@ pub struct DefaultPrimitiveExecutor {
     config: PrimitiveConfig,
     confirmation: Arc<dyn UserConfirmationProvider>,
     audit: Arc<dyn AuditRecorder>,
+    /// 默认工作目录：path_whitelist 为空时作为隐式白名单根目录。
+    workspace_dir: PathBuf,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -34,23 +36,31 @@ impl DefaultPrimitiveExecutor {
         config: PrimitiveConfig,
         confirmation: Arc<dyn UserConfirmationProvider>,
         audit: Arc<dyn AuditRecorder>,
+        workspace_dir: PathBuf,
     ) -> Self {
         Self {
             config,
             confirmation,
             audit,
+            workspace_dir,
         }
     }
 
     /// 路径白名单/黑名单校验；通过则返回规范化后的 PathBuf。
+    ///
+    /// 当 `path_whitelist` 为空时，以 `workspace_dir` 作为隐式白名单（仅允许 workspace 下的路径）。
     fn check_path(&self, path: &str) -> Result<PathBuf, AppError> {
         let normalized = normalize_path(path)?;
         let s = normalized.to_string_lossy();
-        let allowed = self
-            .config
-            .path_whitelist
-            .iter()
-            .any(|w| normalized_starts_with(&s, w));
+        let allowed = if self.config.path_whitelist.is_empty() {
+            let ws = self.workspace_dir.to_string_lossy();
+            normalized_starts_with(&s, &ws)
+        } else {
+            self.config
+                .path_whitelist
+                .iter()
+                .any(|w| normalized_starts_with(&s, w))
+        };
         if !allowed {
             return Err(AppError::Permission(format!("路径不在白名单内: {}", path)));
         }
@@ -213,28 +223,56 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         for edit in &edits {
             match edit.operation_type {
                 EditOperationType::Replace => {
-                    let start = edit.start_line.unwrap_or(1) as usize;
-                    let end = edit.end_line.unwrap_or(start as u64) as usize;
-                    if start < 1 || end > lines.len() || start > end {
-                        let _ = std::fs::copy(&backup_path, &path_buf);
-                        return Err(AppError::Primitive(format!(
-                            "Replace 行号无效: {}..{}",
-                            start, end
-                        )));
-                    }
-                    let idx = start - 1;
-                    let new_lines: Vec<String> =
-                        edit.new_content.lines().map(String::from).collect();
-                    for (i, nl) in new_lines.iter().enumerate() {
-                        if idx + i < lines.len() {
-                            lines[idx + i] = nl.clone();
-                        } else {
-                            lines.push(nl.clone());
+                    if edit.start_line.is_none() {
+                        // 内容匹配替换（AgentLoop 调用路径：old_content + new_content）
+                        // 参考 pi-mono/OpenClaw：全文字符串级精确匹配 + 唯一性检查
+                        if let Some(ref old) = edit.old_content {
+                            let full_text = lines.join("\n");
+                            let count = full_text.matches(old.as_str()).count();
+                            if count == 0 {
+                                let _ = std::fs::copy(&backup_path, &path_buf);
+                                return Err(AppError::Primitive(format!(
+                                    "edit_file: 未找到匹配的 old_content（文件 {}）",
+                                    path
+                                )));
+                            }
+                            if count > 1 {
+                                let _ = std::fs::copy(&backup_path, &path_buf);
+                                return Err(AppError::Primitive(format!(
+                                    "edit_file: old_content 在文件中出现 {} 次，需要更多上下文使其唯一",
+                                    count
+                                )));
+                            }
+                            let new_text =
+                                full_text.replacen(old.as_str(), &edit.new_content, 1);
+                            lines = new_text.lines().map(String::from).collect();
                         }
-                    }
-                    for i in (idx + new_lines.len())..end {
-                        if i < lines.len() {
-                            lines[i] = String::new();
+                        // old_content 为 None 且 start_line 为 None：无操作
+                    } else if let Some(start_line_val) = edit.start_line {
+                        // 行号替换（插件调用兼容路径）
+                        let start = start_line_val as usize;
+                        let end = edit.end_line.unwrap_or(start_line_val) as usize;
+                        if start < 1 || end > lines.len() || start > end {
+                            let _ = std::fs::copy(&backup_path, &path_buf);
+                            return Err(AppError::Primitive(format!(
+                                "Replace 行号无效: {}..{}",
+                                start, end
+                            )));
+                        }
+                        let idx = start - 1;
+                        let new_lines: Vec<String> =
+                            edit.new_content.lines().map(String::from).collect();
+                        for (i, nl) in new_lines.iter().enumerate() {
+                            if idx + i < lines.len() {
+                                lines[idx + i] = nl.clone();
+                            } else {
+                                lines.push(nl.clone());
+                            }
+                        }
+                        for i in (idx + new_lines.len())..end {
+                            if i < lines.len() {
+                                lines[i] = String::new();
+                            }
                         }
                     }
                 }
@@ -480,6 +518,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let out = exec.read_file(&path_str, "p1").await.unwrap();
         assert_eq!(out, "hello");
@@ -494,6 +533,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            PathBuf::from("/nonexistent_pi_workspace"),
         );
         let r = exec.read_file("/tmp/any", "p1").await;
         assert!(r.is_err());
@@ -511,6 +551,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let path_str = dir.to_string_lossy().to_string();
         let entries = exec.list_dir(&path_str, "p1").await.unwrap();
@@ -531,6 +572,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let res = exec
             .write_file(&path_str, "content", false, "p1")
@@ -554,7 +596,7 @@ mod tests {
         c.require_approval_for_all_write = true;
         let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
-        let exec = DefaultPrimitiveExecutor::new(c, Arc::new(DenyAllConfirmation), audit);
+        let exec = DefaultPrimitiveExecutor::new(c, Arc::new(DenyAllConfirmation), audit, dir.clone());
         let r = exec.write_file(&path_str, "new", true, "p1").await;
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err(), AppError::Permission(_)));
@@ -590,6 +632,7 @@ mod tests {
             c,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let edits = vec![EditOperation {
             operation_type: EditOperationType::Replace,
@@ -619,6 +662,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let res = exec
             .execute_bash("echo ok", Some(&path_str), "p1")
@@ -641,6 +685,7 @@ mod tests {
             c,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let r = exec.execute_bash("rm -rf /", Some(&path_str), "p1").await;
         assert!(r.is_err());
@@ -655,6 +700,7 @@ mod tests {
             config,
             Arc::new(DenyAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            PathBuf::from("/nonexistent_pi_workspace"),
         );
         let ok = exec
             .require_user_confirmation(PrimitiveOperation::Write, "preview", "p1")
@@ -675,6 +721,7 @@ mod tests {
             c,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let r = exec.list_dir(&path_str, "p1").await;
         assert!(r.is_err());
@@ -693,6 +740,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let r = exec.read_file(&path_str, "p1").await;
         assert!(r.is_err());
@@ -715,6 +763,7 @@ mod tests {
             c,
             Arc::new(DenyAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let res = exec.write_file(&path_str, "new", true, "p1").await.unwrap();
         assert!(res.written);
@@ -736,6 +785,7 @@ mod tests {
             config,
             Arc::new(AllowAllConfirmation),
             Arc::new(TracingAuditRecorder),
+            dir.clone(),
         );
         let res = exec
             .write_file(&path_str, "overwritten", true, "p1")

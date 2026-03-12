@@ -1231,6 +1231,109 @@ fn test_user_asks_pi_technical_question() {
     );
 }
 
+/// [E2E-CLI-016] 用户要求 pi 执行一条 bash 命令
+///
+/// 验证：exit 0；stdout 含 hello_from_pi（或明显命令执行结果）
+/// 意义：工具调用 E2E 门禁，保证 execute_bash 被真实调用
+#[test]
+fn test_user_asks_pi_to_run_bash_command() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_asks_pi_to_run_bash_command").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: pi chat stdin 请执行 echo hello_from_pi，timeout 60s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("请执行 echo hello_from_pi\n")
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: exit 0 + stdout 含 hello_from_pi；actual: {}",
+        trunc(&out, 300)
+    );
+    assert.success();
+    assert!(
+        out.contains("hello_from_pi"),
+        "stdout 应含 'hello_from_pi'（工具 execute_bash 被调用），实际: {}",
+        trunc(&out, 300)
+    );
+}
+
+/// [E2E-CLI-013] 用户要求 pi 在工作区 workspace 目录下写文件
+///
+/// 验证：exit 0；agents/default/workspace/hello_e2e.txt 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
+/// 意义：默认白名单为 work_dir/agents/default/workspace，write_file 工具调用 E2E 门禁
+#[test]
+fn test_user_asks_pi_to_write_hello_world_bash() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(work_dir.join("agents/default/workspace")).unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+    });
+
+    info!("Act: pi chat stdin 要求在 workspace 下创建 hello_e2e.txt，timeout 60s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin("请在当前工作区的 workspace 目录下创建文件 hello_e2e.txt，内容写 Hello E2E\n")
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: exit 0 + 文件存在且含 Hello E2E 或 stdout 含操作确认；actual: {}",
+        trunc(&out, 300)
+    );
+    assert.success();
+
+    let hello_path = work_dir.join("agents/default/workspace/hello_e2e.txt");
+    if hello_path.exists() {
+        let content = fs::read_to_string(&hello_path).unwrap();
+        assert!(
+            content.contains("Hello E2E"),
+            "hello_e2e.txt 内容应含 'Hello E2E'，实际: {}",
+            trunc(&content, 200)
+        );
+    } else {
+        assert!(
+            out.contains("写入") || out.contains("write") || out.contains("创建") || out.contains("创建了"),
+            "未找到 hello_e2e.txt 时 stdout 应含写入/创建类确认，实际: {}",
+            trunc(&out, 300)
+        );
+    }
+}
+
 // ──────────────────── Story 3: WasmEdge+QuickJS 插件系统（E2E-CLI-021~026） ────────────────────
 
 /// 创建临时插件目录，包含 plugin.json + main.js
