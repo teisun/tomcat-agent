@@ -87,6 +87,17 @@
 - [ ] **wasm-plugin 合并**：若本次合并涉及插件/Wasm 加载或运行时，须确认已有或本次补充「Wasm 真实运行时」集成测试（见 INTEGRATION_TEST_SPEC 5.4）；例如 `PluginManager::load_plugin(path)` 须至少有一条「真实 WasmEngine + 临时插件目录 → load_plugin → 断言加载成功」的集成测试。
 - [ ] **E2E 用户操作模拟覆盖**：本次合并引入的用户可见操作，须在 cli_tests.rs 或 wasmedge_e2e_tests.rs 中有对应 test_user_* 用例，并同步更新 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)（符合 E2E_TEST_SPEC §6）。
 
+### 合并后文档与场景库同步
+
+**每次**将功能分支合并到 develop 之后、在执行全量验收之前，须根据本次合并的代码与相关技术方案（如 [Architecture.md](../openspec/specs/Architecture.md) 及其子文档）补充或更新以下文档，保证规格与实现一致：
+
+1. **时机**：与「编写集成测试代码」同轮或紧接其后，在「合并后全量测试与验收清单」之前完成。
+2. **依据**：本次合并涉及的代码变更、以及 Architecture 与子文档中的相关技术方案（如 [audit-log.md](../openspec/specs/architecture/audit-log.md)、session-storage、host-api 等）。
+3. **动作**：
+   - **[User_Stories.md](../openspec/specs/User_Stories.md)**：若本次合并实现或变更了某 P0/P1 用户故事的能力，则补充或更新对应故事的描述与验收标准，使其与当前实现一致。
+   - **[E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)**：若本次合并引入了新的用户可见操作或场景，则补充或更新 E2E 用例表（编号、用例名、用户意图、操作序列、必须断言），并与 `tests/cli_tests.rs` 或 `tests/wasmedge_e2e_tests.rs` 中的 `test_user_*` / Wasm E2E 用例对应。
+4. **自检**：合并后规格文档与代码、E2E 场景库与现有 E2E 测试用例无矛盾、无遗漏。
+
 ### 合并后全量测试与验收清单
 
 **一键执行（可选）**：`./scripts/run-integration-tests.sh`

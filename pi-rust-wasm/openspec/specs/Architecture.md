@@ -25,7 +25,7 @@
 
 ### 1. 基础设施层
 
-项目的底层可信基础能力，所有上层模块均依赖该层，无任何业务逻辑，保证跨平台通用，完全基于 Rust 安全实现；包含统一错误处理、配置管理、日志与审计、跨平台适配、事件总线。
+项目的底层可信基础能力，所有上层模块均依赖该层，无任何业务逻辑，保证跨平台通用，完全基于 Rust 安全实现；包含统一错误处理、配置管理、日志与审计、跨平台适配、事件总线。**审计日志**的存储形态、仅追加与不可篡改、目录与配置、写入/查询/导出/清理及与 CLI 对接见 [审计日志设计（详细）](architecture/audit-log.md)。
 
 详见 [1. 基础设施层（详细）](architecture/infrastructure-layer.md)。
 
@@ -118,6 +118,7 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | 文档 | 说明 |
 |------|------|
 | [architecture/infrastructure-layer.md](architecture/infrastructure-layer.md) | 基础设施层 |
+| [architecture/audit-log.md](architecture/audit-log.md) | 审计日志设计 |
 | [architecture/host-core-layer.md](architecture/host-core-layer.md) | 宿主核心能力层 |
 | [architecture/host-api-layer.md](architecture/host-api-layer.md) | 宿主API层 |
 | [architecture/wasmedge-runtime-layer.md](architecture/wasmedge-runtime-layer.md) | WasmEdge运行时层 |

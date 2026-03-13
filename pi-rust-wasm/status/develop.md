@@ -1,5 +1,33 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Tom | 2026-03-13 18:15 | DONE | develop | — |
+
+### TASK-04 审计日志系统完整落地（T1-P1-001）
+
+- [✓] 1.1 独立审计日志模块（AuditStore、resolve_audit_dir、FileAuditRecorder）
+- [✓] 1.2 关键路径写入审计（plugin_lifecycle、PluginManager 注入）
+- [✓] 1.3 审计日志查询/导出/按策略清理
+- [✓] 1.4 CLI audit 子命令对接审计模块
+- [✓] 1.5 文档（加密 TODO 说明）
+- [✓] 3.6.1 Architecture 审计子文档（audit-log.md）+ 索引
+- [✓] 3.6.2 Nibbles 合并后文档与场景库同步步骤
+
+### INTERFACE（本批变更）
+
+- `infra`: 新增 `resolve_audit_dir`、`AuditStore`、`AuditFilter`、`AuditEntry`、`FileAuditRecorder`、`PluginLifecycleAuditEntry`；`AuditRecorder` 新增 `record_plugin_lifecycle`。
+- `ext/plugin`: `PluginManager` 新增 `set_audit_recorder`，load/enable/disable/unload 写审计。
+- `api/cli`: `run_audit` 改为基于 AuditStore，不再解析 tracing 日志；`security.enable_audit_log` 控制是否启用。
+- `openspec/specs/architecture/audit-log.md` 新增；`Architecture.md` 增加引用与索引。
+- `agents/Nibbles.md` 增加「合并后文档与场景库同步」步骤。
+
+### BLOCKED
+
+无。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-12 19:00 | E2E FULL COVERAGE PASS | develop | — |
 
 ### E2E 全量覆盖报告：P0 用户故事全面覆盖

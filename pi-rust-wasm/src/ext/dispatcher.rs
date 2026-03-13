@@ -1031,6 +1031,7 @@ mod tests {
             fn record_hostcall(&self, _: crate::infra::HostcallAuditEntry) {
                 COUNT.fetch_add(1, Ordering::SeqCst);
             }
+            fn record_plugin_lifecycle(&self, _: crate::infra::PluginLifecycleAuditEntry) {}
         }
         let bus = Arc::new(DefaultEventBus::new());
         let audit = Arc::new(CountAudit);

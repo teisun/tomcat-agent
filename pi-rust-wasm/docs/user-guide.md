@@ -561,17 +561,21 @@ pi plugin unload my-plugin
 
 ## 7. 审计日志
 
-pi 将所有 4 原语操作、工具调用、插件 hostcall 记录到审计日志，便于事后排查。
+pi 将所有 4 原语操作、工具调用、插件 hostcall 与插件生命周期（加载/启用/禁用/卸载）记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。
 
-### 前提：开启文件日志
+**说明**：当前审计日志为明文存储；加密存储为后续 TODO。
 
-审计记录写入日志文件，需要在 `config.toml` 中打开文件日志：
+### 前提：开启审计日志
+
+需要在 `config.toml` 中开启审计并（可选）设置保留天数：
 
 ```bash
-pi config set log.file_enabled true
+pi config set security.enable_audit_log true
+# 可选：保留最近 N 天（默认 90）
+pi config set security.audit_log_retention_days 90
 ```
 
-日志文件存放于 `~/.pi_wasm/agents/default/logs/`。
+审计文件存放于 `~/.pi_wasm/agents/default/audit/audit.jsonl`（专用 JSONL，仅追加）。
 
 ### 查看审计记录列表
 
@@ -592,7 +596,7 @@ pi audit list --limit 20
 共 3 条
 ```
 
-未开启文件日志或无记录时给出友好提示。
+未开启审计或无记录时给出友好提示。执行 `pi audit list` 时会按配置自动清理过期记录。
 
 ### 审计记录类型
 
@@ -601,6 +605,7 @@ pi audit list --limit 20
 | `primitive` | LLM 调用 read_file / write_file / edit_file / execute_bash |
 | `tool_call` | 插件或 LLM 通过工具注册表调用 tool |
 | `hostcall` | 插件 JS 通过 `__pi_host_call` 调用宿主 API |
+| `plugin_lifecycle` | 插件 load / enable / disable / unload |
 
 ### 查看单条审计记录
 

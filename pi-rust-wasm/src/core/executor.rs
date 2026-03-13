@@ -619,6 +619,7 @@ mod tests {
         }
         fn record_tool_call(&self, _entry: ToolAuditEntry) {}
         fn record_hostcall(&self, _entry: crate::infra::HostcallAuditEntry) {}
+        fn record_plugin_lifecycle(&self, _entry: crate::infra::PluginLifecycleAuditEntry) {}
     }
 
     #[tokio::test]

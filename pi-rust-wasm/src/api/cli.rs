@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ensure_work_dir_structure, load_config, normalize_path, resolve_log_dir, resolve_quickjs_path,
-    resolve_sessions_dir, validate_config, write_file_atomic, AppConfig, AppError, DefaultEventBus,
-    DefaultToolRegistry, EventBus, PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    ensure_work_dir_structure, load_config, normalize_path, resolve_audit_dir, resolve_quickjs_path,
+    resolve_sessions_dir, validate_config, write_file_atomic, AppConfig,
+    AppError, AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
+    FileAuditRecorder, PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry,
     TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
 
@@ -539,11 +540,16 @@ impl ToolExecutor for NoopToolExecutor {
 fn build_plugin_context(cfg: &AppConfig) -> Result<PluginContext, AppError> {
     let event_bus: std::sync::Arc<dyn EventBus> = std::sync::Arc::new(DefaultEventBus::new());
     let executor: std::sync::Arc<dyn ToolExecutor> = std::sync::Arc::new(NoopToolExecutor);
-    let audit = std::sync::Arc::new(TracingAuditRecorder);
+    let audit: std::sync::Arc<dyn crate::infra::AuditRecorder> =
+        match AuditStore::open_if_enabled(cfg)? {
+            Some(store) => std::sync::Arc::new(FileAuditRecorder::new(std::sync::Arc::new(store))),
+            None => std::sync::Arc::new(TracingAuditRecorder),
+        };
     let tool_registry: std::sync::Arc<dyn ToolRegistry> =
-        std::sync::Arc::new(DefaultToolRegistry::new(executor, audit));
+        std::sync::Arc::new(DefaultToolRegistry::new(executor, audit.clone()));
     let mut pm = PluginManager::new(event_bus);
     pm.set_tool_registry(tool_registry);
+    pm.set_audit_recorder(audit);
 
     let resolved_qjs = resolve_quickjs_path(cfg);
     let wasm_cfg = WasmEngineConfig {
@@ -667,6 +673,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
     Ok(())
 }
 
+#[allow(dead_code)] // 保留供单元测试（旧 tracing 日志解析格式）
 #[derive(Debug, Clone, serde::Serialize)]
 struct AuditDisplayEntry {
     index: usize,
@@ -676,6 +683,7 @@ struct AuditDisplayEntry {
     success: String,
 }
 
+#[allow(dead_code)] // 保留供单元测试
 fn parse_audit_line(line: &str, index: usize) -> Option<AuditDisplayEntry> {
     let audit_type = if line.contains("audit primitive") {
         "primitive"
@@ -725,6 +733,7 @@ fn parse_audit_line(line: &str, index: usize) -> Option<AuditDisplayEntry> {
     })
 }
 
+#[allow(dead_code)] // 保留供测试或兼容旧 tracing 日志解析
 fn find_latest_log_file(dir: &std::path::Path) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
@@ -738,6 +747,7 @@ fn find_latest_log_file(dir: &std::path::Path) -> Option<PathBuf> {
         })
 }
 
+#[allow(dead_code)] // 保留供单元测试
 fn read_audit_entries(
     log_path: &std::path::Path,
     limit: Option<u32>,
@@ -761,72 +771,85 @@ fn read_audit_entries(
 }
 
 pub(crate) fn run_audit(sub: AuditSub, cfg: &AppConfig) -> Result<(), AppError> {
-    if !cfg.log.file_enabled {
-        println!("审计日志功能需要开启文件日志。请在配置中设置 log.file_enabled = true");
+    if !cfg.security.enable_audit_log {
+        println!("审计日志未开启。请在配置中设置 security.enable_audit_log = true");
         return Ok(());
     }
-    let log_dir = resolve_log_dir(cfg)?;
-    if !log_dir.exists() {
-        println!("日志目录不存在: {}，尚无审计记录", log_dir.display());
-        return Ok(());
-    }
-    let log_path = find_latest_log_file(&log_dir);
-    let log_path = match log_path {
-        Some(p) => p,
-        None => {
-            println!("日志目录 {} 中无日志文件，尚无审计记录", log_dir.display());
+    let store = match AuditStore::new(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("无法打开审计存储: {}", e);
             return Ok(());
         }
     };
+    let audit_dir = resolve_audit_dir(cfg)?;
+    if !audit_dir.exists() {
+        println!("审计目录不存在: {}，尚无审计记录", audit_dir.display());
+        return Ok(());
+    }
 
     match sub {
         AuditSub::List { limit } => {
-            let entries = read_audit_entries(&log_path, limit)?;
+            let _ = store.cleanup();
+            let filter = AuditFilter {
+                limit: limit.or(Some(50)),
+                ..Default::default()
+            };
+            let entries = store.query(&filter)?;
             if entries.is_empty() {
                 println!("未找到审计记录");
                 return Ok(());
             }
             println!(
-                "{:<6} {:<24} {:<12} {:<6} 详情",
+                "{:<6} {:<28} {:<14} {:<6} 详情",
                 "序号", "时间", "类型", "状态"
             );
-            println!("{}", "-".repeat(80));
+            println!("{}", "-".repeat(90));
             for e in &entries {
+                let status = if e.success() { "OK" } else { "FAIL" };
                 println!(
-                    "{:<6} {:<24} {:<12} {:<6} {}",
-                    e.index, e.timestamp, e.audit_type, e.success, e.detail
+                    "{:<6} {:<28} {:<14} {:<6} {}",
+                    e.id,
+                    e.timestamp,
+                    e.kind_label(),
+                    status,
+                    e.detail_short()
                 );
             }
             println!("共 {} 条", entries.len());
         }
         AuditSub::Show { id } => {
-            let idx: usize = id.parse().unwrap_or(usize::MAX);
-            let entries = read_audit_entries(&log_path, None)?;
-            match entries.iter().find(|e| e.index == idx) {
+            let idx: u64 = id.parse().unwrap_or(0);
+            let filter = AuditFilter {
+                limit: None,
+                ..Default::default()
+            };
+            let entries = store.query(&filter)?;
+            match entries.iter().find(|e| e.id == idx) {
                 Some(e) => {
-                    println!("序号:   {}", e.index);
+                    let status = if e.success() { "OK" } else { "FAIL" };
+                    println!("序号:   {}", e.id);
                     println!("时间:   {}", e.timestamp);
-                    println!("类型:   {}", e.audit_type);
-                    println!("状态:   {}", e.success);
-                    println!("详情:   {}", e.detail);
+                    println!("类型:   {}", e.kind_label());
+                    println!("状态:   {}", status);
+                    println!("详情:   {}", e.detail_short());
                 }
                 None => {
                     println!("未找到审计记录: {}", id);
-                    println!(
-                        "  提示: 完整审计 ID 体系将在 T1-P1-001 中实现，当前使用行序号作为 ID"
-                    );
                 }
             }
         }
         AuditSub::Export { path } => {
-            let entries = read_audit_entries(&log_path, None)?;
+            let filter = AuditFilter {
+                limit: None,
+                ..Default::default()
+            };
+            let entries = store.query(&filter)?;
             if entries.is_empty() {
                 println!("无审计记录可导出");
                 return Ok(());
             }
-            let json = serde_json::to_string_pretty(&entries)
-                .map_err(|e| AppError::Config(e.to_string()))?;
-            write_file_atomic(&path, json.as_bytes())?;
+            store.export_to(&path)?;
             println!("已导出 {} 条审计记录到 {}", entries.len(), path.display());
         }
     }
@@ -1423,11 +1446,12 @@ mod tests {
         assert!(r.is_ok());
     }
 
-    // --- audit with file_enabled = false ---
+    // --- audit with enable_audit_log = false ---
 
     #[test]
     fn run_audit_list_file_disabled_returns_ok() {
-        let cfg = AppConfig::default();
+        let mut cfg = AppConfig::default();
+        cfg.security.enable_audit_log = false;
         let r = run_audit(AuditSub::List { limit: None }, &cfg);
         assert!(r.is_ok());
     }

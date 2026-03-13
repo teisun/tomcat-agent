@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::infra::error::AppError;
-use crate::infra::{AuditRecorder, DefaultEventBus, EventBus, TracingAuditRecorder};
+use crate::infra::{
+    AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
+};
 use crate::{
     agent_messages_from_chat, resolve_sessions_dir, resolve_workspace_dir, AgentLoop,
     AgentLoopConfig, AppConfig, ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry,
@@ -41,7 +43,10 @@ impl ChatContext {
 
         let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(&config.llm)?);
 
-        let audit: Arc<dyn AuditRecorder> = Arc::new(TracingAuditRecorder);
+        let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
+            Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
+            None => Arc::new(TracingAuditRecorder),
+        };
         let confirmation = Arc::new(CliConfirmation);
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
             config.primitive.clone(),

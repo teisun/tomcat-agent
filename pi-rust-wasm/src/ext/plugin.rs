@@ -3,6 +3,7 @@
 //! PluginManifest、PluginInstance、PluginStatus、加载/启用/禁用/卸载及与 EventBus、ToolRegistry 的清理对接。
 
 use crate::core::ToolRegistry;
+use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventListenerId};
 use parking_lot::RwLock;
@@ -132,6 +133,8 @@ pub struct PluginManager {
     host_dispatcher: Option<Arc<HostApiDispatcher>>,
     /// 加载前用户确认权限；未设置时视为自动同意（或由调用方在 load 前自行确认）。
     confirm_permissions: Option<Arc<ConfirmPermissionsFn>>,
+    /// 审计记录器；未设置时不写插件生命周期审计。
+    audit: Option<Arc<dyn AuditRecorder>>,
 }
 
 impl PluginManager {
@@ -143,12 +146,18 @@ impl PluginManager {
             wasm_engine: None,
             host_dispatcher: None,
             confirm_permissions: None,
+            audit: None,
         }
     }
 
     /// 注入 ToolRegistry（006 就绪后调用）；卸载时用于 unregister_plugin_tools。
     pub fn set_tool_registry(&mut self, t: Arc<dyn ToolRegistry>) {
         self.tools = Some(t);
+    }
+
+    /// 注入审计记录器；未设置时 load/enable/disable/unload 不写审计。
+    pub fn set_audit_recorder(&mut self, a: Arc<dyn AuditRecorder>) {
+        self.audit = Some(a);
     }
 
     /// 注入 WasmEngine；load_plugin 前必须设置，否则加载返回错误。
@@ -175,13 +184,47 @@ impl PluginManager {
     /// * 未设置 wasm_engine、路径无效、清单解析失败、main 读取失败、用户拒绝权限、Wasm/QuickJS 执行失败时返回对应错误。
     pub fn load_plugin(&self, path: impl AsRef<Path>) -> Result<(), AppError> {
         let path = path.as_ref();
-        let (plugin_root, manifest) = self.resolve_manifest_and_root(path)?;
-        let plugin_code = self.read_main_script(&plugin_root, &manifest)?;
+        let (plugin_root, manifest) = match self.resolve_manifest_and_root(path) {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(ref a) = self.audit {
+                    a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                        plugin_id: path.to_string_lossy().to_string(),
+                        action: "load".to_string(),
+                        success: false,
+                        detail: Some(e.to_string()),
+                    });
+                }
+                return Err(e);
+            }
+        };
+        let plugin_code = match self.read_main_script(&plugin_root, &manifest) {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(ref a) = self.audit {
+                    a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                        plugin_id: manifest.id.clone(),
+                        action: "load".to_string(),
+                        success: false,
+                        detail: Some(e.to_string()),
+                    });
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(ref confirm) = self.confirm_permissions {
             let ok = confirm(&manifest)
                 .map_err(|e| AppError::Permission(format!("权限确认失败: {}", e)))?;
             if !ok {
+                if let Some(ref a) = self.audit {
+                    a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                        plugin_id: manifest.id.clone(),
+                        action: "load".to_string(),
+                        success: false,
+                        detail: Some("用户拒绝插件授权".to_string()),
+                    });
+                }
                 return Err(AppError::Permission("用户拒绝插件授权".to_string()));
             }
         }
@@ -190,9 +233,21 @@ impl PluginManager {
             AppError::Plugin("load_plugin 需要先调用 set_wasm_engine 注入引擎".to_string())
         })?;
 
-        let mut instance = engine
-            .create_instance(&manifest.id)
-            .map_err(|e| AppError::Plugin(format!("创建 Wasm 实例失败: {}", e)))?;
+        let mut instance = match engine.create_instance(&manifest.id) {
+            Ok(i) => i,
+            Err(e) => {
+                let err = AppError::Plugin(format!("创建 Wasm 实例失败: {}", e));
+                if let Some(ref a) = self.audit {
+                    a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                        plugin_id: manifest.id.clone(),
+                        action: "load".to_string(),
+                        success: false,
+                        detail: Some(err.to_string()),
+                    });
+                }
+                return Err(err);
+            }
+        };
 
         let instance_id = manifest.id.clone();
         let dispatcher_opt = self.host_dispatcher.clone();
@@ -201,13 +256,32 @@ impl PluginManager {
                 invoke_host_func_with(dispatcher_opt.as_deref(), &instance_id, request_json)?;
             serde_json::to_string(&resp).map_err(AppError::from)
         };
-        instance
-            .register_host_binding(invoke_fn)
-            .map_err(|e| AppError::Plugin(format!("注册 host binding 失败: {}", e)))?;
+        if let Err(e) = instance.register_host_binding(invoke_fn) {
+            instance.destroy();
+            let err = AppError::Plugin(format!("注册 host binding 失败: {}", e));
+            if let Some(ref a) = self.audit {
+                a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                    plugin_id: manifest.id.clone(),
+                    action: "load".to_string(),
+                    success: false,
+                    detail: Some(err.to_string()),
+                });
+            }
+            return Err(err);
+        }
 
         if let Err(e) = instance.run_script(&plugin_code) {
             instance.destroy();
-            return Err(AppError::Plugin(format!("插件初始化脚本执行失败: {}", e)));
+            let err = AppError::Plugin(format!("插件初始化脚本执行失败: {}", e));
+            if let Some(ref a) = self.audit {
+                a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                    plugin_id: manifest.id.clone(),
+                    action: "load".to_string(),
+                    success: false,
+                    detail: Some(err.to_string()),
+                });
+            }
+            return Err(err);
         }
 
         let now = std::time::SystemTime::now()
@@ -226,8 +300,36 @@ impl PluginManager {
             loaded_at: now,
             plugin_root: plugin_root.clone(),
         };
-        self.register_plugin(plugin_instance)?;
-        self.enable_plugin(&manifest.id)?;
+        if let Err(e) = self.register_plugin(plugin_instance) {
+            if let Some(ref a) = self.audit {
+                a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                    plugin_id: manifest.id.clone(),
+                    action: "load".to_string(),
+                    success: false,
+                    detail: Some(e.to_string()),
+                });
+            }
+            return Err(e);
+        }
+        if let Err(e) = self.enable_plugin(&manifest.id) {
+            if let Some(ref a) = self.audit {
+                a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                    plugin_id: manifest.id.clone(),
+                    action: "load".to_string(),
+                    success: false,
+                    detail: Some(e.to_string()),
+                });
+            }
+            return Err(e);
+        }
+        if let Some(ref a) = self.audit {
+            a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                plugin_id: manifest.id.clone(),
+                action: "load".to_string(),
+                success: true,
+                detail: None,
+            });
+        }
         Ok(())
     }
 
@@ -317,20 +419,60 @@ impl PluginManager {
     /// 启用插件：仅改状态。
     pub fn enable_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let mut map = self.plugins.write();
-        let inst = map
-            .get_mut(plugin_id)
-            .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?;
+        let inst = match map.get_mut(plugin_id) {
+            Some(i) => i,
+            None => {
+                let e = AppError::Plugin(format!("plugin not found: {}", plugin_id));
+                if let Some(ref a) = self.audit {
+                    a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                        plugin_id: plugin_id.to_string(),
+                        action: "enable".to_string(),
+                        success: false,
+                        detail: Some(e.to_string()),
+                    });
+                }
+                return Err(e);
+            }
+        };
         inst.status = PluginStatus::Enabled;
+        if let Some(ref a) = self.audit {
+            a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                plugin_id: plugin_id.to_string(),
+                action: "enable".to_string(),
+                success: true,
+                detail: None,
+            });
+        }
         Ok(())
     }
 
     /// 禁用插件：仅改状态。
     pub fn disable_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let mut map = self.plugins.write();
-        let inst = map
-            .get_mut(plugin_id)
-            .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?;
+        let inst = match map.get_mut(plugin_id) {
+            Some(i) => i,
+            None => {
+                let e = AppError::Plugin(format!("plugin not found: {}", plugin_id));
+                if let Some(ref a) = self.audit {
+                    a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                        plugin_id: plugin_id.to_string(),
+                        action: "disable".to_string(),
+                        success: false,
+                        detail: Some(e.to_string()),
+                    });
+                }
+                return Err(e);
+            }
+        };
         inst.status = PluginStatus::Disabled;
+        if let Some(ref a) = self.audit {
+            a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                plugin_id: plugin_id.to_string(),
+                action: "disable".to_string(),
+                success: true,
+                detail: None,
+            });
+        }
         Ok(())
     }
 
@@ -338,8 +480,21 @@ impl PluginManager {
     pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let instance = {
             let mut map = self.plugins.write();
-            map.remove(plugin_id)
-                .ok_or_else(|| AppError::Plugin(format!("plugin not found: {}", plugin_id)))?
+            match map.remove(plugin_id) {
+                Some(inst) => inst,
+                None => {
+                    let e = AppError::Plugin(format!("plugin not found: {}", plugin_id));
+                    if let Some(ref a) = self.audit {
+                        a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                            plugin_id: plugin_id.to_string(),
+                            action: "unload".to_string(),
+                            success: false,
+                            detail: Some(e.to_string()),
+                        });
+                    }
+                    return Err(e);
+                }
+            }
         };
 
         self.event_bus.remove_plugin_listeners(plugin_id);
@@ -348,6 +503,14 @@ impl PluginManager {
         }
         if let Some(wasm) = instance.wasm_instance {
             wasm.destroy();
+        }
+        if let Some(ref a) = self.audit {
+            a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
+                plugin_id: plugin_id.to_string(),
+                action: "unload".to_string(),
+                success: true,
+                detail: None,
+            });
         }
         Ok(())
     }

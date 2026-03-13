@@ -302,6 +302,14 @@ pub fn resolve_log_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
         .join("logs"))
 }
 
+/// `work_dir/agents/default/audit` — 独立审计日志目录，专用 JSONL 存储。
+pub fn resolve_audit_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?
+        .join("agents")
+        .join("default")
+        .join("audit"))
+}
+
 /// `work_dir/agents/default/workspace`
 pub fn resolve_workspace_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?
@@ -326,12 +334,12 @@ pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
 
 /// 启动时创建工作根目录及多 agent 子目录（当前仅 agentId=default）。若目录已存在则跳过。
 ///
-/// 创建：`work_dir`、`work_dir/agents/default/sessions`、`plugins`、`tmp`、`logs`、`workspace`，
+/// 创建：`work_dir`、`work_dir/agents/default/sessions`、`plugins`、`tmp`、`logs`、`audit`、`workspace`，
 /// 以及 `work_dir/wasm`（全局运行时引擎）、`work_dir/plugins`（全局共享插件）。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let work = get_work_dir(cfg)?;
     let default_agent = work.join("agents").join("default");
-    for sub in ["sessions", "plugins", "tmp", "logs", "workspace"] {
+    for sub in ["sessions", "plugins", "tmp", "logs", "audit", "workspace"] {
         std::fs::create_dir_all(default_agent.join(sub)).map_err(AppError::Io)?;
     }
     std::fs::create_dir_all(work.join("wasm")).map_err(AppError::Io)?;
