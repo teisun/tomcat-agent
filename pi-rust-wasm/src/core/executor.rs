@@ -13,6 +13,7 @@ use crate::infra::platform::{normalize_path, read_file_utf8, write_file_atomic};
 use crate::infra::PrimitiveConfig;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use tracing::debug;
 use std::sync::Arc;
 use tokio::process::Command;
 
@@ -175,10 +176,12 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             format!("写入新文件 {} ({} bytes)", path, content.len())
         };
         if self.needs_confirmation(PrimitiveOperation::Write) {
+            debug!("[tool_debug] 请求用户确认写入 path={}", path);
             let ok = self
                 .require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id)
                 .await?;
             if !ok {
+                debug!("[tool_debug] 用户拒绝写入确认 path={}", path);
                 self.audit.record_primitive(PrimitiveAuditEntry {
                     operation: AuditPrimitiveOp::Write,
                     path_or_cmd: path_str.clone(),

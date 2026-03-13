@@ -1261,10 +1261,16 @@ fn test_user_asks_pi_to_run_bash_command() {
         .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("OPENAI_API_KEY", &api_key)
         .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .env("RUST_LOG", "pi_wasm=info")
         .write_stdin("请执行 echo hello_from_pi\n")
         .timeout(std::time::Duration::from_secs(60));
     let assert = c.assert();
-    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        info!("[pi chat stderr] {}", trunc(&stderr, 1500));
+    }
+    let out = String::from_utf8_lossy(&output.stdout).to_string();
     info!(
         "Assert: exit 0 + stdout 含 hello_from_pi；actual: {}",
         trunc(&out, 300)

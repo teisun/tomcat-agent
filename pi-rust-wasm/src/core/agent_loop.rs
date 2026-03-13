@@ -129,6 +129,7 @@ use crate::infra::error::AppError;
 use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message, ToolOutput};
 use crate::infra::event_bus::{EventBus, EventContext};
 use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
+use tracing::debug;
 
 /// 流式 delta 回调类型，供调用方渲染等。
 pub type OnStreamDelta = Box<dyn FnMut(&str) + Send>;
@@ -640,6 +641,7 @@ impl AgentLoop {
                 .collect();
 
             if tool_calls.is_empty() {
+                debug!("[tool_debug] 本轮回复无 tool_calls");
                 messages.push(AgentMessage::Assistant {
                     text: content_buf,
                     tool_calls: vec![],
@@ -652,6 +654,12 @@ impl AgentLoop {
                 });
                 return Ok(final_text);
             }
+            let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+            debug!(
+                "[tool_debug] 本轮回复 tool_calls: {} 个 names={:?}",
+                tool_calls.len(),
+                tool_names
+            );
 
             messages.push(AgentMessage::Assistant {
                 text: content_buf.clone(),

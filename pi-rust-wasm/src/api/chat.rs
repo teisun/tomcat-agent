@@ -14,6 +14,7 @@ use crate::{
 };
 
 use super::render::MarkdownRenderer;
+use tracing::debug;
 
 // ─── ChatContext ──────────────────────────────────────────────────────────────
 
@@ -290,6 +291,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect();
         let messages = agent_messages_from_chat(&chat_messages);
+        let first_role = history
+            .first()
+            .and_then(|v| v.get("role").and_then(|r| r.as_str()))
+            .unwrap_or("(none)");
+        debug!(
+            "[tool_debug] 注入 system 后 history 条数={} messages 条数={} 首条 role={}",
+            history.len(),
+            messages.len(),
+            first_role
+        );
 
         let config = AgentLoopConfig {
             max_attempts: 3,
