@@ -12,7 +12,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 1. 读取 [TASK_BOARD.md](./TASK_BOARD.md)。
 2. 查看顶部「当前迭代上下文」区，获取 specs 路径、需求文档路径等。
-3. 在任务列表中，找到**状态为 `TODO` 且负责人为空**的最高优先级任务（P0 > P1 > P2 > P3）。
+3. 在任务列表中，找到**状态为 `TODO` 且负责人为空**的最高优先级任务（P0 > P1 > P2 > P3）。仅 `TODO` 可认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
 4. 若有多个同优先级可选任务，优先选排在前面的（已按推荐顺序排列）。
 5. 有依赖的任务，所有依赖须为 `DONE` 才可认领。
 6. **一次只认领一个任务**，完成或标记 `BLOCKED` 后才可领下一个。
@@ -66,7 +66,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 1. 确认所有子项完成，通过门禁（rustfmt/clippy/单测）
 2. 更新**当前 Git 分支**对应的 status 文件（即 `status/` 下文件名为「当前分支名，`/` 替换为 `-`」的 .md 文件），标记任务完成；若在 develop 上开发则更新 `status/develop.md`。
-3. 将 TASK_BOARD.md 中该任务状态改为 `DONE`
+3. 将 TASK_BOARD.md 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
 4. **完成前自检（必做）**：
    - 已确认**当前分支**，并已更新 **status/当前分支对应.md**（分支名中 `/` → `-`）。
    - **覆盖率**（可选）：若需要测量覆盖率，可手动执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package pi_wasm`，将结果填入 status 文件元数据表的 Cov% 列；不强制执行，不阻塞任务完成。

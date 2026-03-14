@@ -33,6 +33,22 @@
 
 ---
 
+## 任务状态说明
+
+任务**状态**取值统一使用英文，含义与典型流转如下：
+
+| 状态 | 含义 |
+|------|------|
+| **TODO** | 待认领 |
+| **DOING** | 开发中（已认领） |
+| **PENDING_INTEGRATION** | 等待集成测试（开发已完成，等待合并与集成测试通过） |
+| **BLOCKED** | 阻塞（需在「阻塞点」中说明原因） |
+| **DONE** | 已完成（含集成测试通过） |
+
+**典型流转**：`TODO → DOING → PENDING_INTEGRATION → DONE`。阻塞时可为 `DOING` / `PENDING_INTEGRATION` → `BLOCKED` → `DOING` / `PENDING_INTEGRATION`。仅状态为 `TODO` 且负责人为空的任务可被认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
+
+---
+
 ## 待办任务
 
 按推荐执行顺序排列。工程师按 [Dispatcher.md](./Dispatcher.md) 流程认领。

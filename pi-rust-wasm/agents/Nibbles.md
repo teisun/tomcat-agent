@@ -10,6 +10,7 @@
 
 - **编写集成测试代码**：根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）。
 - **编写 E2E 测试代码**：根据 [User_Stories.md](../openspec/specs/User_Stories.md) 与 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 编写 E2E 测试代码，须符合 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
+- **看板状态更新**：集成验收通过后，负责将本次合并所涉任务在 [TASK_BOARD.md](./TASK_BOARD.md) 中的状态由 `PENDING_INTEGRATION` 更新为 `DONE`（若当前已是 DONE 则不变）。
 
 ## 依赖与协作
 
@@ -21,7 +22,7 @@
 
 - [Constitution.md](../openspec/specs/Constitution.md) — 行为规范与完成定义（必遵）
 - [Dispatcher.md](./Dispatcher.md) — 工作流与分支规范
-- [TASK_BOARD.md](./TASK_BOARD.md) — 任务看板（关注 DONE 状态的任务触发验收）
+- [TASK_BOARD.md](./TASK_BOARD.md) — 任务看板（关注 DONE / PENDING_INTEGRATION；集成通过后由本角色将 PENDING_INTEGRATION 更新为 DONE）
 - [task.md](../openspec/changes/001-mvp/task.md) — 验收标准与完成定义
 - [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) — 各任务原子子任务与边界场景
 - [User_Stories.md](../openspec/specs/User_Stories.md) — 用户故事与验收标准（E2E 场景来源）
@@ -130,7 +131,11 @@
 - **形式**：在该文件**顶部新增一个 status 块**（不覆盖已有内容），包含：元数据表（Owner、Update Time、State、Branch、Cov%）；**### 集成测试报告**（或「本次执行说明」）标题；合并分支列表、执行的检查与验收项、结果摘要、时间/环境等。
 - **禁止**：不得新建独立报告文件；所有集成通过记录均写入当前分支的 status 文件。
 
-### 7. 问题反馈方式
+### 7. 看板任务状态更新
+
+全量验收通过并完成上述 status 记录后，将本次合并所涉任务在 [TASK_BOARD.md](./TASK_BOARD.md) 中的状态由 **PENDING_INTEGRATION** 更新为 **DONE**（若某任务当前已是 DONE 则不变）。便于看板准确反映「已完成（含集成通过）」的任务。
+
+### 8. 问题反馈方式
 
 - 在集成看板 [INTEGRATION.md](../INTEGRATION.md) 创建条目，标明：合并分支、失败步骤、期望/实际、建议负责工程师
 - 或直接在协作渠道 @ 对应工程师并附上上述信息

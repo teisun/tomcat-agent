@@ -1,5 +1,25 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| @doc | 2026-03-14 | DONE | develop | — |
+
+### 看板与流程：新增 PENDING_INTEGRATION 状态
+
+- [✓] agents/TASK_BOARD.md：新增「任务状态说明」小节，含 TODO / DOING / PENDING_INTEGRATION / BLOCKED / DONE 及典型流转。
+- [✓] agents/Dispatcher.md：完成任务时状态改为 `PENDING_INTEGRATION`，并说明 DONE 由集成流程更新；领取任务处注明仅 TODO 可认领。
+- [✓] agents/Nibbles.md：角色增加「看板状态更新」职责；流程增加「7. 看板任务状态更新」；参考文档补充 PENDING_INTEGRATION → DONE 说明。
+
+### INTERFACE
+
+无（仅流程与看板文档变更）。
+
+### BLOCKED
+
+无。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-14 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-04 审计日志 Nibbles 验收
