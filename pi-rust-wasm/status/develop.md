@@ -1,5 +1,34 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-14 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-04 审计日志 Nibbles 验收
+
+**执行范围**：develop 上直接开发的 TASK-04（审计日志系统完整落地），无合并分支；按 Nibbles 流程 4.1→4.2→4.3→5→6 执行验收。
+
+#### 本次执行步骤与结果
+
+| 步骤 | 内容 | 结果 |
+|------|------|------|
+| 4.1 | 检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY | 已与实现一致，无变更 |
+| 4.2 | 编写/补充审计相关集成测试 | 新增 `tests/audit_tests.rs`（AuditStore + FileAuditRecorder 写入/查询/导出端到端）；lib 导出 `PluginLifecycleAuditEntry` |
+| 4.3 | E2E 测试与场景库对应 | E2E-CLI-059/060/061 已有对应 test_user_*，cli_tests 中 audit 相关 7 用例全部通过 |
+| 5 | 全量测试与验收清单 | `cargo build --release`、`cargo clippy -- -D warnings`、`cargo test --test '*'` 通过（含 audit_tests） |
+
+#### 验收项摘要
+
+- 构建与静态检查：PASS
+- CLI 子命令（含 `pi audit list/show/export`）：PASS
+- 集成测试（含新增 audit_tests）：PASS
+- E2E（cli_tests 含 audit 相关 test_user_*）：PASS
+
+**执行时间**：2026-03-14  
+**环境**：develop 分支，TASK-04 代码见最新提交
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Tom | 2026-03-13 18:15 | DONE | develop | — |
 
 ### TASK-04 审计日志系统完整落地（T1-P1-001）

@@ -32,6 +32,7 @@ pub use infra::{
     resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir, validate_config,
     write_file_atomic, AgentEvent, AppConfig, AppError, AuditEntry, AuditFilter, AuditPrimitiveOp,
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, EventContext, EventListenerId,
-    ExtensionEvent, FileAuditRecorder, HostcallAuditEntry, LlmConfig, LogConfig, PrimitiveAuditEntry,
-    PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder, WasmConfig,
+    ExtensionEvent, FileAuditRecorder, HostcallAuditEntry, LlmConfig, LogConfig,
+    PluginLifecycleAuditEntry, PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig, ToolAuditEntry,
+    TracingAuditRecorder, WasmConfig,
 };
