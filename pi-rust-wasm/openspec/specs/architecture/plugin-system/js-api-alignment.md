@@ -1,6 +1,6 @@
 # 12. JS API 与 pi-mono 对齐设计
 
-本文为 [Architecture](../Architecture.md) 中第 12 节的详细设计，总览见主文档。
+本文为 [Architecture](../../Architecture.md) 中第 12 节的详细设计，总览见主文档。
 
 ---
 
@@ -154,3 +154,7 @@ interface CompletionResult {
 1. **`off` 重复定义**：第 34 行（按 listenerId）和第 47 行（按 handler 引用），后者覆盖前者
 2. **`emit` 重复定义**：第 43 行和第 60 行，内容相同但冗余
 3. **`exec` 返回 HostResponse 而非 ExecResult**：插件需 `res.data.stdout` 而非 `res.stdout`，与 pi-mono 不兼容
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[事件系统设计](events.md) | 下一节：[Phase 2 长生命周期 VM](phase2-long-lived-vm.md)

@@ -297,3 +297,7 @@ pub struct WasmInstance {
 5. **插件数量有限**：pi-mono/openclaw 生态下典型 5-20 个插件，每个 ~8MB 栈，总计不超过 160MB，完全可接受
 
 若未来需要支持数百个插件或追求极致资源效率，可再评估方案 A，或考虑切换到支持跨平台 async host function 的 Wasmtime。
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[JS API 与 pi-mono 对齐](js-api-alignment.md)

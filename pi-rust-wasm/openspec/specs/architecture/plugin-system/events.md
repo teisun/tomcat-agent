@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「事件系统设计」的详细设计，总览见主文档。
+本文为 [Architecture](../../Architecture.md) 中「事件系统设计」的详细设计，总览见主文档。
 
 ## 事件系统设计（替代原钩子设计，完全对齐pi-agent-rust）
 
@@ -75,3 +75,7 @@ pub enum ExtensionEvent {
 - 按注册顺序执行回调，支持同步/异步；单次回调错误不影响其他回调与主流程
 - 扩展通过 `agent.emit()` 发布自定义事件（如 Custom 前缀），实现插件间通信
 - 插件卸载时自动注销该插件所有监听，无泄漏
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[异步 Hostcall 与事件循环](async-hostcall-event-loop.md) | 下一节：[JS API 与 pi-mono 对齐](js-api-alignment.md)

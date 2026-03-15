@@ -637,3 +637,7 @@ flowchart TB
 
 
 这样设计的好处是：事件分发时不需要每个上下文属性都做一次 hostcall——把当时的快照一次性传过去，只有真正需要「当前最新状态」或「执行操作」的方法才走 hostcall。
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[JS 桥接层](js-bridge-layer.md) | 下一节：[WasmEdge 运行时层](wasmedge-runtime-layer.md)

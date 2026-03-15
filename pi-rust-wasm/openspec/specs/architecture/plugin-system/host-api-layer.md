@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「3. 宿主API层」的详细设计，总览见主文档。
+本文为 [Architecture](../../Architecture.md) 中「3. 宿主API层」的详细设计，总览见主文档。
 
 ## 3. 宿主API层
 
@@ -53,4 +53,8 @@
   - 原子操作：计数器、标志位等优先使用 `std::sync::atomic`。
 
 **AI 实现指导**：
-“在实现 `src/ext/wasm/dispatcher.rs` 时，请创建一个 `HostApiManager` 结构体。它负责持有所有 `Processor`（如 `FsProcessor`, `LlmProcessor`）。它对外只暴露一个符合 WasmEdge 签名要求的 `call` 函数。在这个函数内部，先解析 JSON 参数，再根据 `method` 字符串路由到对应的 `Processor`。这种‘单入口多路复用’模式能极大简化我们未来添加新 API 的工作量。”
+“在实现 `src/ext/wasm/dispatcher.rs` 时，请创建一个 `HostApiManager` 结构体。它负责持有所有 `Processor`（如 `FsProcessor`, `LlmProcessor`）。它对外只暴露一个符合 WasmEdge 签名要求的 `call` 函数。在这个函数内部，先解析 JSON 参数，再根据 `method` 字符串路由到对应的 `Processor`。这种‘单入口多路复用’模式能极大简化我们未来添加新 API 的工作量。」
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 下一节：[Hostcall JSON 协议](host-call-protocol.md)

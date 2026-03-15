@@ -1,6 +1,6 @@
 # 11. 异步 Hostcall 与事件循环设计
 
-本文为 [Architecture](../Architecture.md) 中第 11 节的详细设计，总览见主文档。
+本文为 [Architecture](../../Architecture.md) 中第 11 节的详细设计，总览见主文档。
 
 ---
 
@@ -391,3 +391,7 @@ MVP 验证后，Phase 2 通过让 VM 实例在整个会话期间存活，解决 
 | [js-bridge-layer.md](js-bridge-layer.md) | pi_bridge.js 新增 hostCallAsync + API Promise 化 |
 | [host-call-protocol.md](host-call-protocol.md) | 新增 `__async.poll` 模块路由与 callId 使用规范 |
 | [js-api-alignment.md](js-api-alignment.md) | 异步化是 API 对齐的前置依赖 |
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[沙箱执行层](sandbox-layer.md) | 下一节：[事件系统设计](events.md)

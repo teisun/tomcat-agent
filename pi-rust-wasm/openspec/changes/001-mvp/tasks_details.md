@@ -120,7 +120,7 @@
   - **事件与会话**：接入 `EventBus` 实现跨沙箱事件分发；接入 `SessionManager` 实现上下文读写。
   - **审计挂钩**：在分发层统一触发 `AuditLogger`，记录每一个 Hostcall 的来源插件、参数及执行状态。
 - **8.4 异步 Hostcall 与并发调度 (Async & Concurrency)**
-  - 技术方案见 [异步 Hostcall 与事件循环设计](../../specs/architecture/async-hostcall-event-loop.md)。
+  - 技术方案见 [异步 Hostcall 与事件循环设计](../../specs/architecture/plugin-system/async-hostcall-event-loop.md)。
   - **8.4.1** `dispatcher.rs`：新增 `AsyncCallStatus` 枚举（`Pending`/`Done(HostResponse)`/`Error(String)`）和 `async_results: Arc<DashMap<String, AsyncCallStatus>>` 字段到 `HostApiDispatcher`。
   - **8.4.2** `dispatcher.rs`：改造 `dispatch()` — 若 `request.call_id` 非空，spawn Tokio 任务到共享 `tokio_handle`，将实际 `dispatch_async` 结果写入 `async_results`，立即返回 `{ok: true, data: {pending: true}, callId: "..."}`。
   - **8.4.3** `dispatcher.rs`：新增 `__async.poll` 路由 — 当 `module == "__async" && method == "poll"` 时，从 `async_results` 查结果并返回 `{ready: true/false, result: ...}`。
@@ -130,7 +130,7 @@
   - **8.4.7** 优化并发模型：多 Agent 同时调用时，Session 读写通过分片锁或 `Arc<RwLock>` 解决；LLM 并发通过 `Semaphore` 限制。
   - **8.4.8** 单元测试：异步提交→轮询→返回全链路；超时处理；多 callId 并发；边界：submit 后实例销毁时的清理。
 - **8.7 JS API 与 pi-mono 对齐 (JS API Alignment)**
-  - 技术方案见 [JS API 与 pi-mono 对齐设计](../../specs/architecture/js-api-alignment.md)。
+  - 技术方案见 [JS API 与 pi-mono 对齐设计](../../specs/architecture/plugin-system/js-api-alignment.md)。
   - **8.7.1** `pi_bridge.js`：新增 `hostCallAsync` 函数（submit/poll 包装，返回 Promise），含 callId 生成、指数退避轮询逻辑。
   - **8.7.2** `pi_bridge.js`：`exec` / `createChatCompletion` 改为调用 `hostCallAsync`，返回 Promise，返回值解包为 pi-mono 格式（`ExecResult` / `CompletionResult`）。
   - **8.7.3** `pi_bridge.js`：修复 `off` / `emit` 重复定义 bug，合并为单一定义。

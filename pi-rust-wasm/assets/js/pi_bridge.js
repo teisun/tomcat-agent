@@ -1,8 +1,8 @@
 // pi_bridge.js — pi-mono compatible bridge layer for pi-rust-wasm
 // Constructs globalThis.pi object that routes API calls through __pi_host_call.
 // Loaded by run_script_file_impl before user plugin scripts.
-// See: architecture/js-bridge-layer.md, host-call-protocol.md,
-//      architecture/js-api-alignment.md, architecture/async-hostcall-event-loop.md
+// See: architecture/plugin-system/js-bridge-layer.md, architecture/plugin-system/host-call-protocol.md,
+//      architecture/plugin-system/js-api-alignment.md, architecture/plugin-system/async-hostcall-event-loop.md
 (function () {
   'use strict';
 
@@ -16,7 +16,7 @@
 
   // -- Async host call wrapper (submit/poll pattern) -------------------------
   // Returns a Promise; drives polling via QuickJS built-in event loop.
-  // See: architecture/async-hostcall-event-loop.md §11.4.4
+  // See: architecture/plugin-system/async-hostcall-event-loop.md §11.4.4
   var __callSeq = 0;
   var POLL_INTERVAL_MS = 1;
   var POLL_MAX_INTERVAL_MS = 50;

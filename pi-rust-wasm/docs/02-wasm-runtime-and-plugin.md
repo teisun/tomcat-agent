@@ -75,7 +75,7 @@ flowchart LR
 
 - **build_vm 懒创建 env**：仅在首次调用 `build_vm` 时用 `ImportObjectBuilder` 创建 env 模块（含 `__pi_host_call`），之后复用同一 `import_object`；`HostData` 携带 `plugin_id` 与 `host_invoke`。
 - **每次执行新建 Vm 与 WasiModule**：每次 `run_script`/`run_script_file` 都会先设置当次 `WasiModule`（argv、preopen），再 `build_vm` 得到新 Vm（Store 持有当次 env + wasi），然后加载 quickjs 模块并执行 `_start`。
-- **Guest 侧**：wasmedge_quickjs.wasm 须从 env 导入 `__pi_host_call` 并暴露给 JS，JS 方能通过约定协议调用宿主；协议与调用约定见 [Hostcall JSON 协议](../openspec/specs/architecture/host-call-protocol.md)。
+- **Guest 侧**：wasmedge_quickjs.wasm 须从 env 导入 `__pi_host_call` 并暴露给 JS，JS 方能通过约定协议调用宿主；协议与调用约定见 [Hostcall JSON 协议](../openspec/specs/architecture/plugin-system/host-call-protocol.md)。
 
 **关键代码节点**
 

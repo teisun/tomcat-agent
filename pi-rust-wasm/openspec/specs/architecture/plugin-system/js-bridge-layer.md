@@ -1,6 +1,6 @@
 # JS 桥接层架构（pi_bridge.js）
 
-本文为 [Architecture](../Architecture.md) 中「3. 宿主API层」与「4. WasmEdge运行时层」之间的桥接子文档，描述 pi-mono 兼容桥接层的设计、实现与数据流。
+本文为 [Architecture](../../Architecture.md) 中「3. 宿主API层」与「4. WasmEdge运行时层」之间的桥接子文档，描述 pi-mono 兼容桥接层的设计、实现与数据流。
 
 ---
 
@@ -136,3 +136,7 @@ cp target/wasm32-wasip1/release/wasmedge_quickjs.wasm ../pi-rust-wasm/assets/was
 | `src/ext/instance_wasmedge.rs` | 宿主侧：host_call_impl + bridge 预加载 + dispatch_event |
 | `src/ext/dispatcher.rs` | 宿主侧：module/method 路由 + context 模块 |
 | `scripts/build-custom-quickjs.sh` | 构建定制 wasm 的脚本 |
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[Hostcall JSON 协议](host-call-protocol.md) | 下一节：[Host-Guest 层](host-guest-layer.md)

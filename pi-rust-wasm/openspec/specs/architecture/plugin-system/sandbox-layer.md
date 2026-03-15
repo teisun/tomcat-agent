@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「5. 沙箱执行层」的详细设计，总览见主文档。
+本文为 [Architecture](../../Architecture.md) 中「5. 沙箱执行层」的详细设计，总览见主文档。
 
 ## 5. 沙箱执行层
 
@@ -8,3 +8,7 @@
 - 资源限制：每个插件实例可配置CPU、内存、执行超时硬限制，避免资源耗尽
 - 错误隔离：插件执行错误完全捕获，不传递到宿主主程序，不会导致宿主崩溃
 - 模块加载：支持插件内npm包加载、相对路径模块导入，完全兼容pi-mono插件的模块规范
+
+---
+
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[WasmEdge 运行时层](wasmedge-runtime-layer.md) | 下一节：[异步 Hostcall 与事件循环](async-hostcall-event-loop.md)

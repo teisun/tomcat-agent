@@ -182,7 +182,7 @@
 
 **目标**：实现异步 Hostcall 的 submit/poll 机制，使 exec/LLM 等耗时调用不阻塞 Wasm 实例，利用 wasmedge_quickjs 内置事件循环自动驱动 Promise 解析。
 
-**技术方案**：[异步 Hostcall 与事件循环设计](../openspec/specs/architecture/async-hostcall-event-loop.md)
+**技术方案**：[异步 Hostcall 与事件循环设计](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)
 
 **子项**（参考 tasks_details.md T1-P0-008 的 8.4）：
 - [✓] 8.4.1 `dispatcher.rs`：新增 `AsyncCallStatus` + `async_results: Arc<DashMap>`
@@ -223,7 +223,7 @@
 
 **目标**：pi_bridge.js 的 `globalThis.pi` 接口对齐 pi-mono `ExtensionAPI`，核心 API 返回 Promise，修复已知 bug。
 
-**技术方案**：[JS API 与 pi-mono 对齐设计](../openspec/specs/architecture/js-api-alignment.md)
+**技术方案**：[JS API 与 pi-mono 对齐设计](../openspec/specs/architecture/plugin-system/js-api-alignment.md)
 
 **子项**（参考 tasks_details.md T1-P0-008 的 8.7）：
 - [✓] 8.7.1 `pi_bridge.js`：新增 `hostCallAsync` 函数（submit/poll 包装，返回 Promise）
