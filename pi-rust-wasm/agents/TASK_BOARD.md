@@ -13,6 +13,7 @@
 | 需求设计文档 | [../openspec/changes/001-mvp/](../openspec/changes/001-mvp/)（含 task.md、tasks_details.md、design.md） |
 | 任务原子明细 | [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) |
 | 技术设计 | [Architecture.md](../openspec/specs/Architecture.md)[design.md](../openspec/changes/001-mvp/design.md) |
+| 技术方案（插件异步 Hostcall / 长生命周期 VM） | [async-hostcall-event-loop.md](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)（submit/poll，DONE）、[phase2-long-lived-vm.md](../openspec/specs/architecture/plugin-system/phase2-long-lived-vm.md)（VM actor，TASK-15 TODO） |
 
 ---
 
@@ -292,6 +293,46 @@
 - 重试：RateLimit/Timeout 自动退避重试 ≤ MAX_ATTEMPTS 次；401 立即终止
 - 工具错误：不终止 Loop，错误内容回注 LLM
 - 覆盖率 ≥ 80%
+
+---
+
+### TASK-15 | T1-P1-006 | 长生命周期 VM 实现
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/long-lived-vm` |
+| **阻塞点** | — |
+
+**目标**：按 phase2-long-lived-vm.md 收敛定版实现 VM actor 模型与 session 维度管理，使插件状态跨事件保持，支持 pi-mono 核心状态插件。
+
+**技术方案**：
+- [Phase 2 长生命周期 VM 方案设计](../openspec/specs/architecture/plugin-system/phase2-long-lived-vm.md)
+- [异步 Hostcall 与事件循环设计 11.7](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)
+
+**子项**（参考 tasks_details.md T1-P1-006）：
+- [ ] 15.1 结构改造：长寿命运行单元，解耦启动与事件分发
+- [ ] 15.2 RuntimeManager：session_id + plugin_id 双键，lookup/lazy_init/remove
+- [ ] 15.3 PluginManager 升级为 session 维度实例管理
+- [ ] 15.4 VM actor 命令通道（Init/DispatchEvent/Shutdown）+ spawn_blocking 专属线程
+- [ ] 15.5 dispatcher.rs 新增 __session.waitForEvent 路由与有界 channel
+- [ ] 15.6 _start 常驻循环：lazy start + blocking_recv 挂起 + Shutdown 退出
+- [ ] 15.7 废弃组合脚本 + __pi_dispatch_event 模式，改为 channel send
+- [ ] 15.8 队列上限/回压、超时、session_end 清理与 Error 恢复
+- [ ] 15.9 单元+集成测试
+
+**依赖**：TASK-12 (DONE)、TASK-13 (DONE)
+
+**被依赖**：TASK-05（pi-mono 插件兼容性，跨事件状态保持为前置）
+
+**验收标准**：
+- 插件全局变量可跨事件保持
+- 已注册 handler 在多次事件中持续有效
+- setInterval 在会话期间稳定运行
+- 多会话上下文隔离（状态不串会话）
+- 关闭流程无悬挂线程、无 pending 泄漏
 
 ---
 

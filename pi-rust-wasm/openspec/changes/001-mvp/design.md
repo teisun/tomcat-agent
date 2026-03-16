@@ -185,6 +185,7 @@ API绑定实现逻辑：
 #### 4.3 并发调度与异步 Hostcall
 - **多路复用分发**：宿主侧实现统一入口路由器，通过 `(module, method)` 映射业务逻辑，减少 Wasm 导出表维护成本。
 - **异步 Hostcall 机制（MVP）**：WasmEdge 的 `async_host_function` API 仅限 Linux，不满足跨平台要求。MVP 采用 **submit/poll 模式**：插件发起带 `callId` 的异步请求，宿主 spawn Tokio 任务后立即返回 `{pending: true}`，JS 侧通过 `setTimeout` 驱动的轮询循环调用 `__async.poll` 获取结果。wasmedge_quickjs 内置的 `EventLoop` + `run_loop_without_io()` 自动驱动 Promise 微任务和 setTimeout 回调，`_start` 在所有异步任务完成后自然退出。完整技术设计见 [异步 Hostcall 与事件循环设计](../../specs/architecture/plugin-system/async-hostcall-event-loop.md)。
+- **长生命周期 VM（Phase 2，与 MVP 同期实现）**：submit/poll 解决了异步 Hostcall 的不阻塞问题，但 pi-mono 核心状态插件（git-checkpoint、todo、plan-mode 等）还需要跨事件持久的 JS 运行时状态。为此，VM 采用 **actor 模型**（`VmCommand::Init/DispatchEvent/Shutdown` 命令通道 + `spawn_blocking` 专属线程），实例作用域以 `session_id + plugin_id` 双键管理，事件通过有界 channel 投递，JS 侧用 `waitForEvent` 常驻循环接收。废弃「每事件重建 VM + 组合脚本」模式。完整设计见 [Phase 2 长生命周期 VM 方案设计](../../specs/architecture/plugin-system/phase2-long-lived-vm.md) 与 [async-hostcall-event-loop.md 11.7](../../specs/architecture/plugin-system/async-hostcall-event-loop.md)。
 - **JS API 对齐**：`pi_bridge.js` 中 `exec`/`createChatCompletion` 等耗时 API 改为返回 Promise，与 pi-mono `async/await` 编程模型兼容。详见 [JS API 与 pi-mono 对齐设计](../../specs/architecture/plugin-system/js-api-alignment.md)。
 - **资源配额**：每个实例强制限制内存上限（如 128MB）与指令计数（Gas Limit），防止恶意插件耗尽系统资源。
 

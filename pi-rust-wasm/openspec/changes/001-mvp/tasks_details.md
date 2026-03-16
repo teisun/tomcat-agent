@@ -266,3 +266,29 @@
 - **5.8** 重构 src/api/chat.rs：移除直接的 chat_loop + do_chat_turn 实现，改为构造 AgentLoop 并调用 run()；Steering 注册到 CLI Ctrl+C 中断事件。
 - **5.9** 单元测试：Loop 状态机（正常/RateLimit 重试/Fatal 终止/Abort 路径）、Steering 注入时序（当前工具完成后才跳过）、FollowUp 触发、AgentEvent 发布顺序；覆盖率 ≥ 80%。
 
+---
+
+## T1-P1-006 长生命周期 VM 实现（VM actor + session 维度 + waitForEvent）
+
+技术方案：[Phase 2 长生命周期 VM 方案设计](../../specs/architecture/plugin-system/phase2-long-lived-vm.md)、[异步 Hostcall 与事件循环设计 11.7](../../specs/architecture/plugin-system/async-hostcall-event-loop.md)。
+
+**第一步：结构改造（低风险先行）**
+
+- **15.1** 将 `instance_wasmedge.rs` 中「每次执行新建 VM」改为「长寿命运行单元」：VM 在会话期间持有，`_start` 与事件分发解耦。
+- **15.2** 定义 `WasmInstanceRuntimeKey`（`session_id + plugin_id`），实现 RuntimeManager（lookup / lazy_init / remove）。
+- **15.3** 将 `PluginManager` 中 `plugin_id` 维度的实例管理升级为 `session_id + plugin_id` 双键维度。
+
+**第二步：事件驱动（actor 化）**
+
+- **15.4** 引入 VM actor 命令通道（`VmCommand::Init / DispatchEvent / Shutdown`），VM 封装在专属 `spawn_blocking` 线程。
+- **15.5** 宿主侧 `dispatcher.rs` 新增 `__session.waitForEvent` 路由，通过有界 channel 向 VM 投递事件。
+- **15.6** 实现 `_start` 常驻事件循环：lazy start（首次 `session_start` 时）、`blocking_recv()` 空闲挂起、收到 `Shutdown` 后退出。
+- **15.7** 废弃 `dispatch_event` 中的「组合脚本 + `__pi_dispatch_event`」模式，改为 channel send。
+
+**可靠性与收尾**
+
+- **15.8** 实现有界 channel 队列上限与回压；事件处理超时策略；`session_end` 触发 `Shutdown` 并清理 pending。
+- **15.9** 单元测试 + 集成测试：全局变量跨事件保持、handler 持续有效、`setInterval` 会话期间运行、多会话隔离、关闭无悬挂。
+
+**验收标准**（来自 phase2-long-lived-vm.md）：插件全局变量可跨事件保持；已注册 handler 在多次事件中持续有效；`setInterval` 在会话期间稳定运行；多会话上下文隔离（状态不串会话）；关闭流程无悬挂线程、无 pending 泄漏。
+
