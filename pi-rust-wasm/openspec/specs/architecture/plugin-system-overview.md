@@ -304,6 +304,7 @@ EventBus
 
 | 顺序 | 主题 | 文档 | 说明 |
 |------|------|------|------|
+| 0 | 来源与加载总览 | [插件来源扫描注册加载技术方案](plugin-system/plugin-source-scan-register-load.md) | 先建立“来源扫描 -> 注册 -> 加载”的全局心智模型，再看边界与协议细节。 |
 | 1 | 边界与协议 | [宿主API层](plugin-system/host-api-layer.md)、[Hostcall JSON 协议](plugin-system/host-call-protocol.md) | 插件能调什么、请求/响应长什么样。 |
 | 2 | 桥接与运行时 | [JS 桥接层](plugin-system/js-bridge-layer.md)、[Host-Guest 层](plugin-system/host-guest-layer.md)、[WasmEdge 运行时层](plugin-system/wasmedge-runtime-layer.md)、[沙箱执行层](plugin-system/sandbox-layer.md) | 从 JS 调用到 Wasm 边界、实例隔离与沙箱环境。 |
 | 3 | 异步与事件 | [异步 Hostcall 与事件循环](plugin-system/async-hostcall-event-loop.md)、[事件系统设计](plugin-system/events.md) | submit/poll 细节、ExtensionEvent/AgentEvent。 |

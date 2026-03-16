@@ -133,6 +133,7 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [architecture/audit-log.md](architecture/audit-log.md)                                                             | 审计日志设计                                    |
 | [architecture/host-core-layer.md](architecture/host-core-layer.md)                                                 | 宿主核心能力层                                   |
 | [architecture/plugin-system-overview.md](architecture/plugin-system-overview.md)                                   | 插件系统全貌                                    |
+| [architecture/plugin-system/plugin-source-scan-register-load.md](architecture/plugin-system/plugin-source-scan-register-load.md) | 插件来源扫描、注册与加载技术方案                         |
 | [architecture/plugin-system/host-api-layer.md](architecture/plugin-system/host-api-layer.md)                       | 宿主API层                                    |
 | [architecture/plugin-system/host-call-protocol.md](architecture/plugin-system/host-call-protocol.md)               | Hostcall JSON 协议（请求/响应与 module/method 约定） |
 | [architecture/plugin-system/js-bridge-layer.md](architecture/plugin-system/js-bridge-layer.md)                     | JS 桥接层架构                                  |
