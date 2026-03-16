@@ -359,4 +359,37 @@
       return JSON.stringify({ ok: false, error: String(e) });
     }
   };
+
+  // -- Long-lived VM session event loop (Phase 2) -----------------------------
+  // Called by host when VM actor receives Init command.
+  // Uses setTimeout(loop, 0) to yield control after each event dispatch,
+  // allowing QuickJS run_loop_without_io() to drain Promises and tick tasks
+  // before blocking again on waitForEvent.
+  //
+  // Two-layer collaboration:
+  //   JS layer: setTimeout(loop, 0) schedules next iteration as a tick task
+  //   Rust layer: run_loop_without_io() processes pending Promises + tick tasks
+  //   Net effect: all async work resolves between consecutive waitForEvent calls.
+  globalThis.__pi_start_event_loop = function () {
+    function loop() {
+      var raw = __pi_host_call(JSON.stringify({
+        module: '__session',
+        method: 'waitForEvent'
+      }));
+      var res = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+      if (!res.ok || (res.data && res.data.type === '__shutdown')) {
+        return;
+      }
+
+      try {
+        __pi_dispatch_event(JSON.stringify(res.data));
+      } catch (e) {
+        try { pi.log('event_loop error: ' + e); } catch (_) {}
+      }
+
+      setTimeout(loop, 0);
+    }
+    loop();
+  };
 })();

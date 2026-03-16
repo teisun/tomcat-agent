@@ -104,6 +104,7 @@ use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
 use super::host_binding::{HostRequest, HostResponse};
+use super::vm_actor::EventEnvelope;
 
 /// 异步 Hostcall 任务状态。
 pub enum AsyncCallStatus {
@@ -129,6 +130,11 @@ pub struct HostApiDispatcher {
     tokio_handle: Option<Handle>,
     async_timeout: Duration,
     llm_semaphore: Arc<Semaphore>,
+    /// 长生命周期 VM 的事件队列：instance_id -> event Receiver（Mutex 保证 Sync）。
+    /// waitForEvent 路由从此 channel 阻塞接收事件。
+    event_receivers: Arc<DashMap<String, Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>>>>,
+    /// 事件发送端：宿主通过此端投递事件给 VM。
+    event_senders: Arc<DashMap<String, std::sync::mpsc::SyncSender<EventEnvelope>>>,
 }
 
 impl HostApiDispatcher {
@@ -148,6 +154,8 @@ impl HostApiDispatcher {
             tokio_handle: Handle::try_current().ok(),
             async_timeout: Duration::from_secs(30),
             llm_semaphore: Arc::new(Semaphore::new(5)),
+            event_receivers: Arc::new(DashMap::new()),
+            event_senders: Arc::new(DashMap::new()),
         }
     }
 
@@ -210,6 +218,11 @@ impl HostApiDispatcher {
         instance_id: &str,
         request: HostRequest,
     ) -> Result<HostResponse, AppError> {
+        // __session.waitForEvent：同步阻塞等待事件（在 spawn_blocking 线程内调用）
+        if request.module == "__session" && request.method == "waitForEvent" {
+            return self.do_wait_for_event(instance_id);
+        }
+
         // __async.poll 始终走同步路径，不管是否携带 callId
         let is_async_poll = request.module == "__async";
 
@@ -282,6 +295,79 @@ impl HostApiDispatcher {
                 self.async_results.remove(&cid);
             }
         }
+        self.event_receivers.remove(instance_id);
+        self.event_senders.remove(instance_id);
+    }
+
+    /// 为长生命周期 VM 注册事件 channel。
+    /// `instance_id` 格式建议为 `{session_id}/{plugin_id}`（与 VmRuntimeKey::Display 一致）。
+    pub fn register_event_channel(
+        &self,
+        instance_id: &str,
+        capacity: usize,
+    ) -> std::sync::mpsc::SyncSender<EventEnvelope> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
+        self.event_receivers
+            .insert(instance_id.to_string(), Arc::new(std::sync::Mutex::new(rx)));
+        let tx_clone = tx.clone();
+        self.event_senders.insert(instance_id.to_string(), tx);
+        tx_clone
+    }
+
+    /// 获取事件发送端（宿主向 VM 投递事件）。
+    pub fn get_event_sender(&self, instance_id: &str) -> Option<std::sync::mpsc::SyncSender<EventEnvelope>> {
+        self.event_senders.get(instance_id).map(|r| r.value().clone())
+    }
+
+    /// 阻塞等待事件（在 spawn_blocking 线程内调用，不会阻塞 Tokio worker）。
+    /// 默认无限阻塞；JS 侧可传 `timeout_ms` 参数设置超时。
+    fn do_wait_for_event(&self, instance_id: &str) -> Result<HostResponse, AppError> {
+        let rx_arc = self.event_receivers.get(instance_id).ok_or_else(|| {
+            AppError::Plugin(format!(
+                "no event channel registered for instance '{instance_id}'"
+            ))
+        })?;
+
+        let rx = rx_arc.lock().map_err(|_| {
+            AppError::Plugin("event channel mutex poisoned".into())
+        })?;
+
+        match rx.recv() {
+            Ok(envelope) => {
+                let data = serde_json::to_value(&envelope)
+                    .unwrap_or_else(|_| serde_json::json!({"type": "__error"}));
+                Ok(HostResponse::ok(data))
+            }
+            Err(_) => {
+                Ok(HostResponse::ok(serde_json::json!({"type": "__shutdown"})))
+            }
+        }
+    }
+
+    /// 投递事件到指定 VM 的事件 channel（带回压：channel 满时返回错误而非阻塞）。
+    pub fn deliver_event(
+        &self,
+        instance_id: &str,
+        envelope: EventEnvelope,
+    ) -> Result<(), AppError> {
+        let tx = self.event_senders.get(instance_id).ok_or_else(|| {
+            AppError::Plugin(format!(
+                "no event channel for instance '{instance_id}'"
+            ))
+        })?;
+
+        tx.try_send(envelope).map_err(|e| match e {
+            std::sync::mpsc::TrySendError::Full(_) => {
+                AppError::Plugin(format!(
+                    "event channel full for '{instance_id}' (backpressure)"
+                ))
+            }
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                AppError::Plugin(format!(
+                    "event channel closed for '{instance_id}'"
+                ))
+            }
+        })
     }
 
     /// 异步分发入口：按 module/method 路由，每笔 Hostcall 可选记录审计。
@@ -1834,5 +1920,113 @@ mod tests {
         let res = d.dispatch_async("inst-a", poll_req).await.unwrap();
         assert!(!res.ok);
         assert!(res.error.unwrap().contains("missing callId"));
+    }
+
+    #[test]
+    fn register_event_channel_and_deliver() {
+        let bus = Arc::new(crate::infra::DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        d.register_event_channel("s1/p1", 4);
+
+        let envelope = EventEnvelope {
+            event_type: "test_event".into(),
+            data: serde_json::json!({"key": "val"}),
+            context: serde_json::json!({}),
+        };
+        d.deliver_event("s1/p1", envelope).unwrap();
+    }
+
+    #[test]
+    fn deliver_event_backpressure() {
+        let bus = Arc::new(crate::infra::DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        d.register_event_channel("s1/p1", 2);
+
+        for _ in 0..2 {
+            d.deliver_event(
+                "s1/p1",
+                EventEnvelope {
+                    event_type: "x".into(),
+                    data: serde_json::json!(null),
+                    context: serde_json::json!(null),
+                },
+            )
+            .unwrap();
+        }
+
+        let r = d.deliver_event(
+            "s1/p1",
+            EventEnvelope {
+                event_type: "overflow".into(),
+                data: serde_json::json!(null),
+                context: serde_json::json!(null),
+            },
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("backpressure"));
+    }
+
+    #[test]
+    fn wait_for_event_receives_delivered_event() {
+        let bus = Arc::new(crate::infra::DefaultEventBus::new());
+        let d = Arc::new(HostApiDispatcher::new(bus));
+        d.register_event_channel("s1/p1", 4);
+
+        d.deliver_event(
+            "s1/p1",
+            EventEnvelope {
+                event_type: "session_start".into(),
+                data: serde_json::json!({"sid": "s1"}),
+                context: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+
+        let resp = d.do_wait_for_event("s1/p1").unwrap();
+        assert!(resp.ok);
+        assert_eq!(
+            resp.data.as_ref().unwrap()["type"],
+            "session_start"
+        );
+    }
+
+    #[test]
+    fn wait_for_event_channel_closed_returns_shutdown() {
+        let bus = Arc::new(crate::infra::DefaultEventBus::new());
+        let d = Arc::new(HostApiDispatcher::new(bus));
+        d.register_event_channel("s1/p1", 4);
+
+        // Drop the sender side to close the channel
+        d.event_senders.remove("s1/p1");
+
+        let resp = d.do_wait_for_event("s1/p1").unwrap();
+        assert!(resp.ok);
+        assert_eq!(resp.data.as_ref().unwrap()["type"], "__shutdown");
+    }
+
+    #[test]
+    fn cleanup_instance_removes_event_channels() {
+        let bus = Arc::new(crate::infra::DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        d.register_event_channel("s1/p1", 4);
+        assert!(d.get_event_sender("s1/p1").is_some());
+
+        d.cleanup_instance("s1/p1");
+        assert!(d.get_event_sender("s1/p1").is_none());
+    }
+
+    #[test]
+    fn deliver_event_no_channel_returns_err() {
+        let bus = Arc::new(crate::infra::DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        let r = d.deliver_event(
+            "nonexistent",
+            EventEnvelope {
+                event_type: "x".into(),
+                data: serde_json::json!(null),
+                context: serde_json::json!(null),
+            },
+        );
+        assert!(r.is_err());
     }
 }

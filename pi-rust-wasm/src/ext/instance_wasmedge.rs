@@ -211,15 +211,15 @@ impl WasmInstance {
         Ok(())
     }
 
-    /// 向已加载的插件脚本分发事件：重新执行插件脚本（注册 handler），
-    /// 然后调用 `__pi_dispatch_event(envelope)`，触发匹配的 `pi.on(...)` 回调。
+    /// **[已废弃]** 短生命周期事件分发：组合脚本 + `__pi_dispatch_event` 模式。
     ///
-    /// 由于 WasmEdge + QuickJS 的 VM 是短生命周期的（每次执行新建），
-    /// 此方法会将 plugin_script + dispatch 代码合并后一次性执行。
+    /// 长生命周期 VM 模式下，事件通过 `__session.waitForEvent` channel 投递，
+    /// 无需重新加载脚本。请改用 `PluginManager::dispatch_session_event`。
     ///
     /// # Errors
     /// * [`AppError::QuickJS`] - 事件 JSON 序列化失败。
     /// * 其他错误同 [`run_script`]。
+    #[deprecated(note = "Use PluginManager::dispatch_session_event with long-lived VM actor instead")]
     pub fn dispatch_event(
         &mut self,
         plugin_script: &Path,
@@ -241,6 +241,76 @@ impl WasmInstance {
             .replace('\n', "\\n");
         let combined = format!("{user_code}\n__pi_dispatch_event('{escaped}');\n");
         self.run_script(&combined)
+    }
+
+    /// 构建持久 Vm 并加载 QuickJS 模块（不执行 _start）。
+    /// 用于长生命周期 VM actor 模式：actor 线程拿到 Vm 后自行调用 run_func。
+    ///
+    /// `script_path` 为插件入口脚本路径，用于设置 WasiModule 的 argv 和 preopen。
+    ///
+    /// 返回 `(Vm, _tmp_dir)` — 调用方须持有 `_tmp_dir` 直到 Vm 不再使用，
+    /// 否则临时文件会被提前清理。
+    #[allow(clippy::type_complexity)]
+    pub fn init_vm(
+        &mut self,
+        script_path: &Path,
+    ) -> Result<
+        (
+            Vm<'_, dyn SyncInst>,
+            PathBuf,
+            tempfile::TempDir,
+        ),
+        AppError,
+    > {
+        let quickjs_path = self
+            .quickjs_path
+            .clone()
+            .ok_or_else(|| {
+                AppError::QuickJS(
+                    "WASMEDGE_QUICKJS_PATH not set or path does not exist.".to_string(),
+                )
+            })?;
+
+        let combined = self.build_combined_script(script_path)?;
+        let (combined_path, tmp_dir) = temp_js_file(&combined)?;
+
+        let config = self.config.clone();
+        let script_dir = combined_path.parent().ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "script path has no parent",
+            ))
+        })?;
+        let script_name = combined_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "script path has no file name",
+                ))
+            })?;
+        let host_dir = script_dir
+            .canonicalize()
+            .unwrap_or_else(|_| script_dir.to_path_buf());
+        let preopen = format!(".:{}", host_dir.display());
+        let argv: Vec<&str> = vec!["quickjs", script_name];
+        self.wasi_module = Some(
+            WasiModule::create(Some(argv), None, Some(vec![preopen.as_str()]))
+                .map_err(|e| AppError::WasmEdge(e.to_string()))?,
+        );
+
+        let mut vm = self.build_vm()?;
+        let module = Module::from_file(Some(&config), &quickjs_path)
+            .map_err(|e| AppError::WasmEdge(e.to_string()))?;
+        vm.register_module(Some("quickjs"), module)
+            .map_err(|e| AppError::WasmEdge(e.to_string()))?;
+
+        Ok((vm, combined_path, tmp_dir))
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
     }
 
     /// 销毁实例，释放资源。

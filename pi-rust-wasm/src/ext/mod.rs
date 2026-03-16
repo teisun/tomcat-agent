@@ -12,6 +12,8 @@ pub mod host_binding;
 mod instance_stub;
 mod instance_wasmedge;
 pub mod plugin;
+pub mod runtime_manager;
+pub mod vm_actor;
 
 pub use dispatcher::{AsyncCallStatus, HostApiDispatcher};
 pub use engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
@@ -22,3 +24,5 @@ pub use instance_wasmedge::WasmInstance;
 pub use plugin::{
     parse_manifest, PluginInfo, PluginInstance, PluginManager, PluginManifest, PluginStatus,
 };
+pub use runtime_manager::{RuntimeManager, SharedRuntimeManager, VmRuntimeKey};
+pub use vm_actor::{EventEnvelope, VmActorHandle, VmActorState, VmCommand};
