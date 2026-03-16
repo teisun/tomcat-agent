@@ -301,8 +301,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Tom |
 | **分支** | `feature/long-lived-vm` |
 | **阻塞点** | — |
 
@@ -313,15 +313,15 @@
 - [异步 Hostcall 与事件循环设计 11.7](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)
 
 **子项**（参考 tasks_details.md T1-P1-006）：
-- [ ] 15.1 结构改造：长寿命运行单元，解耦启动与事件分发
-- [ ] 15.2 RuntimeManager：session_id + plugin_id 双键，lookup/lazy_init/remove
-- [ ] 15.3 PluginManager 升级为 session 维度实例管理
-- [ ] 15.4 VM actor 命令通道（Init/DispatchEvent/Shutdown）+ spawn_blocking 专属线程
-- [ ] 15.5 dispatcher.rs 新增 __session.waitForEvent 路由与有界 channel
-- [ ] 15.6 _start 常驻循环：lazy start + blocking_recv 挂起 + Shutdown 退出
-- [ ] 15.7 废弃组合脚本 + __pi_dispatch_event 模式，改为 channel send
-- [ ] 15.8 队列上限/回压、超时、session_end 清理与 Error 恢复
-- [ ] 15.9 单元+集成测试
+- [x] 15.1 结构改造：长寿命运行单元，解耦启动与事件分发
+- [x] 15.2 RuntimeManager：session_id + plugin_id 双键，lookup/lazy_init/remove
+- [x] 15.3 PluginManager 升级为 session 维度实例管理
+- [x] 15.4 VM actor 命令通道（Init/DispatchEvent/Shutdown）+ spawn_blocking 专属线程
+- [x] 15.5 dispatcher.rs 新增 __session.waitForEvent 路由与有界 channel
+- [x] 15.6 _start 常驻循环：lazy start + setTimeout(loop, 0) + Shutdown 退出
+- [x] 15.7 废弃组合脚本 + __pi_dispatch_event 模式，改为 channel send
+- [x] 15.8 队列上限/回压、超时、session_end 清理与 Error 恢复
+- [x] 15.9 单元+集成测试
 
 **依赖**：TASK-12 (DONE)、TASK-13 (DONE)
 

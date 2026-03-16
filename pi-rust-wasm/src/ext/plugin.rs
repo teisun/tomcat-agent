@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::runtime_manager::{SharedRuntimeManager, VmRuntimeKey};
+use super::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmCommand};
 use super::{invoke_host_func_with, HostApiDispatcher, WasmEngine, WasmInstance};
 
 /// 插件清单（与 design CODE_BLOCK_P1_008 一致）。
@@ -53,7 +55,7 @@ pub struct PluginInstance {
     pub config: serde_json::Value,
     pub created_at: i64,
     pub loaded_at: i64,
-    /// 插件根目录路径，用于解析 main 入口与 dispatch_event 时定位脚本。
+    /// 插件根目录路径，用于解析 main 入口脚本。
     pub plugin_root: PathBuf,
 }
 
@@ -74,7 +76,7 @@ impl PluginInstance {
         &self.id
     }
 
-    /// 返回插件 main 入口脚本的绝对路径，供 dispatch_event 等使用。
+    /// 返回插件 main 入口脚本的绝对路径。
     pub fn main_script_path(&self) -> PathBuf {
         self.plugin_root.join(&self.manifest.main)
     }
@@ -135,6 +137,10 @@ pub struct PluginManager {
     confirm_permissions: Option<Arc<ConfirmPermissionsFn>>,
     /// 审计记录器；未设置时不写插件生命周期审计。
     audit: Option<Arc<dyn AuditRecorder>>,
+    /// 长生命周期 VM 运行时管理器（session+plugin 双键）。
+    runtime_manager: Option<SharedRuntimeManager>,
+    /// 事件 channel 默认容量。
+    event_channel_capacity: usize,
 }
 
 impl PluginManager {
@@ -147,6 +153,8 @@ impl PluginManager {
             host_dispatcher: None,
             confirm_permissions: None,
             audit: None,
+            runtime_manager: None,
+            event_channel_capacity: 64,
         }
     }
 
@@ -473,6 +481,121 @@ impl PluginManager {
                 detail: None,
             });
         }
+        Ok(())
+    }
+
+    /// 注入长生命周期 VM 运行时管理器。
+    pub fn set_runtime_manager(&mut self, rm: SharedRuntimeManager) {
+        self.runtime_manager = Some(rm);
+    }
+
+    /// 设置事件 channel 容量（默认 64）。
+    pub fn set_event_channel_capacity(&mut self, cap: usize) {
+        self.event_channel_capacity = cap;
+    }
+
+    /// 为指定会话+插件启动长生命周期 VM actor。
+    ///
+    /// 创建 WasmInstance → 注册 host binding → 注册事件 channel → spawn VmActor → 发送 Init。
+    /// 返回 `VmActorHandle`（调用方可用于后续 dispatch/shutdown）。
+    pub async fn start_session_vm(
+        &self,
+        session_id: &str,
+        plugin_id: &str,
+    ) -> Result<VmActorHandle, AppError> {
+        let key = VmRuntimeKey::new(session_id, plugin_id);
+        let rm = self.runtime_manager.as_ref().ok_or_else(|| {
+            AppError::Plugin("runtime_manager not set".into())
+        })?;
+
+        if let Some(existing) = rm.get(&key) {
+            return Ok(existing);
+        }
+
+        let _plugin_info = self.get_plugin(plugin_id).ok_or_else(|| {
+            AppError::Plugin(format!("plugin '{plugin_id}' not loaded"))
+        })?;
+
+        let engine = self.wasm_engine.as_ref().ok_or_else(|| {
+            AppError::Plugin("wasm_engine not set".into())
+        })?;
+
+        let instance_id = key.to_string();
+        let mut wasm_instance = engine.create_instance(&instance_id)?;
+
+        let dispatcher_opt = self.host_dispatcher.clone();
+        let iid = instance_id.clone();
+        let invoke_fn = move |request_json: &str| {
+            let resp = invoke_host_func_with(dispatcher_opt.as_deref(), &iid, request_json)?;
+            serde_json::to_string(&resp).map_err(AppError::from)
+        };
+        wasm_instance.register_host_binding(invoke_fn)?;
+
+        if let Some(ref dispatcher) = self.host_dispatcher {
+            dispatcher.register_event_channel(&instance_id, self.event_channel_capacity);
+        }
+
+        let plugin_root = {
+            let map = self.plugins.read();
+            map.get(plugin_id)
+                .map(|inst| inst.main_script_path())
+                .ok_or_else(|| AppError::Plugin(format!("plugin '{plugin_id}' not found in registry")))?
+        };
+
+        let (handle, _event_tx) =
+            VmActor::spawn(wasm_instance, plugin_root, self.event_channel_capacity);
+
+        handle.dispatch(VmCommand::Init).await?;
+
+        rm.insert(key, handle.clone());
+        Ok(handle)
+    }
+
+    /// 向指定会话的 VM actor 投递事件（非阻塞，channel 满时返回回压错误）。
+    pub fn dispatch_session_event(
+        &self,
+        session_id: &str,
+        plugin_id: &str,
+        event_type: &str,
+        data: serde_json::Value,
+        context: serde_json::Value,
+    ) -> Result<(), AppError> {
+        let key = VmRuntimeKey::new(session_id, plugin_id);
+
+        let dispatcher = self.host_dispatcher.as_ref().ok_or_else(|| {
+            AppError::Plugin("host_dispatcher not set".into())
+        })?;
+
+        let instance_id = key.to_string();
+        dispatcher.deliver_event(
+            &instance_id,
+            EventEnvelope {
+                event_type: event_type.to_string(),
+                data,
+                context,
+            },
+        )
+    }
+
+    /// 结束指定会话下所有 VM actor：发送 Shutdown、从 RuntimeManager 移除。
+    pub async fn end_session(&self, session_id: &str) -> Result<(), AppError> {
+        let rm = self.runtime_manager.as_ref().ok_or_else(|| {
+            AppError::Plugin("runtime_manager not set".into())
+        })?;
+
+        let handles = rm.remove_session(session_id);
+        for h in &handles {
+            let _ = h.shutdown().await;
+        }
+
+        if let Some(ref dispatcher) = self.host_dispatcher {
+            let map = self.plugins.read();
+            for pid in map.keys() {
+                let instance_id = format!("{session_id}/{pid}");
+                dispatcher.cleanup_instance(&instance_id);
+            }
+        }
+
         Ok(())
     }
 
