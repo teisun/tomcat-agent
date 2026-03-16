@@ -378,7 +378,35 @@ MVP 验证后，Phase 2 通过让 VM 实例在整个会话期间存活，解决 
 **[Phase 2 长生命周期 VM 方案设计（详细）](phase2-long-lived-vm.md)**
 
 - **方案 A：`pi_eval_js` Wasm 新导出**——宿主主动调用 Wasm 导出函数注入 JS 代码；需改造 wasmedge-quickjs 全局 Context，含 `unsafe` 代码
-- **方案 B：`waitForEvent` 阻塞等待（推荐）**——复用现有 `__pi_host_call`，JS 侧运行无限事件循环，每个 VM 占一个 `spawn_blocking` 线程（idle 时 CPU≈0）；wasmedge-quickjs 改动极小，无 `unsafe`，Tokio 天然兼容
+- **方案 B：`waitForEvent` 阻塞等待（推荐）**——复用现有 `__pi_host_call`，JS 侧运行事件循环，宿主侧采用 VM actor + event channel 驱动；Tokio 天然兼容
+
+### 11.7.1 两步改造路径（定版）
+
+1. **结构改造（先做）**
+   - 将“每次执行新建 VM”改为“长寿命运行单元”。
+   - 解耦 VM 启动与事件分发，预留运行时状态机。
+2. **事件驱动（后做）**
+   - 引入 `event_tx/rx + spawn_blocking`，事件通过 channel 投递。
+   - `_start` 常驻循环，但通过 `session_end/shutdown` 可控退出。
+
+### 11.7.2 与 submit/poll 的职责边界
+
+- `waitForEvent`：负责“取事件 + 触发 handler”。
+- `submit/poll`：负责 handler 内耗时 hostcall（LLM、executeBash、tools.callTool）的异步执行。
+- Phase 2 不引入第二套异步协议；继续复用 `callId + __async.poll`。
+
+### 11.7.3 作用域与并发口径
+
+- VM 运行时作用域采用 `session_id + plugin_id`（或 `session_id -> plugin runtimes`）模型。
+- 同一插件可在不同会话拥有独立 VM，避免跨会话状态污染。
+- 外部不直接并发操作可变 `Vm`，统一通过 VM actor 命令通道（`Init/DispatchEvent/Shutdown`）。
+
+### 11.7.4 实现状态（待实现）
+
+- [ ] 结构改造：长寿命运行单元 + 启动/分发解耦
+- [ ] 事件驱动：event channel + spawn_blocking + shutdown 协议
+- [ ] 作用域升级：`session_id + plugin_id` 运行时键
+- [ ] 协同验证：waitForEvent 与 submit/poll 一致性
 
 ---
 
