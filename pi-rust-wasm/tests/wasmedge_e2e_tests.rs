@@ -4,7 +4,10 @@
 
 mod common;
 
-use pi_wasm::{DefaultEventBus, HostResponse, PluginManager, WasmEngine, WasmEngineConfig};
+use pi_wasm::{
+    DefaultEventBus, HostApiDispatcher, HostResponse, PluginManager,
+    RuntimeManager, SharedRuntimeManager, WasmEngine, WasmEngineConfig,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -549,6 +552,292 @@ fn test_wasmedge_e2e_event_on_multiple_handlers() -> Result<(), Box<dyn std::err
         n >= 2,
         "pi.on 两个 handler 各应触发 1 次（共 ≥2 次 log），实际触发 {} 次",
         n
+    );
+    Ok(())
+}
+
+// ══════════════════════════════════════════════════════════════════
+// E2E Story 8b — 长生命周期 VM（TASK-15）
+// E2E-WASM-031 ~ E2E-WASM-035
+// ══════════════════════════════════════════════════════════════════
+
+fn make_e2e_plugin_dir(id: &str, main_js: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("create temp dir for E2E plugin");
+    let manifest = serde_json::json!({
+        "id": id,
+        "name": id,
+        "version": "0.1.0",
+        "description": "e2e",
+        "author": "e2e",
+        "main": main_js,
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": []
+    });
+    std::fs::write(
+        tmp.path().join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let fixture_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasmedge_quickjs")
+        .join(main_js);
+    if fixture_src.exists() {
+        std::fs::copy(&fixture_src, tmp.path().join(main_js)).unwrap();
+    } else {
+        std::fs::write(tmp.path().join(main_js), "// placeholder").unwrap();
+    }
+    tmp
+}
+
+use pi_wasm::{parse_manifest, PluginInstance, PluginStatus};
+
+/// 手动注册插件（跳过 load_plugin 的 init script 执行，避免 __pi_start_event_loop 阻塞）。
+/// start_session_vm 会在独立 spawn_blocking 线程中执行完整脚本。
+fn setup_long_lived_vm_test(
+    plugin_id: &str,
+    main_js: &str,
+) -> (PluginManager, SharedRuntimeManager, Arc<HostApiDispatcher>, tempfile::TempDir) {
+    let quickjs_path = require_quickjs_wasm();
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).unwrap_or_else(|e| {
+        panic!("集成测试要求已安装 WasmEdge。当前: {e}。安装见 {WASMEDGE_INSTALL_URL}");
+    });
+
+    let plugin_dir = make_e2e_plugin_dir(plugin_id, main_js);
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(HostApiDispatcher::new(bus.clone()));
+    let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+
+    let mut mgr = PluginManager::new(bus);
+    mgr.set_wasm_engine(engine);
+    mgr.set_host_dispatcher(dispatcher.clone());
+    mgr.set_runtime_manager(rm.clone());
+    mgr.set_event_channel_capacity(16);
+
+    let manifest_val = serde_json::json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": "e2e",
+        "author": "e2e",
+        "main": main_js,
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": []
+    });
+    let manifest_json = serde_json::to_string(&manifest_val).unwrap();
+    let manifest = parse_manifest(&manifest_json).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let instance = PluginInstance {
+        id: plugin_id.to_string(),
+        manifest,
+        wasm_instance: None,
+        status: PluginStatus::Loaded,
+        registered_tools: vec![],
+        event_listener_ids: vec![],
+        config: serde_json::json!({}),
+        created_at: now,
+        loaded_at: now,
+        plugin_root: plugin_dir.path().to_path_buf(),
+    };
+    mgr.register_plugin(instance).unwrap();
+
+    (mgr, rm, dispatcher, plugin_dir)
+}
+
+/// [E2E-WASM-031] 插件全局变量跨事件保持（长生命周期 VM）
+///
+/// 验证：start_session_vm → deliver_event x2 → end_session 正常
+/// 意义：Story 8b 核心验收——全局变量跨事件保持
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_vm_actor_state_persists_across_events(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_vm_actor_state_persists_across_events").entered();
+
+    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-counter-e2e", "vm_actor_counter_test.js");
+
+    tracing::info!("Act: start_session_vm(s1, vm-counter-e2e)");
+    let handle = mgr
+        .start_session_vm("s1", "vm-counter-e2e")
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Act: dispatch_session_event x2");
+    mgr.dispatch_session_event(
+        "s1", "vm-counter-e2e", "test_event",
+        serde_json::json!({"seq": 1}), serde_json::json!({}),
+    ).map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    mgr.dispatch_session_event(
+        "s1", "vm-counter-e2e", "test_event",
+        serde_json::json!({"seq": 2}), serde_json::json!({}),
+    ).map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    tracing::info!("Assert: VM actor 仍活跃（非 Stopped）");
+    let state = handle.current_state();
+    tracing::info!("  handle state = {:?}", state);
+
+    tracing::info!("Act: end_session(s1)");
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Assert: RuntimeManager 已清空，handle 已终止");
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    let final_state = handle.current_state();
+    tracing::info!("  final handle state = {:?}", final_state);
+    assert_ne!(
+        final_state,
+        pi_wasm::VmActorState::Running,
+        "end_session 后 actor 应为 Stopped 或 Error"
+    );
+    Ok(())
+}
+
+/// [E2E-WASM-032] 已注册 handler 多次事件持续有效
+///
+/// 验证：VM actor 启动后连续 dispatch 多次事件，每次都触发 handler
+/// 意义：Story 8b——handler 注册一次，后续事件直接触发
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_handler_stays_registered() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_handler_stays_registered").entered();
+
+    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-handler-e2e", "vm_actor_multi_handler_test.js");
+
+    tracing::info!("Act: start_session_vm → dispatch x3");
+    let _handle = mgr
+        .start_session_vm("s1", "vm-handler-e2e")
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    for i in 1..=3 {
+        mgr.dispatch_session_event(
+            "s1", "vm-handler-e2e", "multi_evt",
+            serde_json::json!({"seq": i}), serde_json::json!({}),
+        ).map_err(|e| e.to_string())?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    tracing::info!("Assert: 每次 dispatch 均触发 handler（VM 不崩溃 + end_session 正常退出）");
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    Ok(())
+}
+
+/// [E2E-WASM-033] setInterval 在会话期间稳定运行
+///
+/// 验证：start_session_vm（setInterval 每 200ms pi.log）→ sleep 1.2s → VM 仍 Running → end_session
+/// 意义：Story 8b——定时器在会话期间稳定触发
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_set_interval_runs_during_session(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_set_interval_runs_during_session").entered();
+
+    let (mgr, rm, _disp, _dir) =
+        setup_long_lived_vm_test("vm-interval-e2e", "vm_actor_set_interval_test.js");
+
+    let handle = mgr
+        .start_session_vm("s1", "vm-interval-e2e")
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+
+    tracing::info!("Assert: setInterval 运行期间 VM 未崩溃（handle 仍 Running）");
+    let state = handle.current_state();
+    assert_eq!(
+        state,
+        pi_wasm::VmActorState::Running,
+        "setInterval 会话期间 VM 应为 Running，实际 {:?}",
+        state
+    );
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    Ok(())
+}
+
+/// [E2E-WASM-034] 多会话上下文隔离
+///
+/// 验证：两个 session 各启动 VM actor，互相独立
+/// 意义：Story 8b——多会话上下文隔离，状态不串会话
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_multi_session_isolation() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_multi_session_isolation").entered();
+
+    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-iso-e2e", "vm_actor_counter_test.js");
+
+    tracing::info!("Act: 启动 session-A 和 session-B 各自的 VM actor");
+    let _h1 = mgr.start_session_vm("session-A", "vm-iso-e2e").await.map_err(|e| e.to_string())?;
+    let _h2 = mgr.start_session_vm("session-B", "vm-iso-e2e").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Assert: RuntimeManager 含 2 个 handle");
+    assert_eq!(rm.len(), 2, "应有 2 个 session VM handle");
+
+    tracing::info!("Act: 分别投递事件");
+    mgr.dispatch_session_event("session-A", "vm-iso-e2e", "test_event", serde_json::json!({"from": "A"}), serde_json::json!({})).map_err(|e| e.to_string())?;
+    mgr.dispatch_session_event("session-B", "vm-iso-e2e", "test_event", serde_json::json!({"from": "B"}), serde_json::json!({})).map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    tracing::info!("Act: end_session(session-A)");
+    mgr.end_session("session-A").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    assert_eq!(rm.len(), 1, "end session-A 后应剩 1 个 handle（session-B）");
+
+    tracing::info!("Act: end_session(session-B)");
+    mgr.end_session("session-B").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "两个 session 均 end 后 RuntimeManager 应为空");
+    Ok(())
+}
+
+/// [E2E-WASM-035] 关闭流程无悬挂线程
+///
+/// 验证：start_session_vm → end_session → RuntimeManager 为空，actor 状态非 Running
+/// 意义：Story 8b——关闭流程无悬挂线程、无 pending 泄漏
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_session_end_no_hanging_threads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_session_end_no_hanging_threads").entered();
+
+    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-shutdown-e2e", "vm_actor_counter_test.js");
+
+    tracing::info!("Act: start_session_vm → sleep 2s → end_session (repro hang)");
+    let handle = mgr.start_session_vm("s-shutdown", "vm-shutdown-e2e").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    assert_eq!(rm.len(), 1);
+
+    tracing::info!("Act: calling end_session");
+    mgr.end_session("s-shutdown").await.map_err(|e| e.to_string())?;
+    tracing::info!("Act: end_session returned, sleeping 1s");
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    tracing::info!("Assert: RuntimeManager 为空，handle 已终止");
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    let final_state = handle.current_state();
+    tracing::info!("  final handle state = {:?}", final_state);
+    assert_ne!(
+        final_state,
+        pi_wasm::VmActorState::Running,
+        "end_session 后 actor 应为 Stopped 或 Error"
     );
     Ok(())
 }

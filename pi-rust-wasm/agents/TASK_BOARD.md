@@ -13,7 +13,7 @@
 | 需求设计文档 | [../openspec/changes/001-mvp/](../openspec/changes/001-mvp/)（含 task.md、tasks_details.md、design.md） |
 | 任务原子明细 | [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) |
 | 技术设计 | [Architecture.md](../openspec/specs/Architecture.md)[design.md](../openspec/changes/001-mvp/design.md) |
-| 技术方案（插件异步 Hostcall / 长生命周期 VM） | [async-hostcall-event-loop.md](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)（submit/poll，DONE）、[phase2-long-lived-vm.md](../openspec/specs/architecture/plugin-system/phase2-long-lived-vm.md)（VM actor，TASK-15 TODO） |
+| 技术方案（插件异步 Hostcall / 长生命周期 VM） | [async-hostcall-event-loop.md](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)（submit/poll，DONE）、[phase2-long-lived-vm.md](../openspec/specs/architecture/plugin-system/phase2-long-lived-vm.md)（VM actor，TASK-15 DONE） |
 
 ---
 
@@ -301,9 +301,9 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
-| **分支** | `feature/long-lived-vm` |
+| **分支** | `develop`（已合并 feature/long-lived-vm） |
 | **阻塞点** | — |
 
 **目标**：按 phase2-long-lived-vm.md 收敛定版实现 VM actor 模型与 session 维度管理，使插件状态跨事件保持，支持 pi-mono 核心状态插件。

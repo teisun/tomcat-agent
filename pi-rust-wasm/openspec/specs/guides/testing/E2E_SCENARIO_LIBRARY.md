@@ -130,6 +130,22 @@
 
 ---
 
+## Story 8b — 长生命周期 VM 与有状态插件（TASK-15，5 条）
+
+> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`）。须安装 WasmEdge。
+
+
+| 编号           | 用例名                                                     | 用户意图                                 | 操作序列                                                                                          | 必须断言                                                        |
+| ------------ | ------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| E2E-WASM-031 | `test_wasmedge_e2e_vm_actor_state_persists_across_events` | 插件全局变量跨事件保持                         | start_session_vm → dispatch_session_event x2 → 检查 host_call 中的累加值                              | 第二次事件的 host_call 反映累加状态；无崩溃                                 |
+| E2E-WASM-032 | `test_wasmedge_e2e_handler_stays_registered`              | 已注册 handler 多次事件持续有效                 | start_session_vm → dispatch_session_event("evt") x2                                           | 每次 dispatch 均触发 handler（host_call 计数递增）                     |
+| E2E-WASM-033 | `test_wasmedge_e2e_set_interval_runs_during_session`      | setInterval 在会话期间稳定运行                | start_session_vm → sleep 适当时间 → 检查 host_call 计数                                              | host_call 计数 > 1（定时器触发多次）                                   |
+| E2E-WASM-034 | `test_wasmedge_e2e_multi_session_isolation`               | 多会话上下文隔离                             | start_session_vm(s1) + start_session_vm(s2) → 分别 dispatch → 验证各自 host_call                     | s1 与 s2 的 host_call 各自独立、状态不串会话                             |
+| E2E-WASM-035 | `test_wasmedge_e2e_session_end_no_hanging_threads`        | 关闭流程无悬挂线程                            | start_session_vm → end_session → 检查 VmActorHandle 状态                                         | end_session 后 RuntimeManager 为空；handle state 为 Stopped/Error |
+
+
+---
+
 ## Story 9 — AgentLoop 核心结构（TASK-14，3 条）
 
 > 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。

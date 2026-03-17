@@ -321,12 +321,15 @@ impl HostApiDispatcher {
 
     /// 阻塞等待事件（在 spawn_blocking 线程内调用，不会阻塞 Tokio worker）。
     /// 默认无限阻塞；JS 侧可传 `timeout_ms` 参数设置超时。
+    /// 注意：必须克隆 Arc 后立即释放 get() 的 Ref，否则在 recv() 阻塞期间持有 DashMap 的 shard 锁，
+    /// 会导致 end_session → cleanup_instance → event_receivers.remove() 死锁。
     fn do_wait_for_event(&self, instance_id: &str) -> Result<HostResponse, AppError> {
-        let rx_arc = self.event_receivers.get(instance_id).ok_or_else(|| {
-            AppError::Plugin(format!(
-                "no event channel registered for instance '{instance_id}'"
-            ))
-        })?;
+        let rx_arc: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>> =
+            self.event_receivers.get(instance_id).ok_or_else(|| {
+                AppError::Plugin(format!(
+                    "no event channel registered for instance '{instance_id}'"
+                ))
+            })?.clone();
 
         let rx = rx_arc.lock().map_err(|_| {
             AppError::Plugin("event channel mutex poisoned".into())

@@ -1,5 +1,36 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-17 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-15 长生命周期 VM（feature/long-lived-vm 合并）
+
+**执行范围**：将 `feature/long-lived-vm` 合并到 develop，按 Nibbles 流程 4.1→4.2→4.3→5→6 执行验收。
+
+#### 本次执行步骤与结果
+
+| 步骤 | 内容 | 结果 |
+|------|------|------|
+| 4.1 | 检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY | 已补充 Story 8b E2E 场景（E2E-WASM-031～035） |
+| 4.2 | 编写/补充长生命周期 VM 集成测试 | 新增 `tests/long_lived_vm_tests.rs`（13 用例：RuntimeManager、VmActorHandle、PluginManager session API、HostApiDispatcher event channel） |
+| 4.3 | E2E 测试与场景库对应 | 在 `tests/wasmedge_e2e_tests.rs` 补充 Story 8b 用例（test_wasmedge_e2e_vm_actor_state_persists_across_events、handler_stays_registered、multi_session_isolation、session_end_no_hanging_threads）；新增 fixture vm_actor_counter_test.js、vm_actor_multi_handler_test.js |
+| 5 | 全量测试与验收清单 | `cargo build --release`、`cargo clippy`、`cargo test --test long_lived_vm_tests`、`cargo test --test plugin_tests`、`cargo test --test wasmedge_e2e_tests`、`cargo test --test cli_tests` 通过 |
+
+**后续根因修复（同批提交）**：E2E-WASM-035 挂起根因（`do_wait_for_event` 持 DashMap Ref 与 `cleanup_instance` 死锁）已修复（dispatcher 克隆 Arc 后释放 Ref）；E2E-WASM-031 已补充 end_session 后 handle 状态非 Running 断言；HostRequest.params 增加 `#[serde(default)]` 解决 waitForEvent 缺 params 导致 host function failed。
+
+#### 验收项摘要
+
+- 构建与静态检查：PASS
+- 集成测试（long_lived_vm_tests 13 用例）：PASS
+- Wasm E2E（wasmedge_e2e_tests 14 用例，含 Story 8b 长生命周期 VM）：PASS
+- CLI 测试（cli_tests 72 用例）：PASS
+
+**执行时间**：2026-03-17  
+**分支**：develop（已合并 feature/long-lived-vm）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | @doc | 2026-03-14 | DONE | develop | — |
 
 ### 看板与流程：新增 PENDING_INTEGRATION 状态

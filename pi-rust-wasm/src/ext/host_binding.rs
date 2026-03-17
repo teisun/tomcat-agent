@@ -14,7 +14,8 @@ pub struct HostRequest {
     pub module: String,
     /// 方法名，如 "readFile"、"createChatCompletion"。
     pub method: String,
-    /// 参数（JSON 对象）。
+    /// 参数（JSON 对象）。JS 侧如 __session.waitForEvent 可能不传 params，默认空对象。
+    #[serde(default)]
     pub params: serde_json::Value,
     /// 调用 ID，用于异步回传关联。
     #[serde(skip_serializing_if = "Option::is_none")]

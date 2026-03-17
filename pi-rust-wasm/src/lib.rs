@@ -24,6 +24,8 @@ pub use core::{
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, HostApiDispatcher, HostRequest,
     HostResponse, PluginInfo, PluginInstance, PluginManager, PluginManifest, PluginStatus,
+    RuntimeManager, SharedRuntimeManager, VmRuntimeKey,
+    EventEnvelope, VmActorHandle, VmActorState, VmCommand,
     WasmEngine, WasmEngineConfig, WasmInstance,
 };
 pub use infra::{
