@@ -35,3 +35,6 @@ build/
 ### Env (API keys, do not commit) ###
 .env
 /src/main/resources/application-api.properties
+
+### pi-rust-wasm — local / E2E scratch workspace ###
+pi-rust-wasm/workspace/
