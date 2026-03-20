@@ -136,10 +136,14 @@ impl VmActor {
     }
 
     fn run(mut self) {
+        let pid = self.instance.plugin_id().to_string();
         // 1. Wait for Init command
         match self.cmd_rx.blocking_recv() {
-            Some(VmCommand::Init) => {}
+            Some(VmCommand::Init) => {
+                tracing::debug!("[VmActor {pid}] Init received");
+            }
             Some(VmCommand::Shutdown) | None => {
+                tracing::debug!("[VmActor {pid}] Shutdown/None before Init → Stopped");
                 self.set_state(VmActorState::Stopped);
                 return;
             }
@@ -157,26 +161,18 @@ impl VmActor {
 
         // 2. Build persistent Vm and run _start
         //    run_script(_start) blocks until JS event loop exits (details in 15.6)
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.run_vm()
-        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_vm()));
 
         match result {
             Ok(Ok(())) => {
                 self.set_state(VmActorState::Stopped);
             }
             Ok(Err(e)) => {
-                tracing::error!(
-                    "[VmActor {}] VM execution error: {e}",
-                    self.instance.plugin_id()
-                );
+                tracing::error!("[VmActor {}] VM execution error: {e}", pid);
                 self.set_state(VmActorState::Error);
             }
             Err(_panic) => {
-                tracing::error!(
-                    "[VmActor {}] VM thread panicked",
-                    self.instance.plugin_id()
-                );
+                tracing::error!("[VmActor {}] VM thread panicked", pid);
                 self.set_state(VmActorState::Error);
             }
         }

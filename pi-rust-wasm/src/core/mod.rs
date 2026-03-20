@@ -11,6 +11,10 @@ pub mod session;
 pub mod system_prompt;
 pub mod tools;
 
+pub use agent_loop::{
+    agent_messages_from_chat, convert_to_llm_format, AgentLoop, AgentLoopConfig, AgentMessage,
+    AgentRunResult, ToolCallInfo,
+};
 pub use confirmation::{AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider};
 pub use executor::DefaultPrimitiveExecutor;
 pub use llm::{
@@ -25,5 +29,4 @@ pub use session::{
     load_store, save_store, SessionEntry, SessionHeader, SessionManager, SessionStore,
     TranscriptEntry, DEFAULT_SESSION_KEY,
 };
-pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentMessage, AgentRunResult, ToolCallInfo, convert_to_llm_format, agent_messages_from_chat};
 pub use tools::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};

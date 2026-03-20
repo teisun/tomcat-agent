@@ -2,12 +2,13 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Spike | 2026-03-20 21:36 | DONE | feature/plugin-compat-phase0 | - |
+| Spike | 2026-03-21 | PENDING_INTEGRATION | feature/plugin-compat-phase0 | - |
 
 ### 任务
 
 - [✓] **[P1]** TASK-05a Phase 0：pi-mono 插件兼容性技术验证与差距分析
 - [✓] 文档：`INTEGRATION_MERGE_AND_ACCEPTANCE` §1–§4 重编号与中性化、Nibbles §4 精简、工作流与 Constitution/PLAN_SPEC/UNIT_TEST_SPEC 引用对齐
+- [✓] 集成/E2E：`./scripts/run-integration-tests.sh all` 全量通过；长生命周期 VM 会话结束路径（`cleanup_instance` 先发 `__shutdown`、`__pi_start_event_loop` 退出时 neutralize 定时器）与场景库 [E2E-WASM-033](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 对齐
 
 ### 子项进度
 

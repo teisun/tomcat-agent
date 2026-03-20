@@ -6,8 +6,8 @@
 mod common;
 
 use pi_wasm::{
-    ensure_work_dir_structure, AppConfig, AuditRecorder, FileAuditRecorder, PluginLifecycleAuditEntry,
-    PrimitiveAuditEntry,
+    ensure_work_dir_structure, AppConfig, AuditRecorder, FileAuditRecorder,
+    PluginLifecycleAuditEntry, PrimitiveAuditEntry,
 };
 use std::sync::Arc;
 use tempfile::TempDir;

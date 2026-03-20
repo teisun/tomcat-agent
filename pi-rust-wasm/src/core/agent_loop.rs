@@ -124,11 +124,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use tokio_stream::StreamExt;
 
+use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::infra::error::AppError;
-use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message, ToolOutput};
 use crate::infra::event_bus::{EventBus, EventContext};
-use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
+use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message, ToolOutput};
 use tracing::debug;
 
 /// 流式 delta 回调类型，供调用方渲染等。
@@ -147,7 +147,9 @@ pub struct ToolCallInfo {
 /// Agent 内部富类型消息；仅在调 LLM 边界转为 ChatMessage。
 #[derive(Debug, Clone)]
 pub enum AgentMessage {
-    User { text: String },
+    User {
+        text: String,
+    },
     Assistant {
         text: String,
         tool_calls: Vec<ToolCallInfo>,
@@ -157,50 +159,59 @@ pub enum AgentMessage {
         content: String,
         is_error: bool,
     },
-    System { text: String },
-    Steering { text: String, timestamp: i64 },
-    CompactionSummary { summary: String },
+    System {
+        text: String,
+    },
+    Steering {
+        text: String,
+        timestamp: i64,
+    },
+    CompactionSummary {
+        summary: String,
+    },
 }
 
 /// 将 Agent 消息列表转为 LLM 使用的 ChatMessage 序列。
 pub fn convert_to_llm_format(messages: &[AgentMessage]) -> Vec<ChatMessage> {
     messages
         .iter()
-        .map(|m| {
-            match m {
-                AgentMessage::User { text } => ChatMessage::user(text.as_str()),
-                AgentMessage::Steering { text, .. } => ChatMessage::user(text.as_str()),
-                AgentMessage::CompactionSummary { summary } => ChatMessage::user(summary.as_str()),
-                AgentMessage::System { text } => ChatMessage::system(text.as_str()),
-                AgentMessage::Assistant { text, tool_calls } => {
-                    if tool_calls.is_empty() {
-                        ChatMessage::assistant(text.as_str())
-                    } else {
-                        let tc_json: Vec<serde_json::Value> = tool_calls
-                            .iter()
-                            .map(|tc| {
-                                serde_json::json!({
-                                    "id": tc.id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tc.name,
-                                        "arguments": tc.arguments
-                                    }
-                                })
+        .map(|m| match m {
+            AgentMessage::User { text } => ChatMessage::user(text.as_str()),
+            AgentMessage::Steering { text, .. } => ChatMessage::user(text.as_str()),
+            AgentMessage::CompactionSummary { summary } => ChatMessage::user(summary.as_str()),
+            AgentMessage::System { text } => ChatMessage::system(text.as_str()),
+            AgentMessage::Assistant { text, tool_calls } => {
+                if tool_calls.is_empty() {
+                    ChatMessage::assistant(text.as_str())
+                } else {
+                    let tc_json: Vec<serde_json::Value> = tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments
+                                }
                             })
-                            .collect();
-                        ChatMessage::assistant_with_tool_calls(
-                            if text.is_empty() { None } else { Some(text.as_str()) },
-                            tc_json,
-                        )
-                    }
+                        })
+                        .collect();
+                    ChatMessage::assistant_with_tool_calls(
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.as_str())
+                        },
+                        tc_json,
+                    )
                 }
-                AgentMessage::ToolResult {
-                    tool_call_id,
-                    content,
-                    ..
-                } => ChatMessage::tool(tool_call_id, content),
             }
+            AgentMessage::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => ChatMessage::tool(tool_call_id, content),
         })
         .collect()
 }
@@ -209,42 +220,44 @@ pub fn convert_to_llm_format(messages: &[AgentMessage]) -> Vec<ChatMessage> {
 pub fn agent_messages_from_chat(messages: &[ChatMessage]) -> Vec<AgentMessage> {
     messages
         .iter()
-        .map(|m| {
-            match &m.role {
-                ChatMessageRole::User => AgentMessage::User {
-                    text: m.text_content().unwrap_or("").to_string(),
-                },
-                ChatMessageRole::System => AgentMessage::System {
-                    text: m.text_content().unwrap_or("").to_string(),
-                },
-                ChatMessageRole::Assistant => {
-                    let text = m.text_content().unwrap_or("").to_string();
-                    let tool_calls = m
-                        .tool_calls
-                        .as_deref()
-                        .unwrap_or(&[])
-                        .iter()
-                        .filter_map(|v| {
-                            let obj = v.as_object()?;
-                            let id = obj.get("id")?.as_str()?.to_string();
-                            let func = obj.get("function")?.as_object()?;
-                            let name = func.get("name")?.as_str()?.to_string();
-                            let arguments = func
-                                .get("arguments")
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            Some(ToolCallInfo { id, name, arguments })
+        .map(|m| match &m.role {
+            ChatMessageRole::User => AgentMessage::User {
+                text: m.text_content().unwrap_or("").to_string(),
+            },
+            ChatMessageRole::System => AgentMessage::System {
+                text: m.text_content().unwrap_or("").to_string(),
+            },
+            ChatMessageRole::Assistant => {
+                let text = m.text_content().unwrap_or("").to_string();
+                let tool_calls = m
+                    .tool_calls
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|v| {
+                        let obj = v.as_object()?;
+                        let id = obj.get("id")?.as_str()?.to_string();
+                        let func = obj.get("function")?.as_object()?;
+                        let name = func.get("name")?.as_str()?.to_string();
+                        let arguments = func
+                            .get("arguments")
+                            .and_then(|a| a.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Some(ToolCallInfo {
+                            id,
+                            name,
+                            arguments,
                         })
-                        .collect();
-                    AgentMessage::Assistant { text, tool_calls }
-                }
-                ChatMessageRole::Tool => AgentMessage::ToolResult {
-                    tool_call_id: m.tool_call_id.as_deref().unwrap_or("").to_string(),
-                    content: m.text_content().unwrap_or("").to_string(),
-                    is_error: false,
-                },
+                    })
+                    .collect();
+                AgentMessage::Assistant { text, tool_calls }
             }
+            ChatMessageRole::Tool => AgentMessage::ToolResult {
+                tool_call_id: m.tool_call_id.as_deref().unwrap_or("").to_string(),
+                content: m.text_content().unwrap_or("").to_string(),
+                is_error: false,
+            },
         })
         .collect()
 }
@@ -419,7 +432,10 @@ impl AgentLoop {
     }
 
     /// 第一层：Conversation loop，处理 FollowUp。
-    pub async fn run(&mut self, initial_messages: Vec<AgentMessage>) -> Result<AgentRunResult, AppError> {
+    pub async fn run(
+        &mut self,
+        initial_messages: Vec<AgentMessage>,
+    ) -> Result<AgentRunResult, AppError> {
         self.abort_signal.store(false, Ordering::SeqCst);
 
         self.emit_event(AgentEvent::AgentStart {
@@ -439,7 +455,9 @@ impl AgentLoop {
         loop {
             match self.run_attempt_loop(&mut messages).await {
                 Ok(final_text) => {
-                    let result = AgentRunResult { final_text: final_text.clone() };
+                    let result = AgentRunResult {
+                        final_text: final_text.clone(),
+                    };
                     self.emit_event(AgentEvent::AgentEnd {
                         session_id: self.config.session_id.clone(),
                         messages: vec![],
@@ -479,7 +497,10 @@ impl AgentLoop {
     }
 
     /// 第二层：Attempt loop，错误分类与指数退避重试。
-    async fn run_attempt_loop(&mut self, messages: &mut Vec<AgentMessage>) -> Result<String, LoopError> {
+    async fn run_attempt_loop(
+        &mut self,
+        messages: &mut Vec<AgentMessage>,
+    ) -> Result<String, LoopError> {
         let mut last_err: Option<String> = None;
         for attempt in 1..=self.config.max_attempts {
             if attempt > 1 {
@@ -536,7 +557,10 @@ impl AgentLoop {
     }
 
     /// 第三层：Reasoning loop，LLM 流式 + 工具执行 + Steering/Abort 检查。
-    async fn run_reasoning_loop(&mut self, messages: &mut Vec<AgentMessage>) -> Result<String, LoopError> {
+    async fn run_reasoning_loop(
+        &mut self,
+        messages: &mut Vec<AgentMessage>,
+    ) -> Result<String, LoopError> {
         let mut final_text = String::new();
         let mut turn_index: usize = 0;
 
@@ -590,7 +614,9 @@ impl AgentLoop {
                         }
                         self.emit_event(AgentEvent::MessageUpdate {
                             message: Message(serde_json::json!({})),
-                            assistant_message_event: AssistantMessageEvent(serde_json::json!({ "delta": delta })),
+                            assistant_message_event: AssistantMessageEvent(
+                                serde_json::json!({ "delta": delta }),
+                            ),
                         });
                     }
                     Ok(StreamEvent::ToolCallDelta {
@@ -877,7 +903,10 @@ mod tests {
             let stream = tokio_stream::iter(events);
             Ok(Box::new(stream))
         }
-        fn count_tokens(&self, _messages: &[crate::core::llm::ChatMessage]) -> Result<u32, AppError> {
+        fn count_tokens(
+            &self,
+            _messages: &[crate::core::llm::ChatMessage],
+        ) -> Result<u32, AppError> {
             Ok(0)
         }
     }
@@ -904,7 +933,10 @@ mod tests {
         > {
             Err(AppError::Llm(self.err.clone()))
         }
-        fn count_tokens(&self, _messages: &[crate::core::llm::ChatMessage]) -> Result<u32, AppError> {
+        fn count_tokens(
+            &self,
+            _messages: &[crate::core::llm::ChatMessage],
+        ) -> Result<u32, AppError> {
             Ok(0)
         }
     }
@@ -920,7 +952,11 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             Ok(format!("content:{}", path))
         }
-        async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
+        async fn list_dir(
+            &self,
+            _path: &str,
+            _plugin_id: &str,
+        ) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
             Ok(vec![])
         }
         async fn write_file(
@@ -977,7 +1013,9 @@ mod tests {
     #[async_trait::async_trait]
     impl PrimitiveExecutor for SteerableMockPrimitive {
         async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
-            let n = self.read_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = self
+                .read_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 self.steering_queue.lock().push(AgentMessage::Steering {
                     text: "stop after first tool".to_string(),
@@ -986,7 +1024,11 @@ mod tests {
             }
             Ok(format!("content:{}", path))
         }
-        async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
+        async fn list_dir(
+            &self,
+            _path: &str,
+            _plugin_id: &str,
+        ) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
             Ok(vec![])
         }
         async fn write_file(
@@ -1039,7 +1081,11 @@ mod tests {
         async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
             Ok(format!("content:{}", path))
         }
-        async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
+        async fn list_dir(
+            &self,
+            _path: &str,
+            _plugin_id: &str,
+        ) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
             Ok(vec![])
         }
         async fn write_file(
@@ -1125,7 +1171,10 @@ mod tests {
         }];
         let out = convert_to_llm_format(&messages);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].role, crate::core::llm::ChatMessageRole::User));
+        assert!(matches!(
+            out[0].role,
+            crate::core::llm::ChatMessageRole::User
+        ));
         assert_eq!(out[0].text_content(), Some("stop"));
     }
 
@@ -1163,7 +1212,12 @@ mod tests {
                 text: format!("msg{}", i),
             })
             .collect();
-        messages.insert(0, AgentMessage::System { text: "sys".to_string() });
+        messages.insert(
+            0,
+            AgentMessage::System {
+                text: "sys".to_string(),
+            },
+        );
         compact_messages(&mut messages, 5);
         assert!(messages.len() <= 6 + 5);
         let first = match &messages[0] {
@@ -1259,11 +1313,9 @@ mod tests {
     /// 边界：空消息列表不崩溃，run 仍可调用（LLM 可能返回错误或空回复）。
     #[tokio::test]
     async fn run_empty_messages_does_not_crash() {
-        let stream1: Vec<Result<StreamEvent, AppError>> = vec![
-            Ok(StreamEvent::FinishReason {
-                reason: "stop".to_string(),
-            }),
-        ];
+        let stream1: Vec<Result<StreamEvent, AppError>> = vec![Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        })];
         let llm = Arc::new(MockLlmProvider::new(vec![stream1]));
         let primitive = Arc::new(MockPrimitiveExecutor);
         let event_bus = Arc::new(DefaultEventBus::new());
@@ -1305,22 +1357,26 @@ mod tests {
         let event_bus = Arc::new(DefaultEventBus::new());
         let agent_end_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let err_clone = Arc::clone(&agent_end_error);
-        event_bus
-            .on(
-                "agent_end",
-                Box::new(move |ctx: EventContext| {
-                    let err = ctx.payload.get("error").and_then(|v| v.as_str()).map(String::from);
-                    *err_clone.lock().unwrap() = err;
-                    Ok(())
-                }),
-            );
+        event_bus.on(
+            "agent_end",
+            Box::new(move |ctx: EventContext| {
+                let err = ctx
+                    .payload
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                *err_clone.lock().unwrap() = err;
+                Ok(())
+            }),
+        );
         let config = AgentLoopConfig {
             model: "gpt-4".to_string(),
             session_id: "s1".to_string(),
             ..Default::default()
         };
         let abort_signal = Arc::new(AtomicBool::new(false));
-        let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
+        let mut loop_ =
+            AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
         let messages = vec![AgentMessage::User {
             text: "read files".to_string(),
         }];
@@ -1511,11 +1567,11 @@ mod tests {
         }];
         let out = convert_to_llm_format(&messages);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].role, crate::core::llm::ChatMessageRole::User));
-        assert_eq!(
-            out[0].text_content(),
-            Some("Earlier messages summarized.")
-        );
+        assert!(matches!(
+            out[0].role,
+            crate::core::llm::ChatMessageRole::User
+        ));
+        assert_eq!(out[0].text_content(), Some("Earlier messages summarized."));
     }
 
     #[tokio::test]

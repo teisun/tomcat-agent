@@ -1,10 +1,11 @@
-// Long-lived VM E2E: setInterval runs during session (E2E-WASM-033).
-// Fires pi.log every 200ms; host_call count should be > 1 after sleep.
-
+// Long-lived VM E2E: 会话级周期性 pi.log（E2E-WASM-033）。
+// 使用 setTimeout 链（wasmedge_quickjs 对全局 setInterval 支持不稳定）。
 var tickCount = 0;
-setInterval(function () {
+function tick() {
   tickCount++;
   pi.log('vm_actor_set_interval: tick=' + tickCount);
-}, 200);
+  setTimeout(tick, 200);
+}
+setTimeout(tick, 200);
 
 __pi_start_event_loop();

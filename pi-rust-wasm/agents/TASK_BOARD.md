@@ -409,6 +409,8 @@
 - 输出完整差距分析文档（docs/reports/extension_api_gap_analysis.md）
 - 输出 10+ 扩展兼容性评估矩阵
 
+**分支侧集成/E2E**：`./scripts/run-integration-tests.sh all` 已通过（含 wasmedge E2E）；等待 Nibbles 合并入 `develop` 后按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 复跑。
+
 ---
 
 ### TASK-05b | T1-P1-002b | pi-mono 插件兼容性 - Tier 1 纯事件监听型扩展

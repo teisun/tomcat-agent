@@ -504,21 +504,23 @@ impl PluginManager {
         plugin_id: &str,
     ) -> Result<VmActorHandle, AppError> {
         let key = VmRuntimeKey::new(session_id, plugin_id);
-        let rm = self.runtime_manager.as_ref().ok_or_else(|| {
-            AppError::Plugin("runtime_manager not set".into())
-        })?;
+        let rm = self
+            .runtime_manager
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
 
         if let Some(existing) = rm.get(&key) {
             return Ok(existing);
         }
 
-        let _plugin_info = self.get_plugin(plugin_id).ok_or_else(|| {
-            AppError::Plugin(format!("plugin '{plugin_id}' not loaded"))
-        })?;
+        let _plugin_info = self
+            .get_plugin(plugin_id)
+            .ok_or_else(|| AppError::Plugin(format!("plugin '{plugin_id}' not loaded")))?;
 
-        let engine = self.wasm_engine.as_ref().ok_or_else(|| {
-            AppError::Plugin("wasm_engine not set".into())
-        })?;
+        let engine = self
+            .wasm_engine
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin("wasm_engine not set".into()))?;
 
         let instance_id = key.to_string();
         let mut wasm_instance = engine.create_instance(&instance_id)?;
@@ -539,7 +541,9 @@ impl PluginManager {
             let map = self.plugins.read();
             map.get(plugin_id)
                 .map(|inst| inst.main_script_path())
-                .ok_or_else(|| AppError::Plugin(format!("plugin '{plugin_id}' not found in registry")))?
+                .ok_or_else(|| {
+                    AppError::Plugin(format!("plugin '{plugin_id}' not found in registry"))
+                })?
         };
 
         let (handle, _event_tx) =
@@ -562,9 +566,10 @@ impl PluginManager {
     ) -> Result<(), AppError> {
         let key = VmRuntimeKey::new(session_id, plugin_id);
 
-        let dispatcher = self.host_dispatcher.as_ref().ok_or_else(|| {
-            AppError::Plugin("host_dispatcher not set".into())
-        })?;
+        let dispatcher = self
+            .host_dispatcher
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin("host_dispatcher not set".into()))?;
 
         let instance_id = key.to_string();
         dispatcher.deliver_event(
@@ -579,9 +584,10 @@ impl PluginManager {
 
     /// 结束指定会话下所有 VM actor：发送 Shutdown、从 RuntimeManager 移除。
     pub async fn end_session(&self, session_id: &str) -> Result<(), AppError> {
-        let rm = self.runtime_manager.as_ref().ok_or_else(|| {
-            AppError::Plugin("runtime_manager not set".into())
-        })?;
+        let rm = self
+            .runtime_manager
+            .as_ref()
+            .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
 
         let handles = rm.remove_session(session_id);
         for h in &handles {

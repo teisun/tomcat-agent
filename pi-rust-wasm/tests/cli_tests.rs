@@ -1016,17 +1016,24 @@ fn test_user_first_time_setup_init_and_doctor() {
         .args(["init", "--config", config_path.to_str().unwrap()])
         .assert();
     let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
-    info!("Assert init: exit 0 + stdout 含已生成配置文件；actual: {}", trunc(&init_out, 200));
-    init_assert.success().stdout(
-        predicate::str::contains("已生成配置文件").or(predicate::str::contains("config")),
+    info!(
+        "Assert init: exit 0 + stdout 含已生成配置文件；actual: {}",
+        trunc(&init_out, 200)
     );
+    init_assert
+        .success()
+        .stdout(predicate::str::contains("已生成配置文件").or(predicate::str::contains("config")));
 
     info!("Act: pi doctor");
     let mut c = cmd();
     c.args(["doctor", "--config", config_path.to_str().unwrap()]);
     let doctor_assert = c.assert();
-    let doctor_out = String::from_utf8_lossy(&doctor_assert.get_output().stdout.clone()).to_string();
-    info!("Assert doctor: exit 0 + stdout 含 ✓ 或 配置合法；actual: {}", trunc(&doctor_out, 200));
+    let doctor_out =
+        String::from_utf8_lossy(&doctor_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert doctor: exit 0 + stdout 含 ✓ 或 配置合法；actual: {}",
+        trunc(&doctor_out, 200)
+    );
     doctor_assert
         .success()
         .stdout(predicate::str::contains("✓").or(predicate::str::contains("配置合法")));
@@ -1061,7 +1068,10 @@ fn test_user_views_full_config() {
     info!("Act: pi config get");
     let assert = cmd().args(["config", "get"]).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0, stdout 含配置段关键字；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0, stdout 含配置段关键字；actual: {}",
+        trunc(&out, 300)
+    );
     assert.success().stdout(
         predicate::str::contains("llm")
             .or(predicate::str::contains("log"))
@@ -1120,7 +1130,10 @@ fn test_user_imports_config_from_file() {
         .args(["config", "import", export_path.to_str().unwrap()])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含导入；actual: {}", trunc(&out, 200));
+    info!(
+        "Assert: exit 0 + stdout 含导入；actual: {}",
+        trunc(&out, 200)
+    );
     assert.success().stdout(predicate::str::contains("导入"));
 }
 
@@ -1137,7 +1150,10 @@ fn test_user_doctor_detects_environment() {
     info!("Act: pi doctor");
     let assert = cmd().args(["doctor"]).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含检测项；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0 + stdout 含检测项；actual: {}",
+        trunc(&out, 300)
+    );
     assert.success().stdout(
         predicate::str::contains("WasmEdge")
             .or(predicate::str::contains("配置"))
@@ -1169,7 +1185,9 @@ fn test_user_asks_pi_a_question() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat stdin 你好，介绍一下你自己，timeout 60s");
@@ -1184,7 +1202,10 @@ fn test_user_asks_pi_a_question() {
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert.success();
-    assert!(!out.trim().is_empty(), "AI 应输出非空回复，实际 stdout 为空");
+    assert!(
+        !out.trim().is_empty(),
+        "AI 应输出非空回复，实际 stdout 为空"
+    );
 }
 
 /// [E2E-CLI-012] 用户问技术问题，验证 LLM 回复质量
@@ -1209,7 +1230,9 @@ fn test_user_asks_pi_technical_question() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat stdin 问 Rust 所有权，timeout 60s");
@@ -1222,7 +1245,10 @@ fn test_user_asks_pi_technical_question() {
         .timeout(std::time::Duration::from_secs(60));
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含所有权/ownership；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0 + stdout 含所有权/ownership；actual: {}",
+        trunc(&out, 300)
+    );
     assert.success();
     assert!(
         out.contains("所有权") || out.to_lowercase().contains("ownership"),
@@ -1252,7 +1278,9 @@ fn test_user_asks_pi_to_run_bash_command() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat stdin 请执行 echo hello_from_pi，timeout 60s");
@@ -1304,7 +1332,9 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat stdin 要求在 workspace 下创建 hello_e2e.txt，timeout 60s");
@@ -1333,7 +1363,10 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         );
     } else {
         assert!(
-            out.contains("写入") || out.contains("write") || out.contains("创建") || out.contains("创建了"),
+            out.contains("写入")
+                || out.contains("write")
+                || out.contains("创建")
+                || out.contains("创建了"),
             "未找到 hello_e2e.txt 时 stdout 应含写入/创建类确认，实际: {}",
             trunc(&out, 300)
         );
@@ -1374,7 +1407,10 @@ fn test_user_loads_plugin_and_lists() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-list");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: plugin dir = {:?}", plugin_dir.path());
     info!("Act: pi plugin load");
@@ -1383,7 +1419,10 @@ fn test_user_loads_plugin_and_lists() {
         .args(["plugin", "load", plugin_dir.path().to_str().unwrap()])
         .assert();
     let load_out = String::from_utf8_lossy(&load_assert.get_output().stdout.clone()).to_string();
-    info!("Assert load: exit 0, stdout 非空；actual: {}", trunc(&load_out, 200));
+    info!(
+        "Assert load: exit 0, stdout 非空；actual: {}",
+        trunc(&load_out, 200)
+    );
     load_assert.success();
 
     info!("Act: pi plugin list（跨进程，状态不持久）");
@@ -1406,7 +1445,10 @@ fn test_user_views_plugin_info() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-info");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin first");
     cmd()
@@ -1421,7 +1463,10 @@ fn test_user_views_plugin_info() {
         .args(["plugin", "info", "e2e-test-plugin-info"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含 name 或 version；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0 + stdout 含 name 或 version；actual: {}",
+        trunc(&out, 300)
+    );
     assert.success().stdout(
         predicate::str::contains("e2e-test-plugin-info")
             .or(predicate::str::contains("0.1.0"))
@@ -1440,7 +1485,10 @@ fn test_user_disables_plugin() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-disable");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin");
     cmd()
@@ -1469,7 +1517,10 @@ fn test_user_enables_plugin_after_disable() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-enable");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load + disable plugin");
     cmd()
@@ -1503,7 +1554,10 @@ fn test_user_unloads_plugin_removes_from_list() {
 
     let plugin_dir = make_plugin_dir("e2e-test-plugin-unload");
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: load plugin");
     cmd()
@@ -1549,7 +1603,10 @@ fn test_user_loads_nonexistent_plugin_path_shows_error() {
         .args(["plugin", "load", "/nonexistent/path/to/plugin"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含 error 提示；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0 + stdout 含 error 提示；actual: {}",
+        trunc(&out, 300)
+    );
     assert.success().stdout(
         predicate::str::contains("不存在")
             .or(predicate::str::contains("error"))
@@ -1582,7 +1639,9 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat + stdin 单句，timeout 60s");
@@ -1595,9 +1654,15 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         .timeout(std::time::Duration::from_secs(60));
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含 AI 回复；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0 + stdout 含 AI 回复；actual: {}",
+        trunc(&out, 300)
+    );
     assert.success();
-    assert!(!out.trim().is_empty(), "LLM 应输出非空流式回复，实际 stdout 为空");
+    assert!(
+        !out.trim().is_empty(),
+        "LLM 应输出非空流式回复，实际 stdout 为空"
+    );
 }
 
 /// [E2E-CLI-042] 确认 LLM 回复内容非空（基础连通性）
@@ -1622,7 +1687,9 @@ fn test_user_receives_nonempty_llm_response() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat + stdin 说一个字，timeout 30s");
@@ -1637,7 +1704,10 @@ fn test_user_receives_nonempty_llm_response() {
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert.success();
-    assert!(!out.trim().is_empty(), "LLM 应输出非空回复，实际 stdout 为空");
+    assert!(
+        !out.trim().is_empty(),
+        "LLM 应输出非空回复，实际 stdout 为空"
+    );
 }
 
 // ──────────────────── Story 8: CLI对话与会话管理（E2E-CLI-051~082） ────────────────────
@@ -1652,7 +1722,10 @@ fn test_user_creates_new_session() {
     let _span = info_span!("test_user_creates_new_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: fresh work dir");
     info!("Act: pi session new");
@@ -1661,8 +1734,13 @@ fn test_user_creates_new_session() {
         .args(["session", "new"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含已创建会话；actual: {}", trunc(&out, 200));
-    assert.success().stdout(predicate::str::contains("已创建会话"));
+    info!(
+        "Assert: exit 0 + stdout 含已创建会话；actual: {}",
+        trunc(&out, 200)
+    );
+    assert
+        .success()
+        .stdout(predicate::str::contains("已创建会话"));
 }
 
 /// [E2E-CLI-052] 用户查看所有会话
@@ -1675,7 +1753,10 @@ fn test_user_lists_sessions() {
     let _span = info_span!("test_user_lists_sessions").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create a session first");
     cmd()
@@ -1703,7 +1784,10 @@ fn test_user_switches_to_existing_session() {
     let _span = info_span!("test_user_switches_to_existing_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     cmd()
@@ -1731,7 +1815,10 @@ fn test_user_switches_to_nonexistent_session_shows_error() {
     let _span = info_span!("test_user_switches_to_nonexistent_session_shows_error").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: no session pre-created");
     info!("Act: pi session switch nonexistent-key-e2e");
@@ -1740,7 +1827,10 @@ fn test_user_switches_to_nonexistent_session_shows_error() {
         .args(["session", "switch", "nonexistent-key-e2e"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含不存在；actual: {}", trunc(&out, 200));
+    info!(
+        "Assert: exit 0 + stdout 含不存在；actual: {}",
+        trunc(&out, 200)
+    );
     assert.success().stdout(predicate::str::contains("不存在"));
 }
 
@@ -1754,7 +1844,10 @@ fn test_user_deletes_session() {
     let _span = info_span!("test_user_deletes_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     cmd()
@@ -1769,7 +1862,10 @@ fn test_user_deletes_session() {
         .args(["session", "delete", "agent:default:main"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含已删除；actual: {}", trunc(&out, 200));
+    info!(
+        "Assert: exit 0 + stdout 含已删除；actual: {}",
+        trunc(&out, 200)
+    );
     assert.success().stdout(predicate::str::contains("已删除"));
 }
 
@@ -1783,7 +1879,10 @@ fn test_user_archives_session() {
     let _span = info_span!("test_user_archives_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     cmd()
@@ -1798,7 +1897,10 @@ fn test_user_archives_session() {
         .args(["session", "archive", "agent:default:main"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + stdout 含已归档；actual: {}", trunc(&out, 200));
+    info!(
+        "Assert: exit 0 + stdout 含已归档；actual: {}",
+        trunc(&out, 200)
+    );
     assert.success().stdout(predicate::str::contains("已归档"));
 }
 
@@ -1812,7 +1914,10 @@ fn test_user_searches_sessions_by_keyword() {
     let _span = info_span!("test_user_searches_sessions_by_keyword").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let work_dir = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let work_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
     cmd()
@@ -1861,7 +1966,10 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     let output = c.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    info!("Assert: 进程 5s 内结束，含错误提示；stdout: {}", trunc(&stdout, 200));
+    info!(
+        "Assert: 进程 5s 内结束，含错误提示；stdout: {}",
+        trunc(&stdout, 200)
+    );
     let combined = format!("{stdout}{stderr}");
     assert!(
         combined.contains("error")
@@ -1943,7 +2051,10 @@ fn test_user_views_full_help() {
     info!("Act: pi --help");
     let assert = cmd().arg("--help").assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + 含所有子命令；actual: {}", trunc(&out, 400));
+    info!(
+        "Assert: exit 0 + 含所有子命令；actual: {}",
+        trunc(&out, 400)
+    );
     assert
         .success()
         .stdout(predicate::str::contains("init"))
@@ -1967,7 +2078,9 @@ fn test_user_views_version() {
     let assert = cmd().arg("--version").assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + 含版本号；actual: {}", trunc(&out, 100));
-    assert.success().stdout(predicate::str::is_match(r"\d+\.\d+").unwrap());
+    assert
+        .success()
+        .stdout(predicate::str::is_match(r"\d+\.\d+").unwrap());
 }
 
 /// [E2E-CLI-073] 用户输入错误命令时看到帮助
@@ -1982,7 +2095,10 @@ fn test_user_runs_unknown_command() {
     info!("Act: pi nonexistent_cmd_e2e");
     let assert = cmd().arg("nonexistent_cmd_e2e").assert();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr.clone()).to_string();
-    info!("Assert: exit 非 0 + stderr 含 error；actual: {}", trunc(&stderr, 200));
+    info!(
+        "Assert: exit 非 0 + stderr 含 error；actual: {}",
+        trunc(&stderr, 200)
+    );
     assert
         .failure()
         .stderr(predicate::str::contains("error").or(predicate::str::contains("unrecognized")));
@@ -2041,7 +2157,9 @@ fn test_user_chat_resumes_last_session() {
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: 第一轮 pi chat，建立会话历史");
@@ -2068,7 +2186,10 @@ fn test_user_chat_resumes_last_session() {
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     assert.success();
-    assert!(!out.trim().is_empty(), "--resume 后 AI 应有回复，实际 stdout 为空");
+    assert!(
+        !out.trim().is_empty(),
+        "--resume 后 AI 应有回复，实际 stdout 为空"
+    );
 }
 
 // ────────────────────── TASK-14 AgentLoop E2E 用例 ──────────────────────
@@ -2095,7 +2216,9 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         .success();
 
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）")
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
     });
 
     info!("Act: pi chat stdin 单轮问答，timeout 60s");

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ensure_work_dir_structure, load_config, normalize_path, resolve_audit_dir, resolve_quickjs_path,
-    resolve_sessions_dir, validate_config, write_file_atomic, AppConfig,
+    ensure_work_dir_structure, load_config, normalize_path, resolve_audit_dir,
+    resolve_quickjs_path, resolve_sessions_dir, validate_config, write_file_atomic, AppConfig,
     AppError, AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
     FileAuditRecorder, PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry,
     TracingAuditRecorder, WasmEngine, WasmEngineConfig,

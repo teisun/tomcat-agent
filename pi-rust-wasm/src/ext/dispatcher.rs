@@ -132,7 +132,8 @@ pub struct HostApiDispatcher {
     llm_semaphore: Arc<Semaphore>,
     /// 长生命周期 VM 的事件队列：instance_id -> event Receiver（Mutex 保证 Sync）。
     /// waitForEvent 路由从此 channel 阻塞接收事件。
-    event_receivers: Arc<DashMap<String, Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>>>>,
+    event_receivers:
+        Arc<DashMap<String, Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>>>>,
     /// 事件发送端：宿主通过此端投递事件给 VM。
     event_senders: Arc<DashMap<String, std::sync::mpsc::SyncSender<EventEnvelope>>>,
 }
@@ -220,7 +221,7 @@ impl HostApiDispatcher {
     ) -> Result<HostResponse, AppError> {
         // __session.waitForEvent：同步阻塞等待事件（在 spawn_blocking 线程内调用）
         if request.module == "__session" && request.method == "waitForEvent" {
-            return self.do_wait_for_event(instance_id);
+            return self.do_wait_for_event(instance_id, &request.params);
         }
 
         // __async.poll 始终走同步路径，不管是否携带 callId
@@ -289,7 +290,19 @@ impl HostApiDispatcher {
     }
 
     /// 清理指定实例的所有 pending 异步任务（插件卸载/实例销毁时调用）。
+    ///
+    /// 先通过 event channel 发送 `__shutdown` 事件，让 JS 侧 `for(;;)` 事件循环
+    /// 正常退出，再移除 channel 和 pending 任务。仅依赖 channel disconnection
+    /// 不可靠（receiver Arc 可能被 `do_wait_for_event` 持有）。
     pub fn cleanup_instance(&self, instance_id: &str) {
+        use super::vm_actor::EventEnvelope;
+        if let Some(tx) = self.event_senders.get(instance_id) {
+            let _ = tx.try_send(EventEnvelope {
+                event_type: "__shutdown".to_string(),
+                data: serde_json::json!({}),
+                context: serde_json::json!({}),
+            });
+        }
         if let Some((_, call_ids)) = self.instance_calls.remove(instance_id) {
             for cid in call_ids {
                 self.async_results.remove(&cid);
@@ -315,35 +328,84 @@ impl HostApiDispatcher {
     }
 
     /// 获取事件发送端（宿主向 VM 投递事件）。
-    pub fn get_event_sender(&self, instance_id: &str) -> Option<std::sync::mpsc::SyncSender<EventEnvelope>> {
-        self.event_senders.get(instance_id).map(|r| r.value().clone())
+    pub fn get_event_sender(
+        &self,
+        instance_id: &str,
+    ) -> Option<std::sync::mpsc::SyncSender<EventEnvelope>> {
+        self.event_senders
+            .get(instance_id)
+            .map(|r| r.value().clone())
     }
 
     /// 阻塞等待事件（在 spawn_blocking 线程内调用，不会阻塞 Tokio worker）。
     /// 默认无限阻塞；JS 侧可传 `timeout_ms` 参数设置超时。
     /// 注意：必须克隆 Arc 后立即释放 get() 的 Ref，否则在 recv() 阻塞期间持有 DashMap 的 shard 锁，
     /// 会导致 end_session → cleanup_instance → event_receivers.remove() 死锁。
-    fn do_wait_for_event(&self, instance_id: &str) -> Result<HostResponse, AppError> {
-        let rx_arc: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>> =
-            self.event_receivers.get(instance_id).ok_or_else(|| {
+    fn do_wait_for_event(
+        &self,
+        instance_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let rx_arc: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>> = self
+            .event_receivers
+            .get(instance_id)
+            .ok_or_else(|| {
                 AppError::Plugin(format!(
                     "no event channel registered for instance '{instance_id}'"
                 ))
-            })?.clone();
+            })?
+            .clone();
 
-        let rx = rx_arc.lock().map_err(|_| {
-            AppError::Plugin("event channel mutex poisoned".into())
-        })?;
+        let rx = rx_arc
+            .lock()
+            .map_err(|_| AppError::Plugin("event channel mutex poisoned".into()))?;
 
-        match rx.recv() {
-            Ok(envelope) => {
-                let data = serde_json::to_value(&envelope)
-                    .unwrap_or_else(|_| serde_json::json!({"type": "__error"}));
-                Ok(HostResponse::ok(data))
-            }
-            Err(_) => {
-                Ok(HostResponse::ok(serde_json::json!({"type": "__shutdown"})))
-            }
+        let timeout_ms = params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .filter(|&ms| ms > 0);
+
+        match timeout_ms {
+            Some(ms) => match rx.recv_timeout(Duration::from_millis(ms)) {
+                Ok(envelope) => {
+                    tracing::debug!(
+                        "[waitForEvent {instance_id}] event type={}",
+                        envelope.event_type
+                    );
+                    let data = serde_json::to_value(&envelope)
+                        .unwrap_or_else(|_| serde_json::json!({"type": "__error"}));
+                    Ok(HostResponse::ok(data))
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    Ok(HostResponse::ok(serde_json::json!({"type": "__tick"})))
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    tracing::debug!(
+                        "[waitForEvent {instance_id}] channel disconnected → __shutdown"
+                    );
+                    Ok(HostResponse::ok(serde_json::json!({"type": "__shutdown"})))
+                }
+            },
+            None => match rx.recv() {
+                Ok(envelope) => {
+                    tracing::debug!(
+                        "[waitForEvent {instance_id}] event type={}",
+                        envelope.event_type
+                    );
+                    let data = serde_json::to_value(&envelope)
+                        .unwrap_or_else(|_| serde_json::json!({"type": "__error"}));
+                    Ok(HostResponse::ok(data))
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        "[waitForEvent {instance_id}] channel disconnected → __shutdown"
+                    );
+                    Ok(HostResponse::ok(serde_json::json!({"type": "__shutdown"})))
+                }
+            },
         }
     }
 
@@ -354,21 +416,15 @@ impl HostApiDispatcher {
         envelope: EventEnvelope,
     ) -> Result<(), AppError> {
         let tx = self.event_senders.get(instance_id).ok_or_else(|| {
-            AppError::Plugin(format!(
-                "no event channel for instance '{instance_id}'"
-            ))
+            AppError::Plugin(format!("no event channel for instance '{instance_id}'"))
         })?;
 
         tx.try_send(envelope).map_err(|e| match e {
-            std::sync::mpsc::TrySendError::Full(_) => {
-                AppError::Plugin(format!(
-                    "event channel full for '{instance_id}' (backpressure)"
-                ))
-            }
+            std::sync::mpsc::TrySendError::Full(_) => AppError::Plugin(format!(
+                "event channel full for '{instance_id}' (backpressure)"
+            )),
             std::sync::mpsc::TrySendError::Disconnected(_) => {
-                AppError::Plugin(format!(
-                    "event channel closed for '{instance_id}'"
-                ))
+                AppError::Plugin(format!("event channel closed for '{instance_id}'"))
             }
         })
     }
@@ -1985,12 +2041,11 @@ mod tests {
         )
         .unwrap();
 
-        let resp = d.do_wait_for_event("s1/p1").unwrap();
+        let resp = d
+            .do_wait_for_event("s1/p1", &serde_json::json!({}))
+            .unwrap();
         assert!(resp.ok);
-        assert_eq!(
-            resp.data.as_ref().unwrap()["type"],
-            "session_start"
-        );
+        assert_eq!(resp.data.as_ref().unwrap()["type"], "session_start");
     }
 
     #[test]
@@ -2002,7 +2057,9 @@ mod tests {
         // Drop the sender side to close the channel
         d.event_senders.remove("s1/p1");
 
-        let resp = d.do_wait_for_event("s1/p1").unwrap();
+        let resp = d
+            .do_wait_for_event("s1/p1", &serde_json::json!({}))
+            .unwrap();
         assert!(resp.ok);
         assert_eq!(resp.data.as_ref().unwrap()["type"], "__shutdown");
     }

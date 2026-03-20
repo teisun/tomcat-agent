@@ -191,10 +191,9 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
 async fn test_primitive_executor_empty_whitelist_allows_workspace_dir_only(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!(
-        "test_primitive_executor_empty_whitelist_allows_workspace_dir_only"
-    )
-    .entered();
+    let _span =
+        tracing::info_span!("test_primitive_executor_empty_whitelist_allows_workspace_dir_only")
+            .entered();
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;

@@ -370,16 +370,43 @@
   //   JS layer: setTimeout(loop, 0) schedules next iteration as a tick task
   //   Rust layer: run_loop_without_io() processes pending Promises + tick tasks
   //   Net effect: all async work resolves between consecutive waitForEvent calls.
+  // 使用带超时的 waitForEvent：超时返回 type=__tick，让 QuickJS 在两次宿主调用之间处理 setInterval/setTimeout。
+  // 纯阻塞 recv + setTimeout(loop,0) 会导致 loop() 返回后同步脚本结束，_start 退出、VM 变 Stopped。
   globalThis.__pi_start_event_loop = function () {
-    function loop() {
-      var raw = __pi_host_call(JSON.stringify({
-        module: '__session',
-        method: 'waitForEvent'
-      }));
+    // Neutralize timer APIs so QuickJS's internal js_std_loop drains
+    // after the event loop exits. Without this, a setTimeout chain
+    // (e.g. setTimeout(tick, 200) inside tick()) keeps _start alive forever.
+    function neutralizeTimers() {
+      globalThis.setTimeout = function () {};
+      globalThis.setInterval = function () {};
+    }
+
+    for (;;) {
+      var raw;
+      try {
+        raw = __pi_host_call(JSON.stringify({
+          module: '__session',
+          method: 'waitForEvent',
+          params: { timeoutMs: 50 }
+        }));
+      } catch (hostErr) {
+        neutralizeTimers();
+        return;
+      }
       var res = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-      if (!res.ok || (res.data && res.data.type === '__shutdown')) {
+      if (!res.ok) {
+        neutralizeTimers();
         return;
+      }
+
+      if (res.data && res.data.type === '__shutdown') {
+        neutralizeTimers();
+        return;
+      }
+
+      if (res.data && res.data.type === '__tick') {
+        continue;
       }
 
       try {
@@ -387,9 +414,6 @@
       } catch (e) {
         try { pi.log('event_loop error: ' + e); } catch (_) {}
       }
-
-      setTimeout(loop, 0);
     }
-    loop();
   };
 })();

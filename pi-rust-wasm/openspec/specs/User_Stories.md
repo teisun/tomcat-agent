@@ -112,7 +112,7 @@
 **验收标准**：
 - [ ] 插件的全局变量跨多次事件调用保持（如 `let counter = 0` 在多次 `tool_call` 事件间累加）
 - [ ] `pi.on()` 注册的 handler 只需注册一次，后续事件直接触发，无需每次重新执行插件脚本
-- [ ] `setInterval` 定时器在会话期间持续运行（如 mac-system-theme 的 2s 主题轮询）
+- [ ] 周期性定时器在会话期间持续运行（`setInterval` 或等价的 `setTimeout` 链；后者为 wasmedge_quickjs 兼容实现，见 E2E-WASM-033）
 - [ ] `session_start` 初始化的数据可在后续 `before_agent_start`、`tool_call` 等事件中读取
 - [ ] 会话结束时（`session_shutdown` 或用户退出）VM 正常关闭，资源完全释放
 - [ ] pi-mono 核心有状态插件（git-checkpoint、todo、plan-mode、ssh 等）可零修改正确运行

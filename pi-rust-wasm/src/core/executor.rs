@@ -13,9 +13,9 @@ use crate::infra::platform::{normalize_path, read_file_utf8, write_file_atomic};
 use crate::infra::PrimitiveConfig;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tracing::debug;
 use std::sync::Arc;
 use tokio::process::Command;
+use tracing::debug;
 
 /// 单次读取文件最大字节数，避免 OOM。
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
@@ -246,8 +246,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                                     count
                                 )));
                             }
-                            let new_text =
-                                full_text.replacen(old.as_str(), &edit.new_content, 1);
+                            let new_text = full_text.replacen(old.as_str(), &edit.new_content, 1);
                             lines = new_text.lines().map(String::from).collect();
                         }
                         // old_content 为 None 且 start_line 为 None：无操作
@@ -599,7 +598,8 @@ mod tests {
         c.require_approval_for_all_write = true;
         let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
         let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
-        let exec = DefaultPrimitiveExecutor::new(c, Arc::new(DenyAllConfirmation), audit, dir.clone());
+        let exec =
+            DefaultPrimitiveExecutor::new(c, Arc::new(DenyAllConfirmation), audit, dir.clone());
         let r = exec.write_file(&path_str, "new", true, "p1").await;
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err(), AppError::Permission(_)));

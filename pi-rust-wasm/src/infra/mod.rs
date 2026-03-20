@@ -14,8 +14,8 @@ pub(crate) mod logging;
 pub(crate) mod platform;
 
 pub use audit::{
-    AuditPrimitiveOp, AuditRecorder, FileAuditRecorder, HostcallAuditEntry, PluginLifecycleAuditEntry,
-    PrimitiveAuditEntry, ToolAuditEntry, TracingAuditRecorder,
+    AuditPrimitiveOp, AuditRecorder, FileAuditRecorder, HostcallAuditEntry,
+    PluginLifecycleAuditEntry, PrimitiveAuditEntry, ToolAuditEntry, TracingAuditRecorder,
 };
 pub use audit_store::{AuditEntry, AuditFilter, AuditStore};
 pub use config::{

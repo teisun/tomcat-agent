@@ -9,9 +9,9 @@
 mod common;
 
 use pi_wasm::{
-    DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance, PluginManager,
-    PluginStatus, RuntimeManager, SharedRuntimeManager, VmActorHandle, VmActorState, VmCommand,
-    VmRuntimeKey, parse_manifest,
+    parse_manifest, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
+    PluginManager, PluginStatus, RuntimeManager, SharedRuntimeManager, VmActorHandle, VmActorState,
+    VmCommand, VmRuntimeKey,
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -196,7 +196,9 @@ fn test_multi_session_isolation_in_runtime_manager() -> Result<(), Box<dyn std::
         state: state2.clone(),
     };
 
-    tracing::info!("Arrange: 为 session-A/plugin-x(Running) 和 session-B/plugin-x(Created) 各创建 handle");
+    tracing::info!(
+        "Arrange: 为 session-A/plugin-x(Running) 和 session-B/plugin-x(Created) 各创建 handle"
+    );
     mgr.insert(key_s1.clone(), handle1);
     mgr.insert(key_s2.clone(), handle2);
 
@@ -422,8 +424,7 @@ fn test_event_envelope_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_dispatcher_event_channel_register_and_deliver() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span =
-        tracing::info_span!("test_dispatcher_event_channel_register_and_deliver").entered();
+    let _span = tracing::info_span!("test_dispatcher_event_channel_register_and_deliver").entered();
 
     let bus = Arc::new(DefaultEventBus::new());
     let dispatcher = HostApiDispatcher::new(bus);
@@ -479,8 +480,7 @@ fn test_dispatcher_deliver_event_backpressure() -> Result<(), Box<dyn std::error
 #[test]
 fn test_dispatcher_cleanup_removes_event_channel() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span =
-        tracing::info_span!("test_dispatcher_cleanup_removes_event_channel").entered();
+    let _span = tracing::info_span!("test_dispatcher_cleanup_removes_event_channel").entered();
 
     let bus = Arc::new(DefaultEventBus::new());
     let dispatcher = HostApiDispatcher::new(bus);

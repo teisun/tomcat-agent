@@ -111,9 +111,7 @@ impl AuditEntry {
                 ..
             } => format!("{} {} plugin_id={}", module, method, plugin_id),
             AuditKindPayload::PluginLifecycle {
-                plugin_id,
-                action,
-                ..
+                plugin_id, action, ..
             } => format!("action={} plugin_id={}", action, plugin_id),
         }
     }
@@ -144,8 +142,7 @@ pub struct AuditStore {
 impl AuditStore {
     /// 从配置构建：解析审计目录与保留天数，审计文件为 `{audit_dir}/audit.jsonl`。
     pub fn new(cfg: &AppConfig) -> Result<Self, AppError> {
-        let path = super::config::resolve_audit_dir(cfg)?
-            .join("audit.jsonl");
+        let path = super::config::resolve_audit_dir(cfg)?.join("audit.jsonl");
         let retention_days = cfg.security.audit_log_retention_days;
         Ok(Self {
             path,
@@ -168,9 +165,10 @@ impl AuditStore {
 
     /// 追加一条记录（仅追加，不可篡改）。写入格式：一行 JSON + 换行。
     pub fn append(&self, row: &AuditEntryRow) -> Result<(), AppError> {
-        let _guard = self.append_guard.lock().map_err(|e| {
-            AppError::Audit(format!("audit append lock poisoned: {}", e))
-        })?;
+        let _guard = self
+            .append_guard
+            .lock()
+            .map_err(|e| AppError::Audit(format!("audit append lock poisoned: {}", e)))?;
         let line = serde_json::to_string(row).map_err(|e| AppError::Audit(e.to_string()))?;
         let mut content = line;
         content.push('\n');
@@ -224,7 +222,8 @@ impl AuditStore {
             ..Default::default()
         };
         let entries = self.query(&filter)?;
-        let json = serde_json::to_string_pretty(&entries).map_err(|e| AppError::Audit(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(&entries).map_err(|e| AppError::Audit(e.to_string()))?;
         write_file_atomic(path, json.as_bytes())?;
         Ok(())
     }

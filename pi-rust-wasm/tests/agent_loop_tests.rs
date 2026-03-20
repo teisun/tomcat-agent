@@ -93,11 +93,7 @@ impl PrimitiveExecutor for MockPrimitive {
     async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
         Ok(format!("content:{}", path))
     }
-    async fn list_dir(
-        &self,
-        _path: &str,
-        _plugin_id: &str,
-    ) -> Result<Vec<DirEntry>, AppError> {
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
         Ok(vec![])
     }
     async fn write_file(
@@ -155,11 +151,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
     async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
         Ok(format!("content:{}", path))
     }
-    async fn list_dir(
-        &self,
-        _path: &str,
-        _plugin_id: &str,
-    ) -> Result<Vec<DirEntry>, AppError> {
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
         Ok(vec![])
     }
     async fn write_file(
@@ -221,11 +213,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
         Ok(format!("content:{}", path))
     }
-    async fn list_dir(
-        &self,
-        _path: &str,
-        _plugin_id: &str,
-    ) -> Result<Vec<DirEntry>, AppError> {
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
         Ok(vec![])
     }
     async fn write_file(
@@ -334,17 +322,11 @@ async fn test_agent_loop_simple_text_response() -> Result<(), Box<dyn std::error
     }];
 
     info!("Act: 调用 AgentLoop::run()");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
-    info!(
-        "Assert: final_text 包含 LLM 回复: {:?}",
-        result.final_text
-    );
+    info!("Assert: final_text 包含 LLM 回复: {:?}", result.final_text);
     assert!(
         result.final_text.contains("Hello from AgentLoop"),
         "final_text 应包含 LLM 回复，实际: {:?}",
@@ -403,13 +385,7 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
 
     let config = default_config("sess-abort");
     let abort_signal = Arc::new(AtomicBool::new(false));
-    let mut agent = AgentLoop::new(
-        llm,
-        primitive,
-        event_bus,
-        config,
-        Arc::clone(&abort_signal),
-    );
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
     let messages = vec![AgentMessage::User {
         text: "read files".to_string(),
     }];
@@ -421,12 +397,9 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
         abort_for_thread.store(true, Ordering::SeqCst);
     });
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")?;
 
     info!(
         "Assert: run() 返回 Err，agent_end.error=interrupted; result={:?}",
@@ -467,12 +440,9 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
     }];
 
     info!("Act: 调用 AgentLoop::run()，follow_up 已预注入");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
     info!(
         "Assert: final_text 包含第二轮回复 'B': {:?}",
@@ -514,12 +484,9 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     }];
 
     info!("Act: 调用 run()，工具首次执行将 Err");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
     info!(
         "Assert: run() 返回 Ok，final_text 包含 recovered: {:?}",
@@ -544,7 +511,9 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     common::setup_logging();
     let _span = info_span!("test_agent_loop_retryable_error_retries_and_succeeds").entered();
 
-    info!("Arrange: Stream1 返回 429 错误事件；Stream2 返回成功文本；retry_base_delay_ms=0 避免等待");
+    info!(
+        "Arrange: Stream1 返回 429 错误事件；Stream2 返回成功文本；retry_base_delay_ms=0 避免等待"
+    );
     let stream_err = vec![Err(AppError::Llm(
         "API 错误 429: rate limit exceeded".to_string(),
     ))];
@@ -566,12 +535,9 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     }];
 
     info!("Act: 调用 run()，期望自动重试后成功");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
     info!(
         "Assert: run() 返回 Ok，final_text='retried ok': {:?}",
@@ -616,12 +582,9 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
     }];
 
     info!("Act: 调用 run()，期望立即返回 Err（无重试）");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")?;
 
     info!("Assert: run() 返回 Err，错误含 '401'");
     assert!(result.is_err(), "401 Fatal 应导致 run() 返回 Err");
@@ -679,12 +642,9 @@ async fn test_agent_loop_events_published_in_correct_order(
     }];
 
     info!("Act: 调用 run()");
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
     info!("Assert: 验证事件发布顺序与规范一致");
     let actual = observed.lock().unwrap().clone();
@@ -704,8 +664,8 @@ async fn test_agent_loop_events_published_in_correct_order(
 /// 验证：LLM 返回两个工具调用，Steering 注入后仅第一个工具执行；后续 LLM 收到 steering 返回 "steered"
 /// 意义：TASK-14 5.3 Steering 机制——外部线程可中断当前工具批次，实现实时重定向（5.3 验收标准）
 #[tokio::test]
-async fn test_agent_loop_steering_skips_remaining_tools(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = info_span!("test_agent_loop_steering_skips_remaining_tools").entered();
 
@@ -742,17 +702,11 @@ async fn test_agent_loop_steering_skips_remaining_tools(
     }];
 
     info!("Act: 调用 run()，Steering 已预注入");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(messages),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
-    info!(
-        "Assert: final_text 包含 'steered': {:?}",
-        result.final_text
-    );
+    info!("Assert: final_text 包含 'steered': {:?}", result.final_text);
     assert!(
         result.final_text.contains("steered"),
         "Steering 后 final_text 应包含 LLM 第二轮回复 'steered'，实际: {:?}",
@@ -806,8 +760,7 @@ fn test_agent_messages_convert_to_llm_format_roundtrip() {
 /// 验证：run([]) 返回 Ok("")（鲁棒性边界：不触发 panic，符合 INTEGRATION_TEST_ROBUSTNESS §2）
 /// 意义：防御性边界——空上下文不应导致 AgentLoop 崩溃
 #[tokio::test]
-async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span = info_span!("test_agent_loop_empty_messages_does_not_crash").entered();
 
@@ -822,12 +775,9 @@ async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn s
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     info!("Act: run([]) 调用");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        agent.run(vec![]),
-    )
-    .await
-    .map_err(|_| "run() 超时 10s")??;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
 
     info!(
         "Assert: 返回 Ok，final_text 为空字符串: {:?}",

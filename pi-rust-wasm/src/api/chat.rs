@@ -274,14 +274,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         // 在历史消息最前面注入 system message（仅当首条不是 system 时）。
         let workspace_str = ctx.workspace_dir.to_string_lossy();
-        let system_text =
-            crate::core::system_prompt::build_system_prompt(&workspace_str);
+        let system_text = crate::core::system_prompt::build_system_prompt(&workspace_str);
         let system_msg = ChatMessage::system(system_text);
-        if history
-            .first()
-            .and_then(|v| v["role"].as_str())
-            != Some("system")
-        {
+        if history.first().and_then(|v| v["role"].as_str()) != Some("system") {
             history.insert(0, serde_json::to_value(&system_msg)?);
         }
 

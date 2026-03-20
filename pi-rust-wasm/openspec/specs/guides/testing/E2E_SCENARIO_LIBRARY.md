@@ -62,14 +62,16 @@
 
 ---
 
-## Story 4 — Node.js 兼容层（Wasm E2E）（3 条）
+## Story 4 — Node.js 兼容层（Wasm E2E）（5 条）
 
 
-| 编号           | 用例名                                         | 用户意图                      | 操作序列                                               | 必须断言                                                           |
-| ------------ | ------------------------------------------- | ------------------------- | -------------------------------------------------- | -------------------------------------------------------------- |
-| E2E-WASM-001 | `test_wasmedge_e2e_hello_world_inline`      | 插件 JS 可执行内联脚本             | WasmEngine + `run_script("print('Hello World');")` | Ok；无崩溃                                                         |
-| E2E-WASM-002 | `test_wasmedge_e2e_hello_world_script_file` | 插件 JS 可执行 .js 文件          | `run_script_file(hello.js)`                        | Ok                                                             |
-| E2E-WASM-003 | `test_wasmedge_e2e_bridge_layer`            | 插件 JS 可通过 pi 桥接层调用全部 4 原语 | `run_script_file(bridge_test.js)`                  | host_call 次数 ≥4（readFile/writeFile/editFile/executeBash 各 1 次） |
+| 编号           | 用例名                                              | 用户意图                                           | 操作序列                                                  | 必须断言                                                           |
+| ------------ | ------------------------------------------------ | ---------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
+| E2E-WASM-001 | `test_wasmedge_e2e_hello_world_inline`           | 插件 JS 可执行内联脚本                                  | WasmEngine + `run_script("print('Hello World');")`    | Ok；无崩溃                                                         |
+| E2E-WASM-002 | `test_wasmedge_e2e_hello_world_script_file`      | 插件 JS 可执行 .js 文件                               | `run_script_file(hello.js)`                           | Ok                                                             |
+| E2E-WASM-003 | `test_wasmedge_e2e_bridge_layer`                 | 插件 JS 可通过 pi 桥接层调用全部 4 原语                      | `run_script_file(bridge_test.js)`                     | host_call 次数 ≥4（readFile/writeFile/editFile/executeBash 各 1 次） |
+| E2E-WASM-004 | `test_wasmedge_e2e_require_path_modules_preopen` | `require('path')` 可用（WASI `./modules` preopen） | `run_script_file(require_path_test.js)`               | Ok；`path.join('a','b')` 不抛错                                    |
+| E2E-WASM-005 | `test_wasmedge_e2e_tps_transpile_run_script_poc` | SWC 转译后 pi-mono 风格 tps 插件可加载                   | `transpile_pi_plugin_for_quickjs` + `run_script_file` | Ok；不崩溃                                                         |
 
 
 ---
@@ -135,13 +137,13 @@
 > Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`）。须安装 WasmEdge。
 
 
-| 编号           | 用例名                                                     | 用户意图                                 | 操作序列                                                                                          | 必须断言                                                        |
-| ------------ | ------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| E2E-WASM-031 | `test_wasmedge_e2e_vm_actor_state_persists_across_events` | 插件全局变量跨事件保持                         | start_session_vm → dispatch_session_event x2 → 检查 host_call 中的累加值                              | 第二次事件的 host_call 反映累加状态；无崩溃                                 |
-| E2E-WASM-032 | `test_wasmedge_e2e_handler_stays_registered`              | 已注册 handler 多次事件持续有效                 | start_session_vm → dispatch_session_event("evt") x2                                           | 每次 dispatch 均触发 handler（host_call 计数递增）                     |
-| E2E-WASM-033 | `test_wasmedge_e2e_set_interval_runs_during_session`      | setInterval 在会话期间稳定运行                | start_session_vm → sleep 适当时间 → 检查 host_call 计数                                              | host_call 计数 > 1（定时器触发多次）                                   |
-| E2E-WASM-034 | `test_wasmedge_e2e_multi_session_isolation`               | 多会话上下文隔离                             | start_session_vm(s1) + start_session_vm(s2) → 分别 dispatch → 验证各自 host_call                     | s1 与 s2 的 host_call 各自独立、状态不串会话                             |
-| E2E-WASM-035 | `test_wasmedge_e2e_session_end_no_hanging_threads`        | 关闭流程无悬挂线程                            | start_session_vm → end_session → 检查 VmActorHandle 状态                                         | end_session 后 RuntimeManager 为空；handle state 为 Stopped/Error |
+| 编号           | 用例名                                                       | 用户意图                 | 操作序列                                                                                                                                       | 必须断言                                                                        |
+| ------------ | --------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| E2E-WASM-031 | `test_wasmedge_e2e_vm_actor_state_persists_across_events` | 插件全局变量跨事件保持          | start_session_vm → dispatch_session_event x2 → 检查 host_call 中的累加值                                                                          | 第二次事件的 host_call 反映累加状态；无崩溃                                                 |
+| E2E-WASM-032 | `test_wasmedge_e2e_handler_stays_registered`              | 已注册 handler 多次事件持续有效 | start_session_vm → dispatch_session_event("evt") x2                                                                                        | 每次 dispatch 均触发 handler（host_call 计数递增）                                     |
+| E2E-WASM-033 | `test_wasmedge_e2e_set_interval_runs_during_session`      | 会话期间周期性日志（定时器语义）稳定触发 | start_session_vm；fixture 用 `setTimeout` 链模拟周期（wasmedge_quickjs 对全局 `setInterval` 不稳定）；sleep ≥1.2s；断言 `VmActorState::Running`；`end_session` | 会话中 VM 仍为 Running；`pi.log` 侧可见多次 tick；`end_session` 后 RuntimeManager 为空、无悬挂 |
+| E2E-WASM-034 | `test_wasmedge_e2e_multi_session_isolation`               | 多会话上下文隔离             | start_session_vm(s1) + start_session_vm(s2) → 分别 dispatch → 验证各自 host_call                                                                 | s1 与 s2 的 host_call 各自独立、状态不串会话                                             |
+| E2E-WASM-035 | `test_wasmedge_e2e_session_end_no_hanging_threads`        | 关闭流程无悬挂线程            | start_session_vm → end_session → 检查 VmActorHandle 状态                                                                                       | end_session 后 RuntimeManager 为空；handle state 为 Stopped/Error                |
 
 
 ---
