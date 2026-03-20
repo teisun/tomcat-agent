@@ -13,6 +13,30 @@
 
 设计约束：禁止全量加载 transcript；sessions.json 写必用「临时文件 + 重命名」；并发写通过 Mutex 序列化。
 
+### 1.1 CLI 与会话存储关系（ASCII）
+
+```text
+  pi <subcommand> / pi (默认 chat)
+            |
+            v
+     +------+-------+
+     | src/api/cli  |
+     +------+-------+
+            |
+     +------v-------------+----------------------+
+     | SessionManager      |  其他子命令 init/   |
+     | store (HashMap)     |  doctor/config/...  |
+     | + transcript JSONL  |                      |
+     +---------------------+----------------------+
+            |
+            v
+     sessions.json  +  <session_id>.jsonl
+     (原子写)         (仅追加，禁止整文件解析)
+```
+
+- **边界**：`SessionManager` 不直接调用 LLM；对话路径经 `chat` 组装上下文后再交给 `AgentLoop` + `LlmProvider`（见 [模块技术文档索引](./README.md)「图 2」）。
+- **代码入口**：`run_cli()` → 各 `run_*` handler（`src/api/cli.rs`）。
+
 ---
 
 ## 2. 会话存储 (Session Storage)

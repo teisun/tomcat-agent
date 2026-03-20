@@ -6,7 +6,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 ---
 ## 背景了解
- agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档，实现TASK_BOARD.md 规划好的任务，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [status/{branch}.md]
+ agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档，实现TASK_BOARD.md 规划好的任务，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [docs/status/{branch}.md]
 
 ## 一、领取任务
 
@@ -48,7 +48,7 @@ Agent 读取本文件后，须按以下流程执行。
 2. **开发流程**：
    - 编码（带注释）→ 测试 → 修 bug → 单测通过 → 写技术[文档](../docs/)
 3. **提交前**：
-   - 更新**当前 Git 分支**对应的 status 文件：文件名为「当前分支名（`/` 替换为 `-`）.md」，位于 `status/` 目录；若在 develop 上开发则更新 `status/develop.md`。填入 Cov% 等元数据。
+   - 更新**当前 Git 分支**对应的 status 文件：文件名为「当前分支名（`/` 替换为 `-`）.md」，位于 `docs/status/` 目录；若在 develop 上开发则更新 `docs/status/develop.md`。填入 Cov% 等元数据。
    - 严格加载 [commit-guard.mdc](../.cursor/rules/commit-guard.mdc) 提交规则
 4. **提交策略**：
    - 每个子任务完成提交一次，禁止囤积多个任务一次性提交
@@ -59,16 +59,16 @@ Agent 读取本文件后，须按以下流程执行。
 遇依赖阻塞、技术问题、需求不明确时：
 
 1. 在 TASK_BOARD.md 中将任务状态改为 `BLOCKED`，填写**阻塞点**描述
-2. 在**当前 Git 分支**对应的 status 文件（`status/` 下「当前分支名，`/` 换 `-`」.md）中更新阻塞状态（含原因与预计解决时间）
+2. 在**当前 Git 分支**对应的 status 文件（`docs/status/` 下「当前分支名，`/` 换 `-`」.md）中更新阻塞状态（含原因与预计解决时间）
 3. 禁止静默阻塞
 
 ## 七、完成任务
 
 1. 确认所有子项完成，通过门禁（rustfmt/clippy/单测）
-2. 更新**当前 Git 分支**对应的 status 文件（即 `status/` 下文件名为「当前分支名，`/` 替换为 `-`」的 .md 文件），标记任务完成；若在 develop 上开发则更新 `status/develop.md`。
+2. 更新**当前 Git 分支**对应的 status 文件（即 `docs/status/` 下文件名为「当前分支名，`/` 替换为 `-`」的 .md 文件），标记任务完成；若在 develop 上开发则更新 `docs/status/develop.md`。
 3. 将 TASK_BOARD.md 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
 4. **完成前自检（必做）**：
-   - 已确认**当前分支**，并已更新 **status/当前分支对应.md**（分支名中 `/` → `-`）。
+   - 已确认**当前分支**，并已更新 **docs/status/当前分支对应.md**（分支名中 `/` → `-`）。
    - **覆盖率**（可选）：若需要测量覆盖率，可手动执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package pi_wasm`，将结果填入 status 文件元数据表的 Cov% 列；不强制执行，不阻塞任务完成。
    - **技术文档**：若有接口/行为变更，已按 [技术文档规范](../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md) 更新 `docs/` 下对应文档。
    - **提交**：已按 [commit-guard.mdc](../.cursor/rules/commit-guard.mdc) 提交，含 what+why；若为代码变更且 status 中已填 Cov%，commit message 末尾含 `[cov = xx.x%]`。

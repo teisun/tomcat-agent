@@ -54,6 +54,12 @@ src/
 
 详见 [Architecture.md](openspec/specs/Architecture.md)。
 
+## 文档入口
+
+- [docs/README.md](docs/README.md) — 文档地图（技术文档、进度跟踪、分享材料）
+- [docs/technical/README.md](docs/technical/README.md) — 模块技术文档索引（与 `src/` 对照，含 ASCII 总览）
+- [docs/INTEGRATION.md](docs/INTEGRATION.md) — 集成进度看板
+
 ## 规范文档
 
 - [Constitution.md](openspec/specs/Constitution.md) — 项目宪法（不可违反的核心规则）

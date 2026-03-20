@@ -16,6 +16,29 @@
 
 设计原则：最小依赖、强类型约束、错误完整捕获不导致主流程崩溃。
 
+### 1.1 基础设施在系统中的位置（ASCII）
+
+```text
+                    +-----------+     +----------------+
+                    | AppConfig |     | tracing 初始化  |
+                    | 多源合并  |     | (logging.rs)   |
+                    +-----+-----+     +--------+-------+
+                          |                    ^
+                          v                    |
++-------------------------+--------------------+-------------------------+
+|                          src/infra                                   |
+|  AppError ................... 统一向上 ? 传播，禁止裸 panic        |
+|  platform ................... 原子写、路径规范化                     |
+|  EventBus + events .......... publish / subscribe（隔离 listener 故障）|
++----------------------------------+-----------------------------------+
+           ^                                    ^
+           | emit / on_*                        | 读配置 / 打日志
+   [core] [ext] [api] .......................... 各业务模块
+```
+
+- **边界**：`infra` **不**依赖 `core` / `ext`；仅被上层引用。
+- **总览**：与 [模块技术文档索引](./README.md) 中「图 1」对照，可看到本层在全局栈底的位置。
+
 ---
 
 ## 2. 设计方案 (Design Details)
@@ -76,7 +99,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 - **AppConfig**：顶层配置，包含 `log`、`llm`、`storage`、`plugin`、`security`、`primitive`。
 - **LogConfig**：`level`（trace/debug/info/warn/error）、`file_enabled`、`file_path`、`file_roll_size_mb`。
 - **LlmConfig**：`provider`、`api_base`、`api_key_env`、`default_model`、`max_concurrent_requests`、`retry_count`、`stream_timeout_sec`；可选 `proxy`（显式 HTTP 代理 URL，如 `http://127.0.0.1:7890`，未设置时仍使用环境变量 `HTTPS_PROXY`/`HTTP_PROXY`）；可选 `api_base_fallback`（当对主 API 地址请求不通时自动用该 URL 重试，示例 `https://api.chatanywhere.tech`，留空关闭自动降级）。
-- **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认可执行文件目录/.pi_wasm；多 agent 子目录与数据布局见 [工作目录与数据布局](../openspec/specs/architecture/work-dir-and-data-layout.md)）。
+- **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认可执行文件目录/.pi_wasm；多 agent 子目录与数据布局见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)）。
 - **PluginConfig**：`plugins_dir`、`auto_load`。
 - **PrimitiveConfig**：路径/命令白名单与审批、`auto_confirm`、`require_approval_for_all_write` 等。
 - **SecurityConfig**：`default_plugin_permission_level`、`enable_audit_log`、`audit_log_retention_days`、`enable_plugin_safety_scan`。
@@ -140,7 +163,7 @@ pub trait EventBus: Send + Sync + 'static {
 | `plugin.plugins_dir` | 插件目录 | ~/.pi/agent/plugins |
 | `security.enable_audit_log` | 是否启用审计日志 | true |
 | `security.audit_log_retention_days` | 审计保留天数 | 90 |
-| **预留** `memory.profile` | low / standard / high / auto，见 [Architecture 4.5 资源与内存模式](../openspec/specs/Architecture.md#45-资源与内存模式-resource--memory-profile) | - |
+| **预留** `memory.profile` | low / standard / high / auto，见 [Architecture 4.5 资源与内存模式](../../openspec/specs/Architecture.md#45-资源与内存模式-resource--memory-profile) | - |
 | **预留** `memory.*` | 各模式覆盖项（如 wasm_max_pages、js_heap_limit 等），同上 | - |
 
 ---

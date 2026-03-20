@@ -16,7 +16,7 @@
 
 - **依赖**：各工程师（Tom/Jerry/Spike）按 [Dispatcher.md](./Dispatcher.md) 工作流提交功能分支，并自测通过（build、clippy、单测）。
 - **被依赖**：所有工程师在合并后依赖 develop 的稳定状态拉取更新、解决冲突。
-- **协作**：接收工程师合并请求；执行合并前检查；合并后**先检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY**（如需）、**再**编写/补充集成测试与 E2E 测试代码；合并后全量测试；将失败项与验收不符项反馈给对应工程师（issue 和集成看板 [INTEGRATION.md](../INTEGRATION.md)）。工程师只维护各自 `status/` 文件，不直接修改 INTEGRATION.md。
+- **协作**：接收工程师合并请求；执行合并前检查；合并后**先检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY**（如需）、**再**编写/补充集成测试与 E2E 测试代码；合并后全量测试；将失败项与验收不符项反馈给对应工程师（issue 和集成看板 [INTEGRATION.md](../docs/INTEGRATION.md)）。工程师只维护各自 `docs/status/` 文件，不直接修改 docs/INTEGRATION.md。
 
 ## 参考文档
 
@@ -63,7 +63,7 @@
 
 - **主开发分支**：`develop`
 - **功能分支**：按任务命名，格式 `feature/{任务简写}`（如 `feature/cli-chat`、`feature/plugin-lifecycle`）
-- **看板更新**：INTEGRATION.md 由 status 汇总 command 在 develop 上生成，开发分支不直接改 INTEGRATION.md。
+- **看板更新**：docs/INTEGRATION.md 由 status 汇总 command 在 develop 上生成，开发分支不直接改 docs/INTEGRATION.md。
 - 合并顺序按任务依赖关系：先无依赖或依赖已满足的任务，再依次合并后续任务。
 
 ### 3. 合并前检查
@@ -125,9 +125,9 @@
 
 ### 6. 集成通过（status 记录）
 
-若分支合并成功且集成测试通过，须在**当前 Git 分支对应的 status 文件**中记录，文件名规则见 [STATUS_GUIDE.md](../openspec/specs/guides/workflow/STATUS_GUIDE.md)（如 develop → `status/develop.md`，分支名 `/` 替换为 `-`）。
+若分支合并成功且集成测试通过，须在**当前 Git 分支对应的 status 文件**中记录，文件名规则见 [STATUS_GUIDE.md](../openspec/specs/guides/workflow/STATUS_GUIDE.md)（如 develop → `docs/status/develop.md`，分支名 `/` 替换为 `-`）。
 
-- **写入目标**：仅写入上述 status 文件，不得在 status/ 下新建独立报告文件（如 `integration-report-*.md`）。
+- **写入目标**：仅写入上述 status 文件，不得在 docs/status/ 下新建独立报告文件（如 `integration-report-*.md`）。
 - **形式**：在该文件**顶部新增一个 status 块**（不覆盖已有内容），包含：元数据表（Owner、Update Time、State、Branch、Cov%）；**### 集成测试报告**（或「本次执行说明」）标题；合并分支列表、执行的检查与验收项、结果摘要、时间/环境等。
 - **禁止**：不得新建独立报告文件；所有集成通过记录均写入当前分支的 status 文件。
 
@@ -137,5 +137,5 @@
 
 ### 8. 问题反馈方式
 
-- 在集成看板 [INTEGRATION.md](../INTEGRATION.md) 创建条目，标明：合并分支、失败步骤、期望/实际、建议负责工程师
+- 在集成看板 [INTEGRATION.md](../docs/INTEGRATION.md) 创建条目，标明：合并分支、失败步骤、期望/实际、建议负责工程师
 - 或直接在协作渠道 @ 对应工程师并附上上述信息

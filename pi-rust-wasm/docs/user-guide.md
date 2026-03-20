@@ -738,9 +738,9 @@ pi doctor  # 应显示 ✓ WasmEdge 运行时：可用
 |------|------|
 | [README.md](../README.md) | 项目简介、快速开始 |
 | [Architecture.md](../openspec/specs/Architecture.md) | 系统架构与分层设计 |
-| [docs/01-infrastructure.md](01-infrastructure.md) | 基础设施层（配置/日志/审计/事件总线）|
-| [docs/02-llm-module.md](02-llm-module.md) | LLM 模块（OpenAI 适配器、流式输出）|
-| [docs/02-session-and-cli.md](02-session-and-cli.md) | 会话管理与 CLI 设计 |
-| [docs/02-wasm-runtime-and-plugin.md](02-wasm-runtime-and-plugin.md) | Wasm 运行时与插件系统 |
-| [docs/03-agent-loop.md](03-agent-loop.md) | Agent 循环（多轮对话、工具调用、重试）|
+| [docs/technical/01-infrastructure.md](technical/01-infrastructure.md) | 基础设施层（配置/日志/审计/事件总线）|
+| [docs/technical/02-llm-module.md](technical/02-llm-module.md) | LLM 模块（OpenAI 适配器、流式输出）|
+| [docs/technical/02-session-and-cli.md](technical/02-session-and-cli.md) | 会话管理与 CLI 设计 |
+| [docs/technical/02-wasm-runtime-and-plugin.md](technical/02-wasm-runtime-and-plugin.md) | Wasm 运行时与插件系统 |
+| [docs/technical/03-agent-loop.md](technical/03-agent-loop.md) | Agent 循环（多轮对话、工具调用、重试）|
 | [openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | 集成测试日志查看方法 |

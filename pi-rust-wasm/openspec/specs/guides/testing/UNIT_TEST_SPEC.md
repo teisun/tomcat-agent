@@ -43,7 +43,7 @@
 ## 4. 覆盖率与门禁
 
 - **覆盖率**：核心模块 ≥85%，基础设施/工具类 ≥90%（与 [Constitution.md](../../Constitution.md) 一致）；使用 `cargo-tarpaulin` 等统计。各任务（如 [tasks_details.md](../../../changes/001-mvp/tasks_details.md)）可有单独要求（如 ≥80%）。
-- 完成定义要求“单元测试通过，算出覆盖率”，写入当前分支对应的 status 文件（如 `status/feature-xx.md`）；具体字段与格式见 [STATUS_GUIDE](../workflow/STATUS_GUIDE.md)（Cov% 列）。
+- 完成定义要求“单元测试通过，算出覆盖率”，写入当前分支对应的 status 文件（如 `docs/status/feature-xx.md`）；具体字段与格式见 [STATUS_GUIDE](../workflow/STATUS_GUIDE.md)（Cov% 列）。
 
 ---
 

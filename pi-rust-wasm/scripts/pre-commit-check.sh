@@ -16,7 +16,7 @@ echo ""
 cat << 'EOF'
 feat(ext): 007/008 规范审查补漏：导出 invoke_host_func_with、文档与 Hostcall 集成测试
 
-按宪法与 PLAN 补漏：ext/lib 导出 invoke_host_func_with；更新 02-wasm-runtime-and-plugin.md（WasmEdge/Node/内存边界）；新增 tests/hostcall_tests.rs；instance_wasmedge host_call_impl 注释。
+按宪法与 PLAN 补漏：ext/lib 导出 invoke_host_func_with；更新 docs/technical/02-wasm-runtime-and-plugin.md（WasmEdge/Node/内存边界）；新增 tests/hostcall_tests.rs；instance_wasmedge host_call_impl 注释。
 
 [cov = xx.x%]
 EOF

@@ -8,10 +8,10 @@
 
 ## 1. 核心规则
 - **命名规范**：文件名必须与当前 Git 分支一一对应。
-  - 转换规则：`分支名 / 替换为 -`，并存放于 `status/` 目录。
+  - 转换规则：`分支名 / 替换为 -`，并存放于 `docs/status/` 目录。
   - 若非 `feature/*` 分支, 则直接用分支名
-  - 示例：`feature/infra-bus` -> `status/feature-infra-bus.md`, `develop` -> `develop.md`。
-- **始终按「当前 Git 分支」确定文件名**：先取 `git branch --show-current` 得到当前检出分支，再将分支名中的 `/` 替换为 `-`，得到 `status/<该名>.md`。例如当前分支为 `develop` 则只写 `status/develop.md`；为 `feature/plugin-lifecycle` 则写 `status/feature-plugin-lifecycle.md`。**禁止按任务看板中的「分支」字段写**，必须与当前检出分支一致。
+  - 示例：`feature/infra-bus` -> `docs/status/feature-infra-bus.md`, `develop` -> `develop.md`。
+- **始终按「当前 Git 分支」确定文件名**：先取 `git branch --show-current` 得到当前检出分支，再将分支名中的 `/` 替换为 `-`，得到 `docs/status/<该名>.md`。例如当前分支为 `develop` 则只写 `docs/status/develop.md`；为 `feature/plugin-lifecycle` 则写 `docs/status/feature-plugin-lifecycle.md`。**禁止按任务看板中的「分支」字段写**，必须与当前检出分支一致。
 - **排版约束**：
   - **禁止** 使用 `#` (H1) 和 `##` (H2) 标题。
   - 汇总脚本会自动以分支名作为 H2，本文件内仅允许使用 `###` (H3)。
@@ -77,7 +77,7 @@
 
 当你让 Cursor 更新进度时，可以输入：
 
-> **Prompt:** "请根据我刚才的代码修改，更新 `status/` 下对应的进度文件。要求：
+> **Prompt:** "请根据我刚才的代码修改，更新 `docs/status/` 下对应的进度文件。要求：
 > 1. 更新元数据表格中的时间为当前。
 > 2. 在 DONE 区域勾选已完成的任务，并根据代码新增实际产出的任务项。
 > 3. 如果我修改了任何公开的 Trait 或 Struct，请在 INTERFACE 区域列出变更。

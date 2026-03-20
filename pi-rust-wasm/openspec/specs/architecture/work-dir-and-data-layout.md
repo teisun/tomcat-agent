@@ -43,4 +43,4 @@
 ## 5. 引用本设计
 
 - [Architecture](../Architecture.md) 详细设计索引已包含本文档。
-- 涉及会话路径、存储根目录、配置与数据布局的文档（如 host-core-layer、session-storage、01-infrastructure、design、02-wasm-runtime-and-plugin 等）应在相应小节引用本文档。
+- 涉及会话路径、存储根目录、配置与数据布局的文档（如 host-core-layer、session-storage、[docs/technical/01-infrastructure.md](../../../docs/technical/01-infrastructure.md)、design、[docs/technical/02-wasm-runtime-and-plugin.md](../../../docs/technical/02-wasm-runtime-and-plugin.md) 等）应在相应小节引用本文档。

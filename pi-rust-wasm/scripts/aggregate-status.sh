@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 汇总各分支 status 碎片，覆盖生成 INTEGRATION.md。建议在 develop 分支上执行。
+# 汇总各分支 status 碎片，覆盖生成 docs/INTEGRATION.md。建议在 develop 分支上执行。
 set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,9 +13,9 @@ fi
 
 # status 路径前缀：若仓库根与脚本所在项目根不同（如 monorepo），则带相对前缀
 if [ "$GIT_ROOT" != "$REPO_ROOT" ]; then
-  STATUS_PREFIX="${REPO_ROOT#$GIT_ROOT/}/status"
+  STATUS_PREFIX="${REPO_ROOT#$GIT_ROOT/}/docs/status"
 else
-  STATUS_PREFIX="status"
+  STATUS_PREFIX="docs/status"
 fi
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
@@ -32,11 +32,11 @@ OUTPUT="# 项目集成与进度看板
 
 "
 
-# 先汇总 develop 的 status/develop.md（从当前分支读取，建议在 develop 上执行）
+# 先汇总 develop 的 docs/status/develop.md（从当前分支读取，建议在 develop 上执行）
 DEVELOP_PATH="$STATUS_PREFIX/develop.md"
 develop_content=""
-if [ -f "$REPO_ROOT/status/develop.md" ]; then
-  develop_content=$(cat "$REPO_ROOT/status/develop.md" 2>/dev/null || true)
+if [ -f "$REPO_ROOT/docs/status/develop.md" ]; then
+  develop_content=$(cat "$REPO_ROOT/docs/status/develop.md" 2>/dev/null || true)
 fi
 OUTPUT+="
 ## develop
@@ -86,9 +86,10 @@ $content
 "
 done
 
-printf '%s' "$OUTPUT" > INTEGRATION.md
+mkdir -p docs
+printf '%s' "$OUTPUT" > docs/INTEGRATION.md
 
-echo "已根据 status 碎片更新 INTEGRATION.md。"
+echo "已根据 status 碎片更新 docs/INTEGRATION.md。"
 if [ -n "$PARTICIPATED" ]; then
   echo "参与汇总的分支/文件："
   echo "$PARTICIPATED"

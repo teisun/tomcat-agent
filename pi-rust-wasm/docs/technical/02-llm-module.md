@@ -12,6 +12,27 @@
   - `src/core/llm/openai.rs` — OpenAiProvider 实现（非流式/流式、限流、重试）
   - `src/core/llm/token_usage.rs` — SessionTokenUsage 会话级汇总结构
 
+### 1.1 LLM 调用路径（ASCII）
+
+```text
+  ChatRequest (model / messages / model_override)
+            |
+            v
+     +------+------+
+     | OpenAiProvider |
+     | Semaphore 限流   |
+     | 重试 + fallback base |
+     +------+------+
+            |
+     +------v------+       +------------------+
+     | chat()      |       | chat_stream()     |
+     | ChatResponse|       | Stream<StreamEvent> |
+     +-------------+       +-------------------+
+```
+
+- **配置来源**：`LlmConfig` 来自 `AppConfig`（见 [01-infrastructure](./01-infrastructure.md) 中配置与代理说明）。
+- **数据面总览**：与 [模块技术文档索引](./README.md)「图 2」中 `LlmProvider` 与 `SessionManager` 的衔接关系一致。
+
 ## 2. 使用方式
 
 - **构造 OpenAiProvider**：`OpenAiProvider::new(&config)`，其中 `config` 为 `LlmConfig`（含 api_base、api_key_env、default_model、max_concurrent_requests、retry_count、stream_timeout_sec；可选 **proxy** 显式代理、**api_base_fallback** 自动降级用备用 base）。api_key 从 `api_key_env` 指定环境变量读取，未设置则返回错误。若配置 `proxy`，所有 LLM 请求经该代理；未配置时 reqwest 仍尊重环境变量 `HTTPS_PROXY`/`HTTP_PROXY`。代理与降级 URL 可通过配置文件（见项目根 **config.toml.example**）或环境变量 `PI_WASM__LLM__PROXY`、`PI_WASM__LLM__API_BASE_FALLBACK` 配置，详见 [01-infrastructure](./01-infrastructure.md) 中「代理与降级 URL 的配置方式」。

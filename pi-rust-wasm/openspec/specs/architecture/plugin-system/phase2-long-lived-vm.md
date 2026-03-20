@@ -464,4 +464,4 @@ Created -> Running -> Idle -> Running
 
 ---
 
-**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[JS API 与 pi-mono 对齐](js-api-alignment.md)
+**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[JS API 与 pi-mono 对齐](js-api-alignment.md) | 下一节：[pi-mono 生态兼容策略](pi-mono-compat-strategy.md)

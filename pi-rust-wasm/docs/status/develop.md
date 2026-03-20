@@ -1,9 +1,353 @@
-# 项目集成与进度看板
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @cursor | 2026-03-20 14:00 | DONE | develop | — |
 
-以下由 develop 与各 feature 分支的 status 碎片自动汇总，执行 `/aggregate-status` 更新。
+### 本次提交说明（文档与路径规整）
 
+- **进度与看板**：根目录 `status/`、`INTEGRATION.md` 迁至 `docs/status/`、`docs/INTEGRATION.md`；合并并删除 `agents/status/`；更新 Constitution、STATUS_GUIDE、Dispatcher、Nibbles、commit-guard、aggregate-status 脚本与 Cursor commands 等全部引用。
+- **模块技术文档**：五篇模块说明迁入 `docs/technical/`，新增 `technical/README.md`（编号规则 + ASCII 分层/数据面总览）；各篇概述节补充模块级 ASCII；`DOCUMENTATION_GUIDE` 约定落盘与图示要求。
+- **其他**：`docs/README.md` 与根 `README` 文档入口；分享稿与 openspec 局部更新；测试/脚本内文档路径指向 `docs/technical/`。
 
-## develop
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-17 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-15 长生命周期 VM（feature/long-lived-vm 合并）
+
+**执行范围**：将 `feature/long-lived-vm` 合并到 develop，按 Nibbles 流程 4.1→4.2→4.3→5→6 执行验收。
+
+#### 本次执行步骤与结果
+
+| 步骤 | 内容 | 结果 |
+|------|------|------|
+| 4.1 | 检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY | 已补充 Story 8b E2E 场景（E2E-WASM-031～035） |
+| 4.2 | 编写/补充长生命周期 VM 集成测试 | 新增 `tests/long_lived_vm_tests.rs`（13 用例：RuntimeManager、VmActorHandle、PluginManager session API、HostApiDispatcher event channel） |
+| 4.3 | E2E 测试与场景库对应 | 在 `tests/wasmedge_e2e_tests.rs` 补充 Story 8b 用例（test_wasmedge_e2e_vm_actor_state_persists_across_events、handler_stays_registered、multi_session_isolation、session_end_no_hanging_threads）；新增 fixture vm_actor_counter_test.js、vm_actor_multi_handler_test.js |
+| 5 | 全量测试与验收清单 | `cargo build --release`、`cargo clippy`、`cargo test --test long_lived_vm_tests`、`cargo test --test plugin_tests`、`cargo test --test wasmedge_e2e_tests`、`cargo test --test cli_tests` 通过 |
+
+**后续根因修复（同批提交）**：E2E-WASM-035 挂起根因（`do_wait_for_event` 持 DashMap Ref 与 `cleanup_instance` 死锁）已修复（dispatcher 克隆 Arc 后释放 Ref）；E2E-WASM-031 已补充 end_session 后 handle 状态非 Running 断言；HostRequest.params 增加 `#[serde(default)]` 解决 waitForEvent 缺 params 导致 host function failed。
+
+#### 验收项摘要
+
+- 构建与静态检查：PASS
+- 集成测试（long_lived_vm_tests 13 用例）：PASS
+- Wasm E2E（wasmedge_e2e_tests 14 用例，含 Story 8b 长生命周期 VM）：PASS
+- CLI 测试（cli_tests 72 用例）：PASS
+
+**执行时间**：2026-03-17  
+**分支**：develop（已合并 feature/long-lived-vm）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @doc | 2026-03-14 | DONE | develop | — |
+
+### 看板与流程：新增 PENDING_INTEGRATION 状态
+
+- [✓] agents/TASK_BOARD.md：新增「任务状态说明」小节，含 TODO / DOING / PENDING_INTEGRATION / BLOCKED / DONE 及典型流转。
+- [✓] agents/Dispatcher.md：完成任务时状态改为 `PENDING_INTEGRATION`，并说明 DONE 由集成流程更新；领取任务处注明仅 TODO 可认领。
+- [✓] agents/Nibbles.md：角色增加「看板状态更新」职责；流程增加「7. 看板任务状态更新」；参考文档补充 PENDING_INTEGRATION → DONE 说明。
+
+### INTERFACE
+
+无（仅流程与看板文档变更）。
+
+### BLOCKED
+
+无。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-14 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-04 审计日志 Nibbles 验收
+
+**执行范围**：develop 上直接开发的 TASK-04（审计日志系统完整落地），无合并分支；按 Nibbles 流程 4.1→4.2→4.3→5→6 执行验收。
+
+#### 本次执行步骤与结果
+
+| 步骤 | 内容 | 结果 |
+|------|------|------|
+| 4.1 | 检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY | 已与实现一致，无变更 |
+| 4.2 | 编写/补充审计相关集成测试 | 新增 `tests/audit_tests.rs`（AuditStore + FileAuditRecorder 写入/查询/导出端到端）；lib 导出 `PluginLifecycleAuditEntry` |
+| 4.3 | E2E 测试与场景库对应 | E2E-CLI-059/060/061 已有对应 test_user_*，cli_tests 中 audit 相关 7 用例全部通过 |
+| 5 | 全量测试与验收清单 | `cargo build --release`、`cargo clippy -- -D warnings`、`cargo test --test '*'` 通过（含 audit_tests） |
+
+#### 验收项摘要
+
+- 构建与静态检查：PASS
+- CLI 子命令（含 `pi audit list/show/export`）：PASS
+- 集成测试（含新增 audit_tests）：PASS
+- E2E（cli_tests 含 audit 相关 test_user_*）：PASS
+
+**执行时间**：2026-03-14  
+**环境**：develop 分支，TASK-04 代码见最新提交
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Tom | 2026-03-13 18:15 | DONE | develop | — |
+
+### TASK-04 审计日志系统完整落地（T1-P1-001）
+
+- [✓] 1.1 独立审计日志模块（AuditStore、resolve_audit_dir、FileAuditRecorder）
+- [✓] 1.2 关键路径写入审计（plugin_lifecycle、PluginManager 注入）
+- [✓] 1.3 审计日志查询/导出/按策略清理
+- [✓] 1.4 CLI audit 子命令对接审计模块
+- [✓] 1.5 文档（加密 TODO 说明）
+- [✓] 3.6.1 Architecture 审计子文档（audit-log.md）+ 索引
+- [✓] 3.6.2 Nibbles 合并后文档与场景库同步步骤
+
+### INTERFACE（本批变更）
+
+- `infra`: 新增 `resolve_audit_dir`、`AuditStore`、`AuditFilter`、`AuditEntry`、`FileAuditRecorder`、`PluginLifecycleAuditEntry`；`AuditRecorder` 新增 `record_plugin_lifecycle`。
+- `ext/plugin`: `PluginManager` 新增 `set_audit_recorder`，load/enable/disable/unload 写审计。
+- `api/cli`: `run_audit` 改为基于 AuditStore，不再解析 tracing 日志；`security.enable_audit_log` 控制是否启用。
+- `openspec/specs/architecture/audit-log.md` 新增；`Architecture.md` 增加引用与索引。
+- `agents/Nibbles.md` 增加「合并后文档与场景库同步」步骤。
+
+### BLOCKED
+
+无。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-12 19:00 | E2E FULL COVERAGE PASS | develop | — |
+
+### E2E 全量覆盖报告：P0 用户故事全面覆盖
+
+**执行范围**：对 develop 分支现有代码执行全量 E2E 补充覆盖
+
+#### 本次新增/补充内容
+
+| 文件 | 内容 | 数量 |
+|------|------|------|
+| `openspec/specs/User_Stories.md`（更新） | Story 2 补充 `pi audit` CLI 命令验收项；Story 8 补充 `pi chat --resume` 与多轮上下文持久化；Story 8a 补充 registerTool/once Wasm E2E 测试说明 | 3 条验收项 |
+| `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md`（更新） | 新增 E2E-WASM-011（工具注册）、E2E-WASM-022（once handler 触发）、E2E-WASM-023（多 handler 触发）、E2E-CLI-082（chat --resume）、E2E-CLI-083（多轮上下文） | 5 条场景 |
+| `tests/cli_tests.rs`（新增 32 个 test_user_* 函数） | Story 1: 001-006（6）、Story 2: 011-012（2）、Story 3: 021-026（6）、Story 7: 041-042（2）、Story 8: 051-061+071-074+082（16） | 32 个 test_user_* |
+| `tests/wasmedge_e2e_tests.rs`（新增 3 个） | E2E-WASM-011/022/023 + 共用 `require_quickjs_wasm()` helper | 3 个 |
+| `tests/fixtures/wasmedge_quickjs/tool_register_test.js`（新建） | pi.registerTool + pi.log，验证 host_call 链路 | 1 个 |
+| `tests/fixtures/wasmedge_quickjs/event_once_test.js`（新建） | pi.once handler，供 dispatch_event 触发 | 1 个 |
+| `tests/fixtures/wasmedge_quickjs/event_multi_handler_test.js`（新建） | pi.on 两个 handler，供 dispatch_event 触发 | 1 个 |
+
+#### 已知限制（MVP 设计边界）
+
+| 项目 | 说明 |
+|------|------|
+| `pi.on`/`pi.once` 内部 JS emit 不触发 handler | MVP 无状态插件执行模型下，`pi.emit()` 从 JS 内部调用不触发已注册的 handler。「恰好 1 次」的 once 保证需 Story 8b（有状态 VM，P1）实现后补充。 |
+| `pi plugin list` 跨进程不持久 | CLI 插件状态为进程内存，关闭进程后插件列表清空。插件持久化需后续 P1 实现。 |
+| `pi audit export` 不创建文件 | MVP 阶段 audit export 命令存在但文件写入未实现，仅验收 exit 0。 |
+
+#### 全量验收结果
+
+| 验收项 | 结果 |
+|--------|------|
+| `cargo build --release` | ✓ PASS |
+| `cargo clippy -- -D warnings` | ✓ PASS |
+| 单元测试（250 用例，1 ignored） | ✓ 250 passed / 0 failed |
+| `agent_loop_tests`（10 用例） | ✓ PASS |
+| `cli_tests`（70 用例，含 32 个新增 test_user_*） | ✓ 70 passed / 0 failed |
+| `event_tests`（3 用例） | ✓ PASS |
+| `session_tests`（4 用例） | ✓ PASS |
+| `robustness_tests`（5 用例） | ✓ PASS |
+| `primitives_tools_tests`（8 用例） | ✓ PASS |
+| `plugin_tests`（5 用例） | ✓ PASS |
+| `hostcall_tests`（2 用例） | ✓ PASS |
+| `js_api_alignment_tests`（2 用例） | ✓ PASS |
+| `llm_tests`（真实 API，2 用例） | ✓ PASS（OPENAI_API_KEY 已配置） |
+| `wasmedge_e2e_tests`（10 用例，含 3 个新增） | ✓ 10 passed / 0 failed |
+| 全量 `cargo test --test '*'`（11 套测试文件） | ✓ 全部通过（共 123 个集成测试用例） |
+
+**执行时间**：2026-03-12
+**环境**：macOS（darwin 22.6.0），Rust stable，WasmEdge 已安装
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-12 17:00 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-14 Agent Loop 核心结构化实现
+
+**合并分支**：`feature/agent-loop`（已合并到 develop，本次直接对 develop 现有代码执行集成测试与验收）
+
+#### 本次编写/补充的集成测试
+
+| 文件 | 内容 | 数量 |
+|------|------|------|
+| `tests/agent_loop_tests.rs`（新建） | AgentLoop 黑盒集成测试：纯文本回复、Abort、FollowUp、工具错误不终止、429 重试、401 立即终止、事件顺序、消息格式往返、空消息边界 | 10 |
+| `tests/cli_tests.rs`（新增） | E2E 用户视角：`test_user_chat_non_interactive_with_prompt_flag`（pi chat + stdin 单轮问答） | 1 |
+| `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md`（追加） | Story 9 — E2E-CLI-081 AgentLoop 场景条目 | 1 |
+
+#### 合并前检查（pre-merge，已于合并前通过）
+
+- [✓] `cargo build` 无错误
+- [✓] `cargo clippy` 无警告（本次修复 develop 上 3 条既有 clippy 警告：`StorageConfig`/`PluginConfig` derive Default、`logging.rs` 文档缩进）
+- [✓] 单元测试：250 passed / 0 failed / 1 ignored
+
+#### 合并后全量验收
+
+| 验收项 | 结果 |
+|--------|------|
+| `cargo build --release` | ✓ PASS |
+| `cargo clippy -- -D warnings` | ✓ PASS（修复 3 条既有警告后） |
+| 单元测试（250 用例） | ✓ 250 passed / 0 failed |
+| `agent_loop_tests`（10 用例） | ✓ 10 passed / 0 failed |
+| `event_tests`（3 用例） | ✓ PASS |
+| `session_tests`（4 用例） | ✓ PASS |
+| `robustness_tests`（5 用例） | ✓ PASS |
+| `primitives_tools_tests`（8 用例） | ✓ PASS |
+| `plugin_tests`（7 用例） | ✓ PASS |
+| `hostcall_tests`（2 用例） | ✓ PASS |
+| `js_api_alignment_tests`（2 用例） | ✓ PASS |
+| `cli_tests`（38 用例，含 E2E，含 test_user_chat_non_interactive_with_prompt_flag） | ✓ 38 passed / 0 failed |
+| `llm_tests`（真实 API，2 用例） | ✓ PASS（OPENAI_API_KEY 已配置） |
+| `wasmedge_e2e_tests` | ✓ PASS（WasmEdge 已安装） |
+| 全量 `cargo test --test '*'`（11 套测试文件，含 agent_loop_tests） | ✓ 全部通过 |
+
+**执行时间**：2026-03-12  
+**环境**：macOS（darwin 22.6.0），Rust stable，WasmEdge 已安装
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Spike | 2026-03-12 16:30 | DONE | develop | - |
+
+### 多 Agent 架构设计文档（DONE）
+
+- [✓] **[P1]** 竞品调研：openclaw / claude-code / aider / SWE-agent / AutoGen / LangGraph / CrewAI / bolt.diy
+- [✓] **[P1]** 新建 openspec/specs/architecture/multi-agent.md（第 14 节，含 14.0 竞品对比、14.1–14.9 完整方案）
+- [✓] **[P1]** 更新 openspec/specs/Architecture.md：追加第 14 节摘要与索引条目
+
+### DESIGN（新增设计文档）
+
+- `openspec/specs/architecture/multi-agent.md` — 多 Agent 架构（维度A多会话并发 / 维度B主-子Agent编排）
+- 选型：工具调用派发（dispatch_agent 工具）；参考 openclaw SubagentRegistry + spawnDepth、claude-code 强上下文隔离、AutoGen CascadeAbort、LangGraph recursion_limit
+- 分三阶段落地：Phase 1（已有）→ Phase 2（AgentRegistry）→ Phase 3（dispatch_agent 工具）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Spike | 2026-03-12 15:00 | DONE | develop | - |
+
+### TASK-14 Agent Loop 核心结构化实现（DONE）
+
+- [✓] **[P1]** 5.1 AgentMessage 枚举与 convert_to_llm_format()
+- [✓] **[P1]** 5.2 AgentLoop 三层循环骨架（src/core/agent_loop.rs，1555 行）
+- [✓] **[P1]** 5.3 Steering 机制
+- [✓] **[P1]** 5.4 FollowUp 机制
+- [✓] **[P1]** 5.5 Abort 信号（AtomicBool）
+- [✓] **[P1]** 5.6 AgentEvent 全生命周期发布
+- [✓] **[P1]** 5.7 错误分类与 Retryable 指数退避重试
+- [✓] **[P1]** 5.8 重构 chat.rs → AgentLoop::run()
+- [✓] **[P1]** 5.9 单元测试（250 passed / 0 failed，0 新增 clippy 警告）
+
+### INTERFACE（新增对外接口）
+
+- `AgentLoop::new(llm, primitive, event_bus, config, abort)` — 标准构造函数
+- `AgentLoop::run(messages) -> Result<AgentRunResult, AppError>` — 主入口
+- `AgentLoop::steer(msg: String)` — 外部线程注入 Steering 消息
+- `AgentLoop::follow_up(msg: String)` — 外部线程追加 FollowUp 消息
+- `AgentLoop::abort()` — Ctrl+C 中断信号
+- `AgentMessage` 枚举（User/Assistant/ToolResult/System/Steering/CompactionSummary）
+- `convert_to_llm_format(messages)` — AgentMessage → ChatMessage 转换
+- `agent_messages_from_chat(messages)` — ChatMessage → AgentMessage 反向转换（供 chat.rs 加载历史用）
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-11 14:45 | INTEGRATION | develop | — |
+
+### 新增 OpenAI 接口验证工具（verify-openai-apis）
+
+**新增文件**：
+- `.cursor/commands/verify-openai-apis.md`：Cursor 命令文档，支持从 `.env` 读取 `OPENAI_API_KEY`/`HTTPS_PROXY`，列出并验证 `GET /v1/models`、`POST /v1/responses`、`POST /v1/chat/completions` 三个接口。
+- `scripts/verify-openai-apis.sh`：配套可执行脚本，自动加载 `.env`，支持交互与非交互选择，输出 PASS/FAIL 摘要与错误码排查建议，默认模型 `gpt-5.2`。
+
+**验证结果**：脚本已在当前环境通过验证（PASS=2 FAIL=0 及全部3/3），确认 key 与代理配置可用。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-11 | INTEGRATION | develop | — |
+
+### 集成测试报告（TASK-12 feature/async-hostcall 合并）
+
+**合并分支**：`feature/async-hostcall` → `develop`（fast-forward）。
+
+**合并前检查**：在 `feature/async-hostcall` 上执行 `cargo build`、`cargo clippy`（3 个既有警告：config/logging）、`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture` 全量单测通过；合并无冲突。
+
+**集成测试编写**：针对本次合并引入的异步 Hostcall（submit/poll、`__async.poll` 路由、`async_results`）在 `tests/hostcall_tests.rs` 新增 `test_hostcall_async_submit_then_poll_returns_result`：带 callId 的 agent/log 立即返回 pending，sleep 后 `__async.poll(callId)` 得到 ready: true 与 result；用例在 Runtime 内完成 submit、在 runtime 外执行 poll 以避免 dispatch 内 block_on 嵌套。
+
+**全量验收**：`cargo build`、`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 通过（含 hostcall_tests 5 条、wasmedge_e2e_tests 7 条等）。
+
+**结果摘要**：TASK-12 (T1-P0-008-async) 异步 Hostcall submit/poll 机制已合并至 develop；已补充 __async 路由集成测试 1 条，门禁与全量验收通过。
+
+**环境**：macOS，Rust，WasmEdge。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-11 | DONE | develop | - |
+
+### 新增Event Loop事件循环模型与Angent Loop设计(架构子文档与 MVP 设计/用户故事更新)
+
+- [✓] **Architecture 渐进式披露**：拆分为 architecture/ 子文档，新增 agent-loop.md、async-hostcall-event-loop.md、js-api-alignment.md、phase2-long-lived-vm.md。
+- [✓] **001-mvp**：更新 design.md、task.md、tasks_details.md；同步 Product_Brief、User_Stories；host-api-layer.md 更新。
+- [✓] **agents**：TASK_BOARD.md 同步。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-10 | INTEGRATION | develop | — |
+
+### E2E 测试规范体系建立（CLI 重命名为 pi）
+
+- **变更内容**：新建 E2E_TEST_SPEC.md（7 章）、E2E_SCENARIO_LIBRARY.md（39 条 P0 场景）；CLI 二进制名从 `pi_wasm` 改为 `pi`；run-integration-tests.sh 三阶段分层；Nibbles.md 验收清单补 E2E 验收步骤；INTEGRATION_TEST_SPEC.md 添加交叉引用
+- **验证**：`RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests test_help -- --nocapture` 通过（test_help_output_contains_pi_and_exits_ok: ok）
+- **Commit**：91d4744
+- **环境**：macOS darwin 22.6.0 / Rust stable
+
+### 集成测试报告（TASK-03 feature/cli-chat 合并）
+
+**合并分支**：`feature/cli-chat` → `develop`（`git merge --no-ff`）。
+
+**合并前检查**：在 feature/cli-chat 上修复 render.rs 测试中冗余布尔表达式（clippy overly_complex_bool_expr），提交后合并；`cargo build`、`cargo clippy --all-targets`、`cargo test`（单元测试 224 passed）通过。
+
+**集成测试（按 Nibbles 必做清单补充）**：本次合并引入 chat 模块、流式渲染、多轮上下文、工具/4 原语集成。对照 tests/ 检查后**已补充**：`tests/cli_tests.rs` 新增 `test_chat_with_valid_config_and_api_key_starts_and_produces_output`（有合法配置与 OPENAI_API_KEY 时 chat 启动并输出 banner/流式内容，无 key 时用例失败符合 INTEGRATION_TEST_SPEC）、`test_chat_with_session_dir_does_not_crash`（有 init + session new 时 chat 与会话目录协作不崩溃，5s 超时内有输出）。保留原有 `test_chat_without_config_exits_with_error`。
+
+**全量验收**：`cargo clippy --all-targets` 通过；`cargo test` 单元测试 224 通过；集成测试 cli_tests（31，含上述 2 条新 chat 用例）、event_tests、hostcall_tests、llm_tests、plugin_tests、primitives_tools_tests、robustness_tests、session_tests、wasmedge_e2e_tests 均通过。`test_chat_with_valid_config_and_api_key_starts_and_produces_output` 需设置 OPENAI_API_KEY，有 key 时全量 `cargo test --test '*'` 通过。
+
+**结果摘要**：TASK-03 (T1-P0-011) CLI 对话模式已合并；已按 Nibbles 标准流程补充 chat 集成测试 2 条，门禁与全量验收通过（含 OPENAI_API_KEY 时）。
+
+**环境**：macOS，Rust，WasmEdge；执行时 develop 已合并 feature/cli-chat。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| - | 2026-03-10 | DONE | develop | - |
+
+### 本次执行说明（计划规范抽子文档与 status 清理）
+
+- [✓] **agents/plan/**：新建 PLAN_SPEC.md（内容要求、质量标准、自检清单），案例单独为 PLAN_EXAMPLE_CLI.md；Dispatcher.md 改为引用 plan/PLAN_SPEC.md。
+- [✓] **删除**：agents/PLAN.md、agents/integration_test_agent.md；status 下除 develop.md 外 7 个 feature 分支 status 文件已删除。
+
+---
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
@@ -89,7 +433,7 @@
 - [✓] PluginManager 增加 `set_wasm_engine`、`set_host_dispatcher`、`set_confirm_permissions`；类型 `ConfirmPermissionsFn`。
 - [✓] `load_plugin(path)`：解析路径 → 读清单与 main 脚本 → 权限确认回调（可选）→ 创建 Wasm 实例 → 注册 host binding → 执行初始化脚本 → 注册并 enable。main 路径校验不逃逸插件根。
 - [✓] 单测：load_plugin 未设置 wasm_engine、路径不存在、目录无清单、用户拒绝权限；全量 lib + 集成测试通过。
-- [✓] 技术文档：docs/02-wasm-runtime-and-plugin.md 已增「4. 插件完整加载流程（9.2）」与 2 节中 9.2 要点。
+- [✓] 技术文档：docs/technical/02-wasm-runtime-and-plugin.md 已增「4. 插件完整加载流程（9.2）」与 2 节中 9.2 要点。
 
 **宪法流程防遗漏整改**
 - [✓] STATUS_GUIDE：明确「始终按当前 Git 分支」确定 status 文件名，禁止按任务看板分支写。
@@ -320,7 +664,7 @@
 | - | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
-- **提交流程改为从 status 读取覆盖率**：commit-with-status / commit-guard 不再在提交时执行 tests 与 tarpaulin；改为从当前分支对应 `status/*.md` 首个元数据表读取 Cov%，写入 commit message；读不到时提示更新 status 但不阻塞提交。Constitution、STATUS_GUIDE、COMMIT_MESSAGE_SPEC、UNIT_TEST_SPEC 已同步；各 status 文件元数据表增加 Cov% 列。
+- **提交流程改为从 status 读取覆盖率**：commit-with-status / commit-guard 不再在提交时执行 tests 与 tarpaulin；改为从当前分支对应 `docs/status/*.md` 首个元数据表读取 Cov%，写入 commit message；读不到时提示更新 status 但不阻塞提交。Constitution、STATUS_GUIDE、COMMIT_MESSAGE_SPEC、UNIT_TEST_SPEC 已同步；各 status 文件元数据表增加 Cov% 列。
 
 ### ✅ 执行的检查与验收项
 - [✓] 规范与命令、规则文档已更新；status 文件已统一增加 Cov% 列
@@ -354,7 +698,7 @@
 | @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
-- **run-integration-tests.sh 与 install-wasmedge.sh -y**：新增 `scripts/run-integration-tests.sh`（集成测试前检查 WasmEdge，未安装则执行 `install-wasmedge.sh -y` 再跑全量验收）。`install-wasmedge.sh` 支持 `-y` 非交互模式并自动写入 profile，新开终端无需再执行 source。integration_test_agent、INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 已引用 run-integration-tests.sh。
+- **run-integration-tests.sh 与 install-wasmedge.sh -y**：新增 `scripts/run-integration-tests.sh`（集成测试前检查 WasmEdge，未安装则执行 `install-wasmedge.sh -y` 再跑全量验收）。`install-wasmedge.sh` 支持 `-y` 非交互模式并自动写入 profile，新开终端无需再执行 source。integration_test_agent、INTEGRATION_TEST_SPEC 5.4、docs/technical/02-wasm-runtime-and-plugin 已引用 run-integration-tests.sh。
 - **执行 run-integration-tests.sh**：`cargo build --release`、`cargo test --lib`、集成测试（event/hostcall/llm/plugin/primitives_tools/robustness/session）均通过；`cargo build`（默认含 WasmEdge）曾因 wasmedge-sys 与 WasmEdge C 库版本不兼容失败，见 INTEGRATION.md 条目；现已改为 wasmedge-sdk 0.13.5-newapi + 安装脚本固定 C 0.13.5。
 
 ### ✅ 执行的检查与验收项
@@ -373,7 +717,7 @@
 | @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
-- **install-wasmedge.sh 与文档引用**：新增 `scripts/install-wasmedge.sh`（调用 WasmEdge 官方安装脚本；用户级安装后可选择将 `source $HOME/.wasmedge/env` 写入 shell profile 使新开终端生效）。INTEGRATION_TEST_SPEC 5.4、docs/02-wasm-runtime-and-plugin 增加脚本引用；wasmedge_e2e_tests.rs panic 提示增加「或运行 ./scripts/install-wasmedge.sh」。
+- **install-wasmedge.sh 与文档引用**：新增 `scripts/install-wasmedge.sh`（调用 WasmEdge 官方安装脚本；用户级安装后可选择将 `source $HOME/.wasmedge/env` 写入 shell profile 使新开终端生效）。INTEGRATION_TEST_SPEC 5.4、docs/technical/02-wasm-runtime-and-plugin 增加脚本引用；wasmedge_e2e_tests.rs panic 提示增加「或运行 ./scripts/install-wasmedge.sh」。
 - **环境**：macOS / develop 分支；全量验收清单已执行。
 
 ### ✅ 执行的检查与验收项
@@ -402,7 +746,7 @@
 | @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
-- **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、02-wasm-runtime-and-plugin、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
+- **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、docs/technical/02-wasm-runtime-and-plugin.md、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
 - **环境**：macOS / develop 分支；按新规范 Wasm 真实运行时为必选，待安装 WasmEdge 后执行 `cargo test --test wasmedge_e2e_tests` 补跑，否则验收不通过。
 
 ### ✅ 执行的检查与验收项
@@ -416,7 +760,7 @@
 - [ ] **Wasm 真实运行时（必选）**：按新规范环境缺失不得跳过，须先安装 WasmEdge 后执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`，失败即视为验收不通过；待按规范安装依赖后补跑。
 
 ### 🔌 INTERFACE (接口变更)
-- **规范**：INTEGRATION_TEST_SPEC 5.4 修订为环境缺失不允许跳过、须协助安装、失败即失败；integration_test_agent 验收项「Wasm 真实运行时」改为必选；PRACTICE 场景 A 与 docs/02-wasm-runtime-and-plugin 补充集成测试要求。
+- **规范**：INTEGRATION_TEST_SPEC 5.4 修订为环境缺失不允许跳过、须协助安装、失败即失败；integration_test_agent 验收项「Wasm 真实运行时」改为必选；PRACTICE 场景 A 与 docs/technical/02-wasm-runtime-and-plugin 补充集成测试要求。
 - **测试**：`tests/wasmedge_e2e_tests.rs` 去掉跳过逻辑，环境缺失时 panic，须在安装 WasmEdge 后运行（默认构建即包含）。
 
 ### ⚠️ BLOCKED (阻塞/风险)
@@ -628,55 +972,3 @@
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
 | 无 | - | - |
-
----
-
-## feature-Jerry
-
-*暂无进度*
-
----
-
-## feature-Spike
-
-*暂无进度*
-
----
-
-## feature-Tom
-
-*暂无进度*
-
----
-
-## feature-cli-commands
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-03-10 | DONE | feature/cli-commands | 65.6 |
-
-### TASK-02 | T1-P0-010-completion | CLI 子命令补完
-
-**目标**：将 CLI 中仍为占位的子命令补充为真实实现。
-
-**已完成子项**：
-- [x] 10.3 `pi-wasm doctor`：补全 WasmEdge/QuickJS 可用性检测与修复建议
-- [x] 10.4 `pi-wasm config`：补全 get(key)、set（加载→修改→校验→写回）、edit（启动编辑器）
-- [x] 10.6 `pi-wasm plugin`：对接 PluginManager，实现 list/load/unload/enable/disable/info
-- [x] 10.7 `pi-wasm audit`：实现 list/show/export，读取 tracing 日志文件过滤审计记录
-- [x] 10.8 完善帮助文档与参数校验
-
-**门禁**：
-- `cargo fmt -- --check`：通过
-- `cargo clippy --lib --tests`：通过（0 warnings）
-- `cargo test --lib`：211 passed, 0 failed
-- 覆盖率：65.6%（cli.rs 233/414）
-
-### 接口变更
-
-- 新增 `config_file_path`、`resolve_toml_key`、`set_toml_key` 私有函数（cli.rs 内部）
-- 新增 `PluginContext`、`build_plugin_context`、`cli_confirm_permissions`、`format_plugin_info` 私有函数
-- 新增 `AuditDisplayEntry`、`parse_audit_line`、`read_audit_entries` 私有函数/结构
-- 无新增 pub API
-
----

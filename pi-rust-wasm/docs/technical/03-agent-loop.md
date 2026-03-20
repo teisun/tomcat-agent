@@ -9,9 +9,30 @@
   - `src/core/mod.rs` — core 层 re-export
   - `src/lib.rs` — 对外导出 AgentLoop、AgentLoopConfig、AgentRunResult、AgentMessage、convert_to_llm_format、agent_messages_from_chat
 
+### 1.1 三层嵌套循环 + 干预点（ASCII）
+
+```text
+Layer 1  Conversation Loop
+    |     FollowUp 队列非空 -> 注入 User 再继续
+    v
+Layer 2  Attempt Loop (max_attempts, 指数退避)
+    |
+    v
+Layer 3  Reasoning Loop (max_tool_rounds)
+    |     LLM 流式 -> tool_calls?
+    |     +-- 执行工具 -> ToolResult 回注
+    |     +-- Steering 队列 -> 改向，跳过后续工具
+    |     +-- Abort 信号 -> 中断
+    v
+  final_text (由调用方决定是否写 Session)
+```
+
+- **消息边界**：内部 `AgentMessage`，调用 `LlmProvider` 前经 `convert_to_llm_format` 转为 `ChatMessage`（与 [agent-loop 规格](../../openspec/specs/architecture/agent-loop.md) 13.4 一致）。
+- **总览**：与 [模块技术文档索引](./README.md)「图 1」中 `core/agent_loop` 位置对照。
+
 ## 2. 设计方案 (Design Details)
 
-- **设计模式**：三层嵌套循环（Conversation → Attempt → Reasoning），职责分离；内部使用富类型 `AgentMessage`，仅在调 LLM 边界通过 `convert_to_llm_format` 转为 `ChatMessage`，与 [agent-loop.md](../openspec/specs/architecture/agent-loop.md) 13.4 消息类型边界一致。
+- **设计模式**：三层嵌套循环（Conversation → Attempt → Reasoning），职责分离；内部使用富类型 `AgentMessage`，仅在调 LLM 边界通过 `convert_to_llm_format` 转为 `ChatMessage`，与 [agent-loop.md](../../openspec/specs/architecture/agent-loop.md) 13.4 消息类型边界一致。
 - **关键权衡**：System Prompt 与工具定义由**调用方**（如 chat）拼装并注入：AgentLoop 只接受已拼好的 `initial_messages`（含首条 System 若需要）和构造时传入的 `config.tool_definitions`，不在 Loop 内再拼 system，便于多调用方复用同一 Loop 逻辑。Transcript 持久化由调用方在 `run()` 返回后根据 `AgentRunResult.final_text` 自行 append 并写入 Session，AgentLoop 不依赖 SessionManager。
 - **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<AgentMessage>>>`，`abort_signal` 为 `Arc<AtomicBool>`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与信号，无数据竞争。`run()` 需 `&mut self` 因持有 `on_stream_delta: Option<Box<dyn FnMut(&str) + Send>>`。
 
@@ -118,4 +139,4 @@ match agent_loop.run(messages).await {
 
 - **单测**：`cargo test --lib` 全通过（当前 250 passed）；`core::agent_loop::tests` 覆盖：正常单轮无工具、多轮工具循环、Steering 注入后跳过剩余工具、FollowUp 同上下文继续、Abort 终止并 agent_end(interrupted)、429 触发重试后成功、401/503 Fatal 立即终止、convert_to_llm_format 各变体与 CompactionSummary→user、agent_messages_from_chat 往返。
 - **门禁**：`cargo clippy --lib` 无新增警告（既有 3 条在 config/logging，非本模块）。
-- **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、auto_retry_start/end、agent_end(success|error|interrupted) 发布时机与 [agent-loop.md](../openspec/specs/architecture/agent-loop.md) 13.6 一致。
+- **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、auto_retry_start/end、agent_end(success|error|interrupted) 发布时机与 [agent-loop.md](../../openspec/specs/architecture/agent-loop.md) 13.6 一致。

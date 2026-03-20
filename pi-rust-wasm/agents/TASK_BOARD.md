@@ -325,7 +325,7 @@
 
 **依赖**：TASK-12 (DONE)、TASK-13 (DONE)
 
-**被依赖**：TASK-05（pi-mono 插件兼容性，跨事件状态保持为前置）
+**被依赖**：TASK-05a（pi-mono 插件兼容性 Phase 0，跨事件状态保持为前置）
 
 **验收标准**：
 - 插件全局变量可跨事件保持
@@ -373,36 +373,149 @@
 
 ---
 
-### TASK-05 | T1-P1-002 | pi-mono 插件兼容性测试与适配
+### TASK-05a | T1-P1-002a | pi-mono 插件兼容性 - Phase 0 技术验证与差距分析
 
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
 | **状态** | `TODO` |
 | **负责人** | — |
-| **分支** | `feature/plugin-compat` |
+| **分支** | `feature/plugin-compat-phase0` |
+| **阻塞点** | 需恢复 pi-mono 完整工作树（当前为浅克隆） |
+
+**目标**：完成技术可行性验证和完整差距分析，为后续分层实现提供依据。
+
+**技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
+**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+
+**子项**：
+- [ ] a.1 恢复 pi-mono 完整工作树（确保能 npm install + tsc 编译）
+- [ ] a.2 挂载 wasmedge-quickjs modules/ 目录（启用 18 个已有 Node.js 模块）
+- [ ] a.3 SWC crate 集成验证（TS→JS 转译 POC）
+- [ ] a.4 tps.ts 打包+加载 POC（在 wasmedge_quickjs 中执行编译后的 JS）
+- [ ] a.5 ExtensionAPI 差距分析文档输出
+- [ ] a.6 采样 10-15 个 pi-mono 社区扩展，输出兼容性评估矩阵
+
+**依赖**：TASK-15 (DONE)
+
+**被依赖**：TASK-05b
+
+**协作接口**：
+- 消费：`WasmEngine`、`instance_wasmedge.rs`、wasmedge-quickjs `modules/`
+- 提供：`ts_compiler.rs` 模块、差距分析文档、扩展评估矩阵
+
+**验收标准**：
+- tps.ts 的 SWC 编译产物可在 wasmedge_quickjs 中加载（即使 API 调用失败）
+- 输出完整差距分析文档（docs/reports/extension_api_gap_analysis.md）
+- 输出 10+ 扩展兼容性评估矩阵
+
+---
+
+### TASK-05b | T1-P1-002b | pi-mono 插件兼容性 - Tier 1 纯事件监听型扩展
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-compat-tier1` |
 | **阻塞点** | — |
 
-**目标**：验证并确保主流 pi-mono 社区插件可在本运行时零修改运行。
+**目标**：使纯事件监听 + notify 的 pi-mono 扩展能零修改运行（如 tps.ts）。
 
-**子项**（参考 tasks_details.md T1-P1-002）：
-- [ ] 2.1 挑选主流 pi-mono 社区插件（至少 3~5 个），列出依赖的 API 与 Node 模块
-- [ ] 2.2 在本运行时上执行兼容性测试，记录问题
-- [ ] 2.3 修复宿主 API、Node 兼容层、事件 payload 等兼容问题
-- [ ] 2.4 将兼容性用例固化为自动化测试
+**子项**：
+- [ ] b.1 改造扩展入口：支持 `export default function(pi)` 模式
+- [ ] b.2 对齐 `pi.on(event, handler)` handler 签名（传 ctx 参数）
+- [ ] b.3 实现最小 ctx 对象（hasUI、cwd、ui.notify）
+- [ ] b.4 对齐事件类型名（agent_start/agent_end 等 pi-mono 映射）
+- [ ] b.5 tps.ts 端到端测试（零修改加载 + 事件触发 + notify 回调）
+- [ ] b.6 固化为自动化 E2E 测试
 
-**依赖**：TASK-01 (T1-P0-009-completion)
+**依赖**：TASK-05a
+
+**被依赖**：TASK-05c
+
+**协作接口**：
+- 消费：`ts_compiler.rs`、`pi_bridge.js`、`HostApiDispatcher`
+- 提供：ctx 对象构建、事件名映射、扩展入口加载器
+
+**验收标准**：
+- tps.ts 零修改（仅 SWC 编译）在 pi-rust-wasm 上运行
+- agent_start/agent_end 事件正确触发，ctx.ui.notify() 正确回调宿主
+- 自动化 E2E 测试覆盖
+
+---
+
+### TASK-05c | T1-P1-002c | pi-mono 插件兼容性 - Tier 2 命令+exec+基础 UI
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-compat-tier2` |
+| **阻塞点** | — |
+
+**目标**：使含命令注册、exec 调用、基础 UI 交互的扩展能运行。
+
+**子项**：
+- [ ] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
+- [ ] c.2 对齐 `pi.registerCommand(name, {description, handler})`
+- [ ] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
+- [ ] c.4 扩展 ctx.ui：select、confirm、input、setStatus
+- [ ] c.5 对齐 `pi.sendMessage(msg, options)` 签名
+- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试
+- [ ] c.7 固化为自动化 E2E 测试
+
+**依赖**：TASK-05b
+
+**被依赖**：TASK-05d
+
+**协作接口**：
+- 消费：`pi_bridge.js`、`HostApiDispatcher`、`ToolRegistry`
+- 提供：对齐后的 exec/registerTool/registerCommand API
+
+**验收标准**：
+- 至少 2 个含 registerCommand + exec 的扩展可零修改运行
+- ctx.ui 基础四件套（select/confirm/input/notify）功能正常
+- 自动化 E2E 测试覆盖
+
+---
+
+### TASK-05d | T1-P1-002d | pi-mono 插件兼容性 - Tier 3-4 TUI 组件+深度会话 API
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P2 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-compat-tier3-4` |
+| **阻塞点** | 需要 TUI 渲染框架和 SessionManager 只读接口 |
+
+**目标**：使含 TUI 自定义组件和深度会话 API 的扩展能运行（如 diff.ts、files.ts）。
+
+**子项**：
+- [ ] d.1 实现 `ctx.ui.custom()` + TUI 组件兼容层（Container/SelectList/Text）
+- [ ] d.2 实现高级 UI：setWidget、setFooter、setHeader、editor
+- [ ] d.3 实现 `ctx.sessionManager` 只读接口（getBranch 等）
+- [ ] d.4 实现 `ctx.model` / `ctx.modelRegistry`
+- [ ] d.5 diff.ts 端到端测试
+- [ ] d.6 files.ts 端到端测试
+- [ ] d.7 固化为自动化 E2E 测试
+
+**依赖**：TASK-05c
 
 **被依赖**：—
 
 **协作接口**：
-- 消费：`PluginManager`、`WasmEngine`、`HostApiDispatcher`、Node 兼容层
-- 提供：兼容性测试用例集、修复后的宿主 API / Node 兼容层
+- 消费：`pi_bridge.js`、`HostApiDispatcher`、`SessionManager`
+- 提供：TUI 渲染层、sessionManager/modelRegistry 兼容接口
 
 **验收标准**：
-- 至少 3 个 pi-mono 主流插件可零修改加载并运行
-- 兼容性问题已修复或记录为已知限制
-- 兼容性用例固化为自动化测试
+- diff.ts、files.ts 可零修改运行（仅 SWC 编译）
+- TUI 组件在终端中正确渲染
+- sessionManager.getBranch() 等深度 API 可正常调用
+- 自动化 E2E 测试覆盖
 
 ---
 

@@ -11,8 +11,8 @@ alwaysApply: true
 
 ## 一、提交前覆盖率来源（可选，不强制）
 
-- **含代码变更的提交**：从当前分支对应的 `status/<分支对应>.md`（分支名中 `/` 替换为 `-`）读取**第一个元数据表**的 Cov% 列；若有则用于 commit message 的 `[cov = xx.x%]`；若缺失或为空，**直接跳过**，不写 `[cov]`，不提示，不阻塞提交。
-- **仅修改 status/*.md 或仅 INTEGRATION.md**：按豁免规则，不要求覆盖率。
+- **含代码变更的提交**：从当前分支对应的 `docs/status/<分支对应>.md`（分支名中 `/` 替换为 `-`）读取**第一个元数据表**的 Cov% 列；若有则用于 commit message 的 `[cov = xx.x%]`；若缺失或为空，**直接跳过**，不写 `[cov]`，不提示，不阻塞提交。
+- **仅修改 docs/status/*.md 或仅 docs/INTEGRATION.md**：按豁免规则，不要求覆盖率。
 
 ---
 
@@ -38,14 +38,14 @@ alwaysApply: true
 
 ## 三、例外豁免规则（满足则不要求覆盖率）
 
-**仅当本次提交唯一修改的文件均在 `status/*.md` 内，或唯一修改文件为 `INTEGRATION.md` 时**：
+**仅当本次提交唯一修改的文件均在 `docs/status/*.md` 内，或唯一修改文件为 `docs/INTEGRATION.md` 时**：
 
 - 豁免：不执行测试
 - 豁免：不计算覆盖率、不写 `[cov=...]`
 - 仍必须遵守提交格式：
   - 仅修改 status 时示例：
     ```
-    chore(doc): 更新 status/feature-xx.md 进度/阻塞说明
+    chore(doc): 更新 docs/status/feature-xx.md 进度/阻塞说明
 
     用于阻塞上报、进度同步。
 
@@ -53,14 +53,14 @@ alwaysApply: true
     ```
   - 仅修改 INTEGRATION 时（由汇总 command 使用）：
     ```
-    chore(doc): 更新 INTEGRATION.md 进度/阻塞说明
+    chore(doc): 更新 docs/INTEGRATION.md 进度/阻塞说明
 
     用于看板汇总。
 
     （豁免时不写 [cov = xx.x%]）
     ```
 
-**用途**：开发分支只改 status 碎片；INTEGRATION.md 仅在 develop 上由汇总 command 更新；两种情形均不要求当次提交跑全量测试/覆盖率。
+**用途**：开发分支只改 status 碎片；docs/INTEGRATION.md 仅在 develop 上由汇总 command 更新；两种情形均不要求当次提交跑全量测试/覆盖率。
 
 ---
 
@@ -69,8 +69,8 @@ alwaysApply: true
 在执行 `git commit` 前，Agent 必须自动做以下检查：
 
 1. **检查本次 Git 修改文件列表**
-   - 若修改仅包含：`status/*.md` 内文件 → 走豁免规则
-   - 若修改仅包含：`INTEGRATION.md` → 走豁免规则
+   - 若修改仅包含：`docs/status/*.md` 内文件 → 走豁免规则
+   - 若修改仅包含：`docs/INTEGRATION.md` → 走豁免规则
    - 若包含任何代码 / 配置 / 测试文件或其他文件 → 走常规规则
 
 2. **检查 Commit Message 格式**
@@ -84,7 +84,7 @@ alwaysApply: true
 ## 五、Agent 固定执行流程（必须严格遵守）
 
 1. 询问：本次提交修改了哪些文件？
-2. 判断是否仅修改 `status/*.md` 或仅修改 `INTEGRATION.md`
+2. 判断是否仅修改 `docs/status/*.md` 或仅修改 `docs/INTEGRATION.md`
    - **是** → 按豁免规则生成合规 commit
    - **否** → 从 status 读取 Cov%；若有则用该值生成带 `[cov = xx.x%]` 的 commit；若无则**直接生成不含 [cov] 的 commit**，不提示，不阻塞
 3. 校验通过 → 允许提交；不通过 → 终止并提示原因
