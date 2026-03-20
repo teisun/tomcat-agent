@@ -1057,8 +1057,33 @@ mod tests {
 
     #[test]
     fn run_config_edit_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let toml = toml::to_string_pretty(&AppConfig::default()).unwrap();
+        std::fs::write(&path, toml).unwrap();
+
+        let old_editor = std::env::var("EDITOR").ok();
+        // 禁止启动交互式 vi/vim（默认 EDITOR=vi 会阻塞直至用户退出）
+        if cfg!(unix) {
+            std::env::set_var("EDITOR", "true");
+        } else {
+            let bat = dir.path().join("noop_editor.cmd");
+            std::fs::write(&bat, "@exit /b 0\r\n").unwrap();
+            std::env::set_var("EDITOR", bat.to_string_lossy().as_ref());
+        }
+
         let cfg = AppConfig::default();
-        let r = run_config(ConfigSub::Edit { config: None }, &cfg);
+        let r = run_config(
+            ConfigSub::Edit {
+                config: Some(path.to_string_lossy().into_owned()),
+            },
+            &cfg,
+        );
+
+        match old_editor {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
         assert!(r.is_ok());
     }
 

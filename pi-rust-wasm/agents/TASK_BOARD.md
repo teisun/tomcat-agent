@@ -378,7 +378,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Spike |
 | **分支** | `feature/plugin-compat-phase0` |
 | **阻塞点** | — |
@@ -409,7 +409,7 @@
 - 输出完整差距分析文档（docs/reports/extension_api_gap_analysis.md）
 - 输出 10+ 扩展兼容性评估矩阵
 
-**分支侧集成/E2E**：`./scripts/run-integration-tests.sh all` 已通过（含 wasmedge E2E）；等待 Nibbles 合并入 `develop` 后按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 复跑。
+**develop 集成**：已合并入 `develop` 并按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 复跑通过（见 `docs/status/develop.md` 最新 status 块）。
 
 ---
 

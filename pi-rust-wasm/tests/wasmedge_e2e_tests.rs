@@ -253,6 +253,7 @@ fn test_wasmedge_e2e_bridge_layer() -> Result<(), Box<dyn std::error::Error>> {
 /// 验证：hostCall 总次数 ≥8（subscribe+isIdle+hasPending+getSystemPrompt+getContextUsage+compact+uiNotify+log）
 /// 意义：WasmEdge E2E——事件分发与 ctx 代理对象完整链路
 #[test]
+#[allow(deprecated)] // WasmInstance::dispatch_event：短生命周期组合脚本路径；后续可改为 session VM + dispatch_session_event
 fn test_wasmedge_e2e_event_dispatch() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let quickjs_path =
@@ -492,6 +493,7 @@ fn test_wasmedge_e2e_tool_registration() -> Result<(), Box<dyn std::error::Error
 /// 注：「恰好 1 次」的 once 保证需有状态 VM（Story 8b，P1），当前 MVP 下每次 dispatch 重新
 ///     加载脚本会重新注册 handler，属已知设计限制，不作为本用例失败条件。
 #[test]
+#[allow(deprecated)] // 见 test_wasmedge_e2e_event_dispatch
 fn test_wasmedge_e2e_event_once_fires_exactly_once() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span = tracing::info_span!("test_wasmedge_e2e_event_once_fires_exactly_once").entered();
@@ -567,6 +569,7 @@ fn test_wasmedge_e2e_event_once_fires_exactly_once() -> Result<(), Box<dyn std::
 /// 验证：JS 注册两个 handler（各含 pi.log）→ host dispatch_event 一次 → log host_call 计数 ≥2
 /// 意义：Story 6——多 on 处理器并存、同一事件触发所有 handler（通过 dispatch_event 路径验证）
 #[test]
+#[allow(deprecated)] // 见 test_wasmedge_e2e_event_dispatch
 fn test_wasmedge_e2e_event_on_multiple_handlers() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span = tracing::info_span!("test_wasmedge_e2e_event_on_multiple_handlers").entered();

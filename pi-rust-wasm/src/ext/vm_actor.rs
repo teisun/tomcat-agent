@@ -93,7 +93,6 @@ pub struct VmActor {
     instance: WasmInstance,
     script_path: PathBuf,
     cmd_rx: tokio::sync::mpsc::Receiver<VmCommand>,
-    event_tx: std::sync::mpsc::SyncSender<EventEnvelope>,
     event_rx: std::sync::mpsc::Receiver<EventEnvelope>,
     state: Arc<AtomicU8>,
 }
@@ -121,7 +120,6 @@ impl VmActor {
             instance,
             script_path,
             cmd_rx,
-            event_tx,
             event_rx,
             state,
         };

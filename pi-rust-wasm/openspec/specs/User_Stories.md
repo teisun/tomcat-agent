@@ -1,6 +1,3 @@
-
-### 3. User_Stories.md
-```markdown
 # pi-rust-wasm 用户故事
 ## 故事分级规则
 - P0：一期MVP必须实现，核心路径能力，无替代方案

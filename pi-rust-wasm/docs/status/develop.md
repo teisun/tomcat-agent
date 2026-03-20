@@ -1,5 +1,34 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-21 06:15 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-05a（feature/plugin-compat-phase0 并入 develop）
+
+**合并分支**：`feature/plugin-compat-phase0`（含 SWC/TS POC、`assets/modules/` 挂载、tps 加载、差距与兼容矩阵文档等）。
+
+#### 合并后补充与门禁修复
+
+| 项 | 说明 |
+| :--- | :--- |
+| User_Stories.md | 去掉顶部误嵌套的 `### 3.` / ` ```markdown ` 包裹，恢复独立规格正文 |
+| vm_actor.rs | 移除未使用的 `event_tx` 字段，满足 `clippy -D warnings` |
+| wasmedge_e2e_tests.rs | 对仍使用 `WasmInstance::dispatch_event` 的 3 个 E2E 标注 `#[allow(deprecated)]`（短生命周期组合路径；会话 VM 路径已由其他用例覆盖） |
+| cli.rs 单测 | `run_config_edit_returns_ok` 使用临时 `config.toml` + `EDITOR=true`，避免默认打开 `vi` 阻塞测试 |
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture` | PASS（含 wasmedge_e2e_tests、cli_tests 等） |
+
+**执行环境**：macOS（darwin），全量测试约 68s。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | @cursor | 2026-03-20 14:00 | DONE | develop | — |
 
 ### 本次提交说明（文档与路径规整）
