@@ -206,7 +206,7 @@ wasmedge-quickjs 的 `modules/` 目录提供了以下 Node.js 兼容模块：
 
 ### 当前问题
 
-**pi-rust-wasm 未启用这些模块**。`instance_wasmedge.rs` 只 preopen 了脚本目录，没有挂载 wasmedge-quickjs 的 `modules/` 目录。启用方法：在 WasmEdge 实例启动时增加对 `modules/` 的 preopen。
+**TASK-05a 起已启用**：`assets/modules/` 由 wasmedge-quickjs 同步拷贝，`instance_wasmedge.rs` 在 WASI 中增加 `./modules` → 该目录的 preopen；可选环境变量 `PI_WASM_QUICKJS_MODULES_PATH` 覆盖路径。以下「缺失模块」表仍描述相对完整 Node 的差距。
 
 ### 缺失模块及优先级
 

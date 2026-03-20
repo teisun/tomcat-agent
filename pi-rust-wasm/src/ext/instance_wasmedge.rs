@@ -135,14 +135,11 @@ impl WasmInstance {
                     "script path has no file name",
                 ))
             })?;
-        let host_dir = script_dir
-            .canonicalize()
-            .map_err(AppError::Io)
-            .unwrap_or_else(|_| script_dir.to_path_buf());
-        let preopen = format!(".:{}", host_dir.display());
+        let preopen_strings = build_wasi_preopens(script_dir)?;
+        let preopen_refs: Vec<&str> = preopen_strings.iter().map(|s| s.as_str()).collect();
         let argv: Vec<&str> = vec!["quickjs", script_name];
         self.wasi_module = Some(
-            WasiModule::create(Some(argv), None, Some(vec![preopen.as_str()]))
+            WasiModule::create(Some(argv), None, Some(preopen_refs))
                 .map_err(|e| AppError::WasmEdge(e.to_string()))?,
         );
         let mut vm = self.build_vm()?;
@@ -219,7 +216,9 @@ impl WasmInstance {
     /// # Errors
     /// * [`AppError::QuickJS`] - 事件 JSON 序列化失败。
     /// * 其他错误同 [`run_script`]。
-    #[deprecated(note = "Use PluginManager::dispatch_session_event with long-lived VM actor instead")]
+    #[deprecated(
+        note = "Use PluginManager::dispatch_session_event with long-lived VM actor instead"
+    )]
     pub fn dispatch_event(
         &mut self,
         plugin_script: &Path,
@@ -254,22 +253,10 @@ impl WasmInstance {
     pub fn init_vm(
         &mut self,
         script_path: &Path,
-    ) -> Result<
-        (
-            Vm<'_, dyn SyncInst>,
-            PathBuf,
-            tempfile::TempDir,
-        ),
-        AppError,
-    > {
-        let quickjs_path = self
-            .quickjs_path
-            .clone()
-            .ok_or_else(|| {
-                AppError::QuickJS(
-                    "WASMEDGE_QUICKJS_PATH not set or path does not exist.".to_string(),
-                )
-            })?;
+    ) -> Result<(Vm<'_, dyn SyncInst>, PathBuf, tempfile::TempDir), AppError> {
+        let quickjs_path = self.quickjs_path.clone().ok_or_else(|| {
+            AppError::QuickJS("WASMEDGE_QUICKJS_PATH not set or path does not exist.".to_string())
+        })?;
 
         let combined = self.build_combined_script(script_path)?;
         let (combined_path, tmp_dir) = temp_js_file(&combined)?;
@@ -290,13 +277,11 @@ impl WasmInstance {
                     "script path has no file name",
                 ))
             })?;
-        let host_dir = script_dir
-            .canonicalize()
-            .unwrap_or_else(|_| script_dir.to_path_buf());
-        let preopen = format!(".:{}", host_dir.display());
+        let preopen_strings = build_wasi_preopens(script_dir)?;
+        let preopen_refs: Vec<&str> = preopen_strings.iter().map(|s| s.as_str()).collect();
         let argv: Vec<&str> = vec!["quickjs", script_name];
         self.wasi_module = Some(
-            WasiModule::create(Some(argv), None, Some(vec![preopen.as_str()]))
+            WasiModule::create(Some(argv), None, Some(preopen_refs))
                 .map_err(|e| AppError::WasmEdge(e.to_string()))?,
         );
 
@@ -385,4 +370,32 @@ fn temp_js_file(code: &str) -> Result<(PathBuf, tempfile::TempDir), AppError> {
     let path = dir.path().join("script.js");
     std::fs::write(&path, code).map_err(AppError::Io)?;
     Ok((path, dir))
+}
+
+/// wasmedge-quickjs Node 兼容模块目录：`PI_WASM_QUICKJS_MODULES_PATH`，否则 `assets/modules/`（相对 crate 根，构建时嵌入路径）。
+fn resolve_quickjs_modules_dir() -> Option<PathBuf> {
+    std::env::var("PI_WASM_QUICKJS_MODULES_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join("modules");
+            p.is_dir().then_some(p)
+        })
+}
+
+/// WASI preopen：`.` → 脚本目录；`./modules` → QuickJS 内置 Node polyfill（fs/path/…）。
+fn build_wasi_preopens(script_host_dir: &Path) -> Result<Vec<String>, AppError> {
+    let host_dir = script_host_dir
+        .canonicalize()
+        .map_err(AppError::Io)
+        .unwrap_or_else(|_| script_host_dir.to_path_buf());
+    let mut preopens = vec![format!(".:{}", host_dir.display())];
+    if let Some(modules_dir) = resolve_quickjs_modules_dir() {
+        let m = modules_dir.canonicalize().map_err(AppError::Io)?;
+        preopens.push(format!("./modules:{}", m.display()));
+    }
+    Ok(preopens)
 }

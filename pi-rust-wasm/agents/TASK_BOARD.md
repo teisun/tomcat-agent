@@ -42,7 +42,7 @@
 |------|------|
 | **TODO** | 待认领 |
 | **DOING** | 开发中（已认领） |
-| **PENDING_INTEGRATION** | 等待集成测试（开发已完成，等待合并与集成测试通过） |
+| **PENDING_INTEGRATION** | 等待集成测试（工程师须已在功能分支按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成集成与 E2E 全量验收并推送；等待 Nibbles 合并入 develop 并复核通过） |
 | **BLOCKED** | 阻塞（需在「阻塞点」中说明原因） |
 | **DONE** | 已完成（含集成测试通过） |
 
@@ -378,10 +378,10 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Spike |
 | **分支** | `feature/plugin-compat-phase0` |
-| **阻塞点** | 需恢复 pi-mono 完整工作树（当前为浅克隆） |
+| **阻塞点** | — |
 
 **目标**：完成技术可行性验证和完整差距分析，为后续分层实现提供依据。
 
@@ -389,12 +389,12 @@
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
 
 **子项**：
-- [ ] a.1 恢复 pi-mono 完整工作树（确保能 npm install + tsc 编译）
-- [ ] a.2 挂载 wasmedge-quickjs modules/ 目录（启用 18 个已有 Node.js 模块）
-- [ ] a.3 SWC crate 集成验证（TS→JS 转译 POC）
-- [ ] a.4 tps.ts 打包+加载 POC（在 wasmedge_quickjs 中执行编译后的 JS）
-- [ ] a.5 ExtensionAPI 差距分析文档输出
-- [ ] a.6 采样 10-15 个 pi-mono 社区扩展，输出兼容性评估矩阵
+- [✓] a.1 恢复 pi-mono 完整工作树（确保能 npm install + tsc 编译）
+- [✓] a.2 挂载 wasmedge-quickjs modules/ 目录（启用 18 个已有 Node.js 模块）
+- [✓] a.3 SWC crate 集成验证（TS→JS 转译 POC）
+- [✓] a.4 tps.ts 打包+加载 POC（在 wasmedge_quickjs 中执行编译后的 JS）
+- [✓] a.5 ExtensionAPI 差距分析文档输出
+- [✓] a.6 采样 10-15 个 pi-mono 社区扩展，输出兼容性评估矩阵
 
 **依赖**：TASK-15 (DONE)
 

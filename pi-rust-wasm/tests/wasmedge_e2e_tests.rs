@@ -5,8 +5,8 @@
 mod common;
 
 use pi_wasm::{
-    DefaultEventBus, HostApiDispatcher, HostResponse, PluginManager,
-    RuntimeManager, SharedRuntimeManager, WasmEngine, WasmEngineConfig,
+    transpile_pi_plugin_for_quickjs, DefaultEventBus, HostApiDispatcher, HostResponse,
+    PluginManager, RuntimeManager, SharedRuntimeManager, WasmEngine, WasmEngineConfig,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -111,6 +111,70 @@ fn test_wasmedge_e2e_hello_world_script_file() -> Result<(), Box<dyn std::error:
     );
     let mut instance = engine.create_instance("hello-e2e")?;
     instance.run_script_file(&hello_js)?;
+    Ok(())
+}
+
+/// [TASK-05a a.2] wasmedge-quickjs `modules/` 预挂载后 `require('path')` 可用
+///
+/// 验证：`path.join('a','b')` 不抛错、脚本跑完
+/// 意义：Node 兼容模块目录已挂到 `./modules`
+#[test]
+fn test_wasmedge_e2e_require_path_modules_preopen() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let js = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasmedge_quickjs/require_path_test.js");
+    assert!(
+        js.exists(),
+        "fixture require_path_test.js 必须存在: {:?}",
+        js
+    );
+    let mut instance = engine.create_instance("require-path-e2e")?;
+    instance.run_script_file(&js)?;
+    Ok(())
+}
+
+/// [TASK-05a a.4] pi-mono `tps.ts` 经 SWC 转译后在 wasmedge_quickjs 中加载（不崩溃）
+///
+/// 验证：`transpile_pi_plugin_for_quickjs` + `run_script_file` 返回 Ok
+/// 意义：TS→JS→QuickJS 全链路 POC；宿主桩响应满足 `pi.on` 注册
+#[test]
+fn test_wasmedge_e2e_tps_transpile_run_script_poc() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let tps_ts = include_str!("fixtures/pi_mono_tps/tps.ts");
+    let js_body = transpile_pi_plugin_for_quickjs(tps_ts, "tps.ts").map_err(|e| e.to_string())?;
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let out_js = dir.path().join("tps_poc.js");
+    std::fs::write(&out_js, js_body).map_err(|e| e.to_string())?;
+
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let mut instance = engine.create_instance("tps-poc-e2e")?;
+    instance.register_host_binding(|_req| {
+        Ok(serde_json::to_string(&HostResponse::ok(serde_json::json!({}))).unwrap())
+    })?;
+    instance.run_script_file(&out_js)?;
     Ok(())
 }
 
@@ -388,7 +452,11 @@ fn test_wasmedge_e2e_tool_registration() -> Result<(), Box<dyn std::error::Error
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/wasmedge_quickjs/tool_register_test.js");
-    assert!(fixture.exists(), "fixture tool_register_test.js 必须存在: {:?}", fixture);
+    assert!(
+        fixture.exists(),
+        "fixture tool_register_test.js 必须存在: {:?}",
+        fixture
+    );
 
     let mut instance = engine.create_instance("tool-reg-e2e")?;
     let register_count = Arc::new(AtomicU32::new(0));
@@ -448,7 +516,11 @@ fn test_wasmedge_e2e_event_once_fires_exactly_once() -> Result<(), Box<dyn std::
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/wasmedge_quickjs/event_once_test.js");
-    assert!(fixture.exists(), "fixture event_once_test.js 必须存在: {:?}", fixture);
+    assert!(
+        fixture.exists(),
+        "fixture event_once_test.js 必须存在: {:?}",
+        fixture
+    );
 
     let mut instance = engine.create_instance("event-once-e2e")?;
     let log_count = Arc::new(AtomicU32::new(0));
@@ -473,7 +545,12 @@ fn test_wasmedge_e2e_event_once_fires_exactly_once() -> Result<(), Box<dyn std::
 
     let ctx = serde_json::json!({"cwd": "/tmp", "hasUI": false, "model": null});
     tracing::info!("Act: dispatch_event(__e2e_once_event) 一次");
-    instance.dispatch_event(&fixture, "__e2e_once_event", &serde_json::json!({"seq": 1}), &ctx)?;
+    instance.dispatch_event(
+        &fixture,
+        "__e2e_once_event",
+        &serde_json::json!({"seq": 1}),
+        &ctx,
+    )?;
 
     let n = log_count.load(Ordering::SeqCst);
     tracing::info!("Assert: once handler 触发次数 = {}（≥1 即通过）", n);
@@ -514,7 +591,11 @@ fn test_wasmedge_e2e_event_on_multiple_handlers() -> Result<(), Box<dyn std::err
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/wasmedge_quickjs/event_multi_handler_test.js");
-    assert!(fixture.exists(), "fixture event_multi_handler_test.js 必须存在: {:?}", fixture);
+    assert!(
+        fixture.exists(),
+        "fixture event_multi_handler_test.js 必须存在: {:?}",
+        fixture
+    );
 
     let mut instance = engine.create_instance("event-multi-e2e")?;
     let log_count = Arc::new(AtomicU32::new(0));
@@ -597,7 +678,12 @@ use pi_wasm::{parse_manifest, PluginInstance, PluginStatus};
 fn setup_long_lived_vm_test(
     plugin_id: &str,
     main_js: &str,
-) -> (PluginManager, SharedRuntimeManager, Arc<HostApiDispatcher>, tempfile::TempDir) {
+) -> (
+    PluginManager,
+    SharedRuntimeManager,
+    Arc<HostApiDispatcher>,
+    tempfile::TempDir,
+) {
     let quickjs_path = require_quickjs_wasm();
     let config = WasmEngineConfig {
         quickjs_path: Some(quickjs_path),
@@ -660,9 +746,11 @@ fn setup_long_lived_vm_test(
 async fn test_wasmedge_e2e_vm_actor_state_persists_across_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_wasmedge_e2e_vm_actor_state_persists_across_events").entered();
+    let _span =
+        tracing::info_span!("test_wasmedge_e2e_vm_actor_state_persists_across_events").entered();
 
-    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-counter-e2e", "vm_actor_counter_test.js");
+    let (mgr, rm, _disp, _dir) =
+        setup_long_lived_vm_test("vm-counter-e2e", "vm_actor_counter_test.js");
 
     tracing::info!("Act: start_session_vm(s1, vm-counter-e2e)");
     let handle = mgr
@@ -674,15 +762,23 @@ async fn test_wasmedge_e2e_vm_actor_state_persists_across_events(
 
     tracing::info!("Act: dispatch_session_event x2");
     mgr.dispatch_session_event(
-        "s1", "vm-counter-e2e", "test_event",
-        serde_json::json!({"seq": 1}), serde_json::json!({}),
-    ).map_err(|e| e.to_string())?;
+        "s1",
+        "vm-counter-e2e",
+        "test_event",
+        serde_json::json!({"seq": 1}),
+        serde_json::json!({}),
+    )
+    .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     mgr.dispatch_session_event(
-        "s1", "vm-counter-e2e", "test_event",
-        serde_json::json!({"seq": 2}), serde_json::json!({}),
-    ).map_err(|e| e.to_string())?;
+        "s1",
+        "vm-counter-e2e",
+        "test_event",
+        serde_json::json!({"seq": 2}),
+        serde_json::json!({}),
+    )
+    .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     tracing::info!("Assert: VM actor 仍活跃（非 Stopped）");
@@ -714,7 +810,8 @@ async fn test_wasmedge_e2e_handler_stays_registered() -> Result<(), Box<dyn std:
     common::setup_logging();
     let _span = tracing::info_span!("test_wasmedge_e2e_handler_stays_registered").entered();
 
-    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-handler-e2e", "vm_actor_multi_handler_test.js");
+    let (mgr, rm, _disp, _dir) =
+        setup_long_lived_vm_test("vm-handler-e2e", "vm_actor_multi_handler_test.js");
 
     tracing::info!("Act: start_session_vm → dispatch x3");
     let _handle = mgr
@@ -725,9 +822,13 @@ async fn test_wasmedge_e2e_handler_stays_registered() -> Result<(), Box<dyn std:
 
     for i in 1..=3 {
         mgr.dispatch_session_event(
-            "s1", "vm-handler-e2e", "multi_evt",
-            serde_json::json!({"seq": i}), serde_json::json!({}),
-        ).map_err(|e| e.to_string())?;
+            "s1",
+            "vm-handler-e2e",
+            "multi_evt",
+            serde_json::json!({"seq": i}),
+            serde_json::json!({}),
+        )
+        .map_err(|e| e.to_string())?;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
@@ -784,27 +885,54 @@ async fn test_wasmedge_e2e_multi_session_isolation() -> Result<(), Box<dyn std::
     let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-iso-e2e", "vm_actor_counter_test.js");
 
     tracing::info!("Act: 启动 session-A 和 session-B 各自的 VM actor");
-    let _h1 = mgr.start_session_vm("session-A", "vm-iso-e2e").await.map_err(|e| e.to_string())?;
-    let _h2 = mgr.start_session_vm("session-B", "vm-iso-e2e").await.map_err(|e| e.to_string())?;
+    let _h1 = mgr
+        .start_session_vm("session-A", "vm-iso-e2e")
+        .await
+        .map_err(|e| e.to_string())?;
+    let _h2 = mgr
+        .start_session_vm("session-B", "vm-iso-e2e")
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     tracing::info!("Assert: RuntimeManager 含 2 个 handle");
     assert_eq!(rm.len(), 2, "应有 2 个 session VM handle");
 
     tracing::info!("Act: 分别投递事件");
-    mgr.dispatch_session_event("session-A", "vm-iso-e2e", "test_event", serde_json::json!({"from": "A"}), serde_json::json!({})).map_err(|e| e.to_string())?;
-    mgr.dispatch_session_event("session-B", "vm-iso-e2e", "test_event", serde_json::json!({"from": "B"}), serde_json::json!({})).map_err(|e| e.to_string())?;
+    mgr.dispatch_session_event(
+        "session-A",
+        "vm-iso-e2e",
+        "test_event",
+        serde_json::json!({"from": "A"}),
+        serde_json::json!({}),
+    )
+    .map_err(|e| e.to_string())?;
+    mgr.dispatch_session_event(
+        "session-B",
+        "vm-iso-e2e",
+        "test_event",
+        serde_json::json!({"from": "B"}),
+        serde_json::json!({}),
+    )
+    .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     tracing::info!("Act: end_session(session-A)");
-    mgr.end_session("session-A").await.map_err(|e| e.to_string())?;
+    mgr.end_session("session-A")
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     assert_eq!(rm.len(), 1, "end session-A 后应剩 1 个 handle（session-B）");
 
     tracing::info!("Act: end_session(session-B)");
-    mgr.end_session("session-B").await.map_err(|e| e.to_string())?;
+    mgr.end_session("session-B")
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-    assert!(rm.is_empty(), "两个 session 均 end 后 RuntimeManager 应为空");
+    assert!(
+        rm.is_empty(),
+        "两个 session 均 end 后 RuntimeManager 应为空"
+    );
     Ok(())
 }
 
@@ -813,20 +941,26 @@ async fn test_wasmedge_e2e_multi_session_isolation() -> Result<(), Box<dyn std::
 /// 验证：start_session_vm → end_session → RuntimeManager 为空，actor 状态非 Running
 /// 意义：Story 8b——关闭流程无悬挂线程、无 pending 泄漏
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_wasmedge_e2e_session_end_no_hanging_threads(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_wasmedge_e2e_session_end_no_hanging_threads() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = tracing::info_span!("test_wasmedge_e2e_session_end_no_hanging_threads").entered();
 
-    let (mgr, rm, _disp, _dir) = setup_long_lived_vm_test("vm-shutdown-e2e", "vm_actor_counter_test.js");
+    let (mgr, rm, _disp, _dir) =
+        setup_long_lived_vm_test("vm-shutdown-e2e", "vm_actor_counter_test.js");
 
     tracing::info!("Act: start_session_vm → sleep 2s → end_session (repro hang)");
-    let handle = mgr.start_session_vm("s-shutdown", "vm-shutdown-e2e").await.map_err(|e| e.to_string())?;
+    let handle = mgr
+        .start_session_vm("s-shutdown", "vm-shutdown-e2e")
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     assert_eq!(rm.len(), 1);
 
     tracing::info!("Act: calling end_session");
-    mgr.end_session("s-shutdown").await.map_err(|e| e.to_string())?;
+    mgr.end_session("s-shutdown")
+        .await
+        .map_err(|e| e.to_string())?;
     tracing::info!("Act: end_session returned, sleeping 1s");
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
