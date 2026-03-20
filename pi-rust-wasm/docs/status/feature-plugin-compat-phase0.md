@@ -2,11 +2,12 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Spike | 2026-03-20 15:30 | DONE | feature/plugin-compat-phase0 | - |
+| Spike | 2026-03-20 21:36 | DONE | feature/plugin-compat-phase0 | - |
 
 ### 任务
 
 - [✓] **[P1]** TASK-05a Phase 0：pi-mono 插件兼容性技术验证与差距分析
+- [✓] 文档：`INTEGRATION_MERGE_AND_ACCEPTANCE` §1–§4 重编号与中性化、Nibbles §4 精简、工作流与 Constitution/PLAN_SPEC/UNIT_TEST_SPEC 引用对齐
 
 ### 子项进度
 

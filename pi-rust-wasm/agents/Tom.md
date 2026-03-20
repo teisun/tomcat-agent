@@ -21,7 +21,7 @@
 
 ## 计划质量要求
 
-制定开发计划时，**须逐条满足** [Dispatcher.md](./Dispatcher.md) 第四节「计划必须包含的内容」中的全部 5 个维度，并通过末尾「计划输出前自检」清单的全部检查项，不得遗漏。计划经用户确认后方可进入开发。
+制定开发计划时，**须逐条满足** [Dispatcher.md](./Dispatcher.md) 第四节「计划必须包含的内容」中的全部 **6** 个维度，并通过末尾「计划输出前自检」清单的全部检查项，不得遗漏。计划经用户确认后方可进入开发。
 
 ## 参考文档
 
@@ -29,6 +29,9 @@
 - [编码规范](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)
 - [代码注释规范](../openspec/specs/guides/coding/COMMENT_SPEC.md)
 - [单元测试规范](../openspec/specs/guides/testing/UNIT_TEST_SPEC.md)
+- [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) — 集成与 E2E：交付步骤与验收
+- [集成测试规范](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
+- [E2E 测试规范](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)
 - [Commit Message 规范](../openspec/specs/guides/workflow/COMMIT_MESSAGE_SPEC.md)
 - [Status 规范](../openspec/specs/guides/workflow/STATUS_GUIDE.md)
 - [技术文档规范](../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md)

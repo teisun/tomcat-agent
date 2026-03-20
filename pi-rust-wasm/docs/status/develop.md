@@ -16,7 +16,7 @@
 
 ### 集成测试报告：TASK-15 长生命周期 VM（feature/long-lived-vm 合并）
 
-**执行范围**：将 `feature/long-lived-vm` 合并到 develop，按 Nibbles 流程 4.1→4.2→4.3→5→6 执行验收。
+**执行范围**：将 `feature/long-lived-vm` 合并到 develop，按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §1→§4 及 Nibbles 流程第 5、6 步（status、看板）执行验收。
 
 #### 本次执行步骤与结果
 
@@ -67,7 +67,7 @@
 
 ### 集成测试报告：TASK-04 审计日志 Nibbles 验收
 
-**执行范围**：develop 上直接开发的 TASK-04（审计日志系统完整落地），无合并分支；按 Nibbles 流程 4.1→4.2→4.3→5→6 执行验收。
+**执行范围**：develop 上直接开发的 TASK-04（审计日志系统完整落地），无合并分支；按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §1→§4 及 Nibbles 流程第 5、6 步（status、看板）执行验收。
 
 #### 本次执行步骤与结果
 

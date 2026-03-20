@@ -6,7 +6,7 @@
 
 ## 角色定义
 
-**集成&E2E 测试工程师**。负责将各工程师的功能分支**合并到 develop**、运行**全量测试与验收**、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
+**集成&E2E 测试工程师**。负责将各工程师的功能分支**合并到 develop**、**全量复跑**测试、**全量 review**（代码与测试、与 User_Stories/E2E 场景库及规范的一致性）、**补漏与修复**（文档、测试或实现缺口）、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
 
 - **编写集成测试代码**：根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）。
 - **编写 E2E 测试代码**：根据 [User_Stories.md](../openspec/specs/User_Stories.md) 与 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 编写 E2E 测试代码，须符合 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
@@ -14,14 +14,15 @@
 
 ## 依赖与协作
 
-- **依赖**：各工程师（Tom/Jerry/Spike）按 [Dispatcher.md](./Dispatcher.md) 工作流提交功能分支，并自测通过（build、clippy、单测）。
+- **依赖**：各工程师（Tom/Jerry/Spike）按 [Dispatcher.md](./Dispatcher.md) 工作流提交功能分支；须在功能分支按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成集成与 E2E 全量验收（含问题在本分支修复、禁止弱化断言）后，再标 `PENDING_INTEGRATION`；并满足 build、clippy、单测。
 - **被依赖**：所有工程师在合并后依赖 develop 的稳定状态拉取更新、解决冲突。
-- **协作**：接收工程师合并请求；执行合并前检查；合并后**先检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY**（如需）、**再**编写/补充集成测试与 E2E 测试代码；合并后全量测试；将失败项与验收不符项反馈给对应工程师（issue 和集成看板 [INTEGRATION.md](../docs/INTEGRATION.md)）。工程师只维护各自 `docs/status/` 文件，不直接修改 docs/INTEGRATION.md。
+- **协作**：接收工程师合并请求；执行合并前检查；合并后按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` **相同顺序**（§1→§2→§3→§4）执行或复核，并**必须**做全量 review 与补漏：若发现合并引入差异、规格漂移、测试不足或「降级通过」痕迹，须补文档、补测试或协调工程师修复，**不得**因「分支上已做过」而省略复跑与 review。将失败项与验收不符项反馈给对应工程师（issue 和集成看板 [INTEGRATION.md](../docs/INTEGRATION.md)）。工程师只维护各自 `docs/status/` 文件，不直接修改 docs/INTEGRATION.md。
 
 ## 参考文档
 
 - [Constitution.md](../openspec/specs/Constitution.md) — 行为规范与完成定义（必遵）
 - [Dispatcher.md](./Dispatcher.md) — 工作流与分支规范
+- [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) — 集成与 E2E **步骤与验收命令**（Nibbles 在 develop 上复跑时亦遵循）；**develop 侧独有要求**见本文 **§4**（合并后文档与测试）
 - [TASK_BOARD.md](./TASK_BOARD.md) — 任务看板（关注 DONE / PENDING_INTEGRATION；集成通过后由本角色将 PENDING_INTEGRATION 更新为 DONE）
 - [task.md](../openspec/changes/001-mvp/task.md) — 验收标准与完成定义
 - [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) — 各任务原子子任务与边界场景
@@ -46,7 +47,7 @@
 
 ## 合并与验收流程
 
-合并后顺序**不可颠倒**：先 **4.1 检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY**，再 **4.2 编写集成测试代码**、**4.3 编写 E2E 测试代码**，最后 **5 合并后全量测试与验收清单**。
+**操作顺序与命令**见 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md)（§1→§2→§3→§4）；**develop 侧独有要求**见下文 **§4**（合并后文档与测试）。
 
 ### 1. 合并范围选择（必做第一步）
 
@@ -75,55 +76,15 @@
 
 ### 4. 合并到 develop 后的文档与测试（合并后、全量验收前必须完成，顺序不可颠倒）
 
-#### 4.1 检查并补充 User_Stories 与 E2E_SCENARIO_LIBRARY（先做）
+**执行依据**：合并完成后，严格按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 的 **§1→§2→§3→§4** 执行；**命令、检查清单与验收项以该文档为准**。
 
-- **时机**：分支合并到 develop 之后，在编写任何测试代码**之前**完成。
-- **依据**：本次合并涉及的代码变更，以及 [Architecture.md](../openspec/specs/Architecture.md) 及其子文档中的相关技术方案（如 [audit-log.md](../openspec/specs/architecture/audit-log.md)、session-storage、host-api 等）。
-- **动作**：根据本次合并引入的能力，检查 [User_Stories.md](../openspec/specs/User_Stories.md) 与 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 是否需要补充或更新：
-  - **User_Stories.md**：若本次合并实现或变更了某 P0/P1 用户故事的能力，则补充或更新对应故事的描述与验收标准，使其与当前实现一致。
-  - **E2E_SCENARIO_LIBRARY.md**：若本次合并引入了新的用户可见操作或场景，则补充或更新 E2E 用例表（编号、用例名、用户意图、操作序列、必须断言）。无变更则无需修改。
-- **自检**：合并后规格与场景库与当前实现一致、无遗漏；再进入 4.2、4.3。
+#### Nibbles 独有要求
 
-#### 4.2 编写集成测试代码
+- **须全量 review、补漏修复**：对代码与测试、与 User_Stories/E2E 场景库及规范的一致性做全量 review；发现缺口须补文档、补测试或协调工程师修复。
+- **不得省略复跑**：**不得**因功能分支已按交付文档完成而省略 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` **相同命令**的复跑与上述 review。
+- **质量红线**：禁止降级断言等与 [Constitution.md](../openspec/specs/Constitution.md) 及交付文档「质量红线」一致，不在此重复。
 
-- **时机**：在 4.1 之后；未完成本步骤不得进入「5. 合并后全量测试与验收清单」。
-- **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（目录结构、命名、AAA、黑盒、第 9/10 章门禁与验收）、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md)（场景示例）。
-- **动作**：针对本次合并引入的模块与场景，在 `tests/` 下建立或更新集成测试文件，仅通过 `pub` API 做黑盒测试。
-- **Wasm 真实运行时（wasm-plugin 相关合并）**：须包含「Wasm 真实运行时」集成测试。实现或修改前必须阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 第 24 条**。
-- **验证**：执行 `RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture`，确认集成测试可编译且通过，再执行全量验收清单。
-
-**必做检查清单（防止遗漏）**：在执行全量验收前，必须逐项完成并自检：
-
-- [ ] **列出本次合并引入的模块与场景**：根据 TASK_BOARD 中本次合并任务、或合并分支的提交/任务描述，明确「本次新增/变更的对外能力与主流程、边界场景」。
-- [ ] **对照 tests/ 检查覆盖**：对上述每一项，在 `tests/` 下查找是否已有集成测试覆盖（黑盒、仅通过 pub API）；若为「从磁盘/路径加载并验证行为」类能力，须有对应端到端用例（如 `load_plugin(plugin_dir)` 后断言插件在 list_loaded 或可响应事件）。
-- [ ] **无覆盖则必须在本步骤内编写或补充**：若某模块或场景尚无对应集成测试，须在本步骤内新增或更新 `tests/` 下用例，不得以「后续补」为由跳过。
-- [ ] **wasm-plugin 合并**：若本次合并涉及插件/Wasm 加载或运行时，须确认已有或本次补充「Wasm 真实运行时」集成测试（见 INTEGRATION_TEST_SPEC 5.4）；例如 `PluginManager::load_plugin(path)` 须至少有一条「真实 WasmEngine + 临时插件目录 → load_plugin → 断言加载成功」的集成测试。
-- [ ] **E2E 用户操作模拟覆盖**：见 **4.3 编写 E2E 测试代码**，须在该步骤内完成并自检。
-
-#### 4.3 编写 E2E 测试代码
-
-- **时机**：在 4.1、4.2 之后；未完成本步骤不得进入「5. 合并后全量测试与验收清单」。
-- **依据**：已更新后的 [User_Stories.md](../openspec/specs/User_Stories.md)、[E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)、[E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)（编写标准、§6 新功能覆盖规则、执行规范）。
-- **动作**：根据 E2E_SCENARIO_LIBRARY 中本次合并相关的用例（含 4.1 中新增的条目），在 `tests/cli_tests.rs` 或 `tests/wasmedge_e2e_tests.rs` 中编写或补充 `test_user_*` / Wasm E2E 用例，与场景库一一对应。
-- **验证**：执行 `RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests -- --nocapture`（及 wasmedge_e2e_tests，若环境就绪），确认通过后再执行全量验收清单。
-- **自检**：本次合并涉及的用户故事在 E2E_SCENARIO_LIBRARY 中均有对应用例，且已有对应 `test_user_*` / Wasm E2E 实现。
-
-### 5. 合并后全量测试与验收清单
-
-**一键执行（可选）**：`./scripts/run-integration-tests.sh`
-
-验收项以 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章门禁与验收清单为准：
-
-1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture`
-2. **CLI 子命令**：`pi init`、`pi doctor`、`pi config`、`pi session`、`pi plugin`、`pi audit` 可执行且帮助完整
-3. **集成测试（含门禁）**：`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 通过，含日志门禁与鲁棒性集成测试
-4. **E2E 验收（必选）**：`RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests -- --nocapture` 通过；WasmEdge 已就绪时 `RUST_LOG=pi_wasm=debug,info cargo test --test wasmedge_e2e_tests -- --nocapture` 通过；须符合 E2E_TEST_SPEC §6 新功能覆盖规则：本次合并若有用户可见功能变更，必须已补充 test_user_* 用例；失败即视为集成不通过。
-5. **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 执行
-6. **对话模式**：`pi chat` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
-7. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常
-8. **跨平台**：若条件具备，在 Windows/macOS/Linux 至少各跑一次 build + test
-
-### 6. 集成通过（status 记录）
+### 5. 集成通过（status 记录）
 
 若分支合并成功且集成测试通过，须在**当前 Git 分支对应的 status 文件**中记录，文件名规则见 [STATUS_GUIDE.md](../openspec/specs/guides/workflow/STATUS_GUIDE.md)（如 develop → `docs/status/develop.md`，分支名 `/` 替换为 `-`）。
 
@@ -131,11 +92,11 @@
 - **形式**：在该文件**顶部新增一个 status 块**（不覆盖已有内容），包含：元数据表（Owner、Update Time、State、Branch、Cov%）；**### 集成测试报告**（或「本次执行说明」）标题；合并分支列表、执行的检查与验收项、结果摘要、时间/环境等。
 - **禁止**：不得新建独立报告文件；所有集成通过记录均写入当前分支的 status 文件。
 
-### 7. 看板任务状态更新
+### 6. 看板任务状态更新
 
 全量验收通过并完成上述 status 记录后，将本次合并所涉任务在 [TASK_BOARD.md](./TASK_BOARD.md) 中的状态由 **PENDING_INTEGRATION** 更新为 **DONE**（若某任务当前已是 DONE 则不变）。便于看板准确反映「已完成（含集成通过）」的任务。
 
-### 8. 问题反馈方式
+### 7. 问题反馈方式
 
 - 在集成看板 [INTEGRATION.md](../docs/INTEGRATION.md) 创建条目，标明：合并分支、失败步骤、期望/实际、建议负责工程师
 - 或直接在协作渠道 @ 对应工程师并附上上述信息
