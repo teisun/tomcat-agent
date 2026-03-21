@@ -5,8 +5,9 @@
 mod common;
 
 use pi_wasm::{
-    transpile_pi_plugin_for_quickjs, DefaultEventBus, HostApiDispatcher, HostResponse,
-    PluginManager, RuntimeManager, SharedRuntimeManager, WasmEngine, WasmEngineConfig,
+    parse_manifest, transpile_pi_plugin_for_quickjs, DefaultEventBus, HostApiDispatcher,
+    HostResponse, PluginInstance, PluginManager, PluginStatus, RuntimeManager,
+    SharedRuntimeManager, WasmEngine, WasmEngineConfig,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -674,8 +675,6 @@ fn make_e2e_plugin_dir(id: &str, main_js: &str) -> tempfile::TempDir {
     tmp
 }
 
-use pi_wasm::{parse_manifest, PluginInstance, PluginStatus};
-
 /// 手动注册插件（跳过 load_plugin 的 init script 执行，避免 __pi_start_event_loop 阻塞）。
 /// start_session_vm 会在独立 spawn_blocking 线程中执行完整脚本。
 fn setup_long_lived_vm_test(
@@ -976,5 +975,124 @@ async fn test_wasmedge_e2e_session_end_no_hanging_threads() -> Result<(), Box<dy
         pi_wasm::VmActorState::Running,
         "end_session 后 actor 应为 Stopped 或 Error"
     );
+    Ok(())
+}
+
+/// [E2E-WASM-036] pi-mono tps Tier1：零修改 tps.ts 经磁盘加载 + 长生命周期 VM，`agent_end` 触发 `ctx.ui.notify`
+///
+/// 验证：`main.ts` 源文件 → `init_vm` 内 SWC 转译 + 尾部 `__pi_start_event_loop`；`dispatch_session_event(agent_start/agent_end)` 后 `uiNotify` ≥1
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_tps_tier1_agent_end_notify() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_tps_tier1_agent_end_notify").entered();
+
+    let quickjs_path = require_quickjs_wasm();
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).unwrap_or_else(|e| {
+        panic!("集成测试要求已安装 WasmEdge。当前: {e}。安装见 {WASMEDGE_INSTALL_URL}");
+    });
+
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let tps_ts = include_str!("fixtures/pi_mono_tps/tps.ts");
+    std::fs::write(tmp.path().join("main.ts"), tps_ts).map_err(|e| e.to_string())?;
+
+    let plugin_id = "tps-tier1-e2e";
+    let manifest_val = serde_json::json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": "e2e",
+        "author": "e2e",
+        "main": "main.ts",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": []
+    });
+    std::fs::write(
+        tmp.path().join("plugin.json"),
+        serde_json::to_string_pretty(&manifest_val).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let ui_notify = Arc::new(AtomicU32::new(0));
+    let dispatcher =
+        Arc::new(HostApiDispatcher::new(bus.clone()).with_ui_notify_counter(ui_notify.clone()));
+    let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+
+    let mut mgr = PluginManager::new(bus);
+    mgr.set_wasm_engine(engine);
+    mgr.set_host_dispatcher(dispatcher.clone());
+    mgr.set_runtime_manager(rm.clone());
+    mgr.set_event_channel_capacity(16);
+
+    let manifest = parse_manifest(&serde_json::to_string(&manifest_val).unwrap()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let instance = PluginInstance {
+        id: plugin_id.to_string(),
+        manifest,
+        wasm_instance: None,
+        status: PluginStatus::Loaded,
+        registered_tools: vec![],
+        event_listener_ids: vec![],
+        config: serde_json::json!({}),
+        created_at: now,
+        loaded_at: now,
+        plugin_root: tmp.path().to_path_buf(),
+    };
+    mgr.register_plugin(instance).map_err(|e| e.to_string())?;
+
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        "agent_start",
+        serde_json::json!({}),
+        serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
+    )
+    .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    let agent_end = serde_json::json!({
+        "messages": [{
+            "role": "assistant",
+            "usage": {
+                "input": 10,
+                "output": 100,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 110
+            }
+        }]
+    });
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        "agent_end",
+        agent_end,
+        serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
+    )
+    .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+
+    let n = ui_notify.load(Ordering::SeqCst);
+    assert!(
+        n >= 1,
+        "tps Tier1 E2E 应至少触发 1 次 context.uiNotify，实际 {n}"
+    );
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
     Ok(())
 }

@@ -1,5 +1,7 @@
 //! TypeScript → JavaScript（SWC strip），供插件零构建加载路径使用。
 //! 参考 pi_agent_rust `transpile_typescript_module`；QuickJS 脚本模式需去掉 `export default`。
+//! 与 `load_plugin` / `init_vm` 组合脚本的数据流见 openspec：
+//! `architecture/plugin-system/pi-mono-compat-strategy.md` §「TASK-05b Tier1：加载与事件链路」。
 
 use crate::infra::error::AppError;
 use std::path::Path;

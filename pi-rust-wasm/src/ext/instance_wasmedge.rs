@@ -167,7 +167,21 @@ impl WasmInstance {
     /// Prepend pi_bridge.js (if present) to the user script content.
     /// Falls back to the plain user script if bridge is absent.
     fn build_combined_script(&self, user_script: &Path) -> Result<String, AppError> {
-        let user_code = std::fs::read_to_string(user_script).map_err(AppError::Io)?;
+        let raw = std::fs::read_to_string(user_script).map_err(AppError::Io)?;
+        let ext = user_script
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        let user_code = match ext.as_deref() {
+            Some("ts") | Some("tsx") => {
+                let fname = user_script
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("plugin.ts");
+                crate::ext::ts_compiler::transpile_pi_plugin_for_quickjs(&raw, fname)?
+            }
+            _ => raw,
+        };
         let bridge_path = self.resolve_bridge_path();
         match bridge_path {
             Some(bp) if bp.exists() => {
@@ -258,7 +272,10 @@ impl WasmInstance {
             AppError::QuickJS("WASMEDGE_QUICKJS_PATH not set or path does not exist.".to_string())
         })?;
 
-        let combined = self.build_combined_script(script_path)?;
+        let mut combined = self.build_combined_script(script_path)?;
+        // VmActor 长生命周期：pi-mono 插件通常不显式调用 __pi_start_event_loop；在组合脚本尾部注入，
+        // 使 pi.on 注册后仍阻塞在 waitForEvent 循环中（与短生命周期 run_script_file 路径区分，后者不注入）。
+        combined.push_str("\n__pi_start_event_loop();\n");
         let (combined_path, tmp_dir) = temp_js_file(&combined)?;
 
         let config = self.config.clone();

@@ -377,6 +377,9 @@
 
 **总体验收口径**：**TASK-05e** 统一收口——在 TASK-05a→05b→05c→05d 全部落地后，按 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 对 **10–15 个** pi-mono **社区**插件完成**端到端兼容验收**（可加载、各插件约定的核心路径可跑通）。各 Tier 子任务中的「1～3 个」等为**代表性回归样本**，用于门禁与自动化；**不可替代** TASK-05e 的全矩阵验收勾选。
 
+**技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
+**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 ---
@@ -426,8 +429,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Jerry |
 | **分支** | `feature/plugin-compat-tier1` |
 | **阻塞点** | — |
 
@@ -437,12 +440,12 @@
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
 
 **子项**：
-- [ ] b.1 改造扩展入口：支持 `export default function(pi)` 模式
-- [ ] b.2 对齐 `pi.on(event, handler)` handler 签名（传 ctx 参数）
-- [ ] b.3 实现最小 ctx 对象（hasUI、cwd、ui.notify）
-- [ ] b.4 对齐事件类型名（agent_start/agent_end 等 pi-mono 映射）
-- [ ] b.5 tps.ts 端到端测试（零修改加载 + 事件触发 + notify 回调）
-- [ ] b.6 固化为自动化 E2E 测试
+- [✓] b.1 改造扩展入口：支持 `export default function(pi)` 模式
+- [✓] b.2 对齐 `pi.on(event, handler)` handler 签名（传 ctx 参数）
+- [✓] b.3 实现最小 ctx 对象（hasUI、cwd、ui.notify）
+- [✓] b.4 对齐事件类型名（agent_start/agent_end 等 pi-mono 映射）
+- [✓] b.5 tps.ts 端到端测试（零修改加载 + 事件触发 + notify 回调）
+- [✓] b.6 固化为自动化 E2E 测试
 
 **依赖**：TASK-05a
 

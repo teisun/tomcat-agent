@@ -13,8 +13,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::runtime_manager::{SharedRuntimeManager, VmRuntimeKey};
+use super::ts_compiler::transpile_pi_plugin_for_quickjs;
 use super::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmCommand};
 use super::{invoke_host_func_with, HostApiDispatcher, WasmEngine, WasmInstance};
+
+/// 将宿主内部事件名映射为 pi-mono 插件 `pi.on` 常用名（`dispatch_session_event` 入口）。
+pub(crate) fn map_event_type_for_pi_mono_plugin(internal: &str) -> String {
+    match internal {
+        "tool_execution_start" => "tool_call".to_string(),
+        "tool_execution_end" => "tool_result".to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// 插件清单（与 design CODE_BLOCK_P1_008 一致）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,8 +407,16 @@ impl PluginManager {
                 main_path.display()
             )));
         }
-        std::fs::read_to_string(&main_path)
-            .map_err(|e| AppError::Plugin(format!("读取 main 脚本失败: {}", e)))
+        let raw = std::fs::read_to_string(&main_path)
+            .map_err(|e| AppError::Plugin(format!("读取 main 脚本失败: {}", e)))?;
+        let ext = main_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("ts") | Some("tsx") => transpile_pi_plugin_for_quickjs(&raw, &manifest.main),
+            _ => Ok(raw),
+        }
     }
 
     /// 注册已构造的插件实例（内部使用；加载流程完成后调用）。
@@ -572,10 +590,11 @@ impl PluginManager {
             .ok_or_else(|| AppError::Plugin("host_dispatcher not set".into()))?;
 
         let instance_id = key.to_string();
+        let mapped = map_event_type_for_pi_mono_plugin(event_type);
         dispatcher.deliver_event(
             &instance_id,
             EventEnvelope {
-                event_type: event_type.to_string(),
+                event_type: mapped,
                 data,
                 context,
             },
@@ -650,6 +669,22 @@ mod tests {
     use super::*;
     use crate::infra::DefaultEventBus;
     use std::path::Path;
+
+    #[test]
+    fn map_event_type_pi_mono_tool_aliases() {
+        assert_eq!(
+            super::map_event_type_for_pi_mono_plugin("tool_execution_start"),
+            "tool_call"
+        );
+        assert_eq!(
+            super::map_event_type_for_pi_mono_plugin("tool_execution_end"),
+            "tool_result"
+        );
+        assert_eq!(
+            super::map_event_type_for_pi_mono_plugin("agent_end"),
+            "agent_end"
+        );
+    }
 
     #[test]
     fn parse_manifest_valid() {

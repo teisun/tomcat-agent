@@ -125,6 +125,61 @@ flowchart TB
 3. **VM 加载**：编译产物连同 `pi_bridge.js` 一起注入 WasmEdge QuickJS 实例
 4. **运行时交互**：扩展 JS 通过 `hostcall` 调用宿主 API，dispatcher 路由到 Rust 层各模块
 
+### TASK-05b Tier1：加载与事件链路（实现级，与总图互补）
+
+> 上图是**产品级**总览；下图对齐当前仓库实现：`load_plugin`（短生命周期一次执行）与 `start_session_vm` + `VmActor`（长生命周期事件循环）共用 **SWC 转译**（`ts_compiler.rs`），但组合脚本与入口不同。  
+> **推荐放置位置**：本段（`pi-mono-compat-strategy.md`）作为架构正文；若需代码旁引用，可在 `src/ext/ts_compiler.rs` 模块注释中加一行指向本节。
+
+```mermaid
+flowchart TD
+  subgraph shortLife [路径 A：load_plugin 短生命周期]
+    Manifest["plugin.json 中 main 字段"]
+    ReadMain["read_main_script\n校验路径不逃逸出插件根目录"]
+    TranspileA["transpile_pi_plugin_for_quickjs\nSWC strip + default export 包装"]
+    RunOnce["WasmInstance.run_script\n内存临时 JS"]
+    Manifest --> ReadMain
+    ReadMain --> TranspileA
+    TranspileA --> RunOnce
+  end
+
+  subgraph longLife [路径 B：start_session_vm 长生命周期]
+    MainDisk["main_script_path 指向磁盘文件"]
+    BuildComb["build_combined_script\npi_bridge.js 前置拼接\n.ts/.tsx 则 SWC 转译"]
+    InitVm["init_vm 组合脚本末尾\n追加 __pi_start_event_loop"]
+    VmStart["VmActor 线程 run quickjs _start\n阻塞在事件循环内"]
+    MainDisk --> BuildComb
+    BuildComb --> InitVm
+    InitVm --> VmStart
+  end
+
+  subgraph hostToJs [宿主向插件投递事件]
+    MapName["map_event_type_for_pi_mono_plugin\n内部名到 pi.on 名"]
+    Deliver["HostApiDispatcher.deliver_event\n会话 channel"]
+    WaitEvt["JS __session.waitForEvent"]
+    DispatchJs["__pi_dispatch_event\nhandler event, ctx"]
+    MapName --> Deliver
+    Deliver --> WaitEvt
+    WaitEvt --> DispatchJs
+  end
+
+  subgraph shared [共用]
+    Bridge["assets/js/pi_bridge.js\nglobalThis.pi + hostcall"]
+    Swc["ts_compiler.rs\nSWC strip + wrap"]
+  end
+
+  TranspileA --> Swc
+  BuildComb --> Swc
+  TranspileA --> Bridge
+  BuildComb --> Bridge
+  DispatchJs --> Bridge
+```
+
+**读图要点**：
+
+- **路径 A**：适合「加载时执行一次初始化」；`main` 为 `.ts` 时在 `read_main_script` 内转译，不依赖磁盘上生成 `.js`。
+- **路径 B**：适合会话内持续收事件；`init_vm` 仅在 **VmActor** 组合脚本末尾注入 `__pi_start_event_loop`，避免插件未写循环时脚本立即退出。
+- **投递**：Rust 侧仍可使用内部事件名（如 `tool_execution_start`），在 `dispatch_session_event` 出口映射为插件 `pi.on` 使用的字符串（如 `tool_call`）。
+
 ---
 
 ## 13.3 pi_agent_rust 参考实现

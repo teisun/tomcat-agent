@@ -289,8 +289,14 @@
     var eventData = envelope.data;
     var snapshot = envelope.context || {};
 
+    var cwdResolved = snapshot.cwd;
+    if (cwdResolved == null || cwdResolved === '') {
+      var gc = hostCall('context', 'getCwd', {});
+      cwdResolved = (gc && gc.data && gc.data.cwd) ? gc.data.cwd : undefined;
+    }
+
     var ctx = {
-      cwd: snapshot.cwd,
+      cwd: cwdResolved,
       model: snapshot.model,
       hasUI: !!snapshot.hasUI,
       isIdle: function () {

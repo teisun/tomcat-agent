@@ -98,6 +98,7 @@ use crate::infra::event_bus::{EventBus, EventContext, EventListenerId};
 use crate::infra::{AuditRecorder, HostcallAuditEntry};
 use dashmap::DashMap;
 use futures_util::StreamExt;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -136,6 +137,8 @@ pub struct HostApiDispatcher {
         Arc<DashMap<String, Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>>>>,
     /// 事件发送端：宿主通过此端投递事件给 VM。
     event_senders: Arc<DashMap<String, std::sync::mpsc::SyncSender<EventEnvelope>>>,
+    /// 可选：`context.uiNotify` 调用次数（测试断言用，与生产逻辑无关）。
+    ui_notify_count: Option<Arc<AtomicU32>>,
 }
 
 impl HostApiDispatcher {
@@ -157,7 +160,14 @@ impl HostApiDispatcher {
             llm_semaphore: Arc::new(Semaphore::new(5)),
             event_receivers: Arc::new(DashMap::new()),
             event_senders: Arc::new(DashMap::new()),
+            ui_notify_count: None,
         }
+    }
+
+    /// 注入 `uiNotify` 调用计数器（E2E / 集成测试）。
+    pub fn with_ui_notify_counter(mut self, counter: Arc<AtomicU32>) -> Self {
+        self.ui_notify_count = Some(counter);
+        self
     }
 
     /// 注入 4 原语执行器。
@@ -955,6 +965,9 @@ impl HostApiDispatcher {
     }
 
     fn do_context_ui_notify(&self, params: &serde_json::Value) -> HostResponse {
+        if let Some(c) = &self.ui_notify_count {
+            c.fetch_add(1, Ordering::SeqCst);
+        }
         let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
         let kind = params
             .get("type")
