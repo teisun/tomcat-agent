@@ -1087,6 +1087,7 @@ mod tests {
         BashResult, ChatResponse, ChatResponseChoice, DirEntry, EditFileResult, PrimitiveOperation,
         WriteFileResult,
     };
+    use crate::infra::wire;
     use crate::infra::DefaultEventBus;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2047,7 +2048,7 @@ mod tests {
         d.deliver_event(
             "s1/p1",
             EventEnvelope {
-                event_type: "session_start".into(),
+                event_type: wire::vm::WIRE_SESSION_START.into(),
                 data: serde_json::json!({"sid": "s1"}),
                 context: serde_json::json!({}),
             },
@@ -2058,7 +2059,10 @@ mod tests {
             .do_wait_for_event("s1/p1", &serde_json::json!({}))
             .unwrap();
         assert!(resp.ok);
-        assert_eq!(resp.data.as_ref().unwrap()["type"], "session_start");
+        assert_eq!(
+            resp.data.as_ref().unwrap()["type"].as_str().unwrap(),
+            wire::vm::WIRE_SESSION_START
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 mod common;
 
 use pi_wasm::{
-    parse_manifest, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
+    parse_manifest, wire, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
     PluginManager, PluginStatus, RuntimeManager, SharedRuntimeManager, VmActorHandle, VmActorState,
     VmCommand, VmRuntimeKey,
 };
@@ -398,18 +398,18 @@ fn test_event_envelope_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let _span = tracing::info_span!("test_event_envelope_roundtrip").entered();
 
     let env = EventEnvelope {
-        event_type: "tool_call".into(),
+        event_type: wire::WIRE_TOOL_CALL.into(),
         data: serde_json::json!({"tool": "read", "path": "/tmp/x"}),
         context: serde_json::json!({"session_id": "s1"}),
     };
 
-    tracing::info!("Arrange: 构造 EventEnvelope(tool_call)");
+    tracing::info!("Arrange: 构造 EventEnvelope(wire::WIRE_TOOL_CALL)");
     let json = serde_json::to_string(&env)?;
     tracing::info!("Act: 序列化 → 反序列化");
     let decoded: EventEnvelope = serde_json::from_str(&json)?;
 
     tracing::info!("Assert: 字段值一致");
-    assert_eq!(decoded.event_type, "tool_call");
+    assert_eq!(decoded.event_type, wire::WIRE_TOOL_CALL);
     assert_eq!(decoded.data["tool"], "read");
     assert_eq!(decoded.context["session_id"], "s1");
 

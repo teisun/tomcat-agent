@@ -153,11 +153,11 @@ flowchart TD
   end
 
   subgraph hostToJs [宿主向插件投递事件]
-    MapName["map_event_type_for_pi_mono_plugin\n内部名到 pi.on 名"]
-    Deliver["HostApiDispatcher.deliver_event\n会话 channel"]
+    WireNames["infra::events::wire\nJSON type 与 pi.on 字符串唯一来源"]
+    Deliver["HostApiDispatcher.deliver_event\n会话 channel（event_type 透传）"]
     WaitEvt["JS __session.waitForEvent"]
     DispatchJs["__pi_dispatch_event\nhandler event, ctx"]
-    MapName --> Deliver
+    WireNames --> Deliver
     Deliver --> WaitEvt
     WaitEvt --> DispatchJs
   end
@@ -178,7 +178,7 @@ flowchart TD
 
 - **路径 A**：适合「加载时执行一次初始化」；`main` 为 `.ts` 时在 `read_main_script` 内转译，不依赖磁盘上生成 `.js`。
 - **路径 B**：适合会话内持续收事件；`init_vm` 仅在 **VmActor** 组合脚本末尾注入 `__pi_start_event_loop`，避免插件未写循环时脚本立即退出。
-- **投递**：Rust 侧仍可使用内部事件名（如 `tool_execution_start`），在 `dispatch_session_event` 出口映射为插件 `pi.on` 使用的字符串（如 `tool_call`）。
+- **投递**：`AgentEvent` 中工具观察事件 JSON `type` 为 `tool_execution_start` / `tool_execution_end`（及可选 `tool_execution_update`）；扩展钩子为 `ExtensionEvent`，`type` 为 `tool_call` / `tool_result`。二者均在 Agent 工具循环内按序经 `EventBus::emit_sync` 发布。`dispatch_session_event` **透传** `event_type` 字符串至 VM，与 EventBus **非自动转发**。线格式名以 [`events.rs`](../../../../src/infra/events.rs) 内 `pub mod wire` 为唯一来源；工具链时序图见 [events.md §与 pi-mono 工具链事件对照](events.md)。
 
 ---
 

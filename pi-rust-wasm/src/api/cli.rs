@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     ensure_work_dir_structure, load_config, normalize_path, resolve_audit_dir,
-    resolve_quickjs_path, resolve_sessions_dir, validate_config, write_file_atomic, AppConfig,
-    AppError, AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
+    resolve_quickjs_path, resolve_sessions_dir, validate_config, wire, write_file_atomic,
+    AppConfig, AppError, AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
     FileAuditRecorder, PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry,
     TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
@@ -686,11 +686,11 @@ struct AuditDisplayEntry {
 #[allow(dead_code)] // 保留供单元测试
 fn parse_audit_line(line: &str, index: usize) -> Option<AuditDisplayEntry> {
     let audit_type = if line.contains("audit primitive") {
-        "primitive"
+        wire::WIRE_AUDIT_PRIMITIVE
     } else if line.contains("audit tool_call") {
-        "tool_call"
+        wire::WIRE_TOOL_CALL
     } else if line.contains("audit hostcall") {
-        "hostcall"
+        wire::WIRE_AUDIT_HOSTCALL
     } else {
         return None;
     };
@@ -874,6 +874,7 @@ pub(crate) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire;
 
     fn test_config(dir: &std::path::Path) -> AppConfig {
         let mut cfg = AppConfig::default();
@@ -1337,7 +1338,7 @@ mod tests {
         let entry = parse_audit_line(line, 0);
         assert!(entry.is_some());
         let e = entry.unwrap();
-        assert_eq!(e.audit_type, "primitive");
+        assert_eq!(e.audit_type, wire::WIRE_AUDIT_PRIMITIVE);
         assert_eq!(e.success, "OK");
     }
 
@@ -1347,7 +1348,7 @@ mod tests {
         let entry = parse_audit_line(line, 1);
         assert!(entry.is_some());
         let e = entry.unwrap();
-        assert_eq!(e.audit_type, "tool_call");
+        assert_eq!(e.audit_type, wire::WIRE_TOOL_CALL);
         assert_eq!(e.success, "FAIL");
     }
 
@@ -1357,7 +1358,7 @@ mod tests {
             r#"2025-03-10T12:00:00Z  INFO audit hostcall module=fs method=readFile success=true"#;
         let entry = parse_audit_line(line, 2);
         assert!(entry.is_some());
-        assert_eq!(entry.unwrap().audit_type, "hostcall");
+        assert_eq!(entry.unwrap().audit_type, wire::WIRE_AUDIT_HOSTCALL);
     }
 
     #[test]
@@ -1377,8 +1378,8 @@ mod tests {
         .unwrap();
         let entries = read_audit_entries(&log, Some(10)).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].audit_type, "tool_call");
-        assert_eq!(entries[1].audit_type, "primitive");
+        assert_eq!(entries[0].audit_type, wire::WIRE_TOOL_CALL);
+        assert_eq!(entries[1].audit_type, wire::WIRE_AUDIT_PRIMITIVE);
     }
 
     #[test]

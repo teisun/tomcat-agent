@@ -101,7 +101,7 @@ sequenceDiagram
   LLM-->>AgentLoop: 流式内容 / tool_calls
   AgentLoop->>AgentLoop: emit turn_start / message_update / message_end
   alt 有 tool_calls
-    AgentLoop->>AgentLoop: emit tool_execution_start
+    AgentLoop->>AgentLoop: emit tool_execution_start + ExtensionEvent tool_call
     AgentLoop->>Dispatcher: dispatch(instance_id, readFile/...)
     alt 4 原语
       Dispatcher->>Primitive: 执行 readFile/writeFile/editFile/exec
@@ -111,7 +111,7 @@ sequenceDiagram
       Plugin-->>Dispatcher: 结果
     end
     Dispatcher-->>AgentLoop: HostResponse
-    AgentLoop->>AgentLoop: emit tool_execution_end, messages.push(ToolResult)
+    AgentLoop->>AgentLoop: emit ExtensionEvent tool_result + tool_execution_end, messages.push(ToolResult)
     AgentLoop->>LLM: chat_stream(messages) 继续
   end
   AgentLoop->>AgentLoop: emit turn_end / agent_end
@@ -120,7 +120,7 @@ sequenceDiagram
 ```
 
 - 用户从 **CLI** 输入，CLI 调用 **AgentLoop.run**。
-- AgentLoop 在关键节点发布 **AgentEvent / ExtensionEvent**（agent_start、turn_start、tool_execution_start 等）。
+- AgentLoop 在关键节点发布 **AgentEvent / ExtensionEvent**（agent_start、turn_start、**tool_execution_*** 观察事件与 **tool_call** / **tool_result** 钩子事件等；见 [events.md 工具链对照](plugin-system/events.md)）。
 - 需要 LLM 时由宿主侧 **LLM** 流式返回；若有 **tool_calls**，由 AgentLoop 调用 **HostApiDispatcher**，再根据工具类型走 **4 原语** 或 **插件注册工具**（插件侧同样通过 Hostcall 与宿主通信）。
 - 工具结果写回消息列表，再喂给 LLM，直到没有新的 tool_calls，AgentLoop 结束本轮并 **emit agent_end**，把结果返回给 CLI。
 
@@ -150,7 +150,7 @@ sequenceDiagram
 │   steering_queue / follow_up_queue / abort_signal / on_stream_delta           │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ 外部桥接                                                                        │
-│   tool_call ─────────► HostApiDispatcher.dispatch(instance_id, request)       │
+│   tool 执行（execute_tool / dispatch）──► HostApiDispatcher 或 4 原语              │
 │   host_response ─────► messages.push(ToolResult) -> 下一轮 Reasoning          │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -173,9 +173,9 @@ Conversation Loop
           ├─ tool_calls 为空 ? ──是──► emit: turn_end -> return Ok(text)
           └─ tool_calls 非空
               └─ for each tool_call
-                  ├─ emit: tool_execution_start
-                  ├─ dispatch(instance_id, request)
-                  ├─ emit: tool_execution_end
+                  ├─ emit: tool_execution_start + ExtensionEvent tool_call
+                  ├─ dispatch(instance_id, request) / execute_tool
+                  ├─ emit: ExtensionEvent tool_result + tool_execution_end
                   ├─ messages.push(ToolResult)
                   └─ continue 下一轮 llm.chat_stream(updated_messages)
 ```

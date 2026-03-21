@@ -66,12 +66,14 @@
 //! │   │     │                                                                     │
 //! │   │     │     for tc in tool_calls:                                           │
 //! │   │     │       abort? ──是──► Err(Aborted)                                  │
-//! │   │     │       emit: tool_execution_start                                    │
+//! │   │     │       emit: ToolExecutionStart → tool_execution_start              │
+//! │   │     │       emit: ExtensionEvent ToolCall → tool_call                    │
 //! │   │     │       execute_tool(tc) → (content, is_error)                       │
+//! │   │     │       emit: ExtensionEvent ToolResult → tool_result                │
 //! │   │     │         ├── read_file / list_dir / write_file                       │
 //! │   │     │         ├── edit_file / execute_bash                                │
 //! │   │     │         └── unknown ──► is_error=true                              │
-//! │   │     │       emit: tool_execution_end                                      │
+//! │   │     │       emit: ToolExecutionEnd → tool_execution_end                 │
 //! │   │     │       messages.push(ToolResult)                                     │
 //! │   │     │       steering_queue 非空? ──是──► 注入 + break（跳过剩余工具）      │
 //! │   │     │     emit: turn_end                                                  │
@@ -128,7 +130,9 @@ use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamE
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
-use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message, ToolOutput};
+use crate::infra::events::{
+    AgentEvent, AssistantMessageEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
+};
 use tracing::debug;
 
 /// 流式 delta 回调类型，供调用方渲染等。
@@ -431,6 +435,17 @@ impl AgentLoop {
         let _ = self.event_bus.emit_sync(&event_name, ctx);
     }
 
+    fn emit_extension_event(&self, event: ExtensionEvent) {
+        let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+        let event_name = payload
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let ctx = EventContext::new(event_name.clone(), payload);
+        let _ = self.event_bus.emit_sync(&event_name, ctx);
+    }
+
     /// 第一层：Conversation loop，处理 FollowUp。
     pub async fn run(
         &mut self,
@@ -700,13 +715,31 @@ impl AgentLoop {
                     return Err(LoopError::Aborted);
                 }
 
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+
                 self.emit_event(AgentEvent::ToolExecutionStart {
                     tool_call_id: tc.id.clone(),
                     tool_name: tc.name.clone(),
-                    args: serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null),
+                    args: args.clone(),
+                });
+
+                self.emit_extension_event(ExtensionEvent::ToolCall {
+                    tool_name: tc.name.clone(),
+                    tool_call_id: tc.id.clone(),
+                    input: args.clone(),
                 });
 
                 let (result_content, is_error) = self.execute_tool(tc).await;
+
+                self.emit_extension_event(ExtensionEvent::ToolResult {
+                    tool_name: tc.name.clone(),
+                    tool_call_id: tc.id.clone(),
+                    input: args,
+                    content: vec![ContentBlock(serde_json::json!({ "text": result_content }))],
+                    details: None,
+                    is_error,
+                });
 
                 self.emit_event(AgentEvent::ToolExecutionEnd {
                     tool_call_id: tc.id.clone(),
@@ -866,6 +899,7 @@ struct ToolCallAccumulator {
 mod tests {
     use super::*;
     use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, StreamEvent};
+    use crate::infra::wire;
     use crate::infra::{DefaultEventBus, EventContext};
     use std::sync::Mutex;
 
@@ -1358,7 +1392,7 @@ mod tests {
         let agent_end_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let err_clone = Arc::clone(&agent_end_error);
         event_bus.on(
-            "agent_end",
+            wire::WIRE_AGENT_END,
             Box::new(move |ctx: EventContext| {
                 let err = ctx
                     .payload
@@ -1406,18 +1440,18 @@ mod tests {
         let primitive = Arc::new(MockPrimitiveExecutor);
         let event_bus = Arc::new(DefaultEventBus::new());
         let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let events = [
-            "agent_start",
-            "turn_start",
-            "message_start",
-            "message_update",
-            "message_end",
-            "turn_end",
-            "agent_end",
+        let expected: Vec<String> = vec![
+            wire::WIRE_AGENT_START.into(),
+            wire::WIRE_TURN_START.into(),
+            wire::WIRE_MESSAGE_START.into(),
+            wire::WIRE_MESSAGE_UPDATE.into(),
+            wire::WIRE_MESSAGE_END.into(),
+            wire::WIRE_TURN_END.into(),
+            wire::WIRE_AGENT_END.into(),
         ];
-        for ev in &events {
+        for ev in &expected {
             let list = Arc::clone(&order);
-            let name = (*ev).to_string();
+            let name = ev.clone();
             event_bus.on(
                 &name,
                 Box::new(move |ctx: EventContext| {
@@ -1438,7 +1472,7 @@ mod tests {
         }];
         let _ = loop_.run(messages).await.unwrap();
         let observed = order.lock().unwrap().clone();
-        assert_eq!(observed, events);
+        assert_eq!(observed, expected);
     }
 
     /// Steering：第 1 个工具执行后注入 steering，第 2 个工具不执行，下一轮 LLM 收到 steering 后返回文本。

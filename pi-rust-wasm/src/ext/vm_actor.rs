@@ -201,6 +201,7 @@ impl VmActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::wire;
 
     #[test]
     fn state_roundtrip() {
@@ -219,12 +220,13 @@ mod tests {
     #[test]
     fn event_envelope_serialize() {
         let env = EventEnvelope {
-            event_type: "session_start".into(),
+            event_type: wire::vm::WIRE_SESSION_START.into(),
             data: serde_json::json!({"key": "val"}),
             context: serde_json::json!({}),
         };
         let json = serde_json::to_string(&env).unwrap();
-        assert!(json.contains("\"type\":\"session_start\""));
+        let needle = format!("\"type\":\"{}\"", wire::vm::WIRE_SESSION_START);
+        assert!(json.contains(&needle));
     }
 
     #[test]

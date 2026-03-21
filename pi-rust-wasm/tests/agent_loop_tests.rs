@@ -6,10 +6,10 @@ mod common;
 
 use async_trait::async_trait;
 use pi_wasm::{
-    agent_messages_from_chat, convert_to_llm_format, AgentLoop, AgentLoopConfig, AgentMessage,
-    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, DefaultEventBus, DirEntry,
-    EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, PrimitiveExecutor,
-    PrimitiveOperation, StreamEvent, WriteFileResult,
+    agent_messages_from_chat, convert_to_llm_format, wire, AgentLoop, AgentLoopConfig,
+    AgentMessage, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, DefaultEventBus,
+    DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
+    PrimitiveExecutor, PrimitiveOperation, StreamEvent, WriteFileResult,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -371,7 +371,7 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
     let captured_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let err_clone = Arc::clone(&captured_error);
     event_bus.on(
-        "agent_end",
+        wire::WIRE_AGENT_END,
         Box::new(move |ctx: EventContext| {
             let err = ctx
                 .payload
@@ -552,6 +552,87 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     Ok(())
 }
 
+/// [工具事件 pi-mono 五段序] 单工具轮内先发观察向 tool_execution_*，再发钩子 tool_call/tool_result
+///
+/// 验证：EventBus 上事件名序列为 tool_execution_start → tool_call → tool_result → tool_execution_end（子序列）
+/// 意义：与 [events.md](../openspec/specs/architecture/plugin-system/events.md) 工具链对照一致
+#[tokio::test]
+async fn test_agent_loop_tool_pi_mono_event_subsequence(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_agent_loop_tool_pi_mono_event_subsequence").entered();
+
+    let stream_tool = tool_call_stream("bash1", "execute_bash", r#"{"command":"ls","cwd":null}"#);
+    let stream_text = text_stream("done");
+    let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_text]));
+    let primitive = Arc::new(MockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    let observed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let watch: Vec<&str> = vec![
+        wire::WIRE_AGENT_START,
+        wire::WIRE_TURN_START,
+        wire::WIRE_MESSAGE_START,
+        wire::WIRE_MESSAGE_END,
+        wire::WIRE_TOOL_EXECUTION_START,
+        wire::WIRE_TOOL_CALL,
+        wire::WIRE_TOOL_RESULT,
+        wire::WIRE_TOOL_EXECUTION_END,
+        wire::WIRE_TURN_END,
+        wire::WIRE_TURN_START,
+        wire::WIRE_MESSAGE_START,
+        wire::WIRE_MESSAGE_UPDATE,
+        wire::WIRE_MESSAGE_END,
+        wire::WIRE_TURN_END,
+        wire::WIRE_AGENT_END,
+    ];
+    for ev in &watch {
+        let list = Arc::clone(&observed);
+        let name = (*ev).to_string();
+        event_bus.on(
+            &name,
+            Box::new(move |ctx: EventContext| {
+                list.lock().unwrap().push(ctx.event_name.clone());
+                Ok(())
+            }),
+        );
+    }
+
+    let config = default_config("sess-tool-pi-mono-order");
+    let abort = Arc::new(AtomicBool::new(false));
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let messages = vec![AgentMessage::User {
+        text: "run ls".to_string(),
+    }];
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
+
+    let actual = observed.lock().unwrap().clone();
+    let needle = [
+        wire::WIRE_TOOL_EXECUTION_START,
+        wire::WIRE_TOOL_CALL,
+        wire::WIRE_TOOL_RESULT,
+        wire::WIRE_TOOL_EXECUTION_END,
+    ];
+    let mut j = 0usize;
+    for ev in &actual {
+        if j < needle.len() && ev.as_str() == needle[j] {
+            j += 1;
+        }
+    }
+    assert_eq!(
+        j,
+        needle.len(),
+        "应出现子序列 {:?}，实际事件: {:?}",
+        needle,
+        actual
+    );
+
+    Ok(())
+}
+
 /// [Fatal 401 立即终止] 401 错误不重试，run() 立即返回 Err 且消息含 401
 ///
 /// 验证：run() 返回 Err，错误描述包含 "401"；不会触发重试（即不消耗第二个 stream）
@@ -614,19 +695,20 @@ async fn test_agent_loop_events_published_in_correct_order(
     let event_bus = Arc::new(DefaultEventBus::new());
 
     let observed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let tracked_events = [
-        "agent_start",
-        "turn_start",
-        "message_start",
-        "message_update",
-        "message_end",
-        "turn_end",
-        "agent_end",
+    let tracked_events: Vec<String> = vec![
+        wire::WIRE_AGENT_START.into(),
+        wire::WIRE_TURN_START.into(),
+        wire::WIRE_MESSAGE_START.into(),
+        wire::WIRE_MESSAGE_UPDATE.into(),
+        wire::WIRE_MESSAGE_END.into(),
+        wire::WIRE_TURN_END.into(),
+        wire::WIRE_AGENT_END.into(),
     ];
     for ev_name in &tracked_events {
         let list = Arc::clone(&observed);
+        let name = ev_name.clone();
         event_bus.on(
-            ev_name,
+            &name,
             Box::new(move |ctx: EventContext| {
                 list.lock().unwrap().push(ctx.event_name.clone());
                 Ok(())
@@ -649,11 +731,9 @@ async fn test_agent_loop_events_published_in_correct_order(
     info!("Assert: 验证事件发布顺序与规范一致");
     let actual = observed.lock().unwrap().clone();
     assert_eq!(
-        actual,
-        tracked_events.as_slice(),
+        actual, tracked_events,
         "事件顺序应为 {:?}，实际为 {:?}",
-        tracked_events.as_slice(),
-        actual
+        tracked_events, actual
     );
 
     Ok(())

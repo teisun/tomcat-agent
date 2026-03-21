@@ -5,7 +5,7 @@
 mod common;
 
 use pi_wasm::{
-    parse_manifest, transpile_pi_plugin_for_quickjs, DefaultEventBus, HostApiDispatcher,
+    parse_manifest, transpile_pi_plugin_for_quickjs, wire, DefaultEventBus, HostApiDispatcher,
     HostResponse, PluginInstance, PluginManager, PluginStatus, RuntimeManager,
     SharedRuntimeManager, WasmEngine, WasmEngineConfig,
 };
@@ -1056,7 +1056,7 @@ async fn test_wasmedge_e2e_tps_tier1_agent_end_notify() -> Result<(), Box<dyn st
     mgr.dispatch_session_event(
         "s1",
         plugin_id,
-        "agent_start",
+        wire::WIRE_AGENT_START,
         serde_json::json!({}),
         serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
     )
@@ -1078,7 +1078,7 @@ async fn test_wasmedge_e2e_tps_tier1_agent_end_notify() -> Result<(), Box<dyn st
     mgr.dispatch_session_event(
         "s1",
         plugin_id,
-        "agent_end",
+        wire::WIRE_AGENT_END,
         agent_end,
         serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
     )

@@ -5,6 +5,48 @@
 
 use serde::Serialize;
 
+/// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
+pub mod wire {
+    // --- AgentEvent（`#[serde(tag = "type", rename_all = "snake_case")]` 下的线格式名）---
+    pub const WIRE_AGENT_START: &str = "agent_start";
+    pub const WIRE_AGENT_END: &str = "agent_end";
+    pub const WIRE_TURN_START: &str = "turn_start";
+    pub const WIRE_TURN_END: &str = "turn_end";
+    pub const WIRE_MESSAGE_START: &str = "message_start";
+    pub const WIRE_MESSAGE_UPDATE: &str = "message_update";
+    pub const WIRE_MESSAGE_END: &str = "message_end";
+    /// `AgentEvent::ToolExecutionStart` 的 JSON `type`（pi-mono 观察向）。
+    pub const WIRE_TOOL_EXECUTION_START: &str = "tool_execution_start";
+    pub const WIRE_TOOL_EXECUTION_UPDATE: &str = "tool_execution_update";
+    /// `AgentEvent::ToolExecutionEnd` 的 JSON `type`（pi-mono 观察向）。
+    pub const WIRE_TOOL_EXECUTION_END: &str = "tool_execution_end";
+    /// `ExtensionEvent::ToolCall` 的 JSON `type`（pi-mono 扩展钩子）。
+    pub const WIRE_TOOL_CALL: &str = "tool_call";
+    /// `ExtensionEvent::ToolResult` 的 JSON `type`（pi-mono 扩展钩子）。
+    pub const WIRE_TOOL_RESULT: &str = "tool_result";
+    pub const WIRE_AUTO_COMPACTION_START: &str = "auto_compaction_start";
+    pub const WIRE_AUTO_COMPACTION_END: &str = "auto_compaction_end";
+    pub const WIRE_AUTO_RETRY_START: &str = "auto_retry_start";
+    pub const WIRE_AUTO_RETRY_END: &str = "auto_retry_end";
+    pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
+
+    // --- ExtensionEvent ---
+    pub const WIRE_STARTUP: &str = "startup";
+    pub const WIRE_SESSION_BEFORE_SWITCH: &str = "session_before_switch";
+    pub const WIRE_SESSION_BEFORE_FORK: &str = "session_before_fork";
+    pub const WIRE_INPUT: &str = "input";
+
+    // --- 审计 kind_label（与 serde `kind` 一致；tool_call 与事件线格式同名）---
+    pub const WIRE_AUDIT_PRIMITIVE: &str = "primitive";
+    pub const WIRE_AUDIT_HOSTCALL: &str = "hostcall";
+    pub const WIRE_AUDIT_PLUGIN_LIFECYCLE: &str = "plugin_lifecycle";
+
+    /// VM / dispatcher 协议中与 AgentEvent 无关的 `event_type`（如 waitForEvent 信封）。
+    pub mod vm {
+        pub const WIRE_SESSION_START: &str = "session_start";
+    }
+}
+
 /// 占位：与 pi 系 Message 对齐，MVP 用 JSON 表示。
 #[derive(Debug, Clone, Serialize)]
 pub struct Message(pub serde_json::Value);
@@ -76,6 +118,7 @@ pub enum AgentEvent {
     MessageEnd {
         message: Message,
     },
+    /// 线格式 `tool_execution_start`（观察向）；钩子 `tool_call` 见 `ExtensionEvent::ToolCall`。
     ToolExecutionStart {
         #[serde(rename = "toolCallId")]
         tool_call_id: String,
@@ -92,7 +135,7 @@ pub enum AgentEvent {
         #[serde(rename = "partialResult")]
         partial_result: ToolOutput,
     },
-    /// 工具执行结束，含结果与是否错误。
+    /// 线格式 `tool_execution_end`（观察向）；钩子 `tool_result` 见 `ExtensionEvent::ToolResult`。
     ToolExecutionEnd {
         #[serde(rename = "toolCallId")]
         tool_call_id: String,
@@ -211,12 +254,68 @@ mod tests {
     fn agent_event_serialize_type_snake_case() {
         let e = AgentEvent::ExtensionError {
             extension_id: Some("ext-1".to_string()),
-            event: "tool_call".to_string(),
+            event: wire::WIRE_TOOL_CALL.to_string(),
             error: "test".to_string(),
         };
         let j = serde_json::to_string(&e).unwrap();
-        assert!(j.contains("extension_error"));
+        assert!(j.contains(wire::WIRE_EXTENSION_ERROR));
         assert!(j.contains("extensionId"));
+    }
+
+    #[test]
+    fn agent_event_tool_execution_uses_pi_mono_wire_names() {
+        let start = AgentEvent::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "read_file".into(),
+            args: serde_json::json!({}),
+        };
+        let end = AgentEvent::ToolExecutionEnd {
+            tool_call_id: "c1".into(),
+            tool_name: "read_file".into(),
+            result: ToolOutput(serde_json::json!({})),
+            is_error: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&start).unwrap()["type"]
+                .as_str()
+                .unwrap(),
+            wire::WIRE_TOOL_EXECUTION_START
+        );
+        assert_eq!(
+            serde_json::to_value(&end).unwrap()["type"]
+                .as_str()
+                .unwrap(),
+            wire::WIRE_TOOL_EXECUTION_END
+        );
+    }
+
+    #[test]
+    fn extension_event_tool_hooks_use_tool_call_tool_result_wire_names() {
+        let call = ExtensionEvent::ToolCall {
+            tool_name: "read_file".into(),
+            tool_call_id: "c1".into(),
+            input: serde_json::json!({}),
+        };
+        let result = ExtensionEvent::ToolResult {
+            tool_name: "read_file".into(),
+            tool_call_id: "c1".into(),
+            input: serde_json::json!({}),
+            content: vec![ContentBlock(serde_json::json!({"text": "ok"}))],
+            details: None,
+            is_error: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&call).unwrap()["type"]
+                .as_str()
+                .unwrap(),
+            wire::WIRE_TOOL_CALL
+        );
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["type"]
+                .as_str()
+                .unwrap(),
+            wire::WIRE_TOOL_RESULT
+        );
     }
 
     #[test]
@@ -226,7 +325,7 @@ mod tests {
             session_file: None,
         };
         let j = serde_json::to_string(&e).unwrap();
-        assert!(j.contains("startup"));
+        assert!(j.contains(wire::WIRE_STARTUP));
         assert!(j.contains("sessionFile"));
     }
 }

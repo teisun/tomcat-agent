@@ -139,4 +139,4 @@ match agent_loop.run(messages).await {
 
 - **单测**：`cargo test --lib` 全通过（当前 250 passed）；`core::agent_loop::tests` 覆盖：正常单轮无工具、多轮工具循环、Steering 注入后跳过剩余工具、FollowUp 同上下文继续、Abort 终止并 agent_end(interrupted)、429 触发重试后成功、401/503 Fatal 立即终止、convert_to_llm_format 各变体与 CompactionSummary→user、agent_messages_from_chat 往返。
 - **门禁**：`cargo clippy --lib` 无新增警告（既有 3 条在 config/logging，非本模块）。
-- **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、auto_retry_start/end、agent_end(success|error|interrupted) 发布时机与 [agent-loop.md](../../openspec/specs/architecture/agent-loop.md) 13.6 一致。
+- **事件**：agent_start、turn_start/end、message_start/update/end、**tool_execution_start**/**tool_execution_end**（JSON `type`；Rust `ToolExecutionStart`/`ToolExecutionEnd`，观察向）以及 **tool_call**/**tool_result**（`ExtensionEvent` 钩子，与观察向不同名）、auto_retry_start/end、agent_end(success|error|interrupted) 发布时机与 [agent-loop.md](../../openspec/specs/architecture/agent-loop.md) 13.6 及 [events.md](../../openspec/specs/architecture/plugin-system/events.md) 工具链对照一致。

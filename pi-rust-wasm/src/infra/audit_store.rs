@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::config::AppConfig;
 use super::error::AppError;
 use super::platform::write_file_atomic;
+use super::wire;
 
 /// 审计记录类型。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,10 +84,10 @@ impl AuditEntry {
     /// 类型标签，用于 CLI 展示。
     pub fn kind_label(&self) -> &'static str {
         match &self.payload {
-            AuditKindPayload::Primitive { .. } => "primitive",
-            AuditKindPayload::ToolCall { .. } => "tool_call",
-            AuditKindPayload::Hostcall { .. } => "hostcall",
-            AuditKindPayload::PluginLifecycle { .. } => "plugin_lifecycle",
+            AuditKindPayload::Primitive { .. } => wire::WIRE_AUDIT_PRIMITIVE,
+            AuditKindPayload::ToolCall { .. } => wire::WIRE_TOOL_CALL,
+            AuditKindPayload::Hostcall { .. } => wire::WIRE_AUDIT_HOSTCALL,
+            AuditKindPayload::PluginLifecycle { .. } => wire::WIRE_AUDIT_PLUGIN_LIFECYCLE,
         }
     }
 
@@ -284,10 +285,10 @@ fn filter_matches(row: &AuditEntryRow, _id: u64, f: &AuditFilter) -> bool {
         }
     }
     let kind_label = match &row.payload {
-        AuditKindPayload::Primitive { .. } => "primitive",
-        AuditKindPayload::ToolCall { .. } => "tool_call",
-        AuditKindPayload::Hostcall { .. } => "hostcall",
-        AuditKindPayload::PluginLifecycle { .. } => "plugin_lifecycle",
+        AuditKindPayload::Primitive { .. } => wire::WIRE_AUDIT_PRIMITIVE,
+        AuditKindPayload::ToolCall { .. } => wire::WIRE_TOOL_CALL,
+        AuditKindPayload::Hostcall { .. } => wire::WIRE_AUDIT_HOSTCALL,
+        AuditKindPayload::PluginLifecycle { .. } => wire::WIRE_AUDIT_PLUGIN_LIFECYCLE,
     };
     if let Some(ref k) = f.kind {
         if kind_label != k.as_str() {
@@ -321,6 +322,7 @@ fn parse_timestamp_approx_secs(ts: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::wire;
     use super::*;
 
     #[test]
@@ -376,8 +378,8 @@ mod tests {
         let entries = store.query(&AuditFilter::default()).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, 2);
-        assert_eq!(entries[0].kind_label(), "tool_call");
+        assert_eq!(entries[0].kind_label(), wire::WIRE_TOOL_CALL);
         assert_eq!(entries[1].id, 1);
-        assert_eq!(entries[1].kind_label(), "primitive");
+        assert_eq!(entries[1].kind_label(), wire::WIRE_AUDIT_PRIMITIVE);
     }
 }

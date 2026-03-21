@@ -26,7 +26,7 @@
 | **异步 Hostcall / submit/poll** | 耗时请求不阻塞插件：插件带 callId 提交请求，宿主立即返回 `{ pending: true }`；插件随后用 `__async.poll(callId)` 轮询，拿到结果后再继续。 | HostApiDispatcher：submit_async 写 Pending、spawn Tokio 任务；poll 查 async_results。 |
 | **callId** | 某次异步 Hostcall 的唯一标识；用于在 async_results 中挂起/取回结果，以及按 instance 清理。 | 由调用方传入 HostRequest；Dispatcher 用 DashMap&lt;callId, AsyncCallStatus&gt; 存储。 |
 | **ExtensionEvent** | 供扩展（插件）订阅的钩子事件，如 tool_call、tool_result、input、session_before_switch；插件通过 `agent.on(event_name, callback)` 注册。 | 事件系统；宿主在 Agent Loop 等关键节点发布，插件监听；详见 [事件系统设计](plugin-system/events.md)。 |
-| **AgentEvent** | 供流式/UI 使用的事件，携带完整上下文（如 TurnStart、MessageUpdate、ToolExecutionEnd）；与 ExtensionEvent 命名和用途区分。 | 同一事件总线发布；序列化格式见 [事件系统设计](plugin-system/events.md)。 |
+| **AgentEvent** | 供流式/UI 使用的事件，携带完整上下文（如 TurnStart、MessageUpdate）；工具观察向 JSON `type` 为 `tool_execution_*`。 | 与 ExtensionEvent 钩子（`tool_call`/`tool_result`）区分；见 [事件系统设计](plugin-system/events.md)。 |
 | **pi_bridge.js** | 运行在沙箱内的 JS 桥接脚本，暴露 `globalThis.pi`，把 readFile、createChatCompletion、on/emit 等调用转成对 `__pi_host_call` 的 JSON 请求。 | 随 wasmedge_quickjs 加载进插件实例；与 [JS 桥接层](plugin-system/js-bridge-layer.md)、[JS API 对齐](plugin-system/js-api-alignment.md) 对应。 |
 | **HostRequest / HostResponse** | Hostcall 的 JSON 请求/响应格式：请求含 module、method、params、可选 callId；响应含 data 或 pending/error。 | 协议定义见 [Hostcall JSON 协议](plugin-system/host-call-protocol.md)；实现与 host-api-layer 一致。 |
 

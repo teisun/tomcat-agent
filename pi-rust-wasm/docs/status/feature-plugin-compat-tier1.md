@@ -11,7 +11,7 @@
 ### INTERFACE
 
 - `transpile_pi_plugin_for_quickjs`、`PluginManager::read_main_script`（.ts/.tsx）
-- `PluginManager::dispatch_session_event` 事件名映射（内部 `tool_execution_*` → pi-mono `tool_call` / `tool_result`）
+- `PluginManager::dispatch_session_event`（`event_type` 透传；与 `EventBus` emit 非自动转发；`wire` 与 [events.md](../../openspec/specs/architecture/plugin-system/events.md) 五段工具链一致）
 - `WasmInstance::init_vm` 尾部自动 `__pi_start_event_loop`（零修改 pi-mono 插件）
 - `HostApiDispatcher::with_ui_notify_counter`（E2E 断言）
 - `assets/js/pi_bridge.js`：`__pi_dispatch_event` 内 `ctx.cwd` 回退 `context.getCwd`
@@ -35,7 +35,7 @@
 | b.1 `export default function(pi)` 入口 | 完成：`read_main_script` + `build_combined_script` 对 `.ts`/`.tsx` 转译 |
 | b.2 handler `(event, ctx)` | 完成：`__pi_dispatch_event` 传 `(eventData, ctx)` |
 | b.3 最小 ctx（hasUI、cwd、ui.notify） | 完成：`ctx.cwd` 空时回退 `context.getCwd` |
-| b.4 事件名映射 | 完成：`tool_execution_start/end` → `tool_call`/`tool_result` |
+| b.4 线格式事件名 | 完成：`AgentEvent` 观察向 `tool_execution_*` + `ExtensionEvent` 钩子 `tool_call`/`tool_result` + `events::wire`；`dispatch_session_event` 无出口映射；插件 VM 侧完整接收 EventBus 钩子事件仍属后续桥接 |
 | b.5 tps E2E | 完成：`init_vm` 尾部注入 `__pi_start_event_loop` |
 | b.6 自动化 | 完成：E2E-WASM-036 + `with_ui_notify_counter` |
 
@@ -54,8 +54,7 @@
 - **b.2/b.3** 文件：[pi_bridge.js](../../assets/js/pi_bridge.js)  
   思路：`__pi_resolve_cwd`；handler 已 `(eventData, ctx)`。
 
-- **b.4** 文件：[plugin.rs](../../src/ext/plugin.rs)  
-  思路：`extension_event_name_for_bus_event`；单测映射表。
+- **b.4** 文件：[events.rs](../../src/infra/events.rs) `wire` + `AgentEvent` serde；[plugin.rs](../../src/ext/plugin.rs) 仅透传 `event_type`。
 
 - **长生命周期入口**：[instance_wasmedge.rs](../../src/ext/instance_wasmedge.rs) `init_vm` 仅用于 VmActor，尾部追加 `__pi_start_event_loop()`，避免 pi-mono 插件未写循环时脚本立即退出。
 

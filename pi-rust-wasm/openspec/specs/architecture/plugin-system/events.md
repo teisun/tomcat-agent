@@ -68,6 +68,35 @@ pub enum ExtensionEvent {
 }
 ```
 
+**线格式名（JSON `type`）**：`AgentEvent` 使用 `#[serde(tag = "type", rename_all = "snake_case")]`，故 `ToolExecutionStart` / `ToolExecutionEnd` / `ToolExecutionUpdate` 的 `type` 分别为 **`tool_execution_start`**、**`tool_execution_end`**、**`tool_execution_update`**（观察向，与 pi-mono 流式/UI 一致）。扩展钩子 **`tool_call`** / **`tool_result`** 仅用于 **`ExtensionEvent::ToolCall` / `ToolResult`**，与上述观察事件名不同；常量见源码 [`events.rs`](../../../../src/infra/events.rs) `pub mod wire`。
+
+### 与 pi-mono 工具链事件对照
+
+pi-mono `ExtensionAPI`（`packages/coding-agent` 中 `extensions/types.ts`）中工具相关有五个事件名：**观察向**（`tool_execution_*`）与**钩子向**（`tool_call` / `tool_result`）分离。宿主在 Agent 循环内对单次工具调用按时间顺序发布（同一条 `EventBus`，不同 JSON `type` 与 payload 形状）：
+
+```text
+tool_execution_start  →  tool_call  →  [execute_tool]  →  tool_result  →  tool_execution_end
+   AgentEvent            ExtensionEvent                    ExtensionEvent    AgentEvent
+```
+
+```mermaid
+sequenceDiagram
+    participant Loop as AgentLoop
+    participant Bus as EventBus
+    participant Hook as ExtensionHook
+    Loop->>Bus: tool_execution_start (AgentEvent)
+    Loop->>Bus: tool_call (ExtensionEvent)
+    Bus-->>Hook: pi.on("tool_call")
+    Loop->>Loop: execute_tool
+    Loop->>Bus: tool_result (ExtensionEvent)
+    Bus-->>Hook: pi.on("tool_result")
+    Loop->>Bus: tool_execution_end (AgentEvent)
+```
+
+- **观察向**：UI / 日志订阅 `tool_execution_start`、`tool_execution_end`（及可选 `tool_execution_update`），表示「工具生命周期」。
+- **钩子向**：扩展订阅 `tool_call`（执行前）、`tool_result`（执行后）；pi-mono 中可 block / 改写结果，本仓库当前阶段以**发射事件**为主，拦截语义见 [pi-mono-compat-strategy.md §13](pi-mono-compat-strategy.md) 与 `feature-plugin-compat-tier1.md`。
+- **VM 路径**：`PluginManager::dispatch_session_event` 透传 `event_type` 至长生命周期 VM，与 `EventBus::emit_sync` **并行**；插件 JS 是否收到与 `emit_sync` 同源的事件取决于桥接实现，详见 compat 文档。
+
 ### 事件执行机制
 
 - 宿主在关键节点发布 **AgentEvent**（流式/UI）与 **ExtensionEvent**（扩展钩子），携带完整上下文
