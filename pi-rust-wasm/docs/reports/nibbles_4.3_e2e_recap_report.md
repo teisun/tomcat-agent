@@ -32,7 +32,7 @@
 - **实际交付**：
   - 已实现并合入的用例：**5 个** —— E2E-WASM-031～035（含 `test_wasmedge_e2e_set_interval_runs_during_session`）。
   - 配套 fixture：`vm_actor_counter_test.js`、`vm_actor_multi_handler_test.js`、`vm_actor_set_interval_test.js`。
-- **自动化结果**：上述 5 个用例在 CI/本地 `cargo test --test wasmedge_e2e_tests` 中均**通过**（根因修复后功能可用）。
+- **自动化结果**：上述 5 个用例在 CI/本地 `cargo test --test wasmedge_e2e_tests -- --test-threads=1` 中均**通过**（根因修复后功能可用）。
 
 因此：**4.3 已做完且与场景库一一对应**；根因已修复，长生命周期 VM hostcall 链路可用。
 

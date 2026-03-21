@@ -279,7 +279,7 @@
 │  │  人类选择：all / 单分支 / 仅验收不合并                            │
 │  ▼                                                                  │
 │  Step 2 · 合并前检查                                                 │
-│  │  cargo build → cargo clippy → cargo test                        │
+│  │  cargo build → cargo clippy → cargo test -j 1 -- --test-threads=1 │
 │  │  冲突解决 → 依赖顺序检查                                         │
 │  ▼                                                                  │
 │  Step 3 · 合并后（顺序与命令见 INTEGRATION_MERGE_AND_ACCEPTANCE）    │

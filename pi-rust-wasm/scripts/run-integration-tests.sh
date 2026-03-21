@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 集成测试：WasmEdge 检测（非 Windows 可自动 install-wasmedge.sh -y）、source ~/.wasmedge/env。
 # 使用 cargo test --test '*' 已含 cli_tests 与 wasmedge_e2e_tests，不再单独重复跑。
+# 全量测试固定为串行：`-j 1` 串行各测试二进制，`--test-threads=1` 串行同二进制内用例（降低 Wasm/Tokio 并发死锁风险）。
 # 非 TTY 下强制 EDITOR/PAGER 为无交互，避免子进程阻塞；说明见 docs/reports/integration_test_hang_remediation.md。
 #
 # 用法（在项目根）：
@@ -56,8 +57,8 @@ case "$CMD" in
     log_phase "结束 release"
     ;;
   lib)
-    log_phase "开始 lib: cargo test --lib"
-    cargo test --lib -- --nocapture
+    log_phase "开始 lib: cargo test --lib（-j 1，--test-threads=1）"
+    cargo test -j 1 --lib -- --nocapture --test-threads=1
     log_phase "结束 lib"
     ;;
   integration)
@@ -72,9 +73,9 @@ case "$CMD" in
         fi
         INTEGRATION_TEST_ARGS+=(--test "$base")
       done
-      cargo test --no-fail-fast "${INTEGRATION_TEST_ARGS[@]}" -- --nocapture
+      cargo test -j 1 --no-fail-fast "${INTEGRATION_TEST_ARGS[@]}" -- --nocapture --test-threads=1
     else
-      cargo test --no-fail-fast --test '*' -- --nocapture
+      cargo test -j 1 --no-fail-fast --test '*' -- --nocapture --test-threads=1
     fi
     log_phase "结束 integration"
     ;;
@@ -84,8 +85,8 @@ case "$CMD" in
     log_phase "开始 release: cargo build --release"
     cargo build --release || FAIL=1
     log_phase "结束 release"
-    log_phase "开始 lib: cargo test --lib"
-    cargo test --lib -- --nocapture || FAIL=1
+    log_phase "开始 lib: cargo test --lib（-j 1，--test-threads=1）"
+    cargo test -j 1 --lib -- --nocapture --test-threads=1 || FAIL=1
     log_phase "结束 lib"
     log_phase "开始 integration（tests/ 下全部 integration test crate）"
     if [ $SKIP_WASMEDGE -eq 1 ]; then
@@ -98,9 +99,9 @@ case "$CMD" in
         fi
         INTEGRATION_TEST_ARGS+=(--test "$base")
       done
-      cargo test --no-fail-fast "${INTEGRATION_TEST_ARGS[@]}" -- --nocapture || FAIL=1
+      cargo test -j 1 --no-fail-fast "${INTEGRATION_TEST_ARGS[@]}" -- --nocapture --test-threads=1 || FAIL=1
     else
-      cargo test --no-fail-fast --test '*' -- --nocapture || FAIL=1
+      cargo test -j 1 --no-fail-fast --test '*' -- --nocapture --test-threads=1 || FAIL=1
     fi
     log_phase "结束 integration"
     set -e

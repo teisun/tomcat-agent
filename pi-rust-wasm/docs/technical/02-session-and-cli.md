@@ -113,4 +113,4 @@
 ## 6. 依赖与验收
 
 - **依赖**：T1-P0-001~006、TASK-01、TASK-02。
-- **验收**：`cargo test --lib` 通过；clippy/rustfmt 通过；chat 可流式对话、多轮上下文、工具调用。
+- **验收**：`cargo test -j 1 --lib -- --test-threads=1` 通过；clippy/rustfmt 通过；chat 可流式对话、多轮上下文、工具调用。

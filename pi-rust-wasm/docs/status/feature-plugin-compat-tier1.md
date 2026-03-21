@@ -43,7 +43,7 @@
 
 **目标**：零修改 [tests/fixtures/pi_mono_tps/tps.ts](../../tests/fixtures/pi_mono_tps/tps.ts) 经 SWC 后在长生命周期 VM 中加载；宿主投递 `agent_start`/`agent_end` 后 `ctx.ui.notify` 触发宿主 `uiNotify`。
 
-**验收**：`cargo test -p pi_wasm --test wasmedge_e2e_tests` 中含 Tier1 用例通过；`rustfmt`/`clippy` 通过；INTEGRATION 脚本按仓库规范复跑。
+**验收**：`cargo test -p pi_wasm -- --test-threads=1 --test wasmedge_e2e_tests` 中含 Tier1 用例通过；`rustfmt`/`clippy` 通过；INTEGRATION 脚本按仓库规范复跑。
 
 ### 3. 逐子项要点
 

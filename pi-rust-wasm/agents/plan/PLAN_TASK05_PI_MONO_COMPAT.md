@@ -68,7 +68,7 @@
 - Tier 1: 至少 1 个纯事件监听扩展零修改运行（tps.ts）
 - Tier 2: 至少 2 个含 registerCommand + exec 的扩展零修改运行
 - 每个 Tier 有对应的自动化 E2E 测试（可优先覆盖矩阵中各 Tier 的代表扩展）
-- `cargo test` 全量通过
+- `cargo test -j 1 --all -- --test-threads=1` 全量通过（串行约定见 INTEGRATION_TEST_SPEC §7.1）
 
 ### 架构数据流
 

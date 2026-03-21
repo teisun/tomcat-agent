@@ -117,7 +117,7 @@ pub fn execute(command: &str, args: Vec<&str>) -> Result<String, AppError> {
 
 ## 7. 验收标准
 - 运行 `cargo doc --open`，文档页面应清晰、无断链、示例可读。
-- 关键模块的文档测试 (`cargo test --doc`) 必须全部通过。
+- 关键模块的文档测试（`cargo test -j 1 --doc -- --test-threads=1`）必须全部通过。
 - 复杂枚举变体必须有注释说明每个变体的用途。
 
 ```rust

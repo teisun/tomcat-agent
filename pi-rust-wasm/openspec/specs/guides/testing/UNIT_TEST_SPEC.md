@@ -10,7 +10,7 @@
 - **无 key 即不通过**：依赖外部 API key（如 OPENAI_API_KEY）的用例属于核心功能，**未配置 key 时该用例须失败（panic/断言失败），不得用“跳过”绕过**；运行单测前须配置好所需环境，否则相关用例失败。
 - **真实性优先**：核心 LLM 逻辑优先真实接口调用；**外部成熟 API（OpenAI 等）优先用真实请求不通再mock、**；自测时若主 API 与配置的 fallback 均不可用，**再使用 mock 数据**完成该用例，保证单测可稳定通过（优先级：真实请求 > 降级重试 > mock）。**内部未完成模块**因开发进度可用 mock。
 - **自包含性**：每个用例可独立运行，不依赖其他用例的执行顺序。
-- **执行与验收**：跑 `cargo test -p <crate>` 后若有失败，查原因并修复（含补全环境配置），循环直至全部通过。
+- **执行与验收**：跑 `cargo test -p <crate> -j 1 -- --test-threads=1`（或在本仓库根目录等价的 `cargo test -j 1 -- --test-threads=1`）后若有失败，查原因并修复（含补全环境配置），循环直至全部通过。
 - **禁止为过 CI 弱化断言**：不得以放宽断言阈值、删除或注释关键 `assert`、仅 `println!` 而不失败、无评审依据滥用 `#[ignore]` 等方式使失败用例「形式上通过」。须修复实现或重写测试，使断言真实反映契约；与 [Constitution.md](../../Constitution.md)「测试不通过则查因改码」及集成/E2E 规范一致。
 
 ### 1.2 Mock 策略：外部接口 vs 内部模块
@@ -29,7 +29,7 @@
 - 依赖外部 API key（如 `OPENAI_API_KEY`）的用例：**未配置 key 时该用例须不通过**（例如断言 `new()` 失败、或要求 key 的集成断言失败），**不得在无 key 时 return 跳过**；核心功能不能草率绕过。
 - 运行单测前须在运行环境中配置好所需 key（如项目根目录 `.env`、或 `export OPENAI_API_KEY=...`），配置方式见项目说明；未配置则依赖该 key 的用例失败，需补全配置后重新跑测直至通过。
 - 已配置 key 但请求仍失败（如 API 错误、超时等）：用例必须**失败**（`panic!` 或 `assert!`），不得改为“跳过”以绕过失败。
-- **运行环境与网络**：依赖 OpenAI 等外部 API 的用例需在**能访问对应服务**（如 api.openai.com）的环境中运行。若在 IDE/CI 中因运行进程无外网权限而报「请求失败 / error sending request」，请**在本机终端**执行 `cargo test -p pi_wasm` 验证；通过即表示实现与配置正确。自测时降级仍不通则用 mock（见上表）。
+- **运行环境与网络**：依赖 OpenAI 等外部 API 的用例需在**能访问对应服务**（如 api.openai.com）的环境中运行。若在 IDE/CI 中因运行进程无外网权限而报「请求失败 / error sending request」，请**在本机终端**执行 `cargo test -p pi_wasm -j 1 -- --test-threads=1` 验证；通过即表示实现与配置正确。自测时降级仍不通则用 mock（见上表）。
 - **强制断言环境**：涉及 `OPENAI_API_KEY` 的测试建议使用统一校验（如 `dotenvy::dotenv().ok(); std::env::var("OPENAI_API_KEY").expect("测试失败：未检测到 OPENAI_API_KEY")`），严禁静默跳过。
 
 ---
@@ -66,7 +66,7 @@
   info!：记录测试步骤（如：“开始调用 OpenAI API”）。
   debug!：记录原始报文或中间变量。
   error!：记录非预期的捕获异常。
-  查看日志：执行测试时建议使用 `RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture` 以便在开发阶段实时观察执行流。
+  查看日志：执行测试时建议使用 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` 以便在开发阶段实时观察执行流。
 
 
 ---
@@ -92,7 +92,7 @@
 在执行 `git commit` 前自检：
 
 1. 是否有新增功能？若有，必须附带至少一个测试用例。
-2. 本地 `cargo test` 是否全量通过？
+2. 本地是否已用 **`cargo test -j 1 … -- --test-threads=1`**（见 INTEGRATION_TEST_SPEC §7.1）全量通过？
 3. 是否存在被 `#[ignore]` 的遗留问题？
 4. 涉及 Key 的测试是否在本地（或私有 CI）验证通过？
 5. 是否仅保留关键链路日志，清空不必要的 `println!`？

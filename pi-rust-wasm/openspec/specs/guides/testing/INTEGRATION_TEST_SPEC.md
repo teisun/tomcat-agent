@@ -106,7 +106,7 @@ my_project/
 *   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：默认构建即包含 WasmEdge；在环境已安装 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)` 或 `run_script_file(path)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。
 *   wasmedge_quickjs 集成测试包含真实 .js 脚本：Hello World（`tests/fixtures/wasmedge_quickjs/hello.js`）、4 原语（`tests/fixtures/wasmedge_quickjs/primitives_test.js`）、桥接层（`tests/fixtures/wasmedge_quickjs/bridge_test.js`，验证 `pi.readFile/writeFile/editFile/exec` 通过 `pi_bridge.js` 正确路由到 hostCall）、事件分发（`tests/fixtures/wasmedge_quickjs/event_dispatch_test.js`，验证 `dispatch_event()` 触发 JS handler、ctx 代理对象的动态方法均触发 hostCall），依赖 WASI argv/preopen 与每次新建 Vm；工作目录与临时文件约定见 [工作目录与数据布局](../../architecture/work-dir-and-data-layout.md)。桥接层与事件分发架构见 [JS 桥接层](../../architecture/plugin-system/js-bridge-layer.md)。
 *   **环境缺失不允许跳过或绕过**。执行全量集成测试前须已安装 WasmEdge 并配置 wasmedge_quickjs.wasm 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`）。
-*   **协助安装**：若环境未安装 WasmEdge，应协助客户全局安装。可运行 `scripts/run-integration-tests.sh` 自动检查并安装后执行全量集成测试；或运行 `scripts/install-wasmedge.sh`（Linux/macOS），或见 https://wasmedge.org/docs/start/install，再执行 `cargo build` 与 `RUST_LOG=pi_wasm=debug,info cargo test --test wasmedge_e2e_tests -- --nocapture`。
+*   **协助安装**：若环境未安装 WasmEdge，应协助客户全局安装。可运行 `scripts/run-integration-tests.sh` 自动检查并安装后执行全量集成测试；或运行 `scripts/install-wasmedge.sh`（Linux/macOS），或见 https://wasmedge.org/docs/start/install，再执行 `cargo build` 与 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1`。
 *   **失败即失败**：上述构建或测试若失败，视为集成测试不通过，不得以「环境未就绪」为由跳过或记录为通过。
 *   **不得通过降低断言或放宽验收条件使用例通过**：不得通过降低断言或放宽「宿主侧行为」（如 host_call 被调用、返回符合预期）的验收条件来使用例通过；若运行时/环境不满足要求，须查因修复或记录阻塞，用例视为不通过（见 Constitution 第 24 条）。
 *   与 5.2 中 LLM 真实 API 要求并列：Wasm 与 LLM 均为「须在真实环境下验证」的外部依赖。
@@ -120,13 +120,14 @@ my_project/
 ## 7. 执行与持续集成 (CI)
 
 ### 7.1 本地执行
-*   运行所有集成测试：`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture`
-*   运行特定文件：`RUST_LOG=pi_wasm=debug,info cargo test --test api_tests -- --nocapture`
-*   显示打印输出：`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture`
+*   **串行约定（本仓库）**：`cargo test` 须加 **`-j 1`**（串行执行各测试目标/二进制）与 **`--test-threads=1`**（串行执行同一目标内用例，写在 `--` 之后）。涉及 Wasm/Tokio/spawn_blocking 时并行易导致挂起或 flaky；一键脚本 `./scripts/run-integration-tests.sh` 已按此执行。
+*   运行所有集成测试：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1`
+*   运行特定文件：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test api_tests -- --nocapture --test-threads=1`
+*   显示打印输出（含库内单元测试）：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`
 
-### 7.2 串行执行
-对于涉及全局资源（如固定端口、单例数据库）的测试，需强制单线程执行：
-`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture --test-threads=1`
+### 7.2 串行执行（与 7.1 一致）
+涉及全局资源、Wasm 真实运行时或长生命周期 VM 的测试：**必须**使用 `-j 1` 与 `--test-threads=1`，例如：
+`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：
@@ -157,7 +158,7 @@ my_project/
 2. **上下文**：为每个测试用例创建 `info_span!`（或使用 `#[instrument]`）标注用例名与关键参数（如 plugin_id、session_key）。
 3. **AAA 日志锚点**：在 Arrange / Act / Assert 三个阶段的关键步骤**至少各记录一条** `tracing::info!`（必要时补 `tracing::debug!` 记录关键变量）。
 
-> 说明：默认 `cargo test` 会捕获输出，需使用 `-- --nocapture` 才能在终端实时看到日志。详细技术说明与目录结构见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)。
+> 说明：默认 `cargo test` 会捕获输出，需使用 `-- --nocapture --test-threads=1` 才能在终端实时看到日志；全量测试建议同时加 **`cargo test -j 1`**。详细技术说明与目录结构见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)。
 
 ---
 
@@ -166,8 +167,8 @@ my_project/
 **集成测试门禁**：全量集成测试须包含并通过鲁棒性/异常边界类用例（如 `robustness_tests` 或等价的异常、边界、超时、资源类用例）；具体要求与清单见子文档 [集成测试鲁棒性保障](INTEGRATION_TEST_ROBUSTNESS.md)。
 
 - **鲁棒性编写要求**：须包含并维护 `robustness_tests.rs`（或等效的异常、边界、超时、资源泄露等用例），符合 [INTEGRATION_TEST_ROBUSTNESS.md](INTEGRATION_TEST_ROBUSTNESS.md) 要求。
-- **鲁棒性验证门禁**：全量 `RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 须包含并通过鲁棒性用例（如 `--test robustness_tests`）；不满足则与日志门禁同样处理（补全后再跑全量验收）。
-- **验收清单项**：**鲁棒性集成测试**：`RUST_LOG=pi_wasm=debug,info cargo test --test robustness_tests -- --nocapture` 通过（或等价地，`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 已包含 robustness_tests 并通过）。
+- **鲁棒性验证门禁**：全量 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 须包含并通过鲁棒性用例（如 `--test robustness_tests`）；不满足则与日志门禁同样处理（补全后再跑全量验收）。
+- **验收清单项**：**鲁棒性集成测试**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test robustness_tests -- --nocapture --test-threads=1` 通过（或等价地，`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 已包含 robustness_tests 并通过）。
 
 集成测试须覆盖异常与边界场景（环境/契约/状态边界），包括故障注入、超时控制、脏数据与非法路径、资源泄露验证及异常测试的断言准则与清单。正文见子文档 [集成测试鲁棒性保障](INTEGRATION_TEST_ROBUSTNESS.md)。
 

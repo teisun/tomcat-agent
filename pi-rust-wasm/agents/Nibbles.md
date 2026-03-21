@@ -39,8 +39,8 @@
 
 本角色自身无"任务验收"，但需保证：
 
-- 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture`（全量）。
-- **已按规范编写/补充集成测试与 E2E 测试代码**；集成测试符合 INTEGRATION_TEST_SPEC，E2E 测试符合 E2E_TEST_SPEC 且与 User_Stories、E2E_SCENARIO_LIBRARY 对应；`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 包含并通过集成测试，cli_tests / wasmedge_e2e_tests 通过。
+- 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`（全量）。
+- **已按规范编写/补充集成测试与 E2E 测试代码**；集成测试符合 INTEGRATION_TEST_SPEC，E2E 测试符合 E2E_TEST_SPEC 且与 User_Stories、E2E_SCENARIO_LIBRARY 对应；`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 包含并通过集成测试，cli_tests / wasmedge_e2e_tests 通过。
 - 验收清单执行通过或问题已记录并指派。
 
 ---
@@ -71,7 +71,7 @@
 
 1. `cargo build` 无错误
 2. `cargo clippy` 无警告（全量规则）
-3. `RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture` 全部通过
+3. `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` 全部通过
 4. 若存在冲突，由 Nibbles 或提交方在本地解决后再推
 
 ### 4. 合并到 develop 后的文档与测试（合并后、全量验收前必须完成，顺序不可颠倒）

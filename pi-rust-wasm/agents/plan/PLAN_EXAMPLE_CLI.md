@@ -39,7 +39,7 @@
 - `pi-wasm audit list/show/export` 能读取已有审计日志
 - 所有子命令帮助文档完整、参数校验正确
 - 首次运行无配置时的提示友好
-- `cargo test` 全部通过，门禁（rustfmt/clippy/单测）通过
+- `cargo test -j 1 --all -- --test-threads=1` 全部通过，门禁（rustfmt/clippy/单测）通过
 
 ### 各步骤的用户故事、作用与意义
 

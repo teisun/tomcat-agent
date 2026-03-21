@@ -28,7 +28,8 @@ cargo build --release
 
 ```bash
 # 需要先配置 .env（参考 .env.example）
-RUST_LOG=pi_wasm=debug,info cargo test --all -- --nocapture --test-threads=1
+# -j 1：串行执行各测试二进制；--test-threads=1：串行执行同一二进制内用例（Wasm/Tokio 场景推荐，见 INTEGRATION_TEST_SPEC §7.1）
+RUST_LOG=pi_wasm=debug,info cargo test -j 1 --all -- --nocapture --test-threads=1
 ```
 
 ## 项目结构

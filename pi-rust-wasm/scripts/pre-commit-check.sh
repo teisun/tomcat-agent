@@ -3,8 +3,8 @@
 set -e
 cd "$(dirname "$0")/.."
 
-echo "=== 1. 全量测试 ==="
-cargo test --all
+echo "=== 1. 全量测试（-j 1 与各目标内 --test-threads=1 串行）==="
+cargo test -j 1 --all -- --test-threads=1
 echo ""
 
 echo "=== 2. 覆盖率（pi_wasm lib）==="

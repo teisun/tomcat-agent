@@ -429,7 +429,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `feature/plugin-compat-tier1` |
 | **阻塞点** | — |
@@ -604,7 +604,7 @@
 
 **验收标准**：
 - 核心模块覆盖率 >= 80%，核心路径 100%
-- `cargo test` 全部通过
+- `cargo test -j 1 --all -- --test-threads=1` 全部通过（见 INTEGRATION_TEST_SPEC §7.1）
 - 跨平台编译通过（至少 CI 或本地三平台各一次）
 
 ---

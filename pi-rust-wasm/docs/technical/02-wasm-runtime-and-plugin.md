@@ -118,7 +118,7 @@ flowchart LR
 
 ### 集成测试要求
 
-- 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。可执行 `./scripts/run-integration-tests.sh` 自动完成环境检查、未安装则安装（并写入 profile，新开终端无需再 source）、再跑集成测试；或须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build`、`cargo test --test wasmedge_e2e_tests`；若构建或测试失败则视为集成测试失败。
+- 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。可执行 `./scripts/run-integration-tests.sh` 自动完成环境检查、未安装则安装（并写入 profile，新开终端无需再 source）、再跑集成测试；或须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build`、`cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1`；若构建或测试失败则视为集成测试失败。
 - wasmedge_quickjs 集成测试包含：**真实 .js Hello World**（`tests/fixtures/wasmedge_quickjs/hello.js`，`run_script` 内联与 `run_script_file` 路径两种方式）、**4 原语 .js**（`tests/fixtures/wasmedge_quickjs/primitives_test.js`），依赖 run_script/run_script_file 的 WASI argv/preopen 与每次新建 Vm。
 
 ## 4. 插件完整加载流程（9.2）

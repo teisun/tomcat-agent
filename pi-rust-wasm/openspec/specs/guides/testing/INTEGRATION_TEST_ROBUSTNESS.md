@@ -143,4 +143,4 @@ fn test_plugin_reload_no_memory_leak() {
 | **`robustness_tests.rs`** | 跨模块或通用的鲁棒性 | 仅放无法归到单一功能域的用例，例如：契约/Schema 违规（多模块共用）、错误分类断言、重复加载/卸载导致的状态一致性等。 |
 
 - **不要求**为每个模块单独再建「某某_robustness_tests.rs」。
-- 门禁仍以全量 `cargo test --test '*'` 通过为准；鲁棒性覆盖由「各 `*_tests.rs` 内边界用例」+「`robustness_tests.rs` 中跨模块/通用用例」共同满足。
+- 门禁仍以全量 `cargo test -j 1 --test '*' -- --test-threads=1` 通过为准；鲁棒性覆盖由「各 `*_tests.rs` 内边界用例」+「`robustness_tests.rs` 中跨模块/通用用例」共同满足。

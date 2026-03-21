@@ -38,7 +38,7 @@
 - **依据**：[INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)、[INTEGRATION_TEST_PRACTICE.md](../openspec/specs/guides/testing/INTEGRATION_TEST_PRACTICE.md)。
 - **动作**：针对本次变更引入的模块与场景，在 `tests/` 下建立或更新集成测试文件，**仅通过 `pub` API** 做黑盒测试。
 - **Wasm 真实运行时**：若涉及插件/Wasm 加载或运行时，须包含「Wasm 真实运行时」集成测试；实现前阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 二、3**（测试不得假绿；Wasm 门禁见该规范）。
-- **验证**：`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 通过。
+- **验证**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 通过。
 
 **检查清单**：
 
@@ -51,7 +51,7 @@
 - **时机**：在 §1、§2 之后。
 - **依据**：[User_Stories.md](../openspec/specs/User_Stories.md)、[E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)、[E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
 - **动作**：根据场景库中与本次变更相关的用例，在 `tests/cli_tests.rs` 或 `tests/wasmedge_e2e_tests.rs` 中编写或补充 `test_user_*` / Wasm E2E 用例，与场景库对应。
-- **验证**：`RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests -- --nocapture`；环境具备时执行 `wasmedge_e2e_tests`。
+- **验证**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`；环境具备时执行 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1`。
 
 ### §4 全量测试与验收清单
 
@@ -59,10 +59,10 @@
 
 以下为全量验收依据；细节与门禁另见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章。
 
-1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`RUST_LOG=pi_wasm=debug,info cargo test -- --nocapture`
+1. **构建与静态检查**：`cargo build --release`、`cargo clippy`、`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`
 2. **CLI 子命令**：`pi init`、`pi doctor`、`pi config`、`pi session`、`pi plugin`、`pi audit` 可执行且帮助完整
-3. **集成测试（含门禁）**：`RUST_LOG=pi_wasm=debug,info cargo test --test '*' -- --nocapture` 通过，含日志门禁与鲁棒性集成测试
-4. **E2E**：`RUST_LOG=pi_wasm=debug,info cargo test --test cli_tests -- --nocapture` 通过；WasmEdge 已就绪时 `RUST_LOG=pi_wasm=debug,info cargo test --test wasmedge_e2e_tests -- --nocapture` 通过；须符合 E2E_TEST_SPEC §6
+3. **集成测试（含门禁）**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 通过，含日志门禁与鲁棒性集成测试
+4. **E2E**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；WasmEdge 已就绪时 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` 通过；须符合 E2E_TEST_SPEC §6
 5. **Wasm 真实运行时（若任务涉及插件/Wasm）**：按 INTEGRATION_TEST_SPEC 5.4 执行
 6. **对话模式**：`pi chat` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
 7. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常

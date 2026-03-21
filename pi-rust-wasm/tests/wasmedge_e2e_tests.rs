@@ -1,5 +1,5 @@
 //! Wasm E2E 集成测试：真实 WasmEngine + run_script + host_call 链路。
-//! 须在安装 WasmEdge 后以 `cargo test --test wasmedge_e2e_tests` 运行（默认构建即包含 WasmEdge）；
+//! 须在安装 WasmEdge 后以 `cargo test -j 1 --test wasmedge_e2e_tests -- --test-threads=1` 运行（默认构建即包含 WasmEdge；串行约定见 INTEGRATION_TEST_SPEC §7.1）；
 //! 环境缺失时用例失败、不允许跳过，见 INTEGRATION_TEST_SPEC 5.4 与 docs/technical/02-wasm-runtime-and-plugin.md。
 
 mod common;
@@ -57,7 +57,7 @@ fn test_wasmedge_e2e_engine_instance_run_script() -> Result<(), Box<dyn std::err
         Err(e) => {
             if e.to_string().contains("stub") || e.to_string().contains("WasmEdge") {
                 panic!(
-                    "集成测试要求已安装 WasmEdge 并以 cargo test --test wasmedge_e2e_tests 运行，不得跳过。当前: {}。安装见 {} 或运行 ./scripts/install-wasmedge.sh，规范见 INTEGRATION_TEST_SPEC 5.4 与 docs/technical/02-wasm-runtime-and-plugin.md",
+                    "集成测试要求已安装 WasmEdge 并以 cargo test -j 1 --test wasmedge_e2e_tests -- --test-threads=1 运行，不得跳过。当前: {}。安装见 {} 或运行 ./scripts/install-wasmedge.sh，规范见 INTEGRATION_TEST_SPEC 5.4 与 docs/technical/02-wasm-runtime-and-plugin.md",
                     e,
                     WASMEDGE_INSTALL_URL
                 );
