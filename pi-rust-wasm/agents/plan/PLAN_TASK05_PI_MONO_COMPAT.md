@@ -1,20 +1,22 @@
-# 开发计划：pi-mono 生态插件兼容（TASK-05a/b/c/d）
+# 开发计划：pi-mono 生态插件兼容（TASK-05a/b/c/d/e）
 
-本计划对照 [PLAN_SPEC.md](./PLAN_SPEC.md) 规范编写，覆盖 TASK-05 拆分后的全部四个阶段。
+本计划对照 [PLAN_SPEC.md](./PLAN_SPEC.md) 规范编写，覆盖 TASK-05 拆分后的全部阶段（含矩阵端到端验收 **TASK-05e**）。
 技术方案详见 [pi-mono-compat-strategy.md](../../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)。
+
+**总体验收（社区规模）**：由 **TASK-05e** 统一执行并勾选——在 TASK-05d 完成后，按 `extension_compat_matrix.md` 对 **10–15 个** pi-mono **社区**插件做端到端兼容验收（与 Phase 0 矩阵采样一致）。TASK-05b/c/d 子项中的少量社区扩展为**分层门禁**，不替代 05e。
 
 ---
 
-## 一、待完成子项清单
+## 一、子项清单（与 [TASK_BOARD.md](./TASK_BOARD.md) 同步）
 
-### TASK-05a | Phase 0 技术验证与差距分析
+### TASK-05a | Phase 0 技术验证与差距分析（`DONE`）
 
-- [ ] a.1 恢复 pi-mono 完整工作树（确保能 npm install + tsc 编译）
-- [ ] a.2 挂载 wasmedge-quickjs modules/ 目录（启用 18 个已有 Node.js 模块）
-- [ ] a.3 SWC crate 集成验证（TS→JS 转译 POC）
-- [ ] a.4 tps.ts 打包+加载 POC（在 wasmedge_quickjs 中执行编译后的 JS）
-- [ ] a.5 ExtensionAPI 差距分析文档输出
-- [ ] a.6 采样 10-15 个 pi-mono 社区扩展，输出兼容性评估矩阵
+- [✓] a.1 恢复 pi-mono 完整工作树（确保能 npm install + tsc 编译）
+- [✓] a.2 挂载 wasmedge-quickjs modules/ 目录（启用 18 个已有 Node.js 模块）
+- [✓] a.3 SWC crate 集成验证（TS→JS 转译 POC）
+- [✓] a.4 tps.ts 打包+加载 POC（在 wasmedge_quickjs 中执行编译后的 JS）
+- [✓] a.5 ExtensionAPI 差距分析文档输出
+- [✓] a.6 采样 10-15 个 pi-mono 社区扩展，输出兼容性评估矩阵
 
 ### TASK-05b | Tier 1 纯事件监听型扩展
 
@@ -32,7 +34,7 @@
 - [ ] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
 - [ ] c.4 扩展 ctx.ui：select、confirm、input、setStatus
 - [ ] c.5 对齐 `pi.sendMessage(msg, options)` 签名
-- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试
+- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试（选自矩阵；服务于总体 10–15 个社区插件兼容目标）
 - [ ] c.7 固化为自动化 E2E 测试
 
 ### TASK-05d | Tier 3-4 TUI 组件+深度会话 API
@@ -45,6 +47,14 @@
 - [ ] d.6 files.ts 端到端测试
 - [ ] d.7 固化为自动化 E2E 测试
 
+### TASK-05e | 社区插件矩阵端到端兼容验收
+
+- [ ] e.1 对照 [`extension_compat_matrix.md`](../../docs/reports/extension_compat_matrix.md) 锁定本批次 **10–15** 个社区插件清单（名称、来源、Tier、核心验证路径）
+- [ ] e.2 为每个插件写明「通过」判定（如：SWC 编译 → `load_plugin` → 触发约定事件/命令/工具路径）
+- [ ] e.3 逐插件执行验证并记录结果（建议在同目录或 `docs/reports/` 下维护验收表，与矩阵交叉引用）
+- [ ] e.4 将其中高价值路径纳入 `tests/` 或 `./scripts/run-integration-tests.sh` 可复用步骤（可选，不降低 10–15 全量手测/记录要求）
+- [ ] e.5 提交 Nibbles 集成前自检：矩阵内本批次插件 **≥10** 个已勾选为通过（与 TASK-05a 验收「10+ 矩阵」口径一致）
+
 ---
 
 ## 二、目标与验收
@@ -54,9 +64,10 @@
 **技术路线**：方案 C（SWC + Rust 模块解析）——Rust 层完成 TS→JS 转译，通过 WasmEdge QuickJS 执行编译产物，配合改造后的 `pi_bridge.js` 提供 pi-mono 兼容 API。
 
 **总体验收标准**：
+- **社区插件兼容测试**：全系列完成后，**10–15 个** pi-mono **社区**插件通过兼容测试（与 `extension_compat_matrix` 采样规模一致）
 - Tier 1: 至少 1 个纯事件监听扩展零修改运行（tps.ts）
 - Tier 2: 至少 2 个含 registerCommand + exec 的扩展零修改运行
-- 每个 Tier 有对应的自动化 E2E 测试
+- 每个 Tier 有对应的自动化 E2E 测试（可优先覆盖矩阵中各 Tier 的代表扩展）
 - `cargo test` 全量通过
 
 ### 架构数据流
@@ -471,6 +482,14 @@ var ctx = {
 
 ---
 
+### TASK-05e：社区插件矩阵端到端兼容验收
+
+**依赖 TASK-05d 全部完成。** 对照 `extension_compat_matrix.md` 中本批 **10–15** 个 pi-mono 社区插件，逐项端到端验证（加载 + 各插件约定核心路径），维护可勾选验收表；**不替代** 05b/c/d 内少量代表扩展的门禁用例，而是矩阵级总收口。
+
+**涉及文件**：[`docs/reports/extension_compat_matrix.md`](../../docs/reports/extension_compat_matrix.md)、（建议）同目录或 `docs/reports/` 下 `plugin_community_e2e_acceptance.md` 等验收记录
+
+---
+
 ## 四、实施顺序与依赖关系
 
 ```mermaid
@@ -504,6 +523,10 @@ flowchart TD
         D5["d.5-d.7 E2E测试"]
     end
 
+    subgraph MatrixE2E ["TASK-05e 矩阵验收"]
+        EAll["e.1-e.5 10-15社区插件端到端"]
+    end
+
     TASK15 --> A1
     TASK15 --> A2
     TASK15 --> A3
@@ -522,6 +545,7 @@ flowchart TD
     C1 --> C6
     C6 --> D1
     D1 --> D5
+    D5 --> EAll
 ```
 
 ---
@@ -599,6 +623,7 @@ flowchart TD
 | TASK-05b | 3-4 个工作日 | b.1 入口改造（ESM 支持验证为最大风险） |
 | TASK-05c | 4-6 个工作日 | c.4 UI 真实实现（需 dispatcher 端支持） |
 | TASK-05d | 8-12 个工作日 | d.1 TUI 组件（需独立设计，P2 可延后） |
+| TASK-05e | 2-4 个工作日 | 10-15 个社区插件环境差异与验收记录 |
 | **Tier 1-2 合计** | **10-15 个工作日** | — |
 | **Tier 3-4 额外** | **8-12 个工作日** | — |
 

@@ -373,6 +373,14 @@
 
 ---
 
+### pi-mono 社区插件兼容（TASK-05 系列）
+
+**总体验收口径**：**TASK-05e** 统一收口——在 TASK-05a→05b→05c→05d 全部落地后，按 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 对 **10–15 个** pi-mono **社区**插件完成**端到端兼容验收**（可加载、各插件约定的核心路径可跑通）。各 Tier 子任务中的「1～3 个」等为**代表性回归样本**，用于门禁与自动化；**不可替代** TASK-05e 的全矩阵验收勾选。
+
+**本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
+
+---
+
 ### TASK-05a | T1-P1-002a | pi-mono 插件兼容性 - Phase 0 技术验证与差距分析
 
 | 字段 | 内容 |
@@ -425,6 +433,9 @@
 
 **目标**：使纯事件监听 + notify 的 pi-mono 扩展能零修改运行（如 tps.ts）。
 
+**技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
+**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+
 **子项**：
 - [ ] b.1 改造扩展入口：支持 `export default function(pi)` 模式
 - [ ] b.2 对齐 `pi.on(event, handler)` handler 签名（传 ctx 参数）
@@ -460,13 +471,16 @@
 
 **目标**：使含命令注册、exec 调用、基础 UI 交互的扩展能运行。
 
+**技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
+**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+
 **子项**：
 - [ ] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
 - [ ] c.2 对齐 `pi.registerCommand(name, {description, handler})`
 - [ ] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
 - [ ] c.4 扩展 ctx.ui：select、confirm、input、setStatus
 - [ ] c.5 对齐 `pi.sendMessage(msg, options)` 签名
-- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试
+- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试（选自扩展矩阵；累计达成 TASK-05 总体 **10–15** 个社区插件兼容测试的一部分）
 - [ ] c.7 固化为自动化 E2E 测试
 
 **依赖**：TASK-05b
@@ -496,6 +510,9 @@
 
 **目标**：使含 TUI 自定义组件和深度会话 API 的扩展能运行（如 diff.ts、files.ts）。
 
+**技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
+**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+
 **子项**：
 - [ ] d.1 实现 `ctx.ui.custom()` + TUI 组件兼容层（Container/SelectList/Text）
 - [ ] d.2 实现高级 UI：setWidget、setFooter、setHeader、editor
@@ -507,7 +524,7 @@
 
 **依赖**：TASK-05c
 
-**被依赖**：—
+**被依赖**：TASK-05e
 
 **协作接口**：
 - 消费：`pi_bridge.js`、`HostApiDispatcher`、`SessionManager`
@@ -518,6 +535,43 @@
 - TUI 组件在终端中正确渲染
 - sessionManager.getBranch() 等深度 API 可正常调用
 - 自动化 E2E 测试覆盖
+
+---
+
+### TASK-05e | T1-P1-002e | pi-mono 社区插件矩阵端到端兼容验收
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/plugin-compat-matrix-e2e` |
+| **阻塞点** | — |
+
+**目标**：按 Phase 0 输出的扩展矩阵，对 **10–15 个** pi-mono **社区**插件逐一做端到端兼容验收，形成可勾选、可追溯的验收记录（并尽量固化为自动化或脚本化回归）。
+
+**技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
+**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+
+**子项**：
+- [ ] e.1 对照 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 锁定本批次 **10–15** 个社区插件清单（名称、来源、Tier、核心验证路径）
+- [ ] e.2 为每个插件写明「通过」判定（如：SWC 编译 → `load_plugin` → 触发约定事件/命令/工具路径）
+- [ ] e.3 逐插件执行验证并记录结果（建议在同目录或 `docs/reports/` 下维护验收表，与矩阵交叉引用）
+- [ ] e.4 将其中高价值路径纳入 `tests/` 或 `./scripts/run-integration-tests.sh` 可复用步骤（可选，不降低 10–15 全量手测/记录要求）
+- [ ] e.5 提交 Nibbles 集成前自检：矩阵内本批次插件 **≥10** 个已勾选为通过（与 TASK-05a 验收「10+ 矩阵」口径一致）
+
+**依赖**：TASK-05d
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`extension_compat_matrix.md`、TASK-05b/c/d 已对齐的加载与 API、`ts_compiler`、Wasm 插件路径
+- 提供：社区兼容验收记录（文档 + 可选测试/脚本）
+
+**验收标准**：
+- 矩阵中本批次 **10–15** 个社区插件均完成端到端验证并有明确通过/阻塞结论
+- 阻塞项已记入验收表并关联差距文档或后续任务
+- （推荐）至少 **10** 个插件结论为「通过」方视为本任务可标 `PENDING_INTEGRATION` / 集成通过
 
 ---
 

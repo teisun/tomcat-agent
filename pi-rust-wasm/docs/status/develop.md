@@ -1,5 +1,17 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| @cursor | 2026-03-21 | DONE | develop | — |
+
+### 文档：TASK-05 系列（05e、PLAN 与策略同步）
+
+- **TASK_BOARD**：新增 **TASK-05e**（矩阵 10–15 社区插件端到端验收）；05b–05e 补充技术方案/开发计划链接；系列总述增加 Tomcat 根目录 **pi-mono** / **pi_agent_rust** 本地参考说明。
+- **PLAN_TASK05**：05a 子项与看板 DONE 对齐；05e 子项 e.1–e.5 与看板一致。
+- **pi-mono-compat-strategy**：§13.1 / §13.10 与 05e、工作量表一致。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-21 06:15 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-05a（feature/plugin-compat-phase0 并入 develop）
