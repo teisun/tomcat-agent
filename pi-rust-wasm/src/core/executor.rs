@@ -363,32 +363,50 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
+        argv: Option<&[String]>,
     ) -> Result<BashResult, AppError> {
         let cwd_path = cwd
             .map(|c| self.check_path(c))
             .transpose()?
             .unwrap_or_else(|| PathBuf::from("."));
-        let first_token = command.split_whitespace().next().unwrap_or("");
-        let in_whitelist = self
-            .config
-            .bash_whitelist
-            .iter()
-            .any(|c| c == first_token || command.starts_with(c));
-        let in_forbidden = self
-            .config
-            .bash_forbidden
-            .iter()
-            .any(|c| c == first_token || command.starts_with(c));
-        let needs_approval = self
-            .config
-            .bash_approval_required
-            .iter()
-            .any(|c| c == first_token || command.starts_with(c));
+
+        let audit_cmd = match argv {
+            None => command.to_string(),
+            Some(args) => {
+                let mut s = command.to_string();
+                for a in args {
+                    s.push(' ');
+                    s.push_str(a);
+                }
+                s
+            }
+        };
+
+        let (first_token, check_full_cmd): (&str, &str) = match argv {
+            None => {
+                let ft = command.split_whitespace().next().unwrap_or("");
+                (ft, command)
+            }
+            Some(_) => (command, command),
+        };
+
+        let in_whitelist =
+            self.config.bash_whitelist.iter().any(|c| {
+                c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
+            });
+        let in_forbidden =
+            self.config.bash_forbidden.iter().any(|c| {
+                c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
+            });
+        let needs_approval =
+            self.config.bash_approval_required.iter().any(|c| {
+                c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
+            });
 
         if in_forbidden {
             self.audit.record_primitive(PrimitiveAuditEntry {
                 operation: AuditPrimitiveOp::Bash,
-                path_or_cmd: command.to_string(),
+                path_or_cmd: audit_cmd.clone(),
                 plugin_id: plugin_id.to_string(),
                 user_approved: false,
                 success: false,
@@ -402,14 +420,14 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             let ok = self
                 .require_user_confirmation(
                     PrimitiveOperation::Bash,
-                    &format!("执行: {}", command),
+                    &format!("执行: {}", audit_cmd),
                     plugin_id,
                 )
                 .await?;
             if !ok {
                 self.audit.record_primitive(PrimitiveAuditEntry {
                     operation: AuditPrimitiveOp::Bash,
-                    path_or_cmd: command.to_string(),
+                    path_or_cmd: audit_cmd.clone(),
                     plugin_id: plugin_id.to_string(),
                     user_approved: false,
                     success: false,
@@ -419,19 +437,30 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             }
         }
 
-        #[cfg(unix)]
-        let (shell, arg) = ("sh", "-c");
-        #[cfg(windows)]
-        let (shell, arg) = ("cmd", "/C");
-
-        let output = Command::new(shell)
-            .arg(arg)
-            .arg(command)
-            .current_dir(&cwd_path)
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|e| AppError::Primitive(e.to_string()))?;
+        let output = match argv {
+            None => {
+                #[cfg(unix)]
+                let (shell, arg) = ("sh", "-c");
+                #[cfg(windows)]
+                let (shell, arg) = ("cmd", "/C");
+                Command::new(shell)
+                    .arg(arg)
+                    .arg(command)
+                    .current_dir(&cwd_path)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+            }
+            Some(args) => {
+                let mut cmd = Command::new(command);
+                cmd.args(args)
+                    .current_dir(&cwd_path)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+            }
+        }
+        .map_err(|e| AppError::Primitive(e.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -439,7 +468,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
 
         self.audit.record_primitive(PrimitiveAuditEntry {
             operation: AuditPrimitiveOp::Bash,
-            path_or_cmd: command.to_string(),
+            path_or_cmd: audit_cmd,
             plugin_id: plugin_id.to_string(),
             user_approved: true,
             success: exit_code == 0,
@@ -669,7 +698,7 @@ mod tests {
             dir.clone(),
         );
         let res = exec
-            .execute_bash("echo ok", Some(&path_str), "p1")
+            .execute_bash("echo ok", Some(&path_str), "p1", None)
             .await
             .unwrap();
         assert_eq!(res.exit_code, 0);
@@ -691,7 +720,9 @@ mod tests {
             Arc::new(TracingAuditRecorder),
             dir.clone(),
         );
-        let r = exec.execute_bash("rm -rf /", Some(&path_str), "p1").await;
+        let r = exec
+            .execute_bash("rm -rf /", Some(&path_str), "p1", None)
+            .await;
         assert!(r.is_err());
         assert!(matches!(r.unwrap_err(), AppError::Permission(_)));
         let _ = std::fs::remove_dir(&dir);

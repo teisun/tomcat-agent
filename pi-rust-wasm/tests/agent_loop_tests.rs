@@ -124,6 +124,7 @@ impl PrimitiveExecutor for MockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
+        _argv: Option<&[String]>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -182,6 +183,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         _command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
+        _argv: Option<&[String]>,
     ) -> Result<BashResult, AppError> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
@@ -244,6 +246,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         command: &str,
         _cwd: Option<&str>,
         _plugin_id: &str,
+        _argv: Option<&[String]>,
     ) -> Result<BashResult, AppError> {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
         Ok(BashResult {
@@ -557,8 +560,8 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
 /// 验证：EventBus 上事件名序列为 tool_execution_start → tool_call → tool_result → tool_execution_end（子序列）
 /// 意义：与 [events.md](../openspec/specs/architecture/plugin-system/events.md) 工具链对照一致
 #[tokio::test]
-async fn test_agent_loop_tool_pi_mono_event_subsequence(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = info_span!("test_agent_loop_tool_pi_mono_event_subsequence").entered();
 

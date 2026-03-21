@@ -838,8 +838,15 @@ impl AgentLoop {
             "execute_bash" => {
                 let command = args["command"].as_str().unwrap_or("");
                 let cwd = args["cwd"].as_str();
+                let argv_store: Option<Vec<String>> =
+                    args.get("args").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    });
+                let argv_ref = argv_store.as_deref();
                 self.primitive
-                    .execute_bash(command, cwd, plugin_id)
+                    .execute_bash(command, cwd, plugin_id, argv_ref)
                     .await
                     .map(|r| {
                         let mut out = String::new();
@@ -1021,6 +1028,7 @@ mod tests {
             command: &str,
             _cwd: Option<&str>,
             _plugin_id: &str,
+            _argv: Option<&[String]>,
         ) -> Result<crate::core::primitives::BashResult, AppError> {
             Ok(crate::core::primitives::BashResult {
                 stdout: format!("out:{}", command),
@@ -1093,6 +1101,7 @@ mod tests {
             command: &str,
             _cwd: Option<&str>,
             _plugin_id: &str,
+            _argv: Option<&[String]>,
         ) -> Result<crate::core::primitives::BashResult, AppError> {
             Ok(crate::core::primitives::BashResult {
                 stdout: format!("out:{}", command),
@@ -1150,6 +1159,7 @@ mod tests {
             command: &str,
             _cwd: Option<&str>,
             _plugin_id: &str,
+            _argv: Option<&[String]>,
         ) -> Result<crate::core::primitives::BashResult, AppError> {
             Ok(crate::core::primitives::BashResult {
                 stdout: format!("out:{}", command),

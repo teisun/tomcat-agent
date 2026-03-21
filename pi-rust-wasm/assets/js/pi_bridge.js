@@ -67,6 +67,7 @@
   // -- Internal registries ----------------------------------------------------
   var __pi_hooks = {};   // eventName -> [{id, fn}, ...]
   var __pi_tools = {};   // toolName  -> handler
+  var __pi_commands = {}; // commandName -> { description, handler }
   var __pi_nextId = 1;
 
   // -- Build globalThis.pi ---------------------------------------------------
@@ -187,9 +188,14 @@
     // Command Registration (pi-mono ExtensionAPI.registerCommand)
     // =========================================================================
     registerCommand: function (name, options) {
+      options = options || {};
+      __pi_commands[name] = {
+        description: options.description || '',
+        handler: options.handler || null
+      };
       return hostCall('tools', 'registerCommand', {
         name: name,
-        description: options && options.description
+        description: options.description
       });
     },
 
@@ -332,6 +338,12 @@
         },
         input: function (title, placeholder) {
           return hostCall('context', 'uiInput', { title: title, placeholder: placeholder });
+        },
+        setStatus: function (message, details) {
+          return hostCall('context', 'uiSetStatus', {
+            message: message,
+            details: details != null ? details : null
+          });
         }
       },
       sessionManager: {
@@ -348,6 +360,34 @@
       } catch (e) {
         try { pi.log('pi_bridge: handler error for ' + eventType + ': ' + e); } catch (_) {}
       }
+    }
+  };
+
+  // -- Plugin command invoke (tests / host bridge; handler 存于 __pi_commands) ---
+  globalThis.__pi_invoke_command = function (name, argsJson) {
+    var entry = __pi_commands[name];
+    if (!entry || typeof entry.handler !== 'function') {
+      return JSON.stringify({ ok: false, error: 'unknown command: ' + name });
+    }
+    var args = {};
+    try {
+      if (argsJson && argsJson.length > 0) {
+        args = JSON.parse(argsJson);
+      }
+    } catch (e) {
+      return JSON.stringify({ ok: false, error: 'invalid args JSON: ' + e });
+    }
+    try {
+      var r = entry.handler(args);
+      if (r && typeof r.then === 'function') {
+        return JSON.stringify({
+          ok: false,
+          error: 'async command handler requires await outside __pi_invoke_command'
+        });
+      }
+      return JSON.stringify({ ok: true, data: r });
+    } catch (err) {
+      return JSON.stringify({ ok: false, error: String(err) });
     }
   };
 

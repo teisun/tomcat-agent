@@ -96,6 +96,7 @@ use crate::core::{
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext, EventListenerId};
 use crate::infra::{AuditRecorder, HostcallAuditEntry};
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,6 +140,8 @@ pub struct HostApiDispatcher {
     event_senders: Arc<DashMap<String, std::sync::mpsc::SyncSender<EventEnvelope>>>,
     /// 可选：`context.uiNotify` 调用次数（测试断言用，与生产逻辑无关）。
     ui_notify_count: Option<Arc<AtomicU32>>,
+    /// 插件实例已注册的 slash 命令：(name, description)，handler 仅存于 JS `__pi_commands`。
+    plugin_commands: Arc<DashMap<String, Vec<(String, String)>>>,
 }
 
 impl HostApiDispatcher {
@@ -161,7 +164,16 @@ impl HostApiDispatcher {
             event_receivers: Arc::new(DashMap::new()),
             event_senders: Arc::new(DashMap::new()),
             ui_notify_count: None,
+            plugin_commands: Arc::new(DashMap::new()),
         }
+    }
+
+    /// 返回某 Wasm 实例在宿主侧登记的 `registerCommand` 元数据（不含 JS handler）。
+    pub fn registered_plugin_commands(&self, instance_id: &str) -> Vec<(String, String)> {
+        self.plugin_commands
+            .get(instance_id)
+            .map(|e| e.value().clone())
+            .unwrap_or_default()
     }
 
     /// 注入 `uiNotify` 调用计数器（E2E / 集成测试）。
@@ -496,9 +508,10 @@ impl HostApiDispatcher {
             ("context", "getCwd") => Ok(Self::do_context_get_cwd()),
             ("context", "getModel") => Ok(Self::do_context_get_model()),
             ("context", "uiNotify") => Ok(self.do_context_ui_notify(&params)),
-            ("context", "uiSelect") | ("context", "uiConfirm") | ("context", "uiInput") => {
-                Ok(Self::do_context_ui_stub(&method))
-            }
+            ("context", "uiSelect") => Ok(Self::do_context_ui_select(&params)),
+            ("context", "uiConfirm") => Ok(Self::do_context_ui_confirm(&params)),
+            ("context", "uiInput") => Ok(Self::do_context_ui_input(&params)),
+            ("context", "uiSetStatus") => Ok(Self::do_context_ui_set_status(&params)),
             ("context", "getSystemPrompt") => Ok(Self::do_context_get_system_prompt()),
             ("context", "hasPendingMessages") => Ok(Self::do_context_has_pending()),
             ("context", "shutdown") => Ok(Self::do_context_shutdown()),
@@ -643,7 +656,16 @@ impl HostApiDispatcher {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::Plugin("executeBash: missing command".to_string()))?;
         let cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
-        let result = p.execute_bash(command, cwd.as_deref(), plugin_id).await?;
+        let argv_store: Option<Vec<String>> =
+            params.get("args").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            });
+        let argv_ref = argv_store.as_deref();
+        let result = p
+            .execute_bash(command, cwd.as_deref(), plugin_id, argv_ref)
+            .await?;
         Ok(HostResponse::ok(
             serde_json::to_value(result).map_err(AppError::Serialize)?,
         ))
@@ -801,7 +823,7 @@ impl HostApiDispatcher {
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
-    /// 注册命令（与 pi-mono ExtensionAPI.registerCommand 对齐）。MVP 阶段仅记录，不执行。
+    /// 注册命令（与 pi-mono ExtensionAPI.registerCommand 对齐）。宿主侧仅存元数据；handler 在 JS `__pi_commands`。
     async fn do_register_command(
         &self,
         plugin_id: &str,
@@ -821,6 +843,19 @@ impl HostApiDispatcher {
             name,
             description
         );
+        match self.plugin_commands.entry(plugin_id.to_string()) {
+            Entry::Occupied(mut ent) => {
+                let v = ent.get_mut();
+                if let Some(i) = v.iter().position(|(n, _)| n == name) {
+                    v[i] = (name.to_string(), description.to_string());
+                } else {
+                    v.push((name.to_string(), description.to_string()));
+                }
+            }
+            Entry::Vacant(ent) => {
+                ent.insert(vec![(name.to_string(), description.to_string())]);
+            }
+        }
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -907,11 +942,24 @@ impl HostApiDispatcher {
 
     // -- agent module: sendMessage / sendUserMessage -----------------------
     fn do_agent_send_message(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
-        let message = params
-            .get("message")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        tracing::info!("[plugin sendMessage] {:?}", message);
+        let Some(session) = &self.session else {
+            tracing::info!(
+                "[plugin sendMessage] no SessionManager, message={:?}",
+                params.get("message")
+            );
+            return Ok(HostResponse::ok(serde_json::Value::Null));
+        };
+        if params
+            .get("options")
+            .and_then(|o| o.get("silent"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            tracing::debug!("[plugin sendMessage] silent=true, skip transcript append");
+            return Ok(HostResponse::ok(serde_json::Value::Null));
+        }
+        let wire = agent_send_message_wire(params)?;
+        session.append_message(wire)?;
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -919,11 +967,28 @@ impl HostApiDispatcher {
         &self,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let content = params
-            .get("content")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        tracing::info!("[plugin sendUserMessage] {:?}", content);
+        let Some(session) = &self.session else {
+            tracing::info!(
+                "[plugin sendUserMessage] no SessionManager, content={:?}",
+                params.get("content")
+            );
+            return Ok(HostResponse::ok(serde_json::Value::Null));
+        };
+        if params
+            .get("options")
+            .and_then(|o| o.get("silent"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(HostResponse::ok(serde_json::Value::Null));
+        }
+        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let role = params
+            .get("options")
+            .and_then(|o| o.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("user");
+        session.append_message(serde_json::json!({ "role": role, "content": content }))?;
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -977,8 +1042,59 @@ impl HostApiDispatcher {
         HostResponse::ok(serde_json::Value::Null)
     }
 
-    fn do_context_ui_stub(method: &str) -> HostResponse {
-        HostResponse::ok(serde_json::json!({ "stub": true, "method": method }))
+    /// pi-mono `ctx.ui.select`：无 TTY 时返回确定性默认（首项），便于扩展逻辑与 E2E 断言。
+    fn do_context_ui_select(params: &serde_json::Value) -> HostResponse {
+        let options = params
+            .get("options")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        tracing::info!(
+            "[context.ui.select] title={} option_count={}",
+            title,
+            options.len()
+        );
+        let (selected_index, selected, cancelled) = if let Some(first) = options.first() {
+            (0_i64, first.clone(), false)
+        } else {
+            (-1_i64, serde_json::Value::Null, true)
+        };
+        HostResponse::ok(serde_json::json!({
+            "selectedIndex": selected_index,
+            "selected": selected,
+            "cancelled": cancelled
+        }))
+    }
+
+    fn do_context_ui_confirm(params: &serde_json::Value) -> HostResponse {
+        let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        tracing::info!(
+            "[context.ui.confirm] title={} message_len={}",
+            title,
+            message.len()
+        );
+        HostResponse::ok(serde_json::json!({ "confirmed": true }))
+    }
+
+    fn do_context_ui_input(params: &serde_json::Value) -> HostResponse {
+        let placeholder = params
+            .get("placeholder")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        tracing::info!("[context.ui.input] placeholder_len={}", placeholder.len());
+        HostResponse::ok(serde_json::json!({ "value": "" }))
+    }
+
+    fn do_context_ui_set_status(params: &serde_json::Value) -> HostResponse {
+        let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let details = params
+            .get("details")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        tracing::info!("[context.ui.setStatus] {} details={}", message, details);
+        HostResponse::ok(serde_json::Value::Null)
     }
 
     fn do_context_get_system_prompt() -> HostResponse {
@@ -1014,6 +1130,71 @@ impl HostApiDispatcher {
             .ok_or_else(|| AppError::Plugin("sendMessage: missing message".to_string()))?;
         session.append_message(message)?;
         Ok(HostResponse::ok(serde_json::Value::Null))
+    }
+}
+
+/// `agent.sendMessage` → 当前会话 transcript  wire 格式（role + content）。
+fn agent_send_message_wire(params: &serde_json::Value) -> Result<serde_json::Value, AppError> {
+    let opts = params.get("options").and_then(|v| v.as_object());
+    let role_default = opts
+        .and_then(|o| o.get("role"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("user");
+    let message = params
+        .get("message")
+        .ok_or_else(|| AppError::Plugin("sendMessage: missing message".into()))?;
+    if let Some(obj) = message.as_object() {
+        let role = obj
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or(role_default);
+        let content = obj
+            .get("content")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        return Ok(serde_json::json!({ "role": role, "content": content }));
+    }
+    if let Some(s) = message.as_str() {
+        return Ok(serde_json::json!({ "role": role_default, "content": s }));
+    }
+    Ok(serde_json::json!({ "role": role_default, "content": message }))
+}
+
+/// 规整 TypeBox / 包装型 `parameters` 为 JSON Schema 风格，便于 LLM tools。
+pub(crate) fn normalize_tool_parameters(params: &serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Null => serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+        serde_json::Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(inner) = map.get("schema") {
+                    return normalize_tool_parameters(inner);
+                }
+            }
+            let mut out = params.clone();
+            if let Some(o) = out.as_object_mut() {
+                o.remove("default");
+                let has_shape = o.contains_key("type")
+                    || o.contains_key("properties")
+                    || o.contains_key("anyOf")
+                    || o.contains_key("oneOf")
+                    || o.contains_key("allOf")
+                    || o.contains_key("items")
+                    || o.contains_key("enum")
+                    || o.contains_key("const");
+                if has_shape {
+                    return out;
+                }
+                if o.is_empty() {
+                    return serde_json::json!({ "type": "object", "properties": {} });
+                }
+                return serde_json::json!({ "type": "object", "properties": out.clone() });
+            }
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        _ => serde_json::json!({ "type": "object", "properties": {} }),
     }
 }
 
@@ -1061,10 +1242,11 @@ fn parse_tool(params: &serde_json::Value, plugin_id: &str) -> Result<Tool, AppEr
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let parameters = params
+    let raw_params = params
         .get("parameters")
         .cloned()
         .unwrap_or(serde_json::json!({}));
+    let parameters = normalize_tool_parameters(&raw_params);
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1084,8 +1266,8 @@ fn parse_tool(params: &serde_json::Value, plugin_id: &str) -> Result<Tool, AppEr
 mod tests {
     use super::*;
     use crate::core::{
-        BashResult, ChatResponse, ChatResponseChoice, DirEntry, EditFileResult, PrimitiveOperation,
-        WriteFileResult,
+        BashResult, ChatResponse, ChatResponseChoice, DirEntry, EditFileResult, EditOperation,
+        PrimitiveOperation, WriteFileResult,
     };
     use crate::infra::wire;
     use crate::infra::DefaultEventBus;
@@ -1272,6 +1454,7 @@ mod tests {
             _command: &str,
             _cwd: Option<&str>,
             _plugin_id: &str,
+            _argv: Option<&[String]>,
         ) -> Result<BashResult, AppError> {
             Ok(BashResult {
                 stdout: "ok".to_string(),
@@ -1411,6 +1594,124 @@ mod tests {
         };
         let res = d.dispatch_async("inst-1", req).await.unwrap();
         assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn dispatch_execute_bash_with_argv_calls_primitive() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran2 = Arc::clone(&ran);
+        #[derive(Clone)]
+        struct ArgvPrimitive(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl PrimitiveExecutor for ArgvPrimitive {
+            async fn read_file(&self, _p: &str, _id: &str) -> Result<String, AppError> {
+                Ok(String::new())
+            }
+            async fn list_dir(&self, _p: &str, _id: &str) -> Result<Vec<DirEntry>, AppError> {
+                Ok(vec![])
+            }
+            async fn write_file(
+                &self,
+                _p: &str,
+                _c: &str,
+                _o: bool,
+                _id: &str,
+            ) -> Result<WriteFileResult, AppError> {
+                Ok(WriteFileResult {
+                    path: String::new(),
+                    written: false,
+                })
+            }
+            async fn edit_file(
+                &self,
+                _p: &str,
+                _e: Vec<EditOperation>,
+                _id: &str,
+            ) -> Result<EditFileResult, AppError> {
+                Ok(EditFileResult {
+                    path: String::new(),
+                    applied: false,
+                })
+            }
+            async fn execute_bash(
+                &self,
+                cmd: &str,
+                _cwd: Option<&str>,
+                _id: &str,
+                argv: Option<&[String]>,
+            ) -> Result<BashResult, AppError> {
+                if cmd == "echo" {
+                    if let Some(a) = argv {
+                        if a.len() == 2 && a[0] == "a" && a[1] == "b" {
+                            self.0.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                Ok(BashResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                })
+            }
+            async fn require_user_confirmation(
+                &self,
+                _op: PrimitiveOperation,
+                _prev: &str,
+                _id: &str,
+            ) -> Result<bool, AppError> {
+                Ok(true)
+            }
+        }
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus).with_primitive(Arc::new(ArgvPrimitive(ran2)));
+        let req = HostRequest {
+            module: "fs".to_string(),
+            method: "executeBash".to_string(),
+            params: serde_json::json!({
+                "command": "echo",
+                "args": ["a", "b"],
+                "pluginId": "p1"
+            }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-argv", req).await.unwrap();
+        assert!(res.ok);
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "execute_bash 应收到 argv 模式参数"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_register_command_records_metadata() {
+        let bus = Arc::new(DefaultEventBus::new());
+        let d = HostApiDispatcher::new(bus);
+        let req = HostRequest {
+            module: "tools".to_string(),
+            method: "registerCommand".to_string(),
+            params: serde_json::json!({ "name": "my-cmd", "description": "desc" }),
+            call_id: None,
+        };
+        let res = d.dispatch_async("inst-rc", req).await.unwrap();
+        assert!(res.ok);
+        let cmds = d.registered_plugin_commands("inst-rc");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].0, "my-cmd");
+        assert_eq!(cmds[0].1, "desc");
+    }
+
+    #[test]
+    fn normalize_tool_parameters_unwraps_schema() {
+        let raw = serde_json::json!({
+            "schema": {
+                "type": "object",
+                "properties": { "q": { "type": "string" } }
+            }
+        });
+        let n = normalize_tool_parameters(&raw);
+        assert_eq!(n.get("type").and_then(|v| v.as_str()), Some("object"));
+        assert!(n.get("properties").is_some());
     }
 
     #[tokio::test]
@@ -1863,6 +2164,7 @@ mod tests {
                 _: &str,
                 _: Option<&str>,
                 _: &str,
+                _: Option<&[String]>,
             ) -> Result<BashResult, AppError> {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 Ok(BashResult {

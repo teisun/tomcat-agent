@@ -29,13 +29,13 @@
 
 ### TASK-05c | Tier 2 命令+exec+基础 UI
 
-- [ ] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
-- [ ] c.2 对齐 `pi.registerCommand(name, {description, handler})`
-- [ ] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
-- [ ] c.4 扩展 ctx.ui：select、confirm、input、setStatus
-- [ ] c.5 对齐 `pi.sendMessage(msg, options)` 签名
-- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试（选自矩阵；服务于总体 10–15 个社区插件兼容目标）
-- [ ] c.7 固化为自动化 E2E 测试
+- [x] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
+- [x] c.2 对齐 `pi.registerCommand(name, {description, handler})`
+- [x] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
+- [x] c.4 扩展 ctx.ui：select、confirm、input、setStatus
+- [x] c.5 对齐 `pi.sendMessage(msg, options)` 签名
+- [x] c.6 2-3 个 Tier 2 社区扩展兼容性测试（选自矩阵；服务于总体 10–15 个社区插件兼容目标）
+- [x] c.7 固化为自动化 E2E 测试
 
 ### TASK-05d | Tier 3-4 TUI 组件+深度会话 API
 

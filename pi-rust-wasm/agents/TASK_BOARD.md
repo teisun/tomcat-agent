@@ -467,8 +467,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Jerry |
 | **分支** | `feature/plugin-compat-tier2` |
 | **阻塞点** | — |
 
@@ -478,13 +478,13 @@
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
 
 **子项**：
-- [ ] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
-- [ ] c.2 对齐 `pi.registerCommand(name, {description, handler})`
-- [ ] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
-- [ ] c.4 扩展 ctx.ui：select、confirm、input、setStatus
-- [ ] c.5 对齐 `pi.sendMessage(msg, options)` 签名
-- [ ] c.6 2-3 个 Tier 2 社区扩展兼容性测试（选自扩展矩阵；累计达成 TASK-05 总体 **10–15** 个社区插件兼容测试的一部分）
-- [ ] c.7 固化为自动化 E2E 测试
+- [x] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
+- [x] c.2 对齐 `pi.registerCommand(name, {description, handler})`
+- [x] c.3 对齐 `pi.registerTool(toolDef)` TypeBox schema 兼容
+- [x] c.4 扩展 ctx.ui：select、confirm、input、setStatus
+- [x] c.5 对齐 `pi.sendMessage(msg, options)` 签名
+- [x] c.6 2-3 个 Tier 2 社区扩展兼容性测试（选自扩展矩阵；累计达成 TASK-05 总体 **10–15** 个社区插件兼容测试的一部分）
+- [x] c.7 固化为自动化 E2E 测试
 
 **依赖**：TASK-05b
 

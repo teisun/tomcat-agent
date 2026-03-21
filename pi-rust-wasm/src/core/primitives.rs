@@ -78,11 +78,15 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError>;
+    /// 执行 bash/进程。
+    /// - `argv` 为 `None`：`command` 视为完整 shell 命令（经 `sh -c` / `cmd /C`）。
+    /// - `argv` 为 `Some`：`command` 为可执行文件名，`argv` 为其参数列表（不经 shell，与 pi-mono `exec(cmd, args)` 对齐）。
     async fn execute_bash(
         &self,
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
+        argv: Option<&[String]>,
     ) -> Result<BashResult, AppError>;
     async fn require_user_confirmation(
         &self,

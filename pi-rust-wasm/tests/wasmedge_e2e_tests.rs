@@ -356,6 +356,123 @@ fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// [TASK-05c Tier2] tier2_compat_test.js：registerCommand+invoke、registerTool(schema)、ctx.ui、executeBash+args
+#[test]
+fn test_wasmedge_e2e_tier2_compat_script() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let js_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/wasmedge_quickjs/tier2_compat_test.js");
+    assert!(
+        js_path.exists(),
+        "fixture tier2_compat_test.js 必须存在: {:?}",
+        js_path
+    );
+    let mut instance = engine.create_instance("tier2-compat-e2e")?;
+    let call_count = std::sync::Arc::new(AtomicU32::new(0));
+    let count = std::sync::Arc::clone(&call_count);
+    instance.register_host_binding(move |request_json: &str| {
+        let req: serde_json::Value =
+            serde_json::from_str(request_json).unwrap_or(serde_json::Value::Null);
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        if [
+            "registerCommand",
+            "registerTool",
+            "uiSelect",
+            "uiConfirm",
+            "uiInput",
+            "uiSetStatus",
+            "executeBash",
+        ]
+        .contains(&method)
+        {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(serde_json::to_string(&HostResponse::ok(serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exitCode": 0,
+            "selectedIndex": 0,
+            "selected": "x",
+            "cancelled": false,
+            "confirmed": true,
+            "value": ""
+        })))
+        .unwrap())
+    })?;
+    instance.run_script_file(&js_path)?;
+    let n = call_count.load(Ordering::SeqCst);
+    assert!(
+        n >= 7,
+        "Tier2 脚本须触发 ≥7 次相关 host 调用（registerCommand/registerTool/ui×3/setStatus/executeBash），实际 {}",
+        n
+    );
+    Ok(())
+}
+
+/// [TASK-05c] 模拟社区扩展：`export default function(pi)` + registerCommand + `__pi_invoke_command`（TS→SWC→QuickJS）
+#[test]
+fn test_wasmedge_e2e_tier2_transpiled_export_default_plugin(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let quickjs_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");
+    if !quickjs_path.exists() {
+        panic!(
+            "集成测试要求 wasmedge_quickjs.wasm 存在。见 test_wasmedge_e2e_engine_instance_run_script",
+        );
+    }
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path.to_string_lossy().into_owned()),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).map_err(|e| e.to_string())?;
+    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let ts = r#"
+export default function (pi) {
+  pi.registerCommand("tier2-ts-cmd", {
+    description: "from transpiled ts",
+    handler: function () { return "ts-ok"; }
+  });
+  var j = JSON.parse(__pi_invoke_command("tier2-ts-cmd", "{}"));
+  if (!j.ok) throw new Error(j.error);
+  if (j.data !== "ts-ok") throw new Error(String(j.data));
+}
+"#;
+    let plugin_ts = tmp.path().join("tier2_snippet.ts");
+    std::fs::write(&plugin_ts, ts).map_err(|e| e.to_string())?;
+
+    let mut instance = engine.create_instance("tier2-ts-e2e")?;
+    let reg_count = Arc::new(AtomicU32::new(0));
+    let c = Arc::clone(&reg_count);
+    instance.register_host_binding(move |request_json: &str| {
+        let req: serde_json::Value =
+            serde_json::from_str(request_json).unwrap_or(serde_json::Value::Null);
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        if method == "registerCommand" {
+            c.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(serde_json::to_string(&HostResponse::ok(serde_json::Value::Null)).unwrap())
+    })?;
+    instance.run_script_file(&plugin_ts)?;
+    assert!(
+        reg_count.load(Ordering::SeqCst) >= 1,
+        "TS 插件应至少触发 1 次 registerCommand"
+    );
+    Ok(())
+}
+
 /// [插件完整加载] load_plugin 从磁盘加载插件后 list_loaded 含该插件
 ///
 /// 验证：load_plugin 成功、list_loaded 含 id、get_plugin 返回 Some；unload 后为空
