@@ -515,6 +515,7 @@
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 **子项**：
 - [ ] d.1 实现 `ctx.ui.custom()` + TUI 组件兼容层（Container/SelectList/Text）
@@ -555,6 +556,7 @@
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 **子项**：
 - [ ] e.1 对照 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 锁定本批次 **10–15** 个社区插件清单（名称、来源、Tier、核心验证路径）
