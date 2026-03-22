@@ -559,6 +559,10 @@
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
+**硬性约束**：
+- **长生命周期 VM**：所有插件 E2E 验证**必须在长生命周期 VM 模式下执行**（即 WasmEdge VM 实例启动后持续存活、复用，跨多次事件/命令调用），以确保覆盖 Promise drain、ctx 状态隔离、事件累积等长生命周期特有场景。
+- **插件来源**：本批次插件清单**必须全部来自 pi-mono 仓库社区扩展或官方示例**（路径见 `extension_compat_matrix.md`），不得使用本项目自建的 mock/stub 插件充数；插件源码须以**零修改**（仅允许 SWC 编译转换）方式加载验证。
+
 **子项**：
 - [ ] e.1 对照 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 锁定本批次 **10–15** 个社区插件清单（名称、来源、Tier、核心验证路径）
 - [ ] e.2 为每个插件写明「通过」判定（如：SWC 编译 → `load_plugin` → 触发约定事件/命令/工具路径）
