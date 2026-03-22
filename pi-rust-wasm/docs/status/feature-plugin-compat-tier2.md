@@ -22,6 +22,10 @@
 | :--- | :--- | :--- |
 | 无 | - | - |
 
+### 文档
+
+- 改动说明与 FAQ：[task-05c-tier2-change-report.md](../reports/task-05c-tier2-change-report.md)
+
 ### 验收自测
 
 - `cargo test -j 1 -p pi_wasm --lib --tests -- --test-threads=1` 全通过
