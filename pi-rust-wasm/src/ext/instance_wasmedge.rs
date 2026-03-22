@@ -13,6 +13,12 @@ use wasmedge_sdk::{
     ImportObjectBuilder, Instance, Module, Store, Vm, WasmValue,
 };
 
+/// npm package shims embedded at compile time; injected between pi_bridge.js and user script.
+const PI_TUI_SHIM: &str = include_str!("../../assets/js/pi_tui_shim.js");
+const PI_CODING_AGENT_SHIM: &str = include_str!("../../assets/js/pi_coding_agent_shim.js");
+const PI_AI_SHIM: &str = include_str!("../../assets/js/pi_ai_shim.js");
+const PI_TYPEBOX_SHIM: &str = include_str!("../../assets/js/pi_typebox_shim.js");
+
 /// Hostcall 回调函数签名：接收 JSON 请求字符串，返回 JSON 响应字符串。
 type HostInvokeFn = dyn Fn(&str) -> Result<String, AppError> + Send + Sync;
 
@@ -164,8 +170,9 @@ impl WasmInstance {
         }
     }
 
-    /// Prepend pi_bridge.js (if present) to the user script content.
+    /// Prepend pi_bridge.js + npm shims (if present) to the user script content.
     /// Falls back to the plain user script if bridge is absent.
+    /// Injection order: pi_bridge → tui shim → coding-agent shim → ai shim → typebox shim → user script.
     fn build_combined_script(&self, user_script: &Path) -> Result<String, AppError> {
         let raw = std::fs::read_to_string(user_script).map_err(AppError::Io)?;
         let ext = user_script
@@ -187,7 +194,12 @@ impl WasmInstance {
             Some(bp) if bp.exists() => {
                 let bridge_code = std::fs::read_to_string(&bp).map_err(AppError::Io)?;
                 Ok(format!(
-                    "// --- pi_bridge.js (auto-injected) ---\n{bridge_code}\n// --- user script ---\n{user_code}"
+                    "// --- pi_bridge.js (auto-injected) ---\n{bridge_code}\n\
+                     // --- pi_tui_shim.js ---\n{PI_TUI_SHIM}\n\
+                     // --- pi_coding_agent_shim.js ---\n{PI_CODING_AGENT_SHIM}\n\
+                     // --- pi_ai_shim.js ---\n{PI_AI_SHIM}\n\
+                     // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
+                     // --- user script ---\n{user_code}"
                 ))
             }
             _ => Ok(user_code),

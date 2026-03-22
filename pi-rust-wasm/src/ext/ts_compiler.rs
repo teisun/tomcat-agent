@@ -5,12 +5,26 @@
 
 use crate::infra::error::AppError;
 use std::path::Path;
-use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
-use swc_ecma_ast::{Module as SwcModule, Pass, Program as SwcProgram};
+use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, SyntaxContext, DUMMY_SP, GLOBALS};
+use swc_ecma_ast::{
+    AssignPatProp, BindingIdent, Decl, Expr, Ident, IdentName, ImportSpecifier,
+    KeyValuePatProp, MemberExpr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem,
+    Module as SwcModule, ObjectPat, ObjectPatProp, Pass, Pat, Program as SwcProgram, PropName,
+    Stmt, VarDecl, VarDeclKind, VarDeclarator,
+};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{Parser as SwcParser, StringInput, Syntax, TsSyntax};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_transforms_typescript::strip;
+
+/// Known npm package → globalThis property mapping for QuickJS script-mode import rewriting.
+/// Each package has a corresponding `assets/js/<name>_shim.js` injected by `build_combined_script`.
+const NPM_SHIM_MAP: &[(&str, &str)] = &[
+    ("@mariozechner/pi-tui", "__pi_tui"),
+    ("@mariozechner/pi-coding-agent", "__pi_coding_agent"),
+    ("@mariozechner/pi-ai", "__pi_ai"),
+    ("@sinclair/typebox", "__pi_typebox"),
+];
 
 /// 将 TypeScript 模块源码转译为 ES 模块风格 JS（仍含 `import` / `export` 时由调用方处理）。
 pub fn transpile_typescript(source: &str, filename: &str) -> Result<String, AppError> {
@@ -50,11 +64,13 @@ fn transpile_typescript_inner(source: &str, filename: &str) -> Result<String, Ap
         let mut pass = strip(unresolved_mark, top_level_mark);
         pass.process(&mut program);
     }
-    let SwcProgram::Module(module) = program else {
+    let SwcProgram::Module(mut module) = program else {
         return Err(AppError::Plugin(format!(
             "TS transpile {filename}: expected module after strip"
         )));
     };
+
+    rewrite_npm_imports(&mut module);
 
     let mut buf = Vec::new();
     {
@@ -94,6 +110,159 @@ fn wrap_export_default_pi_plugin(js: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// npm import → globalThis rewrite (QuickJS script mode)
+// ---------------------------------------------------------------------------
+
+/// Replace `import { X } from "<known-pkg>"` with `var { X } = globalThis.__xxx;`
+/// for packages listed in [`NPM_SHIM_MAP`]. Other imports pass through unchanged.
+fn rewrite_npm_imports(module: &mut SwcModule) {
+    let shim_map: Vec<(&str, &str)> = NPM_SHIM_MAP.to_vec();
+    let old_body = std::mem::take(&mut module.body);
+    let mut new_body = Vec::with_capacity(old_body.len());
+
+    for item in old_body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(ref import_decl)) = item {
+            if import_decl.type_only {
+                continue;
+            }
+            if let Some(global_prop) = lookup_shim_prop(&shim_map, &import_decl.src) {
+                if let Some(var_item) = import_to_globalthis_var(import_decl, global_prop) {
+                    new_body.push(var_item);
+                }
+                continue;
+            }
+        }
+        new_body.push(item);
+    }
+
+    module.body = new_body;
+}
+
+/// Byte-level lookup: `Wtf8Atom` doesn't implement `Display`/`Hash<str>`,
+/// so compare raw bytes (module specifiers are always valid UTF-8).
+fn lookup_shim_prop<'a>(
+    map: &[(&str, &'a str)],
+    src: &swc_ecma_ast::Str,
+) -> Option<&'a str> {
+    let bytes = src.value.as_bytes();
+    map.iter()
+        .find(|(pkg, _)| pkg.as_bytes() == bytes)
+        .map(|(_, prop)| *prop)
+}
+
+/// Build `var { X, Y } = globalThis.__xxx;` (or `var NS = globalThis.__xxx;` for namespace import).
+fn import_to_globalthis_var(
+    import_decl: &swc_ecma_ast::ImportDecl,
+    global_prop: &str,
+) -> Option<ModuleItem> {
+    let global_expr = Expr::Member(MemberExpr {
+        span: DUMMY_SP,
+        obj: Box::new(Expr::Ident(Ident::new_no_ctxt(
+            "globalThis".into(),
+            DUMMY_SP,
+        ))),
+        prop: MemberProp::Ident(IdentName::new(global_prop.into(), DUMMY_SP)),
+    });
+
+    let mut props: Vec<ObjectPatProp> = Vec::new();
+    let mut namespace_local: Option<Ident> = None;
+
+    for spec in &import_decl.specifiers {
+        match spec {
+            ImportSpecifier::Named(named) => {
+                if named.is_type_only {
+                    continue;
+                }
+                match &named.imported {
+                    Some(ModuleExportName::Ident(imported_id)) => {
+                        props.push(ObjectPatProp::KeyValue(KeyValuePatProp {
+                            key: PropName::Ident(IdentName::new(
+                                imported_id.sym.clone(),
+                                DUMMY_SP,
+                            )),
+                            value: Box::new(Pat::Ident(BindingIdent {
+                                id: named.local.clone(),
+                                type_ann: None,
+                            })),
+                        }));
+                    }
+                    Some(ModuleExportName::Str(s)) => {
+                        props.push(ObjectPatProp::KeyValue(KeyValuePatProp {
+                            key: PropName::Str(s.clone()),
+                            value: Box::new(Pat::Ident(BindingIdent {
+                                id: named.local.clone(),
+                                type_ann: None,
+                            })),
+                        }));
+                    }
+                    None => {
+                        props.push(ObjectPatProp::Assign(AssignPatProp {
+                            span: DUMMY_SP,
+                            key: BindingIdent {
+                                id: named.local.clone(),
+                                type_ann: None,
+                            },
+                            value: None,
+                        }));
+                    }
+                }
+            }
+            ImportSpecifier::Default(def) => {
+                props.push(ObjectPatProp::KeyValue(KeyValuePatProp {
+                    key: PropName::Ident(IdentName::new("default".into(), DUMMY_SP)),
+                    value: Box::new(Pat::Ident(BindingIdent {
+                        id: def.local.clone(),
+                        type_ann: None,
+                    })),
+                }));
+            }
+            ImportSpecifier::Namespace(ns) => {
+                namespace_local = Some(ns.local.clone());
+            }
+        }
+    }
+
+    if let Some(local) = namespace_local {
+        return Some(make_var_stmt(
+            Pat::Ident(BindingIdent {
+                id: local,
+                type_ann: None,
+            }),
+            global_expr,
+        ));
+    }
+
+    if props.is_empty() {
+        return None;
+    }
+
+    Some(make_var_stmt(
+        Pat::Object(ObjectPat {
+            span: DUMMY_SP,
+            props,
+            optional: false,
+            type_ann: None,
+        }),
+        global_expr,
+    ))
+}
+
+fn make_var_stmt(name: Pat, init: Expr) -> ModuleItem {
+    ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+        span: DUMMY_SP,
+        ctxt: SyntaxContext::empty(),
+        kind: VarDeclKind::Var,
+        declare: false,
+        decls: vec![VarDeclarator {
+            span: DUMMY_SP,
+            name,
+            init: Some(Box::new(init)),
+            definite: false,
+        }],
+    }))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +296,108 @@ mod tests {
             out.contains("__pi_plugin_default") || out.contains("function"),
             "应产出可执行插件脚本"
         );
+    }
+
+    #[test]
+    fn rewrite_known_npm_imports() {
+        // All imported names must be referenced in code body — SWC strip removes unused import specifiers.
+        let src = r#"
+import { Container, Key, matchesKey, SelectList, Text } from "@mariozechner/pi-tui";
+import { DynamicBorder } from "@mariozechner/pi-coding-agent";
+const c = new Container();
+const k = Key.escape;
+const m = matchesKey("a", "b");
+const s = new SelectList([], 10, {});
+const t = new Text("hi");
+const d = new DynamicBorder();
+"#;
+        let out = transpile_typescript(src, "test.ts").unwrap();
+        assert!(
+            !out.contains("from \"@mariozechner"),
+            "known npm imports should be rewritten, got:\n{out}"
+        );
+        assert!(
+            out.contains("globalThis.__pi_tui"),
+            "should reference globalThis.__pi_tui, got:\n{out}"
+        );
+        assert!(
+            out.contains("globalThis.__pi_coding_agent"),
+            "should reference globalThis.__pi_coding_agent, got:\n{out}"
+        );
+        assert!(
+            out.contains("Container"),
+            "should preserve binding names, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_typebox_and_pi_ai_imports() {
+        let src = r#"
+import { Type } from "@sinclair/typebox";
+import { StringEnum, complete } from "@mariozechner/pi-ai";
+const schema = Type.String();
+const e = StringEnum(["a", "b"]);
+complete("model", []);
+"#;
+        let out = transpile_typescript(src, "test.ts").unwrap();
+        assert!(out.contains("globalThis.__pi_typebox"));
+        assert!(out.contains("globalThis.__pi_ai"));
+        assert!(!out.contains("from \"@sinclair"));
+        assert!(!out.contains("from \"@mariozechner/pi-ai"));
+    }
+
+    #[test]
+    fn import_type_stripped_not_rewritten() {
+        let src = r#"
+import type { ExtensionAPI } from "@mariozechner/pi-mono";
+const x = 1;
+"#;
+        let out = transpile_typescript(src, "test.ts").unwrap();
+        assert!(
+            !out.contains("ExtensionAPI"),
+            "import type should be stripped entirely"
+        );
+        assert!(!out.contains("globalThis.__"));
+    }
+
+    #[test]
+    fn unknown_package_imports_preserved() {
+        let src = r#"
+import { Foo } from "unknown-package";
+const x = Foo;
+"#;
+        let out = transpile_typescript(src, "test.ts").unwrap();
+        assert!(
+            out.contains("\"unknown-package\""),
+            "unknown imports should remain, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn namespace_import_rewritten() {
+        let src = r#"
+import * as tui from "@mariozechner/pi-tui";
+const c = new tui.Container();
+"#;
+        let out = transpile_typescript(src, "test.ts").unwrap();
+        assert!(
+            out.contains("globalThis.__pi_tui"),
+            "namespace import should reference globalThis, got:\n{out}"
+        );
+        assert!(
+            !out.contains("from \"@mariozechner"),
+            "should not contain original import, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn default_import_rewritten() {
+        let src = r#"
+import TypeBox from "@sinclair/typebox";
+const t = TypeBox.Type.String();
+"#;
+        let out = transpile_typescript(src, "test.ts").unwrap();
+        assert!(out.contains("globalThis.__pi_typebox"));
+        assert!(!out.contains("from \"@sinclair"));
     }
 }
