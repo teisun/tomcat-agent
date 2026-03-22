@@ -548,7 +548,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
 | **分支** | `feature/plugin-compat-matrix-e2e` |
 | **阻塞点** | — |

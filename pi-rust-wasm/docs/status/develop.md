@@ -1,5 +1,39 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-22 22:28 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-05e（`feature/plugin-compat-matrix-e2e` 并入 develop）
+
+**合并分支**：`feature/plugin-compat-matrix-e2e`（1 提交，fast-forward 合并，25 文件变更，+5170/-18 行）。
+
+**任务内容**：TASK-05e pi-mono 社区插件矩阵端到端兼容验收——15 个 pi-mono 社区插件在长生命周期 VM 模式下全部 PASS（SWC 编译 → 加载 → 核心路径验证 → 清理）。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS（全量 454 passed / 1 ignored / 0 failed；wasmedge_e2e_tests 39 passed，含 15 个社区插件 E2E） |
+
+**执行环境**：macOS darwin；全量串行验收（后台写日志 + 轮询监控）。
+
+#### 变更 Review 摘要
+
+- **源码**（`dispatcher.rs`、`instance_wasmedge.rs`、`ts_compiler.rs`）：新增 registerFlag/registerShortcut/getFlag/getSessionName/setSessionName/appendEntry/setThinkingLevel stub 路由；注入 3 个新 JS shim；修复命名函数默认导出 bug
+- **JS shim 层**：`pi_bridge.js` 补齐 process.cwd/kill stub 及新 API 桥接；新增 `pi_node_shim.js`（fs/path/child_process/os/crypto）、`pi_ms_shim.js`、`pi_sandbox_runtime_shim.js`
+- **E2E 测试**：`wasmedge_e2e_tests.rs` +470 行，15 个社区插件 E2E 测试，使用轮询等待替代固定 sleep
+- **插件 fixture**：15 个 pi-mono 社区扩展 TS 源码（零修改，仅 SWC 编译）
+- 无降级断言、无 `#[ignore]` 滥用、无假绿模式
+
+#### 看板
+
+- **TASK-05e**：集成通过后已在 `TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-22 20:05 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-05d（`feature/plugin-compat-tier3-4` 并入 develop）
