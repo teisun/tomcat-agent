@@ -436,17 +436,20 @@
           params: { timeoutMs: 50 }
         }));
       } catch (hostErr) {
+        try { pi.log('[event_loop] exiting: hostErr=' + hostErr); } catch (_) {}
         neutralizeTimers();
         return;
       }
       var res = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
       if (!res.ok) {
+        try { pi.log('[event_loop] exiting: !res.ok'); } catch (_) {}
         neutralizeTimers();
         return;
       }
 
       if (res.data && res.data.type === '__shutdown') {
+        try { pi.log('[event_loop] exiting: __shutdown received'); } catch (_) {}
         neutralizeTimers();
         return;
       }

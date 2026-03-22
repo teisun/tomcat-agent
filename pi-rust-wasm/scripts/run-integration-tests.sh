@@ -5,9 +5,10 @@
 # 非 TTY 下强制 EDITOR/PAGER 为无交互，避免子进程阻塞；说明见 docs/reports/integration_test_hang_remediation.md。
 #
 # 用法（在项目根）：
-#   ./scripts/run-integration-tests.sh              # 全量：release → lib → integration
+#   ./scripts/run-integration-tests.sh              # 全量：release → clippy → lib → integration
 #   ./scripts/run-integration-tests.sh all          # 同上
 #   ./scripts/run-integration-tests.sh release      # 仅 cargo build --release
+#   ./scripts/run-integration-tests.sh clippy       # 仅 cargo clippy --all-targets -- -D warnings
 #   ./scripts/run-integration-tests.sh lib        # 仅单元测试
 #   ./scripts/run-integration-tests.sh integration  # 仅 tests/ 下全部 integration crate
 #
@@ -56,6 +57,11 @@ case "$CMD" in
     cargo build --release
     log_phase "结束 release"
     ;;
+  clippy)
+    log_phase "开始 clippy: cargo clippy --all-targets -- -D warnings"
+    cargo clippy --all-targets -- -D warnings
+    log_phase "结束 clippy"
+    ;;
   lib)
     log_phase "开始 lib: cargo test --lib（-j 1，--test-threads=1）"
     cargo test -j 1 --lib -- --nocapture --test-threads=1
@@ -85,6 +91,9 @@ case "$CMD" in
     log_phase "开始 release: cargo build --release"
     cargo build --release || FAIL=1
     log_phase "结束 release"
+    log_phase "开始 clippy: cargo clippy --all-targets -- -D warnings"
+    cargo clippy --all-targets -- -D warnings || FAIL=1
+    log_phase "结束 clippy"
     log_phase "开始 lib: cargo test --lib（-j 1，--test-threads=1）"
     cargo test -j 1 --lib -- --nocapture --test-threads=1 || FAIL=1
     log_phase "结束 lib"
@@ -112,12 +121,12 @@ case "$CMD" in
     echo "=== 全量集成测试通过 ==="
     ;;
   -h|--help|help)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)
-    echo "用法: $0 [release|lib|integration|all|-h]" >&2
-    echo "  默认与 all：release → lib → integration（含 cli + wasmedge_e2e）" >&2
+    echo "用法: $0 [release|clippy|lib|integration|all|-h]" >&2
+    echo "  默认与 all：release → clippy → lib → integration（含 cli + wasmedge_e2e）" >&2
     exit 2
     ;;
 esac

@@ -46,8 +46,8 @@ Agent 读取本文件后，须按以下流程执行。
    - 创建任务分支（格式见下方「分支命名规范」）
    - 阅读 [编码规范](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)
 2. **开发流程**：
-   - 编码（带注释）→ 测试 → 修 bug → 单测通过 → 集成&E2E测试(见7.1)→ 写技术[文档](../docs/)
-   - 本地跑 `cargo test` 时须 **`-j 1`** 且 **`--test-threads=1`**（写在 `--` 之后），与 [INTEGRATION_TEST_SPEC §7.1](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)、[INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 一致。
+   - 编码（带注释）→ 测试 → 修 bug → 单测通过 → 集成&E2E测试→ 写技术[文档](../docs/)
+   - 集成&E2E测试 见[INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 、[INTEGRATION_TEST_SPEC §7.1](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
 3. **提交前**：
    - 更新**当前 Git 分支**对应的 status 文件：文件名为「当前分支名（`/` 替换为 `-`）.md」，位于 `docs/status/` 目录；若在 develop 上开发则更新 `docs/status/develop.md`。填入 Cov% 等元数据。
    - 严格加载 [commit-guard.mdc](../.cursor/rules/commit-guard.mdc) 提交规则
