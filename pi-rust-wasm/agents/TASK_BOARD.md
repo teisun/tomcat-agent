@@ -518,14 +518,14 @@
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 **子项**：
-- [ ] d.0 npm 包 import 基础设施（SWC import 重写 + globalThis shim 注入）
-- [ ] d.1 实现 `ctx.ui.custom()` + TUI 组件兼容层（Container/SelectList/Text）
-- [ ] d.2 实现高级 UI：setWidget、setFooter、setHeader、editor
-- [ ] d.3 实现 `ctx.sessionManager` 只读接口（getBranch 等）
-- [ ] d.4 实现 `ctx.model` / `ctx.modelRegistry`
-- [ ] d.5 diff.ts 端到端测试
-- [ ] d.6 files.ts 端到端测试
-- [ ] d.7 固化为自动化 E2E 测试
+- [x] d.0 npm 包 import 基础设施（SWC import 重写 + globalThis shim 注入）
+- [x] d.1 实现 `ctx.ui.custom()` + TUI 组件兼容层（Container/SelectList/Text）
+- [x] d.2 实现高级 UI：setWidget、setFooter、setHeader、editor
+- [x] d.3 实现 `ctx.sessionManager` 只读接口（getBranch 等）
+- [x] d.4 实现 `ctx.model` / `ctx.modelRegistry`
+- [x] d.5 diff.ts 端到端测试
+- [x] d.6 files.ts 端到端测试
+- [x] d.7 固化为自动化 E2E 测试
 
 **依赖**：TASK-05c
 
