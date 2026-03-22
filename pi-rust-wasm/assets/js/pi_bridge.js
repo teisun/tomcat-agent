@@ -8,7 +8,10 @@
 
   // -- Node.js polyfills for extensions that reference process.platform --------
   if (typeof globalThis.process === 'undefined') {
-    globalThis.process = { platform: 'linux', env: {}, argv: [], exit: function () {} };
+    globalThis.process = { platform: 'linux', env: {}, argv: [], pid: 1, exit: function () {}, cwd: function () { return '/'; }, kill: function () {} };
+  } else {
+    if (typeof globalThis.process.cwd !== 'function') globalThis.process.cwd = function () { return '/'; };
+    if (typeof globalThis.process.kill !== 'function') globalThis.process.kill = function () {};
   }
 
   // -- Low-level synchronous host call wrapper --------------------------------
@@ -282,7 +285,7 @@
     },
 
     // =========================================================================
-    // Tool visibility (pi-mono ExtensionAPI.getActiveTools / setActiveTools)
+    // Tool visibility (pi-mono ExtensionAPI.getActiveTools / setActiveTools / getAllTools)
     // =========================================================================
     getActiveTools: function () {
       return hostCall('tools', 'getActiveTools', {});
@@ -290,6 +293,63 @@
 
     setActiveTools: function (toolNames) {
       return hostCall('tools', 'setActiveTools', { toolNames: toolNames });
+    },
+
+    getAllTools: function () {
+      var r = hostCall('tools', 'getToolList', {});
+      return (r && r.ok && r.data) ? r.data : [];
+    },
+
+    // =========================================================================
+    // Flags (pi-mono ExtensionAPI.registerFlag / getFlag)
+    // =========================================================================
+    registerFlag: function (name, options) {
+      return hostCall('tools', 'registerFlag', {
+        name: name,
+        description: (options && options.description) || '',
+        type: (options && options.type) || 'boolean'
+      });
+    },
+
+    getFlag: function (name) {
+      var r = hostCall('tools', 'getFlag', { name: name });
+      return (r && r.ok && r.data != null) ? r.data.value : undefined;
+    },
+
+    // =========================================================================
+    // Shortcuts (pi-mono ExtensionAPI.registerShortcut)
+    // =========================================================================
+    registerShortcut: function (key, options) {
+      return hostCall('tools', 'registerShortcut', {
+        key: key,
+        description: (options && options.description) || ''
+      });
+    },
+
+    // =========================================================================
+    // Session name (pi-mono ExtensionAPI.getSessionName / setSessionName)
+    // =========================================================================
+    getSessionName: function () {
+      var r = hostCall('session', 'getSessionName', {});
+      return (r && r.ok && r.data) ? r.data.name : '';
+    },
+
+    setSessionName: function (name) {
+      return hostCall('session', 'setSessionName', { name: name });
+    },
+
+    // =========================================================================
+    // Conversation (pi-mono ExtensionAPI.appendEntry)
+    // =========================================================================
+    appendEntry: function (entry) {
+      return hostCall('session', 'appendEntry', { entry: entry });
+    },
+
+    // =========================================================================
+    // Model control (pi-mono ExtensionAPI.setThinkingLevel)
+    // =========================================================================
+    setThinkingLevel: function (level) {
+      return hostCall('llm', 'setThinkingLevel', { level: level });
     }
   };
 
@@ -458,7 +518,9 @@
           var r = hostCall('context', 'listModels', {});
           return (r && r.ok && r.data) ? r.data : [];
         },
-        getError: function () { return undefined; }
+        getError: function () { return undefined; },
+        find: function (_query) { return null; },
+        getApiKeyForProvider: function (_provider) { return ''; }
       }
     };
   }

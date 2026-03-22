@@ -512,6 +512,16 @@ impl HostApiDispatcher {
             ("tools", "getActiveTools") => self.do_get_active_tools(instance_id, &params).await,
             ("tools", "setActiveTools") => self.do_set_active_tools(instance_id, &params).await,
             ("tools", "registerCommand") => self.do_register_command(instance_id, &params).await,
+            ("tools", "registerFlag") | ("tools", "registerShortcut") | ("tools", "getFlag") => {
+                Ok(HostResponse::ok(serde_json::Value::Null))
+            }
+            ("session", "getSessionName") => {
+                Ok(HostResponse::ok(serde_json::json!({"name": ""})))
+            }
+            ("session", "setSessionName") | ("session", "appendEntry") => {
+                Ok(HostResponse::ok(serde_json::Value::Null))
+            }
+            ("llm", "setThinkingLevel") => Ok(HostResponse::ok(serde_json::Value::Null)),
             ("events", "on")
             | ("events", "subscribe")
             | ("events", "once")

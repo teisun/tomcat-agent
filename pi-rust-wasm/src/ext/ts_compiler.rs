@@ -24,6 +24,24 @@ const NPM_SHIM_MAP: &[(&str, &str)] = &[
     ("@mariozechner/pi-coding-agent", "__pi_coding_agent"),
     ("@mariozechner/pi-ai", "__pi_ai"),
     ("@sinclair/typebox", "__pi_typebox"),
+    // Node.js built-in modules
+    ("fs", "__node_fs"),
+    ("node:fs", "__node_fs"),
+    ("fs/promises", "__node_fs_promises"),
+    ("node:fs/promises", "__node_fs_promises"),
+    ("path", "__node_path"),
+    ("node:path", "__node_path"),
+    ("child_process", "__node_child_process"),
+    ("node:child_process", "__node_child_process"),
+    ("os", "__node_os"),
+    ("node:os", "__node_os"),
+    ("crypto", "__node_crypto"),
+    ("node:crypto", "__node_crypto"),
+    // External npm packages
+    ("@anthropic-ai/sandbox-runtime", "__pi_sandbox_runtime"),
+    ("ms", "__pi_ms"),
+    // Subagent local import
+    ("./agents.js", "__pi_subagent_agents"),
 ];
 
 /// 将 TypeScript 模块源码转译为 ES 模块风格 JS（仍含 `import` / `export` 时由调用方处理）。
@@ -97,10 +115,21 @@ pub fn transpile_pi_plugin_for_quickjs(source: &str, filename: &str) -> Result<S
 fn wrap_export_default_pi_plugin(js: &str) -> String {
     let needle = "export default function";
     if let Some(pos) = js.find(needle) {
+        let after = &js[pos + needle.len()..];
+        // Skip optional original function name so
+        // `export default function myName(` becomes `function __pi_plugin_default(`
+        let after = after.trim_start();
+        let skip_name = if after.starts_with('(') {
+            after
+        } else if let Some(paren) = after.find('(') {
+            &after[paren..]
+        } else {
+            after
+        };
         let mut out = String::with_capacity(js.len() + 128);
         out.push_str(&js[..pos]);
         out.push_str("function __pi_plugin_default");
-        out.push_str(&js[pos + needle.len()..]);
+        out.push_str(skip_name);
         out.push_str(
             "\nif (typeof globalThis.pi !== 'undefined') { __pi_plugin_default(globalThis.pi); }\n",
         );
@@ -388,6 +417,18 @@ const c = new tui.Container();
             !out.contains("from \"@mariozechner"),
             "should not contain original import, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn named_default_export_stripped() {
+        let src = r#"export default function myPlugin(pi: unknown) { pi; }
+"#;
+        let out = transpile_pi_plugin_for_quickjs(src, "p.ts").unwrap();
+        assert!(
+            !out.contains("myPlugin"),
+            "original function name should be stripped, got:\n{out}"
+        );
+        assert!(out.contains("function __pi_plugin_default("));
     }
 
     #[test]

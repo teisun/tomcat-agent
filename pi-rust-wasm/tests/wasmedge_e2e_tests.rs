@@ -1033,11 +1033,17 @@ async fn test_wasmedge_e2e_vm_actor_state_persists_across_events(
 
     tracing::info!("Act: end_session(s1)");
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     tracing::info!("Assert: RuntimeManager 已清空，handle 已终止");
     assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
-    let final_state = handle.current_state();
+    let mut final_state = handle.current_state();
+    for _ in 0..20 {
+        if final_state != pi_wasm::VmActorState::Running {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        final_state = handle.current_state();
+    }
     tracing::info!("  final handle state = {:?}", final_state);
     assert_ne!(
         final_state,
@@ -1398,7 +1404,11 @@ fn setup_long_lived_vm_test_with_ts(
         serde_json::to_string_pretty(&manifest_val).unwrap(),
     )
     .unwrap();
-    std::fs::copy(&ts_src, tmp.path().join(ts_fixture)).unwrap();
+    let dest = tmp.path().join(ts_fixture);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::copy(&ts_src, &dest).unwrap();
 
     let bus = Arc::new(DefaultEventBus::new());
     let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
@@ -1603,5 +1613,459 @@ async fn test_wasmedge_e2e_tier4_files_real_ts() -> Result<(), Box<dyn std::erro
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    Ok(())
+}
+
+// ===========================================================================
+// TASK-05e: Community plugin E2E tests (15 plugins, long-lived VM)
+// ===========================================================================
+
+/// Helper: set up dispatcher with ui_notify counter and tokio handle.
+fn make_community_dispatcher() -> (Arc<HostApiDispatcher>, Arc<AtomicU32>) {
+    let bus = Arc::new(DefaultEventBus::new());
+    let ui_notify = Arc::new(AtomicU32::new(0));
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus)
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_ui_notify_counter(ui_notify.clone()),
+    );
+    (dispatcher, ui_notify)
+}
+
+async fn poll_for_command(
+    dispatcher: &HostApiDispatcher,
+    inst_id: &str,
+    cmd_name: &str,
+    max_polls: usize,
+) -> Vec<(String, String)> {
+    let mut cmds = Vec::new();
+    for _ in 0..max_polls {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        cmds = dispatcher.registered_plugin_commands(inst_id);
+        if cmds.iter().any(|(n, _)| n == cmd_name) {
+            break;
+        }
+    }
+    cmds
+}
+
+/// [TASK-05e] 1/15 tps — agent_end triggers ctx.ui.notify with TPS info
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_tps() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-tps";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "tps.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::WIRE_AGENT_START,
+        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::WIRE_AGENT_END,
+        serde_json::json!({
+            "messages": [{"role": "assistant", "usage": {"input": 10, "output": 100, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 110}}]
+        }),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        if ui_notify.load(Ordering::SeqCst) >= 1 { break; }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("tps: expected >=1 uiNotify within 5s, got {}", ui_notify.load(Ordering::SeqCst));
+        }
+    }
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 2/15 dynamic-tools — session_start registers echo_session tool + add-echo-tool command
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_dynamic_tools() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-dynamic-tools";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "dynamic-tools.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let inst_id = format!("s1/{plugin_id}");
+    let cmds = poll_for_command(&dispatcher, &inst_id, "add-echo-tool", 30).await;
+    assert!(cmds.iter().any(|(n, _)| n == "add-echo-tool"),
+        "dynamic-tools should register 'add-echo-tool' command, got: {:?}", cmds);
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_SESSION_START,
+        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    assert!(ui_notify.load(Ordering::SeqCst) >= 1,
+        "dynamic-tools session_start should trigger ui.notify");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 3/15 tool-override — registers read tool override + read-log command
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_tool_override() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-tool-override";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "tool-override.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let inst_id = format!("s1/{plugin_id}");
+    let cmds = poll_for_command(&dispatcher, &inst_id, "read-log", 30).await;
+    assert!(cmds.iter().any(|(n, _)| n == "read-log"),
+        "tool-override should register 'read-log' command, got: {:?}", cmds);
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 4/15 truncated-tool — registers rg tool with JSON Schema parameters
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_truncated_tool() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-truncated-tool";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "truncated-tool.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "truncated-tool should load without command failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 5/15 preset — registers preset command, preset flag, and shortcut
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_preset() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-preset";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "preset.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let inst_id = format!("s1/{plugin_id}");
+    let cmds = poll_for_command(&dispatcher, &inst_id, "preset", 30).await;
+    assert!(cmds.iter().any(|(n, _)| n == "preset"),
+        "preset should register 'preset' command, got: {:?}", cmds);
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_SESSION_START,
+        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "preset should not have command failures after session_start");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 6/15 files — command_invoke("files") → getBranch → commandCompleted
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_files() -> Result<(), Box<dyn std::error::Error>> {
+    use pi_wasm::SessionManager;
+    common::setup_logging();
+
+    let session_dir = tempfile::tempdir()?;
+    let session_mgr = Arc::new(SessionManager::new(session_dir.path().to_path_buf()));
+    let key = session_mgr.current_session_key().to_string();
+    session_mgr.create_session(&key, Some("/tmp".to_string()))?;
+    session_mgr.append_message(serde_json::json!({
+        "role": "assistant", "timestamp": 1000,
+        "content": [{"type": "toolCall", "id": "tc-1", "name": "read", "arguments": {"path": "/tmp/foo.rs"}}]
+    }))?;
+    session_mgr.append_message(serde_json::json!({
+        "role": "toolResult", "timestamp": 1001, "toolCallId": "tc-1",
+        "content": [{"type": "text", "text": "file contents"}]
+    }))?;
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus)
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_session(session_mgr),
+    );
+
+    let plugin_id = "community-files";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "files.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_COMMAND_INVOKE,
+        serde_json::json!({"name": "files", "args": ""}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+    assert!(dispatcher.command_completed_count() >= 1,
+        "files handler should call commandCompleted");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 7/15 diff — command_invoke("diff") → exec("git") → commandCompleted
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
+    use pi_wasm::{BashResult, PrimitiveExecutor, DirEntry, EditOperation, EditFileResult, WriteFileResult, PrimitiveOperation};
+    common::setup_logging();
+
+    struct DiffMock;
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for DiffMock {
+        async fn read_file(&self, _: &str, _: &str) -> Result<String, pi_wasm::AppError> { Ok(String::new()) }
+        async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, pi_wasm::AppError> { Ok(vec![]) }
+        async fn write_file(&self, _: &str, _: &str, _: bool, _: &str) -> Result<WriteFileResult, pi_wasm::AppError> {
+            Ok(WriteFileResult { path: String::new(), written: false })
+        }
+        async fn edit_file(&self, _: &str, _: Vec<EditOperation>, _: &str) -> Result<EditFileResult, pi_wasm::AppError> {
+            Ok(EditFileResult { path: String::new(), applied: false })
+        }
+        async fn execute_bash(&self, cmd: &str, _: Option<&str>, _: &str, argv: Option<&[String]>) -> Result<BashResult, pi_wasm::AppError> {
+            if cmd == "git" {
+                if let Some(args) = argv {
+                    if args.first().map(|s| s.as_str()) == Some("status") {
+                        return Ok(BashResult { stdout: " M src/main.rs\n?? new.txt\n".into(), stderr: String::new(), exit_code: 0 });
+                    }
+                }
+            }
+            Ok(BashResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })
+        }
+        async fn require_user_confirmation(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, pi_wasm::AppError> { Ok(true) }
+    }
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus)
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_primitive(Arc::new(DiffMock)),
+    );
+
+    let plugin_id = "community-diff";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "diff.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_COMMAND_INVOKE,
+        serde_json::json!({"name": "diff", "args": ""}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+    assert!(dispatcher.command_completed_count() >= 1,
+        "diff handler should call commandCompleted");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 8/15 sandbox — registers bash tool, sandbox command, no-sandbox flag
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_sandbox() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-sandbox";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "sandbox/index.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let inst_id = format!("s1/{plugin_id}");
+    let mut cmds = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        cmds = dispatcher.registered_plugin_commands(&inst_id);
+        if cmds.iter().any(|(n, _)| n == "sandbox") { break; }
+    }
+    assert!(cmds.iter().any(|(n, _)| n == "sandbox"),
+        "sandbox should register 'sandbox' command, got: {:?}", cmds);
+
+    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_SESSION_START,
+        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "sandbox session_start should not trigger command failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 9/15 antigravity-image-gen — registers generate_image tool with TypeBox schema
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_antigravity_image_gen() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-antigravity";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "antigravity-image-gen.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "antigravity-image-gen should load without failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 10/15 subagent — registers subagent tool with parameter schema
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_subagent() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-subagent";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "subagent/index.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "subagent should load without failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 11/15 with-deps — registers parse_duration tool (ms npm dependency)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_with_deps() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-with-deps";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "with-deps/index.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "with-deps should load without failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 12/15 prompt-url-widget — before_agent_start handler processes PR URLs
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_prompt_url_widget() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-prompt-url-widget";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "prompt-url-widget.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    mgr.dispatch_session_event("s1", plugin_id, "before_agent_start",
+        serde_json::json!({"prompt": "Review https://github.com/owner/repo/pull/42"}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "prompt-url-widget should not have command failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 13/15 redraws — registers tui command
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_redraws() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-redraws";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "redraws.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let inst_id = format!("s1/{plugin_id}");
+    let cmds = poll_for_command(&dispatcher, &inst_id, "tui", 30).await;
+    assert!(cmds.iter().any(|(n, _)| n == "tui"),
+        "redraws should register 'tui' command, got: {:?}", cmds);
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 14/15 overlay-qa-tests — registers multiple overlay-* commands
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_overlay_qa_tests() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-overlay-qa";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "overlay-qa-tests.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+
+    let inst_id = format!("s1/{plugin_id}");
+    let cmds = poll_for_command(&dispatcher, &inst_id, "overlay-animation", 30).await;
+    assert!(cmds.iter().any(|(n, _)| n == "overlay-animation"),
+        "overlay-qa-tests should register 'overlay-animation', got: {:?}", cmds);
+    assert!(cmds.len() >= 5, "overlay-qa-tests should register multiple overlay-* commands, got {}", cmds.len());
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
+    Ok(())
+}
+
+/// [TASK-05e] 15/15 provider-payload — before_provider_request handler logs payload
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_e2e_community_provider_payload() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let (dispatcher, _ui_notify) = make_community_dispatcher();
+    let plugin_id = "community-provider-payload";
+    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "provider-payload.ts", dispatcher.clone());
+
+    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    mgr.dispatch_session_event("s1", plugin_id, "before_provider_request",
+        serde_json::json!({"payload": {"model": "test", "messages": []}}),
+        serde_json::json!({"hasUI": false, "cwd": "/tmp"}))?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let failed = dispatcher.command_failed_count();
+    assert_eq!(failed, 0, "provider-payload should not have command failures");
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert!(rm.is_empty());
     Ok(())
 }

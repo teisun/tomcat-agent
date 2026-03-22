@@ -195,6 +195,10 @@
   AuthStorage.prototype.resolveApiKey = function () { return undefined; };
   AuthStorage.prototype.get = function () { return undefined; };
 
+  function withFileMutationQueue(fn) {
+    return typeof fn === 'function' ? fn() : Promise.resolve();
+  }
+
   function createAgentSession(opts) {
     opts = opts || {};
     var state = { id: String(opts.id || "session"), messages: Array.isArray(opts.messages) ? opts.messages.slice() : [] };
@@ -216,6 +220,7 @@
     createBashTool: createBashTool, createReadTool: createReadTool, createLsTool: createLsTool,
     createGrepTool: createGrepTool, createWriteTool: createWriteTool, createEditTool: createEditTool,
     copyToClipboard: copyToClipboard, getAgentDir: getAgentDir, keyHint: keyHint, compact: compact,
+    withFileMutationQueue: withFileMutationQueue,
     AssistantMessageComponent: AssistantMessageComponent,
     ToolExecutionComponent: ToolExecutionComponent, UserMessageComponent: UserMessageComponent,
     SessionManager: SessionManager, SettingsManager: SettingsManager,
@@ -236,6 +241,7 @@
       createBashTool: createBashTool, createReadTool: createReadTool, createLsTool: createLsTool,
       createGrepTool: createGrepTool, createWriteTool: createWriteTool, createEditTool: createEditTool,
       copyToClipboard: copyToClipboard, getAgentDir: getAgentDir, keyHint: keyHint, compact: compact,
+      withFileMutationQueue: withFileMutationQueue,
       AssistantMessageComponent: AssistantMessageComponent,
       ToolExecutionComponent: ToolExecutionComponent, UserMessageComponent: UserMessageComponent,
       SessionManager: SessionManager, SettingsManager: SettingsManager,

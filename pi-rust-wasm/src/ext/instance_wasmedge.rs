@@ -18,6 +18,9 @@ const PI_TUI_SHIM: &str = include_str!("../../assets/js/pi_tui_shim.js");
 const PI_CODING_AGENT_SHIM: &str = include_str!("../../assets/js/pi_coding_agent_shim.js");
 const PI_AI_SHIM: &str = include_str!("../../assets/js/pi_ai_shim.js");
 const PI_TYPEBOX_SHIM: &str = include_str!("../../assets/js/pi_typebox_shim.js");
+const PI_NODE_SHIM: &str = include_str!("../../assets/js/pi_node_shim.js");
+const PI_SANDBOX_RUNTIME_SHIM: &str = include_str!("../../assets/js/pi_sandbox_runtime_shim.js");
+const PI_MS_SHIM: &str = include_str!("../../assets/js/pi_ms_shim.js");
 /// Async main loop IIFE injected at the tail of long-lived VM scripts.
 const PI_MAIN_LOOP: &str = include_str!("../../assets/js/pi_main_loop.js");
 
@@ -200,10 +203,13 @@ impl WasmInstance {
                 let bridge_code = std::fs::read_to_string(&bp).map_err(AppError::Io)?;
                 Ok(format!(
                     "// --- pi_bridge.js (auto-injected) ---\n{bridge_code}\n\
+                     // --- pi_node_shim.js ---\n{PI_NODE_SHIM}\n\
                      // --- pi_tui_shim.js ---\n{PI_TUI_SHIM}\n\
                      // --- pi_coding_agent_shim.js ---\n{PI_CODING_AGENT_SHIM}\n\
                      // --- pi_ai_shim.js ---\n{PI_AI_SHIM}\n\
                      // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
+                     // --- pi_sandbox_runtime_shim.js ---\n{PI_SANDBOX_RUNTIME_SHIM}\n\
+                     // --- pi_ms_shim.js ---\n{PI_MS_SHIM}\n\
                      // --- user script ---\n{user_code}"
                 ))
             }

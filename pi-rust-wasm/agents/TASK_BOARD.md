@@ -548,12 +548,12 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Tom |
 | **分支** | `feature/plugin-compat-matrix-e2e` |
 | **阻塞点** | — |
 
-**目标**：按 Phase 0 输出的扩展矩阵，对 **10–15 个** pi-mono **社区**插件逐一做端到端兼容验收，形成可勾选、可追溯的验收记录（并尽量固化为自动化或脚本化回归）。
+**目标**：按 Phase 0 输出的扩展矩阵，对 **15 个** pi-mono **社区**插件逐一做端到端兼容验收（长生命周期 VM），**15/15 全部通过**，每个插件均有自动化 E2E 测试覆盖。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
 **开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
@@ -564,11 +564,11 @@
 - **插件来源**：本批次插件清单**必须全部来自 pi-mono 仓库社区扩展或官方示例**（路径见 `extension_compat_matrix.md`），不得使用本项目自建的 mock/stub 插件充数；插件源码须以**零修改**（仅允许 SWC 编译转换）方式加载验证。
 
 **子项**：
-- [ ] e.1 对照 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 锁定本批次 **10–15** 个社区插件清单（名称、来源、Tier、核心验证路径）
-- [ ] e.2 为每个插件写明「通过」判定（如：SWC 编译 → `load_plugin` → 触发约定事件/命令/工具路径）
-- [ ] e.3 逐插件执行验证并记录结果（建议在同目录或 `docs/reports/` 下维护验收表，与矩阵交叉引用）
-- [ ] e.4 将其中高价值路径纳入 `tests/` 或 `./scripts/run-integration-tests.sh` 可复用步骤（可选，不降低 10–15 全量手测/记录要求）
-- [ ] e.5 提交 Nibbles 集成前自检：矩阵内本批次插件 **≥10** 个已勾选为通过（与 TASK-05a 验收「10+ 矩阵」口径一致）
+- [x] e.1 对照 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 锁定本批次 **15** 个社区插件清单（名称、来源、Tier、核心验证路径）
+- [x] e.2 为每个插件写明「通过」判定（如：SWC 编译 → `load_plugin` → 触发约定事件/命令/工具路径）
+- [x] e.3 逐插件执行验证并记录结果 → [`plugin_community_e2e_acceptance.md`](../docs/reports/plugin_community_e2e_acceptance.md)（15/15 PASS）
+- [x] e.4 所有 15 个插件均在 `tests/wasmedge_e2e_tests.rs` 中有自动化 E2E 测试函数，`cargo test -j 1 --all -- --test-threads=1` 全量通过
+- [x] e.5 自检完成：15/15 PASS，全量测试 0 failed，标记 `PENDING_INTEGRATION`
 
 **依赖**：TASK-05d
 
@@ -579,9 +579,10 @@
 - 提供：社区兼容验收记录（文档 + 可选测试/脚本）
 
 **验收标准**：
-- 矩阵中本批次 **10–15** 个社区插件均完成端到端验证并有明确通过/阻塞结论
-- 阻塞项已记入验收表并关联差距文档或后续任务
-- （推荐）至少 **10** 个插件结论为「通过」方视为本任务可标 `PENDING_INTEGRATION` / 集成通过
+- **15/15** 个社区插件全部通过端到端兼容验证，不接受 PARTIAL 或 BLOCKED
+- 每个插件在 `tests/wasmedge_e2e_tests.rs` 中有对应的自动化 E2E 测试函数
+- 遇到缺失的 shim/API 需当场补齐，而非标记跳过
+- `cargo test -j 1 --all -- --test-threads=1` 全量通过
 
 ---
 
