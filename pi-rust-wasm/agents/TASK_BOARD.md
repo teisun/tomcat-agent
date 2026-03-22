@@ -506,8 +506,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P2 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DOING` |
+| **负责人** | Spike |
 | **分支** | `feature/plugin-compat-tier3-4` |
 | **阻塞点** | npm 包 import 需 SWC 重写 + shim 注入；TUI 渲染策略；SessionManager hostcall 接线 |
 
