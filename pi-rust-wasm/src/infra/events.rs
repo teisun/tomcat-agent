@@ -44,6 +44,8 @@ pub mod wire {
     /// VM / dispatcher 协议中与 AgentEvent 无关的 `event_type`（如 waitForEvent 信封）。
     pub mod vm {
         pub const WIRE_SESSION_START: &str = "session_start";
+        /// 宿主向 JS 侧发起命令执行请求（长生命周期 VM async main loop 机制）。
+        pub const WIRE_COMMAND_INVOKE: &str = "command_invoke";
     }
 }
 

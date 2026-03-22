@@ -22,7 +22,7 @@ var filesRan = false;
 
 pi.registerCommand('files', {
   description: 'Show session files',
-  handler: function (ctx) {
+  handler: function (_args, ctx) {
     var branch = ctx.sessionManager.getBranch();
     if (!Array.isArray(branch)) {
       throw new Error('getBranch() did not return array, got: ' + typeof branch);

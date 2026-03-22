@@ -140,6 +140,10 @@ pub struct HostApiDispatcher {
     event_senders: Arc<DashMap<String, std::sync::mpsc::SyncSender<EventEnvelope>>>,
     /// 可选：`context.uiNotify` 调用次数（测试断言用，与生产逻辑无关）。
     ui_notify_count: Option<Arc<AtomicU32>>,
+    /// `context.commandCompleted` 调用次数（测试断言用）。
+    command_completed_count: Arc<AtomicU32>,
+    /// `context.commandFailed` 调用次数（测试断言用）。
+    command_failed_count: Arc<AtomicU32>,
     /// 插件实例已注册的 slash 命令：(name, description)，handler 仅存于 JS `__pi_commands`。
     plugin_commands: Arc<DashMap<String, Vec<(String, String)>>>,
 }
@@ -164,6 +168,8 @@ impl HostApiDispatcher {
             event_receivers: Arc::new(DashMap::new()),
             event_senders: Arc::new(DashMap::new()),
             ui_notify_count: None,
+            command_completed_count: Arc::new(AtomicU32::new(0)),
+            command_failed_count: Arc::new(AtomicU32::new(0)),
             plugin_commands: Arc::new(DashMap::new()),
         }
     }
@@ -180,6 +186,16 @@ impl HostApiDispatcher {
     pub fn with_ui_notify_counter(mut self, counter: Arc<AtomicU32>) -> Self {
         self.ui_notify_count = Some(counter);
         self
+    }
+
+    /// `commandCompleted` 累计调用次数（测试断言用）。
+    pub fn command_completed_count(&self) -> u32 {
+        self.command_completed_count.load(Ordering::SeqCst)
+    }
+
+    /// `commandFailed` 累计调用次数（测试断言用）。
+    pub fn command_failed_count(&self) -> u32 {
+        self.command_failed_count.load(Ordering::SeqCst)
     }
 
     /// 注入 4 原语执行器。
@@ -526,6 +542,8 @@ impl HostApiDispatcher {
             ("context", "uiConfirm") => Ok(Self::do_context_ui_confirm(&params)),
             ("context", "uiInput") => Ok(Self::do_context_ui_input(&params)),
             ("context", "uiSetStatus") => Ok(Self::do_context_ui_set_status(&params)),
+            ("context", "commandCompleted") => Ok(self.do_command_completed(&params)),
+            ("context", "commandFailed") => Ok(self.do_command_failed(&params)),
             ("context", "uiCustom") => Ok(Self::do_context_ui_custom(&params)),
             ("context", "uiSetWidget") => Ok(Self::do_context_ui_stub("uiSetWidget", &params)),
             ("context", "uiSetFooter") => Ok(Self::do_context_ui_stub("uiSetFooter", &params)),
@@ -1114,6 +1132,21 @@ impl HostApiDispatcher {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         tracing::debug!("[context.ui.setStatus] {} details={}", message, details);
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    fn do_command_completed(&self, params: &serde_json::Value) -> HostResponse {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        tracing::debug!("[context.commandCompleted] name={}", name);
+        self.command_completed_count.fetch_add(1, Ordering::SeqCst);
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    fn do_command_failed(&self, params: &serde_json::Value) -> HostResponse {
+        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let error = params.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        tracing::warn!("[context.commandFailed] name={} error={}", name, error);
+        self.command_failed_count.fetch_add(1, Ordering::SeqCst);
         HostResponse::ok(serde_json::Value::Null)
     }
 

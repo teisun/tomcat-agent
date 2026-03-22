@@ -150,6 +150,7 @@ fn test_wasmedge_e2e_require_path_modules_preopen() -> Result<(), Box<dyn std::e
 ///
 /// 验证：`transpile_pi_plugin_for_quickjs` + `run_script_file` 返回 Ok
 /// 意义：TS→JS→QuickJS 全链路 POC；宿主桩响应满足 `pi.on` 注册
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_tps_transpile_run_script_poc() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -207,6 +208,7 @@ fn test_wasmedge_e2e_hello_world_inline() -> Result<(), Box<dyn std::error::Erro
 ///
 /// 验证：4 原语触发 ≥4 次 host 调用
 /// 意义：WasmEdge E2E——pi_bridge.js 桥接层 4 原语完整链路
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_bridge_layer() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -312,6 +314,7 @@ fn test_wasmedge_e2e_event_dispatch() -> Result<(), Box<dyn std::error::Error>> 
 ///
 /// 验证：hostCall 计数 ≥4
 /// 意义：WasmEdge E2E——JS 侧 4 原语调用完整链路（INTEGRATION_TEST_SPEC 5.4）
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -357,6 +360,7 @@ fn test_wasmedge_e2e_primitives_script_file() -> Result<(), Box<dyn std::error::
 }
 
 /// [TASK-05c Tier2] tier2_compat_test.js：registerCommand+invoke、registerTool(schema)、ctx.ui、executeBash+args
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_tier2_compat_script() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -422,6 +426,7 @@ fn test_wasmedge_e2e_tier2_compat_script() -> Result<(), Box<dyn std::error::Err
 }
 
 /// [TASK-05c] 模拟社区扩展：`export default function(pi)` + registerCommand + `__pi_invoke_command`（TS→SWC→QuickJS）
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_tier2_transpiled_export_default_plugin(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -474,6 +479,10 @@ export default function (pi) {
 }
 
 /// [TASK-05d d.5 Tier3] diff fixture：registerCommand("diff") → exec("git") → ctx.ui.custom + TUI 组件树渲染
+///
+/// DEPRECATED: 短生命周期 VM shim 层回归测试。插件完整 E2E 请使用
+/// `test_wasmedge_e2e_tier3_diff_real_ts`（长生命周期 VM + command_invoke）。
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_tier3_diff_custom_ui() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -532,6 +541,10 @@ fn test_wasmedge_e2e_tier3_diff_custom_ui() -> Result<(), Box<dyn std::error::Er
 }
 
 /// [TASK-05d d.6 Tier4] files fixture：registerCommand("files") → getBranch() → ctx.ui.custom + SelectList
+///
+/// DEPRECATED: 短生命周期 VM shim 层回归测试。插件完整 E2E 请使用
+/// `test_wasmedge_e2e_tier4_files_real_ts`（长生命周期 VM + command_invoke）。
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_tier4_files_session_branch() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -589,6 +602,7 @@ fn test_wasmedge_e2e_tier4_files_session_branch() -> Result<(), Box<dyn std::err
 ///
 /// 验证：load_plugin 成功、list_loaded 含 id、get_plugin 返回 Some；unload 后为空
 /// 意义：WasmEdge E2E——插件从磁盘加载到卸载的完整生命周期（Nibbles + INTEGRATION_TEST_SPEC 5.4）
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_load_plugin_from_disk_succeeds() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -658,6 +672,7 @@ fn test_wasmedge_e2e_load_plugin_from_disk_succeeds() -> Result<(), Box<dyn std:
 ///
 /// 验证：JS 调用 pi.registerTool({...}) 后，宿主侧 host_call 中 method=registerTool 至少触发 1 次
 /// 意义：Story 5——插件可通过 pi.registerTool 向宿主注册工具，宿主 host_call 链路正常
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_wasmedge_e2e_tool_registration() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -1322,6 +1337,263 @@ async fn test_wasmedge_e2e_tps_tier1_agent_end_notify() -> Result<(), Box<dyn st
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    Ok(())
+}
+
+// ===========================================================================
+// Long-lived VM + command_invoke E2E tests (real pi-mono .ts sources)
+// ===========================================================================
+
+/// Setup helper: creates a long-lived VM test from a `.ts` fixture in `pi_mono_extensions/`.
+fn setup_long_lived_vm_test_with_ts(
+    plugin_id: &str,
+    ts_fixture: &str,
+    dispatcher: Arc<HostApiDispatcher>,
+) -> (
+    PluginManager,
+    SharedRuntimeManager,
+    tempfile::TempDir,
+) {
+    let quickjs_path = require_quickjs_wasm();
+    let config = WasmEngineConfig {
+        quickjs_path: Some(quickjs_path),
+        ..WasmEngineConfig::default()
+    };
+    let engine = WasmEngine::global(Some(config)).unwrap_or_else(|e| {
+        panic!("集成测试要求已安装 WasmEdge。当前: {e}。安装见 {WASMEDGE_INSTALL_URL}");
+    });
+
+    let ts_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pi_mono_extensions")
+        .join(ts_fixture);
+    assert!(
+        ts_src.exists(),
+        "pi_mono_extensions fixture must exist: {:?}",
+        ts_src
+    );
+
+    let tmp = tempfile::tempdir().expect("create temp dir for E2E plugin");
+    let manifest_val = serde_json::json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": "e2e",
+        "author": "e2e",
+        "main": ts_fixture,
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": []
+    });
+    std::fs::write(
+        tmp.path().join("plugin.json"),
+        serde_json::to_string_pretty(&manifest_val).unwrap(),
+    )
+    .unwrap();
+    std::fs::copy(&ts_src, tmp.path().join(ts_fixture)).unwrap();
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+
+    let mut mgr = PluginManager::new(bus);
+    mgr.set_wasm_engine(engine);
+    mgr.set_host_dispatcher(dispatcher.clone());
+    mgr.set_runtime_manager(rm.clone());
+    mgr.set_event_channel_capacity(16);
+
+    let manifest = parse_manifest(&serde_json::to_string(&manifest_val).unwrap()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let instance = PluginInstance {
+        id: plugin_id.to_string(),
+        manifest,
+        wasm_instance: None,
+        status: PluginStatus::Loaded,
+        registered_tools: vec![],
+        event_listener_ids: vec![],
+        config: serde_json::json!({}),
+        created_at: now,
+        loaded_at: now,
+        plugin_root: tmp.path().to_path_buf(),
+    };
+    mgr.register_plugin(instance).unwrap();
+
+    (mgr, rm, tmp)
+}
+
+/// [E2E-WASM-041] diff.ts: real TS source → long-lived VM + command_invoke → executeBash + commandCompleted
+///
+/// Full pipeline: SWC transpile → QuickJS long-lived VM → command_invoke event →
+/// async handler calls pi.exec("git", ["status", "--porcelain"]) → commandCompleted hostcall.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error::Error>> {
+    use pi_wasm::{BashResult, PrimitiveExecutor, DirEntry, EditOperation, EditFileResult, WriteFileResult, PrimitiveOperation};
+
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_tier3_diff_real_ts").entered();
+
+    struct DiffMockPrimitive;
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for DiffMockPrimitive {
+        async fn read_file(&self, _: &str, _: &str) -> Result<String, pi_wasm::AppError> {
+            Ok(String::new())
+        }
+        async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, pi_wasm::AppError> {
+            Ok(vec![])
+        }
+        async fn write_file(&self, _: &str, _: &str, _: bool, _: &str) -> Result<WriteFileResult, pi_wasm::AppError> {
+            Ok(WriteFileResult { path: String::new(), written: false })
+        }
+        async fn edit_file(&self, _: &str, _: Vec<EditOperation>, _: &str) -> Result<EditFileResult, pi_wasm::AppError> {
+            Ok(EditFileResult { path: String::new(), applied: false })
+        }
+        async fn execute_bash(&self, cmd: &str, _cwd: Option<&str>, _: &str, argv: Option<&[String]>) -> Result<BashResult, pi_wasm::AppError> {
+            if cmd == "git" {
+                if let Some(args) = argv {
+                    if args.first().map(|s| s.as_str()) == Some("status") {
+                        return Ok(BashResult {
+                            stdout: " M src/main.rs\n?? new_file.txt\n".to_string(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                        });
+                    }
+                }
+            }
+            Ok(BashResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })
+        }
+        async fn require_user_confirmation(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, pi_wasm::AppError> {
+            Ok(true)
+        }
+    }
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus)
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_primitive(Arc::new(DiffMockPrimitive)),
+    );
+
+    let plugin_id = "diff-real-ts-e2e";
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "diff.ts", dispatcher.clone());
+
+    tracing::info!("Act: start_session_vm");
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    tracing::info!("Act: dispatch command_invoke(diff)");
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_COMMAND_INVOKE,
+        serde_json::json!({ "name": "diff", "args": "" }),
+        serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Wait for the async handler to complete (includes hostCallAsync polling)
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+    let completed = dispatcher.command_completed_count();
+    let failed = dispatcher.command_failed_count();
+    tracing::info!(
+        "Assert: commandCompleted={completed}, commandFailed={failed}"
+    );
+    assert!(
+        completed >= 1,
+        "diff handler should have called commandCompleted, got completed={completed} failed={failed}"
+    );
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
+    Ok(())
+}
+
+/// [E2E-WASM-042] files.ts: real TS source → long-lived VM + command_invoke → getBranch + commandCompleted
+///
+/// Full pipeline: SWC transpile → QuickJS long-lived VM → command_invoke event →
+/// async handler calls ctx.sessionManager.getBranch() → commandCompleted hostcall.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_wasmedge_e2e_tier4_files_real_ts() -> Result<(), Box<dyn std::error::Error>> {
+    use pi_wasm::SessionManager;
+
+    common::setup_logging();
+    let _span = tracing::info_span!("test_wasmedge_e2e_tier4_files_real_ts").entered();
+
+    let session_dir = tempfile::tempdir()?;
+    let session_mgr = Arc::new(SessionManager::new(session_dir.path().to_path_buf()));
+    let key = session_mgr.current_session_key().to_string();
+    session_mgr.create_session(&key, Some("/tmp".to_string()))?;
+
+    // Populate transcript with toolCall + toolResult entries so getBranch returns data.
+    let assistant_msg = serde_json::json!({
+        "role": "assistant",
+        "timestamp": 1000,
+        "content": [{
+            "type": "toolCall",
+            "id": "tc-1",
+            "name": "read",
+            "arguments": { "path": "/tmp/foo.rs" }
+        }]
+    });
+    session_mgr.append_message(assistant_msg)?;
+
+    let tool_result_msg = serde_json::json!({
+        "role": "toolResult",
+        "timestamp": 1001,
+        "toolCallId": "tc-1",
+        "content": [{ "type": "text", "text": "file contents" }]
+    });
+    session_mgr.append_message(tool_result_msg)?;
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus)
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_session(session_mgr),
+    );
+
+    let plugin_id = "files-real-ts-e2e";
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "files.ts", dispatcher.clone());
+
+    tracing::info!("Act: start_session_vm");
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+    tracing::info!("Act: dispatch command_invoke(files)");
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_COMMAND_INVOKE,
+        serde_json::json!({ "name": "files", "args": "" }),
+        serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
+    )
+    .map_err(|e| e.to_string())?;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+    let completed = dispatcher.command_completed_count();
+    let failed = dispatcher.command_failed_count();
+    tracing::info!(
+        "Assert: commandCompleted={completed}, commandFailed={failed}"
+    );
+    // files.ts calls getBranch. If no matching toolCall/toolResult pairs, it shows
+    // "No files read/written/edited" via ui.notify and returns — which still completes successfully.
+    assert!(
+        completed >= 1,
+        "files handler should have called commandCompleted, got completed={completed} failed={failed}"
+    );
+
+    mgr.end_session("s1").await.map_err(|e| e.to_string())?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
     Ok(())
 }

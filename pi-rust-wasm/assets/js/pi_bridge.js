@@ -463,6 +463,11 @@
     };
   }
 
+  // -- Expose internals needed by the async main loop injected in instance_wasmedge.rs --
+  globalThis.__pi_build_ctx = __pi_build_ctx;
+  globalThis.__pi_hostCall = hostCall;
+  globalThis.__pi_commands = __pi_commands;
+
   // -- Event dispatch entry (called by host via __pi_dispatch_event) ----------
   globalThis.__pi_dispatch_event = function (eventJson) {
     var envelope = JSON.parse(eventJson);
@@ -496,8 +501,7 @@
     }
     try {
       var ctx = __pi_build_ctx({});
-      ctx.args = args;
-      var r = entry.handler(ctx);
+      var r = entry.handler(argsJson || '', ctx);
       if (r && typeof r.then === 'function') {
         return JSON.stringify({
           ok: false,
@@ -575,6 +579,13 @@
 
       if (res.data && res.data.type === '__tick') {
         continue;
+      }
+
+      // command_invoke: store pending command and exit the event loop so the
+      // async main loop can await the handler with run_loop_without_io active.
+      if (res.data && res.data.type === 'command_invoke') {
+        globalThis.__pi_pending_command_invoke = res.data;
+        return;
       }
 
       try {

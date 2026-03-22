@@ -25,7 +25,7 @@ var diffRan = false;
 
 pi.registerCommand('diff', {
   description: 'Show git diff file picker',
-  handler: function (ctx) {
+  handler: function (_args, ctx) {
     var execResult = hostCall('fs', 'executeBash', {
       command: 'git', args: ['status', '--porcelain'], cwd: ctx.cwd
     });

@@ -30,6 +30,7 @@ pub struct EditFileResult {
 pub struct BashResult {
     pub stdout: String,
     pub stderr: String,
+    #[serde(rename = "code")]
     pub exit_code: i32,
 }
 

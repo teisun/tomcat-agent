@@ -22,8 +22,8 @@ async function testExecReturnsPromise() {
   assert(typeof r.stdout === 'string', 'exec result.stdout should be a string');
   assert(r.stdout.indexOf('hello') !== -1, 'stdout should contain "hello", got: ' + r.stdout);
   assert(typeof r.stderr === 'string', 'exec result.stderr should be a string');
-  assert(typeof r.exitCode === 'number', 'exec result.exitCode should be a number');
-  assert(r.exitCode === 0, 'exitCode should be 0, got: ' + r.exitCode);
+  assert(typeof r.code === 'number', 'exec result.code should be a number');
+  assert(r.code === 0, 'code should be 0, got: ' + r.code);
   print('js_api_async_test: testExecReturnsPromise PASSED');
 }
 

@@ -18,6 +18,8 @@ const PI_TUI_SHIM: &str = include_str!("../../assets/js/pi_tui_shim.js");
 const PI_CODING_AGENT_SHIM: &str = include_str!("../../assets/js/pi_coding_agent_shim.js");
 const PI_AI_SHIM: &str = include_str!("../../assets/js/pi_ai_shim.js");
 const PI_TYPEBOX_SHIM: &str = include_str!("../../assets/js/pi_typebox_shim.js");
+/// Async main loop IIFE injected at the tail of long-lived VM scripts.
+const PI_MAIN_LOOP: &str = include_str!("../../assets/js/pi_main_loop.js");
 
 /// Hostcall 回调函数签名：接收 JSON 请求字符串，返回 JSON 响应字符串。
 type HostInvokeFn = dyn Fn(&str) -> Result<String, AppError> + Send + Sync;
@@ -97,6 +99,9 @@ impl WasmInstance {
     }
 
     /// 执行指定路径的 .js 文件：由 wasmedge_quickjs.wasm 执行；每次执行新建 Vm 与 WasiModule（argv + preopen）。
+    ///
+    /// **注意**：此方法创建短生命周期 VM，仅用于基础引擎测试和 `load_plugin` 加载校验。
+    /// 插件/扩展 E2E 测试必须使用 `init_vm` + `start_session_vm` 长生命周期路径。
     ///
     /// # Errors
     /// * [`AppError::QuickJS`] - quickjs_path 未设置或路径不存在时返回。
@@ -285,9 +290,8 @@ impl WasmInstance {
         })?;
 
         let mut combined = self.build_combined_script(script_path)?;
-        // VmActor 长生命周期：pi-mono 插件通常不显式调用 __pi_start_event_loop；在组合脚本尾部注入，
-        // 使 pi.on 注册后仍阻塞在 waitForEvent 循环中（与短生命周期 run_script_file 路径区分，后者不注入）。
-        combined.push_str("\n__pi_start_event_loop();\n");
+        combined.push('\n');
+        combined.push_str(PI_MAIN_LOOP);
         let (combined_path, tmp_dir) = temp_js_file(&combined)?;
 
         let config = self.config.clone();

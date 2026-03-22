@@ -64,6 +64,7 @@ fn require_quickjs_path() -> String {
 /// - `pi.unregisterTool(...)` 无异常
 ///
 /// 意义：覆盖 TASK-13 8.7.1–8.7.8 所有 P0/P1 改动；确保 pi-mono 风格插件可用
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_js_api_async_alignment_full() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -120,6 +121,7 @@ fn test_js_api_async_alignment_full() -> Result<(), Box<dyn std::error::Error>> 
 ///
 /// 验证：exec 触发带 callId 的 hostcall（executeBash），poll 最终返回 stdout 含 "hello"
 /// 意义：8.7.2 exec 异步化核心路径隔离验证
+// TODO: migrate to long-lived VM (see plan §3)
 #[test]
 fn test_js_api_exec_async_submit_poll() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
