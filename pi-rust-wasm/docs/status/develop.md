@@ -1,5 +1,17 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| @cursor | 2026-03-22 | DONE | develop | — |
+
+### TASK-05d 前置调研与看板同步
+
+- **报告**：新增 `docs/reports/task-05d-compat-research.md`（npm 依赖与 shim 清单、pi-mono TUI 架构、SWC import 处理与 pi_agent_rust 对比）。
+- **参考摘录**：仓库根 `pi-mono_docs/` 纳入 `pi-tui` / `pi-coding-agent` / `pi-ai` 三篇上游 README，供离线对照（与报告 Part 1 引用一致）。
+- **TASK_BOARD**：TASK-05d 阻塞点细化（SWC import 重写 + globalThis shim、TUI 策略、SessionManager hostcall）；新增子项 d.0；协作接口补充 `ts_compiler.rs` 与 npm shim 层。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-22 10:48 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-05c（`feature/plugin-compat-tier2` 并入 develop）

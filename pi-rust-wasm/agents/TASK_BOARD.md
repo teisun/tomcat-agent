@@ -509,7 +509,7 @@
 | **状态** | `TODO` |
 | **负责人** | — |
 | **分支** | `feature/plugin-compat-tier3-4` |
-| **阻塞点** | 需要 TUI 渲染框架和 SessionManager 只读接口 |
+| **阻塞点** | npm 包 import 需 SWC 重写 + shim 注入；TUI 渲染策略；SessionManager hostcall 接线 |
 
 **目标**：使含 TUI 自定义组件和深度会话 API 的扩展能运行（如 diff.ts、files.ts）。
 
@@ -518,6 +518,7 @@
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 **子项**：
+- [ ] d.0 npm 包 import 基础设施（SWC import 重写 + globalThis shim 注入）
 - [ ] d.1 实现 `ctx.ui.custom()` + TUI 组件兼容层（Container/SelectList/Text）
 - [ ] d.2 实现高级 UI：setWidget、setFooter、setHeader、editor
 - [ ] d.3 实现 `ctx.sessionManager` 只读接口（getBranch 等）
@@ -531,8 +532,8 @@
 **被依赖**：TASK-05e
 
 **协作接口**：
-- 消费：`pi_bridge.js`、`HostApiDispatcher`、`SessionManager`
-- 提供：TUI 渲染层、sessionManager/modelRegistry 兼容接口
+- 消费：`pi_bridge.js`、`HostApiDispatcher`、`SessionManager`、`ts_compiler.rs`
+- 提供：npm 包 shim 层、TUI 渲染层、sessionManager/modelRegistry 兼容接口
 
 **验收标准**：
 - diff.ts、files.ts 可零修改运行（仅 SWC 编译）
