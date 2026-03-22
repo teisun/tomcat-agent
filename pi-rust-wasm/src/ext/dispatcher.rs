@@ -318,12 +318,19 @@ impl HostApiDispatcher {
     /// 不可靠（receiver Arc 可能被 `do_wait_for_event` 持有）。
     pub fn cleanup_instance(&self, instance_id: &str) {
         use super::vm_actor::EventEnvelope;
+        tracing::debug!("[cleanup_instance] {instance_id} start");
         if let Some(tx) = self.event_senders.get(instance_id) {
-            let _ = tx.try_send(EventEnvelope {
+            let send_result = tx.try_send(EventEnvelope {
                 event_type: "__shutdown".to_string(),
                 data: serde_json::json!({}),
                 context: serde_json::json!({}),
             });
+            tracing::debug!(
+                "[cleanup_instance] {instance_id} try_send __shutdown ok={}",
+                send_result.is_ok()
+            );
+        } else {
+            tracing::warn!("[cleanup_instance] no event_sender for {instance_id}");
         }
         if let Some((_, call_ids)) = self.instance_calls.remove(instance_id) {
             for cid in call_ids {
@@ -332,6 +339,7 @@ impl HostApiDispatcher {
         }
         self.event_receivers.remove(instance_id);
         self.event_senders.remove(instance_id);
+        tracing::debug!("[cleanup_instance] {instance_id} channels removed");
     }
 
     /// 为长生命周期 VM 注册事件 channel。
@@ -545,7 +553,7 @@ impl HostApiDispatcher {
 
     fn do_log(&self, _method: &str, params: &serde_json::Value) -> Result<HostResponse, AppError> {
         let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
-        tracing::info!("[plugin log] {}", msg);
+        tracing::debug!("[plugin log] {}", msg);
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -837,7 +845,7 @@ impl HostApiDispatcher {
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        tracing::info!(
+        tracing::debug!(
             "[registerCommand] plugin={} cmd={} desc={}",
             plugin_id,
             name,
@@ -943,7 +951,7 @@ impl HostApiDispatcher {
     // -- agent module: sendMessage / sendUserMessage -----------------------
     fn do_agent_send_message(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
         let Some(session) = &self.session else {
-            tracing::info!(
+            tracing::debug!(
                 "[plugin sendMessage] no SessionManager, message={:?}",
                 params.get("message")
             );
@@ -968,7 +976,7 @@ impl HostApiDispatcher {
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
         let Some(session) = &self.session else {
-            tracing::info!(
+            tracing::debug!(
                 "[plugin sendUserMessage] no SessionManager, content={:?}",
                 params.get("content")
             );
@@ -998,7 +1006,7 @@ impl HostApiDispatcher {
     }
 
     fn do_context_abort() -> HostResponse {
-        tracing::info!("[context] abort requested by plugin");
+        tracing::debug!("[context] abort requested by plugin");
         HostResponse::ok(serde_json::Value::Null)
     }
 
@@ -1025,7 +1033,7 @@ impl HostApiDispatcher {
     /// Future: maintain a per-instance model override map.
     fn do_llm_set_model(params: &serde_json::Value) -> HostResponse {
         let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("");
-        tracing::info!("[llm.setModel] plugin requested model={} (MVP stub)", model);
+        tracing::debug!("[llm.setModel] plugin requested model={} (MVP stub)", model);
         HostResponse::ok(serde_json::json!({ "model": model }))
     }
 
@@ -1038,7 +1046,7 @@ impl HostApiDispatcher {
             .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("info");
-        tracing::info!("[context.ui.notify] [{}] {}", kind, msg);
+        tracing::debug!("[context.ui.notify] [{}] {}", kind, msg);
         HostResponse::ok(serde_json::Value::Null)
     }
 
@@ -1050,7 +1058,7 @@ impl HostApiDispatcher {
             .cloned()
             .unwrap_or_default();
         let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        tracing::info!(
+        tracing::debug!(
             "[context.ui.select] title={} option_count={}",
             title,
             options.len()
@@ -1070,7 +1078,7 @@ impl HostApiDispatcher {
     fn do_context_ui_confirm(params: &serde_json::Value) -> HostResponse {
         let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
         let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
-        tracing::info!(
+        tracing::debug!(
             "[context.ui.confirm] title={} message_len={}",
             title,
             message.len()
@@ -1083,7 +1091,7 @@ impl HostApiDispatcher {
             .get("placeholder")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        tracing::info!("[context.ui.input] placeholder_len={}", placeholder.len());
+        tracing::debug!("[context.ui.input] placeholder_len={}", placeholder.len());
         HostResponse::ok(serde_json::json!({ "value": "" }))
     }
 
@@ -1093,7 +1101,7 @@ impl HostApiDispatcher {
             .get("details")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        tracing::info!("[context.ui.setStatus] {} details={}", message, details);
+        tracing::debug!("[context.ui.setStatus] {} details={}", message, details);
         HostResponse::ok(serde_json::Value::Null)
     }
 
@@ -1115,7 +1123,7 @@ impl HostApiDispatcher {
     }
 
     fn do_context_compact() -> HostResponse {
-        tracing::info!("[context] compact requested by plugin");
+        tracing::debug!("[context] compact requested by plugin");
         HostResponse::ok(serde_json::Value::Null)
     }
 

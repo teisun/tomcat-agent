@@ -593,24 +593,29 @@ impl PluginManager {
 
     /// 结束指定会话下所有 VM actor：发送 Shutdown、从 RuntimeManager 移除。
     pub async fn end_session(&self, session_id: &str) -> Result<(), AppError> {
+        tracing::debug!("[end_session] session={session_id} start");
         let rm = self
             .runtime_manager
             .as_ref()
             .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
 
         let handles = rm.remove_session(session_id);
+        tracing::debug!("[end_session] removed {} handles", handles.len());
         for h in &handles {
             let _ = h.shutdown().await;
         }
+        tracing::debug!("[end_session] shutdown commands sent");
 
         if let Some(ref dispatcher) = self.host_dispatcher {
             let map = self.plugins.read();
             for pid in map.keys() {
                 let instance_id = format!("{session_id}/{pid}");
+                tracing::debug!("[end_session] cleanup_instance {instance_id}");
                 dispatcher.cleanup_instance(&instance_id);
             }
         }
 
+        tracing::debug!("[end_session] session={session_id} complete");
         Ok(())
     }
 

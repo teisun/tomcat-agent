@@ -177,9 +177,16 @@ impl VmActor {
     }
 
     fn run_vm(&mut self) -> Result<(), AppError> {
+        let pid = self.instance.plugin_id().to_string();
+        tracing::debug!("[VmActor {pid}] run_vm: init_vm start");
         let (mut vm, _combined_path, _tmp_dir) = self.instance.init_vm(&self.script_path)?;
-
-        match vm.run_func(Some("quickjs"), "_start", []) {
+        tracing::debug!("[VmActor {pid}] run_vm: calling _start");
+        let run_result = vm.run_func(Some("quickjs"), "_start", []);
+        tracing::debug!(
+            "[VmActor {pid}] run_vm: _start returned ok={}",
+            run_result.is_ok()
+        );
+        match run_result {
             Ok(_) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
