@@ -467,9 +467,9 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
-| **分支** | `feature/plugin-compat-tier2` |
+| **分支** | `feature/plugin-compat-tier2`（已并入 `develop`） |
 | **阻塞点** | — |
 
 **目标**：使含命令注册、exec 调用、基础 UI 交互的扩展能运行。

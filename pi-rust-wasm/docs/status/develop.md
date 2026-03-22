@@ -1,5 +1,29 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-22 10:48 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-05c（`feature/plugin-compat-tier2` 并入 develop）
+
+**合并分支**：`feature/plugin-compat-tier2`（`7074c59` TASK-05c Tier2 pi-mono 插件兼容；`6f7f3d4` 改动报告与 status 链接）。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS（`EXIT_CODE=0`；lib **276** passed / 1 ignored；`wasmedge_e2e_tests` **20** passed；日志见仓库根 `pi-rust-wasm/.integration_test_output.log`） |
+
+**执行环境**：macOS darwin；全量串行验收与 TASK-05b 同约定（后台写日志、`tail` 监控）。
+
+#### 看板
+
+- **TASK-05c**：集成通过后已在 `TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-22 14:10 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-05b（`feature/plugin-compat-tier1` 并入 develop）
