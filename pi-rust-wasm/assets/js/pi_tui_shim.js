@@ -24,11 +24,21 @@
 
   // --- Classes ---
 
+  function _stripAnsi(s) {
+    return String(s).replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
   function Text(text, padLeft, padRight) {
     this.text = String(text == null ? "" : text);
     this.padLeft = padLeft || 0;
     this.padRight = padRight || 0;
   }
+  Text.prototype.render = function (_width) {
+    var pad = '';
+    for (var i = 0; i < this.padLeft; i++) pad += ' ';
+    return [pad + this.text];
+  };
+  Text.prototype.invalidate = function () {};
 
   function TruncatedText(text, width, x, y) {
     Text.call(this, text, x, y);
@@ -36,6 +46,12 @@
   }
   TruncatedText.prototype = Object.create(Text.prototype);
   TruncatedText.prototype.constructor = TruncatedText;
+  TruncatedText.prototype.render = function (width) {
+    var w = Math.min(this.width, width || 80);
+    var stripped = _stripAnsi(this.text);
+    var line = stripped.length <= w ? this.text : stripped.slice(0, w);
+    return [line];
+  };
 
   function Container() {
     this.children = [];
@@ -44,12 +60,32 @@
     this.children.push(child);
     return this;
   };
+  Container.prototype.render = function (width) {
+    var lines = [];
+    for (var i = 0; i < this.children.length; i++) {
+      var child = this.children[i];
+      if (child && typeof child.render === 'function') {
+        var childLines = child.render(width);
+        if (Array.isArray(childLines)) {
+          for (var j = 0; j < childLines.length; j++) lines.push(childLines[j]);
+        }
+      }
+    }
+    return lines;
+  };
+  Container.prototype.invalidate = function () {};
 
   function Markdown() {}
+  Markdown.prototype.render = function () { return []; };
+  Markdown.prototype.invalidate = function () {};
 
   function Spacer() {}
+  Spacer.prototype.render = function () { return ['']; };
+  Spacer.prototype.invalidate = function () {};
 
   function Editor() { this.value = ""; }
+  Editor.prototype.render = function () { return [this.value]; };
+  Editor.prototype.invalidate = function () {};
 
   function Box(_padX, _padY, _styleFn) {
     this.children = [];
@@ -58,6 +94,20 @@
     this.children.push(child);
     return this;
   };
+  Box.prototype.render = function (width) {
+    var lines = [];
+    for (var i = 0; i < this.children.length; i++) {
+      var child = this.children[i];
+      if (child && typeof child.render === 'function') {
+        var childLines = child.render(width);
+        if (Array.isArray(childLines)) {
+          for (var j = 0; j < childLines.length; j++) lines.push(childLines[j]);
+        }
+      }
+    }
+    return lines;
+  };
+  Box.prototype.invalidate = function () {};
 
   function SelectList(items, visibleRows, opts) {
     this.items = Array.isArray(items) ? items : [];
@@ -80,17 +130,48 @@
       this.onSelectionChange(this.selected);
     }
   };
-  SelectList.prototype.handleInput = function (_data) {
-    // No-op in shim mode; full implementation in d.1
+  SelectList.prototype.handleInput = function (data) {
+    var key = (typeof data === 'string') ? data : ((data && data.key) || '');
+    if (key === 'up' || key === Key.up) {
+      this.selected = Math.max(0, this.selected - 1);
+      if (typeof this.onSelectionChange === 'function') this.onSelectionChange(this.items[this.selected]);
+    } else if (key === 'down' || key === Key.down) {
+      this.selected = Math.min(this.items.length - 1, this.selected + 1);
+      if (typeof this.onSelectionChange === 'function') this.onSelectionChange(this.items[this.selected]);
+    } else if (key === 'enter' || key === Key.enter) {
+      if (typeof this.onSelect === 'function' && this.items[this.selected]) this.onSelect(this.items[this.selected]);
+    } else if (key === 'escape' || key === Key.escape || key === Key.esc) {
+      if (typeof this.onCancel === 'function') this.onCancel();
+    }
   };
+  SelectList.prototype.render = function (width) {
+    var lines = [];
+    var start = Math.max(0, this.selected - Math.floor(this.visibleRows / 2));
+    var end = Math.min(this.items.length, start + this.visibleRows);
+    if (end - start < this.visibleRows) start = Math.max(0, end - this.visibleRows);
+    for (var i = start; i < end; i++) {
+      var item = this.items[i];
+      var label = (item && item.label) ? String(item.label) : String(item);
+      var prefix = (i === this.selected) ? '> ' : '  ';
+      var line = prefix + label;
+      if (width && line.length > width) line = line.slice(0, width);
+      lines.push(line);
+    }
+    return lines;
+  };
+  SelectList.prototype.invalidate = function () {};
 
   function Input() { this.value = ""; }
+  Input.prototype.render = function () { return [this.value]; };
+  Input.prototype.invalidate = function () {};
 
   function Image(src) {
     this.src = String(src == null ? "" : src);
     this.width = 0;
     this.height = 0;
   }
+  Image.prototype.render = function () { return ['[image: ' + this.src + ']']; };
+  Image.prototype.invalidate = function () {};
 
   var Key = {
     escape: "escape", esc: "esc", enter: "enter", tab: "tab",
@@ -110,11 +191,27 @@
   };
 
   function DynamicBorder(_styleFn) { this.styleFn = _styleFn || null; }
+  DynamicBorder.prototype.render = function (width) {
+    var w = Number(width || 80);
+    var line = '';
+    for (var i = 0; i < w; i++) line += '─';
+    if (typeof this.styleFn === 'function') {
+      try { line = this.styleFn(line); } catch (_) {}
+    }
+    return [line];
+  };
+  DynamicBorder.prototype.invalidate = function () {};
 
   function SettingsList() { this.items = []; }
   SettingsList.prototype.setItems = function (items) {
     this.items = Array.isArray(items) ? items : [];
   };
+  SettingsList.prototype.render = function () {
+    return this.items.map(function (item) {
+      return String((item && item.label) || item);
+    });
+  };
+  SettingsList.prototype.invalidate = function () {};
 
   function fuzzyMatch(query, text) {
     var q = String(query == null ? "" : query).toLowerCase();

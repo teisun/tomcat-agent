@@ -6,6 +6,11 @@
 (function () {
   'use strict';
 
+  // -- Node.js polyfills for extensions that reference process.platform --------
+  if (typeof globalThis.process === 'undefined') {
+    globalThis.process = { platform: 'linux', env: {}, argv: [], exit: function () {} };
+  }
+
   // -- Low-level synchronous host call wrapper --------------------------------
   // Used for fast APIs that don't need async: logging, event registration, etc.
   function hostCall(module, method, params) {
@@ -288,20 +293,15 @@
     }
   };
 
-  // -- Event dispatch entry (called by host via __pi_dispatch_event) ----------
-  globalThis.__pi_dispatch_event = function (eventJson) {
-    var envelope = JSON.parse(eventJson);
-    var eventType = envelope.type;
-    var eventData = envelope.data;
-    var snapshot = envelope.context || {};
-
+  // -- Shared ctx constructor (used by dispatch_event and invoke_command) ------
+  function __pi_build_ctx(snapshot) {
+    snapshot = snapshot || {};
     var cwdResolved = snapshot.cwd;
     if (cwdResolved == null || cwdResolved === '') {
       var gc = hostCall('context', 'getCwd', {});
       cwdResolved = (gc && gc.data && gc.data.cwd) ? gc.data.cwd : undefined;
     }
-
-    var ctx = {
+    return {
       cwd: cwdResolved,
       model: snapshot.model,
       hasUI: !!snapshot.hasUI,
@@ -344,14 +344,131 @@
             message: message,
             details: details != null ? details : null
           });
-        }
+        },
+        custom: function (factory, _options) {
+          var termWidth = 80;
+          var result;
+          var resolved = false;
+          function done(val) { result = val; resolved = true; }
+          var tui = { requestRender: function () {} };
+          var theme = {
+            fg: function (_c, t) { return String(t == null ? '' : t); },
+            bg: function (_c, t) { return String(t == null ? '' : t); },
+            bold: function (t) { return String(t == null ? '' : t); },
+            dim: function (t) { return String(t == null ? '' : t); },
+            italic: function (t) { return String(t == null ? '' : t); },
+            underline: function (t) { return String(t == null ? '' : t); },
+            strikethrough: function (t) { return String(t == null ? '' : t); }
+          };
+          var kb = {};
+          try {
+            var component = factory(tui, theme, kb, done);
+            if (component && typeof component.render === 'function') {
+              var lines = component.render(termWidth);
+              if (Array.isArray(lines) && lines.length > 0) {
+                hostCall('context', 'uiCustom', { lines: lines });
+              }
+            }
+          } catch (err) {
+            hostCall('context', 'uiNotify', { message: 'ctx.ui.custom factory error: ' + String(err), type: 'error' });
+          }
+          if (!resolved) done(undefined);
+          return result;
+        },
+        setWidget: function (key, content, _options) {
+          hostCall('context', 'uiSetWidget', { key: key, content: content });
+        },
+        setFooter: function (_factory) {
+          hostCall('context', 'uiSetFooter', {});
+        },
+        setHeader: function (_factory) {
+          hostCall('context', 'uiSetHeader', {});
+        },
+        editor: function (title, prefill) {
+          var r = hostCall('context', 'uiEditor', { title: title, prefill: prefill || '' });
+          return (r && r.ok && r.data && r.data.text != null) ? r.data.text : (prefill || '');
+        },
+        setTitle: function (_title) {},
+        setWorkingMessage: function (_msg) {},
+        onTerminalInput: function (_cb) {},
+        pasteToEditor: function (_text) {},
+        setEditorText: function (_text) {},
+        getEditorText: function () { return ''; },
+        setEditorComponent: function (_component) {},
+        theme: {
+          fg: function (_c, t) { return String(t == null ? '' : t); },
+          bg: function (_c, t) { return String(t == null ? '' : t); },
+          bold: function (t) { return String(t == null ? '' : t); },
+          dim: function (t) { return String(t == null ? '' : t); }
+        },
+        getAllThemes: function () { return []; },
+        getTheme: function () { return 'default'; },
+        setTheme: function (_name) {},
+        getToolsExpanded: function () { return false; },
+        setToolsExpanded: function (_expanded) {}
       },
       sessionManager: {
         getCurrent: function () {
           return hostCall('session', 'getCurrentSession', {});
-        }
+        },
+        getBranch: function (fromId) {
+          var r = hostCall('session', 'getBranch', { fromId: fromId });
+          return (r && r.ok && r.data) ? r.data : [];
+        },
+        getLeafEntry: function () {
+          var r = hostCall('session', 'getLeafEntry', {});
+          return (r && r.ok) ? r.data : null;
+        },
+        getLeafId: function () {
+          var r = hostCall('session', 'getLeafId', {});
+          return (r && r.ok && r.data) ? r.data.id : null;
+        },
+        getEntry: function (id) {
+          var r = hostCall('session', 'getEntry', { id: id });
+          return (r && r.ok) ? r.data : null;
+        },
+        getHeader: function () {
+          var r = hostCall('session', 'getHeader', {});
+          return (r && r.ok) ? r.data : null;
+        },
+        getEntries: function (cap) {
+          var r = hostCall('session', 'getEntries', { cap: cap });
+          return (r && r.ok && r.data) ? r.data : [];
+        },
+        getCwd: function () {
+          var gc = hostCall('context', 'getCwd', {});
+          return (gc && gc.data && gc.data.cwd) ? gc.data.cwd : '';
+        },
+        getSessionDir: function () { return ''; },
+        getSessionId: function () { return ''; },
+        getSessionFile: function () { return ''; },
+        getTree: function () { return []; },
+        getLabel: function () { return null; }
+      },
+      model: snapshot.model || (function () {
+        var r = hostCall('context', 'getModel', {});
+        return (r && r.data && r.data.model) ? r.data : undefined;
+      })(),
+      modelRegistry: {
+        getAll: function () {
+          var r = hostCall('context', 'listModels', {});
+          return (r && r.ok && r.data) ? r.data : [];
+        },
+        getAvailable: function () {
+          var r = hostCall('context', 'listModels', {});
+          return (r && r.ok && r.data) ? r.data : [];
+        },
+        getError: function () { return undefined; }
       }
     };
+  }
+
+  // -- Event dispatch entry (called by host via __pi_dispatch_event) ----------
+  globalThis.__pi_dispatch_event = function (eventJson) {
+    var envelope = JSON.parse(eventJson);
+    var eventType = envelope.type;
+    var eventData = envelope.data;
+    var ctx = __pi_build_ctx(envelope.context);
 
     var handlers = __pi_hooks[eventType] || [];
     for (var i = 0; i < handlers.length; i++) {
@@ -378,7 +495,9 @@
       return JSON.stringify({ ok: false, error: 'invalid args JSON: ' + e });
     }
     try {
-      var r = entry.handler(args);
+      var ctx = __pi_build_ctx({});
+      ctx.args = args;
+      var r = entry.handler(ctx);
       if (r && typeof r.then === 'function') {
         return JSON.stringify({
           ok: false,

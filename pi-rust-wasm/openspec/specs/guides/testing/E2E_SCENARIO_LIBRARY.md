@@ -167,6 +167,8 @@
 | E2E-WASM-036 | 人工 | `test_wasmedge_e2e_tps_tier1_agent_end_notify`            | pi-mono tps Tier1：零修改 TS 长生命周期 + notify | 临时插件 `main.ts`（fixture tps 源码）→ `start_session_vm` → `dispatch_session_event(agent_start)` → sleep → `dispatch_session_event(agent_end)`（含 assistant usage） | `with_ui_notify_counter` ≥1；`end_session` 后 RuntimeManager 为空                         |
 | E2E-WASM-037 | 人工 | `test_wasmedge_e2e_tier2_compat_script`                   | TASK-05c Tier2：`registerCommand`+`__pi_invoke_command`、`registerTool`（schema 包装）、`ctx.ui` 等价 host、`executeBash`+args | `run_script_file(tier2_compat_test.js)` + stub host | 相关 host_call 次数 ≥7；脚本打印 done、无抛错 |
 | E2E-WASM-038 | 人工 | `test_wasmedge_e2e_tier2_transpiled_export_default_plugin` | TASK-05c：社区风格 `export default function(pi)` TS 经 SWC 加载 + 命令注册与同步 invoke | 临时 `tier2_snippet.ts` → `run_script_file` + stub host | `registerCommand` host_call ≥1；脚本无抛错 |
+| E2E-WASM-039 | 自动 | `test_wasmedge_e2e_tier3_diff_custom_ui` | TASK-05d Tier3：diff.ts 核心路径——registerCommand("diff") → exec("git") → ctx.ui.custom 渲染 Container/SelectList/Text | `run_script_file(tier3_diff_test.js)` + stub host（git status 返回固定 porcelain） | `executeBash` ≥1；`uiCustom` ≥1；脚本打印 done、无抛错 |
+| E2E-WASM-040 | 自动 | `test_wasmedge_e2e_tier4_files_session_branch` | TASK-05d Tier4：files.ts 核心路径——registerCommand("files") → ctx.sessionManager.getBranch() → 空 session 降级 uiNotify | `run_script_file(tier4_files_test.js)` + stub host（getBranch 返回空数组） | `getBranch` ≥1；`uiNotify` ≥1；脚本打印 done、无抛错 |
 
 
 ---

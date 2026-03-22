@@ -506,10 +506,10 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P2 |
-| **状态** | `DOING` |
+| **状态** | `PENDING_INTEGRATION` |
 | **负责人** | Spike |
 | **分支** | `feature/plugin-compat-tier3-4` |
-| **阻塞点** | npm 包 import 需 SWC 重写 + shim 注入；TUI 渲染策略；SessionManager hostcall 接线 |
+| **阻塞点** | — |
 
 **目标**：使含 TUI 自定义组件和深度会话 API 的扩展能运行（如 diff.ts、files.ts）。
 

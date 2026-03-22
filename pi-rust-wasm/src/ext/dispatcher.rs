@@ -508,6 +508,12 @@ impl HostApiDispatcher {
                 self.do_get_current_session(&params).await
             }
             ("session", "getMessages") => self.do_get_messages(&params).await,
+            ("session", "getBranch") => self.do_session_get_branch(&params),
+            ("session", "getLeafEntry") => self.do_session_get_leaf_entry(),
+            ("session", "getLeafId") => self.do_session_get_leaf_id(),
+            ("session", "getEntry") => self.do_session_get_entry(&params),
+            ("session", "getHeader") => self.do_session_get_header(),
+            ("session", "getEntries") => self.do_session_get_entries(&params),
             ("session", "sendMessage") => self.do_send_message(&params).await,
             ("agent", "sendMessage") => self.do_agent_send_message(&params),
             ("agent", "sendUserMessage") => self.do_agent_send_user_message(&params),
@@ -520,11 +526,17 @@ impl HostApiDispatcher {
             ("context", "uiConfirm") => Ok(Self::do_context_ui_confirm(&params)),
             ("context", "uiInput") => Ok(Self::do_context_ui_input(&params)),
             ("context", "uiSetStatus") => Ok(Self::do_context_ui_set_status(&params)),
+            ("context", "uiCustom") => Ok(Self::do_context_ui_custom(&params)),
+            ("context", "uiSetWidget") => Ok(Self::do_context_ui_stub("uiSetWidget", &params)),
+            ("context", "uiSetFooter") => Ok(Self::do_context_ui_stub("uiSetFooter", &params)),
+            ("context", "uiSetHeader") => Ok(Self::do_context_ui_stub("uiSetHeader", &params)),
+            ("context", "uiEditor") => Ok(Self::do_context_ui_editor(&params)),
             ("context", "getSystemPrompt") => Ok(Self::do_context_get_system_prompt()),
             ("context", "hasPendingMessages") => Ok(Self::do_context_has_pending()),
             ("context", "shutdown") => Ok(Self::do_context_shutdown()),
             ("context", "getContextUsage") => Ok(Self::do_context_usage()),
             ("context", "compact") => Ok(Self::do_context_compact()),
+            ("context", "listModels") => Ok(Self::do_context_list_models()),
             _ => Ok(HostResponse::err(format!(
                 "unknown API: {}.{}",
                 module, method
@@ -1105,6 +1117,46 @@ impl HostApiDispatcher {
         HostResponse::ok(serde_json::Value::Null)
     }
 
+    /// `ctx.ui.custom()` degraded mode: log the rendered lines and return ok.
+    fn do_context_ui_custom(params: &serde_json::Value) -> HostResponse {
+        let lines = params
+            .get("lines")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !lines.is_empty() {
+            tracing::info!("[context.ui.custom] rendered {} lines", lines.len());
+            for line in &lines {
+                tracing::debug!("  | {}", line);
+            }
+        }
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    /// Generic UI stub: log and return ok.
+    fn do_context_ui_stub(op: &str, params: &serde_json::Value) -> HostResponse {
+        tracing::debug!("[context.ui.{}] stub, params={}", op, params);
+        HostResponse::ok(serde_json::Value::Null)
+    }
+
+    /// `ctx.ui.editor()`: no-TTY fallback returns the prefill text.
+    fn do_context_ui_editor(params: &serde_json::Value) -> HostResponse {
+        let prefill = params
+            .get("prefill")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        tracing::debug!(
+            "[context.ui.editor] title={:?} prefill_len={}",
+            params.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+            prefill.len()
+        );
+        HostResponse::ok(serde_json::json!({ "text": prefill }))
+    }
+
     fn do_context_get_system_prompt() -> HostResponse {
         HostResponse::ok(serde_json::json!({ "prompt": "" }))
     }
@@ -1125,6 +1177,115 @@ impl HostApiDispatcher {
     fn do_context_compact() -> HostResponse {
         tracing::debug!("[context] compact requested by plugin");
         HostResponse::ok(serde_json::Value::Null)
+    }
+
+    // -- session deep read-only (d.3) ------------------------------------
+
+    fn do_session_get_branch(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
+        let session = match &self.session {
+            None => return Ok(HostResponse::err("SessionManager not configured")),
+            Some(s) => s,
+        };
+        let from_id = params.get("fromId").and_then(|v| v.as_str());
+        let leaf_id = match from_id {
+            Some(id) => id.to_string(),
+            None => match session.get_leaf_entry()? {
+                Some(e) => transcript_entry_id(&e).unwrap_or_default().to_string(),
+                None => return Ok(HostResponse::ok(serde_json::json!([]))),
+            },
+        };
+        let branch = session.get_branch(&leaf_id)?;
+        let list: Vec<serde_json::Value> = branch
+            .into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect();
+        Ok(HostResponse::ok(serde_json::json!(list)))
+    }
+
+    fn do_session_get_leaf_entry(&self) -> Result<HostResponse, AppError> {
+        let session = match &self.session {
+            None => return Ok(HostResponse::err("SessionManager not configured")),
+            Some(s) => s,
+        };
+        let entry = session.get_leaf_entry()?;
+        let data = match entry {
+            Some(e) => serde_json::to_value(e).map_err(AppError::Serialize)?,
+            None => serde_json::Value::Null,
+        };
+        Ok(HostResponse::ok(data))
+    }
+
+    fn do_session_get_leaf_id(&self) -> Result<HostResponse, AppError> {
+        let session = match &self.session {
+            None => return Ok(HostResponse::err("SessionManager not configured")),
+            Some(s) => s,
+        };
+        let id = session
+            .get_leaf_entry()?
+            .as_ref()
+            .and_then(transcript_entry_id)
+            .unwrap_or("")
+            .to_string();
+        Ok(HostResponse::ok(serde_json::json!({ "id": id })))
+    }
+
+    fn do_session_get_entry(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let session = match &self.session {
+            None => return Ok(HostResponse::err("SessionManager not configured")),
+            Some(s) => s,
+        };
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Plugin("getEntry: missing id".to_string()))?;
+        let entry = session.get_entry(id)?;
+        let data = match entry {
+            Some(e) => serde_json::to_value(e).map_err(AppError::Serialize)?,
+            None => serde_json::Value::Null,
+        };
+        Ok(HostResponse::ok(data))
+    }
+
+    fn do_session_get_header(&self) -> Result<HostResponse, AppError> {
+        let session = match &self.session {
+            None => return Ok(HostResponse::err("SessionManager not configured")),
+            Some(s) => s,
+        };
+        let header = session.read_session_header()?;
+        let data = match header {
+            Some(h) => serde_json::to_value(h).map_err(AppError::Serialize)?,
+            None => serde_json::Value::Null,
+        };
+        Ok(HostResponse::ok(data))
+    }
+
+    fn do_session_get_entries(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<HostResponse, AppError> {
+        let session = match &self.session {
+            None => return Ok(HostResponse::err("SessionManager not configured")),
+            Some(s) => s,
+        };
+        let cap = params
+            .get("cap")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2000) as usize;
+        let entries = session.get_entries(cap)?;
+        let list: Vec<serde_json::Value> = entries
+            .into_iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect();
+        Ok(HostResponse::ok(serde_json::json!(list)))
+    }
+
+    // -- context.listModels (d.4) -----------------------------------------
+
+    fn do_context_list_models() -> HostResponse {
+        HostResponse::ok(serde_json::json!([]))
     }
 
     async fn do_send_message(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
@@ -1203,6 +1364,21 @@ pub(crate) fn normalize_tool_parameters(params: &serde_json::Value) -> serde_jso
             serde_json::json!({ "type": "object", "properties": {} })
         }
         _ => serde_json::json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// Extract the `id` field from any [`TranscriptEntry`] variant.
+fn transcript_entry_id(entry: &crate::core::session::TranscriptEntry) -> Option<&str> {
+    use crate::core::session::TranscriptEntry;
+    match entry {
+        TranscriptEntry::Message(e) => e.id.as_deref(),
+        TranscriptEntry::ModelChange(e) => e.id.as_deref(),
+        TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
+        TranscriptEntry::Compaction(e) => e.id.as_deref(),
+        TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
+        TranscriptEntry::Label(e) => e.id.as_deref(),
+        TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
+        TranscriptEntry::Custom(e) => e.id.as_deref(),
     }
 }
 
