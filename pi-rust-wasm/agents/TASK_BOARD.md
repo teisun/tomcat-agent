@@ -506,7 +506,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P2 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Spike |
 | **分支** | `feature/plugin-compat-tier3-4` |
 | **阻塞点** | — |

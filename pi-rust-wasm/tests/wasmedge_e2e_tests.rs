@@ -1327,13 +1327,21 @@ async fn test_wasmedge_e2e_tps_tier1_agent_end_notify() -> Result<(), Box<dyn st
         serde_json::json!({ "hasUI": true, "cwd": "/tmp" }),
     )
     .map_err(|e| e.to_string())?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
 
-    let n = ui_notify.load(Ordering::SeqCst);
-    assert!(
-        n >= 1,
-        "tps Tier1 E2E 应至少触发 1 次 context.uiNotify，实际 {n}"
-    );
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        if ui_notify.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let n = ui_notify.load(Ordering::SeqCst);
+            assert!(
+                n >= 1,
+                "tps Tier1 E2E 应至少触发 1 次 context.uiNotify，实际 {n}（5s 超时）"
+            );
+        }
+    }
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;

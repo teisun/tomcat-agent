@@ -1,5 +1,41 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-22 20:05 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-05d（`feature/plugin-compat-tier3-4` 并入 develop）
+
+**合并分支**：`feature/plugin-compat-tier3-4`（5 提交，fast-forward 合并，22 文件变更，+3166/-33 行）。
+
+**任务内容**：pi-mono 插件兼容性 Tier 3-4 — TUI 组件 + 深度会话 API（SWC import 重写 + globalThis shim 注入、ctx.ui.custom 降级 TUI 渲染、ctx.sessionManager 只读接口、ctx.model/modelRegistry、diff.ts/files.ts 端到端验证）。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS（全量 438 passed / 1 ignored / 0 failed；wasmedge_e2e_tests 24 passed 含 tier3_diff_real_ts、tier4_files_real_ts） |
+
+**执行环境**：macOS darwin；全量串行验收（后台写日志 + 轮询监控）。
+
+**集成修复**：`test_wasmedge_e2e_tps_tier1_agent_end_notify` 存在时序竞争（固定 600ms 等待不足以等待 VM async handler 完成 uiNotify），改为 5s 超时轮询后通过。
+
+#### 代码 Review
+
+全量 22 文件 review 结论：**PASS_WITH_NOTES**。
+
+- 无降级断言、无 `#[ignore]` 滥用、无假绿模式
+- 2 个 major 跟踪项（不阻塞合并）：`instance_wasmedge.rs` build_vm 中 2 处 unwrap 建议改 Result；real TS E2E 仅断言 commandCompleted 计数、建议增加路径正确性断言
+- Session API dispatcher 新增路由测试覆盖偏弱（getLeafEntry/getEntry/getHeader/getEntries 缺直接测试），建议后续补充
+
+#### 看板
+
+- **TASK-05d**：集成通过后已在 `TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | @cursor | 2026-03-22 | DONE | develop | — |
 
 ### TASK-05d 前置调研与看板同步
