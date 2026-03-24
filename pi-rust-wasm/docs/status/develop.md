@@ -1,5 +1,40 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-24 14:42 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：`feature/directory_refactor` 并入 develop（非看板任务）
+
+**合并分支**：`feature/directory_refactor`（2 提交，fast-forward 合并，24 文件变更）。
+
+**变更内容**：运行时工作目录从项目内 `config.toml` 迁移至 `~/.pi_`，配置文件重命名为 `pi.config.toml`，新增 `[agent]` 配置节；同步更新 openclaw 知识库文档。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS（lib 283 passed / 1 ignored；agent_loop_tests 11 passed；cli_tests 72 passed；wasmedge_e2e_tests 39 passed；全量 0 failed，EXIT_CODE=0） |
+
+**执行环境**：macOS darwin；全量串行验收（`./scripts/run-integration-tests.sh all`，后台写日志 + 轮询监控）。
+
+#### 变更 Review 摘要
+
+- `src/infra/config.rs`：运行时根目录改为 `~/.pi_`，配置文件名改为 `pi.config.toml`，新增 `AgentConfig` 结构体与 `[agent]` 配置节
+- `src/api/cli.rs`：`init` 子命令生成路径与提示文案对齐新目录布局
+- `src/core/session/store.rs`：会话存储路径适配 `~/.pi_/agents/<id>/sessions/`
+- `tests/cli_tests.rs`：测试用例适配新配置文件名与目录结构
+- 文档：`directory-structure.md`、`Architecture.md`、`audit-log.md`、`session-storage.md`、`work-dir-and-data-layout.md`、`user-guide.md`、`E2E_SCENARIO_LIBRARY.md` 等同步更新路径引用
+- 无降级断言、无 `#[ignore]` 滥用
+
+#### 看板
+
+- 本次合并不对应 TASK_BOARD 中的任务，不修改看板状态。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-22 22:28 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-05e（`feature/plugin-compat-matrix-e2e` 并入 develop）
