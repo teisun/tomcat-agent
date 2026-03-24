@@ -586,34 +586,61 @@
 
 ---
 
-### TASK-06 | T1-P1-003 | 核心模块单元测试全覆盖
+### TASK-06 | T1-P1-003 | 初始化体验与资源内嵌
 
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
 | **状态** | `TODO` |
 | **负责人** | — |
-| **分支** | `feature/test-coverage` |
+| **分支** | `feature/init-experience` |
 | **阻塞点** | — |
 
-**目标**：补充单元测试使核心模块覆盖率 >= 80%、核心路径 100%。
+**目标**：将用户首次安装从 9 步手工操作简化为「下载二进制 + `pi init`」两步完成。内嵌运行时资源、静态链接 WasmEdge、重写 `pi init` 交互式向导，产出可独立分发的单二进制。
 
-**子项**（参考 tasks_details.md T1-P1-003）：
-- [ ] 3.1 对基础设施层、宿主核心能力层、宿主 API 层、WasmEdge 层、CLI 层补充单测
-- [ ] 3.2 确保全部测试用例通过；跨平台编译与测试
+**技术方案**：[init-experience-and-embedded-assets.md](../docs/reports/init-experience-and-embedded-assets.md)
 
-**依赖**：—（可随时进行）
+**子项**：
 
-**被依赖**：—
+**Phase 1：资源内嵌与自动释放**
+- [ ] 6.1 `instance_wasmedge.rs`：`include_str!("../../assets/js/pi_bridge.js")` 嵌入桥接脚本，修改 `resolve_bridge_path` 消除磁盘 / 环境变量依赖
+- [ ] 6.2 `config.rs`：`include_bytes!` 嵌入 `wasmedge_quickjs.wasm`（~3.3MB），修改 `resolve_quickjs_path` 增加自动释放逻辑
+- [ ] 6.3 `Cargo.toml` 添加 `include_dir` 依赖；`instance_wasmedge.rs`：用 `include_dir!` 嵌入 `assets/modules/`（~1.0MB, 80+ 文件），修改 `resolve_quickjs_modules_dir` 优先 `{work_dir}/assets/modules/`
+- [ ] 6.4 `config.rs` 新增 `ensure_embedded_assets`（统一释放入口），`cli.rs` 中 `ensure_work_dir_structure` 之后调用
+- [ ] 6.5 `build.rs` 新增：编译期 SHA-256 摘要生成；`ensure_embedded_assets` 实现版本比对（摘要不一致则覆盖），写入 `assets/.versions.json`
+- [ ] 6.6 `Cargo.toml` 添加 `fs2` 依赖；释放前 `{work_dir}/assets/.lock` 文件锁 + 原子 rename 写入
+
+**Phase 2：WasmEdge 静态链接 + Release 优化**
+- [ ] 6.7 `Cargo.toml`：启用 `standalone` feature gate（默认静态链接，`--no-default-features` 走系统库）；`wasmedge-sdk` 加 `standalone` feature
+- [ ] 6.8 `Cargo.toml` 新增 `[profile.release]`：`opt-level = "z"` / `lto = true` / `codegen-units = 1` / `strip = "symbols"`（不使用 `panic = "abort"`，因 `vm_actor.rs` 和 `event_bus.rs` 依赖 `catch_unwind`）
+- [ ] 6.9 验证最终二进制体积在 30-40MB 范围内
+
+**Phase 3：增强 `pi init` 交互式向导**
+- [ ] 6.10 重写 `run_init`：集成 `dialoguer` 两步向导（LLM 配置 + 资源检查），调用 `ensure_work_dir_structure` + `ensure_embedded_assets`
+- [ ] 6.11 `pi init` 幂等性：已有配置询问是否覆盖（默认 N）；已有 API Key 跳过输入
+- [ ] 6.12 旧目录迁移：检测 `~/.pi_wasm/` → 交互式迁移到 `~/.pi_/` → 旧目录重命名 `.bak`
+- [ ] 6.13 `.env` 处理：`Cargo.toml` 提升 `dotenvy` 为正式依赖；`run_cli` 入口加载 `{work_dir}/assets/.env`；创建时设置 `0600` 权限
+- [ ] 6.14 增强 `run_doctor`：修正现有路径 bug（`work_dir/wasm/` → `work_dir/assets/wasm/`）；新增 SHA-256 展示、`.env` 权限检查
+
+**文档同步**
+- [ ] 6.15 更新 `docs/user-guide.md`（安装说明、目录结构、init 流程）
+- [ ] 6.16 同步 `openspec/specs/architecture/work-dir-and-data-layout.md` 与 `docs/technical/directory-structure.md`
+
+**依赖**：—（可随时进行；Phase 2 的 `standalone` feature 需验证 CI 构建环境）
+
+**被依赖**：TASK-07（全平台兼容性测试）、TASK-10（项目文档编写）
 
 **协作接口**：
-- 消费：所有模块的 pub API
-- 提供：全量单测用例
+- 消费：`AppConfig`、`ensure_work_dir_structure`、`resolve_quickjs_path`、`resolve_bridge_path`、`resolve_quickjs_modules_dir`、`dialoguer`
+- 提供：单二进制分发能力、`ensure_embedded_assets` API、增强后的 `pi init` / `pi doctor`
 
 **验收标准**：
-- 核心模块覆盖率 >= 80%，核心路径 100%
-- `cargo test -j 1 --all -- --test-threads=1` 全部通过（见 INTEGRATION_TEST_SPEC §7.1）
-- 跨平台编译通过（至少 CI 或本地三平台各一次）
+- 预编译二进制可在干净 macOS / Linux 环境下通过 `pi init` 一步完成初始化，无需手动安装 WasmEdge、复制 wasm 文件或设置环境变量
+- `pi init` 幂等，二次运行不破坏已有配置
+- `pi doctor` 全部检查项通过（配置、WasmEdge、QuickJS WASM、Node 模块、.env 权限、API Key）
+- 内嵌资源版本升级后，重启自动覆盖旧文件（SHA-256 比对）
+- Release 二进制体积 30-40MB
+- `cargo test -j 1 --all -- --test-threads=1` 全部通过
 
 ---
 
