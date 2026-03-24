@@ -1,4 +1,5 @@
-# PI-WASM 配置
+# PI-WASM 配置示例
+# 复制为 pi.config.toml 后按需修改。
 # 环境变量 PI_WASM__*（如 PI_WASM__LLM__PROXY）会覆盖同名字段。
 
 # ------------------------------------------------------------------------------
@@ -8,8 +9,8 @@
 # level：日志级别。控制输出到 stderr 的日志最低等级。
 # 取值：trace | debug | info | warn | error。用于排查问题时可设为 debug。
 level = "info"
-# file_enabled：是否同时把日志写入文件。true 时写入 work_dir/agents/default/logs/，便于事后排查。
-file_enabled = true
+# file_enabled：是否同时把日志写入文件。true 时写入 work_dir/agents/main/logs/，便于事后排查。
+file_enabled = false
 # file_roll_size_mb：单个日志文件最大体积（MB），超过后滚动到新文件。仅 file_enabled 时生效。
 file_roll_size_mb = 10
 
@@ -20,7 +21,6 @@ file_roll_size_mb = 10
 # provider：当前使用的 LLM 提供商标识。如 "openai"，用于选择对应适配器。
 provider = "openai"
 # api_base：API 根地址。不填则默认 https://api.openai.com；自建或代理时可改写。
-api_base = "https://api.openai.com"
 # api_key_env：存 API Key 的环境变量名。不填则默认从 OPENAI_API_KEY 读取。
 default_model = "gpt-5.2"
 # max_concurrent_requests：允许同时进行的 LLM 请求数，用于限流；0 表示不限制（不推荐）。
@@ -30,23 +30,34 @@ retry_count = 3
 # stream_timeout_sec：流式请求单次读取的超时秒数，超时则中断流式输出。
 stream_timeout_sec = 60
 # proxy：HTTP(S) 代理 URL。设置后所有 LLM 请求经该代理；不填则使用环境变量 HTTPS_PROXY/HTTP_PROXY（若有）。
-proxy = "http://127.0.0.1:7890"
+# proxy = "http://127.0.0.1:7890"
 # api_base_fallback：主 api_base 不可达（连接失败、超时等）时，自动用此 URL 重试；留空则关闭降级。
-api_base_fallback = "https://api.chatanywhere.tech"
+# api_base_fallback = "https://api.chatanywhere.tech"
 
 # ------------------------------------------------------------------------------
 # [storage] 存储配置：工作根目录
-# agent 系统子目录（sessions/plugins/tmp/logs/wasm）全部由 work_dir 按架构推导，不可单独配置。
+# agent 系统子目录（sessions/logs/audit 等）全部由 work_dir 按架构推导，不可单独配置。
 # 详见 openspec/specs/architecture/work-dir-and-data-layout.md
 # ------------------------------------------------------------------------------
 [storage]
-# work_dir：工作根目录。所有 agent 系统子目录从此推导。默认 ~/.pi_wasm/
+# work_dir：工作根目录。所有 agent 系统子目录从此推导。默认 ~/.pi_/
 # 可通过环境变量 PI_WASM__STORAGE__WORK_DIR 覆盖。
-work_dir = "~/.pi_wasm/"
+# work_dir = "~/.pi_/"
+
+# ------------------------------------------------------------------------------
+# [agent] Agent 配置：标识、身份目录、工作区
+# ------------------------------------------------------------------------------
+[agent]
+# id：agent 标识，影响运行时数据目录和 session key 命名。
+id = "main"
+# agent_dir：agent 身份与凭据目录。未配置时默认 work_dir/agents/{id}/agent。
+# agent_dir = "~/.pi_/agents/main/agent"
+# workspace：agent 工作区目录。未配置时默认 work_dir/workspace-{id}。
+# workspace = "~/.pi_/workspace-main"
 
 # ------------------------------------------------------------------------------
 # [plugin] 插件配置：启动时自动加载列表
-# 插件目录由 work_dir 推导为 work_dir/agents/default/plugins
+# 插件目录由 work_dir 推导为 work_dir/plugins
 # ------------------------------------------------------------------------------
 [plugin]
 # auto_load：启动时自动加载的插件 ID 列表。空则需手动 load；填如 ["my-plugin"] 则启动即加载。
@@ -68,7 +79,7 @@ enable_plugin_safety_scan = false
 
 # ------------------------------------------------------------------------------
 # [wasm] Wasm 运行时（feature "wasmedge"）
-# quickjs wasm 文件由 work_dir 推导为 work_dir/wasm/wasmedge_quickjs.wasm，
+# quickjs wasm 文件由 work_dir 推导为 work_dir/assets/wasm/wasmedge_quickjs.wasm，
 # 找不到时回退到环境变量 WASMEDGE_QUICKJS_PATH。
 # ------------------------------------------------------------------------------
 [wasm]
@@ -78,7 +89,7 @@ enable_plugin_safety_scan = false
 # ------------------------------------------------------------------------------
 [primitive]
 # path_whitelist：文件操作（read/write/edit/list_dir）允许的路径前缀列表。
-# 空列表 = 仅允许 work_dir/agents/default/workspace 目录下的路径（隐式白名单）。
+# 空列表 = 仅允许 work_dir/workspace-main 目录下的路径（隐式白名单）。
 # 示例：path_whitelist = ["/home/user/project", "/tmp"]
 path_whitelist = []
 # path_blacklist：即使在白名单内也禁止操作的路径前缀。优先级高于白名单。

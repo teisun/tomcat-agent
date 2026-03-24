@@ -7,8 +7,8 @@
 单文件 JSON：`sessionKey -> SessionEntry`。列表与路由由此提供，不另建 SQLite 索引。
 
 ```rust
-/// 会话根目录：~/.pi/agent/sessions/ 或 ~/.pi/agent/sessions/<agentId>/
-/// sessionKey 格式：agent:<agentId>:<channelKey>，MVP 单入口用 agent:default:main
+/// 会话根目录：~/.pi_/agents/<agentId>/sessions/
+/// sessionKey 格式：agent:<agentId>:<channelKey>，MVP 单入口用 agent:main:main
 pub type SessionStore = std::collections::HashMap<String, SessionEntry>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,8 +78,8 @@ pub struct EntryBase {
 ```
 
 **会话路径与会话标识**
-- **会话根目录** '~/.pi/agent/sessions/'; 按Agent分子目录预留多Agent设计 (如'~/.pi/agent/sessions/<agentId>/'), mvp先单agentId或固定default。
-- **sessionKey** (路由键，预留多channel)：'agent:<agentId>:<channelKey>', MVP可用'agent:default:main' 后续channnelKey可扩展如: 'agent:mybot:telegram:group:123'
+- **会话根目录** `~/.pi_/agents/<agentId>/sessions/`；MVP 阶段 agentId 固定为 `main`。
+- **sessionKey** (路由键，预留多channel)：`agent:<agentId>:<channelKey>`，MVP 用 `agent:main:main`，后续 channelKey 可扩展如: `agent:mybot:telegram:group:123`
 - **sessionId** 当前对话对应的 transcript 唯一 id(sessionId=<timestamp>_<uuid>)，对应文件名'<sessionId>.jsonl'; SessionEntry中'sessionId'指向改文件
 
 **Source of truth**：transcript 内容以 JSONL 文件为准；sessions.json 为元数据与路由的权威，写入时覆盖该文件。

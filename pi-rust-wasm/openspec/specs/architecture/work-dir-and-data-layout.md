@@ -4,8 +4,8 @@
 
 ## 1. 默认工作根目录（work_dir）
 
-- **默认值**：当前可执行文件所在目录下的 `.pi_wasm`，即 `{可执行文件目录}/.pi_wasm`。在进程启动时通过 `std::env::current_exe()` 的父目录得到 `exe_dir`，默认 `work_dir = exe_dir.join(".pi_wasm")`。
-- **可配置**：支持通过配置文件（如 `storage.work_dir` 或 `app.work_dir`）和环境变量（如 `PI_WASM__STORAGE__WORK_DIR`）覆盖。路径支持 `~` 与相对路径，经现有 `normalize_path` 展开。
+- **默认值**：当前可执行文件所在目录下的 `.pi_`，即 `{可执行文件目录}/.pi_`。在进程启动时通过 `std::env::current_exe()` 的父目录得到 `exe_dir`，默认 `work_dir = exe_dir.join(".pi_")`。
+- **可配置**：支持通过主配置文件 `pi.config.toml`（键如 `storage.work_dir` 或 `app.work_dir`）和环境变量（如 `PI_WASM__STORAGE__WORK_DIR`）覆盖。路径支持 `~` 与相对路径，经现有 `normalize_path` 展开。
 
 ## 2. 多 agent 子目录约定
 
@@ -13,31 +13,39 @@
 
 | 路径 | 说明 |
 |------|------|
+| `agents/<agentId>/agent/` | 该 agent 的身份与凭据目录（可配置覆盖） |
 | `agents/<agentId>/sessions/` | 该 agent 的会话与 transcript（sessions.json、JSONL 等） |
-| `agents/<agentId>/plugins/` | 该 agent 的插件目录（插件可含 JS 或 Wasm 入口） |
-| `agents/<agentId>/tmp/` | 该 agent 的临时文件（如 run_script 写入的 script.js） |
 | `agents/<agentId>/logs/` | 该 agent 的日志（per-agent，若写文件则用此路径） |
+| `agents/<agentId>/audit/` | 该 agent 的审计日志（JSONL） |
+| `workspace-<agentId>/` | 该 agent 的工作区（AGENTS.md 等设计态文件，根级目录，可配置覆盖） |
+| `memory/` | 向量检索索引 |
+| `credentials/` | OAuth 凭据 |
+| `media/` | 媒体文件 |
+| `subagents/` | 子 agent 注册表 |
 | `plugins/` | **全局**共享插件目录（所有 agent 均可加载） |
-| `wasm/` | **全局** wasm 运行时引擎（共享的 wasmedge_quickjs.wasm 等） |
+| `assets/wasm/` | **全局** wasm 运行时引擎（共享的 wasmedge_quickjs.wasm 等） |
+| `assets/modules/` | **全局** JS 兼容模块 |
 
-- **当前仅一个 agent**：agentId 固定为 `default`，即使用 `work_dir/agents/default/` 下各子目录。
-- **与现有配置的兼容**：若已显式配置 `sessions_dir`、`plugins_dir` 等，则优先使用（可视为单 agent 或兼容模式）；否则按 work_dir + 上述多 agent 布局推导。设计文档与实现中需统一约定兼容规则。
+- **当前仅一个 agent**：agentId 固定为 `main`，即使用 `work_dir/agents/main/` 下各子目录。
+- **可配置覆盖**：`agent_dir` 和 `workspace` 可通过 `[agent]` 配置节覆盖；`sessions/logs/audit` 始终从 `work_dir/agents/{id}/` 独立推导，不受 `agent_dir` 配置影响。
 
 ## 3. 启动时创建目录
 
 - **时机**：load_config 后或 CLI/服务入口启动时。
 - **行为**：创建 work_dir 及本约定中的全部子目录；若目录已存在则跳过。
-- **当前**：仅支持一个 agent（agentId=`default`），至少创建：
-  - `work_dir/agents/default/sessions`
-  - `work_dir/agents/default/plugins`
-  - `work_dir/agents/default/tmp`
-  - `work_dir/agents/default/logs`
+- **当前**：仅支持一个 agent（agentId=`main`），至少创建：
+  - `work_dir/agents/main/agent`（身份与凭据，可配置覆盖）
+  - `work_dir/agents/main/sessions`
+  - `work_dir/agents/main/logs`
+  - `work_dir/agents/main/audit`
+  - `work_dir/workspace-main`（根级工作区，可配置覆盖）
+  - `work_dir/memory`、`credentials`、`media`、`subagents`
   - `work_dir/plugins`（全局共享插件）
-  - `work_dir/wasm`（全局 wasm 运行时引擎）
+  - `work_dir/assets/wasm`、`assets/modules`（全局资源）
 
 ## 4. run_script 与临时文件
 
-- run_script(code) 写入的 script.js 放在**当前 agent 的 tmp**，当前即 `work_dir/agents/default/tmp/`。未指定 agent 时使用 `default`。
+- run_script(code) 写入的 script.js 放在**当前 agent 的 tmp**，当前即 `work_dir/agents/main/tmp/`（tmp 目录保留签名兼容但不在启动时创建）。未指定 agent 时使用 `main`。
 - work_dir 未初始化或不可用时，可回退到系统 temp（如 `std::env::temp_dir()`）。
 
 ## 5. 引用本设计

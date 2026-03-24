@@ -39,3 +39,4 @@ build/
 ### pi-rust-wasm — local / E2E scratch workspace ###
 pi-rust-wasm/workspace/
 pi-rust-wasm/.integration_test_output.log
+pi-rust-wasm/.integration_retry_*.log

@@ -114,9 +114,40 @@ impl Default for LlmConfig {
 /// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StorageConfig {
-    /// 工作根目录；默认 `~/.pi_wasm/`。支持 `~` 与相对路径。
+    /// 工作根目录；默认 `~/.pi_/`。支持 `~` 与相对路径。
     #[serde(default)]
     pub work_dir: Option<String>,
+}
+
+/// Agent 配置：标识、身份目录、工作区目录。
+/// `agent_dir` 和 `workspace` 均为可选，未配置时由 resolve 函数从 work_dir 推导。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentConfig {
+    /// agent 标识，影响运行时数据目录和 session key 命名。
+    #[serde(default = "default_agent_id")]
+    pub id: String,
+    /// agent 身份与凭据目录（auth-profiles.json、models.json 等）。
+    /// 未配置时从 work_dir 推导为 `{work_dir}/agents/{id}/agent`。
+    #[serde(default)]
+    pub agent_dir: Option<String>,
+    /// agent 工作区目录（AGENTS.md、SOUL.md 等设计态文件）。
+    /// 未配置时从 work_dir 推导为 `{work_dir}/workspace-{id}`。
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+fn default_agent_id() -> String {
+    "main".to_string()
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            id: default_agent_id(),
+            agent_dir: None,
+            workspace: None,
+        }
+    }
 }
 
 /// 插件配置：启动时自动加载的插件列表。插件目录由 [`resolve_plugins_dir`] 从 work_dir 推导。
@@ -201,7 +232,7 @@ impl Default for SecurityConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WasmConfig {}
 
-/// 应用顶层配置，聚合 log / llm / storage / plugin / security / primitive / wasm 子配置。
+/// 应用顶层配置，聚合 log / llm / storage / agent / plugin / security / primitive / wasm 子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -210,6 +241,8 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
     #[serde(default)]
     pub plugin: PluginConfig,
     #[serde(default)]
@@ -225,7 +258,7 @@ pub struct AppConfig {
 /// 合并顺序：若提供且存在的配置文件先加载，再叠加环境变量 `PI_WASM__*`（`__` 表示嵌套）。未提供或不存在文件时仅用默认值与环境变量。
 ///
 /// # Arguments
-/// * `config_path` - 配置文件路径，如 `Some(Path::new("config.toml"))`；`None` 表示仅用默认与环境变量。
+/// * `config_path` - 配置文件路径，如 `Some(Path::new("pi.config.toml"))`；`None` 表示仅用默认与环境变量。
 ///
 /// # Returns
 /// 合并后的 [`AppConfig`]，可直接用于 [`validate_config`] 校验。
@@ -253,7 +286,7 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
     Ok(merged)
 }
 
-/// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.pi_wasm/`。
+/// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.pi_/`。
 ///
 /// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
 pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -263,65 +296,92 @@ pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
             return normalize_path(s);
         }
     }
-    normalize_path("~/.pi_wasm/")
+    normalize_path("~/.pi_/")
 }
 
 // ---------------------------------------------------------------------------
 // resolve 函数：从 work_dir 按架构推导 agent 系统子目录
+// sessions/logs/audit 始终从 work_dir/agents/{id}/ 独立推导，不经 agent_dir。
+// agent_dir 和 workspace 支持配置覆盖。
+// 参考 openclaw 的独立推导模式。
 // ---------------------------------------------------------------------------
 
-/// `work_dir/agents/default/sessions`
+/// agent 身份与凭据目录。优先 `cfg.agent.agent_dir`，否则 `work_dir/agents/{id}/agent`。
+pub fn resolve_agent_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    if let Some(ref dir) = cfg.agent.agent_dir {
+        let d = dir.trim();
+        if !d.is_empty() {
+            return normalize_path(d);
+        }
+    }
+    Ok(get_work_dir(cfg)?
+        .join("agents")
+        .join(&cfg.agent.id)
+        .join("agent"))
+}
+
+/// `work_dir/agents/{id}/sessions` — 独立推导，不经 agent_dir。
 pub fn resolve_sessions_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?
         .join("agents")
-        .join("default")
+        .join(&cfg.agent.id)
         .join("sessions"))
 }
 
-/// `work_dir/agents/default/plugins`
+/// `work_dir/plugins` — 全局共享插件目录。
 pub fn resolve_plugins_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(get_work_dir(cfg)?
-        .join("agents")
-        .join("default")
-        .join("plugins"))
+    Ok(get_work_dir(cfg)?.join("plugins"))
 }
 
-/// `work_dir/agents/default/tmp`
+/// `work_dir/agents/{id}/tmp` — 临时目录，保留签名兼容。
 pub fn resolve_tmp_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?
         .join("agents")
-        .join("default")
+        .join(&cfg.agent.id)
         .join("tmp"))
 }
 
-/// `work_dir/agents/default/logs`
+/// `work_dir/agents/{id}/logs` — 独立推导，不经 agent_dir。
 pub fn resolve_log_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?
         .join("agents")
-        .join("default")
+        .join(&cfg.agent.id)
         .join("logs"))
 }
 
-/// `work_dir/agents/default/audit` — 独立审计日志目录，专用 JSONL 存储。
+/// `work_dir/agents/{id}/audit` — 独立审计日志目录，专用 JSONL 存储。
 pub fn resolve_audit_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?
         .join("agents")
-        .join("default")
+        .join(&cfg.agent.id)
         .join("audit"))
 }
 
-/// `work_dir/agents/default/workspace`
+/// agent 工作区目录。优先 `cfg.agent.workspace`，否则 `work_dir/workspace-{id}`。
 pub fn resolve_workspace_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(get_work_dir(cfg)?
-        .join("agents")
-        .join("default")
-        .join("workspace"))
+    if let Some(ref ws) = cfg.agent.workspace {
+        let w = ws.trim();
+        if !w.is_empty() {
+            return normalize_path(w);
+        }
+    }
+    Ok(get_work_dir(cfg)?.join(format!("workspace-{}", cfg.agent.id)))
 }
 
-/// 查找 quickjs wasm：`work_dir/wasm/wasmedge_quickjs.wasm` → 环境变量 `WASMEDGE_QUICKJS_PATH`。
+/// `work_dir/memory` — 向量检索索引目录。
+pub fn resolve_memory_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?.join("memory"))
+}
+
+/// `work_dir/assets` — 全局资源目录（含 wasm/ 和 modules/ 子目录）。
+pub fn resolve_assets_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?.join("assets"))
+}
+
+/// 查找 quickjs wasm：`work_dir/assets/wasm/wasmedge_quickjs.wasm` → 环境变量 `WASMEDGE_QUICKJS_PATH`。
 pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
     if let Ok(work) = get_work_dir(cfg) {
-        let p = work.join("wasm").join("wasmedge_quickjs.wasm");
+        let p = work.join("assets").join("wasm").join("wasmedge_quickjs.wasm");
         if p.exists() {
             return Some(p);
         }
@@ -332,18 +392,32 @@ pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
         .filter(|p| p.exists())
 }
 
-/// 启动时创建工作根目录及多 agent 子目录（当前仅 agentId=default）。若目录已存在则跳过。
+/// 启动时创建完整新布局目录树。若目录已存在则跳过（幂等）。
 ///
-/// 创建：`work_dir`、`work_dir/agents/default/sessions`、`plugins`、`tmp`、`logs`、`audit`、`workspace`，
-/// 以及 `work_dir/wasm`（全局运行时引擎）、`work_dir/plugins`（全局共享插件）。
+/// 创建：`agent_dir`（可配置覆盖）、`work_dir/agents/{id}/sessions|logs|audit`、
+/// `workspace-{id}`（可配置覆盖）、全局目录 `memory|credentials|media|subagents|plugins`、
+/// 以及 `assets/wasm|modules`。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let work = get_work_dir(cfg)?;
-    let default_agent = work.join("agents").join("default");
-    for sub in ["sessions", "plugins", "tmp", "logs", "audit", "workspace"] {
-        std::fs::create_dir_all(default_agent.join(sub)).map_err(AppError::Io)?;
+    let id = &cfg.agent.id;
+
+    let agent_dir = resolve_agent_dir(cfg)?;
+    std::fs::create_dir_all(&agent_dir).map_err(AppError::Io)?;
+
+    let agent_base = work.join("agents").join(id);
+    for sub in ["sessions", "logs", "audit"] {
+        std::fs::create_dir_all(agent_base.join(sub)).map_err(AppError::Io)?;
     }
-    std::fs::create_dir_all(work.join("wasm")).map_err(AppError::Io)?;
-    std::fs::create_dir_all(work.join("plugins")).map_err(AppError::Io)?;
+
+    let ws = resolve_workspace_dir(cfg)?;
+    std::fs::create_dir_all(&ws).map_err(AppError::Io)?;
+
+    for dir in ["memory", "credentials", "media", "subagents", "plugins"] {
+        std::fs::create_dir_all(work.join(dir)).map_err(AppError::Io)?;
+    }
+
+    std::fs::create_dir_all(work.join("assets").join("wasm")).map_err(AppError::Io)?;
+    std::fs::create_dir_all(work.join("assets").join("modules")).map_err(AppError::Io)?;
     Ok(())
 }
 
@@ -454,7 +528,7 @@ mod tests {
     #[test]
     fn load_config_from_example_file() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let example_path = manifest_dir.join("config.toml.example");
+        let example_path = manifest_dir.join("pi.config.toml.example");
         if !example_path.exists() {
             return;
         }
@@ -468,7 +542,7 @@ mod tests {
         let _ = std::fs::remove_file(&temp_toml);
         let _ = std::fs::remove_dir(&dir);
         let cfg = r.unwrap_or_else(|e| {
-            panic!("config.toml.example 内容应可被 load_config 反序列化: {}", e)
+            panic!("pi.config.toml.example 内容应可被 load_config 反序列化: {}", e)
         });
         assert!(validate_config(&cfg).is_ok());
     }

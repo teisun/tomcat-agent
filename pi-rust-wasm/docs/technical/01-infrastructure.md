@@ -99,7 +99,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 - **AppConfig**：顶层配置，包含 `log`、`llm`、`storage`、`plugin`、`security`、`primitive`。
 - **LogConfig**：`level`（trace/debug/info/warn/error）、`file_enabled`、`file_path`、`file_roll_size_mb`。
 - **LlmConfig**：`provider`、`api_base`、`api_key_env`、`default_model`、`max_concurrent_requests`、`retry_count`、`stream_timeout_sec`；可选 `proxy`（显式 HTTP 代理 URL，如 `http://127.0.0.1:7890`，未设置时仍使用环境变量 `HTTPS_PROXY`/`HTTP_PROXY`）；可选 `api_base_fallback`（当对主 API 地址请求不通时自动用该 URL 重试，示例 `https://api.chatanywhere.tech`，留空关闭自动降级）。
-- **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认可执行文件目录/.pi_wasm；多 agent 子目录与数据布局见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)）。
+- **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认 `~/.pi_/`；多 agent 子目录与数据布局见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)）。
 - **PluginConfig**：`plugins_dir`、`auto_load`。
 - **PrimitiveConfig**：路径/命令白名单与审批、`auto_confirm`、`require_approval_for_all_write` 等。
 - **SecurityConfig**：`default_plugin_permission_level`、`enable_audit_log`、`audit_log_retention_days`、`enable_plugin_safety_scan`。
@@ -111,7 +111,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 
 **代理与降级 URL 的配置方式**：
 
-- **方式 A（配置文件）**：在 `config.toml` 的 `[llm]` 段中设置 `proxy`、`api_base_fallback`。项目根目录提供 **config.toml.example**，复制为 `config.toml` 并按需修改后，通过 `load_config(Some(Path::new("config.toml")))` 加载。
+- **方式 A（配置文件）**：在 `pi.config.toml` 的 `[llm]` 段中设置 `proxy`、`api_base_fallback`。项目根目录提供 **pi.config.toml.example**，复制为 `pi.config.toml` 并按需修改后，通过 `load_config(Some(Path::new("pi.config.toml")))` 加载。
 - **方式 B（环境变量）**：通过 `PI_WASM__LLM__PROXY`、`PI_WASM__LLM__API_BASE_FALLBACK` 注入（与 `load_config` 的 Environment 前缀一致），会覆盖配置文件中的同名字段。
 - **代理兜底**：未设置 `llm.proxy`（且未通过环境变量指定）时，程序通过 reqwest 使用系统环境变量 `HTTPS_PROXY`/`HTTP_PROXY`（若存在），与终端 curl 行为一致。也可使用项目内 **.env.example**（复制为 `.env` 后按需填写）配置密钥与可选代理/降级项。
 
@@ -192,7 +192,7 @@ pub trait EventBus: Send + Sync + 'static {
 ```rust
 use pi_wasm::{load_config, validate_config, init_logging};
 
-let cfg = load_config(Some(std::path::Path::new("config.toml")))?;
+let cfg = load_config(Some(std::path::Path::new("pi.config.toml")))?;
 validate_config(&cfg)?;
 init_logging(&cfg.log)?;
 ```

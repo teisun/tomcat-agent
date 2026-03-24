@@ -82,7 +82,7 @@
 ### 2.2 配置中心 (AppConfig)
 - **加载机制**：
   1. 默认值 (`Default::default()`)
-  2. 配置文件 (`config.toml`)
+  2. 配置文件 (`pi.config.toml`)
   3. 环境变量 (前缀 `PI_WASM__`)
 - **校验逻辑**：`validate_config` 在系统启动阶段执行，若关键路径（如 `sessions_dir`）无写权限，程序将拒绝启动。
 

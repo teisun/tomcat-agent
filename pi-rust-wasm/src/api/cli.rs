@@ -12,7 +12,7 @@ use crate::{
     TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
 
-const DEFAULT_CONFIG_PATH: &str = "~/.pi_wasm/agent_default/config.toml";
+const DEFAULT_CONFIG_PATH: &str = "~/.pi_/pi.config.toml";
 
 /// pi CLI：AI Agent 运行时，支持插件管理、会话、配置、审计与对话模式
 #[derive(Parser, Debug)]
@@ -487,7 +487,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
                 println!("会话不存在: {}", key);
                 return Ok(());
             }
-            println!("当前会话 key 固定为 agent:default:main，切换逻辑占位。");
+            println!("当前会话 key 固定为 agent:main:main，切换逻辑占位。");
         }
         SessionSub::Delete { key } => {
             mgr.delete_session(&key)?;
@@ -888,16 +888,16 @@ mod tests {
         let cmd = cli.command.expect("subcommand");
         assert!(matches!(cmd, Commands::Init { config: _ }));
         if let Commands::Init { config } = cmd {
-            assert!(config.contains("config.toml"));
+            assert!(config.contains("pi.config.toml"));
         }
     }
 
     #[test]
     fn cli_parse_init_with_config_path() {
-        let cli = Cli::try_parse_from(["pi", "init", "--config", "/tmp/pi/config.toml"]).unwrap();
+        let cli = Cli::try_parse_from(["pi", "init", "--config", "/tmp/pi/pi.config.toml"]).unwrap();
         let cmd = cli.command.unwrap();
         if let Commands::Init { config } = cmd {
-            assert_eq!(config, "/tmp/pi/config.toml");
+            assert_eq!(config, "/tmp/pi/pi.config.toml");
         }
     }
 
@@ -964,7 +964,7 @@ mod tests {
     #[test]
     fn run_init_creates_config_in_temp_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("pi.config.toml");
         let r = run_init(config_path.to_str().unwrap());
         assert!(r.is_ok());
         assert!(config_path.exists());
@@ -981,7 +981,7 @@ mod tests {
     #[test]
     fn run_doctor_some_with_valid_config_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("pi.config.toml");
         run_init(config_path.to_str().unwrap()).unwrap();
         let r = run_doctor(Some(config_path.to_str().unwrap()));
         assert!(r.is_ok());
@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn run_config_edit_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
+        let path = dir.path().join("pi.config.toml");
         let toml = toml::to_string_pretty(&AppConfig::default()).unwrap();
         std::fs::write(&path, toml).unwrap();
 
@@ -1090,7 +1090,7 @@ mod tests {
 
     #[test]
     fn run_doctor_invalid_config_path_returns_ok() {
-        let r = run_doctor(Some("/nonexistent/path/config.toml"));
+        let r = run_doctor(Some("/nonexistent/path/pi.config.toml"));
         assert!(r.is_ok());
     }
 
@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn run_doctor_with_valid_config_checks_wasm() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("pi.config.toml");
         run_init(config_path.to_str().unwrap()).unwrap();
         let r = run_doctor(Some(config_path.to_str().unwrap()));
         assert!(r.is_ok());
@@ -1311,7 +1311,7 @@ mod tests {
     #[test]
     fn config_set_with_real_file() {
         let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
+        let config_path = dir.path().join("pi.config.toml");
         run_init(config_path.to_str().unwrap()).unwrap();
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("info") || content.contains("level"));

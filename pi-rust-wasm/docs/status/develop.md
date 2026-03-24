@@ -155,7 +155,7 @@
 | User_Stories.md | 去掉顶部误嵌套的 `### 3.` / ` ```markdown ` 包裹，恢复独立规格正文 |
 | vm_actor.rs | 移除未使用的 `event_tx` 字段，满足 `clippy -D warnings` |
 | wasmedge_e2e_tests.rs | 对仍使用 `WasmInstance::dispatch_event` 的 3 个 E2E 标注 `#[allow(deprecated)]`（短生命周期组合路径；会话 VM 路径已由其他用例覆盖） |
-| cli.rs 单测 | `run_config_edit_returns_ok` 使用临时 `config.toml` + `EDITOR=true`，避免默认打开 `vi` 阻塞测试 |
+| cli.rs 单测 | `run_config_edit_returns_ok` 使用临时 `pi.config.toml` + `EDITOR=true`，避免默认打开 `vi` 阻塞测试 |
 
 #### 验收命令与结果
 

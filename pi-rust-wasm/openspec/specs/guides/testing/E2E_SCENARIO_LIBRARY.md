@@ -138,10 +138,10 @@
 | ----------- | -- | ------------------------------------------------------- | ------------------------- | ---------------------------------------------------------- | ------------------------------- |
 | E2E-CLI-051 | 自动 | `test_user_creates_new_session`                         | 用户创建一个新会话                 | `pi session new`                                           | exit 0；stdout 含"已创建会话"          |
 | E2E-CLI-052 | 自动 | `test_user_lists_sessions`                              | 用户查看所有会话                  | `pi session list`                                          | exit 0                          |
-| E2E-CLI-053 | 自动 | `test_user_switches_to_existing_session`                | 用户切换到已存在的会话               | `pi session new` → `pi session switch agent:default:main`  | exit 0                          |
+| E2E-CLI-053 | 自动 | `test_user_switches_to_existing_session`                | 用户切换到已存在的会话               | `pi session new` → `pi session switch agent:main:main`  | exit 0                          |
 | E2E-CLI-054 | 自动 | `test_user_switches_to_nonexistent_session_shows_error` | 用户切换到不存在会话时看到友好提示         | `pi session switch nonexistent-key`                        | exit 0；stdout 含"不存在"            |
-| E2E-CLI-055 | 自动 | `test_user_deletes_session`                             | 用户删除刚创建的会话                | `pi session new` → `pi session delete agent:default:main`  | exit 0；stdout 含"已删除"            |
-| E2E-CLI-056 | 自动 | `test_user_archives_session`                            | 用户归档会话                    | `pi session new` → `pi session archive agent:default:main` | exit 0；stdout 含"已归档"            |
+| E2E-CLI-055 | 自动 | `test_user_deletes_session`                             | 用户删除刚创建的会话                | `pi session new` → `pi session delete agent:main:main`  | exit 0；stdout 含"已删除"            |
+| E2E-CLI-056 | 自动 | `test_user_archives_session`                            | 用户归档会话                    | `pi session new` → `pi session archive agent:main:main` | exit 0；stdout 含"已归档"            |
 | E2E-CLI-057 | 自动 | `test_user_searches_sessions_by_keyword`                | 用户按关键词搜索会话                | `pi session search default`                                | exit 0                          |
 | E2E-CLI-058 | 人工 | `test_user_chat_without_api_key_fails_gracefully`       | 无 API key 时 chat 快速失败，不挂起 | `pi chat`（移除 OPENAI_API_KEY），timeout 5s                    | 进程 5s 内结束；stdout 或 stderr 含错误提示 |
 | E2E-CLI-059 | 自动 | `test_user_views_audit_list`                            | 用户查看操作审计记录列表              | `pi audit list`                                            | exit 0                          |

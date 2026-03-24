@@ -247,7 +247,7 @@ execute_tool("dispatch_agent", args)
 参考 claude-code 的强隔离设计（只返回 final message）和 openclaw 的 system prompt 注入方式：
 
 - **不继承 messages 历史**：子 Agent 只接收 `args.task` 字符串，外加宿主注入的系统 prompt（含子 Agent 身份描述、`spawn_depth`、`parent_session_id`）。
-- **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/default/sessions/{child_session_id}.jsonl`，或通过配置设为不落盘（ephemeral）。
+- **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/main/sessions/{child_session_id}.jsonl`，或通过配置设为不落盘（ephemeral）。
 - **工具集独立**：子 Agent 默认继承父 Agent 的工具集，但**排除** `dispatch_agent` 工具（防止无限递归）。如需允许孙 Agent，显式在 `args` 中传入 `allow_sub_dispatch: true` 并受 `spawn_depth` 检查约束。
 
 ### 14.4.4 嵌套深度限制

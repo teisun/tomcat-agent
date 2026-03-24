@@ -11,7 +11,7 @@ use crate::infra::error::AppError;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 
 /// MVP 默认 sessionKey：单 Agent 单入口。
-pub const DEFAULT_SESSION_KEY: &str = "agent:default:main";
+pub const DEFAULT_SESSION_KEY: &str = "agent:main:main";
 
 /// sessions.json 的根类型：sessionKey → 元数据条目。
 pub type SessionStore = HashMap<String, SessionEntry>;
@@ -82,7 +82,7 @@ mod tests {
         let path = dir.join("sessions.json");
         let mut store = SessionStore::new();
         store.insert(
-            "agent:default:main".to_string(),
+            "agent:main:main".to_string(),
             SessionEntry {
                 session_id: "123_abc".to_string(),
                 updated_at: 1_000_000,
@@ -98,7 +98,7 @@ mod tests {
         save_store(&path, &store).unwrap();
         let loaded = load_store(&path).unwrap();
         assert_eq!(loaded.len(), 1);
-        let e = loaded.get("agent:default:main").unwrap();
+        let e = loaded.get("agent:main:main").unwrap();
         assert_eq!(e.session_id, "123_abc");
         assert_eq!(e.updated_at, 1_000_000);
         let _ = std::fs::remove_file(&path);

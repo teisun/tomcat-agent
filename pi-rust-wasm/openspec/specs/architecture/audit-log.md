@@ -12,7 +12,7 @@
 
 ## 2. 存储形态
 
-- **路径**：由 `resolve_audit_dir(cfg)` 推导，为 `work_dir/agents/default/audit/`；审计文件名为 `audit.jsonl`。
+- **路径**：由 `resolve_audit_dir(cfg)` 推导，为 `work_dir/agents/main/audit/`；审计文件名为 `audit.jsonl`。
 - **格式**：每行一条 JSON（JSONL），字段包含 `timestamp`（ISO8601）与按类型区分的 payload（见下）。
 - **写入**：仅通过 `AuditStore::append` 追加，使用 `OpenOptions::create(true).append(true)`，多线程通过 `Mutex` 保护。
 - **目录创建**：`ensure_work_dir_structure` 在启动时创建 `audit` 子目录。
@@ -52,4 +52,4 @@ CLI `pi audit list` 执行前可选调用 `store.cleanup()`，按配置的保留
 
 ## 8. 与工作目录布局的关系
 
-审计目录 `work_dir/agents/default/audit` 与 `logs`、`sessions`、`plugins`、`tmp`、`workspace` 并列，约定见 [工作目录与数据布局](work-dir-and-data-layout.md)。若后续引入按日切分（如 `audit_2025-03-13.jsonl`），清理可改为删除过期文件，查询则多文件合并或按日过滤。
+审计目录 `work_dir/agents/main/audit` 与 `logs`、`sessions`、`plugins`、`tmp`、`workspace` 并列，约定见 [工作目录与数据布局](work-dir-and-data-layout.md)。若后续引入按日切分（如 `audit_2025-03-13.jsonl`），清理可改为删除过期文件，查询则多文件合并或按日过滤。

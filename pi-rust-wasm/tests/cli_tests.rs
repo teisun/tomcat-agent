@@ -73,7 +73,7 @@ fn test_version_output_exits_ok() {
 
 /// [init 子命令] 在临时目录生成配置文件
 ///
-/// 验证：exit 0、config.toml 已创建且含 [log] 段、stdout 提示"已生成配置文件"
+/// 验证：exit 0、pi.config.toml 已创建且含 [log] 段、stdout 提示"已生成配置文件"
 /// 意义：首次使用流程门禁（TASK-02 10.2：引导 LLM 配置、生成配置文件）
 #[test]
 fn test_init_creates_config_file_in_temp_dir() {
@@ -81,7 +81,7 @@ fn test_init_creates_config_file_in_temp_dir() {
     let _span = info_span!("test_init_creates_config_file_in_temp_dir").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: temp dir at {:?}", dir.path());
     let mut c = cmd();
@@ -136,7 +136,7 @@ fn test_doctor_with_valid_config_checks_environment() {
     let _span = info_span!("test_doctor_with_valid_config_checks_environment").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: create valid config via init");
     cmd()
@@ -673,7 +673,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: init config in temp dir, set work_dir and OPENAI_API_KEY");
     cmd()
@@ -718,7 +718,7 @@ fn test_chat_with_session_dir_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: init config, session new, set work_dir");
     cmd()
@@ -783,7 +783,7 @@ fn test_init_then_doctor_roundtrip() {
     let _span = info_span!("test_init_then_doctor_roundtrip").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: init config in temp dir");
     cmd()
@@ -885,7 +885,7 @@ fn test_session_delete_via_cli_removes_session() {
     info!("Act: delete the default session key");
     let mut c = cmd();
     c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
-    c.args(["session", "delete", "agent:default:main"]);
+    c.args(["session", "delete", "agent:main:main"]);
 
     let assert = c.assert();
 
@@ -917,7 +917,7 @@ fn test_session_archive_exits_ok() {
 
     let mut c = cmd();
     c.env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
-    c.args(["session", "archive", "agent:default:main"]);
+    c.args(["session", "archive", "agent:main:main"]);
 
     info!("Act: execute session archive");
     let assert = c.assert();
@@ -1008,7 +1008,7 @@ fn test_user_first_time_setup_init_and_doctor() {
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: fresh temp dir, no existing config");
     info!("Act: pi init");
@@ -1177,7 +1177,7 @@ fn test_user_asks_pi_a_question() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -1222,7 +1222,7 @@ fn test_user_asks_pi_technical_question() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -1270,7 +1270,7 @@ fn test_user_asks_pi_to_run_bash_command() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -1313,8 +1313,8 @@ fn test_user_asks_pi_to_run_bash_command() {
 
 /// [E2E-CLI-013] 用户要求 pi 在工作区 workspace 目录下写文件
 ///
-/// 验证：exit 0；agents/default/workspace/hello_e2e.txt 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
-/// 意义：默认白名单为 work_dir/agents/default/workspace，write_file 工具调用 E2E 门禁
+/// 验证：exit 0；workspace-main/hello_e2e.txt 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
+/// 意义：默认白名单为 work_dir/workspace-main，write_file 工具调用 E2E 门禁
 #[test]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
@@ -1323,8 +1323,8 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
 
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
-    std::fs::create_dir_all(work_dir.join("agents/default/workspace")).unwrap();
-    let config_path = dir.path().join("config.toml");
+    std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -1353,7 +1353,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     );
     assert.success();
 
-    let hello_path = work_dir.join("agents/default/workspace/hello_e2e.txt");
+    let hello_path = work_dir.join("workspace-main/hello_e2e.txt");
     if hello_path.exists() {
         let content = fs::read_to_string(&hello_path).unwrap();
         assert!(
@@ -1631,7 +1631,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -1679,7 +1679,7 @@ fn test_user_receives_nonempty_llm_response() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -1796,10 +1796,10 @@ fn test_user_switches_to_existing_session() {
         .assert()
         .success();
 
-    info!("Act: pi session switch agent:default:main");
+    info!("Act: pi session switch agent:main:main");
     let assert = cmd()
         .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "switch", "agent:default:main"])
+        .args(["session", "switch", "agent:main:main"])
         .assert();
     info!("Assert: exit 0");
     assert.success();
@@ -1856,10 +1856,10 @@ fn test_user_deletes_session() {
         .assert()
         .success();
 
-    info!("Act: pi session delete agent:default:main");
+    info!("Act: pi session delete agent:main:main");
     let assert = cmd()
         .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "delete", "agent:default:main"])
+        .args(["session", "delete", "agent:main:main"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -1891,10 +1891,10 @@ fn test_user_archives_session() {
         .assert()
         .success();
 
-    info!("Act: pi session archive agent:default:main");
+    info!("Act: pi session archive agent:main:main");
     let assert = cmd()
         .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "archive", "agent:default:main"])
+        .args(["session", "archive", "agent:main:main"])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -1947,7 +1947,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init，移除 OPENAI_API_KEY");
     cmd()
@@ -2114,7 +2114,7 @@ fn test_user_init_then_doctor_roundtrip() {
     let _span = info_span!("test_user_init_then_doctor_roundtrip").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: pi init → pi doctor");
@@ -2149,7 +2149,7 @@ fn test_user_chat_resumes_last_session() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
@@ -2207,7 +2207,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("config.toml");
+    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: pi init 生成配置；加载 OPENAI_API_KEY");
     cmd()

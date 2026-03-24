@@ -19,9 +19,10 @@ pub use audit::{
 };
 pub use audit_store::{AuditEntry, AuditFilter, AuditStore};
 pub use config::{
-    ensure_work_dir_structure, get_work_dir, load_config, resolve_audit_dir, resolve_log_dir,
-    resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir,
-    resolve_workspace_dir, validate_config, AppConfig, LlmConfig, LogConfig, PrimitiveConfig,
+    ensure_work_dir_structure, get_work_dir, load_config, resolve_agent_dir, resolve_assets_dir,
+    resolve_audit_dir, resolve_log_dir, resolve_memory_dir, resolve_plugins_dir,
+    resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
+    validate_config, AgentConfig, AppConfig, LlmConfig, LogConfig, PrimitiveConfig,
     SecurityConfig, WasmConfig,
 };
 pub use error::AppError;

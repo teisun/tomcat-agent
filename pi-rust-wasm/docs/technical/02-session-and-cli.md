@@ -43,9 +43,9 @@
 
 ### 2.1 元数据 store（sessions.json）
 
-- **类型**：`SessionStore = HashMap<String, SessionEntry>`，key 为 sessionKey（MVP 固定 `agent:default:main`）。
+- **类型**：`SessionStore = HashMap<String, SessionEntry>`，key 为 sessionKey（MVP 固定 `agent:main:main`）。
 - **SessionEntry 字段**：session_id、updated_at、session_file、cwd、thinking_level、model_override、input_tokens、output_tokens、compaction_count（camelCase 序列化）。
-- **路径**：由 `AppConfig::storage.sessions_dir` 决定，默认 `~/.pi/agent/sessions`；文件名为 `sessions.json`。
+- **路径**：由 `resolve_sessions_dir` 从 work_dir 推导，默认 `~/.pi_/agents/main/sessions`；文件名为 `sessions.json`。
 - **原子写**：`save_store` 使用 infra 的 `write_file_atomic`（写临时文件后 rename）。
 
 ### 2.2 对话 transcript（pi 系 JSONL）
@@ -70,7 +70,7 @@
 | 子命令 | 说明 |
 |--------|------|
 | `pi-wasm`（无参） | 默认执行 chat（占位） |
-| `init` | 生成默认配置文件（默认路径 ~/.pi/agent/config.toml） |
+| `init` | 生成默认配置文件（默认路径 ~/.pi/agent/pi.config.toml） |
 | `doctor` | 检查配置文件存在与合法性；WasmEdge/QuickJS 检测占位 |
 | `config get/set/edit/export/import` | 配置管理，session 依赖 load_config(None) 与默认路径 |
 | `session list/new/switch/delete/archive/search` | 依赖 SessionManager，空会话列表时提示 |
