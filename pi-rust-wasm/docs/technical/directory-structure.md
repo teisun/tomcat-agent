@@ -44,11 +44,13 @@
 │   └── runs.json                      # 子 agent 注册表
 └── plugins/                           # 全局共享插件
 ├── assets/                         # 全局资源目录
-│   ├── .env                        # 敏感配置（API Key 等），pi init 自动生成
+│   ├── .env                        # 敏感配置（API Key 等），pi init 自动生成，权限 0600
+│   ├── .versions.json              # 内嵌资源 SHA-256 版本记录 + 释放时间戳
+│   ├── .lock                       # 并发写入保护文件锁（fs2 exclusive lock）
 │   ├── wasm/                       # 全局 Wasm 运行时引擎
-│   │   └── wasmedge_quickjs.wasm   # 内嵌资源自动释放目标
+│   │   └── wasmedge_quickjs.wasm   # 内嵌资源自动释放目标（~3.3MB）
 │   └── modules/                    # 全局 JS 兼容模块（内嵌资源自动释放目标）
-│       └── (80+ Node.js 兼容 shim)
+│       └── (79 个 Node.js 兼容 shim，~1MB)
 ```
 ```
 pi.json

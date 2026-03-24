@@ -1,15 +1,15 @@
 //! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认 chat。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ensure_work_dir_structure, load_config, normalize_path, resolve_audit_dir,
-    resolve_quickjs_path, resolve_sessions_dir, validate_config, wire, write_file_atomic,
-    AppConfig, AppError, AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
-    FileAuditRecorder, PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry,
-    TracingAuditRecorder, WasmEngine, WasmEngineConfig,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
+    resolve_audit_dir, resolve_quickjs_path, resolve_sessions_dir, validate_config, wire,
+    write_file_atomic, AppConfig, AppError, AuditFilter, AuditStore, DefaultEventBus,
+    DefaultToolRegistry, EventBus, FileAuditRecorder, PluginManager, SessionManager, Tool,
+    ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi_/pi.config.toml";
@@ -189,6 +189,11 @@ pub fn run_cli() -> Result<(), AppError> {
         return Ok(());
     }
     ensure_work_dir_structure(&cfg)?;
+    ensure_embedded_assets(&cfg)?;
+
+    if let Ok(work_dir) = get_work_dir(&cfg) {
+        let _ = dotenvy::from_path(work_dir.join("assets").join(".env"));
+    }
 
     match cmd {
         Commands::Config { sub } => run_config(sub, &cfg),
@@ -201,16 +206,175 @@ pub fn run_cli() -> Result<(), AppError> {
 }
 
 pub(crate) fn run_init(config_path: &str) -> Result<(), AppError> {
-    let path = normalize_path(config_path)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Config("无效配置路径".to_string()))?;
-    std::fs::create_dir_all(parent).map_err(AppError::Io)?;
-    let cfg = AppConfig::default();
-    let toml = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
-    std::fs::write(&path, toml).map_err(AppError::Io)?;
-    println!("已生成配置文件: {}", path.display());
-    println!("请编辑 {} 填写 LLM API 与安全策略。", path.display());
+    let config_file = normalize_path(config_path)?;
+
+    // --- 6.12 旧目录迁移 ---
+    if let Some(legacy) = detect_legacy_dir() {
+        let new_dir = dirs::home_dir()
+            .ok_or_else(|| AppError::Config("无法获取 home 目录".to_string()))?
+            .join(".pi_");
+        if !new_dir.exists() {
+            let migrate = dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "检测到旧工作目录 {}，是否迁移到 {}？",
+                    legacy.display(),
+                    new_dir.display()
+                ))
+                .default(true)
+                .interact()
+                .unwrap_or(false);
+            if migrate {
+                migrate_legacy_dir(&legacy, &new_dir)?;
+                println!("✓ 已迁移旧目录到 {}", new_dir.display());
+            }
+        }
+    }
+
+    // --- 6.11 幂等性：检测已有配置 ---
+    let mut write_config = true;
+    if config_file.exists() {
+        write_config = dialoguer::Confirm::new()
+            .with_prompt("配置文件已存在，是否覆盖？")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !write_config {
+            println!("  跳过配置写入，保留已有配置");
+        }
+    }
+
+    // --- 6.10 [1/2] LLM 配置向导 ---
+    let cfg = if write_config {
+        let providers = &["openai", "azure", "anthropic", "custom"];
+        let provider_idx = dialoguer::Select::new()
+            .with_prompt("[1/2] 选择 LLM Provider")
+            .items(providers)
+            .default(0)
+            .interact()
+            .unwrap_or(0);
+
+        let default_model = match providers[provider_idx] {
+            "openai" => "gpt-4.1-mini",
+            "anthropic" => "claude-sonnet-4-20250514",
+            _ => "gpt-4.1-mini",
+        };
+        let model: String = dialoguer::Input::new()
+            .with_prompt("  默认模型")
+            .default(default_model.to_string())
+            .interact_text()
+            .unwrap_or_else(|_| default_model.to_string());
+
+        let api_base: String = dialoguer::Input::new()
+            .with_prompt("  API Base URL（回车使用默认）")
+            .default(String::new())
+            .interact_text()
+            .unwrap_or_default();
+
+        let mut llm = crate::LlmConfig::default();
+        llm.provider = providers[provider_idx].to_string();
+        llm.default_model = model;
+        if !api_base.is_empty() {
+            llm.api_base = Some(api_base);
+        }
+        let mut cfg = AppConfig::default();
+        cfg.llm = llm;
+        cfg
+    } else {
+        let existing = crate::load_config(Some(&config_file)).unwrap_or_default();
+        existing
+    };
+
+    // --- 写配置文件 ---
+    if write_config {
+        if let Some(parent) = config_file.parent() {
+            std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+        }
+        let toml_str =
+            toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+        std::fs::write(&config_file, toml_str).map_err(AppError::Io)?;
+        println!("✓ 配置文件已写入: {}", config_file.display());
+    }
+
+    // --- [2/2] 资源检查 ---
+    println!("\n[2/2] 资源检查");
+    ensure_work_dir_structure(&cfg)?;
+    println!("  ✓ 目录结构就绪");
+
+    ensure_embedded_assets(&cfg)?;
+    println!("  ✓ 内嵌资源已释放（wasm + modules）");
+
+    // --- .env 处理（6.13 写入部分） ---
+    let work_dir = get_work_dir(&cfg)?;
+    let env_path = work_dir.join("assets").join(".env");
+    let existing_key = env_path
+        .exists()
+        .then(|| {
+            dotenvy::from_path_iter(&env_path)
+                .ok()
+                .and_then(|iter| {
+                    iter.filter_map(|r| r.ok())
+                        .find(|(k, _)| k == "OPENAI_API_KEY")
+                        .map(|(_, v)| v)
+                })
+                .filter(|v| !v.is_empty())
+        })
+        .flatten();
+
+    if existing_key.is_some() {
+        println!("  ✓ API Key 已配置");
+    } else {
+        let api_key: String = dialoguer::Password::new()
+            .with_prompt("  输入 OPENAI_API_KEY（回车跳过）")
+            .allow_empty_password(true)
+            .interact()
+            .unwrap_or_default();
+
+        let env_content = format!(
+            "# pi runtime credentials — 此文件由 pi init 生成，权限 0600\nOPENAI_API_KEY={api_key}\n"
+        );
+        std::fs::write(&env_path, env_content).map_err(AppError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&env_path, perms).map_err(AppError::Io)?;
+        }
+        if api_key.is_empty() {
+            println!("  ⚠ API Key 未设置，后续可编辑 {}", env_path.display());
+        } else {
+            println!("  ✓ API Key 已写入 .env");
+        }
+    }
+
+    println!("\n初始化完成！运行 `pi doctor` 验证环境。");
+    Ok(())
+}
+
+fn detect_legacy_dir() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let legacy = home.join(".pi_wasm");
+    legacy.is_dir().then_some(legacy)
+}
+
+fn migrate_legacy_dir(from: &Path, to: &Path) -> Result<(), AppError> {
+    copy_dir_recursive(from, to)?;
+    let backup = from.with_file_name(".pi_wasm.bak");
+    std::fs::rename(from, &backup).map_err(AppError::Io)?;
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), AppError> {
+    std::fs::create_dir_all(dst).map_err(AppError::Io)?;
+    for entry in std::fs::read_dir(src).map_err(AppError::Io)? {
+        let entry = entry.map_err(AppError::Io)?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path).map_err(AppError::Io)?;
+        }
+    }
     Ok(())
 }
 
@@ -218,7 +382,8 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     if config_path.is_none() {
         let default = normalize_path(DEFAULT_CONFIG_PATH)?;
         if !default.exists() {
-            println!("未找到配置文件。请先运行: pi init");
+            println!("✗ 未找到配置文件");
+            println!("  → 运行 pi init 生成配置");
             return Ok(());
         }
     }
@@ -228,22 +393,42 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     let path = match path {
         Some(p) if p.exists() => p,
         _ => {
-            println!("未找到配置文件。请先运行: pi init");
+            println!("✗ 未找到配置文件");
+            println!("  → 运行 pi init 生成配置");
             return Ok(());
         }
     };
     let cfg = load_config(Some(path.as_path()))?;
     if let Err(e) = validate_config(&cfg) {
-        println!("配置不合法: {}", e);
+        println!("✗ 配置不合法: {}", e);
+        println!("  → 运行 pi init 重新生成或手动修复 {}", path.display());
         return Ok(());
     }
     if let Err(e) = ensure_work_dir_structure(&cfg) {
-        println!("创建工作目录失败: {}", e);
+        println!("✗ 创建工作目录失败: {}", e);
         return Ok(());
     }
-    println!("✓ 配置合法");
+    println!("✓ 配置合法 ({})", path.display());
 
+    // --- 内嵌资源 ---
+    if let Err(e) = ensure_embedded_assets(&cfg) {
+        println!("✗ 资源释放失败: {}", e);
+        println!("  → 运行 pi init 或检查磁盘空间");
+    } else {
+        println!("✓ 内嵌资源已就绪");
+    }
+
+    // --- QuickJS wasm ---
     let resolved_qjs = resolve_quickjs_path(&cfg);
+    match &resolved_qjs {
+        Some(p) => println!("✓ QuickJS wasm：{}", p.display()),
+        None => {
+            println!("✗ QuickJS wasm 未找到");
+            println!("  → 运行 pi init 或设置 WASMEDGE_QUICKJS_PATH");
+        }
+    }
+
+    // --- WasmEdge 运行时 ---
     let wasm_cfg = WasmEngineConfig {
         quickjs_path: resolved_qjs
             .as_ref()
@@ -255,17 +440,55 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
         Ok(_) => println!("✓ WasmEdge 运行时：可用"),
         Err(e) => {
             println!("✗ WasmEdge 运行时：不可用 ({})", e);
-            println!("  修复建议：请安装 WasmEdge，参考 https://wasmedge.org/docs/start/install");
+            println!("  → 安装 WasmEdge: https://wasmedge.org/docs/start/install");
         }
     }
 
-    match resolved_qjs {
-        Some(p) => {
-            println!("✓ QuickJS 运行时：可用 ({})", p.display());
+    // --- .versions.json SHA-256 ---
+    let work_dir = get_work_dir(&cfg)?;
+    let versions_path = work_dir.join("assets").join(".versions.json");
+    if versions_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&versions_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let wasm_sha = v["wasm_sha256"].as_str().unwrap_or("N/A");
+                let modules_sha = v["modules_sha256"].as_str().unwrap_or("N/A");
+                println!(
+                    "  资源版本: wasm={:.12}… modules={:.12}…",
+                    wasm_sha, modules_sha
+                );
+            }
         }
-        None => {
-            println!("✗ QuickJS 路径未配置");
-            println!("  修复建议：下载 wasmedge_quickjs.wasm 到 work_dir/wasm/ 或设置环境变量 WASMEDGE_QUICKJS_PATH");
+    }
+
+    // --- .env 检查 ---
+    let env_path = work_dir.join("assets").join(".env");
+    if env_path.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&env_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode == 0o600 {
+                    println!("✓ .env 权限: 0600");
+                } else {
+                    println!("⚠ .env 权限: {:04o}（建议 0600）", mode);
+                    println!("  → chmod 600 {}", env_path.display());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        println!("✓ .env 存在");
+    } else {
+        println!("⚠ .env 不存在（API Key 未配置）");
+        println!("  → 运行 pi init 配置 API Key");
+    }
+
+    // --- OPENAI_API_KEY ---
+    match std::env::var("OPENAI_API_KEY") {
+        Ok(k) if !k.is_empty() => println!("✓ OPENAI_API_KEY 已设置"),
+        _ => {
+            println!("⚠ OPENAI_API_KEY 未设置");
+            println!("  → 运行 pi init 或编辑 {}", env_path.display());
         }
     }
 

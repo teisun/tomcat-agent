@@ -8,8 +8,8 @@ name = "pi"
 path = "src/main.rs"
 
 [features]
-# default = []
-# wasmedge = ["dep:wasmedge-sdk"]
+default = []
+standalone = ["wasmedge-sdk/standalone"]
 
 [dependencies]
 thiserror = "2.0"
@@ -46,9 +46,21 @@ swc_ecma_parser = "34.0.0"
 swc_ecma_transforms_base = "37.0.0"
 swc_ecma_transforms_typescript = "41.0.0"
 swc_ecma_visit = "20.0.0"
+sha2 = "0.10"
+fs2 = "0.4"
+include_dir = "0.7"
+dotenvy = "0.15"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
 
 [dev-dependencies]
-dotenvy = "0.15"
 tempfile = "3.10"
 assert_cmd = "2"
 predicates = "3"

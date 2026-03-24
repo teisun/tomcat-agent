@@ -23,8 +23,11 @@
 | `media/` | 媒体文件 |
 | `subagents/` | 子 agent 注册表 |
 | `plugins/` | **全局**共享插件目录（所有 agent 均可加载） |
-| `assets/wasm/` | **全局** wasm 运行时引擎（共享的 wasmedge_quickjs.wasm 等） |
-| `assets/modules/` | **全局** JS 兼容模块 |
+| `assets/wasm/` | **全局** wasm 运行时引擎（共享的 wasmedge_quickjs.wasm 等，内嵌资源自动释放） |
+| `assets/modules/` | **全局** JS 兼容模块（内嵌资源自动释放，79 个 Node.js 兼容 shim） |
+| `assets/.env` | 敏感配置（API Key 等），`pi init` 生成，权限 0600，`run_cli` 启动时 dotenvy 加载 |
+| `assets/.versions.json` | 内嵌资源版本记录（SHA-256 + extracted_at），`ensure_embedded_assets` 写入 |
+| `assets/.lock` | 并发写入保护文件锁（fs2 exclusive lock），`ensure_embedded_assets` 使用 |
 
 - **当前仅一个 agent**：agentId 固定为 `main`，即使用 `work_dir/agents/main/` 下各子目录。
 - **可配置覆盖**：`agent_dir` 和 `workspace` 可通过 `[agent]` 配置节覆盖；`sessions/logs/audit` 始终从 `work_dir/agents/{id}/` 独立推导，不受 `agent_dir` 配置影响。

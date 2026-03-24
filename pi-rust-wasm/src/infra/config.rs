@@ -1,13 +1,26 @@
 //! # 配置模块 (Config)
 //!
 //! 配置结构体、加载与合并、合法性校验。多源合并顺序：默认值 → 配置文件 → 环境变量（前缀 `PI_WASM__`，分隔符 `__`）。
+//! 内嵌资源管理：wasmedge_quickjs.wasm + assets/modules/ 在启动时自动释放到 work_dir。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::error::AppError;
 use super::platform::normalize_path;
+
+// ---------------------------------------------------------------------------
+// Embedded resources & compile-time SHA-256
+// ---------------------------------------------------------------------------
+
+const EMBEDDED_QUICKJS_WASM: &[u8] = include_bytes!("../../assets/wasm/wasmedge_quickjs.wasm");
+static EMBEDDED_MODULES: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/modules");
+
+const EMBEDDED_WASM_SHA256: &str = env!("EMBEDDED_WASM_SHA256");
+const EMBEDDED_MODULES_SHA256: &str = env!("EMBEDDED_MODULES_SHA256");
 
 /// 插件或操作的权限等级，用于 4 原语与工具访问控制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -453,6 +466,175 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// SHA-256 helpers
+// ---------------------------------------------------------------------------
+
+fn compute_file_sha256(path: &Path) -> Result<String, AppError> {
+    let data = std::fs::read(path).map_err(AppError::Io)?;
+    Ok(format!("{:x}", Sha256::digest(&data)))
+}
+
+fn compute_dir_sha256(dir: &Path) -> Result<String, AppError> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    collect_dir_hashes(dir, dir, &mut entries)?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = Sha256::new();
+    for (rel, file_hash) in &entries {
+        hasher.update(rel.as_bytes());
+        hasher.update(file_hash.as_bytes());
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_dir_hashes(
+    base: &Path,
+    current: &Path,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), AppError> {
+    let entries = std::fs::read_dir(current).map_err(AppError::Io)?;
+    for entry in entries {
+        let entry = entry.map_err(AppError::Io)?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dir_hashes(base, &path, out)?;
+        } else if path.is_file() {
+            let rel = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let hash = compute_file_sha256(&path)?;
+            out.push((rel, hash));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Atomic write + file locking (6.6)
+// ---------------------------------------------------------------------------
+
+fn write_atomic(target: &Path, content: &[u8]) -> Result<(), AppError> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+    }
+    let tmp = target.with_extension("tmp");
+    std::fs::write(&tmp, content).map_err(AppError::Io)?;
+    std::fs::rename(&tmp, target).or_else(|_| {
+        std::fs::copy(&tmp, target).map_err(AppError::Io)?;
+        let _ = std::fs::remove_file(&tmp);
+        Ok(())
+    })
+}
+
+fn acquire_assets_lock(work_dir: &Path) -> Result<std::fs::File, AppError> {
+    use fs2::FileExt;
+    let lock_dir = work_dir.join("assets");
+    std::fs::create_dir_all(&lock_dir).map_err(AppError::Io)?;
+    let lock_path = lock_dir.join(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(AppError::Io)?;
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(10);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(_) if start.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => {
+                return Err(AppError::Config(
+                    "资源锁超时（10s），请检查是否有其他 pi 进程卡住，或手动删除 ~/.pi_/assets/.lock"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedded asset extraction (6.2, 6.3)
+// ---------------------------------------------------------------------------
+
+fn extract_wasm_if_needed(work_dir: &Path) -> Result<PathBuf, AppError> {
+    let target = work_dir
+        .join("assets")
+        .join("wasm")
+        .join("wasmedge_quickjs.wasm");
+    if target.exists() && !EMBEDDED_WASM_SHA256.is_empty() {
+        if let Ok(disk_sha) = compute_file_sha256(&target) {
+            if disk_sha == EMBEDDED_WASM_SHA256 {
+                return Ok(target);
+            }
+        }
+    }
+    std::fs::create_dir_all(target.parent().unwrap()).map_err(AppError::Io)?;
+    write_atomic(&target, EMBEDDED_QUICKJS_WASM)?;
+    Ok(target)
+}
+
+fn extract_modules_if_needed(work_dir: &Path) -> Result<PathBuf, AppError> {
+    let target_dir = work_dir.join("assets").join("modules");
+    if target_dir.is_dir() && !EMBEDDED_MODULES_SHA256.is_empty() {
+        if let Ok(disk_sha) = compute_dir_sha256(&target_dir) {
+            if disk_sha == EMBEDDED_MODULES_SHA256 {
+                return Ok(target_dir);
+            }
+        }
+    }
+    extract_include_dir(&EMBEDDED_MODULES, &target_dir)?;
+    Ok(target_dir)
+}
+
+fn extract_include_dir(dir: &Dir<'_>, base_target: &Path) -> Result<(), AppError> {
+    std::fs::create_dir_all(base_target).map_err(AppError::Io)?;
+    for file in dir.files() {
+        let dest = base_target.join(file.path());
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+        }
+        std::fs::write(&dest, file.contents()).map_err(AppError::Io)?;
+    }
+    for sub in dir.dirs() {
+        extract_include_dir(sub, base_target)?;
+    }
+    Ok(())
+}
+
+fn write_versions_json(work_dir: &Path) -> Result<(), AppError> {
+    let versions = serde_json::json!({
+        "wasm_sha256": EMBEDDED_WASM_SHA256,
+        "modules_sha256": EMBEDDED_MODULES_SHA256,
+        "extracted_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let content =
+        serde_json::to_string_pretty(&versions).map_err(|e| AppError::Config(e.to_string()))?;
+    let path = work_dir.join("assets").join(".versions.json");
+    write_atomic(&path, content.as_bytes())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unified entry point (6.4)
+// ---------------------------------------------------------------------------
+
+/// 确保内嵌资源已释放到 `work_dir/assets/`。
+/// 在 `ensure_work_dir_structure` 之后、正式业务逻辑之前调用。
+/// 通过文件锁保证多进程安全；SHA-256 比对避免重复写入。
+pub fn ensure_embedded_assets(cfg: &AppConfig) -> Result<(), AppError> {
+    let work_dir = get_work_dir(cfg)?;
+    let _lock = acquire_assets_lock(&work_dir)?;
+    extract_wasm_if_needed(&work_dir)?;
+    extract_modules_if_needed(&work_dir)?;
+    write_versions_json(&work_dir)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +735,194 @@ mod tests {
         let cfg: AppConfig = serde_json::from_str(s).unwrap();
         assert!(cfg.security.enable_audit_log);
         assert_eq!(cfg.security.audit_log_retention_days, 90);
+    }
+
+    fn cfg_with_work_dir(dir: &std::path::Path) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(dir.to_string_lossy().to_string());
+        cfg
+    }
+
+    #[test]
+    fn compute_file_sha256_returns_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.bin");
+        std::fs::write(&file, b"hello").unwrap();
+        let hash = compute_file_sha256(&file).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn compute_file_sha256_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.bin");
+        let f2 = dir.path().join("b.bin");
+        std::fs::write(&f1, b"same content").unwrap();
+        std::fs::write(&f2, b"same content").unwrap();
+        assert_eq!(
+            compute_file_sha256(&f1).unwrap(),
+            compute_file_sha256(&f2).unwrap()
+        );
+    }
+
+    #[test]
+    fn compute_dir_sha256_deterministic() {
+        let d1 = tempfile::tempdir().unwrap();
+        std::fs::write(d1.path().join("a.txt"), b"aaa").unwrap();
+        std::fs::write(d1.path().join("b.txt"), b"bbb").unwrap();
+
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::write(d2.path().join("a.txt"), b"aaa").unwrap();
+        std::fs::write(d2.path().join("b.txt"), b"bbb").unwrap();
+
+        assert_eq!(
+            compute_dir_sha256(d1.path()).unwrap(),
+            compute_dir_sha256(d2.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn compute_dir_sha256_changes_on_content_diff() {
+        let d1 = tempfile::tempdir().unwrap();
+        std::fs::write(d1.path().join("a.txt"), b"aaa").unwrap();
+
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::write(d2.path().join("a.txt"), b"bbb").unwrap();
+
+        assert_ne!(
+            compute_dir_sha256(d1.path()).unwrap(),
+            compute_dir_sha256(d2.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn write_atomic_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sub").join("output.bin");
+        write_atomic(&target, b"data").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"data");
+    }
+
+    #[test]
+    fn write_atomic_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("output.bin");
+        std::fs::write(&target, b"old").unwrap();
+        write_atomic(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn acquire_assets_lock_creates_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _lock = acquire_assets_lock(dir.path()).unwrap();
+        assert!(dir.path().join("assets").join(".lock").exists());
+    }
+
+    #[test]
+    fn ensure_embedded_assets_extracts_wasm_and_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_work_dir(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        ensure_embedded_assets(&cfg).unwrap();
+
+        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        assert!(wasm_path.exists(), "wasm file should be extracted");
+        assert!(wasm_path.metadata().unwrap().len() > 0);
+
+        let modules_dir = dir.path().join("assets").join("modules");
+        assert!(modules_dir.is_dir(), "modules dir should be extracted");
+        let count = std::fs::read_dir(&modules_dir)
+            .unwrap()
+            .count();
+        assert!(count > 0, "modules dir should contain files");
+
+        let versions = dir.path().join("assets").join(".versions.json");
+        assert!(versions.exists(), ".versions.json should be created");
+        let content = std::fs::read_to_string(&versions).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(!v["wasm_sha256"].as_str().unwrap_or("").is_empty());
+        assert!(!v["modules_sha256"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn ensure_embedded_assets_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_work_dir(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        ensure_embedded_assets(&cfg).unwrap();
+        ensure_embedded_assets(&cfg).unwrap();
+
+        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        assert!(wasm_path.exists());
+    }
+
+    #[test]
+    fn ensure_embedded_assets_upgrades_on_sha_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_work_dir(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+        ensure_embedded_assets(&cfg).unwrap();
+
+        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let original = std::fs::read(&wasm_path).unwrap();
+
+        std::fs::write(&wasm_path, b"tampered content").unwrap();
+        assert_ne!(std::fs::read(&wasm_path).unwrap(), original);
+
+        ensure_embedded_assets(&cfg).unwrap();
+        assert_eq!(
+            std::fs::read(&wasm_path).unwrap(),
+            original,
+            "tampered wasm should be overwritten with embedded version"
+        );
+    }
+
+    #[test]
+    fn extract_wasm_skips_when_sha_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        extract_wasm_if_needed(dir.path()).unwrap();
+
+        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let mtime_before = std::fs::metadata(&wasm_path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let result = extract_wasm_if_needed(dir.path()).unwrap();
+        assert_eq!(result, wasm_path);
+
+        let mtime_after = std::fs::metadata(&wasm_path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "file should not be rewritten when SHA matches");
+    }
+
+    #[test]
+    fn embedded_sha256_constants_are_nonempty() {
+        assert!(!EMBEDDED_WASM_SHA256.is_empty(), "compile-time wasm SHA-256 must be set");
+        assert!(!EMBEDDED_MODULES_SHA256.is_empty(), "compile-time modules SHA-256 must be set");
+        assert_eq!(EMBEDDED_WASM_SHA256.len(), 64);
+        assert_eq!(EMBEDDED_MODULES_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn concurrent_lock_does_not_deadlock() {
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+
+        for _ in 0..2 {
+            let p = Arc::clone(&path);
+            let b = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                let _lock = acquire_assets_lock(&p).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

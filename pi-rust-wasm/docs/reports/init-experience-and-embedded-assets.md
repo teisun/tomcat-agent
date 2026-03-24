@@ -172,32 +172,32 @@ pub fn ensure_embedded_assets(cfg: &AppConfig) -> Result<(), AppError> {
 
 ### 4.1 Cargo feature gate 设计
 
-`wasmedge-sdk` 0.13 支持 `standalone` feature，构建时自动下载并静态链接 WasmEdge C 库。
+`wasmedge-sdk` 0.13 支持 `standalone` feature，构建时自动下载并链接 WasmEdge C 库。默认不启用，开发者日常编译使用系统已安装的 WasmEdge 以加速构建。发布时可手动启用 `--features standalone`。
 
 ```toml
 [features]
-default = ["standalone"]
-standalone = []
+default = []
+standalone = ["wasmedge-sdk/standalone"]
 
 [dependencies]
-wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot", "standalone"] }
+wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot"] }
 ```
 
 **行为说明**：
 
 | 场景 | 构建命令 | 效果 |
 |------|----------|------|
-| 用户安装 / CI 发布 | `cargo build --release`（默认） | 静态链接 WasmEdge C 库，无需系统安装 |
-| 开发者本地编译 | `cargo build --no-default-features` | 使用系统已安装的 WasmEdge，编译更快 |
+| 开发者本地编译 / 单测 / CI | `cargo build --release`（默认） | 使用系统已安装的 WasmEdge，编译快 |
+| 发布预编译二进制 | `cargo build --release --features standalone` | 自动下载并链接 WasmEdge C 库，无需系统预装 |
 
 ### 4.2 影响评估
 
 | 项目 | 影响 |
 |------|------|
-| 构建时间 | 增加（自动下载 + 编译 C 库） |
-| 二进制体积 | +20-30MB |
+| 构建时间 | standalone 模式增加（自动下载 + 编译 C 库）；默认模式无影响 |
+| 二进制体积 | standalone 模式 +20-30MB |
 | 平台支持 | macOS (x86_64/aarch64)、Linux |
-| `install-wasmedge.sh` | 仅在 `--no-default-features` 开发场景保留 |
+| `install-wasmedge.sh` | 默认编译需要；仅 `--features standalone` 可免装 |
 
 ### 4.3 Release profile 体积优化
 

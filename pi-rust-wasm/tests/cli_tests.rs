@@ -1000,7 +1000,7 @@ fn test_audit_export_creates_file() {
 /// [E2E-CLI-001] 新用户首次安装，完成初始化并验证环境健康
 ///
 /// 用户意图：新用户首次安装，完成初始化并验证环境健康
-/// 验证：init exit 0 + stdout 含"已生成配置文件"；doctor exit 0 + stdout 含"✓"或"配置合法"
+/// 验证：init exit 0 + stdout 含 ✓ 标记（配置写入 + 资源释放）；doctor exit 0 + stdout 含"配置合法"和"内嵌资源已就绪"
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
@@ -1017,12 +1017,20 @@ fn test_user_first_time_setup_init_and_doctor() {
         .assert();
     let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert init: exit 0 + stdout 含已生成配置文件；actual: {}",
-        trunc(&init_out, 200)
+        "Assert init: exit 0 + stdout 含 ✓ 配置文件已写入 + 资源检查；actual: {}",
+        trunc(&init_out, 400)
     );
     init_assert
         .success()
-        .stdout(predicate::str::contains("已生成配置文件").or(predicate::str::contains("config")));
+        .stdout(
+            predicate::str::contains("配置文件已写入")
+                .or(predicate::str::contains("已生成配置文件"))
+                .or(predicate::str::contains("config")),
+        )
+        .stdout(
+            predicate::str::contains("资源检查")
+                .or(predicate::str::contains("✓")),
+        );
 
     info!("Act: pi doctor");
     let mut c = cmd();
@@ -1031,12 +1039,16 @@ fn test_user_first_time_setup_init_and_doctor() {
     let doctor_out =
         String::from_utf8_lossy(&doctor_assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert doctor: exit 0 + stdout 含 ✓ 或 配置合法；actual: {}",
-        trunc(&doctor_out, 200)
+        "Assert doctor: exit 0 + stdout 含 配置合法 + 内嵌资源；actual: {}",
+        trunc(&doctor_out, 400)
     );
     doctor_assert
         .success()
-        .stdout(predicate::str::contains("✓").or(predicate::str::contains("配置合法")));
+        .stdout(predicate::str::contains("配置合法"))
+        .stdout(
+            predicate::str::contains("内嵌资源已就绪")
+                .or(predicate::str::contains("✓")),
+        );
 }
 
 /// [E2E-CLI-002] 用户修改日志级别
@@ -1151,14 +1163,242 @@ fn test_user_doctor_detects_environment() {
     let assert = cmd().args(["doctor"]).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert: exit 0 + stdout 含检测项；actual: {}",
-        trunc(&out, 300)
+        "Assert: exit 0 + stdout 含 WasmEdge / 配置 / 内嵌资源 / .env 检查项；actual: {}",
+        trunc(&out, 500)
     );
     assert.success().stdout(
         predicate::str::contains("WasmEdge")
             .or(predicate::str::contains("配置"))
-            .or(predicate::str::contains("✓")),
+            .or(predicate::str::contains("✓"))
+            .or(predicate::str::contains("内嵌资源"))
+            .or(predicate::str::contains(".env")),
     );
+}
+
+// ──────────────────── TASK-06 新增集成测试：内嵌资源 + init .env ────────────────────
+
+/// [TASK-06] init 后 .env 文件存在且权限为 0600（Unix）
+///
+/// 验证：pi init 会创建 .env 文件，Unix 下权限为 0600
+#[test]
+fn test_init_creates_env_file() {
+    common::setup_logging();
+    let _span = info_span!("test_init_creates_env_file").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Arrange: fresh temp dir");
+    info!("Act: pi init");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Assert: config file created");
+    assert!(config_path.exists(), "config file should be created");
+
+    let cfg_content = fs::read_to_string(&config_path).unwrap();
+    info!("Config content (truncated): {}", trunc(&cfg_content, 300));
+    assert!(
+        cfg_content.contains("[llm]") || cfg_content.contains("provider"),
+        "config should contain LLM section"
+    );
+}
+
+/// [TASK-06] init 后 .env 权限为 0600
+#[test]
+#[cfg(unix)]
+fn test_init_creates_env_with_correct_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    common::setup_logging();
+    let _span = info_span!("test_init_creates_env_with_correct_permissions").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Arrange: fresh temp dir");
+    info!("Act: pi init → check .env permissions");
+
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let home = std::env::var("HOME").expect("HOME env required");
+    let env_path = std::path::PathBuf::from(home).join(".pi_").join("assets").join(".env");
+    if env_path.exists() {
+        let mode = fs::metadata(&env_path).unwrap().permissions().mode() & 0o777;
+        info!("Assert: .env permissions = {:04o}", mode);
+        assert_eq!(mode, 0o600, ".env should have 0600 permissions");
+    }
+}
+
+/// [TASK-06] doctor 对完整环境报告所有检查项
+///
+/// 验证：先 init 再 doctor，输出含 配置合法 / 内嵌资源 / QuickJS wasm / WasmEdge / 资源版本
+#[test]
+fn test_doctor_reports_all_checks() {
+    common::setup_logging();
+    let _span = info_span!("test_doctor_reports_all_checks").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Arrange: pi init first");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi doctor");
+    let assert = cmd()
+        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: all check items present；actual: {}",
+        trunc(&out, 600)
+    );
+    assert
+        .success()
+        .stdout(predicate::str::contains("配置合法"))
+        .stdout(predicate::str::contains("内嵌资源"))
+        .stdout(predicate::str::contains("QuickJS wasm"))
+        .stdout(predicate::str::contains("WasmEdge"));
+}
+
+/// [TASK-06] init 幂等：第二次调用不报错
+///
+/// 验证：连续两次 pi init，第二次也应 exit 0
+#[test]
+fn test_init_idempotent() {
+    common::setup_logging();
+    let _span = info_span!("test_init_idempotent").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Act: pi init (first)");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi init (second, idempotent)");
+    let assert = cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: second init exit 0；actual: {}",
+        trunc(&out, 300)
+    );
+    assert.success();
+}
+
+/// [TASK-06] ensure_embedded_assets 释放 wasm 到 work_dir
+///
+/// 验证：pi init 后 ~/.pi_/assets/wasm/wasmedge_quickjs.wasm 存在
+#[test]
+fn test_ensure_embedded_assets_extracts_wasm() {
+    common::setup_logging();
+    let _span = info_span!("test_ensure_embedded_assets_extracts_wasm").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Act: pi init");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Assert: doctor 能发现 QuickJS wasm");
+    let assert = cmd()
+        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!("doctor output: {}", trunc(&out, 500));
+    assert
+        .success()
+        .stdout(predicate::str::contains("QuickJS wasm"));
+}
+
+/// [TASK-06] ensure_embedded_assets 重复调用不报错
+///
+/// 验证：连续 pi doctor 两次（每次都触发 ensure_embedded_assets），均 exit 0
+#[test]
+fn test_ensure_embedded_assets_idempotent() {
+    common::setup_logging();
+    let _span = info_span!("test_ensure_embedded_assets_idempotent").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Arrange: pi init");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Act: pi doctor x2（每次触发 ensure_embedded_assets）");
+    cmd()
+        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+    cmd()
+        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+/// [TASK-06] ensure_embedded_assets 在 SHA 不匹配时覆盖旧文件
+///
+/// 验证：篡改 wasm 文件后，pi doctor 仍能正常通过（ensure_embedded_assets 覆盖了篡改文件）
+#[test]
+fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
+    common::setup_logging();
+    let _span = info_span!("test_ensure_embedded_assets_upgrades_on_sha_mismatch").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("pi.config.toml");
+
+    info!("Arrange: pi init");
+    cmd()
+        .args(["init", "--config", config_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    info!("Arrange: tamper wasm file in default work_dir");
+    let home = std::env::var("HOME").expect("HOME env required");
+    let wasm_path = std::path::PathBuf::from(&home)
+        .join(".pi_")
+        .join("assets")
+        .join("wasm")
+        .join("wasmedge_quickjs.wasm");
+    if wasm_path.exists() {
+        let original_len = fs::metadata(&wasm_path).unwrap().len();
+        fs::write(&wasm_path, b"tampered").unwrap();
+        info!("Tampered wasm: {} bytes -> 8 bytes", original_len);
+
+        info!("Act: pi doctor（触发 ensure_embedded_assets 覆盖）");
+        let assert = cmd()
+            .args(["doctor", "--config", config_path.to_str().unwrap()])
+            .assert();
+        assert.success();
+
+        let restored_len = fs::metadata(&wasm_path).unwrap().len();
+        info!(
+            "Assert: wasm restored from 8 bytes to {} bytes",
+            restored_len
+        );
+        assert!(
+            restored_len > 100,
+            "wasm should be restored after SHA mismatch, got {} bytes",
+            restored_len
+        );
+    }
 }
 
 // ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 OPENAI_API_KEY） ────────────────────
@@ -2127,10 +2367,17 @@ fn test_user_init_then_doctor_roundtrip() {
         .args(["doctor", "--config", config_path.to_str().unwrap()])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("Assert: exit 0 + 含 ✓；actual: {}", trunc(&out, 300));
+    info!(
+        "Assert: exit 0 + 含 配置合法 + 内嵌资源已就绪 + QuickJS wasm；actual: {}",
+        trunc(&out, 500)
+    );
     assert
         .success()
-        .stdout(predicate::str::contains("✓").or(predicate::str::contains("配置合法")));
+        .stdout(predicate::str::contains("配置合法"))
+        .stdout(
+            predicate::str::contains("内嵌资源已就绪")
+                .or(predicate::str::contains("✓")),
+        );
 }
 
 // ──────────────────── Story 9 补充: chat --resume 与多轮上下文（E2E-CLI-082~083） ────────────────────

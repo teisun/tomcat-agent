@@ -26,17 +26,21 @@
 
 ---
 
-## Story 1 — 宿主初始化与基础配置（6 条）
+## Story 1 — 宿主初始化与基础配置（10 条）
 
 
 | 编号          | 验收 | 用例名                                          | 用户意图                                | 操作序列                                | 必须断言                                                               |
 | ----------- | -- | -------------------------------------------- | ----------------------------------- | ----------------------------------- | ------------------------------------------------------------------ |
-| E2E-CLI-001 | 自动 | `test_user_first_time_setup_init_and_doctor` | 新用户首次安装，完成初始化并验证环境健康                | `pi init` → `pi doctor`             | init exit 0 + stdout 含"已生成配置文件"；doctor exit 0 + stdout 含"✓"或"配置合法" |
+| E2E-CLI-001 | 自动 | `test_user_first_time_setup_init_and_doctor` | 新用户首次安装，完成初始化并验证环境健康                | `pi init` → `pi doctor`             | init exit 0 + stdout 含"配置文件已写入"+"资源检查"；doctor exit 0 + stdout 含"配置合法"+"内嵌资源已就绪" |
 | E2E-CLI-002 | 自动 | `test_user_sets_config_value`                | 用户修改日志级别                            | `pi config set log.level warn`      | exit 0                                                             |
 | E2E-CLI-003 | 自动 | `test_user_views_full_config`                | 用户查看当前全部配置                          | `pi config get`                     | exit 0；stdout 含配置段关键字                                              |
 | E2E-CLI-004 | 自动 | `test_user_exports_config_to_file`           | 用户导出配置备份                            | `pi config export /tmp/pi_cfg.toml` | exit 0；文件存在                                                        |
 | E2E-CLI-005 | 自动 | `test_user_imports_config_from_file`         | 用户从备份恢复配置                           | `pi config import /tmp/pi_cfg.toml` | exit 0；stdout 含"导入"                                                |
-| E2E-CLI-006 | 人工 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 WasmEdge/QuickJS 可用性 | `pi doctor`                         | exit 0；stdout 含环境检测项                                               |
+| E2E-CLI-006 | 自动 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 WasmEdge/QuickJS 可用性 | `pi doctor`                         | exit 0；stdout 含 WasmEdge/配置/✓/内嵌资源/.env 检查项                       |
+| E2E-CLI-007 | 自动 | `test_init_creates_env_file`                 | init 后配置文件包含 LLM 配置段                | `pi init`                           | exit 0；config 文件存在且含 `[llm]` 或 `provider`                          |
+| E2E-CLI-008 | 自动 | `test_init_creates_env_with_correct_permissions` | init 后 .env 权限为 0600（Unix）       | `pi init` → 检查 .env 权限              | .env 存在时 mode=0600                                                 |
+| E2E-CLI-009 | 自动 | `test_doctor_reports_all_checks`             | doctor 输出含全部检查项                     | `pi init` → `pi doctor`             | exit 0；stdout 含 配置合法/内嵌资源/QuickJS wasm/WasmEdge                   |
+| E2E-CLI-010 | 自动 | `test_init_idempotent`                       | 连续两次 init 均 exit 0                 | `pi init` × 2                       | 两次均 exit 0                                                        |
 
 
 ---
@@ -198,7 +202,7 @@
 | E2E-CLI-071 | 自动 | `test_user_views_full_help`            | 用户查看帮助，所有子命令可见             | `pi --help`             | exit 0；stdout 含 init/doctor/config/session/plugin/audit |
 | E2E-CLI-072 | 自动 | `test_user_views_version`              | 用户查看版本号                    | `pi --version`          | exit 0；stdout 含版本号字符串                                   |
 | E2E-CLI-073 | 自动 | `test_user_runs_unknown_command`       | 用户输入错误命令时看到帮助              | `pi nonexistent_cmd`    | exit 非 0；stderr 含"error"                                |
-| E2E-CLI-074 | 自动 | `test_user_init_then_doctor_roundtrip` | 用户 init 后 doctor 通过，完整引导流程 | `pi init` → `pi doctor` | 两步 exit 0；doctor 含"✓"                                   |
+| E2E-CLI-074 | 自动 | `test_user_init_then_doctor_roundtrip` | 用户 init 后 doctor 通过，完整引导流程 | `pi init` → `pi doctor` | 两步 exit 0；doctor 含"配置合法"+"内嵌资源已就绪" |
 
 
 ---

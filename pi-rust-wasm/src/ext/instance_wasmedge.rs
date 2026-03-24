@@ -13,6 +13,9 @@ use wasmedge_sdk::{
     ImportObjectBuilder, Instance, Module, Store, Vm, WasmValue,
 };
 
+/// pi_bridge.js embedded at compile time — the primary JS bridge between host and QuickJS guest.
+const EMBEDDED_BRIDGE_JS: &str = include_str!("../../assets/js/pi_bridge.js");
+
 /// npm package shims embedded at compile time; injected between pi_bridge.js and user script.
 const PI_TUI_SHIM: &str = include_str!("../../assets/js/pi_tui_shim.js");
 const PI_CODING_AGENT_SHIM: &str = include_str!("../../assets/js/pi_coding_agent_shim.js");
@@ -197,40 +200,18 @@ impl WasmInstance {
             }
             _ => raw,
         };
-        let bridge_path = self.resolve_bridge_path();
-        match bridge_path {
-            Some(bp) if bp.exists() => {
-                let bridge_code = std::fs::read_to_string(&bp).map_err(AppError::Io)?;
-                Ok(format!(
-                    "// --- pi_bridge.js (auto-injected) ---\n{bridge_code}\n\
-                     // --- pi_node_shim.js ---\n{PI_NODE_SHIM}\n\
-                     // --- pi_tui_shim.js ---\n{PI_TUI_SHIM}\n\
-                     // --- pi_coding_agent_shim.js ---\n{PI_CODING_AGENT_SHIM}\n\
-                     // --- pi_ai_shim.js ---\n{PI_AI_SHIM}\n\
-                     // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
-                     // --- pi_sandbox_runtime_shim.js ---\n{PI_SANDBOX_RUNTIME_SHIM}\n\
-                     // --- pi_ms_shim.js ---\n{PI_MS_SHIM}\n\
-                     // --- user script ---\n{user_code}"
-                ))
-            }
-            _ => Ok(user_code),
-        }
-    }
-
-    /// Locate pi_bridge.js: relative to the quickjs wasm path (sibling assets/js/pi_bridge.js)
-    /// or via PI_BRIDGE_JS_PATH env.
-    fn resolve_bridge_path(&self) -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("PI_BRIDGE_JS_PATH") {
-            let pb = PathBuf::from(p);
-            if pb.exists() {
-                return Some(pb);
-            }
-        }
-        self.quickjs_path.as_ref().and_then(|qp| {
-            qp.parent()
-                .and_then(|wasm_dir| wasm_dir.parent())
-                .map(|assets_dir| assets_dir.join("js").join("pi_bridge.js"))
-        })
+        let bridge_code = get_bridge_js_content();
+        Ok(format!(
+            "// --- pi_bridge.js (auto-injected) ---\n{bridge_code}\n\
+             // --- pi_node_shim.js ---\n{PI_NODE_SHIM}\n\
+             // --- pi_tui_shim.js ---\n{PI_TUI_SHIM}\n\
+             // --- pi_coding_agent_shim.js ---\n{PI_CODING_AGENT_SHIM}\n\
+             // --- pi_ai_shim.js ---\n{PI_AI_SHIM}\n\
+             // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
+             // --- pi_sandbox_runtime_shim.js ---\n{PI_SANDBOX_RUNTIME_SHIM}\n\
+             // --- pi_ms_shim.js ---\n{PI_MS_SHIM}\n\
+             // --- user script ---\n{user_code}"
+        ))
     }
 
     /// 注册宿主导入并映射到 QuickJS 全局 agent；内部在 build_vm 时注册 env.__pi_host_call。
@@ -411,12 +392,17 @@ fn temp_js_file(code: &str) -> Result<(PathBuf, tempfile::TempDir), AppError> {
     Ok((path, dir))
 }
 
-/// wasmedge-quickjs Node 兼容模块目录：`PI_WASM_QUICKJS_MODULES_PATH`，否则 `assets/modules/`（相对 crate 根，构建时嵌入路径）。
+/// wasmedge-quickjs Node 兼容模块目录。
+/// 优先级：`PI_WASM_QUICKJS_MODULES_PATH` → `~/.pi_/assets/modules/` → `CARGO_MANIFEST_DIR/assets/modules`（开发兜底）。
 fn resolve_quickjs_modules_dir() -> Option<PathBuf> {
     std::env::var("PI_WASM_QUICKJS_MODULES_PATH")
         .ok()
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
+        .or_else(|| {
+            let p = dirs::home_dir()?.join(".pi_").join("assets").join("modules");
+            p.is_dir().then_some(p)
+        })
         .or_else(|| {
             let p = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets")
@@ -437,4 +423,23 @@ fn build_wasi_preopens(script_host_dir: &Path) -> Result<Vec<String>, AppError> 
         preopens.push(format!("./modules:{}", m.display()));
     }
     Ok(preopens)
+}
+
+/// Return the pi_bridge.js content. Priority:
+/// 1. `PI_BRIDGE_JS_PATH` env var (if set and file is readable)
+/// 2. Compile-time embedded constant
+fn get_bridge_js_content() -> std::borrow::Cow<'static, str> {
+    if let Ok(path) = std::env::var("PI_BRIDGE_JS_PATH") {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => return std::borrow::Cow::Owned(content),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path,
+                    error = %e,
+                    "PI_BRIDGE_JS_PATH set but file unreadable, falling back to embedded bridge"
+                );
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(EMBEDDED_BRIDGE_JS)
 }

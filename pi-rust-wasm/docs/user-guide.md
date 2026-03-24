@@ -20,43 +20,34 @@
 
 ## 0. 前置准备
 
-### 依赖清单
+### 用户安装（预编译二进制）
+
+预编译二进制已内嵌 WasmEdge 运行时、QuickJS wasm 和 Node.js 兼容模块。下载后只需两步：
+
+```bash
+# 1. 下载并放入 PATH
+chmod +x pi && mv pi /usr/local/bin/
+
+# 2. 初始化
+pi init
+```
+
+`pi init` 会通过交互式向导完成 LLM 配置、API Key 输入和资源部署。
+
+### 开发者编译
 
 | 依赖 | 版本要求 | 用途 |
 |------|----------|------|
 | Rust | stable 1.70+ | 编译 |
-| WasmEdge C 库 | 0.13.5 | Wasm 运行时（插件与 QuickJS 引擎） |
-| `jq` | 任意版本（可选） | `verify-openai-apis.sh` 输出格式化 |
-
-### 安装 WasmEdge
+| WasmEdge C 库 | 0.13.5 | 默认需要（通过 `install-wasmedge.sh` 安装） |
+| CMake + C 编译器 | 任意 | 仅 `--features standalone` 模式需要（自动下载并链接 WasmEdge） |
 
 ```bash
 cd pi-rust-wasm
-bash scripts/install-wasmedge.sh -y
-source $HOME/.wasmedge/env
+cargo build --release          # 默认使用系统已安装的 WasmEdge，编译快
+# 或自动下载并链接 WasmEdge（无需预装，但首次编译慢）：
+# cargo build --release --features standalone
 ```
-
-验证安装：
-
-```bash
-wasmedge --version
-# 应输出: wasmedge version 0.13.x
-```
-
-### 配置 .env
-
-```bash
-cp .env.example .env
-```
-
-打开 `.env`，至少填写以下两项：
-
-```env
-OPENAI_API_KEY=sk-...         # 必填，LLM 调用凭证
-HTTPS_PROXY=http://127.0.0.1:7890  # 若需要代理才能访问 OpenAI，取消注释并填写
-```
-
-> 说明：`OPENAI_API_KEY` 在运行 `pi chat` 以及 LLM 集成测试时是必需的；不填则 chat 进入后会立即报错退出。
 
 ### 工作目录
 
@@ -66,21 +57,30 @@ pi 默认将所有数据存放在 `~/.pi_/`。可在 `pi.config.toml` 的 `[stor
 export PI_WASM__STORAGE__WORK_DIR=/your/custom/path
 ```
 
-子目录结构（由程序自动创建）：
+子目录结构（由 `pi init` 或首次启动自动创建）：
 
 ```
 ~/.pi_/
-├── agent/
-│   └── pi.config.toml          # 配置文件（pi init 生成）
+├── pi.config.toml                 # 主配置文件（pi init 生成）
 ├── agents/
 │   └── main/
-│       ├── sessions/        # 会话 JSONL transcript
-│       ├── plugins/         # 插件目录
-│       ├── logs/            # 日志文件（file_enabled=true 时）
-│       └── tmp/
-└── wasm/
-    └── wasmedge_quickjs.wasm  # QuickJS 运行时（可手动放置）
+│       ├── agent/                 # 身份与凭据
+│       ├── sessions/              # 会话 JSONL transcript
+│       ├── logs/                  # 日志文件
+│       └── audit/                 # 审计日志
+├── workspace-main/                # 默认 agent 工作区
+├── assets/
+│   ├── .env                       # API Key 等敏感配置（0600 权限）
+│   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
+│   ├── .lock                      # 并发写入保护锁
+│   ├── wasm/
+│   │   └── wasmedge_quickjs.wasm  # 内嵌资源自动释放
+│   └── modules/                   # Node.js 兼容模块（内嵌资源自动释放）
+├── plugins/                       # 全局共享插件
+└── memory/                        # 向量检索索引
 ```
+
+详见 [directory-structure.md](technical/directory-structure.md)。
 
 ---
 
@@ -111,51 +111,62 @@ pi --version
 
 ## 2. 初始化与环境检测
 
-### pi init — 生成配置文件
+### pi init — 交互式向导
 
 ```bash
 pi init
 ```
 
-默认在 `~/.pi_/pi.config.toml` 生成初始配置文件。也可以指定自定义路径：
+`pi init` 是两步交互式向导：
+
+1. **[1/2] LLM 配置**：选择 Provider（openai/azure/anthropic/custom） → 输入 API Key → 选择默认模型
+2. **[2/2] 资源检查**：自动创建目录结构、释放内嵌资源（wasm + modules）、写入 `.env`
+
+预期输出：
+
+```
+[1/2] 选择 LLM Provider: openai
+  默认模型: gpt-4.1-mini
+  API Base URL（回车使用默认）:
+✓ 配置文件已写入: ~/.pi_/pi.config.toml
+
+[2/2] 资源检查
+  ✓ 目录结构就绪
+  ✓ 内嵌资源已释放（wasm + modules）
+  ✓ API Key 已写入 .env
+
+初始化完成！运行 `pi doctor` 验证环境。
+```
+
+**幂等性**：二次运行 `pi init` 会询问「配置文件已存在，是否覆盖？」（默认否），选择否则仅刷新资源，不影响已有配置和 API Key。
+
+**旧目录迁移**：若检测到 `~/.pi_wasm/`（旧版工作目录），会提示迁移到 `~/.pi_/`。
+
+也可指定自定义路径：
 
 ```bash
 pi init --config /tmp/my-pi/pi.config.toml
 ```
 
-预期输出：
-
-```
-已生成配置文件: ~/.pi_/pi.config.toml
-请编辑 ~/.pi_/pi.config.toml 填写 LLM API 与安全策略。
-```
-
-生成后**至少需要**在配置文件中确认 `[llm]` 段的 `api_key_env` 指向你的环境变量名（默认已配置为 `OPENAI_API_KEY`）。
-
-### pi doctor — 环境检测
+### pi doctor — 环境诊断
 
 ```bash
 pi doctor
 ```
 
-doctor 会逐项检查以下内容并给出修复建议：
+doctor 逐项检查环境并给出可执行的修复建议：
 
 | 检查项 | 通过示例 | 失败示例 |
 |--------|---------|---------|
-| 配置文件 | `✓ 配置合法` | `未找到配置文件。请先运行: pi init` |
+| 配置文件 | `✓ 配置合法 (~/.pi_/pi.config.toml)` | `✗ 未找到配置文件` |
+| 内嵌资源 | `✓ 内嵌资源已就绪` | `✗ 资源释放失败` |
+| QuickJS wasm | `✓ QuickJS wasm：~/.pi_/assets/wasm/...` | `✗ QuickJS wasm 未找到` |
 | WasmEdge 运行时 | `✓ WasmEdge 运行时：可用` | `✗ WasmEdge 运行时：不可用` |
-| QuickJS wasm 路径 | `✓ QuickJS 运行时：可用 (/path/to/wasmedge_quickjs.wasm)` | `✗ QuickJS 路径未配置` |
+| 资源版本 | `资源版本: wasm=abc123... modules=def456...` | — |
+| .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
+| API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
-典型输出（初始化后，未放置 QuickJS wasm 时）：
-
-```
-✓ 配置合法
-✓ WasmEdge 运行时：可用
-✗ QuickJS 路径未配置
-  修复建议：下载 wasmedge_quickjs.wasm 到 work_dir/wasm/ 或设置环境变量 WASMEDGE_QUICKJS_PATH
-```
-
-> QuickJS wasm 由 `scripts/build-custom-quickjs.sh` 构建，或手动复制 `assets/wasm/wasmedge_quickjs.wasm` 到 `~/.pi_/wasm/wasmedge_quickjs.wasm`。插件功能依赖此文件；chat 与其他 CLI 功能不依赖。
+每个失败/警告项都会给出 `→ 运行 pi init 或...` 修复建议。
 
 也可针对特定配置文件运行：
 
@@ -330,10 +341,12 @@ pi session delete agent:main:main
 
 ### 前提条件
 
-确保 `.env` 中已设置 `OPENAI_API_KEY`，并在当前 shell 中加载：
+确保已运行 `pi init` 并配置了 API Key。`pi init` 会将 Key 写入 `~/.pi_/assets/.env`，启动时自动加载。
+
+也可手动设置环境变量：
 
 ```bash
-set -a && source .env && set +a
+export OPENAI_API_KEY=sk-...
 ```
 
 ### 启动对话
@@ -691,32 +704,25 @@ pi chat
 
 ---
 
-**Q: `pi doctor` 显示 QuickJS 路径未配置**
+**Q: `pi doctor` 显示 QuickJS wasm 未找到**
 
-原因：`~/.pi_/wasm/wasmedge_quickjs.wasm` 不存在，且未设置 `WASMEDGE_QUICKJS_PATH`。
-
-方案一：复制项目内置文件：
+预编译二进制已内嵌 QuickJS wasm，正常情况下 `pi init` 会自动释放。若仍缺失：
 
 ```bash
-mkdir -p ~/.pi_/wasm
-cp pi-rust-wasm/assets/wasm/wasmedge_quickjs.wasm ~/.pi_/wasm/
+pi init   # 重新运行 init 触发资源释放
 ```
 
-方案二：通过环境变量指定：
+开发模式下也可通过环境变量指定：
 
 ```bash
 export WASMEDGE_QUICKJS_PATH=/path/to/wasmedge_quickjs.wasm
 ```
 
-方案三：自行构建（需要 `wasm32-wasip1` target）：
-
-```bash
-bash scripts/build-custom-quickjs.sh
-```
-
 ---
 
-**Q: WasmEdge 未安装或版本不对**
+**Q: WasmEdge 运行时不可用**
+
+默认编译使用系统已安装的 WasmEdge C 库，需先安装：
 
 ```bash
 bash scripts/install-wasmedge.sh -y
@@ -724,11 +730,17 @@ source $HOME/.wasmedge/env
 pi doctor  # 应显示 ✓ WasmEdge 运行时：可用
 ```
 
+如需自动下载并链接 WasmEdge（无需预装），可使用 `--features standalone` 编译：
+
+```bash
+cargo build --release --features standalone
+```
+
 ---
 
-**Q: 插件加载失败（QuickJS wasm 不存在）**
+**Q: 从 `~/.pi_wasm/` 旧版本升级**
 
-插件执行依赖 QuickJS wasm，参考上方"QuickJS 路径未配置"的解决方案后重试。
+运行 `pi init`，向导会自动检测旧目录并提示迁移到 `~/.pi_/`。
 
 ---
 
