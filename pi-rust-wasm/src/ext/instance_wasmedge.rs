@@ -50,7 +50,7 @@ pub struct WasmInstance {
     /// 宿主导入回调：request_json -> response_json；在构建 Vm 时注册到 env.__pi_host_call。
     #[allow(clippy::type_complexity)]
     host_invoke: Option<Arc<dyn Fn(&str) -> Result<String, AppError> + Send + Sync>>,
-    /// QuickJS wasm 路径；未设置时 run_script 返回错误提示设置 WASMEDGE_QUICKJS_PATH。
+    /// QuickJS wasm 路径；未设置时 run_script 返回错误。
     quickjs_path: Option<PathBuf>,
     /// 懒创建：env 宿主导入模块（Store 需持有其引用）。
     import_object: Option<wasmedge_sdk::ImportObject<HostData>>,
@@ -68,7 +68,7 @@ impl fmt::Debug for WasmInstance {
 }
 
 impl WasmInstance {
-    /// 由 WasmEngine::create_instance 调用。QuickJS 路径：优先使用 engine 传入的配置（来自 AppConfig/环境变量 PI_WASM__WASM__QUICKJS_PATH），否则回退到 WASMEDGE_QUICKJS_PATH。
+    /// 由 WasmEngine::create_instance 调用。QuickJS 路径来自 AppConfig 解析。
     ///
     /// # Errors
     /// * 当前实现不返回错误；路径未设置时在 [`run_script`] 中返回 [`AppError::QuickJS`]。
@@ -77,12 +77,7 @@ impl WasmInstance {
         plugin_id: String,
         quickjs_path_from_engine: Option<PathBuf>,
     ) -> Result<Self, AppError> {
-        let quickjs_path = quickjs_path_from_engine.filter(|p| p.exists()).or_else(|| {
-            std::env::var("WASMEDGE_QUICKJS_PATH")
-                .ok()
-                .map(PathBuf::from)
-                .filter(|p| p.exists())
-        });
+        let quickjs_path = quickjs_path_from_engine.filter(|p| p.exists());
         Ok(Self {
             config,
             plugin_id,
@@ -129,7 +124,7 @@ impl WasmInstance {
             .clone()
             .ok_or_else(|| {
                 AppError::QuickJS(
-                    "WASMEDGE_QUICKJS_PATH not set or path does not exist. Set it to wasmedge_quickjs.wasm path.".to_string(),
+                    "QuickJS wasm not found. Run `pi init` to extract embedded assets.".to_string(),
                 )
             })?;
 
@@ -273,7 +268,7 @@ impl WasmInstance {
         script_path: &Path,
     ) -> Result<(Vm<'_, dyn SyncInst>, PathBuf, tempfile::TempDir), AppError> {
         let quickjs_path = self.quickjs_path.clone().ok_or_else(|| {
-            AppError::QuickJS("WASMEDGE_QUICKJS_PATH not set or path does not exist.".to_string())
+            AppError::QuickJS("QuickJS wasm not found. Run `pi init` to extract embedded assets.".to_string())
         })?;
 
         let mut combined = self.build_combined_script(script_path)?;

@@ -335,6 +335,7 @@ impl Default for AgentLoopConfig {
 #[derive(Debug)]
 pub struct AgentRunResult {
     pub final_text: String,
+    pub new_messages: Vec<AgentMessage>,
 }
 
 // ─── AgentLoop 结构体 ───────────────────────────────────────────────────────
@@ -467,11 +468,15 @@ impl AgentLoop {
             }
         }
 
+        let start_idx = messages.len();
+
         loop {
             match self.run_attempt_loop(&mut messages).await {
                 Ok(final_text) => {
+                    let new_messages = messages[start_idx..].to_vec();
                     let result = AgentRunResult {
                         final_text: final_text.clone(),
+                        new_messages,
                     };
                     self.emit_event(AgentEvent::AgentEnd {
                         session_id: self.config.session_id.clone(),

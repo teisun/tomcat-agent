@@ -803,3 +803,44 @@
 - 至少 3 个示例插件可正常加载并运行
 - 分别覆盖工具注册、事件监听、4 原语调用
 - 每个插件含注释与 README
+
+---
+
+### TASK-12 | user-guide-remediation | user-guide.md 整改与 bug 修复
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Tom |
+| **分支** | `feature/user-guide-remediation` |
+| **阻塞点** | — |
+
+**目标**：修正 user-guide.md 与实际代码的 14 项不一致，修复 2 个运行时 bug（流式输出 flush、工具调用未持久化），移除 4 项冗余功能（--config 标志、export/import、环境变量覆盖、session --cwd），新增 2 项能力（workspace 管理、插件注册表）。
+
+**子项**：
+- [x] 12.1 修复流式输出 flush（chat.rs print! 后加 flush）
+- [x] 12.2 提示符改名（AI> → pi.{agentId}>，你> → u>）
+- [x] 12.3 审计日志文档修正（默认开启措辞）
+- [x] 12.4 移除 --config 标志 + 固定 DEFAULT_CONFIG_PATH + 测试隔离
+- [x] 12.5 pi init 完成后输出 PATH 提示
+- [x] 12.6 移除 config export/import 子命令 + 测试 + E2E
+- [x] 12.7 移除 WASMEDGE_QUICKJS_PATH 死代码 + 环境变量文档
+- [x] 12.8 修复工具调用未写入会话记录 bug
+- [x] 12.9 workspace add/list/remove + ext_workspaces.json
+- [x] 12.10 新增 plugins/registry.json 全局插件注册表
+
+**依赖**：TASK-06（PENDING_INTEGRATION）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`ChatContext`、`AgentLoop`、`AgentRunResult`、`SessionManager`、`PluginManager`、`AppConfig`
+- 提供：workspace 管理 API、插件注册表、修正后的 CLI 行为
+
+**验收标准**：
+- `cargo build --release` 编译通过
+- `cargo test --lib` + `cargo test --test cli_tests` 全量通过
+- `cargo clippy` 无新增 warning
+- user-guide.md 中每条操作示例与实际 CLI 行为一致
+- E2E_SCENARIO_LIBRARY.md 与 tests/ 同步

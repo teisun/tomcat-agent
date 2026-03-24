@@ -23,7 +23,7 @@ fn trunc(s: &str, n: usize) -> String {
 
 /// [--help 输出] 验证主帮助页包含所有一级子命令名称
 ///
-/// 验证：exit 0 且 stdout 包含 pi、init、doctor、config、session、plugin、audit
+/// 验证：exit 0 且 stdout 包含 pi、init、doctor、config、session、workspace、plugin、audit
 /// 意义：CLI 入口完整性门禁（TASK-02 验收：所有子命令帮助文档完整）
 #[test]
 fn test_help_output_contains_pi_and_exits_ok() {
@@ -45,6 +45,7 @@ fn test_help_output_contains_pi_and_exits_ok() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("config"))
         .stdout(predicate::str::contains("session"))
+        .stdout(predicate::str::contains("workspace"))
         .stdout(predicate::str::contains("plugin"))
         .stdout(predicate::str::contains("audit"));
 }
@@ -81,11 +82,11 @@ fn test_init_creates_config_file_in_temp_dir() {
     let _span = info_span!("test_init_creates_config_file_in_temp_dir").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: temp dir at {:?}", dir.path());
     let mut c = cmd();
-    c.args(["init", "--config", config_path.to_str().unwrap()]);
+    c.args(["init"]).env("HOME", dir.path());
 
     info!("Act: execute init");
     let assert = c.assert();
@@ -113,9 +114,11 @@ fn test_doctor_without_config_prompts_init() {
     common::setup_logging();
     let _span = info_span!("test_doctor_without_config_prompts_init").entered();
 
+    let dir = tempfile::tempdir().unwrap();
+
     info!("Arrange: point to nonexistent config");
     let mut c = cmd();
-    c.args(["doctor", "--config", "/tmp/nonexistent_pi_test_cfg.toml"]);
+    c.args(["doctor"]).env("HOME", dir.path());
 
     info!("Act: execute doctor");
     let assert = c.assert();
@@ -136,23 +139,76 @@ fn test_doctor_with_valid_config_checks_environment() {
     let _span = info_span!("test_doctor_with_valid_config_checks_environment").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
 
     info!("Arrange: create valid config via init");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Act: execute doctor with valid config");
     let mut c = cmd();
-    c.args(["doctor", "--config", config_path.to_str().unwrap()]);
+    c.args(["doctor"]).env("HOME", dir.path());
     let assert = c.assert();
 
     info!("Assert: exit 0, mentions config validity and wasm checks");
     assert
         .success()
         .stdout(predicate::str::contains("配置合法").or(predicate::str::contains("✓")));
+}
+
+/// [E2E-CLI-004] 工作区 add / list / remove
+///
+/// 验证：init 后 workspace add → list 含路径 → remove → list 为空提示
+/// 意义：TASK-12 ext_workspaces.json 与 CLI 一致
+#[test]
+fn test_workspace_add_list_remove_e2e() {
+    common::setup_logging();
+    let _span = info_span!("test_workspace_add_list_remove_e2e").entered();
+
+    let home = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_canon = std::fs::canonicalize(proj.path()).unwrap();
+    let proj_str = proj_canon.to_str().unwrap();
+
+    cmd()
+        .args(["init"])
+        .env("HOME", home.path())
+        .assert()
+        .success();
+
+    cmd()
+        .args(["workspace", "add", proj_str])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加工作区"));
+
+    let list_assert = cmd()
+        .args(["workspace", "list"])
+        .env("HOME", home.path())
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout).to_string();
+    list_assert.success();
+    assert!(
+        list_out.contains(proj_str),
+        "list 应含已添加路径，实际: {}",
+        trunc(&list_out, 200)
+    );
+
+    cmd()
+        .args(["workspace", "remove", proj_str])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已移除工作区"));
+
+    cmd()
+        .args(["workspace", "list"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("无已授权工作区"));
 }
 
 // ────────────────────── config ──────────────────────
@@ -221,81 +277,6 @@ fn test_config_get_with_unknown_key_shows_hint() {
         .stdout(predicate::str::contains("未找到").or(predicate::str::contains("不存在")));
 }
 
-/// [config export] 导出配置到文件
-///
-/// 验证：exit 0、文件已创建、stdout 提示"已导出"
-/// 意义：TASK-02 10.4——config export 可导出 TOML 配置
-#[test]
-fn test_config_export_creates_file() {
-    common::setup_logging();
-    let _span = info_span!("test_config_export_creates_file").entered();
-
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("exported.toml");
-
-    info!("Arrange: temp export path {:?}", out);
-    let mut c = cmd();
-    c.args(["config", "export", out.to_str().unwrap()]);
-
-    info!("Act: execute config export");
-    let assert = c.assert();
-
-    info!("Assert: exit 0, file exists and contains toml");
-    assert.success().stdout(predicate::str::contains("已导出"));
-    assert!(out.exists(), "exported file should exist");
-}
-
-/// [config import 合法] 先导出再导入合法 TOML 成功
-///
-/// 验证：export exit 0 后 import exit 0、stdout 含"导入"
-/// 意义：TASK-02 10.4——config import 可接受合法配置
-#[test]
-fn test_config_import_valid_toml_succeeds() {
-    common::setup_logging();
-    let _span = info_span!("test_config_import_valid_toml_succeeds").entered();
-
-    let dir = tempfile::tempdir().unwrap();
-    let export_path = dir.path().join("cfg.toml");
-
-    info!("Arrange: export then import");
-    cmd()
-        .args(["config", "export", export_path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    info!("Act: import the exported file");
-    let mut c = cmd();
-    c.args(["config", "import", export_path.to_str().unwrap()]);
-    let assert = c.assert();
-
-    info!("Assert: exit 0, mentions import success");
-    assert.success().stdout(predicate::str::contains("导入"));
-}
-
-/// [config import 非法] 导入格式错误的 TOML 文件失败
-///
-/// 验证：exit code 非 0
-/// 意义：TASK-02 10.4——config import 拒绝非法配置，避免覆盖合法文件
-#[test]
-fn test_config_import_invalid_file_fails() {
-    common::setup_logging();
-    let _span = info_span!("test_config_import_invalid_file_fails").entered();
-
-    let dir = tempfile::tempdir().unwrap();
-    let bad = dir.path().join("bad.toml");
-    fs::write(&bad, "this is not valid toml config { broken }").unwrap();
-
-    info!("Arrange: create invalid toml file");
-    let mut c = cmd();
-    c.args(["config", "import", bad.to_str().unwrap()]);
-
-    info!("Act: import invalid file");
-    let assert = c.assert();
-
-    info!("Assert: exits with error");
-    assert.failure();
-}
-
 // ────────────────────── config set (boundary) ──────────────────────
 
 /// [config set 缺参数] set 不带 key/value 时 clap 报错
@@ -324,7 +305,7 @@ fn test_config_set_missing_args_shows_error() {
 
 /// [config --help] 帮助页列出所有 config 子命令
 ///
-/// 验证：exit 0 且 stdout 包含 get/set/edit/export/import
+/// 验证：exit 0 且 stdout 包含 get/set/edit
 /// 意义：CLI 帮助完整性门禁
 #[test]
 fn test_config_help_lists_subcommands() {
@@ -338,14 +319,12 @@ fn test_config_help_lists_subcommands() {
     info!("Act: execute");
     let assert = c.assert();
 
-    info!("Assert: lists get/set/edit/export/import");
+    info!("Assert: lists get/set/edit");
     assert
         .success()
         .stdout(predicate::str::contains("get"))
         .stdout(predicate::str::contains("set"))
-        .stdout(predicate::str::contains("edit"))
-        .stdout(predicate::str::contains("export"))
-        .stdout(predicate::str::contains("import"));
+        .stdout(predicate::str::contains("edit"));
 }
 
 // ────────────────────── plugin ──────────────────────
@@ -673,11 +652,11 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: init config in temp dir, set work_dir and OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
@@ -700,8 +679,8 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
     assert.success();
     assert!(
-        out_str.contains("对话模式") || out_str.contains("模型:") || out_str.contains("AI>"),
-        "chat 应输出对话模式 banner 或模型信息或 AI 提示，实际: {}",
+        out_str.contains("对话模式") || out_str.contains("模型:") || out_str.contains("pi.main>"),
+        "chat 应输出对话模式 banner 或模型信息或 pi.main> 提示，实际: {}",
         out_str.chars().take(500).collect::<String>()
     );
 }
@@ -718,11 +697,11 @@ fn test_chat_with_session_dir_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: init config, session new, set work_dir");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
@@ -783,52 +762,23 @@ fn test_init_then_doctor_roundtrip() {
     let _span = info_span!("test_init_then_doctor_roundtrip").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: init config in temp dir");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Act: doctor with generated config");
     let mut c = cmd();
-    c.args(["doctor", "--config", config_path.to_str().unwrap()]);
+    c.args(["doctor"]).env("HOME", dir.path());
     let assert = c.assert();
 
     info!("Assert: doctor passes config check");
     assert
         .success()
         .stdout(predicate::str::contains("配置合法").or(predicate::str::contains("✓")));
-}
-
-// ────────────────────── init + config export + import roundtrip ──────────────────────
-
-/// [config export → import 联合] 导出再导入配置一致
-///
-/// 验证：export exit 0 + import exit 0 且 stdout 含"导入"
-/// 意义：配置可迁移性验证（TASK-02 10.4 联合验收）
-#[test]
-fn test_config_export_then_import_roundtrip() {
-    common::setup_logging();
-    let _span = info_span!("test_config_export_then_import_roundtrip").entered();
-
-    let dir = tempfile::tempdir().unwrap();
-    let export_path = dir.path().join("exported.toml");
-
-    info!("Arrange: export current config");
-    cmd()
-        .args(["config", "export", export_path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    info!("Act: import the exported config");
-    let mut c = cmd();
-    c.args(["config", "import", export_path.to_str().unwrap()]);
-    let assert = c.assert();
-
-    info!("Assert: import succeeds");
-    assert.success().stdout(predicate::str::contains("导入"));
 }
 
 // ────────────────────── 补充用例：session switch/delete/archive ──────────────────────
@@ -1008,12 +958,12 @@ fn test_user_first_time_setup_init_and_doctor() {
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir, no existing config");
     info!("Act: pi init");
     let init_assert = cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert();
     let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
     info!(
@@ -1030,11 +980,12 @@ fn test_user_first_time_setup_init_and_doctor() {
         .stdout(
             predicate::str::contains("资源检查")
                 .or(predicate::str::contains("✓")),
-        );
+        )
+        .stdout(predicate::str::contains("PATH"));
 
     info!("Act: pi doctor");
     let mut c = cmd();
-    c.args(["doctor", "--config", config_path.to_str().unwrap()]);
+    c.args(["doctor"]).env("HOME", dir.path());
     let doctor_assert = c.assert();
     let doctor_out =
         String::from_utf8_lossy(&doctor_assert.get_output().stdout.clone()).to_string();
@@ -1091,64 +1042,6 @@ fn test_user_views_full_config() {
     );
 }
 
-/// [E2E-CLI-004] 用户导出配置备份
-///
-/// 用户意图：导出配置备份
-/// 验证：exit 0；文件存在且非空
-#[test]
-fn test_user_exports_config_to_file() {
-    common::setup_logging();
-    let _span = info_span!("test_user_exports_config_to_file").entered();
-
-    let dir = tempfile::tempdir().unwrap();
-    let export_path = dir.path().join("pi_cfg_backup.toml");
-
-    info!("Arrange: temp export path = {:?}", export_path);
-    info!("Act: pi config export");
-    let assert = cmd()
-        .args(["config", "export", export_path.to_str().unwrap()])
-        .assert();
-    let out = assert.get_output().stdout.clone();
-    info!("Assert: exit 0 + file exists and non-empty");
-    assert.success();
-    assert!(export_path.exists(), "导出文件应存在：{:?}", export_path);
-    assert!(
-        fs::metadata(&export_path).unwrap().len() > 0,
-        "导出文件不应为空"
-    );
-    let _ = out;
-}
-
-/// [E2E-CLI-005] 用户从备份恢复配置
-///
-/// 用户意图：从备份文件恢复配置
-/// 验证：exit 0；stdout 含"导入"
-#[test]
-fn test_user_imports_config_from_file() {
-    common::setup_logging();
-    let _span = info_span!("test_user_imports_config_from_file").entered();
-
-    let dir = tempfile::tempdir().unwrap();
-    let export_path = dir.path().join("pi_cfg_export.toml");
-
-    info!("Arrange: first export then import");
-    cmd()
-        .args(["config", "export", export_path.to_str().unwrap()])
-        .assert()
-        .success();
-
-    info!("Act: pi config import");
-    let assert = cmd()
-        .args(["config", "import", export_path.to_str().unwrap()])
-        .assert();
-    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!(
-        "Assert: exit 0 + stdout 含导入；actual: {}",
-        trunc(&out, 200)
-    );
-    assert.success().stdout(predicate::str::contains("导入"));
-}
-
 /// [E2E-CLI-006] 用户运行 doctor 检测 WasmEdge/QuickJS 可用性
 ///
 /// 用户意图：运行 doctor 检测环境
@@ -1186,12 +1079,12 @@ fn test_init_creates_env_file() {
     let _span = info_span!("test_init_creates_env_file").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: pi init");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
@@ -1215,18 +1108,17 @@ fn test_init_creates_env_with_correct_permissions() {
     let _span = info_span!("test_init_creates_env_with_correct_permissions").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: pi init → check .env permissions");
 
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
-    let home = std::env::var("HOME").expect("HOME env required");
-    let env_path = std::path::PathBuf::from(home).join(".pi_").join("assets").join(".env");
+    let env_path = dir.path().join(".pi_").join("assets").join(".env");
     if env_path.exists() {
         let mode = fs::metadata(&env_path).unwrap().permissions().mode() & 0o777;
         info!("Assert: .env permissions = {:04o}", mode);
@@ -1243,17 +1135,17 @@ fn test_doctor_reports_all_checks() {
     let _span = info_span!("test_doctor_reports_all_checks").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init first");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Act: pi doctor");
     let assert = cmd()
-        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .args(["doctor"]).env("HOME", dir.path())
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -1277,17 +1169,17 @@ fn test_init_idempotent() {
     let _span = info_span!("test_init_idempotent").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Act: pi init (first)");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Act: pi init (second, idempotent)");
     let assert = cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -1306,17 +1198,17 @@ fn test_ensure_embedded_assets_extracts_wasm() {
     let _span = info_span!("test_ensure_embedded_assets_extracts_wasm").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Act: pi init");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Assert: doctor 能发现 QuickJS wasm");
     let assert = cmd()
-        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .args(["doctor"]).env("HOME", dir.path())
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("doctor output: {}", trunc(&out, 500));
@@ -1334,21 +1226,21 @@ fn test_ensure_embedded_assets_idempotent() {
     let _span = info_span!("test_ensure_embedded_assets_idempotent").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Act: pi doctor x2（每次触发 ensure_embedded_assets）");
     cmd()
-        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .args(["doctor"]).env("HOME", dir.path())
         .assert()
         .success();
     cmd()
-        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .args(["doctor"]).env("HOME", dir.path())
         .assert()
         .success();
 }
@@ -1362,17 +1254,16 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
     let _span = info_span!("test_ensure_embedded_assets_upgrades_on_sha_mismatch").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     info!("Arrange: tamper wasm file in default work_dir");
-    let home = std::env::var("HOME").expect("HOME env required");
-    let wasm_path = std::path::PathBuf::from(&home)
+    let wasm_path = dir.path()
         .join(".pi_")
         .join("assets")
         .join("wasm")
@@ -1384,7 +1275,7 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
 
         info!("Act: pi doctor（触发 ensure_embedded_assets 覆盖）");
         let assert = cmd()
-            .args(["doctor", "--config", config_path.to_str().unwrap()])
+            .args(["doctor"]).env("HOME", dir.path())
             .assert();
         assert.success();
 
@@ -1417,11 +1308,11 @@ fn test_user_asks_pi_a_question() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1462,11 +1353,11 @@ fn test_user_asks_pi_technical_question() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1510,11 +1401,11 @@ fn test_user_asks_pi_to_run_bash_command() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1564,11 +1455,11 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1871,11 +1762,11 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1919,11 +1810,11 @@ fn test_user_receives_nonempty_llm_response() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -2187,11 +2078,11 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init，移除 OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
@@ -2354,17 +2245,17 @@ fn test_user_init_then_doctor_roundtrip() {
     let _span = info_span!("test_user_init_then_doctor_roundtrip").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: pi init → pi doctor");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 
     let assert = cmd()
-        .args(["doctor", "--config", config_path.to_str().unwrap()])
+        .args(["doctor"]).env("HOME", dir.path())
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -2396,11 +2287,11 @@ fn test_user_chat_resumes_last_session() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -2454,11 +2345,11 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join("pi.config.toml");
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init 生成配置；加载 OPENAI_API_KEY");
     cmd()
-        .args(["init", "--config", config_path.to_str().unwrap()])
+        .args(["init"]).env("HOME", dir.path())
         .assert()
         .success();
 

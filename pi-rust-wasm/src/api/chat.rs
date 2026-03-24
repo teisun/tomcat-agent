@@ -9,10 +9,10 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    agent_messages_from_chat, resolve_sessions_dir, resolve_workspace_dir, AgentLoop,
-    AgentLoopConfig, AppConfig, ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry,
-    LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool,
-    ToolExecutor, ToolRegistry,
+    agent_messages_from_chat, convert_to_llm_format, resolve_sessions_dir,
+    resolve_workspace_dir, AgentLoop, AgentLoopConfig, AppConfig, ChatMessage,
+    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
+    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -241,7 +241,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
 
     loop {
-        let input = match rl.readline("你> ") {
+        let input = match rl.readline("u> ") {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => {
                 println!("\n再见！");
@@ -322,9 +322,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             renderer_clone.lock().push(delta);
             while let Some(chunk) = renderer_clone.lock().take_ready() {
                 print!("{}", chunk);
+                let _ = io::stdout().flush();
             }
         }));
-        print!("\nAI> ");
+        print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
 
         match agent_loop.run(messages).await {
@@ -333,10 +334,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     print!("{}", remaining);
                     io::stdout().flush().map_err(AppError::Io)?;
                 }
-                if !result.final_text.is_empty() {
-                    let assistant_msg = ChatMessage::assistant(&result.final_text);
+                let chat_msgs = convert_to_llm_format(&result.new_messages);
+                for msg in &chat_msgs {
                     ctx.session
-                        .append_message(serde_json::to_value(&assistant_msg)?)?;
+                        .append_message(serde_json::to_value(msg)?)?;
                 }
             }
             Err(e) => return Err(e),

@@ -14,7 +14,7 @@ pub const DEFAULT_QUICKJS_HEAP_MB: u32 = 16;
 pub struct WasmEngineConfig {
     pub wasm_max_pages: u32,
     pub quickjs_heap_mb: u32,
-    /// wasmedge_quickjs.wasm 路径；未设置时 instance 层回退到环境变量 WASMEDGE_QUICKJS_PATH。
+    /// wasmedge_quickjs.wasm 路径。
     #[allow(dead_code)]
     pub quickjs_path: Option<String>,
 }

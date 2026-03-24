@@ -391,7 +391,7 @@ pub fn resolve_assets_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("assets"))
 }
 
-/// 查找 quickjs wasm：`work_dir/assets/wasm/wasmedge_quickjs.wasm` → 环境变量 `WASMEDGE_QUICKJS_PATH`。
+/// 查找 quickjs wasm：`work_dir/assets/wasm/wasmedge_quickjs.wasm`。
 pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
     if let Ok(work) = get_work_dir(cfg) {
         let p = work.join("assets").join("wasm").join("wasmedge_quickjs.wasm");
@@ -399,10 +399,7 @@ pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    std::env::var("WASMEDGE_QUICKJS_PATH")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
+    None
 }
 
 /// 启动时创建完整新布局目录树。若目录已存在则跳过（幂等）。

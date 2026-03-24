@@ -6,8 +6,10 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
-    resolve_audit_dir, resolve_quickjs_path, resolve_sessions_dir, validate_config, wire,
-    write_file_atomic, AppConfig, AppError, AuditFilter, AuditStore, DefaultEventBus,
+    resolve_agent_dir, resolve_audit_dir, resolve_plugins_dir, resolve_quickjs_path,
+    resolve_sessions_dir,
+    validate_config, wire, write_file_atomic, AppConfig, AppError, AuditFilter, AuditStore,
+    DefaultEventBus,
     DefaultToolRegistry, EventBus, FileAuditRecorder, PluginManager, SessionManager, Tool,
     ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
@@ -30,18 +32,10 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// 初始化配置，引导 LLM 与安全策略，生成配置文件
-    Init {
-        /// 配置文件输出路径
-        #[arg(short, long, default_value = DEFAULT_CONFIG_PATH)]
-        config: String,
-    },
+    Init,
     /// 检测运行环境、WasmEdge/QuickJS、配置合法性，输出修复建议
-    Doctor {
-        /// 配置文件路径
-        #[arg(short, long)]
-        config: Option<String>,
-    },
-    /// 配置管理：get/set/edit/export/import
+    Doctor,
+    /// 配置管理：get/set/edit
     Config {
         #[command(subcommand)]
         sub: ConfigSub,
@@ -60,6 +54,11 @@ pub enum Commands {
     Audit {
         #[command(subcommand)]
         sub: AuditSub,
+    },
+    /// 工作区管理：add/list/remove
+    Workspace {
+        #[command(subcommand)]
+        sub: WorkspaceSub,
     },
     /// 进入交互式对话模式
     Chat {
@@ -84,21 +83,7 @@ pub enum ConfigSub {
         value: String,
     },
     /// 用编辑器打开配置文件（读取 $EDITOR，默认 vi/notepad）
-    Edit {
-        /// 指定配置文件路径
-        #[arg(short, long)]
-        config: Option<String>,
-    },
-    /// 导出当前配置到指定文件
-    Export {
-        /// 导出目标文件路径
-        path: PathBuf,
-    },
-    /// 从文件导入配置（校验格式后提示）
-    Import {
-        /// 导入源文件路径
-        path: PathBuf,
-    },
+    Edit,
 }
 
 #[derive(Subcommand, Debug)]
@@ -106,10 +91,7 @@ pub enum SessionSub {
     /// 列出所有会话
     List,
     /// 创建新会话
-    New {
-        #[arg(short, long)]
-        cwd: Option<String>,
-    },
+    New,
     /// 切换到指定会话
     Switch { key: String },
     /// 删除会话
@@ -118,6 +100,22 @@ pub enum SessionSub {
     Archive { key: String },
     /// 搜索会话（MVP 占位：仅列出）
     Search { query: Option<String> },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkspaceSub {
+    /// 添加工作区目录
+    Add {
+        /// 要添加的目录路径
+        path: String,
+    },
+    /// 列出已授权的工作区
+    List,
+    /// 移除工作区目录
+    Remove {
+        /// 要移除的目录路径
+        path: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -177,8 +175,8 @@ pub fn run_cli() -> Result<(), AppError> {
     let cmd = cli.command.unwrap_or(Commands::Chat { resume: false });
 
     match cmd {
-        Commands::Init { config } => return run_init(&config),
-        Commands::Doctor { config } => return run_doctor(config.as_deref()),
+        Commands::Init => return run_init(),
+        Commands::Doctor => return run_doctor(),
         _ => {}
     }
 
@@ -198,6 +196,7 @@ pub fn run_cli() -> Result<(), AppError> {
     match cmd {
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),
+        Commands::Workspace { sub } => run_workspace(sub, &cfg),
         Commands::Plugin { sub } => run_plugin(sub, &cfg),
         Commands::Audit { sub } => run_audit(sub, &cfg),
         Commands::Chat { resume } => run_chat(resume, &cfg),
@@ -205,8 +204,8 @@ pub fn run_cli() -> Result<(), AppError> {
     }
 }
 
-pub(crate) fn run_init(config_path: &str) -> Result<(), AppError> {
-    let config_file = normalize_path(config_path)?;
+pub(crate) fn run_init() -> Result<(), AppError> {
+    let config_file = normalize_path(DEFAULT_CONFIG_PATH)?;
 
     // --- 6.12 旧目录迁移 ---
     if let Some(legacy) = detect_legacy_dir() {
@@ -270,18 +269,18 @@ pub(crate) fn run_init(config_path: &str) -> Result<(), AppError> {
             .interact_text()
             .unwrap_or_default();
 
-        let mut llm = crate::LlmConfig::default();
-        llm.provider = providers[provider_idx].to_string();
-        llm.default_model = model;
-        if !api_base.is_empty() {
-            llm.api_base = Some(api_base);
+        let llm = crate::LlmConfig {
+            provider: providers[provider_idx].to_string(),
+            default_model: model,
+            api_base: if api_base.is_empty() { None } else { Some(api_base) },
+            ..Default::default()
+        };
+        AppConfig {
+            llm,
+            ..Default::default()
         }
-        let mut cfg = AppConfig::default();
-        cfg.llm = llm;
-        cfg
     } else {
-        let existing = crate::load_config(Some(&config_file)).unwrap_or_default();
-        existing
+        crate::load_config(Some(&config_file)).unwrap_or_default()
     };
 
     // --- 写配置文件 ---
@@ -347,6 +346,16 @@ pub(crate) fn run_init(config_path: &str) -> Result<(), AppError> {
     }
 
     println!("\n初始化完成！运行 `pi doctor` 验证环境。");
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            println!(
+                "\n提示：若 pi 不在 PATH 中，请执行：\n  export PATH=\"{}:$PATH\"",
+                bin_dir.display()
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -378,20 +387,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
-    if config_path.is_none() {
-        let default = normalize_path(DEFAULT_CONFIG_PATH)?;
-        if !default.exists() {
-            println!("✗ 未找到配置文件");
-            println!("  → 运行 pi init 生成配置");
-            return Ok(());
-        }
-    }
-    let path: Option<PathBuf> = config_path
-        .and_then(|s| normalize_path(s).ok())
-        .or_else(|| normalize_path(DEFAULT_CONFIG_PATH).ok());
-    let path = match path {
-        Some(p) if p.exists() => p,
+pub(crate) fn run_doctor() -> Result<(), AppError> {
+    let path = match normalize_path(DEFAULT_CONFIG_PATH) {
+        Ok(p) if p.exists() => p,
         _ => {
             println!("✗ 未找到配置文件");
             println!("  → 运行 pi init 生成配置");
@@ -424,7 +422,7 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
         Some(p) => println!("✓ QuickJS wasm：{}", p.display()),
         None => {
             println!("✗ QuickJS wasm 未找到");
-            println!("  → 运行 pi init 或设置 WASMEDGE_QUICKJS_PATH");
+            println!("  → 运行 pi init 释放内嵌资源");
         }
     }
 
@@ -495,11 +493,8 @@ pub(crate) fn run_doctor(config_path: Option<&str>) -> Result<(), AppError> {
     Ok(())
 }
 
-fn config_file_path(custom: Option<&str>) -> Result<PathBuf, AppError> {
-    match custom {
-        Some(s) => normalize_path(s),
-        None => normalize_path(DEFAULT_CONFIG_PATH),
-    }
+fn config_file_path() -> Result<PathBuf, AppError> {
+    normalize_path(DEFAULT_CONFIG_PATH)
 }
 
 fn resolve_toml_key<'a>(val: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
@@ -599,7 +594,7 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
             }
         }
         ConfigSub::Set { key, value } => {
-            let path = config_file_path(None)?;
+            let path = config_file_path()?;
             if !path.exists() {
                 println!("配置文件不存在: {}。请先运行: pi init", path.display());
                 return Ok(());
@@ -627,8 +622,8 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
             write_file_atomic(&path, new_toml.as_bytes())?;
             println!("已设置 {} = {}", key, value);
         }
-        ConfigSub::Edit { config } => {
-            let path = config_file_path(config.as_deref())?;
+        ConfigSub::Edit => {
+            let path = config_file_path()?;
             if !path.exists() {
                 println!("配置文件不存在: {}。请先运行: pi init", path.display());
                 return Ok(());
@@ -666,21 +661,6 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                 }
             }
         }
-        ConfigSub::Export { path } => {
-            let toml_str =
-                toml::to_string_pretty(cfg).map_err(|e| AppError::Config(e.to_string()))?;
-            std::fs::write(&path, toml_str).map_err(AppError::Io)?;
-            println!("已导出到 {}", path.display());
-        }
-        ConfigSub::Import { path } => {
-            let content = std::fs::read_to_string(&path).map_err(AppError::Io)?;
-            let _: AppConfig =
-                toml::from_str(&content).map_err(|e| AppError::Config(e.to_string()))?;
-            println!(
-                "已从 {} 导入（当前仅校验格式，未写入默认路径）",
-                path.display()
-            );
-        }
     }
     Ok(())
 }
@@ -700,9 +680,9 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
                 println!("{}  {}  {}", key, entry.session_id, entry.updated_at);
             }
         }
-        SessionSub::New { cwd } => {
+        SessionSub::New => {
             let key = mgr.current_session_key();
-            let entry = mgr.create_session(key, cwd)?;
+            let entry = mgr.create_session(key, None)?;
             println!("已创建会话: {}  {}", entry.session_id, key);
         }
         SessionSub::Switch { key } => {
@@ -735,6 +715,86 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
         }
     }
     Ok(())
+}
+
+pub(crate) fn run_workspace(sub: WorkspaceSub, cfg: &AppConfig) -> Result<(), AppError> {
+    let agent_dir = resolve_agent_dir(cfg)?;
+    std::fs::create_dir_all(&agent_dir).map_err(AppError::Io)?;
+    let ws_file = agent_dir.join("ext_workspaces.json");
+
+    match sub {
+        WorkspaceSub::Add { path } => {
+            let abs = std::fs::canonicalize(&path).map_err(|_| {
+                AppError::Config(format!("路径不存在或无法访问: {}", path))
+            })?;
+            if !abs.is_dir() {
+                return Err(AppError::Config(format!("路径不是目录: {}", abs.display())));
+            }
+            let mut workspaces = load_workspaces(&ws_file);
+            if workspaces.contains(&abs) {
+                println!("工作区已存在: {}", abs.display());
+                return Ok(());
+            }
+            workspaces.push(abs.clone());
+            save_workspaces(&ws_file, &workspaces)?;
+            println!("已添加工作区: {}", abs.display());
+        }
+        WorkspaceSub::List => {
+            let workspaces = load_workspaces(&ws_file);
+            if workspaces.is_empty() {
+                println!("无已授权工作区。使用 workspace add <path> 添加。");
+                return Ok(());
+            }
+            for ws in &workspaces {
+                println!("{}", ws.display());
+            }
+        }
+        WorkspaceSub::Remove { path } => {
+            let abs = normalize_path(&path)?;
+            let mut workspaces = load_workspaces(&ws_file);
+            let before = workspaces.len();
+            workspaces.retain(|p| p != &abs);
+            if workspaces.len() == before {
+                println!("工作区不存在: {}", abs.display());
+                return Ok(());
+            }
+            save_workspaces(&ws_file, &workspaces)?;
+            println!("已移除工作区: {}", abs.display());
+        }
+    }
+    Ok(())
+}
+
+fn load_workspaces(path: &Path) -> Vec<PathBuf> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    #[derive(serde::Deserialize)]
+    struct WsFile {
+        #[serde(default)]
+        workspaces: Vec<PathBuf>,
+    }
+    match serde_json::from_str::<WsFile>(&content) {
+        Ok(f) => f.workspaces,
+        Err(_) => {
+            eprintln!("⚠ ext_workspaces.json 格式损坏，返回空列表");
+            Vec::new()
+        }
+    }
+}
+
+fn save_workspaces(path: &Path, workspaces: &[PathBuf]) -> Result<(), AppError> {
+    #[derive(serde::Serialize)]
+    struct WsFile<'a> {
+        workspaces: &'a [PathBuf],
+    }
+    let json = serde_json::to_string_pretty(&WsFile { workspaces })
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    write_file_atomic(path, json.as_bytes())
 }
 
 struct PluginContext {
@@ -823,15 +883,60 @@ fn format_plugin_info(info: &crate::PluginInfo) {
     println!("  加载时间:  {}", info.loaded_at);
 }
 
+// ─── Plugin Registry (registry.json) ──────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PluginRegistryEntry {
+    id: String,
+    path: String,
+    enabled: bool,
+    loaded_at: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct PluginRegistryFile {
+    #[serde(default)]
+    plugins: Vec<PluginRegistryEntry>,
+}
+
+fn registry_path(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(resolve_plugins_dir(cfg)?.join("registry.json"))
+}
+
+fn load_plugin_registry(path: &Path) -> PluginRegistryFile {
+    if !path.exists() {
+        return PluginRegistryFile::default();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| {
+            eprintln!("⚠ registry.json 格式损坏，返回空注册表");
+            PluginRegistryFile::default()
+        }),
+        Err(_) => PluginRegistryFile::default(),
+    }
+}
+
+fn save_plugin_registry(path: &Path, reg: &PluginRegistryFile) -> Result<(), AppError> {
+    let json = serde_json::to_string_pretty(reg)
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+    }
+    write_file_atomic(path, json.as_bytes())
+}
+
 pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError> {
     let ctx = build_plugin_context(cfg)?;
     let pm = &ctx.plugin_manager;
+    let reg_path = registry_path(cfg)?;
 
     match sub {
         PluginSub::List => {
             let ids = pm.list_loaded();
-            if ids.is_empty() {
-                println!("当前无已加载插件。");
+            let registry = load_plugin_registry(&reg_path);
+
+            if ids.is_empty() && registry.plugins.is_empty() {
+                println!("当前无已加载或已注册插件。");
                 if !ctx.config.plugin.auto_load.is_empty() {
                     println!(
                         "  提示: auto_load 中的插件将在对话模式启动时自动加载: {:?}",
@@ -839,13 +944,25 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     );
                 }
             } else {
-                println!("{:<20} {:<15} {:<10} {:<10}", "ID", "名称", "版本", "状态");
-                println!("{}", "-".repeat(55));
+                println!("{:<20} {:<15} {:<10} {:<10}", "ID", "路径/名称", "启用", "状态");
+                println!("{}", "-".repeat(60));
                 for id in &ids {
                     if let Some(info) = pm.get_plugin(id) {
                         println!(
                             "{:<20} {:<15} {:<10} {:?}",
-                            info.id, info.manifest.name, info.manifest.version, info.status
+                            info.id, info.manifest.name, "loaded", info.status
+                        );
+                    }
+                }
+                for entry in &registry.plugins {
+                    if !ids.contains(&entry.id) {
+                        let status = "registered";
+                        println!(
+                            "{:<20} {:<15} {:<10} {}",
+                            entry.id,
+                            entry.path,
+                            if entry.enabled { "是" } else { "否" },
+                            status
                         );
                     }
                 }
@@ -865,6 +982,15 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                         if let Some(info) = pm.get_plugin(id) {
                             format_plugin_info(&info);
                         }
+                        let mut registry = load_plugin_registry(&reg_path);
+                        registry.plugins.retain(|e| e.id != *id);
+                        registry.plugins.push(PluginRegistryEntry {
+                            id: id.clone(),
+                            path: path.clone(),
+                            enabled: true,
+                            loaded_at: chrono::Utc::now().to_rfc3339(),
+                        });
+                        save_plugin_registry(&reg_path, &registry)?;
                     }
                 }
                 Err(e) => {
@@ -877,15 +1003,34 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
             }
         }
         PluginSub::Unload { id } => match pm.unload_plugin(&id) {
-            Ok(()) => println!("已卸载插件: {}", id),
+            Ok(()) => {
+                println!("已卸载插件: {}", id);
+                let mut registry = load_plugin_registry(&reg_path);
+                registry.plugins.retain(|e| e.id != id);
+                save_plugin_registry(&reg_path, &registry)?;
+            }
             Err(e) => println!("卸载失败: {}", e),
         },
         PluginSub::Enable { id } => match pm.enable_plugin(&id) {
-            Ok(()) => println!("已启用插件: {}", id),
+            Ok(()) => {
+                println!("已启用插件: {}", id);
+                let mut registry = load_plugin_registry(&reg_path);
+                if let Some(entry) = registry.plugins.iter_mut().find(|e| e.id == id) {
+                    entry.enabled = true;
+                    save_plugin_registry(&reg_path, &registry)?;
+                }
+            }
             Err(e) => println!("启用失败: {}", e),
         },
         PluginSub::Disable { id } => match pm.disable_plugin(&id) {
-            Ok(()) => println!("已禁用插件: {}", id),
+            Ok(()) => {
+                println!("已禁用插件: {}", id);
+                let mut registry = load_plugin_registry(&reg_path);
+                if let Some(entry) = registry.plugins.iter_mut().find(|e| e.id == id) {
+                    entry.enabled = false;
+                    save_plugin_registry(&reg_path, &registry)?;
+                }
+            }
             Err(e) => println!("禁用失败: {}", e),
         },
         PluginSub::Info { id } => match pm.get_plugin(&id) {
@@ -1109,28 +1254,19 @@ mod tests {
     fn cli_parse_init() {
         let cli = Cli::try_parse_from(["pi", "init"]).unwrap();
         let cmd = cli.command.expect("subcommand");
-        assert!(matches!(cmd, Commands::Init { config: _ }));
-        if let Commands::Init { config } = cmd {
-            assert!(config.contains("pi.config.toml"));
-        }
+        assert!(matches!(cmd, Commands::Init));
     }
 
     #[test]
-    fn cli_parse_init_with_config_path() {
-        let cli = Cli::try_parse_from(["pi", "init", "--config", "/tmp/pi/pi.config.toml"]).unwrap();
-        let cmd = cli.command.unwrap();
-        if let Commands::Init { config } = cmd {
-            assert_eq!(config, "/tmp/pi/pi.config.toml");
-        }
+    fn cli_parse_init_rejects_config_flag() {
+        let r = Cli::try_parse_from(["pi", "init", "--config", "/tmp/pi.config.toml"]);
+        assert!(r.is_err(), "--config should be rejected after removal");
     }
 
     #[test]
     fn cli_parse_doctor() {
         let cli = Cli::try_parse_from(["pi", "doctor"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Doctor { config: None })
-        ));
+        assert!(matches!(cli.command, Some(Commands::Doctor)));
     }
 
     #[test]
@@ -1185,28 +1321,14 @@ mod tests {
     }
 
     #[test]
-    fn run_init_creates_config_in_temp_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("pi.config.toml");
-        let r = run_init(config_path.to_str().unwrap());
-        assert!(r.is_ok());
-        assert!(config_path.exists());
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("[log]") || content.contains("log"));
-    }
-
-    #[test]
-    fn run_doctor_none_when_no_default_config_returns_ok() {
-        let r = run_doctor(None);
+    fn run_init_returns_ok() {
+        let r = run_init();
         assert!(r.is_ok());
     }
 
     #[test]
-    fn run_doctor_some_with_valid_config_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("pi.config.toml");
-        run_init(config_path.to_str().unwrap()).unwrap();
-        let r = run_doctor(Some(config_path.to_str().unwrap()));
+    fn run_doctor_returns_ok() {
+        let r = run_doctor();
         assert!(r.is_ok());
     }
 
@@ -1246,27 +1368,6 @@ mod tests {
     }
 
     #[test]
-    fn run_config_export_writes_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out.toml");
-        let cfg = AppConfig::default();
-        let r = run_config(ConfigSub::Export { path: out.clone() }, &cfg);
-        assert!(r.is_ok());
-        assert!(out.exists());
-    }
-
-    #[test]
-    fn run_config_import_valid_toml_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("import.toml");
-        let toml = toml::to_string_pretty(&AppConfig::default()).unwrap();
-        std::fs::write(&path, toml).unwrap();
-        let cfg = AppConfig::default();
-        let r = run_config(ConfigSub::Import { path }, &cfg);
-        assert!(r.is_ok());
-    }
-
-    #[test]
     fn run_config_set_returns_ok() {
         let cfg = AppConfig::default();
         let r = run_config(
@@ -1281,28 +1382,17 @@ mod tests {
 
     #[test]
     fn run_config_edit_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pi.config.toml");
-        let toml = toml::to_string_pretty(&AppConfig::default()).unwrap();
-        std::fs::write(&path, toml).unwrap();
+        run_init().unwrap();
 
         let old_editor = std::env::var("EDITOR").ok();
-        // 禁止启动交互式 vi/vim（默认 EDITOR=vi 会阻塞直至用户退出）
         if cfg!(unix) {
             std::env::set_var("EDITOR", "true");
         } else {
-            let bat = dir.path().join("noop_editor.cmd");
-            std::fs::write(&bat, "@exit /b 0\r\n").unwrap();
-            std::env::set_var("EDITOR", bat.to_string_lossy().as_ref());
+            std::env::set_var("EDITOR", "cmd /c exit 0");
         }
 
         let cfg = AppConfig::default();
-        let r = run_config(
-            ConfigSub::Edit {
-                config: Some(path.to_string_lossy().into_owned()),
-            },
-            &cfg,
-        );
+        let r = run_config(ConfigSub::Edit, &cfg);
 
         match old_editor {
             Some(v) => std::env::set_var("EDITOR", v),
@@ -1312,8 +1402,8 @@ mod tests {
     }
 
     #[test]
-    fn run_doctor_invalid_config_path_returns_ok() {
-        let r = run_doctor(Some("/nonexistent/path/pi.config.toml"));
+    fn run_doctor_is_always_ok() {
+        let r = run_doctor();
         assert!(r.is_ok());
     }
 
@@ -1333,7 +1423,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
         ensure_work_dir_structure(&cfg).unwrap();
-        let r = run_session(SessionSub::New { cwd: None }, &cfg);
+        let r = run_session(SessionSub::New, &cfg);
         assert!(r.is_ok());
     }
 
@@ -1342,7 +1432,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
         ensure_work_dir_structure(&cfg).unwrap();
-        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let _ = run_session(SessionSub::New, &cfg);
         let r = run_session(SessionSub::List, &cfg);
         assert!(r.is_ok());
     }
@@ -1366,7 +1456,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
         ensure_work_dir_structure(&cfg).unwrap();
-        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let _ = run_session(SessionSub::New, &cfg);
         let r = run_session(
             SessionSub::Switch {
                 key: crate::DEFAULT_SESSION_KEY.to_string(),
@@ -1381,7 +1471,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
         ensure_work_dir_structure(&cfg).unwrap();
-        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let _ = run_session(SessionSub::New, &cfg);
         let r = run_session(
             SessionSub::Delete {
                 key: crate::DEFAULT_SESSION_KEY.to_string(),
@@ -1396,7 +1486,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
         ensure_work_dir_structure(&cfg).unwrap();
-        let _ = run_session(SessionSub::New { cwd: None }, &cfg);
+        let _ = run_session(SessionSub::New, &cfg);
         let r = run_session(
             SessionSub::Archive {
                 key: crate::DEFAULT_SESSION_KEY.to_string(),
@@ -1429,6 +1519,111 @@ mod tests {
         assert!(r.is_ok());
     }
 
+    // --- workspace tests ---
+
+    #[test]
+    fn run_workspace_add_list_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        let target_path = target.path().to_str().unwrap().to_string();
+
+        let r = run_workspace(WorkspaceSub::Add { path: target_path.clone() }, &cfg);
+        assert!(r.is_ok());
+
+        let r = run_workspace(WorkspaceSub::List, &cfg);
+        assert!(r.is_ok());
+
+        let r = run_workspace(WorkspaceSub::Remove { path: target_path }, &cfg);
+        assert!(r.is_ok());
+
+        let r = run_workspace(WorkspaceSub::List, &cfg);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_workspace_add_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+
+        let r = run_workspace(
+            WorkspaceSub::Add {
+                path: "/nonexistent/path/should/fail".to_string(),
+            },
+            &cfg,
+        );
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn run_workspace_add_duplicate_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        let target_path = target.path().to_str().unwrap().to_string();
+
+        let r = run_workspace(WorkspaceSub::Add { path: target_path.clone() }, &cfg);
+        assert!(r.is_ok());
+
+        let r = run_workspace(WorkspaceSub::Add { path: target_path }, &cfg);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_workspace_remove_nonexistent_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+
+        let r = run_workspace(
+            WorkspaceSub::Remove {
+                path: "/some/path".to_string(),
+            },
+            &cfg,
+        );
+        assert!(r.is_ok());
+    }
+
+    // --- plugin registry tests ---
+
+    #[test]
+    fn plugin_registry_load_save_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+
+        let reg = load_plugin_registry(&path);
+        assert!(reg.plugins.is_empty());
+
+        let mut reg = PluginRegistryFile::default();
+        reg.plugins.push(PluginRegistryEntry {
+            id: "test-plugin".to_string(),
+            path: "/some/path".to_string(),
+            enabled: true,
+            loaded_at: "2026-01-01T00:00:00Z".to_string(),
+        });
+        save_plugin_registry(&path, &reg).unwrap();
+
+        let loaded = load_plugin_registry(&path);
+        assert_eq!(loaded.plugins.len(), 1);
+        assert_eq!(loaded.plugins[0].id, "test-plugin");
+        assert!(loaded.plugins[0].enabled);
+    }
+
+    #[test]
+    fn plugin_registry_corrupt_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        std::fs::write(&path, "not valid json {{{").unwrap();
+
+        let reg = load_plugin_registry(&path);
+        assert!(reg.plugins.is_empty());
+    }
+
     #[test]
     fn run_audit_show_and_export_returns_ok() {
         let cfg = AppConfig::default();
@@ -1452,11 +1647,9 @@ mod tests {
     // --- doctor tests ---
 
     #[test]
-    fn run_doctor_with_valid_config_checks_wasm() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("pi.config.toml");
-        run_init(config_path.to_str().unwrap()).unwrap();
-        let r = run_doctor(Some(config_path.to_str().unwrap()));
+    fn run_doctor_after_init_returns_ok() {
+        run_init().unwrap();
+        let r = run_doctor();
         assert!(r.is_ok());
     }
 
@@ -1533,24 +1726,15 @@ mod tests {
 
     #[test]
     fn config_set_with_real_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("pi.config.toml");
-        run_init(config_path.to_str().unwrap()).unwrap();
-        let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("info") || content.contains("level"));
+        run_init().unwrap();
+        let config_path = normalize_path(DEFAULT_CONFIG_PATH).unwrap();
+        assert!(config_path.exists(), "config should exist after init");
     }
 
     #[test]
     fn config_file_path_resolves_default() {
-        let r = config_file_path(None);
+        let r = config_file_path();
         assert!(r.is_ok());
-    }
-
-    #[test]
-    fn config_file_path_resolves_custom() {
-        let r = config_file_path(Some("/tmp/custom.toml"));
-        assert!(r.is_ok());
-        assert_eq!(r.unwrap(), std::path::PathBuf::from("/tmp/custom.toml"));
     }
 
     // --- parse_audit_line tests ---

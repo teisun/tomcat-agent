@@ -14,7 +14,7 @@ use wasmedge_sdk::config::{
 #[derive(Debug)]
 pub struct WasmEngine {
     config: Config,
-    /// 已规范化的 QuickJS wasm 路径；None 时 instance 回退到环境变量 WASMEDGE_QUICKJS_PATH。
+    /// 已规范化的 QuickJS wasm 路径。
     quickjs_path: Option<PathBuf>,
 }
 
