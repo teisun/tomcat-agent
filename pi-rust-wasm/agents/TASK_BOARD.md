@@ -711,35 +711,43 @@
 
 ---
 
-### TASK-09 | T1-P2-002 | 插件安全扫描基础能力
+### TASK-09 | chat-path-env | Chat / 路径 / .env 整改
+
+> **计划全文**（流程、PLAN_SPEC 六维、风险与 E2E 要点）：Cursor 计划 `chat_路径_wasmedge_整改_d21d6d2a.plan.md`（默认路径 `~/.cursor/plans/`；本表为执行摘要）。**WasmEdge 动态库子进程**不在本 TASK，见 [docs/reports/wasmedge-dylib-sip-subprocess.md](../docs/reports/wasmedge-dylib-sip-subprocess.md)。
 
 | 字段 | 内容 |
 |------|------|
-| **优先级** | P2 |
+| **优先级** | P1（内含 **P0** 子项须优先交付：transcript 400、`pi chat` 遇错不整段退出） |
 | **状态** | `TODO` |
 | **负责人** | — |
-| **分支** | `feature/plugin-security` |
+| **分支** | `feature/chat-path-env`（或按子项拆支：`feature/chat-transcript-and-resilience`、`feature/ext-workspaces-executor` 等，见计划） |
 | **阻塞点** | — |
 
-**目标**：在插件加载前增加安全扫描，拦截风险插件。
+**目标**：消除 transcript 截断导致的 OpenAI 400；单次 API/Agent 错误不结束整段 `pi chat`；`ext_workspaces.json` 与 `DefaultPrimitiveExecutor` 路径策略一致；`.env` 代理模板、确认框 `{agentId} · host|pluginId`、system prompt 防目录幻觉。
 
-**子项**（参考 tasks_details.md T1-P2-002）：
-- [ ] 2.1 静态检查恶意模式、越权 API 使用、敏感信息泄露风险（规则可配置）
-- [ ] 2.2 风险插件拦截并提示用户，不静默加载；可选"强制加载"二次确认
+**子项**（与计划内 P0-a / P0-b / P1 / P2 对齐）：
+- [ ] **P0-a** `build_context_messages`：尾部窗口向上追溯到首条 `user`，注入 system 后为 `[system, user, …]`（[`session/manager.rs`](../src/core/session/manager.rs)）
+- [ ] **P0-b** `chat_loop`：`agent_loop.run` 失败时终端打印清晰错误并 `continue`；**不把 API 错误写入送给 LLM 的 transcript**（可选独立审计日志）
+- [ ] **P1** 加载 `ext_workspaces.json` 并入允许路径；测试 + [`user-guide.md`](../docs/user-guide.md)
+- [ ] **P2** `pi init` `.env` 代理注释模板或条件写入；确认框来源格式；[`build_system_prompt`](../src/core/system_prompt.rs) 约束
 
-**依赖**：TASK-01 (T1-P0-009-completion)
+**依赖**：—
 
 **被依赖**：—
 
 **协作接口**：
-- 消费：`PluginManifest`、插件入口代码、`SecurityConfig`
-- 提供：安全扫描接口，嵌入 `PluginManager::load_plugin` 流程
+- 消费：`SessionManager`、`ChatContext`、`DefaultPrimitiveExecutor`、`run_init`/`run_workspace`、OpenAI 消息组装
+- 提供：合规 LLM 消息序列、可恢复的 CLI 对话、与 workspace 注册一致的四原语路径策略
 
-**验收标准**：
-- 加载插件前自动执行安全扫描
-- 风险插件被拦截并给出明确提示
-- 提供"强制加载"二次确认选项
-- 扫描规则可配置
+**验收标准**（须按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 在本分支完成集成/E2E，并更新 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 相关条目）：
+- 多轮 tool 后不因截断触发 400；模拟 API 错误后仍停留在 `u>`
+- `pi workspace add` 后外部根下 `read_file`/`list_dir` 在策略内成功
+- `.env`/确认框/system prompt 符合计划验收描述
+- `rustfmt` / `clippy` / 相关 `cargo test` 通过；不弱化断言
+
+**实施流程**：按 [Dispatcher.md](./Dispatcher.md) 领取本 TASK → 子计划经用户确认 → 开发 → 更新 `docs/status/{分支}.md` → `PENDING_INTEGRATION`。
+
+**说明**：openspec 中 [T1-P2-002 插件安全扫描](../openspec/changes/001-mvp/tasks_details.md) 原对应本 TASK-09；**现 TASK-09 已改为本整改**。插件安全扫描若仍要做，须在 TASK_BOARD **另起新 TASK** 引用 `T1-P2-002`，勿与本条混用。
 
 ---
 
