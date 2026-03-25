@@ -718,7 +718,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1（内含 **P0** 子项须优先交付：transcript 400、`pi chat` 遇错不整段退出） |
-| **状态** | `DOING` |
+| **状态** | `PENDING_INTEGRATION` |
 | **负责人** | Jerry |
 | **分支** | `feature/chat-path-env` |
 | **阻塞点** | — |
