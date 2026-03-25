@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
-    resolve_agent_dir, resolve_audit_dir, resolve_plugins_dir, resolve_quickjs_path,
-    resolve_sessions_dir, validate_config, wire, write_file_atomic, AppConfig, AppError,
-    AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus, FileAuditRecorder,
-    PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder,
-    WasmEngine, WasmEngineConfig, DEFAULT_LLM_MODEL,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config,
+    load_config_toml_file, normalize_path, resolve_audit_dir, resolve_extra_roots_paths,
+    resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir, validate_config, wire,
+    write_file_atomic, AppConfig, AppError, AuditFilter, AuditStore, DefaultEventBus,
+    DefaultToolRegistry, EventBus, FileAuditRecorder, PluginManager, SessionManager, Tool,
+    ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
+    DEFAULT_LLM_MODEL,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi_/pi.config.toml";
@@ -715,17 +716,53 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
     Ok(())
 }
 
-pub(crate) fn run_workspace(sub: WorkspaceSub, cfg: &AppConfig) -> Result<(), AppError> {
-    let agent_dir = resolve_agent_dir(cfg)?;
-    std::fs::create_dir_all(&agent_dir).map_err(AppError::Io)?;
-    let ws_file = agent_dir.join("ext_workspaces.json");
+pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), AppError> {
+    let config_path = config_file_path()?;
 
     match sub {
-        WorkspaceSub::Add { path, cwd } => {
+        WorkspaceSub::List => {
+            if !config_path.exists() {
+                println!(
+                    "配置文件不存在: {}。请先运行: pi init",
+                    config_path.display()
+                );
+                return Ok(());
+            }
+            let list_cfg = load_config(Some(&config_path))?;
+            let mut any = false;
+            for s in &list_cfg.workspace.extra_roots {
+                let t = s.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                any = true;
+                match normalize_path(t)
+                    .ok()
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+                {
+                    Some(c) => println!("{}", c.display()),
+                    None => println!("{}", t),
+                }
+            }
+            if !any {
+                println!("无已授权工作区。使用 workspace add <path> 或 workspace add --cwd 添加。");
+            }
+        }
+        WorkspaceSub::Add {
+            path: add_path,
+            cwd,
+        } => {
+            if !config_path.exists() {
+                println!(
+                    "配置文件不存在: {}。请先运行: pi init",
+                    config_path.display()
+                );
+                return Ok(());
+            }
             let target = if cwd {
                 std::env::current_dir()
                     .map_err(|e| AppError::Config(format!("无法获取当前工作目录: {}", e)))?
-            } else if let Some(p) = path {
+            } else if let Some(p) = add_path {
                 PathBuf::from(p)
             } else {
                 return Err(AppError::Config("请提供目录路径或使用 --cwd".to_string()));
@@ -736,71 +773,63 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, cfg: &AppConfig) -> Result<(), Ap
             if !abs.is_dir() {
                 return Err(AppError::Config(format!("路径不是目录: {}", abs.display())));
             }
-            let mut workspaces = load_workspaces(&ws_file);
-            if workspaces.contains(&abs) {
+            let mut file_cfg = load_config_toml_file(&config_path)?;
+            let existing = resolve_extra_roots_paths(&file_cfg)?;
+            if existing.contains(&abs) {
                 println!("工作区已存在: {}", abs.display());
                 return Ok(());
             }
-            workspaces.push(abs.clone());
-            save_workspaces(&ws_file, &workspaces)?;
+            file_cfg
+                .workspace
+                .extra_roots
+                .push(abs.to_string_lossy().into_owned());
+            validate_config(&file_cfg)?;
+            let toml_str =
+                toml::to_string_pretty(&file_cfg).map_err(|e| AppError::Config(e.to_string()))?;
+            write_file_atomic(&config_path, toml_str.as_bytes())?;
             println!("已添加工作区: {}", abs.display());
         }
-        WorkspaceSub::List => {
-            let workspaces = load_workspaces(&ws_file);
-            if workspaces.is_empty() {
-                println!("无已授权工作区。使用 workspace add <path> 或 workspace add --cwd 添加。");
+        WorkspaceSub::Remove { path: path_arg } => {
+            if !config_path.exists() {
+                println!(
+                    "配置文件不存在: {}。请先运行: pi init",
+                    config_path.display()
+                );
                 return Ok(());
             }
-            for ws in &workspaces {
-                println!("{}", ws.display());
-            }
-        }
-        WorkspaceSub::Remove { path } => {
-            let abs = normalize_path(&path)?;
-            let mut workspaces = load_workspaces(&ws_file);
-            let before = workspaces.len();
-            workspaces.retain(|p| p != &abs);
-            if workspaces.len() == before {
-                println!("工作区不存在: {}", abs.display());
+            let mut file_cfg = load_config_toml_file(&config_path)?;
+            let norm_user = normalize_path(&path_arg)?;
+            let canon_user = std::fs::canonicalize(&norm_user).ok();
+
+            let before_len = file_cfg.workspace.extra_roots.len();
+            file_cfg.workspace.extra_roots.retain(|entry| {
+                let t = entry.trim();
+                if t.is_empty() {
+                    return true;
+                }
+                let matches = if let Some(ref cu) = canon_user {
+                    normalize_path(t)
+                        .ok()
+                        .and_then(|p| std::fs::canonicalize(p).ok())
+                        .map(|ct| &ct == cu)
+                        .unwrap_or(false)
+                } else {
+                    normalize_path(t).map(|nt| nt == norm_user).unwrap_or(false)
+                };
+                !matches
+            });
+            if file_cfg.workspace.extra_roots.len() == before_len {
+                println!("工作区不存在: {}", norm_user.display());
                 return Ok(());
             }
-            save_workspaces(&ws_file, &workspaces)?;
-            println!("已移除工作区: {}", abs.display());
+            validate_config(&file_cfg)?;
+            let toml_str =
+                toml::to_string_pretty(&file_cfg).map_err(|e| AppError::Config(e.to_string()))?;
+            write_file_atomic(&config_path, toml_str.as_bytes())?;
+            println!("已移除工作区: {}", norm_user.display());
         }
     }
     Ok(())
-}
-
-fn load_workspaces(path: &Path) -> Vec<PathBuf> {
-    if !path.exists() {
-        return Vec::new();
-    }
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    #[derive(serde::Deserialize)]
-    struct WsFile {
-        #[serde(default)]
-        workspaces: Vec<PathBuf>,
-    }
-    match serde_json::from_str::<WsFile>(&content) {
-        Ok(f) => f.workspaces,
-        Err(_) => {
-            eprintln!("⚠ ext_workspaces.json 格式损坏，返回空列表");
-            Vec::new()
-        }
-    }
-}
-
-fn save_workspaces(path: &Path, workspaces: &[PathBuf]) -> Result<(), AppError> {
-    #[derive(serde::Serialize)]
-    struct WsFile<'a> {
-        workspaces: &'a [PathBuf],
-    }
-    let json = serde_json::to_string_pretty(&WsFile { workspaces })
-        .map_err(|e| AppError::Config(e.to_string()))?;
-    write_file_atomic(path, json.as_bytes())
 }
 
 struct PluginContext {
@@ -1250,7 +1279,36 @@ pub(crate) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::load_config_toml_file;
+    use crate::resolve_extra_roots_paths;
     use crate::wire;
+    use std::sync::Mutex;
+
+    /// `pi workspace` 读写 `~/.pi_/pi.config.toml`；单测串行化并隔离 `HOME`，避免触碰真实用户目录。
+    static WORKSPACE_CLI_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_pi_config_in_home<R>(work_dir: &std::path::Path, f: impl FnOnce() -> R) -> R {
+        let _lock = WORKSPACE_CLI_HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let pi = home.path().join(".pi_");
+        std::fs::create_dir_all(&pi).unwrap();
+        let mut c = AppConfig::default();
+        c.log.level = "info".to_string();
+        c.storage.work_dir = Some(work_dir.to_str().unwrap().to_string());
+        std::fs::write(
+            pi.join("pi.config.toml"),
+            toml::to_string_pretty(&c).unwrap(),
+        )
+        .unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let out = f();
+        match prev {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
 
     fn test_config(dir: &std::path::Path) -> AppConfig {
         let mut cfg = AppConfig::default();
@@ -1533,113 +1591,123 @@ mod tests {
     fn run_workspace_add_list_remove() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
-        ensure_work_dir_structure(&cfg).unwrap();
+        with_pi_config_in_home(dir.path(), || {
+            ensure_work_dir_structure(&cfg).unwrap();
 
-        let target = tempfile::tempdir().unwrap();
-        let target_path = target.path().to_str().unwrap().to_string();
+            let target = tempfile::tempdir().unwrap();
+            let target_path = target.path().to_str().unwrap().to_string();
 
-        let r = run_workspace(
-            WorkspaceSub::Add {
-                path: Some(target_path.clone()),
-                cwd: false,
-            },
-            &cfg,
-        );
-        assert!(r.is_ok());
+            let r = run_workspace(
+                WorkspaceSub::Add {
+                    path: Some(target_path.clone()),
+                    cwd: false,
+                },
+                &cfg,
+            );
+            assert!(r.is_ok());
 
-        let r = run_workspace(WorkspaceSub::List, &cfg);
-        assert!(r.is_ok());
+            let r = run_workspace(WorkspaceSub::List, &cfg);
+            assert!(r.is_ok());
 
-        let r = run_workspace(WorkspaceSub::Remove { path: target_path }, &cfg);
-        assert!(r.is_ok());
+            let r = run_workspace(WorkspaceSub::Remove { path: target_path }, &cfg);
+            assert!(r.is_ok());
 
-        let r = run_workspace(WorkspaceSub::List, &cfg);
-        assert!(r.is_ok());
+            let r = run_workspace(WorkspaceSub::List, &cfg);
+            assert!(r.is_ok());
+        });
     }
 
     #[test]
     fn run_workspace_add_nonexistent_fails() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
-        ensure_work_dir_structure(&cfg).unwrap();
+        with_pi_config_in_home(dir.path(), || {
+            ensure_work_dir_structure(&cfg).unwrap();
 
-        let r = run_workspace(
-            WorkspaceSub::Add {
-                path: Some("/nonexistent/path/should/fail".to_string()),
-                cwd: false,
-            },
-            &cfg,
-        );
-        assert!(r.is_err());
+            let r = run_workspace(
+                WorkspaceSub::Add {
+                    path: Some("/nonexistent/path/should/fail".to_string()),
+                    cwd: false,
+                },
+                &cfg,
+            );
+            assert!(r.is_err());
+        });
     }
 
     #[test]
     fn run_workspace_add_duplicate_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
-        ensure_work_dir_structure(&cfg).unwrap();
+        with_pi_config_in_home(dir.path(), || {
+            ensure_work_dir_structure(&cfg).unwrap();
 
-        let target = tempfile::tempdir().unwrap();
-        let target_path = target.path().to_str().unwrap().to_string();
+            let target = tempfile::tempdir().unwrap();
+            let target_path = target.path().to_str().unwrap().to_string();
 
-        let r = run_workspace(
-            WorkspaceSub::Add {
-                path: Some(target_path.clone()),
-                cwd: false,
-            },
-            &cfg,
-        );
-        assert!(r.is_ok());
+            let r = run_workspace(
+                WorkspaceSub::Add {
+                    path: Some(target_path.clone()),
+                    cwd: false,
+                },
+                &cfg,
+            );
+            assert!(r.is_ok());
 
-        let r = run_workspace(
-            WorkspaceSub::Add {
-                path: Some(target_path),
-                cwd: false,
-            },
-            &cfg,
-        );
-        assert!(r.is_ok());
+            let r = run_workspace(
+                WorkspaceSub::Add {
+                    path: Some(target_path),
+                    cwd: false,
+                },
+                &cfg,
+            );
+            assert!(r.is_ok());
+        });
     }
 
     #[test]
     fn run_workspace_add_cwd_adds_current_dir() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
-        ensure_work_dir_structure(&cfg).unwrap();
+        with_pi_config_in_home(dir.path(), || {
+            ensure_work_dir_structure(&cfg).unwrap();
 
-        let target = tempfile::tempdir().unwrap();
-        let canon = std::fs::canonicalize(target.path()).unwrap();
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(target.path()).unwrap();
-        let r = run_workspace(
-            WorkspaceSub::Add {
-                path: None,
-                cwd: true,
-            },
-            &cfg,
-        );
-        std::env::set_current_dir(&prev).unwrap();
-        assert!(r.is_ok());
+            let target = tempfile::tempdir().unwrap();
+            let canon = std::fs::canonicalize(target.path()).unwrap();
+            let prev = std::env::current_dir().unwrap();
+            std::env::set_current_dir(target.path()).unwrap();
+            let r = run_workspace(
+                WorkspaceSub::Add {
+                    path: None,
+                    cwd: true,
+                },
+                &cfg,
+            );
+            std::env::set_current_dir(&prev).unwrap();
+            assert!(r.is_ok());
 
-        let agent_dir = resolve_agent_dir(&cfg).unwrap();
-        let ws_file = agent_dir.join("ext_workspaces.json");
-        let list = super::load_workspaces(&ws_file);
-        assert!(list.iter().any(|p| p == &canon));
+            let cfg_path = normalize_path(DEFAULT_CONFIG_PATH).unwrap();
+            let file_cfg = load_config_toml_file(&cfg_path).unwrap();
+            let list = resolve_extra_roots_paths(&file_cfg).unwrap();
+            assert!(list.iter().any(|p| p == &canon));
+        });
     }
 
     #[test]
     fn run_workspace_remove_nonexistent_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_config(dir.path());
-        ensure_work_dir_structure(&cfg).unwrap();
+        with_pi_config_in_home(dir.path(), || {
+            ensure_work_dir_structure(&cfg).unwrap();
 
-        let r = run_workspace(
-            WorkspaceSub::Remove {
-                path: "/some/path".to_string(),
-            },
-            &cfg,
-        );
-        assert!(r.is_ok());
+            let r = run_workspace(
+                WorkspaceSub::Remove {
+                    path: "/some/path".to_string(),
+                },
+                &cfg,
+            );
+            assert!(r.is_ok());
+        });
     }
 
     // --- plugin registry tests ---

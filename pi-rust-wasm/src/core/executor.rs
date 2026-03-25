@@ -30,7 +30,7 @@ pub struct DefaultPrimitiveExecutor {
     audit: Arc<dyn AuditRecorder>,
     /// 默认工作目录：path_whitelist 为空时作为隐式白名单根目录。
     workspace_dir: PathBuf,
-    /// ext_workspaces.json 中的额外授权根路径，与 workspace_dir 并集。
+    /// `pi.config.toml` 中 `[workspace] extra_roots` 的额外授权根路径，与 `workspace_dir` 并集（全局，所有 agent 共用）。
     extra_roots: Vec<PathBuf>,
 }
 
@@ -50,7 +50,7 @@ impl DefaultPrimitiveExecutor {
         }
     }
 
-    /// 设置 ext_workspaces 中加载的额外授权根路径。
+    /// 设置配置中解析得到的额外授权根路径（与 `pi workspace` / TOML 同源）。
     pub fn with_extra_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.extra_roots = roots;
         self

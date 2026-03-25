@@ -723,12 +723,12 @@
 | **分支** | `feature/chat-path-env` |
 | **阻塞点** | — |
 
-**目标**：消除 transcript 截断导致的 OpenAI 400；单次 API/Agent 错误不结束整段 `pi chat`；`ext_workspaces.json` 与 `DefaultPrimitiveExecutor` 路径策略一致；`.env` 代理模板、确认框 `{agentId} · host|pluginId`、system prompt 防目录幻觉。
+**目标**：消除 transcript 截断导致的 OpenAI 400；单次 API/Agent 错误不结束整段 `pi chat`；`pi.config.toml` 全局 `[workspace] extra_roots` 与 `DefaultPrimitiveExecutor` 路径策略一致；`.env` 代理模板、确认框 `{agentId} · host|pluginId`、system prompt 防目录幻觉。
 
 **子项**（与计划内 P0-a / P0-b / P1 / P2 对齐）：
 - [ ] **P0-a** `build_context_messages`：尾部窗口向上追溯到首条 `user`，注入 system 后为 `[system, user, …]`（[`session/manager.rs`](../src/core/session/manager.rs)）
 - [ ] **P0-b** `chat_loop`：`agent_loop.run` 失败时终端打印清晰错误并 `continue`；**不把 API 错误写入送给 LLM 的 transcript**（可选独立审计日志）
-- [ ] **P1** 加载 `ext_workspaces.json` 并入允许路径；测试 + [`user-guide.md`](../docs/user-guide.md)
+- [ ] **P1** 从 `pi.config.toml` 加载全局 `workspace.extra_roots` 并入允许路径；测试 + [`user-guide.md`](../docs/user-guide.md)（已废弃 per-agent `ext_workspaces.json`）
 - [ ] **P2** `pi init` `.env` 代理注释模板或条件写入；确认框来源格式；[`build_system_prompt`](../src/core/system_prompt.rs) 约束
 
 **依赖**：—
@@ -835,7 +835,7 @@
 - [x] 12.6 移除 config export/import 子命令 + 测试 + E2E
 - [x] 12.7 移除 WASMEDGE_QUICKJS_PATH 死代码 + 环境变量文档
 - [x] 12.8 修复工具调用未写入会话记录 bug
-- [x] 12.9 workspace add/list/remove + ext_workspaces.json
+- [x] 12.9 workspace add/list/remove（持久化 `pi.config.toml` `[workspace] extra_roots`；原 ext_workspaces.json 已废弃）
 - [x] 12.10 新增 plugins/registry.json 全局插件注册表
 
 **依赖**：TASK-06（DONE）

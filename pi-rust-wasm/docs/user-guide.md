@@ -307,7 +307,7 @@ pi session delete agent:main:main
 
 ## 5. 工作区管理
 
-pi 通过 `workspace` 子命令管理 agent 被授权访问的外部目录。授权列表持久化在 `{agent_dir}/ext_workspaces.json`。
+pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 自己的设计态工作区 `workspace-{id}` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `extra_roots`），**所有 agent 共用同一份列表**。
 
 ### 添加工作区
 

@@ -119,14 +119,11 @@ impl WasmInstance {
     }
 
     fn run_script_file_impl(&mut self, script_path: &Path) -> Result<serde_json::Value, AppError> {
-        let quickjs_path = self
-            .quickjs_path
-            .clone()
-            .ok_or_else(|| {
-                AppError::QuickJS(
-                    "QuickJS wasm not found. Run `pi init` to extract embedded assets.".to_string(),
-                )
-            })?;
+        let quickjs_path = self.quickjs_path.clone().ok_or_else(|| {
+            AppError::QuickJS(
+                "QuickJS wasm not found. Run `pi init` to extract embedded assets.".to_string(),
+            )
+        })?;
 
         let combined = self.build_combined_script(script_path)?;
         let (combined_path, _tmp_dir) = temp_js_file(&combined)?;
@@ -268,7 +265,9 @@ impl WasmInstance {
         script_path: &Path,
     ) -> Result<(Vm<'_, dyn SyncInst>, PathBuf, tempfile::TempDir), AppError> {
         let quickjs_path = self.quickjs_path.clone().ok_or_else(|| {
-            AppError::QuickJS("QuickJS wasm not found. Run `pi init` to extract embedded assets.".to_string())
+            AppError::QuickJS(
+                "QuickJS wasm not found. Run `pi init` to extract embedded assets.".to_string(),
+            )
         })?;
 
         let mut combined = self.build_combined_script(script_path)?;
@@ -395,7 +394,10 @@ fn resolve_quickjs_modules_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
         .or_else(|| {
-            let p = dirs::home_dir()?.join(".pi_").join("assets").join("modules");
+            let p = dirs::home_dir()?
+                .join(".pi_")
+                .join("assets")
+                .join("modules");
             p.is_dir().then_some(p)
         })
         .or_else(|| {

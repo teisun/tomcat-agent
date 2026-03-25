@@ -342,9 +342,9 @@ impl HostApiDispatcher {
                 context: serde_json::json!({}),
             });
             match &send_result {
-                Ok(()) => tracing::debug!(
-                    "[cleanup_instance] {instance_id} try_send __shutdown ok"
-                ),
+                Ok(()) => {
+                    tracing::debug!("[cleanup_instance] {instance_id} try_send __shutdown ok")
+                }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
                     tracing::warn!(
                         "[cleanup_instance] {instance_id} try_send __shutdown failed: channel full"
@@ -530,9 +530,7 @@ impl HostApiDispatcher {
             ("tools", "registerFlag") | ("tools", "registerShortcut") | ("tools", "getFlag") => {
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
-            ("session", "getSessionName") => {
-                Ok(HostResponse::ok(serde_json::json!({"name": ""})))
-            }
+            ("session", "getSessionName") => Ok(HostResponse::ok(serde_json::json!({"name": ""}))),
             ("session", "setSessionName") | ("session", "appendEntry") => {
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
@@ -1203,10 +1201,7 @@ impl HostApiDispatcher {
 
     /// `ctx.ui.editor()`: no-TTY fallback returns the prefill text.
     fn do_context_ui_editor(params: &serde_json::Value) -> HostResponse {
-        let prefill = params
-            .get("prefill")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let prefill = params.get("prefill").and_then(|v| v.as_str()).unwrap_or("");
         tracing::debug!(
             "[context.ui.editor] title={:?} prefill_len={}",
             params.get("title").and_then(|v| v.as_str()).unwrap_or(""),
@@ -1287,10 +1282,7 @@ impl HostApiDispatcher {
         Ok(HostResponse::ok(serde_json::json!({ "id": id })))
     }
 
-    fn do_session_get_entry(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<HostResponse, AppError> {
+    fn do_session_get_entry(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
         let session = match &self.session {
             None => return Ok(HostResponse::err("SessionManager not configured")),
             Some(s) => s,
@@ -1320,18 +1312,12 @@ impl HostApiDispatcher {
         Ok(HostResponse::ok(data))
     }
 
-    fn do_session_get_entries(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<HostResponse, AppError> {
+    fn do_session_get_entries(&self, params: &serde_json::Value) -> Result<HostResponse, AppError> {
         let session = match &self.session {
             None => return Ok(HostResponse::err("SessionManager not configured")),
             Some(s) => s,
         };
-        let cap = params
-            .get("cap")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2000) as usize;
+        let cap = params.get("cap").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
         let entries = session.get_entries(cap)?;
         let list: Vec<serde_json::Value> = entries
             .into_iter()

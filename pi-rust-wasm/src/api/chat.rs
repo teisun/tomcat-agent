@@ -9,10 +9,10 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    agent_messages_from_chat, convert_to_llm_format, resolve_agent_dir, resolve_sessions_dir,
-    resolve_workspace_dir, AgentLoop, AgentLoopConfig, AppConfig, ChatMessage,
-    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor,
-    SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    agent_messages_from_chat, convert_to_llm_format, resolve_extra_roots_paths,
+    resolve_sessions_dir, resolve_workspace_dir, AgentLoop, AgentLoopConfig, AppConfig,
+    ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
+    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -47,7 +47,7 @@ impl ChatContext {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
             None => Arc::new(TracingAuditRecorder),
         };
-        let extra_roots = load_ext_workspaces(&config);
+        let extra_roots = resolve_extra_roots_paths(&config)?;
         let confirmation = Arc::new(CliConfirmation);
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
             DefaultPrimitiveExecutor::new(
@@ -375,31 +375,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 /// 判断错误是否致命（配置缺失等不可恢复场景）；API/网络错误为非致命。
 fn is_fatal_error(e: &AppError) -> bool {
     matches!(e, AppError::Config(_))
-}
-
-/// 从 ext_workspaces.json 加载额外授权根路径（与 cli.rs run_workspace 逻辑一致）。
-fn load_ext_workspaces(config: &AppConfig) -> Vec<std::path::PathBuf> {
-    let agent_dir = match resolve_agent_dir(config) {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
-    let ws_file = agent_dir.join("ext_workspaces.json");
-    if !ws_file.exists() {
-        return Vec::new();
-    }
-    let content = match std::fs::read_to_string(&ws_file) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    #[derive(serde::Deserialize)]
-    struct WsFile {
-        #[serde(default)]
-        workspaces: Vec<std::path::PathBuf>,
-    }
-    match serde_json::from_str::<WsFile>(&content) {
-        Ok(f) => f.workspaces,
-        Err(_) => Vec::new(),
-    }
 }
 
 fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
