@@ -1,5 +1,32 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-25 14:10 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：`feature/init-experience` → `feature/user-guide-remediation` 并入 develop
+
+**合并顺序**：先 `feature/init-experience`（TASK-06），再 `feature/user-guide-remediation`（含 TASK-12 user-guide 整改、TASK-16 init 三步 / workspace `--cwd`、VmActor 关停报告等）；相对 `origin/develop` 为 **4** 个 fast-forward 提交（`54549f9` … `4d99003`）。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` | PASS（77 passed） |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` | PASS（39 passed） |
+
+**执行环境**：macOS darwin；默认（非 standalone）debug/`pi` 需系统 WasmEdge 动态库，本次验收设置 `DYLD_LIBRARY_PATH=$HOME/.wasmedge/lib` 后全量串行执行；日志 `pi-rust-wasm/.integration_test_output.log` 末尾 `EXIT_CODE=0`。
+
+#### 看板
+
+- **TASK-06**、**TASK-12**（user-guide-remediation）、**TASK-16**：集成通过后已在 `TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-24 14:42 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：`feature/directory_refactor` 并入 develop（非看板任务）

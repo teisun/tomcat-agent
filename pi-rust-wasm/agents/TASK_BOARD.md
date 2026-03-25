@@ -591,7 +591,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
 | **分支** | `feature/init-experience` |
 | **阻塞点** | — |
@@ -811,7 +811,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
 | **分支** | `feature/user-guide-remediation` |
 | **阻塞点** | — |
@@ -830,7 +830,7 @@
 - [x] 12.9 workspace add/list/remove + ext_workspaces.json
 - [x] 12.10 新增 plugins/registry.json 全局插件注册表
 
-**依赖**：TASK-06（PENDING_INTEGRATION）
+**依赖**：TASK-06（DONE）
 
 **被依赖**：—
 
@@ -852,7 +852,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
 | **分支** | `feature/user-guide-remediation` |
 | **阻塞点** | — |
