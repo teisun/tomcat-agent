@@ -844,3 +844,29 @@
 - `cargo clippy` 无新增 warning
 - user-guide.md 中每条操作示例与实际 CLI 行为一致
 - E2E_SCENARIO_LIBRARY.md 与 tests/ 同步
+
+---
+
+### TASK-16 | init-3step-workspace-cwd | pi init 三步重构与 workspace add --cwd
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Tom |
+| **分支** | `feature/user-guide-remediation` |
+| **阻塞点** | — |
+
+**目标**：`pi init` 改为 [1/3] 环境初始化 / [2/3] 资源检查（复用 doctor，跳过 API Key）/ [3/3] API Key；配置已存在默认不覆盖；PATH 自动写入 shell 配置；`pi workspace add --cwd` 添加当前目录。
+
+**子项**：
+- [x] 16.1 提取 `run_doctor_checks`，init 与 doctor 共用
+- [x] 16.2 重构 `run_init` 三步 + `auto_add_to_path`
+- [x] 16.3 `workspace add --cwd`
+- [x] 16.4 测试与 user-guide、E2E 场景库、全量验收
+
+**依赖**：TASK-12（可并行收尾）
+
+**被依赖**：—
+
+**验收标准**：见 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §1–§4；`cargo clippy --all-targets -- -D warnings`；场景库与测试同步。

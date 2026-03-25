@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::WasmInstance;
 
@@ -159,19 +160,44 @@ impl VmActor {
 
         // 2. Build persistent Vm and run _start
         //    run_script(_start) blocks until JS event loop exits (details in 15.6)
+        let run_vm_wall = Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_vm()));
+        let run_vm_wall_ms = run_vm_wall.elapsed().as_millis();
+        tracing::debug!(
+            "[VmActor {pid}] run_vm wall elapsed_ms={run_vm_wall_ms} (init_vm + _start; panic_caught={})",
+            result.is_err()
+        );
+
+        // Init 之后 cmd_rx 在 _start 阻塞期间不再被轮询；Shutdown 等会积压在 channel 中。
+        let mut drained = 0usize;
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            drained += 1;
+            tracing::trace!(
+                "[VmActor {pid}] discarding buffered cmd_rx after _start: {:?}",
+                cmd
+            );
+        }
+        if drained > 0 {
+            tracing::warn!(
+                "[VmActor {pid}] drained {drained} VmCommand(s) from cmd_rx after _start returned; \
+                 these were not processed while VM blocked (Shutdown/DispatchEvent are no-ops on the actor thread during _start)"
+            );
+        }
 
         match result {
             Ok(Ok(())) => {
                 self.set_state(VmActorState::Stopped);
+                tracing::debug!("[VmActor {pid}] run finished state=Stopped");
             }
             Ok(Err(e)) => {
                 tracing::error!("[VmActor {}] VM execution error: {e}", pid);
                 self.set_state(VmActorState::Error);
+                tracing::debug!("[VmActor {pid}] run finished state=Error");
             }
             Err(_panic) => {
                 tracing::error!("[VmActor {}] VM thread panicked", pid);
                 self.set_state(VmActorState::Error);
+                tracing::debug!("[VmActor {pid}] run finished state=Error (panic)");
             }
         }
     }
@@ -181,9 +207,11 @@ impl VmActor {
         tracing::debug!("[VmActor {pid}] run_vm: init_vm start");
         let (mut vm, _combined_path, _tmp_dir) = self.instance.init_vm(&self.script_path)?;
         tracing::debug!("[VmActor {pid}] run_vm: calling _start");
+        let _start_t0 = Instant::now();
         let run_result = vm.run_func(Some("quickjs"), "_start", []);
+        let _start_ms = _start_t0.elapsed().as_millis();
         tracing::debug!(
-            "[VmActor {pid}] run_vm: _start returned ok={}",
+            "[VmActor {pid}] run_vm: _start returned ok={} elapsed_ms={_start_ms}",
             run_result.is_ok()
         );
         match run_result {

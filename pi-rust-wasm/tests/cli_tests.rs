@@ -12,7 +12,10 @@ use tracing::{info, info_span};
 
 #[allow(deprecated)]
 fn cmd() -> Command {
-    Command::cargo_bin("pi").expect("binary pi should exist")
+    let mut c = Command::cargo_bin("pi").expect("binary pi should exist");
+    // 避免宿主环境 PI_WASM__LLM__DEFAULT_MODEL 覆盖临时 HOME 下的 pi.config.toml
+    c.env_remove("PI_WASM__LLM__DEFAULT_MODEL");
+    c
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -74,7 +77,7 @@ fn test_version_output_exits_ok() {
 
 /// [init 子命令] 在临时目录生成配置文件
 ///
-/// 验证：exit 0、pi.config.toml 已创建且含 [log] 段、stdout 提示"已生成配置文件"
+/// 验证：exit 0、pi.config.toml 已创建且含 [log] 段、stdout 含三步向导与「配置文件已写入」
 /// 意义：首次使用流程门禁（TASK-02 10.2：引导 LLM 配置、生成配置文件）
 #[test]
 fn test_init_creates_config_file_in_temp_dir() {
@@ -86,7 +89,9 @@ fn test_init_creates_config_file_in_temp_dir() {
 
     info!("Arrange: temp dir at {:?}", dir.path());
     let mut c = cmd();
-    c.args(["init"]).env("HOME", dir.path());
+    c.args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh");
 
     info!("Act: execute init");
     let assert = c.assert();
@@ -94,7 +99,8 @@ fn test_init_creates_config_file_in_temp_dir() {
     info!("Assert: exit 0, config file created, output mentions file path");
     assert
         .success()
-        .stdout(predicate::str::contains("已生成配置文件"));
+        .stdout(predicate::str::contains("[1/3] 环境初始化"))
+        .stdout(predicate::str::contains("配置文件已写入"));
     assert!(config_path.exists(), "config file should be created");
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(
@@ -142,7 +148,9 @@ fn test_doctor_with_valid_config_checks_environment() {
 
     info!("Arrange: create valid config via init");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -174,6 +182,7 @@ fn test_workspace_add_list_remove_e2e() {
     cmd()
         .args(["init"])
         .env("HOME", home.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -209,6 +218,99 @@ fn test_workspace_add_list_remove_e2e() {
         .assert()
         .success()
         .stdout(predicate::str::contains("无已授权工作区"));
+}
+
+/// [E2E-CLI-017] workspace add --cwd 将当前目录加入授权列表
+#[test]
+fn test_workspace_add_cwd_e2e() {
+    common::setup_logging();
+    let _span = info_span!("test_workspace_add_cwd_e2e").entered();
+
+    let home = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    let proj_canon = std::fs::canonicalize(proj.path()).unwrap();
+    let proj_str = proj_canon.to_str().unwrap();
+
+    cmd()
+        .args(["init"])
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
+
+    // `std::env::current_dir` 为进程全局；若将来 cli_tests 改为多线程并行，需改为子进程或串行策略，避免与其它用例竞态。
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(proj.path()).unwrap();
+    cmd()
+        .args(["workspace", "add", "--cwd"])
+        .env("HOME", home.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加工作区"));
+    std::env::set_current_dir(&prev).unwrap();
+
+    let list_assert = cmd()
+        .args(["workspace", "list"])
+        .env("HOME", home.path())
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout).to_string();
+    list_assert.success();
+    assert!(
+        list_out.contains(proj_str),
+        "list 应含当前目录，实际: {}",
+        trunc(&list_out, 200)
+    );
+}
+
+/// [E2E-CLI-005] init 自动将 PATH 写入隔离 HOME 下的 shell 配置文件
+#[test]
+fn test_init_auto_adds_path_to_shell_profile() {
+    common::setup_logging();
+    let _span = info_span!("test_init_auto_adds_path_to_shell_profile").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let zshrc = dir.path().join(".zshrc");
+
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&zshrc).expect(".zshrc should be created under HOME");
+    assert!(
+        content.contains("export PATH=") && content.contains("# Added by pi init"),
+        "expected PATH block in .zshrc, got: {}",
+        trunc(&content, 400)
+    );
+}
+
+/// init 两次后 shell 配置中仅一条 export PATH（幂等）
+#[test]
+fn test_init_path_export_idempotent_in_shell_profile() {
+    common::setup_logging();
+    let _span = info_span!("test_init_path_export_idempotent_in_shell_profile").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let zshrc = dir.path().join(".zshrc");
+
+    for _ in 0..2 {
+        cmd()
+            .args(["init"])
+            .env("HOME", dir.path())
+            .env("SHELL", "/bin/zsh")
+            .assert()
+            .success();
+    }
+    let content = fs::read_to_string(&zshrc).unwrap();
+    let count = content.matches("export PATH=").count();
+    assert_eq!(
+        count, 1,
+        "expected single export PATH line, got {} in: {}",
+        count,
+        trunc(&content, 500)
+    );
 }
 
 // ────────────────────── config ──────────────────────
@@ -626,10 +728,13 @@ fn test_chat_without_config_exits_with_error() {
     common::setup_logging();
     let _span = info_span!("test_chat_without_config_exits_with_error").entered();
 
-    info!("Arrange: chat command without valid config/env");
+    let dir = tempfile::tempdir().unwrap();
+
+    info!("Arrange: 无 ~/.pi_/ 配置且无 OPENAI_API_KEY（HOME 指向空临时目录）");
     let mut c = cmd();
-    c.arg("chat");
-    c.env_remove("OPENAI_API_KEY");
+    c.arg("chat")
+        .env("HOME", dir.path())
+        .env_remove("OPENAI_API_KEY");
 
     info!("Act: execute chat");
     let assert = c.assert();
@@ -652,11 +757,12 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: init config in temp dir, set work_dir and OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -697,11 +803,12 @@ fn test_chat_with_session_dir_does_not_crash() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: init config, session new, set work_dir");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -762,11 +869,12 @@ fn test_init_then_doctor_roundtrip() {
     let _span = info_span!("test_init_then_doctor_roundtrip").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: init config in temp dir");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -950,7 +1058,7 @@ fn test_audit_export_creates_file() {
 /// [E2E-CLI-001] 新用户首次安装，完成初始化并验证环境健康
 ///
 /// 用户意图：新用户首次安装，完成初始化并验证环境健康
-/// 验证：init exit 0 + stdout 含 ✓ 标记（配置写入 + 资源释放）；doctor exit 0 + stdout 含"配置合法"和"内嵌资源已就绪"
+/// 验证：init exit 0 + stdout 含 [1/3][2/3][3/3]、pi chat、PATH 自动配置；doctor exit 0 + stdout 含"配置合法"和"内嵌资源已就绪"
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
@@ -958,29 +1066,26 @@ fn test_user_first_time_setup_init_and_doctor() {
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir, no existing config");
     info!("Act: pi init");
     let init_assert = cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert();
     let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert init: exit 0 + stdout 含 ✓ 配置文件已写入 + 资源检查；actual: {}",
+        "Assert init: exit 0 + 三步向导 + pi chat；actual: {}",
         trunc(&init_out, 400)
     );
     init_assert
         .success()
-        .stdout(
-            predicate::str::contains("配置文件已写入")
-                .or(predicate::str::contains("已生成配置文件"))
-                .or(predicate::str::contains("config")),
-        )
-        .stdout(
-            predicate::str::contains("资源检查")
-                .or(predicate::str::contains("✓")),
-        )
+        .stdout(predicate::str::contains("[1/3]"))
+        .stdout(predicate::str::contains("[2/3]"))
+        .stdout(predicate::str::contains("[3/3]"))
+        .stdout(predicate::str::contains("配置文件已写入"))
+        .stdout(predicate::str::contains("pi chat"))
         .stdout(predicate::str::contains("PATH"));
 
     info!("Act: pi doctor");
@@ -1070,9 +1175,9 @@ fn test_user_doctor_detects_environment() {
 
 // ──────────────────── TASK-06 新增集成测试：内嵌资源 + init .env ────────────────────
 
-/// [TASK-06] init 后 .env 文件存在且权限为 0600（Unix）
+/// [TASK-06] init 后生成配置中的 LLM 段
 ///
-/// 验证：pi init 会创建 .env 文件，Unix 下权限为 0600
+/// 验证：pi init exit 0；`pi.config.toml` 存在且含 LLM 相关字段（.env 仅在用户输入非空 Key 时写入）
 #[test]
 fn test_init_creates_env_file() {
     common::setup_logging();
@@ -1084,7 +1189,9 @@ fn test_init_creates_env_file() {
     info!("Arrange: fresh temp dir");
     info!("Act: pi init");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -1108,13 +1215,14 @@ fn test_init_creates_env_with_correct_permissions() {
     let _span = info_span!("test_init_creates_env_with_correct_permissions").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: pi init → check .env permissions");
 
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -1135,11 +1243,12 @@ fn test_doctor_reports_all_checks() {
     let _span = info_span!("test_doctor_reports_all_checks").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init first");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -1160,33 +1269,39 @@ fn test_doctor_reports_all_checks() {
         .stdout(predicate::str::contains("WasmEdge"));
 }
 
-/// [TASK-06] init 幂等：第二次调用不报错
+/// [E2E-CLI-010] init 幂等：第二次不覆盖配置并给出提示
 ///
-/// 验证：连续两次 pi init，第二次也应 exit 0
+/// 验证：连续两次 pi init，第二次 exit 0 且 stdout 含保留/使用已有配置提示
 #[test]
 fn test_init_idempotent() {
     common::setup_logging();
     let _span = info_span!("test_init_idempotent").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Act: pi init (first)");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
     info!("Act: pi init (second, idempotent)");
     let assert = cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
         "Assert: second init exit 0；actual: {}",
         trunc(&out, 300)
     );
-    assert.success();
+    assert.success().stdout(
+        predicate::str::contains("已存在配置文件")
+            .or(predicate::str::contains("使用已有配置文件")),
+    );
 }
 
 /// [TASK-06] ensure_embedded_assets 释放 wasm 到 work_dir
@@ -1198,11 +1313,12 @@ fn test_ensure_embedded_assets_extracts_wasm() {
     let _span = info_span!("test_ensure_embedded_assets_extracts_wasm").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Act: pi init");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -1226,11 +1342,12 @@ fn test_ensure_embedded_assets_idempotent() {
     let _span = info_span!("test_ensure_embedded_assets_idempotent").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -1254,11 +1371,12 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
     let _span = info_span!("test_ensure_embedded_assets_upgrades_on_sha_mismatch").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: pi init");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -1312,7 +1430,9 @@ fn test_user_asks_pi_a_question() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1357,7 +1477,9 @@ fn test_user_asks_pi_technical_question() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1405,7 +1527,9 @@ fn test_user_asks_pi_to_run_bash_command() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1459,7 +1583,9 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1766,7 +1892,9 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -1814,7 +1942,9 @@ fn test_user_receives_nonempty_llm_response() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -2082,7 +2212,9 @@ fn test_user_chat_without_api_key_fails_gracefully() {
 
     info!("Arrange: pi init，移除 OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -2245,12 +2377,13 @@ fn test_user_init_then_doctor_roundtrip() {
     let _span = info_span!("test_user_init_then_doctor_roundtrip").entered();
 
     let dir = tempfile::tempdir().unwrap();
-    let config_path = dir.path().join(".pi_").join("pi.config.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: pi init → pi doctor");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
@@ -2291,7 +2424,9 @@ fn test_user_chat_resumes_last_session() {
 
     info!("Arrange: pi init + OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
@@ -2349,7 +2484,9 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
 
     info!("Arrange: pi init 生成配置；加载 OPENAI_API_KEY");
     cmd()
-        .args(["init"]).env("HOME", dir.path())
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 

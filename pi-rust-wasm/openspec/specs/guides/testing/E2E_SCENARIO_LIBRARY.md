@@ -26,21 +26,25 @@
 
 ---
 
-## Story 1 — 宿主初始化与基础配置（9 条）
+## Story 1 — 宿主初始化与基础配置（11 条）
 
-> **变更（TASK-12）**：原 E2E-CLI-004/005（`config export` / `import`）随子命令删除而作废；**E2E-CLI-004** 现为 `workspace add/list/remove`；**init 完成后的 PATH 提示**并入 **E2E-CLI-001** 断言。
+> **变更（TASK-12 / TASK-16）**：原 E2E-CLI-004/005（`config export` / `import`）随子命令删除而作废；**E2E-CLI-004** 现为 `workspace add/list/remove`。**TASK-16**：`pi init` 为 `[1/3][2/3][3/3]`，PATH 自动写入 shell 配置；**E2E-CLI-001** 断言与 **E2E-CLI-005**（PATH 写入）、**E2E-CLI-017**（`workspace add --cwd`）、**E2E-CLI-010**（幂等提示）同步。
 
 | 编号          | 验收 | 用例名                                          | 用户意图                                | 操作序列                                | 必须断言                                                               |
 | ----------- | -- | -------------------------------------------- | ----------------------------------- | ----------------------------------- | ------------------------------------------------------------------ |
-| E2E-CLI-001 | 自动 | `test_user_first_time_setup_init_and_doctor` | 新用户首次安装，完成初始化并验证环境健康                | `pi init` → `pi doctor`（`HOME` 指向临时目录）             | init exit 0 + stdout 含配置写入+"资源检查"+**PATH 提示**；doctor exit 0 + stdout 含"配置合法"+"内嵌资源已就绪" |
+| E2E-CLI-001 | 自动 | `test_user_first_time_setup_init_and_doctor` | 新用户首次安装，完成初始化并验证环境健康                | `pi init` → `pi doctor`（`HOME`+`SHELL` 隔离）             | init exit 0 + stdout 含 `[1/3]` `[2/3]` `[3/3]` + `配置文件已写入` + `pi chat` + `PATH`；doctor exit 0 + stdout 含"配置合法"+"内嵌资源已就绪" |
 | E2E-CLI-002 | 自动 | `test_user_sets_config_value`                | 用户修改日志级别                            | `pi config set log.level warn`      | exit 0                                                             |
 | E2E-CLI-003 | 自动 | `test_user_views_full_config`                | 用户查看当前全部配置                          | `pi config get`                     | exit 0；stdout 含配置段关键字                                              |
-| E2E-CLI-004 | 自动 | `test_workspace_add_list_remove_e2e`         | 用户授权工作区目录（add/list/remove）           | `pi init` → `pi workspace add` → `list` → `remove`（`HOME` 隔离） | add/remove exit 0 且 stdout 含「已添加/已移除」；list 含路径；最终 list 提示无已授权工作区 |
+| E2E-CLI-004 | 自动 | `test_workspace_add_list_remove_e2e`         | 用户授权工作区目录（add/list/remove）           | `pi init` → `pi workspace add <path>` → `list` → `remove`（`HOME` 隔离） | add/remove exit 0 且 stdout 含「已添加/已移除」；list 含路径；最终 list 提示无已授权工作区 |
+| E2E-CLI-005 | 自动 | `test_init_auto_adds_path_to_shell_profile` | init 将 PATH 写入隔离 `HOME` 下 shell 配置 | `pi init`（`HOME`+`SHELL=/bin/zsh`） | `$HOME/.zshrc` 含 `# Added by pi init` 与 `export PATH=` |
 | E2E-CLI-006 | 自动 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 WasmEdge/QuickJS 可用性 | `pi doctor`                         | exit 0；stdout 含 WasmEdge/配置/✓/内嵌资源/.env 检查项                       |
 | E2E-CLI-007 | 自动 | `test_init_creates_env_file`                 | init 后配置文件包含 LLM 配置段                | `pi init`                           | exit 0；config 文件存在且含 `[llm]` 或 `provider`                          |
 | E2E-CLI-008 | 自动 | `test_init_creates_env_with_correct_permissions` | init 后 .env 权限为 0600（Unix）       | `pi init` → 检查 .env 权限              | .env 存在时 mode=0600                                                 |
 | E2E-CLI-009 | 自动 | `test_doctor_reports_all_checks`             | doctor 输出含全部检查项                     | `pi init` → `pi doctor`             | exit 0；stdout 含 配置合法/内嵌资源/QuickJS wasm/WasmEdge                   |
-| E2E-CLI-010 | 自动 | `test_init_idempotent`                       | 连续两次 init 均 exit 0                 | `pi init` × 2                       | 两次均 exit 0                                                        |
+| E2E-CLI-010 | 自动 | `test_init_idempotent`                       | 连续两次 init，第二次不覆盖配置               | `pi init` × 2（同 `HOME`）           | 两次均 exit 0；第二次 stdout 含「已存在配置文件」或「使用已有配置文件」 |
+| E2E-CLI-017 | 自动 | `test_workspace_add_cwd_e2e`                 | `workspace add --cwd` 添加当前目录           | `pi init` → `cd` 至临时目录 → `workspace add --cwd` → `list` | add exit 0；list 含该目录绝对路径 |
+
+**补充（幂等 PATH）**：`test_init_path_export_idempotent_in_shell_profile` — 同一 `HOME` 下连续两次 `init`，`$HOME/.zshrc` 中仅一条 `export PATH=`。
 
 
 ---

@@ -341,10 +341,21 @@ impl HostApiDispatcher {
                 data: serde_json::json!({}),
                 context: serde_json::json!({}),
             });
-            tracing::debug!(
-                "[cleanup_instance] {instance_id} try_send __shutdown ok={}",
-                send_result.is_ok()
-            );
+            match &send_result {
+                Ok(()) => tracing::debug!(
+                    "[cleanup_instance] {instance_id} try_send __shutdown ok"
+                ),
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "[cleanup_instance] {instance_id} try_send __shutdown failed: channel full"
+                    );
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    tracing::warn!(
+                        "[cleanup_instance] {instance_id} try_send __shutdown failed: disconnected"
+                    );
+                }
+            }
         } else {
             tracing::warn!("[cleanup_instance] no event_sender for {instance_id}");
         }
@@ -395,6 +406,15 @@ impl HostApiDispatcher {
         use std::sync::mpsc::RecvTimeoutError;
         use std::time::Duration;
 
+        let timeout_ms = params
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .filter(|&ms| ms > 0);
+        tracing::debug!(
+            "[waitForEvent {instance_id}] enter timeout_ms={:?}",
+            timeout_ms
+        );
+
         let rx_arc: Arc<std::sync::Mutex<std::sync::mpsc::Receiver<EventEnvelope>>> = self
             .event_receivers
             .get(instance_id)
@@ -408,11 +428,6 @@ impl HostApiDispatcher {
         let rx = rx_arc
             .lock()
             .map_err(|_| AppError::Plugin("event channel mutex poisoned".into()))?;
-
-        let timeout_ms = params
-            .get("timeoutMs")
-            .and_then(|v| v.as_u64())
-            .filter(|&ms| ms > 0);
 
         match timeout_ms {
             Some(ms) => match rx.recv_timeout(Duration::from_millis(ms)) {

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::runtime_manager::{SharedRuntimeManager, VmRuntimeKey};
 use super::ts_compiler::transpile_pi_plugin_for_quickjs;
@@ -593,6 +594,7 @@ impl PluginManager {
 
     /// 结束指定会话下所有 VM actor：发送 Shutdown、从 RuntimeManager 移除。
     pub async fn end_session(&self, session_id: &str) -> Result<(), AppError> {
+        let t0 = Instant::now();
         tracing::debug!("[end_session] session={session_id} start");
         let rm = self
             .runtime_manager
@@ -600,11 +602,18 @@ impl PluginManager {
             .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
 
         let handles = rm.remove_session(session_id);
-        tracing::debug!("[end_session] removed {} handles", handles.len());
+        tracing::debug!(
+            "[end_session] removed {} handles elapsed_ms={}",
+            handles.len(),
+            t0.elapsed().as_millis()
+        );
         for h in &handles {
             let _ = h.shutdown().await;
         }
-        tracing::debug!("[end_session] shutdown commands sent");
+        tracing::debug!(
+            "[end_session] shutdown commands sent elapsed_ms={}",
+            t0.elapsed().as_millis()
+        );
 
         if let Some(ref dispatcher) = self.host_dispatcher {
             let map = self.plugins.read();
@@ -615,7 +624,10 @@ impl PluginManager {
             }
         }
 
-        tracing::debug!("[end_session] session={session_id} complete");
+        tracing::debug!(
+            "[end_session] session={session_id} complete elapsed_ms={}",
+            t0.elapsed().as_millis()
+        );
         Ok(())
     }
 

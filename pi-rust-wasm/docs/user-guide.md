@@ -107,39 +107,48 @@ pi --version
 
 ## 2. 初始化与环境检测
 
-### pi init — 交互式向导
+### pi init — 三步向导
 
 ```bash
 pi init
 ```
 
-`pi init` 是两步交互式向导：
+`pi init` 为**非交互式**三步流程（不再选择 Provider / 模型 / API Base URL；首次写入默认 `openai` + `gpt-5.2`，与 `pi.config.toml.example` 及代码中 `DEFAULT_LLM_MODEL` 一致）：
 
-1. **[1/2] LLM 配置**：选择 Provider（openai/azure/anthropic/custom） → 输入 API Key → 选择默认模型
-2. **[2/2] 资源检查**：自动创建目录结构、释放内嵌资源（wasm + modules）、写入 `.env`
+1. **[1/3] 环境初始化**：写入 `~/.pi_/pi.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（wasm + modules）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by pi init` 标记；已存在同序 export 则跳过）
+2. **[2/3] 资源检查**：与 `pi doctor` 相同的检查项（配置合法、内嵌资源、QuickJS wasm、WasmEdge、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
+3. **[3/3] API Key 配置**：若 `~/.pi_/assets/.env` 中尚无有效 `OPENAI_API_KEY`，提示输入（可回车跳过）。**回车跳过不会创建或写入 `.env`**（避免留下空 Key 文件）；可稍后再次运行 `pi init` 输入 Key，或自行创建/编辑 `~/.pi_/assets/.env`
 
-预期输出：
+预期输出（节选）：
 
 ```
-[1/2] 选择 LLM Provider: openai
-  默认模型: gpt-4.1-mini
-  API Base URL（回车使用默认）:
-✓ 配置文件已写入: ~/.pi_/pi.config.toml
-
-[2/2] 资源检查
+[1/3] 环境初始化
+  ✓ 配置文件已写入: ~/.pi_/pi.config.toml
+  ✓ 默认 LLM Provider: openai
+  ✓ 默认模型: gpt-5.2
   ✓ 目录结构就绪
   ✓ 内嵌资源已释放（wasm + modules）
-  ✓ API Key 已写入 .env
+  ✓ 已加入 PATH 环境变量
 
-初始化完成！运行 `pi doctor` 验证环境。
+[2/3] 资源检查
+✓ 配置合法 (~/.pi_/pi.config.toml)
+✓ 内嵌资源已就绪
+✓ QuickJS wasm：...
+✓ WasmEdge 运行时：可用
+  资源版本: wasm=... modules=...
 
-提示：若 pi 不在 PATH 中，请执行：
-  export PATH="/path/to/pi/bin:$PATH"
+[3/3] API Key 配置
+  ✓ API Key 已配置
+  （或 ⚠ 未设置时的提示与 `.env` 路径）
+
+初始化完成！运行 `pi chat` 开始对话。
 ```
 
-**幂等性**：二次运行 `pi init` 会询问「配置文件已存在，是否覆盖？」（默认否），选择否则仅刷新资源，不影响已有配置和 API Key。
+若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH` 及一行可手动执行的 `export PATH=...`。
 
-**旧目录迁移**：若检测到 `~/.pi_wasm/`（旧版工作目录），会提示迁移到 `~/.pi_/`。
+**幂等性**：若 `~/.pi_/pi.config.toml` **已存在**，默认**不覆盖**，仅打印保留说明并继续执行目录/资源/PATH/检查/API Key 步骤；第二次起可看到「使用已有配置文件」类提示。若要换新默认模型等，请用 `pi config set` 或自行编辑配置后重跑。
+
+**与 `pi doctor`**：`init` 第二步与 `doctor` 共用同一套检查逻辑；配置与资源有疑义时可再运行 `pi doctor` 查看含 API Key / `.env` 的完整诊断。
 
 ### pi doctor — 环境诊断
 
@@ -307,7 +316,15 @@ pi workspace add /path/to/project
 # 已添加工作区: /path/to/project
 ```
 
-路径必须是已存在的目录，重复添加会去重。
+将**当前工作目录**加入授权列表（无需敲绝对路径）：
+
+```bash
+cd /path/to/project
+pi workspace add --cwd
+# 已添加工作区: /path/to/project
+```
+
+路径必须是已存在的目录；`pi workspace add` 须提供路径**或** `--cwd`。重复添加会去重。
 
 ### 列出已授权工作区
 
@@ -650,8 +667,9 @@ jq '.[0]' /tmp/audit_backup.json
 | `HTTP_PROXY` | 可选 | 全局 HTTP 代理 |
 | `PI_WASM__LLM__PROXY` | 可选 | 仅 LLM 请求使用的代理，覆盖 config |
 | `PI_WASM__LLM__API_BASE_FALLBACK` | 可选 | 主 API 不通时的备用 base URL |
+| `PI_WASM__LLM__DEFAULT_MODEL` | 可选 | 覆盖 `[llm] default_model`；未设置时以配置文件 / 代码默认 `gpt-5.2` 为准 |
 
-> LLM 相关的 `PI_WASM__LLM__*` 变量可覆盖 `pi.config.toml` 中对应字段，`__` 作为嵌套分隔符。
+> LLM 相关的 `PI_WASM__LLM__*` 变量可覆盖 `pi.config.toml` 中对应字段，`__` 作为嵌套分隔符。仓库与安装包**不会**默认注入这些变量；若本机 shell 里长期设置了旧模型 id，会导致与 `pi init` 新写入的 toml 不一致。
 
 ### 常见问题
 
@@ -717,12 +735,6 @@ pi doctor  # 应显示 ✓ WasmEdge 运行时：可用
 ```bash
 cargo build --release --features standalone
 ```
-
----
-
-**Q: 从 `~/.pi_wasm/` 旧版本升级**
-
-运行 `pi init`，向导会自动检测旧目录并提示迁移到 `~/.pi_/`。
 
 ---
 

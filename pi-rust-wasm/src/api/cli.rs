@@ -1,5 +1,6 @@
 //! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认 chat。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
@@ -12,6 +13,7 @@ use crate::{
     DefaultEventBus,
     DefaultToolRegistry, EventBus, FileAuditRecorder, PluginManager, SessionManager, Tool,
     ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
+    DEFAULT_LLM_MODEL,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi_/pi.config.toml";
@@ -106,8 +108,11 @@ pub enum SessionSub {
 pub enum WorkspaceSub {
     /// 添加工作区目录
     Add {
-        /// 要添加的目录路径
-        path: String,
+        /// 要添加的目录路径（与 --cwd 二选一）
+        path: Option<String>,
+        /// 将当前工作目录加入授权列表
+        #[arg(long)]
+        cwd: bool,
     },
     /// 列出已授权的工作区
     List,
@@ -207,72 +212,24 @@ pub fn run_cli() -> Result<(), AppError> {
 pub(crate) fn run_init() -> Result<(), AppError> {
     let config_file = normalize_path(DEFAULT_CONFIG_PATH)?;
 
-    // --- 6.12 旧目录迁移 ---
-    if let Some(legacy) = detect_legacy_dir() {
-        let new_dir = dirs::home_dir()
-            .ok_or_else(|| AppError::Config("无法获取 home 目录".to_string()))?
-            .join(".pi_");
-        if !new_dir.exists() {
-            let migrate = dialoguer::Confirm::new()
-                .with_prompt(format!(
-                    "检测到旧工作目录 {}，是否迁移到 {}？",
-                    legacy.display(),
-                    new_dir.display()
-                ))
-                .default(true)
-                .interact()
-                .unwrap_or(false);
-            if migrate {
-                migrate_legacy_dir(&legacy, &new_dir)?;
-                println!("✓ 已迁移旧目录到 {}", new_dir.display());
-            }
-        }
-    }
+    // --- [1/3] 环境初始化（标题先于配置写入，便于失败时仍可见步骤）---
+    println!("\n[1/3] 环境初始化");
 
-    // --- 6.11 幂等性：检测已有配置 ---
+    // --- 幂等性：配置文件已存在则默认不覆盖 ---
     let mut write_config = true;
     if config_file.exists() {
-        write_config = dialoguer::Confirm::new()
-            .with_prompt("配置文件已存在，是否覆盖？")
-            .default(false)
-            .interact()
-            .unwrap_or(false);
-        if !write_config {
-            println!("  跳过配置写入，保留已有配置");
-        }
+        write_config = false;
+        println!(
+            "  已存在配置文件，保留现有内容：{}",
+            config_file.display()
+        );
     }
 
-    // --- 6.10 [1/2] LLM 配置向导 ---
     let cfg = if write_config {
-        let providers = &["openai", "azure", "anthropic", "custom"];
-        let provider_idx = dialoguer::Select::new()
-            .with_prompt("[1/2] 选择 LLM Provider")
-            .items(providers)
-            .default(0)
-            .interact()
-            .unwrap_or(0);
-
-        let default_model = match providers[provider_idx] {
-            "openai" => "gpt-4.1-mini",
-            "anthropic" => "claude-sonnet-4-20250514",
-            _ => "gpt-4.1-mini",
-        };
-        let model: String = dialoguer::Input::new()
-            .with_prompt("  默认模型")
-            .default(default_model.to_string())
-            .interact_text()
-            .unwrap_or_else(|_| default_model.to_string());
-
-        let api_base: String = dialoguer::Input::new()
-            .with_prompt("  API Base URL（回车使用默认）")
-            .default(String::new())
-            .interact_text()
-            .unwrap_or_default();
-
         let llm = crate::LlmConfig {
-            provider: providers[provider_idx].to_string(),
-            default_model: model,
-            api_base: if api_base.is_empty() { None } else { Some(api_base) },
+            provider: "openai".to_string(),
+            default_model: DEFAULT_LLM_MODEL.to_string(),
+            api_base: None,
             ..Default::default()
         };
         AppConfig {
@@ -283,7 +240,6 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         crate::load_config(Some(&config_file)).unwrap_or_default()
     };
 
-    // --- 写配置文件 ---
     if write_config {
         if let Some(parent) = config_file.parent() {
             std::fs::create_dir_all(parent).map_err(AppError::Io)?;
@@ -291,18 +247,44 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         let toml_str =
             toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
         std::fs::write(&config_file, toml_str).map_err(AppError::Io)?;
-        println!("✓ 配置文件已写入: {}", config_file.display());
     }
 
-    // --- [2/2] 资源检查 ---
-    println!("\n[2/2] 资源检查");
+    if write_config {
+        println!("  ✓ 配置文件已写入: {}", config_file.display());
+    } else {
+        println!("  ✓ 使用已有配置文件: {}", config_file.display());
+    }
+    println!("  ✓ 默认 LLM Provider: {}", cfg.llm.provider);
+    println!("  ✓ 默认模型: {}", cfg.llm.default_model);
+
     ensure_work_dir_structure(&cfg)?;
     println!("  ✓ 目录结构就绪");
 
     ensure_embedded_assets(&cfg)?;
     println!("  ✓ 内嵌资源已释放（wasm + modules）");
 
-    // --- .env 处理（6.13 写入部分） ---
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Some(bin_dir) = exe.parent() {
+                if auto_add_to_path(bin_dir) {
+                    println!("  ✓ 已加入 PATH 环境变量");
+                } else {
+                    println!("  ⚠ 无法自动配置 PATH，请手动执行：");
+                    println!("    export PATH=\"{}:$PATH\"", bin_dir.display());
+                }
+            } else {
+                println!("  ⚠ 无法确定可执行文件所在目录，请手动配置 PATH");
+            }
+        }
+        Err(_) => println!("  ⚠ 无法确定可执行文件路径，请手动配置 PATH"),
+    }
+
+    // --- [2/3] 资源检查（与 pi doctor 一致，跳过 API Key）---
+    println!("\n[2/3] 资源检查");
+    run_doctor_checks(&cfg, config_file.as_path(), true)?;
+
+    // --- [3/3] API Key 配置 ---
+    println!("\n[3/3] API Key 配置");
     let work_dir = get_work_dir(&cfg)?;
     let env_path = work_dir.join("assets").join(".env");
     let existing_key = env_path
@@ -328,88 +310,88 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             .interact()
             .unwrap_or_default();
 
-        let env_content = format!(
-            "# pi runtime credentials — 此文件由 pi init 生成，权限 0600\nOPENAI_API_KEY={api_key}\n"
-        );
-        std::fs::write(&env_path, env_content).map_err(AppError::Io)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&env_path, perms).map_err(AppError::Io)?;
-        }
         if api_key.is_empty() {
-            println!("  ⚠ API Key 未设置，后续可编辑 {}", env_path.display());
+            println!(
+                "  ⚠ API Key 未设置，后续可运行 `pi init` 重新配置，或编辑 {}",
+                env_path.display()
+            );
         } else {
+            let env_content = format!(
+                "# pi runtime credentials — 此文件由 pi init 生成，权限 0600\nOPENAI_API_KEY={api_key}\n"
+            );
+            std::fs::write(&env_path, env_content).map_err(AppError::Io)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(&env_path, perms).map_err(AppError::Io)?;
+            }
             println!("  ✓ API Key 已写入 .env");
         }
     }
 
-    println!("\n初始化完成！运行 `pi doctor` 验证环境。");
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(bin_dir) = exe.parent() {
-            println!(
-                "\n提示：若 pi 不在 PATH 中，请执行：\n  export PATH=\"{}:$PATH\"",
-                bin_dir.display()
-            );
-        }
-    }
+    println!("\n初始化完成！运行 `pi chat` 开始对话。");
 
     Ok(())
 }
 
-fn detect_legacy_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    let legacy = home.join(".pi_wasm");
-    legacy.is_dir().then_some(legacy)
-}
-
-fn migrate_legacy_dir(from: &Path, to: &Path) -> Result<(), AppError> {
-    copy_dir_recursive(from, to)?;
-    let backup = from.with_file_name(".pi_wasm.bak");
-    std::fs::rename(from, &backup).map_err(AppError::Io)?;
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), AppError> {
-    std::fs::create_dir_all(dst).map_err(AppError::Io)?;
-    for entry in std::fs::read_dir(src).map_err(AppError::Io)? {
-        let entry = entry.map_err(AppError::Io)?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).map_err(AppError::Io)?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn run_doctor() -> Result<(), AppError> {
-    let path = match normalize_path(DEFAULT_CONFIG_PATH) {
-        Ok(p) if p.exists() => p,
-        _ => {
-            println!("✗ 未找到配置文件");
-            println!("  → 运行 pi init 生成配置");
-            return Ok(());
-        }
+/// 将 `pi` 所在目录追加到 shell 启动脚本中的 PATH；已存在同序 export 则跳过。
+fn auto_add_to_path(bin_dir: &Path) -> bool {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let Some(home) = dirs::home_dir() else {
+        return false;
     };
-    let cfg = load_config(Some(path.as_path()))?;
-    if let Err(e) = validate_config(&cfg) {
+    let profile = if shell.contains("zsh") {
+        home.join(".zshrc")
+    } else if shell.contains("bash") {
+        let bp = home.join(".bash_profile");
+        if bp.exists() {
+            bp
+        } else {
+            home.join(".bashrc")
+        }
+    } else {
+        home.join(".profile")
+    };
+    let export_line = format!("export PATH=\"{}:$PATH\"", bin_dir.display());
+    if let Ok(content) = std::fs::read_to_string(&profile) {
+        if content.contains(&export_line) {
+            return true;
+        }
+    }
+    let mut f = match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&profile)
+    {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    writeln!(f, "\n# Added by pi init\n{}", export_line).is_ok()
+}
+
+/// 与 `pi doctor` 相同的逐项检查。`skip_api_key` 为 true 时（用于 `pi init` 第二步）不输出 .env 权限与 OPENAI_API_KEY 相关行。
+pub(crate) fn run_doctor_checks(
+    cfg: &AppConfig,
+    config_path: &Path,
+    skip_api_key: bool,
+) -> Result<(), AppError> {
+    if let Err(e) = validate_config(cfg) {
         println!("✗ 配置不合法: {}", e);
-        println!("  → 运行 pi init 重新生成或手动修复 {}", path.display());
+        println!(
+            "  → 运行 pi init 重新生成或手动修复 {}",
+            config_path.display()
+        );
         return Ok(());
     }
-    if let Err(e) = ensure_work_dir_structure(&cfg) {
+    if let Err(e) = ensure_work_dir_structure(cfg) {
         println!("✗ 创建工作目录失败: {}", e);
         return Ok(());
     }
-    println!("✓ 配置合法 ({})", path.display());
+    println!("✓ 配置合法 ({})", config_path.display());
 
     // --- 内嵌资源 ---
-    if let Err(e) = ensure_embedded_assets(&cfg) {
+    if let Err(e) = ensure_embedded_assets(cfg) {
         println!("✗ 资源释放失败: {}", e);
         println!("  → 运行 pi init 或检查磁盘空间");
     } else {
@@ -417,7 +399,7 @@ pub(crate) fn run_doctor() -> Result<(), AppError> {
     }
 
     // --- QuickJS wasm ---
-    let resolved_qjs = resolve_quickjs_path(&cfg);
+    let resolved_qjs = resolve_quickjs_path(cfg);
     match &resolved_qjs {
         Some(p) => println!("✓ QuickJS wasm：{}", p.display()),
         None => {
@@ -443,7 +425,7 @@ pub(crate) fn run_doctor() -> Result<(), AppError> {
     }
 
     // --- .versions.json SHA-256 ---
-    let work_dir = get_work_dir(&cfg)?;
+    let work_dir = get_work_dir(cfg)?;
     let versions_path = work_dir.join("assets").join(".versions.json");
     if versions_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&versions_path) {
@@ -458,38 +440,54 @@ pub(crate) fn run_doctor() -> Result<(), AppError> {
         }
     }
 
-    // --- .env 检查 ---
-    let env_path = work_dir.join("assets").join(".env");
-    if env_path.exists() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&env_path) {
-                let mode = meta.permissions().mode() & 0o777;
-                if mode == 0o600 {
-                    println!("✓ .env 权限: 0600");
-                } else {
-                    println!("⚠ .env 权限: {:04o}（建议 0600）", mode);
-                    println!("  → chmod 600 {}", env_path.display());
+    if !skip_api_key {
+        // --- .env 检查 ---
+        let env_path = work_dir.join("assets").join(".env");
+        if env_path.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&env_path) {
+                    let mode = meta.permissions().mode() & 0o777;
+                    if mode == 0o600 {
+                        println!("✓ .env 权限: 0600");
+                    } else {
+                        println!("⚠ .env 权限: {:04o}（建议 0600）", mode);
+                        println!("  → chmod 600 {}", env_path.display());
+                    }
                 }
             }
+            #[cfg(not(unix))]
+            println!("✓ .env 存在");
+        } else {
+            println!("⚠ .env 不存在（API Key 未配置）");
+            println!("  → 运行 pi init 配置 API Key");
         }
-        #[cfg(not(unix))]
-        println!("✓ .env 存在");
-    } else {
-        println!("⚠ .env 不存在（API Key 未配置）");
-        println!("  → 运行 pi init 配置 API Key");
+
+        // --- OPENAI_API_KEY ---
+        match std::env::var("OPENAI_API_KEY") {
+            Ok(k) if !k.is_empty() => println!("✓ OPENAI_API_KEY 已设置"),
+            _ => {
+                println!("⚠ OPENAI_API_KEY 未设置");
+                println!("  → 运行 pi init 或编辑 {}", env_path.display());
+            }
+        }
     }
 
-    // --- OPENAI_API_KEY ---
-    match std::env::var("OPENAI_API_KEY") {
-        Ok(k) if !k.is_empty() => println!("✓ OPENAI_API_KEY 已设置"),
+    Ok(())
+}
+
+pub(crate) fn run_doctor() -> Result<(), AppError> {
+    let path = match normalize_path(DEFAULT_CONFIG_PATH) {
+        Ok(p) if p.exists() => p,
         _ => {
-            println!("⚠ OPENAI_API_KEY 未设置");
-            println!("  → 运行 pi init 或编辑 {}", env_path.display());
+            println!("✗ 未找到配置文件");
+            println!("  → 运行 pi init 生成配置");
+            return Ok(());
         }
-    }
-
+    };
+    let cfg = load_config(Some(path.as_path()))?;
+    run_doctor_checks(&cfg, path.as_path(), false)?;
     Ok(())
 }
 
@@ -723,9 +721,23 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, cfg: &AppConfig) -> Result<(), Ap
     let ws_file = agent_dir.join("ext_workspaces.json");
 
     match sub {
-        WorkspaceSub::Add { path } => {
-            let abs = std::fs::canonicalize(&path).map_err(|_| {
-                AppError::Config(format!("路径不存在或无法访问: {}", path))
+        WorkspaceSub::Add { path, cwd } => {
+            let target = if cwd {
+                std::env::current_dir().map_err(|e| {
+                    AppError::Config(format!("无法获取当前工作目录: {}", e))
+                })?
+            } else if let Some(p) = path {
+                PathBuf::from(p)
+            } else {
+                return Err(AppError::Config(
+                    "请提供目录路径或使用 --cwd".to_string(),
+                ));
+            };
+            let abs = std::fs::canonicalize(&target).map_err(|_| {
+                AppError::Config(format!(
+                    "路径不存在或无法访问: {}",
+                    target.display()
+                ))
             })?;
             if !abs.is_dir() {
                 return Err(AppError::Config(format!("路径不是目录: {}", abs.display())));
@@ -742,7 +754,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, cfg: &AppConfig) -> Result<(), Ap
         WorkspaceSub::List => {
             let workspaces = load_workspaces(&ws_file);
             if workspaces.is_empty() {
-                println!("无已授权工作区。使用 workspace add <path> 添加。");
+                println!("无已授权工作区。使用 workspace add <path> 或 workspace add --cwd 添加。");
                 return Ok(());
             }
             for ws in &workspaces {
@@ -1530,7 +1542,13 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let target_path = target.path().to_str().unwrap().to_string();
 
-        let r = run_workspace(WorkspaceSub::Add { path: target_path.clone() }, &cfg);
+        let r = run_workspace(
+            WorkspaceSub::Add {
+                path: Some(target_path.clone()),
+                cwd: false,
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
 
         let r = run_workspace(WorkspaceSub::List, &cfg);
@@ -1551,7 +1569,8 @@ mod tests {
 
         let r = run_workspace(
             WorkspaceSub::Add {
-                path: "/nonexistent/path/should/fail".to_string(),
+                path: Some("/nonexistent/path/should/fail".to_string()),
+                cwd: false,
             },
             &cfg,
         );
@@ -1567,11 +1586,43 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let target_path = target.path().to_str().unwrap().to_string();
 
-        let r = run_workspace(WorkspaceSub::Add { path: target_path.clone() }, &cfg);
+        let r = run_workspace(
+            WorkspaceSub::Add {
+                path: Some(target_path.clone()),
+                cwd: false,
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
 
-        let r = run_workspace(WorkspaceSub::Add { path: target_path }, &cfg);
+        let r = run_workspace(
+            WorkspaceSub::Add {
+                path: Some(target_path),
+                cwd: false,
+            },
+            &cfg,
+        );
         assert!(r.is_ok());
+    }
+
+    #[test]
+    fn run_workspace_add_cwd_adds_current_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_config(dir.path());
+        ensure_work_dir_structure(&cfg).unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        let canon = std::fs::canonicalize(target.path()).unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(target.path()).unwrap();
+        let r = run_workspace(WorkspaceSub::Add { path: None, cwd: true }, &cfg);
+        std::env::set_current_dir(&prev).unwrap();
+        assert!(r.is_ok());
+
+        let agent_dir = resolve_agent_dir(&cfg).unwrap();
+        let ws_file = agent_dir.join("ext_workspaces.json");
+        let list = super::load_workspaces(&ws_file);
+        assert!(list.iter().any(|p| p == &canon));
     }
 
     #[test]

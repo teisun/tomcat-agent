@@ -94,8 +94,13 @@ pub struct LlmConfig {
 fn default_llm_provider() -> String {
     "openai".to_string()
 }
+
+/// 全局默认 LLM 模型 id（`LlmConfig` 默认值、`pi init` 首次写入与文档一致）。
+/// 可通过 `pi.config.toml` 中 `[llm] default_model` 或环境变量 `PI_WASM__LLM__DEFAULT_MODEL` 覆盖（后者优先级更高，见 [`load_config`]）。
+pub const DEFAULT_LLM_MODEL: &str = "gpt-5.2";
+
 fn default_llm_model() -> String {
-    "gpt-5.2".to_string()
+    DEFAULT_LLM_MODEL.to_string()
 }
 fn default_max_concurrent_requests() -> u32 {
     4
@@ -269,6 +274,7 @@ pub struct AppConfig {
 /// 从可选配置文件与环境变量加载并合并为 [`AppConfig`]。
 ///
 /// 合并顺序：若提供且存在的配置文件先加载，再叠加环境变量 `PI_WASM__*`（`__` 表示嵌套）。未提供或不存在文件时仅用默认值与环境变量。
+/// **注意**：仓库与代码**不**设置任何 `PI_WASM__*` 默认值；若本机 shell 中设置了 `PI_WASM__LLM__DEFAULT_MODEL` 等变量，会覆盖配置文件中的同名字段（例如把模型固定为旧值）。集成测试会通过 `env_remove` 避免宿主环境泄漏。
 ///
 /// # Arguments
 /// * `config_path` - 配置文件路径，如 `Some(Path::new("pi.config.toml"))`；`None` 表示仅用默认与环境变量。
