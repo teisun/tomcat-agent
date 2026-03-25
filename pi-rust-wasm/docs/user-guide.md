@@ -29,7 +29,7 @@
 chmod +x pi && mv pi /usr/local/bin/
 
 # 2. 初始化
-pi init
+./pi init
 ```
 
 `pi init` 会通过交互式向导完成 LLM 配置、API Key 输入和资源部署。
