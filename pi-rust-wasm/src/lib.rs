@@ -30,13 +30,13 @@ pub use ext::{
 };
 pub use infra::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, init_logging, load_config,
-    normalize_path, read_file_utf8, resolve_agent_dir, resolve_assets_dir, resolve_audit_dir,
-    resolve_log_dir, resolve_memory_dir, resolve_plugins_dir, resolve_quickjs_path,
-    resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir, validate_config, wire,
-    write_file_atomic, AgentConfig,
-    AgentEvent, AppConfig, AppError, AuditEntry, AuditFilter, AuditPrimitiveOp, AuditRecorder,
-    AuditStore, DefaultEventBus, EventBus, EventContext, EventListenerId, DEFAULT_LLM_MODEL,
-    ExtensionEvent, FileAuditRecorder, HostcallAuditEntry, LlmConfig, LogConfig,
-    PluginLifecycleAuditEntry, PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig,
-    ToolAuditEntry, TracingAuditRecorder, WasmConfig,
+    load_config_toml_file, normalize_path, read_file_utf8, resolve_agent_dir, resolve_assets_dir,
+    resolve_audit_dir, resolve_extra_roots_paths, resolve_log_dir, resolve_memory_dir,
+    resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir,
+    resolve_workspace_dir, validate_config, wire, write_file_atomic, AgentConfig, AgentEvent,
+    AppConfig, AppError, AuditEntry, AuditFilter, AuditPrimitiveOp, AuditRecorder, AuditStore,
+    DefaultEventBus, EventBus, EventContext, EventListenerId, ExtensionEvent, FileAuditRecorder,
+    HostcallAuditEntry, LlmConfig, LogConfig, PluginLifecycleAuditEntry, PrimitiveAuditEntry,
+    PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder, WasmConfig,
+    WorkspaceConfig, DEFAULT_LLM_MODEL,
 };

@@ -3,6 +3,7 @@
 //! 配置结构体、加载与合并、合法性校验。多源合并顺序：默认值 → 配置文件 → 环境变量（前缀 `PI_WASM__`，分隔符 `__`）。
 //! 内嵌资源管理：wasmedge_quickjs.wasm + assets/modules/ 在启动时自动释放到 work_dir。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use include_dir::{include_dir, Dir};
@@ -175,6 +176,16 @@ pub struct PluginConfig {
     pub auto_load: Vec<String>,
 }
 
+/// 全局工作区授权：额外可访问根路径列表，**所有 agent 共用**，与 `[agent]` 下的 `workspace`（设计态目录）不同。
+///
+/// 持久化在 `pi.config.toml` 的 `[workspace]` 表；由 `pi workspace add/list/remove` 或手编维护。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WorkspaceConfig {
+    /// 每项为路径字符串（通常为绝对路径）；空串在解析时忽略。
+    #[serde(default)]
+    pub extra_roots: Vec<String>,
+}
+
 /// 4 原语配置：路径/命令白名单与黑名单、审批与禁止列表、是否需用户确认等。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PrimitiveConfig {
@@ -264,6 +275,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub plugin: PluginConfig,
     #[serde(default)]
+    pub workspace: WorkspaceConfig,
+    #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
     pub primitive: PrimitiveConfig,
@@ -303,6 +316,42 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;
     Ok(merged)
+}
+
+/// 仅从 TOML 配置文件解析 [`AppConfig`]（**不**合并环境变量），供需整表写回的场景（如 `pi workspace`）。
+pub fn load_config_toml_file(path: &Path) -> Result<AppConfig, AppError> {
+    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
+    toml::from_str(&content).map_err(|e| AppError::Config(e.to_string()))
+}
+
+/// 校验并解析 `workspace.extra_roots`：忽略仅空白项；每项须可规范化为已存在的目录；规范路径去重。
+pub fn resolve_extra_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for s in &cfg.workspace.extra_roots {
+        let t = s.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let p = normalize_path(t)?;
+        let canon = std::fs::canonicalize(&p).map_err(|_| {
+            AppError::Config(format!("workspace.extra_roots 路径无效或不可访问: {}", t))
+        })?;
+        if !canon.is_dir() {
+            return Err(AppError::Config(format!(
+                "workspace.extra_roots 不是目录: {}",
+                canon.display()
+            )));
+        }
+        if !seen.insert(canon.clone()) {
+            return Err(AppError::Config(format!(
+                "workspace.extra_roots 存在重复: {}",
+                canon.display()
+            )));
+        }
+        out.push(canon);
+    }
+    Ok(out)
 }
 
 /// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.pi_/`。
@@ -400,7 +449,10 @@ pub fn resolve_assets_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 /// 查找 quickjs wasm：`work_dir/assets/wasm/wasmedge_quickjs.wasm`。
 pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
     if let Ok(work) = get_work_dir(cfg) {
-        let p = work.join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let p = work
+            .join("assets")
+            .join("wasm")
+            .join("wasmedge_quickjs.wasm");
         if p.exists() {
             return Some(p);
         }
@@ -466,6 +518,7 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             )));
         }
     }
+    resolve_extra_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }
 
@@ -689,6 +742,50 @@ mod tests {
     }
 
     #[test]
+    fn validate_config_rejects_duplicate_extra_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = std::fs::canonicalize(dir.path()).unwrap();
+        let s = c.to_string_lossy().into_owned();
+        let mut cfg = AppConfig::default();
+        cfg.log.level = "info".to_string();
+        cfg.workspace.extra_roots = vec![s.clone(), s];
+        assert!(validate_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_config_rejects_nonexistent_extra_root() {
+        let mut cfg = AppConfig::default();
+        cfg.log.level = "info".to_string();
+        cfg.workspace
+            .extra_roots
+            .push("/nonexistent/pi_workspace_root_test_path".to_string());
+        assert!(validate_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_config_accepts_extra_roots_when_dirs_exist() {
+        let d1 = tempfile::tempdir().unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.log.level = "info".to_string();
+        cfg.workspace.extra_roots = vec![
+            d1.path().to_str().unwrap().to_string(),
+            d2.path().to_str().unwrap().to_string(),
+        ];
+        assert!(validate_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn resolve_extra_roots_skips_blank_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.workspace.extra_roots =
+            vec!["  ".to_string(), dir.path().to_str().unwrap().to_string()];
+        let roots = resolve_extra_roots_paths(&cfg).unwrap();
+        assert_eq!(roots.len(), 1);
+    }
+
+    #[test]
     fn load_config_none_path_returns_default_or_env() {
         let r = load_config(None);
         assert!(r.is_ok());
@@ -727,7 +824,10 @@ mod tests {
         let _ = std::fs::remove_file(&temp_toml);
         let _ = std::fs::remove_dir(&dir);
         let cfg = r.unwrap_or_else(|e| {
-            panic!("pi.config.toml.example 内容应可被 load_config 反序列化: {}", e)
+            panic!(
+                "pi.config.toml.example 内容应可被 load_config 反序列化: {}",
+                e
+            )
         });
         assert!(validate_config(&cfg).is_ok());
     }
@@ -830,15 +930,17 @@ mod tests {
         ensure_work_dir_structure(&cfg).unwrap();
         ensure_embedded_assets(&cfg).unwrap();
 
-        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let wasm_path = dir
+            .path()
+            .join("assets")
+            .join("wasm")
+            .join("wasmedge_quickjs.wasm");
         assert!(wasm_path.exists(), "wasm file should be extracted");
         assert!(wasm_path.metadata().unwrap().len() > 0);
 
         let modules_dir = dir.path().join("assets").join("modules");
         assert!(modules_dir.is_dir(), "modules dir should be extracted");
-        let count = std::fs::read_dir(&modules_dir)
-            .unwrap()
-            .count();
+        let count = std::fs::read_dir(&modules_dir).unwrap().count();
         assert!(count > 0, "modules dir should contain files");
 
         let versions = dir.path().join("assets").join(".versions.json");
@@ -857,7 +959,11 @@ mod tests {
         ensure_embedded_assets(&cfg).unwrap();
         ensure_embedded_assets(&cfg).unwrap();
 
-        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let wasm_path = dir
+            .path()
+            .join("assets")
+            .join("wasm")
+            .join("wasmedge_quickjs.wasm");
         assert!(wasm_path.exists());
     }
 
@@ -868,7 +974,11 @@ mod tests {
         ensure_work_dir_structure(&cfg).unwrap();
         ensure_embedded_assets(&cfg).unwrap();
 
-        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let wasm_path = dir
+            .path()
+            .join("assets")
+            .join("wasm")
+            .join("wasmedge_quickjs.wasm");
         let original = std::fs::read(&wasm_path).unwrap();
 
         std::fs::write(&wasm_path, b"tampered content").unwrap();
@@ -887,7 +997,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         extract_wasm_if_needed(dir.path()).unwrap();
 
-        let wasm_path = dir.path().join("assets").join("wasm").join("wasmedge_quickjs.wasm");
+        let wasm_path = dir
+            .path()
+            .join("assets")
+            .join("wasm")
+            .join("wasmedge_quickjs.wasm");
         let mtime_before = std::fs::metadata(&wasm_path).unwrap().modified().unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -896,13 +1010,22 @@ mod tests {
         assert_eq!(result, wasm_path);
 
         let mtime_after = std::fs::metadata(&wasm_path).unwrap().modified().unwrap();
-        assert_eq!(mtime_before, mtime_after, "file should not be rewritten when SHA matches");
+        assert_eq!(
+            mtime_before, mtime_after,
+            "file should not be rewritten when SHA matches"
+        );
     }
 
     #[test]
     fn embedded_sha256_constants_are_nonempty() {
-        assert!(!EMBEDDED_WASM_SHA256.is_empty(), "compile-time wasm SHA-256 must be set");
-        assert!(!EMBEDDED_MODULES_SHA256.is_empty(), "compile-time modules SHA-256 must be set");
+        assert!(
+            !EMBEDDED_WASM_SHA256.is_empty(),
+            "compile-time wasm SHA-256 must be set"
+        );
+        assert!(
+            !EMBEDDED_MODULES_SHA256.is_empty(),
+            "compile-time modules SHA-256 must be set"
+        );
         assert_eq!(EMBEDDED_WASM_SHA256.len(), 64);
         assert_eq!(EMBEDDED_MODULES_SHA256.len(), 64);
     }

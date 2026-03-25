@@ -7,10 +7,10 @@ use crate::infra::error::AppError;
 use std::path::Path;
 use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, SyntaxContext, DUMMY_SP, GLOBALS};
 use swc_ecma_ast::{
-    AssignPatProp, BindingIdent, Decl, Expr, Ident, IdentName, ImportSpecifier,
-    KeyValuePatProp, MemberExpr, MemberProp, ModuleDecl, ModuleExportName, ModuleItem,
-    Module as SwcModule, ObjectPat, ObjectPatProp, Pass, Pat, Program as SwcProgram, PropName,
-    Stmt, VarDecl, VarDeclKind, VarDeclarator,
+    AssignPatProp, BindingIdent, Decl, Expr, Ident, IdentName, ImportSpecifier, KeyValuePatProp,
+    MemberExpr, MemberProp, Module as SwcModule, ModuleDecl, ModuleExportName, ModuleItem,
+    ObjectPat, ObjectPatProp, Pass, Pat, Program as SwcProgram, PropName, Stmt, VarDecl,
+    VarDeclKind, VarDeclarator,
 };
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{Parser as SwcParser, StringInput, Syntax, TsSyntax};
@@ -170,10 +170,7 @@ fn rewrite_npm_imports(module: &mut SwcModule) {
 
 /// Byte-level lookup: `Wtf8Atom` doesn't implement `Display`/`Hash<str>`,
 /// so compare raw bytes (module specifiers are always valid UTF-8).
-fn lookup_shim_prop<'a>(
-    map: &[(&str, &'a str)],
-    src: &swc_ecma_ast::Str,
-) -> Option<&'a str> {
+fn lookup_shim_prop<'a>(map: &[(&str, &'a str)], src: &swc_ecma_ast::Str) -> Option<&'a str> {
     let bytes = src.value.as_bytes();
     map.iter()
         .find(|(pkg, _)| pkg.as_bytes() == bytes)
@@ -206,10 +203,7 @@ fn import_to_globalthis_var(
                 match &named.imported {
                     Some(ModuleExportName::Ident(imported_id)) => {
                         props.push(ObjectPatProp::KeyValue(KeyValuePatProp {
-                            key: PropName::Ident(IdentName::new(
-                                imported_id.sym.clone(),
-                                DUMMY_SP,
-                            )),
+                            key: PropName::Ident(IdentName::new(imported_id.sym.clone(), DUMMY_SP)),
                             value: Box::new(Pat::Ident(BindingIdent {
                                 id: named.local.clone(),
                                 type_ann: None,

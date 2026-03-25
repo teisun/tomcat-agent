@@ -30,6 +30,8 @@ pub struct DefaultPrimitiveExecutor {
     audit: Arc<dyn AuditRecorder>,
     /// 默认工作目录：path_whitelist 为空时作为隐式白名单根目录。
     workspace_dir: PathBuf,
+    /// `pi.config.toml` 中 `[workspace] extra_roots` 的额外授权根路径，与 `workspace_dir` 并集（全局，所有 agent 共用）。
+    extra_roots: Vec<PathBuf>,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -44,18 +46,30 @@ impl DefaultPrimitiveExecutor {
             confirmation,
             audit,
             workspace_dir,
+            extra_roots: Vec::new(),
         }
+    }
+
+    /// 设置配置中解析得到的额外授权根路径（与 `pi workspace` / TOML 同源）。
+    pub fn with_extra_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.extra_roots = roots;
+        self
     }
 
     /// 路径白名单/黑名单校验；通过则返回规范化后的 PathBuf。
     ///
-    /// 当 `path_whitelist` 为空时，以 `workspace_dir` 作为隐式白名单（仅允许 workspace 下的路径）。
+    /// 优先级：config.path_whitelist > (workspace_dir ∪ extra_roots)。
+    /// 当 `path_whitelist` 为空时，以 `workspace_dir` 和 `extra_roots` 的并集作为隐式白名单。
     fn check_path(&self, path: &str) -> Result<PathBuf, AppError> {
         let normalized = normalize_path(path)?;
         let s = normalized.to_string_lossy();
         let allowed = if self.config.path_whitelist.is_empty() {
             let ws = self.workspace_dir.to_string_lossy();
             normalized_starts_with(&s, &ws)
+                || self
+                    .extra_roots
+                    .iter()
+                    .any(|r| normalized_starts_with(&s, &r.to_string_lossy()))
         } else {
             self.config
                 .path_whitelist
@@ -834,5 +848,58 @@ mod tests {
         let _ = std::fs::remove_file(&f);
         let _ = std::fs::remove_file(&backup);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn extra_roots_allow_external_path() {
+        let ws_dir = std::env::temp_dir().join("pi_wasm_exec_extra_ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let ws_dir = ws_dir.canonicalize().unwrap();
+
+        let ext_dir = std::env::temp_dir().join("pi_wasm_exec_extra_ext");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let ext_dir = ext_dir.canonicalize().unwrap();
+        let ext_file = ext_dir.join("ext.txt");
+        std::fs::write(&ext_file, "external").unwrap();
+
+        let config = PrimitiveConfig::default();
+        let exec = DefaultPrimitiveExecutor::new(
+            config,
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            ws_dir.clone(),
+        )
+        .with_extra_roots(vec![ext_dir.clone()]);
+
+        let content = exec
+            .read_file(&ext_file.to_string_lossy(), "p1")
+            .await
+            .unwrap();
+        assert_eq!(content, "external");
+
+        let _ = std::fs::remove_dir_all(&ws_dir);
+        let _ = std::fs::remove_dir_all(&ext_dir);
+    }
+
+    #[tokio::test]
+    async fn extra_roots_still_rejects_unlisted_path() {
+        let ws_dir = std::env::temp_dir().join("pi_wasm_exec_extra_reject");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let ws_dir = ws_dir.canonicalize().unwrap();
+
+        let config = PrimitiveConfig::default();
+        let exec = DefaultPrimitiveExecutor::new(
+            config,
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            ws_dir.clone(),
+        )
+        .with_extra_roots(vec![]);
+
+        let r = exec.read_file("/tmp/some_other_path/file.txt", "p1").await;
+        assert!(r.is_err());
+        assert!(matches!(r.unwrap_err(), AppError::Permission(_)));
+
+        let _ = std::fs::remove_dir_all(&ws_dir);
     }
 }

@@ -168,7 +168,7 @@ fn test_doctor_with_valid_config_checks_environment() {
 /// [E2E-CLI-004] 工作区 add / list / remove
 ///
 /// 验证：init 后 workspace add → list 含路径 → remove → list 为空提示
-/// 意义：TASK-12 ext_workspaces.json 与 CLI 一致
+/// 意义：TASK-12 / TASK-09：`pi workspace` 与 `pi.config.toml` `[workspace] extra_roots` 一致
 #[test]
 fn test_workspace_add_list_remove_e2e() {
     common::setup_logging();
@@ -306,7 +306,8 @@ fn test_init_path_export_idempotent_in_shell_profile() {
     let content = fs::read_to_string(&zshrc).unwrap();
     let count = content.matches("export PATH=").count();
     assert_eq!(
-        count, 1,
+        count,
+        1,
         "expected single export PATH line, got {} in: {}",
         count,
         trunc(&content, 500)
@@ -1101,10 +1102,7 @@ fn test_user_first_time_setup_init_and_doctor() {
     doctor_assert
         .success()
         .stdout(predicate::str::contains("配置合法"))
-        .stdout(
-            predicate::str::contains("内嵌资源已就绪")
-                .or(predicate::str::contains("✓")),
-        );
+        .stdout(predicate::str::contains("内嵌资源已就绪").or(predicate::str::contains("✓")));
 }
 
 /// [E2E-CLI-002] 用户修改日志级别
@@ -1253,9 +1251,7 @@ fn test_doctor_reports_all_checks() {
         .success();
 
     info!("Act: pi doctor");
-    let assert = cmd()
-        .args(["doctor"]).env("HOME", dir.path())
-        .assert();
+    let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
         "Assert: all check items present；actual: {}",
@@ -1294,13 +1290,9 @@ fn test_init_idempotent() {
         .env("SHELL", "/bin/zsh")
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!(
-        "Assert: second init exit 0；actual: {}",
-        trunc(&out, 300)
-    );
+    info!("Assert: second init exit 0；actual: {}", trunc(&out, 300));
     assert.success().stdout(
-        predicate::str::contains("已存在配置文件")
-            .or(predicate::str::contains("使用已有配置文件")),
+        predicate::str::contains("已存在配置文件").or(predicate::str::contains("使用已有配置文件")),
     );
 }
 
@@ -1323,9 +1315,7 @@ fn test_ensure_embedded_assets_extracts_wasm() {
         .success();
 
     info!("Assert: doctor 能发现 QuickJS wasm");
-    let assert = cmd()
-        .args(["doctor"]).env("HOME", dir.path())
-        .assert();
+    let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("doctor output: {}", trunc(&out, 500));
     assert
@@ -1353,11 +1343,13 @@ fn test_ensure_embedded_assets_idempotent() {
 
     info!("Act: pi doctor x2（每次触发 ensure_embedded_assets）");
     cmd()
-        .args(["doctor"]).env("HOME", dir.path())
+        .args(["doctor"])
+        .env("HOME", dir.path())
         .assert()
         .success();
     cmd()
-        .args(["doctor"]).env("HOME", dir.path())
+        .args(["doctor"])
+        .env("HOME", dir.path())
         .assert()
         .success();
 }
@@ -1381,7 +1373,8 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
         .success();
 
     info!("Arrange: tamper wasm file in default work_dir");
-    let wasm_path = dir.path()
+    let wasm_path = dir
+        .path()
         .join(".pi_")
         .join("assets")
         .join("wasm")
@@ -1392,9 +1385,7 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
         info!("Tampered wasm: {} bytes -> 8 bytes", original_len);
 
         info!("Act: pi doctor（触发 ensure_embedded_assets 覆盖）");
-        let assert = cmd()
-            .args(["doctor"]).env("HOME", dir.path())
-            .assert();
+        let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
         assert.success();
 
         let restored_len = fs::metadata(&wasm_path).unwrap().len();
@@ -2387,9 +2378,7 @@ fn test_user_init_then_doctor_roundtrip() {
         .assert()
         .success();
 
-    let assert = cmd()
-        .args(["doctor"]).env("HOME", dir.path())
-        .assert();
+    let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
         "Assert: exit 0 + 含 配置合法 + 内嵌资源已就绪 + QuickJS wasm；actual: {}",
@@ -2398,10 +2387,7 @@ fn test_user_init_then_doctor_roundtrip() {
     assert
         .success()
         .stdout(predicate::str::contains("配置合法"))
-        .stdout(
-            predicate::str::contains("内嵌资源已就绪")
-                .or(predicate::str::contains("✓")),
-        );
+        .stdout(predicate::str::contains("内嵌资源已就绪").or(predicate::str::contains("✓")));
 }
 
 // ──────────────────── Story 9 补充: chat --resume 与多轮上下文（E2E-CLI-082~083） ────────────────────

@@ -1364,11 +1364,7 @@ fn setup_long_lived_vm_test_with_ts(
     plugin_id: &str,
     ts_fixture: &str,
     dispatcher: Arc<HostApiDispatcher>,
-) -> (
-    PluginManager,
-    SharedRuntimeManager,
-    tempfile::TempDir,
-) {
+) -> (PluginManager, SharedRuntimeManager, tempfile::TempDir) {
     let quickjs_path = require_quickjs_wasm();
     let config = WasmEngineConfig {
         quickjs_path: Some(quickjs_path),
@@ -1447,7 +1443,10 @@ fn setup_long_lived_vm_test_with_ts(
 /// async handler calls pi.exec("git", ["status", "--porcelain"]) → commandCompleted hostcall.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error::Error>> {
-    use pi_wasm::{BashResult, PrimitiveExecutor, DirEntry, EditOperation, EditFileResult, WriteFileResult, PrimitiveOperation};
+    use pi_wasm::{
+        BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
+        WriteFileResult,
+    };
 
     common::setup_logging();
     let _span = tracing::info_span!("test_wasmedge_e2e_tier3_diff_real_ts").entered();
@@ -1461,13 +1460,36 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
         async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, pi_wasm::AppError> {
             Ok(vec![])
         }
-        async fn write_file(&self, _: &str, _: &str, _: bool, _: &str) -> Result<WriteFileResult, pi_wasm::AppError> {
-            Ok(WriteFileResult { path: String::new(), written: false })
+        async fn write_file(
+            &self,
+            _: &str,
+            _: &str,
+            _: bool,
+            _: &str,
+        ) -> Result<WriteFileResult, pi_wasm::AppError> {
+            Ok(WriteFileResult {
+                path: String::new(),
+                written: false,
+            })
         }
-        async fn edit_file(&self, _: &str, _: Vec<EditOperation>, _: &str) -> Result<EditFileResult, pi_wasm::AppError> {
-            Ok(EditFileResult { path: String::new(), applied: false })
+        async fn edit_file(
+            &self,
+            _: &str,
+            _: Vec<EditOperation>,
+            _: &str,
+        ) -> Result<EditFileResult, pi_wasm::AppError> {
+            Ok(EditFileResult {
+                path: String::new(),
+                applied: false,
+            })
         }
-        async fn execute_bash(&self, cmd: &str, _cwd: Option<&str>, _: &str, argv: Option<&[String]>) -> Result<BashResult, pi_wasm::AppError> {
+        async fn execute_bash(
+            &self,
+            cmd: &str,
+            _cwd: Option<&str>,
+            _: &str,
+            argv: Option<&[String]>,
+        ) -> Result<BashResult, pi_wasm::AppError> {
             if cmd == "git" {
                 if let Some(args) = argv {
                     if args.first().map(|s| s.as_str()) == Some("status") {
@@ -1479,9 +1501,18 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
                     }
                 }
             }
-            Ok(BashResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })
+            Ok(BashResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
         }
-        async fn require_user_confirmation(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, pi_wasm::AppError> {
+        async fn require_user_confirmation(
+            &self,
+            _: PrimitiveOperation,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, pi_wasm::AppError> {
             Ok(true)
         }
     }
@@ -1518,9 +1549,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
 
     let completed = dispatcher.command_completed_count();
     let failed = dispatcher.command_failed_count();
-    tracing::info!(
-        "Assert: commandCompleted={completed}, commandFailed={failed}"
-    );
+    tracing::info!("Assert: commandCompleted={completed}, commandFailed={failed}");
     assert!(
         completed >= 1,
         "diff handler should have called commandCompleted, got completed={completed} failed={failed}"
@@ -1600,9 +1629,7 @@ async fn test_wasmedge_e2e_tier4_files_real_ts() -> Result<(), Box<dyn std::erro
 
     let completed = dispatcher.command_completed_count();
     let failed = dispatcher.command_failed_count();
-    tracing::info!(
-        "Assert: commandCompleted={completed}, commandFailed={failed}"
-    );
+    tracing::info!("Assert: commandCompleted={completed}, commandFailed={failed}");
     // files.ts calls getBranch. If no matching toolCall/toolResult pairs, it shows
     // "No files read/written/edited" via ui.notify and returns — which still completes successfully.
     assert!(
@@ -1657,11 +1684,18 @@ async fn test_e2e_community_tps() -> Result<(), Box<dyn std::error::Error>> {
     let plugin_id = "community-tps";
     let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "tps.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
 
-    mgr.dispatch_session_event("s1", plugin_id, wire::WIRE_AGENT_START,
-        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::WIRE_AGENT_START,
+        serde_json::json!({}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
     mgr.dispatch_session_event("s1", plugin_id, wire::WIRE_AGENT_END,
@@ -1673,9 +1707,14 @@ async fn test_e2e_community_tps() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     loop {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        if ui_notify.load(Ordering::SeqCst) >= 1 { break; }
+        if ui_notify.load(Ordering::SeqCst) >= 1 {
+            break;
+        }
         if tokio::time::Instant::now() >= deadline {
-            panic!("tps: expected >=1 uiNotify within 5s, got {}", ui_notify.load(Ordering::SeqCst));
+            panic!(
+                "tps: expected >=1 uiNotify within 5s, got {}",
+                ui_notify.load(Ordering::SeqCst)
+            );
         }
     }
 
@@ -1691,21 +1730,34 @@ async fn test_e2e_community_dynamic_tools() -> Result<(), Box<dyn std::error::Er
     common::setup_logging();
     let (dispatcher, ui_notify) = make_community_dispatcher();
     let plugin_id = "community-dynamic-tools";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "dynamic-tools.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "dynamic-tools.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
     let cmds = poll_for_command(&dispatcher, &inst_id, "add-echo-tool", 30).await;
-    assert!(cmds.iter().any(|(n, _)| n == "add-echo-tool"),
-        "dynamic-tools should register 'add-echo-tool' command, got: {:?}", cmds);
+    assert!(
+        cmds.iter().any(|(n, _)| n == "add-echo-tool"),
+        "dynamic-tools should register 'add-echo-tool' command, got: {:?}",
+        cmds
+    );
 
-    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_SESSION_START,
-        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_SESSION_START,
+        serde_json::json!({}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
-    assert!(ui_notify.load(Ordering::SeqCst) >= 1,
-        "dynamic-tools session_start should trigger ui.notify");
+    assert!(
+        ui_notify.load(Ordering::SeqCst) >= 1,
+        "dynamic-tools session_start should trigger ui.notify"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1719,14 +1771,20 @@ async fn test_e2e_community_tool_override() -> Result<(), Box<dyn std::error::Er
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-tool-override";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "tool-override.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "tool-override.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
     let cmds = poll_for_command(&dispatcher, &inst_id, "read-log", 30).await;
-    assert!(cmds.iter().any(|(n, _)| n == "read-log"),
-        "tool-override should register 'read-log' command, got: {:?}", cmds);
+    assert!(
+        cmds.iter().any(|(n, _)| n == "read-log"),
+        "tool-override should register 'read-log' command, got: {:?}",
+        cmds
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1740,12 +1798,18 @@ async fn test_e2e_community_truncated_tool() -> Result<(), Box<dyn std::error::E
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-truncated-tool";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "truncated-tool.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "truncated-tool.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let failed = dispatcher.command_failed_count();
-    assert_eq!(failed, 0, "truncated-tool should load without command failures");
+    assert_eq!(
+        failed, 0,
+        "truncated-tool should load without command failures"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1759,21 +1823,35 @@ async fn test_e2e_community_preset() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-preset";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "preset.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "preset.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
     let cmds = poll_for_command(&dispatcher, &inst_id, "preset", 30).await;
-    assert!(cmds.iter().any(|(n, _)| n == "preset"),
-        "preset should register 'preset' command, got: {:?}", cmds);
+    assert!(
+        cmds.iter().any(|(n, _)| n == "preset"),
+        "preset should register 'preset' command, got: {:?}",
+        cmds
+    );
 
-    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_SESSION_START,
-        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_SESSION_START,
+        serde_json::json!({}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let failed = dispatcher.command_failed_count();
-    assert_eq!(failed, 0, "preset should not have command failures after session_start");
+    assert_eq!(
+        failed, 0,
+        "preset should not have command failures after session_start"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1808,18 +1886,27 @@ async fn test_e2e_community_files() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let plugin_id = "community-files";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "files.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "files.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_COMMAND_INVOKE,
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_COMMAND_INVOKE,
         serde_json::json!({"name": "files", "args": ""}),
-        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
-    assert!(dispatcher.command_completed_count() >= 1,
-        "files handler should call commandCompleted");
+    assert!(
+        dispatcher.command_completed_count() >= 1,
+        "files handler should call commandCompleted"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1830,31 +1917,76 @@ async fn test_e2e_community_files() -> Result<(), Box<dyn std::error::Error>> {
 /// [TASK-05e] 7/15 diff — command_invoke("diff") → exec("git") → commandCompleted
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
-    use pi_wasm::{BashResult, PrimitiveExecutor, DirEntry, EditOperation, EditFileResult, WriteFileResult, PrimitiveOperation};
+    use pi_wasm::{
+        BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
+        WriteFileResult,
+    };
     common::setup_logging();
 
     struct DiffMock;
     #[async_trait::async_trait]
     impl PrimitiveExecutor for DiffMock {
-        async fn read_file(&self, _: &str, _: &str) -> Result<String, pi_wasm::AppError> { Ok(String::new()) }
-        async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, pi_wasm::AppError> { Ok(vec![]) }
-        async fn write_file(&self, _: &str, _: &str, _: bool, _: &str) -> Result<WriteFileResult, pi_wasm::AppError> {
-            Ok(WriteFileResult { path: String::new(), written: false })
+        async fn read_file(&self, _: &str, _: &str) -> Result<String, pi_wasm::AppError> {
+            Ok(String::new())
         }
-        async fn edit_file(&self, _: &str, _: Vec<EditOperation>, _: &str) -> Result<EditFileResult, pi_wasm::AppError> {
-            Ok(EditFileResult { path: String::new(), applied: false })
+        async fn list_dir(&self, _: &str, _: &str) -> Result<Vec<DirEntry>, pi_wasm::AppError> {
+            Ok(vec![])
         }
-        async fn execute_bash(&self, cmd: &str, _: Option<&str>, _: &str, argv: Option<&[String]>) -> Result<BashResult, pi_wasm::AppError> {
+        async fn write_file(
+            &self,
+            _: &str,
+            _: &str,
+            _: bool,
+            _: &str,
+        ) -> Result<WriteFileResult, pi_wasm::AppError> {
+            Ok(WriteFileResult {
+                path: String::new(),
+                written: false,
+            })
+        }
+        async fn edit_file(
+            &self,
+            _: &str,
+            _: Vec<EditOperation>,
+            _: &str,
+        ) -> Result<EditFileResult, pi_wasm::AppError> {
+            Ok(EditFileResult {
+                path: String::new(),
+                applied: false,
+            })
+        }
+        async fn execute_bash(
+            &self,
+            cmd: &str,
+            _: Option<&str>,
+            _: &str,
+            argv: Option<&[String]>,
+        ) -> Result<BashResult, pi_wasm::AppError> {
             if cmd == "git" {
                 if let Some(args) = argv {
                     if args.first().map(|s| s.as_str()) == Some("status") {
-                        return Ok(BashResult { stdout: " M src/main.rs\n?? new.txt\n".into(), stderr: String::new(), exit_code: 0 });
+                        return Ok(BashResult {
+                            stdout: " M src/main.rs\n?? new.txt\n".into(),
+                            stderr: String::new(),
+                            exit_code: 0,
+                        });
                     }
                 }
             }
-            Ok(BashResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })
+            Ok(BashResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
         }
-        async fn require_user_confirmation(&self, _: PrimitiveOperation, _: &str, _: &str) -> Result<bool, pi_wasm::AppError> { Ok(true) }
+        async fn require_user_confirmation(
+            &self,
+            _: PrimitiveOperation,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, pi_wasm::AppError> {
+            Ok(true)
+        }
     }
 
     let bus = Arc::new(DefaultEventBus::new());
@@ -1865,18 +1997,27 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let plugin_id = "community-diff";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "diff.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "diff.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_COMMAND_INVOKE,
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_COMMAND_INVOKE,
         serde_json::json!({"name": "diff", "args": ""}),
-        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
-    assert!(dispatcher.command_completed_count() >= 1,
-        "diff handler should call commandCompleted");
+    assert!(
+        dispatcher.command_completed_count() >= 1,
+        "diff handler should call commandCompleted"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1890,26 +2031,42 @@ async fn test_e2e_community_sandbox() -> Result<(), Box<dyn std::error::Error>> 
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-sandbox";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "sandbox/index.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "sandbox/index.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
     let mut cmds = Vec::new();
     for _ in 0..30 {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         cmds = dispatcher.registered_plugin_commands(&inst_id);
-        if cmds.iter().any(|(n, _)| n == "sandbox") { break; }
+        if cmds.iter().any(|(n, _)| n == "sandbox") {
+            break;
+        }
     }
-    assert!(cmds.iter().any(|(n, _)| n == "sandbox"),
-        "sandbox should register 'sandbox' command, got: {:?}", cmds);
+    assert!(
+        cmds.iter().any(|(n, _)| n == "sandbox"),
+        "sandbox should register 'sandbox' command, got: {:?}",
+        cmds
+    );
 
-    mgr.dispatch_session_event("s1", plugin_id, wire::vm::WIRE_SESSION_START,
-        serde_json::json!({}), serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        wire::vm::WIRE_SESSION_START,
+        serde_json::json!({}),
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let failed = dispatcher.command_failed_count();
-    assert_eq!(failed, 0, "sandbox session_start should not trigger command failures");
+    assert_eq!(
+        failed, 0,
+        "sandbox session_start should not trigger command failures"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1923,13 +2080,19 @@ async fn test_e2e_community_antigravity_image_gen() -> Result<(), Box<dyn std::e
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-antigravity";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "antigravity-image-gen.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "antigravity-image-gen.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
     let failed = dispatcher.command_failed_count();
-    assert_eq!(failed, 0, "antigravity-image-gen should load without failures");
+    assert_eq!(
+        failed, 0,
+        "antigravity-image-gen should load without failures"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -1943,9 +2106,12 @@ async fn test_e2e_community_subagent() -> Result<(), Box<dyn std::error::Error>>
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-subagent";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "subagent/index.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "subagent/index.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let failed = dispatcher.command_failed_count();
@@ -1963,9 +2129,12 @@ async fn test_e2e_community_with_deps() -> Result<(), Box<dyn std::error::Error>
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-with-deps";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "with-deps/index.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "with-deps/index.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
     let failed = dispatcher.command_failed_count();
@@ -1983,18 +2152,28 @@ async fn test_e2e_community_prompt_url_widget() -> Result<(), Box<dyn std::error
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-prompt-url-widget";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "prompt-url-widget.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "prompt-url-widget.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    mgr.dispatch_session_event("s1", plugin_id, "before_agent_start",
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        "before_agent_start",
         serde_json::json!({"prompt": "Review https://github.com/owner/repo/pull/42"}),
-        serde_json::json!({"hasUI": true, "cwd": "/tmp"}))?;
+        serde_json::json!({"hasUI": true, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let failed = dispatcher.command_failed_count();
-    assert_eq!(failed, 0, "prompt-url-widget should not have command failures");
+    assert_eq!(
+        failed, 0,
+        "prompt-url-widget should not have command failures"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -2008,14 +2187,20 @@ async fn test_e2e_community_redraws() -> Result<(), Box<dyn std::error::Error>> 
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-redraws";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "redraws.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "redraws.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
     let cmds = poll_for_command(&dispatcher, &inst_id, "tui", 30).await;
-    assert!(cmds.iter().any(|(n, _)| n == "tui"),
-        "redraws should register 'tui' command, got: {:?}", cmds);
+    assert!(
+        cmds.iter().any(|(n, _)| n == "tui"),
+        "redraws should register 'tui' command, got: {:?}",
+        cmds
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -2029,15 +2214,25 @@ async fn test_e2e_community_overlay_qa_tests() -> Result<(), Box<dyn std::error:
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-overlay-qa";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "overlay-qa-tests.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "overlay-qa-tests.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
     let cmds = poll_for_command(&dispatcher, &inst_id, "overlay-animation", 30).await;
-    assert!(cmds.iter().any(|(n, _)| n == "overlay-animation"),
-        "overlay-qa-tests should register 'overlay-animation', got: {:?}", cmds);
-    assert!(cmds.len() >= 5, "overlay-qa-tests should register multiple overlay-* commands, got {}", cmds.len());
+    assert!(
+        cmds.iter().any(|(n, _)| n == "overlay-animation"),
+        "overlay-qa-tests should register 'overlay-animation', got: {:?}",
+        cmds
+    );
+    assert!(
+        cmds.len() >= 5,
+        "overlay-qa-tests should register multiple overlay-* commands, got {}",
+        cmds.len()
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -2051,18 +2246,28 @@ async fn test_e2e_community_provider_payload() -> Result<(), Box<dyn std::error:
     common::setup_logging();
     let (dispatcher, _ui_notify) = make_community_dispatcher();
     let plugin_id = "community-provider-payload";
-    let (mgr, rm, _dir) = setup_long_lived_vm_test_with_ts(plugin_id, "provider-payload.ts", dispatcher.clone());
+    let (mgr, rm, _dir) =
+        setup_long_lived_vm_test_with_ts(plugin_id, "provider-payload.ts", dispatcher.clone());
 
-    mgr.start_session_vm("s1", plugin_id).await.map_err(|e| e.to_string())?;
+    mgr.start_session_vm("s1", plugin_id)
+        .await
+        .map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-    mgr.dispatch_session_event("s1", plugin_id, "before_provider_request",
+    mgr.dispatch_session_event(
+        "s1",
+        plugin_id,
+        "before_provider_request",
         serde_json::json!({"payload": {"model": "test", "messages": []}}),
-        serde_json::json!({"hasUI": false, "cwd": "/tmp"}))?;
+        serde_json::json!({"hasUI": false, "cwd": "/tmp"}),
+    )?;
     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let failed = dispatcher.command_failed_count();
-    assert_eq!(failed, 0, "provider-payload should not have command failures");
+    assert_eq!(
+        failed, 0,
+        "provider-payload should not have command failures"
+    );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;

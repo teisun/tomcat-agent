@@ -34,6 +34,7 @@ Guidelines:
 - Use write_file only for new files or complete rewrites
 - Be concise in your responses
 - Show file paths clearly when working with files
+- IMPORTANT: Only claim you can access directories that you have successfully listed or read from using tools. Do not guess or fabricate which directories are accessible. If unsure, use list_dir to verify first.
 
 Current date and time: {now}
 Current working directory: {workspace_dir}"#
@@ -61,5 +62,14 @@ mod tests {
         let prompt = build_system_prompt("/tmp");
         assert!(prompt.contains("Current date and time:"));
         assert!(prompt.contains("Current working directory:"));
+    }
+
+    #[test]
+    fn build_system_prompt_contains_anti_hallucination_constraint() {
+        let prompt = build_system_prompt("/tmp");
+        assert!(
+            prompt.contains("Only claim you can access"),
+            "system prompt 应包含防幻觉约束"
+        );
     }
 }
