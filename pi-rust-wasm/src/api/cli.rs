@@ -8,12 +8,10 @@ use clap::{Parser, Subcommand};
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
     resolve_agent_dir, resolve_audit_dir, resolve_plugins_dir, resolve_quickjs_path,
-    resolve_sessions_dir,
-    validate_config, wire, write_file_atomic, AppConfig, AppError, AuditFilter, AuditStore,
-    DefaultEventBus,
-    DefaultToolRegistry, EventBus, FileAuditRecorder, PluginManager, SessionManager, Tool,
-    ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
-    DEFAULT_LLM_MODEL,
+    resolve_sessions_dir, validate_config, wire, write_file_atomic, AppConfig, AppError,
+    AuditFilter, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus, FileAuditRecorder,
+    PluginManager, SessionManager, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder,
+    WasmEngine, WasmEngineConfig, DEFAULT_LLM_MODEL,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "~/.pi_/pi.config.toml";
@@ -219,10 +217,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     let mut write_config = true;
     if config_file.exists() {
         write_config = false;
-        println!(
-            "  已存在配置文件，保留现有内容：{}",
-            config_file.display()
-        );
+        println!("  已存在配置文件，保留现有内容：{}", config_file.display());
     }
 
     let cfg = if write_config {
@@ -244,8 +239,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         if let Some(parent) = config_file.parent() {
             std::fs::create_dir_all(parent).map_err(AppError::Io)?;
         }
-        let toml_str =
-            toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+        let toml_str = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
         std::fs::write(&config_file, toml_str).map_err(AppError::Io)?;
     }
 
@@ -317,7 +311,13 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             );
         } else {
             let env_content = format!(
-                "# pi runtime credentials — 此文件由 pi init 生成，权限 0600\nOPENAI_API_KEY={api_key}\n"
+                "# pi runtime credentials — 此文件由 pi init 生成，权限 0600\n\
+                 OPENAI_API_KEY={api_key}\n\
+                 \n\
+                 # 如需通过代理访问 OpenAI，取消以下注释并填入代理地址：\n\
+                 # HTTPS_PROXY=http://127.0.0.1:7890\n\
+                 # HTTP_PROXY=http://127.0.0.1:7890\n\
+                 # ALL_PROXY=socks5://127.0.0.1:7890\n"
             );
             std::fs::write(&env_path, env_content).map_err(AppError::Io)?;
             #[cfg(unix)]
@@ -723,21 +723,15 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, cfg: &AppConfig) -> Result<(), Ap
     match sub {
         WorkspaceSub::Add { path, cwd } => {
             let target = if cwd {
-                std::env::current_dir().map_err(|e| {
-                    AppError::Config(format!("无法获取当前工作目录: {}", e))
-                })?
+                std::env::current_dir()
+                    .map_err(|e| AppError::Config(format!("无法获取当前工作目录: {}", e)))?
             } else if let Some(p) = path {
                 PathBuf::from(p)
             } else {
-                return Err(AppError::Config(
-                    "请提供目录路径或使用 --cwd".to_string(),
-                ));
+                return Err(AppError::Config("请提供目录路径或使用 --cwd".to_string()));
             };
             let abs = std::fs::canonicalize(&target).map_err(|_| {
-                AppError::Config(format!(
-                    "路径不存在或无法访问: {}",
-                    target.display()
-                ))
+                AppError::Config(format!("路径不存在或无法访问: {}", target.display()))
             })?;
             if !abs.is_dir() {
                 return Err(AppError::Config(format!("路径不是目录: {}", abs.display())));
@@ -929,8 +923,7 @@ fn load_plugin_registry(path: &Path) -> PluginRegistryFile {
 }
 
 fn save_plugin_registry(path: &Path, reg: &PluginRegistryFile) -> Result<(), AppError> {
-    let json = serde_json::to_string_pretty(reg)
-        .map_err(|e| AppError::Config(e.to_string()))?;
+    let json = serde_json::to_string_pretty(reg).map_err(|e| AppError::Config(e.to_string()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
@@ -956,7 +949,10 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     );
                 }
             } else {
-                println!("{:<20} {:<15} {:<10} {:<10}", "ID", "路径/名称", "启用", "状态");
+                println!(
+                    "{:<20} {:<15} {:<10} {:<10}",
+                    "ID", "路径/名称", "启用", "状态"
+                );
                 println!("{}", "-".repeat(60));
                 for id in &ids {
                     if let Some(info) = pm.get_plugin(id) {
@@ -1615,7 +1611,13 @@ mod tests {
         let canon = std::fs::canonicalize(target.path()).unwrap();
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(target.path()).unwrap();
-        let r = run_workspace(WorkspaceSub::Add { path: None, cwd: true }, &cfg);
+        let r = run_workspace(
+            WorkspaceSub::Add {
+                path: None,
+                cwd: true,
+            },
+            &cfg,
+        );
         std::env::set_current_dir(&prev).unwrap();
         assert!(r.is_ok());
 

@@ -9,10 +9,10 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    agent_messages_from_chat, convert_to_llm_format, resolve_sessions_dir,
+    agent_messages_from_chat, convert_to_llm_format, resolve_agent_dir, resolve_sessions_dir,
     resolve_workspace_dir, AgentLoop, AgentLoopConfig, AppConfig, ChatMessage,
-    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
-    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor,
+    SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -47,13 +47,17 @@ impl ChatContext {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
             None => Arc::new(TracingAuditRecorder),
         };
+        let extra_roots = load_ext_workspaces(&config);
         let confirmation = Arc::new(CliConfirmation);
-        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
-            config.primitive.clone(),
-            confirmation,
-            audit.clone(),
-            workspace_dir.clone(),
-        ));
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
+            DefaultPrimitiveExecutor::new(
+                config.primitive.clone(),
+                confirmation,
+                audit.clone(),
+                workspace_dir.clone(),
+            )
+            .with_extra_roots(extra_roots),
+        );
 
         let tool_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
         let tool_registry: Arc<dyn ToolRegistry> =
@@ -99,7 +103,12 @@ impl UserConfirmationProvider for CliConfirmation {
         plugin_id: &str,
     ) -> Result<bool, AppError> {
         println!("\n--- 操作确认 ---");
-        println!("类型: {:?}  来源: {}", operation, plugin_id);
+        let source_label = if plugin_id == "__agent__" {
+            "host".to_string()
+        } else {
+            plugin_id.to_string()
+        };
+        println!("类型: {:?}  来源: {}", operation, source_label);
         if !preview.is_empty() {
             let lines: Vec<&str> = preview.lines().collect();
             let display = if lines.len() > 20 {
@@ -336,11 +345,23 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 }
                 let chat_msgs = convert_to_llm_format(&result.new_messages);
                 for msg in &chat_msgs {
-                    ctx.session
-                        .append_message(serde_json::to_value(msg)?)?;
+                    ctx.session.append_message(serde_json::to_value(msg)?)?;
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                if let Some(remaining) = renderer.lock().flush() {
+                    print!("{}", remaining);
+                    let _ = io::stdout().flush();
+                }
+                let is_fatal = is_fatal_error(&e);
+                eprintln!("\n[错误] {}", e);
+                if is_fatal {
+                    eprintln!("(致命错误，退出对话)");
+                    return Err(e);
+                }
+                eprintln!("(可重试，请继续输入)\n");
+                continue;
+            }
         }
 
         println!();
@@ -350,6 +371,36 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// 判断错误是否致命（配置缺失等不可恢复场景）；API/网络错误为非致命。
+fn is_fatal_error(e: &AppError) -> bool {
+    matches!(e, AppError::Config(_))
+}
+
+/// 从 ext_workspaces.json 加载额外授权根路径（与 cli.rs run_workspace 逻辑一致）。
+fn load_ext_workspaces(config: &AppConfig) -> Vec<std::path::PathBuf> {
+    let agent_dir = match resolve_agent_dir(config) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let ws_file = agent_dir.join("ext_workspaces.json");
+    if !ws_file.exists() {
+        return Vec::new();
+    }
+    let content = match std::fs::read_to_string(&ws_file) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    #[derive(serde::Deserialize)]
+    struct WsFile {
+        #[serde(default)]
+        workspaces: Vec<std::path::PathBuf>,
+    }
+    match serde_json::from_str::<WsFile>(&content) {
+        Ok(f) => f.workspaces,
+        Err(_) => Vec::new(),
+    }
+}
 
 fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
     let key = ctx.session.current_session_key();

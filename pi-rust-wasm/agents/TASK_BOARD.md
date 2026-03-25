@@ -713,14 +713,14 @@
 
 ### TASK-09 | chat-path-env | Chat / 路径 / .env 整改
 
-> **计划全文**（流程、PLAN_SPEC 六维、风险与 E2E 要点）：Cursor 计划 `chat_路径_wasmedge_整改_d21d6d2a.plan.md`（默认路径 `~/.cursor/plans/`；本表为执行摘要）。**WasmEdge 动态库子进程**不在本 TASK，见 [docs/reports/wasmedge-dylib-sip-subprocess.md](../docs/reports/wasmedge-dylib-sip-subprocess.md)。
+> **计划全文**（流程、PLAN_SPEC 六维、风险与 E2E 要点）：Cursor 计划 `chat_路径_wasmedge_整改_d21d6d2a.plan.md`（默认路径 `~/.cursor/plans/`；本表为执行摘要）。
 
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1（内含 **P0** 子项须优先交付：transcript 400、`pi chat` 遇错不整段退出） |
-| **状态** | `TODO` |
-| **负责人** | — |
-| **分支** | `feature/chat-path-env`（或按子项拆支：`feature/chat-transcript-and-resilience`、`feature/ext-workspaces-executor` 等，见计划） |
+| **状态** | `DOING` |
+| **负责人** | Jerry |
+| **分支** | `feature/chat-path-env` |
 | **阻塞点** | — |
 
 **目标**：消除 transcript 截断导致的 OpenAI 400；单次 API/Agent 错误不结束整段 `pi chat`；`ext_workspaces.json` 与 `DefaultPrimitiveExecutor` 路径策略一致；`.env` 代理模板、确认框 `{agentId} · host|pluginId`、system prompt 防目录幻觉。

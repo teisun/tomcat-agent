@@ -262,19 +262,52 @@ impl SessionManager {
         read_entries_tail(&path, cap)
     }
 
-    /// 根据会话历史组装 LLM 所需消息列表（最近 N 条，仅 Message 条目）。
+    /// 根据会话历史组装 LLM 所需消息列表。
+    ///
+    /// 取最近 `recent_n` 条 transcript entry 中的 Message，然后**向前扩展**
+    /// 直到首条为 `role: user`（或耗尽全部 entry）。这保证调用方注入 system
+    /// 后形态为 `[system, user, …]`，避免 OpenAI 400（tool 必须跟在含
+    /// tool_calls 的 assistant 之后）。
     pub fn build_context_messages(
         &self,
         recent_n: usize,
     ) -> Result<Vec<serde_json::Value>, AppError> {
-        let entries = self.get_entries(recent_n)?;
-        let mut messages = Vec::new();
-        for e in entries {
-            if let TranscriptEntry::Message(me) = e {
-                messages.push(me.message);
-            }
+        let path = match self.current_transcript_path()? {
+            Some(p) => p,
+            None => return Err(AppError::Config("无当前会话".to_string())),
+        };
+
+        let all_entries = read_entries_tail(&path, BRANCH_MAX_ENTRIES)?;
+        let all_messages: Vec<serde_json::Value> = all_entries
+            .into_iter()
+            .filter_map(|e| {
+                if let TranscriptEntry::Message(me) = e {
+                    Some(me.message)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if all_messages.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(messages)
+
+        let start = if all_messages.len() > recent_n {
+            all_messages.len() - recent_n
+        } else {
+            0
+        };
+
+        let mut anchor = start;
+        while anchor > 0 {
+            if all_messages[anchor].get("role").and_then(|r| r.as_str()) == Some("user") {
+                break;
+            }
+            anchor -= 1;
+        }
+
+        Ok(all_messages[anchor..].to_vec())
     }
 
     /// 会话级上下文窗口条数；MVP 固定 DEFAULT_CONTEXT_CAP。
@@ -613,6 +646,71 @@ mod tests {
         assert!(r.is_ok());
         let entries = mgr.get_entries(10).unwrap();
         assert_eq!(entries.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_context_messages_anchors_on_user() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"tool","tool_call_id":"c1","content":"ok"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"done"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q2"}))
+            .unwrap();
+
+        // cap=2 would naively start at "assistant:done" + "user:q2", but anchor
+        // should expand back to the nearest user before assistant
+        let msgs = mgr.build_context_messages(2).unwrap();
+        let first_role = msgs[0]["role"].as_str().unwrap();
+        assert_eq!(first_role, "user", "首条应为 user 而非 {:?}", msgs[0]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_context_messages_all_user_stays_same() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        for i in 0..5 {
+            mgr.append_message(serde_json::json!({"role":"user","content":format!("q{}",i)}))
+                .unwrap();
+        }
+
+        let msgs = mgr.build_context_messages(3).unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"].as_str().unwrap(), "user");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_context_messages_empty_transcript() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        let msgs = mgr.build_context_messages(10).unwrap();
+        assert!(msgs.is_empty());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
