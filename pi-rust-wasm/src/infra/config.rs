@@ -207,6 +207,9 @@ pub struct PrimitiveConfig {
     pub require_approval_for_all_write: bool,
     #[serde(default)]
     pub require_approval_for_all_bash: bool,
+    /// `execute_bash` 在 Unix 上 `sh -c` 前可选 source 的 env 脚本路径；`None` 时默认 `$HOME/.wasmedge/env`。
+    #[serde(default)]
+    pub wasmedge_env_path: Option<String>,
 }
 
 impl Default for PrimitiveConfig {
@@ -221,6 +224,7 @@ impl Default for PrimitiveConfig {
             auto_confirm_whitelist: Vec::new(),
             require_approval_for_all_write: true,
             require_approval_for_all_bash: true,
+            wasmedge_env_path: None,
         }
     }
 }

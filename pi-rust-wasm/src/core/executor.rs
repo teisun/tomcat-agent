@@ -454,12 +454,26 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         let output = match argv {
             None => {
                 #[cfg(unix)]
-                let (shell, arg) = ("sh", "-c");
+                let script = {
+                    let env_path = self
+                        .config
+                        .wasmedge_env_path
+                        .as_deref()
+                        .unwrap_or(r#"$HOME/.wasmedge/env"#);
+                    format!(
+                        r#"[ -f "{0}" ] && . "{0}"; {1}"#,
+                        env_path, command
+                    )
+                };
                 #[cfg(windows)]
-                let (shell, arg) = ("cmd", "/C");
+                let script = command.to_string();
+                #[cfg(unix)]
+                let (shell, shell_arg) = ("sh", "-c");
+                #[cfg(windows)]
+                let (shell, shell_arg) = ("cmd", "/C");
                 Command::new(shell)
-                    .arg(arg)
-                    .arg(command)
+                    .arg(shell_arg)
+                    .arg(&script)
                     .current_dir(&cwd_path)
                     .kill_on_drop(true)
                     .output()
