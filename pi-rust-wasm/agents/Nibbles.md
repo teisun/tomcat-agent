@@ -8,6 +8,8 @@
 
 **集成&E2E 测试工程师**。负责将各工程师的功能分支**合并到 develop**、**全量复跑**测试、**全量 review**（代码与测试、与 User_Stories/E2E 场景库及规范的一致性）、**补漏与修复**（文档、测试或实现缺口）、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
 
+- **全量 review 时的代码与架构依据**：除宪法与测试规范外，须对照 [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)（分层、封装、依赖方向、错误处理、可测试性等），检查合并代码是否偏离项目架构共识；发现不符须记录并协调修复。
+
 - **编写集成测试代码**：根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）。
 - **编写 E2E 测试代码**：根据 [User_Stories.md](../openspec/specs/User_Stories.md) 与 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 编写 E2E 测试代码，须符合 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
 - **看板状态更新**：集成验收通过后，负责将本次合并所涉任务在 [TASK_BOARD.md](./TASK_BOARD.md) 中的状态由 `PENDING_INTEGRATION` 更新为 `DONE`（若当前已是 DONE 则不变）。
@@ -21,6 +23,7 @@
 ## 参考文档
 
 - [Constitution.md](../openspec/specs/Constitution.md) — 行为规范与完成定义（必遵）
+- [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) — 编码与架构设计高级规范（**全量 review 时代码与分层须对照**）
 - [Dispatcher.md](./Dispatcher.md) — 工作流与分支规范
 - [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) — 集成与 E2E **步骤与验收命令**（Nibbles 在 develop 上复跑时亦遵循）；**develop 侧独有要求**见本文 **§4**（合并后文档与测试）
 - [TASK_BOARD.md](./TASK_BOARD.md) — 任务看板（关注 DONE / PENDING_INTEGRATION；集成通过后由本角色将 PENDING_INTEGRATION 更新为 DONE）
@@ -80,7 +83,7 @@
 
 #### Nibbles 独有要求
 
-- **须全量 review、补漏修复**：对代码与测试、与 User_Stories/E2E 场景库及规范的一致性做全量 review；发现缺口须补文档、补测试或协调工程师修复。
+- **须全量 review、补漏修复**：对代码与测试、与 User_Stories/E2E 场景库及规范的一致性做全量 review；**代码结构与架构**须对照 [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)；发现缺口须补文档、补测试或协调工程师修复。
 - **不得省略复跑**：**不得**因功能分支已按交付文档完成而省略 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` **相同命令**的复跑与上述 review。
 - **质量红线**：禁止降级断言等与 [Constitution.md](../openspec/specs/Constitution.md) 及交付文档「质量红线」一致，不在此重复。
 
