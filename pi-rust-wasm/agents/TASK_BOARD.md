@@ -718,18 +718,18 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1（内含 **P0** 子项须优先交付：transcript 400、`pi chat` 遇错不整段退出） |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
-| **分支** | `feature/chat-path-env` |
+| **分支** | `feature/chat-path-env`（已合并 `develop`，`ad3409f`） |
 | **阻塞点** | — |
 
 **目标**：消除 transcript 截断导致的 OpenAI 400；单次 API/Agent 错误不结束整段 `pi chat`；`pi.config.toml` 全局 `[workspace] extra_roots` 与 `DefaultPrimitiveExecutor` 路径策略一致；`.env` 代理模板、确认框 `{agentId} · host|pluginId`、system prompt 防目录幻觉。
 
 **子项**（与计划内 P0-a / P0-b / P1 / P2 对齐）：
-- [ ] **P0-a** `build_context_messages`：尾部窗口向上追溯到首条 `user`，注入 system 后为 `[system, user, …]`（[`session/manager.rs`](../src/core/session/manager.rs)）
-- [ ] **P0-b** `chat_loop`：`agent_loop.run` 失败时终端打印清晰错误并 `continue`；**不把 API 错误写入送给 LLM 的 transcript**（可选独立审计日志）
-- [ ] **P1** 从 `pi.config.toml` 加载全局 `workspace.extra_roots` 并入允许路径；测试 + [`user-guide.md`](../docs/user-guide.md)（已废弃 per-agent `ext_workspaces.json`）
-- [ ] **P2** `pi init` `.env` 代理注释模板或条件写入；确认框来源格式；[`build_system_prompt`](../src/core/system_prompt.rs) 约束
+- [x] **P0-a** `build_context_messages`：尾部窗口向上追溯到首条 `user`，注入 system 后为 `[system, user, …]`（[`session/manager.rs`](../src/core/session/manager.rs)）
+- [x] **P0-b** `chat_loop`：`agent_loop.run` 失败时终端打印清晰错误并 `continue`；**不把 API 错误写入送给 LLM 的 transcript**（可选独立审计日志）
+- [x] **P1** 从 `pi.config.toml` 加载全局 `workspace.extra_roots` 并入允许路径；测试 + [`user-guide.md`](../docs/user-guide.md)（已废弃 per-agent `ext_workspaces.json`）
+- [x] **P2** `pi init` `.env` 代理注释模板或条件写入；确认框来源格式；[`build_system_prompt`](../src/core/system_prompt.rs) 约束
 
 **依赖**：—
 
@@ -745,7 +745,7 @@
 - `.env`/确认框/system prompt 符合计划验收描述
 - `rustfmt` / `clippy` / 相关 `cargo test` 通过；不弱化断言
 
-**实施流程**：按 [Dispatcher.md](./Dispatcher.md) 领取本 TASK → 子计划经用户确认 → 开发 → 更新 `docs/status/{分支}.md` → `PENDING_INTEGRATION`。
+**实施流程**：已按 [Dispatcher.md](./Dispatcher.md) 在 `feature/chat-path-env` 交付并由集成流程合并入 `develop`（`ad3409f`）；看板按 [Nibbles.md](./Nibbles.md) §6 收口为 `DONE`。
 
 **说明**：openspec 中 [T1-P2-002 插件安全扫描](../openspec/changes/001-mvp/tasks_details.md) 原对应本 TASK-09；**现 TASK-09 已改为本整改**。插件安全扫描若仍要做，须在 TASK_BOARD **另起新 TASK** 引用 `T1-P2-002`，勿与本条混用。
 
@@ -921,7 +921,7 @@
 - [ ] 17.14 集成测试：大文件 read_file → Layer 0 截断不溢出；多轮对话 → Layer 1+2 自动触发；session 重载识别 Compaction entry
 - [ ] 17.15 `contextBudgetChars` 预算计算验证（GPT-5.2 400K → 816,000 chars）
 
-**依赖**：TASK-14（Agent Loop DONE）、TASK-09（chat-path-env，PENDING_INTEGRATION，涉及 `build_context_messages` 改动需先合入）
+**依赖**：TASK-14（Agent Loop DONE）、TASK-09（chat-path-env，DONE，已合入 `develop`）
 
 **被依赖**：—
 
