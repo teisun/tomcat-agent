@@ -878,3 +878,72 @@
 **被依赖**：—
 
 **验收标准**：见 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §1–§4；`cargo clippy --all-targets -- -D warnings`；场景库与测试同步。
+
+---
+
+### TASK-17 | context-management | 上下文管理（token-aware 滑窗 + Compaction）
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/context-management` |
+| **阻塞点** | — |
+
+**目标**：将上下文管理从「按条数裁剪」改为 **token-aware 滑窗 + 四层防护**（Layer 0 单条截断 → Layer 1 占位符替换 → Layer 2 LLM 循环 Compaction → Layer 3 极端兜底），消除 context overflow，保留语义完整性。同时移除 `max_tool_rounds` 硬限（留 TODO 待 tool-loop-detection 方案）。
+
+**技术方案**：[上下文管理技术方案](../openspec/specs/architecture/context-management.md)
+**研究报告**：[context-management-deep-dive.md](../docs/reports/context-management-deep-dive.md)
+
+**子项**：
+
+**Phase 1：基础设施与配置**
+- [ ] 17.1 `src/infra/config.rs`：新增 `[context]` 配置节（`context_window=400K`、`max_output_tokens=128K`、`compaction_turns=10`、`keep_recent_turns=3`、`single_tool_result_max_chars=400K`、`compaction_model="gpt-5.2"`），`PrimitiveConfig` 加载 + `pi.config.toml` 覆盖
+- [ ] 17.2 `src/core/session/manager.rs`：定义 `UserTurn`、`SummaryTurn`、`ContextState` 结构体；实现 `init_context_state`（从 transcript 按 user turn 分组加载，识别 Compaction entry 折叠，当天优先 + 不足 10 补全）
+- [ ] 17.3 `src/core/session/manager.rs`：`estimateContextChars` 动态维护（含 system prompt）；`on_message_appended` / `on_new_user_turn` 增量更新
+
+**Phase 2：四层防护算法**
+- [ ] 17.4 `src/core/compaction.rs`（**新建**）：Layer 0 — `truncate_tool_result_if_needed`（单条 tool result 超 400K chars 截断，70%~100% 区间找换行切断）
+- [ ] 17.5 `src/core/compaction.rs`：Layer 1 — `compact_tool_results`（compactable zone 内从旧到新替换 role=tool 为 PLACEHOLDER，减够即停）
+- [ ] 17.6 `src/core/compaction.rs`：Layer 2 — `run_compaction_loop`（每批 ≤10 turns 调 LLM 生成结构化摘要，UPDATE 模式合并旧 summary，循环至回预算或 compactable zone 耗尽；失败重试 1 次 + 跳过 + 降级）
+- [ ] 17.7 `src/core/compaction.rs`：Layer 3 — 强制删除最旧 summary/turn 兜底（几乎不可达）
+- [ ] 17.8 `src/core/compaction.rs`：SUMMARIZATION_PROMPT + UPDATE_SUMMARIZATION_PROMPT 模板（Goal/Constraints/Progress/Key Decisions/Critical Context）
+
+**Phase 3：集成与串联**
+- [ ] 17.9 `src/core/agent_loop.rs`：reasoning loop 工具返回后调用 Layer 0 + `on_message_appended`；移除 `max_tool_rounds` 硬限（保留配置项但默认不限制，留 TODO 注释）
+- [ ] 17.10 `src/core/session/manager.rs` / `src/api/chat.rs`：`build_context_messages` 改为从 `userTurnsList.flatten()` 产出，② 进入前触发 Layer 1~3 预算检查；④ 结束后打包当前 turn 追加 `userTurnsList`
+- [ ] 17.11 Transcript 写入：Compaction 发生时追加 `SessionEntry::Compaction` entry（append-only，原始消息不删），记录摘要正文与覆盖 turn range
+- [ ] 17.12 事件发布：`auto_compaction_start` / `auto_compaction_end` / `compaction_error` / `tool_result_truncated`
+
+**Phase 4：测试**
+- [ ] 17.13 单元测试：`truncate_tool_result_if_needed`（正常/超限/无换行边界）、`compact_tool_results`（减够即停/全部替换仍不够）、`run_compaction_loop`（单批/多批/UPDATE 模式/失败降级）
+- [ ] 17.14 集成测试：大文件 read_file → Layer 0 截断不溢出；多轮对话 → Layer 1+2 自动触发；session 重载识别 Compaction entry
+- [ ] 17.15 `contextBudgetChars` 预算计算验证（GPT-5.2 400K → 816,000 chars）
+
+**依赖**：TASK-14（Agent Loop DONE）、TASK-09（chat-path-env，PENDING_INTEGRATION，涉及 `build_context_messages` 改动需先合入）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`LlmProvider`（Compaction 摘要调用）、`SessionManager`（transcript 读写）、`EventBus`（事件发布）、`PrimitiveConfig`（配置加载）
+- 提供：`ContextState`（内存上下文视图）、`compaction.rs` 四层防护 API、token-aware `build_context_messages`
+
+**涉及文件**：
+
+| 文件 | 改动 |
+|------|------|
+| `src/infra/config.rs` | 新增 `[context]` 配置节 |
+| `src/core/session/manager.rs` | `UserTurn`/`ContextState` 定义；`build_context_messages` 改为 token-aware；初始化 + 动态维护 |
+| `src/core/agent_loop.rs` | reasoning loop 集成 Layer 0 + 估算更新；移除 `max_tool_rounds` 硬限 |
+| `src/core/compaction.rs`（**新建**） | 四层防护算法 + Compaction prompt 模板 |
+
+**验收标准**：
+- `estimateContextChars` 超 `contextBudgetChars` 时自动触发 Layer 1 → 2 → 3，不出现 context overflow 400 错误
+- 单条 tool result > 400K chars 被 Layer 0 截断
+- Compaction 摘要结构化（Goal/Progress/Critical Context），UPDATE 模式合并旧 summary
+- 最近 3 个 user turns 不参与任何压缩/替换（protected zone）
+- Session 重载正确识别 Compaction entry，不重复压缩
+- transcript JSONL 仅追加，原始消息不删除
+- `cargo clippy --all-targets -- -D warnings` 无新增 warning
+- 单测覆盖率 ≥ 80%

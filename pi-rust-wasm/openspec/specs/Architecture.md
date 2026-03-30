@@ -115,6 +115,8 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 
 详见 [9. Agent Loop 设计（详细）](architecture/agent-loop.md)。
 
+> Agent Loop 容错重试循环中的 ContextOverflow 路径、以及 `build_context_messages` 前的上下文预算检查，由 **上下文管理模块** 负责处理，详见 [上下文管理技术方案](architecture/context-management.md)。
+
 ### 10. 多 Agent 架构设计
 
 系统支持两个维度的多 Agent 能力：**多会话并发**（不同 session 各对应一个独立 AgentLoop 实例，共享基础设施、上下文完全隔离，通过 AgentRegistry 管理全局实例）与**主-子 Agent 编排**（主 Agent 通过 `dispatch_agent` 工具调用创建子 AgentLoop，子任务独立执行后将最终回答回注为 ToolResult，支持嵌套深度限制与级联 Abort）。设计综合参考了 openclaw（SubagentRegistry + spawnDepth）、claude-code（强上下文隔离 + 两层硬限制）、AutoGen（CancellationToken 级联取消）、LangGraph（recursion_limit 软限）的最优实践，与第 4、7、8、9 节共同构成完整的多 Agent 运行基础。
@@ -150,5 +152,6 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [architecture/work-dir-and-data-layout.md](architecture/work-dir-and-data-layout.md)                               | 工作目录与数据布局                                 |
 | [architecture/agent-loop.md](architecture/agent-loop.md)                                                           | Agent Loop 设计                             |
 | [architecture/multi-agent.md](architecture/multi-agent.md)                                                         | 多 Agent 架构设计                              |
+| [architecture/context-management.md](architecture/context-management.md)                                           | 上下文管理技术方案                                 |
 
 
