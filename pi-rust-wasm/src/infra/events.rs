@@ -26,6 +26,8 @@ pub mod wire {
     pub const WIRE_TOOL_RESULT: &str = "tool_result";
     pub const WIRE_AUTO_COMPACTION_START: &str = "auto_compaction_start";
     pub const WIRE_AUTO_COMPACTION_END: &str = "auto_compaction_end";
+    pub const WIRE_COMPACTION_ERROR: &str = "compaction_error";
+    pub const WIRE_TOOL_RESULT_TRUNCATED: &str = "tool_result_truncated";
     pub const WIRE_AUTO_RETRY_START: &str = "auto_retry_start";
     pub const WIRE_AUTO_RETRY_END: &str = "auto_retry_end";
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
@@ -157,6 +159,19 @@ pub enum AgentEvent {
         will_retry: bool,
         #[serde(rename = "errorMessage")]
         error_message: Option<String>,
+    },
+    CompactionError {
+        #[serde(rename = "batchIndex")]
+        batch_index: usize,
+        error: String,
+    },
+    ToolResultTruncated {
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        #[serde(rename = "originalChars")]
+        original_chars: usize,
+        #[serde(rename = "truncatedChars")]
+        truncated_chars: usize,
     },
     AutoRetryStart {
         attempt: u32,
@@ -318,6 +333,31 @@ mod tests {
                 .unwrap(),
             wire::WIRE_TOOL_RESULT
         );
+    }
+
+    #[test]
+    fn agent_event_compaction_error_serializes() {
+        let e = AgentEvent::CompactionError {
+            batch_index: 2,
+            error: "LLM timeout".to_string(),
+        };
+        let j = serde_json::to_string(&e).unwrap();
+        assert!(j.contains(wire::WIRE_COMPACTION_ERROR));
+        assert!(j.contains("batchIndex"));
+    }
+
+    #[test]
+    fn agent_event_tool_result_truncated_serializes() {
+        let e = AgentEvent::ToolResultTruncated {
+            tool_name: "read_file".to_string(),
+            original_chars: 600_000,
+            truncated_chars: 400_000,
+        };
+        let j = serde_json::to_string(&e).unwrap();
+        assert!(j.contains(wire::WIRE_TOOL_RESULT_TRUNCATED));
+        assert!(j.contains("toolName"));
+        assert!(j.contains("originalChars"));
+        assert!(j.contains("truncatedChars"));
     }
 
     #[test]

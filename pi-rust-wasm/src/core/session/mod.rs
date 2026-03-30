@@ -4,9 +4,12 @@ pub(crate) mod manager;
 pub(crate) mod store;
 pub(crate) mod transcript;
 
-pub use manager::SessionManager;
+pub use manager::{
+    build_context_from_state, estimate_turn_chars, init_context_state, ContextState,
+    SessionManager, TurnEntry,
+};
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 pub use transcript::{
-    append_entry, append_line, read_entries_tail, read_header, write_header, MessageEntry,
-    SessionHeader, TranscriptEntry,
+    append_entry, append_line, read_entries_tail, read_header, write_header, CompactionEntry,
+    MessageEntry, SessionHeader, TranscriptEntry,
 };

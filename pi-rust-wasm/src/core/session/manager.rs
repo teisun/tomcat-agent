@@ -15,9 +15,218 @@ use super::transcript::{
     read_header, write_header, MessageEntry, SessionHeader, TranscriptEntry,
 };
 
+use crate::infra::config::{compute_context_budget_chars, ContextConfig};
+
 const SESSIONS_FILE: &str = "sessions.json";
 const DEFAULT_CONTEXT_CAP: usize = 10;
 const BRANCH_MAX_ENTRIES: usize = 2000;
+
+// ---------------------------------------------------------------------------
+// Context management data structures (TASK-17)
+// ---------------------------------------------------------------------------
+
+use crate::core::agent_loop::AgentMessage;
+
+/// 上下文管理的分组单位：一条 user 消息及其后所有 assistant/tool 消息，
+/// 或一条 Compaction 生成的结构化摘要。
+#[derive(Debug, Clone)]
+pub enum TurnEntry {
+    UserTurn { messages: Vec<AgentMessage> },
+    SummaryTurn { summary: String },
+}
+
+/// 运行时上下文状态，在 `chat_loop` 外层初始化一次、跨迭代复用。
+pub struct ContextState {
+    pub user_turns_list: Vec<TurnEntry>,
+    pub estimate_context_chars: usize,
+    pub context_budget_chars: usize,
+}
+
+impl ContextState {
+    /// 追加消息后增量更新估算字符数。
+    pub fn on_message_appended(&mut self, content_len: usize) {
+        self.estimate_context_chars += content_len;
+    }
+
+    /// 新 user turn 完成后追加到 turns 列表并更新估算。
+    pub fn on_new_user_turn(&mut self, turn: TurnEntry) {
+        let chars = estimate_turn_chars(&turn);
+        self.estimate_context_chars += chars;
+        self.user_turns_list.push(turn);
+    }
+
+    /// 当前上下文是否超预算。
+    pub fn is_over_budget(&self) -> bool {
+        self.estimate_context_chars > self.context_budget_chars
+    }
+}
+
+/// 估算单个 TurnEntry 的字符数。
+pub fn estimate_turn_chars(turn: &TurnEntry) -> usize {
+    match turn {
+        TurnEntry::UserTurn { messages } => messages
+            .iter()
+            .map(|m| match m {
+                AgentMessage::User { text } => text.len(),
+                AgentMessage::Assistant { text, tool_calls } => {
+                    text.len()
+                        + tool_calls
+                            .iter()
+                            .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
+                            .sum::<usize>()
+                }
+                AgentMessage::ToolResult { content, .. } => content.len(),
+                AgentMessage::System { text } => text.len(),
+                AgentMessage::Steering { text, .. } => text.len(),
+                AgentMessage::CompactionSummary { summary } => summary.len(),
+            })
+            .sum(),
+        TurnEntry::SummaryTurn { summary } => summary.len(),
+    }
+}
+
+/// 从 transcript 加载历史，按 user turn 分组初始化 ContextState。
+/// 识别已有 Compaction entry 折叠为 SummaryTurn，避免重复压缩。
+pub fn init_context_state(
+    session: &SessionManager,
+    config: &ContextConfig,
+    system_text: &str,
+) -> Result<ContextState, AppError> {
+    let budget = compute_context_budget_chars(config);
+
+    let path = match session.current_transcript_path()? {
+        Some(p) => p,
+        None => {
+            return Ok(ContextState {
+                user_turns_list: Vec::new(),
+                estimate_context_chars: system_text.len(),
+                context_budget_chars: budget,
+            });
+        }
+    };
+
+    let entries = read_entries_tail(&path, BRANCH_MAX_ENTRIES)?;
+
+    let mut turns: Vec<TurnEntry> = Vec::new();
+    let mut current_turn_msgs: Vec<AgentMessage> = Vec::new();
+    let mut total_chars = system_text.len();
+
+    for entry in entries {
+        match entry {
+            TranscriptEntry::Compaction(ce) => {
+                if !current_turn_msgs.is_empty() {
+                    let turn = TurnEntry::UserTurn {
+                        messages: std::mem::take(&mut current_turn_msgs),
+                    };
+                    total_chars += estimate_turn_chars(&turn);
+                    turns.push(turn);
+                }
+                if let Some(ref summary) = ce.summary {
+                    total_chars += summary.len();
+                    turns.push(TurnEntry::SummaryTurn {
+                        summary: summary.clone(),
+                    });
+                }
+            }
+            TranscriptEntry::Message(me) => {
+                let role = me.message.get("role").and_then(|r| r.as_str());
+                let content = me
+                    .message
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+
+                if role == Some("user") && !current_turn_msgs.is_empty() {
+                    let turn = TurnEntry::UserTurn {
+                        messages: std::mem::take(&mut current_turn_msgs),
+                    };
+                    total_chars += estimate_turn_chars(&turn);
+                    turns.push(turn);
+                }
+
+                let agent_msg = match role {
+                    Some("user") => AgentMessage::User {
+                        text: content.to_string(),
+                    },
+                    Some("assistant") => {
+                        let tool_calls = me
+                            .message
+                            .get("tool_calls")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| {
+                                        let obj = v.as_object()?;
+                                        let id = obj.get("id")?.as_str()?.to_string();
+                                        let func = obj.get("function")?.as_object()?;
+                                        let name = func.get("name")?.as_str()?.to_string();
+                                        let arguments = func
+                                            .get("arguments")
+                                            .and_then(|a| a.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        Some(crate::core::agent_loop::ToolCallInfo {
+                                            id,
+                                            name,
+                                            arguments,
+                                        })
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        AgentMessage::Assistant {
+                            text: content.to_string(),
+                            tool_calls,
+                        }
+                    }
+                    Some("tool") => AgentMessage::ToolResult {
+                        tool_call_id: me
+                            .message
+                            .get("tool_call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        content: content.to_string(),
+                        is_error: false,
+                    },
+                    _ => continue,
+                };
+                current_turn_msgs.push(agent_msg);
+            }
+            _ => {}
+        }
+    }
+
+    if !current_turn_msgs.is_empty() {
+        let turn = TurnEntry::UserTurn {
+            messages: std::mem::take(&mut current_turn_msgs),
+        };
+        total_chars += estimate_turn_chars(&turn);
+        turns.push(turn);
+    }
+
+    Ok(ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total_chars,
+        context_budget_chars: budget,
+    })
+}
+
+/// 将 ContextState 中的 turns 展平为 AgentMessage 列表（不含 system prompt）。
+pub fn build_context_from_state(state: &ContextState) -> Vec<AgentMessage> {
+    let mut out = Vec::new();
+    for turn in &state.user_turns_list {
+        match turn {
+            TurnEntry::UserTurn { messages } => out.extend(messages.iter().cloned()),
+            TurnEntry::SummaryTurn { summary } => {
+                out.push(AgentMessage::CompactionSummary {
+                    summary: summary.clone(),
+                });
+            }
+        }
+    }
+    out
+}
 
 /// 会话管理器：持有 store 路径与写入锁，提供 CRUD 与 transcript 读写。
 pub struct SessionManager {
@@ -212,7 +421,7 @@ impl SessionManager {
         append_entry(&path, &entry)
     }
 
-    /// 追加 compaction。
+    /// 追加 compaction（基本版，不含覆盖范围信息）。
     pub fn append_compaction(&self, summary: Option<&str>) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
@@ -222,6 +431,32 @@ impl SessionManager {
             parent_id: None,
             timestamp: iso_ts_now()?,
             summary: summary.map(String::from),
+            covered_start_id: None,
+            covered_end_id: None,
+            covered_count: None,
+        });
+        append_entry(&path, &entry)
+    }
+
+    /// 追加含覆盖范围的 compaction entry。
+    pub fn append_compaction_with_range(
+        &self,
+        summary: &str,
+        covered_start_id: Option<String>,
+        covered_end_id: Option<String>,
+        covered_count: usize,
+    ) -> Result<(), AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        let entry = TranscriptEntry::Compaction(CompactionEntry {
+            id: None,
+            parent_id: None,
+            timestamp: iso_ts_now()?,
+            summary: Some(summary.to_string()),
+            covered_start_id,
+            covered_end_id,
+            covered_count: Some(covered_count),
         });
         append_entry(&path, &entry)
     }
@@ -710,6 +945,107 @@ mod tests {
 
         let msgs = mgr.build_context_messages(10).unwrap();
         assert!(msgs.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_context_state_empty_session() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        let cfg = ContextConfig::default();
+        let state = init_context_state(&mgr, &cfg, "system prompt").unwrap();
+        assert!(state.user_turns_list.is_empty());
+        assert_eq!(state.estimate_context_chars, "system prompt".len());
+        assert_eq!(state.context_budget_chars, 816_000);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_context_state_with_messages() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        mgr.append_message(serde_json::json!({"role":"user","content":"q1"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q2"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a2"})).unwrap();
+
+        let cfg = ContextConfig::default();
+        let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+        assert_eq!(state.user_turns_list.len(), 2);
+        assert!(state.estimate_context_chars > 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_context_state_with_compaction_entry() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        mgr.append_compaction(Some("summary of old turns")).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q_after"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a_after"})).unwrap();
+
+        let cfg = ContextConfig::default();
+        let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+        assert_eq!(state.user_turns_list.len(), 2);
+        if let TurnEntry::SummaryTurn { summary } = &state.user_turns_list[0] {
+            assert_eq!(summary, "summary of old turns");
+        } else {
+            panic!("first turn should be SummaryTurn");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_context_from_state_flattens_turns() {
+        let state = ContextState {
+            user_turns_list: vec![
+                TurnEntry::SummaryTurn { summary: "summary".to_string() },
+                TurnEntry::UserTurn {
+                    messages: vec![
+                        AgentMessage::User { text: "hello".to_string() },
+                        AgentMessage::Assistant { text: "world".to_string(), tool_calls: vec![] },
+                    ],
+                },
+            ],
+            estimate_context_chars: 100,
+            context_budget_chars: 1000,
+        };
+        let msgs = build_context_from_state(&state);
+        assert_eq!(msgs.len(), 3);
+        assert!(matches!(&msgs[0], AgentMessage::CompactionSummary { .. }));
+        assert!(matches!(&msgs[1], AgentMessage::User { .. }));
+        assert!(matches!(&msgs[2], AgentMessage::Assistant { .. }));
+    }
+
+    #[test]
+    fn init_context_state_no_session() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+
+        let cfg = ContextConfig::default();
+        let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+        assert!(state.user_turns_list.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

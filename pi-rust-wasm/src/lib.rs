@@ -18,8 +18,9 @@ pub use core::{
     ToolRegistry, UserConfirmationProvider, WriteFileResult,
 };
 pub use core::{
-    load_store, save_store, SessionEntry, SessionHeader, SessionManager, SessionStore,
-    TranscriptEntry, DEFAULT_SESSION_KEY,
+    build_context_from_state, init_context_state, load_store, save_store, CompactionEntry,
+    ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore, TranscriptEntry,
+    TurnEntry, DEFAULT_SESSION_KEY,
 };
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, transpile_pi_plugin_for_quickjs,
@@ -35,8 +36,8 @@ pub use infra::{
     resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir,
     resolve_workspace_dir, validate_config, wire, write_file_atomic, AgentConfig, AgentEvent,
     AppConfig, AppError, AuditEntry, AuditFilter, AuditPrimitiveOp, AuditRecorder, AuditStore,
-    DefaultEventBus, EventBus, EventContext, EventListenerId, ExtensionEvent, FileAuditRecorder,
-    HostcallAuditEntry, LlmConfig, LogConfig, PluginLifecycleAuditEntry, PrimitiveAuditEntry,
-    PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder, WasmConfig,
-    WorkspaceConfig, DEFAULT_LLM_MODEL,
+    ContextConfig, DefaultEventBus, EventBus, EventContext, EventListenerId, ExtensionEvent,
+    FileAuditRecorder, HostcallAuditEntry, LlmConfig, LogConfig, PluginLifecycleAuditEntry,
+    PrimitiveAuditEntry, PrimitiveConfig, SecurityConfig, ToolAuditEntry, TracingAuditRecorder,
+    WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
 };

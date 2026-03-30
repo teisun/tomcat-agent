@@ -127,7 +127,13 @@ use parking_lot::Mutex;
 use tokio_stream::StreamExt;
 
 use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
+use crate::core::compaction::{
+    compact_tool_results, force_drop_oldest, is_context_overflow_error,
+    run_compaction_loop, truncate_tool_result_if_needed,
+};
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
+use crate::core::session::manager::ContextState;
+use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::{
@@ -294,6 +300,8 @@ fn classify_error(err: &AppError) -> LoopError {
 }
 
 /// MVP：保留首条 System（若有）+ 最近 keep_recent 条。
+/// Deprecated: 由 token-aware ContextState + 四层防护替代（TASK-17）。
+#[deprecated(note = "Use ContextState + compaction layers instead")]
 pub fn compact_messages(messages: &mut Vec<AgentMessage>, keep_recent: usize) {
     if messages.len() <= keep_recent + 1 {
         return;
@@ -312,22 +320,26 @@ pub fn compact_messages(messages: &mut Vec<AgentMessage>, keep_recent: usize) {
 
 pub struct AgentLoopConfig {
     pub max_attempts: u32,
+    /// 单次 Attempt 最大工具轮次。默认 `usize::MAX`（不限制）；
+    /// 上下文预算自然约束轮次。TODO: 待 tool-loop-detection 方案替代。
     pub max_tool_rounds: usize,
     pub retry_base_delay_ms: u64,
     pub model: String,
     pub session_id: String,
     pub tool_definitions: Vec<serde_json::Value>,
+    pub context_config: ContextConfig,
 }
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
             max_attempts: 3,
-            max_tool_rounds: 10,
+            max_tool_rounds: usize::MAX,
             retry_base_delay_ms: 300,
             model: String::new(),
             session_id: String::new(),
             tool_definitions: Vec::new(),
+            context_config: ContextConfig::default(),
         }
     }
 }
@@ -349,6 +361,7 @@ pub struct AgentLoop {
     follow_up_queue: Arc<Mutex<Vec<AgentMessage>>>,
     abort_signal: Arc<AtomicBool>,
     on_stream_delta: Option<OnStreamDelta>,
+    context_state: Option<ContextState>,
 }
 
 fn unix_ts_ms() -> i64 {
@@ -375,6 +388,7 @@ impl AgentLoop {
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             abort_signal,
             on_stream_delta: None,
+            context_state: None,
         }
     }
 
@@ -397,6 +411,7 @@ impl AgentLoop {
             steering_queue,
             abort_signal,
             on_stream_delta: None,
+            context_state: None,
         }
     }
 
@@ -423,6 +438,14 @@ impl AgentLoop {
 
     pub fn abort_signal(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.abort_signal)
+    }
+
+    pub fn set_context_state(&mut self, state: Option<ContextState>) {
+        self.context_state = state;
+    }
+
+    pub fn take_context_state(&mut self) -> Option<ContextState> {
+        self.context_state.take()
     }
 
     fn emit_event(&self, event: AgentEvent) {
@@ -558,6 +581,38 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
+                    // ContextOverflow: trigger compaction before retry
+                    if is_context_overflow_error(&e) && self.context_state.is_some() {
+                        self.emit_event(AgentEvent::AutoCompactionStart {
+                            reason: "context_overflow".into(),
+                        });
+                        if let Some(ref mut ctx_state) = self.context_state {
+                            compact_tool_results(
+                                ctx_state,
+                                self.config.context_config.keep_recent_turns,
+                            );
+                            if ctx_state.is_over_budget() {
+                                let _ = run_compaction_loop(
+                                    ctx_state,
+                                    &*self.llm,
+                                    &self.config.context_config,
+                                    std::path::Path::new(""),
+                                )
+                                .await;
+                            }
+                            if ctx_state.is_over_budget() {
+                                force_drop_oldest(ctx_state);
+                            }
+                            *messages =
+                                crate::core::session::manager::build_context_from_state(ctx_state);
+                        }
+                        self.emit_event(AgentEvent::AutoCompactionEnd {
+                            result: None,
+                            aborted: false,
+                            will_retry: true,
+                            error_message: None,
+                        });
+                    }
                     last_err = Some(e);
                     if attempt == self.config.max_attempts {
                         let fatal = last_err.unwrap_or_else(|| "重试耗尽".to_string());
@@ -688,6 +743,9 @@ impl AgentLoop {
 
             if tool_calls.is_empty() {
                 debug!("[tool_debug] 本轮回复无 tool_calls");
+                if let Some(ref mut ctx_state) = self.context_state {
+                    ctx_state.on_message_appended(content_buf.len());
+                }
                 messages.push(AgentMessage::Assistant {
                     text: content_buf,
                     tool_calls: vec![],
@@ -706,6 +764,16 @@ impl AgentLoop {
                 tool_calls.len(),
                 tool_names
             );
+
+            // Update context estimate for assistant message with tool calls
+            if let Some(ref mut ctx_state) = self.context_state {
+                let assistant_chars = content_buf.len()
+                    + tool_calls
+                        .iter()
+                        .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
+                        .sum::<usize>();
+                ctx_state.on_message_appended(assistant_chars);
+            }
 
             messages.push(AgentMessage::Assistant {
                 text: content_buf.clone(),
@@ -735,7 +803,20 @@ impl AgentLoop {
                     input: args.clone(),
                 });
 
-                let (result_content, is_error) = self.execute_tool(tc).await;
+                let (mut result_content, is_error) = self.execute_tool(tc).await;
+
+                // Layer 0: truncate oversized tool results
+                if let Some(ref ctx_state) = self.context_state {
+                    let max_chars = self.config.context_config.single_tool_result_max_chars;
+                    if let Some(info) = truncate_tool_result_if_needed(&mut result_content, max_chars) {
+                        self.emit_event(AgentEvent::ToolResultTruncated {
+                            tool_name: tc.name.clone(),
+                            original_chars: info.original_chars,
+                            truncated_chars: info.truncated_chars,
+                        });
+                        let _ = ctx_state; // acknowledge use for borrow purposes
+                    }
+                }
 
                 self.emit_extension_event(ExtensionEvent::ToolResult {
                     tool_name: tc.name.clone(),
@@ -752,6 +833,11 @@ impl AgentLoop {
                     result: ToolOutput(serde_json::json!(result_content)),
                     is_error,
                 });
+
+                // Update context estimate for tool result
+                if let Some(ref mut ctx_state) = self.context_state {
+                    ctx_state.on_message_appended(result_content.len());
+                }
 
                 messages.push(AgentMessage::ToolResult {
                     tool_call_id: tc.id.clone(),
@@ -1255,6 +1341,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn compact_messages_keeps_system_and_recent() {
         let mut messages: Vec<AgentMessage> = (0..25)
             .map(|i| AgentMessage::User {

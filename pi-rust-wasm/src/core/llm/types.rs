@@ -110,7 +110,7 @@ impl ChatMessage {
 /// 会话级模型覆盖；若为 None，使用全局 LlmConfig.default_model。
 /// 后续 SessionManager 可用时由上层从 SessionEntry.model_override 填入。
 /// 与 OpenAI API 请求体兼容（snake_case）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
