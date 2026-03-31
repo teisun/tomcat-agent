@@ -83,6 +83,12 @@ pub struct CompactionEntry {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_start_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_end_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

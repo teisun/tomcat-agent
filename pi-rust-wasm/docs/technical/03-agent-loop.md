@@ -5,9 +5,11 @@
 - **职责**：编排「用户输入 → LLM 流式调用 → 工具执行 → 结果回注 → 再调 LLM」的三层嵌套循环，支持 Steering（中途改向）、FollowUp（同上下文追问）、Abort（Ctrl+C 中断）、AgentEvent 全生命周期发布、错误分类与指数退避重试。
 - **所在层级**：宿主核心能力层（`src/core/agent_loop.rs`），被 `src/api/chat.rs` 调用，依赖 `LlmProvider`、`PrimitiveExecutor`、`EventBus`。
 - **核心文件**：
-  - `src/core/agent_loop.rs` — AgentMessage、ToolCallInfo、convert_to_llm_format、agent_messages_from_chat、AgentLoopConfig、AgentLoop、LoopError、compact_messages
+  - `src/core/agent_loop.rs` — AgentMessage、ToolCallInfo、convert_to_llm_format、agent_messages_from_chat、AgentLoopConfig、AgentLoop、LoopError
+  - `src/core/compaction.rs` — 四层上下文防护算法（Layer 0~3）、Compaction Prompt 模板、context overflow 检测
+  - `src/core/session/manager.rs` — TurnEntry、ContextState、init_context_state、build_context_from_state、estimate_turn_chars
   - `src/core/mod.rs` — core 层 re-export
-  - `src/lib.rs` — 对外导出 AgentLoop、AgentLoopConfig、AgentRunResult、AgentMessage、convert_to_llm_format、agent_messages_from_chat
+  - `src/lib.rs` — 对外导出 AgentLoop、AgentLoopConfig、AgentRunResult、AgentMessage、ContextState、TurnEntry、ContextConfig 等
 
 ### 1.1 三层嵌套循环 + 干预点（ASCII）
 
@@ -18,11 +20,15 @@ Layer 1  Conversation Loop
 Layer 2  Attempt Loop (max_attempts, 指数退避)
     |
     v
-Layer 3  Reasoning Loop (max_tool_rounds)
+Layer 2  Attempt Loop (max_attempts, 指数退避)
+    |     ContextOverflow 检测 -> 触发 Layer 1~3 Compaction -> 重试
+    v
+Layer 3  Reasoning Loop
     |     LLM 流式 -> tool_calls?
-    |     +-- 执行工具 -> ToolResult 回注
+    |     +-- 执行工具 -> Layer 0 截断超大 ToolResult -> ToolResult 回注
     |     +-- Steering 队列 -> 改向，跳过后续工具
     |     +-- Abort 信号 -> 中断
+    |     +-- ContextState 动态估算更新
     v
   final_text (由调用方决定是否写 Session)
 ```
@@ -51,20 +57,54 @@ Layer 3  Reasoning Loop (max_tool_rounds)
 - **AgentLoop::abort(&self)**：将 `abort_signal` 置为 true；第三层每工具执行前检查，为 true 则返回 `Err` 并发布 agent_end(interrupted)。
 - **AgentLoop::set_on_stream_delta(&mut self, f)**：设置流式 delta 回调，供 chat 做 Markdown 渲染等。
 - **LoopError**（内部）：`Retryable(String)`、`Fatal(String)`、`Aborted`；`classify_error(AppError)` 将 429/5xx/超时/请求失败等归为 Retryable，401/400 归为 Fatal。
-- **compact_messages(messages, keep_recent)**：MVP 压缩：保留首条 System（若有）+ 最近 `keep_recent` 条，其余丢弃。
+- **compact_messages(messages, keep_recent)**：（已废弃）MVP 压缩。由 ContextState + 四层防护替代。
+
+### 3.2 上下文管理 API（TASK-17）
+
+- **ContextState**：运行时上下文状态，包含 `user_turns_list: Vec<TurnEntry>`、`estimate_context_chars: usize`、`context_budget_chars: usize`。在 `chat_loop` 外层初始化一次、跨迭代复用。
+- **TurnEntry**：上下文分组单位——`UserTurn { messages: Vec<AgentMessage> }` 或 `SummaryTurn { summary: String }`。
+- **init_context_state(session, config, system_text) -> ContextState**：从 transcript 加载历史，按 user turn 分组，识别已有 Compaction entry 折叠为 SummaryTurn。
+- **build_context_from_state(state) -> Vec<AgentMessage>**：将 ContextState 的 turns 展平为 AgentMessage 列表。
+- **ContextConfig**：上下文管理配置，含 `context_window`、`max_output_tokens`、`compaction_turns`、`keep_recent_turns`、`single_tool_result_max_chars`、`compaction_model`。
+
+### 3.3 四层防护算法（`compaction.rs`）
+
+| Layer | 函数 | 机制 | 触发条件 |
+|-------|------|------|----------|
+| 0 | `truncate_tool_result_if_needed` | 单条 tool result 超限截断（Unicode 安全） | 每次 tool 执行完毕后 |
+| 1 | `compact_tool_results` | 可压缩区内旧 tool result 替换为占位符 | `estimateContextChars > budget` |
+| 2 | `run_compaction_loop` | LLM 循环摘要（结构化 Compaction） | Layer 1 后仍超预算 |
+| 3 | `force_drop_oldest` | 强制删除最旧 turn（防御性兜底） | Layer 2 后仍超预算 |
+
+- **is_context_overflow_error(err)**：检测 LLM 错误是否为 context overflow（含 "context" + "length"/"token"/"limit"）。
+- **Compaction Prompts**：`SUMMARIZATION_PROMPT`（首次摘要）和 `UPDATE_SUMMARIZATION_PROMPT`（增量合并已有摘要）。
 
 ## 4. 配置项 (Configuration)
+
+### 4.1 AgentLoopConfig
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | max_attempts | u32 | 3 | 第二层 Attempt 最大重试次数（含首次） |
-| max_tool_rounds | usize | 10 | 单次 Attempt 内第三层最大工具轮次 |
+| max_tool_rounds | usize | usize::MAX | 单次 Attempt 内第三层最大工具轮次（不再硬限，由 token 预算兜底） |
 | retry_base_delay_ms | u64 | 300 | 指数退避基准延迟（ms），实际 delay = base × 2^(attempt-1) |
 | model | String | — | LLM 模型名，由调用方从 Session/Config 填入 |
 | session_id | String | — | 会话 ID，随 AgentEvent 发布 |
-| tool_definitions | Vec<serde_json::Value> | [] | 传入 LLM 的工具 JSON Schema，由调用方 build_tool_definitions() 生成 |
+| tool_definitions | Vec<serde_json::Value> | [] | 传入 LLM 的工具 JSON Schema |
+| context_config | ContextConfig | ContextConfig::default() | 上下文管理配置 |
 
-无环境变量或配置文件直连；上述均在构造 `AgentLoopConfig` 时由调用方设置。
+### 4.2 ContextConfig（`[context]` 配置节）
+
+| 字段 | 类型 | 默认值 | 环境变量 | 说明 |
+|------|------|--------|----------|------|
+| context_window | usize | 400,000 | `PI_CONTEXT_WINDOW` | 模型 context window（tokens） |
+| max_output_tokens | usize | 128,000 | `PI_MAX_OUTPUT_TOKENS` | 模型最大输出（tokens） |
+| compaction_turns | usize | 10 | — | 每批 Compaction 的 turn 数上限 |
+| keep_recent_turns | usize | 3 | — | 保护区 turn 数（不参与压缩） |
+| single_tool_result_max_chars | usize | 400,000 | — | Layer 0 单条 tool result 截断阈值（chars） |
+| compaction_model | String | 与主模型相同 | — | Compaction LLM 调用使用的模型 |
+
+预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4 × 0.75`（GPT-5.2 默认 = 816,000 chars）。
 
 ## 5. 交互流程 (Workflow)
 
@@ -97,8 +137,31 @@ flowchart TD
 ```
 
 - 第一层：处理用户输入与 FollowUp；每次循环开始注入 steering_queue 中已有消息；Attempt 成功后在循环尾检查 follow_up_queue，非空则 drain 追加后 continue，否则 return。
-- 第二层：按 attempt 计数，Retryable 错误时指数退避后重试，Fatal 或 Aborted 则终止并返回 Err。
-- 第三层：turn_start → chat_stream → message_start/update/end → 若有 tool_calls 则逐个 execute_tool，每工具前检查 abort、每工具后检查 steering_queue；无 tool_calls 或达到 max_tool_rounds 则 return Ok(final_text)。
+- 第二层：按 attempt 计数，Retryable 错误时指数退避后重试，Fatal 或 Aborted 则终止并返回 Err。**ContextOverflow 检测**：若错误匹配 `is_context_overflow_error`，触发 Layer 1→2→3 Compaction 后以压缩后的上下文重试。
+- 第三层：turn_start → chat_stream → message_start/update/end → 若有 tool_calls 则逐个 execute_tool（**Layer 0 截断**检查），每工具前检查 abort、每工具后检查 steering_queue；同时**动态更新** `ContextState.estimate_context_chars`。
+
+### 5.2 上下文管理集成流程（TASK-17）
+
+```text
+  chat_loop (api/chat.rs)
+      |
+      v  init_context_state() ← 从 transcript 重建 ContextState（仅首次）
+      |
+      v  每轮用户输入:
+      |    1. 更新 estimateContextChars（新消息）
+      |    2. is_over_budget? → 预飞 Layer 1~3 Compaction
+      |    3. build_context_from_state → messages
+      |    4. set_context_state → AgentLoop
+      |
+      v  AgentLoop::run()
+      |    - Layer 0: 每次 tool 执行后截断超大 result
+      |    - Layer 2 Attempt: ContextOverflow → Layer 1~3 → 重试
+      |    - 动态维护 estimate_context_chars
+      |
+      v  take_context_state ← 取回 ContextState
+      |    - on_new_user_turn（追加本轮 turn）
+      |    - 下一轮继续使用同一 ContextState
+```
 
 ## 6. 示例代码 (Usage Examples)
 
@@ -137,6 +200,16 @@ match agent_loop.run(messages).await {
 
 ## 7. 验收标准 (Testing & QA)
 
-- **单测**：`cargo test -j 1 --lib -- --test-threads=1` 全通过（当前 250 passed）；`core::agent_loop::tests` 覆盖：正常单轮无工具、多轮工具循环、Steering 注入后跳过剩余工具、FollowUp 同上下文继续、Abort 终止并 agent_end(interrupted)、429 触发重试后成功、401/503 Fatal 立即终止、convert_to_llm_format 各变体与 CompactionSummary→user、agent_messages_from_chat 往返。
-- **门禁**：`cargo clippy --lib` 无新增警告（既有 3 条在 config/logging，非本模块）。
-- **事件**：agent_start、turn_start/end、message_start/update/end、**tool_execution_start**/**tool_execution_end**（JSON `type`；Rust `ToolExecutionStart`/`ToolExecutionEnd`，观察向）以及 **tool_call**/**tool_result**（`ExtensionEvent` 钩子，与观察向不同名）、auto_retry_start/end、agent_end(success|error|interrupted) 发布时机与 [agent-loop.md](../../openspec/specs/architecture/agent-loop.md) 13.6 及 [events.md](../../openspec/specs/architecture/plugin-system/events.md) 工具链对照一致。
+- **单测**：`cargo test -j 1 --lib -- --test-threads=1` 全通过（当前 334 passed）；覆盖：
+  - `core::agent_loop::tests` — 正常单轮无工具、多轮工具循环、Steering/FollowUp/Abort、429 重试、401 Fatal、convert_to_llm_format、agent_messages_from_chat 往返
+  - `core::compaction::tests` — Layer 0 截断（ASCII/Unicode/边界）、Layer 1 占位符替换、Layer 3 强制删除、is_context_overflow_error 匹配、ContextState 方法
+  - `infra::config::tests` — ContextConfig 默认值、预算计算（GPT-5.2 816K）、溢出保护、TOML override
+  - `core::session::manager::tests` — init_context_state（空/有消息/有 compaction entry/无 session）、build_context_from_state
+  - `infra::events::tests` — CompactionError/ToolResultTruncated 序列化
+- **集成测试**：`tests/context_management_tests.rs`（14 用例）—
+  - 端到端：大文件截断事件、Layer 1+3 预算恢复、Session 重载含 Compaction entry、ContextOverflow 自动恢复重试、Unicode 安全截断、混合 turns 展平顺序
+  - Layer 1 深度验证：占位符替换正确性（旧 turn 替换/保护区保留）、减够即停、estimate 精确变化量
+  - Layer 2 深度验证：单批压缩、多批循环、UPDATE 模式（SummaryTurn 在 batch）、LLM 报错优雅降级、摘要过长中断
+- **重构**：`run_compaction_cascade`（`compaction.rs`）统一三层级联逻辑，`chat.rs` 与 `agent_loop.rs` 共用
+- **门禁**：`cargo clippy --all-targets -- -D warnings` 无警告。
+- **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、tool_call/tool_result、auto_retry_start/end、**auto_compaction_start/end**（TASK-17 新增）、**tool_result_truncated**（TASK-17 新增）、**compaction_error**（TASK-17 新增）、agent_end(success|error|interrupted)。

@@ -183,7 +183,7 @@
 
 ---
 
-## Story 9 — AgentLoop 核心结构（TASK-14，3 条）
+## Story 9 — AgentLoop 核心结构（TASK-14，3 条 + TASK-17 上下文管理 3 条）
 
 > 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
 > **验收**：与 §4 人工验收「对话模式、多轮上下文、会话切换」对齐，建议**人工补验** AgentLoop 与终端交互体验。
@@ -194,7 +194,11 @@
 | E2E-CLI-081 | 人工 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `pi chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `pi init` → `pi chat`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 OPENAI_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复） |
 | E2E-CLI-082 | 人工 | `test_user_chat_resumes_last_session`             | 用户用 `--resume` 恢复上次会话，历史消息从 JSONL 加载         | `pi init` → `pi chat`（stdin 第一轮）→ `pi chat --resume`（stdin 第二轮，timeout 60s）               | exit 0；第二轮 stdout 非空；进程正常退出                  |
 | E2E-CLI-083 | 人工 | `test_user_chat_multi_turn_context_retained`      | 用户进行两轮提问，第二轮 Agent 可引用第一轮答案（多轮上下文）           | `pi chat`（stdin: 两行问答，第二问引用第一问答案，timeout 90s）                                             | exit 0；stdout 包含第二问回复且非空                     |
+| E2E-CLI-084 | 自动 | `test_large_tool_result_triggers_truncation_event` | 超大 tool result 被自动截断，对话正常继续 | AgentLoop mock 返回大文件读取 → 检查截断事件 | ToolResultTruncated 事件发布；截断后内容 <= 阈值 |
+| E2E-CLI-085 | 自动 | `test_context_overflow_triggers_compaction_and_retries` | Context overflow 触发 Compaction 后自动恢复 | Mock LLM 先返回 overflow 错误 → 触发压缩 → 重试成功 | 预算恢复；重试成功返回结果 |
+| E2E-CLI-086 | 自动 | `test_session_reload_with_compaction_entries` | Session JSONL 含 Compaction entry 时重载正确 | 写入含 CompactionEntry 的 JSONL → init_context_state → build_context | SummaryTurn 出现在正确位置；消息顺序正确 |
 
+> **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
 
 ---
 

@@ -9,10 +9,14 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    agent_messages_from_chat, convert_to_llm_format, resolve_extra_roots_paths,
+    convert_to_llm_format, resolve_extra_roots_paths,
     resolve_sessions_dir, resolve_workspace_dir, AgentLoop, AgentLoopConfig, AppConfig,
     ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
     PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
+};
+use crate::core::compaction::run_compaction_cascade;
+use crate::core::session::manager::{
+    build_context_from_state, init_context_state, TurnEntry,
 };
 
 use super::render::MarkdownRenderer;
@@ -249,6 +253,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
 
+    // ContextState: 在 loop 外一次性初始化，跨迭代复用
+    let context_config = &ctx.config.context;
+    let workspace_str = ctx.workspace_dir.to_string_lossy();
+    let system_text = crate::core::system_prompt::build_system_prompt(&workspace_str);
+    let mut context_state =
+        init_context_state(&ctx.session, context_config, &system_text)?;
+
     loop {
         let input = match rl.readline("u> ") {
             Ok(line) => line,
@@ -276,48 +287,60 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let entry = ctx.session.get_session(ctx.session.current_session_key())?;
         let model = ctx.effective_model(entry.as_ref());
 
-        let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
-        let mut history = ctx
-            .session
-            .build_context_messages(ctx.session.context_cap())?;
+        // Update context estimate for the new user input
+        context_state.on_message_appended(input.len());
 
-        // 在历史消息最前面注入 system message（仅当首条不是 system 时）。
-        let workspace_str = ctx.workspace_dir.to_string_lossy();
-        let system_text = crate::core::system_prompt::build_system_prompt(&workspace_str);
-        let system_msg = ChatMessage::system(system_text);
-        if history.first().and_then(|v| v["role"].as_str()) != Some("system") {
-            history.insert(0, serde_json::to_value(&system_msg)?);
+        // Pre-flight budget check: trigger Layer 1~3 cascade if over budget
+        if context_state.is_over_budget() {
+            let tp = ctx
+                .session
+                .current_transcript_path()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            run_compaction_cascade(
+                &mut context_state,
+                &*ctx.llm,
+                context_config,
+                &tp,
+            )
+            .await;
         }
 
-        let user_msg = ChatMessage::user(&input);
-        history.push(serde_json::to_value(&user_msg)?);
+        // Build messages from ContextState
+        let mut messages = build_context_from_state(&context_state);
+        messages.insert(
+            0,
+            crate::core::AgentMessage::System {
+                text: system_text.clone(),
+            },
+        );
+        messages.push(crate::core::AgentMessage::User {
+            text: input.clone(),
+        });
 
+        // Append user message to transcript
+        let user_msg = ChatMessage::user(&input);
         ctx.session
             .append_message(serde_json::to_value(&user_msg)?)?;
 
-        let chat_messages: Vec<ChatMessage> = history
-            .iter()
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-            .collect();
-        let messages = agent_messages_from_chat(&chat_messages);
-        let first_role = history
-            .first()
-            .and_then(|v| v.get("role").and_then(|r| r.as_str()))
-            .unwrap_or("(none)");
         debug!(
-            "[tool_debug] 注入 system 后 history 条数={} messages 条数={} 首条 role={}",
-            history.len(),
-            messages.len(),
-            first_role
+            "[tool_debug] ContextState turns={} estimate={} budget={} messages={}",
+            context_state.user_turns_list.len(),
+            context_state.estimate_context_chars,
+            context_state.context_budget_chars,
+            messages.len()
         );
 
+        let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
         let config = AgentLoopConfig {
             max_attempts: 3,
-            max_tool_rounds: 10,
+            max_tool_rounds: usize::MAX,
             retry_base_delay_ms: 300,
             model: model.clone(),
             session_id: ctx.session.current_session_key().to_string(),
             tool_definitions: build_tool_definitions(),
+            context_config: context_config.clone(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -326,6 +349,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             config,
             ctx.cancelled.clone(),
         );
+        agent_loop.set_context_state(Some(context_state));
+
         let renderer_clone = Arc::clone(&renderer);
         agent_loop.set_on_stream_delta(Box::new(move |delta: &str| {
             renderer_clone.lock().push(delta);
@@ -343,6 +368,26 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     print!("{}", remaining);
                     io::stdout().flush().map_err(AppError::Io)?;
                 }
+
+                // Take back ContextState
+                context_state = agent_loop.take_context_state().unwrap_or_else(|| {
+                    init_context_state(&ctx.session, context_config, &system_text)
+                        .unwrap_or(crate::core::ContextState {
+                            user_turns_list: Vec::new(),
+                            estimate_context_chars: system_text.len(),
+                            context_budget_chars: crate::infra::config::compute_context_budget_chars(
+                                context_config,
+                            ),
+                        })
+                });
+
+                // Pack current turn and append to context state
+                let current_turn = TurnEntry::UserTurn {
+                    messages: result.new_messages.clone(),
+                };
+                context_state.on_new_user_turn(current_turn);
+
+                // Write to transcript
                 let chat_msgs = convert_to_llm_format(&result.new_messages);
                 for msg in &chat_msgs {
                     ctx.session.append_message(serde_json::to_value(msg)?)?;
@@ -353,6 +398,19 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     print!("{}", remaining);
                     let _ = io::stdout().flush();
                 }
+
+                // Take back context state even on error
+                context_state = agent_loop.take_context_state().unwrap_or_else(|| {
+                    init_context_state(&ctx.session, context_config, &system_text)
+                        .unwrap_or(crate::core::ContextState {
+                            user_turns_list: Vec::new(),
+                            estimate_context_chars: system_text.len(),
+                            context_budget_chars: crate::infra::config::compute_context_budget_chars(
+                                context_config,
+                            ),
+                        })
+                });
+
                 let is_fatal = is_fatal_error(&e);
                 eprintln!("\n[错误] {}", e);
                 if is_fatal {

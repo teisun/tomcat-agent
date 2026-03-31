@@ -260,6 +260,71 @@ impl Default for SecurityConfig {
     }
 }
 
+/// 上下文管理配置：token-aware 滑窗与 Compaction 参数。
+/// 详见 `openspec/specs/architecture/context-management.md`。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ContextConfig {
+    /// LLM 上下文窗口大小（token 数），默认 400,000（GPT-5.2）。
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
+    /// LLM 最大输出 token 数，默认 128,000。
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: usize,
+    /// 每批 Compaction 的最大 user turn 数，默认 10。
+    #[serde(default = "default_compaction_turns")]
+    pub compaction_turns: usize,
+    /// 受保护的最近 user turn 数（不参与任何压缩），默认 3。
+    #[serde(default = "default_keep_recent_turns")]
+    pub keep_recent_turns: usize,
+    /// 单条 tool result 最大字符数（超出则 Layer 0 截断），默认 400,000。
+    #[serde(default = "default_single_tool_result_max_chars")]
+    pub single_tool_result_max_chars: usize,
+    /// Compaction 摘要使用的 LLM 模型（可配低成本模型），默认与主模型相同。
+    #[serde(default = "default_compaction_model")]
+    pub compaction_model: String,
+}
+
+fn default_context_window() -> usize {
+    400_000
+}
+fn default_max_output_tokens() -> usize {
+    128_000
+}
+fn default_compaction_turns() -> usize {
+    10
+}
+fn default_keep_recent_turns() -> usize {
+    3
+}
+fn default_single_tool_result_max_chars() -> usize {
+    400_000
+}
+fn default_compaction_model() -> String {
+    DEFAULT_LLM_MODEL.to_string()
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            context_window: default_context_window(),
+            max_output_tokens: default_max_output_tokens(),
+            compaction_turns: default_compaction_turns(),
+            keep_recent_turns: default_keep_recent_turns(),
+            single_tool_result_max_chars: default_single_tool_result_max_chars(),
+            compaction_model: default_compaction_model(),
+        }
+    }
+}
+
+/// 计算上下文预算（字符数）。
+/// 公式：`(context_window - max_output_tokens) * 4 * 0.75`
+/// 其中 `*4` 将 token 转为近似字符数（chars/4 启发式），`*0.75` 为安全余量。
+pub fn compute_context_budget_chars(config: &ContextConfig) -> usize {
+    let available_tokens = config.context_window.saturating_sub(config.max_output_tokens);
+    let chars_estimate = available_tokens * 4;
+    chars_estimate * 3 / 4
+}
+
 /// Wasm 运行时配置（feature "wasmedge" 时使用）。
 /// quickjs wasm 路径由 [`resolve_quickjs_path`] 从 work_dir 推导，回退到环境变量。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -284,6 +349,8 @@ pub struct AppConfig {
     pub security: SecurityConfig,
     #[serde(default)]
     pub primitive: PrimitiveConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
     #[serde(default)]
     pub wasm: WasmConfig,
 }
@@ -1032,6 +1099,75 @@ mod tests {
         );
         assert_eq!(EMBEDDED_WASM_SHA256.len(), 64);
         assert_eq!(EMBEDDED_MODULES_SHA256.len(), 64);
+    }
+
+    #[test]
+    fn context_config_default_values() {
+        let cfg = ContextConfig::default();
+        assert_eq!(cfg.context_window, 400_000);
+        assert_eq!(cfg.max_output_tokens, 128_000);
+        assert_eq!(cfg.compaction_turns, 10);
+        assert_eq!(cfg.keep_recent_turns, 3);
+        assert_eq!(cfg.single_tool_result_max_chars, 400_000);
+        assert_eq!(cfg.compaction_model, DEFAULT_LLM_MODEL);
+    }
+
+    #[test]
+    fn context_budget_chars_gpt52() {
+        let cfg = ContextConfig {
+            context_window: 400_000,
+            max_output_tokens: 128_000,
+            ..Default::default()
+        };
+        let budget = compute_context_budget_chars(&cfg);
+        // (400000 - 128000) * 4 * 0.75 = 816000
+        assert_eq!(budget, 816_000);
+    }
+
+    #[test]
+    fn context_budget_chars_zero_output() {
+        let cfg = ContextConfig {
+            context_window: 100_000,
+            max_output_tokens: 0,
+            ..Default::default()
+        };
+        let budget = compute_context_budget_chars(&cfg);
+        assert_eq!(budget, 300_000); // 100000 * 4 * 0.75
+    }
+
+    #[test]
+    fn context_budget_chars_overflow_protection() {
+        let cfg = ContextConfig {
+            context_window: 10,
+            max_output_tokens: 100,
+            ..Default::default()
+        };
+        let budget = compute_context_budget_chars(&cfg);
+        assert_eq!(budget, 0); // saturating_sub gives 0
+    }
+
+    #[test]
+    fn app_config_includes_context() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.context.context_window, 400_000);
+    }
+
+    #[test]
+    fn context_config_toml_override() {
+        let dir = std::env::temp_dir().join("pi_wasm_ctx_config_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"[context]\ncontext_window = 200000\nmax_output_tokens = 64000\ncompaction_model = \"gpt-4o-mini\"\n").unwrap();
+        drop(f);
+        let r = load_config(Some(path.as_path()));
+        assert!(r.is_ok());
+        let cfg = r.unwrap();
+        assert_eq!(cfg.context.context_window, 200_000);
+        assert_eq!(cfg.context.max_output_tokens, 64_000);
+        assert_eq!(cfg.context.compaction_model, "gpt-4o-mini");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
