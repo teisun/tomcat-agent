@@ -18,7 +18,7 @@
 //! │   model            ► LLM 模型名                                               │
 //! │   session_id       ► 会话 ID（随事件一起发布）                                  │
 //! │   max_attempts     ► Retryable 最大重试次数（默认 3）                           │
-//! │   max_tool_rounds  ► 单次 Attempt 最大工具轮次（默认 10）                       │
+//! │   max_tool_rounds  ► 单次 Attempt 工具轮次上限（默认 usize::MAX，不硬限）             │
 //! │   retry_base_delay ► 指数退避基准延迟 ms（默认 300）                            │
 //! │   tool_definitions ► 传入 LLM 的工具 JSON Schema 列表                         │
 //! ├──────────────────────────────────────────────────────────────────────────────┤

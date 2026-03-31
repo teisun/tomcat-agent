@@ -284,7 +284,7 @@ export const MAX_CACHED_CHAT_SESSIONS = 20;
 | pi-rust-wasm | `src/core/session/transcript.rs` | `SessionHeader`、`TranscriptEntry`、append/read |
 | pi-rust-wasm | `src/api/cli.rs` | `run_session`：`new`/`list`/`switch`/`delete`/`archive`/`search` |
 | pi-rust-wasm | `src/api/chat.rs` | `ensure_session`、`chat_loop` |
-| pi-rust-wasm | `docs/technical/02-session-and-cli.md` | 会话管理与 CLI 技术文档 |
+| pi-rust-wasm | `src/core/session/README.md` | 会话管理与 CLI 技术文档 |
 | pi-mono | `packages/coding-agent/src/core/session-manager.ts` | `SessionManager` 完整实现 |
 | pi-mono | `packages/coding-agent/docs/session.md` | JSONL 格式文档 |
 | OpenClaw | `ui/src/ui/app-settings.ts` | `sessionKey`/`lastActiveSessionKey` 持久化 |

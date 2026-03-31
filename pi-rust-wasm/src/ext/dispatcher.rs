@@ -26,6 +26,9 @@
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
+//! 另有（图中未画全，见 `HostApiDispatcher` 字段）：`event_receivers` / `event_senders`（长生命周期 VM、`waitForEvent`）；
+//! `plugin_commands`（`registerCommand` 元数据）；`ui_notify_count` / `command_completed_count` / `command_failed_count`（测试与 E2E）。
+//!
 //! ## 调用流
 //!
 //! ```text

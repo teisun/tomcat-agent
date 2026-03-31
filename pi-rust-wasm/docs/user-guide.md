@@ -76,7 +76,7 @@ pi 默认将所有数据存放在 `~/.pi_/`。可在 `pi.config.toml` 的 `[stor
 └── memory/                        # 向量检索索引
 ```
 
-详见 [directory-structure.md](technical/directory-structure.md)。
+详见 [directory-structure.md](../openspec/specs/architecture/directory-structure.md)。
 
 ---
 
@@ -744,9 +744,10 @@ cargo build --release --features standalone
 |------|------|
 | [README.md](../README.md) | 项目简介、快速开始 |
 | [Architecture.md](../openspec/specs/Architecture.md) | 系统架构与分层设计 |
-| [docs/technical/01-infrastructure.md](technical/01-infrastructure.md) | 基础设施层（配置/日志/审计/事件总线）|
-| [docs/technical/02-llm-module.md](technical/02-llm-module.md) | LLM 模块（OpenAI 适配器、流式输出）|
-| [docs/technical/02-session-and-cli.md](technical/02-session-and-cli.md) | 会话管理与 CLI 设计 |
-| [docs/technical/02-wasm-runtime-and-plugin.md](technical/02-wasm-runtime-and-plugin.md) | Wasm 运行时与插件系统 |
-| [docs/technical/03-agent-loop.md](technical/03-agent-loop.md) | Agent 循环（多轮对话、工具调用、重试）|
+| [src/infra/README.md](../src/infra/README.md) | 基础设施层（配置/日志/审计/事件总线）|
+| [src/core/llm/README.md](../src/core/llm/README.md) | LLM 模块（OpenAI 适配器、流式输出）|
+| [src/core/session/README.md](../src/core/session/README.md) | 会话管理与 CLI 设计 |
+| [src/ext/README.md](../src/ext/README.md) | Wasm 运行时与插件系统 |
+| [src/core/README.md](../src/core/README.md) | Agent 循环（多轮对话、工具调用、重试）|
+| [src/api/README.md](../src/api/README.md) | CLI / chat / render 入口层 |
 | [openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | 集成测试日志查看方法 |

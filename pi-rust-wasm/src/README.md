@@ -1,6 +1,6 @@
-# 模块技术文档（`docs/technical/`）
+# 模块技术文档（`src/`）
 
-本目录存放与 **`src/` 代码目录一一对应** 的模块说明，便于开发与 Code Review 时快速对照实现。宏观设计与契约仍以 [openspec/specs/architecture](../../openspec/specs/architecture) 为准。
+本目录下的 **`README.md` 与 `src/` 代码子目录一一对应**，便于开发与 Code Review 时快速对照实现。宏观设计与契约仍以 [openspec/specs/architecture](../openspec/specs/architecture) 为准。
 
 ---
 
@@ -10,9 +10,10 @@
 
 | 前缀 | 含义 | 文档 |
 |------|------|------|
-| `01-` | 最底层：基础设施 | [01-infrastructure.md](./01-infrastructure.md) |
-| `02-*` | **同层并列**的宿主核心 / 扩展能力（无先后顺序） | [02-llm-module.md](./02-llm-module.md)、[02-session-and-cli.md](./02-session-and-cli.md)、[02-wasm-runtime-and-plugin.md](./02-wasm-runtime-and-plugin.md) |
-| `03-` | 更上层编排（依赖下层能力） | [03-agent-loop.md](./03-agent-loop.md) |
+| `01-` | 最底层：基础设施 | [infra/README.md](./infra/README.md) |
+| `02-*` | **同层并列**的宿主核心 / 扩展能力（无先后顺序） | [core/llm/README.md](./core/llm/README.md)、[core/session/README.md](./core/session/README.md)、[ext/README.md](./ext/README.md) |
+| `03-` | 更上层编排（依赖下层能力） | [core/README.md](./core/README.md) |
+| — | 交互入口（CLI / chat） | [api/README.md](./api/README.md) |
 
 ---
 
@@ -25,7 +26,7 @@
                          +--------+---------+
                                   |
                          +--------v---------+
-                         | core/agent_loop   |  ◄── 03-agent-loop
+                         | core/agent_loop   |  ◄── core/README（Agent 循环）
                          +--------+---------+
                                   |
          +------------------------+------------------------+
@@ -33,7 +34,7 @@
 +--------v---------+    +---------v---------+    +---------v------------------+
 | core/llm         |    | core/session      |    | ext/ (WasmEngine,          |
 | LlmProvider      |    | SessionManager    |    |  Dispatcher, PluginMgr)     |
-| ◄── 02-llm       |    | ◄── 02-session    |    | ◄── 02-wasm                 |
+| ◄── core/llm     |    | ◄── core/session  |    | ◄── ext/README              |
 +--------+---------+    +---------+---------+    +---------+-------------------+
          \___________________|_______________________/
                                |
@@ -41,12 +42,12 @@
                     |      src/infra       |
                     | AppError, AppConfig |
                     | EventBus, logging   |
-                    | ◄── 01-infra        |
+                    | ◄── infra/README    |
                     +---------------------+
 ```
 
 - **依赖方向**：自上而下依赖 `infra`；`ext` 与 `core` 内各模块通过 Trait / 注入协作，避免环依赖。
-- **延伸阅读**：[Architecture.md](../../openspec/specs/Architecture.md) 分层说明与资源模式。
+- **延伸阅读**：[Architecture.md](../openspec/specs/Architecture.md) 分层说明与资源模式。
 
 ---
 
@@ -54,11 +55,14 @@
 
 | 文档 | 职责摘要 |
 |------|----------|
-| [01-infrastructure.md](./01-infrastructure.md) | 错误、配置、日志、平台 IO、事件总线 |
-| [02-llm-module.md](./02-llm-module.md) | LLM 统一接入、流式、限流与重试 |
-| [02-session-and-cli.md](./02-session-and-cli.md) | 会话存储、JSONL transcript、CLI |
-| [02-wasm-runtime-and-plugin.md](./02-wasm-runtime-and-plugin.md) | WasmEdge、Hostcall、插件生命周期 |
-| [03-agent-loop.md](./03-agent-loop.md) | 三层 Agent 循环与工具编排 |
+| [api/README.md](./api/README.md) | CLI 入口、子命令、`chat`/`render` 与 core 的衔接 |
+| [infra/README.md](./infra/README.md) | 错误、配置、日志、平台 IO、事件总线、审计 |
+| [core/llm/README.md](./core/llm/README.md) | LLM 统一接入、流式、限流与重试 |
+| [core/session/README.md](./core/session/README.md) | 会话存储、JSONL transcript |
+| [ext/README.md](./ext/README.md) | WasmEdge、Hostcall、插件生命周期 |
+| [core/README.md](./core/README.md) | Agent 循环、Compaction、core 层其它子模块索引 |
+
+运行时工作区目录树（非 `src` 模块）见 [openspec/specs/architecture/directory-structure.md](../openspec/specs/architecture/directory-structure.md)。
 
 ---
 
@@ -88,5 +92,5 @@
                +-------------+
 ```
 
-- **边界**：持久化格式与路径约定见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)；各模块细节见对应 `02-*` 文档。
-- **02-llm**、**02-session** 内另有针对本模块的精简 ASCII，可与本图对照阅读。
+- **边界**：持久化格式与路径约定见 [工作目录与数据布局](../openspec/specs/architecture/work-dir-and-data-layout.md)；各模块细节见上表。
+- **core/llm**、**core/session** 内另有针对本模块的精简 ASCII，可与本图对照阅读。

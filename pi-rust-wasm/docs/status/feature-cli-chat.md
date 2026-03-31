@@ -48,7 +48,7 @@ render.rs 覆盖率 62/76（82%），types.rs/openai.rs 变更部分已有测试
 - `src/ext/dispatcher.rs` — ChatRequest 构造加 tools 字段
 - `tests/cli_tests.rs` — chat 测试改为验证无配置时的失败行为
 - `tests/llm_tests.rs` — ChatRequest 构造加 tools 字段
-- `docs/technical/02-session-and-cli.md` — 补充对话模式文档
+- `src/core/session/README.md` — 补充对话模式文档
 - `agents/TASK_BOARD.md` — TASK-03 认领为 DOING
 
 ---

@@ -2,17 +2,18 @@
 
 ## 1. 概述 (Overview)
 
-- **职责**：为上层模块（session_cli、llm、wasm_plugin、primitives_tools、chat）提供统一的错误处理、配置管理、分级日志、跨平台路径与文件操作，以及解耦的全局事件总线。
+- **职责**：为上层模块（`api`、`core`、`ext`）提供统一的错误处理、配置管理、分级日志、跨平台路径与文件操作、解耦的全局事件总线，以及审计存储与记录器。
 - **所在层级**：基础设施层（全项目起点，无上游依赖）。
 - **核心文件**：
   - `src/lib.rs` — 门面，声明 `pub mod infra` 并 re-export 对外 API
   - `src/infra/mod.rs` — 基础设施层聚合，`pub(crate) mod` 子模块与选择性 `pub use`
   - `src/infra/error.rs` — 统一错误枚举 `AppError`
-  - `src/infra/config.rs` — 配置结构体与加载/校验
+  - `src/infra/config.rs` — 配置结构体与加载/校验（含 `ContextConfig`、工作区路径解析等）
   - `src/infra/logging.rs` — tracing 分级日志初始化
   - `src/infra/platform.rs` — 路径规范化、原子写入、系统信息
   - `src/infra/event_bus.rs` — 事件总线 Trait 与默认实现
   - `src/infra/events.rs` — `AgentEvent` / `ExtensionEvent` 枚举定义
+  - `src/infra/audit.rs` / `src/infra/audit_store.rs` — 审计记录类型与持久化存储
 
 设计原则：最小依赖、强类型约束、错误完整捕获不导致主流程崩溃。
 
@@ -37,7 +38,7 @@
 ```
 
 - **边界**：`infra` **不**依赖 `core` / `ext`；仅被上层引用。
-- **总览**：与 [模块技术文档索引](./README.md) 中「图 1」对照，可看到本层在全局栈底的位置。
+- **总览**：与 [src 模块索引](../README.md) 中「图 1」对照，可看到本层在全局栈底的位置。
 
 ---
 

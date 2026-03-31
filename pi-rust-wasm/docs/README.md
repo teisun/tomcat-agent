@@ -25,15 +25,10 @@ docs/
 ├── reports/                           ◄── 测试与验收报告
 │   └── nibbles_4.3_e2e_recap_report.md
 │
-├── technical/                         ◄── 模块技术文档（与 src/ 对照）
-│   ├── README.md                          编号规则 + ASCII 总览
-│   ├── 01-infrastructure.md
-│   ├── 02-llm-module.md
-│   ├── 02-session-and-cli.md
-│   ├── 02-wasm-runtime-and-plugin.md
-│   └── 03-agent-loop.md
 └── user-guide.md
 ```
+
+运行时工作区目录树（`~/.pi_/`）不在 `docs/` 下，见 [directory-structure.md](../openspec/specs/architecture/directory-structure.md)（与 [work-dir-and-data-layout](../openspec/specs/architecture/work-dir-and-data-layout.md) 配套）。
 
 ---
 
@@ -44,7 +39,7 @@ docs/
 | **进度碎片写入** | 仅写入 `docs/status/` 下对应当前 Git 分支的文件（规则见 [STATUS_GUIDE](../openspec/specs/guides/workflow/STATUS_GUIDE.md)） |
 | **集成看板生成** | `docs/INTEGRATION.md` 由 `/aggregate-status` 命令在 develop 分支上自动汇总，**禁止手动编辑** |
 | **禁止新建平行 status** | 不要在根目录或 `agents/` 下再建 `status/` 目录 |
-| **模块技术文档** | 新增或修订与 `src/` 模块对应的说明时，放在 `docs/technical/`（见 [technical/README.md](./technical/README.md)） |
+| **模块技术文档** | 新增或修订与 `src/` 模块对应的说明时，写在对应子目录的 `README.md`；索引用仓库根 [src/README.md](../src/README.md)；**已废弃** `docs/technical/` |
 
 ---
 

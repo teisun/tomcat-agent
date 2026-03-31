@@ -58,7 +58,7 @@
 - `tests/context_management_tests.rs` — 14 个集成测试（含 Layer 1/2 深度与 `MockCompactionLlm`）
 - `openspec/specs/User_Stories.md` — Compaction 纳入 Story 8；延迟二期注删除该项
 - `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` — Story 9 追加 084~086
-- `docs/technical/03-agent-loop.md` — 更新技术文档与 §7 测试清单
+- `src/core/README.md` — 更新技术文档与测试清单
 - `docs/reports/context-management-deep-dive.md` — 更新实现状态
 - `agents/TASK_BOARD.md` — 任务认领
 

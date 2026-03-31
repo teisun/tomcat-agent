@@ -18,7 +18,7 @@
 
 - `AppConfig` 新增 `agent: AgentConfig`（`id` 默认 `main`、`agent_dir`、`workspace` 可选）；crate 公开 `resolve_agent_dir`、`resolve_memory_dir`、`resolve_assets_dir`。
 - `DEFAULT_SESSION_KEY`、`DEFAULT_CONFIG_PATH`、默认 `work_dir` 与配置文件名变更见上；路径推导：sessions/logs/audit 不经 `agent_dir`；`resolve_workspace_dir` → `workspace-{id}` 或可配置；`resolve_plugins_dir` → 全局 `plugins/`；`resolve_quickjs_path` → `assets/wasm/`。
-- `ensure_work_dir_structure` 与 [directory-structure.md](../reports/directory-structure.md)、[work-dir-and-data-layout.md](../../openspec/specs/architecture/work-dir-and-data-layout.md) 对齐。
+- `ensure_work_dir_structure` 与 [directory-structure.md](../../openspec/specs/architecture/directory-structure.md)、[work-dir-and-data-layout.md](../../openspec/specs/architecture/work-dir-and-data-layout.md) 对齐。
 
 ### ⚠️ BLOCKED
 

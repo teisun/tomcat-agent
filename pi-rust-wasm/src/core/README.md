@@ -1,12 +1,12 @@
-# Agent Loop 模块说明 (Agent Loop Module)
+# Agent Loop 与 core 层说明 (core)
 
 ## 1. 概述 (Overview)
 
-- **职责**：编排「用户输入 → LLM 流式调用 → 工具执行 → 结果回注 → 再调 LLM」的三层嵌套循环，支持 Steering（中途改向）、FollowUp（同上下文追问）、Abort（Ctrl+C 中断）、AgentEvent 全生命周期发布、错误分类与指数退避重试。
-- **所在层级**：宿主核心能力层（`src/core/agent_loop.rs`），被 `src/api/chat.rs` 调用，依赖 `LlmProvider`、`PrimitiveExecutor`、`EventBus`。
+- **职责**：编排「用户输入 → LLM 流式调用 → 工具执行 → 结果回注 → 再调 LLM」的三层嵌套循环，支持 Steering（中途改向）、FollowUp（同上下文追问）、Abort（Ctrl+C 中断）、AgentEvent 全生命周期发布、错误分类与指数退避重试；与 **token-aware 上下文管理**、**四层 Compaction 防护**（`compaction.rs`）协同。
+- **所在层级**：宿主核心能力层（`src/core/agent_loop.rs` 等），被 `src/api/chat.rs` 调用，依赖 `LlmProvider`、`PrimitiveExecutor`、`EventBus`。
 - **核心文件**：
   - `src/core/agent_loop.rs` — AgentMessage、ToolCallInfo、convert_to_llm_format、agent_messages_from_chat、AgentLoopConfig、AgentLoop、LoopError
-  - `src/core/compaction.rs` — 四层上下文防护算法（Layer 0~3）、Compaction Prompt 模板、context overflow 检测
+  - `src/core/compaction.rs` — 四层上下文防护算法（Layer 0~3）、Compaction Prompt 模板、context overflow 检测、`run_compaction_cascade`
   - `src/core/session/manager.rs` — TurnEntry、ContextState、init_context_state、build_context_from_state、estimate_turn_chars
   - `src/core/mod.rs` — core 层 re-export
   - `src/lib.rs` — 对外导出 AgentLoop、AgentLoopConfig、AgentRunResult、AgentMessage、ContextState、TurnEntry、ContextConfig 等
@@ -16,9 +16,6 @@
 ```text
 Layer 1  Conversation Loop
     |     FollowUp 队列非空 -> 注入 User 再继续
-    v
-Layer 2  Attempt Loop (max_attempts, 指数退避)
-    |
     v
 Layer 2  Attempt Loop (max_attempts, 指数退避)
     |     ContextOverflow 检测 -> 触发 Layer 1~3 Compaction -> 重试
@@ -34,7 +31,7 @@ Layer 3  Reasoning Loop
 ```
 
 - **消息边界**：内部 `AgentMessage`，调用 `LlmProvider` 前经 `convert_to_llm_format` 转为 `ChatMessage`（与 [agent-loop 规格](../../openspec/specs/architecture/agent-loop.md) 13.4 一致）。
-- **总览**：与 [模块技术文档索引](./README.md)「图 1」中 `core/agent_loop` 位置对照。
+- **总览**：与 [src 模块索引](../README.md)「图 1」中 `core/agent_loop` 位置对照。
 
 ## 2. 设计方案 (Design Details)
 
@@ -48,7 +45,7 @@ Layer 3  Reasoning Loop
 - **ToolCallInfo**：`{ id, name, arguments }`，与 LLM 流式 tool_calls 对应。
 - **convert_to_llm_format(messages: &[AgentMessage]) -> Vec<ChatMessage>**：将 AgentMessage 序列转为 LlmProvider 使用的 ChatMessage；User/Steering/CompactionSummary → user，System → system，Assistant 按有无 tool_calls 分别转为 assistant 或 assistant_with_tool_calls，ToolResult → tool。
 - **agent_messages_from_chat(messages: &[ChatMessage]) -> Vec<AgentMessage>**：反向转换，供 chat 从 Session 加载历史后拼装 `initial_messages`。
-- **AgentLoopConfig**：`max_attempts`（默认 3）、`max_tool_rounds`（默认 10）、`retry_base_delay_ms`（默认 300）、`model`、`session_id`、`tool_definitions: Vec<serde_json::Value>`（由调用方 `build_tool_definitions()` 等生成）。
+- **AgentLoopConfig**：`max_attempts`（默认 3）、`max_tool_rounds`（默认 `usize::MAX`，由 token 预算与工具轮次逻辑兜底）、`retry_base_delay_ms`（默认 300）、`model`、`session_id`、`tool_definitions: Vec<serde_json::Value>`（由调用方 `build_tool_definitions()` 等生成）、`context_config`。
 - **AgentRunResult**：`{ final_text: String }`，run 成功时最后一轮 LLM 文本回复。
 - **AgentLoop::new(llm, primitive, event_bus, config, abort_signal)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
 - **AgentLoop::run(&mut self, initial_messages: Vec<AgentMessage>) -> Result<AgentRunResult, AppError>**：主入口；执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。
@@ -79,9 +76,23 @@ Layer 3  Reasoning Loop
 - **is_context_overflow_error(err)**：检测 LLM 错误是否为 context overflow（含 "context" + "length"/"token"/"limit"）。
 - **Compaction Prompts**：`SUMMARIZATION_PROMPT`（首次摘要）和 `UPDATE_SUMMARIZATION_PROMPT`（增量合并已有摘要）。
 
-## 4. 配置项 (Configuration)
+## 4. core 层其它子模块（索引）
 
-### 4.1 AgentLoopConfig
+以下模块不单独拆 README，职责与主文件如下：
+
+| 模块 | 主文件 | 职责摘要 |
+|------|--------|----------|
+| `executor` | `executor.rs` | `DefaultPrimitiveExecutor`，4 原语执行 |
+| `primitives` | `primitives.rs` | 原语类型与 `PrimitiveExecutor` trait |
+| `tools` | `tools.rs` | `Tool`/`ToolRegistry`/`DefaultToolRegistry` |
+| `confirmation` | `confirmation.rs` | `UserConfirmationProvider`（允许/拒绝/交互） |
+| `system_prompt` | `system_prompt.rs` | 系统提示拼装辅助 |
+| `session` | `session/` | 见 [session/README.md](./session/README.md) |
+| `llm` | `llm/` | 见 [llm/README.md](./llm/README.md) |
+
+## 5. 配置项 (Configuration)
+
+### 5.1 AgentLoopConfig
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -93,7 +104,7 @@ Layer 3  Reasoning Loop
 | tool_definitions | Vec<serde_json::Value> | [] | 传入 LLM 的工具 JSON Schema |
 | context_config | ContextConfig | ContextConfig::default() | 上下文管理配置 |
 
-### 4.2 ContextConfig（`[context]` 配置节）
+### 5.2 ContextConfig（`[context]` 配置节）
 
 | 字段 | 类型 | 默认值 | 环境变量 | 说明 |
 |------|------|--------|----------|------|
@@ -106,7 +117,7 @@ Layer 3  Reasoning Loop
 
 预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4 × 0.75`（GPT-5.2 默认 = 816,000 chars）。
 
-## 5. 交互流程 (Workflow)
+## 6. 交互流程 (Workflow)
 
 ```mermaid
 flowchart TD
@@ -140,7 +151,7 @@ flowchart TD
 - 第二层：按 attempt 计数，Retryable 错误时指数退避后重试，Fatal 或 Aborted 则终止并返回 Err。**ContextOverflow 检测**：若错误匹配 `is_context_overflow_error`，触发 Layer 1→2→3 Compaction 后以压缩后的上下文重试。
 - 第三层：turn_start → chat_stream → message_start/update/end → 若有 tool_calls 则逐个 execute_tool（**Layer 0 截断**检查），每工具前检查 abort、每工具后检查 steering_queue；同时**动态更新** `ContextState.estimate_context_chars`。
 
-### 5.2 上下文管理集成流程（TASK-17）
+### 6.1 上下文管理集成流程（TASK-17）
 
 ```text
   chat_loop (api/chat.rs)
@@ -163,7 +174,7 @@ flowchart TD
       |    - 下一轮继续使用同一 ContextState
 ```
 
-## 6. 示例代码 (Usage Examples)
+## 7. 示例代码 (Usage Examples)
 
 chat 层构造并调用 AgentLoop 的典型片段（见 `src/api/chat.rs`）：
 
@@ -198,18 +209,9 @@ match agent_loop.run(messages).await {
 }
 ```
 
-## 7. 验收标准 (Testing & QA)
+## 8. 验收标准 (Testing & QA)
 
-- **单测**：`cargo test -j 1 --lib -- --test-threads=1` 全通过（当前 334 passed）；覆盖：
-  - `core::agent_loop::tests` — 正常单轮无工具、多轮工具循环、Steering/FollowUp/Abort、429 重试、401 Fatal、convert_to_llm_format、agent_messages_from_chat 往返
-  - `core::compaction::tests` — Layer 0 截断（ASCII/Unicode/边界）、Layer 1 占位符替换、Layer 3 强制删除、is_context_overflow_error 匹配、ContextState 方法
-  - `infra::config::tests` — ContextConfig 默认值、预算计算（GPT-5.2 816K）、溢出保护、TOML override
-  - `core::session::manager::tests` — init_context_state（空/有消息/有 compaction entry/无 session）、build_context_from_state
-  - `infra::events::tests` — CompactionError/ToolResultTruncated 序列化
-- **集成测试**：`tests/context_management_tests.rs`（14 用例）—
-  - 端到端：大文件截断事件、Layer 1+3 预算恢复、Session 重载含 Compaction entry、ContextOverflow 自动恢复重试、Unicode 安全截断、混合 turns 展平顺序
-  - Layer 1 深度验证：占位符替换正确性（旧 turn 替换/保护区保留）、减够即停、estimate 精确变化量
-  - Layer 2 深度验证：单批压缩、多批循环、UPDATE 模式（SummaryTurn 在 batch）、LLM 报错优雅降级、摘要过长中断
-- **重构**：`run_compaction_cascade`（`compaction.rs`）统一三层级联逻辑，`chat.rs` 与 `agent_loop.rs` 共用
+- **单测**：`cargo test -j 1 --lib -- --test-threads=1` 全通过；覆盖 `core::agent_loop`、`core::compaction`、`infra::config`（含 ContextConfig）、`core::session::manager`（init_context_state 等）。
+- **集成**：`tests/context_management_tests.rs` — 端到端上下文与 Compaction 场景；`context_management.md` / User_Stories Story 8 对齐。
 - **门禁**：`cargo clippy --all-targets -- -D warnings` 无警告。
-- **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、tool_call/tool_result、auto_retry_start/end、**auto_compaction_start/end**（TASK-17 新增）、**tool_result_truncated**（TASK-17 新增）、**compaction_error**（TASK-17 新增）、agent_end(success|error|interrupted)。
+- **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、tool_call/tool_result、auto_retry_start/end、**auto_compaction_start/end**、**tool_result_truncated**、**compaction_error**、agent_end(success|error|interrupted)。

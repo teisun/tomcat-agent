@@ -1,5 +1,17 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-31 15:00 | ACTIVE | develop | — |
+
+### 文档与规范同步（technical 迁移 + directory-structure 归入 architecture）
+
+- 废弃 `docs/technical/`，模块说明迁至 `src/**/README.md`；`directory-structure` 迁至 `openspec/specs/architecture/`，`work-dir-and-data-layout` 增加互链；`docs/README`、user-guide、DOCUMENTATION_GUIDE、TASK_BOARD、各 status 与报告内引用已更新。
+- `agent_loop` / `dispatcher` 模块头 ASCII 与实现一致（`max_tool_rounds` 默认值、Dispatcher 扩展字段说明）；`wasmedge_e2e_tests` 文档路径指向 `src/ext/README.md`。
+- 无业务逻辑变更。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-31 10:25 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：`feature/context-management`（TASK-17）并入 develop
@@ -82,7 +94,7 @@
 - `src/api/cli.rs`：`init` 子命令生成路径与提示文案对齐新目录布局
 - `src/core/session/store.rs`：会话存储路径适配 `~/.pi_/agents/<id>/sessions/`
 - `tests/cli_tests.rs`：测试用例适配新配置文件名与目录结构
-- 文档：`directory-structure.md`、`Architecture.md`、`audit-log.md`、`session-storage.md`、`work-dir-and-data-layout.md`、`user-guide.md`、`E2E_SCENARIO_LIBRARY.md` 等同步更新路径引用
+- 文档：`openspec/specs/architecture/directory-structure.md`、`Architecture.md`、`audit-log.md`、`session-storage.md`、`work-dir-and-data-layout.md`、`user-guide.md`、`E2E_SCENARIO_LIBRARY.md` 等同步更新路径引用
 - 无降级断言、无 `#[ignore]` 滥用
 
 #### 看板

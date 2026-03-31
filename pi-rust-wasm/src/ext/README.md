@@ -3,15 +3,18 @@
 ## 1. 概述
 
 - **职责**：WasmEdge 运行时骨架、宿主导入绑定、Hostcall 分发、插件生命周期管理；与 design/Architecture 第 3、4 节及 CODE_BLOCK_P1_007/008/009 对齐。
-- **所在层级**：宿主 API 层 + WasmEdge 运行时层（依赖 infra、core traits）。
+- **所在层级**：扩展层（依赖 `infra`、通过 Trait 使用 `core` 中的类型与执行器）。
 - **核心文件**：
-  - `src/ext/mod.rs` — 聚合 engine/instance、host_binding、dispatcher、plugin
-  - `src/ext/engine_stub.rs` — WasmEngine 单例与 WasmInstance 创建（桩实现）
-  - `src/ext/instance_stub.rs` — 单插件 Wasm 实例（桩）
-  - `src/ext/host_binding.rs` — HostRequest/HostResponse、invoke_host_func / invoke_host_func_with 入口
+  - `src/ext/mod.rs` — 聚合 engine、instance、host_binding、dispatcher、plugin、VmActor、RuntimeManager 等
+  - `src/ext/engine_wasmedge.rs` — **默认**：`WasmEngine` 单例与 `WasmInstance` 创建（WasmEdge 实现）
+  - `src/ext/instance_wasmedge.rs` — 单插件 Wasm 实例：QuickJS、`run_script` / `run_script_file`、宿主导入 `__pi_host_call`
+  - `src/ext/engine_stub.rs` / `src/ext/instance_stub.rs` — 桩实现，保留用于测试或最小构建路径（`#[allow(dead_code)]`）
+  - `src/ext/host_binding.rs` — HostRequest/HostResponse、`invoke_host_func` / `invoke_host_func_with` 入口
   - `src/ext/dispatcher.rs` — HostApiDispatcher，按 module/method 路由
   - `src/ext/plugin.rs` — PluginManifest、PluginInstance、PluginStatus、PluginManager
-  - `src/core/*.rs` — PrimitiveExecutor、ToolRegistry、LlmProvider 等 Trait 定义
+  - `src/ext/vm_actor.rs` — 插件 VM 生命周期与异步命令通道
+  - `src/ext/runtime_manager.rs` — 多运行时/插件实例管理
+  - `src/ext/ts_compiler.rs` — TypeScript → QuickJS 兼容 transpile
 
 ### 1.1 Wasm / Hostcall / 插件 — 结构总览（ASCII）
 

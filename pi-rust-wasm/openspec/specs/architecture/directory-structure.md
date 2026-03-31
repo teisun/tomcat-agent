@@ -86,9 +86,9 @@ pi.json
 ```
 
 ## 说明
-- **`~/.pi_/pi.toml`**：总控配置文件
+- **`~/.pi_/pi.config.toml`**：总控配置文件（与树形图顶部一致）。
 - **`workspace-main/`**：存放主 Agent 的行为规则与个性化配置，属于「设计态」数据。
 - **`agents/<agentId>/`**：存放 Agent 的「运行态」数据（会话、日志、临时文件等）。当前 MVP 仅一个 agent，agentId 固定为 `main`。
 - **`plugins/`**（根级）：全局共享插件，所有 agent 均可加载。`agents/<agentId>/plugins/` 为 agent 专属插件。
-- **`assets/`**：全局资源目录，包含MVP阶段配置文件（`pi.config.toml`）、内嵌资源释放目标（`wasm/`、`modules/`）和敏感配置（`.env`）。详见 [init-experience-and-embedded-assets](./init-experience-and-embedded-assets.md)。
+- **`assets/`**：全局资源目录，包含MVP阶段配置文件（`pi.config.toml`）、内嵌资源释放目标（`wasm/`、`modules/`）和敏感配置（`.env`）。详见 [init-experience-and-embedded-assets](../../../docs/reports/init-experience-and-embedded-assets.md)。
 - **`assets/.env`**：存放 API Key 等敏感配置，`pi init` 自动生成模板，`run_cli` 启动时通过 dotenvy 自动加载。

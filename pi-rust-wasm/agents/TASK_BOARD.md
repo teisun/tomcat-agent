@@ -624,7 +624,7 @@
 
 **文档同步**
 - [x] 6.15 更新 `docs/user-guide.md`（安装说明、目录结构、init 流程）
-- [x] 6.16 同步 `openspec/specs/architecture/work-dir-and-data-layout.md` 与 `docs/technical/directory-structure.md`
+- [x] 6.16 同步 `openspec/specs/architecture/work-dir-and-data-layout.md` 与 `openspec/specs/architecture/directory-structure.md`
 
 **依赖**：—（发布场景可显式 `cargo build --release --features standalone`）
 

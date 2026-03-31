@@ -9,7 +9,7 @@
 - [✓] **[P1]** `pi doctor` 增强（内嵌资源、.versions.json、.env 权限、API Key 提示）
 - [✓] **[P1]** `standalone` 保留为可选 `--features standalone`，默认使用系统 WasmEdge 以缩短编译时间
 - [✓] **[P1]** 单元测试（config）、CLI 集成测试（init/doctor/资源释放）、Wasm E2E 39 项回归通过
-- [✓] **[P1]** 文档：user-guide、directory-structure、work-dir-and-data-layout、init-experience 报告、E2E_SCENARIO_LIBRARY
+- [✓] **[P1]** 文档：user-guide、openspec/architecture/directory-structure、work-dir-and-data-layout、init-experience 报告、E2E_SCENARIO_LIBRARY
 
 ### 🔌 INTERFACE（接口变更）
 

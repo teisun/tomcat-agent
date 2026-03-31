@@ -2,8 +2,8 @@
 
 ## 1. 概述 (Overview)
 
-- **职责**：会话元数据 store（sessions.json）、对话 transcript（pi 系 JSONL）的读写与 CRUD；CLI 子命令 init/doctor/config/session/plugin/audit，无参默认 chat。
-- **所在层级**：宿主核心能力层（core/session）、交互层（api/cli）。
+- **职责**：会话元数据 store（sessions.json）、对话 transcript（pi 系 JSONL）的读写与 CRUD；CLI 子命令 init/doctor/config/session/plugin/audit，无参默认 chat（**CLI 入口与 chat 循环**见 [api/README.md](../../api/README.md)）。
+- **所在层级**：宿主核心能力层（`core/session`）、交互层（`api/cli`）。
 - **核心文件**：
   - `src/core/session/store.rs` — sessions.json 元数据 load/save、原子写
   - `src/core/session/transcript.rs` — SessionHeader、TranscriptEntry、流式读/追加写、get_entry/get_children/get_branch 等
@@ -34,7 +34,7 @@
      (原子写)         (仅追加，禁止整文件解析)
 ```
 
-- **边界**：`SessionManager` 不直接调用 LLM；对话路径经 `chat` 组装上下文后再交给 `AgentLoop` + `LlmProvider`（见 [模块技术文档索引](./README.md)「图 2」）。
+- **边界**：`SessionManager` 不直接调用 LLM；对话路径经 `chat` 组装上下文后再交给 `AgentLoop` + `LlmProvider`（见 [src 模块索引](../../README.md)「图 2」）。
 - **代码入口**：`run_cli()` → 各 `run_*` handler（`src/api/cli.rs`）。
 
 ---
