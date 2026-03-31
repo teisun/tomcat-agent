@@ -886,9 +886,9 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
-| **分支** | `feature/context-management` |
+| **分支** | `feature/context-management`（已合并入 `develop`） |
 | **阻塞点** | — |
 
 **目标**：将上下文管理从「按条数裁剪」改为 **token-aware 滑窗 + 四层防护**（Layer 0 单条截断 → Layer 1 占位符替换 → Layer 2 LLM 循环 Compaction → Layer 3 极端兜底），消除 context overflow，保留语义完整性。同时移除 `max_tool_rounds` 硬限（留 TODO 待 tool-loop-detection 方案）。

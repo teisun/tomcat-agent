@@ -1,5 +1,36 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-03-31 10:25 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：`feature/context-management`（TASK-17）并入 develop
+
+**合并**：`git merge --no-ff feature/context-management`，合并提交 `a489a0c`；上下文管理（四层防护、`run_compaction_cascade`、`context_management_tests` 等）。
+
+**交付文档 §1–§3（develop 复核）**：§1 `User_Stories.md` Story 8、`E2E_SCENARIO_LIBRARY.md` Story 9（084–086）与合并后代码一致；§2 集成测试随全量 `cargo test` 复跑；§3 TASK-17 无新增 `cli_tests` 用例，084–086 由 `tests/context_management_tests.rs` 自动覆盖。
+
+**集成验收补充**：全量跑测中 `test_e2e_community_overlay_qa_tests` 因 `poll_for_command` 过早返回产生竞态失败，已改为轮询至 `overlay-animation` 且 `overlay-*` ≥5 后再断言；修复提交 `93ea99c`（`wasmedge_e2e_tests.rs`）。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | PASS（与上项一并覆盖） |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` | PASS（77 passed） |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` | PASS（39 passed） |
+
+**执行环境**：macOS darwin；`DYLD_LIBRARY_PATH=$HOME/.wasmedge/lib`；日志 `pi-rust-wasm/.integration_test_output.log` 末尾 `EXIT_CODE=0`。
+
+#### 看板
+
+- **TASK-17**：本报告写入同时将 `TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-25 14:10 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：`feature/init-experience` → `feature/user-guide-remediation` 并入 develop
