@@ -6,13 +6,13 @@ mod common;
 use async_trait::async_trait;
 use pi_wasm::{
     build_context_from_state, init_context_state, wire, AgentLoop, AgentLoopConfig, AgentMessage,
-    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
-    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, ToolCallInfo, TurnEntry,
-    WriteFileResult,
+    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    ContextConfig, ContextState, DefaultEventBus, DirEntry, EditFileResult, EditOperation,
+    EventBus, EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation, SessionManager,
+    StreamEvent, ToolCallInfo, TurnEntry, WriteFileResult,
 };
 use pi_wasm::core::compaction::{
-    compact_tool_results, force_drop_oldest, truncate_tool_result_if_needed,
+    compact_tool_results, force_drop_oldest, run_compaction_loop, truncate_tool_result_if_needed,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -578,4 +578,494 @@ fn test_build_context_preserves_order_with_mixed_turns() {
     assert!(matches!(&msgs[2], AgentMessage::Assistant { .. }));
     assert!(matches!(&msgs[3], AgentMessage::ToolResult { .. }));
     assert!(matches!(&msgs[4], AgentMessage::User { text } if text == "run tests"));
+}
+
+// ────────────────────── MockCompactionLlm ──────────────────────────────────
+
+struct MockCompactionLlm {
+    summaries: Mutex<VecDeque<Result<String, AppError>>>,
+    captured_requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl MockCompactionLlm {
+    fn new(summaries: Vec<Result<String, AppError>>) -> Self {
+        Self {
+            summaries: Mutex::new(summaries.into()),
+            captured_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn captured_count(&self) -> usize {
+        self.captured_requests.lock().unwrap().len()
+    }
+
+    fn captured_all_message_texts(&self) -> Vec<String> {
+        self.captured_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|req| {
+                req.messages
+                    .iter()
+                    .filter_map(|m| m.text_content().map(|s| s.to_string()))
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MockCompactionLlm {
+    fn provider_name(&self) -> &str {
+        "mock-compaction"
+    }
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.captured_requests.lock().unwrap().push(req);
+        let result = self
+            .summaries
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(Err(AppError::Llm("no more summaries".into())));
+        let text = result?;
+        Ok(ChatResponse {
+            id: None,
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant(&text),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        })
+    }
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        Err(AppError::Llm(
+            "MockCompactionLlm: chat_stream not supported".into(),
+        ))
+    }
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+// ────────── Layer 1 深度验证测试 ──────────────────────────────────────────
+
+fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry {
+    TurnEntry::UserTurn {
+        messages: vec![
+            AgentMessage::User {
+                text: user_text.to_string(),
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc".to_string(),
+                content: tool_content.to_string(),
+                is_error: false,
+            },
+            AgentMessage::Assistant {
+                text: "ok".to_string(),
+                tool_calls: vec![],
+            },
+        ],
+    }
+}
+
+const PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
+
+/// [Layer 1 深度] 占位符替换正确性：旧 turn 被替换为占位符，保护区内 turn 保持原内容
+#[test]
+fn test_compact_tool_results_replaces_with_placeholder() {
+    common::setup_logging();
+    let _span = info_span!("test_compact_tool_results_replaces_with_placeholder").entered();
+
+    let big = "x".repeat(5_000);
+    let mut state = ContextState {
+        user_turns_list: vec![
+            make_turn_with_tool_result("q1", &big),
+            make_turn_with_tool_result("q2", &big),
+            make_turn_with_tool_result("q3-recent", &big),
+        ],
+        estimate_context_chars: 0,
+        context_budget_chars: 0,
+    };
+    let total: usize = state
+        .user_turns_list
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+    state.estimate_context_chars = total;
+    state.context_budget_chars = total / 3;
+
+    info!("Act: compact_tool_results with keep_recent=1");
+    compact_tool_results(&mut state, 1);
+
+    info!("Assert: old turns replaced, recent preserved");
+    for (i, turn) in state.user_turns_list.iter().enumerate() {
+        if let TurnEntry::UserTurn { messages } = turn {
+            for msg in messages {
+                if let AgentMessage::ToolResult { content, .. } = msg {
+                    if i < 2 {
+                        assert_eq!(
+                            content, PLACEHOLDER,
+                            "turn {} tool result should be placeholder",
+                            i
+                        );
+                    } else {
+                        assert_eq!(
+                            content, &big,
+                            "turn {} (protected recent) should keep original",
+                            i
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// [Layer 1 深度] 减够即停：预算恢复后不继续替换后续 tool results
+#[test]
+fn test_compact_tool_results_stops_when_budget_ok() {
+    common::setup_logging();
+    let _span = info_span!("test_compact_tool_results_stops_when_budget_ok").entered();
+
+    let big = "x".repeat(10_000);
+    let small_overhead = 20;
+    let turns = vec![
+        make_turn_with_tool_result("q1", &big),
+        make_turn_with_tool_result("q2", &big),
+        make_turn_with_tool_result("q3", &big),
+        make_turn_with_tool_result("q4-recent", &big),
+    ];
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+    let savings_one = big.len() - PLACEHOLDER.len();
+    let budget = total - savings_one + small_overhead;
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: budget,
+    };
+    assert!(state.is_over_budget());
+
+    info!(
+        "Act: compact with budget={}, replacing 1 should save ~{} and be enough",
+        budget, savings_one
+    );
+    compact_tool_results(&mut state, 1);
+
+    info!("Assert: first replaced, second and third still original");
+    let get_tool_content = |idx: usize| -> String {
+        if let TurnEntry::UserTurn { messages } = &state.user_turns_list[idx] {
+            messages
+                .iter()
+                .find_map(|m| {
+                    if let AgentMessage::ToolResult { content, .. } = m {
+                        Some(content.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap()
+        } else {
+            panic!("not a UserTurn");
+        }
+    };
+    assert_eq!(get_tool_content(0), PLACEHOLDER, "first should be replaced");
+    assert_eq!(get_tool_content(1), big, "second should still be original (stop-when-enough)");
+    assert_eq!(get_tool_content(2), big, "third should still be original");
+    assert!(!state.is_over_budget(), "should be back within budget");
+}
+
+/// [Layer 1 深度] estimate 精确变化量
+#[test]
+fn test_compact_tool_results_estimate_precise() {
+    common::setup_logging();
+    let _span = info_span!("test_compact_tool_results_estimate_precise").entered();
+
+    let content_len = 8_000;
+    let big = "y".repeat(content_len);
+    let turns = vec![
+        make_turn_with_tool_result("q1", &big),
+        make_turn_with_tool_result("q2-recent", &big),
+    ];
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: 1,
+    };
+
+    let reduced = compact_tool_results(&mut state, 1);
+
+    let expected_reduced = content_len - PLACEHOLDER.len();
+    assert_eq!(
+        reduced, expected_reduced,
+        "reduced should be exactly original_len - placeholder_len"
+    );
+    assert_eq!(
+        state.estimate_context_chars,
+        total - expected_reduced,
+        "estimate should be total - reduced"
+    );
+}
+
+// ────────── Layer 2 深度验证测试 ──────────────────────────────────────────
+
+fn make_big_turn(user_text: &str, size: usize) -> TurnEntry {
+    TurnEntry::UserTurn {
+        messages: vec![
+            AgentMessage::User {
+                text: user_text.to_string(),
+            },
+            AgentMessage::Assistant {
+                text: "a".repeat(size),
+                tool_calls: vec![],
+            },
+        ],
+    }
+}
+
+/// [Layer 2] 单批压缩：6 turns 超预算，LLM 返回短摘要，压缩后回预算
+#[tokio::test]
+async fn test_compaction_loop_single_batch() {
+    common::setup_logging();
+    let _span = info_span!("test_compaction_loop_single_batch").entered();
+
+    let turns: Vec<TurnEntry> = (0..6).map(|i| make_big_turn(&format!("q{}", i), 2_000)).collect();
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+    let budget = total / 2;
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: budget,
+    };
+    assert!(state.is_over_budget());
+
+    let short_summary = "## Goal\nUser asked 4 questions.".to_string();
+    let llm = MockCompactionLlm::new(vec![Ok(short_summary)]);
+    let config = ContextConfig {
+        keep_recent_turns: 2,
+        compaction_turns: 4,
+        ..Default::default()
+    };
+
+    info!("Act: run_compaction_loop");
+    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
+    assert!(result.is_ok());
+
+    info!("Assert: turns compressed, back within budget");
+    assert_eq!(
+        state.user_turns_list.len(),
+        3,
+        "4 old drained + 1 SummaryTurn inserted + 2 recent = 3"
+    );
+    assert!(
+        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary } if summary.contains("Goal")),
+        "first turn should be SummaryTurn"
+    );
+    assert!(!state.is_over_budget(), "should be within budget after compaction");
+    assert_eq!(llm.captured_count(), 1, "LLM chat called exactly once");
+}
+
+/// [Layer 2] 多批循环：10 turns 大幅超预算，需要 2+ 轮 LLM 调用
+#[tokio::test]
+async fn test_compaction_loop_multi_batch() {
+    common::setup_logging();
+    let _span = info_span!("test_compaction_loop_multi_batch").entered();
+
+    let turns: Vec<TurnEntry> = (0..10).map(|i| make_big_turn(&format!("q{}", i), 2_000)).collect();
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+    let budget = total / 2;
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: budget,
+    };
+
+    let llm = MockCompactionLlm::new(vec![
+        Ok("## Summary batch 1".into()),
+        Ok("## Summary batch 2".into()),
+        Ok("## Summary batch 3".into()),
+    ]);
+    let config = ContextConfig {
+        keep_recent_turns: 2,
+        compaction_turns: 3,
+        ..Default::default()
+    };
+
+    info!("Act: run_compaction_loop with small batches");
+    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
+    assert!(result.is_ok());
+
+    info!("Assert: multiple LLM calls were needed");
+    assert!(
+        llm.captured_count() >= 2,
+        "should need multiple LLM calls, got {}",
+        llm.captured_count()
+    );
+    assert!(
+        !state.is_over_budget(),
+        "should be within budget after multi-batch compaction: estimate={}, budget={}",
+        state.estimate_context_chars,
+        state.context_budget_chars
+    );
+}
+
+/// [Layer 2] UPDATE 模式：batch 含 SummaryTurn 时使用 UPDATE prompt
+#[tokio::test]
+async fn test_compaction_loop_update_mode() {
+    common::setup_logging();
+    let _span = info_span!("test_compaction_loop_update_mode").entered();
+
+    let turns = vec![
+        TurnEntry::SummaryTurn {
+            summary: "old summary about coding".to_string(),
+        },
+        make_big_turn("q1", 3_000),
+        make_big_turn("q2", 3_000),
+        make_big_turn("q3-recent", 500),
+    ];
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: total / 3,
+    };
+
+    let llm = MockCompactionLlm::new(vec![Ok("## Updated summary".into())]);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        compaction_turns: 3,
+        ..Default::default()
+    };
+
+    info!("Act: run_compaction_loop with SummaryTurn in batch");
+    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
+    assert!(result.is_ok());
+
+    info!("Assert: UPDATE prompt used (contains 'Existing summary')");
+    let texts = llm.captured_all_message_texts();
+    assert!(!texts.is_empty(), "should have captured at least one request");
+    let has_update_marker = texts.iter().any(|t| t.contains("Existing summary"));
+    assert!(
+        has_update_marker,
+        "at least one message should contain UPDATE template marker 'Existing summary', got: {:?}",
+        texts.iter().map(|t| &t[..80.min(t.len())]).collect::<Vec<_>>()
+    );
+}
+
+/// [Layer 2] LLM 报错时优雅降级：state 不变，函数返回 Ok
+#[tokio::test]
+async fn test_compaction_loop_llm_error_degrades() {
+    common::setup_logging();
+    let _span = info_span!("test_compaction_loop_llm_error_degrades").entered();
+
+    let turns: Vec<TurnEntry> = (0..4).map(|i| make_big_turn(&format!("q{}", i), 2_000)).collect();
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: total / 2,
+    };
+    let original_len = state.user_turns_list.len();
+    let original_estimate = state.estimate_context_chars;
+
+    let llm = MockCompactionLlm::new(vec![Err(AppError::Llm("API error".into()))]);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        compaction_turns: 3,
+        ..Default::default()
+    };
+
+    info!("Act: run_compaction_loop with LLM error");
+    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
+
+    info!("Assert: graceful degradation — state unchanged, Ok returned");
+    assert!(result.is_ok(), "should return Ok even on LLM error");
+    assert_eq!(
+        state.user_turns_list.len(),
+        original_len,
+        "turns should be unchanged"
+    );
+    assert_eq!(
+        state.estimate_context_chars, original_estimate,
+        "estimate should be unchanged"
+    );
+}
+
+/// [Layer 2] 摘要比原文长时中断：不死循环，state 不变
+#[tokio::test]
+async fn test_compaction_loop_summary_too_long_breaks() {
+    common::setup_logging();
+    let _span = info_span!("test_compaction_loop_summary_too_long_breaks").entered();
+
+    let turns: Vec<TurnEntry> = (0..4).map(|i| make_big_turn(&format!("q{}", i), 500)).collect();
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: total,
+        context_budget_chars: total / 2,
+    };
+    let original_len = state.user_turns_list.len();
+    let original_estimate = state.estimate_context_chars;
+
+    let way_too_long = "z".repeat(50_000);
+    let llm = MockCompactionLlm::new(vec![Ok(way_too_long)]);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        compaction_turns: 3,
+        ..Default::default()
+    };
+
+    info!("Act: run_compaction_loop with summary longer than original");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")),
+    )
+    .await
+    .expect("should not timeout (no infinite loop)");
+
+    info!("Assert: breaks without modifying state");
+    assert!(result.is_ok());
+    assert_eq!(
+        state.user_turns_list.len(),
+        original_len,
+        "turns should be unchanged when summary is too long"
+    );
+    assert_eq!(
+        state.estimate_context_chars, original_estimate,
+        "estimate should be unchanged"
+    );
 }

@@ -102,6 +102,9 @@
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
 - [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在等）给出清晰提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
+- [ ] 单条工具结果超过阈值（默认 300K chars）时自动截断，不导致 context overflow，截断事件通过 EventBus 发布
+- [ ] 长对话 token 超预算时自动触发四层保护（tool result 占位 → LLM 摘要 → 强制删除），保护最近 N 个 turns 不被压缩，压缩后继续正常对话
+- [ ] Session 重载时正确识别已有 CompactionEntry，恢复 SummaryTurn 而非重复压缩
 
 ## P1 二期核心用户故事
 ### Story 8b: 长生命周期 VM 与有状态插件支持
@@ -191,4 +194,3 @@
 
 ### 注：以下 Agent Loop 能力延迟到二期
 - **工具循环自动检测**：Generic Repeat / Ping Pong / Global Circuit Breaker 三道防线
-- **上下文自动压缩（Compaction）**：Context Overflow 时调用 LLM 生成历史摘要

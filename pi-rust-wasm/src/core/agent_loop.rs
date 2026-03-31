@@ -128,8 +128,7 @@ use tokio_stream::StreamExt;
 
 use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
 use crate::core::compaction::{
-    compact_tool_results, force_drop_oldest, is_context_overflow_error,
-    run_compaction_loop, truncate_tool_result_if_needed,
+    is_context_overflow_error, run_compaction_cascade, truncate_tool_result_if_needed,
 };
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::core::session::manager::ContextState;
@@ -581,28 +580,19 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
-                    // ContextOverflow: trigger compaction before retry
+                    // ContextOverflow: trigger compaction cascade before retry
                     if is_context_overflow_error(&e) && self.context_state.is_some() {
                         self.emit_event(AgentEvent::AutoCompactionStart {
                             reason: "context_overflow".into(),
                         });
                         if let Some(ref mut ctx_state) = self.context_state {
-                            compact_tool_results(
+                            run_compaction_cascade(
                                 ctx_state,
-                                self.config.context_config.keep_recent_turns,
-                            );
-                            if ctx_state.is_over_budget() {
-                                let _ = run_compaction_loop(
-                                    ctx_state,
-                                    &*self.llm,
-                                    &self.config.context_config,
-                                    std::path::Path::new(""),
-                                )
-                                .await;
-                            }
-                            if ctx_state.is_over_budget() {
-                                force_drop_oldest(ctx_state);
-                            }
+                                &*self.llm,
+                                &self.config.context_config,
+                                std::path::Path::new(""),
+                            )
+                            .await;
                             *messages =
                                 crate::core::session::manager::build_context_from_state(ctx_state);
                         }

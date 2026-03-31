@@ -14,7 +14,7 @@ use crate::{
     ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
     PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
-use crate::core::compaction::{compact_tool_results, force_drop_oldest, run_compaction_loop};
+use crate::core::compaction::run_compaction_cascade;
 use crate::core::session::manager::{
     build_context_from_state, init_context_state, TurnEntry,
 };
@@ -290,23 +290,21 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         // Update context estimate for the new user input
         context_state.on_message_appended(input.len());
 
-        // Pre-flight budget check: trigger Layer 1~3 if over budget
+        // Pre-flight budget check: trigger Layer 1~3 cascade if over budget
         if context_state.is_over_budget() {
-            compact_tool_results(&mut context_state, context_config.keep_recent_turns);
-        }
-        if context_state.is_over_budget() {
-            if let Ok(Some(tp)) = ctx.session.current_transcript_path() {
-                let _ = run_compaction_loop(
-                    &mut context_state,
-                    &*ctx.llm,
-                    context_config,
-                    &tp,
-                )
-                .await;
-            }
-        }
-        if context_state.is_over_budget() {
-            force_drop_oldest(&mut context_state);
+            let tp = ctx
+                .session
+                .current_transcript_path()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            run_compaction_cascade(
+                &mut context_state,
+                &*ctx.llm,
+                context_config,
+                &tp,
+            )
+            .await;
         }
 
         // Build messages from ContextState

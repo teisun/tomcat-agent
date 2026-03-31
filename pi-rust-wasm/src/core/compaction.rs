@@ -308,6 +308,29 @@ pub fn force_drop_oldest(state: &mut ContextState) {
 }
 
 // ---------------------------------------------------------------------------
+// Compaction cascade: Layer 1 → 2 → 3
+// ---------------------------------------------------------------------------
+
+/// 三层级联压缩：依次尝试 Layer 1（占位符）→ Layer 2（LLM 摘要）→ Layer 3（强制删除），
+/// 每层执行后检查预算，够用即停。由 `chat.rs`（pre-flight）和 `agent_loop.rs`（overflow retry）复用。
+pub async fn run_compaction_cascade(
+    state: &mut ContextState,
+    llm: &dyn LlmProvider,
+    config: &ContextConfig,
+    transcript_path: &Path,
+) {
+    if state.is_over_budget() {
+        compact_tool_results(state, config.keep_recent_turns);
+    }
+    if state.is_over_budget() {
+        let _ = run_compaction_loop(state, llm, config, transcript_path).await;
+    }
+    if state.is_over_budget() {
+        force_drop_oldest(state);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: context overflow detection
 // ---------------------------------------------------------------------------
 

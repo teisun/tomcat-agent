@@ -11,7 +11,7 @@ pub mod infra;
 pub use api::run_cli;
 pub use core::{
     agent_messages_from_chat, convert_to_llm_format, AgentLoop, AgentLoopConfig, AgentMessage,
-    AgentRunResult, AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse,
+    AgentRunResult, AllowAllConfirmation, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
     DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation, DirEntry, EditFileResult,
     EditOperation, EditOperationType, LlmProvider, OpenAiProvider, PrimitiveExecutor,
     PrimitiveOperation, SessionTokenUsage, StreamEvent, Tool, ToolCallInfo, ToolExecutor,

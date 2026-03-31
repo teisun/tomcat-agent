@@ -206,6 +206,10 @@ match agent_loop.run(messages).await {
   - `infra::config::tests` — ContextConfig 默认值、预算计算（GPT-5.2 816K）、溢出保护、TOML override
   - `core::session::manager::tests` — init_context_state（空/有消息/有 compaction entry/无 session）、build_context_from_state
   - `infra::events::tests` — CompactionError/ToolResultTruncated 序列化
-- **集成测试**：`tests/context_management_tests.rs`（6 用例）— 大文件截断端到端、Layer 1+3 预算恢复、Session 重载含 Compaction entry、ContextOverflow 自动恢复重试、Unicode 安全截断、混合 turns 展平顺序
+- **集成测试**：`tests/context_management_tests.rs`（14 用例）—
+  - 端到端：大文件截断事件、Layer 1+3 预算恢复、Session 重载含 Compaction entry、ContextOverflow 自动恢复重试、Unicode 安全截断、混合 turns 展平顺序
+  - Layer 1 深度验证：占位符替换正确性（旧 turn 替换/保护区保留）、减够即停、estimate 精确变化量
+  - Layer 2 深度验证：单批压缩、多批循环、UPDATE 模式（SummaryTurn 在 batch）、LLM 报错优雅降级、摘要过长中断
+- **重构**：`run_compaction_cascade`（`compaction.rs`）统一三层级联逻辑，`chat.rs` 与 `agent_loop.rs` 共用
 - **门禁**：`cargo clippy --all-targets -- -D warnings` 无警告。
 - **事件**：agent_start、turn_start/end、message_start/update/end、tool_execution_start/end、tool_call/tool_result、auto_retry_start/end、**auto_compaction_start/end**（TASK-17 新增）、**tool_result_truncated**（TASK-17 新增）、**compaction_error**（TASK-17 新增）、agent_end(success|error|interrupted)。
