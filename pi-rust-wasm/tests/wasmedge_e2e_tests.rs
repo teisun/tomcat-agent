@@ -2222,16 +2222,26 @@ async fn test_e2e_community_overlay_qa_tests() -> Result<(), Box<dyn std::error:
         .map_err(|e| e.to_string())?;
 
     let inst_id = format!("s1/{plugin_id}");
-    let cmds = poll_for_command(&dispatcher, &inst_id, "overlay-animation", 30).await;
+    // registerCommand 异步到达；poll_for_command 在命中首个名称后即返回会导致 len 断言竞态
+    let mut cmds = Vec::new();
+    for _ in 0..40 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        cmds = dispatcher.registered_plugin_commands(&inst_id);
+        let overlay_count = cmds.iter().filter(|(n, _)| n.starts_with("overlay-")).count();
+        if cmds.iter().any(|(n, _)| n == "overlay-animation") && overlay_count >= 5 {
+            break;
+        }
+    }
     assert!(
         cmds.iter().any(|(n, _)| n == "overlay-animation"),
         "overlay-qa-tests should register 'overlay-animation', got: {:?}",
         cmds
     );
+    let overlay_count = cmds.iter().filter(|(n, _)| n.starts_with("overlay-")).count();
     assert!(
-        cmds.len() >= 5,
+        overlay_count >= 5,
         "overlay-qa-tests should register multiple overlay-* commands, got {}",
-        cmds.len()
+        overlay_count
     );
 
     mgr.end_session("s1").await.map_err(|e| e.to_string())?;
