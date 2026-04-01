@@ -26,7 +26,7 @@
 //! │   steering_queue  ─► Mutex<Vec<AgentMessage::Steering>>（跨线程注入）          │
 //! │   follow_up_queue ─► Mutex<Vec<AgentMessage::User>>（同上下文追问）            │
 //! │   abort_signal    ─► AtomicBool（Ctrl+C 中断）                                │
-//! │   on_stream_delta ─► Option<FnMut(&str)>（流式文字推送到渲染层）               │
+//! │   （流式 delta 通过 EventBus message_update 事件推送到渲染层）                 │
 //! └──────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -56,7 +56,7 @@
 //! │   │     │     abort? ──是──► Err(Aborted)                                    │
 //! │   │     │     emit: turn_start                                                │
 //! │   │     │     llm.chat_stream(messages)                                       │
-//! │   │     │       ├── ContentDelta ──► content_buf / on_stream_delta           │
+//! │   │     │       ├── ContentDelta ──► content_buf                             │
 //! │   │     │       │                    emit: message_update                    │
 //! │   │     │       ├── ToolCallDelta ──► tool_calls_buf 累积                    │
 //! │   │     │       └── Err(e) ──► classify_error → Retryable / Fatal            │
@@ -139,9 +139,6 @@ use crate::infra::events::{
     AgentEvent, AssistantMessageEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
 };
 use tracing::debug;
-
-/// 流式 delta 回调类型，供调用方渲染等。
-pub type OnStreamDelta = Box<dyn FnMut(&str) + Send>;
 
 // ─── 5.1 AgentMessage 与转换 ───────────────────────────────────────────────
 
@@ -359,7 +356,6 @@ pub struct AgentLoop {
     steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
     follow_up_queue: Arc<Mutex<Vec<AgentMessage>>>,
     abort_signal: Arc<AtomicBool>,
-    on_stream_delta: Option<OnStreamDelta>,
     context_state: Option<ContextState>,
 }
 
@@ -386,7 +382,6 @@ impl AgentLoop {
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             abort_signal,
-            on_stream_delta: None,
             context_state: None,
         }
     }
@@ -409,13 +404,8 @@ impl AgentLoop {
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_queue,
             abort_signal,
-            on_stream_delta: None,
             context_state: None,
         }
-    }
-
-    pub fn set_on_stream_delta(&mut self, f: OnStreamDelta) {
-        self.on_stream_delta = Some(f);
     }
 
     pub fn steer(&self, msg: String) {
@@ -674,9 +664,6 @@ impl AgentLoop {
                 match item {
                     Ok(StreamEvent::ContentDelta { delta }) => {
                         content_buf.push_str(&delta);
-                        if let Some(cb) = self.on_stream_delta.as_mut() {
-                            cb(&delta);
-                        }
                         self.emit_event(AgentEvent::MessageUpdate {
                             message: Message(serde_json::json!({})),
                             assistant_message_event: AssistantMessageEvent(

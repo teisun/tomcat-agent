@@ -644,6 +644,42 @@
 
 ---
 
+### TASK-18 | stream-delta-to-eventbus | on_stream_delta 回调改为 EventBus 事件订阅
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `DONE` |
+| **负责人** | Tom |
+| **分支** | `develop`（本任务直接在 develop 落地） |
+| **阻塞点** | — |
+
+**目标**：移除 `AgentLoop` 上的 `on_stream_delta` 回调字段，改由 `chat.rs` 通过 `EventBus` 订阅已有的 `message_update` 事件驱动 Markdown 渲染与 stdout 输出，对齐 pi-mono 的 `emit("message_update")` 事件分发模式。消除 `AgentLoop` 对 CLI 层的直接耦合，为后续多消费者（Web UI / LSP）铺路。
+
+**子项**：
+- [x] 18.1 `chat.rs`：替换调用方 — `event_bus.on("message_update", ...)` 订阅 + import `EventContext` + `off()` 在 match 前
+- [x] 18.2 `agent_loop.rs`：移除 `OnStreamDelta` 类型、`on_stream_delta` 字段、`set_on_stream_delta` 方法及回调调用点
+- [x] 18.3 更新 `src/core/README.md` 中 `on_stream_delta` 相关描述
+- [x] 18.4 `cargo build` + `cargo clippy` + `cargo test` 全量验证
+
+**依赖**：TASK-14（Agent Loop，DONE）
+
+**被依赖**：TASK-08（CLI 交互体验优化，可并行）
+
+**协作接口**：
+- 消费：`EventBus::on`/`off`（`src/infra/event_bus.rs`）、`AgentEvent::MessageUpdate`（`src/infra/events.rs`）
+- 移除：`OnStreamDelta` 类型、`set_on_stream_delta` 公开 API
+
+**验收标准**：
+- `cargo build` 编译通过，无 `on_stream_delta` 残留引用
+- `cargo clippy --all-targets -- -D warnings` 无新增 warning
+- `cargo test --lib` + `cargo test --test cli_tests` 全量通过
+- `pi chat` 流式输出行为与改动前一致
+
+**开发计划**：Cursor 计划 `stream_delta_改为事件_b97eb771.plan.md`
+
+---
+
 ### TASK-07 | T1-P1-004 | 全平台兼容性测试与 bug 修复
 
 | 字段 | 内容 |

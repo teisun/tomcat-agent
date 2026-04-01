@@ -37,7 +37,7 @@ Layer 3  Reasoning Loop
 
 - **设计模式**：三层嵌套循环（Conversation → Attempt → Reasoning），职责分离；内部使用富类型 `AgentMessage`，仅在调 LLM 边界通过 `convert_to_llm_format` 转为 `ChatMessage`，与 [agent-loop.md](../../openspec/specs/architecture/agent-loop.md) 13.4 消息类型边界一致。
 - **关键权衡**：System Prompt 与工具定义由**调用方**（如 chat）拼装并注入：AgentLoop 只接受已拼好的 `initial_messages`（含首条 System 若需要）和构造时传入的 `config.tool_definitions`，不在 Loop 内再拼 system，便于多调用方复用同一 Loop 逻辑。Transcript 持久化由调用方在 `run()` 返回后根据 `AgentRunResult.final_text` 自行 append 并写入 Session，AgentLoop 不依赖 SessionManager。
-- **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<AgentMessage>>>`，`abort_signal` 为 `Arc<AtomicBool>`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与信号，无数据竞争。`run()` 需 `&mut self` 因持有 `on_stream_delta: Option<Box<dyn FnMut(&str) + Send>>`。
+- **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<AgentMessage>>>`，`abort_signal` 为 `Arc<AtomicBool>`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与信号，无数据竞争。流式 delta 通过 `EventBus` 的 `message_update` 事件推送，调用方（如 `chat.rs`）通过 `event_bus.on("message_update", ...)` 订阅。
 
 ## 3. 核心 API 与数据结构 (API Definitions)
 
@@ -52,7 +52,6 @@ Layer 3  Reasoning Loop
 - **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `AgentMessage::Steering { text, timestamp }`；第三层每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
 - **AgentLoop::follow_up(&self, msg: String)**：向 follow_up_queue 推入 `AgentMessage::User { text }`；第一层循环尾部检查，非空则 drain 追加到 messages 并 continue。
 - **AgentLoop::abort(&self)**：将 `abort_signal` 置为 true；第三层每工具执行前检查，为 true 则返回 `Err` 并发布 agent_end(interrupted)。
-- **AgentLoop::set_on_stream_delta(&mut self, f)**：设置流式 delta 回调，供 chat 做 Markdown 渲染等。
 - **LoopError**（内部）：`Retryable(String)`、`Fatal(String)`、`Aborted`；`classify_error(AppError)` 将 429/5xx/超时/请求失败等归为 Retryable，401/400 归为 Fatal。
 - **compact_messages(messages, keep_recent)**：（已废弃）MVP 压缩。由 ContextState + 四层防护替代。
 
@@ -195,9 +194,15 @@ let mut agent_loop = AgentLoop::new(
     config,
     ctx.cancelled.clone(),
 );
-agent_loop.set_on_stream_delta(Box::new(move |delta: &str| { /* 渲染 delta */ }));
+// 通过 EventBus 订阅流式 delta（对齐 pi-mono emit("message_update") 模式）
+let listener_id = ctx.event_bus.on("message_update", Box::new(move |evt| {
+    // 从 evt.payload["assistantMessageEvent"]["delta"] 提取增量文本并渲染
+    Ok(())
+}));
 
-match agent_loop.run(messages).await {
+let run_result = agent_loop.run(messages).await;
+ctx.event_bus.off(listener_id);
+match run_result {
     Ok(result) => {
         // AgentLoop 不负责写入 Session；调用方自行 append 并持久化
         if !result.final_text.is_empty() {

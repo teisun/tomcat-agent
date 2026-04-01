@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::infra::error::AppError;
+use crate::infra::event_bus::EventContext;
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
@@ -352,17 +353,30 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         agent_loop.set_context_state(Some(context_state));
 
         let renderer_clone = Arc::clone(&renderer);
-        agent_loop.set_on_stream_delta(Box::new(move |delta: &str| {
-            renderer_clone.lock().push(delta);
-            while let Some(chunk) = renderer_clone.lock().take_ready() {
-                print!("{}", chunk);
-                let _ = io::stdout().flush();
-            }
-        }));
+        let listener_id = ctx.event_bus.on(
+            "message_update",
+            Box::new(move |evt: EventContext| {
+                if let Some(delta) = evt
+                    .payload
+                    .get("assistantMessageEvent")
+                    .and_then(|e| e.get("delta"))
+                    .and_then(|d| d.as_str())
+                {
+                    renderer_clone.lock().push(delta);
+                    while let Some(chunk) = renderer_clone.lock().take_ready() {
+                        print!("{}", chunk);
+                        let _ = io::stdout().flush();
+                    }
+                }
+                Ok(())
+            }),
+        );
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
 
-        match agent_loop.run(messages).await {
+        let run_result = agent_loop.run(messages).await;
+        ctx.event_bus.off(listener_id);
+        match run_result {
             Ok(result) => {
                 if let Some(remaining) = renderer.lock().flush() {
                     print!("{}", remaining);

@@ -1,5 +1,26 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Tom | 2026-04-01 12:00 | ACTIVE | develop | — |
+
+### TASK-18：on_stream_delta 改为 EventBus `message_update` 订阅
+
+- 移除 `AgentLoop` 的 `OnStreamDelta` / `set_on_stream_delta` 与流式旁路回调；`ContentDelta` 仅经 `emit_event(MessageUpdate)` 发布。
+- `chat.rs` 在 `run()` 前 `event_bus.on("message_update", …)` 驱动 `MarkdownRenderer`，`run()` 返回后 `off(listener_id)`，避免致命错误路径泄漏监听。
+- `src/core/README.md` 与 `agent_loop.rs` 模块头 ASCII 已同步；无对外 API 行为变更（CLI 流式表现不变）。
+
+#### 本机验收（本提交前）
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `cargo test --lib` | PASS（334 passed，1 ignored） |
+| `cargo test --test cli_tests` | PASS（77 passed） |
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-31 15:00 | ACTIVE | develop | — |
 
 ### 文档与规范同步（technical 迁移 + directory-structure 归入 architecture）
