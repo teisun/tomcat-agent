@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventContext;
 use crate::infra::{
-    AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
+    wire, AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder,
+    TracingAuditRecorder,
 };
 use crate::{
     convert_to_llm_format, resolve_extra_roots_paths,
@@ -354,7 +355,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         let renderer_clone = Arc::clone(&renderer);
         let listener_id = ctx.event_bus.on(
-            "message_update",
+            wire::WIRE_MESSAGE_UPDATE,
             Box::new(move |evt: EventContext| {
                 if let Some(delta) = evt
                     .payload
