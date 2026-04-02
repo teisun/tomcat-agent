@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「上下文管理」的详细设计，总览见主文档。关联文档：[Agent Loop 设计](agent-loop.md)、[会话存储数据结构](session-storage.md)。研究报告：[context-management-deep-dive.md](../../../docs/reports/context-management-deep-dive.md)。
+本文为 [Architecture](../Architecture.md) 中「上下文管理」的详细设计，总览见主文档。关联文档：[Agent Loop 设计](agent-loop.md)、[会话存储数据结构](session-storage.md)。研究报告：[context-management-deep-dive.md](../../../docs/reports/context-management-deep-dive.md)。重构建议报告：[context-management-refactoring-proposal.md](../../../docs/reports/context-management-refactoring-proposal.md)。
 
 ---
 
@@ -8,19 +8,27 @@
 
 ### 1.1 背景
 
-当前 pi-rust-wasm 的上下文管理存在两个维度的缺陷：
+TASK-17 已落地四层防护（Layer 0 截断 → Layer 1 占位符 → Layer 2 LLM 摘要 → Layer 3 强制删除）和 token-aware 滑窗，解决了原始的条数裁剪和 context overflow 问题。
 
-- **reasoning loop 内**：`max_tool_rounds=10` 仅限轮数，每轮全量累积 messages 发给 LLM，10 轮大文件 read_file 可达 50,000+ token，**无 token 级检查**。
-- **跨轮次 session 历史**：`DEFAULT_CONTEXT_CAP=10`（条数），按消息条数裁剪——一条 tool result 可能 50,000 字符，条数不等于 token 量。
+本轮重构基于 [Claude Code 上下文管理机制](../../../docs/reports/context-management-refactoring-proposal.md) 的对比分析，对现有方案做渐进式升级，核心改进点：
 
-两个维度叠加后，任一场景都可能导致 **context window 溢出**（LLM 报错或静默截断），且按条数裁剪会**丢失早期关键上下文**（用户约束、决策、目标），直接影响回答质量。
+- **Token 计数精度**：从纯字符估算（误差 30-50%）升级为 API Usage 优先 + 字符 fallback，直接影响所有压缩决策的准确性
+- **主动压缩**：从被动 `is_over_budget()` 单点触发升级为多级 ratio 水位线（70%/85%/92%/98%）+ buffer 安全网的分级主动响应
+- **信息保全**：Layer 0 从「截断丢弃」升级为「落盘 + preview 占位符」，大 tool_result 内容不丢失、可按需读回
+- **级联降压**：Layer 0 → 1 → 2 → 3 按瀑布式逐层尝试，每层跑完重新计算 ratio，降压成功即停
+- **防御增强**：Circuit Breaker（Layer 2 连续失败 3 次自动降级）+ PTL 重试（摘要请求超长时范围减半重试）
+- **可观测性**：`ContextMetrics` 追踪 token 使用率、压缩次数、释放量等指标
 
 ### 1.2 设计目标
 
-1. **防溢出**：所有发给 LLM 的 prompt 估算 token 不超过安全水位，消除 context overflow。
-2. **语义完整**：被裁剪的旧消息通过 LLM 结构化摘要保留核心语义（Goal / Constraints / Progress）。
-3. **低额外开销**：优先用零成本的占位符替换释放空间，仅在不够时才触发 LLM 摘要调用。
-4. **可配置**：`context_window`、`max_output_tokens`、`compaction_turns`、`keep_recent_turns`、`single_tool_result_max_chars`、`compaction_model` 均可在配置文件中覆盖。
+1. **防溢出**：所有发给 LLM 的 prompt 估算 token 不超过安全水位，消除 context overflow
+2. **语义完整**：被压缩的旧消息通过 LLM 结构化摘要保留核心语义（Goal / Constraints / Progress）
+3. **信息保全**：超大 tool_result 落盘保全，不截断丢弃，未来可按需读回
+4. **低额外开销**：优先用零成本的 Layer 0（落盘）和 Layer 1（占位符）释放空间，仅在不够时才触发 LLM 摘要
+5. **主动降压**：ratio 水位线驱动的分级主动压缩，而非被动等 API 报错
+6. **防御性**：Circuit Breaker 防止 LLM 调用无限重试，Layer 3 兜底确保极端场景不崩溃
+7. **可配置**：`context_window`、`max_output_tokens`、`autocompact_buffer_tokens`、`warning_buffer_tokens`、`compaction_model` 等均可在配置中覆盖
+8. **可观测**：`ContextMetrics` 提供上下文健康度实时指标
 
 ---
 
@@ -30,221 +38,254 @@
 |------|------|
 | **user turn** | 一条 `role=user` 消息 + 其后所有 `role=assistant` / `role=tool` 消息，直到下一条 `role=user`。上下文管理的最小粒度单位。 |
 | **context_window** | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.2 400K）。 |
-| **contextBudgetChars** | 滑动窗口的字符预算上限，`(context_window - max_output_tokens) × 4 × 0.75`。 |
-| **estimateContextChars** | 当前 `userTurnsList` 中所有消息的估算总字符数，内存中动态维护。 |
-| **compactable zone** | `userTurnsList` 中可被压缩的区间（排除保护区）。 |
-| **protected zone** | 最近 `keep_recent_turns`（默认 3）个 user turns，**不参与任何压缩/替换**。 |
-| **placeholder** | `"[compacted: tool output removed to free context]"`，替换旧 tool result 正文的常量。 |
-| **compaction summary** | LLM 对一批 user turns 生成的结构化摘要，一条消息替换整批原始 turns（多变一）。 |
-| **chars/4 启发式** | token 估算公式：`estimated_tokens ≈ text.len() / 4`，业界广泛使用，pi-mono `estimateTokens` 同此实现。 |
+| **input_budget** | 输入 token 预算，`context_window - max_output_tokens`。分母，用于计算 ratio。 |
+| **ratio** | 上下文使用率，`estimated_input_tokens / input_budget`，取值 0.0 ~ 1.0+。驱动多级水位线触发。 |
+| **cascade** | 级联降压流程。Layer 0 → 1 → 2 → 3 逐层尝试，每层完成后重新计算 ratio，降压成功即停。 |
+| **compactable zone** | `userTurnsList` 中可被压缩的区间 `[0, N-m)`（左闭右开，Rust `[..compactable_end]` 语义），排除保护区。 |
+| **protected zone** | 最近 `m` 个 user turns，**不参与任何压缩/替换**。`m` 值随 ratio 档位动态调整。 |
+| **m 值** | 保护区大小，即 cascade 中保留的最近 turn 数。ratio 越高，m 越小，压缩越激进。 |
+| **preview 占位符** | Layer 0 落盘后替换 tool_result 的短文本，包含路径 + 工具名 + 前 500 chars 预览。 |
+| **placeholder** | Layer 1 替换旧 turn 中 tool_result 的常量文本 `[Previous tool result replaced to save context space]`。 |
+| **compaction summary** | Layer 2 LLM 对一批 user turns 生成的结构化摘要，一条消息替换整批 turns。 |
+| **compact boundary** | `TranscriptEntry::Compaction` 中的 `is_boundary: bool` 标记，`init_context_state` 遇到后丢弃其前所有 entry，防止跨重启时历史重复。 |
+| **circuit breaker** | Layer 2 LLM 摘要连续失败 >= 3 次后自动跳过，直接 fallback 到 Layer 3。 |
+| **buffer 安全网** | `autocompact_buffer_tokens` / `warning_buffer_tokens`，基于绝对剩余 token 的辅助触发线，主要保护小窗口模型。 |
+| **API Usage** | LLM API 返回的 `usage` 字段（`prompt_tokens` + `completion_tokens`），用于精确 token 计数。 |
 
 ---
 
 ## 3. 核心架构图
 
-### 图一：消息膨胀与两维度风险
+### 图一：Token 计数与 Ratio 计算
 
 ```
-  ═══════════════════════════════════════════════════════════════════════
-  维度 1：reasoning loop 内消息膨胀（单次用户输入）
-  ═══════════════════════════════════════════════════════════════════════
+  ════════════════════ Token 计数策略 ════════════════════
 
-  用户输入 ──► AgentLoop.run(initial_messages)
-               │
-               │  思考-行动循环（第三层，见 agent-loop.md §13.3）
-               │  ┌─────────────────────────────────────────────────┐
-               │  │ 每轮：                                           │
-               │  │   messages += assistant(tool_calls)  ~200 tok    │
-               │  │   messages += tool(result)           ~2500 tok   │
-               │  │   下一轮把【全量 messages】发给 LLM                │
-               │  └─────────────────────────────────────────────────┘
-               │
-               │  520 tok → 3,220 → 4,220 → ... → 50,000+ tok（10 轮大文件）
-               │
-               │  当前防线：仅 max_tool_rounds=10 硬上限
-               │  缺失防线：无 token 估算、无 tool result 截断
-               │  ► 本方案补充：每轮工具执行后检查 estimateContextChars
+  方式 A（优先）：API Usage 精确计数
+  ──────────────────────────────────────
+  LLM 响应中的 StreamEvent::Usage
+      → prompt_tokens = 180,000
+      → completion_tokens = 2,000
+      │
+      │ 之后新增消息的字符数 / 4（增量估算）
+      │   post_usage_appended_chars = 12,000 → ~3,000 tokens
+      ▼
+  estimated_input_tokens = prompt_tokens + incremental
+                         = 180,000 + 3,000 = 183,000
 
-  ═══════════════════════════════════════════════════════════════════════
-  维度 2：跨 user turn 的 session 历史裁剪
-  ═══════════════════════════════════════════════════════════════════════
+  方式 B（fallback）：字符启发式
+  ──────────────────────────────────────
+  首轮无 usage / compact 后 usage 失效时
+      → estimated_input_tokens = estimate_context_chars / 4
 
-  transcript（磁盘持久化全量 JSONL）
-  ┌────────────────────────────────────────────────────┐
-  │ turn_0(user + assistant + tool × N)                 │
-  │ turn_1(user + assistant + tool × N)                 │
-  │ ...                                                 │
-  │ turn_n-1(user)  ← 当前输入                           │
-  └────────────────────────────────────────────────────┘
-               │
-               │ 当前：build_context_messages(cap=10 条) → 按条数裁剪
-               │ 问题：一条 tool result 可能 50,000 chars → 溢出
-               │       早期 user 声明的约束被裁掉 → 语义丢失
-               │
-               │ ► 本方案：改为 token-aware 滑窗 + 占位符 + Compaction
+
+  ════════════════════ Ratio 与水位线 ════════════════════
+
+  input_budget = context_window - max_output_tokens
+               = 400,000 - 128,000 = 272,000 tokens（GPT-5.2）
+
+  ratio = estimated_input_tokens / input_budget
+
+    0%          70%     85%  92% 98% 100%
+    ├───────────┼───────┼────┼───┼───┤
+    │  正常区    │cascade│    │   │   │
+    │  无压缩    │L1→L2  │L1→L2│L1→L2│L1→L2│ L3
+    │           │  m=5  │m=3 │m=2│m=1│ 强制删除
+    │           │       │    │   │阻止│ 目标<0.50
+    │           │       │    │   │工具│
+
+  注：Layer 0 每轮必跑，不受 ratio 控制，图中省略。
+      cascade 启动后从 Layer 1 起逐层执行（L1→L2→L3），每层完成后重新算 ratio，降压成功即停。
 ```
 
-### 图二：预算计算与滑动窗口结构
+### 图二：四层防护流程（级联降压）
 
 ```
-  ════════════════════ 预算计算链 ════════════════════
+  工具执行完毕，LLM 已完成本轮回复
+      │
+      ▼
+  ┌─ Layer 0（每轮必跑）─────────────────────────────────┐
+  │  单条 tool_result >= 30K chars？                     │
+  │    → 落盘 + preview 占位符                           │
+  │  单 user_turn tool_result 合计 >= 150K chars？       │
+  │    → 挑最大 fresh 结果逐个落盘，直到合计 < 150K      │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼ 重新算 ratio
+      │
+      ratio < 0.70 且剩余 > buffer？ ──Yes──► 停止，无需 cascade
+      │
+      No（cascade 启动）
+      ▼
+  ┌─ Layer 1 ────────────────────────────────────────────┐
+  │  turn 0..(N-m) 中 tool_result > 20K chars            │
+  │  → 占位符替换（不落盘）                              │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼ 重新算 ratio
+      │
+      ratio 已降到安全线？ ──Yes──► 停止
+      │
+      No
+      ▼
+  ┌─ Layer 2 ────────────────────────────────────────────┐
+  │  按当前 ratio 对应的 m 值，对 turn 0..(N-m) 做 LLM 摘要│
+  │  （ratio 越高 m 越小，压缩越激进）                    │
+  │  Circuit Breaker：连续失败 >= 3 → 跳过               │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼ 重新算 ratio
+      │
+      ratio 已降到安全线？ ──Yes──► 停止
+      │
+      No
+      ▼
+  ┌─ Layer 3（防御性兜底，几乎不可达）───────────────────┐
+  │  从最旧 summary/turn 起逐条删除，直到 ratio < 0.50   │
+  │  （远低于 Layer 2 触发线，充足缓冲避免振荡）          │
+  └──────────────────────────────────────────────────────┘
+      │
+      ▼
+  ratio >= 0.98？ ──Yes──► 标记 block_tool_calls = true
+                           reasoning loop 后续迭代中若 LLM 请求
+                           工具调用，跳过执行并返回文本提示用户
+                           （压缩已尽力，避免继续膨胀）
+```
 
-  context_window (模型固有)           如 GPT-5.2 = 400,000 tokens
-       │
-       ├─ max_output_tokens (模型固有)  如 GPT-5.2 = 128,000 tokens
-       │
-       ▼
-  prompt_tokens_max = context_window - max_output_tokens
-                    = 400,000 - 128,000 = 272,000 tokens
-       │
-       │  × 4 (chars/4 启发式, 反向换算)
-       ▼
-  prompt_chars_max = 272,000 × 4 = 1,088,000 chars
-       │
-       │  × 0.75 (安全水位, 吸收估算误差 + provider framing)
-       ▼
-  contextBudgetChars = 1,088,000 × 0.75 = 816,000 chars
-       │
-       │  这是 estimateContextChars 的触发阈值
-       │  超过此值 → 进入 Layer 1~3（Layer 0 在工具返回时单独触发）
-       ▼
+### 图三：滑动窗口与 m 值保护区
 
-  ════════════════════ 滑动窗口结构 ════════════════════
-
+```
   userTurnsList (内存中维护)：
 
+  ratio = 0.70 → m = 5:
+  [turn_0] [turn_1] ... [turn_n-6] │ [turn_n-5] ... [turn_n-1]
+  ◄──── compactable zone ─────────►│◄──── protected zone (5) ──►
+
+  ratio = 0.85 → m = 3:
   [turn_0] [turn_1] ... [turn_n-4] │ [turn_n-3] [turn_n-2] [turn_n-1]
-  ◄──────── compactable zone ──────►│◄────── protected zone (3) ─────►
-                                    │
-  Layer 1/2 仅操作此区间              │  永远不压缩，保证当前对话完整
+  ◄──── compactable zone ─────────►│◄──── protected zone (3) ──────►
+
+  ratio = 0.98 → m = 1:
+  [turn_0] [turn_1] ... [turn_n-2] │ [turn_n-1]
+  ◄──── compactable zone ─────────►│◄── prot.(1)
 ```
 
-### 图三：四层防护流程
-
-```
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ Layer 0: 新 tool result 入口截断（reasoning loop 内，工具返回时）  │
-  │                                                                  │
-  │  tool_result.len() > SINGLE_TOOL_RESULT_MAX_CHARS ?              │
-  │    YES → 截断到 70%~100% 区间的换行处，拼 [truncated] 后缀        │
-  │    NO  → 保留原文                                                 │
-  │  ► 每条 tool result 写入 messages 前执行                          │
-  └──────────────────────────────────────────────────────────────────┘
-
-  每次 build_context_messages（向 LLM 发请求前）触发：
-
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ estimateContextChars ≤ contextBudgetChars ?                      │
-  │   YES → 直接发送，无需处理                                        │
-  │   NO  → 进入防护流程 ↓                                           │
-  └──────────────────────────────────────────────────────────────────┘
-                                  │
-                 ┌────────────────▼─────────────────┐
-                 │  Layer 1: 占位符替换               │
-                 │                                   │
-                 │  scope = compactable zone          │
-                 │  for turn in turns[0..n-3]:        │
-                 │    for msg where role=tool:         │
-                 │      msg.content = PLACEHOLDER      │
-                 │      reduced += (before - after)    │
-                 │      if reduced >= charsNeeded:     │
-                 │        break ──────────────►        │
-                 │  charsNeeded = estimate - budget     │
-                 └────────────────┬─────────────────┘
-                                  │
-                 estimateContextChars ≤ budget ?
-                      YES → 发送
-                      NO  ↓
-                 ┌────────────────▼─────────────────┐
-                 │  Layer 2: 循环 Compaction           │
-                 │                                   │
-                 │  compactable = turns[0..n-3]       │
-                 │                                   │
-                 │  while estimate > budget            │
-                 │     && compactable 非空:             │
-                 │                                   │
-                 │    batch = 最旧未压缩 ≤10 turns     │
-                 │    summary = LLM(batch)            │
-                 │    一条 summary 替换整批 turns       │
-                 │    更新 estimateContextChars        │
-                 │    compactable 移除已压缩 batch     │
-                 └────────────────┬─────────────────┘
-                                  │
-                 estimateContextChars ≤ budget ?
-                      YES → 发送
-                      NO  ↓ (compactable zone 已耗尽)
-                 ┌────────────────▼─────────────────┐
-                 │  Layer 3: 强制删除（极端兜底）      │
-                 │                                   │
-                 │  从最旧 summary/turn 起删除          │
-                 │  直到 estimate 回到 budget 内        │
-                 │  （几乎不可达；防御性保底）            │
-                 └──────────────────────────────────┘
-```
-
-### 图四：Compaction 多轮摘要演进
+### 图四：Compaction 摘要演进
 
 ```
   ════════════════════ 初始状态 ════════════════════
 
-  [turn_0][turn_1]...[turn_9] [turn_10]...[turn_n-3] │ [turn_n-2][turn_n-1][turn_n]
-  ◄────── batch 1 (10 turns) ──► ◄── 剩余可压缩 ──► │ ◄──── protected zone ──────►
+  [turn_0][turn_1]...[turn_9] [turn_10]...[turn_n-m] │ [turn_n-m+1]...[turn_n-1]
+  ◄────── compactable zone ─────────────────────────►│◄─── protected zone (m) ──►
 
-  ════════════════════ 第一轮 Compaction ════════════════════
+  ════════════════════ Layer 2 触发（ratio >= 0.70, m=5）════════════
 
-  LLM(turn_0..turn_9) → summary_A（一条消息，含 Goal/Constraints/Progress...）
+  LLM(turn_0..turn_n-5) → summary_A（Goal/Constraints/Progress...）
 
-  [summary_A] [turn_10]...[turn_n-3] │ [turn_n-2][turn_n-1][turn_n]
-  ◄─ 1 条 ──► ◄── 剩余可压缩 ───────► │ ◄──── protected zone ──────►
+  [summary_A] │ [turn_n-5]...[turn_n-1]
+  ◄─ 1 条 ──► │ ◄─── protected zone (5) ──►
 
-  ════════════════════ 若仍超预算 → 第二轮 ════════════════════
+  ratio 降回 ~0.2，cascade 结束
 
-  LLM(turn_10..turn_19) → summary_B
+  ════════════════════ 已有旧 summary 时 ════════════════════
 
-  [summary_A][summary_B] [turn_20]...[turn_n-3] │ [turn_n-2][turn_n-1][turn_n]
-  ◄────── 摘要链 ──────► ◄── 剩余可压缩 ────────► │ ◄──── protected zone ──────►
-
-  ════════════════════ 最终稳定 ════════════════════
-
-  [summary_A][summary_B]...[summary_X] │ [turn_n-2][turn_n-1][turn_n]
-  ◄──────────── 摘要链 ──────────────► │ ◄──── protected zone ──────►
-
-  已有旧 summary 时 → UPDATE 模式合并（参考 pi-mono UPDATE_SUMMARIZATION_PROMPT）
+  若后续 ratio 再次达 0.70，summary_A 与新 turn 均在 compactable zone 中：
+  LLM 使用 UPDATE 模式合并旧 summary（参考 pi-mono UPDATE_SUMMARIZATION_PROMPT）
 ```
 
 ---
 
-## 4. 预算计算
+## 4. 预算计算与水位线
 
-### 4.1 公式
+### 4.1 Token 计数策略
+
+精确的 token 计数是所有压缩决策的基础。采用 **API Usage 优先 + 字符 fallback** 双模式：
 
 ```
-prompt_tokens_max   = context_window - max_output_tokens
-prompt_chars_max    = prompt_tokens_max × 4
-contextBudgetChars  = prompt_chars_max × 0.75
+fn estimated_token_count(state: &ContextState) -> usize:
+    if let Some(usage) = state.last_api_usage:
+        let base = usage.prompt_tokens + usage.completion_tokens
+        let incremental = state.post_usage_appended_chars / CHARS_PER_TOKEN_ESTIMATE
+        base + incremental
+    else:
+        state.estimate_context_chars / CHARS_PER_TOKEN_ESTIMATE
+
+fn usage_ratio(state: &ContextState) -> f64:
+    estimated_token_count(state) / state.context_budget_tokens
 ```
 
-### 4.2 配置项
+- **`last_api_usage`**：每次 LLM 响应结束后，从 `StreamEvent::Usage` 更新
+- **`post_usage_appended_chars`**：自最近 usage 后新增的字符数，用于增量估算
+- **compact 后**：`last_api_usage` 失效（上下文已变），清零回退到字符 fallback，等下次 API 响应刷新
+
+> **关于 `estimate_context_chars` 的度量单位**：Rust 的 `String::len()` 返回 UTF-8 字节数而非 Unicode 字符数。`CHARS_PER_TOKEN_ESTIMATE = 4` 对英文内容（1 byte ≈ 1 char）较为准确；对中文内容（3 bytes/char，约 1.5 token/char），4 bytes/token 的估算会偏保守（低估 token 数），可能导致压缩触发略晚。**API Usage 优先模式下此偏差被消除**，字符 fallback 仅在首轮和 compact 后短暂使用。
+
+### 4.2 Ratio 水位线
+
+`ratio = estimated_input_tokens / input_budget`，其中 `input_budget = context_window - max_output_tokens`。
+
+分母是输入 token 预算（已扣除输出预留），ratio 衡量的是输入空间的使用率，不会挤占输出空间。
+
+| ratio 档位 | cascade 最高触及层 | m | 动作 |
+|------------|-------------------|---|------|
+| `< 0.70` | — | — | 正常，无 cascade（Layer 0 仍每轮执行） |
+| `>= 0.70` | Layer 1 → 2 | 5 | 温和压缩，batch 小，摘要精 |
+| `>= 0.85` | Layer 1 → 2 | 3 | 中等压力 |
+| `>= 0.92` | Layer 1 → 2 | 2 | 高压，只留最近 2 轮 |
+| `>= 0.98` | Layer 1 → 2 | 1 | 极限压缩 + 阻止后续工具调用 |
+| `>= 1.0` | Layer 1 → 2 → 3 | — | 强制删除，**目标 ratio < 0.50** |
+
+> cascade 始终从 Layer 0 起逐层执行（Layer 0 → 1 → 2 → 3），每层完成后重新计算 ratio，降压成功即停。上表的"cascade 最高触及层"表示该 ratio 下 cascade 最高会升级到的层级及其 m 值参数。
+
+Layer 0 在**每轮 LLM 回复完毕后立即检查**，不受 ratio 控制。Layer 1/2/3 作为 cascade 的一环，由 ratio 或 buffer 驱动——只有 Layer 0 不够降压时才逐层升级。
+
+**触发总表**（含 Layer 0/1）：
+
+| 触发条件 | 层级 | m | 动作 |
+|---------|------|---|------|
+| 单条 tool_result >= 30K chars | Layer 0 | — | 落盘 + preview 占位符 |
+| 单个 user_turn 的 tool_result 合计 >= 150K chars | Layer 0 | — | 挑最大的 fresh 结果逐个落盘，直到合计回到预算内 |
+| Layer 0 后 ratio 仍 >= 0.70（或剩余 < buffer），旧 turn(0..N-m) 中 tool_result > 20K chars | Layer 1 | 同 Layer 2 | 占位符替换（不落盘），m 由当前 ratio 档位决定 |
+
+### 4.3 Buffer 安全网
+
+`autocompact_buffer_tokens`（默认 13000）和 `warning_buffer_tokens`（默认 20000）提供基于**绝对剩余 token** 的辅助触发线，映射到等价的 ratio 档位行为：
+
+| Buffer 条件 | 等价 ratio（128K 窗口） | 动作 |
+|------------|----------------------|------|
+| 剩余 < `warning_buffer`(20K) | ≈ 0.82 | Layer 2，m=3 |
+| 剩余 < `autocompact_buffer`(13K) | ≈ 0.88 | Layer 2，m=2 |
+
+对大窗口模型（128K+），ratio 几乎总是先触发；buffer 的价值在**小窗口模型**。但 13K/20K 的绝对值对小窗口不合理（32K 窗口下几乎无法使用），因此需要 cap：**实际 buffer = min(配置值, input_budget × 0.3)**（其中 `input_budget = context_window - max_output_tokens`），确保至少保留 70% 的 input budget 给正常对话。
+
+两套机制互补：**ratio 按比例适配所有窗口大小，buffer 为「剩余空间不足以完成一轮完整工具调用」提供绝对值保底**。
+
+### 4.4 配置项
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `context_window` | `usize` | `400_000` | 默认对齐 **GPT-5.2**（400K）；其他模型请在配置中覆盖 |
 | `max_output_tokens` | `usize` | `128_000` | 默认对齐 **GPT-5.2** 单轮最大输出；对齐 API 的 `max_tokens` |
-| `compaction_turns` | `usize` | `10` | 每批 Compaction 摘要处理的最大 user turns 数 |
-| `keep_recent_turns` | `usize` | `3` | 保护区大小，最近 N 个 user turns 不参与压缩 |
-| `single_tool_result_max_chars` | `usize` | `400_000` | 单条 tool result 最大字符数，超出截断（Layer 0），与 openclaw 硬上限量级一致 |
+| `layer0_single_result_max_chars` | `usize` | `30_000` | Layer 0 触发条件 A：单条 tool_result 超过此值则落盘 + preview 占位符 |
+| `layer0_turn_aggregate_max_chars` | `usize` | `150_000` | Layer 0 触发条件 B：单个 user_turn 内所有 tool_result 合计超过此值则逐个落盘最大的 |
+| `autocompact_buffer_tokens` | `usize` | `13_000` | 剩余 token 低于此值时触发 Layer 2（m=2），主要保护小窗口模型 |
+| `warning_buffer_tokens` | `usize` | `20_000` | 剩余 token 低于此值时触发 Layer 2（m=3），与 autocompact_buffer 分级 |
 | `compaction_model` | `String` | `"gpt-5.2"` | Compaction 摘要专用模型 ID（与主对话 `model` 可相同或不同） |
 
 > 配置位于 `pi.config.toml` 的 `[context]` 节，或通过 `PrimitiveConfig` 结构体注入。
 
-### 4.3 典型值
+### 4.5 典型值
 
-| 模型 | context_window | max_output_tokens | prompt_tokens_max | contextBudgetChars |
-|------|---------------|-------------------|-------------------|--------------------|
-| GPT-4o | 128,000 | 16,384 | 111,616 | 334,848 |
-| GPT-5.2 | 400,000 | 128,000 | 272,000 | 816,000 |
-| Claude 3.5 Sonnet | 200,000 | 8,192 | 191,808 | 575,424 |
-| DeepSeek-V3 | 64,000 | 8,192 | 55,808 | 167,424 |
+| 模型 | context_window | max_output_tokens | input_budget | ratio=0.70 时已用 |
+|------|---------------|-------------------|-------------|-----------------|
+| GPT-4o | 128,000 | 16,384 | 111,616 | 78,131 |
+| GPT-5.2 | 400,000 | 128,000 | 272,000 | 190,400 |
+| Claude 3.5 Sonnet | 200,000 | 8,192 | 191,808 | 134,266 |
+| DeepSeek-V3 | 64,000 | 8,192 | 55,808 | 39,066 |
+
+### 4.6 与旧方案对比
+
+旧方案（TASK-17）使用 `contextBudgetChars = (context_window - max_output_tokens) × 4 × 0.75`，额外乘 0.75 安全系数用于补偿字符→token 估算误差。新方案有了精确 token 计数后，0.75 系数不再需要——ratio 水位线本身提供分级保护，且 `is_over_budget()` 改为基于 token 维度判断。
 
 ---
 
@@ -259,36 +300,57 @@ fn init_context_state(session: &Session, config: &ContextConfig) -> ContextState
     # 优先取当天所有 turns
     today_turns = turns.filter(|t| t.date == today())
 
-    # 不足 10 则向前补全
+    # 不足 10 则向前补全（确保短会话或跨午夜场景仍有足够上下文）
     if today_turns.len() < 10:
         extra = turns.before(today_turns.first())
                      .rev()
                      .take(10 - today_turns.len())
         today_turns = extra.rev() + today_turns
 
+    let input_budget = config.context_window - config.max_output_tokens
     estimate = sum(today_turns.map(|t| estimate_turn_chars(t)))
 
     return ContextState {
         user_turns_list: today_turns,
         estimate_context_chars: estimate,
-        context_budget_chars: compute_budget(config),
+        context_budget_chars: input_budget * CHARS_PER_TOKEN_ESTIMATE,  # fallback 用
+        context_budget_tokens: input_budget,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     }
 ```
 
+> **边界情况说明**：
+> - **跨午夜会话**：用户 23:55 开始对话，重启后 `today()` 返回新日期。当天 turns 为空时，向前补全最近 10 条覆盖前一天的对话，不影响正确性。
+> - **长期不活跃**：transcript 最后活跃在数天前，补全的 10 条为旧消息。上下文可能已不相关，但不影响正确性——后续新对话产生后旧 turns 会自然进入 compactable zone 被压缩。
+> - 此策略优先保证**不丢失近期上下文**；上下文"相关性"由 Layer 2 摘要在运行过程中自然优化。
+
 ### 5.2 动态更新
 
-每次 reasoning loop 中追加新 turn（包括 assistant、tool 消息），同步更新 `estimate_context_chars`：
+每次 reasoning loop 中追加新 turn（包括 assistant、tool 消息），同步更新估算：
 
 ```
 fn on_message_appended(state: &mut ContextState, msg: &Message):
     state.estimate_context_chars += msg.content.len()
+    state.post_usage_appended_chars += msg.content.len()
 
 fn on_new_user_turn(state: &mut ContextState, turn: UserTurn):
+    let chars = estimate_turn_chars(&turn)
+    state.estimate_context_chars += chars
+    state.post_usage_appended_chars += chars
     state.user_turns_list.push(turn)
-    state.estimate_context_chars += estimate_turn_chars(&turn)
+
+fn update_api_usage(state: &mut ContextState, prompt_tokens: u32, completion_tokens: u32):
+    state.last_api_usage = Some(ApiUsage { prompt_tokens, completion_tokens })
+    state.post_usage_appended_chars = 0
+
+fn invalidate_api_usage(state: &mut ContextState):
+    state.last_api_usage = None
+    state.post_usage_appended_chars = 0
 ```
 
-无需每次从 transcript 文件全量扫描。
+> `invalidate_api_usage` 在 compact 后调用——上下文已变，旧 usage 不再有效。
 
 ### 5.3 system prompt 纳入估算
 
@@ -298,22 +360,43 @@ fn on_new_user_turn(state: &mut ContextState, turn: UserTurn):
 estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t)))
 ```
 
-> 若 system prompt 较短（< 5K chars），25% 安全水位已足够覆盖。但为准确性，仍建议显式计入。
+> 若 system prompt 较短（< 5K chars），水位线已足够覆盖。但为准确性，仍建议显式计入。
 
-### 5.4 Session 重载时处理已有 Compaction entry
+### 5.4 Session 重载与 Compact Boundary
 
-从 transcript JSONL 加载 user turns 时，需识别 `SessionEntry::Compaction` entry：
+从 transcript JSONL 加载 user turns 时，需识别 `SessionEntry::Compaction` entry 并处理 boundary 语义：
 
 1. 遇到 `Compaction` entry → 作为 `SummaryTurn` 加入 `userTurnsList`，**不展开**为原始消息
 2. 已被 Compaction 覆盖的原始 turns **不重复加载**（Compaction entry 中记录了覆盖的 turn range）
-3. 后续 Layer 2 的 `find_last_summary` 可直接定位已有 summary，进入 UPDATE 模式
+3. 后续 Layer 2 可直接定位已有 summary，进入 UPDATE 模式
+
+**Compact Boundary 处理**：
+
+`TranscriptEntry::Compaction` 中 `is_boundary: bool` 标记。`init_context_state` 遇到 `is_boundary=true` 的 Compaction entry 时，丢弃其前已暂存的所有 entry，使重建结果与运行时一致：
+
+```
+Transcript 文件（JSONL，按时间追加）
+═════════════════════════════════════════════
+
+  entry 1~8:  原始消息（已被摘要覆盖）
+  entry 9:    Compaction { summary: "...", is_boundary: true }
+  entry 10~11: 新消息
+
+init_context_state 处理流程：
+  读到 entry 1~8 → 暂存
+  读到 entry 9 (is_boundary=true) → 丢弃暂存的 1~8，保留 summary
+  读到 entry 10~11 → 构建 UserTurn
+
+  结果: [SummaryTurn(entry 9), UserTurn(entry 10~11)]
+  → 与运行时 drain 后的内存状态一致，无重复
+```
 
 **被压缩的 user turn 是否仍留在 transcript JSONL 中？**
 
 采用 **仅追加（append-only）** 约定，与 pi 系 transcript 一致：
 
 - **保留**：原先写入的 `Message` 行（user / assistant / tool）**不删除、不改写**，仍在 `.jsonl` 中，便于审计、回放与调试。
-- **追加**：Compaction 发生时 **再追加一行** `type: compaction` 的 `CompactionEntry`（含摘要正文与覆盖范围元数据，字段以 [session-storage.md](session-storage.md) 为准）。
+- **追加**：Compaction 发生时 **再追加一行** `type: compaction` 的 `CompactionEntry`（含摘要正文、覆盖范围元数据、`is_boundary` 标记，字段以 [session-storage.md](session-storage.md) 为准）。
 - **构建 LLM 上下文**：`userTurnsList` / `build_context_messages` 在内存中按 Compaction 元数据 **折叠**——已摘要区间只表现为一条 summary，**不把同一区间的原始 Message 再次拼进 prompt**（避免双倍 token）。
 
 若未来需要「物理瘦身」大文件，可作为独立运维能力（压缩归档副本），**不**作为默认行为。
@@ -361,7 +444,7 @@ estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t))
   │                                                                         │
   │  transcript JSONL ──[BufReader 逐行]──► 按 user turn 分组               │
   │       │                                      │                          │
-  │       │  识别 Compaction entry                │ 折叠已摘要区间            │
+  │       │  识别 Compaction entry + boundary     │ 折叠已摘要区间            │
   │       ▼                                      ▼                          │
   │  userTurnsList: [SummaryTurn?, UserTurn, UserTurn, ...]                  │
   │  estimateContextChars = system_prompt.len() + Σ turn_chars              │
@@ -375,8 +458,6 @@ estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t))
   │       + 注入 system prompt                                              │
   │       + 追加本轮 AgentMessage::User                                     │
   │       ──► initial_messages: Vec<AgentMessage>                           │
-  │                                                                         │
-  │  ◆ 此处触发 Layer 1~3 预算检查（若 estimateContextChars > budget）       │
   │                                                                         │
   │  AgentLoop::run(initial_messages)                                       │
   └─────────────────────────────────────────────────────────────────────────┘
@@ -394,9 +475,13 @@ estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t))
   │       │  LLM 返回 assistant + tool_calls                                │
   │       │  工具执行 → tool result                                         │
   │       ▼                                                                 │
-  │  ◆ Layer 0: truncate_tool_result_if_needed(result)                      │
   │  messages.push(AgentMessage::ToolResult { .. })                         │
   │  estimateContextChars += result.len()       ← 实时更新                  │
+  │  update_api_usage(usage)                    ← 从 StreamEvent 更新       │
+  │                                                                         │
+  │  ◆ 本轮 LLM 回复完毕后：                                               │
+  │    → Layer 0 检查（落盘超大 tool_result）                                │
+  │    → 计算 ratio → 若需 cascade 则 Layer 1 → 2 → 3                      │
   │                                                                         │
   │  注意：userTurnsList 此时【不更新】                                      │
   │        当前 turn 正在进行中，尚未完成                                    │
@@ -419,7 +504,7 @@ estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t))
 
 - **`userTurnsList`**：管理**已完成的历史 turns**。只在 ② 进入前读取（flatten）、④ 结束后追加。
 - **`messages`**：reasoning loop 的**实时工作集**，包含历史 + 当前 turn 正在产生的新消息。
-- **`estimateContextChars`**：**两处都更新**——② 初始化时计算历史总量，③ 每次 push 时实时累加。这样 Layer 0~3 在 reasoning loop 内也能正确触发。
+- **估算更新**：`estimateContextChars` 在 ③ 每次 push 时实时累加，`last_api_usage` 在每次 LLM 响应后刷新。cascade 在 ③ 内也能正确触发。
 
 即：**`userTurnsList` 是持久化 transcript 与 `AgentMessage` 之间的中间层**——负责分组、Compaction 折叠与估算维护；最终转为 `AgentMessage` 后走已有的 `convert_to_llm_format` 链路，**不改变** reasoning loop 内部已有的消息流转方式。
 
@@ -427,118 +512,229 @@ estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t))
 
 ## 6. 防护算法（Layer 0~3）
 
-### 6.1 触发点
+### 6.1 Layer 0：工具结果落盘（入口防线）
 
-在 `build_context_messages`（向 LLM 发请求前）调用，以及 reasoning loop 内每轮工具执行后更新估算。
+在 reasoning loop 中，每轮 LLM 回复完毕后，检查当前 turn 的 tool_result。**先让 LLM 看到完整内容，再收纳落盘**——LLM 在本轮已正常分析和使用了完整结果，落盘是为了未来轮次的上下文不膨胀。
 
-与 Agent Loop 第二层（容错重试循环）的 ContextOverflow 路径配合：当 LLM 返回 ContextOverflow 错误时，也进入本模块的 Layer 2。
+**触发条件 A**：单条 tool_result >= `layer0_single_result_max_chars`（默认 **30K chars**，~7.5K token）
 
-### 6.2 Layer 0：新 tool result 单条截断（入口防线）
+**触发条件 B**：单个 user_turn 内所有 tool_result 合计 >= `layer0_turn_aggregate_max_chars`（默认 **150K chars**，~37.5K token）→ 挑最大的 fresh 结果，逐个落盘并换成预览，直到合计回到预算内
 
-在 reasoning loop 中，每次工具执行返回结果后、**写入 messages 前**，检查单条 tool result 大小。超过上限则就地截断，防止单条巨型结果直接撑爆 context。
+> **fresh 定义**：本轮 reasoning loop 迭代内产生且尚未被 Layer 0 落盘处理的 tool_result。已替换为 preview 占位符的不再参与。
 
-```
-const SINGLE_TOOL_RESULT_MAX_CHARS: usize = 400_000;  // 默认 400K chars，与 openclaw HARD_MAX_TOOL_RESULT_CHARS 同量级
-const TRUNCATION_SUFFIX: &str = "\n\n[truncated: result exceeded size limit, showing first portion]";
+> **并发工具执行时序**：若 LLM 一次返回多个 tool_calls 并行执行，Layer 0 在**全部并行工具完成后**统一检查触发条件 A/B，确保合计计算覆盖所有结果。
 
-fn truncate_tool_result_if_needed(content: &mut String):
-    if content.len() <= SINGLE_TOOL_RESULT_MAX_CHARS:
-        return
-
-    # 在 70% 处之后找换行，避免截断到 JSON/代码中间
-    let cut_zone_start = SINGLE_TOOL_RESULT_MAX_CHARS * 70 / 100
-    let cut_pos = content[cut_zone_start..SINGLE_TOOL_RESULT_MAX_CHARS]
-                    .rfind('\n')
-                    .map(|i| cut_zone_start + i)
-                    .unwrap_or(SINGLE_TOOL_RESULT_MAX_CHARS)
-
-    content.truncate(cut_pos)
-    content.push_str(TRUNCATION_SUFFIX)
-```
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `single_tool_result_max_chars` | `usize` | `400_000` | 单条 tool result 最大字符数，超出截断 |
-
-> 参考 openclaw `SINGLE_TOOL_RESULT_CONTEXT_SHARE=0.5`（动态语境下单条占比）与 `HARD_MAX_TOOL_RESULT_CHARS=400,000`。本方案默认上限与后者对齐，仍可通过配置调低。
-
-### 6.3 Layer 1：占位符替换
-
-零 LLM 开销。仅对 compactable zone 内的 `role=tool` 消息，**从最旧到最新**逐条替换正文为常量 PLACEHOLDER，减够即停。
+**落盘动作**：
 
 ```
-const KEEP_RECENT_TURNS: usize = 3;
-const PLACEHOLDER: &str = "[compacted: tool output removed to free context]";
+fn persist_tool_result(result: &ToolResult, work_dir: &Path) -> String:
+    let path = format!("{}/agents/{}/tool-results/{}.txt",
+                       work_dir, session_id, result.tool_call_id)
+    fs::write(&path, &result.content)
 
-fn compact_tool_results(state: &mut ContextState) -> usize:
-    let compactable_end = state.user_turns_list.len().saturating_sub(KEEP_RECENT_TURNS)
-    let chars_needed = state.estimate_context_chars - state.context_budget_chars
+    let preview = &result.content[..min(500, result.content.len())]
+    format!("[Tool result persisted: {} (来源: {}(\"{}\"), {})]\\nPreview: {}...",
+            path, result.tool_name, result.arg_summary,
+            human_readable_size(result.content.len()), preview)
+```
+
+**留 preview 的理由**：仅靠路径和工具名，LLM 在未来轮次无法判断内容是否与当前任务相关（尤其是 `search`/`shell` 等输出不可预知的工具）。500 chars 的 preview 成本极低（~125 token），但能帮助 LLM 决定是否需要按需读回，避免盲目忽略或盲目全量读取。
+
+**落盘时机与流程**：
+
+```
+                     当前轮（第 N 轮）
+  ┌──────────────────────────────────────────────────────┐
+  │  1. Agent 执行工具（如 read_file）                    │
+  │     → 得到 tool_result（可能超过 30K 字符）            │
+  │                                                      │
+  │  2. tool_result 原样拼入 messages，发送给 LLM         │
+  │     → LLM 看到完整内容，正常分析和回复 ✓              │
+  │                                                      │
+  │  3. 本轮 LLM 回复完毕后，检查该 tool_result：         │
+  │     → 超过阈值？写入磁盘，将上下文中的 tool_result    │
+  │       替换为 preview 占位符（路径 + 前 500 chars）    │
+  └──────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                     未来轮次（第 N+1, N+2, ...）
+  ┌──────────────────────────────────────────────────────┐
+  │  组装上下文时，第 N 轮的 tool_result 已是短占位符     │
+  │  → 不膨胀，正常构建 messages ✓                       │
+  │                                                      │
+  │  如果 LLM 需要再看原始内容：                         │
+  │  → 按行范围读取（read_file + offset/limit），        │
+  │    不要全量读，避免再次产生超大 tool_result            │
+  └──────────────────────────────────────────────────────┘
+```
+
+### 6.2 Layer 1：旧 turn 批量占位符替换（不落盘）
+
+**触发条件**：cascade 启动（ratio >= 0.70 或剩余 < buffer）且 Layer 0 不够降压时，对 turn 0..(N-m) 中 tool_result > **20K chars** 的做替换。m 由当前 ratio 档位决定。
+
+**不会每轮独立触发**——ratio 低时旧 tool_result 保持完整，LLM 后续仍可引用。
+
+```
+const LAYER1_TOOL_RESULT_THRESHOLD: usize = 20_000;
+const LAYER1_PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
+
+fn compact_old_tool_results(state: &mut ContextState, m: usize) -> usize:
+    let compactable_end = state.user_turns_list.len().saturating_sub(m)
     let mut reduced = 0
 
     for turn in state.user_turns_list[..compactable_end]:
         for msg in turn.messages where msg.role == Tool:
-            let before = msg.content.len()
-            if before <= PLACEHOLDER.len():
-                continue
-            msg.content = PLACEHOLDER
-            reduced += before - PLACEHOLDER.len()
-            state.estimate_context_chars -= (before - PLACEHOLDER.len())
-            if reduced >= chars_needed:
-                return reduced
+            if msg.content.len() > LAYER1_TOOL_RESULT_THRESHOLD:
+                let before = msg.content.len()
+                msg.content = LAYER1_PLACEHOLDER
+                reduced += before - LAYER1_PLACEHOLDER.len()
+                state.estimate_context_chars -= (before - LAYER1_PLACEHOLDER.len())
     return reduced
 ```
 
-### 6.4 Layer 2：循环 Compaction 摘要
+**为什么不落盘**：Layer 0 已把超大结果落盘保全；Layer 1 处理的是旧 turn 中「不算超大但仍占空间」的 tool_result，这些 turn 即将被 Layer 2 摘要覆盖，为每个都写磁盘的 I/O 和管理成本不值当。
 
-Layer 1 不够时触发。对 compactable zone 内最旧的未压缩 turns，每批 ≤ `compaction_turns` 条，调用 LLM 生成一条结构化摘要消息替换整批。循环执行直到回预算或 compactable zone 耗尽。
+**为什么不每轮无差别清理**：ratio 充裕时没必要丢掉旧 tool_result，且会使 m 保护变得无意义（保护了 turn 不被摘要，却偷偷换掉了其中的 tool_result）。
+
+### 6.3 Layer 2：LLM 摘要压缩
+
+Layer 1 不够时触发。按当前 ratio 对应的 m 值，一次性将 turn 0..(N-m) 提交给 LLM 生成一条 summary 替换。
 
 ```
-fn run_compaction_loop(state: &mut ContextState, llm: &LlmProvider):
-    let compactable_end = state.user_turns_list.len().saturating_sub(KEEP_RECENT_TURNS)
-    let mut cursor = 0
+fn run_compaction(state: &mut ContextState, llm: &LlmProvider, m: usize):
+    if state.compaction_consecutive_failures >= 3:
+        # Circuit Breaker 已触发，跳过 Layer 2
+        return
 
-    while state.estimate_context_chars > state.context_budget_chars
-       && cursor < compactable_end:
+    let compactable_end = state.user_turns_list.len().saturating_sub(m)
+    if compactable_end == 0:
+        return
 
-        let batch_end = min(cursor + COMPACTION_TURNS, compactable_end)
-        let batch = state.user_turns_list[cursor..batch_end]
+    let batch = state.user_turns_list[..compactable_end]
+    let previous_summary = find_last_summary(batch)
 
-        let previous_summary = find_last_summary(state.user_turns_list[..cursor])
-        let summary_text = llm.generate_summary(batch, previous_summary)
+    # (actual_start, actual_end) 跟踪实际被摘要覆盖的范围
+    # 正常情况 = (0, compactable_end)；PTL 重试时取较新半段
+    let (summary_text, actual_start, actual_end) =
+        match llm.generate_summary(batch, previous_summary):
+            Ok(text) => (text, 0, compactable_end)
+            Err(e) if is_ptl_error(&e) =>
+                # PTL 重试：取较新半段 [mid..compactable_end)，保留近期上下文
+                retry_with_half_range(state, llm, compactable_end)?
+            Err(e) =>
+                state.compaction_consecutive_failures += 1
+                return
 
-        let batch_chars = sum(batch.map(|t| estimate_turn_chars(t)))
-        let summary_chars = summary_text.len()
+    let covered = state.user_turns_list[actual_start..actual_end]
+    let batch_chars = sum(covered.map(|t| estimate_turn_chars(t)))
+    let summary_chars = summary_text.len()
 
-        # 替换：移除原 batch，插入一条 summary 消息
-        state.user_turns_list.splice(cursor..batch_end, [SummaryTurn(summary_text)])
-        state.estimate_context_chars -= batch_chars
-        state.estimate_context_chars += summary_chars
+    # 在 splice 前提取覆盖范围的 entry id（splice 后原数据已被替换）
+    let first_id = covered.first_entry_id()
+    let last_id = covered.last_entry_id()
 
-        # 更新索引（splice 后 compactable_end 缩小了）
-        compactable_end = state.user_turns_list.len().saturating_sub(KEEP_RECENT_TURNS)
-        cursor += 1  # 跳过刚插入的 summary
+    # splice 范围必须与实际摘要覆盖范围一致
+    state.user_turns_list.splice(actual_start..actual_end, [SummaryTurn(summary_text)])
+    state.estimate_context_chars -= batch_chars
+    state.estimate_context_chars += summary_chars
+    state.compaction_consecutive_failures = 0
 
-    # 写入 Transcript：追加 Compaction entry（type=compaction）
-    session.append_entry(CompactionEntry { summary: summary_text, ... })
+    invalidate_api_usage(state)
+
+    # 字段对齐 CompactionEntry 结构体（session-storage.md），新增 is_boundary
+    session.append_entry(CompactionEntry {
+        id: generate_entry_id(),
+        parent_id: last_id.clone(),
+        timestamp: Utc::now().to_rfc3339(),
+        summary: Some(summary_text),
+        covered_start_id: first_id,
+        covered_end_id: last_id,
+        covered_count: Some(actual_end - actual_start),
+        is_boundary: actual_start == 0,  # 仅从头开始压缩时标记 boundary（截断前序）
+    })
 ```
 
-### 6.5 Layer 3：强制删除（极端兜底）
+**不再使用循环 batch 模式**：旧设计中 `run_compaction_loop` 按 batch 分组逐步压缩；新设计直接按 ratio 对应的 m 值确定压缩范围，一次调用完成。
 
-Layer 2 耗尽 compactable zone 后仍超预算——说明 protected zone 本身已超大。从 `user_turns_list[0]`（最旧 summary/turn）起逐个删除，直到估算回到预算内。几乎不可达，仅作防御性保底。
+### 6.4 Layer 3：强制删除（极端兜底）
 
-### 6.6 Compaction 失败处理
+Layer 2 被 Circuit Breaker 跳过后仍超预算，或 ratio >= 1.0。从 `user_turns_list[0]`（最旧 summary/turn）起逐个删除，**直到 ratio < 0.50**。
 
-Layer 2 调用 LLM 生成摘要可能因网络错误、速率限制等失败：
+```
+fn force_delete_oldest(state: &mut ContextState):
+    while state.usage_ratio() >= 0.50 && !state.user_turns_list.is_empty():
+        let oldest = state.user_turns_list.remove(0)
+        state.estimate_context_chars -= estimate_turn_chars(&oldest)
+    invalidate_api_usage(state)
+```
+
+**为什么目标是 0.50 而不是刚好 < 1.0**：若只降到 < 1.0，下一条消息或工具调用就可能再次触发 Layer 3，形成频繁振荡。删到 0.50 一次性创造充足缓冲，远低于 Layer 2 首次触发线（0.70），确保 Layer 3 触发后有足够的对话增长空间。
+
+**设计定位**：几乎不可达的安全网。正常运行中，0.70 的 Layer 2 压缩通常已足够将 ratio 降回 0.1~0.3；高档位（0.85/0.92/0.98）在实际运行中极少触发。Layer 3 是最后兜底。
+
+> **Layer 3 不受 m 值保护区约束**：当所有 turn 都在 protected zone 内（`compactable_end = 0`）时，Layer 1/2 无法工作。Layer 3 作为最后兜底，**必须能删除任何 turn**（包括 protected zone 内的），否则极端场景下无法降压。
+
+### 6.5 Circuit Breaker
+
+Layer 2 依赖外部 LLM 调用，可能因网络错误、速率限制等反复失败。
+
+```
+fn check_circuit_breaker(state: &ContextState) -> bool:
+    state.compaction_consecutive_failures >= 3
+```
+
+- `compaction_consecutive_failures` 在 Layer 2 LLM 调用失败时递增，成功时清零
+- 连续失败 >= 3 次时跳过 Layer 2，直接 fallback 到 Layer 3
+- 通过 EventBus 发出 `CompactionCircuitBreakerTriggered` 事件
+
+### 6.6 PTL 重试
+
+Layer 2 的 LLM 摘要请求如果因上下文过长（Prompt Too Long）失败：
+
+```
+fn retry_with_half_range(state, llm, compactable_end)
+    -> Result<(String, usize, usize)>:
+    # 取较新半段：优先保留近期上下文的摘要，旧半段留给后续 cascade 或 Layer 3
+    let mut range_start = compactable_end / 2
+    for attempt in 0..2:
+        let sub_batch = state.user_turns_list[range_start..compactable_end]
+        let prev = find_last_summary(sub_batch)
+        match llm.generate_summary(sub_batch, prev):
+            Ok(text) => return Ok((text, range_start, compactable_end))
+            Err(e) if is_ptl_error(&e) =>
+                # 仍然太长，再从中点往后取（丢弃更多旧 turns）
+                range_start = range_start + (compactable_end - range_start) / 2
+            Err(e) => return Err(e)
+    Err(PtlRetryExhausted)
+```
+
+- 错误含 context/token 关键词（PTL）→ **取较新半段** `[mid..compactable_end)` 重试，优先保留近期上下文的摘要
+- 最多重试 2 次，每次 `range_start` 向后推移（丢弃更多旧 turns），范围持续缩小
+- 未被摘要覆盖的旧半段 `[0..range_start)` 留给后续 cascade 或 Layer 3 处理
+- 仍失败则跳过 Layer 2，由 Circuit Breaker 计数，fallback 到 Layer 3
+
+### 6.7 防振荡设计
+
+落盘后如果 LLM 再次全量读取同一文件，新 tool_result 仍可能超阈值、再次落盘，形成「读 → 落盘 → 再读 → 再落盘」的无效循环。
+
+防范策略：
+
+1. **分页读取引导**：system prompt 中明确告知 LLM「已落盘的工具结果可通过 `read_file` 的 offset/limit 参数按需读取指定行范围，无需全量读取」
+2. **占位符自包含**：preview（前 500 chars）+ 来源工具名 + 参数 + 大小，让 LLM 有足够信息决定是否需要读回、读哪部分
+3. **兜底保障**：即使 LLM 仍然全量读取，Layer 0 会再次正常落盘。流程上不会死循环（每轮仍正常推进），只是浪费了一次全量读取的 token。这属于 LLM 行为问题，通过优化 system prompt 引导来改善，不需要在代码层做硬拦截
+
+### 6.8 Compaction 失败处理
 
 | 情况 | 处理 |
 |------|------|
-| LLM 调用超时/网络错误 | 重试 1 次；仍失败则跳过本批次，尝试下一批；最终降级到 Layer 3 |
+| LLM 调用超时/网络错误 | Circuit Breaker 递增；连续 3 次后跳过 Layer 2，降级到 Layer 3 |
 | LLM 返回空摘要 | 视为失败，同上 |
-| 摘要比原文还大（极端） | 丢弃摘要，保留原文，尝试下一批 |
+| 摘要比原文还大（极端） | 丢弃摘要，保留原文，Circuit Breaker 递增 |
+| PTL 错误 | 范围减半重试（最多 2 次），仍失败则 Circuit Breaker 递增 |
 
-> 失败时发布 `compaction_error` 事件（`{ batch_index, error }`），由日志记录。
+> 失败时发布 `compaction_error` 事件（`{ error, consecutive_failures }`），由日志记录。
 
-### 6.7 与 `max_tool_rounds` 的关系
+### 6.9 与 `max_tool_rounds` 的关系
 
 > **TODO**：`max_tool_rounds` 硬限暂时**移除**（不再限制 reasoning loop 工具轮数）。防死循环由上下文预算 + 后续独立的 tool-loop-detection 方案负责。等 tool-loop-detection 方案落地后再评估是否需要恢复硬限。
 
@@ -612,23 +808,55 @@ Update the existing structured summary with new information. RULES:
 - UPDATE "Next Steps" based on what was accomplished
 - PRESERVE exact file paths, function names, and error messages
 - If something is no longer relevant, you may remove it
+
+Use this EXACT format (same as the original summary):
+
+## Goal
+[Updated goal]
+
+## Constraints & Preferences
+- [Updated constraints]
+
+## Progress
+### Done
+- [x] [Completed tasks]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Updated ordered list]
+
+## Critical Context
+- [Updated references]
 ```
 
 ### 7.4 摘要消息格式
 
-摘要以 `Compaction` entry 写入 transcript JSONL（类型已在 [session-storage.md](session-storage.md) 的 `SessionEntry::Compaction` 定义）。在内存中作为一条 `role=user` 消息（content 为摘要文本）放入 `user_turns_list`，替换被压缩的原始 turns。
+摘要以 `Compaction` entry 写入 transcript JSONL（类型已在 [session-storage.md](session-storage.md) 的 `SessionEntry::Compaction` 定义，新增 `is_boundary` 字段）。在内存中作为一条 `role=user` 消息（content 为摘要文本）放入 `user_turns_list`，替换被压缩的原始 turns。
 
 ---
 
 ## 8. 超出本方案范围（Out of Scope）
 
-以下机制在研究报告中分析过，但不纳入本方案首期实现：
+以下机制在研究报告中分析过，但不纳入本方案实现：
 
 | 机制 | 说明 | 后续计划 |
 |------|------|---------|
-| **工具循环检测（tool-loop-detection）** | openclaw 的滑窗重复检测 + steering 注入 + 熔断。当前 `max_tool_rounds` 已作为简单兜底。 | 可作为独立方案在 agent-loop 中实现 |
-| **RAG 检索增强** | 旧消息向量化 + 按相关性检索注入。效果好但需向量库依赖。 | 长期方向 |
-| **System Prompt 自动注入** | 从对话中自动提取约束/偏好到 system prompt（类似 Cursor rules）。 | 可与 Compaction 互补，后续独立方案 |
+| **Snip（中间段删除）** | CC Level 1，删除中间历史保留头尾，零 API 成本。当前 Layer 2 可覆盖此场景。 | 若 Layer 2 触发过于频繁/费用高，再评估插入 Layer 1~2 之间 |
+| **Prompt Cache 管理** | CC 的 `cache_control` / `cache_reference` / `cache_edits` 三原语为 Anthropic API 专属，OpenAI 自动缓存无需客户端配置 | 不适用 |
+| **Cached Microcompact** | 依赖 `cache_edits` 服务端打洞能力 | 不适用 |
+| **Session Stability Latching** | 锁定运行时状态防 cache bust，Pi 无 Prompt Cache | 不适用 |
+| **Context Collapse** | CC 实验性 commit-log 视图投影，通用性差 | 不纳入 |
+| **工具循环检测（tool-loop-detection）** | openclaw 的滑窗重复检测 + steering 注入 + 熔断 | 独立方案在 agent-loop 中实现 |
+| **RAG 检索增强** | 旧消息向量化 + 按相关性检索注入 | 长期方向 |
+| **System Prompt 自动注入** | 从对话中自动提取约束/偏好到 system prompt | 可与 Compaction 互补，后续独立方案 |
 
 ---
 
@@ -636,10 +864,13 @@ Update the existing structured summary with new information. RULES:
 
 | 文件 | 改动内容 |
 |------|---------|
-| [`src/core/session/manager.rs`](../../../src/core/session/manager.rs) | `build_context_messages` 改为 token-aware（基于 `estimateContextChars` 而非 `context_cap` 条数）；初始化时构建 `userTurnsList` + `estimateContextChars`；每次追加消息同步更新估算 |
-| [`src/core/agent_loop.rs`](../../../src/core/agent_loop.rs) | reasoning loop 每轮工具执行后：① 调用 `truncate_tool_result_if_needed`（Layer 0）② 调用 `on_message_appended` 更新估算；`build_context_messages` 前触发 Layer 1~3 防护检查 |
-| [`src/infra/config.rs`](../../../src/infra/config.rs) | 新增 `[context]` 配置节：`context_window`、`max_output_tokens`、`compaction_turns`（默认 10）、`keep_recent_turns`（默认 3）、`single_tool_result_max_chars`（默认 400K）、`compaction_model`（默认 `gpt-5.2`） |
-| `src/core/compaction.rs`（**新建**） | `truncate_tool_result_if_needed`（Layer 0）、`compact_tool_results`（Layer 1）、`run_compaction_loop`（Layer 2）、`generate_summary` / `update_summary`（LLM 摘要）、SUMMARIZATION_PROMPT / UPDATE_SUMMARIZATION_PROMPT 模板 |
+| [`src/core/session/manager.rs`](../../../src/core/session/manager.rs) | `ContextState` 增加 `context_budget_tokens`、`last_api_usage`、`post_usage_appended_chars`、`compaction_consecutive_failures` 字段；新增 `usage_ratio()`、`estimated_token_count()`、`update_api_usage()`、`invalidate_api_usage()` 方法；`init_context_state` 增加 compact boundary 处理 |
+| [`src/core/agent_loop.rs`](../../../src/core/agent_loop.rs) | reasoning loop 每轮 LLM 回复后：① 捕获 `StreamEvent::Usage` 更新 `last_api_usage` ② 调用 Layer 0（落盘） ③ 计算 ratio 触发 cascade（Layer 1 → 2 → 3）；ratio >= 0.98 时标记阻止新工具调用 |
+| [`src/infra/config.rs`](../../../src/infra/config.rs) | `[context]` 配置节新增 `layer0_single_result_max_chars`、`layer0_turn_aggregate_max_chars`、`autocompact_buffer_tokens`、`warning_buffer_tokens` |
+| [`src/core/compaction.rs`](../../../src/core/compaction.rs) | Layer 0 从截断改为落盘 + preview；Layer 1 改为 cascade 内触发（旧 turn > 20K 占位符替换，不落盘）；Layer 2 从循环 batch 改为按 m 值一次调用；Layer 3 目标 ratio < 0.50；新增 Circuit Breaker + PTL 重试；新增 cascade 流程编排 |
+| [`src/core/system_prompt.rs`](../../../src/core/system_prompt.rs) | 模块化改造（`SystemPromptSection` trait + 注册机制）；新增分页读取引导 section |
+| [`src/infra/events.rs`](../../../src/infra/events.rs) | 新增 `ContextMetricsUpdate`、`CompactionCircuitBreakerTriggered` 事件 |
+| `src/core/context_metrics.rs`（**新建**） | `ContextMetrics` 结构体：`input_tokens_used`、`context_utilization_ratio`、`compaction_count`、`compaction_tokens_freed`、`total_tool_result_bytes_persisted` |
 
 ---
 
@@ -647,18 +878,20 @@ Update the existing structured summary with new information. RULES:
 
 ### 10.1 Agent Loop（agent-loop.md §13.3）
 
-- **思考-行动循环（第三层）**：每轮工具执行后调用 `on_message_appended` 更新 `estimateContextChars`。
-- **容错重试循环（第二层）**：LLM 返回 ContextOverflow 错误时，发布 `auto_compaction_start` 事件，调用本模块 Layer 2（`run_compaction_loop`），完成后发布 `auto_compaction_end`。
-- **对话管理循环（第一层）**：每次 `build_context_messages` 前执行 Layer 1~3；Layer 0 在工具返回写入 messages 时执行。
+- **思考-行动循环（第三层）**：每轮 LLM 回复完毕后，捕获 `StreamEvent::Usage` 更新 token 计数，执行 Layer 0 检查，计算 ratio 触发 cascade。
+- **容错重试循环（第二层）**：LLM 返回 ContextOverflow 错误时，发布 `auto_compaction_start` 事件，直接触发 cascade 流程（从 Layer 0 起逐层执行）。
+- **工具调用阻止**：ratio >= 0.98 时标记 `block_tool_calls`，reasoning loop 跳过工具执行、返回文本提示用户。
 
 ### 10.2 会话存储（session-storage.md）
 
-- Compaction 摘要以 `SessionEntry::Compaction` entry 类型写入 transcript JSONL。
-- 初始化时从 transcript 流式读取 user turns（遵守「禁止全量加载」约定，使用 `BufReader` 逐行解析）。
+- Compaction 摘要以 `SessionEntry::Compaction` entry 类型写入 transcript JSONL，新增 `is_boundary: bool` 字段。
+- Tool result 落盘文件存储在 `{work_dir}/agents/{session_id}/tool-results/` 目录。
+- 初始化时从 transcript 流式读取 user turns（遵守「禁止全量加载」约定，使用 `BufReader` 逐行解析），识别 compact boundary。
 
 ### 10.3 配置管理（infrastructure-layer.md）
 
 - `[context]` 配置节由 `PrimitiveConfig` 加载，支持 `pi.config.toml` 覆盖。
+- 新增 `autocompact_buffer_tokens`、`warning_buffer_tokens` 配置项。
 - 不同模型可通过 `[model.<name>]` 节覆盖 `context_window` 和 `max_output_tokens`。
 
 ### 10.4 事件系统（events.md）
@@ -667,7 +900,9 @@ Update the existing structured summary with new information. RULES:
 
 | 事件 | 时机 | payload |
 |------|------|---------|
-| `auto_compaction_start` | Layer 2 开始前 | `{ reason: "context_overflow" \| "budget_exceeded" }` |
-| `auto_compaction_end` | Layer 2 完成后 | `{ summary_count, chars_before, chars_after }` |
-| `compaction_error` | Layer 2 单批次失败 | `{ batch_index, error }` |
-| `tool_result_truncated` | Layer 0 截断新 tool result | `{ tool_name, original_chars, truncated_chars }` |
+| `auto_compaction_start` | cascade 启动前 | `{ reason: "ratio_threshold" \| "buffer_threshold" \| "context_overflow", ratio, m }` |
+| `auto_compaction_end` | cascade 完成后 | `{ layers_executed, ratio_before, ratio_after }` |
+| `compaction_error` | Layer 2 单次失败 | `{ error, consecutive_failures }` |
+| `compaction_circuit_breaker_triggered` | 连续失败 >= 3 | `{ consecutive_failures }` |
+| `tool_result_persisted` | Layer 0 落盘 tool result | `{ tool_name, original_chars, persisted_path }` |
+| `context_metrics_update` | 每轮 LLM 回复后 | `{ ratio, input_tokens, compaction_count, tokens_freed }` |

@@ -75,6 +75,28 @@ pub struct EntryBase {
     pub parent_id: Option<String>,
     pub timestamp: String,
 }
+
+/// Compaction entry：Layer 2 LLM 摘要产物，替换一批已压缩的旧 turns。
+/// 详见 [上下文管理技术方案](context-management.md) §5.4 / §6.3。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionEntry {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_start_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_end_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_count: Option<usize>,
+    /// init_context_state 遇到 is_boundary=true 时，丢弃其前已暂存的所有 entry，
+    /// 使跨重启重建结果与运行时内存状态一致，防止已摘要的旧 turns 与 summary 重复加载。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_boundary: bool,
+}
 ```
 
 **会话路径与会话标识**

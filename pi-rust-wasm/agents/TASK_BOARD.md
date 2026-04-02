@@ -984,3 +984,90 @@
 - transcript JSONL 仅追加，原始消息不删除
 - `cargo clippy --all-targets -- -D warnings` 无新增 warning
 - 单测覆盖率 ≥ 80%
+
+---
+
+### TASK-19 | context-management-v2 | 上下文管理重构（精确计数 + 级联降压 + 落盘）
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/context-management-v2` |
+| **阻塞点** | — |
+
+**目标**：基于 [Claude Code 上下文管理对比分析](../docs/reports/context-management-refactoring-proposal.md)，对 TASK-17 落地的四层防护做渐进式升级——从被动单点触发改为多级 ratio 水位线主动降压，从字符估算改为 API Usage 精确计数，Layer 0 从截断丢弃改为落盘 + preview 占位符，新增 Circuit Breaker、PTL 重试、ContextMetrics 可观测性。
+
+**技术方案**：[上下文管理技术方案 v2](../openspec/specs/architecture/context-management.md)
+**重构建议报告**：[context-management-refactoring-proposal.md](../docs/reports/context-management-refactoring-proposal.md)
+
+**子项**：
+
+**Phase 1：精确 Token 计数（P0）**
+- [ ] 19.1 `src/core/session/manager.rs`：`ContextState` 增加 `context_budget_tokens`、`last_api_usage: Option<ApiUsage>`、`post_usage_appended_chars`、`compaction_consecutive_failures` 字段；新增 `estimated_token_count()`、`usage_ratio()`、`update_api_usage()`、`invalidate_api_usage()` 方法
+- [ ] 19.2 `src/core/agent_loop.rs`：reasoning loop 中捕获 `StreamEvent::Usage`，调用 `update_api_usage` 存入 `ContextState`
+- [ ] 19.3 `src/core/compaction.rs`：`is_over_budget()` 改为基于 token 维度判断（有 usage 时用 token，否则 fallback 字符估算）
+
+**Phase 2：多级水位线与级联降压（P1）**
+- [ ] 19.4 `src/infra/config.rs`：`[context]` 配置节新增 `layer0_single_result_max_chars`（默认 30000）、`layer0_turn_aggregate_max_chars`（默认 150000）、`autocompact_buffer_tokens`（默认 13000）、`warning_buffer_tokens`（默认 20000）
+- [ ] 19.5 `src/core/compaction.rs`：实现 ratio 水位线触发逻辑（0.70/0.85/0.92/0.98 → 对应 m=5/3/2/1）+ buffer 安全网（`min(配置值, budget×0.3)` cap）
+- [ ] 19.6 `src/core/compaction.rs`：实现 cascade 流程编排——Layer 0 → 重算 ratio → Layer 1（若需） → 重算 ratio → Layer 2（若需） → 重算 ratio → Layer 3（若需）；每层跑完判断是否已降压成功
+- [ ] 19.7 `src/core/agent_loop.rs`：每轮 LLM 回复完毕后触发 cascade（替换旧的仅 `is_over_budget` 预检）；ratio >= 0.98 时标记阻止新工具调用
+
+**Phase 3：Layer 0 落盘 + Layer 1 改造（P1）**
+- [ ] 19.8 `src/core/compaction.rs`：Layer 0 从截断改为落盘 + preview 占位符（单条 >= `layer0_single_result_max_chars` 默认 30K / 单 turn 合计 >= `layer0_turn_aggregate_max_chars` 默认 150K，均可配）；落盘路径 `{work_dir}/agents/{id}/tool-results/{tool_call_id}.txt`；preview 前 500 chars
+- [ ] 19.9 `src/core/compaction.rs`：Layer 1 改为 cascade 内触发（旧 turn 0..N-m 中 tool_result > 20K chars 做占位符替换，不落盘、不每轮独立执行）
+- [ ] 19.10 `src/core/compaction.rs`：Layer 2 从 `run_compaction_loop` 循环 batch 改为按 m 值一次性调用；Layer 3 目标 ratio < 0.50
+
+**Phase 4：防御增强（P0/P1）**
+- [ ] 19.11 `src/core/compaction.rs`：Circuit Breaker——`compaction_consecutive_failures` 连续 >= 3 次跳过 Layer 2，发布 `CompactionCircuitBreakerTriggered` 事件
+- [ ] 19.12 `src/core/compaction.rs`：PTL 重试——摘要请求返回 context/token 错误时**取较新半段** `[mid..compactable_end)` 重试（最多 2 次），优先保留近期上下文的摘要；未覆盖的旧半段留给后续 cascade 或 Layer 3
+- [ ] 19.13 `src/core/system_prompt.rs`：新增分页读取引导 section（「已落盘的工具结果可通过 offset/limit 按需读取」）
+
+**Phase 5：可观测性与模块化（P2）**
+- [ ] 19.14 `src/core/context_metrics.rs`（**新建**）：`ContextMetrics` 结构体（`input_tokens_used`、`context_utilization_ratio`、`compaction_count`、`compaction_tokens_freed`、`total_tool_result_bytes_persisted`）
+- [ ] 19.15 `src/infra/events.rs`：新增 `ContextMetricsUpdate`、`CompactionCircuitBreakerTriggered`、`ToolResultPersisted` 事件类型
+- [ ] 19.16 `src/core/system_prompt.rs`：模块化改造——`SystemPromptSection` trait + 注册机制 + 内置 Section（CoreIdentity / ToolInstructions / WorkspaceContext / ProjectRules）
+- [ ] 19.17 `src/core/session/manager.rs`：`init_context_state` 增加 compact boundary 处理（遇到 `is_boundary=true` 的 Compaction entry 时丢弃其前所有暂存 entry）
+- [ ] 19.18 [session-storage.md](../openspec/specs/architecture/session-storage.md)：`CompactionEntry` 增加 `is_boundary: bool` 字段文档
+
+**Phase 6：测试**
+- [ ] 19.19 单元测试：`estimated_token_count`（有 usage / 无 usage / compact 后 fallback）、`usage_ratio` 计算、cascade 流程（各 ratio 档位触发正确层级 + m 值）
+- [ ] 19.20 单元测试：Layer 0 落盘（单条 >= 30K 默认 / 单 turn 合计 >= 150K 默认 / preview 生成 / 阈值可配）、Layer 1 cascade 触发（20K 阈值 / 不独立执行）
+- [ ] 19.21 单元测试：Circuit Breaker（连续 3 次失败跳过 / 成功清零）、PTL 重试（范围减半 / 最多 2 次）
+- [ ] 19.22 集成测试：大文件 tool_result → Layer 0 落盘不丢失 + 可按需读回；多轮对话 ratio 升高 → cascade 自动触发 Layer 1+2；Session 重载识别 compact boundary 无重复
+- [ ] 19.23 集成测试：buffer 安全网在小窗口模型（64K context）下正确触发；ratio >= 0.98 时阻止新工具调用
+
+**依赖**：TASK-17（context-management，DONE）、TASK-14（Agent Loop，DONE）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`LlmProvider`（Compaction 摘要调用 + `StreamEvent::Usage`）、`SessionManager`（transcript 读写 + tool-result 文件 I/O）、`EventBus`（事件发布）、`PrimitiveConfig`（配置加载）
+- 提供：`ContextState`（增强版：token 维度 + ratio）、cascade 流程编排、`ContextMetrics`、`SystemPromptSection` trait
+
+**涉及文件**：
+
+| 文件 | 改动 |
+|------|------|
+| `src/core/session/manager.rs` | `ContextState` 扩展（token 字段 + usage + ratio + circuit breaker）；compact boundary 处理 |
+| `src/core/agent_loop.rs` | 捕获 Usage + 触发 cascade + ratio >= 0.98 阻止工具调用 |
+| `src/infra/config.rs` | 新增 `layer0_single_result_max_chars`、`layer0_turn_aggregate_max_chars`、`autocompact_buffer_tokens`、`warning_buffer_tokens` 配置项 |
+| `src/core/compaction.rs` | Layer 0 落盘 + Layer 1 cascade 改造 + Layer 2 单次调用 + Layer 3 目标 0.50 + cascade 编排 + Circuit Breaker + PTL 重试 |
+| `src/core/system_prompt.rs` | 模块化 `SystemPromptSection` trait + 分页读取引导 |
+| `src/infra/events.rs` | 新增事件类型 |
+| `src/core/context_metrics.rs`（**新建**） | `ContextMetrics` 指标结构体 |
+
+**验收标准**：
+- `StreamEvent::Usage` 被正确捕获，`estimated_token_count` 有 usage 时基于真实值、无 usage 时 fallback 字符估算
+- ratio 达到各档位时触发对应层级压缩（0.70→L2 m=5 / 0.85→L2 m=3 / 0.92→L2 m=2 / 0.98→L2 m=1 + 阻止工具 / 1.0→L3 目标<0.50）
+- cascade 逐层执行、每层后重算 ratio、降压成功即停
+- 单条 tool_result >= `layer0_single_result_max_chars`（默认 30K）被 Layer 0 落盘 + preview 占位符，原始内容可通过路径读回；阈值可配
+- Layer 1 仅在 cascade 内触发，不独立每轮执行
+- Circuit Breaker 连续失败 3 次跳过 Layer 2 降级到 Layer 3
+- PTL 重试取较新半段最多 2 次，优先保留近期上下文
+- compact boundary 使 session 重载与运行时状态一致、无重复
+- `ContextMetrics` 每轮更新并通过 EventBus 推送
+- `cargo clippy --all-targets -- -D warnings` 无新增 warning
+- 新增单测覆盖率 ≥ 80%
