@@ -1,5 +1,50 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-03 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-19（feature/context-management-v2 并入 develop）
+
+**合并分支**：`feature/context-management-v2`（2 提交，`--no-ff` 合并，15 文件变更，+1600/-156 行）。
+
+**任务内容**：TASK-19 上下文管理重构 V2——精确 token 计数（API Usage）、多级 ratio 水位线级联降压（0.70/0.85/0.92/0.98）、Layer 0 落盘+preview 占位符、Circuit Breaker、PTL 重试、ContextMetrics 可观测性、SystemPromptSection trait 模块化。
+
+**交付文档 §1–§3（develop 复核）**：§1 User_Stories Story 8 上下文管理/压缩能力与合并后代码一致，E2E_SCENARIO_LIBRARY Story 9 的 084–086 与 TASK-17 备注对齐；§2 全量 15 文件代码 review（PASS_WITH_NOTES：修复 compaction.rs UTF-8 切片 panic `b37effd`；跟踪项见下）；§3 TASK-19 无新增 CLI 用户可见行为，E2E 以 context_management_tests 自动覆盖。
+
+**集成验收补充**：合并后修复 `compaction.rs` L430 UTF-8 切片 panic（`&content[..200]` 改为 `floor_char_boundary`）。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | PASS（全量 555 passed / 1 ignored / 0 failed） |
+| lib 单元测试 | 362 passed, 1 ignored |
+| agent_loop_tests | 11 passed |
+| cli_tests | 77 passed |
+| context_management_tests | 17 passed |
+| wasmedge_e2e_tests | 39 passed |
+| 其余 8 个套件 | 全部 ok（49 passed） |
+
+**执行环境**：macOS darwin；`DYLD_LIBRARY_PATH=$HOME/.wasmedge/lib`；日志 `pi-rust-wasm/.integration_test_output.log` 末尾 `EXIT_CODE=0`。
+
+#### 代码 Review 摘要
+
+全量 15 文件 review 结论：**PASS_WITH_NOTES**。
+
+- 架构清晰：分层正确（core/infra/api），依赖单向无环
+- 并发安全：ContextState 通过 `&mut self` 修改，Rust 借用检查保证独占
+- **已修复**：compaction.rs L430 UTF-8 切片 panic（`b37effd`）
+- **跟踪项**（不阻塞合并）：chat.rs `CascadeResult` 被丢弃未传递 `block_tool_calls`；`let _ = work_dir_str` 死变量残留；circuit_breaker_skips_layer2 测试断言偏弱（仅校验 setup）；PTL retry 缺少专项测试
+
+#### 看板
+
+- **TASK-19**：集成通过后已在 `TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Tom | 2026-04-01 14:30 | ACTIVE | develop | — |
 
 ### chat：流式订阅事件名改用 `wire::WIRE_MESSAGE_UPDATE`
