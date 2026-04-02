@@ -620,7 +620,12 @@ fn run_compaction(state: &mut ContextState, llm: &LlmProvider, m: usize):
             Ok(text) => (text, 0, compactable_end)
             Err(e) if is_ptl_error(&e) =>
                 # PTL 重试：取较新半段 [mid..compactable_end)，保留近期上下文
-                retry_with_half_range(state, llm, compactable_end)?
+                # 重试失败同样需递增 failures，确保 Circuit Breaker 能正确计数
+                match retry_with_half_range(state, llm, compactable_end):
+                    Ok(result) => result
+                    Err(_) =>
+                        state.compaction_consecutive_failures += 1
+                        return
             Err(e) =>
                 state.compaction_consecutive_failures += 1
                 return
