@@ -89,6 +89,8 @@ pub struct CompactionEntry {
     pub covered_end_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covered_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_boundary: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

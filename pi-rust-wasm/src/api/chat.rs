@@ -16,7 +16,7 @@ use crate::{
     ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
     PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
-use crate::core::compaction::run_compaction_cascade;
+use crate::core::compaction::run_compaction_cascade_v2;
 use crate::core::session::manager::{
     build_context_from_state, init_context_state, TurnEntry,
 };
@@ -292,7 +292,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         // Update context estimate for the new user input
         context_state.on_message_appended(input.len());
 
-        // Pre-flight budget check: trigger Layer 1~3 cascade if over budget
+        // Pre-flight cascade V2: ratio watermark-driven compaction
         if context_state.is_over_budget() {
             let tp = ctx
                 .session
@@ -300,13 +300,17 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            run_compaction_cascade(
+            let work_dir_str = ctx.workspace_dir.to_string_lossy();
+            run_compaction_cascade_v2(
                 &mut context_state,
                 &*ctx.llm,
                 context_config,
                 &tp,
+                &ctx.workspace_dir,
+                ctx.session.current_session_key(),
             )
             .await;
+            let _ = work_dir_str;
         }
 
         // Build messages from ContextState
@@ -343,6 +347,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             session_id: ctx.session.current_session_key().to_string(),
             tool_definitions: build_tool_definitions(),
             context_config: context_config.clone(),
+            work_dir: ctx.workspace_dir.to_string_lossy().to_string(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -393,6 +398,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                             context_budget_chars: crate::infra::config::compute_context_budget_chars(
                                 context_config,
                             ),
+                            context_budget_tokens: context_config.context_window.saturating_sub(context_config.max_output_tokens),
+                            last_api_usage: None,
+                            post_usage_appended_chars: 0,
+                            compaction_consecutive_failures: 0,
                         })
                 });
 
@@ -423,6 +432,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                             context_budget_chars: crate::infra::config::compute_context_budget_chars(
                                 context_config,
                             ),
+                            context_budget_tokens: context_config.context_window.saturating_sub(context_config.max_output_tokens),
+                            last_api_usage: None,
+                            post_usage_appended_chars: 0,
+                            compaction_consecutive_failures: 0,
                         })
                 });
 

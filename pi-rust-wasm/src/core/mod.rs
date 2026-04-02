@@ -4,6 +4,7 @@
 
 pub mod agent_loop;
 pub mod compaction;
+pub mod context_metrics;
 pub mod confirmation;
 pub mod executor;
 pub(crate) mod llm;
@@ -27,8 +28,9 @@ pub use primitives::{
     PrimitiveOperation, WriteFileResult,
 };
 pub use session::{
-    build_context_from_state, init_context_state, load_store, save_store, CompactionEntry,
-    ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore, TranscriptEntry,
-    TurnEntry, DEFAULT_SESSION_KEY,
+    build_context_from_state, init_context_state, load_store, save_store, ApiUsage,
+    CompactionEntry, ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore,
+    TranscriptEntry, TurnEntry, DEFAULT_SESSION_KEY,
 };
+pub use context_metrics::ContextMetrics;
 pub use tools::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};
