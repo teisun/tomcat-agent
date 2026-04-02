@@ -1201,7 +1201,7 @@ mod tests {
             ..Default::default()
         };
         let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
-        assert!(results.len() > 0, "aggregate threshold should trigger persistence");
+        assert!(!results.is_empty(), "aggregate threshold should trigger persistence");
     }
 
     #[test]

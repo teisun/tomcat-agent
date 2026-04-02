@@ -992,7 +992,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `REVIEW` |
+| **状态** | `PENDING_INTEGRATION` |
 | **负责人** | Jerry |
 | **分支** | `feature/context-management-v2` |
 | **阻塞点** | — |
