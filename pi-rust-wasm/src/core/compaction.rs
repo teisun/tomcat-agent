@@ -428,7 +428,8 @@ fn turns_to_text(turns: &[TurnEntry]) -> String {
                         crate::core::agent_loop::AgentMessage::ToolResult { content, .. } => {
                             buf.push_str("[ToolResult] ");
                             let preview = if content.len() > 200 {
-                                &content[..200]
+                                let end = floor_char_boundary(content, 200);
+                                &content[..end]
                             } else {
                                 content
                             };
