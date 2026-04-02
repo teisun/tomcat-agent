@@ -2,10 +2,10 @@
 
 pub(crate) mod manager;
 pub(crate) mod store;
-pub(crate) mod transcript;
+pub mod transcript;
 
 pub use manager::{
-    build_context_from_state, estimate_turn_chars, init_context_state, ContextState,
+    build_context_from_state, estimate_turn_chars, init_context_state, ApiUsage, ContextState,
     SessionManager, TurnEntry,
 };
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};

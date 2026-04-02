@@ -30,6 +30,10 @@ pub mod wire {
     pub const WIRE_TOOL_RESULT_TRUNCATED: &str = "tool_result_truncated";
     pub const WIRE_AUTO_RETRY_START: &str = "auto_retry_start";
     pub const WIRE_AUTO_RETRY_END: &str = "auto_retry_end";
+    pub const WIRE_CONTEXT_METRICS_UPDATE: &str = "context_metrics_update";
+    pub const WIRE_COMPACTION_CIRCUIT_BREAKER_TRIGGERED: &str =
+        "compaction_circuit_breaker_triggered";
+    pub const WIRE_TOOL_RESULT_PERSISTED: &str = "tool_result_persisted";
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
 
     // --- ExtensionEvent ---
@@ -194,6 +198,30 @@ pub enum AgentEvent {
         extension_id: Option<String>,
         event: String,
         error: String,
+    },
+    ContextMetricsUpdate {
+        #[serde(rename = "inputTokensUsed")]
+        input_tokens_used: usize,
+        #[serde(rename = "contextUtilizationRatio")]
+        context_utilization_ratio: f64,
+        #[serde(rename = "compactionCount")]
+        compaction_count: u32,
+        #[serde(rename = "compactionTokensFreed")]
+        compaction_tokens_freed: usize,
+        #[serde(rename = "totalToolResultBytesPersisted")]
+        total_tool_result_bytes_persisted: usize,
+    },
+    CompactionCircuitBreakerTriggered {
+        #[serde(rename = "consecutiveFailures")]
+        consecutive_failures: u32,
+    },
+    ToolResultPersisted {
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        #[serde(rename = "originalChars")]
+        original_chars: usize,
+        #[serde(rename = "persistedPath")]
+        persisted_path: String,
     },
 }
 

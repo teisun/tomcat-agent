@@ -35,29 +35,77 @@ pub enum TurnEntry {
     SummaryTurn { summary: String },
 }
 
+/// API token 使用量快照（从 `StreamEvent::Usage` 捕获）。
+#[derive(Debug, Clone)]
+pub struct ApiUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
 /// 运行时上下文状态，在 `chat_loop` 外层初始化一次、跨迭代复用。
 pub struct ContextState {
     pub user_turns_list: Vec<TurnEntry>,
     pub estimate_context_chars: usize,
     pub context_budget_chars: usize,
+    pub context_budget_tokens: usize,
+    pub last_api_usage: Option<ApiUsage>,
+    pub post_usage_appended_chars: usize,
+    pub compaction_consecutive_failures: u32,
 }
 
 impl ContextState {
-    /// 追加消息后增量更新估算字符数。
+    /// 追加消息后增量更新估算字符数和 post-usage 增量。
     pub fn on_message_appended(&mut self, content_len: usize) {
         self.estimate_context_chars += content_len;
+        self.post_usage_appended_chars += content_len;
     }
 
     /// 新 user turn 完成后追加到 turns 列表并更新估算。
     pub fn on_new_user_turn(&mut self, turn: TurnEntry) {
         let chars = estimate_turn_chars(&turn);
         self.estimate_context_chars += chars;
+        self.post_usage_appended_chars += chars;
         self.user_turns_list.push(turn);
     }
 
-    /// 当前上下文是否超预算。
+    /// 估算当前上下文占用的 token 数。
+    /// 有 API usage 时基于真实值 + 增量近似；否则 fallback 字符估算。
+    pub fn estimated_token_count(&self) -> usize {
+        if let Some(ref usage) = self.last_api_usage {
+            let base = (usage.prompt_tokens + usage.completion_tokens) as usize;
+            base + self.post_usage_appended_chars / 4
+        } else {
+            self.estimate_context_chars / 4
+        }
+    }
+
+    /// 当前上下文利用率（0.0 ~ ∞）。
+    /// `context_budget_tokens == 0` 时返回 `f64::MAX` 以安全触发 Layer 3。
+    pub fn usage_ratio(&self) -> f64 {
+        if self.context_budget_tokens == 0 {
+            return f64::MAX;
+        }
+        self.estimated_token_count() as f64 / self.context_budget_tokens as f64
+    }
+
+    /// LLM 返回 Usage 事件后刷新真实 token 计数，清零增量。
+    pub fn update_api_usage(&mut self, prompt_tokens: u32, completion_tokens: u32) {
+        self.last_api_usage = Some(ApiUsage {
+            prompt_tokens,
+            completion_tokens,
+        });
+        self.post_usage_appended_chars = 0;
+    }
+
+    /// compaction 后使 API usage 失效，后续 fallback 到字符估算。
+    pub fn invalidate_api_usage(&mut self) {
+        self.last_api_usage = None;
+        self.post_usage_appended_chars = 0;
+    }
+
+    /// 当前上下文是否超预算（token 维度）。
     pub fn is_over_budget(&self) -> bool {
-        self.estimate_context_chars > self.context_budget_chars
+        self.estimated_token_count() > self.context_budget_tokens
     }
 }
 
@@ -93,6 +141,7 @@ pub fn init_context_state(
     system_text: &str,
 ) -> Result<ContextState, AppError> {
     let budget = compute_context_budget_chars(config);
+    let token_budget = config.context_window.saturating_sub(config.max_output_tokens);
 
     let path = match session.current_transcript_path()? {
         Some(p) => p,
@@ -101,6 +150,10 @@ pub fn init_context_state(
                 user_turns_list: Vec::new(),
                 estimate_context_chars: system_text.len(),
                 context_budget_chars: budget,
+                context_budget_tokens: token_budget,
+                last_api_usage: None,
+                post_usage_appended_chars: 0,
+                compaction_consecutive_failures: 0,
             });
         }
     };
@@ -121,6 +174,12 @@ pub fn init_context_state(
                     total_chars += estimate_turn_chars(&turn);
                     turns.push(turn);
                 }
+
+                if ce.is_boundary == Some(true) {
+                    turns.clear();
+                    total_chars = system_text.len();
+                }
+
                 if let Some(ref summary) = ce.summary {
                     total_chars += summary.len();
                     turns.push(TurnEntry::SummaryTurn {
@@ -209,6 +268,10 @@ pub fn init_context_state(
         user_turns_list: turns,
         estimate_context_chars: total_chars,
         context_budget_chars: budget,
+        context_budget_tokens: token_budget,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     })
 }
 
@@ -434,6 +497,7 @@ impl SessionManager {
             covered_start_id: None,
             covered_end_id: None,
             covered_count: None,
+            is_boundary: None,
         });
         append_entry(&path, &entry)
     }
@@ -457,6 +521,7 @@ impl SessionManager {
             covered_start_id,
             covered_end_id,
             covered_count: Some(covered_count),
+            is_boundary: None,
         });
         append_entry(&path, &entry)
     }
@@ -1028,6 +1093,10 @@ mod tests {
             ],
             estimate_context_chars: 100,
             context_budget_chars: 1000,
+            context_budget_tokens: 250,
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            compaction_consecutive_failures: 0,
         };
         let msgs = build_context_from_state(&state);
         assert_eq!(msgs.len(), 3);
@@ -1046,6 +1115,82 @@ mod tests {
         let cfg = ContextConfig::default();
         let state = init_context_state(&mgr, &cfg, "sys").unwrap();
         assert!(state.user_turns_list.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_context_state_boundary_discards_prior() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        mgr.append_message(serde_json::json!({"role":"user","content":"old q1"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"old a1"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"old q2"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"old a2"})).unwrap();
+
+        let path = mgr.current_transcript_path().unwrap().unwrap();
+        let boundary_entry = TranscriptEntry::Compaction(CompactionEntry {
+            id: None,
+            parent_id: None,
+            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+            summary: Some("boundary summary".to_string()),
+            covered_start_id: None,
+            covered_end_id: None,
+            covered_count: Some(2),
+            is_boundary: Some(true),
+        });
+        super::super::transcript::append_entry(&path, &boundary_entry).unwrap();
+
+        mgr.append_message(serde_json::json!({"role":"user","content":"new q"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"new a"})).unwrap();
+
+        let cfg = ContextConfig::default();
+        let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+
+        assert_eq!(state.user_turns_list.len(), 2, "boundary + 1 new turn");
+
+        let has_boundary_summary = state.user_turns_list.iter().any(|t| {
+            matches!(t, TurnEntry::SummaryTurn { summary } if summary == "boundary summary")
+        });
+        assert!(has_boundary_summary, "should contain boundary summary");
+
+        let has_old = state.user_turns_list.iter().any(|t| {
+            if let TurnEntry::UserTurn { messages } = t {
+                messages.iter().any(|m| {
+                    matches!(m, AgentMessage::User { text } if text.contains("old"))
+                })
+            } else {
+                false
+            }
+        });
+        assert!(!has_old, "old turns before boundary should be discarded");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_context_state_non_boundary_compaction_preserves_prior() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+
+        mgr.append_message(serde_json::json!({"role":"user","content":"q1"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"})).unwrap();
+        mgr.append_compaction(Some("non-boundary summary")).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q2"})).unwrap();
+
+        let cfg = ContextConfig::default();
+        let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+
+        assert!(state.user_turns_list.len() >= 3, "should preserve pre-compaction turn + summary + post turn");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

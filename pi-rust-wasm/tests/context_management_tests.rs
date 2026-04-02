@@ -224,6 +224,10 @@ async fn test_large_tool_result_triggers_truncation_event() -> Result<(), Box<dy
         user_turns_list: Vec::new(),
         estimate_context_chars: 0,
         context_budget_chars: 1_000_000,
+        context_budget_tokens: 250_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     agent.set_context_state(Some(ctx_state));
 
@@ -263,7 +267,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     common::setup_logging();
     let _span = info_span!("test_compaction_pipeline_layer1_then_layer3_recovers_budget").entered();
 
-    info!("Arrange: 构造含 5 个 turn 的 ContextState，总字符远超 budget");
+    info!("Arrange: 构造含 5 个 turn 的 ContextState，总字符远超 budget (tool results >20K)");
     let mut turns = Vec::new();
     for i in 0..5 {
         turns.push(TurnEntry::UserTurn {
@@ -273,7 +277,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
                 },
                 AgentMessage::ToolResult {
                     tool_call_id: format!("tc_{}", i),
-                    content: "x".repeat(10_000),
+                    content: "x".repeat(25_000),
                     is_error: false,
                 },
                 AgentMessage::Assistant {
@@ -285,10 +289,16 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     }
     let total: usize = turns.iter().map(pi_wasm::core::session::estimate_turn_chars).sum();
 
+    let budget_chars = 30_000;
+    let budget_tokens = budget_chars / 4;
     let mut state = ContextState {
         user_turns_list: turns,
         estimate_context_chars: total,
-        context_budget_chars: 12_000,
+        context_budget_chars: budget_chars,
+        context_budget_tokens: budget_tokens,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     assert!(state.is_over_budget());
 
@@ -459,6 +469,10 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         ],
         estimate_context_chars: 60_000,
         context_budget_chars: 1_000_000,
+        context_budget_tokens: 250_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     agent.set_context_state(Some(ctx_state));
 
@@ -566,6 +580,10 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         ],
         estimate_context_chars: 500,
         context_budget_chars: 10_000,
+        context_budget_tokens: 2_500,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
 
     let msgs = build_context_from_state(&state);
@@ -676,13 +694,13 @@ fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry 
 
 const PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
 
-/// [Layer 1 深度] 占位符替换正确性：旧 turn 被替换为占位符，保护区内 turn 保持原内容
+/// [Layer 1 深度] 占位符替换正确性：旧 turn 的 >20K tool result 被替换为占位符，保护区内 turn 保持原内容
 #[test]
 fn test_compact_tool_results_replaces_with_placeholder() {
     common::setup_logging();
     let _span = info_span!("test_compact_tool_results_replaces_with_placeholder").entered();
 
-    let big = "x".repeat(5_000);
+    let big = "x".repeat(25_000);
     let mut state = ContextState {
         user_turns_list: vec![
             make_turn_with_tool_result("q1", &big),
@@ -691,6 +709,10 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         ],
         estimate_context_chars: 0,
         context_budget_chars: 0,
+        context_budget_tokens: 0,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     let total: usize = state
         .user_turns_list
@@ -727,17 +749,17 @@ fn test_compact_tool_results_replaces_with_placeholder() {
     }
 }
 
-/// [Layer 1 深度] 减够即停：预算恢复后不继续替换后续 tool results
+/// [Layer 1 深度] Layer 1 V2 替换所有 >20K tool results in compactable zone
 #[test]
-fn test_compact_tool_results_stops_when_budget_ok() {
+fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     common::setup_logging();
-    let _span = info_span!("test_compact_tool_results_stops_when_budget_ok").entered();
+    let _span = info_span!("test_compact_tool_results_replaces_all_large_in_compactable_zone").entered();
 
-    let big = "x".repeat(10_000);
-    let small_overhead = 20;
+    let big = "x".repeat(25_000);
+    let small = "x".repeat(5_000);
     let turns = vec![
         make_turn_with_tool_result("q1", &big),
-        make_turn_with_tool_result("q2", &big),
+        make_turn_with_tool_result("q2", &small),
         make_turn_with_tool_result("q3", &big),
         make_turn_with_tool_result("q4-recent", &big),
     ];
@@ -745,23 +767,20 @@ fn test_compact_tool_results_stops_when_budget_ok() {
         .iter()
         .map(pi_wasm::core::session::estimate_turn_chars)
         .sum();
-    let savings_one = big.len() - PLACEHOLDER.len();
-    let budget = total - savings_one + small_overhead;
 
     let mut state = ContextState {
         user_turns_list: turns,
         estimate_context_chars: total,
-        context_budget_chars: budget,
+        context_budget_chars: total,
+        context_budget_tokens: total / 4,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
-    assert!(state.is_over_budget());
 
-    info!(
-        "Act: compact with budget={}, replacing 1 should save ~{} and be enough",
-        budget, savings_one
-    );
+    info!("Act: compact with m=1, only >20K in compactable zone get replaced");
     compact_tool_results(&mut state, 1);
 
-    info!("Assert: first replaced, second and third still original");
     let get_tool_content = |idx: usize| -> String {
         if let TurnEntry::UserTurn { messages } = &state.user_turns_list[idx] {
             messages
@@ -778,19 +797,19 @@ fn test_compact_tool_results_stops_when_budget_ok() {
             panic!("not a UserTurn");
         }
     };
-    assert_eq!(get_tool_content(0), PLACEHOLDER, "first should be replaced");
-    assert_eq!(get_tool_content(1), big, "second should still be original (stop-when-enough)");
-    assert_eq!(get_tool_content(2), big, "third should still be original");
-    assert!(!state.is_over_budget(), "should be back within budget");
+    assert_eq!(get_tool_content(0), PLACEHOLDER, "first (>20K) should be replaced");
+    assert_eq!(get_tool_content(1), small, "second (<20K) should keep original");
+    assert_eq!(get_tool_content(2), PLACEHOLDER, "third (>20K) should be replaced");
+    assert_eq!(get_tool_content(3), big, "fourth (protected) should keep original");
 }
 
-/// [Layer 1 深度] estimate 精确变化量
+/// [Layer 1 深度] estimate 精确变化量（>20K 阈值才触发替换）
 #[test]
 fn test_compact_tool_results_estimate_precise() {
     common::setup_logging();
     let _span = info_span!("test_compact_tool_results_estimate_precise").entered();
 
-    let content_len = 8_000;
+    let content_len = 25_000;
     let big = "y".repeat(content_len);
     let turns = vec![
         make_turn_with_tool_result("q1", &big),
@@ -805,6 +824,10 @@ fn test_compact_tool_results_estimate_precise() {
         user_turns_list: turns,
         estimate_context_chars: total,
         context_budget_chars: 1,
+        context_budget_tokens: 0,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
 
     let reduced = compact_tool_results(&mut state, 1);
@@ -854,6 +877,10 @@ async fn test_compaction_loop_single_batch() {
         user_turns_list: turns,
         estimate_context_chars: total,
         context_budget_chars: budget,
+        context_budget_tokens: budget / 4,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     assert!(state.is_over_budget());
 
@@ -900,6 +927,10 @@ async fn test_compaction_loop_multi_batch() {
         user_turns_list: turns,
         estimate_context_chars: total,
         context_budget_chars: budget,
+        context_budget_tokens: budget / 4,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
 
     let llm = MockCompactionLlm::new(vec![
@@ -954,6 +985,10 @@ async fn test_compaction_loop_update_mode() {
         user_turns_list: turns,
         estimate_context_chars: total,
         context_budget_chars: total / 3,
+        context_budget_tokens: total / 12,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
 
     let llm = MockCompactionLlm::new(vec![Ok("## Updated summary".into())]);
@@ -994,6 +1029,10 @@ async fn test_compaction_loop_llm_error_degrades() {
         user_turns_list: turns,
         estimate_context_chars: total,
         context_budget_chars: total / 2,
+        context_budget_tokens: total / 8,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     let original_len = state.user_turns_list.len();
     let original_estimate = state.estimate_context_chars;
@@ -1021,6 +1060,154 @@ async fn test_compaction_loop_llm_error_degrades() {
     );
 }
 
+/// [V2 集成] Session 重载识别 compact boundary 无重复
+#[test]
+fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_session_reload_with_boundary").entered();
+
+    let dir = temp_sessions_dir("boundary");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None)?;
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"old question"}))?;
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"old answer"}))?;
+
+    let path = mgr.current_transcript_path()?.unwrap();
+    let boundary = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
+        pi_wasm::core::session::transcript::CompactionEntry {
+            id: None,
+            parent_id: None,
+            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+            summary: Some("Summary of everything before this point".to_string()),
+            covered_start_id: None,
+            covered_end_id: None,
+            covered_count: Some(1),
+            is_boundary: Some(true),
+        },
+    );
+    pi_wasm::core::session::transcript::append_entry(&path, &boundary)?;
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"new question"}))?;
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"new answer"}))?;
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "system")?;
+
+    let has_old = state.user_turns_list.iter().any(|t| {
+        if let TurnEntry::UserTurn { messages } = t {
+            messages.iter().any(|m| {
+                matches!(m, AgentMessage::User { text } if text.contains("old"))
+            })
+        } else {
+            false
+        }
+    });
+    assert!(!has_old, "turns before boundary should be discarded");
+
+    let has_summary = state.user_turns_list.iter().any(|t| {
+        matches!(t, TurnEntry::SummaryTurn { summary } if summary.contains("Summary of everything"))
+    });
+    assert!(has_summary, "boundary summary should be present");
+
+    let has_new = state.user_turns_list.iter().any(|t| {
+        if let TurnEntry::UserTurn { messages } = t {
+            messages.iter().any(|m| {
+                matches!(m, AgentMessage::User { text } if text.contains("new"))
+            })
+        } else {
+            false
+        }
+    });
+    assert!(has_new, "turns after boundary should be present");
+    assert_eq!(state.user_turns_list.len(), 2, "summary + 1 new turn");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// [V2 集成] Layer 0 大文件落盘可读回
+#[test]
+fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_layer0_persist_and_readback").entered();
+
+    use pi_wasm::core::compaction::layer0_persist_large_results;
+
+    let dir = tempfile::tempdir()?;
+    let original = "important content ".repeat(2000);
+    let mut state = ContextState {
+        user_turns_list: vec![TurnEntry::UserTurn {
+            messages: vec![AgentMessage::ToolResult {
+                tool_call_id: "tc_persist".into(),
+                content: original.clone(),
+                is_error: false,
+            }],
+        }],
+        estimate_context_chars: original.len(),
+        context_budget_chars: 1_000_000,
+        context_budget_tokens: 250_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
+    };
+    let config = ContextConfig::default();
+    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");
+    assert_eq!(results.len(), 1);
+
+    let readback = std::fs::read_to_string(&results[0].persisted_path)?;
+    assert_eq!(readback, original, "persisted content should match original");
+
+    if let TurnEntry::UserTurn { messages } = &state.user_turns_list[0] {
+        if let AgentMessage::ToolResult { content, .. } = &messages[0] {
+            assert!(content.starts_with("[Tool result persisted:"));
+            assert!(content.contains("Preview:"));
+        }
+    }
+
+    assert!(state.estimate_context_chars < original.len(), "estimate should decrease after persistence");
+
+    Ok(())
+}
+
+/// [V2 集成] cascade_params buffer 安全网在小窗口模型下正确触发
+/// ratio < 0.70 不触发水位线，但 remaining < autocompact_buf 触发 buffer 安全网
+#[test]
+fn test_cascade_params_small_window_buffer_safety() {
+    common::setup_logging();
+    let _span = info_span!("test_cascade_params_small_window_buffer_safety").entered();
+
+    use pi_wasm::core::compaction::determine_cascade_params;
+
+    let mut state = ContextState {
+        user_turns_list: vec![],
+        estimate_context_chars: 0,
+        context_budget_chars: 0,
+        context_budget_tokens: 32000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
+    };
+    // ratio = 13000/32000 = 0.406, well below 0.70
+    state.update_api_usage(13000, 0);
+
+    let config = ContextConfig {
+        context_window: 16384,
+        max_output_tokens: 384,
+        // input_budget = 16000, remaining = 16000 - 13000 = 3000
+        // buffer_cap(5000) = min(5000, 16000*3/10=4800) = 4800
+        // remaining(3000) < autocompact_buf(4800) → triggers
+        autocompact_buffer_tokens: 5_000,
+        warning_buffer_tokens: 20_000,
+        ..Default::default()
+    };
+    let params = determine_cascade_params(&state, &config);
+    assert!(params.should_cascade, "small window: ratio 0.40 but remaining(3000) < buffer(4800) should trigger");
+}
+
 /// [Layer 2] 摘要比原文长时中断：不死循环，state 不变
 #[tokio::test]
 async fn test_compaction_loop_summary_too_long_breaks() {
@@ -1037,6 +1224,10 @@ async fn test_compaction_loop_summary_too_long_breaks() {
         user_turns_list: turns,
         estimate_context_chars: total,
         context_budget_chars: total / 2,
+        context_budget_tokens: total / 8,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
     };
     let original_len = state.user_turns_list.len();
     let original_estimate = state.estimate_context_chars;

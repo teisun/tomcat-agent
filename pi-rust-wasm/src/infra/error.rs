@@ -44,6 +44,15 @@ pub enum AppError {
     /// 审计日志写入或查询错误。
     #[error("审计日志错误: {0}")]
     Audit(String),
+    /// 内部逻辑错误（不可恢复）。
+    #[error("内部错误: {0}")]
+    Internal(String),
+}
+
+impl AppError {
+    pub fn internal(msg: &str) -> Self {
+        AppError::Internal(msg.to_string())
+    }
 }
 
 #[cfg(test)]

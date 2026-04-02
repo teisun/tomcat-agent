@@ -128,7 +128,7 @@ use tokio_stream::StreamExt;
 
 use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
 use crate::core::compaction::{
-    is_context_overflow_error, run_compaction_cascade, truncate_tool_result_if_needed,
+    is_context_overflow_error, run_compaction_cascade_v2, truncate_tool_result_if_needed,
 };
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::core::session::manager::ContextState;
@@ -324,6 +324,8 @@ pub struct AgentLoopConfig {
     pub session_id: String,
     pub tool_definitions: Vec<serde_json::Value>,
     pub context_config: ContextConfig,
+    /// Agent 工作目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
+    pub work_dir: String,
 }
 
 impl Default for AgentLoopConfig {
@@ -336,6 +338,7 @@ impl Default for AgentLoopConfig {
             session_id: String::new(),
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
+            work_dir: String::new(),
         }
     }
 }
@@ -357,6 +360,7 @@ pub struct AgentLoop {
     follow_up_queue: Arc<Mutex<Vec<AgentMessage>>>,
     abort_signal: Arc<AtomicBool>,
     context_state: Option<ContextState>,
+    block_tool_calls: bool,
 }
 
 fn unix_ts_ms() -> i64 {
@@ -383,6 +387,7 @@ impl AgentLoop {
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             abort_signal,
             context_state: None,
+            block_tool_calls: false,
         }
     }
 
@@ -405,6 +410,7 @@ impl AgentLoop {
             steering_queue,
             abort_signal,
             context_state: None,
+            block_tool_calls: false,
         }
     }
 
@@ -570,21 +576,23 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
-                    // ContextOverflow: trigger compaction cascade before retry
                     if is_context_overflow_error(&e) && self.context_state.is_some() {
                         self.emit_event(AgentEvent::AutoCompactionStart {
                             reason: "context_overflow".into(),
                         });
                         if let Some(ref mut ctx_state) = self.context_state {
-                            run_compaction_cascade(
+                            let cascade_result = run_compaction_cascade_v2(
                                 ctx_state,
                                 &*self.llm,
                                 &self.config.context_config,
                                 std::path::Path::new(""),
+                                std::path::Path::new(&self.config.work_dir),
+                                &self.config.session_id,
                             )
                             .await;
                             *messages =
                                 crate::core::session::manager::build_context_from_state(ctx_state);
+                            self.block_tool_calls = cascade_result.block_tool_calls;
                         }
                         self.emit_event(AgentEvent::AutoCompactionEnd {
                             result: None,
@@ -692,7 +700,15 @@ impl AgentLoop {
                         }
                     }
                     Ok(StreamEvent::FinishReason { .. }) => break,
-                    Ok(StreamEvent::Usage { .. }) => {}
+                    Ok(StreamEvent::Usage {
+                        prompt_tokens,
+                        completion_tokens,
+                        ..
+                    }) => {
+                        if let Some(ref mut ctx_state) = self.context_state {
+                            ctx_state.update_api_usage(prompt_tokens, completion_tokens);
+                        }
+                    }
                     Err(e) => {
                         self.emit_event(AgentEvent::MessageEnd {
                             message: Message(serde_json::json!({})),
@@ -759,6 +775,33 @@ impl AgentLoop {
 
             let mut tool_results = Vec::new();
             let mut steered = false;
+
+            if self.block_tool_calls {
+                for tc in &tool_calls {
+                    let blocked_msg = format!(
+                        "[Tool call blocked: context usage too high. Tool '{}' was not executed.]",
+                        tc.name
+                    );
+                    if let Some(ref mut ctx_state) = self.context_state {
+                        ctx_state.on_message_appended(blocked_msg.len());
+                    }
+                    messages.push(AgentMessage::ToolResult {
+                        tool_call_id: tc.id.clone(),
+                        content: blocked_msg.clone(),
+                        is_error: true,
+                    });
+                    tool_results.push(Message(serde_json::json!({ "content": blocked_msg })));
+                }
+                self.block_tool_calls = false;
+
+                self.emit_event(AgentEvent::TurnEnd {
+                    session_id: self.config.session_id.clone(),
+                    turn_index,
+                    message: Message(serde_json::json!({})),
+                    tool_results,
+                });
+                continue;
+            }
 
             for tc in &tool_calls {
                 if self.abort_signal.load(Ordering::SeqCst) {
@@ -829,6 +872,32 @@ impl AgentLoop {
                     steered = true;
                     break;
                 }
+            }
+
+            // Proactive cascade after tool execution
+            if let Some(ref mut ctx_state) = self.context_state {
+                let tp = std::path::Path::new("");
+                let cascade_result = run_compaction_cascade_v2(
+                    ctx_state,
+                    &*self.llm,
+                    &self.config.context_config,
+                    tp,
+                    std::path::Path::new(&self.config.work_dir),
+                    &self.config.session_id,
+                )
+                .await;
+                if !cascade_result.layers_executed.is_empty() {
+                    *messages = crate::core::session::manager::build_context_from_state(ctx_state);
+                    messages.insert(
+                        0,
+                        AgentMessage::System {
+                            text: crate::core::system_prompt::build_system_prompt(
+                                &self.config.work_dir,
+                            ),
+                        },
+                    );
+                }
+                self.block_tool_calls = cascade_result.block_tool_calls;
             }
 
             self.emit_event(AgentEvent::TurnEnd {
