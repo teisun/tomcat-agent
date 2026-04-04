@@ -19,12 +19,12 @@ pub use audit::{
 };
 pub use audit_store::{AuditEntry, AuditFilter, AuditStore};
 pub use config::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config,
-    load_config_toml_file, resolve_agent_dir, resolve_assets_dir, resolve_audit_dir,
+    compute_context_budget_chars, ensure_embedded_assets, ensure_work_dir_structure, get_work_dir,
+    load_config, load_config_toml_file, resolve_agent_dir, resolve_assets_dir, resolve_audit_dir,
     resolve_extra_roots_paths, resolve_log_dir, resolve_memory_dir, resolve_plugins_dir,
     resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
     validate_config, AgentConfig, AppConfig, ContextConfig, LlmConfig, LogConfig, PrimitiveConfig,
-    SecurityConfig, WasmConfig, WorkspaceConfig, compute_context_budget_chars, DEFAULT_LLM_MODEL,
+    SecurityConfig, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
 };
 pub use error::AppError;
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};

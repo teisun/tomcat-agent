@@ -1023,7 +1023,7 @@ impl HostApiDispatcher {
             return Ok(HostResponse::ok(serde_json::Value::Null));
         }
         let wire = agent_send_message_wire(params)?;
-        session.append_message(wire)?;
+        session.try_append_message(wire)?;
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -1052,7 +1052,7 @@ impl HostApiDispatcher {
             .and_then(|o| o.get("role"))
             .and_then(|v| v.as_str())
             .unwrap_or("user");
-        session.append_message(serde_json::json!({ "role": role, "content": content }))?;
+        session.try_append_message(serde_json::json!({ "role": role, "content": content }))?;
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -1344,7 +1344,7 @@ impl HostApiDispatcher {
             .get("message")
             .cloned()
             .ok_or_else(|| AppError::Plugin("sendMessage: missing message".to_string()))?;
-        session.append_message(message)?;
+        session.try_append_message(message)?;
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 }

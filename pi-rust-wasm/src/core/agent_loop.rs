@@ -846,7 +846,9 @@ impl AgentLoop {
                 // Layer 0: truncate oversized tool results
                 if let Some(ref ctx_state) = self.context_state {
                     let max_chars = self.config.context_config.single_tool_result_max_chars;
-                    if let Some(info) = truncate_tool_result_if_needed(&mut result_content, max_chars) {
+                    if let Some(info) =
+                        truncate_tool_result_if_needed(&mut result_content, max_chars)
+                    {
                         self.emit_event(AgentEvent::ToolResultTruncated {
                             tool_name: tc.name.clone(),
                             original_chars: info.original_chars,
@@ -1889,9 +1891,7 @@ mod tests {
         let metrics_pos = observed
             .iter()
             .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
-        let turn_end_pos = observed
-            .iter()
-            .position(|e| e == wire::WIRE_TURN_END);
+        let turn_end_pos = observed.iter().position(|e| e == wire::WIRE_TURN_END);
         assert!(
             metrics_pos.is_some(),
             "context_metrics_update should be emitted, observed: {:?}",
@@ -2171,9 +2171,7 @@ mod tests {
         let metrics_pos = observed
             .iter()
             .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
-        let turn_end_pos = observed
-            .iter()
-            .position(|e| e == wire::WIRE_TURN_END);
+        let turn_end_pos = observed.iter().position(|e| e == wire::WIRE_TURN_END);
         assert!(
             metrics_pos.is_some(),
             "context_metrics_update should be emitted on text-only path, observed: {:?}",

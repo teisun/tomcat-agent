@@ -4,6 +4,8 @@ use std::io::{self, Write as IoWrite};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::core::compaction::run_compaction_cascade_v2;
+use crate::core::session::manager::{build_context_from_state, init_context_state, TurnEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventContext;
 use crate::infra::{
@@ -11,14 +13,10 @@ use crate::infra::{
     TracingAuditRecorder,
 };
 use crate::{
-    convert_to_llm_format, resolve_extra_roots_paths,
-    resolve_sessions_dir, resolve_workspace_dir, AgentLoop, AgentLoopConfig, AppConfig,
-    ChatMessage, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider,
-    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
-};
-use crate::core::compaction::run_compaction_cascade_v2;
-use crate::core::session::manager::{
-    build_context_from_state, init_context_state, TurnEntry,
+    convert_to_llm_format, resolve_extra_roots_paths, resolve_sessions_dir, resolve_workspace_dir,
+    AgentLoop, AgentLoopConfig, AppConfig, ChatMessage, DefaultPrimitiveExecutor,
+    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
+    SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -258,8 +256,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let context_config = &ctx.config.context;
     let workspace_str = ctx.workspace_dir.to_string_lossy();
     let system_text = crate::core::system_prompt::build_system_prompt(&workspace_str);
-    let mut context_state =
-        init_context_state(&ctx.session, context_config, &system_text)?;
+    let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
 
     loop {
         let input = match rl.readline("u> ") {
@@ -411,24 +408,27 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
                 // Take back ContextState
                 context_state = agent_loop.take_context_state().unwrap_or_else(|| {
-                    init_context_state(&ctx.session, context_config, &system_text)
-                        .unwrap_or(crate::core::ContextState {
+                    init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
+                        crate::core::ContextState {
                             user_turns_list: Vec::new(),
                             estimate_context_chars: system_text.len(),
-                            context_budget_chars: crate::infra::config::compute_context_budget_chars(
-                                context_config,
-                            ),
-                            context_budget_tokens: context_config.context_window.saturating_sub(context_config.max_output_tokens),
+                            context_budget_chars:
+                                crate::infra::config::compute_context_budget_chars(context_config),
+                            context_budget_tokens: context_config
+                                .context_window
+                                .saturating_sub(context_config.max_output_tokens),
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
                             compaction_consecutive_failures: 0,
-                        })
+                        },
+                    )
                 });
 
                 // Pack current turn and append to context state
                 let current_turn = TurnEntry::UserTurn {
                     messages: result.new_messages.clone(),
-                    timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    timestamp: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 };
                 context_state.on_new_user_turn(current_turn);
 
@@ -446,18 +446,20 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
                 // Take back context state even on error
                 context_state = agent_loop.take_context_state().unwrap_or_else(|| {
-                    init_context_state(&ctx.session, context_config, &system_text)
-                        .unwrap_or(crate::core::ContextState {
+                    init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
+                        crate::core::ContextState {
                             user_turns_list: Vec::new(),
                             estimate_context_chars: system_text.len(),
-                            context_budget_chars: crate::infra::config::compute_context_budget_chars(
-                                context_config,
-                            ),
-                            context_budget_tokens: context_config.context_window.saturating_sub(context_config.max_output_tokens),
+                            context_budget_chars:
+                                crate::infra::config::compute_context_budget_chars(context_config),
+                            context_budget_tokens: context_config
+                                .context_window
+                                .saturating_sub(context_config.max_output_tokens),
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
                             compaction_consecutive_failures: 0,
-                        })
+                        },
+                    )
                 });
 
                 let is_fatal = is_fatal_error(&e);

@@ -1,5 +1,16 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-05 | ACTIVE | develop | — |
+
+### style：`cargo fmt` 同步（chat / compaction / 测试等）
+
+- 对 `pi-rust-wasm` 内多处源文件与集成测试做 rustfmt（换行、import 顺序等），**无行为变更**。
+- 提交前：`cargo test --lib` PASS（395 passed，1 ignored）。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-04 | ACTIVE | develop | — |
 
 ### session：append 消息链校验拆至 `append_message_chain.rs` + JSONL id backfill 脚本

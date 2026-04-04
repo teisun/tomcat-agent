@@ -130,9 +130,7 @@ impl SystemPromptSection for WorkspaceContextSection {
     }
     fn render(&self, workspace_dir: &str) -> String {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M %Z");
-        format!(
-            "Current date and time: {now}\nCurrent working directory: {workspace_dir}"
-        )
+        format!("Current date and time: {now}\nCurrent working directory: {workspace_dir}")
     }
     fn priority(&self) -> u32 {
         200
@@ -196,15 +194,27 @@ mod tests {
     fn builder_sections_ordered_by_priority() {
         struct HighPriority;
         impl SystemPromptSection for HighPriority {
-            fn section_name(&self) -> &str { "high" }
-            fn render(&self, _: &str) -> String { "HIGH".to_string() }
-            fn priority(&self) -> u32 { 1 }
+            fn section_name(&self) -> &str {
+                "high"
+            }
+            fn render(&self, _: &str) -> String {
+                "HIGH".to_string()
+            }
+            fn priority(&self) -> u32 {
+                1
+            }
         }
         struct LowPriority;
         impl SystemPromptSection for LowPriority {
-            fn section_name(&self) -> &str { "low" }
-            fn render(&self, _: &str) -> String { "LOW".to_string() }
-            fn priority(&self) -> u32 { 999 }
+            fn section_name(&self) -> &str {
+                "low"
+            }
+            fn render(&self, _: &str) -> String {
+                "LOW".to_string()
+            }
+            fn priority(&self) -> u32 {
+                999
+            }
         }
 
         let mut builder = SystemPromptBuilder::new();
@@ -220,8 +230,12 @@ mod tests {
     fn custom_section_appears_in_output() {
         struct CustomSection;
         impl SystemPromptSection for CustomSection {
-            fn section_name(&self) -> &str { "custom" }
-            fn render(&self, _: &str) -> String { "CUSTOM_CONTENT".to_string() }
+            fn section_name(&self) -> &str {
+                "custom"
+            }
+            fn render(&self, _: &str) -> String {
+                "CUSTOM_CONTENT".to_string()
+            }
         }
 
         let mut builder = SystemPromptBuilder::default();

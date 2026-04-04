@@ -348,7 +348,9 @@ impl Default for ContextConfig {
 /// 公式：`(context_window - max_output_tokens) * 4 * 0.75`
 /// 其中 `*4` 将 token 转为近似字符数（chars/4 启发式），`*0.75` 为安全余量。
 pub fn compute_context_budget_chars(config: &ContextConfig) -> usize {
-    let available_tokens = config.context_window.saturating_sub(config.max_output_tokens);
+    let available_tokens = config
+        .context_window
+        .saturating_sub(config.max_output_tokens);
     let chars_estimate = available_tokens * 4;
     chars_estimate * 3 / 4
 }

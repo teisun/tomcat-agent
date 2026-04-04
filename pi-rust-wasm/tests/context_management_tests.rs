@@ -4,15 +4,15 @@
 mod common;
 
 use async_trait::async_trait;
+use pi_wasm::core::compaction::{
+    compact_tool_results, force_drop_oldest, run_compaction_loop, truncate_tool_result_if_needed,
+};
 use pi_wasm::{
     build_context_from_state, init_context_state, wire, AgentLoop, AgentLoopConfig, AgentMessage,
     AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
     ContextConfig, ContextState, DefaultEventBus, DirEntry, EditFileResult, EditOperation,
     EventBus, EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation, SessionManager,
     StreamEvent, ToolCallInfo, TurnEntry, WriteFileResult,
-};
-use pi_wasm::core::compaction::{
-    compact_tool_results, force_drop_oldest, run_compaction_loop, truncate_tool_result_if_needed,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -179,8 +179,7 @@ async fn test_large_tool_result_triggers_truncation_event() -> Result<(), Box<dy
     let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 600_000 });
     let event_bus = Arc::new(DefaultEventBus::new());
 
-    let truncated_event: Arc<Mutex<Option<(String, usize, usize)>>> =
-        Arc::new(Mutex::new(None));
+    let truncated_event: Arc<Mutex<Option<(String, usize, usize)>>> = Arc::new(Mutex::new(None));
     let ev_clone = Arc::clone(&truncated_event);
     event_bus.on(
         wire::WIRE_TOOL_RESULT_TRUNCATED,
@@ -288,7 +287,10 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
             timestamp: TEST_TS.to_string(),
         });
     }
-    let total: usize = turns.iter().map(pi_wasm::core::session::estimate_turn_chars).sum();
+    let total: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
 
     let budget_chars = 30_000;
     let budget_tokens = budget_chars / 4;
@@ -305,7 +307,11 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
 
     info!("Act: Layer 1 compact_tool_results (keep_recent=1)");
     let reduced = compact_tool_results(&mut state, 1);
-    info!("Layer 1 reduced {} chars, still over? {}", reduced, state.is_over_budget());
+    info!(
+        "Layer 1 reduced {} chars, still over? {}",
+        reduced,
+        state.is_over_budget()
+    );
     assert!(reduced > 0, "Layer 1 应替换了部分 tool results");
 
     if state.is_over_budget() {
@@ -320,10 +326,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         state.estimate_context_chars,
         state.context_budget_chars
     );
-    assert!(
-        !state.user_turns_list.is_empty(),
-        "至少保留一个 turn"
-    );
+    assert!(!state.user_turns_list.is_empty(), "至少保留一个 turn");
 }
 
 /// [Session 重载] 写入消息与 Compaction entry 后 init_context_state 正确重建
@@ -370,18 +373,26 @@ fn test_session_reload_with_compaction_entries() -> Result<(), Box<dyn std::erro
     // Total expected: old turns + SummaryTurn + new turn = depends on grouping
     // Actually: entries order is msg, msg, msg, msg, compaction, msg, msg
     // The init_context_state groups: UserTurn(q1,a1), UserTurn(q2,a2), then compaction flushes → SummaryTurn, then UserTurn(new q, new a)
-    assert!(state.user_turns_list.len() >= 3, "should have at least 3 groups: 2 old turns + summary + 1 new turn, got {}", state.user_turns_list.len());
+    assert!(
+        state.user_turns_list.len() >= 3,
+        "should have at least 3 groups: 2 old turns + summary + 1 new turn, got {}",
+        state.user_turns_list.len()
+    );
 
-    let has_summary = state.user_turns_list.iter().any(|t| {
-        matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal"))
-    });
-    assert!(has_summary, "应含 SummaryTurn 且内容包含 compaction summary");
+    let has_summary = state
+        .user_turns_list
+        .iter()
+        .any(|t| matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal")));
+    assert!(
+        has_summary,
+        "应含 SummaryTurn 且内容包含 compaction summary"
+    );
 
     let has_new_turn = state.user_turns_list.iter().any(|t| {
         if let TurnEntry::UserTurn { messages, .. } = t {
-            messages.iter().any(|m| {
-                matches!(m, AgentMessage::User { text } if text.contains("new question"))
-            })
+            messages
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("new question")))
         } else {
             false
         }
@@ -403,8 +414,7 @@ fn test_session_reload_with_compaction_entries() -> Result<(), Box<dyn std::erro
 async fn test_context_overflow_triggers_compaction_and_retries(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span =
-        info_span!("test_context_overflow_triggers_compaction_and_retries").entered();
+    let _span = info_span!("test_context_overflow_triggers_compaction_and_retries").entered();
 
     info!("Arrange: MockLlm 首次返回 context overflow 错误，第二次返回成功文本");
     let stream_err = vec![Err(AppError::Llm(
@@ -530,10 +540,7 @@ fn test_truncation_unicode_safety_integration() {
     assert!(info.is_some());
 
     info!("Assert: 截断后为合法 UTF-8 且长度合理");
-    assert!(
-        content.len() < original_len,
-        "截断后应比原始短"
-    );
+    assert!(content.len() < original_len, "截断后应比原始短");
     let _ = content.chars().count(); // panics if invalid UTF-8
     assert!(
         content.ends_with("[truncated — original content exceeded limit]"),
@@ -762,7 +769,8 @@ fn test_compact_tool_results_replaces_with_placeholder() {
 #[test]
 fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     common::setup_logging();
-    let _span = info_span!("test_compact_tool_results_replaces_all_large_in_compactable_zone").entered();
+    let _span =
+        info_span!("test_compact_tool_results_replaces_all_large_in_compactable_zone").entered();
 
     let big = "x".repeat(25_000);
     let small = "x".repeat(5_000);
@@ -806,10 +814,26 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
             panic!("not a UserTurn");
         }
     };
-    assert_eq!(get_tool_content(0), PLACEHOLDER, "first (>20K) should be replaced");
-    assert_eq!(get_tool_content(1), small, "second (<20K) should keep original");
-    assert_eq!(get_tool_content(2), PLACEHOLDER, "third (>20K) should be replaced");
-    assert_eq!(get_tool_content(3), big, "fourth (protected) should keep original");
+    assert_eq!(
+        get_tool_content(0),
+        PLACEHOLDER,
+        "first (>20K) should be replaced"
+    );
+    assert_eq!(
+        get_tool_content(1),
+        small,
+        "second (<20K) should keep original"
+    );
+    assert_eq!(
+        get_tool_content(2),
+        PLACEHOLDER,
+        "third (>20K) should be replaced"
+    );
+    assert_eq!(
+        get_tool_content(3),
+        big,
+        "fourth (protected) should keep original"
+    );
 }
 
 /// [Layer 1 深度] estimate 精确变化量（>20K 阈值才触发替换）
@@ -876,7 +900,9 @@ async fn test_compaction_loop_single_batch() {
     common::setup_logging();
     let _span = info_span!("test_compaction_loop_single_batch").entered();
 
-    let turns: Vec<TurnEntry> = (0..6).map(|i| make_big_turn(&format!("q{}", i), 2_000)).collect();
+    let turns: Vec<TurnEntry> = (0..6)
+        .map(|i| make_big_turn(&format!("q{}", i), 2_000))
+        .collect();
     let total: usize = turns
         .iter()
         .map(pi_wasm::core::session::estimate_turn_chars)
@@ -916,7 +942,10 @@ async fn test_compaction_loop_single_batch() {
         matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal")),
         "first turn should be SummaryTurn"
     );
-    assert!(!state.is_over_budget(), "should be within budget after compaction");
+    assert!(
+        !state.is_over_budget(),
+        "should be within budget after compaction"
+    );
     assert_eq!(llm.captured_count(), 1, "LLM chat called exactly once");
 }
 
@@ -926,7 +955,9 @@ async fn test_compaction_loop_multi_batch() {
     common::setup_logging();
     let _span = info_span!("test_compaction_loop_multi_batch").entered();
 
-    let turns: Vec<TurnEntry> = (0..10).map(|i| make_big_turn(&format!("q{}", i), 2_000)).collect();
+    let turns: Vec<TurnEntry> = (0..10)
+        .map(|i| make_big_turn(&format!("q{}", i), 2_000))
+        .collect();
     let total: usize = turns
         .iter()
         .map(pi_wasm::core::session::estimate_turn_chars)
@@ -1015,12 +1046,18 @@ async fn test_compaction_loop_update_mode() {
 
     info!("Assert: UPDATE prompt used (contains 'Existing summary')");
     let texts = llm.captured_all_message_texts();
-    assert!(!texts.is_empty(), "should have captured at least one request");
+    assert!(
+        !texts.is_empty(),
+        "should have captured at least one request"
+    );
     let has_update_marker = texts.iter().any(|t| t.contains("Existing summary"));
     assert!(
         has_update_marker,
         "at least one message should contain UPDATE template marker 'Existing summary', got: {:?}",
-        texts.iter().map(|t| &t[..80.min(t.len())]).collect::<Vec<_>>()
+        texts
+            .iter()
+            .map(|t| &t[..80.min(t.len())])
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1030,7 +1067,9 @@ async fn test_compaction_loop_llm_error_degrades() {
     common::setup_logging();
     let _span = info_span!("test_compaction_loop_llm_error_degrades").entered();
 
-    let turns: Vec<TurnEntry> = (0..4).map(|i| make_big_turn(&format!("q{}", i), 2_000)).collect();
+    let turns: Vec<TurnEntry> = (0..4)
+        .map(|i| make_big_turn(&format!("q{}", i), 2_000))
+        .collect();
     let total: usize = turns
         .iter()
         .map(pi_wasm::core::session::estimate_turn_chars)
@@ -1110,9 +1149,9 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
 
     let has_old = state.user_turns_list.iter().any(|t| {
         if let TurnEntry::UserTurn { messages, .. } = t {
-            messages.iter().any(|m| {
-                matches!(m, AgentMessage::User { text } if text.contains("old"))
-            })
+            messages
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("old")))
         } else {
             false
         }
@@ -1126,9 +1165,9 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
 
     let has_new = state.user_turns_list.iter().any(|t| {
         if let TurnEntry::UserTurn { messages, .. } = t {
-            messages.iter().any(|m| {
-                matches!(m, AgentMessage::User { text } if text.contains("new"))
-            })
+            messages
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("new")))
         } else {
             false
         }
@@ -1171,7 +1210,10 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
     assert_eq!(results.len(), 1);
 
     let readback = std::fs::read_to_string(&results[0].persisted_path)?;
-    assert_eq!(readback, original, "persisted content should match original");
+    assert_eq!(
+        readback, original,
+        "persisted content should match original"
+    );
 
     if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[0] {
         if let AgentMessage::ToolResult { content, .. } = &messages[0] {
@@ -1180,7 +1222,10 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
-    assert!(state.estimate_context_chars < original.len(), "estimate should decrease after persistence");
+    assert!(
+        state.estimate_context_chars < original.len(),
+        "estimate should decrease after persistence"
+    );
 
     Ok(())
 }
@@ -1217,7 +1262,10 @@ fn test_cascade_params_small_window_buffer_safety() {
         ..Default::default()
     };
     let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade, "small window: ratio 0.40 but remaining(3000) < buffer(4800) should trigger");
+    assert!(
+        params.should_cascade,
+        "small window: ratio 0.40 but remaining(3000) < buffer(4800) should trigger"
+    );
 }
 
 /// [Layer 2] 摘要比原文长时中断：不死循环，state 不变
@@ -1226,7 +1274,9 @@ async fn test_compaction_loop_summary_too_long_breaks() {
     common::setup_logging();
     let _span = info_span!("test_compaction_loop_summary_too_long_breaks").entered();
 
-    let turns: Vec<TurnEntry> = (0..4).map(|i| make_big_turn(&format!("q{}", i), 500)).collect();
+    let turns: Vec<TurnEntry> = (0..4)
+        .map(|i| make_big_turn(&format!("q{}", i), 500))
+        .collect();
     let total: usize = turns
         .iter()
         .map(pi_wasm::core::session::estimate_turn_chars)

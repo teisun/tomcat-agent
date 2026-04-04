@@ -150,8 +150,8 @@ pub fn layer0_persist_large_results(
             ..
         } = msg
         {
-            let should_persist =
-                content.len() >= single_max || (needs_aggregate && content.len() > LAYER0_PREVIEW_CHARS);
+            let should_persist = content.len() >= single_max
+                || (needs_aggregate && content.len() > LAYER0_PREVIEW_CHARS);
 
             if !should_persist {
                 continue;
@@ -362,18 +362,14 @@ pub async fn run_compaction_loop(
             .map(estimate_turn_chars)
             .sum();
 
-        let summary = match generate_or_update_summary(
-            llm,
-            config,
-            &batch_text,
-            existing_summary.as_deref(),
-        )
-        .await
-        {
-            Ok(s) if !s.is_empty() && s.len() < old_batch_chars => s,
-            Ok(_) => break,
-            Err(_) => break,
-        };
+        let summary =
+            match generate_or_update_summary(llm, config, &batch_text, existing_summary.as_deref())
+                .await
+            {
+                Ok(s) if !s.is_empty() && s.len() < old_batch_chars => s,
+                Ok(_) => break,
+                Err(_) => break,
+            };
 
         let summary_chars = summary.len();
 
@@ -468,10 +464,7 @@ async fn generate_or_update_summary(
 
     let req = ChatRequest {
         model: config.compaction_model.clone(),
-        messages: vec![
-            ChatMessage::system(&prompt),
-            ChatMessage::user(batch_text),
-        ],
+        messages: vec![ChatMessage::system(&prompt), ChatMessage::user(batch_text)],
         stream: Some(false),
         ..Default::default()
     };
@@ -497,7 +490,9 @@ async fn retry_with_half_range(
     compactable_end: usize,
 ) -> Result<(String, usize, usize), AppError> {
     if compactable_end <= 1 {
-        return Err(AppError::internal("compactable zone too small for PTL retry"));
+        return Err(AppError::internal(
+            "compactable zone too small for PTL retry",
+        ));
     }
     let retry_end = compactable_end - 1;
 
@@ -508,13 +503,8 @@ async fn retry_with_half_range(
         }
         let sub_batch = &state.user_turns_list[range_start..retry_end];
         let prev = find_last_summary(sub_batch);
-        match generate_or_update_summary(
-            llm,
-            config,
-            &turns_to_text(sub_batch),
-            prev.as_deref(),
-        )
-        .await
+        match generate_or_update_summary(llm, config, &turns_to_text(sub_batch), prev.as_deref())
+            .await
         {
             Ok(text) if !text.is_empty() => return Ok((text, range_start, retry_end)),
             Err(e) if is_context_overflow_error(&e.to_string()) => {
@@ -563,12 +553,11 @@ pub struct CascadeParams {
 }
 
 /// 根据当前 ratio 和 buffer 安全网决定 cascade 参数。
-pub fn determine_cascade_params(
-    state: &ContextState,
-    config: &ContextConfig,
-) -> CascadeParams {
+pub fn determine_cascade_params(state: &ContextState, config: &ContextConfig) -> CascadeParams {
     let ratio = state.usage_ratio();
-    let input_budget = config.context_window.saturating_sub(config.max_output_tokens);
+    let input_budget = config
+        .context_window
+        .saturating_sub(config.max_output_tokens);
     let remaining = input_budget.saturating_sub(state.estimated_token_count());
 
     let buffer_cap = |val: usize| val.min(input_budget * 3 / 10);
@@ -751,11 +740,17 @@ mod tests {
     const TS: &str = "2026-04-04T12:00:00Z";
 
     fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
-        TurnEntry::UserTurn { messages, timestamp: TS.to_string() }
+        TurnEntry::UserTurn {
+            messages,
+            timestamp: TS.to_string(),
+        }
     }
 
     fn make_summary_turn(summary: impl Into<String>) -> TurnEntry {
-        TurnEntry::SummaryTurn { summary: summary.into(), timestamp: TS.to_string() }
+        TurnEntry::SummaryTurn {
+            summary: summary.into(),
+            timestamp: TS.to_string(),
+        }
     }
 
     fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> ContextState {
@@ -1078,7 +1073,8 @@ mod tests {
         state.user_turns_list = vec![
             make_user_turn(vec![AgentMessage::ToolResult {
                 tool_call_id: "c1".into(),
-                content: "[Tool result persisted: /tmp/foo.txt (50000 chars)]\nPreview: ...".to_string(),
+                content: "[Tool result persisted: /tmp/foo.txt (50000 chars)]\nPreview: ..."
+                    .to_string(),
                 is_error: false,
             }]),
             make_user_turn(vec![AgentMessage::User {
@@ -1086,7 +1082,10 @@ mod tests {
             }]),
         ];
         let reduced = compact_tool_results(&mut state, 1);
-        assert_eq!(reduced, 0, "already persisted results should not be replaced");
+        assert_eq!(
+            reduced, 0,
+            "already persisted results should not be replaced"
+        );
     }
 
     #[test]
@@ -1103,7 +1102,10 @@ mod tests {
             }]),
         ];
         let reduced = compact_tool_results(&mut state, 1);
-        assert_eq!(reduced, 0, "already replaced results should not be re-replaced");
+        assert_eq!(
+            reduced, 0,
+            "already replaced results should not be re-replaced"
+        );
     }
 
     #[test]
@@ -1180,7 +1182,10 @@ mod tests {
             ..Default::default()
         };
         let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
-        assert!(!results.is_empty(), "aggregate threshold should trigger persistence");
+        assert!(
+            !results.is_empty(),
+            "aggregate threshold should trigger persistence"
+        );
     }
 
     #[test]
@@ -1197,7 +1202,10 @@ mod tests {
         let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess1");
         assert_eq!(results.len(), 1);
         let content = std::fs::read_to_string(&results[0].persisted_path).unwrap();
-        assert_eq!(content, original, "persisted file should contain original content");
+        assert_eq!(
+            content, original,
+            "persisted file should contain original content"
+        );
     }
 
     #[test]
@@ -1213,7 +1221,10 @@ mod tests {
             }]),
         ];
         force_drop_oldest_to_target(&mut state);
-        assert!(state.last_api_usage.is_none(), "usage should be invalidated after force drop");
+        assert!(
+            state.last_api_usage.is_none(),
+            "usage should be invalidated after force drop"
+        );
     }
 
     #[test]

@@ -460,10 +460,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                         .wasmedge_env_path
                         .as_deref()
                         .unwrap_or(r#"$HOME/.wasmedge/env"#);
-                    format!(
-                        r#"[ -f "{0}" ] && . "{0}"; {1}"#,
-                        env_path, command
-                    )
+                    format!(r#"[ -f "{0}" ] && . "{0}"; {1}"#, env_path, command)
                 };
                 #[cfg(windows)]
                 let script = command.to_string();

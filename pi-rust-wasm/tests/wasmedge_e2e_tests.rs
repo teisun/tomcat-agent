@@ -1577,24 +1577,23 @@ async fn test_wasmedge_e2e_tier4_files_real_ts() -> Result<(), Box<dyn std::erro
     let key = session_mgr.current_session_key().to_string();
     session_mgr.create_session(&key, Some("/tmp".to_string()))?;
 
-    // Populate transcript with toolCall + toolResult entries so getBranch returns data.
+    // Populate transcript with assistant+tool_calls + tool entries so getBranch returns data.
     let assistant_msg = serde_json::json!({
         "role": "assistant",
         "timestamp": 1000,
-        "content": [{
-            "type": "toolCall",
+        "tool_calls": [{
             "id": "tc-1",
-            "name": "read",
-            "arguments": { "path": "/tmp/foo.rs" }
+            "type": "function",
+            "function": { "name": "read", "arguments": "{\"path\":\"/tmp/foo.rs\"}" }
         }]
     });
     session_mgr.append_message(assistant_msg)?;
 
     let tool_result_msg = serde_json::json!({
-        "role": "toolResult",
+        "role": "tool",
         "timestamp": 1001,
-        "toolCallId": "tc-1",
-        "content": [{ "type": "text", "text": "file contents" }]
+        "tool_call_id": "tc-1",
+        "content": "file contents"
     });
     session_mgr.append_message(tool_result_msg)?;
 
@@ -1871,11 +1870,11 @@ async fn test_e2e_community_files() -> Result<(), Box<dyn std::error::Error>> {
     session_mgr.create_session(&key, Some("/tmp".to_string()))?;
     session_mgr.append_message(serde_json::json!({
         "role": "assistant", "timestamp": 1000,
-        "content": [{"type": "toolCall", "id": "tc-1", "name": "read", "arguments": {"path": "/tmp/foo.rs"}}]
+        "tool_calls": [{"id": "tc-1", "type": "function", "function": {"name": "read", "arguments": "{\"path\":\"/tmp/foo.rs\"}"}}]
     }))?;
     session_mgr.append_message(serde_json::json!({
-        "role": "toolResult", "timestamp": 1001, "toolCallId": "tc-1",
-        "content": [{"type": "text", "text": "file contents"}]
+        "role": "tool", "timestamp": 1001, "tool_call_id": "tc-1",
+        "content": "file contents"
     }))?;
 
     let bus = Arc::new(DefaultEventBus::new());
@@ -2227,7 +2226,10 @@ async fn test_e2e_community_overlay_qa_tests() -> Result<(), Box<dyn std::error:
     for _ in 0..40 {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         cmds = dispatcher.registered_plugin_commands(&inst_id);
-        let overlay_count = cmds.iter().filter(|(n, _)| n.starts_with("overlay-")).count();
+        let overlay_count = cmds
+            .iter()
+            .filter(|(n, _)| n.starts_with("overlay-"))
+            .count();
         if cmds.iter().any(|(n, _)| n == "overlay-animation") && overlay_count >= 5 {
             break;
         }
@@ -2237,7 +2239,10 @@ async fn test_e2e_community_overlay_qa_tests() -> Result<(), Box<dyn std::error:
         "overlay-qa-tests should register 'overlay-animation', got: {:?}",
         cmds
     );
-    let overlay_count = cmds.iter().filter(|(n, _)| n.starts_with("overlay-")).count();
+    let overlay_count = cmds
+        .iter()
+        .filter(|(n, _)| n.starts_with("overlay-"))
+        .count();
     assert!(
         overlay_count >= 5,
         "overlay-qa-tests should register multiple overlay-* commands, got {}",

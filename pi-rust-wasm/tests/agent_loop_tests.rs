@@ -898,9 +898,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     let metrics_pos = order
         .iter()
         .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
-    let turn_end_pos = order
-        .iter()
-        .position(|e| e == wire::WIRE_TURN_END);
+    let turn_end_pos = order.iter().position(|e| e == wire::WIRE_TURN_END);
     assert!(
         metrics_pos.is_some() && turn_end_pos.is_some(),
         "应同时捕获 context_metrics_update 和 turn_end，实际: {:?}",
