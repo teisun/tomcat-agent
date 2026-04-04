@@ -7,6 +7,7 @@
 - **核心文件**：
   - `src/core/session/store.rs` — sessions.json 元数据 load/save、原子写
   - `src/core/session/transcript.rs` — SessionHeader、TranscriptEntry、流式读/追加写、get_entry/get_children/get_branch 等
+  - `src/core/session/append_message_chain.rs` — 落盘前 OpenAI Chat Completions 消息链校验（规则 A–E）；从 transcript tail 收集连续 `Message` 的内层 JSON 供校验
   - `src/core/session/manager.rs` — SessionManager：CRUD、上下文组装、会话级配置
   - `src/api/cli.rs` — clap 子命令定义与 run_init/run_doctor/run_config/run_session/run_plugin/run_audit/run_chat
   - `src/main.rs` — 二进制入口，调用 `run_cli()`
@@ -52,6 +53,7 @@
 
 - **首行**：SessionHeader（type、version、id、timestamp、cwd）。
 - **后续行**：TranscriptEntry 枚举（message、model_change、thinking_level_change、session_info、compaction、branch_summary、label、custom），与 session-pi-mono-format.jsonl 兼容。
+- **`message` 行顶层 `id`**：新写入由运行时生成（Unix 微秒 + 进程内单调序号，形如 `微秒_序号`）；历史 JSONL 若 `id` 为空可一次性 backfill（见仓库 `scripts/backfill_transcript_message_ids.py`）。
 - **读写约定**：禁止整文件 `from_str`；使用 BufReader 逐行读；上下文组装仅保留最近 N 条（默认 10）；append 仅追加不修改历史。
 
 ---
@@ -60,7 +62,7 @@
 
 - **构造**：`SessionManager::new(sessions_dir: PathBuf)` 或 `SessionManager::from_sessions_dir(sessions_dir: &str)`（内部 normalize_path）。
 - **CRUD**：`create_session`、`get_session`、`list_sessions`、`update_session`、`delete_session`、`archive_session`。
-- **消息**：`append_message`、`append_thinking_level_change`、`append_model_change`、`append_compaction`、`append_session_info`、`append_label_change`；`get_entries`、`get_entry`、`get_children`、`get_leaf_entry`、`get_branch`。
+- **消息**：`append_message`（核心路径：链违规 `panic!`）、`try_append_message`（插件/dispatcher：链违规返回 `AppError::Config`）；以及 `append_thinking_level_change`、`append_model_change`、`append_compaction`、`append_session_info`、`append_label_change`；`get_entries`、`get_entry`、`get_children`、`get_leaf_entry`、`get_branch`。链校验逻辑见 `append_message_chain.rs`。
 - **上下文**：`init_context_state` 按天筛选 + 不足 10 向前补齐，构建 `ContextState`；`build_context_from_state` 展平为 `AgentMessage` 列表。
 
 ---

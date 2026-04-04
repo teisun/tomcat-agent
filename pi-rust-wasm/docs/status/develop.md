@@ -1,5 +1,18 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-04 | ACTIVE | develop | — |
+
+### session：append 消息链校验拆至 `append_message_chain.rs` + JSONL id backfill 脚本
+
+- 新增 [`src/core/session/append_message_chain.rs`](../../src/core/session/append_message_chain.rs)：`collect_recent_chat_messages_from_tail`、`validate_append_message`（OpenAI 规则 A–E）及单测；`SessionManager` 仍负责 `generate_entry_id` / tail cap / `append_entry`。
+- [`src/core/session/README.md`](../../src/core/session/README.md) 已补充模块说明与 `append_message` vs `try_append_message`。
+- 工具脚本 [`scripts/backfill_transcript_message_ids.py`](../../scripts/backfill_transcript_message_ids.py)：对 `type=message` 且顶层 `id` 为空的行写入 `{timestamp_micros}_{seq}`；执行前默认写 `.jsonl.bak`。
+- 本机验收：`cargo fmt`；`cargo clippy -p pi_wasm --lib -- -D warnings`；`cargo test --lib`（395 passed，1 ignored）。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-03 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-19（feature/context-management-v2 并入 develop）

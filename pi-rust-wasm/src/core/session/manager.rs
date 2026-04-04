@@ -3,12 +3,19 @@
 //! 通过 Mutex 序列化 sessions.json 的写入，保证并发安全（不锁文件）。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 use chrono::Utc;
 
+static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
+const VALIDATE_TAIL_CAP: usize = 64;
+
+use super::append_message_chain::{
+    collect_recent_chat_messages_from_tail, validate_append_message,
+};
 use super::store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 use super::transcript::{
     append_entry, get_branch, get_children, get_entry, get_leaf_entry, read_entries_tail,
@@ -186,28 +193,27 @@ fn parse_date(ts: &str) -> Option<NaiveDate> {
 ///   - 所有 today 的 turns
 ///   - 不足 min_turns 时的 backfill turns
 ///   - boundary 之后的全部内容
-fn compute_fold_start(
-    entries: &[TranscriptEntry],
-    today: NaiveDate,
-    min_turns: usize,
-) -> usize {
-    let boundary = entries.iter().rposition(|e| {
-        matches!(e, TranscriptEntry::Compaction(ce) if ce.is_boundary == Some(true))
-    });
+fn compute_fold_start(entries: &[TranscriptEntry], today: NaiveDate, min_turns: usize) -> usize {
+    let boundary = entries.iter().rposition(
+        |e| matches!(e, TranscriptEntry::Compaction(ce) if ce.is_boundary == Some(true)),
+    );
     let effective_start = boundary.unwrap_or(0);
 
     let today_start = entries[effective_start..]
         .iter()
-        .position(|e| parse_date(entry_timestamp(e)).map_or(false, |d| d == today))
+        .position(|e| parse_date(entry_timestamp(e)) == Some(today))
         .map(|i| effective_start + i);
 
     let today_user_msgs = today_start.map_or(0, |start| {
-        entries[start..].iter().filter(|e| is_user_message(e)).count()
+        entries[start..]
+            .iter()
+            .filter(|e| is_user_message(e))
+            .count()
     });
 
     if today_user_msgs >= min_turns {
         if let Some(b) = boundary {
-            if today_start.map_or(false, |ts| ts > b) {
+            if today_start.is_some_and(|ts| ts > b) {
                 return b;
             }
         }
@@ -232,7 +238,10 @@ fn compute_fold_start(
 
 /// Phase 2: 将 entries 折叠为带 timestamp 的 TurnEntry 列表。
 /// boundary compaction 仍会清除之前的 turns。
-fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) -> (Vec<TurnEntry>, usize) {
+fn fold_entries_to_turns(
+    entries: &[TranscriptEntry],
+    system_text_len: usize,
+) -> (Vec<TurnEntry>, usize) {
     let mut turns: Vec<TurnEntry> = Vec::new();
     let mut current_turn_msgs: Vec<AgentMessage> = Vec::new();
     let mut current_turn_ts = String::new();
@@ -390,7 +399,9 @@ pub fn init_context_state(
     system_text: &str,
 ) -> Result<ContextState, AppError> {
     let budget = compute_context_budget_chars(config);
-    let token_budget = config.context_window.saturating_sub(config.max_output_tokens);
+    let token_budget = config
+        .context_window
+        .saturating_sub(config.max_output_tokens);
 
     let path = match session.current_transcript_path()? {
         Some(p) => p,
@@ -420,7 +431,10 @@ pub fn init_context_state(
     let selected = filter_turns_by_day(all_turns, today, DEFAULT_CONTEXT_CAP);
 
     let total_chars = system_text.len()
-        + selected.iter().map(|t| estimate_turn_chars(t)).sum::<usize>();
+        + selected
+            .iter()
+            .map(estimate_turn_chars)
+            .sum::<usize>();
 
     Ok(ContextState {
         user_turns_list: selected,
@@ -594,14 +608,42 @@ impl SessionManager {
         Ok(store.get(key).map(|e| self.transcript_path(&e.session_id)))
     }
 
-    /// 追加 message 到当前会话的 transcript。
+    // TODO: 并发 append 存在 TOCTOU 竞态，当前假设单线程串行调用；后续若引入并发需加文件锁或 Mutex
+    /// 追加 message 到当前会话的 transcript（核心路径：校验失败 panic!）。
     pub fn append_message(&self, message: serde_json::Value) -> Result<(), AppError> {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
+        let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
+        if let Err(reason) = validate_append_message(&message, &recent_msgs) {
+            panic!("[append_message] chain violation: {reason}");
+        }
+        let id = generate_entry_id();
         let now = iso_ts_now()?;
         let entry = TranscriptEntry::Message(MessageEntry {
-            id: None,
+            id: Some(id),
+            parent_id: None,
+            timestamp: now,
+            message,
+        });
+        append_entry(&path, &entry)
+    }
+
+    /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
+    pub fn try_append_message(&self, message: serde_json::Value) -> Result<(), AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
+        let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
+        if let Err(reason) = validate_append_message(&message, &recent_msgs) {
+            return Err(AppError::Config(format!("chain violation: {reason}")));
+        }
+        let id = generate_entry_id();
+        let now = iso_ts_now()?;
+        let entry = TranscriptEntry::Message(MessageEntry {
+            id: Some(id),
             parent_id: None,
             timestamp: now,
             message,
@@ -783,6 +825,12 @@ fn iso_ts(ms: i64) -> String {
 
 fn iso_ts_now() -> Result<String, AppError> {
     Ok(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn generate_entry_id() -> String {
+    let micros = Utc::now().timestamp_micros();
+    let seq = APPEND_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{micros}_{seq}")
 }
 
 // 供 append_* 使用的 transcript 条目类型
@@ -1070,10 +1118,14 @@ mod tests {
         let key = mgr.current_session_key();
         mgr.create_session(key, None).unwrap();
 
-        mgr.append_message(serde_json::json!({"role":"user","content":"q1"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"user","content":"q2"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"a2"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q2"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a2"}))
+            .unwrap();
 
         let cfg = ContextConfig::default();
         let state = init_context_state(&mgr, &cfg, "sys").unwrap();
@@ -1093,8 +1145,10 @@ mod tests {
         mgr.create_session(key, None).unwrap();
 
         mgr.append_compaction(Some("summary of old turns")).unwrap();
-        mgr.append_message(serde_json::json!({"role":"user","content":"q_after"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"a_after"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q_after"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a_after"}))
+            .unwrap();
 
         let cfg = ContextConfig::default();
         let state = init_context_state(&mgr, &cfg, "sys").unwrap();
@@ -1112,11 +1166,19 @@ mod tests {
     fn build_context_from_state_flattens_turns() {
         let state = ContextState {
             user_turns_list: vec![
-                TurnEntry::SummaryTurn { summary: "summary".to_string(), timestamp: "2026-04-04T12:00:00Z".to_string() },
+                TurnEntry::SummaryTurn {
+                    summary: "summary".to_string(),
+                    timestamp: "2026-04-04T12:00:00Z".to_string(),
+                },
                 TurnEntry::UserTurn {
                     messages: vec![
-                        AgentMessage::User { text: "hello".to_string() },
-                        AgentMessage::Assistant { text: "world".to_string(), tool_calls: vec![] },
+                        AgentMessage::User {
+                            text: "hello".to_string(),
+                        },
+                        AgentMessage::Assistant {
+                            text: "world".to_string(),
+                            tool_calls: vec![],
+                        },
                     ],
                     timestamp: "2026-04-04T12:00:00Z".to_string(),
                 },
@@ -1158,10 +1220,14 @@ mod tests {
         let key = mgr.current_session_key();
         mgr.create_session(key, None).unwrap();
 
-        mgr.append_message(serde_json::json!({"role":"user","content":"old q1"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"old a1"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"user","content":"old q2"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"old a2"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"old q1"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"old a1"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"old q2"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"old a2"}))
+            .unwrap();
 
         let path = mgr.current_transcript_path().unwrap().unwrap();
         let boundary_entry = TranscriptEntry::Compaction(CompactionEntry {
@@ -1176,8 +1242,10 @@ mod tests {
         });
         super::super::transcript::append_entry(&path, &boundary_entry).unwrap();
 
-        mgr.append_message(serde_json::json!({"role":"user","content":"new q"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"new a"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"new q"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"new a"}))
+            .unwrap();
 
         let cfg = ContextConfig::default();
         let state = init_context_state(&mgr, &cfg, "sys").unwrap();
@@ -1191,9 +1259,9 @@ mod tests {
 
         let has_old = state.user_turns_list.iter().any(|t| {
             if let TurnEntry::UserTurn { messages, .. } = t {
-                messages.iter().any(|m| {
-                    matches!(m, AgentMessage::User { text } if text.contains("old"))
-                })
+                messages
+                    .iter()
+                    .any(|m| matches!(m, AgentMessage::User { text } if text.contains("old")))
             } else {
                 false
             }
@@ -1212,15 +1280,21 @@ mod tests {
         let key = mgr.current_session_key();
         mgr.create_session(key, None).unwrap();
 
-        mgr.append_message(serde_json::json!({"role":"user","content":"q1"})).unwrap();
-        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"}))
+            .unwrap();
         mgr.append_compaction(Some("non-boundary summary")).unwrap();
-        mgr.append_message(serde_json::json!({"role":"user","content":"q2"})).unwrap();
+        mgr.append_message(serde_json::json!({"role":"user","content":"q2"}))
+            .unwrap();
 
         let cfg = ContextConfig::default();
         let state = init_context_state(&mgr, &cfg, "sys").unwrap();
 
-        assert!(state.user_turns_list.len() >= 3, "should preserve pre-compaction turn + summary + post turn");
+        assert!(
+            state.user_turns_list.len() >= 3,
+            "should preserve pre-compaction turn + summary + post turn"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1276,7 +1350,11 @@ mod tests {
         }
 
         let start = compute_fold_start(&entries, today, 10);
-        assert!(start >= 100, "should skip old entries, got fold_start={}", start);
+        assert!(
+            start >= 100,
+            "should skip old entries, got fold_start={}",
+            start
+        );
     }
 
     #[test]
@@ -1296,8 +1374,15 @@ mod tests {
         }
 
         let start = compute_fold_start(&entries, today, 10);
-        let user_msgs_from_start = entries[start..].iter().filter(|e| is_user_message(e)).count();
-        assert!(user_msgs_from_start >= 10, "should include backfill, user_msgs_from_start={}", user_msgs_from_start);
+        let user_msgs_from_start = entries[start..]
+            .iter()
+            .filter(|e| is_user_message(e))
+            .count();
+        assert!(
+            user_msgs_from_start >= 10,
+            "should include backfill, user_msgs_from_start={}",
+            user_msgs_from_start
+        );
     }
 
     #[test]
@@ -1332,8 +1417,15 @@ mod tests {
         }
 
         let start = compute_fold_start(&entries, today, 10);
-        let user_msgs = entries[start..].iter().filter(|e| is_user_message(e)).count();
-        assert!(user_msgs >= 10, "should backfill at least 10 user msgs, got {}", user_msgs);
+        let user_msgs = entries[start..]
+            .iter()
+            .filter(|e| is_user_message(e))
+            .count();
+        assert!(
+            user_msgs >= 10,
+            "should backfill at least 10 user msgs, got {}",
+            user_msgs
+        );
     }
 
     #[test]
@@ -1347,7 +1439,9 @@ mod tests {
 
     fn make_test_turn(ts: &str) -> TurnEntry {
         TurnEntry::UserTurn {
-            messages: vec![AgentMessage::User { text: "q".to_string() }],
+            messages: vec![AgentMessage::User {
+                text: "q".to_string(),
+            }],
             timestamp: ts.to_string(),
         }
     }
@@ -1365,7 +1459,9 @@ mod tests {
 
         let selected = filter_turns_by_day(turns, today, 10);
         assert_eq!(selected.len(), 12, "today has 12 >= 10, no backfill needed");
-        assert!(selected.iter().all(|t| parse_date(t.timestamp()) == Some(today)));
+        assert!(selected
+            .iter()
+            .all(|t| parse_date(t.timestamp()) == Some(today)));
     }
 
     #[test]
@@ -1382,26 +1478,41 @@ mod tests {
         let selected = filter_turns_by_day(turns, today, 10);
         assert_eq!(selected.len(), 10, "3 today + 7 backfill = 10");
 
-        let today_count = selected.iter().filter(|t| parse_date(t.timestamp()) == Some(today)).count();
+        let today_count = selected
+            .iter()
+            .filter(|t| parse_date(t.timestamp()) == Some(today))
+            .count();
         assert_eq!(today_count, 3);
     }
 
     #[test]
     fn filter_cross_midnight() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
-        let turns: Vec<_> = (0..15).map(|_| make_test_turn("2026-04-03T23:00:00Z")).collect();
+        let turns: Vec<_> = (0..15)
+            .map(|_| make_test_turn("2026-04-03T23:00:00Z"))
+            .collect();
 
         let selected = filter_turns_by_day(turns, today, 10);
-        assert_eq!(selected.len(), 10, "no today turns, backfill 10 from yesterday");
+        assert_eq!(
+            selected.len(),
+            10,
+            "no today turns, backfill 10 from yesterday"
+        );
     }
 
     #[test]
     fn filter_all_today_gt_10() {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
-        let turns: Vec<_> = (0..15).map(|_| make_test_turn("2026-04-04T10:00:00Z")).collect();
+        let turns: Vec<_> = (0..15)
+            .map(|_| make_test_turn("2026-04-04T10:00:00Z"))
+            .collect();
 
         let selected = filter_turns_by_day(turns, today, 10);
-        assert_eq!(selected.len(), 15, "all today turns should be kept without truncation");
+        assert_eq!(
+            selected.len(),
+            15,
+            "all today turns should be kept without truncation"
+        );
     }
 
     #[test]
@@ -1409,5 +1520,34 @@ mod tests {
         let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
         let selected = filter_turns_by_day(vec![], today, 10);
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn try_append_returns_err_on_violation() {
+        let dir = temp_sessions_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = SessionManager::new(dir.clone());
+        let key = mgr.current_session_key();
+        mgr.create_session(key, None).unwrap();
+        mgr.try_append_message(serde_json::json!({ "role": "user", "content": "hi" }))
+            .unwrap();
+        let result = mgr.try_append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": "ok"
+        }));
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_generates_unique_ids() {
+        let id1 = generate_entry_id();
+        let id2 = generate_entry_id();
+        let id3 = generate_entry_id();
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert_ne!(id1, id3);
     }
 }
