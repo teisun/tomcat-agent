@@ -937,7 +937,7 @@
 
 **Phase 1：基础设施与配置**
 - [x] 17.1 `src/infra/config.rs`：新增 `[context]` 配置节（`context_window=400K`、`max_output_tokens=128K`、`compaction_turns=10`、`keep_recent_turns=3`、`single_tool_result_max_chars=400K`、`compaction_model="gpt-5.2"`），`PrimitiveConfig` 加载 + `pi.config.toml` 覆盖
-- [x] 17.2 `src/core/session/manager.rs`：定义 `UserTurn`、`SummaryTurn`、`ContextState` 结构体；实现 `init_context_state`（从 transcript 按 user turn 分组加载，识别 Compaction entry 折叠，当天优先 + 不足 10 补全）
+- [x] 17.2 `src/core/session/manager.rs`：定义 `UserTurn`、`SummaryTurn`（含 `timestamp`）、`ContextState` 结构体；实现 `init_context_state`（三阶漏斗：`compute_fold_start` 预扫描 → `fold_entries_to_turns` 折叠 → `filter_turns_by_day` 当天优先 + 不足 10 向前补齐）；删除遗留 `build_context_messages` / `context_cap`
 - [x] 17.3 `src/core/session/manager.rs`：`estimateContextChars` 动态维护（含 system prompt）；`on_message_appended` / `on_new_user_turn` 增量更新
 
 **Phase 2：四层防护算法**
@@ -1029,7 +1029,7 @@
 - [ ] 19.14 `src/core/context_metrics.rs`（**新建**）：`ContextMetrics` 结构体（`input_tokens_used`、`context_utilization_ratio`、`compaction_count`、`compaction_tokens_freed`、`total_tool_result_bytes_persisted`）
 - [ ] 19.15 `src/infra/events.rs`：新增 `ContextMetricsUpdate`、`CompactionCircuitBreakerTriggered`、`ToolResultPersisted` 事件类型
 - [ ] 19.16 `src/core/system_prompt.rs`：模块化改造——`SystemPromptSection` trait + 注册机制 + 内置 Section（CoreIdentity / ToolInstructions / WorkspaceContext / ProjectRules）
-- [ ] 19.17 `src/core/session/manager.rs`：`init_context_state` 增加 compact boundary 处理（遇到 `is_boundary=true` 的 Compaction entry 时丢弃其前所有暂存 entry）
+- [x] 19.17 `src/core/session/manager.rs`：`init_context_state` 增加 compact boundary 处理（遇到 `is_boundary=true` 的 Compaction entry 时丢弃其前所有暂存 entry）— 已在 17.2 整改中实现
 - [ ] 19.18 [session-storage.md](../openspec/specs/architecture/session-storage.md)：`CompactionEntry` 增加 `is_boundary: bool` 字段文档
 
 **Phase 6：测试**

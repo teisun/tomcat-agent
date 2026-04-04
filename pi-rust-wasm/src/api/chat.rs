@@ -22,7 +22,6 @@ use crate::core::session::manager::{
 };
 
 use super::render::MarkdownRenderer;
-use tracing::debug;
 
 // ─── ChatContext ──────────────────────────────────────────────────────────────
 
@@ -330,14 +329,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         ctx.session
             .append_message(serde_json::to_value(&user_msg)?)?;
 
-        debug!(
-            "[tool_debug] ContextState turns={} estimate={} budget={} messages={}",
-            context_state.user_turns_list.len(),
-            context_state.estimate_context_chars,
-            context_state.context_budget_chars,
-            messages.len()
-        );
-
         let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
         let config = AgentLoopConfig {
             max_attempts: 3,
@@ -377,11 +368,40 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 Ok(())
             }),
         );
+        let metrics_listener_id = ctx.event_bus.on(
+            wire::WIRE_CONTEXT_METRICS_UPDATE,
+            Box::new(move |evt: EventContext| {
+                let tokens = evt.payload.get("inputTokensUsed")
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                let ratio = evt.payload.get("contextUtilizationRatio")
+                    .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let compactions = evt.payload.get("compactionCount")
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                let freed = evt.payload.get("compactionTokensFreed")
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                let persisted = evt.payload.get("totalToolResultBytesPersisted")
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+
+                let ratio_pct = (ratio * 100.0).min(99999.0);
+                let persisted_display = if persisted >= 1024 {
+                    format!("{:.1} KB", persisted as f64 / 1024.0)
+                } else {
+                    format!("{} B", persisted)
+                };
+                eprint!(
+                    "\n\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | freed {} tok | persisted {}\x1b[0m",
+                    tokens, ratio_pct, compactions, freed, persisted_display
+                );
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
 
         let run_result = agent_loop.run(messages).await;
         ctx.event_bus.off(listener_id);
+        ctx.event_bus.off(metrics_listener_id);
         match run_result {
             Ok(result) => {
                 if let Some(remaining) = renderer.lock().flush() {
@@ -408,6 +428,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 // Pack current turn and append to context state
                 let current_turn = TurnEntry::UserTurn {
                     messages: result.new_messages.clone(),
+                    timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 };
                 context_state.on_new_user_turn(current_turn);
 

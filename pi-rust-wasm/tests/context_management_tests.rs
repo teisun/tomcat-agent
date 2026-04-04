@@ -285,6 +285,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
                     tool_calls: vec![],
                 },
             ],
+            timestamp: TEST_TS.to_string(),
         });
     }
     let total: usize = turns.iter().map(pi_wasm::core::session::estimate_turn_chars).sum();
@@ -372,12 +373,12 @@ fn test_session_reload_with_compaction_entries() -> Result<(), Box<dyn std::erro
     assert!(state.user_turns_list.len() >= 3, "should have at least 3 groups: 2 old turns + summary + 1 new turn, got {}", state.user_turns_list.len());
 
     let has_summary = state.user_turns_list.iter().any(|t| {
-        matches!(t, TurnEntry::SummaryTurn { summary } if summary.contains("Goal"))
+        matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal"))
     });
     assert!(has_summary, "应含 SummaryTurn 且内容包含 compaction summary");
 
     let has_new_turn = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages } = t {
+        if let TurnEntry::UserTurn { messages, .. } = t {
             messages.iter().any(|m| {
                 matches!(m, AgentMessage::User { text } if text.contains("new question"))
             })
@@ -460,11 +461,13 @@ async fn test_context_overflow_triggers_compaction_and_retries(
                         is_error: false,
                     },
                 ],
+                timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
                 messages: vec![AgentMessage::User {
                     text: "recent question".to_string(),
                 }],
+                timestamp: TEST_TS.to_string(),
             },
         ],
         estimate_context_chars: 60_000,
@@ -551,6 +554,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         user_turns_list: vec![
             TurnEntry::SummaryTurn {
                 summary: "## Goal\nBuild a web app".to_string(),
+                timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
                 messages: vec![
@@ -571,11 +575,13 @@ fn test_build_context_preserves_order_with_mixed_turns() {
                         is_error: false,
                     },
                 ],
+                timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
                 messages: vec![AgentMessage::User {
                     text: "run tests".to_string(),
                 }],
+                timestamp: TEST_TS.to_string(),
             },
         ],
         estimate_context_chars: 500,
@@ -673,6 +679,8 @@ impl LlmProvider for MockCompactionLlm {
 
 // ────────── Layer 1 深度验证测试 ──────────────────────────────────────────
 
+const TEST_TS: &str = "2026-04-04T12:00:00Z";
+
 fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry {
     TurnEntry::UserTurn {
         messages: vec![
@@ -689,6 +697,7 @@ fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry 
                 tool_calls: vec![],
             },
         ],
+        timestamp: TEST_TS.to_string(),
     }
 }
 
@@ -727,7 +736,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
 
     info!("Assert: old turns replaced, recent preserved");
     for (i, turn) in state.user_turns_list.iter().enumerate() {
-        if let TurnEntry::UserTurn { messages } = turn {
+        if let TurnEntry::UserTurn { messages, .. } = turn {
             for msg in messages {
                 if let AgentMessage::ToolResult { content, .. } = msg {
                     if i < 2 {
@@ -782,7 +791,7 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     compact_tool_results(&mut state, 1);
 
     let get_tool_content = |idx: usize| -> String {
-        if let TurnEntry::UserTurn { messages } = &state.user_turns_list[idx] {
+        if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[idx] {
             messages
                 .iter()
                 .find_map(|m| {
@@ -857,6 +866,7 @@ fn make_big_turn(user_text: &str, size: usize) -> TurnEntry {
                 tool_calls: vec![],
             },
         ],
+        timestamp: TEST_TS.to_string(),
     }
 }
 
@@ -903,7 +913,7 @@ async fn test_compaction_loop_single_batch() {
         "4 old drained + 1 SummaryTurn inserted + 2 recent = 3"
     );
     assert!(
-        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary } if summary.contains("Goal")),
+        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal")),
         "first turn should be SummaryTurn"
     );
     assert!(!state.is_over_budget(), "should be within budget after compaction");
@@ -971,6 +981,7 @@ async fn test_compaction_loop_update_mode() {
     let turns = vec![
         TurnEntry::SummaryTurn {
             summary: "old summary about coding".to_string(),
+            timestamp: TEST_TS.to_string(),
         },
         make_big_turn("q1", 3_000),
         make_big_turn("q2", 3_000),
@@ -1098,7 +1109,7 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
     let state = init_context_state(&mgr, &cfg, "system")?;
 
     let has_old = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages } = t {
+        if let TurnEntry::UserTurn { messages, .. } = t {
             messages.iter().any(|m| {
                 matches!(m, AgentMessage::User { text } if text.contains("old"))
             })
@@ -1109,12 +1120,12 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
     assert!(!has_old, "turns before boundary should be discarded");
 
     let has_summary = state.user_turns_list.iter().any(|t| {
-        matches!(t, TurnEntry::SummaryTurn { summary } if summary.contains("Summary of everything"))
+        matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Summary of everything"))
     });
     assert!(has_summary, "boundary summary should be present");
 
     let has_new = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages } = t {
+        if let TurnEntry::UserTurn { messages, .. } = t {
             messages.iter().any(|m| {
                 matches!(m, AgentMessage::User { text } if text.contains("new"))
             })
@@ -1146,6 +1157,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
                 content: original.clone(),
                 is_error: false,
             }],
+            timestamp: TEST_TS.to_string(),
         }],
         estimate_context_chars: original.len(),
         context_budget_chars: 1_000_000,
@@ -1161,7 +1173,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
     let readback = std::fs::read_to_string(&results[0].persisted_path)?;
     assert_eq!(readback, original, "persisted content should match original");
 
-    if let TurnEntry::UserTurn { messages } = &state.user_turns_list[0] {
+    if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[0] {
         if let AgentMessage::ToolResult { content, .. } = &messages[0] {
             assert!(content.starts_with("[Tool result persisted:"));
             assert!(content.contains("Preview:"));

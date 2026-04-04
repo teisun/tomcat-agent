@@ -126,7 +126,7 @@ pub fn layer0_persist_large_results(
     let agg_max = config.layer0_turn_aggregate_max_chars;
 
     let last_turn = match state.user_turns_list.last_mut() {
-        Some(TurnEntry::UserTurn { messages }) => messages,
+        Some(TurnEntry::UserTurn { messages, .. }) => messages,
         _ => return results,
     };
 
@@ -213,7 +213,7 @@ pub fn compact_tool_results(state: &mut ContextState, m: usize) -> usize {
     let mut total_reduced = 0usize;
 
     for turn in state.user_turns_list[..compactable_end].iter_mut() {
-        if let TurnEntry::UserTurn { messages } = turn {
+        if let TurnEntry::UserTurn { messages, .. } = turn {
             for msg in messages.iter_mut() {
                 if let crate::core::agent_loop::AgentMessage::ToolResult { content, .. } = msg {
                     if content.len() <= LAYER1_TOOL_RESULT_THRESHOLD {
@@ -319,6 +319,7 @@ pub async fn run_compaction(
 
     let new_turn = TurnEntry::SummaryTurn {
         summary: summary_text,
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     };
     state.estimate_context_chars += summary_chars;
     state.user_turns_list.insert(actual_start, new_turn);
@@ -391,7 +392,10 @@ pub async fn run_compaction_loop(
         state.user_turns_list.drain(..batch_size);
         state.estimate_context_chars = state.estimate_context_chars.saturating_sub(old_batch_chars);
 
-        let new_turn = TurnEntry::SummaryTurn { summary };
+        let new_turn = TurnEntry::SummaryTurn {
+            summary,
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        };
         state.estimate_context_chars += summary_chars;
         state.user_turns_list.insert(0, new_turn);
     }
@@ -400,7 +404,7 @@ pub async fn run_compaction_loop(
 
 fn find_last_summary(turns: &[TurnEntry]) -> Option<String> {
     turns.iter().rev().find_map(|t| {
-        if let TurnEntry::SummaryTurn { summary } = t {
+        if let TurnEntry::SummaryTurn { summary, .. } = t {
             Some(summary.clone())
         } else {
             None
@@ -412,7 +416,7 @@ fn turns_to_text(turns: &[TurnEntry]) -> String {
     let mut buf = String::new();
     for turn in turns {
         match turn {
-            TurnEntry::UserTurn { messages } => {
+            TurnEntry::UserTurn { messages, .. } => {
                 for msg in messages {
                     match msg {
                         crate::core::agent_loop::AgentMessage::User { text } => {
@@ -440,7 +444,7 @@ fn turns_to_text(turns: &[TurnEntry]) -> String {
                     }
                 }
             }
-            TurnEntry::SummaryTurn { summary } => {
+            TurnEntry::SummaryTurn { summary, .. } => {
                 buf.push_str("[Previous Summary]\n");
                 buf.push_str(summary);
                 buf.push('\n');
@@ -744,6 +748,16 @@ mod tests {
     use super::*;
     use crate::core::agent_loop::AgentMessage;
 
+    const TS: &str = "2026-04-04T12:00:00Z";
+
+    fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
+        TurnEntry::UserTurn { messages, timestamp: TS.to_string() }
+    }
+
+    fn make_summary_turn(summary: impl Into<String>) -> TurnEntry {
+        TurnEntry::SummaryTurn { summary: summary.into(), timestamp: TS.to_string() }
+    }
+
     fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> ContextState {
         ContextState {
             user_turns_list: vec![],
@@ -810,23 +824,19 @@ mod tests {
     fn compact_tool_results_reduces_budget() {
         let mut state = make_state(11_000, 5_000, 1_250);
         state.user_turns_list = vec![
-            TurnEntry::UserTurn {
-                messages: vec![
-                    AgentMessage::User {
-                        text: "q".to_string(),
-                    },
-                    AgentMessage::ToolResult {
-                        tool_call_id: "c1".into(),
-                        content: "x".repeat(25_000),
-                        is_error: false,
-                    },
-                ],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "q2".to_string(),
-                }],
-            },
+            make_user_turn(vec![
+                AgentMessage::User {
+                    text: "q".to_string(),
+                },
+                AgentMessage::ToolResult {
+                    tool_call_id: "c1".into(),
+                    content: "x".repeat(25_000),
+                    is_error: false,
+                },
+            ]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "q2".to_string(),
+            }]),
         ];
         let reduced = compact_tool_results(&mut state, 1);
         assert!(reduced > 0);
@@ -836,13 +846,11 @@ mod tests {
     fn compact_tool_results_protects_recent() {
         let tool_content = "x".repeat(25_000);
         let mut state = make_state(25_000, 5_000, 1_250);
-        state.user_turns_list = vec![TurnEntry::UserTurn {
-            messages: vec![AgentMessage::ToolResult {
-                tool_call_id: "c1".into(),
-                content: tool_content.clone(),
-                is_error: false,
-            }],
-        }];
+        state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+            tool_call_id: "c1".into(),
+            content: tool_content.clone(),
+            is_error: false,
+        }])];
         let reduced = compact_tool_results(&mut state, 1);
         assert_eq!(reduced, 0);
     }
@@ -851,18 +859,14 @@ mod tests {
     fn compact_tool_results_skips_small() {
         let mut state = make_state(5_000, 3_000, 750);
         state.user_turns_list = vec![
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::ToolResult {
-                    tool_call_id: "c1".into(),
-                    content: "x".repeat(1_000),
-                    is_error: false,
-                }],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "q".to_string(),
-                }],
-            },
+            make_user_turn(vec![AgentMessage::ToolResult {
+                tool_call_id: "c1".into(),
+                content: "x".repeat(1_000),
+                is_error: false,
+            }]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "q".to_string(),
+            }]),
         ];
         let reduced = compact_tool_results(&mut state, 1);
         assert_eq!(reduced, 0);
@@ -872,14 +876,10 @@ mod tests {
     fn force_drop_oldest_recovers_budget() {
         let mut state = make_state(6000, 2000, 500);
         state.user_turns_list = vec![
-            TurnEntry::SummaryTurn {
-                summary: "x".repeat(5000),
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "q".to_string(),
-                }],
-            },
+            make_summary_turn("x".repeat(5000)),
+            make_user_turn(vec![AgentMessage::User {
+                text: "q".to_string(),
+            }]),
         ];
         force_drop_oldest(&mut state);
         assert!(!state.is_over_budget());
@@ -889,21 +889,15 @@ mod tests {
     fn force_drop_oldest_to_target_below_half() {
         let mut state = make_state(4000, 4000, 1000);
         state.user_turns_list = vec![
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "x".repeat(2000),
-                }],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "y".repeat(1000),
-                }],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "z".repeat(500),
-                }],
-            },
+            make_user_turn(vec![AgentMessage::User {
+                text: "x".repeat(2000),
+            }]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "y".repeat(1000),
+            }]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "z".repeat(500),
+            }]),
         ];
         force_drop_oldest_to_target(&mut state);
         assert!(state.usage_ratio() < 0.50);
@@ -934,11 +928,9 @@ mod tests {
     #[test]
     fn context_state_on_new_user_turn() {
         let mut state = make_state(0, 1000, 250);
-        let turn = TurnEntry::UserTurn {
-            messages: vec![AgentMessage::User {
-                text: "hello".to_string(),
-            }],
-        };
+        let turn = make_user_turn(vec![AgentMessage::User {
+            text: "hello".to_string(),
+        }]);
         state.on_new_user_turn(turn);
         assert_eq!(state.user_turns_list.len(), 1);
         assert_eq!(state.estimate_context_chars, 5);
@@ -999,19 +991,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = make_state(50_000, 100_000, 25_000);
         let big_content = "x".repeat(40_000);
-        state.user_turns_list = vec![TurnEntry::UserTurn {
-            messages: vec![AgentMessage::ToolResult {
-                tool_call_id: "tc_1".into(),
-                content: big_content,
-                is_error: false,
-            }],
-        }];
+        state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+            tool_call_id: "tc_1".into(),
+            content: big_content,
+            is_error: false,
+        }])];
         let config = ContextConfig::default();
         let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
         assert_eq!(results.len(), 1);
         assert!(std::path::Path::new(&results[0].persisted_path).exists());
         assert!(state.estimate_context_chars < 50_000);
-        if let TurnEntry::UserTurn { messages } = &state.user_turns_list[0] {
+        if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[0] {
             if let AgentMessage::ToolResult { content, .. } = &messages[0] {
                 assert!(content.starts_with("[Tool result persisted:"));
             }
@@ -1022,13 +1012,11 @@ mod tests {
     fn layer0_persist_skips_small() {
         let dir = tempfile::tempdir().unwrap();
         let mut state = make_state(1_000, 100_000, 25_000);
-        state.user_turns_list = vec![TurnEntry::UserTurn {
-            messages: vec![AgentMessage::ToolResult {
-                tool_call_id: "tc_2".into(),
-                content: "small".to_string(),
-                is_error: false,
-            }],
-        }];
+        state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+            tool_call_id: "tc_2".into(),
+            content: "small".to_string(),
+            is_error: false,
+        }])];
         let config = ContextConfig::default();
         let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
         assert!(results.is_empty());
@@ -1088,18 +1076,14 @@ mod tests {
     fn compact_tool_results_skips_already_persisted() {
         let mut state = make_state(30_000, 5_000, 1_250);
         state.user_turns_list = vec![
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::ToolResult {
-                    tool_call_id: "c1".into(),
-                    content: "[Tool result persisted: /tmp/foo.txt (50000 chars)]\nPreview: ...".to_string(),
-                    is_error: false,
-                }],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "q".to_string(),
-                }],
-            },
+            make_user_turn(vec![AgentMessage::ToolResult {
+                tool_call_id: "c1".into(),
+                content: "[Tool result persisted: /tmp/foo.txt (50000 chars)]\nPreview: ...".to_string(),
+                is_error: false,
+            }]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "q".to_string(),
+            }]),
         ];
         let reduced = compact_tool_results(&mut state, 1);
         assert_eq!(reduced, 0, "already persisted results should not be replaced");
@@ -1109,18 +1093,14 @@ mod tests {
     fn compact_tool_results_skips_placeholder() {
         let mut state = make_state(30_000, 5_000, 1_250);
         state.user_turns_list = vec![
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::ToolResult {
-                    tool_call_id: "c1".into(),
-                    content: TOOL_RESULT_PLACEHOLDER.to_string(),
-                    is_error: false,
-                }],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "q".to_string(),
-                }],
-            },
+            make_user_turn(vec![AgentMessage::ToolResult {
+                tool_call_id: "c1".into(),
+                content: TOOL_RESULT_PLACEHOLDER.to_string(),
+                is_error: false,
+            }]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "q".to_string(),
+            }]),
         ];
         let reduced = compact_tool_results(&mut state, 1);
         assert_eq!(reduced, 0, "already replaced results should not be re-replaced");
@@ -1153,50 +1133,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut state = make_state(200_000, 500_000, 125_000);
         let medium = "x".repeat(20_000);
-        state.user_turns_list = vec![TurnEntry::UserTurn {
-            messages: vec![
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_a".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_b".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_c".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_d".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_e".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_f".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_g".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: "tc_h".into(),
-                    content: medium.clone(),
-                    is_error: false,
-                },
-            ],
-        }];
+        state.user_turns_list = vec![make_user_turn(vec![
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_a".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_b".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_c".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_d".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_e".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_f".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_g".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc_h".into(),
+                content: medium.clone(),
+                is_error: false,
+            },
+        ])];
         let config = ContextConfig {
             layer0_turn_aggregate_max_chars: 150_000,
             ..Default::default()
@@ -1210,13 +1188,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let original = "hello world content for persistence test ".repeat(1000);
         let mut state = make_state(original.len(), 100_000, 25_000);
-        state.user_turns_list = vec![TurnEntry::UserTurn {
-            messages: vec![AgentMessage::ToolResult {
-                tool_call_id: "tc_read".into(),
-                content: original.clone(),
-                is_error: false,
-            }],
-        }];
+        state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+            tool_call_id: "tc_read".into(),
+            content: original.clone(),
+            is_error: false,
+        }])];
         let config = ContextConfig::default();
         let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess1");
         assert_eq!(results.len(), 1);
@@ -1229,16 +1205,12 @@ mod tests {
         let mut state = make_state(4000, 4000, 1000);
         state.update_api_usage(900, 0);
         state.user_turns_list = vec![
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "x".repeat(3000),
-                }],
-            },
-            TurnEntry::UserTurn {
-                messages: vec![AgentMessage::User {
-                    text: "y".repeat(500),
-                }],
-            },
+            make_user_turn(vec![AgentMessage::User {
+                text: "x".repeat(3000),
+            }]),
+            make_user_turn(vec![AgentMessage::User {
+                text: "y".repeat(500),
+            }]),
         ];
         force_drop_oldest_to_target(&mut state);
         assert!(state.last_api_usage.is_none(), "usage should be invalidated after force drop");

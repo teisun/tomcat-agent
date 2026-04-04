@@ -61,7 +61,7 @@
 - **构造**：`SessionManager::new(sessions_dir: PathBuf)` 或 `SessionManager::from_sessions_dir(sessions_dir: &str)`（内部 normalize_path）。
 - **CRUD**：`create_session`、`get_session`、`list_sessions`、`update_session`、`delete_session`、`archive_session`。
 - **消息**：`append_message`、`append_thinking_level_change`、`append_model_change`、`append_compaction`、`append_session_info`、`append_label_change`；`get_entries`、`get_entry`、`get_children`、`get_leaf_entry`、`get_branch`。
-- **上下文**：`build_context_messages(recent_n)` 返回最近 N 条 Message 的 message 列表，供 LLM 使用。
+- **上下文**：`init_context_state` 按天筛选 + 不足 10 向前补齐，构建 `ContextState`；`build_context_from_state` 展平为 `AgentMessage` 列表。
 
 ---
 
@@ -90,12 +90,12 @@
 
 ### 5.2 架构
 
-`run_chat` → `ChatContext::from_config` → `tokio::Runtime::block_on(chat_loop)`。主循环：rustyline 读输入 → `build_context_messages` 组装历史 → `chat_stream` 流式输出（MarkdownRenderer 高亮）→ 工具调用循环（最多 10 轮）→ 写 transcript。
+`run_chat` → `ChatContext::from_config` → `tokio::Runtime::block_on(chat_loop)`。主循环：rustyline 读输入 → `init_context_state` + `build_context_from_state` 组装历史 → AgentLoop 流式输出（MarkdownRenderer 高亮）→ 工具调用循环 → 写 transcript。
 
 ### 5.3 关键设计
 
 - **流式渲染**：消费 `StreamEvent::ContentDelta`，代码块闭合后 syntect 高亮。
-- **多轮上下文**：`build_context_messages(context_cap())` 取最近 N 条。
+- **多轮上下文**：`init_context_state` 按天优先、不足 10 个 user turn 向前补齐。
 - **工具调用**：`ToolCallDelta` 累积后执行 read_file/write_file/edit_file/execute_bash/list_dir；结果以 `role=tool` 回传 LLM。
 - **用户确认**：`CliConfirmation` 实现 `UserConfirmationProvider`（stdin y/N）。
 - **会话隔离**：`effective_model` 优先用 `SessionEntry.model_override`。

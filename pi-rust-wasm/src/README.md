@@ -80,9 +80,9 @@
                       |                  | *.jsonl transcript
                       |                  +--------+---------+
                       |                           |
-                      |   build_context_messages  |
+                      |   init_context_state      |
                       v                           v
-               +------+------+            (最近 N 条 -> ChatMessage)
+               +------+------+            (当天+补齐 -> TurnEntry)
                | AgentLoop   |<-------------------+
                +------+------+
                       |

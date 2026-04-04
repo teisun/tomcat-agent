@@ -130,6 +130,7 @@ use super::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamE
 use crate::core::compaction::{
     is_context_overflow_error, run_compaction_cascade_v2, truncate_tool_result_if_needed,
 };
+use crate::core::context_metrics::ContextMetrics;
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::core::session::manager::ContextState;
 use crate::infra::config::ContextConfig;
@@ -138,8 +139,6 @@ use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::{
     AgentEvent, AssistantMessageEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
 };
-use tracing::debug;
-
 // ─── 5.1 AgentMessage 与转换 ───────────────────────────────────────────────
 
 /// 单次工具调用信息（与 OpenAI 流式 tool_calls 对应）。
@@ -361,6 +360,8 @@ pub struct AgentLoop {
     abort_signal: Arc<AtomicBool>,
     context_state: Option<ContextState>,
     block_tool_calls: bool,
+    metrics: ContextMetrics,
+    start_idx: usize,
 }
 
 fn unix_ts_ms() -> i64 {
@@ -388,6 +389,8 @@ impl AgentLoop {
             abort_signal,
             context_state: None,
             block_tool_calls: false,
+            metrics: ContextMetrics::default(),
+            start_idx: 0,
         }
     }
 
@@ -411,6 +414,8 @@ impl AgentLoop {
             abort_signal,
             context_state: None,
             block_tool_calls: false,
+            metrics: ContextMetrics::default(),
+            start_idx: 0,
         }
     }
 
@@ -441,6 +446,23 @@ impl AgentLoop {
 
     pub fn take_context_state(&mut self) -> Option<ContextState> {
         self.context_state.take()
+    }
+
+    /// 刷新实时 token 指标并发射 ContextMetricsUpdate 事件（仅当 context_state 存在时）。
+    fn emit_context_metrics(&mut self) {
+        if let Some(ref ctx_state) = self.context_state {
+            self.metrics.input_tokens_used = ctx_state.estimated_token_count();
+            self.metrics.context_utilization_ratio = ctx_state.usage_ratio();
+        }
+        if self.context_state.is_some() {
+            self.emit_event(AgentEvent::ContextMetricsUpdate {
+                input_tokens_used: self.metrics.input_tokens_used,
+                context_utilization_ratio: self.metrics.context_utilization_ratio,
+                compaction_count: self.metrics.compaction_count,
+                compaction_tokens_freed: self.metrics.compaction_tokens_freed,
+                total_tool_result_bytes_persisted: self.metrics.total_tool_result_bytes_persisted,
+            });
+        }
     }
 
     fn emit_event(&self, event: AgentEvent) {
@@ -486,12 +508,12 @@ impl AgentLoop {
             }
         }
 
-        let start_idx = messages.len();
+        self.start_idx = messages.len();
 
         loop {
             match self.run_attempt_loop(&mut messages).await {
                 Ok(final_text) => {
-                    let new_messages = messages[start_idx..].to_vec();
+                    let new_messages = messages[self.start_idx..].to_vec();
                     let result = AgentRunResult {
                         final_text: final_text.clone(),
                         new_messages,
@@ -592,6 +614,7 @@ impl AgentLoop {
                             .await;
                             *messages =
                                 crate::core::session::manager::build_context_from_state(ctx_state);
+                            self.start_idx = messages.len();
                             self.block_tool_calls = cascade_result.block_tool_calls;
                         }
                         self.emit_event(AgentEvent::AutoCompactionEnd {
@@ -735,7 +758,6 @@ impl AgentLoop {
                 .collect();
 
             if tool_calls.is_empty() {
-                debug!("[tool_debug] 本轮回复无 tool_calls");
                 if let Some(ref mut ctx_state) = self.context_state {
                     ctx_state.on_message_appended(content_buf.len());
                 }
@@ -743,6 +765,7 @@ impl AgentLoop {
                     text: content_buf,
                     tool_calls: vec![],
                 });
+                self.emit_context_metrics();
                 self.emit_event(AgentEvent::TurnEnd {
                     session_id: self.config.session_id.clone(),
                     turn_index,
@@ -751,12 +774,6 @@ impl AgentLoop {
                 });
                 return Ok(final_text);
             }
-            let tool_names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
-            debug!(
-                "[tool_debug] 本轮回复 tool_calls: {} 个 names={:?}",
-                tool_calls.len(),
-                tool_names
-            );
 
             // Update context estimate for assistant message with tool calls
             if let Some(ref mut ctx_state) = self.context_state {
@@ -794,6 +811,7 @@ impl AgentLoop {
                 }
                 self.block_tool_calls = false;
 
+                self.emit_context_metrics();
                 self.emit_event(AgentEvent::TurnEnd {
                     session_id: self.config.session_id.clone(),
                     turn_index,
@@ -887,6 +905,15 @@ impl AgentLoop {
                 )
                 .await;
                 if !cascade_result.layers_executed.is_empty() {
+                    self.metrics.compaction_count += 1;
+                    let freed = ((cascade_result.ratio_before - cascade_result.ratio_after)
+                        * ctx_state.context_budget_tokens as f64)
+                        .max(0.0) as usize;
+                    self.metrics.compaction_tokens_freed += freed;
+                    for pr in &cascade_result.persisted_results {
+                        self.metrics.total_tool_result_bytes_persisted += pr.original_chars;
+                    }
+
                     *messages = crate::core::session::manager::build_context_from_state(ctx_state);
                     messages.insert(
                         0,
@@ -896,10 +923,12 @@ impl AgentLoop {
                             ),
                         },
                     );
+                    self.start_idx = messages.len();
                 }
                 self.block_tool_calls = cascade_result.block_tool_calls;
             }
 
+            self.emit_context_metrics();
             self.emit_event(AgentEvent::TurnEnd {
                 session_id: self.config.session_id.clone(),
                 turn_index,
@@ -1796,5 +1825,364 @@ mod tests {
         let result = loop_.run(messages).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("503"));
+    }
+
+    /// context_metrics_update 出现在 turn_end 之前（工具轮场景）。
+    #[tokio::test]
+    async fn context_metrics_update_emitted_before_turn_end() {
+        use crate::core::session::manager::ContextState;
+        let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_m1".to_string()),
+                name: Some("read_file".to_string()),
+                arguments_delta: Some(r#"{"path":"/tmp/m"}"#.to_string()),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ];
+        let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "done".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ];
+        let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
+        let primitive = Arc::new(MockPrimitiveExecutor);
+        let event_bus = Arc::new(DefaultEventBus::new());
+        let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        for ev in &[wire::WIRE_CONTEXT_METRICS_UPDATE, wire::WIRE_TURN_END] {
+            let list = Arc::clone(&order);
+            let name = (*ev).to_string();
+            event_bus.on(
+                &name,
+                Box::new(move |ctx: EventContext| {
+                    list.lock().unwrap().push(ctx.event_name.clone());
+                    Ok(())
+                }),
+            );
+        }
+        let config = AgentLoopConfig {
+            model: "gpt-4".to_string(),
+            session_id: "s-metrics-order".to_string(),
+            ..Default::default()
+        };
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+        loop_.set_context_state(Some(ContextState {
+            user_turns_list: Vec::new(),
+            estimate_context_chars: 100,
+            context_budget_chars: 100_000,
+            context_budget_tokens: 25_000,
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            compaction_consecutive_failures: 0,
+        }));
+        let messages = vec![AgentMessage::User {
+            text: "read".to_string(),
+        }];
+        let _ = loop_.run(messages).await.unwrap();
+        let observed = order.lock().unwrap().clone();
+        let metrics_pos = observed
+            .iter()
+            .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
+        let turn_end_pos = observed
+            .iter()
+            .position(|e| e == wire::WIRE_TURN_END);
+        assert!(
+            metrics_pos.is_some(),
+            "context_metrics_update should be emitted, observed: {:?}",
+            observed
+        );
+        assert!(
+            metrics_pos.unwrap() < turn_end_pos.unwrap(),
+            "context_metrics_update must precede turn_end, observed: {:?}",
+            observed
+        );
+    }
+
+    /// context_metrics_update payload 包含合法字段值。
+    #[tokio::test]
+    async fn context_metrics_update_payload_contains_valid_values() {
+        use crate::core::session::manager::ContextState;
+        let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_v1".to_string()),
+                name: Some("read_file".to_string()),
+                arguments_delta: Some(r#"{"path":"/tmp/v"}"#.to_string()),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ];
+        let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "ok".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ];
+        let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
+        let primitive = Arc::new(MockPrimitiveExecutor);
+        let event_bus = Arc::new(DefaultEventBus::new());
+        let payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let payloads_clone = Arc::clone(&payloads);
+        event_bus.on(
+            wire::WIRE_CONTEXT_METRICS_UPDATE,
+            Box::new(move |ctx: EventContext| {
+                payloads_clone.lock().unwrap().push(ctx.payload.clone());
+                Ok(())
+            }),
+        );
+        let config = AgentLoopConfig {
+            model: "gpt-4".to_string(),
+            session_id: "s-metrics-payload".to_string(),
+            ..Default::default()
+        };
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+        loop_.set_context_state(Some(ContextState {
+            user_turns_list: Vec::new(),
+            estimate_context_chars: 2000,
+            context_budget_chars: 100_000,
+            context_budget_tokens: 25_000,
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            compaction_consecutive_failures: 0,
+        }));
+        let messages = vec![AgentMessage::User {
+            text: "validate".to_string(),
+        }];
+        let _ = loop_.run(messages).await.unwrap();
+        let captured = payloads.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "should have captured at least one context_metrics_update payload"
+        );
+        let p = &captured[0];
+        let tokens = p["inputTokensUsed"].as_u64().unwrap();
+        let ratio = p["contextUtilizationRatio"].as_f64().unwrap();
+        assert!(tokens > 0, "inputTokensUsed should be > 0, got {}", tokens);
+        assert!(
+            ratio >= 0.0 && ratio <= 1.0,
+            "contextUtilizationRatio should be in [0,1], got {}",
+            ratio
+        );
+        assert!(p["compactionCount"].is_u64());
+        assert!(p["compactionTokensFreed"].is_u64());
+        assert!(p["totalToolResultBytesPersisted"].is_u64());
+    }
+
+    /// 累加器在多轮工具调用中递增：后一次 compaction_count >= 前一次。
+    #[tokio::test]
+    async fn context_metrics_compaction_count_accumulates_across_rounds() {
+        use crate::core::session::manager::ContextState;
+        let stream_tool1: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_a1".to_string()),
+                name: Some("read_file".to_string()),
+                arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ];
+        let stream_tool2: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_a2".to_string()),
+                name: Some("read_file".to_string()),
+                arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ];
+        let stream_end: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "fin".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ];
+        let llm = Arc::new(MockLlmProvider::new(vec![
+            stream_tool1,
+            stream_tool2,
+            stream_end,
+        ]));
+        let primitive = Arc::new(MockPrimitiveExecutor);
+        let event_bus = Arc::new(DefaultEventBus::new());
+        let counts: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let counts_clone = Arc::clone(&counts);
+        event_bus.on(
+            wire::WIRE_CONTEXT_METRICS_UPDATE,
+            Box::new(move |ctx: EventContext| {
+                if let Some(c) = ctx.payload.get("compactionCount").and_then(|v| v.as_u64()) {
+                    counts_clone.lock().unwrap().push(c);
+                }
+                Ok(())
+            }),
+        );
+        let config = AgentLoopConfig {
+            model: "gpt-4".to_string(),
+            session_id: "s-metrics-accum".to_string(),
+            ..Default::default()
+        };
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+        loop_.set_context_state(Some(ContextState {
+            user_turns_list: Vec::new(),
+            estimate_context_chars: 100,
+            context_budget_chars: 100_000,
+            context_budget_tokens: 25_000,
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            compaction_consecutive_failures: 0,
+        }));
+        let messages = vec![AgentMessage::User {
+            text: "multi".to_string(),
+        }];
+        let _ = loop_.run(messages).await.unwrap();
+        let captured = counts.lock().unwrap();
+        assert!(
+            captured.len() >= 2,
+            "should capture at least 2 context_metrics_update events for 2 tool rounds, got {}",
+            captured.len()
+        );
+        for window in captured.windows(2) {
+            assert!(
+                window[1] >= window[0],
+                "compaction_count should be monotonically non-decreasing: {:?}",
+                *captured
+            );
+        }
+    }
+
+    /// 无 context_state 时不发射 context_metrics_update。
+    #[tokio::test]
+    async fn context_metrics_update_skipped_when_no_context_state() {
+        let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ToolCallDelta {
+                index: 0,
+                id: Some("call_n1".to_string()),
+                name: Some("read_file".to_string()),
+                arguments_delta: Some(r#"{"path":"/tmp/n"}"#.to_string()),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "tool_calls".to_string(),
+            }),
+        ];
+        let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "no ctx".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ];
+        let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
+        let primitive = Arc::new(MockPrimitiveExecutor);
+        let event_bus = Arc::new(DefaultEventBus::new());
+        let emitted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let emitted_clone = Arc::clone(&emitted);
+        event_bus.on(
+            wire::WIRE_CONTEXT_METRICS_UPDATE,
+            Box::new(move |ctx: EventContext| {
+                emitted_clone.lock().unwrap().push(ctx.event_name.clone());
+                Ok(())
+            }),
+        );
+        let config = AgentLoopConfig {
+            model: "gpt-4".to_string(),
+            session_id: "s-no-ctx".to_string(),
+            ..Default::default()
+        };
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+        // No set_context_state call — context_state is None
+        let messages = vec![AgentMessage::User {
+            text: "hi".to_string(),
+        }];
+        let _ = loop_.run(messages).await.unwrap();
+        let captured = emitted.lock().unwrap();
+        assert!(
+            captured.is_empty(),
+            "context_metrics_update should NOT be emitted without context_state, got {:?}",
+            *captured
+        );
+    }
+
+    /// 纯文本回复（无工具调用）路径也发射 context_metrics_update。
+    #[tokio::test]
+    async fn context_metrics_update_emitted_on_text_only_response() {
+        use crate::core::session::manager::ContextState;
+        let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "hello".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ];
+        let llm = Arc::new(MockLlmProvider::new(vec![stream_text]));
+        let primitive = Arc::new(MockPrimitiveExecutor);
+        let event_bus = Arc::new(DefaultEventBus::new());
+        let order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        for ev in &[wire::WIRE_CONTEXT_METRICS_UPDATE, wire::WIRE_TURN_END] {
+            let list = Arc::clone(&order);
+            let name = (*ev).to_string();
+            event_bus.on(
+                &name,
+                Box::new(move |ctx: EventContext| {
+                    list.lock().unwrap().push(ctx.event_name.clone());
+                    Ok(())
+                }),
+            );
+        }
+        let config = AgentLoopConfig {
+            model: "gpt-4".to_string(),
+            session_id: "s-text-metrics".to_string(),
+            ..Default::default()
+        };
+        let abort = Arc::new(AtomicBool::new(false));
+        let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+        loop_.set_context_state(Some(ContextState {
+            user_turns_list: Vec::new(),
+            estimate_context_chars: 200,
+            context_budget_chars: 100_000,
+            context_budget_tokens: 25_000,
+            last_api_usage: None,
+            post_usage_appended_chars: 0,
+            compaction_consecutive_failures: 0,
+        }));
+        let messages = vec![AgentMessage::User {
+            text: "hi".to_string(),
+        }];
+        let result = loop_.run(messages).await.unwrap();
+        assert_eq!(result.final_text, "hello");
+        let observed = order.lock().unwrap().clone();
+        let metrics_pos = observed
+            .iter()
+            .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
+        let turn_end_pos = observed
+            .iter()
+            .position(|e| e == wire::WIRE_TURN_END);
+        assert!(
+            metrics_pos.is_some(),
+            "context_metrics_update should be emitted on text-only path, observed: {:?}",
+            observed
+        );
+        assert!(
+            metrics_pos.unwrap() < turn_end_pos.unwrap(),
+            "context_metrics_update must precede turn_end, observed: {:?}",
+            observed
+        );
     }
 }

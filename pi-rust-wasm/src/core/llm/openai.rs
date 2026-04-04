@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_stream::Stream;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
@@ -306,12 +306,6 @@ impl LlmProvider for OpenAiProvider {
             stream: true,
             tools: request.tools.clone(),
         };
-        let tools_len = body.tools.as_ref().map(|t| t.len()).unwrap_or(0);
-        debug!(
-            "[tool_debug] chat_stream 发请求前 body.tools 条数={} body.messages 条数={}",
-            tools_len,
-            body.messages.len()
-        );
 
         let resp = self.stream_post_once(&self.base_url, &body).await;
         let resp = match resp {

@@ -466,7 +466,99 @@ stream_timeout_sec: u64,
 
 ---
 
-## 11. 资源配额与超时控制规范 (Resource Quotas)
+## 11. 代码复用与去重 (Code Reuse & DRY)
+
+### 理论 (Theory)
+
+DRY（Don't Repeat Yourself）不仅是风格偏好，而是**架构级约束**。重复的结构体、常量或逻辑在演进中不可避免地分叉——一处改了另一处忘了，造成数据不一致、行为分裂。代码复用的核心收益：
+
+- **单一事实来源（Single Source of Truth）**：同一语义只存在一个权威定义。字段增删只改一处，编译器自动传播。
+- **类型安全传播**：复用结构体而非散装字段时，新增/移除/重命名字段会产生编译错误，强制所有消费端同步更新。
+- **认知负担最小化**：开发者只需理解一个类型的语义，不必在多个"长得像"的定义之间做心智映射。
+
+判断是否需要复用的决策标准：
+1. **同构即复用**：如果两个位置的字段集完全一致或构成子集关系，**必须**复用而不是拷贝。
+2. **语义一致即复用**：即使字段名略有差异，只要表达相同业务概念（如 `ContextMetrics` 与 `ContextMetricsUpdate` 事件字段），应以一方为权威源，另一方通过 `From` 转换或直接持有。
+3. **三次出现即提取**：同一逻辑片段（函数体/匹配模式/构造块）出现三次或以上，必须提取为函数、宏或 trait 方法。
+
+### 实践 (Practice)
+
+#### 规则 11.1 — 同构结构体禁止散装替代
+
+当项目中已存在与需求字段完全对齐的结构体时，**必须**直接持有该类型，禁止将其字段拆散为多个独立变量。
+
+```rust
+// BAD — 散装字段是 ContextMetrics 的逐字拷贝，新增字段时必然遗漏
+pub struct AgentLoop {
+    compaction_count: u32,
+    compaction_tokens_freed: usize,
+    total_tool_result_bytes_persisted: usize,
+    // ...
+}
+
+// GOOD — 复用已有类型，字段增删由编译器保障一致性
+use crate::core::context_metrics::ContextMetrics;
+
+pub struct AgentLoop {
+    metrics: ContextMetrics,
+    // ...
+}
+```
+
+#### 规则 11.2 — 事件/DTO 与内部模型对齐
+
+当事件枚举变体（如 `AgentEvent::ContextMetricsUpdate`）与内部结构体（如 `ContextMetrics`）字段同构时，构造事件应直接从内部结构体取值，避免中间变量二次搬运导致映射错位。
+
+```rust
+// BAD — 手动逐字段搬运，新增字段时容易遗漏
+self.emit_event(AgentEvent::ContextMetricsUpdate {
+    input_tokens_used: local_var_a,
+    context_utilization_ratio: local_var_b,
+    // 漏了 compaction_count ...
+});
+
+// GOOD — 从权威源直接取值
+self.emit_event(AgentEvent::ContextMetricsUpdate {
+    input_tokens_used: self.metrics.input_tokens_used,
+    context_utilization_ratio: self.metrics.context_utilization_ratio,
+    compaction_count: self.metrics.compaction_count,
+    compaction_tokens_freed: self.metrics.compaction_tokens_freed,
+    total_tool_result_bytes_persisted: self.metrics.total_tool_result_bytes_persisted,
+});
+```
+
+#### 规则 11.3 — 重复逻辑提取为函数
+
+同一代码模式出现三次或以上时，必须提取为命名函数或宏。提取后函数应放在**语义最近的模块**中（而非全局 utils）。
+
+```rust
+// BAD — 相同的 "chars / 4" 近似 token 计算散落在三处
+let tokens_a = some_chars / 4;
+// ... 另一处 ...
+let tokens_b = other_chars / 4;
+
+// GOOD — 提取为具名函数，语义清晰且修改集中
+pub(crate) fn estimate_tokens(chars: usize) -> usize {
+    chars / 4
+}
+```
+
+#### 规则 11.4 — 常量与魔数统一管理
+
+相同的阈值、配置默认值、格式字符串出现在两处及以上时，必须提取为命名常量。常量放在语义所属模块内，通过 `pub(crate)` 暴露。
+
+```rust
+// BAD — 魔数 4096 散落在 compaction.rs 和 agent_loop.rs
+if chars > 4096 { ... }
+
+// GOOD
+pub(crate) const LARGE_RESULT_THRESHOLD_CHARS: usize = 4096;
+if chars > LARGE_RESULT_THRESHOLD_CHARS { ... }
+```
+
+---
+
+## 12. 资源配额与超时控制规范 (Resource Quotas)
 
 ### 理论 (Theory)
 插件是不可信的（Untrusted Code）。除了权限隔离，还必须进行资源隔离：

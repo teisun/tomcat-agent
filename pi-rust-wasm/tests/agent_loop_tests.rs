@@ -799,6 +799,122 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后工具轮发射 context_metrics_update
+///
+/// 验证：EventBus 上捕获到 context_metrics_update 事件，payload 含合法字段，
+///       且 context_metrics_update 出现在 turn_end 之前
+/// 意义：TODO §2 ContextMetricsUpdate 接线——token 水位可观测性门禁
+#[tokio::test]
+async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_context_metrics_update_event_published").entered();
+
+    info!("Arrange: LLM 返回 read_file 工具调用 → 纯文本结束；AgentLoop 注入 ContextState");
+    let stream_tool = tool_call_stream("cm1", "read_file", r#"{"path":"/tmp/cm"}"#);
+    let stream_text = text_stream("metrics done");
+    let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_text]));
+    let primitive = Arc::new(MockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    let events_order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // 订阅 context_metrics_update：收集顺序 + payload
+    let order_clone = Arc::clone(&events_order);
+    let payloads_clone = Arc::clone(&payloads);
+    event_bus.on(
+        wire::WIRE_CONTEXT_METRICS_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            order_clone.lock().unwrap().push(ctx.event_name.clone());
+            payloads_clone.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    // 订阅 turn_end：收集顺序
+    let order_clone2 = Arc::clone(&events_order);
+    event_bus.on(
+        wire::WIRE_TURN_END,
+        Box::new(move |ctx: EventContext| {
+            order_clone2.lock().unwrap().push(ctx.event_name.clone());
+            Ok(())
+        }),
+    );
+
+    let config = default_config("sess-ctx-metrics");
+    let abort = Arc::new(AtomicBool::new(false));
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+
+    use pi_wasm::ContextState;
+    agent.set_context_state(Some(ContextState {
+        user_turns_list: Vec::new(),
+        estimate_context_chars: 500,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        compaction_consecutive_failures: 0,
+    }));
+
+    let messages = vec![AgentMessage::User {
+        text: "test metrics".to_string(),
+    }];
+
+    info!("Act: 调用 AgentLoop::run()");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() 超时 10s")??;
+
+    info!("Assert: context_metrics_update 事件被发射、payload 合法、顺序正确");
+    assert!(result.final_text.contains("metrics done"));
+
+    let captured_payloads = payloads.lock().unwrap();
+    assert!(
+        !captured_payloads.is_empty(),
+        "至少应捕获一个 context_metrics_update 事件"
+    );
+    let p = &captured_payloads[0];
+    assert!(
+        p["inputTokensUsed"].as_u64().is_some(),
+        "payload 应含 inputTokensUsed"
+    );
+    assert!(
+        p["contextUtilizationRatio"].as_f64().is_some(),
+        "payload 应含 contextUtilizationRatio"
+    );
+    assert!(
+        p["compactionCount"].as_u64().is_some(),
+        "payload 应含 compactionCount"
+    );
+    assert!(
+        p["compactionTokensFreed"].as_u64().is_some(),
+        "payload 应含 compactionTokensFreed"
+    );
+    assert!(
+        p["totalToolResultBytesPersisted"].as_u64().is_some(),
+        "payload 应含 totalToolResultBytesPersisted"
+    );
+
+    let order = events_order.lock().unwrap();
+    let metrics_pos = order
+        .iter()
+        .position(|e| e == wire::WIRE_CONTEXT_METRICS_UPDATE);
+    let turn_end_pos = order
+        .iter()
+        .position(|e| e == wire::WIRE_TURN_END);
+    assert!(
+        metrics_pos.is_some() && turn_end_pos.is_some(),
+        "应同时捕获 context_metrics_update 和 turn_end，实际: {:?}",
+        *order
+    );
+    assert!(
+        metrics_pos.unwrap() < turn_end_pos.unwrap(),
+        "context_metrics_update 应在 turn_end 之前，实际: {:?}",
+        *order
+    );
+
+    Ok(())
+}
+
 /// [消息格式转换往返] convert_to_llm_format 与 agent_messages_from_chat 往返转换无损
 ///
 /// 验证：system/user/assistant 三种角色转换后内容与角色均不变
