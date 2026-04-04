@@ -2,6 +2,17 @@
 | :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-05 | ACTIVE | develop | — |
 
+### refactor：RUST_FILE_LINES_SPEC 目录化拆分与测试外提
+
+- 按 [`openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)：超大模块改为目录 + 子文件（如 `ext/dispatcher/`、`core/agent_loop/`、`api/cli/`、`core/session/manager/`、`core/compaction/`、`infra/config/`、`ext/plugin/`、`core/executor/`）；其余将内联 `#[cfg(test)]` 迁至 `tests.rs` 或并存子目录；`pub use` 保持对外 API。
+- 本机验收：`cargo check --all-targets`、`cargo clippy --all-targets`（仅既有 deprecated 等 warning）、`cargo test --lib`（395 passed，1 ignored）；集成门禁：`./scripts/run-integration-tests.sh integration`（全量 `tests/*` + E2E，PASS）。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-05 | ACTIVE | develop | — |
+
 ### style：`cargo fmt` 同步（chat / compaction / 测试等）
 
 - 对 `pi-rust-wasm` 内多处源文件与集成测试做 rustfmt（换行、import 顺序等），**无行为变更**。
