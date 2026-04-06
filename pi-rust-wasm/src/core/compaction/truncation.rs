@@ -14,9 +14,9 @@ pub(super) const TRUNCATION_SUFFIX: &str = "\n\n[truncated — original content 
 pub(super) const TOOL_RESULT_PLACEHOLDER: &str =
     "[Previous tool result replaced to save context space]";
 
-const LAYER1_TOOL_RESULT_THRESHOLD: usize = 20_000;
-
 const LAYER0_PREVIEW_CHARS: usize = 500;
+
+const M_PROTECTED_TURNS: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Layer 0: Single tool result truncation (legacy fallback)
@@ -74,9 +74,8 @@ pub struct PersistedResult {
     pub persisted_path: String,
 }
 
-/// Layer 0 V2：超大 tool result 落盘 + preview 占位符。
-/// 遍历最后一个 UserTurn 的 messages，满足条件 A（单条 >= threshold）
-/// 或条件 B（单 turn 合计 >= aggregate threshold）时落盘。
+/// Layer 0 步骤 A：超大 tool result 落盘 + preview 占位符。
+/// 仅扫描最后一个 UserTurn，单条 >= `layer0_single_result_max_chars` 时落盘。
 pub fn layer0_persist_large_results(
     state: &mut ContextState,
     config: &ContextConfig,
@@ -85,25 +84,11 @@ pub fn layer0_persist_large_results(
 ) -> Vec<PersistedResult> {
     let mut results = Vec::new();
     let single_max = config.layer0_single_result_max_chars;
-    let agg_max = config.layer0_turn_aggregate_max_chars;
 
     let last_turn = match state.user_turns_list.last_mut() {
         Some(TurnEntry::UserTurn { messages, .. }) => messages,
         _ => return results,
     };
-
-    let total_tool_chars: usize = last_turn
-        .iter()
-        .filter_map(|m| {
-            if let crate::core::agent_loop::AgentMessage::ToolResult { content, .. } = m {
-                Some(content.len())
-            } else {
-                None
-            }
-        })
-        .sum();
-
-    let needs_aggregate = total_tool_chars >= agg_max;
 
     for msg in last_turn.iter_mut() {
         if let crate::core::agent_loop::AgentMessage::ToolResult {
@@ -112,10 +97,10 @@ pub fn layer0_persist_large_results(
             ..
         } = msg
         {
-            let should_persist = content.len() >= single_max
-                || (needs_aggregate && content.len() > LAYER0_PREVIEW_CHARS);
-
-            if !should_persist {
+            if content.len() < single_max {
+                continue;
+            }
+            if content.starts_with("[Tool result persisted:") {
                 continue;
             }
 
@@ -165,8 +150,9 @@ pub fn layer0_persist_large_results(
 // ---------------------------------------------------------------------------
 
 /// Layer 1：从 compactable zone（排除最近 `m` 个 turns）中，
-/// 将 > LAYER1_TOOL_RESULT_THRESHOLD 的 tool result 替换为占位符。
+/// 将 > `layer0_placeholder_threshold_chars` 的 tool result 替换为占位符。
 pub fn compact_tool_results(state: &mut ContextState, m: usize) -> usize {
+    let threshold = 20_000; // will be replaced by config in Phase D
     let len = state.user_turns_list.len();
     if len <= m {
         return 0;
@@ -178,7 +164,7 @@ pub fn compact_tool_results(state: &mut ContextState, m: usize) -> usize {
         if let TurnEntry::UserTurn { messages, .. } = turn {
             for msg in messages.iter_mut() {
                 if let crate::core::agent_loop::AgentMessage::ToolResult { content, .. } = msg {
-                    if content.len() <= LAYER1_TOOL_RESULT_THRESHOLD {
+                    if content.len() <= threshold {
                         continue;
                     }
                     if content.starts_with("[Tool result persisted:")
@@ -197,4 +183,21 @@ pub fn compact_tool_results(state: &mut ContextState, m: usize) -> usize {
         }
     }
     total_reduced
+}
+
+// ---------------------------------------------------------------------------
+// run_layer0_cleanup: Combined L0 persist + L1 placeholder (TASK-20)
+// ---------------------------------------------------------------------------
+
+/// TASK-20: L0 步骤 A（最后一 turn 落盘）+ 步骤 B（compactable zone 占位符替换）。
+/// 在时机 ⑤（reasoning loop 最终 assistant 回复后）调用。
+pub fn run_layer0_cleanup(
+    state: &mut ContextState,
+    config: &ContextConfig,
+    work_dir: &Path,
+    session_id: &str,
+) -> Vec<PersistedResult> {
+    let persisted = layer0_persist_large_results(state, config, work_dir, session_id);
+    compact_tool_results(state, M_PROTECTED_TURNS);
+    persisted
 }

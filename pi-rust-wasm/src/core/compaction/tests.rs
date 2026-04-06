@@ -255,8 +255,8 @@ fn determine_cascade_params_zero_budget() {
 #[test]
 fn layer0_persist_creates_files() {
     let dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(50_000, 100_000, 25_000);
-    let big_content = "x".repeat(40_000);
+    let mut state = make_state(60_000, 100_000, 25_000);
+    let big_content = "x".repeat(60_000);
     state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
         tool_call_id: "tc_1".into(),
         content: big_content,
@@ -266,7 +266,7 @@ fn layer0_persist_creates_files() {
     let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
     assert_eq!(results.len(), 1);
     assert!(std::path::Path::new(&results[0].persisted_path).exists());
-    assert!(state.estimate_context_chars < 50_000);
+    assert!(state.estimate_context_chars < 60_000);
     if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[0] {
         if let AgentMessage::ToolResult { content, .. } = &messages[0] {
             assert!(content.starts_with("[Tool result persisted:"));
@@ -402,67 +402,27 @@ fn determine_cascade_params_at_092() {
 }
 
 #[test]
-fn layer0_persist_aggregate_threshold() {
+fn layer0_persist_skips_below_threshold() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(200_000, 500_000, 125_000);
     let medium = "x".repeat(20_000);
-    state.user_turns_list = vec![make_user_turn(vec![
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_a".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_b".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_c".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_d".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_e".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_f".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_g".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "tc_h".into(),
-            content: medium.clone(),
-            is_error: false,
-        },
-    ])];
-    let config = ContextConfig {
-        layer0_turn_aggregate_max_chars: 150_000,
-        ..Default::default()
-    };
+    state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+        tool_call_id: "tc_a".into(),
+        content: medium,
+        is_error: false,
+    }])];
+    let config = ContextConfig::default();
     let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
     assert!(
-        !results.is_empty(),
-        "aggregate threshold should trigger persistence"
+        results.is_empty(),
+        "20K < 50K threshold should NOT trigger persistence"
     );
 }
 
 #[test]
 fn layer0_persist_file_readable() {
     let dir = tempfile::tempdir().unwrap();
-    let original = "hello world content for persistence test ".repeat(1000);
+    let original = "hello world content for persistence test ".repeat(2000);
     let mut state = make_state(original.len(), 100_000, 25_000);
     state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
         tool_call_id: "tc_read".into(),

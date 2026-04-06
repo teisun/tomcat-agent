@@ -19,8 +19,8 @@ mod tests;
 // ---------------------------------------------------------------------------
 
 pub use truncation::{
-    compact_tool_results, layer0_persist_large_results, truncate_tool_result_if_needed,
-    PersistedResult, TruncationInfo,
+    compact_tool_results, layer0_persist_large_results, run_layer0_cleanup,
+    truncate_tool_result_if_needed, PersistedResult, TruncationInfo,
 };
 
 pub use summary::{

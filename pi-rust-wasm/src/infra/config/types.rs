@@ -261,12 +261,15 @@ pub struct ContextConfig {
     /// Compaction 摘要使用的 LLM 模型（可配低成本模型），默认与主模型相同。
     #[serde(default = "default_compaction_model")]
     pub compaction_model: String,
-    /// Layer 0 落盘阈值：单条 tool_result 字符数上限，默认 30,000。
+    /// Layer 0 落盘阈值：单条 tool_result 字符数上限，默认 50,000。
     #[serde(default = "default_layer0_single_result_max_chars")]
     pub layer0_single_result_max_chars: usize,
-    /// Layer 0 落盘阈值：单 turn 合计字符数上限，默认 150,000。
+    /// Layer 0 落盘阈值：单 turn 合计字符数上限，默认 150,000（legacy, ignored）。
     #[serde(default = "default_layer0_turn_aggregate_max_chars")]
     pub layer0_turn_aggregate_max_chars: usize,
+    /// Layer 0 占位符替换阈值：compactable zone 内 > 此值的 tool_result 被替换为占位符，默认 10,000。
+    #[serde(default = "default_layer0_placeholder_threshold_chars")]
+    pub layer0_placeholder_threshold_chars: usize,
     /// 自动压缩 buffer（token 数），remaining < 此值触发 cascade（≈ ratio 0.88 档），默认 13,000。
     #[serde(default = "default_autocompact_buffer_tokens")]
     pub autocompact_buffer_tokens: usize,
@@ -294,7 +297,10 @@ fn default_compaction_model() -> String {
     DEFAULT_LLM_MODEL.to_string()
 }
 fn default_layer0_single_result_max_chars() -> usize {
-    30_000
+    50_000
+}
+fn default_layer0_placeholder_threshold_chars() -> usize {
+    10_000
 }
 fn default_layer0_turn_aggregate_max_chars() -> usize {
     150_000
@@ -317,6 +323,7 @@ impl Default for ContextConfig {
             compaction_model: default_compaction_model(),
             layer0_single_result_max_chars: default_layer0_single_result_max_chars(),
             layer0_turn_aggregate_max_chars: default_layer0_turn_aggregate_max_chars(),
+            layer0_placeholder_threshold_chars: default_layer0_placeholder_threshold_chars(),
             autocompact_buffer_tokens: default_autocompact_buffer_tokens(),
             warning_buffer_tokens: default_warning_buffer_tokens(),
         }

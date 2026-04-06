@@ -1219,7 +1219,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
     use pi_wasm::core::compaction::layer0_persist_large_results;
 
     let dir = tempfile::tempdir()?;
-    let original = "important content ".repeat(2000);
+    let original = "important content ".repeat(4000);
     let mut state = ContextState {
         user_turns_list: vec![TurnEntry::UserTurn {
             id: "turn_persist".to_string(),
