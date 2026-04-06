@@ -1041,7 +1041,7 @@
 
 **依赖**：TASK-17（context-management，DONE）、TASK-14（Agent Loop，DONE）
 
-**被依赖**：—
+**被依赖**：TASK-20（上下文管理现行方案：异步预热 + 延迟应用，见下文）
 
 **协作接口**：
 - 消费：`LlmProvider`（Compaction 摘要调用 + `StreamEvent::Usage`）、`SessionManager`（transcript 读写 + tool-result 文件 I/O）、`EventBus`（事件发布）、`PrimitiveConfig`（配置加载）
@@ -1071,3 +1071,57 @@
 - `ContextMetrics` 每轮更新并通过 EventBus 推送
 - `cargo clippy --all-targets -- -D warnings` 无新增 warning
 - 新增单测覆盖率 ≥ 80%
+
+---
+
+### TASK-20 | context-management-async-boundary | 上下文管理 — 异步预热与 Boundary 延迟应用（对齐现行方案）
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/context-async-compaction`（建议） |
+| **阻塞点** | — |
+
+**目标**：按 [上下文管理技术方案](../openspec/specs/architecture/context-management.md) **现行** §1–§5，将 LLM 摘要从「同步阻塞 / 每轮级联」收敛为 **Layer 1 异步预热 + Layer 2 延迟应用（Boundary 切换）**，保证 **reasoning loop 最终 assistant 回复后（时机 ⑤）主线程零等待**；仅在 **下一 user turn 发起 LLM 请求前（时机 ②）**、且 `ratio >= 0.98` 而摘要未完成时，才允许阻塞等待推理启动。统一水位线与触发表（0.50 / 0.70 / 0.85 / 0.98、buffer 安全网、Layer 3 仅 API Context Overflow 后兜底）。
+
+**技术方案**：[context-management.md](../openspec/specs/architecture/context-management.md)（§3 时序图、§4.2 水位线、§5.2 `CompactionSummary`、§5.5 compact boundary）
+
+**子项**：
+
+**Phase A：状态与单例任务**
+- [ ] 20.1 `ContextState`（或等价模块）：`compaction_summary: Option<CompactionSummary>` — 含后台 `JoinHandle`、覆盖区间 `covered_start_id`/`covered_end_id`、完成结果；**同一时间仅允许一个**预热任务；Session 退出时对未完成 task `abort()`（§5.2）
+- [ ] 20.2 Boundary 切换后调用 `invalidate_api_usage`，并重算 `estimate_context_chars` / token 相关字段与 reasoning 消息起始索引（`start_idx`，§5.3、文档图二）
+
+**Phase B：时机 ⑤ / ② 挂载**
+- [ ] 20.3 **时机 ⑤**（user turn 结束：最终无 `tool_calls` 的 assistant 回复后）：同步跑 Layer 0（50K 落盘 + preview、compactable zone 内 10K 占位符，§4.4）；重算 `ratio`；`ratio >= 0.50` 且无进行中任务则 **spawn** Layer 1 预热；`ratio >= 0.85` 时对已完成摘要 **非阻塞** Boundary 切换，并可按需启动新一轮预热（§4.2）
+- [ ] 20.4 **时机 ②**（下一 user turn 构建 `messages` 并发 LLM 前）：`ratio >= 0.70` 时非阻塞检查并完成则切换；`ratio >= 0.98` 时已完成则切换，**未完成则 `block_on` 等待**后再切换（§4.2）；与 buffer 安全网（§4.3）对齐
+
+**Phase C：Transcript 与 Layer 1/2/3 语义**
+- [ ] 20.5 预热完成：追加 `Compaction` entry，`is_boundary=false`（备用，加载时跳过）；应用切换：追加 `is_boundary=true`，`init_context_state` 折叠与运行时一致（§5.5）
+- [ ] 20.6 Layer 1：克隆 `user_turns_list` 调 `compaction_model`，摘要覆盖**整表**并记录首尾 id；与既有 UPDATE 摘要 prompt 兼容（§3 图四、文档 1.1）
+- [ ] 20.7 Layer 3：**仅**在 API 明确 Context Overflow 后物理截断至 `ratio < 0.50`（§4.2）；与 TASK-19 中「ratio=1.0 触发 L3」等旧叙述脱钩，以现行文档为准
+
+**Phase D：可观测与配置对齐**
+- [ ] 20.8 `ContextMetrics`（若尚未完整落地则本任务收口）：压缩次数、释放量、利用率等；经 EventBus 推送；CLI/TUI **状态栏反馈压缩进度**（§1.1 设计目标 8）
+- [ ] 20.9 `[context]` 默认值与文档一致：`layer0_single_result_max_chars=50000`、`layer0_placeholder_threshold_chars=10000` 等（§4.4）；移除实现中与现行方案冲突的同步级联入口或加以 `#deprecated` 注释并单一路径
+
+**Phase E：测试**
+- [ ] 20.10 单元测试：单例预热、⑤ 不阻塞、② 下 0.98 同步等待路径、boundary 加载跳过 `false`、task abort
+- [ ] 20.11 集成测试：高 `ratio` 下对话与流式输出不卡顿；session 重载后内存视图与 transcript 一致
+
+**依赖**：TASK-17（DONE）、TASK-19（DONE）；以当前 `develop` 实现为基线，**规格以 `context-management.md` 现行正文为准**（TASK-19 表格若与文档不一致时以文档收口）。
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`LlmProvider`（`StreamEvent::Usage`、compaction 调用）、`SessionManager`（transcript、tool-result 落盘路径）、`EventBus`、`PrimitiveConfig`
+- 提供：异步 `CompactionSummary` 生命周期 API、Boundary 切换与 `build_context_messages` 一致行为
+
+**验收标准**：
+- ⑤ 路径上无 `await` Compaction LLM；UI 在整轮 reasoning 结束后不因压缩卡住
+- ② 路径上仅在 `ratio >= 0.98` 且摘要未完成时阻塞，且阻塞发生在用户已看到完整回复之后
+- `ratio` 档位与 §4.2 总表一致；Layer 3 仅在 Context Overflow 错误后触发
+- Transcript：`is_boundary=false` / `true` 语义与 §5.5 一致；重载无重复摘要、无丢失 boundary 后状态
+- `cargo clippy --all-targets -- -D warnings`；新增/相关单测覆盖率 ≥ 80%

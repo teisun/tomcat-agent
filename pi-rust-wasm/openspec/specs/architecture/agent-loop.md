@@ -171,6 +171,8 @@ fn run_reasoning_loop(session, messages) -> Result:
     tool_loop_guard = ToolLoopGuard::new()
     turn_index = 0
     loop:
+        # MAX_TOOL_ROUNDS 已设为 usize::MAX（不限制）；
+        # 工具轮次由上下文预算自然约束，详见 context-management.md §6.7。
         if turn_index >= MAX_TOOL_ROUNDS:
             return Ok(last_response)
         emit(TurnStart { turn_index })
@@ -338,13 +340,15 @@ agent_start              ← 第一层开始，用户消息进入
 
 ## 13.9 上下文压缩（Compaction）
 
-当第二层捕获到 Context Overflow 时触发：
+详见 [上下文管理技术方案](context-management.md)。以下为与 Agent Loop 交互的概要：
 
-- **保留**：System Prompt（始终不压缩）+ 最近 N 条消息（N 可配置，默认如 20）。
-- **压缩**：中间旧消息可调用 LLM 生成摘要（可选）；MVP 可采用简单截断。
-- **替换**：用一条 CompactionSummary 消息替代被压缩的消息段。
+上下文管理采用四层防护（L0 tool_result 清理 → L1 异步预热 → L2 检查与应用 → L3 物理截断），由 ratio 水位线驱动。与 Agent Loop 的三个交互时机：
 
-MVP 简化：仅丢弃最旧消息（保留 System Prompt + 最近 N 条），不生成摘要；后续迭代再增加 LLM 摘要。
+- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI）：L0 同步清理 `userTurnsList` → L1 异步预热 → L2 非阻塞检查
+- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：L2 检查 CompactionSummary → 完成则 Boundary 切换（ratio >= 0.98 时可化异步为同步等待）→ `messages` 从更新后的 `userTurnsList` 重建
+- **③ reasoning loop 内 API 返回 Context Overflow**：L3 物理截断 + 重试（第二层 Attempt Loop）
+
+> 步骤编号（②③⑤）对应 [context-management.md §5.6](context-management.md) 的完整链路图。
 
 ---
 
