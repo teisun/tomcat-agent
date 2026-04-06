@@ -7,7 +7,9 @@
 //!
 //! 由 ratio 水位线驱动级联降压：每层执行后重算 ratio，降压成功即停。
 
+pub mod apply;
 mod cascade;
+pub mod preheat;
 mod summary;
 mod truncation;
 
