@@ -854,7 +854,6 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     }));
 
     let messages = vec![AgentMessage::User {

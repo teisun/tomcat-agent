@@ -262,7 +262,7 @@ fn init_context_state_empty_session() {
     let state = init_context_state(&mgr, &cfg, "system prompt").unwrap();
     assert!(state.user_turns_list.is_empty());
     assert_eq!(state.estimate_context_chars, "system prompt".len());
-    assert_eq!(state.context_budget_chars, 816_000);
+    assert_eq!(state.context_budget_chars, 1_088_000);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -350,7 +350,6 @@ fn build_context_from_state_flattens_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
     let msgs = build_context_from_state(&state);
     assert_eq!(msgs.len(), 3);

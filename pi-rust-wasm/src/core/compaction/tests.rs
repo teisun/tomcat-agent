@@ -1,4 +1,4 @@
-use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER, TRUNCATION_SUFFIX};
+use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER};
 use super::*;
 use crate::core::agent_loop::AgentMessage;
 use crate::core::session::manager::{ContextState, TurnEntry};
@@ -14,14 +14,6 @@ fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
     }
 }
 
-fn make_summary_turn(summary: impl Into<String>) -> TurnEntry {
-    TurnEntry::SummaryTurn {
-        id: format!("sum_{}", TS),
-        summary: summary.into(),
-        timestamp: TS.to_string(),
-    }
-}
-
 fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> ContextState {
     ContextState {
         user_turns_list: vec![],
@@ -32,7 +24,6 @@ fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> Contex
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     }
 }
 
@@ -51,39 +42,6 @@ fn floor_char_boundary_multibyte() {
     assert_eq!(floor_char_boundary(s, 4), 3);
     assert_eq!(floor_char_boundary(s, 5), 3);
     assert_eq!(floor_char_boundary(s, 6), 6);
-}
-
-#[test]
-fn truncate_noop_when_under_limit() {
-    let mut s = "short".to_string();
-    let info = truncate_tool_result_if_needed(&mut s, 1000);
-    assert!(info.is_none());
-    assert_eq!(s, "short");
-}
-
-#[test]
-fn truncate_works_on_large_content() {
-    let mut s = "a\n".repeat(300_000);
-    let info = truncate_tool_result_if_needed(&mut s, 400_000);
-    assert!(info.is_some());
-    let info = info.unwrap();
-    assert!(info.truncated_chars < 400_000 + TRUNCATION_SUFFIX.len() + 10);
-    assert!(s.ends_with(TRUNCATION_SUFFIX));
-}
-
-#[test]
-fn truncate_chinese_content_no_panic() {
-    let mut s = "你好\n".repeat(200_000);
-    let info = truncate_tool_result_if_needed(&mut s, 400_000);
-    assert!(info.is_some());
-    assert!(s.ends_with(TRUNCATION_SUFFIX));
-}
-
-#[test]
-fn truncate_exact_boundary() {
-    let mut s = "x".repeat(400_000);
-    let info = truncate_tool_result_if_needed(&mut s, 400_000);
-    assert!(info.is_none());
 }
 
 #[test]
@@ -139,19 +97,6 @@ fn compact_tool_results_skips_small() {
 }
 
 #[test]
-fn force_drop_oldest_recovers_budget() {
-    let mut state = make_state(6000, 2000, 500);
-    state.user_turns_list = vec![
-        make_summary_turn("x".repeat(5000)),
-        make_user_turn(vec![AgentMessage::User {
-            text: "q".to_string(),
-        }]),
-    ];
-    force_drop_oldest(&mut state);
-    assert!(!state.is_over_budget());
-}
-
-#[test]
 fn force_drop_oldest_to_target_below_half() {
     let mut state = make_state(4000, 4000, 1000);
     state.user_turns_list = vec![
@@ -203,56 +148,6 @@ fn context_state_on_new_user_turn() {
 }
 
 #[test]
-fn determine_cascade_params_below_threshold() {
-    let state = make_state(100, 1000, 1000);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(!params.should_cascade);
-}
-
-#[test]
-fn determine_cascade_params_at_070() {
-    let mut state = make_state(0, 0, 1000);
-    state.update_api_usage(700, 0);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade);
-    assert_eq!(params.m, 5);
-    assert!(!params.block_tool_calls);
-}
-
-#[test]
-fn determine_cascade_params_at_098() {
-    let mut state = make_state(0, 0, 1000);
-    state.update_api_usage(980, 0);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade);
-    assert_eq!(params.m, 1);
-    assert!(params.block_tool_calls);
-    assert!(!params.target_layer3);
-}
-
-#[test]
-fn determine_cascade_params_at_100() {
-    let mut state = make_state(0, 0, 1000);
-    state.update_api_usage(1000, 0);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade);
-    assert!(params.target_layer3);
-}
-
-#[test]
-fn determine_cascade_params_zero_budget() {
-    let state = make_state(100, 100, 0);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade);
-    assert!(params.target_layer3);
-}
-
-#[test]
 fn layer0_persist_creates_files() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(60_000, 100_000, 25_000);
@@ -286,13 +181,6 @@ fn layer0_persist_skips_small() {
     let config = ContextConfig::default();
     let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
     assert!(results.is_empty());
-}
-
-#[test]
-fn circuit_breaker_skips_layer2() {
-    let mut state = make_state(100, 100, 100);
-    state.compaction_consecutive_failures = 3;
-    assert!(state.compaction_consecutive_failures >= 3);
 }
 
 // --- V2 新增测试 ---
@@ -380,28 +268,6 @@ fn compact_tool_results_skips_placeholder() {
 }
 
 #[test]
-fn determine_cascade_params_at_085() {
-    let mut state = make_state(0, 0, 1000);
-    state.update_api_usage(860, 0);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade);
-    assert_eq!(params.m, 3);
-    assert!(!params.block_tool_calls);
-}
-
-#[test]
-fn determine_cascade_params_at_092() {
-    let mut state = make_state(0, 0, 1000);
-    state.update_api_usage(930, 0);
-    let config = ContextConfig::default();
-    let params = determine_cascade_params(&state, &config);
-    assert!(params.should_cascade);
-    assert_eq!(params.m, 2);
-    assert!(!params.block_tool_calls);
-}
-
-#[test]
 fn layer0_persist_skips_below_threshold() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(200_000, 500_000, 125_000);
@@ -465,4 +331,115 @@ fn is_context_overflow_comprehensive() {
     assert!(is_context_overflow_error("Context limit exceeded"));
     assert!(!is_context_overflow_error("rate limit exceeded"));
     assert!(!is_context_overflow_error("authentication failed"));
+}
+
+// --- TASK-20 新增测试 ---
+
+#[test]
+fn abort_preheat_none_is_noop() {
+    let mut state = make_state(100, 1000, 250);
+    state.compaction_summary = None;
+    state.abort_preheat();
+    assert!(state.compaction_summary.is_none());
+}
+
+#[test]
+fn apply_boundary_replaces_covered_range() {
+    let mut state = make_state(0, 100_000, 25_000);
+    let t0 = TurnEntry::UserTurn {
+        id: "t0".into(),
+        messages: vec![AgentMessage::User { text: "a".repeat(5000) }],
+        timestamp: "2026-01-01T00:00:00Z".into(),
+    };
+    let t1 = TurnEntry::UserTurn {
+        id: "t1".into(),
+        messages: vec![AgentMessage::User { text: "b".repeat(3000) }],
+        timestamp: "2026-01-01T00:01:00Z".into(),
+    };
+    let t2 = TurnEntry::UserTurn {
+        id: "t2".into(),
+        messages: vec![AgentMessage::User { text: "c".repeat(2000) }],
+        timestamp: "2026-01-01T00:02:00Z".into(),
+    };
+    state.user_turns_list = vec![t0, t1, t2];
+    state.estimate_context_chars = 10_000;
+
+    let result = crate::core::session::manager::CompactionResult {
+        summary_text: "short summary".into(),
+        covered_start_id: "t0".into(),
+        covered_end_id: "t1".into(),
+        covered_count: 2,
+    };
+    let old_ratio = state.usage_ratio();
+    state.apply_boundary(result).unwrap();
+
+    assert_eq!(state.user_turns_list.len(), 2);
+    assert!(matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary == "short summary"));
+    assert_eq!(state.user_turns_list[1].id(), "t2");
+    assert!(state.last_api_usage.is_none());
+    let new_ratio = state.usage_ratio();
+    assert!(new_ratio < old_ratio, "ratio should decrease after boundary");
+}
+
+#[test]
+fn apply_boundary_not_found_returns_err() {
+    let mut state = make_state(1000, 10_000, 2_500);
+    state.user_turns_list = vec![make_user_turn(vec![AgentMessage::User { text: "x".into() }])];
+
+    let result = crate::core::session::manager::CompactionResult {
+        summary_text: "summary".into(),
+        covered_start_id: "nonexistent".into(),
+        covered_end_id: "also_nonexistent".into(),
+        covered_count: 1,
+    };
+    let res = state.apply_boundary(result);
+    assert!(res.is_err());
+}
+
+#[test]
+fn check_after_reply_skips_below_085() {
+    let mut state = make_state(0, 0, 1000);
+    state.update_api_usage(500, 0);
+    let switched = super::apply::check_after_reply(&mut state);
+    assert!(!switched, "ratio 0.50 should not trigger check_after_reply");
+}
+
+#[test]
+fn check_after_reply_skips_when_no_preheat() {
+    let mut state = make_state(0, 0, 1000);
+    state.update_api_usage(900, 0);
+    let switched = super::apply::check_after_reply(&mut state);
+    assert!(!switched, "no compaction_summary should skip");
+}
+
+#[test]
+fn layer0_threshold_from_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(60_000, 100_000, 25_000);
+    let big_content = "x".repeat(60_000);
+    state.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+        tool_call_id: "tc_cfg".into(),
+        content: big_content,
+        is_error: false,
+    }])];
+
+    let config = ContextConfig {
+        layer0_single_result_max_chars: 100_000,
+        ..Default::default()
+    };
+    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test");
+    assert!(results.is_empty(), "60K < 100K threshold should NOT persist");
+
+    let config2 = ContextConfig {
+        layer0_single_result_max_chars: 50_000,
+        ..Default::default()
+    };
+    let mut state2 = make_state(60_000, 100_000, 25_000);
+    state2.user_turns_list = vec![make_user_turn(vec![AgentMessage::ToolResult {
+        tool_call_id: "tc_cfg2".into(),
+        content: "y".repeat(60_000),
+        is_error: false,
+    }])];
+    let results2 = layer0_persist_large_results(&mut state2, &config2, dir.path(), "test");
+    assert_eq!(results2.len(), 1, "60K > 50K threshold should persist");
 }

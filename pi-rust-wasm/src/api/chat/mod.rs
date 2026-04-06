@@ -4,7 +4,7 @@ use std::io::{self, Write as IoWrite};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::core::compaction::run_compaction_cascade_v2;
+use crate::core::compaction::apply::check_before_request;
 use crate::core::session::manager::{build_context_from_state, init_context_state, TurnEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventContext;
@@ -266,6 +266,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => {
                 println!("\n再见！");
+                context_state.abort_preheat();
                 break;
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
@@ -273,6 +274,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             }
             Err(e) => {
                 eprintln!("输入错误: {}", e);
+                context_state.abort_preheat();
                 break;
             }
         };
@@ -291,26 +293,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         // Update context estimate for the new user input
         context_state.on_message_appended(input.len());
 
-        // Pre-flight cascade V2: ratio watermark-driven compaction
-        if context_state.is_over_budget() {
-            let tp = ctx
-                .session
-                .current_transcript_path()
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-            let work_dir_str = ctx.workspace_dir.to_string_lossy();
-            run_compaction_cascade_v2(
-                &mut context_state,
-                &*ctx.llm,
-                context_config,
-                &tp,
-                &ctx.workspace_dir,
-                ctx.session.current_session_key(),
-            )
-            .await;
-            let _ = work_dir_str;
-        }
+        // Timing ②: apply pending preheat boundary before request
+        check_before_request(&mut context_state).await;
 
         // Build messages from ContextState
         let mut messages = build_context_from_state(&context_state);
@@ -424,7 +408,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                             post_usage_appended_chars: 0,
                             transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
                             compaction_summary: None,
-                            compaction_consecutive_failures: 0,
                         },
                     )
                 });
@@ -465,7 +448,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                             post_usage_appended_chars: 0,
                             transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
                             compaction_summary: None,
-                            compaction_consecutive_failures: 0,
                         },
                     )
                 });
@@ -474,6 +456,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 eprintln!("\n[错误] {}", e);
                 if is_fatal {
                     eprintln!("(致命错误，退出对话)");
+                    context_state.abort_preheat();
                     return Err(e);
                 }
                 eprintln!("(可重试，请继续输入)\n");

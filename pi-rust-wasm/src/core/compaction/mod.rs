@@ -1,36 +1,25 @@
-//! 上下文 Compaction 四层防护算法 V2。
+//! 上下文 Compaction：异步预热 + Boundary 延迟应用。
 //!
 //! - Layer 0: 超大 tool result 落盘 + preview 占位符（保全信息）
-//! - Layer 1: compactable zone 内 tool result > 20K 占位符替换（零 LLM 开销）
-//! - Layer 2: LLM 一次性摘要 compactable zone（按 m 值保护最近 turns）
-//! - Layer 3: 强制删除最旧 turn 到 ratio < 0.50 兜底
-//!
-//! 由 ratio 水位线驱动级联降压：每层执行后重算 ratio，降压成功即停。
+//! - Layer 1: 异步 LLM 摘要预热（后台 tokio task）
+//! - Layer 2: 延迟应用（时机 ⑤ 非阻塞 + 时机 ② async 检查）
+//! - Layer 3: 强制删除最旧 turn（仅 API Context Overflow 后触发）
 
 pub mod apply;
-mod cascade;
 pub mod preheat;
-mod summary;
+mod cascade;
 mod truncation;
 
 #[cfg(test)]
 mod tests;
 
 // ---------------------------------------------------------------------------
-// Public re-exports (preserves original module API surface)
+// Public re-exports
 // ---------------------------------------------------------------------------
 
 pub use truncation::{
     compact_tool_results, layer0_persist_large_results, run_layer0_cleanup,
-    truncate_tool_result_if_needed, PersistedResult, TruncationInfo,
+    PersistedResult,
 };
 
-pub use summary::{
-    run_compaction, run_compaction_loop, SUMMARIZATION_PROMPT, UPDATE_SUMMARIZATION_PROMPT,
-};
-
-pub use cascade::{
-    determine_cascade_params, force_drop_oldest, force_drop_oldest_to_target,
-    is_context_overflow_error, run_compaction_cascade, run_compaction_cascade_v2, CascadeParams,
-    CascadeResult,
-};
+pub use cascade::{force_drop_oldest_to_target, is_context_overflow_error};

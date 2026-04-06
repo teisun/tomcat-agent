@@ -92,8 +92,6 @@ pub struct ContextState {
     pub transcript_path: PathBuf,
     /// 异步预热单例：同一时间仅允许一个预热任务。
     pub compaction_summary: Option<CompactionSummary>,
-    /// Legacy: Phase E (20.10) will remove this field.
-    pub compaction_consecutive_failures: u32,
 }
 
 fn _assert_send<T: Send>() {}

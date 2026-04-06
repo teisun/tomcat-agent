@@ -344,8 +344,10 @@ fn context_config_default_values() {
     assert_eq!(cfg.max_output_tokens, 128_000);
     assert_eq!(cfg.compaction_turns, 10);
     assert_eq!(cfg.keep_recent_turns, 3);
-    assert_eq!(cfg.single_tool_result_max_chars, 400_000);
     assert_eq!(cfg.compaction_model, DEFAULT_LLM_MODEL);
+    assert_eq!(cfg.layer0_single_result_max_chars, 50_000);
+    assert_eq!(cfg.layer0_placeholder_threshold_chars, 10_000);
+    assert_eq!(cfg.compaction_max_tokens, 10_000);
 }
 
 #[test]
@@ -356,8 +358,8 @@ fn context_budget_chars_gpt52() {
         ..Default::default()
     };
     let budget = compute_context_budget_chars(&cfg);
-    // (400000 - 128000) * 4 * 0.75 = 816000
-    assert_eq!(budget, 816_000);
+    // (400000 - 128000) * 4 = 1_088_000
+    assert_eq!(budget, 1_088_000);
 }
 
 #[test]
@@ -368,7 +370,7 @@ fn context_budget_chars_zero_output() {
         ..Default::default()
     };
     let budget = compute_context_budget_chars(&cfg);
-    assert_eq!(budget, 300_000); // 100000 * 4 * 0.75
+    assert_eq!(budget, 400_000); // 100000 * 4
 }
 
 #[test]

@@ -34,6 +34,10 @@ pub mod wire {
     pub const WIRE_COMPACTION_CIRCUIT_BREAKER_TRIGGERED: &str =
         "compaction_circuit_breaker_triggered";
     pub const WIRE_TOOL_RESULT_PERSISTED: &str = "tool_result_persisted";
+    pub const WIRE_PREHEAT_STARTED: &str = "preheat_started";
+    pub const WIRE_PREHEAT_COMPLETED: &str = "preheat_completed";
+    pub const WIRE_PREHEAT_ERROR: &str = "preheat_error";
+    pub const WIRE_BOUNDARY_SWITCHED: &str = "boundary_switched";
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
 
     // --- ExtensionEvent ---
@@ -210,6 +214,8 @@ pub enum AgentEvent {
         compaction_tokens_freed: usize,
         #[serde(rename = "totalToolResultBytesPersisted")]
         total_tool_result_bytes_persisted: usize,
+        #[serde(rename = "preheatInProgress")]
+        preheat_in_progress: bool,
     },
     CompactionCircuitBreakerTriggered {
         #[serde(rename = "consecutiveFailures")]
@@ -222,6 +228,31 @@ pub enum AgentEvent {
         original_chars: usize,
         #[serde(rename = "persistedPath")]
         persisted_path: String,
+    },
+    PreheatStarted {
+        #[serde(rename = "coveredCount")]
+        covered_count: usize,
+        #[serde(rename = "usageRatio")]
+        usage_ratio: f64,
+    },
+    PreheatCompleted {
+        #[serde(rename = "coveredCount")]
+        covered_count: usize,
+        #[serde(rename = "summaryChars")]
+        summary_chars: usize,
+    },
+    PreheatError {
+        error: String,
+    },
+    BoundarySwitched {
+        #[serde(rename = "ratioBefore")]
+        ratio_before: f64,
+        #[serde(rename = "ratioAfter")]
+        ratio_after: f64,
+        #[serde(rename = "coveredCount")]
+        covered_count: usize,
+        #[serde(rename = "wasSyncWait")]
+        was_sync_wait: bool,
     },
 }
 

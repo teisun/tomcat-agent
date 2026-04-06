@@ -4,12 +4,10 @@
 mod common;
 
 use async_trait::async_trait;
-use pi_wasm::core::compaction::{
-    compact_tool_results, force_drop_oldest, run_compaction_loop, truncate_tool_result_if_needed,
-};
+use pi_wasm::core::compaction::compact_tool_results;
 use pi_wasm::{
-    build_context_from_state, init_context_state, wire, AgentLoop, AgentLoopConfig, AgentMessage,
-    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    build_context_from_state, init_context_state, AgentLoop, AgentLoopConfig, AgentMessage,
+    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
     ContextConfig, ContextState, DefaultEventBus, DirEntry, EditFileResult, EditOperation,
     EventBus, EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation, SessionManager,
     StreamEvent, ToolCallInfo, TurnEntry, WriteFileResult,
@@ -132,20 +130,6 @@ fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
     ]
 }
 
-fn tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEvent, AppError>> {
-    vec![
-        Ok(StreamEvent::ToolCallDelta {
-            index: 0,
-            id: Some(id.to_string()),
-            name: Some(name.to_string()),
-            arguments_delta: Some(args.to_string()),
-        }),
-        Ok(StreamEvent::FinishReason {
-            reason: "tool_calls".to_string(),
-        }),
-    ]
-}
-
 fn temp_sessions_dir(label: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ms = SystemTime::now()
@@ -162,113 +146,12 @@ fn temp_sessions_dir(label: &str) -> PathBuf {
 
 // ────────────────────── 测试用例 ──────────────────────────────────────────
 
-/// [Layer 0 端到端] AgentLoop 对超大 tool result 自动截断并发出 ToolResultTruncated 事件
-///
-/// 验证：read_file 返回 600K 字符内容时，ToolResultTruncated 事件被发布
-/// 意义：TASK-17 Layer 0 单条 tool result 截断与事件通知——端到端集成
-#[tokio::test]
-async fn test_large_tool_result_triggers_truncation_event() -> Result<(), Box<dyn std::error::Error>>
-{
-    common::setup_logging();
-    let _span = info_span!("test_large_tool_result_triggers_truncation_event").entered();
-
-    info!("Arrange: MockLlm 返回 read_file 工具调用，MockPrimitive 返回 600K 字符内容");
-    let stream_tool = tool_call_stream("rf1", "read_file", r#"{"path":"/big.txt"}"#);
-    let stream_text = text_stream("done reading");
-    let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_text]));
-    let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 600_000 });
-    let event_bus = Arc::new(DefaultEventBus::new());
-
-    let truncated_event: Arc<Mutex<Option<(String, usize, usize)>>> = Arc::new(Mutex::new(None));
-    let ev_clone = Arc::clone(&truncated_event);
-    event_bus.on(
-        wire::WIRE_TOOL_RESULT_TRUNCATED,
-        Box::new(move |ctx: EventContext| {
-            let tool = ctx
-                .payload
-                .get("toolName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let orig = ctx
-                .payload
-                .get("originalChars")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let trunc = ctx
-                .payload
-                .get("truncatedChars")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            *ev_clone.lock().unwrap() = Some((tool, orig, trunc));
-            Ok(())
-        }),
-    );
-
-    let config = AgentLoopConfig {
-        model: "mock-model".to_string(),
-        session_id: "sess-truncation".to_string(),
-        max_attempts: 1,
-        retry_base_delay_ms: 0,
-        context_config: ContextConfig {
-            single_tool_result_max_chars: 400_000,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let abort = Arc::new(AtomicBool::new(false));
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-
-    let ctx_state = ContextState {
-        user_turns_list: Vec::new(),
-        estimate_context_chars: 0,
-        context_budget_chars: 1_000_000,
-        context_budget_tokens: 250_000,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-    agent.set_context_state(Some(ctx_state));
-
-    let messages = vec![AgentMessage::User {
-        text: "read a big file".to_string(),
-    }];
-
-    info!("Act: 调用 AgentLoop::run()");
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
-        .await
-        .map_err(|_| "run() 超时 10s")??;
-
-    info!(
-        "Assert: ToolResultTruncated 事件已发布: {:?}",
-        truncated_event.lock().unwrap()
-    );
-    let ev = truncated_event.lock().unwrap().take();
-    assert!(ev.is_some(), "应发布 ToolResultTruncated 事件");
-    let (tool, orig, trunc) = ev.unwrap();
-    assert_eq!(tool, "read_file");
-    assert_eq!(orig, 600_000);
-    assert!(trunc < orig, "截断后字符数应小于原始");
-    assert!(
-        result.final_text.contains("done reading"),
-        "截断后 AgentLoop 应继续并返回最终文本"
-    );
-
-    Ok(())
-}
-
-/// [Layer 1 + Layer 3 全链路] compact_tool_results 后仍超预算时 force_drop_oldest 兜底恢复
-///
-/// 验证：构造超预算 ContextState → Layer 1 压缩 → 仍超预算 → Layer 3 强制删除 → 回到预算内
-/// 意义：TASK-17 四层防护协同——Layer 1 与 Layer 3 的端到端集成
+/// [Layer 1 + Layer 3 全链路] compact_tool_results 后仍超 ratio 时 force_drop_oldest_to_target 兜底
 #[test]
 fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     common::setup_logging();
     let _span = info_span!("test_compaction_pipeline_layer1_then_layer3_recovers_budget").entered();
 
-    info!("Arrange: 构造含 5 个 turn 的 ContextState，总字符远超 budget (tool results >20K)");
     let mut turns = Vec::new();
     for i in 0..5 {
         turns.push(TurnEntry::UserTurn {
@@ -295,7 +178,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         .map(pi_wasm::core::session::estimate_turn_chars)
         .sum();
 
-    let budget_chars = 30_000;
+    let budget_chars = 80_000;
     let budget_tokens = budget_chars / 4;
     let mut state = ContextState {
         user_turns_list: turns,
@@ -306,32 +189,17 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
-    assert!(state.is_over_budget());
 
-    info!("Act: Layer 1 compact_tool_results (keep_recent=1)");
     let reduced = compact_tool_results(&mut state, 1);
-    info!(
-        "Layer 1 reduced {} chars, still over? {}",
-        reduced,
-        state.is_over_budget()
-    );
-    assert!(reduced > 0, "Layer 1 应替换了部分 tool results");
+    assert!(reduced > 0);
 
-    if state.is_over_budget() {
-        info!("Act: Layer 3 force_drop_oldest");
-        force_drop_oldest(&mut state);
+    if state.usage_ratio() >= 0.50 {
+        pi_wasm::core::compaction::force_drop_oldest_to_target(&mut state);
     }
 
-    info!("Assert: 最终 ContextState 在预算内");
-    assert!(
-        !state.is_over_budget(),
-        "Layer 1 + Layer 3 后应回到预算内: estimate={}, budget={}",
-        state.estimate_context_chars,
-        state.context_budget_chars
-    );
-    assert!(!state.user_turns_list.is_empty(), "至少保留一个 turn");
+    assert!(state.usage_ratio() < 0.50);
+    assert!(!state.user_turns_list.is_empty());
 }
 
 /// [Session 重载] 写入消息与 Compaction entry 后 init_context_state 正确重建
@@ -494,7 +362,6 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
     agent.set_context_state(Some(ctx_state));
 
@@ -529,32 +396,6 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     );
 
     Ok(())
-}
-
-/// [大文件截断 Unicode 安全] 含中文的大工具结果截断后不会出现残缺 UTF-8
-///
-/// 验证：truncate_tool_result_if_needed 对多字节 UTF-8 内容截断后，结果是合法 UTF-8
-/// 意义：TASK-17 Layer 0 Unicode 安全——跨语言场景的鲁棒性
-#[test]
-fn test_truncation_unicode_safety_integration() {
-    common::setup_logging();
-    let _span = info_span!("test_truncation_unicode_safety_integration").entered();
-
-    info!("Arrange: 生成 200K 中文字符串（600K bytes）");
-    let mut content = "你好世界\n".repeat(50_000);
-    let original_len = content.len();
-
-    info!("Act: 截断到 400K 字符限制");
-    let info = truncate_tool_result_if_needed(&mut content, 400_000);
-    assert!(info.is_some());
-
-    info!("Assert: 截断后为合法 UTF-8 且长度合理");
-    assert!(content.len() < original_len, "截断后应比原始短");
-    let _ = content.chars().count(); // panics if invalid UTF-8
-    assert!(
-        content.ends_with("[truncated — original content exceeded limit]"),
-        "应以截断后缀结尾"
-    );
 }
 
 /// [build_context_from_state 端到端] SummaryTurn + UserTurn 混合展平后消息顺序正确
@@ -610,7 +451,6 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
 
     let msgs = build_context_from_state(&state);
@@ -623,79 +463,6 @@ fn test_build_context_preserves_order_with_mixed_turns() {
     assert!(matches!(&msgs[2], AgentMessage::Assistant { .. }));
     assert!(matches!(&msgs[3], AgentMessage::ToolResult { .. }));
     assert!(matches!(&msgs[4], AgentMessage::User { text } if text == "run tests"));
-}
-
-// ────────────────────── MockCompactionLlm ──────────────────────────────────
-
-struct MockCompactionLlm {
-    summaries: Mutex<VecDeque<Result<String, AppError>>>,
-    captured_requests: Mutex<Vec<ChatRequest>>,
-}
-
-impl MockCompactionLlm {
-    fn new(summaries: Vec<Result<String, AppError>>) -> Self {
-        Self {
-            summaries: Mutex::new(summaries.into()),
-            captured_requests: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn captured_count(&self) -> usize {
-        self.captured_requests.lock().unwrap().len()
-    }
-
-    fn captured_all_message_texts(&self) -> Vec<String> {
-        self.captured_requests
-            .lock()
-            .unwrap()
-            .iter()
-            .flat_map(|req| {
-                req.messages
-                    .iter()
-                    .filter_map(|m| m.text_content().map(|s| s.to_string()))
-            })
-            .collect()
-    }
-}
-
-#[async_trait]
-impl LlmProvider for MockCompactionLlm {
-    fn provider_name(&self) -> &str {
-        "mock-compaction"
-    }
-    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
-        self.captured_requests.lock().unwrap().push(req);
-        let result = self
-            .summaries
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or(Err(AppError::Llm("no more summaries".into())));
-        let text = result?;
-        Ok(ChatResponse {
-            id: None,
-            choices: vec![ChatResponseChoice {
-                index: 0,
-                message: ChatMessage::assistant(&text),
-                finish_reason: Some("stop".into()),
-            }],
-            usage: None,
-        })
-    }
-    async fn chat_stream(
-        &self,
-        _req: ChatRequest,
-    ) -> Result<
-        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
-        AppError,
-    > {
-        Err(AppError::Llm(
-            "MockCompactionLlm: chat_stream not supported".into(),
-        ))
-    }
-    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
-        Ok(0)
-    }
 }
 
 // ────────── Layer 1 深度验证测试 ──────────────────────────────────────────
@@ -745,7 +512,6 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
     let total: usize = state
         .user_turns_list
@@ -811,7 +577,6 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
 
     info!("Act: compact with m=1, only >20K in compactable zone get replaced");
@@ -881,7 +646,6 @@ fn test_compact_tool_results_estimate_precise() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
 
     let reduced = compact_tool_results(&mut state, 1);
@@ -895,249 +659,6 @@ fn test_compact_tool_results_estimate_precise() {
         state.estimate_context_chars,
         total - expected_reduced,
         "estimate should be total - reduced"
-    );
-}
-
-// ────────── Layer 2 深度验证测试 ──────────────────────────────────────────
-
-fn make_big_turn(user_text: &str, size: usize) -> TurnEntry {
-    TurnEntry::UserTurn {
-        id: format!("big_{}", user_text),
-        messages: vec![
-            AgentMessage::User {
-                text: user_text.to_string(),
-            },
-            AgentMessage::Assistant {
-                text: "a".repeat(size),
-                tool_calls: vec![],
-            },
-        ],
-        timestamp: TEST_TS.to_string(),
-    }
-}
-
-/// [Layer 2] 单批压缩：6 turns 超预算，LLM 返回短摘要，压缩后回预算
-#[tokio::test]
-async fn test_compaction_loop_single_batch() {
-    common::setup_logging();
-    let _span = info_span!("test_compaction_loop_single_batch").entered();
-
-    let turns: Vec<TurnEntry> = (0..6)
-        .map(|i| make_big_turn(&format!("q{}", i), 2_000))
-        .collect();
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-    let budget = total / 2;
-
-    let mut state = ContextState {
-        user_turns_list: turns,
-        estimate_context_chars: total,
-        context_budget_chars: budget,
-        context_budget_tokens: budget / 4,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-    assert!(state.is_over_budget());
-
-    let short_summary = "## Goal\nUser asked 4 questions.".to_string();
-    let llm = MockCompactionLlm::new(vec![Ok(short_summary)]);
-    let config = ContextConfig {
-        keep_recent_turns: 2,
-        compaction_turns: 4,
-        ..Default::default()
-    };
-
-    info!("Act: run_compaction_loop");
-    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
-    assert!(result.is_ok());
-
-    info!("Assert: turns compressed, back within budget");
-    assert_eq!(
-        state.user_turns_list.len(),
-        3,
-        "4 old drained + 1 SummaryTurn inserted + 2 recent = 3"
-    );
-    assert!(
-        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal")),
-        "first turn should be SummaryTurn"
-    );
-    assert!(
-        !state.is_over_budget(),
-        "should be within budget after compaction"
-    );
-    assert_eq!(llm.captured_count(), 1, "LLM chat called exactly once");
-}
-
-/// [Layer 2] 多批循环：10 turns 大幅超预算，需要 2+ 轮 LLM 调用
-#[tokio::test]
-async fn test_compaction_loop_multi_batch() {
-    common::setup_logging();
-    let _span = info_span!("test_compaction_loop_multi_batch").entered();
-
-    let turns: Vec<TurnEntry> = (0..10)
-        .map(|i| make_big_turn(&format!("q{}", i), 2_000))
-        .collect();
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-    let budget = total / 2;
-
-    let mut state = ContextState {
-        user_turns_list: turns,
-        estimate_context_chars: total,
-        context_budget_chars: budget,
-        context_budget_tokens: budget / 4,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-
-    let llm = MockCompactionLlm::new(vec![
-        Ok("## Summary batch 1".into()),
-        Ok("## Summary batch 2".into()),
-        Ok("## Summary batch 3".into()),
-    ]);
-    let config = ContextConfig {
-        keep_recent_turns: 2,
-        compaction_turns: 3,
-        ..Default::default()
-    };
-
-    info!("Act: run_compaction_loop with small batches");
-    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
-    assert!(result.is_ok());
-
-    info!("Assert: multiple LLM calls were needed");
-    assert!(
-        llm.captured_count() >= 2,
-        "should need multiple LLM calls, got {}",
-        llm.captured_count()
-    );
-    assert!(
-        !state.is_over_budget(),
-        "should be within budget after multi-batch compaction: estimate={}, budget={}",
-        state.estimate_context_chars,
-        state.context_budget_chars
-    );
-}
-
-/// [Layer 2] UPDATE 模式：batch 含 SummaryTurn 时使用 UPDATE prompt
-#[tokio::test]
-async fn test_compaction_loop_update_mode() {
-    common::setup_logging();
-    let _span = info_span!("test_compaction_loop_update_mode").entered();
-
-    let turns = vec![
-        TurnEntry::SummaryTurn {
-            id: "sum_old".to_string(),
-            summary: "old summary about coding".to_string(),
-            timestamp: TEST_TS.to_string(),
-        },
-        make_big_turn("q1", 3_000),
-        make_big_turn("q2", 3_000),
-        make_big_turn("q3-recent", 500),
-    ];
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-
-    let mut state = ContextState {
-        user_turns_list: turns,
-        estimate_context_chars: total,
-        context_budget_chars: total / 3,
-        context_budget_tokens: total / 12,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-
-    let llm = MockCompactionLlm::new(vec![Ok("## Updated summary".into())]);
-    let config = ContextConfig {
-        keep_recent_turns: 1,
-        compaction_turns: 3,
-        ..Default::default()
-    };
-
-    info!("Act: run_compaction_loop with SummaryTurn in batch");
-    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
-    assert!(result.is_ok());
-
-    info!("Assert: UPDATE prompt used (contains 'Existing summary')");
-    let texts = llm.captured_all_message_texts();
-    assert!(
-        !texts.is_empty(),
-        "should have captured at least one request"
-    );
-    let has_update_marker = texts.iter().any(|t| t.contains("Existing summary"));
-    assert!(
-        has_update_marker,
-        "at least one message should contain UPDATE template marker 'Existing summary', got: {:?}",
-        texts
-            .iter()
-            .map(|t| &t[..80.min(t.len())])
-            .collect::<Vec<_>>()
-    );
-}
-
-/// [Layer 2] LLM 报错时优雅降级：state 不变，函数返回 Ok
-#[tokio::test]
-async fn test_compaction_loop_llm_error_degrades() {
-    common::setup_logging();
-    let _span = info_span!("test_compaction_loop_llm_error_degrades").entered();
-
-    let turns: Vec<TurnEntry> = (0..4)
-        .map(|i| make_big_turn(&format!("q{}", i), 2_000))
-        .collect();
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-
-    let mut state = ContextState {
-        user_turns_list: turns,
-        estimate_context_chars: total,
-        context_budget_chars: total / 2,
-        context_budget_tokens: total / 8,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-    let original_len = state.user_turns_list.len();
-    let original_estimate = state.estimate_context_chars;
-
-    let llm = MockCompactionLlm::new(vec![Err(AppError::Llm("API error".into()))]);
-    let config = ContextConfig {
-        keep_recent_turns: 1,
-        compaction_turns: 3,
-        ..Default::default()
-    };
-
-    info!("Act: run_compaction_loop with LLM error");
-    let result = run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")).await;
-
-    info!("Assert: graceful degradation — state unchanged, Ok returned");
-    assert!(result.is_ok(), "should return Ok even on LLM error");
-    assert_eq!(
-        state.user_turns_list.len(),
-        original_len,
-        "turns should be unchanged"
-    );
-    assert_eq!(
-        state.estimate_context_chars, original_estimate,
-        "estimate should be unchanged"
     );
 }
 
@@ -1237,7 +758,6 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     };
     let config = ContextConfig::default();
     let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");
@@ -1264,99 +784,70 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// [V2 集成] cascade_params buffer 安全网在小窗口模型下正确触发
-/// ratio < 0.70 不触发水位线，但 remaining < autocompact_buf 触发 buffer 安全网
+/// [TASK-20 集成] Session 重载：is_boundary=false 被跳过、is_boundary=true 生效
 #[test]
-fn test_cascade_params_small_window_buffer_safety() {
+fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = info_span!("test_cascade_params_small_window_buffer_safety").entered();
+    let _span = info_span!("test_session_reload_boundary_false_skipped").entered();
 
-    use pi_wasm::core::compaction::determine_cascade_params;
+    let dir = temp_sessions_dir("boundary_false");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None)?;
 
-    let mut state = ContextState {
-        user_turns_list: vec![],
-        estimate_context_chars: 0,
-        context_budget_chars: 0,
-        context_budget_tokens: 32000,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-    // ratio = 13000/32000 = 0.406, well below 0.70
-    state.update_api_usage(13000, 0);
+    mgr.append_message(serde_json::json!({"role":"user","content":"first question"}))?;
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"first answer"}))?;
 
-    let config = ContextConfig {
-        context_window: 16384,
-        max_output_tokens: 384,
-        // input_budget = 16000, remaining = 16000 - 13000 = 3000
-        // buffer_cap(5000) = min(5000, 16000*3/10=4800) = 4800
-        // remaining(3000) < autocompact_buf(4800) → triggers
-        autocompact_buffer_tokens: 5_000,
-        warning_buffer_tokens: 20_000,
-        ..Default::default()
-    };
-    let params = determine_cascade_params(&state, &config);
+    let path = mgr.current_transcript_path()?.unwrap();
+
+    let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
+        pi_wasm::core::session::transcript::CompactionEntry {
+            id: Some("preheat_1".into()),
+            parent_id: None,
+            timestamp: "2026-01-01T00:00:01.000Z".to_string(),
+            summary: Some("Preheat summary (should be ignored)".to_string()),
+            covered_start_id: Some("t0".into()),
+            covered_end_id: Some("t0".into()),
+            covered_count: Some(1),
+            is_boundary: Some(false),
+        },
+    );
+    pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"second question"}))?;
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"second answer"}))?;
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "system")?;
+
+    let has_preheat_summary = state.user_turns_list.iter().any(|t| {
+        matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Preheat summary"))
+    });
     assert!(
-        params.should_cascade,
-        "small window: ratio 0.40 but remaining(3000) < buffer(4800) should trigger"
+        !has_preheat_summary,
+        "is_boundary=false entry should be skipped during reload"
     );
-}
 
-/// [Layer 2] 摘要比原文长时中断：不死循环，state 不变
-#[tokio::test]
-async fn test_compaction_loop_summary_too_long_breaks() {
-    common::setup_logging();
-    let _span = info_span!("test_compaction_loop_summary_too_long_breaks").entered();
+    let has_first = state.user_turns_list.iter().any(|t| {
+        if let TurnEntry::UserTurn { messages, .. } = t {
+            messages.iter().any(|m| matches!(m, AgentMessage::User { text } if text.contains("first")))
+        } else {
+            false
+        }
+    });
+    assert!(has_first, "original turns should still be present");
 
-    let turns: Vec<TurnEntry> = (0..4)
-        .map(|i| make_big_turn(&format!("q{}", i), 500))
-        .collect();
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
+    let has_second = state.user_turns_list.iter().any(|t| {
+        if let TurnEntry::UserTurn { messages, .. } = t {
+            messages.iter().any(|m| matches!(m, AgentMessage::User { text } if text.contains("second")))
+        } else {
+            false
+        }
+    });
+    assert!(has_second, "turns after preheat entry should be present");
 
-    let mut state = ContextState {
-        user_turns_list: turns,
-        estimate_context_chars: total,
-        context_budget_chars: total / 2,
-        context_budget_tokens: total / 8,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        compaction_summary: None,
-        compaction_consecutive_failures: 0,
-    };
-    let original_len = state.user_turns_list.len();
-    let original_estimate = state.estimate_context_chars;
-
-    let way_too_long = "z".repeat(50_000);
-    let llm = MockCompactionLlm::new(vec![Ok(way_too_long)]);
-    let config = ContextConfig {
-        keep_recent_turns: 1,
-        compaction_turns: 3,
-        ..Default::default()
-    };
-
-    info!("Act: run_compaction_loop with summary longer than original");
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        run_compaction_loop(&mut state, &llm, &config, std::path::Path::new("")),
-    )
-    .await
-    .expect("should not timeout (no infinite loop)");
-
-    info!("Assert: breaks without modifying state");
-    assert!(result.is_ok());
-    assert_eq!(
-        state.user_turns_list.len(),
-        original_len,
-        "turns should be unchanged when summary is too long"
-    );
-    assert_eq!(
-        state.estimate_context_chars, original_estimate,
-        "estimate should be unchanged"
-    );
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }

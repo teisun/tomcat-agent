@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use tokio_stream::StreamExt;
 
 use crate::core::compaction::{
-    is_context_overflow_error, run_compaction_cascade_v2, truncate_tool_result_if_needed,
+    is_context_overflow_error, force_drop_oldest_to_target, run_layer0_cleanup,
 };
 use crate::core::context_metrics::ContextMetrics;
 use crate::core::llm::{ChatRequest, LlmProvider, StreamEvent};
@@ -105,6 +105,7 @@ impl AgentLoop {
         if let Some(ref ctx_state) = self.context_state {
             self.metrics.input_tokens_used = ctx_state.estimated_token_count();
             self.metrics.context_utilization_ratio = ctx_state.usage_ratio();
+            self.metrics.preheat_in_progress = ctx_state.compaction_summary.is_some();
         }
         if self.context_state.is_some() {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
@@ -113,6 +114,7 @@ impl AgentLoop {
                 compaction_count: self.metrics.compaction_count,
                 compaction_tokens_freed: self.metrics.compaction_tokens_freed,
                 total_tool_result_bytes_persisted: self.metrics.total_tool_result_bytes_persisted,
+                preheat_in_progress: self.metrics.preheat_in_progress,
             });
         }
     }
@@ -252,19 +254,10 @@ impl AgentLoop {
                             reason: "context_overflow".into(),
                         });
                         if let Some(ref mut ctx_state) = self.context_state {
-                            let cascade_result = run_compaction_cascade_v2(
-                                ctx_state,
-                                &*self.llm,
-                                &self.config.context_config,
-                                std::path::Path::new(""),
-                                std::path::Path::new(&self.config.work_dir),
-                                &self.config.session_id,
-                            )
-                            .await;
+                            force_drop_oldest_to_target(ctx_state);
                             *messages =
                                 crate::core::session::manager::build_context_from_state(ctx_state);
                             self.start_idx = messages.len();
-                            self.block_tool_calls = cascade_result.block_tool_calls;
                         }
                         self.emit_event(AgentEvent::AutoCompactionEnd {
                             result: None,
@@ -414,6 +407,30 @@ impl AgentLoop {
                     text: content_buf,
                     tool_calls: vec![],
                 });
+
+                // Timing ⑤: L0 cleanup + preheat + check_after_reply
+                if let Some(ref mut ctx_state) = self.context_state {
+                    let persisted = run_layer0_cleanup(
+                        ctx_state,
+                        &self.config.context_config,
+                        std::path::Path::new(&self.config.work_dir),
+                        &self.config.session_id,
+                    );
+                    for pr in &persisted {
+                        self.metrics.total_tool_result_bytes_persisted += pr.original_chars;
+                    }
+
+                    crate::core::compaction::preheat::maybe_start_preheat(
+                        ctx_state,
+                        Arc::clone(&self.llm),
+                        &self.config.context_config,
+                    );
+
+                    if ctx_state.usage_ratio() >= 0.85 {
+                        crate::core::compaction::apply::check_after_reply(ctx_state);
+                    }
+                }
+
                 self.emit_context_metrics();
                 self.emit_event(AgentEvent::TurnEnd {
                     session_id: self.config.session_id.clone(),
@@ -489,21 +506,7 @@ impl AgentLoop {
                     input: args.clone(),
                 });
 
-                let (mut result_content, is_error) = self.execute_tool(tc).await;
-
-                if let Some(ref ctx_state) = self.context_state {
-                    let max_chars = self.config.context_config.single_tool_result_max_chars;
-                    if let Some(info) =
-                        truncate_tool_result_if_needed(&mut result_content, max_chars)
-                    {
-                        self.emit_event(AgentEvent::ToolResultTruncated {
-                            tool_name: tc.name.clone(),
-                            original_chars: info.original_chars,
-                            truncated_chars: info.truncated_chars,
-                        });
-                        let _ = ctx_state;
-                    }
-                }
+                let (result_content, is_error) = self.execute_tool(tc).await;
 
                 self.emit_extension_event(ExtensionEvent::ToolResult {
                     tool_name: tc.name.clone(),
@@ -540,40 +543,7 @@ impl AgentLoop {
                 }
             }
 
-            if let Some(ref mut ctx_state) = self.context_state {
-                let tp = std::path::Path::new("");
-                let cascade_result = run_compaction_cascade_v2(
-                    ctx_state,
-                    &*self.llm,
-                    &self.config.context_config,
-                    tp,
-                    std::path::Path::new(&self.config.work_dir),
-                    &self.config.session_id,
-                )
-                .await;
-                if !cascade_result.layers_executed.is_empty() {
-                    self.metrics.compaction_count += 1;
-                    let freed = ((cascade_result.ratio_before - cascade_result.ratio_after)
-                        * ctx_state.context_budget_tokens as f64)
-                        .max(0.0) as usize;
-                    self.metrics.compaction_tokens_freed += freed;
-                    for pr in &cascade_result.persisted_results {
-                        self.metrics.total_tool_result_bytes_persisted += pr.original_chars;
-                    }
-
-                    *messages = crate::core::session::manager::build_context_from_state(ctx_state);
-                    messages.insert(
-                        0,
-                        AgentMessage::System {
-                            text: crate::core::system_prompt::build_system_prompt(
-                                &self.config.work_dir,
-                            ),
-                        },
-                    );
-                    self.start_idx = messages.len();
-                }
-                self.block_tool_calls = cascade_result.block_tool_calls;
-            }
+            // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
 
             self.emit_context_metrics();
             self.emit_event(AgentEvent::TurnEnd {

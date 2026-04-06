@@ -108,6 +108,11 @@ fn fold_entries_to_turns(
     for entry in entries {
         match entry {
             TranscriptEntry::Compaction(ce) => {
+                // is_boundary=false → preheat record: skip during reload
+                if ce.is_boundary == Some(false) {
+                    continue;
+                }
+
                 if !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
                         id: generate_entry_id(),
@@ -118,6 +123,8 @@ fn fold_entries_to_turns(
                     turns.push(turn);
                 }
 
+                // is_boundary=true → discard prefix (boundary switch)
+                // is_boundary=None → legacy entry, don't clear (backward compat)
                 if ce.is_boundary == Some(true) {
                     turns.clear();
                     total_chars = system_text_len;
@@ -277,7 +284,6 @@ pub fn init_context_state(
                 post_usage_appended_chars: 0,
                 transcript_path: PathBuf::new(),
                 compaction_summary: None,
-                compaction_consecutive_failures: 0,
             });
         }
     };
@@ -300,7 +306,6 @@ pub fn init_context_state(
         post_usage_appended_chars: 0,
         transcript_path: path,
         compaction_summary: None,
-        compaction_consecutive_failures: 0,
     })
 }
 

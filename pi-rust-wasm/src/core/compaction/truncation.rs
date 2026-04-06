@@ -9,24 +9,12 @@ use crate::infra::config::ContextConfig;
 // Constants
 // ---------------------------------------------------------------------------
 
-pub(super) const TRUNCATION_SUFFIX: &str = "\n\n[truncated — original content exceeded limit]";
-
 pub(super) const TOOL_RESULT_PLACEHOLDER: &str =
     "[Previous tool result replaced to save context space]";
 
 const LAYER0_PREVIEW_CHARS: usize = 500;
 
 const M_PROTECTED_TURNS: usize = 5;
-
-// ---------------------------------------------------------------------------
-// Layer 0: Single tool result truncation (legacy fallback)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct TruncationInfo {
-    pub original_chars: usize,
-    pub truncated_chars: usize,
-}
 
 pub(super) fn floor_char_boundary(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
@@ -37,29 +25,6 @@ pub(super) fn floor_char_boundary(s: &str, pos: usize) -> usize {
         p -= 1;
     }
     p
-}
-
-/// Layer 0 fallback：若 `content` 超过 `max_chars` 则就地截断。
-pub fn truncate_tool_result_if_needed(
-    content: &mut String,
-    max_chars: usize,
-) -> Option<TruncationInfo> {
-    if content.len() <= max_chars {
-        return None;
-    }
-    let original_len = content.len();
-    let safe_max = floor_char_boundary(content, max_chars);
-    let safe_zone_start = floor_char_boundary(content, max_chars * 70 / 100);
-    let cut_pos = content[safe_zone_start..safe_max]
-        .rfind('\n')
-        .map(|i| safe_zone_start + i)
-        .unwrap_or(safe_max);
-    content.truncate(cut_pos);
-    content.push_str(TRUNCATION_SUFFIX);
-    Some(TruncationInfo {
-        original_chars: original_len,
-        truncated_chars: content.len(),
-    })
 }
 
 // ---------------------------------------------------------------------------
