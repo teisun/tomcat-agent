@@ -10,7 +10,10 @@ mod types;
 
 pub use context::{build_context_from_state, init_context_state};
 pub use session_impl::SessionManager;
-pub use types::{estimate_turn_chars, ApiUsage, ContextState, TurnEntry};
+pub use session_impl::generate_entry_id;
+pub use types::{
+    estimate_turn_chars, ApiUsage, CompactionResult, CompactionSummary, ContextState, TurnEntry,
+};
 
 const BRANCH_MAX_ENTRIES: usize = 2000;
 
@@ -22,7 +25,5 @@ use crate::core::session::transcript::{CompactionEntry, MessageEntry, Transcript
 use crate::infra::config::ContextConfig;
 #[cfg(test)]
 use context::{compute_fold_start, filter_turns_by_day, is_user_message, parse_date};
-#[cfg(test)]
-use session_impl::generate_entry_id;
 #[cfg(test)]
 use std::path::PathBuf;

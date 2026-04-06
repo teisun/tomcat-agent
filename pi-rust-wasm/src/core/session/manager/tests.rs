@@ -325,10 +325,12 @@ fn build_context_from_state_flattens_turns() {
     let state = ContextState {
         user_turns_list: vec![
             TurnEntry::SummaryTurn {
+                id: "sum_1".to_string(),
                 summary: "summary".to_string(),
                 timestamp: "2026-04-04T12:00:00Z".to_string(),
             },
             TurnEntry::UserTurn {
+                id: "turn_1".to_string(),
                 messages: vec![
                     AgentMessage::User {
                         text: "hello".to_string(),
@@ -346,6 +348,8 @@ fn build_context_from_state_flattens_turns() {
         context_budget_tokens: 250,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     let msgs = build_context_from_state(&state);
@@ -597,6 +601,7 @@ fn fold_start_empty() {
 
 fn make_test_turn(ts: &str) -> TurnEntry {
     TurnEntry::UserTurn {
+        id: format!("test_{}", ts),
         messages: vec![AgentMessage::User {
             text: "q".to_string(),
         }],

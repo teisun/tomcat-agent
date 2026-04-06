@@ -422,6 +422,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                                 .saturating_sub(context_config.max_output_tokens),
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
+                            transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
+                            compaction_summary: None,
                             compaction_consecutive_failures: 0,
                         },
                     )
@@ -429,6 +431,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
                 // Pack current turn and append to context state
                 let current_turn = TurnEntry::UserTurn {
+                    id: crate::core::session::manager::generate_entry_id(),
                     messages: result.new_messages.clone(),
                     timestamp: chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -460,6 +463,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                                 .saturating_sub(context_config.max_output_tokens),
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
+                            transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
+                            compaction_summary: None,
                             compaction_consecutive_failures: 0,
                         },
                     )

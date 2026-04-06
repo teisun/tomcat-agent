@@ -1,5 +1,7 @@
 //! init_context_state helpers and context assembly functions.
 
+use std::path::PathBuf;
+
 use chrono::{NaiveDate, Utc};
 
 use crate::core::agent_loop::{AgentMessage, ToolCallInfo};
@@ -8,6 +10,7 @@ use crate::infra::config::{compute_context_budget_chars, ContextConfig};
 use crate::infra::error::AppError;
 
 use super::session_impl::SessionManager;
+use super::session_impl::generate_entry_id;
 use super::types::{estimate_turn_chars, ContextState, TurnEntry};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
@@ -107,6 +110,7 @@ fn fold_entries_to_turns(
             TranscriptEntry::Compaction(ce) => {
                 if !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
+                        id: generate_entry_id(),
                         messages: std::mem::take(&mut current_turn_msgs),
                         timestamp: std::mem::take(&mut current_turn_ts),
                     };
@@ -122,6 +126,7 @@ fn fold_entries_to_turns(
                 if let Some(ref summary) = ce.summary {
                     total_chars += summary.len();
                     turns.push(TurnEntry::SummaryTurn {
+                        id: ce.id.clone().unwrap_or_else(generate_entry_id),
                         summary: summary.clone(),
                         timestamp: ce.timestamp.clone(),
                     });
@@ -137,6 +142,7 @@ fn fold_entries_to_turns(
 
                 if role == Some("user") && !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
+                        id: generate_entry_id(),
                         messages: std::mem::take(&mut current_turn_msgs),
                         timestamp: std::mem::take(&mut current_turn_ts),
                     };
@@ -203,6 +209,7 @@ fn fold_entries_to_turns(
 
     if !current_turn_msgs.is_empty() {
         let turn = TurnEntry::UserTurn {
+            id: generate_entry_id(),
             messages: std::mem::take(&mut current_turn_msgs),
             timestamp: current_turn_ts,
         };
@@ -268,6 +275,8 @@ pub fn init_context_state(
                 context_budget_tokens: token_budget,
                 last_api_usage: None,
                 post_usage_appended_chars: 0,
+                transcript_path: PathBuf::new(),
+                compaction_summary: None,
                 compaction_consecutive_failures: 0,
             });
         }
@@ -289,6 +298,8 @@ pub fn init_context_state(
         context_budget_tokens: token_budget,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: path,
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     })
 }

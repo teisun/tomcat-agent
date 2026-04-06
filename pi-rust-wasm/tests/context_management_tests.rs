@@ -226,6 +226,8 @@ async fn test_large_tool_result_triggers_truncation_event() -> Result<(), Box<dy
         context_budget_tokens: 250_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     agent.set_context_state(Some(ctx_state));
@@ -270,6 +272,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     let mut turns = Vec::new();
     for i in 0..5 {
         turns.push(TurnEntry::UserTurn {
+            id: format!("turn_{}", i),
             messages: vec![
                 AgentMessage::User {
                     text: format!("question {}", i),
@@ -301,6 +304,8 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         context_budget_tokens: budget_tokens,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     assert!(state.is_over_budget());
@@ -461,6 +466,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let ctx_state = ContextState {
         user_turns_list: vec![
             TurnEntry::UserTurn {
+                id: "turn_old".to_string(),
                 messages: vec![
                     AgentMessage::User {
                         text: "old question".to_string(),
@@ -474,6 +480,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
                 timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
+                id: "turn_recent".to_string(),
                 messages: vec![AgentMessage::User {
                     text: "recent question".to_string(),
                 }],
@@ -485,6 +492,8 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         context_budget_tokens: 250_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     agent.set_context_state(Some(ctx_state));
@@ -560,10 +569,12 @@ fn test_build_context_preserves_order_with_mixed_turns() {
     let state = ContextState {
         user_turns_list: vec![
             TurnEntry::SummaryTurn {
+                id: "sum_1".to_string(),
                 summary: "## Goal\nBuild a web app".to_string(),
                 timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
+                id: "turn_1".to_string(),
                 messages: vec![
                     AgentMessage::User {
                         text: "add auth".to_string(),
@@ -585,6 +596,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
                 timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
+                id: "turn_2".to_string(),
                 messages: vec![AgentMessage::User {
                     text: "run tests".to_string(),
                 }],
@@ -596,6 +608,8 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         context_budget_tokens: 2_500,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
 
@@ -690,6 +704,7 @@ const TEST_TS: &str = "2026-04-04T12:00:00Z";
 
 fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry {
     TurnEntry::UserTurn {
+        id: format!("turn_{}", user_text),
         messages: vec![
             AgentMessage::User {
                 text: user_text.to_string(),
@@ -728,6 +743,8 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         context_budget_tokens: 0,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     let total: usize = state
@@ -792,6 +809,8 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         context_budget_tokens: total / 4,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
 
@@ -860,6 +879,8 @@ fn test_compact_tool_results_estimate_precise() {
         context_budget_tokens: 0,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
 
@@ -881,6 +902,7 @@ fn test_compact_tool_results_estimate_precise() {
 
 fn make_big_turn(user_text: &str, size: usize) -> TurnEntry {
     TurnEntry::UserTurn {
+        id: format!("big_{}", user_text),
         messages: vec![
             AgentMessage::User {
                 text: user_text.to_string(),
@@ -916,6 +938,8 @@ async fn test_compaction_loop_single_batch() {
         context_budget_tokens: budget / 4,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     assert!(state.is_over_budget());
@@ -971,6 +995,8 @@ async fn test_compaction_loop_multi_batch() {
         context_budget_tokens: budget / 4,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
 
@@ -1011,6 +1037,7 @@ async fn test_compaction_loop_update_mode() {
 
     let turns = vec![
         TurnEntry::SummaryTurn {
+            id: "sum_old".to_string(),
             summary: "old summary about coding".to_string(),
             timestamp: TEST_TS.to_string(),
         },
@@ -1030,6 +1057,8 @@ async fn test_compaction_loop_update_mode() {
         context_budget_tokens: total / 12,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
 
@@ -1082,6 +1111,8 @@ async fn test_compaction_loop_llm_error_degrades() {
         context_budget_tokens: total / 8,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     let original_len = state.user_turns_list.len();
@@ -1191,6 +1222,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
     let original = "important content ".repeat(2000);
     let mut state = ContextState {
         user_turns_list: vec![TurnEntry::UserTurn {
+            id: "turn_persist".to_string(),
             messages: vec![AgentMessage::ToolResult {
                 tool_call_id: "tc_persist".into(),
                 content: original.clone(),
@@ -1203,6 +1235,8 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         context_budget_tokens: 250_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     let config = ContextConfig::default();
@@ -1246,6 +1280,8 @@ fn test_cascade_params_small_window_buffer_safety() {
         context_budget_tokens: 32000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     // ratio = 13000/32000 = 0.406, well below 0.70
@@ -1289,6 +1325,8 @@ async fn test_compaction_loop_summary_too_long_breaks() {
         context_budget_tokens: total / 8,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     };
     let original_len = state.user_turns_list.len();

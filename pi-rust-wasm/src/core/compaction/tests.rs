@@ -8,6 +8,7 @@ const TS: &str = "2026-04-04T12:00:00Z";
 
 fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
     TurnEntry::UserTurn {
+        id: format!("test_{}", TS),
         messages,
         timestamp: TS.to_string(),
     }
@@ -15,6 +16,7 @@ fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
 
 fn make_summary_turn(summary: impl Into<String>) -> TurnEntry {
     TurnEntry::SummaryTurn {
+        id: format!("sum_{}", TS),
         summary: summary.into(),
         timestamp: TS.to_string(),
     }
@@ -28,6 +30,8 @@ fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> Contex
         context_budget_tokens: budget_tokens,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     }
 }

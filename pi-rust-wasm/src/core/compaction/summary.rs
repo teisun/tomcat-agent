@@ -124,6 +124,10 @@ pub async fn run_compaction(
     state.estimate_context_chars = state.estimate_context_chars.saturating_sub(removed_chars);
 
     let new_turn = TurnEntry::SummaryTurn {
+        id: format!(
+            "compact_{}",
+            chrono::Utc::now().timestamp_micros()
+        ),
         summary: summary_text,
         timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     };
@@ -195,6 +199,10 @@ pub async fn run_compaction_loop(
         state.estimate_context_chars = state.estimate_context_chars.saturating_sub(old_batch_chars);
 
         let new_turn = TurnEntry::SummaryTurn {
+            id: format!(
+                "compact_loop_{}",
+                chrono::Utc::now().timestamp_micros()
+            ),
             summary,
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };

@@ -388,7 +388,7 @@ fn iso_ts_now() -> Result<String, AppError> {
     Ok(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-pub(super) fn generate_entry_id() -> String {
+pub fn generate_entry_id() -> String {
     let micros = Utc::now().timestamp_micros();
     let seq = APPEND_SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{micros}_{seq}")

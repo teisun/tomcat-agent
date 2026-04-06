@@ -807,6 +807,8 @@ async fn context_metrics_update_emitted_before_turn_end() {
         context_budget_tokens: 25_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     }));
     let messages = vec![AgentMessage::User {
@@ -879,6 +881,8 @@ async fn context_metrics_update_payload_contains_valid_values() {
         context_budget_tokens: 25_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     }));
     let messages = vec![AgentMessage::User {
@@ -970,6 +974,8 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         context_budget_tokens: 25_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     }));
     let messages = vec![AgentMessage::User {
@@ -1085,6 +1091,8 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         context_budget_tokens: 25_000,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        compaction_summary: None,
         compaction_consecutive_failures: 0,
     }));
     let messages = vec![AgentMessage::User {
