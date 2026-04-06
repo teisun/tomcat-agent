@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Jerry | 2026-04-06 | DOING | feature/context-async-compaction | - |
+| @Jerry | 2026-04-06 | PENDING_INTEGRATION | feature/context-async-compaction | - |
 
 ### ✅ DONE (已完成)
 - [x] **[P0]** 20.1 TurnEntry 增加 `id: String`；ContextState 增加 `transcript_path`/`compaction_summary`
