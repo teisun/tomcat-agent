@@ -1079,9 +1079,9 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `TODO` |
-| **负责人** | — |
-| **分支** | `feature/context-async-compaction`（建议） |
+| **状态** | `DOING` |
+| **负责人** | Jerry |
+| **分支** | `feature/context-async-compaction` |
 | **阻塞点** | — |
 
 **目标**：按 [上下文管理技术方案](../openspec/specs/architecture/context-management.md) **现行** §1–§5，将 LLM 摘要从「同步阻塞 / 每轮级联」收敛为 **Layer 1 异步预热 + Layer 2 延迟应用（Boundary 切换）**，保证 **reasoning loop 最终 assistant 回复后（时机 ⑤）主线程零等待**；仅在 **下一 user turn 发起 LLM 请求前（时机 ②）**、且 `ratio >= 0.98` 而摘要未完成时，才允许阻塞等待推理启动。统一水位线与触发表（0.50 / 0.70 / 0.85 / 0.98、buffer 安全网、Layer 3 仅 API Context Overflow 后兜底）。
@@ -1105,11 +1105,18 @@
 
 **Phase D：可观测与配置对齐**
 - [ ] 20.8 `ContextMetrics`（若尚未完整落地则本任务收口）：压缩次数、释放量、利用率等；经 EventBus 推送；CLI/TUI **状态栏反馈压缩进度**（§1.1 设计目标 8）
-- [ ] 20.9 `[context]` 默认值与文档一致：`layer0_single_result_max_chars=50000`、`layer0_placeholder_threshold_chars=10000` 等（§4.4）；移除实现中与现行方案冲突的同步级联入口或加以 `#deprecated` 注释并单一路径
+- [ ] 20.9 `[context]` 默认值与文档一致：`layer0_single_result_max_chars=50000`、`layer0_placeholder_threshold_chars=10000` 等（§4.4）；`compute_context_budget_chars` 改为 `input_budget * 4`（去掉 `* 0.75`，对齐 §4.6）
+- [ ] 20.14 `system_prompt.rs` 新增落盘文件分页读取引导（§6.5 防振荡），告知 LLM 可通过 `read_file` offset/limit 按需读取
 
-**Phase E：测试**
-- [ ] 20.10 单元测试：单例预热、⑤ 不阻塞、② 下 0.98 同步等待路径、boundary 加载跳过 `false`、task abort
-- [ ] 20.11 集成测试：高 `ratio` 下对话与流式输出不卡顿；session 重载后内存视图与 transcript 一致
+**Phase E：清理遗留同步路径**
+- [ ] 20.10 **彻底删除**同步 cascade 旧路径：`run_compaction_cascade_v2` / `run_compaction_cascade` / `determine_cascade_params` / `CascadeParams` / `CascadeResult` / `force_drop_oldest` / `run_compaction` / `run_compaction_loop`；**移除** `compaction_consecutive_failures` 字段；L3 唯一入口收敛为 `is_context_overflow_error` + `force_drop_oldest_to_target`（**不保留 deprecated 过渡**）
+
+**Phase F：Session 生命周期管理**
+- [ ] 20.11 Session 退出时（Ctrl+D / `/exit` / error）调用 `abort_preheat()` 清理后台预热 task，防止资源泄漏
+
+**Phase G：测试**
+- [ ] 20.12 单元测试：单例预热、⑤ 不阻塞、② 下 0.98 同步等待路径、boundary 加载跳过 `false`、task abort
+- [ ] 20.13 集成测试：高 `ratio` 下对话与流式输出不卡顿；session 重载后内存视图与 transcript 一致
 
 **依赖**：TASK-17（DONE）、TASK-19（DONE）；以当前 `develop` 实现为基线，**规格以 `context-management.md` 现行正文为准**（TASK-19 表格若与文档不一致时以文档收口）。
 
