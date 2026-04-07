@@ -188,7 +188,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
     let reduced = compact_tool_results(&mut state, 1);
@@ -303,14 +303,14 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let cs = Arc::clone(&compaction_started);
     let ce = Arc::clone(&compaction_ended);
     event_bus.on(
-        "auto_compaction_start",
+        "context_overflow_trim_start",
         Box::new(move |_ctx: EventContext| {
             cs.store(true, Ordering::SeqCst);
             Ok(())
         }),
     );
     event_bus.on(
-        "auto_compaction_end",
+        "context_overflow_trim_end",
         Box::new(move |_ctx: EventContext| {
             ce.store(true, Ordering::SeqCst);
             Ok(())
@@ -361,7 +361,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
     agent.set_context_state(Some(ctx_state));
 
@@ -382,11 +382,11 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     );
     assert!(
         compaction_started.load(Ordering::SeqCst),
-        "应触发 auto_compaction_start 事件"
+        "应触发 context_overflow_trim_start 事件"
     );
     assert!(
         compaction_ended.load(Ordering::SeqCst),
-        "应触发 auto_compaction_end 事件"
+        "应触发 context_overflow_trim_end 事件"
     );
 
     let recovered_state = agent.take_context_state();
@@ -450,7 +450,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
     let msgs = build_context_from_state(&state);
@@ -511,7 +511,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
     let total: usize = state
         .user_turns_list
@@ -576,7 +576,7 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
     info!("Act: compact with m=1, only >20K in compactable zone get replaced");
@@ -645,7 +645,7 @@ fn test_compact_tool_results_estimate_precise() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
     let reduced = compact_tool_results(&mut state, 1);
@@ -757,7 +757,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
     let config = ContextConfig::default();
     let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");

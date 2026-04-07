@@ -1,6 +1,7 @@
 use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER};
 use super::*;
 use crate::core::agent_loop::AgentMessage;
+use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::{ContextState, TurnEntry};
 use crate::infra::config::ContextConfig;
 
@@ -23,7 +24,7 @@ fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> Contex
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
-        compaction_summary: None,
+        preheat: Preheat::new(),
     }
 }
 
@@ -336,11 +337,11 @@ fn is_context_overflow_comprehensive() {
 // --- TASK-20 新增测试 ---
 
 #[test]
-fn abort_preheat_none_is_noop() {
+fn abort_preheat_idle_is_noop() {
     let mut state = make_state(100, 1000, 250);
-    state.compaction_summary = None;
-    state.abort_preheat();
-    assert!(state.compaction_summary.is_none());
+    assert!(state.preheat.is_idle());
+    state.preheat.abort();
+    assert!(state.preheat.is_idle());
 }
 
 #[test]
@@ -398,18 +399,22 @@ fn apply_boundary_not_found_returns_err() {
 
 #[test]
 fn check_after_reply_skips_below_085() {
+    use crate::infra::event_bus::DefaultEventBus;
+    let eb = DefaultEventBus::new();
     let mut state = make_state(0, 0, 1000);
     state.update_api_usage(500, 0);
-    let switched = super::apply::check_after_reply(&mut state);
+    let switched = super::apply::check_after_reply(&mut state, &eb);
     assert!(!switched, "ratio 0.50 should not trigger check_after_reply");
 }
 
 #[test]
 fn check_after_reply_skips_when_no_preheat() {
+    use crate::infra::event_bus::DefaultEventBus;
+    let eb = DefaultEventBus::new();
     let mut state = make_state(0, 0, 1000);
     state.update_api_usage(900, 0);
-    let switched = super::apply::check_after_reply(&mut state);
-    assert!(!switched, "no compaction_summary should skip");
+    let switched = super::apply::check_after_reply(&mut state, &eb);
+    assert!(!switched, "idle preheat should skip");
 }
 
 #[test]

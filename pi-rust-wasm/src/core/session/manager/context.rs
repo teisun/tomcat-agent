@@ -11,6 +11,8 @@ use crate::infra::error::AppError;
 
 use super::session_impl::SessionManager;
 use super::session_impl::generate_entry_id;
+use crate::core::compaction::preheat::Preheat;
+
 use super::types::{estimate_turn_chars, ContextState, TurnEntry};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
@@ -283,7 +285,7 @@ pub fn init_context_state(
                 last_api_usage: None,
                 post_usage_appended_chars: 0,
                 transcript_path: PathBuf::new(),
-                compaction_summary: None,
+                preheat: Preheat::new(),
             });
         }
     };
@@ -305,7 +307,7 @@ pub fn init_context_state(
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: path,
-        compaction_summary: None,
+        preheat: Preheat::new(),
     })
 }
 

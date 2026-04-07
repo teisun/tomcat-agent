@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::core::compaction::apply::check_before_request;
+use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::{build_context_from_state, init_context_state, TurnEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventContext;
@@ -266,7 +267,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => {
                 println!("\n再见！");
-                context_state.abort_preheat();
+                context_state.preheat.abort();
                 break;
             }
             Err(rustyline::error::ReadlineError::Interrupted) => {
@@ -274,7 +275,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             }
             Err(e) => {
                 eprintln!("输入错误: {}", e);
-                context_state.abort_preheat();
+                context_state.preheat.abort();
                 break;
             }
         };
@@ -293,8 +294,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         // Update context estimate for the new user input
         context_state.on_message_appended(input.len());
 
-        // Timing ②: apply pending preheat boundary before request
-        check_before_request(&mut context_state).await;
+        // Timing ②: restore pending preheat + apply boundary before request
+        context_state.preheat.try_restart_if_pending(
+            context_state.usage_ratio(),
+            &context_state.user_turns_list,
+            &context_state.transcript_path,
+            ctx.llm.clone(),
+            context_config,
+            ctx.event_bus.clone(),
+        );
+        check_before_request(&mut context_state, &*ctx.event_bus).await;
 
         // Build messages from ContextState
         let mut messages = build_context_from_state(&context_state);
@@ -372,20 +381,89 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 } else {
                     format!("{} B", persisted)
                 };
+                // 行尾必须换行，否则 stderr 与 stdout 流式正文可能在同一视觉行粘连（如「0 B你给」）。
                 eprint!(
-                    "\n\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | freed {} tok | persisted {}\x1b[0m",
+                    "\n\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | freed {} tok | persisted {}\x1b[0m\n",
                     tokens, ratio_pct, compactions, freed, persisted_display
                 );
                 let _ = io::stderr().flush();
                 Ok(())
             }),
         );
+        // L1: auto_compaction_start / auto_compaction_end
+        let l1_start_id = ctx.event_bus.on(
+            wire::WIRE_AUTO_COMPACTION_START,
+            Box::new(|_ctx: EventContext| {
+                eprint!("\n\x1b[90m[ctx] 后台压缩已启动…\x1b[0m\n");
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
+        let l1_end_id = ctx.event_bus.on(
+            wire::WIRE_AUTO_COMPACTION_END,
+            Box::new(|_ctx: EventContext| {
+                eprint!("\n\x1b[90m[ctx] 后台压缩已完成\x1b[0m\n");
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
+        // L1 exhausted: compaction_error
+        let l1_err_id = ctx.event_bus.on(
+            wire::WIRE_COMPACTION_ERROR,
+            Box::new(|evt: EventContext| {
+                let exhausted = evt
+                    .payload
+                    .get("exhaustedAfterRetries")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if exhausted {
+                    eprint!(
+                        "\n\x1b[33m[ctx] 上下文压缩暂时失败，将在下次发送消息时自动重试\x1b[0m\n"
+                    );
+                    let _ = io::stderr().flush();
+                }
+                Ok(())
+            }),
+        );
+        // L2: boundary_switched
+        let l2_id = ctx.event_bus.on(
+            wire::WIRE_BOUNDARY_SWITCHED,
+            Box::new(|_ctx: EventContext| {
+                eprint!("\n\x1b[90m[ctx] 上下文已压缩重置\x1b[0m\n");
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
+        // L3: context_overflow_trim_*
+        let l3_start_id = ctx.event_bus.on(
+            wire::WIRE_CONTEXT_OVERFLOW_TRIM_START,
+            Box::new(|_ctx: EventContext| {
+                eprint!("\n\x1b[33m[ctx] 上下文溢出，正在截断旧消息…\x1b[0m\n");
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
+        let l3_end_id = ctx.event_bus.on(
+            wire::WIRE_CONTEXT_OVERFLOW_TRIM_END,
+            Box::new(|_ctx: EventContext| {
+                eprint!("\n\x1b[90m[ctx] 截断完成，正在重试\x1b[0m\n");
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
+
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
 
         let run_result = agent_loop.run(messages).await;
         ctx.event_bus.off(listener_id);
         ctx.event_bus.off(metrics_listener_id);
+        ctx.event_bus.off(l1_start_id);
+        ctx.event_bus.off(l1_end_id);
+        ctx.event_bus.off(l1_err_id);
+        ctx.event_bus.off(l2_id);
+        ctx.event_bus.off(l3_start_id);
+        ctx.event_bus.off(l3_end_id);
         match run_result {
             Ok(result) => {
                 if let Some(remaining) = renderer.lock().flush() {
@@ -407,7 +485,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
                             transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
-                            compaction_summary: None,
+                            preheat: Preheat::new(),
                         },
                     )
                 });
@@ -447,7 +525,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
                             transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
-                            compaction_summary: None,
+                            preheat: Preheat::new(),
                         },
                     )
                 });
@@ -456,7 +534,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 eprintln!("\n[错误] {}", e);
                 if is_fatal {
                     eprintln!("(致命错误，退出对话)");
-                    context_state.abort_preheat();
+                    context_state.preheat.abort();
                     return Err(e);
                 }
                 eprintln!("(可重试，请继续输入)\n");

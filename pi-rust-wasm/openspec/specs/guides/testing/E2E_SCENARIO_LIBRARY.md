@@ -198,7 +198,13 @@
 | E2E-CLI-085 | 自动 | `test_context_overflow_triggers_compaction_and_retries` | Context overflow 触发 Compaction 后自动恢复 | Mock LLM 先返回 overflow 错误 → 触发压缩 → 重试成功 | 预算恢复；重试成功返回结果 |
 | E2E-CLI-086 | 自动 | `test_session_reload_with_compaction_entries` | Session JSONL 含 Compaction entry 时重载正确 | 写入含 CompactionEntry 的 JSONL → init_context_state → build_context | SummaryTurn 出现在正确位置；消息顺序正确 |
 
+| E2E-CLI-087 | 自动 | `test_preheat_does_not_block_reply` | 高 ratio 下异步预热不阻塞最终回复 | Mock LLM；ratio >= 0.50 → preheat.try_start → assistant 回复路径无 await compaction LLM | 回复正常返回；auto_compaction_start 已 emit |
+| E2E-CLI-088 | 自动 | `test_sync_wait_at_098` | ratio >= 0.98 时同步等待后继续 | 构造 ContextState + Running preheat → check_before_request → boundary 应用或超时 | boundary_switched emit 或超时后继续 |
+| E2E-CLI-089 | 自动 | `test_preheat_completed_boundary_switch` | 预热完成后非阻塞切换 boundary | ratio >= 0.85 + preheat finished → check_after_reply → BoundarySwitched + SummaryTurn | boundary_switched 已 emit；turns 含 SummaryTurn |
+| E2E-CLI-090 | 自动 | `test_session_reload_boundary_false_skipped` | Session 重载识别 is_boundary=false/true | 写含 is_boundary=false 的 CompactionEntry → init_context_state | is_boundary=false 被跳过；is_boundary=true 生效 |
+
 > **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
+> **TASK-20 备注**：E2E-CLI-087~090 异步预热与 L1/L2/L3 事件分离，验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
 
 ---
 

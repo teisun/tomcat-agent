@@ -1,11 +1,9 @@
 //! Context management data structures (TASK-17 / TASK-20).
 
 use std::path::PathBuf;
-use std::time::Instant;
-
-use tokio::task::JoinHandle;
 
 use crate::core::agent_loop::AgentMessage;
+use crate::core::compaction::preheat::Preheat;
 use crate::infra::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -56,16 +54,8 @@ pub struct ApiUsage {
 }
 
 // ---------------------------------------------------------------------------
-// CompactionSummary / CompactionResult (TASK-20)
+// CompactionResult (TASK-20)
 // ---------------------------------------------------------------------------
-
-/// 异步预热任务的产物对象。同一时间仅允许一个预热任务。
-pub struct CompactionSummary {
-    pub task_handle: JoinHandle<Result<CompactionResult, AppError>>,
-    pub covered_start_id: String,
-    pub covered_end_id: String,
-    pub started_at: Instant,
-}
 
 /// 异步预热任务完成后的结果。
 #[derive(Debug, Clone)]
@@ -90,8 +80,8 @@ pub struct ContextState {
     pub post_usage_appended_chars: usize,
     /// 当前 session 的 transcript 文件路径，供异步预热 spawn 闭包 clone。
     pub transcript_path: PathBuf,
-    /// 异步预热单例：同一时间仅允许一个预热任务。
-    pub compaction_summary: Option<CompactionSummary>,
+    /// 异步预热状态机（替代旧 `Option<CompactionSummary>`）。
+    pub preheat: Preheat,
 }
 
 fn _assert_send<T: Send>() {}
@@ -153,13 +143,6 @@ impl ContextState {
     /// 当前上下文是否超预算（token 维度）。
     pub fn is_over_budget(&self) -> bool {
         self.estimated_token_count() > self.context_budget_tokens
-    }
-
-    /// 取消并清除正在运行的异步预热任务。幂等——无任务时为 no-op。
-    pub fn abort_preheat(&mut self) {
-        if let Some(pending) = self.compaction_summary.take() {
-            pending.task_handle.abort();
-        }
     }
 
     /// 将已完成的 CompactionResult 应用到 user_turns_list：

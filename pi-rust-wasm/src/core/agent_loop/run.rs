@@ -105,7 +105,7 @@ impl AgentLoop {
         if let Some(ref ctx_state) = self.context_state {
             self.metrics.input_tokens_used = ctx_state.estimated_token_count();
             self.metrics.context_utilization_ratio = ctx_state.usage_ratio();
-            self.metrics.preheat_in_progress = ctx_state.compaction_summary.is_some();
+            self.metrics.preheat_in_progress = ctx_state.preheat.is_running();
         }
         if self.context_state.is_some() {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
@@ -250,8 +250,14 @@ impl AgentLoop {
                 }
                 Err(LoopError::Retryable(e)) => {
                     if is_context_overflow_error(&e) && self.context_state.is_some() {
-                        self.emit_event(AgentEvent::AutoCompactionStart {
+                        let ratio_before = self
+                            .context_state
+                            .as_ref()
+                            .map(|cs| cs.usage_ratio())
+                            .unwrap_or(0.0);
+                        self.emit_event(AgentEvent::ContextOverflowTrimStart {
                             reason: "context_overflow".into(),
+                            ratio: ratio_before,
                         });
                         if let Some(ref mut ctx_state) = self.context_state {
                             force_drop_oldest_to_target(ctx_state);
@@ -259,11 +265,15 @@ impl AgentLoop {
                                 crate::core::session::manager::build_context_from_state(ctx_state);
                             self.start_idx = messages.len();
                         }
-                        self.emit_event(AgentEvent::AutoCompactionEnd {
-                            result: None,
-                            aborted: false,
+                        let ratio_after = self
+                            .context_state
+                            .as_ref()
+                            .map(|cs| cs.usage_ratio())
+                            .unwrap_or(0.0);
+                        self.emit_event(AgentEvent::ContextOverflowTrimEnd {
+                            ratio_before,
+                            ratio_after,
                             will_retry: true,
-                            error_message: None,
                         });
                     }
                     last_err = Some(e);
@@ -408,8 +418,10 @@ impl AgentLoop {
                     tool_calls: vec![],
                 });
 
-                // Timing ⑤: L0 cleanup + preheat + check_after_reply
+                // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
+                let mut preheat_started: Option<(usize, f64)> = None;
                 if let Some(ref mut ctx_state) = self.context_state {
+                    // Step 1: L0 cleanup
                     let persisted = run_layer0_cleanup(
                         ctx_state,
                         &self.config.context_config,
@@ -420,15 +432,43 @@ impl AgentLoop {
                         self.metrics.total_tool_result_bytes_persisted += pr.original_chars;
                     }
 
-                    crate::core::compaction::preheat::maybe_start_preheat(
-                        ctx_state,
+                    // Step 2: restore ExhaustedPending → Running
+                    ctx_state.preheat.try_restart_if_pending(
+                        ctx_state.usage_ratio(),
+                        &ctx_state.user_turns_list,
+                        &ctx_state.transcript_path,
                         Arc::clone(&self.llm),
                         &self.config.context_config,
+                        Arc::clone(&self.event_bus),
                     );
 
+                    // Step 3: L2 non-blocking poll + apply boundary
                     if ctx_state.usage_ratio() >= 0.85 {
-                        crate::core::compaction::apply::check_after_reply(ctx_state);
+                        crate::core::compaction::apply::check_after_reply(
+                            ctx_state,
+                            &*self.event_bus,
+                        );
                     }
+
+                    // Step 4: Idle → Running (start new preheat if conditions met)
+                    let ratio = ctx_state.usage_ratio();
+                    let turn_count = ctx_state.user_turns_list.len();
+                    if ctx_state.preheat.try_start(
+                        ratio,
+                        &ctx_state.user_turns_list,
+                        &ctx_state.transcript_path,
+                        Arc::clone(&self.llm),
+                        &self.config.context_config,
+                        Arc::clone(&self.event_bus),
+                    ) {
+                        preheat_started = Some((turn_count, ratio));
+                    }
+                }
+                if let Some((covered_count, ratio_before)) = preheat_started {
+                    self.emit_event(AgentEvent::AutoCompactionStart {
+                        covered_count,
+                        ratio_before,
+                    });
                 }
 
                 self.emit_context_metrics();

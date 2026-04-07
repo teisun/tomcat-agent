@@ -349,7 +349,7 @@ fn build_context_from_state_flattens_turns() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
-        compaction_summary: None,
+        preheat: crate::core::compaction::preheat::Preheat::new(),
     };
     let msgs = build_context_from_state(&state);
     assert_eq!(msgs.len(), 3);

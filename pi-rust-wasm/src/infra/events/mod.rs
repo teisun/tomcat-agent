@@ -31,13 +31,10 @@ pub mod wire {
     pub const WIRE_AUTO_RETRY_START: &str = "auto_retry_start";
     pub const WIRE_AUTO_RETRY_END: &str = "auto_retry_end";
     pub const WIRE_CONTEXT_METRICS_UPDATE: &str = "context_metrics_update";
-    pub const WIRE_COMPACTION_CIRCUIT_BREAKER_TRIGGERED: &str =
-        "compaction_circuit_breaker_triggered";
     pub const WIRE_TOOL_RESULT_PERSISTED: &str = "tool_result_persisted";
-    pub const WIRE_PREHEAT_STARTED: &str = "preheat_started";
-    pub const WIRE_PREHEAT_COMPLETED: &str = "preheat_completed";
-    pub const WIRE_PREHEAT_ERROR: &str = "preheat_error";
     pub const WIRE_BOUNDARY_SWITCHED: &str = "boundary_switched";
+    pub const WIRE_CONTEXT_OVERFLOW_TRIM_START: &str = "context_overflow_trim_start";
+    pub const WIRE_CONTEXT_OVERFLOW_TRIM_END: &str = "context_overflow_trim_end";
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
 
     // --- ExtensionEvent ---
@@ -158,20 +155,28 @@ pub enum AgentEvent {
         is_error: bool,
     },
     AutoCompactionStart {
-        reason: String,
+        #[serde(rename = "coveredCount")]
+        covered_count: usize,
+        #[serde(rename = "ratioBefore")]
+        ratio_before: f64,
     },
     AutoCompactionEnd {
-        result: Option<serde_json::Value>,
-        aborted: bool,
-        #[serde(rename = "willRetry")]
-        will_retry: bool,
-        #[serde(rename = "errorMessage")]
-        error_message: Option<String>,
+        #[serde(rename = "elapsedMs")]
+        elapsed_ms: u64,
+        #[serde(rename = "summaryChars")]
+        summary_chars: usize,
+        #[serde(rename = "coveredCount")]
+        covered_count: usize,
+        #[serde(rename = "ratioAfter")]
+        ratio_after: f64,
     },
     CompactionError {
-        #[serde(rename = "batchIndex")]
-        batch_index: usize,
+        #[serde(rename = "exhaustedAfterRetries")]
+        exhausted_after_retries: bool,
+        attempts: u32,
         error: String,
+        source: String,
+        ratio: Option<f64>,
     },
     ToolResultTruncated {
         #[serde(rename = "toolName")]
@@ -217,10 +222,6 @@ pub enum AgentEvent {
         #[serde(rename = "preheatInProgress")]
         preheat_in_progress: bool,
     },
-    CompactionCircuitBreakerTriggered {
-        #[serde(rename = "consecutiveFailures")]
-        consecutive_failures: u32,
-    },
     ToolResultPersisted {
         #[serde(rename = "toolName")]
         tool_name: String,
@@ -229,20 +230,17 @@ pub enum AgentEvent {
         #[serde(rename = "persistedPath")]
         persisted_path: String,
     },
-    PreheatStarted {
-        #[serde(rename = "coveredCount")]
-        covered_count: usize,
-        #[serde(rename = "usageRatio")]
-        usage_ratio: f64,
+    ContextOverflowTrimStart {
+        reason: String,
+        ratio: f64,
     },
-    PreheatCompleted {
-        #[serde(rename = "coveredCount")]
-        covered_count: usize,
-        #[serde(rename = "summaryChars")]
-        summary_chars: usize,
-    },
-    PreheatError {
-        error: String,
+    ContextOverflowTrimEnd {
+        #[serde(rename = "ratioBefore")]
+        ratio_before: f64,
+        #[serde(rename = "ratioAfter")]
+        ratio_after: f64,
+        #[serde(rename = "willRetry")]
+        will_retry: bool,
     },
     BoundarySwitched {
         #[serde(rename = "ratioBefore")]

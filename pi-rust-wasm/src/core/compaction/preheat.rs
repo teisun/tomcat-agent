@@ -1,17 +1,28 @@
 //! Layer 1 异步预热：后台 tokio task 生成 LLM 摘要 + 写入 transcript。
+//!
+//! `Preheat` struct 封装完整的预热状态机（Idle / Running / ExhaustedPending），
+//! 外部仅通过 try_start / try_restart_if_pending / poll_result / await_result / abort
+//! 等公共方法与之交互，不直接访问内部状态枚举。
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use tokio::task::JoinHandle;
+use tracing::warn;
 
 use crate::core::llm::{ChatMessage, ChatRequest, LlmProvider};
 use crate::core::session::manager::{
-    generate_entry_id, CompactionResult, CompactionSummary, ContextState, TurnEntry,
+    generate_entry_id, CompactionResult, TurnEntry,
 };
 use crate::core::session::transcript::{append_entry, CompactionEntry, TranscriptEntry};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
+use crate::infra::event_bus::{EventBus, EventContext};
+use crate::infra::events::AgentEvent;
 
 use super::truncation::floor_char_boundary;
+
+const MAX_PREHEAT_RETRIES: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Prompt templates (aligned with context-management.md §7.1 / §7.3)
@@ -60,70 +71,313 @@ Output format:
 ## Next Steps"#;
 
 // ---------------------------------------------------------------------------
-// maybe_start_preheat
+// PreheatState (internal — not pub)
 // ---------------------------------------------------------------------------
 
-/// 检查 ratio >= 0.50 且无正在进行的预热，启动异步预热 task。
-/// 返回 true 表示成功启动；false 表示条件不满足或已有预热在进行。
-pub fn maybe_start_preheat(
-    state: &mut ContextState,
-    llm: Arc<dyn LlmProvider>,
-    config: &ContextConfig,
-) -> bool {
-    if state.usage_ratio() < 0.50 {
-        return false;
+#[allow(dead_code)]
+enum PreheatState {
+    Idle,
+    Running {
+        handle: JoinHandle<Result<CompactionResult, AppError>>,
+        covered_start_id: String,
+        covered_end_id: String,
+        covered_count: usize,
+        started_at: Instant,
+    },
+    ExhaustedPending,
+}
+
+// ---------------------------------------------------------------------------
+// PreheatOutcome (public)
+// ---------------------------------------------------------------------------
+
+/// poll_result / await_result 的返回值。
+pub enum PreheatOutcome {
+    /// 摘要生成成功，调用方应 apply_boundary。
+    Completed(CompactionResult),
+    /// 任务尚未完成，或当前非 Running 状态。
+    NotReady,
+    /// 3 次 retry 全部失败，已转入 ExhaustedPending。
+    Exhausted,
+    /// JoinHandle panic 或其他非预期错误，已转入 Idle。
+    Failed,
+}
+
+// ---------------------------------------------------------------------------
+// Preheat (public struct)
+// ---------------------------------------------------------------------------
+
+/// 异步预热状态机。外部通过方法与之交互，内部状态枚举不可见。
+pub struct Preheat {
+    state: PreheatState,
+}
+
+impl std::fmt::Debug for Preheat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match &self.state {
+            PreheatState::Idle => "Idle",
+            PreheatState::Running { .. } => "Running",
+            PreheatState::ExhaustedPending => "ExhaustedPending",
+        };
+        f.debug_struct("Preheat").field("state", &label).finish()
     }
-    if state.compaction_summary.is_some() {
-        return false;
+}
+
+impl Default for Preheat {
+    fn default() -> Self {
+        Self::new()
     }
-    if state.user_turns_list.is_empty() {
-        return false;
+}
+
+impl Preheat {
+    pub fn new() -> Self {
+        Self {
+            state: PreheatState::Idle,
+        }
     }
 
-    let snapshot = state.user_turns_list.clone();
-    let first_id = snapshot.first().map(|t| t.id().to_string()).unwrap();
-    let last_id = snapshot.last().map(|t| t.id().to_string()).unwrap();
-    let covered_count = snapshot.len();
-    let transcript_path = state.transcript_path.clone();
-    let compaction_model = config.compaction_model.clone();
+    // --- 查询 ---
 
-    let existing_summary = find_last_summary(&snapshot);
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, PreheatState::Idle)
+    }
 
-    let handle = tokio::spawn(async move {
-        let summary_text = generate_summary(&snapshot, existing_summary.as_deref(), &*llm, &compaction_model).await?;
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, PreheatState::Running { .. })
+    }
 
-        let entry_id = generate_entry_id();
-        let compaction_entry = TranscriptEntry::Compaction(CompactionEntry {
-            id: Some(entry_id),
-            parent_id: None,
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            summary: Some(summary_text.clone()),
-            covered_start_id: Some(first_id.clone()),
-            covered_end_id: Some(last_id.clone()),
-            covered_count: Some(covered_count),
-            is_boundary: Some(false),
-        });
+    pub fn is_exhausted_pending(&self) -> bool {
+        matches!(self.state, PreheatState::ExhaustedPending)
+    }
 
-        if !transcript_path.as_os_str().is_empty() {
-            let _ = append_entry(&transcript_path, &compaction_entry);
+    /// Running 且 JoinHandle 已完成。
+    pub fn is_finished(&self) -> bool {
+        matches!(self.state, PreheatState::Running { ref handle, .. } if handle.is_finished())
+    }
+
+    pub fn started_at(&self) -> Option<Instant> {
+        match &self.state {
+            PreheatState::Running { started_at, .. } => Some(*started_at),
+            _ => None,
+        }
+    }
+
+    // --- 状态转换 ---
+
+    /// Idle → Running。条件：ratio >= 0.50、有 turns、当前 Idle。
+    /// spawn 内 generate_summary 最多 3 次 retry；
+    /// 成功 emit AutoCompactionEnd，耗尽 emit CompactionError(exhausted)。
+    /// 返回 true = 已启动。
+    ///
+    /// 接受独立参数而非 `&ContextState`，避免与 `ctx.preheat` 的 `&mut self` 冲突。
+    pub fn try_start(
+        &mut self,
+        usage_ratio: f64,
+        turns: &[TurnEntry],
+        transcript_path: &std::path::Path,
+        llm: Arc<dyn LlmProvider>,
+        config: &ContextConfig,
+        event_bus: Arc<dyn EventBus>,
+    ) -> bool {
+        if !self.is_idle() {
+            return false;
+        }
+        if usage_ratio < 0.50 {
+            return false;
+        }
+        if turns.is_empty() {
+            return false;
         }
 
-        Ok(CompactionResult {
-            summary_text,
-            covered_start_id: first_id,
-            covered_end_id: last_id,
+        let snapshot = turns.to_vec();
+        let first_id = snapshot.first().map(|t| t.id().to_string()).unwrap();
+        let last_id = snapshot.last().map(|t| t.id().to_string()).unwrap();
+        let covered_count = snapshot.len();
+        let transcript_path = transcript_path.to_path_buf();
+        let compaction_model = config.compaction_model.clone();
+        let ratio_before = usage_ratio;
+
+        let existing_summary = find_last_summary(&snapshot);
+
+        let eb = event_bus.clone();
+        let handle = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut last_error = String::new();
+
+            for attempt in 1..=MAX_PREHEAT_RETRIES {
+                match generate_summary(
+                    &snapshot,
+                    existing_summary.as_deref(),
+                    &*llm,
+                    &compaction_model,
+                )
+                .await
+                {
+                    Ok(summary_text) => {
+                        let entry_id = generate_entry_id();
+                        let compaction_entry =
+                            TranscriptEntry::Compaction(CompactionEntry {
+                                id: Some(entry_id),
+                                parent_id: None,
+                                timestamp: chrono::Utc::now()
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                summary: Some(summary_text.clone()),
+                                covered_start_id: Some(first_id.clone()),
+                                covered_end_id: Some(last_id.clone()),
+                                covered_count: Some(covered_count),
+                                is_boundary: Some(false),
+                            });
+
+                        if !transcript_path.as_os_str().is_empty() {
+                            let _ = append_entry(&transcript_path, &compaction_entry);
+                        }
+
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        let summary_chars = summary_text.len();
+
+                        emit_agent_event(
+                            &*eb,
+                            AgentEvent::AutoCompactionEnd {
+                                elapsed_ms,
+                                summary_chars,
+                                covered_count,
+                                ratio_after: ratio_before,
+                            },
+                        );
+
+                        return Ok(CompactionResult {
+                            summary_text,
+                            covered_start_id: first_id,
+                            covered_end_id: last_id,
+                            covered_count,
+                        });
+                    }
+                    Err(e) => {
+                        last_error = e.to_string();
+                        warn!(
+                            "preheat attempt {}/{} failed: {}",
+                            attempt, MAX_PREHEAT_RETRIES, last_error
+                        );
+                    }
+                }
+            }
+
+            emit_agent_event(
+                &*eb,
+                AgentEvent::CompactionError {
+                    exhausted_after_retries: true,
+                    attempts: MAX_PREHEAT_RETRIES,
+                    error: last_error.clone(),
+                    source: "preheat".to_string(),
+                    ratio: Some(ratio_before),
+                },
+            );
+
+            Err(AppError::Llm(format!(
+                "preheat exhausted after {} retries: {}",
+                MAX_PREHEAT_RETRIES, last_error
+            )))
+        });
+
+        self.state = PreheatState::Running {
+            handle,
+            covered_start_id: turns.first().unwrap().id().to_string(),
+            covered_end_id: turns.last().unwrap().id().to_string(),
             covered_count,
-        })
-    });
+            started_at: Instant::now(),
+        };
 
-    state.compaction_summary = Some(CompactionSummary {
-        task_handle: handle,
-        covered_start_id: state.user_turns_list.first().unwrap().id().to_string(),
-        covered_end_id: state.user_turns_list.last().unwrap().id().to_string(),
-        started_at: Instant::now(),
-    });
+        true
+    }
 
-    true
+    /// ExhaustedPending → Running（条件：ratio >= 0.50）。
+    /// 内部先转 Idle 再调 try_start。
+    pub fn try_restart_if_pending(
+        &mut self,
+        usage_ratio: f64,
+        turns: &[TurnEntry],
+        transcript_path: &std::path::Path,
+        llm: Arc<dyn LlmProvider>,
+        config: &ContextConfig,
+        event_bus: Arc<dyn EventBus>,
+    ) -> bool {
+        if !self.is_exhausted_pending() {
+            return false;
+        }
+        self.state = PreheatState::Idle;
+        self.try_start(usage_ratio, turns, transcript_path, llm, config, event_bus)
+    }
+
+    /// 非阻塞获取结果。Running(finished) → Idle + Completed；
+    /// Running(exhausted Err) → ExhaustedPending + Exhausted；
+    /// Running(panic) → Idle + Failed；其他情况 → NotReady。
+    pub fn poll_result(&mut self) -> PreheatOutcome {
+        let is_finished = matches!(
+            self.state,
+            PreheatState::Running { ref handle, .. } if handle.is_finished()
+        );
+        if !is_finished {
+            return PreheatOutcome::NotReady;
+        }
+
+        let old = std::mem::replace(&mut self.state, PreheatState::Idle);
+        match old {
+            PreheatState::Running { handle, .. } => {
+                match futures_util::FutureExt::now_or_never(handle) {
+                    Some(Ok(Ok(result))) => PreheatOutcome::Completed(result),
+                    Some(Ok(Err(_e))) => {
+                        self.state = PreheatState::ExhaustedPending;
+                        PreheatOutcome::Exhausted
+                    }
+                    Some(Err(e)) => {
+                        warn!("preheat task panicked: {}", e);
+                        PreheatOutcome::Failed
+                    }
+                    None => PreheatOutcome::NotReady,
+                }
+            }
+            _ => PreheatOutcome::NotReady,
+        }
+    }
+
+    /// 阻塞等待结果（带超时），用于 ratio >= 0.98 的同步等待路径。
+    pub async fn await_result(&mut self, timeout: Duration) -> PreheatOutcome {
+        let is_running = matches!(self.state, PreheatState::Running { .. });
+        if !is_running {
+            return PreheatOutcome::NotReady;
+        }
+
+        let old = std::mem::replace(&mut self.state, PreheatState::Idle);
+        match old {
+            PreheatState::Running { handle, .. } => {
+                match tokio::time::timeout(timeout, handle).await {
+                    Ok(Ok(Ok(result))) => PreheatOutcome::Completed(result),
+                    Ok(Ok(Err(_e))) => {
+                        self.state = PreheatState::ExhaustedPending;
+                        PreheatOutcome::Exhausted
+                    }
+                    Ok(Err(e)) => {
+                        warn!("preheat task panicked during await: {}", e);
+                        PreheatOutcome::Failed
+                    }
+                    Err(_) => {
+                        warn!("preheat timed out after {:?}, clearing", timeout);
+                        PreheatOutcome::Failed
+                    }
+                }
+            }
+            _ => PreheatOutcome::NotReady,
+        }
+    }
+
+    /// any → Idle。取消运行中任务 + 清除 pending。
+    pub fn abort(&mut self) {
+        if let PreheatState::Running { handle, .. } =
+            std::mem::replace(&mut self.state, PreheatState::Idle)
+        {
+            handle.abort();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +424,17 @@ pub async fn generate_summary(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn emit_agent_event(event_bus: &dyn EventBus, event: AgentEvent) {
+    let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+    let event_name = payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let ctx = EventContext::new(event_name.clone(), payload);
+    let _ = event_bus.emit_sync(&event_name, ctx);
+}
 
 fn find_last_summary(turns: &[TurnEntry]) -> Option<String> {
     turns.iter().rev().find_map(|t| {

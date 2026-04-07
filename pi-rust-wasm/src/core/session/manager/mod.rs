@@ -12,7 +12,7 @@ pub use context::{build_context_from_state, init_context_state};
 pub use session_impl::SessionManager;
 pub use session_impl::generate_entry_id;
 pub use types::{
-    estimate_turn_chars, ApiUsage, CompactionResult, CompactionSummary, ContextState, TurnEntry,
+    estimate_turn_chars, ApiUsage, CompactionResult, ContextState, TurnEntry,
 };
 
 const BRANCH_MAX_ENTRIES: usize = 2000;

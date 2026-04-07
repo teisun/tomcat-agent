@@ -267,12 +267,6 @@ pub struct ContextConfig {
     /// Compaction 摘要最大 token 数（LLM max_tokens 参数），默认 10,000。
     #[serde(default = "default_compaction_max_tokens")]
     pub compaction_max_tokens: usize,
-    /// 自动压缩 buffer（token 数），remaining < 此值触发 cascade（≈ ratio 0.88 档），默认 13,000。
-    #[serde(default = "default_autocompact_buffer_tokens")]
-    pub autocompact_buffer_tokens: usize,
-    /// 警告 buffer（token 数），remaining < 此值触发 cascade（≈ ratio 0.82 档），默认 20,000。
-    #[serde(default = "default_warning_buffer_tokens")]
-    pub warning_buffer_tokens: usize,
 }
 
 fn default_context_window() -> usize {
@@ -299,12 +293,6 @@ fn default_layer0_placeholder_threshold_chars() -> usize {
 fn default_compaction_max_tokens() -> usize {
     10_000
 }
-fn default_autocompact_buffer_tokens() -> usize {
-    13_000
-}
-fn default_warning_buffer_tokens() -> usize {
-    20_000
-}
 
 impl Default for ContextConfig {
     fn default() -> Self {
@@ -317,8 +305,6 @@ impl Default for ContextConfig {
             layer0_single_result_max_chars: default_layer0_single_result_max_chars(),
             layer0_placeholder_threshold_chars: default_layer0_placeholder_threshold_chars(),
             compaction_max_tokens: default_compaction_max_tokens(),
-            autocompact_buffer_tokens: default_autocompact_buffer_tokens(),
-            warning_buffer_tokens: default_warning_buffer_tokens(),
         }
     }
 }

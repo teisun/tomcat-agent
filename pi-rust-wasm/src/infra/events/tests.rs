@@ -71,12 +71,18 @@ fn extension_event_tool_hooks_use_tool_call_tool_result_wire_names() {
 #[test]
 fn agent_event_compaction_error_serializes() {
     let e = AgentEvent::CompactionError {
-        batch_index: 2,
+        exhausted_after_retries: true,
+        attempts: 3,
         error: "LLM timeout".to_string(),
+        source: "preheat".to_string(),
+        ratio: Some(0.65),
     };
-    let j = serde_json::to_string(&e).unwrap();
-    assert!(j.contains(wire::WIRE_COMPACTION_ERROR));
-    assert!(j.contains("batchIndex"));
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_COMPACTION_ERROR);
+    assert_eq!(j["exhaustedAfterRetries"].as_bool().unwrap(), true);
+    assert_eq!(j["attempts"].as_u64().unwrap(), 3);
+    assert_eq!(j["source"].as_str().unwrap(), "preheat");
+    assert!(!j.to_string().contains("batchIndex"));
 }
 
 #[test]
@@ -102,4 +108,81 @@ fn extension_event_serialize_camel_case() {
     let j = serde_json::to_string(&e).unwrap();
     assert!(j.contains(wire::WIRE_STARTUP));
     assert!(j.contains("sessionFile"));
+}
+
+#[test]
+fn auto_compaction_start_serializes_with_new_payload() {
+    let e = AgentEvent::AutoCompactionStart {
+        covered_count: 5,
+        ratio_before: 0.72,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        j["type"].as_str().unwrap(),
+        wire::WIRE_AUTO_COMPACTION_START
+    );
+    assert_eq!(j["coveredCount"].as_u64().unwrap(), 5);
+    assert!(j["ratioBefore"].as_f64().is_some());
+    assert!(!j.to_string().contains("reason"));
+}
+
+#[test]
+fn auto_compaction_end_serializes_with_new_payload() {
+    let e = AgentEvent::AutoCompactionEnd {
+        elapsed_ms: 1234,
+        summary_chars: 5000,
+        covered_count: 5,
+        ratio_after: 0.30,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_AUTO_COMPACTION_END);
+    assert_eq!(j["elapsedMs"].as_u64().unwrap(), 1234);
+    assert_eq!(j["summaryChars"].as_u64().unwrap(), 5000);
+    assert!(!j.to_string().contains("aborted"));
+}
+
+#[test]
+fn context_overflow_trim_start_serializes() {
+    let e = AgentEvent::ContextOverflowTrimStart {
+        reason: "context_overflow".into(),
+        ratio: 1.05,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        j["type"].as_str().unwrap(),
+        wire::WIRE_CONTEXT_OVERFLOW_TRIM_START
+    );
+    assert_eq!(j["reason"].as_str().unwrap(), "context_overflow");
+    assert!(j["ratio"].as_f64().unwrap() > 1.0);
+}
+
+#[test]
+fn context_overflow_trim_end_serializes() {
+    let e = AgentEvent::ContextOverflowTrimEnd {
+        ratio_before: 1.05,
+        ratio_after: 0.40,
+        will_retry: true,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(
+        j["type"].as_str().unwrap(),
+        wire::WIRE_CONTEXT_OVERFLOW_TRIM_END
+    );
+    assert_eq!(j["willRetry"].as_bool().unwrap(), true);
+    assert!(j["ratioBefore"].as_f64().unwrap() > 1.0);
+    assert!(j["ratioAfter"].as_f64().unwrap() < 0.50);
+}
+
+#[test]
+fn boundary_switched_serializes() {
+    let e = AgentEvent::BoundarySwitched {
+        ratio_before: 0.85,
+        ratio_after: 0.30,
+        covered_count: 4,
+        was_sync_wait: false,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_BOUNDARY_SWITCHED);
+    assert_eq!(j["coveredCount"].as_u64().unwrap(), 4);
+    assert_eq!(j["wasSyncWait"].as_bool().unwrap(), false);
 }

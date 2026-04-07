@@ -81,7 +81,7 @@ flowchart TD
         AttemptResult -->|"RateLimit / Timeout"| Backoff
         AttemptResult -->|Success| AttemptDone
         AttemptResult -->|"Fatal Error"| FatalError
-        EmitCompact["发布 auto_compaction_start\n压缩上下文\n发布 auto_compaction_end"] --> Layer2Entry
+        EmitCompact["发布 context_overflow_trim_start\n物理截断/压缩\n发布 context_overflow_trim_end"] --> Layer2Entry
         Backoff["指数退避等待\n发布 auto_retry_end"] --> Layer2Entry
     end
 
@@ -144,9 +144,9 @@ fn agent_run(session, user_message):
                     emit(AutoRetryEnd { success: true })
                     break
                 Err(ContextOverflow):
-                    emit(AutoCompactionStart { reason: "context_overflow" })
+                    emit(ContextOverflowTrimStart { reason: "context_overflow" })
                     messages = compact(messages)
-                    emit(AutoCompactionEnd { ... })
+                    emit(ContextOverflowTrimEnd { ... })
                     continue
                 Err(RateLimit { retry_after }):
                     sleep(exponential_backoff(attempt_count, retry_after))
@@ -276,8 +276,8 @@ agent_start              ← 第一层开始，用户消息进入
 │  └─ turn_end           ← 本轮结束
 │     … 如有更多工具请求，重复 turn_start → turn_end …
 │
-├─ [auto_compaction_start]  ← Context Overflow 触发压缩
-├─ [auto_compaction_end]    ← 压缩完成
+├─ [context_overflow_trim_start]  ← Context Overflow 路径（Rust `ContextOverflowTrimStart`）
+├─ [context_overflow_trim_end]    ← Overflow 截断/压缩完成（Rust `ContextOverflowTrimEnd`）
 ├─ [auto_retry_end]         ← 重试结束
 │
 └─ agent_end             ← 整个 Agent 处理结束
@@ -344,9 +344,9 @@ agent_start              ← 第一层开始，用户消息进入
 
 上下文管理采用四层防护（L0 tool_result 清理 → L1 异步预热 → L2 检查与应用 → L3 物理截断），由 ratio 水位线驱动。与 Agent Loop 的三个交互时机：
 
-- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI）：L0 同步清理 `userTurnsList` → L1 异步预热 → L2 非阻塞检查
-- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：L2 检查 CompactionSummary → 完成则 Boundary 切换（ratio >= 0.98 时可化异步为同步等待）→ `messages` 从更新后的 `userTurnsList` 重建
-- **③ reasoning loop 内 API 返回 Context Overflow**：L3 物理截断 + 重试（第二层 Attempt Loop）
+- **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`run_layer0_cleanup` → `preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll + apply boundary）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
+- **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换（ratio >= 0.98 时可化异步为同步等待）→ `messages` 从更新后的 `userTurnsList` 重建
+- **③ reasoning loop 内 API 返回 Context Overflow**：L3 物理截断 + 重试（第二层 Attempt Loop）；该路径发布 `ContextOverflowTrimStart` / `ContextOverflowTrimEnd`（JSON wire：`context_overflow_trim_start` / `context_overflow_trim_end`），不再使用 `AutoCompactionStart` / `AutoCompactionEnd`
 
 > 步骤编号（②③⑤）对应 [context-management.md §5.6](context-management.md) 的完整链路图。
 

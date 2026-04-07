@@ -17,23 +17,43 @@
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    AgentStart { #[serde(rename = "sessionId")] session_id: Arc<str> },
-    AgentEnd { #[serde(rename = "sessionId")] session_id: Arc<str>, messages: Vec<Message>, error: Option<String> },
-    TurnStart { #[serde(rename = "sessionId")] session_id: Arc<str>, #[serde(rename = "turnIndex")] turn_index: usize, timestamp: i64 },
-    TurnEnd { #[serde(rename = "sessionId")] session_id: Arc<str>, #[serde(rename = "turnIndex")] turn_index: usize, message: Message, #[serde(rename = "toolResults")] tool_results: Vec<Message> },
+    AgentStart { #[serde(rename = "sessionId")] session_id: String },
+    AgentEnd { #[serde(rename = "sessionId")] session_id: String, messages: Vec<Message>, error: Option<String> },
+    TurnStart { #[serde(rename = "sessionId")] session_id: String, #[serde(rename = "turnIndex")] turn_index: usize, timestamp: i64 },
+    TurnEnd { #[serde(rename = "sessionId")] session_id: String, #[serde(rename = "turnIndex")] turn_index: usize, message: Message, #[serde(rename = "toolResults")] tool_results: Vec<Message> },
     MessageStart { message: Message },
     MessageUpdate { message: Message, #[serde(rename = "assistantMessageEvent")] assistant_message_event: AssistantMessageEvent },
     MessageEnd { message: Message },
     ToolExecutionStart { #[serde(rename = "toolCallId")] tool_call_id: String, #[serde(rename = "toolName")] tool_name: String, args: Value },
     ToolExecutionUpdate { #[serde(rename = "toolCallId")] tool_call_id: String, #[serde(rename = "toolName")] tool_name: String, args: Value, #[serde(rename = "partialResult")] partial_result: ToolOutput },
     ToolExecutionEnd { #[serde(rename = "toolCallId")] tool_call_id: String, #[serde(rename = "toolName")] tool_name: String, result: ToolOutput, #[serde(rename = "isError")] is_error: bool },
-    AutoCompactionStart { reason: String },
-    AutoCompactionEnd { result: Option<Value>, aborted: bool, #[serde(rename = "willRetry")] will_retry: bool, #[serde(rename = "errorMessage")] error_message: Option<String> },
+    AutoCompactionStart { #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "ratioBefore")] ratio_before: f64 },
+    AutoCompactionEnd { #[serde(rename = "elapsedMs")] elapsed_ms: u64, #[serde(rename = "summaryChars")] summary_chars: usize, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "ratioAfter")] ratio_after: f64 },
+    CompactionError { #[serde(rename = "exhaustedAfterRetries")] exhausted_after_retries: bool, attempts: u32, error: String, source: String, ratio: Option<f64> },
+    ToolResultTruncated { #[serde(rename = "toolName")] tool_name: String, #[serde(rename = "originalChars")] original_chars: usize, #[serde(rename = "truncatedChars")] truncated_chars: usize },
     AutoRetryStart { attempt: u32, #[serde(rename = "maxAttempts")] max_attempts: u32, #[serde(rename = "delayMs")] delay_ms: u64, #[serde(rename = "errorMessage")] error_message: String },
     AutoRetryEnd { success: bool, attempt: u32, #[serde(rename = "finalError")] final_error: Option<String> },
     ExtensionError { #[serde(rename = "extensionId")] extension_id: Option<String>, event: String, error: String },
+    ContextMetricsUpdate { #[serde(rename = "inputTokensUsed")] input_tokens_used: usize, #[serde(rename = "contextUtilizationRatio")] context_utilization_ratio: f64, #[serde(rename = "compactionCount")] compaction_count: u32, #[serde(rename = "compactionTokensFreed")] compaction_tokens_freed: usize, #[serde(rename = "totalToolResultBytesPersisted")] total_tool_result_bytes_persisted: usize, #[serde(rename = "preheatInProgress")] preheat_in_progress: bool },
+    ToolResultPersisted { #[serde(rename = "toolName")] tool_name: String, #[serde(rename = "originalChars")] original_chars: usize, #[serde(rename = "persistedPath")] persisted_path: String },
+    ContextOverflowTrimStart { reason: String, ratio: f64 },
+    ContextOverflowTrimEnd { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "willRetry")] will_retry: bool },
+    BoundarySwitched { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "wasSyncWait")] was_sync_wait: bool },
 }
 ```
+
+**上下文压缩与溢出（线格式名与 payload）**：异步预热线（L1）、边界切换（L2）、溢出裁剪（L3）对应下列 JSON `type`；序列化字段为 camelCase，与实现一致。以下事件**不再**存在于代码库：`preheat_started`、`preheat_completed`、`preheat_error`、`compaction_circuit_breaker_triggered`。
+
+| 层级 | JSON `type` | Payload |
+|------|-------------|---------|
+| L1（async preheat） | `auto_compaction_start` | `{ "coveredCount": number, "ratioBefore": number }` |
+| L1 | `auto_compaction_end` | `{ "elapsedMs": number, "summaryChars": number, "coveredCount": number, "ratioAfter": number }` |
+| L1（失败耗尽） | `compaction_error` | `{ "exhaustedAfterRetries": boolean, "attempts": number, "error": string, "source": string, "ratio": number \| null }` |
+| L2 | `boundary_switched` | `{ "ratioBefore": number, "ratioAfter": number, "coveredCount": number, "wasSyncWait": boolean }` |
+| L3（overflow trim） | `context_overflow_trim_start` | `{ "reason": string, "ratio": number }` |
+| L3 | `context_overflow_trim_end` | `{ "ratioBefore": number, "ratioAfter": number, "willRetry": boolean }` |
+
+**`wire` 模块常量**（与上表 JSON `type` 一一对应，定义见 [`events/mod.rs`](../../../../src/infra/events/mod.rs) `pub mod wire`）：`WIRE_AUTO_COMPACTION_START`、`WIRE_AUTO_COMPACTION_END`、`WIRE_COMPACTION_ERROR`、`WIRE_BOUNDARY_SWITCHED`、`WIRE_CONTEXT_OVERFLOW_TRIM_START`、`WIRE_CONTEXT_OVERFLOW_TRIM_END`。
 
 #### ExtensionEvent（扩展钩子）
 
@@ -68,7 +88,7 @@ pub enum ExtensionEvent {
 }
 ```
 
-**线格式名（JSON `type`）**：`AgentEvent` 使用 `#[serde(tag = "type", rename_all = "snake_case")]`，故 `ToolExecutionStart` / `ToolExecutionEnd` / `ToolExecutionUpdate` 的 `type` 分别为 **`tool_execution_start`**、**`tool_execution_end`**、**`tool_execution_update`**（观察向，与 pi-mono 流式/UI 一致）。扩展钩子 **`tool_call`** / **`tool_result`** 仅用于 **`ExtensionEvent::ToolCall` / `ToolResult`**，与上述观察事件名不同；常量见源码 [`events.rs`](../../../../src/infra/events.rs) `pub mod wire`。
+**线格式名（JSON `type`）**：`AgentEvent` 使用 `#[serde(tag = "type", rename_all = "snake_case")]`，故 `ToolExecutionStart` / `ToolExecutionEnd` / `ToolExecutionUpdate` 的 `type` 分别为 **`tool_execution_start`**、**`tool_execution_end`**、**`tool_execution_update`**（观察向，与 pi-mono 流式/UI 一致）。扩展钩子 **`tool_call`** / **`tool_result`** 仅用于 **`ExtensionEvent::ToolCall` / `ToolResult`**，与上述观察事件名不同；其余 Agent 线格式名及 `WIRE_*` 常量见源码 [`events/mod.rs`](../../../../src/infra/events/mod.rs) `pub mod wire`。
 
 ### 与 pi-mono 工具链事件对照
 

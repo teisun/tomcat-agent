@@ -1010,8 +1010,8 @@
 - [ ] 19.3 `src/core/compaction.rs`：`is_over_budget()` 改为基于 token 维度判断（有 usage 时用 token，否则 fallback 字符估算）
 
 **Phase 2：多级水位线与级联降压（P1）**
-- [ ] 19.4 `src/infra/config.rs`：`[context]` 配置节新增 `layer0_single_result_max_chars`（默认 30000）、`layer0_turn_aggregate_max_chars`（默认 150000）、`autocompact_buffer_tokens`（默认 13000）、`warning_buffer_tokens`（默认 20000）
-- [ ] 19.5 `src/core/compaction.rs`：实现 ratio 水位线触发逻辑（0.70/0.85/0.92/0.98 → 对应 m=5/3/2/1）+ buffer 安全网（`min(配置值, budget×0.3)` cap）
+- [ ] 19.4 `src/infra/config.rs`：`[context]` 配置节新增 `layer0_single_result_max_chars`（默认 30000）、`layer0_turn_aggregate_max_chars`（默认 150000）
+- [ ] 19.5 `src/core/compaction.rs`：实现 ratio 水位线触发逻辑（0.70/0.85/0.92/0.98 → 对应 m=5/3/2/1）
 - [ ] 19.6 `src/core/compaction.rs`：实现 cascade 流程编排——Layer 0 → 重算 ratio → Layer 1（若需） → 重算 ratio → Layer 2（若需） → 重算 ratio → Layer 3（若需）；每层跑完判断是否已降压成功
 - [ ] 19.7 `src/core/agent_loop.rs`：每轮 LLM 回复完毕后触发 cascade（替换旧的仅 `is_over_budget` 预检）；ratio >= 0.98 时标记阻止新工具调用
 
@@ -1053,7 +1053,7 @@
 |------|------|
 | `src/core/session/manager.rs` | `ContextState` 扩展（token 字段 + usage + ratio + circuit breaker）；compact boundary 处理 |
 | `src/core/agent_loop.rs` | 捕获 Usage + 触发 cascade + ratio >= 0.98 阻止工具调用 |
-| `src/infra/config.rs` | 新增 `layer0_single_result_max_chars`、`layer0_turn_aggregate_max_chars`、`autocompact_buffer_tokens`、`warning_buffer_tokens` 配置项 |
+| `src/infra/config.rs` | 新增 `layer0_single_result_max_chars`、`layer0_turn_aggregate_max_chars` 配置项 |
 | `src/core/compaction.rs` | Layer 0 落盘 + Layer 1 cascade 改造 + Layer 2 单次调用 + Layer 3 目标 0.50 + cascade 编排 + Circuit Breaker + PTL 重试 |
 | `src/core/system_prompt.rs` | 模块化 `SystemPromptSection` trait + 分页读取引导 |
 | `src/infra/events.rs` | 新增事件类型 |
