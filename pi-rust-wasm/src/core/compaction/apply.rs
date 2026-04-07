@@ -80,10 +80,12 @@ fn apply_and_emit_boundary(
     event_bus: &dyn EventBus,
 ) -> bool {
     let covered_count = result.covered_count;
-    write_boundary_transcript(state, &result);
 
-    match state.apply_boundary(result) {
+    match state.apply_boundary(result.clone()) {
         Ok(()) => {
+            // Only record boundary switch after it has successfully applied.
+            write_boundary_transcript(state, &result);
+
             let ratio_after = state.usage_ratio();
             emit_agent_event(
                 event_bus,
