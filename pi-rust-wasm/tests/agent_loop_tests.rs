@@ -799,11 +799,10 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后工具轮发射 context_metrics_update
+/// [ContextMetricsUpdate 事件发射] 设置 ContextState 后：首次 LLM 请求前 + 本轮最终回复后各一次
 ///
-/// 验证：EventBus 上捕获到 context_metrics_update 事件，payload 含合法字段，
-///       且 context_metrics_update 出现在 turn_end 之前
-/// 意义：TODO §2 ContextMetricsUpdate 接线——token 水位可观测性门禁
+/// 验证：至少一次 context_metrics_update，payload 含合法字段；首次 metrics 出现在首次 turn_end 之前
+/// 意义：ContextMetricsUpdate 双点发射（中间 tool round 不发）——可观测性与 CLI 刷屏平衡
 #[tokio::test]
 async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

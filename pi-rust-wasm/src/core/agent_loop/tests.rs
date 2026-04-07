@@ -755,7 +755,7 @@ async fn run_chat_stream_returns_err_is_classified() {
     assert!(result.unwrap_err().to_string().contains("503"));
 }
 
-/// context_metrics_update 出现在 turn_end 之前（工具轮场景）。
+/// context_metrics_update：首次 LLM 请求前一次 + 本轮结束前一次；每次 turn_end 前均有对应轮次的 metrics（工具轮场景）。
 #[tokio::test]
 async fn context_metrics_update_emitted_before_turn_end() {
     use crate::core::session::manager::ContextState;
@@ -906,7 +906,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
     assert!(p["totalToolResultBytesPersisted"].is_u64());
 }
 
-/// 累加器在多轮工具调用中递增：后一次 compaction_count >= 前一次。
+/// 多轮工具时仅发射两次 context_metrics（首请求前 + 最终 timing ⑤ 后）；compaction_count 在后一次 payload 中单调不减于前一次。
 #[tokio::test]
 async fn context_metrics_compaction_count_accumulates_across_rounds() {
     use crate::core::session::manager::ContextState;
@@ -980,9 +980,10 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
     }];
     let _ = loop_.run(messages).await.unwrap();
     let captured = counts.lock().unwrap();
-    assert!(
-        captured.len() >= 2,
-        "should capture at least 2 context_metrics_update events for 2 tool rounds, got {}",
+    assert_eq!(
+        captured.len(),
+        2,
+        "run_reasoning_loop should emit exactly 2 context_metrics_update (before first LLM + after final reply), got {}",
         captured.len()
     );
     for window in captured.windows(2) {
@@ -1047,7 +1048,7 @@ async fn context_metrics_update_skipped_when_no_context_state() {
     );
 }
 
-/// 纯文本回复（无工具调用）路径也发射 context_metrics_update。
+/// 纯文本回复：首 LLM 请求前一次 + timing ⑤ 后一次（共两次），最后一次在 turn_end 之前。
 #[tokio::test]
 async fn context_metrics_update_emitted_on_text_only_response() {
     use crate::core::session::manager::ContextState;

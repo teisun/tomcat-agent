@@ -191,7 +191,7 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
@@ -492,7 +492,7 @@ fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry 
 
 const PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
 
-/// [Layer 1 深度] 占位符替换正确性：旧 turn 的 >20K tool result 被替换为占位符，保护区内 turn 保持原内容
+/// [Layer 1 深度] 占位符替换正确性：旧 turn 的超大 tool result 被替换为占位符，保护区内 turn 保持原内容
 #[test]
 fn test_compact_tool_results_replaces_with_placeholder() {
     common::setup_logging();
@@ -522,7 +522,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
     state.context_budget_chars = total / 3;
 
     info!("Act: compact_tool_results with keep_recent=1");
-    compact_tool_results(&mut state, 1);
+    compact_tool_results(&mut state, &ContextConfig::default(), 1);
 
     info!("Assert: old turns replaced, recent preserved");
     for (i, turn) in state.user_turns_list.iter().enumerate() {
@@ -548,7 +548,7 @@ fn test_compact_tool_results_replaces_with_placeholder() {
     }
 }
 
-/// [Layer 1 深度] Layer 1 V2 替换所有 >20K tool results in compactable zone
+/// [Layer 1 深度] compactable zone 内超过占位符阈值的 tool results 均被替换
 #[test]
 fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     common::setup_logging();
@@ -579,8 +579,8 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
-    info!("Act: compact with m=1, only >20K in compactable zone get replaced");
-    compact_tool_results(&mut state, 1);
+    info!("Act: compact with m=1, only >threshold in compactable zone get replaced");
+    compact_tool_results(&mut state, &ContextConfig::default(), 1);
 
     let get_tool_content = |idx: usize| -> String {
         if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[idx] {
@@ -601,17 +601,17 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     assert_eq!(
         get_tool_content(0),
         PLACEHOLDER,
-        "first (>20K) should be replaced"
+        "first (above threshold) should be replaced"
     );
     assert_eq!(
         get_tool_content(1),
         small,
-        "second (<20K) should keep original"
+        "second (below threshold) should keep original"
     );
     assert_eq!(
         get_tool_content(2),
         PLACEHOLDER,
-        "third (>20K) should be replaced"
+        "third (above threshold) should be replaced"
     );
     assert_eq!(
         get_tool_content(3),
@@ -620,7 +620,7 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     );
 }
 
-/// [Layer 1 深度] estimate 精确变化量（>20K 阈值才触发替换）
+/// [Layer 1 深度] estimate 精确变化量（仅超过占位符阈值时触发替换）
 #[test]
 fn test_compact_tool_results_estimate_precise() {
     common::setup_logging();
@@ -648,7 +648,7 @@ fn test_compact_tool_results_estimate_precise() {
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
     };
 
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
 
     let expected_reduced = content_len - PLACEHOLDER.len();
     assert_eq!(

@@ -63,7 +63,7 @@ fn compact_tool_results_reduces_budget() {
             text: "q2".to_string(),
         }]),
     ];
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert!(reduced > 0);
 }
 
@@ -76,7 +76,7 @@ fn compact_tool_results_protects_recent() {
         content: tool_content.clone(),
         is_error: false,
     }])];
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert_eq!(reduced, 0);
 }
 
@@ -93,7 +93,7 @@ fn compact_tool_results_skips_small() {
             text: "q".to_string(),
         }]),
     ];
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert_eq!(reduced, 0);
 }
 
@@ -241,7 +241,7 @@ fn compact_tool_results_skips_already_persisted() {
             text: "q".to_string(),
         }]),
     ];
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert_eq!(
         reduced, 0,
         "already persisted results should not be replaced"
@@ -261,11 +261,45 @@ fn compact_tool_results_skips_placeholder() {
             text: "q".to_string(),
         }]),
     ];
-    let reduced = compact_tool_results(&mut state, 1);
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert_eq!(
         reduced, 0,
         "already replaced results should not be re-replaced"
     );
+}
+
+#[test]
+fn compact_tool_results_respects_placeholder_threshold_from_config() {
+    let mut state = make_state(30_000, 5_000, 1_250);
+    let big = "x".repeat(25_000);
+    state.user_turns_list = vec![
+        make_user_turn(vec![AgentMessage::ToolResult {
+            tool_call_id: "c1".into(),
+            content: big.clone(),
+            is_error: false,
+        }]),
+        make_user_turn(vec![AgentMessage::User {
+            text: "q".to_string(),
+        }]),
+    ];
+    let high_threshold = ContextConfig {
+        layer0_placeholder_threshold_chars: 30_000,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &high_threshold, 1);
+    assert_eq!(
+        reduced, 0,
+        "content below custom threshold should not be replaced"
+    );
+    if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[0] {
+        if let AgentMessage::ToolResult { content, .. } = &messages[0] {
+            assert_eq!(content.len(), 25_000);
+        } else {
+            panic!("expected ToolResult");
+        }
+    } else {
+        panic!("expected UserTurn");
+    }
 }
 
 #[test]

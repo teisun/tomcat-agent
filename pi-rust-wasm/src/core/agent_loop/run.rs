@@ -325,6 +325,11 @@ impl AgentLoop {
                 tools: Some(self.config.tool_definitions.clone()),
             };
 
+            // context_metrics_update：单次 run_reasoning_loop 内仅在首次 LLM 请求前发一次（中间 tool round 不发）。
+            if turn_index == 1 {
+                self.emit_context_metrics();
+            }
+
             let mut stream = match self.llm.chat_stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -516,7 +521,6 @@ impl AgentLoop {
                 }
                 self.block_tool_calls = false;
 
-                self.emit_context_metrics();
                 self.emit_event(AgentEvent::TurnEnd {
                     session_id: self.config.session_id.clone(),
                     turn_index,
@@ -585,7 +589,6 @@ impl AgentLoop {
 
             // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
 
-            self.emit_context_metrics();
             self.emit_event(AgentEvent::TurnEnd {
                 session_id: self.config.session_id.clone(),
                 turn_index,
@@ -598,6 +601,7 @@ impl AgentLoop {
             }
 
             if turn_index >= self.config.max_tool_rounds {
+                self.emit_context_metrics();
                 return Ok(final_text);
             }
         }

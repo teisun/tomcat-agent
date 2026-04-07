@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Jerry | 2026-04-06 | PENDING_INTEGRATION | feature/context-async-compaction | - |
+| @Jerry | 2026-04-07 | PENDING_INTEGRATION | feature/context-async-compaction | - |
 
 ### ✅ DONE (已完成)
 - [x] **[P0]** 20.1 TurnEntry 增加 `id: String`；ContextState 增加 `transcript_path`/`compaction_summary`
@@ -19,6 +19,8 @@
 - [x] **[P1]** 20.11 Session 退出 `abort_preheat()`
 - [x] **[P2]** 20.12 单元测试（`abort_preheat`/`apply_boundary`/`check_after_reply`/`layer0_threshold_from_config`）
 - [x] **[P2]** 20.13 集成测试（`session_reload_boundary_false_skipped`/`session_reload_with_boundary`）
+- [x] **`compact_tool_results` 读取 `ContextConfig.layer0_placeholder_threshold_chars`**（默认 10K，可 `[context]` 覆盖；替换原硬编码 20K）
+- [x] **`context_metrics_update` 单次 `run_reasoning_loop` 内至多两次**（首轮 LLM 前 + 收尾 / `max_tool_rounds` 耗尽；中间 tool round 不发）
 
 ### 🔌 INTERFACE (接口变更)
 - `TurnEntry::UserTurn`/`SummaryTurn`: 新增 `id: String`
@@ -30,6 +32,7 @@
 - 新增 `CompactionSummary`/`CompactionResult` structs
 - 新增 `maybe_start_preheat()`、`check_after_reply()`、`check_before_request()`
 - 新增 `run_layer0_cleanup()`
+- `compact_tool_results(state, config, m)`：第二参为 `&ContextConfig`（占位符阈值取自 `layer0_placeholder_threshold_chars`）
 - 删除 `run_compaction_cascade_v2`、`run_compaction_cascade`、`determine_cascade_params`、`force_drop_oldest`、`truncate_tool_result_if_needed`、`summary.rs`
 
 ### ⚠️ BLOCKED (阻塞/风险)

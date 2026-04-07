@@ -115,9 +115,9 @@ pub fn layer0_persist_large_results(
 // ---------------------------------------------------------------------------
 
 /// Layer 1：从 compactable zone（排除最近 `m` 个 turns）中，
-/// 将 > `layer0_placeholder_threshold_chars` 的 tool result 替换为占位符。
-pub fn compact_tool_results(state: &mut ContextState, m: usize) -> usize {
-    let threshold = 20_000; // will be replaced by config in Phase D
+/// 将长度 **大于** `ContextConfig::layer0_placeholder_threshold_chars`（默认 10_000）的 tool result 替换为占位符。
+pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig, m: usize) -> usize {
+    let threshold = config.layer0_placeholder_threshold_chars;
     let len = state.user_turns_list.len();
     if len <= m {
         return 0;
@@ -163,6 +163,6 @@ pub fn run_layer0_cleanup(
     session_id: &str,
 ) -> Vec<PersistedResult> {
     let persisted = layer0_persist_large_results(state, config, work_dir, session_id);
-    compact_tool_results(state, M_PROTECTED_TURNS);
+    compact_tool_results(state, config, M_PROTECTED_TURNS);
     persisted
 }
