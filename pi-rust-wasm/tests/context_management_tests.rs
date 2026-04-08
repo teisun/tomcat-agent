@@ -689,6 +689,7 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
             covered_end_id: None,
             covered_count: Some(1),
             is_boundary: Some(true),
+            preheat_compaction_id: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &boundary)?;
@@ -802,16 +803,29 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
     let path = mgr.current_transcript_path()?.unwrap();
 
+    let first_turn_uid = pi_wasm::core::session::transcript::read_entries_tail(&path, 500)?
+        .into_iter()
+        .find_map(|e| {
+            if let pi_wasm::core::session::transcript::TranscriptEntry::Message(me) = e {
+                if me.message.get("role").and_then(|r| r.as_str()) == Some("user") {
+                    return me.id;
+                }
+            }
+            None
+        })
+        .expect("first user message id");
+
     let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
         pi_wasm::core::session::transcript::CompactionEntry {
             id: Some("preheat_1".into()),
             parent_id: None,
             timestamp: "2026-01-01T00:00:01.000Z".to_string(),
             summary: Some("Preheat summary (should be ignored)".to_string()),
-            covered_start_id: Some("t0".into()),
-            covered_end_id: Some("t0".into()),
+            covered_start_id: Some(first_turn_uid.clone()),
+            covered_end_id: Some(first_turn_uid),
             covered_count: Some(1),
             is_boundary: Some(false),
+            preheat_compaction_id: Some("preheat_1".into()),
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;
@@ -847,6 +861,80 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
         }
     });
     assert!(has_second, "turns after preheat entry should be present");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// [TASK-20] 重载后未应用 preheat：`restore_completed` + `poll_result` 可取回摘要
+#[test]
+fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_session_reload_pending_preheat_restore").entered();
+
+    let dir = temp_sessions_dir("preheat_restore");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None)?;
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"first question"}))?;
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"first answer"}))?;
+
+    let path = mgr.current_transcript_path()?.unwrap();
+    let first_turn_uid = pi_wasm::core::session::transcript::read_entries_tail(&path, 500)?
+        .into_iter()
+        .find_map(|e| {
+            if let pi_wasm::core::session::transcript::TranscriptEntry::Message(me) = e {
+                if me.message.get("role").and_then(|r| r.as_str()) == Some("user") {
+                    return me.id;
+                }
+            }
+            None
+        })
+        .expect("first user message id");
+
+    let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
+        pi_wasm::core::session::transcript::CompactionEntry {
+            id: Some("preheat_restore_1".into()),
+            parent_id: None,
+            timestamp: "2026-01-01T00:00:01.000Z".to_string(),
+            summary: Some("Restored preheat summary body".to_string()),
+            covered_start_id: Some(first_turn_uid.clone()),
+            covered_end_id: Some(first_turn_uid),
+            covered_count: Some(1),
+            is_boundary: Some(false),
+            preheat_compaction_id: Some("preheat_restore_1".into()),
+        },
+    );
+    pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"second question"}))?;
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"second answer"}))?;
+
+    let cfg = ContextConfig::default();
+    let mut state = init_context_state(&mgr, &cfg, "system")?;
+
+    assert!(
+        state.preheat.is_finished(),
+        "reload should leave CachedCompleted preheat"
+    );
+    use pi_wasm::core::compaction::preheat::PreheatOutcome;
+    match state.preheat.poll_result() {
+        PreheatOutcome::Completed(r) => {
+            assert!(
+                r.summary_text.contains("Restored preheat summary"),
+                "poll should return disk preheat summary"
+            );
+            assert_eq!(
+                r.transcript_compaction_entry_id.as_deref(),
+                Some("preheat_restore_1")
+            );
+        }
+        o => panic!("expected Completed, got {:?}", o),
+    }
+    assert!(state.preheat.is_idle());
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())

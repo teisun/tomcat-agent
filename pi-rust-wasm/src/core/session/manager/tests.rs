@@ -400,6 +400,7 @@ fn init_context_state_boundary_discards_prior() {
         covered_end_id: None,
         covered_count: Some(2),
         is_boundary: Some(true),
+        preheat_compaction_id: None,
     });
     super::super::transcript::append_entry(&path, &boundary_entry).unwrap();
 
@@ -491,6 +492,7 @@ fn make_boundary_entry(ts: &str, summary: &str) -> TranscriptEntry {
         covered_end_id: None,
         covered_count: None,
         is_boundary: Some(true),
+        preheat_compaction_id: None,
     })
 }
 

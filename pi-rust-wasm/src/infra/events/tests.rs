@@ -79,7 +79,7 @@ fn agent_event_compaction_error_serializes() {
     };
     let j = serde_json::to_value(&e).unwrap();
     assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_COMPACTION_ERROR);
-    assert_eq!(j["exhaustedAfterRetries"].as_bool().unwrap(), true);
+    assert!(j["exhaustedAfterRetries"].as_bool().unwrap());
     assert_eq!(j["attempts"].as_u64().unwrap(), 3);
     assert_eq!(j["source"].as_str().unwrap(), "preheat");
     assert!(!j.to_string().contains("batchIndex"));
@@ -168,7 +168,7 @@ fn context_overflow_trim_end_serializes() {
         j["type"].as_str().unwrap(),
         wire::WIRE_CONTEXT_OVERFLOW_TRIM_END
     );
-    assert_eq!(j["willRetry"].as_bool().unwrap(), true);
+    assert!(j["willRetry"].as_bool().unwrap());
     assert!(j["ratioBefore"].as_f64().unwrap() > 1.0);
     assert!(j["ratioAfter"].as_f64().unwrap() < 0.50);
 }
@@ -184,5 +184,5 @@ fn boundary_switched_serializes() {
     let j = serde_json::to_value(&e).unwrap();
     assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_BOUNDARY_SWITCHED);
     assert_eq!(j["coveredCount"].as_u64().unwrap(), 4);
-    assert_eq!(j["wasSyncWait"].as_bool().unwrap(), false);
+    assert!(!j["wasSyncWait"].as_bool().unwrap());
 }

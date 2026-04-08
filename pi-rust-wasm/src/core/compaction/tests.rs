@@ -404,6 +404,7 @@ fn apply_boundary_replaces_covered_range() {
         covered_start_id: "t0".into(),
         covered_end_id: "t1".into(),
         covered_count: 2,
+        transcript_compaction_entry_id: None,
     };
     let old_ratio = state.usage_ratio();
     state.apply_boundary(result).unwrap();
@@ -426,9 +427,35 @@ fn apply_boundary_not_found_returns_err() {
         covered_start_id: "nonexistent".into(),
         covered_end_id: "also_nonexistent".into(),
         covered_count: 1,
+        transcript_compaction_entry_id: None,
     };
     let res = state.apply_boundary(result);
     assert!(res.is_err());
+}
+
+#[test]
+fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
+    let mut state = make_state(0, 100_000, 25_000);
+    let t1 = TurnEntry::UserTurn {
+        id: "still_end".into(),
+        messages: vec![AgentMessage::User { text: "b".repeat(1000) }],
+        timestamp: "2026-01-01T00:01:00Z".into(),
+    };
+    state.user_turns_list = vec![t1];
+    state.estimate_context_chars = 5_000;
+
+    let result = crate::core::session::manager::CompactionResult {
+        summary_text: "merged".into(),
+        covered_start_id: "gone_start".into(),
+        covered_end_id: "still_end".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: None,
+    };
+    state.apply_boundary(result).unwrap();
+    assert_eq!(state.user_turns_list.len(), 1);
+    assert!(
+        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary == "merged")
+    );
 }
 
 #[test]

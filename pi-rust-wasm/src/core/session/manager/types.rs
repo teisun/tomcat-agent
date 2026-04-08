@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use tracing::warn;
+
 use crate::core::agent_loop::AgentMessage;
 use crate::core::compaction::preheat::Preheat;
 use crate::infra::error::AppError;
@@ -64,6 +66,8 @@ pub struct CompactionResult {
     pub covered_start_id: String,
     pub covered_end_id: String,
     pub covered_count: usize,
+    /// JSONL 中 `Compaction` 行的 `id`；apply 时用于原地将 `isBoundary` 置为 true。
+    pub transcript_compaction_entry_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +164,14 @@ impl ContextState {
 
         let (start, end) = match (start_idx, end_idx) {
             (Some(s), Some(e)) if s <= e => (s, e),
+            (None, Some(e)) => {
+                warn!(
+                    covered_start_id = %result.covered_start_id,
+                    covered_end_id = %result.covered_end_id,
+                    "apply_boundary: start id missing; splicing from 0 to end (Layer3 may have dropped prefix)"
+                );
+                (0, e)
+            }
             _ => {
                 return Err(AppError::Config(
                     "apply_boundary: covered range not found in user_turns_list (IDs may have been invalidated by Layer 3)".to_string(),

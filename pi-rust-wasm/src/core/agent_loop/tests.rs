@@ -897,7 +897,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
     let ratio = p["contextUtilizationRatio"].as_f64().unwrap();
     assert!(tokens > 0, "inputTokensUsed should be > 0, got {}", tokens);
     assert!(
-        ratio >= 0.0 && ratio <= 1.0,
+        (0.0..=1.0).contains(&ratio),
         "contextUtilizationRatio should be in [0,1], got {}",
         ratio
     );

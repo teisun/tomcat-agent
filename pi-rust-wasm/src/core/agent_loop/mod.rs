@@ -126,7 +126,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use convert::{agent_messages_from_chat, compact_messages, convert_to_llm_format};
+pub use convert::{agent_messages_from_chat, convert_to_llm_format};
+#[allow(deprecated)]
+pub use convert::compact_messages;
 pub use types::{
     AgentLoop, AgentLoopConfig, AgentMessage, AgentRunResult, LoopError, ToolCallInfo,
 };

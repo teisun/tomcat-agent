@@ -74,13 +74,19 @@ Output format:
 // PreheatState (internal — not pub)
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 enum PreheatState {
     Idle,
+    /// Reload：磁盘上已有未消费的 preheat 摘要，下一轮 `poll_result` 直接返回。
+    CachedCompleted {
+        result: CompactionResult,
+    },
     Running {
         handle: JoinHandle<Result<CompactionResult, AppError>>,
+        #[allow(dead_code)]
         covered_start_id: String,
+        #[allow(dead_code)]
         covered_end_id: String,
+        #[allow(dead_code)]
         covered_count: usize,
         started_at: Instant,
     },
@@ -92,6 +98,7 @@ enum PreheatState {
 // ---------------------------------------------------------------------------
 
 /// poll_result / await_result 的返回值。
+#[derive(Debug)]
 pub enum PreheatOutcome {
     /// 摘要生成成功，调用方应 apply_boundary。
     Completed(CompactionResult),
@@ -116,6 +123,7 @@ impl std::fmt::Debug for Preheat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label = match &self.state {
             PreheatState::Idle => "Idle",
+            PreheatState::CachedCompleted { .. } => "CachedCompleted",
             PreheatState::Running { .. } => "Running",
             PreheatState::ExhaustedPending => "ExhaustedPending",
         };
@@ -150,15 +158,29 @@ impl Preheat {
         matches!(self.state, PreheatState::ExhaustedPending)
     }
 
-    /// Running 且 JoinHandle 已完成。
+    /// `CachedCompleted`（reload 恢复）或 Running 且 JoinHandle 已完成。
     pub fn is_finished(&self) -> bool {
-        matches!(self.state, PreheatState::Running { ref handle, .. } if handle.is_finished())
+        match &self.state {
+            PreheatState::CachedCompleted { .. } => true,
+            PreheatState::Running { handle, .. } => handle.is_finished(),
+            _ => false,
+        }
     }
 
     pub fn started_at(&self) -> Option<Instant> {
         match &self.state {
             PreheatState::Running { started_at, .. } => Some(*started_at),
             _ => None,
+        }
+    }
+
+    /// Idle 或已有 `CachedCompleted` 时注入磁盘恢复的摘要；Running / ExhaustedPending 时忽略。
+    pub fn restore_completed(&mut self, result: CompactionResult) {
+        match self.state {
+            PreheatState::Idle | PreheatState::CachedCompleted { .. } => {
+                self.state = PreheatState::CachedCompleted { result };
+            }
+            PreheatState::Running { .. } | PreheatState::ExhaustedPending => {}
         }
     }
 
@@ -217,7 +239,7 @@ impl Preheat {
                         let entry_id = generate_entry_id();
                         let compaction_entry =
                             TranscriptEntry::Compaction(CompactionEntry {
-                                id: Some(entry_id),
+                                id: Some(entry_id.clone()),
                                 parent_id: None,
                                 timestamp: chrono::Utc::now()
                                     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -226,11 +248,21 @@ impl Preheat {
                                 covered_end_id: Some(last_id.clone()),
                                 covered_count: Some(covered_count),
                                 is_boundary: Some(false),
+                                preheat_compaction_id: Some(entry_id.clone()),
                             });
 
-                        if !transcript_path.as_os_str().is_empty() {
-                            let _ = append_entry(&transcript_path, &compaction_entry);
-                        }
+                        let transcript_compaction_entry_id =
+                            if transcript_path.as_os_str().is_empty() {
+                                None
+                            } else {
+                                match append_entry(&transcript_path, &compaction_entry) {
+                                    Ok(()) => Some(entry_id),
+                                    Err(e) => {
+                                        warn!("preheat append_entry failed: {}", e);
+                                        None
+                                    }
+                                }
+                            };
 
                         let elapsed_ms = started.elapsed().as_millis() as u64;
                         let summary_chars = summary_text.len();
@@ -250,6 +282,7 @@ impl Preheat {
                             covered_start_id: first_id,
                             covered_end_id: last_id,
                             covered_count,
+                            transcript_compaction_entry_id,
                         });
                     }
                     Err(e) => {
@@ -308,10 +341,19 @@ impl Preheat {
         self.try_start(usage_ratio, turns, transcript_path, llm, config, event_bus)
     }
 
-    /// 非阻塞获取结果。Running(finished) → Idle + Completed；
+    /// 非阻塞获取结果。CachedCompleted → Idle + Completed；
+    /// Running(finished) → Idle + Completed；
     /// Running(exhausted Err) → ExhaustedPending + Exhausted；
     /// Running(panic) → Idle + Failed；其他情况 → NotReady。
     pub fn poll_result(&mut self) -> PreheatOutcome {
+        if matches!(self.state, PreheatState::CachedCompleted { .. }) {
+            let old = std::mem::replace(&mut self.state, PreheatState::Idle);
+            return match old {
+                PreheatState::CachedCompleted { result } => PreheatOutcome::Completed(result),
+                _ => PreheatOutcome::NotReady,
+            };
+        }
+
         let is_finished = matches!(
             self.state,
             PreheatState::Running { ref handle, .. } if handle.is_finished()
@@ -342,6 +384,14 @@ impl Preheat {
 
     /// 阻塞等待结果（带超时），用于 ratio >= 0.98 的同步等待路径。
     pub async fn await_result(&mut self, timeout: Duration) -> PreheatOutcome {
+        if matches!(self.state, PreheatState::CachedCompleted { .. }) {
+            let old = std::mem::replace(&mut self.state, PreheatState::Idle);
+            return match old {
+                PreheatState::CachedCompleted { result } => PreheatOutcome::Completed(result),
+                _ => PreheatOutcome::NotReady,
+            };
+        }
+
         let is_running = matches!(self.state, PreheatState::Running { .. });
         if !is_running {
             return PreheatOutcome::NotReady;

@@ -259,6 +259,7 @@ impl SessionManager {
             covered_end_id: None,
             covered_count: None,
             is_boundary: None,
+            preheat_compaction_id: None,
         });
         append_entry(&path, &entry)
     }
@@ -283,6 +284,7 @@ impl SessionManager {
             covered_end_id,
             covered_count: Some(covered_count),
             is_boundary: None,
+            preheat_compaction_id: None,
         });
         append_entry(&path, &entry)
     }

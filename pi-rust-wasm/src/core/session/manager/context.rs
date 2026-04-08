@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use chrono::{NaiveDate, Utc};
 
 use crate::core::agent_loop::{AgentMessage, ToolCallInfo};
-use crate::core::session::transcript::{read_entries_tail, TranscriptEntry};
+use crate::core::session::transcript::{read_entries_tail, CompactionEntry, TranscriptEntry};
 use crate::infra::config::{compute_context_budget_chars, ContextConfig};
 use crate::infra::error::AppError;
 
@@ -13,7 +13,7 @@ use super::session_impl::SessionManager;
 use super::session_impl::generate_entry_id;
 use crate::core::compaction::preheat::Preheat;
 
-use super::types::{estimate_turn_chars, ContextState, TurnEntry};
+use super::types::{estimate_turn_chars, CompactionResult, ContextState, TurnEntry};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
 
@@ -96,28 +96,59 @@ pub(super) fn compute_fold_start(
     effective_start
 }
 
+fn compaction_pending_from_entry(ce: &CompactionEntry) -> Option<CompactionResult> {
+    if ce.is_boundary != Some(false) {
+        return None;
+    }
+    Some(CompactionResult {
+        summary_text: ce.summary.clone()?,
+        covered_start_id: ce.covered_start_id.clone()?,
+        covered_end_id: ce.covered_end_id.clone()?,
+        covered_count: ce.covered_count?,
+        transcript_compaction_entry_id: ce.id.clone(),
+    })
+}
+
 /// Phase 2: 将 entries 折叠为带 timestamp 的 TurnEntry 列表。
 /// boundary compaction 仍会清除之前的 turns。
-fn fold_entries_to_turns(
-    entries: &[TranscriptEntry],
-    system_text_len: usize,
-) -> (Vec<TurnEntry>, usize) {
+/// `pending_preheat`：切片内最后一条未应用 preheat（`is_boundary=false` 且字段齐全）。
+pub(super) struct FoldEntriesOutcome {
+    pub turns: Vec<TurnEntry>,
+    /// 折叠后全量 turns 的字符估计（未经过 `filter_turns_by_day`）；供调试或后续与 `selected` 对齐用。
+    #[allow(dead_code)]
+    pub total_chars: usize,
+    pub pending_preheat: Option<CompactionResult>,
+}
+
+fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) -> FoldEntriesOutcome {
     let mut turns: Vec<TurnEntry> = Vec::new();
     let mut current_turn_msgs: Vec<AgentMessage> = Vec::new();
     let mut current_turn_ts = String::new();
+    // 与 transcript Message 首条 user 的 id 对齐，供 preheat covered_* reload 后仍可匹配。
+    let mut current_turn_id: Option<String> = None;
     let mut total_chars = system_text_len;
+    let mut pending_preheat: Option<CompactionResult> = None;
 
     for entry in entries {
         match entry {
             TranscriptEntry::Compaction(ce) => {
                 // is_boundary=false → preheat record: skip during reload
                 if ce.is_boundary == Some(false) {
+                    if let Some(r) = compaction_pending_from_entry(ce) {
+                        pending_preheat = Some(r);
+                    }
                     continue;
+                }
+
+                if ce.is_boundary == Some(true) {
+                    pending_preheat = None;
                 }
 
                 if !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
-                        id: generate_entry_id(),
+                        id: current_turn_id
+                            .take()
+                            .unwrap_or_else(generate_entry_id),
                         messages: std::mem::take(&mut current_turn_msgs),
                         timestamp: std::mem::take(&mut current_turn_ts),
                     };
@@ -130,6 +161,7 @@ fn fold_entries_to_turns(
                 if ce.is_boundary == Some(true) {
                     turns.clear();
                     total_chars = system_text_len;
+                    current_turn_id = None;
                 }
 
                 if let Some(ref summary) = ce.summary {
@@ -151,7 +183,9 @@ fn fold_entries_to_turns(
 
                 if role == Some("user") && !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
-                        id: generate_entry_id(),
+                        id: current_turn_id
+                            .take()
+                            .unwrap_or_else(generate_entry_id),
                         messages: std::mem::take(&mut current_turn_msgs),
                         timestamp: std::mem::take(&mut current_turn_ts),
                     };
@@ -161,6 +195,11 @@ fn fold_entries_to_turns(
 
                 if role == Some("user") {
                     current_turn_ts = me.timestamp.clone();
+                    current_turn_id = Some(
+                        me.id
+                            .clone()
+                            .unwrap_or_else(generate_entry_id),
+                    );
                 }
 
                 let agent_msg = match role {
@@ -218,7 +257,9 @@ fn fold_entries_to_turns(
 
     if !current_turn_msgs.is_empty() {
         let turn = TurnEntry::UserTurn {
-            id: generate_entry_id(),
+            id: current_turn_id
+                .take()
+                .unwrap_or_else(generate_entry_id),
             messages: std::mem::take(&mut current_turn_msgs),
             timestamp: current_turn_ts,
         };
@@ -226,7 +267,11 @@ fn fold_entries_to_turns(
         turns.push(turn);
     }
 
-    (turns, total_chars)
+    FoldEntriesOutcome {
+        turns,
+        total_chars,
+        pending_preheat,
+    }
 }
 
 /// Phase 3: 按天筛选 turns + 不足 min_turns 向前补齐。
@@ -294,10 +339,17 @@ pub fn init_context_state(
     let today = Utc::now().date_naive();
 
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
-    let (all_turns, _) = fold_entries_to_turns(&entries[fold_start..], system_text.len());
-    let selected = filter_turns_by_day(all_turns, today, DEFAULT_CONTEXT_CAP);
+    let fold_out = fold_entries_to_turns(&entries[fold_start..], system_text.len());
+    let selected = filter_turns_by_day(fold_out.turns, today, DEFAULT_CONTEXT_CAP);
 
     let total_chars = system_text.len() + selected.iter().map(estimate_turn_chars).sum::<usize>();
+
+    let mut preheat = Preheat::new();
+    if let Some(p) = fold_out.pending_preheat {
+        if selected.iter().any(|t| t.id() == p.covered_end_id) {
+            preheat.restore_completed(p);
+        }
+    }
 
     Ok(ContextState {
         user_turns_list: selected,
@@ -307,7 +359,7 @@ pub fn init_context_state(
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: path,
-        preheat: Preheat::new(),
+        preheat,
     })
 }
 

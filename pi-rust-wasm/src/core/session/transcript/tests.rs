@@ -214,3 +214,41 @@ fn get_children_empty_when_no_match() {
     let children = get_children(&path, "no_such_parent", 10).unwrap();
     assert!(children.is_empty());
 }
+
+#[test]
+fn set_compaction_entry_is_boundary_true_updates_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("inplace.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let c = TranscriptEntry::Compaction(CompactionEntry {
+        id: Some("cmp_inplace".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        summary: Some("s".to_string()),
+        covered_start_id: Some("a".to_string()),
+        covered_end_id: Some("b".to_string()),
+        covered_count: Some(2),
+        is_boundary: Some(false),
+        preheat_compaction_id: Some("cmp_inplace".to_string()),
+    });
+    append_entry(&path, &c).unwrap();
+    set_compaction_entry_is_boundary_true(&path, "cmp_inplace").unwrap();
+    let e = get_entry(&path, "cmp_inplace").unwrap().unwrap();
+    match e {
+        TranscriptEntry::Compaction(ce) => {
+            assert_eq!(ce.is_boundary, Some(true));
+            assert_eq!(ce.summary.as_deref(), Some("s"));
+        }
+        _ => panic!("expected compaction"),
+    }
+}

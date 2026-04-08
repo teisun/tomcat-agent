@@ -91,6 +91,9 @@ pub struct CompactionEntry {
     pub covered_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_boundary: Option<bool>,
+    /// 与 `id` 一致时可自指，便于阅读端识别 preheat 行。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preheat_compaction_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +204,59 @@ pub fn append_line(path: &Path, json: &str) -> Result<(), AppError> {
 pub fn append_entry(path: &Path, entry: &TranscriptEntry) -> Result<(), AppError> {
     let json = serde_json::to_string(entry)?;
     append_line(path, &json)
+}
+
+/// 按 `Compaction` 行的 `id` 将 `isBoundary` 原地改为 `true`（重写整文件除首行 header 外仅替换匹配行）。
+pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Result<(), AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut found = false;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+        let replaced = match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::Compaction(mut ce)) => {
+                if ce.id.as_deref() == Some(entry_id) {
+                    ce.is_boundary = Some(true);
+                    found = true;
+                    Some(serde_json::to_string(&TranscriptEntry::Compaction(ce))?)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(json) = replaced {
+            out.push(json);
+        } else {
+            out.push(trimmed.to_string());
+        }
+    }
+
+    if !found {
+        return Err(AppError::Config(format!(
+            "transcript: compaction entry id {entry_id:?} not found"
+        )));
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    std::fs::write(path, content).map_err(AppError::Io)?;
+    Ok(())
 }
 
 /// 追加 SessionHeader 作为首行（仅当文件不存在或为空时调用）。

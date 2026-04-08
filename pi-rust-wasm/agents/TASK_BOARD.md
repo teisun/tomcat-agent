@@ -1099,7 +1099,7 @@
 - [ ] 20.4 **时机 ②**（下一 user turn 构建 `messages` 并发 LLM 前）：`ratio >= 0.70` 时非阻塞检查并完成则切换；`ratio >= 0.98` 时已完成则切换，**未完成则 `block_on` 等待**后再切换（§4.2）；与 buffer 安全网（§4.3）对齐
 
 **Phase C：Transcript 与 Layer 1/2/3 语义**
-- [ ] 20.5 预热完成：追加 `Compaction` entry，`is_boundary=false`（备用，加载时跳过）；应用切换：追加 `is_boundary=true`，`init_context_state` 折叠与运行时一致（§5.5）
+- [ ] 20.5 预热完成：追加 **单行** `Compaction` entry，`is_boundary=false`（含行 `id` / 可选 `preheatCompactionId`，加载 fold 时仍跳过）；应用切换：**原地**将该行 `isBoundary` 改为 `true`（不追加第二份全文）。`init_context_state` 对切片内最后一条未应用 preheat 调用 `preheat.restore_completed`，且 fold 与运行时一致（§5.5′）
 - [ ] 20.6 Layer 1：克隆 `user_turns_list` 调 `compaction_model`，摘要覆盖**整表**并记录首尾 id；与既有 UPDATE 摘要 prompt 兼容（§3 图四、文档 1.1）
 - [ ] 20.7 Layer 3：**仅**在 API 明确 Context Overflow 后物理截断至 `ratio < 0.50`（§4.2）；与 TASK-19 中「ratio=1.0 触发 L3」等旧叙述脱钩，以现行文档为准
 
@@ -1115,7 +1115,7 @@
 - [ ] 20.11 Session 退出时（Ctrl+D / `/exit` / error）调用 `abort_preheat()` 清理后台预热 task，防止资源泄漏
 
 **Phase G：测试**
-- [ ] 20.12 单元测试：单例预热、⑤ 不阻塞、② 下 0.98 同步等待路径、boundary 加载跳过 `false`、task abort
+- [ ] 20.12 单元测试：单例预热、⑤ 不阻塞、② 下 0.98 同步等待路径、boundary 加载跳过 `false`、transcript 按 id 原地升级、`restore_completed`、**`apply_boundary` 仅尾锚 `[0..=end]`**、task abort
 - [ ] 20.13 集成测试：高 `ratio` 下对话与流式输出不卡顿；session 重载后内存视图与 transcript 一致
 
 **依赖**：TASK-17（DONE）、TASK-19（DONE）；以当前 `develop` 实现为基线，**规格以 `context-management.md` 现行正文为准**（TASK-19 表格若与文档不一致时以文档收口）。

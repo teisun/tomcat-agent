@@ -168,6 +168,7 @@ fn collect_skips_non_message() {
             covered_end_id: None,
             covered_count: None,
             is_boundary: None,
+            preheat_compaction_id: None,
         }),
         TranscriptEntry::Message(MessageEntry {
             id: Some("2".into()),

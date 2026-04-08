@@ -5,8 +5,8 @@ use std::time::Duration;
 use tracing::warn;
 
 use crate::core::compaction::preheat::PreheatOutcome;
-use crate::core::session::manager::{generate_entry_id, CompactionResult, ContextState};
-use crate::core::session::transcript::{append_entry, CompactionEntry, TranscriptEntry};
+use crate::core::session::manager::{CompactionResult, ContextState};
+use crate::core::session::transcript::set_compaction_entry_is_boundary_true;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::AgentEvent;
 
@@ -113,17 +113,13 @@ fn write_boundary_transcript(state: &ContextState, result: &CompactionResult) {
     if state.transcript_path.as_os_str().is_empty() {
         return;
     }
-    let entry = TranscriptEntry::Compaction(CompactionEntry {
-        id: Some(generate_entry_id()),
-        parent_id: None,
-        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        summary: Some(result.summary_text.clone()),
-        covered_start_id: Some(result.covered_start_id.clone()),
-        covered_end_id: Some(result.covered_end_id.clone()),
-        covered_count: Some(result.covered_count),
-        is_boundary: Some(true),
-    });
-    let _ = append_entry(&state.transcript_path, &entry);
+    let Some(id) = result.transcript_compaction_entry_id.as_deref() else {
+        warn!("write_boundary_transcript: missing transcript_compaction_entry_id; skip transcript update");
+        return;
+    };
+    if let Err(e) = set_compaction_entry_is_boundary_true(&state.transcript_path, id) {
+        warn!("write_boundary_transcript: failed to set isBoundary for {}: {}", id, e);
+    }
 }
 
 fn emit_agent_event(event_bus: &dyn EventBus, event: AgentEvent) {
