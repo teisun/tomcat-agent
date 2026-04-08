@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::infra::error::AppError;
+use crate::infra::platform::write_file_atomic;
 
 /// 首行：session header，与 pi-mono 格式一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,7 +207,9 @@ pub fn append_entry(path: &Path, entry: &TranscriptEntry) -> Result<(), AppError
     append_line(path, &json)
 }
 
-/// 按 `Compaction` 行的 `id` 将 `isBoundary` 原地改为 `true`（重写整文件除首行 header 外仅替换匹配行）。
+/// 按 `Compaction` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
+///
+/// 使用临时文件 + `rename` 原子替换目标路径，避免写入中途崩溃导致 transcript 损坏。
 pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Result<(), AppError> {
     let f = std::fs::File::open(path).map_err(AppError::Io)?;
     let reader = BufReader::new(f);
@@ -243,7 +246,7 @@ pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Res
         if let Some(json) = replaced {
             out.push(json);
         } else {
-            out.push(trimmed.to_string());
+            out.push(line);
         }
     }
 
@@ -255,7 +258,7 @@ pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Res
 
     let mut content = out.join("\n");
     content.push('\n');
-    std::fs::write(path, content).map_err(AppError::Io)?;
+    write_file_atomic(path, content.as_bytes())?;
     Ok(())
 }
 

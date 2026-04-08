@@ -252,3 +252,61 @@ fn set_compaction_entry_is_boundary_true_updates_line() {
         _ => panic!("expected compaction"),
     }
 }
+
+#[test]
+fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("preserve_ws.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    let msg = TranscriptEntry::Message(MessageEntry {
+        id: Some("msg_ws".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        message: serde_json::json!({"role": "user", "content": "hi"}),
+    });
+    let indented = format!("   {}", serde_json::to_string(&msg).unwrap());
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(f, "{}", indented).unwrap();
+
+    let c = TranscriptEntry::Compaction(CompactionEntry {
+        id: Some("cmp_ws".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:02.000Z".to_string(),
+        summary: Some("sum".to_string()),
+        covered_start_id: Some("a".to_string()),
+        covered_end_id: Some("b".to_string()),
+        covered_count: Some(2),
+        is_boundary: Some(false),
+        preheat_compaction_id: None,
+    });
+    append_entry(&path, &c).unwrap();
+
+    set_compaction_entry_is_boundary_true(&path, "cmp_ws").unwrap();
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.lines().any(|l| l.starts_with("   ") && l.contains("\"type\":\"message\"")),
+        "leading spaces on non-compaction lines must be preserved:\n{raw}"
+    );
+
+    let e = get_entry(&path, "cmp_ws").unwrap().unwrap();
+    match e {
+        TranscriptEntry::Compaction(ce) => assert_eq!(ce.is_boundary, Some(true)),
+        _ => panic!("expected compaction"),
+    }
+}
