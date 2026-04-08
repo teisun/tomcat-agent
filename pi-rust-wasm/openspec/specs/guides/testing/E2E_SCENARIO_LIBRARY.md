@@ -202,9 +202,11 @@
 | E2E-CLI-088 | 自动 | `test_sync_wait_at_098` | ratio >= 0.98 时同步等待后继续 | 构造 ContextState + Running preheat → check_before_request → boundary 应用或超时 | boundary_switched emit 或超时后继续 |
 | E2E-CLI-089 | 自动 | `test_preheat_completed_boundary_switch` | 预热完成后非阻塞切换 boundary | ratio >= 0.85 + preheat finished → check_after_reply → BoundarySwitched + SummaryTurn | boundary_switched 已 emit；turns 含 SummaryTurn |
 | E2E-CLI-090 | 自动 | `test_session_reload_boundary_false_skipped` | Session 重载识别 is_boundary=false/true | 写含 is_boundary=false 的 CompactionEntry → init_context_state | is_boundary=false 被跳过；is_boundary=true 生效 |
+| E2E-CLI-091 | 自动 | `test_context_metrics_update_event_published` + `persist_context_observability_writes_sessions_json` | 上下文指标事件节奏与 `sessions.json` 可观测累计刷盘 | AgentLoop mock：`context_metrics_update` 顺序与字段；SessionManager：`persist_context_observability` 写入 `compactionCount` 等价字段 | stderr/事件含合法 metrics；store 中 `compaction_tokens_freed` 等与 `ContextState` 一致 |
 
 > **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
 > **TASK-20 备注**：E2E-CLI-087~090 异步预热与 L1/L2/L3 事件分离，验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
+> **上下文可观测性完善**：E2E-CLI-091 中 `test_context_metrics_update_event_published` 位于 `tests/agent_loop_tests.rs`，`persist_context_observability_writes_sessions_json` 位于 `src/core/session/manager/tests.rs`（lib 单测）。
 
 ---
 

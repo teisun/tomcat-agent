@@ -381,10 +381,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 } else {
                     format!("{} B", persisted)
                 };
+                let preheat = evt
+                    .payload
+                    .get("preheatInProgress")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let preheat_note = if preheat { " | 预热中…" } else { "" };
                 // 行尾必须换行，否则 stderr 与 stdout 流式正文可能在同一视觉行粘连（如「0 B你给」）。
                 eprint!(
-                    "\n\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | freed {} tok | persisted {}\x1b[0m\n",
-                    tokens, ratio_pct, compactions, freed, persisted_display
+                    "\n\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | freed {} tok | persisted {}{}\x1b[0m\n",
+                    tokens, ratio_pct, compactions, freed, persisted_display, preheat_note
                 );
                 let _ = io::stderr().flush();
                 Ok(())
@@ -401,8 +407,26 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         );
         let l1_end_id = ctx.event_bus.on(
             wire::WIRE_AUTO_COMPACTION_END,
-            Box::new(|_ctx: EventContext| {
-                eprint!("\n\x1b[90m[ctx] 后台压缩已完成\x1b[0m\n");
+            Box::new(|evt: EventContext| {
+                let before = evt
+                    .payload
+                    .get("estimatedCoveredTokensBefore")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let summ = evt
+                    .payload
+                    .get("estimatedSummaryTokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let saved = evt
+                    .payload
+                    .get("estimatedTokensSaved")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                eprint!(
+                    "\n\x1b[90m[ctx] 压缩摘要就绪 | 覆盖区 ~{} tok → 摘要 ~{} tok（估省 {} tok）\x1b[0m\n",
+                    before, summ, saved
+                );
                 let _ = io::stderr().flush();
                 Ok(())
             }),
@@ -428,8 +452,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         // L2: boundary_switched
         let l2_id = ctx.event_bus.on(
             wire::WIRE_BOUNDARY_SWITCHED,
-            Box::new(|_ctx: EventContext| {
-                eprint!("\n\x1b[90m[ctx] 上下文已压缩重置\x1b[0m\n");
+            Box::new(|evt: EventContext| {
+                let freed = evt
+                    .payload
+                    .get("estimatedTokensFreed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                eprint!(
+                    "\n\x1b[90m[ctx] 上下文已压缩重置，释放约 {} tokens\x1b[0m\n",
+                    freed
+                );
                 let _ = io::stderr().flush();
                 Ok(())
             }),
@@ -445,8 +477,42 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         );
         let l3_end_id = ctx.event_bus.on(
             wire::WIRE_CONTEXT_OVERFLOW_TRIM_END,
-            Box::new(|_ctx: EventContext| {
-                eprint!("\n\x1b[90m[ctx] 截断完成，正在重试\x1b[0m\n");
+            Box::new(|evt: EventContext| {
+                let freed = evt
+                    .payload
+                    .get("estimatedTokensFreed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let turns = evt
+                    .payload
+                    .get("turnsRemoved")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                eprint!(
+                    "\n\x1b[90m[ctx] 截断完成（删 {} 轮，估省 {} tok），正在重试\x1b[0m\n",
+                    turns, freed
+                );
+                let _ = io::stderr().flush();
+                Ok(())
+            }),
+        );
+        let l0_id = ctx.event_bus.on(
+            wire::WIRE_LAYER0_CONTEXT_RELEASE,
+            Box::new(|evt: EventContext| {
+                let p = evt
+                    .payload
+                    .get("persistTokensFreed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let ph = evt
+                    .payload
+                    .get("placeholderTokensFreed")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                eprint!(
+                    "\n\x1b[90m[ctx] L0: 落盘释放 ~{} tok | 占位符释放 ~{} tok\x1b[0m\n",
+                    p, ph
+                );
                 let _ = io::stderr().flush();
                 Ok(())
             }),
@@ -464,6 +530,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         ctx.event_bus.off(l2_id);
         ctx.event_bus.off(l3_start_id);
         ctx.event_bus.off(l3_end_id);
+        ctx.event_bus.off(l0_id);
         match run_result {
             Ok(result) => {
                 if let Some(remaining) = renderer.lock().flush() {
@@ -484,8 +551,15 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                                 .saturating_sub(context_config.max_output_tokens),
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
-                            transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
+                            transcript_path: ctx
+                                .session
+                                .current_transcript_path()
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default(),
                             preheat: Preheat::new(),
+                            session_obs: Default::default(),
+                            live: Default::default(),
                         },
                     )
                 });
@@ -504,6 +578,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 for msg in &chat_msgs {
                     ctx.session.append_message(serde_json::to_value(msg)?)?;
                 }
+
+                ctx.session.persist_context_observability(&context_state)?;
             }
             Err(e) => {
                 if let Some(remaining) = renderer.lock().flush() {
@@ -524,11 +600,20 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                                 .saturating_sub(context_config.max_output_tokens),
                             last_api_usage: None,
                             post_usage_appended_chars: 0,
-                            transcript_path: ctx.session.current_transcript_path().ok().flatten().unwrap_or_default(),
+                            transcript_path: ctx
+                                .session
+                                .current_transcript_path()
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default(),
                             preheat: Preheat::new(),
+                            session_obs: Default::default(),
+                            live: Default::default(),
                         },
                     )
                 });
+
+                let _ = ctx.session.persist_context_observability(&context_state);
 
                 let is_fatal = is_fatal_error(&e);
                 eprintln!("\n[错误] {}", e);

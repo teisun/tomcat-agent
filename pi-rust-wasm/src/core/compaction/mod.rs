@@ -6,8 +6,8 @@
 //! - Layer 3: 强制删除最旧 turn（仅 API Context Overflow 后触发）
 
 pub mod apply;
-pub mod preheat;
 mod cascade;
+pub mod preheat;
 mod truncation;
 
 #[cfg(test)]
@@ -18,7 +18,7 @@ mod tests;
 // ---------------------------------------------------------------------------
 
 pub use truncation::{
-    compact_tool_results, layer0_persist_large_results, run_layer0_cleanup,
+    compact_tool_results, layer0_persist_large_results, run_layer0_cleanup, Layer0CleanupOutcome,
     PersistedResult,
 };
 

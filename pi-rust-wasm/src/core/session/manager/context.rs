@@ -9,8 +9,8 @@ use crate::core::session::transcript::{read_entries_tail, CompactionEntry, Trans
 use crate::infra::config::{compute_context_budget_chars, ContextConfig};
 use crate::infra::error::AppError;
 
-use super::session_impl::SessionManager;
 use super::session_impl::generate_entry_id;
+use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
 use super::types::{estimate_turn_chars, CompactionResult, ContextState, TurnEntry};
@@ -106,6 +106,10 @@ fn compaction_pending_from_entry(ce: &CompactionEntry) -> Option<CompactionResul
         covered_end_id: ce.covered_end_id.clone()?,
         covered_count: ce.covered_count?,
         transcript_compaction_entry_id: ce.id.clone(),
+        estimated_covered_tokens_before: ce.estimated_covered_tokens_before,
+        estimated_summary_tokens: ce.estimated_summary_tokens,
+        estimated_tokens_saved: ce.estimated_tokens_saved,
+        preheat_elapsed_ms: 0,
     })
 }
 
@@ -120,7 +124,10 @@ pub(super) struct FoldEntriesOutcome {
     pub pending_preheat: Option<CompactionResult>,
 }
 
-fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) -> FoldEntriesOutcome {
+fn fold_entries_to_turns(
+    entries: &[TranscriptEntry],
+    system_text_len: usize,
+) -> FoldEntriesOutcome {
     let mut turns: Vec<TurnEntry> = Vec::new();
     let mut current_turn_msgs: Vec<AgentMessage> = Vec::new();
     let mut current_turn_ts = String::new();
@@ -146,9 +153,7 @@ fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) ->
 
                 if !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
-                        id: current_turn_id
-                            .take()
-                            .unwrap_or_else(generate_entry_id),
+                        id: current_turn_id.take().unwrap_or_else(generate_entry_id),
                         messages: std::mem::take(&mut current_turn_msgs),
                         timestamp: std::mem::take(&mut current_turn_ts),
                     };
@@ -183,9 +188,7 @@ fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) ->
 
                 if role == Some("user") && !current_turn_msgs.is_empty() {
                     let turn = TurnEntry::UserTurn {
-                        id: current_turn_id
-                            .take()
-                            .unwrap_or_else(generate_entry_id),
+                        id: current_turn_id.take().unwrap_or_else(generate_entry_id),
                         messages: std::mem::take(&mut current_turn_msgs),
                         timestamp: std::mem::take(&mut current_turn_ts),
                     };
@@ -195,11 +198,7 @@ fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) ->
 
                 if role == Some("user") {
                     current_turn_ts = me.timestamp.clone();
-                    current_turn_id = Some(
-                        me.id
-                            .clone()
-                            .unwrap_or_else(generate_entry_id),
-                    );
+                    current_turn_id = Some(me.id.clone().unwrap_or_else(generate_entry_id));
                 }
 
                 let agent_msg = match role {
@@ -257,9 +256,7 @@ fn fold_entries_to_turns(entries: &[TranscriptEntry], system_text_len: usize) ->
 
     if !current_turn_msgs.is_empty() {
         let turn = TurnEntry::UserTurn {
-            id: current_turn_id
-                .take()
-                .unwrap_or_else(generate_entry_id),
+            id: current_turn_id.take().unwrap_or_else(generate_entry_id),
             messages: std::mem::take(&mut current_turn_msgs),
             timestamp: current_turn_ts,
         };
@@ -306,6 +303,19 @@ pub(super) fn filter_turns_by_day(
     selected
 }
 
+fn observability_from_session(session: &SessionManager) -> Result<(u32, usize, usize), AppError> {
+    Ok(session
+        .get_session(session.current_session_key())?
+        .map(|e| {
+            (
+                e.compaction_count.unwrap_or(0),
+                e.compaction_tokens_freed.unwrap_or(0) as usize,
+                e.tool_result_chars_persisted.unwrap_or(0) as usize,
+            )
+        })
+        .unwrap_or((0, 0, 0)))
+}
+
 /// 从 transcript 加载历史，按 user turn 分组初始化 ContextState。
 /// 识别已有 Compaction entry 折叠为 SummaryTurn，避免重复压缩。
 /// 按天筛选：优先取当天所有 turns，不足 DEFAULT_CONTEXT_CAP 则向前补齐。
@@ -318,6 +328,12 @@ pub fn init_context_state(
     let token_budget = config
         .context_window
         .saturating_sub(config.max_output_tokens);
+    let (cc, ctf, trcp) = observability_from_session(session)?;
+    let session_obs = super::types::SessionContextObservation {
+        compaction_count: cc,
+        compaction_tokens_freed: ctf,
+        tool_result_chars_persisted: trcp,
+    };
 
     let path = match session.current_transcript_path()? {
         Some(p) => p,
@@ -331,6 +347,8 @@ pub fn init_context_state(
                 post_usage_appended_chars: 0,
                 transcript_path: PathBuf::new(),
                 preheat: Preheat::new(),
+                session_obs,
+                live: super::types::ContextLiveMetrics::default(),
             });
         }
     };
@@ -360,6 +378,8 @@ pub fn init_context_state(
         post_usage_appended_chars: 0,
         transcript_path: path,
         preheat,
+        session_obs,
+        live: super::types::ContextLiveMetrics::default(),
     })
 }
 

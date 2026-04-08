@@ -21,6 +21,7 @@
 - [x] **[P2]** 20.13 集成测试（`session_reload_boundary_false_skipped`/`session_reload_with_boundary`/`session_reload_pending_preheat_restore`）
 - [x] **`compact_tool_results` 读取 `ContextConfig.layer0_placeholder_threshold_chars`**（默认 10K，可 `[context]` 覆盖；替换原硬编码 20K）
 - [x] **`context_metrics_update` 单次 `run_reasoning_loop` 内至多两次**（首轮 LLM 前 + 收尾 / `max_tool_rounds` 耗尽；中间 tool round 不发）
+- [x] **ContextState 嵌套** `session_obs: SessionContextObservation`（刷盘子集）与 `live: ContextLiveMetrics`；`AgentLoop` 移除独立 `metrics`，瞬时指标只写 `context_state.live`
 
 ### 🔌 INTERFACE (接口变更)
 

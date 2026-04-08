@@ -12,7 +12,8 @@ use tracing::warn;
 
 use crate::core::llm::{ChatMessage, ChatRequest, LlmProvider};
 use crate::core::session::manager::{
-    generate_entry_id, CompactionResult, TurnEntry,
+    estimate_turn_chars, estimated_tokens_from_chars, generate_entry_id, CompactionResult,
+    TurnEntry,
 };
 use crate::core::session::transcript::{append_entry, CompactionEntry, TranscriptEntry};
 use crate::infra::config::ContextConfig;
@@ -237,19 +238,27 @@ impl Preheat {
                 {
                     Ok(summary_text) => {
                         let entry_id = generate_entry_id();
-                        let compaction_entry =
-                            TranscriptEntry::Compaction(CompactionEntry {
-                                id: Some(entry_id.clone()),
-                                parent_id: None,
-                                timestamp: chrono::Utc::now()
-                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                                summary: Some(summary_text.clone()),
-                                covered_start_id: Some(first_id.clone()),
-                                covered_end_id: Some(last_id.clone()),
-                                covered_count: Some(covered_count),
-                                is_boundary: Some(false),
-                                preheat_compaction_id: Some(entry_id.clone()),
-                            });
+                        let covered_chars: usize = snapshot.iter().map(estimate_turn_chars).sum();
+                        let est_covered_tok = estimated_tokens_from_chars(covered_chars);
+                        let est_summary_tok = estimated_tokens_from_chars(summary_text.len());
+                        let est_saved = est_covered_tok.saturating_sub(est_summary_tok);
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+                        let compaction_entry = TranscriptEntry::Compaction(CompactionEntry {
+                            id: Some(entry_id.clone()),
+                            parent_id: None,
+                            timestamp: chrono::Utc::now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                            summary: Some(summary_text.clone()),
+                            covered_start_id: Some(first_id.clone()),
+                            covered_end_id: Some(last_id.clone()),
+                            covered_count: Some(covered_count),
+                            is_boundary: Some(false),
+                            preheat_compaction_id: Some(entry_id.clone()),
+                            estimated_covered_tokens_before: Some(est_covered_tok),
+                            estimated_summary_tokens: Some(est_summary_tok),
+                            estimated_tokens_saved: Some(est_saved),
+                        });
 
                         let transcript_compaction_entry_id =
                             if transcript_path.as_os_str().is_empty() {
@@ -264,25 +273,16 @@ impl Preheat {
                                 }
                             };
 
-                        let elapsed_ms = started.elapsed().as_millis() as u64;
-                        let summary_chars = summary_text.len();
-
-                        emit_agent_event(
-                            &*eb,
-                            AgentEvent::AutoCompactionEnd {
-                                elapsed_ms,
-                                summary_chars,
-                                covered_count,
-                                ratio_after: ratio_before,
-                            },
-                        );
-
                         return Ok(CompactionResult {
                             summary_text,
                             covered_start_id: first_id,
                             covered_end_id: last_id,
                             covered_count,
                             transcript_compaction_entry_id,
+                            estimated_covered_tokens_before: Some(est_covered_tok),
+                            estimated_summary_tokens: Some(est_summary_tok),
+                            estimated_tokens_saved: Some(est_saved),
+                            preheat_elapsed_ms: elapsed_ms,
                         });
                     }
                     Err(e) => {

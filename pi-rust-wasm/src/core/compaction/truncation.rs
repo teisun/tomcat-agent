@@ -39,6 +39,16 @@ pub struct PersistedResult {
     pub persisted_path: String,
 }
 
+/// L0 步骤 A+B 的汇总（timing ⑤）。
+#[derive(Debug, Clone, Default)]
+pub struct Layer0CleanupOutcome {
+    pub persisted: Vec<PersistedResult>,
+    /// 落盘替换为 preview 后减少的字符数之和。
+    pub persist_chars_freed: usize,
+    /// compactable zone 占位符替换减少的字符数。
+    pub placeholder_chars_freed: usize,
+}
+
 /// Layer 0 步骤 A：超大 tool result 落盘 + preview 占位符。
 /// 仅扫描最后一个 UserTurn，单条 >= `layer0_single_result_max_chars` 时落盘。
 pub fn layer0_persist_large_results(
@@ -46,13 +56,14 @@ pub fn layer0_persist_large_results(
     config: &ContextConfig,
     work_dir: &Path,
     session_id: &str,
-) -> Vec<PersistedResult> {
+) -> (Vec<PersistedResult>, usize) {
     let mut results = Vec::new();
+    let mut persist_chars_freed = 0usize;
     let single_max = config.layer0_single_result_max_chars;
 
     let last_turn = match state.user_turns_list.last_mut() {
         Some(TurnEntry::UserTurn { messages, .. }) => messages,
-        _ => return results,
+        _ => return (results, persist_chars_freed),
     };
 
     for msg in last_turn.iter_mut() {
@@ -97,6 +108,7 @@ pub fn layer0_persist_large_results(
             *content = replacement;
 
             let freed = original_len.saturating_sub(new_len);
+            persist_chars_freed += freed;
             state.estimate_context_chars = state.estimate_context_chars.saturating_sub(freed);
 
             results.push(PersistedResult {
@@ -107,7 +119,7 @@ pub fn layer0_persist_large_results(
             });
         }
     }
-    results
+    (results, persist_chars_freed)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,8 +173,13 @@ pub fn run_layer0_cleanup(
     config: &ContextConfig,
     work_dir: &Path,
     session_id: &str,
-) -> Vec<PersistedResult> {
-    let persisted = layer0_persist_large_results(state, config, work_dir, session_id);
-    compact_tool_results(state, config, M_PROTECTED_TURNS);
-    persisted
+) -> Layer0CleanupOutcome {
+    let (persisted, persist_chars_freed) =
+        layer0_persist_large_results(state, config, work_dir, session_id);
+    let placeholder_chars_freed = compact_tool_results(state, config, M_PROTECTED_TURNS);
+    Layer0CleanupOutcome {
+        persisted,
+        persist_chars_freed,
+        placeholder_chars_freed,
+    }
 }

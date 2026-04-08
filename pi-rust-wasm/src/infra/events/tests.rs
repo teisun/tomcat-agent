@@ -133,6 +133,9 @@ fn auto_compaction_end_serializes_with_new_payload() {
         summary_chars: 5000,
         covered_count: 5,
         ratio_after: 0.30,
+        estimated_covered_tokens_before: 100,
+        estimated_summary_tokens: 20,
+        estimated_tokens_saved: 80,
     };
     let j = serde_json::to_value(&e).unwrap();
     assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_AUTO_COMPACTION_END);
@@ -162,6 +165,8 @@ fn context_overflow_trim_end_serializes() {
         ratio_before: 1.05,
         ratio_after: 0.40,
         will_retry: true,
+        estimated_tokens_freed: 400,
+        turns_removed: 2,
     };
     let j = serde_json::to_value(&e).unwrap();
     assert_eq!(
@@ -180,6 +185,7 @@ fn boundary_switched_serializes() {
         ratio_after: 0.30,
         covered_count: 4,
         was_sync_wait: false,
+        estimated_tokens_freed: 50,
     };
     let j = serde_json::to_value(&e).unwrap();
     assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_BOUNDARY_SWITCHED);

@@ -80,11 +80,30 @@ fn apply_and_emit_boundary(
     event_bus: &dyn EventBus,
 ) -> bool {
     let covered_count = result.covered_count;
+    let ratio_after_pre_apply = state.usage_ratio();
+    emit_agent_event(
+        event_bus,
+        AgentEvent::AutoCompactionEnd {
+            elapsed_ms: result.preheat_elapsed_ms,
+            summary_chars: result.summary_text.len(),
+            covered_count,
+            ratio_after: ratio_after_pre_apply,
+            estimated_covered_tokens_before: result.estimated_covered_tokens_before.unwrap_or(0),
+            estimated_summary_tokens: result.estimated_summary_tokens.unwrap_or(0),
+            estimated_tokens_saved: result.estimated_tokens_saved.unwrap_or(0),
+        },
+    );
+
+    let saved = result.estimated_tokens_saved.unwrap_or(0);
 
     match state.apply_boundary(result.clone()) {
         Ok(()) => {
             // Only record boundary switch after it has successfully applied.
             write_boundary_transcript(state, &result);
+
+            state.session_obs.compaction_tokens_freed += saved;
+            state.session_obs.compaction_count =
+                state.session_obs.compaction_count.saturating_add(1);
 
             let ratio_after = state.usage_ratio();
             emit_agent_event(
@@ -94,6 +113,7 @@ fn apply_and_emit_boundary(
                     ratio_after,
                     covered_count,
                     was_sync_wait,
+                    estimated_tokens_freed: saved,
                 },
             );
             true
@@ -118,7 +138,10 @@ fn write_boundary_transcript(state: &ContextState, result: &CompactionResult) {
         return;
     };
     if let Err(e) = set_compaction_entry_is_boundary_true(&state.transcript_path, id) {
-        warn!("write_boundary_transcript: failed to set isBoundary for {}: {}", id, e);
+        warn!(
+            "write_boundary_transcript: failed to set isBoundary for {}: {}",
+            id, e
+        );
     }
 }
 

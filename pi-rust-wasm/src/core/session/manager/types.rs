@@ -68,6 +68,36 @@ pub struct CompactionResult {
     pub covered_count: usize,
     /// JSONL 中 `Compaction` 行的 `id`；apply 时用于原地将 `isBoundary` 置为 true。
     pub transcript_compaction_entry_id: Option<String>,
+    /// L1 预热完成时估算：覆盖区 tokens（旧 transcript 无此字段时为 `None`）。
+    pub estimated_covered_tokens_before: Option<usize>,
+    pub estimated_summary_tokens: Option<usize>,
+    /// L2 apply 时计入 `session_obs.compaction_tokens_freed`（`None` 视为 0）。
+    pub estimated_tokens_saved: Option<usize>,
+    /// 预热任务耗时（ms）；从 transcript 恢复的 pending 为 0。
+    pub preheat_elapsed_ms: u64,
+}
+
+// ---------------------------------------------------------------------------
+// SessionContextObservation / ContextLiveMetrics
+// ---------------------------------------------------------------------------
+
+/// 会话级可观测累计：与 [`crate::core::session::store::SessionEntry`] 在 user turn 末同步；**不**含瞬时 ratio/tokens。
+#[derive(Debug, Clone, Default)]
+pub struct SessionContextObservation {
+    /// 成功 apply boundary / L3 trim 等次数（与 `SessionEntry.compaction_count`）。
+    pub compaction_count: u32,
+    /// 估算释放的 tokens（L0+L2+L3；与 `SessionEntry.compaction_tokens_freed`）。
+    pub compaction_tokens_freed: usize,
+    /// L0 落盘原始 Unicode 字符数（与 `SessionEntry.tool_result_chars_persisted`；事件字段仍名 bytes）。
+    pub tool_result_chars_persisted: usize,
+}
+
+/// 瞬时上下文指标：仅内存，**不**写入 `sessions.json`。
+#[derive(Debug, Clone, Default)]
+pub struct ContextLiveMetrics {
+    pub input_tokens_used: usize,
+    pub context_utilization_ratio: f64,
+    pub preheat_in_progress: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +116,10 @@ pub struct ContextState {
     pub transcript_path: PathBuf,
     /// 异步预热状态机（替代旧 `Option<CompactionSummary>`）。
     pub preheat: Preheat,
+    /// 会话累计（刷盘子集）。
+    pub session_obs: SessionContextObservation,
+    /// 瞬时指标（`AgentLoop` 经方案 1 只写此处，不写独立 `metrics`）。
+    pub live: ContextLiveMetrics,
 }
 
 fn _assert_send<T: Send>() {}
@@ -193,8 +227,7 @@ impl ContextState {
         let summary_turn = TurnEntry::SummaryTurn {
             id: new_id,
             summary: result.summary_text,
-            timestamp: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };
 
         self.user_turns_list.splice(start..=end, [summary_turn]);
@@ -209,6 +242,12 @@ impl ContextState {
 // ---------------------------------------------------------------------------
 // estimate_turn_chars
 // ---------------------------------------------------------------------------
+
+/// 与 `ContextState::estimated_token_count` 的纯字符 fallback 一致：`chars / 4`。
+#[inline]
+pub fn estimated_tokens_from_chars(chars: usize) -> usize {
+    chars / 4
+}
 
 /// 估算单个 TurnEntry 的字符数。
 pub fn estimate_turn_chars(turn: &TurnEntry) -> usize {

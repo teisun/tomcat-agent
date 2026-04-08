@@ -20,6 +20,8 @@ use crate::core::session::transcript::{
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 
+use super::types::ContextState;
+
 static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
 const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
@@ -110,6 +112,8 @@ impl SessionManager {
             input_tokens: None,
             output_tokens: None,
             compaction_count: None,
+            compaction_tokens_freed: None,
+            tool_result_chars_persisted: None,
         };
         let mut store = self.load_store()?;
         store.insert(session_key.to_string(), entry.clone());
@@ -141,6 +145,17 @@ impl SessionManager {
             f(entry);
         }
         self.save_store(&store)
+    }
+
+    /// 将 `ContextState` 中会话级可观测累计写入 `sessions.json`（user turn 末节流刷盘）。
+    pub fn persist_context_observability(&self, state: &ContextState) -> Result<(), AppError> {
+        let key = self.current_session_key();
+        self.update_session(key, |e| {
+            e.compaction_count = Some(state.session_obs.compaction_count);
+            e.compaction_tokens_freed = Some(state.session_obs.compaction_tokens_freed as u64);
+            e.tool_result_chars_persisted =
+                Some(state.session_obs.tool_result_chars_persisted as u64);
+        })
     }
 
     /// 删除会话：从 store 移除并删除 transcript 文件（若存在）。
@@ -260,6 +275,9 @@ impl SessionManager {
             covered_count: None,
             is_boundary: None,
             preheat_compaction_id: None,
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
         });
         append_entry(&path, &entry)
     }
@@ -285,6 +303,9 @@ impl SessionManager {
             covered_count: Some(covered_count),
             is_boundary: None,
             preheat_compaction_id: None,
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
         });
         append_entry(&path, &entry)
     }

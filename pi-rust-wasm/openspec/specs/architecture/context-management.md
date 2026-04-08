@@ -33,7 +33,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 - **Preheat 状态机（单任务）**：`Preheat` 保证后台同一时间至多一个预热 task，防止竞态和 token 浪费
 - **信息保全**：Layer 0 从「截断丢弃」升级为「落盘 + preview 占位符」，大 tool_result 内容不丢失、可按需读回
 - **UI 不卡顿**：LLM 回复后（L0/L1 时机）绝不阻塞主线程；仅在发起下一次 LLM 请求前、且 ratio >= 0.98 时才可能同步等待
-- **可观测性**：`ContextMetrics` 追踪 token 使用率、压缩次数、释放量等指标；UI 状态栏反馈压缩进度
+- **可观测性**：`ContextState` 内嵌 **`live: ContextLiveMetrics`**（瞬时利用率与预热标志）与 **`session_obs: SessionContextObservation`**（会话累计：压缩次数、释放量、工具落盘字符）；`context_metrics_update` 由二者组装，其中 `session_obs` 在 user turn 末写入 `sessions.json`；UI 状态栏反馈压缩进度（见 §10.6）。类型别名 `ContextMetrics` ≡ `ContextLiveMetrics`（见 `context_metrics.rs`）。
 
 ### 1.2 设计目标
 
@@ -44,7 +44,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 5. **主动降压**：ratio 水位线驱动的分级主动压缩，而非被动等 API 报错
 6. **防御性兜底**：Layer 3 物理截断确保极端场景不崩溃
 7. **可配置**：`context_window`、`max_output_tokens`、`compaction_model` 等均可在配置中覆盖
-8. **可观测**：`ContextMetrics` 提供上下文健康度实时指标；UI 反馈压缩状态
+8. **可观测**：L0–L3 事件与 `context_metrics_update` 提供分层与累计指标；UI 反馈压缩状态（§10.4 / §10.6）
 
 ---
 
@@ -386,7 +386,10 @@ fn init_context_state(session: &Session, config: &ContextConfig) -> ContextState
         context_budget_tokens: input_budget,
         last_api_usage: None,
         post_usage_appended_chars: 0,
+        transcript_path: ...,  # 当前会话 JSONL
         preheat: Preheat::default(),  # Layer 1 异步预热状态机
+        session_obs: ...,  # 从 SessionEntry 恢复累计；新建即默认 0
+        live: ContextLiveMetrics::default(),
     }
 ```
 
@@ -1002,8 +1005,8 @@ Use this EXACT format (same as the original summary):
 | `[src/infra/config/types.rs](../../../src/infra/config/types.rs)`                 | `[context]` 配置节更新 `layer0_single_result_max_chars` 为 50K、新增 `layer0_placeholder_threshold_chars`（10K）、新增 `compaction_max_tokens`（10K）                                       |
 | `[src/core/compaction/](../../../src/core/compaction/)`                           | 重构模块结构：`layer0.rs`（同步清理：落盘 + 占位符）、`preheat.rs`（异步预热：克隆整个 userTurnsList + 后台 Task + 写 transcript）、`apply.rs`（检查与应用：两个检查时机 + Boundary 切换）、`truncation.rs`（物理截断）               |
 | `[src/core/system_prompt.rs](../../../src/core/system_prompt.rs)`                 | 新增分页读取引导 section                                                                                                                                                            |
-| `[src/infra/events/mod.rs](../../../src/infra/events/mod.rs)`                     | 压缩可观测性：`AutoCompactionStart`/`End`、`CompactionError`、`BoundarySwitched`、`ContextOverflowTrimStart`/`End` 等（wire 名见 §10.4）                                                                 |
-| `[src/core/context_metrics.rs](../../../src/core/context_metrics.rs)`             | `ContextMetrics` 结构体：`input_tokens_used`、`context_utilization_ratio`、`compaction_count`、`compaction_tokens_freed`、`total_tool_result_bytes_persisted`、`preheat_in_progress` |
+| `[src/infra/events/mod.rs](../../../src/infra/events/mod.rs)`                     | 压缩可观测性：L0 `Layer0ContextRelease`、L1 `AutoCompactionStart`/`End`（含估算三字段）、`CompactionError`、L2 `BoundarySwitched`（含 `estimatedTokensFreed`）、L3 `ContextOverflowTrimStart`/`End`（含删轮与释放）、`context_metrics_update`（详见 §10.4 / §10.6） |
+| `[src/core/context_metrics.rs](../../../src/core/context_metrics.rs)`             | `ContextLiveMetrics`（别名 `ContextMetrics`）字段语义；运行时嵌入 `ContextState::live`。**会话累计**在 `ContextState::session_obs`，见 §10.6 |
 
 
 ---
@@ -1045,24 +1048,26 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 ### 10.4 事件系统（events.md）
 
-本模块发布的压缩相关事件按 **L1 / L2 / L3** 分层（Rust variant ↔ wire name）：
+本模块发布的压缩相关事件按 **L0 / L1 / L2 / L3** 分层（Rust variant ↔ wire name）；字段表与 camelCase 细节以 [events.md](plugin-system/events.md) 为准。
 
 
 | Layer | Rust variants | wire names |
 | ----- | ------------- | ---------- |
-| **L1（异步预热）** | `AutoCompactionStart { covered_count, ratio_before }` / `AutoCompactionEnd { elapsed_ms, summary_chars, covered_count, ratio_after }` / `CompactionError { exhausted_after_retries, attempts, error, source, ratio }` | `auto_compaction_start` / `auto_compaction_end` / `compaction_error` |
-| **L2（边界切换）** | `BoundarySwitched { ratio_before, ratio_after, covered_count, was_sync_wait }` | `boundary_switched` |
-| **L3（溢出裁剪）** | `ContextOverflowTrimStart { reason, ratio }` / `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry }` | `context_overflow_trim_start` / `context_overflow_trim_end` |
+| **L0（⑤ 同步清理）** | `Layer0ContextRelease { persist_tokens_freed, placeholder_tokens_freed }` | `layer0_context_release` |
+| **L1（异步预热）** | `AutoCompactionStart { covered_count, ratio_before }` / `AutoCompactionEnd { elapsed_ms, summary_chars, covered_count, ratio_after, estimated_covered_tokens_before, estimated_summary_tokens, estimated_tokens_saved }` / `CompactionError { exhausted_after_retries, attempts, error, source, ratio }` | `auto_compaction_start` / `auto_compaction_end` / `compaction_error` |
+| **L2（边界切换）** | `BoundarySwitched { ratio_before, ratio_after, covered_count, was_sync_wait, estimated_tokens_freed }` | `boundary_switched` |
+| **L3（溢出裁剪）** | `ContextOverflowTrimStart { reason, ratio }` / `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry, estimated_tokens_freed, turns_removed }` | `context_overflow_trim_start` / `context_overflow_trim_end` |
 
 
-其他与本模块相关的通用事件（未归入上表分层）：`tool_result_persisted`（Layer 0 落盘）、`context_metrics_update`（⑤ LLM 回复后指标刷新）等，见 `events` 模块定义。
+其他与本模块相关的通用事件（未归入上表分层）：`tool_result_persisted`（Layer 0 单条落盘）、`context_metrics_update`（**每个 user turn** 内约两次：本轮首次 `chat_stream` 前与 timing ⑤ 末尾；payload 中累计字段来自 `ContextState`）等，见 `events` 模块定义。
 
 **CLI / 宿主按 wire name 订阅时的语义对应**：
 
-- `auto_compaction_start` / `auto_compaction_end` → **L1** 异步预热进度
+- `layer0_context_release` → **L0** 本轮落盘 + 占位符释放的估算 tok（已写入会话累计）
+- `auto_compaction_start` / `auto_compaction_end` → **L1** 异步预热进度与前/后/差展示（**不在** `auto_compaction_end` 时累加会话 `compactionTokensFreed`）
 - `compaction_error`（当 **`exhausted_after_retries == true`** 时）→ **待恢复**提示（需结合 ⑤/② 的 `try_restart_if_pending` 或用户操作）
-- `context_overflow_trim_start` / `context_overflow_trim_end` → **L3** Context Overflow 后的物理裁剪
-- `boundary_switched` → **L2** 摘要已应用、边界重置
+- `context_overflow_trim_start` / `context_overflow_trim_end` → **L3** Context Overflow 后的物理裁剪与释放量
+- `boundary_switched` → **L2** 摘要已应用、边界重置（`estimatedTokensFreed` 与本次计入累计的量一致）
 
 
 ### 10.5 UI 反馈
@@ -1073,5 +1078,13 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 | ratio >= 0.50 且预热中  | 状态栏转圈图标："后台准备压缩..." |
 | Boundary 切换完成       | 闪过提示："上下文已重置"       |
 | ratio >= 0.98 同步等待中 | 状态栏："等待压缩完成..."     |
+
+
+### 10.6 可观测性与 token 估算约定
+
+- **`context_metrics_update` 节奏**：与实现一致，**每个 user turn** 内约发射两次（本轮首次流式请求前 + timing ⑤ 末尾）；中间 tool round **不**额外发射。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**。`AgentLoop` **不**再持有独立 `metrics` 结构。
+- **估算函数**：分层释放量与 transcript 中三字段均通过 `estimated_tokens_from_chars`（与 `estimated_token_count()` 的 **chars/4** fallback 同阶）换算；与带 API usage 的精确计数相比均为**估算**，仅保证与水位线逻辑一致。
+- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `CompactionEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 在 timing ⑤ 将落盘与占位符释放折算为 tok 后立即计入会话累计，并发射 `layer0_context_release`。**L3** 按被删 turn 的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
+- **持久化（方案 B）**：`sessions.json` 的 `SessionEntry` 持有 `compaction_count`、`compaction_tokens_freed`、`tool_result_chars_persisted`；**仅在 user turn 结束**（含可恢复错误路径）刷盘；进程在 turn 中途崩溃可能丢失本 turn 内尚未写入 store 的观测累计，详见 [session-storage.md](session-storage.md)。
 
 

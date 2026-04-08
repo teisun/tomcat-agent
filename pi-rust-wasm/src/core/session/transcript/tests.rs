@@ -240,6 +240,9 @@ fn set_compaction_entry_is_boundary_true_updates_line() {
         covered_count: Some(2),
         is_boundary: Some(false),
         preheat_compaction_id: Some("cmp_inplace".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
     });
     append_entry(&path, &c).unwrap();
     set_compaction_entry_is_boundary_true(&path, "cmp_inplace").unwrap();
@@ -293,6 +296,9 @@ fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
         covered_count: Some(2),
         is_boundary: Some(false),
         preheat_compaction_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
     });
     append_entry(&path, &c).unwrap();
 
@@ -300,7 +306,8 @@ fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
 
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(
-        raw.lines().any(|l| l.starts_with("   ") && l.contains("\"type\":\"message\"")),
+        raw.lines()
+            .any(|l| l.starts_with("   ") && l.contains("\"type\":\"message\"")),
         "leading spaces on non-compaction lines must be preserved:\n{raw}"
     );
 

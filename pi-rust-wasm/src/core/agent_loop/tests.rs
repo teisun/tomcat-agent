@@ -809,6 +809,8 @@ async fn context_metrics_update_emitted_before_turn_end() {
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     }));
     let messages = vec![AgentMessage::User {
         text: "read".to_string(),
@@ -882,6 +884,8 @@ async fn context_metrics_update_payload_contains_valid_values() {
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     }));
     let messages = vec![AgentMessage::User {
         text: "validate".to_string(),
@@ -974,6 +978,8 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     }));
     let messages = vec![AgentMessage::User {
         text: "multi".to_string(),
@@ -1091,6 +1097,8 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     }));
     let messages = vec![AgentMessage::User {
         text: "hi".to_string(),

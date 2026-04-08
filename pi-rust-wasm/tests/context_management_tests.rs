@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use pi_wasm::core::compaction::compact_tool_results;
 use pi_wasm::{
     build_context_from_state, init_context_state, AgentLoop, AgentLoopConfig, AgentMessage,
-    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
-    ContextConfig, ContextState, DefaultEventBus, DirEntry, EditFileResult, EditOperation,
-    EventBus, EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation, SessionManager,
-    StreamEvent, ToolCallInfo, TurnEntry, WriteFileResult,
+    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
+    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
+    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, ToolCallInfo, TurnEntry,
+    WriteFileResult,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -189,6 +189,8 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
 
     let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
@@ -362,6 +364,8 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
     agent.set_context_state(Some(ctx_state));
 
@@ -451,6 +455,8 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
 
     let msgs = build_context_from_state(&state);
@@ -512,6 +518,8 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
     let total: usize = state
         .user_turns_list
@@ -577,6 +585,8 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
 
     info!("Act: compact with m=1, only >threshold in compactable zone get replaced");
@@ -646,6 +656,8 @@ fn test_compact_tool_results_estimate_precise() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
 
     let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
@@ -690,6 +702,9 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
             covered_count: Some(1),
             is_boundary: Some(true),
             preheat_compaction_id: None,
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &boundary)?;
@@ -759,9 +774,12 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
     let config = ContextConfig::default();
-    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");
+    let (results, _) =
+        layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");
     assert_eq!(results.len(), 1);
 
     let readback = std::fs::read_to_string(&results[0].persisted_path)?;
@@ -826,6 +844,9 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
             covered_count: Some(1),
             is_boundary: Some(false),
             preheat_compaction_id: Some("preheat_1".into()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;
@@ -846,7 +867,9 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
     let has_first = state.user_turns_list.iter().any(|t| {
         if let TurnEntry::UserTurn { messages, .. } = t {
-            messages.iter().any(|m| matches!(m, AgentMessage::User { text } if text.contains("first")))
+            messages
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("first")))
         } else {
             false
         }
@@ -855,7 +878,9 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
     let has_second = state.user_turns_list.iter().any(|t| {
         if let TurnEntry::UserTurn { messages, .. } = t {
-            messages.iter().any(|m| matches!(m, AgentMessage::User { text } if text.contains("second")))
+            messages
+                .iter()
+                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("second")))
         } else {
             false
         }
@@ -906,6 +931,9 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
             covered_count: Some(1),
             is_boundary: Some(false),
             preheat_compaction_id: Some("preheat_restore_1".into()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;

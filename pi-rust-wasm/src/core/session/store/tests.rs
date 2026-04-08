@@ -29,6 +29,8 @@ fn save_and_load_store_roundtrip() {
             input_tokens: None,
             output_tokens: None,
             compaction_count: None,
+            compaction_tokens_freed: None,
+            tool_result_chars_persisted: None,
         },
     );
     save_store(&path, &store).unwrap();

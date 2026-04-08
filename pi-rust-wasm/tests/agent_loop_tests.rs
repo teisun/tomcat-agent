@@ -853,6 +853,8 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     }));
 
     let messages = vec![AgentMessage::User {

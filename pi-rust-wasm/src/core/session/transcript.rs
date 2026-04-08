@@ -95,6 +95,12 @@ pub struct CompactionEntry {
     /// 与 `id` 一致时可自指，便于阅读端识别 preheat 行。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preheat_compaction_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_covered_tokens_before: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_summary_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_saved: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

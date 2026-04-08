@@ -518,14 +518,17 @@ self.emit_event(AgentEvent::ContextMetricsUpdate {
     // 漏了 compaction_count ...
 });
 
-// GOOD — 从权威源直接取值
-self.emit_event(AgentEvent::ContextMetricsUpdate {
-    input_tokens_used: self.metrics.input_tokens_used,
-    context_utilization_ratio: self.metrics.context_utilization_ratio,
-    compaction_count: self.metrics.compaction_count,
-    compaction_tokens_freed: self.metrics.compaction_tokens_freed,
-    total_tool_result_bytes_persisted: self.metrics.total_tool_result_bytes_persisted,
-});
+// GOOD — 累计在 session_obs，瞬时在 live；无 AgentLoop 侧第二份 metrics
+if let Some(ref ctx_state) = self.context_state {
+    self.emit_event(AgentEvent::ContextMetricsUpdate {
+        input_tokens_used: ctx_state.live.input_tokens_used,
+        context_utilization_ratio: ctx_state.live.context_utilization_ratio,
+        compaction_count: ctx_state.session_obs.compaction_count,
+        compaction_tokens_freed: ctx_state.session_obs.compaction_tokens_freed,
+        total_tool_result_bytes_persisted: ctx_state.session_obs.tool_result_chars_persisted,
+        preheat_in_progress: ctx_state.live.preheat_in_progress,
+    });
+}
 ```
 
 #### 规则 11.3 — 重复逻辑提取为函数

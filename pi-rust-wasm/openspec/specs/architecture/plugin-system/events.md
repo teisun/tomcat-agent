@@ -28,7 +28,7 @@ pub enum AgentEvent {
     ToolExecutionUpdate { #[serde(rename = "toolCallId")] tool_call_id: String, #[serde(rename = "toolName")] tool_name: String, args: Value, #[serde(rename = "partialResult")] partial_result: ToolOutput },
     ToolExecutionEnd { #[serde(rename = "toolCallId")] tool_call_id: String, #[serde(rename = "toolName")] tool_name: String, result: ToolOutput, #[serde(rename = "isError")] is_error: bool },
     AutoCompactionStart { #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "ratioBefore")] ratio_before: f64 },
-    AutoCompactionEnd { #[serde(rename = "elapsedMs")] elapsed_ms: u64, #[serde(rename = "summaryChars")] summary_chars: usize, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "ratioAfter")] ratio_after: f64 },
+    AutoCompactionEnd { #[serde(rename = "elapsedMs")] elapsed_ms: u64, #[serde(rename = "summaryChars")] summary_chars: usize, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "estimatedCoveredTokensBefore")] estimated_covered_tokens_before: usize, #[serde(rename = "estimatedSummaryTokens")] estimated_summary_tokens: usize, #[serde(rename = "estimatedTokensSaved")] estimated_tokens_saved: usize },
     CompactionError { #[serde(rename = "exhaustedAfterRetries")] exhausted_after_retries: bool, attempts: u32, error: String, source: String, ratio: Option<f64> },
     ToolResultTruncated { #[serde(rename = "toolName")] tool_name: String, #[serde(rename = "originalChars")] original_chars: usize, #[serde(rename = "truncatedChars")] truncated_chars: usize },
     AutoRetryStart { attempt: u32, #[serde(rename = "maxAttempts")] max_attempts: u32, #[serde(rename = "delayMs")] delay_ms: u64, #[serde(rename = "errorMessage")] error_message: String },
@@ -36,24 +36,28 @@ pub enum AgentEvent {
     ExtensionError { #[serde(rename = "extensionId")] extension_id: Option<String>, event: String, error: String },
     ContextMetricsUpdate { #[serde(rename = "inputTokensUsed")] input_tokens_used: usize, #[serde(rename = "contextUtilizationRatio")] context_utilization_ratio: f64, #[serde(rename = "compactionCount")] compaction_count: u32, #[serde(rename = "compactionTokensFreed")] compaction_tokens_freed: usize, #[serde(rename = "totalToolResultBytesPersisted")] total_tool_result_bytes_persisted: usize, #[serde(rename = "preheatInProgress")] preheat_in_progress: bool },
     ToolResultPersisted { #[serde(rename = "toolName")] tool_name: String, #[serde(rename = "originalChars")] original_chars: usize, #[serde(rename = "persistedPath")] persisted_path: String },
+    Layer0ContextRelease { #[serde(rename = "persistTokensFreed")] persist_tokens_freed: usize, #[serde(rename = "placeholderTokensFreed")] placeholder_tokens_freed: usize },
     ContextOverflowTrimStart { reason: String, ratio: f64 },
-    ContextOverflowTrimEnd { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "willRetry")] will_retry: bool },
-    BoundarySwitched { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "wasSyncWait")] was_sync_wait: bool },
+    ContextOverflowTrimEnd { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "willRetry")] will_retry: bool, #[serde(rename = "estimatedTokensFreed")] estimated_tokens_freed: usize, #[serde(rename = "turnsRemoved")] turns_removed: usize },
+    BoundarySwitched { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "wasSyncWait")] was_sync_wait: bool, #[serde(rename = "estimatedTokensFreed")] estimated_tokens_freed: usize },
 }
 ```
 
-**上下文压缩与溢出（线格式名与 payload）**：异步预热线（L1）、边界切换（L2）、溢出裁剪（L3）对应下列 JSON `type`；序列化字段为 camelCase，与实现一致。以下事件**不再**存在于代码库：`preheat_started`、`preheat_completed`、`preheat_error`、`compaction_circuit_breaker_triggered`。
+**上下文压缩与溢出（线格式名与 payload）**：L0（落盘+占位符）、异步预热线（L1）、边界切换（L2）、溢出裁剪（L3）对应下列 JSON `type`；序列化字段为 camelCase，与实现一致。以下事件**不再**存在于代码库：`preheat_started`、`preheat_completed`、`preheat_error`、`compaction_circuit_breaker_triggered`。
 
 | 层级 | JSON `type` | Payload |
 |------|-------------|---------|
+| L0（timing ⑤） | `layer0_context_release` | `{ "persistTokensFreed": number, "placeholderTokensFreed": number }`（估算 tok，已计入会话 `compactionTokensFreed`） |
 | L1（async preheat） | `auto_compaction_start` | `{ "coveredCount": number, "ratioBefore": number }` |
-| L1 | `auto_compaction_end` | `{ "elapsedMs": number, "summaryChars": number, "coveredCount": number, "ratioAfter": number }` |
+| L1 | `auto_compaction_end` | `{ "elapsedMs", "summaryChars", "coveredCount", "ratioAfter", "estimatedCoveredTokensBefore", "estimatedSummaryTokens", "estimatedTokensSaved" }`；`ratioAfter` 为**主线程**在即将 apply 前读取的利用率；**不在此事件时**累加会话 `compactionTokensFreed` |
 | L1（失败耗尽） | `compaction_error` | `{ "exhaustedAfterRetries": boolean, "attempts": number, "error": string, "source": string, "ratio": number \| null }` |
-| L2 | `boundary_switched` | `{ "ratioBefore": number, "ratioAfter": number, "coveredCount": number, "wasSyncWait": boolean }` |
+| L2 | `boundary_switched` | `{ ratioBefore, ratioAfter, coveredCount, wasSyncWait, estimatedTokensFreed }`（`estimatedTokensFreed` 等于 L1 写入 transcript 的 `estimatedTokensSaved`，apply 成功时计入会话累计） |
 | L3（overflow trim） | `context_overflow_trim_start` | `{ "reason": string, "ratio": number }` |
-| L3 | `context_overflow_trim_end` | `{ "ratioBefore": number, "ratioAfter": number, "willRetry": boolean }` |
+| L3 | `context_overflow_trim_end` | `{ "ratioBefore", "ratioAfter", "willRetry", "estimatedTokensFreed", "turnsRemoved" }` |
 
-**`wire` 模块常量**（与上表 JSON `type` 一一对应，定义见 [`events/mod.rs`](../../../../src/infra/events/mod.rs) `pub mod wire`）：`WIRE_AUTO_COMPACTION_START`、`WIRE_AUTO_COMPACTION_END`、`WIRE_COMPACTION_ERROR`、`WIRE_BOUNDARY_SWITCHED`、`WIRE_CONTEXT_OVERFLOW_TRIM_START`、`WIRE_CONTEXT_OVERFLOW_TRIM_END`。
+**`context_metrics_update`**：累计字段来自 `ContextState::session_obs`（与 `sessions.json` 在 user turn 结束时同步）；瞬时字段来自 `ContextState::live`。`totalToolResultBytesPersisted` 字段名历史兼容，**实际为 Unicode 字符累计**（L0 落盘原始长度之和）。
+
+**`wire` 模块常量**（与上表 JSON `type` 一一对应，定义见 [`events/mod.rs`](../../../../src/infra/events/mod.rs) `pub mod wire`）：`WIRE_AUTO_COMPACTION_START`、`WIRE_AUTO_COMPACTION_END`、`WIRE_COMPACTION_ERROR`、`WIRE_BOUNDARY_SWITCHED`、`WIRE_CONTEXT_OVERFLOW_TRIM_START`、`WIRE_CONTEXT_OVERFLOW_TRIM_END`、`WIRE_LAYER0_CONTEXT_RELEASE`。
 
 #### ExtensionEvent（扩展钩子）
 

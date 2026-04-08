@@ -169,6 +169,9 @@ fn collect_skips_non_message() {
             covered_count: None,
             is_boundary: None,
             preheat_compaction_id: None,
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
         }),
         TranscriptEntry::Message(MessageEntry {
             id: Some("2".into()),

@@ -35,6 +35,7 @@ pub mod wire {
     pub const WIRE_BOUNDARY_SWITCHED: &str = "boundary_switched";
     pub const WIRE_CONTEXT_OVERFLOW_TRIM_START: &str = "context_overflow_trim_start";
     pub const WIRE_CONTEXT_OVERFLOW_TRIM_END: &str = "context_overflow_trim_end";
+    pub const WIRE_LAYER0_CONTEXT_RELEASE: &str = "layer0_context_release";
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
 
     // --- ExtensionEvent ---
@@ -169,6 +170,12 @@ pub enum AgentEvent {
         covered_count: usize,
         #[serde(rename = "ratioAfter")]
         ratio_after: f64,
+        #[serde(rename = "estimatedCoveredTokensBefore")]
+        estimated_covered_tokens_before: usize,
+        #[serde(rename = "estimatedSummaryTokens")]
+        estimated_summary_tokens: usize,
+        #[serde(rename = "estimatedTokensSaved")]
+        estimated_tokens_saved: usize,
     },
     CompactionError {
         #[serde(rename = "exhaustedAfterRetries")]
@@ -241,6 +248,10 @@ pub enum AgentEvent {
         ratio_after: f64,
         #[serde(rename = "willRetry")]
         will_retry: bool,
+        #[serde(rename = "estimatedTokensFreed")]
+        estimated_tokens_freed: usize,
+        #[serde(rename = "turnsRemoved")]
+        turns_removed: usize,
     },
     BoundarySwitched {
         #[serde(rename = "ratioBefore")]
@@ -251,6 +262,15 @@ pub enum AgentEvent {
         covered_count: usize,
         #[serde(rename = "wasSyncWait")]
         was_sync_wait: bool,
+        #[serde(rename = "estimatedTokensFreed")]
+        estimated_tokens_freed: usize,
+    },
+    /// L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。
+    Layer0ContextRelease {
+        #[serde(rename = "persistTokensFreed")]
+        persist_tokens_freed: usize,
+        #[serde(rename = "placeholderTokensFreed")]
+        placeholder_tokens_freed: usize,
     },
 }
 

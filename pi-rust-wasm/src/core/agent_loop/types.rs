@@ -4,7 +4,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
-use crate::core::context_metrics::ContextMetrics;
 use crate::core::llm::LlmProvider;
 use crate::core::primitives::PrimitiveExecutor;
 use crate::core::session::manager::ContextState;
@@ -106,7 +105,6 @@ pub struct AgentLoop {
     pub(super) abort_signal: Arc<AtomicBool>,
     pub(super) context_state: Option<ContextState>,
     pub(super) block_tool_calls: bool,
-    pub(super) metrics: ContextMetrics,
     pub(super) start_idx: usize,
 }
 

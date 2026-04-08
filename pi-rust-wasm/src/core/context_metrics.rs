@@ -1,14 +1,7 @@
-//! 上下文管理可观测性指标。
+//! 上下文管理可观测性：瞬时指标类型定义在 `ContextState::live`（`ContextLiveMetrics`）。
+//! 本会话累计见 `ContextState::session_obs`（`SessionContextObservation`）。
 
-use serde::Serialize;
+pub use crate::core::session::manager::ContextLiveMetrics;
 
-/// 上下文管理运行时指标，每轮后计算并通过 EventBus 推送。
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct ContextMetrics {
-    pub input_tokens_used: usize,
-    pub context_utilization_ratio: f64,
-    pub compaction_count: u32,
-    pub compaction_tokens_freed: usize,
-    pub total_tool_result_bytes_persisted: usize,
-    pub preheat_in_progress: bool,
-}
+/// 与历史命名对齐的别名（即 `ContextLiveMetrics`）。
+pub type ContextMetrics = ContextLiveMetrics;

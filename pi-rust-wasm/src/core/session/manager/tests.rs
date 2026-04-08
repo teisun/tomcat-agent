@@ -1,4 +1,6 @@
 use super::*;
+use crate::core::compaction::preheat::Preheat;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -350,6 +352,8 @@ fn build_context_from_state_flattens_turns() {
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
         preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     };
     let msgs = build_context_from_state(&state);
     assert_eq!(msgs.len(), 3);
@@ -401,6 +405,9 @@ fn init_context_state_boundary_discards_prior() {
         covered_count: Some(2),
         is_boundary: Some(true),
         preheat_compaction_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
     });
     super::super::transcript::append_entry(&path, &boundary_entry).unwrap();
 
@@ -493,6 +500,9 @@ fn make_boundary_entry(ts: &str, summary: &str) -> TranscriptEntry {
         covered_count: None,
         is_boundary: Some(true),
         preheat_compaction_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
     })
 }
 
@@ -713,4 +723,48 @@ fn append_generates_unique_ids() {
     assert_ne!(id1, id2);
     assert_ne!(id2, id3);
     assert_ne!(id1, id3);
+}
+
+#[test]
+fn persist_context_observability_writes_sessions_json() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let state = ContextState {
+        user_turns_list: vec![],
+        estimate_context_chars: 0,
+        context_budget_chars: 1000,
+        context_budget_tokens: 250,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::from("dummy.jsonl"),
+        preheat: Preheat::new(),
+        session_obs: super::types::SessionContextObservation {
+            compaction_count: 7,
+            compaction_tokens_freed: 12345,
+            tool_result_chars_persisted: 999,
+        },
+        live: Default::default(),
+    };
+    mgr.persist_context_observability(&state).unwrap();
+
+    let entry = mgr.get_session(key).unwrap().expect("session entry");
+    assert_eq!(
+        entry.compaction_count,
+        Some(state.session_obs.compaction_count)
+    );
+    assert_eq!(
+        entry.compaction_tokens_freed,
+        Some(state.session_obs.compaction_tokens_freed as u64)
+    );
+    assert_eq!(
+        entry.tool_result_chars_persisted,
+        Some(state.session_obs.tool_result_chars_persisted as u64)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

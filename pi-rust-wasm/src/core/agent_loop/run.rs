@@ -5,12 +5,11 @@ use parking_lot::Mutex;
 use tokio_stream::StreamExt;
 
 use crate::core::compaction::{
-    is_context_overflow_error, force_drop_oldest_to_target, run_layer0_cleanup,
+    force_drop_oldest_to_target, is_context_overflow_error, run_layer0_cleanup,
 };
-use crate::core::context_metrics::ContextMetrics;
 use crate::core::llm::{ChatRequest, LlmProvider, StreamEvent};
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
-use crate::core::session::manager::ContextState;
+use crate::core::session::manager::{estimated_tokens_from_chars, ContextState};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::{
@@ -41,7 +40,6 @@ impl AgentLoop {
             abort_signal,
             context_state: None,
             block_tool_calls: false,
-            metrics: ContextMetrics::default(),
             start_idx: 0,
         }
     }
@@ -66,7 +64,6 @@ impl AgentLoop {
             abort_signal,
             context_state: None,
             block_tool_calls: false,
-            metrics: ContextMetrics::default(),
             start_idx: 0,
         }
     }
@@ -102,19 +99,24 @@ impl AgentLoop {
 
     /// 刷新实时 token 指标并发射 ContextMetricsUpdate 事件（仅当 context_state 存在时）。
     fn emit_context_metrics(&mut self) {
-        if let Some(ref ctx_state) = self.context_state {
-            self.metrics.input_tokens_used = ctx_state.estimated_token_count();
-            self.metrics.context_utilization_ratio = ctx_state.usage_ratio();
-            self.metrics.preheat_in_progress = ctx_state.preheat.is_running();
+        if let Some(ref mut ctx_state) = self.context_state {
+            let input_tokens_used = ctx_state.estimated_token_count();
+            let context_utilization_ratio = ctx_state.usage_ratio();
+            let preheat_in_progress = ctx_state.preheat.is_running();
+            ctx_state.live.input_tokens_used = input_tokens_used;
+            ctx_state.live.context_utilization_ratio = context_utilization_ratio;
+            ctx_state.live.preheat_in_progress = preheat_in_progress;
         }
-        if self.context_state.is_some() {
+        if let Some(ref ctx_state) = self.context_state {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
-                input_tokens_used: self.metrics.input_tokens_used,
-                context_utilization_ratio: self.metrics.context_utilization_ratio,
-                compaction_count: self.metrics.compaction_count,
-                compaction_tokens_freed: self.metrics.compaction_tokens_freed,
-                total_tool_result_bytes_persisted: self.metrics.total_tool_result_bytes_persisted,
-                preheat_in_progress: self.metrics.preheat_in_progress,
+                input_tokens_used: ctx_state.live.input_tokens_used,
+                context_utilization_ratio: ctx_state.live.context_utilization_ratio,
+                compaction_count: ctx_state.session_obs.compaction_count,
+                compaction_tokens_freed: ctx_state.session_obs.compaction_tokens_freed,
+                total_tool_result_bytes_persisted: ctx_state
+                    .session_obs
+                    .tool_result_chars_persisted,
+                preheat_in_progress: ctx_state.live.preheat_in_progress,
             });
         }
     }
@@ -259,8 +261,16 @@ impl AgentLoop {
                             reason: "context_overflow".into(),
                             ratio: ratio_before,
                         });
+                        let mut trim_tokens = 0usize;
+                        let mut trim_turns = 0usize;
                         if let Some(ref mut ctx_state) = self.context_state {
-                            force_drop_oldest_to_target(ctx_state);
+                            let (turns_removed, chars_removed) =
+                                force_drop_oldest_to_target(ctx_state);
+                            trim_turns = turns_removed;
+                            trim_tokens = estimated_tokens_from_chars(chars_removed);
+                            ctx_state.session_obs.compaction_tokens_freed += trim_tokens;
+                            ctx_state.session_obs.compaction_count =
+                                ctx_state.session_obs.compaction_count.saturating_add(1);
                             *messages =
                                 crate::core::session::manager::build_context_from_state(ctx_state);
                             self.start_idx = messages.len();
@@ -274,6 +284,8 @@ impl AgentLoop {
                             ratio_before,
                             ratio_after,
                             will_retry: true,
+                            estimated_tokens_freed: trim_tokens,
+                            turns_removed: trim_turns,
                         });
                     }
                     last_err = Some(e);
@@ -425,16 +437,24 @@ impl AgentLoop {
 
                 // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
                 let mut preheat_started: Option<(usize, f64)> = None;
+                let mut layer0_release: Option<(usize, usize)> = None;
                 if let Some(ref mut ctx_state) = self.context_state {
                     // Step 1: L0 cleanup
-                    let persisted = run_layer0_cleanup(
+                    let l0 = run_layer0_cleanup(
                         ctx_state,
                         &self.config.context_config,
                         std::path::Path::new(&self.config.work_dir),
                         &self.config.session_id,
                     );
-                    for pr in &persisted {
-                        self.metrics.total_tool_result_bytes_persisted += pr.original_chars;
+                    for pr in &l0.persisted {
+                        ctx_state.session_obs.tool_result_chars_persisted += pr.original_chars;
+                    }
+                    let persist_tok = estimated_tokens_from_chars(l0.persist_chars_freed);
+                    let placeholder_tok = estimated_tokens_from_chars(l0.placeholder_chars_freed);
+                    if persist_tok > 0 || placeholder_tok > 0 {
+                        ctx_state.session_obs.compaction_tokens_freed +=
+                            persist_tok + placeholder_tok;
+                        layer0_release = Some((persist_tok, placeholder_tok));
                     }
 
                     // Step 2: restore ExhaustedPending → Running
@@ -468,6 +488,12 @@ impl AgentLoop {
                     ) {
                         preheat_started = Some((turn_count, ratio));
                     }
+                }
+                if let Some((p, ph)) = layer0_release {
+                    self.emit_event(AgentEvent::Layer0ContextRelease {
+                        persist_tokens_freed: p,
+                        placeholder_tokens_freed: ph,
+                    });
                 }
                 if let Some((covered_count, ratio_before)) = preheat_started {
                     self.emit_event(AgentEvent::AutoCompactionStart {

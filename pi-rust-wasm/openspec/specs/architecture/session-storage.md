@@ -30,6 +30,12 @@ pub struct SessionEntry {
     pub output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_count: Option<u32>,
+    /// 与会话内 `ContextState.session_obs.compaction_tokens_freed` 同步（估算 tok 累计）；CLI 在 user turn 结束时写回。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_tokens_freed: Option<u64>,
+    /// L0 落盘原始 Unicode 字符累计；与 `ContextState.session_obs.tool_result_chars_persisted` 同步（事件字段仍名 bytes）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result_chars_persisted: Option<u64>,
     // 预留：channel/agent 相关字段供三期多 channel 使用
 }
 ```
@@ -92,6 +98,12 @@ pub struct CompactionEntry {
     pub covered_end_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covered_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_covered_tokens_before: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_summary_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_saved: Option<usize>,
     /// init_context_state 遇到 is_boundary=true 时，丢弃其前已暂存的所有 entry，
     /// 使跨重启重建结果与运行时内存状态一致，防止已摘要的旧 turns 与 summary 重复加载。
     #[serde(default, skip_serializing_if = "is_false")]
@@ -105,3 +117,7 @@ pub struct CompactionEntry {
 - **sessionId** 当前对话对应的 transcript 唯一 id(sessionId=<timestamp>_<uuid>)，对应文件名'<sessionId>.jsonl'; SessionEntry中'sessionId'指向改文件
 
 **Source of truth**：transcript 内容以 JSONL 文件为准；sessions.json 为元数据与路由的权威，写入时覆盖该文件。
+
+**上下文可观测累计（方案 B）**：`compaction_count` / `compaction_tokens_freed` / `tool_result_chars_persisted` 在进程内由 `ContextState` 更新，**每个 user turn 结束**（成功路径与可恢复错误路径）由 `SessionManager::persist_context_observability` 刷入 `sessions.json`；`init_context_state` 启动时读回填入 `ContextState`，实现重启后累计不无故归零。该累计**不以 transcript 重放重建**；与 transcript 手工编辑可能不一致。
+
+**CompactionEntry（JSONL）可选 token 估算字段**（camelCase，旧行可缺省）：`estimatedCoveredTokensBefore`、`estimatedSummaryTokens`、`estimatedTokensSaved` — L1 预热写入，供 L2 apply 计入 `session_obs.compaction_tokens_freed` 而无需再次用 `estimated_token_count` 前后差计算。

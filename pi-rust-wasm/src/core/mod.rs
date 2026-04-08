@@ -18,7 +18,7 @@ pub use agent_loop::{
     AgentRunResult, ToolCallInfo,
 };
 pub use confirmation::{AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider};
-pub use context_metrics::ContextMetrics;
+pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use executor::DefaultPrimitiveExecutor;
 pub use llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, OpenAiProvider,

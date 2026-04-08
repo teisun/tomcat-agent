@@ -38,6 +38,12 @@ pub struct SessionEntry {
     pub output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_count: Option<u32>,
+    /// 与会话 `ContextState.session_obs.compaction_tokens_freed` 同步（估算 tok 累计）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_tokens_freed: Option<u64>,
+    /// L0 落盘原始字符累计（Unicode），与 `ContextState.session_obs.tool_result_chars_persisted` 同步。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result_chars_persisted: Option<u64>,
 }
 
 /// 从路径加载 SessionStore；文件不存在或为空时返回空 HashMap。

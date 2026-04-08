@@ -25,6 +25,8 @@ fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> Contex
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
         preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
     }
 }
 
@@ -159,7 +161,8 @@ fn layer0_persist_creates_files() {
         is_error: false,
     }])];
     let config = ContextConfig::default();
-    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+    let (results, _) =
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
     assert_eq!(results.len(), 1);
     assert!(std::path::Path::new(&results[0].persisted_path).exists());
     assert!(state.estimate_context_chars < 60_000);
@@ -180,7 +183,8 @@ fn layer0_persist_skips_small() {
         is_error: false,
     }])];
     let config = ContextConfig::default();
-    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+    let (results, _) =
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
     assert!(results.is_empty());
 }
 
@@ -313,7 +317,8 @@ fn layer0_persist_skips_below_threshold() {
         is_error: false,
     }])];
     let config = ContextConfig::default();
-    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+    let (results, _) =
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
     assert!(
         results.is_empty(),
         "20K < 50K threshold should NOT trigger persistence"
@@ -331,7 +336,7 @@ fn layer0_persist_file_readable() {
         is_error: false,
     }])];
     let config = ContextConfig::default();
-    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "sess1");
+    let (results, _) = layer0_persist_large_results(&mut state, &config, dir.path(), "sess1");
     assert_eq!(results.len(), 1);
     let content = std::fs::read_to_string(&results[0].persisted_path).unwrap();
     assert_eq!(
@@ -383,17 +388,23 @@ fn apply_boundary_replaces_covered_range() {
     let mut state = make_state(0, 100_000, 25_000);
     let t0 = TurnEntry::UserTurn {
         id: "t0".into(),
-        messages: vec![AgentMessage::User { text: "a".repeat(5000) }],
+        messages: vec![AgentMessage::User {
+            text: "a".repeat(5000),
+        }],
         timestamp: "2026-01-01T00:00:00Z".into(),
     };
     let t1 = TurnEntry::UserTurn {
         id: "t1".into(),
-        messages: vec![AgentMessage::User { text: "b".repeat(3000) }],
+        messages: vec![AgentMessage::User {
+            text: "b".repeat(3000),
+        }],
         timestamp: "2026-01-01T00:01:00Z".into(),
     };
     let t2 = TurnEntry::UserTurn {
         id: "t2".into(),
-        messages: vec![AgentMessage::User { text: "c".repeat(2000) }],
+        messages: vec![AgentMessage::User {
+            text: "c".repeat(2000),
+        }],
         timestamp: "2026-01-01T00:02:00Z".into(),
     };
     state.user_turns_list = vec![t0, t1, t2];
@@ -405,22 +416,33 @@ fn apply_boundary_replaces_covered_range() {
         covered_end_id: "t1".into(),
         covered_count: 2,
         transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
     };
     let old_ratio = state.usage_ratio();
     state.apply_boundary(result).unwrap();
 
     assert_eq!(state.user_turns_list.len(), 2);
-    assert!(matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary == "short summary"));
+    assert!(
+        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary == "short summary")
+    );
     assert_eq!(state.user_turns_list[1].id(), "t2");
     assert!(state.last_api_usage.is_none());
     let new_ratio = state.usage_ratio();
-    assert!(new_ratio < old_ratio, "ratio should decrease after boundary");
+    assert!(
+        new_ratio < old_ratio,
+        "ratio should decrease after boundary"
+    );
 }
 
 #[test]
 fn apply_boundary_not_found_returns_err() {
     let mut state = make_state(1000, 10_000, 2_500);
-    state.user_turns_list = vec![make_user_turn(vec![AgentMessage::User { text: "x".into() }])];
+    state.user_turns_list = vec![make_user_turn(vec![AgentMessage::User {
+        text: "x".into(),
+    }])];
 
     let result = crate::core::session::manager::CompactionResult {
         summary_text: "summary".into(),
@@ -428,6 +450,10 @@ fn apply_boundary_not_found_returns_err() {
         covered_end_id: "also_nonexistent".into(),
         covered_count: 1,
         transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
     };
     let res = state.apply_boundary(result);
     assert!(res.is_err());
@@ -438,7 +464,9 @@ fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
     let mut state = make_state(0, 100_000, 25_000);
     let t1 = TurnEntry::UserTurn {
         id: "still_end".into(),
-        messages: vec![AgentMessage::User { text: "b".repeat(1000) }],
+        messages: vec![AgentMessage::User {
+            text: "b".repeat(1000),
+        }],
         timestamp: "2026-01-01T00:01:00Z".into(),
     };
     state.user_turns_list = vec![t1];
@@ -450,6 +478,10 @@ fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
         covered_end_id: "still_end".into(),
         covered_count: 2,
         transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
     };
     state.apply_boundary(result).unwrap();
     assert_eq!(state.user_turns_list.len(), 1);
@@ -493,8 +525,11 @@ fn layer0_threshold_from_config() {
         layer0_single_result_max_chars: 100_000,
         ..Default::default()
     };
-    let results = layer0_persist_large_results(&mut state, &config, dir.path(), "test");
-    assert!(results.is_empty(), "60K < 100K threshold should NOT persist");
+    let (results, _) = layer0_persist_large_results(&mut state, &config, dir.path(), "test");
+    assert!(
+        results.is_empty(),
+        "60K < 100K threshold should NOT persist"
+    );
 
     let config2 = ContextConfig {
         layer0_single_result_max_chars: 50_000,
@@ -506,6 +541,6 @@ fn layer0_threshold_from_config() {
         content: "y".repeat(60_000),
         is_error: false,
     }])];
-    let results2 = layer0_persist_large_results(&mut state2, &config2, dir.path(), "test");
+    let (results2, _) = layer0_persist_large_results(&mut state2, &config2, dir.path(), "test");
     assert_eq!(results2.len(), 1, "60K > 50K threshold should persist");
 }
