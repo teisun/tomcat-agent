@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio_stream::StreamExt;
+use tracing::info;
 
 use crate::core::compaction::{
     force_drop_oldest_to_target, is_context_overflow_error, run_layer0_cleanup,
@@ -107,8 +108,7 @@ impl AgentLoop {
             ctx_state.live.input_tokens_used = input_tokens_used;
             ctx_state.live.context_utilization_ratio = context_utilization_ratio;
             ctx_state.live.preheat_in_progress = preheat_in_progress;
-            ctx_state.live.preheat_result_pending =
-                preheat_result_pending && !preheat_in_progress;
+            ctx_state.live.preheat_result_pending = preheat_result_pending && !preheat_in_progress;
         }
         if let Some(ref ctx_state) = self.context_state {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
@@ -255,7 +255,18 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
-                    if is_context_overflow_error(&e) && self.context_state.is_some() {
+                    let overflow_hit = is_context_overflow_error(&e);
+                    let context_state_some = self.context_state.is_some();
+                    let err_snippet: String = e.chars().take(200).collect();
+                    info!(
+                        target: "pi_wasm_chat_diag",
+                        phase = "attempt_loop_retryable",
+                        attempt,
+                        overflow_hit,
+                        context_state_some,
+                        snippet = %err_snippet
+                    );
+                    if overflow_hit && context_state_some {
                         let ratio_before = self
                             .context_state
                             .as_ref()
@@ -291,6 +302,33 @@ impl AgentLoop {
                             estimated_tokens_freed: trim_tokens,
                             turns_removed: trim_turns,
                         });
+                        let compaction_count_after = self
+                            .context_state
+                            .as_ref()
+                            .map(|cs| cs.session_obs.compaction_count)
+                            .unwrap_or(0);
+                        info!(
+                            target: "pi_wasm_chat_diag",
+                            phase = "l3_trim_done",
+                            attempt,
+                            turns_removed = trim_turns,
+                            trim_tokens,
+                            ratio_before,
+                            ratio_after,
+                            compaction_count_after
+                        );
+                    } else if overflow_hit && !context_state_some {
+                        info!(
+                            target: "pi_wasm_chat_diag",
+                            phase = "l3_skipped_no_context_state",
+                            attempt
+                        );
+                    } else if !overflow_hit {
+                        info!(
+                            target: "pi_wasm_chat_diag",
+                            phase = "l3_skipped_not_overflow",
+                            attempt
+                        );
                     }
                     last_err = Some(e);
                     if attempt == self.config.max_attempts {
@@ -344,11 +382,27 @@ impl AgentLoop {
             // context_metrics_update：单次 run_reasoning_loop 内仅在首次 LLM 请求前发一次（中间 tool round 不发）。
             if turn_index == 1 {
                 self.emit_context_metrics();
+                if let Some(ref ctx_state) = self.context_state {
+                    info!(
+                        target: "pi_wasm_chat_diag",
+                        phase = "emit_context_metrics_turn1",
+                        turn_index,
+                        input_tokens_used = ctx_state.live.input_tokens_used,
+                        context_utilization_ratio = ctx_state.live.context_utilization_ratio,
+                        compaction_count = ctx_state.session_obs.compaction_count
+                    );
+                }
             }
 
             let mut stream = match self.llm.chat_stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
+                    let snippet: String = e.to_string().chars().take(200).collect();
+                    info!(
+                        target: "pi_wasm_chat_diag",
+                        phase = "reasoning_chat_stream_connect_err",
+                        snippet = %snippet
+                    );
                     return Err(classify_error(&e));
                 }
             };

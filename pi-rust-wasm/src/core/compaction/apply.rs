@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::core::compaction::preheat::PreheatOutcome;
 use crate::core::session::manager::{CompactionResult, ContextState};
@@ -40,31 +40,68 @@ pub fn check_after_reply(state: &mut ContextState, event_bus: &dyn EventBus) -> 
 /// - ratio >= 0.98：未完成则 await（30s 超时）
 pub async fn check_before_request(state: &mut ContextState, event_bus: &dyn EventBus) -> bool {
     let ratio = state.usage_ratio();
+    let user_turns_len = state.user_turns_list.len();
+    let preheat_finished = state.preheat.is_finished();
+    let preheat_running = state.preheat.is_running();
+    info!(
+        target: "pi_wasm_chat_diag",
+        phase = "timing2_check_before_request_entry",
+        ratio,
+        user_turns_len,
+        preheat_finished,
+        preheat_running
+    );
 
     if ratio < 0.70 {
+        info!(
+            target: "pi_wasm_chat_diag",
+            phase = "timing2_check_before_request_exit",
+            path = "below_0_70",
+            applied = false
+        );
         return false;
     }
 
     let ratio_before = state.usage_ratio();
 
     if state.preheat.is_finished() {
-        return match state.preheat.poll_result() {
+        let applied = match state.preheat.poll_result() {
             PreheatOutcome::Completed(result) => {
                 apply_and_emit_boundary(state, result, ratio_before, false, event_bus)
             }
             _ => false,
         };
+        info!(
+            target: "pi_wasm_chat_diag",
+            phase = "timing2_check_before_request_exit",
+            path = "finished_apply",
+            applied
+        );
+        return applied;
     }
 
     if ratio >= 0.98 && state.preheat.is_running() {
-        return match state.preheat.await_result(Duration::from_secs(30)).await {
+        let applied = match state.preheat.await_result(Duration::from_secs(30)).await {
             PreheatOutcome::Completed(result) => {
                 apply_and_emit_boundary(state, result, ratio_before, true, event_bus)
             }
             _ => false,
         };
+        info!(
+            target: "pi_wasm_chat_diag",
+            phase = "timing2_check_before_request_exit",
+            path = "await_0_98_apply",
+            applied
+        );
+        return applied;
     }
 
+    info!(
+        target: "pi_wasm_chat_diag",
+        phase = "timing2_check_before_request_exit",
+        path = "no_op",
+        applied = false
+    );
     false
 }
 

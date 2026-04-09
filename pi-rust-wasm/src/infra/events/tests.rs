@@ -205,7 +205,10 @@ fn context_metrics_update_serializes_preheat_result_pending() {
         preheat_result_pending: true,
     };
     let j = serde_json::to_value(&e).unwrap();
-    assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_CONTEXT_METRICS_UPDATE);
+    assert_eq!(
+        j["type"].as_str().unwrap(),
+        wire::WIRE_CONTEXT_METRICS_UPDATE
+    );
     assert_eq!(j["preheatInProgress"].as_bool(), Some(false));
     assert_eq!(j["preheatResultPending"].as_bool(), Some(true));
 }

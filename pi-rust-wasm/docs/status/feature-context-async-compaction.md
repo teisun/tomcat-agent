@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Jerry | 2026-04-08 | PENDING_INTEGRATION | feature/context-async-compaction | - |
+| @Jerry | 2026-04-09 | PENDING_INTEGRATION | feature/context-async-compaction | - |
 
 ### ✅ DONE (已完成)
 - [x] **[P0]** 20.1 TurnEntry 增加 `id: String`；ContextState 增加 `transcript_path`/`compaction_summary`
@@ -22,6 +22,7 @@
 - [x] **`compact_tool_results` 读取 `ContextConfig.layer0_placeholder_threshold_chars`**（默认 10K，可 `[context]` 覆盖；替换原硬编码 20K）
 - [x] **`context_metrics_update` 单次 `run_reasoning_loop` 内至多两次**（首轮 LLM 前 + 收尾 / `max_tool_rounds` 耗尽；中间 tool round 不发）
 - [x] **ContextState 嵌套** `session_obs: SessionContextObservation`（刷盘子集）与 `live: ContextLiveMetrics`；`AgentLoop` 移除独立 `metrics`，瞬时指标只写 `context_state.live`
+- [x] **可观测性与日志可靠性**：`target: pi_wasm_chat_diag` 结构化 info（用户追加后、timing② 后、agent run 前、`classify_error` 各分支、L3 重试与 trim 结果、首 turn 指标、流连接错误、timing② `check_before_request` 出入路径）；CLI 在 `init_logging` 之前加载 `assets/.env` 使 `RUST_LOG` 参与 `EnvFilter`；文件与 stderr 共用同一 `EnvFilter`，`non_blocking` 的 `WorkerGuard` 在 `try_init` 成功后 `mem::forget` 避免落盘线程提前退出
 
 ### 🔌 INTERFACE (接口变更)
 

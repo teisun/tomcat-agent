@@ -217,6 +217,11 @@ pub fn run_cli() -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     ensure_embedded_assets(&cfg)?;
 
+    // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
+    if let Ok(work_dir) = get_work_dir(&cfg) {
+        let _ = dotenvy::from_path(work_dir.join("assets").join(".env"));
+    }
+
     let log_dir = resolve_log_dir(&cfg)?;
     std::fs::create_dir_all(&log_dir).map_err(AppError::Io)?;
     init_logging(
@@ -227,10 +232,6 @@ pub fn run_cli() -> Result<(), AppError> {
             None
         },
     )?;
-
-    if let Ok(work_dir) = get_work_dir(&cfg) {
-        let _ = dotenvy::from_path(work_dir.join("assets").join(".env"));
-    }
 
     match cmd {
         Commands::Config { sub } => run_config(sub, &cfg),

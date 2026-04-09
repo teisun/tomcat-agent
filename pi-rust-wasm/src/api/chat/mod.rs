@@ -4,6 +4,8 @@ use std::io::{self, Write as IoWrite};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use tracing::info;
+
 use crate::core::compaction::apply::check_before_request;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::{build_context_from_state, init_context_state, TurnEntry};
@@ -293,6 +295,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         // Update context estimate for the new user input
         context_state.on_message_appended(input.len());
+        info!(
+            target: "pi_wasm_chat_diag",
+            phase = "chat_after_user_append",
+            ratio = context_state.usage_ratio(),
+            compaction_count = context_state.session_obs.compaction_count,
+            turns = context_state.user_turns_list.len()
+        );
 
         // Timing ②: restore pending preheat + apply boundary before request
         context_state.preheat.try_restart_if_pending(
@@ -304,6 +313,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             ctx.event_bus.clone(),
         );
         check_before_request(&mut context_state, &*ctx.event_bus).await;
+        info!(
+            target: "pi_wasm_chat_diag",
+            phase = "chat_after_timing2_check",
+            cli_listeners_registered = false,
+            ratio = context_state.usage_ratio(),
+            compaction_count = context_state.session_obs.compaction_count
+        );
 
         // Build messages from ContextState
         let mut messages = build_context_from_state(&context_state);
@@ -601,6 +617,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
 
+        info!(
+            target: "pi_wasm_chat_diag",
+            phase = "chat_before_agent_run",
+            cli_listeners_registered = true
+        );
         let run_result = agent_loop.run(messages).await;
         ctx.event_bus.off(listener_id);
         ctx.event_bus.off(metrics_listener_id);
