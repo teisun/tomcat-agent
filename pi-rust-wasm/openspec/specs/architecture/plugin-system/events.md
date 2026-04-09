@@ -34,7 +34,7 @@ pub enum AgentEvent {
     AutoRetryStart { attempt: u32, #[serde(rename = "maxAttempts")] max_attempts: u32, #[serde(rename = "delayMs")] delay_ms: u64, #[serde(rename = "errorMessage")] error_message: String },
     AutoRetryEnd { success: bool, attempt: u32, #[serde(rename = "finalError")] final_error: Option<String> },
     ExtensionError { #[serde(rename = "extensionId")] extension_id: Option<String>, event: String, error: String },
-    ContextMetricsUpdate { #[serde(rename = "inputTokensUsed")] input_tokens_used: usize, #[serde(rename = "contextUtilizationRatio")] context_utilization_ratio: f64, #[serde(rename = "compactionCount")] compaction_count: u32, #[serde(rename = "compactionTokensFreed")] compaction_tokens_freed: usize, #[serde(rename = "totalToolResultBytesPersisted")] total_tool_result_bytes_persisted: usize, #[serde(rename = "preheatInProgress")] preheat_in_progress: bool },
+    ContextMetricsUpdate { #[serde(rename = "inputTokensUsed")] input_tokens_used: usize, #[serde(rename = "contextUtilizationRatio")] context_utilization_ratio: f64, #[serde(rename = "compactionCount")] compaction_count: u32, #[serde(rename = "compactionTokensFreed")] compaction_tokens_freed: usize, #[serde(rename = "totalToolResultBytesPersisted")] total_tool_result_bytes_persisted: usize, #[serde(rename = "preheatInProgress")] preheat_in_progress: bool, #[serde(rename = "preheatResultPending")] preheat_result_pending: bool },
     ToolResultPersisted { #[serde(rename = "toolName")] tool_name: String, #[serde(rename = "originalChars")] original_chars: usize, #[serde(rename = "persistedPath")] persisted_path: String },
     Layer0ContextRelease { #[serde(rename = "persistTokensFreed")] persist_tokens_freed: usize, #[serde(rename = "placeholderTokensFreed")] placeholder_tokens_freed: usize },
     ContextOverflowTrimStart { reason: String, ratio: f64 },
@@ -49,13 +49,14 @@ pub enum AgentEvent {
 |------|-------------|---------|
 | L0（timing ⑤） | `layer0_context_release` | `{ "persistTokensFreed": number, "placeholderTokensFreed": number }`（估算 tok，已计入会话 `compactionTokensFreed`） |
 | L1（async preheat） | `auto_compaction_start` | `{ "coveredCount": number, "ratioBefore": number }` |
-| L1 | `auto_compaction_end` | `{ "elapsedMs", "summaryChars", "coveredCount", "ratioAfter", "estimatedCoveredTokensBefore", "estimatedSummaryTokens", "estimatedTokensSaved" }`；`ratioAfter` 为**主线程**在即将 apply 前读取的利用率；**不在此事件时**累加会话 `compactionTokensFreed` |
-| L1（失败耗尽） | `compaction_error` | `{ "exhaustedAfterRetries": boolean, "attempts": number, "error": string, "source": string, "ratio": number \| null }` |
+| L1 | `auto_compaction_end` | `{ "elapsedMs", "summaryChars", "coveredCount", "ratioAfter", "estimatedCoveredTokensBefore", "estimatedSummaryTokens", "estimatedTokensSaved" }`；在 **L1 后台任务**于 `append_entry` 成功（或无 transcript 路径）后发射一次；`ratioAfter` 为预热启动时的利用率快照（与 L2 apply 前主线程读到的 ratio 可能不同）；**不在此事件时**累加会话 `compactionTokensFreed`。**L2** `apply_boundary` **不再**发射 `auto_compaction_end`。 |
+| L1（失败耗尽） | `compaction_error` | `{ "exhaustedAfterRetries": boolean, "attempts": number, "error": string, "source": string, "ratio": number \| null }`；典型 `source: "preheat"` |
+| L2（apply 失败） | `compaction_error` | 同上；`source: "apply"`，`exhaustedAfterRetries: false` |
 | L2 | `boundary_switched` | `{ ratioBefore, ratioAfter, coveredCount, wasSyncWait, estimatedTokensFreed }`（`estimatedTokensFreed` 等于 L1 写入 transcript 的 `estimatedTokensSaved`，apply 成功时计入会话累计） |
 | L3（overflow trim） | `context_overflow_trim_start` | `{ "reason": string, "ratio": number }` |
 | L3 | `context_overflow_trim_end` | `{ "ratioBefore", "ratioAfter", "willRetry", "estimatedTokensFreed", "turnsRemoved" }` |
 
-**`context_metrics_update`**：累计字段来自 `ContextState::session_obs`（与 `sessions.json` 在 user turn 结束时同步）；瞬时字段来自 `ContextState::live`。`totalToolResultBytesPersisted` 字段名历史兼容，**实际为 Unicode 字符累计**（L0 落盘原始长度之和）。
+**`context_metrics_update`**：累计字段来自 `ContextState::session_obs`（与 `sessions.json` 在 user turn 结束时同步）；瞬时字段来自 `ContextState::live`。`preheatInProgress`：LLM 预热任务仍在跑（`Running` 且 JoinHandle 未完成）。`preheatResultPending`：摘要已就绪、尚未被 `poll_result` 消费（`CachedCompleted`，或 `Running` 且 handle 已完成）；与 `preheatInProgress` 互斥。CLI 可对指标行做中英双语两行展示；`compactionTokensFreed` 在展示文案中可与英文 `saved` 对齐。`totalToolResultBytesPersisted` 字段名历史兼容，**实际为 Unicode 字符累计**（L0 落盘原始长度之和）。
 
 **`wire` 模块常量**（与上表 JSON `type` 一一对应，定义见 [`events/mod.rs`](../../../../src/infra/events/mod.rs) `pub mod wire`）：`WIRE_AUTO_COMPACTION_START`、`WIRE_AUTO_COMPACTION_END`、`WIRE_COMPACTION_ERROR`、`WIRE_BOUNDARY_SWITCHED`、`WIRE_CONTEXT_OVERFLOW_TRIM_START`、`WIRE_CONTEXT_OVERFLOW_TRIM_END`、`WIRE_LAYER0_CONTEXT_RELEASE`。
 

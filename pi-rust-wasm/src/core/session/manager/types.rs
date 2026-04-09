@@ -98,6 +98,7 @@ pub struct ContextLiveMetrics {
     pub input_tokens_used: usize,
     pub context_utilization_ratio: f64,
     pub preheat_in_progress: bool,
+    pub preheat_result_pending: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -135,11 +136,12 @@ impl ContextState {
         self.post_usage_appended_chars += content_len;
     }
 
-    /// 新 user turn 完成后追加到 turns 列表并更新估算。
+    /// 将本轮对话包登记到 `user_turns_list`（供后续 `build_context_from_state` / 压缩等使用）。
+    ///
+    /// **不计入** `estimate_context_chars` / `post_usage_appended_chars`：同一轮的用户句、assistant
+    /// 与 tool 结果已在 `chat` 的 `on_message_appended` 与 `agent_loop` 内增量累加；此处再按
+    /// `estimate_turn_chars` 加一遍会导致下一轮「首轮 LLM 前」的 `context_metrics` 虚高（约一整轮重复）。
     pub fn on_new_user_turn(&mut self, turn: TurnEntry) {
-        let chars = estimate_turn_chars(&turn);
-        self.estimate_context_chars += chars;
-        self.post_usage_appended_chars += chars;
         self.user_turns_list.push(turn);
     }
 

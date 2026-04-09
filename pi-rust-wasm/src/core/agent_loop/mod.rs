@@ -98,7 +98,10 @@
 //!     ├── 含 "429" / "500" / "502" / "503" / "超时" / "请求失败"
 //!     │       └──► LoopError::Retryable  →  第二层指数退避重试
 //!     │
-//!     ├── 含 "401" / "400"
+//!     ├── is_context_overflow_error（如 400 + context_length_exceeded）
+//!     │       └──► LoopError::Retryable  →  可触发 L3 截断后再试
+//!     │
+//!     ├── 含 "401" / 含 "400" 且非上下文溢出
 //!     │       └──► LoopError::Fatal      →  立即终止，agent_end(error)
 //!     │
 //!     └── 其他

@@ -228,6 +228,8 @@ pub enum AgentEvent {
         total_tool_result_bytes_persisted: usize,
         #[serde(rename = "preheatInProgress")]
         preheat_in_progress: bool,
+        #[serde(rename = "preheatResultPending")]
+        preheat_result_pending: bool,
     },
     ToolResultPersisted {
         #[serde(rename = "toolName")]

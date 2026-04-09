@@ -8,10 +8,8 @@
 # level：日志级别。控制输出到 stderr 的日志最低等级。
 # 取值：trace | debug | info | warn | error。用于排查问题时可设为 debug。
 level = "info"
-# file_enabled：是否同时把日志写入文件。true 时写入 work_dir/agents/main/logs/，便于事后排查。
+# file_enabled：是否同时把 tracing 写入文件。true 时写入 work_dir/agents/{agent.id}/logs/，按日切分（文件名前缀 pi_wasm），便于事后排查。
 file_enabled = true
-# file_roll_size_mb：单个日志文件最大体积（MB），超过后滚动到新文件。仅 file_enabled 时生效。
-file_roll_size_mb = 10
 
 # ------------------------------------------------------------------------------
 # [llm] LLM 接入配置：大模型 API 地址、密钥、限流与重试

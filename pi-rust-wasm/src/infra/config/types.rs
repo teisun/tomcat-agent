@@ -15,22 +15,17 @@ pub enum PermissionLevel {
     Trusted,
 }
 
-/// 日志配置：级别、是否写文件、滚动大小。日志目录由 [`resolve_log_dir`] 从 work_dir 推导。
+/// 日志配置：级别、是否写文件。文件目录由 [`resolve_log_dir`] 推导；按日滚动、文件名前缀 `pi_wasm`（见 [`crate::init_logging`]）。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
     #[serde(default)]
     pub file_enabled: bool,
-    #[serde(default = "default_log_roll_size")]
-    pub file_roll_size_mb: u64,
 }
 
 fn default_log_level() -> String {
     "info".to_string()
-}
-fn default_log_roll_size() -> u64 {
-    10
 }
 
 impl Default for LogConfig {
@@ -38,7 +33,6 @@ impl Default for LogConfig {
         Self {
             level: default_log_level(),
             file_enabled: false,
-            file_roll_size_mb: default_log_roll_size(),
         }
     }
 }

@@ -15,8 +15,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
-    validate_config, AppError,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, init_logging, load_config,
+    normalize_path, resolve_log_dir, validate_config, AppError,
 };
 
 pub(crate) use audit_cmd::run_audit;
@@ -216,6 +216,17 @@ pub fn run_cli() -> Result<(), AppError> {
     }
     ensure_work_dir_structure(&cfg)?;
     ensure_embedded_assets(&cfg)?;
+
+    let log_dir = resolve_log_dir(&cfg)?;
+    std::fs::create_dir_all(&log_dir).map_err(AppError::Io)?;
+    init_logging(
+        &cfg.log,
+        if cfg.log.file_enabled {
+            Some(log_dir.as_path())
+        } else {
+            None
+        },
+    )?;
 
     if let Ok(work_dir) = get_work_dir(&cfg) {
         let _ = dotenvy::from_path(work_dir.join("assets").join(".env"));

@@ -895,6 +895,10 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         p["totalToolResultBytesPersisted"].as_u64().is_some(),
         "payload 应含 totalToolResultBytesPersisted"
     );
+    assert!(
+        p["preheatResultPending"].is_boolean(),
+        "payload 应含 preheatResultPending"
+    );
 
     let order = events_order.lock().unwrap();
     let metrics_pos = order

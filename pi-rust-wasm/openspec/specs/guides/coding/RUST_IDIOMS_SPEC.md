@@ -198,13 +198,13 @@ Rust 的 `///` doc comment 语义是附着到紧随其后的 item。如果 `///`
 ///
 /// 优先使用环境变量 `RUST_LOG`。
 
-pub fn init_logging(cfg: &LogConfig) -> Result<(), AppError> { ... }
+pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), AppError> { ... }
 
 // GOOD — doc comment 紧贴 item
 /// 使用 [`LogConfig`] 初始化 tracing。
 ///
 /// 优先使用环境变量 `RUST_LOG`。
-pub fn init_logging(cfg: &LogConfig) -> Result<(), AppError> { ... }
+pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), AppError> { ... }
 ```
 
 ---

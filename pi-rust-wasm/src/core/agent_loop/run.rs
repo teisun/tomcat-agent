@@ -102,10 +102,13 @@ impl AgentLoop {
         if let Some(ref mut ctx_state) = self.context_state {
             let input_tokens_used = ctx_state.estimated_token_count();
             let context_utilization_ratio = ctx_state.usage_ratio();
-            let preheat_in_progress = ctx_state.preheat.is_running();
+            let preheat_in_progress = ctx_state.preheat.is_warmup_task_active();
+            let preheat_result_pending = ctx_state.preheat.preheat_result_pending();
             ctx_state.live.input_tokens_used = input_tokens_used;
             ctx_state.live.context_utilization_ratio = context_utilization_ratio;
             ctx_state.live.preheat_in_progress = preheat_in_progress;
+            ctx_state.live.preheat_result_pending =
+                preheat_result_pending && !preheat_in_progress;
         }
         if let Some(ref ctx_state) = self.context_state {
             self.emit_event(AgentEvent::ContextMetricsUpdate {
@@ -117,6 +120,7 @@ impl AgentLoop {
                     .session_obs
                     .tool_result_chars_persisted,
                 preheat_in_progress: ctx_state.live.preheat_in_progress,
+                preheat_result_pending: ctx_state.live.preheat_result_pending,
             });
         }
     }

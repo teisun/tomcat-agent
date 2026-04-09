@@ -382,6 +382,27 @@ fn classify_error_fatal_401() {
     assert!(matches!(r, LoopError::Fatal(_)));
 }
 
+#[test]
+fn classify_error_context_length_400_is_retryable() {
+    let body = r#"{"error":{"message":"Input tokens exceed limit","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#;
+    let e = AppError::Llm(format!("API 错误 400: {}", body));
+    let r = classify_error(&e);
+    assert!(
+        matches!(r, LoopError::Retryable(_)),
+        "OpenAI 400 context_length_exceeded must be Retryable so L3 trim can run"
+    );
+}
+
+#[test]
+fn classify_error_generic_400_stays_fatal() {
+    let e = AppError::Llm(
+        r#"API 错误 400: {"error":{"message":"invalid model","type":"invalid_request_error"}}"#
+            .to_string(),
+    );
+    let r = classify_error(&e);
+    assert!(matches!(r, LoopError::Fatal(_)));
+}
+
 /// 重试：Mock LLM 先返回 429 再返回成功 -> 自动重试后得到文本。
 #[tokio::test]
 async fn run_retries_on_429_then_succeeds() {
@@ -908,6 +929,8 @@ async fn context_metrics_update_payload_contains_valid_values() {
     assert!(p["compactionCount"].is_u64());
     assert!(p["compactionTokensFreed"].is_u64());
     assert!(p["totalToolResultBytesPersisted"].is_u64());
+    assert_eq!(p["preheatInProgress"].as_bool(), Some(false));
+    assert_eq!(p["preheatResultPending"].as_bool(), Some(false));
 }
 
 /// 多轮工具时仅发射两次 context_metrics（首请求前 + 最终 timing ⑤ 后）；compaction_count 在后一次 payload 中单调不减于前一次。

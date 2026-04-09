@@ -1,3 +1,4 @@
+use crate::core::compaction::is_context_overflow_error;
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::infra::error::AppError;
 
@@ -96,7 +97,14 @@ pub fn agent_messages_from_chat(messages: &[ChatMessage]) -> Vec<AgentMessage> {
 
 pub(super) fn classify_error(err: &AppError) -> LoopError {
     let s = err.to_string();
-    if s.contains("401") || s.contains("400") {
+    if s.contains("401") {
+        return LoopError::Fatal(s);
+    }
+    // HTTP 400 + context_length_exceeded 等：须为 Retryable，Attempt loop 才能走 L3 截断。
+    if is_context_overflow_error(&s) {
+        return LoopError::Retryable(s);
+    }
+    if s.contains("400") {
         return LoopError::Fatal(s);
     }
     if s.contains("429")

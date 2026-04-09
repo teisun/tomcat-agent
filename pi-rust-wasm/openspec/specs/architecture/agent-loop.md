@@ -361,8 +361,8 @@ agent_start              ← 第一层开始，用户消息进入
 
 | 类别 | 处理方 | 示例 | 行为 |
 |------|--------|------|------|
-| **可重试** | 第二层 Attempt Loop | ContextOverflow、RateLimit、NetworkTimeout、ServerError(5xx) | Compaction / 指数退避后重试 |
-| **致命** | 直接终止 | 401、400、ModelNotFound、MaxAttemptsExceeded | 发布 agent_end { error } |
+| **可重试** | 第二层 Attempt Loop | ContextOverflow（含 API 400 `context_length_exceeded` 等，见 `is_context_overflow_error`）、RateLimit、NetworkTimeout、ServerError(5xx) | L3 物理截断（若有 ContextState）/ 指数退避后重试 |
+| **致命** | 直接终止 | 401、非上下文类 400（如 invalid model）、ModelNotFound、MaxAttemptsExceeded | 发布 agent_end { error } |
 | **工具错误** | 不终止 Loop | 文件不存在、权限拒绝、命令失败 | 作为 ToolResult 返回 LLM，由 LLM 调整策略 |
 
 ---

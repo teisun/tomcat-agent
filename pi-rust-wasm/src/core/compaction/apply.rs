@@ -80,20 +80,6 @@ fn apply_and_emit_boundary(
     event_bus: &dyn EventBus,
 ) -> bool {
     let covered_count = result.covered_count;
-    let ratio_after_pre_apply = state.usage_ratio();
-    emit_agent_event(
-        event_bus,
-        AgentEvent::AutoCompactionEnd {
-            elapsed_ms: result.preheat_elapsed_ms,
-            summary_chars: result.summary_text.len(),
-            covered_count,
-            ratio_after: ratio_after_pre_apply,
-            estimated_covered_tokens_before: result.estimated_covered_tokens_before.unwrap_or(0),
-            estimated_summary_tokens: result.estimated_summary_tokens.unwrap_or(0),
-            estimated_tokens_saved: result.estimated_tokens_saved.unwrap_or(0),
-        },
-    );
-
     let saved = result.estimated_tokens_saved.unwrap_or(0);
 
     match state.apply_boundary(result.clone()) {
@@ -120,6 +106,17 @@ fn apply_and_emit_boundary(
         }
         Err(e) => {
             warn!("apply_boundary failed: {}", e);
+            emit_agent_event(
+                event_bus,
+                AgentEvent::CompactionError {
+                    exhausted_after_retries: false,
+                    attempts: 0,
+                    error: e.to_string(),
+                    source: "apply".to_string(),
+                    ratio: Some(state.usage_ratio()),
+                },
+            );
+            state.preheat.restore_pending_result(result);
             false
         }
     }

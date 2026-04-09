@@ -52,7 +52,7 @@ Layer 3  Reasoning Loop
 - **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `AgentMessage::Steering { text, timestamp }`；第三层每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
 - **AgentLoop::follow_up(&self, msg: String)**：向 follow_up_queue 推入 `AgentMessage::User { text }`；第一层循环尾部检查，非空则 drain 追加到 messages 并 continue。
 - **AgentLoop::abort(&self)**：将 `abort_signal` 置为 true；第三层每工具执行前检查，为 true 则返回 `Err` 并发布 agent_end(interrupted)。
-- **LoopError**（内部）：`Retryable(String)`、`Fatal(String)`、`Aborted`；`classify_error(AppError)` 将 429/5xx/超时/请求失败等归为 Retryable，401/400 归为 Fatal。
+- **LoopError**（内部）：`Retryable(String)`、`Fatal(String)`、`Aborted`；`classify_error(AppError)` 将 429/5xx/超时/请求失败及**上下文/长度类溢出**（含 OpenAI 400 `context_length_exceeded`）归为 Retryable（后者配合 L3 截断）；**401** 与**非溢出类** **400** 归为 Fatal。
 - **compact_messages(messages, keep_recent)**：（已废弃）MVP 压缩。由 ContextState + 四层防护替代。
 
 ### 3.2 上下文管理 API（TASK-17）

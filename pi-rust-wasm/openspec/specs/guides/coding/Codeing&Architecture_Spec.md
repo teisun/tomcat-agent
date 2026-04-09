@@ -527,6 +527,7 @@ if let Some(ref ctx_state) = self.context_state {
         compaction_tokens_freed: ctx_state.session_obs.compaction_tokens_freed,
         total_tool_result_bytes_persisted: ctx_state.session_obs.tool_result_chars_persisted,
         preheat_in_progress: ctx_state.live.preheat_in_progress,
+        preheat_result_pending: ctx_state.live.preheat_result_pending,
     });
 }
 ```

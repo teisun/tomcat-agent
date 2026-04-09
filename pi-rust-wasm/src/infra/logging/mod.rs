@@ -1,4 +1,4 @@
-//! 基于 tracing 的分级日志：控制台与按大小滚动的文件输出。
+//! 基于 tracing 的分级日志：控制台 stderr 与可选按日滚动的文件输出。
 //! 禁止在日志中打印敏感信息（API 密钥等）。
 
 use std::path::Path;
@@ -54,14 +54,15 @@ pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), super
         None
     };
 
-    if let Some(file_layer) = file_layer {
+    // try_init：进程内只允许一个全局 subscriber；重复调用（如单测多次跑 CLI）时忽略已初始化。
+    let _ = if let Some(file_layer) = file_layer {
         tracing_subscriber::registry()
             .with(fmt_layer)
             .with(file_layer)
-            .init();
+            .try_init()
     } else {
-        tracing_subscriber::registry().with(fmt_layer).init();
-    }
+        tracing_subscriber::registry().with(fmt_layer).try_init()
+    };
     Ok(())
 }
 

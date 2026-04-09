@@ -2,7 +2,7 @@ use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER};
 use super::*;
 use crate::core::agent_loop::AgentMessage;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::session::manager::{ContextState, TurnEntry};
+use crate::core::session::manager::{CompactionResult, ContextState, TurnEntry};
 use crate::infra::config::ContextConfig;
 
 const TS: &str = "2026-04-04T12:00:00Z";
@@ -13,6 +13,39 @@ fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
         messages,
         timestamp: TS.to_string(),
     }
+}
+
+fn dummy_compaction_result() -> CompactionResult {
+    CompactionResult {
+        summary_text: "summary".into(),
+        covered_start_id: "start".into(),
+        covered_end_id: "end".into(),
+        covered_count: 1,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: Some(10),
+        estimated_summary_tokens: Some(2),
+        estimated_tokens_saved: Some(8),
+        preheat_elapsed_ms: 0,
+    }
+}
+
+#[test]
+fn preheat_restore_pending_result_keeps_non_idle_until_consumed() {
+    let mut p = Preheat::new();
+    assert!(p.is_idle());
+    p.restore_pending_result(dummy_compaction_result());
+    assert!(!p.is_idle());
+    assert!(p.is_finished());
+}
+
+#[test]
+fn preheat_warmup_active_vs_result_pending() {
+    let mut p = Preheat::new();
+    assert!(!p.is_warmup_task_active());
+    assert!(!p.preheat_result_pending());
+    p.restore_completed(dummy_compaction_result());
+    assert!(!p.is_warmup_task_active());
+    assert!(p.preheat_result_pending());
 }
 
 fn make_state(chars: usize, budget_chars: usize, budget_tokens: usize) -> ContextState {
@@ -145,6 +178,8 @@ fn context_state_on_new_user_turn() {
     let turn = make_user_turn(vec![AgentMessage::User {
         text: "hello".to_string(),
     }]);
+    // 与 chat + agent_loop 一致：内容先经 on_message_appended，再登记 turn（避免双重计入）。
+    state.on_message_appended(5);
     state.on_new_user_turn(turn);
     assert_eq!(state.user_turns_list.len(), 1);
     assert_eq!(state.estimate_context_chars, 5);

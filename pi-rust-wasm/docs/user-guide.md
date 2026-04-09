@@ -188,7 +188,6 @@ pi config get
 [log]
 level = "info"
 file_enabled = true
-file_roll_size_mb = 10
 
 [llm]
 provider = "openai"

@@ -155,6 +155,23 @@ impl Preheat {
         matches!(self.state, PreheatState::Running { .. })
     }
 
+    /// LLM 摘要任务仍在执行（`Running` 且 JoinHandle 未完成）。
+    pub fn is_warmup_task_active(&self) -> bool {
+        matches!(
+            &self.state,
+            PreheatState::Running { handle, .. } if !handle.is_finished()
+        )
+    }
+
+    /// 摘要已在内存/磁盘就绪，尚未被 `poll_result` 消费并进入 apply。
+    pub fn preheat_result_pending(&self) -> bool {
+        match &self.state {
+            PreheatState::CachedCompleted { .. } => true,
+            PreheatState::Running { handle, .. } => handle.is_finished(),
+            _ => false,
+        }
+    }
+
     pub fn is_exhausted_pending(&self) -> bool {
         matches!(self.state, PreheatState::ExhaustedPending)
     }
@@ -185,11 +202,28 @@ impl Preheat {
         }
     }
 
+    /// `poll_result` 已交出 `CompactionResult` 且 `apply_boundary` 失败时调用：回到 `CachedCompleted`，
+    /// 以便后续重试 apply，并避免 `Preheat` 误留在 `Idle` 导致 timing ⑤ 再次 `try_start`、叠未应用摘要。
+    pub(crate) fn restore_pending_result(&mut self, result: CompactionResult) {
+        match self.state {
+            PreheatState::Idle => {
+                self.state = PreheatState::CachedCompleted { result };
+            }
+            _ => {
+                warn!(
+                    "restore_pending_result: expected Idle after failed apply, state={:?}",
+                    self
+                );
+            }
+        }
+    }
+
     // --- 状态转换 ---
 
-    /// Idle → Running。条件：ratio >= 0.50、有 turns、当前 Idle。
+    /// Idle → Running。条件：ratio >= 0.50、有 turns、且当前为 **Idle**。
+    /// `CachedCompleted` / `Running` / `ExhaustedPending` 时均不启动，避免已有未消费摘要时又开新预热。
     /// spawn 内 generate_summary 最多 3 次 retry；
-    /// 成功 emit AutoCompactionEnd，耗尽 emit CompactionError(exhausted)。
+    /// 成功且 append_entry 成功（或无 transcript 路径）时 emit AutoCompactionEnd；耗尽 emit CompactionError(exhausted)。
     /// 返回 true = 已启动。
     ///
     /// 接受独立参数而非 `&ContextState`，避免与 `ctx.preheat` 的 `&mut self` 冲突。
@@ -260,20 +294,20 @@ impl Preheat {
                             estimated_tokens_saved: Some(est_saved),
                         });
 
-                        let transcript_compaction_entry_id =
+                        let (transcript_compaction_entry_id, append_ok) =
                             if transcript_path.as_os_str().is_empty() {
-                                None
+                                (None, true)
                             } else {
                                 match append_entry(&transcript_path, &compaction_entry) {
-                                    Ok(()) => Some(entry_id),
+                                    Ok(()) => (Some(entry_id), true),
                                     Err(e) => {
                                         warn!("preheat append_entry failed: {}", e);
-                                        None
+                                        (None, false)
                                     }
                                 }
                             };
 
-                        return Ok(CompactionResult {
+                        let result = CompactionResult {
                             summary_text,
                             covered_start_id: first_id,
                             covered_end_id: last_id,
@@ -283,7 +317,24 @@ impl Preheat {
                             estimated_summary_tokens: Some(est_summary_tok),
                             estimated_tokens_saved: Some(est_saved),
                             preheat_elapsed_ms: elapsed_ms,
-                        });
+                        };
+
+                        if append_ok {
+                            emit_agent_event(
+                                &*eb,
+                                AgentEvent::AutoCompactionEnd {
+                                    elapsed_ms,
+                                    summary_chars: result.summary_text.len(),
+                                    covered_count,
+                                    ratio_after: ratio_before,
+                                    estimated_covered_tokens_before: est_covered_tok,
+                                    estimated_summary_tokens: est_summary_tok,
+                                    estimated_tokens_saved: est_saved,
+                                },
+                            );
+                        }
+
+                        return Ok(result);
                     }
                     Err(e) => {
                         last_error = e.to_string();

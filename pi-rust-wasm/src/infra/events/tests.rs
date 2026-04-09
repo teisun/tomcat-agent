@@ -192,3 +192,20 @@ fn boundary_switched_serializes() {
     assert_eq!(j["coveredCount"].as_u64().unwrap(), 4);
     assert!(!j["wasSyncWait"].as_bool().unwrap());
 }
+
+#[test]
+fn context_metrics_update_serializes_preheat_result_pending() {
+    let e = AgentEvent::ContextMetricsUpdate {
+        input_tokens_used: 100,
+        context_utilization_ratio: 0.5,
+        compaction_count: 0,
+        compaction_tokens_freed: 0,
+        total_tool_result_bytes_persisted: 0,
+        preheat_in_progress: false,
+        preheat_result_pending: true,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(j["type"].as_str().unwrap(), wire::WIRE_CONTEXT_METRICS_UPDATE);
+    assert_eq!(j["preheatInProgress"].as_bool(), Some(false));
+    assert_eq!(j["preheatResultPending"].as_bool(), Some(true));
+}

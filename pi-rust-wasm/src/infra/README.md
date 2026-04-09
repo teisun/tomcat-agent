@@ -98,7 +98,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 ### 3.2 配置 (AppConfig 及子结构)
 
 - **AppConfig**：顶层配置，包含 `log`、`llm`、`storage`、`plugin`、`security`、`primitive`。
-- **LogConfig**：`level`（trace/debug/info/warn/error）、`file_enabled`、`file_path`、`file_roll_size_mb`。
+- **LogConfig**：`level`（trace/debug/info/warn/error）、`file_enabled`。文件目录为 `resolve_log_dir`（`work_dir/agents/{id}/logs/`），按日滚动、文件名前缀 `pi_wasm`，最多保留 5 个历史文件。
 - **LlmConfig**：`provider`、`api_base`、`api_key_env`、`default_model`、`max_concurrent_requests`、`retry_count`、`stream_timeout_sec`；可选 `proxy`（显式 HTTP 代理 URL，如 `http://127.0.0.1:7890`，未设置时仍使用环境变量 `HTTPS_PROXY`/`HTTP_PROXY`）；可选 `api_base_fallback`（当对主 API 地址请求不通时自动用该 URL 重试，示例 `https://api.chatanywhere.tech`，留空关闭自动降级）。
 - **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认 `~/.pi_/`；多 agent 子目录与数据布局见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)）。
 - **PluginConfig**：`plugins_dir`、`auto_load`。
@@ -144,7 +144,7 @@ pub trait EventBus: Send + Sync + 'static {
 ### 3.5 平台与日志
 
 - **platform**：`normalize_path(path)`、`read_file_utf8(path)`、`write_file_atomic(path, content)`、`current_dir()`、`system_info()`（`SystemInfo { os, arch }`）。
-- **logging**：`init_logging(cfg: &LogConfig) -> Result<(), AppError>`，基于 tracing，控制台 + 可选按天滚动文件，禁止在日志中打印敏感信息。
+- **logging**：`init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), AppError>`，基于 tracing：stderr；`file_enabled` 且 `log_dir = Some(resolve_log_dir(...))` 时另写按日文件。禁止在日志中打印敏感信息。CLI 在 `run_cli` 中于 `ensure_work_dir_structure` 之后调用。
 
 ---
 
@@ -155,9 +155,7 @@ pub trait EventBus: Send + Sync + 'static {
 | `PI_WASM__*`（`__` 为嵌套分隔） | 覆盖对应配置项 | - |
 | 配置文件 | TOML，由 `load_config(Some(path))` 指定 | - |
 | `log.level` | trace / debug / info / warn / error | info |
-| `log.file_enabled` | 是否写文件 | false |
-| `log.file_path` | 日志文件路径 | pi_wasm.log |
-| `log.file_roll_size_mb` | 滚动大小（MB） | 10 |
+| `log.file_enabled` | 是否将 tracing 写入 `resolve_log_dir` 下按日文件 | false |
 | `llm.proxy` | 显式 HTTP 代理 URL；不设时 reqwest 使用 `HTTPS_PROXY`/`HTTP_PROXY` | - |
 | `llm.api_base_fallback` | 主 API 不通时自动重试的备用 base | - |
 | `storage.sessions_dir` | 会话目录 | ~/.pi/agent/sessions |
@@ -175,7 +173,7 @@ pub trait EventBus: Send + Sync + 'static {
 
 1. 调用 `load_config(Some(config_path))` 或 `load_config(None)` 得到 `AppConfig`。
 2. 调用 `validate_config(&cfg)`，失败则拒绝启动。
-3. 调用 `init_logging(&cfg.log)` 初始化 tracing。
+3. `create_dir_all(resolve_log_dir(&cfg)?)` 后调用 `init_logging(&cfg.log, log_dir)`（`file_enabled` 时 `Some(resolve_log_dir(...))`，否则 `None`）。CLI 已接入 `run_cli`。
 
 ### 5.2 事件总线典型流程
 
