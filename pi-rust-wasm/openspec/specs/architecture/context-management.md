@@ -496,7 +496,7 @@ init_context_state 处理流程：
 
 - **保留**：原先写入的 `Message` 行（user / assistant / tool）**不删除、不改写**，仍在 `.jsonl` 中，便于审计、回放与调试。
 - **Compaction**：预热 **追加** 一行 `type: compaction`，`is_boundary=false`，并写入稳定 **`id`**（及可选 `preheatCompactionId`）；Boundary 切换时 **按 `id` 原地**将 `isBoundary` 置为 `true`（**不**再追加一条带全文摘要的新行）。开发阶段 **不** 向前兼容历史上「false 一行 + true 一行双份全文」JSONL。
-- **构建 LLM 上下文**：`userTurnsList` / `build_context_messages` 在内存中按 Compaction 元数据 **折叠**——已摘要区间只表现为一条 summary，**不把同一区间的原始 Message 再次拼进 prompt**（避免双倍 token）。
+- **构建 LLM 上下文**：`userTurnsList` / `build_context_from_state` 在内存中按 Compaction 元数据 **折叠**——已摘要区间只表现为一条 summary，**不把同一区间的原始 Message 再次拼进 prompt**（避免双倍 token）。
 
 若未来需要「物理瘦身」大文件，可作为独立运维能力（压缩归档副本），**不**作为默认行为。
 
@@ -504,19 +504,102 @@ init_context_state 处理流程：
 
 #### 现有三种消息类型
 
+下列三列表示三种**并存**的表示层；**列从左到右**刻意排成 **持久化 → 内部工作集 → LLM wire**，与「发往 API」的方向一致：**先 `AgentMessage`，再 `convert_to_llm_format` → `ChatMessage`**（与下方含 `userTurnsList` 的第二张图一致）。  
+
+另：`agent_messages_from_chat` 用于**已有** `Vec<ChatMessage>` 时转为 `Vec<AgentMessage>`（测试、回放等）；**从 transcript 恢复主路径**是 JSONL → `userTurnsList` → `build_context_from_state`（展平为 `AgentMessage`），**不经过**该函数。
+
 ```
-  ┌─ transcript JSONL ─┐    ┌── chat.rs ──────┐    ┌── AgentLoop ──────────┐
-  │ serde_json::Value   │    │ ChatMessage      │    │ AgentMessage           │
-  │ (磁盘持久化格式)    │    │ (LLM 请求格式)  │    │ (agent 内部富类型)     │
-  └─────────┬──────────┘    └───────┬─────────┘    └─────────┬─────────────┘
-            │                       │                         │
-            │ build_context_messages│ agent_messages_from_chat │ convert_to_llm_format
-            │ (JSON → ChatMessage)  │ (ChatMessage → Agent)   │ (Agent → ChatMessage)
-            ▼                       ▼                         ▼
-  历史加载 ────────────► 拼装初始消息 ──────────► reasoning loop 每轮发 LLM
+  ┌─ transcript JSONL ─┐    ┌── AgentMessage ─────────────┐    ┌── ChatMessage ──────┐
+  │ serde_json::Value   │    │ AgentLoop 工作集 / 富类型    │    │ LLM 请求/响应格式    │
+  │ (磁盘持久化格式)    │    │ (内部：User/Assistant/…)    │    │ (API 载荷)          │
+  └─────────┬──────────┘    └─────────┬───────────────────┘    └─────────▲──────────┘
+            │                           │                              │
+            │ init + fold               │ 每轮请求前                     │
+            │ build_context_from_state  │ convert_to_llm_format ─────────┘
+            └──────────────────────────►│
+            （自 userTurnsList 展平；见第二张图）
+
+  ④ LLM / run 结束后（见第二张图展开）：
+       AgentRunResult.new_messages ──► TurnEntry::UserTurn ──on_new_user_turn──► userTurnsList
+       └─ 通常为 messages[start_idx..]（本轮循环内新追加片段；chat 路径上用户句常已先 append 到 JSONL）
+
+  落盘：本轮 new_messages ──convert_to_llm_format──► ChatMessage ──serde_json──► JSONL 行追加
 ```
 
-- `**serde_json::Value**`：transcript JSONL 的原始 JSON 行，`build_context_messages` 从中读取。
+将 `userTurnsList` 纳入同一纵深的示意图如下（**不是**第四种 wire 格式，而是 JSONL 与 `Vec<AgentMessage>` 之间的**内存分组层**）：
+
+```
+  磁盘 / 会话初始化                         上下文管理（内存）                    Agent / LLM
+  ══════════════════                        ═══════════════════                   ═══════════
+
+  ┌─────────────────────┐
+  │ transcript JSONL    │
+  │ (serde_json::Value  │
+  │  逐行持久化)        │
+  └──────────┬──────────┘
+             │
+             │  BufReader 逐行 + fold_entries / boundary
+             │  （按 user turn 分组，Compaction 区间折叠成 SummaryTurn）
+             ▼
+  ┌─────────────────────────────────────────────────────────┐
+  │  userTurnsList: Vec<UserTurn | SummaryTurn>             │
+  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐ │
+  │  │ SummaryTurn? │ │   UserTurn   │ │     UserTurn     │ │
+  │  │  (摘要占位)  │ │ messages:[]  │ │   messages:[]    │ │
+  │  └──────────────┘ └──────────────┘ └──────────────────┘ │
+  │         ↑ 仅内存视图；不是第四种「消息 wire 格式」          │
+  └────────────────────────────┬────────────────────────────┘
+                               │
+                               │  ② 本轮发起 LLM 请求前
+                               │     userTurnsList.flatten()
+                               │     + system + 本轮 User
+                               ▼
+                        ┌─────────────────────┐      ┌─────────────────────┐
+                        │ Vec<AgentMessage>   │      │ Vec<ChatMessage>    │
+                        │ reasoning loop      │ ──►  │ ChatRequest.messages│
+                        │ 工作集 messages     │      │ convert_to_llm_     │
+                        └──────────┬──────────┘      │ format(...)         │
+                                   │                 └──────────┬──────────┘
+                                                                ▼
+                                                       ┌─────────────┐
+                                                       │  LLM 流式   │
+                                                       └──────┬──────┘
+                                                              │
+                        ┌─────────────────────────────────────┘
+                        │  reasoning loop 结束（含 tool 轮），run 返回 Ok(AgentRunResult)
+                        ▼
+               ┌────────────────────────────┐
+               │ new_messages =             │
+               │ messages[start_idx..]      │  ← start_idx：run 入口在合并 steering 后
+               │ （本轮相对前缀新增长度）    │    对 messages 做快照；中途 L3 trim 会重算
+               └─────────────┬──────────────┘
+                             │
+                             │  TurnEntry::UserTurn { id, messages: new_messages, ... }
+                             ▼
+               ┌────────────────────────────┐
+               │ ContextState::             │
+               │ on_new_user_turn(turn)     │
+               └─────────────┬──────────────┘
+                             │
+                             │  user_turns_list.push(…)
+                             ▼
+               ┌─────────────────────────────────────────────────────────┐
+               │  userTurnsList（末尾新增一个 UserTurn，供下一轮 ② flatten） │
+               └────────────────────────────┬────────────────────────────┘
+                                            │
+                                            │  convert_to_llm_format(&new_messages)
+                                            │  + append_message（逐 ChatMessage 行）
+                                            ▼
+                                    transcript JSONL（与 run 前已写的 user 行衔接）
+
+  ⑤ 随后：Layer 0 / 预热等在本轮 turn 已入表前提下运行（见 §1「关键时序」步骤⑤与 §6）；此处从略。
+```
+
+（另有从 `ChatMessage` 经 `agent_messages_from_chat` 得到 `Vec<AgentMessage>` 的路径，与 transcript 主路径在「进入 AgentLoop」前语义汇合；本图只强调 **JSONL ↔ userTurnsList ↔ flatten** 主链路。）
+
+读图要点：**进入 reasoning loop 前**由 `flatten` 得到 `AgentMessage` 序列；**LLM / run 返回后**用 `new_messages` 构造 `TurnEntry::UserTurn` 并 `on_new_user_turn` 追加到 `userTurnsList`，再 `convert_to_llm_format` 写 JSONL；L0/L1/L2 在 turn 已入表后作用于 `userTurnsList`，下一轮 ② 再 `flatten` 重建（与下方「发给 LLM 的完整链路」一致）。
+
+- `**serde_json::Value**`：transcript JSONL 的原始 JSON 行；会话初始化时流式读入并折叠进 `userTurnsList`（见 `init_context_state` / `fold_entries_to_turns` 等），**不是**先整体变成 `ChatMessage` 再转 `AgentMessage`。
 - `**ChatMessage**`：LLM 请求/响应格式（`role` + `content` + `tool_calls`），由 `src/core/llm/types.rs` 定义。
 - `**AgentMessage**`：agent loop 内部富类型（User / Assistant / ToolResult / System / **Steering** / **CompactionSummary**），比 `ChatMessage` 多出 `Steering`（用户中途注入指令）和 `CompactionSummary`（摘要）。
 
@@ -590,12 +673,12 @@ init_context_state 处理流程：
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ ④ user turn 完成：打包 + 持久化                                          │
   │                                                                         │
-  │  当前 turn 内的全部 messages 打包：                                      │
-  │    current_turn = UserTurn {                                            │
-  │        messages: [User, Assistant, ToolResult, ..., Assistant(final)]    │
-  │    }                                                                    │
+  │  打包（与 §5.6 大图一致）：`new_messages = messages[start_idx..]`，        │
+  │    `TurnEntry::UserTurn { messages: new_messages, ... }`                │
+  │  （chat：`new_messages` 多为本轮 assistant/tool；user 行常已先写 JSONL；   │
+  │    hydrate 自磁盘的 `UserTurn` 可含完整 user+assistant）                   │
   │  userTurnsList.push(current_turn)          ← 此时才追加                  │
-  │  写入 transcript JSONL（各 Message entry）                               │
+  │  再 `convert_to_llm_format` + 写入 transcript 中尚未落盘的 Message 行    │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼

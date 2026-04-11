@@ -352,7 +352,7 @@ pub fn init_context_state(
             });
         }
     };
-
+    // TODO: 这里读取了 transcript 的最后 2000 条 entries，需要优化为只读取当天 entries。
     let entries = read_entries_tail(&path, super::BRANCH_MAX_ENTRIES)?;
     let today = Utc::now().date_naive();
 

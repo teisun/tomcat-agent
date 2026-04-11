@@ -27,6 +27,8 @@ use super::render::MarkdownRenderer;
 #[cfg(test)]
 mod tests;
 
+mod session_stderr_listeners;
+
 // ─── ChatContext ──────────────────────────────────────────────────────────────
 
 pub struct ChatContext {
@@ -263,6 +265,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let workspace_str = ctx.workspace_dir.to_string_lossy();
     let system_text = crate::core::system_prompt::build_system_prompt(&workspace_str);
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
+    let session_stderr_ids =
+        session_stderr_listeners::register_chat_session_stderr_listeners(&*ctx.event_bus);
 
     loop {
         let input = match rl.readline("u> ") {
@@ -316,7 +320,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         info!(
             target: "pi_wasm_chat_diag",
             phase = "chat_after_timing2_check",
-            cli_listeners_registered = false,
+            session_stderr_listeners_active = true,
+            message_stream_listener_registered = false,
             ratio = context_state.usage_ratio(),
             compaction_count = context_state.session_obs.compaction_count
         );
@@ -377,242 +382,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 Ok(())
             }),
         );
-        let metrics_listener_id = ctx.event_bus.on(
-            wire::WIRE_CONTEXT_METRICS_UPDATE,
-            Box::new(move |evt: EventContext| {
-                let tokens = evt.payload.get("inputTokensUsed")
-                    .and_then(|v| v.as_u64()).unwrap_or(0);
-                let ratio = evt.payload.get("contextUtilizationRatio")
-                    .and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let compactions = evt.payload.get("compactionCount")
-                    .and_then(|v| v.as_u64()).unwrap_or(0);
-                let saved = evt.payload.get("compactionTokensFreed")
-                    .and_then(|v| v.as_u64()).unwrap_or(0);
-                let persisted = evt.payload.get("totalToolResultBytesPersisted")
-                    .and_then(|v| v.as_u64()).unwrap_or(0);
-
-                let ratio_pct = (ratio * 100.0).min(99999.0);
-                let persisted_display = if persisted >= 1024 {
-                    format!("{:.1} KB", persisted as f64 / 1024.0)
-                } else {
-                    format!("{} B", persisted)
-                };
-                let preheat_in_progress = evt
-                    .payload
-                    .get("preheatInProgress")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let preheat_result_pending = evt
-                    .payload
-                    .get("preheatResultPending")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let (zh_suffix, en_suffix) = if preheat_in_progress {
-                    (" | 预热中…", " | Preheating…")
-                } else if preheat_result_pending {
-                    (" | 摘要待应用", " | Summary pending apply")
-                } else {
-                    ("", "")
-                };
-                // 行尾必须换行，否则 stderr 与 stdout 流式正文可能在同一视觉行粘连（如「0 B你给」）。
-                eprint!(
-                    "\n\x1b[90m[ctx] {} 令牌 | {:.1}% 占用 | 压缩 x{} | 已节省 {} 令牌 | 已持久化 {}{}\x1b[0m\n",
-                    tokens, ratio_pct, compactions, saved, persisted_display, zh_suffix
-                );
-                eprint!(
-                    "\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | saved {} tok | persisted {}{}\x1b[0m\n",
-                    tokens, ratio_pct, compactions, saved, persisted_display, en_suffix
-                );
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        // L1: auto_compaction_start / auto_compaction_end
-        let l1_start_id = ctx.event_bus.on(
-            wire::WIRE_AUTO_COMPACTION_START,
-            Box::new(|_ctx: EventContext| {
-                eprint!("\n\x1b[90m[ctx] 后台压缩已启动…\x1b[0m\n");
-                eprint!("\x1b[90m[ctx] Background compaction started…\x1b[0m\n");
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        let l1_end_id = ctx.event_bus.on(
-            wire::WIRE_AUTO_COMPACTION_END,
-            Box::new(|evt: EventContext| {
-                let before = evt
-                    .payload
-                    .get("estimatedCoveredTokensBefore")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let summ = evt
-                    .payload
-                    .get("estimatedSummaryTokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let saved = evt
-                    .payload
-                    .get("estimatedTokensSaved")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                eprint!(
-                    "\n\x1b[90m[ctx] 压缩摘要就绪（待应用）| 覆盖区 ~{} 令牌 → 摘要 ~{} 令牌（估省 {} 令牌）\x1b[0m\n",
-                    before, summ, saved
-                );
-                eprint!(
-                    "\x1b[90m[ctx] Summary generated (pending apply) | covered ~{} tok → summary ~{} tok (saved ~{} tok)\x1b[0m\n",
-                    before, summ, saved
-                );
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        // L1 exhausted: compaction_error
-        let l1_err_id = ctx.event_bus.on(
-            wire::WIRE_COMPACTION_ERROR,
-            Box::new(|evt: EventContext| {
-                let source = evt
-                    .payload
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let err_raw = evt
-                    .payload
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let err_display = if err_raw.chars().count() > 200 {
-                    let t: String = err_raw.chars().take(200).collect();
-                    format!("{}…", t)
-                } else {
-                    err_raw.to_string()
-                };
-                if source == "apply" {
-                    eprint!(
-                        "\n\x1b[33m[ctx] 摘要应用失败：{}\x1b[0m\n",
-                        err_display
-                    );
-                    eprint!(
-                        "\x1b[33m[ctx] Summary application failed: {}\x1b[0m\n",
-                        err_display
-                    );
-                    let _ = io::stderr().flush();
-                    return Ok(());
-                }
-                let exhausted = evt
-                    .payload
-                    .get("exhaustedAfterRetries")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let attempts = evt
-                    .payload
-                    .get("attempts")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                if exhausted && source == "preheat" {
-                    eprint!(
-                        "\n\x1b[33m[ctx] 预热失败（已重试 {} 次）：{}\x1b[0m\n",
-                        attempts, err_display
-                    );
-                    eprint!(
-                        "\x1b[33m[ctx] Preheat failed after {} attempt(s): {}\x1b[0m\n",
-                        attempts, err_display
-                    );
-                } else if source == "preheat" {
-                    eprint!(
-                        "\n\x1b[33m[ctx] 上下文压缩暂时失败，将在下次发送消息时自动重试：{}\x1b[0m\n",
-                        err_display
-                    );
-                    eprint!(
-                        "\x1b[33m[ctx] Context compaction temporarily failed; will retry on your next message: {}\x1b[0m\n",
-                        err_display
-                    );
-                }
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        // L2: boundary_switched
-        let l2_id = ctx.event_bus.on(
-            wire::WIRE_BOUNDARY_SWITCHED,
-            Box::new(|evt: EventContext| {
-                let saved = evt
-                    .payload
-                    .get("estimatedTokensFreed")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                eprint!(
-                    "\n\x1b[90m[ctx] 上下文已压缩重置，约节省 {} 令牌\x1b[0m\n",
-                    saved
-                );
-                eprint!(
-                    "\x1b[90m[ctx] Context compacted; saved ~{} tok\x1b[0m\n",
-                    saved
-                );
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        // L3: context_overflow_trim_*
-        let l3_start_id = ctx.event_bus.on(
-            wire::WIRE_CONTEXT_OVERFLOW_TRIM_START,
-            Box::new(|_ctx: EventContext| {
-                eprint!("\n\x1b[33m[ctx] 上下文溢出，正在截断旧消息…\x1b[0m\n");
-                eprint!("\x1b[33m[ctx] Context overflow; trimming older messages…\x1b[0m\n");
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        let l3_end_id = ctx.event_bus.on(
-            wire::WIRE_CONTEXT_OVERFLOW_TRIM_END,
-            Box::new(|evt: EventContext| {
-                let saved = evt
-                    .payload
-                    .get("estimatedTokensFreed")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let turns = evt
-                    .payload
-                    .get("turnsRemoved")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                eprint!(
-                    "\n\x1b[90m[ctx] 截断完成（删 {} 轮，估省 {} 令牌），正在重试\x1b[0m\n",
-                    turns, saved
-                );
-                eprint!(
-                    "\x1b[90m[ctx] Trim done ({} turns removed, ~{} tok saved); retrying\x1b[0m\n",
-                    turns, saved
-                );
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
-        let l0_id = ctx.event_bus.on(
-            wire::WIRE_LAYER0_CONTEXT_RELEASE,
-            Box::new(|evt: EventContext| {
-                let p = evt
-                    .payload
-                    .get("persistTokensFreed")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let ph = evt
-                    .payload
-                    .get("placeholderTokensFreed")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                eprint!(
-                    "\n\x1b[90m[ctx] L0：大文件落盘释放 ~{} 令牌 | 历史工具结果释放 ~{} 令牌\x1b[0m\n",
-                    p, ph
-                );
-                eprint!(
-                    "\x1b[90m[ctx] L0: large file persist release ~{} tok | historical tool result release ~{} tok\x1b[0m\n",
-                    p, ph
-                );
-                let _ = io::stderr().flush();
-                Ok(())
-            }),
-        );
 
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
@@ -620,18 +389,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         info!(
             target: "pi_wasm_chat_diag",
             phase = "chat_before_agent_run",
-            cli_listeners_registered = true
+            session_stderr_listeners_active = true,
+            message_stream_listener_registered = true
         );
         let run_result = agent_loop.run(messages).await;
         ctx.event_bus.off(listener_id);
-        ctx.event_bus.off(metrics_listener_id);
-        ctx.event_bus.off(l1_start_id);
-        ctx.event_bus.off(l1_end_id);
-        ctx.event_bus.off(l1_err_id);
-        ctx.event_bus.off(l2_id);
-        ctx.event_bus.off(l3_start_id);
-        ctx.event_bus.off(l3_end_id);
-        ctx.event_bus.off(l0_id);
         match run_result {
             Ok(result) => {
                 if let Some(remaining) = renderer.lock().flush() {
@@ -721,6 +483,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 if is_fatal {
                     eprintln!("(致命错误，退出对话)");
                     context_state.preheat.abort();
+                    session_stderr_listeners::unregister_chat_session_stderr_listeners(
+                        &*ctx.event_bus,
+                        &session_stderr_ids,
+                    );
                     return Err(e);
                 }
                 eprintln!("(可重试，请继续输入)\n");
@@ -731,6 +497,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!();
     }
 
+    session_stderr_listeners::unregister_chat_session_stderr_listeners(
+        &*ctx.event_bus,
+        &session_stderr_ids,
+    );
     Ok(())
 }
 

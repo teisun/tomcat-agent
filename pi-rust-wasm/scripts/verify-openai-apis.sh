@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Verify selected OpenAI endpoints using credentials/proxy from .env.
 # Usage:
-#   ./scripts/verify-openai-apis.sh           # interactive select
-#   ./scripts/verify-openai-apis.sh 1 2 3     # non-interactive select
+#   ./scripts/verify-openai-apis.sh              # interactive select
+#   ./scripts/verify-openai-apis.sh 1 2 3 4      # non-interactive select
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
@@ -45,6 +45,8 @@ echo "Available endpoints:"
 echo "1) GET  /v1/models"
 echo "2) POST /v1/responses"
 echo "3) POST /v1/chat/completions"
+echo "4) POST /v1/chat/completions (stream, SSE)"
+echo "5) POST /v1/responses (stream, SSE)"
 
 choices=()
 if [[ "$#" -gt 0 ]]; then
@@ -148,6 +150,95 @@ run_request() {
   rm -f "${tmp_body}"
 }
 
+# Streaming endpoints return text/event-stream (SSE). Validate HTTP 2xx and at least one `data:` line.
+run_sse_stream_request() {
+  local label="$1"
+  local url="$2"
+  local body="$3"
+
+  local tmp_body
+  tmp_body="$(mktemp)"
+  local http_code="000"
+  local curl_exit=0
+
+  http_code="$(curl -sS \
+    --connect-timeout 10 --max-time 180 \
+    -o "${tmp_body}" -w "%{http_code}" \
+    -X POST "${url}" \
+    -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Accept: text/event-stream" \
+    -d "${body}")" || curl_exit=$?
+
+  if [[ "${curl_exit}" -ne 0 ]]; then
+    echo "[FAIL] ${label} - curl exit ${curl_exit}"
+    print_fail_hint "curl_failed" "000"
+    rm -f "${tmp_body}"
+    fail_count=$((fail_count + 1))
+    return
+  fi
+
+  local data_lines=0
+  if [[ -s "${tmp_body}" ]]; then
+    data_lines="$(grep -c '^data: ' "${tmp_body}" 2>/dev/null || true)"
+  fi
+  [[ -z "${data_lines}" ]] && data_lines=0
+
+  if [[ "${http_code}" =~ ^2 ]]; then
+    if [[ "${data_lines}" -lt 1 ]]; then
+      echo "[FAIL] ${label} - HTTP ${http_code} but no SSE data: lines (got ${data_lines})"
+      local err_preview
+      err_preview="$(tr -d '\n' < "${tmp_body}" | cut -c1-300)"
+      echo "  Body preview: ${err_preview}"
+      print_fail_hint "${err_preview}" "${http_code}"
+      fail_count=$((fail_count + 1))
+      rm -f "${tmp_body}"
+      return
+    fi
+    echo "[PASS] ${label} - HTTP ${http_code} (${data_lines} SSE data: lines)"
+    if [[ "${HAS_JQ}" -eq 1 ]]; then
+      case "${label}" in
+        *"chat/completions"*)
+          {
+            local merged=""
+            while IFS= read -r line || [[ -n "${line}" ]]; do
+              [[ "${line}" == data:\ * ]] || continue
+              local payload="${line#data: }"
+              [[ "${payload}" == "[DONE]" ]] && continue
+              local piece
+              piece="$(echo "${payload}" | jq -r '.choices[0].delta.content // empty' 2>/dev/null || true)"
+              merged="${merged}${piece}"
+            done < "${tmp_body}"
+            if [[ -n "${merged}" ]]; then
+              echo "  merged delta (truncated): $(echo -n "${merged}" | cut -c1-200)$([[ ${#merged} -gt 200 ]] && echo -n "...")"
+            else
+              echo "  (no text in choices[].delta.content; stream shape may differ for this model)"
+            fi
+          }
+          ;;
+        *)
+          echo "  (responses stream: showing first non-[DONE] data line, truncated)"
+          local sample
+          sample="$(grep '^data: ' "${tmp_body}" | grep -v 'data: \[DONE\]' | head -n 1 | sed 's/^data: //' | cut -c1-240)"
+          [[ -n "${sample}" ]] && echo "  ${sample}..."
+          ;;
+      esac
+    else
+      echo "  (jq not found; SSE preview omitted)"
+    fi
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] ${label} - HTTP ${http_code}"
+    local err_preview
+    err_preview="$(tr -d '\n' < "${tmp_body}" | cut -c1-300)"
+    echo "  Error: ${err_preview}"
+    print_fail_hint "${err_preview}" "${http_code}"
+    fail_count=$((fail_count + 1))
+  fi
+
+  rm -f "${tmp_body}"
+}
+
 for c in "${choices[@]}"; do
   case "${c}" in
     1)
@@ -160,6 +251,16 @@ for c in "${choices[@]}"; do
     3)
       run_request "POST /v1/chat/completions" "POST" "https://api.openai.com/v1/chat/completions" \
         "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with: pong\"}]}"
+      ;;
+    4)
+      run_sse_stream_request "POST /v1/chat/completions (stream)" \
+        "https://api.openai.com/v1/chat/completions" \
+        "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with one word: hi\"}],\"stream\":true}"
+      ;;
+    5)
+      run_sse_stream_request "POST /v1/responses (stream)" \
+        "https://api.openai.com/v1/responses" \
+        "{\"model\":\"${MODEL}\",\"input\":\"Reply with one word: hi\",\"stream\":true}"
       ;;
     *)
       echo "[SKIP] Unknown choice: ${c}"

@@ -1,4 +1,33 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use super::*;
+use crate::infra::wire;
+
+/// CLI 曾每轮 `run` 结束后 `off` 掉 `auto_compaction_end`；Layer1 在 `readline` 空闲时才 emit 会无人消费。
+/// 会话级监听应跨轮保留——本用例模拟「只摘掉占位监听、保留 compaction_end」后延迟 emit 仍能送达。
+#[test]
+fn auto_compaction_end_delivered_when_session_listener_not_off() {
+    let bus = DefaultEventBus::new();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let h = hits.clone();
+    let session_id = bus.on(
+        wire::WIRE_AUTO_COMPACTION_END,
+        Box::new(move |_| {
+            h.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let per_turn_id = bus.on("per_turn_placeholder", Box::new(|_| Ok(())));
+    bus.off(per_turn_id);
+    bus.emit_sync(
+        wire::WIRE_AUTO_COMPACTION_END,
+        EventContext::new(wire::WIRE_AUTO_COMPACTION_END, serde_json::json!({})),
+    )
+    .unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    bus.off(session_id);
+}
 
 #[test]
 fn on_returns_id_and_emit_sync_calls() {
