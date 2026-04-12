@@ -44,7 +44,6 @@
    **形式**（任选其一或组合，须在计划内写清若双轨如何同步）：  
    - Markdown：顶层 `- [ ] todo_id — 简述` 或表格 `| id | 动作 | 依据/对应章节 |`；  
    - 使用 Cursor 等工具时：可在计划 frontmatter 用 YAML `todos`，并在正文设 **「流程类 Todo（与 YAML 同步）」** 表，避免 UI 与正文各说各话。  
-   **参考范式**（长任务）：流程 Todo（如 `ops-claim-and-branch`、`ops-after-each-phase`、`ops-pending-integration`）与 Phase Todo（如 `phase-a`、`phase-b-layer0`…）分工、表列 `id | 动作 | 依据`、并写明执行顺序与穿插关系——与历史 **TASK-20 异步预热计划**（团队 `.cursor/plans/task-20_异步预热计划_*.plan.md`）同级结构一致即可。
 
 ---
 
@@ -79,7 +78,7 @@
 | :--- | :--- |
 | [PLAN_SKELETON.md](./PLAN_SKELETON.md) | **任意任务**一屏内最小骨架（复制后填空即可）。 |
 | [PLAN_EXAMPLE_CLI.md](./PLAN_EXAMPLE_CLI.md) | **渐进补全**：多子命令、多子项、逐步替换占位实现（历史案例：TASK-02）。 |
-| [PLAN_TASK05_PI_MONO_COMPAT.md](./PLAN_TASK05_PI_MONO_COMPAT.md) | **多阶段横切**：Tier/Phase、矩阵验收、依赖图、与外部生态对齐（TASK-05 系列）。 |
+| [PLAN_TASK05_PI_MONO_COMPAT.md](./PLAN_TASK05_PI_MONO_COMPAT.md) | **多阶段横切**：Tier/Phase、矩阵验收、依赖图、与外部生态对齐（TASK-05 系列）；Todo 总表固定为**第七节**（在「六、风险」之后）。 |
 
 制定计划时：小任务对齐「一」+ 自检 + **SKELETON** 即可；与 CLI/插件类似形态可对照 EXAMPLE / TASK05 的章节结构，不必同等长度。
 

@@ -10,24 +10,10 @@
 | 分支 | `feature/...`（与 TASK_BOARD 一致） |
 | 规格单一来源 | （openspec 路径，无则写「无，以 TASK_BOARD 为准」） |
 
-## 〇、Todo 总表（与下文章节一一对应，勿留悬空项）
-
-> 流程类（认领/分支/status/提交/集成）与实施类（每个子项或 Phase）**均须出现**；可与「一、子项清单」合并为同一组勾选，但须保证每条能指回正文一节。
-
-| id | 类型 | 动作摘要 | 对应正文 |
-| :--- | :--- | :--- | :--- |
-| `ops-claim` | 流程 | 认领 TASK、checkout 分支、拉 develop | （Dispatcher §1–§5） |
-| `ops-ship` | 流程 | 子项完成后 status → commit → push | （Dispatcher §5） |
-| `ops-integration` | 流程 | 分支侧门禁通过 → PENDING_INTEGRATION → 推送 | （Dispatcher §7） |
-| `impl-x.1` | 实施 | … | 见 **三、子项 x.1** |
-| `impl-x.2` | 实施 | … | 见 **三、子项 x.2** |
-
-**写后复核**（定稿前勾选）：每条 Todo 有正文展开；每个正文交付点有 Todo；若用 YAML 与 Markdown 双轨则两处一致（见 [PLAN_SPEC.md](./PLAN_SPEC.md) 第六节）。
-
 ## 一、子项清单
 
-- [ ] x.1 …（与上表 `impl-x.1` 同步）
-- [ ] x.2 …（与上表 `impl-x.2` 同步）
+- [ ] x.1 …（与**第七节** Todo 表中 `impl-x.1` 同步）
+- [ ] x.2 …（与**第七节** Todo 表中 `impl-x.2` 同步）
 
 ## 二、目标与验收
 
@@ -60,3 +46,17 @@
 - 涉及用户面 / P0–P1 故事：场景库条目编号、集成测试文件、`cli_tests` / `wasmedge_e2e_tests` 意图；**用例名与仓库一致或标「待新增」**  
 - 纯内部：写「不适用」+ 理由  
 - 全量门禁：交付前按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md) 执行（不在此重复全文）
+
+## 七、Todo 总表（与下文章节一一对应，勿留悬空项）
+
+> 流程类（认领/分支/status/提交/集成）与实施类（每个子项或 Phase）**均须出现**；可与「一、子项清单」合并为同一组勾选，但须保证每条能指回正文一节。
+
+| id | 类型 | 动作摘要 | 对应正文 |
+| :--- | :--- | :--- | :--- |
+| `ops-claim` | 流程 | 认领 TASK、checkout 分支、拉 develop | （Dispatcher §1–§5） |
+| `ops-ship` | 流程 | 子项完成后 status → commit → push | （Dispatcher §5） |
+| `ops-integration` | 流程 | 分支侧门禁通过 → PENDING_INTEGRATION → 推送 | （Dispatcher §7） |
+| `impl-x.1` | 实施 | … | 见 **三、子项 x.1** |
+| `impl-x.2` | 实施 | … | 见 **三、子项 x.2** |
+
+**写后复核**（定稿前勾选）：每条 Todo 有正文展开；每个正文交付点有 Todo；若用 YAML 与 Markdown 双轨则两处一致（见 [PLAN_SPEC.md](./PLAN_SPEC.md) 第六节）。
