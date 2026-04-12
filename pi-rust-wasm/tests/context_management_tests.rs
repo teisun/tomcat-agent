@@ -208,15 +208,15 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     assert!(!state.user_turns_list.is_empty());
 }
 
-/// [Session 重载] 写入消息与 Compaction entry 后 init_context_state 正确重建
+/// [Session 重载] 写入消息与 `type: branch_summary` 摘要行后 init_context_state 正确重建
 ///
-/// 验证：创建会话 → 写消息 → 写 compaction → 再写消息 → init_context_state →
+/// 验证：创建会话 → 写消息 → 写 branch_summary → 再写消息 → init_context_state →
 ///       turns 数量正确、SummaryTurn 内容正确、后续 UserTurn 正确
 /// 意义：TASK-17 Transcript 持久化与重载——跨进程会话恢复端到端
 #[test]
-fn test_session_reload_with_compaction_entries() -> Result<(), Box<dyn std::error::Error>> {
+fn test_session_reload_with_branch_summary_entries() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = info_span!("test_session_reload_with_compaction_entries").entered();
+    let _span = info_span!("test_session_reload_with_branch_summary_entries").entered();
 
     let dir = temp_sessions_dir("reload");
     let _ = std::fs::remove_dir_all(&dir);
@@ -225,7 +225,7 @@ fn test_session_reload_with_compaction_entries() -> Result<(), Box<dyn std::erro
     let key = mgr.current_session_key();
     mgr.create_session(key, None)?;
 
-    info!("Arrange: 写入 user/assistant 消息 → compaction entry → 更多消息");
+    info!("Arrange: 写入 user/assistant 消息 → branch_summary 行 → 更多消息");
     mgr.append_message(serde_json::json!({"role":"user","content":"old question 1"}))?;
     mgr.append_message(serde_json::json!({"role":"assistant","content":"old answer 1"}))?;
     mgr.append_message(serde_json::json!({"role":"user","content":"old question 2"}))?;

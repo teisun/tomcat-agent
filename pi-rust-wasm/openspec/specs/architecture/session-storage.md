@@ -120,3 +120,5 @@ pub struct BranchSummaryEntry {
 **上下文可观测累计（方案 B）**：`compaction_count` / `compaction_tokens_freed` / `tool_result_chars_persisted` 在进程内由 `ContextState` 更新，**每个 user turn 结束**（成功路径与可恢复错误路径）由 `SessionManager::persist_context_observability` 刷入 `sessions.json`；`init_context_state` 启动时读回填入 `ContextState`，实现重启后累计不无故归零。该累计**不以 transcript 重放重建**；与 transcript 手工编辑可能不一致。
 
 **BranchSummaryEntry（JSONL `type: branch_summary`）可选 token 估算字段**（camelCase，旧行可缺省）：`estimatedCoveredTokensBefore`、`estimatedSummaryTokens`、`estimatedTokensSaved` — L1 预热写入，供 L2 apply 计入 `session_obs.compaction_tokens_freed` 而无需再次用 `estimated_token_count` 前后差计算。
+
+**开发阶段说明（不向前兼容）**：运行时联合类型仅含 **`branch_summary`** 等当前变体，**不**再识别历史 JSONL 别名 **`type: compaction`**。若文件中仍存在该 `type`，反序列化将失败，读 tail 实现为 **跳过该行并 `warn` 日志**（不崩溃、不提供自动迁移）。本地旧文件需手工改为 `branch_summary` 或重新生成会话文件。

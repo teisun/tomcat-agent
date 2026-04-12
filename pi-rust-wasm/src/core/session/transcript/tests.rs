@@ -47,6 +47,39 @@ fn append_and_read_entries_tail() {
     let _ = std::fs::remove_dir(&dir);
 }
 
+/// E2E-CLI-093：`type` 非 `TranscriptEntry` 成员时 tail 读入跳过该行、不 panic。
+#[test]
+fn read_entries_tail_skips_unknown_type_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skip_unknown.jsonl");
+    let header = SessionHeader {
+        r#type: "session".to_string(),
+        version: Some(3),
+        id: "sid_skip".to_string(),
+        timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+        cwd: None,
+    };
+    write_header(&path, &header).unwrap();
+    let msg = TranscriptEntry::Message(MessageEntry {
+        id: Some("m_ok".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        message: serde_json::json!({"role":"user","content":"keep"}),
+    });
+    append_entry(&path, &msg).unwrap();
+    append_line(
+        &path,
+        r#"{"type":"totally_unknown_variant","timestamp":"2025-01-01T00:00:02.000Z","id":"bad"}"#,
+    )
+    .unwrap();
+    let entries = read_entries_tail(&path, 10).unwrap();
+    assert_eq!(entries.len(), 1);
+    match &entries[0] {
+        TranscriptEntry::Message(me) => assert_eq!(me.id.as_deref(), Some("m_ok")),
+        _ => panic!("expected sole surviving message"),
+    }
+}
+
 #[test]
 fn get_entry_finds_by_id() {
     let dir = tempfile::tempdir().unwrap();
