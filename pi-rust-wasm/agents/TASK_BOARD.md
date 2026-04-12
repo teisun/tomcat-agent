@@ -1079,7 +1079,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `feature/context-async-compaction` |
 | **阻塞点** | — |
@@ -1140,7 +1140,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P1 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `feature/context-async-compaction` |
 | **阻塞点** | — |
@@ -1159,7 +1159,7 @@
 - [x] **21.6 restore / hydrate**：`compaction_pending_from_entry` / `restore_completed` 与 §5.7.7、`CompactionEntry` 字段语义一致
 - [x] **21.7 测试**：覆盖 §5.7.8 场景 1～5 中可由单测/集成测表达的部分（不重启 apply、重启 restore、锚点插入行序、L3 后仅 end 匹配、id 冲突策略）
 
-**依赖**：TASK-20（`PENDING_INTEGRATION` / 合并后以 develop 为基线亦可）；以 **§5.7 现行正文** 为验收依据。
+**依赖**：TASK-20（DONE）；以 **§5.7 现行正文** 为验收依据。
 
 **被依赖**：—
 

@@ -1,5 +1,35 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-12 13:35 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：TASK-20 / TASK-21（`feature/context-async-compaction` fast-forward 并入 develop）
+
+**合并方式**：`develop` 快进至 `feature/context-async-compaction` 顶端（与一次合并等价，无额外 merge commit）。
+
+**任务内容**：TASK-20 异步预热与 Boundary 延迟应用；TASK-21 §5.7 消息级 ID、锚点插入与 `S::E` compaction 行语义对齐。
+
+**交付复核**：§1 规格以仓库内 `context-management.md` 现行正文为准；§2–§3 变更已由分支侧集成/E2E 覆盖，develop 上按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 全量复跑。
+
+#### 验收命令与结果
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `./scripts/run-integration-tests.sh all` | PASS（`EXIT_CODE=0`，日志见 `pi-rust-wasm/.integration_test_output.log`） |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `cargo test -j 1 --lib` | PASS（405 passed, 1 ignored） |
+| `cargo test -j 1 --test '*'`（节选） | cli_tests 77 passed；wasmedge_e2e_tests 39 passed；其余集成套件均 ok |
+
+**执行环境**：macOS darwin；`.env` 已加载（含 `OPENAI_API_KEY`，cli_tests 需真实上游）；WasmEdge 可用。
+
+#### 看板
+
+- **TASK-20**、**TASK-21**：集成通过后已在 `agents/TASK_BOARD.md` 标为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-05 | ACTIVE | develop | — |
 
 ### refactor：RUST_FILE_LINES_SPEC 目录化拆分与测试外提
