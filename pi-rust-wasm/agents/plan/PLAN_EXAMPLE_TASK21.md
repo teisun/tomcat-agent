@@ -26,16 +26,16 @@
 | 21.1 | `UserTurn` 增加 `start_id`/`end_id`，`id` ≡ `start_id::end_id`；`SummaryTurn.id` 与 compaction 行一致 | 待做 |
 | 21.2 | pack：`api/chat` 落盘后回填；fold：从 `MessageEntry.id` 还原 | 待做 |
 | 21.3 | transcript：按 `MessageEntry.id == E` **之后**插入 compaction；锚点缺失策略 | 待做 |
-| 21.4 | Preheat：`S`/`E` 与 `CompactionEntry.id = S::E`；成功后走 21.3；`transcript_compaction_entry_id` 存整串 | 待做 |
+| 21.4 | Preheat：`S`/`E` 与 `BranchSummaryEntry.id = S::E`；成功后走 21.3；`transcript_compaction_entry_id` 存整串 | 待做 |
 | 21.5 | `apply_boundary`：主路径 `UserTurn.end_id == E`，`splice(0..=k, [SummaryTurn])`；旧 turn-id 回退 | 待做 |
-| 21.6 | `compaction_pending_from_entry` / `restore_completed` / `init_context_state` hydrate 与 §5.7.7 一致 | 待做 |
+| 21.6 | `branch_summary_pending_from_entry` / `restore_completed` / `init_context_state` hydrate 与 §5.7.7 一致 | 待做 |
 | 21.7 | 单测/集成测覆盖 §5.7.8 可表达场景 | 待做 |
 
 ---
 
 ## 目标与验收（含作用/意义）
 
-**要做出什么**：运行时 `user_turns_list`、Layer 1 快照、`CompactionEntry`/`CompactionResult`、JSONL 行序与 Layer 2 splice 全部按 §5.7 的 **MessageId / `S::E` / 锚点后插入** 对齐。
+**要做出什么**：运行时 `user_turns_list`、Layer 1 快照、`BranchSummaryEntry`/`CompactionResult`、JSONL 行序与 Layer 2 splice 全部按 §5.7 的 **MessageId / `S::E` / 锚点后插入** 对齐。
 
 **验收**（与看板 + §5.7.8 一致）：`cargo fmt --all`（或 `cargo fmt --check` 满足 CI）、`cargo clippy --all-targets -- -D warnings`；行为与 ASCII 总览及 5.7.1～5.7.6 条文一致；**标 `PENDING_INTEGRATION` 前**须完成 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md) 分支侧 **§4 全量测试与验收**（执行方式见下文，**禁止**未确认全量通过即标集成）。
 
@@ -50,7 +50,7 @@
 ## 现状与差距（关键代码）
 
 - [`TurnEntry::UserTurn`](../../src/core/session/manager/types.rs) 仅有单一 `id`；[`apply_boundary`](../../src/core/session/manager/types.rs) 用 `t.id() == covered_start_id/end_id` 定位区间，且 `SummaryTurn` 使用临时 `summary_*` id，与 §5.7.5/5.7.3 不符。
-- [`Preheat::try_start`](../../src/core/compaction/preheat.rs) 中 `first_id`/`last_id` 来自 `t.id()`（将变为复合 id 后**不能**再代表 `S`/`E`）；`CompactionEntry.id` 为随机 `generate_entry_id()`，与 §5.7.3 的 **`S::E`** 不符；[`append_entry`](../../src/core/session/transcript.rs) 仅尾部追加，不满足 §5.7.4「插在 `id == E` 的 message 行之后」。
+- [`Preheat::try_start`](../../src/core/compaction/preheat.rs) 中 `first_id`/`last_id` 来自 `t.id()`（将变为复合 id 后**不能**再代表 `S`/`E`）；`BranchSummaryEntry.id` 为随机 `generate_entry_id()`，与 §5.7.3 的 **`S::E`** 不符；[`append_entry`](../../src/core/session/transcript.rs) 仅尾部追加，不满足 §5.7.4「插在 `id == E` 的 message 行之后」。
 - [`api/chat/mod.rs`](../../src/api/chat/mod.rs) 先 `on_new_user_turn`（随机 id）再 `append_message`，内存 turn id 与 transcript message id **脱钩**。
 - [`fold_entries_to_turns`](../../src/core/session/manager/context.rs) 仅在遇到 user 时用 `current_turn_id`（单值）作为整段 turn id，未区分 **首/末 message id**。
 - [`init_context_state`](../../src/core/session/manager/context.rs) 中 `restore_completed` 条件 `t.id() == p.covered_end_id` 在 `covered_end_id` 为 message 级 **E** 后需改为匹配 **`end_id`**（并保留旧数据回退）。
@@ -64,9 +64,9 @@
 | 21.1 | `TurnEntry`、`generate_entry_id` | `compound_turn_id`（或等价）；`UserTurn` 字段；MessageId 与 `::` 的校验策略 |
 | 21.2 | `SessionManager::append_message` / `try_append_message`、`on_new_user_turn`、`fold_entries_to_turns` | 两者返回 `MessageEntry` 新 id；chat 与 **dispatcher**（[session_ops.rs](../../src/ext/dispatcher/session_ops.rs)）等所有调用点同步 |
 | 21.3 | `append_entry`、`write_file_atomic` | `insert_entry_after_message_id` |
-| 21.4 | `Preheat::try_start`、`CompactionEntry` / `CompactionResult` | 快照 S/E 来源、`id = S::E`、写盘走插入 API |
-| 21.5 | `ContextState::apply_boundary`、`set_compaction_entry_is_boundary_true` | 匹配与 splice 语义；`SummaryTurn.id` 来源 |
-| 21.6 | `compaction_pending_from_entry`、`init_context_state`、`restore_completed` | restore 条件（`end_id` + 旧数据回退） |
+| 21.4 | `Preheat::try_start`、`BranchSummaryEntry` / `CompactionResult` | 快照 S/E 来源、`id = S::E`、写盘走插入 API |
+| 21.5 | `ContextState::apply_boundary`、`set_branch_summary_entry_is_boundary_true` | 匹配与 splice 语义；`SummaryTurn.id` 来源 |
+| 21.6 | `branch_summary_pending_from_entry`、`init_context_state`、`restore_completed` | restore 条件（`end_id` + 旧数据回退） |
 
 ---
 
@@ -90,16 +90,16 @@
 ### 21.3 Transcript 锚点插入
 
 - **文件**：[transcript.rs](../../src/core/session/transcript.rs)（新函数 + 单测）、必要时 [transcript/tests.rs](../../src/core/session/transcript/tests.rs)。
-- **思路**：实现 `insert_entry_after_message_id(path: &Path, anchor_message_id: &str, entry: &TranscriptEntry) -> Result<(), AppError>`：跳过 header，逐行解析；找到第一条 `Message` 且 `id == Some(anchor)` 的行，在其后插入序列化后的新行；其余行保持原字节或统一用 serde 再序列化（与 `set_compaction_entry_is_boundary_true` 一致：**整文件原子写** `write_file_atomic`）。**找不到锚点**：warn + 回退 `append_entry` 或返回 Err（在计划中**写死一种**并在 preheat 调用处统一处理）；与 [session_impl 并发 TODO](../../src/core/session/manager/session_impl.rs) 一致保持单线程假设。
+- **思路**：实现 `insert_entry_after_message_id(path: &Path, anchor_message_id: &str, entry: &TranscriptEntry) -> Result<(), AppError>`：跳过 header，逐行解析；找到第一条 `Message` 且 `id == Some(anchor)` 的行，在其后插入序列化后的新行；其余行保持原字节或统一用 serde 再序列化（与 `set_branch_summary_entry_is_boundary_true` 一致：**整文件原子写** `write_file_atomic`）。**找不到锚点**：warn + 回退 `append_entry` 或返回 Err（在计划中**写死一种**并在 preheat 调用处统一处理）；与 [session_impl 并发 TODO](../../src/core/session/manager/session_impl.rs) 一致保持单线程假设。
 - **接口**：新增 `insert_entry_after_message_id`；保留 `append_entry` 供无锚点/测试简路径。
 - **测试要点**：多行 JSONL；锚点在中间；锚点缺失；compaction 行 `id` 为 `S::E`。
 
 ### 21.4 Preheat
 
 - **文件**：[preheat.rs](../../src/core/compaction/preheat.rs)。
-- **思路**：从 `snapshot` 首末 **`UserTurn`** 取 `start_id` / `end_id`（若无新字段则回退旧 `id()` 以兼容测试数据）。`S = first.start_id`，`E = last.end_id`，`batch_id = compound_turn_id(&S, &E)`。构造 `CompactionEntry`：`id = Some(batch_id.clone())`，`covered_start_id/covered_end_id = Some(S/E)`，`preheat_compaction_id` 与 `id` 对齐（与 §5.7.3 一致）。写盘：有路径且 `E` 非空时调 **`insert_entry_after_message_id(path, &E, ...)`**；失败时与现逻辑一致打 warn 且 `transcript_compaction_entry_id` 置 `None` / `append_ok = false`。`CompactionResult.transcript_compaction_entry_id = Some(batch_id)`。
+- **思路**：从 `snapshot` 首末 **`UserTurn`** 取 `start_id` / `end_id`（若无新字段则回退旧 `id()` 以兼容测试数据）。`S = first.start_id`，`E = last.end_id`，`batch_id = compound_turn_id(&S, &E)`。构造 `BranchSummaryEntry`：`id = Some(batch_id.clone())`，`covered_start_id/covered_end_id = Some(S/E)`，`preheat_compaction_id` 与 `id` 对齐（与 §5.7.3 一致）。写盘：有路径且 `E` 非空时调 **`insert_entry_after_message_id(path, &E, ...)`**；失败时与现逻辑一致打 warn 且 `transcript_compaction_entry_id` 置 `None` / `append_ok = false`。`CompactionResult.transcript_compaction_entry_id = Some(batch_id)`。
 - **依赖接口**：21.1、21.3；`generate_summary` 仍消费 `TurnEntry` 快照（仅 id 语义变严）。
-- **测试要点**：多 turn 快照时 `CompactionEntry.id` ≠ 任一单条 `UserTurn.id`；单 turn 时可能相等。
+- **测试要点**：多 turn 快照时 `BranchSummaryEntry.id` ≠ 任一单条 `UserTurn.id`；单 turn 时可能相等。
 
 ### 21.5 apply_boundary
 
@@ -110,8 +110,8 @@
 
 ### 21.6 restore / hydrate
 
-- **文件**：[context.rs](../../src/core/session/manager/context.rs)（`compaction_pending_from_entry`、`init_context_state`）、[preheat.rs](../../src/core/compaction/preheat.rs)（`restore_completed` 消费字段已齐）。
-- **思路**：`compaction_pending_from_entry` 继续从 `ce.id` / `covered_*` 填 `CompactionResult`；确认 `covered_end_id` 为 **E**。`init_context_state` 中 `restore_completed` 条件改为：存在 `UserTurn` 满足 `end_id == p.covered_end_id` **或** 旧 `t.id() == p.covered_end_id`（兼容 TASK-20 已写磁盘）。
+- **文件**：[context.rs](../../src/core/session/manager/context.rs)（`branch_summary_pending_from_entry`、`init_context_state`）、[preheat.rs](../../src/core/compaction/preheat.rs)（`restore_completed` 消费字段已齐）。
+- **思路**：`branch_summary_pending_from_entry` 继续从 `ce.id` / `covered_*` 填 `CompactionResult`；确认 `covered_end_id` 为 **E**。`init_context_state` 中 `restore_completed` 条件改为：存在 `UserTurn` 满足 `end_id == p.covered_end_id` **或** 旧 `t.id() == p.covered_end_id`（兼容 TASK-20 已写磁盘）。
 - **测试要点**：与 [context_management_tests.rs](../../tests/context_management_tests.rs) 中 restore 用例对齐并增量扩展。
 
 ### 21.7 测试
@@ -151,7 +151,7 @@ flowchart TD
 | 风险 | 备选/降级 |
 |------|-----------|
 | `append_message` 改返回类型触及大量调用点 | 先加 `append_message_with_id`，逐步迁移；或一次性改签名并批量修复编译错误（推荐一次到位避免双 API）。 |
-| 大文件上「插入行」重写全文件 O(n) | 与 §5.7.4 及现有 `set_compaction_entry_is_boundary_true` 一致；后续优化为稀疏索引（超出 TASK-21）。 |
+| 大文件上「插入行」重写全文件 O(n) | 与 §5.7.4 及现有 `set_branch_summary_entry_is_boundary_true` 一致；后续优化为稀疏索引（超出 TASK-21）。 |
 | 旧 transcript 无 `MessageEntry.id` | fold 继续 `generate_entry_id` 回退；`end_id` 匹配失败时走 §5.7.5 旧双 id 回退。 |
 | TASK-20 尚未合并 | 将 `develop` merge/rebase 进**当前分支**；冲突集中在 `preheat`/`context_management_tests` 时以 §5.7 正文为准解决。 |
 

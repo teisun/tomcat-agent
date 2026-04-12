@@ -122,7 +122,7 @@ static continueRecent(cwd: string, sessionDir?: string): SessionManager {
 {"type":"session","version":3,"id":"<uuid>","timestamp":"<ISO>","cwd":"<path>","parentSession":"<optional>"}
 ```
 
-后续行为 `SessionEntry`，每行含 `id`/`parentId` 形成树结构（支持分支），类型包括：`message`、`thinking_level_change`、`model_change`、`compaction`、`branch_summary`、`custom`、`custom_message`、`label`、`session_info`。
+后续行为 `SessionEntry`，每行含 `id`/`parentId` 形成树结构（支持分支），类型包括：`message`、`thinking_level_change`、`model_change`、`branch_summary`（上下文压缩摘要）、`custom`、`custom_message`、`label`、`session_info`。
 
 pi-rust-wasm 的 transcript 格式已与此兼容（v3 header、相同的 entry 类型枚举）。
 

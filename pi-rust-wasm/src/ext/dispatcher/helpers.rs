@@ -75,7 +75,6 @@ pub(super) fn transcript_entry_id(entry: &crate::core::session::TranscriptEntry)
         TranscriptEntry::Message(e) => e.id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
-        TranscriptEntry::Compaction(e) => e.id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
         TranscriptEntry::Label(e) => e.id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),

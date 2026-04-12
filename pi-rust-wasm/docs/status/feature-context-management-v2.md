@@ -20,14 +20,14 @@
 - [x] **[P2]** 19.15 events.rs 新增事件类型
 - [x] **[P2]** 19.16 SystemPromptSection trait 模块化
 - [x] **[P2]** 19.17 init_context_state compact boundary
-- [x] **[P2]** 19.18 CompactionEntry is_boundary 字段
+- [x] **[P2]** 19.18 BranchSummaryEntry is_boundary 字段
 - [x] **[P2]** 19.19-19.21 单元测试
 - [x] **[P2]** 19.22-19.23 集成测试
 
 ### 🔌 INTERFACE (接口变更)
 - `ContextState`: 新增 `context_budget_tokens`, `last_api_usage`, `post_usage_appended_chars`, `compaction_consecutive_failures` 字段
 - `ContextConfig`: 新增 `layer0_single_result_max_chars`, `layer0_turn_aggregate_max_chars`, `autocompact_buffer_tokens`, `warning_buffer_tokens`
-- `CompactionEntry`: 新增 `is_boundary: Option<bool>` 字段
+- `BranchSummaryEntry`: 新增 `is_boundary: Option<bool>` 字段
 - `AgentLoopConfig`: 新增 `work_dir: String` 字段
 - `AgentEvent`: 新增 `ContextMetricsUpdate`, `CompactionCircuitBreakerTriggered`, `ToolResultPersisted` 变体
 - 新增 `run_compaction_cascade_v2` 替代 `run_compaction_cascade`

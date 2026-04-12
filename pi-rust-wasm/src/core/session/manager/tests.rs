@@ -397,7 +397,7 @@ fn init_context_state_boundary_discards_prior() {
         .unwrap();
 
     let path = mgr.current_transcript_path().unwrap().unwrap();
-    let boundary_entry = TranscriptEntry::Compaction(CompactionEntry {
+    let boundary_entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
         id: None,
         parent_id: None,
         timestamp: "2026-01-01T00:00:00.000Z".to_string(),
@@ -491,8 +491,8 @@ fn make_assistant_msg_entry(ts: &str) -> TranscriptEntry {
 }
 
 fn make_boundary_entry(ts: &str, summary: &str) -> TranscriptEntry {
-    use super::super::transcript::CompactionEntry;
-    TranscriptEntry::Compaction(CompactionEntry {
+    use super::super::transcript::BranchSummaryEntry;
+    TranscriptEntry::BranchSummary(BranchSummaryEntry {
         id: None,
         parent_id: None,
         timestamp: ts.to_string(),

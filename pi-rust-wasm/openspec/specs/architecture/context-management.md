@@ -55,7 +55,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **user turn**          | 一条 `role=user` 消息 + 其后所有 `role=assistant` / `role=tool` 消息，直到下一条 `role=user`。上下文管理的最小粒度单位。                                                                                                                                |
 | **MessageId**          | Transcript 中每条 `MessageEntry.id`（user/assistant/tool 各一行一条）。会话内须**唯一**，且不得包含子串 `::`（与复合 id 分隔符冲突），详见 §5.7。                                                                                                            |
-| **TurnId（复合）**      | `start_id + "::" + end_id`，其中 `start_id` / `end_id` 均为 MessageId。单条 `UserTurn` 表示「本条 turn 内首条与末条 message」；`CompactionEntry.id` 表示「预热 snapshot 首 turn 的 `start_id` + 末 turn 的 `end_id`」，见 §5.7。                                |
+| **TurnId（复合）**      | `start_id + "::" + end_id`，其中 `start_id` / `end_id` 均为 MessageId。单条 `UserTurn` 表示「本条 turn 内首条与末条 message」；`BranchSummaryEntry.id` 表示「预热 snapshot 首 turn 的 `start_id` + 末 turn 的 `end_id`」，见 §5.7。                                |
 | **context_window**     | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.2 400K）。                                                                                                                                                              |
 | **input_budget**       | 输入 token 预算，`context_window - max_output_tokens`。分母，用于计算 ratio。                                                                                                                                                           |
 | **ratio**              | 上下文使用率，`estimated_token_count / input_budget`，取值 0.0 ~ 1.0+。驱动多级水位线触发。                                                                                                                                                    |
@@ -64,11 +64,11 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **m 值**                | 保护区大小，固定为 5。**仅影响 Layer 0** 占位符替换范围。                                                                                                                                                                                      |
 | **preview 占位符**        | Layer 0 落盘后替换 tool_result 的短文本，包含路径 + 工具名 + 前 500 chars 预览。                                                                                                                                                               |
 | **placeholder**        | Layer 0 替换旧 turn 中 tool_result 的常量文本 `[Previous tool result replaced to save context space]`。                                                                                                                             |
-| **CompactionSummary**  | 多指 `AgentMessage::CompactionSummary`：摘要展平到消息列表中的形态。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 **`CompactionEntry.id`（整串 `S::E`）** 一致），供 Layer 2 取出并应用。任务完成写入 transcript 时，**按 §5.7 插在 `MessageEntry.id == covered_end_id` 的行之后**（`is_boundary=false`），而非仅依赖「文件尾追加」。 |
+| **CompactionSummary**  | 多指 `AgentMessage::CompactionSummary`：摘要展平到消息列表中的形态。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 **`BranchSummaryEntry.id`（整串 `S::E`）** 一致），供 Layer 2 取出并应用。任务完成写入 transcript 时，**按 §5.7 插在 `MessageEntry.id == covered_end_id` 的行之后**（`is_boundary=false`），而非仅依赖「文件尾追加」。 |
 | **预热（Preheat）**        | Layer 1 的异步压缩任务。在 ratio >= 0.5 时启动，克隆 `userTurnsList` 后台调用 `compaction_model` 生成摘要，主线程不等待。快照边界 id 取 **message 级** `covered_start_id` / `covered_end_id`（§5.7），与旧版「首/尾 turn 的 `id()`」区分。                                                                                                                                |
-| **Boundary 切换**        | Layer 2 从 **`preheat`** 取得已完成的 **`CompactionResult`** 并应用到 `userTurnsList`：按 §5.7 **`splice(0..=k)`** 用 `SummaryTurn` 替换前缀；**更新内存中的 `start_idx`**（reasoning loop 的消息起始位置）；并按 **`transcript_compaction_entry_id`（= `CompactionEntry.id` 整串 `S::E`）** **原地**将 JSONL 中对应 compaction 行的 `isBoundary` 改为 `true`（不追加第二份全文）。切换后水位从 ~~70% 瞬降至 10~~20%。                                    |
+| **Boundary 切换**        | Layer 2 从 **`preheat`** 取得已完成的 **`CompactionResult`** 并应用到 `userTurnsList`：按 §5.7 **`splice(0..=k)`** 用 `SummaryTurn` 替换前缀；**更新内存中的 `start_idx`**（reasoning loop 的消息起始位置）；并按 **`transcript_compaction_entry_id`（= `BranchSummaryEntry.id` 整串 `S::E`）** **原地**将 JSONL 中对应 compaction 行的 `isBoundary` 改为 `true`（不追加第二份全文）。切换后水位从 ~~70% 瞬降至 10~~20%。                                    |
 | **compaction summary** | Layer 1 LLM 对**整个 `userTurnsList`** 生成的结构化摘要，一条消息替换整批 turns。                                                                                                                                                              |
-| **compact boundary**   | `TranscriptEntry::Compaction` 中的 `is_boundary: bool` 标记。每个逻辑批次在 JSONL 中 **仅一行**：预热写入 `boundary=false`（位置见 §5.7「锚点插入」；fold 时跳过）；应用 **原地升级** 为 `boundary=true`（`init_context_state` 遇到后丢弃其前所有 entry）。重载时若最后一行 compaction 仍为 `false`，`init_context_state` 通过 **`restore_completed`** 将摘要 Hydrate 回 `Preheat`（`id`/`covered_*` 须与 §5.7 字段语义一致）。                                                                     |
+| **compact boundary**   | `TranscriptEntry::BranchSummary` 中的 `is_boundary: bool` 标记。每个逻辑批次在 JSONL 中 **仅一行**：预热写入 `boundary=false`（位置见 §5.7「锚点插入」；fold 时跳过）；应用 **原地升级** 为 `boundary=true`（`init_context_state` 遇到后丢弃其前所有 entry）。重载时若最后一行 compaction 仍为 `false`，`init_context_state` 通过 **`restore_completed`** 将摘要 Hydrate 回 `Preheat`（`id`/`covered_*` 须与 §5.7 字段语义一致）。                                                                     |
 | **API Usage**          | LLM API 返回的 `usage` 字段（`prompt_tokens` + `completion_tokens`），用于精确 token 计数。                                                                                                                                              |
 
 
@@ -160,7 +160,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
   │  2. 启动后台 Task：                                    │
   │     → 按模板压缩整个 user turn list（记录首尾 **MessageId**）│
   │     → 调用 compaction_model，限制 <= 10K tokens         │
-  │     → 写入 transcript: type=compaction, boundary=false   │
+  │     → 写入 transcript: type=branch_summary, boundary=false   │
   │        （插入在 id==covered_end_id 的 message 行**之后**，§5.7）│
   │  3. 产物 → CompactionResult（由 Preheat 持有至 Layer 2 消费）   │
   │  单例：后台只允许一个压缩任务                           │
@@ -230,7 +230,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 
   后台 Task：克隆整个 user_turns_list → 调用 compaction_model
   → 生成 summary_A（Goal/Constraints/Progress...）
-  → 追加 transcript: { type: compaction, is_boundary: false, id: ... }（持久化备份；每批次单行）
+  → 追加 transcript: { type: branch_summary, is_boundary: false, id: ... }（持久化备份；每批次单行）
   → CompactionResult { summary_text: summary_A, covered: turn_0..turn_n-1, ... }（由 Preheat 暂存）
 
   主线程不等待，对话正常继续。
@@ -414,7 +414,7 @@ struct CompactionResult {  // 规范语义（字段名以实现为准）
     covered_start_id: String,   // = 预热 snapshot 第一个 UserTurn 的 start_id（MessageId）
     covered_end_id: String,     // = 预热 snapshot 最后一个 UserTurn 的 end_id（MessageId）
     covered_count: usize,
-    transcript_compaction_entry_id: Option<String>,  // 须与 CompactionEntry.id 整串一致，即 S::E
+    transcript_compaction_entry_id: Option<String>,  // 须与 BranchSummaryEntry.id 整串一致，即 S::E
     // …估算与耗时等
 }
 ```
@@ -469,22 +469,22 @@ estimate = system_prompt.len() + sum(today_turns.map(|t| estimate_turn_chars(t))
 
 ### 5.5 Session 重载与 Compact Boundary
 
-从 transcript JSONL 加载 user turns 时，需识别 `SessionEntry::Compaction` entry 并处理 boundary 语义：
+从 transcript JSONL 加载 user turns 时，需识别 `SessionEntry::BranchSummary` entry（`type: branch_summary`）并处理 boundary 语义：
 
-1. 遇到 `Compaction` entry 且 `is_boundary=true` → 作为 `SummaryTurn` 加入 `userTurnsList`，**丢弃其前**已暂存的所有 entry
-2. 遇到 `Compaction` entry 且 `is_boundary=false` → **跳过**（这是预热阶段的备用记录，尚未被应用；**不在** `userTurnsList` 中生成 `SummaryTurn`）
-3. 已被 Compaction 覆盖的原始 turns **不重复加载**
+1. 遇到 `branch_summary` entry 且 `is_boundary=true` → 作为 `SummaryTurn` 加入 `userTurnsList`，**丢弃其前**已暂存的所有 entry
+2. 遇到 `branch_summary` entry 且 `is_boundary=false` → **跳过**（这是预热阶段的备用记录，尚未被应用；**不在** `userTurnsList` 中生成 `SummaryTurn`）
+3. 已被摘要覆盖的原始 turns **不重复加载**
 4. 后续 Layer 1 可直接定位已有 summary，进入 UPDATE 模式
 5. **重载 Hydrate**：在 `fold_entries_to_turns` 与 `init_context_state` 使用的 **同一 entry 切片** 内，正向扫描维护「最后一条未应用 preheat」：遇 `is_boundary=false` 且摘要与 `covered_*` 齐全则更新；遇下一条 `is_boundary=true` 则清空。切片结束后若仍保留该 pending，且当前 `userTurnsList`（经日筛选后）仍含 `covered_end_id`，则调用 **`preheat.restore_completed`**，使下一轮 `poll_result` 与「任务刚完成」一致（无需再 spawn LLM）。
 
 **Compact Boundary 处理（单行不变式）**：
 
 ```
-Transcript 文件（JSONL；每个压缩逻辑批次仅一行 compaction）
+Transcript 文件（JSONL；每个压缩逻辑批次仅一行 `type: branch_summary`）
 ═════════════════════════════════════════════
 
   entry 1~8:  原始消息（已被摘要覆盖）
-  entry 9:    Compaction { id, summary: "...", is_boundary: false }  ← 预热追加
+  entry 9:    BranchSummary { id, summary: "...", is_boundary: false }  ← 预热追加
               … apply 成功后同一行原地改为 is_boundary: true（不追加第二行）
   entry 10~11: 新消息
 
@@ -499,10 +499,10 @@ init_context_state 处理流程：
 
 **被压缩的 user turn 是否仍留在 transcript JSONL 中？**
 
-采用 **消息行仅追加、compaction 行可原地改写 `isBoundary`** 约定，与 pi 系 transcript 一致：
+采用 **消息行仅追加、`branch_summary` 行可原地改写 `isBoundary`** 约定，与 pi 系 transcript 一致：
 
 - **保留**：原先写入的 `Message` 行（user / assistant / tool）**不删除、不改写**，仍在 `.jsonl` 中，便于审计、回放与调试。
-- **Compaction**：预热成功后写入一行 `type: compaction`，`is_boundary=false`，**插入位置**为 transcript 中 **`MessageEntry.id == covered_end_id`（即 `E`）的那一行之后**（见 §5.7），以保持 JSONL 时间序与 fold 一致；**`id`/`covered_*`** 与 §5.7 一致（`CompactionEntry.id = S::E`）。Boundary 切换时 **按该整串 `id` 原地**将 `isBoundary` 置为 `true`（**不**再追加一条带全文摘要的新行）。开发阶段 **不** 向前兼容历史上「false 一行 + true 一行双份全文」JSONL。
+- **BranchSummary（transcript 行）**：预热成功后写入一行 `type: branch_summary`，`is_boundary=false`，**插入位置**为 transcript 中 **`MessageEntry.id == covered_end_id`（即 `E`）的那一行之后**（见 §5.7），以保持 JSONL 时间序与 fold 一致；**`id`/`covered_*`** 与 §5.7 一致（`BranchSummaryEntry.id = S::E`）。Boundary 切换时 **按该整串 `id` 原地**将 `isBoundary` 置为 `true`（**不**再追加一条带全文摘要的新行）。开发阶段 **不** 向前兼容历史上「false 一行 + true 一行双份全文」JSONL。
 - **构建 LLM 上下文**：`userTurnsList` / `build_context_from_state` 在内存中按 Compaction 元数据 **折叠**——已摘要区间只表现为一条 summary，**不把同一区间的原始 Message 再次拼进 prompt**（避免双倍 token）。
 
 若未来需要「物理瘦身」大文件，可作为独立运维能力（压缩归档副本），**不**作为默认行为。
@@ -754,7 +754,7 @@ init_context_state 处理流程：
                     ┌───────────────────────────────┐
                     │  covered_start_id = S         │
                     │  covered_end_id   = E         │
-                    │  CompactionEntry.id = S::E    │
+                    │  BranchSummaryEntry.id = S::E    │
                     └───────────────┬───────────────┘
                                     │
         transcript JSONL（message / compaction 行序示意）
@@ -764,7 +764,7 @@ init_context_state 处理流程：
                     │ 预热成功后：在此行**之后**插入 compaction 行
                     ▼
               ┌─────────────────────┐
-              │ type: compaction    │
+              │ type: branch_summary    │
               │ id = S::E           │
               │ is_boundary = false │
               └──────────┬──────────┘
@@ -776,7 +776,7 @@ init_context_state 处理流程：
                 再按 id=S::E 将该 compaction 行 is_boundary → true
 ```
 
-**读图要点**：单条 **`UserTurn.id` = 本条首末 message 的 `start::end`**；**`CompactionEntry.id` = 整段快照首 turn 的 `start` 与末 turn 的 `end` 拼成的 `S::E`**，二者仅在「快照只有一条 turn」时可能相等。下文 **5.7.1～5.7.6** 为逐条规范。
+**读图要点**：单条 **`UserTurn.id` = 本条首末 message 的 `start::end`**；**`BranchSummaryEntry.id` = 整段快照首 turn 的 `start` 与末 turn 的 `end` 拼成的 `S::E`**，二者仅在「快照只有一条 turn」时可能相等。下文 **5.7.1～5.7.6** 为逐条规范。
 
 #### 5.7.1 标识符定义
 
@@ -797,16 +797,16 @@ Layer 1 启动时克隆 `userTurnsList` 为 snapshot，并记录：
 
 与旧叙述「首/尾 **turn 的 `id()`**」区分：此处边界均为 **message 级** MessageId。
 
-#### 5.7.3 `CompactionEntry` / `CompactionResult` / `SummaryTurn`
+#### 5.7.3 `BranchSummaryEntry` / `CompactionResult` / `SummaryTurn`
 
-- **`CompactionEntry.id`（必填）**：**`S::E`** —— 即 **`covered_start_id::covered_end_id`**，其中 `S`/`E` 来自 §5.7.2 的快照首尾。**与单条 `UserTurn.id` 同形**（均为 `a::b`），但当 snapshot 含多条 `UserTurn` 时，`CompactionEntry.id` **一般不等于** 任一单条 `UserTurn.id`（仅当 snapshot 恰为一条 turn 时可能偶然相等）。
-- **`CompactionEntry.covered_start_id` / `covered_end_id`**：分别等于 **`S`** / **`E`**，与将 `CompactionEntry.id` 按 `::` 拆出的左、右段一致。
-- **`CompactionResult`**：上述三字段与落盘前构造的 **`CompactionEntry` 完全一致**；**`transcript_compaction_entry_id`**（或等价字段）须存 **整串 `S::E`**，供 Layer 2 调用「按 `id` 将 compaction 行 `isBoundary` 置 true」时使用（与 [`set_compaction_entry_is_boundary_true`](../../../src/core/session/transcript.rs) 入参一致）。
-- **`SummaryTurn.id`**：成功 apply boundary 后，**等于**本次 **`CompactionEntry.id`（`S::E`）**，以便 fold 与 transcript 对齐。
+- **`BranchSummaryEntry.id`（必填）**：**`S::E`** —— 即 **`covered_start_id::covered_end_id`**，其中 `S`/`E` 来自 §5.7.2 的快照首尾。**与单条 `UserTurn.id` 同形**（均为 `a::b`），但当 snapshot 含多条 `UserTurn` 时，`BranchSummaryEntry.id` **一般不等于** 任一单条 `UserTurn.id`（仅当 snapshot 恰为一条 turn 时可能偶然相等）。
+- **`BranchSummaryEntry.covered_start_id` / `covered_end_id`**：分别等于 **`S`** / **`E`**，与将 `BranchSummaryEntry.id` 按 `::` 拆出的左、右段一致。
+- **`CompactionResult`**：上述三字段与落盘前构造的 **`BranchSummaryEntry` 完全一致**；**`transcript_compaction_entry_id`**（或等价字段）须存 **整串 `S::E`**，供 Layer 2 调用「按 `id` 将 compaction 行 `isBoundary` 置 true」时使用（与 [`set_branch_summary_entry_is_boundary_true`](../../../src/core/session/transcript.rs) 入参一致）。
+- **`SummaryTurn.id`**：成功 apply boundary 后，**等于**本次 **`BranchSummaryEntry.id`（`S::E`）**，以便 fold 与 transcript 对齐。
 
 #### 5.7.4 Transcript 写入顺序（锚点插入）
 
-- 预热 **成功后** 将 `Compaction` 行写入 JSONL：**插入到「`MessageEntry.id == E`（`covered_end_id`）」的那一行之后**，而不是无条件追加到文件物理尾部。这样当 covered 段之后仍有新 message 时，compaction 行仍位于 **语义时间序**正确位置，fold 不会错位。
+- 预热 **成功后** 将 `branch_summary` 行写入 JSONL：**插入到「`MessageEntry.id == E`（`covered_end_id`）」的那一行之后**，而不是无条件追加到文件物理尾部。这样当 covered 段之后仍有新 message 时，摘要行仍位于 **语义时间序**正确位置，fold 不会错位。
 - **实现提示**：需在 transcript 层提供「按锚点 message id 插入」能力（读行、定位、重写文件原子替换等）；大文件成本与 **单线程 append** 假设见 [`session_impl`](../../../src/core/session/manager/session_impl.rs) 中并发 TODO。
 
 #### 5.7.5 Layer 2 应用算法
@@ -817,9 +817,9 @@ Layer 1 启动时克隆 `userTurnsList` 为 snapshot，并记录：
 
 #### 5.7.6 复合 id 与 transcript 锚点（小结）
 
-**A. `CompactionEntry.id`**：即 **`S::E`**，`S` = snapshot 首 `UserTurn.start_id`，`E` = snapshot 末 `UserTurn.end_id`。
+**A. `BranchSummaryEntry.id`**：即 **`S::E`**，`S` = snapshot 首 `UserTurn.start_id`，`E` = snapshot 末 `UserTurn.end_id`。
 
-**B. 与 `isBoundary` 原地升级**：查找 compaction 行时，主键必须为写入时的 **整串 `CompactionEntry.id`（`S::E`）**，不能只匹配 `S` 或 `E`。
+**B. 与 `isBoundary` 原地升级**：查找 compaction 行时，主键必须为写入时的 **整串 `BranchSummaryEntry.id`（`S::E`）**，不能只匹配 `S` 或 `E`。
 
 **C. `covered_end_id`（`E`）**：被摘要范围在 transcript 上的**最后一条 message**；插入 compaction 行依赖 **`E` 在会话内唯一可定位**；若锚点缺失则插入失败须可观测（日志 / 错误路径）。
 
@@ -828,7 +828,7 @@ flowchart LR
   msgUser["Message lines with MessageId"]
   userTurn["UserTurn start_id end_id"]
   preheat["Preheat snapshot S and E"]
-  pending["CompactionEntry id S::E insert after E"]
+  pending["BranchSummaryEntry id S::E insert after E"]
   apply["apply_boundary splice zero to k"]
   msgUser --> userTurn
   userTurn --> preheat
@@ -838,7 +838,7 @@ flowchart LR
 
 #### 5.7.7 重启与 `restore_completed`
 
-与 §5.5 一致：`is_boundary=false` 的 compaction 行在 fold 时跳过，但应参与 **pending hydrate**；`restore_completed` / `compaction_pending_from_entry` 的字段须能消费 §5.7.3 的 **`id`/`covered_*`/`summary`** 语义。
+与 §5.5 一致：`is_boundary=false` 的 `branch_summary` 行在 fold 时跳过，但应参与 **pending hydrate**；`restore_completed` / `branch_summary_pending_from_entry` 的字段须能消费 §5.7.3 的 **`id`/`covered_*`/`summary`** 语义。
 
 #### 5.7.8 验收与测试场景
 
@@ -850,7 +850,7 @@ flowchart LR
 | **4** | **仅 end 匹配**：前缀 turn 因 L3 等丢失后，仍能通过 **`covered_end_id`** 完成 apply（与「`covered_start` 缺失则从 0 splice 到 end」行为对齐并固化为规范） |
 | **5** | **id 冲突**：复合 `turn_id` 与历史 boundary compaction **`id` 碰撞**时的策略（拒绝 apply / 报错 / 审计日志）须在实现中明确 |
 
-**验收要点**：`CompactionEntry.id` 与 `set_compaction_entry_is_boundary_true` 使用同一整串；**MessageId 唯一**；**锚点插入**后 JSONL 顺序与 `userTurnsList` fold 一致；restore 后 `poll_result` 行为与「任务刚完成」等价。
+**验收要点**：`BranchSummaryEntry.id` 与 `set_branch_summary_entry_is_boundary_true` 使用同一整串；**MessageId 唯一**；**锚点插入**后 JSONL 顺序与 `userTurnsList` fold 一致；restore 后 `poll_result` 行为与「任务刚完成」等价。
 
 > **与 [session-storage.md](session-storage.md) 的关系**：会话级 `SessionEntry` 中的 compaction 累计字段仍以 user turn 末刷盘为准；MessageId 体系主要约束 **transcript JSONL** 与 **`userTurnsList`**，二者交叉引用即可。
 
@@ -1009,7 +1009,7 @@ fn apply_boundary_switch(state: &mut ContextState):
 
     invalidate_api_usage(state)
 
-    # 按 transcript 行 id 原地将 isBoundary 改为 true（`Some(id)` → set_compaction_entry_is_boundary_true(path, id)；无 id 则 warn）
+    # 按 transcript 行 id 原地将 isBoundary 改为 true（`Some(id)` → set_branch_summary_entry_is_boundary_true(path, id)；无 id 则 warn）
 
     # apply 路径从 preheat 取出并消费 CompactionResult，随后可再次 try_start
 ```
@@ -1178,9 +1178,9 @@ Use this EXACT format (same as the original summary):
 
 ### 7.4 摘要消息格式
 
-摘要以 `Compaction` entry 写入 transcript JSONL（类型已在 [session-storage.md](session-storage.md) 的 `SessionEntry::Compaction` 定义）。**每个压缩批次仅一行 compaction**：
+摘要以 `type: branch_summary` 的 `SessionEntry::BranchSummary` entry 写入 transcript JSONL（类型定义见 [session-storage.md](session-storage.md)）。**每个压缩批次仅一行**：
 
-- **预热阶段**（Layer 1 异步任务完成时）：**追加**一行，`is_boundary: false`，分配行 **`id`**，写入 `CompactionResult.transcript_compaction_entry_id`；`init_context_state` fold 时**跳过**该行（不生成 `SummaryTurn`），并可 **`restore_completed`** 注入 `Preheat`。
+- **预热阶段**（Layer 1 异步任务完成时）：在锚点 message 行**之后插入**一行，`is_boundary: false`，分配行 **`id`**，写入 `CompactionResult.transcript_compaction_entry_id`；`init_context_state` fold 时**跳过**该行（不生成 `SummaryTurn`），并可 **`restore_completed`** 注入 `Preheat`。
 - **应用阶段**（Layer 2 Boundary 切换时）：**原地**将该行的 `isBoundary` 改为 `true`（summary / `covered_*` 不变）。`init_context_state` 遇到 `is_boundary=true` 后**丢弃其前所有 entry**，使重启时重建结果与运行时一致。
 
 在内存中作为一条 `role=user` 消息（content 为摘要文本）放入 `user_turns_list`，替换被压缩的原始 turns。
@@ -1212,7 +1212,7 @@ Use this EXACT format (same as the original summary):
 | 文件                                                                                | 改动内容                                                                                                                                                                        |
 | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[src/core/session/manager/types.rs](../../../src/core/session/manager/types.rs)` | `ContextState` 持有 `preheat: Preheat`（Layer 1 状态机）、`start_idx` 等；`CompactionResult` 含 `transcript_compaction_entry_id`；`apply_boundary` 支持仅尾锚命中时的 `[0..=end]` 降级                                           |
-| `[src/core/session/transcript.rs](../../../src/core/session/transcript.rs)` | `CompactionEntry` 可选 `preheatCompactionId`；`set_compaction_entry_is_boundary_true` 按 id 原地升级                                                     |
+| `[src/core/session/transcript.rs](../../../src/core/session/transcript.rs)` | `BranchSummaryEntry` 可选 `preheatCompactionId`；`set_branch_summary_entry_is_boundary_true` 按 id 原地升级                                                     |
 | `[src/core/agent_loop/run.rs](../../../src/core/agent_loop/run.rs)`               | reasoning loop 每轮 LLM 回复后：① Layer 0 同步清理 ② ratio check → Layer 1 异步预热 ③ 0.85<=r<0.98 时 Layer 2 回复后检查；发起 LLM 请求前：r>=0.70 时 Layer 2 检查、r>=0.98 时发请求前检查（可能同步等待）                |
 | `[src/infra/config/types.rs](../../../src/infra/config/types.rs)`                 | `[context]` 配置节更新 `layer0_single_result_max_chars` 为 50K、新增 `layer0_placeholder_threshold_chars`（10K）、新增 `compaction_max_tokens`（10K）                                       |
 | `[src/core/compaction/](../../../src/core/compaction/)`                           | 重构模块结构：`layer0.rs`（同步清理：落盘 + 占位符）、`preheat.rs`（异步预热：克隆整个 userTurnsList + 后台 Task + 写 transcript）、`apply.rs`（检查与应用：两个检查时机 + Boundary 切换）、`truncation.rs`（物理截断）               |
@@ -1246,7 +1246,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 
 ### 10.2 会话存储（session-storage.md）
 
-- Compaction 摘要以 `SessionEntry::Compaction` entry 类型写入 transcript JSONL（**每批次单行**）。
+- 压缩摘要以 `SessionEntry::BranchSummary` entry（JSONL `type: branch_summary`）写入 transcript（**每批次单行**）。
   - 预热阶段 **追加** `is_boundary: false`（含行 `id`）
   - 应用阶段 **原地**将该行改为 `is_boundary: true`（重启时生效；不追加第二份全文）
 - Tool result 落盘文件存储在 `{work_dir}/agents/{session_id}/tool-results/` 目录。
@@ -1297,7 +1297,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 - **`context_metrics_update` 节奏**：与实现一致，**每个 user turn** 内约发射两次（本轮首次流式请求前 + timing ⑤ 末尾）；中间 tool round **不**额外发射。`compactionCount` / `compactionTokensFreed` / `totalToolResultBytesPersisted`（字段名历史兼容，**值为 Unicode 字符累计**）来自 **`ContextState::session_obs`**；瞬时字段来自 **`ContextState::live`**（含 `preheatInProgress` = 预热 LLM 任务仍在跑；`preheatResultPending` = 摘要已就绪待 poll/apply，与前者互斥）。`AgentLoop` **不**再持有独立 `metrics` 结构。
 - **Transcript（暂缓专项）**：同一会话 JSONL 中可能出现多条 `isBoundary: false` 的 compaction 行或边界行语义重叠；合并策略与 LLM 约束待后续排查。
 - **估算函数**：分层释放量与 transcript 中三字段均通过 `estimated_tokens_from_chars`（与 `estimated_token_count()` 的 **chars/4** fallback 同阶）换算；与带 API usage 的精确计数相比均为**估算**，仅保证与水位线逻辑一致。
-- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `CompactionEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 在 timing ⑤ 将落盘与占位符释放折算为 tok 后立即计入会话累计，并发射 `layer0_context_release`。**L3** 按被删 turn 的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
+- **防重复计入**：**L1** 在拿到 `summary_text` 时**一次性**计算 `estimatedCoveredTokensBefore` / `estimatedSummaryTokens` / `estimatedTokensSaved`，写入 `BranchSummaryEntry` 与 `CompactionResult`；**不在 L2** 再用 `estimated_token_count()` 前后差重算。**L2** `apply_boundary` **成功**后将会话 `compaction_tokens_freed` 加上 `estimated_tokens_saved`，并 `compaction_count += 1`。**L0** 在 timing ⑤ 将落盘与占位符释放折算为 tok 后立即计入会话累计，并发射 `layer0_context_release`。**L3** 按被删 turn 的字符累计折算 tok 后计入会话累计；**每次成功 trim 段**计 **1** 次 compact 动作（与 `compaction_count` 语义对齐），`turns_removed` 由事件给出。
 - **持久化（方案 B）**：`sessions.json` 的 `SessionEntry` 持有 `compaction_count`、`compaction_tokens_freed`、`tool_result_chars_persisted`；**仅在 user turn 结束**（含可恢复错误路径）刷盘；进程在 turn 中途崩溃可能丢失本 turn 内尚未写入 store 的观测累计，详见 [session-storage.md](session-storage.md)。
 
 

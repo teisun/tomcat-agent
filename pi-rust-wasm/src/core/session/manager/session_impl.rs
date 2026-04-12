@@ -14,7 +14,7 @@ use crate::core::session::store::{
 };
 use crate::core::session::transcript::{
     append_entry, get_branch, get_children, get_entry, get_leaf_entry, read_entries_tail,
-    read_header, write_header, CompactionEntry, LabelEntry, MessageEntry, ModelChangeEntry,
+    read_header, write_header, BranchSummaryEntry, LabelEntry, MessageEntry, ModelChangeEntry,
     SessionHeader, SessionInfoEntry, ThinkingLevelChangeEntry, TranscriptEntry,
 };
 use crate::infra::error::AppError;
@@ -269,7 +269,7 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::Compaction(CompactionEntry {
+        let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
             id: None,
             parent_id: None,
             timestamp: iso_ts_now()?,
@@ -297,7 +297,7 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::Compaction(CompactionEntry {
+        let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
             id: None,
             parent_id: None,
             timestamp: iso_ts_now()?,

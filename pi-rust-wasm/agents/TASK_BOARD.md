@@ -950,7 +950,7 @@
 **Phase 3：集成与串联**
 - [x] 17.9 `src/core/agent_loop.rs`：reasoning loop 工具返回后调用 Layer 0 + `on_message_appended`；移除 `max_tool_rounds` 硬限（保留配置项但默认不限制，留 TODO 注释）
 - [x] 17.10 `src/core/session/manager.rs` / `src/api/chat.rs`：`build_context_messages` 改为从 `userTurnsList.flatten()` 产出，② 进入前触发 Layer 1~3 预算检查；④ 结束后打包当前 turn 追加 `userTurnsList`
-- [x] 17.11 Transcript 写入：Compaction 发生时追加 `SessionEntry::Compaction` entry（append-only，原始消息不删），记录摘要正文与覆盖 turn range
+- [x] 17.11 Transcript 写入：压缩发生时追加 `SessionEntry::BranchSummary` entry（`type: branch_summary`；append-only，原始消息不删），记录摘要正文与覆盖 turn range
 - [x] 17.12 事件发布：`auto_compaction_start` / `auto_compaction_end` / `compaction_error` / `tool_result_truncated`
 
 **Phase 4：测试**
@@ -1030,7 +1030,7 @@
 - [ ] 19.15 `src/infra/events.rs`：新增 `ContextMetricsUpdate`、`CompactionCircuitBreakerTriggered`、`ToolResultPersisted` 事件类型
 - [ ] 19.16 `src/core/system_prompt.rs`：模块化改造——`SystemPromptSection` trait + 注册机制 + 内置 Section（CoreIdentity / ToolInstructions / WorkspaceContext / ProjectRules）
 - [x] 19.17 `src/core/session/manager.rs`：`init_context_state` 增加 compact boundary 处理（遇到 `is_boundary=true` 的 Compaction entry 时丢弃其前所有暂存 entry）— 已在 17.2 整改中实现
-- [ ] 19.18 [session-storage.md](../openspec/specs/architecture/session-storage.md)：`CompactionEntry` 增加 `is_boundary: bool` 字段文档
+- [ ] 19.18 [session-storage.md](../openspec/specs/architecture/session-storage.md)：`BranchSummaryEntry` 与 JSONL `type: branch_summary` 字段文档（含 `is_boundary`）
 
 **Phase 6：测试**
 - [ ] 19.19 单元测试：`estimated_token_count`（有 usage / 无 usage / compact 后 fallback）、`usage_ratio` 计算、cascade 流程（各 ratio 档位触发正确层级 + m 值）
@@ -1145,7 +1145,7 @@
 | **分支** | `feature/context-async-compaction` |
 | **阻塞点** | — |
 
-**目标**：将运行时与 transcript 行为对齐 [上下文管理技术方案 §5.7](../openspec/specs/architecture/context-management.md)（**消息级 ID**、`UserTurn` 的 `start_id`/`end_id`/`id`、`CompactionEntry.id = S::E`、**在 `MessageEntry.id == E` 行之后插入** pending compaction、Layer 2 **`splice(0..=k)`** 与 **`set_compaction_entry_is_boundary_true` 使用整串 `S::E`**），减少摘要 apply / restore / 水位异常类 bug。
+**目标**：将运行时与 transcript 行为对齐 [上下文管理技术方案 §5.7](../openspec/specs/architecture/context-management.md)（**消息级 ID**、`UserTurn` 的 `start_id`/`end_id`/`id`、`BranchSummaryEntry.id = S::E`、**在 `MessageEntry.id == E` 行之后插入** pending `branch_summary` 行、Layer 2 **`splice(0..=k)`** 与 **`set_branch_summary_entry_is_boundary_true` 使用整串 `S::E`**），减少摘要 apply / restore / 水位异常类 bug。
 
 **技术方案**：[context-management.md §5.7](../openspec/specs/architecture/context-management.md)（含 ASCII 总览、5.7.1～5.7.8 验收场景表）
 
@@ -1154,9 +1154,9 @@
 - [x] **21.1 类型与内存**：`TurnEntry::UserTurn` 增加 `start_id` / `end_id`；`id` 恒为 `start_id::end_id`（与文档 `::` 分隔符一致）；提供或复用 `message_span_turn_id` 类辅助函数；`SummaryTurn.id` 与 compaction 行一致（§5.7.3）
 - [x] **21.2 pack / fold**：`api/chat`（或等价路径）在落盘 message 后回填本条 turn 的 `start_id`/`end_id`；`fold_entries_to_turns` 从 `MessageEntry.id` 还原上述字段（§5.7.1）
 - [x] **21.3 transcript**：实现「按锚点 message id 插入」`Compaction` 行（在 `id == covered_end_id` 的 message 行**之后**）；找不到锚点时策略（日志 + 回退尾追加或报错）写清；原子写与单线程假设见文档 §5.7.4
-- [x] **21.4 Preheat**：快照 `covered_start_id` / `covered_end_id` 取 **首 `UserTurn.start_id`、末 `UserTurn.end_id`**；`CompactionEntry.id = S::E`；成功后调用 21.3 插入；`CompactionResult.transcript_compaction_entry_id` 存整串 `S::E`（§5.7.2～5.7.3）
-- [x] **21.5 apply_boundary**：主路径按 **`UserTurn.end_id == covered_end_id`**（或 `id` 右段）定位 `k`，**`splice(0..=k, [SummaryTurn])`**；保留对旧 turn-id `covered_*` 的兼容回退（文档 §5.7.5）；`write_boundary_transcript` 仍以整串 id 调 `set_compaction_entry_is_boundary_true`
-- [x] **21.6 restore / hydrate**：`compaction_pending_from_entry` / `restore_completed` 与 §5.7.7、`CompactionEntry` 字段语义一致
+- [x] **21.4 Preheat**：快照 `covered_start_id` / `covered_end_id` 取 **首 `UserTurn.start_id`、末 `UserTurn.end_id`**；`BranchSummaryEntry.id = S::E`；成功后调用 21.3 插入；`CompactionResult.transcript_compaction_entry_id` 存整串 `S::E`（§5.7.2～5.7.3）
+- [x] **21.5 apply_boundary**：主路径按 **`UserTurn.end_id == covered_end_id`**（或 `id` 右段）定位 `k`，**`splice(0..=k, [SummaryTurn])`**；保留对旧 turn-id `covered_*` 的兼容回退（文档 §5.7.5）；`write_boundary_transcript` 仍以整串 id 调 `set_branch_summary_entry_is_boundary_true`
+- [x] **21.6 restore / hydrate**：`branch_summary_pending_from_entry` / `restore_completed` 与 §5.7.7、`BranchSummaryEntry` 字段语义一致
 - [x] **21.7 测试**：覆盖 §5.7.8 场景 1～5 中可由单测/集成测表达的部分（不重启 apply、重启 restore、锚点插入行序、L3 后仅 end 匹配、id 冲突策略）
 
 **依赖**：TASK-20（DONE）；以 **§5.7 现行正文** 为验收依据。

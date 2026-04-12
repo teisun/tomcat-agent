@@ -232,7 +232,7 @@ context_state.on_new_user_turn(current_turn);
 
 ### 4.3 为什么 transcript 无 type:compaction 但仍触发重建
 
-Layer 0（大 tool result 落盘）和 Layer 1（>20K 占位符替换）均**不写 CompactionEntry 到 transcript**。
+Layer 0（大 tool result 落盘）和 Layer 1（>20K 占位符替换）均**不写 BranchSummaryEntry 到 transcript**。
 只有 Layer 2（LLM 摘要）才写。因此 transcript 中没有 `type: compaction`，但 Layer 0/1 仍可触发
 `layers_executed` 非空，进而执行 `*messages = build_context_from_state(ctx_state)` 重建。
 

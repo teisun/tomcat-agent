@@ -12,5 +12,6 @@ pub use manager::{
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 pub use transcript::{
     append_entry, append_line, insert_entry_after_message_id, read_entries_tail, read_header,
-    write_header, CompactionEntry, MessageEntry, SessionHeader, TranscriptEntry,
+    set_branch_summary_entry_is_boundary_true, write_header, BranchSummaryEntry, MessageEntry,
+    SessionHeader, TranscriptEntry,
 };

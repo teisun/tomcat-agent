@@ -19,7 +19,7 @@ pub use core::{
 };
 pub use core::{
     build_context_from_state, compound_turn_id, init_context_state, load_store, save_store,
-    CompactionEntry, ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore,
+    BranchSummaryEntry, ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore,
     TranscriptEntry, TurnEntry, DEFAULT_SESSION_KEY,
 };
 pub use ext::{

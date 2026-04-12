@@ -216,7 +216,7 @@ fn get_children_empty_when_no_match() {
 }
 
 #[test]
-fn set_compaction_entry_is_boundary_true_updates_line() {
+fn set_branch_summary_entry_is_boundary_true_updates_line() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("inplace.jsonl");
     write_header(
@@ -230,7 +230,7 @@ fn set_compaction_entry_is_boundary_true_updates_line() {
         },
     )
     .unwrap();
-    let c = TranscriptEntry::Compaction(CompactionEntry {
+    let c = TranscriptEntry::BranchSummary(BranchSummaryEntry {
         id: Some("cmp_inplace".to_string()),
         parent_id: None,
         timestamp: "2025-01-01T00:00:01.000Z".to_string(),
@@ -245,19 +245,19 @@ fn set_compaction_entry_is_boundary_true_updates_line() {
         estimated_tokens_saved: None,
     });
     append_entry(&path, &c).unwrap();
-    set_compaction_entry_is_boundary_true(&path, "cmp_inplace").unwrap();
+    set_branch_summary_entry_is_boundary_true(&path, "cmp_inplace").unwrap();
     let e = get_entry(&path, "cmp_inplace").unwrap().unwrap();
     match e {
-        TranscriptEntry::Compaction(ce) => {
+        TranscriptEntry::BranchSummary(ce) => {
             assert_eq!(ce.is_boundary, Some(true));
             assert_eq!(ce.summary.as_deref(), Some("s"));
         }
-        _ => panic!("expected compaction"),
+        _ => panic!("expected branch_summary"),
     }
 }
 
 #[test]
-fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
+fn set_branch_summary_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("preserve_ws.jsonl");
     write_header(
@@ -286,7 +286,7 @@ fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
         .unwrap();
     writeln!(f, "{}", indented).unwrap();
 
-    let c = TranscriptEntry::Compaction(CompactionEntry {
+    let c = TranscriptEntry::BranchSummary(BranchSummaryEntry {
         id: Some("cmp_ws".to_string()),
         parent_id: None,
         timestamp: "2025-01-01T00:00:02.000Z".to_string(),
@@ -302,19 +302,19 @@ fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
     });
     append_entry(&path, &c).unwrap();
 
-    set_compaction_entry_is_boundary_true(&path, "cmp_ws").unwrap();
+    set_branch_summary_entry_is_boundary_true(&path, "cmp_ws").unwrap();
 
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(
         raw.lines()
             .any(|l| l.starts_with("   ") && l.contains("\"type\":\"message\"")),
-        "leading spaces on non-compaction lines must be preserved:\n{raw}"
+        "leading spaces on non-target lines must be preserved:\n{raw}"
     );
 
     let e = get_entry(&path, "cmp_ws").unwrap().unwrap();
     match e {
-        TranscriptEntry::Compaction(ce) => assert_eq!(ce.is_boundary, Some(true)),
-        _ => panic!("expected compaction"),
+        TranscriptEntry::BranchSummary(ce) => assert_eq!(ce.is_boundary, Some(true)),
+        _ => panic!("expected branch_summary"),
     }
 }
 
@@ -350,7 +350,7 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
     });
     append_entry(&path, &m_later).unwrap();
 
-    let c = TranscriptEntry::Compaction(CompactionEntry {
+    let c = TranscriptEntry::BranchSummary(BranchSummaryEntry {
         id: Some("S::E".to_string()),
         parent_id: None,
         timestamp: "2025-01-01T00:00:03.000Z".to_string(),
@@ -369,6 +369,6 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
     let entries = read_entries_tail(&path, 10).unwrap();
     assert_eq!(entries.len(), 3);
     assert!(matches!(&entries[0], TranscriptEntry::Message(_)));
-    assert!(matches!(&entries[1], TranscriptEntry::Compaction(_)));
+    assert!(matches!(&entries[1], TranscriptEntry::BranchSummary(_)));
     assert!(matches!(&entries[2], TranscriptEntry::Message(_)));
 }

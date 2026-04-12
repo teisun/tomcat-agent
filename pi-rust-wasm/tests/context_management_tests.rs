@@ -707,8 +707,8 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
     mgr.append_message(serde_json::json!({"role":"assistant","content":"old answer"}))?;
 
     let path = mgr.current_transcript_path()?.unwrap();
-    let boundary = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
-        pi_wasm::core::session::transcript::CompactionEntry {
+    let boundary = pi_wasm::core::session::transcript::TranscriptEntry::BranchSummary(
+        pi_wasm::core::session::transcript::BranchSummaryEntry {
             id: None,
             parent_id: None,
             timestamp: "2026-01-01T00:00:00.000Z".to_string(),
@@ -854,8 +854,8 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
     let covered_end = msg_ids[1].clone();
     let compact_id = compound_turn_id(&covered_start, &covered_end);
 
-    let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
-        pi_wasm::core::session::transcript::CompactionEntry {
+    let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::BranchSummary(
+        pi_wasm::core::session::transcript::BranchSummaryEntry {
             id: Some(compact_id.clone()),
             parent_id: None,
             timestamp: "2026-01-01T00:00:01.000Z".to_string(),
@@ -944,8 +944,8 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
     let covered_end = msg_ids[1].clone();
     let compact_id = compound_turn_id(&covered_start, &covered_end);
 
-    let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
-        pi_wasm::core::session::transcript::CompactionEntry {
+    let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::BranchSummary(
+        pi_wasm::core::session::transcript::BranchSummaryEntry {
             id: Some(compact_id.clone()),
             parent_id: None,
             timestamp: "2026-01-01T00:00:01.000Z".to_string(),

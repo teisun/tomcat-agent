@@ -19,7 +19,7 @@
 | 子项 | 状态 | 说明 |
 |------|------|------|
 | 17.1 ContextConfig | DONE | `config.rs` 新增 `[context]` 配置节与 `ContextConfig` 结构体 |
-| 17.2 数据结构 | DONE | `TurnEntry`/`ContextState`/`CompactionEntry` 增强；`init_context_state` |
+| 17.2 数据结构 | DONE | `TurnEntry`/`ContextState`/`BranchSummaryEntry` 增强；`init_context_state` |
 | 17.3 动态估算 | DONE | `on_message_appended`/`on_new_user_turn`/`is_over_budget` |
 | 17.4 Layer 0 | DONE | `truncate_tool_result_if_needed`（Unicode 安全截断） |
 | 17.5 Layer 1 | DONE | `compact_tool_results`（占位符替换） |
@@ -28,7 +28,7 @@
 | 17.8 Prompts | DONE | `SUMMARIZATION_PROMPT` + `UPDATE_SUMMARIZATION_PROMPT` |
 | 17.9 AgentLoop 集成 | DONE | Layer 0 集成 + 估算更新 + `max_tool_rounds` → `usize::MAX` |
 | 17.10 全链路 | DONE | `build_context_from_state` + `chat.rs` ContextState 集成 |
-| 17.11 Transcript | DONE | `CompactionEntry` 增强字段 + `append_compaction_with_range` |
+| 17.11 Transcript | DONE | `BranchSummaryEntry` 增强字段 + `append_compaction_with_range` |
 | 17.12 Events | DONE | `CompactionError` / `ToolResultTruncated` 事件 |
 | 17.13 单元测试 | DONE | Layer 0~3 全路径 + ContextState + init_context_state |
 | 17.14 集成测试 | DONE | `context_management_tests` 14 用例：截断、Layer1+3、Session 重载、Overflow 重试、Unicode、展平顺序 |
@@ -48,7 +48,7 @@
 - `src/infra/events.rs` — 新增 `CompactionError`、`ToolResultTruncated` 事件
 - `src/core/compaction.rs` — 四层防护 + Prompt 模板；`run_compaction_cascade` 抽取
 - `src/core/session/manager.rs` — `TurnEntry`/`ContextState`/`init_context_state`/`build_context_from_state`/`estimate_turn_chars`
-- `src/core/session/transcript.rs` — `CompactionEntry` 增强 `covered_start_id`/`covered_end_id`/`covered_count`
+- `src/core/session/transcript.rs` — `BranchSummaryEntry` 增强 `covered_start_id`/`covered_end_id`/`covered_count`
 - `src/core/session/mod.rs` — 导出新类型
 - `src/core/agent_loop.rs` — Layer 0 集成 + ContextOverflow 重试 + `context_state` 管理 + `max_tool_rounds` → `usize::MAX`
 - `src/core/llm/types.rs` — `ChatRequest` 添加 `#[derive(Default)]`

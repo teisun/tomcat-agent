@@ -1,5 +1,5 @@
 use super::*;
-use crate::core::session::transcript::{CompactionEntry, MessageEntry, TranscriptEntry};
+use crate::core::session::transcript::{BranchSummaryEntry, MessageEntry, TranscriptEntry};
 
 fn mk_user(text: &str) -> Value {
     serde_json::json!({ "role": "user", "content": text })
@@ -159,7 +159,7 @@ fn collect_skips_non_message() {
             timestamp: "t".into(),
             message: mk_user("a"),
         }),
-        TranscriptEntry::Compaction(CompactionEntry {
+        TranscriptEntry::BranchSummary(BranchSummaryEntry {
             id: None,
             parent_id: None,
             timestamp: "t".into(),

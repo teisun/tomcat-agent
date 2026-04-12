@@ -22,7 +22,7 @@ const BRANCH_MAX_ENTRIES: usize = 2000;
 #[cfg(test)]
 use crate::core::agent_loop::AgentMessage;
 #[cfg(test)]
-use crate::core::session::transcript::{CompactionEntry, MessageEntry, TranscriptEntry};
+use crate::core::session::transcript::{BranchSummaryEntry, MessageEntry, TranscriptEntry};
 #[cfg(test)]
 use crate::infra::config::ContextConfig;
 #[cfg(test)]

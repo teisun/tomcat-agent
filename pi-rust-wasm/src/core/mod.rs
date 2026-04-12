@@ -30,7 +30,7 @@ pub use primitives::{
 };
 pub use session::{
     build_context_from_state, compound_turn_id, init_context_state, load_store, save_store,
-    ApiUsage, CompactionEntry, ContextState, SessionEntry, SessionHeader, SessionManager,
+    ApiUsage, BranchSummaryEntry, ContextState, SessionEntry, SessionHeader, SessionManager,
     SessionStore, TranscriptEntry, TurnEntry, DEFAULT_SESSION_KEY,
 };
 pub use tools::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};

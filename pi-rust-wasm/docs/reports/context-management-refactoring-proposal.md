@@ -413,7 +413,7 @@ Transcript 文件（JSONL，按时间追加）
 
 **Pi 的改造方案**：Pi 已有 `SummaryTurn` 概念且运行时 drain 逻辑正确，但 `init_context_state` 从 transcript 重建时缺少 boundary 语义。建议：
 
-- `TranscriptEntry::Compaction` 增加 `is_boundary: bool` 标记
+- `TranscriptEntry::BranchSummary` 增加 `is_boundary: bool` 标记
 - `init_context_state` 遇到 boundary 时丢弃其前已暂存的所有 entry，使重建结果与运行时一致
 - 暂不需要 CC 的复杂上下文重建（file attachments 等），Pi 当前没有这些依赖
 

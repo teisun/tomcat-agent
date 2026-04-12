@@ -40,7 +40,6 @@ pub enum TranscriptEntry {
     Message(MessageEntry),
     ModelChange(ModelChangeEntry),
     ThinkingLevelChange(ThinkingLevelChangeEntry),
-    Compaction(CompactionEntry),
     BranchSummary(BranchSummaryEntry),
     Label(LabelEntry),
     SessionInfo(SessionInfoEntry),
@@ -76,9 +75,10 @@ pub struct ThinkingLevelChangeEntry {
     pub thinking_level: Option<String>,
 }
 
+/// JSONL `type: branch_summary`：上下文压缩摘要行（原 compaction 语义），含 `S::E` 与 boundary 等字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompactionEntry {
+pub struct BranchSummaryEntry {
     pub id: Option<String>,
     pub parent_id: Option<String>,
     pub timestamp: String,
@@ -101,16 +101,6 @@ pub struct CompactionEntry {
     pub estimated_summary_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_tokens_saved: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchSummaryEntry {
-    pub id: Option<String>,
-    pub parent_id: Option<String>,
-    pub timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,10 +257,13 @@ pub fn insert_entry_after_message_id(
     Ok(())
 }
 
-/// 按 `Compaction` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
+/// 按 `branch_summary` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
 ///
 /// 使用临时文件 + `rename` 原子替换目标路径，避免写入中途崩溃导致 transcript 损坏。
-pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Result<(), AppError> {
+pub fn set_branch_summary_entry_is_boundary_true(
+    path: &Path,
+    entry_id: &str,
+) -> Result<(), AppError> {
     let f = std::fs::File::open(path).map_err(AppError::Io)?;
     let reader = BufReader::new(f);
     let lines: Vec<String> = reader
@@ -292,11 +285,11 @@ pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Res
             continue;
         }
         let replaced = match serde_json::from_str::<TranscriptEntry>(trimmed) {
-            Ok(TranscriptEntry::Compaction(mut ce)) => {
+            Ok(TranscriptEntry::BranchSummary(mut ce)) => {
                 if ce.id.as_deref() == Some(entry_id) {
                     ce.is_boundary = Some(true);
                     found = true;
-                    Some(serde_json::to_string(&TranscriptEntry::Compaction(ce))?)
+                    Some(serde_json::to_string(&TranscriptEntry::BranchSummary(ce))?)
                 } else {
                     None
                 }
@@ -312,7 +305,7 @@ pub fn set_compaction_entry_is_boundary_true(path: &Path, entry_id: &str) -> Res
 
     if !found {
         return Err(AppError::Config(format!(
-            "transcript: compaction entry id {entry_id:?} not found"
+            "transcript: branch_summary entry id {entry_id:?} not found"
         )));
     }
 
@@ -336,7 +329,6 @@ fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::Message(e) => e.id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
-        TranscriptEntry::Compaction(e) => e.id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
         TranscriptEntry::Label(e) => e.id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
@@ -349,7 +341,6 @@ fn entry_parent_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::Message(e) => e.parent_id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.parent_id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.parent_id.as_deref(),
-        TranscriptEntry::Compaction(e) => e.parent_id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.parent_id.as_deref(),
         TranscriptEntry::Label(e) => e.parent_id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.parent_id.as_deref(),

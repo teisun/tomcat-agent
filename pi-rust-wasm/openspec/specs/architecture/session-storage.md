@@ -66,7 +66,6 @@ pub enum SessionEntry {
     Message(MessageEntry),
     ModelChange(ModelChangeEntry),
     ThinkingLevelChange(ThinkingLevelChangeEntry),
-    Compaction(CompactionEntry),
     BranchSummary(BranchSummaryEntry),
     Label(LabelEntry),
     SessionInfo(SessionInfoEntry),
@@ -82,11 +81,11 @@ pub struct EntryBase {
     pub timestamp: String,
 }
 
-/// Compaction entry：Layer 2 LLM 摘要产物，替换一批已压缩的旧 turns。
-/// 详见 [上下文管理技术方案](context-management.md) §5.4 / §6.3。
+/// `branch_summary` entry：JSONL `type: branch_summary`，Layer 1/2 上下文压缩摘要行（原 compaction 语义）。
+/// 详见 [上下文管理技术方案](context-management.md) §5.4 / §5.7 / §6.3。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompactionEntry {
+pub struct BranchSummaryEntry {
     pub id: Option<String>,
     pub parent_id: Option<String>,
     pub timestamp: String,
@@ -99,15 +98,15 @@ pub struct CompactionEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub covered_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_boundary: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preheat_compaction_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_covered_tokens_before: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_summary_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_tokens_saved: Option<usize>,
-    /// init_context_state 遇到 is_boundary=true 时，丢弃其前已暂存的所有 entry，
-    /// 使跨重启重建结果与运行时内存状态一致，防止已摘要的旧 turns 与 summary 重复加载。
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub is_boundary: bool,
 }
 ```
 
@@ -120,4 +119,4 @@ pub struct CompactionEntry {
 
 **上下文可观测累计（方案 B）**：`compaction_count` / `compaction_tokens_freed` / `tool_result_chars_persisted` 在进程内由 `ContextState` 更新，**每个 user turn 结束**（成功路径与可恢复错误路径）由 `SessionManager::persist_context_observability` 刷入 `sessions.json`；`init_context_state` 启动时读回填入 `ContextState`，实现重启后累计不无故归零。该累计**不以 transcript 重放重建**；与 transcript 手工编辑可能不一致。
 
-**CompactionEntry（JSONL）可选 token 估算字段**（camelCase，旧行可缺省）：`estimatedCoveredTokensBefore`、`estimatedSummaryTokens`、`estimatedTokensSaved` — L1 预热写入，供 L2 apply 计入 `session_obs.compaction_tokens_freed` 而无需再次用 `estimated_token_count` 前后差计算。
+**BranchSummaryEntry（JSONL `type: branch_summary`）可选 token 估算字段**（camelCase，旧行可缺省）：`estimatedCoveredTokensBefore`、`estimatedSummaryTokens`、`estimatedTokensSaved` — L1 预热写入，供 L2 apply 计入 `session_obs.compaction_tokens_freed` 而无需再次用 `estimated_token_count` 前后差计算。

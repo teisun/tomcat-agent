@@ -15,7 +15,7 @@ use crate::core::session::manager::{
     compound_turn_id, estimate_turn_chars, estimated_tokens_from_chars, CompactionResult, TurnEntry,
 };
 use crate::core::session::transcript::{
-    insert_entry_after_message_id, CompactionEntry, TranscriptEntry,
+    insert_entry_after_message_id, BranchSummaryEntry, TranscriptEntry,
 };
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
@@ -285,21 +285,22 @@ impl Preheat {
                         let est_saved = est_covered_tok.saturating_sub(est_summary_tok);
                         let elapsed_ms = started.elapsed().as_millis() as u64;
 
-                        let compaction_entry = TranscriptEntry::Compaction(CompactionEntry {
-                            id: Some(batch_compaction_id.clone()),
-                            parent_id: None,
-                            timestamp: chrono::Utc::now()
-                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                            summary: Some(summary_text.clone()),
-                            covered_start_id: Some(covered_start_id.clone()),
-                            covered_end_id: Some(covered_end_id.clone()),
-                            covered_count: Some(covered_count),
-                            is_boundary: Some(false),
-                            preheat_compaction_id: Some(batch_compaction_id.clone()),
-                            estimated_covered_tokens_before: Some(est_covered_tok),
-                            estimated_summary_tokens: Some(est_summary_tok),
-                            estimated_tokens_saved: Some(est_saved),
-                        });
+                        let branch_summary_entry =
+                            TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                                id: Some(batch_compaction_id.clone()),
+                                parent_id: None,
+                                timestamp: chrono::Utc::now()
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                                summary: Some(summary_text.clone()),
+                                covered_start_id: Some(covered_start_id.clone()),
+                                covered_end_id: Some(covered_end_id.clone()),
+                                covered_count: Some(covered_count),
+                                is_boundary: Some(false),
+                                preheat_compaction_id: Some(batch_compaction_id.clone()),
+                                estimated_covered_tokens_before: Some(est_covered_tok),
+                                estimated_summary_tokens: Some(est_summary_tok),
+                                estimated_tokens_saved: Some(est_saved),
+                            });
 
                         let (transcript_compaction_entry_id, append_ok) = if transcript_path
                             .as_os_str()
@@ -310,7 +311,7 @@ impl Preheat {
                             match insert_entry_after_message_id(
                                 &transcript_path,
                                 &covered_end_id,
-                                &compaction_entry,
+                                &branch_summary_entry,
                             ) {
                                 Ok(()) => (Some(batch_compaction_id.clone()), true),
                                 Err(e) => {

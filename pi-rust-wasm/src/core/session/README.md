@@ -52,7 +52,7 @@
 ### 2.2 对话 transcript（pi 系 JSONL）
 
 - **首行**：SessionHeader（type、version、id、timestamp、cwd）。
-- **后续行**：TranscriptEntry 枚举（message、model_change、thinking_level_change、session_info、compaction、branch_summary、label、custom），与 session-pi-mono-format.jsonl 兼容。
+- **后续行**：TranscriptEntry 枚举（message、model_change、thinking_level_change、session_info、**branch_summary**（上下文压缩摘要行，JSONL `type: branch_summary`）、label、custom）。与 pi 系 JSONL 的其它 `type` 值并存时，未知行可能按 skip 策略处理；压缩语义以 `branch_summary` 为准。
 - **`message` 行顶层 `id`**：新写入由运行时生成（Unix 微秒 + 进程内单调序号，形如 `微秒_序号`）；历史 JSONL 若 `id` 为空可一次性 backfill（见仓库 `scripts/backfill_transcript_message_ids.py`）。
 - **读写约定**：禁止整文件 `from_str`；使用 BufReader 逐行读；上下文组装仅保留最近 N 条（默认 10）；append 仅追加不修改历史。
 

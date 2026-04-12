@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use crate::core::compaction::preheat::PreheatOutcome;
 use crate::core::session::manager::{CompactionResult, ContextState};
-use crate::core::session::transcript::set_compaction_entry_is_boundary_true;
+use crate::core::session::transcript::set_branch_summary_entry_is_boundary_true;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::AgentEvent;
 
@@ -171,7 +171,7 @@ fn write_boundary_transcript(state: &ContextState, result: &CompactionResult) {
         warn!("write_boundary_transcript: missing transcript_compaction_entry_id; skip transcript update");
         return;
     };
-    if let Err(e) = set_compaction_entry_is_boundary_true(&state.transcript_path, id) {
+    if let Err(e) = set_branch_summary_entry_is_boundary_true(&state.transcript_path, id) {
         warn!(
             "write_boundary_transcript: failed to set isBoundary for {}: {}",
             id, e

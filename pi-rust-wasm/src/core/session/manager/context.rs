@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use chrono::{NaiveDate, Utc};
 
 use crate::core::agent_loop::{AgentMessage, ToolCallInfo};
-use crate::core::session::transcript::{read_entries_tail, CompactionEntry, TranscriptEntry};
+use crate::core::session::transcript::{read_entries_tail, BranchSummaryEntry, TranscriptEntry};
 use crate::infra::config::{compute_context_budget_chars, ContextConfig};
 use crate::infra::error::AppError;
 
@@ -23,7 +23,6 @@ const DEFAULT_CONTEXT_CAP: usize = 10;
 fn entry_timestamp(entry: &TranscriptEntry) -> &str {
     match entry {
         TranscriptEntry::Message(e) => &e.timestamp,
-        TranscriptEntry::Compaction(e) => &e.timestamp,
         TranscriptEntry::ModelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
@@ -58,7 +57,7 @@ pub(super) fn compute_fold_start(
     min_turns: usize,
 ) -> usize {
     let boundary = entries.iter().rposition(
-        |e| matches!(e, TranscriptEntry::Compaction(ce) if ce.is_boundary == Some(true)),
+        |e| matches!(e, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true)),
     );
     let effective_start = boundary.unwrap_or(0);
 
@@ -99,7 +98,7 @@ pub(super) fn compute_fold_start(
     effective_start
 }
 
-fn compaction_pending_from_entry(ce: &CompactionEntry) -> Option<CompactionResult> {
+fn branch_summary_pending_from_entry(ce: &BranchSummaryEntry) -> Option<CompactionResult> {
     if ce.is_boundary != Some(false) {
         return None;
     }
@@ -160,10 +159,10 @@ fn fold_entries_to_turns(
 
     for entry in entries {
         match entry {
-            TranscriptEntry::Compaction(ce) => {
+            TranscriptEntry::BranchSummary(ce) => {
                 // is_boundary=false → preheat record: skip during reload
                 if ce.is_boundary == Some(false) {
-                    if let Some(r) = compaction_pending_from_entry(ce) {
+                    if let Some(r) = branch_summary_pending_from_entry(ce) {
                         pending_preheat = Some(r);
                     }
                     continue;
