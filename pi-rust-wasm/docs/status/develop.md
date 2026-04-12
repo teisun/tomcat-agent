@@ -1,5 +1,35 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-12（补录） | INTEGRATION PASS | develop | — |
+
+### 集成补录：§1 规格核对、E2E 场景库对齐与架构 review（TASK-20/21 合并后）
+
+本次在已合并代码与门禁通过基础上，补齐 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) **§1** 与 **全量 review** 的书面记录（不重复 §4 命令执行）。
+
+#### §1 User_Stories / 场景库 / 架构正文
+
+| 文档 | 动作 | 结论 |
+| :--- | :--- | :--- |
+| [User_Stories.md](../../openspec/specs/User_Stories.md) Story 8 | 对照 TASK-20/21 现行实现修订验收表述 | 已更新：单条大 tool result 阈值指向 `[context].layer0_single_result_max_chars`（默认 50K）；压缩链路改为 L0→L1 异步→L2 Boundary→L3 仅 overflow；Session 重载与 §5.7 compaction 语义对齐 |
+| [E2E_SCENARIO_LIBRARY.md](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) Story 9（E2E-CLI-084～090） | 将「用例名」列与仓库内**真实**测试符号及路径对齐 | 已更新：替换历史上不存在的 `test_large_tool_result_*` / `test_preheat_does_not_block_reply` / `test_sync_wait_at_098` 等占位名；补充 TASK-21 与 `transcript/tests` 交叉引用 |
+| [context-management.md](../../openspec/specs/architecture/context-management.md) | 核对 §4.2 / §5.7 与代码主路径 | 无新增偏差需改本文；User_Stories / 场景库已指向本文为单一事实来源 |
+
+#### §2–§3 测试与场景对应（抽样核对）
+
+- **集成**：[`tests/context_management_tests.rs`](../../tests/context_management_tests.rs) 覆盖重载、boundary、`layer0` 读回、overflow 重试等，与上表 E2E-CLI-085/086/090 及 TASK-20 备注一致。
+- **单测**：[`src/core/compaction/tests.rs`](../../src/core/compaction/tests.rs) 覆盖 `Preheat` 状态、`apply_boundary`、Layer0 阈值、`check_after_reply` 分档；[`src/core/session/transcript/tests.rs`](../../src/core/session/transcript/tests.rs) 覆盖 §5.7 锚点与 compaction 行字段。
+- **E2E/CLI**：[`tests/cli_tests.rs`](../../tests/cli_tests.rs) 与 AgentLoop 路径继续覆盖 Story 9 人工行 E2E-CLI-081～083；与上下文压缩无冲突。
+
+#### 架构与质量红线 review（对照 [Codeing&Architecture_Spec.md](../../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) / [Constitution.md](../../openspec/specs/Constitution.md)）
+
+- **分层**：`api/chat` 仅编排；`compaction/{preheat,apply,truncation}` 与 `session::{transcript,manager}` 职责边界清晰；`ContextState` 仍为会话内聚状态载体，未见向下层泄漏实现细节。
+- **并发**：L1 预热单例、`abort_preheat` 与 Session 生命周期在既有测试中可验证；未见为通过测试而删除断言或滥用 `#[ignore]`。
+- **残留**：若后续需 **E2E-CLI-084** 与 `ToolResultTruncated` 事件在 **AgentLoop 全链路** 的专项黑盒用例，可另开任务（当前以 Layer0/L1 单测与集成为主）。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-12 13:35 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：TASK-20 / TASK-21（`feature/context-async-compaction` fast-forward 并入 develop）

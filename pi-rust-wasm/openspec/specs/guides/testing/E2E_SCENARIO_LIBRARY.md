@@ -194,18 +194,18 @@
 | E2E-CLI-081 | 人工 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `pi chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `pi init` → `pi chat`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 OPENAI_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复） |
 | E2E-CLI-082 | 人工 | `test_user_chat_resumes_last_session`             | 用户用 `--resume` 恢复上次会话，历史消息从 JSONL 加载         | `pi init` → `pi chat`（stdin 第一轮）→ `pi chat --resume`（stdin 第二轮，timeout 60s）               | exit 0；第二轮 stdout 非空；进程正常退出                  |
 | E2E-CLI-083 | 人工 | `test_user_chat_multi_turn_context_retained`      | 用户进行两轮提问，第二轮 Agent 可引用第一轮答案（多轮上下文）           | `pi chat`（stdin: 两行问答，第二问引用第一问答案，timeout 90s）                                             | exit 0；stdout 包含第二问回复且非空                     |
-| E2E-CLI-084 | 自动 | `test_large_tool_result_triggers_truncation_event` | 超大 tool result 被自动截断，对话正常继续 | AgentLoop mock 返回大文件读取 → 检查截断事件 | ToolResultTruncated 事件发布；截断后内容 <= 阈值 |
+| E2E-CLI-084 | 自动 | `test_layer0_persist_and_readback`；`layer0_threshold_from_config`（`src/core/compaction/tests.rs`）；`test_compact_tool_results_*`（`tests/context_management_tests.rs`） | 超大 tool result：Layer 0 落盘 + preview / compactable 区内占位，不导致单次上下文爆炸 | 构造超大 `ToolResult` → `layer0_persist_large_results` 或 `compact_tool_results` / 集成写盘读回 | 落盘路径可读回或占位符替换；估算字符下降；阈值随 `[context]` 生效 |
 | E2E-CLI-085 | 自动 | `test_context_overflow_triggers_compaction_and_retries` | Context overflow 触发 Compaction 后自动恢复 | Mock LLM 先返回 overflow 错误 → 触发压缩 → 重试成功 | 预算恢复；重试成功返回结果 |
-| E2E-CLI-086 | 自动 | `test_session_reload_with_compaction_entries` | Session JSONL 含 Compaction entry 时重载正确 | 写入含 CompactionEntry 的 JSONL → init_context_state → build_context | SummaryTurn 出现在正确位置；消息顺序正确 |
-
-| E2E-CLI-087 | 自动 | `test_preheat_does_not_block_reply` | 高 ratio 下异步预热不阻塞最终回复 | Mock LLM；ratio >= 0.50 → preheat.try_start → assistant 回复路径无 await compaction LLM | 回复正常返回；auto_compaction_start 已 emit |
-| E2E-CLI-088 | 自动 | `test_sync_wait_at_098` | ratio >= 0.98 时同步等待后继续 | 构造 ContextState + Running preheat → check_before_request → boundary 应用或超时 | boundary_switched emit 或超时后继续 |
-| E2E-CLI-089 | 自动 | `test_preheat_completed_boundary_switch` | 预热完成后非阻塞切换 boundary | ratio >= 0.85 + preheat finished → check_after_reply → BoundarySwitched + SummaryTurn | boundary_switched 已 emit；turns 含 SummaryTurn |
+| E2E-CLI-086 | 自动 | `test_session_reload_with_compaction_entries`；`test_session_reload_with_boundary` | Session JSONL 含 Compaction entry 时重载正确 | 写入含 CompactionEntry 的 JSONL → `init_context_state` → `build_context` | `SummaryTurn` 位置与消息顺序正确；boundary 场景无重复 |
+| E2E-CLI-087 | 自动 | `preheat_warmup_active_vs_result_pending`、`preheat_restore_pending_result_keeps_non_idle_until_consumed`（`src/core/compaction/tests.rs`）；`test_session_reload_pending_preheat_restore`（`tests/context_management_tests.rs`） | 异步预热状态机：结果 pending / restore 与重载一致 | 构造 `Preheat` / 写 `is_boundary=false` 的 compaction 行后 `init_context_state` | preheat 非 idle 语义正确；重载后可 `poll_result` / `CachedCompleted` |
+| E2E-CLI-088 | 自动 | `check_before_request`（`src/core/compaction/apply.rs`，由 `api/chat` 时机 ② 调用） | ratio ≥ 0.98 且预热未完成时允许同步等待后再发 LLM | 逻辑见 apply.rs；全链路行为由 `cli_tests` + chat 诊断日志观测 | 无独立历史用例名 `test_sync_wait_at_098`；以 apply 实现 + 集成为准 |
+| E2E-CLI-089 | 自动 | `apply_boundary_replaces_covered_range` 等（`src/core/compaction/tests.rs`）；`check_after_reply_skips_below_085` / `check_after_reply_skips_when_no_preheat` | 预热完成后 Boundary / ratio 分档不误切换 | `CompactionResult` + `apply_boundary`；高 ratio 无 preheat 时 `check_after_reply` 不切换 | turns 含 `SummaryTurn`；ratio 下降；idle preheat 不触发切换 |
 | E2E-CLI-090 | 自动 | `test_session_reload_boundary_false_skipped` | Session 重载识别 is_boundary=false/true | 写含 is_boundary=false 的 CompactionEntry → init_context_state | is_boundary=false 被跳过；is_boundary=true 生效 |
 | E2E-CLI-091 | 自动 | `test_context_metrics_update_event_published` + `persist_context_observability_writes_sessions_json` | 上下文指标事件节奏与 `sessions.json` 可观测累计刷盘 | AgentLoop mock：`context_metrics_update` 顺序与字段；SessionManager：`persist_context_observability` 写入 `compactionCount` 等价字段 | stderr/事件含合法 metrics；store 中 `compaction_tokens_freed` 等与 `ContextState` 一致 |
 
-> **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
-> **TASK-20 备注**：E2E-CLI-087~090 异步预热与 L1/L2/L3 事件分离，验收以 `tests/context_management_tests.rs` 集成测试自动覆盖为准。
+> **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 为主、`src/core/compaction/tests.rs` 为 Layer0/L2 单测补充（见上表「用例名」列）。
+> **TASK-20 备注**：E2E-CLI-087~090 异步预热与 Boundary/L3 语义：集成见 `context_management_tests.rs`，状态机与 `apply_boundary` 见 `src/core/compaction/tests.rs`；时机 ② `check_before_request` 见 `apply.rs` 与 `api/chat`。
+> **TASK-21 备注**：§5.7 消息级 ID、锚点插入、`S::E`：`src/core/session/transcript/tests.rs` 与 `context_management_tests.rs` 中重载/边界用例对齐 JSONL 行序与 fold。
 > **上下文可观测性完善**：E2E-CLI-091 中 `test_context_metrics_update_event_published` 位于 `tests/agent_loop_tests.rs`，`persist_context_observability_writes_sessions_json` 位于 `src/core/session/manager/tests.rs`（lib 单测）。
 
 ---

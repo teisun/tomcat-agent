@@ -102,9 +102,9 @@
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
 - [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在等）给出清晰提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
-- [ ] 单条工具结果超过阈值（默认 300K chars）时自动截断，不导致 context overflow，截断事件通过 EventBus 发布
-- [ ] 长对话 token 超预算时自动触发四层保护（tool result 占位 → LLM 摘要 → 强制删除），保护最近 N 个 turns 不被压缩，压缩后继续正常对话
-- [ ] Session 重载时正确识别已有 CompactionEntry，恢复 SummaryTurn 而非重复压缩
+- [ ] 单条工具结果超过 `[context].layer0_single_result_max_chars`（默认 **50_000** chars，与 [context-management.md §4.4](architecture/context-management.md) 一致）时 Layer 0 落盘 + preview，不撑爆单次请求；可观测事件见 `tool_result_truncated` / 压缩相关事件（以代码与 [events.md](architecture/plugin-system/events.md) 为准）
+- [ ] 长对话 token 超预算时按 [context-management.md](architecture/context-management.md) **现行**链路：**Layer 0**（同步：落盘 / compactable 区占位）→ **Layer 1**（异步预热摘要，时机 ⑤ 不阻塞）→ **Layer 2**（Boundary 延迟应用，时机 ②）→ **Layer 3**（仅 API **Context Overflow** 后 `force_drop_oldest_to_target` 兜底）；保护最近若干 turns 与水位线见文档 §4.2；压缩后继续正常对话
+- [ ] Session 重载时正确识别 `CompactionEntry`（含 `is_boundary=false` 跳过 / `true` 折叠、`S::E` 锚点，§5.7），恢复 `SummaryTurn` / `Preheat` 状态与运行时一致，不重复摘要
 
 ## P1 二期核心用户故事
 ### Story 8b: 长生命周期 VM 与有状态插件支持
