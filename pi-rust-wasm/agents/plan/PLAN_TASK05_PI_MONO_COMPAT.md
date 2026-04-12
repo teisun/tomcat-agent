@@ -1,6 +1,8 @@
 # 开发计划：pi-mono 生态插件兼容（TASK-05a/b/c/d/e）
 
-本计划对照 [PLAN_SPEC.md](./PLAN_SPEC.md) 规范编写，覆盖 TASK-05 拆分后的全部阶段（含矩阵端到端验收 **TASK-05e**）。
+**案例定位**（[PLAN_SPEC.md](./PLAN_SPEC.md) 第四节）：**多 Phase、多 Tier、矩阵式验收**横切任务的长计划范例；与 [PLAN_EXAMPLE_CLI.md](./PLAN_EXAMPLE_CLI.md) 的「单 crate 多子命令渐进」互补。新任务若规模类似可复用章节顺序，**不必**等同长度；仅 Phase 0 时可缩为 SKELETON + 技术方案链接。
+
+本计划对照 PLAN_SPEC 编写，覆盖 TASK-05 拆分后的全部阶段（含矩阵端到端验收 **TASK-05e**）。  
 技术方案详见 [pi-mono-compat-strategy.md](../../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)。
 
 **总体验收（社区规模）**：由 **TASK-05e** 统一执行并勾选——在 TASK-05d 完成后，按 `extension_compat_matrix.md` 对 **10–15 个** pi-mono **社区**插件做端到端兼容验收（与 Phase 0 矩阵采样一致）。TASK-05b/c/d 子项中的少量社区扩展为**分层门禁**，不替代 05e。
@@ -68,7 +70,7 @@
 - Tier 1: 至少 1 个纯事件监听扩展零修改运行（tps.ts）
 - Tier 2: 至少 2 个含 registerCommand + exec 的扩展零修改运行
 - 每个 Tier 有对应的自动化 E2E 测试（可优先覆盖矩阵中各 Tier 的代表扩展）
-- `cargo test -j 1 --all -- --test-threads=1` 全量通过（串行约定见 INTEGRATION_TEST_SPEC §7.1）
+- 交付前全量门禁与 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md) 一致（推荐 `./scripts/run-integration-tests.sh all` 或等价 `cargo test -j 1 … --test-threads=1` 串行策略，见 INTEGRATION_TEST_SPEC §7.1）
 
 ### 架构数据流
 

@@ -1,6 +1,9 @@
 # 案例：CLI 子命令补完（TASK-02 / T1-P0-010-completion）
 
-以下是一份符合 [PLAN_SPEC.md](./PLAN_SPEC.md) 规范的**完整开发计划**，来源于 Jerry 认领 TASK-02 的实际输出。可作为模板对照使用。
+以下是一份符合 [PLAN_SPEC.md](./PLAN_SPEC.md) 的**完整开发计划**（历史输出），形态为「多子命令、占位渐进替换」——**同类新任务请复制结构、替换任务名与路径即可**，不必保留 `pi-wasm` 等旧二进制名：当前仓库 CLI 入口以 crate 配置为准（常见为 `pi` / `cargo run -p pi_wasm -- …`）。
+
+- **更小任务**：优先用 [PLAN_SKELETON.md](./PLAN_SKELETON.md) 一屏骨架。  
+- **TASK-02 已在看板 DONE**：本文仅作章节与粒度示范，子项编号以当时 TASK_BOARD 为准。
 
 ### 规范映射
 
