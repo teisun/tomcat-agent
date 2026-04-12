@@ -9,6 +9,26 @@
 
 ---
 
+## 〇、Todo 总表与章节映射（符合 [PLAN_SPEC.md](./PLAN_SPEC.md) 一.7、第六节）
+
+> 长任务可在 Cursor 计划 frontmatter 增加 YAML `todos`（如 TASK-20：`ops-*` + `phase-*`），与本节 Markdown 表**双轨同步**；本仓库内 Markdown 计划以本节表为权威汇总。
+
+| Todo 范围 | 类型 | 对应正文 |
+| :--- | :--- | :--- |
+| `ops-claim` / 分支与 `develop` 同步 | 流程 | [Dispatcher.md](../Dispatcher.md) §1–§5；实施前单独一行写明即可 |
+| `ops-after-each-tier` | 流程 | 每完成 **一** 中一个 Tier（05b/05c/05d）或 05e 子批：`docs/status/<分支>.md` → commit-guard → push（Dispatcher §5） |
+| `ops-pending-integration` | 流程 | 05e 与全量门禁通过后 TASK_BOARD → `PENDING_INTEGRATION`（Dispatcher §7） |
+| TASK-05a（a.1–a.6） | 实施 | **一、** `### TASK-05a` |
+| TASK-05b（b.1–b.6） | 实施 | **一、** `### TASK-05b` |
+| TASK-05c（c.1–c.7） | 实施 | **一、** `### TASK-05c` |
+| TASK-05d（d.1–d.7） | 实施 | **一、** `### TASK-05d` |
+| TASK-05e（e.1–e.5） | 实施 | **一、** `### TASK-05e` |
+| 下文「三～」各技术子节 | 实施 | 与 **一** 中字母子项交叉引用（新增子节时须回填本表一行） |
+
+**写后复核**：每条 a./b./c./d./e. 子项在「一」中有勾选行；流程三行在实施计划执行段有交代；与 TASK-20 类计划同样做一次 **Todo ↔ 正文** 双向扫描。
+
+---
+
 ## 一、子项清单（与 [TASK_BOARD.md](./TASK_BOARD.md) 同步）
 
 ### TASK-05a | Phase 0 技术验证与差距分析（`DONE`）

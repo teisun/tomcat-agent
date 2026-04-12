@@ -14,6 +14,24 @@
 | 3. 每子项详细（文件/思路/接口/测试） | 三、各子项详细计划 |
 | 4. 实施顺序与依赖 | 四、实施顺序与依赖关系 |
 | 5. 风险点 | 五、风险点与可能的阻塞项 |
+| 7. Todo 总表 + 写后复核 | **〇、Todo 与章节映射**（[PLAN_SPEC.md](./PLAN_SPEC.md) 一.7、第六节） |
+
+---
+
+## 〇、Todo 与章节映射（与计划描述一致）
+
+| Todo / 子项 | 类型 | 对应计划章节 |
+| :--- | :--- | :--- |
+| `ops-claim`～`develop` 同步、`feature/...` | 流程 | Dispatcher；本案例省略细节，真实任务须写明 |
+| 10.3 doctor | 实施 | 三、子项 1 |
+| 10.4 config | 实施 | 三、子项 2 |
+| 10.6 plugin | 实施 | 三、子项 3 |
+| 10.7 audit | 实施 | 三、子项 4 |
+| 10.8 帮助与校验 | 实施 | 三、子项 5 |
+| 每子项完成 → status / commit / push | 流程 | Dispatcher §5；与 TASK-20 类计划中 `ops-after-each-phase` 同级 |
+| 收尾 → 门禁 → PENDING_INTEGRATION | 流程 | Dispatcher §7、INTEGRATION_MERGE_AND_ACCEPTANCE |
+
+**写后复核**：确认上表每一行在「三、各子项详细计划」中有展开；「一」中清单与上表实施类一一对应。
 
 ---
 
