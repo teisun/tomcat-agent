@@ -18,9 +18,9 @@ pub use core::{
     ToolExecutor, ToolRegistry, UserConfirmationProvider, WriteFileResult,
 };
 pub use core::{
-    build_context_from_state, init_context_state, load_store, save_store, CompactionEntry,
-    ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore, TranscriptEntry,
-    TurnEntry, DEFAULT_SESSION_KEY,
+    build_context_from_state, compound_turn_id, init_context_state, load_store, save_store,
+    CompactionEntry, ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore,
+    TranscriptEntry, TurnEntry, DEFAULT_SESSION_KEY,
 };
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, transpile_pi_plugin_for_quickjs,

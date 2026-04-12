@@ -1120,7 +1120,7 @@
 
 **依赖**：TASK-17（DONE）、TASK-19（DONE）；以当前 `develop` 实现为基线，**规格以 `context-management.md` 现行正文为准**（TASK-19 表格若与文档不一致时以文档收口）。
 
-**被依赖**：—
+**被依赖**：TASK-21（§5.7 消息级 ID、锚点插入、`S::E`；见本文件 **TASK-21**）
 
 **协作接口**：
 - 消费：`LlmProvider`（`StreamEvent::Usage`、compaction 调用）、`SessionManager`（transcript、tool-result 落盘路径）、`EventBus`、`PrimitiveConfig`
@@ -1132,3 +1132,41 @@
 - `ratio` 档位与 §4.2 总表一致；Layer 3 仅在 Context Overflow 错误后触发
 - Transcript：`is_boundary=false` / `true` 语义与 §5.5 一致；重载无重复摘要、无丢失 boundary 后状态
 - `cargo clippy --all-targets -- -D warnings`；新增/相关单测覆盖率 ≥ 80%
+
+---
+
+### TASK-21 | context-management-message-ids | 上下文管理 — §5.7 消息级 ID 与 compaction 锚点对齐（实现）
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Jerry |
+| **分支** | `feature/context-async-compaction` |
+| **阻塞点** | — |
+
+**目标**：将运行时与 transcript 行为对齐 [上下文管理技术方案 §5.7](../openspec/specs/architecture/context-management.md)（**消息级 ID**、`UserTurn` 的 `start_id`/`end_id`/`id`、`CompactionEntry.id = S::E`、**在 `MessageEntry.id == E` 行之后插入** pending compaction、Layer 2 **`splice(0..=k)`** 与 **`set_compaction_entry_is_boundary_true` 使用整串 `S::E`**），减少摘要 apply / restore / 水位异常类 bug。
+
+**技术方案**：[context-management.md §5.7](../openspec/specs/architecture/context-management.md)（含 ASCII 总览、5.7.1～5.7.8 验收场景表）
+
+**子项**：
+
+- [x] **21.1 类型与内存**：`TurnEntry::UserTurn` 增加 `start_id` / `end_id`；`id` 恒为 `start_id::end_id`（与文档 `::` 分隔符一致）；提供或复用 `message_span_turn_id` 类辅助函数；`SummaryTurn.id` 与 compaction 行一致（§5.7.3）
+- [x] **21.2 pack / fold**：`api/chat`（或等价路径）在落盘 message 后回填本条 turn 的 `start_id`/`end_id`；`fold_entries_to_turns` 从 `MessageEntry.id` 还原上述字段（§5.7.1）
+- [x] **21.3 transcript**：实现「按锚点 message id 插入」`Compaction` 行（在 `id == covered_end_id` 的 message 行**之后**）；找不到锚点时策略（日志 + 回退尾追加或报错）写清；原子写与单线程假设见文档 §5.7.4
+- [x] **21.4 Preheat**：快照 `covered_start_id` / `covered_end_id` 取 **首 `UserTurn.start_id`、末 `UserTurn.end_id`**；`CompactionEntry.id = S::E`；成功后调用 21.3 插入；`CompactionResult.transcript_compaction_entry_id` 存整串 `S::E`（§5.7.2～5.7.3）
+- [x] **21.5 apply_boundary**：主路径按 **`UserTurn.end_id == covered_end_id`**（或 `id` 右段）定位 `k`，**`splice(0..=k, [SummaryTurn])`**；保留对旧 turn-id `covered_*` 的兼容回退（文档 §5.7.5）；`write_boundary_transcript` 仍以整串 id 调 `set_compaction_entry_is_boundary_true`
+- [x] **21.6 restore / hydrate**：`compaction_pending_from_entry` / `restore_completed` 与 §5.7.7、`CompactionEntry` 字段语义一致
+- [x] **21.7 测试**：覆盖 §5.7.8 场景 1～5 中可由单测/集成测表达的部分（不重启 apply、重启 restore、锚点插入行序、L3 后仅 end 匹配、id 冲突策略）
+
+**依赖**：TASK-20（`PENDING_INTEGRATION` / 合并后以 develop 为基线亦可）；以 **§5.7 现行正文** 为验收依据。
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`SessionManager` / `transcript.rs`、`Preheat`、`ContextState::apply_boundary`、`init_context_state` / `fold_entries_to_turns`
+- 提供：与 JSONL 一致的 message 边界 id；可观测的失败路径（锚点缺失、apply 拒绝对齐文档场景 5）
+
+**验收标准**：
+- 行为与 §5.7 ASCII 总览及 5.7.1～5.7.6 条文一致；§5.7.8 所列场景在测试或手动验收中有对应用例
+- `cargo clippy --all-targets -- -D warnings`；相关模块单测通过

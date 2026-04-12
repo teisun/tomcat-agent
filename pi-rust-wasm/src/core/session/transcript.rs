@@ -213,6 +213,60 @@ pub fn append_entry(path: &Path, entry: &TranscriptEntry) -> Result<(), AppError
     append_line(path, &json)
 }
 
+/// 在首条 `type=message` 且 `id == anchor_message_id` 的 JSONL 行**之后**插入 `entry`（整文件原子写）。
+///
+/// §5.7.4：找不到锚点时打 `warn` 并退化为 [`append_entry`]（尾部追加），保证 L1 仍可落盘。
+pub fn insert_entry_after_message_id(
+    path: &Path,
+    anchor_message_id: &str,
+    entry: &TranscriptEntry,
+) -> Result<(), AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut anchor_line: Option<usize> = None;
+    for (idx, line) in lines.iter().enumerate().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(TranscriptEntry::Message(me)) = serde_json::from_str::<TranscriptEntry>(trimmed) {
+            if me.id.as_deref() == Some(anchor_message_id) {
+                anchor_line = Some(idx);
+                break;
+            }
+        }
+    }
+
+    if anchor_line.is_none() {
+        warn!(
+            anchor = %anchor_message_id,
+            "insert_entry_after_message_id: anchor message not found; falling back to append_entry"
+        );
+        return append_entry(path, entry);
+    }
+    let anchor_line = anchor_line.unwrap();
+    let new_json = serde_json::to_string(entry)?;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 1);
+    for (i, line) in lines.iter().enumerate() {
+        out.push(line.clone());
+        if i == anchor_line {
+            out.push(new_json.clone());
+        }
+    }
+    let mut content = out.join("\n");
+    content.push('\n');
+    write_file_atomic(path, content.as_bytes())?;
+    Ok(())
+}
+
 /// 按 `Compaction` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
 ///
 /// 使用临时文件 + `rename` 原子替换目标路径，避免写入中途崩溃导致 transcript 损坏。

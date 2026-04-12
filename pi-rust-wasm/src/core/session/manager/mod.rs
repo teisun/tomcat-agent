@@ -9,10 +9,11 @@ mod tests;
 mod types;
 
 pub use context::{build_context_from_state, init_context_state};
+#[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
 pub use session_impl::SessionManager;
 pub use types::{
-    estimate_turn_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
+    compound_turn_id, estimate_turn_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
     ContextLiveMetrics, ContextState, TurnEntry,
 };
 

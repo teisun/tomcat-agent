@@ -332,7 +332,9 @@ fn build_context_from_state_flattens_turns() {
                 timestamp: "2026-04-04T12:00:00Z".to_string(),
             },
             TurnEntry::UserTurn {
-                id: "turn_1".to_string(),
+                id: super::compound_turn_id("turn_1_u", "turn_1_a"),
+                start_id: "turn_1_u".to_string(),
+                end_id: "turn_1_a".to_string(),
                 messages: vec![
                     AgentMessage::User {
                         text: "hello".to_string(),
@@ -611,8 +613,12 @@ fn fold_start_empty() {
 // ────────── filter_turns_by_day 纯函数测试 ──────────────────────────
 
 fn make_test_turn(ts: &str) -> TurnEntry {
+    let sid = format!("test_{}", ts);
+    let eid = sid.clone();
     TurnEntry::UserTurn {
-        id: format!("test_{}", ts),
+        id: super::compound_turn_id(&sid, &eid),
+        start_id: sid,
+        end_id: eid,
         messages: vec![AgentMessage::User {
             text: "q".to_string(),
         }],

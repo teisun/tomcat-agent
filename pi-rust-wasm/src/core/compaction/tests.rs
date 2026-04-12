@@ -2,17 +2,31 @@ use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER};
 use super::*;
 use crate::core::agent_loop::AgentMessage;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::session::manager::{CompactionResult, ContextState, TurnEntry};
+use crate::core::session::manager::{compound_turn_id, CompactionResult, ContextState, TurnEntry};
 use crate::infra::config::ContextConfig;
 
 const TS: &str = "2026-04-04T12:00:00Z";
 
-fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
+fn make_user_turn_with_span(
+    start_id: &str,
+    end_id: &str,
+    messages: Vec<AgentMessage>,
+) -> TurnEntry {
+    let start_id = start_id.to_string();
+    let end_id = end_id.to_string();
+    let id = compound_turn_id(&start_id, &end_id);
     TurnEntry::UserTurn {
-        id: format!("test_{}", TS),
+        id,
+        start_id,
+        end_id,
         messages,
         timestamp: TS.to_string(),
     }
+}
+
+/// 不关心 id 语义时的占位（单测 compaction 行为）。
+fn make_user_turn(messages: Vec<AgentMessage>) -> TurnEntry {
+    make_user_turn_with_span("m_legacy", "m_legacy", messages)
 }
 
 fn dummy_compaction_result() -> CompactionResult {
@@ -421,36 +435,36 @@ fn abort_preheat_idle_is_noop() {
 #[test]
 fn apply_boundary_replaces_covered_range() {
     let mut state = make_state(0, 100_000, 25_000);
-    let t0 = TurnEntry::UserTurn {
-        id: "t0".into(),
-        messages: vec![AgentMessage::User {
+    let t0 = make_user_turn_with_span(
+        "m0",
+        "m0",
+        vec![AgentMessage::User {
             text: "a".repeat(5000),
         }],
-        timestamp: "2026-01-01T00:00:00Z".into(),
-    };
-    let t1 = TurnEntry::UserTurn {
-        id: "t1".into(),
-        messages: vec![AgentMessage::User {
+    );
+    let t1 = make_user_turn_with_span(
+        "m1",
+        "m1",
+        vec![AgentMessage::User {
             text: "b".repeat(3000),
         }],
-        timestamp: "2026-01-01T00:01:00Z".into(),
-    };
-    let t2 = TurnEntry::UserTurn {
-        id: "t2".into(),
-        messages: vec![AgentMessage::User {
+    );
+    let t2 = make_user_turn_with_span(
+        "m2",
+        "m2",
+        vec![AgentMessage::User {
             text: "c".repeat(2000),
         }],
-        timestamp: "2026-01-01T00:02:00Z".into(),
-    };
+    );
     state.user_turns_list = vec![t0, t1, t2];
     state.estimate_context_chars = 10_000;
 
     let result = crate::core::session::manager::CompactionResult {
         summary_text: "short summary".into(),
-        covered_start_id: "t0".into(),
-        covered_end_id: "t1".into(),
+        covered_start_id: "m0".into(),
+        covered_end_id: "m1".into(),
         covered_count: 2,
-        transcript_compaction_entry_id: None,
+        transcript_compaction_entry_id: Some(compound_turn_id("m0", "m1")),
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
@@ -463,7 +477,7 @@ fn apply_boundary_replaces_covered_range() {
     assert!(
         matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary == "short summary")
     );
-    assert_eq!(state.user_turns_list[1].id(), "t2");
+    assert_eq!(state.user_turns_list[1].id(), compound_turn_id("m2", "m2"));
     assert!(state.last_api_usage.is_none());
     let new_ratio = state.usage_ratio();
     assert!(
@@ -497,13 +511,13 @@ fn apply_boundary_not_found_returns_err() {
 #[test]
 fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
     let mut state = make_state(0, 100_000, 25_000);
-    let t1 = TurnEntry::UserTurn {
-        id: "still_end".into(),
-        messages: vec![AgentMessage::User {
+    let t1 = make_user_turn_with_span(
+        "still_end",
+        "still_end",
+        vec![AgentMessage::User {
             text: "b".repeat(1000),
         }],
-        timestamp: "2026-01-01T00:01:00Z".into(),
-    };
+    );
     state.user_turns_list = vec![t1];
     state.estimate_context_chars = 5_000;
 
@@ -521,7 +535,7 @@ fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
     state.apply_boundary(result).unwrap();
     assert_eq!(state.user_turns_list.len(), 1);
     assert!(
-        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, .. } if summary == "merged")
+        matches!(&state.user_turns_list[0], TurnEntry::SummaryTurn { summary, id, .. } if summary == "merged" && id == &compound_turn_id("gone_start", "still_end"))
     );
 }
 

@@ -8,7 +8,9 @@ use tracing::info;
 
 use crate::core::compaction::apply::check_before_request;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::session::manager::{build_context_from_state, init_context_state, TurnEntry};
+use crate::core::session::manager::{
+    build_context_from_state, compound_turn_id, init_context_state, TurnEntry,
+};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventContext;
 use crate::infra::{
@@ -338,9 +340,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             text: input.clone(),
         });
 
-        // Append user message to transcript
+        // Append user message to transcript（§5.7：保留 user 行 id 作为 turn `start_id`）
         let user_msg = ChatMessage::user(&input);
-        ctx.session
+        let user_row_id = ctx
+            .session
             .append_message(serde_json::to_value(&user_msg)?)?;
 
         let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
@@ -427,20 +430,23 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     )
                 });
 
-                // Pack current turn and append to context state
+                // 先写 transcript，再 pack 内存（§5.7.1 / 计划 21.2）
+                let chat_msgs = convert_to_llm_format(&result.new_messages);
+                let mut end_id = user_row_id.clone();
+                for msg in &chat_msgs {
+                    end_id = ctx.session.append_message(serde_json::to_value(msg)?)?;
+                }
+                let start_id = user_row_id;
+                let id = compound_turn_id(&start_id, &end_id);
                 let current_turn = TurnEntry::UserTurn {
-                    id: crate::core::session::manager::generate_entry_id(),
+                    id,
+                    start_id,
+                    end_id,
                     messages: result.new_messages.clone(),
                     timestamp: chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 };
                 context_state.on_new_user_turn(current_turn);
-
-                // Write to transcript
-                let chat_msgs = convert_to_llm_format(&result.new_messages);
-                for msg in &chat_msgs {
-                    ctx.session.append_message(serde_json::to_value(msg)?)?;
-                }
 
                 ctx.session.persist_context_observability(&context_state)?;
             }

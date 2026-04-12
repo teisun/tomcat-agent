@@ -317,3 +317,58 @@ fn set_compaction_entry_is_boundary_true_preserves_unmatched_line_whitespace() {
         _ => panic!("expected compaction"),
     }
 }
+
+#[test]
+fn insert_entry_after_message_id_inserts_before_later_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("insert_anchor.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    let m_anchor = TranscriptEntry::Message(MessageEntry {
+        id: Some("mid_anchor".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        message: serde_json::json!({"role": "user", "content": "u"}),
+    });
+    append_entry(&path, &m_anchor).unwrap();
+
+    let m_later = TranscriptEntry::Message(MessageEntry {
+        id: Some("mid_later".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:02.000Z".to_string(),
+        message: serde_json::json!({"role": "assistant", "content": "a"}),
+    });
+    append_entry(&path, &m_later).unwrap();
+
+    let c = TranscriptEntry::Compaction(CompactionEntry {
+        id: Some("S::E".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:03.000Z".to_string(),
+        summary: Some("sum".to_string()),
+        covered_start_id: Some("S".to_string()),
+        covered_end_id: Some("mid_anchor".to_string()),
+        covered_count: Some(1),
+        is_boundary: Some(false),
+        preheat_compaction_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+    });
+    insert_entry_after_message_id(&path, "mid_anchor", &c).unwrap();
+
+    let entries = read_entries_tail(&path, 10).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(&entries[0], TranscriptEntry::Message(_)));
+    assert!(matches!(&entries[1], TranscriptEntry::Compaction(_)));
+    assert!(matches!(&entries[2], TranscriptEntry::Message(_)));
+}

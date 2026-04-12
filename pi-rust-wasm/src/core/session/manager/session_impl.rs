@@ -186,7 +186,8 @@ impl SessionManager {
 
     // TODO: 并发 append 存在 TOCTOU 竞态，当前假设单线程串行调用；后续若引入并发需加文件锁或 Mutex
     /// 追加 message 到当前会话的 transcript（核心路径：校验失败 panic!）。
-    pub fn append_message(&self, message: serde_json::Value) -> Result<(), AppError> {
+    /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
+    pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
@@ -198,16 +199,18 @@ impl SessionManager {
         let id = generate_entry_id();
         let now = iso_ts_now()?;
         let entry = TranscriptEntry::Message(MessageEntry {
-            id: Some(id),
+            id: Some(id.clone()),
             parent_id: None,
             timestamp: now,
             message,
         });
-        append_entry(&path, &entry)
+        append_entry(&path, &entry)?;
+        Ok(id)
     }
 
     /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
-    pub fn try_append_message(&self, message: serde_json::Value) -> Result<(), AppError> {
+    /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
+    pub fn try_append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
@@ -219,12 +222,13 @@ impl SessionManager {
         let id = generate_entry_id();
         let now = iso_ts_now()?;
         let entry = TranscriptEntry::Message(MessageEntry {
-            id: Some(id),
+            id: Some(id.clone()),
             parent_id: None,
             timestamp: now,
             message,
         });
-        append_entry(&path, &entry)
+        append_entry(&path, &entry)?;
+        Ok(id)
     }
 
     /// 追加 thinking_level_change。

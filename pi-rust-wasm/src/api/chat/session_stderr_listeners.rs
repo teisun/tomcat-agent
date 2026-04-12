@@ -16,7 +16,9 @@ pub(crate) struct ChatSessionStderrListenerIds {
     l0: EventListenerId,
 }
 
-pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> ChatSessionStderrListenerIds {
+pub(crate) fn register_chat_session_stderr_listeners(
+    bus: &dyn EventBus,
+) -> ChatSessionStderrListenerIds {
     let metrics = bus.on(
         wire::WIRE_CONTEXT_METRICS_UPDATE,
         Box::new(move |evt: EventContext| {
@@ -69,12 +71,12 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
             } else {
                 ("", "")
             };
-            eprint!(
-                "\n\x1b[90m[ctx] {} 令牌 | {:.1}% 占用 | 压缩 x{} | 已节省 {} 令牌 | 已持久化 {}{}\x1b[0m\n",
+            eprintln!(
+                "\n\x1b[90m[ctx] {} 令牌 | {:.1}% 占用 | 压缩 x{} | 已节省 {} 令牌 | 已持久化 {}{}\x1b[0m",
                 tokens, ratio_pct, compactions, saved, persisted_display, zh_suffix
             );
-            eprint!(
-                "\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | saved {} tok | persisted {}{}\x1b[0m\n",
+            eprintln!(
+                "\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | saved {} tok | persisted {}{}\x1b[0m",
                 tokens, ratio_pct, compactions, saved, persisted_display, en_suffix
             );
             let _ = io::stderr().flush();
@@ -84,8 +86,8 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
     let l1_start = bus.on(
         wire::WIRE_AUTO_COMPACTION_START,
         Box::new(|_ctx: EventContext| {
-            eprint!("\n\x1b[90m[ctx] 后台压缩已启动…\x1b[0m\n");
-            eprint!("\x1b[90m[ctx] Background compaction started…\x1b[0m\n");
+            eprintln!("\n\x1b[90m[ctx] 后台压缩已启动…\x1b[0m");
+            eprintln!("\x1b[90m[ctx] Background compaction started…\x1b[0m");
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -108,12 +110,12 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
                 .get("estimatedTokensSaved")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            eprint!(
-                "\n\x1b[90m[ctx] 压缩摘要就绪（待应用）| 覆盖区 ~{} 令牌 → 摘要 ~{} 令牌（估省 {} 令牌）\x1b[0m\n",
+            eprintln!(
+                "\n\x1b[90m[ctx] 压缩摘要就绪（待应用）| 覆盖区 ~{} 令牌 → 摘要 ~{} 令牌（估省 {} 令牌）\x1b[0m",
                 before, summ, saved
             );
-            eprint!(
-                "\x1b[90m[ctx] Summary generated (pending apply) | covered ~{} tok → summary ~{} tok (saved ~{} tok)\x1b[0m\n",
+            eprintln!(
+                "\x1b[90m[ctx] Summary generated (pending apply) | covered ~{} tok → summary ~{} tok (saved ~{} tok)\x1b[0m",
                 before, summ, saved
             );
             let _ = io::stderr().flush();
@@ -140,12 +142,12 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
                 err_raw.to_string()
             };
             if source == "apply" {
-                eprint!(
-                    "\n\x1b[33m[ctx] 摘要应用失败：{}\x1b[0m\n",
+                eprintln!(
+                    "\n\x1b[33m[ctx] 摘要应用失败：{}\x1b[0m",
                     err_display
                 );
-                eprint!(
-                    "\x1b[33m[ctx] Summary application failed: {}\x1b[0m\n",
+                eprintln!(
+                    "\x1b[33m[ctx] Summary application failed: {}\x1b[0m",
                     err_display
                 );
                 let _ = io::stderr().flush();
@@ -162,21 +164,21 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             if exhausted && source == "preheat" {
-                eprint!(
-                    "\n\x1b[33m[ctx] 预热失败（已重试 {} 次）：{}\x1b[0m\n",
+                eprintln!(
+                    "\n\x1b[33m[ctx] 预热失败（已重试 {} 次）：{}\x1b[0m",
                     attempts, err_display
                 );
-                eprint!(
-                    "\x1b[33m[ctx] Preheat failed after {} attempt(s): {}\x1b[0m\n",
+                eprintln!(
+                    "\x1b[33m[ctx] Preheat failed after {} attempt(s): {}\x1b[0m",
                     attempts, err_display
                 );
             } else if source == "preheat" {
-                eprint!(
-                    "\n\x1b[33m[ctx] 上下文压缩暂时失败，将在下次发送消息时自动重试：{}\x1b[0m\n",
+                eprintln!(
+                    "\n\x1b[33m[ctx] 上下文压缩暂时失败，将在下次发送消息时自动重试：{}\x1b[0m",
                     err_display
                 );
-                eprint!(
-                    "\x1b[33m[ctx] Context compaction temporarily failed; will retry on your next message: {}\x1b[0m\n",
+                eprintln!(
+                    "\x1b[33m[ctx] Context compaction temporarily failed; will retry on your next message: {}\x1b[0m",
                     err_display
                 );
             }
@@ -192,12 +194,12 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
                 .get("estimatedTokensFreed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            eprint!(
-                "\n\x1b[90m[ctx] 上下文已压缩重置，约节省 {} 令牌\x1b[0m\n",
+            eprintln!(
+                "\n\x1b[90m[ctx] 上下文已压缩重置，约节省 {} 令牌\x1b[0m",
                 saved
             );
-            eprint!(
-                "\x1b[90m[ctx] Context compacted; saved ~{} tok\x1b[0m\n",
+            eprintln!(
+                "\x1b[90m[ctx] Context compacted; saved ~{} tok\x1b[0m",
                 saved
             );
             let _ = io::stderr().flush();
@@ -207,8 +209,8 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
     let l3_start = bus.on(
         wire::WIRE_CONTEXT_OVERFLOW_TRIM_START,
         Box::new(|_ctx: EventContext| {
-            eprint!("\n\x1b[33m[ctx] 上下文溢出，正在截断旧消息…\x1b[0m\n");
-            eprint!("\x1b[33m[ctx] Context overflow; trimming older messages…\x1b[0m\n");
+            eprintln!("\n\x1b[33m[ctx] 上下文溢出，正在截断旧消息…\x1b[0m");
+            eprintln!("\x1b[33m[ctx] Context overflow; trimming older messages…\x1b[0m");
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -226,12 +228,12 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
                 .get("turnsRemoved")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            eprint!(
-                "\n\x1b[90m[ctx] 截断完成（删 {} 轮，估省 {} 令牌），正在重试\x1b[0m\n",
+            eprintln!(
+                "\n\x1b[90m[ctx] 截断完成（删 {} 轮，估省 {} 令牌），正在重试\x1b[0m",
                 turns, saved
             );
-            eprint!(
-                "\x1b[90m[ctx] Trim done ({} turns removed, ~{} tok saved); retrying\x1b[0m\n",
+            eprintln!(
+                "\x1b[90m[ctx] Trim done ({} turns removed, ~{} tok saved); retrying\x1b[0m",
                 turns, saved
             );
             let _ = io::stderr().flush();
@@ -251,12 +253,12 @@ pub(crate) fn register_chat_session_stderr_listeners(bus: &dyn EventBus) -> Chat
                 .get("placeholderTokensFreed")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            eprint!(
-                "\n\x1b[90m[ctx] L0：大文件落盘释放 ~{} 令牌 | 历史工具结果释放 ~{} 令牌\x1b[0m\n",
+            eprintln!(
+                "\n\x1b[90m[ctx] L0：大文件落盘释放 ~{} 令牌 | 历史工具结果释放 ~{} 令牌\x1b[0m",
                 p, ph
             );
-            eprint!(
-                "\x1b[90m[ctx] L0: large file persist release ~{} tok | historical tool result release ~{} tok\x1b[0m\n",
+            eprintln!(
+                "\x1b[90m[ctx] L0: large file persist release ~{} tok | historical tool result release ~{} tok\x1b[0m",
                 p, ph
             );
             let _ = io::stderr().flush();

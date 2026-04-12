@@ -13,7 +13,10 @@ use super::session_impl::generate_entry_id;
 use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
-use super::types::{estimate_turn_chars, CompactionResult, ContextState, TurnEntry};
+use super::types::{
+    compound_id_suffix, compound_turn_id, estimate_turn_chars, CompactionResult, ContextState,
+    TurnEntry,
+};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
 
@@ -131,10 +134,29 @@ fn fold_entries_to_turns(
     let mut turns: Vec<TurnEntry> = Vec::new();
     let mut current_turn_msgs: Vec<AgentMessage> = Vec::new();
     let mut current_turn_ts = String::new();
-    // 与 transcript Message 首条 user 的 id 对齐，供 preheat covered_* reload 后仍可匹配。
-    let mut current_turn_id: Option<String> = None;
+    // 当前 user turn 在 transcript 中首条 message 的 id（§5.7）。
+    let mut turn_first_msg_id: Option<String> = None;
+    // 当前 turn 内最后一条已纳入的 message 的 id。
+    let mut turn_last_msg_id: Option<String> = None;
     let mut total_chars = system_text_len;
     let mut pending_preheat: Option<CompactionResult> = None;
+
+    let flush_user_turn = |msgs: Vec<AgentMessage>,
+                           ts: String,
+                           first: Option<String>,
+                           last: Option<String>|
+     -> TurnEntry {
+        let start_id = first.unwrap_or_else(generate_entry_id);
+        let end_id = last.unwrap_or_else(|| start_id.clone());
+        let id = compound_turn_id(&start_id, &end_id);
+        TurnEntry::UserTurn {
+            id,
+            start_id,
+            end_id,
+            messages: msgs,
+            timestamp: ts,
+        }
+    };
 
     for entry in entries {
         match entry {
@@ -152,11 +174,12 @@ fn fold_entries_to_turns(
                 }
 
                 if !current_turn_msgs.is_empty() {
-                    let turn = TurnEntry::UserTurn {
-                        id: current_turn_id.take().unwrap_or_else(generate_entry_id),
-                        messages: std::mem::take(&mut current_turn_msgs),
-                        timestamp: std::mem::take(&mut current_turn_ts),
-                    };
+                    let turn = flush_user_turn(
+                        std::mem::take(&mut current_turn_msgs),
+                        std::mem::take(&mut current_turn_ts),
+                        turn_first_msg_id.take(),
+                        turn_last_msg_id.take(),
+                    );
                     total_chars += estimate_turn_chars(&turn);
                     turns.push(turn);
                 }
@@ -166,7 +189,8 @@ fn fold_entries_to_turns(
                 if ce.is_boundary == Some(true) {
                     turns.clear();
                     total_chars = system_text_len;
-                    current_turn_id = None;
+                    turn_first_msg_id = None;
+                    turn_last_msg_id = None;
                 }
 
                 if let Some(ref summary) = ce.summary {
@@ -187,18 +211,21 @@ fn fold_entries_to_turns(
                     .unwrap_or("");
 
                 if role == Some("user") && !current_turn_msgs.is_empty() {
-                    let turn = TurnEntry::UserTurn {
-                        id: current_turn_id.take().unwrap_or_else(generate_entry_id),
-                        messages: std::mem::take(&mut current_turn_msgs),
-                        timestamp: std::mem::take(&mut current_turn_ts),
-                    };
+                    let turn = flush_user_turn(
+                        std::mem::take(&mut current_turn_msgs),
+                        std::mem::take(&mut current_turn_ts),
+                        turn_first_msg_id.take(),
+                        turn_last_msg_id.take(),
+                    );
                     total_chars += estimate_turn_chars(&turn);
                     turns.push(turn);
                 }
 
                 if role == Some("user") {
                     current_turn_ts = me.timestamp.clone();
-                    current_turn_id = Some(me.id.clone().unwrap_or_else(generate_entry_id));
+                    let mid = me.id.clone().unwrap_or_else(generate_entry_id);
+                    turn_first_msg_id = Some(mid.clone());
+                    turn_last_msg_id = Some(mid);
                 }
 
                 let agent_msg = match role {
@@ -249,17 +276,20 @@ fn fold_entries_to_turns(
                     _ => continue,
                 };
                 current_turn_msgs.push(agent_msg);
+                let mid = me.id.clone().unwrap_or_else(generate_entry_id);
+                turn_last_msg_id = Some(mid);
             }
             _ => {}
         }
     }
 
     if !current_turn_msgs.is_empty() {
-        let turn = TurnEntry::UserTurn {
-            id: current_turn_id.take().unwrap_or_else(generate_entry_id),
-            messages: std::mem::take(&mut current_turn_msgs),
-            timestamp: current_turn_ts,
-        };
+        let turn = flush_user_turn(
+            std::mem::take(&mut current_turn_msgs),
+            current_turn_ts,
+            turn_first_msg_id.take(),
+            turn_last_msg_id.take(),
+        );
         total_chars += estimate_turn_chars(&turn);
         turns.push(turn);
     }
@@ -364,7 +394,13 @@ pub fn init_context_state(
 
     let mut preheat = Preheat::new();
     if let Some(p) = fold_out.pending_preheat {
-        if selected.iter().any(|t| t.id() == p.covered_end_id) {
+        let end = p.covered_end_id.as_str();
+        if selected.iter().any(|t| match t {
+            TurnEntry::UserTurn { end_id, id, .. } => {
+                end_id == end || id == end || compound_id_suffix(id) == Some(end)
+            }
+            _ => false,
+        }) {
             preheat.restore_completed(p);
         }
     }

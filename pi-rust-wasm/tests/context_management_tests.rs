@@ -6,11 +6,11 @@ mod common;
 use async_trait::async_trait;
 use pi_wasm::core::compaction::compact_tool_results;
 use pi_wasm::{
-    build_context_from_state, init_context_state, AgentLoop, AgentLoopConfig, AgentMessage,
-    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
-    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, ToolCallInfo, TurnEntry,
-    WriteFileResult,
+    build_context_from_state, compound_turn_id, init_context_state, AgentLoop, AgentLoopConfig,
+    AgentMessage, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
+    ContextState, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext,
+    LlmProvider, PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, ToolCallInfo,
+    TurnEntry, WriteFileResult,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -154,8 +154,12 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
 
     let mut turns = Vec::new();
     for i in 0..5 {
+        let sid = format!("turn_{}", i);
+        let eid = sid.clone();
         turns.push(TurnEntry::UserTurn {
-            id: format!("turn_{}", i),
+            id: compound_turn_id(&sid, &eid),
+            start_id: sid,
+            end_id: eid,
             messages: vec![
                 AgentMessage::User {
                     text: format!("question {}", i),
@@ -336,7 +340,9 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let ctx_state = ContextState {
         user_turns_list: vec![
             TurnEntry::UserTurn {
-                id: "turn_old".to_string(),
+                id: compound_turn_id("turn_old", "turn_old"),
+                start_id: "turn_old".to_string(),
+                end_id: "turn_old".to_string(),
                 messages: vec![
                     AgentMessage::User {
                         text: "old question".to_string(),
@@ -350,7 +356,9 @@ async fn test_context_overflow_triggers_compaction_and_retries(
                 timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
-                id: "turn_recent".to_string(),
+                id: compound_turn_id("turn_recent", "turn_recent"),
+                start_id: "turn_recent".to_string(),
+                end_id: "turn_recent".to_string(),
                 messages: vec![AgentMessage::User {
                     text: "recent question".to_string(),
                 }],
@@ -419,7 +427,9 @@ fn test_build_context_preserves_order_with_mixed_turns() {
                 timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
-                id: "turn_1".to_string(),
+                id: compound_turn_id("turn_1_u", "turn_1_tr"),
+                start_id: "turn_1_u".to_string(),
+                end_id: "turn_1_tr".to_string(),
                 messages: vec![
                     AgentMessage::User {
                         text: "add auth".to_string(),
@@ -441,7 +451,9 @@ fn test_build_context_preserves_order_with_mixed_turns() {
                 timestamp: TEST_TS.to_string(),
             },
             TurnEntry::UserTurn {
-                id: "turn_2".to_string(),
+                id: compound_turn_id("turn_2", "turn_2"),
+                start_id: "turn_2".to_string(),
+                end_id: "turn_2".to_string(),
                 messages: vec![AgentMessage::User {
                     text: "run tests".to_string(),
                 }],
@@ -476,8 +488,12 @@ fn test_build_context_preserves_order_with_mixed_turns() {
 const TEST_TS: &str = "2026-04-04T12:00:00Z";
 
 fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry {
+    let sid = format!("turn_{}", user_text);
+    let eid = sid.clone();
     TurnEntry::UserTurn {
-        id: format!("turn_{}", user_text),
+        id: compound_turn_id(&sid, &eid),
+        start_id: sid,
+        end_id: eid,
         messages: vec![
             AgentMessage::User {
                 text: user_text.to_string(),
@@ -759,7 +775,9 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
     let original = "important content ".repeat(4000);
     let mut state = ContextState {
         user_turns_list: vec![TurnEntry::UserTurn {
-            id: "turn_persist".to_string(),
+            id: compound_turn_id("turn_persist", "turn_persist"),
+            start_id: "turn_persist".to_string(),
+            end_id: "turn_persist".to_string(),
             messages: vec![AgentMessage::ToolResult {
                 tool_call_id: "tc_persist".into(),
                 content: original.clone(),
@@ -821,29 +839,32 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
     let path = mgr.current_transcript_path()?.unwrap();
 
-    let first_turn_uid = pi_wasm::core::session::transcript::read_entries_tail(&path, 500)?
+    let msg_ids: Vec<String> = pi_wasm::core::session::transcript::read_entries_tail(&path, 500)?
         .into_iter()
-        .find_map(|e| {
+        .filter_map(|e| {
             if let pi_wasm::core::session::transcript::TranscriptEntry::Message(me) = e {
-                if me.message.get("role").and_then(|r| r.as_str()) == Some("user") {
-                    return me.id;
-                }
+                me.id
+            } else {
+                None
             }
-            None
         })
-        .expect("first user message id");
+        .collect();
+    assert!(msg_ids.len() >= 2, "expect user+assistant message ids");
+    let covered_start = msg_ids[0].clone();
+    let covered_end = msg_ids[1].clone();
+    let compact_id = compound_turn_id(&covered_start, &covered_end);
 
     let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
         pi_wasm::core::session::transcript::CompactionEntry {
-            id: Some("preheat_1".into()),
+            id: Some(compact_id.clone()),
             parent_id: None,
             timestamp: "2026-01-01T00:00:01.000Z".to_string(),
             summary: Some("Preheat summary (should be ignored)".to_string()),
-            covered_start_id: Some(first_turn_uid.clone()),
-            covered_end_id: Some(first_turn_uid),
+            covered_start_id: Some(covered_start),
+            covered_end_id: Some(covered_end),
             covered_count: Some(1),
             is_boundary: Some(false),
-            preheat_compaction_id: Some("preheat_1".into()),
+            preheat_compaction_id: Some(compact_id),
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
@@ -908,29 +929,32 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
     mgr.append_message(serde_json::json!({"role":"assistant","content":"first answer"}))?;
 
     let path = mgr.current_transcript_path()?.unwrap();
-    let first_turn_uid = pi_wasm::core::session::transcript::read_entries_tail(&path, 500)?
+    let msg_ids: Vec<String> = pi_wasm::core::session::transcript::read_entries_tail(&path, 500)?
         .into_iter()
-        .find_map(|e| {
+        .filter_map(|e| {
             if let pi_wasm::core::session::transcript::TranscriptEntry::Message(me) = e {
-                if me.message.get("role").and_then(|r| r.as_str()) == Some("user") {
-                    return me.id;
-                }
+                me.id
+            } else {
+                None
             }
-            None
         })
-        .expect("first user message id");
+        .collect();
+    assert!(msg_ids.len() >= 2);
+    let covered_start = msg_ids[0].clone();
+    let covered_end = msg_ids[1].clone();
+    let compact_id = compound_turn_id(&covered_start, &covered_end);
 
     let preheat_entry = pi_wasm::core::session::transcript::TranscriptEntry::Compaction(
         pi_wasm::core::session::transcript::CompactionEntry {
-            id: Some("preheat_restore_1".into()),
+            id: Some(compact_id.clone()),
             parent_id: None,
             timestamp: "2026-01-01T00:00:01.000Z".to_string(),
             summary: Some("Restored preheat summary body".to_string()),
-            covered_start_id: Some(first_turn_uid.clone()),
-            covered_end_id: Some(first_turn_uid),
+            covered_start_id: Some(covered_start),
+            covered_end_id: Some(covered_end),
             covered_count: Some(1),
             is_boundary: Some(false),
-            preheat_compaction_id: Some("preheat_restore_1".into()),
+            preheat_compaction_id: Some(compact_id.clone()),
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
@@ -957,7 +981,7 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
             );
             assert_eq!(
                 r.transcript_compaction_entry_id.as_deref(),
-                Some("preheat_restore_1")
+                Some(compact_id.as_str())
             );
         }
         o => panic!("expected Completed, got {:?}", o),

@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Jerry | 2026-04-11 | PENDING_INTEGRATION | feature/context-async-compaction | - |
+| @Jerry | 2026-04-12 | PENDING_INTEGRATION | feature/context-async-compaction | - |
 
 ### ✅ DONE (已完成)
 - [x] **[P0]** 20.1 TurnEntry 增加 `id: String`；ContextState 增加 `transcript_path`/`compaction_summary`
@@ -24,8 +24,16 @@
 - [x] **ContextState 嵌套** `session_obs: SessionContextObservation`（刷盘子集）与 `live: ContextLiveMetrics`；`AgentLoop` 移除独立 `metrics`，瞬时指标只写 `context_state.live`
 - [x] **可观测性与日志可靠性**：`target: pi_wasm_chat_diag` 结构化 info（用户追加后、timing② 后、agent run 前、`classify_error` 各分支、L3 重试与 trim 结果、首 turn 指标、流连接错误、timing② `check_before_request` 出入路径）；CLI 在 `init_logging` 之前加载 `assets/.env` 使 `RUST_LOG` 参与 `EnvFilter`；文件与 stderr 共用同一 `EnvFilter`，`non_blocking` 的 `WorkerGuard` 在 `try_init` 成功后 `mem::forget` 避免落盘线程提前退出
 - [x] **会话级 stderr 监听**：`chat_loop` 入口一次性注册 `session_stderr_listeners`（context_metrics / L1 compaction / boundary 等），跨用户输入轮次保留，避免 Layer1 在 readline 空闲 emit 时因 per-run `off` 无人消费；`event_bus` 单测覆盖「摘掉占位监听后延迟 emit 仍可送达」
+- [x] **TASK-21 §5.7 消息级 ID**：`UserTurn` 增加 `start_id`/`end_id` 与 `compound_turn_id`；`append_message`/`try_append_message` 返回新 message 行 id；`chat` 先写满 transcript 再 `on_new_user_turn`；`fold_entries_to_turns` 从首尾 message id 还原；`insert_entry_after_message_id`（锚点缺失 warn + `append_entry`）；Preheat 快照 `S`/`E`、`CompactionEntry.id = S::E`；`apply_boundary` 以 `end_id` 为主 + 旧 id 回退；`restore_completed` 与 `end_id`/suffix 匹配
+- [x] **门禁（2026-04-12）**：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings` 通过；全量子集 `cargo test -j 1 -p pi_wasm --lib --bins` + 除 `cli_tests`/`llm_tests` 外全部 `--test` 目标，`--test-threads=1`，日志 `pi-rust-wasm/.integration_test_output.log` 末尾 `EXIT_CODE=0`。**说明**：未设置 `OPENAI_API_KEY` 时按规范不在此环境跑需真实 LLM 的 `cli_tests` / `llm_tests`，合并前请在有关环境补跑完整 `cargo test -j 1 -p pi_wasm -- --test-threads=1`
 
 ### 🔌 INTERFACE (接口变更)
+
+**TASK-21（§5.7 消息级 ID，2026-04）**
+
+- `SessionManager::append_message` / `try_append_message`：返回 `Result<String, AppError>`，成功值为新 `MessageEntry.id`。
+- `compound_turn_id` / `compound_id_prefix` / `compound_id_suffix`：公开辅助（crate 根或 `session::manager` 导出路径以代码为准）。
+- `transcript::insert_entry_after_message_id`：在锚点 message 行之后插入条目；锚点缺失时 warn 并回退尾部追加。
 
 **20.5′（单行 + 原地升级，2026-04）**
 

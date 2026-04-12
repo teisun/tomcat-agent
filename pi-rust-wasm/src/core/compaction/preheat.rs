@@ -12,10 +12,11 @@ use tracing::warn;
 
 use crate::core::llm::{ChatMessage, ChatRequest, LlmProvider};
 use crate::core::session::manager::{
-    estimate_turn_chars, estimated_tokens_from_chars, generate_entry_id, CompactionResult,
-    TurnEntry,
+    compound_turn_id, estimate_turn_chars, estimated_tokens_from_chars, CompactionResult, TurnEntry,
 };
-use crate::core::session::transcript::{append_entry, CompactionEntry, TranscriptEntry};
+use crate::core::session::transcript::{
+    insert_entry_after_message_id, CompactionEntry, TranscriptEntry,
+};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
@@ -223,7 +224,7 @@ impl Preheat {
     /// Idle → Running。条件：ratio >= 0.50、有 turns、且当前为 **Idle**。
     /// `CachedCompleted` / `Running` / `ExhaustedPending` 时均不启动，避免已有未消费摘要时又开新预热。
     /// spawn 内 generate_summary 最多 3 次 retry；
-    /// 成功且 append_entry 成功（或无 transcript 路径）时 emit AutoCompactionEnd；耗尽 emit CompactionError(exhausted)。
+    /// 成功且 `insert_entry_after_message_id` 成功（或无 transcript 路径）时 emit AutoCompactionEnd；耗尽 emit CompactionError(exhausted)。
     /// 返回 true = 已启动。
     ///
     /// 接受独立参数而非 `&ContextState`，避免与 `ctx.preheat` 的 `&mut self` 冲突。
@@ -247,8 +248,15 @@ impl Preheat {
         }
 
         let snapshot = turns.to_vec();
-        let first_id = snapshot.first().map(|t| t.id().to_string()).unwrap();
-        let last_id = snapshot.last().map(|t| t.id().to_string()).unwrap();
+        let (covered_start_id, covered_end_id) = match (snapshot.first(), snapshot.last()) {
+            (
+                Some(TurnEntry::UserTurn { start_id, .. }),
+                Some(TurnEntry::UserTurn { end_id, .. }),
+            ) => (start_id.clone(), end_id.clone()),
+            (Some(t), Some(_)) => (t.id().to_string(), t.id().to_string()),
+            _ => unreachable!("snapshot non-empty checked above"),
+        };
+        let batch_compaction_id = compound_turn_id(&covered_start_id, &covered_end_id);
         let covered_count = snapshot.len();
         let transcript_path = transcript_path.to_path_buf();
         let compaction_model = config.compaction_model.clone();
@@ -271,7 +279,6 @@ impl Preheat {
                 .await
                 {
                     Ok(summary_text) => {
-                        let entry_id = generate_entry_id();
                         let covered_chars: usize = snapshot.iter().map(estimate_turn_chars).sum();
                         let est_covered_tok = estimated_tokens_from_chars(covered_chars);
                         let est_summary_tok = estimated_tokens_from_chars(summary_text.len());
@@ -279,38 +286,44 @@ impl Preheat {
                         let elapsed_ms = started.elapsed().as_millis() as u64;
 
                         let compaction_entry = TranscriptEntry::Compaction(CompactionEntry {
-                            id: Some(entry_id.clone()),
+                            id: Some(batch_compaction_id.clone()),
                             parent_id: None,
                             timestamp: chrono::Utc::now()
                                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                             summary: Some(summary_text.clone()),
-                            covered_start_id: Some(first_id.clone()),
-                            covered_end_id: Some(last_id.clone()),
+                            covered_start_id: Some(covered_start_id.clone()),
+                            covered_end_id: Some(covered_end_id.clone()),
                             covered_count: Some(covered_count),
                             is_boundary: Some(false),
-                            preheat_compaction_id: Some(entry_id.clone()),
+                            preheat_compaction_id: Some(batch_compaction_id.clone()),
                             estimated_covered_tokens_before: Some(est_covered_tok),
                             estimated_summary_tokens: Some(est_summary_tok),
                             estimated_tokens_saved: Some(est_saved),
                         });
 
-                        let (transcript_compaction_entry_id, append_ok) =
-                            if transcript_path.as_os_str().is_empty() {
-                                (None, true)
-                            } else {
-                                match append_entry(&transcript_path, &compaction_entry) {
-                                    Ok(()) => (Some(entry_id), true),
-                                    Err(e) => {
-                                        warn!("preheat append_entry failed: {}", e);
-                                        (None, false)
-                                    }
+                        let (transcript_compaction_entry_id, append_ok) = if transcript_path
+                            .as_os_str()
+                            .is_empty()
+                        {
+                            (Some(batch_compaction_id.clone()), true)
+                        } else {
+                            match insert_entry_after_message_id(
+                                &transcript_path,
+                                &covered_end_id,
+                                &compaction_entry,
+                            ) {
+                                Ok(()) => (Some(batch_compaction_id.clone()), true),
+                                Err(e) => {
+                                    warn!("preheat insert_entry_after_message_id failed: {}", e);
+                                    (None, false)
                                 }
-                            };
+                            }
+                        };
 
                         let result = CompactionResult {
                             summary_text,
-                            covered_start_id: first_id,
-                            covered_end_id: last_id,
+                            covered_start_id,
+                            covered_end_id,
                             covered_count,
                             transcript_compaction_entry_id,
                             estimated_covered_tokens_before: Some(est_covered_tok),
@@ -363,10 +376,18 @@ impl Preheat {
             )))
         });
 
+        let (run_s, run_e) = match (turns.first(), turns.last()) {
+            (
+                Some(TurnEntry::UserTurn { start_id, .. }),
+                Some(TurnEntry::UserTurn { end_id, .. }),
+            ) => (start_id.clone(), end_id.clone()),
+            (Some(a), Some(b)) => (a.id().to_string(), b.id().to_string()),
+            _ => unreachable!(),
+        };
         self.state = PreheatState::Running {
             handle,
-            covered_start_id: turns.first().unwrap().id().to_string(),
-            covered_end_id: turns.last().unwrap().id().to_string(),
+            covered_start_id: run_s,
+            covered_end_id: run_e,
             covered_count,
             started_at: Instant::now(),
         };

@@ -1,4 +1,4 @@
-//! Context management data structures (TASK-17 / TASK-20).
+//! Context management data structures (TASK-17 / TASK-20 / TASK-21 §5.7).
 
 use std::path::PathBuf;
 
@@ -9,6 +9,56 @@ use crate::core::compaction::preheat::Preheat;
 use crate::infra::error::AppError;
 
 // ---------------------------------------------------------------------------
+// §5.7 message / turn ids
+// ---------------------------------------------------------------------------
+
+/// 复合 TurnId：`start_id + "::" + end_id`（与 [context-management.md §5.7] 一致）。
+///
+/// MessageId 不得包含子串 `::`；若违反则打日志但仍拼接，避免线上硬崩。
+pub fn compound_turn_id(start_id: &str, end_id: &str) -> String {
+    if start_id.contains("::") || end_id.contains("::") {
+        warn!(
+            %start_id,
+            %end_id,
+            "compound_turn_id: message id should not contain `::` (reserved as turn separator)"
+        );
+    }
+    format!("{start_id}::{end_id}")
+}
+
+/// `start::end` 的右段；无 `::` 时返回 `None`（旧式单层 turn id）。
+pub fn compound_id_suffix(turn_id: &str) -> Option<&str> {
+    turn_id.rsplit_once("::").map(|(_, r)| r)
+}
+
+/// `start::end` 的左段；无 `::` 时整个串视为左段。
+pub fn compound_id_prefix(turn_id: &str) -> &str {
+    turn_id.split_once("::").map(|(l, _)| l).unwrap_or(turn_id)
+}
+
+fn user_turn_matches_covered_end(turn: &TurnEntry, covered_end: &str) -> bool {
+    match turn {
+        TurnEntry::UserTurn { end_id, id, .. } => {
+            end_id == covered_end
+                || id == covered_end
+                || compound_id_suffix(id).is_some_and(|s| s == covered_end)
+        }
+        _ => false,
+    }
+}
+
+fn user_turn_matches_covered_start(turn: &TurnEntry, covered_start: &str) -> bool {
+    match turn {
+        TurnEntry::UserTurn { start_id, id, .. } => {
+            start_id == covered_start
+                || id == covered_start
+                || compound_id_prefix(id) == covered_start
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TurnEntry
 // ---------------------------------------------------------------------------
 
@@ -17,7 +67,12 @@ use crate::infra::error::AppError;
 #[derive(Debug, Clone)]
 pub enum TurnEntry {
     UserTurn {
+        /// 恒等于 `compound_turn_id(start_id, end_id)`（§5.7）。
         id: String,
+        /// 本条 turn 在 transcript 中**首条** message 的 id（通常为 user 行）。
+        start_id: String,
+        /// 本条 turn 在 transcript 中**末条** message 的 id。
+        end_id: String,
         messages: Vec<AgentMessage>,
         timestamp: String,
     },
@@ -186,32 +241,66 @@ impl ContextState {
     }
 
     /// 将已完成的 CompactionResult 应用到 user_turns_list：
-    /// 通过 ID 匹配找到 covered 范围，splice 替换为 SummaryTurn，
-    /// 重算 estimate_context_chars，invalidate API usage。
+    /// §5.7.5 主路径：最小 `k` 使 `UserTurn.end_id == covered_end_id`（及右段 / 旧 id 回退），
+    /// 再 `splice(0..=k, [SummaryTurn])`。保留旧式「双端 turn `id()`」匹配为回退。
     pub fn apply_boundary(&mut self, result: CompactionResult) -> Result<(), AppError> {
-        let start_idx = self
-            .user_turns_list
-            .iter()
-            .position(|t| t.id() == result.covered_start_id);
-        let end_idx = self
-            .user_turns_list
-            .iter()
-            .position(|t| t.id() == result.covered_end_id);
+        let covered_end = result.covered_end_id.as_str();
+        let covered_start = result.covered_start_id.as_str();
 
-        let (start, end) = match (start_idx, end_idx) {
-            (Some(s), Some(e)) if s <= e => (s, e),
-            (None, Some(e)) => {
-                warn!(
-                    covered_start_id = %result.covered_start_id,
-                    covered_end_id = %result.covered_end_id,
-                    "apply_boundary: start id missing; splicing from 0 to end (Layer3 may have dropped prefix)"
-                );
-                (0, e)
+        let k_message = self
+            .user_turns_list
+            .iter()
+            .position(|t| user_turn_matches_covered_end(t, covered_end));
+
+        let (start, end) = if let Some(k) = k_message {
+            if let Some(TurnEntry::UserTurn { start_id, id, .. }) = self.user_turns_list.first() {
+                let prefix = compound_id_prefix(id);
+                if start_id.as_str() != covered_start && prefix != covered_start {
+                    warn!(
+                        covered_start_id = %result.covered_start_id,
+                        covered_end_id = %result.covered_end_id,
+                        %start_id,
+                        "apply_boundary: covered_start_id does not match first turn (continuing with splice 0..=k)"
+                    );
+                }
             }
-            _ => {
-                return Err(AppError::Config(
-                    "apply_boundary: covered range not found in user_turns_list (IDs may have been invalidated by Layer 3)".to_string(),
-                ));
+            let dup_end_count = self
+                .user_turns_list
+                .iter()
+                .filter(|t| user_turn_matches_covered_end(t, covered_end))
+                .count();
+            if dup_end_count > 1 {
+                warn!(
+                    covered_end_id = %result.covered_end_id,
+                    matches = dup_end_count,
+                    "apply_boundary: multiple UserTurns match covered_end_id (scenario 5 / id collision); using minimal index"
+                );
+            }
+            (0usize, k)
+        } else {
+            let start_idx = self
+                .user_turns_list
+                .iter()
+                .position(|t| user_turn_matches_covered_start(t, covered_start));
+            let end_idx = self
+                .user_turns_list
+                .iter()
+                .position(|t| user_turn_matches_covered_end(t, covered_end));
+            match (start_idx, end_idx) {
+                (Some(s), Some(e)) if s <= e => (s, e),
+                (None, Some(e)) => {
+                    warn!(
+                        covered_start_id = %result.covered_start_id,
+                        covered_end_id = %result.covered_end_id,
+                        "apply_boundary: start id missing; splicing from 0 to end (Layer3 may have dropped prefix)"
+                    );
+                    (0, e)
+                }
+                _ => {
+                    return Err(AppError::Config(
+                        "apply_boundary: covered range not found in user_turns_list (IDs may have been invalidated by Layer 3)".to_string(),
+                    ));
+                }
             }
         };
 
@@ -221,13 +310,12 @@ impl ContextState {
             .sum();
         let summary_chars = result.summary_text.len();
 
-        let new_id = format!(
-            "summary_{}_{}",
-            chrono::Utc::now().timestamp_micros(),
-            start
-        );
+        let summary_id = result
+            .transcript_compaction_entry_id
+            .clone()
+            .unwrap_or_else(|| compound_turn_id(covered_start, covered_end));
         let summary_turn = TurnEntry::SummaryTurn {
-            id: new_id,
+            id: summary_id,
             summary: result.summary_text,
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };

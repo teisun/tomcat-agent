@@ -6,11 +6,11 @@ pub(crate) mod store;
 pub mod transcript;
 
 pub use manager::{
-    build_context_from_state, estimate_turn_chars, init_context_state, ApiUsage, ContextState,
-    SessionManager, TurnEntry,
+    build_context_from_state, compound_turn_id, estimate_turn_chars, init_context_state, ApiUsage,
+    ContextState, SessionManager, TurnEntry,
 };
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 pub use transcript::{
-    append_entry, append_line, read_entries_tail, read_header, write_header, CompactionEntry,
-    MessageEntry, SessionHeader, TranscriptEntry,
+    append_entry, append_line, insert_entry_after_message_id, read_entries_tail, read_header,
+    write_header, CompactionEntry, MessageEntry, SessionHeader, TranscriptEntry,
 };

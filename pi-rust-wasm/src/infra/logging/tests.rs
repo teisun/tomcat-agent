@@ -8,7 +8,6 @@ fn a_init_logging_console_only_succeeds() {
     let cfg = LogConfig {
         level: "info".to_string(),
         file_enabled: false,
-        ..LogConfig::default()
     };
     let r = init_logging(&cfg, None);
     assert!(r.is_ok(), "init_logging(console only) should succeed");
@@ -25,7 +24,6 @@ fn invalid_log_level_returns_error() {
     let cfg = LogConfig {
         level: "not_a_level".to_string(),
         file_enabled: false,
-        ..Default::default()
     };
     let r = init_logging(&cfg, None);
     assert!(r.is_err());
