@@ -106,6 +106,9 @@ pub struct AgentLoop {
     pub(super) context_state: Option<ContextState>,
     pub(super) block_tool_calls: bool,
     pub(super) start_idx: usize,
+    /// 首次进入 `run()` 时 `messages` 中自该下标起（含）为**不得被 L3 rebuild 覆盖**的尾部
+    ///（当前用户句 / steering + 后续 assistant/tool）。用于 overflow 后只替换 transcript 段。
+    pub(super) context_tail_start: usize,
 }
 
 pub(super) fn unix_ts_ms() -> i64 {

@@ -2,8 +2,14 @@ use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER};
 use super::*;
 use crate::core::agent_loop::AgentMessage;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::session::manager::{compound_turn_id, CompactionResult, ContextState, TurnEntry};
+use crate::core::session::manager::{
+    build_context_from_state, compound_turn_id, CompactionResult, ContextState, TurnEntry,
+};
+use crate::core::session::transcript::{
+    append_entry, read_header, write_header, BranchSummaryEntry, SessionHeader, TranscriptEntry,
+};
 use crate::infra::config::ContextConfig;
+use crate::infra::error::AppError;
 
 const TS: &str = "2026-04-04T12:00:00Z";
 
@@ -413,6 +419,32 @@ fn force_drop_oldest_to_target_invalidates_usage() {
     );
 }
 
+/// 回归：上一轮 `last_api_usage` 很大时，L3 仍应按**字符估算**与 turns 同步删 oldest，
+/// 不得因 ratio 长期虚高而删空 `user_turns_list`（否则 `build_context_from_state` 为空 → API `messages: []`）。
+#[test]
+fn force_drop_oldest_respects_chars_not_stale_api_usage() {
+    let t_big = make_user_turn(vec![AgentMessage::User {
+        text: "a".repeat(30_000),
+    }]);
+    let t_small = make_user_turn(vec![AgentMessage::User {
+        text: "b".repeat(15_000),
+    }]);
+    let mut state = make_state(45_000, 200_000, 20_000);
+    state.user_turns_list = vec![t_big, t_small];
+    state.update_api_usage(500_000, 0);
+    force_drop_oldest_to_target(&mut state);
+    assert_eq!(
+        state.user_turns_list.len(),
+        1,
+        "should drop only oldest turn(s) until char-based ratio < 0.5, not drain all"
+    );
+    let flat = build_context_from_state(&state);
+    assert!(
+        !flat.is_empty(),
+        "non-empty turns must rebuild non-empty context"
+    );
+}
+
 #[test]
 fn is_context_overflow_comprehensive() {
     assert!(is_context_overflow_error("context length exceeded"));
@@ -505,7 +537,10 @@ fn apply_boundary_not_found_returns_err() {
         preheat_elapsed_ms: 0,
     };
     let res = state.apply_boundary(result);
-    assert!(res.is_err());
+    assert!(matches!(
+        res,
+        Err(AppError::ApplyBoundaryStale { covered_end_id }) if covered_end_id == "also_nonexistent"
+    ));
 }
 
 #[test]
@@ -557,6 +592,89 @@ fn check_after_reply_skips_when_no_preheat() {
     state.update_api_usage(900, 0);
     let switched = super::apply::check_after_reply(&mut state, &eb);
     assert!(!switched, "idle preheat should skip");
+}
+
+#[test]
+fn preheat_discard_cached_completed_only_clears_cached() {
+    let mut p = Preheat::new();
+    p.restore_completed(dummy_compaction_result());
+    assert!(p.is_finished());
+    p.discard_cached_completed();
+    assert!(p.is_idle());
+    p.discard_cached_completed();
+    assert!(p.is_idle());
+}
+
+#[test]
+fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle() {
+    use crate::infra::event_bus::DefaultEventBus;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stale_apply.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let entry_id = compound_turn_id("gone_start", "stale_end");
+    let branch = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some(entry_id.clone()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        summary: Some("pending sum".to_string()),
+        covered_start_id: Some("gone_start".to_string()),
+        covered_end_id: Some("stale_end".to_string()),
+        covered_count: Some(1),
+        is_boundary: Some(false),
+        preheat_compaction_id: Some(entry_id.clone()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+    });
+    append_entry(&path, &branch).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+
+    let eb = DefaultEventBus::new();
+    let mut state = make_state(0, 0, 1000);
+    state.transcript_path = path.clone();
+    state.update_api_usage(900, 0);
+    state.user_turns_list = vec![make_user_turn_with_span(
+        "still_end",
+        "still_end",
+        vec![AgentMessage::User {
+            text: "x".into(),
+        }],
+    )];
+    let stale_result = CompactionResult {
+        summary_text: "sum".into(),
+        covered_start_id: "gone_start".into(),
+        covered_end_id: "stale_end".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some(entry_id),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    };
+    state.preheat.restore_completed(stale_result);
+    let switched = super::apply::check_after_reply(&mut state, &eb);
+    assert!(!switched, "stale apply should not emit boundary switched");
+    assert!(
+        state.preheat.is_idle(),
+        "stale path must not restore_pending_result → stay idle"
+    );
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        raw.lines().count(),
+        1,
+        "branch_summary line should be removed; only header remains"
+    );
+    read_header(&path).unwrap();
 }
 
 #[test]

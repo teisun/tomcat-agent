@@ -41,7 +41,7 @@
 - `BranchSummaryEntry`（serde）：可选 `preheatCompactionId`（与行 `id` 对齐写入，便于外部工具）。
 - `transcript::set_branch_summary_entry_is_boundary_true`：按 `id` 定位 `branch_summary` 行并改写 `isBoundary=true`（整文件读改写）。
 - `Preheat::restore_completed` + 内部 `CachedCompleted`：重载后恢复「LLM 已写完磁盘、尚未 apply」的摘要；`poll_result`/`await_result` 与正常完成同语义；`abort` 清除缓存。
-- `apply_boundary`：`covered_start_id` 在列表中缺失但 `covered_end_id` 仍命中时，替换区间为 `user_turns_list[0..=end]`（Layer3 删前缀场景），并 `warn`。
+- `apply_boundary`：仅按 **`covered_end_id`** 在 `user_turns_list` 中定位最小 `k`；无匹配 → **`AppError::ApplyBoundaryStale`**，Layer 2 删对应 **`branch_summary`** 行且不 **`restore_pending_result`**（见 `context-management.md` §5.7.5.1）。
 - **不向前兼容**：开发阶段不实现「同一逻辑批次两条全文 compaction（false 行 + 再 append true 行）」；历史 JSONL 需手工整理或新 session。
 - `TurnEntry::UserTurn`/`SummaryTurn`: 新增 `id: String`
 - `ContextState`: 新增 `transcript_path: PathBuf`、`compaction_summary: Option<CompactionSummary>`；移除 `compaction_consecutive_failures`

@@ -5,8 +5,11 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::core::compaction::preheat::PreheatOutcome;
-use crate::core::session::manager::{CompactionResult, ContextState};
-use crate::core::session::transcript::set_branch_summary_entry_is_boundary_true;
+use crate::core::session::manager::{compound_turn_id, CompactionResult, ContextState};
+use crate::core::session::transcript::{
+    remove_branch_summary_entry_by_id, set_branch_summary_entry_is_boundary_true,
+};
+use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::AgentEvent;
 
@@ -141,6 +144,25 @@ fn apply_and_emit_boundary(
             );
             true
         }
+        Err(e @ AppError::ApplyBoundaryStale { .. }) => {
+            warn!(
+                error = %e,
+                "apply_boundary stale: covered_end not in user_turns_list; removing branch_summary line, not restoring pending"
+            );
+            remove_stale_branch_summary_line(state, &result);
+            state.preheat.discard_cached_completed();
+            emit_agent_event(
+                event_bus,
+                AgentEvent::CompactionError {
+                    exhausted_after_retries: false,
+                    attempts: 0,
+                    error: e.to_string(),
+                    source: "apply".to_string(),
+                    ratio: Some(state.usage_ratio()),
+                },
+            );
+            false
+        }
         Err(e) => {
             warn!("apply_boundary failed: {}", e);
             emit_agent_event(
@@ -156,6 +178,28 @@ fn apply_and_emit_boundary(
             state.preheat.restore_pending_result(result);
             false
         }
+    }
+}
+
+fn transcript_entry_id_for_stale_remove(result: &CompactionResult) -> String {
+    result
+        .transcript_compaction_entry_id
+        .clone()
+        .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id))
+}
+
+fn remove_stale_branch_summary_line(state: &ContextState, result: &CompactionResult) {
+    if state.transcript_path.as_os_str().is_empty() {
+        warn!("remove_stale_branch_summary_line: transcript path empty; skip");
+        return;
+    }
+    let id = transcript_entry_id_for_stale_remove(result);
+    if let Err(e) = remove_branch_summary_entry_by_id(&state.transcript_path, &id) {
+        warn!(
+            entry_id = %id,
+            "remove_stale_branch_summary_line: failed (transcript may diverge until reload): {}",
+            e
+        );
     }
 }
 

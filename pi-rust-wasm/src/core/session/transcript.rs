@@ -315,6 +315,53 @@ pub fn set_branch_summary_entry_is_boundary_true(
     Ok(())
 }
 
+/// 按 `branch_summary` 行的 `id` **删除所有匹配行**（重写整文件：省略匹配行；其余行保留原始字节）。
+///
+/// 与 [`set_branch_summary_entry_is_boundary_true`] 相同：临时文件 + `rename` 原子替换。
+pub fn remove_branch_summary_entry_by_id(path: &Path, entry_id: &str) -> Result<(), AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut removed = 0usize;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+        let omit = match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::BranchSummary(ref ce)) => ce.id.as_deref() == Some(entry_id),
+            _ => false,
+        };
+        if omit {
+            removed += 1;
+        } else {
+            out.push(line);
+        }
+    }
+
+    if removed == 0 {
+        return Err(AppError::Config(format!(
+            "transcript: branch_summary entry id {entry_id:?} not found for removal"
+        )));
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    write_file_atomic(path, content.as_bytes())?;
+    Ok(())
+}
+
 /// 追加 SessionHeader 作为首行（仅当文件不存在或为空时调用）。
 pub fn write_header(path: &Path, header: &SessionHeader) -> Result<(), AppError> {
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(AppError::Io)?;

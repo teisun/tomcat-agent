@@ -372,3 +372,103 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
     assert!(matches!(&entries[1], TranscriptEntry::BranchSummary(_)));
     assert!(matches!(&entries[2], TranscriptEntry::Message(_)));
 }
+
+#[test]
+fn remove_branch_summary_entry_by_id_removes_matching_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rm_branch.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let msg = TranscriptEntry::Message(MessageEntry {
+        id: Some("m1".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        message: serde_json::json!({"role": "user", "content": "hi"}),
+    });
+    append_entry(&path, &msg).unwrap();
+    let b = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some("rm_target".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:02.000Z".to_string(),
+        summary: Some("s".to_string()),
+        covered_start_id: Some("a".to_string()),
+        covered_end_id: Some("b".to_string()),
+        covered_count: Some(2),
+        is_boundary: Some(false),
+        preheat_compaction_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+    });
+    append_entry(&path, &b).unwrap();
+    remove_branch_summary_entry_by_id(&path, "rm_target").unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.lines().count(), 2, "header + message only");
+    assert!(get_entry(&path, "rm_target").unwrap().is_none());
+}
+
+#[test]
+fn remove_branch_summary_entry_by_id_removes_all_duplicate_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rm_dup.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let mk = |ts: &str| {
+        TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some("dup_id".to_string()),
+            parent_id: None,
+            timestamp: ts.to_string(),
+            summary: Some("x".to_string()),
+            covered_start_id: None,
+            covered_end_id: None,
+            covered_count: None,
+            is_boundary: Some(false),
+            preheat_compaction_id: None,
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+        })
+    };
+    append_entry(&path, &mk("2025-01-01T00:00:01.000Z")).unwrap();
+    append_entry(&path, &mk("2025-01-01T00:00:02.000Z")).unwrap();
+    remove_branch_summary_entry_by_id(&path, "dup_id").unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(raw.lines().count(), 1);
+}
+
+#[test]
+fn remove_branch_summary_entry_by_id_not_found_returns_err() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rm_missing.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let r = remove_branch_summary_entry_by_id(&path, "nope");
+    assert!(r.is_err());
+}

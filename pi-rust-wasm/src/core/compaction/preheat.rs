@@ -219,6 +219,13 @@ impl Preheat {
         }
     }
 
+    /// 防御性丢弃尚未 `poll_result` 的完成态（陈旧 apply 等路径）；**仅** `CachedCompleted` → `Idle`。
+    pub fn discard_cached_completed(&mut self) {
+        if matches!(self.state, PreheatState::CachedCompleted { .. }) {
+            self.state = PreheatState::Idle;
+        }
+    }
+
     // --- 状态转换 ---
 
     /// Idle → Running。条件：ratio >= 0.50、有 turns、且当前为 **Idle**。
@@ -248,13 +255,10 @@ impl Preheat {
         }
 
         let snapshot = turns.to_vec();
-        let (covered_start_id, covered_end_id) = match (snapshot.first(), snapshot.last()) {
-            (
-                Some(TurnEntry::UserTurn { start_id, .. }),
-                Some(TurnEntry::UserTurn { end_id, .. }),
-            ) => (start_id.clone(), end_id.clone()),
-            (Some(t), Some(_)) => (t.id().to_string(), t.id().to_string()),
-            _ => unreachable!("snapshot non-empty checked above"),
+        let Some((covered_start_id, covered_end_id)) =
+            snapshot_message_bounds_for_preheat(&snapshot)
+        else {
+            return false;
         };
         let batch_compaction_id = compound_turn_id(&covered_start_id, &covered_end_id);
         let covered_count = snapshot.len();
@@ -377,13 +381,8 @@ impl Preheat {
             )))
         });
 
-        let (run_s, run_e) = match (turns.first(), turns.last()) {
-            (
-                Some(TurnEntry::UserTurn { start_id, .. }),
-                Some(TurnEntry::UserTurn { end_id, .. }),
-            ) => (start_id.clone(), end_id.clone()),
-            (Some(a), Some(b)) => (a.id().to_string(), b.id().to_string()),
-            _ => unreachable!(),
+        let Some((run_s, run_e)) = snapshot_message_bounds_for_preheat(turns) else {
+            return false;
         };
         self.state = PreheatState::Running {
             handle,
@@ -548,6 +547,27 @@ pub async fn generate_summary(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// §5.7：`insert_entry_after_message_id` 的锚点必须是 **MessageId**（`UserTurn.end_id`），
+/// 不能是 `SummaryTurn.id` 或 `UserTurn.id` 的复合 `S::E`。快照首尾可能是 `SummaryTurn`，
+/// 因此取**首个**与**最后一个** `UserTurn` 的 `start_id` / `end_id`。
+fn snapshot_message_bounds_for_preheat(turns: &[TurnEntry]) -> Option<(String, String)> {
+    let first_start = turns.iter().find_map(|t| {
+        if let TurnEntry::UserTurn { start_id, .. } = t {
+            Some(start_id.clone())
+        } else {
+            None
+        }
+    })?;
+    let last_end = turns.iter().rev().find_map(|t| {
+        if let TurnEntry::UserTurn { end_id, .. } = t {
+            Some(end_id.clone())
+        } else {
+            None
+        }
+    })?;
+    Some((first_start, last_end))
+}
+
 fn emit_agent_event(event_bus: &dyn EventBus, event: AgentEvent) {
     let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
     let event_name = payload
@@ -609,4 +629,62 @@ fn turns_to_text(turns: &[TurnEntry]) -> String {
         }
     }
     buf
+}
+
+#[cfg(test)]
+mod snapshot_message_bounds_tests {
+    use super::snapshot_message_bounds_for_preheat;
+    use crate::core::session::manager::compound_turn_id;
+    use crate::core::session::manager::TurnEntry;
+
+    fn ut(start: &str, end: &str) -> TurnEntry {
+        TurnEntry::UserTurn {
+            id: compound_turn_id(start, end),
+            start_id: start.to_string(),
+            end_id: end.to_string(),
+            messages: vec![],
+            timestamp: "ts".into(),
+        }
+    }
+
+    #[test]
+    fn skips_leading_summary_turn() {
+        let turns = vec![
+            TurnEntry::SummaryTurn {
+                id: "batch_S::batch_E".into(),
+                summary: "prev".into(),
+                timestamp: "t0".into(),
+            },
+            ut("m0", "m1"),
+            ut("m2", "m3"),
+        ];
+        let (s, e) = snapshot_message_bounds_for_preheat(&turns).unwrap();
+        assert_eq!(s, "m0");
+        assert_eq!(e, "m3");
+    }
+
+    #[test]
+    fn skips_trailing_summary_turn() {
+        let turns = vec![
+            ut("a", "b"),
+            TurnEntry::SummaryTurn {
+                id: "x::y".into(),
+                summary: "s".into(),
+                timestamp: "t1".into(),
+            },
+        ];
+        let (s, e) = snapshot_message_bounds_for_preheat(&turns).unwrap();
+        assert_eq!(s, "a");
+        assert_eq!(e, "b");
+    }
+
+    #[test]
+    fn none_when_no_user_turn() {
+        let turns = vec![TurnEntry::SummaryTurn {
+            id: "only::summary".into(),
+            summary: "s".into(),
+            timestamp: "t".into(),
+        }];
+        assert!(snapshot_message_bounds_for_preheat(&turns).is_none());
+    }
 }

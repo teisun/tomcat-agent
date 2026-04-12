@@ -42,6 +42,7 @@ impl AgentLoop {
             context_state: None,
             block_tool_calls: false,
             start_idx: 0,
+            context_tail_start: 0,
         }
     }
 
@@ -66,6 +67,7 @@ impl AgentLoop {
             context_state: None,
             block_tool_calls: false,
             start_idx: 0,
+            context_tail_start: 0,
         }
     }
 
@@ -166,6 +168,13 @@ impl AgentLoop {
                 messages.extend(q.drain(..));
             }
         }
+
+        self.context_tail_start = match messages.last() {
+            Some(AgentMessage::User { .. } | AgentMessage::Steering { .. }) => {
+                messages.len().saturating_sub(1)
+            }
+            _ => messages.len(),
+        };
 
         self.start_idx = messages.len();
 
@@ -286,8 +295,17 @@ impl AgentLoop {
                             ctx_state.session_obs.compaction_tokens_freed += trim_tokens;
                             ctx_state.session_obs.compaction_count =
                                 ctx_state.session_obs.compaction_count.saturating_add(1);
-                            *messages =
-                                crate::core::session::manager::build_context_from_state(ctx_state);
+                            let tail_start = self.context_tail_start.min(messages.len());
+                            let tail: Vec<AgentMessage> = messages[tail_start..].to_vec();
+                            let mut rebuilt: Vec<AgentMessage> = Vec::new();
+                            if let Some(m @ AgentMessage::System { .. }) = messages.first() {
+                                rebuilt.push(m.clone());
+                            }
+                            rebuilt.extend(
+                                crate::core::session::manager::build_context_from_state(ctx_state),
+                            );
+                            rebuilt.extend(tail);
+                            *messages = rebuilt;
                             self.start_idx = messages.len();
                         }
                         let ratio_after = self

@@ -47,17 +47,6 @@ fn user_turn_matches_covered_end(turn: &TurnEntry, covered_end: &str) -> bool {
     }
 }
 
-fn user_turn_matches_covered_start(turn: &TurnEntry, covered_start: &str) -> bool {
-    match turn {
-        TurnEntry::UserTurn { start_id, id, .. } => {
-            start_id == covered_start
-                || id == covered_start
-                || compound_id_prefix(id) == covered_start
-        }
-        _ => false,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // TurnEntry
 // ---------------------------------------------------------------------------
@@ -241,8 +230,8 @@ impl ContextState {
     }
 
     /// 将已完成的 CompactionResult 应用到 user_turns_list：
-    /// §5.7.5 主路径：最小 `k` 使 `UserTurn.end_id == covered_end_id`（及右段 / 旧 id 回退），
-    /// 再 `splice(0..=k, [SummaryTurn])`。保留旧式「双端 turn `id()`」匹配为回退。
+    /// §5.7.5：最小 `k` 使 `UserTurn` 与 `covered_end_id` 匹配（`end_id` / `id` / 复合 id 右段），
+    /// 再 `splice(0..=k, [SummaryTurn])`。无匹配时返回 [`AppError::ApplyBoundaryStale`]（不第二遍扫 start/end）。
     pub fn apply_boundary(&mut self, result: CompactionResult) -> Result<(), AppError> {
         let covered_end = result.covered_end_id.as_str();
         let covered_start = result.covered_start_id.as_str();
@@ -278,30 +267,9 @@ impl ContextState {
             }
             (0usize, k)
         } else {
-            let start_idx = self
-                .user_turns_list
-                .iter()
-                .position(|t| user_turn_matches_covered_start(t, covered_start));
-            let end_idx = self
-                .user_turns_list
-                .iter()
-                .position(|t| user_turn_matches_covered_end(t, covered_end));
-            match (start_idx, end_idx) {
-                (Some(s), Some(e)) if s <= e => (s, e),
-                (None, Some(e)) => {
-                    warn!(
-                        covered_start_id = %result.covered_start_id,
-                        covered_end_id = %result.covered_end_id,
-                        "apply_boundary: start id missing; splicing from 0 to end (Layer3 may have dropped prefix)"
-                    );
-                    (0, e)
-                }
-                _ => {
-                    return Err(AppError::Config(
-                        "apply_boundary: covered range not found in user_turns_list (IDs may have been invalidated by Layer 3)".to_string(),
-                    ));
-                }
-            }
+            return Err(AppError::ApplyBoundaryStale {
+                covered_end_id: result.covered_end_id.clone(),
+            });
         };
 
         let batch_chars: usize = self.user_turns_list[start..=end]
