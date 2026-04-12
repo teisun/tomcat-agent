@@ -34,7 +34,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 读取完上下文后，**禁止直接编码**，须先制定并输出详细开发计划，**经用户确认后**方可进入开发阶段。
 
-制定计划时须遵循 [plan/PLAN_SPEC.md](./plan/PLAN_SPEC.md) 中的**内容要求**（第一节「必须包含」共 **7** 条，含 **Todo 总表与正文一一对应**）、**质量标准**与**第五、六节自检与写后复核**；中小任务可先复制 [plan/PLAN_SKELETON.md](./plan/PLAN_SKELETON.md) 再按规范扩写，并参考 PLAN_SPEC 第四节中的完整案例索引。
+制定计划时须遵循 [plan/PLAN_SPEC.md](./plan/PLAN_SPEC.md) 中的**内容要求** 含全部 **7** 个维度，中小任务可先复制 [plan/PLAN_SKELETON.md](./plan/PLAN_SKELETON.md) 再按规范扩写，并参考 PLAN_SPEC 第四节中的完整案例索引。
 
 ## 5、开发
 

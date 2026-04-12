@@ -1,5 +1,15 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-12 | DONE | develop | — |
+
+### docs：agents/plan 以 TASK-21 为唯一完整范例并收口 TASK-05 链接
+
+移除 `PLAN_EXAMPLE_CLI.md`、独立长篇 `PLAN_TASK05_PI_MONO_COMPAT.md`；新增 `PLAN_EXAMPLE_TASK21.md`，`PLAN_SKELETON` / `PLAN_SPEC` / `Dispatcher` / `TASK_BOARD` 与相关报告引用与之对齐，避免计划文档双轨与死链。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-12（补录） | INTEGRATION PASS | develop | — |
 
 ### 集成补录：§1 规格核对、E2E 场景库对齐与架构 review（TASK-20/21 合并后）
@@ -412,7 +422,7 @@
 ### 文档：TASK-05 系列（05e、PLAN 与策略同步）
 
 - **TASK_BOARD**：新增 **TASK-05e**（矩阵 10–15 社区插件端到端验收）；05b–05e 补充技术方案/开发计划链接；系列总述增加 Tomcat 根目录 **pi-mono** / **pi_agent_rust** 本地参考说明。
-- **PLAN_TASK05**：05a 子项与看板 DONE 对齐；05e 子项 e.1–e.5 与看板一致。
+- **开发计划（agents/plan）**：05a 子项与看板 DONE 对齐；05e 子项 e.1–e.5 与看板一致（当时曾维护独立 PLAN 专文，现已以 TASK_BOARD + 矩阵为准）。
 - **pi-mono-compat-strategy**：§13.1 / §13.10 与 05e、工作量表一致。
 
 ---
@@ -792,7 +802,7 @@
 
 ### 本次执行说明（计划规范抽子文档与 status 清理）
 
-- [✓] **agents/plan/**：新建 PLAN_SPEC.md（内容要求、质量标准、自检清单），案例单独为 PLAN_EXAMPLE_CLI.md；Dispatcher.md 改为引用 plan/PLAN_SPEC.md。
+- [✓] **agents/plan/**：新建 PLAN_SPEC.md（内容要求、质量标准、自检清单），完整计划范例为 PLAN_EXAMPLE_TASK21.md；Dispatcher.md 改为引用 plan/PLAN_SPEC.md。
 - [✓] **删除**：agents/PLAN.md、agents/integration_test_agent.md；status 下除 develop.md 外 7 个 feature 分支 status 文件已删除。
 
 ---

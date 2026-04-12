@@ -378,7 +378,7 @@
 **总体验收口径**：**TASK-05e** 统一收口——在 TASK-05a→05b→05c→05d 全部落地后，按 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md) 对 **10–15 个** pi-mono **社区**插件完成**端到端兼容验收**（可加载、各插件约定的核心路径可跑通）。各 Tier 子任务中的「1～3 个」等为**代表性回归样本**，用于门禁与自动化；**不可替代** TASK-05e 的全矩阵验收勾选。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
-**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**开发计划**：[PLAN_SPEC.md](./plan/PLAN_SPEC.md)（规范）、[PLAN_EXAMPLE_TASK21.md](./plan/PLAN_EXAMPLE_TASK21.md)（完整范例）；验收矩阵见 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md)。
 
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
@@ -397,7 +397,7 @@
 **目标**：完成技术可行性验证和完整差距分析，为后续分层实现提供依据。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
-**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**开发计划**：[PLAN_SPEC.md](./plan/PLAN_SPEC.md)（规范）、[PLAN_EXAMPLE_TASK21.md](./plan/PLAN_EXAMPLE_TASK21.md)（完整范例）；验收矩阵见 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md)。
 
 **子项**：
 - [✓] a.1 恢复 pi-mono 完整工作树（确保能 npm install + tsc 编译）
@@ -437,7 +437,7 @@
 **目标**：使纯事件监听 + notify 的 pi-mono 扩展能零修改运行（如 tps.ts）。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
-**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**开发计划**：[PLAN_SPEC.md](./plan/PLAN_SPEC.md)（规范）、[PLAN_EXAMPLE_TASK21.md](./plan/PLAN_EXAMPLE_TASK21.md)（完整范例）；验收矩阵见 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md)。
 
 **子项**：
 - [✓] b.1 改造扩展入口：支持 `export default function(pi)` 模式
@@ -475,7 +475,7 @@
 **目标**：使含命令注册、exec 调用、基础 UI 交互的扩展能运行。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
-**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**开发计划**：[PLAN_SPEC.md](./plan/PLAN_SPEC.md)（规范）、[PLAN_EXAMPLE_TASK21.md](./plan/PLAN_EXAMPLE_TASK21.md)（完整范例）；验收矩阵见 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md)。
 
 **子项**：
 - [x] c.1 对齐 `pi.exec(cmd, args[], opts)` 签名
@@ -514,7 +514,7 @@
 **目标**：使含 TUI 自定义组件和深度会话 API 的扩展能运行（如 diff.ts、files.ts）。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
-**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**开发计划**：[PLAN_SPEC.md](./plan/PLAN_SPEC.md)（规范）、[PLAN_EXAMPLE_TASK21.md](./plan/PLAN_EXAMPLE_TASK21.md)（完整范例）；验收矩阵见 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md)。
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 **子项**：
@@ -556,7 +556,7 @@
 **目标**：按 Phase 0 输出的扩展矩阵，对 **15 个** pi-mono **社区**插件逐一做端到端兼容验收（长生命周期 VM），**15/15 全部通过**，每个插件均有自动化 E2E 测试覆盖。
 
 **技术方案**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md)
-**开发计划**：[PLAN_TASK05_PI_MONO_COMPAT.md](./plan/PLAN_TASK05_PI_MONO_COMPAT.md)
+**开发计划**：[PLAN_SPEC.md](./plan/PLAN_SPEC.md)（规范）、[PLAN_EXAMPLE_TASK21.md](./plan/PLAN_EXAMPLE_TASK21.md)（完整范例）；验收矩阵见 [`extension_compat_matrix.md`](../docs/reports/extension_compat_matrix.md)。
 **本地参考源码**（Tomcat 工作区根目录，与 `pi-rust-wasm/` 并列；**默认不纳入本仓库 Git 提交**，需本地自备克隆）：[pi-mono](../../pi-mono)（上游 TypeScript 生态、`ExtensionAPI` 与社区扩展形态）、[pi_agent_rust](../../pi_agent_rust)（SWC / 扩展加载等 Rust 侧参考实现）。
 
 **硬性约束**：

@@ -76,11 +76,10 @@
 
 | 文档 | 适用场景 |
 | :--- | :--- |
-| [PLAN_SKELETON.md](./PLAN_SKELETON.md) | **任意任务**一屏内最小骨架（复制后填空即可）。 |
-| [PLAN_EXAMPLE_CLI.md](./PLAN_EXAMPLE_CLI.md) | **渐进补全**：多子命令、多子项、逐步替换占位实现（历史案例：TASK-02）。 |
-| [PLAN_TASK05_PI_MONO_COMPAT.md](./PLAN_TASK05_PI_MONO_COMPAT.md) | **多阶段横切**：Tier/Phase、矩阵验收、依赖图、与外部生态对齐（TASK-05 系列）；Todo 总表固定为**第七节**（在「六、风险」之后）。 |
+| [PLAN_SKELETON.md](./PLAN_SKELETON.md) | **任意任务**最小骨架（复制后填空）；章节顺序与 [PLAN_EXAMPLE_TASK21.md](./PLAN_EXAMPLE_TASK21.md) 对齐。 |
+| [PLAN_EXAMPLE_TASK21.md](./PLAN_EXAMPLE_TASK21.md) | **完整计划范例**：认领与分支、研发流程表、子项状态表、目标与验收、现状与差距、子项与 API 一览、各子项详情、依赖图、风险、集成 §4、自检、Dispatcher 收尾、**第七节 Todo 总表**（历史完成：TASK-21）。横切任务（如 TASK-05 系列）以 [TASK_BOARD.md](../TASK_BOARD.md) 与本节子项 + [`docs/reports/extension_compat_matrix.md`](../../docs/reports/extension_compat_matrix.md) 为范围与验收单一事实来源，不必另建同名长篇计划文件。 |
 
-制定计划时：小任务对齐「一」+ 自检 + **SKELETON** 即可；与 CLI/插件类似形态可对照 EXAMPLE / TASK05 的章节结构，不必同等长度。
+制定计划时：小任务对齐「一」+ 自检 + **SKELETON** 即可；横切或多子项任务可对照 **TASK21 范例** 的章节结构扩写，不必同等篇幅。
 
 ---
 

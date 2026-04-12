@@ -201,7 +201,7 @@
 |------|----------|
 | [agents/TASK_BOARD.md](../../agents/TASK_BOARD.md) | TASK-05c 子项勾选、状态 `PENDING_INTEGRATION` |
 | [docs/status/feature-plugin-compat-tier2.md](../status/feature-plugin-compat-tier2.md) | 分支元数据与接口摘要 |
-| [agents/plan/PLAN_TASK05_PI_MONO_COMPAT.md](../../agents/plan/PLAN_TASK05_PI_MONO_COMPAT.md) | TASK-05c 勾选与总计划同步 |
+| [agents/TASK_BOARD.md](../../agents/TASK_BOARD.md) + [`extension_compat_matrix.md`](../reports/extension_compat_matrix.md) | TASK-05 系列范围与矩阵验收（已无独立 `PLAN_TASK05_*.md`） |
 
 ---
 
