@@ -1,5 +1,38 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-12 21:50 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：`feature/transcript-branch-summary-replaces-compaction` 并入 develop
+
+**合并**：在 `origin/develop` 基线上快进合并功能分支（2 commits：`transcript` 压缩行统一为 `type: branch_summary` 等；preheat 锚点、stale boundary apply、transcript 清理）。
+
+#### §1 规格与场景库
+
+| 文档 | 结论 |
+| :--- | :--- |
+| [User_Stories.md](../../openspec/specs/User_Stories.md)、[E2E_SCENARIO_LIBRARY.md](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) | 与本次 JSONL `branch_summary` 语义一致；合入前已核对无待补 delta |
+
+#### §2–§4 验收（develop 工作树复跑）
+
+| 项 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS |
+| `cargo clippy --all-targets -- -D warnings` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | PASS |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` | PASS（77） |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`（全量） | PASS |
+| [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 质量红线 | 未见弱化断言；`cli_tests` 首轮曾 1 例 LLM 偶发失败，重跑全量通过 |
+
+**环境**：macOS；于 `pi-rust-wasm/` 目录 `source .env` 后跑测；WasmEdge 可用。
+
+#### 架构 review（对照 Codeing&Architecture_Spec）
+
+transcript / preheat / `compaction/apply` 分层与既有会话、上下文模块边界一致。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-12 | DONE | develop | — |
 
 ### docs：agents/plan 以 TASK-21 为唯一完整范例并收口 TASK-05 链接
