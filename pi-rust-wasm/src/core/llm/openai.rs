@@ -17,7 +17,9 @@ use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
 use super::provider::LlmProvider;
-use super::types::{ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent};
+use super::types::{
+    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent, TokenUsage,
+};
 
 /// 发给 OpenAI API 的请求体（不含 model_override，stream 由调用方定）。
 /// 使用 max_completion_tokens 以兼容新模型（部分模型已不再接受 max_tokens）。
@@ -32,6 +34,13 @@ struct OpenAiRequestBody {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptionsBody>,
+}
+
+#[derive(serde::Serialize)]
+struct StreamOptionsBody {
+    include_usage: bool,
 }
 
 /// OpenAI 兼容 API 的适配器；限流、重试、超时、代理与 fallback 由本实现负责。
@@ -127,6 +136,7 @@ impl OpenAiProvider {
             max_tokens: request.max_tokens,
             stream: false,
             tools: request.tools.clone(),
+            stream_options: None,
         };
 
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
@@ -305,6 +315,9 @@ impl LlmProvider for OpenAiProvider {
             max_tokens: request.max_tokens,
             stream: true,
             tools: request.tools.clone(),
+            stream_options: Some(StreamOptionsBody {
+                include_usage: true,
+            }),
         };
 
         let resp = self.stream_post_once(&self.base_url, &body).await;
@@ -454,6 +467,7 @@ fn parse_sse_buffer(
 #[serde(rename_all = "snake_case")]
 struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
+    usage: Option<TokenUsage>,
 }
 
 #[derive(serde::Deserialize)]
@@ -486,39 +500,41 @@ struct OpenAiStreamFunctionDelta {
 }
 
 fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
-    let choices = match chunk.choices {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-    let choice = match choices.into_iter().next() {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-
     let mut events = Vec::new();
 
-    if let Some(delta) = choice.delta {
-        if let Some(content) = delta.content {
-            if !content.is_empty() {
-                events.push(StreamEvent::ContentDelta { delta: content });
+    if let Some(choices) = chunk.choices {
+        if let Some(choice) = choices.into_iter().next() {
+            if let Some(delta) = choice.delta {
+                if let Some(content) = delta.content {
+                    if !content.is_empty() {
+                        events.push(StreamEvent::ContentDelta { delta: content });
+                    }
+                }
+                if let Some(tool_calls) = delta.tool_calls {
+                    for tc in tool_calls {
+                        events.push(StreamEvent::ToolCallDelta {
+                            index: tc.index.unwrap_or(0),
+                            id: tc.id,
+                            name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                            arguments_delta: tc.function.and_then(|f| f.arguments),
+                        });
+                    }
+                }
             }
-        }
-        if let Some(tool_calls) = delta.tool_calls {
-            for tc in tool_calls {
-                events.push(StreamEvent::ToolCallDelta {
-                    index: tc.index.unwrap_or(0),
-                    id: tc.id,
-                    name: tc.function.as_ref().and_then(|f| f.name.clone()),
-                    arguments_delta: tc.function.and_then(|f| f.arguments),
-                });
+            if let Some(reason) = choice.finish_reason {
+                if !reason.is_empty() {
+                    events.push(StreamEvent::FinishReason { reason });
+                }
             }
         }
     }
 
-    if let Some(reason) = choice.finish_reason {
-        if !reason.is_empty() {
-            events.push(StreamEvent::FinishReason { reason });
-        }
+    if let Some(usage) = chunk.usage {
+        events.push(StreamEvent::Usage {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+        });
     }
 
     events

@@ -912,7 +912,285 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-/// [TASK-20] 重载后未应用 preheat：`restore_completed` + `poll_result` 可取回摘要
+/// [Fix B+C] agent_loop 返回的 new_messages 首条应为 AgentMessage::User
+///
+/// 验证：修复后 start_idx = context_tail_start → new_messages 包含 User 消息
+/// 意义：确保 TurnEntry 完整包含用户输入
+#[tokio::test]
+async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_new_messages_includes_user_message").entered();
+
+    let stream_ok = text_stream("response to user");
+    let llm = Arc::new(MockLlm::new(vec![stream_ok]));
+    let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 100 });
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    let config = AgentLoopConfig {
+        model: "mock-model".to_string(),
+        session_id: "sess-user-msg".to_string(),
+        max_attempts: 1,
+        retry_base_delay_ms: 0,
+        ..Default::default()
+    };
+    let abort = Arc::new(AtomicBool::new(false));
+    let mut agent = AgentLoop::new(
+        llm,
+        primitive,
+        event_bus,
+        config,
+        abort,
+    );
+
+    let messages = vec![
+        AgentMessage::System {
+            text: "system".to_string(),
+        },
+        AgentMessage::User {
+            text: "hello".to_string(),
+        },
+    ];
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
+        .await
+        .map_err(|_| "run() timeout 5s")??;
+
+    assert!(
+        !result.new_messages.is_empty(),
+        "new_messages should not be empty"
+    );
+    assert!(
+        matches!(&result.new_messages[0], AgentMessage::User { text } if text == "hello"),
+        "first new_message should be User('hello'), got {:?}",
+        result.new_messages.first()
+    );
+    assert!(
+        result.new_messages.len() >= 2,
+        "new_messages should contain User + Assistant, got {}",
+        result.new_messages.len()
+    );
+
+    Ok(())
+}
+
+/// [Fix B+C] L3 rebuild 后 estimate_context_chars 与 sum(turn_chars) + system 一致（无幽灵）
+///
+/// 场景：构造溢出 → L3 → agent 重试成功 → take_context_state → 验证 estimate 对齐
+#[tokio::test]
+async fn test_l3_rebuild_estimate_consistent_no_phantom(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_l3_rebuild_estimate_consistent_no_phantom").entered();
+
+    let stream_err = vec![Err(AppError::Llm(
+        "context length exceeded: 500000 tokens".to_string(),
+    ))];
+    let stream_ok = text_stream("recovered");
+    let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
+    let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 100 });
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    let system_text = "system prompt for test";
+    let config = AgentLoopConfig {
+        model: "mock".to_string(),
+        session_id: "sess-phantom".to_string(),
+        max_attempts: 3,
+        retry_base_delay_ms: 0,
+        context_config: ContextConfig {
+            keep_recent_turns: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let abort = Arc::new(AtomicBool::new(false));
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+
+    let big_turn = TurnEntry::UserTurn {
+        id: compound_turn_id("old", "old"),
+        start_id: "old".to_string(),
+        end_id: "old".to_string(),
+        messages: vec![
+            AgentMessage::User {
+                text: "old question".to_string(),
+            },
+            AgentMessage::ToolResult {
+                tool_call_id: "tc1".to_string(),
+                content: "x".repeat(50_000),
+                is_error: false,
+            },
+        ],
+        timestamp: TEST_TS.to_string(),
+    };
+    let big_chars: usize = pi_wasm::core::session::estimate_turn_chars(&big_turn);
+    let ctx_state = ContextState {
+        user_turns_list: vec![big_turn],
+        estimate_context_chars: system_text.len() + big_chars,
+        context_budget_chars: 1_000_000,
+        context_budget_tokens: 250_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    agent.set_context_state(Some(ctx_state));
+
+    let messages = vec![
+        AgentMessage::System {
+            text: system_text.to_string(),
+        },
+        AgentMessage::User {
+            text: "trigger overflow".to_string(),
+        },
+    ];
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
+        .await
+        .map_err(|_| "run() timeout 10s")??;
+
+    let ctx = agent
+        .take_context_state()
+        .expect("context_state should exist");
+
+    let turns_chars: usize = ctx
+        .user_turns_list
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+    let _expected_estimate = system_text.len() + turns_chars;
+
+    // After our fix, the new_messages should include User + any tail + the recovered response.
+    // When packed into a TurnEntry, estimate should align.
+    // We simulate what chat_loop does: on_new_user_turn(TurnEntry from new_messages)
+    let new_turn_chars: usize = result
+        .new_messages
+        .iter()
+        .map(|m| match m {
+            AgentMessage::User { text } => text.len(),
+            AgentMessage::Assistant { text, tool_calls } => {
+                text.len()
+                    + tool_calls
+                        .iter()
+                        .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
+                        .sum::<usize>()
+            }
+            AgentMessage::ToolResult { content, .. } => content.len(),
+            _ => 0,
+        })
+        .sum();
+
+    // estimate should be close to system + remaining turns chars + new_turn chars
+    // (the new turn hasn't been pushed yet at this point, but estimate already includes it
+    //  via on_message_appended during agent_loop)
+    let actual_estimate = ctx.estimate_context_chars;
+    let sum_from_turns = system_text.len() + turns_chars + new_turn_chars;
+
+    let drift = actual_estimate.abs_diff(sum_from_turns);
+    assert!(
+        drift < 200,
+        "estimate ({}) should be close to system + turns + new_turn ({}), drift = {}",
+        actual_estimate,
+        sum_from_turns,
+        drift
+    );
+
+    Ok(())
+}
+
+/// [Fix B+C] L3 force_drop 后 estimate_context_chars 与 sum(turn_chars) + system 一致
+#[test]
+fn test_force_drop_estimate_consistent_after_l3() {
+    common::setup_logging();
+    let _span = info_span!("test_force_drop_estimate_consistent_after_l3").entered();
+
+    let system_chars = 100usize;
+    let turns = vec![
+        TurnEntry::UserTurn {
+            id: compound_turn_id("t0", "t0"),
+            start_id: "t0".to_string(),
+            end_id: "t0".to_string(),
+            messages: vec![
+                AgentMessage::User {
+                    text: "question 0".to_string(),
+                },
+                AgentMessage::Assistant {
+                    text: "x".repeat(20_000),
+                    tool_calls: vec![],
+                },
+            ],
+            timestamp: TEST_TS.to_string(),
+        },
+        TurnEntry::UserTurn {
+            id: compound_turn_id("t1", "t1"),
+            start_id: "t1".to_string(),
+            end_id: "t1".to_string(),
+            messages: vec![
+                AgentMessage::User {
+                    text: "question 1".to_string(),
+                },
+                AgentMessage::Assistant {
+                    text: "x".repeat(20_000),
+                    tool_calls: vec![],
+                },
+            ],
+            timestamp: TEST_TS.to_string(),
+        },
+        TurnEntry::UserTurn {
+            id: compound_turn_id("t2", "t2"),
+            start_id: "t2".to_string(),
+            end_id: "t2".to_string(),
+            messages: vec![
+                AgentMessage::User {
+                    text: "question 2".to_string(),
+                },
+                AgentMessage::Assistant {
+                    text: "answer 2".to_string(),
+                    tool_calls: vec![],
+                },
+            ],
+            timestamp: TEST_TS.to_string(),
+        },
+    ];
+    let total_turn_chars: usize = turns
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+
+    let budget_tokens = total_turn_chars / 4;
+    let mut state = ContextState {
+        user_turns_list: turns,
+        estimate_context_chars: system_chars + total_turn_chars,
+        context_budget_chars: total_turn_chars,
+        context_budget_tokens: budget_tokens,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+
+    pi_wasm::core::compaction::force_drop_oldest_to_target(&mut state);
+
+    let remaining_turn_chars: usize = state
+        .user_turns_list
+        .iter()
+        .map(pi_wasm::core::session::estimate_turn_chars)
+        .sum();
+    let expected = system_chars + remaining_turn_chars;
+    assert_eq!(
+        state.estimate_context_chars, expected,
+        "estimate ({}) should equal system + sum(remaining turn_chars) ({})",
+        state.estimate_context_chars, expected
+    );
+    assert!(
+        !state.user_turns_list.is_empty(),
+        "should have at least one remaining turn after L3"
+    );
+}
+
+/// [TASK-20 集成] Session 重载：is_boundary=false 被跳过、is_boundary=true 生效
 #[test]
 fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

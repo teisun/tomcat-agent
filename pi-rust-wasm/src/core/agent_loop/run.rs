@@ -176,7 +176,7 @@ impl AgentLoop {
             _ => messages.len(),
         };
 
-        self.start_idx = messages.len();
+        self.start_idx = self.context_tail_start;
 
         loop {
             match self.run_attempt_loop(&mut messages).await {
@@ -304,9 +304,10 @@ impl AgentLoop {
                             rebuilt.extend(
                                 crate::core::session::manager::build_context_from_state(ctx_state),
                             );
+                            let tail_start_in_rebuilt = rebuilt.len();
                             rebuilt.extend(tail);
                             *messages = rebuilt;
-                            self.start_idx = messages.len();
+                            self.start_idx = tail_start_in_rebuilt;
                         }
                         let ratio_after = self
                             .context_state

@@ -19,7 +19,7 @@ use crate::infra::{
 };
 use crate::{
     convert_to_llm_format, resolve_extra_roots_paths, resolve_sessions_dir, resolve_workspace_dir,
-    AgentLoop, AgentLoopConfig, AppConfig, ChatMessage, DefaultPrimitiveExecutor,
+    AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
     DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
     SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
@@ -340,12 +340,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             text: input.clone(),
         });
 
-        // Append user message to transcript（§5.7：保留 user 行 id 作为 turn `start_id`）
-        let user_msg = ChatMessage::user(&input);
-        let user_row_id = ctx
-            .session
-            .append_message(serde_json::to_value(&user_msg)?)?;
-
         let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
         let config = AgentLoopConfig {
             max_attempts: 3,
@@ -430,13 +424,17 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     )
                 });
 
-                // 先写 transcript，再 pack 内存（§5.7.1 / 计划 21.2）
                 let chat_msgs = convert_to_llm_format(&result.new_messages);
-                let mut end_id = user_row_id.clone();
-                for msg in &chat_msgs {
-                    end_id = ctx.session.append_message(serde_json::to_value(msg)?)?;
+                let mut start_id = String::new();
+                let mut end_id = String::new();
+                for (i, msg) in chat_msgs.iter().enumerate() {
+                    let row_id =
+                        ctx.session.append_message(serde_json::to_value(msg)?)?;
+                    if i == 0 {
+                        start_id = row_id.clone();
+                    }
+                    end_id = row_id;
                 }
-                let start_id = user_row_id;
                 let id = compound_turn_id(&start_id, &end_id);
                 let current_turn = TurnEntry::UserTurn {
                     id,

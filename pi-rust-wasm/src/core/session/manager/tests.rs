@@ -3,6 +3,7 @@ use crate::core::compaction::preheat::Preheat;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use types::ApiUsage;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -719,6 +720,92 @@ fn try_append_returns_err_on_violation() {
     }));
     assert!(result.is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ────────── ContextState estimated_token_count / usage_ratio 测试 ──────────
+
+#[test]
+fn test_estimated_token_count_uses_api_usage_when_present() {
+    let state = ContextState {
+        user_turns_list: vec![],
+        estimate_context_chars: 40_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: Some(ApiUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+        }),
+        post_usage_appended_chars: 400,
+        transcript_path: PathBuf::new(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    // API branch: base(1000+200) + post_usage(400)/4 = 1200 + 100 = 1300
+    assert_eq!(
+        state.estimated_token_count(),
+        1300,
+        "should use API usage base + post_usage increment"
+    );
+}
+
+#[test]
+fn test_estimated_token_count_fallback_to_chars_when_no_usage() {
+    let state = ContextState {
+        user_turns_list: vec![],
+        estimate_context_chars: 8000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 500,
+        transcript_path: PathBuf::new(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    // Fallback branch: estimate_context_chars / 4 = 8000 / 4 = 2000
+    assert_eq!(
+        state.estimated_token_count(),
+        2000,
+        "should fallback to estimate_context_chars / 4 when no API usage"
+    );
+}
+
+#[test]
+fn test_usage_ratio_after_invalidate() {
+    let mut state = ContextState {
+        user_turns_list: vec![],
+        estimate_context_chars: 10_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: Some(ApiUsage {
+            prompt_tokens: 5000,
+            completion_tokens: 1000,
+        }),
+        post_usage_appended_chars: 800,
+        transcript_path: PathBuf::new(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+
+    state.invalidate_api_usage();
+
+    assert!(
+        state.last_api_usage.is_none(),
+        "last_api_usage should be None after invalidate"
+    );
+    assert_eq!(
+        state.post_usage_appended_chars, 0,
+        "post_usage_appended_chars should be 0 after invalidate"
+    );
+    // After invalidate: fallback = 10_000 / 4 = 2500; ratio = 2500 / 25000 = 0.1
+    let ratio = state.usage_ratio();
+    assert!(
+        (ratio - 0.1).abs() < 1e-9,
+        "usage_ratio should be 0.1 after invalidate, got {}",
+        ratio
+    );
 }
 
 #[test]

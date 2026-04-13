@@ -89,6 +89,43 @@ fn is_retriable_returns_false_for_non_llm_error() {
     )));
 }
 
+#[test]
+fn test_openai_chunk_with_usage_emits_usage_event() {
+    let chunk: OpenAiStreamChunk = serde_json::from_str(
+        r#"{"choices":[],"usage":{"prompt_tokens":150,"completion_tokens":42,"total_tokens":192}}"#,
+    )
+    .expect("should parse chunk with usage");
+    let events = openai_chunk_to_stream_events(chunk);
+    assert_eq!(events.len(), 1, "should emit exactly one Usage event");
+    match &events[0] {
+        StreamEvent::Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        } => {
+            assert_eq!(*prompt_tokens, 150);
+            assert_eq!(*completion_tokens, 42);
+            assert_eq!(*total_tokens, Some(192));
+        }
+        other => panic!("expected StreamEvent::Usage, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_openai_chunk_without_usage_no_usage_event() {
+    let chunk: OpenAiStreamChunk = serde_json::from_str(
+        r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
+    )
+    .expect("should parse chunk without usage");
+    let events = openai_chunk_to_stream_events(chunk);
+    assert!(
+        !events.iter().any(|e| matches!(e, StreamEvent::Usage { .. })),
+        "should not contain Usage event when chunk has no usage field"
+    );
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0], StreamEvent::ContentDelta { delta } if delta == "hi"));
+}
+
 #[tokio::test]
 async fn sse_stream_parses_and_yields_events() {
     println!("[TEST] sse_stream_parses_and_yields_events — 开始");
