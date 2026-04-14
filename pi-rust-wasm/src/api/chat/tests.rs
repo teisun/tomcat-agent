@@ -25,41 +25,37 @@ fn build_tool_definitions_contains_all_primitives() {
 }
 
 #[test]
-fn convert_to_llm_format_assistant_with_tool_calls() {
-    use crate::{convert_to_llm_format, AgentMessage, ToolCallInfo};
-    let tcs = vec![ToolCallInfo {
-        id: "call_1".into(),
-        name: "read_file".into(),
-        arguments: r#"{"path":"/tmp/x"}"#.into(),
-    }];
-    let messages = vec![AgentMessage::Assistant {
-        text: "thinking...".into(),
-        tool_calls: tcs,
-    }];
-    let out = convert_to_llm_format(&messages);
-    assert_eq!(out.len(), 1);
-    assert!(out[0].tool_calls.is_some());
-    let tc_val = out[0].tool_calls.as_ref().unwrap();
+fn chat_message_assistant_with_tool_calls_has_tool_calls() {
+    use crate::ChatMessage;
+    let tc_json = vec![serde_json::json!({
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": r#"{"path":"/tmp/x"}"#
+        }
+    })];
+    let msg = ChatMessage::assistant_with_tool_calls(Some("thinking..."), tc_json);
+    assert!(msg.tool_calls.is_some());
+    let tc_val = msg.tool_calls.as_ref().unwrap();
     assert_eq!(tc_val.len(), 1);
     assert_eq!(tc_val[0]["function"]["name"], "read_file");
 }
 
 #[test]
-fn convert_to_llm_format_assistant_tool_calls_null_content_when_empty() {
-    use crate::{convert_to_llm_format, AgentMessage, ToolCallInfo};
-    let tcs = vec![ToolCallInfo {
-        id: "call_2".into(),
-        name: "list_dir".into(),
-        arguments: r#"{"path":"."}"#.into(),
-    }];
-    let messages = vec![AgentMessage::Assistant {
-        text: String::new(),
-        tool_calls: tcs,
-    }];
-    let out = convert_to_llm_format(&messages);
-    assert_eq!(out.len(), 1);
-    assert!(out[0].content.is_none());
-    assert!(out[0].tool_calls.is_some());
+fn chat_message_assistant_tool_calls_null_content_when_empty() {
+    use crate::ChatMessage;
+    let tc_json = vec![serde_json::json!({
+        "id": "call_2",
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "arguments": r#"{"path":"."}"#
+        }
+    })];
+    let msg = ChatMessage::assistant_with_tool_calls(None, tc_json);
+    assert!(msg.content.is_none());
+    assert!(msg.tool_calls.is_some());
 }
 
 #[test]

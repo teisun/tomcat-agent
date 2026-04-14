@@ -4,47 +4,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
 
-use crate::core::llm::LlmProvider;
+use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::primitives::PrimitiveExecutor;
 use crate::core::session::manager::ContextState;
 use crate::infra::config::ContextConfig;
 use crate::infra::event_bus::EventBus;
 
-// ─── 5.1 AgentMessage 与转换 ───────────────────────────────────────────────
+// ─── ToolCallInfo ─────────────────────────────────────────────────────────
 
 /// 单次工具调用信息（与 OpenAI 流式 tool_calls 对应）。
+/// Temporary type: used only during stream accumulation + tool execution;
+/// stored in messages as `serde_json::Value` via `ChatMessage::tool_calls`.
 #[derive(Debug, Clone)]
 pub struct ToolCallInfo {
     pub id: String,
     pub name: String,
     pub arguments: String,
-}
-
-/// Agent 内部富类型消息；仅在调 LLM 边界转为 ChatMessage。
-#[derive(Debug, Clone)]
-pub enum AgentMessage {
-    User {
-        text: String,
-    },
-    Assistant {
-        text: String,
-        tool_calls: Vec<ToolCallInfo>,
-    },
-    ToolResult {
-        tool_call_id: String,
-        content: String,
-        is_error: bool,
-    },
-    System {
-        text: String,
-    },
-    Steering {
-        text: String,
-        timestamp: i64,
-    },
-    CompactionSummary {
-        summary: String,
-    },
 }
 
 // ─── 5.7 错误分类与重试 ─────────────────────────────────────────────────────
@@ -90,7 +65,7 @@ impl Default for AgentLoopConfig {
 #[derive(Debug)]
 pub struct AgentRunResult {
     pub final_text: String,
-    pub new_messages: Vec<AgentMessage>,
+    pub new_messages: Vec<ChatMessage>,
 }
 
 // ─── AgentLoop 结构体 ───────────────────────────────────────────────────────
@@ -100,8 +75,8 @@ pub struct AgentLoop {
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) event_bus: Arc<dyn EventBus>,
     pub(super) config: AgentLoopConfig,
-    pub(super) steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
-    pub(super) follow_up_queue: Arc<Mutex<Vec<AgentMessage>>>,
+    pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
+    pub(super) follow_up_queue: Arc<Mutex<Vec<ChatMessage>>>,
     pub(super) abort_signal: Arc<AtomicBool>,
     pub(super) context_state: Option<ContextState>,
     pub(super) block_tool_calls: bool,

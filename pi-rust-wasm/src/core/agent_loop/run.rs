@@ -8,7 +8,7 @@ use tracing::info;
 use crate::core::compaction::{
     force_drop_oldest_to_target, is_context_overflow_error, run_layer0_cleanup,
 };
-use crate::core::llm::{ChatRequest, LlmProvider, StreamEvent};
+use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::core::session::manager::{estimated_tokens_from_chars, ContextState};
 use crate::infra::error::AppError;
@@ -17,10 +17,10 @@ use crate::infra::events::{
     AgentEvent, AssistantMessageEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
 };
 
-use super::convert::{classify_error, convert_to_llm_format};
+use super::convert::classify_error;
 use super::types::{
-    unix_ts_ms, AgentLoop, AgentLoopConfig, AgentMessage, AgentRunResult, LoopError,
-    ToolCallAccumulator, ToolCallInfo,
+    unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunResult, LoopError, ToolCallAccumulator,
+    ToolCallInfo,
 };
 
 impl AgentLoop {
@@ -54,7 +54,7 @@ impl AgentLoop {
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
         abort_signal: Arc<AtomicBool>,
-        steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
+        steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     ) -> Self {
         Self {
             llm,
@@ -72,16 +72,13 @@ impl AgentLoop {
     }
 
     pub fn steer(&self, msg: String) {
-        self.steering_queue.lock().push(AgentMessage::Steering {
-            text: msg,
-            timestamp: unix_ts_ms(),
-        });
+        self.steering_queue
+            .lock()
+            .push(ChatMessage::steering(msg));
     }
 
     pub fn follow_up(&self, msg: String) {
-        self.follow_up_queue
-            .lock()
-            .push(AgentMessage::User { text: msg });
+        self.follow_up_queue.lock().push(ChatMessage::user(msg));
     }
 
     pub fn abort(&self) {
@@ -152,7 +149,7 @@ impl AgentLoop {
     /// 第一层：Conversation loop，处理 FollowUp。
     pub async fn run(
         &mut self,
-        initial_messages: Vec<AgentMessage>,
+        initial_messages: Vec<ChatMessage>,
     ) -> Result<AgentRunResult, AppError> {
         self.abort_signal.store(false, Ordering::SeqCst);
 
@@ -170,9 +167,7 @@ impl AgentLoop {
         }
 
         self.context_tail_start = match messages.last() {
-            Some(AgentMessage::User { .. } | AgentMessage::Steering { .. }) => {
-                messages.len().saturating_sub(1)
-            }
+            Some(m) if m.role == ChatMessageRole::User => messages.len().saturating_sub(1),
             _ => messages.len(),
         };
 
@@ -225,7 +220,7 @@ impl AgentLoop {
     /// 第二层：Attempt loop，错误分类与指数退避重试。
     async fn run_attempt_loop(
         &mut self,
-        messages: &mut Vec<AgentMessage>,
+        messages: &mut Vec<ChatMessage>,
     ) -> Result<String, LoopError> {
         let mut last_err: Option<String> = None;
         for attempt in 1..=self.config.max_attempts {
@@ -296,10 +291,13 @@ impl AgentLoop {
                             ctx_state.session_obs.compaction_count =
                                 ctx_state.session_obs.compaction_count.saturating_add(1);
                             let tail_start = self.context_tail_start.min(messages.len());
-                            let tail: Vec<AgentMessage> = messages[tail_start..].to_vec();
-                            let mut rebuilt: Vec<AgentMessage> = Vec::new();
-                            if let Some(m @ AgentMessage::System { .. }) = messages.first() {
-                                rebuilt.push(m.clone());
+                            let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
+                            let mut rebuilt: Vec<ChatMessage> = Vec::new();
+                            if messages
+                                .first()
+                                .is_some_and(|m| m.role == ChatMessageRole::System)
+                            {
+                                rebuilt.push(messages[0].clone());
                             }
                             rebuilt.extend(
                                 crate::core::session::manager::build_context_from_state(ctx_state),
@@ -370,7 +368,7 @@ impl AgentLoop {
     /// 第三层：Reasoning loop，LLM 流式 + 工具执行 + Steering/Abort 检查。
     async fn run_reasoning_loop(
         &mut self,
-        messages: &mut Vec<AgentMessage>,
+        messages: &mut Vec<ChatMessage>,
     ) -> Result<String, LoopError> {
         let mut final_text = String::new();
         let mut turn_index: usize = 0;
@@ -387,9 +385,8 @@ impl AgentLoop {
                 timestamp: unix_ts_ms(),
             });
 
-            let llm_messages = convert_to_llm_format(messages);
             let req = ChatRequest {
-                messages: llm_messages,
+                messages: messages.clone(),
                 model: self.config.model.clone(),
                 temperature: None,
                 max_tokens: None,
@@ -507,10 +504,7 @@ impl AgentLoop {
                 if let Some(ref mut ctx_state) = self.context_state {
                     ctx_state.on_message_appended(content_buf.len());
                 }
-                messages.push(AgentMessage::Assistant {
-                    text: content_buf,
-                    tool_calls: vec![],
-                });
+                messages.push(ChatMessage::assistant(&content_buf));
 
                 // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
                 let mut preheat_started: Option<(usize, f64)> = None;
@@ -537,7 +531,7 @@ impl AgentLoop {
                     // Step 2: restore ExhaustedPending → Running
                     ctx_state.preheat.try_restart_if_pending(
                         ctx_state.usage_ratio(),
-                        &ctx_state.user_turns_list,
+                        &ctx_state.messages,
                         &ctx_state.transcript_path,
                         Arc::clone(&self.llm),
                         &self.config.context_config,
@@ -554,10 +548,10 @@ impl AgentLoop {
 
                     // Step 4: Idle → Running (start new preheat if conditions met)
                     let ratio = ctx_state.usage_ratio();
-                    let turn_count = ctx_state.user_turns_list.len();
+                    let turn_count = ctx_state.turn_count();
                     if ctx_state.preheat.try_start(
                         ratio,
-                        &ctx_state.user_turns_list,
+                        &ctx_state.messages,
                         &ctx_state.transcript_path,
                         Arc::clone(&self.llm),
                         &self.config.context_config,
@@ -598,10 +592,29 @@ impl AgentLoop {
                 ctx_state.on_message_appended(assistant_chars);
             }
 
-            messages.push(AgentMessage::Assistant {
-                text: content_buf.clone(),
-                tool_calls: tool_calls.clone(),
-            });
+            {
+                let tc_json: Vec<serde_json::Value> = tool_calls
+                    .iter()
+                    .map(|tc| {
+                        serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments
+                            }
+                        })
+                    })
+                    .collect();
+                messages.push(ChatMessage::assistant_with_tool_calls(
+                    if content_buf.is_empty() {
+                        None
+                    } else {
+                        Some(content_buf.as_str())
+                    },
+                    tc_json,
+                ));
+            }
 
             let mut tool_results = Vec::new();
             let mut steered = false;
@@ -615,11 +628,7 @@ impl AgentLoop {
                     if let Some(ref mut ctx_state) = self.context_state {
                         ctx_state.on_message_appended(blocked_msg.len());
                     }
-                    messages.push(AgentMessage::ToolResult {
-                        tool_call_id: tc.id.clone(),
-                        content: blocked_msg.clone(),
-                        is_error: true,
-                    });
+                    messages.push(ChatMessage::tool(&tc.id, &blocked_msg));
                     tool_results.push(Message(serde_json::json!({ "content": blocked_msg })));
                 }
                 self.block_tool_calls = false;
@@ -675,11 +684,7 @@ impl AgentLoop {
                     ctx_state.on_message_appended(result_content.len());
                 }
 
-                messages.push(AgentMessage::ToolResult {
-                    tool_call_id: tc.id.clone(),
-                    content: result_content.clone(),
-                    is_error,
-                });
+                messages.push(ChatMessage::tool(&tc.id, &result_content));
                 tool_results.push(Message(serde_json::json!({ "content": result_content })));
 
                 let mut q = self.steering_queue.lock();

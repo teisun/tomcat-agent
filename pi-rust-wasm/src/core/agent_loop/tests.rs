@@ -2,6 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use crate::core::llm::ChatMessage;
 use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::primitives::PrimitiveExecutor;
 use crate::infra::error::AppError;
@@ -144,7 +145,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
 
 /// 第一次 read_file 时向 steering_queue 推入 Steering，用于测试"跳过剩余工具"。
 struct SteerableMockPrimitive {
-    steering_queue: Arc<parking_lot::Mutex<Vec<AgentMessage>>>,
+    steering_queue: Arc<parking_lot::Mutex<Vec<ChatMessage>>>,
     read_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -155,10 +156,9 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
             .read_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n == 0 {
-            self.steering_queue.lock().push(AgentMessage::Steering {
-                text: "stop after first tool".to_string(),
-                timestamp: 0,
-            });
+            self.steering_queue
+                .lock()
+                .push(ChatMessage::steering("stop after first tool"));
         }
         Ok(format!("content:{}", path))
     }
@@ -296,76 +296,9 @@ async fn run_returns_text_when_llm_returns_text_only() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "Hello world");
-}
-
-#[tokio::test]
-async fn convert_to_llm_format_steering_as_user() {
-    let messages = vec![AgentMessage::Steering {
-        text: "stop".to_string(),
-        timestamp: 0,
-    }];
-    let out = convert_to_llm_format(&messages);
-    assert_eq!(out.len(), 1);
-    assert!(matches!(
-        out[0].role,
-        crate::core::llm::ChatMessageRole::User
-    ));
-    assert_eq!(out[0].text_content(), Some("stop"));
-}
-
-#[tokio::test]
-async fn convert_to_llm_format_all_variants() {
-    let messages = vec![
-        AgentMessage::User {
-            text: "u".to_string(),
-        },
-        AgentMessage::System {
-            text: "s".to_string(),
-        },
-        AgentMessage::Assistant {
-            text: "a".to_string(),
-            tool_calls: vec![],
-        },
-        AgentMessage::ToolResult {
-            tool_call_id: "id1".to_string(),
-            content: "c".to_string(),
-            is_error: false,
-        },
-    ];
-    let out = convert_to_llm_format(&messages);
-    assert_eq!(out.len(), 4);
-    assert_eq!(out[0].text_content(), Some("u"));
-    assert_eq!(out[1].text_content(), Some("s"));
-    assert_eq!(out[2].text_content(), Some("a"));
-    assert_eq!(out[3].text_content(), Some("c"));
-}
-
-#[test]
-#[allow(deprecated)]
-fn compact_messages_keeps_system_and_recent() {
-    let mut messages: Vec<AgentMessage> = (0..25)
-        .map(|i| AgentMessage::User {
-            text: format!("msg{}", i),
-        })
-        .collect();
-    messages.insert(
-        0,
-        AgentMessage::System {
-            text: "sys".to_string(),
-        },
-    );
-    compact_messages(&mut messages, 5);
-    assert!(messages.len() <= 6 + 5);
-    let first = match &messages[0] {
-        AgentMessage::System { text } => text.as_str(),
-        _ => "",
-    };
-    assert_eq!(first, "sys");
 }
 
 #[test]
@@ -426,9 +359,7 @@ async fn run_retries_on_429_then_succeeds() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "OK");
 }
@@ -465,9 +396,7 @@ async fn run_tool_loop_calls_tool_then_returns_text() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "read /tmp/x".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("read /tmp/x")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("done"));
 }
@@ -488,7 +417,7 @@ async fn run_empty_messages_does_not_crash() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages: Vec<AgentMessage> = vec![];
+    let messages: Vec<ChatMessage> = vec![];
     let result = loop_.run(messages).await;
     assert!(result.is_ok());
     assert!(result.unwrap().final_text.is_empty());
@@ -538,9 +467,7 @@ async fn run_aborts_returns_interrupted() {
     };
     let abort_signal = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
-    let messages = vec![AgentMessage::User {
-        text: "read files".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("read files")];
     let abort_for_thread = Arc::clone(&abort_signal);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -594,9 +521,7 @@ async fn run_emits_events_in_correct_order() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let observed = order.lock().unwrap().clone();
     assert_eq!(observed, expected);
@@ -652,9 +577,7 @@ async fn run_steering_skips_remaining_tools() {
         abort,
         steering_queue,
     );
-    let messages = vec![AgentMessage::User {
-        text: "read two files".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("read two files")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("steered"));
     assert_eq!(read_count.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -690,9 +613,7 @@ async fn run_follow_up_continues_in_same_context() {
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.follow_up("next".to_string());
-    let messages = vec![AgentMessage::User {
-        text: "first".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("first")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("B"));
 }
@@ -712,45 +633,10 @@ async fn run_fatal_401_terminates_immediately() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("401"));
-}
-
-#[tokio::test]
-async fn convert_to_llm_format_compaction_summary_as_user() {
-    let messages = vec![AgentMessage::CompactionSummary {
-        summary: "Earlier messages summarized.".to_string(),
-    }];
-    let out = convert_to_llm_format(&messages);
-    assert_eq!(out.len(), 1);
-    assert!(matches!(
-        out[0].role,
-        crate::core::llm::ChatMessageRole::User
-    ));
-    assert_eq!(out[0].text_content(), Some("Earlier messages summarized."));
-}
-
-#[tokio::test]
-async fn agent_messages_from_chat_roundtrip() {
-    use crate::core::llm::{ChatMessage, ChatMessageRole};
-    let chat = vec![
-        ChatMessage::system("sys"),
-        ChatMessage::user("u"),
-        ChatMessage::assistant("a"),
-    ];
-    let agent = agent_messages_from_chat(&chat);
-    let back = convert_to_llm_format(&agent);
-    assert_eq!(back.len(), 3);
-    assert_eq!(back[0].role, ChatMessageRole::System);
-    assert_eq!(back[0].text_content(), Some("sys"));
-    assert_eq!(back[1].role, ChatMessageRole::User);
-    assert_eq!(back[1].text_content(), Some("u"));
-    assert_eq!(back[2].role, ChatMessageRole::Assistant);
-    assert_eq!(back[2].text_content(), Some("a"));
 }
 
 /// chat_stream 直接返回 Err（非 stream 内 Err）时也被正确分类并终止。
@@ -768,9 +654,7 @@ async fn run_chat_stream_returns_err_is_classified() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("503"));
@@ -822,7 +706,7 @@ async fn context_metrics_update_emitted_before_turn_end() {
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
-        user_turns_list: Vec::new(),
+        messages: Vec::new(),
         estimate_context_chars: 100,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -833,9 +717,7 @@ async fn context_metrics_update_emitted_before_turn_end() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
-    let messages = vec![AgentMessage::User {
-        text: "read".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("read")];
     let _ = loop_.run(messages).await.unwrap();
     let observed = order.lock().unwrap().clone();
     let metrics_pos = observed
@@ -897,7 +779,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
-        user_turns_list: Vec::new(),
+        messages: Vec::new(),
         estimate_context_chars: 2000,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -908,9 +790,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
-    let messages = vec![AgentMessage::User {
-        text: "validate".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("validate")];
     let _ = loop_.run(messages).await.unwrap();
     let captured = payloads.lock().unwrap();
     assert!(
@@ -993,7 +873,7 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
-        user_turns_list: Vec::new(),
+        messages: Vec::new(),
         estimate_context_chars: 100,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -1004,9 +884,7 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
-    let messages = vec![AgentMessage::User {
-        text: "multi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("multi")];
     let _ = loop_.run(messages).await.unwrap();
     let captured = counts.lock().unwrap();
     assert_eq!(
@@ -1065,9 +943,7 @@ async fn context_metrics_update_skipped_when_no_context_state() {
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
     let captured = emitted.lock().unwrap();
     assert!(
@@ -1112,7 +988,7 @@ async fn context_metrics_update_emitted_on_text_only_response() {
     let abort = Arc::new(AtomicBool::new(false));
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
-        user_turns_list: Vec::new(),
+        messages: Vec::new(),
         estimate_context_chars: 200,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -1123,9 +999,7 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "hello");
     let observed = order.lock().unwrap().clone();

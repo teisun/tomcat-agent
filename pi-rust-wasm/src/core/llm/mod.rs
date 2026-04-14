@@ -15,5 +15,5 @@ pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse,
-    ChatResponseChoice, StreamEvent, TokenUsage,
+    ChatResponseChoice, MessageKind, StreamEvent, TokenUsage,
 };

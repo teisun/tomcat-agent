@@ -7,11 +7,12 @@ use async_trait::async_trait;
 use pi_wasm::core::compaction::compact_tool_results;
 use pi_wasm::{
     build_context_from_state, compound_turn_id, init_context_state, AgentLoop, AgentLoopConfig,
-    AgentMessage, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
-    ContextState, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext,
-    LlmProvider, PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, ToolCallInfo,
-    TurnEntry, WriteFileResult,
+    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
+    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
+    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, WriteFileResult,
 };
+use pi_wasm::core::llm::{ChatMessageRole, MessageKind};
+use pi_wasm::core::session::estimate_msg_chars;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,6 +120,8 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
 
 // ────────────────────── 辅助 ──────────────────────────────────────────────
 
+const TEST_TS: &str = "2026-04-04T12:00:00Z";
+
 fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
     vec![
         Ok(StreamEvent::ContentDelta {
@@ -144,6 +147,22 @@ fn temp_sessions_dir(label: &str) -> PathBuf {
     ))
 }
 
+/// Helper: create [user, tool_result, assistant] messages for one "turn"
+fn make_msgs_with_tool_result(user_text: &str, tool_content: &str) -> Vec<ChatMessage> {
+    let mut user = ChatMessage::user(user_text);
+    user.timestamp = Some(TEST_TS.to_string());
+
+    let mut tool = ChatMessage::tool("tc", tool_content);
+    tool.timestamp = Some(TEST_TS.to_string());
+
+    let mut asst = ChatMessage::assistant("ok");
+    asst.timestamp = Some(TEST_TS.to_string());
+
+    vec![user, tool, asst]
+}
+
+const PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
+
 // ────────────────────── 测试用例 ──────────────────────────────────────────
 
 /// [Layer 1 + Layer 3 全链路] compact_tool_results 后仍超 ratio 时 force_drop_oldest_to_target 兜底
@@ -152,40 +171,24 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     common::setup_logging();
     let _span = info_span!("test_compaction_pipeline_layer1_then_layer3_recovers_budget").entered();
 
-    let mut turns = Vec::new();
+    let mut messages: Vec<ChatMessage> = Vec::new();
     for i in 0..5 {
-        let sid = format!("turn_{}", i);
-        let eid = sid.clone();
-        turns.push(TurnEntry::UserTurn {
-            id: compound_turn_id(&sid, &eid),
-            start_id: sid,
-            end_id: eid,
-            messages: vec![
-                AgentMessage::User {
-                    text: format!("question {}", i),
-                },
-                AgentMessage::ToolResult {
-                    tool_call_id: format!("tc_{}", i),
-                    content: "x".repeat(25_000),
-                    is_error: false,
-                },
-                AgentMessage::Assistant {
-                    text: format!("answer {}", i),
-                    tool_calls: vec![],
-                },
-            ],
-            timestamp: TEST_TS.to_string(),
-        });
+        let mut user = ChatMessage::user(format!("question {}", i));
+        user.timestamp = Some(TEST_TS.to_string());
+        let mut tool = ChatMessage::tool(&format!("tc_{}", i), &"x".repeat(25_000));
+        tool.timestamp = Some(TEST_TS.to_string());
+        let mut asst = ChatMessage::assistant(format!("answer {}", i));
+        asst.timestamp = Some(TEST_TS.to_string());
+        messages.push(user);
+        messages.push(tool);
+        messages.push(asst);
     }
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
+    let total: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let budget_chars = 80_000;
     let budget_tokens = budget_chars / 4;
     let mut state = ContextState {
-        user_turns_list: turns,
+        messages,
         estimate_context_chars: total,
         context_budget_chars: budget_chars,
         context_budget_tokens: budget_tokens,
@@ -205,13 +208,13 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
     }
 
     assert!(state.usage_ratio() < 0.50);
-    assert!(!state.user_turns_list.is_empty());
+    assert!(!state.messages.is_empty());
 }
 
 /// [Session 重载] 写入消息与 `type: branch_summary` 摘要行后 init_context_state 正确重建
 ///
 /// 验证：创建会话 → 写消息 → 写 branch_summary → 再写消息 → init_context_state →
-///       turns 数量正确、SummaryTurn 内容正确、后续 UserTurn 正确
+///       messages 数量正确、CompactionSummary 内容正确、后续消息正确
 /// 意义：TASK-17 Transcript 持久化与重载——跨进程会话恢复端到端
 #[test]
 fn test_session_reload_with_branch_summary_entries() -> Result<(), Box<dyn std::error::Error>> {
@@ -245,38 +248,26 @@ fn test_session_reload_with_branch_summary_entries() -> Result<(), Box<dyn std::
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "system prompt")?;
 
-    info!("Assert: 验证 turns 数量与内容");
-    // Before compaction: 2 UserTurns (old Q1+A1, old Q2+A2)
-    // Compaction entry → SummaryTurn
-    // After compaction: 1 UserTurn (new Q + A)
-    // Total expected: old turns + SummaryTurn + new turn = depends on grouping
-    // Actually: entries order is msg, msg, msg, msg, compaction, msg, msg
-    // The init_context_state groups: UserTurn(q1,a1), UserTurn(q2,a2), then compaction flushes → SummaryTurn, then UserTurn(new q, new a)
+    info!("Assert: 验证 messages 数量与内容");
     assert!(
-        state.user_turns_list.len() >= 3,
-        "should have at least 3 groups: 2 old turns + summary + 1 new turn, got {}",
-        state.user_turns_list.len()
+        state.messages.len() >= 3,
+        "should have at least 3 messages, got {}",
+        state.messages.len()
     );
 
     let has_summary = state
-        .user_turns_list
+        .messages
         .iter()
-        .any(|t| matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Goal")));
+        .any(|m| m.kind == MessageKind::CompactionSummary && m.text_content().is_some_and(|t| t.contains("Goal")));
     assert!(
         has_summary,
-        "应含 SummaryTurn 且内容包含 compaction summary"
+        "应含 CompactionSummary 且内容包含 compaction summary"
     );
 
-    let has_new_turn = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages, .. } = t {
-            messages
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("new question")))
-        } else {
-            false
-        }
+    let has_new_msg = state.messages.iter().any(|m| {
+        m.text_content().is_some_and(|t| t.contains("new question"))
     });
-    assert!(has_new_turn, "应含 compaction 之后的 new question UserTurn");
+    assert!(has_new_msg, "应含 compaction 之后的 new question 消息");
 
     let msgs = build_context_from_state(&state);
     assert!(msgs.len() >= 3, "展平后消息数应 >= 3");
@@ -337,34 +328,17 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
+    let mut old_user = ChatMessage::user("old question");
+    old_user.timestamp = Some(TEST_TS.to_string());
+
+    let mut old_tool = ChatMessage::tool("tc1", &"x".repeat(50_000));
+    old_tool.timestamp = Some(TEST_TS.to_string());
+
+    let mut recent_user = ChatMessage::user("recent question");
+    recent_user.timestamp = Some(TEST_TS.to_string());
+
     let ctx_state = ContextState {
-        user_turns_list: vec![
-            TurnEntry::UserTurn {
-                id: compound_turn_id("turn_old", "turn_old"),
-                start_id: "turn_old".to_string(),
-                end_id: "turn_old".to_string(),
-                messages: vec![
-                    AgentMessage::User {
-                        text: "old question".to_string(),
-                    },
-                    AgentMessage::ToolResult {
-                        tool_call_id: "tc1".to_string(),
-                        content: "x".repeat(50_000),
-                        is_error: false,
-                    },
-                ],
-                timestamp: TEST_TS.to_string(),
-            },
-            TurnEntry::UserTurn {
-                id: compound_turn_id("turn_recent", "turn_recent"),
-                start_id: "turn_recent".to_string(),
-                end_id: "turn_recent".to_string(),
-                messages: vec![AgentMessage::User {
-                    text: "recent question".to_string(),
-                }],
-                timestamp: TEST_TS.to_string(),
-            },
-        ],
+        messages: vec![old_user, old_tool, recent_user],
         estimate_context_chars: 60_000,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -377,9 +351,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     };
     agent.set_context_state(Some(ctx_state));
 
-    let messages = vec![AgentMessage::User {
-        text: "trigger overflow".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("trigger overflow")];
 
     info!("Act: 调用 AgentLoop::run()，期望 context overflow → compaction → retry → 成功");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -410,56 +382,43 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     Ok(())
 }
 
-/// [build_context_from_state 端到端] SummaryTurn + UserTurn 混合展平后消息顺序正确
+/// [build_context_from_state 端到端] CompactionSummary + user/assistant/tool 混合展平后消息顺序正确
 ///
-/// 验证：SummaryTurn 转为 CompactionSummary，UserTurn 展平为原始消息，顺序保持
+/// 验证：CompactionSummary 转为 CompactionSummary，普通消息展平顺序保持
 /// 意义：TASK-17 上下文重建——build_context_from_state 正确性的端到端验证
 #[test]
 fn test_build_context_preserves_order_with_mixed_turns() {
     common::setup_logging();
     let _span = info_span!("test_build_context_preserves_order_with_mixed_turns").entered();
 
+    let mut summary = ChatMessage::compaction_summary("## Goal\nBuild a web app");
+    summary.msg_id = Some("sum_1".to_string());
+    summary.timestamp = Some(TEST_TS.to_string());
+
+    let mut user1 = ChatMessage::user("add auth");
+    user1.msg_id = Some("turn_1_u".to_string());
+    user1.timestamp = Some(TEST_TS.to_string());
+
+    let mut asst1 = ChatMessage::assistant_with_tool_calls(
+        Some("I'll add JWT auth"),
+        vec![serde_json::json!({
+            "id": "tc1",
+            "type": "function",
+            "function": {"name": "write_file", "arguments": r#"{"path":"auth.rs"}"#}
+        })],
+    );
+    asst1.timestamp = Some(TEST_TS.to_string());
+
+    let mut tool1 = ChatMessage::tool("tc1", "file written");
+    tool1.msg_id = Some("turn_1_tr".to_string());
+    tool1.timestamp = Some(TEST_TS.to_string());
+
+    let mut user2 = ChatMessage::user("run tests");
+    user2.msg_id = Some("turn_2".to_string());
+    user2.timestamp = Some(TEST_TS.to_string());
+
     let state = ContextState {
-        user_turns_list: vec![
-            TurnEntry::SummaryTurn {
-                id: "sum_1".to_string(),
-                summary: "## Goal\nBuild a web app".to_string(),
-                timestamp: TEST_TS.to_string(),
-            },
-            TurnEntry::UserTurn {
-                id: compound_turn_id("turn_1_u", "turn_1_tr"),
-                start_id: "turn_1_u".to_string(),
-                end_id: "turn_1_tr".to_string(),
-                messages: vec![
-                    AgentMessage::User {
-                        text: "add auth".to_string(),
-                    },
-                    AgentMessage::Assistant {
-                        text: "I'll add JWT auth".to_string(),
-                        tool_calls: vec![ToolCallInfo {
-                            id: "tc1".to_string(),
-                            name: "write_file".to_string(),
-                            arguments: r#"{"path":"auth.rs"}"#.to_string(),
-                        }],
-                    },
-                    AgentMessage::ToolResult {
-                        tool_call_id: "tc1".to_string(),
-                        content: "file written".to_string(),
-                        is_error: false,
-                    },
-                ],
-                timestamp: TEST_TS.to_string(),
-            },
-            TurnEntry::UserTurn {
-                id: compound_turn_id("turn_2", "turn_2"),
-                start_id: "turn_2".to_string(),
-                end_id: "turn_2".to_string(),
-                messages: vec![AgentMessage::User {
-                    text: "run tests".to_string(),
-                }],
-                timestamp: TEST_TS.to_string(),
-            },
-        ],
+        messages: vec![summary, user1, asst1, tool1, user2],
         estimate_context_chars: 500,
         context_budget_chars: 10_000,
         context_budget_tokens: 2_500,
@@ -475,44 +434,31 @@ fn test_build_context_preserves_order_with_mixed_turns() {
 
     assert_eq!(msgs.len(), 5, "应展平为 5 条消息");
     assert!(
-        matches!(&msgs[0], AgentMessage::CompactionSummary { summary } if summary.contains("Goal"))
+        msgs[0].kind == MessageKind::CompactionSummary
+            && msgs[0].text_content().is_some_and(|t| t.contains("Goal")),
+        "msgs[0] should be CompactionSummary containing 'Goal'"
     );
-    assert!(matches!(&msgs[1], AgentMessage::User { text } if text == "add auth"));
-    assert!(matches!(&msgs[2], AgentMessage::Assistant { .. }));
-    assert!(matches!(&msgs[3], AgentMessage::ToolResult { .. }));
-    assert!(matches!(&msgs[4], AgentMessage::User { text } if text == "run tests"));
+    assert!(
+        msgs[1].role == ChatMessageRole::User
+            && msgs[1].text_content() == Some("add auth"),
+        "msgs[1] should be User 'add auth'"
+    );
+    assert!(
+        msgs[2].role == ChatMessageRole::Assistant,
+        "msgs[2] should be Assistant"
+    );
+    assert!(
+        msgs[3].role == ChatMessageRole::Tool,
+        "msgs[3] should be Tool"
+    );
+    assert!(
+        msgs[4].role == ChatMessageRole::User
+            && msgs[4].text_content() == Some("run tests"),
+        "msgs[4] should be User 'run tests'"
+    );
 }
 
 // ────────── Layer 1 深度验证测试 ──────────────────────────────────────────
-
-const TEST_TS: &str = "2026-04-04T12:00:00Z";
-
-fn make_turn_with_tool_result(user_text: &str, tool_content: &str) -> TurnEntry {
-    let sid = format!("turn_{}", user_text);
-    let eid = sid.clone();
-    TurnEntry::UserTurn {
-        id: compound_turn_id(&sid, &eid),
-        start_id: sid,
-        end_id: eid,
-        messages: vec![
-            AgentMessage::User {
-                text: user_text.to_string(),
-            },
-            AgentMessage::ToolResult {
-                tool_call_id: "tc".to_string(),
-                content: tool_content.to_string(),
-                is_error: false,
-            },
-            AgentMessage::Assistant {
-                text: "ok".to_string(),
-                tool_calls: vec![],
-            },
-        ],
-        timestamp: TEST_TS.to_string(),
-    }
-}
-
-const PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
 
 /// [Layer 1 深度] 占位符替换正确性：旧 turn 的超大 tool result 被替换为占位符，保护区内 turn 保持原内容
 #[test]
@@ -521,14 +467,16 @@ fn test_compact_tool_results_replaces_with_placeholder() {
     let _span = info_span!("test_compact_tool_results_replaces_with_placeholder").entered();
 
     let big = "x".repeat(25_000);
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    msgs.extend(make_msgs_with_tool_result("q1", &big));
+    msgs.extend(make_msgs_with_tool_result("q2", &big));
+    msgs.extend(make_msgs_with_tool_result("q3-recent", &big));
+
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
     let mut state = ContextState {
-        user_turns_list: vec![
-            make_turn_with_tool_result("q1", &big),
-            make_turn_with_tool_result("q2", &big),
-            make_turn_with_tool_result("q3-recent", &big),
-        ],
-        estimate_context_chars: 0,
-        context_budget_chars: 0,
+        messages: msgs,
+        estimate_context_chars: total,
+        context_budget_chars: total / 3,
         context_budget_tokens: 0,
         last_api_usage: None,
         post_usage_appended_chars: 0,
@@ -537,39 +485,34 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let total: usize = state
-        .user_turns_list
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-    state.estimate_context_chars = total;
-    state.context_budget_chars = total / 3;
 
     info!("Act: compact_tool_results with keep_recent=1");
     compact_tool_results(&mut state, &ContextConfig::default(), 1);
 
     info!("Assert: old turns replaced, recent preserved");
-    for (i, turn) in state.user_turns_list.iter().enumerate() {
-        if let TurnEntry::UserTurn { messages, .. } = turn {
-            for msg in messages {
-                if let AgentMessage::ToolResult { content, .. } = msg {
-                    if i < 2 {
-                        assert_eq!(
-                            content, PLACEHOLDER,
-                            "turn {} tool result should be placeholder",
-                            i
-                        );
-                    } else {
-                        assert_eq!(
-                            content, &big,
-                            "turn {} (protected recent) should keep original",
-                            i
-                        );
-                    }
-                }
-            }
-        }
-    }
+    // Turns: turn 0 = msgs[0..3], turn 1 = msgs[3..6], turn 2 = msgs[6..9] (recent)
+    // Tool messages are at index 1, 4, 7
+    let tool_msgs: Vec<&ChatMessage> = state
+        .messages
+        .iter()
+        .filter(|m| m.role == ChatMessageRole::Tool)
+        .collect();
+    assert_eq!(tool_msgs.len(), 3, "should have 3 tool messages");
+    assert_eq!(
+        tool_msgs[0].text_content().unwrap_or(""),
+        PLACEHOLDER,
+        "first tool result should be placeholder"
+    );
+    assert_eq!(
+        tool_msgs[1].text_content().unwrap_or(""),
+        PLACEHOLDER,
+        "second tool result should be placeholder"
+    );
+    assert_eq!(
+        tool_msgs[2].text_content().unwrap_or(""),
+        big,
+        "third (protected recent) tool result should keep original"
+    );
 }
 
 /// [Layer 1 深度] compactable zone 内超过占位符阈值的 tool results 均被替换
@@ -581,19 +524,16 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
 
     let big = "x".repeat(25_000);
     let small = "x".repeat(5_000);
-    let turns = vec![
-        make_turn_with_tool_result("q1", &big),
-        make_turn_with_tool_result("q2", &small),
-        make_turn_with_tool_result("q3", &big),
-        make_turn_with_tool_result("q4-recent", &big),
-    ];
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    msgs.extend(make_msgs_with_tool_result("q1", &big));
+    msgs.extend(make_msgs_with_tool_result("q2", &small));
+    msgs.extend(make_msgs_with_tool_result("q3", &big));
+    msgs.extend(make_msgs_with_tool_result("q4-recent", &big));
+
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
 
     let mut state = ContextState {
-        user_turns_list: turns,
+        messages: msgs,
         estimate_context_chars: total,
         context_budget_chars: total,
         context_budget_tokens: total / 4,
@@ -608,39 +548,30 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     info!("Act: compact with m=1, only >threshold in compactable zone get replaced");
     compact_tool_results(&mut state, &ContextConfig::default(), 1);
 
-    let get_tool_content = |idx: usize| -> String {
-        if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[idx] {
-            messages
-                .iter()
-                .find_map(|m| {
-                    if let AgentMessage::ToolResult { content, .. } = m {
-                        Some(content.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap()
-        } else {
-            panic!("not a UserTurn");
-        }
-    };
+    let tool_msgs: Vec<&ChatMessage> = state
+        .messages
+        .iter()
+        .filter(|m| m.role == ChatMessageRole::Tool)
+        .collect();
+    assert_eq!(tool_msgs.len(), 4);
+
     assert_eq!(
-        get_tool_content(0),
+        tool_msgs[0].text_content().unwrap_or(""),
         PLACEHOLDER,
         "first (above threshold) should be replaced"
     );
     assert_eq!(
-        get_tool_content(1),
+        tool_msgs[1].text_content().unwrap_or(""),
         small,
         "second (below threshold) should keep original"
     );
     assert_eq!(
-        get_tool_content(2),
+        tool_msgs[2].text_content().unwrap_or(""),
         PLACEHOLDER,
         "third (above threshold) should be replaced"
     );
     assert_eq!(
-        get_tool_content(3),
+        tool_msgs[3].text_content().unwrap_or(""),
         big,
         "fourth (protected) should keep original"
     );
@@ -654,17 +585,13 @@ fn test_compact_tool_results_estimate_precise() {
 
     let content_len = 25_000;
     let big = "y".repeat(content_len);
-    let turns = vec![
-        make_turn_with_tool_result("q1", &big),
-        make_turn_with_tool_result("q2-recent", &big),
-    ];
-    let total: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    msgs.extend(make_msgs_with_tool_result("q1", &big));
+    msgs.extend(make_msgs_with_tool_result("q2-recent", &big));
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
 
     let mut state = ContextState {
-        user_turns_list: turns,
+        messages: msgs,
         estimate_context_chars: total,
         context_budget_chars: 1,
         context_budget_tokens: 0,
@@ -731,33 +658,23 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "system")?;
 
-    let has_old = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages, .. } = t {
-            messages
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("old")))
-        } else {
-            false
-        }
+    let has_old = state.messages.iter().any(|m| {
+        m.text_content().is_some_and(|t| t.contains("old"))
     });
     assert!(!has_old, "turns before boundary should be discarded");
 
-    let has_summary = state.user_turns_list.iter().any(|t| {
-        matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Summary of everything"))
+    let has_summary = state.messages.iter().any(|m| {
+        m.kind == MessageKind::CompactionSummary
+            && m.text_content().is_some_and(|t| t.contains("Summary of everything"))
     });
     assert!(has_summary, "boundary summary should be present");
 
-    let has_new = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages, .. } = t {
-            messages
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("new")))
-        } else {
-            false
-        }
+    let has_new = state.messages.iter().any(|m| {
+        m.text_content().is_some_and(|t| t.contains("new"))
     });
     assert!(has_new, "turns after boundary should be present");
-    assert_eq!(state.user_turns_list.len(), 2, "summary + 1 new turn");
+    // summary + user("new question") + assistant("new answer") = 3
+    assert_eq!(state.messages.len(), 3, "summary + 2 new messages");
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
@@ -773,18 +690,15 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
 
     let dir = tempfile::tempdir()?;
     let original = "important content ".repeat(4000);
+
+    let mut user_msg = ChatMessage::user("trigger");
+    user_msg.timestamp = Some(TEST_TS.to_string());
+
+    let mut tool_msg = ChatMessage::tool("tc_persist", &original);
+    tool_msg.timestamp = Some(TEST_TS.to_string());
+
     let mut state = ContextState {
-        user_turns_list: vec![TurnEntry::UserTurn {
-            id: compound_turn_id("turn_persist", "turn_persist"),
-            start_id: "turn_persist".to_string(),
-            end_id: "turn_persist".to_string(),
-            messages: vec![AgentMessage::ToolResult {
-                tool_call_id: "tc_persist".into(),
-                content: original.clone(),
-                is_error: false,
-            }],
-            timestamp: TEST_TS.to_string(),
-        }],
+        messages: vec![user_msg, tool_msg],
         estimate_context_chars: original.len(),
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -806,12 +720,14 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         "persisted content should match original"
     );
 
-    if let TurnEntry::UserTurn { messages, .. } = &state.user_turns_list[0] {
-        if let AgentMessage::ToolResult { content, .. } = &messages[0] {
-            assert!(content.starts_with("[Tool result persisted:"));
-            assert!(content.contains("Preview:"));
-        }
-    }
+    let tool_in_state = state
+        .messages
+        .iter()
+        .find(|m| m.role == ChatMessageRole::Tool)
+        .expect("tool message should exist");
+    let content = tool_in_state.text_content().unwrap_or("");
+    assert!(content.starts_with("[Tool result persisted:"));
+    assert!(content.contains("Preview:"));
 
     assert!(
         state.estimate_context_chars < original.len(),
@@ -878,33 +794,22 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "system")?;
 
-    let has_preheat_summary = state.user_turns_list.iter().any(|t| {
-        matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary.contains("Preheat summary"))
+    let has_preheat_summary = state.messages.iter().any(|m| {
+        m.kind == MessageKind::CompactionSummary
+            && m.text_content().is_some_and(|t| t.contains("Preheat summary"))
     });
     assert!(
         !has_preheat_summary,
         "is_boundary=false entry should be skipped during reload"
     );
 
-    let has_first = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages, .. } = t {
-            messages
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("first")))
-        } else {
-            false
-        }
+    let has_first = state.messages.iter().any(|m| {
+        m.text_content().is_some_and(|t| t.contains("first"))
     });
     assert!(has_first, "original turns should still be present");
 
-    let has_second = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages, .. } = t {
-            messages
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("second")))
-        } else {
-            false
-        }
+    let has_second = state.messages.iter().any(|m| {
+        m.text_content().is_some_and(|t| t.contains("second"))
     });
     assert!(has_second, "turns after preheat entry should be present");
 
@@ -912,10 +817,10 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-/// [Fix B+C] agent_loop 返回的 new_messages 首条应为 AgentMessage::User
+/// [Fix B+C] agent_loop 返回的 new_messages 首条应为 role=User 的 ChatMessage
 ///
 /// 验证：修复后 start_idx = context_tail_start → new_messages 包含 User 消息
-/// 意义：确保 TurnEntry 完整包含用户输入
+/// 意义：确保新消息列表完整包含用户输入
 #[tokio::test]
 async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -943,12 +848,8 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
     );
 
     let messages = vec![
-        AgentMessage::System {
-            text: "system".to_string(),
-        },
-        AgentMessage::User {
-            text: "hello".to_string(),
-        },
+        ChatMessage::system("system"),
+        ChatMessage::user("hello"),
     ];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
@@ -960,7 +861,8 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
         "new_messages should not be empty"
     );
     assert!(
-        matches!(&result.new_messages[0], AgentMessage::User { text } if text == "hello"),
+        result.new_messages[0].role == ChatMessageRole::User
+            && result.new_messages[0].text_content() == Some("hello"),
         "first new_message should be User('hello'), got {:?}",
         result.new_messages.first()
     );
@@ -973,7 +875,7 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// [Fix B+C] L3 rebuild 后 estimate_context_chars 与 sum(turn_chars) + system 一致（无幽灵）
+/// [Fix B+C] L3 rebuild 后 estimate_context_chars 与 sum(msg_chars) + system 一致（无幽灵）
 ///
 /// 场景：构造溢出 → L3 → agent 重试成功 → take_context_state → 验证 estimate 对齐
 #[tokio::test]
@@ -1005,25 +907,14 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom(
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
-    let big_turn = TurnEntry::UserTurn {
-        id: compound_turn_id("old", "old"),
-        start_id: "old".to_string(),
-        end_id: "old".to_string(),
-        messages: vec![
-            AgentMessage::User {
-                text: "old question".to_string(),
-            },
-            AgentMessage::ToolResult {
-                tool_call_id: "tc1".to_string(),
-                content: "x".repeat(50_000),
-                is_error: false,
-            },
-        ],
-        timestamp: TEST_TS.to_string(),
-    };
-    let big_chars: usize = pi_wasm::core::session::estimate_turn_chars(&big_turn);
+    let mut old_user = ChatMessage::user("old question");
+    old_user.timestamp = Some(TEST_TS.to_string());
+    let mut old_tool = ChatMessage::tool("tc1", &"x".repeat(50_000));
+    old_tool.timestamp = Some(TEST_TS.to_string());
+
+    let big_chars: usize = estimate_msg_chars(&old_user) + estimate_msg_chars(&old_tool);
     let ctx_state = ContextState {
-        user_turns_list: vec![big_turn],
+        messages: vec![old_user, old_tool],
         estimate_context_chars: system_text.len() + big_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -1037,12 +928,8 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom(
     agent.set_context_state(Some(ctx_state));
 
     let messages = vec![
-        AgentMessage::System {
-            text: system_text.to_string(),
-        },
-        AgentMessage::User {
-            text: "trigger overflow".to_string(),
-        },
+        ChatMessage::system(system_text),
+        ChatMessage::user("trigger overflow"),
     ];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -1053,115 +940,83 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom(
         .take_context_state()
         .expect("context_state should exist");
 
-    let turns_chars: usize = ctx
-        .user_turns_list
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-    let _expected_estimate = system_text.len() + turns_chars;
+    let msgs_chars: usize = ctx.messages.iter().map(estimate_msg_chars).sum();
 
-    // After our fix, the new_messages should include User + any tail + the recovered response.
-    // When packed into a TurnEntry, estimate should align.
-    // We simulate what chat_loop does: on_new_user_turn(TurnEntry from new_messages)
     let new_turn_chars: usize = result
         .new_messages
         .iter()
-        .map(|m| match m {
-            AgentMessage::User { text } => text.len(),
-            AgentMessage::Assistant { text, tool_calls } => {
-                text.len()
-                    + tool_calls
-                        .iter()
-                        .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
+        .map(|m| match m.role {
+            ChatMessageRole::User => m.text_content().map_or(0, |t| t.len()),
+            ChatMessageRole::Assistant => {
+                let text_len = m.text_content().map_or(0, |t| t.len());
+                let tc_len = m.tool_calls.as_ref().map_or(0, |tcs| {
+                    tcs.iter()
+                        .map(|tc| {
+                            let name = tc
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("");
+                            let args = tc
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("");
+                            let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                            name.len() + args.len() + id.len() + 40
+                        })
                         .sum::<usize>()
+                });
+                text_len + tc_len
             }
-            AgentMessage::ToolResult { content, .. } => content.len(),
+            ChatMessageRole::Tool => m.text_content().map_or(0, |t| t.len()),
             _ => 0,
         })
         .sum();
 
-    // estimate should be close to system + remaining turns chars + new_turn chars
-    // (the new turn hasn't been pushed yet at this point, but estimate already includes it
-    //  via on_message_appended during agent_loop)
     let actual_estimate = ctx.estimate_context_chars;
-    let sum_from_turns = system_text.len() + turns_chars + new_turn_chars;
+    let sum_from_msgs = system_text.len() + msgs_chars + new_turn_chars;
 
-    let drift = actual_estimate.abs_diff(sum_from_turns);
+    let drift = actual_estimate.abs_diff(sum_from_msgs);
     assert!(
         drift < 200,
-        "estimate ({}) should be close to system + turns + new_turn ({}), drift = {}",
+        "estimate ({}) should be close to system + msgs + new_turn ({}), drift = {}",
         actual_estimate,
-        sum_from_turns,
+        sum_from_msgs,
         drift
     );
 
     Ok(())
 }
 
-/// [Fix B+C] L3 force_drop 后 estimate_context_chars 与 sum(turn_chars) + system 一致
+/// [Fix B+C] L3 force_drop 后 estimate_context_chars 与 sum(msg_chars) + system 一致
 #[test]
 fn test_force_drop_estimate_consistent_after_l3() {
     common::setup_logging();
     let _span = info_span!("test_force_drop_estimate_consistent_after_l3").entered();
 
     let system_chars = 100usize;
-    let turns = vec![
-        TurnEntry::UserTurn {
-            id: compound_turn_id("t0", "t0"),
-            start_id: "t0".to_string(),
-            end_id: "t0".to_string(),
-            messages: vec![
-                AgentMessage::User {
-                    text: "question 0".to_string(),
-                },
-                AgentMessage::Assistant {
-                    text: "x".repeat(20_000),
-                    tool_calls: vec![],
-                },
-            ],
-            timestamp: TEST_TS.to_string(),
-        },
-        TurnEntry::UserTurn {
-            id: compound_turn_id("t1", "t1"),
-            start_id: "t1".to_string(),
-            end_id: "t1".to_string(),
-            messages: vec![
-                AgentMessage::User {
-                    text: "question 1".to_string(),
-                },
-                AgentMessage::Assistant {
-                    text: "x".repeat(20_000),
-                    tool_calls: vec![],
-                },
-            ],
-            timestamp: TEST_TS.to_string(),
-        },
-        TurnEntry::UserTurn {
-            id: compound_turn_id("t2", "t2"),
-            start_id: "t2".to_string(),
-            end_id: "t2".to_string(),
-            messages: vec![
-                AgentMessage::User {
-                    text: "question 2".to_string(),
-                },
-                AgentMessage::Assistant {
-                    text: "answer 2".to_string(),
-                    tool_calls: vec![],
-                },
-            ],
-            timestamp: TEST_TS.to_string(),
-        },
-    ];
-    let total_turn_chars: usize = turns
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
 
-    let budget_tokens = total_turn_chars / 4;
+    let make_turn_msgs = |label: &str, asst_text: &str| -> Vec<ChatMessage> {
+        let mut user = ChatMessage::user(format!("question {}", label));
+        user.timestamp = Some(TEST_TS.to_string());
+        let mut asst = ChatMessage::assistant(asst_text);
+        asst.timestamp = Some(TEST_TS.to_string());
+        vec![user, asst]
+    };
+
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    msgs.extend(make_turn_msgs("0", &"x".repeat(20_000)));
+    msgs.extend(make_turn_msgs("1", &"x".repeat(20_000)));
+    msgs.extend(make_turn_msgs("2", "answer 2"));
+
+    let total_msg_chars: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let budget_tokens = total_msg_chars / 4;
+
     let mut state = ContextState {
-        user_turns_list: turns,
-        estimate_context_chars: system_chars + total_turn_chars,
-        context_budget_chars: total_turn_chars,
+        messages: msgs,
+        estimate_context_chars: system_chars + total_msg_chars,
+        context_budget_chars: total_msg_chars,
         context_budget_tokens: budget_tokens,
         last_api_usage: None,
         post_usage_appended_chars: 0,
@@ -1173,20 +1028,16 @@ fn test_force_drop_estimate_consistent_after_l3() {
 
     pi_wasm::core::compaction::force_drop_oldest_to_target(&mut state);
 
-    let remaining_turn_chars: usize = state
-        .user_turns_list
-        .iter()
-        .map(pi_wasm::core::session::estimate_turn_chars)
-        .sum();
-    let expected = system_chars + remaining_turn_chars;
+    let remaining_msg_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let expected = system_chars + remaining_msg_chars;
     assert_eq!(
         state.estimate_context_chars, expected,
-        "estimate ({}) should equal system + sum(remaining turn_chars) ({})",
+        "estimate ({}) should equal system + sum(remaining msg_chars) ({})",
         state.estimate_context_chars, expected
     );
     assert!(
-        !state.user_turns_list.is_empty(),
-        "should have at least one remaining turn after L3"
+        !state.messages.is_empty(),
+        "should have at least one remaining message after L3"
     );
 }
 

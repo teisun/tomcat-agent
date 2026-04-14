@@ -8,9 +8,8 @@ use tracing::info;
 
 use crate::core::compaction::apply::check_before_request;
 use crate::core::compaction::preheat::Preheat;
-use crate::core::session::manager::{
-    build_context_from_state, compound_turn_id, init_context_state, TurnEntry,
-};
+use crate::core::llm::ChatMessage;
+use crate::core::session::manager::{build_context_from_state, init_context_state};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventContext;
 use crate::infra::{
@@ -18,10 +17,10 @@ use crate::infra::{
     TracingAuditRecorder,
 };
 use crate::{
-    convert_to_llm_format, resolve_extra_roots_paths, resolve_sessions_dir, resolve_workspace_dir,
-    AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
-    SessionManager, Tool, ToolExecutor, ToolRegistry,
+    resolve_extra_roots_paths, resolve_sessions_dir, resolve_workspace_dir, AgentLoop,
+    AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
+    OpenAiProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor,
+    ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -306,13 +305,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             phase = "chat_after_user_append",
             ratio = context_state.usage_ratio(),
             compaction_count = context_state.session_obs.compaction_count,
-            turns = context_state.user_turns_list.len()
+            turns = context_state.turn_count()
         );
 
         // Timing ②: restore pending preheat + apply boundary before request
         context_state.preheat.try_restart_if_pending(
             context_state.usage_ratio(),
-            &context_state.user_turns_list,
+            &context_state.messages,
             &context_state.transcript_path,
             ctx.llm.clone(),
             context_config,
@@ -330,15 +329,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         // Build messages from ContextState
         let mut messages = build_context_from_state(&context_state);
-        messages.insert(
-            0,
-            crate::core::AgentMessage::System {
-                text: system_text.clone(),
-            },
-        );
-        messages.push(crate::core::AgentMessage::User {
-            text: input.clone(),
-        });
+        messages.insert(0, ChatMessage::system(&system_text));
+        messages.push(ChatMessage::user(&input));
 
         let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
         let config = AgentLoopConfig {
@@ -402,7 +394,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 context_state = agent_loop.take_context_state().unwrap_or_else(|| {
                     init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
                         crate::core::ContextState {
-                            user_turns_list: Vec::new(),
+                            messages: Vec::new(),
                             estimate_context_chars: system_text.len(),
                             context_budget_chars:
                                 crate::infra::config::compute_context_budget_chars(context_config),
@@ -424,27 +416,12 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     )
                 });
 
-                let chat_msgs = convert_to_llm_format(&result.new_messages);
-                let mut start_id = String::new();
-                let mut end_id = String::new();
-                for (i, msg) in chat_msgs.iter().enumerate() {
-                    let row_id =
-                        ctx.session.append_message(serde_json::to_value(msg)?)?;
-                    if i == 0 {
-                        start_id = row_id.clone();
-                    }
-                    end_id = row_id;
+                for msg in result.new_messages {
+                    let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
+                    let mut cm = msg;
+                    cm.msg_id = Some(row_id);
+                    context_state.messages.push(cm);
                 }
-                let id = compound_turn_id(&start_id, &end_id);
-                let current_turn = TurnEntry::UserTurn {
-                    id,
-                    start_id,
-                    end_id,
-                    messages: result.new_messages.clone(),
-                    timestamp: chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                };
-                context_state.on_new_user_turn(current_turn);
 
                 ctx.session.persist_context_observability(&context_state)?;
             }
@@ -458,7 +435,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 context_state = agent_loop.take_context_state().unwrap_or_else(|| {
                     init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
                         crate::core::ContextState {
-                            user_turns_list: Vec::new(),
+                            messages: Vec::new(),
                             estimate_context_chars: system_text.len(),
                             context_budget_chars:
                                 crate::infra::config::compute_context_budget_chars(context_config),

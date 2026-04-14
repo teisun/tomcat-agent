@@ -6,9 +6,8 @@ mod common;
 
 use async_trait::async_trait;
 use pi_wasm::{
-    agent_messages_from_chat, convert_to_llm_format, wire, AgentLoop, AgentLoopConfig,
-    AgentMessage, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, DefaultEventBus,
-    DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
+    wire, AgentLoop, AgentLoopConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
+    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
     PrimitiveExecutor, PrimitiveOperation, StreamEvent, WriteFileResult,
 };
 use std::collections::VecDeque;
@@ -320,9 +319,7 @@ async fn test_agent_loop_simple_text_response() -> Result<(), Box<dyn std::error
     let config = default_config("sess-simple");
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "say hello".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("say hello")];
 
     info!("Act: 调用 AgentLoop::run()");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -389,9 +386,7 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
     let config = default_config("sess-abort");
     let abort_signal = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
-    let messages = vec![AgentMessage::User {
-        text: "read files".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("read files")];
 
     info!("Act: 在后台线程 20ms 后触发 abort()，同时 run() 执行中");
     let abort_for_thread = Arc::clone(&abort_signal);
@@ -438,9 +433,7 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     agent.follow_up("continue please".to_string());
-    let messages = vec![AgentMessage::User {
-        text: "first message".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("first message")];
 
     info!("Act: 调用 AgentLoop::run()，follow_up 已预注入");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -482,9 +475,7 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     let config = default_config("sess-tool-error");
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "run bash".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("run bash")];
 
     info!("Act: 调用 run()，工具首次执行将 Err");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -533,9 +524,7 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望自动重试后成功");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -604,9 +593,7 @@ async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn 
     let config = default_config("sess-tool-pi-mono-order");
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "run ls".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("run ls")];
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
@@ -661,9 +648,7 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
     };
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望立即返回 Err（无重试）");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -722,9 +707,7 @@ async fn test_agent_loop_events_published_in_correct_order(
     let config = default_config("sess-events");
     let abort = Arc::new(AtomicBool::new(false));
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
-    let messages = vec![AgentMessage::User {
-        text: "hi".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -780,9 +763,7 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
 
     // 预注入 Steering 消息，工具批次第一个完成后将被检测并跳过剩余工具
     agent.steer("redirect me now".to_string());
-    let messages = vec![AgentMessage::User {
-        text: "read two files".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("read two files")];
 
     info!("Act: 调用 run()，Steering 已预注入");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -845,7 +826,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
 
     use pi_wasm::ContextState;
     agent.set_context_state(Some(ContextState {
-        user_turns_list: Vec::new(),
+        messages: Vec::new(),
         estimate_context_chars: 500,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -857,9 +838,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         live: Default::default(),
     }));
 
-    let messages = vec![AgentMessage::User {
-        text: "test metrics".to_string(),
-    }];
+    let messages = vec![ChatMessage::user("test metrics")];
 
     info!("Act: 调用 AgentLoop::run()");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -917,45 +896,6 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     );
 
     Ok(())
-}
-
-/// [消息格式转换往返] convert_to_llm_format 与 agent_messages_from_chat 往返转换无损
-///
-/// 验证：system/user/assistant 三种角色转换后内容与角色均不变
-/// 意义：TASK-14 5.1 AgentMessage 枚举与转换边界——保证消息序列化契约不被破坏
-#[test]
-fn test_agent_messages_convert_to_llm_format_roundtrip() {
-    common::setup_logging();
-    let _span = info_span!("test_agent_messages_convert_to_llm_format_roundtrip").entered();
-
-    info!("Arrange: 构造含 system/user/assistant 的 ChatMessage 列表");
-    let chat = vec![
-        ChatMessage::system("you are helpful"),
-        ChatMessage::user("what is 2+2"),
-        ChatMessage::assistant("it is 4"),
-    ];
-
-    info!("Act: agent_messages_from_chat -> convert_to_llm_format 往返");
-    let agent_msgs = agent_messages_from_chat(&chat);
-    let back = convert_to_llm_format(&agent_msgs);
-
-    info!("Assert: 往返后长度、角色、内容均一致");
-    assert_eq!(back.len(), 3, "往返后消息数量应为 3");
-    assert_eq!(
-        back[0].text_content(),
-        Some("you are helpful"),
-        "system 文本应不变"
-    );
-    assert_eq!(
-        back[1].text_content(),
-        Some("what is 2+2"),
-        "user 文本应不变"
-    );
-    assert_eq!(
-        back[2].text_content(),
-        Some("it is 4"),
-        "assistant 文本应不变"
-    );
 }
 
 /// [边界：空消息列表] 传入空消息列表时 run() 不崩溃，返回 Ok 且 final_text 为空

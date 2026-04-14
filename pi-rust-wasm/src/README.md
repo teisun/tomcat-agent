@@ -82,7 +82,7 @@
                       |                           |
                       |   init_context_state      |
                       v                           v
-               +------+------+            (当天+补齐 -> TurnEntry)
+               +------+------+            (当天+补齐 -> Vec<ChatMessage>)
                | AgentLoop   |<-------------------+
                +------+------+
                       |

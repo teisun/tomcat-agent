@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use chrono::{NaiveDate, Utc};
 
-use crate::core::agent_loop::{AgentMessage, ToolCallInfo};
+use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
 use crate::core::session::transcript::{read_entries_tail, BranchSummaryEntry, TranscriptEntry};
 use crate::infra::config::{compute_context_budget_chars, ContextConfig};
 use crate::infra::error::AppError;
@@ -14,8 +14,7 @@ use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
 use super::types::{
-    compound_id_suffix, compound_turn_id, estimate_turn_chars, CompactionResult, ContextState,
-    TurnEntry,
+    estimate_msg_chars, CompactionResult, ContextState, SessionContextObservation,
 };
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
@@ -115,47 +114,70 @@ fn branch_summary_pending_from_entry(ce: &BranchSummaryEntry) -> Option<Compacti
     })
 }
 
-/// Phase 2: 将 entries 折叠为带 timestamp 的 TurnEntry 列表。
-/// boundary compaction 仍会清除之前的 turns。
+/// Phase 2: 将 entries 折叠为 ChatMessage 列表（msg_id / timestamp 已填充）。
+/// boundary compaction 仍会清除之前的 messages。
 /// `pending_preheat`：切片内最后一条未应用 preheat（`is_boundary=false` 且字段齐全）。
 pub(super) struct FoldEntriesOutcome {
-    pub turns: Vec<TurnEntry>,
-    /// 折叠后全量 turns 的字符估计（未经过 `filter_turns_by_day`）；供调试或后续与 `selected` 对齐用。
+    pub messages: Vec<ChatMessage>,
+    /// 折叠后全量 messages 的字符估计（未经过 `filter_messages_by_day`）；供调试或后续与 selected 对齐用。
     #[allow(dead_code)]
     pub total_chars: usize,
     pub pending_preheat: Option<CompactionResult>,
 }
 
-fn fold_entries_to_turns(
+fn chat_message_from_entry(me: &crate::core::session::transcript::MessageEntry) -> Option<ChatMessage> {
+    let role_str = me.message.get("role").and_then(|r| r.as_str())?;
+    let role = match role_str {
+        "user" => ChatMessageRole::User,
+        "assistant" => ChatMessageRole::Assistant,
+        "tool" => ChatMessageRole::Tool,
+        "system" => ChatMessageRole::System,
+        _ => return None,
+    };
+
+    let content = me
+        .message
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| ChatMessageContent::Text(s.to_string()));
+
+    let tool_calls = me
+        .message
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.to_vec());
+
+    let tool_call_id = me
+        .message
+        .get("tool_call_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let mut msg = ChatMessage {
+        role,
+        content,
+        name: None,
+        tool_calls,
+        tool_call_id,
+        msg_id: me.id.clone().or_else(|| Some(generate_entry_id())),
+        kind: MessageKind::Normal,
+        timestamp: Some(me.timestamp.clone()),
+    };
+
+    // Detect compaction summary injected as user message (via older paths)
+    // These are plain user messages from transcript — no special marking needed here.
+    // The CompactionSummary kind is only set for BranchSummary entries below.
+    let _ = &mut msg;
+    Some(msg)
+}
+
+fn fold_entries_to_messages(
     entries: &[TranscriptEntry],
     system_text_len: usize,
 ) -> FoldEntriesOutcome {
-    let mut turns: Vec<TurnEntry> = Vec::new();
-    let mut current_turn_msgs: Vec<AgentMessage> = Vec::new();
-    let mut current_turn_ts = String::new();
-    // 当前 user turn 在 transcript 中首条 message 的 id（§5.7）。
-    let mut turn_first_msg_id: Option<String> = None;
-    // 当前 turn 内最后一条已纳入的 message 的 id。
-    let mut turn_last_msg_id: Option<String> = None;
+    let mut messages: Vec<ChatMessage> = Vec::new();
     let mut total_chars = system_text_len;
     let mut pending_preheat: Option<CompactionResult> = None;
-
-    let flush_user_turn = |msgs: Vec<AgentMessage>,
-                           ts: String,
-                           first: Option<String>,
-                           last: Option<String>|
-     -> TurnEntry {
-        let start_id = first.unwrap_or_else(generate_entry_id);
-        let end_id = last.unwrap_or_else(|| start_id.clone());
-        let id = compound_turn_id(&start_id, &end_id);
-        TurnEntry::UserTurn {
-            id,
-            start_id,
-            end_id,
-            messages: msgs,
-            timestamp: ts,
-        }
-    };
 
     for entry in entries {
         match entry {
@@ -172,164 +194,94 @@ fn fold_entries_to_turns(
                     pending_preheat = None;
                 }
 
-                if !current_turn_msgs.is_empty() {
-                    let turn = flush_user_turn(
-                        std::mem::take(&mut current_turn_msgs),
-                        std::mem::take(&mut current_turn_ts),
-                        turn_first_msg_id.take(),
-                        turn_last_msg_id.take(),
-                    );
-                    total_chars += estimate_turn_chars(&turn);
-                    turns.push(turn);
-                }
-
                 // is_boundary=true → discard prefix (boundary switch)
                 // is_boundary=None → legacy entry, don't clear (backward compat)
                 if ce.is_boundary == Some(true) {
-                    turns.clear();
+                    messages.clear();
                     total_chars = system_text_len;
-                    turn_first_msg_id = None;
-                    turn_last_msg_id = None;
                 }
 
                 if let Some(ref summary) = ce.summary {
-                    total_chars += summary.len();
-                    turns.push(TurnEntry::SummaryTurn {
-                        id: ce.id.clone().unwrap_or_else(generate_entry_id),
-                        summary: summary.clone(),
-                        timestamp: ce.timestamp.clone(),
-                    });
+                    let mut summary_msg = ChatMessage::compaction_summary(summary.as_str());
+                    summary_msg.msg_id = ce.id.clone().or_else(|| Some(generate_entry_id()));
+                    summary_msg.timestamp = Some(ce.timestamp.clone());
+                    total_chars += estimate_msg_chars(&summary_msg);
+                    messages.push(summary_msg);
                 }
             }
             TranscriptEntry::Message(me) => {
-                let role = me.message.get("role").and_then(|r| r.as_str());
-                let content = me
-                    .message
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
-
-                if role == Some("user") && !current_turn_msgs.is_empty() {
-                    let turn = flush_user_turn(
-                        std::mem::take(&mut current_turn_msgs),
-                        std::mem::take(&mut current_turn_ts),
-                        turn_first_msg_id.take(),
-                        turn_last_msg_id.take(),
-                    );
-                    total_chars += estimate_turn_chars(&turn);
-                    turns.push(turn);
+                if let Some(msg) = chat_message_from_entry(me) {
+                    total_chars += estimate_msg_chars(&msg);
+                    messages.push(msg);
                 }
-
-                if role == Some("user") {
-                    current_turn_ts = me.timestamp.clone();
-                    let mid = me.id.clone().unwrap_or_else(generate_entry_id);
-                    turn_first_msg_id = Some(mid.clone());
-                    turn_last_msg_id = Some(mid);
-                }
-
-                let agent_msg = match role {
-                    Some("user") => AgentMessage::User {
-                        text: content.to_string(),
-                    },
-                    Some("assistant") => {
-                        let tool_calls = me
-                            .message
-                            .get("tool_calls")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| {
-                                        let obj = v.as_object()?;
-                                        let id = obj.get("id")?.as_str()?.to_string();
-                                        let func = obj.get("function")?.as_object()?;
-                                        let name = func.get("name")?.as_str()?.to_string();
-                                        let arguments = func
-                                            .get("arguments")
-                                            .and_then(|a| a.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-                                        Some(ToolCallInfo {
-                                            id,
-                                            name,
-                                            arguments,
-                                        })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        AgentMessage::Assistant {
-                            text: content.to_string(),
-                            tool_calls,
-                        }
-                    }
-                    Some("tool") => AgentMessage::ToolResult {
-                        tool_call_id: me
-                            .message
-                            .get("tool_call_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        content: content.to_string(),
-                        is_error: false,
-                    },
-                    _ => continue,
-                };
-                current_turn_msgs.push(agent_msg);
-                let mid = me.id.clone().unwrap_or_else(generate_entry_id);
-                turn_last_msg_id = Some(mid);
             }
             _ => {}
         }
     }
 
-    if !current_turn_msgs.is_empty() {
-        let turn = flush_user_turn(
-            std::mem::take(&mut current_turn_msgs),
-            current_turn_ts,
-            turn_first_msg_id.take(),
-            turn_last_msg_id.take(),
-        );
-        total_chars += estimate_turn_chars(&turn);
-        turns.push(turn);
-    }
-
     FoldEntriesOutcome {
-        turns,
+        messages,
         total_chars,
         pending_preheat,
     }
 }
 
-/// Phase 3: 按天筛选 turns + 不足 min_turns 向前补齐。
-pub(super) fn filter_turns_by_day(
-    all_turns: Vec<TurnEntry>,
+/// Returns true if the message is a "turn start" — i.e., starts a new logical turn.
+fn is_turn_start(m: &ChatMessage) -> bool {
+    (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
+        || m.kind == MessageKind::CompactionSummary
+}
+
+/// Phase 3: 按天筛选 messages + 不足 min_turns 向前补齐。
+pub(super) fn filter_messages_by_day(
+    all_messages: Vec<ChatMessage>,
     today: NaiveDate,
     min_turns: usize,
-) -> Vec<TurnEntry> {
-    let today_start = all_turns
+) -> Vec<ChatMessage> {
+    let today_start = all_messages
         .iter()
-        .position(|t| parse_date(t.timestamp()) == Some(today));
+        .position(|m| parse_date(m.timestamp.as_deref().unwrap_or("")) == Some(today))
+        .unwrap_or(all_messages.len());
 
-    let mut selected = match today_start {
-        Some(i) => all_turns[i..].to_vec(),
-        None => vec![],
-    };
+    let today_turns = all_messages[today_start..]
+        .iter()
+        .filter(|m| is_turn_start(m))
+        .count();
 
-    if selected.len() < min_turns {
-        let before = today_start.unwrap_or(all_turns.len());
-        let need = min_turns - selected.len();
-        let extra: Vec<_> = all_turns[..before]
-            .iter()
-            .rev()
-            .take(need)
-            .cloned()
-            .collect();
-        let mut result: Vec<_> = extra.into_iter().rev().collect();
-        result.append(&mut selected);
-        selected = result;
+    if today_turns >= min_turns || today_start == 0 {
+        return all_messages[today_start..].to_vec();
     }
 
-    selected
+    // Need to backfill (min_turns - today_turns) turns from before today.
+    let need_extra = min_turns - today_turns;
+    let pre_today = &all_messages[..today_start];
+
+    // Collect indices of turn starts in pre-today portion.
+    let turn_start_indices: Vec<usize> = pre_today
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_turn_start(m))
+        .map(|(i, _)| i)
+        .collect();
+
+    // Take the last `need_extra` turn starts; the earliest one is our new start.
+    let backfill_start = if turn_start_indices.len() <= need_extra {
+        0
+    } else {
+        turn_start_indices[turn_start_indices.len() - need_extra]
+    };
+
+    all_messages[backfill_start..].to_vec()
+}
+
+// Keep old name as alias for tests that may use it.
+#[allow(dead_code)]
+pub(super) fn filter_turns_by_day(
+    all_messages: Vec<ChatMessage>,
+    today: NaiveDate,
+    min_turns: usize,
+) -> Vec<ChatMessage> {
+    filter_messages_by_day(all_messages, today, min_turns)
 }
 
 fn observability_from_session(session: &SessionManager) -> Result<(u32, usize, usize), AppError> {
@@ -345,8 +297,8 @@ fn observability_from_session(session: &SessionManager) -> Result<(u32, usize, u
         .unwrap_or((0, 0, 0)))
 }
 
-/// 从 transcript 加载历史，按 user turn 分组初始化 ContextState。
-/// 识别已有 Compaction entry 折叠为 SummaryTurn，避免重复压缩。
+/// 从 transcript 加载历史，以 ChatMessage 列表初始化 ContextState。
+/// 识别已有 Compaction entry 折叠为 CompactionSummary 消息，避免重复压缩。
 /// 按天筛选：优先取当天所有 turns，不足 DEFAULT_CONTEXT_CAP 则向前补齐。
 pub fn init_context_state(
     session: &SessionManager,
@@ -358,7 +310,7 @@ pub fn init_context_state(
         .context_window
         .saturating_sub(config.max_output_tokens);
     let (cc, ctf, trcp) = observability_from_session(session)?;
-    let session_obs = super::types::SessionContextObservation {
+    let session_obs = SessionContextObservation {
         compaction_count: cc,
         compaction_tokens_freed: ctf,
         tool_result_chars_persisted: trcp,
@@ -368,7 +320,7 @@ pub fn init_context_state(
         Some(p) => p,
         None => {
             return Ok(ContextState {
-                user_turns_list: Vec::new(),
+                messages: Vec::new(),
                 estimate_context_chars: system_text.len(),
                 context_budget_chars: budget,
                 context_budget_tokens: token_budget,
@@ -386,26 +338,22 @@ pub fn init_context_state(
     let today = Utc::now().date_naive();
 
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
-    let fold_out = fold_entries_to_turns(&entries[fold_start..], system_text.len());
-    let selected = filter_turns_by_day(fold_out.turns, today, DEFAULT_CONTEXT_CAP);
+    let fold_out = fold_entries_to_messages(&entries[fold_start..], system_text.len());
+    let selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
 
-    let total_chars = system_text.len() + selected.iter().map(estimate_turn_chars).sum::<usize>();
+    let total_chars =
+        system_text.len() + selected.iter().map(estimate_msg_chars).sum::<usize>();
 
     let mut preheat = Preheat::new();
     if let Some(p) = fold_out.pending_preheat {
         let end = p.covered_end_id.as_str();
-        if selected.iter().any(|t| match t {
-            TurnEntry::UserTurn { end_id, id, .. } => {
-                end_id == end || id == end || compound_id_suffix(id) == Some(end)
-            }
-            _ => false,
-        }) {
+        if selected.iter().any(|m| m.msg_id.as_deref() == Some(end)) {
             preheat.restore_completed(p);
         }
     }
 
     Ok(ContextState {
-        user_turns_list: selected,
+        messages: selected,
         estimate_context_chars: total_chars,
         context_budget_chars: budget,
         context_budget_tokens: token_budget,
@@ -418,18 +366,7 @@ pub fn init_context_state(
     })
 }
 
-/// 将 ContextState 中的 turns 展平为 AgentMessage 列表（不含 system prompt）。
-pub fn build_context_from_state(state: &ContextState) -> Vec<AgentMessage> {
-    let mut out = Vec::new();
-    for turn in &state.user_turns_list {
-        match turn {
-            TurnEntry::UserTurn { messages, .. } => out.extend(messages.iter().cloned()),
-            TurnEntry::SummaryTurn { summary, .. } => {
-                out.push(AgentMessage::CompactionSummary {
-                    summary: summary.clone(),
-                });
-            }
-        }
-    }
-    out
+/// Messages from ContextState, ready for LLM (no system prompt).
+pub fn build_context_from_state(state: &ContextState) -> Vec<ChatMessage> {
+    state.messages.clone()
 }
