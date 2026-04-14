@@ -589,7 +589,7 @@ fn find_last_summary(messages: &[ChatMessage]) -> Option<String> {
     })
 }
 
-fn messages_to_text(messages: &[ChatMessage]) -> String {
+pub(super) fn messages_to_text(messages: &[ChatMessage]) -> String {
     let mut buf = String::new();
     for m in messages {
         match m.kind {

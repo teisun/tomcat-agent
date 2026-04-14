@@ -1,5 +1,7 @@
 # 工具轮次与上下文管理深度分析
 
+> **⚠️ 过时提示（2026-04）**：本文基于重构前架构，其中提及的 `UserTurn`、`TurnEntry`、`convert_to_llm_format` 等类型已在 `feature/collapse-to-chatmsg` 分支中删除，统一为 `ChatMessage` + `MessageKind`。现行架构见 [collapse-to-chatmsg-guide.md](./collapse-to-chatmsg-guide.md) 和 [feature-collapse-to-chatmsg.md](../status/feature-collapse-to-chatmsg.md)。
+
 > 创建：2026-03-29 | 最后更新：2026-03-30
 > 范围：pi-rust-wasm 现状分析 + pi-mono / openclaw 设计对照 + 业界方案 + **最终设计决策**
 > 来源：从综合报告 `llm-tool-rounds-cli-display-thinking-protocol.md` 第一章独立拆出并整合 Q&A

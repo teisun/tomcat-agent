@@ -18,8 +18,8 @@ pub use core::{
 };
 pub use core::{
     build_context_from_state, compound_turn_id, init_context_state, load_store, save_store,
-    BranchSummaryEntry, ContextState, SessionEntry, SessionHeader, SessionManager, SessionStore,
-    TranscriptEntry, DEFAULT_SESSION_KEY,
+    BranchSummaryEntry, CompactionResult, ContextState, SessionEntry, SessionHeader,
+    SessionManager, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, transpile_pi_plugin_for_quickjs,

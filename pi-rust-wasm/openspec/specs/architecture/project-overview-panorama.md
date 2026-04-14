@@ -269,7 +269,7 @@ src 总计 39 个 .rs（main/lib=2, api=4, core=16, ext=8, infra=9）
 │                                                   ├─ llm::* (openai/provider/types/token_usage)                           │
 │                                                   ├─ session::* (manager/store/transcript/mod)                            │
 │                                                   ├─ tools::* / primitives::* / executor.rs                               │
-│                                                   └─ convert_to_llm_format / agent_messages_from_chat                     │
+│                                                   └─ [已删除] convert_to_llm_format（统一使用 ChatMessage，无需转换层） │
 │                                                                                                                            │
 │  infra::*（config/error/event_bus/events/logging/platform/audit/audit_store）                                             │
 │    └─ AppError / EventBus / AgentEvent / ExtensionEvent / load_config / normalize_path / write_file_atomic               │

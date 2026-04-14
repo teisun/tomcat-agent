@@ -1,9 +1,10 @@
+use super::preheat::messages_to_text;
 use super::truncation::{floor_char_boundary, TOOL_RESULT_PLACEHOLDER};
 use super::*;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use crate::core::session::manager::{
-    build_context_from_state, compound_turn_id, CompactionResult, ContextState,
+    build_context_from_state, compound_turn_id, estimate_msg_chars, CompactionResult, ContextState,
 };
 use crate::core::session::transcript::{
     append_entry, read_header, write_header, BranchSummaryEntry, SessionHeader, TranscriptEntry,
@@ -631,4 +632,378 @@ fn layer0_threshold_from_config() {
     ];
     let (results2, _) = layer0_persist_large_results(&mut state2, &config2, dir.path(), "test");
     assert_eq!(results2.len(), 1, "60K > 50K threshold should persist");
+}
+
+// ===========================================================================
+// Group A: run_layer0_cleanup 组合测试
+// ===========================================================================
+
+fn assistant_msg(text: &str) -> ChatMessage {
+    let mut m = ChatMessage::assistant(text);
+    m.timestamp = Some(TS.to_string());
+    m
+}
+
+fn steering_msg(text: &str) -> ChatMessage {
+    let mut m = ChatMessage::steering(text);
+    m.timestamp = Some(TS.to_string());
+    m
+}
+
+fn summary_msg(text: &str) -> ChatMessage {
+    let mut m = ChatMessage::compaction_summary(text);
+    m.msg_id = Some("summary_0".to_string());
+    m.timestamp = Some(TS.to_string());
+    m
+}
+
+/// 构造 N 个 turn，每个 turn 含 [user, tool(content), assistant]
+fn build_turns(n: usize, tool_content: &str) -> Vec<ChatMessage> {
+    let mut msgs = Vec::new();
+    for i in 0..n {
+        msgs.push(user_msg_with_id(&format!("u{i}"), &format!("q{i}")));
+        msgs.push(tool_msg_with_id(
+            &format!("t{i}"),
+            &format!("tc{i}"),
+            tool_content,
+        ));
+        msgs.push(assistant_msg(&format!("a{i}")));
+    }
+    msgs
+}
+
+#[test]
+fn run_layer0_cleanup_persists_then_compacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = "x".repeat(60_000);
+
+    let msgs = build_turns(8, &big);
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let mut state = make_state(total, total * 2, total / 2);
+    state.messages = msgs;
+
+    let config = ContextConfig::default();
+    let outcome = run_layer0_cleanup(&mut state, &config, dir.path(), "sess_a1");
+
+    assert!(
+        !outcome.persisted.is_empty(),
+        "should persist at least one large tool result"
+    );
+
+    let compactable_tools: Vec<_> = state
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == ChatMessageRole::Tool)
+        .collect();
+    let protected_start_turn = 8 - 5; // M_PROTECTED_TURNS=5 → turns 3..7 protected
+    let protected_start_idx = protected_start_turn * 3; // 3 msgs per turn
+    for (idx, m) in &compactable_tools {
+        let text = m.text_content().unwrap_or("");
+        if *idx < protected_start_idx {
+            assert_eq!(
+                text, TOOL_RESULT_PLACEHOLDER,
+                "tool at index {} in compactable zone should be placeholder",
+                idx
+            );
+        }
+    }
+
+    assert!(
+        outcome.persist_chars_freed > 0,
+        "persist should free some chars"
+    );
+    assert!(
+        outcome.placeholder_chars_freed > 0,
+        "placeholder should free some chars"
+    );
+}
+
+#[test]
+fn run_layer0_cleanup_no_tool_results_is_noop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(500, 10_000, 2_500);
+    state.messages = vec![
+        user_msg("hello"),
+        assistant_msg("hi"),
+        user_msg("bye"),
+        assistant_msg("see ya"),
+    ];
+
+    let before = state.estimate_context_chars;
+    let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a2");
+
+    assert!(outcome.persisted.is_empty());
+    assert_eq!(outcome.persist_chars_freed, 0);
+    assert_eq!(outcome.placeholder_chars_freed, 0);
+    assert_eq!(state.estimate_context_chars, before);
+}
+
+#[test]
+fn run_layer0_cleanup_mixed_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = "x".repeat(60_000);
+    let medium = "y".repeat(15_000);
+    let small = "z".repeat(5_000);
+
+    // 8 turns total so that first 3 are in compactable zone (8 - M_PROTECTED=5 = 3)
+    // L0 persist only scans the LAST turn, so put big result in the last turn.
+    // L1 compact scans the compactable zone (turns before protected).
+    let mut msgs = vec![
+        user_msg_with_id("u0", "q0"),
+        tool_msg_with_id("t0", "tc0", &medium),  // 15K in compactable zone
+        assistant_msg("a0"),
+        user_msg_with_id("u1", "q1"),
+        tool_msg_with_id("t1", "tc1", &small),    // 5K in compactable zone
+        assistant_msg("a1"),
+    ];
+    for i in 2..7 {
+        msgs.push(user_msg_with_id(&format!("u{i}"), &format!("q{i}")));
+        msgs.push(tool_msg_with_id(&format!("t{i}"), &format!("tc{i}"), "ok"));
+        msgs.push(assistant_msg(&format!("a{i}")));
+    }
+    // Last turn (turn 7): big tool result for L0 persist
+    msgs.push(user_msg_with_id("u7", "q7"));
+    msgs.push(tool_msg_with_id("t7", "tc7", &big));
+    msgs.push(assistant_msg("a7"));
+
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let mut state = make_state(total, total * 2, total / 2);
+    state.messages = msgs;
+
+    let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a3");
+
+    // Turn 0 medium (15K > 10K placeholder threshold, in compactable zone): L1 placeholder
+    let t0_tool = &state.messages[1];
+    assert_eq!(
+        t0_tool.text_content().unwrap_or(""),
+        TOOL_RESULT_PLACEHOLDER,
+        "15K tool result in compactable zone should be placeholder (L1)"
+    );
+
+    // Turn 1 small (5K < 10K): unchanged
+    let t1_tool = &state.messages[4];
+    assert_eq!(
+        t1_tool.text_content().unwrap_or("").len(),
+        5_000,
+        "5K tool result should be unchanged"
+    );
+
+    // Last turn big (60K > 50K): L0 persisted (but in protected zone, so not L1 placeholder)
+    let last_tool = state.messages.iter().rev()
+        .find(|m| m.role == ChatMessageRole::Tool)
+        .unwrap();
+    assert!(
+        last_tool.text_content().unwrap_or("").starts_with("[Tool result persisted:"),
+        "60K tool result in last turn should be L0 persisted"
+    );
+
+    assert!(
+        !outcome.persisted.is_empty(),
+        "at least the 60K result should be persisted to disk"
+    );
+}
+
+#[test]
+fn run_layer0_cleanup_freed_values_consistent_with_estimate() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = "x".repeat(60_000);
+    let msgs = build_turns(8, &big);
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let mut state = make_state(total, total * 2, total / 2);
+    state.messages = msgs;
+
+    let before = state.estimate_context_chars;
+    let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a4");
+
+    let reported_freed = outcome.persist_chars_freed + outcome.placeholder_chars_freed;
+    assert!(
+        reported_freed > 0,
+        "should report freed chars"
+    );
+    assert!(
+        state.estimate_context_chars < before,
+        "estimate should decrease"
+    );
+}
+
+// ===========================================================================
+// Group B: 重构回归 — turn 边界检测
+// ===========================================================================
+
+#[test]
+fn l1_turn_boundary_with_steering_messages() {
+    // 8 turns with steering injected — steering has role=User but kind=Steering,
+    // should NOT count as a turn boundary for L1 protected zone calculation.
+    let big = "x".repeat(25_000);
+    let mut msgs = Vec::new();
+
+    // Turns 0-2: user + big tool + assistant (compactable zone if total >= M_PROTECTED+1)
+    for i in 0..3 {
+        msgs.push(user_msg_with_id(&format!("u{i}"), &format!("q{i}")));
+        msgs.push(tool_msg_with_id(&format!("t{i}"), &format!("tc{i}"), &big));
+        msgs.push(assistant_msg(&format!("a{i}")));
+    }
+
+    // Inject a steering message between turns — role=User, kind=Steering
+    msgs.push(steering_msg("internal steering"));
+
+    // Turns 3-7: user + small tool + assistant (protected zone)
+    for i in 3..8 {
+        msgs.push(user_msg_with_id(&format!("u{i}"), &format!("q{i}")));
+        msgs.push(tool_msg_with_id(&format!("t{i}"), &format!("tc{i}"), "ok"));
+        msgs.push(assistant_msg(&format!("a{i}")));
+    }
+
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let mut state = make_state(total, total, total / 4);
+    state.messages = msgs;
+
+    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 5);
+
+    // Turns 0-2 are in compactable zone (3 real turns before the protected 5)
+    // Their tool results should be replaced
+    assert!(reduced > 0, "should compact tool results in turns 0-2");
+
+    // The steering message itself should not have been touched
+    let steering = state
+        .messages
+        .iter()
+        .find(|m| m.kind == MessageKind::Steering);
+    assert!(steering.is_some(), "steering message should still exist");
+    assert_eq!(
+        steering.unwrap().text_content(),
+        Some("internal steering"),
+        "steering content should be unchanged"
+    );
+}
+
+#[test]
+fn l3_drop_oldest_with_compaction_summary_as_first() {
+    // Use a small budget so ratio is high enough to trigger dropping.
+    // estimate_context_chars / 4 = estimated tokens; ratio = tokens / budget_tokens
+    // Need ratio >= 0.50, so tokens >= budget_tokens * 0.50
+    let summary_text = "previous summary ".repeat(200);
+    let asst_text = "assistant response ".repeat(200);
+    let tool_text = "tool output data ".repeat(200);
+    let user_text = "new question text ".repeat(100);
+
+    let mut state = make_state(0, 100_000, 1_000);
+    state.messages = vec![
+        summary_msg(&summary_text),           // turn 0 start (CompactionSummary)
+        assistant_msg(&asst_text),             // turn 0 body
+        tool_msg_with_id("t0", "tc0", &tool_text),
+        user_msg_with_id("u1", &user_text),    // turn 1 start
+        assistant_msg("new answer"),           // turn 1 body
+    ];
+    let total: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    state.estimate_context_chars = total;
+
+    // Verify ratio is high enough before dropping
+    assert!(
+        state.usage_ratio() >= 0.50,
+        "ratio should be >= 0.50 to trigger L3, got {}",
+        state.usage_ratio()
+    );
+
+    let (turns_removed, chars_removed) = force_drop_oldest_to_target(&mut state);
+
+    assert!(turns_removed >= 1, "should drop at least one turn");
+    assert!(chars_removed > 0, "should free some chars");
+    assert!(
+        !state.messages.is_empty(),
+        "should not drain all messages"
+    );
+
+    // CompactionSummary turn was the oldest — it should have been dropped
+    let has_summary = state.messages.iter().any(|m| m.kind == MessageKind::CompactionSummary);
+    assert!(
+        !has_summary,
+        "CompactionSummary (oldest turn) should have been dropped"
+    );
+}
+
+#[test]
+fn apply_boundary_with_msg_id_matching() {
+    let mut state = make_state(0, 100_000, 25_000);
+    state.messages = vec![
+        user_msg_with_id("m1", "first"),
+        user_msg_with_id("m2", "second"),
+        user_msg_with_id("m3", "third"),
+        user_msg_with_id("m4", "fourth"),
+        user_msg_with_id("m5", "fifth"),
+    ];
+    state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
+
+    let result = CompactionResult {
+        summary_text: "summary of m1-m3".into(),
+        covered_start_id: "m1".into(),
+        covered_end_id: "m3".into(),
+        covered_count: 3,
+        transcript_compaction_entry_id: Some("cid_m1_m3".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    };
+    state.apply_boundary(result).unwrap();
+
+    assert_eq!(state.messages.len(), 3, "summary + m4 + m5");
+    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(
+        state.messages[0].text_content(),
+        Some("summary of m1-m3")
+    );
+    assert_eq!(state.messages[1].msg_id.as_deref(), Some("m4"));
+    assert_eq!(state.messages[2].msg_id.as_deref(), Some("m5"));
+}
+
+// ===========================================================================
+// Group E: messages_to_text 格式验证
+// ===========================================================================
+
+#[test]
+fn messages_to_text_format_all_roles() {
+    let msgs = vec![
+        {
+            let mut m = ChatMessage::compaction_summary("之前的摘要");
+            m.msg_id = Some("s0".to_string());
+            m
+        },
+        ChatMessage::user("你好"),
+        ChatMessage::assistant("你好啊"),
+        ChatMessage::tool("tc1", "ok"),
+        ChatMessage::tool("tc2", &"x".repeat(250)),
+    ];
+
+    let text = messages_to_text(&msgs);
+
+    assert!(
+        text.contains("[Previous Summary]\n之前的摘要\n"),
+        "should contain summary with correct format"
+    );
+    assert!(
+        text.contains("[User] 你好\n"),
+        "should contain user message"
+    );
+    assert!(
+        text.contains("[Assistant] 你好啊\n"),
+        "should contain assistant message"
+    );
+    assert!(
+        text.contains("[ToolResult] ok\n"),
+        "should contain short tool result"
+    );
+    // The 250-char tool result should be truncated to ~200
+    let tool_result_lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("[ToolResult]"))
+        .collect();
+    assert_eq!(tool_result_lines.len(), 2, "should have 2 tool result lines");
+    let long_tool_line = tool_result_lines[1];
+    assert!(
+        long_tool_line.len() < 250,
+        "long tool result should be truncated, got {} chars",
+        long_tool_line.len()
+    );
 }

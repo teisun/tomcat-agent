@@ -267,7 +267,7 @@
 **技术方案**：[Agent Loop 设计](../openspec/specs/architecture/agent-loop.md)
 
 **子项**（参考 tasks_details.md T1-P1-005）：
-- [✓] 5.1 AgentMessage 枚举与 convert_to_llm_format() 转换边界
+- [✓] 5.1 ~~AgentMessage~~ 枚举与 ~~convert_to_llm_format()~~ 转换边界 [已重构: 见 feature/collapse-to-chatmsg — `AgentMessage` → `ChatMessage`（含 `MessageKind` 字段）；`convert_to_llm_format` 已移除，消息直接为 LLM 格式]
 - [✓] 5.2 AgentLoop 结构体（src/core/agent_loop.rs），三层循环骨架
 - [✓] 5.3 Steering 机制（steer()，每工具后检查）
 - [✓] 5.4 FollowUp 机制（follow_up()，第一层尾部检查）
@@ -937,8 +937,8 @@
 
 **Phase 1：基础设施与配置**
 - [x] 17.1 `src/infra/config.rs`：新增 `[context]` 配置节（`context_window=400K`、`max_output_tokens=128K`、`compaction_turns=10`、`keep_recent_turns=3`、`single_tool_result_max_chars=400K`、`compaction_model="gpt-5.2"`），`PrimitiveConfig` 加载 + `pi.config.toml` 覆盖
-- [x] 17.2 `src/core/session/manager.rs`：定义 `UserTurn`、`SummaryTurn`（含 `timestamp`）、`ContextState` 结构体；实现 `init_context_state`（三阶漏斗：`compute_fold_start` 预扫描 → `fold_entries_to_turns` 折叠 → `filter_turns_by_day` 当天优先 + 不足 10 向前补齐）；删除遗留 `build_context_messages` / `context_cap`
-- [x] 17.3 `src/core/session/manager.rs`：`estimateContextChars` 动态维护（含 system prompt）；`on_message_appended` / `on_new_user_turn` 增量更新
+- [x] 17.2 `src/core/session/manager.rs`：定义 ~~`UserTurn`~~、~~`SummaryTurn`~~（含 `timestamp`）、`ContextState` 结构体；实现 `init_context_state`（三阶漏斗：`compute_fold_start` 预扫描 → ~~`fold_entries_to_turns`~~ 折叠 → `filter_turns_by_day` 当天优先 + 不足 10 向前补齐）；删除遗留 `build_context_messages` / `context_cap` [已重构: 见 feature/collapse-to-chatmsg — `UserTurn` → `ChatMessage` + turn boundary 推导；`SummaryTurn` → `CompactionSummary`（MessageKind）；`fold_entries_to_turns` → `fold_entries_to_messages`]
+- [x] 17.3 `src/core/session/manager.rs`：~~`estimateContextChars`~~ 动态维护（含 system prompt）；`on_message_appended` / ~~`on_new_user_turn`~~ 增量更新 [已重构: 见 feature/collapse-to-chatmsg — `estimateContextChars` → `estimate_msg_chars`；`on_new_user_turn` → `messages.push`]
 
 **Phase 2：四层防护算法**
 - [x] 17.4 `src/core/compaction.rs`（**新建**）：Layer 0 — `truncate_tool_result_if_needed`（单条 tool result 超 400K chars 截断，70%~100% 区间找换行切断）
@@ -949,7 +949,7 @@
 
 **Phase 3：集成与串联**
 - [x] 17.9 `src/core/agent_loop.rs`：reasoning loop 工具返回后调用 Layer 0 + `on_message_appended`；移除 `max_tool_rounds` 硬限（保留配置项但默认不限制，留 TODO 注释）
-- [x] 17.10 `src/core/session/manager.rs` / `src/api/chat.rs`：`build_context_messages` 改为从 `userTurnsList.flatten()` 产出，② 进入前触发 Layer 1~3 预算检查；④ 结束后打包当前 turn 追加 `userTurnsList`
+- [x] 17.10 `src/core/session/manager.rs` / `src/api/chat.rs`：`build_context_messages` 改为从 ~~`userTurnsList.flatten()`~~ 产出，② 进入前触发 Layer 1~3 预算检查；④ 结束后打包当前 turn 追加 ~~`userTurnsList`~~ [已重构: 见 feature/collapse-to-chatmsg — `userTurnsList` → `messages: Vec<ChatMessage>`]
 - [x] 17.11 Transcript 写入：压缩发生时追加 `SessionEntry::BranchSummary` entry（`type: branch_summary`；append-only，原始消息不删），记录摘要正文与覆盖 turn range
 - [x] 17.12 事件发布：`auto_compaction_start` / `auto_compaction_end` / `compaction_error` / `tool_result_truncated`
 
@@ -964,19 +964,19 @@
 
 **协作接口**：
 - 消费：`LlmProvider`（Compaction 摘要调用）、`SessionManager`（transcript 读写）、`EventBus`（事件发布）、`PrimitiveConfig`（配置加载）
-- 提供：`ContextState`（内存上下文视图）、`compaction.rs` 四层防护 API、token-aware `build_context_messages`
+- 提供：`ContextState`（内存上下文视图，基于 `messages: Vec<ChatMessage>` [已重构: 原 `user_turns_list`]）、`compaction.rs` 四层防护 API、token-aware `build_context_messages`
 
 **涉及文件**：
 
 | 文件 | 改动 |
 |------|------|
 | `src/infra/config.rs` | 新增 `[context]` 配置节 |
-| `src/core/session/manager.rs` | `UserTurn`/`ContextState` 定义；`build_context_messages` 改为 token-aware；初始化 + 动态维护 |
+| `src/core/session/manager.rs` | ~~`UserTurn`~~/`ContextState` 定义；`build_context_messages` 改为 token-aware；初始化 + 动态维护 [已重构: `UserTurn` → `ChatMessage`] |
 | `src/core/agent_loop.rs` | reasoning loop 集成 Layer 0 + 估算更新；移除 `max_tool_rounds` 硬限 |
 | `src/core/compaction.rs`（**新建**） | 四层防护算法 + Compaction prompt 模板 |
 
 **验收标准**：
-- `estimateContextChars` 超 `contextBudgetChars` 时自动触发 Layer 1 → 2 → 3，不出现 context overflow 400 错误
+- ~~`estimateContextChars`~~ 超 `contextBudgetChars` 时自动触发 Layer 1 → 2 → 3，不出现 context overflow 400 错误 [已重构: `estimateContextChars` → `estimate_msg_chars`]
 - 单条 tool result > 400K chars 被 Layer 0 截断
 - Compaction 摘要结构化（Goal/Progress/Critical Context），UPDATE 模式合并旧 summary
 - 最近 3 个 user turns 不参与任何压缩/替换（protected zone）
@@ -1100,7 +1100,7 @@
 
 **Phase C：Transcript 与 Layer 1/2/3 语义**
 - [ ] 20.5 预热完成：追加 **单行** `Compaction` entry，`is_boundary=false`（含行 `id` / 可选 `preheatCompactionId`，加载 fold 时仍跳过）；应用切换：**原地**将该行 `isBoundary` 改为 `true`（不追加第二份全文）。`init_context_state` 对切片内最后一条未应用 preheat 调用 `preheat.restore_completed`，且 fold 与运行时一致（§5.5′）
-- [ ] 20.6 Layer 1：克隆 `user_turns_list` 调 `compaction_model`，摘要覆盖**整表**并记录首尾 id；与既有 UPDATE 摘要 prompt 兼容（§3 图四、文档 1.1）
+- [ ] 20.6 Layer 1：克隆 ~~`user_turns_list`~~ 调 `compaction_model`，摘要覆盖**整表**并记录首尾 id；与既有 UPDATE 摘要 prompt 兼容（§3 图四、文档 1.1） [已重构: 见 feature/collapse-to-chatmsg — `user_turns_list` → `messages: Vec<ChatMessage>`]
 - [ ] 20.7 Layer 3：**仅**在 API 明确 Context Overflow 后物理截断至 `ratio < 0.50`（§4.2）；与 TASK-19 中「ratio=1.0 触发 L3」等旧叙述脱钩，以现行文档为准
 
 **Phase D：可观测与配置对齐**
@@ -1145,17 +1145,17 @@
 | **分支** | `feature/context-async-compaction` |
 | **阻塞点** | — |
 
-**目标**：将运行时与 transcript 行为对齐 [上下文管理技术方案 §5.7](../openspec/specs/architecture/context-management.md)（**消息级 ID**、`UserTurn` 的 `start_id`/`end_id`/`id`、`BranchSummaryEntry.id = S::E`、**在 `MessageEntry.id == E` 行之后插入** pending `branch_summary` 行、Layer 2 **`splice(0..=k)`** 与 **`set_branch_summary_entry_is_boundary_true` 使用整串 `S::E`**），减少摘要 apply / restore / 水位异常类 bug。
+**目标**：将运行时与 transcript 行为对齐 [上下文管理技术方案 §5.7](../openspec/specs/architecture/context-management.md)（**消息级 ID**、~~`UserTurn`~~ 的 `start_id`/`end_id`/`id`、`BranchSummaryEntry.id = S::E`、**在 `MessageEntry.id == E` 行之后插入** pending `branch_summary` 行、Layer 2 **`splice(0..=k)`** 与 **`set_branch_summary_entry_is_boundary_true` 使用整串 `S::E`**），减少摘要 apply / restore / 水位异常类 bug。 [已重构: `UserTurn` → `ChatMessage` + turn boundary 推导]
 
 **技术方案**：[context-management.md §5.7](../openspec/specs/architecture/context-management.md)（含 ASCII 总览、5.7.1～5.7.8 验收场景表）
 
 **子项**：
 
-- [x] **21.1 类型与内存**：`TurnEntry::UserTurn` 增加 `start_id` / `end_id`；`id` 恒为 `start_id::end_id`（与文档 `::` 分隔符一致）；提供或复用 `message_span_turn_id` 类辅助函数；`SummaryTurn.id` 与 compaction 行一致（§5.7.3）
-- [x] **21.2 pack / fold**：`api/chat`（或等价路径）在落盘 message 后回填本条 turn 的 `start_id`/`end_id`；`fold_entries_to_turns` 从 `MessageEntry.id` 还原上述字段（§5.7.1）
+- [x] **21.1 类型与内存**：~~`TurnEntry::UserTurn`~~ 增加 `start_id` / `end_id`；`id` 恒为 `start_id::end_id`（与文档 `::` 分隔符一致）；提供或复用 `message_span_turn_id` 类辅助函数；~~`SummaryTurn.id`~~ 与 compaction 行一致（§5.7.3） [已重构: 见 feature/collapse-to-chatmsg — `TurnEntry::UserTurn` → `ChatMessage` + turn boundary 推导；`SummaryTurn` → `CompactionSummary`（MessageKind）]
+- [x] **21.2 pack / fold**：`api/chat`（或等价路径）在落盘 message 后回填本条 turn 的 `start_id`/`end_id`；~~`fold_entries_to_turns`~~ 从 `MessageEntry.id` 还原上述字段（§5.7.1） [已重构: `fold_entries_to_turns` → `fold_entries_to_messages`]
 - [x] **21.3 transcript**：实现「按锚点 message id 插入」`Compaction` 行（在 `id == covered_end_id` 的 message 行**之后**）；找不到锚点时策略（日志 + 回退尾追加或报错）写清；原子写与单线程假设见文档 §5.7.4
-- [x] **21.4 Preheat**：快照 `covered_start_id` / `covered_end_id` 取 **首 `UserTurn.start_id`、末 `UserTurn.end_id`**；`BranchSummaryEntry.id = S::E`；成功后调用 21.3 插入；`CompactionResult.transcript_compaction_entry_id` 存整串 `S::E`（§5.7.2～5.7.3）
-- [x] **21.5 apply_boundary**：主路径按 **`UserTurn.end_id == covered_end_id`**（或 `id` 右段）定位 `k`，**`splice(0..=k, [SummaryTurn])`**；保留对旧 turn-id `covered_*` 的兼容回退（文档 §5.7.5）；`write_boundary_transcript` 仍以整串 id 调 `set_branch_summary_entry_is_boundary_true`
+- [x] **21.4 Preheat**：快照 `covered_start_id` / `covered_end_id` 取 **首 ~~`UserTurn.start_id`~~、末 ~~`UserTurn.end_id`~~**；`BranchSummaryEntry.id = S::E`；成功后调用 21.3 插入；`CompactionResult.transcript_compaction_entry_id` 存整串 `S::E`（§5.7.2～5.7.3） [已重构: `UserTurn` → `ChatMessage`]
+- [x] **21.5 apply_boundary**：主路径按 **~~`UserTurn.end_id`~~ `== covered_end_id`**（或 `id` 右段）定位 `k`，**`splice(0..=k, [~~SummaryTurn~~])`**；保留对旧 turn-id `covered_*` 的兼容回退（文档 §5.7.5）；`write_boundary_transcript` 仍以整串 id 调 `set_branch_summary_entry_is_boundary_true` [已重构: 见 feature/collapse-to-chatmsg — `UserTurn` → `ChatMessage`；`SummaryTurn` → `CompactionSummary`（MessageKind）]
 - [x] **21.6 restore / hydrate**：`branch_summary_pending_from_entry` / `restore_completed` 与 §5.7.7、`BranchSummaryEntry` 字段语义一致
 - [x] **21.7 测试**：覆盖 §5.7.8 场景 1～5 中可由单测/集成测表达的部分（不重启 apply、重启 restore、锚点插入行序、L3 后仅 end 匹配、id 冲突策略）
 
@@ -1164,7 +1164,7 @@
 **被依赖**：—
 
 **协作接口**：
-- 消费：`SessionManager` / `transcript.rs`、`Preheat`、`ContextState::apply_boundary`、`init_context_state` / `fold_entries_to_turns`
+- 消费：`SessionManager` / `transcript.rs`、`Preheat`、`ContextState::apply_boundary`、`init_context_state` / ~~`fold_entries_to_turns`~~ [已重构: → `fold_entries_to_messages`]
 - 提供：与 JSONL 一致的 message 边界 id；可观测的失败路径（锚点缺失、apply 拒绝对齐文档场景 5）
 
 **验收标准**：

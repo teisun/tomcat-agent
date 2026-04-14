@@ -231,7 +231,7 @@ execute_tool("dispatch_agent", args)
 │
 ├─ 发布 AgentEvent::SubAgentStart { session_id, parent_session_id, task, spawn_depth }
 │
-├─ child_loop.run(vec![ AgentMessage::User { text: args.task } ]).await
+├─ child_loop.run(vec![ ChatMessage::user(args.task) ]).await
 │
 │   ... 子 Agent 独立运行，所有 AgentEvent 以 session_id="S1:sub:<uuid>" 在 EventBus 发布 ...
 │

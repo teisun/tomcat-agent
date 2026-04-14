@@ -256,7 +256,7 @@
 
 ## T1-P1-005 Agent Loop 核心结构化实现
 
-- **5.1** 定义 AgentMessage 枚举：UserMessage、AssistantMessage、ToolResultMessage、SystemMessage、SteeringMessage；实现 convert_to_llm_format()（AgentMessage → LLM Message 的唯一转换边界，参考 agent-loop.md 13.4）。
+- **5.1** ~~定义 AgentMessage 枚举~~ [已重构: `AgentMessage` 删除，统一使用 `ChatMessage` + `MessageKind`（Normal/Steering/CompactionSummary）]；~~实现 convert_to_llm_format()~~ [已重构: 删除，`ChatMessage` 直接作为 LLM wire format]。
 - **5.2** 新增 src/core/agent_loop.rs，实现 AgentLoop 结构体；持有 steering_queue/follow_up_queue/abort_signal；实现三层循环骨架（Conversation Loop → Attempt Loop → Reasoning Loop），参考 agent-loop.md 13.3.2 伪代码。
 - **5.3** 实现 Steering 机制：steer(msg) 写入 steering_queue；Reasoning Loop 每个工具执行完毕后检查队列，有则跳过剩余工具、注入消息、进入下一轮 LLM 调用。
 - **5.4** 实现 FollowUp 机制：follow_up(msg) 写入 follow_up_queue；Conversation Loop 尾部检查队列，有则继续循环（one-at-a-time 默认模式）。

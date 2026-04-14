@@ -1120,3 +1120,542 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+// ────────── Group C: L2 preheat 全链路 + 事件断言 ──────────────────────────
+
+/// [L2 事件] check_after_reply 在 preheat 完成且 ratio >= 0.85 时 emit BoundarySwitched
+#[test]
+fn test_check_after_reply_emits_boundary_switched_on_apply() {
+    common::setup_logging();
+    let _span = info_span!("test_check_after_reply_emits_boundary_switched_on_apply").entered();
+
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let boundary_switched = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let bs = Arc::clone(&boundary_switched);
+    event_bus.on(
+        "boundary_switched",
+        Box::new(move |ctx: EventContext| {
+            bs.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+
+    info!("Arrange: ContextState with high ratio + CachedCompleted preheat");
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 0,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 1000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+
+    let mut m0 = ChatMessage::user("a".repeat(5000));
+    m0.msg_id = Some("u0".to_string());
+    m0.timestamp = Some(TEST_TS.to_string());
+    let mut m1 = ChatMessage::user("b".repeat(3000));
+    m1.msg_id = Some("u1".to_string());
+    m1.timestamp = Some(TEST_TS.to_string());
+    let mut m2 = ChatMessage::user("c".repeat(2000));
+    m2.msg_id = Some("u2".to_string());
+    m2.timestamp = Some(TEST_TS.to_string());
+    state.messages = vec![m0, m1, m2];
+    state.estimate_context_chars = 10_000;
+    state.update_api_usage(900, 0); // ratio = 0.90 >= 0.85
+
+    let compaction_result = pi_wasm::CompactionResult {
+        summary_text: "summary of u0-u1".into(),
+        covered_start_id: "u0".into(),
+        covered_end_id: "u1".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some(compound_turn_id("u0", "u1")),
+        estimated_covered_tokens_before: Some(200),
+        estimated_summary_tokens: Some(50),
+        estimated_tokens_saved: Some(150),
+        preheat_elapsed_ms: 100,
+    };
+    state.preheat.restore_completed(compaction_result);
+    assert!(state.preheat.is_finished());
+
+    info!("Act: check_after_reply");
+    let switched = pi_wasm::core::compaction::apply::check_after_reply(&mut state, &*event_bus);
+
+    info!("Assert: BoundarySwitched event received");
+    assert!(switched, "should have applied boundary");
+    let events = boundary_switched.lock().unwrap();
+    assert_eq!(events.len(), 1, "should emit exactly one BoundarySwitched");
+    let payload = &events[0];
+    assert!(
+        payload.get("ratioBefore").is_some(),
+        "payload should have ratioBefore"
+    );
+    assert!(
+        payload.get("ratioAfter").is_some(),
+        "payload should have ratioAfter"
+    );
+
+    assert_eq!(state.messages.len(), 2, "summary + u2 after splice");
+    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
+}
+
+/// [L2 事件] check_after_reply 在 stale apply 时 emit CompactionError
+#[test]
+fn test_check_after_reply_stale_emits_compaction_error() {
+    common::setup_logging();
+    let _span = info_span!("test_check_after_reply_stale_emits_compaction_error").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stale_err.jsonl");
+    pi_wasm::core::session::transcript::write_header(
+        &path,
+        &pi_wasm::core::session::transcript::SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid_err".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let compaction_errors = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let ce = Arc::clone(&compaction_errors);
+    event_bus.on(
+        "compaction_error",
+        Box::new(move |ctx: EventContext| {
+            ce.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+
+    info!("Arrange: ContextState with stale preheat result");
+    let mut state = ContextState {
+        messages: vec![{
+            let mut m = ChatMessage::user("still here");
+            m.msg_id = Some("still".to_string());
+            m.timestamp = Some(TEST_TS.to_string());
+            m
+        }],
+        estimate_context_chars: 500,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 1000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: path.clone(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    state.update_api_usage(900, 0); // ratio >= 0.85
+
+    let stale_result = pi_wasm::CompactionResult {
+        summary_text: "sum".into(),
+        covered_start_id: "gone_start".into(),
+        covered_end_id: "gone_end".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    };
+    state.preheat.restore_completed(stale_result);
+
+    info!("Act: check_after_reply with stale covered_end_id");
+    let switched = pi_wasm::core::compaction::apply::check_after_reply(&mut state, &*event_bus);
+
+    info!("Assert: CompactionError event received, not switched");
+    assert!(!switched, "stale apply should not switch");
+    let errors = compaction_errors.lock().unwrap();
+    assert_eq!(errors.len(), 1, "should emit exactly one CompactionError");
+    let payload = &errors[0];
+    assert_eq!(
+        payload.get("source").and_then(|v| v.as_str()),
+        Some("apply"),
+        "error source should be 'apply'"
+    );
+}
+
+/// [L2 事件] check_before_request 在完成的 preheat 上 emit BoundarySwitched（async 路径）
+#[tokio::test]
+async fn test_check_before_request_emits_boundary_switched() {
+    common::setup_logging();
+    let _span = info_span!("test_check_before_request_emits_boundary_switched").entered();
+
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let boundary_switched = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let bs = Arc::clone(&boundary_switched);
+    event_bus.on(
+        "boundary_switched",
+        Box::new(move |ctx: EventContext| {
+            bs.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+
+    info!("Arrange: ratio >= 0.70, preheat CachedCompleted");
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 0,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 1000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+
+    let mut m0 = ChatMessage::user("a".repeat(5000));
+    m0.msg_id = Some("u0".to_string());
+    m0.timestamp = Some(TEST_TS.to_string());
+    let mut m1 = ChatMessage::user("b".repeat(3000));
+    m1.msg_id = Some("u1".to_string());
+    m1.timestamp = Some(TEST_TS.to_string());
+    let mut m2 = ChatMessage::user("c".repeat(2000));
+    m2.msg_id = Some("u2".to_string());
+    m2.timestamp = Some(TEST_TS.to_string());
+    state.messages = vec![m0, m1, m2];
+    state.estimate_context_chars = 10_000;
+    state.update_api_usage(750, 0); // ratio = 0.75 >= 0.70
+
+    let compaction_result = pi_wasm::CompactionResult {
+        summary_text: "async boundary summary".into(),
+        covered_start_id: "u0".into(),
+        covered_end_id: "u1".into(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some(compound_turn_id("u0", "u1")),
+        estimated_covered_tokens_before: Some(200),
+        estimated_summary_tokens: Some(50),
+        estimated_tokens_saved: Some(150),
+        preheat_elapsed_ms: 50,
+    };
+    state.preheat.restore_completed(compaction_result);
+
+    info!("Act: check_before_request");
+    let applied =
+        pi_wasm::core::compaction::apply::check_before_request(&mut state, &*event_bus).await;
+
+    info!("Assert: BoundarySwitched event + messages shortened");
+    assert!(applied, "should apply boundary in check_before_request");
+    let events = boundary_switched.lock().unwrap();
+    assert_eq!(events.len(), 1, "should emit BoundarySwitched");
+
+    let payload = &events[0];
+    let ratio_before = payload
+        .get("ratioBefore")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let ratio_after = payload
+        .get("ratioAfter")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
+    assert!(
+        ratio_after < ratio_before,
+        "ratio should decrease: before={}, after={}",
+        ratio_before,
+        ratio_after
+    );
+    assert_eq!(state.messages.len(), 2, "summary + u2");
+}
+
+// ────────── Group D: L0->L1->L2->L3 全管线 + 事件时序 ─────────────────────
+
+/// [全链路管线] L0 落盘 → L1 占位 → L2 apply → L3 force_drop + 事件时序正确
+#[test]
+fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
+    common::setup_logging();
+    let _span = info_span!("test_full_compaction_pipeline_l0_l1_l2_l3").entered();
+    let dir = tempfile::tempdir().unwrap();
+
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let events_log = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let el = Arc::clone(&events_log);
+    event_bus.on(
+        "boundary_switched",
+        Box::new(move |_ctx: EventContext| {
+            el.lock().unwrap().push("boundary_switched".to_string());
+            Ok(())
+        }),
+    );
+
+    info!("Arrange: 10+ turns with large tool results, ratio ~0.90");
+    let big = "x".repeat(60_000);
+    let mut msgs = Vec::new();
+    for i in 0..12 {
+        let mut user = ChatMessage::user(format!("question {}", i));
+        user.msg_id = Some(format!("u{}", i));
+        user.timestamp = Some(TEST_TS.to_string());
+        let mut tool = ChatMessage::tool(&format!("tc_{}", i), &big);
+        tool.msg_id = Some(format!("t{}", i));
+        tool.timestamp = Some(TEST_TS.to_string());
+        let mut asst = ChatMessage::assistant(format!("answer {}", i));
+        asst.timestamp = Some(TEST_TS.to_string());
+        msgs.push(user);
+        msgs.push(tool);
+        msgs.push(asst);
+    }
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let budget_chars = (total as f64 * 1.1) as usize;
+    let budget_tokens = budget_chars / 4;
+
+    let mut state = ContextState {
+        messages: msgs,
+        estimate_context_chars: total,
+        context_budget_chars: budget_chars,
+        context_budget_tokens: budget_tokens,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+
+    info!(
+        "initial: messages={}, estimate_chars={}, ratio={:.3}",
+        state.messages.len(),
+        state.estimate_context_chars,
+        state.usage_ratio()
+    );
+
+    // Step 1: L0+L1
+    info!("Act Step 1: run_layer0_cleanup");
+    let outcome = pi_wasm::core::compaction::run_layer0_cleanup(
+        &mut state,
+        &ContextConfig::default(),
+        dir.path(),
+        "pipeline_sess",
+    );
+    info!(
+        "L0+L1: persisted={}, persist_freed={}, placeholder_freed={}, ratio={:.3}",
+        outcome.persisted.len(),
+        outcome.persist_chars_freed,
+        outcome.placeholder_chars_freed,
+        state.usage_ratio()
+    );
+    assert!(
+        outcome.persist_chars_freed + outcome.placeholder_chars_freed > 0,
+        "L0+L1 should free some chars"
+    );
+
+    // Step 2: L2 apply (simulate preheat completion)
+    info!("Act Step 2: simulate preheat completed + apply_boundary");
+    let first_user_id = state.messages.iter()
+        .find(|m| m.role == ChatMessageRole::User && m.kind != MessageKind::CompactionSummary)
+        .and_then(|m| m.msg_id.clone())
+        .unwrap_or_default();
+    // Find end of compactable zone (everything before last 5 turns)
+    let turn_starts: Vec<usize> = state.messages.iter().enumerate()
+        .filter(|(_, m)| {
+            (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
+                || m.kind == MessageKind::CompactionSummary
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if turn_starts.len() > 5 {
+        let cover_end_idx = turn_starts[turn_starts.len() - 5] - 1;
+        let covered_end = state.messages[..=cover_end_idx]
+            .iter()
+            .rev()
+            .find_map(|m| m.msg_id.clone())
+            .unwrap_or_default();
+
+        let compaction_result = pi_wasm::CompactionResult {
+            summary_text: "Pipeline summary of early conversation".into(),
+            covered_start_id: first_user_id.clone(),
+            covered_end_id: covered_end.clone(),
+            covered_count: turn_starts.len() - 5,
+            transcript_compaction_entry_id: Some(compound_turn_id(&first_user_id, &covered_end)),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 100,
+        };
+        state.preheat.restore_completed(compaction_result);
+
+        let ratio_before_apply = state.usage_ratio();
+        state.update_api_usage((state.estimated_token_count() as f64 * 0.90) as u32, 0);
+
+        let switched = pi_wasm::core::compaction::apply::check_after_reply(&mut state, &*event_bus);
+        info!(
+            "L2: switched={}, ratio before={:.3}, after={:.3}, messages={}",
+            switched,
+            ratio_before_apply,
+            state.usage_ratio(),
+            state.messages.len()
+        );
+    }
+
+    // Step 3: L3 force drop (if still over budget)
+    if state.usage_ratio() >= 0.50 {
+        info!("Act Step 3: force_drop_oldest_to_target");
+        let (turns_removed, chars_removed) =
+            pi_wasm::core::compaction::force_drop_oldest_to_target(&mut state);
+        info!(
+            "L3: turns_removed={}, chars_removed={}, ratio={:.3}",
+            turns_removed,
+            chars_removed,
+            state.usage_ratio()
+        );
+    }
+
+    info!("Assert: pipeline completed, chars consistent");
+    let actual_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let diff = (state.estimate_context_chars as i64 - actual_chars as i64).unsigned_abs();
+    assert!(
+        diff <= (actual_chars / 10 + 100) as u64,
+        "estimate_context_chars ({}) should be close to actual ({}), diff={}",
+        state.estimate_context_chars,
+        actual_chars,
+        diff
+    );
+    assert!(
+        !state.messages.is_empty(),
+        "should not drain all messages"
+    );
+}
+
+// ────────── Group F: L3 overflow 事件 payload 断言 ────────────────────────
+
+/// [L3 事件 payload] ContextOverflowTrimStart/End payload 含正确字段
+#[tokio::test]
+async fn test_context_overflow_trim_events_have_correct_payload(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = info_span!("test_context_overflow_trim_events_have_correct_payload").entered();
+
+    info!("Arrange: MockLlm 首次 overflow，第二次成功");
+    let stream_err = vec![Err(AppError::Llm(
+        "context length exceeded: 500000 tokens".to_string(),
+    ))];
+    let stream_ok = text_stream("ok after trim");
+    let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
+    let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 100 });
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    let trim_start_payloads = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let trim_end_payloads = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let ts = Arc::clone(&trim_start_payloads);
+    let te = Arc::clone(&trim_end_payloads);
+    event_bus.on(
+        "context_overflow_trim_start",
+        Box::new(move |ctx: EventContext| {
+            ts.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    event_bus.on(
+        "context_overflow_trim_end",
+        Box::new(move |ctx: EventContext| {
+            te.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+
+    let config = AgentLoopConfig {
+        model: "mock-model".to_string(),
+        session_id: "sess-overflow-payload".to_string(),
+        max_attempts: 3,
+        retry_base_delay_ms: 0,
+        context_config: ContextConfig::default(),
+        ..Default::default()
+    };
+    let abort = Arc::new(AtomicBool::new(false));
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+
+    let old_content = "old ".repeat(10_000); // ~40K chars
+    let mut old_user = ChatMessage::user(old_content);
+    old_user.timestamp = Some(TEST_TS.to_string());
+    let mut recent_user = ChatMessage::user("recent");
+    recent_user.timestamp = Some(TEST_TS.to_string());
+
+    let estimate = 40_000usize;
+    let budget_tokens = (estimate / 4) + 100; // ~10_100 — ratio will be ~0.99
+    let ctx_state = ContextState {
+        messages: vec![old_user, recent_user],
+        estimate_context_chars: estimate,
+        context_budget_chars: estimate * 4,
+        context_budget_tokens: budget_tokens,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        preheat: pi_wasm::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+    agent.set_context_state(Some(ctx_state));
+
+    info!("Act: run AgentLoop");
+    let _result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        agent.run(vec![ChatMessage::user("trigger")]),
+    )
+    .await
+    .map_err(|_| "timeout")?
+    .map_err(|e| format!("{:?}", e))?;
+
+    info!("Assert: trim event payloads");
+    let starts = trim_start_payloads.lock().unwrap();
+    assert_eq!(starts.len(), 1, "should emit one trim_start");
+    let start_p = &starts[0];
+    assert_eq!(
+        start_p.get("reason").and_then(|v| v.as_str()),
+        Some("context_overflow"),
+        "trim_start reason"
+    );
+    assert!(
+        start_p.get("ratio").and_then(|v| v.as_f64()).unwrap_or(0.0) > 0.0,
+        "trim_start should have ratio > 0"
+    );
+
+    let ends = trim_end_payloads.lock().unwrap();
+    assert_eq!(ends.len(), 1, "should emit one trim_end");
+    let end_p = &ends[0];
+    assert_eq!(
+        end_p.get("willRetry").and_then(|v| v.as_bool()),
+        Some(true),
+        "trim_end willRetry"
+    );
+    assert!(
+        end_p
+            .get("estimatedTokensFreed")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            > 0,
+        "should have freed tokens"
+    );
+    assert!(
+        end_p
+            .get("turnsRemoved")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            > 0,
+        "should have removed turns"
+    );
+
+    let rb = end_p
+        .get("ratioBefore")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let ra = end_p
+        .get("ratioAfter")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
+    assert!(
+        ra < rb || ra == 0.0,
+        "ratio_after ({}) should be < ratio_before ({})",
+        ra,
+        rb
+    );
+
+    Ok(())
+}

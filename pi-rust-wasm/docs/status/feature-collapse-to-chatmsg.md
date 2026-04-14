@@ -12,6 +12,9 @@
 - [x] **[P0]** Phase 7: 删除旧类型 — TurnEntry / AgentMessage / convert_to_llm_format / agent_messages_from_chat
 - [x] **[P1]** Phase 8: 更新全部测试 + 文档，cargo test 全绿
 - [x] **[P1]** 门禁: clippy --all-targets -D warnings 零 warning + cargo test 606 passed 0 failed
+- [x] **[P1]** Compaction 测试计划: 新增 8 个单元测试 + 5 个集成测试，覆盖 L0/L1/L2/L3 + 事件断言
+- [x] **[P2]** 重构导读: `docs/reports/collapse-to-chatmsg-guide.md`
+- [x] **[P2]** 文档更新: 全项目文档术语同步（20+ 文件）
 
 ### 🔌 INTERFACE (接口变更)
 - `ChatMessage`: 新增 `msg_id: Option<String>`, `kind: MessageKind`, `timestamp: Option<String>` (均 `#[serde(skip)]`)

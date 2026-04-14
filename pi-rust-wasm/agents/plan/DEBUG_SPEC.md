@@ -23,7 +23,7 @@
 **反面**："水位好像不对" —— 没有定量，无法验证。
 
 **正面**：
-- L3 截断后 `usage_ratio=0.443`，但 `user_turns_list` 只剩 1 条 turn（48 chars）
+- L3 截断后 `usage_ratio=0.443`，但 `messages` 只剩 1 个 turn（48 chars）
 - 重启 `pi chat` 后同一 session 水位从 53.8% 降到 0.9%
 - 日志显示 `user_turns_len=0, user_turns_total_chars=0` 但 `usage_ratio=0.5303`
 
@@ -76,7 +76,7 @@ system_text ≈ 1300
 
 画完这张表，问自己：**有没有"只加不减"的路径？**
 
-在本案例中：`on_message_appended` 在 agent_loop 推理期间累加了 tail 的字符数，但 L3 只能减 `user_turns_list` 中 turn 的字符数。如果 tail 不在任何 turn 里，它的字符数就是"只加不减"的。
+在本案例中：`on_message_appended` 在 agent_loop 推理期间累加了 tail 的字符数，但 L3 只能减 `messages` 中 turn 的字符数。如果 tail 不在 `messages` 里，它的字符数就是"只加不减"的。
 
 **关键经验**：
 
@@ -94,7 +94,7 @@ system_text ≈ 1300
 1. **分支判定点**：`if let Some(usage) = ... { A } else { B }` —— 打印走了哪个分支
 2. **值变化点**：`estimate_context_chars` 被修改前后 —— 打印前值和后值
 3. **"应该发生但可能没发生"的点**：`StreamEvent::Usage` 处理分支 —— 打印证明它从未被命中
-4. **数据打包/传递点**：`on_new_user_turn` 前 —— 打印 turn 内容是否完整
+4. **数据传递点**：`messages.push` 前 —— 打印消息内容是否完整
 
 **关于日志框架 vs eprintln**：
 
@@ -108,7 +108,7 @@ system_text ≈ 1300
 **诊断日志输出示例**：
 ```
 [DIAG] estimated_token_count: branch=fallback_chars estimate_context_chars=6326 result=1581
-[DIAG] before_on_new_user_turn: has_user_msg=false turn_msg_count=1 input_len=2 last_api_usage=false
+[DIAG] before_push_messages: has_user_msg=false msg_count=1 input_len=2 last_api_usage=false
 ```
 
 一眼就能确认：`branch=fallback_chars`（从未走 api_usage 分支）、`has_user_msg=false`（UserTurn 缺少用户消息）。
@@ -145,7 +145,7 @@ system_text ≈ 1300
 | 重启恢复 | 重启后问题消失 | 初始化路径是正确的，运行时路径有漂移，对比两条路径 |
 | 事件从未触发 | 某个 handler 永远不执行 | 从事件源头追：谁产生这个事件？解析器是否包含对应字段？ |
 | 采集窗口错位 | `start_idx` / `offset` 设置导致数据被跳过 | 画 messages 数组的索引变化图，标注每次设置 start_idx 的时机 |
-| 打包边界遗漏 | 数据从一种表示转入另一种时，窗口外的数据永久丢失 | 找到"打包"操作（如 messages → TurnEntry），检查窗口是否覆盖全部应打包数据 |
+| 打包边界遗漏 | 数据从一种表示转入另一种时，窗口外的数据永久丢失 | 找到数据传递操作，检查窗口是否覆盖全部应包含数据 |
 
 ---
 
@@ -157,17 +157,17 @@ system_text ≈ 1300
 
 | 策略 | 手段 | 适用场景 | 风险 |
 | :--- | :--- | :--- | :--- |
-| **治标** | 在脱节发生后重算/修补（如 L3 后用 `system + sum(turns) + sum(tail)` 重算 estimate） | 紧急热修复、根因不可改（第三方库） | 掩盖根因；其他触发路径仍可能脱节 |
-| **治本** | 修正导致脱节的源头操作（如调整 `start_idx` 让 tail 能被打包进 TurnEntry） | 根因在己方代码、有测试覆盖 | 改动链路更长，需更多测试 |
+| **治标** | 在脱节发生后重算/修补（如 L3 后用 `system + sum(msgs) + sum(tail)` 重算 estimate） | 紧急热修复、根因不可改（第三方库） | 掩盖根因；其他触发路径仍可能脱节 |
+| **治本** | 修正导致脱节的源头操作（如调整 `start_idx` 让 tail 能被正确加入 `messages`） | 根因在己方代码、有测试覆盖 | 改动链路更长，需更多测试 |
 
-**本案例的教训**：最初的方案是 L3 rebuild 后重算 `estimate_context_chars`（治标）。用户指出"tail 的 tokens 不就是原来的幽灵吗？正确做法是校正 `start_idx`"——这才抓到了真正的修复方向：让 tail 被正确打包成 TurnEntry（治本），从根本上消除幽灵的产生，而非在幽灵出现后再清扫。
+**本案例的教训**：最初的方案是 L3 rebuild 后重算 `estimate_context_chars`（治标）。用户指出"tail 的 tokens 不就是原来的幽灵吗？正确做法是校正 `start_idx`"——这才抓到了真正的修复方向：让 tail 被正确加入 `messages`（治本），从根本上消除幽灵的产生，而非在幽灵出现后再清扫。
 
 ### 8.2 多根因合并修复
 
 当多个根因指向同一个机制缺陷时，优先寻找**一个修改点同时解决多个问题**的方案：
 
 **本案例**：
-- 根因 2（幽灵字符）：`start_idx` 跳过 tail → tail 不进 TurnEntry
+- 根因 2（幽灵字符）：`start_idx` 跳过 tail → tail 不进 `messages`
 - 根因 3（User 消息丢失）：`start_idx` 在 User 消息 push 前设置 → User 不进 new_messages
 
 两者本质相同——`start_idx` 的设置时机/位置不对。合并为 Fix B+C：将 `start_idx` 指向 `context_tail_start`，同时移除提前写 User 消息的冗余操作。一处改动解决两个根因，比各自打补丁更优雅、更不容易遗漏。
@@ -178,8 +178,8 @@ system_text ≈ 1300
 
 | 改动 | 需要检查的下游 |
 | :--- | :--- |
-| `new_messages` 现在包含 User 消息 | `convert_to_llm_format` 是否正确处理 `AgentMessage::User`？ |
-| 移除 chat/mod.rs 提前写 User 到 transcript | transcript 重载（`fold_entries_to_turns`）是否仍能正确识别 User turn？ |
+| `new_messages` 现在包含 User 消息 | `ChatMessage::user` 是否正确构造？ |
+| 移除 chat/mod.rs 提前写 User 到 transcript | transcript 重载（`fold_entries_to_messages`）是否仍能正确识别 User turn？ |
 | `start_idx` 指向 `context_tail_start` | L3 rebuild 路径中 tail 提取逻辑是否兼容？ |
 
 **经验法则**：对每个改动，问"谁消费这个数据？消费者的假设是否仍然成立？"
