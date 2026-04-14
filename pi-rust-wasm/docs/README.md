@@ -10,6 +10,7 @@
 docs/
 ├── README.md                          ◄── 本文件
 ├── INTEGRATION.md                     ◄── 集成进度看板（由 /aggregate-status 自动汇总）
+├── TODOS.md                           ◄── 灵感/想法/待办收集池（按领域分类 + P0-P5 优先级）
 │
 ├── status/                            ◄── 各分支进度碎片
 │   ├── develop.md                         集成分支进度
