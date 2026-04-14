@@ -1,5 +1,48 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-14 17:44 | INTEGRATION PASS | develop | — |
+
+### 集成测试报告：`feature/collapse-to-chatmsg` 并入 develop
+
+**合并**: 3 commits (`d482725`, `bd05f85`, `4a03812`)，`--no-ff` 合并。48 files changed, +2659 -2144（净减少，大规模类型精简重构：四层降两层，统一到 ChatMessage，消除 TurnEntry 与 AgentMessage）。
+
+#### §1 规格与场景库
+
+纯内部类型重构，无新用户可见功能/操作/场景。User_Stories.md / E2E_SCENARIO_LIBRARY.md 仅术语同步（`SummaryTurn` -> `CompactionSummary`/`MessageKind`），无需新增条目。
+
+#### §2-§3 集成/E2E 测试
+
+- **compaction/tests.rs**: 43 个测试函数，覆盖 L0 落盘/跳过/阈值、Preheat 状态机、Boundary 应用/错误路径、check_after_reply 分档
+- **context_management_tests.rs**: 19 个测试函数，覆盖 L1+L3 pipeline、Session 重载（boundary true/false/pending preheat）、Context overflow 重试、tool result 占位符替换、完整 L0-L3-event 全链路
+- **agent_loop_tests.rs**: 类型适配（`AgentMessage::User` -> `ChatMessage::user()`），逻辑不变
+- **cli_tests.rs / wasmedge_e2e_tests.rs**: 未修改（内部重构不影响 E2E pub API）
+- **结论**: 核心变更均有黑盒集成测试覆盖，无缺口
+
+#### §4 全量验收
+
+| 项 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | PASS (3m33s) |
+| `cargo clippy --all-targets -- -D warnings` | PASS (14s, 0 warnings) |
+| 全量 `cargo test` | PASS (618 passed, 0 failed, 1 ignored) |
+| `cli_tests` | PASS (77 passed) |
+| `wasmedge_e2e_tests` | PASS (39 passed) |
+
+#### 架构 review（对照 Codeing&Architecture_Spec）
+
+- **分层**: `ChatMessage`/`MessageKind` 在 `core/llm/types.rs`，`ContextState` 在 `core/session/manager/types.rs`，无 infra 穿透
+- **封装**: `#[serde(skip)]` 隔离内部元数据与 wire 格式；便捷构造方法封装字段初始化
+- **依赖方向**: `agent_loop` -> `llm` + `session`; `session/manager` -> `compaction` + `llm/types`; 无反向依赖
+- **错误处理**: `apply_boundary()` 专属 `AppError::ApplyBoundaryStale`；`compound_turn_id` 防御性 `warn!`
+- **可测试性**: 便捷构造 + 独立纯函数 + 近纯方法
+- **结论**: 无不符项，架构分层与封装未退化
+
+**环境**: macOS; `pi-rust-wasm/` 目录; `source .env` 后跑测。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-12 21:50 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：`feature/transcript-branch-summary-replaces-compaction` 并入 develop
