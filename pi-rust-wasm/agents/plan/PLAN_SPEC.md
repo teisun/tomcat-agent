@@ -165,9 +165,9 @@ Agent **输出计划前**须逐条确认以下项**全部满足，缺一不可**
 
 ```markdown
 **记账 A**（`estimate_context_chars`，一个数字）：通过加减法维护
-**记账 B**（`user_turns_list`，一个列表）：通过 push/remove 维护
+**记账 B**（`messages: Vec<ChatMessage>`，一个列表）：通过 push/drain 维护
 
-正常情况：A ≈ system + sum(B 中每个 turn 的字符数)
+正常情况：A ≈ system + sum(B 中每条消息的字符数)
 Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 ```
 
@@ -181,7 +181,7 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 
 > 你可能会问：rebuild 之后 tail 还在 messages 里，实际发给 LLM 的内容和记账 A 不是对得上的吗？
 >
-> 对，在 L3 重试那一瞬间是对的。但下一轮就不对了——因为 tail 从未被打包进任何 TurnEntry...
+> 对，在 L3 重试那一瞬间是对的。但下一轮就不对了——因为 tail 从未被正确加入 `messages`（历史注：原文为"打包进 TurnEntry"，TurnEntry 已在 collapse-to-chatmsg 重构中删除）...
 
 这种写法比让读者自己发现反例后再去计划里找答案要高效得多。
 
@@ -204,8 +204,8 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 
 | 方向 | 含义 | 示例 |
 | :--- | :--- | :--- |
-| **治标** | 在脱节发生后修补/重算 | L3 后重算 estimate = system + sum(turns) + tail |
-| **治本** | 修正导致脱节的源头操作 | 调整 start_idx 让 tail 被正确打包进 TurnEntry，从根本上消除幽灵 |
+| **治标** | 在脱节发生后修补/重算 | L3 后重算 estimate = system + sum(msgs) + tail |
+| **治本** | 修正导致脱节的源头操作 | 调整 start_idx 让 tail 被正确加入 `messages`，从根本上消除幽灵 |
 
 **本案例的教训**：初始方案是"L3 rebuild 后重算 estimate"（治标），用户质疑"tail 的 tokens 不就是原来的幽灵吗？"——指出正确做法是校正 `start_idx`（治本）。治标方案虽然能修当前路径，但其他触发路径仍可能产生相同的幽灵。
 
@@ -216,7 +216,7 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 
 **修复根因**：根因 2（幽灵字符）+ 根因 3（User 消息丢失）
 **为什么是治本**：不是在幽灵出现后清扫，而是消除幽灵产生的机制——
-  让 tail 必定被打包进 TurnEntry，进入 user_turns_list，
+  让 tail 必定被加入 `messages: Vec<ChatMessage>`，
   从而可被 L2/L3 正常管理。
 **为什么可以合并**：两个根因的源头相同——start_idx 设置位置不对。
 ```
@@ -239,7 +239,7 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 
 修复前：start_idx = messages.len() → tail 被跳过 → 幽灵产生
 修复后：start_idx = context_tail_start → new_messages 包含完整 tail
-         → on_new_user_turn 将 tail 打包为 TurnEntry
+         → tail 被正确 push 到 messages
          → 记账 B 包含 tail → L2/L3 可正常扣减 → 无幽灵
 ```
 

@@ -29,7 +29,22 @@ pub struct ChatMessageContentPart {
     pub text: Option<String>,
 }
 
+/// Internal semantic tag for messages that share the same LLM wire role.
+/// `#[serde(skip)]` — never serialized; defaults to `Normal` on deserialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageKind {
+    #[default]
+    Normal,
+    /// Steering instruction injected mid-turn; LLM sees `role: user`.
+    Steering,
+    /// Compaction summary replacing older messages; LLM sees `role: user`.
+    CompactionSummary,
+}
+
 /// 单条对话消息（与 OpenAI API 兼容，wire 格式为 snake_case）。
+///
+/// Three `#[serde(skip)]` metadata fields (`msg_id`, `kind`, `timestamp`) carry
+/// internal bookkeeping that never leaves the process boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatMessage {
@@ -42,6 +57,16 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+
+    /// Transcript `MessageEntry.id` — set during hydration or after `append_message`.
+    #[serde(skip)]
+    pub msg_id: Option<String>,
+    /// Semantic tag distinguishing steering / compaction-summary from normal messages.
+    #[serde(skip)]
+    pub kind: MessageKind,
+    /// ISO-8601 timestamp from the transcript, used for day-based filtering.
+    #[serde(skip)]
+    pub timestamp: Option<String>,
 }
 
 impl ChatMessage {
@@ -52,6 +77,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::Normal,
+            timestamp: None,
         }
     }
 
@@ -62,6 +90,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::Normal,
+            timestamp: None,
         }
     }
 
@@ -75,6 +106,9 @@ impl ChatMessage {
             name: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::Normal,
+            timestamp: None,
         }
     }
 
@@ -85,6 +119,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            msg_id: None,
+            kind: MessageKind::Normal,
+            timestamp: None,
         }
     }
 
@@ -95,7 +132,41 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::Normal,
+            timestamp: None,
         }
+    }
+
+    pub fn steering(text: impl Into<String>) -> Self {
+        Self {
+            role: ChatMessageRole::User,
+            content: Some(ChatMessageContent::Text(text.into())),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::Steering,
+            timestamp: None,
+        }
+    }
+
+    pub fn compaction_summary(text: impl Into<String>) -> Self {
+        Self {
+            role: ChatMessageRole::User,
+            content: Some(ChatMessageContent::Text(text.into())),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::CompactionSummary,
+            timestamp: None,
+        }
+    }
+
+    /// Replace the text content in-place (used by L0/L1 compaction on tool results).
+    pub fn set_text_content(&mut self, text: String) {
+        self.content = Some(ChatMessageContent::Text(text));
     }
 
     /// Helper to extract text content (for backward compat).

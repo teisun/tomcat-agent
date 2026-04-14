@@ -43,7 +43,7 @@ pub fn check_after_reply(state: &mut ContextState, event_bus: &dyn EventBus) -> 
 /// - ratio >= 0.98：未完成则 await（30s 超时）
 pub async fn check_before_request(state: &mut ContextState, event_bus: &dyn EventBus) -> bool {
     let ratio = state.usage_ratio();
-    let user_turns_len = state.user_turns_list.len();
+    let user_turns_len = state.turn_count();
     let preheat_finished = state.preheat.is_finished();
     let preheat_running = state.preheat.is_running();
     info!(

@@ -1,5 +1,7 @@
 # LLM 工具轮次、CLI 展示与 Thinking 协议研究报告
 
+> **⚠️ 过时提示（2026-04）**：本文中提及的 `AgentMessage` 枚举已在 `feature/collapse-to-chatmsg` 分支中删除，thinking 相关方案需基于 `ChatMessage` + `MessageKind` 重新设计。现行架构见 [collapse-to-chatmsg-guide.md](./collapse-to-chatmsg-guide.md)。
+
 > 日期：2026-03-29
 > 范围：pi-rust-wasm 现状分析 + pi-mono / openclaw 设计对照 + 业界方案 + 实施推荐
 

@@ -13,14 +13,12 @@ pub use context::{build_context_from_state, init_context_state};
 pub use session_impl::generate_entry_id;
 pub use session_impl::SessionManager;
 pub use types::{
-    compound_turn_id, estimate_turn_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
-    ContextLiveMetrics, ContextState, TurnEntry,
+    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
+    ContextLiveMetrics, ContextState,
 };
 
 const BRANCH_MAX_ENTRIES: usize = 2000;
 
-#[cfg(test)]
-use crate::core::agent_loop::AgentMessage;
 #[cfg(test)]
 use crate::core::session::transcript::{BranchSummaryEntry, MessageEntry, TranscriptEntry};
 #[cfg(test)]

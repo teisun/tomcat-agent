@@ -47,7 +47,7 @@ pub enum AppError {
     /// 内部逻辑错误（不可恢复）。
     #[error("内部错误: {0}")]
     Internal(String),
-    /// `apply_boundary` 时 `covered_end_id` 在当前 `user_turns_list` 中无法匹配（陈旧结果，不可重试 restore）。
+    /// `apply_boundary` 时 `covered_end_id` 在当前 `messages` 中无法匹配（陈旧结果，不可重试 restore）。
     #[error("apply_boundary: 无法在会话列表中定位 covered_end_id={covered_end_id:?}")]
     ApplyBoundaryStale { covered_end_id: String },
 }

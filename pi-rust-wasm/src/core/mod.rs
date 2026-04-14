@@ -7,16 +7,13 @@ pub mod compaction;
 pub mod confirmation;
 pub mod context_metrics;
 pub mod executor;
-pub(crate) mod llm;
+pub mod llm;
 pub mod primitives;
 pub mod session;
 pub mod system_prompt;
 pub mod tools;
 
-pub use agent_loop::{
-    agent_messages_from_chat, convert_to_llm_format, AgentLoop, AgentLoopConfig, AgentMessage,
-    AgentRunResult, ToolCallInfo,
-};
+pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentRunResult, ToolCallInfo};
 pub use confirmation::{AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider};
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use executor::DefaultPrimitiveExecutor;
@@ -30,7 +27,7 @@ pub use primitives::{
 };
 pub use session::{
     build_context_from_state, compound_turn_id, init_context_state, load_store, save_store,
-    ApiUsage, BranchSummaryEntry, ContextState, SessionEntry, SessionHeader, SessionManager,
-    SessionStore, TranscriptEntry, TurnEntry, DEFAULT_SESSION_KEY,
+    ApiUsage, BranchSummaryEntry, CompactionResult, ContextState, SessionEntry, SessionHeader,
+    SessionManager, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use tools::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};

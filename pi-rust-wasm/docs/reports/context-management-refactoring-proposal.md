@@ -1,5 +1,7 @@
 # pi-rust-wasm 上下文管理重构建议报告
 
+> **⚠️ 过时提示（2026-04）**：本提议已实施完成。`TurnEntry` / `AgentMessage` / `convert_to_llm_format` 等已删除，统一为 `ChatMessage` + `MessageKind`。实施状态见 [feature-collapse-to-chatmsg.md](../status/feature-collapse-to-chatmsg.md)，重构导读见 [collapse-to-chatmsg-guide.md](./collapse-to-chatmsg-guide.md)。
+
 > 参考系：[Claude Code 上下文管理机制](cc-fork-01/docs/CONTEXT_MANAGEMENT.md) + [cc-fork-01/src](cc-fork-01/src) 源码
 > 目标系：[pi-rust-wasm](pi-rust-wasm/) 项目
 

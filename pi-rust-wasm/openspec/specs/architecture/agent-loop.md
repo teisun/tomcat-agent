@@ -221,26 +221,26 @@ fn run_reasoning_loop(session, messages) -> Result:
 
 ---
 
-## 13.4 消息类型边界设计
+## 13.4 消息类型设计
 
-与 pi-mono 对齐：**Agent 内部全程使用 AgentMessage，仅在 LLM 调用边界转换为 LLM Message**。
+> **[已重构]** 原 `AgentMessage` 中间层已删除（见 `feature/collapse-to-chatmsg`），统一使用 `ChatMessage`（OpenAI wire format）。不同语义通过 `MessageKind` 字段区分，无需转换层。
 
 ```
-AgentMessage                               LLM Message
-(内部流转，可含自定义类型)                  (LLM API 格式)
-┌──────────────────────┐                  ┌──────────────────────┐
-│ UserMessage          │                  │ { role: "user" }     │
-│ AssistantMessage     │  ──转换边界──→   │ { role: "assistant" }│
-│ ToolResultMessage    │                  │ { role: "tool" }     │
-│ SystemMessage        │                  │ { role: "system" }   │
-│ SteeringMessage      │  (转换同 User)   │                      │
-│ CompactionSummary    │  (替换旧消息)    │ { role: "user" }    │
-└──────────────────────┘                  └──────────────────────┘
+ChatMessage（统一表示，直接发给 LLM）
+┌──────────────────────────────────────────┐
+│ role: user      + kind: Normal           │  普通用户消息
+│ role: assistant                          │  助手回复
+│ role: tool                               │  工具结果
+│ role: system                             │  系统提示
+│ role: user      + kind: Steering         │  内部 Steering 指令
+│ role: user      + kind: CompactionSummary│  压缩摘要（替换旧消息）
+└──────────────────────────────────────────┘
+附加 #[serde(skip)] 字段: msg_id, kind, timestamp（不影响 wire format）
 ```
 
-- **SteeringMessage**：标记「来自用户的中断」，转换时按 UserMessage 处理，可带 steering 时间戳等元数据。
-- **CompactionSummary**：压缩后的历史摘要，替换被压缩的消息段，以一条 user/system 消息发给 LLM。
-- 该边界保证：更换 LLM Provider 或 API 格式时，仅改转换函数，Loop 内部逻辑不变。
+- **Steering**（`kind: MessageKind::Steering`）：标记内部指令，role 为 user 但不计入 turn 边界。
+- **CompactionSummary**（`kind: MessageKind::CompactionSummary`）：压缩后的历史摘要，替换被压缩的消息段。
+- 由于内存表示与 wire format 统一，更换 LLM Provider 无需修改转换逻辑。
 
 ---
 

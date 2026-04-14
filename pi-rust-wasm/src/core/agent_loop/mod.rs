@@ -23,8 +23,8 @@
 //! │   tool_definitions ► 传入 LLM 的工具 JSON Schema 列表                         │
 //! ├──────────────────────────────────────────────────────────────────────────────┤
 //! │ 运行时状态                                                                     │
-//! │   steering_queue  ─► Mutex<Vec<AgentMessage::Steering>>（跨线程注入）          │
-//! │   follow_up_queue ─► Mutex<Vec<AgentMessage::User>>（同上下文追问）            │
+//! │   steering_queue  ─► Mutex<Vec<ChatMessage>>（跨线程注入 steering）            │
+//! │   follow_up_queue ─► Mutex<Vec<ChatMessage>>（同上下文追问）                  │
 //! │   abort_signal    ─► AtomicBool（Ctrl+C 中断）                                │
 //! │   （流式 delta 通过 EventBus message_update 事件推送到渲染层）                 │
 //! └──────────────────────────────────────────────────────────────────────────────┘
@@ -108,18 +108,19 @@
 //!             └──► LoopError::Fatal
 //! ```
 //!
-//! ## AgentMessage 消息类型与 LLM 格式转换
+//! ## 消息类型
+//!
+//! 消息统一使用 `ChatMessage`（OpenAI wire format），通过 `MessageKind` 字段区分语义：
 //!
 //! ```text
-//!   AgentMessage                           ChatMessage (OpenAI)
-//!   ─────────────────────────────────────────────────────────────
-//!   User     { text }               ──►  role=user,      content=text
-//!   Steering { text, timestamp }    ──►  role=user,      content=text
-//!   CompactionSummary { summary }   ──►  role=user,      content=summary
-//!   System   { text }               ──►  role=system,    content=text
-//!   Assistant{ text, tool_calls=[] }──►  role=assistant, content=text
-//!   Assistant{ text, tool_calls=[…]}──►  role=assistant, tool_calls=[…]
-//!   ToolResult{ id, content, .. }   ──►  role=tool,      tool_call_id=id
+//!   ChatMessage (role + kind)
+//!   ──────────────────────────────────────────────
+//!   role=user,      kind=Normal             普通用户消息
+//!   role=user,      kind=Steering           Steering 指令
+//!   role=user,      kind=CompactionSummary  Compaction 摘要
+//!   role=system                             System prompt
+//!   role=assistant                          LLM 回复 (含 tool_calls)
+//!   role=tool                               工具执行结果
 //! ```
 
 mod convert;
@@ -129,9 +130,4 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-#[allow(deprecated)]
-pub use convert::compact_messages;
-pub use convert::{agent_messages_from_chat, convert_to_llm_format};
-pub use types::{
-    AgentLoop, AgentLoopConfig, AgentMessage, AgentRunResult, LoopError, ToolCallInfo,
-};
+pub use types::{AgentLoop, AgentLoopConfig, AgentRunResult, LoopError, ToolCallInfo};

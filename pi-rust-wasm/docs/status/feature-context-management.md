@@ -19,8 +19,8 @@
 | 子项 | 状态 | 说明 |
 |------|------|------|
 | 17.1 ContextConfig | DONE | `config.rs` 新增 `[context]` 配置节与 `ContextConfig` 结构体 |
-| 17.2 数据结构 | DONE | `TurnEntry`/`ContextState`/`BranchSummaryEntry` 增强；`init_context_state` |
-| 17.3 动态估算 | DONE | `on_message_appended`/`on_new_user_turn`/`is_over_budget` |
+| 17.2 数据结构 | DONE | ~~`TurnEntry`~~/`ContextState`/`BranchSummaryEntry` 增强；`init_context_state` [已重构: `TurnEntry` 删除，改为 `messages: Vec<ChatMessage>`] |
+| 17.3 动态估算 | DONE | `on_message_appended`/~~`on_new_user_turn`~~/`is_over_budget` [已重构: `on_new_user_turn` 删除，改为直接 `messages.push`] |
 | 17.4 Layer 0 | DONE | `truncate_tool_result_if_needed`（Unicode 安全截断） |
 | 17.5 Layer 1 | DONE | `compact_tool_results`（占位符替换） |
 | 17.6 Layer 2 | DONE | `run_compaction_loop`（LLM 循环 Compaction） |
@@ -47,7 +47,7 @@
 - `src/infra/mod.rs` — 导出 `ContextConfig`、`compute_context_budget_chars`
 - `src/infra/events.rs` — 新增 `CompactionError`、`ToolResultTruncated` 事件
 - `src/core/compaction.rs` — 四层防护 + Prompt 模板；`run_compaction_cascade` 抽取
-- `src/core/session/manager.rs` — `TurnEntry`/`ContextState`/`init_context_state`/`build_context_from_state`/`estimate_turn_chars`
+- `src/core/session/manager.rs` — ~~`TurnEntry`~~/`ContextState`/`init_context_state`/`build_context_from_state`/~~`estimate_turn_chars`~~ [已重构: `TurnEntry` → `Vec<ChatMessage>`，`estimate_turn_chars` → `estimate_msg_chars`]
 - `src/core/session/transcript.rs` — `BranchSummaryEntry` 增强 `covered_start_id`/`covered_end_id`/`covered_count`
 - `src/core/session/mod.rs` — 导出新类型
 - `src/core/agent_loop.rs` — Layer 0 集成 + ContextOverflow 重试 + `context_state` 管理 + `max_tool_rounds` → `usize::MAX`

@@ -1,5 +1,7 @@
 # Tool 消息链违规根因报告
 
+> **⚠️ 过时提示（2026-04）**：本文中提及的 `AgentMessage`、`convert_to_llm_format`、`TurnEntry` 等类型已在 `feature/collapse-to-chatmsg` 分支中删除。消息链校验现在直接在 `ChatMessage` 层面操作。现行架构见 [collapse-to-chatmsg-guide.md](./collapse-to-chatmsg-guide.md)。
+
 > 创建：2026-04-04
 > 状态：根因已定位，修复待实施
 > 关联错误：`OpenAI API 400: messages with role 'tool' must be a response to a preceeding message with 'tool_calls'`

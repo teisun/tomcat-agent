@@ -1,5 +1,7 @@
 # 计划范例：TASK-21 §5.7 消息级 ID 与 compaction 锚点对齐
 
+> **⚠️ 过时提示（2026-04）**：本示例基于重构前架构，其中 `UserTurn`、`SummaryTurn`、`TurnEntry`、`user_turns_list`、`fold_entries_to_turns`、`on_new_user_turn`、`compound_turn_id` 等概念已在 `feature/collapse-to-chatmsg` 分支中删除。统一为 `ChatMessage` + `MessageKind`，详见 [docs/reports/collapse-to-chatmsg-guide.md](../../pi-rust-wasm/docs/reports/collapse-to-chatmsg-guide.md)。本文仅保留作为计划格式范例参考。
+
 > 本文档由 Cursor 计划 `task-21_消息级_id` 迁入仓库，**路径已改为以 `agents/plan/` 为基准的相对链接**。任务已在主线完成；保留作 [PLAN_SPEC.md](./PLAN_SPEC.md) 第四节「完整计划」范例（认领流程、子项表、现状差距、API 一览、依赖图、集成 §4、Todo 第七节等）。
 
 ## 认领与分支（Dispatcher）

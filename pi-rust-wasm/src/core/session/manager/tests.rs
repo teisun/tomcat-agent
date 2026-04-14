@@ -1,5 +1,6 @@
 use super::*;
 use crate::core::compaction::preheat::Preheat;
+use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -263,7 +264,7 @@ fn init_context_state_empty_session() {
 
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "system prompt").unwrap();
-    assert!(state.user_turns_list.is_empty());
+    assert!(state.messages.is_empty());
     assert_eq!(state.estimate_context_chars, "system prompt".len());
     assert_eq!(state.context_budget_chars, 1_088_000);
 
@@ -290,7 +291,8 @@ fn init_context_state_with_messages() {
 
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
-    assert_eq!(state.user_turns_list.len(), 2);
+    // 2 user + 2 assistant = 4 messages
+    assert_eq!(state.messages.len(), 4);
     assert!(state.estimate_context_chars > 0);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -313,41 +315,30 @@ fn init_context_state_with_compaction_entry() {
 
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
-    assert_eq!(state.user_turns_list.len(), 2);
-    if let TurnEntry::SummaryTurn { summary, .. } = &state.user_turns_list[0] {
-        assert_eq!(summary, "summary of old turns");
-    } else {
-        panic!("first turn should be SummaryTurn");
-    }
+    // CompactionSummary + user + assistant = 3 messages
+    assert_eq!(state.messages.len(), 3);
+    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(state.messages[0].text_content(), Some("summary of old turns"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn build_context_from_state_flattens_turns() {
+    let mut summary_msg = ChatMessage::compaction_summary("summary");
+    summary_msg.msg_id = Some("sum_1".to_string());
+    summary_msg.timestamp = Some("2026-04-04T12:00:00Z".to_string());
+
+    let mut user_msg = ChatMessage::user("hello");
+    user_msg.msg_id = Some("turn_1_u".to_string());
+    user_msg.timestamp = Some("2026-04-04T12:00:00Z".to_string());
+
+    let mut asst_msg = ChatMessage::assistant("world");
+    asst_msg.msg_id = Some("turn_1_a".to_string());
+    asst_msg.timestamp = Some("2026-04-04T12:00:00Z".to_string());
+
     let state = ContextState {
-        user_turns_list: vec![
-            TurnEntry::SummaryTurn {
-                id: "sum_1".to_string(),
-                summary: "summary".to_string(),
-                timestamp: "2026-04-04T12:00:00Z".to_string(),
-            },
-            TurnEntry::UserTurn {
-                id: super::compound_turn_id("turn_1_u", "turn_1_a"),
-                start_id: "turn_1_u".to_string(),
-                end_id: "turn_1_a".to_string(),
-                messages: vec![
-                    AgentMessage::User {
-                        text: "hello".to_string(),
-                    },
-                    AgentMessage::Assistant {
-                        text: "world".to_string(),
-                        tool_calls: vec![],
-                    },
-                ],
-                timestamp: "2026-04-04T12:00:00Z".to_string(),
-            },
-        ],
+        messages: vec![summary_msg, user_msg, asst_msg],
         estimate_context_chars: 100,
         context_budget_chars: 1000,
         context_budget_tokens: 250,
@@ -360,9 +351,9 @@ fn build_context_from_state_flattens_turns() {
     };
     let msgs = build_context_from_state(&state);
     assert_eq!(msgs.len(), 3);
-    assert!(matches!(&msgs[0], AgentMessage::CompactionSummary { .. }));
-    assert!(matches!(&msgs[1], AgentMessage::User { .. }));
-    assert!(matches!(&msgs[2], AgentMessage::Assistant { .. }));
+    assert_eq!(msgs[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(msgs[1].role, ChatMessageRole::User);
+    assert_eq!(msgs[2].role, ChatMessageRole::Assistant);
 }
 
 #[test]
@@ -374,7 +365,7 @@ fn init_context_state_no_session() {
 
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
-    assert!(state.user_turns_list.is_empty());
+    assert!(state.messages.is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -422,21 +413,17 @@ fn init_context_state_boundary_discards_prior() {
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
 
-    assert_eq!(state.user_turns_list.len(), 2, "boundary + 1 new turn");
+    // CompactionSummary("boundary summary") + user("new q") + assistant("new a") = 3 messages
+    assert_eq!(state.messages.len(), 3, "boundary summary + 2 new messages");
 
-    let has_boundary_summary = state.user_turns_list.iter().any(
-        |t| matches!(t, TurnEntry::SummaryTurn { summary, .. } if summary == "boundary summary"),
-    );
+    let has_boundary_summary = state.messages.iter().any(|m| {
+        m.kind == MessageKind::CompactionSummary
+            && m.text_content() == Some("boundary summary")
+    });
     assert!(has_boundary_summary, "should contain boundary summary");
 
-    let has_old = state.user_turns_list.iter().any(|t| {
-        if let TurnEntry::UserTurn { messages, .. } = t {
-            messages
-                .iter()
-                .any(|m| matches!(m, AgentMessage::User { text } if text.contains("old")))
-        } else {
-            false
-        }
+    let has_old = state.messages.iter().any(|m| {
+        m.text_content().is_some_and(|t| t.contains("old"))
     });
     assert!(!has_old, "old turns before boundary should be discarded");
 
@@ -464,7 +451,7 @@ fn init_context_state_non_boundary_compaction_preserves_prior() {
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
 
     assert!(
-        state.user_turns_list.len() >= 3,
+        state.messages.len() >= 3,
         "should preserve pre-compaction turn + summary + post turn"
     );
 
@@ -611,57 +598,49 @@ fn fold_start_empty() {
     assert_eq!(compute_fold_start(&entries, today, 10), 0);
 }
 
-// ────────── filter_turns_by_day 纯函数测试 ──────────────────────────
+// ────────── filter_messages_by_day 纯函数测试 ──────────────────────────
 
-fn make_test_turn(ts: &str) -> TurnEntry {
-    let sid = format!("test_{}", ts);
-    let eid = sid.clone();
-    TurnEntry::UserTurn {
-        id: super::compound_turn_id(&sid, &eid),
-        start_id: sid,
-        end_id: eid,
-        messages: vec![AgentMessage::User {
-            text: "q".to_string(),
-        }],
-        timestamp: ts.to_string(),
-    }
+fn make_test_msg(ts: &str) -> ChatMessage {
+    let mut m = ChatMessage::user("q");
+    m.timestamp = Some(ts.to_string());
+    m
 }
 
 #[test]
 fn filter_enough_today_no_backfill() {
     let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
-    let mut turns = Vec::new();
+    let mut messages = Vec::new();
     for _ in 0..5 {
-        turns.push(make_test_turn("2026-04-03T10:00:00Z"));
+        messages.push(make_test_msg("2026-04-03T10:00:00Z"));
     }
     for _ in 0..12 {
-        turns.push(make_test_turn("2026-04-04T10:00:00Z"));
+        messages.push(make_test_msg("2026-04-04T10:00:00Z"));
     }
 
-    let selected = filter_turns_by_day(turns, today, 10);
+    let selected = filter_turns_by_day(messages, today, 10);
     assert_eq!(selected.len(), 12, "today has 12 >= 10, no backfill needed");
     assert!(selected
         .iter()
-        .all(|t| parse_date(t.timestamp()) == Some(today)));
+        .all(|m| parse_date(m.timestamp.as_deref().unwrap_or("")) == Some(today)));
 }
 
 #[test]
 fn filter_backfill_to_10() {
     let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
-    let mut turns = Vec::new();
+    let mut messages = Vec::new();
     for _ in 0..12 {
-        turns.push(make_test_turn("2026-04-03T10:00:00Z"));
+        messages.push(make_test_msg("2026-04-03T10:00:00Z"));
     }
     for _ in 0..3 {
-        turns.push(make_test_turn("2026-04-04T10:00:00Z"));
+        messages.push(make_test_msg("2026-04-04T10:00:00Z"));
     }
 
-    let selected = filter_turns_by_day(turns, today, 10);
+    let selected = filter_turns_by_day(messages, today, 10);
     assert_eq!(selected.len(), 10, "3 today + 7 backfill = 10");
 
     let today_count = selected
         .iter()
-        .filter(|t| parse_date(t.timestamp()) == Some(today))
+        .filter(|m| parse_date(m.timestamp.as_deref().unwrap_or("")) == Some(today))
         .count();
     assert_eq!(today_count, 3);
 }
@@ -669,11 +648,11 @@ fn filter_backfill_to_10() {
 #[test]
 fn filter_cross_midnight() {
     let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
-    let turns: Vec<_> = (0..15)
-        .map(|_| make_test_turn("2026-04-03T23:00:00Z"))
+    let messages: Vec<_> = (0..15)
+        .map(|_| make_test_msg("2026-04-03T23:00:00Z"))
         .collect();
 
-    let selected = filter_turns_by_day(turns, today, 10);
+    let selected = filter_turns_by_day(messages, today, 10);
     assert_eq!(
         selected.len(),
         10,
@@ -684,11 +663,11 @@ fn filter_cross_midnight() {
 #[test]
 fn filter_all_today_gt_10() {
     let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();
-    let turns: Vec<_> = (0..15)
-        .map(|_| make_test_turn("2026-04-04T10:00:00Z"))
+    let messages: Vec<_> = (0..15)
+        .map(|_| make_test_msg("2026-04-04T10:00:00Z"))
         .collect();
 
-    let selected = filter_turns_by_day(turns, today, 10);
+    let selected = filter_turns_by_day(messages, today, 10);
     assert_eq!(
         selected.len(),
         15,
@@ -727,7 +706,7 @@ fn try_append_returns_err_on_violation() {
 #[test]
 fn test_estimated_token_count_uses_api_usage_when_present() {
     let state = ContextState {
-        user_turns_list: vec![],
+        messages: vec![],
         estimate_context_chars: 40_000,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -752,7 +731,7 @@ fn test_estimated_token_count_uses_api_usage_when_present() {
 #[test]
 fn test_estimated_token_count_fallback_to_chars_when_no_usage() {
     let state = ContextState {
-        user_turns_list: vec![],
+        messages: vec![],
         estimate_context_chars: 8000,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -774,7 +753,7 @@ fn test_estimated_token_count_fallback_to_chars_when_no_usage() {
 #[test]
 fn test_usage_ratio_after_invalidate() {
     let mut state = ContextState {
-        user_turns_list: vec![],
+        messages: vec![],
         estimate_context_chars: 10_000,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -828,7 +807,7 @@ fn persist_context_observability_writes_sessions_json() {
     mgr.create_session(key, None).unwrap();
 
     let state = ContextState {
-        user_turns_list: vec![],
+        messages: vec![],
         estimate_context_chars: 0,
         context_budget_chars: 1000,
         context_budget_tokens: 250,

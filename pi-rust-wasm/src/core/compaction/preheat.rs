@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
-use crate::core::llm::{ChatMessage, ChatRequest, LlmProvider};
+use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, MessageKind};
 use crate::core::session::manager::{
-    compound_turn_id, estimate_turn_chars, estimated_tokens_from_chars, CompactionResult, TurnEntry,
+    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, CompactionResult,
 };
 use crate::core::session::transcript::{
     insert_entry_after_message_id, BranchSummaryEntry, TranscriptEntry,
@@ -228,7 +228,7 @@ impl Preheat {
 
     // --- 状态转换 ---
 
-    /// Idle → Running。条件：ratio >= 0.50、有 turns、且当前为 **Idle**。
+    /// Idle → Running。条件：ratio >= 0.50、有 messages、且当前为 **Idle**。
     /// `CachedCompleted` / `Running` / `ExhaustedPending` 时均不启动，避免已有未消费摘要时又开新预热。
     /// spawn 内 generate_summary 最多 3 次 retry；
     /// 成功且 `insert_entry_after_message_id` 成功（或无 transcript 路径）时 emit AutoCompactionEnd；耗尽 emit CompactionError(exhausted)。
@@ -238,7 +238,7 @@ impl Preheat {
     pub fn try_start(
         &mut self,
         usage_ratio: f64,
-        turns: &[TurnEntry],
+        messages: &[ChatMessage],
         transcript_path: &std::path::Path,
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
@@ -250,11 +250,11 @@ impl Preheat {
         if usage_ratio < 0.50 {
             return false;
         }
-        if turns.is_empty() {
+        if messages.is_empty() {
             return false;
         }
 
-        let snapshot = turns.to_vec();
+        let snapshot = messages.to_vec();
         let Some((covered_start_id, covered_end_id)) =
             snapshot_message_bounds_for_preheat(&snapshot)
         else {
@@ -283,7 +283,7 @@ impl Preheat {
                 .await
                 {
                     Ok(summary_text) => {
-                        let covered_chars: usize = snapshot.iter().map(estimate_turn_chars).sum();
+                        let covered_chars: usize = snapshot.iter().map(estimate_msg_chars).sum();
                         let est_covered_tok = estimated_tokens_from_chars(covered_chars);
                         let est_summary_tok = estimated_tokens_from_chars(summary_text.len());
                         let est_saved = est_covered_tok.saturating_sub(est_summary_tok);
@@ -381,7 +381,7 @@ impl Preheat {
             )))
         });
 
-        let Some((run_s, run_e)) = snapshot_message_bounds_for_preheat(turns) else {
+        let Some((run_s, run_e)) = snapshot_message_bounds_for_preheat(messages) else {
             return false;
         };
         self.state = PreheatState::Running {
@@ -400,7 +400,7 @@ impl Preheat {
     pub fn try_restart_if_pending(
         &mut self,
         usage_ratio: f64,
-        turns: &[TurnEntry],
+        messages: &[ChatMessage],
         transcript_path: &std::path::Path,
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
@@ -410,7 +410,7 @@ impl Preheat {
             return false;
         }
         self.state = PreheatState::Idle;
-        self.try_start(usage_ratio, turns, transcript_path, llm, config, event_bus)
+        self.try_start(usage_ratio, messages, transcript_path, llm, config, event_bus)
     }
 
     /// 非阻塞获取结果。CachedCompleted → Idle + Completed；
@@ -506,14 +506,14 @@ impl Preheat {
 // generate_summary
 // ---------------------------------------------------------------------------
 
-/// 根据 turns snapshot 生成 LLM 摘要（首次或 UPDATE 模式）。
+/// 根据 messages snapshot 生成 LLM 摘要（首次或 UPDATE 模式）。
 pub async fn generate_summary(
-    snapshot: &[TurnEntry],
+    snapshot: &[ChatMessage],
     previous_summary: Option<&str>,
     llm: &dyn LlmProvider,
     compaction_model: &str,
 ) -> Result<String, AppError> {
-    let batch_text = turns_to_text(snapshot);
+    let batch_text = messages_to_text(snapshot);
 
     let prompt = if let Some(existing) = previous_summary {
         UPDATE_SUMMARIZATION_PROMPT.replace("{existing_summary}", existing)
@@ -547,20 +547,20 @@ pub async fn generate_summary(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// §5.7：`insert_entry_after_message_id` 的锚点必须是 **MessageId**（`UserTurn.end_id`），
-/// 不能是 `SummaryTurn.id` 或 `UserTurn.id` 的复合 `S::E`。快照首尾可能是 `SummaryTurn`，
-/// 因此取**首个**与**最后一个** `UserTurn` 的 `start_id` / `end_id`。
-fn snapshot_message_bounds_for_preheat(turns: &[TurnEntry]) -> Option<(String, String)> {
-    let first_start = turns.iter().find_map(|t| {
-        if let TurnEntry::UserTurn { start_id, .. } = t {
-            Some(start_id.clone())
+/// §5.7：`insert_entry_after_message_id` 的锚点必须是 **MessageId**（transcript MessageEntry 的 id），
+/// 不能是 CompactionSummary 消息的 msg_id（那是 BranchSummary entry 的 id）。
+/// 因此跳过 CompactionSummary 消息，取首个与最后一个普通消息的 msg_id。
+fn snapshot_message_bounds_for_preheat(messages: &[ChatMessage]) -> Option<(String, String)> {
+    let first_start = messages.iter().find_map(|m| {
+        if m.kind != MessageKind::CompactionSummary {
+            m.msg_id.clone()
         } else {
             None
         }
     })?;
-    let last_end = turns.iter().rev().find_map(|t| {
-        if let TurnEntry::UserTurn { end_id, .. } = t {
-            Some(end_id.clone())
+    let last_end = messages.iter().rev().find_map(|m| {
+        if m.kind != MessageKind::CompactionSummary {
+            m.msg_id.clone()
         } else {
             None
         }
@@ -579,53 +579,57 @@ fn emit_agent_event(event_bus: &dyn EventBus, event: AgentEvent) {
     let _ = event_bus.emit_sync(&event_name, ctx);
 }
 
-fn find_last_summary(turns: &[TurnEntry]) -> Option<String> {
-    turns.iter().rev().find_map(|t| {
-        if let TurnEntry::SummaryTurn { summary, .. } = t {
-            Some(summary.clone())
+fn find_last_summary(messages: &[ChatMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|m| {
+        if m.kind == MessageKind::CompactionSummary {
+            m.text_content().map(|s| s.to_string())
         } else {
             None
         }
     })
 }
 
-fn turns_to_text(turns: &[TurnEntry]) -> String {
+pub(super) fn messages_to_text(messages: &[ChatMessage]) -> String {
     let mut buf = String::new();
-    for turn in turns {
-        match turn {
-            TurnEntry::UserTurn { messages, .. } => {
-                for msg in messages {
-                    match msg {
-                        crate::core::agent_loop::AgentMessage::User { text } => {
-                            buf.push_str("[User] ");
-                            buf.push_str(text);
-                            buf.push('\n');
-                        }
-                        crate::core::agent_loop::AgentMessage::Assistant { text, .. } => {
-                            buf.push_str("[Assistant] ");
-                            buf.push_str(text);
-                            buf.push('\n');
-                        }
-                        crate::core::agent_loop::AgentMessage::ToolResult { content, .. } => {
-                            buf.push_str("[ToolResult] ");
-                            let preview = if content.len() > 200 {
-                                let end = floor_char_boundary(content, 200);
-                                &content[..end]
-                            } else {
-                                content
-                            };
-                            buf.push_str(preview);
-                            buf.push('\n');
-                        }
-                        _ => {}
-                    }
+    for m in messages {
+        match m.kind {
+            MessageKind::CompactionSummary => {
+                buf.push_str("[Previous Summary]\n");
+                if let Some(text) = m.text_content() {
+                    buf.push_str(text);
+                    buf.push('\n');
                 }
             }
-            TurnEntry::SummaryTurn { summary, .. } => {
-                buf.push_str("[Previous Summary]\n");
-                buf.push_str(summary);
-                buf.push('\n');
-            }
+            _ => match m.role {
+                ChatMessageRole::User => {
+                    buf.push_str("[User] ");
+                    if let Some(text) = m.text_content() {
+                        buf.push_str(text);
+                    }
+                    buf.push('\n');
+                }
+                ChatMessageRole::Assistant => {
+                    buf.push_str("[Assistant] ");
+                    if let Some(text) = m.text_content() {
+                        buf.push_str(text);
+                    }
+                    buf.push('\n');
+                }
+                ChatMessageRole::Tool => {
+                    buf.push_str("[ToolResult] ");
+                    if let Some(text) = m.text_content() {
+                        let preview = if text.len() > 200 {
+                            let end = floor_char_boundary(text, 200);
+                            &text[..end]
+                        } else {
+                            text
+                        };
+                        buf.push_str(preview);
+                    }
+                    buf.push('\n');
+                }
+                _ => {}
+            },
         }
     }
     buf
@@ -634,57 +638,56 @@ fn turns_to_text(turns: &[TurnEntry]) -> String {
 #[cfg(test)]
 mod snapshot_message_bounds_tests {
     use super::snapshot_message_bounds_for_preheat;
-    use crate::core::session::manager::compound_turn_id;
-    use crate::core::session::manager::TurnEntry;
+    use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
 
-    fn ut(start: &str, end: &str) -> TurnEntry {
-        TurnEntry::UserTurn {
-            id: compound_turn_id(start, end),
-            start_id: start.to_string(),
-            end_id: end.to_string(),
-            messages: vec![],
-            timestamp: "ts".into(),
+    fn normal_msg(id: &str) -> ChatMessage {
+        ChatMessage {
+            role: ChatMessageRole::User,
+            content: Some(ChatMessageContent::Text("text".into())),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            msg_id: Some(id.to_string()),
+            kind: MessageKind::Normal,
+            timestamp: Some("ts".into()),
         }
+    }
+
+    fn summary_msg(id: &str) -> ChatMessage {
+        let mut m = ChatMessage::compaction_summary("prev");
+        m.msg_id = Some(id.to_string());
+        m
     }
 
     #[test]
     fn skips_leading_summary_turn() {
-        let turns = vec![
-            TurnEntry::SummaryTurn {
-                id: "batch_S::batch_E".into(),
-                summary: "prev".into(),
-                timestamp: "t0".into(),
-            },
-            ut("m0", "m1"),
-            ut("m2", "m3"),
+        let messages = vec![
+            summary_msg("batch_S::batch_E"),
+            normal_msg("m0"),
+            normal_msg("m1"),
+            normal_msg("m2"),
+            normal_msg("m3"),
         ];
-        let (s, e) = snapshot_message_bounds_for_preheat(&turns).unwrap();
+        let (s, e) = snapshot_message_bounds_for_preheat(&messages).unwrap();
         assert_eq!(s, "m0");
         assert_eq!(e, "m3");
     }
 
     #[test]
     fn skips_trailing_summary_turn() {
-        let turns = vec![
-            ut("a", "b"),
-            TurnEntry::SummaryTurn {
-                id: "x::y".into(),
-                summary: "s".into(),
-                timestamp: "t1".into(),
-            },
+        let messages = vec![
+            normal_msg("a"),
+            normal_msg("b"),
+            summary_msg("x::y"),
         ];
-        let (s, e) = snapshot_message_bounds_for_preheat(&turns).unwrap();
+        let (s, e) = snapshot_message_bounds_for_preheat(&messages).unwrap();
         assert_eq!(s, "a");
         assert_eq!(e, "b");
     }
 
     #[test]
-    fn none_when_no_user_turn() {
-        let turns = vec![TurnEntry::SummaryTurn {
-            id: "only::summary".into(),
-            summary: "s".into(),
-            timestamp: "t".into(),
-        }];
-        assert!(snapshot_message_bounds_for_preheat(&turns).is_none());
+    fn none_when_no_normal_message() {
+        let messages = vec![summary_msg("only::summary")];
+        assert!(snapshot_message_bounds_for_preheat(&messages).is_none());
     }
 }

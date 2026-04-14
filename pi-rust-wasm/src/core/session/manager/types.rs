@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use tracing::warn;
 
-use crate::core::agent_loop::AgentMessage;
 use crate::core::compaction::preheat::Preheat;
+use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use crate::infra::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -24,68 +24,6 @@ pub fn compound_turn_id(start_id: &str, end_id: &str) -> String {
         );
     }
     format!("{start_id}::{end_id}")
-}
-
-/// `start::end` 的右段；无 `::` 时返回 `None`（旧式单层 turn id）。
-pub fn compound_id_suffix(turn_id: &str) -> Option<&str> {
-    turn_id.rsplit_once("::").map(|(_, r)| r)
-}
-
-/// `start::end` 的左段；无 `::` 时整个串视为左段。
-pub fn compound_id_prefix(turn_id: &str) -> &str {
-    turn_id.split_once("::").map(|(l, _)| l).unwrap_or(turn_id)
-}
-
-fn user_turn_matches_covered_end(turn: &TurnEntry, covered_end: &str) -> bool {
-    match turn {
-        TurnEntry::UserTurn { end_id, id, .. } => {
-            end_id == covered_end
-                || id == covered_end
-                || compound_id_suffix(id).is_some_and(|s| s == covered_end)
-        }
-        _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TurnEntry
-// ---------------------------------------------------------------------------
-
-/// 上下文管理的分组单位：一条 user 消息及其后所有 assistant/tool 消息，
-/// 或一条 Compaction 生成的结构化摘要。
-#[derive(Debug, Clone)]
-pub enum TurnEntry {
-    UserTurn {
-        /// 恒等于 `compound_turn_id(start_id, end_id)`（§5.7）。
-        id: String,
-        /// 本条 turn 在 transcript 中**首条** message 的 id（通常为 user 行）。
-        start_id: String,
-        /// 本条 turn 在 transcript 中**末条** message 的 id。
-        end_id: String,
-        messages: Vec<AgentMessage>,
-        timestamp: String,
-    },
-    SummaryTurn {
-        id: String,
-        summary: String,
-        timestamp: String,
-    },
-}
-
-impl TurnEntry {
-    pub fn id(&self) -> &str {
-        match self {
-            TurnEntry::UserTurn { id, .. } => id,
-            TurnEntry::SummaryTurn { id, .. } => id,
-        }
-    }
-
-    pub fn timestamp(&self) -> &str {
-        match self {
-            TurnEntry::UserTurn { timestamp, .. } => timestamp,
-            TurnEntry::SummaryTurn { timestamp, .. } => timestamp,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +89,7 @@ pub struct ContextLiveMetrics {
 
 /// 运行时上下文状态，在 `chat_loop` 外层初始化一次、跨迭代复用。
 pub struct ContextState {
-    pub user_turns_list: Vec<TurnEntry>,
+    pub messages: Vec<ChatMessage>,
     pub estimate_context_chars: usize,
     pub context_budget_chars: usize,
     pub context_budget_tokens: usize,
@@ -178,15 +116,6 @@ impl ContextState {
     pub fn on_message_appended(&mut self, content_len: usize) {
         self.estimate_context_chars += content_len;
         self.post_usage_appended_chars += content_len;
-    }
-
-    /// 将本轮对话包登记到 `user_turns_list`（供后续 `build_context_from_state` / 压缩等使用）。
-    ///
-    /// **不计入** `estimate_context_chars` / `post_usage_appended_chars`：同一轮的用户句、assistant
-    /// 与 tool 结果已在 `chat` 的 `on_message_appended` 与 `agent_loop` 内增量累加；此处再按
-    /// `estimate_turn_chars` 加一遍会导致下一轮「首轮 LLM 前」的 `context_metrics` 虚高（约一整轮重复）。
-    pub fn on_new_user_turn(&mut self, turn: TurnEntry) {
-        self.user_turns_list.push(turn);
     }
 
     /// 估算当前上下文占用的 token 数。
@@ -229,76 +158,48 @@ impl ContextState {
         self.estimated_token_count() > self.context_budget_tokens
     }
 
-    /// 将已完成的 CompactionResult 应用到 user_turns_list：
-    /// §5.7.5：最小 `k` 使 `UserTurn` 与 `covered_end_id` 匹配（`end_id` / `id` / 复合 id 右段），
-    /// 再 `splice(0..=k, [SummaryTurn])`。无匹配时返回 [`AppError::ApplyBoundaryStale`]（不第二遍扫 start/end）。
+    /// 将已完成的 CompactionResult 应用到 messages 列表：
+    /// 找到最后一条 `msg_id == covered_end_id` 的消息，将其及之前所有消息替换为摘要消息。
+    /// 无匹配时返回 [`AppError::ApplyBoundaryStale`]。
     pub fn apply_boundary(&mut self, result: CompactionResult) -> Result<(), AppError> {
-        let covered_end = result.covered_end_id.as_str();
-        let covered_start = result.covered_start_id.as_str();
-
-        let k_message = self
-            .user_turns_list
+        let end_idx = self
+            .messages
             .iter()
-            .position(|t| user_turn_matches_covered_end(t, covered_end));
-
-        let (start, end) = if let Some(k) = k_message {
-            if let Some(TurnEntry::UserTurn { start_id, id, .. }) = self.user_turns_list.first() {
-                let prefix = compound_id_prefix(id);
-                if start_id.as_str() != covered_start && prefix != covered_start {
-                    warn!(
-                        covered_start_id = %result.covered_start_id,
-                        covered_end_id = %result.covered_end_id,
-                        %start_id,
-                        "apply_boundary: covered_start_id does not match first turn (continuing with splice 0..=k)"
-                    );
-                }
-            }
-            let dup_end_count = self
-                .user_turns_list
-                .iter()
-                .filter(|t| user_turn_matches_covered_end(t, covered_end))
-                .count();
-            if dup_end_count > 1 {
-                warn!(
-                    covered_end_id = %result.covered_end_id,
-                    matches = dup_end_count,
-                    "apply_boundary: multiple UserTurns match covered_end_id (scenario 5 / id collision); using minimal index"
-                );
-            }
-            (0usize, k)
-        } else {
-            return Err(AppError::ApplyBoundaryStale {
+            .rposition(|m| m.msg_id.as_deref() == Some(result.covered_end_id.as_str()))
+            .ok_or(AppError::ApplyBoundaryStale {
                 covered_end_id: result.covered_end_id.clone(),
-            });
-        };
+            })?;
 
-        let batch_chars: usize = self.user_turns_list[start..=end]
+        let batch_chars: usize = self.messages[..=end_idx]
             .iter()
-            .map(estimate_turn_chars)
+            .map(estimate_msg_chars)
             .sum();
-        let summary_chars = result.summary_text.len();
 
-        let summary_id = result
-            .transcript_compaction_entry_id
-            .clone()
-            .unwrap_or_else(|| compound_turn_id(covered_start, covered_end));
-        let summary_turn = TurnEntry::SummaryTurn {
-            id: summary_id,
-            summary: result.summary_text,
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        };
+        let mut summary_msg = ChatMessage::compaction_summary(&result.summary_text);
+        summary_msg.msg_id = result.transcript_compaction_entry_id.clone();
 
-        self.user_turns_list.splice(start..=end, [summary_turn]);
-        self.estimate_context_chars = self.estimate_context_chars.saturating_sub(batch_chars);
-        self.estimate_context_chars += summary_chars;
+        self.messages.splice(..=end_idx, [summary_msg]);
+        self.estimate_context_chars = self
+            .estimate_context_chars
+            .saturating_sub(batch_chars)
+            + result.summary_text.len();
         self.invalidate_api_usage();
-
         Ok(())
+    }
+
+    /// 当前上下文中的 turn 数：user 消息 + compaction 摘要消息之和。
+    pub fn turn_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|m| {
+                m.role == ChatMessageRole::User || m.kind == MessageKind::CompactionSummary
+            })
+            .count()
     }
 }
 
 // ---------------------------------------------------------------------------
-// estimate_turn_chars
+// Helper functions
 // ---------------------------------------------------------------------------
 
 /// 与 `ContextState::estimated_token_count` 的纯字符 fallback 一致：`chars / 4`。
@@ -307,26 +208,12 @@ pub fn estimated_tokens_from_chars(chars: usize) -> usize {
     chars / 4
 }
 
-/// 估算单个 TurnEntry 的字符数。
-pub fn estimate_turn_chars(turn: &TurnEntry) -> usize {
-    match turn {
-        TurnEntry::UserTurn { messages, .. } => messages
-            .iter()
-            .map(|m| match m {
-                AgentMessage::User { text } => text.len(),
-                AgentMessage::Assistant { text, tool_calls } => {
-                    text.len()
-                        + tool_calls
-                            .iter()
-                            .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
-                            .sum::<usize>()
-                }
-                AgentMessage::ToolResult { content, .. } => content.len(),
-                AgentMessage::System { text } => text.len(),
-                AgentMessage::Steering { text, .. } => text.len(),
-                AgentMessage::CompactionSummary { summary } => summary.len(),
-            })
-            .sum(),
-        TurnEntry::SummaryTurn { summary, .. } => summary.len(),
-    }
+/// 估算单条 ChatMessage 的字符数（文本内容 + tool_calls 序列化长度）。
+pub fn estimate_msg_chars(msg: &ChatMessage) -> usize {
+    let content_len = msg.text_content().map_or(0, |s| s.len());
+    let tc_len = msg
+        .tool_calls
+        .as_ref()
+        .map_or(0, |tcs| tcs.iter().map(|tc| tc.to_string().len()).sum::<usize>());
+    content_len + tc_len
 }
