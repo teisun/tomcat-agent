@@ -95,7 +95,7 @@ pub fn layer0_persist_large_results(
         let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
 
         let persist_dir = work_dir
-            .join("agents")
+            .join("workspace")
             .join(session_id)
             .join("tool-results");
 
