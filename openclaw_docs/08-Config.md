@@ -1,21 +1,84 @@
 # Config 配置模块
 
-**设计思想**：OpenClaw 采用单一配置文件 `clawdbot.json` 承载全部运行时配置，通过加载、校验、合并、路径解析与热更机制，为 Gateway、Channels、Agents 等模块提供统一的配置来源。配置模块不持有运行时状态，仅负责 I/O 与转换。
+## 零、先用大白话
+
+配置模块像 **图书馆员管规则手册**。  
+它不聊天。它只做几件事：把 **`openclaw.json`** 从磁盘读出来、查有没有写错、补上默认值、把路径变成「绝对地址」，再递给 Gateway 和渠道。  
+手册改了几个字，Gateway 常常能 **热更新**，不用整台电脑重启。
+
+**这一节你会学到**：配置从哪读；类型散在哪几个文件；环境变量能盖什么。
+
+---
+
+## ASCII 核心四图
+
+### 1) 结构图
+
+```text
+paths.ts（~/.openclaw/、openclaw.json）
+        |
+        v
+loadConfig + validate + merge defaults
+        |
+        v
+normalize-paths（绝对化）
+        |
+        v
+Gateway / Channels / Agents 消费 OpenClawConfig
+```
+
+### 2) 调用流图
+
+```text
+读磁盘 JSON
+  -> validateConfigObjectWithPlugins
+      -> merge runtime overrides
+          -> normalize paths
+              -> 返回内存快照给调用方
+```
+
+### 3) 时序图
+
+```text
+CLI          loadConfig         plugins schema     Disk
+  |                |                  |             |
+  | doctor/config  |                  |             |
+  |--------------->|----------------->|------------>|
+  |                | validated        |             |
+  |<---------------|                  |             |
+```
+
+### 4) 数据闭环图
+
+```text
+用户编辑 openclaw.json
+        |
+        v
+config-reload 监听 -> 新快照
+        |
+        v
+WS 客户端重新拉 config.get
+        |
+        v
+doctor 校验通过 -> 长期运行稳定
+```
 
 ---
 
 ## 一、职责与设计目标
 
-- **单一真相源**：所有配置从 `~/.clawdbot/clawdbot.json`（或 `CONFIG_PATH_CLAWDBOT` 指定路径）加载。
-- **校验与合并**：加载后经 `validateConfigObjectWithPlugins` 校验，再应用 defaults、merge-config、runtime-overrides。
-- **路径规范化**：`normalize-paths` 将相对路径解析为绝对路径；`paths` 提供 `resolveConfigPath`、`resolveStateDir` 等。
-- **与 Gateway 热更配合**：`config-reload` 监听文件变化，触发 Gateway 重载配置，Config 模块本身无状态，每次 `loadConfig` 返回最新快照。
+**设计思想**：采用单一配置文件（默认 **`openclaw.json`**）承载运行时配置；模块无长期状态，只做 I/O 与转换。
+
+- **单一真相源**：默认路径由 **`src/config/paths.ts`** 解析：状态目录默认 **`~/.openclaw/`**，主配置默认 **`~/.openclaw/openclaw.json`**。可用 **`OPENCLAW_CONFIG_PATH`** 或 **`OPENCLAW_STATE_DIR`** 覆盖；仍可能识别旧目录 **`~/.clawdbot`** 与旧文件名 **`clawdbot.json`**（兼容逻辑见 `paths.ts`）。
+- **校验与合并**：`validateConfigObjectWithPlugins`；defaults、`merge-config`、内存中的 **runtime overrides**（见下）。
+- **路径规范化**：`normalize-paths`；`paths` 提供 `resolveConfigPath`、`resolveStateDir` 等。
+- **与 Gateway 热更配合**：`config-reload` 监听文件变化；每次 `loadConfig` 从磁盘读新快照。
 
 ---
 
-## 二、ClawdbotConfig 结构
+## 二、OpenClawConfig 结构
 
-**定义位置**：`openclaw/src/config/types.clawdbot.ts`
+**定义位置**：类型从 **`src/config/types.ts`** 再导出；根对象形状主要在 **`src/config/types.openclaw.ts`** 及 `types.*.ts` 各子模块。
 
 **顶层字段**（节选）：
 
@@ -27,7 +90,7 @@
 | wizard | object | 上次 wizard 运行信息 |
 | agents | AgentsConfig | Agent 列表、defaults、workspace |
 | models | ModelsConfig | 模型、别名、fallback、auth profiles |
-| channels | ChannelsConfig | 各 channel 配置（whatsapp、telegram 等） |
+| channels | ChannelsConfig | 各 channel 配置 |
 | session | SessionConfig | mainKey、scope、groupPolicy |
 | gateway | GatewayConfig | bind、port、auth、tailscale、controlUi |
 | plugins | PluginsConfig | 启用/禁用的插件 |
@@ -37,55 +100,50 @@
 | hooks | HooksConfig | 钩子启用状态 |
 | bindings | AgentBinding[] | Agent 路由绑定 |
 
-**子类型**：`types.agents`、`types.gateway`、`types.channels`、`types.models` 等定义各区块的详细结构。
-
 ---
 
 ## 三、加载与写入
 
 ### 3.1 入口
 
-- **loadConfig**：`openclaw/src/config/io.ts`，主入口，返回 `ClawdbotConfig`。
-- **readConfigFileSnapshot**：读取文件并返回 `ConfigFileSnapshot`（raw、parsed、valid、issues、warnings、legacyIssues）。
+- **loadConfig**：`src/config/io.ts`，主入口，返回 **`OpenClawConfig`**。
+- **readConfigFileSnapshot**：`ConfigFileSnapshot`（raw、parsed、valid、issues、warnings、legacyIssues）。
 - **writeConfigFile**：写入配置，支持备份轮转（`CONFIG_BACKUP_COUNT`）。
 
-### 3.2 加载流程
+### 3.2 加载流程（简化）
 
-```
-resolveConfigPath() → 确定配置文件路径
-  → fs.readFile (或 readConfigFileSnapshot)
-  → parseConfigJson5 (JSON5 解析)
-  → resolveConfigIncludes (处理 $include)
-  → resolveConfigEnvVars (环境变量替换)
-  → coerceConfig → ClawdbotConfig
+```text
+resolveConfigPath() → 读文件
+  → parseConfigJson5
+  → resolveConfigIncludes（$include）
+  → resolveConfigEnvVars
+  → coerceConfig → OpenClawConfig
   → validateConfigObjectWithPlugins
-  → applyDefaults (defaults.ts 中各 apply*)
-  → mergeConfig (若有 include 合并)
-  → applyConfigOverrides (runtime-overrides)
+  → applyDefaults
+  → mergeConfig（若有 include）
+  → applyConfigOverrides（内存中的测试/注入覆盖，见 runtime-overrides）
   → normalizeConfigPaths
   → 返回
 ```
 
 ### 3.3 校验
 
-- **validateConfigObjectWithPlugins**：`openclaw/src/config/validation.ts`，基于 schema 与插件提供的 schema 扩展校验。
-- **findLegacyConfigIssues**：检测废弃字段，提示迁移。
+- **validateConfigObjectWithPlugins**：`src/config/validation.ts`。
+- **findLegacyConfigIssues**：废弃字段与迁移提示。
 
 ---
 
 ## 四、路径与运行时覆盖
 
-- **paths.ts**：`resolveConfigPath`、`resolveStateDir`、`resolveAgentDir` 等。
-- **runtime-overrides.ts**：`applyConfigOverrides`，支持 `CLAWDBOT_*` 环境变量覆盖部分配置。
-- **normalize-paths.ts**：将配置中的相对路径（如 workspace、agent dir）解析为绝对路径。
+- **paths.ts**：`resolveConfigPath`、`resolveStateDir`、`resolveAgentDir`；网关端口还可看环境变量 **`OPENCLAW_GATEWAY_PORT`**（见 `resolveGatewayPort`）。
+- **runtime-overrides.ts**：测试或运行时通过 **`setConfigOverride`** 写入内存树，**`applyConfigOverrides`** 在 `loadConfig` 末尾合并；**不是**「`CLAWDBOT_*` 环境变量自动映射整棵配置树」的旧描述。
+- **normalize-paths.ts**：workspace、agent dir 等相对路径 → 绝对路径。
 
 ---
 
 ## 五、与 Gateway config-reload 的配合
 
-- Gateway 启动时调用 `startGatewayConfigReloader`（`openclaw/src/gateway/config-reload.ts`）。
-- 监听配置文件变化（chokidar），变化时重新 `loadConfig`，并触发 Gateway 内部重载（channel-manager、cron、plugins 等）。
-- Config 模块无缓存，每次 `loadConfig` 都从磁盘读取并重新解析。
+- **`src/gateway/config-reload.ts`**：`startGatewayConfigReloader` 监听配置文件变化，重新 `loadConfig` 并驱动 Gateway 内部重载（channel-manager、cron、plugins 等）。
 
 ---
 
@@ -93,12 +151,28 @@ resolveConfigPath() → 确定配置文件路径
 
 | 文件 | 职责 |
 |------|------|
-| openclaw/src/config/io.ts | loadConfig、readConfigFileSnapshot、writeConfigFile |
-| openclaw/src/config/types.clawdbot.ts | ClawdbotConfig 类型定义 |
-| openclaw/src/config/validation.ts | 校验 |
-| openclaw/src/config/defaults.ts | 各区块默认值 |
-| openclaw/src/config/merge-config.ts | include 合并 |
-| openclaw/src/config/paths.ts | 路径解析 |
-| openclaw/src/config/runtime-overrides.ts | 运行时覆盖 |
-| openclaw/src/config/plugin-auto-enable.ts | 插件自动启用 |
-| openclaw/src/config/legacy-migrate.ts | 遗留配置迁移 |
+| `src/config/io.ts` | loadConfig、readConfigFileSnapshot、writeConfigFile |
+| `src/config/types.ts` | 类型再导出入口 |
+| `src/config/types.openclaw.ts` | 根配置类型主模块 |
+| `src/config/validation.ts` | 校验 |
+| `src/config/defaults.ts` | 默认值 |
+| `src/config/merge-config.ts` | include 合并 |
+| `src/config/paths.ts` | 路径解析、旧目录兼容 |
+| `src/config/runtime-overrides.ts` | 内存覆盖合并 |
+| `src/config/plugin-auto-enable.ts` | 插件自动启用 |
+| `src/config/legacy-migrate.ts` | 遗留迁移 |
+
+---
+
+## 延伸阅读
+
+- [01-技术设计总览.md](01-技术设计总览.md)  
+- [README.md](README.md)（历史名称与 `openclaw doctor`）
+
+---
+
+## 常见误会
+
+- **误会**：我改了环境变量就等于改了整份配置。**正解**：只有少数键会进 **`runtime-overrides`**；大头仍是 **`openclaw.json`**。  
+- **误会**：JSON 里多一个未知字段没关系。**正解**：校验会 **报错或警告**；看 `doctor` 输出最省事。  
+- **误会**：`merge-config` 和 `$include` 是一回事。**正解**：`$include` 是 **拆文件**；merge 是 **合并规则**；都在 `loadConfig` 链路里分步发生。

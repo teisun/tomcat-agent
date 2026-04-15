@@ -14,6 +14,11 @@
   <a href="https://exe.dev"><img src="docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
 </p>
 
+> **中文导读（pi-mono_docs）**  
+> 本文件是 **`packages/coding-agent/README.md` 的副本**。先看中文架构与 CLI 流程：[00-pi-mono 技术总览](00-pi-mono%20技术总览.md)、[03-pi-coding-agent 包](03-pi-coding-agent%20包.md)。完整用户文档在 pi-mono 的 **`packages/coding-agent/docs/`**（如 `extensions.md`、`rpc.md`、`session.md`）。
+
+---
+
 Pi is a minimal terminal coding harness. Adapt pi to your workflows, not the other way around, without having to fork and modify pi internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Pi Packages](#pi-packages) and share them with others via npm or git.
 
 Pi ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask pi to build what you want or install a third party pi package that matches your workflow.

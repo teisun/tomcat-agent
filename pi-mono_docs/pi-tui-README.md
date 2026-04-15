@@ -1,5 +1,10 @@
 # @mariozechner/pi-tui
 
+> **中文导读（pi-mono_docs）**  
+> 本文件为 **`packages/tui/README.md` 风格的上游说明副本**。中文架构速览见 [04-tui 与 web-ui](04-tui%20与%20web-ui.md) 第一节（pi-tui）。
+
+---
+
 Minimal terminal UI framework with differential rendering and synchronized output for flicker-free interactive CLI applications.
 
 ## Features

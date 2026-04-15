@@ -1,5 +1,10 @@
 # @mariozechner/pi-ai
 
+> **中文导读（pi-mono_docs）**  
+> 这份文件是 **pi-mono 仓库里 `packages/ai/README.md` 的副本/摘录**，细节以英文正文与源码为准。想先看短的中文说明，请读同目录的 [01-pi-ai 包](01-pi-ai%20包.md)。维护时若发现与实现不一致，**改中文分文档**，再视需要同步更新本副本。
+
+---
+
 Unified LLM API with automatic model discovery, provider configuration, token and cost tracking, and simple context persistence and hand-off to other models mid-session.
 
 **Note**: This library only includes models that support tool calling (function calling), as this is essential for agentic workflows.

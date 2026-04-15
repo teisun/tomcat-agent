@@ -1,86 +1,96 @@
 # pi-ai 包
 
-pi-ai（`@mariozechner/pi-ai`）提供统一的多 Provider LLM API，支持流式/非流式调用、Context/Tools、TypeBox 校验，以及跨 Provider 的会话交接与 Context 序列化。仅包含支持 tool calling 的模型，以支撑 Agent 工作流。
+## 先用大白话
+
+**pi-ai**（npm：`@mariozechner/pi-ai`）是一块「万能转接头」：你的程序只想用**同一套**函数去聊天、流式输出、传图片、注册工具（tool calling），背后到底是 OpenAI、Anthropic、Google 还是 Bedrock，都由它来翻译。
+
+它**只收录支持 tool calling 的模型**，因为下游 Agent 工作流默认模型会「要工具」。
 
 ---
 
-## 1. 模块职责
+## 往里说：模块职责
 
-- **统一 API**：`stream` / `complete` / `streamSimple` / `completeSimple`，屏蔽各厂商 API 差异。
-- **多 Provider**：通过 Api 类型与 api-registry 注册，每个 Api 对应一个 Provider 实现（stream + streamSimple）。
-- **Context 与消息**：`Context`（systemPrompt、messages、tools）、`Message`（user / assistant / toolResult）、统一事件类型 `AssistantMessageEvent`。
-- **Tools**：TypeBox 定义参数 schema，校验与流式 partial 解析。
-- **跨 Provider 交接**：Context 可序列化，便于在会话中切换模型（如先 OpenAI 后 Claude）。
-
----
-
-## 2. 关键类型（types.ts）
-
-- **Api / KnownApi**：API 标识，如 `openai-completions`、`anthropic-messages`、`google-generative-ai`、`bedrock-converse-stream` 等。
-- **Provider / KnownProvider**：厂商名，如 `openai`、`anthropic`、`google`、`amazon-bedrock` 等。
-- **Model&lt;TApi&gt;**：`id`、`name`、`api`、`provider`、`baseUrl`、`reasoning`、`input`（text/image）、`cost`、`contextWindow`、`maxTokens`、`compat`（OpenAI 兼容选项）等。
-- **Context**：`systemPrompt?`、`messages: Message[]`、`tools?: Tool[]`。
-- **Message**：`UserMessage`（role user，content 为 string 或 TextContent/ImageContent 数组）、`AssistantMessage`（content 含 TextContent/ThinkingContent/ToolCall，以及 usage、stopReason 等）、`ToolResultMessage`（toolCallId、toolName、content、isError）。
-- **Tool**：`name`、`description`、`parameters`（TSchema/TypeBox）。
-- **StreamOptions / SimpleStreamOptions**：`temperature`、`maxTokens`、`signal`、`apiKey`、`sessionId`、`cacheRetention`、`transport`、`reasoning`（Simple）、`thinkingBudgets` 等。
-- **AssistantMessageEvent**：`start`、`text_start`/`text_delta`/`text_end`、`thinking_*`、`toolcall_start`/`toolcall_delta`/`toolcall_end`、`done`（含 message）、`error`（含 error message）。
+- **统一入口**：`stream` / `complete` / `streamSimple` / `completeSimple`，屏蔽各厂商 HTTP/SDK 差异。
+- **Provider 注册**：每种 `Api` 对应一份实现（`stream` + `streamSimple`），在 **`register-builtins`** 里懒加载注册。
+- **Context**：`systemPrompt`、多轮 `messages`、可选 `tools`；整体可序列化，方便换模型继续聊（handoff）。
+- **Tools**：用 **TypeBox** 描述参数 schema，便于校验与流式 partial JSON 解析。
 
 ---
 
-## 3. 核心 API（stream.ts）
+## ASCII：一次调用经过哪里
 
-- **stream(model, context, options?)**：返回 `AssistantMessageEventStream`，使用 Provider 的完整 stream（可带各 Provider 特有 options）。
-- **complete(model, context, options?)**：基于 stream 的 `s.result()` 得到最终 `AssistantMessage`。
-- **streamSimple(model, context, options?)**：统一选项（含 `reasoning`、`thinkingBudgets`），Agent 层常用。
-- **completeSimple(model, context, options?)**：同上，非流式。
-
-内部通过 `getApiProvider(model.api)` 从 api-registry 解析出对应 Provider，再调用其 `stream` 或 `streamSimple`。
-
----
-
-## 4. Provider 注册（api-registry.ts + providers/register-builtins.ts）
-
-- **ApiProvider&lt;TApi, TOptions&gt;**：`api`、`stream`、`streamSimple`。每个 Api 对应一个实现。
-- **registerApiProvider(provider, sourceId?)**：注册到全局 Map；**getApiProvider(api)**：供 stream.ts 解析。
-- **register-builtins**：在 stream 被 import 时执行，注册内置 Api：anthropic-messages、openai-completions、openai-responses、azure-openai-responses、openai-codex-responses、google-generative-ai、google-gemini-cli、google-vertex、bedrock-converse-stream。
-
-扩展或自定义 Provider 时，实现 `stream`/`streamSimple` 并在使用前调用 `registerApiProvider`（coding-agent 的扩展可注册自定义 Provider）。
+```
+  你的代码                    pi-ai                     具体 Provider 文件
+      |                        |                              |
+      +-- streamSimple() ----->+-- getApiProvider(api) ------>+-- 发 HTTP / SDK
+      |                        |                              |
+      +<-- AssistantMessageEvent 流（text_delta、toolcall_* …）-+
+```
 
 ---
 
-## 5. 事件流（utils/event-stream.ts）
+## 关键类型（`packages/ai/src/types.ts`）
 
-- **EventStream&lt;T, R&gt;**：通用异步事件队列，`push(event)`、`end(result?)`、`async *[Symbol.asyncIterator]`、`result(): Promise<R>`。
-- **AssistantMessageEventStream**：继承 `EventStream<AssistantMessageEvent, AssistantMessage>`，完成条件为 `event.type === "done" || "error"`，最终结果从 `done.message` 或 `error.error` 提取。
-
-Provider 实现中会构造此类 stream，按协议推送 `text_delta`、`toolcall_*`、`done` 等事件。
-
----
-
-## 6. Tools 与 TypeBox
-
-- Tool 的 `parameters` 使用 TypeBox（TSchema）定义，便于类型推导与 JSON Schema 校验。
-- 库导出 `Type`、`Static`、`TSchema`；`validateToolArguments` / `validateToolCall` 用于在执行前校验 tool call 参数。
-- 流式场景下 `toolcall_delta` 的 `event.partial.content[contentIndex]` 可能为 partial JSON，需防御性使用；`toolcall_end` 时参数完整但仍需校验后再执行。
+- **Api**：字符串联合，标识走哪条协议实现（如 `openai-responses`、`anthropic-messages`）。
+- **Model&lt;TApi&gt;**：`id`、`name`、`api`、`provider`、`contextWindow`、`maxTokens`、`reasoning` 能力等。
+- **Context / Message / Tool**：送给模型的上下文与工具定义。
+- **AssistantMessageEvent**：`start`、`text_*`、`thinking_*`、`toolcall_*`、`done`、`error` 等（具体名字以类型为准）。
 
 ---
 
-## 7. 跨 Provider 交接与 Context 序列化
+## 核心 API（`packages/ai/src/stream.ts`）
 
-- **Context** 仅含 `systemPrompt`、`messages`、`tools`，均为可序列化结构；可 JSON 序列化后交给另一模型继续对话。
-- 文档与示例中的「跨 Provider handoff」：先与模型 A 对话，将得到的 Context 序列化，再以模型 B 的 `stream(modelB, context)` 继续，实现会话迁移或接力。
+- **stream**：最全的 Provider 专属 options。
+- **streamSimple / completeSimple**：Agent 常用；选项统一到 `SimpleStreamOptions`（含 `reasoning`、`thinkingBudgets` 等）。
+- **complete / completeSimple**：在 stream 上等到最终结果。
+
+内部：`getApiProvider(model.api)` → 调用对应实现的 `stream` 或 `streamSimple`。
 
 ---
 
-## 8. 关键文件路径
+## Provider 注册（`api-registry.ts` + `providers/register-builtins.ts`）
+
+- **registerApiProvider**：扩展或测试可注入自定义实现。
+- **内置 Api**（以仓库 `register-builtins.ts` 为准，含 Mistral）：  
+  `anthropic-messages`、`openai-completions`、`openai-responses`、`azure-openai-responses`、`openai-codex-responses`、`google-generative-ai`、`google-gemini-cli`、`google-vertex`、`mistral-conversations`、`bedrock-converse-stream`。
+
+若你维护文档：发版前请 **grep** `registerApiProvider` / `register-builtins` 与本文列举是否仍一致。
+
+---
+
+## 事件流（`packages/ai/src/utils/event-stream.ts`）
+
+- **EventStream&lt;T, R&gt;**：异步迭代、`push`、`end`、`result()`。
+- **AssistantMessageEventStream**：消费到 `done` 或 `error` 即结束；最终结果从 `done.message` 或错误里取。
+
+Provider 负责把厂商响应切成统一事件往里 `push`。
+
+---
+
+## Tools 与 TypeBox
+
+- `parameters` 用 TypeBox（`TSchema`）；导出 `validateToolArguments` / `validateToolCall`。
+- 流式 `toolcall_delta` 里可能出现 **未拼完的 JSON**，执行前要等到完整并校验。
+
+---
+
+## 跨 Provider 交接
+
+把 `Context` JSON 化或深拷贝后，换另一个 `Model` 再 `stream`，即可让会话「换模型接力」。
+
+---
+
+## 关键文件路径（查代码用）
+
+下面这张表是给**要改 pi-ai 或对照实现**的人用的。
 
 | 文件 | 说明 |
 |------|------|
-| `packages/ai/src/stream.ts` | stream/complete/streamSimple/completeSimple 入口，解析 Provider 并调用 |
-| `packages/ai/src/types.ts` | Api、Model、Context、Message、Tool、StreamOptions、AssistantMessageEvent 等类型 |
-| `packages/ai/src/api-registry.ts` | registerApiProvider、getApiProvider、ApiProvider 接口 |
-| `packages/ai/src/providers/register-builtins.ts` | 内置 Api 注册 |
-| `packages/ai/src/utils/event-stream.ts` | EventStream、AssistantMessageEventStream |
-| `packages/ai/src/env-api-keys.js` | getEnvApiKey 等鉴权辅助（stream 中 re-export） |
+| `packages/ai/src/stream.ts` | 对外 stream/complete/streamSimple |
+| `packages/ai/src/types.ts` | Api、Model、Context、Message、事件类型 |
+| `packages/ai/src/api-registry.ts` | 注册表 |
+| `packages/ai/src/providers/register-builtins.ts` | 内置 Provider 懒加载注册 |
+| `packages/ai/src/utils/event-stream.ts` | EventStream |
+| `packages/ai/src/env-api-keys.ts` | 环境变量/API Key 探测（Node） |
 
-各具体 Provider 实现位于 `packages/ai/src/providers/*.ts`（如 anthropic、openai-completions、google、amazon-bedrock 等），每个导出 `stream*` 与 `streamSimple*`，内部将厂商 API 响应转换为统一的 `AssistantMessageEvent` 并 push 到 stream。
+各 Provider 实现位于 `packages/ai/src/providers/`。
