@@ -1,5 +1,28 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-19 12:00 | ACTIVE | develop | — |
+
+### docs：三端插件体系报告与 OpenClaw 导读补全
+
+- [✓] `docs/reports/plugin_systems_openclaw_pi_mono_pi_agent_rust.md` 升为 **v1.4**：关键章节穿插 **ASCII 示意图**（导读路线、清单/发现/加载、`RegisterPayload`、启动顺序、安全切片等），与既有 Mermaid 互补，便于纯文本阅读。
+- [✓] Tomcat `openclaw_docs/12-Plugins.md`：补充 **`@openclaw/plugin-sdk` 子路径表**（类型/模块/描述），并指向 `memory-host-sdk`。
+- [✓] `docs/reports/plugin_skills_first_principles_pi_rust_wasm.md`：**v1.1** 附录同源子路径一览（与 §八 文档交叉引用）。
+- [✓] `docs/TODOS.md`：与插件优先级/条目同步（若文内有本轮修订）。
+
+### 🔌 INTERFACE（接口变更）
+
+无显著变更（仅 Markdown）。
+
+### ⚠️ BLOCKED（阻塞/风险）
+
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | — | — |
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-14 17:44 | INTEGRATION PASS | develop | — |
 
 ### 集成测试报告：`feature/collapse-to-chatmsg` 并入 develop

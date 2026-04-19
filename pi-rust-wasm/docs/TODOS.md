@@ -4,7 +4,7 @@
 >
 > 组织方式：**先按领域分类，再在每条上标注优先级（P0-P5）**。
 >
-> 最近更新：2026-04-14
+> 最近更新：2026-04-19（插件/Skills 报告 §九；另将 `#T-001` VMActor shutdown 依死代码分析报告降为 P2，见 §一）
 
 ---
 
@@ -23,11 +23,10 @@
 
 ## 优先级速查
 
-### P0 — 破损/不可用（~15 条）
+### P0 — 破损/不可用（~14 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
-| T-001 | Bug | VMActor shutdown 命令无效 | 已有分析报告 |
 | T-003 | 交互/TUI | 工具输出过程中无法中断 | 执行期间用户无法中断 |
 | T-004 | 交互/TUI | 中断时丢弃 LLM 已回复内容 | 已接收内容不应丢失 |
 | T-005 | 交互/TUI | chat 没有退出命令 | 缺少基本 /exit 命令 |
@@ -43,7 +42,7 @@
 | T-047 | 权限 | 非工作目录操作被直接拒绝而非申请授权 | 直接 403 而非弹授权 |
 | T-072 | LLM | 流式输出底层修复 | `openai.rs` 非流式调用，关联 T-006 |
 
-### P1 — 高价值（~26 条）
+### P1 — 高价值（~21 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
@@ -60,10 +59,6 @@
 | T-041 | 上下文 | 压缩任务失败重试 | 影响可靠性 |
 | T-042 | 上下文 | Checkpoint 机制 | 需先设计数据模型 |
 | T-050 | 权限 | Bash 访问目录限制和授权 | 解析命令来限制 |
-| T-062 | 插件/VM | 实现所有 shim（pimono SDK） | 核心功能不依赖全量 shim |
-| T-063 | 插件/VM | 长生命周期插件注册 | 注册到会话/全局插件表 |
-| T-064 | 插件/VM | 长生命周期 VM 清理机制 | `vm_actor.rs` |
-| T-066 | 插件/VM | 初始化搬放 js 配置文件 | 初始化流程 |
 | T-071 | LLM | 接入 thinking API + 展示 | 非 thinking 也可用 |
 | T-090-plan | 计划 | 提问/应答机制 | 无法提问致任务理解偏差 |
 | T-097 | 系统提示词 | 模板和系统提示词章节 | `system_prompt.rs` |
@@ -72,12 +67,12 @@
 | T-108 | 研究 | 拉 Codex、Harmess 代码 | 学习业界实践 |
 | T-131 | Agent Loop | `max_tool_rounds` 替换为 tool-loop-detection | 代码 + 规格双 TODO |
 | T-132 | LLM | `stream_timeout_sec` 接入 tokio 超时 | 关联 T-072 流式修复 |
-| T-133 | 插件/VM | 测试迁移到长生命周期 VM（11 处） | 涉及 e2e + js_api 测试 |
 
-### P2 — 有价值的增强（~35 条）
+### P2 — 有价值的增强（~41 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
+| T-001 | Bug | VMActor shutdown 命令无效 | VM/插件管线语义；会话可走事件通道结束，见 [vm-actor-shutdown-dead-code-analysis.md](reports/vm-actor-shutdown-dead-code-analysis.md)；依扩展面非 MVP 阻塞降为 P2 |
 | T-009 | 交互/TUI | user turn list 显示在 TUI 上 | 信息展示增强 |
 | T-010 | 交互/TUI | 状态总览 | 信息展示增强 |
 | T-011 | 交互/TUI | 时间戳、时间显示 | 辅助信息 |
@@ -111,6 +106,11 @@
 | T-110 | 研究 | 了解 Candel 推理库 | |
 | T-111 | 研究 | 了解 llm-chain 编排库 | |
 | T-112 | 研究 | 了解 swarms | |
+| T-062 | 插件/VM | 实现所有 shim（pimono SDK） | 扩展面就绪；依据 [plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) 由 P1 降为 P2 |
+| T-063 | 插件/VM | 长生命周期插件注册 | 同上 |
+| T-064 | 插件/VM | 长生命周期 VM 清理机制 | `vm_actor.rs`；同上 |
+| T-066 | 插件/VM | 初始化搬放 js 配置文件 | 同上 |
+| T-133 | 插件/VM | 测试迁移到长生命周期 VM（11 处） | e2e + js_api；同上 |
 | T-134 | 插件/VM | 清理弃用的 `dispatch_event` | 已有替代实现 |
 | T-135 | 规范/文档 | Product_Brief 产品级 TODO | `Product_Brief.md:34` |
 
@@ -169,7 +169,8 @@
 
 ## 一、Bug / 缺陷
 
-- [ ] **[P0]** `#T-001` VMActor shutdown 命令无效
+- [ ] **[P2]** `#T-001` VMActor shutdown 命令无效
+  - **降级理由**：分析报告结论为会话结束靠 `__shutdown` 事件通道，非 `cmd_rx` 上 `Shutdown`；属管道语义/可维护性，不属「主流程完全不可用」；与 [plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) 中扩展面不压 P0 一致
   - 已有分析报告：[vm-actor-shutdown-dead-code-analysis.md](reports/vm-actor-shutdown-dead-code-analysis.md)
   - 关联模块：`src/ext/vm_actor.rs`
 
@@ -408,23 +409,26 @@
 
 ## 八、插件 / Wasm / VM
 
-- [ ] **[P1]** `#T-062` 实现所有 shim（pimono 插件 SDK）
-  - 降级理由：插件生态重要但当前核心功能不依赖全量 shim
+> **优先级说明（2026-04-19）**：`#T-062`～`#T-066`、`#T-133` 由 P1 调整为 **P2**，依据 [plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) ——扩展平台与核心体验类 P1 解耦，避免排期心理压力混排。
+
+- [ ] **[P2]** `#T-062` 实现所有 shim（pimono 插件 SDK）
+  - 降级理由：插件生态重要但当前核心功能不依赖全量 shim；见报告 §5–§9
   - 关联模块：`src/ext/`
 
-- [ ] **[P1]** `#T-063` 加载插件要启动长生命周期
-  - 注册到会话或全局插件表
+- [ ] **[P2]** `#T-063` 加载插件要启动长生命周期
+  - 注册到会话或全局插件表；见报告 §5–§9
   - 关联模块：`src/ext/plugin/`
   - 关联报告：[async-handler-in-long-lived-vm.md](reports/async-handler-in-long-lived-vm.md)
 
-- [ ] **[P1]** `#T-064` 长生命周期 VM 的清理机制
-  - 关联模块：`src/ext/vm_actor.rs`
+- [ ] **[P2]** `#T-064` 长生命周期 VM 的清理机制
+  - 关联模块：`src/ext/vm_actor.rs`；见报告 §5–§9
 
 - [ ] **[P2]** `#T-065` 维护 10 个 VM 的 LRU 算法清理策略
   - 降级理由：T-064 的具体实现策略，先解决有/无再优化策略
   - 关联模块：`src/ext/runtime_manager.rs`
 
-- [ ] **[P1]** `#T-066` 初始化时搬放 js 配置文件和其他文件到初始化目录
+- [ ] **[P2]** `#T-066` 初始化时搬放 js 配置文件和其他文件到初始化目录
+  - 见报告 §5–§9
 
 - [ ] **[P3]** `#T-067` 接受 WAPM .wasm 包的加载运行
   - 降级理由：扩展生态，非 MVP 必需
@@ -437,7 +441,8 @@
 - [ ] **[P3]** `#T-070-wasm` 关闭 LLVM 和 AOT 预编译 aot.wasm
   - 关联模块：`src/ext/engine_wasmedge.rs`
 
-- [ ] **[P1]** `#T-133` WasmEdge / JS API 测试迁移到长生命周期 VM
+- [ ] **[P2]** `#T-133` WasmEdge / JS API 测试迁移到长生命周期 VM
+  - 优先级依据：[plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) §9
   - 来源：代码中 `// TODO: migrate to long-lived VM (see plan §3)`
   - 涉及 11 处测试用例：
     - `tests/wasmedge_e2e_tests.rs` 第 153, 211, 317, 363, 429, 485, 547, 605, 675 行
@@ -551,7 +556,7 @@
 - [ ] **[P2]** `#T-094` 是否读取记忆可配
 
 - [ ] **[P3]** `#T-095-mem` 自总结生成 skill
-  - 降级理由：需要记忆系统基础先到位
+  - 降级理由：需要记忆系统基础先到位；Skills 路径见 [plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) §5
 
 - [ ] **[P4]** `#T-096-mem` 记录用户感兴趣的事物
   - 定时推送感兴趣的资讯
@@ -630,8 +635,10 @@
 
 - [ ] **[P3]** `#T-114` 对比 claude code 的 skill 系统
   - skill creator、evals
+  - 对齐本仓库结论：[plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) §4–§5
 
 - [ ] **[P3]** `#T-115` 对比 openclaw 的 skill 系统
+  - 同上报告 §4–§5；可与上游摘引 [openclaw_docs/11-Skills与Tools.md](../../openclaw_docs/11-Skills与Tools.md) 对照
 
 - [ ] **[P3]** `#T-116` 对比 claude code 对 MCP 调用的优化
   - 好像是写代码？
@@ -697,9 +704,9 @@
 
 | 优先级 | 条目数 | 说明 |
 |--------|--------|------|
-| P0 | ~15 | 破损/不可用：核心流程走不通 |
-| P1 | ~26 | 高价值：显著影响体验，应尽快排期 |
-| P2 | ~35 | 有价值的增强：改善体验但不紧急 |
+| P0 | ~14 | 破损/不可用：核心流程走不通 |
+| P1 | ~21 | 高价值：显著影响体验，应尽快排期 |
+| P2 | ~41 | 有价值的增强：改善体验但不紧急（含插件/VM 管线与 §一 T-001，见 §八） |
 | P3 | ~38 | 远期重要：多 Agent / 安全 / 平台扩展 |
 | P4 | ~15 | 探索性：商业场景 / 远期愿景 |
 | P5 | ~6  | 灵感/阅读 |
@@ -711,7 +718,7 @@
 |------|--------|------|------|
 | T-131 | P1 | `max_tool_rounds` → tool-loop-detection | `agent_loop/types.rs` + 规格 |
 | T-132 | P1 | `stream_timeout_sec` → tokio 超时 | `llm/openai.rs` |
-| T-133 | P1 | 测试迁移到长生命周期 VM（11 处） | `wasmedge_e2e_tests` + `js_api_alignment_tests` |
+| T-133 | P2 | 测试迁移到长生命周期 VM（11 处） | `wasmedge_e2e_tests` + `js_api_alignment_tests`；[plugin_skills_first_principles](reports/plugin_skills_first_principles_pi_rust_wasm.md) §9 |
 | T-134 | P2 | 清理弃用 `dispatch_event` | `instance_wasmedge.rs` |
 | T-135 | P2 | Product_Brief 产品级 TODO | `Product_Brief.md` |
 | T-054 扩展 | P3 | 加密相关规格 TODO（4 处文档） | Constitution / User_Stories / design / user-guide |
