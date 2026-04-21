@@ -1,5 +1,26 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-19 16:30 | ACTIVE | develop | — |
+
+### docs：跨仓库 Agent 错误处理对比；TODOS 与源码核对
+
+- [✓] `docs/reports/agent_error_handling_cross_repo.md`：**v1.0**——对比 cc-fork-01、hermes-agent、OpenClaw、pi-mono、pi_agent_rust、pi-rust-wasm 在工具失败、流式/LLM、扩展与会话重试上的策略；矩阵、六端分节、评分表与适合本仓的优选组合/路线图。
+- [✓] `docs/TODOS.md`：对 `api/chat`、`core/agent_loop`、`core/system_prompt`、`core/session` 等核对；**#T-005 / T-006 / T-024 / T-038 / T-072** 标为已满足或更新描述与锚点；P0 未决条数下调；**T-132** 承接流式超时残余。
+
+### 🔌 INTERFACE（接口变更）
+
+无显著变更（仅 Markdown）。
+
+### ⚠️ BLOCKED（阻塞/风险）
+
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | — | — |
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-19 12:00 | ACTIVE | develop | — |
 
 ### docs：三端插件体系报告与 OpenClaw 导读补全

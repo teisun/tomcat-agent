@@ -4,7 +4,7 @@
 >
 > 组织方式：**先按领域分类，再在每条上标注优先级（P0-P5）**。
 >
-> 最近更新：2026-04-19（插件/Skills 报告 §九；另将 `#T-001` VMActor shutdown 依死代码分析报告降为 P2，见 §一）
+> 最近更新：2026-04-19（**代码核对**：对 `src/api/chat`、`core/agent_loop`、`core/system_prompt`、`core/session` 等核对，将 **#T-005 / T-006 / T-024 / T-038 / T-072** 标为已满足或已更新描述，见下表与各节 `[x]`；未改子模块/未列目录者未动）
 
 ---
 
@@ -19,28 +19,38 @@
 | **P4** | 探索性 | 商业场景、远期愿景、大量设计 |
 | **P5** | 灵感/阅读 | 读书、灵感、someday/maybe |
 
+### 代码核对约定（pi-rust-wasm 仓库）
+
+- **已实现**：本文件中带 `[x]` 的条目表示在 **当前工作区 `pi-rust-wasm/` 源码** 中已有对应实现或行为；核对日期写在条目内。
+- **仍开放**：`[ ]` 表示未完成或未核对通过；若你认为条目表述过时，应先改代码再改文档。
+
 ---
 
 ## 优先级速查
 
-### P0 — 破损/不可用（~14 条）
+### P0 — 破损/不可用（~9 条；2026-04-19 自 ~14 下调——部分已核对达标）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
 | T-003 | 交互/TUI | 工具输出过程中无法中断 | 执行期间用户无法中断 |
 | T-004 | 交互/TUI | 中断时丢弃 LLM 已回复内容 | 已接收内容不应丢失 |
-| T-005 | 交互/TUI | chat 没有退出命令 | 缺少基本 /exit 命令 |
-| T-006 | 交互/TUI | 流式输出问题（gpt5.2 确认非流式） | 底层非流式，TUI 无输出反馈 |
-| T-008 | 交互/TUI | workspace 没有切换到当前目录 | `api/chat/` 未切换 cwd |
+| T-008 | 交互/TUI | workspace 没有切换到当前目录 | 默认仍为配置侧 `workspace-{id}`，非 shell `cwd` |
 | T-020 | Agent Loop | 长任务阻塞主线程 | 主线程被阻塞，UI 卡死 |
-| T-024 | 会话 | 工具调用没有写入会话记录 | session 未记录 tool_use/tool_result |
 | T-033 | 工具 | Bash 授权类型错误（为什么是 FS） | 权限类型错配 |
 | T-036 | 工具 | Chat 不访问当前目录，也不申请授权 | 不尝试访问也不弹授权 |
-| T-038 | 工具 | Agent 不知道自己有什么工作目录 | 系统提示词中缺工作目录信息 |
 | T-040 | 上下文 | 超大文件处理崩溃（超 800K/超预算） | compaction 层崩溃 |
 | T-046 | 权限 | 工作目录读写授权分级缺失 | 读/写权限未分级 |
 | T-047 | 权限 | 非工作目录操作被直接拒绝而非申请授权 | 直接 403 而非弹授权 |
-| T-072 | LLM | 流式输出底层修复 | `openai.rs` 非流式调用，关联 T-006 |
+
+#### 已从本表移除（已实现 / 已过时备注，2026-04-19 核对）
+
+| 编号 | 结论 | 依据（源码锚点） |
+|------|------|------------------|
+| **T-005** | Chat 可通过 **Ctrl+D（EOF）** 退出循环；打印提示「Ctrl+D 退出」。无单独 **`/exit`** 字符串命令——若产品坚持要 `/exit`，可作为小增强另开条目。 | `src/api/chat/mod.rs`（`chat_loop`，ReadlineError::Eof） |
+| **T-006** | **AgentLoop** 推理路径使用 **`stream: Some(true)` + `LlmProvider::chat_stream`**，工具增量走 `StreamEvent::ToolCallDelta`，助手增量走 `ContentDelta`。 | `src/core/agent_loop/run.rs` |
+| **T-024** | 回合结束后 **`append_message`** 持久化 `new_messages`；会话链校验 **assistant `tool_calls` → `role=tool`**（`append_message_chain`）。 | `src/api/chat/mod.rs`、`src/core/session/append_message_chain.rs` |
+| **T-038** | **系统提示词**含 **WorkspaceContextSection**：`Current working directory: {workspace_dir}`。 | `src/core/system_prompt.rs` |
+| **T-072** | **主路径已流式**（同上 T-006）；**仍欠**：`OpenAiProvider` 内 **`stream_timeout_sec` 未接 `tokio::time::timeout`**（见 **T-132**、`openai.rs` 注释 TODO）。旧备注「非流式」对当前主路径不再准确。 | `src/core/agent_loop/run.rs`、`src/core/llm/openai.rs` |
 
 ### P1 — 高价值（~21 条）
 
@@ -66,7 +76,7 @@
 | T-102 | 规范 | 集成测试也要负责修复代码 | 流程规范 |
 | T-108 | 研究 | 拉 Codex、Harmess 代码 | 学习业界实践 |
 | T-131 | Agent Loop | `max_tool_rounds` 替换为 tool-loop-detection | 代码 + 规格双 TODO |
-| T-132 | LLM | `stream_timeout_sec` 接入 tokio 超时 | 关联 T-072 流式修复 |
+| T-132 | LLM | `stream_timeout_sec` 接入 tokio 超时 | 承接原 T-072 **残余**（delta 流已存在；缺超时收尾） |
 
 ### P2 — 有价值的增强（~41 条）
 
@@ -188,12 +198,14 @@
 - [ ] **[P0]** `#T-004` 中断时不应丢弃 LLM 已回复的内容
   - 应保留已回复内容，加上新的 user message 继续请求 LLM
 
-- [ ] **[P0]** `#T-005` chat 不能退出，没有退出命令
+- [x] **[P0 → 已满足核心退出路径]** `#T-005` chat 不能退出，没有退出命令
+  - **核对 2026-04-19**：`chat_loop` 在 **Ctrl+D（EOF）** 时正常 `break` 并提示「再见」；启动时打印「Ctrl+D 退出，Ctrl+C 中断生成」。**未实现**字面 **`/exit`** 命令——若仍要产品级 `/exit`，可单列增强任务。
+  - 关联：`src/api/chat/mod.rs`
 
-- [ ] **[P0]** `#T-006` 流式输出问题
-  - 大任务时工具使用没有输出，好像不是流式输出
-  - gpt5.2 确认当前不是流式输出
-  - 关联：`#T-072`（LLM 底层修复）
+- [x] **[P0 → 已实现主路径]** `#T-006` 流式输出问题
+  - **核对 2026-04-19**：**AgentLoop** 使用 **`chat_stream`**、`StreamEvent`（含 **`ToolCallDelta`**），TUI 通过 **`WIRE_MESSAGE_UPDATE` / delta** 刷新；旧「完全非流式」表述对当前主干不再成立。
+  - **残留**：LLM 侧 **流式超时**见 **T-132**（`openai.rs`）。
+  - 关联：`src/core/agent_loop/run.rs`、`#T-072`
 
 - [ ] **[P1]** `#T-007` 大任务卡很久没输出，中断后应能记得上下文
   - 降级理由：中断后恢复属于增强，核心中断功能在 T-003/T-004
@@ -266,9 +278,9 @@
 
 ## 四、会话管理
 
-- [ ] **[P0]** `#T-024` 工具调用没有写入会话记录
-  - 数据丢失问题，影响会话可回溯性
-  - 关联模块：`src/core/session/`
+- [x] **[P0 → 已实现]** `#T-024` 工具调用没有写入会话记录
+  - **核对 2026-04-19**：`agent_loop.run` 返回的 **`new_messages`**（含 assistant **tool_calls**、**tool** 角色结果）经 **`session.append_message`** 写入 transcript；会话层对 **tool_calls ↔ tool** 有成链校验。
+  - 关联：`src/api/chat/mod.rs`、`src/core/session/`、`append_message_chain.rs`
 
 - [ ] **[P1]** `#T-025` 无法多 session
   - 降级理由：单 session 目前可用，多 session 是重要增强
@@ -318,7 +330,9 @@
   - 降级理由：功能缺失但有替代方式
   - 比如添加工作目录
 
-- [ ] **[P0]** `#T-038` Agent 不知道自己有什么工作目录
+- [x] **[P0 → 已实现]** `#T-038` Agent 不知道自己有什么工作目录
+  - **核对 2026-04-19**：**`WorkspaceContextSection`** 注入 **`Current working directory: {workspace_dir}`**（与配置解析的 workspace 路径一致）。
+  - 关联：`src/core/system_prompt.rs`
 
 - [ ] **[P2]** `#T-039` 拦截删除操作，换成归档操作
   - 降级理由：安全增强，非核心功能
@@ -464,14 +478,13 @@
   - 关联模块：`src/core/llm/`
   - 关联报告：[llm-tool-rounds-cli-display-thinking-protocol.md](reports/llm-tool-rounds-cli-display-thinking-protocol.md)
 
-- [ ] **[P0]** `#T-072` 流式输出修复
-  - gpt5.2 确认当前非流式输出
-  - 关联：`#T-006`（TUI 侧表现）
-  - 关联模块：`src/core/llm/openai.rs`
+- [x] **[P0 → 主干已流式]** `#T-072` 流式输出修复
+  - **核对 2026-04-19**：推理主路径已 **`chat_stream`**（见 **`#T-006`**）；**残余工作**仅是 **`stream_timeout_sec` / tokio 超时**（归入 **T-132**，`openai.rs` 仍有 TODO 注释）。
+  - 关联：`src/core/agent_loop/run.rs`、`src/core/llm/openai.rs`
 
 - [ ] **[P1]** `#T-132` `stream_timeout_sec` 待接入 `tokio::time::timeout` 实现流式超时
-  - 来源：代码 TODO `src/core/llm/openai.rs:58-60`
-  - 关联：`#T-072`（流式输出修复的基础设施）
+  - 来源：代码 TODO `src/core/llm/openai.rs`（`OpenAiProvider` 字段注释）
+  - **关联**：原 **T-072** 中流式请求的**超时与收尾**短板；主干 delta 流已存在。
 
 ---
 
@@ -704,13 +717,13 @@
 
 | 优先级 | 条目数 | 说明 |
 |--------|--------|------|
-| P0 | ~14 | 破损/不可用：核心流程走不通 |
+| P0 | ~9 | 破损/不可用（2026-04-19：已移出 5 条至「已实现」表，见速查） |
 | P1 | ~21 | 高价值：显著影响体验，应尽快排期 |
 | P2 | ~41 | 有价值的增强：改善体验但不紧急（含插件/VM 管线与 §一 T-001，见 §八） |
 | P3 | ~38 | 远期重要：多 Agent / 安全 / 平台扩展 |
 | P4 | ~15 | 探索性：商业场景 / 远期愿景 |
 | P5 | ~6  | 灵感/阅读 |
-| **合计** | **~135** | |
+| **合计** | **~130** | 条数随「已实现」迁移略减；以正文 `[x]` 为准 |
 
 ### 本次新增条目（来源：代码 TODO/FIXME/DEPRECATED 扫描）
 
