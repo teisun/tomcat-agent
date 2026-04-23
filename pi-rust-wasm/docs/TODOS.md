@@ -261,12 +261,15 @@
 
 ## 二、交互体验 / TUI
 
-- [ ] **[P0] `[UX]`** `#T-003` 工具输出过程中无法中断
-  - 用户在工具执行期间应能发送中断信号
+- [x] **[P0] `[UX]`** `#T-003` 工具输出过程中无法中断
+  - **核对 2026-04-22**：`AgentLoop::run` 全流式 / 工具 await 由 `tokio::select!` + `CancellationToken` 可取消；Ctrl+C 软中断 soft-cancel 当前 turn，`execute_bash` 子进程通过 `tokio::process::Command::kill_on_drop(true)` 被 Drop 时终止
+  - 架构：[interrupt-and-cancellation.md](../openspec/specs/architecture/interrupt-and-cancellation.md)
+  - 代码：`src/core/agent_loop/run.rs`、`src/api/chat/mod.rs`、`src/api/cli/chat_cmd.rs`
   - 档位：T2-P0-007
 
-- [ ] **[P0] `[UX]`** `#T-004` 中断时不应丢弃 LLM 已回复的内容
-  - 应保留已回复内容，加上新的 user message 继续请求 LLM
+- [x] **[P0] `[UX]`** `#T-004` 中断时不应丢弃 LLM 已回复的内容
+  - **核对 2026-04-22**：`AgentRunOutcome::Interrupted` 与 `Completed` 走同一持久化路径；partial assistant delta 收入 `AgentRunResult.new_messages`；`chat_loop` 对两者调用同一 `SessionManager::append_message` 链
+  - 代码：`src/core/agent_loop/types.rs`（`AgentRunOutcome`）、`src/core/agent_loop/run.rs`（`make_aborted` 保留 `start_idx..` partial）
   - 档位：T2-P0-007
 
 - [x] **[已实现核心退出路径]** `#T-005` chat 不能退出，没有退出命令
@@ -312,7 +315,9 @@
   - 每个 userturn 的 toolresult 总量和被调阅次数
   - 档位：与 P3 记忆 + 系统提示词一起考虑
 
-- [ ] **[P0] `[BUG]`** `#T-017` 中断智能体 loop 时 transcript 要记录
+- [x] **[P0] `[BUG]`** `#T-017` 中断智能体 loop 时 transcript 要记录
+  - **核对 2026-04-22**：`chat_loop` 在 `Interrupted` 分支同样执行 `agent_loop.take_context_state()` + `ctx.session.append_message` + `persist_context_observability`；partial assistant 与已完成的 tool_result 均落 JSONL
+  - 硬验收：`src/api/chat/tests.rs::interrupt_persists_transcript_hard_ack`
   - 档位升档自 P1：并入 T2-P0-007
 
 ---

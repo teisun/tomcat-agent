@@ -179,10 +179,8 @@ impl ContextState {
         summary_msg.msg_id = result.transcript_compaction_entry_id.clone();
 
         self.messages.splice(..=end_idx, [summary_msg]);
-        self.estimate_context_chars = self
-            .estimate_context_chars
-            .saturating_sub(batch_chars)
-            + result.summary_text.len();
+        self.estimate_context_chars =
+            self.estimate_context_chars.saturating_sub(batch_chars) + result.summary_text.len();
         self.invalidate_api_usage();
         Ok(())
     }
@@ -191,9 +189,7 @@ impl ContextState {
     pub fn turn_count(&self) -> usize {
         self.messages
             .iter()
-            .filter(|m| {
-                m.role == ChatMessageRole::User || m.kind == MessageKind::CompactionSummary
-            })
+            .filter(|m| m.role == ChatMessageRole::User || m.kind == MessageKind::CompactionSummary)
             .count()
     }
 }
@@ -211,9 +207,8 @@ pub fn estimated_tokens_from_chars(chars: usize) -> usize {
 /// 估算单条 ChatMessage 的字符数（文本内容 + tool_calls 序列化长度）。
 pub fn estimate_msg_chars(msg: &ChatMessage) -> usize {
     let content_len = msg.text_content().map_or(0, |s| s.len());
-    let tc_len = msg
-        .tool_calls
-        .as_ref()
-        .map_or(0, |tcs| tcs.iter().map(|tc| tc.to_string().len()).sum::<usize>());
+    let tc_len = msg.tool_calls.as_ref().map_or(0, |tcs| {
+        tcs.iter().map(|tc| tc.to_string().len()).sum::<usize>()
+    });
     content_len + tc_len
 }

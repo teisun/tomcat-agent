@@ -129,10 +129,7 @@ fn compact_tool_results_protects_recent() {
     let tool_content = "x".repeat(25_000);
     let mut state = make_state(25_000, 5_000, 1_250);
     // Only one turn (one user message), m=1 → everything protected
-    state.messages = vec![
-        user_msg("q"),
-        tool_msg("c1", &tool_content),
-    ];
+    state.messages = vec![user_msg("q"), tool_msg("c1", &tool_content)];
     let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
     assert_eq!(reduced, 0);
 }
@@ -211,18 +208,22 @@ fn layer0_persist_creates_files() {
     assert!(std::path::Path::new(&results[0].persisted_path).exists());
     assert!(state.estimate_context_chars < 60_000);
     // Check the tool message content was replaced
-    let tool = state.messages.iter().find(|m| m.role == ChatMessageRole::Tool).unwrap();
-    assert!(tool.text_content().unwrap_or("").starts_with("[Tool result persisted:"));
+    let tool = state
+        .messages
+        .iter()
+        .find(|m| m.role == ChatMessageRole::Tool)
+        .unwrap();
+    assert!(tool
+        .text_content()
+        .unwrap_or("")
+        .starts_with("[Tool result persisted:"));
 }
 
 #[test]
 fn layer0_persist_skips_small() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(1_000, 100_000, 25_000);
-    state.messages = vec![
-        user_msg("q"),
-        tool_msg("tc_2", "small"),
-    ];
+    state.messages = vec![user_msg("q"), tool_msg("tc_2", "small")];
     let config = ContextConfig::default();
     let (results, _) =
         layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
@@ -309,11 +310,7 @@ fn compact_tool_results_skips_placeholder() {
 fn compact_tool_results_respects_placeholder_threshold_from_config() {
     let big = "x".repeat(25_000);
     let mut state = make_state(30_000, 5_000, 1_250);
-    state.messages = vec![
-        user_msg("q"),
-        tool_msg("c1", &big),
-        user_msg("q2"),
-    ];
+    state.messages = vec![user_msg("q"), tool_msg("c1", &big), user_msg("q2")];
     let high_threshold = ContextConfig {
         layer0_placeholder_threshold_chars: 30_000,
         ..Default::default()
@@ -323,7 +320,11 @@ fn compact_tool_results_respects_placeholder_threshold_from_config() {
         reduced, 0,
         "content below custom threshold should not be replaced"
     );
-    let tool = state.messages.iter().find(|m| m.role == ChatMessageRole::Tool).unwrap();
+    let tool = state
+        .messages
+        .iter()
+        .find(|m| m.role == ChatMessageRole::Tool)
+        .unwrap();
     assert_eq!(tool.text_content().unwrap_or("").len(), 25_000);
 }
 
@@ -332,10 +333,7 @@ fn layer0_persist_skips_below_threshold() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(200_000, 500_000, 125_000);
     let medium = "x".repeat(20_000);
-    state.messages = vec![
-        user_msg("q"),
-        tool_msg("tc_a", &medium),
-    ];
+    state.messages = vec![user_msg("q"), tool_msg("tc_a", &medium)];
     let config = ContextConfig::default();
     let (results, _) =
         layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
@@ -350,10 +348,7 @@ fn layer0_persist_file_readable() {
     let dir = tempfile::tempdir().unwrap();
     let original = "hello world content for persistence test ".repeat(2000);
     let mut state = make_state(original.len(), 100_000, 25_000);
-    state.messages = vec![
-        user_msg("q"),
-        tool_msg("tc_read", &original),
-    ];
+    state.messages = vec![user_msg("q"), tool_msg("tc_read", &original)];
     let config = ContextConfig::default();
     let (results, _) = layer0_persist_large_results(&mut state, &config, dir.path(), "sess1");
     assert_eq!(results.len(), 1);
@@ -368,10 +363,7 @@ fn layer0_persist_file_readable() {
 fn force_drop_oldest_to_target_invalidates_usage() {
     let mut state = make_state(4000, 4000, 1000);
     state.update_api_usage(900, 0);
-    state.messages = vec![
-        user_msg(&"x".repeat(3000)),
-        user_msg(&"y".repeat(500)),
-    ];
+    state.messages = vec![user_msg(&"x".repeat(3000)), user_msg(&"y".repeat(500))];
     force_drop_oldest_to_target(&mut state);
     assert!(
         state.last_api_usage.is_none(),
@@ -446,7 +438,10 @@ fn apply_boundary_replaces_covered_range() {
     assert_eq!(state.messages.len(), 2);
     assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
     assert_eq!(state.messages[0].text_content(), Some("short summary"));
-    assert_eq!(state.messages[0].msg_id.as_deref(), Some(compound_turn_id("m0", "m1").as_str()));
+    assert_eq!(
+        state.messages[0].msg_id.as_deref(),
+        Some(compound_turn_id("m0", "m1").as_str())
+    );
     assert_eq!(state.messages[1].msg_id.as_deref(), Some("m2"));
     assert!(state.last_api_usage.is_none());
     let new_ratio = state.usage_ratio();
@@ -606,10 +601,7 @@ fn layer0_threshold_from_config() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(60_000, 100_000, 25_000);
     let big_content = "x".repeat(60_000);
-    state.messages = vec![
-        user_msg("q"),
-        tool_msg("tc_cfg", &big_content),
-    ];
+    state.messages = vec![user_msg("q"), tool_msg("tc_cfg", &big_content)];
 
     let config = ContextConfig {
         layer0_single_result_max_chars: 100_000,
@@ -626,10 +618,7 @@ fn layer0_threshold_from_config() {
         ..Default::default()
     };
     let mut state2 = make_state(60_000, 100_000, 25_000);
-    state2.messages = vec![
-        user_msg("q"),
-        tool_msg("tc_cfg2", &"y".repeat(60_000)),
-    ];
+    state2.messages = vec![user_msg("q"), tool_msg("tc_cfg2", &"y".repeat(60_000))];
     let (results2, _) = layer0_persist_large_results(&mut state2, &config2, dir.path(), "test");
     assert_eq!(results2.len(), 1, "60K > 50K threshold should persist");
 }
@@ -751,10 +740,10 @@ fn run_layer0_cleanup_mixed_sizes() {
     // L1 compact scans the compactable zone (turns before protected).
     let mut msgs = vec![
         user_msg_with_id("u0", "q0"),
-        tool_msg_with_id("t0", "tc0", &medium),  // 15K in compactable zone
+        tool_msg_with_id("t0", "tc0", &medium), // 15K in compactable zone
         assistant_msg("a0"),
         user_msg_with_id("u1", "q1"),
-        tool_msg_with_id("t1", "tc1", &small),    // 5K in compactable zone
+        tool_msg_with_id("t1", "tc1", &small), // 5K in compactable zone
         assistant_msg("a1"),
     ];
     for i in 2..7 {
@@ -790,11 +779,17 @@ fn run_layer0_cleanup_mixed_sizes() {
     );
 
     // Last turn big (60K > 50K): L0 persisted (but in protected zone, so not L1 placeholder)
-    let last_tool = state.messages.iter().rev()
+    let last_tool = state
+        .messages
+        .iter()
+        .rev()
         .find(|m| m.role == ChatMessageRole::Tool)
         .unwrap();
     assert!(
-        last_tool.text_content().unwrap_or("").starts_with("[Tool result persisted:"),
+        last_tool
+            .text_content()
+            .unwrap_or("")
+            .starts_with("[Tool result persisted:"),
         "60K tool result in last turn should be L0 persisted"
     );
 
@@ -817,10 +812,7 @@ fn run_layer0_cleanup_freed_values_consistent_with_estimate() {
     let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a4");
 
     let reported_freed = outcome.persist_chars_freed + outcome.placeholder_chars_freed;
-    assert!(
-        reported_freed > 0,
-        "should report freed chars"
-    );
+    assert!(reported_freed > 0, "should report freed chars");
     assert!(
         state.estimate_context_chars < before,
         "estimate should decrease"
@@ -890,11 +882,11 @@ fn l3_drop_oldest_with_compaction_summary_as_first() {
 
     let mut state = make_state(0, 100_000, 1_000);
     state.messages = vec![
-        summary_msg(&summary_text),           // turn 0 start (CompactionSummary)
-        assistant_msg(&asst_text),             // turn 0 body
+        summary_msg(&summary_text), // turn 0 start (CompactionSummary)
+        assistant_msg(&asst_text),  // turn 0 body
         tool_msg_with_id("t0", "tc0", &tool_text),
-        user_msg_with_id("u1", &user_text),    // turn 1 start
-        assistant_msg("new answer"),           // turn 1 body
+        user_msg_with_id("u1", &user_text), // turn 1 start
+        assistant_msg("new answer"),        // turn 1 body
     ];
     let total: usize = state.messages.iter().map(estimate_msg_chars).sum();
     state.estimate_context_chars = total;
@@ -910,13 +902,13 @@ fn l3_drop_oldest_with_compaction_summary_as_first() {
 
     assert!(turns_removed >= 1, "should drop at least one turn");
     assert!(chars_removed > 0, "should free some chars");
-    assert!(
-        !state.messages.is_empty(),
-        "should not drain all messages"
-    );
+    assert!(!state.messages.is_empty(), "should not drain all messages");
 
     // CompactionSummary turn was the oldest — it should have been dropped
-    let has_summary = state.messages.iter().any(|m| m.kind == MessageKind::CompactionSummary);
+    let has_summary = state
+        .messages
+        .iter()
+        .any(|m| m.kind == MessageKind::CompactionSummary);
     assert!(
         !has_summary,
         "CompactionSummary (oldest turn) should have been dropped"
@@ -950,10 +942,7 @@ fn apply_boundary_with_msg_id_matching() {
 
     assert_eq!(state.messages.len(), 3, "summary + m4 + m5");
     assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
-    assert_eq!(
-        state.messages[0].text_content(),
-        Some("summary of m1-m3")
-    );
+    assert_eq!(state.messages[0].text_content(), Some("summary of m1-m3"));
     assert_eq!(state.messages[1].msg_id.as_deref(), Some("m4"));
     assert_eq!(state.messages[2].msg_id.as_deref(), Some("m5"));
 }
@@ -999,7 +988,11 @@ fn messages_to_text_format_all_roles() {
         .lines()
         .filter(|l| l.starts_with("[ToolResult]"))
         .collect();
-    assert_eq!(tool_result_lines.len(), 2, "should have 2 tool result lines");
+    assert_eq!(
+        tool_result_lines.len(),
+        2,
+        "should have 2 tool result lines"
+    );
     let long_tool_line = tool_result_lines[1];
     assert!(
         long_tool_line.len() < 250,

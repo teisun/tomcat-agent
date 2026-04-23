@@ -13,9 +13,7 @@ use super::session_impl::generate_entry_id;
 use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
-use super::types::{
-    estimate_msg_chars, CompactionResult, ContextState, SessionContextObservation,
-};
+use super::types::{estimate_msg_chars, CompactionResult, ContextState, SessionContextObservation};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
 
@@ -125,7 +123,9 @@ pub(super) struct FoldEntriesOutcome {
     pub pending_preheat: Option<CompactionResult>,
 }
 
-fn chat_message_from_entry(me: &crate::core::session::transcript::MessageEntry) -> Option<ChatMessage> {
+fn chat_message_from_entry(
+    me: &crate::core::session::transcript::MessageEntry,
+) -> Option<ChatMessage> {
     let role_str = me.message.get("role").and_then(|r| r.as_str())?;
     let role = match role_str {
         "user" => ChatMessageRole::User,
@@ -341,8 +341,7 @@ pub fn init_context_state(
     let fold_out = fold_entries_to_messages(&entries[fold_start..], system_text.len());
     let selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
 
-    let total_chars =
-        system_text.len() + selected.iter().map(estimate_msg_chars).sum::<usize>();
+    let total_chars = system_text.len() + selected.iter().map(estimate_msg_chars).sum::<usize>();
 
     let mut preheat = Preheat::new();
     if let Some(p) = fold_out.pending_preheat {

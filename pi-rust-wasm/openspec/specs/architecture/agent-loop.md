@@ -205,11 +205,18 @@ fn run_reasoning_loop(session, messages) -> Result:
             continue
 
         for tc in tool_calls:
-            if abort_signal.is_set():
+            if cancel_token.is_cancelled():
                 emit(TurnEnd { turn_index })
-                return Err(Aborted)
+                return Err(Aborted { partial_text, partial_messages: messages[start_idx..] })
             emit(ToolExecutionStart { ... })
-            result = execute_tool(session, tc)
+            # 工具执行 await 被 tokio::select! 包裹，cancel 触发后立即返回
+            result = select {
+                r = execute_tool(session, tc) => r,
+                _ = cancel_token.cancelled() => {
+                    emit(ToolExecutionEnd { tc.id, result: "[interrupted]", ok: false })
+                    return Err(Aborted { partial_text, partial_messages: messages[start_idx..] })
+                }
+            }
             emit(ToolExecutionEnd { ... })
             messages.append(ToolResultMessage { tc.id, result })
             if steering_queue.has_pending():
@@ -218,6 +225,11 @@ fn run_reasoning_loop(session, messages) -> Result:
         emit(TurnEnd { turn_index })
         continue
 ```
+
+> **Aborted 语义**（见 [interrupt-and-cancellation.md](interrupt-and-cancellation.md)）：
+> - `LoopError::Aborted { partial_text, partial_messages }` 由 `make_aborted` 构造，`partial_messages = messages[start_idx..]`，天然包含本轮已完成的 `tool_result` 与（若存在）已作为 partial push 的 assistant 消息。
+> - `AgentLoop::run` 外层把 `Err(Aborted)` 转成 `AgentRunOutcome::Interrupted(AgentRunResult { new_messages, .. })`，与 `Completed` **共享同一持久化路径**；这是 T-003/T-004/T-017 的实现锚点。
+> - 事件层：新增 `AgentEvent::Interrupted { session_id, partial_text_len, tool_results_count }`（wire：`agent_interrupted`），同时保留 `AgentEnd { error: "interrupted" }` 兼容旧订阅者。
 
 ---
 
@@ -294,16 +306,17 @@ agent_start              ← 第一层开始，用户消息进入
 |----------|------------------|------------------|----------------|
 | 触发时机 | Agent 工作中     | Agent 刚结束     | 任何时候       |
 | 用户意图 | 改方向           | 加任务           | 全停           |
-| 系统行为 | 完成当前工具，跳过剩余工具，注入新消息，重新调用 LLM | 不重新初始化，在现有上下文中继续 | 完成当前工具后终止循环 |
-| 触发方式 | steer(msg)       | follow_up(msg)   | abort()        |
-| 对应事件 | （无独立事件）   | 新 agent_start   | agent_end(interrupted) |
-| 实现方式 | 线程安全队列，每工具完成后检查 | 线程安全队列，第一层循环尾部检查 | AtomicBool 等无锁信号 |
+| 系统行为 | 完成当前工具，跳过剩余工具，注入新消息，重新调用 LLM | 不重新初始化，在现有上下文中继续 | 所有 stream/tool await 立即 cancel，返回 `AgentRunOutcome::Interrupted`（含 partial） |
+| 触发方式 | steer(msg)       | follow_up(msg)   | `CancellationToken::cancel()`（Ctrl+C 软中断）|
+| 对应事件 | （无独立事件）   | 新 agent_start   | `AgentEvent::Interrupted` + `AgentEnd { error: "interrupted" }` |
+| 实现方式 | 线程安全队列，每工具完成后检查 | 线程安全队列，第一层循环尾部检查 | `tokio_util::sync::CancellationToken` + `tokio::select!` 竞速 await |
 
 队列与信号设计建议：
 
 - `steering_queue`：`Arc<Mutex<Vec<AgentMessage>>>`，UI 写、Loop 读。
 - `follow_up_queue`：同上。
-- `abort_signal`：`Arc<AtomicBool>`，轻量无锁。
+- `cancel_token`：`tokio_util::sync::CancellationToken`，可克隆、可 await、支持广播；每个 user turn 在 `readline` 读到非空输入后**重建一个全新 token**（避免上一轮残留 cancel 污染新轮），见 [interrupt-and-cancellation.md](interrupt-and-cancellation.md) §3、§4。
+- Ctrl+C 双击语义：2 秒内两次 SIGINT 触发 `exit(130)`（hard interrupt，进程退出）；首击仅 cancel 当前 turn（soft interrupt，保留 partial）。
 
 注入模式（与 pi-mono 对齐）：
 

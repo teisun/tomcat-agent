@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::core::compaction::{
@@ -19,8 +19,8 @@ use crate::infra::events::{
 
 use super::convert::classify_error;
 use super::types::{
-    unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunResult, LoopError, ToolCallAccumulator,
-    ToolCallInfo,
+    unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError,
+    ToolCallAccumulator, ToolCallInfo,
 };
 
 impl AgentLoop {
@@ -29,7 +29,7 @@ impl AgentLoop {
         primitive: Arc<dyn PrimitiveExecutor>,
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
-        abort_signal: Arc<AtomicBool>,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             llm,
@@ -38,7 +38,7 @@ impl AgentLoop {
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
-            abort_signal,
+            cancel_token,
             context_state: None,
             block_tool_calls: false,
             start_idx: 0,
@@ -53,7 +53,7 @@ impl AgentLoop {
         primitive: Arc<dyn PrimitiveExecutor>,
         event_bus: Arc<dyn EventBus>,
         config: AgentLoopConfig,
-        abort_signal: Arc<AtomicBool>,
+        cancel_token: CancellationToken,
         steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     ) -> Self {
         Self {
@@ -63,7 +63,7 @@ impl AgentLoop {
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_queue,
-            abort_signal,
+            cancel_token,
             context_state: None,
             block_tool_calls: false,
             start_idx: 0,
@@ -72,21 +72,21 @@ impl AgentLoop {
     }
 
     pub fn steer(&self, msg: String) {
-        self.steering_queue
-            .lock()
-            .push(ChatMessage::steering(msg));
+        self.steering_queue.lock().push(ChatMessage::steering(msg));
     }
 
     pub fn follow_up(&self, msg: String) {
         self.follow_up_queue.lock().push(ChatMessage::user(msg));
     }
 
+    /// 触发本次 `run` 的取消。幂等且不可逆——调用方需在下一回合前
+    /// `new(...)` 时传入新的 `CancellationToken`。
     pub fn abort(&self) {
-        self.abort_signal.store(true, Ordering::SeqCst);
+        self.cancel_token.cancel();
     }
 
-    pub fn abort_signal(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.abort_signal)
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel_token.clone()
     }
 
     pub fn set_context_state(&mut self, state: Option<ContextState>) {
@@ -147,11 +147,27 @@ impl AgentLoop {
     }
 
     /// 第一层：Conversation loop，处理 FollowUp。
-    pub async fn run(
-        &mut self,
-        initial_messages: Vec<ChatMessage>,
-    ) -> Result<AgentRunResult, AppError> {
-        self.abort_signal.store(false, Ordering::SeqCst);
+    ///
+    /// 返回 `AgentRunOutcome` 三态：`Completed` / `Interrupted` / `Failed`。
+    /// `Interrupted` 与 `Completed` 共用 `AgentRunResult` 载荷，调用方走同一
+    /// 持久化路径即可（T-004 / T-017）。
+    pub async fn run(&mut self, initial_messages: Vec<ChatMessage>) -> AgentRunOutcome {
+        if self.cancel_token.is_cancelled() {
+            // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted
+            // 避免 chat_loop 误把"取消信号"传染给下一回合的正常输入。
+            self.emit_event(AgentEvent::AgentStart {
+                session_id: self.config.session_id.clone(),
+            });
+            self.emit_event(AgentEvent::AgentEnd {
+                session_id: self.config.session_id.clone(),
+                messages: vec![],
+                error: Some("interrupted".to_string()),
+            });
+            return AgentRunOutcome::Interrupted(AgentRunResult {
+                final_text: String::new(),
+                new_messages: Vec::new(),
+            });
+        }
 
         self.emit_event(AgentEvent::AgentStart {
             session_id: self.config.session_id.clone(),
@@ -189,18 +205,41 @@ impl AgentLoop {
 
                     let mut q = self.follow_up_queue.lock();
                     if q.is_empty() {
-                        return Ok(result);
+                        return AgentRunOutcome::Completed(result);
                     }
                     messages.extend(q.drain(..));
                     continue;
                 }
-                Err(LoopError::Aborted) => {
+                Err(LoopError::Aborted {
+                    partial_text,
+                    partial_messages,
+                }) => {
+                    let session_id = self.config.session_id.clone();
+                    let tool_results_count = partial_messages
+                        .iter()
+                        .filter(|m| m.role == ChatMessageRole::Tool)
+                        .count();
+                    let partial_text_len = partial_text.chars().count();
+
+                    // 先发布独立的 Interrupted 事件（新增）再发布原有的 AgentEnd(interrupted)
+                    // 供订阅者做"失败 vs 用户中断"区分；旧订阅者仍然拿到 AgentEnd。
+                    self.emit_event(AgentEvent::Interrupted {
+                        session_id: session_id.clone(),
+                        partial_text_len,
+                        tool_results_count,
+                    });
                     self.emit_event(AgentEvent::AgentEnd {
-                        session_id: self.config.session_id.clone(),
+                        session_id,
                         messages: vec![],
                         error: Some("interrupted".to_string()),
                     });
-                    return Err(AppError::Config("用户中断".to_string()));
+
+                    // 中断时 partial_messages 可能不包括发给 LLM 时 context_tail_start 之前
+                    // 的历史消息；外层只需 `new_messages`，故直接透传即可。
+                    return AgentRunOutcome::Interrupted(AgentRunResult {
+                        final_text: partial_text,
+                        new_messages: partial_messages,
+                    });
                 }
                 Err(LoopError::Fatal(e)) => {
                     self.emit_event(AgentEvent::AgentEnd {
@@ -208,10 +247,10 @@ impl AgentLoop {
                         messages: vec![],
                         error: Some(e.clone()),
                     });
-                    return Err(AppError::Llm(e));
+                    return AgentRunOutcome::Failed(AppError::Llm(e));
                 }
                 Err(LoopError::Retryable(_)) => {
-                    unreachable!()
+                    unreachable!("Retryable 应在 run_attempt_loop 内部处理")
                 }
             }
         }
@@ -233,7 +272,18 @@ impl AgentLoop {
                     delay_ms,
                     error_message: err_msg,
                 });
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                // Sleep 期间也要响应取消，不然 Ctrl+C 会被"3 秒退避"吃掉
+                let cancel = self.cancel_token.clone();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(LoopError::Aborted {
+                            partial_text: String::new(),
+                            partial_messages: messages[self.start_idx..].to_vec(),
+                        });
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)) => {}
+                }
             }
 
             match self.run_reasoning_loop(messages).await {
@@ -247,7 +297,7 @@ impl AgentLoop {
                     }
                     return Ok(text);
                 }
-                Err(LoopError::Aborted) => return Err(LoopError::Aborted),
+                Err(err @ LoopError::Aborted { .. }) => return Err(err),
                 Err(LoopError::Fatal(e)) => {
                     if attempt > 1 {
                         self.emit_event(AgentEvent::AutoRetryEnd {
@@ -365,6 +415,20 @@ impl AgentLoop {
         ))
     }
 
+    /// 构造 Aborted 错误：
+    ///
+    /// - `partial_text` 是本轮 assistant 流**已收到**的 delta 拼接
+    ///   （包含将要作为 partial assistant 写入 messages 的文本）；
+    /// - `partial_messages` 取 `messages[start_idx..]`——这是本轮新增的全部消息，
+    ///   既包含中断前已完成的 tool_result，也包含即将作为 partial 写入的
+    ///   assistant 消息（调用方在进入本函数前已 `push` 到 messages）。
+    fn make_aborted(&mut self, messages: &[ChatMessage], partial_text: String) -> LoopError {
+        LoopError::Aborted {
+            partial_text,
+            partial_messages: messages[self.start_idx..].to_vec(),
+        }
+    }
+
     /// 第三层：Reasoning loop，LLM 流式 + 工具执行 + Steering/Abort 检查。
     async fn run_reasoning_loop(
         &mut self,
@@ -374,8 +438,8 @@ impl AgentLoop {
         let mut turn_index: usize = 0;
 
         loop {
-            if self.abort_signal.load(Ordering::SeqCst) {
-                return Err(LoopError::Aborted);
+            if self.cancel_token.is_cancelled() {
+                return Err(self.make_aborted(messages, final_text));
             }
 
             turn_index += 1;
@@ -410,31 +474,52 @@ impl AgentLoop {
                 }
             }
 
-            let mut stream = match self.llm.chat_stream(req).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let snippet: String = e.to_string().chars().take(200).collect();
-                    info!(
-                        target: "pi_wasm_chat_diag",
-                        phase = "reasoning_chat_stream_connect_err",
-                        snippet = %snippet
-                    );
-                    return Err(classify_error(&e));
+            // ── LLM connect：chat_stream 的建连 await 也要可中断 ──
+            let cancel = self.cancel_token.clone();
+            let mut stream = {
+                let connect = self.llm.chat_stream(req);
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(self.make_aborted(messages, final_text));
+                    }
+                    conn = connect => match conn {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let snippet: String = e.to_string().chars().take(200).collect();
+                            info!(
+                                target: "pi_wasm_chat_diag",
+                                phase = "reasoning_chat_stream_connect_err",
+                                snippet = %snippet
+                            );
+                            return Err(classify_error(&e));
+                        }
+                    }
                 }
             };
 
             let mut content_buf = String::new();
             let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
+            let mut aborted_during_stream = false;
 
             let msg_json = serde_json::json!({});
             self.emit_event(AgentEvent::MessageStart {
                 message: Message(msg_json.clone()),
             });
 
-            while let Some(item) = stream.next().await {
-                if self.abort_signal.load(Ordering::SeqCst) {
+            loop {
+                let cancel = self.cancel_token.clone();
+                let next = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        aborted_during_stream = true;
+                        break;
+                    }
+                    item = stream.next() => item,
+                };
+                let Some(item) = next else {
                     break;
-                }
+                };
                 match item {
                     Ok(StreamEvent::ContentDelta { delta }) => {
                         content_buf.push_str(&delta);
@@ -487,6 +572,19 @@ impl AgentLoop {
             self.emit_event(AgentEvent::MessageEnd {
                 message: Message(serde_json::json!({})),
             });
+
+            // stream 被取消：把 partial content_buf 作为 partial assistant 落到 messages，
+            // 让 ctx_state 也把它计入消息预算；再返回 Aborted 携带 partial。
+            if aborted_during_stream {
+                if !content_buf.is_empty() {
+                    if let Some(ref mut ctx_state) = self.context_state {
+                        ctx_state.on_message_appended(content_buf.len());
+                    }
+                    messages.push(ChatMessage::assistant(&content_buf));
+                    final_text.push_str(&content_buf);
+                }
+                return Err(self.make_aborted(messages, final_text));
+            }
 
             final_text.push_str(&content_buf);
 
@@ -643,8 +741,8 @@ impl AgentLoop {
             }
 
             for tc in &tool_calls {
-                if self.abort_signal.load(Ordering::SeqCst) {
-                    return Err(LoopError::Aborted);
+                if self.cancel_token.is_cancelled() {
+                    return Err(self.make_aborted(messages, final_text));
                 }
 
                 let args: serde_json::Value =
@@ -662,7 +760,26 @@ impl AgentLoop {
                     input: args.clone(),
                 });
 
-                let (result_content, is_error) = self.execute_tool(tc).await;
+                // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` +
+                // `reqwest` 连接被 drop 时自动关闭，保证子进程 / HTTP 连接被及时释放。
+                let cancel = self.cancel_token.clone();
+                let (result_content, is_error) = {
+                    let exec = self.execute_tool(tc);
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            // 即便 cancel 先触发，也发布 ToolExecutionEnd 让 UI 完成配对
+                            self.emit_event(AgentEvent::ToolExecutionEnd {
+                                tool_call_id: tc.id.clone(),
+                                tool_name: tc.name.clone(),
+                                result: ToolOutput(serde_json::json!("[interrupted]")),
+                                is_error: true,
+                            });
+                            return Err(self.make_aborted(messages, final_text));
+                        }
+                        out = exec => out,
+                    }
+                };
 
                 self.emit_extension_event(ExtensionEvent::ToolResult {
                     tool_name: tc.name.clone(),

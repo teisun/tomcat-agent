@@ -37,6 +37,10 @@ pub mod wire {
     pub const WIRE_CONTEXT_OVERFLOW_TRIM_END: &str = "context_overflow_trim_end";
     pub const WIRE_LAYER0_CONTEXT_RELEASE: &str = "layer0_context_release";
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
+    /// `AgentEvent::Interrupted` 的 JSON `type`：用户中断（Ctrl+C 软中断）。
+    /// 与现有 `AgentEnd { error: Some("interrupted") }` **并存**——前者供需要区分
+    /// "失败 vs 中断"的订阅者使用，后者保留给原有订阅者做向后兼容。
+    pub const WIRE_AGENT_INTERRUPTED: &str = "agent_interrupted";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";
@@ -273,6 +277,20 @@ pub enum AgentEvent {
         persist_tokens_freed: usize,
         #[serde(rename = "placeholderTokensFreed")]
         placeholder_tokens_freed: usize,
+    },
+    /// 用户中断（Soft Interrupt）：携带本回合已累积的 partial 尺寸统计，
+    /// 便于订阅者区分"失败 vs 中断"。本事件与 `AgentEnd(interrupted)` **并存**，
+    /// 后者保留向后兼容。
+    #[serde(rename = "agent_interrupted")]
+    Interrupted {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        /// partial assistant 累积字符数（非字节数）。
+        #[serde(rename = "partialTextLen")]
+        partial_text_len: usize,
+        /// 本回合已追加到 messages 的 tool_result 数量。
+        #[serde(rename = "toolResultsCount")]
+        tool_results_count: usize,
     },
 }
 

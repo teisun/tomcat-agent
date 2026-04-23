@@ -130,4 +130,6 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use types::{AgentLoop, AgentLoopConfig, AgentRunResult, LoopError, ToolCallInfo};
+pub use types::{
+    AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError, ToolCallInfo,
+};

@@ -194,7 +194,7 @@ system_text ≈ 1300
 
 | 目标 | 策略 |
 | :--- | :--- |
-| 测试 `pub(crate)` 类型（如 `CompactionResult`） | 放在模块内 `#[cfg(test)] mod tests` 中作为单元测试 |
+| 测试 `pub(crate)` 类型（如 `CompactionResult`） | 放在**同级独立 `tests.rs`** 中作为单元测试（父模块用 `#[cfg(test)] mod tests;` 引入；**禁止**在业务源文件内联 `#[cfg(test)] mod tests { ... }`，依据 [RUST_FILE_LINES_SPEC.md §A](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)） |
 | 测试外部可见行为（如 L3 后 estimate 一致性） | 通过 `pub` 入口（如 `force_drop_oldest_to_target`）间接触发，在 `tests/` 中写集成测试 |
 
 **本案例的教训**：最初计划直接在集成测试中构造 `CompactionResult`，编译失败（`error[E0603]: module manager is private`）。改为通过 `force_drop_oldest_to_target()` 这个公开 API 间接测试，既避免了暴露内部类型，又验证了真实的 L3 路径。

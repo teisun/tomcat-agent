@@ -49,14 +49,18 @@ Rust 编译器对单文件行数没有硬性限制。本规范从**可维护性*
 
 Rust 社区习惯把模块测试写在同文件底部，但这会使**业务逻辑与测试代码混杂在同一文件中**，严重膨胀行数并干扰对主逻辑的阅读。
 
-**本规范要求**：单元测试**必须**放在独立文件中，不得内联于业务文件。常见组织方式：
+**本规范要求**（单元测试组织方式的**单一权威来源**；[UNIT_TEST_SPEC.md](../testing/UNIT_TEST_SPEC.md) §3 / §6、[DEBUG_SPEC.md](../../../../agents/plan/DEBUG_SPEC.md) §9.1、[PLAN_SPEC.md](../../../../agents/plan/PLAN_SPEC.md) §8.1 均以本节为准；如出现表述冲突以本节为权威）：
 
-- 同级 `tests.rs`：如 `user.rs` 的测试放在 `user/tests.rs`
-- 独立 `tests/` 子模块：当测试体量较大时可进一步拆分
+1. 单元测试**必须**放在**独立文件**中，**不得**在业务源文件内联 `#[cfg(test)] mod tests { ... }` 代码块。
+2. 常见组织方式：
+   - **同级 `tests.rs`**：如 `user.rs` 的测试放在 `user/tests.rs`；父模块以 `#[cfg(test)] mod tests;` 引入。
+   - **独立 `tests/` 子模块**：当测试体量较大时可进一步拆为 `foo/tests/xxx.rs`。
+3. 业务源文件中唯一允许的 `#[cfg(test)]` 用法是 `#[cfg(test)] mod tests;`（单行模块声明，指向独立测试文件），以及在类型/函数上用 `#[cfg(test)]` 暴露仅测试可见的 helper（确需时）。
+4. 集成测试放项目 `tests/` 顶层目录，与本条无冲突。
 
 这样做的收益：业务文件行数即为有效逻辑行数，度量不再需要区分测试与非测试；业务文件更精简，阅读与评审体验更好。
 
-更细的测试编写规范见 [UNIT_TEST_SPEC.md](../testing/UNIT_TEST_SPEC.md)。
+更细的测试编写规范（mock 策略、覆盖率、命名、断言等）见 [UNIT_TEST_SPEC.md](../testing/UNIT_TEST_SPEC.md)。
 
 ### B. 多个 `impl` 与 trait 实现
 

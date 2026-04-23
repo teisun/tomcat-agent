@@ -55,7 +55,7 @@
 | :--- | :--- |
 | **当前基线 / 现状与差距** | 列出关键类型、入口函数、旧行为与新目标一行对比，减少「从哪改起」的歧义。 |
 | **已定产品 / 技术决策表** | 用户或架构师已拍板的选项（删除/保留某路径、默认值、是否保留 deprecated 等）**表格式列出**；实施阶段不得再悬而未决。 |
-| **文档先行与阶段边界** | 若采用「先只改 openspec、后改代码」的两阶段策略，须在计划中写明**阶段范围**与**不包含**的交付物，避免 Agent 越界改 `src/`。 |
+| **文档先行与阶段边界** | 若采用「先只改 openspec、后改代码」的两阶段策略，须在计划中写明**阶段范围**与**不包含**的交付物，避免 Agent 越界改 `src/`。若本任务需**新增技术方案文档**到 `openspec/specs/architecture/**`，撰写时须遵循 [`DOCUMENTATION_GUIDE.md §2B`](../../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md)，其中「文件职责总览图（One-Glance Map）」为 MUST。 |
 
 **糟粕勿抄**：勿在计划里堆超长 API 清单或与 `TASK_BOARD` 完全重复的 Phase 正文；超大任务可拆为独立 `agents/plan/PLAN_<任务简写>.md`，本规范只定义共性要求。
 
@@ -287,7 +287,7 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 | 目标类型可见性 | 测试位置 | 示例 |
 | :--- | :--- | :--- |
 | `pub` | `tests/` 集成测试 | `force_drop_oldest_to_target` 的行为 |
-| `pub(crate)` | 模块内 `#[cfg(test)]` 单元测试 | `CompactionResult` 的构造与断言 |
+| `pub(crate)` | **同级独立 `tests.rs`** 单元测试（业务源文件 `#[cfg(test)] mod tests;` 引入；**禁止**内联 `mod tests { ... }`，依据 [RUST_FILE_LINES_SPEC.md §A](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)） | `CompactionResult` 的构造与断言 |
 
 **计划中应明确标注**：每个测试子项涉及的类型/函数的可见性，避免实施时才发现编译不过。
 
