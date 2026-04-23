@@ -119,7 +119,7 @@
 - [ ] 新建 `src/core/agent_loop/stream_handler.rs`：`chat_stream` delta 处理 + `ToolCallDelta`
 - [ ] 新建 `src/core/agent_loop/error_classifier.rs`：Retryable / Fatal / ToolError 分类
 - [ ] `run.rs` 保留三层循环骨架 ≤ 300 行
-- [ ] 补 `#[cfg(test)]` 子模块单测，覆盖 Steering / FollowUp / Abort 注入时序
+- [ ] 补独立 `tests.rs` 子模块单测（遵循 [RUST_FILE_LINES_SPEC.md §A](../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)，业务源文件不内联 `#[cfg(test)] mod tests {...}`），覆盖 Steering / FollowUp / Abort 注入时序
 - [ ] `src/ext/dispatcher/` 子模块化（消息分发 / hostcall / audit）
 
 **依赖**：归档 001-mvp 中的 TASK-14（DONE）

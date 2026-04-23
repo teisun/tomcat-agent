@@ -36,7 +36,7 @@
 
 ## 3. 测试分类与目录
 
-- **单元测试**：源文件底部 `#[cfg(test)] mod tests { ... }`，覆盖私有方法、核心算法、纯函数；不应依赖外部网络，耗时低。
+- **单元测试**：**必须**放在**独立 `tests.rs` 文件**中（业务文件**禁止内联** `#[cfg(test)] mod tests { ... }`），覆盖私有方法、核心算法、纯函数；不应依赖外部网络，耗时低。组织方式与目录布局以 [RUST_FILE_LINES_SPEC.md §A](../coding/RUST_FILE_LINES_SPEC.md) 为准——典型做法是在 `foo.rs` 同级建 `foo/tests.rs`，并在 `foo.rs` 中通过 `#[cfg(test)] mod tests;` 引入。
 - **集成测试**：`tests/` 目录，覆盖公开 API、多模块协作、真实外部服务；需覆盖主业务链路。
 
 ---
@@ -76,7 +76,7 @@
 - **同步测试**：`#[test]`；**异步测试**：统一 `#[tokio::test]`（需 `tokio` 的 `rt`、`macros` 等 feature）。
 - **依赖**：仅测试用的 crate（如 `dotenvy`、`wiremock`、`insta`）放在 `[dev-dependencies]`，避免污染主依赖。
 - **全局状态**：避免在测试中无谓修改全局环境（如 `std::env::set_var`）影响其他用例；必要时在用例内恢复或使用 `temp_env` 等隔离手段。
-- **模块组织**：单元测试放在同文件底部 `#[cfg(test)] mod tests { ... }`，或 `tests/` 目录下集成测试；大模块可拆为 `tests/` 子目录。性能测试放 `benches/` 用 criterion。
+- **模块组织**：单元测试**必须**放在**独立 `tests.rs` 文件**中（如 `user.rs` → `user/tests.rs`，父模块 `mod tests;` 引入），**禁止**在业务源文件底部内联 `#[cfg(test)] mod tests { ... }`；测试体量大时可进一步拆为 `foo/tests/` 子目录。集成测试放 `tests/` 顶层目录；性能测试放 `benches/` 用 criterion。详见 [RUST_FILE_LINES_SPEC.md §A](../coding/RUST_FILE_LINES_SPEC.md)（本规范是业务与测试代码分离的权威来源）。
 
 ---
 

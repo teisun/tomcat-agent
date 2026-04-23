@@ -287,7 +287,7 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 | 目标类型可见性 | 测试位置 | 示例 |
 | :--- | :--- | :--- |
 | `pub` | `tests/` 集成测试 | `force_drop_oldest_to_target` 的行为 |
-| `pub(crate)` | 模块内 `#[cfg(test)]` 单元测试 | `CompactionResult` 的构造与断言 |
+| `pub(crate)` | **同级独立 `tests.rs`** 单元测试（业务源文件 `#[cfg(test)] mod tests;` 引入；**禁止**内联 `mod tests { ... }`，依据 [RUST_FILE_LINES_SPEC.md §A](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)） | `CompactionResult` 的构造与断言 |
 
 **计划中应明确标注**：每个测试子项涉及的类型/函数的可见性，避免实施时才发现编译不过。
 
