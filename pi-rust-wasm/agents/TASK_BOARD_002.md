@@ -324,23 +324,26 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `DOING` |
+| **状态** | `PENDING_INTEGRATION` |
 | **负责人** | Spike |
 | **分支** | `feature/interrupt-resume` |
-| **阻塞点** | **依赖偏离（待 Nibbles 复核）**：看板标注依赖 T2-P0-001 / T2-P0-003（均 TODO）。本次破例先做，理由详见计划 `~/.cursor/plans/interruptible_agent_loop_c77e96ab.plan.md` §0.2——改动范围（`run.rs` / `types.rs` / `primitives/bash` / `chat/*`）不与 T2-P0-001 拆分冲突；T2-P0-003 可直接复用本次 CancellationToken 基建。 |
+| **阻塞点** | **依赖偏离（待 Nibbles 复核）**：看板标注依赖 T2-P0-001 / T2-P0-003（均 TODO）。本次破例先做，理由详见计划 `~/.cursor/plans/interruptible_agent_loop_c77e96ab.plan.md` §0.2——改动范围（`run.rs` / `types.rs` / `chat/*` / `cli/chat_cmd.rs`）不与 T2-P0-001 拆分冲突；T2-P0-003 可直接复用本次 CancellationToken 基建。impact-scan 结论（见 `docs/status/feature-interrupt-resume.md`）：未修改 `PrimitiveExecutor::execute_bash` trait 签名，零 mock 改动、零外部 plugin 影响。 |
 | **关联 TODOS** | `#T-003`、`#T-004`、`#T-007`、`#T-017` |
 | **计划文档** | `~/.cursor/plans/interruptible_agent_loop_c77e96ab.plan.md` |
-| **架构文档** | `openspec/specs/architecture/interrupt-and-cancellation.md`（待新建，计划阶段 A 产出） |
+| **架构文档** | `openspec/specs/architecture/interrupt-and-cancellation.md`（2026-04-22 定稿） |
+| **状态文档** | `docs/status/feature-interrupt-resume.md` |
 
 **目标**：用户中断期间不丢已生成的 LLM 回复；中断时 transcript 落盘；下次进入同会话可续写上下文。
 
 **子项**：
-- [ ] **T-003**：工具输出过程中支持 Ctrl+C 中断（接入 Abort）
-- [ ] **T-004**：中断时保留已回复片段，加上新 user 消息继续请求 LLM（不再丢弃）
-- [ ] **T-017**：中断时同步落盘 transcript（`session.append_message` 前缀刷盘）
-- [ ] **T-007 最小版**：中断 partial 落盘 + 现有 `--resume` 路径天然满足"记得上下文"；完整 resume API（`session resume` 子命令、跨 session Checkpoint）推到 T2-P1-001
-- [ ] 集成 Steering / FollowUp / Abort 三态流转
-- [ ] 新增架构文档 `openspec/specs/architecture/interrupt-and-cancellation.md`
+- [x] **T-003**：工具输出过程中支持 Ctrl+C 中断（`tokio::select!` + `CancellationToken` + `kill_on_drop(true)`）
+- [x] **T-004**：中断时保留已回复片段，`AgentRunOutcome::Interrupted` 与 `Completed` 走同一持久化路径
+- [x] **T-017**：中断时同步落盘 transcript（`session.append_message` 覆盖 partial assistant + 已完成 tool_result；硬验收 `interrupt_persists_transcript_hard_ack`）
+- [x] **T-007 最小版**：中断 partial 落盘 + 现有 `--resume` 路径天然满足"记得上下文"；完整 resume API（`session resume` 子命令、跨 session Checkpoint）推到 T2-P1-001
+- [x] Ctrl+C 双击语义：首击 soft cancel、2s 内再击 `exit(130)`（纯函数 `check_double_tap` + 4 用例单测）
+- [x] `AgentEvent::Interrupted` + `WIRE_AGENT_INTERRUPTED`；`AgentEnd.error="interrupted"` 保留兼容
+- [x] 新增架构文档 `openspec/specs/architecture/interrupt-and-cancellation.md`
+- [ ] Steering / FollowUp 三态流转完整集成：本次仅覆盖 Abort 维度；Steering / FollowUp 队列整合推 T2-P0-001 Agent Loop 拆分时统一处理
 
 **依赖**：T2-P0-001、T2-P0-003（本次破例——见"阻塞点"字段）
 
@@ -695,3 +698,4 @@ flowchart LR
 |------|------|------|
 | 2026-04-22 | 新建本看板 | 随 P0-P9 路线图调整；`001-mvp` 归档到 `openspec/specs/archive/` |
 | 2026-04-22 | 认领 T2-P0-007 | Spike 认领（TODO→DOING），破例绕过 T2-P0-001 / T2-P0-003 依赖（见阻塞点）；计划 `interruptible_agent_loop_c77e96ab.plan.md` 经用户确认后进入开发 |
+| 2026-04-23 | T2-P0-007 DOING→PENDING_INTEGRATION | Spike 完成 T-003 / T-004 / T-017 + T-007 最小版；全量门禁 `cargo build --all-targets`、`cargo clippy -- -D warnings`、`cargo fmt -- --check`、`cargo test --lib` (432/432) 与 `cargo test --test '*'` (含 cli_tests 77 / wasmedge_e2e_tests 39) 全绿；impact-scan 实际**未修改** `PrimitiveExecutor::execute_bash` trait 签名（零 mock 改动）；架构文档 `interrupt-and-cancellation.md` 定稿，E2E-CLI-062 / E2E-CLI-063 登记到场景库；待 Nibbles 集成复核 |

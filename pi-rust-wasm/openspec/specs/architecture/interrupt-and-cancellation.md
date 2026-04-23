@@ -619,14 +619,14 @@ ctrlc::set_handler(move || {
 
 ## 14. 验收（与看板 T2-P0-007 对齐）
 
-| 维度 | 具体断言 |
-|---|---|
-| 单元测试 | `test_check_double_tap` / `test_cancel_during_bash` / `test_cancel_during_stream` / `test_token_rebuild_per_turn` 全绿 |
-| 集成测试 | `tests/integration/interrupt/interrupt_partial_persist.rs`：真实 `SessionManager` + mock LLM，transcript 末尾为 partial assistant，观测值已刷 |
-| E2E | `test_user_interrupt_during_bash` / `test_user_double_ctrlc_exits`（新增到 `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md`） |
-| 观察指标 | G1–G5 人工验证 + E2E 自动化覆盖 |
-| 文档 | 本文 + `agent-loop.md` §13.2 / §13.3.2 同步更新 + `docs/TODOS.md` T-003 / T-004 / T-017 标 `[x]` 附源码锚点 |
-| 范围内 T-007 最小版 | 同一 session 中断 → 重启 `pi chat --resume <id>` 后 transcript 末尾见 partial assistant；用户下一条输入能在此基础上延续 |
+| 维度 | 具体断言 | 状态 |
+|---|---|---|
+| 单元测试 | `api::cli::chat_cmd::tests::check_double_tap_*`（4 用例 / 纯函数）、`core::agent_loop::tests::run_interrupt_between_tools_retains_completed_tool_result`、`core::agent_loop::tests::run_interrupt_during_stream_preserves_partial_text`、`core::agent_loop::tests::token_rebuild_per_turn_allows_next_run` | ✅ 2026-04-22 全绿 |
+| 集成 / 硬验收 | `src/api/chat/tests.rs::interrupt_persists_transcript_hard_ack`（真实 `SessionManager` + 模拟 `AgentRunResult` interrupted，transcript 末尾 `role=assistant`（含 tool_calls）+ `role=tool`） | ✅ 2026-04-22 |
+| E2E（人工） | `E2E-CLI-062 test_user_interrupt_during_bash` / `E2E-CLI-063 test_user_double_ctrlc_exits`（已登记到 [`E2E_SCENARIO_LIBRARY.md`](../guides/testing/E2E_SCENARIO_LIBRARY.md) Story 8） | ✅ 场景入库；人工观感 PENDING |
+| 观察指标 | G1–G5：G1/G2 由单测+硬验收锁死；G3/G4 由 `check_double_tap` + token-rebuild 锁死；G5 见 T-007 最小版 | ✅ |
+| 文档 | 本文（定稿）+ `agent-loop.md` §13.2 / §13.3.2 同步 + `docs/TODOS.md` T-003 / T-004 / T-017 标 `[x]` 附源码锚点 | ✅ 2026-04-22 |
+| 范围内 T-007 最小版 | 同一 session 中断 → 重启 `pi chat --resume <id>` 后 transcript 末尾见 partial assistant；用户下一条输入能在此基础上延续 | ✅ 由 T-004/T-017 持久化路径天然满足 |
 
 ### 14.1 T-007 最小版 vs 完整版
 
