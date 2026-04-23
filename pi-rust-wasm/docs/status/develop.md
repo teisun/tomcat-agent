@@ -1,5 +1,73 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-23 22:41 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-007 interrupt-resume-transcript（中断/恢复 + transcript 完整性）
+
+**合并信息**
+
+- 源分支：`feature/interrupt-resume` @ `a0c6260`（8 commits）
+- 合并 commit：`3518089 merge(T2-P0-007): feature/interrupt-resume → develop (中断/恢复 + transcript 完整性)`
+- 合并策略：`--no-ff`，ort 3-way 无冲突
+- 负责任务：T2-P0-007（Spike 交付，Nibbles 集成复核）
+
+**§1 规格 & 场景库核对**
+
+- [✓] `User_Stories.md` Story 8 已包含 Ctrl+C 中断 / FollowUp 验收条目。
+- [✓] `E2E_SCENARIO_LIBRARY.md` Story 8 含 **E2E-CLI-062**（`test_user_interrupt_during_bash`）与 **E2E-CLI-063**（`test_user_double_ctrlc_exits`）；均标注为**人工**验收，数据契约由单测锁定（见下）。
+- [✓] `openspec/specs/architecture/interrupt-and-cancellation.md` 定稿并与 `agent-loop.md §13.2/§13.3.2` 对齐。
+
+**§2 + §3 全量 review — 编码规范家族四件套**
+
+| 规范 | 结论 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | ✅ 通过 | `ctrlc::set_handler` 仅存在于 `src/api/cli/chat_cmd.rs`（api/cli 层）；`core/agent_loop` 仅接收 `CancellationToken` 不自行装 handler；`LoopError::Aborted { partial_text, partial_messages }` 与 `AgentRunOutcome { Completed, Interrupted, Failed }` 单一定义在 `core/agent_loop/types.rs`；错误走 `AppError` 家族，`Interrupted` 与 `Failed` 严格分离；partial 持久化仍经 `SessionManager::append_message`（未绕过 session 层）。 |
+| `RUST_FILE_LINES_SPEC.md` | ✅ 通过（有预警） | 预警（500–1000 黄金区）：`src/core/agent_loop/run.rs` 948、`src/core/compaction/preheat.rs` 646、`src/api/chat/mod.rs` 502；测试文件 `src/core/agent_loop/tests.rs` 1277（按规范度量口径，测试代码不计入业务红线）。全仓无内联 `#[cfg(test)] mod tests { ... }`（`rg` 0 命中）；新增单测均在兄弟文件（`chat_cmd/tests.rs` 48、`preheat/tests.rs` 55、`api/chat/tests.rs` 218）。—— 未来 `run.rs` 若继续膨胀，建议抽 `run/cancel.rs` 子模块，本次不阻塞。 |
+| `RUST_IDIOMS_SPEC.md` | ✅ 通过 | `cargo clippy --all-targets -- -D warnings` 零警告（2026-04-23 22:32 develop HEAD）。spot-check：`messages[self.start_idx..].to_vec()` 是 slice→owned 构造（非 `unnecessary_to_owned` 场景），其余 I-1~I-8 未见违规。 |
+| `COMMENT_SPEC.md` | ✅ 通过 | `chat_cmd.rs` 顶有 `//!` 模块注释，交叉引用 `interrupt-and-cancellation.md`；`AgentRunOutcome` 三变体（`Completed`/`Interrupted`/`Failed`）各自带 `///` 变体级注释（`types.rs:86–98`）；`LoopError::Aborted` 注释解释为何携带 `partial_text` + `partial_messages`（T-004/T-017）；`check_double_tap` 注释含 `- last` / `- now` / `- window` 参数说明与返回语义。 |
+
+**§2.2 集成测试覆盖核查**
+
+- [✓] `src/api/cli/chat_cmd.rs::check_double_tap` 纯函数 + 兄弟文件 `chat_cmd/tests.rs` 4 用例（首击 / 窗口内双击 / 窗口外 / 边界 2s）。
+- [✓] `AgentLoop::run` → `AgentRunOutcome` 三态，`LoopError::Aborted` 携带 partial，硬验收覆盖：
+  - `run_interrupt_between_tools_retains_completed_tool_result`（`src/core/agent_loop/tests.rs`）
+  - `run_interrupt_during_stream_preserves_partial_text`（同上）
+  - `token_rebuild_per_turn_allows_next_run`（同上）
+  - `interrupt_persists_transcript_hard_ack`（`src/api/chat/tests.rs`，T-017）
+- [✓] `E2E-CLI-062/063` 虽为**人工**用例，其数据契约由上述 4 单测 + 4 用例 `check_double_tap` 锁定，符合场景库表头说明。
+
+**§4 自动化门禁（develop HEAD `3518089`）**
+
+日志：`pi-rust-wasm/.integration_test_output.log`（gitignored）。
+
+| 步骤 | 命令 | 结果 |
+| :--- | :--- | :--- |
+| 1. build | `cargo build --release` | ✅ OK (22:32:30) |
+| 2. clippy | `cargo clippy --all-targets -- -D warnings` | ✅ 零警告 (22:32:53) |
+| 3. lib tests | `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | ✅ **432 passed**, 0 failed, 1 ignored (22:38:06) |
+| 4. `--test '*'` | `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | ✅ 全绿，含 `cli_tests` **77 passed** / `wasmedge_e2e_tests` **39 passed**（22:41:25） |
+
+`EXIT_CODE=0`。WasmEdge VM cleanup 阶段的 `[error] execution failed: host function failed, Code: 0x8d` 属已知环境噪声（见 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §4 说明），用例级 `ok` / `FAILED` 以 Rust test harness 为准。
+
+**§5 人工验收**
+
+- `pi chat` Ctrl+C 单击 / 双击（2s 内）的终端观感由 E2E-CLI-062/063 人工清单承载，数据契约已由 §2.2 单测锁定。本次集成未触发新的破坏性 UX 变更，不强制重跑人工清单。
+
+**环境**
+
+- macOS 22.6.0（darwin）/ aarch64
+- WasmEdge 已就绪
+- OpenAI：`.env` 中 `OPENAI_API_KEY` + `HTTPS_PROXY` 生效（`cli_tests` / `llm_tests` 实时通联 `api.openai.com` 成功）
+- Rust toolchain：仓内 `rust-toolchain.toml`（如有）为准
+
+**结论**
+
+✅ T2-P0-007 集成通过；看板状态由 `PENDING_INTEGRATION` 更新为 `DONE`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-23 12:00 | ACTIVE | develop | — |
 
 ### docs：路线图 P0-P9 重排；002 单 Agent 看板；001-mvp 归档
