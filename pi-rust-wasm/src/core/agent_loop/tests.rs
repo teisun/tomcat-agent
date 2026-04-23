@@ -1023,3 +1023,256 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         observed
     );
 }
+
+// ─── 中断 / Partial 持久化硬验收（T-003 / T-004 / T-017） ─────────────────────
+
+/// 在 tool 轮之间取消：partial_messages 必须**包含**已完成的 tool_result，
+/// 使外层 chat_loop 对中断路径做与正常收束一致的落盘（T-017 的核心主张）。
+#[tokio::test]
+async fn run_interrupt_between_tools_retains_completed_tool_result() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read_file".to_string()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: Some("c2".to_string()),
+            name: Some("read_file".to_string()),
+            arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream_tools]));
+    let primitive = Arc::new(SleepyMockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    let interrupted_payloads: Arc<Mutex<Vec<serde_json::Value>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let ip_clone = Arc::clone(&interrupted_payloads);
+    event_bus.on(
+        wire::WIRE_AGENT_INTERRUPTED,
+        Box::new(move |ctx: EventContext| {
+            ip_clone.lock().unwrap().push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-int-tools".to_string(),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(130)).await;
+        cancel_bg.cancel();
+    });
+
+    let outcome = agent.run(vec![ChatMessage::user("read two files")]).await;
+    assert!(
+        outcome.is_interrupted(),
+        "期望 Interrupted outcome，实际 {:?}",
+        outcome
+    );
+    let result = match outcome {
+        AgentRunOutcome::Interrupted(r) => r,
+        other => panic!("unexpected: {:?}", other),
+    };
+
+    let roles: Vec<String> = result
+        .new_messages
+        .iter()
+        .map(|m| format!("{:?}", m.role))
+        .collect();
+    assert!(
+        roles.iter().any(|r| r.contains("Assistant")),
+        "partial_messages 应含 assistant（发起工具调用的一条），实际 roles={:?}",
+        roles
+    );
+    let tool_msgs: Vec<&ChatMessage> = result
+        .new_messages
+        .iter()
+        .filter(|m| format!("{:?}", m.role).contains("Tool"))
+        .collect();
+    assert_eq!(
+        tool_msgs.len(),
+        1,
+        "应恰好有 1 个已完成的 tool_result（c1），实际 {} 个：{:?}",
+        tool_msgs.len(),
+        roles
+    );
+
+    let emitted = interrupted_payloads.lock().unwrap();
+    assert_eq!(emitted.len(), 1, "应发布 1 次 agent_interrupted");
+    let p = &emitted[0];
+    assert_eq!(
+        p.get("sessionId").and_then(|v| v.as_str()),
+        Some("s-int-tools")
+    );
+    assert_eq!(p.get("toolResultsCount").and_then(|v| v.as_u64()), Some(1));
+}
+
+/// 在 LLM 流式输出 delta 期间取消：partial_text 非空、assistant partial 入 messages、
+/// final_text 与 partial_text 一致。覆盖 T-004（不丢 LLM 回复）。
+#[tokio::test]
+async fn run_interrupt_during_stream_preserves_partial_text() {
+    use tokio_stream::wrappers::ReceiverStream;
+
+    struct StreamingLlm {
+        rx: Mutex<Option<tokio::sync::mpsc::Receiver<Result<StreamEvent, AppError>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StreamingLlm {
+        fn provider_name(&self) -> &str {
+            "streaming_mock"
+        }
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            Err(AppError::Llm("unused".into()))
+        }
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<
+            Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            let rx = self
+                .rx
+                .lock()
+                .unwrap()
+                .take()
+                .expect("chat_stream called twice");
+            Ok(Box::new(ReceiverStream::new(rx)))
+        }
+        fn count_tokens(
+            &self,
+            _messages: &[crate::core::llm::ChatMessage],
+        ) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamEvent, AppError>>(16);
+    let llm = Arc::new(StreamingLlm {
+        rx: Mutex::new(Some(rx)),
+    });
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+
+    tokio::spawn(async move {
+        for i in 0..200 {
+            if tx
+                .send(Ok(StreamEvent::ContentDelta {
+                    delta: format!("chunk-{i} "),
+                }))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    });
+
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-int-stream".to_string(),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+        cancel_bg.cancel();
+    });
+
+    let outcome = agent.run(vec![ChatMessage::user("stream")]).await;
+    let result = match outcome {
+        AgentRunOutcome::Interrupted(r) => r,
+        other => panic!("期望 Interrupted，实际 {:?}", other),
+    };
+
+    assert!(
+        !result.final_text.is_empty(),
+        "partial_text 不应为空（stream 期间 delta 已累积）"
+    );
+    assert!(
+        result.final_text.contains("chunk-"),
+        "partial_text 应含 delta 片段，实际: {:?}",
+        result.final_text
+    );
+    assert!(
+        result
+            .new_messages
+            .iter()
+            .any(|m| format!("{:?}", m.role).contains("Assistant")),
+        "partial_messages 应含 assistant 消息（承载 partial_text）"
+    );
+}
+
+/// Token 每回合重建：预取消的 token 应在 run() 入口立即返回 Interrupted；
+/// 新 token 的 AgentLoop 应能正常收束。验证架构文档 §6.2 的契约——
+/// CancellationToken 一旦 cancel 不可逆，必须每回合重建。
+#[tokio::test]
+async fn token_rebuild_per_turn_allows_next_run() {
+    // 回合 1 的 token 在 run() 入口即 cancel，`chat_stream` 根本不会被调用；
+    // 故只需为回合 2 准备一个 stream 即可。
+    let stream2: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "second-ok".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream2]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config_a = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-rebuild".to_string(),
+        ..Default::default()
+    };
+
+    let token_a = CancellationToken::new();
+    token_a.cancel();
+    let mut loop_a = AgentLoop::new(
+        llm.clone(),
+        primitive.clone(),
+        event_bus.clone(),
+        config_a,
+        token_a.clone(),
+    );
+    let out_a = loop_a.run(vec![ChatMessage::user("first")]).await;
+    assert!(
+        out_a.is_interrupted(),
+        "已 cancel 的 token 应在 run() 入口立即返回 Interrupted"
+    );
+
+    let config_b = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-rebuild".to_string(),
+        ..Default::default()
+    };
+    let token_b = CancellationToken::new();
+    assert!(
+        !token_b.is_cancelled(),
+        "新 token 必须未被 cancel（否则证明 token 被跨回合复用）"
+    );
+    let mut loop_b = AgentLoop::new(llm, primitive, event_bus, config_b, token_b);
+    let out_b = loop_b.run(vec![ChatMessage::user("second")]).await;
+    assert!(out_b.is_ok(), "新回合应正常 Completed");
+    let r = out_b.unwrap();
+    assert_eq!(r.final_text, "second-ok");
+}
