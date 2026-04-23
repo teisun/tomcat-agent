@@ -18,7 +18,7 @@
 - [x] **[流程]** 看板认领 T2-P0-007（TODO → DOING）
 - [x] **[流程]** 创建分支 feature/interrupt-resume，初始化 status 文件
 - [x] **[文档]** 阶段 A：openspec/specs/architecture/interrupt-and-cancellation.md 初稿
-- [ ] **[流程]** impact-scan：ripgrep 扫描 abort_signal / cancelled / AgentLoop::run 调用面
+- [x] **[流程]** impact-scan：ripgrep 扫描 abort_signal / cancelled / AgentLoop::run 调用面（结论见末尾"impact-scan 结论"）
 
 #### 实施类
 - [ ] **[P0]** types-refactor：types.rs 引入 CancellationToken / 重塑 LoopError::Aborted 携带 partial / 新增 AgentRunOutcome 三态
@@ -52,5 +52,18 @@
 
 ### 📌 备注
 
-- 阶段 A（仅文档）已完成，待用户审阅 `interrupt-and-cancellation.md` 后进入阶段 B（代码实施）。
+- 阶段 A（仅文档）已完成，进入阶段 B（代码实施）。
 - 提交策略：每子任务完成提交一次（commit-guard），本地 + 远端同步推送。
+
+### 🔍 impact-scan 结论（2026-04-22）
+
+| 改动点 | 调用方 / 实现方 | 处理方式 |
+|---|---|---|
+| `AgentLoop::run` 返回类型 → `AgentRunOutcome` | `src/api/chat/mod.rs:384`（生产唯一）+ ~6 处 tests | 全部更新 match 模式 |
+| `LoopError::Aborted` → 携带 partial | `run.rs` 内 4 处构造 + 4 处 match | 仅 run.rs 自身 |
+| `PrimitiveExecutor::execute_bash` trait | 1 处真实现 + 6 处 mock + 0 个外部 plugin | **决策调整**：不改 trait 签名。`tokio::process::Command::output().await` + `.kill_on_drop(true)` 已支持"future drop 即 kill 子进程"。caller 端 `tokio::select!` 包裹即可，0 处 mock 受影响 |
+| `AgentLoop::new` 签名（abort_signal 参数） | ~9 处生产 + 测试 | **决策**：保留 abort_signal 参数；内部新增 `cancel_token` 字段，`abort()` 同时 cancel token。0 处调用方改动 |
+| `AgentEvent::Interrupted` + `WIRE_AGENT_INTERRUPTED` | events.rs / wire.rs 新增 | 附加而非替代 |
+| 新增依赖 `tokio-util` (sync feature) | Cargo.toml | 引入 `CancellationToken` |
+
+**整体结论**：影响面较 plan §6.3 预估缩小（不改 trait 签名节省 6 处 mock 改动 + 0 外部 plugin 影响）。架构文档 `interrupt-and-cancellation.md` §6.3 将在 docs-sync 阶段同步修订该决策调整。

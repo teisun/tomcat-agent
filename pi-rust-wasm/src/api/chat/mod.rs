@@ -1,11 +1,14 @@
 //! CLI 对话模式：主循环、流式渲染、多轮上下文、工具调用、Markdown 高亮。
 
 use std::io::{self, Write as IoWrite};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
+use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::ChatMessage;
@@ -39,7 +42,12 @@ pub struct ChatContext {
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub event_bus: Arc<dyn EventBus>,
-    pub cancelled: Arc<AtomicBool>,
+    /// 当前回合用户中断令牌。ctrlc handler 会 `lock().cancel()`；
+    /// `chat_loop` 在每次 readline 读到非空输入后**重建**它（`CancellationToken`
+    /// 一旦 cancel 不可逆），保证新回合不会被上一回合的中断信号污染。
+    pub cancel_token: Arc<Mutex<CancellationToken>>,
+    /// 上一次 Ctrl+C 按下的时刻；ctrlc handler 判双击用。
+    pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
     /// Agent 默认工作目录，用于 system prompt 和路径白名单默认值。
     pub workspace_dir: std::path::PathBuf,
 }
@@ -76,7 +84,8 @@ impl ChatContext {
             Arc::new(DefaultToolRegistry::new(tool_executor, audit));
 
         let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
+        let last_interrupt_at = Arc::new(Mutex::new(None));
 
         Ok(Self {
             session,
@@ -85,7 +94,8 @@ impl ChatContext {
             primitive,
             tool_registry,
             event_bus,
-            cancelled,
+            cancel_token,
+            last_interrupt_at,
             workspace_dir,
         })
     }
@@ -293,7 +303,15 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         }
         let _ = rl.add_history_entry(&input);
 
-        ctx.cancelled.store(false, Ordering::SeqCst);
+        // 读到新输入后重建 CancellationToken。
+        // 关键约束：token 一旦 cancel 不可逆——如果用户 Ctrl+C 落在 prompt 处，
+        // 旧 token 已被 cancel；这里替换成新 token，新回合才能正常运行。
+        // 必须在 `agent_loop.run` 之前完成。
+        let turn_token = {
+            let mut guard = ctx.cancel_token.lock();
+            *guard = CancellationToken::new();
+            guard.clone()
+        };
 
         let entry = ctx.session.get_session(ctx.session.current_session_key())?;
         let model = ctx.effective_model(entry.as_ref());
@@ -348,7 +366,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             ctx.primitive.clone(),
             ctx.event_bus.clone(),
             config,
-            ctx.cancelled.clone(),
+            turn_token,
         );
         agent_loop.set_context_state(Some(context_state));
 
@@ -381,98 +399,79 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             session_stderr_listeners_active = true,
             message_stream_listener_registered = true
         );
-        let run_result = agent_loop.run(messages).await;
+        let outcome = agent_loop.run(messages).await;
         ctx.event_bus.off(listener_id);
-        match run_result {
-            Ok(result) => {
-                if let Some(remaining) = renderer.lock().flush() {
-                    print!("{}", remaining);
-                    io::stdout().flush().map_err(AppError::Io)?;
-                }
 
-                // Take back ContextState
-                context_state = agent_loop.take_context_state().unwrap_or_else(|| {
-                    init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
-                        crate::core::ContextState {
-                            messages: Vec::new(),
-                            estimate_context_chars: system_text.len(),
-                            context_budget_chars:
-                                crate::infra::config::compute_context_budget_chars(context_config),
-                            context_budget_tokens: context_config
-                                .context_window
-                                .saturating_sub(context_config.max_output_tokens),
-                            last_api_usage: None,
-                            post_usage_appended_chars: 0,
-                            transcript_path: ctx
-                                .session
-                                .current_transcript_path()
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default(),
-                            preheat: Preheat::new(),
-                            session_obs: Default::default(),
-                            live: Default::default(),
-                        },
-                    )
-                });
+        // T-004 / T-017：`Completed` 与 `Interrupted` 走**同一条**持久化路径——
+        // partial assistant（content_buf 截短处）+ 已完成的 tool_result 都已被
+        // `AgentLoop::run` 装进 `AgentRunResult.new_messages`，这里只需 append +
+        // observability，不区分成功与中断。
+        let (maybe_result, was_interrupted, maybe_error) = match outcome {
+            AgentRunOutcome::Completed(r) => (Some(r), false, None),
+            AgentRunOutcome::Interrupted(r) => (Some(r), true, None),
+            AgentRunOutcome::Failed(e) => (None, false, Some(e)),
+        };
 
-                for msg in result.new_messages {
-                    let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
-                    let mut cm = msg;
-                    cm.msg_id = Some(row_id);
-                    context_state.messages.push(cm);
-                }
+        if let Some(remaining) = renderer.lock().flush() {
+            print!("{}", remaining);
+            let _ = io::stdout().flush();
+        }
 
-                ctx.session.persist_context_observability(&context_state)?;
+        context_state = agent_loop
+            .take_context_state()
+            .unwrap_or_else(|| {
+                init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
+                    crate::core::ContextState {
+                        messages: Vec::new(),
+                        estimate_context_chars: system_text.len(),
+                        context_budget_chars:
+                            crate::infra::config::compute_context_budget_chars(context_config),
+                        context_budget_tokens: context_config
+                            .context_window
+                            .saturating_sub(context_config.max_output_tokens),
+                        last_api_usage: None,
+                        post_usage_appended_chars: 0,
+                        transcript_path: ctx
+                            .session
+                            .current_transcript_path()
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default(),
+                        preheat: Preheat::new(),
+                        session_obs: Default::default(),
+                        live: Default::default(),
+                    },
+                )
+            });
+
+        if let Some(result) = maybe_result {
+            for msg in result.new_messages {
+                let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
+                let mut cm = msg;
+                cm.msg_id = Some(row_id);
+                context_state.messages.push(cm);
             }
-            Err(e) => {
-                if let Some(remaining) = renderer.lock().flush() {
-                    print!("{}", remaining);
-                    let _ = io::stdout().flush();
-                }
+            ctx.session.persist_context_observability(&context_state)?;
 
-                // Take back context state even on error
-                context_state = agent_loop.take_context_state().unwrap_or_else(|| {
-                    init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
-                        crate::core::ContextState {
-                            messages: Vec::new(),
-                            estimate_context_chars: system_text.len(),
-                            context_budget_chars:
-                                crate::infra::config::compute_context_budget_chars(context_config),
-                            context_budget_tokens: context_config
-                                .context_window
-                                .saturating_sub(context_config.max_output_tokens),
-                            last_api_usage: None,
-                            post_usage_appended_chars: 0,
-                            transcript_path: ctx
-                                .session
-                                .current_transcript_path()
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default(),
-                            preheat: Preheat::new(),
-                            session_obs: Default::default(),
-                            live: Default::default(),
-                        },
-                    )
-                });
-
-                let _ = ctx.session.persist_context_observability(&context_state);
-
-                let is_fatal = is_fatal_error(&e);
-                eprintln!("\n[错误] {}", e);
-                if is_fatal {
-                    eprintln!("(致命错误，退出对话)");
-                    context_state.preheat.abort();
-                    session_stderr_listeners::unregister_chat_session_stderr_listeners(
-                        &*ctx.event_bus,
-                        &session_stderr_ids,
-                    );
-                    return Err(e);
-                }
-                eprintln!("(可重试，请继续输入)\n");
-                continue;
+            if was_interrupted {
+                eprintln!("\n^C 已中断（partial 已保存）");
             }
+        } else if let Some(e) = maybe_error {
+            let _ = ctx.session.persist_context_observability(&context_state);
+
+            let is_fatal = is_fatal_error(&e);
+            eprintln!("\n[错误] {}", e);
+            if is_fatal {
+                eprintln!("(致命错误，退出对话)");
+                context_state.preheat.abort();
+                session_stderr_listeners::unregister_chat_session_stderr_listeners(
+                    &*ctx.event_bus,
+                    &session_stderr_ids,
+                );
+                return Err(e);
+            }
+            eprintln!("(可重试，请继续输入)\n");
+            continue;
         }
 
         println!();

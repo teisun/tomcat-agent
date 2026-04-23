@@ -11,7 +11,8 @@ use pi_wasm::{
     PrimitiveExecutor, PrimitiveOperation, StreamEvent, WriteFileResult,
 };
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio_util::sync::CancellationToken;
 use std::sync::{Arc, Mutex};
 use tracing::{info, info_span};
 
@@ -317,14 +318,15 @@ async fn test_agent_loop_simple_text_response() -> Result<(), Box<dyn std::error
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-simple");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("say hello")];
 
     info!("Act: 调用 AgentLoop::run()");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!("Assert: final_text 包含 LLM 回复: {:?}", result.final_text);
     assert!(
@@ -384,15 +386,15 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
     );
 
     let config = default_config("sess-abort");
-    let abort_signal = Arc::new(AtomicBool::new(false));
-    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
+    let abort_signal = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort_signal.clone());
     let messages = vec![ChatMessage::user("read files")];
 
     info!("Act: 在后台线程 20ms 后触发 abort()，同时 run() 执行中");
-    let abort_for_thread = Arc::clone(&abort_signal);
+    let abort_for_thread = abort_signal.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(20));
-        abort_for_thread.store(true, Ordering::SeqCst);
+        abort_for_thread.cancel();
     });
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
@@ -400,10 +402,13 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
         .map_err(|_| "run() 超时 10s")?;
 
     info!(
-        "Assert: run() 返回 Err，agent_end.error=interrupted; result={:?}",
-        result.is_err()
+        "Assert: run() 返回 Interrupted，agent_end.error=interrupted; result={:?}",
+        result.is_interrupted()
     );
-    assert!(result.is_err(), "abort 后 run() 应返回 Err");
+    assert!(
+        result.is_interrupted(),
+        "abort 后 run() 应返回 Interrupted"
+    );
     let captured = captured_error.lock().unwrap().take();
     assert_eq!(
         captured.as_deref(),
@@ -429,7 +434,7 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-followup");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     agent.follow_up("continue please".to_string());
@@ -438,7 +443,8 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
     info!("Act: 调用 AgentLoop::run()，follow_up 已预注入");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!(
         "Assert: final_text 包含第二轮回复 'B': {:?}",
@@ -473,14 +479,15 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     });
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-tool-error");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("run bash")];
 
     info!("Act: 调用 run()，工具首次执行将 Err");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!(
         "Assert: run() 返回 Ok，final_text 包含 recovered: {:?}",
@@ -522,14 +529,15 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
         retry_base_delay_ms: 0,
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()，期望自动重试后成功");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!(
         "Assert: run() 返回 Ok，final_text='retried ok': {:?}",
@@ -591,13 +599,14 @@ async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn 
     }
 
     let config = default_config("sess-tool-pi-mono-order");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("run ls")];
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     let actual = observed.lock().unwrap().clone();
     let needle = [
@@ -646,7 +655,7 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
         retry_base_delay_ms: 0,
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
 
@@ -705,14 +714,15 @@ async fn test_agent_loop_events_published_in_correct_order(
     }
 
     let config = default_config("sess-events");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
 
     info!("Act: 调用 run()");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!("Assert: 验证事件发布顺序与规范一致");
     let actual = observed.lock().unwrap().clone();
@@ -758,7 +768,7 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-steering");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     // 预注入 Steering 消息，工具批次第一个完成后将被检测并跳过剩余工具
@@ -768,7 +778,8 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     info!("Act: 调用 run()，Steering 已预注入");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!("Assert: final_text 包含 'steered': {:?}", result.final_text);
     assert!(
@@ -821,7 +832,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     );
 
     let config = default_config("sess-ctx-metrics");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     use pi_wasm::ContextState;
@@ -843,7 +854,8 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     info!("Act: 调用 AgentLoop::run()");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!("Assert: context_metrics_update 事件被发射、payload 合法、顺序正确");
     assert!(result.final_text.contains("metrics done"));
@@ -914,13 +926,14 @@ async fn test_agent_loop_empty_messages_does_not_crash() -> Result<(), Box<dyn s
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = default_config("sess-empty");
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     info!("Act: run([]) 调用");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(vec![]))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!(
         "Assert: 返回 Ok，final_text 为空字符串: {:?}",

@@ -16,6 +16,7 @@ use pi_wasm::core::session::estimate_msg_chars;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
 use std::sync::{Arc, Mutex};
 use tracing::{info, info_span};
 
@@ -325,7 +326,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         },
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     let mut old_user = ChatMessage::user("old question");
@@ -356,7 +357,8 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     info!("Act: 调用 AgentLoop::run()，期望 context overflow → compaction → retry → 成功");
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() 超时 10s")??;
+        .map_err(|_| "run() 超时 10s")?
+        .unwrap();
 
     info!("Assert: 最终成功返回，compaction 事件已触发");
     assert!(
@@ -838,7 +840,7 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
         retry_base_delay_ms: 0,
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(
         llm,
         primitive,
@@ -854,7 +856,8 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
         .await
-        .map_err(|_| "run() timeout 5s")??;
+        .map_err(|_| "run() timeout 5s")?
+        .unwrap();
 
     assert!(
         !result.new_messages.is_empty(),
@@ -904,7 +907,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom(
         },
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     let mut old_user = ChatMessage::user("old question");
@@ -934,7 +937,8 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom(
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), agent.run(messages))
         .await
-        .map_err(|_| "run() timeout 10s")??;
+        .map_err(|_| "run() timeout 10s")?
+        .unwrap();
 
     let ctx = agent
         .take_context_state()
@@ -1569,7 +1573,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         context_config: ContextConfig::default(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
     let old_content = "old ".repeat(10_000); // ~40K chars
@@ -1600,8 +1604,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         agent.run(vec![ChatMessage::user("trigger")]),
     )
     .await
-    .map_err(|_| "timeout")?
-    .map_err(|e| format!("{:?}", e))?;
+    .map_err(|_| "timeout")?;
 
     info!("Assert: trim event payloads");
     let starts = trim_start_payloads.lock().unwrap();

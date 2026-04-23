@@ -1,6 +1,7 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::core::llm::ChatMessage;
 use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, StreamEvent};
@@ -294,7 +295,7 @@ async fn run_returns_text_when_llm_returns_text_only() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
@@ -357,7 +358,7 @@ async fn run_retries_on_429_then_succeeds() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
@@ -394,7 +395,7 @@ async fn run_tool_loop_calls_tool_then_returns_text() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("read /tmp/x")];
     let result = loop_.run(messages).await.unwrap();
@@ -415,7 +416,7 @@ async fn run_empty_messages_does_not_crash() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages: Vec<ChatMessage> = vec![];
     let result = loop_.run(messages).await;
@@ -465,16 +466,20 @@ async fn run_aborts_returns_interrupted() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort_signal = Arc::new(AtomicBool::new(false));
-    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, Arc::clone(&abort_signal));
+    let abort_signal = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort_signal.clone());
     let messages = vec![ChatMessage::user("read files")];
-    let abort_for_thread = Arc::clone(&abort_signal);
+    let abort_for_thread = abort_signal.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(20));
-        abort_for_thread.store(true, std::sync::atomic::Ordering::SeqCst);
+        abort_for_thread.cancel();
     });
     let result = loop_.run(messages).await;
-    assert!(result.is_err());
+    assert!(
+        result.is_interrupted(),
+        "expected Interrupted outcome, got {:?}",
+        result
+    );
     let captured = agent_end_error.lock().unwrap().take();
     assert_eq!(captured.as_deref(), Some("interrupted"));
 }
@@ -519,7 +524,7 @@ async fn run_emits_events_in_correct_order() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
@@ -568,7 +573,7 @@ async fn run_steering_skips_remaining_tools() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new_with_steering_queue(
         llm,
         primitive,
@@ -610,7 +615,7 @@ async fn run_follow_up_continues_in_same_context() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.follow_up("next".to_string());
     let messages = vec![ChatMessage::user("first")];
@@ -631,7 +636,7 @@ async fn run_fatal_401_terminates_immediately() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await;
@@ -652,7 +657,7 @@ async fn run_chat_stream_returns_err_is_classified() {
         session_id: "s1".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await;
@@ -703,7 +708,7 @@ async fn context_metrics_update_emitted_before_turn_end() {
         session_id: "s-metrics-order".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
@@ -776,7 +781,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
         session_id: "s-metrics-payload".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
@@ -870,7 +875,7 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         session_id: "s-metrics-accum".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
@@ -941,7 +946,7 @@ async fn context_metrics_update_skipped_when_no_context_state() {
         session_id: "s-no-ctx".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
@@ -985,7 +990,7 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         session_id: "s-text-metrics".to_string(),
         ..Default::default()
     };
-    let abort = Arc::new(AtomicBool::new(false));
+    let abort = CancellationToken::new();
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     loop_.set_context_state(Some(ContextState {
         messages: Vec::new(),
