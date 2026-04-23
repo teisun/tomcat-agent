@@ -12,8 +12,8 @@ use pi_wasm::{
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio_util::sync::CancellationToken;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, info_span};
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────
@@ -405,10 +405,7 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
         "Assert: run() 返回 Interrupted，agent_end.error=interrupted; result={:?}",
         result.is_interrupted()
     );
-    assert!(
-        result.is_interrupted(),
-        "abort 后 run() 应返回 Interrupted"
-    );
+    assert!(result.is_interrupted(), "abort 后 run() 应返回 Interrupted");
     let captured = captured_error.lock().unwrap().take();
     assert_eq!(
         captured.as_deref(),

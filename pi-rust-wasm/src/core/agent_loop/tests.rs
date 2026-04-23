@@ -1051,8 +1051,7 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
     let primitive = Arc::new(SleepyMockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());
 
-    let interrupted_payloads: Arc<Mutex<Vec<serde_json::Value>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let interrupted_payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let ip_clone = Arc::clone(&interrupted_payloads);
     event_bus.on(
         wire::WIRE_AGENT_INTERRUPTED,

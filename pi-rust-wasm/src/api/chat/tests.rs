@@ -166,7 +166,7 @@ fn interrupt_persists_transcript_hard_ack() {
     let file = std::fs::File::open(&path).expect("open transcript");
     let lines: Vec<String> = BufReader::new(file)
         .lines()
-        .filter_map(Result::ok)
+        .map_while(Result::ok)
         .filter(|l| !l.trim().is_empty())
         .collect();
 

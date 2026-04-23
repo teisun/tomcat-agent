@@ -318,7 +318,10 @@ fn init_context_state_with_compaction_entry() {
     // CompactionSummary + user + assistant = 3 messages
     assert_eq!(state.messages.len(), 3);
     assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
-    assert_eq!(state.messages[0].text_content(), Some("summary of old turns"));
+    assert_eq!(
+        state.messages[0].text_content(),
+        Some("summary of old turns")
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -417,14 +420,14 @@ fn init_context_state_boundary_discards_prior() {
     assert_eq!(state.messages.len(), 3, "boundary summary + 2 new messages");
 
     let has_boundary_summary = state.messages.iter().any(|m| {
-        m.kind == MessageKind::CompactionSummary
-            && m.text_content() == Some("boundary summary")
+        m.kind == MessageKind::CompactionSummary && m.text_content() == Some("boundary summary")
     });
     assert!(has_boundary_summary, "should contain boundary summary");
 
-    let has_old = state.messages.iter().any(|m| {
-        m.text_content().is_some_and(|t| t.contains("old"))
-    });
+    let has_old = state
+        .messages
+        .iter()
+        .any(|m| m.text_content().is_some_and(|t| t.contains("old")));
     assert!(!has_old, "old turns before boundary should be discarded");
 
     let _ = std::fs::remove_dir_all(&dir);

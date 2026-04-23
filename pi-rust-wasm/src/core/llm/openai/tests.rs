@@ -113,13 +113,14 @@ fn test_openai_chunk_with_usage_emits_usage_event() {
 
 #[test]
 fn test_openai_chunk_without_usage_no_usage_event() {
-    let chunk: OpenAiStreamChunk = serde_json::from_str(
-        r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
-    )
-    .expect("should parse chunk without usage");
+    let chunk: OpenAiStreamChunk =
+        serde_json::from_str(r#"{"choices":[{"delta":{"content":"hi"}}]}"#)
+            .expect("should parse chunk without usage");
     let events = openai_chunk_to_stream_events(chunk);
     assert!(
-        !events.iter().any(|e| matches!(e, StreamEvent::Usage { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Usage { .. })),
         "should not contain Usage event when chunk has no usage field"
     );
     assert_eq!(events.len(), 1);

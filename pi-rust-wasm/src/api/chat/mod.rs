@@ -417,32 +417,31 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             let _ = io::stdout().flush();
         }
 
-        context_state = agent_loop
-            .take_context_state()
-            .unwrap_or_else(|| {
-                init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
-                    crate::core::ContextState {
-                        messages: Vec::new(),
-                        estimate_context_chars: system_text.len(),
-                        context_budget_chars:
-                            crate::infra::config::compute_context_budget_chars(context_config),
-                        context_budget_tokens: context_config
-                            .context_window
-                            .saturating_sub(context_config.max_output_tokens),
-                        last_api_usage: None,
-                        post_usage_appended_chars: 0,
-                        transcript_path: ctx
-                            .session
-                            .current_transcript_path()
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default(),
-                        preheat: Preheat::new(),
-                        session_obs: Default::default(),
-                        live: Default::default(),
-                    },
-                )
-            });
+        context_state = agent_loop.take_context_state().unwrap_or_else(|| {
+            init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
+                crate::core::ContextState {
+                    messages: Vec::new(),
+                    estimate_context_chars: system_text.len(),
+                    context_budget_chars: crate::infra::config::compute_context_budget_chars(
+                        context_config,
+                    ),
+                    context_budget_tokens: context_config
+                        .context_window
+                        .saturating_sub(context_config.max_output_tokens),
+                    last_api_usage: None,
+                    post_usage_appended_chars: 0,
+                    transcript_path: ctx
+                        .session
+                        .current_transcript_path()
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                    preheat: Preheat::new(),
+                    session_obs: Default::default(),
+                    live: Default::default(),
+                },
+            )
+        });
 
         if let Some(result) = maybe_result {
             for msg in result.new_messages {

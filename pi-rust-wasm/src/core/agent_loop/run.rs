@@ -72,9 +72,7 @@ impl AgentLoop {
     }
 
     pub fn steer(&self, msg: String) {
-        self.steering_queue
-            .lock()
-            .push(ChatMessage::steering(msg));
+        self.steering_queue.lock().push(ChatMessage::steering(msg));
     }
 
     pub fn follow_up(&self, msg: String) {
@@ -424,11 +422,7 @@ impl AgentLoop {
     /// - `partial_messages` 取 `messages[start_idx..]`——这是本轮新增的全部消息，
     ///   既包含中断前已完成的 tool_result，也包含即将作为 partial 写入的
     ///   assistant 消息（调用方在进入本函数前已 `push` 到 messages）。
-    fn make_aborted(
-        &mut self,
-        messages: &Vec<ChatMessage>,
-        partial_text: String,
-    ) -> LoopError {
+    fn make_aborted(&mut self, messages: &[ChatMessage], partial_text: String) -> LoopError {
         LoopError::Aborted {
             partial_text,
             partial_messages: messages[self.start_idx..].to_vec(),

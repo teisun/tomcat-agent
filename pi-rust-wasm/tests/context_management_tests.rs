@@ -5,19 +5,19 @@ mod common;
 
 use async_trait::async_trait;
 use pi_wasm::core::compaction::compact_tool_results;
+use pi_wasm::core::llm::{ChatMessageRole, MessageKind};
+use pi_wasm::core::session::estimate_msg_chars;
 use pi_wasm::{
     build_context_from_state, compound_turn_id, init_context_state, AgentLoop, AgentLoopConfig,
     AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
     DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
     PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, WriteFileResult,
 };
-use pi_wasm::core::llm::{ChatMessageRole, MessageKind};
-use pi_wasm::core::session::estimate_msg_chars;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio_util::sync::CancellationToken;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, info_span};
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────
@@ -256,18 +256,19 @@ fn test_session_reload_with_branch_summary_entries() -> Result<(), Box<dyn std::
         state.messages.len()
     );
 
-    let has_summary = state
-        .messages
-        .iter()
-        .any(|m| m.kind == MessageKind::CompactionSummary && m.text_content().is_some_and(|t| t.contains("Goal")));
+    let has_summary = state.messages.iter().any(|m| {
+        m.kind == MessageKind::CompactionSummary
+            && m.text_content().is_some_and(|t| t.contains("Goal"))
+    });
     assert!(
         has_summary,
         "应含 CompactionSummary 且内容包含 compaction summary"
     );
 
-    let has_new_msg = state.messages.iter().any(|m| {
-        m.text_content().is_some_and(|t| t.contains("new question"))
-    });
+    let has_new_msg = state
+        .messages
+        .iter()
+        .any(|m| m.text_content().is_some_and(|t| t.contains("new question")));
     assert!(has_new_msg, "应含 compaction 之后的 new question 消息");
 
     let msgs = build_context_from_state(&state);
@@ -441,8 +442,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         "msgs[0] should be CompactionSummary containing 'Goal'"
     );
     assert!(
-        msgs[1].role == ChatMessageRole::User
-            && msgs[1].text_content() == Some("add auth"),
+        msgs[1].role == ChatMessageRole::User && msgs[1].text_content() == Some("add auth"),
         "msgs[1] should be User 'add auth'"
     );
     assert!(
@@ -454,8 +454,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         "msgs[3] should be Tool"
     );
     assert!(
-        msgs[4].role == ChatMessageRole::User
-            && msgs[4].text_content() == Some("run tests"),
+        msgs[4].role == ChatMessageRole::User && msgs[4].text_content() == Some("run tests"),
         "msgs[4] should be User 'run tests'"
     );
 }
@@ -660,20 +659,23 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "system")?;
 
-    let has_old = state.messages.iter().any(|m| {
-        m.text_content().is_some_and(|t| t.contains("old"))
-    });
+    let has_old = state
+        .messages
+        .iter()
+        .any(|m| m.text_content().is_some_and(|t| t.contains("old")));
     assert!(!has_old, "turns before boundary should be discarded");
 
     let has_summary = state.messages.iter().any(|m| {
         m.kind == MessageKind::CompactionSummary
-            && m.text_content().is_some_and(|t| t.contains("Summary of everything"))
+            && m.text_content()
+                .is_some_and(|t| t.contains("Summary of everything"))
     });
     assert!(has_summary, "boundary summary should be present");
 
-    let has_new = state.messages.iter().any(|m| {
-        m.text_content().is_some_and(|t| t.contains("new"))
-    });
+    let has_new = state
+        .messages
+        .iter()
+        .any(|m| m.text_content().is_some_and(|t| t.contains("new")));
     assert!(has_new, "turns after boundary should be present");
     // summary + user("new question") + assistant("new answer") = 3
     assert_eq!(state.messages.len(), 3, "summary + 2 new messages");
@@ -798,21 +800,24 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
     let has_preheat_summary = state.messages.iter().any(|m| {
         m.kind == MessageKind::CompactionSummary
-            && m.text_content().is_some_and(|t| t.contains("Preheat summary"))
+            && m.text_content()
+                .is_some_and(|t| t.contains("Preheat summary"))
     });
     assert!(
         !has_preheat_summary,
         "is_boundary=false entry should be skipped during reload"
     );
 
-    let has_first = state.messages.iter().any(|m| {
-        m.text_content().is_some_and(|t| t.contains("first"))
-    });
+    let has_first = state
+        .messages
+        .iter()
+        .any(|m| m.text_content().is_some_and(|t| t.contains("first")));
     assert!(has_first, "original turns should still be present");
 
-    let has_second = state.messages.iter().any(|m| {
-        m.text_content().is_some_and(|t| t.contains("second"))
-    });
+    let has_second = state
+        .messages
+        .iter()
+        .any(|m| m.text_content().is_some_and(|t| t.contains("second")));
     assert!(has_second, "turns after preheat entry should be present");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -841,18 +846,9 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
         ..Default::default()
     };
     let abort = CancellationToken::new();
-    let mut agent = AgentLoop::new(
-        llm,
-        primitive,
-        event_bus,
-        config,
-        abort,
-    );
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
 
-    let messages = vec![
-        ChatMessage::system("system"),
-        ChatMessage::user("hello"),
-    ];
+    let messages = vec![ChatMessage::system("system"), ChatMessage::user("hello")];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
         .await
@@ -882,8 +878,8 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
 ///
 /// 场景：构造溢出 → L3 → agent 重试成功 → take_context_state → 验证 estimate 对齐
 #[tokio::test]
-async fn test_l3_rebuild_estimate_consistent_no_phantom(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let _span = info_span!("test_l3_rebuild_estimate_consistent_no_phantom").entered();
 
@@ -1452,12 +1448,17 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
 
     // Step 2: L2 apply (simulate preheat completion)
     info!("Act Step 2: simulate preheat completed + apply_boundary");
-    let first_user_id = state.messages.iter()
+    let first_user_id = state
+        .messages
+        .iter()
         .find(|m| m.role == ChatMessageRole::User && m.kind != MessageKind::CompactionSummary)
         .and_then(|m| m.msg_id.clone())
         .unwrap_or_default();
     // Find end of compactable zone (everything before last 5 turns)
-    let turn_starts: Vec<usize> = state.messages.iter().enumerate()
+    let turn_starts: Vec<usize> = state
+        .messages
+        .iter()
+        .enumerate()
         .filter(|(_, m)| {
             (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
                 || m.kind == MessageKind::CompactionSummary
@@ -1522,10 +1523,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         actual_chars,
         diff
     );
-    assert!(
-        !state.messages.is_empty(),
-        "should not drain all messages"
-    );
+    assert!(!state.messages.is_empty(), "should not drain all messages");
 }
 
 // ────────── Group F: L3 overflow 事件 payload 断言 ────────────────────────

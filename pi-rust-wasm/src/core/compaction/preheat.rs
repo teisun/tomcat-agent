@@ -410,7 +410,14 @@ impl Preheat {
             return false;
         }
         self.state = PreheatState::Idle;
-        self.try_start(usage_ratio, messages, transcript_path, llm, config, event_bus)
+        self.try_start(
+            usage_ratio,
+            messages,
+            transcript_path,
+            llm,
+            config,
+            event_bus,
+        )
     }
 
     /// 非阻塞获取结果。CachedCompleted → Idle + Completed；
@@ -675,11 +682,7 @@ mod snapshot_message_bounds_tests {
 
     #[test]
     fn skips_trailing_summary_turn() {
-        let messages = vec![
-            normal_msg("a"),
-            normal_msg("b"),
-            summary_msg("x::y"),
-        ];
+        let messages = vec![normal_msg("a"), normal_msg("b"), summary_msg("x::y")];
         let (s, e) = snapshot_message_bounds_for_preheat(&messages).unwrap();
         assert_eq!(s, "a");
         assert_eq!(e, "b");
