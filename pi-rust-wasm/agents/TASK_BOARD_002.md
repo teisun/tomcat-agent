@@ -324,11 +324,13 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DOING` |
+| **负责人** | Spike |
 | **分支** | `feature/interrupt-resume` |
-| **阻塞点** | — |
+| **阻塞点** | **依赖偏离（待 Nibbles 复核）**：看板标注依赖 T2-P0-001 / T2-P0-003（均 TODO）。本次破例先做，理由详见计划 `~/.cursor/plans/interruptible_agent_loop_c77e96ab.plan.md` §0.2——改动范围（`run.rs` / `types.rs` / `primitives/bash` / `chat/*`）不与 T2-P0-001 拆分冲突；T2-P0-003 可直接复用本次 CancellationToken 基建。 |
 | **关联 TODOS** | `#T-003`、`#T-004`、`#T-007`、`#T-017` |
+| **计划文档** | `~/.cursor/plans/interruptible_agent_loop_c77e96ab.plan.md` |
+| **架构文档** | `openspec/specs/architecture/interrupt-and-cancellation.md`（待新建，计划阶段 A 产出） |
 
 **目标**：用户中断期间不丢已生成的 LLM 回复；中断时 transcript 落盘；下次进入同会话可续写上下文。
 
@@ -336,10 +338,11 @@
 - [ ] **T-003**：工具输出过程中支持 Ctrl+C 中断（接入 Abort）
 - [ ] **T-004**：中断时保留已回复片段，加上新 user 消息继续请求 LLM（不再丢弃）
 - [ ] **T-017**：中断时同步落盘 transcript（`session.append_message` 前缀刷盘）
-- [ ] **T-007**：中断后恢复 → 读取上次 transcript 尾部 → 自动 prepend 到下一次 ChatRequest
+- [ ] **T-007 最小版**：中断 partial 落盘 + 现有 `--resume` 路径天然满足"记得上下文"；完整 resume API（`session resume` 子命令、跨 session Checkpoint）推到 T2-P1-001
 - [ ] 集成 Steering / FollowUp / Abort 三态流转
+- [ ] 新增架构文档 `openspec/specs/architecture/interrupt-and-cancellation.md`
 
-**依赖**：T2-P0-001、T2-P0-003
+**依赖**：T2-P0-001、T2-P0-003（本次破例——见"阻塞点"字段）
 
 **被依赖**：T2-P1-001（Checkpoint 依赖 transcript 完整性）
 
@@ -691,3 +694,4 @@ flowchart LR
 | 日期 | 变更 | 说明 |
 |------|------|------|
 | 2026-04-22 | 新建本看板 | 随 P0-P9 路线图调整；`001-mvp` 归档到 `openspec/specs/archive/` |
+| 2026-04-22 | 认领 T2-P0-007 | Spike 认领（TODO→DOING），破例绕过 T2-P0-001 / T2-P0-003 依赖（见阻塞点）；计划 `interruptible_agent_loop_c77e96ab.plan.md` 经用户确认后进入开发 |
