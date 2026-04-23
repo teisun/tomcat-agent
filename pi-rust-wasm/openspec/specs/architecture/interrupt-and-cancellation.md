@@ -486,6 +486,117 @@ pub enum AgentEvent {
 
 本节列出实现层面必须落点的模块级改动，作为规格层验收的映射表。具体提交拆分与子任务节奏由 [agents/plan/*](../../../agents/plan/) 下的计划文档管理。
 
+### 9.0 文件职责总览（One-Glance Map）
+
+下图把本次改动涉及的 **6 个业务文件 + 3 份独立单测文件** 按调用层次串起来：从 OS SIGINT 信号进入进程，一路穿透到 LLM stream / 工具执行的取消点，再把 partial 数据沿反向路径写回 transcript。箭头方向即"谁调用谁 / 数据向谁流动"。
+
+```text
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │                    L0  OS 进程层：SIGINT (Ctrl+C)                         │
+ └──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │  src/api/cli/chat_cmd.rs                          ── CLI 入口 + 信号桥接 │
+ │  ────────────────────────────────────────────────────────────────────    │
+ │  • fn check_double_tap(last, now, window) -> DoubleTap   (纯函数)        │
+ │  • const DOUBLE_TAP_WINDOW = 2s                                          │
+ │  • ctrlc::set_handler 首击 Soft → cancel_token.cancel()                  │
+ │                      2s 内再击 Hard → std::process::exit(130)            │
+ │                                                                          │
+ │  [chat_cmd/tests.rs]  ← 4 个单测：首击/窗内/窗外/边界                     │
+ └──────────────────────────────────────────────────────────────────────────┘
+                                    │
+            持有 Arc<Mutex<CancellationToken>> （L0 ↔ L1 桥）
+                                    │
+                                    ▼
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │  src/api/chat/mod.rs                          ── chat 会话调度 + 持久化 │
+ │  ────────────────────────────────────────────────────────────────────    │
+ │  • struct ChatContext {                                                  │
+ │        cancel_token: Arc<Mutex<CancellationToken>>,   ← 让 handler 改写 │
+ │        last_interrupt_at: Arc<Mutex<Option<Instant>>>,                   │
+ │        ...                                                               │
+ │    }                                                                     │
+ │                                                                          │
+ │  • fn chat_loop():                                                       │
+ │      loop {                                                              │
+ │        let line = rl.readline(..)?;                                      │
+ │        *ctx.cancel_token.lock() = CancellationToken::new();  ← 每回合重建│
+ │        match agent_loop.run(..).await {                                  │
+ │          Completed   ─┐                                                  │
+ │          Interrupted ─┼─► ①renderer.flush()                              │
+ │                       │   ②take_context_state()                          │
+ │                       │   ③for m in new_messages: session.append_message │
+ │                       │   ④persist_context_observability                 │
+ │          Failed      ─┘                                                  │
+ │      }                                                                   │
+ │                                                                          │
+ │  [chat/tests.rs]  ← interrupt_persists_transcript_hard_ack (T-017 硬验收) │
+ └──────────────────────────────────────────────────────────────────────────┘
+                                    │
+               .run(cancel_token.clone()) 下钻到 agent_loop
+                                    ▼
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │  src/core/agent_loop/types.rs                        ── 类型 & 契约重塑 │
+ │  ────────────────────────────────────────────────────────────────────    │
+ │  • struct AgentLoop { cancel_token: CancellationToken, ... }             │
+ │  • enum LoopError::Aborted { partial_text, partial_messages }            │
+ │  • enum AgentRunOutcome {                                                │
+ │        Completed(AgentRunResult),                                        │
+ │        Interrupted(AgentRunResult),   ← 携带同构 partial 数据           │
+ │        Failed(LoopError),                                                │
+ │    }                                                                     │
+ │    impl: .unwrap / .unwrap_err / .is_interrupted  (便于测试)             │
+ └──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    AgentLoop::run → run_reasoning_loop
+                                    ▼
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │  src/core/agent_loop/run.rs                   ── 三处取消点 + partial 保全│
+ │  ────────────────────────────────────────────────────────────────────    │
+ │  run_reasoning_loop 内每个 await 点套 tokio::select!：                    │
+ │                                                                          │
+ │      ① llm.chat_stream(req)   vs cancel_token.cancelled()                │
+ │      ② stream.next()          vs cancel_token.cancelled()                │
+ │      ③ self.execute_tool(tc)  vs cancel_token.cancelled()                │
+ │                                                                          │
+ │  被取消时（任一路径）：                                                  │
+ │    • 把 content_buf 当成 partial assistant push 进 messages              │
+ │      （若 tool_calls 已累积完则一并带上）                                │
+ │    • ctx_state.on_message_appended(len) 对称维护（防 compaction 错位）   │
+ │    • 返回 LoopError::Aborted { partial_text, partial_messages }          │
+ │    • run() 翻译成 AgentRunOutcome::Interrupted 向上返回                  │
+ │                                                                          │
+ │  [agent_loop/tests.rs]  ← 中断 stream / 中断工具间隙 / token 重建 3 组   │
+ └──────────────────────────────────────────────────────────────────────────┘
+                                    │
+        ③ 选择了 execute_tool 取消分支时，execute_tool future 被 drop
+                                    ▼
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │  PrimitiveExecutor::execute_bash            ── 【未改签名 / 依赖 Drop】  │
+ │  ────────────────────────────────────────────────────────────────────    │
+ │  依赖 tokio::process::Command 的 .kill_on_drop(true)：                   │
+ │    run.rs 的 select! 弃用 future → Command::Child 析构 → SIGKILL 子进程  │
+ │  故 PrimitiveExecutor trait 签名**不变**（决策见 §5.2）。                │
+ └──────────────────────────────────────────────────────────────────────────┘
+
+ side-car —— 事件面（被 §9.2 的 run.rs 主动 emit）：
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │  src/infra/events/mod.rs                             ── wire 事件扩展   │
+ │  ────────────────────────────────────────────────────────────────────    │
+ │  • const WIRE_AGENT_INTERRUPTED = "agent_interrupted"                    │
+ │  • AgentEvent::Interrupted {                                             │
+ │        session_id, partial_text_len, tool_results_count                  │
+ │    }                                                                     │
+ │  • AgentEnd { error: Some("interrupted") }  **保留**（向后兼容）        │
+ └──────────────────────────────────────────────────────────────────────────┘
+```
+
+**阅读顺序建议**：自顶向下跟着箭头走一遍，即可复现一次 Soft Interrupt 的完整链路——SIGINT 打进 `chat_cmd.rs` → cancel 掉 `chat/mod.rs` 持有的 token → `run.rs` 中 `select!` 胜出取消分支 → 返回 `AgentRunOutcome::Interrupted(partial)` → `chat/mod.rs` 走与 `Completed` 同构的持久化路径把 partial 落 transcript。详细时序图见 §4.6 / §6.1。
+
+所有 `[*/tests.rs]` 均为**独立文件**，业务源文件里只出现 `#[cfg(test)] mod tests;` 单行声明，符合 [`RUST_FILE_LINES_SPEC.md §A`](../guides/coding/RUST_FILE_LINES_SPEC.md)。
+
 ### 9.1 `src/core/agent_loop/types.rs`
 
 - `LoopError::Aborted` 改为 `Aborted { partial_text: String, partial_messages: Vec<ChatMessage> }`。
