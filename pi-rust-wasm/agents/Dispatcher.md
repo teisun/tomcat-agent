@@ -6,13 +6,13 @@ Agent 读取本文件后，须按以下流程执行。
 
 ---
 ## 背景了解
- agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档，实现TASK_BOARD.md 规划好的任务，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [docs/status/{branch}.md]
+ agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档，实现当前迭代看板（当前为 [TASK_BOARD_002.md](./TASK_BOARD_002.md)）规划好的任务，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [docs/status/{branch}.md]
 
 ## 1、领取任务
 
-1. 读取 [TASK_BOARD.md](./TASK_BOARD.md)。
+1. 读取 [TASK_BOARD_002.md](./TASK_BOARD_002.md)。
 2. 查看顶部「当前迭代上下文」区，获取 specs 路径、需求文档路径等。
-3. 在任务列表中，找到**状态为 `TODO` 且负责人为空**的最高优先级任务（P0 > P1 > P2 > P3）。仅 `TODO` 可认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
+3. 在任务列表中，找到**状态为 `TODO` 且负责人为空**的最高优先级任务（P0 > P1）。仅 `TODO` 可认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
 4. 若有多个同优先级可选任务，优先选排在前面的（已按推荐顺序排列）。
 5. 有依赖的任务，所有依赖须为 `DONE` 才可认领。
 6. **一次只认领一个任务**，完成或标记 `BLOCKED` 后才可领下一个。
@@ -24,11 +24,11 @@ Agent 读取本文件后，须按以下流程执行。
 
 ## 3、读取上下文
 
-根据 TASK_BOARD.md 顶部的「当前迭代上下文」，读取以下文档：
+根据 TASK_BOARD_002.md 顶部的「当前迭代上下文」，读取以下文档：
 
-1. **specs 规格文档**（含 Architecture.md、Constitution.md 及子文档）
-2. **需求设计文档**（含 task.md、tasks_details.md、design.md）
-3. 重点阅读 tasks_details.md 中对应任务的**原子子任务**与**边界场景**
+1. **specs 规格文档**（含 Architecture.md、Constitution.md、Product_Brief.md 及子文档）
+2. **当前迭代立项块 + 待办任务**（TASK_BOARD_002.md 第 1/4 节）
+3. **全集想法池**：[docs/TODOS.md](../docs/TODOS.md)（查对应 `#T-XXX` 条目说明）
 
 ## 4、制定开发计划
 
@@ -59,7 +59,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 遇依赖阻塞、技术问题、需求不明确时：
 
-1. 在 TASK_BOARD.md 中将任务状态改为 `BLOCKED`，填写**阻塞点**描述
+1. 在 TASK_BOARD_002.md 中将任务状态改为 `BLOCKED`，填写**阻塞点**描述
 2. 在**当前 Git 分支**对应的 status 文件（`docs/status/` 下「当前分支名，`/` 换 `-`」.md）中更新阻塞状态（含原因与预计解决时间）
 3. 禁止静默阻塞
 
@@ -67,7 +67,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 1. 确认所有子项完成，通过门禁（rustfmt/clippy/单测），且已按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成 **分支侧全量集成/E2E测试验收**（集成/E2E 失败须在本分支修复，禁止弱化断言通过）
 2. 更新**当前 Git 分支**对应的 status 文件（即 `docs/status/` 下文件名为「当前分支名，`/` 替换为 `-`」的 .md 文件），标记任务完成；若在 develop 上开发则更新 `docs/status/develop.md`。
-3. 将 TASK_BOARD.md 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
+3. 将 TASK_BOARD_002.md 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
 4. **完成前自检（必做）**：
    - 已确认**当前分支**，并已更新 **docs/status/当前分支对应.md**（分支名中 `/` → `-`）。
    - **集成与 E2E**：已按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 完成规格/场景库（若任务涉及用户可见行为或 P0/P1 故事）、集成测试与 E2E；失败项已在**本分支**修复；**无**为通过测试而弱化断言或糊弄 `#[ignore]` 的情况。

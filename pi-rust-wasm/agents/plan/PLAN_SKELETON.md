@@ -4,7 +4,7 @@
 
 ## 认领与分支（Dispatcher）
 
-- [TASK_BOARD.md](../TASK_BOARD.md)：负责人、状态、**分支名**（与 Git 一致）；依赖任务是否已 `DONE` / 是否需先合并 `develop`。
+- [TASK_BOARD_002.md](../TASK_BOARD_002.md)：负责人、状态、**分支名**（与 Git 一致）；依赖任务是否已 `DONE` / 是否需先合并 `develop`。
 - 行为规范：[Constitution.md](../../openspec/specs/Constitution.md) 及任务引用的规范链接。
 
 ## 研发流程（对照 Dispatcher）

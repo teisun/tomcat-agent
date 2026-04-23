@@ -1,3 +1,15 @@
+> **已归档（Archived）** — 归档日期 2026-04-22
+>
+> 本迭代 `001-mvp` 已关闭，进入「单 Agent 完善期」（`002-single-agent-complete`）。
+> - 当前执行看板：[`agents/TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md)
+> - 全局 TODO 池：[`docs/TODOS.md`](../../../../docs/TODOS.md)
+> - 路线图（P0-P9）：[`openspec/specs/Product_Brief.md`](../../../Product_Brief.md)
+> - 归档说明：[`openspec/specs/archive/README.md`](../README.md)
+>
+> 未完的 TODO 迁移去向（见 task.md 顶部说明）。本文件保留为历史记录，不再维护。
+
+---
+
 # Proposal: 一期 MVP 核心引擎与插件系统落地
 ## 提案背景
 项目处于从零启动阶段，核心目标是打造一款基于Rust+WasmEdge+QuickJS的pi-mono生态兼容AI Agent运行时，解决pi-mono原生实现的安全风险问题，同时100%兼容社区插件生态。一期MVP需要优先落地核心宿主引擎、WasmEdge沙箱插件系统、pi-mono兼容的4原语、事件系统、宿主API，跑通「插件加载→执行→宿主API调用→对话交互」的最小闭环，验证架构可行性与生态兼容性。所有设计严格对齐pi-agent-rust与pi-mono规范，遵循安全隔离优先的核心原则。

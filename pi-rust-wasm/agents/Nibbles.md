@@ -12,7 +12,7 @@
 
 - **编写集成测试代码**：根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）。
 - **编写 E2E 测试代码**：根据 [User_Stories.md](../openspec/specs/User_Stories.md) 与 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 编写 E2E 测试代码，须符合 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
-- **看板状态更新**：集成验收通过后，负责将本次合并所涉任务在 [TASK_BOARD.md](./TASK_BOARD.md) 中的状态由 `PENDING_INTEGRATION` 更新为 `DONE`（若当前已是 DONE 则不变）。
+- **看板状态更新**：集成验收通过后，负责将本次合并所涉任务在 [TASK_BOARD_002.md](./TASK_BOARD_002.md) 中的状态由 `PENDING_INTEGRATION` 更新为 `DONE`（若当前已是 DONE 则不变）。
 
 ## 依赖与协作
 
@@ -26,9 +26,9 @@
 - [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) — 编码与架构设计高级规范（**全量 review 时代码与分层须对照**）
 - [Dispatcher.md](./Dispatcher.md) — 工作流与分支规范
 - [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) — 集成与 E2E **步骤与验收命令**（Nibbles 在 develop 上复跑时亦遵循）；**develop 侧独有要求**见本文 **§4**（合并后文档与测试）
-- [TASK_BOARD.md](./TASK_BOARD.md) — 任务看板（关注 DONE / PENDING_INTEGRATION；集成通过后由本角色将 PENDING_INTEGRATION 更新为 DONE）
-- [task.md](../openspec/changes/001-mvp/task.md) — 验收标准与完成定义
-- [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) — 各任务原子子任务与边界场景
+- [TASK_BOARD_002.md](./TASK_BOARD_002.md) — 当前迭代任务看板（关注 DONE / PENDING_INTEGRATION；集成通过后由本角色将 PENDING_INTEGRATION 更新为 DONE）
+- [TODOS.md](../docs/TODOS.md) — 全集想法池与 `#T-XXX` 条目说明
+- [Product_Brief.md](../openspec/specs/Product_Brief.md) — P0-P9 路线图
 - [User_Stories.md](../openspec/specs/User_Stories.md) — 用户故事与验收标准（E2E 场景来源）
 - [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) — 集成测试规范
 - [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md) — E2E 测试规范
@@ -60,7 +60,7 @@
 2. **带序号展示可合并分支**（仅展示有未合并提交的分支）：列出序号、分支名、未合并提交数、最新提交摘要。若所有功能分支均无未合并提交，告知用户「当前无待合并分支」，询问是否仅对 develop 现有代码做集成测试与验收。
 3. **提示用户选择**（支持序号或关键字）：**`all`** 或 **`0`** 表示合并所有有未合并提交的分支并执行全量集成测试；**序号**（如 `1`）或**分支名**表示仅合并对应分支并针对本次合并做集成测试。
 4. 在用户明确选择之前，**不执行任何合并操作**。
-5. **用户选定后**，对照 [TASK_BOARD.md](./TASK_BOARD.md) 获取所选分支对应的任务信息（任务 ID、依赖关系、验收标准等），用于后续合并前检查与验收。
+5. **用户选定后**，对照 [TASK_BOARD_002.md](./TASK_BOARD_002.md) 获取所选分支对应的任务信息（任务 ID、依赖关系、验收标准等），用于后续合并前检查与验收。
 6. 若选择单分支合并，合并顺序仍须满足依赖：目标分支的依赖分支如尚未在 develop 上，须先提示用户或按依赖顺序先合并。
 
 ### 2. 分支策略
@@ -97,7 +97,7 @@
 
 ### 6. 看板任务状态更新
 
-全量验收通过并完成上述 status 记录后，将本次合并所涉任务在 [TASK_BOARD.md](./TASK_BOARD.md) 中的状态由 **PENDING_INTEGRATION** 更新为 **DONE**（若某任务当前已是 DONE 则不变）。便于看板准确反映「已完成（含集成通过）」的任务。
+全量验收通过并完成上述 status 记录后，将本次合并所涉任务在 [TASK_BOARD_002.md](./TASK_BOARD_002.md) 中的状态由 **PENDING_INTEGRATION** 更新为 **DONE**（若某任务当前已是 DONE 则不变）。便于看板准确反映「已完成（含集成通过）」的任务。
 
 ### 7. 问题反馈方式
 

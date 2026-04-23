@@ -6,7 +6,7 @@
 
 ## 认领与分支（Dispatcher）
 
-- 在 [TASK_BOARD.md](../TASK_BOARD.md) 将 **TASK-21** 负责人改为 **Jerry**、状态改为 **DOING**；**分支**列填写**当前实际 Git 分支名**（例如已在 `feature/context-async-compaction` 上则填该名）。**不**另建看板曾建议的 `feature/context-message-ids`，在本分支完成即可。
+- 在当时看板（已归档为 [archive/TASK_BOARD_001-mvp.md](../../openspec/specs/archive/TASK_BOARD_001-mvp.md)）将 **TASK-21** 负责人改为 **Jerry**、状态改为 **DOING**；**分支**列填写**当前实际 Git 分支名**（例如已在 `feature/context-async-compaction` 上则填该名）。**不**另建看板曾建议的 `feature/context-message-ids`，在本分支完成即可。
 - **依赖**：TASK-20 为 `PENDING_INTEGRATION`。实施前将 **`develop`（含 TASK-20 合并结果）** 合并或 rebase 进**当前分支**，避免与主线长期分叉；无需为 TASK-21 单独再开一条功能分支。
 - **行为规范**：编码、测试、提交、文档均须遵循 [Constitution.md](../../openspec/specs/Constitution.md) 与 Jerry 引用的各规范链接。
 
@@ -14,7 +14,7 @@
 
 | 阶段 | 动作 |
 |------|------|
-| **读上下文（§3）** | 除 §5.7 外，必读迭代 [tasks_details.md](../../openspec/changes/001-mvp/tasks_details.md) 中与 TASK-21 相关的原子子任务与边界、[design.md](../../openspec/changes/001-mvp/design.md) / [task.md](../../openspec/changes/001-mvp/task.md)；扫一眼 Architecture / Constitution 是否有关联约束。对应 todo：`context-read`。 |
+| **读上下文（§3）** | 除 §5.7 外，必读迭代 [archive/001-mvp/tasks_details.md](../../openspec/specs/archive/001-mvp/tasks_details.md) 中与 TASK-21 相关的原子子任务与边界、[archive/001-mvp/design.md](../../openspec/specs/archive/001-mvp/design.md) / [archive/001-mvp/task.md](../../openspec/specs/archive/001-mvp/task.md)；扫一眼 Architecture / Constitution 是否有关联约束。对应 todo：`context-read`。 |
 | **开发前** | 工作区非 detached；已在目标分支上；按需与 `develop` 同步；阅读 [编码规范](../../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)。含在 `claim-board-branch` / `context-read`。 |
 | **开发中（§5）** | 编码（必要处注释）→ 单测 → 集成测；**每完成一个 21.x 或一块连贯改动即提交**（禁止囤积多子项一次提交）。 |
 | **门禁** | `cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`。**缩小范围**验证（单 crate / 过滤测试名 / `cargo test -j 1 … 某用例 -- --test-threads=1`）可前台短时跑。**§4 全量集成/E2E** 必须严格按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md)（见下文 **全量集成/E2E 执行规范**）；质量红线与顺序仍以该文档 §1 前质量红线、§「交付顺序」为准。对应 todo：`dev-gates`。 |

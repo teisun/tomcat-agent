@@ -1,3 +1,15 @@
+> **已归档（Archived）** — 归档日期 2026-04-22
+>
+> 本文件对应迭代 `001-mvp`，已关闭并搬移到 `openspec/specs/archive/TASK_BOARD_001-mvp.md`。
+> - 当前执行看板：[`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md)
+> - 路线图 P0-P9：[`openspec/specs/Product_Brief.md`](../Product_Brief.md)
+> - 全局 TODO 池：[`docs/TODOS.md`](../../../docs/TODOS.md)
+> - 归档说明：[`openspec/specs/archive/README.md`](./README.md)
+>
+> 迭代 002 所有新任务（T2-P0-001~010 / T2-P1-001~006）请到新看板认领。本文件保留为历史记录，不再维护。
+
+---
+
 # 任务总看板
 
 ---
@@ -10,9 +22,9 @@
 |------|----|
 | 当前迭代 | `001-mvp` |
 | specs 规格文档 | [../openspec/specs/](../openspec/specs/)（含 Architecture.md、Constitution.md 及子文档） |
-| 需求设计文档 | [../openspec/changes/001-mvp/](../openspec/changes/001-mvp/)（含 task.md、tasks_details.md、design.md） |
-| 任务原子明细 | [tasks_details.md](../openspec/changes/001-mvp/tasks_details.md) |
-| 技术设计 | [Architecture.md](../openspec/specs/Architecture.md)[design.md](../openspec/changes/001-mvp/design.md) |
+| 需求设计文档 | [./001-mvp/](./001-mvp/)（含 task.md、tasks_details.md、design.md；原路径 `openspec/changes/001-mvp/` 已归档于此） |
+| 任务原子明细 | [tasks_details.md](./001-mvp/tasks_details.md) |
+| 技术设计 | [Architecture.md](../Architecture.md)、[design.md](./001-mvp/design.md) |
 | 技术方案（插件异步 Hostcall / 长生命周期 VM） | [async-hostcall-event-loop.md](../openspec/specs/architecture/plugin-system/async-hostcall-event-loop.md)（submit/poll，DONE）、[phase2-long-lived-vm.md](../openspec/specs/architecture/plugin-system/phase2-long-lived-vm.md)（VM actor，TASK-15 DONE） |
 
 ---
@@ -783,7 +795,7 @@
 
 **实施流程**：已按 [Dispatcher.md](./Dispatcher.md) 在 `feature/chat-path-env` 交付并由集成流程合并入 `develop`（`ad3409f`）；看板按 [Nibbles.md](./Nibbles.md) §6 收口为 `DONE`。
 
-**说明**：openspec 中 [T1-P2-002 插件安全扫描](../openspec/changes/001-mvp/tasks_details.md) 原对应本 TASK-09；**现 TASK-09 已改为本整改**。插件安全扫描若仍要做，须在 TASK_BOARD **另起新 TASK** 引用 `T1-P2-002`，勿与本条混用。
+**说明**：openspec 中 [T1-P2-002 插件安全扫描](./001-mvp/tasks_details.md) 原对应本 TASK-09；**现 TASK-09 已改为本整改**。插件安全扫描若仍要做，须在 TASK_BOARD **另起新 TASK** 引用 `T1-P2-002`，勿与本条混用。
 
 ---
 

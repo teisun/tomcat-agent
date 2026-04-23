@@ -1,6 +1,11 @@
 # 基于规范驱动的 AI Agent 自动化工作流
 
 > 组内技术分享 · 2026-03
+>
+> **更新（2026-04-22）**：文内「TASK_BOARD.md」与「changes/001-mvp/」属于当时的工作流示意。实际工程位置已调整：
+> - 当前迭代看板 → [`agents/TASK_BOARD_002.md`](../../agents/TASK_BOARD_002.md)
+> - 路线图 → [`openspec/specs/Product_Brief.md`](../../openspec/specs/Product_Brief.md)（P0-P9）
+> - 新迭代不再创建 `changes/` 四件套，立项信息直接写入 Board。
 
 ---
 
@@ -413,7 +418,7 @@ docs/status/
 **参考资料**
 
 - [Dispatcher.md](../../agents/Dispatcher.md) — 七步工作流
-- [TASK_BOARD.md](../../agents/TASK_BOARD.md) — 任务看板
+- [TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) — 当前迭代任务看板
 - [Constitution.md](../../openspec/specs/Constitution.md) — 行为宪法
 - [PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md) — 计划规范
 - [Nibbles.md](../../agents/Nibbles.md) — 集成测试 Agent 流程

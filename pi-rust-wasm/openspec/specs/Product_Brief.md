@@ -23,44 +23,57 @@ pi-rust-wasm是一款参考pi-agent-rust设计、基于Rust+WasmEdge构建的轻
 6.  **全平台原生支持**：基于Rust+WasmEdge实现跨平台兼容，Windows/macOS/Linux/Android全平台覆盖，核心能力100%对齐
 7.  **精细化权限管控**：插件级细粒度权限配置，默认最小权限，仅开放授权的4原语、网络、文件访问能力，从根源规避安全风险
 
-## MVP范围（一期）
-1.  核心宿主引擎：Rust+Tokio异步核心架构，全局单例WasmEdge运行时引擎初始化与生命周期管理
-2.  核心4原语能力：完全对齐pi-mono的read/write/edit/bash宿主API，实现权限管控、审计日志、用户确认机制
-3.  沙箱插件系统：基于WasmEdge+官方QuickJS运行时，实现插件全生命周期管理，独立Wasm实例隔离，pi-mono API兼容
-4.  Node.js核心兼容层：基于WasmEdge原生实现，覆盖fs/path/process/console等pi插件高频核心模块
-5.  宿主核心API：LLM统一接入、工具注册、事件系统、配置管理核心能力落地
-6.  极简CLI工具：实现会话管理、对话交互、插件加载/卸载、配置管理核心命令
-7.  Agent Loop 核心运行时：三层嵌套循环（对话管理/容错重试/思考-行动），Steering/FollowUp/Abort 用户中断机制，Rate Limit 指数退避自动重试，完整 AgentEvent/ExtensionEvent 生命周期发布，消息类型边界隔离
-8.  基础安全体系：插件级权限管控、沙箱隔离、4原语操作全链路审计（敏感数据加密 TODO 后续考虑）
-9.  异步 Hostcall 与 JS API 对齐：复用 `__pi_host_call` 的 submit/poll 机制实现异步非阻塞 Hostcall（LLM/exec 等耗时调用），pi_bridge.js 核心 API 返回 Promise 对齐 pi-mono async/await 编程模型。技术方案见 [异步 Hostcall 与事件循环设计](architecture/plugin-system/async-hostcall-event-loop.md)、[JS API 对齐设计](architecture/plugin-system/js-api-alignment.md)
+## 阶段性理念调整（2026-04-22 起）
 
-## 不做（一期Out of Scope）
-1.  多Agent完整体系、自定义Agent能力（三期及以后实现）
-2.  Skills技能工作流系统（五期及以后实现）
-3.  长程记忆系统（四期实现）
-4.  Web/Android前端界面（六期实现）
-5.  插件自举全闭环、AI自主生成插件（二期实现）
-6.  容器化运行环境、多平台交叉编译（三期实现）
-7.  插件市场、多模态能力、团队协作（长期规划）
-8.  内存模式多档位与运行时动态切换（一期仅预留设计，十一期实现）
-9.  工具调用循环检测（ToolLoopGuard）：三道防线检测（一期仅有 MAX_TOOL_ROUNDS 硬限制，二期实现）
-10. 上下文自动压缩（Compaction）：Context Overflow 时 LLM 摘要（一期仅做简单截断兜底，二期实现）
-11. 长生命周期 VM（插件跨事件调用状态保持）：一期短生命周期 VM 足以支持无状态 async/await 插件；二期通过 waitForEvent 模式实现 VM 会话级存活，支持 pi-mono 有状态插件（git-checkpoint、todo、plan-mode 等）。方案见 [Phase 2 长生命周期 VM 设计](architecture/plugin-system/phase2-long-lived-vm.md)
+项目经过一期 MVP 落地，已验证 Rust+WasmEdge+QuickJS 架构可行性与 pi-mono 兼容能力。当前阶段的战略调整：
 
-## 十期迭代路线图
-| 期数 | 核心主题 | 核心交付内容 | 预计周期 |
-|------|----------|--------------|----------|
-| 一期（MVP） | 核心引擎与插件系统落地 | 1. Rust宿主核心架构；2. WasmEdge+QuickJS沙箱运行时；3. 4原语宿主API；4. pi-mono API兼容层；5. 基础CLI工具；6. LLM统一接入 | 2周 |
-| 二期 | 插件自举闭环 | 1. AI自主生成插件全流程；2. 运行时动态编译与热加载；3. 错误自动修复闭环；4. 插件模板库；5. CLI自举相关命令 | 2周 |
-| 三期 | 多Agent基础能力 | 1. 自定义Agent生命周期管理；2. Agent级独立权限与插件隔离；3. 容器化安全执行环境；4. 跨平台交叉编译适配 | 3周 |
-| 四期 | 长程记忆系统 | 1. Agent级独立记忆空间；2. 对话自动记忆提取与注入；3. 向量存储引擎；4. 记忆管理CLI与API | 2周 |
-| 五期 | Skills技能系统 | 1. 标准化工作流模板；2. Skill工作流引擎；3. 插件与Skill联动；4. 内置高频场景Skill模板 | 3周 |
-| 六期 | 全平台前端界面 | 1. Tauri+React Web桌面端界面；2. Android端基础适配；3. 全平台核心能力对齐；4. 插件管理可视化界面 | 4周 |
-| 七期 | 多Agent协作体系 | 1. 多Agent异步协作；2. 串行/并行/评审协作模式；3. 协作状态同步与依赖协调；4. 协作模板化 | 3周 |
-| 八期 | 独立应用生成能力 | 1. 基于4原语的完整应用生成；2. 容器化隔离编译打包；3. 多平台安装包生成；4. 二次开发引导 | 4周 |
-| 九期 | 插件市场与生态建设 | 1. 本地插件市场基础能力；2. 插件/Agent/Skill模板分享；3. 第三方模板源支持；4. 安全扫描门禁 | 3周 |
-| 十期 | 生产级稳定与体验闭环 | 1. 全量性能优化与稳定性提升；2. 新手引导与全流程体验优化；3. 企业级安全审计与权限管控；4. 完整用户文档与最佳实践 | 4周 |
-| 十一期 | 资源改造（内存模式与资源伸缩） | 1. MemoryProfile/配置观测；2. 按 profile 限制 Wasm/QuickJS；3. 运行时动态切换；4. 惰性加载与 LRU、Auto、mimalloc 可选等 | 待定 |
+- **先把单 Agent 做到极致**，再扩展到多 Agent、Skill、插件生态、UI 等周边能力；
+- **插件系统冻结**：保留已完成的沙箱、4 原语、长生命周期 VM、pi-mono 兼容层，不再新增插件特性；待单 Agent 体验与自进化能力成熟，再回到插件生态做第二轮投资；
+- **新路线图使用 P0-P9 十档**：P0-P9 不再是「紧急度」，而是**执行编排顺序**（上一档完成后再投入下一档），具体见下文。
+
+## 当前状态（001-mvp 已关闭）
+一期核心交付已完成并冻结：Rust 宿主核心、WasmEdge+QuickJS 沙箱、4 原语执行引擎、pi-mono 兼容层、异步 Hostcall、长生命周期 VM（VM Actor）、CLI 对话模式、Agent Loop 三层循环、基础审计日志。详情见 [archive/001-mvp/](archive/001-mvp/)。
+
+## 当前迭代：002-single-agent-complete（单 Agent 完善期）
+完成 P0 + P1 两档，目标：让单 Agent 在 macOS/Linux 上的基础体验、状态管理、任务循环达到「无 P0 bug、可稳定长时间运行」。执行看板：[`agents/TASK_BOARD_002.md`](../../agents/TASK_BOARD_002.md)。
+
+核心方向（对应 P0-P1 十六个顶层任务）：
+1. **基础体验**：bug 修复（VMActor shutdown / 三套管道 / stream timeout / tool loop detection）、工作目录权限分级、工具系统整改、TUI 体验强化、中断/恢复 transcript 完整性、长任务后台化；
+2. **思考与展示**：Thinking API 接入 + TUI 可折叠展示；
+3. **摘要优化**：对齐 [`docs/reports/compaction-prompt-cc-vs-pi.md`](../../docs/reports/compaction-prompt-cc-vs-pi.md) §5.3/§5.4，升级 Compaction prompt 为 9 节模板，禁止 tools 调用；
+4. **Agent Loop 模块化**：拆 `run.rs`（832 行）为 dispatcher / tool_exec / stream_handler / error_classifier；
+5. **状态管理**：Checkpoint + 断点续跑、PLAN 模式增强、提问/应答机制、结果验证 review 子流程、Feedback 回路、集成测试规范。
+
+## 不做（当前阶段 Out of Scope）
+1. **多 Agent / Agent 编排 / 安全体系 / 多会话**（P5 才启动）；
+2. **插件系统新特性**（冻结区，P6；仅保留 T-001 VMActor shutdown 这类维护性修复）；
+3. **Skill 系统**（调度、工作流、内置 Skill）—— P2；
+4. **记忆系统 / USER.md / MEMORY.md**—— P3；
+5. **自进化 / 学习回路**—— P4；
+6. **跨平台（WasmEdge 下载脚本、Android、openclaw 兼容）**—— P7；
+7. **多 LLM 适配 / 多 IM 网关（Telegram/Slack/企微）**—— P8；
+8. **UI（Tauri+React、Android 端、插件可视化）**—— P9；
+9. **插件自举 / AI 自主生成插件闭环** —— 随 P6 插件系统解冻时再评估；
+10. **容器化运行 / 插件市场 / 多模态** —— 长期规划，不在 P0-P9 范围内。
+
+## P0-P9 路线图（十档执行顺序）
+
+| 档位 | 核心主题 | 核心方向 | 关联模块/报告 |
+|------|----------|----------|---------------|
+| **P0** 单 Agent 基础体验 | bug 修复 / 工作目录权限 / 思考与工具展示 / 工具系统 / 摘要优化 / Agent Loop 模块化 | T2-P0-001~010（16 项中 10 项） | `src/core/agent_loop/`、`src/core/compaction/`、`src/ext/dispatcher/`、`src/api/chat/`、TUI |
+| **P1** 状态管理 | Checkpoint / PLAN 模式 / 任务断点续跑 / 结果验证 / Review / Feedback | T2-P1-001~006 | `src/core/session/`、`src/api/render/`、PLAN 子流程 |
+| **P2** Skill 系统 | Skill 声明/注册/发现、调度器、工作流引擎、内置高频 Skill | 新建 `src/core/skill/` | [plugin_skills_first_principles_pi_rust_wasm.md](../../docs/reports/plugin_skills_first_principles_pi_rust_wasm.md) §4-5、T-114/T-115 |
+| **P3** 系统提示词 + 记忆 | USER.md / MEMORY.md 加载注入、系统提示词文件化/模板化、会话记忆总结 | 扩展 `src/core/system_prompt.rs`、新建 `src/core/memory/` | T-030/T-031/T-045/T-093/T-094/T-097/T-098 |
+| **P4** 自进化 / 学习 | 自总结生成 Skill、学习回路（从 Feedback 生成 SKILL/MEMORY 增量）、自举 AI 编程 Agent | 参考 [hermes-agent](../../../hermes-agent/) | T-095/T-103 + 新增 T-142 |
+| **P5** 多 Agent + 安全 + 多会话 | Agent 编排器、Agent 邮箱、独立 VM 运行、安全体系 9 条、多会话管理 | 多 Agent 基础设施 | T-022/T-025~T-029/T-052~T-061/T-073~T-084 |
+| **P6** 插件系统（冻结区，仅维护） | 插件管线收尾、WAPM/预热/关闭 AOT、自举闭环、VMActor shutdown 修复 | `src/ext/`、`src/ext/plugin/` | T-001/T-062~T-070/T-133/T-134 |
+| **P7** 跨平台 | WasmEdge standalone 下载与链接、install 脚本、Android、openclaw 兼容 | `scripts/`、`build.rs` | T-104/T-105/T-106/T-107 |
+| **P8** 多 IM / 多 LLM 适配 | 多 LLM 适配层（Anthropic/Gemini/local-llm）、IM 网关（Telegram/Slack/企微/邮件/Webhook）、商米场景 | 新建 `src/core/llm/providers/`、`src/gateway/` | T-128/T-129/T-130 + 新增 T-143/T-144 |
+| **P9** UI | Tauri+React Web 桌面端、Android 端、插件/Skill/Agent 管理可视化 | 新仓库或 `ui/` | - |
+
+> **档位语义**：P0-P9 是**执行编排顺序**，上一档核心完成后才投入下一档；`docs/TODOS.md` 中并行维护「紧急度标签」`[BUG]/[UX]/[REF]` 用于同档位内排序。
+>
+> **档位 vs 旧十一期**：旧「一期（MVP）/ 二期（插件自举）/ 三期（多 Agent）/ ... / 十一期（资源改造）」在新架构下重新分配到 P0-P9，不再按时间期次编号。
 
 ## 长期愿景
-打造一款轻量、安全、全兼容pi生态的AI Agent运行时引擎，让用户可以通过自然语言轻松扩展Agent能力，自主生成、安装、运行插件，兼顾生态开放性与系统安全性，成为pi-mono生态的高性能、高可靠Rust实现，推动AI Agent全民化、安全化落地。
+打造一款轻量、安全、全兼容 pi 生态的 AI Agent 运行时引擎：从单 Agent 做到极致，让用户通过自然语言完成复杂任务，带出可审查的产出（日志、diff、测试、review）；再扩展到多 Agent 协作、Skill 复用、插件生态、跨平台，兼顾生态开放性与系统安全性，成为 pi-mono 生态的高性能、高可靠 Rust 实现，推动 AI Agent 全民化、安全化落地。

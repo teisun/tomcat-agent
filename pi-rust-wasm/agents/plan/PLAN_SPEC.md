@@ -10,7 +10,7 @@
 ## 一、计划必须包含的内容
 
 1. **待完成子项清单**  
-   对照 [TASK_BOARD.md](../TASK_BOARD.md) 中的子项清单，列出本任务所有待完成子项及当前状态（已完成/待做）。若计划内拆 Phase 导致编号与看板不一致，须加**「看板子项 ↔ 计划子项」映射表**（避免评审与验收时对不上号）。
+   对照当前迭代看板 [TASK_BOARD_002.md](../TASK_BOARD_002.md) 中的子项清单，列出本任务所有待完成子项及当前状态（已完成/待做）。若计划内拆 Phase 导致编号与看板不一致，须加**「看板子项 ↔ 计划子项」映射表**（避免评审与验收时对不上号）。
 
 2. **目标与验收（含功能/步骤的作用与意义、用户故事/用户场景）**  
    - 用一两句话写明「要做出什么」以及验收标准（可运行、可测、门禁通过等）。  
@@ -78,7 +78,7 @@
 | 文档 | 适用场景 |
 | :--- | :--- |
 | [PLAN_SKELETON.md](./PLAN_SKELETON.md) | **任意任务**最小骨架（复制后填空）；章节顺序与 [PLAN_EXAMPLE_TASK21.md](./PLAN_EXAMPLE_TASK21.md) 对齐。 |
-| [PLAN_EXAMPLE_TASK21.md](./PLAN_EXAMPLE_TASK21.md) | **完整计划范例**：认领与分支、研发流程表、子项状态表、目标与验收、现状与差距、子项与 API 一览、各子项详情、依赖图、风险、集成 §4、自检、Dispatcher 收尾、**第七节 Todo 总表**（历史完成：TASK-21）。横切任务（如 TASK-05 系列）以 [TASK_BOARD.md](../TASK_BOARD.md) 与本节子项 + [`docs/reports/extension_compat_matrix.md`](../../docs/reports/extension_compat_matrix.md) 为范围与验收单一事实来源，不必另建同名长篇计划文件。 |
+| [PLAN_EXAMPLE_TASK21.md](./PLAN_EXAMPLE_TASK21.md) | **完整计划范例（历史）**：认领与分支、研发流程表、子项状态表、目标与验收、现状与差距、子项与 API 一览、各子项详情、依赖图、风险、集成 §4、自检、Dispatcher 收尾、**第七节 Todo 总表**（历史完成：TASK-21）。横切任务以当前看板 [TASK_BOARD_002.md](../TASK_BOARD_002.md) 与本节子项 + [`docs/reports/extension_compat_matrix.md`](../../docs/reports/extension_compat_matrix.md) 为范围与验收单一事实来源，不必另建同名长篇计划文件。 |
 
 制定计划时：小任务对齐「一」+ 自检 + **SKELETON** 即可；横切或多子项任务可对照 **TASK21 范例** 的章节结构扩写，不必同等篇幅。
 

@@ -1,5 +1,29 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Agent | 2026-04-23 12:00 | ACTIVE | develop | — |
+
+### docs：路线图 P0-P9 重排；002 单 Agent 看板；001-mvp 归档
+
+- [✓] `openspec/specs/Product_Brief.md`：十档执行顺序、`002-single-agent-complete`、插件阶段性冻结说明
+- [✓] `agents/TASK_BOARD_002.md`：当前迭代立项与 T2-P0 / T2-P1 任务（取代原位 `TASK_BOARD.md`）
+- [✓] `openspec/specs/archive/`：迁入 `001-mvp/` 四件套与 `TASK_BOARD_001-mvp.md`；删除 `openspec/changes/001-mvp/` 与仓库根 `agents/TASK_BOARD.md` 原位文件
+- [✓] `docs/TODOS.md`：档位定义与条目按 P0-P9 重标；同步改造记录附录
+- [✓] 活跃协作文档收敛对 `archive/001-mvp` 的噪声引用（Dispatcher、Nibbles、分享稿、UNIT_TEST_SPEC 等）
+
+### 🔌 INTERFACE（接口变更）
+
+无显著变更（仅文档与规划路径调整）。
+
+### ⚠️ BLOCKED（阻塞/风险）
+
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | — | — |
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Agent | 2026-04-19 16:30 | ACTIVE | develop | — |
 
 ### docs：跨仓库 Agent 错误处理对比；TODOS 与源码核对
