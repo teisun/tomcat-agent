@@ -6,16 +6,14 @@ use tracing::info;
 
 use crate::core::compaction::run_layer0_cleanup;
 use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider};
-use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
+use crate::core::primitives::PrimitiveExecutor;
 use crate::core::session::manager::{estimated_tokens_from_chars, ContextState};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
-use crate::infra::events::{
-    AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
-};
+use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
 
 use super::error_classifier::handle_overflow_retry;
-use super::stream_handler;
+use super::{stream_handler, tool_exec};
 use super::types::{
     unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError,
     ToolCallInfo,
@@ -590,7 +588,7 @@ impl AgentLoop {
                 // `reqwest` 连接被 drop 时自动关闭，保证子进程 / HTTP 连接被及时释放。
                 let cancel = self.cancel_token.clone();
                 let (result_content, is_error) = {
-                    let exec = self.execute_tool(tc);
+                    let exec = tool_exec::execute_tool(&self.primitive, tc);
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
@@ -655,120 +653,6 @@ impl AgentLoop {
                 self.emit_context_metrics();
                 return Ok(final_text);
             }
-        }
-    }
-
-    async fn execute_tool(&self, tc: &ToolCallInfo) -> (String, bool) {
-        let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
-            Ok(v) => v,
-            Err(e) => return (format!("参数解析失败: {}", e), true),
-        };
-
-        let plugin_id = "__agent__";
-
-        let out = match tc.name.as_str() {
-            "read_file" => {
-                let path = args["path"].as_str().unwrap_or("");
-                self.primitive
-                    .read_file(path, plugin_id)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            "write_file" => {
-                let path = args["path"].as_str().unwrap_or("");
-                let content = args["content"].as_str().unwrap_or("");
-                let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-                self.primitive
-                    .write_file(path, content, overwrite, plugin_id)
-                    .await
-                    .map(|r| {
-                        if r.written {
-                            format!("已写入: {}", r.path)
-                        } else {
-                            format!("写入被拒绝: {}", r.path)
-                        }
-                    })
-                    .map_err(|e| e.to_string())
-            }
-            "edit_file" => {
-                let path = args["path"].as_str().unwrap_or("");
-                let old_content = args["old_content"].as_str().unwrap_or("");
-                let new_content = args["new_content"].as_str().unwrap_or("");
-                let edits = vec![EditOperation {
-                    operation_type: EditOperationType::Replace,
-                    start_line: None,
-                    end_line: None,
-                    old_content: Some(old_content.to_string()),
-                    new_content: new_content.to_string(),
-                }];
-                self.primitive
-                    .edit_file(path, edits, plugin_id)
-                    .await
-                    .map(|r| {
-                        if r.applied {
-                            format!("已编辑: {}", r.path)
-                        } else {
-                            format!("编辑被拒绝: {}", r.path)
-                        }
-                    })
-                    .map_err(|e| e.to_string())
-            }
-            "execute_bash" => {
-                let command = args["command"].as_str().unwrap_or("");
-                let cwd = args["cwd"].as_str();
-                let argv_store: Option<Vec<String>> =
-                    args.get("args").and_then(|v| v.as_array()).map(|arr| {
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(String::from))
-                            .collect()
-                    });
-                let argv_ref = argv_store.as_deref();
-                self.primitive
-                    .execute_bash(command, cwd, plugin_id, argv_ref)
-                    .await
-                    .map(|r| {
-                        let mut out = String::new();
-                        if !r.stdout.is_empty() {
-                            out.push_str(&r.stdout);
-                        }
-                        if !r.stderr.is_empty() {
-                            if !out.is_empty() {
-                                out.push('\n');
-                            }
-                            out.push_str("STDERR: ");
-                            out.push_str(&r.stderr);
-                        }
-                        out.push_str(&format!("\n(exit code: {})", r.exit_code));
-                        out
-                    })
-                    .map_err(|e| e.to_string())
-            }
-            "list_dir" => {
-                let path = args["path"].as_str().unwrap_or("");
-                self.primitive
-                    .list_dir(path, plugin_id)
-                    .await
-                    .map(|entries| {
-                        let lines: Vec<String> = entries
-                            .iter()
-                            .map(|e| {
-                                if e.is_dir {
-                                    format!("  {}/ (dir)", e.name)
-                                } else {
-                                    format!("  {}", e.name)
-                                }
-                            })
-                            .collect();
-                        lines.join("\n")
-                    })
-                    .map_err(|e| e.to_string())
-            }
-            other => Err(format!("未知工具: {}", other)),
-        };
-
-        match out {
-            Ok(s) => (s, false),
-            Err(s) => (s, true),
         }
     }
 }

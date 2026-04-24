@@ -126,6 +126,7 @@
 mod error_classifier;
 mod run;
 mod stream_handler;
+mod tool_exec;
 mod types;
 
 #[cfg(test)]
