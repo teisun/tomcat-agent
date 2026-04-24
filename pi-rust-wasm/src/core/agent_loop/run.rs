@@ -1,24 +1,24 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::core::compaction::run_layer0_cleanup;
-use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
+use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider};
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::core::session::manager::{estimated_tokens_from_chars, ContextState};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::{
-    AgentEvent, AssistantMessageEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
+    AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
 };
 
-use super::error_classifier::{classify_error, handle_overflow_retry};
+use super::error_classifier::handle_overflow_retry;
+use super::stream_handler;
 use super::types::{
     unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError,
-    ToolCallAccumulator, ToolCallInfo,
+    ToolCallInfo,
 };
 
 impl AgentLoop {
@@ -392,108 +392,15 @@ impl AgentLoop {
                 }
             }
 
-            // ── LLM connect：chat_stream 的建连 await 也要可中断 ──
-            let cancel = self.cancel_token.clone();
-            let mut stream = {
-                let connect = self.llm.chat_stream(req);
-                tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        return Err(self.make_aborted(messages, final_text));
-                    }
-                    conn = connect => match conn {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let snippet: String = e.to_string().chars().take(200).collect();
-                            info!(
-                                target: "pi_wasm_chat_diag",
-                                phase = "reasoning_chat_stream_connect_err",
-                                snippet = %snippet
-                            );
-                            return Err(classify_error(&e));
-                        }
-                    }
-                }
-            };
-
-            let mut content_buf = String::new();
-            let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
-            let mut aborted_during_stream = false;
-
-            let msg_json = serde_json::json!({});
-            self.emit_event(AgentEvent::MessageStart {
-                message: Message(msg_json.clone()),
-            });
-
-            loop {
-                let cancel = self.cancel_token.clone();
-                let next = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        aborted_during_stream = true;
-                        break;
-                    }
-                    item = stream.next() => item,
-                };
-                let Some(item) = next else {
-                    break;
-                };
-                match item {
-                    Ok(StreamEvent::ContentDelta { delta }) => {
-                        content_buf.push_str(&delta);
-                        self.emit_event(AgentEvent::MessageUpdate {
-                            message: Message(serde_json::json!({})),
-                            assistant_message_event: AssistantMessageEvent(
-                                serde_json::json!({ "delta": delta }),
-                            ),
-                        });
-                    }
-                    Ok(StreamEvent::ToolCallDelta {
-                        index,
-                        id,
-                        name,
-                        arguments_delta,
-                    }) => {
-                        while tool_calls_buf.len() <= index as usize {
-                            tool_calls_buf.push(ToolCallAccumulator::default());
-                        }
-                        let acc = &mut tool_calls_buf[index as usize];
-                        if let Some(id_val) = id {
-                            acc.id = id_val;
-                        }
-                        if let Some(name_val) = name {
-                            acc.name = name_val;
-                        }
-                        if let Some(args) = arguments_delta {
-                            acc.arguments.push_str(&args);
-                        }
-                    }
-                    Ok(StreamEvent::FinishReason { .. }) => break,
-                    Ok(StreamEvent::Usage {
-                        prompt_tokens,
-                        completion_tokens,
-                        ..
-                    }) => {
-                        if let Some(ref mut ctx_state) = self.context_state {
-                            ctx_state.update_api_usage(prompt_tokens, completion_tokens);
-                        }
-                    }
-                    Err(e) => {
-                        self.emit_event(AgentEvent::MessageEnd {
-                            message: Message(serde_json::json!({})),
-                        });
-                        return Err(classify_error(&e));
-                    }
-                }
-            }
-
-            self.emit_event(AgentEvent::MessageEnd {
-                message: Message(serde_json::json!({})),
-            });
+            // Stream 消费（含 LLM connect + MessageStart/Update/End 发射 + cancel 抢占）
+            // 整块委托给 stream_handler::run_chat_stream；aborted / Err 路径均已
+            // 先发 MessageEnd，调用方仅需补 partial assistant 落盘与 make_aborted。
+            let outcome = stream_handler::run_chat_stream(self, req).await?;
+            let content_buf = outcome.content_buf;
 
             // stream 被取消：把 partial content_buf 作为 partial assistant 落到 messages，
             // 让 ctx_state 也把它计入消息预算；再返回 Aborted 携带 partial。
-            if aborted_during_stream {
+            if outcome.aborted {
                 if !content_buf.is_empty() {
                     if let Some(ref mut ctx_state) = self.context_state {
                         ctx_state.on_message_appended(content_buf.len());
@@ -506,7 +413,8 @@ impl AgentLoop {
 
             final_text.push_str(&content_buf);
 
-            let tool_calls: Vec<ToolCallInfo> = tool_calls_buf
+            let tool_calls: Vec<ToolCallInfo> = outcome
+                .tool_calls_buf
                 .into_iter()
                 .filter(|tc| !tc.name.is_empty())
                 .map(|tc| ToolCallInfo {

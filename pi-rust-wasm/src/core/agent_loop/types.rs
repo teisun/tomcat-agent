@@ -177,6 +177,30 @@ pub(super) struct ToolCallAccumulator {
 
 // ─── L3 overflow trim 统计（error_classifier::handle_overflow_retry 返回） ───
 
+// ─── stream_handler 输出 ────────────────────────────────────────────────────
+
+/// `stream_handler::run_chat_stream` 的输出载荷：
+///
+/// - `content_buf`：本轮 `ContentDelta` 累积的文本（调用方可直接
+///   `final_text.push_str(&content_buf)` 或当作 partial assistant 落到 messages）
+/// - `tool_calls_buf`：按 `index` 对齐的 `ToolCallAccumulator` 列表（空 `name`
+///   的条目由调用方 `.filter` 后再构造 `ToolCallInfo`）
+/// - `aborted == true`：中途被 `cancel_token.cancel()`；此时**已经**发射
+///   `MessageEnd` 事件，但**尚未** push partial assistant 到 messages 或构造
+///   `LoopError::Aborted`——调用方（`run_reasoning_loop` Step 5）负责：
+///   1. 若 `content_buf` 非空，`ctx_state.on_message_appended(len)` +
+///      `messages.push(ChatMessage::assistant(&content_buf))` +
+///      `final_text.push_str(&content_buf)`
+///   2. 调用 `agent.make_aborted(messages, final_text)` 返回 `LoopError::Aborted`
+///      （"谁拥有 messages 谁负责落盘"原则）
+/// - `aborted == false`：正常收敛（`FinishReason` / stream 末尾）或建连前被取消
+///   （后者 `content_buf` / `tool_calls_buf` 均为空）。
+pub(super) struct StreamOutcome {
+    pub(super) content_buf: String,
+    pub(super) tool_calls_buf: Vec<ToolCallAccumulator>,
+    pub(super) aborted: bool,
+}
+
 /// `handle_overflow_retry` 的结果统计：
 ///
 /// - `applied == true`：成功执行了 L3 trim（发送了 `ContextOverflowTrimStart/End` 事件，
