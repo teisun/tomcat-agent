@@ -177,6 +177,24 @@ pub(super) struct ToolCallAccumulator {
 
 // ─── L3 overflow trim 统计（error_classifier::handle_overflow_retry 返回） ───
 
+// ─── tool_dispatcher 输出 ───────────────────────────────────────────────────
+
+/// `tool_dispatcher::run_tool_calls` 的输出载荷：
+///
+/// - `tool_results`：按 `tool_calls` 顺序排列的 `Message`（供 `TurnEnd` 事件使用）；
+///   包含 `block_tool_calls == true` 时注入的 blocked 占位文本。
+/// - `steered == true`：本轮至少有 **1** 个 tool 执行完毕后被 steering queue 打断
+///   （queue 非空 → `messages.extend(q.drain(..)) + break`）。调用方应 `continue`
+///   下一轮 reasoning loop，让下一次 LLM 请求携带 steering 消息。
+///
+/// `#[allow(dead_code)]`：`tool_results` 字段当前通过 `_ = outcome.tool_results`
+/// 读取；Phase 4 测试将按 `steered / tool_results.len()` 做断言。
+#[allow(dead_code)]
+pub(super) struct DispatchOutcome {
+    pub(super) tool_results: Vec<crate::infra::events::Message>,
+    pub(super) steered: bool,
+}
+
 // ─── stream_handler 输出 ────────────────────────────────────────────────────
 
 /// `stream_handler::run_chat_stream` 的输出载荷：

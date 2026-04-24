@@ -10,14 +10,14 @@ use crate::core::primitives::PrimitiveExecutor;
 use crate::core::session::manager::{estimated_tokens_from_chars, ContextState};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventBus, EventContext};
-use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
+use crate::infra::events::{AgentEvent, ExtensionEvent, Message};
 
 use super::error_classifier::handle_overflow_retry;
-use super::{stream_handler, tool_exec};
 use super::types::{
     unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError,
     ToolCallInfo,
 };
+use super::{stream_handler, tool_dispatcher};
 
 impl AgentLoop {
     pub fn new(
@@ -335,7 +335,7 @@ impl AgentLoop {
     ///   既包含中断前已完成的 tool_result，也包含即将作为 partial 写入的
     ///   assistant 消息（调用方在进入本函数前已 `push` 到 messages）。
     pub(super) fn make_aborted(
-        &mut self,
+        &self,
         messages: &[ChatMessage],
         partial_text: String,
     ) -> LoopError {
@@ -505,136 +505,19 @@ impl AgentLoop {
                 return Ok(final_text);
             }
 
-            if let Some(ref mut ctx_state) = self.context_state {
-                let assistant_chars = content_buf.len()
-                    + tool_calls
-                        .iter()
-                        .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
-                        .sum::<usize>();
-                ctx_state.on_message_appended(assistant_chars);
-            }
-
-            {
-                let tc_json: Vec<serde_json::Value> = tool_calls
-                    .iter()
-                    .map(|tc| {
-                        serde_json::json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments
-                            }
-                        })
-                    })
-                    .collect();
-                messages.push(ChatMessage::assistant_with_tool_calls(
-                    if content_buf.is_empty() {
-                        None
-                    } else {
-                        Some(content_buf.as_str())
-                    },
-                    tc_json,
-                ));
-            }
-
-            let mut tool_results = Vec::new();
-            let mut steered = false;
-
-            if self.block_tool_calls {
-                for tc in &tool_calls {
-                    let blocked_msg = format!(
-                        "[Tool call blocked: context usage too high. Tool '{}' was not executed.]",
-                        tc.name
-                    );
-                    if let Some(ref mut ctx_state) = self.context_state {
-                        ctx_state.on_message_appended(blocked_msg.len());
-                    }
-                    messages.push(ChatMessage::tool(&tc.id, &blocked_msg));
-                    tool_results.push(Message(serde_json::json!({ "content": blocked_msg })));
-                }
-                self.block_tool_calls = false;
-
-                self.emit_event(AgentEvent::TurnEnd {
-                    session_id: self.config.session_id.clone(),
-                    turn_index,
-                    message: Message(serde_json::json!({})),
-                    tool_results,
-                });
-                continue;
-            }
-
-            for tc in &tool_calls {
-                if self.cancel_token.is_cancelled() {
-                    return Err(self.make_aborted(messages, final_text));
-                }
-
-                let args: serde_json::Value =
-                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
-
-                self.emit_event(AgentEvent::ToolExecutionStart {
-                    tool_call_id: tc.id.clone(),
-                    tool_name: tc.name.clone(),
-                    args: args.clone(),
-                });
-
-                self.emit_extension_event(ExtensionEvent::ToolCall {
-                    tool_name: tc.name.clone(),
-                    tool_call_id: tc.id.clone(),
-                    input: args.clone(),
-                });
-
-                // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` +
-                // `reqwest` 连接被 drop 时自动关闭，保证子进程 / HTTP 连接被及时释放。
-                let cancel = self.cancel_token.clone();
-                let (result_content, is_error) = {
-                    let exec = tool_exec::execute_tool(&self.primitive, tc);
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            // 即便 cancel 先触发，也发布 ToolExecutionEnd 让 UI 完成配对
-                            self.emit_event(AgentEvent::ToolExecutionEnd {
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                result: ToolOutput(serde_json::json!("[interrupted]")),
-                                is_error: true,
-                            });
-                            return Err(self.make_aborted(messages, final_text));
-                        }
-                        out = exec => out,
-                    }
-                };
-
-                self.emit_extension_event(ExtensionEvent::ToolResult {
-                    tool_name: tc.name.clone(),
-                    tool_call_id: tc.id.clone(),
-                    input: args,
-                    content: vec![ContentBlock(serde_json::json!({ "text": result_content }))],
-                    details: None,
-                    is_error,
-                });
-
-                self.emit_event(AgentEvent::ToolExecutionEnd {
-                    tool_call_id: tc.id.clone(),
-                    tool_name: tc.name.clone(),
-                    result: ToolOutput(serde_json::json!(result_content)),
-                    is_error,
-                });
-
-                if let Some(ref mut ctx_state) = self.context_state {
-                    ctx_state.on_message_appended(result_content.len());
-                }
-
-                messages.push(ChatMessage::tool(&tc.id, &result_content));
-                tool_results.push(Message(serde_json::json!({ "content": result_content })));
-
-                let mut q = self.steering_queue.lock();
-                if !q.is_empty() {
-                    messages.extend(q.drain(..));
-                    steered = true;
-                    break;
-                }
-            }
+            // tool_calls 调度（block / steering / cancel / 事件配对 / 计费 / push）
+            // 整块委托给 tool_dispatcher::run_tool_calls；函数内部严格保持原事件顺序：
+            // ToolExecutionStart → ExtensionEvent::ToolCall → execute_tool →
+            // ExtensionEvent::ToolResult → ToolExecutionEnd；cancel 抢占点均保留
+            // "先发 End 让 UI 配对再 make_aborted" 的原语义。
+            let dispatch = tool_dispatcher::run_tool_calls(
+                self,
+                messages,
+                &tool_calls,
+                &content_buf,
+                &final_text,
+            )
+            .await?;
 
             // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
 
@@ -642,10 +525,10 @@ impl AgentLoop {
                 session_id: self.config.session_id.clone(),
                 turn_index,
                 message: Message(serde_json::json!({})),
-                tool_results,
+                tool_results: dispatch.tool_results,
             });
 
-            if steered {
+            if dispatch.steered {
                 continue;
             }
 
