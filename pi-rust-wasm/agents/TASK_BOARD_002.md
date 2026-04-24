@@ -110,6 +110,7 @@
 | **分支** | `feature/agent-loop-split` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-018`、`#T-019` |
+| **关联报告** | [plan-mode-execution-playbook-T2-P0-001.md](../docs/reports/plan-mode-execution-playbook-T2-P0-001.md) — Cursor PLAN 模式执行步骤复盘（Phase A-F SOP）|
 
 **目标**：把 832 行的 `src/core/agent_loop/run.rs` 拆为可独立测试的子模块，并为 `src/ext/dispatcher/` 做对等拆分，消除核心循环的维护阻力。
 
