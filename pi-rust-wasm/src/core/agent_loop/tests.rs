@@ -11,7 +11,7 @@ use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
-use super::convert::classify_error;
+use super::error_classifier::classify_error;
 use super::*;
 
 struct MockLlmProvider {

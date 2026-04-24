@@ -5,9 +5,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::core::compaction::{
-    force_drop_oldest_to_target, is_context_overflow_error, run_layer0_cleanup,
-};
+use crate::core::compaction::run_layer0_cleanup;
 use crate::core::llm::{ChatMessage, ChatMessageRole, ChatRequest, LlmProvider, StreamEvent};
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 use crate::core::session::manager::{estimated_tokens_from_chars, ContextState};
@@ -17,7 +15,7 @@ use crate::infra::events::{
     AgentEvent, AssistantMessageEvent, ContentBlock, ExtensionEvent, Message, ToolOutput,
 };
 
-use super::convert::classify_error;
+use super::error_classifier::{classify_error, handle_overflow_retry};
 use super::types::{
     unix_ts_ms, AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError,
     ToolCallAccumulator, ToolCallInfo,
@@ -98,7 +96,7 @@ impl AgentLoop {
     }
 
     /// 刷新实时 token 指标并发射 ContextMetricsUpdate 事件（仅当 context_state 存在时）。
-    fn emit_context_metrics(&mut self) {
+    pub(super) fn emit_context_metrics(&mut self) {
         if let Some(ref mut ctx_state) = self.context_state {
             let input_tokens_used = ctx_state.estimated_token_count();
             let context_utilization_ratio = ctx_state.usage_ratio();
@@ -124,7 +122,7 @@ impl AgentLoop {
         }
     }
 
-    fn emit_event(&self, event: AgentEvent) {
+    pub(super) fn emit_event(&self, event: AgentEvent) {
         let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
         let event_name = payload
             .get("type")
@@ -135,7 +133,7 @@ impl AgentLoop {
         let _ = self.event_bus.emit_sync(&event_name, ctx);
     }
 
-    fn emit_extension_event(&self, event: ExtensionEvent) {
+    pub(super) fn emit_extension_event(&self, event: ExtensionEvent) {
         let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
         let event_name = payload
             .get("type")
@@ -309,94 +307,10 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
-                    let overflow_hit = is_context_overflow_error(&e);
-                    let context_state_some = self.context_state.is_some();
-                    let err_snippet: String = e.chars().take(200).collect();
-                    info!(
-                        target: "pi_wasm_chat_diag",
-                        phase = "attempt_loop_retryable",
-                        attempt,
-                        overflow_hit,
-                        context_state_some,
-                        snippet = %err_snippet
-                    );
-                    if overflow_hit && context_state_some {
-                        let ratio_before = self
-                            .context_state
-                            .as_ref()
-                            .map(|cs| cs.usage_ratio())
-                            .unwrap_or(0.0);
-                        self.emit_event(AgentEvent::ContextOverflowTrimStart {
-                            reason: "context_overflow".into(),
-                            ratio: ratio_before,
-                        });
-                        let mut trim_tokens = 0usize;
-                        let mut trim_turns = 0usize;
-                        if let Some(ref mut ctx_state) = self.context_state {
-                            let (turns_removed, chars_removed) =
-                                force_drop_oldest_to_target(ctx_state);
-                            trim_turns = turns_removed;
-                            trim_tokens = estimated_tokens_from_chars(chars_removed);
-                            ctx_state.session_obs.compaction_tokens_freed += trim_tokens;
-                            ctx_state.session_obs.compaction_count =
-                                ctx_state.session_obs.compaction_count.saturating_add(1);
-                            let tail_start = self.context_tail_start.min(messages.len());
-                            let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
-                            let mut rebuilt: Vec<ChatMessage> = Vec::new();
-                            if messages
-                                .first()
-                                .is_some_and(|m| m.role == ChatMessageRole::System)
-                            {
-                                rebuilt.push(messages[0].clone());
-                            }
-                            rebuilt.extend(
-                                crate::core::session::manager::build_context_from_state(ctx_state),
-                            );
-                            let tail_start_in_rebuilt = rebuilt.len();
-                            rebuilt.extend(tail);
-                            *messages = rebuilt;
-                            self.start_idx = tail_start_in_rebuilt;
-                        }
-                        let ratio_after = self
-                            .context_state
-                            .as_ref()
-                            .map(|cs| cs.usage_ratio())
-                            .unwrap_or(0.0);
-                        self.emit_event(AgentEvent::ContextOverflowTrimEnd {
-                            ratio_before,
-                            ratio_after,
-                            will_retry: true,
-                            estimated_tokens_freed: trim_tokens,
-                            turns_removed: trim_turns,
-                        });
-                        let compaction_count_after = self
-                            .context_state
-                            .as_ref()
-                            .map(|cs| cs.session_obs.compaction_count)
-                            .unwrap_or(0);
-                        info!(
-                            target: "pi_wasm_chat_diag",
-                            phase = "l3_trim_done",
-                            attempt,
-                            turns_removed = trim_turns,
-                            trim_tokens,
-                            ratio_before,
-                            ratio_after,
-                            compaction_count_after
-                        );
-                    } else if overflow_hit && !context_state_some {
-                        info!(
-                            target: "pi_wasm_chat_diag",
-                            phase = "l3_skipped_no_context_state",
-                            attempt
-                        );
-                    } else if !overflow_hit {
-                        info!(
-                            target: "pi_wasm_chat_diag",
-                            phase = "l3_skipped_not_overflow",
-                            attempt
-                        );
-                    }
+                    // L3 overflow trim 与诊断日志统一放在 error_classifier 中处理；
+                    // retry 控制流（last_err / max_attempts 判定）仍由本函数持有，
+                    // 保证"谁拥有 attempt 循环谁决定终止"。
+                    let _stats = handle_overflow_retry(self, messages, attempt, &e);
                     last_err = Some(e);
                     if attempt == self.config.max_attempts {
                         let fatal = last_err.unwrap_or_else(|| "重试耗尽".to_string());
@@ -422,7 +336,11 @@ impl AgentLoop {
     /// - `partial_messages` 取 `messages[start_idx..]`——这是本轮新增的全部消息，
     ///   既包含中断前已完成的 tool_result，也包含即将作为 partial 写入的
     ///   assistant 消息（调用方在进入本函数前已 `push` 到 messages）。
-    fn make_aborted(&mut self, messages: &[ChatMessage], partial_text: String) -> LoopError {
+    pub(super) fn make_aborted(
+        &mut self,
+        messages: &[ChatMessage],
+        partial_text: String,
+    ) -> LoopError {
         LoopError::Aborted {
             partial_text,
             partial_messages: messages[self.start_idx..].to_vec(),

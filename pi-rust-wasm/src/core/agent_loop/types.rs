@@ -174,3 +174,26 @@ pub(super) struct ToolCallAccumulator {
     pub(super) name: String,
     pub(super) arguments: String,
 }
+
+// ─── L3 overflow trim 统计（error_classifier::handle_overflow_retry 返回） ───
+
+/// `handle_overflow_retry` 的结果统计：
+///
+/// - `applied == true`：成功执行了 L3 trim（发送了 `ContextOverflowTrimStart/End` 事件，
+///   重建了 `messages`，更新了 `ctx_state.session_obs.compaction_count/tokens_freed`）
+/// - `applied == false`：两种跳过场景（均**不发** `ContextOverflowTrim*` 事件，
+///   仅写诊断 `info!`）——
+///   * `context_state` 为 `None`（诊断日志 `phase="l3_skipped_no_context_state"`）
+///   * 错误非 context overflow（诊断日志 `phase="l3_skipped_not_overflow"`）
+///
+/// `#[allow(dead_code)]`：当前生产代码仅 `let _stats = ...` 消费；Phase 4 单测会按
+/// `applied / ratio_before / ratio_after / trim_tokens / trim_turns` 断言，届时移除。
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone)]
+pub(super) struct OverflowTrimStats {
+    pub(super) trim_tokens: usize,
+    pub(super) trim_turns: usize,
+    pub(super) ratio_before: f64,
+    pub(super) ratio_after: f64,
+    pub(super) applied: bool,
+}
