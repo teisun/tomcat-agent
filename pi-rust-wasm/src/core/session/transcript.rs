@@ -1,6 +1,96 @@
-//! 对话 transcript（pi 系 JSONL）：SessionHeader、TranscriptEntry 及流式读/追加写。
+//! # Session Transcript（pi 系 JSONL 格式）
 //!
-//! 首行 session header，后续每行一条 entry；禁止全量加载，使用 BufReader 逐行读。
+//! 单 session 落盘的对话记录：与 pi-mono 共享 schema，append-only / BufReader
+//! 流式读，禁止全量加载到内存（单 session 可能上百 MB）。是 [`crate::core::compaction`]
+//! 与 `--resume` / Checkpoint 体系的物理基座。
+//!
+//! ## 文件结构
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │  ~/.pi_/sessions/<session_id>.jsonl                                      │
+//! ├─────────────────────────────────────────────────────────────────────────┤
+//! │  Line 1   { "type":"session", "id":"...", "version":1, "timestamp":..., │
+//! │             "cwd":"..." }                          ← SessionHeader      │
+//! ├─────────────────────────────────────────────────────────────────────────┤
+//! │  Line N   { "type":"message", "id":"...", "parentId":"...",             │
+//! │             "timestamp":..., "role":"user|assistant|tool",              │
+//! │             "kind":"normal|steering|compactionSummary",                  │
+//! │             "content":[{...}], ... }              ← TranscriptEntry     │
+//! │  Line N+1 { "type":"branchSummary", ... }                                │
+//! │  Line N+2 { "type":"modelChange", ... }                                  │
+//! │  ...                                                                     │
+//! ├─────────────────────────────────────────────────────────────────────────┤
+//! │  EOF（永远 append-only，原子落盘后立即 fsync 由 platform 层管）         │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 8 种 TranscriptEntry（tag = "type"）
+//!
+//! ```text
+//! TranscriptEntry
+//! ├─ Message               role + kind + content[]    （主流：user/assistant/tool）
+//! ├─ ModelChange           model_id 切换记录          （/model 命令）
+//! ├─ ThinkingLevelChange   thinking_level 切换记录    （/thinking 命令）
+//! ├─ BranchSummary         分支摘要 + isBoundary       （Layer-1 压缩落点）
+//! ├─ Label                 用户书签                   （/label 命令）
+//! ├─ SessionInfo           会话级元数据                （新版会话补充信息）
+//! ├─ Custom                透传 JSON                   （扩展逃生舱）
+//! └─ EntryBase             公共基座（id / parentId / timestamp）
+//! ```
+//!
+//! ## parent_id 树形结构
+//!
+//! ```text
+//!   header.id → 不参与 parent_id 引用
+//!
+//!   M1 (parentId=None)          ← 第 1 条根 entry
+//!    │
+//!    ├── M2 (parentId=M1)       ← 顺序对话
+//!    │    │
+//!    │    └── M3 (parentId=M2)
+//!    │         │
+//!    │         ├── BS1 (parentId=M3, isBoundary=true)  ← Layer-1 摘要
+//!    │         │
+//!    │         └── M4 (parentId=BS1)  ← 压缩后续话
+//!    │
+//!    └── M2' (parentId=M1)      ← 分支（Steering / 重生成 等）
+//! ```
+//!
+//! ## 公共 API 两类
+//!
+//! ```text
+//! ┌─ 流式读（BufReader 逐行解析，禁止 read_to_end） ────────────────────────┐
+//! │  read_header              ► 第 1 行 SessionHeader                       │
+//! │  read_entries_tail(cap)   ► 从尾部反向读 cap 条                          │
+//! │  get_entry(id)            ► 按 id 线性扫描                               │
+//! │  get_branch(leaf_id)      ► 沿 parentId 反向追溯到根                     │
+//! │  get_children(parent_id)  ► 全文件扫描收集 parentId 命中项               │
+//! │  get_leaf_entry           ► 最后一行                                     │
+//! └────────────────────────────────────────────────────────────────────────┘
+//!
+//! ┌─ 追加 / 插入 / 局部改写 ────────────────────────────────────────────────┐
+//! │  append_line(json)            ► 单纯字符串追加，最低开销                 │
+//! │  append_entry(&entry)         ► 序列化 + append                         │
+//! │  insert_entry_after_message_id ► 为某 message 之后原地插入              │
+//! │                                  （compaction 把 BranchSummary 落到这）│
+//! │  set_branch_summary_entry_is_boundary_true                              │
+//! │                                ► 仅改 BranchSummary 的 isBoundary 标志  │
+//! │  remove_branch_summary_entry_by_id                                      │
+//! │                                ► 失败摘要回滚（compaction error 路径）  │
+//! │  write_header                 ► 重写第 1 行（cwd 变更等罕见场景）        │
+//! └────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 设计要点
+//!
+//! - **Append-only 优先**：90% 写入是 `append_line` / `append_entry`，避免锁全文件。
+//! - **insert / set / remove 走 atomic rewrite**：先读全文件（流式）→ 改→ 写
+//!   临时 → rename，由 [`crate::infra::platform::write_file_atomic`] 兜底原子性。
+//! - **EntryBase + serde flatten**：所有变体共享 `id / parentId / timestamp`，新增
+//!   类型只需在 `TranscriptEntry` enum 加一个变体。
+//! - **`#[serde(rename_all = "camelCase")]`**：与 pi-mono `transcript.ts` 字段名
+//!   完全对齐，跨语言会话可互操作。
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;

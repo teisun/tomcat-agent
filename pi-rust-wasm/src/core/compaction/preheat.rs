@@ -1,8 +1,67 @@
-//! Layer 1 异步预热：后台 tokio task 生成 LLM 摘要 + 写入 transcript。
+//! # Layer-1 异步预压缩（Preheat）
 //!
-//! `Preheat` struct 封装完整的预热状态机（Idle / Running / ExhaustedPending），
-//! 外部仅通过 try_start / try_restart_if_pending / poll_result / await_result / abort
-//! 等公共方法与之交互，不直接访问内部状态枚举。
+//! 后台 tokio task 在用户输入空闲期就把"段落级摘要"算好（LLM call），等到
+//! `usage_ratio` 触发边界时直接把已就绪的摘要灌进 transcript，避免压缩本身
+//! 阻塞用户输入；与 `apply.rs` 的"最后一刻压缩"形成两段式策略。
+//!
+//! ## 状态机（4 态）
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────────────────────┐
+//! │                                                                           │
+//! │           ┌───────┐  try_start (前置已通过)                              │
+//! │   ┌──────►│ Idle  ├─────────────────────────────┐                        │
+//! │   │       └───┬───┘                              │                        │
+//! │   │           │ restore_completed (reload 时)    │ spawn(generate_summary)│
+//! │   │           ▼                                  ▼                        │
+//! │   │   ┌──────────────────┐                ┌─────────────┐                │
+//! │   │   │ CachedCompleted  │ ◄──────────────┤   Running   │ ◄──────┐       │
+//! │   │   │ {result}         │  Ok 完成        │ {handle,    │        │       │
+//! │   │   └─────────┬────────┘                │  attempt,   │        │       │
+//! │   │             │                          │  started_at}│        │       │
+//! │   │             │ poll_result/             └──┬──────┬───┘        │       │
+//! │   │             │ await_result                │      │            │       │
+//! │   │             ▼                              │      │ Err 第 N 次│       │
+//! │   │   PreheatOutcome::Completed                │      │  (N<3 重试)│       │
+//! │   │             │                              │      ▼            │       │
+//! │   │             │              Err 第 3 次  ◄──┘  retry: 重 spawn ─┘       │
+//! │   │             │                              │                          │
+//! │   └─ apply ─────┘                              ▼                          │
+//! │                                       ┌────────────────────┐              │
+//! │                                       │ ExhaustedPending   │              │
+//! │                                       └─────────┬──────────┘              │
+//! │                                                 │                          │
+//! │              try_restart_if_pending(usage_ratio)│                          │
+//! │              ── ratio 仍超阈值 ► 重 spawn ──────┘                          │
+//! │              ── ratio 已下降   ► 留 ExhaustedPending（等下一轮）           │
+//! │                                                                           │
+//! │   abort()：任意态 ► JoinHandle.abort + state = Idle                       │
+//! │   discard_cached_completed()：CachedCompleted ► Idle（手动丢弃）           │
+//! │                                                                           │
+//! └──────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 5 个公共入口
+//!
+//! | 方法                          | 何时调用                                |
+//! | ----------------------------- | --------------------------------------- |
+//! | `try_start`                   | check_before_request 触发预热阈值       |
+//! | `try_restart_if_pending`      | 下一回合开始前，从 ExhaustedPending 重启 |
+//! | `poll_result`                 | apply_boundary 前非阻塞探一下结果       |
+//! | `await_result(timeout)`       | 边界压缩兜底等待                         |
+//! | `abort`                       | 退出 / 中断 / 显式取消                   |
+//!
+//! ## 为什么不直接 enum public
+//!
+//! `PreheatState` 持有 `JoinHandle` 与 `started_at` 等内部记账字段，外暴露会让
+//! 调用方误改状态；改用 `is_idle()` / `is_running()` / `preheat_result_pending()`
+//! 等查询方法保证状态机变迁路径可枚举。
+//!
+//! ## 副作用
+//!
+//! 摘要生成成功后调用方在 `apply.rs` 中通过 [`crate::core::session::transcript::insert_entry_after_message_id`]
+//! 把 `BranchSummaryEntry` 写回 JSONL，并发射 `AgentEvent::AutoCompactionEnd`。
+//! 重试与失败路径分别发 `AutoCompactionStart` / `CompactionError`。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

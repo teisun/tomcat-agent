@@ -174,3 +174,68 @@ pub(super) struct ToolCallAccumulator {
     pub(super) name: String,
     pub(super) arguments: String,
 }
+
+// ─── L3 overflow trim 统计（error_classifier::handle_overflow_retry 返回） ───
+
+// ─── tool_dispatcher 输出 ───────────────────────────────────────────────────
+
+/// `tool_dispatcher::run_tool_calls` 的输出载荷：
+///
+/// - `tool_results`：按 `tool_calls` 顺序排列的 `Message`（供 `TurnEnd` 事件使用）；
+///   包含 `block_tool_calls == true` 时注入的 blocked 占位文本。
+/// - `steered == true`：本轮至少有 **1** 个 tool 执行完毕后被 steering queue 打断
+///   （queue 非空 → `messages.extend(q.drain(..)) + break`）。调用方应 `continue`
+///   下一轮 reasoning loop，让下一次 LLM 请求携带 steering 消息。
+///
+/// `#[allow(dead_code)]`：`tool_results` 字段当前通过 `_ = outcome.tool_results`
+/// 读取；Phase 4 测试将按 `steered / tool_results.len()` 做断言。
+#[allow(dead_code)]
+pub(super) struct DispatchOutcome {
+    pub(super) tool_results: Vec<crate::infra::events::Message>,
+    pub(super) steered: bool,
+}
+
+// ─── stream_handler 输出 ────────────────────────────────────────────────────
+
+/// `stream_handler::run_chat_stream` 的输出载荷：
+///
+/// - `content_buf`：本轮 `ContentDelta` 累积的文本（调用方可直接
+///   `final_text.push_str(&content_buf)` 或当作 partial assistant 落到 messages）
+/// - `tool_calls_buf`：按 `index` 对齐的 `ToolCallAccumulator` 列表（空 `name`
+///   的条目由调用方 `.filter` 后再构造 `ToolCallInfo`）
+/// - `aborted == true`：中途被 `cancel_token.cancel()`；此时**已经**发射
+///   `MessageEnd` 事件，但**尚未** push partial assistant 到 messages 或构造
+///   `LoopError::Aborted`——调用方（`run_reasoning_loop` Step 5）负责：
+///   1. 若 `content_buf` 非空，`ctx_state.on_message_appended(len)` +
+///      `messages.push(ChatMessage::assistant(&content_buf))` +
+///      `final_text.push_str(&content_buf)`
+///   2. 调用 `agent.make_aborted(messages, final_text)` 返回 `LoopError::Aborted`
+///      （"谁拥有 messages 谁负责落盘"原则）
+/// - `aborted == false`：正常收敛（`FinishReason` / stream 末尾）或建连前被取消
+///   （后者 `content_buf` / `tool_calls_buf` 均为空）。
+pub(super) struct StreamOutcome {
+    pub(super) content_buf: String,
+    pub(super) tool_calls_buf: Vec<ToolCallAccumulator>,
+    pub(super) aborted: bool,
+}
+
+/// `handle_overflow_retry` 的结果统计：
+///
+/// - `applied == true`：成功执行了 L3 trim（发送了 `ContextOverflowTrimStart/End` 事件，
+///   重建了 `messages`，更新了 `ctx_state.session_obs.compaction_count/tokens_freed`）
+/// - `applied == false`：两种跳过场景（均**不发** `ContextOverflowTrim*` 事件，
+///   仅写诊断 `info!`）——
+///   * `context_state` 为 `None`（诊断日志 `phase="l3_skipped_no_context_state"`）
+///   * 错误非 context overflow（诊断日志 `phase="l3_skipped_not_overflow"`）
+///
+/// `#[allow(dead_code)]`：当前生产代码仅 `let _stats = ...` 消费；Phase 4 单测会按
+/// `applied / ratio_before / ratio_after / trim_tokens / trim_turns` 断言，届时移除。
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone)]
+pub(super) struct OverflowTrimStats {
+    pub(super) trim_tokens: usize,
+    pub(super) trim_turns: usize,
+    pub(super) ratio_before: f64,
+    pub(super) ratio_after: f64,
+    pub(super) applied: bool,
+}

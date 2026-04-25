@@ -1,4 +1,73 @@
-//! CLI 对话模式：主循环、流式渲染、多轮上下文、工具调用、Markdown 高亮。
+//! # CLI 对话主循环
+//!
+//! [`chat_loop`] 是 `pi chat` 子命令的事件循环：装配 [`ChatContext`]、读用户输入、
+//! 触发 preheat / 边界压缩、跑 [`AgentLoop`]、流式渲染回执、把消息写回 transcript，
+//! 并处理 Ctrl+C 双击退出。
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │  ChatContext::from_config(AppConfig)                ① 装配阶段           │
+//! │   ├─ SessionManager      （sessions_dir，transcript JSONL 持久层）       │
+//! │   ├─ Arc<dyn LlmProvider>（OpenAiProvider / ...）                        │
+//! │   ├─ Arc<dyn PrimitiveExecutor>（DefaultPrimitiveExecutor + 白名单）     │
+//! │   ├─ Arc<dyn ToolRegistry>     （内置 + 插件 tool）                       │
+//! │   ├─ Arc<dyn EventBus>         （DefaultEventBus）                       │
+//! │   ├─ Arc<Mutex<CancellationToken>>（每回合重建，Ctrl+C 用）              │
+//! │   ├─ Arc<Mutex<Option<Instant>>>  （last_interrupt_at，双击窗口）         │
+//! │   └─ workspace_dir       （system prompt + path 白名单默认根）           │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//!    │
+//!    ▼
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │  chat_loop(ctx, resume)                              ② 主循环           │
+//! │                                                                          │
+//! │  ensure_session → init_context_state → register_chat_session_stderr     │
+//! │                                                                          │
+//! │  loop {                                                                  │
+//! │    rl.readline("u> ")                                                    │
+//! │      ├ Ok(line)                  ► trim + add_history                    │
+//! │      ├ Err(Eof)                  ► preheat.abort() + break               │
+//! │      └ Err(Interrupted)          ► continue（Ctrl+C 在 prompt 处忽略）   │
+//! │                                                                          │
+//! │    cancel_token = CancellationToken::new() ◄─ 重建（cancel 不可逆）     │
+//! │    context_state.on_message_appended(input.len())                        │
+//! │                                                                          │
+//! │    Timing ②  preheat.try_restart_if_pending                              │
+//! │              check_before_request（auto-compaction 边界判定）            │
+//! │                                                                          │
+//! │    messages = build_context_from_state                                   │
+//! │             ◄ system_prompt（首位）                                      │
+//! │             ◄ user(input)                                                │
+//! │                                                                          │
+//! │    listener = event_bus.on(MESSAGE_UPDATE, |delta| renderer.push)        │
+//! │                                                                          │
+//! │    AgentLoop::new(...).run(messages)                                     │
+//! │      ├ Completed   ► renderer.flush + session.append_messages            │
+//! │      ├ Interrupted ► flush + append（partial）+ ctrl+c 双击 ► exit(130)  │
+//! │      └ Failed      ► is_fatal_error? ► break : 打印错误并 continue       │
+//! │                                                                          │
+//! │    event_bus.off(listener)                                               │
+//! │  }                                                                       │
+//! │                                                                          │
+//! │  preheat.abort + event_bus.off(session_stderr_ids)                       │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 关键约束
+//!
+//! - **CancellationToken 必须每回合新建**：`tokio_util::sync::CancellationToken`
+//!   一旦 cancel 不可逆；上一回合的 Ctrl+C 不能污染下一回合的输入。
+//! - **system prompt 不入 transcript**：每次现拼，`messages.insert(0, system)`
+//!   仅给 LLM 看，避免 transcript 体积膨胀与 prompt 升级时的历史污染。
+//! - **Ctrl+C 双击窗口**：第一击触发 `cancel_token.cancel()`（soft cancel，留
+//!   transcript）；2s 内第二击直接 `std::process::exit(130)`（hard exit）。
+//!
+//! ## 同目录子模块
+//!
+//! - [`super::render`]：Markdown 流式渲染器。
+//! - `session_stderr_listeners`：把 `ToolResult` / `Compaction` 等事件按用户视角
+//!   渲染到 stderr，与主流 stdout 解耦。
+//! - `tests`：CLI 集成测试入口。
 
 use std::io::{self, Write as IoWrite};
 use std::sync::Arc;

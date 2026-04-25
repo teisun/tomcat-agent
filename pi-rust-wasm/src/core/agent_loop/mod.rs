@@ -123,8 +123,14 @@
 //!   role=tool                               工具执行结果
 //! ```
 
-mod convert;
+mod accessors;
+mod error_classifier;
+mod reasoning_loop;
 mod run;
+mod stream_handler;
+mod tool_dispatcher;
+mod tool_exec;
+mod turn_finalize;
 mod types;
 
 #[cfg(test)]

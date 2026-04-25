@@ -1,7 +1,72 @@
 //! # 事件枚举 (AgentEvent / ExtensionEvent)
 //!
-//! 与 Architecture 事件系统设计一致：type 使用 snake_case，payload 字段使用 camelCase。
-//! 扩展侧使用字符串事件名，与 pi-mono 对齐。
+//! pi-mono 协议层的事件契约。所有 Agent 生命周期、流式输出、工具调用、自动压缩、
+//! 上下文溢出、用户中断等可观测事件都在本文件以强类型 enum 定义；EventBus 用
+//! `serde_json` 把它们序列化成 wire 格式的 JSON 给插件 / TUI / 审计消费。
+//!
+//! ## 三层结构
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────┐
+//! │  pub mod wire                ① Wire 字面量层（防散落字面量）             │
+//! │  pub const WIRE_*: &str = "agent_start" | "turn_end" | ...              │
+//! │  ─ 业务侧只引用本常量；测试断言、审计日志、pi-mono 对齐都走它           │
+//! └────────────────────────────────────────────────────────────────────────┘
+//!                              │
+//!                              │ 与 enum 变体一一对应
+//!                              ▼
+//! ┌────────────────────────────────────────────────────────────────────────┐
+//! │  #[serde(tag="type", rename_all="snake_case")]   ② 强类型层            │
+//! │  pub enum AgentEvent {                                                  │
+//! │    AgentStart / AgentEnd / Interrupted              （生命周期）        │
+//! │    TurnStart / TurnEnd                              （回合）            │
+//! │    MessageStart / MessageUpdate / MessageEnd        （流式 delta）      │
+//! │    ToolExecutionStart / ToolExecutionUpdate /                           │
+//! │      ToolExecutionEnd                               （工具时序）        │
+//! │    AutoRetryStart / AutoRetryEnd                    （重试）            │
+//! │    AutoCompactionStart / AutoCompactionEnd /                            │
+//! │      CompactionError                                （Layer-1 压缩）    │
+//! │    ContextOverflowTrimStart / ...End                （Layer-3 截断）    │
+//! │    Layer0ContextRelease / BoundarySwitched /                            │
+//! │      ContextMetricsUpdate / ToolResultTruncated /                       │
+//! │      ToolResultPersisted                             （上下文记账）     │
+//! │    ExtensionError                                    （扩展异常）       │
+//! │  }                                                                      │
+//! │                                                                         │
+//! │  pub enum ExtensionEvent {                                              │
+//! │    ToolCall / ToolResult                  （插件 hook，对 ToolExecution│
+//! │                                            *Start/End 的镜像，便于扩展 │
+//! │                                            侧只订阅业务语义事件）       │
+//! │  }                                                                      │
+//! └────────────────────────────────────────────────────────────────────────┘
+//!                              │
+//!                              │ serde_json::to_value
+//!                              ▼
+//! ┌────────────────────────────────────────────────────────────────────────┐
+//! │  ③ Wire JSON 层（pi-mono 协议）                                          │
+//! │  { "type": "tool_execution_end",                                        │
+//! │    "sessionId": "...",         ← payload 字段一律 camelCase            │
+//! │    "toolCallId": "call_abc",                                            │
+//! │    "isError": false,                                                    │
+//! │    ... }                                                                │
+//! └────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 序列化合约（**修改 enum 时必须满足**）
+//!
+//! - 顶层 `tag = "type"` + `rename_all = "snake_case"`：变体名自动转 wire 名
+//!   （e.g. `ToolExecutionEnd` → `"tool_execution_end"`）。
+//! - payload 字段必须 `#[serde(rename_all = "camelCase")]` 显式标注，与
+//!   pi-mono `AgentEvent.ts` 的字段命名严格对齐。
+//! - 新增变体时同步在 [`wire`] 模块加 `WIRE_*` 常量，避免业务直接写字面量。
+//! - 测试覆盖：本文件 `#[cfg(test)] mod tests` 对每个变体做"snake_case +
+//!   camelCase"双向 snapshot。
+//!
+//! ## 包装类型 ([`Message`] / [`AssistantMessage`] / [`ToolOutput`] / ...)
+//!
+//! 用 `pub struct Foo(pub serde_json::Value)` 让 LLM 报文与工具结果在 `AgentEvent`
+//! 中以"任意 JSON"携带，不强制 wire schema——避免 LLM provider 升级时全链路
+//! 改 enum；强类型断言留在调用方（如 `agent_loop::reasoning_loop`）。
 
 use serde::Serialize;
 

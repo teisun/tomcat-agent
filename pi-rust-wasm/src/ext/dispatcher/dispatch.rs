@@ -1,3 +1,78 @@
+//! # HostApiDispatcher 同步/异步分发主入口
+//!
+//! 宿主侧（Rust）对 WASM 插件 hostcall 的 **唯一入口**。同一个 `HostRequest` 进来，
+//! 这里决定它是"立刻 block_on 出结果"还是"spawn 后台 task + 返回 pending 票据"，
+//! 然后按 `(module, method)` 路由到 50+ 个 `do_*` 方法。
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────┐
+//! │  HostApiDispatcher::dispatch(instance_id, HostRequest)  ← 唯一入口      │
+//! └────────────────────────────────────────────────────────────────────────┘
+//!    │
+//!    │ ① 特例：(module="__session", method="waitForEvent") ──► do_wait_for_event
+//!    │
+//!    │ ② is_async = (call_id.is_some() && module != "__async")
+//!    ▼
+//!  ┌─ is_async? ──────────────────────────────────────────────────────────┐
+//!  │   YES                                          NO                     │
+//!  │   │                                            │                      │
+//!  │   ▼                                            ▼                      │
+//!  │ submit_async                          tokio_handle.block_on(           │
+//!  │  spawn(dispatch_async)                  dispatch_async(...))           │
+//!  │  async_results[call_id]=Pending                                        │
+//!  │  instance_calls[inst].push                                             │
+//!  │  立返 HostResponse::ok({pending:true})                                 │
+//!  └───────────────────────────────────────────────────────────────────────┘
+//!
+//! ┌── dispatch_async：(module, method) → do_* 路由大表 ───────────────────┐
+//! │                                                                        │
+//! │  __async    poll                ─► do_async_poll                       │
+//! │  log/agent  log|info|warn|...   ─► do_log                              │
+//! │  fs|prim    readFile/writeFile/ ─► do_read_file / do_write_file /      │
+//! │             editFile/executeBash    do_edit_file / do_execute_bash     │
+//! │  llm        createChatCompletion─► do_chat / do_chat_stream /          │
+//! │             [Stream] / get/setMod   do_llm_get_model / do_llm_set_model│
+//! │  tools      register/unregister ─► do_register_tool / do_unregister_   │
+//! │             /list/call/active/cmd   tool / do_list_tools / do_call_    │
+//! │                                     tool / do_get_active_tools / ...   │
+//! │  events     on/once/subscribe/  ─► do_events（subscribe → on 重写）    │
+//! │             off/emit                                                   │
+//! │  session    getCurrent/getMsgs/ ─► do_get_current_session /            │
+//! │             getBranch/getLeaf/      do_get_messages /                  │
+//! │             getEntry/sendMessage    do_session_get_branch / ...        │
+//! │  agent      sendMessage/sendUser─► do_agent_send_message /             │
+//! │                                     do_agent_send_user_message         │
+//! │  context    isIdle/abort/getCwd ─► do_context_*（22 个 UI/状态方法）   │
+//! │             getModel/uiNotify/                                         │
+//! │             uiSelect/uiConfirm/...                                     │
+//! │  其他       _                   ─► HostResponse::err("unknown API")    │
+//! │                                                                        │
+//! └────────────────────────────────────────────────────────────────────────┘
+//!    │
+//!    ▼ 旁路（无论 Ok/Err 都执行）
+//! ┌──────────────────────────────────────────────────────────────────────┐
+//! │  audit.record_hostcall(plugin_id, module, method, success, detail)   │
+//! └──────────────────────────────────────────────────────────────────────┘
+//!    │
+//!    ▼
+//!   Result<HostResponse, AppError>
+//! ```
+//!
+//! ## 异步票据生命周期
+//!
+//! `submit_async` 在 `async_results: DashMap<call_id, AsyncCallStatus>` 上登记
+//! `Pending`，并把 `call_id` push 到 `instance_calls[instance_id]`。后台任务完成后
+//! 写回 `Completed/Failed`。插件侧通过 `__async.poll` 轮询取结果；插件卸载时由
+//! `cleanup_instance` 按 `instance_calls` 反查全部 abort + 清理。
+//!
+//! ## 与同族子模块的边界
+//!
+//! - **本文件**：路由分发与异步票据账本。
+//! - `ops.rs`：4 原语 `do_read_file / do_write_file / do_edit_file / do_execute_bash` 实现。
+//! - `session_ops.rs`：会话/agent/上下文/事件类 `do_*` 实现。
+//! - `helpers.rs`：审计 / async_results 辅助。
+//! - `types.rs`：`HostApiDispatcher` 与 `AsyncCallStatus` 数据结构。
+
 use super::types::{AsyncCallStatus, HostApiDispatcher};
 use crate::ext::host_binding::{HostRequest, HostResponse};
 use crate::ext::vm_actor::EventEnvelope;

@@ -1,3 +1,73 @@
+//! # 4+1 原语执行引擎（DefaultPrimitiveExecutor）
+//!
+//! 实现 [`crate::core::primitives::PrimitiveExecutor`] trait，是 Agent 与文件系统 / Shell
+//! 的 **唯一受信通道**：任何 LLM 工具调用最终都要落到这 5 个方法上，安全策略
+//! （白名单 / 用户确认 / 备份 / 原子写 / 审计）全部在此横切。
+//!
+//! ## 5 个原语 + 共享安全流水
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │  入口（trait 方法）                                                       │
+//! │   ├─ read_file(path, plugin_id)                                          │
+//! │   ├─ list_dir(path, plugin_id)                                           │
+//! │   ├─ write_file(path, content, plugin_id, ...)                           │
+//! │   ├─ edit_file(path, operations, plugin_id, ...)                         │
+//! │   └─ execute_bash(cmd, args, plugin_id, ...)                             │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//!    │
+//!    │ ① 路径规范化                       ┌──────────────────────────────┐
+//!    │   normalize_path(workspace, path) ─┤ infra::platform              │
+//!    │   ── ~ 展开、相对路径解析、         │ （read_file_utf8 / write_     │
+//!    │      symlink 还原、Win 反斜杠       │  file_atomic 也在这里）       │
+//!    │                                    └──────────────────────────────┘
+//!    │
+//!    │ ② 路径校验（白名单合并）
+//!    │   合法当且仅当 path 落入：
+//!    │     workspace_dir          （隐式根，用户当前工作目录）
+//!    │   ∪ extra_roots            （pi.config.toml [workspace] extra_roots）
+//!    │   ∪ PrimitiveConfig.path_whitelist（运行时显式追加）
+//!    │   未命中 ► AppError::Permission
+//!    │
+//!    │ ③ 用户确认（写类操作 + bash）
+//!    │   confirmation.confirm(op_summary)
+//!    │     ├─ Approve  ► 继续
+//!    │     ├─ Deny     ► AppError::Permission(用户拒绝)
+//!    │     └─ Timeout  ► 视为 Deny
+//!    │   read_file / list_dir 跳过（只读）
+//!    │
+//!    │ ④ 业务执行（按方法分支）
+//!    │   read_file    ► 大小预检（≤ MAX_READ_BYTES=10MB）► read_file_utf8
+//!    │   list_dir     ► std::fs::read_dir → DirEntry 列表
+//!    │   write_file   ► （可选）备份原文件 ► write_file_atomic（写临时 + rename）
+//!    │   edit_file    ► load → apply EditOperation* → diff → 备份 ► atomic 写
+//!    │   execute_bash ► 命令白名单校验 ► tokio::process::Command spawn
+//!    │                  ► （未来：BASH_TIMEOUT_SECS 配合 timeout）
+//!    │
+//!    │ ⑤ 审计落库（无论 Ok / Err）
+//!    │   audit.record_primitive(PrimitiveAuditEntry {
+//!    │     plugin_id, op: AuditPrimitiveOp::*, success, detail, ...
+//!    │   })
+//!    ▼
+//!   Result<T, AppError>
+//! ```
+//!
+//! ## 横切配置
+//!
+//! - `PrimitiveConfig`（来自 [`crate::infra::PrimitiveConfig`]）：路径白名单 +
+//!   命令白名单 + 备份策略。
+//! - `MAX_READ_BYTES = 10 MiB`：read_file 单次读上限，防 OOM。
+//! - `BASH_TIMEOUT_SECS = 30`：bash 默认超时（当前预留，后续接 `tokio::time::timeout`）。
+//! - `workspace_dir` + `extra_roots`：构造时注入，后者来自配置文件，前者来自
+//!   CLI 当前目录，两者并集 ∪ `path_whitelist` 形成最终白名单。
+//!
+//! ## 与同族子模块的边界
+//!
+//! - `super::diff::build_simple_diff`：edit_file 的 diff 文本生成。
+//! - `super::primitives` 与 `super::confirmation`：trait + 用户确认 trait。
+//! - 调用方：`agent_loop::tool_exec::execute_tool` 是唯一直接调用方，所有
+//!   LLM 工具调用都从那里 dispatch 进来。
+
 use crate::core::confirmation::UserConfirmationProvider;
 use crate::core::primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
