@@ -1,7 +1,70 @@
 //! # 全局事件总线 (Event Bus)
 //!
-//! 提供 on/once/off/emit_sync/emit_async/remove_plugin_listeners 等能力；单 listener 抛错或 panic 不中断其他 listener 与主流程。
-//! 事件名使用字符串、snake_case，与 pi-mono 对齐。
+//! 全进程共享的发布/订阅总线：业务侧（agent_loop / chat / dispatcher）emit
+//! 事件，扩展侧（pi-mono / 插件 / TUI / 审计）on 订阅；与 [`super::events`]
+//! 的 enum 配合形成"强类型 emit + 字符串 subscribe"的混合契约。
+//!
+//! ## 五个公共入口
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                                                                          │
+//! │  on(event, cb)         ─► 持久订阅，返回 EventListenerId                 │
+//! │  once(event, cb)       ─► 单次订阅，触发后自动 off                       │
+//! │  off(listener_id)      ─► 显式注销                                       │
+//! │  emit_sync(event, ctx) ─► 立即按 priority 降序逐个调用回调（不阻塞 actor）│
+//! │  emit_async(event, ctx)─► 当前实现转调 emit_sync（保留异步签名以便后续  │
+//! │                            升级到 mpsc + spawn 模型，不破坏调用方）       │
+//! │  remove_plugin_listeners(plugin_id) ─► 插件卸载兜底，按 plugin_id 批量 off│
+//! │                                                                          │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 内部数据结构（双表）
+//!
+//! ```text
+//! ┌─ DefaultEventBus ───────────────────────────────────────────────────────┐
+//! │                                                                          │
+//! │  next_id: AtomicU64                  ── 单调递增，listener_id 全局唯一  │
+//! │                                                                          │
+//! │  listeners: RwLock<HashMap<                                              │
+//! │      event_name: String,              ── snake_case，与 wire 常量一致   │
+//! │      Vec<ListenerEntry { id, plugin_id, priority, once, callback }>     │
+//! │  >>                                                                      │
+//! │                                                                          │
+//! │  id_to_event: RwLock<HashMap<EventListenerId, event_name>>               │
+//! │  ── off 时不需要 O(N×M) 扫全表，O(1) 反查事件名再单 Vec 内 retain        │
+//! │                                                                          │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//!
+//!         emit_sync(event, ctx)
+//!              │
+//!              │ ① RwLock::read(listeners)
+//!              │ ② 取 listeners[event] 并按 priority 降序排
+//!              │ ③ 逐个 catch_unwind(|| cb(ctx.clone()))
+//!              │     ├─ Ok(Ok(_))  ► 继续下一个
+//!              │     ├─ Ok(Err(e)) ► tracing::warn 单条事件错，继续下一个
+//!              │     └─ Err(_)     ► panic 被吞，tracing::warn，继续下一个
+//!              │ ④ 删除 once==true 的项
+//!              ▼
+//!         Result<(), AppError>  ── 永远 Ok，单 listener 失败不外抛
+//! ```
+//!
+//! ## 不变量
+//!
+//! - **隔离性**：单 listener panic / Err 不中断其余回调，业务主流程绝不被订阅者
+//!   拖慢或抛错（`emit_sync` 内部用 `catch_unwind`）。
+//! - **优先级**：`priority` 大者先执行，相同 priority 按注册顺序——保证渲染层
+//!   能比审计层先消费 `MessageUpdate`，UI 不滞后。
+//! - **插件卸载兜底**：`remove_plugin_listeners` 配合 [`crate::ext::plugin::PluginManager::unload_plugin`]
+//!   保证插件 listener 不残留为僵尸订阅。
+//!
+//! ## 与 [`super::events`] 的边界
+//!
+//! - `events/mod.rs`：定义事件 **类型** 与 **wire 字面量**。
+//! - 本文件：负责 **运行时分发**（订阅表 + 触发循环 + panic 隔离）。
+//! - 业务侧 emit 流程：构造 `AgentEvent::Foo` → `serde_json::to_value` →
+//!   `EventContext::new(WIRE_FOO, payload)` → `event_bus.emit_sync(WIRE_FOO, ctx)`。
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
