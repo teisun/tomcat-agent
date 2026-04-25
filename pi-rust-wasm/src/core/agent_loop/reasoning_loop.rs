@@ -118,9 +118,14 @@ pub(super) async fn run_reasoning_loop(
         // ToolExecutionStart → ExtensionEvent::ToolCall → execute_tool →
         // ExtensionEvent::ToolResult → ToolExecutionEnd；cancel 抢占点均保留
         // "先发 End 让 UI 配对再 make_aborted" 的原语义。
-        let dispatch =
-            tool_dispatcher::run_tool_calls(agent, messages, &tool_calls, &content_buf, &final_text)
-                .await?;
+        let dispatch = tool_dispatcher::run_tool_calls(
+            agent,
+            messages,
+            &tool_calls,
+            &content_buf,
+            &final_text,
+        )
+        .await?;
 
         // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
         agent.emit_event(AgentEvent::TurnEnd {

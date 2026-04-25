@@ -177,11 +177,7 @@ impl AgentLoop {
     ///
     /// 签名为 `&self`（仅读 `start_idx`），允许在 `tokio::select!` 内 `&agent.primitive`
     /// 共享借用之后立即调用，无需先 drop primitive 借用。
-    pub(super) fn make_aborted(
-        &self,
-        messages: &[ChatMessage],
-        partial_text: String,
-    ) -> LoopError {
+    pub(super) fn make_aborted(&self, messages: &[ChatMessage], partial_text: String) -> LoopError {
         LoopError::Aborted {
             partial_text,
             partial_messages: messages[self.start_idx..].to_vec(),
