@@ -1,3 +1,68 @@
+//! # PluginManager 插件生命周期管理
+//!
+//! WASM 插件的全生命周期管理器：从磁盘加载 manifest + 主脚本（TS→QuickJS），
+//! 注册到内存表，按需启用/禁用，会话级启动专属 VmActor 并桥接 hostcall，
+//! 卸载时清理所有副作用（EventBus listeners / ToolRegistry / VM / async 票据）。
+//!
+//! ## 状态机
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                                                                          │
+//! │  ① 磁盘                                                                  │
+//! │   plugin/                                                                │
+//! │   ├─ pi-plugin.json    ─┐                                                │
+//! │   └─ <main>.{ts,js,wasm}┴──► load_plugin(path)                           │
+//! │                                  │ resolve_manifest_and_root             │
+//! │                                  │ read_main_script + transpile_ts      │
+//! │                                  ▼                                      │
+//! │  ② Loaded   ──────► register_plugin(PluginInstance) ──┐                  │
+//! │   plugins[id] = { Loaded, manifest, ... }              │                 │
+//! │                                                         ▼                │
+//! │  ③ Enabled  ◄── enable_plugin(id) ──── 设 status=Enabled，未起 VM        │
+//! │                                                         │                │
+//! │                       start_session_vm(plugin_id, sid)  │                │
+//! │                                                         ▼                │
+//! │  ④ Active   VmActor + VmActorHandle 注册到 plugins[id].sessions[sid]    │
+//! │                ├─ wasm_engine 创建 instance                              │
+//! │                ├─ host_dispatcher 注册 EventChannel                       │
+//! │                └─ confirm_permissions 询问敏感能力                        │
+//! │                                                         │                │
+//! │              dispatch_session_event ─► VmCommand ─► VmActor ─► JS 钩子   │
+//! │                                                         │                │
+//! │                       end_session(sid)                  │                │
+//! │                                                         ▼                │
+//! │  ③ Enabled  会话 VM 退出，plugin 仍 Enabled 待下个 session                │
+//! │                                                                          │
+//! │  ⑤ Disabled ◄── disable_plugin(id) ──┐                                   │
+//! │                                       │                                   │
+//! │                  unload_plugin(id) ──┴──► 移除 plugins[id] + 全副作用清理 │
+//! │                  ├─ event_bus.remove_plugin_listeners(id)                │
+//! │                  ├─ tools.unregister_plugin_tools(id)                    │
+//! │                  ├─ host_dispatcher.cleanup_instance(id)                 │
+//! │                  └─ runtime_manager.evict(VmRuntimeKey)                  │
+//! │                                                                          │
+//! └─────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## 6 个可注入依赖（构造后 set_*）
+//!
+//! | 字段                  | 用途                                      |
+//! | --------------------- | ----------------------------------------- |
+//! | `tools`               | `ToolRegistry`：注册/注销插件工具         |
+//! | `audit`               | `AuditRecorder`：插件生命周期审计         |
+//! | `wasm_engine`         | `WasmEngine`：WASM 实例化与 host_func 注册 |
+//! | `host_dispatcher`     | `HostApiDispatcher`：插件→宿主 hostcall    |
+//! | `confirm_permissions` | 敏感权限交互回调（CLI / TUI 二选一）       |
+//! | `runtime_manager`     | 复用 QuickJS / WASM 实例池                |
+//!
+//! ## 与同族子模块的边界
+//!
+//! - **本文件**：生命周期 + 实例表 + 事件分发入口。
+//! - `types.rs`：`PluginInstance` / `PluginManifest` / `PluginStatus` / `PluginInfo`。
+//! - 跨 actor：`vm_actor::{VmActor, VmCommand, EventEnvelope}` 提供单插件单 VM 的
+//!   消息隔离；`runtime_manager` 跨插件共享 QuickJS / WASM engine。
+
 use super::types::{
     ConfirmPermissionsFn, PluginInfo, PluginInstance, PluginManifest, PluginStatus,
 };
