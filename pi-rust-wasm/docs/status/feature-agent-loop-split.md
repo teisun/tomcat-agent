@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Jerry | 2026-04-25 | DOING | feature/agent-loop-split | - |
+| @Jerry | 2026-04-25 | PENDING_INTEGRATION | feature/agent-loop-split | - |
 
 ## T2-P0-001 | agent-loop-modularization | Agent Loop 模块化拆分
 
@@ -33,6 +33,9 @@
 - [x] **[Phase 4]** cargo test --lib core::agent_loop:: 26/26 通过（22 原有 + 4 新增焦小测，无回归）
 - [x] **[Phase 3-4]** cargo clippy --all-targets -D warnings 全绿
 - [x] **[Phase 5]** status 文件登记 ext/dispatcher 现状决策（不改代码）
+- [x] **[Gates]** cargo fmt --all -- --check 全绿
+- [x] **[Gates]** cargo clippy --all-targets -- -D warnings 全绿
+- [x] **[Gates]** cargo test --lib (--test-threads=1) 436/436 通过、1 ignored（默认并发模式下 2 个用例因共享 `~/.pi_/assets/.lock` 与 chdir 资源竞争 flaky，与本次拆分无关；详见下方测试门禁记录）
 
 ### 🔌 INTERFACE (接口变更 / 已落地)
 
@@ -154,3 +157,8 @@ src/ext/dispatcher/
 | Phase 3 | `cargo test --lib core::agent_loop::` | 22/22 |
 | Phase 4 | `cargo clippy --all-targets -- -D warnings` | 通过 |
 | Phase 4 | `cargo test --lib core::agent_loop::` | 26/26（含 4 焦小测） |
+| Gates | `cargo fmt --all -- --check` | 通过（accessors / reasoning_loop 行宽对齐已合入 080cb07） |
+| Gates | `cargo clippy --all-targets -- -D warnings` | 通过 |
+| Gates | `cargo test --lib core::agent_loop::` | 26/26 |
+| Gates | `cargo test --lib -- --test-threads=1` | 436/436、1 ignored ✅ |
+| Gates | `cargo test --lib`（默认并发） | 434/2 失败：`api::cli::tests::run_doctor_after_init_returns_ok`、`core::executor::tests::list_dir_path_in_blacklist_returns_err` —— 共享 `~/.pi_/assets/.lock` 与测试间 chdir 竞争导致的预存在 flaky，串行模式下两者均通过；与本次 agent_loop 拆分无任何代码相关 |
