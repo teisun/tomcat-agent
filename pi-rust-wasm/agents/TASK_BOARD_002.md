@@ -105,24 +105,26 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `DOING` |
+| **状态** | `PENDING_INTEGRATION` |
 | **负责人** | Jerry |
 | **分支** | `feature/agent-loop-split` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-018`、`#T-019` |
 | **关联报告** | [plan-mode-execution-playbook-T2-P0-001.md](../docs/reports/plan-mode-execution-playbook-T2-P0-001.md) — Cursor PLAN 模式执行步骤复盘（Phase A-F SOP）|
+| **状态文档** | [feature-agent-loop-split.md](../docs/status/feature-agent-loop-split.md) |
 | **计划文档** | `~/.cursor/plans/agent-loop-modularization_e99e067f.plan.md` |
 
 **目标**：把 832 行的 `src/core/agent_loop/run.rs` 拆为可独立测试的子模块，并为 `src/ext/dispatcher/` 做对等拆分，消除核心循环的维护阻力。
 
 **子项**：
-- [ ] 新建 `src/core/agent_loop/dispatcher.rs`：消息调度 / tool call 路由
-- [ ] 新建 `src/core/agent_loop/tool_exec.rs`：工具执行与结果回注
-- [ ] 新建 `src/core/agent_loop/stream_handler.rs`：`chat_stream` delta 处理 + `ToolCallDelta`
-- [ ] 新建 `src/core/agent_loop/error_classifier.rs`：Retryable / Fatal / ToolError 分类
-- [ ] `run.rs` 保留三层循环骨架 ≤ 300 行
-- [ ] 补独立 `tests.rs` 子模块单测（遵循 [RUST_FILE_LINES_SPEC.md §A](../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)，业务源文件不内联 `#[cfg(test)] mod tests {...}`），覆盖 Steering / FollowUp / Abort 注入时序
-- [ ] `src/ext/dispatcher/` 子模块化（消息分发 / hostcall / audit）
+- [x] 新建 `src/core/agent_loop/tool_dispatcher.rs`：tool_calls 调度 + 事件配对（207 行）
+- [x] 新建 `src/core/agent_loop/tool_exec.rs`：7 分支工具执行自由函数（151 行）
+- [x] 新建 `src/core/agent_loop/stream_handler.rs`：`chat_stream` delta 消费 + StreamOutcome（166 行）
+- [x] 新建 `src/core/agent_loop/error_classifier.rs`：Retryable / Fatal 分类 + L3 overflow trim（246 行）
+- [x] 新建 `src/core/agent_loop/{accessors,turn_finalize,reasoning_loop}.rs`：访问器/收束/第三层循环
+- [x] `run.rs` 保留 Conversation + Attempt 骨架（**213 行** ≤ 300 红线）
+- [x] 独立 `tests/` 子目录（mocks / classify / run_basic / events_order / steering_followup / metrics / interrupt / submodules 共 8 文件 + 26 用例）；遵循 [RUST_FILE_LINES_SPEC.md §A](../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)，业务源文件不内联 `#[cfg(test)] mod tests {...}`
+- [-] `src/ext/dispatcher/` 子模块化：经计划阶段评估**不在本任务内重构**（dispatch.rs 390 / ops.rs 345 / session_ops.rs 374 处于黄区下沿但未触红，且二次拆分会破坏"路由大表一处可见"的可读性）；详见 [feature-agent-loop-split.md §ext/dispatcher 现状决策](../docs/status/feature-agent-loop-split.md)，建议作为独立 ticket 在突破 450 行时再处理
 
 **依赖**：归档 001-mvp 中的 TASK-14（DONE）
 
@@ -702,3 +704,4 @@ flowchart LR
 | 2026-04-22 | 认领 T2-P0-007 | Spike 认领（TODO→DOING），破例绕过 T2-P0-001 / T2-P0-003 依赖（见阻塞点）；计划 `interruptible_agent_loop_c77e96ab.plan.md` 经用户确认后进入开发 |
 | 2026-04-23 | T2-P0-007 DOING→PENDING_INTEGRATION | Spike 完成 T-003 / T-004 / T-017 + T-007 最小版；全量门禁 `cargo build --all-targets`、`cargo clippy -- -D warnings`、`cargo fmt -- --check`、`cargo test --lib` (432/432) 与 `cargo test --test '*'` (含 cli_tests 77 / wasmedge_e2e_tests 39) 全绿；impact-scan 实际**未修改** `PrimitiveExecutor::execute_bash` trait 签名（零 mock 改动）；架构文档 `interrupt-and-cancellation.md` 定稿，E2E-CLI-062 / E2E-CLI-063 登记到场景库；待 Nibbles 集成复核 |
 | 2026-04-23 | T2-P0-007 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/interrupt-resume` @ `a0c6260` `--no-ff` 合并入 develop（merge commit `3518089`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test --lib`（432/432）+ `cargo test --test '*'`（含 cli_tests 77 / wasmedge_e2e_tests 39）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（预警留痕：`run.rs` 948、`preheat.rs` 646、`chat/mod.rs` 502 落入 500–1000 黄金区上沿）；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |
+| 2026-04-25 | T2-P0-001 DOING→PENDING_INTEGRATION | Jerry 完成 agent_loop 模块化拆分：`run.rs` 948 → 213 行；新增 `error_classifier` / `stream_handler` / `tool_exec` / `tool_dispatcher` / `accessors` / `turn_finalize` / `reasoning_loop` 七个子模块；`tests.rs` 1277 行拆为 `tests/` 子目录 8 文件 26 用例（含 4 个直查 `pub(super)` 子模块的焦小测）；门禁 `cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test --lib --test-threads=1`（436/436、1 ignored）全绿；并发模式下 `api::cli::tests::run_doctor_after_init_returns_ok` / `core::executor::tests::list_dir_path_in_blacklist_returns_err` 因共享 `~/.pi_/assets/.lock` + chdir 资源竞争 flaky，与本次拆分无关，串行通过；外部 API + 事件顺序契约完全保持；`src/ext/dispatcher/` 经评估暂不重构（详见 status 文件决策段）；待 Nibbles 集成复核 |
