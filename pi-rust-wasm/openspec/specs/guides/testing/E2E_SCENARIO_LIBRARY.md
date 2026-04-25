@@ -139,7 +139,7 @@
 
 ## Story 8 — CLI 对话与会话管理（13 条）
 
-> **验收**：会话与审计子命令以自动化为主；058 涉及 chat 失败路径，可与 §4「对话模式」人工清单一并 spot-check；062/063（Ctrl+C 软/硬中断）数据契约由 `src/core/agent_loop/tests.rs`（中断路径）+ `src/api/chat/tests.rs::interrupt_persists_transcript_hard_ack`（T-017 partial 落盘）+ `src/api/cli/chat_cmd::check_double_tap` 单测锁定，终端观感由 §4 人工清单补验。
+> **验收**：会话与审计子命令以自动化为主；058 涉及 chat 失败路径，可与 §4「对话模式」人工清单一并 spot-check；062/063（Ctrl+C 软/硬中断）数据契约由 `src/core/agent_loop/tests/interrupt.rs`（中断路径，T2-P0-001 后由原单文件 `tests.rs` 拆分目录化）+ `src/api/chat/tests.rs::interrupt_persists_transcript_hard_ack`（T-017 partial 落盘）+ `src/api/cli/chat_cmd::check_double_tap` 单测锁定，终端观感由 §4 人工清单补验。
 
 
 | 编号          | 验收 | 用例名                                                     | 用户意图                      | 操作序列                                                       | 必须断言                            |

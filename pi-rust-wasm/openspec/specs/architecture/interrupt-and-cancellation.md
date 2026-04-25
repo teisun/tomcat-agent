@@ -568,7 +568,7 @@ pub enum AgentEvent {
  │    • 返回 LoopError::Aborted { partial_text, partial_messages }          │
  │    • run() 翻译成 AgentRunOutcome::Interrupted 向上返回                  │
  │                                                                          │
- │  [agent_loop/tests.rs]  ← 中断 stream / 中断工具间隙 / token 重建 3 组   │
+ │  [agent_loop/tests/interrupt.rs] ← 中断 stream / 中断工具间隙 / token 重建│
  └──────────────────────────────────────────────────────────────────────────┘
                                     │
         ③ 选择了 execute_tool 取消分支时，execute_tool future 被 drop

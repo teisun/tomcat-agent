@@ -105,7 +105,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `feature/agent-loop-split` |
 | **阻塞点** | — |
@@ -705,3 +705,4 @@ flowchart LR
 | 2026-04-23 | T2-P0-007 DOING→PENDING_INTEGRATION | Spike 完成 T-003 / T-004 / T-017 + T-007 最小版；全量门禁 `cargo build --all-targets`、`cargo clippy -- -D warnings`、`cargo fmt -- --check`、`cargo test --lib` (432/432) 与 `cargo test --test '*'` (含 cli_tests 77 / wasmedge_e2e_tests 39) 全绿；impact-scan 实际**未修改** `PrimitiveExecutor::execute_bash` trait 签名（零 mock 改动）；架构文档 `interrupt-and-cancellation.md` 定稿，E2E-CLI-062 / E2E-CLI-063 登记到场景库；待 Nibbles 集成复核 |
 | 2026-04-23 | T2-P0-007 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/interrupt-resume` @ `a0c6260` `--no-ff` 合并入 develop（merge commit `3518089`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test --lib`（432/432）+ `cargo test --test '*'`（含 cli_tests 77 / wasmedge_e2e_tests 39）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（预警留痕：`run.rs` 948、`preheat.rs` 646、`chat/mod.rs` 502 落入 500–1000 黄金区上沿）；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |
 | 2026-04-25 | T2-P0-001 DOING→PENDING_INTEGRATION | Jerry 完成 agent_loop 模块化拆分：`run.rs` 948 → 213 行；新增 `error_classifier` / `stream_handler` / `tool_exec` / `tool_dispatcher` / `accessors` / `turn_finalize` / `reasoning_loop` 七个子模块；`tests.rs` 1277 行拆为 `tests/` 子目录 8 文件 26 用例（含 4 个直查 `pub(super)` 子模块的焦小测）；门禁 `cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test --lib --test-threads=1`（436/436、1 ignored）全绿；并发模式下 `api::cli::tests::run_doctor_after_init_returns_ok` / `core::executor::tests::list_dir_path_in_blacklist_returns_err` 因共享 `~/.pi_/assets/.lock` + chdir 资源竞争 flaky，与本次拆分无关，串行通过；外部 API + 事件顺序契约完全保持；`src/ext/dispatcher/` 经评估暂不重构（详见 status 文件决策段）；待 Nibbles 集成复核 |
+| 2026-04-25 | T2-P0-001 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/agent-loop-split` @ `28b74dd` `--no-ff` 合并入 develop（merge commit `45c43b6`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test -j 1 --lib --test-threads=1`（436/436、1 ignored）+ `cargo test -j 1 --test '*' --test-threads=1`（agent_loop_tests 11 / cli_tests 77 / context_management_tests 19 / wasmedge_e2e_tests 39 等共 195 用例）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（业务文件最大 246 行，全部 ≤ 300 红线）；规格漂移已就地补齐：`openspec/specs/architecture/interrupt-and-cancellation.md` 与 `E2E_SCENARIO_LIBRARY.md` 中对原 `agent_loop/tests.rs` 单文件的引用改为 `agent_loop/tests/interrupt.rs`；外部 API + 事件顺序契约完全保持；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |

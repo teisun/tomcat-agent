@@ -1,6 +1,92 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-04-23 22:41 | INTEGRATED | develop | — |
+| Nibbles | 2026-04-25 19:42 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-001 agent-loop-modularization（Agent Loop 模块化拆分）
+
+**合并信息**
+
+- 源分支：`feature/agent-loop-split` @ `28b74dd`（17 commits）
+- 合并 commit：`45c43b6 merge(T2-P0-001): feature/agent-loop-split → develop (agent_loop 模块化拆分 / run.rs 948→213 行)`
+- 合并策略：`--no-ff`，ort 3-way 无冲突（merge-base = 本地 develop HEAD `406fd14`，严格后代）
+- 负责任务：T2-P0-001（Jerry 交付，Nibbles 集成复核）
+- 覆盖文件：31 个，+3656 / -2164 行
+
+**§1 规格 & 场景库核对**
+
+- `User_Stories.md` / `E2E_SCENARIO_LIBRARY.md`：本次为纯内部模块化拆分，**无新增用户可见行为**，故事编号与 Story 9 AgentLoop 既有断言均保持。
+- **修复 2 处合并引入的规格漂移**（`tests.rs` 单文件 → `tests/` 子目录）：
+  - `openspec/specs/architecture/interrupt-and-cancellation.md:571` — ASCII 全景图中的 `[agent_loop/tests.rs]` 改为 `[agent_loop/tests/interrupt.rs]`
+  - `openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md:142` — E2E-CLI-062/063 数据契约引用改为 `src/core/agent_loop/tests/interrupt.rs`，并标注 T2-P0-001 拆分溯源
+
+**§2 集成测试 review（重点核 agent_loop 拆分）**
+
+- 业务文件 ≤ 300 行：`accessors.rs` 186、`error_classifier.rs` 246、`mod.rs` 141、`reasoning_loop.rs` 147、`run.rs` 256、`stream_handler.rs` 166、`tool_dispatcher.rs` 207、`tool_exec.rs` 151、`turn_finalize.rs` 113、`types.rs` 241。最大 246 行，红线 300，**全部黄区或绿区**。
+- `tool_dispatcher.rs` 五段事件配对严格保持：`ToolExecutionStart` → `ExtensionEvent::ToolCall` → `tool_exec::execute_tool` await → `ExtensionEvent::ToolResult` → `ToolExecutionEnd`；cancel 抢占分支补发 `ToolExecutionEnd { is_error=true, result="[interrupted]" }` 配平 UI；`block_tool_calls` 短路与 `steering break` 语义一致。
+- 4 个新增焦小测全部命中 `pub(super)` 子模块且断言强：
+  - `handle_overflow_retry_skipped_when_not_overflow`：`!stats.applied`
+  - `handle_overflow_retry_skipped_when_no_context_state`：`!stats.applied` + `messages.len() == 1` 未触
+  - `tool_exec_unknown_tool_returns_is_error`：`is_error == true`
+  - `tool_exec_read_file_returns_content`：`is_error == false` + path 注入校验
+- 无 `#[ignore]`、无 panic-only、无放宽阈值。
+
+**§3 E2E review**
+
+- `tests/cli_tests.rs` / `tests/wasmedge_e2e_tests.rs` 仅通过 `AgentEvent::*` / `WIRE_*` 间接消费 `core::agent_loop`，对外 API 仅 6 个类型从 `types.rs` 导出（`AgentLoop` / `AgentLoopConfig` / `AgentRunOutcome` / `AgentRunResult` / `LoopError` / `ToolCallInfo`），契约稳定。
+
+**§4 全量门禁**
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | ✅ 2m26s |
+| `cargo clippy --all-targets -- -D warnings` | ✅ 零警告 |
+| `cargo test -j 1 --lib -- --test-threads=1` | ✅ **436 passed; 0 failed; 1 ignored**（与分支侧记录一致） |
+| `cargo test -j 1 --test '*' -- --test-threads=1`（含 .env 注入） | ✅ **195 passed; 0 failed; 0 ignored** |
+
+集成 / E2E 各 crate 明细：
+
+| crate | 结果 |
+| :--- | :--- |
+| `agent_loop_tests` | 11/11 |
+| `audit_tests` | 1/1 |
+| `cli_tests` | **77/77**（72.82s） |
+| `context_management_tests` | 19/19 |
+| `event_tests` | 4/4 |
+| `hostcall_tests` | 5/5 |
+| `js_api_alignment_tests` | 2/2 |
+| `llm_tests` | 2/2 |
+| `long_lived_vm_tests` | 13/13 |
+| `plugin_tests` | 3/3 |
+| `primitives_tools_tests` | 10/10 |
+| `robustness_tests` | 5/5 |
+| `session_tests` | 4/4 |
+| `wasmedge_e2e_tests` | **39/39**（74.92s） |
+
+**编码规范家族对照**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | ✅ 通过 | 模块化拆分仅作分层细化，`AgentLoop::run` / `new` / `steer` / `follow_up` / `abort` / `cancel_token` / `set_context_state` / `take_context_state` 签名与行为不变；新增 `pub(super)` 子模块 `error_classifier` / `stream_handler` / `tool_exec` / `tool_dispatcher` / `accessors` / `turn_finalize` / `reasoning_loop` 仅模块内部可见；事件顺序契约逐项保持；错误仍走 `LoopError::*`；无新增对外 API。 |
+| `RUST_FILE_LINES_SPEC.md` | ✅ 通过 | 业务文件 113–256 行，最大 `error_classifier.rs` 246、`run.rs` 256，均黄区（≤300 红线）。`tests/` 子目录共 8 文件 1524 行，按 §A 显式排除业务红线（独立测试文件）。无内联 `#[cfg(test)] mod tests {...}`。 |
+| `RUST_IDIOMS_SPEC.md` | ✅ 通过 | `cargo clippy --all-targets -- -D warnings` 零警告。 |
+| `COMMENT_SPEC.md` | ✅ 通过 | 每个新模块顶部均含「为什么 / 责任边界 / 调用关系」doc 注释（参见 `tool_dispatcher.rs:1-17`、`accessors.rs`、`reasoning_loop.rs`、`turn_finalize.rs` 顶部）。 |
+
+**`src/ext/dispatcher/` 不重构决策复核**
+
+- 业务文件 38–390 行（`dispatch.rs` 390 / `ops.rs` 345 / `session_ops.rs` 374），处于黄区下沿但**距 500 红线尚有空间**，路由大表「一处可见」对可读性收益更大；与 [`feature-agent-loop-split.md` §ext/dispatcher 现状决策](./feature-agent-loop-split.md) 一致，本次集成**不动**。
+- 后续触发条件：当 `dispatch.rs` 突破 450 行时，按「输入解析 / 路由 / 响应封装」三段式拆 `route.rs` + `decode.rs` + `encode.rs`，单独立 ticket。
+
+**时间 / 环境**
+
+- 主机：macOS Darwin 22.6.0；Rust toolchain：项目固定（rust-toolchain.toml）。
+- `.env` 提供 `OPENAI_API_KEY` + `HTTPS_PROXY`，`cli_tests` / `llm_tests` 真实联网通过。
+- WasmEdge stderr 偶现 `Code: 0x8d`（VM cleanup 阶段宿主调用返回错误）属于已知良性，harness 仍判 `ok`。
+
+**结论**
+
+T2-P0-001 集成验收**全部通过**：合并 `--no-ff` 无冲突；规格漂移已就地补齐；编码规范家族四件套核查通过；外部 API + 事件顺序契约完全保持；门禁全绿（lib 436、集成+E2E 195）。
+
+---
 
 ### 集成测试报告 — T2-P0-007 interrupt-resume-transcript（中断/恢复 + transcript 完整性）
 
