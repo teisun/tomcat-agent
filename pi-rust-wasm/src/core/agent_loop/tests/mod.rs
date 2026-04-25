@@ -1,0 +1,30 @@
+//! # `agent_loop::tests` 测试目录
+//!
+//! Phase 4 把原 `tests.rs`（1277 行，超超超红区）按主题拆为同名子 mod；
+//! 每个文件 ≤ 350 行，覆盖一组语义相关的测试用例。`mocks.rs` 集中所有
+//! `LlmProvider` / `PrimitiveExecutor` 测试替身，子 mod 通过 `use super::mocks::*;`
+//! 复用，避免散落在多文件中。
+//!
+//! ## 测试组织
+//!
+//! - `mocks`：MockLlmProvider / MockLlmProviderFatal / MockPrimitiveExecutor /
+//!   SleepyMockPrimitive / SteerableMockPrimitive。
+//! - `classify`：`error_classifier::classify_error` 4 个等价类断言。
+//! - `run_basic`：text-only / 重试 / 工具循环 / 空消息 4 个基础正向测试。
+//! - `events_order`：wire 事件全序列 + Fatal 终结 + chat_stream Err 分类。
+//! - `steering_followup`：Steering 跳过剩余工具 + FollowUp 第二轮上下文。
+//! - `metrics`：5 个 ContextMetricsUpdate 用例（顺序 / payload / 多轮累计 /
+//!   无 ctx 跳过 / 纯文本路径）。
+//! - `interrupt`：Abort / 工具间中断 / 流式中断 partial / token 重建 4 个
+//!   T-003/T-004/T-017 硬验收。
+//! - `submodules`：直接调用 `pub(super)` 子模块函数的焦小测
+//!   （handle_overflow_retry / execute_tool）。
+
+mod classify;
+mod events_order;
+mod interrupt;
+mod metrics;
+mod mocks;
+mod run_basic;
+mod steering_followup;
+mod submodules;
