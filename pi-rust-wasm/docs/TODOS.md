@@ -403,6 +403,10 @@
 - [ ] **[P0] `[UX]`** `#T-037` 无法在规划中执行 pi 命令
   - 档位：T2-P0-005
 
+- [ ] **[P0] `[UX]`** `#T-147` 增加一个工具 `ASK_Question`
+  - 目标：支持智能体在流程中向用户发起结构化提问/确认
+  - 档位：待映射（工具系统能力增强）
+
 - [x] **[已实现]** `#T-038` Agent 不知道自己有什么工作目录
   - **核对 2026-04-19**：`WorkspaceContextSection` 注入 `Current working directory: {workspace_dir}`
 
