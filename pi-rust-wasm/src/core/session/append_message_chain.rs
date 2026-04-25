@@ -203,4 +203,5 @@ fn has_nonempty_tool_calls(msg: &Value) -> bool {
 }
 
 #[cfg(test)]
+#[path = "tests/append_message_chain.rs"]
 mod tests;

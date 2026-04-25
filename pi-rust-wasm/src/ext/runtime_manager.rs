@@ -86,6 +86,3 @@ impl Default for RuntimeManager {
 
 /// 线程安全的共享 RuntimeManager。
 pub type SharedRuntimeManager = Arc<RuntimeManager>;
-
-#[cfg(test)]
-mod tests;

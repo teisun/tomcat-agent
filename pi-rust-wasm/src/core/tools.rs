@@ -166,6 +166,3 @@ impl ToolRegistry for DefaultToolRegistry {
             .retain(|k, _| !k.starts_with(&key_prefix));
     }
 }
-
-#[cfg(test)]
-mod tests;

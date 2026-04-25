@@ -232,6 +232,3 @@ impl VmActor {
         &self.event_rx
     }
 }
-
-#[cfg(test)]
-mod tests;

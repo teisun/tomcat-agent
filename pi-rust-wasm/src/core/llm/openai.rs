@@ -359,7 +359,7 @@ impl LlmProvider for OpenAiProvider {
 
 /// 将 Bytes 流解析为 StreamEvent 流；缓冲 SSE 行，按 "data: {...}\n\n" 解析。
 /// 调用方可通过 drop 提前结束流以释放连接；流式超时可由上层消费时用 tokio::time::timeout 包裹。
-struct SseEventStream<S> {
+pub(super) struct SseEventStream<S> {
     inner: S,
     buffer: Vec<u8>,
     /// 已解析待输出的事件队列（同一 chunk 可能解析出多个事件）。
@@ -367,7 +367,7 @@ struct SseEventStream<S> {
 }
 
 impl<S> SseEventStream<S> {
-    fn new(inner: S) -> Self {
+    pub(super) fn new(inner: S) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
@@ -465,7 +465,7 @@ fn parse_sse_buffer(
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-struct OpenAiStreamChunk {
+pub(super) struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
     usage: Option<TokenUsage>,
 }
@@ -499,7 +499,7 @@ struct OpenAiStreamFunctionDelta {
     arguments: Option<String>,
 }
 
-fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
+pub(super) fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     if let Some(choices) = chunk.choices {
@@ -539,6 +539,3 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
 
     events
 }
-
-#[cfg(test)]
-mod tests;

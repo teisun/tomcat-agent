@@ -15,3 +15,6 @@ pub use transcript::{
     remove_branch_summary_entry_by_id, set_branch_summary_entry_is_boundary_true, write_header,
     BranchSummaryEntry, MessageEntry, SessionHeader, TranscriptEntry,
 };
+
+#[cfg(test)]
+mod tests;

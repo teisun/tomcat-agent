@@ -59,4 +59,5 @@ impl WasmEngine {
 }
 
 #[cfg(test)]
+#[path = "tests/engine_stub.rs"]
 mod tests;

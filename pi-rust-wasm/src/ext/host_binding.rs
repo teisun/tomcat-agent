@@ -100,6 +100,3 @@ pub fn invoke_host_func_with(
         None => Ok(HostResponse::ok(serde_json::json!({ "stub": true }))),
     }
 }
-
-#[cfg(test)]
-mod tests;

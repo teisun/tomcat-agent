@@ -28,3 +28,6 @@ pub use plugin::{
 };
 pub use runtime_manager::{RuntimeManager, SharedRuntimeManager, VmRuntimeKey};
 pub use vm_actor::{EventEnvelope, VmActorHandle, VmActorState, VmCommand};
+
+#[cfg(test)]
+mod tests;

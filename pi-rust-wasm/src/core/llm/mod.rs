@@ -17,3 +17,6 @@ pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse,
     ChatResponseChoice, MessageKind, StreamEvent, TokenUsage,
 };
+
+#[cfg(test)]
+mod tests;

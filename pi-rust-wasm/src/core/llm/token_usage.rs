@@ -19,6 +19,3 @@ impl SessionTokenUsage {
         self.output_tokens += u64::from(completion_tokens);
     }
 }
-
-#[cfg(test)]
-mod tests;

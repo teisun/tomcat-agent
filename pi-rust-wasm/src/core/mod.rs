@@ -31,3 +31,6 @@ pub use session::{
     SessionManager, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use tools::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};
+
+#[cfg(test)]
+mod tests;

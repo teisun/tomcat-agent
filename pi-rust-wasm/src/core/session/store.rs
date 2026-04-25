@@ -65,6 +65,3 @@ pub fn save_store(path: &Path, store: &SessionStore) -> Result<(), AppError> {
     let content = serde_json::to_string_pretty(store)?;
     write_file_atomic(path, content.as_bytes())
 }
-
-#[cfg(test)]
-mod tests;

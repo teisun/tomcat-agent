@@ -285,6 +285,3 @@ fn make_var_stmt(name: Pat, init: Expr) -> ModuleItem {
         }],
     }))))
 }
-
-#[cfg(test)]
-mod tests;

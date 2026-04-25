@@ -50,6 +50,3 @@ impl UserConfirmationProvider for DenyAllConfirmation {
         Ok(false)
     }
 }
-
-#[cfg(test)]
-mod tests;

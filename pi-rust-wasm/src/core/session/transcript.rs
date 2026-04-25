@@ -598,6 +598,3 @@ pub fn get_branch(
     branch.reverse();
     Ok(branch)
 }
-
-#[cfg(test)]
-mod tests;

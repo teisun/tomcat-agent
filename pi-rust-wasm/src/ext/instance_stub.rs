@@ -43,6 +43,3 @@ impl WasmInstance {
     /// 销毁实例，释放资源（桩：无操作）。
     pub fn destroy(self) {}
 }
-
-#[cfg(test)]
-mod tests;

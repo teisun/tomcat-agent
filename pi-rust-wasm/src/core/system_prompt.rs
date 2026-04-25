@@ -148,6 +148,3 @@ impl SystemPromptSection for WorkspaceContextSection {
 pub fn build_system_prompt(workspace_dir: &str) -> String {
     SystemPromptBuilder::default().build(workspace_dir)
 }
-
-#[cfg(test)]
-mod tests;

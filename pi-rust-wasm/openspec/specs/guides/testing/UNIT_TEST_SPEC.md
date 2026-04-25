@@ -36,7 +36,7 @@
 
 ## 3. 测试分类与目录
 
-- **单元测试**：**必须**放在**独立 `tests.rs` 文件**中（业务文件**禁止内联** `#[cfg(test)] mod tests { ... }`），覆盖私有方法、核心算法、纯函数；不应依赖外部网络，耗时低。组织方式与目录布局以 [RUST_FILE_LINES_SPEC.md §A](../coding/RUST_FILE_LINES_SPEC.md) 为准——典型做法是在 `foo.rs` 同级建 `foo/tests.rs`，并在 `foo.rs` 中通过 `#[cfg(test)] mod tests;` 引入。
+- **单元测试**：**必须**放在「父目录模块」（含 `mod.rs` 的目录或 crate root）的 `tests/` 子目录中，采用 `<dir>/tests/mod.rs` + `<dir>/tests/<file>[_<topic>].rs`（业务文件**禁止内联** `#[cfg(test)] mod tests { ... }`），覆盖私有方法、核心算法、纯函数；不应依赖外部网络，耗时低。组织方式与目录布局以 [RUST_FILE_LINES_SPEC.md §A](../coding/RUST_FILE_LINES_SPEC.md) 为唯一权威：父目录模块入口（`mod.rs` / crate root）声明 `#[cfg(test)] mod tests;`，被测业务子文件不再自带 `mod tests;`；**禁止**在单文件 `foo.rs` 旁开 `foo/tests/` 空壳目录，也禁止 `foo/tests.rs`、`foo_tests.rs` 等逃避通道。**测私有项**（私有 `fn` / 字段 / `const`）必须按 [RUST_FILE_LINES_SPEC §A 第 9 条](../coding/RUST_FILE_LINES_SPEC.md) 走 `#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;` 挂载（测试文件物理位置不变，仅模块系统挂回被测源文件下），**禁止**为测试在业务源文件提升可见性（`pub(super)` / `pub(crate)`）。
 - **集成测试**：`tests/` 目录，覆盖公开 API、多模块协作、真实外部服务；需覆盖主业务链路。
 
 ---
@@ -76,7 +76,7 @@
 - **同步测试**：`#[test]`；**异步测试**：统一 `#[tokio::test]`（需 `tokio` 的 `rt`、`macros` 等 feature）。
 - **依赖**：仅测试用的 crate（如 `dotenvy`、`wiremock`、`insta`）放在 `[dev-dependencies]`，避免污染主依赖。
 - **全局状态**：避免在测试中无谓修改全局环境（如 `std::env::set_var`）影响其他用例；必要时在用例内恢复或使用 `temp_env` 等隔离手段。
-- **模块组织**：单元测试**必须**放在**独立 `tests.rs` 文件**中（如 `user.rs` → `user/tests.rs`，父模块 `mod tests;` 引入），**禁止**在业务源文件底部内联 `#[cfg(test)] mod tests { ... }`；测试体量大时可进一步拆为 `foo/tests/` 子目录。集成测试放 `tests/` 顶层目录；性能测试放 `benches/` 用 criterion。详见 [RUST_FILE_LINES_SPEC.md §A](../coding/RUST_FILE_LINES_SPEC.md)（本规范是业务与测试代码分离的权威来源）。
+- **模块组织**：单元测试必须采用「父目录模块 tests/ 目录化」结构 `<dir>/tests/mod.rs` + `<dir>/tests/<file>[_<topic>].rs`（父目录模块入口声明 `#[cfg(test)] mod tests;` 引入），**禁止**在业务源文件底部内联 `#[cfg(test)] mod tests { ... }`，也禁止 `foo/tests.rs`、`foo_tests.rs`、单文件 `foo.rs` 旁开同名 `foo/tests/` 等任何逃避通道。小模块最少使用 `tests/mod.rs` + 一个 `tests/<file>.rs`（topic 建议同被测子文件名）；大模块按主题拆分并可抽 `tests/mocks.rs`。**测私有项例外**：仅当测试需要访问被测模块私有项时，可在被测源文件末尾用 `#[cfg(test)] #[path = "tests/<file>.rs"] mod tests;` 挂载，并相应从父目录 `tests/mod.rs` 删除 `mod <file>;`（详见 [RUST_FILE_LINES_SPEC §A 第 9 条](../coding/RUST_FILE_LINES_SPEC.md)）；此时**严禁**改用 `pub(super)` / `pub(crate)` 等可见性提升手段绕过封装。集成测试放 `tests/` 顶层目录；性能测试放 `benches/` 用 criterion。详见 [RUST_FILE_LINES_SPEC.md §A](../coding/RUST_FILE_LINES_SPEC.md)（该节为目录形态与边界的唯一权威）。
 
 ---
 

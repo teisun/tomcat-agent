@@ -702,4 +702,5 @@ pub(super) fn messages_to_text(messages: &[ChatMessage]) -> String {
 }
 
 #[cfg(test)]
+#[path = "tests/preheat.rs"]
 mod tests;
