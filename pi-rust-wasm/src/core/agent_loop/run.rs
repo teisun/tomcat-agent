@@ -1,18 +1,61 @@
 //! # Agent Loop 顶层骨架（Conversation + Attempt 两层）
 //!
-//! 本文件只承载两层调度骨架：
+//! 本文件只承载两层调度骨架；Reasoning Loop（第三层）抽到 `reasoning_loop.rs`，
+//! 让 `run.rs` 满足 [RUST_FILE_LINES_SPEC §A](../../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
+//! 的 300 行硬上限。`mod.rs` 已有三层全景大图，本图只画 **本文件持有的两层** + 与
+//! 同族子模块的协作箭头，避免与上层 doc 重复。
 //!
-//! | 层 | 函数 | 职责 |
-//! |---|---|---|
-//! | Conversation | [`AgentLoop::run`] | AgentStart/End 生命周期 + steering 注入 + follow_up loop + Aborted/Fatal 终结 |
-//! | Attempt | `run_attempt_loop` | Retryable 指数退避 + L3 trim 路由 + AutoRetryStart/End |
+//! ```text
+//! ┌────────────────────────────────────────────────────────────────────────┐
+//! │  AgentLoop::run(initial_messages)              ← 调用方：api::chat     │
+//! └────────────────────────────────────────────────────────────────────────┘
+//!    │  ① 入口三检：cancel_token.is_cancelled? │ steering_queue 注入 │
+//!    │              start_idx / context_tail_start 标记
+//!    ▼
+//! ┌── 第一层 Conversation Loop  (本文件 AgentLoop::run) ────────────────────┐
+//! │  emit AgentStart                                                         │
+//! │  loop {                                                                  │
+//! │    ┌────────────────────────────────────────────────────────────────┐   │
+//! │    │  第二层 Attempt Loop  (本文件 AgentLoop::run_attempt_loop)     │   │
+//! │    │  for attempt in 1..=max_attempts:                              │   │
+//! │    │    if attempt > 1:                                             │   │
+//! │    │      emit AutoRetryStart(attempt, delay=base*2^(n-1))          │   │
+//! │    │      tokio::select! { cancel ► Aborted │ sleep ► continue }    │   │
+//! │    │                                                                │   │
+//! │    │    ┌── reasoning_loop::run_reasoning_loop(self, &mut msgs) ──┐ │   │
+//! │    │    │      (← 第三层骨架在 reasoning_loop.rs)                 │ │   │
+//! │    │    │   委托：stream_handler / tool_dispatcher / tool_exec    │ │   │
+//! │    │    │         / turn_finalize（timing ⑤）                    │ │   │
+//! │    │    └─────────────────────────────────────────────────────────┘ │   │
+//! │    │       │                                                        │   │
+//! │    │       ├ Ok(text)        ── attempt>1 ► emit AutoRetryEnd(ok)   │   │
+//! │    │       ├ Err(Aborted)    ── 透传给第一层                        │   │
+//! │    │       ├ Err(Fatal)      ── attempt>1 ► emit AutoRetryEnd(err)  │   │
+//! │    │       └ Err(Retryable)  ── error_classifier::handle_overflow   │   │
+//! │    │                            _retry（L3 trim + 重建 messages）   │   │
+//! │    └────────────────────────────────────────────────────────────────┘   │
+//! │                                                                          │
+//! │    Ok(text) ► emit AgentEnd(ok)                                          │
+//! │              ► follow_up_queue 非空 ► drain ► continue                   │
+//! │              ► 否则 ► return Completed(AgentRunResult)                   │
+//! │    Err(Aborted)  ► terminate_interrupted ► emit Interrupted + AgentEnd   │
+//! │                                            ► return Interrupted          │
+//! │    Err(Fatal)    ► emit AgentEnd(error)   ► return Failed                │
+//! │  }                                                                       │
+//! └──────────────────────────────────────────────────────────────────────────┘
+//!    │
+//!    ▼ 三态出口
+//!   AgentRunOutcome::{ Completed | Interrupted | Failed }
+//! ```
 //!
-//! Reasoning Loop（第三层）抽到 `reasoning_loop.rs` 作为 `pub(super)` 自由函数，
-//! 以满足 [RUST_FILE_LINES_SPEC §A](../../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
-//! 的 300 行硬上限。其余具体动作分布在：访问器 / emit / make_aborted →
-//! `accessors.rs`；错误分类与 overflow 回收 → `error_classifier.rs`；流消费 →
-//! `stream_handler.rs`；工具执行 → `tool_exec.rs`；工具调度 →
-//! `tool_dispatcher.rs`；text-only 收束 → `turn_finalize.rs`。
+//! ## 与同族子模块的边界
+//!
+//! - **本文件**：只做 Conversation/Attempt 的"何时调用 / 错误归并 / 三态收口"。
+//! - `accessors.rs`：`new` / `steer` / `follow_up` / `abort` / `emit_*` / `make_aborted`。
+//! - `reasoning_loop.rs`：单 turn 的 LLM↔工具调度（第三层骨架）。
+//! - `error_classifier.rs`：`classify_error` + `handle_overflow_retry`（L3 截断）。
+//! - `stream_handler.rs` / `tool_dispatcher.rs` / `tool_exec.rs` / `turn_finalize.rs`：
+//!   分别负责流消费 / 工具调度 / 工具执行 / text-only 收束。
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::infra::error::AppError;
