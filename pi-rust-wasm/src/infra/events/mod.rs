@@ -59,8 +59,8 @@
 //! - payload 字段必须 `#[serde(rename_all = "camelCase")]` 显式标注，与
 //!   pi-mono `AgentEvent.ts` 的字段命名严格对齐。
 //! - 新增变体时同步在 [`wire`] 模块加 `WIRE_*` 常量，避免业务直接写字面量。
-//! - 测试覆盖：[`tests`](self::tests) 模块对每个变体做"snake_case + camelCase"
-//!   双向 snapshot。
+//! - 测试覆盖：本文件 `#[cfg(test)] mod tests` 对每个变体做"snake_case +
+//!   camelCase"双向 snapshot。
 //!
 //! ## 包装类型 ([`Message`] / [`AssistantMessage`] / [`ToolOutput`] / ...)
 //!
