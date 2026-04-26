@@ -649,6 +649,8 @@ fn test_session_reload_with_boundary() -> Result<(), Box<dyn std::error::Error>>
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &boundary)?;
@@ -788,6 +790,8 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;
@@ -1087,6 +1091,8 @@ fn test_session_reload_pending_preheat_restore() -> Result<(), Box<dyn std::erro
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
         },
     );
     pi_wasm::core::session::transcript::append_entry(&path, &preheat_entry)?;

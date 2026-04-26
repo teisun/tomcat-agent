@@ -399,6 +399,8 @@ impl Preheat {
                                 estimated_covered_tokens_before: Some(est_covered_tok),
                                 estimated_summary_tokens: Some(est_summary_tok),
                                 estimated_tokens_saved: Some(est_saved),
+                                error: None,
+                                attempts: None,
                             });
 
                         let (transcript_compaction_entry_id, append_ok) = if transcript_path
@@ -455,7 +457,49 @@ impl Preheat {
                             "preheat attempt {}/{} failed: {}",
                             attempt, MAX_PREHEAT_RETRIES, last_error
                         );
+                        // T2-P0-002 Phase D：失败重试加指数退避（500ms / 1s / 2s）。
+                        // attempt < MAX_PREHEAT_RETRIES 时才睡，避免最后一次 Err 后做无意义的等待。
+                        // `500 << (attempt - 1)` ⇒ attempt=1→500ms, attempt=2→1000ms（attempt=3 不睡）。
+                        // 该 await 位于 tokio::spawn 的异步上下文，不会阻塞调用线程；测试用
+                        // `tokio::time::pause` + `advance` 控制虚拟时钟（详见 tests/preheat_backoff.rs）。
+                        if attempt < MAX_PREHEAT_RETRIES {
+                            let backoff = std::time::Duration::from_millis(500u64 << (attempt - 1));
+                            tokio::time::sleep(backoff).await;
+                        }
                     }
+                }
+            }
+
+            // T2-P0-002 Phase D：3 次重试全部失败 → 在 transcript 落一条
+            // BranchSummaryEntry { summary: None, error, attempts } 失败锚点。
+            // 同时承接 #T-040：LLM 因 batch 过长返回 `context_length_exceeded` 也走同一路径，
+            // 不再为「超大消息」单独引入硬截断（详见计划 §6.C 决议段 + 报告 §5.7）。
+            // reload 时 `session::manager::context::fold_entries_to_messages` 凭 `summary == None`
+            // 跳过该行，不会重建假摘要 ChatMessage（详见 transcript.rs 字段注释）。
+            let failure_entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                id: Some(batch_compaction_id.clone()),
+                parent_id: None,
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                summary: None,
+                covered_start_id: Some(covered_start_id.clone()),
+                covered_end_id: Some(covered_end_id.clone()),
+                covered_count: Some(covered_count),
+                is_boundary: Some(false),
+                preheat_compaction_id: Some(batch_compaction_id.clone()),
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: Some(last_error.clone()),
+                attempts: Some(MAX_PREHEAT_RETRIES),
+            });
+            if !transcript_path.as_os_str().is_empty() {
+                if let Err(e) =
+                    insert_entry_after_message_id(&transcript_path, &covered_end_id, &failure_entry)
+                {
+                    warn!(
+                        "preheat failure-trail insert_entry_after_message_id failed: {}",
+                        e
+                    );
                 }
             }
 

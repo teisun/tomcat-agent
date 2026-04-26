@@ -21,14 +21,15 @@
 - [x] **[流程]** 看板认领 T2-P0-002（TODO → DOING，负责人 Spike）
 - [x] **[流程]** 创建分支 `feature/compaction-prompt-9section`（基于 `develop`）
 - [x] **[流程]** Phase B 末门禁：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test -j 1 --lib -- --test-threads=1` 全绿（449 passed / 0 failed / 1 ignored，含新增 13 个 `prompt_snapshot` 测试）
+- [x] **[流程]** Phase D 末门禁：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib core::compaction::tests` 全绿（61 passed / 0 failed，含新增 2 个退避/失败留痕 + 3 个 `legacy_transcript_compat` 测试）
 - [ ] **[流程]** F 阶段 §4 全量门禁（按 INTEGRATION_MERGE_AND_ACCEPTANCE「后台写日志 + 轮询」）
 
 #### 实施类（按 plan §6）
 - [x] **[Phase A]** Two-pass 不实施决议落档：在 `docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1` 新增「Two-pass 决议固化」段落（背景：CC fork 子代理 + prompt cache vs. Pi 单次 LLM 直发；决议：不实施；替代：模板追加 `First reason internally, then output the final summary.`；反向逃生口；关闭轨迹）；§5.7 表格 Two-pass 行回链改指 §5.7.1；`docs/TODOS.md` 顶部速查表 + 详细条目区两处回链同步刷新 — 关闭 `#T-044`
 - [x] **[Phase B-1]** `preheat.rs` 两个 const 升级 9 节模板（来源 报告 §5.3 BASE / §5.4 UPDATE；`Recent User Messages` 保留最近 10 条用户原话；`Next Steps` verbatim；指令区追加 `First reason internally, then output the final summary.`），可见性改 `pub(super)` 供测试访问
 - [x] **[Phase B-2]** `generate_summary` 的 `ChatRequest` 显式 `tools: None` + 注释「Compaction MUST NOT carry tools」（双保险：prompt 首行 + 请求体无 tool schema）；两个模板首行固定 `Respond with text only. Do not call any tools.`；新增 `tests/prompt_snapshot.rs` 13 个断言（9 节标题、text-only 首行、内部 reason、最近 10 条、verbatim 引用、文件锚点、占位符、`tools.is_none()` / `stream=Some(false)`、`pub(super)` 可见性 lock）
-- [ ] **[Phase D-1]** `preheat.rs` 重试 loop Err 分支尾部追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s）；用 `tokio::time::pause` 写虚拟时钟单测
-- [ ] **[Phase D-2]** `BranchSummaryEntry` 新增 `error: Option<String>` / `attempts: Option<u32>`（`#[serde(skip_serializing_if = "Option::is_none")]` 向后兼容）；3 次耗尽后 `insert_entry_after_message_id` 写入失败锁点；`legacy_transcript_compat.rs` 兼容性测试
+- [x] **[Phase D-1]** `preheat.rs` 重试 loop Err 分支尾部追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s）；`Cargo.toml` 启用 `tokio` 的 `test-util` feature（仅 dev-dep）；新增 `preheat_retries_with_exponential_backoff` 用 `tokio::time::pause` + `start_paused = true` 验证虚拟时钟下 3 次 attempt 间累计推进 ≥ 1500ms
+- [x] **[Phase D-2]** `BranchSummaryEntry` 新增 `error: Option<String>` / `attempts: Option<u32>`（`#[serde(default, skip_serializing_if = "Option::is_none")]` 向后兼容）；`generate_summary` 3 次耗尽后通过 `insert_entry_after_message_id` 在 transcript 写入 `summary: None, error, attempts: 3` 失败锁点；新增 `legacy_transcript_compat.rs`（缺字段反序列化默认 None / 成功条目不序列化失败字段 / 失败条目序列化无 summary 字段）+ `preheat_exhausted_writes_failure_entry_to_transcript` 端到端验证；同步 14 处 `BranchSummaryEntry` 构造点初始化 `error: None, attempts: None`
 - [ ] **[Phase F]** 全量回归门禁：`cargo test -j 1 --test '*' --test-threads=1` 后台日志 + 轮询；失败项在本分支修复，不弱化断言
 - [ ] **[Phase G]** F 全绿后仅在 `openspec/specs/architecture/context-management.md` 补充 `Compaction v2（T2-P0-002）` 简短小节（9 节模板 / 禁 tools / 退避+留痕 + 3 项不实施决议回链）；`docs/reports/compaction-prompt-cc-vs-pi.md §5.6` 三项 TODO 改 `[x]`
 
@@ -44,8 +45,10 @@
 
 | 文件 | 类型 | 改动概述 |
 | :--- | :--- | :--- |
-| `src/core/compaction/preheat.rs` | 业务 | 两个 const 升级 9 节模板（B）；`generate_summary` 显式 `tools: None`（B）；Err 分支退避（D） |
-| `src/core/session/transcript.rs` | 业务 | `BranchSummaryEntry` 新增 2 字段 `error` / `attempts`（D） |
+| `Cargo.toml` | 配置 | `[dev-dependencies]` 启用 `tokio` 的 `test-util` feature（虚拟时钟，仅测试构建生效）|
+| `src/core/compaction/preheat.rs` | 业务 | 两个 const 升级 9 节模板（B）；`generate_summary` 显式 `tools: None`（B）；Err 分支退避 + 3 次耗尽写失败锁点（D）|
+| `src/core/session/transcript.rs` | 业务 | `BranchSummaryEntry` 新增 2 字段 `error` / `attempts`（D，向后兼容）|
+| `src/core/session/manager/session_impl.rs` 等 14 处 | 测试/构造 | 同步初始化新增 2 字段为 `None`（D）|
 | `src/core/compaction/tests/prompt_snapshot.rs` | 测试 | 新建 — 断言 9 节标题与 text-only 首行 |
 | `src/core/compaction/tests/preheat_and_truncation.rs` | 测试 | 扩展 — 退避 + 失败留痕 |
 | `src/core/compaction/tests/legacy_transcript_compat.rs` | 测试 | 新建 — 旧 transcript 反序列化兼容 |

@@ -191,6 +191,17 @@ pub struct BranchSummaryEntry {
     pub estimated_summary_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_tokens_saved: Option<usize>,
+    /// T2-P0-002 Phase D：preheat 摘要任务 3 次重试全部失败时记录的最末错误，
+    /// 与 `summary == None` 配合形成「失败锚点」，便于运行期与 reload 时定位故障窗口。
+    /// 旧 transcript 行（无此字段）反序列化为 `None`，序列化时 `skip_serializing_if`
+    /// 保证现有成功路径不再写出新字段，避免 JSONL 行长度膨胀。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// T2-P0-002 Phase D：preheat 摘要任务实际进行的尝试次数（含失败的最末一次），
+    /// 通常为 `MAX_PREHEAT_RETRIES = 3`。与 `error` 同步写入，用于 reload 时跳过失败行
+    /// 不重建假摘要 ChatMessage（详见 `session::manager::context::fold_entries_to_messages`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

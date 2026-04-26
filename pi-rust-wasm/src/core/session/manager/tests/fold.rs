@@ -42,6 +42,8 @@ fn make_boundary_entry(ts: &str, summary: &str) -> TranscriptEntry {
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     })
 }
 

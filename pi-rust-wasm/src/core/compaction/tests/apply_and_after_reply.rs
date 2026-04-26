@@ -167,6 +167,8 @@ fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle()
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     });
     append_entry(&path, &branch).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);

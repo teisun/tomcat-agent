@@ -165,6 +165,8 @@ fn init_context_state_boundary_discards_prior() {
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     });
     crate::core::session::transcript::append_entry(&path, &boundary_entry).unwrap();
 
