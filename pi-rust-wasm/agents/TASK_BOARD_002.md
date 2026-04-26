@@ -147,25 +147,28 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `DOING`（`2026-04-26` 由 Spike 认领） |
+| **状态** | `PENDING_INTEGRATION`（`2026-04-26` 由 Spike 完成实施 + 全量门禁 + 架构 spec 落档；待 Nibbles 集成复核） |
 | **负责人** | Spike |
 | **分支** | `feature/compaction-prompt-9section` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-041`、`#T-136`、`#T-137`；**改判**：`#T-040` 关闭归并、`#T-044` 报告决议关闭、`#T-043` 抽出 T2-P0-011；继承归档 TASK-19 剩余 |
-| **关联报告** | [compaction-prompt-cc-vs-pi.md](../docs/reports/compaction-prompt-cc-vs-pi.md) §5.3/§5.4/§5.7 |
+| **关联报告** | [compaction-prompt-cc-vs-pi.md](../docs/reports/compaction-prompt-cc-vs-pi.md) §5.3/§5.4/§5.6/§5.7 |
+| **架构 spec** | [context-management.md §7.5 Compaction v2 修订](../openspec/specs/architecture/context-management.md)（4 个 H4 子节 + 3 项不实施决议回链表） |
 | **计划文档** | `~/.cursor/plans/compaction_prompt_9-section_41653219.plan.md`（含 §6.C / §6.E 改判决议段） |
+| **commit 列表** | `4b2717c` Phase B（9 节模板 + 禁 tools） / `447a61a` Phase D（退避 + 失败留痕） / `ff178ff` Phase G（context-management §7.5）|
+| **门禁结果** | lib `454 passed / 1 ignored`；integration 14 crate `195 passed / 0 failed`（含 `cli_tests` / `wasmedge_e2e_tests` / `llm_tests` 真实路径）；`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` 零警告 |
 
 **目标**：把 `src/core/compaction/preheat.rs` 的 5 节摘要模板升级为 9 节（对齐 CC）；Compaction 路径的 `ChatRequest` 显式不传 `tools` 并加首行禁工具声明；补齐指数退避 + transcript 失败留痕收尾项；合并 TASK-19 的异步预热 / 级联降压 / 落盘剩余项。
 
 **子项**：
-- [ ] 9 节摘要模板：Intent / Key Technical Concepts / Files and Code Sections / Errors and Fixes / Problem Solving / All User Messages / Pending Tasks / Current Work / Optional Next Step（+ Errors Encountered / Recent User Messages 两节）
-- [ ] Compaction 入口禁 tools：`ChatRequest { tools: None, .. }`（**不引入** `tool_choice` 字段，避免破 `ChatRequest` 公共结构）；Prompt 首行追加 `Respond with text only. Do not call any tools.`
+- [x] 9 节摘要模板：Goal / Constraints & Preferences / Progress（Done [带 file: 锚点] / In Progress / Blocked）/ Errors Encountered / Key Decisions / Recent User Messages（最近 10 条用户原话）/ Next Steps（含 verbatim 引用）/ Critical Context；指令区追加 `First reason internally, then output the final summary.`
+- [x] Compaction 入口禁 tools：`ChatRequest { tools: None, .. }`（**不引入** `tool_choice` 字段，避免破 `ChatRequest` 公共结构）；Prompt 首行追加 `Respond with text only. Do not call any tools.`
 - [-] ~~超大文件处理（>800K / 超预算）：fallback 到截断 + 哨兵消息，不再 panic~~ — **不实施 / `#T-040` 关闭归并**（`2026-04-26`，按 plan §6.C 决议；现有 Layer 0 + Phase D 失败留痕已覆盖；compaction 不兼任输入校验）
-- [ ] 压缩任务失败重试：指数退避 3 次（500ms / 1s / 2s）；3 次都失败时 transcript 写一条 `BranchSummaryEntry { summary: None, error, attempts }`（**同时承接 `#T-040` 超大消息 → LLM 拒绝路径**）
+- [x] 压缩任务失败重试：指数退避 3 次（500ms / 1s / 2s）；3 次都失败时 transcript 写一条 `BranchSummaryEntry { summary: None, error, attempts }`（**同时承接 `#T-040` 超大消息 → LLM 拒绝路径**）
 - [-] ~~大文件多次编辑写入：分块落盘 + 合并锚点~~ — **不实施 / `#T-043` 改判归属抽出 T2-P0-011**（`2026-04-26`，按 plan §6.E 决议；原 TODO 真实归属是 `executor/primitives.rs::edit_file`，与 compaction 无关）
 - [-] ~~先写分析草稿再输出摘要正文（Two-pass summary）~~ — **不实施 / `#T-044` 报告决议关闭**（`2026-04-26`；详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7`](../docs/reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals)，prompt 内加一句"先内部 reason 再输出"做隐式诱导）
-- [ ] 架构 spec 落档：仅在 `openspec/specs/architecture/context-management.md` 增加一个简短小节（建议标题 `Compaction v2（T2-P0-002）`），简明记录本计划 3 个落地点（9 节模板、禁 tools、退避+留痕）+ 3 项不实施决议回链（`#T-040`/`#T-043`/`#T-044`）；**不新增** `compaction-resilience.md`，**不做** §7 索引化搬迁（按 plan §6.G 决议）
-- [ ] 回归集成测试：`tests/compaction/*` 全绿（含新增 prompt snapshot + 退避 + 失败留痕 2 组用例）
+- [x] 架构 spec 落档：在 [`openspec/specs/architecture/context-management.md §7.5`](../openspec/specs/architecture/context-management.md) 新增 4 个 H4 子节（9 节模板 / 显式 `tools: None` / 退避 + 留痕含字段 schema / 3 项不实施决议表），单一事实来源指向 `preheat.rs` 的 `pub(super) const`；不新建 `compaction-resilience.md`，不做 §7 索引化搬迁
+- [x] 回归集成测试：lib `454 passed / 1 ignored` + integration 14 crate `195 passed / 0 failed`（含 `prompt_snapshot.rs` 13 用例 / `preheat_and_truncation.rs` 退避 + 失败留痕 2 用例 / `legacy_transcript_compat.rs` 3 用例 / `cli_tests` `wasmedge_e2e_tests` `llm_tests` 真实路径）
 
 **依赖**：T2-P0-001（Agent Loop 拆分后便于替换 compaction 注入点；2026-04-25 已 DONE）
 
@@ -755,3 +758,4 @@ flowchart LR
 | 2026-04-25 | T2-P0-001 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/agent-loop-split` @ `28b74dd` `--no-ff` 合并入 develop（merge commit `45c43b6`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test -j 1 --lib --test-threads=1`（436/436、1 ignored）+ `cargo test -j 1 --test '*' --test-threads=1`（agent_loop_tests 11 / cli_tests 77 / context_management_tests 19 / wasmedge_e2e_tests 39 等共 195 用例）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（业务文件最大 246 行，全部 ≤ 300 红线）；规格漂移已就地补齐：`openspec/specs/architecture/interrupt-and-cancellation.md` 与 `E2E_SCENARIO_LIBRARY.md` 中对原 `agent_loop/tests.rs` 单文件的引用改为 `agent_loop/tests/interrupt.rs`；外部 API + 事件顺序契约完全保持；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |
 | 2026-04-26 | T2-P0-002 立项决议落档 + T2-P0-011 新建 | Spike 在 plan `compaction_prompt_9-section_41653219.plan.md` 阶段输出三项决议改判：① **`#T-040` 关闭归并**（plan §6.C；现有 Layer 0 + Phase D 失败留痕已覆盖；compaction 不兼任输入校验）；② **`#T-043` 改判归属抽出 T2-P0-011**（plan §6.E；原 TODO 真实归属是 `executor/primitives.rs::edit_file`，与 compaction 无关，归属错位）；③ **`#T-044` 在原报告关闭**（plan Phase A；CC fork+cache 抵消草稿成本，Pi 单次 LLM 直发多一轮草稿性价比不好；改在 prompt 内加一句"先内部 reason"做隐式诱导）。同步：T2-P0-002 子项 3/5/6 标"不实施"+保留删除线；新建 `T2-P0-011 \| large-file-edit-strategy` 任务承接 `#T-043`；`docs/TODOS.md` 顶部速查表 + 详细条目区三行同步落档；`docs/reports/compaction-prompt-cc-vs-pi.md §5.7 Anti-goals` 新增三行"明确不做的事项"。本次仅文档落档，无代码改动 |
 | 2026-04-26 | T2-P0-002 TODO→DOING | Spike 认领并从 develop 拉出 `feature/compaction-prompt-9section`；同步把字段表「架构 spec 落档」子项与验收标准对齐 plan §6.G 决议——**不新增** `compaction-resilience.md`，**不做** §7 索引化搬迁，仅在 `openspec/specs/architecture/context-management.md` 增加一个简短小节（`Compaction v2（T2-P0-002）`）记录 9 节模板 / 禁 tools / 退避+留痕 + 3 项不实施决议回链。本次仅看板状态字段同步，无代码改动 |
+| 2026-04-26 | T2-P0-002 DOING→PENDING_INTEGRATION | Spike 完成 plan `compaction_prompt_9-section_41653219.plan.md` 全部 Phase A/B/D/F/G 实施：① **Phase B**（`4b2717c`）`preheat.rs` 两个 `pub(super) const` 升级为 9 节模板（含「最近 10 条用户原话」+「先内部 reason 再输出」双声明），`generate_summary` 显式 `tools: None`，新增 `prompt_snapshot.rs` 13 用例；② **Phase D**（`447a61a`）重试 loop Err 分支追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s），`BranchSummaryEntry` 新增 `error: Option<String>` / `attempts: Option<u32>`（`#[serde(default, skip_serializing_if)]` 向后兼容），3 次耗尽后 `insert_entry_after_message_id` 写失败锁点，新增 `legacy_transcript_compat.rs` + 退避/失败留痕 2 用例，`Cargo.toml` `[dev-dependencies]` 启用 tokio `test-util` feature；③ **Phase F** 全量门禁 lib `454 passed / 1 ignored` + integration 14 crate `195 passed / 0 failed`（含 `cli_tests` / `wasmedge_e2e_tests` / `llm_tests` 真实路径，`.integration_test_output.log` 留痕）；④ **Phase G**（`ff178ff`）`context-management.md` 新增 §7.5（4 个 H4 子节 + 3 项不实施决议表），`docs/reports/compaction-prompt-cc-vs-pi.md §5.6` 三项 TODO 改 `[x]`。No-Stale 校验：spec 单一事实来源指向 `preheat.rs` `pub(super) const`；零悬空回链（git grep 校验既有 `context-management.md:1017-1019` 引用属于 §6.7 max_tool_rounds，未受插入位置影响）。待 Nibbles 集成复核 |

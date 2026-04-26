@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Spike | 2026-04-26 | DOING | feature/compaction-prompt-9section | - |
+| @Spike | 2026-04-26 | PENDING_INTEGRATION | feature/compaction-prompt-9section | - |
 
 ## T2-P0-002 | compaction-prompt-and-ctx-v2 | 摘要 prompt 9 节升级 + Compaction 收尾
 
@@ -14,7 +14,7 @@
 
 ---
 
-### 🟡 DOING (进行中)
+### 🟢 PENDING_INTEGRATION (实施完成 / 待 Nibbles 复核)
 
 #### 流程类
 - [x] **[流程]** 立项决议落档（`2026-04-26`：`#T-040` / `#T-043` / `#T-044` 改判 + 抽出 T2-P0-011；详见看板 §6 变更记录）
@@ -56,8 +56,28 @@
 | `docs/reports/compaction-prompt-cc-vs-pi.md` | 文档 | Phase A：§5.7 补 Two-pass 决议；Phase G：§5.6 三项 TODO 改 `[x]` |
 | `agents/TASK_BOARD_002.md` | 文档 | DOING / PENDING_INTEGRATION 状态 + §6 变更记录 |
 
-### 📝 待 PENDING_INTEGRATION 时填写
+### 📝 PENDING_INTEGRATION 集成测试报告
 
-- [ ] 各 Phase commit hash 列表
-- [ ] §4 全量门禁结果（`cargo test -j 1 --test '*' --test-threads=1` 通过率 + 用例数）
-- [ ] `feature/compaction-prompt-9section` push 远端 + 看板 `DOING → PENDING_INTEGRATION`
+| commit hash | Phase | 摘要 |
+| :--- | :--- | :--- |
+| `0c281b5` | Phase A | `docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1` Two-pass 不实施决议固化 — 关闭 `#T-044` |
+| `4b2717c` | Phase B | `preheat.rs` 两个 `pub(super) const` 升级 9 节模板 + 显式 `tools: None`；`prompt_snapshot.rs` 13 用例 |
+| `447a61a` | Phase D | 重试指数退避 + `BranchSummaryEntry { error, attempts }` 失败留痕；`legacy_transcript_compat.rs` 3 用例 + 退避/失败留痕 2 用例；`Cargo.toml` 启用 `tokio` `test-util` feature；承接 `#T-040` |
+| `ff178ff` | Phase G + docs-sync | `context-management.md §7.5 Compaction v2 修订` 简明落档（4 个 H4 子节 + 3 项不实施决议表）；`compaction-prompt-cc-vs-pi.md §5.6` 三项 TODO 改 `[x]` |
+
+**§4 全量门禁结果**（按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 后台日志 + 轮询）：
+
+| 命令 | 结果 | 日志 |
+| :--- | :--- | :--- |
+| `cargo fmt --check` | ✅ 零 diff | — |
+| `cargo clippy --all-targets -- -D warnings` | ✅ 零警告 | — |
+| `cargo test -j 1 --lib -- --test-threads=1` | ✅ 454 passed / 0 failed / 1 ignored | `.integration_test_output_lib.log` |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | ✅ 14 crate / 195 passed / 0 failed（含 `cli_tests` 77 / `wasmedge_e2e_tests` 39 / `llm_tests` 2 真实 OpenAI 路径） | `.integration_test_output.log` |
+
+**No-Stale 自检**：spec 单一事实来源指向 `preheat.rs` `pub(super) const`；零弱化断言、零 `#[ignore]` 新增；外部回链 `git grep "context-management.md"` 校验通过（既有 `agents/TASK_BOARD_002.md:204` / `docs/TODOS.md:351` 指向的 `:1017-1019` 行号属 §6.7 `max_tool_rounds`，新增 §7.5 在其后插入未影响这些引用）。
+
+### 待 Nibbles 接手
+
+- [ ] `git push origin feature/compaction-prompt-9section`（本 commit 后由调用方触发）
+- [ ] Nibbles 在 develop 上 `--no-ff` 合并 + 复跑全量门禁 + 编码规范家族四件套核查
+- [ ] 看板 `T2-P0-002` `PENDING_INTEGRATION → DONE`
