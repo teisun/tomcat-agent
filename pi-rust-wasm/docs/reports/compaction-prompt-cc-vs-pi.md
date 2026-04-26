@@ -205,7 +205,7 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 
 | 不做的事 | 来源 | 决议 | 理由 | 回链 |
 |---------|------|------|------|------|
-| **Two-pass `<analysis>` 草稿区** | 本报告 §5.2 第 1 行（已标"不采纳"） | 不实施；prompt 内可加一句"先内部 reason 再输出"做隐式诱导 | CC 走 fork 子代理 + prompt cache 抵消草稿成本；Pi 单次 LLM 直发，多一轮草稿 = token 翻倍，性价比不好 | 本报告 §5.7（本行即决议落档）；TODOS [#T-044](../TODOS.md) |
+| **Two-pass `<analysis>` 草稿区** | 本报告 §5.2 第 1 行（已标"不采纳"） | 不实施；模板指令区追加 `First reason internally, then output the final summary.` 做隐式诱导 | CC 走 fork 子代理 + prompt cache 抵消草稿成本；Pi 单次 LLM 直发，多一轮草稿 = 输出 token 翻倍 + 撞 max_tokens 上限，性价比不好 | [§5.7.1 Two-pass 决议固化](#571-two-pass-summary-不实施决议固化关闭-t-044)；TODOS [#T-044](../TODOS.md) |
 | **在 compaction 层对超大单条消息做字符硬截断 + 哨兵** | TODOS [#T-040](../TODOS.md)、[TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) 子项 3 | 不实施 / 关闭归并 | ① compaction 是「读 → 总结 → 写」的二次加工层，**不应兼任输入校验**——若真要限制单条字符，正确位置是在用户输入入口或 LLM 调用 provider 边界，不是 compaction；② 核实代码后发现 [`preheat.rs::messages_to_text`](../../src/core/compaction/preheat.rs) 对 User/Assistant **不做切片**，**不存在字符边界 panic**——原 #T-040 描述把 Layer 0 的 `floor_char_boundary` 风险（已多年稳定）误外推到 messages_to_text；③ 唯一剩余风险（拼出超长 batch_text → LLM 拒绝）由 plan Phase D 的退避 + transcript 失败留痕直接承接，**用户视角是「ratio 高 + 一条 fail entry」，不 panic / 不 abort，可接受**；④ 引入 `truncate_with_sentinel` + 配置项会新增高风险代码（字符边界 panic）+ 新测试 + spec 字段，收益与成本不对称 | plan [§6.C 决议段](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md)；TODOS [#T-040](../TODOS.md) 行尾备注 |
 | **在 compaction 层为多次落盘建立 `_index.jsonl` 合并锚点** | TODOS [#T-043](../TODOS.md)、[TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) 子项 5 | 不实施 / #T-043 改判**归属错位**，已抽出独立任务 [T2-P0-011](../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 承接 | ① **TODO 原始文案错配**——[#T-043](../TODOS.md) 写的是「**更新大文件时应该多次编辑写入**」，最自然读法是「agent 写大文件时偏好多次小 `edit_file` 而不是一次性 overwrite」，归属应在 `src/core/executor/primitives.rs::edit_file`，看板把它分进 compaction 任务（关联模块 `src/core/compaction/`）属分类错配；② **方案是过度发挥**——`_index.jsonl` 这个具体方案是 plan 起草时根据"分块落盘 + 合并锚点"两个词凑出来的，本报告 / `context-management.md` / 任何 spec 都没明确要求过这个文件；③ **价值评估为零**——所提供的全部信息（落盘哪些块 / 时间序 / 原始大小 / 工具名）可由 **transcript 占位符 `[Tool result persisted: {path} ({len} chars)]` + 文件系统 mtime + 文件名（即 `tool_call_id`）** 完全重建；④ **无消费者**——主路径 [`PersistedResult.persisted_path`](../../src/core/compaction/truncation.rs) 直接持文件路径，没有任何代码读 `_index.jsonl`；⑤ 反观成本：~50 行业务 + ~80 行测试 + 1 份新 JSONL schema + spec 一节，收益 / 成本严重失衡 | plan [§6.E 决议段](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md)；TODOS [#T-043](../TODOS.md) T2 映射改判 T2-P0-011；看板 [T2-P0-011 large-file-edit-strategy](../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 任务详情 |
 
@@ -213,6 +213,40 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 - 若线上观测到「LLM `context_length_exceeded` 因超长 Assistant/User 消息触发」频率显著（例如 > 1%），单开 ticket 在 Phase D 的失败留痕路径之上加一道 batch_text 长度预检（短路浪费的 3 次 retry），改动 < 5 行，**与本报告 / 当前 plan 解耦**。
 - 若将来真要做"按时间序可视化落盘历史"功能（例如 debug 工具），单开 ticket 加一份独立 `_index.jsonl`（< 30 行），**与本报告 / 当前 plan 解耦**。
 - `#T-043` 的原始诉求（agent 写大文件时偏好多次 `edit_file`）由独立任务 [T2-P0-011 large-file-edit-strategy](../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 承接（system prompt 引导 / `write_file` 大字符串 hint / tool description 增强 三选一或组合，由计划阶段决定，与 compaction 解耦）。
+
+#### 5.7.1 Two-pass summary 不实施决议固化（关闭 [#T-044](../TODOS.md)）
+
+**身份**：本节为 [#T-044](../TODOS.md)「Two-pass summary」的**最终决议落档点**——任何回链到 `compaction-prompt-cc-vs-pi.md§5.7.1` 即视作此决议生效；不再单独建立 ADR 文件（`docs/adr/T-044-two-pass-summary.md` 不存在，也不会创建）。
+
+**背景**：
+
+1. CC（Claude Code）在 [`prompt.ts`](../../../cc-fork-01/src/services/compact/prompt.ts) 里要求模型先在 `<analysis>` 标签内完整列出 1) Primary Request and Intent 2) Key Technical Concepts 3) Files and Code Sections 4) Errors and fixes 5) Problem Solving 6) All user messages 7) Pending Tasks 8) Current Work 9) Optional Next Step **草稿**，再在 `<summary>` 标签内输出最终摘要。这是**事实上的双轮推理**——只是借助单次模型调用 + 标签分区伪装成一次响应。
+2. CC 能负担"草稿区翻倍"成本的两个**特殊条件**：
+   - **fork 子代理路径**：CC 的 `runCompact` 调用单独 fork 一个子代理处理摘要，主对话上下文不被草稿占用；
+   - **prompt cache 命中**：CC 与 Anthropic provider 之间走 `cache_control` 缓存机制，被压缩的历史消息（≥ 1024 token 的 system / user 块）在第二次调用时能命中 90% 以上输入 token 折扣（[Anthropic prompt-caching 文档](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)），所以"两轮跑一次"的总输入 token 成本相比单轮仅多约 1.1 倍而非 2 倍。
+3. Pi 的部署形态**两个条件都不成立**：
+   - Pi 的 `Compactor::summarize` 走与主 reasoning loop 同一个 `LlmProvider::chat`，没有 fork 子代理；
+   - 当前 OpenAI 接入未启用 prompt cache（OpenAI 自身也只对 ≥ 1024 token 的 prefix 命中 50% 折扣，且 cache 命中需要请求间稳定 prefix——压缩场景的 `batch_text` 每次都不同，命中率不稳定）。
+
+因此 Pi 若复刻 Two-pass，**实质等于把单次摘要的输出 token 直接乘以 2**——9 节模板已经接近 ~8K 输出预算，再翻倍会撞 provider 的 `max_tokens` 上限或显著抬升 latency。
+
+**决议**：本计划（T2-P0-002）**不实施 Two-pass summary**。
+
+**替代策略**（采纳）：
+
+- 在 [§5.3 BASE](#53-整合后首次摘要模板summarization_prompt) / [§5.4 UPDATE](#54-整合后增量更新模板update_summarization_prompt) 模板的指令区追加一句 `First reason internally, then output the final summary.`，让模型走**内部隐式推理**（不输出可见草稿），相当于一次有引导的单轮推理；
+- 现代 LLM（GPT-4 / Claude 3.5+ / Qwen-Max）对此句的内部推理已被广泛验证有效，落地成本 = 1 句 prompt，相对 Two-pass 节省约 1 倍输出 token；
+- 验收**只校验** prompt 含此行，**不校验**模型是否真的进行了内部推理（无可观测端点，且超出本任务责任范围）。
+
+**反向逃生口**：
+
+- 若后续在某个 provider 上观测到 9 节摘要质量明显劣化（例如多个 in-progress 项被遗漏 / Next Steps verbatim 引用与最近用户消息不匹配 ≥ 30%），重新评估 Two-pass 时优先考虑：① 走 fork 子代理路径（需要主 reasoning loop 配合）；② 在 OpenAI / Anthropic provider 启用 prompt cache + 稳定 prefix（需要重排 message 顺序）；
+- 真要做时单开 ticket，**与本任务 / 本报告解耦**；不在 plan T2-P0-002 中追加。
+
+**关闭轨迹**：
+
+- [`docs/TODOS.md`](../TODOS.md) 中 `#T-044` 的状态/备注同步标注为「**报告决议关闭**：详见 `compaction-prompt-cc-vs-pi.md §5.7.1`」（已于 2026-04-26 在 [TASK_BOARD_002.md §6 变更记录](../../agents/TASK_BOARD_002.md) 同日 entry 落档）。
+- plan [`compaction_prompt_9-section_41653219.plan.md` §6.A](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md) 的 `impl-A-adr-two-pass` 子项指向本节，作为决议落地凭证。
 
 ---
 

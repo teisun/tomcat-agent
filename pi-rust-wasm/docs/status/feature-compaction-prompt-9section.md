@@ -24,7 +24,7 @@
 - [ ] **[流程]** F 阶段 §4 全量门禁（按 INTEGRATION_MERGE_AND_ACCEPTANCE「后台写日志 + 轮询」）
 
 #### 实施类（按 plan §6）
-- [ ] **[Phase A]** Two-pass 不实施决议落档：在 `docs/reports/compaction-prompt-cc-vs-pi.md §5.7` 补充/固化（不新增独立 ADR 文件）→ 关闭 `#T-044`
+- [x] **[Phase A]** Two-pass 不实施决议落档：在 `docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1` 新增「Two-pass 决议固化」段落（背景：CC fork 子代理 + prompt cache vs. Pi 单次 LLM 直发；决议：不实施；替代：模板追加 `First reason internally, then output the final summary.`；反向逃生口；关闭轨迹）；§5.7 表格 Two-pass 行回链改指 §5.7.1；`docs/TODOS.md` 顶部速查表 + 详细条目区两处回链同步刷新 — 关闭 `#T-044`
 - [ ] **[Phase B-1]** `preheat.rs` 两个 const 升级 9 节模板（来源 报告 §5.3 BASE / §5.4 UPDATE；`Recent User Messages` 保留最近 10 条用户原话；`Next Steps` verbatim；指令区追加 `First reason internally, then output the final summary.`）
 - [ ] **[Phase B-2]** `generate_summary` 的 `ChatRequest` 显式 `tools: None` + 注释 `Compaction MUST NOT carry tools`；两个模板首行固定 `Respond with text only. Do not call any tools.`
 - [ ] **[Phase D-1]** `preheat.rs` 重试 loop Err 分支尾部追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s）；用 `tokio::time::pause` 写虚拟时钟单测
