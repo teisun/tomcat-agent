@@ -102,7 +102,7 @@
 | CC 特性 | 价值 | 取舍 |
 |---------|------|------|
 | `<analysis>` 草稿区 | 先推理再输出，摘要质量更高 | **不采纳**——Pi 不走 fork 子代理，多一轮草稿 = 多一倍输出 token，性价比不好 |
-| All user messages 全列 | 防任务漂移 | **缩小范围**：只要求摘录「最近 2~3 条用户原话」，不全列 |
+| All user messages 全列 | 防任务漂移 | **缩小范围**：只要求摘录「最近 10 条用户原话」，不全列 |
 | Files & Code Sections | 文件变更可追溯 | **合并进 Progress Done**——每个已完成项带文件路径即可，不需要独立节 |
 | Errors & Fixes 独立节 | 避免重复踩坑 | **采纳**——作为独立小节，简短列出错误 + 修复方式 |
 | Next Step + verbatim 引用 | 防「摘要漂移」 | **采纳**——要求 Next Steps 第一条附带最近对话原文的简短引用 |
@@ -182,7 +182,7 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 |------|---------------------|-------|------|
 | 节数 | 7 | **9** | +Errors Encountered, +Recent User Messages |
 | 禁工具 | 无 | 首行一句话 | CC 简化 |
-| 用户原话 | 无 | 最近 2~3 条 | CC 缩小范围 |
+| 用户原话 | 无 | 最近 10 条 | CC 缩小范围 |
 | 错误追踪 | 散在 Progress/Critical Context | 独立小节 | CC |
 | Next Steps | 有序列表 | 第一条带 **verbatim 短引用** | CC |
 | Progress Done | 纯文本 | 带文件路径 `(file: ...)` | CC Files & Code 精简版 |
