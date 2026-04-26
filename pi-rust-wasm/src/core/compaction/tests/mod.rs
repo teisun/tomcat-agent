@@ -11,4 +11,5 @@ mod layer0_cleanup;
 mod messages_to_text;
 mod mocks;
 mod preheat_and_truncation;
+mod prompt_snapshot;
 mod turn_boundaries_l3;

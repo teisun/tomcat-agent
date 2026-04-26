@@ -20,13 +20,13 @@
 - [x] **[流程]** 立项决议落档（`2026-04-26`：`#T-040` / `#T-043` / `#T-044` 改判 + 抽出 T2-P0-011；详见看板 §6 变更记录）
 - [x] **[流程]** 看板认领 T2-P0-002（TODO → DOING，负责人 Spike）
 - [x] **[流程]** 创建分支 `feature/compaction-prompt-9section`（基于 `develop`）
-- [ ] **[流程]** Phase 末门禁（`cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test --lib --test-threads=1`）
+- [x] **[流程]** Phase B 末门禁：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test -j 1 --lib -- --test-threads=1` 全绿（449 passed / 0 failed / 1 ignored，含新增 13 个 `prompt_snapshot` 测试）
 - [ ] **[流程]** F 阶段 §4 全量门禁（按 INTEGRATION_MERGE_AND_ACCEPTANCE「后台写日志 + 轮询」）
 
 #### 实施类（按 plan §6）
 - [x] **[Phase A]** Two-pass 不实施决议落档：在 `docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1` 新增「Two-pass 决议固化」段落（背景：CC fork 子代理 + prompt cache vs. Pi 单次 LLM 直发；决议：不实施；替代：模板追加 `First reason internally, then output the final summary.`；反向逃生口；关闭轨迹）；§5.7 表格 Two-pass 行回链改指 §5.7.1；`docs/TODOS.md` 顶部速查表 + 详细条目区两处回链同步刷新 — 关闭 `#T-044`
-- [ ] **[Phase B-1]** `preheat.rs` 两个 const 升级 9 节模板（来源 报告 §5.3 BASE / §5.4 UPDATE；`Recent User Messages` 保留最近 10 条用户原话；`Next Steps` verbatim；指令区追加 `First reason internally, then output the final summary.`）
-- [ ] **[Phase B-2]** `generate_summary` 的 `ChatRequest` 显式 `tools: None` + 注释 `Compaction MUST NOT carry tools`；两个模板首行固定 `Respond with text only. Do not call any tools.`
+- [x] **[Phase B-1]** `preheat.rs` 两个 const 升级 9 节模板（来源 报告 §5.3 BASE / §5.4 UPDATE；`Recent User Messages` 保留最近 10 条用户原话；`Next Steps` verbatim；指令区追加 `First reason internally, then output the final summary.`），可见性改 `pub(super)` 供测试访问
+- [x] **[Phase B-2]** `generate_summary` 的 `ChatRequest` 显式 `tools: None` + 注释「Compaction MUST NOT carry tools」（双保险：prompt 首行 + 请求体无 tool schema）；两个模板首行固定 `Respond with text only. Do not call any tools.`；新增 `tests/prompt_snapshot.rs` 13 个断言（9 节标题、text-only 首行、内部 reason、最近 10 条、verbatim 引用、文件锚点、占位符、`tools.is_none()` / `stream=Some(false)`、`pub(super)` 可见性 lock）
 - [ ] **[Phase D-1]** `preheat.rs` 重试 loop Err 分支尾部追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s）；用 `tokio::time::pause` 写虚拟时钟单测
 - [ ] **[Phase D-2]** `BranchSummaryEntry` 新增 `error: Option<String>` / `attempts: Option<u32>`（`#[serde(skip_serializing_if = "Option::is_none")]` 向后兼容）；3 次耗尽后 `insert_entry_after_message_id` 写入失败锁点；`legacy_transcript_compat.rs` 兼容性测试
 - [ ] **[Phase F]** 全量回归门禁：`cargo test -j 1 --test '*' --test-threads=1` 后台日志 + 轮询；失败项在本分支修复，不弱化断言
