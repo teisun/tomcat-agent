@@ -65,3 +65,7 @@ strip = "symbols"
 tempfile = "3.10"
 assert_cmd = "2"
 predicates = "3"
+# 启用 tokio test-util 仅在测试构建中生效；T2-P0-002 Phase D 用 `tokio::time::pause`
+# / `start_paused = true` 让重试退避走虚拟时钟（详见 src/core/compaction/tests/preheat_and_truncation.rs）。
+# `features` 是 additive：生产构建仍只用 [dependencies] 里的 `full` 集合，不引入测试工具。
+tokio = { version = "1.0", features = ["test-util"] }

@@ -70,7 +70,7 @@
 | T-040 | 上下文 | 超大文件处理崩溃 | compaction 崩溃 | T2-P0-002（**关闭归并 2026-04-26**：Layer 0 + Phase D 已覆盖） |
 | T-041 | 上下文 | 压缩任务失败重试 | 可靠性 | T2-P0-002 |
 | T-043 | 工具/原语 | 大文件多次编辑写入 | agent 写大文件方式（`edit_file` 偏好） | T2-P0-011（**改判 2026-04-26**：归属由 compaction 转 executor primitives） |
-| T-044 | 上下文 | 摘要先写草稿再输出正文 | Two-pass | T2-P0-002（**报告决议关闭 2026-04-26**：详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7`](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals)） |
+| T-044 | 上下文 | 摘要先写草稿再输出正文 | Two-pass | T2-P0-002（**报告决议关闭 2026-04-26**：详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1`](reports/compaction-prompt-cc-vs-pi.md#571-two-pass-summary-不实施决议固化关闭-t-044)） |
 | T-046 | 权限 | 工作目录读写授权分级缺失 | 读/写权限未分级 | T2-P0-004 |
 | T-047 | 权限 | 非工作目录操作被直接拒绝而非申请授权 | 直接 403 | T2-P0-004 |
 | T-048 | 权限 | 给工作目录加别名和描述 | 体验优化 | T2-P0-004 |
@@ -438,7 +438,7 @@
 - [-] **[P0] `[REF]`** `#T-044` 摘要先写分析草稿思考，再输出摘要正文 — **报告决议关闭**（`2026-04-26`）
   - 档位升档自 P2：T2-P0-002
   - 关联模块：`src/core/compaction/preheat.rs`
-  - **决议（plan T2-P0-002 Phase A）**：CC 通过 fork 子代理 + prompt cache 抵消草稿成本，Pi 单次 LLM 直发，多一轮草稿 = token 翻倍，性价比不好；改为在 prompt 内加一句"先内部 reason 再输出"做隐式诱导。详见 [报告 §5.7 Anti-goals](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 1 行（plan Phase A 落地）。
+  - **决议（plan T2-P0-002 Phase A）**：CC 通过 fork 子代理 + prompt cache 抵消草稿成本，Pi 单次 LLM 直发，多一轮草稿 = 输出 token 翻倍 + 撞 max_tokens 上限，性价比不好；改为在两个 prompt 模板（`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT`）的指令区追加 `First reason internally, then output the final summary.` 做隐式诱导。详见 [报告 §5.7.1 Two-pass 决议固化](reports/compaction-prompt-cc-vs-pi.md#571-two-pass-summary-不实施决议固化关闭-t-044)（plan Phase A 落地）。
 
 - [ ] **[P3] `[REF]`** `#T-045` Token 节省机制
   - 工具结果用完 2 轮后落盘/删除

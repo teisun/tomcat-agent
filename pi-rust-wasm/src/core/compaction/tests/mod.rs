@@ -8,7 +8,9 @@
 mod apply_and_after_reply;
 mod context_layer0_v2;
 mod layer0_cleanup;
+mod legacy_transcript_compat;
 mod messages_to_text;
 mod mocks;
 mod preheat_and_truncation;
+mod prompt_snapshot;
 mod turn_boundaries_l3;

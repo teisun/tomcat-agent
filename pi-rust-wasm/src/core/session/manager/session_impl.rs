@@ -282,6 +282,8 @@ impl SessionManager {
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
         });
         append_entry(&path, &entry)
     }
@@ -310,6 +312,8 @@ impl SessionManager {
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
         });
         append_entry(&path, &entry)
     }

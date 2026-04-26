@@ -40,6 +40,8 @@ fn set_branch_summary_entry_is_boundary_true_updates_line() {
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     });
     append_entry(&path, &c).unwrap();
     set_branch_summary_entry_is_boundary_true(&path, "cmp_inplace").unwrap();
@@ -96,6 +98,8 @@ fn set_branch_summary_entry_is_boundary_true_preserves_unmatched_line_whitespace
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     });
     append_entry(&path, &c).unwrap();
 
@@ -160,6 +164,8 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     });
     insert_entry_after_message_id(&path, "mid_anchor", &c).unwrap();
 
@@ -205,6 +211,8 @@ fn remove_branch_summary_entry_by_id_removes_matching_line() {
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
         estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
     });
     append_entry(&path, &b).unwrap();
     remove_branch_summary_entry_by_id(&path, "rm_target").unwrap();
@@ -242,6 +250,8 @@ fn remove_branch_summary_entry_by_id_removes_all_duplicate_ids() {
             estimated_covered_tokens_before: None,
             estimated_summary_tokens: None,
             estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
         })
     };
     append_entry(&path, &mk("2025-01-01T00:00:01.000Z")).unwrap();

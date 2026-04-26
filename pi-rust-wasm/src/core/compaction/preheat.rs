@@ -86,50 +86,86 @@ use super::truncation::floor_char_boundary;
 const MAX_PREHEAT_RETRIES: u32 = 3;
 
 // ---------------------------------------------------------------------------
-// Prompt templates (aligned with context-management.md §7.1 / §7.3)
+// Prompt templates (T2-P0-002 Phase B — 9 节模板，唯一来源：
+//   - docs/reports/compaction-prompt-cc-vs-pi.md §5.3 (BASE)
+//   - docs/reports/compaction-prompt-cc-vs-pi.md §5.4 (UPDATE)
+//
+// 设计要点（详见 docs/reports/compaction-prompt-cc-vs-pi.md §5.5 与 §5.7.1）：
+//   1. 首行固定 `Respond with text only. Do not call any tools.` —— 防止部分 provider
+//      在摘要场景误调工具，与 generate_summary 中 ChatRequest.tools = None 形成双保险。
+//   2. 指令区追加 `First reason internally, then output the final summary.` —— Two-pass
+//      decision freeze（关闭 #T-044）的替代策略，让模型走内部隐式推理，避免双轮草稿翻倍 token。
+//   3. 9 节结构 + Recent User Messages 保留最近 10 条用户原话 + Next Steps verbatim 引用，
+//      让下一轮 LLM 能从摘要直接接力，不再丢任务上下文。
+//   4. 历史模板对齐 context-management.md §7.1 / §7.3 仍保留，Phase G 由
+//      `impl-G-arch-spec-doc` 在 `Compaction v2（T2-P0-002）` 小节统一记录。
 // ---------------------------------------------------------------------------
 
-const SUMMARIZATION_PROMPT: &str = r#"You are a context compaction assistant. Summarize the following conversation segment into a structured format under ~8K tokens. Preserve all critical information needed for the AI assistant to continue working effectively.
+pub(super) const SUMMARIZATION_PROMPT: &str = r#"Respond with text only. Do not call any tools.
 
-Output format:
+Create a structured context checkpoint that another LLM will use to continue the work.
+The entire summary should be under ~8K tokens. Prioritize actionable information.
+
+First reason internally, then output the final summary.
+
+Use this EXACT format:
+
 ## Goal
-What the user is trying to accomplish.
+[What is the user trying to accomplish? Can be multiple items.]
 
-## Constraints
-Any rules, preferences, or constraints mentioned.
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
 
 ## Progress
-What has been done so far (key actions, tool calls, results).
+### Done
+- [x] [Completed task] (file: path/to/file, if applicable)
+- [x] ...
 
 ### In Progress
-Current tasks that are underway but not yet completed.
+- [ ] [Current work]
 
 ### Blocked
-Tasks that cannot proceed and their reasons.
+- [Issues preventing progress, if any]
+
+## Errors Encountered
+- **[Error description]**: [How it was fixed / current status]
+- [Or "(none)" if no errors]
 
 ## Key Decisions
-Important decisions made and their rationale.
+- **[Decision]**: [Brief rationale]
 
-## Critical Context
-File paths, variable names, error messages, or other specific details that must be preserved.
+## Recent User Messages
+- [Verbatim or near-verbatim quote of the 10 most recent non-tool user messages, to preserve task intent]
 
 ## Next Steps
-What should happen next based on the conversation."#;
+1. [Most immediate next step. Include a short quote from the latest conversation showing what was being worked on.]
+2. [Subsequent steps]
 
-const UPDATE_SUMMARIZATION_PROMPT: &str = r#"You are a context compaction assistant. You have an existing summary and a new conversation segment. Merge them into a single updated summary under ~8K tokens, keeping the same structured format. Drop information that is no longer relevant, and add new information from the recent segment.
+## Critical Context
+- [Any data, file paths, variable names, error messages, or references needed to continue]
+- [Or "(none)" if not applicable]"#;
+
+pub(super) const UPDATE_SUMMARIZATION_PROMPT: &str = r#"Respond with text only. Do not call any tools.
+
+Update the existing structured summary with new information. The output REPLACES the old summary entirely.
+
+First reason internally, then output the final summary.
 
 Existing summary:
 {existing_summary}
 
-Output format:
-## Goal
-## Constraints
-## Progress
-### In Progress
-### Blocked
-## Key Decisions
-## Critical Context
-## Next Steps"#;
+RULES:
+- PRESERVE information from the previous summary that is still relevant
+- ADD new progress, decisions, errors, and context from the new messages
+- UPDATE Progress: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" and "Recent User Messages" to reflect the latest state
+- REMOVE information that is no longer relevant to free space
+- The complete updated summary should be under ~8K tokens
+- When the old summary is already large, compress older details to stay within budget
+- PRESERVE exact file paths, function names, and error messages
+
+Use the EXACT same format as the original summary (Goal / Constraints & Preferences / Progress / Errors Encountered / Key Decisions / Recent User Messages / Next Steps / Critical Context)."#;
 
 // ---------------------------------------------------------------------------
 // PreheatState (internal — not pub)
@@ -363,6 +399,8 @@ impl Preheat {
                                 estimated_covered_tokens_before: Some(est_covered_tok),
                                 estimated_summary_tokens: Some(est_summary_tok),
                                 estimated_tokens_saved: Some(est_saved),
+                                error: None,
+                                attempts: None,
                             });
 
                         let (transcript_compaction_entry_id, append_ok) = if transcript_path
@@ -419,7 +457,49 @@ impl Preheat {
                             "preheat attempt {}/{} failed: {}",
                             attempt, MAX_PREHEAT_RETRIES, last_error
                         );
+                        // T2-P0-002 Phase D：失败重试加指数退避（500ms / 1s / 2s）。
+                        // attempt < MAX_PREHEAT_RETRIES 时才睡，避免最后一次 Err 后做无意义的等待。
+                        // `500 << (attempt - 1)` ⇒ attempt=1→500ms, attempt=2→1000ms（attempt=3 不睡）。
+                        // 该 await 位于 tokio::spawn 的异步上下文，不会阻塞调用线程；测试用
+                        // `tokio::time::pause` + `advance` 控制虚拟时钟（详见 tests/preheat_backoff.rs）。
+                        if attempt < MAX_PREHEAT_RETRIES {
+                            let backoff = std::time::Duration::from_millis(500u64 << (attempt - 1));
+                            tokio::time::sleep(backoff).await;
+                        }
                     }
+                }
+            }
+
+            // T2-P0-002 Phase D：3 次重试全部失败 → 在 transcript 落一条
+            // BranchSummaryEntry { summary: None, error, attempts } 失败锚点。
+            // 同时承接 #T-040：LLM 因 batch 过长返回 `context_length_exceeded` 也走同一路径，
+            // 不再为「超大消息」单独引入硬截断（详见计划 §6.C 决议段 + 报告 §5.7）。
+            // reload 时 `session::manager::context::fold_entries_to_messages` 凭 `summary == None`
+            // 跳过该行，不会重建假摘要 ChatMessage（详见 transcript.rs 字段注释）。
+            let failure_entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                id: Some(batch_compaction_id.clone()),
+                parent_id: None,
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                summary: None,
+                covered_start_id: Some(covered_start_id.clone()),
+                covered_end_id: Some(covered_end_id.clone()),
+                covered_count: Some(covered_count),
+                is_boundary: Some(false),
+                preheat_compaction_id: Some(batch_compaction_id.clone()),
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: Some(last_error.clone()),
+                attempts: Some(MAX_PREHEAT_RETRIES),
+            });
+            if !transcript_path.as_os_str().is_empty() {
+                if let Err(e) =
+                    insert_entry_after_message_id(&transcript_path, &covered_end_id, &failure_entry)
+                {
+                    warn!(
+                        "preheat failure-trail insert_entry_after_message_id failed: {}",
+                        e
+                    );
                 }
             }
 
@@ -587,10 +667,16 @@ pub async fn generate_summary(
         SUMMARIZATION_PROMPT.to_string()
     };
 
+    // Compaction MUST NOT carry tools — 显式 `tools: None` 与 prompt 首行
+    // `Respond with text only. Do not call any tools.` 形成双保险：
+    //   - 即使某些 provider 忽略 prompt 指令，请求体里没有 tool schema 也无法触发 tool_call；
+    //   - 若未来通过 `..Default::default()` 引入新字段，显式赋值能保证 compaction 路径不被默认 tool 推送污染。
+    // 详见 docs/reports/compaction-prompt-cc-vs-pi.md §5.6 / §5.7.1，以及计划 §6.B 子项 2。
     let req = ChatRequest {
         model: compaction_model.to_string(),
         messages: vec![ChatMessage::system(&prompt), ChatMessage::user(&batch_text)],
         stream: Some(false),
+        tools: None,
         ..Default::default()
     };
 
