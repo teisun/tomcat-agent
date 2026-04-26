@@ -1,6 +1,77 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-04-25 19:42 | INTEGRATED | develop | — |
+| Nibbles | 2026-04-26 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-002 compaction-prompt-and-ctx-v2（摘要 9 节 + 退避留痕 + spec）
+
+**合并信息**
+
+- 源分支：`feature/compaction-prompt-9section` @ `ceaa8b8`（8 commits）
+- 合并 commit：`1fb0a62 merge(T2-P0-002): feature/compaction-prompt-9section → develop (compaction 9 节 + 退避留痕 + spec)`
+- 合并策略：`--no-ff`，ort 无冲突
+- 负责任务：T2-P0-002（Spike 交付，Nibbles 集成复核）
+- 覆盖范围：`pi-rust-wasm` 内 21 文件（`preheat.rs` 9 节模板、`transcript.rs` `BranchSummaryEntry` 扩展、`context-management.md` §7.5、`compaction-prompt-cc-vs-pi.md` §5.6 等）
+
+**§1 规格 & 场景库核对**
+
+- 本次为 Compaction 内部行为 + transcript schema 扩展，**无新增 CLI 子命令**；`User_Stories.md` / `E2E_SCENARIO_LIBRARY.md` 无强制新增条目（与分支侧 plan 一致）。
+- 架构单一事实来源：[`context-management.md` §7.5](../../openspec/specs/architecture/context-management.md) 与 [`preheat.rs`](../../src/core/compaction/preheat.rs) 中 `pub(super) const` 对齐；**不实施**项 `#T-040` / `#T-043` / `#T-044` 在 §7.5.4 与 [报告 §5.7](../reports/compaction-prompt-cc-vs-pi.md) 回链一致。
+
+**§2 集成测试 review（compaction / session）**
+
+- `BranchSummaryEntry` 新增 `error` / `attempts` 为 `Option` + `serde` 默认与 `skip_serializing_if`，旧 JSONL 缺字段可反序列化；`summary == None` 失败行 fold 时跳过，不造假摘要消息（与 spec §7.5.3 一致）。
+- 新增 `prompt_snapshot.rs` / `legacy_transcript_compat.rs` / 扩展 `preheat_and_truncation.rs` 断言无 `#[ignore]`、无放宽阈值；退避用 tokio 虚拟时钟（`dev-dependencies` 仅加 `test-util` feature）。
+
+**§3 E2E**
+
+- `context_management_tests` 19/19 通过；`cli_tests` / `wasmedge_e2e_tests` 未因 compaction 变更回归（间接依赖 agent_loop + session 链路与既有场景一致）。
+
+**§4 全量门禁**（在 `develop` 合并后、`pi-rust-wasm` 根目录；`source ~/.wasmedge/env` + 可选 `source .env`）
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | 通过（~3m28s） |
+| `cargo clippy --all-targets -- -D warnings` | 零警告 |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --lib -- --nocapture --test-threads=1` | **454 passed; 0 failed; 1 ignored** |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | **195 passed; 0 failed; 0 ignored**（日志：`.integration_develop_merge.log`） |
+
+集成 / E2E 各 crate 明细（与 T2-P0-001 同结构）：
+
+| crate | 结果 |
+| :--- | :--- |
+| `agent_loop_tests` | 11/11 |
+| `audit_tests` | 1/1 |
+| `cli_tests` | 77/77 |
+| `context_management_tests` | 19/19 |
+| `event_tests` | 4/4 |
+| `hostcall_tests` | 5/5 |
+| `js_api_alignment_tests` | 2/2 |
+| `llm_tests` | 2/2 |
+| `long_lived_vm_tests` | 13/13 |
+| `plugin_tests` | 3/3 |
+| `primitives_tools_tests` | 10/10 |
+| `robustness_tests` | 5/5 |
+| `session_tests` | 4/4 |
+| `wasmedge_e2e_tests` | 39/39 |
+
+**编码规范家族对照（抽样）**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | 通过 | compaction 仍在 `core::compaction`；LLM 调用不携带 tools；transcript 扩展向后兼容 |
+| `RUST_IDIOMS_SPEC.md` | 通过 | clippy 零警告 |
+
+**时间 / 环境**
+
+- 主机：macOS；Rust toolchain：项目 `rust-toolchain.toml`
+- 已 `source $HOME/.wasmedge/lib` 路径经 `~/.wasmedge/env`；若存在 `pi-rust-wasm/.env` 则注入 `OPENAI_API_KEY`（`llm_tests` / `cli_tests` 部分用例）
+- WasmEdge harness  stderr `Code: 0x8d` 为已知非失败信号（以 harness `ok` 为准）
+
+**结论**
+
+T2-P0-002 集成验收**通过**：`--no-ff` 合并无冲突；门禁全绿；看板 T2-P0-002 更新为 `DONE`。
+
+---
 
 ### 集成测试报告 — T2-P0-001 agent-loop-modularization（Agent Loop 模块化拆分）
 
