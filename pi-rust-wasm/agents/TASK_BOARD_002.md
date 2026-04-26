@@ -151,33 +151,36 @@
 | **负责人** | — |
 | **分支** | `feature/compaction-prompt-9section` |
 | **阻塞点** | — |
-| **关联 TODOS** | `#T-040`、`#T-041`、`#T-043`、`#T-044`、`#T-136`、`#T-137`；继承归档 TASK-19 剩余 |
-| **关联报告** | [compaction-prompt-cc-vs-pi.md](../docs/reports/compaction-prompt-cc-vs-pi.md) §5.3/§5.4 |
+| **关联 TODOS** | `#T-041`、`#T-136`、`#T-137`；**改判**：`#T-040` 关闭归并、`#T-044` 报告决议关闭、`#T-043` 抽出 T2-P0-011；继承归档 TASK-19 剩余 |
+| **关联报告** | [compaction-prompt-cc-vs-pi.md](../docs/reports/compaction-prompt-cc-vs-pi.md) §5.3/§5.4/§5.7 |
+| **计划文档** | `~/.cursor/plans/compaction_prompt_9-section_41653219.plan.md`（含 §6.C / §6.E 改判决议段） |
 
-**目标**：把 `src/core/compaction/summary.rs` 的 5 节摘要模板升级为 9 节（对齐 CC）；Compaction 路径的 `ChatRequest` 显式不传 `tools` 并加首行禁工具声明；合并 TASK-19 的异步预热 / 级联降压 / 落盘剩余项。
+**目标**：把 `src/core/compaction/preheat.rs` 的 5 节摘要模板升级为 9 节（对齐 CC）；Compaction 路径的 `ChatRequest` 显式不传 `tools` 并加首行禁工具声明；补齐指数退避 + transcript 失败留痕收尾项；合并 TASK-19 的异步预热 / 级联降压 / 落盘剩余项。
 
 **子项**：
 - [ ] 9 节摘要模板：Intent / Key Technical Concepts / Files and Code Sections / Errors and Fixes / Problem Solving / All User Messages / Pending Tasks / Current Work / Optional Next Step（+ Errors Encountered / Recent User Messages 两节）
-- [ ] Compaction 入口禁 tools：`ChatRequest { tools: None, tool_choice: None, .. }`；Prompt 首行追加 `Respond with text only. Do not call any tools.`
-- [ ] 超大文件处理（>800K / 超预算）：fallback 到截断 + 哨兵消息，不再 panic
-- [ ] 压缩任务失败重试：指数退避 3 次；失败时留痕 transcript
-- [ ] 大文件多次编辑写入：分块落盘 + 合并锚点
-- [ ] 先写分析草稿再输出摘要正文（Two-pass summary）
-- [ ] 回归集成测试：`tests/compaction/*` 全绿
+- [ ] Compaction 入口禁 tools：`ChatRequest { tools: None, .. }`（**不引入** `tool_choice` 字段，避免破 `ChatRequest` 公共结构）；Prompt 首行追加 `Respond with text only. Do not call any tools.`
+- [-] ~~超大文件处理（>800K / 超预算）：fallback 到截断 + 哨兵消息，不再 panic~~ — **不实施 / `#T-040` 关闭归并**（`2026-04-26`，按 plan §6.C 决议；现有 Layer 0 + Phase D 失败留痕已覆盖；compaction 不兼任输入校验）
+- [ ] 压缩任务失败重试：指数退避 3 次（500ms / 1s / 2s）；3 次都失败时 transcript 写一条 `BranchSummaryEntry { summary: None, error, attempts }`（**同时承接 `#T-040` 超大消息 → LLM 拒绝路径**）
+- [-] ~~大文件多次编辑写入：分块落盘 + 合并锚点~~ — **不实施 / `#T-043` 改判归属抽出 T2-P0-011**（`2026-04-26`，按 plan §6.E 决议；原 TODO 真实归属是 `executor/primitives.rs::edit_file`，与 compaction 无关）
+- [-] ~~先写分析草稿再输出摘要正文（Two-pass summary）~~ — **不实施 / `#T-044` 报告决议关闭**（`2026-04-26`；详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7`](../docs/reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals)，prompt 内加一句"先内部 reason 再输出"做隐式诱导）
+- [ ] 架构 spec 落档：新增 `openspec/specs/architecture/compaction-resilience.md`（按 [DOCUMENTATION_GUIDE §2B](../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md) 6 MUST）+ `context-management.md §7` 收为索引页
+- [ ] 回归集成测试：`tests/compaction/*` 全绿（含新增 prompt snapshot + 退避 + 失败留痕 2 组用例）
 
-**依赖**：T2-P0-001（Agent Loop 拆分后便于替换 compaction 注入点）
+**依赖**：T2-P0-001（Agent Loop 拆分后便于替换 compaction 注入点；2026-04-25 已 DONE）
 
 **被依赖**：T2-P1-001（Checkpoint 依赖新摘要锚点）
 
 **协作接口**：
-- 消费：`src/core/llm/`、`src/core/compaction/{summary,apply,preheat}.rs`
-- 提供：`Compactor::summarize`（新签名，不变对外 API）
+- 消费：`src/core/llm/`、`src/core/compaction/{preheat,apply,truncation}.rs`、`src/core/session/transcript.rs`
+- 提供：`BranchSummaryEntry { error, attempts }` 字段扩展（向后兼容）；`Compactor::summarize` 行为不变
 
 **验收标准**：
 - 9 节模板的结构化输出通过 snapshot 测试
-- 禁 tools 声明在 request 中生效（日志可验证）
-- 大文件 / 压缩失败 / 多次编辑 3 个极端场景 E2E 全绿
-- 与 `#T-136` `#T-137` 两条 TODO 一一对应
+- 禁 tools 声明在 request 中生效（`tools: None` + 首行 prompt）
+- 退避 + 留痕场景 E2E 全绿（含 mock `LlmError::ContextLengthExceeded` 用例覆盖 `#T-040` 承接语义）
+- 与 `#T-041` / `#T-136` / `#T-137` 三条 TODO 一一对应；`#T-040` / `#T-044` 改判结论落档；`#T-043` 抽出后由 T2-P0-011 承接
+- `compaction-resilience.md` 通过 §2B 6 条 MUST 自检；`context-management.md §7` 收为索引页且零悬空回链
 
 ---
 
@@ -471,6 +474,48 @@
 
 ---
 
+### T2-P0-011 | large-file-edit-strategy | 大文件编辑策略
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/large-file-edit-strategy` |
+| **阻塞点** | — |
+| **关联 TODOS** | `#T-043`（由 T2-P0-002 抽出，2026-04-26） |
+| **关联报告** | [compaction-prompt-cc-vs-pi.md §5.7 Anti-goals](../docs/reports/compaction-prompt-cc-vs-pi.md) 第 3 行（决议来源） |
+
+**目标**：让 Agent 在更新大文件时偏好「多次小 `edit_file`」而非「一次性 `write_file` 大字符串」，避免单条 `tool_input` 字符过大形成上下文 / token 压力。**与 compaction 无关**——本任务在 executor primitives + system prompt 引导层解决。
+
+**子项**（具体方案由计划阶段确定，先列待研究方向）：
+- [ ] 调研 CC / openclaw / hermes-agent 在「写大文件」时如何引导 Agent（system prompt 措辞 / tool description / 大字符串 hint 阈值），输出 ≤ 30 行调研笔记到 `agents/plan/large-file-edit-strategy.md`
+- [ ] 选定方案（计划阶段决定，三选一或组合）：
+  - ① **System prompt 引导**：在 `src/core/system_prompt.rs` 加一句「prefer multiple small `edit_file` calls over one `write_file` with large content」
+  - ② **`write_file` 大字符串 hint**：当 `content.len() > N` 时返回非阻塞 hint（不 reject、不 panic），引导下次改用 `edit_file`
+  - ③ **Tool description 增强**：在 `edit_file` / `write_file` 的 description 中说明使用偏好
+- [ ] 若选方案 ②，新增配置项 `executor.write_file_hint_threshold_chars`（默认值由计划阶段确定）
+- [ ] 集成测试：构造「Agent 修改 1MB 文件中 3 行」场景，验证 Agent 倾向用 `edit_file` 而非 `write_file` 整文件重写
+- [ ] `docs/TODOS.md` 中 `#T-043` 状态改为 `[x]`
+
+**依赖**：T2-P0-002（compaction 收尾后再做，避免与 docs 改动 / `preheat.rs` 路径冲突）；T2-P0-005（工具系统整改先就位再调整 description）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`PrimitiveExecutor::write_file` / `PrimitiveExecutor::edit_file`、`SystemPrompt`、`ToolRegistry::description`
+- 提供：（无新公共 API；行为引导）
+
+**验收标准**：
+- `#T-043` 闭环（`docs/TODOS.md` 改 `[x]`）
+- E2E：Agent 在「修改 1MB 文件中 3 行」场景下调用 `edit_file` 至少 1 次（而非全文 `write_file`）
+- 计划阶段输出 design 短文（≤ 30 行）放 `agents/plan/large-file-edit-strategy.md`
+- 不引入新 panic / reject 路径（兼容现有 4 原语）
+
+**说明（来源溯源）**：本任务源自 plan T2-P0-002 §6.E 决议——`#T-043` 原始 TODO 文案「更新大文件时应该多次编辑写入」**真实归属是 `executor/primitives.rs`**（agent 写大文件方式），与 compaction 无关；原看板把它分到 T2-P0-002 子项 5 属归属错位。详见 [compaction-prompt-cc-vs-pi.md §5.7](../docs/reports/compaction-prompt-cc-vs-pi.md) Anti-goals 第 3 行 + plan §6.E 决议段。
+
+---
+
 ### T2-P1-001 | checkpoint-resume | Checkpoint + 断点续跑
 
 | 字段 | 内容 |
@@ -685,6 +730,8 @@ flowchart LR
     P004[T2-P0-004<br/>权限分级] --> P005[T2-P0-005<br/>工具系统]
     P005 --> P008[T2-P0-008<br/>TUI 强化]
     P006 --> P008
+    P002 --> P011[T2-P0-011<br/>大文件编辑策略<br/>由 #T-043 抽出]
+    P005 --> P011
     P007 --> P101[T2-P1-001<br/>Checkpoint]
     P101 --> P102[T2-P1-002<br/>PLAN 增强]
     P008 --> P103[T2-P1-003<br/>提问/应答]
@@ -706,3 +753,4 @@ flowchart LR
 | 2026-04-23 | T2-P0-007 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/interrupt-resume` @ `a0c6260` `--no-ff` 合并入 develop（merge commit `3518089`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test --lib`（432/432）+ `cargo test --test '*'`（含 cli_tests 77 / wasmedge_e2e_tests 39）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（预警留痕：`run.rs` 948、`preheat.rs` 646、`chat/mod.rs` 502 落入 500–1000 黄金区上沿）；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |
 | 2026-04-25 | T2-P0-001 DOING→PENDING_INTEGRATION | Jerry 完成 agent_loop 模块化拆分：`run.rs` 948 → 213 行；新增 `error_classifier` / `stream_handler` / `tool_exec` / `tool_dispatcher` / `accessors` / `turn_finalize` / `reasoning_loop` 七个子模块；`tests.rs` 1277 行拆为 `tests/` 子目录 8 文件 26 用例（含 4 个直查 `pub(super)` 子模块的焦小测）；门禁 `cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test --lib --test-threads=1`（436/436、1 ignored）全绿；并发模式下 `api::cli::tests::run_doctor_after_init_returns_ok` / `core::executor::tests::list_dir_path_in_blacklist_returns_err` 因共享 `~/.pi_/assets/.lock` + chdir 资源竞争 flaky，与本次拆分无关，串行通过；外部 API + 事件顺序契约完全保持；`src/ext/dispatcher/` 经评估暂不重构（详见 status 文件决策段）；待 Nibbles 集成复核 |
 | 2026-04-25 | T2-P0-001 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/agent-loop-split` @ `28b74dd` `--no-ff` 合并入 develop（merge commit `45c43b6`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test -j 1 --lib --test-threads=1`（436/436、1 ignored）+ `cargo test -j 1 --test '*' --test-threads=1`（agent_loop_tests 11 / cli_tests 77 / context_management_tests 19 / wasmedge_e2e_tests 39 等共 195 用例）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（业务文件最大 246 行，全部 ≤ 300 红线）；规格漂移已就地补齐：`openspec/specs/architecture/interrupt-and-cancellation.md` 与 `E2E_SCENARIO_LIBRARY.md` 中对原 `agent_loop/tests.rs` 单文件的引用改为 `agent_loop/tests/interrupt.rs`；外部 API + 事件顺序契约完全保持；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |
+| 2026-04-26 | T2-P0-002 立项决议落档 + T2-P0-011 新建 | Spike 在 plan `compaction_prompt_9-section_41653219.plan.md` 阶段输出三项决议改判：① **`#T-040` 关闭归并**（plan §6.C；现有 Layer 0 + Phase D 失败留痕已覆盖；compaction 不兼任输入校验）；② **`#T-043` 改判归属抽出 T2-P0-011**（plan §6.E；原 TODO 真实归属是 `executor/primitives.rs::edit_file`，与 compaction 无关，归属错位）；③ **`#T-044` 在原报告关闭**（plan Phase A；CC fork+cache 抵消草稿成本，Pi 单次 LLM 直发多一轮草稿性价比不好；改在 prompt 内加一句"先内部 reason"做隐式诱导）。同步：T2-P0-002 子项 3/5/6 标"不实施"+保留删除线；新建 `T2-P0-011 \| large-file-edit-strategy` 任务承接 `#T-043`；`docs/TODOS.md` 顶部速查表 + 详细条目区三行同步落档；`docs/reports/compaction-prompt-cc-vs-pi.md §5.7 Anti-goals` 新增三行"明确不做的事项"。本次仅文档落档，无代码改动 |

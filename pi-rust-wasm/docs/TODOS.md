@@ -67,10 +67,10 @@
 | T-036 | 工具 | Chat 不访问当前目录也不申请授权 | 不尝试访问也不弹授权 | T2-P0-005 |
 | T-037 | 工具 | 无法在规划中执行 pi 命令 | 规划模式约束 | T2-P0-005 |
 | T-039 | 工具 | 拦截删除换成归档 | 安全增强 | T2-P0-005 |
-| T-040 | 上下文 | 超大文件处理崩溃 | compaction 崩溃 | T2-P0-002 |
+| T-040 | 上下文 | 超大文件处理崩溃 | compaction 崩溃 | T2-P0-002（**关闭归并 2026-04-26**：Layer 0 + Phase D 已覆盖） |
 | T-041 | 上下文 | 压缩任务失败重试 | 可靠性 | T2-P0-002 |
-| T-043 | 上下文 | 大文件多次编辑写入 | 分块落盘 | T2-P0-002 |
-| T-044 | 上下文 | 摘要先写草稿再输出正文 | Two-pass | T2-P0-002 |
+| T-043 | 工具/原语 | 大文件多次编辑写入 | agent 写大文件方式（`edit_file` 偏好） | T2-P0-011（**改判 2026-04-26**：归属由 compaction 转 executor primitives） |
+| T-044 | 上下文 | 摘要先写草稿再输出正文 | Two-pass | T2-P0-002（**报告决议关闭 2026-04-26**：详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7`](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals)） |
 | T-046 | 权限 | 工作目录读写授权分级缺失 | 读/写权限未分级 | T2-P0-004 |
 | T-047 | 权限 | 非工作目录操作被直接拒绝而非申请授权 | 直接 403 | T2-P0-004 |
 | T-048 | 权限 | 给工作目录加别名和描述 | 体验优化 | T2-P0-004 |
@@ -417,10 +417,11 @@
 
 ## 六、上下文管理与压缩
 
-- [ ] **[P0] `[BUG]`** `#T-040` 超大文件处理
+- [-] **[P0] `[BUG]`** `#T-040` 超大文件处理 — **关闭归并**（`2026-04-26`）
   - 超过 800K 字符、超过预算的大文件
-  - 档位：T2-P0-002
+  - 档位：T2-P0-002（不单立子项实施）
   - 关联模块：`src/core/compaction/`
+  - **决议（plan T2-P0-002 §6.C）**：核实代码后确认 [`preheat.rs::messages_to_text`](../src/core/compaction/preheat.rs) 对 User/Assistant 不做切片，**不存在字符边界 panic**；现有 Layer 0（>=50K Tool 消息落盘 + 200 字 preview）已覆盖主路径；剩余风险（拼出超长 batch_text 让 LLM 返回 `context_length_exceeded`）由 Phase D 退避 + transcript 失败留痕直接承接，用户视角是「ratio 高 + 一条 fail entry」，不 panic / 不 abort，可接受。详见 [报告 §5.7 Anti-goals](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 2 行。
 
 - [ ] **[P0] `[BUG]`** `#T-041` 压缩任务的失败重试
   - 档位：T2-P0-002
@@ -429,12 +430,15 @@
 - [ ] **[P1] `[REF]`** `#T-042` Checkpoint 机制
   - 档位：T2-P1-001
 
-- [ ] **[P0] `[REF]`** `#T-043` 更新大文件时应该多次编辑写入
-  - 档位升档自 P2：T2-P0-002
+- [ ] **[P0] `[REF]`** `#T-043` 更新大文件时应该多次编辑写入 — **改判归属 2026-04-26**
+  - 档位升档自 P2：~~T2-P0-002~~ → **T2-P0-011 `large-file-edit-strategy`**
+  - 关联模块：`src/core/executor/primitives.rs::edit_file` / `src/core/executor/primitives.rs::write_file` / `src/core/system_prompt.rs`（**不在 compaction 路径**）
+  - **决议（plan T2-P0-002 §6.E）**：原始 TODO 文案「更新大文件时应该多次编辑写入」真实归属是「agent 写大文件时偏好多次小 `edit_file` 而非一次性 `write_file` 大字符串」，与 compaction 无关；原看板把它归到 T2-P0-002 子项 5 属归属错位，已抽出独立任务 T2-P0-011 承接。详见 [报告 §5.7 Anti-goals](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 3 行。
 
-- [ ] **[P0] `[REF]`** `#T-044` 摘要先写分析草稿思考，再输出摘要正文
+- [-] **[P0] `[REF]`** `#T-044` 摘要先写分析草稿思考，再输出摘要正文 — **报告决议关闭**（`2026-04-26`）
   - 档位升档自 P2：T2-P0-002
   - 关联模块：`src/core/compaction/preheat.rs`
+  - **决议（plan T2-P0-002 Phase A）**：CC 通过 fork 子代理 + prompt cache 抵消草稿成本，Pi 单次 LLM 直发，多一轮草稿 = token 翻倍，性价比不好；改为在 prompt 内加一句"先内部 reason 再输出"做隐式诱导。详见 [报告 §5.7 Anti-goals](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 1 行（plan Phase A 落地）。
 
 - [ ] **[P3] `[REF]`** `#T-045` Token 节省机制
   - 工具结果用完 2 轮后落盘/删除
