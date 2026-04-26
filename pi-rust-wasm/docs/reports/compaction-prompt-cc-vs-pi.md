@@ -145,7 +145,7 @@ Use this EXACT format:
 - **[Decision]**: [Brief rationale]
 
 ## Recent User Messages
-- [Verbatim or near-verbatim quote of the 2~3 most recent non-tool user messages, to preserve task intent]
+- [Verbatim or near-verbatim quote of the 10 most recent non-tool user messages, to preserve task intent]
 
 ## Next Steps
 1. [Most immediate next step. Include a short quote from the latest conversation showing what was being worked on.]
