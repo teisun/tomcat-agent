@@ -147,8 +147,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `DOING`（`2026-04-26` 由 Spike 认领） |
+| **负责人** | Spike |
 | **分支** | `feature/compaction-prompt-9section` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-041`、`#T-136`、`#T-137`；**改判**：`#T-040` 关闭归并、`#T-044` 报告决议关闭、`#T-043` 抽出 T2-P0-011；继承归档 TASK-19 剩余 |
@@ -164,7 +164,7 @@
 - [ ] 压缩任务失败重试：指数退避 3 次（500ms / 1s / 2s）；3 次都失败时 transcript 写一条 `BranchSummaryEntry { summary: None, error, attempts }`（**同时承接 `#T-040` 超大消息 → LLM 拒绝路径**）
 - [-] ~~大文件多次编辑写入：分块落盘 + 合并锚点~~ — **不实施 / `#T-043` 改判归属抽出 T2-P0-011**（`2026-04-26`，按 plan §6.E 决议；原 TODO 真实归属是 `executor/primitives.rs::edit_file`，与 compaction 无关）
 - [-] ~~先写分析草稿再输出摘要正文（Two-pass summary）~~ — **不实施 / `#T-044` 报告决议关闭**（`2026-04-26`；详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7`](../docs/reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals)，prompt 内加一句"先内部 reason 再输出"做隐式诱导）
-- [ ] 架构 spec 落档：新增 `openspec/specs/architecture/compaction-resilience.md`（按 [DOCUMENTATION_GUIDE §2B](../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md) 6 MUST）+ `context-management.md §7` 收为索引页
+- [ ] 架构 spec 落档：仅在 `openspec/specs/architecture/context-management.md` 增加一个简短小节（建议标题 `Compaction v2（T2-P0-002）`），简明记录本计划 3 个落地点（9 节模板、禁 tools、退避+留痕）+ 3 项不实施决议回链（`#T-040`/`#T-043`/`#T-044`）；**不新增** `compaction-resilience.md`，**不做** §7 索引化搬迁（按 plan §6.G 决议）
 - [ ] 回归集成测试：`tests/compaction/*` 全绿（含新增 prompt snapshot + 退避 + 失败留痕 2 组用例）
 
 **依赖**：T2-P0-001（Agent Loop 拆分后便于替换 compaction 注入点；2026-04-25 已 DONE）
@@ -180,7 +180,7 @@
 - 禁 tools 声明在 request 中生效（`tools: None` + 首行 prompt）
 - 退避 + 留痕场景 E2E 全绿（含 mock `LlmError::ContextLengthExceeded` 用例覆盖 `#T-040` 承接语义）
 - 与 `#T-041` / `#T-136` / `#T-137` 三条 TODO 一一对应；`#T-040` / `#T-044` 改判结论落档；`#T-043` 抽出后由 T2-P0-011 承接
-- `compaction-resilience.md` 通过 §2B 6 条 MUST 自检；`context-management.md §7` 收为索引页且零悬空回链
+- `context-management.md` 新增 `Compaction v2` 小节简明覆盖 3 个落地点 + 3 项不实施决议回链；与本分支 `preheat.rs` / `transcript.rs` 实际改动一一对应（No-Stale）；零悬空回链
 
 ---
 
@@ -754,3 +754,4 @@ flowchart LR
 | 2026-04-25 | T2-P0-001 DOING→PENDING_INTEGRATION | Jerry 完成 agent_loop 模块化拆分：`run.rs` 948 → 213 行；新增 `error_classifier` / `stream_handler` / `tool_exec` / `tool_dispatcher` / `accessors` / `turn_finalize` / `reasoning_loop` 七个子模块；`tests.rs` 1277 行拆为 `tests/` 子目录 8 文件 26 用例（含 4 个直查 `pub(super)` 子模块的焦小测）；门禁 `cargo fmt --check` + `clippy --all-targets -D warnings` + `cargo test --lib --test-threads=1`（436/436、1 ignored）全绿；并发模式下 `api::cli::tests::run_doctor_after_init_returns_ok` / `core::executor::tests::list_dir_path_in_blacklist_returns_err` 因共享 `~/.pi_/assets/.lock` + chdir 资源竞争 flaky，与本次拆分无关，串行通过；外部 API + 事件顺序契约完全保持；`src/ext/dispatcher/` 经评估暂不重构（详见 status 文件决策段）；待 Nibbles 集成复核 |
 | 2026-04-25 | T2-P0-001 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/agent-loop-split` @ `28b74dd` `--no-ff` 合并入 develop（merge commit `45c43b6`，无冲突）；develop 上复跑 `cargo build --release` + `clippy --all-targets -- -D warnings`（零警告）+ `cargo test -j 1 --lib --test-threads=1`（436/436、1 ignored）+ `cargo test -j 1 --test '*' --test-threads=1`（agent_loop_tests 11 / cli_tests 77 / context_management_tests 19 / wasmedge_e2e_tests 39 等共 195 用例）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查通过（业务文件最大 246 行，全部 ≤ 300 红线）；规格漂移已就地补齐：`openspec/specs/architecture/interrupt-and-cancellation.md` 与 `E2E_SCENARIO_LIBRARY.md` 中对原 `agent_loop/tests.rs` 单文件的引用改为 `agent_loop/tests/interrupt.rs`；外部 API + 事件顺序契约完全保持；详见 `docs/status/develop.md` 顶部集成测试报告 status 块 |
 | 2026-04-26 | T2-P0-002 立项决议落档 + T2-P0-011 新建 | Spike 在 plan `compaction_prompt_9-section_41653219.plan.md` 阶段输出三项决议改判：① **`#T-040` 关闭归并**（plan §6.C；现有 Layer 0 + Phase D 失败留痕已覆盖；compaction 不兼任输入校验）；② **`#T-043` 改判归属抽出 T2-P0-011**（plan §6.E；原 TODO 真实归属是 `executor/primitives.rs::edit_file`，与 compaction 无关，归属错位）；③ **`#T-044` 在原报告关闭**（plan Phase A；CC fork+cache 抵消草稿成本，Pi 单次 LLM 直发多一轮草稿性价比不好；改在 prompt 内加一句"先内部 reason"做隐式诱导）。同步：T2-P0-002 子项 3/5/6 标"不实施"+保留删除线；新建 `T2-P0-011 \| large-file-edit-strategy` 任务承接 `#T-043`；`docs/TODOS.md` 顶部速查表 + 详细条目区三行同步落档；`docs/reports/compaction-prompt-cc-vs-pi.md §5.7 Anti-goals` 新增三行"明确不做的事项"。本次仅文档落档，无代码改动 |
+| 2026-04-26 | T2-P0-002 TODO→DOING | Spike 认领并从 develop 拉出 `feature/compaction-prompt-9section`；同步把字段表「架构 spec 落档」子项与验收标准对齐 plan §6.G 决议——**不新增** `compaction-resilience.md`，**不做** §7 索引化搬迁，仅在 `openspec/specs/architecture/context-management.md` 增加一个简短小节（`Compaction v2（T2-P0-002）`）记录 9 节模板 / 禁 tools / 退避+留痕 + 3 项不实施决议回链。本次仅看板状态字段同步，无代码改动 |
