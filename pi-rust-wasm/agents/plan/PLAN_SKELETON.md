@@ -64,6 +64,42 @@
 
 ---
 
+## 文件职责总览（One-Glance Map，[PLAN_SPEC.md](./PLAN_SPEC.md) 一.4，条件触发 MUST）
+
+> 触发条件：本计划「关键改动」涉及 ≥ 2 个 `*.rs` 业务源文件。仅 1 个文件可写"不适用：仅改 X"。
+>
+> 硬约束遵循 [DOCUMENTATION_GUIDE §2B.4](../../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md)：①箭头标方向；②每个 `*.rs` 都有节点；③同时挂独立 `tests.rs`；④图后 2–3 句"阅读顺序建议"；⑤实施期偏离须就地标注 `【未改签名 / 依赖 Drop】` 等显式标签。
+
+```text
+ ┌────────────────────────────────┐
+ │  src/.../entry.rs   ── 入口    │
+ │  • fn entry(...)               │
+ │  ★ Phase X：<改动要点>         │
+ │  [tests/entry.rs] 新建/扩展    │
+ └────────────────────────────────┘
+                │
+                ▼
+ ┌────────────────────────────────┐
+ │  src/.../core.rs    ── 核心逻辑│
+ │  • struct CoreState            │
+ │  ★ Phase Y：<改动要点>         │
+ │  [tests/core.rs]               │
+ └────────────────────────────────┘
+                │
+                ▼
+ ┌────────────────────────────────┐
+ │  src/.../sink.rs    ── 落盘    │
+ │  ★ Phase Z：<改动要点>         │
+ │  [tests/sink.rs]               │
+ └────────────────────────────────┘
+```
+
+**阅读顺序**：①入口接收事件 → ②核心逻辑处理状态 → ③落盘持久化（用 12 岁原则一句话复述链路）。
+
+参考样板：[interrupt-and-cancellation.md §9.0](../../openspec/specs/architecture/interrupt-and-cancellation.md)（T2-P0-007 定稿）。
+
+---
+
 ## 实施顺序与依赖
 
 （列表或 Mermaid `flowchart`；标明串行 / 可并行）
