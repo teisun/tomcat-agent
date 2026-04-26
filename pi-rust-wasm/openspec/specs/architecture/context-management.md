@@ -1132,6 +1132,62 @@ Use this EXACT format (same as the original summary):
 
 在内存中作为一条 `ChatMessage::compaction_summary(text)`（`role=user`，`kind=CompactionSummary`，content 为摘要文本）放入 `messages`，替换被压缩的原始消息。
 
+### 7.5 Compaction v2 修订（T2-P0-002）
+
+> 本小节为 [T2-P0-002 计划](../../../agents/TASK_BOARD_002.md#t2-p0-002--compaction-prompt-and-ctx-v2--摘要-prompt-升级--context-v2-收尾) 的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../../../docs/reports/compaction-prompt-cc-vs-pi.md)。
+
+#### 7.5.1 模板升级为 9 节
+
+`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 由 7 节扩展为 9 节，新增 `Errors Encountered`、`Recent User Messages`（最近 10 条用户原话），并要求 `Next Steps` 给出 **verbatim 引用**（精确 file path / 函数名 / 错误信息）。两个模板首行均为 `Respond with text only. Do not call any tools.`，指令区追加 `First reason internally, then output the final summary.`（隐式诱导内部推理，不开 Two-pass 第二轮 LLM）。
+
+模板章节顺序与必要约束：
+
+```
+## Goal
+## Constraints & Preferences
+## Progress    （Done [带 file: 锚点] / In Progress / Blocked）
+## Errors Encountered
+## Key Decisions
+## Recent User Messages    （最近 10 条用户原话，逐字保留）
+## Next Steps    （含 verbatim 引用）
+## Critical Context
+```
+
+行为契约：
+- `<8K tokens` 的输出预算与既有保持一致；§7.2 模型选择不变。
+- 测试锁点见 [`src/core/compaction/tests/prompt_snapshot.rs`](../../../src/core/compaction/tests/prompt_snapshot.rs)（13 用例：9 节标题、text-only 首行、internal-reason 指令、最近 10 条口径、verbatim 要求、文件锚点提示、`{existing_summary}` 占位符等）。
+
+#### 7.5.2 Compaction 请求显式 `tools: None`
+
+`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。`stream: Some(false)`（摘要不流式）。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
+
+#### 7.5.3 失败路径：指数退避 + transcript 留痕
+
+`Compactor::try_start` 内的 `for attempt in 1..=MAX_PREHEAT_RETRIES` 重试 loop **Err 分支末尾**追加 `tokio::time::sleep(500ms << (attempt - 1))`，即 `500ms / 1s / 2s` 三档退避；3 次都失败后通过 `insert_entry_after_message_id` 在 transcript 写一条 `BranchSummaryEntry { summary: None, error: Some(...), attempts: Some(3), is_boundary: false, ... }` 的失败锁点，与既有 `AgentEvent::CompactionError` 事件流并行（事件给上层 UI、留痕给会话重启与人工排查）。
+
+`BranchSummaryEntry` 新增两个可选字段（向后兼容旧 transcript）：
+
+```rust
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub error: Option<String>,
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub attempts: Option<u32>,
+```
+
+`init_context_state` fold 时遇 `summary == None` 直接跳过（不生成假摘要 `ChatMessage`，仅作日志锚点），不影响重启路径与既有 §7.4 boundary 升级语义。
+
+测试锁点见 [`src/core/compaction/tests/preheat_and_truncation.rs`](../../../src/core/compaction/tests/preheat_and_truncation.rs) 与 [`src/core/compaction/tests/legacy_transcript_compat.rs`](../../../src/core/compaction/tests/legacy_transcript_compat.rs)（虚拟时钟下退避计时；3 次耗尽端到端写入；缺字段默认 None；成功条目不序列化失败字段）。
+
+#### 7.5.4 三项不实施决议（关闭/转后续）
+
+T2-P0-002 立项决议中**明确不做**的三项相关动作（决议落档于 [`docs/TODOS.md`](../../../docs/TODOS.md) 与 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §6 变更记录，背景论证见 [报告 §5.7](../../../docs/reports/compaction-prompt-cc-vs-pi.md)）：
+
+| 决议 | 范围 | 承接路径 |
+| :--- | :--- | :--- |
+| `#T-040` 不在 `messages_to_text` 做内容硬截断 | compaction 不兼任输入校验；现有 Layer 0（`>= 50K` 落盘 + 200 字 preview）已覆盖 Tool 路径 | User/Assistant 巨量消息让 LLM 自行返回 `context_length_exceeded`，由 §7.5.3 退避 + 失败留痕路径承接 |
+| `#T-043` 不新增 `tool-results/_index.jsonl` 落盘索引 | 信息可由 transcript 占位符 + fs mtime + 文件名（tool_call_id）完全重建，主路径无消费者 | 真实归属 `executor/primitives.rs::edit_file`（agent 写大文件方式），抽出 [T2-P0-011 large-file-edit-strategy](../../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 承接 |
+| `#T-044` 不实施 Two-pass summary | CC 用 fork 子代理 + prompt cache 抵消草稿成本，Pi 单次 LLM 直发性价比不好 | 模板指令区追加 `First reason internally, then output the final summary.` 隐式诱导，不开第二轮 LLM |
+
 ---
 
 ## 8. 超出本方案范围（Out of Scope）

@@ -193,11 +193,11 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 
 ### 5.6 落地 TODO
 
-- [ ] 将 §5.3 / §5.4 模板同步到 `context-management.md` §7（替换现有 §7.1 / §7.3）
-- [ ] 将 `summary.rs` 中 `SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 与新模板对齐
-- [ ] Compaction 专用 ChatRequest 中显式不传 `tools`（或传空），配合首行禁工具声明
+- [x] 将 §5.3 / §5.4 模板同步到 `context-management.md` §7（已通过 [§7.5 Compaction v2 修订](../../openspec/specs/architecture/context-management.md) 简明补充落地，单一事实来源指向 `preheat.rs` 的 `pub(super) const`）
+- [x] 将 `preheat.rs` 中 `SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 与新模板对齐（含 `Recent User Messages` 最近 10 条 + `First reason internally, then output the final summary.`；测试锁点 [`prompt_snapshot.rs`](../../src/core/compaction/tests/prompt_snapshot.rs) 13 用例）
+- [x] Compaction 专用 ChatRequest 中显式 `tools: None`（双保险：模板首行 `Respond with text only. Do not call any tools.` + 请求体不携带 tool schema）
 
-> 落地工作由 plan [`compaction-prompt-9section`](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md) 承接（T2-P0-002 / Phase B）。完成后本节三项 TODO 标 `[x]`。
+> 落地工作由 plan [`compaction-prompt-9section`](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md) 承接（T2-P0-002 / Phase B），架构 spec 补充见 [`context-management.md` §7.5](../../openspec/specs/architecture/context-management.md)。
 
 ### 5.7 明确不做的事项（Anti-goals）
 

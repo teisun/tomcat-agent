@@ -22,7 +22,7 @@
 - [x] **[流程]** 创建分支 `feature/compaction-prompt-9section`（基于 `develop`）
 - [x] **[流程]** Phase B 末门禁：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test -j 1 --lib -- --test-threads=1` 全绿（449 passed / 0 failed / 1 ignored，含新增 13 个 `prompt_snapshot` 测试）
 - [x] **[流程]** Phase D 末门禁：`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib core::compaction::tests` 全绿（61 passed / 0 failed，含新增 2 个退避/失败留痕 + 3 个 `legacy_transcript_compat` 测试）
-- [ ] **[流程]** F 阶段 §4 全量门禁（按 INTEGRATION_MERGE_AND_ACCEPTANCE「后台写日志 + 轮询」）
+- [x] **[流程]** F 阶段 §4 全量门禁（按 INTEGRATION_MERGE_AND_ACCEPTANCE「后台写日志 + 轮询」）：lib 454 passed / 1 ignored；14 个 integration crate 195 passed / 0 failed（含 `tests/cli_tests.rs` `tests/wasmedge_e2e_tests.rs` `tests/llm_tests.rs` 真实 LLM 路径），日志见 `.integration_test_output_lib.log` / `.integration_test_output.log`
 
 #### 实施类（按 plan §6）
 - [x] **[Phase A]** Two-pass 不实施决议落档：在 `docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1` 新增「Two-pass 决议固化」段落（背景：CC fork 子代理 + prompt cache vs. Pi 单次 LLM 直发；决议：不实施；替代：模板追加 `First reason internally, then output the final summary.`；反向逃生口；关闭轨迹）；§5.7 表格 Two-pass 行回链改指 §5.7.1；`docs/TODOS.md` 顶部速查表 + 详细条目区两处回链同步刷新 — 关闭 `#T-044`
@@ -30,8 +30,8 @@
 - [x] **[Phase B-2]** `generate_summary` 的 `ChatRequest` 显式 `tools: None` + 注释「Compaction MUST NOT carry tools」（双保险：prompt 首行 + 请求体无 tool schema）；两个模板首行固定 `Respond with text only. Do not call any tools.`；新增 `tests/prompt_snapshot.rs` 13 个断言（9 节标题、text-only 首行、内部 reason、最近 10 条、verbatim 引用、文件锚点、占位符、`tools.is_none()` / `stream=Some(false)`、`pub(super)` 可见性 lock）
 - [x] **[Phase D-1]** `preheat.rs` 重试 loop Err 分支尾部追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s）；`Cargo.toml` 启用 `tokio` 的 `test-util` feature（仅 dev-dep）；新增 `preheat_retries_with_exponential_backoff` 用 `tokio::time::pause` + `start_paused = true` 验证虚拟时钟下 3 次 attempt 间累计推进 ≥ 1500ms
 - [x] **[Phase D-2]** `BranchSummaryEntry` 新增 `error: Option<String>` / `attempts: Option<u32>`（`#[serde(default, skip_serializing_if = "Option::is_none")]` 向后兼容）；`generate_summary` 3 次耗尽后通过 `insert_entry_after_message_id` 在 transcript 写入 `summary: None, error, attempts: 3` 失败锁点；新增 `legacy_transcript_compat.rs`（缺字段反序列化默认 None / 成功条目不序列化失败字段 / 失败条目序列化无 summary 字段）+ `preheat_exhausted_writes_failure_entry_to_transcript` 端到端验证；同步 14 处 `BranchSummaryEntry` 构造点初始化 `error: None, attempts: None`
-- [ ] **[Phase F]** 全量回归门禁：`cargo test -j 1 --test '*' --test-threads=1` 后台日志 + 轮询；失败项在本分支修复，不弱化断言
-- [ ] **[Phase G]** F 全绿后仅在 `openspec/specs/architecture/context-management.md` 补充 `Compaction v2（T2-P0-002）` 简短小节（9 节模板 / 禁 tools / 退避+留痕 + 3 项不实施决议回链）；`docs/reports/compaction-prompt-cc-vs-pi.md §5.6` 三项 TODO 改 `[x]`
+- [x] **[Phase F]** 全量回归门禁：lib 454 passed / 1 ignored；`cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 14 crate 195 passed / 0 failed（含 cli_tests / wasmedge_e2e_tests / llm_tests 真实路径），无 wave 弱化、无 `#[ignore]`
+- [x] **[Phase G]** 在 `openspec/specs/architecture/context-management.md` 新增 `§7.5 Compaction v2 修订（T2-P0-002）`：4 个子节覆盖 9 节模板 / 显式 `tools: None` / 退避 + 留痕（含字段 schema），并以表格列出 3 项不实施决议（`#T-040` / `#T-043` / `#T-044`）的承接路径；不新增独立文档、不做 §7 索引化搬迁；同步 `docs/reports/compaction-prompt-cc-vs-pi.md §5.6` 三项 TODO 改 `[x]` 并指向 §7.5
 
 ### 🚫 不实施（已落档关闭）
 
