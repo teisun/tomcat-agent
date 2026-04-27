@@ -10,8 +10,8 @@
 
 ### 1.1 目标
 
-- 工作目录内 read 免授权；write **支持 `always` / `单次` 两档**授权（`AllowAndPersistRoot` / `AllowOnce`），告别一刀切弹窗。
-- 工作目录外的所有操作必须**显式授权**（弹 prompt，而非直接 403），授权后可只授权一次或追加 `extra_roots` / `path_rules` 持久化。
+- **工作目录与 `extra_roots`**：未被 `path_rules`（Deny / Readonly）否决时，读与写均 **默认允许**，无需确认弹窗。
+- **工作目录外**：路径原语必须 **显式授权**（`NeedConfirm` prompt，而非直接 403）；确认时支持 **`always` / `单次` 两档**（`AllowAndPersistRoot` / `AllowOnce`），并可追加 `extra_roots` / `path_rules` 持久化，告别一刀切弹窗。
 - Bash 走**结构化解析**而非整命令行 regex：解析 token、抽取目标路径，再走与 4 原语相同的 `PermissionGate` 决策。
 - 把 `~/.ssh` / `~/.aws` / agent 自身凭据 / 自身审计目录这些「Agent 不该写」的路径用 builtin `path_rules` 兜住。
 - Agent 自我感知：通过 system prompt 告诉模型当前 effective roots / path_rules / agent data dir，让 LLM 不要去试错那些必然被拒的路径。
