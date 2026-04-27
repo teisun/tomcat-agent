@@ -4,6 +4,7 @@ mod audit_cmd;
 mod chat_cmd;
 mod config_cmd;
 mod init;
+mod pathrules_cmd;
 mod plugin_cmd;
 mod session_cmd;
 mod workspace_cmd;
@@ -22,6 +23,7 @@ use crate::{
 pub(crate) use audit_cmd::run_audit;
 pub(crate) use config_cmd::{config_file_path, run_config};
 pub(crate) use init::{run_doctor, run_init};
+pub(crate) use pathrules_cmd::run_pathrules;
 pub(crate) use plugin_cmd::run_plugin;
 pub(crate) use session_cmd::run_session;
 pub(crate) use workspace_cmd::run_workspace;
@@ -85,6 +87,11 @@ pub enum Commands {
         #[command(subcommand)]
         sub: WorkspaceSub,
     },
+    /// 路径规则管理：add/list（plan §9 / PR-10）
+    Pathrules {
+        #[command(subcommand)]
+        sub: PathRulesSub,
+    },
     /// 进入交互式对话模式
     Chat {
         /// 恢复上次会话（默认行为，显式语义）
@@ -144,6 +151,20 @@ pub enum WorkspaceSub {
         /// 要移除的目录路径
         path: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PathRulesSub {
+    /// 追加一条 path_rule（与 `pi config set primitive.path_rules <json>` 等价）
+    Add {
+        /// 目标路径（支持 `~` 前缀；不存在仅警告，仍允许写入）
+        path: String,
+        /// 规则模式：deny（拒绝读写）/ readonly（仅可读）
+        #[arg(long, default_value = "readonly")]
+        mode: String,
+    },
+    /// 列出当前生效的全部 path_rules（builtin / user / session 三段）
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -237,6 +258,7 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),
         Commands::Workspace { sub } => run_workspace(sub, &cfg),
+        Commands::Pathrules { sub } => run_pathrules(sub, &cfg),
         Commands::Plugin { sub } => run_plugin(sub, &cfg),
         Commands::Audit { sub } => run_audit(sub, &cfg),
         Commands::Chat { resume } => run_chat(resume, &cfg),

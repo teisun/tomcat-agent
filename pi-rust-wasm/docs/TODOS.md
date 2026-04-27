@@ -468,6 +468,27 @@
 - [ ] **[P0] `[UX]`** `#T-051` 工作目录调整——说话就可以改配置
   - 档位：T2-P0-004
 
+- [ ] **[P0] `[UX]`** `#T-148` `pi pathrules remove` CLI 子命令
+  - 档位：T2-P0-004 follow-up（PR-10 暂不实施）
+  - 当前 path_rules **没有** remove 入口（`config_set` 工具仅 append；CLI 仅 add/list）
+  - 设计：`pi pathrules remove <path>` 按 path 字符串精确匹配；模糊匹配多条时报错让用户精确指定；命中 builtin 路径时报错"builtin rules cannot be removed"
+  - 复用 `with_config_lock` + `remove_path_rule_from_disk()`
+  - 关联：[workspace_permission_tiers_design plan §5.x 删除路径](../../../.cursor/plans/workspace_permission_tiers_design_1ad7681a.plan.md)
+
+- [ ] **[P0] `[UX]`** `#T-149` chat `/reload` 配置热加载
+  - 档位：T2-P0-004 follow-up（原 PR-11 暂不实施）
+  - 用户在另一终端 `pi config edit` / `pi pathrules add` 改了配置 → 当前 chat 进程用 `/reload` 即时生效，无需重启
+  - 改动点：`src/api/chat/mod.rs` chat_loop 增 slash command 解析；`DefaultPermissionGate::reload(new_cfg)` 原子替换 user_config + 重编译 path_rules glob / bash_* regex
+  - reload 失败 → 保留旧配置 + 渲染错误提示
+  - system prompt **不**重新拼接（避免 LLM context 漂移）；如需 Agent 看新配置应让它调 `config_get`
+
+- [ ] **[P0] `[REF]`** `#T-150` path_rules 双层存储策略（builtin 常量 + TOML 可见性）
+  - 档位：T2-P0-004 follow-up（当前实现走"仅代码常量"方案）
+  - 现状（PR-1/PR-5 实施时）：`BUILTIN_DEFAULT_PATH_RULES` 仅在代码常量中，TOML 不写入；Agent 通过 system prompt 渲染才能看到 builtin 列表
+  - 目标：保留代码常量作安全兜底（不可弱化），**额外**把 builtin 渲染成带 `# managed-by: builtin-defaults` 注释的 TOML 段写入用户 `pi.config.toml`，提升用户/Agent 可见性
+  - 合并时去重（builtin 路径 + user 自加 → 不重复生效）；用户手编 TOML 删除 managed-by 段不影响代码常量生效（启动时 stderr 提示该段缺失，可选自动补回）
+  - 关联：[workspace_permission_tiers_design plan §5 默认 path_rules](../../../.cursor/plans/workspace_permission_tiers_design_1ad7681a.plan.md)
+
 ### 安全体系（P5 统一推进）
 
 - [ ] **[P5]** `#T-052` 提示注入攻击检测
@@ -483,6 +504,18 @@
 - [ ] **[P5]** `#T-059` 参考 IRONClaw 安全方案
 - [ ] **[P5]** `#T-060` 安全参考文章（https://mp.weixin.qq.com/s/tDkwZLkgljozUTAIAVgrcA）
 - [ ] **[P5]** `#T-061-sec` 攻击指令拦截 / 攻击用例收集
+
+- [ ] **[P2] `[RES]`** `#T-147` 自我攻击/自我安全进化机制设计
+  - 思路：让 Agent 在隔离沙盒里**主动尝试**越权（绕 path_rules / bash_forbidden / config_set 白名单 / sudo 提权 / 凭据读取等），把成功路径自动写回 `bash_forbidden` / `path_rules` 形成"攻防闭环"
+  - 启发：红队思路 + Anthropic constitutional AI；与 T-052（提示注入检测）/ T-053（行为意图审查）形成"防御 + 主动检测"对照
+  - 设计要点（待研究）：
+    - 沙盒环境（Docker / Wasm / chroot）使其攻击不影响真实系统
+    - 攻击 prompt 库（已知 jailbreak / 工具滥用 / SSRF / RCE 模板）
+    - 成功率统计 + 失败模式聚类
+    - 自动生成新规则的安全门：人类 review 必经，避免 Agent 自己加规则把自己锁死
+  - 风险：Agent 可能"学会"绕过自己的规则（构造比当前 regex 更绕的命令）；需配合 LLM 行为日志审计
+  - 关联：[workspace_permission_tiers_design plan §11 风险表](../../../.cursor/plans/workspace_permission_tiers_design_1ad7681a.plan.md)
+  - 优先级释义：**P2 档位**（用户 2026-04-27 标注"优先级不高"），不阻塞 002 迭代
 
 ---
 
@@ -732,6 +765,17 @@
 
 ---
 
+## 十九、本次新增条目（2026-04-27 随 T2-P0-004 plan review）
+
+| 编号 | 档位 | 条目 | 来源 / 关联 |
+|------|------|------|-------------|
+| T-147 | P2 | 自我攻击/自我安全进化机制设计（红队思路） | T2-P0-004 plan review；与 T-052/T-053/T-061-sec 形成防御+主动检测对照 |
+| T-148 | P0 | `pi pathrules remove` CLI 子命令 | T2-P0-004 PR-10 follow-up；首版仅 add/list |
+| T-149 | P0 | chat `/reload` 配置热加载 | T2-P0-004 原 PR-11；暂不实施 |
+| T-150 | P0 | path_rules 双层存储（builtin 常量 + TOML 可见性段） | T2-P0-004 PR-1/PR-5 follow-up；当前仅常量 |
+
+---
+
 ## 附录：Agent 犯的错（经验教训）
 
 > 记录 Agent 在开发过程中犯过的典型错误，作为未来改进和规范制定的参考。
@@ -747,9 +791,9 @@
 
 | 档位 | 条目数（估） | 说明 |
 |------|--------------|------|
-| **P0** | ~37 | 单 Agent 基础体验；全部映射到 002 T2-P0-001~010 |
+| **P0** | ~40 | 单 Agent 基础体验；全部映射到 002 T2-P0-001~010；含 T-148/T-149/T-150（2026-04-27 新增） |
 | **P1** | ~12 | 状态管理；全部映射到 002 T2-P1-001~006 |
-| **P2** | ~4 | Skill 系统（T-114/T-115/T-138/T-139） |
+| **P2** | ~5 | Skill 系统（T-114/T-115/T-138/T-139）+ 安全研究（T-147） |
 | **P3** | ~10 | 系统提示词 + 记忆 |
 | **P4** | ~12 | 自进化 / 学习 / 业界研究 |
 | **P5** | ~34 | 多 Agent + 安全 + 多会话 |
@@ -759,7 +803,7 @@
 | **P9** | ~11 | UI / 远期愿景 / 阅读 |
 | **已实现** | 5 | T-005/T-006/T-024/T-038/T-072（2026-04-19 核对） |
 | **已关闭** | 1 | T-135（本次随改造关闭） |
-| **合计** | **~140** | 含 T-136~T-146 新增 11 条 |
+| **合计** | **~144** | 含 T-136~T-146 新增 11 条；T-147~T-150 新增 4 条 |
 
 ### 与前一版（P0-P5 紧急度档）变更一览
 

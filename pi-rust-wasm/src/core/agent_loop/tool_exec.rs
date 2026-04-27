@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
 
+use super::config_backend::SharedConfigBackend;
 use super::types::ToolCallInfo;
 
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
@@ -35,8 +36,12 @@ pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
 ///
 /// 自由函数设计（**不**接收 `&AgentLoop`）：调用方持有 `Arc<dyn PrimitiveExecutor>`
 /// 即可直接调用；test 只需 mock `PrimitiveExecutor`，不必 mock 整个 AgentLoop。
+///
+/// `config_backend` 为可选注入：未注入时 `config_get` / `config_set` 命中后返回
+/// 错误文案（参考 [`super::config_backend::ConfigBackend`] 的契约）。
 pub(super) async fn execute_tool(
     primitive: &Arc<dyn PrimitiveExecutor>,
+    config_backend: &Option<SharedConfigBackend>,
     tc: &ToolCallInfo,
 ) -> (String, bool) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
@@ -138,6 +143,41 @@ pub(super) async fn execute_tool(
                         })
                         .collect();
                     lines.join("\n")
+                })
+                .map_err(|e| e.to_string())
+        }
+        "config_get" => {
+            let Some(backend) = config_backend.as_ref() else {
+                return (
+                    "config 工具未启用：当前会话不允许通过 LLM 读改配置".to_string(),
+                    true,
+                );
+            };
+            let key = args["key"].as_str().unwrap_or("");
+            backend
+                .config_get(key)
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| v.to_string()))
+                .map_err(|e| e.to_string())
+        }
+        "config_set" => {
+            let Some(backend) = config_backend.as_ref() else {
+                return (
+                    "config 工具未启用：当前会话不允许通过 LLM 读改配置".to_string(),
+                    true,
+                );
+            };
+            let key = args["key"].as_str().unwrap_or("");
+            let value = args["value"].as_str().unwrap_or("");
+            backend
+                .config_set(key, value)
+                .await
+                .map(|(applied, msg)| {
+                    serde_json::json!({
+                        "applied": applied,
+                        "message": msg,
+                    })
+                    .to_string()
                 })
                 .map_err(|e| e.to_string())
         }

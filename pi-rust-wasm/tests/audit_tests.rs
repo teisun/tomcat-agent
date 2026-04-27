@@ -41,6 +41,9 @@ fn test_audit_store_write_query_export_roundtrip() -> Result<(), Box<dyn std::er
         user_approved: true,
         success: true,
         detail: None,
+        permission_level: None,
+        grant_source: None,
+        in_working_dir: None,
     });
     recorder.record_plugin_lifecycle(PluginLifecycleAuditEntry {
         plugin_id: "test_plugin".to_string(),

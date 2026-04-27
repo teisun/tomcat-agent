@@ -68,7 +68,8 @@
 //! - 调用方：`agent_loop::tool_exec::execute_tool` 是唯一直接调用方，所有
 //!   LLM 工具调用都从那里 dispatch 进来。
 
-use crate::core::confirmation::UserConfirmationProvider;
+use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::permission::{GrantSource, PermissionDecision, PermissionGate, PermissionLevel};
 use crate::core::primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
     PrimitiveOperation, WriteFileResult,
@@ -91,7 +92,11 @@ const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
 #[allow(dead_code)]
 const BASH_TIMEOUT_SECS: u64 = 30;
 
-/// 4 原语执行引擎默认实现：路径白名单、用户确认、备份、原子化与审计。
+/// 4 原语执行引擎默认实现：路径权限、用户确认、备份、原子化与审计。
+///
+/// **权限模型**：当注入了 [`PermissionGate`] 时（`with_gate`），路径与 bash 权限
+/// 完全交由 gate 三层决策；否则回退到 legacy 模式（`config.path_whitelist` ∪
+/// `workspace_dir` ∪ `extra_roots`），以保留旧测试 / 旧调用方零行为变化。
 pub struct DefaultPrimitiveExecutor {
     config: PrimitiveConfig,
     confirmation: Arc<dyn UserConfirmationProvider>,
@@ -100,6 +105,8 @@ pub struct DefaultPrimitiveExecutor {
     workspace_dir: PathBuf,
     /// `pi.config.toml` 中 `[workspace] extra_roots` 的额外授权根路径，与 `workspace_dir` 并集（全局，所有 agent 共用）。
     extra_roots: Vec<PathBuf>,
+    /// 注入后取代 legacy 路径白名单与 confirm 决策；为 None 时走 legacy 模式。
+    gate: Option<Arc<dyn PermissionGate>>,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -115,12 +122,19 @@ impl DefaultPrimitiveExecutor {
             audit,
             workspace_dir,
             extra_roots: Vec::new(),
+            gate: None,
         }
     }
 
     /// 设置配置中解析得到的额外授权根路径（与 `pi workspace` / TOML 同源）。
     pub fn with_extra_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.extra_roots = roots;
+        self
+    }
+
+    /// 注入 [`PermissionGate`]：路径与 bash 权限改走 3 层决策。
+    pub fn with_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.gate = Some(gate);
         self
     }
 
@@ -147,38 +161,170 @@ impl DefaultPrimitiveExecutor {
         if !allowed {
             return Err(AppError::Permission(format!("路径不在白名单内: {}", path)));
         }
-        for b in &self.config.path_blacklist {
-            if normalized_starts_with(&s, b) {
-                return Err(AppError::Permission(format!("路径在黑名单内: {}", path)));
-            }
-        }
         Ok(normalized)
     }
 
-    /// 是否需要对该操作进行用户确认（根据 config）。
+    /// 是否需要对该操作进行用户确认（legacy 模式：write/edit/bash 一律需要，
+    /// 除非 `auto_confirm = true`）。gate 模式下走 `gate_check_*`，本函数不被调用。
     fn needs_confirmation(&self, op: PrimitiveOperation) -> bool {
-        match op {
-            PrimitiveOperation::Read => false,
-            PrimitiveOperation::Write => {
-                if self.config.auto_confirm {
-                    return false;
+        if self.config.auto_confirm {
+            return false;
+        }
+        !matches!(op, PrimitiveOperation::Read)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PermissionGate 桥接（gate 注入后启用）
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// 经 gate 决定一个原语对路径的访问，必要时弹 confirm 完成 layer-2。
+    ///
+    /// 返回 `Ok(Some((path_buf, level, source)))` 表示放行；
+    /// `Ok(None)` 不应出现（要么 Allow 要么 Err）；
+    /// `Err(AppError::Permission)` 表示被 gate 拒绝或用户拒绝 confirm。
+    async fn gate_check_path(
+        &self,
+        op: PrimitiveOperation,
+        path: &str,
+        plugin_id: &str,
+    ) -> Result<(PathBuf, PermissionLevel, GrantSource), AppError> {
+        let gate = self
+            .gate
+            .as_ref()
+            .expect("gate_check_path requires gate to be present");
+        let normalized = normalize_path(path)?;
+        loop {
+            let decision = gate.check(op, &normalized.to_string_lossy())?;
+            match decision {
+                PermissionDecision::Allow { source, level } => {
+                    return Ok((normalized, level, source))
                 }
-                self.config.require_approval_for_all_write
-            }
-            PrimitiveOperation::Edit => {
-                if self.config.auto_confirm {
-                    return false;
+                PermissionDecision::Deny { reason } => {
+                    return Err(AppError::Permission(reason));
                 }
-                true
-            }
-            PrimitiveOperation::Bash => {
-                if self.config.auto_confirm {
-                    return false;
+                PermissionDecision::NeedConfirm {
+                    reason,
+                    suggested_root,
+                } => {
+                    let preview = format!(
+                        "[{:?}] {}\n路径: {}\n原因: {}",
+                        op,
+                        op_summary(op),
+                        normalized.display(),
+                        reason
+                    );
+                    let dec = self
+                        .confirmation
+                        .confirm_decision(op, &preview, plugin_id, suggested_root.clone())
+                        .await?;
+                    match dec {
+                        ConfirmDecision::Deny => {
+                            return Err(AppError::Permission(format!(
+                                "用户拒绝授权: {}",
+                                normalized.display()
+                            )));
+                        }
+                        ConfirmDecision::AllowOnce => {
+                            // 落 SessionGrants：用 suggested_root（一般是父目录）作为前缀，
+                            // 这样同目录下后续访问无需再 confirm。
+                            let target = suggested_root.unwrap_or_else(|| normalized.clone());
+                            gate.grant_session(target, GrantSource::SessionGrant);
+                            // 重新 check：现在应该 Allow。
+                            continue;
+                        }
+                        ConfirmDecision::AllowAndPersistRoot { root } => {
+                            // 1) 同时落 SessionGrants（本会话生效）。
+                            gate.grant_session(root.clone(), GrantSource::SessionGrant);
+                            // 2) 持久化由 caller（CLI confirm 实现）负责调用
+                            //    `pi workspace add` 等价的 append_extra_root_to_disk；
+                            //    这里只标记会话授权，避免和 disk 写入耦合。
+                            //    重新 check 应 Allow。
+                            continue;
+                        }
+                    }
                 }
-                self.config.require_approval_for_all_bash
             }
         }
     }
+
+    /// 经 gate 决定一条 bash 命令是否放行；layer-2 命中弹 confirm。
+    async fn gate_check_bash(
+        &self,
+        command: &str,
+        plugin_id: &str,
+    ) -> Result<(PermissionLevel, GrantSource), AppError> {
+        let gate = self
+            .gate
+            .as_ref()
+            .expect("gate_check_bash requires gate to be present");
+        let decision = gate.check_bash(command)?;
+        match decision {
+            PermissionDecision::Allow { source, level } => Ok((level, source)),
+            PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
+            PermissionDecision::NeedConfirm { reason, .. } => {
+                let preview = format!(
+                    "[Bash] 危险命令命中确认列表\n命令: {}\n原因: {}",
+                    command, reason
+                );
+                let dec = self
+                    .confirmation
+                    .confirm_decision(PrimitiveOperation::Bash, &preview, plugin_id, None)
+                    .await?;
+                match dec {
+                    ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
+                        Ok((PermissionLevel::BashApproval, GrantSource::SessionGrant))
+                    }
+                    ConfirmDecision::Deny => {
+                        Err(AppError::Permission("用户拒绝 bash 确认".to_string()))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn op_summary(op: PrimitiveOperation) -> &'static str {
+    match op {
+        PrimitiveOperation::Read => "读取",
+        PrimitiveOperation::Write => "写入",
+        PrimitiveOperation::Edit => "编辑",
+        PrimitiveOperation::Bash => "执行命令",
+    }
+}
+
+/// 把 [`PermissionLevel`] 序列化为审计字符串（与 serde rename_all = snake_case 一致）。
+fn permission_level_str(l: PermissionLevel) -> String {
+    match l {
+        PermissionLevel::Read => "read",
+        PermissionLevel::Write => "write",
+        PermissionLevel::BashWhitelist => "bash_whitelist",
+        PermissionLevel::BashApproval => "bash_approval",
+        PermissionLevel::Forbidden => "forbidden",
+    }
+    .to_string()
+}
+
+/// 把 [`GrantSource`] 序列化为审计字符串。
+fn grant_source_str(s: GrantSource) -> String {
+    match s {
+        GrantSource::AgentWorkspace => "agent_workspace",
+        GrantSource::AgentDataDir => "agent_data_dir",
+        GrantSource::ConfigExtraRoot => "config_extra_root",
+        GrantSource::SessionGrant => "session_grant",
+        GrantSource::DraggedPath => "dragged_path",
+        GrantSource::PathRuleReadOnly => "path_rule_read_only",
+        GrantSource::BashWhitelist => "bash_whitelist",
+        GrantSource::AutoConfirmFlag => "auto_confirm_flag",
+    }
+    .to_string()
+}
+
+/// 由 GrantSource 推断「是否在工作目录内」（与 plan §2 的 `in_working_dir` 字段一致）。
+fn in_working_dir_from_source(s: GrantSource) -> bool {
+    matches!(
+        s,
+        GrantSource::AgentWorkspace | GrantSource::ConfigExtraRoot
+    )
 }
 
 fn normalized_starts_with(path: &str, prefix: &str) -> bool {
@@ -190,7 +336,14 @@ fn normalized_starts_with(path: &str, prefix: &str) -> bool {
 #[async_trait]
 impl PrimitiveExecutor for DefaultPrimitiveExecutor {
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError> {
-        let path_buf = self.check_path(path)?;
+        let (path_buf, level, source) = if self.gate.is_some() {
+            let (p, l, s) = self
+                .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
+                .await?;
+            (p, Some(l), Some(s))
+        } else {
+            (self.check_path(path)?, None, None)
+        };
         let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
         if meta.is_dir() {
             return Err(AppError::Primitive(
@@ -212,12 +365,22 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: None,
+            permission_level: level.map(permission_level_str),
+            grant_source: source.map(grant_source_str),
+            in_working_dir: source.map(in_working_dir_from_source),
         });
         Ok(content)
     }
 
     async fn list_dir(&self, path: &str, plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
-        let path_buf = self.check_path(path)?;
+        let (path_buf, level, source) = if self.gate.is_some() {
+            let (p, l, s) = self
+                .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
+                .await?;
+            (p, Some(l), Some(s))
+        } else {
+            (self.check_path(path)?, None, None)
+        };
         let read = std::fs::read_dir(&path_buf).map_err(AppError::Io)?;
         let mut entries = Vec::new();
         for e in read {
@@ -233,6 +396,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: Some(format!("list_dir {} entries", entries.len())),
+            permission_level: level.map(permission_level_str),
+            grant_source: source.map(grant_source_str),
+            in_working_dir: source.map(in_working_dir_from_source),
         });
         Ok(entries)
     }
@@ -244,7 +410,14 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         overwrite: bool,
         plugin_id: &str,
     ) -> Result<WriteFileResult, AppError> {
-        let path_buf = self.check_path(path)?;
+        let (path_buf, level, source) = if self.gate.is_some() {
+            let (p, l, s) = self
+                .gate_check_path(PrimitiveOperation::Write, path, plugin_id)
+                .await?;
+            (p, Some(l), Some(s))
+        } else {
+            (self.check_path(path)?, None, None)
+        };
         let path_str = path_buf.to_string_lossy().to_string();
 
         if overwrite && path_buf.exists() {
@@ -257,7 +430,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         } else {
             format!("写入新文件 {} ({} bytes)", path, content.len())
         };
-        if self.needs_confirmation(PrimitiveOperation::Write) {
+        if self.gate.is_none() && self.needs_confirmation(PrimitiveOperation::Write) {
             debug!("[tool_debug] 请求用户确认写入 path={}", path);
             let ok = self
                 .require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id)
@@ -271,10 +444,12 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                     user_approved: false,
                     success: false,
                     detail: Some("用户拒绝确认".to_string()),
+                    ..Default::default()
                 });
                 return Err(AppError::Permission("用户拒绝写入确认".to_string()));
             }
         }
+        let _ = preview;
 
         write_file_atomic(&path_buf, content.as_bytes())?;
         self.audit.record_primitive(PrimitiveAuditEntry {
@@ -284,6 +459,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: None,
+            permission_level: level.map(permission_level_str),
+            grant_source: source.map(grant_source_str),
+            in_working_dir: source.map(in_working_dir_from_source),
         });
         Ok(WriteFileResult {
             path: path.to_string(),
@@ -297,7 +475,14 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError> {
-        let path_buf = self.check_path(path)?;
+        let (path_buf, level, source) = if self.gate.is_some() {
+            let (p, l, s) = self
+                .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
+                .await?;
+            (p, Some(l), Some(s))
+        } else {
+            (self.check_path(path)?, None, None)
+        };
         let path_str = path_buf.to_string_lossy().to_string();
         let content = read_file_utf8(&path_buf)?;
         let mut lines: Vec<String> = content.lines().map(String::from).collect();
@@ -385,7 +570,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
 
         let new_content = lines.join("\n");
         let diff_preview = build_simple_diff(content.as_str(), &new_content);
-        if self.needs_confirmation(PrimitiveOperation::Edit) {
+        if self.gate.is_none() && self.needs_confirmation(PrimitiveOperation::Edit) {
             let ok = self
                 .require_user_confirmation(
                     PrimitiveOperation::Edit,
@@ -403,6 +588,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                     user_approved: false,
                     success: false,
                     detail: Some("用户拒绝确认".to_string()),
+                    ..Default::default()
                 });
                 return Err(AppError::Permission("用户拒绝编辑确认".to_string()));
             }
@@ -418,6 +604,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 user_approved: true,
                 success: false,
                 detail: Some(e.to_string()),
+                permission_level: level.map(permission_level_str),
+                grant_source: source.map(grant_source_str),
+                in_working_dir: source.map(in_working_dir_from_source),
             });
             return Err(e);
         }
@@ -429,6 +618,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: None,
+            permission_level: level.map(permission_level_str),
+            grant_source: source.map(grant_source_str),
+            in_working_dir: source.map(in_working_dir_from_source),
         });
         Ok(EditFileResult {
             path: path.to_string(),
@@ -443,10 +635,18 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         plugin_id: &str,
         argv: Option<&[String]>,
     ) -> Result<BashResult, AppError> {
-        let cwd_path = cwd
-            .map(|c| self.check_path(c))
-            .transpose()?
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd_path = if let Some(c) = cwd {
+            if self.gate.is_some() {
+                let (p, _l, _s) = self
+                    .gate_check_path(PrimitiveOperation::Read, c, plugin_id)
+                    .await?;
+                p
+            } else {
+                self.check_path(c)?
+            }
+        } else {
+            PathBuf::from(".")
+        };
 
         let audit_cmd = match argv {
             None => command.to_string(),
@@ -460,58 +660,104 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             }
         };
 
-        let (first_token, check_full_cmd): (&str, &str) = match argv {
-            None => {
-                let ft = command.split_whitespace().next().unwrap_or("");
-                (ft, command)
+        // 用于审计成功路径的 bash 决策来源（whitelist / approval）。
+        let mut bash_level: Option<PermissionLevel> = None;
+        let mut bash_source: Option<GrantSource> = None;
+
+        if self.gate.is_some() {
+            // gate 模式：先 bash 三档 regex 决策（NeedConfirm 弹 confirm）。
+            match self.gate_check_bash(&audit_cmd, plugin_id).await {
+                Ok((l, s)) => {
+                    bash_level = Some(l);
+                    bash_source = Some(s);
+                }
+                Err(e) => {
+                    self.audit.record_primitive(PrimitiveAuditEntry {
+                        operation: AuditPrimitiveOp::Bash,
+                        path_or_cmd: audit_cmd.clone(),
+                        plugin_id: plugin_id.to_string(),
+                        user_approved: false,
+                        success: false,
+                        detail: Some(e.to_string()),
+                        ..Default::default()
+                    });
+                    return Err(e);
+                }
             }
-            Some(_) => (command, command),
-        };
 
-        let in_whitelist =
-            self.config.bash_whitelist.iter().any(|c| {
+            // 然后把命令里出现的路径逐一交给 gate.check 处理（layer-1 deny / layer-2 confirm）。
+            // 仅作"尽力而为"——shell_words 解析失败的命令，依赖 forbidden regex 兜底。
+            for raw in crate::core::permission::bash_parser::extract_paths(&audit_cmd) {
+                if let Err(e) = self
+                    .gate_check_path(PrimitiveOperation::Bash, &raw, plugin_id)
+                    .await
+                {
+                    self.audit.record_primitive(PrimitiveAuditEntry {
+                        operation: AuditPrimitiveOp::Bash,
+                        path_or_cmd: audit_cmd.clone(),
+                        plugin_id: plugin_id.to_string(),
+                        user_approved: false,
+                        success: false,
+                        detail: Some(format!("路径未授权: {} ({})", raw, e)),
+                        ..Default::default()
+                    });
+                    return Err(e);
+                }
+            }
+        } else {
+            // legacy：第一段子串匹配 + require_approval_for_all_bash 流程。
+            let (first_token, check_full_cmd): (&str, &str) = match argv {
+                None => {
+                    let ft = command.split_whitespace().next().unwrap_or("");
+                    (ft, command)
+                }
+                Some(_) => (command, command),
+            };
+
+            let in_whitelist = self.config.bash_whitelist.iter().any(|c| {
                 c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
             });
-        let in_forbidden =
-            self.config.bash_forbidden.iter().any(|c| {
+            let in_forbidden = self.config.bash_forbidden.iter().any(|c| {
                 c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
             });
-        let needs_approval =
-            self.config.bash_approval_required.iter().any(|c| {
+            let needs_approval = self.config.bash_approval_required.iter().any(|c| {
                 c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
             });
 
-        if in_forbidden {
-            self.audit.record_primitive(PrimitiveAuditEntry {
-                operation: AuditPrimitiveOp::Bash,
-                path_or_cmd: audit_cmd.clone(),
-                plugin_id: plugin_id.to_string(),
-                user_approved: false,
-                success: false,
-                detail: Some("命令在禁止列表中".to_string()),
-            });
-            return Err(AppError::Permission("命令在禁止列表中".to_string()));
-        }
-        let need_confirm =
-            (!in_whitelist && !self.config.bash_whitelist.is_empty()) || needs_approval;
-        if need_confirm && self.needs_confirmation(PrimitiveOperation::Bash) {
-            let ok = self
-                .require_user_confirmation(
-                    PrimitiveOperation::Bash,
-                    &format!("执行: {}", audit_cmd),
-                    plugin_id,
-                )
-                .await?;
-            if !ok {
+            if in_forbidden {
                 self.audit.record_primitive(PrimitiveAuditEntry {
                     operation: AuditPrimitiveOp::Bash,
                     path_or_cmd: audit_cmd.clone(),
                     plugin_id: plugin_id.to_string(),
                     user_approved: false,
                     success: false,
-                    detail: Some("用户拒绝确认".to_string()),
+                    detail: Some("命令在禁止列表中".to_string()),
+                    ..Default::default()
                 });
-                return Err(AppError::Permission("用户拒绝 bash 确认".to_string()));
+                return Err(AppError::Permission("命令在禁止列表中".to_string()));
+            }
+            let need_confirm =
+                (!in_whitelist && !self.config.bash_whitelist.is_empty()) || needs_approval;
+            if need_confirm && self.needs_confirmation(PrimitiveOperation::Bash) {
+                let ok = self
+                    .require_user_confirmation(
+                        PrimitiveOperation::Bash,
+                        &format!("执行: {}", audit_cmd),
+                        plugin_id,
+                    )
+                    .await?;
+                if !ok {
+                    self.audit.record_primitive(PrimitiveAuditEntry {
+                        operation: AuditPrimitiveOp::Bash,
+                        path_or_cmd: audit_cmd.clone(),
+                        plugin_id: plugin_id.to_string(),
+                        user_approved: false,
+                        success: false,
+                        detail: Some("用户拒绝确认".to_string()),
+                        ..Default::default()
+                    });
+                    return Err(AppError::Permission("用户拒绝 bash 确认".to_string()));
+                }
             }
         }
 
@@ -567,6 +813,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 stdout.len(),
                 stderr.len()
             )),
+            permission_level: bash_level.map(permission_level_str),
+            grant_source: bash_source.map(grant_source_str),
+            in_working_dir: bash_source.map(in_working_dir_from_source),
         });
         Ok(BashResult {
             stdout,

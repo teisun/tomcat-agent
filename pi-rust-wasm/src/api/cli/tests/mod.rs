@@ -21,6 +21,7 @@ mod audit;
 mod config_keys;
 mod mocks;
 mod parse_cli;
+mod pathrules_cmd;
 mod plugin_cmd;
 mod run_basic;
 mod session_cmd;

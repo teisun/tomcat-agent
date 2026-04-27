@@ -145,6 +145,13 @@ pub struct AgentLoop {
     pub(super) llm: Arc<dyn LlmProvider>,
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) event_bus: Arc<dyn EventBus>,
+    /// 可选 `config_get` / `config_set` 后端（plan §6 / PR-7）。
+    ///
+    /// 注入路径：`ChatContext::from_config` 在创建 `AgentLoop` 前构造
+    /// `ChatConfigBackend` 并通过 [`AgentLoop::with_config_backend`] 设入；
+    /// CLI / 单测路径继续传 `None`，工具命中时返回"未启用"错误（不影响
+    /// 4 原语的 execute_tool 主流程）。
+    pub(super) config_backend: Option<super::config_backend::SharedConfigBackend>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     pub(super) follow_up_queue: Arc<Mutex<Vec<ChatMessage>>>,

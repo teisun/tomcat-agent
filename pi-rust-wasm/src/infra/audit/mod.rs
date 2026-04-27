@@ -7,8 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// 原语操作类型，与 core::PrimitiveOperation 对齐，避免 core 依赖 infra 的循环。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuditPrimitiveOp {
+    #[default]
     Read,
     Write,
     Edit,
@@ -16,7 +17,17 @@ pub enum AuditPrimitiveOp {
 }
 
 /// 单条原语审计记录。
-#[derive(Debug, Clone)]
+///
+/// 与 plan §2/§6 对齐——新增 3 个授权来源字段：
+///
+/// - `permission_level`：操作权限等级（`Read` / `Write` / `BashWhitelist` /
+///   `BashApproval` / `Forbidden`）。
+/// - `grant_source`：授权来源（`AgentWorkspace` / `SessionGrant` / `BashWhitelist` 等）。
+/// - `in_working_dir`：路径是否在 `workspace_dir` / `extra_roots` 范围内。
+///
+/// 所有 3 个字段都是 `Option`：legacy 路径（未启用 gate）写 `None`，gate 路径写
+/// `Some(...)`，向后兼容已有 JSONL 行。
+#[derive(Debug, Clone, Default)]
 pub struct PrimitiveAuditEntry {
     pub operation: AuditPrimitiveOp,
     pub path_or_cmd: String,
@@ -24,6 +35,12 @@ pub struct PrimitiveAuditEntry {
     pub user_approved: bool,
     pub success: bool,
     pub detail: Option<String>,
+    /// 操作权限等级（仅 gate 模式填）。
+    pub permission_level: Option<String>,
+    /// 授权来源（仅 gate 模式填）。
+    pub grant_source: Option<String>,
+    /// 路径是否在工作目录内（仅原语 op 适用，bash 默认 None）。
+    pub in_working_dir: Option<bool>,
 }
 
 /// 工具调用审计记录。
@@ -80,6 +97,9 @@ impl AuditRecorder for TracingAuditRecorder {
             user_approved = entry.user_approved,
             success = entry.success,
             detail = ?entry.detail,
+            permission_level = ?entry.permission_level,
+            grant_source = ?entry.grant_source,
+            in_working_dir = ?entry.in_working_dir,
             "audit primitive"
         );
     }
@@ -147,6 +167,9 @@ impl AuditRecorder for FileAuditRecorder {
                 user_approved: entry.user_approved,
                 success: entry.success,
                 detail: entry.detail,
+                permission_level: entry.permission_level,
+                grant_source: entry.grant_source,
+                in_working_dir: entry.in_working_dir,
             },
         };
         let _ = self.store.append(&row);

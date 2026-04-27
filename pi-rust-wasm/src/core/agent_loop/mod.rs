@@ -124,6 +124,7 @@
 //! ```
 
 mod accessors;
+pub mod config_backend;
 mod error_classifier;
 mod reasoning_loop;
 mod run;
@@ -136,6 +137,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+pub use config_backend::{ConfigBackend, SharedConfigBackend};
 pub use types::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError, ToolCallInfo,
 };

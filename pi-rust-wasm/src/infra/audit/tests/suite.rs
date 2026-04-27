@@ -20,6 +20,7 @@ fn tracing_audit_recorder_default_works() {
         user_approved: true,
         success: true,
         detail: None,
+        ..Default::default()
     });
 }
 
@@ -33,6 +34,7 @@ fn tracing_audit_recorder_records_primitive() {
         user_approved: true,
         success: true,
         detail: None,
+        ..Default::default()
     });
 }
 

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::infra::config::with_config_lock;
 use crate::{load_config, normalize_path, validate_config, write_file_atomic, AppConfig, AppError};
 
 use super::{ConfigSub, DEFAULT_CONFIG_PATH};
@@ -116,28 +117,31 @@ pub(crate) fn run_config(sub: ConfigSub, cfg: &AppConfig) -> Result<(), AppError
                 println!("配置文件不存在: {}。请先运行: pi init", path.display());
                 return Ok(());
             }
-            let content = std::fs::read_to_string(&path).map_err(AppError::Io)?;
-            let mut val: toml::Value = content
-                .parse()
-                .map_err(|e: toml::de::Error| AppError::Config(e.to_string()))?;
-            set_toml_key(&mut val, &key, &value)?;
-            let new_toml =
-                toml::to_string_pretty(&val).map_err(|e| AppError::Config(e.to_string()))?;
-            let check: Result<AppConfig, _> = toml::from_str(&new_toml);
-            match check {
-                Ok(ref c) => {
-                    if let Err(e) = validate_config(c) {
+            with_config_lock(&path, || {
+                let content = std::fs::read_to_string(&path).map_err(AppError::Io)?;
+                let mut val: toml::Value = content
+                    .parse()
+                    .map_err(|e: toml::de::Error| AppError::Config(e.to_string()))?;
+                set_toml_key(&mut val, &key, &value)?;
+                let new_toml =
+                    toml::to_string_pretty(&val).map_err(|e| AppError::Config(e.to_string()))?;
+                let check: Result<AppConfig, _> = toml::from_str(&new_toml);
+                match check {
+                    Ok(ref c) => {
+                        if let Err(e) = validate_config(c) {
+                            println!("值无效: {}，未修改配置", e);
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
                         println!("值无效: {}，未修改配置", e);
                         return Ok(());
                     }
                 }
-                Err(e) => {
-                    println!("值无效: {}，未修改配置", e);
-                    return Ok(());
-                }
-            }
-            write_file_atomic(&path, new_toml.as_bytes())?;
-            println!("已设置 {} = {}", key, value);
+                write_file_atomic(&path, new_toml.as_bytes())?;
+                println!("已设置 {} = {}", key, value);
+                Ok(())
+            })?;
         }
         ConfigSub::Edit => {
             let path = config_file_path()?;

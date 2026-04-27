@@ -8,13 +8,16 @@ pub mod confirmation;
 pub mod context_metrics;
 pub mod executor;
 pub mod llm;
+pub mod permission;
 pub mod primitives;
 pub mod session;
 pub mod system_prompt;
 pub mod tools;
 
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentRunResult, ToolCallInfo};
-pub use confirmation::{AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider};
+pub use confirmation::{
+    AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
+};
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use executor::DefaultPrimitiveExecutor;
 pub use llm::{

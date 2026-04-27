@@ -1,0 +1,423 @@
+//! # PermissionGate trait + DefaultPermissionGate
+//!
+//! 三层决策引擎（与 plan §3 对齐）：
+//!
+//! 1. **Layer 1 — Forbidden**：硬否决，不可被 confirm 推翻。
+//!    - 命中 `path_rules` `Deny`（builtin ∪ user TOML ∪ session）；
+//!    - 写/编辑命中 `path_rules` `Readonly`；
+//!    - bash 命令命中 `bash_forbidden` regex（builtin ∪ user TOML）。
+//! 2. **Layer 2 — NeedConfirm**：路径在 `EffectiveRoots` 之外，弹 confirm，
+//!    给出 `suggested_root`（默认是父目录或本身）。
+//!    bash 命中 `bash_approval_required` 同样落到此层。
+//! 3. **Layer 3 — Allow**：路径在 `EffectiveRoots.read_write` / `read_only` /
+//!    `agent_data_dir`（仅 read）；bash 命中 `bash_whitelist` 直接 Allow。
+//!
+//! `auto_confirm = true` 仅短路 Layer-2 NeedConfirm（写入审计标记 `AutoConfirmFlag`），
+//! Layer-1 Forbidden 永远不可被绕过。
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use globset::Glob;
+use regex::Regex;
+
+use super::defaults::{
+    builtin_default_rules, BUILTIN_BASH_APPROVAL_REQUIRED, BUILTIN_BASH_FORBIDDEN,
+    BUILTIN_BASH_WHITELIST,
+};
+use super::path_rule::PathRule;
+use super::session_grants::{DraggedPaths, SessionGrants};
+use super::types::{
+    path_starts_with, EffectiveRoots, GrantSource, PathRuleMode, PermissionDecision,
+    PermissionLevel,
+};
+use crate::core::primitives::PrimitiveOperation;
+use crate::infra::error::AppError;
+use crate::infra::platform::normalize_path;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PermissionGate Trait
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 路径与 bash 命令的统一权限检查抽象。
+pub trait PermissionGate: Send + Sync {
+    /// 检查一个原语对路径的访问。
+    fn check(&self, op: PrimitiveOperation, path: &str) -> Result<PermissionDecision, AppError>;
+
+    /// 检查一条 bash 命令（可能包含路径，由实现内部解析）。
+    fn check_bash(&self, command: &str) -> Result<PermissionDecision, AppError>;
+
+    /// 暴露一份 EffectiveRoots 快照（用于 system_prompt / 审计）。
+    fn effective_roots(&self) -> EffectiveRoots;
+
+    /// 暴露当前生效的 path_rules（合并后）—— 用于注入 system_prompt。
+    fn effective_path_rules(&self) -> Vec<PathRule>;
+
+    /// 把一个会话级授权写入 SessionGrants（confirm 通过 / 拖入路径）。
+    fn grant_session(&self, path: PathBuf, source: GrantSource);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DefaultPermissionGate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 默认实现：不可变快照式（构造时把 cfg / workspace_dir / agent_dir / extra_roots
+/// 全部冻结），共享 `SessionGrants` 与 `DraggedPaths` 走 `Arc` + 内部 Mutex。
+pub struct DefaultPermissionGate {
+    /// 工作根（writable）。
+    workspace_dir: PathBuf,
+    /// 配置中显式声明的额外根（writable）。
+    extra_roots: Vec<PathBuf>,
+    /// `{work_dir}/agents/{id}` 一系列只读目录（read only）。
+    agent_data_readonly_dirs: Vec<PathBuf>,
+    /// 合并后的 path_rules（builtin ∪ user TOML）。
+    path_rules: Vec<PathRule>,
+    /// 编译好的 bash 三档 regex；构造期一次性编译，bad regex 跳过 + warn。
+    bash_forbidden: Vec<Regex>,
+    bash_approval: Vec<Regex>,
+    bash_whitelist: Vec<Regex>,
+    /// 是否对 Layer-2 NeedConfirm 短路（不影响 Layer-1）。
+    auto_confirm: bool,
+    /// 共享会话授权与拖入路径。
+    session_grants: SessionGrants,
+    dragged_paths: DraggedPaths,
+}
+
+/// `DefaultPermissionGate::new` 构造参数。
+#[derive(Debug, Clone)]
+pub struct GateConfig {
+    pub workspace_dir: PathBuf,
+    pub extra_roots: Vec<PathBuf>,
+    pub agent_data_readonly_dirs: Vec<PathBuf>,
+    pub user_path_rules: Vec<PathRule>,
+    pub user_bash_forbidden: Vec<String>,
+    pub user_bash_approval: Vec<String>,
+    pub user_bash_whitelist: Vec<String>,
+    pub auto_confirm: bool,
+}
+
+impl DefaultPermissionGate {
+    pub fn new(
+        cfg: GateConfig,
+        session_grants: SessionGrants,
+        dragged_paths: DraggedPaths,
+    ) -> Self {
+        // path_rules 合并：builtin ∪ user TOML（user 不能弱化 builtin，
+        // 但可以追加；`Deny` 覆盖 `Readonly` 由匹配阶段保证：
+        // 我们把所有规则放入同一个 vec，然后在匹配时优先 Deny 命中）。
+        let mut path_rules = builtin_default_rules();
+        path_rules.extend(cfg.user_path_rules);
+
+        // bash 三档 regex 编译：builtin ∪ user。
+        let bash_forbidden = compile_regex_list(BUILTIN_BASH_FORBIDDEN, &cfg.user_bash_forbidden);
+        let bash_approval =
+            compile_regex_list(BUILTIN_BASH_APPROVAL_REQUIRED, &cfg.user_bash_approval);
+        let bash_whitelist = compile_regex_list(BUILTIN_BASH_WHITELIST, &cfg.user_bash_whitelist);
+
+        Self {
+            workspace_dir: cfg.workspace_dir,
+            extra_roots: cfg.extra_roots,
+            agent_data_readonly_dirs: cfg.agent_data_readonly_dirs,
+            path_rules,
+            bash_forbidden,
+            bash_approval,
+            bash_whitelist,
+            auto_confirm: cfg.auto_confirm,
+            session_grants,
+            dragged_paths,
+        }
+    }
+
+    /// 构造一份 `Arc<dyn PermissionGate>`。
+    pub fn into_arc(self) -> Arc<dyn PermissionGate> {
+        Arc::new(self)
+    }
+
+    /// 把字符串路径规范化：先 `normalize_path`（处理 `~` + canonicalize），
+    /// 若返回值仍是 symlink 链未解析的形式，则尝试 canonicalize 最长存在的祖先并拼回剩余子路径，
+    /// 以保证不存在的目标也能被前缀匹配命中（macOS `/var` -> `/private/var` 等场景）。
+    fn normalize(&self, raw: &str) -> Result<PathBuf, AppError> {
+        let p = normalize_path(raw)?;
+        Ok(canonicalize_with_existing_ancestor(&p))
+    }
+
+    /// 路径是否在 `extra_roots` 或 workspace_dir 之中（writable 集合）。
+    fn in_writable_set(&self, target: &Path) -> bool {
+        let s = target.to_string_lossy();
+        let ws = canonicalize_with_existing_ancestor(&self.workspace_dir);
+        if path_starts_with(&s, &ws.to_string_lossy()) {
+            return true;
+        }
+        for r in &self.extra_roots {
+            let rc = canonicalize_with_existing_ancestor(r);
+            if path_starts_with(&s, &rc.to_string_lossy()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 路径是否在 agent_data_readonly_dirs 中（仅 read）。
+    fn in_agent_readonly_set(&self, target: &Path) -> bool {
+        let s = target.to_string_lossy();
+        self.agent_data_readonly_dirs.iter().any(|r| {
+            let rc = canonicalize_with_existing_ancestor(r);
+            path_starts_with(&s, &rc.to_string_lossy())
+        })
+    }
+
+    /// 命中第一条 Deny 规则；否则返回第一条 Readonly 命中（用于 read 通过）。
+    fn match_path_rule(&self, target: &Path) -> Option<&PathRule> {
+        // 先 Deny（最高优先级）。
+        if let Some(r) = self
+            .path_rules
+            .iter()
+            .find(|r| r.mode == PathRuleMode::Deny && r.matches(target))
+        {
+            return Some(r);
+        }
+        // 再 Readonly。
+        self.path_rules
+            .iter()
+            .find(|r| r.mode == PathRuleMode::Readonly && r.matches(target))
+    }
+}
+
+impl PermissionGate for DefaultPermissionGate {
+    fn check(&self, op: PrimitiveOperation, path: &str) -> Result<PermissionDecision, AppError> {
+        let target = self.normalize(path)?;
+
+        // ── Layer 1：path_rules Deny / Readonly+write ──
+        if let Some(rule) = self.match_path_rule(&target) {
+            match rule.mode {
+                PathRuleMode::Deny => {
+                    return Ok(PermissionDecision::Deny {
+                        reason: format!("path_rule deny: {}", rule.path),
+                    });
+                }
+                PathRuleMode::Readonly => {
+                    if matches!(
+                        op,
+                        PrimitiveOperation::Write
+                            | PrimitiveOperation::Edit
+                            | PrimitiveOperation::Bash
+                    ) {
+                        return Ok(PermissionDecision::Deny {
+                            reason: format!("path_rule readonly: {}", rule.path),
+                        });
+                    }
+                    // read 通过 readonly。
+                    return Ok(PermissionDecision::Allow {
+                        source: GrantSource::PathRuleReadOnly,
+                        level: PermissionLevel::Read,
+                    });
+                }
+            }
+        }
+
+        // ── Layer 3 第一波：在 writable 集合内（workspace_dir / extra_roots） ──
+        if self.in_writable_set(&target) {
+            return Ok(PermissionDecision::Allow {
+                source: source_for_writable(&target, &self.workspace_dir, &self.extra_roots),
+                level: level_for_op(op),
+            });
+        }
+
+        // ── Layer 3 第二波：dragged path / session_grant ──
+        if self.dragged_paths.contains(&target) {
+            return Ok(PermissionDecision::Allow {
+                source: GrantSource::DraggedPath,
+                level: level_for_op(op),
+            });
+        }
+        if self.session_grants.contains(&target) {
+            return Ok(PermissionDecision::Allow {
+                source: GrantSource::SessionGrant,
+                level: level_for_op(op),
+            });
+        }
+
+        // ── Layer 3 第三波：agent 数据目录（仅 read） ──
+        if matches!(op, PrimitiveOperation::Read) && self.in_agent_readonly_set(&target) {
+            return Ok(PermissionDecision::Allow {
+                source: GrantSource::AgentDataDir,
+                level: PermissionLevel::Read,
+            });
+        }
+
+        // ── Layer 2：NeedConfirm（auto_confirm 短路） ──
+        if self.auto_confirm {
+            return Ok(PermissionDecision::Allow {
+                source: GrantSource::AutoConfirmFlag,
+                level: level_for_op(op),
+            });
+        }
+        let suggested_root = target
+            .parent()
+            .map(|p| p.to_path_buf())
+            .or(Some(target.clone()));
+        Ok(PermissionDecision::NeedConfirm {
+            reason: format!("路径 `{}` 不在已授权范围内", target.display()),
+            suggested_root,
+        })
+    }
+
+    fn check_bash(&self, command: &str) -> Result<PermissionDecision, AppError> {
+        // Layer 1：bash_forbidden（builtin ∪ user）。
+        for re in &self.bash_forbidden {
+            if re.is_match(command) {
+                return Ok(PermissionDecision::Deny {
+                    reason: format!("bash_forbidden 命中: {}", re.as_str()),
+                });
+            }
+        }
+
+        // 白名单优先（短路 NeedConfirm，但仍受 forbidden 约束 —— 已在上面检查过）。
+        for re in &self.bash_whitelist {
+            if re.is_match(command) {
+                return Ok(PermissionDecision::Allow {
+                    source: GrantSource::BashWhitelist,
+                    level: PermissionLevel::BashWhitelist,
+                });
+            }
+        }
+
+        // Layer 2：bash_approval_required（命中弹 confirm）。
+        for re in &self.bash_approval {
+            if re.is_match(command) {
+                if self.auto_confirm {
+                    return Ok(PermissionDecision::Allow {
+                        source: GrantSource::AutoConfirmFlag,
+                        level: PermissionLevel::BashApproval,
+                    });
+                }
+                return Ok(PermissionDecision::NeedConfirm {
+                    reason: format!("bash_approval_required 命中: {}", re.as_str()),
+                    suggested_root: None,
+                });
+            }
+        }
+
+        // 默认：bash 命令本身不强制 confirm（路径检查由调用方在 parse 后逐一调用 `check`）。
+        Ok(PermissionDecision::Allow {
+            source: GrantSource::BashWhitelist,
+            level: PermissionLevel::BashWhitelist,
+        })
+    }
+
+    fn effective_roots(&self) -> EffectiveRoots {
+        let mut read_write = vec![self.workspace_dir.clone()];
+        read_write.extend(self.extra_roots.iter().cloned());
+        read_write.extend(self.session_grants.snapshot());
+        read_write.extend(self.dragged_paths.snapshot());
+
+        let mut read_only = self.agent_data_readonly_dirs.clone();
+        for r in &self.path_rules {
+            if r.mode == PathRuleMode::Readonly {
+                if let Ok(s) = r.expanded_path() {
+                    read_only.push(PathBuf::from(s));
+                }
+            }
+        }
+        EffectiveRoots {
+            read_write,
+            read_only,
+        }
+    }
+
+    fn effective_path_rules(&self) -> Vec<PathRule> {
+        self.path_rules.clone()
+    }
+
+    fn grant_session(&self, path: PathBuf, source: GrantSource) {
+        match source {
+            GrantSource::DraggedPath => self.dragged_paths.add(path),
+            _ => self.session_grants.add(path),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 辅助
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn level_for_op(op: PrimitiveOperation) -> PermissionLevel {
+    match op {
+        PrimitiveOperation::Read => PermissionLevel::Read,
+        PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionLevel::Write,
+        PrimitiveOperation::Bash => PermissionLevel::BashWhitelist,
+    }
+}
+
+fn source_for_writable(
+    target: &Path,
+    workspace_dir: &Path,
+    extra_roots: &[PathBuf],
+) -> GrantSource {
+    let s = target.to_string_lossy();
+    let ws = canonicalize_with_existing_ancestor(workspace_dir);
+    if path_starts_with(&s, &ws.to_string_lossy()) {
+        return GrantSource::AgentWorkspace;
+    }
+    for r in extra_roots {
+        let rc = canonicalize_with_existing_ancestor(r);
+        if path_starts_with(&s, &rc.to_string_lossy()) {
+            return GrantSource::ConfigExtraRoot;
+        }
+    }
+    GrantSource::AgentWorkspace
+}
+
+/// 编译 `builtin ∪ user` 两层 regex；非法 regex 静默跳过 + tracing warn，
+/// 避免一条坏配置牵连整个权限系统。
+fn compile_regex_list(builtin: &[&str], user: &[String]) -> Vec<Regex> {
+    let mut out = Vec::with_capacity(builtin.len() + user.len());
+    for s in builtin {
+        match Regex::new(s) {
+            Ok(re) => out.push(re),
+            Err(e) => tracing::warn!(target: "permission", "builtin regex 编译失败: {} ({})", s, e),
+        }
+    }
+    for s in user {
+        match Regex::new(s) {
+            Ok(re) => out.push(re),
+            Err(e) => tracing::warn!(target: "permission", "user regex 编译失败: {} ({})", s, e),
+        }
+    }
+    out
+}
+
+/// 用 globset 把 `~/...` 风格的 glob 编译为 matcher（供调用方临时使用）。
+#[allow(dead_code)]
+pub(crate) fn compile_glob(pattern: &str) -> Option<globset::GlobMatcher> {
+    Glob::new(pattern).ok().map(|g| g.compile_matcher())
+}
+
+/// 找到 `path` 最长存在的祖先并 canonicalize，再拼回剩余的子路径。
+///
+/// 例如 `/var/tmp/foo/k.txt`（k.txt 不存在）：canonicalize `/var/tmp/foo` ->
+/// `/private/var/tmp/foo`，最终返回 `/private/var/tmp/foo/k.txt`。
+pub(crate) fn canonicalize_with_existing_ancestor(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    let mut tail = Vec::new();
+    let mut cur = path.to_path_buf();
+    while let Some(parent) = cur.parent().map(|p| p.to_path_buf()) {
+        if let Some(name) = cur.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(c) = std::fs::canonicalize(&parent) {
+            let mut out = c;
+            for seg in tail.iter().rev() {
+                out.push(seg);
+            }
+            return out;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
