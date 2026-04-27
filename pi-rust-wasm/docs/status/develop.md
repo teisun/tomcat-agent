@@ -1,6 +1,99 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-04-26 | INTEGRATED | develop | — |
+| Nibbles | 2026-04-27 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-004 workspace-permission-tiers（工作目录权限分级）
+
+**合并信息**
+
+- 源分支：`feature/workspace-permission-tiers` @ `343d08d`（3 commits：`ebbb66d` 主体 + `af93941` 文档微调 + `343d08d` Nibbles.md 编码规范家族升级）
+- 合并 commit：`11eb5e7 merge(T2-P0-004): feature/workspace-permission-tiers → develop (workspace permission tiers PR-1~PR-10)`
+- 合并策略：`--no-ff`，ort 无冲突
+- 负责任务：T2-P0-004（Jerry 交付，Nibbles 集成复核）
+- 覆盖范围：`pi-rust-wasm` 内 55 文件 +5655 / -196 行（含 `core/permission/{gate,bash_parser,defaults,path_rule,session_grants,types,mod}.rs` 全新模块、`api/chat/{config_tool,dragged_path}.rs`、`api/cli/pathrules_cmd.rs`、`infra/config/{append,lock}.rs`、`core/agent_loop/config_backend.rs`、`core/system_prompt.rs::WorkspaceStateSection`、`PrimitiveAuditEntry` 三新字段、`openspec/specs/architecture/permission-system.md` 582 行设计文档）
+
+**§1 规格 & 场景库核对**
+
+- 设计单一事实来源：[`permission-system.md`](../../openspec/specs/architecture/permission-system.md)（12 节 + 多幅 ASCII 决策树/数据流图）与 `src/core/permission/` 实现一致
+- [`Architecture.md`](../../openspec/specs/Architecture.md) 第 98、151 行已交叉引用；[`security.md`](../../openspec/specs/architecture/security.md) 第 5、8 行已对接"最小权限""用户知情权"原则
+- **已知差异**：本次 T2-P0-004 引入的用户可见行为（`pi pathrules add/list` CLI、拖拽路径 5 选项菜单、`config_get` / `config_set` LLM 工具、`WorkspaceStateSection` 启动横幅）尚未在 [`E2E_SCENARIO_LIBRARY.md`](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 中挂 E2E-CLI-* 编号——分支侧实现走 src 内单元/集成测试。`tests/cli_tests.rs` 在 `ec84e93..HEAD` 范围内无新增，证实未挂顶层 E2E。建议在 T2-P0-005 或独立 follow-up 中补充。**不阻塞合并**
+
+**§2 集成测试 review（permission / executor / chat / config）**
+
+- 新增黑盒测试覆盖（按 PR 分布）：
+  - PR-1：`core::permission::tests::{gate,session_grants,path_rule,dragged_paths,effective_roots,defaults}`
+  - PR-2：`core::executor::tests::gate_suite`（含 `pr2_*` / `pr9_*`）
+  - PR-3：`core::permission::bash_parser::tests`
+  - PR-4：`api::chat::tests::dragged_path` + `interpret_dragged_paths`
+  - PR-5：`infra::config::tests::{path_rules,workspace_entries,env_sanitize}`
+  - PR-6：`infra::audit::tests::primitive_entry_fields`
+  - PR-7：`api::chat::tests::config_tool`
+  - PR-8：`core::tests::system_prompt::WorkspaceStateSection`
+  - PR-9：`core::executor::tests::gate_suite::pr9_*` + `core::permission::tests::gate::pr9_*`
+  - PR-10：`api::cli::tests::pathrules_cmd`
+- **flaky `run_init_returns_ok`**：HOME 切换并发竞态预存在问题，已用 `--test-threads=1` 兜底；本次复跑 538 lib + 195 集成全绿，未触发；建议后续以全局 HOME 锁修复（[feature-workspace-permission-tiers.md 第 60 行](feature-workspace-permission-tiers.md) 已记录）
+
+**§3 E2E**
+
+- `cli_tests`（77/77，含真实 LLM 流式 + 4 原语 + 工具调用全部通过，83.82s）
+- `wasmedge_e2e_tests`（39/39，81.52s）；stderr `js_api_async_test: FATAL ERROR: ASSERT FAILED: once handler should fire exactly once, got count=0` 为 E2E-WASM-022 注释中已知 MVP 无状态执行限制（Rust harness `ok` 为准，与 [INTEGRATION_MERGE_AND_ACCEPTANCE §4 第 152 行](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 一致）
+
+**§4 全量门禁**（在 `develop` 合并后、`pi-rust-wasm` 根目录；`source ~/.wasmedge/env` + `source .env`）
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo build --release` | 通过（6m 59s） |
+| `cargo clippy --all-features --all-targets -- -D warnings` | 零警告（19.85s） |
+| `RUST_LOG=pi_wasm=debug,info cargo test --all-features --lib -j 1 -- --nocapture --test-threads=1` | **538 passed; 0 failed; 1 ignored**（14.79s） |
+| `RUST_LOG=pi_wasm=debug,info cargo test --all-features --tests -j 1 --no-fail-fast -- --nocapture --test-threads=1` | **195 passed; 0 failed; 0 ignored**（日志：`.integration_develop_merge.log`） |
+
+集成 / E2E 各 crate 明细：
+
+| crate | 结果 |
+| :--- | :--- |
+| `agent_loop_tests` | 11/11 |
+| `audit_tests` | 1/1 |
+| `cli_tests` | 77/77 |
+| `context_management_tests` | 19/19 |
+| `event_tests` | 4/4 |
+| `hostcall_tests` | 5/5 |
+| `js_api_alignment_tests` | 2/2 |
+| `llm_tests` | 2/2 |
+| `long_lived_vm_tests` | 13/13 |
+| `plugin_tests` | 3/3 |
+| `primitives_tools_tests` | 10/10 |
+| `robustness_tests` | 5/5 |
+| `session_tests` | 4/4 |
+| `wasmedge_e2e_tests` | 39/39 |
+
+**编码规范家族对照**（[Constitution §三.3 完成定义](../../openspec/specs/Constitution.md) 4 件套全量）
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | 通过 | `core/permission` 0 反向依赖 `api`；与 `executor` 一致依赖 `infra::error/platform/audit/config`；`PermissionGate` trait + `DefaultPermissionGate` 默认实现封装在 core 内；`api/cli/pathrules_cmd.rs` 137 行薄壳；原语-core-infra 单向流 |
+| `RUST_FILE_LINES_SPEC.md` | 主体通过；3 处 follow-up | `core/permission/*` 全部落 L-1 黄金区间（gate=423 / bash_parser=188 / defaults=108 / path_rule=95 / session_grants=96 / types=103 / mod=34）；存量大文件 follow-up：`api/chat/config_tool.rs` 725（L-2）、`core/executor/primitives.rs` 840（L-2）、`api/chat/mod.rs` 1024（L-3）。**性质为指导性建议，不阻塞合并** |
+| `RUST_IDIOMS_SPEC.md` | 通过 | `cargo clippy --all-features --all-targets -- -D warnings` 零警告；分支已修 4 类 lint（`manual_contains` / `redundant_guards` / `derivable_impls` / `single_match`）兄弟 case 抽样无新增 |
+| `COMMENT_SPEC.md` | 通过 | `permission/{mod,types,gate,bash_parser,path_rule,session_grants,defaults}.rs` 模块级 `//!` + 项级 `///` 完整；`PermissionGate` trait 与每个方法都有 doc；`bash_parser` 含「保守的尽力而为」「为什么静默返回空列表」级注释；`config_tool` 模块顶部说明 LLM 工具与 CLI 通道职责区分（防 Agent 自我提权） |
+
+**follow-up（不阻塞合并，建议挂 T-XXX 或下一迭代）**
+
+1. `api/chat/config_tool.rs`（725 行）建议拆为 `config_tool/{mod,get,set}.rs`
+2. `core/executor/primitives.rs`（840 行）建议按 4 原语拆 impl 子模块
+3. `api/chat/mod.rs`（1024 行）建议按 chat session / dragged path / tool dispatch 等子域拆模块
+4. `E2E_SCENARIO_LIBRARY.md` 补 T2-P0-004 用户可见行为编号（pathrules / dragged_path / config tool）
+5. `run_init_returns_ok` flaky → 全局 HOME 锁
+
+**时间 / 环境**
+
+- 主机：macOS；Rust toolchain：项目 `rust-toolchain.toml`（nightly-x86_64-apple-darwin）
+- 已 `source ~/.wasmedge/env`；`pi-rust-wasm/.env` 注入 `OPENAI_API_KEY`（`llm_tests` / `cli_tests` 部分用例）
+- WasmEdge harness stderr `Code: 0x8d` / JS `ASSERT FAILED ... once handler` 均为已知非失败信号
+
+**结论**
+
+T2-P0-004 集成验收**通过**：`--no-ff` 合并无冲突；门禁全绿；编码规范家族 4 件套全部对照通过（3 处行数 follow-up 不阻塞合并）；看板 T2-P0-004 即将更新为 `DONE`。
+
+---
 
 ### 集成测试报告 — T2-P0-002 compaction-prompt-and-ctx-v2（摘要 9 节 + 退避留痕 + spec）
 
