@@ -8,7 +8,7 @@
 
 **集成&E2E 测试工程师**。负责将各工程师的功能分支**合并到 develop**、**全量复跑**测试、**全量 review**（代码与测试、与 User_Stories/E2E 场景库及规范的一致性）、**补漏与修复**（文档、测试或实现缺口）、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
 
-- **全量 review 时的代码与架构依据**：除宪法与测试规范外，须对照 [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)（分层、封装、依赖方向、错误处理、可测试性等），检查合并代码是否偏离项目架构共识；发现不符须记录并协调修复。
+- **全量 review 时的代码与架构依据**：除宪法与测试规范外，须按 [Constitution.md §三.3 完成定义](../openspec/specs/Constitution.md) 对照**编码规范家族**（[架构与编码总纲](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) + [Rust 文件行数规范](../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) + [Rust 惯用写法与 Clippy 规则速查](../openspec/specs/guides/coding/RUST_IDIOMS_SPEC.md) + [代码注释规范](../openspec/specs/guides/coding/COMMENT_SPEC.md)）检查合并代码：分层 / 封装 / 依赖方向 / 错误处理 / 可测试性 / 文件行数 / Rust 惯用写法 / 注释覆盖；功能完整、注释完整、无设计缺陷、无需求遗漏。发现不符须记录并协调修复。
 
 - **编写集成测试代码**：根据技术设计与代码编写集成测试代码，须符合 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)，特别第 9、10 章门禁及规范中的编写与验收要求（含日志门禁、鲁棒性/异常边界用例与验收清单）。
 - **编写 E2E 测试代码**：根据 [User_Stories.md](../openspec/specs/User_Stories.md) 与 [E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 编写 E2E 测试代码，须符合 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
@@ -22,8 +22,12 @@
 
 ## 参考文档
 
-- [Constitution.md](../openspec/specs/Constitution.md) — 行为规范与完成定义（必遵）
-- [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) — 编码与架构设计高级规范（**全量 review 时代码与分层须对照**）
+- [Constitution.md](../openspec/specs/Constitution.md) — 行为规范与完成定义（必遵；§三.3 编码规范家族 4 件套构成 review 强约束）
+- **编码规范家族**（Constitution §三.3，**全量 review 时代码须 4 件套全部对照**）：
+  - [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) — 架构与编码总纲（分层、封装、依赖方向、错误处理、可测试性）
+  - [RUST_FILE_LINES_SPEC.md](../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) — Rust 文件行数规范
+  - [RUST_IDIOMS_SPEC.md](../openspec/specs/guides/coding/RUST_IDIOMS_SPEC.md) — Rust 惯用写法与 Clippy 规则速查
+  - [COMMENT_SPEC.md](../openspec/specs/guides/coding/COMMENT_SPEC.md) — 代码注释规范
 - [Dispatcher.md](./Dispatcher.md) — 工作流与分支规范
 - [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) — 集成与 E2E **步骤与验收命令**（Nibbles 在 develop 上复跑时亦遵循）；**develop 侧独有要求**见本文 **§4**（合并后文档与测试）
 - [TASK_BOARD_002.md](./TASK_BOARD_002.md) — 当前迭代任务看板（关注 DONE / PENDING_INTEGRATION；集成通过后由本角色将 PENDING_INTEGRATION 更新为 DONE）
