@@ -79,7 +79,7 @@ async fn tool_exec_unknown_tool_returns_is_error() {
         name: "no_such_tool".to_string(),
         arguments: "{}".to_string(),
     };
-    let (msg, is_error) = execute_tool(&primitive, &tc).await;
+    let (msg, is_error) = execute_tool(&primitive, &None, &tc).await;
     assert!(is_error, "unknown tool must report is_error=true");
     assert!(
         msg.contains("no_such_tool") || msg.to_lowercase().contains("unknown"),
@@ -97,7 +97,7 @@ async fn tool_exec_read_file_returns_content() {
         name: "read_file".to_string(),
         arguments: r#"{"path":"/tmp/abc"}"#.to_string(),
     };
-    let (msg, is_error) = execute_tool(&primitive, &tc).await;
+    let (msg, is_error) = execute_tool(&primitive, &None, &tc).await;
     assert!(!is_error, "read_file success must report is_error=false");
     assert!(
         msg.contains("/tmp/abc"),

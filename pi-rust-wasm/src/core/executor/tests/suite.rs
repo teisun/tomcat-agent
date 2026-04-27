@@ -14,8 +14,8 @@ fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
     let mut c = PrimitiveConfig::default();
     let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     c.path_whitelist = vec![canonical.to_string_lossy().into_owned()];
-    c.require_approval_for_all_write = false;
-    c.require_approval_for_all_bash = false;
+    // Legacy 模式：write/edit/bash 默认弹 confirm；测试里通常用 AllowAllConfirmation 直通，
+    // 或显式开 auto_confirm。
     c.bash_whitelist = vec!["echo".to_string()];
     c
 }
@@ -107,8 +107,7 @@ async fn write_file_user_denied_returns_permission_and_audit() {
     let f = dir.join("d.txt");
     std::fs::write(&f, "old").unwrap();
     let path_str = f.to_string_lossy().to_string();
-    let mut c = temp_whitelist_config(&dir);
-    c.require_approval_for_all_write = true;
+    let c = temp_whitelist_config(&dir);
     let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
     let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
     let exec = DefaultPrimitiveExecutor::new(c, Arc::new(DenyAllConfirmation), audit, dir.clone());
@@ -142,8 +141,7 @@ async fn edit_file_success() {
     let f = dir.join("e.txt");
     std::fs::write(&f, "line1\nline2\nline3").unwrap();
     let path_str = f.to_string_lossy().to_string();
-    let mut c = temp_whitelist_config(&dir);
-    c.require_approval_for_all_write = false;
+    let c = temp_whitelist_config(&dir);
     let exec = DefaultPrimitiveExecutor::new(
         c,
         Arc::new(AllowAllConfirmation),
@@ -228,13 +226,15 @@ async fn require_user_confirmation_deny_returns_false() {
 }
 
 #[tokio::test]
-async fn list_dir_path_in_blacklist_returns_err() {
-    let dir = std::env::temp_dir().join("pi_wasm_exec_blacklist");
+async fn list_dir_path_rule_deny_returns_err() {
+    // PR-5 起：`path_blacklist` 已被结构化 `path_rules` 替代；此处验证
+    // legacy 模式下不再做黑名单检查（仅靠 path_whitelist 限制），
+    // 而真正 deny 路径的能力由 gate 模式 + path_rules 提供（gate_suite 覆盖）。
+    let dir = std::env::temp_dir().join("pi_wasm_exec_legacy_no_blacklist");
     std::fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
     let path_str = dir.to_string_lossy().to_string();
-    let mut c = temp_whitelist_config(&dir);
-    c.path_blacklist = vec![path_str.clone()];
+    let c = temp_whitelist_config(&dir);
     let exec = DefaultPrimitiveExecutor::new(
         c,
         Arc::new(AllowAllConfirmation),
@@ -242,8 +242,7 @@ async fn list_dir_path_in_blacklist_returns_err() {
         dir.clone(),
     );
     let r = exec.list_dir(&path_str, "p1").await;
-    assert!(r.is_err());
-    assert!(r.unwrap_err().to_string().contains("黑名单"));
+    assert!(r.is_ok(), "legacy 模式不再有黑名单语义");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -276,7 +275,6 @@ async fn write_file_auto_confirm_skips_confirmation() {
     let path_str = f.to_string_lossy().to_string();
     let mut c = temp_whitelist_config(&dir);
     c.auto_confirm = true;
-    c.require_approval_for_all_write = true;
     let exec = DefaultPrimitiveExecutor::new(
         c,
         Arc::new(DenyAllConfirmation),

@@ -151,7 +151,7 @@ pub(super) async fn run_tool_calls(
         // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` 由
         // PrimitiveExecutor::execute_bash 内部兜底，保证子进程 / HTTP 连接被及时释放。
         let (result_content, is_error) = {
-            let exec = tool_exec::execute_tool(&agent.primitive, tc);
+            let exec = tool_exec::execute_tool(&agent.primitive, &agent.config_backend, tc);
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {

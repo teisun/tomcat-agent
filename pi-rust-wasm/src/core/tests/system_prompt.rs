@@ -90,3 +90,162 @@ fn custom_section_appears_in_output() {
     let output = builder.build("/tmp");
     assert!(output.contains("CUSTOM_CONTENT"));
 }
+
+// ── WorkspaceStateSection（plan §8 / PR-8） ──────────────────────────────────
+
+fn fixture_state() -> WorkspaceState {
+    WorkspaceState {
+        read_write: vec![
+            WorkspaceRootDescriptor {
+                path: "/Users/yan/proj".into(),
+                label: "agent_workspace".into(),
+                alias: None,
+                description: None,
+            },
+            WorkspaceRootDescriptor {
+                path: "/Users/yan/scratch".into(),
+                label: "extra_root".into(),
+                alias: Some("scratch".into()),
+                description: Some("用户附加根".into()),
+            },
+            WorkspaceRootDescriptor {
+                path: "/tmp/dropped".into(),
+                label: "dragged_path".into(),
+                alias: None,
+                description: None,
+            },
+        ],
+        read_only: vec![WorkspaceRootDescriptor {
+            path: "/Users/yan/.pi_/agents/main/sessions".into(),
+            label: "agent_data_dir".into(),
+            alias: None,
+            description: None,
+        }],
+        path_rules: vec![
+            PathRuleSummary {
+                path: "/etc".into(),
+                mode: "deny".into(),
+                builtin: true,
+            },
+            PathRuleSummary {
+                path: "/Users/yan/secrets".into(),
+                mode: "deny".into(),
+                builtin: false,
+            },
+            PathRuleSummary {
+                path: "/Users/yan/refs".into(),
+                mode: "readonly".into(),
+                builtin: false,
+            },
+        ],
+        agent_data_dir: Some("/Users/yan/.pi_/agents/main/agent".into()),
+    }
+}
+
+#[test]
+fn workspace_state_section_renders_read_write() {
+    let s = WorkspaceStateSection::new(fixture_state()).render("/tmp");
+    assert!(s.contains("Workspace State"));
+    assert!(s.contains("/Users/yan/proj"));
+    assert!(s.contains("[agent_workspace]"));
+    assert!(s.contains("/Users/yan/scratch"));
+    assert!(s.contains("alias=scratch"));
+    assert!(s.contains("desc=\"用户附加根\""));
+    assert!(s.contains("/tmp/dropped"));
+    assert!(s.contains("[dragged_path]"));
+}
+
+#[test]
+fn workspace_state_section_renders_read_only_and_agent_dir() {
+    let s = WorkspaceStateSection::new(fixture_state()).render("/tmp");
+    assert!(s.contains("READ (but NOT write)"));
+    assert!(s.contains("/Users/yan/.pi_/agents/main/sessions"));
+    assert!(s.contains("[agent_data_dir]"));
+    // agent_data_dir 文案（独立行；read_only 已出现 sessions 但 agent dir 路径不同）。
+    assert!(s.contains("Agent data dir"));
+    assert!(s.contains("/Users/yan/.pi_/agents/main/agent"));
+}
+
+#[test]
+fn workspace_state_section_renders_path_rules_with_builtin_tag() {
+    let s = WorkspaceStateSection::new(fixture_state()).render("/tmp");
+    assert!(s.contains("Path rules in effect:"));
+    let deny_line = s
+        .lines()
+        .find(|l| l.contains("deny:"))
+        .expect("should have deny line");
+    assert!(deny_line.contains("/etc [builtin]"));
+    assert!(deny_line.contains("/Users/yan/secrets"));
+    // 用户自定义不带 [builtin]
+    assert!(!deny_line.contains("/Users/yan/secrets [builtin]"));
+    let ro_line = s
+        .lines()
+        .find(|l| l.contains("readonly:"))
+        .expect("should have readonly line");
+    assert!(ro_line.contains("/Users/yan/refs"));
+}
+
+#[test]
+fn workspace_state_section_mentions_config_tools() {
+    let s = WorkspaceStateSection::new(fixture_state()).render("/tmp");
+    assert!(s.contains("config_get"));
+    assert!(s.contains("config_set"));
+    assert!(s.contains("DO NOT write to ~/.pi_/pi.config.toml"));
+}
+
+#[test]
+fn workspace_state_section_handles_empty_state() {
+    let st = WorkspaceState {
+        read_write: vec![],
+        read_only: vec![],
+        path_rules: vec![],
+        agent_data_dir: None,
+    };
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    assert!(s.contains("no read/write directories"));
+    // 没有 read_only / path_rules / agent_data_dir 行
+    assert!(!s.contains("READ (but NOT write)"));
+    assert!(!s.contains("Path rules in effect:"));
+    assert!(!s.contains("Agent data dir"));
+    // 但 config_get 工具引导仍要保留
+    assert!(s.contains("config_get"));
+}
+
+#[test]
+fn build_system_prompt_with_state_includes_workspace_state() {
+    let prompt = build_system_prompt_with_state("/home/user/workspace", fixture_state());
+    assert!(prompt.contains("Workspace State"));
+    assert!(prompt.contains("/Users/yan/proj"));
+    // 默认 4 个 section + 新加的 1 个，仍包含工具说明
+    assert!(prompt.contains("read_file"));
+    assert!(prompt.contains("Current date and time"));
+}
+
+#[test]
+fn workspace_state_priority_between_paged_reading_and_workspace_context() {
+    let prompt = build_system_prompt_with_state("/tmp", fixture_state());
+    // priority 顺序：core(10) < tool(20) < paged(30) < workspace_state(150) < workspace_ctx(200)
+    let paged_pos = prompt.find("Tool result persisted").expect("paged section");
+    let state_pos = prompt.find("Workspace State").expect("state section");
+    let ctx_pos = prompt
+        .find("Current date and time:")
+        .expect("workspace ctx");
+    assert!(paged_pos < state_pos, "state 应在 paged 之后");
+    assert!(state_pos < ctx_pos, "state 应在 workspace ctx 之前");
+}
+
+#[test]
+fn workspace_state_section_skips_duplicate_agent_data_dir() {
+    // 当 agent_data_dir 已经在 read_only 列表中时，不重复输出独立行。
+    let mut st = fixture_state();
+    let dup = "/Users/yan/.pi_/agents/main/agent";
+    st.read_only.push(WorkspaceRootDescriptor {
+        path: dup.to_string(),
+        label: "agent_data_dir".into(),
+        alias: None,
+        description: None,
+    });
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    let occurrences = s.matches(dup).count();
+    assert_eq!(occurrences, 1, "agent_data_dir 路径只应出现一次");
+}

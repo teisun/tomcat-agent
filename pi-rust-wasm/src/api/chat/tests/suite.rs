@@ -25,6 +25,23 @@ fn build_tool_definitions_contains_all_primitives() {
 }
 
 #[test]
+fn build_tool_definitions_contains_config_tools() {
+    let defs = build_tool_definitions();
+    let names: Vec<String> = defs
+        .iter()
+        .filter_map(|d| d["function"]["name"].as_str().map(String::from))
+        .collect();
+    assert!(
+        names.contains(&"config_get".to_string()),
+        "config_get tool must be registered (PR-7)"
+    );
+    assert!(
+        names.contains(&"config_set".to_string()),
+        "config_set tool must be registered (PR-7)"
+    );
+}
+
+#[test]
 fn chat_message_assistant_with_tool_calls_has_tool_calls() {
     use crate::ChatMessage;
     let tc_json = vec![serde_json::json!({

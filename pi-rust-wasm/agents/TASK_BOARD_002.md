@@ -55,6 +55,7 @@
 | Checkpoint 设计需共识 | 中 | 先出 design 草案进 `agents/plan/`，由 Nibbles 发起 review 后再开工 |
 | Compaction prompt 改动可能触发旧 transcript 不兼容 | 中 | 保留旧摘要兜底路径，新 prompt 先做 A/B 观察 2 个会话周期 |
 | 权限分级（T2-P0-004）与既有 4 原语 audit 日志耦合 | 中 | 先补 dry-run 模式，再切换；审计日志新增 `permission_level` 字段 |
+| T2-P0-003 末位调度、迭代末仍未闭环 | 低 | 主动取消 + `reqwest` 整请求超时已兜底主要挂死面；下迭代首周可补热修 / 提优先级 |
 
 ### 1.5 优先级说明（必读）
 
@@ -94,7 +95,7 @@
 
 ## 4. 待办任务
 
-> 按 P0 → P1 顺序与模块依赖排列。工程师按 [Dispatcher.md](./Dispatcher.md) 流程认领。
+> 按 P0 → P1 顺序与模块依赖排列；**T2-P0-003** 在**全部其它 T2-P0-00x 完成之后**再排期（002 期全 P0 中最低优先级、末位调度）。工程师按 [Dispatcher.md](./Dispatcher.md) 流程认领。
 >
 > 字段约定：`关联 TODOS` 字段列出 `docs/TODOS.md` 中对应 `#T-XXX` 条目，便于双向追溯。
 
@@ -128,7 +129,7 @@
 
 **依赖**：归档 001-mvp 中的 TASK-14（DONE）
 
-**被依赖**：T2-P0-003、T2-P0-007
+**被依赖**：T2-P0-003、T2-P0-007（003 为**末位调度**，不阻塞 007 等其它 P0 的合并与交付）
 
 **协作接口**：
 - 消费：`LlmProvider::chat_stream`、`EventBus`、`ToolRegistry`
@@ -187,47 +188,13 @@
 
 ---
 
-### T2-P0-003 | stream-timeout-and-tool-loop | Stream timeout + Tool loop detection
-
-| 字段 | 内容 |
-|------|------|
-| **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
-| **分支** | `feature/stream-timeout-loop-guard` |
-| **阻塞点** | — |
-| **关联 TODOS** | `#T-131`、`#T-132` |
-
-**目标**：把 `src/core/llm/openai.rs` 中的 `stream_timeout_sec` 接 `tokio::time::timeout`；替换 `src/core/agent_loop/types.rs:38-40` 的 `MAX_TOOL_ROUNDS` 硬限为 ToolLoopGuard 三道防线。
-
-**子项**：
-- [ ] `OpenAiProvider::chat_stream` 接入 `tokio::time::timeout` + 心跳超时；超时抛 `LlmError::StreamTimeout`（Retryable）
-- [ ] 删除 `MAX_TOOL_ROUNDS` 硬编码，新增 `ToolLoopGuard`：① 连续同名 tool 调用次数阈值 ② 最近 N 轮 tool 输出相似度阈值 ③ 总轮数上限（可配）
-- [ ] 触发 guard 后向 LLM 回注 `You appear to be in a tool-call loop, please reconsider.` 的 system 提示
-- [ ] `openspec/specs/architecture/context-management.md:1017-1019` 规格侧 TODO 同步更新
-
-**依赖**：T2-P0-001（error_classifier 已落位）
-
-**被依赖**：—
-
-**协作接口**：
-- 消费：`error_classifier::classify`、配置 `llm.stream_timeout_sec` / `agent.tool_loop_guard.*`
-- 提供：`ToolLoopGuard::check(&self, history)` → `GuardDecision`
-
-**验收标准**：
-- 流式挂起 ≥ timeout 时自动重连或失败，不再静默阻塞
-- ToolLoopGuard 三档都有单测覆盖
-- `#T-131` `#T-132` 两条 TODO 关闭
-
----
-
 ### T2-P0-004 | workspace-permission-tiers | 工作目录权限分级
 
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Jerry |
 | **分支** | `feature/workspace-permission-tiers` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-046`、`#T-047`、`#T-048`、`#T-050`、`#T-051` |
@@ -235,12 +202,12 @@
 **目标**：落实工作目录 / 非工作目录的权限分级模型，避免现有「一刀切拒绝」带来的体验断层。
 
 **子项**：
-- [ ] 工作目录下：read 免授权；write 支持 `always / 单次` 两档授权
-- [ ] 非工作目录：所有操作需显式授权（弹 prompt 而非直接 403）
-- [ ] Bash：解析命令目标路径，按同规则分级；避免 `rm -rf /` 类命令越权
-- [ ] 工作目录别名 + 描述字段；「说话就能改配置」的便捷入口
-- [ ] 审计日志新增 `permission_level` / `grant_source` 字段
-- [ ] `src/core/primitives.rs` 对齐新权限 API
+- [x] 工作目录下：read 免授权；write 支持 `always / 单次` 两档授权（PR-1/PR-2 落地，`ConfirmDecision::AllowOnce` / `AllowAndPersistRoot` / `Deny` 三选项 UI）
+- [x] 非工作目录：所有操作需显式授权（弹 prompt 而非直接 403）（PR-2，layer-2 NeedConfirm）
+- [x] Bash：解析命令目标路径，按同规则分级；避免 `rm -rf /` 类命令越权（PR-3 `bash_parser` + `bash_forbidden` 默认值）
+- [x] 工作目录别名 + 描述字段；「说话就能改配置」的便捷入口（PR-5 `WorkspaceConfig.entries` + PR-7 `config_get/set` LLM 工具）
+- [x] 审计日志新增 `permission_level` / `grant_source` 字段（PR-6，外加 `in_working_dir`）
+- [x] `src/core/primitives.rs` 对齐新权限 API（PR-2 `executor::primitives` 接入 `PermissionGate`，原语返回 `PermissionDecision`）
 
 **依赖**：归档 001-mvp 的 4 原语引擎（DONE）
 
@@ -253,7 +220,7 @@
 **验收标准**：
 - 5 条 TODO（T-046/T-047/T-048/T-050/T-051）全部闭环
 - E2E：工作目录 / 非工作目录 / Bash / 写操作 四个场景用户体验符合 `Product_Brief.md` 新约束
-- 审计日志 schema 变更有迁移脚本
+- 审计 JSONL 向后兼容（`PrimitiveAuditEntry` 新增 `permission_level` / `grant_source` / `in_working_dir` 一律 `#[serde(default)]`，老行缺字段可读；开发期无存量用户，不做批量迁移脚本——与设计 plan §5/§10/§11 一致）
 
 ---
 
@@ -519,6 +486,42 @@
 
 ---
 
+### T2-P0-003 | stream-timeout-and-tool-loop | Stream timeout + Tool loop detection
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0（**002 期末位调度**：在**全部其它** `T2-P0-00x` 完成后再做；全 P0 中**最低**） |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/stream-timeout-loop-guard` |
+| **阻塞点** | — |
+| **关联 TODOS** | `#T-131`、`#T-132` |
+
+**目标**：把 `src/core/llm/openai.rs` 中的 `stream_timeout_sec` 接 `tokio::time::timeout`；替换 `src/core/agent_loop/types.rs:38-40` 的 `MAX_TOOL_ROUNDS` 硬限为 ToolLoopGuard 三道防线。
+
+**调度说明（2026-04-26）**：仍在 002 范围与「16 个 T2-P0/P1 全 DONE」交付内。主动取消 + `reqwest` 整请求超时已降低挂死概率；本任务为体验加固，**不阻塞**其它 P0 认领与合并；若迭代末期时间仍紧，以「末位调度」压线排期，接受短期依赖现有超时与取消路径。
+
+**子项**：
+- [ ] `OpenAiProvider::chat_stream` 接入 `tokio::time::timeout` + 心跳超时；超时抛 `LlmError::StreamTimeout`（Retryable）
+- [ ] 删除 `MAX_TOOL_ROUNDS` 硬编码，新增 `ToolLoopGuard`：① 连续同名 tool 调用次数阈值 ② 最近 N 轮 tool 输出相似度阈值 ③ 总轮数上限（可配）
+- [ ] 触发 guard 后向 LLM 回注 `You appear to be in a tool-call loop, please reconsider.` 的 system 提示
+- [ ] `openspec/specs/architecture/context-management.md:1017-1019` 规格侧 TODO 同步更新
+
+**依赖**：T2-P0-001（error_classifier 已落位；**无硬依赖其它 P0**，仅**实施顺序**置末位）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`error_classifier::classify`、配置 `llm.stream_timeout_sec` / `agent.tool_loop_guard.*`
+- 提供：`ToolLoopGuard::check(&self, history)` → `GuardDecision`
+
+**验收标准**：
+- 流式挂起 ≥ timeout 时自动重连或失败，不再静默阻塞
+- ToolLoopGuard 三档都有单测覆盖
+- `#T-131` `#T-132` 两条 TODO 关闭
+
+---
+
 ### T2-P1-001 | checkpoint-resume | Checkpoint + 断点续跑
 
 | 字段 | 内容 |
@@ -725,11 +728,11 @@
 ```mermaid
 flowchart LR
     P001[T2-P0-001<br/>AgentLoop 拆分] --> P002[T2-P0-002<br/>Compaction]
-    P001 --> P003[T2-P0-003<br/>Stream timeout + Loop guard]
     P001 --> P006[T2-P0-006<br/>Thinking]
     P001 --> P007[T2-P0-007<br/>Interrupt/Resume]
     P001 --> P009[T2-P0-009<br/>Pipeline 重构]
     P001 --> P010[T2-P0-010<br/>长任务后台]
+    P001 --> P003[T2-P0-003<br/>Stream timeout + Loop 002末位]
     P004[T2-P0-004<br/>权限分级] --> P005[T2-P0-005<br/>工具系统]
     P005 --> P008[T2-P0-008<br/>TUI 强化]
     P006 --> P008
@@ -744,12 +747,15 @@ flowchart LR
     P010 --> P106[T2-P1-006<br/>集成测试规范]
 ```
 
+> **注**：T2-P0-003 仍从 T2-P0-001 出依赖边，**实施顺序**固定为**全部其它 T2-P0-00x 之后**（002 内最低、末位调度）。
+
 ---
 
 ## 6. 变更记录
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-04-26 | T2-P0-003 调度为 002 全 P0 末位（最低优先） | 任务块重排至 `T2-P0-011` 之后；§4 认领说明、§1.4 风险、§5 拓扑同步；仍属 002 交付与 `#T-131`/`#T-132` 闭环范围，不降低 P0 档 |
 | 2026-04-22 | 新建本看板 | 随 P0-P9 路线图调整；`001-mvp` 归档到 `openspec/specs/archive/` |
 | 2026-04-22 | 认领 T2-P0-007 | Spike 认领（TODO→DOING），破例绕过 T2-P0-001 / T2-P0-003 依赖（见阻塞点）；计划 `interruptible_agent_loop_c77e96ab.plan.md` 经用户确认后进入开发 |
 | 2026-04-23 | T2-P0-007 DOING→PENDING_INTEGRATION | Spike 完成 T-003 / T-004 / T-017 + T-007 最小版；全量门禁 `cargo build --all-targets`、`cargo clippy -- -D warnings`、`cargo fmt -- --check`、`cargo test --lib` (432/432) 与 `cargo test --test '*'` (含 cli_tests 77 / wasmedge_e2e_tests 39) 全绿；impact-scan 实际**未修改** `PrimitiveExecutor::execute_bash` trait 签名（零 mock 改动）；架构文档 `interrupt-and-cancellation.md` 定稿，E2E-CLI-062 / E2E-CLI-063 登记到场景库；待 Nibbles 集成复核 |
@@ -760,3 +766,5 @@ flowchart LR
 | 2026-04-26 | T2-P0-002 TODO→DOING | Spike 认领并从 develop 拉出 `feature/compaction-prompt-9section`；同步把字段表「架构 spec 落档」子项与验收标准对齐 plan §6.G 决议——**不新增** `compaction-resilience.md`，**不做** §7 索引化搬迁，仅在 `openspec/specs/architecture/context-management.md` 增加一个简短小节（`Compaction v2（T2-P0-002）`）记录 9 节模板 / 禁 tools / 退避+留痕 + 3 项不实施决议回链。本次仅看板状态字段同步，无代码改动 |
 | 2026-04-26 | T2-P0-002 DOING→PENDING_INTEGRATION | Spike 完成 plan `compaction_prompt_9-section_41653219.plan.md` 全部 Phase A/B/D/F/G 实施：① **Phase B**（`4b2717c`）`preheat.rs` 两个 `pub(super) const` 升级为 9 节模板（含「最近 10 条用户原话」+「先内部 reason 再输出」双声明），`generate_summary` 显式 `tools: None`，新增 `prompt_snapshot.rs` 13 用例；② **Phase D**（`447a61a`）重试 loop Err 分支追加 `tokio::time::sleep` 指数退避（500ms / 1s / 2s），`BranchSummaryEntry` 新增 `error: Option<String>` / `attempts: Option<u32>`（`#[serde(default, skip_serializing_if)]` 向后兼容），3 次耗尽后 `insert_entry_after_message_id` 写失败锁点，新增 `legacy_transcript_compat.rs` + 退避/失败留痕 2 用例，`Cargo.toml` `[dev-dependencies]` 启用 tokio `test-util` feature；③ **Phase F** 全量门禁 lib `454 passed / 1 ignored` + integration 14 crate `195 passed / 0 failed`（含 `cli_tests` / `wasmedge_e2e_tests` / `llm_tests` 真实路径，`.integration_test_output.log` 留痕）；④ **Phase G**（`ff178ff`）`context-management.md` 新增 §7.5（4 个 H4 子节 + 3 项不实施决议表），`docs/reports/compaction-prompt-cc-vs-pi.md §5.6` 三项 TODO 改 `[x]`。No-Stale 校验：spec 单一事实来源指向 `preheat.rs` `pub(super) const`；零悬空回链（git grep 校验既有 `context-management.md:1017-1019` 引用属于 §6.7 max_tool_rounds，未受插入位置影响）。待 Nibbles 集成复核 |
 | 2026-04-26 | T2-P0-002 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/compaction-prompt-9section` @ `ceaa8b8` `--no-ff` 合并入 develop（merge commit `1fb0a62`，ort 无冲突）；`pi-rust-wasm` 上复跑 `cargo build --release` + `cargo clippy --all-targets -- -D warnings` + `cargo test -j 1 --lib`（454/454、1 ignored）+ `cargo test -j 1 --test '*'`（195 用例）全绿；集成报告见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部 **T2-P0-002** 块；日志 `.integration_develop_merge.log` |
+| 2026-04-27 | T2-P0-004 TODO→DOING | Jerry 认领并从 develop 拉出 `feature/workspace-permission-tiers`；按 plan `workspace_permission_tiers_design_1ad7681a.plan.md` §1 流程进入 PR-1～PR-10 实施；同步初始化 `docs/status/feature-workspace-permission-tiers.md` 元数据表（Owner=Jerry，State=ACTIVE，Cov%=-）；本次仅看板字段同步，无代码改动 |
+| 2026-04-27 | T2-P0-004 DOING→PENDING_INTEGRATION | Jerry 完成 plan §9 PR-1～PR-10 全部 10 个 PR：核心 `PermissionGate` + 3 层决策（PR-1）、`ConfirmDecision` 升级 + executor 接入（PR-2）、`bash_parser` + 危险命令 regex 默认值（PR-3）、拖拽 UX 双语义（PR-4）、`PrimitiveConfig.path_rules` / `WorkspaceConfig.entries` schema + env sanitize（PR-5）、`PrimitiveAuditEntry` `permission_level` / `grant_source` / `in_working_dir`（PR-6）、`config_get` / `config_set` LLM 工具（PR-7）、System prompt `WorkspaceStateSection` + 启动横幅（PR-8）、`agents/{id}` 接入 `EffectiveRoots.read_only` + 凭据子目录默认 deny（PR-9）、`pi pathrules add/list` CLI（PR-10）。门禁全绿：`cargo fmt --all` + `cargo clippy --all-features --all-targets -- -D warnings` + `cargo test -j 1 --lib --test-threads=1`（538 passed / 0 failed / 1 ignored）+ `cargo test -j 1 --tests --no-fail-fast --test-threads=1`（含 `cli_tests` / `wasmedge_e2e_tests` 39 用例 70.8s 全绿）。验收口径勘误：「审计日志 schema 变更有迁移脚本」改为「审计 JSONL 向后兼容 + `#[serde(default)]` + 不做迁移脚本」（与 plan §5/§10/§11 一致）。详见 [`docs/status/feature-workspace-permission-tiers.md`](../docs/status/feature-workspace-permission-tiers.md)；待 Nibbles 集成复核 |

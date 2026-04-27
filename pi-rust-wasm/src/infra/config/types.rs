@@ -152,54 +152,70 @@ pub struct PluginConfig {
 /// 全局工作区授权：额外可访问根路径列表，**所有 agent 共用**，与 `[agent]` 下的 `workspace`（设计态目录）不同。
 ///
 /// 持久化在 `pi.config.toml` 的 `[workspace]` 表；由 `pi workspace add/list/remove` 或手编维护。
+///
+/// `entries` 是 v2 富格式（每项含 path / alias / description），与 `extra_roots`（仅路径）
+/// 同时支持；解析时合并去重。新代码请优先使用 `entries`。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WorkspaceConfig {
-    /// 每项为路径字符串（通常为绝对路径）；空串在解析时忽略。
+    /// v1 兼容：每项为路径字符串（通常为绝对路径）；空串在解析时忽略。
     #[serde(default)]
     pub extra_roots: Vec<String>,
+    /// v2 富格式：每项含 path / alias / description（与 `extra_roots` 合并）。
+    #[serde(default)]
+    pub entries: Vec<WorkspaceEntry>,
 }
 
-/// 4 原语配置：路径/命令白名单与黑名单、审批与禁止列表、是否需用户确认等。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+/// 富格式工作区条目（[`WorkspaceConfig::entries`] 元素）。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceEntry {
+    /// 路径（绝对，含 `~` 前缀）。
+    pub path: String,
+    /// 可选别名，便于 LLM 在对话中引用。
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// 可选说明，便于审计与回顾。
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// 4 原语配置：路径白名单 + bash 三档列表 + path_rules 结构化规则。
+///
+/// **schema 升级（plan §5）**：
+/// - 删除 `path_blacklist`（被 `path_rules` 替代，模式更明确）
+/// - 删除 `require_approval_for_all_write` / `require_approval_for_all_bash`
+///   （`workspace-in-default-allow, workspace-out-confirm` 模型已让它们冗余）
+/// - 新增 `path_rules`: `Vec<PathRule>`（结构化路径规则，模式 `deny` / `readonly`）
+/// - `bash_forbidden` / `bash_approval_required` 默认转为 regex 字符串列表
+///   （编译由 `permission::gate` 在构造时完成）
+///
+/// 仍保留：
+/// - `path_whitelist`：legacy 路径白名单（gate 模式下不再使用，但兼容老 TOML）
+/// - `bash_whitelist`：用户可自定义命令白名单（regex 列表）
+/// - `auto_confirm` / `auto_confirm_whitelist`：自动确认开关（仅短路 layer-2）
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PrimitiveConfig {
     #[serde(default)]
     pub path_whitelist: Vec<String>,
+    /// 结构化路径规则。每条 `path` + `mode`（`deny` / `readonly`）。
+    /// 在 gate 模式下与 builtin 规则合并；仅生效，不可弱化 builtin。
     #[serde(default)]
-    pub path_blacklist: Vec<String>,
+    pub path_rules: Vec<crate::core::permission::PathRule>,
+    /// bash 白名单：regex 列表，与 builtin 合并（builtin 默认空）。
     #[serde(default)]
     pub bash_whitelist: Vec<String>,
+    /// bash 高危但可允许：regex 列表，命中后弹 confirm；与 builtin 合并。
     #[serde(default)]
     pub bash_approval_required: Vec<String>,
+    /// bash 禁止：regex 列表，命中即拒绝；与 builtin 合并。
     #[serde(default)]
     pub bash_forbidden: Vec<String>,
     #[serde(default)]
     pub auto_confirm: bool,
     #[serde(default)]
     pub auto_confirm_whitelist: Vec<String>,
-    #[serde(default)]
-    pub require_approval_for_all_write: bool,
-    #[serde(default)]
-    pub require_approval_for_all_bash: bool,
     /// `execute_bash` 在 Unix 上 `sh -c` 前可选 source 的 env 脚本路径；`None` 时默认 `$HOME/.wasmedge/env`。
     #[serde(default)]
     pub wasmedge_env_path: Option<String>,
-}
-
-impl Default for PrimitiveConfig {
-    fn default() -> Self {
-        Self {
-            path_whitelist: Vec::new(),
-            path_blacklist: Vec::new(),
-            bash_whitelist: Vec::new(),
-            bash_approval_required: Vec::new(),
-            bash_forbidden: Vec::new(),
-            auto_confirm: false,
-            auto_confirm_whitelist: Vec::new(),
-            require_approval_for_all_write: true,
-            require_approval_for_all_bash: true,
-            wasmedge_env_path: None,
-        }
-    }
 }
 
 /// 安全与审计配置：默认插件权限、审计日志开关与保留天数、安全扫描等。

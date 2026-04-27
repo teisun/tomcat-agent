@@ -95,7 +95,7 @@
 
 最小权限、完全隔离、唯一通道、用户知情权、错误隔离、全链路审计、代码安全校验、资源硬配额（内存隔离、执行时限、API 限流）；敏感数据加密为后续 TODO。
 
-详见 [6. 安全设计核心原则（详细）](architecture/security.md)。
+详见 [6. 安全设计核心原则（详细）](architecture/security.md)；其中「最小权限」与「用户知情权」在工作目录权限分级（T2-P0-004）的具体落地见 [权限子系统（PermissionGate）设计](architecture/permission-system.md)。
 
 ### 7. 会话存储数据结构设计
 
@@ -148,6 +148,7 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [architecture/plugin-system/phase2-long-lived-vm.md](architecture/plugin-system/phase2-long-lived-vm.md)           | Phase 2 长生命周期 VM 方案设计（方案 A/B 对比）          |
 | [architecture/interaction-layer.md](architecture/interaction-layer.md)                                             | 交互层                                       |
 | [architecture/security.md](architecture/security.md)                                                               | 安全设计核心原则                                  |
+| [architecture/permission-system.md](architecture/permission-system.md)                                             | 权限子系统（PermissionGate）— T2-P0-004 工作区权限分级 |
 | [architecture/session-storage.md](architecture/session-storage.md)                                                 | 会话存储数据结构设计                                |
 | [architecture/work-dir-and-data-layout.md](architecture/work-dir-and-data-layout.md)                               | 工作目录与数据布局                                 |
 | [architecture/agent-loop.md](architecture/agent-loop.md)                                                           | Agent Loop 设计                             |

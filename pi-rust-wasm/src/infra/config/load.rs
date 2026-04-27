@@ -21,6 +21,12 @@ use super::types::AppConfig;
 /// # Errors
 /// * [`AppError::Config`] - 配置文件解析失败或反序列化到 [`AppConfig`] 失败时返回。
 pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
+    // 安全护栏（plan §5）：敏感 env vars 必须由 TOML 主导，不允许 env 覆盖。
+    // 若 TOML 文件存在且声明了对应 key，则在 layered.build 之前 unset env，
+    // 防止 shell 中误设的 `PI_WASM__SECURITY__*` / `PI_WASM__LLM__API_KEY*`
+    // 静默覆盖磁盘配置造成提权。
+    sanitize_sensitive_env(config_path);
+
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
@@ -39,6 +45,43 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;
     Ok(merged)
+}
+
+/// 把 TOML 文件中已声明的敏感 key 对应的 env vars 从进程环境中移除，避免
+/// `PI_WASM__SECURITY__*` 等 env 静默覆盖磁盘 TOML 引发的提权风险。
+///
+/// 当前覆盖：
+/// - `PI_WASM__SECURITY__*` 全部
+/// - `PI_WASM__LLM__API_KEY*`
+/// - `PI_WASM__PRIMITIVE__PATH_RULES*`
+/// - `PI_WASM__PRIMITIVE__BASH_FORBIDDEN*`
+/// - `PI_WASM__PRIMITIVE__BASH_APPROVAL_REQUIRED*`
+fn sanitize_sensitive_env(config_path: Option<&std::path::Path>) {
+    if config_path.is_none_or(|p| !p.exists()) {
+        return;
+    }
+    let blocked_prefixes = [
+        "PI_WASM__SECURITY__",
+        "PI_WASM__LLM__API_KEY",
+        "PI_WASM__PRIMITIVE__PATH_RULES",
+        "PI_WASM__PRIMITIVE__BASH_FORBIDDEN",
+        "PI_WASM__PRIMITIVE__BASH_APPROVAL_REQUIRED",
+    ];
+    let to_remove: Vec<String> = std::env::vars()
+        .filter_map(|(k, _)| {
+            if blocked_prefixes.iter().any(|p| k.starts_with(p)) {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for k in &to_remove {
+        // SAFETY: env_remove 在 std::env 中是安全函数；多线程下 Rust 1.85+ 标记为 unsafe
+        // 但本调用发生在 load_config 启动早期单线程上下文。
+        std::env::remove_var(k);
+        tracing::warn!(target: "config", "已 unset 敏感 env var: {}", k);
+    }
 }
 
 /// 仅从 TOML 配置文件解析 [`AppConfig`]（**不**合并环境变量），供需整表写回的场景（如 `pi workspace`）。

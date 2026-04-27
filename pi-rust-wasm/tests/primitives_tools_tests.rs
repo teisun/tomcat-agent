@@ -108,8 +108,6 @@ fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
         .to_string();
     c.path_whitelist.push(path);
     c.auto_confirm = true;
-    c.require_approval_for_all_write = false;
-    c.require_approval_for_all_bash = false;
     c
 }
 
@@ -278,7 +276,6 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
     let canonical_dir = tmp.path().canonicalize()?;
     let mut config = temp_whitelist_config(&canonical_dir);
     config.auto_confirm = false;
-    config.require_approval_for_all_write = true;
     let executor = DefaultPrimitiveExecutor::new(
         config,
         Arc::new(DenyAllConfirmation),

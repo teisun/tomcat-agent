@@ -48,6 +48,7 @@ impl AgentLoop {
             llm,
             primitive,
             event_bus,
+            config_backend: None,
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
@@ -57,6 +58,16 @@ impl AgentLoop {
             start_idx: 0,
             context_tail_start: 0,
         }
+    }
+
+    /// 注入 `config_get` / `config_set` 工具后端（PR-7）；返回 `self` 形成 builder 链。
+    /// `chat::ChatContext::from_config` 在创建 `AgentLoop` 后立即调用此方法。
+    pub fn with_config_backend(
+        mut self,
+        backend: super::config_backend::SharedConfigBackend,
+    ) -> Self {
+        self.config_backend = Some(backend);
+        self
     }
 
     /// 测试用：注入 steering_queue，便于 mock 在工具执行中推入 steering 消息。
@@ -73,6 +84,7 @@ impl AgentLoop {
             llm,
             primitive,
             event_bus,
+            config_backend: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_queue,
