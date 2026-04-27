@@ -154,6 +154,13 @@ impl SystemPromptSection for WorkspaceContextSection {
 /// `read_write` / `read_only` 元素已经过 `expand_tilde` + canonicalize（调用方
 /// 负责），用于直接渲染给 LLM。
 pub struct WorkspaceState {
+    /// `pi chat` 启动时 [`std::env::current_dir`] 的快照，绝对路径字符串。
+    /// 即使 cwd 没有列入 read_write，也会出现在 system prompt 的「## Current
+    /// Working Directory」段，让 LLM 优先在 cwd 下查找/操作；
+    /// 是否被授权由 `read_write` / `read_only` 决定，二者解耦。
+    /// 旧调用方（仅传入 `read_write` / `read_only` / `path_rules` / `agent_data_dir`
+    /// 字段）对本字段不可见，赋默认空串即可，渲染会跳过该段。
+    pub cwd: String,
     /// 用户可读写的目录列表（含 workspace_dir、extra_roots、session_grants、dragged）。
     pub read_write: Vec<WorkspaceRootDescriptor>,
     /// 仅读目录列表（含 agent_data_dir 中的 sessions/logs，path_rules readonly 命中等）。
@@ -204,6 +211,45 @@ impl SystemPromptSection for WorkspaceStateSection {
 
     fn render(&self, _workspace_dir: &str) -> String {
         let mut out = String::new();
+
+        // ── ## Current Working Directory ──
+        // 让 LLM 在每次推理首屏看到「用户启动 pi chat 时所在的目录」。即使 cwd
+        // 当前不在 read_write / read_only 里（首次访问会触发 lazy 授权弹窗），
+        // 也要让 LLM 知道这是用户的语境根，优先在此处查找/操作；
+        // 同时把「访问需要授权」的事实显式说明，避免 LLM 在拒绝时混乱。
+        if !self.state.cwd.is_empty() {
+            let in_rw = self
+                .state
+                .read_write
+                .iter()
+                .any(|d| d.path == self.state.cwd);
+            let in_ro = self
+                .state
+                .read_only
+                .iter()
+                .any(|d| d.path == self.state.cwd);
+            out.push_str("## Current Working Directory\n\n");
+            out.push_str(&format!("`{}`\n\n", self.state.cwd));
+            if in_rw {
+                out.push_str(
+                    "This directory is currently writable for you (see Workspace State below).\n",
+                );
+            } else if in_ro {
+                out.push_str(
+                    "This directory is currently read-only for you (see Workspace State below).\n",
+                );
+            } else {
+                out.push_str(
+                    "This directory is NOT yet authorized. \
+                     The user is interacting from here, so prefer interpreting relative paths and \
+                     ambiguous references against this directory. \
+                     The first time you call a tool that touches a path inside this directory, \
+                     the runtime will ask the user how to authorize it (one-time / persist-extra-root / deny).\n",
+                );
+            }
+            out.push('\n');
+        }
+
         out.push_str("## Workspace State\n\n");
 
         if self.state.read_write.is_empty() {

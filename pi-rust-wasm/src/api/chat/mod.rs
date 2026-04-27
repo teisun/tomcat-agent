@@ -101,6 +101,7 @@ use super::render::MarkdownRenderer;
 mod tests;
 
 pub mod config_tool;
+pub mod cwd_lazy_prompt;
 pub mod dragged_path;
 mod session_stderr_listeners;
 
@@ -121,6 +122,17 @@ pub struct ChatContext {
     pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
     /// Agent 默认工作目录，用于 system prompt 和路径白名单默认值。
     pub workspace_dir: std::path::PathBuf,
+    /// `pi chat` 进入时的真实当前工作目录（`std::env::current_dir()` 一次性快照）。
+    /// 用途：
+    /// - 注入 system prompt「## Current Working Directory」段，让 LLM 优先在 cwd 下查找/操作；
+    /// - `CwdLazyPrompt` 装饰器判断「LLM 即将访问的目标是否落在 cwd 子树」；
+    /// - 拖拽路径对比（plan §7）。
+    ///
+    /// **不**等同于 [`Self::workspace_dir`]——后者是 agent 配置的工作区根，前者是用户启动 cli 时所在目录。
+    pub cwd: std::path::PathBuf,
+    /// `pi.config.toml` 的解析后绝对路径快照，避免在权限决策路径上重复调用 `config_file_path()`。
+    /// `CwdLazyPrompt::AllowAndPersistRoot` 分支用它持久化 extra_root。
+    pub cfg_path: std::path::PathBuf,
     /// 会话级临时授权（拖拽 + 用户 confirm AllowOnce 共享）。
     pub session_grants: crate::core::permission::SessionGrants,
     /// 拖入路径缓存（与 `session_grants` 同结构，仅审计语义 `GrantSource::DraggedPath` 区分）。
@@ -142,6 +154,13 @@ impl ChatContext {
         let workspace_dir = resolve_workspace_dir(&config)?;
         std::fs::create_dir_all(&workspace_dir).map_err(AppError::Io)?;
 
+        // 启动 snapshot：cwd / cfg_path 在整个 chat 生命周期内固定，避免后续 cd
+        // 让 system prompt 与权限决策视图漂移。`current_dir()` 失败时退化到 workspace_dir
+        // （兜底场景：被 chroot 或者 cwd 不可读，仍能继续聊天）。
+        let cwd_snapshot = std::env::current_dir().unwrap_or_else(|_| workspace_dir.clone());
+        let cfg_path_snapshot =
+            crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
+
         let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(&config.llm)?);
 
         let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
@@ -149,7 +168,7 @@ impl ChatContext {
             None => Arc::new(TracingAuditRecorder),
         };
         let extra_roots = resolve_extra_roots_paths(&config)?;
-        let confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
+        let cli_confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
 
         // PR-9：构造 3 层权限 gate；与 executor / chat 共享 SessionGrants + DraggedPaths。
         // agent_data_readonly_dirs：sessions/logs/audit + agent 凭据目录（凭据子目录由
@@ -180,6 +199,19 @@ impl ChatContext {
                 gate_cfg,
                 session_grants.clone(),
                 dragged_paths.clone(),
+            ));
+
+        // Hotfix §A.3：用 CwdLazyPrompt 装饰 CliConfirmation。
+        // 装饰器：当 LLM 工具调用首次落到 cwd 子树未授权路径时弹「[a]/[s]/[n]」
+        // 范围级提示，其余情况转发给 CliConfirmation 既有行为。
+        // 注意：dismissed flag 在装饰器内部以 Arc<AtomicBool> 创建，与 ctx 同生命周期。
+        let confirmation: Arc<dyn UserConfirmationProvider> =
+            Arc::new(cwd_lazy_prompt::CwdLazyPrompt::new(
+                cli_confirmation,
+                cwd_snapshot.clone(),
+                gate.clone(),
+                session_grants.clone(),
+                cfg_path_snapshot.clone(),
             ));
 
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
@@ -221,6 +253,8 @@ impl ChatContext {
             cancel_token,
             last_interrupt_at,
             workspace_dir,
+            cwd: cwd_snapshot,
+            cfg_path: cfg_path_snapshot,
             session_grants,
             dragged_paths,
             config_backend,
@@ -554,65 +588,12 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     }
 
     WorkspaceState {
+        cwd: ctx.cwd.to_string_lossy().to_string(),
         read_write,
         read_only,
         path_rules,
         agent_data_dir: agent_data_dir_for_prompt,
     }
-}
-
-/// `pi chat` 启动横幅（plan §8.2）：把当前生效的 read_write / read_only 摘要
-/// 输出到 stderr，让用户在第 0 轮就能确认权限边界。stdout 留给 LLM 输出。
-fn print_startup_banner(
-    workspace_dir: &std::path::Path,
-    state: &crate::core::system_prompt::WorkspaceState,
-) {
-    eprintln!("─────────────────────────────────────────────────────────────");
-    eprintln!("Workspace: {}", workspace_dir.display());
-    if state.read_write.is_empty() {
-        eprintln!("  read/write 根: (无；可用 `pi workspace add` 添加)");
-    } else {
-        let mut shown = 0usize;
-        for d in &state.read_write {
-            eprintln!("  rw  {} [{}]", d.path, d.label);
-            shown += 1;
-            if shown >= 5 && state.read_write.len() > 5 {
-                eprintln!(
-                    "  ... 另有 {} 个 read/write 根",
-                    state.read_write.len() - shown
-                );
-                break;
-            }
-        }
-    }
-    if !state.read_only.is_empty() {
-        let mut shown = 0usize;
-        for d in &state.read_only {
-            eprintln!("  ro  {} [{}]", d.path, d.label);
-            shown += 1;
-            if shown >= 3 && state.read_only.len() > 3 {
-                eprintln!(
-                    "  ... 另有 {} 个 read-only 根",
-                    state.read_only.len() - shown
-                );
-                break;
-            }
-        }
-    }
-    let deny_cnt = state.path_rules.iter().filter(|r| r.mode == "deny").count();
-    let ro_cnt = state
-        .path_rules
-        .iter()
-        .filter(|r| r.mode == "readonly")
-        .count();
-    eprintln!(
-        "  path_rules: {} deny / {} readonly（builtin + 用户配置）",
-        deny_cnt, ro_cnt
-    );
-    if let Some(ref ad) = state.agent_data_dir {
-        eprintln!("  agent_data_dir: {} (read-only)", ad);
-    }
-    eprintln!("─────────────────────────────────────────────────────────────");
 }
 
 // ─── Main chat loop ───────────────────────────────────────────────────────────
@@ -636,7 +617,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let context_config = &ctx.config.context;
     let workspace_str = ctx.workspace_dir.to_string_lossy().to_string();
     let workspace_state = compute_workspace_state(ctx);
-    print_startup_banner(&ctx.workspace_dir, &workspace_state);
     let system_text =
         crate::core::system_prompt::build_system_prompt_with_state(&workspace_str, workspace_state);
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
