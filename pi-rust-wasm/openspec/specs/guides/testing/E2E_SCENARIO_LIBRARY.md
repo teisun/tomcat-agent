@@ -49,10 +49,11 @@
 
 ---
 
-## Story 2 — 4 原语安全管控（通过 `pi chat` 驱动）（6 条）
+## Story 2 — 4 原语安全管控（通过 `pi chat` 驱动）（11 条）
 
 > 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`，不得跳过。
 > **验收**：本 Story 与 §4 人工验收「对话模式、四原语与用户确认」对齐，**整组建议人工补验**（流式观感、多轮、确认提示）。
+> **T2-P0-004 follow-up**：E2E-CLI-018～022 补充 drag-deny / cwd runtime / 二进制错误 / Layer0 落盘路径场景；当前自动化由对应单测/集成测试锁定，真实终端交互仍建议人工 spot-check。
 
 
 | 编号          | 验收 | 用例名                                           | 用户意图                                | 操作序列                                                                                      | 必须断言                                                       |
@@ -63,9 +64,14 @@
 | E2E-CLI-014 | 人工 | `test_user_asks_pi_to_read_a_file`            | 用户要求 pi 读取指定文件内容                    | 预置 /tmp/test_read.txt → `pi chat` + stdin `请读取 /tmp/test_read.txt 的内容`，timeout 60s        | exit 0；stdout 含文件内容或读取确认                                   |
 | E2E-CLI-015 | 人工 | `test_user_asks_pi_to_edit_a_file`            | 用户要求 pi 修改文件中的某行内容                  | 预置 /tmp/test_edit.txt → `pi chat` + stdin `请把 /tmp/test_edit.txt 第一行改成 hello`，timeout 60s | exit 0；修改后文件第一行为 hello                                     |
 | E2E-CLI-016 | 人工 | `test_user_asks_pi_to_run_bash_command`       | 用户要求 pi 执行一条 bash 命令                | `pi chat` + stdin `请执行 echo hello_from_pi`，timeout 60s                                    | exit 0；stdout 含 hello_from_pi 或命令确认提示                      |
+| E2E-CLI-018 | 人工 | `manual_drag_path_with_nonascii_intent_auto_allows` | 用户拖拽存在路径并紧跟中文意图时，仍按“路径 + 用户意图”发送给 Agent | `pi chat` → 粘贴 `'<abs-path>'这个文件夹下面有几个文件?` | 不进入纯拖拽 5 选项菜单；路径进入本会话授权；LLM 收到原始中文意图；自动化回归见 `quoted_path_with_intent_text_returns_auto_allow` / `split_path_and_suffix_nonascii_suffix_splits_correctly` |
+| E2E-CLI-019 | 人工 | `manual_drag_path_denied_shows_cancel_only` | 用户拖拽命中 deny 规则的路径时不能扩大授权 | 预置 `primitive.path_rules=[{path=<secret>, mode="deny"}]` → `pi chat` → 拖入 `<secret>` | 仅允许取消/不授权；不得展示永久允许、本次允许或工作区写授权选项；自动化回归见 `menu_options_deny_only_only_cancel` |
+| E2E-CLI-020 | 人工 | `manual_config_set_path_rules_runtime_effective` | 用户在同一会话内通过配置工具新增 deny 规则后立即生效 | `pi chat` → 触发 `config_set primitive.path_rules` 追加 deny → 再请求 read/write 同一路径 | 后续工具调用被 deny 拦截，无需重启；自动化回归见 `runtime_deny_rule_overrides_existing_session_grant` / `config_set_array_path_rule_appends_with_json_value` |
+| E2E-CLI-021 | 自动 | `read_file_binary_returns_product_error` | 用户要求读取二进制或非 UTF-8 文件时获得明确错误 | 构造非 UTF-8 文件 → `read_file` | 返回产品化错误，提示二进制/非 UTF-8，不把乱码注入上下文 |
+| E2E-CLI-022 | 自动 | `layer0_persist_file_readable` | 大工具结果落盘到 agent runtime trail，不污染 workspace definition | 构造超阈值 tool_result → Layer0 cleanup | 文件写入 `agent_workspace_trail/tool-results/{session_id}`；不写入旧 `workspace/<session>/tool-results` 路径；preview 留在上下文 |
 
 
-**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。014、015 待后续补充。
+**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～022 的核心契约已由 `dragged_path`、`permission::gate`、`config_tool`、`executor`、`compaction` 自动化回归覆盖；其中 018～020 的真实终端菜单观感仍按「人工」补验。014、015 待后续补充。
 
 ---
 

@@ -13,7 +13,9 @@
 
 **§1 规格 & 场景库核对**
 
-- `permission-system.md`、`directory-structure.md`、`context-management.md` 已对齐本次权限 deny 热生效、cwd 语义、`agent_workspace_trail` 与 Layer0 `tool-results` 落盘路径变更。
+- `User_Stories.md` Story 2 已补充本 follow-up 的用户可见验收点：拖拽路径 + 中文/非 ASCII 意图、deny / readonly `path_rules` 会话内热生效、cwd / extra_roots 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_workspace_trail/tool-results/{session_id}` 落盘语义。
+- `E2E_SCENARIO_LIBRARY.md` Story 2 已新增 E2E-CLI-018～022，覆盖 drag-deny、cwd runtime、`config_set primitive.path_rules` 热生效、二进制错误与 Layer0 落盘路径；018～020 标记人工补验，核心契约由现有自动化回归锁定。
+- `permission-system.md`、`directory-structure.md`、`context-management.md` 已对齐本次权限 deny 热生效、cwd 语义、`agent_workspace_trail` 与 Layer0 `tool-results` 落盘路径变更；`context-management.md` 旧伪代码中的 `work_dir/agents/.../tool-results` 已改为 `agent_workspace_trail/tool-results/{session_id}`。
 - 本次为 T2-P0-004 已 DONE 后 follow-up 修复，不新增主任务、不回退看板状态。
 
 **§2 / §3 测试 review**
@@ -38,7 +40,7 @@
 | 规范 | 结果 | 备注 |
 | :--- | :--- | :--- |
 | `Codeing&Architecture_Spec.md` | 通过 | 权限判断仍集中在 permission / executor 边界；chat 层仅承载 UX、拖拽解析与配置入口 |
-| `RUST_FILE_LINES_SPEC.md` | 通过 | 本次未发现需阻塞合并的新文件行数红线；既有大文件风险延续 follow-up 跟踪 |
+| `RUST_FILE_LINES_SPEC.md` | 条件通过 | 本次补漏未引入新的 Rust 业务文件膨胀；合并后 `api/chat/mod.rs` 约 1071 行、`core/executor/primitives.rs` 约 846 行、`api/chat/config_tool.rs` 约 791 行仍为既有大文件风险，已作为后续拆分 follow-up 留痕，不阻塞本次集成 |
 | `RUST_IDIOMS_SPEC.md` | 通过 | `cargo clippy --all-targets -- -D warnings` 零警告 |
 | `COMMENT_SPEC.md` | 通过 | 关键路径语义与迁移行为已有说明，未发现降级断言、跳测或以打印代替失败 |
 

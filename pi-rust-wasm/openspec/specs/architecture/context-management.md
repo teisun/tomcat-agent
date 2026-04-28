@@ -802,16 +802,19 @@ flowchart LR
 在 `messages` 中找到最后一个 turn start（通过 `is_turn_start()` 判定），扫描 `messages[last_turn_start..]` 中 `role == Tool` 的消息：单条 tool_result >= `layer0_single_result_max_chars`（默认 **50K chars**，~12.5K token）→ 落盘 + 500 chars preview 占位符（通过 `ChatMessage::set_text_content(preview)` 原地替换）。**先让 LLM 看到完整内容，再收纳落盘**——LLM 在本轮已正常分析和使用了完整结果，落盘是为了未来轮次的上下文不膨胀。
 
 ```
-fn persist_tool_result(result: &ToolResult, work_dir: &Path) -> String:
-    let path = format!("{}/agents/{}/tool-results/{}.txt",
-                       work_dir, session_id, result.tool_call_id)
+fn persist_tool_result(result: &ToolResult, agent_workspace_trail: &Path, session_id: &str) -> String:
+    let path = agent_workspace_trail
+        .join("tool-results")
+        .join(session_id)
+        .join(format!("{}.txt", result.tool_call_id))
     fs::write(&path, &result.content)
 
     let preview = &result.content[..min(500, result.content.len())]
-    format!("[Tool result persisted: {} (来源: {}(\"{}\"), {})]\\nPreview: {}...",
-            path, result.tool_name, result.arg_summary,
-            human_readable_size(result.content.len()), preview)
+    format!("[Tool result persisted: {} ({} chars)]\\nPreview: {}...",
+            path, result.content.len(), preview)
 ```
+
+`agent_workspace_trail` 当前默认解析为 `~/.pi_/agents/{agent_id}/`。旧的 `workspace-main/workspace/{session_id}/tool-results` 仅作为历史迁移来源，不再作为新写入目标。
 
 **步骤 B：compactable zone 占位符替换**
 
