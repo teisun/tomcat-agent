@@ -357,7 +357,13 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 MAX_READ_BYTES
             )));
         }
-        let content = read_file_utf8(&path_buf)?;
+        let content = read_file_utf8(&path_buf).map_err(|e| match e {
+            AppError::Config(msg) if msg.contains("invalid utf-8") => AppError::Primitive(format!(
+                "文件存在且权限已通过检查，但它是二进制或非 UTF-8 文本，不能用 read_file 按文本读取：{}",
+                path_buf.display()
+            )),
+            other => other,
+        })?;
         self.audit.record_primitive(PrimitiveAuditEntry {
             operation: AuditPrimitiveOp::Read,
             path_or_cmd: path.to_string(),

@@ -165,8 +165,18 @@ pub fn split_path_and_suffix(tok: &str) -> Option<(String, String)> {
         if !is_path_prefix_token(&prefix) {
             break;
         }
-        if std::path::Path::new(&prefix).exists() {
+        let prefix_path = std::path::Path::new(&prefix);
+        if prefix_path.exists() {
             let suffix: String = chars[end..].iter().collect();
+            if prefix_path.is_dir() {
+                let suffix_starts_like_path_component = suffix
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c == std::path::MAIN_SEPARATOR || c.is_ascii());
+                if suffix_starts_like_path_component {
+                    return None;
+                }
+            }
             return Some((prefix, suffix));
         }
     }
@@ -204,22 +214,22 @@ impl MenuOptions {
         }
     }
 
-    /// 命中 builtin deny —— 仅放 `[d]/[c]`，提醒用户该路径被默认安全规则保护。
+    /// 命中 deny —— 不再显示任何授权选项，只允许取消。
     pub fn deny_only(note: impl Into<String>) -> Self {
         Self {
             allow_once: false,
             persist_extra_root: false,
             persist_readonly: false,
-            persist_deny: true,
+            persist_deny: false,
             cancel: true,
             note: Some(note.into()),
         }
     }
 
-    /// 命中 readonly path_rule —— 仅放 `[r]/[d]/[c]`。
+    /// 命中 readonly path_rule —— 允许确认本次读取，但不允许持久写入工作区。
     pub fn readonly_only(note: impl Into<String>) -> Self {
         Self {
-            allow_once: false,
+            allow_once: true,
             persist_extra_root: false,
             persist_readonly: true,
             persist_deny: true,
@@ -233,23 +243,22 @@ impl MenuOptions {
 ///
 /// 用 [`PermissionGate::check`] 模拟一次 read 操作：
 ///
-/// - 命中 `Deny` —— 仅 `[d]/[c]`，警告"此路径受默认安全规则保护"；
-/// - 命中 `PathRuleReadOnly` —— 仅 `[r]/[d]/[c]`，提示"此路径已是只读规则"；
+/// - 命中 `Deny` —— 仅 `[c]`，警告"此路径已被禁止访问"；
+/// - 命中 `PathRuleReadOnly` —— `[a]/[r]/[d]/[c]`，不允许 `[w]`；
 /// - 其它 —— 全 5 选项。
 pub fn render_drag_menu(path: &std::path::Path, gate: &dyn PermissionGate) -> MenuOptions {
     use crate::core::primitives::PrimitiveOperation;
 
     let probe = gate.check(PrimitiveOperation::Read, &path.to_string_lossy());
     match probe {
-        Ok(PermissionDecision::Deny { .. }) => MenuOptions::deny_only(format!(
-            "此路径受默认安全规则保护，仅允许 [d] 加入禁止 / [c] 取消（路径: {}）",
-            path.display()
-        )),
+        Ok(PermissionDecision::Deny { .. }) => {
+            MenuOptions::deny_only(format!("该路径已被禁止读写访问：{}", path.display()))
+        }
         Ok(PermissionDecision::Allow {
             source: crate::core::permission::GrantSource::PathRuleReadOnly,
             ..
         }) => MenuOptions::readonly_only(format!(
-            "此路径已是只读规则，[a]/[w] 不会改变其只读状态（路径: {}）",
+            "这是只读路径，本次会话可以读取其中内容，但不能写入、修改或删除：{}",
             path.display()
         )),
         _ => MenuOptions::full(),
@@ -416,17 +425,18 @@ mod tests {
     }
 
     #[test]
-    fn menu_options_deny_only_only_d_and_c() {
+    fn menu_options_deny_only_only_cancel() {
         let m = MenuOptions::deny_only("note");
         assert!(!m.allow_once && !m.persist_extra_root && !m.persist_readonly);
-        assert!(m.persist_deny && m.cancel);
+        assert!(!m.persist_deny && m.cancel);
         assert!(m.note.is_some());
     }
 
     #[test]
-    fn menu_options_readonly_only_r_d_c() {
+    fn menu_options_readonly_allows_session_read_but_not_extra_root() {
         let m = MenuOptions::readonly_only("note");
-        assert!(!m.allow_once && !m.persist_extra_root);
+        assert!(m.allow_once);
+        assert!(!m.persist_extra_root);
         assert!(m.persist_readonly && m.persist_deny && m.cancel);
     }
 
@@ -459,6 +469,18 @@ mod tests {
             split_path_and_suffix(&mixed).expect("nonascii suffix should split off");
         assert_eq!(path, real);
         assert_eq!(suffix, "这个项目下面");
+    }
+
+    #[test]
+    fn split_path_and_suffix_missing_file_with_intent_does_not_authorize_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing.png");
+        let mixed = format!("{}看下", missing.to_string_lossy());
+        assert_eq!(
+            split_path_and_suffix(&mixed),
+            None,
+            "不存在文件 + 中文意图不得回退到父目录"
+        );
     }
 
     #[test]

@@ -89,10 +89,10 @@ use crate::infra::{
     TracingAuditRecorder,
 };
 use crate::{
-    resolve_extra_roots_paths, resolve_sessions_dir, resolve_workspace_dir, AgentLoop,
-    AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
-    OpenAiProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor,
-    ToolRegistry,
+    resolve_agent_workspace_definition_dir, resolve_agent_workspace_trail_dir,
+    resolve_extra_roots_paths, resolve_sessions_dir, AgentLoop, AgentLoopConfig, AppConfig,
+    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor,
+    SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -120,8 +120,10 @@ pub struct ChatContext {
     pub cancel_token: Arc<Mutex<CancellationToken>>,
     /// 上一次 Ctrl+C 按下的时刻；ctrlc handler 判双击用。
     pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
-    /// Agent 默认工作目录，用于 system prompt 和路径白名单默认值。
+    /// Agent 设计态工作区，用于 AGENTS.md / SOUL.md / skills / memory 等长期配置。
     pub workspace_dir: std::path::PathBuf,
+    /// Agent 运行态轨迹目录，用于 sessions / logs / audit / tmp / tool-results。
+    pub agent_workspace_trail: std::path::PathBuf,
     /// `pi chat` 进入时的真实当前工作目录（`std::env::current_dir()` 一次性快照）。
     /// 用途：
     /// - 注入 system prompt「## Current Working Directory」段，让 LLM 优先在 cwd 下查找/操作；
@@ -151,8 +153,11 @@ impl ChatContext {
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
 
-        let workspace_dir = resolve_workspace_dir(&config)?;
+        let workspace_dir = resolve_agent_workspace_definition_dir(&config)?;
         std::fs::create_dir_all(&workspace_dir).map_err(AppError::Io)?;
+        let agent_workspace_trail = resolve_agent_workspace_trail_dir(&config)?;
+        std::fs::create_dir_all(&agent_workspace_trail).map_err(AppError::Io)?;
+        migrate_legacy_layer0_tool_results(&workspace_dir, &agent_workspace_trail);
 
         // 启动 snapshot：cwd / cfg_path 在整个 chat 生命周期内固定，避免后续 cd
         // 让 system prompt 与权限决策视图漂移。`current_dir()` 失败时退化到 workspace_dir
@@ -176,6 +181,7 @@ impl ChatContext {
         let session_grants = crate::core::permission::SessionGrants::new();
         let dragged_paths = crate::core::permission::DraggedPaths::new();
         let agent_data_readonly_dirs: Vec<std::path::PathBuf> = vec![
+            Some(agent_workspace_trail.clone()),
             crate::infra::config::resolve_sessions_dir(&config).ok(),
             crate::infra::config::resolve_log_dir(&config).ok(),
             crate::infra::config::resolve_audit_dir(&config).ok(),
@@ -230,7 +236,8 @@ impl ChatContext {
         let config_backend: Option<crate::core::agent_loop::SharedConfigBackend> =
             match crate::api::cli::config_file_path() {
                 Ok(p) => Some(Arc::new(config_tool::ChatConfigBackend {
-                    ctx: config_tool::ConfigToolContext::new(p, confirmation.clone()),
+                    ctx: config_tool::ConfigToolContext::new(p, confirmation.clone())
+                        .with_gate(gate.clone()),
                 })),
                 Err(_) => None,
             };
@@ -253,6 +260,7 @@ impl ChatContext {
             cancel_token,
             last_interrupt_at,
             workspace_dir,
+            agent_workspace_trail,
             cwd: cwd_snapshot,
             cfg_path: cfg_path_snapshot,
             session_grants,
@@ -470,11 +478,10 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     let workspace_dir = ctx.workspace_dir.clone();
     let extra_roots = resolve_extra_roots_paths(cfg).unwrap_or_default();
 
-    // agent_data_dir：display 用 agent 凭据目录路径（仅展示，read_only 集合由 gate 提供）。
-    let agent_data_dir_for_prompt = crate::infra::config::resolve_agent_dir(cfg)
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
+    // agent runtime trail：display 用运行态根路径（仅展示，read_only 集合由 gate 提供）。
+    let agent_data_dir_for_prompt = Some(ctx.agent_workspace_trail.to_string_lossy().to_string());
     let agent_data_readonly_dirs: Vec<std::path::PathBuf> = vec![
+        Some(ctx.agent_workspace_trail.clone()),
         crate::infra::config::resolve_sessions_dir(cfg).ok(),
         crate::infra::config::resolve_log_dir(cfg).ok(),
         crate::infra::config::resolve_audit_dir(cfg).ok(),
@@ -524,7 +531,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
             continue;
         }
         let label = if s == workspace_canon {
-            "agent_workspace"
+            "agent_workspace_definition"
         } else if extra_set.contains(&s) {
             "extra_root"
         } else if dragged_set.contains(&s) {
@@ -556,7 +563,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
             continue;
         }
         let label = if agent_data_set.contains(&s) {
-            "agent_data_dir"
+            "agent_workspace_trail"
         } else {
             "path_rule_readonly"
         };
@@ -711,7 +718,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             session_id: ctx.session.current_session_key().to_string(),
             tool_definitions: build_tool_definitions(),
             context_config: context_config.clone(),
-            work_dir: ctx.workspace_dir.to_string_lossy().to_string(),
+            agent_workspace_trail: ctx.agent_workspace_trail.to_string_lossy().to_string(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -856,9 +863,34 @@ fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
     Ok(())
 }
 
+fn migrate_legacy_layer0_tool_results(
+    agent_workspace_definition: &std::path::Path,
+    agent_workspace_trail: &std::path::Path,
+) {
+    let legacy_root = agent_workspace_definition.join("workspace");
+    if !legacy_root.exists() {
+        return;
+    }
+    let target_root = agent_workspace_trail.join("tool-results");
+    if let Ok(entries) = std::fs::read_dir(&legacy_root) {
+        let _ = std::fs::create_dir_all(&target_root);
+        for entry in entries.flatten() {
+            let from = entry.path();
+            let name = entry.file_name();
+            let to = target_root.join(name);
+            if to.exists() {
+                continue;
+            }
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+}
+
 // ─── 拖拽路径处理（plan §7） ────────────────────────────────────────────────
 
-use dragged_path::{interpret_dragged_paths, DragOutcome, MenuChoice, MenuOptions};
+use dragged_path::{
+    interpret_dragged_paths, render_drag_menu, DragOutcome, MenuChoice, MenuOptions,
+};
 
 enum DragHandleResult {
     /// 把 `line` 作为本回合用户消息发给 LLM。
@@ -881,14 +913,18 @@ fn handle_dragged_input(
             original_line,
         } => {
             for p in &paths {
-                if let Ok(canon) = crate::infra::platform::normalize_path(&p.to_string_lossy()) {
-                    ctx.dragged_paths.add(canon);
-                } else {
-                    ctx.dragged_paths.add(p.clone());
+                match precheck_read_allow(ctx, p) {
+                    Ok(canon) => {
+                        ctx.gate.grant_session(
+                            canon,
+                            crate::core::permission::GrantSource::DraggedPath,
+                        );
+                        eprintln!("✓ {} 本次会话期间允许访问", p.display());
+                    }
+                    Err(e) => {
+                        eprintln!("✗ {}: {}", p.display(), e);
+                    }
                 }
-            }
-            for p in &paths {
-                eprintln!("✓ 已自动允许本会话访问 {}", p.display());
             }
             DragHandleResult::Continue {
                 line: original_line,
@@ -902,7 +938,7 @@ fn handle_dragged_input(
             // 多路径用户体验是"逐条菜单"——避免一刀切允许 5 路径中的 builtin deny。
             let mut any_persisted = false;
             for p in &paths {
-                let opts = MenuOptions::full();
+                let opts = render_drag_menu(p, &*ctx.gate);
                 let choice = render_menu_and_read(p, &opts, rl);
                 match apply_menu_choice(ctx, p, choice) {
                     Ok(persisted) => {
@@ -936,19 +972,19 @@ fn render_menu_and_read(
         println!("提示: {}", note);
     }
     if opts.allow_once {
-        println!("  [a] 本会话允许 (SessionGrant)");
+        println!("  [a] 本次会话允许访问");
     }
     if opts.persist_extra_root {
-        println!("  [w] 加入工作区持久化 (extra_roots)");
+        println!("  [w] 以后也允许访问（写入配置 workspace.extra_roots）");
     }
     if opts.persist_readonly {
-        println!("  [r] 加入只读规则 (path_rules readonly)");
+        println!("  [r] 设为只读：允许读取，禁止写入");
     }
     if opts.persist_deny {
-        println!("  [d] 加入禁止规则 (path_rules deny)");
+        println!("  [d] 禁止访问：拒绝读取和写入");
     }
     if opts.cancel {
-        println!("  [c] 取消，按聊天处理");
+        println!("  [c] 取消授权，作为普通消息发送");
     }
     print!("选择: ");
     let _ = io::stdout().flush();
@@ -966,20 +1002,21 @@ fn apply_menu_choice(
 
     match choice {
         MenuChoice::AllowOnce => {
-            let canon = crate::infra::platform::normalize_path(&path.to_string_lossy())
-                .unwrap_or_else(|_| path.to_path_buf());
-            ctx.session_grants.add(canon);
-            eprintln!("✓ 已加入本会话 SessionGrants");
+            let canon = precheck_read_allow(ctx, path)?;
+            ctx.gate
+                .grant_session(canon, crate::core::permission::GrantSource::SessionGrant);
+            eprintln!("✓ {} 本次会话期间允许访问", path.display());
             Ok(true)
         }
         MenuChoice::PersistExtraRoot => {
+            precheck_read_allow(ctx, path)?;
             let canon = std::fs::canonicalize(path).map_err(AppError::Io)?;
             let cfg_path = crate::api::cli::config_file_path()?;
             crate::infra::config::append_extra_root_to_disk(
                 &cfg_path,
                 canon.to_string_lossy().into_owned(),
             )?;
-            eprintln!("✓ 已写入 [workspace] extra_roots");
+            eprintln!("✓ 已更新配置：以后允许访问 {}", canon.display());
             Ok(true)
         }
         MenuChoice::PersistReadonly | MenuChoice::PersistDeny => {
@@ -996,9 +1033,39 @@ fn apply_menu_choice(
                     mode,
                 },
             )?;
-            eprintln!("✓ 已写入 [primitive] path_rules");
+            ctx.gate.grant_path_rule(PathRule {
+                path: path.to_string_lossy().into_owned(),
+                mode,
+            });
+            let status = match mode {
+                PathRuleMode::Readonly => "已设为只读",
+                PathRuleMode::Deny => "已禁止访问",
+            };
+            eprintln!("✓ 已更新访问规则：{} {}", path.display(), status);
             Ok(true)
         }
         MenuChoice::Cancel => Ok(false),
+    }
+}
+
+fn precheck_read_allow(
+    ctx: &ChatContext,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, AppError> {
+    use crate::core::permission::PermissionDecision;
+    use crate::core::primitives::PrimitiveOperation;
+
+    let canon = crate::infra::platform::normalize_path(&path.to_string_lossy())
+        .unwrap_or_else(|_| path.to_path_buf());
+    match ctx
+        .gate
+        .check(PrimitiveOperation::Read, &canon.to_string_lossy())?
+    {
+        PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
+            "该路径已被禁止访问，无法授权本次会话：{} ({})",
+            path.display(),
+            reason
+        ))),
+        _ => Ok(canon),
     }
 }

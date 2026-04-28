@@ -94,10 +94,7 @@ pub fn layer0_persist_large_results(
 
         let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
 
-        let persist_dir = work_dir
-            .join("workspace")
-            .join(session_id)
-            .join("tool-results");
+        let persist_dir = work_dir.join("tool-results").join(session_id);
 
         if std::fs::create_dir_all(&persist_dir).is_err() {
             continue;

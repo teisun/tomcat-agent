@@ -137,7 +137,7 @@ impl SystemPromptSection for WorkspaceContextSection {
     }
     fn render(&self, workspace_dir: &str) -> String {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M %Z");
-        format!("Current date and time: {now}\nCurrent working directory: {workspace_dir}")
+        format!("Current date and time: {now}\nAgent workspace definition: {workspace_dir}")
     }
     fn priority(&self) -> u32 {
         200
@@ -230,6 +230,11 @@ impl SystemPromptSection for WorkspaceStateSection {
                 .any(|d| d.path == self.state.cwd);
             out.push_str("## Current Working Directory\n\n");
             out.push_str(&format!("`{}`\n\n", self.state.cwd));
+            out.push_str(
+                "Current working directory (cwd_snapshot): the user's shell working directory \
+                 when pi chat was launched. Treat relative paths, \"current directory\", \
+                 \"this project\", and ambiguous file references as referring to this directory first.\n",
+            );
             if in_rw {
                 out.push_str(
                     "This directory is currently writable for you (see Workspace State below).\n",
@@ -240,11 +245,9 @@ impl SystemPromptSection for WorkspaceStateSection {
                 );
             } else {
                 out.push_str(
-                    "This directory is NOT yet authorized. \
-                     The user is interacting from here, so prefer interpreting relative paths and \
-                     ambiguous references against this directory. \
-                     The first time you call a tool that touches a path inside this directory, \
-                     the runtime will ask the user how to authorize it (one-time / persist-extra-root / deny).\n",
+                    "This directory is NOT yet authorized. The first time you call a tool that \
+                     touches a path inside this directory, the runtime will ask the user how to \
+                     authorize it.\n",
                 );
             }
             out.push('\n');
@@ -259,7 +262,9 @@ impl SystemPromptSection for WorkspaceStateSection {
             );
         } else {
             out.push_str(
-                "You can read/write in these directories (write may require user confirmation):\n",
+                "You can read/write in these directories (write may require user confirmation). \
+                 An agent_workspace_definition is the design-time workspace for agent instructions, \
+                 personality, skills, and long-term configuration. Do not describe it as the user's current directory:\n",
             );
             for (idx, d) in self.state.read_write.iter().enumerate() {
                 out.push_str(&format!("  {}. {}", idx + 1, d.path));
@@ -294,7 +299,7 @@ impl SystemPromptSection for WorkspaceStateSection {
             // 当 read_only 已经包含 agent_data_dir 时不重复渲染。
             if !self.state.read_only.iter().any(|d| d.path == *ad) {
                 out.push_str(&format!(
-                    "\nAgent data dir (read-only, history/logs/audit/profile): {}\n",
+                    "\nAgent runtime trail: the runtime data directory for sessions, logs, audit records, temporary files, and persisted tool results. You may inspect it when you need to understand what the agent did before, but do not treat it as the user's project directory: {}\n",
                     ad
                 ));
             }

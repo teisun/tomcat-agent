@@ -27,7 +27,7 @@ pub use defaults::{
 };
 pub use gate::{DefaultPermissionGate, GateConfig, PermissionGate};
 pub use path_rule::PathRule;
-pub use session_grants::{DraggedPaths, SessionGrants};
+pub use session_grants::{DraggedPaths, SessionGrants, SessionPathRules};
 pub use types::{EffectiveRoots, GrantSource, PathRuleMode, PermissionDecision, PermissionLevel};
 
 #[cfg(test)]

@@ -196,6 +196,41 @@ fn session_grant_unblocks_outside() {
 }
 
 #[test]
+fn runtime_deny_rule_overrides_existing_session_grant() {
+    let ws = tmpdir("ws_runtime_deny");
+    let outside = tmpdir("outside_runtime_deny");
+    let session = SessionGrants::new();
+    session.add(outside.clone());
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            workspace_dir: ws,
+            extra_roots: vec![],
+            agent_data_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            user_bash_whitelist: vec![],
+            auto_confirm: false,
+        },
+        session,
+        DraggedPaths::new(),
+    );
+
+    gate.grant_path_rule(PathRule::new(
+        outside.to_string_lossy().to_string(),
+        PathRuleMode::Deny,
+    ));
+
+    let dec = gate
+        .check(
+            PrimitiveOperation::Read,
+            outside.join("a.txt").to_str().unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(dec, PermissionDecision::Deny { .. }));
+}
+
+#[test]
 fn dragged_path_unblocks_outside() {
     let ws = tmpdir("ws_drag");
     let dragged = tmpdir("dragged_ok");

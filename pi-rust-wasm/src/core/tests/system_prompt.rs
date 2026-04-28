@@ -16,7 +16,7 @@ fn build_system_prompt_contains_tools_and_workspace() {
 fn build_system_prompt_contains_current_time() {
     let prompt = build_system_prompt("/tmp");
     assert!(prompt.contains("Current date and time:"));
-    assert!(prompt.contains("Current working directory:"));
+    assert!(prompt.contains("Agent workspace definition:"));
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn fixture_state() -> WorkspaceState {
         read_write: vec![
             WorkspaceRootDescriptor {
                 path: "/Users/yan/proj".into(),
-                label: "agent_workspace".into(),
+                label: "agent_workspace_definition".into(),
                 alias: None,
                 description: None,
             },
@@ -118,7 +118,7 @@ fn fixture_state() -> WorkspaceState {
         ],
         read_only: vec![WorkspaceRootDescriptor {
             path: "/Users/yan/.pi_/agents/main/sessions".into(),
-            label: "agent_data_dir".into(),
+            label: "agent_workspace_trail".into(),
             alias: None,
             description: None,
         }],
@@ -139,7 +139,7 @@ fn fixture_state() -> WorkspaceState {
                 builtin: false,
             },
         ],
-        agent_data_dir: Some("/Users/yan/.pi_/agents/main/agent".into()),
+        agent_data_dir: Some("/Users/yan/.pi_/agents/main".into()),
     }
 }
 
@@ -148,7 +148,7 @@ fn workspace_state_section_renders_read_write() {
     let s = WorkspaceStateSection::new(fixture_state()).render("/tmp");
     assert!(s.contains("Workspace State"));
     assert!(s.contains("/Users/yan/proj"));
-    assert!(s.contains("[agent_workspace]"));
+    assert!(s.contains("[agent_workspace_definition]"));
     assert!(s.contains("/Users/yan/scratch"));
     assert!(s.contains("alias=scratch"));
     assert!(s.contains("desc=\"用户附加根\""));
@@ -161,10 +161,9 @@ fn workspace_state_section_renders_read_only_and_agent_dir() {
     let s = WorkspaceStateSection::new(fixture_state()).render("/tmp");
     assert!(s.contains("READ (but NOT write)"));
     assert!(s.contains("/Users/yan/.pi_/agents/main/sessions"));
-    assert!(s.contains("[agent_data_dir]"));
-    // agent_data_dir 文案（独立行；read_only 已出现 sessions 但 agent dir 路径不同）。
-    assert!(s.contains("Agent data dir"));
-    assert!(s.contains("/Users/yan/.pi_/agents/main/agent"));
+    assert!(s.contains("[agent_workspace_trail]"));
+    assert!(s.contains("Agent runtime trail"));
+    assert!(s.contains("/Users/yan/.pi_/agents/main"));
 }
 
 #[test]
