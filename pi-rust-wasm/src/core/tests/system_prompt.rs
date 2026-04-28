@@ -95,6 +95,7 @@ fn custom_section_appears_in_output() {
 
 fn fixture_state() -> WorkspaceState {
     WorkspaceState {
+        cwd: String::new(),
         read_write: vec![
             WorkspaceRootDescriptor {
                 path: "/Users/yan/proj".into(),
@@ -196,6 +197,7 @@ fn workspace_state_section_mentions_config_tools() {
 #[test]
 fn workspace_state_section_handles_empty_state() {
     let st = WorkspaceState {
+        cwd: String::new(),
         read_write: vec![],
         read_only: vec![],
         path_rules: vec![],
@@ -232,6 +234,60 @@ fn workspace_state_priority_between_paged_reading_and_workspace_context() {
         .expect("workspace ctx");
     assert!(paged_pos < state_pos, "state 应在 paged 之后");
     assert!(state_pos < ctx_pos, "state 应在 workspace ctx 之前");
+}
+
+// ── cwd 注入 system prompt（hotfix §A.0） ────────────────────────────────────
+
+#[test]
+fn workspace_state_section_renders_cwd_section_when_present() {
+    let mut st = fixture_state();
+    st.cwd = "/Users/yan/scratch/sub".into();
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    assert!(s.contains("## Current Working Directory"));
+    assert!(s.contains("`/Users/yan/scratch/sub`"));
+    assert!(
+        s.contains("NOT yet authorized"),
+        "cwd 不在 read_write 时应说明需授权"
+    );
+}
+
+#[test]
+fn workspace_state_section_renders_cwd_writable_when_in_rw_list() {
+    let mut st = fixture_state();
+    st.cwd = "/Users/yan/proj".into();
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    assert!(s.contains("## Current Working Directory"));
+    assert!(
+        s.contains("currently writable"),
+        "cwd 在 read_write 时应给 LLM 明确授权信号"
+    );
+    assert!(!s.contains("NOT yet authorized"));
+}
+
+#[test]
+fn workspace_state_section_renders_cwd_readonly_when_in_ro_list() {
+    let mut st = fixture_state();
+    st.cwd = "/Users/yan/.pi_/agents/main/sessions".into();
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    assert!(s.contains("## Current Working Directory"));
+    assert!(s.contains("currently read-only"));
+}
+
+#[test]
+fn workspace_state_section_skips_cwd_when_empty() {
+    let st = fixture_state();
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    assert!(!s.contains("## Current Working Directory"));
+}
+
+#[test]
+fn workspace_state_section_cwd_appears_before_workspace_state() {
+    let mut st = fixture_state();
+    st.cwd = "/some/cwd/path".into();
+    let s = WorkspaceStateSection::new(st).render("/tmp");
+    let cwd_pos = s.find("## Current Working Directory").expect("cwd section");
+    let ws_pos = s.find("## Workspace State").expect("workspace state");
+    assert!(cwd_pos < ws_pos, "cwd 段必须在 workspace state 之前");
 }
 
 #[test]
