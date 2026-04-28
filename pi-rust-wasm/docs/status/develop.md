@@ -21,6 +21,7 @@
 **§2 / §3 测试 review**
 
 - 权限门覆盖 session runtime path_rules、deny 预检、`config_set primitive.path_rules` 热生效、拖拽菜单扩大授权前 deny 校验等路径。
+- Nibbles 补充自动化回归：`render_drag_menu_with_deny_rule_hides_authorization_choices` 用真实 `DefaultPermissionGate` 断言拖拽命中 deny 时只剩取消；`config_set_array_path_rule_appends_with_json_value` 增加同一会话 gate 立即 deny 的闭环断言。
 - 拖拽解析覆盖不存在文件 + 中文意图不误退父目录；Layer0 覆盖 `agent_workspace_trail/tool-results/{session_id}` 写入与旧路径迁移。
 - E2E 复跑覆盖 `cli_tests` 77/77 与 `wasmedge_e2e_tests` 39/39；WasmEdge cleanup 阶段 `Code: 0x8d` stderr 仍按验收文档说明处理，以 Rust test harness `ok` 为准。
 
@@ -34,6 +35,8 @@
 | `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | **lib 571 passed / 0 failed / 1 ignored；integration 201 passed / 0 failed；doc 0 passed / 1 ignored；EXIT_CODE=0** |
 | `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | **integration 201 passed / 0 failed；含 `cli_tests` 77/77、`wasmedge_e2e_tests` 39/39** |
 | `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` | **77 passed / 0 failed / 0 ignored** |
+| `cargo test -j 1 render_drag_menu_with_deny_rule_hides_authorization_choices -- --nocapture --test-threads=1` | **1 passed / 0 failed** |
+| `cargo test -j 1 config_set_array_path_rule_appends_with_json_value -- --nocapture --test-threads=1` | **1 passed / 0 failed** |
 
 **编码规范家族对照**
 

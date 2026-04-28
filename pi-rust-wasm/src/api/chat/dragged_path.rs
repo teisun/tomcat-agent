@@ -433,6 +433,48 @@ mod tests {
     }
 
     #[test]
+    fn render_drag_menu_with_deny_rule_hides_authorization_choices() {
+        use crate::core::permission::{
+            DefaultPermissionGate, DraggedPaths, GateConfig, PathRule, SessionGrants,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let denied = tmp.path().join("secret");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&denied).unwrap();
+        let gate = DefaultPermissionGate::new(
+            GateConfig {
+                workspace_dir: workspace,
+                extra_roots: vec![],
+                agent_data_readonly_dirs: vec![],
+                user_path_rules: vec![PathRule::new(
+                    denied.to_string_lossy().to_string(),
+                    PathRuleMode::Deny,
+                )],
+                user_bash_forbidden: vec![],
+                user_bash_approval: vec![],
+                user_bash_whitelist: vec![],
+                auto_confirm: false,
+            },
+            SessionGrants::new(),
+            DraggedPaths::new(),
+        );
+
+        let menu = render_drag_menu(&denied, &gate);
+
+        assert!(menu.cancel);
+        assert!(!menu.allow_once, "deny 命中后不得允许本次授权");
+        assert!(!menu.persist_extra_root, "deny 命中后不得允许持久扩权");
+        assert!(
+            !menu.persist_readonly,
+            "deny 命中后不得降级为 readonly 扩权"
+        );
+        assert!(!menu.persist_deny, "deny 命中后无需再展示重复 deny 选项");
+        assert!(menu.note.as_deref().unwrap_or("").contains("禁止读写访问"));
+    }
+
+    #[test]
     fn menu_options_readonly_allows_session_read_but_not_extra_root() {
         let m = MenuOptions::readonly_only("note");
         assert!(m.allow_once);

@@ -757,21 +757,55 @@ mod tests {
 
     #[tokio::test]
     async fn config_set_array_path_rule_appends_with_json_value() {
+        use crate::core::permission::{
+            DefaultPermissionGate, DraggedPaths, GateConfig, PermissionDecision, SessionGrants,
+        };
+        use crate::core::primitives::PrimitiveOperation;
+
         let dir = TempDir::new().unwrap();
         let p = empty_config(&dir);
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
-        let ctx = ConfigToolContext::new(p.clone(), confirm);
-        let outcome = config_set_impl(
-            "primitive.path_rules",
-            r#"{"path":"~/.foo","mode":"deny"}"#,
-            &ctx,
+        let gate = DefaultPermissionGate::new(
+            GateConfig {
+                workspace_dir: dir.path().join("workspace"),
+                extra_roots: vec![],
+                agent_data_readonly_dirs: vec![],
+                user_path_rules: vec![],
+                user_bash_forbidden: vec![],
+                user_bash_approval: vec![],
+                user_bash_whitelist: vec![],
+                auto_confirm: false,
+            },
+            SessionGrants::new(),
+            DraggedPaths::new(),
         )
-        .await
-        .unwrap();
+        .into_arc();
+        let ctx = ConfigToolContext::new(p.clone(), confirm).with_gate(gate.clone());
+        let rule = format!(
+            r#"{{"path":"{}","mode":"deny"}}"#,
+            blocked.to_string_lossy()
+        );
+        let outcome = config_set_impl("primitive.path_rules", &rule, &ctx)
+            .await
+            .unwrap();
         assert!(outcome.applied);
         let cfg = load_config(Some(&p)).unwrap();
         assert_eq!(cfg.primitive.path_rules.len(), 1);
-        assert_eq!(cfg.primitive.path_rules[0].path, "~/.foo");
+        assert_eq!(cfg.primitive.path_rules[0].path, blocked.to_string_lossy());
+
+        let decision = gate
+            .check(
+                PrimitiveOperation::Read,
+                blocked.join("secret.txt").to_str().unwrap(),
+            )
+            .unwrap();
+        assert!(
+            matches!(decision, PermissionDecision::Deny { .. }),
+            "config_set primitive.path_rules 后，同一会话 gate 必须立即 deny，实际: {:?}",
+            decision
+        );
     }
 
     #[tokio::test]
