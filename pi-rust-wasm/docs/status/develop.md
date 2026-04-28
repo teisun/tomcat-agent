@@ -1,5 +1,60 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-28 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-004 post-merge hotfix（cwd lazy prompt + 拖拽意图切分）
+
+**合并信息**
+
+- 源分支：`feature/workspace-permission-tiers-hotfix` @ `10c62dc`
+- 合并 commit：`60189c0 merge(T2-P0-004-hotfix): feature/workspace-permission-tiers-hotfix → develop`
+- 合并策略：`--no-ff`，ort 无冲突
+- 负责任务：T2-P0-004 post-merge hotfix（主任务状态保持 `DONE`）
+- Nibbles 补漏：将 `cwd_lazy_prompt.rs` 内联单元测试迁移到 `src/api/chat/tests/cwd_lazy_prompt.rs`，原业务文件仅保留 `#[path]` 测私有项挂载，满足 `RUST_FILE_LINES_SPEC` 测试物理位置规范
+
+**§1 规格 & 场景库核对**
+
+- `permission-system.md` 已记录 cwd 首次触达授权与拖拽 token 内「存在路径 + 非 ASCII suffix」切分语义，和实现路径 `cwd_lazy_prompt.rs` / `dragged_path.rs` 一致
+- 本次是 T2-P0-004 已 DONE 后热修，不新增主任务或回退看板状态
+
+**§2 集成测试 review**
+
+- `CwdLazyPrompt` 覆盖非 TTY fallback、`[a]` 写盘 + SessionGrants、`[s]` 仅会话授权、`[n]` dismissed 后转发、cwd 已授权绕过等路径
+- `dragged_path` 覆盖单引号路径紧贴中文意图、不存在 ASCII 路径保持旧纯拖拽菜单等回归
+- 代码结构补漏后 `cwd_lazy_prompt.rs` 约 325 行，回到 L-1 黄金区间；测试移入父目录模块 `tests/`
+
+**§3 E2E**
+
+- 新增 `cwd_lazy_prompt_e2e` 6/6 通过
+- `cli_tests` 77/77 通过；`wasmedge_e2e_tests` 39/39 通过
+- WasmEdge cleanup 阶段 `Code: 0x8d` stderr 仍按验收文档说明处理，以 Rust test harness `ok` 为准
+
+**§4 全量门禁**（在 `develop` 合并并补漏后、`pi-rust-wasm` 根目录；`source .env` 注入 LLM 测试环境）
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo fmt --check` | 通过 |
+| `cargo build --release` | 通过（最终复跑 3m16s） |
+| `cargo clippy --all-targets -- -D warnings` | 零警告（最终复跑 8.19s） |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | **lib 567 passed / 0 failed / 1 ignored；integration 201 passed / 0 failed；doc 0 passed / 1 ignored；EXIT_CODE=0** |
+
+**编码规范家族对照**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | 通过 | 权限判断仍在 core/executor 边界内；chat 层只做 UX 装饰与输入解析 |
+| `RUST_FILE_LINES_SPEC.md` | 通过 | 发现并修复 `cwd_lazy_prompt.rs` 内联测试；业务文件回落到黄金区间 |
+| `RUST_IDIOMS_SPEC.md` | 通过 | `cargo clippy --all-targets -- -D warnings` 零警告 |
+| `COMMENT_SPEC.md` | 通过 | 新增路径含模块级说明与关键分支注释，未发现降级断言或跳测 |
+
+**结论**
+
+T2-P0-004 post-merge hotfix 集成验收**通过**：合并无冲突，develop 全量门禁绿灯，Nibbles 已完成测试组织补漏并留痕。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-27 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — T2-P0-004 workspace-permission-tiers（工作目录权限分级）
