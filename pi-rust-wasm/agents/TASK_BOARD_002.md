@@ -23,7 +23,7 @@
 3. **Agent Loop 模块化**：`src/core/agent_loop/run.rs`（832 行）拆为 dispatcher / tool_exec / stream_handler / error_classifier 子模块；三套管道（`src/ext/`）语义统一；
 4. **Thinking API + 展示**：`src/core/llm/` 接入 Claude/GPT/Qwen 的 thinking 协议，TUI 支持可折叠展示；
 5. **状态管理**：Checkpoint 机制 + 断点续跑、PLAN 模式增强、提问/应答机制、结果验证 review 子流程、Feedback 回路、集成测试规范 6 个方向全部达标；
-6. **交付口径**：16 个 T2-P0/P1 任务全部 DONE；macOS/Linux 上单 Agent 可连续运行 ≥ 4 小时不退化；compaction 触发不产生死循环。
+6. **交付口径**：18 个 T2-P0/P1 任务全部 DONE；macOS/Linux 上单 Agent 可连续运行 ≥ 4 小时不退化；compaction 触发不产生死循环。
 
 ### 1.2 不做的范围
 
@@ -40,7 +40,7 @@
 
 ### 1.3 验收口径
 
-1. 16 个 T2-P0/P1 任务全部标记 `DONE` 并通过 Nibbles 复核；
+1. 18 个 T2-P0/P1 任务全部标记 `DONE` 并通过 Nibbles 复核；
 2. 单元测试覆盖率 ≥ 80%，集成测试（compaction、agent loop、权限、中断恢复）全部绿灯；
 3. `docs/TODOS.md` 的 P0 条目逐项在看板中有对应 T2 任务闭环；
 4. `openspec/specs/Product_Brief.md` 与本看板、`docs/TODOS.md` 在档位/映射上内部一致（归档回归检查通过）。
@@ -486,6 +486,45 @@
 
 ---
 
+### T2-P0-012 | llm-binary-attachments | 图片/二进制文件传给 LLM
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/llm-binary-attachments` |
+| **阻塞点** | — |
+| **关联 TODOS** | 新增（多模态输入 / 二进制安全读取） |
+
+**目标**：用户拖拽或显式指定图片 / 二进制文件时，系统应把文件作为 LLM attachment 传入模型，而不是走 `read_file` 的 UTF-8 文本路径误读、乱码或污染上下文。
+
+**子项**（具体方案由计划阶段确定，先列待研究方向）：
+- [ ] 新增文件类型判定层：按 MIME / magic bytes / UTF-8 可解码性区分 text、image、generic binary；文本文件继续走现有 `read_file`，二进制文件禁止静默 UTF-8 解码
+- [ ] 设计 `ChatRequest` / message content 的 attachment 抽象：支持 image（PNG/JPEG/WebP/GIF 等）与 generic binary（文件名、MIME、大小、bytes/ref），并记录 provider capability
+- [ ] Provider 适配：OpenAI / Anthropic / Qwen 分别映射到各自多模态输入协议；不支持的 provider 返回明确可恢复错误，不回退为乱码文本
+- [ ] TUI / 拖拽路径接入：用户拖入图片或二进制文件时显示附件 chip / 文件摘要，并将附件随下一轮 user message 发送给 LLM
+- [ ] 安全与预算：文件大小上限、MIME allowlist、权限复用 `PermissionGate`，transcript 只落 metadata / content hash，避免把原始二进制直接写进历史
+- [ ] 回归测试：图片附件能被 mock LLM 收到；随机二进制不会触发 UTF-8 `read_file`；不支持多模态的 provider 给出结构化错误
+
+**依赖**：T2-P0-005（工具系统整改后再调整 `read_file`/attachment 边界）；T2-P0-006（LLM content 抽象与 provider 适配先就位）；T2-P0-008（TUI 附件展示与拖拽交互承载）
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`dragged_path`、`PrimitiveExecutor::read_file`、`ChatRequest`、`LlmProvider`、`PermissionGate`
+- 提供：`AttachmentContent` / `BinaryAttachment`（命名由计划阶段定）、provider capability 查询、二进制安全读取路径
+
+**验收标准**：
+- PNG/JPEG 图片拖入后作为 LLM image attachment 发送，mock provider 可断言 MIME、文件名、bytes/hash
+- 任意非 UTF-8 二进制文件不会被 `read_file` 当文本读入上下文；错误信息明确提示可用的附件路径或 provider 限制
+- transcript / audit 只记录附件 metadata、hash、大小与路径权限来源，不落原始 bytes
+- 多模态不支持场景有单测覆盖，行为为结构化失败而非 silent fallback
+
+**说明（来源溯源）**：本任务承接用户反馈——当前用户想把图片 / 二进制文件交给 LLM 时，容易被系统当作 UTF-8 文本文件读取，造成乱码、token 浪费和模型误判。修复重点是「输入语义分流 + LLM 多模态附件通道」，不是扩大 `read_file` 的文本读取能力。
+
+---
+
 ### T2-P0-003 | stream-timeout-and-tool-loop | Stream timeout + Tool loop detection
 
 | 字段 | 内容 |
@@ -499,7 +538,7 @@
 
 **目标**：把 `src/core/llm/openai.rs` 中的 `stream_timeout_sec` 接 `tokio::time::timeout`；替换 `src/core/agent_loop/types.rs:38-40` 的 `MAX_TOOL_ROUNDS` 硬限为 ToolLoopGuard 三道防线。
 
-**调度说明（2026-04-26）**：仍在 002 范围与「16 个 T2-P0/P1 全 DONE」交付内。主动取消 + `reqwest` 整请求超时已降低挂死概率；本任务为体验加固，**不阻塞**其它 P0 认领与合并；若迭代末期时间仍紧，以「末位调度」压线排期，接受短期依赖现有超时与取消路径。
+**调度说明（2026-04-26）**：仍在 002 范围与「18 个 T2-P0/P1 全 DONE」交付内。主动取消 + `reqwest` 整请求超时已降低挂死概率；本任务为体验加固，**不阻塞**其它 P0 认领与合并；若迭代末期时间仍紧，以「末位调度」压线排期，接受短期依赖现有超时与取消路径。
 
 **子项**：
 - [ ] `OpenAiProvider::chat_stream` 接入 `tokio::time::timeout` + 心跳超时；超时抛 `LlmError::StreamTimeout`（Retryable）
@@ -738,6 +777,9 @@ flowchart LR
     P006 --> P008
     P002 --> P011[T2-P0-011<br/>大文件编辑策略<br/>由 #T-043 抽出]
     P005 --> P011
+    P005 --> P012[T2-P0-012<br/>图片/二进制附件]
+    P006 --> P012
+    P008 --> P012
     P007 --> P101[T2-P1-001<br/>Checkpoint]
     P101 --> P102[T2-P1-002<br/>PLAN 增强]
     P008 --> P103[T2-P1-003<br/>提问/应答]
@@ -772,3 +814,4 @@ flowchart LR
 | 2026-04-27 | T2-P0-004 post-merge hotfix-1（DONE 不变） | Jerry 在 `feature/workspace-permission-tiers-hotfix` 分支补 plan §8.2 → lazy first-touch + cwd 注入 system prompt：① `ChatContext` 新增 `cwd` / `cfg_path` 启动 snapshot（`std::env::current_dir()` 一次性，避免 `set_current_dir` footgun）；② `WorkspaceStateSection` 新增 `## Current Working Directory` 段（先于 `## Workspace State`，三态文案随 cwd 是否在 effective_roots 切换），让 LLM 在每次推理首屏看到 cwd；③ 删除 `print_startup_banner` 与 `chat_loop` 调用；④ 新建 `src/api/chat/cwd_lazy_prompt.rs::CwdLazyPrompt` 装饰器（`[a]` 写盘 extra_roots + SessionGrants / `[s]` 仅 SessionGrants / `[n]` dismissed + fall-through，`Arc<AtomicBool>` 共享 dismissed，非 TTY 自动 dismiss 防 CI 阻塞）；⑤ `from_config` 用 `CwdLazyPrompt` 包裹 `CliConfirmation`。补丁 plan：[`.cursor/plans/cwd-startup-prompt-fix_7af19637.plan.md`](../../.cursor/plans/cwd-startup-prompt-fix_7af19637.plan.md)；规格更新见 `permission-system.md` §10.0 / §10.1。本行不把 T2-P0-004 主状态改回 DOING，仅追加 changelog |
 | 2026-04-27 | T2-P0-004 post-merge hotfix-2（DONE 不变） | Jerry 在同一 hotfix 分支补 plan §7 拖拽切分误判：`src/api/chat/dragged_path.rs::interpret_dragged_paths` 引入 `split_path_and_suffix` 在 token 内做「存在性 + 字符边界切分」——`'/abs/path'这个文件夹下面有几个文件?` 类输入（POSIX 单引号闭合后紧贴非 ASCII 中文）不再被 `shell_words::split` 合成单 token 后误入 5 选项纯拖拽菜单，而是正确拆成 `(path, "这个文件夹下面有几个文件?")` 走 AutoAllow 自动 `SessionGrants += path`、整行原样发 LLM。区分 ASCII / 非 ASCII：纯 ASCII 不存在路径保留 plan §7 旧 `PromptMenu` 行为零回归。新增回归 case 4 个（quoted_path_with_intent / nonascii_existing_intact / nonascii_suffix_splits / nonexistent_ascii_keeps_legacy）。规格更新见 `permission-system.md` §8.1 |
 | 2026-04-28 | T2-P0-004 post-merge hotfix 集成通过（DONE 不变） | Nibbles 将 `feature/workspace-permission-tiers-hotfix` @ `10c62dc` `--no-ff` 合并入 `develop`（merge commit `60189c0`，无冲突）；develop 上复跑 `cargo fmt --check` + `cargo build --release` + `cargo clippy --all-targets -- -D warnings` + `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` 全绿（lib 567 passed / integration 201 passed / doc 0 passed，`EXIT_CODE=0`）。集成 review 发现并补漏：`cwd_lazy_prompt.rs` 内联测试迁移到 `src/api/chat/tests/cwd_lazy_prompt.rs`，业务文件回落到 L-1 黄金区间并符合测试物理位置规范。集成报告见 `docs/status/develop.md` 顶部 |
+| 2026-04-28 | 新增 T2-P0-012 图片/二进制附件任务 | 根据用户反馈新增 `T2-P0-012 \| llm-binary-attachments`：用户拖拽或指定图片 / 二进制文件时走 LLM attachment 通道，而不是 `read_file` UTF-8 文本路径；同步 §1 交付/验收任务总数 16→18（本文件原 16 为历史口径且已存在 17 个任务），§5 依赖拓扑新增 T2-P0-005 / T2-P0-006 / T2-P0-008 → T2-P0-012 |

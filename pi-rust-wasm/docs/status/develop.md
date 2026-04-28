@@ -1,5 +1,16 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| — | 2026-04-28 | DOCS | develop | — |
+
+### 任务看板 — 002 新增 T2-P0-012（LLM 图片/二进制附件）
+
+- 更新 [`agents/TASK_BOARD_002.md`](../../agents/TASK_BOARD_002.md)：新增 `T2-P0-012 | llm-binary-attachments`，目标为用户拖拽或指定的图片 / 二进制走 LLM 多模态附件通道，避免沿用 `read_file` 的 UTF-8 文本路径误读；迭代交付口径与 §1.3 验收同步为 **18** 个 T2 任务；§5 依赖拓扑补充 `T2-P0-005` / `T2-P0-006` / `T2-P0-008` → `T2-P0-012`；§6 变更记录追加一行。
+- 本次仅文档，无 `src/` 变更；Cov% 不适用。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-28 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — T2-P0-004 post-merge hotfix（cwd lazy prompt + 拖拽意图切分）
