@@ -54,7 +54,7 @@ pub struct AgentLoopConfig {
     pub session_id: String,
     pub tool_definitions: Vec<serde_json::Value>,
     pub context_config: ContextConfig,
-    /// Agent 工作目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
+    /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
     pub work_dir: String,
 }
 

@@ -1252,7 +1252,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 - 压缩摘要以 `SessionEntry::BranchSummary` entry（JSONL `type: branch_summary`）写入 transcript（**每批次单行**）。
   - 预热阶段 **追加** `is_boundary: false`（含行 `id`）
   - 应用阶段 **原地**将该行改为 `is_boundary: true`（重启时生效；不追加第二份全文）
-- Tool result 落盘文件存储在 `{work_dir}/agents/{session_id}/tool-results/` 目录。
+- Tool result 落盘文件存储在 `agent_workspace_trail/tool-results/{session_id}/` 目录，即默认 `~/.pi_/agents/{agent_id}/tool-results/{session_id}/`。
 - 初始化时从 transcript 流式读取消息（遵守「禁止全量加载」约定，使用 `BufReader` 逐行解析 + `fold_entries_to_messages` 输出 `Vec<ChatMessage>`），识别 compact boundary，跳过 `is_boundary=false` 的预热记录。
 
 ### 10.3 配置管理（infrastructure-layer.md）

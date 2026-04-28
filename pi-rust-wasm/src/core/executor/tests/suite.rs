@@ -42,6 +42,34 @@ async fn read_file_success() {
 }
 
 #[tokio::test]
+async fn read_file_binary_returns_product_error() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_binary_read");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let f = dir.join("image.png");
+    std::fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let config = temp_whitelist_config(&dir);
+    let exec = DefaultPrimitiveExecutor::new(
+        config,
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        dir.clone(),
+    );
+
+    let err = exec.read_file(&path_str, "p1").await.unwrap_err();
+    match err {
+        AppError::Primitive(msg) => {
+            assert!(msg.contains("文件存在且权限已通过检查"));
+            assert!(msg.contains("二进制或非 UTF-8 文本"));
+        }
+        other => panic!("expected product primitive error, got {:?}", other),
+    }
+    let _ = std::fs::remove_file(&f);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
 async fn read_file_path_not_in_whitelist() {
     let config = PrimitiveConfig::default();
     let exec = DefaultPrimitiveExecutor::new(

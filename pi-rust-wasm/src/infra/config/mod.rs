@@ -18,9 +18,10 @@ pub use append::{append_extra_root_to_disk, append_path_rule_to_disk};
 pub use assets::ensure_embedded_assets;
 pub use load::{
     ensure_work_dir_structure, get_work_dir, load_config, load_config_toml_file, resolve_agent_dir,
-    resolve_assets_dir, resolve_audit_dir, resolve_extra_roots_paths, resolve_log_dir,
-    resolve_memory_dir, resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir,
-    resolve_tmp_dir, resolve_workspace_dir, validate_config,
+    resolve_agent_workspace_definition_dir, resolve_agent_workspace_trail_dir, resolve_assets_dir,
+    resolve_audit_dir, resolve_extra_roots_paths, resolve_log_dir, resolve_memory_dir,
+    resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir,
+    resolve_workspace_dir, validate_config,
 };
 pub use lock::with_config_lock;
 #[allow(unused_imports)]

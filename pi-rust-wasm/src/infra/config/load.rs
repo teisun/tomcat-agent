@@ -154,12 +154,14 @@ pub fn resolve_agent_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
         .join("agent"))
 }
 
+/// `work_dir/agents/{id}` — Agent 运行态轨迹目录。
+pub fn resolve_agent_workspace_trail_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?.join("agents").join(&cfg.agent.id))
+}
+
 /// `work_dir/agents/{id}/sessions` — 独立推导，不经 agent_dir。
 pub fn resolve_sessions_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(get_work_dir(cfg)?
-        .join("agents")
-        .join(&cfg.agent.id)
-        .join("sessions"))
+    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("sessions"))
 }
 
 /// `work_dir/plugins` — 全局共享插件目录。
@@ -169,30 +171,21 @@ pub fn resolve_plugins_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 
 /// `work_dir/agents/{id}/tmp` — 临时目录，保留签名兼容。
 pub fn resolve_tmp_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(get_work_dir(cfg)?
-        .join("agents")
-        .join(&cfg.agent.id)
-        .join("tmp"))
+    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("tmp"))
 }
 
 /// `work_dir/agents/{id}/logs` — 独立推导，不经 agent_dir。
 pub fn resolve_log_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(get_work_dir(cfg)?
-        .join("agents")
-        .join(&cfg.agent.id)
-        .join("logs"))
+    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("logs"))
 }
 
 /// `work_dir/agents/{id}/audit` — 独立审计日志目录，专用 JSONL 存储。
 pub fn resolve_audit_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(get_work_dir(cfg)?
-        .join("agents")
-        .join(&cfg.agent.id)
-        .join("audit"))
+    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("audit"))
 }
 
 /// agent 工作区目录。优先 `cfg.agent.workspace`，否则 `work_dir/workspace-{id}`。
-pub fn resolve_workspace_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+pub fn resolve_agent_workspace_definition_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     if let Some(ref ws) = cfg.agent.workspace {
         let w = ws.trim();
         if !w.is_empty() {
@@ -200,6 +193,12 @@ pub fn resolve_workspace_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
         }
     }
     Ok(get_work_dir(cfg)?.join(format!("workspace-{}", cfg.agent.id)))
+}
+
+/// agent 设计态工作区目录。保留旧函数名作为兼容 wrapper，新代码优先使用
+/// [`resolve_agent_workspace_definition_dir`]。
+pub fn resolve_workspace_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    resolve_agent_workspace_definition_dir(cfg)
 }
 
 /// `work_dir/memory` — 向量检索索引目录。
@@ -233,13 +232,11 @@ pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
 /// 以及 `assets/wasm|modules`。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let work = get_work_dir(cfg)?;
-    let id = &cfg.agent.id;
-
     let agent_dir = resolve_agent_dir(cfg)?;
     std::fs::create_dir_all(&agent_dir).map_err(AppError::Io)?;
 
-    let agent_base = work.join("agents").join(id);
-    for sub in ["sessions", "logs", "audit"] {
+    let agent_base = resolve_agent_workspace_trail_dir(cfg)?;
+    for sub in ["sessions", "logs", "audit", "tmp", "tool-results"] {
         std::fs::create_dir_all(agent_base.join(sub)).map_err(AppError::Io)?;
     }
 

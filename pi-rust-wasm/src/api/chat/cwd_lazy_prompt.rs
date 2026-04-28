@@ -44,7 +44,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
-use crate::core::permission::{PermissionGate, SessionGrants};
+use crate::core::permission::{PermissionDecision, PermissionGate, SessionGrants};
 use crate::core::primitives::PrimitiveOperation;
 use crate::infra::error::AppError;
 
@@ -168,10 +168,10 @@ impl CwdLazyPrompt {
 
     fn render_prompt(&self, target: &Path) {
         eprintln!("─────────────────────────────────────────────────────────────");
-        eprintln!("当前目录 {} 不在已授权工作区。", self.cwd.display());
+        eprintln!("当前目录 {} 尚未授权访问。", self.cwd.display());
         eprintln!("即将操作: {}", target.display());
-        eprintln!("[a] 加入工作区（持久化到 ~/.pi_/pi.config.toml extra_roots）");
-        eprintln!("[s] 仅本会话允许（不写盘）");
+        eprintln!("[a] 以后也允许访问（写入配置 ~/.pi_/pi.config.toml workspace.extra_roots）");
+        eprintln!("[s] 本次会话期间允许访问");
         eprintln!("[n] 不加入（按文件粒度逐次询问）");
         eprint!("选择 [a/s/n]: ");
         let _ = io::stderr().flush();
@@ -267,21 +267,26 @@ impl CwdLazyPrompt {
         match choice {
             CwdPromptChoice::AddPersistent => {
                 let canon = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
+                ensure_not_denied(&*self.gate, &canon)?;
                 if let Err(e) = crate::infra::config::append_extra_root_to_disk(
                     &self.cfg_path,
                     canon.to_string_lossy().into_owned(),
                 ) {
-                    eprintln!("✗ 写入 extra_roots 失败: {}", e);
-                    eprintln!("  已退化为本会话授权（[s]）");
+                    eprintln!(
+                        "✗ 持久化失败：{}；已改为仅本次会话允许访问 {}",
+                        e,
+                        canon.display()
+                    );
                 }
                 self.session_grants.add(canon);
-                eprintln!("✓ cwd 已加入工作区（写盘 + SessionGrants）");
+                eprintln!("✓ {} 本次会话期间允许访问", self.cwd.display());
                 Ok(ConfirmDecision::AllowOnce)
             }
             CwdPromptChoice::AllowSessionOnly => {
                 let canon = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
-                self.session_grants.add(canon);
-                eprintln!("✓ cwd 已加入本会话 SessionGrants");
+                ensure_not_denied(&*self.gate, &canon)?;
+                self.session_grants.add(canon.clone());
+                eprintln!("✓ {} 本次会话期间允许访问", canon.display());
                 Ok(ConfirmDecision::AllowOnce)
             }
             CwdPromptChoice::Skip => {
@@ -317,6 +322,17 @@ impl CwdLazyPrompt {
     #[doc(hidden)]
     pub fn is_dismissed(&self) -> bool {
         self.dismissed.load(Ordering::Acquire)
+    }
+}
+
+fn ensure_not_denied(gate: &dyn PermissionGate, path: &Path) -> Result<(), AppError> {
+    match gate.check(PrimitiveOperation::Read, &path.to_string_lossy())? {
+        PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
+            "该路径已被禁止访问，无法加入当前会话或配置：{} ({})",
+            path.display(),
+            reason
+        ))),
+        _ => Ok(()),
     }
 }
 

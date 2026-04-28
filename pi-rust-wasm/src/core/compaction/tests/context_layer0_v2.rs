@@ -146,6 +146,20 @@ fn layer0_persist_file_readable() {
         content, original,
         "persisted file should contain original content"
     );
+    assert!(
+        results[0]
+            .persisted_path
+            .contains(&format!("tool-results{}sess1", std::path::MAIN_SEPARATOR)),
+        "tool result should be stored under runtime tool-results/session path"
+    );
+    assert!(
+        !results[0].persisted_path.contains(&format!(
+            "workspace{}sess1{}tool-results",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        )),
+        "legacy workspace/session/tool-results path must not be used"
+    );
 }
 
 #[test]

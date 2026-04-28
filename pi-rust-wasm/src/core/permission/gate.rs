@@ -26,7 +26,7 @@ use super::defaults::{
     BUILTIN_BASH_WHITELIST,
 };
 use super::path_rule::PathRule;
-use super::session_grants::{DraggedPaths, SessionGrants};
+use super::session_grants::{DraggedPaths, SessionGrants, SessionPathRules};
 use super::types::{
     path_starts_with, EffectiveRoots, GrantSource, PathRuleMode, PermissionDecision,
     PermissionLevel,
@@ -55,6 +55,9 @@ pub trait PermissionGate: Send + Sync {
 
     /// 把一个会话级授权写入 SessionGrants（confirm 通过 / 拖入路径）。
     fn grant_session(&self, path: PathBuf, source: GrantSource);
+
+    /// 把当前会话新增的 path_rule 写入运行时规则集，让 deny / readonly 立即生效。
+    fn grant_path_rule(&self, rule: PathRule);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ pub struct DefaultPermissionGate {
     extra_roots: Vec<PathBuf>,
     /// `{work_dir}/agents/{id}` 一系列只读目录（read only）。
     agent_data_readonly_dirs: Vec<PathBuf>,
-    /// 合并后的 path_rules（builtin ∪ user TOML）。
+    /// 构造时冻结的 path_rules（builtin ∪ user TOML）。
     path_rules: Vec<PathRule>,
     /// 编译好的 bash 三档 regex；构造期一次性编译，bad regex 跳过 + warn。
     bash_forbidden: Vec<Regex>,
@@ -81,6 +84,8 @@ pub struct DefaultPermissionGate {
     /// 共享会话授权与拖入路径。
     session_grants: SessionGrants,
     dragged_paths: DraggedPaths,
+    /// 当前会话新增的 deny / readonly 规则。
+    session_path_rules: SessionPathRules,
 }
 
 /// `DefaultPermissionGate::new` 构造参数。
@@ -125,6 +130,7 @@ impl DefaultPermissionGate {
             auto_confirm: cfg.auto_confirm,
             session_grants,
             dragged_paths,
+            session_path_rules: SessionPathRules::new(),
         }
     }
 
@@ -166,20 +172,27 @@ impl DefaultPermissionGate {
         })
     }
 
+    fn path_rules_snapshot(&self) -> Vec<PathRule> {
+        let mut rules = self.path_rules.clone();
+        rules.extend(self.session_path_rules.snapshot());
+        rules
+    }
+
     /// 命中第一条 Deny 规则；否则返回第一条 Readonly 命中（用于 read 通过）。
-    fn match_path_rule(&self, target: &Path) -> Option<&PathRule> {
+    fn match_path_rule(&self, target: &Path) -> Option<PathRule> {
+        let rules = self.path_rules_snapshot();
         // 先 Deny（最高优先级）。
-        if let Some(r) = self
-            .path_rules
+        if let Some(r) = rules
             .iter()
             .find(|r| r.mode == PathRuleMode::Deny && r.matches(target))
         {
-            return Some(r);
+            return Some(r.clone());
         }
         // 再 Readonly。
-        self.path_rules
+        rules
             .iter()
             .find(|r| r.mode == PathRuleMode::Readonly && r.matches(target))
+            .cloned()
     }
 }
 
@@ -312,7 +325,7 @@ impl PermissionGate for DefaultPermissionGate {
         read_write.extend(self.dragged_paths.snapshot());
 
         let mut read_only = self.agent_data_readonly_dirs.clone();
-        for r in &self.path_rules {
+        for r in self.path_rules_snapshot() {
             if r.mode == PathRuleMode::Readonly {
                 if let Ok(s) = r.expanded_path() {
                     read_only.push(PathBuf::from(s));
@@ -326,7 +339,7 @@ impl PermissionGate for DefaultPermissionGate {
     }
 
     fn effective_path_rules(&self) -> Vec<PathRule> {
-        self.path_rules.clone()
+        self.path_rules_snapshot()
     }
 
     fn grant_session(&self, path: PathBuf, source: GrantSource) {
@@ -334,6 +347,10 @@ impl PermissionGate for DefaultPermissionGate {
             GrantSource::DraggedPath => self.dragged_paths.add(path),
             _ => self.session_grants.add(path),
         }
+    }
+
+    fn grant_path_rule(&self, rule: PathRule) {
+        self.session_path_rules.add(rule);
     }
 }
 

@@ -29,7 +29,7 @@ use async_trait::async_trait;
 
 use crate::core::agent_loop::ConfigBackend;
 use crate::core::confirmation::UserConfirmationProvider;
-use crate::core::permission::PathRule;
+use crate::core::permission::{PathRule, PermissionDecision, PermissionGate};
 use crate::core::primitives::PrimitiveOperation;
 use crate::infra::config::{
     append_extra_root_to_disk, append_path_rule_to_disk, append_workspace_entry_to_disk,
@@ -170,6 +170,8 @@ pub struct ConfigToolContext {
     pub config_path: PathBuf,
     /// 二次 confirm 提供方；与 primitive 层共享同一 `CliConfirmation` 实例。
     pub confirmation: Arc<dyn UserConfirmationProvider>,
+    /// 当前 chat 共享的权限 gate；用于阻止 config_set 绕过 deny，并让 path_rules 热生效。
+    pub gate: Option<Arc<dyn PermissionGate>>,
 }
 
 impl ConfigToolContext {
@@ -177,7 +179,13 @@ impl ConfigToolContext {
         Self {
             config_path,
             confirmation,
+            gate: None,
         }
+    }
+
+    pub fn with_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 }
 
@@ -288,6 +296,7 @@ async fn handle_array_append(
             let abs = parse_string_element(value)?;
             let normalized =
                 normalize_path(&abs).map_err(|e| AppError::Config(format!("路径无效: {}", e)))?;
+            ensure_path_not_denied(ctx, &normalized)?;
             let abs_path = normalized.to_string_lossy().to_string();
             let suggested = Some(normalized.clone());
             let decision = ctx
@@ -308,7 +317,7 @@ async fn handle_array_append(
             append_extra_root_to_disk(&ctx.config_path, abs_path)?;
             Ok(ConfigSetOutcome {
                 applied: true,
-                message: format!("已追加 workspace.extra_roots: {}", value),
+                message: format!("已更新配置：以后允许访问 {}", value),
             })
         }
         "workspace.entries" => {
@@ -336,6 +345,7 @@ async fn handle_array_append(
         }
         "primitive.path_rules" => {
             let rule: PathRule = parse_json_element(value, "PathRule")?;
+            let rule_for_runtime = rule.clone();
             let decision = ctx
                 .confirmation
                 .confirm_decision(
@@ -352,9 +362,12 @@ async fn handle_array_append(
                 });
             }
             append_path_rule_to_disk(&ctx.config_path, rule)?;
+            if let Some(gate) = ctx.gate.as_ref() {
+                gate.grant_path_rule(rule_for_runtime);
+            }
             Ok(ConfigSetOutcome {
                 applied: true,
-                message: format!("已追加 primitive.path_rules: {}", value),
+                message: format!("已更新访问规则：{}", value),
             })
         }
         "primitive.bash_approval_required" | "primitive.bash_forbidden" => {
@@ -426,6 +439,20 @@ async fn handle_scalar_replace(
         applied: true,
         message: format!("已设置 {} = {}", key, value),
     })
+}
+
+fn ensure_path_not_denied(ctx: &ConfigToolContext, path: &Path) -> Result<(), AppError> {
+    let Some(gate) = ctx.gate.as_ref() else {
+        return Ok(());
+    };
+    match gate.check(PrimitiveOperation::Read, &path.to_string_lossy())? {
+        PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
+            "该路径已被禁止访问，无法写入 workspace.extra_roots：{} ({})",
+            path.display(),
+            reason
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn parse_string_element(value: &str) -> Result<String, AppError> {
@@ -648,6 +675,45 @@ mod tests {
         assert!(outcome.applied);
         let cfg = load_config(Some(&p)).unwrap();
         assert_eq!(cfg.workspace.extra_roots.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn config_set_extra_root_cannot_override_runtime_deny() {
+        use crate::core::permission::{
+            DefaultPermissionGate, DraggedPaths, GateConfig, PathRuleMode, SessionGrants,
+        };
+
+        let dir = TempDir::new().unwrap();
+        let p = empty_config(&dir);
+        let extra = dir.path().join("denied");
+        std::fs::create_dir_all(&extra).unwrap();
+        let gate = DefaultPermissionGate::new(
+            GateConfig {
+                workspace_dir: dir.path().join("workspace"),
+                extra_roots: vec![],
+                agent_data_readonly_dirs: vec![],
+                user_path_rules: vec![PathRule::new(
+                    extra.to_string_lossy().to_string(),
+                    PathRuleMode::Deny,
+                )],
+                user_bash_forbidden: vec![],
+                user_bash_approval: vec![],
+                user_bash_whitelist: vec![],
+                auto_confirm: false,
+            },
+            SessionGrants::new(),
+            DraggedPaths::new(),
+        )
+        .into_arc();
+        let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
+        let ctx = ConfigToolContext::new(p.clone(), confirm).with_gate(gate);
+
+        let err = config_set_impl("workspace.extra_roots", &extra.to_string_lossy(), &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Permission(_)));
+        let cfg = load_config(Some(&p)).unwrap();
+        assert!(cfg.workspace.extra_roots.is_empty());
     }
 
     #[tokio::test]
