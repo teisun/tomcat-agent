@@ -718,7 +718,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             session_id: ctx.session.current_session_key().to_string(),
             tool_definitions: build_tool_definitions(),
             context_config: context_config.clone(),
-            work_dir: ctx.agent_workspace_trail.to_string_lossy().to_string(),
+            agent_workspace_trail: ctx.agent_workspace_trail.to_string_lossy().to_string(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),

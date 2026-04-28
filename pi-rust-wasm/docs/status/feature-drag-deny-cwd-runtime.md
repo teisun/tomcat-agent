@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-04-28 13:10 | DONE | feature/drag-deny-cwd-runtime | - |
+| Jerry | 2026-04-28 14:25 | DONE | feature/drag-deny-cwd-runtime | - |
 
 ### DONE（拖拽授权、deny 规则与目录语义整改）
 
@@ -14,7 +14,7 @@
 
 - `PermissionGate` 新增 `grant_path_rule(PathRule)`，用于当前会话内热追加 deny / readonly。
 - `ConfigToolContext` 可携带共享 `PermissionGate`，用于 `config_set` 前置 deny 预检与 path_rules 热生效。
-- `AgentLoopConfig.work_dir` 语义收敛为 Agent 运行态轨迹目录，Layer0 持久化不再落入设计态 workspace。
+- `AgentLoopConfig.agent_workspace_trail`（原字段名 `work_dir`）：Agent 运行态轨迹目录字符串，用作 Layer0 落盘根；命名与 `ChatContext::agent_workspace_trail` 对齐，避免与 `storage.work_dir` / cwd 混淆。
 
 ### TEST（门禁）
 
