@@ -1,5 +1,55 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-04-28 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-004 follow-up（drag deny + cwd runtime + agent_workspace_trail）
+
+**合并信息**
+
+- 源分支：`feature/drag-deny-cwd-runtime` @ `0c439f9`
+- 合并 commit：`04f4caa merge(feature): 集成 drag-deny cwd runtime`
+- 合并策略：`--no-ff`，ort 无冲突
+- 负责任务：T2-P0-004 follow-up（主任务状态保持 `DONE`）
+
+**§1 规格 & 场景库核对**
+
+- `permission-system.md`、`directory-structure.md`、`context-management.md` 已对齐本次权限 deny 热生效、cwd 语义、`agent_workspace_trail` 与 Layer0 `tool-results` 落盘路径变更。
+- 本次为 T2-P0-004 已 DONE 后 follow-up 修复，不新增主任务、不回退看板状态。
+
+**§2 / §3 测试 review**
+
+- 权限门覆盖 session runtime path_rules、deny 预检、`config_set primitive.path_rules` 热生效、拖拽菜单扩大授权前 deny 校验等路径。
+- 拖拽解析覆盖不存在文件 + 中文意图不误退父目录；Layer0 覆盖 `agent_workspace_trail/tool-results/{session_id}` 写入与旧路径迁移。
+- E2E 复跑覆盖 `cli_tests` 77/77 与 `wasmedge_e2e_tests` 39/39；WasmEdge cleanup 阶段 `Code: 0x8d` stderr 仍按验收文档说明处理，以 Rust test harness `ok` 为准。
+
+**§4 全量门禁**（在 `develop` 合并后、`pi-rust-wasm` 根目录；`source .env` 注入 LLM 测试环境）
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo fmt --check` | 通过 |
+| `cargo build --release` | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | 零警告 |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | **lib 571 passed / 0 failed / 1 ignored；integration 201 passed / 0 failed；doc 0 passed / 1 ignored；EXIT_CODE=0** |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | **integration 201 passed / 0 failed；含 `cli_tests` 77/77、`wasmedge_e2e_tests` 39/39** |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` | **77 passed / 0 failed / 0 ignored** |
+
+**编码规范家族对照**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | 通过 | 权限判断仍集中在 permission / executor 边界；chat 层仅承载 UX、拖拽解析与配置入口 |
+| `RUST_FILE_LINES_SPEC.md` | 通过 | 本次未发现需阻塞合并的新文件行数红线；既有大文件风险延续 follow-up 跟踪 |
+| `RUST_IDIOMS_SPEC.md` | 通过 | `cargo clippy --all-targets -- -D warnings` 零警告 |
+| `COMMENT_SPEC.md` | 通过 | 关键路径语义与迁移行为已有说明，未发现降级断言、跳测或以打印代替失败 |
+
+**结论**
+
+T2-P0-004 follow-up 集成验收**通过**：`feature/drag-deny-cwd-runtime` 已合并入 `develop`，develop 全量门禁绿灯，权限 deny / cwd runtime / `agent_workspace_trail` 语义与规格及测试一致。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | — | 2026-04-28 | DOCS | develop | — |
 
 ### 任务看板 — 002 新增 T2-P0-012（LLM 图片/二进制附件）
