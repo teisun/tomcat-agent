@@ -46,7 +46,7 @@
 
 **提交**
 
-- 待推送后以当前分支 HEAD 为准。
+- 实现提交：`981775c`（`fix(integration): 收敛拖拽 Bash CWD 语义`），已推送 `origin/fix/drag-deny-cwd-remediation`。
 
 ### BLOCKED
 
