@@ -1,7 +1,5 @@
 use super::super::*;
-use crate::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PermissionGate, SessionGrants,
-};
+use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::primitives::{
     EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation,
 };
@@ -24,21 +22,20 @@ fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
 
 fn make_gate_with(
     definition: &Path,
-    extra_roots: Vec<PathBuf>,
+    workspace_roots: Vec<PathBuf>,
     auto_confirm: bool,
 ) -> Arc<dyn PermissionGate> {
     DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: definition.to_path_buf(),
-            extra_roots,
-            agent_data_readonly_dirs: vec![],
+            workspace_roots,
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     )
     .into_arc()
 }
@@ -362,7 +359,7 @@ async fn write_file_overwrite_creates_backup() {
 }
 
 #[tokio::test]
-async fn extra_roots_allow_external_path() {
+async fn workspace_roots_allow_external_path() {
     let ws_dir = std::env::temp_dir().join("pi_wasm_exec_extra_ws");
     std::fs::create_dir_all(&ws_dir).unwrap();
     let ws_dir = ws_dir.canonicalize().unwrap();
@@ -391,7 +388,7 @@ async fn extra_roots_allow_external_path() {
 }
 
 #[tokio::test]
-async fn extra_roots_still_rejects_unlisted_path() {
+async fn workspace_roots_still_rejects_unlisted_path() {
     let ws_dir = std::env::temp_dir().join("pi_wasm_exec_extra_reject");
     std::fs::create_dir_all(&ws_dir).unwrap();
     let ws_dir = ws_dir.canonicalize().unwrap();

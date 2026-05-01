@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use crate::core::permission::gate::{DefaultPermissionGate, GateConfig};
 use crate::core::permission::path_rule::PathRule;
-use crate::core::permission::session_grants::{DraggedPaths, SessionGrants};
+use crate::core::permission::session_grants::SessionGrants;
 use crate::core::permission::types::{
-    GrantSource, PathRuleMode, PermissionDecision, PermissionLevel,
+    GrantTrigger, GrantType, PathRuleMode, PermissionDecision, PermissionLevel,
 };
 use crate::core::permission::PermissionGate;
 use crate::core::primitives::PrimitiveOperation;
@@ -27,15 +27,14 @@ fn gate_with(
     DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: definition,
-            extra_roots: extra,
-            agent_data_readonly_dirs: agent_ro,
+            workspace_roots: extra,
+            agent_trail_readonly_dirs: agent_ro,
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     )
 }
 
@@ -50,8 +49,9 @@ fn allow_inside_agent_definition_dir() {
         )
         .unwrap();
     match dec {
-        PermissionDecision::Allow { source, level } => {
-            assert_eq!(source, GrantSource::AgentWorkspace);
+        PermissionDecision::Allow { grant, level } => {
+            assert_eq!(grant.grant_type, GrantType::AgentDefinitionDir);
+            assert_eq!(grant.trigger, GrantTrigger::BuiltinDefault);
             assert_eq!(level, PermissionLevel::Write);
         }
         other => panic!("unexpected: {:?}", other),
@@ -89,7 +89,7 @@ fn startup_cwd_without_extra_root_needs_confirm() {
 
     assert!(
         matches!(dec, PermissionDecision::NeedConfirm { .. }),
-        "启动 cwd 不在 extra_roots/session/dragged 时不应自动 Allow，得到: {:?}",
+        "启动 cwd 不在 workspace_roots/session 时不应自动 Allow，得到: {:?}",
         dec
     );
 }
@@ -103,8 +103,8 @@ fn deny_path_rule_overrides_workspace() {
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws.clone(),
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
                 secret.to_string_lossy().to_string(),
                 PathRuleMode::Deny,
@@ -114,7 +114,6 @@ fn deny_path_rule_overrides_workspace() {
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
     let dec = gate
         .check(
@@ -133,8 +132,8 @@ fn readonly_path_rule_blocks_write_allows_read() {
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws.clone(),
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
                 ro.to_string_lossy().to_string(),
                 PathRuleMode::Readonly,
@@ -144,17 +143,15 @@ fn readonly_path_rule_blocks_write_allows_read() {
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
     let read_ok = gate
         .check(PrimitiveOperation::Read, ro.join("a").to_str().unwrap())
         .unwrap();
     assert!(matches!(
         read_ok,
-        PermissionDecision::Allow {
-            source: GrantSource::PathRuleReadOnly,
-            ..
-        }
+        PermissionDecision::Allow { grant, .. }
+            if grant.grant_type == GrantType::PathRuleReadOnly
+                && grant.trigger == GrantTrigger::PathRulesConfig
     ));
     let write_deny = gate
         .check(PrimitiveOperation::Write, ro.join("a").to_str().unwrap())
@@ -163,7 +160,7 @@ fn readonly_path_rule_blocks_write_allows_read() {
 }
 
 #[test]
-fn agent_data_dir_read_only_allow() {
+fn agent_trail_dir_read_only_allow() {
     let ws = tmpdir("ws_agent");
     let agent = tmpdir("agent_ro");
     let gate = gate_with(ws, vec![], vec![agent.clone()]);
@@ -175,10 +172,9 @@ fn agent_data_dir_read_only_allow() {
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow {
-            source: GrantSource::AgentDataDir,
-            level: PermissionLevel::Read
-        }
+        PermissionDecision::Allow { grant, level: PermissionLevel::Read }
+            if grant.grant_type == GrantType::AgentTrailDir
+                && grant.trigger == GrantTrigger::BuiltinDefault
     ));
 }
 
@@ -187,19 +183,18 @@ fn session_grant_unblocks_outside() {
     let ws = tmpdir("ws_session");
     let outside = tmpdir("outside_session");
     let session = SessionGrants::new();
-    session.add(outside.clone());
+    session.add(outside.clone(), GrantTrigger::UserConfirm);
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws,
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: false,
         },
         session,
-        DraggedPaths::new(),
     );
     let dec = gate
         .check(
@@ -209,10 +204,9 @@ fn session_grant_unblocks_outside() {
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow {
-            source: GrantSource::SessionGrant,
-            ..
-        }
+        PermissionDecision::Allow { grant, .. }
+            if grant.grant_type == GrantType::SessionScope
+                && grant.trigger == GrantTrigger::UserConfirm
     ));
 }
 
@@ -221,19 +215,18 @@ fn runtime_deny_rule_overrides_existing_session_grant() {
     let ws = tmpdir("ws_runtime_deny");
     let outside = tmpdir("outside_runtime_deny");
     let session = SessionGrants::new();
-    session.add(outside.clone());
+    session.add(outside.clone(), GrantTrigger::UserConfirm);
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws,
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: false,
         },
         session,
-        DraggedPaths::new(),
     );
 
     gate.grant_path_rule(PathRule::new(
@@ -254,20 +247,19 @@ fn runtime_deny_rule_overrides_existing_session_grant() {
 fn dragged_path_unblocks_outside() {
     let ws = tmpdir("ws_drag");
     let dragged = tmpdir("dragged_ok");
-    let drag = DraggedPaths::new();
-    drag.add(dragged.clone());
+    let session = SessionGrants::new();
+    session.add(dragged.clone(), GrantTrigger::DraggedPathMenu);
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws,
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: false,
         },
-        SessionGrants::new(),
-        drag,
+        session,
     );
     let dec = gate
         .check(
@@ -277,10 +269,9 @@ fn dragged_path_unblocks_outside() {
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow {
-            source: GrantSource::DraggedPath,
-            ..
-        }
+        PermissionDecision::Allow { grant, .. }
+            if grant.grant_type == GrantType::SessionScope
+                && grant.trigger == GrantTrigger::DraggedPathMenu
     ));
 }
 
@@ -290,25 +281,23 @@ fn auto_confirm_short_circuits_layer2() {
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws,
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: true,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
     let dec = gate
         .check(PrimitiveOperation::Write, "/tmp/ac-foreign-target/x")
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow {
-            source: GrantSource::AutoConfirmFlag,
-            ..
-        }
+        PermissionDecision::Allow { grant, .. }
+            if grant.grant_type == GrantType::SessionScope
+                && grant.trigger == GrantTrigger::AutoConfirmFlag
     ));
 }
 
@@ -318,15 +307,14 @@ fn auto_confirm_does_not_override_forbidden() {
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: ws,
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: true,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
     // 命中 builtin bash_forbidden（pi config set）。
     let dec = gate.check_bash("pi config set llm.api_key xxx").unwrap();
@@ -361,7 +349,7 @@ fn bash_approval_required_layer2() {
     assert!(matches!(dec, PermissionDecision::NeedConfirm { .. }));
 }
 
-// ── PR-9：Agent data dir 凭据保护 / 历史只读集成 ─────────────────────────
+// ── PR-9：Agent trail dir 凭据保护 / 历史只读集成 ─────────────────────────
 
 /// 写 `~/.pi_/agents/main/agent/auth-profiles.json` → builtin path_rule deny。
 #[test]
@@ -381,7 +369,7 @@ fn pr9_credentials_glob_denies_write() {
 }
 
 /// 读 `~/.pi_/agents/main/agent/auth-profiles.json` → builtin path_rule deny
-/// （凭据 deny 优先于 agent_data_dir read_only）。
+/// （凭据 deny 优先于 agent_trail_dir read_only）。
 #[test]
 fn pr9_credentials_glob_denies_read_too() {
     let ws = tmpdir("ws_pr9_cred_read");
@@ -394,7 +382,7 @@ fn pr9_credentials_glob_denies_read_too() {
         .unwrap();
     assert!(
         matches!(dec, PermissionDecision::Deny { .. }),
-        "deny 应优先于 readonly agent_data_dir"
+        "deny 应优先于 readonly agent_trail_dir"
     );
 }
 
@@ -417,7 +405,7 @@ fn pr9_sessions_glob_blocks_write() {
 }
 
 /// 读 `~/.pi_/agents/main/sessions/foo.jsonl` → builtin readonly 通过
-/// （source=`PathRuleReadOnly`）。
+/// （grant_type=`PathRuleReadOnly`）。
 #[test]
 fn pr9_sessions_glob_allows_read_with_path_rule_source() {
     let ws = tmpdir("ws_pr9_sess_read");
@@ -428,16 +416,16 @@ fn pr9_sessions_glob_allows_read_with_path_rule_source() {
         .check(PrimitiveOperation::Read, target.to_str().unwrap())
         .unwrap();
     // glob `~/.pi_/agents/*/sessions` 不会自动覆盖子文件——globset 要求模式精确匹配整个字符串；
-    // 但当我们把 sessions 目录路径加进 `agent_data_readonly_dirs` 时，read 会通过 AgentDataDir 兜底；
-    // 否则走 NeedConfirm。这里只断言"非 Deny"（无论 source 是 PathRuleReadOnly 还是 NeedConfirm）。
+    // 但当我们把 sessions 目录路径加进 `agent_trail_readonly_dirs` 时，read 会通过 AgentTrailDir 兜底；
+    // 否则走 NeedConfirm。这里只断言"非 Deny"（无论 grant_type 是 PathRuleReadOnly 还是 NeedConfirm）。
     if matches!(dec, PermissionDecision::Deny { .. }) {
         panic!("read 应允许或要求确认，不应 deny");
     }
 }
 
-/// 命中 read_only 集合的 read 路径 → AgentDataDir 来源；同路径 write → Deny。
+/// 命中 read_only 集合的 read 路径 → AgentTrailDir 类型；同路径 write → Deny。
 #[test]
-fn pr9_agent_data_dir_read_allow_write_deny() {
+fn pr9_agent_trail_dir_read_allow_write_deny() {
     let ws = tmpdir("ws_pr9_ad");
     let agent = tmpdir("ad_ro");
     let gate = gate_with(ws, vec![], vec![agent.clone()]);
@@ -449,12 +437,11 @@ fn pr9_agent_data_dir_read_allow_write_deny() {
         .unwrap();
     assert!(matches!(
         read_dec,
-        PermissionDecision::Allow {
-            source: GrantSource::AgentDataDir,
-            level: PermissionLevel::Read
-        }
+        PermissionDecision::Allow { grant, level: PermissionLevel::Read }
+            if grant.grant_type == GrantType::AgentTrailDir
+                && grant.trigger == GrantTrigger::BuiltinDefault
     ));
-    // write 不应通过 AgentDataDir：fall through 到 NeedConfirm（不在 writable 集合里）。
+    // write 不应通过 AgentTrailDir：fall through 到 NeedConfirm（不在 writable 集合里）。
     let write_dec = gate
         .check(
             PrimitiveOperation::Write,
@@ -472,7 +459,7 @@ fn pr9_agent_data_dir_read_allow_write_deny() {
 }
 
 #[test]
-fn extra_roots_grant_writable() {
+fn workspace_roots_grant_writable() {
     let ws = tmpdir("ws_extra");
     let extra = tmpdir("extra_root");
     let gate = gate_with(ws, vec![extra.clone()], vec![]);
@@ -484,9 +471,8 @@ fn extra_roots_grant_writable() {
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow {
-            source: GrantSource::ConfigExtraRoot,
-            level: PermissionLevel::Write,
-        }
+        PermissionDecision::Allow { grant, level: PermissionLevel::Write }
+            if grant.grant_type == GrantType::AgentWorkspaceRoot
+                && grant.trigger == GrantTrigger::WorkspaceRootsConfig
     ));
 }

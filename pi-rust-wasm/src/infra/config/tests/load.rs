@@ -46,7 +46,7 @@ fn load_config_rejects_legacy_whitelist_keys() {
     let err = load_config(Some(path.as_path())).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("primitive.path_whitelist"));
-    assert!(msg.contains("workspace.extra_roots"));
+    assert!(msg.contains("workspace.workspace_roots"));
     assert!(msg.contains("primitive.bash_whitelist"));
     assert!(msg.contains("primitive.bash_forbidden"));
     assert!(msg.contains("primitive.auto_confirm_whitelist"));

@@ -43,7 +43,7 @@
 //!    │ ⑤ 审计落库（无论 Ok / Err）
 //!    │   audit.record_primitive(PrimitiveAuditEntry {
 //!    │     plugin_id, op: AuditPrimitiveOp::*, success, detail,
-//!    │     permission_level, grant_source, in_working_dir, ...
+//!    │     permission_level, grant_type, grant_trigger, ...
 //!    │   })
 //!    ▼
 //!   Result<T, AppError>
@@ -66,7 +66,9 @@
 //!   LLM 工具调用都从那里 dispatch 进来。
 
 use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
-use crate::core::permission::{GrantSource, PermissionDecision, PermissionGate, PermissionLevel};
+use crate::core::permission::{
+    GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionGate, PermissionLevel,
+};
 use crate::core::primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
     PrimitiveOperation, WriteFileResult,
@@ -97,7 +99,7 @@ pub struct DefaultPrimitiveExecutor {
     confirmation: Arc<dyn UserConfirmationProvider>,
     audit: Arc<dyn AuditRecorder>,
     /// 路径与 bash 权限决策入口；由 [`crate::api::chat::ChatContext`] 注入并与
-    /// `cwd_lazy_prompt` / `config_tool` 共享同一份 `SessionGrants` / `DraggedPaths` 视图。
+    /// `cwd_lazy_prompt` / `config_tool` 共享同一份 `SessionGrants` 视图。
     gate: Arc<dyn PermissionGate>,
 }
 
@@ -122,21 +124,21 @@ impl DefaultPrimitiveExecutor {
 
     /// 经 gate 决定一个原语对路径的访问，必要时弹 confirm 完成 layer-2。
     ///
-    /// 返回 `Ok((path_buf, level, source))` 表示放行；
+    /// 返回 `Ok((path_buf, level, grant))` 表示放行；
     /// `Err(AppError::Permission)` 表示被 gate 拒绝或用户拒绝 confirm。
     async fn gate_check_path(
         &self,
         op: PrimitiveOperation,
         path: &str,
         plugin_id: &str,
-    ) -> Result<(PathBuf, PermissionLevel, GrantSource), AppError> {
+    ) -> Result<(PathBuf, PermissionLevel, GrantTrace), AppError> {
         let gate = &self.gate;
         let normalized = normalize_path(path)?;
         loop {
             let decision = gate.check(op, &normalized.to_string_lossy())?;
             match decision {
-                PermissionDecision::Allow { source, level } => {
-                    return Ok((normalized, level, source))
+                PermissionDecision::Allow { grant, level } => {
+                    return Ok((normalized, level, grant))
                 }
                 PermissionDecision::Deny { reason } => {
                     return Err(AppError::Permission(reason));
@@ -164,18 +166,16 @@ impl DefaultPrimitiveExecutor {
                             )));
                         }
                         ConfirmDecision::AllowOnce => {
-                            // 落 SessionGrants：用 suggested_root（一般是父目录）作为前缀，
-                            // 这样同目录下后续访问无需再 confirm。
-                            let target = suggested_root.unwrap_or_else(|| normalized.clone());
-                            gate.grant_session(target, GrantSource::SessionGrant);
+                            // 落 SessionGrants：AllowOnce 授权当前目标路径本身。
+                            gate.grant_session(normalized.clone(), GrantTrigger::UserConfirm);
                             // 重新 check：现在应该 Allow。
                             continue;
                         }
                         ConfirmDecision::AllowAndPersistRoot { root } => {
                             // 1) 同时落 SessionGrants（本会话生效）。
-                            gate.grant_session(root.clone(), GrantSource::SessionGrant);
+                            gate.grant_session(root.clone(), GrantTrigger::UserConfirm);
                             // 2) 持久化由 caller（CLI confirm 实现）负责调用
-                            //    `pi workspace add` 等价的 append_extra_root_to_disk；
+                            //    `pi workspace add` 等价的 append_workspace_root_to_disk；
                             //    这里只标记会话授权，避免和 disk 写入耦合。
                             //    重新 check 应 Allow。
                             continue;
@@ -191,11 +191,11 @@ impl DefaultPrimitiveExecutor {
         &self,
         command: &str,
         plugin_id: &str,
-    ) -> Result<(PermissionLevel, GrantSource), AppError> {
+    ) -> Result<(PermissionLevel, GrantTrace), AppError> {
         let gate = &self.gate;
         let decision = gate.check_bash(command)?;
         match decision {
-            PermissionDecision::Allow { source, level } => Ok((level, source)),
+            PermissionDecision::Allow { grant, level } => Ok((level, grant)),
             PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
             PermissionDecision::NeedConfirm { reason, .. } => {
                 let preview = format!(
@@ -208,7 +208,10 @@ impl DefaultPrimitiveExecutor {
                     .await?;
                 match dec {
                     ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
-                        Ok((PermissionLevel::BashApproval, GrantSource::SessionGrant))
+                        Ok((
+                            PermissionLevel::BashApproval,
+                            GrantTrace::new(GrantType::BashPolicy, GrantTrigger::UserConfirm),
+                        ))
                     }
                     ConfirmDecision::Deny => {
                         Err(AppError::Permission("用户拒绝 bash 确认".to_string()))
@@ -240,36 +243,38 @@ fn permission_level_str(l: PermissionLevel) -> String {
     .to_string()
 }
 
-/// 把 [`GrantSource`] 序列化为审计字符串。
-fn grant_source_str(s: GrantSource) -> String {
+/// 把 [`GrantType`] 序列化为审计字符串。
+fn grant_type_str(s: GrantType) -> String {
     match s {
-        GrantSource::AgentWorkspace => "agent_workspace",
-        GrantSource::AgentDataDir => "agent_data_dir",
-        GrantSource::ConfigExtraRoot => "config_extra_root",
-        GrantSource::SessionGrant => "session_grant",
-        GrantSource::DraggedPath => "dragged_path",
-        GrantSource::PathRuleReadOnly => "path_rule_read_only",
-        GrantSource::BashPolicy => "bash_policy",
-        GrantSource::AutoConfirmFlag => "auto_confirm_flag",
+        GrantType::AgentDefinitionDir => "agent_definition_dir",
+        GrantType::AgentWorkspaceRoot => "agent_workspace_root",
+        GrantType::SessionScope => "session_scope",
+        GrantType::PathRuleReadOnly => "path_rule_read_only",
+        GrantType::AgentTrailDir => "agent_trail_dir",
+        GrantType::BashPolicy => "bash_policy",
     }
     .to_string()
 }
 
-/// 由 GrantSource 推断历史审计字段 `in_working_dir`。
-///
-/// 注意：`AgentWorkspace` 当前指 `agent_definition_dir`，不是启动 cwd；
-/// 字段名保留仅用于兼容已有 audit schema。
-fn in_working_dir_from_source(s: GrantSource) -> bool {
-    matches!(
-        s,
-        GrantSource::AgentWorkspace | GrantSource::ConfigExtraRoot
-    )
+/// 把 [`GrantTrigger`] 序列化为审计字符串。
+fn grant_trigger_str(s: GrantTrigger) -> String {
+    match s {
+        GrantTrigger::BuiltinDefault => "builtin_default",
+        GrantTrigger::WorkspaceRootsConfig => "workspace_roots_config",
+        GrantTrigger::PathRulesConfig => "path_rules_config",
+        GrantTrigger::BashRegexConfig => "bash_regex_config",
+        GrantTrigger::UserConfirm => "user_confirm",
+        GrantTrigger::CwdLazyPrompt => "cwd_lazy_prompt",
+        GrantTrigger::DraggedPathMenu => "dragged_path_menu",
+        GrantTrigger::AutoConfirmFlag => "auto_confirm_flag",
+    }
+    .to_string()
 }
 
 #[async_trait]
 impl PrimitiveExecutor for DefaultPrimitiveExecutor {
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError> {
-        let (path_buf, level, source) = self
+        let (path_buf, level, grant) = self
             .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
             .await?;
         let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
@@ -300,14 +305,14 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             success: true,
             detail: None,
             permission_level: Some(permission_level_str(level)),
-            grant_source: Some(grant_source_str(source)),
-            in_working_dir: Some(in_working_dir_from_source(source)),
+            grant_type: Some(grant_type_str(grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
         Ok(content)
     }
 
     async fn list_dir(&self, path: &str, plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
-        let (path_buf, level, source) = self
+        let (path_buf, level, grant) = self
             .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
             .await?;
         let read = std::fs::read_dir(&path_buf).map_err(AppError::Io)?;
@@ -326,8 +331,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             success: true,
             detail: Some(format!("list_dir {} entries", entries.len())),
             permission_level: Some(permission_level_str(level)),
-            grant_source: Some(grant_source_str(source)),
-            in_working_dir: Some(in_working_dir_from_source(source)),
+            grant_type: Some(grant_type_str(grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
         Ok(entries)
     }
@@ -339,7 +344,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         overwrite: bool,
         plugin_id: &str,
     ) -> Result<WriteFileResult, AppError> {
-        let (path_buf, level, source) = self
+        let (path_buf, level, grant) = self
             .gate_check_path(PrimitiveOperation::Write, path, plugin_id)
             .await?;
         let path_str = path_buf.to_string_lossy().to_string();
@@ -358,8 +363,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             success: true,
             detail: None,
             permission_level: Some(permission_level_str(level)),
-            grant_source: Some(grant_source_str(source)),
-            in_working_dir: Some(in_working_dir_from_source(source)),
+            grant_type: Some(grant_type_str(grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
         Ok(WriteFileResult {
             path: path.to_string(),
@@ -373,7 +378,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError> {
-        let (path_buf, level, source) = self
+        let (path_buf, level, grant) = self
             .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
             .await?;
         let path_str = path_buf.to_string_lossy().to_string();
@@ -475,8 +480,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 success: false,
                 detail: Some(e.to_string()),
                 permission_level: Some(permission_level_str(level)),
-                grant_source: Some(grant_source_str(source)),
-                in_working_dir: Some(in_working_dir_from_source(source)),
+                grant_type: Some(grant_type_str(grant.grant_type)),
+                grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
             return Err(e);
         }
@@ -489,8 +494,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             success: true,
             detail: None,
             permission_level: Some(permission_level_str(level)),
-            grant_source: Some(grant_source_str(source)),
-            in_working_dir: Some(in_working_dir_from_source(source)),
+            grant_type: Some(grant_type_str(grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
         Ok(EditFileResult {
             path: path.to_string(),
@@ -527,7 +532,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         };
 
         // bash 决策来源（whitelist / approval）—— 走 gate 三层。
-        let (bash_level, bash_source) = match self.gate_check_bash(&audit_cmd, plugin_id).await {
+        let (bash_level, bash_grant) = match self.gate_check_bash(&audit_cmd, plugin_id).await {
             Ok((l, s)) => (l, s),
             Err(e) => {
                 self.audit.record_primitive(PrimitiveAuditEntry {
@@ -617,8 +622,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 stderr.len()
             )),
             permission_level: Some(permission_level_str(bash_level)),
-            grant_source: Some(grant_source_str(bash_source)),
-            in_working_dir: Some(in_working_dir_from_source(bash_source)),
+            grant_type: Some(grant_type_str(bash_grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(bash_grant.trigger)),
         });
         Ok(BashResult {
             stdout,

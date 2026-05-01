@@ -2,7 +2,7 @@
 //!
 //! `PathRule` 是对单条 path 规则的内存表示，支持两种匹配模式：
 //!
-//! 1. **不含 glob 字符**（`* / ** / ?`）：规范化路径前缀比较（与 `extra_roots` 一致）；
+//! 1. **不含 glob 字符**（`* / ** / ?`）：规范化路径前缀比较（与 `workspace_roots` 一致）；
 //! 2. **含 glob 字符**：用 `globset::GlobMatcher` 匹配字符串路径（用于 `~/.pi_/agents/*/sessions` 等）。
 //!
 //! 序列化用 `serde rename_all = "snake_case"`：mode 写为 `"deny"` / `"readonly"`。

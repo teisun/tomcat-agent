@@ -6,8 +6,8 @@
 //! 1. 非 TTY（cargo test 默认）下，cwd 内首次 `confirm_decision` 走 fallback +
 //!    `dismissed=true`，避免 CI 阻塞；
 //! 2. dismissed 一旦置位，后续 confirm_decision 不再尝试范围级提示；
-//! 3. 直接驱动 `apply_choice_for_test`：`[a]` 真的写盘 `extra_roots`、`[s]`
-//!    只动 SessionGrants、`[n]` 设 dismissed 后转发给 inner；
+//! 3. 直接驱动 `apply_choice_for_test`：`[a]` 真的写盘 `workspace_roots`、`[s]`
+//!    只动 SessionGrants、`[c]` 设 dismissed 并拒绝当前操作；
 //! 4. cwd 已被 SessionGrants 包含时，装饰器整段不介入。
 //!
 //! 真正基于真实 PTY/stdin 的交互式回放走「§E.3 手工验收脚本」，由人在终端
@@ -18,9 +18,7 @@ use std::sync::Arc;
 
 use pi_wasm::api::chat::cwd_lazy_prompt::{CwdLazyPrompt, CwdPromptChoice};
 use pi_wasm::core::confirmation::ConfirmDecision;
-use pi_wasm::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PermissionGate, SessionGrants,
-};
+use pi_wasm::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use pi_wasm::{
     AllowAllConfirmation, DenyAllConfirmation, PrimitiveOperation, UserConfirmationProvider,
 };
@@ -28,18 +26,14 @@ use pi_wasm::{
 fn make_gate(definition: &std::path::Path) -> Arc<dyn PermissionGate> {
     let cfg = GateConfig {
         agent_definition_dir: definition.to_path_buf(),
-        extra_roots: vec![],
-        agent_data_readonly_dirs: vec![],
+        workspace_roots: vec![],
+        agent_trail_readonly_dirs: vec![],
         user_path_rules: vec![],
         user_bash_forbidden: vec![],
         user_bash_approval: vec![],
         auto_confirm: false,
     };
-    Arc::new(DefaultPermissionGate::new(
-        cfg,
-        SessionGrants::new(),
-        DraggedPaths::new(),
-    ))
+    Arc::new(DefaultPermissionGate::new(cfg, SessionGrants::new()))
 }
 
 fn write_minimal_config(cfg_path: &std::path::Path) {
@@ -51,7 +45,7 @@ id = "main"
 default_model = "gpt-4o-mini"
 
 [workspace]
-extra_roots = []
+workspace_roots = []
 
 [primitive]
 auto_confirm = false
@@ -123,7 +117,7 @@ async fn second_call_after_dismissed_skips_lazy_branch() {
 }
 
 #[tokio::test]
-async fn add_persistent_choice_writes_extra_roots_and_grants() {
+async fn add_persistent_choice_writes_workspace_roots_and_grants() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().join("cwd");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -159,7 +153,7 @@ async fn add_persistent_choice_writes_extra_roots_and_grants() {
     let toml_text = std::fs::read_to_string(&cfg_path).unwrap();
     assert!(
         toml_text.contains(canon.to_string_lossy().as_ref()),
-        "extra_roots 应包含 cwd canonical 路径，实际:\n{}",
+        "workspace_roots 应包含 cwd canonical 路径，实际:\n{}",
         toml_text
     );
 
@@ -213,7 +207,7 @@ async fn allow_session_only_choice_does_not_write_disk() {
 }
 
 #[tokio::test]
-async fn skip_choice_sets_dismissed_and_forwards_to_inner() {
+async fn cancel_choice_sets_dismissed_and_denies_current_operation() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().to_path_buf();
     let cfg_path = tmp.path().join("pi.config.toml");
@@ -227,7 +221,7 @@ async fn skip_choice_sets_dismissed_and_forwards_to_inner() {
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let dec = prompt
         .apply_choice_for_test(
-            CwdPromptChoice::Skip,
+            CwdPromptChoice::Cancel,
             PrimitiveOperation::Read,
             &preview,
             "__agent__",

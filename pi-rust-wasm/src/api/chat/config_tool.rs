@@ -32,7 +32,7 @@ use crate::core::confirmation::UserConfirmationProvider;
 use crate::core::permission::{PathRule, PermissionDecision, PermissionGate};
 use crate::core::primitives::PrimitiveOperation;
 use crate::infra::config::{
-    append_extra_root_to_disk, append_path_rule_to_disk, append_workspace_entry_to_disk,
+    append_path_rule_to_disk, append_workspace_entry_to_disk, append_workspace_root_to_disk,
     load_config, with_config_lock, AppConfig, WorkspaceEntry,
 };
 use crate::infra::error::AppError;
@@ -47,7 +47,7 @@ const CONFIG_TOOL_PLUGIN_ID: &str = "__config_tool__";
 /// 读白名单：精确匹配（点号路径）；只有精确命中才允许读。
 const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "workspace",
-    "workspace.extra_roots",
+    "workspace.workspace_roots",
     "workspace.entries",
     "agent.id",
     "agent.workspace",
@@ -80,7 +80,7 @@ const CONFIG_HARDCODED_READ_DENY: &[&str] = &[
 
 /// 写白名单：精确匹配；其余字段一律拒绝。所有数组字段语义为「单元素追加」。
 const CONFIG_WRITE_ALLOWLIST: &[&str] = &[
-    "workspace.extra_roots",
+    "workspace.workspace_roots",
     "workspace.entries",
     "primitive.path_rules",
     "primitive.bash_approval_required",
@@ -108,7 +108,7 @@ const CONFIG_HARDCODED_WRITE_DENY: &[&str] = &[
 
 /// 数组字段集合（单元素追加语义）；其余白名单内字段视为标量替换。
 const ARRAY_FIELDS: &[&str] = &[
-    "workspace.extra_roots",
+    "workspace.workspace_roots",
     "workspace.entries",
     "primitive.path_rules",
     "primitive.bash_approval_required",
@@ -292,7 +292,7 @@ async fn handle_array_append(
     );
 
     match key {
-        "workspace.extra_roots" => {
+        "workspace.workspace_roots" => {
             let abs = parse_string_element(value)?;
             let normalized =
                 normalize_path(&abs).map_err(|e| AppError::Config(format!("路径无效: {}", e)))?;
@@ -314,7 +314,7 @@ async fn handle_array_append(
                     message: "user_denied".into(),
                 });
             }
-            append_extra_root_to_disk(&ctx.config_path, abs_path)?;
+            append_workspace_root_to_disk(&ctx.config_path, abs_path)?;
             Ok(ConfigSetOutcome {
                 applied: true,
                 message: format!("已更新配置：以后允许访问 {}", value),
@@ -447,7 +447,7 @@ fn ensure_path_not_denied(ctx: &ConfigToolContext, path: &Path) -> Result<(), Ap
     };
     match gate.check(PrimitiveOperation::Read, &path.to_string_lossy())? {
         PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
-            "该路径已被禁止访问，无法写入 workspace.extra_roots：{} ({})",
+            "该路径已被禁止访问，无法写入 workspace.workspace_roots：{} ({})",
             path.display(),
             reason
         ))),
@@ -574,7 +574,7 @@ mod tests {
     fn read_allowlist_covers_documented_keys() {
         for k in [
             "workspace",
-            "workspace.extra_roots",
+            "workspace.workspace_roots",
             "primitive.path_rules",
             "agent.id",
             "log.level",
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn write_allowlist_subset() {
         for k in [
-            "workspace.extra_roots",
+            "workspace.workspace_roots",
             "primitive.path_rules",
             "primitive.bash_forbidden",
             "log.level",
@@ -625,7 +625,7 @@ mod tests {
 
     #[test]
     fn array_fields_classification() {
-        assert!(is_array_field("workspace.extra_roots"));
+        assert!(is_array_field("workspace.workspace_roots"));
         assert!(is_array_field("primitive.path_rules"));
         assert!(is_array_field("primitive.bash_forbidden"));
         assert!(!is_array_field("log.level"));
@@ -639,7 +639,7 @@ mod tests {
         let p = dir.path().join("pi.config.toml");
         std::fs::write(
             &p,
-            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nextra_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
         ).unwrap();
         p
     }
@@ -670,18 +670,18 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
         let ctx = ConfigToolContext::new(p.clone(), confirm);
-        let outcome = config_set_impl("workspace.extra_roots", &extra.to_string_lossy(), &ctx)
+        let outcome = config_set_impl("workspace.workspace_roots", &extra.to_string_lossy(), &ctx)
             .await
             .unwrap();
         assert!(outcome.applied);
         let cfg = load_config(Some(&p)).unwrap();
-        assert_eq!(cfg.workspace.extra_roots.len(), 1);
+        assert_eq!(cfg.workspace.workspace_roots.len(), 1);
     }
 
     #[tokio::test]
     async fn config_set_extra_root_cannot_override_runtime_deny() {
         use crate::core::permission::{
-            DefaultPermissionGate, DraggedPaths, GateConfig, PathRuleMode, SessionGrants,
+            DefaultPermissionGate, GateConfig, PathRuleMode, SessionGrants,
         };
 
         let dir = TempDir::new().unwrap();
@@ -691,8 +691,8 @@ mod tests {
         let gate = DefaultPermissionGate::new(
             GateConfig {
                 agent_definition_dir: dir.path().join("workspace"),
-                extra_roots: vec![],
-                agent_data_readonly_dirs: vec![],
+                workspace_roots: vec![],
+                agent_trail_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(
                     extra.to_string_lossy().to_string(),
                     PathRuleMode::Deny,
@@ -702,18 +702,17 @@ mod tests {
                 auto_confirm: false,
             },
             SessionGrants::new(),
-            DraggedPaths::new(),
         )
         .into_arc();
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
         let ctx = ConfigToolContext::new(p.clone(), confirm).with_gate(gate);
 
-        let err = config_set_impl("workspace.extra_roots", &extra.to_string_lossy(), &ctx)
+        let err = config_set_impl("workspace.workspace_roots", &extra.to_string_lossy(), &ctx)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Permission(_)));
         let cfg = load_config(Some(&p)).unwrap();
-        assert!(cfg.workspace.extra_roots.is_empty());
+        assert!(cfg.workspace.workspace_roots.is_empty());
     }
 
     #[tokio::test]
@@ -748,19 +747,19 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(DenyAllConfirmation);
         let ctx = ConfigToolContext::new(p.clone(), confirm);
-        let outcome = config_set_impl("workspace.extra_roots", &extra.to_string_lossy(), &ctx)
+        let outcome = config_set_impl("workspace.workspace_roots", &extra.to_string_lossy(), &ctx)
             .await
             .unwrap();
         assert!(!outcome.applied);
         assert_eq!(outcome.message, "user_denied");
         let cfg = load_config(Some(&p)).unwrap();
-        assert!(cfg.workspace.extra_roots.is_empty());
+        assert!(cfg.workspace.workspace_roots.is_empty());
     }
 
     #[tokio::test]
     async fn config_set_array_path_rule_appends_with_json_value() {
         use crate::core::permission::{
-            DefaultPermissionGate, DraggedPaths, GateConfig, PermissionDecision, SessionGrants,
+            DefaultPermissionGate, GateConfig, PermissionDecision, SessionGrants,
         };
         use crate::core::primitives::PrimitiveOperation;
 
@@ -772,15 +771,14 @@ mod tests {
         let gate = DefaultPermissionGate::new(
             GateConfig {
                 agent_definition_dir: dir.path().join("workspace"),
-                extra_roots: vec![],
-                agent_data_readonly_dirs: vec![],
+                workspace_roots: vec![],
+                agent_trail_readonly_dirs: vec![],
                 user_path_rules: vec![],
                 user_bash_forbidden: vec![],
                 user_bash_approval: vec![],
                 auto_confirm: false,
             },
             SessionGrants::new(),
-            DraggedPaths::new(),
         )
         .into_arc();
         let ctx = ConfigToolContext::new(p.clone(), confirm).with_gate(gate.clone());

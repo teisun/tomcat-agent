@@ -103,7 +103,7 @@ fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
     let legacy = [
         (
             "path_whitelist",
-            "workspace.extra_roots（持久允许根）或 primitive.path_rules（deny/readonly）",
+            "workspace.workspace_roots（持久允许根）或 primitive.path_rules（deny/readonly）",
         ),
         (
             "bash_whitelist",
@@ -128,28 +128,31 @@ fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
     )))
 }
 
-/// 校验并解析 `workspace.extra_roots`：忽略仅空白项；每项须可规范化为已存在的目录；规范路径去重。
-pub fn resolve_extra_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
+/// 校验并解析 `workspace.workspace_roots`：忽略仅空白项；每项须可规范化为已存在的目录；规范路径去重。
+pub fn resolve_workspace_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for s in &cfg.workspace.extra_roots {
+    for s in &cfg.workspace.workspace_roots {
         let t = s.trim();
         if t.is_empty() {
             continue;
         }
         let p = normalize_path(t)?;
         let canon = std::fs::canonicalize(&p).map_err(|_| {
-            AppError::Config(format!("workspace.extra_roots 路径无效或不可访问: {}", t))
+            AppError::Config(format!(
+                "workspace.workspace_roots 路径无效或不可访问: {}",
+                t
+            ))
         })?;
         if !canon.is_dir() {
             return Err(AppError::Config(format!(
-                "workspace.extra_roots 不是目录: {}",
+                "workspace.workspace_roots 不是目录: {}",
                 canon.display()
             )));
         }
         if !seen.insert(canon.clone()) {
             return Err(AppError::Config(format!(
-                "workspace.extra_roots 存在重复: {}",
+                "workspace.workspace_roots 存在重复: {}",
                 canon.display()
             )));
         }
@@ -319,6 +322,6 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             )));
         }
     }
-    resolve_extra_roots_paths(cfg).map(|_| ())?;
+    resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }

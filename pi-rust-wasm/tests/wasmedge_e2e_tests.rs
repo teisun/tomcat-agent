@@ -1213,12 +1213,18 @@ async fn test_wasmedge_e2e_session_end_no_hanging_threads() -> Result<(), Box<dy
     mgr.end_session("s-shutdown")
         .await
         .map_err(|e| e.to_string())?;
-    tracing::info!("Act: end_session returned, sleeping 1s");
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    tracing::info!("Act: end_session returned, waiting for actor shutdown");
+    let mut final_state = handle.current_state();
+    for _ in 0..40 {
+        if final_state != pi_wasm::VmActorState::Running {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        final_state = handle.current_state();
+    }
 
     tracing::info!("Assert: RuntimeManager 为空，handle 已终止");
     assert!(rm.is_empty(), "end_session 后 RuntimeManager 应为空");
-    let final_state = handle.current_state();
     tracing::info!("  final handle state = {:?}", final_state);
     assert_ne!(
         final_state,

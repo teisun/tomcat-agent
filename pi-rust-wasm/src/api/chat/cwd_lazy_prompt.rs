@@ -15,23 +15,23 @@
 //! │                     ├─ target ∉ cwd 子树? ──────────► inner       │
 //! │                     ├─ cwd 已授权? ─────────────────► inner       │
 //! │                     ├─ stdin 非 TTY? dismissed=true ► inner       │
-//! │                     └─ 弹 [a]/[s]/[n]                            │
-//! │                         ├─ [a] 写盘 + session_grants ► AllowOnce │
+//! │                     └─ 弹 [s]/[w]/[c]                            │
 //! │                         ├─ [s] 仅 session_grants ────► AllowOnce │
-//! │                         └─ [n] dismissed=true ───────► inner     │
+//! │                         ├─ [w] 写盘 + session_grants ► AllowOnce │
+//! │                         └─ [c] dismissed=true ───────► Deny      │
 //! └──────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! ## 关键设计
 //!
 //! - **首次触达原则**：装饰器只在「LLM 真的要碰 cwd 内文件」时才出现一次范围级
-//!   提示。`[a]/[s]` 把 cwd 整体写进 `SessionGrants`，下次同子树访问被
+//!   提示。`[s]/[w]` 把 cwd 整体写进 `SessionGrants`，下次同子树访问被
 //!   `PermissionGate.check` 直接 Allow，根本不再进 confirm 层。
-//! - **`AllowOnce` 而非 `AllowAndPersistRoot`**：`[a]` 由本装饰器自己写盘，
-//!   返回 `AllowOnce` 是因为执行器不需要再追加一次 `extra_roots`；执行器侧
+//! - **`AllowOnce` 而非 `AllowAndPersistRoot`**：`[w]` 由本装饰器自己写盘，
+//!   返回 `AllowOnce` 是因为执行器不需要再追加一次 `workspace_roots`；执行器侧
 //!   `gate_check_path` 收到 `AllowOnce` 后会同步把 cwd 加进 SessionGrants。
-//! - **`dismissed` 流程末梢**：用户选 `[n]` 后整个会话内不再就 cwd 范围弹此提示，
-//!   退化为原 `CliConfirmation` 逐文件 3 选项 UX。配合 `Arc<AtomicBool>`
+//! - **`dismissed` 流程末梢**：用户选 `[c]` 后拒绝当前操作，后续同会话内不再就 cwd
+//!   范围弹此提示，退化为 `CliConfirmation` 逐文件 3 选项 UX。配合 `Arc<AtomicBool>`
 //!   保证装饰器与 `ChatContext` 同生命周期共享。
 //! - **非 TTY 兜底**：CI/管道场景 `stdin().is_terminal() == false` 时设置
 //!   dismissed 并 fall-through，避免阻塞读取 stdin。
@@ -44,29 +44,29 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
-use crate::core::permission::{PermissionDecision, PermissionGate, SessionGrants};
+use crate::core::permission::{GrantTrigger, PermissionDecision, PermissionGate, SessionGrants};
 use crate::core::primitives::PrimitiveOperation;
 use crate::infra::error::AppError;
 
 /// 用户在 cwd 范围级提示中的选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CwdPromptChoice {
-    /// `[a]` 加入工作区（写盘 `extra_roots` + 当前会话 SessionGrants 同时生效）。
-    AddPersistent,
     /// `[s]` 仅本会话允许（写 SessionGrants，不写盘）。
     AllowSessionOnly,
-    /// `[n]` 不加入；本会话内 dismissed=true，按文件粒度逐次询问。
-    Skip,
+    /// `[w]` 加入工作区（写盘 `workspace_roots` + 当前会话 SessionGrants 同时生效）。
+    AddPersistent,
+    /// `[c]` 取消当前操作；本会话内 dismissed=true，后续按文件粒度逐次询问。
+    Cancel,
 }
 
 /// 解析用户输入字符串为 [`CwdPromptChoice`]。
 ///
-/// 返回 `None` 表示无法识别 —— 调用方默认按 `[n] Skip` 处理。
+/// 返回 `None` 表示无法识别 —— 调用方默认按 `[c] Cancel` 处理。
 pub fn parse_choice(s: &str) -> Option<CwdPromptChoice> {
     match s.trim().to_lowercase().as_str() {
-        "a" | "add" | "persist" => Some(CwdPromptChoice::AddPersistent),
         "s" | "session" | "once" => Some(CwdPromptChoice::AllowSessionOnly),
-        "n" | "no" | "skip" => Some(CwdPromptChoice::Skip),
+        "w" | "workspace" | "persist" => Some(CwdPromptChoice::AddPersistent),
+        "c" | "cancel" | "n" | "no" | "skip" => Some(CwdPromptChoice::Cancel),
         _ => None,
     }
 }
@@ -125,7 +125,7 @@ fn read_choice_from_stdin() -> Option<CwdPromptChoice> {
 }
 
 /// `UserConfirmationProvider` 装饰器：仅当 op 目标 `target` ∈ `cwd` 子树
-/// 且 cwd 尚未授权且本会话未 dismiss 时，弹「[a] 加入工作区 / [s] 仅本会话 / [n] 跳过」
+/// 且 cwd 尚未授权且本会话未 dismiss 时，弹「[s] 仅本会话 / [w] 加入工作区 / [c] 取消」
 /// 3 选项范围级提示。其余情况一律转发给 `inner`。
 ///
 /// # Lifetime / Sharing
@@ -170,9 +170,9 @@ impl CwdLazyPrompt {
         eprintln!("─────────────────────────────────────────────────────────────");
         eprintln!("当前目录 {} 尚未授权访问。", self.cwd.display());
         eprintln!("即将操作: {}", target.display());
-        eprintln!("[a] 以后也允许访问（写入配置 ~/.pi_/pi.config.toml workspace.extra_roots）");
         eprintln!("[s] 本次会话期间允许访问");
-        eprintln!("[n] 不加入（按文件粒度逐次询问）");
+        eprintln!("[w] 以后也允许访问（写入配置 ~/.pi_/pi.config.toml workspace.workspace_roots）");
+        eprintln!("[c] 取消本次操作（后续按文件粒度逐次询问）");
         eprint!("选择 [a/s/n]: ");
         let _ = io::stderr().flush();
     }
@@ -242,33 +242,33 @@ impl UserConfirmationProvider for CwdLazyPrompt {
         }
 
         self.render_prompt(&target);
-        let choice = read_choice_from_stdin().unwrap_or(CwdPromptChoice::Skip);
+        let choice = read_choice_from_stdin().unwrap_or(CwdPromptChoice::Cancel);
         self.apply_choice(choice, operation, preview, plugin_id, suggested_root)
             .await
     }
 }
 
 impl CwdLazyPrompt {
-    /// 把用户在 [a]/[s]/[n] 中的选择落到副作用：
+    /// 把用户在 [s]/[w]/[c] 中的选择落到副作用：
     ///
-    /// - `[a]` AddPersistent：写盘 `extra_roots` + 加入 SessionGrants → `AllowOnce`
     /// - `[s]` AllowSessionOnly：仅加入 SessionGrants → `AllowOnce`
-    /// - `[n]` Skip：设 dismissed=true 后转发给 inner provider
+    /// - `[w]` AddPersistent：写盘 `workspace_roots` + 加入 SessionGrants → `AllowOnce`
+    /// - `[c]` Cancel：设 dismissed=true 后拒绝当前操作
     ///
-    /// 抽离成单独方法是为了让单测可以直接驱动 `[a]/[s]` 分支，无需 TTY 注入。
+    /// 抽离成单独方法是为了让单测可以直接驱动 `[s]/[w]` 分支，无需 TTY 注入。
     async fn apply_choice(
         &self,
         choice: CwdPromptChoice,
-        operation: PrimitiveOperation,
-        preview: &str,
-        plugin_id: &str,
-        suggested_root: Option<PathBuf>,
+        _operation: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+        _suggested_root: Option<PathBuf>,
     ) -> Result<ConfirmDecision, AppError> {
         match choice {
             CwdPromptChoice::AddPersistent => {
                 let canon = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
                 ensure_not_denied(&*self.gate, &canon)?;
-                if let Err(e) = crate::infra::config::append_extra_root_to_disk(
+                if let Err(e) = crate::infra::config::append_workspace_root_to_disk(
                     &self.cfg_path,
                     canon.to_string_lossy().into_owned(),
                 ) {
@@ -278,28 +278,27 @@ impl CwdLazyPrompt {
                         canon.display()
                     );
                 }
-                self.session_grants.add(canon);
+                self.session_grants.add(canon, GrantTrigger::CwdLazyPrompt);
                 eprintln!("✓ {} 本次会话期间允许访问", self.cwd.display());
                 Ok(ConfirmDecision::AllowOnce)
             }
             CwdPromptChoice::AllowSessionOnly => {
                 let canon = std::fs::canonicalize(&self.cwd).unwrap_or_else(|_| self.cwd.clone());
                 ensure_not_denied(&*self.gate, &canon)?;
-                self.session_grants.add(canon.clone());
+                self.session_grants
+                    .add(canon.clone(), GrantTrigger::CwdLazyPrompt);
                 eprintln!("✓ {} 本次会话期间允许访问", canon.display());
                 Ok(ConfirmDecision::AllowOnce)
             }
-            CwdPromptChoice::Skip => {
+            CwdPromptChoice::Cancel => {
                 self.dismissed.store(true, Ordering::Release);
-                eprintln!("✓ 已跳过：本会话内不再就 cwd 范围弹此提示，转入逐文件确认");
-                self.inner
-                    .confirm_decision(operation, preview, plugin_id, suggested_root)
-                    .await
+                eprintln!("✓ 已取消：本会话内不再就 cwd 范围弹此提示，转入逐文件确认");
+                Ok(ConfirmDecision::Deny)
             }
         }
     }
 
-    /// 测试钩子：直接驱动 `[a]/[s]/[n]` 三分支副作用，无需 TTY 注入。
+    /// 测试钩子：直接驱动 `[s]/[w]/[c]` 三分支副作用，无需 TTY 注入。
     ///
     /// 命名上保留 `_for_test` 后缀以提醒非测试代码路径不应调用；保持
     /// `pub` 而非 `#[cfg(test)]` 是为了让 `tests/cwd_lazy_prompt_e2e.rs`

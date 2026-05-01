@@ -30,12 +30,12 @@ pub enum AuditKindPayload {
         /// 操作权限等级（plan §6 PR-6）；老 JSONL 行缺该字段时反序列化为 None。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         permission_level: Option<String>,
-        /// 授权来源（plan §6 PR-6）。
+        /// 授权类型。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        grant_source: Option<String>,
-        /// 路径是否在 workspace_dir / extra_roots（plan §6 PR-6）。
+        grant_type: Option<String>,
+        /// 触发来源。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        in_working_dir: Option<bool>,
+        grant_trigger: Option<String>,
     },
     ToolCall {
         tool_name: String,

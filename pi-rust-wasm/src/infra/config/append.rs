@@ -18,16 +18,16 @@ use crate::core::permission::PathRule;
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-/// 把 `extra_roots` 单条目追加到 `config_path` 指向的 TOML 文件。
+/// 把 `workspace_roots` 单条目追加到 `config_path` 指向的 TOML 文件。
 ///
 /// 调用方应预先做绝对路径化 / 存在性校验。函数本身仅做：load -> push -> validate -> 原子写。
-pub fn append_extra_root_to_disk(config_path: &Path, abs_path: String) -> Result<(), AppError> {
+pub fn append_workspace_root_to_disk(config_path: &Path, abs_path: String) -> Result<(), AppError> {
     with_config_lock(config_path, || {
         let mut cfg = load_config(Some(config_path))?;
-        if cfg.workspace.extra_roots.iter().any(|s| s == &abs_path) {
+        if cfg.workspace.workspace_roots.iter().any(|s| s == &abs_path) {
             return Ok(());
         }
-        cfg.workspace.extra_roots.push(abs_path);
+        cfg.workspace.workspace_roots.push(abs_path);
         validate_config(&cfg)?;
         let toml_str = toml::to_string_pretty(&cfg)
             .map_err(|e| AppError::Config(format!("序列化配置失败: {}", e)))?;
@@ -88,7 +88,7 @@ mod tests {
         let p = dir.path().join("pi.config.toml");
         std::fs::write(
             &p,
-            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nextra_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
         )
         .unwrap();
         p
@@ -101,10 +101,10 @@ mod tests {
         let extra = dir.path().join("extra");
         std::fs::create_dir_all(&extra).unwrap();
         let s = extra.to_string_lossy().into_owned();
-        append_extra_root_to_disk(&p, s.clone()).unwrap();
-        append_extra_root_to_disk(&p, s.clone()).unwrap();
+        append_workspace_root_to_disk(&p, s.clone()).unwrap();
+        append_workspace_root_to_disk(&p, s.clone()).unwrap();
         let cfg = load_config(Some(&p)).unwrap();
-        assert_eq!(cfg.workspace.extra_roots, vec![s]);
+        assert_eq!(cfg.workspace.workspace_roots, vec![s]);
     }
 
     #[test]

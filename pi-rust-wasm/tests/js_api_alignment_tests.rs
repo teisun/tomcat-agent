@@ -9,9 +9,7 @@
 
 mod common;
 
-use pi_wasm::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PermissionGate, SessionGrants,
-};
+use pi_wasm::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use pi_wasm::{
     AllowAllConfirmation, DefaultEventBus, DefaultPrimitiveExecutor, HostApiDispatcher,
     PrimitiveConfig, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
@@ -25,15 +23,14 @@ fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
     DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: definition.to_path_buf(),
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
             auto_confirm: true,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     )
     .into_arc()
 }

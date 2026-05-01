@@ -148,7 +148,7 @@ impl SystemPromptSection for WorkspaceContextSection {
              Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}\n\
              - This is the user's shell working directory when pi chat was launched.\n\
              - Interpret \"current directory\", \"this project\", and relative paths as this directory.\n\
-             - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `extra_roots` or a session-only grant.\n\
+             - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `workspace_roots` or a session-only grant.\n\
              - For execute_bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
              \n\
              Agent definition directory (agent_definition_dir): {agent_definition_dir}\n\
@@ -180,7 +180,7 @@ impl SystemPromptSection for WorkspaceContextSection {
 /// `read_write` / `read_only` 元素已经过 `expand_tilde` + canonicalize（调用方
 /// 负责），用于直接渲染给 LLM。
 pub struct WorkspaceState {
-    /// 用户可读写的目录列表（含 agent_definition_dir、extra_roots、session_grants、dragged）。
+    /// 用户可读写的目录列表（含 agent_definition_dir、workspace_roots、session_grants、dragged）。
     pub read_write: Vec<WorkspaceRootDescriptor>,
     /// 仅读目录列表（含 agent_trail_dir 中的 sessions/logs，path_rules readonly 命中等）。
     pub read_only: Vec<WorkspaceRootDescriptor>,
@@ -191,8 +191,8 @@ pub struct WorkspaceState {
 /// 单条 `read_write` / `read_only` 描述。
 pub struct WorkspaceRootDescriptor {
     pub path: String,
-    /// 来源标签：`agent_definition_dir` / `extra_root` /
-    /// `session_grant` / `dragged_path` / `agent_trail_dir` / `path_rule_readonly` 等。
+    /// 来源标签：`agent_definition_dir` / `agent_workspace_root` /
+    /// `session_grant` / `agent_trail_dir` / `path_rule_readonly` 等。
     pub label: String,
     pub alias: Option<String>,
     pub description: Option<String>,
@@ -234,7 +234,7 @@ impl SystemPromptSection for WorkspaceStateSection {
         if self.state.read_write.is_empty() {
             out.push_str(
                 "You currently have no read/write directories. \
-                 Use `config_set(\"workspace.extra_roots\", \"<abs path>\")` to add one.\n",
+                 Use `config_set(\"workspace.workspace_roots\", \"<abs path>\")` to add one.\n",
             );
         } else {
             out.push_str(
@@ -315,7 +315,7 @@ impl SystemPromptSection for WorkspaceStateSection {
         }
 
         out.push_str(
-            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (extra_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.pi_/pi.config.toml directly with write_file/edit_file (will be denied).\n",
+            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.pi_/pi.config.toml directly with write_file/edit_file (will be denied).\n",
         );
 
         out

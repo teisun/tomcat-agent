@@ -25,7 +25,7 @@ use std::path::PathBuf;
 pub enum ConfirmDecision {
     /// 仅本次允许（写入 SessionGrants，会话结束失效）。
     AllowOnce,
-    /// 允许并把 `root` 写入 `workspace.extra_roots`（持久化）。
+    /// 允许并把 `root` 写入 `workspace.workspace_roots`（持久化）。
     AllowAndPersistRoot { root: PathBuf },
     /// 拒绝。
     Deny,

@@ -4,7 +4,7 @@
 
 use pi_wasm::api::chat::dragged_path::{interpret_dragged_paths, render_drag_menu, DragOutcome};
 use pi_wasm::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PathRule, PathRuleMode, SessionGrants,
+    DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,
 };
 
 #[test]
@@ -28,8 +28,8 @@ fn deny_path_drag_menu_only_allows_cancel_contract() {
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: workspace,
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
                 denied.to_string_lossy().to_string(),
                 PathRuleMode::Deny,
@@ -39,7 +39,6 @@ fn deny_path_drag_menu_only_allows_cancel_contract() {
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
 
     let menu = render_drag_menu(&denied, &gate);

@@ -13,7 +13,7 @@
 
 **§1 规格 & 场景库核对**
 
-- `User_Stories.md` Story 2 已补充本 follow-up 的用户可见验收点：拖拽路径 + 中文/非 ASCII 意图、deny / readonly `path_rules` 会话内热生效、cwd / extra_roots 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_trail_dir/tool-results/{session_id}` 落盘语义。
+- `User_Stories.md` Story 2 已补充本 follow-up 的用户可见验收点：拖拽路径 + 中文/非 ASCII 意图、deny / readonly `path_rules` 会话内热生效、cwd / workspace_roots 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_trail_dir/tool-results/{session_id}` 落盘语义。
 - `E2E_SCENARIO_LIBRARY.md` Story 2 已新增 E2E-CLI-018～022，覆盖 drag-deny、cwd runtime、`config_set primitive.path_rules` 热生效、二进制错误与 Layer0 落盘路径；018～020 标记人工补验，核心契约由现有自动化回归锁定。
 - `permission-system.md`、`directory-structure.md`、`context-management.md` 已对齐本次权限 deny 热生效、cwd 语义、`agent_trail_dir` 与 Layer0 `tool-results` 落盘路径变更；`context-management.md` 旧伪代码中的 `work_dir/agents/.../tool-results` 已改为 `agent_trail_dir/tool-results/{session_id}`。
 - 本次为 T2-P0-004 已 DONE 后 follow-up 修复，不新增主任务、不回退看板状态。

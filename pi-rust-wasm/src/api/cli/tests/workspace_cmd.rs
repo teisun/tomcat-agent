@@ -11,7 +11,7 @@
 use super::super::*;
 use super::mocks::{test_config, with_pi_config_in_home};
 use crate::load_config_toml_file;
-use crate::resolve_extra_roots_paths;
+use crate::resolve_workspace_roots_paths;
 
 #[test]
 fn run_workspace_add_list_remove() {
@@ -114,7 +114,7 @@ fn run_workspace_add_cwd_adds_current_dir() {
 
         let cfg_path = crate::normalize_path(DEFAULT_CONFIG_PATH).unwrap();
         let file_cfg = load_config_toml_file(&cfg_path).unwrap();
-        let list = resolve_extra_roots_paths(&file_cfg).unwrap();
+        let list = resolve_workspace_roots_paths(&file_cfg).unwrap();
         assert!(list.iter().any(|p| p == &canon));
     });
 }

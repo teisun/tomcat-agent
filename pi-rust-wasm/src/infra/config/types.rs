@@ -153,14 +153,14 @@ pub struct PluginConfig {
 ///
 /// 持久化在 `pi.config.toml` 的 `[workspace]` 表；由 `pi workspace add/list/remove` 或手编维护。
 ///
-/// `entries` 是 v2 富格式（每项含 path / alias / description），与 `extra_roots`（仅路径）
+/// `entries` 是 v2 富格式（每项含 path / alias / description），与 `workspace_roots`（仅路径）
 /// 同时支持；解析时合并去重。新代码请优先使用 `entries`。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WorkspaceConfig {
     /// v1 兼容：每项为路径字符串（通常为绝对路径）；空串在解析时忽略。
     #[serde(default)]
-    pub extra_roots: Vec<String>,
-    /// v2 富格式：每项含 path / alias / description（与 `extra_roots` 合并）。
+    pub workspace_roots: Vec<String>,
+    /// v2 富格式：每项含 path / alias / description（与 `workspace_roots` 合并）。
     #[serde(default)]
     pub entries: Vec<WorkspaceEntry>,
 }
@@ -188,7 +188,7 @@ pub struct WorkspaceEntry {
 /// - `bash_forbidden` / `bash_approval_required` 默认转为 regex 字符串列表
 ///   （编译由 `permission::gate` 在构造时完成）
 ///
-/// 删除 legacy whitelist 配置后，路径允许根只由 `workspace.extra_roots` 表达；
+/// 删除 legacy whitelist 配置后，路径允许根只由 `workspace.workspace_roots` 表达；
 /// bash 只保留 forbidden / approval_required 两类策略。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PrimitiveConfig {

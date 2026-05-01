@@ -100,7 +100,7 @@ fn is_valid_pure_path_token(tok: &str) -> bool {
 pub struct MenuOptions {
     /// `[a]` 本会话允许（SessionGrant）。
     pub allow_once: bool,
-    /// `[w]` 加入工作区持久化（extra_roots）。
+    /// `[w]` 加入工作区持久化（workspace_roots）。
     pub persist_extra_root: bool,
     /// `[r]` 加入只读规则（path_rules readonly）。
     pub persist_readonly: bool,
@@ -165,13 +165,14 @@ pub fn render_drag_menu(path: &std::path::Path, gate: &dyn PermissionGate) -> Me
         Ok(PermissionDecision::Deny { .. }) => {
             MenuOptions::deny_only(format!("该路径已被禁止读写访问：{}", path.display()))
         }
-        Ok(PermissionDecision::Allow {
-            source: crate::core::permission::GrantSource::PathRuleReadOnly,
-            ..
-        }) => MenuOptions::readonly_only(format!(
-            "这是只读路径，本次会话可以读取其中内容，但不能写入、修改或删除：{}",
-            path.display()
-        )),
+        Ok(PermissionDecision::Allow { grant, .. })
+            if grant.grant_type == crate::core::permission::GrantType::PathRuleReadOnly =>
+        {
+            MenuOptions::readonly_only(format!(
+                "这是只读路径，本次会话可以读取其中内容，但不能写入、修改或删除：{}",
+                path.display()
+            ))
+        }
         _ => MenuOptions::full(),
     }
 }
@@ -181,8 +182,8 @@ pub fn render_drag_menu(path: &std::path::Path, gate: &dyn PermissionGate) -> Me
 pub enum MenuChoice {
     /// `[a]` SessionGrant（仅本会话）。
     AllowOnce,
-    /// `[w]` 加入 `[workspace] extra_roots`（持久化）。
-    PersistExtraRoot,
+    /// `[w]` 加入 `[workspace] workspace_roots`（持久化）。
+    PersistWorkspaceRoot,
     /// `[r]` 追加 `path_rules` `readonly` 规则。
     PersistReadonly,
     /// `[d]` 追加 `path_rules` `deny` 规则。
@@ -195,7 +196,7 @@ impl MenuChoice {
     pub fn from_input(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "a" | "allow" | "allow_once" => Some(Self::AllowOnce),
-            "w" | "workspace" | "persist" => Some(Self::PersistExtraRoot),
+            "w" | "workspace" | "persist" => Some(Self::PersistWorkspaceRoot),
             "r" | "readonly" => Some(Self::PersistReadonly),
             "d" | "deny" => Some(Self::PersistDeny),
             "c" | "cancel" => Some(Self::Cancel),
@@ -307,7 +308,7 @@ mod tests {
         assert_eq!(MenuChoice::from_input("a"), Some(MenuChoice::AllowOnce));
         assert_eq!(
             MenuChoice::from_input("W"),
-            Some(MenuChoice::PersistExtraRoot)
+            Some(MenuChoice::PersistWorkspaceRoot)
         );
         assert_eq!(
             MenuChoice::from_input("r"),
@@ -336,9 +337,7 @@ mod tests {
 
     #[test]
     fn render_drag_menu_with_deny_rule_hides_authorization_choices() {
-        use crate::core::permission::{
-            DefaultPermissionGate, DraggedPaths, GateConfig, PathRule, SessionGrants,
-        };
+        use crate::core::permission::{DefaultPermissionGate, GateConfig, PathRule, SessionGrants};
 
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().join("workspace");
@@ -348,8 +347,8 @@ mod tests {
         let gate = DefaultPermissionGate::new(
             GateConfig {
                 agent_definition_dir: workspace,
-                extra_roots: vec![],
-                agent_data_readonly_dirs: vec![],
+                workspace_roots: vec![],
+                agent_trail_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(
                     denied.to_string_lossy().to_string(),
                     PathRuleMode::Deny,
@@ -359,7 +358,6 @@ mod tests {
                 auto_confirm: false,
             },
             SessionGrants::new(),
-            DraggedPaths::new(),
         );
 
         let menu = render_drag_menu(&denied, &gate);

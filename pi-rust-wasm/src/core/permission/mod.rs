@@ -5,11 +5,11 @@
 //!
 //! 子模块：
 //!
-//! - [`types`]：[`PermissionDecision`] / [`GrantSource`] / [`PermissionLevel`] /
+//! - [`types`]：[`PermissionDecision`] / [`GrantTrace`] / [`PermissionLevel`] /
 //!   [`PathRuleMode`] / [`EffectiveRoots`]
 //! - [`path_rule`]：[`PathRule`] 单条 path 规则与匹配逻辑（含 globset 支持）
 //! - [`defaults`]：内置默认规则常量（凭据保护 / Agent 自我提权防护）
-//! - [`session_grants`]：[`SessionGrants`] / [`DraggedPaths`] 会话级临时授权
+//! - [`session_grants`]：[`SessionGrants`] 会话级临时授权
 //! - [`gate`]：[`PermissionGate`] trait + [`DefaultPermissionGate`]
 //!
 //! 调用方仅依赖 [`PermissionGate`] trait + 类型即可（PR-2 起 executor 接入）。
@@ -27,8 +27,11 @@ pub use defaults::{
 };
 pub use gate::{DefaultPermissionGate, GateConfig, PermissionGate};
 pub use path_rule::PathRule;
-pub use session_grants::{DraggedPaths, SessionGrants, SessionPathRules};
-pub use types::{EffectiveRoots, GrantSource, PathRuleMode, PermissionDecision, PermissionLevel};
+pub use session_grants::{SessionGrants, SessionPathRules};
+pub use types::{
+    EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode, PermissionDecision,
+    PermissionLevel,
+};
 
 #[cfg(test)]
 mod tests;

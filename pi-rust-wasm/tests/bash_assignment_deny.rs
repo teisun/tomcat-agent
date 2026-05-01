@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pi_wasm::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PathRule, PathRuleMode, SessionGrants,
+    DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,
 };
 use pi_wasm::{
     AllowAllConfirmation, AppError, DefaultPrimitiveExecutor, PrimitiveConfig, PrimitiveExecutor,
@@ -17,8 +17,8 @@ fn make_executor(
     let gate = DefaultPermissionGate::new(
         GateConfig {
             agent_definition_dir: workspace.to_path_buf(),
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
                 denied.to_string_lossy().to_string(),
                 PathRuleMode::Deny,
@@ -28,7 +28,6 @@ fn make_executor(
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
 
     DefaultPrimitiveExecutor::new(

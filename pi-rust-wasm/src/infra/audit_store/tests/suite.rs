@@ -13,8 +13,8 @@ fn audit_entry_row_roundtrip() {
             success: true,
             detail: None,
             permission_level: None,
-            grant_source: None,
-            in_working_dir: None,
+            grant_type: None,
+            grant_trigger: None,
         },
     };
     let j = serde_json::to_string(&row).unwrap();
@@ -41,8 +41,8 @@ fn audit_store_append_and_query() {
             success: true,
             detail: None,
             permission_level: Some("read".to_string()),
-            grant_source: Some("agent_workspace".to_string()),
-            in_working_dir: Some(true),
+            grant_type: Some("agent_definition_dir".to_string()),
+            grant_trigger: Some("builtin_default".to_string()),
         },
     };
     let row2 = AuditEntryRow {

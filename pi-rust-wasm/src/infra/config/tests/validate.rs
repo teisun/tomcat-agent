@@ -1,10 +1,10 @@
-//! # `validate_config` 与 `resolve_extra_roots_paths`
+//! # `validate_config` 与 `resolve_workspace_roots_paths`
 //!
 //! 校验与 workspace 路径整理：
 //!
 //! - `validate_config_*`：日志级别 / 审计保留期 / LLM 代理 schema /
-//!   workspace.extra_roots 重复 / 不存在 / 全部存在 等多个等价类。
-//! - `resolve_extra_roots_skips_blank_entries`：仅含空白字符的路径会被
+//!   workspace.workspace_roots 重复 / 不存在 / 全部存在 等多个等价类。
+//! - `resolve_workspace_roots_skips_blank_entries`：仅含空白字符的路径会被
 //!   过滤后再判定。
 
 use super::super::*;
@@ -43,13 +43,13 @@ fn validate_config_rejects_invalid_proxy() {
 }
 
 #[test]
-fn validate_config_rejects_duplicate_extra_roots() {
+fn validate_config_rejects_duplicate_workspace_roots() {
     let dir = tempfile::tempdir().unwrap();
     let c = std::fs::canonicalize(dir.path()).unwrap();
     let s = c.to_string_lossy().into_owned();
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();
-    cfg.workspace.extra_roots = vec![s.clone(), s];
+    cfg.workspace.workspace_roots = vec![s.clone(), s];
     assert!(validate_config(&cfg).is_err());
 }
 
@@ -58,18 +58,18 @@ fn validate_config_rejects_nonexistent_extra_root() {
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();
     cfg.workspace
-        .extra_roots
+        .workspace_roots
         .push("/nonexistent/pi_workspace_root_test_path".to_string());
     assert!(validate_config(&cfg).is_err());
 }
 
 #[test]
-fn validate_config_accepts_extra_roots_when_dirs_exist() {
+fn validate_config_accepts_workspace_roots_when_dirs_exist() {
     let d1 = tempfile::tempdir().unwrap();
     let d2 = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();
-    cfg.workspace.extra_roots = vec![
+    cfg.workspace.workspace_roots = vec![
         d1.path().to_str().unwrap().to_string(),
         d2.path().to_str().unwrap().to_string(),
     ];
@@ -77,10 +77,11 @@ fn validate_config_accepts_extra_roots_when_dirs_exist() {
 }
 
 #[test]
-fn resolve_extra_roots_skips_blank_entries() {
+fn resolve_workspace_roots_skips_blank_entries() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
-    cfg.workspace.extra_roots = vec!["  ".to_string(), dir.path().to_str().unwrap().to_string()];
-    let roots = resolve_extra_roots_paths(&cfg).unwrap();
+    cfg.workspace.workspace_roots =
+        vec!["  ".to_string(), dir.path().to_str().unwrap().to_string()];
+    let roots = resolve_workspace_roots_paths(&cfg).unwrap();
     assert_eq!(roots.len(), 1);
 }

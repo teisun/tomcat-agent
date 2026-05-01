@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use crate::{
-    load_config, load_config_toml_file, normalize_path, resolve_extra_roots_paths, validate_config,
-    write_file_atomic, AppConfig, AppError,
+    load_config, load_config_toml_file, normalize_path, resolve_workspace_roots_paths,
+    validate_config, write_file_atomic, AppConfig, AppError,
 };
 
 use super::{config_file_path, WorkspaceSub};
@@ -23,7 +23,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
             }
             let list_cfg = load_config(Some(&config_path))?;
             let mut any = false;
-            for s in &list_cfg.workspace.extra_roots {
+            for s in &list_cfg.workspace.workspace_roots {
                 let t = s.trim();
                 if t.is_empty() {
                     continue;
@@ -67,14 +67,14 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
                 return Err(AppError::Config(format!("路径不是目录: {}", abs.display())));
             }
             let mut file_cfg = load_config_toml_file(&config_path)?;
-            let existing = resolve_extra_roots_paths(&file_cfg)?;
+            let existing = resolve_workspace_roots_paths(&file_cfg)?;
             if existing.contains(&abs) {
                 println!("工作区已存在: {}", abs.display());
                 return Ok(());
             }
             file_cfg
                 .workspace
-                .extra_roots
+                .workspace_roots
                 .push(abs.to_string_lossy().into_owned());
             validate_config(&file_cfg)?;
             let toml_str =
@@ -94,8 +94,8 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
             let norm_user = normalize_path(&path_arg)?;
             let canon_user = std::fs::canonicalize(&norm_user).ok();
 
-            let before_len = file_cfg.workspace.extra_roots.len();
-            file_cfg.workspace.extra_roots.retain(|entry| {
+            let before_len = file_cfg.workspace.workspace_roots.len();
+            file_cfg.workspace.workspace_roots.retain(|entry| {
                 let t = entry.trim();
                 if t.is_empty() {
                     return true;
@@ -111,7 +111,7 @@ pub(crate) fn run_workspace(sub: WorkspaceSub, _cfg: &AppConfig) -> Result<(), A
                 };
                 !matches
             });
-            if file_cfg.workspace.extra_roots.len() == before_len {
+            if file_cfg.workspace.workspace_roots.len() == before_len {
                 println!("工作区不存在: {}", norm_user.display());
                 return Ok(());
             }

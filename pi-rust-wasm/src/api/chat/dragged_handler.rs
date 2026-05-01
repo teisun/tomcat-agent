@@ -90,7 +90,7 @@ fn render_menu_and_read(
         println!("  [a] 本次会话允许访问");
     }
     if opts.persist_extra_root {
-        println!("  [w] 以后也允许访问（写入配置 workspace.extra_roots）");
+        println!("  [w] 以后也允许访问（写入配置 workspace.workspace_roots）");
     }
     if opts.persist_readonly {
         println!("  [r] 设为只读：允许读取，禁止写入");
@@ -118,7 +118,7 @@ fn render_menu_and_read(
 fn is_choice_enabled(choice: MenuChoice, opts: &MenuOptions) -> bool {
     match choice {
         MenuChoice::AllowOnce => opts.allow_once,
-        MenuChoice::PersistExtraRoot => opts.persist_extra_root,
+        MenuChoice::PersistWorkspaceRoot => opts.persist_extra_root,
         MenuChoice::PersistReadonly => opts.persist_readonly,
         MenuChoice::PersistDeny => opts.persist_deny,
         MenuChoice::Cancel => opts.cancel,
@@ -168,24 +168,25 @@ fn apply_menu_choice(
     path: &std::path::Path,
     choice: MenuChoice,
 ) -> Result<bool, AppError> {
-    use crate::core::permission::{PathRule, PathRuleMode};
+    use crate::core::permission::{GrantTrigger, PathRule, PathRuleMode};
 
     match choice {
         MenuChoice::AllowOnce => {
             let canon = precheck_read_allow(ctx, path)?;
-            ctx.gate
-                .grant_session(canon, crate::core::permission::GrantSource::SessionGrant);
+            ctx.gate.grant_session(canon, GrantTrigger::DraggedPathMenu);
             eprintln!("✓ {} 本次会话期间允许访问", path.display());
             Ok(true)
         }
-        MenuChoice::PersistExtraRoot => {
+        MenuChoice::PersistWorkspaceRoot => {
             precheck_read_allow(ctx, path)?;
             let canon = std::fs::canonicalize(path).map_err(AppError::Io)?;
             let cfg_path = crate::api::cli::config_file_path()?;
-            crate::infra::config::append_extra_root_to_disk(
+            crate::infra::config::append_workspace_root_to_disk(
                 &cfg_path,
                 canon.to_string_lossy().into_owned(),
             )?;
+            ctx.gate
+                .grant_session(canon.clone(), GrantTrigger::DraggedPathMenu);
             eprintln!("✓ 已更新配置：以后允许访问 {}", canon.display());
             Ok(true)
         }

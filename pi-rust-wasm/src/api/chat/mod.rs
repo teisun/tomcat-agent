@@ -89,8 +89,8 @@ use crate::infra::{
     TracingAuditRecorder,
 };
 use crate::{
-    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_extra_roots_paths,
-    resolve_sessions_dir, AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
+    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
+    resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
     DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
     SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
@@ -104,6 +104,7 @@ pub mod config_tool;
 pub mod cwd_lazy_prompt;
 mod dragged_handler;
 pub mod dragged_path;
+pub mod permission_prompt;
 mod session_stderr_listeners;
 
 use dragged_handler::{handle_dragged_input, DragHandleResult};
@@ -130,17 +131,15 @@ pub struct ChatContext {
     /// Agent 运行态轨迹目录，用于 sessions / logs / audit / tmp / tool-results。
     pub agent_trail_dir: std::path::PathBuf,
     /// `pi.config.toml` 的解析后绝对路径快照，避免在权限决策路径上重复调用 `config_file_path()`。
-    /// `CwdLazyPrompt::AllowAndPersistRoot` 分支用它持久化 extra_root。
+    /// `CwdLazyPrompt::AllowAndPersistRoot` 分支用它持久化 workspace root。
     pub cfg_path: std::path::PathBuf,
     /// 会话级临时授权（拖拽 + 用户 confirm AllowOnce 共享）。
     pub session_grants: crate::core::permission::SessionGrants,
-    /// 拖入路径缓存（与 `session_grants` 同结构，仅审计语义 `GrantSource::DraggedPath` 区分）。
-    pub dragged_paths: crate::core::permission::DraggedPaths,
     /// `config_get` / `config_set` LLM 工具后端（plan §6 / PR-7）。
     /// 为 `None` 时工具命中返回"未启用"错误，正常 4 原语 / chat 流程不受影响。
     pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 拖拽 UI
-    /// 共享同一份 SessionGrants + DraggedPaths 视图，保证三处的授权变更彼此可见。
+    /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
 }
 
@@ -170,15 +169,14 @@ impl ChatContext {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
             None => Arc::new(TracingAuditRecorder),
         };
-        let extra_roots = resolve_extra_roots_paths(&config)?;
+        let workspace_roots = resolve_workspace_roots_paths(&config)?;
         let cli_confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
 
-        // PR-9：构造 3 层权限 gate；与 executor / chat 共享 SessionGrants + DraggedPaths。
-        // agent_data_readonly_dirs：sessions/logs/audit + agent 凭据目录（凭据子目录由
+        // PR-9：构造 3 层权限 gate；与 executor / chat 共享 SessionGrants。
+        // agent_trail_readonly_dirs：sessions/logs/audit + agent 凭据目录（凭据子目录由
         // builtin path_rules 单独 deny，read_only 集合允许 read 但禁 write）。
         let session_grants = crate::core::permission::SessionGrants::new();
-        let dragged_paths = crate::core::permission::DraggedPaths::new();
-        let agent_data_readonly_dirs: Vec<std::path::PathBuf> = vec![
+        let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
             Some(agent_trail_dir.clone()),
             crate::infra::config::resolve_sessions_dir(&config).ok(),
             crate::infra::config::resolve_log_dir(&config).ok(),
@@ -191,26 +189,23 @@ impl ChatContext {
         // gate-root-remediation：默认 writable root 是 agent_definition_dir
         // （`workspace-<agentId>/`），而不是启动 cwd。启动 cwd 仅在 system prompt
         // 中作为「当前目录 / this project / relative paths」的语义来源，
-        // 实际访问 cwd 子树需要 `extra_roots` / `session_grants` / `dragged_paths`
+        // 实际访问 cwd 子树需要 `workspace_roots` / `session_grants`
         // / `cwd_lazy_prompt` 提供的会话级授权。
         let gate_cfg = crate::core::permission::GateConfig {
             agent_definition_dir: agent_definition_dir.clone(),
-            extra_roots: extra_roots.clone(),
-            agent_data_readonly_dirs: agent_data_readonly_dirs.clone(),
+            workspace_roots: workspace_roots.clone(),
+            agent_trail_readonly_dirs: agent_trail_readonly_dirs.clone(),
             user_path_rules: config.primitive.path_rules.clone(),
             user_bash_forbidden: config.primitive.bash_forbidden.clone(),
             user_bash_approval: config.primitive.bash_approval_required.clone(),
             auto_confirm: config.primitive.auto_confirm,
         };
-        let gate: Arc<dyn crate::core::permission::PermissionGate> =
-            Arc::new(crate::core::permission::DefaultPermissionGate::new(
-                gate_cfg,
-                session_grants.clone(),
-                dragged_paths.clone(),
-            ));
+        let gate: Arc<dyn crate::core::permission::PermissionGate> = Arc::new(
+            crate::core::permission::DefaultPermissionGate::new(gate_cfg, session_grants.clone()),
+        );
 
         // Hotfix §A.3：用 CwdLazyPrompt 装饰 CliConfirmation。
-        // 装饰器：当 LLM 工具调用首次落到 cwd 子树未授权路径时弹「[a]/[s]/[n]」
+        // 装饰器：当 LLM 工具调用首次落到 cwd 子树未授权路径时弹「[s]/[w]/[c]」
         // 范围级提示，其余情况转发给 CliConfirmation 既有行为。
         // 注意：dismissed flag 在装饰器内部以 Arc<AtomicBool> 创建，与 ctx 同生命周期。
         let confirmation: Arc<dyn UserConfirmationProvider> =
@@ -222,7 +217,7 @@ impl ChatContext {
                 cfg_path_snapshot.clone(),
             ));
 
-        let _ = extra_roots; // 已通过 GateConfig.extra_roots 落入 gate；executor 不再单独保存。
+        let _ = workspace_roots; // 已通过 GateConfig.workspace_roots 落入 gate；executor 不再单独保存。
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
             config.primitive.clone(),
             confirmation.clone(),
@@ -263,7 +258,6 @@ impl ChatContext {
             agent_trail_dir,
             cfg_path: cfg_path_snapshot,
             session_grants,
-            dragged_paths,
             config_backend,
             gate,
         })
@@ -280,7 +274,7 @@ impl ChatContext {
 
 // ─── CLI UserConfirmationProvider ─────────────────────────────────────────────
 
-use crate::core::confirmation::UserConfirmationProvider;
+use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::primitives::PrimitiveOperation;
 
 pub struct CliConfirmation;
@@ -320,6 +314,52 @@ impl UserConfirmationProvider for CliConfirmation {
         let answer = line.trim().to_lowercase();
         Ok(answer == "y" || answer == "yes")
     }
+
+    async fn confirm_decision(
+        &self,
+        operation: PrimitiveOperation,
+        preview: &str,
+        plugin_id: &str,
+        suggested_root: Option<std::path::PathBuf>,
+    ) -> Result<ConfirmDecision, AppError> {
+        if operation == PrimitiveOperation::Bash {
+            return match self.confirm(operation, preview, plugin_id).await? {
+                true => Ok(ConfirmDecision::AllowOnce),
+                false => Ok(ConfirmDecision::Deny),
+            };
+        }
+
+        let target = extract_path_from_preview(preview).unwrap_or_else(|| {
+            suggested_root
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        });
+        match permission_prompt::read_path_prompt(
+            &target,
+            suggested_root,
+            Some(&format!("类型: {:?}  来源: {}", operation, plugin_id)),
+        )
+        .map_err(AppError::Io)?
+        {
+            permission_prompt::PathPromptChoice::AllowSession => Ok(ConfirmDecision::AllowOnce),
+            permission_prompt::PathPromptChoice::PersistWorkspaceRoot { root } => {
+                let cfg_path = crate::api::cli::config_file_path()?;
+                crate::infra::config::append_workspace_root_to_disk(
+                    &cfg_path,
+                    root.to_string_lossy().into_owned(),
+                )?;
+                Ok(ConfirmDecision::AllowAndPersistRoot { root })
+            }
+            permission_prompt::PathPromptChoice::Cancel => Ok(ConfirmDecision::Deny),
+        }
+    }
+}
+
+fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
+    preview
+        .lines()
+        .find_map(|line| line.strip_prefix("路径: "))
+        .map(std::path::PathBuf::from)
 }
 
 // ─── NoopToolExecutor ─────────────────────────────────────────────────────────
@@ -430,7 +470,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
                     "properties": {
                         "key": {
                             "type": "string",
-                            "description": "配置键的 dot 路径，例：'workspace.extra_roots' / 'workspace.entries' / 'primitive.path_rules' / 'primitive.bash_forbidden' / 'agent.id'"
+                            "description": "配置键的 dot 路径，例：'workspace.workspace_roots' / 'workspace.entries' / 'primitive.path_rules' / 'primitive.bash_forbidden' / 'agent.id'"
                         }
                     },
                     "required": ["key"]
@@ -441,7 +481,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "config_set",
-                "description": "向受允许的 pi 配置项追加或修改值，每次调用都会触发用户 confirm（用户看到 unified diff 后 y/N）。受键级白名单（CONFIG_WRITE_ALLOWLIST）+ 硬黑名单（CONFIG_HARDCODED_WRITE_DENY）双重约束。\n\n语义：\n- 数组字段（workspace.extra_roots / workspace.entries / primitive.path_rules / primitive.bash_forbidden / primitive.bash_approval_required）：value 是单个新元素的 JSON 字符串（追加 only，不替换整数组）。例：value='{\"path\":\"~/myproj\",\"mode\":\"deny\"}'\n- 标量字段（llm.default_model / log.level / context.compaction_turns 等）：value 直接是新值字符串（替换语义）\n- 删除/修改不支持：返回 error 引导用户使用 `pi config edit` 手编 TOML（未来版本将提供 `pi pathrules remove` / `pi workspace remove`）\n\n禁止字段：llm.api_key* / security.* / storage.* / agent.id / agent.workspace / primitive.auto_confirm 等（自我提权防护）。",
+                "description": "向受允许的 pi 配置项追加或修改值，每次调用都会触发用户 confirm（用户看到 unified diff 后 y/N）。受键级白名单（CONFIG_WRITE_ALLOWLIST）+ 硬黑名单（CONFIG_HARDCODED_WRITE_DENY）双重约束。\n\n语义：\n- 数组字段（workspace.workspace_roots / workspace.entries / primitive.path_rules / primitive.bash_forbidden / primitive.bash_approval_required）：value 是单个新元素的 JSON 字符串（追加 only，不替换整数组）。例：value='{\"path\":\"~/myproj\",\"mode\":\"deny\"}'\n- 标量字段（llm.default_model / log.level / context.compaction_turns 等）：value 直接是新值字符串（替换语义）\n- 删除/修改不支持：返回 error 引导用户使用 `pi config edit` 手编 TOML（未来版本将提供 `pi pathrules remove` / `pi workspace remove`）\n\n禁止字段：llm.api_key* / security.* / storage.* / agent.id / agent.workspace / primitive.auto_confirm 等（自我提权防护）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -463,7 +503,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────
 
-/// 把 `ChatContext` 的 workspace 配置 + session_grants + dragged_paths 合并成
+/// 把 `ChatContext` 的 workspace 配置 + session_grants 合并成
 /// `system_prompt::WorkspaceState`，喂给 [`build_system_prompt_with_state`]。
 ///
 /// 直接读 `ctx.gate.effective_roots()` / `effective_path_rules()`，与 executor /
@@ -475,7 +515,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
 
     let cfg = &ctx.config;
     let agent_definition_dir = ctx.agent_definition_dir.clone();
-    let extra_roots = resolve_extra_roots_paths(cfg).unwrap_or_default();
+    let workspace_roots = resolve_workspace_roots_paths(cfg).unwrap_or_default();
 
     let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
         Some(ctx.agent_trail_dir.clone()),
@@ -502,7 +542,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
 
     // ── read_write 列表 ──
     let agent_definition_canon = agent_definition_dir.to_string_lossy().to_string();
-    let extra_set: HashSet<String> = extra_roots
+    let workspace_root_set: HashSet<String> = workspace_roots
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
@@ -512,13 +552,6 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let dragged_set: HashSet<String> = ctx
-        .dragged_paths
-        .snapshot()
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
     let er = ctx.gate.effective_roots();
     let mut read_write: Vec<WorkspaceRootDescriptor> = Vec::new();
     let mut seen_rw: HashSet<String> = HashSet::new();
@@ -529,10 +562,8 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
         }
         let label = if s == agent_definition_canon {
             "agent_definition_dir"
-        } else if extra_set.contains(&s) {
-            "extra_root"
-        } else if dragged_set.contains(&s) {
-            "dragged_path"
+        } else if workspace_root_set.contains(&s) {
+            "agent_workspace_root"
         } else if session_set.contains(&s) {
             "session_grant"
         } else {

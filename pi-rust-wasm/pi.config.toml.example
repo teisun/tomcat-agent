@@ -58,7 +58,7 @@ id = "main"
 # 由 `pi workspace add/list/remove` 维护，也可手编。每项须为已存在的目录路径。
 # ------------------------------------------------------------------------------
 [workspace]
-extra_roots = []
+workspace_roots = []
 
 # ------------------------------------------------------------------------------
 # [plugin] 插件配置：启动时自动加载列表
@@ -93,7 +93,7 @@ enable_plugin_safety_scan = false
 # [primitive] 4 原语配置：path_rules 与 bash forbidden/approval 策略
 # ------------------------------------------------------------------------------
 [primitive]
-# 路径允许根请配置 [workspace].extra_roots；禁止 / 只读路径请配置 path_rules。
+# 路径允许根请配置 [workspace].workspace_roots；禁止 / 只读路径请配置 path_rules。
 path_rules = []
 # bash_approval_required：即使 auto_confirm=true 也需要用户逐条确认的命令前缀。
 # 示例：bash_approval_required = ["rm", "sudo", "chmod"]

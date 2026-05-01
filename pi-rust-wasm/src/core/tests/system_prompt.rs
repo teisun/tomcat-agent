@@ -104,15 +104,9 @@ fn fixture_state() -> WorkspaceState {
             },
             WorkspaceRootDescriptor {
                 path: "/Users/yan/scratch".into(),
-                label: "extra_root".into(),
+                label: "agent_workspace_root".into(),
                 alias: Some("scratch".into()),
                 description: Some("用户附加根".into()),
-            },
-            WorkspaceRootDescriptor {
-                path: "/tmp/dropped".into(),
-                label: "dragged_path".into(),
-                alias: None,
-                description: None,
             },
         ],
         read_only: vec![WorkspaceRootDescriptor {
@@ -159,8 +153,7 @@ fn workspace_state_section_renders_read_write() {
     assert!(s.contains("/Users/yan/scratch"));
     assert!(s.contains("alias=scratch"));
     assert!(s.contains("desc=\"用户附加根\""));
-    assert!(s.contains("/tmp/dropped"));
-    assert!(s.contains("[dragged_path]"));
+    assert!(!s.contains("[dragged_path]"));
 }
 
 #[test]
@@ -211,7 +204,7 @@ fn workspace_state_section_handles_empty_state() {
     // 没有 read_only / path_rules 行
     assert!(!s.contains("READ (but NOT write)"));
     assert!(!s.contains("Path rules in effect:"));
-    assert!(!s.contains("Agent data dir"));
+    assert!(!s.contains("Agent trail dir"));
     // 但 config_get 工具引导仍要保留
     assert!(s.contains("config_get"));
 }
