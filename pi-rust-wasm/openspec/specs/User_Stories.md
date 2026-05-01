@@ -25,8 +25,8 @@
 - [ ] 所有4原语操作完整记录审计日志，包含操作内容、用户确认状态、执行结果、时间戳
 - [ ] 支持全局配置自动确认策略；legacy `path_whitelist` / `bash_whitelist` / `auto_confirm_whitelist` 配置字段已删除
 - [ ] `pi audit list` 可列出历史审计记录；`pi audit show <id>` 查看单条详情；`pi audit export <file>` 导出完整日志文件
-- [ ] 拖拽或粘贴路径时，只有整行纯路径输入进入授权菜单；路径 + 意图混合行视作普通输入原样发送给 LLM，不在拖拽层自动加入本会话授权
-- [ ] 拖拽路径命中 deny 或用户选择 cancel 时，原始输入不得发送给 LLM；transcript 仅写入 `[drag-cancel]` 前缀的合成 note，不带原始拖拽行
+- [ ] 直接拖拽或粘贴路径回车时按普通聊天发送给 LLM；只有显式 `/path <路径>` 命令进入路径授权菜单，且仅支持单个路径参数
+- [ ] `/path` 路径授权命中 deny 或用户选择 cancel 时，本地命令不得发送给 LLM，也不写入 `[drag-cancel]` 合成 note；`/help` 可显示当前本地命令列表
 - [ ] deny / readonly `path_rules` 在同一会话内热生效：`[r]`、`[d]` 或 `config_set primitive.path_rules` 写入后，后续 read/write/edit/bash 立即按新规则拦截或降级，不需重启
 - [ ] cwd 首次触达授权与 `workspace.workspace_roots` 扩大授权前必须先做 deny 预检；命中 deny 时不得展示“永久允许/本次允许”等扩大授权选项
 - [ ] `read_file` 读取二进制或非 UTF-8 文件时返回明确、产品化错误提示，不把乱码注入上下文；图片/二进制多模态输入由后续附件通道承接

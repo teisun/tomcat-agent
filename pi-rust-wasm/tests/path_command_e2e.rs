@@ -1,8 +1,9 @@
-//! E2E-CLI-023 / E2E-CLI-026 的离线契约层。
+//! Offline contracts for `/path` chat command behavior.
 //!
-//! 真正的 TTY 菜单观感仍可人工补验；这里锁定可稳定自动化的拖拽语义和 deny 菜单裁剪。
+//! The real TTY menu is still best verified manually. These tests pin the
+//! stable parsing and permission menu filtering behavior.
 
-use pi_wasm::api::chat::dragged_path::{interpret_dragged_paths, render_drag_menu, DragOutcome};
+use pi_wasm::api::chat::commands::{parse_chat_command, render_path_menu, ChatCommand};
 use pi_wasm::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,
 };
@@ -12,13 +13,16 @@ fn path_with_intent_silent_passthrough_contract() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
-    let line = format!("'{}'看下里面有什么文件", project.display());
+    let line = format!("{} 看下里面有什么文件", project.display());
 
-    assert_eq!(interpret_dragged_paths(&line), DragOutcome::None);
+    assert!(matches!(
+        parse_chat_command(&line),
+        ChatCommand::NotACommand(_)
+    ));
 }
 
 #[test]
-fn deny_path_drag_menu_only_allows_cancel_contract() {
+fn deny_path_command_menu_only_allows_cancel_contract() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");
     let denied = tmp.path().join("deny-target");
@@ -41,7 +45,7 @@ fn deny_path_drag_menu_only_allows_cancel_contract() {
         SessionGrants::new(),
     );
 
-    let menu = render_drag_menu(&denied, &gate);
+    let menu = render_path_menu(&denied, &gate);
     assert!(menu.cancel);
     assert!(!menu.allow_once);
     assert!(!menu.persist_extra_root);

@@ -4,7 +4,7 @@
 //!
 //! - `pi pathrules add` / `pi workspace add` CLI（用户特权通道）
 //! - `config_set` LLM 工具（受白名单约束）
-//! - 拖拽菜单 `[w]/[r]/[d]`（chat_loop 内部）
+//! - `/path` 路径授权菜单 `[w]/[r]/[d]`（chat_loop 内部）
 //!
 //! 三个入口共享 [`super::lock::with_config_lock`] —— 进程间并发安全。
 //! 操作语义为「追加 only」：不去重不替换，重复条目由 [`load_config`] 的 normalize 阶段消解。

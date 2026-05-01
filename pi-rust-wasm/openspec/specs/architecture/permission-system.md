@@ -1,11 +1,11 @@
 # 权限子系统设计
 
-本文描述当前代码中的权限模型，以 `src/core/permission/*`、`src/core/executor/primitives.rs`、`src/api/chat/*` 与 `src/core/system_prompt.rs` 为准。
+本文描述当前代码中的权限模型，以 `src/core/permission/*`、`src/core/tools/primitive/*`、`src/api/chat/*` 与 `src/core/system_prompt.rs` 为准。
 
 ## 1. 目标与不变量
 
-- **统一入口**：文件读写、编辑、bash 执行、拖拽授权、cwd lazy prompt、Workspace State 渲染都通过同一个 `PermissionGate` 视图判断。
-- **deny 优先**：内置与用户配置的 `path_rules deny` 命中后直接拒绝，不能被 `workspace_roots`、session grant、拖拽授权或确认弹窗绕过。
+- **统一入口**：文件读写、编辑、bash 执行、`/path` 路径授权、cwd lazy prompt、Workspace State 渲染都通过同一个 `PermissionGate` 视图判断。
+- **deny 优先**：内置与用户配置的 `path_rules deny` 命中后直接拒绝，不能被 `workspace_roots`、session grant、`/path` 授权或确认弹窗绕过。
 - **readonly 降级**：`path_rules readonly` 与 agent 运行态轨迹目录只允许读；写入不会展示扩大授权选项。
 - **默认可写根是 `agent_definition_dir`**：即 `~/.pi_/workspace-main/` 或 `workspace-<agentId>/`，承载 Agent 设计态文件。
 - **启动 cwd 不是默认授权根**：`agent_workspace_dir` 只用于 prompt 中解释“当前目录 / 这个项目 / 相对路径”。访问该目录仍需 `workspace.workspace_roots`、会话授权或 cwd lazy prompt 授权。
@@ -87,7 +87,7 @@ pub struct GrantTrace {
 | `BashRegexConfig` | bash forbidden / approval regex 策略 |
 | `UserConfirm` | 普通路径确认菜单 |
 | `CwdLazyPrompt` | cwd lazy prompt |
-| `DraggedPathMenu` | 纯拖拽路径菜单 |
+| `DraggedPathMenu` | `/path` 路径授权菜单（名称为兼容历史审计保留） |
 | `AutoConfirmFlag` | `primitive.auto_confirm` 自动允许 |
 
 ## 5. Effective Roots
@@ -106,7 +106,7 @@ pub struct EffectiveRoots {
 | `read_write` | `agent_definition_dir` + `workspace.workspace_roots` + `session_grants` |
 | `read_only` | `agent_trail_readonly_dirs` + 命中 readonly path rule 的范围 |
 
-注意：`read_write` 不包含启动 cwd，除非 cwd 已经被用户加入 `workspace.workspace_roots` 或本会话授权。拖拽路径不再是独立 bucket；拖拽菜单 `[a]` 会写入 `SessionGrants`，trigger 记录为 `DraggedPathMenu`。
+注意：`read_write` 不包含启动 cwd，除非 cwd 已经被用户加入 `workspace.workspace_roots` 或本会话授权。`/path` 路径授权不再是独立 bucket；`/path` 菜单 `[a]` 会写入 `SessionGrants`，trigger 记录为 `DraggedPathMenu`（兼容历史审计命名）。
 
 ## 6. 确认与运行时授权
 
@@ -116,13 +116,13 @@ pub struct EffectiveRoots {
 - `[w]`：以后也允许访问 `suggested_root`（当前实现通常为目标路径父目录）。确认层写入 `workspace.workspace_roots`，executor 同步写入本会话授权。
 - `[c]`：取消 / 拒绝当前操作。
 
-纯拖拽路径仍保留五选项：
+显式 `/path <路径>` 命令展示五选项：
 
 - `[a]` 本次会话允许，落入 `SessionGrants`，trigger=`DraggedPathMenu`。
 - `[w]` 持久写入 `workspace.workspace_roots`，并同步当前会话授权。
 - `[r]` 持久写入 `path_rules readonly`。
 - `[d]` 持久写入 `path_rules deny`。
-- `[c]` 取消，不把原始拖拽内容发送给 LLM。
+- `[c]` 取消，不向 LLM 发送本地命令内容。
 
 `CwdLazyPrompt` 只在首次工具调用触达 `agent_workspace_dir` 子树且 cwd 尚未授权时触发，按键同样是 `[s]/[w]/[c]`。选择 `[c]` 会拒绝当前操作并将 cwd lazy 标记为 dismissed；之后同会话内 cwd 子树路径走普通三选项菜单，不再弹 cwd lazy prompt。
 

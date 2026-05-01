@@ -17,7 +17,7 @@
 //!
 //! ## 测试位置
 //!
-//! 集中在 `pi-rust-wasm/src/api/chat/tests/config_tool.rs`：
+//! 集中在本模块的 `tests`：
 //! - 白名单 / hardcoded deny 矩阵
 //! - 数组单元素追加正反案例
 //! - confirm AllowOnce / Deny / AllowAndPersistRoot 分支

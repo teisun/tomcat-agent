@@ -65,7 +65,7 @@
 //! ## 同目录子模块
 //!
 //! - [`super::render`]：Markdown 流式渲染器。
-//! - `session_stderr_listeners`：把 `ToolResult` / `Compaction` 等事件按用户视角
+//! - `events::stderr`：把 `ToolResult` / `Compaction` 等事件按用户视角
 //!   渲染到 stderr，与主流 stdout 解耦。
 //! - `tests`：CLI 集成测试入口。
 
@@ -100,14 +100,11 @@ use super::render::MarkdownRenderer;
 #[cfg(test)]
 mod tests;
 
-pub mod config_tool;
-pub mod cwd_lazy_prompt;
-mod dragged_handler;
-pub mod dragged_path;
-pub mod permission_prompt;
-mod session_stderr_listeners;
+pub mod commands;
+pub mod events;
+pub mod permission;
 
-use dragged_handler::{handle_dragged_input, DragHandleResult};
+use commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
 
 // ─── ChatContext ──────────────────────────────────────────────────────────────
 
@@ -133,12 +130,12 @@ pub struct ChatContext {
     /// `pi.config.toml` 的解析后绝对路径快照，避免在权限决策路径上重复调用 `config_file_path()`。
     /// `CwdLazyPrompt::AllowAndPersistRoot` 分支用它持久化 workspace root。
     pub cfg_path: std::path::PathBuf,
-    /// 会话级临时授权（拖拽 + 用户 confirm AllowOnce 共享）。
+    /// 会话级临时授权（`/path` 命令 + 用户 confirm AllowOnce 共享）。
     pub session_grants: crate::core::permission::SessionGrants,
     /// `config_get` / `config_set` LLM 工具后端（plan §6 / PR-7）。
     /// 为 `None` 时工具命中返回"未启用"错误，正常 4 原语 / chat 流程不受影响。
     pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
-    /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 拖拽 UI
+    /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 路径授权 UI
     /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
 }
@@ -190,7 +187,7 @@ impl ChatContext {
         // （`workspace-<agentId>/`），而不是启动 cwd。启动 cwd 仅在 system prompt
         // 中作为「当前目录 / this project / relative paths」的语义来源，
         // 实际访问 cwd 子树需要 `workspace_roots` / `session_grants`
-        // / `cwd_lazy_prompt` 提供的会话级授权。
+        // / `permission::cwd_lazy` 提供的会话级授权。
         let gate_cfg = crate::core::permission::GateConfig {
             agent_definition_dir: agent_definition_dir.clone(),
             workspace_roots: workspace_roots.clone(),
@@ -209,7 +206,7 @@ impl ChatContext {
         // 范围级提示，其余情况转发给 CliConfirmation 既有行为。
         // 注意：dismissed flag 在装饰器内部以 Arc<AtomicBool> 创建，与 ctx 同生命周期。
         let confirmation: Arc<dyn UserConfirmationProvider> =
-            Arc::new(cwd_lazy_prompt::CwdLazyPrompt::new(
+            Arc::new(permission::cwd_lazy::CwdLazyPrompt::new(
                 cli_confirmation,
                 agent_workspace_dir.clone(),
                 gate.clone(),
@@ -229,9 +226,12 @@ impl ChatContext {
         // 时降级为 `None`，工具命中返回"未启用"错误，主流程不阻塞。
         let config_backend: Option<crate::core::agent_loop::SharedConfigBackend> =
             match crate::api::cli::config_file_path() {
-                Ok(p) => Some(Arc::new(config_tool::ChatConfigBackend {
-                    ctx: config_tool::ConfigToolContext::new(p, confirmation.clone())
-                        .with_gate(gate.clone()),
+                Ok(p) => Some(Arc::new(crate::core::tools::config::ChatConfigBackend {
+                    ctx: crate::core::tools::config::ConfigToolContext::new(
+                        p,
+                        confirmation.clone(),
+                    )
+                    .with_gate(gate.clone()),
                 })),
                 Err(_) => None,
             };
@@ -334,15 +334,15 @@ impl UserConfirmationProvider for CliConfirmation {
                 .clone()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
         });
-        match permission_prompt::read_path_prompt(
+        match permission::prompt::read_path_prompt(
             &target,
             suggested_root,
             Some(&format!("类型: {:?}  来源: {}", operation, plugin_id)),
         )
         .map_err(AppError::Io)?
         {
-            permission_prompt::PathPromptChoice::AllowSession => Ok(ConfirmDecision::AllowOnce),
-            permission_prompt::PathPromptChoice::PersistWorkspaceRoot { root } => {
+            permission::prompt::PathPromptChoice::AllowSession => Ok(ConfirmDecision::AllowOnce),
+            permission::prompt::PathPromptChoice::PersistWorkspaceRoot { root } => {
                 let cfg_path = crate::api::cli::config_file_path()?;
                 crate::infra::config::append_workspace_root_to_disk(
                     &cfg_path,
@@ -350,7 +350,7 @@ impl UserConfirmationProvider for CliConfirmation {
                 )?;
                 Ok(ConfirmDecision::AllowAndPersistRoot { root })
             }
-            permission_prompt::PathPromptChoice::Cancel => Ok(ConfirmDecision::Deny),
+            permission::prompt::PathPromptChoice::Cancel => Ok(ConfirmDecision::Deny),
         }
     }
 }
@@ -507,7 +507,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
 /// `system_prompt::WorkspaceState`，喂给 [`build_system_prompt_with_state`]。
 ///
 /// 直接读 `ctx.gate.effective_roots()` / `effective_path_rules()`，与 executor /
-/// 拖拽 UI 共享同一份决策视图。
+/// 路径授权 UI 共享同一份决策视图。
 fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::WorkspaceState {
     use crate::core::permission::PathRuleMode;
     use crate::core::system_prompt::{PathRuleSummary, WorkspaceRootDescriptor, WorkspaceState};
@@ -641,7 +641,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!("恢复会话: {}", ctx.session.current_session_key());
     }
     println!("pi 对话模式 (模型: {})", model);
-    println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。\n");
+    println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
+    println!("输入 /help 查看命令列表。\n");
 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
@@ -660,7 +661,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     );
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
     let session_stderr_ids =
-        session_stderr_listeners::register_chat_session_stderr_listeners(&*ctx.event_bus);
+        events::stderr::register_chat_session_stderr_listeners(&*ctx.event_bus);
 
     loop {
         let input = match rl.readline("u> ") {
@@ -685,20 +686,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             continue;
         }
 
-        // 拖拽路径解析：仅整行纯路径进入授权菜单；含意图行等同普通聊天输入。
-        let input = match handle_dragged_input(ctx, &input, &mut rl) {
-            DragHandleResult::Continue { line } => line,
-            DragHandleResult::Skip => continue,
-            DragHandleResult::RecordUserAndSkip { synth_user_msg } => {
-                context_state.on_message_appended(synth_user_msg.len());
-                let mut msg = ChatMessage::user(&synth_user_msg);
-                let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
-                msg.msg_id = Some(row_id);
-                context_state.messages.push(msg);
-                ctx.session.persist_context_observability(&context_state)?;
-                eprintln!("{}", synth_user_msg);
-                continue;
-            }
+        // 聊天命令解析：目前支持 `/path` 和 `/help`；其它输入进入普通 LLM 回合。
+        let input = match dispatch_chat_command(ctx, parse_chat_command(&input), &mut rl) {
+            ChatCommandOutcome::Continue { line } => line,
+            ChatCommandOutcome::Handled => continue,
         };
 
         let _ = rl.add_history_entry(&input);
@@ -866,7 +857,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             if is_fatal {
                 eprintln!("(致命错误，退出对话)");
                 context_state.preheat.abort();
-                session_stderr_listeners::unregister_chat_session_stderr_listeners(
+                events::stderr::unregister_chat_session_stderr_listeners(
                     &*ctx.event_bus,
                     &session_stderr_ids,
                 );
@@ -879,10 +870,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!();
     }
 
-    session_stderr_listeners::unregister_chat_session_stderr_listeners(
-        &*ctx.event_bus,
-        &session_stderr_ids,
-    );
+    events::stderr::unregister_chat_session_stderr_listeners(&*ctx.event_bus, &session_stderr_ids);
     Ok(())
 }
 
