@@ -10,7 +10,7 @@
 //!    给出 `suggested_root`（默认是父目录或本身）。
 //!    bash 命中 `bash_approval_required` 同样落到此层。
 //! 3. **Layer 3 — Allow**：路径在 `EffectiveRoots.read_write` / `read_only` /
-//!    `agent_data_dir`（仅 read）；bash 命中 `bash_whitelist` 直接 Allow。
+//!    `agent_trail_dir`（仅 read）；bash 未命中 forbidden / approval_required 时 Allow。
 //!
 //! `auto_confirm = true` 仅短路 Layer-2 NeedConfirm（写入审计标记 `AutoConfirmFlag`），
 //! Layer-1 Forbidden 永远不可被绕过。
@@ -23,13 +23,12 @@ use regex::Regex;
 
 use super::defaults::{
     builtin_default_rules, BUILTIN_BASH_APPROVAL_REQUIRED, BUILTIN_BASH_FORBIDDEN,
-    BUILTIN_BASH_WHITELIST,
 };
 use super::path_rule::PathRule;
-use super::session_grants::{DraggedPaths, SessionGrants, SessionPathRules};
+use super::session_grants::{SessionGrants, SessionPathRules};
 use super::types::{
-    path_starts_with, EffectiveRoots, GrantSource, PathRuleMode, PermissionDecision,
-    PermissionLevel,
+    path_starts_with, EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode,
+    PermissionDecision, PermissionLevel,
 };
 use crate::core::primitives::PrimitiveOperation;
 use crate::infra::error::AppError;
@@ -54,7 +53,7 @@ pub trait PermissionGate: Send + Sync {
     fn effective_path_rules(&self) -> Vec<PathRule>;
 
     /// 把一个会话级授权写入 SessionGrants（confirm 通过 / 拖入路径）。
-    fn grant_session(&self, path: PathBuf, source: GrantSource);
+    fn grant_session(&self, path: PathBuf, trigger: GrantTrigger);
 
     /// 把当前会话新增的 path_rule 写入运行时规则集，让 deny / readonly 立即生效。
     fn grant_path_rule(&self, rule: PathRule);
@@ -64,26 +63,27 @@ pub trait PermissionGate: Send + Sync {
 // DefaultPermissionGate
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 默认实现：不可变快照式（构造时把 cfg / workspace_dir / agent_dir / extra_roots
-/// 全部冻结），共享 `SessionGrants` 与 `DraggedPaths` 走 `Arc` + 内部 Mutex。
+/// 默认实现：不可变快照式（构造时把 cfg / agent_definition_dir / agent_dir / workspace_roots
+/// 全部冻结），共享 `SessionGrants` 走 `Arc` + 内部 Mutex。
 pub struct DefaultPermissionGate {
-    /// 工作根（writable）。
-    workspace_dir: PathBuf,
+    /// Agent 设计态目录（`workspace-<agentId>/`）—— 默认 writable 根，
+    /// 仅承载 AGENTS.md / SOUL.md / skills / memory 等 agent 长期配置。
+    /// 注意：用户启动 `pi chat` 时的 shell cwd 不会自动放进 writable 集合，
+    /// 需通过 `workspace_roots` / `session_grants` 才能访问。
+    agent_definition_dir: PathBuf,
     /// 配置中显式声明的额外根（writable）。
-    extra_roots: Vec<PathBuf>,
+    workspace_roots: Vec<PathBuf>,
     /// `{work_dir}/agents/{id}` 一系列只读目录（read only）。
-    agent_data_readonly_dirs: Vec<PathBuf>,
+    agent_trail_readonly_dirs: Vec<PathBuf>,
     /// 构造时冻结的 path_rules（builtin ∪ user TOML）。
     path_rules: Vec<PathRule>,
     /// 编译好的 bash 三档 regex；构造期一次性编译，bad regex 跳过 + warn。
     bash_forbidden: Vec<Regex>,
     bash_approval: Vec<Regex>,
-    bash_whitelist: Vec<Regex>,
     /// 是否对 Layer-2 NeedConfirm 短路（不影响 Layer-1）。
     auto_confirm: bool,
-    /// 共享会话授权与拖入路径。
+    /// 共享会话授权。
     session_grants: SessionGrants,
-    dragged_paths: DraggedPaths,
     /// 当前会话新增的 deny / readonly 规则。
     session_path_rules: SessionPathRules,
 }
@@ -91,22 +91,19 @@ pub struct DefaultPermissionGate {
 /// `DefaultPermissionGate::new` 构造参数。
 #[derive(Debug, Clone)]
 pub struct GateConfig {
-    pub workspace_dir: PathBuf,
-    pub extra_roots: Vec<PathBuf>,
-    pub agent_data_readonly_dirs: Vec<PathBuf>,
+    /// Agent 设计态目录（`workspace-<agentId>/`）；作为默认 writable 根。
+    /// 启动 cwd 不在此处，访问启动 cwd 子树需要 `workspace_roots` 或 session 授权。
+    pub agent_definition_dir: PathBuf,
+    pub workspace_roots: Vec<PathBuf>,
+    pub agent_trail_readonly_dirs: Vec<PathBuf>,
     pub user_path_rules: Vec<PathRule>,
     pub user_bash_forbidden: Vec<String>,
     pub user_bash_approval: Vec<String>,
-    pub user_bash_whitelist: Vec<String>,
     pub auto_confirm: bool,
 }
 
 impl DefaultPermissionGate {
-    pub fn new(
-        cfg: GateConfig,
-        session_grants: SessionGrants,
-        dragged_paths: DraggedPaths,
-    ) -> Self {
+    pub fn new(cfg: GateConfig, session_grants: SessionGrants) -> Self {
         // path_rules 合并：builtin ∪ user TOML（user 不能弱化 builtin，
         // 但可以追加；`Deny` 覆盖 `Readonly` 由匹配阶段保证：
         // 我们把所有规则放入同一个 vec，然后在匹配时优先 Deny 命中）。
@@ -117,19 +114,16 @@ impl DefaultPermissionGate {
         let bash_forbidden = compile_regex_list(BUILTIN_BASH_FORBIDDEN, &cfg.user_bash_forbidden);
         let bash_approval =
             compile_regex_list(BUILTIN_BASH_APPROVAL_REQUIRED, &cfg.user_bash_approval);
-        let bash_whitelist = compile_regex_list(BUILTIN_BASH_WHITELIST, &cfg.user_bash_whitelist);
 
         Self {
-            workspace_dir: cfg.workspace_dir,
-            extra_roots: cfg.extra_roots,
-            agent_data_readonly_dirs: cfg.agent_data_readonly_dirs,
+            agent_definition_dir: cfg.agent_definition_dir,
+            workspace_roots: cfg.workspace_roots,
+            agent_trail_readonly_dirs: cfg.agent_trail_readonly_dirs,
             path_rules,
             bash_forbidden,
             bash_approval,
-            bash_whitelist,
             auto_confirm: cfg.auto_confirm,
             session_grants,
-            dragged_paths,
             session_path_rules: SessionPathRules::new(),
         }
     }
@@ -147,14 +141,14 @@ impl DefaultPermissionGate {
         Ok(canonicalize_with_existing_ancestor(&p))
     }
 
-    /// 路径是否在 `extra_roots` 或 workspace_dir 之中（writable 集合）。
+    /// 路径是否在 `workspace_roots` 或 `agent_definition_dir` 之中（writable 集合）。
     fn in_writable_set(&self, target: &Path) -> bool {
         let s = target.to_string_lossy();
-        let ws = canonicalize_with_existing_ancestor(&self.workspace_dir);
-        if path_starts_with(&s, &ws.to_string_lossy()) {
+        let def = canonicalize_with_existing_ancestor(&self.agent_definition_dir);
+        if path_starts_with(&s, &def.to_string_lossy()) {
             return true;
         }
-        for r in &self.extra_roots {
+        for r in &self.workspace_roots {
             let rc = canonicalize_with_existing_ancestor(r);
             if path_starts_with(&s, &rc.to_string_lossy()) {
                 return true;
@@ -163,10 +157,10 @@ impl DefaultPermissionGate {
         false
     }
 
-    /// 路径是否在 agent_data_readonly_dirs 中（仅 read）。
+    /// 路径是否在 agent_trail_readonly_dirs 中（仅 read）。
     fn in_agent_readonly_set(&self, target: &Path) -> bool {
         let s = target.to_string_lossy();
-        self.agent_data_readonly_dirs.iter().any(|r| {
+        self.agent_trail_readonly_dirs.iter().any(|r| {
             let rc = canonicalize_with_existing_ancestor(r);
             path_starts_with(&s, &rc.to_string_lossy())
         })
@@ -221,31 +215,36 @@ impl PermissionGate for DefaultPermissionGate {
                     }
                     // read 通过 readonly。
                     return Ok(PermissionDecision::Allow {
-                        source: GrantSource::PathRuleReadOnly,
+                        grant: GrantTrace::new(
+                            GrantType::PathRuleReadOnly,
+                            GrantTrigger::PathRulesConfig,
+                        ),
                         level: PermissionLevel::Read,
                     });
                 }
             }
         }
 
-        // ── Layer 3 第一波：在 writable 集合内（workspace_dir / extra_roots） ──
+        // ── Layer 3 第一波：在 writable 集合内（agent_definition_dir / workspace_roots） ──
         if self.in_writable_set(&target) {
             return Ok(PermissionDecision::Allow {
-                source: source_for_writable(&target, &self.workspace_dir, &self.extra_roots),
+                grant: grant_for_writable(
+                    &target,
+                    &self.agent_definition_dir,
+                    &self.workspace_roots,
+                ),
                 level: level_for_op(op),
             });
         }
 
-        // ── Layer 3 第二波：dragged path / session_grant ──
-        if self.dragged_paths.contains(&target) {
-            return Ok(PermissionDecision::Allow {
-                source: GrantSource::DraggedPath,
-                level: level_for_op(op),
-            });
-        }
+        // ── Layer 3 第二波：session grant ──
         if self.session_grants.contains(&target) {
+            let trigger = self
+                .session_grants
+                .trigger_for(&target)
+                .unwrap_or(GrantTrigger::UserConfirm);
             return Ok(PermissionDecision::Allow {
-                source: GrantSource::SessionGrant,
+                grant: GrantTrace::new(GrantType::SessionScope, trigger),
                 level: level_for_op(op),
             });
         }
@@ -253,7 +252,7 @@ impl PermissionGate for DefaultPermissionGate {
         // ── Layer 3 第三波：agent 数据目录（仅 read） ──
         if matches!(op, PrimitiveOperation::Read) && self.in_agent_readonly_set(&target) {
             return Ok(PermissionDecision::Allow {
-                source: GrantSource::AgentDataDir,
+                grant: GrantTrace::new(GrantType::AgentTrailDir, GrantTrigger::BuiltinDefault),
                 level: PermissionLevel::Read,
             });
         }
@@ -261,7 +260,7 @@ impl PermissionGate for DefaultPermissionGate {
         // ── Layer 2：NeedConfirm（auto_confirm 短路） ──
         if self.auto_confirm {
             return Ok(PermissionDecision::Allow {
-                source: GrantSource::AutoConfirmFlag,
+                grant: GrantTrace::new(GrantType::SessionScope, GrantTrigger::AutoConfirmFlag),
                 level: level_for_op(op),
             });
         }
@@ -285,22 +284,15 @@ impl PermissionGate for DefaultPermissionGate {
             }
         }
 
-        // 白名单优先（短路 NeedConfirm，但仍受 forbidden 约束 —— 已在上面检查过）。
-        for re in &self.bash_whitelist {
-            if re.is_match(command) {
-                return Ok(PermissionDecision::Allow {
-                    source: GrantSource::BashWhitelist,
-                    level: PermissionLevel::BashWhitelist,
-                });
-            }
-        }
-
         // Layer 2：bash_approval_required（命中弹 confirm）。
         for re in &self.bash_approval {
             if re.is_match(command) {
                 if self.auto_confirm {
                     return Ok(PermissionDecision::Allow {
-                        source: GrantSource::AutoConfirmFlag,
+                        grant: GrantTrace::new(
+                            GrantType::BashPolicy,
+                            GrantTrigger::AutoConfirmFlag,
+                        ),
                         level: PermissionLevel::BashApproval,
                     });
                 }
@@ -313,18 +305,17 @@ impl PermissionGate for DefaultPermissionGate {
 
         // 默认：bash 命令本身不强制 confirm（路径检查由调用方在 parse 后逐一调用 `check`）。
         Ok(PermissionDecision::Allow {
-            source: GrantSource::BashWhitelist,
-            level: PermissionLevel::BashWhitelist,
+            grant: GrantTrace::new(GrantType::BashPolicy, GrantTrigger::BashRegexConfig),
+            level: PermissionLevel::Bash,
         })
     }
 
     fn effective_roots(&self) -> EffectiveRoots {
-        let mut read_write = vec![self.workspace_dir.clone()];
-        read_write.extend(self.extra_roots.iter().cloned());
+        let mut read_write = vec![self.agent_definition_dir.clone()];
+        read_write.extend(self.workspace_roots.iter().cloned());
         read_write.extend(self.session_grants.snapshot());
-        read_write.extend(self.dragged_paths.snapshot());
 
-        let mut read_only = self.agent_data_readonly_dirs.clone();
+        let mut read_only = self.agent_trail_readonly_dirs.clone();
         for r in self.path_rules_snapshot() {
             if r.mode == PathRuleMode::Readonly {
                 if let Ok(s) = r.expanded_path() {
@@ -342,11 +333,8 @@ impl PermissionGate for DefaultPermissionGate {
         self.path_rules_snapshot()
     }
 
-    fn grant_session(&self, path: PathBuf, source: GrantSource) {
-        match source {
-            GrantSource::DraggedPath => self.dragged_paths.add(path),
-            _ => self.session_grants.add(path),
-        }
+    fn grant_session(&self, path: PathBuf, trigger: GrantTrigger) {
+        self.session_grants.add(path, trigger);
     }
 
     fn grant_path_rule(&self, rule: PathRule) {
@@ -362,27 +350,30 @@ fn level_for_op(op: PrimitiveOperation) -> PermissionLevel {
     match op {
         PrimitiveOperation::Read => PermissionLevel::Read,
         PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionLevel::Write,
-        PrimitiveOperation::Bash => PermissionLevel::BashWhitelist,
+        PrimitiveOperation::Bash => PermissionLevel::Bash,
     }
 }
 
-fn source_for_writable(
+fn grant_for_writable(
     target: &Path,
-    workspace_dir: &Path,
-    extra_roots: &[PathBuf],
-) -> GrantSource {
+    agent_definition_dir: &Path,
+    workspace_roots: &[PathBuf],
+) -> GrantTrace {
     let s = target.to_string_lossy();
-    let ws = canonicalize_with_existing_ancestor(workspace_dir);
-    if path_starts_with(&s, &ws.to_string_lossy()) {
-        return GrantSource::AgentWorkspace;
+    let def = canonicalize_with_existing_ancestor(agent_definition_dir);
+    if path_starts_with(&s, &def.to_string_lossy()) {
+        return GrantTrace::new(GrantType::AgentDefinitionDir, GrantTrigger::BuiltinDefault);
     }
-    for r in extra_roots {
+    for r in workspace_roots {
         let rc = canonicalize_with_existing_ancestor(r);
         if path_starts_with(&s, &rc.to_string_lossy()) {
-            return GrantSource::ConfigExtraRoot;
+            return GrantTrace::new(
+                GrantType::AgentWorkspaceRoot,
+                GrantTrigger::WorkspaceRootsConfig,
+            );
         }
     }
-    GrantSource::AgentWorkspace
+    GrantTrace::new(GrantType::AgentDefinitionDir, GrantTrigger::BuiltinDefault)
 }
 
 /// 编译 `builtin ∪ user` 两层 regex；非法 regex 静默跳过 + tracing warn，

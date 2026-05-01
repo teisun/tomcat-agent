@@ -19,17 +19,19 @@
 **作为用户**，我希望Agent能通过4原语安全地操作文件、执行命令，所有操作可控、可追溯。
 **验收标准**：
 - [ ] 完全对齐pi-mono的read/write/edit/bash API规范，功能完整
-- [ ] 实现路径白名单机制，仅允许访问用户授权的目录
-- [ ] 实现bash命令三级管控：白名单自动执行、审批类需用户确认、禁止类直接拦截
+- [ ] 实现路径授权根机制：`agent_definition_dir` 为默认允许根，`workspace.workspace_roots` / 会话授权用于扩大外部目录访问，`primitive.path_rules` 提供 deny / readonly 规则；`agent_workspace_dir` 只作为当前目录语义来源，不自动授权
+- [ ] 实现bash命令管控：`bash_forbidden` 直接拦截，`bash_approval_required` 需用户确认，路径 token 与 `NAME=/path` assignment RHS 都必须进入同一套路径权限预检
 - [ ] write/edit操作前自动备份原文件，支持回滚，操作前显示diff预览与用户确认
 - [ ] 所有4原语操作完整记录审计日志，包含操作内容、用户确认状态、执行结果、时间戳
-- [ ] 支持全局配置自动确认策略，可设置白名单操作无需重复确认
+- [ ] 支持全局配置自动确认策略；legacy `path_whitelist` / `bash_whitelist` / `auto_confirm_whitelist` 配置字段已删除
 - [ ] `pi audit list` 可列出历史审计记录；`pi audit show <id>` 查看单条详情；`pi audit export <file>` 导出完整日志文件
-- [ ] 拖拽或粘贴路径时，纯路径输入进入授权菜单；路径后紧跟中文/非 ASCII 意图时保留用户原始意图并自动加入本会话授权，不能误退到父目录或丢失后缀文本
+- [ ] 拖拽或粘贴路径时，只有整行纯路径输入进入授权菜单；路径 + 意图混合行视作普通输入原样发送给 LLM，不在拖拽层自动加入本会话授权
+- [ ] 拖拽路径命中 deny 或用户选择 cancel 时，原始输入不得发送给 LLM；transcript 仅写入 `[drag-cancel]` 前缀的合成 note，不带原始拖拽行
 - [ ] deny / readonly `path_rules` 在同一会话内热生效：`[r]`、`[d]` 或 `config_set primitive.path_rules` 写入后，后续 read/write/edit/bash 立即按新规则拦截或降级，不需重启
-- [ ] cwd 首次触达授权与 `workspace.extra_roots` 扩大授权前必须先做 deny 预检；命中 deny 时不得展示“永久允许/本次允许”等扩大授权选项
+- [ ] cwd 首次触达授权与 `workspace.workspace_roots` 扩大授权前必须先做 deny 预检；命中 deny 时不得展示“永久允许/本次允许”等扩大授权选项
 - [ ] `read_file` 读取二进制或非 UTF-8 文件时返回明确、产品化错误提示，不把乱码注入上下文；图片/二进制多模态输入由后续附件通道承接
-- [ ] 单条大工具结果按 Layer 0 落盘到 `agent_workspace_trail/tool-results/{session_id}/` 并在上下文中留下 preview；`workspace-main/` 仅是 agent 行为定义工作区，不承载运行态 tool-results
+- [ ] LLM 必须把 `agent_workspace_dir` 视为“当前目录 / 这个项目 / 相对路径”的唯一来源；`agent_definition_dir`（`workspace-<agentId>/`）和 `agent_trail_dir`（`agents/<agentId>/`）不得替代用户工作目录
+- [ ] 单条大工具结果按 Layer 0 落盘到 `agent_trail_dir/tool-results/{session_id}/` 并在上下文中留下 preview；`agent_definition_dir` 仅是 agent 行为定义工作区，不承载运行态 tool-results
 
 ### Story 3: WasmEdge+QuickJS沙箱插件系统
 **作为用户**，我希望能加载、运行pi-mono插件，插件在隔离沙箱内运行，不影响宿主系统安全。

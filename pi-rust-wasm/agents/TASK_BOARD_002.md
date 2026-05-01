@@ -101,6 +101,29 @@
 
 ---
 
+### T2-P0-014 | permission-source-redesign | 权限授权来源重构
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Tom |
+| **分支** | `feature/permission-source-redesign` |
+| **阻塞点** | — |
+| **关联 TODOS** | `#T-147`、`#T-151` |
+| **状态文档** | [feature-permission-source-redesign.md](../docs/status/feature-permission-source-redesign.md) |
+| **计划文档** | `~/.cursor/plans/permission-source-redesign_b2c3b5c4.plan.md` |
+
+**目标**：重构权限命名与授权溯源模型，拆分 `GrantSource` 为 `GrantType` + `GrantTrigger`，破坏性重命名 `workspace.extra_roots` 为 `workspace.workspace_roots`，删除 `DraggedPaths` 独立 bucket，统一普通路径授权三选项 UI，并将运行态目录语义收敛为 `agent_trail_dir`。
+
+**验收**：
+
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test --all-targets`
+
+---
+
 ### T2-P0-001 | agent-loop-modularization | Agent Loop 模块化拆分
 
 | 字段 | 内容 |
@@ -229,24 +252,24 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Jerry |
 | **分支** | `fix/drag-deny-cwd-remediation` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-046`、`#T-047`、`#T-048`、`#T-050`、`#T-051` 的 follow-up |
 | **计划文档** | [drag-deny-cwd-remediation_8b74f52d.plan.md](/Users/yankeben/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md) |
 
-**目标**：收敛拖拽授权语义、修复 Bash assignment 路径预检漏判、厘清 cwd / agent definition / agent trail 目录命名，并删除 legacy whitelist 配置面，确保用户说「当前目录 / 这个项目 / 相对路径」时始终以 `cwd_snapshot()` 为准。
+**目标**：收敛拖拽授权语义、修复 Bash assignment 路径预检漏判、厘清 agent workspace / agent definition / agent trail 目录命名，并删除 legacy whitelist 配置面，确保用户说「当前目录 / 这个项目 / 相对路径」时始终以启动时的 `agent_workspace_dir` 为准。
 
 **子项**：
-- [ ] 拖拽 DropPath 仅处理整行纯路径；删除 `DragOutcome::AutoAllow`、`split_path_and_suffix`、`has_intent_text`，`PATH + 意图` 原样交给 LLM 后续工具流程处理。
-- [ ] PromptMenu deny / 用户 cancel 触发 `RecordUserAndSkip`：只写 `[drag-cancel]` 合成 note 到 transcript，直接回到 `u>`，不重建 `cancel_token`、不进 `AgentLoop`。
-- [ ] 修复 `bash_parser` 对 `NAME=/path` 三种形态（命令前缀 / 位置参数 / 子命令首段）的 RHS 路径提取，确保 deny path_rules 在 bash 预检中命中真实路径。
-- [ ] 目录命名与语义对齐：`workspace_dir` 与启动时 `cwd_snapshot()` 一致；`agent_workspace_definition` → `agent_definition_dir`（`workspace-<agentId>/`）；`agent_workspace_trail` → `agent_trail_dir`（`agents/<agentId>/`）。
-- [ ] 修正 system prompt 与 tool description：`cwd_snapshot` 在「当前目录 / 这个项目 / 相对路径」语义中压过 `agent_definition_dir`；`list_dir` / `read_file` / `execute_bash.cwd` 描述同步。
-- [ ] 删除 `primitive.path_whitelist` / `primitive.bash_whitelist` / `primitive.auto_confirm_whitelist` 配置字段与相关代码；旧 TOML 命中时 validation 明确报错并给出迁移建议。
-- [ ] 抽取 `src/api/chat/dragged_handler.rs`，控制 `src/api/chat/mod.rs` 净涨 ≤ 0 行。
-- [ ] 补齐单测、离线 E2E 与可选真实 LLM E2E；同步 `User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`directory-structure.md`、`context-management.md`、`permission-system.md`、`user-guide.md` 与 `docs/status/develop.md`。
+- [x] 拖拽 DropPath 仅处理整行纯路径；删除 `DragOutcome::AutoAllow`、`split_path_and_suffix`、`has_intent_text`，`PATH + 意图` 原样交给 LLM 后续工具流程处理。
+- [x] PromptMenu deny / 用户 cancel 触发 `RecordUserAndSkip`：只写 `[drag-cancel]` 合成 note 到 transcript，直接回到 `u>`，不重建 `cancel_token`、不进 `AgentLoop`。
+- [x] 修复 `bash_parser` 对 `NAME=/path` 三种形态（命令前缀 / 位置参数 / 子命令首段）的 RHS 路径提取，确保 deny path_rules 在 bash 预检中命中真实路径。
+- [x] 目录命名与语义对齐：用户启动 `pi chat` 时的目录统一命名为 `agent_workspace_dir`；`agent_workspace_definition` → `agent_definition_dir`（`workspace-<agentId>/`）；`agent_workspace_trail` → `agent_trail_dir`（`agents/<agentId>/`）。
+- [x] 修正 system prompt 与 tool description：`agent_workspace_dir` 在「当前目录 / 这个项目 / 相对路径」语义中压过 `agent_definition_dir`；`list_dir` / `read_file` / `execute_bash.cwd` 描述同步。
+- [x] 删除 `primitive.path_whitelist` / `primitive.bash_whitelist` / `primitive.auto_confirm_whitelist` 配置字段与相关代码；旧 TOML 命中时 validation 明确报错并给出迁移建议。
+- [x] 抽取 `src/api/chat/dragged_handler.rs`，控制 `src/api/chat/mod.rs` 净涨 ≤ 0 行。
+- [x] 补齐单测、离线 E2E 与可选真实 LLM E2E；同步 `User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`directory-structure.md`、`context-management.md`、`permission-system.md`、`user-guide.md` 与 `docs/status/fix-drag-deny-cwd-remediation.md`。
 
 **依赖**：T2-P0-004（权限分级模型已落地）；当前 plan 中的目录命名决策。
 
@@ -254,13 +277,13 @@
 
 **协作接口**：
 - 消费：`PermissionGate`、`DefaultPrimitiveExecutor`、`bash_parser`、`ChatContext`、`SystemPromptBuilder`、`config_tool`。
-- 提供：纯路径拖拽授权契约、Bash assignment 路径提取契约、`cwd_snapshot` / `agent_definition_dir` / `agent_trail_dir` 目录命名契约、精简后的 primitive 配置 schema。
+- 提供：纯路径拖拽授权契约、Bash assignment 路径提取契约、`agent_workspace_dir` / `agent_definition_dir` / `agent_trail_dir` 目录命名契约、精简后的 primitive 配置 schema。
 
 **验收标准**：
 - `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` 全绿。
 - 定向测试覆盖 `dragged_path`、`dragged_handler`、`bash_parser`、`system_prompt`、`config_tool`、`infra::config`。
 - 离线 E2E 覆盖拖拽 deny/cancel、`PATH+意图` silent passthrough、Bash assignment deny、cwd prompt 渲染；带 `OPENAI_API_KEY` 时补跑真实 cwd 问答 E2E。
-- `docs/status/develop.md` 与本看板记录 follow-up hotfix 结论、命令、日志与 commit SHA。
+- `docs/status/fix-drag-deny-cwd-remediation.md` 与本看板记录 follow-up hotfix 结论、命令、日志与 commit SHA。
 
 ---
 
@@ -839,6 +862,7 @@ flowchart LR
 | 日期 | 变更 | 说明 |
 |------|------|------|
 | 2026-05-01 | 新增 T2-P0-013 | 将 `~/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md` 登记为 P0 follow-up 任务：覆盖拖拽纯路径语义收敛、drag cancel 只写 transcript、bash assignment deny 预检、cwd / agent_definition_dir / agent_trail_dir 命名迁移、删除 legacy whitelist 配置面、补单测/E2E/文档同步；状态 `TODO`，建议分支 `fix/drag-deny-cwd-remediation`。 |
+| 2026-05-01 | T2-P0-013 DOING→PENDING_INTEGRATION | Jerry 在 `fix/drag-deny-cwd-remediation` 完成整改（实现提交 `981775c`）：删除 `DragOutcome::AutoAllow` 与 legacy whitelist 配置面；拖拽 deny/cancel 只写 `[drag-cancel]` transcript note；Bash assignment RHS 纳入权限预检；目录统一为 `agent_workspace_dir` / `agent_definition_dir` / `agent_trail_dir`；同步 User Stories、E2E 场景库、权限/目录/上下文架构文档与用户指南。门禁 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`、`cargo test -- --ignored` 全绿（含真实 OpenAI ignored 用例）；待 Nibbles 集成复核。 |
 | 2026-04-26 | T2-P0-003 调度为 002 全 P0 末位（最低优先） | 任务块重排至 `T2-P0-011` 之后；§4 认领说明、§1.4 风险、§5 拓扑同步；仍属 002 交付与 `#T-131`/`#T-132` 闭环范围，不降低 P0 档 |
 | 2026-04-22 | 新建本看板 | 随 P0-P9 路线图调整；`001-mvp` 归档到 `openspec/specs/archive/` |
 | 2026-04-22 | 认领 T2-P0-007 | Spike 认领（TODO→DOING），破例绕过 T2-P0-001 / T2-P0-003 依赖（见阻塞点）；计划 `interruptible_agent_loop_c77e96ab.plan.md` 经用户确认后进入开发 |
@@ -853,10 +877,10 @@ flowchart LR
 | 2026-04-27 | T2-P0-004 TODO→DOING | Jerry 认领并从 develop 拉出 `feature/workspace-permission-tiers`；按 plan `workspace_permission_tiers_design_1ad7681a.plan.md` §1 流程进入 PR-1～PR-10 实施；同步初始化 `docs/status/feature-workspace-permission-tiers.md` 元数据表（Owner=Jerry，State=ACTIVE，Cov%=-）；本次仅看板字段同步，无代码改动 |
 | 2026-04-27 | T2-P0-004 DOING→PENDING_INTEGRATION | Jerry 完成 plan §9 PR-1～PR-10 全部 10 个 PR：核心 `PermissionGate` + 3 层决策（PR-1）、`ConfirmDecision` 升级 + executor 接入（PR-2）、`bash_parser` + 危险命令 regex 默认值（PR-3）、拖拽 UX 双语义（PR-4）、`PrimitiveConfig.path_rules` / `WorkspaceConfig.entries` schema + env sanitize（PR-5）、`PrimitiveAuditEntry` `permission_level` / `grant_source` / `in_working_dir`（PR-6）、`config_get` / `config_set` LLM 工具（PR-7）、System prompt `WorkspaceStateSection` + 启动横幅（PR-8）、`agents/{id}` 接入 `EffectiveRoots.read_only` + 凭据子目录默认 deny（PR-9）、`pi pathrules add/list` CLI（PR-10）。门禁全绿：`cargo fmt --all` + `cargo clippy --all-features --all-targets -- -D warnings` + `cargo test -j 1 --lib --test-threads=1`（538 passed / 0 failed / 1 ignored）+ `cargo test -j 1 --tests --no-fail-fast --test-threads=1`（含 `cli_tests` / `wasmedge_e2e_tests` 39 用例 70.8s 全绿）。验收口径勘误：「审计日志 schema 变更有迁移脚本」改为「审计 JSONL 向后兼容 + `#[serde(default)]` + 不做迁移脚本」（与 plan §5/§10/§11 一致）。详见 [`docs/status/feature-workspace-permission-tiers.md`](../docs/status/feature-workspace-permission-tiers.md)；待 Nibbles 集成复核 |
 | 2026-04-27 | T2-P0-004 PENDING_INTEGRATION→DONE | Nibbles 集成复核通过：`feature/workspace-permission-tiers` @ `343d08d`（3 commits：`ebbb66d` 主体 + `af93941` 文档微调 + `343d08d` Nibbles.md 升级）`--no-ff` 合并入 develop（merge commit `11eb5e7`，ort 无冲突，55 文件 +5655/-196）；`pi-rust-wasm` 上复跑 `cargo build --release`（6m59s）+ `cargo clippy --all-features --all-targets -- -D warnings`（19.85s 零警告）+ `cargo test -j 1 --lib --test-threads=1`（538 passed / 0 failed / 1 ignored，14.79s）+ `cargo test -j 1 --tests --no-fail-fast --test-threads=1`（14 crate 195 passed / 0 failed / 0 ignored，含 `cli_tests` 77 / `wasmedge_e2e_tests` 39）全绿；编码规范家族四件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）逐项核查：分层 / idioms / 注释 PASS；`core/permission/*` 全部 L-1 黄金区间，3 处存量大文件预警留痕（`api/chat/config_tool.rs` 725 / `core/executor/primitives.rs` 840 / `api/chat/mod.rs` 1024）记 follow-up，不阻塞合并；规格漂移：T2-P0-004 用户可见行为（pathrules / dragged_path / config_tool）尚未在 `E2E_SCENARIO_LIBRARY.md` 挂 E2E-CLI-* 编号，记 follow-up；集成报告见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部 **T2-P0-004** 块；日志 `.integration_develop_merge.log` |
-| 2026-04-27 | T2-P0-004 post-merge hotfix-1（DONE 不变） | Jerry 在 `feature/workspace-permission-tiers-hotfix` 分支补 plan §8.2 → lazy first-touch + cwd 注入 system prompt：① `ChatContext` 新增 `cwd` / `cfg_path` 启动 snapshot（`std::env::current_dir()` 一次性，避免 `set_current_dir` footgun）；② `WorkspaceStateSection` 新增 `## Current Working Directory` 段（先于 `## Workspace State`，三态文案随 cwd 是否在 effective_roots 切换），让 LLM 在每次推理首屏看到 cwd；③ 删除 `print_startup_banner` 与 `chat_loop` 调用；④ 新建 `src/api/chat/cwd_lazy_prompt.rs::CwdLazyPrompt` 装饰器（`[a]` 写盘 extra_roots + SessionGrants / `[s]` 仅 SessionGrants / `[n]` dismissed + fall-through，`Arc<AtomicBool>` 共享 dismissed，非 TTY 自动 dismiss 防 CI 阻塞）；⑤ `from_config` 用 `CwdLazyPrompt` 包裹 `CliConfirmation`。补丁 plan：[`.cursor/plans/cwd-startup-prompt-fix_7af19637.plan.md`](../../.cursor/plans/cwd-startup-prompt-fix_7af19637.plan.md)；规格更新见 `permission-system.md` §10.0 / §10.1。本行不把 T2-P0-004 主状态改回 DOING，仅追加 changelog |
+| 2026-04-27 | T2-P0-004 post-merge hotfix-1（DONE 不变） | Jerry 在 `feature/workspace-permission-tiers-hotfix` 分支补 plan §8.2 → lazy first-touch + cwd 注入 system prompt：① `ChatContext` 新增 `cwd` / `cfg_path` 启动 snapshot（`std::env::current_dir()` 一次性，避免 `set_current_dir` footgun）；② `WorkspaceStateSection` 新增 `## Current Working Directory` 段（先于 `## Workspace State`，三态文案随 cwd 是否在 effective_roots 切换），让 LLM 在每次推理首屏看到 cwd；③ 删除 `print_startup_banner` 与 `chat_loop` 调用；④ 新建 `src/api/chat/cwd_lazy_prompt.rs::CwdLazyPrompt` 装饰器（`[a]` 写盘 workspace_roots + SessionGrants / `[s]` 仅 SessionGrants / `[n]` dismissed + fall-through，`Arc<AtomicBool>` 共享 dismissed，非 TTY 自动 dismiss 防 CI 阻塞）；⑤ `from_config` 用 `CwdLazyPrompt` 包裹 `CliConfirmation`。补丁 plan：[`.cursor/plans/cwd-startup-prompt-fix_7af19637.plan.md`](../../.cursor/plans/cwd-startup-prompt-fix_7af19637.plan.md)；规格更新见 `permission-system.md` §10.0 / §10.1。本行不把 T2-P0-004 主状态改回 DOING，仅追加 changelog |
 | 2026-04-27 | T2-P0-004 post-merge hotfix-2（DONE 不变） | Jerry 在同一 hotfix 分支补 plan §7 拖拽切分误判：`src/api/chat/dragged_path.rs::interpret_dragged_paths` 引入 `split_path_and_suffix` 在 token 内做「存在性 + 字符边界切分」——`'/abs/path'这个文件夹下面有几个文件?` 类输入（POSIX 单引号闭合后紧贴非 ASCII 中文）不再被 `shell_words::split` 合成单 token 后误入 5 选项纯拖拽菜单，而是正确拆成 `(path, "这个文件夹下面有几个文件?")` 走 AutoAllow 自动 `SessionGrants += path`、整行原样发 LLM。区分 ASCII / 非 ASCII：纯 ASCII 不存在路径保留 plan §7 旧 `PromptMenu` 行为零回归。新增回归 case 4 个（quoted_path_with_intent / nonascii_existing_intact / nonascii_suffix_splits / nonexistent_ascii_keeps_legacy）。规格更新见 `permission-system.md` §8.1 |
 | 2026-04-28 | T2-P0-004 post-merge hotfix 集成通过（DONE 不变） | Nibbles 将 `feature/workspace-permission-tiers-hotfix` @ `10c62dc` `--no-ff` 合并入 `develop`（merge commit `60189c0`，无冲突）；develop 上复跑 `cargo fmt --check` + `cargo build --release` + `cargo clippy --all-targets -- -D warnings` + `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` 全绿（lib 567 passed / integration 201 passed / doc 0 passed，`EXIT_CODE=0`）。集成 review 发现并补漏：`cwd_lazy_prompt.rs` 内联测试迁移到 `src/api/chat/tests/cwd_lazy_prompt.rs`，业务文件回落到 L-1 黄金区间并符合测试物理位置规范。集成报告见 `docs/status/develop.md` 顶部 |
-| 2026-04-28 | T2-P0-004 follow-up 修复交付→PENDING_INTEGRATION（DONE 不变） | Jerry 在 `feature/drag-deny-cwd-runtime` 完成拖拽授权、deny 热生效与目录语义 follow-up：① `PermissionGate` 新增 session runtime path_rules，`[r]/[d]` 与 `config_set primitive.path_rules` 写盘后同会话立即生效；② AutoAllow、拖拽菜单 `[a]/[w]`、CwdLazyPrompt、`config_set workspace.extra_roots` 全部在扩大授权前做 deny 预检；③ 修复不存在文件 + 中文意图退到父目录的问题；④ Layer0 `tool-results` 改写入 `agent_workspace_trail/tool-results/{session_id}` 并迁移旧 `workspace-main/workspace` 内容；⑤ Prompt/文档统一 `cwd_snapshot` / `agent_workspace_trail` / `agent_workspace_definition` 语义，二进制 `read_file` 错误改为产品化提示。分支门禁：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release`、`cargo test -j 1 -- --nocapture --test-threads=1` 全绿（lib 571 passed / integration 201 passed / doc 0 passed，2 ignored） |
+| 2026-04-28 | T2-P0-004 follow-up 修复交付→PENDING_INTEGRATION（DONE 不变） | Jerry 在 `feature/drag-deny-cwd-runtime` 完成拖拽授权、deny 热生效与目录语义 follow-up：① `PermissionGate` 新增 session runtime path_rules，`[r]/[d]` 与 `config_set primitive.path_rules` 写盘后同会话立即生效；② AutoAllow、拖拽菜单 `[a]/[w]`、CwdLazyPrompt、`config_set workspace.workspace_roots` 全部在扩大授权前做 deny 预检；③ 修复不存在文件 + 中文意图退到父目录的问题；④ Layer0 `tool-results` 改写入 `agent_trail_dir/tool-results/{session_id}` 并迁移旧 `workspace-main/workspace` 内容；⑤ Prompt/文档统一当前目录 snapshot / `agent_trail_dir` / `agent_definition_dir` 语义，二进制 `read_file` 错误改为产品化提示。分支门禁：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo build --release`、`cargo test -j 1 -- --nocapture --test-threads=1` 全绿（lib 571 passed / integration 201 passed / doc 0 passed，2 ignored） |
 | 2026-04-28 | 新增 T2-P0-012 图片/二进制附件任务 | 根据用户反馈新增 `T2-P0-012 \| llm-binary-attachments`：用户拖拽或指定图片 / 二进制文件时走 LLM attachment 通道，而不是 `read_file` UTF-8 文本路径；同步 §1 交付/验收任务总数 16→18（本文件原 16 为历史口径且已存在 17 个任务），§5 依赖拓扑新增 T2-P0-005 / T2-P0-006 / T2-P0-008 → T2-P0-012 |
-| 2026-04-28 | T2-P0-004 follow-up 集成通过（DONE 不变） | Nibbles 将 `feature/drag-deny-cwd-runtime` @ `0c439f9` `--no-ff` 合并入 `develop`（merge commit `04f4caa`，无冲突）；develop 上复跑 `cargo fmt --check` + `cargo build --release` + `cargo clippy --all-targets -- -D warnings` + `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` + `cargo test -j 1 --test '*'` + `cargo test -j 1 --test cli_tests` 全绿（lib 571 passed / integration 201 passed / cli_tests 77 passed / wasmedge_e2e_tests 39 passed / doc 0 passed，2 ignored）。集成 review 核对 permission / dragged_path / Layer0 `agent_workspace_trail` 规格与测试一致；集成报告见 `docs/status/develop.md` 顶部 |
-| 2026-04-28 | T2-P0-004 follow-up 集成补漏（DONE 不变） | Nibbles 按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §1–§3 追加补漏：`User_Stories.md` Story 2 新增拖拽中文意图、deny/readonly 热生效、cwd 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_workspace_trail/tool-results/{session_id}` 验收点；`E2E_SCENARIO_LIBRARY.md` 新增 E2E-CLI-018～022；`context-management.md` 旧伪代码从 `work_dir/agents/.../tool-results` 修正为 `agent_workspace_trail/tool-results/{session_id}`；新增自动化回归 `render_drag_menu_with_deny_rule_hides_authorization_choices` 与 `config_set_array_path_rule_appends_with_json_value` 的 runtime gate 断言并通过。全量 review 留痕：`api/chat/mod.rs` / `config_tool.rs` / `executor/primitives.rs` 仍为既有大文件拆分 follow-up，不阻塞本次集成 |
+| 2026-04-28 | T2-P0-004 follow-up 集成通过（DONE 不变） | Nibbles 将 `feature/drag-deny-cwd-runtime` @ `0c439f9` `--no-ff` 合并入 `develop`（merge commit `04f4caa`，无冲突）；develop 上复跑 `cargo fmt --check` + `cargo build --release` + `cargo clippy --all-targets -- -D warnings` + `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` + `cargo test -j 1 --test '*'` + `cargo test -j 1 --test cli_tests` 全绿（lib 571 passed / integration 201 passed / cli_tests 77 passed / wasmedge_e2e_tests 39 passed / doc 0 passed，2 ignored）。集成 review 核对 permission / dragged_path / Layer0 `agent_trail_dir` 规格与测试一致；集成报告见 `docs/status/develop.md` 顶部 |
+| 2026-04-28 | T2-P0-004 follow-up 集成补漏（DONE 不变） | Nibbles 按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §1–§3 追加补漏：`User_Stories.md` Story 2 新增拖拽中文意图、deny/readonly 热生效、cwd 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_trail_dir/tool-results/{session_id}` 验收点；`E2E_SCENARIO_LIBRARY.md` 新增 E2E-CLI-018～022；`context-management.md` 旧伪代码从 `work_dir/agents/.../tool-results` 修正为 `agent_trail_dir/tool-results/{session_id}`；新增自动化回归 `render_drag_menu_with_deny_rule_hides_authorization_choices` 与 `config_set_array_path_rule_appends_with_json_value` 的 runtime gate 断言并通过。全量 review 留痕：`api/chat/mod.rs` / `config_tool.rs` / `executor/primitives.rs` 仍为既有大文件拆分 follow-up，不阻塞本次集成 |

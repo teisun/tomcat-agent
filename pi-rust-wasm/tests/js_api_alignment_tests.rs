@@ -9,6 +9,7 @@
 
 mod common;
 
+use pi_wasm::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use pi_wasm::{
     AllowAllConfirmation, DefaultEventBus, DefaultPrimitiveExecutor, HostApiDispatcher,
     PrimitiveConfig, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
@@ -18,18 +19,35 @@ use std::sync::Arc;
 
 const WASMEDGE_INSTALL_URL: &str = "https://wasmedge.org/docs/start/install";
 
+fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
+    DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: definition.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: true,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc()
+}
+
 /// 构建带完整 Tokio 运行时 + PrimitiveExecutor 的 Dispatcher，用于 async API 测试。
 fn build_async_dispatcher() -> Arc<HostApiDispatcher> {
     let bus = Arc::new(DefaultEventBus::new());
-    let mut cfg = PrimitiveConfig::default();
-    // Whitelist /tmp for exec/file operations in tests.
-    cfg.path_whitelist.push("/tmp".to_string());
-    cfg.auto_confirm = true;
+    let definition_dir = Path::new("/tmp");
+    let cfg = PrimitiveConfig {
+        auto_confirm: true,
+        ..Default::default()
+    };
     let executor = DefaultPrimitiveExecutor::new(
         cfg,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        std::path::PathBuf::from("/tmp"),
+        make_gate(definition_dir),
     );
     Arc::new(
         HostApiDispatcher::new(bus)

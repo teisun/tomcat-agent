@@ -4,9 +4,7 @@ use super::{
 use crate::core::confirmation::{
     AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
 };
-use crate::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PermissionGate, SessionGrants,
-};
+use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::primitives::PrimitiveOperation;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,8 +14,8 @@ use std::sync::Arc;
 
 #[test]
 fn parse_choice_recognizes_aliases() {
-    assert_eq!(parse_choice("a"), Some(CwdPromptChoice::AddPersistent));
-    assert_eq!(parse_choice("ADD"), Some(CwdPromptChoice::AddPersistent));
+    assert_eq!(parse_choice("a"), None);
+    assert_eq!(parse_choice("w"), Some(CwdPromptChoice::AddPersistent));
     assert_eq!(
         parse_choice("persist"),
         Some(CwdPromptChoice::AddPersistent)
@@ -31,9 +29,9 @@ fn parse_choice_recognizes_aliases() {
         parse_choice("once"),
         Some(CwdPromptChoice::AllowSessionOnly)
     );
-    assert_eq!(parse_choice("n"), Some(CwdPromptChoice::Skip));
-    assert_eq!(parse_choice("NO"), Some(CwdPromptChoice::Skip));
-    assert_eq!(parse_choice("skip"), Some(CwdPromptChoice::Skip));
+    assert_eq!(parse_choice("c"), Some(CwdPromptChoice::Cancel));
+    assert_eq!(parse_choice("NO"), Some(CwdPromptChoice::Cancel));
+    assert_eq!(parse_choice("skip"), Some(CwdPromptChoice::Cancel));
     assert_eq!(parse_choice(""), None);
     assert_eq!(parse_choice("xyz"), None);
 }
@@ -92,22 +90,19 @@ fn extract_target_from_preview_blank_returns_none() {
 
 // ── decorator behavior（异步 + tempdir 集成）──
 
-fn make_gate(workspace: &Path) -> Arc<dyn PermissionGate> {
+/// `definition` 在 gate 中作为默认 writable root（即 `agent_definition_dir`）；
+/// 启动 cwd 不会自动落入 writable 集合，需要显式 workspace_roots / session_grants。
+fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
     let cfg = GateConfig {
-        workspace_dir: workspace.to_path_buf(),
-        extra_roots: vec![],
-        agent_data_readonly_dirs: vec![],
+        agent_definition_dir: definition.to_path_buf(),
+        workspace_roots: vec![],
+        agent_trail_readonly_dirs: vec![],
         user_path_rules: vec![],
         user_bash_forbidden: vec![],
         user_bash_approval: vec![],
-        user_bash_whitelist: vec![],
         auto_confirm: false,
     };
-    Arc::new(DefaultPermissionGate::new(
-        cfg,
-        SessionGrants::new(),
-        DraggedPaths::new(),
-    ))
+    Arc::new(DefaultPermissionGate::new(cfg, SessionGrants::new()))
 }
 
 fn build_preview(path: &str) -> String {
@@ -224,7 +219,7 @@ async fn forwards_when_preview_lacks_path_line() {
     assert_eq!(dec, ConfirmDecision::Deny);
 }
 
-// ── apply_choice：[a] / [s] / [n] 三分支副作用 ──
+// ── apply_choice：[s] / [w] / [c] 三分支副作用 ──
 
 fn write_minimal_config(cfg_path: &Path) {
     let toml = r#"
@@ -235,7 +230,7 @@ id = "main"
 default_model = "gpt-4o-mini"
 
 [workspace]
-extra_roots = []
+workspace_roots = []
 
 [primitive]
 auto_confirm = false
@@ -280,7 +275,7 @@ async fn apply_choice_add_persistent_writes_disk_and_session_grants() {
     let canon = std::fs::canonicalize(&cwd).unwrap();
     assert!(
         toml_after.contains(canon.to_string_lossy().as_ref()),
-        "extra_roots 应写入 cwd canonical 路径，实际:\n{}",
+        "workspace_roots 应写入 cwd canonical 路径，实际:\n{}",
         toml_after
     );
 
@@ -341,7 +336,7 @@ async fn apply_choice_allow_session_only_does_not_write_disk() {
 }
 
 #[tokio::test]
-async fn apply_choice_skip_sets_dismissed_and_forwards() {
+async fn apply_choice_cancel_sets_dismissed_and_denies() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().to_path_buf();
     let cfg_path = tmp.path().join("pi.config.toml");
@@ -355,7 +350,7 @@ async fn apply_choice_skip_sets_dismissed_and_forwards() {
     let preview = build_preview(&cwd.join("foo.txt").to_string_lossy());
     let dec = prompt
         .apply_choice_for_test(
-            CwdPromptChoice::Skip,
+            CwdPromptChoice::Cancel,
             PrimitiveOperation::Read,
             &preview,
             "__agent__",
@@ -363,12 +358,12 @@ async fn apply_choice_skip_sets_dismissed_and_forwards() {
         )
         .await
         .unwrap();
-    // [n] 后转发给 DenyAll
+    // [c] 后拒绝当前操作。
     assert_eq!(dec, ConfirmDecision::Deny);
-    assert!(prompt.is_dismissed(), "[n] 必须设 dismissed=true");
+    assert!(prompt.is_dismissed(), "[c] 必须设 dismissed=true");
     assert!(
         session_grants.snapshot().is_empty(),
-        "[n] 不应改 SessionGrants"
+        "[c] 不应改 SessionGrants"
     );
 }
 

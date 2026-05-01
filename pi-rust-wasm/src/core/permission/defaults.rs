@@ -5,7 +5,6 @@
 //! - `BUILTIN_DEFAULT_PATH_RULES`：凭据保护 + Agent 自我提权防护 + Agent 历史只读
 //! - `BUILTIN_BASH_FORBIDDEN`：系统级灾难命令 / 凭据泄漏防护 / Agent 自我提权防护
 //! - `BUILTIN_BASH_APPROVAL_REQUIRED`：高危但可允许场景（rm -rf、sudo、git --force 等）
-//! - `BUILTIN_BASH_WHITELIST`：默认空（白名单是放松约束，builtin 不主动放松）
 //!
 //! **关键不变量**：用户**永远无法**通过 TOML / `config_set` 移除 builtin 列表项；
 //! 要"放行某条 builtin"必须改代码源。坏 regex 静默跳过 + warning，不影响其他规则。
@@ -103,6 +102,3 @@ pub const BUILTIN_BASH_APPROVAL_REQUIRED: &[&str] = &[
     r#"\|\s*(sh|bash|zsh)\b"#,
     r#">\s*(/etc/|/usr/|~/.ssh/|~/.aws/|~/.gnupg/)"#,
 ];
-
-/// 默认空（白名单是放松约束，builtin 不主动放松）。
-pub const BUILTIN_BASH_WHITELIST: &[&str] = &[];

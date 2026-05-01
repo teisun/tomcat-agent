@@ -5,7 +5,7 @@
 //!
 //! 用法：
 //!
-//! ```ignore
+//! ```text
 //! use crate::infra::config::lock::with_config_lock;
 //! with_config_lock(&config_path, || {
 //!     // 在锁内：读 -> 改 -> write_file_atomic

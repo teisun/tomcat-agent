@@ -30,6 +30,7 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
+            reject_legacy_whitelist_keys(p)?;
             builder = builder.add_source(::config::File::from(p));
         }
     }
@@ -86,32 +87,72 @@ fn sanitize_sensitive_env(config_path: Option<&std::path::Path>) {
 
 /// 仅从 TOML 配置文件解析 [`AppConfig`]（**不**合并环境变量），供需整表写回的场景（如 `pi workspace`）。
 pub fn load_config_toml_file(path: &Path) -> Result<AppConfig, AppError> {
+    reject_legacy_whitelist_keys(path)?;
     let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
     toml::from_str(&content).map_err(|e| AppError::Config(e.to_string()))
 }
 
-/// 校验并解析 `workspace.extra_roots`：忽略仅空白项；每项须可规范化为已存在的目录；规范路径去重。
-pub fn resolve_extra_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
+fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
+    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return Ok(());
+    };
+    let Some(primitive) = value.get("primitive").and_then(|v| v.as_table()) else {
+        return Ok(());
+    };
+    let legacy = [
+        (
+            "path_whitelist",
+            "workspace.workspace_roots（持久允许根）或 primitive.path_rules（deny/readonly）",
+        ),
+        (
+            "bash_whitelist",
+            "primitive.bash_forbidden / primitive.bash_approval_required 的显式规则",
+        ),
+        (
+            "auto_confirm_whitelist",
+            "删除该字段；如确需全自动化可使用 primitive.auto_confirm=true（日常不推荐）",
+        ),
+    ];
+    let hits = legacy
+        .iter()
+        .filter(|(key, _)| primitive.contains_key(*key))
+        .map(|(key, target)| format!("primitive.{key} -> {target}"))
+        .collect::<Vec<_>>();
+    if hits.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Config(format!(
+        "配置包含已删除的 legacy whitelist 字段：{}。请按提示迁移后重试。",
+        hits.join("; ")
+    )))
+}
+
+/// 校验并解析 `workspace.workspace_roots`：忽略仅空白项；每项须可规范化为已存在的目录；规范路径去重。
+pub fn resolve_workspace_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for s in &cfg.workspace.extra_roots {
+    for s in &cfg.workspace.workspace_roots {
         let t = s.trim();
         if t.is_empty() {
             continue;
         }
         let p = normalize_path(t)?;
         let canon = std::fs::canonicalize(&p).map_err(|_| {
-            AppError::Config(format!("workspace.extra_roots 路径无效或不可访问: {}", t))
+            AppError::Config(format!(
+                "workspace.workspace_roots 路径无效或不可访问: {}",
+                t
+            ))
         })?;
         if !canon.is_dir() {
             return Err(AppError::Config(format!(
-                "workspace.extra_roots 不是目录: {}",
+                "workspace.workspace_roots 不是目录: {}",
                 canon.display()
             )));
         }
         if !seen.insert(canon.clone()) {
             return Err(AppError::Config(format!(
-                "workspace.extra_roots 存在重复: {}",
+                "workspace.workspace_roots 存在重复: {}",
                 canon.display()
             )));
         }
@@ -155,13 +196,13 @@ pub fn resolve_agent_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 }
 
 /// `work_dir/agents/{id}` — Agent 运行态轨迹目录。
-pub fn resolve_agent_workspace_trail_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+pub fn resolve_agent_trail_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("agents").join(&cfg.agent.id))
 }
 
 /// `work_dir/agents/{id}/sessions` — 独立推导，不经 agent_dir。
 pub fn resolve_sessions_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("sessions"))
+    Ok(resolve_agent_trail_dir(cfg)?.join("sessions"))
 }
 
 /// `work_dir/plugins` — 全局共享插件目录。
@@ -171,21 +212,21 @@ pub fn resolve_plugins_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
 
 /// `work_dir/agents/{id}/tmp` — 临时目录，保留签名兼容。
 pub fn resolve_tmp_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("tmp"))
+    Ok(resolve_agent_trail_dir(cfg)?.join("tmp"))
 }
 
 /// `work_dir/agents/{id}/logs` — 独立推导，不经 agent_dir。
 pub fn resolve_log_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("logs"))
+    Ok(resolve_agent_trail_dir(cfg)?.join("logs"))
 }
 
 /// `work_dir/agents/{id}/audit` — 独立审计日志目录，专用 JSONL 存储。
 pub fn resolve_audit_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    Ok(resolve_agent_workspace_trail_dir(cfg)?.join("audit"))
+    Ok(resolve_agent_trail_dir(cfg)?.join("audit"))
 }
 
-/// agent 工作区目录。优先 `cfg.agent.workspace`，否则 `work_dir/workspace-{id}`。
-pub fn resolve_agent_workspace_definition_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+/// agent 设计态目录。优先 `cfg.agent.workspace`，否则 `work_dir/workspace-{id}`。
+pub fn resolve_agent_definition_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     if let Some(ref ws) = cfg.agent.workspace {
         let w = ws.trim();
         if !w.is_empty() {
@@ -196,9 +237,9 @@ pub fn resolve_agent_workspace_definition_dir(cfg: &AppConfig) -> Result<PathBuf
 }
 
 /// agent 设计态工作区目录。保留旧函数名作为兼容 wrapper，新代码优先使用
-/// [`resolve_agent_workspace_definition_dir`]。
+/// [`resolve_agent_definition_dir`]。
 pub fn resolve_workspace_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
-    resolve_agent_workspace_definition_dir(cfg)
+    resolve_agent_definition_dir(cfg)
 }
 
 /// `work_dir/memory` — 向量检索索引目录。
@@ -235,12 +276,12 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let agent_dir = resolve_agent_dir(cfg)?;
     std::fs::create_dir_all(&agent_dir).map_err(AppError::Io)?;
 
-    let agent_base = resolve_agent_workspace_trail_dir(cfg)?;
+    let agent_base = resolve_agent_trail_dir(cfg)?;
     for sub in ["sessions", "logs", "audit", "tmp", "tool-results"] {
         std::fs::create_dir_all(agent_base.join(sub)).map_err(AppError::Io)?;
     }
 
-    let ws = resolve_workspace_dir(cfg)?;
+    let ws = resolve_agent_definition_dir(cfg)?;
     std::fs::create_dir_all(&ws).map_err(AppError::Io)?;
 
     for dir in ["memory", "credentials", "media", "subagents", "plugins"] {
@@ -281,6 +322,6 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             )));
         }
     }
-    resolve_extra_roots_paths(cfg).map(|_| ())?;
+    resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }

@@ -18,15 +18,15 @@ pub enum AuditPrimitiveOp {
 
 /// 单条原语审计记录。
 ///
-/// 与 plan §2/§6 对齐——新增 3 个授权来源字段：
+/// 与权限 gate 对齐——记录权限等级、授权类型与触发来源：
 ///
-/// - `permission_level`：操作权限等级（`Read` / `Write` / `BashWhitelist` /
+/// - `permission_level`：操作权限等级（`Read` / `Write` / `Bash` /
 ///   `BashApproval` / `Forbidden`）。
-/// - `grant_source`：授权来源（`AgentWorkspace` / `SessionGrant` / `BashWhitelist` 等）。
-/// - `in_working_dir`：路径是否在 `workspace_dir` / `extra_roots` 范围内。
+/// - `grant_type`：授权类型（`AgentDefinitionDir` / `SessionScope` / `BashPolicy` 等）。
+/// - `grant_trigger`：触发来源（`UserConfirm` / `WorkspaceRootsConfig` / `DraggedPathMenu` 等）。
 ///
-/// 所有 3 个字段都是 `Option`：legacy 路径（未启用 gate）写 `None`，gate 路径写
-/// `Some(...)`，向后兼容已有 JSONL 行。
+/// 所有 3 个字段都是 `Option`：早期 JSONL 行可能没有这些字段；当前 executor
+/// 强制启用 gate，正常新记录会写 `Some(...)`。
 #[derive(Debug, Clone, Default)]
 pub struct PrimitiveAuditEntry {
     pub operation: AuditPrimitiveOp,
@@ -37,10 +37,10 @@ pub struct PrimitiveAuditEntry {
     pub detail: Option<String>,
     /// 操作权限等级（仅 gate 模式填）。
     pub permission_level: Option<String>,
-    /// 授权来源（仅 gate 模式填）。
-    pub grant_source: Option<String>,
-    /// 路径是否在工作目录内（仅原语 op 适用，bash 默认 None）。
-    pub in_working_dir: Option<bool>,
+    /// 授权类型（仅 gate 模式填）。
+    pub grant_type: Option<String>,
+    /// 触发来源（仅 gate 模式填）。
+    pub grant_trigger: Option<String>,
 }
 
 /// 工具调用审计记录。
@@ -98,8 +98,8 @@ impl AuditRecorder for TracingAuditRecorder {
             success = entry.success,
             detail = ?entry.detail,
             permission_level = ?entry.permission_level,
-            grant_source = ?entry.grant_source,
-            in_working_dir = ?entry.in_working_dir,
+            grant_type = ?entry.grant_type,
+            grant_trigger = ?entry.grant_trigger,
             "audit primitive"
         );
     }
@@ -168,8 +168,8 @@ impl AuditRecorder for FileAuditRecorder {
                 success: entry.success,
                 detail: entry.detail,
                 permission_level: entry.permission_level,
-                grant_source: entry.grant_source,
-                in_working_dir: entry.in_working_dir,
+                grant_type: entry.grant_type,
+                grant_trigger: entry.grant_trigger,
             },
         };
         let _ = self.store.append(&row);

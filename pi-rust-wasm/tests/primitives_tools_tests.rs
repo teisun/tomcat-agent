@@ -3,6 +3,7 @@
 
 mod common;
 
+use pi_wasm::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use pi_wasm::{
     AllowAllConfirmation, DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation,
     EditOperation, EditOperationType, PrimitiveConfig, PrimitiveExecutor, Tool, ToolExecutor,
@@ -10,6 +11,23 @@ use pi_wasm::{
 };
 use std::sync::Arc;
 use tempfile::TempDir;
+
+/// 测试 helper：把 `dir` 作为 `agent_definition_dir` 注入 gate（默认 writable）。
+fn make_gate(definition: &std::path::Path, auto_confirm: bool) -> Arc<dyn PermissionGate> {
+    DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: definition.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc()
+}
 
 /// 集成测试用 stub：仅通过 pub API 注入，返回固定 JSON。
 struct StubToolExecutor;
@@ -99,16 +117,11 @@ async fn test_tool_registry_unregister_plugin_tools_removes_all(
 
 // ---------- PrimitiveExecutor 集成测试（含鲁棒性：路径白名单拒绝） ----------
 
-fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
-    let mut c = PrimitiveConfig::default();
-    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let path = canonical
-        .to_string_lossy()
-        .trim_end_matches(std::path::MAIN_SEPARATOR)
-        .to_string();
-    c.path_whitelist.push(path);
-    c.auto_confirm = true;
-    c
+fn temp_whitelist_config(_dir: &std::path::Path) -> PrimitiveConfig {
+    PrimitiveConfig {
+        auto_confirm: true,
+        ..PrimitiveConfig::default()
+    }
 }
 
 /// [read_file 白名单内] 白名单内路径可正常读取文件内容
@@ -124,17 +137,12 @@ async fn test_primitive_executor_read_file_in_whitelist_succeeds(
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;
-    let path_whitelist = canonical_dir
-        .to_string_lossy()
-        .trim_end_matches(std::path::MAIN_SEPARATOR)
-        .to_string();
-    let mut config = PrimitiveConfig::default();
-    config.path_whitelist.push(path_whitelist);
+    let config = PrimitiveConfig::default();
     let executor = DefaultPrimitiveExecutor::new(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir, false),
     );
     let file_path = canonical_dir.join("hello.txt");
     std::fs::write(&file_path, "hello")?;
@@ -163,9 +171,9 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
     let config = PrimitiveConfig::default();
     let executor = DefaultPrimitiveExecutor::new(
         config,
-        Arc::new(AllowAllConfirmation),
+        Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        std::path::PathBuf::from("/nonexistent_pi_workspace"),
+        make_gate(std::path::Path::new("/nonexistent_pi_workspace"), false),
     );
     tracing::info!("Arrange: PrimitiveConfig 空 path_whitelist");
     let res = executor.read_file("/etc/hosts", "test_plugin").await;
@@ -173,7 +181,9 @@ async fn test_primitive_executor_read_file_path_not_in_whitelist_returns_permiss
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.to_string().contains("白名单") || err.to_string().contains("Permission"),
+        err.to_string().contains("白名单")
+            || err.to_string().contains("Permission")
+            || err.to_string().contains("权限"),
         "期望权限/白名单错误，got: {}",
         err
     );
@@ -198,9 +208,9 @@ async fn test_primitive_executor_empty_whitelist_allows_workspace_dir_only(
     let config = PrimitiveConfig::default();
     let executor = DefaultPrimitiveExecutor::new(
         config,
-        Arc::new(AllowAllConfirmation),
+        Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir, false),
     );
     let allowed_path = canonical_dir.join("allowed.txt");
     std::fs::write(&allowed_path, "workspace_content")?;
@@ -217,7 +227,9 @@ async fn test_primitive_executor_empty_whitelist_allows_workspace_dir_only(
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(
-        err.to_string().contains("白名单") || err.to_string().contains("Permission"),
+        err.to_string().contains("白名单")
+            || err.to_string().contains("Permission")
+            || err.to_string().contains("权限"),
         "workspace 外路径应返回 Permission/白名单 错误，got: {}",
         err
     );
@@ -244,7 +256,7 @@ async fn test_primitive_executor_write_file_with_allow_all_succeeds(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir, true),
     );
     let file_path = canonical_dir.join("out.txt");
     let path_str = file_path.to_string_lossy().to_string();
@@ -280,7 +292,7 @@ async fn test_primitive_executor_write_file_user_denied_returns_permission_error
         config,
         Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(std::path::Path::new("/nonexistent_pi_workspace"), false),
     );
     let file_path = canonical_dir.join("denied.txt");
     let path_str = file_path.to_string_lossy().to_string();
@@ -319,7 +331,7 @@ async fn test_primitive_executor_edit_file_replaces_content(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir, false),
     );
 
     let file_path = canonical_dir.join("edit_target.txt");
@@ -365,7 +377,7 @@ async fn test_primitive_executor_execute_bash_echo_succeeds(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir, false),
     );
 
     tracing::info!("Arrange: 白名单临时目录");
@@ -401,7 +413,7 @@ async fn test_primitive_executor_execute_bash_argv_echo() -> Result<(), Box<dyn 
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir, false),
     );
     let argv = vec!["hello".to_string(), "argv".to_string()];
     let result = executor

@@ -3,11 +3,29 @@
 
 mod common;
 
+use pi_wasm::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use pi_wasm::{
     invoke_host_func_with, AllowAllConfirmation, DefaultEventBus, DefaultPrimitiveExecutor,
     HostApiDispatcher, PrimitiveConfig, TracingAuditRecorder,
 };
+use std::path::Path;
 use std::sync::Arc;
+
+fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
+    DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: definition.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: true,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc()
+}
 
 /// [log hostcall] Dispatcher 无 primitive 时 log 请求仍可成功
 ///
@@ -99,19 +117,15 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
     let file_path = canonical_dir.join("hostcall_read.txt");
     std::fs::write(&file_path, "hostcall-content").unwrap();
 
-    let mut config = PrimitiveConfig::default();
-    config.path_whitelist.push(
-        canonical_dir
-            .to_string_lossy()
-            .trim_end_matches(std::path::MAIN_SEPARATOR)
-            .to_string(),
-    );
-    config.auto_confirm = true;
+    let config = PrimitiveConfig {
+        auto_confirm: true,
+        ..Default::default()
+    };
     let executor = DefaultPrimitiveExecutor::new(
         config,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        canonical_dir.clone(),
+        make_gate(&canonical_dir),
     );
 
     let bus = Arc::new(DefaultEventBus::new());

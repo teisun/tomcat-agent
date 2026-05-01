@@ -89,10 +89,10 @@ use crate::infra::{
     TracingAuditRecorder,
 };
 use crate::{
-    resolve_agent_workspace_definition_dir, resolve_agent_workspace_trail_dir,
-    resolve_extra_roots_paths, resolve_sessions_dir, AgentLoop, AgentLoopConfig, AppConfig,
-    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor,
-    SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
+    resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
+    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
+    SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -102,8 +102,12 @@ mod tests;
 
 pub mod config_tool;
 pub mod cwd_lazy_prompt;
+mod dragged_handler;
 pub mod dragged_path;
+pub mod permission_prompt;
 mod session_stderr_listeners;
+
+use dragged_handler::{handle_dragged_input, DragHandleResult};
 
 // ─── ChatContext ──────────────────────────────────────────────────────────────
 
@@ -120,30 +124,22 @@ pub struct ChatContext {
     pub cancel_token: Arc<Mutex<CancellationToken>>,
     /// 上一次 Ctrl+C 按下的时刻；ctrlc handler 判双击用。
     pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
-    /// Agent 设计态工作区，用于 AGENTS.md / SOUL.md / skills / memory 等长期配置。
-    pub workspace_dir: std::path::PathBuf,
+    /// 用户启动 `pi chat` 时的 shell 工作目录。
+    pub agent_workspace_dir: std::path::PathBuf,
+    /// Agent 设计态目录，用于 AGENTS.md / SOUL.md / skills / memory 等长期配置。
+    pub agent_definition_dir: std::path::PathBuf,
     /// Agent 运行态轨迹目录，用于 sessions / logs / audit / tmp / tool-results。
-    pub agent_workspace_trail: std::path::PathBuf,
-    /// `pi chat` 进入时的真实当前工作目录（`std::env::current_dir()` 一次性快照）。
-    /// 用途：
-    /// - 注入 system prompt「## Current Working Directory」段，让 LLM 优先在 cwd 下查找/操作；
-    /// - `CwdLazyPrompt` 装饰器判断「LLM 即将访问的目标是否落在 cwd 子树」；
-    /// - 拖拽路径对比（plan §7）。
-    ///
-    /// **不**等同于 [`Self::workspace_dir`]——后者是 agent 配置的工作区根，前者是用户启动 cli 时所在目录。
-    pub cwd: std::path::PathBuf,
+    pub agent_trail_dir: std::path::PathBuf,
     /// `pi.config.toml` 的解析后绝对路径快照，避免在权限决策路径上重复调用 `config_file_path()`。
-    /// `CwdLazyPrompt::AllowAndPersistRoot` 分支用它持久化 extra_root。
+    /// `CwdLazyPrompt::AllowAndPersistRoot` 分支用它持久化 workspace root。
     pub cfg_path: std::path::PathBuf,
     /// 会话级临时授权（拖拽 + 用户 confirm AllowOnce 共享）。
     pub session_grants: crate::core::permission::SessionGrants,
-    /// 拖入路径缓存（与 `session_grants` 同结构，仅审计语义 `GrantSource::DraggedPath` 区分）。
-    pub dragged_paths: crate::core::permission::DraggedPaths,
     /// `config_get` / `config_set` LLM 工具后端（plan §6 / PR-7）。
     /// 为 `None` 时工具命中返回"未启用"错误，正常 4 原语 / chat 流程不受影响。
     pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 拖拽 UI
-    /// 共享同一份 SessionGrants + DraggedPaths 视图，保证三处的授权变更彼此可见。
+    /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
 }
 
@@ -153,16 +149,17 @@ impl ChatContext {
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
 
-        let workspace_dir = resolve_agent_workspace_definition_dir(&config)?;
-        std::fs::create_dir_all(&workspace_dir).map_err(AppError::Io)?;
-        let agent_workspace_trail = resolve_agent_workspace_trail_dir(&config)?;
-        std::fs::create_dir_all(&agent_workspace_trail).map_err(AppError::Io)?;
-        migrate_legacy_layer0_tool_results(&workspace_dir, &agent_workspace_trail);
+        let agent_definition_dir = resolve_agent_definition_dir(&config)?;
+        std::fs::create_dir_all(&agent_definition_dir).map_err(AppError::Io)?;
+        let agent_trail_dir = resolve_agent_trail_dir(&config)?;
+        std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
+        migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
-        // 启动 snapshot：cwd / cfg_path 在整个 chat 生命周期内固定，避免后续 cd
-        // 让 system prompt 与权限决策视图漂移。`current_dir()` 失败时退化到 workspace_dir
+        // 启动 snapshot：agent_workspace_dir / cfg_path 在整个 chat 生命周期内固定，避免后续 cd
+        // 让 system prompt 与权限决策视图漂移。`current_dir()` 失败时退化到 agent_definition_dir
         // （兜底场景：被 chroot 或者 cwd 不可读，仍能继续聊天）。
-        let cwd_snapshot = std::env::current_dir().unwrap_or_else(|_| workspace_dir.clone());
+        let agent_workspace_dir =
+            std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.clone());
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
@@ -172,16 +169,15 @@ impl ChatContext {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
             None => Arc::new(TracingAuditRecorder),
         };
-        let extra_roots = resolve_extra_roots_paths(&config)?;
+        let workspace_roots = resolve_workspace_roots_paths(&config)?;
         let cli_confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
 
-        // PR-9：构造 3 层权限 gate；与 executor / chat 共享 SessionGrants + DraggedPaths。
-        // agent_data_readonly_dirs：sessions/logs/audit + agent 凭据目录（凭据子目录由
+        // PR-9：构造 3 层权限 gate；与 executor / chat 共享 SessionGrants。
+        // agent_trail_readonly_dirs：sessions/logs/audit + agent 凭据目录（凭据子目录由
         // builtin path_rules 单独 deny，read_only 集合允许 read 但禁 write）。
         let session_grants = crate::core::permission::SessionGrants::new();
-        let dragged_paths = crate::core::permission::DraggedPaths::new();
-        let agent_data_readonly_dirs: Vec<std::path::PathBuf> = vec![
-            Some(agent_workspace_trail.clone()),
+        let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
+            Some(agent_trail_dir.clone()),
             crate::infra::config::resolve_sessions_dir(&config).ok(),
             crate::infra::config::resolve_log_dir(&config).ok(),
             crate::infra::config::resolve_audit_dir(&config).ok(),
@@ -190,46 +186,44 @@ impl ChatContext {
         .into_iter()
         .flatten()
         .collect();
+        // gate-root-remediation：默认 writable root 是 agent_definition_dir
+        // （`workspace-<agentId>/`），而不是启动 cwd。启动 cwd 仅在 system prompt
+        // 中作为「当前目录 / this project / relative paths」的语义来源，
+        // 实际访问 cwd 子树需要 `workspace_roots` / `session_grants`
+        // / `cwd_lazy_prompt` 提供的会话级授权。
         let gate_cfg = crate::core::permission::GateConfig {
-            workspace_dir: workspace_dir.clone(),
-            extra_roots: extra_roots.clone(),
-            agent_data_readonly_dirs: agent_data_readonly_dirs.clone(),
+            agent_definition_dir: agent_definition_dir.clone(),
+            workspace_roots: workspace_roots.clone(),
+            agent_trail_readonly_dirs: agent_trail_readonly_dirs.clone(),
             user_path_rules: config.primitive.path_rules.clone(),
             user_bash_forbidden: config.primitive.bash_forbidden.clone(),
             user_bash_approval: config.primitive.bash_approval_required.clone(),
-            user_bash_whitelist: config.primitive.bash_whitelist.clone(),
             auto_confirm: config.primitive.auto_confirm,
         };
-        let gate: Arc<dyn crate::core::permission::PermissionGate> =
-            Arc::new(crate::core::permission::DefaultPermissionGate::new(
-                gate_cfg,
-                session_grants.clone(),
-                dragged_paths.clone(),
-            ));
+        let gate: Arc<dyn crate::core::permission::PermissionGate> = Arc::new(
+            crate::core::permission::DefaultPermissionGate::new(gate_cfg, session_grants.clone()),
+        );
 
         // Hotfix §A.3：用 CwdLazyPrompt 装饰 CliConfirmation。
-        // 装饰器：当 LLM 工具调用首次落到 cwd 子树未授权路径时弹「[a]/[s]/[n]」
+        // 装饰器：当 LLM 工具调用首次落到 cwd 子树未授权路径时弹「[s]/[w]/[c]」
         // 范围级提示，其余情况转发给 CliConfirmation 既有行为。
         // 注意：dismissed flag 在装饰器内部以 Arc<AtomicBool> 创建，与 ctx 同生命周期。
         let confirmation: Arc<dyn UserConfirmationProvider> =
             Arc::new(cwd_lazy_prompt::CwdLazyPrompt::new(
                 cli_confirmation,
-                cwd_snapshot.clone(),
+                agent_workspace_dir.clone(),
                 gate.clone(),
                 session_grants.clone(),
                 cfg_path_snapshot.clone(),
             ));
 
-        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
-            DefaultPrimitiveExecutor::new(
-                config.primitive.clone(),
-                confirmation.clone(),
-                audit.clone(),
-                workspace_dir.clone(),
-            )
-            .with_extra_roots(extra_roots)
-            .with_gate(gate.clone()),
-        );
+        let _ = workspace_roots; // 已通过 GateConfig.workspace_roots 落入 gate；executor 不再单独保存。
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
+            config.primitive.clone(),
+            confirmation.clone(),
+            audit.clone(),
+            gate.clone(),
+        ));
 
         // PR-7：构造 config_get / config_set 工具后端。失败（无法解析 config_path）
         // 时降级为 `None`，工具命中返回"未启用"错误，主流程不阻塞。
@@ -259,12 +253,11 @@ impl ChatContext {
             event_bus,
             cancel_token,
             last_interrupt_at,
-            workspace_dir,
-            agent_workspace_trail,
-            cwd: cwd_snapshot,
+            agent_workspace_dir,
+            agent_definition_dir,
+            agent_trail_dir,
             cfg_path: cfg_path_snapshot,
             session_grants,
-            dragged_paths,
             config_backend,
             gate,
         })
@@ -281,7 +274,7 @@ impl ChatContext {
 
 // ─── CLI UserConfirmationProvider ─────────────────────────────────────────────
 
-use crate::core::confirmation::UserConfirmationProvider;
+use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::primitives::PrimitiveOperation;
 
 pub struct CliConfirmation;
@@ -321,6 +314,52 @@ impl UserConfirmationProvider for CliConfirmation {
         let answer = line.trim().to_lowercase();
         Ok(answer == "y" || answer == "yes")
     }
+
+    async fn confirm_decision(
+        &self,
+        operation: PrimitiveOperation,
+        preview: &str,
+        plugin_id: &str,
+        suggested_root: Option<std::path::PathBuf>,
+    ) -> Result<ConfirmDecision, AppError> {
+        if operation == PrimitiveOperation::Bash {
+            return match self.confirm(operation, preview, plugin_id).await? {
+                true => Ok(ConfirmDecision::AllowOnce),
+                false => Ok(ConfirmDecision::Deny),
+            };
+        }
+
+        let target = extract_path_from_preview(preview).unwrap_or_else(|| {
+            suggested_root
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        });
+        match permission_prompt::read_path_prompt(
+            &target,
+            suggested_root,
+            Some(&format!("类型: {:?}  来源: {}", operation, plugin_id)),
+        )
+        .map_err(AppError::Io)?
+        {
+            permission_prompt::PathPromptChoice::AllowSession => Ok(ConfirmDecision::AllowOnce),
+            permission_prompt::PathPromptChoice::PersistWorkspaceRoot { root } => {
+                let cfg_path = crate::api::cli::config_file_path()?;
+                crate::infra::config::append_workspace_root_to_disk(
+                    &cfg_path,
+                    root.to_string_lossy().into_owned(),
+                )?;
+                Ok(ConfirmDecision::AllowAndPersistRoot { root })
+            }
+            permission_prompt::PathPromptChoice::Cancel => Ok(ConfirmDecision::Deny),
+        }
+    }
+}
+
+fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
+    preview
+        .lines()
+        .find_map(|line| line.strip_prefix("路径: "))
+        .map(std::path::PathBuf::from)
 }
 
 // ─── NoopToolExecutor ─────────────────────────────────────────────────────────
@@ -431,7 +470,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
                     "properties": {
                         "key": {
                             "type": "string",
-                            "description": "配置键的 dot 路径，例：'workspace.extra_roots' / 'workspace.entries' / 'primitive.path_rules' / 'primitive.bash_forbidden' / 'agent.id'"
+                            "description": "配置键的 dot 路径，例：'workspace.workspace_roots' / 'workspace.entries' / 'primitive.path_rules' / 'primitive.bash_forbidden' / 'agent.id'"
                         }
                     },
                     "required": ["key"]
@@ -442,7 +481,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
             "type": "function",
             "function": {
                 "name": "config_set",
-                "description": "向受允许的 pi 配置项追加或修改值，每次调用都会触发用户 confirm（用户看到 unified diff 后 y/N）。受键级白名单（CONFIG_WRITE_ALLOWLIST）+ 硬黑名单（CONFIG_HARDCODED_WRITE_DENY）双重约束。\n\n语义：\n- 数组字段（workspace.extra_roots / workspace.entries / primitive.path_rules / primitive.bash_forbidden / primitive.bash_approval_required）：value 是单个新元素的 JSON 字符串（追加 only，不替换整数组）。例：value='{\"path\":\"~/myproj\",\"mode\":\"deny\"}'\n- 标量字段（llm.default_model / log.level / context.compaction_turns 等）：value 直接是新值字符串（替换语义）\n- 删除/修改不支持：返回 error 引导用户使用 `pi config edit` 手编 TOML（未来版本将提供 `pi pathrules remove` / `pi workspace remove`）\n\n禁止字段：llm.api_key* / security.* / storage.* / agent.id / agent.workspace / primitive.bash_whitelist / primitive.path_whitelist / primitive.auto_confirm 等（自我提权防护）。",
+                "description": "向受允许的 pi 配置项追加或修改值，每次调用都会触发用户 confirm（用户看到 unified diff 后 y/N）。受键级白名单（CONFIG_WRITE_ALLOWLIST）+ 硬黑名单（CONFIG_HARDCODED_WRITE_DENY）双重约束。\n\n语义：\n- 数组字段（workspace.workspace_roots / workspace.entries / primitive.path_rules / primitive.bash_forbidden / primitive.bash_approval_required）：value 是单个新元素的 JSON 字符串（追加 only，不替换整数组）。例：value='{\"path\":\"~/myproj\",\"mode\":\"deny\"}'\n- 标量字段（llm.default_model / log.level / context.compaction_turns 等）：value 直接是新值字符串（替换语义）\n- 删除/修改不支持：返回 error 引导用户使用 `pi config edit` 手编 TOML（未来版本将提供 `pi pathrules remove` / `pi workspace remove`）\n\n禁止字段：llm.api_key* / security.* / storage.* / agent.id / agent.workspace / primitive.auto_confirm 等（自我提权防护）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -464,7 +503,7 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────
 
-/// 把 `ChatContext` 的 workspace 配置 + session_grants + dragged_paths 合并成
+/// 把 `ChatContext` 的 workspace 配置 + session_grants 合并成
 /// `system_prompt::WorkspaceState`，喂给 [`build_system_prompt_with_state`]。
 ///
 /// 直接读 `ctx.gate.effective_roots()` / `effective_path_rules()`，与 executor /
@@ -475,13 +514,11 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     use std::collections::HashSet;
 
     let cfg = &ctx.config;
-    let workspace_dir = ctx.workspace_dir.clone();
-    let extra_roots = resolve_extra_roots_paths(cfg).unwrap_or_default();
+    let agent_definition_dir = ctx.agent_definition_dir.clone();
+    let workspace_roots = resolve_workspace_roots_paths(cfg).unwrap_or_default();
 
-    // agent runtime trail：display 用运行态根路径（仅展示，read_only 集合由 gate 提供）。
-    let agent_data_dir_for_prompt = Some(ctx.agent_workspace_trail.to_string_lossy().to_string());
-    let agent_data_readonly_dirs: Vec<std::path::PathBuf> = vec![
-        Some(ctx.agent_workspace_trail.clone()),
+    let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
+        Some(ctx.agent_trail_dir.clone()),
         crate::infra::config::resolve_sessions_dir(cfg).ok(),
         crate::infra::config::resolve_log_dir(cfg).ok(),
         crate::infra::config::resolve_audit_dir(cfg).ok(),
@@ -504,8 +541,8 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     }
 
     // ── read_write 列表 ──
-    let workspace_canon = workspace_dir.to_string_lossy().to_string();
-    let extra_set: HashSet<String> = extra_roots
+    let agent_definition_canon = agent_definition_dir.to_string_lossy().to_string();
+    let workspace_root_set: HashSet<String> = workspace_roots
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
@@ -515,13 +552,6 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let dragged_set: HashSet<String> = ctx
-        .dragged_paths
-        .snapshot()
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-
     let er = ctx.gate.effective_roots();
     let mut read_write: Vec<WorkspaceRootDescriptor> = Vec::new();
     let mut seen_rw: HashSet<String> = HashSet::new();
@@ -530,12 +560,10 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
         if !seen_rw.insert(s.clone()) {
             continue;
         }
-        let label = if s == workspace_canon {
-            "agent_workspace_definition"
-        } else if extra_set.contains(&s) {
-            "extra_root"
-        } else if dragged_set.contains(&s) {
-            "dragged_path"
+        let label = if s == agent_definition_canon {
+            "agent_definition_dir"
+        } else if workspace_root_set.contains(&s) {
+            "agent_workspace_root"
         } else if session_set.contains(&s) {
             "session_grant"
         } else {
@@ -553,7 +581,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     // ── read_only 列表 ──
     let mut read_only: Vec<WorkspaceRootDescriptor> = Vec::new();
     let mut seen_ro: HashSet<String> = HashSet::new();
-    let agent_data_set: HashSet<String> = agent_data_readonly_dirs
+    let agent_trail_set: HashSet<String> = agent_trail_readonly_dirs
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
@@ -562,8 +590,8 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
         if !seen_ro.insert(s.clone()) {
             continue;
         }
-        let label = if agent_data_set.contains(&s) {
-            "agent_workspace_trail"
+        let label = if agent_trail_set.contains(&s) {
+            "agent_trail_dir"
         } else {
             "path_rule_readonly"
         };
@@ -595,11 +623,9 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     }
 
     WorkspaceState {
-        cwd: ctx.cwd.to_string_lossy().to_string(),
         read_write,
         read_only,
         path_rules,
-        agent_data_dir: agent_data_dir_for_prompt,
     }
 }
 
@@ -622,10 +648,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
     // ContextState: 在 loop 外一次性初始化，跨迭代复用
     let context_config = &ctx.config.context;
-    let workspace_str = ctx.workspace_dir.to_string_lossy().to_string();
+    let workspace_context = crate::core::system_prompt::WorkspaceContext {
+        agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
+        agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
+        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+    };
     let workspace_state = compute_workspace_state(ctx);
-    let system_text =
-        crate::core::system_prompt::build_system_prompt_with_state(&workspace_str, workspace_state);
+    let system_text = crate::core::system_prompt::build_system_prompt_with_state(
+        workspace_context,
+        workspace_state,
+    );
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
     let session_stderr_ids =
         session_stderr_listeners::register_chat_session_stderr_listeners(&*ctx.event_bus);
@@ -653,11 +685,20 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             continue;
         }
 
-        // 拖拽路径解析：行内含意图 → SessionGrants AllowOnce；纯路径 → 5 选项菜单。
-        // 菜单返回 None 时，原行按聊天处理（cancel 行为）。
+        // 拖拽路径解析：仅整行纯路径进入授权菜单；含意图行等同普通聊天输入。
         let input = match handle_dragged_input(ctx, &input, &mut rl) {
             DragHandleResult::Continue { line } => line,
             DragHandleResult::Skip => continue,
+            DragHandleResult::RecordUserAndSkip { synth_user_msg } => {
+                context_state.on_message_appended(synth_user_msg.len());
+                let mut msg = ChatMessage::user(&synth_user_msg);
+                let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
+                msg.msg_id = Some(row_id);
+                context_state.messages.push(msg);
+                ctx.session.persist_context_observability(&context_state)?;
+                eprintln!("{}", synth_user_msg);
+                continue;
+            }
         };
 
         let _ = rl.add_history_entry(&input);
@@ -718,7 +759,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             session_id: ctx.session.current_session_key().to_string(),
             tool_definitions: build_tool_definitions(),
             context_config: context_config.clone(),
-            agent_workspace_trail: ctx.agent_workspace_trail.to_string_lossy().to_string(),
+            agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -864,14 +905,14 @@ fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
 }
 
 fn migrate_legacy_layer0_tool_results(
-    agent_workspace_definition: &std::path::Path,
-    agent_workspace_trail: &std::path::Path,
+    agent_definition_dir: &std::path::Path,
+    agent_trail_dir: &std::path::Path,
 ) {
-    let legacy_root = agent_workspace_definition.join("workspace");
+    let legacy_root = agent_definition_dir.join("workspace");
     if !legacy_root.exists() {
         return;
     }
-    let target_root = agent_workspace_trail.join("tool-results");
+    let target_root = agent_trail_dir.join("tool-results");
     if let Ok(entries) = std::fs::read_dir(&legacy_root) {
         let _ = std::fs::create_dir_all(&target_root);
         for entry in entries.flatten() {
@@ -883,189 +924,5 @@ fn migrate_legacy_layer0_tool_results(
             }
             let _ = std::fs::rename(&from, &to);
         }
-    }
-}
-
-// ─── 拖拽路径处理（plan §7） ────────────────────────────────────────────────
-
-use dragged_path::{
-    interpret_dragged_paths, render_drag_menu, DragOutcome, MenuChoice, MenuOptions,
-};
-
-enum DragHandleResult {
-    /// 把 `line` 作为本回合用户消息发给 LLM。
-    Continue { line: String },
-    /// 用户在菜单选了非 `[c]` 选项 / 或路径无效 —— 跳过本轮 readline。
-    Skip,
-}
-
-fn handle_dragged_input(
-    ctx: &ChatContext,
-    input: &str,
-    rl: &mut rustyline::DefaultEditor,
-) -> DragHandleResult {
-    match interpret_dragged_paths(input) {
-        DragOutcome::None => DragHandleResult::Continue {
-            line: input.to_string(),
-        },
-        DragOutcome::AutoAllow {
-            paths,
-            original_line,
-        } => {
-            for p in &paths {
-                match precheck_read_allow(ctx, p) {
-                    Ok(canon) => {
-                        ctx.gate.grant_session(
-                            canon,
-                            crate::core::permission::GrantSource::DraggedPath,
-                        );
-                        eprintln!("✓ {} 本次会话期间允许访问", p.display());
-                    }
-                    Err(e) => {
-                        eprintln!("✗ {}: {}", p.display(), e);
-                    }
-                }
-            }
-            DragHandleResult::Continue {
-                line: original_line,
-            }
-        }
-        DragOutcome::PromptMenu {
-            paths,
-            original_line,
-        } => {
-            // 首版菜单：每个路径独立走一次（保证 path_rules 预检查精确）。
-            // 多路径用户体验是"逐条菜单"——避免一刀切允许 5 路径中的 builtin deny。
-            let mut any_persisted = false;
-            for p in &paths {
-                let opts = render_drag_menu(p, &*ctx.gate);
-                let choice = render_menu_and_read(p, &opts, rl);
-                match apply_menu_choice(ctx, p, choice) {
-                    Ok(persisted) => {
-                        any_persisted |= persisted;
-                    }
-                    Err(e) => {
-                        eprintln!("✗ {}: {}", p.display(), e);
-                    }
-                }
-            }
-            if any_persisted {
-                DragHandleResult::Skip
-            } else {
-                // 没人持久化也没 AllowOnce：把原行按聊天处理。
-                DragHandleResult::Continue {
-                    line: original_line,
-                }
-            }
-        }
-    }
-}
-
-fn render_menu_and_read(
-    path: &std::path::Path,
-    opts: &MenuOptions,
-    rl: &mut rustyline::DefaultEditor,
-) -> MenuChoice {
-    println!("\n--- 拖入路径授权 ---");
-    println!("路径: {}", path.display());
-    if let Some(note) = &opts.note {
-        println!("提示: {}", note);
-    }
-    if opts.allow_once {
-        println!("  [a] 本次会话允许访问");
-    }
-    if opts.persist_extra_root {
-        println!("  [w] 以后也允许访问（写入配置 workspace.extra_roots）");
-    }
-    if opts.persist_readonly {
-        println!("  [r] 设为只读：允许读取，禁止写入");
-    }
-    if opts.persist_deny {
-        println!("  [d] 禁止访问：拒绝读取和写入");
-    }
-    if opts.cancel {
-        println!("  [c] 取消授权，作为普通消息发送");
-    }
-    print!("选择: ");
-    let _ = io::stdout().flush();
-
-    let line = rl.readline("").unwrap_or_else(|_| "c".to_string());
-    MenuChoice::from_input(&line).unwrap_or(MenuChoice::Cancel)
-}
-
-fn apply_menu_choice(
-    ctx: &ChatContext,
-    path: &std::path::Path,
-    choice: MenuChoice,
-) -> Result<bool, AppError> {
-    use crate::core::permission::{PathRule, PathRuleMode};
-
-    match choice {
-        MenuChoice::AllowOnce => {
-            let canon = precheck_read_allow(ctx, path)?;
-            ctx.gate
-                .grant_session(canon, crate::core::permission::GrantSource::SessionGrant);
-            eprintln!("✓ {} 本次会话期间允许访问", path.display());
-            Ok(true)
-        }
-        MenuChoice::PersistExtraRoot => {
-            precheck_read_allow(ctx, path)?;
-            let canon = std::fs::canonicalize(path).map_err(AppError::Io)?;
-            let cfg_path = crate::api::cli::config_file_path()?;
-            crate::infra::config::append_extra_root_to_disk(
-                &cfg_path,
-                canon.to_string_lossy().into_owned(),
-            )?;
-            eprintln!("✓ 已更新配置：以后允许访问 {}", canon.display());
-            Ok(true)
-        }
-        MenuChoice::PersistReadonly | MenuChoice::PersistDeny => {
-            let mode = match choice {
-                MenuChoice::PersistReadonly => PathRuleMode::Readonly,
-                MenuChoice::PersistDeny => PathRuleMode::Deny,
-                _ => unreachable!(),
-            };
-            let cfg_path = crate::api::cli::config_file_path()?;
-            crate::infra::config::append_path_rule_to_disk(
-                &cfg_path,
-                PathRule {
-                    path: path.to_string_lossy().into_owned(),
-                    mode,
-                },
-            )?;
-            ctx.gate.grant_path_rule(PathRule {
-                path: path.to_string_lossy().into_owned(),
-                mode,
-            });
-            let status = match mode {
-                PathRuleMode::Readonly => "已设为只读",
-                PathRuleMode::Deny => "已禁止访问",
-            };
-            eprintln!("✓ 已更新访问规则：{} {}", path.display(), status);
-            Ok(true)
-        }
-        MenuChoice::Cancel => Ok(false),
-    }
-}
-
-fn precheck_read_allow(
-    ctx: &ChatContext,
-    path: &std::path::Path,
-) -> Result<std::path::PathBuf, AppError> {
-    use crate::core::permission::PermissionDecision;
-    use crate::core::primitives::PrimitiveOperation;
-
-    let canon = crate::infra::platform::normalize_path(&path.to_string_lossy())
-        .unwrap_or_else(|_| path.to_path_buf());
-    match ctx
-        .gate
-        .check(PrimitiveOperation::Read, &canon.to_string_lossy())?
-    {
-        PermissionDecision::Deny { reason } => Err(AppError::Permission(format!(
-            "该路径已被禁止访问，无法授权本次会话：{} ({})",
-            path.display(),
-            reason
-        ))),
-        _ => Ok(canon),
     }
 }

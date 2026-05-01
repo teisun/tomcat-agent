@@ -1,14 +1,13 @@
 //! # 工作区权限分级 - 核心类型
 //!
 //! 与 `.cursor/plans/workspace_permission_tiers_design_1ad7681a.plan.md` §2 对齐：
-//! `PermissionDecision` / `GrantSource` / `PermissionLevel` / `PathRuleMode` /
+//! `PermissionDecision` / `GrantTrace` / `PermissionLevel` / `PathRuleMode` /
 //! `EffectiveRoots`。
 //!
 //! - `PermissionDecision` 描述 [`PermissionGate::check`](super::PermissionGate)
 //!   返回的三态结果。
-//! - `GrantSource` 是审计/溯源字段；运行时行为以 `Allow` 自身为准。
-//! - `PermissionLevel` 描述操作权限等级；与"是否在 working dir 内"解耦
-//!   （后者作为 audit entry 的独立字段 `in_working_dir`）。
+//! - `GrantTrace` 同时记录授权类型与触发来源，供审计/溯源使用。
+//! - `PermissionLevel` 描述操作权限等级；与目录来源解耦。
 //! - `PathRuleMode` 仅两种合法模式：`Deny` / `ReadOnly`；"未命中"自然表达 allow。
 
 use serde::{Deserialize, Serialize};
@@ -18,38 +17,72 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionLevel {
-    /// 含 working dir read / extra_root read / readonly path_rule / agent_data_dir。
+    /// 含默认定义目录 read / extra_root read / readonly path_rule / agent_trail_dir。
     Read,
-    /// 含 working dir write / extra_root write / session 授权后写。
+    /// 含默认定义目录 write / extra_root write / session 授权后写。
     Write,
-    /// bash 命令命中 whitelist。
-    BashWhitelist,
+    /// bash 命令通过命令策略。
+    Bash,
     /// bash 命令命中 approval_required（需用户确认）。
     BashApproval,
     /// 命中 path_rules deny / bash_forbidden / hardcoded write deny。
     Forbidden,
 }
 
-/// 授权来源——主要供审计/溯源；运行时行为以 `Allow` 自身为准。
+/// 授权类型——说明“为什么允许”。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GrantSource {
-    /// 隐式 workspace_dir（启动时确定）。
-    AgentWorkspace,
-    /// `{work_dir}/agents/{id}` 数据目录（仅 read）。
-    AgentDataDir,
-    /// `pi.config.toml` 中 `[workspace] extra_roots`（持久）。
-    ConfigExtraRoot,
-    /// 用户在 confirm 弹窗显式选了"本次允许"（知情授权）。
-    SessionGrant,
-    /// 拖拽产生的临时授权（行内含意图自动 AllowOnce / 拖拽菜单 [a]）。
-    DraggedPath,
+pub enum GrantType {
+    /// `agent_definition_dir`（`workspace-<agentId>/`）—— 默认 writable 根。
+    AgentDefinitionDir,
+    /// `pi.config.toml` 中 `[workspace] workspace_roots`（用户工作区根，持久）。
+    AgentWorkspaceRoot,
+    /// 仅本会话生效的授权范围。
+    SessionScope,
     /// 命中 path_rules readonly + read 操作。
     PathRuleReadOnly,
-    /// 命中 bash_whitelist regex。
-    BashWhitelist,
-    /// `primitive.auto_confirm = true` 时短路 Layer-2 NeedConfirm。
+    /// `agent_trail_dir` 运行态目录（仅 read）。
+    AgentTrailDir,
+    /// Bash 命令未命中 forbidden / approval_required 后按策略放行。
+    BashPolicy,
+}
+
+/// 触发来源——说明“这次授权从哪里来”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantTrigger {
+    /// 内置默认策略。
+    BuiltinDefault,
+    /// `[workspace] workspace_roots` 配置。
+    WorkspaceRootsConfig,
+    /// `path_rules` 配置或运行时追加。
+    PathRulesConfig,
+    /// bash forbidden / approval regex 策略。
+    BashRegexConfig,
+    /// 用户在普通确认菜单中选择允许。
+    UserConfirm,
+    /// cwd lazy prompt 产生的授权。
+    CwdLazyPrompt,
+    /// 拖拽路径菜单产生的授权。
+    DraggedPathMenu,
+    /// `primitive.auto_confirm = true` 时自动允许。
     AutoConfirmFlag,
+}
+
+/// 审计/溯源信息：授权类型 + 触发来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantTrace {
+    pub grant_type: GrantType,
+    pub trigger: GrantTrigger,
+}
+
+impl GrantTrace {
+    pub const fn new(grant_type: GrantType, trigger: GrantTrigger) -> Self {
+        Self {
+            grant_type,
+            trigger,
+        }
+    }
 }
 
 /// 检查结果（三态）。
@@ -57,11 +90,11 @@ pub enum GrantSource {
 pub enum PermissionDecision {
     /// 通过；附带审计来源与操作等级。
     Allow {
-        source: GrantSource,
+        grant: GrantTrace,
         level: PermissionLevel,
     },
     /// 需要 confirm（Layer-2 外部路径）；
-    /// `suggested_root` 为可建议持久化为 `extra_roots` 的父目录。
+    /// `suggested_root` 为可建议持久化为 `workspace_roots` 的父目录。
     NeedConfirm {
         reason: String,
         suggested_root: Option<PathBuf>,
@@ -80,10 +113,10 @@ pub enum PathRuleMode {
     Readonly,
 }
 
-/// 当前生效的路径范围（从配置 + workspace_dir + session_grants + dragged 派生）。
+/// 当前生效的路径范围（从 agent_definition_dir + 配置 + session_grants 派生）。
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveRoots {
-    /// `workspace_dir + extra_roots + session_grants + dragged`。
+    /// `agent_definition_dir + workspace_roots + session_grants`。
     pub read_write: Vec<PathBuf>,
     /// `agents/{id}`（除凭据外） + `path_rules` 中的 `Readonly` 命中。
     pub read_only: Vec<PathBuf>,

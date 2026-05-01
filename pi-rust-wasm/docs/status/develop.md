@@ -2,7 +2,7 @@
 | :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-28 | INTEGRATED | develop | — |
 
-### 集成测试报告 — T2-P0-004 follow-up（drag deny + cwd runtime + agent_workspace_trail）
+### 集成测试报告 — T2-P0-004 follow-up（drag deny + cwd runtime + agent_trail_dir）
 
 **合并信息**
 
@@ -13,16 +13,16 @@
 
 **§1 规格 & 场景库核对**
 
-- `User_Stories.md` Story 2 已补充本 follow-up 的用户可见验收点：拖拽路径 + 中文/非 ASCII 意图、deny / readonly `path_rules` 会话内热生效、cwd / extra_roots 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_workspace_trail/tool-results/{session_id}` 落盘语义。
+- `User_Stories.md` Story 2 已补充本 follow-up 的用户可见验收点：拖拽路径 + 中文/非 ASCII 意图、deny / readonly `path_rules` 会话内热生效、cwd / workspace_roots 扩权前 deny 预检、二进制 `read_file` 产品化错误、Layer0 `agent_trail_dir/tool-results/{session_id}` 落盘语义。
 - `E2E_SCENARIO_LIBRARY.md` Story 2 已新增 E2E-CLI-018～022，覆盖 drag-deny、cwd runtime、`config_set primitive.path_rules` 热生效、二进制错误与 Layer0 落盘路径；018～020 标记人工补验，核心契约由现有自动化回归锁定。
-- `permission-system.md`、`directory-structure.md`、`context-management.md` 已对齐本次权限 deny 热生效、cwd 语义、`agent_workspace_trail` 与 Layer0 `tool-results` 落盘路径变更；`context-management.md` 旧伪代码中的 `work_dir/agents/.../tool-results` 已改为 `agent_workspace_trail/tool-results/{session_id}`。
+- `permission-system.md`、`directory-structure.md`、`context-management.md` 已对齐本次权限 deny 热生效、cwd 语义、`agent_trail_dir` 与 Layer0 `tool-results` 落盘路径变更；`context-management.md` 旧伪代码中的 `work_dir/agents/.../tool-results` 已改为 `agent_trail_dir/tool-results/{session_id}`。
 - 本次为 T2-P0-004 已 DONE 后 follow-up 修复，不新增主任务、不回退看板状态。
 
 **§2 / §3 测试 review**
 
 - 权限门覆盖 session runtime path_rules、deny 预检、`config_set primitive.path_rules` 热生效、拖拽菜单扩大授权前 deny 校验等路径。
 - Nibbles 补充自动化回归：`render_drag_menu_with_deny_rule_hides_authorization_choices` 用真实 `DefaultPermissionGate` 断言拖拽命中 deny 时只剩取消；`config_set_array_path_rule_appends_with_json_value` 增加同一会话 gate 立即 deny 的闭环断言。
-- 拖拽解析覆盖不存在文件 + 中文意图不误退父目录；Layer0 覆盖 `agent_workspace_trail/tool-results/{session_id}` 写入与旧路径迁移。
+- 拖拽解析覆盖不存在文件 + 中文意图不误退父目录；Layer0 覆盖 `agent_trail_dir/tool-results/{session_id}` 写入与旧路径迁移。
 - E2E 复跑覆盖 `cli_tests` 77/77 与 `wasmedge_e2e_tests` 39/39；WasmEdge cleanup 阶段 `Code: 0x8d` stderr 仍按验收文档说明处理，以 Rust test harness `ok` 为准。
 
 **§4 全量门禁**（在 `develop` 合并后、`pi-rust-wasm` 根目录；`source .env` 注入 LLM 测试环境）
@@ -49,7 +49,7 @@
 
 **结论**
 
-T2-P0-004 follow-up 集成验收**通过**：`feature/drag-deny-cwd-runtime` 已合并入 `develop`，develop 全量门禁绿灯，权限 deny / cwd runtime / `agent_workspace_trail` 语义与规格及测试一致。
+T2-P0-004 follow-up 集成验收**通过**：`feature/drag-deny-cwd-runtime` 已合并入 `develop`，develop 全量门禁绿灯，权限 deny / cwd runtime / `agent_trail_dir` 语义与规格及测试一致。
 
 ---
 

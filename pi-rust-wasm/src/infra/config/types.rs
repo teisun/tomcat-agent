@@ -153,14 +153,14 @@ pub struct PluginConfig {
 ///
 /// 持久化在 `pi.config.toml` 的 `[workspace]` 表；由 `pi workspace add/list/remove` 或手编维护。
 ///
-/// `entries` 是 v2 富格式（每项含 path / alias / description），与 `extra_roots`（仅路径）
+/// `entries` 是 v2 富格式（每项含 path / alias / description），与 `workspace_roots`（仅路径）
 /// 同时支持；解析时合并去重。新代码请优先使用 `entries`。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WorkspaceConfig {
     /// v1 兼容：每项为路径字符串（通常为绝对路径）；空串在解析时忽略。
     #[serde(default)]
-    pub extra_roots: Vec<String>,
-    /// v2 富格式：每项含 path / alias / description（与 `extra_roots` 合并）。
+    pub workspace_roots: Vec<String>,
+    /// v2 富格式：每项含 path / alias / description（与 `workspace_roots` 合并）。
     #[serde(default)]
     pub entries: Vec<WorkspaceEntry>,
 }
@@ -178,7 +178,7 @@ pub struct WorkspaceEntry {
     pub description: Option<String>,
 }
 
-/// 4 原语配置：路径白名单 + bash 三档列表 + path_rules 结构化规则。
+/// 4 原语配置：bash 两档列表 + path_rules 结构化规则。
 ///
 /// **schema 升级（plan §5）**：
 /// - 删除 `path_blacklist`（被 `path_rules` 替代，模式更明确）
@@ -188,21 +188,14 @@ pub struct WorkspaceEntry {
 /// - `bash_forbidden` / `bash_approval_required` 默认转为 regex 字符串列表
 ///   （编译由 `permission::gate` 在构造时完成）
 ///
-/// 仍保留：
-/// - `path_whitelist`：legacy 路径白名单（gate 模式下不再使用，但兼容老 TOML）
-/// - `bash_whitelist`：用户可自定义命令白名单（regex 列表）
-/// - `auto_confirm` / `auto_confirm_whitelist`：自动确认开关（仅短路 layer-2）
+/// 删除 legacy whitelist 配置后，路径允许根只由 `workspace.workspace_roots` 表达；
+/// bash 只保留 forbidden / approval_required 两类策略。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct PrimitiveConfig {
-    #[serde(default)]
-    pub path_whitelist: Vec<String>,
     /// 结构化路径规则。每条 `path` + `mode`（`deny` / `readonly`）。
     /// 在 gate 模式下与 builtin 规则合并；仅生效，不可弱化 builtin。
     #[serde(default)]
     pub path_rules: Vec<crate::core::permission::PathRule>,
-    /// bash 白名单：regex 列表，与 builtin 合并（builtin 默认空）。
-    #[serde(default)]
-    pub bash_whitelist: Vec<String>,
     /// bash 高危但可允许：regex 列表，命中后弹 confirm；与 builtin 合并。
     #[serde(default)]
     pub bash_approval_required: Vec<String>,
@@ -211,8 +204,6 @@ pub struct PrimitiveConfig {
     pub bash_forbidden: Vec<String>,
     #[serde(default)]
     pub auto_confirm: bool,
-    #[serde(default)]
-    pub auto_confirm_whitelist: Vec<String>,
     /// `execute_bash` 在 Unix 上 `sh -c` 前可选 source 的 env 脚本路径；`None` 时默认 `$HOME/.wasmedge/env`。
     #[serde(default)]
     pub wasmedge_env_path: Option<String>,

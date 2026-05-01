@@ -55,7 +55,7 @@ pub struct AgentLoopConfig {
     pub tool_definitions: Vec<serde_json::Value>,
     pub context_config: ContextConfig,
     /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
-    pub agent_workspace_trail: String,
+    pub agent_trail_dir: String,
 }
 
 impl Default for AgentLoopConfig {
@@ -68,7 +68,7 @@ impl Default for AgentLoopConfig {
             session_id: String::new(),
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
-            agent_workspace_trail: String::new(),
+            agent_trail_dir: String::new(),
         }
     }
 }

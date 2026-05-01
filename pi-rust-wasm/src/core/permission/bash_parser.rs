@@ -12,6 +12,7 @@
 //!
 //! 命令前缀（如 `rm`、`echo`）不视作路径；
 //! `--flag=value` 中的 `value` 若像路径则会被提取。
+//! `NAME=/path` 形式的 assignment 会只提取 RHS，覆盖命令前缀、位置参数和子命令首段。
 //!
 //! # 注意
 //!
@@ -33,17 +34,33 @@ pub fn extract_paths(command: &str) -> Vec<String> {
             Ok(t) => t,
             Err(_) => continue,
         };
-        // 跳过命令本身（第一个 token），其余 token 检查是否像路径。
-        let mut iter = tokens.into_iter();
+        let mut iter = tokens.iter().peekable();
+        while let Some(tok) = iter.peek() {
+            let Some(rhs) = is_env_assignment(tok) else {
+                break;
+            };
+            if looks_like_path(rhs) {
+                paths.push(rhs.to_string());
+            }
+            iter.next();
+        }
+        // 跳过命令名；leading assignment-only 子命令已经在上面被消费。
         let _cmd_name = iter.next();
         for tok in iter {
-            collect_candidates(&tok, &mut paths);
+            collect_candidates(tok, &mut paths);
         }
     }
     paths
 }
 
 fn collect_candidates(tok: &str, out: &mut Vec<String>) {
+    if let Some(rhs) = is_env_assignment(tok) {
+        if looks_like_path(rhs) {
+            out.push(rhs.to_string());
+        }
+        return;
+    }
+
     // 处理 --flag=value
     if let Some(eq) = tok.find('=') {
         // 仅当 token 以 `-` 开头时才视为 flag
@@ -58,6 +75,24 @@ fn collect_candidates(tok: &str, out: &mut Vec<String>) {
     if looks_like_path(tok) {
         out.push(tok.to_string());
     }
+}
+
+fn is_env_assignment(tok: &str) -> Option<&str> {
+    let eq = tok.find('=')?;
+    let name = &tok[..eq];
+    let rhs = &tok[eq + 1..];
+    if name.is_empty() {
+        return None;
+    }
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(rhs)
 }
 
 fn looks_like_path(s: &str) -> bool {
@@ -168,6 +203,48 @@ mod tests {
     fn extracts_flag_value_paths() {
         let v = extract_paths("cargo --target-dir=/tmp/target build");
         assert_eq!(v, vec!["/tmp/target"]);
+    }
+
+    #[test]
+    fn extracts_assignment_in_arg_position() {
+        let v = extract_paths("stat -c %s p=/Users/a/file");
+        assert_eq!(v, vec!["/Users/a/file"]);
+    }
+
+    #[test]
+    fn extracts_leading_env_assignment_before_cmd() {
+        let v = extract_paths("p=/Users/a/file ls -la \"$p\"");
+        assert!(v.contains(&"/Users/a/file".to_string()));
+    }
+
+    #[test]
+    fn extracts_leading_env_assignment_in_subcommand() {
+        let v = extract_paths("p=/Users/a/file; cmd $p");
+        assert!(v.contains(&"/Users/a/file".to_string()));
+    }
+
+    #[test]
+    fn keeps_existing_flag_value_behavior() {
+        let v = extract_paths("cargo --target-dir=/tmp/target build");
+        assert_eq!(v, vec!["/tmp/target"]);
+    }
+
+    #[test]
+    fn ignores_empty_rhs() {
+        let v = extract_paths("p= cmd");
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_identifier_lhs() {
+        let v = extract_paths("echo 123=/path");
+        assert_eq!(v, vec!["123=/path"]);
+    }
+
+    #[test]
+    fn multiple_leading_assignments() {
+        let v = extract_paths("A=/x B=/y cmd");
+        assert_eq!(v, vec!["/x", "/y"]);
     }
 
     #[test]

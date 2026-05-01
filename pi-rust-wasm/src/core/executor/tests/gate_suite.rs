@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::executor::DefaultPrimitiveExecutor;
 use crate::core::permission::{
-    DefaultPermissionGate, DraggedPaths, GateConfig, PathRule, PathRuleMode, SessionGrants,
+    DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,
 };
 use crate::core::primitives::{PrimitiveExecutor, PrimitiveOperation};
 use crate::core::AllowAllConfirmation;
@@ -71,29 +71,28 @@ fn workspace_dir(name: &str) -> PathBuf {
 }
 
 fn make_executor(
-    workspace_dir: PathBuf,
+    agent_definition_dir: PathBuf,
     user_path_rules: Vec<PathRule>,
     confirm: Arc<dyn UserConfirmationProvider>,
 ) -> DefaultPrimitiveExecutor {
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: workspace_dir.clone(),
-            extra_roots: vec![],
-            agent_data_readonly_dirs: vec![],
+            agent_definition_dir,
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
             user_path_rules,
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
-    let cfg = PrimitiveConfig::default();
-    // gate 模式下 needs_confirmation 不被调用，无需关闭 legacy 字段。
-
-    DefaultPrimitiveExecutor::new(cfg, confirm, Arc::new(TracingAuditRecorder), workspace_dir)
-        .with_gate(gate.into_arc())
+    DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        confirm,
+        Arc::new(TracingAuditRecorder),
+        gate.into_arc(),
+    )
 }
 
 #[tokio::test]
@@ -178,38 +177,35 @@ async fn gate_bash_forbidden_blocks() {
     let _ = std::fs::remove_dir(&ws);
 }
 
-// ── PR-9：Agent data dir read-only / 凭据 deny 经 executor 落地 ──
+// ── PR-9：Agent trail dir read-only / 凭据 deny 经 executor 落地 ──
 
 fn make_executor_with_agent_ro(
-    workspace_dir: PathBuf,
+    agent_definition_dir: PathBuf,
     agent_ro: Vec<PathBuf>,
     confirm: Arc<dyn UserConfirmationProvider>,
 ) -> DefaultPrimitiveExecutor {
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: workspace_dir.clone(),
-            extra_roots: vec![],
-            agent_data_readonly_dirs: agent_ro,
+            agent_definition_dir,
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: agent_ro,
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
-        DraggedPaths::new(),
     );
     DefaultPrimitiveExecutor::new(
         PrimitiveConfig::default(),
         confirm,
         Arc::new(TracingAuditRecorder),
-        workspace_dir,
+        gate.into_arc(),
     )
-    .with_gate(gate.into_arc())
 }
 
 #[tokio::test]
-async fn pr9_executor_reads_agent_data_dir_succeeds() {
+async fn pr9_executor_reads_agent_trail_dir_succeeds() {
     let ws = workspace_dir("pr9_ad_read_ws");
     let agent_ro = workspace_dir("pr9_ad_read_ro");
     let f = agent_ro.join("hello.log");
@@ -222,7 +218,7 @@ async fn pr9_executor_reads_agent_data_dir_succeeds() {
     let res = exec
         .read_file(&f.to_string_lossy(), "p1")
         .await
-        .expect("read should pass via AgentDataDir");
+        .expect("read should pass via AgentTrailDir");
     assert!(res.contains("line1"));
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_dir(&agent_ro);
@@ -230,11 +226,11 @@ async fn pr9_executor_reads_agent_data_dir_succeeds() {
 }
 
 #[tokio::test]
-async fn pr9_executor_writes_agent_data_dir_blocked_or_confirms() {
+async fn pr9_executor_writes_agent_trail_dir_blocked_or_confirms() {
     let ws = workspace_dir("pr9_ad_write_ws");
     let agent_ro = workspace_dir("pr9_ad_write_ro");
     let f = agent_ro.join("blocked.log");
-    // confirm 选 Deny —— write 必须失败（gate 不会 Allow agent_data_readonly_dirs 的 write）。
+    // confirm 选 Deny —— write 必须失败（gate 不会 Allow agent_trail_readonly_dirs 的 write）。
     let exec = make_executor_with_agent_ro(
         ws.clone(),
         vec![agent_ro.clone()],
@@ -245,7 +241,7 @@ async fn pr9_executor_writes_agent_data_dir_blocked_or_confirms() {
         .await;
     assert!(
         matches!(r, Err(AppError::Permission(_))),
-        "write 在 agent data dir 上应受 confirm/deny 控制，得到: {:?}",
+        "write 在 agent trail dir 上应受 confirm/deny 控制，得到: {:?}",
         r
     );
     let _ = std::fs::remove_dir(&agent_ro);

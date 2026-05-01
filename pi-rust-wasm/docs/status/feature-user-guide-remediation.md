@@ -36,7 +36,7 @@
 6. **remove-export-import** — 移除 config export/import 子命令、测试、E2E、user-guide
 7. **remove-env-overrides** — 移除 WASMEDGE_QUICKJS_PATH 死代码和 user-guide 环境变量附录
 8. **fix-tool-call-history** — AgentRunResult 返回 new_messages，chat_loop 逐条写入 session
-9. **workspace-command** — 新增 workspace add/list/remove + `pi.config.toml` `[workspace] extra_roots`（全局）
+9. **workspace-command** — 新增 workspace add/list/remove + `pi.config.toml` `[workspace] workspace_roots`（全局）
 10. **plugin-registry** — 新增 plugins/registry.json 全局注册表
 11. **TASK-16 / init-3step-workspace-cwd** — `pi init` 三步（环境 / doctor 同源检查 skip API Key / API Key）、默认 `gpt-5.2`、已有配置不覆盖、PATH 写入 shell（`# Added by pi init`）；`pi workspace add --cwd`；附录补充 `PI_WASM__LLM__DEFAULT_MODEL` 说明
 

@@ -9,8 +9,8 @@
 //! 工作区权限分级（plan §3）需要"加入工作区(永久)/本次允许/拒绝"三选项。
 //!
 //! 兼容策略：
-//! - 老代码路径继续使用 `confirm` -> `bool`（在 executor 旧分支保留）。
-//! - 新代码路径使用 `confirm_decision` -> [`ConfirmDecision`]，
+//! - `confirm` -> `bool` 作为 trait 兼容入口保留，默认三态实现会委托它。
+//! - executor 当前路径使用 `confirm_decision` -> [`ConfirmDecision`]，
 //!   默认实现委托给 `confirm`（`true` ↦ `AllowOnce`，`false` ↦ `Deny`）。
 //! - CLI 端 `CliConfirmation` 在 PR-4（drag UX）/PR-2（executor 接入）中
 //!   override `confirm_decision` 给出 3 选项 UI。
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 pub enum ConfirmDecision {
     /// 仅本次允许（写入 SessionGrants，会话结束失效）。
     AllowOnce,
-    /// 允许并把 `root` 写入 `workspace.extra_roots`（持久化）。
+    /// 允许并把 `root` 写入 `workspace.workspace_roots`（持久化）。
     AllowAndPersistRoot { root: PathBuf },
     /// 拒绝。
     Deny,

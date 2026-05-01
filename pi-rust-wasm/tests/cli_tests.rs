@@ -168,7 +168,7 @@ fn test_doctor_with_valid_config_checks_environment() {
 /// [E2E-CLI-004] 工作区 add / list / remove
 ///
 /// 验证：init 后 workspace add → list 含路径 → remove → list 为空提示
-/// 意义：TASK-12 / TASK-09：`pi workspace` 与 `pi.config.toml` `[workspace] extra_roots` 一致
+/// 意义：TASK-12 / TASK-09：`pi workspace` 与 `pi.config.toml` `[workspace] workspace_roots` 一致
 #[test]
 fn test_workspace_add_list_remove_e2e() {
     common::setup_logging();
