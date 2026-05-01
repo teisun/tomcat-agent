@@ -7,8 +7,8 @@
 //! - `PermissionDecision` 描述 [`PermissionGate::check`](super::PermissionGate)
 //!   返回的三态结果。
 //! - `GrantSource` 是审计/溯源字段；运行时行为以 `Allow` 自身为准。
-//! - `PermissionLevel` 描述操作权限等级；与"是否在 working dir 内"解耦
-//!   （后者作为 audit entry 的独立字段 `in_working_dir`）。
+//! - `PermissionLevel` 描述操作权限等级；与目录来源解耦。审计字段
+//!   `in_working_dir` 是历史字段名，当前仅保留兼容。
 //! - `PathRuleMode` 仅两种合法模式：`Deny` / `ReadOnly`；"未命中"自然表达 allow。
 
 use serde::{Deserialize, Serialize};
@@ -18,9 +18,9 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionLevel {
-    /// 含 working dir read / extra_root read / readonly path_rule / agent_data_dir。
+    /// 含默认定义目录 read / extra_root read / readonly path_rule / agent_data_dir。
     Read,
-    /// 含 working dir write / extra_root write / session 授权后写。
+    /// 含默认定义目录 write / extra_root write / session 授权后写。
     Write,
     /// bash 命令通过命令策略。
     Bash,
@@ -34,7 +34,10 @@ pub enum PermissionLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantSource {
-    /// 隐式 workspace_dir（启动时确定）。
+    /// `agent_definition_dir`（`workspace-<agentId>/`）—— 默认 writable 根。
+    /// 历史名 `AgentWorkspace` 保留以兼容审计 schema；
+    /// 启动 cwd（即 `agent_workspace_dir`）不再属于此来源，需要 `extra_roots` /
+    /// `session_grants` / `dragged_paths` 显式授权。
     AgentWorkspace,
     /// `{work_dir}/agents/{id}` 数据目录（仅 read）。
     AgentDataDir,
@@ -48,7 +51,7 @@ pub enum GrantSource {
     PathRuleReadOnly,
     /// Bash 命令未命中 forbidden / approval_required 后按策略放行。
     BashPolicy,
-    /// `primitive.auto_confirm = true` 时短路 Layer-2 NeedConfirm。
+    /// `primitive.auto_confirm = true` 时确认阶段自动允许。
     AutoConfirmFlag,
 }
 
@@ -80,10 +83,10 @@ pub enum PathRuleMode {
     Readonly,
 }
 
-/// 当前生效的路径范围（从配置 + workspace_dir + session_grants + dragged 派生）。
+/// 当前生效的路径范围（从 agent_definition_dir + 配置 + session_grants + dragged 派生）。
 #[derive(Debug, Clone, Default)]
 pub struct EffectiveRoots {
-    /// `workspace_dir + extra_roots + session_grants + dragged`。
+    /// `agent_definition_dir + extra_roots + session_grants + dragged`。
     pub read_write: Vec<PathBuf>,
     /// `agents/{id}`（除凭据外） + `path_rules` 中的 `Readonly` 命中。
     pub read_only: Vec<PathBuf>,

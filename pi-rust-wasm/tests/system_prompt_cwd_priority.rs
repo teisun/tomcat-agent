@@ -20,20 +20,12 @@ fn system_prompt_names_three_directories_and_keeps_state_as_permission_list() {
         agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
     };
     let state = WorkspaceState {
-        read_write: vec![
-            WorkspaceRootDescriptor {
-                path: agent_workspace_dir.to_string_lossy().to_string(),
-                label: "agent_workspace_dir".into(),
-                alias: None,
-                description: None,
-            },
-            WorkspaceRootDescriptor {
-                path: agent_definition_dir.to_string_lossy().to_string(),
-                label: "agent_definition_dir".into(),
-                alias: None,
-                description: None,
-            },
-        ],
+        read_write: vec![WorkspaceRootDescriptor {
+            path: agent_definition_dir.to_string_lossy().to_string(),
+            label: "agent_definition_dir".into(),
+            alias: None,
+            description: None,
+        }],
         read_only: vec![WorkspaceRootDescriptor {
             path: agent_trail_dir.to_string_lossy().to_string(),
             label: "agent_trail_dir".into(),
@@ -49,6 +41,7 @@ fn system_prompt_names_three_directories_and_keeps_state_as_permission_list() {
     assert!(prompt.contains("current directory"));
     assert!(prompt.contains("this project"));
     assert!(prompt.contains("relative paths"));
+    assert!(prompt.contains("NOT automatically authorized"));
     assert!(prompt.contains("Agent definition directory (agent_definition_dir):"));
     assert!(prompt.contains("Permission: read/write"));
     assert!(prompt.contains("Do NOT treat it as the user's current directory"));
@@ -58,4 +51,6 @@ fn system_prompt_names_three_directories_and_keeps_state_as_permission_list() {
     assert!(!prompt.contains("Agent runtime trail:"));
     assert!(!prompt.contains("cwd_snapshot"));
     assert!(!prompt.contains("agent_workspace_definition"));
+    assert!(prompt.contains("[agent_definition_dir]"));
+    assert!(!prompt.contains("[agent_workspace_dir]"));
 }

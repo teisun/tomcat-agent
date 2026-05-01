@@ -148,7 +148,8 @@ impl SystemPromptSection for WorkspaceContextSection {
              Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}\n\
              - This is the user's shell working directory when pi chat was launched.\n\
              - Interpret \"current directory\", \"this project\", and relative paths as this directory.\n\
-             - Use \".\" or this absolute path for list_dir/read_file/execute_bash.cwd unless the user explicitly names another path.\n\
+             - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `extra_roots` or a session-only grant.\n\
+             - For execute_bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
              \n\
              Agent definition directory (agent_definition_dir): {agent_definition_dir}\n\
              - Design-time agent rules/configuration under ~/.pi_/workspace-<agentId>/.\n\
@@ -179,7 +180,7 @@ impl SystemPromptSection for WorkspaceContextSection {
 /// `read_write` / `read_only` 元素已经过 `expand_tilde` + canonicalize（调用方
 /// 负责），用于直接渲染给 LLM。
 pub struct WorkspaceState {
-    /// 用户可读写的目录列表（含 agent_workspace_dir、extra_roots、session_grants、dragged）。
+    /// 用户可读写的目录列表（含 agent_definition_dir、extra_roots、session_grants、dragged）。
     pub read_write: Vec<WorkspaceRootDescriptor>,
     /// 仅读目录列表（含 agent_trail_dir 中的 sessions/logs，path_rules readonly 命中等）。
     pub read_only: Vec<WorkspaceRootDescriptor>,
@@ -190,7 +191,7 @@ pub struct WorkspaceState {
 /// 单条 `read_write` / `read_only` 描述。
 pub struct WorkspaceRootDescriptor {
     pub path: String,
-    /// 来源标签：`agent_workspace_dir` / `agent_definition_dir` / `extra_root` /
+    /// 来源标签：`agent_definition_dir` / `extra_root` /
     /// `session_grant` / `dragged_path` / `agent_trail_dir` / `path_rule_readonly` 等。
     pub label: String,
     pub alias: Option<String>,

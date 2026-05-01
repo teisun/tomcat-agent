@@ -63,11 +63,14 @@ pub trait PermissionGate: Send + Sync {
 // DefaultPermissionGate
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 默认实现：不可变快照式（构造时把 cfg / workspace_dir / agent_dir / extra_roots
+/// 默认实现：不可变快照式（构造时把 cfg / agent_definition_dir / agent_dir / extra_roots
 /// 全部冻结），共享 `SessionGrants` 与 `DraggedPaths` 走 `Arc` + 内部 Mutex。
 pub struct DefaultPermissionGate {
-    /// 用户启动 `pi chat` 时的工作目录（writable）。
-    agent_workspace_dir: PathBuf,
+    /// Agent 设计态目录（`workspace-<agentId>/`）—— 默认 writable 根，
+    /// 仅承载 AGENTS.md / SOUL.md / skills / memory 等 agent 长期配置。
+    /// 注意：用户启动 `pi chat` 时的 shell cwd 不会自动放进 writable 集合，
+    /// 需通过 `extra_roots` / `session_grants` / `dragged_paths` 才能访问。
+    agent_definition_dir: PathBuf,
     /// 配置中显式声明的额外根（writable）。
     extra_roots: Vec<PathBuf>,
     /// `{work_dir}/agents/{id}` 一系列只读目录（read only）。
@@ -89,7 +92,9 @@ pub struct DefaultPermissionGate {
 /// `DefaultPermissionGate::new` 构造参数。
 #[derive(Debug, Clone)]
 pub struct GateConfig {
-    pub agent_workspace_dir: PathBuf,
+    /// Agent 设计态目录（`workspace-<agentId>/`）；作为默认 writable 根。
+    /// 启动 cwd 不在此处，访问启动 cwd 子树需要 `extra_roots` 或 session 授权。
+    pub agent_definition_dir: PathBuf,
     pub extra_roots: Vec<PathBuf>,
     pub agent_data_readonly_dirs: Vec<PathBuf>,
     pub user_path_rules: Vec<PathRule>,
@@ -116,7 +121,7 @@ impl DefaultPermissionGate {
             compile_regex_list(BUILTIN_BASH_APPROVAL_REQUIRED, &cfg.user_bash_approval);
 
         Self {
-            agent_workspace_dir: cfg.agent_workspace_dir,
+            agent_definition_dir: cfg.agent_definition_dir,
             extra_roots: cfg.extra_roots,
             agent_data_readonly_dirs: cfg.agent_data_readonly_dirs,
             path_rules,
@@ -142,11 +147,11 @@ impl DefaultPermissionGate {
         Ok(canonicalize_with_existing_ancestor(&p))
     }
 
-    /// 路径是否在 `extra_roots` 或 workspace_dir 之中（writable 集合）。
+    /// 路径是否在 `extra_roots` 或 `agent_definition_dir` 之中（writable 集合）。
     fn in_writable_set(&self, target: &Path) -> bool {
         let s = target.to_string_lossy();
-        let ws = canonicalize_with_existing_ancestor(&self.agent_workspace_dir);
-        if path_starts_with(&s, &ws.to_string_lossy()) {
+        let def = canonicalize_with_existing_ancestor(&self.agent_definition_dir);
+        if path_starts_with(&s, &def.to_string_lossy()) {
             return true;
         }
         for r in &self.extra_roots {
@@ -223,10 +228,10 @@ impl PermissionGate for DefaultPermissionGate {
             }
         }
 
-        // ── Layer 3 第一波：在 writable 集合内（workspace_dir / extra_roots） ──
+        // ── Layer 3 第一波：在 writable 集合内（agent_definition_dir / extra_roots） ──
         if self.in_writable_set(&target) {
             return Ok(PermissionDecision::Allow {
-                source: source_for_writable(&target, &self.agent_workspace_dir, &self.extra_roots),
+                source: source_for_writable(&target, &self.agent_definition_dir, &self.extra_roots),
                 level: level_for_op(op),
             });
         }
@@ -304,7 +309,7 @@ impl PermissionGate for DefaultPermissionGate {
     }
 
     fn effective_roots(&self) -> EffectiveRoots {
-        let mut read_write = vec![self.agent_workspace_dir.clone()];
+        let mut read_write = vec![self.agent_definition_dir.clone()];
         read_write.extend(self.extra_roots.iter().cloned());
         read_write.extend(self.session_grants.snapshot());
         read_write.extend(self.dragged_paths.snapshot());
@@ -353,12 +358,12 @@ fn level_for_op(op: PrimitiveOperation) -> PermissionLevel {
 
 fn source_for_writable(
     target: &Path,
-    workspace_dir: &Path,
+    agent_definition_dir: &Path,
     extra_roots: &[PathBuf],
 ) -> GrantSource {
     let s = target.to_string_lossy();
-    let ws = canonicalize_with_existing_ancestor(workspace_dir);
-    if path_starts_with(&s, &ws.to_string_lossy()) {
+    let def = canonicalize_with_existing_ancestor(agent_definition_dir);
+    if path_starts_with(&s, &def.to_string_lossy()) {
         return GrantSource::AgentWorkspace;
     }
     for r in extra_roots {

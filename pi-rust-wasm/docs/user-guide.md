@@ -78,7 +78,7 @@ pi 默认将所有数据存放在 `~/.pi_/`。可在 `pi.config.toml` 的 `[stor
 
 详见 [directory-structure.md](../openspec/specs/architecture/directory-structure.md)。
 
-目录概念速记：`agent_workspace_dir` 是用户启动 `pi chat` 时的 shell 当前目录；`agent_definition_dir` 是 `workspace-<agentId>/` 设计态目录；`agent_trail_dir` 是 `agents/<agentId>/` 运行态目录。
+目录概念速记：`agent_workspace_dir` 是用户启动 `pi chat` 时的 shell 当前目录，是“当前目录 / 这个项目 / 相对路径”的语义来源，但不自动授权文件访问；`agent_definition_dir` 是 `workspace-<agentId>/` 设计态目录，也是默认可写根；`agent_trail_dir` 是 `agents/<agentId>/` 运行态目录。
 
 ---
 
@@ -308,7 +308,7 @@ pi session delete agent:main:main
 
 ## 5. 工作区管理
 
-pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 自己的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `extra_roots`），**所有 agent 共用同一份列表**。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.extra_roots` 或 `primitive.path_rules`。
+pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 默认可写的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `extra_roots`），**所有 agent 共用同一份列表**。启动 `pi chat` 时的当前目录不会自动加入该列表；需要访问当前项目时，可用 `pi workspace add --cwd`、对话中的 cwd lazy prompt 或拖拽授权显式加入。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.extra_roots` 或 `primitive.path_rules`。
 
 ### 添加工作区
 

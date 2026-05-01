@@ -25,9 +25,9 @@ use pi_wasm::{
     AllowAllConfirmation, DenyAllConfirmation, PrimitiveOperation, UserConfirmationProvider,
 };
 
-fn make_gate(workspace: &std::path::Path) -> Arc<dyn PermissionGate> {
+fn make_gate(definition: &std::path::Path) -> Arc<dyn PermissionGate> {
     let cfg = GateConfig {
-        agent_workspace_dir: workspace.to_path_buf(),
+        agent_definition_dir: definition.to_path_buf(),
         extra_roots: vec![],
         agent_data_readonly_dirs: vec![],
         user_path_rules: vec![],

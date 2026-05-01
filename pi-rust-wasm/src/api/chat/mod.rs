@@ -188,8 +188,13 @@ impl ChatContext {
         .into_iter()
         .flatten()
         .collect();
+        // gate-root-remediation：默认 writable root 是 agent_definition_dir
+        // （`workspace-<agentId>/`），而不是启动 cwd。启动 cwd 仅在 system prompt
+        // 中作为「当前目录 / this project / relative paths」的语义来源，
+        // 实际访问 cwd 子树需要 `extra_roots` / `session_grants` / `dragged_paths`
+        // / `cwd_lazy_prompt` 提供的会话级授权。
         let gate_cfg = crate::core::permission::GateConfig {
-            agent_workspace_dir: agent_workspace_dir.clone(),
+            agent_definition_dir: agent_definition_dir.clone(),
             extra_roots: extra_roots.clone(),
             agent_data_readonly_dirs: agent_data_readonly_dirs.clone(),
             user_path_rules: config.primitive.path_rules.clone(),
@@ -217,16 +222,13 @@ impl ChatContext {
                 cfg_path_snapshot.clone(),
             ));
 
-        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
-            DefaultPrimitiveExecutor::new(
-                config.primitive.clone(),
-                confirmation.clone(),
-                audit.clone(),
-                agent_workspace_dir.clone(),
-            )
-            .with_extra_roots(extra_roots)
-            .with_gate(gate.clone()),
-        );
+        let _ = extra_roots; // 已通过 GateConfig.extra_roots 落入 gate；executor 不再单独保存。
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
+            config.primitive.clone(),
+            confirmation.clone(),
+            audit.clone(),
+            gate.clone(),
+        ));
 
         // PR-7：构造 config_get / config_set 工具后端。失败（无法解析 config_path）
         // 时降级为 `None`，工具命中返回"未启用"错误，主流程不阻塞。
@@ -472,7 +474,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     use std::collections::HashSet;
 
     let cfg = &ctx.config;
-    let agent_workspace_dir = ctx.agent_workspace_dir.clone();
+    let agent_definition_dir = ctx.agent_definition_dir.clone();
     let extra_roots = resolve_extra_roots_paths(cfg).unwrap_or_default();
 
     let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
@@ -499,7 +501,7 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
     }
 
     // ── read_write 列表 ──
-    let agent_workspace_canon = agent_workspace_dir.to_string_lossy().to_string();
+    let agent_definition_canon = agent_definition_dir.to_string_lossy().to_string();
     let extra_set: HashSet<String> = extra_roots
         .iter()
         .map(|p| p.to_string_lossy().to_string())
@@ -525,8 +527,8 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::Wor
         if !seen_rw.insert(s.clone()) {
             continue;
         }
-        let label = if s == agent_workspace_canon {
-            "agent_workspace_dir"
+        let label = if s == agent_definition_canon {
+            "agent_definition_dir"
         } else if extra_set.contains(&s) {
             "extra_root"
         } else if dragged_set.contains(&s) {

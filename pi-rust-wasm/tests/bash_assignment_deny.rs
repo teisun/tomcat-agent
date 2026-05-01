@@ -16,7 +16,7 @@ fn make_executor(
 ) -> DefaultPrimitiveExecutor {
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: workspace.to_path_buf(),
+            agent_definition_dir: workspace.to_path_buf(),
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
@@ -35,9 +35,8 @@ fn make_executor(
         PrimitiveConfig::default(),
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        workspace.to_path_buf(),
+        gate.into_arc(),
     )
-    .with_gate(gate.into_arc())
 }
 
 #[tokio::test]

@@ -17,14 +17,16 @@ fn tmpdir(name: &str) -> PathBuf {
     p
 }
 
+/// `definition` 即默认 writable root（与 `agent_definition_dir` 对齐），
+/// 启动 cwd 在这些 helper 里**不会**自动 writable。
 fn gate_with(
-    workspace: PathBuf,
+    definition: PathBuf,
     extra: Vec<PathBuf>,
     agent_ro: Vec<PathBuf>,
 ) -> DefaultPermissionGate {
     DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: workspace,
+            agent_definition_dir: definition,
             extra_roots: extra,
             agent_data_readonly_dirs: agent_ro,
             user_path_rules: vec![],
@@ -38,13 +40,13 @@ fn gate_with(
 }
 
 #[test]
-fn allow_inside_workspace() {
-    let ws = tmpdir("ws_allow");
-    let gate = gate_with(ws.clone(), vec![], vec![]);
+fn allow_inside_agent_definition_dir() {
+    let def = tmpdir("agent_def_allow");
+    let gate = gate_with(def.clone(), vec![], vec![]);
     let dec = gate
         .check(
             PrimitiveOperation::Write,
-            ws.join("a.txt").to_str().unwrap(),
+            def.join("a.txt").to_str().unwrap(),
         )
         .unwrap();
     match dec {
@@ -57,9 +59,9 @@ fn allow_inside_workspace() {
 }
 
 #[test]
-fn need_confirm_outside_workspace() {
-    let ws = tmpdir("ws_outside");
-    let gate = gate_with(ws, vec![], vec![]);
+fn need_confirm_outside_agent_definition_dir() {
+    let def = tmpdir("agent_def_outside");
+    let gate = gate_with(def, vec![], vec![]);
     let dec = gate
         .check(
             PrimitiveOperation::Write,
@@ -70,6 +72,29 @@ fn need_confirm_outside_workspace() {
 }
 
 #[test]
+fn startup_cwd_without_extra_root_needs_confirm() {
+    let tmp = tmpdir("cwd_not_implicit_root");
+    let agent_definition_dir = tmp.join("workspace-main");
+    let startup_cwd = tmp.join("project-cwd");
+    std::fs::create_dir_all(&agent_definition_dir).unwrap();
+    std::fs::create_dir_all(&startup_cwd).unwrap();
+
+    let gate = gate_with(agent_definition_dir, vec![], vec![]);
+    let dec = gate
+        .check(
+            PrimitiveOperation::Read,
+            startup_cwd.join("src/main.rs").to_str().unwrap(),
+        )
+        .unwrap();
+
+    assert!(
+        matches!(dec, PermissionDecision::NeedConfirm { .. }),
+        "启动 cwd 不在 extra_roots/session/dragged 时不应自动 Allow，得到: {:?}",
+        dec
+    );
+}
+
+#[test]
 fn deny_path_rule_overrides_workspace() {
     let ws = tmpdir("ws_deny");
     let secret = ws.join("secret");
@@ -77,7 +102,7 @@ fn deny_path_rule_overrides_workspace() {
     // 注入 user_path_rules：deny <ws>/secret
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws.clone(),
+            agent_definition_dir: ws.clone(),
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
@@ -107,7 +132,7 @@ fn readonly_path_rule_blocks_write_allows_read() {
     let _ = std::fs::create_dir_all(&ro);
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws.clone(),
+            agent_definition_dir: ws.clone(),
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
@@ -165,7 +190,7 @@ fn session_grant_unblocks_outside() {
     session.add(outside.clone());
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws,
+            agent_definition_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
@@ -199,7 +224,7 @@ fn runtime_deny_rule_overrides_existing_session_grant() {
     session.add(outside.clone());
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws,
+            agent_definition_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
@@ -233,7 +258,7 @@ fn dragged_path_unblocks_outside() {
     drag.add(dragged.clone());
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws,
+            agent_definition_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
@@ -264,7 +289,7 @@ fn auto_confirm_short_circuits_layer2() {
     let ws = tmpdir("ws_autoconf");
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws,
+            agent_definition_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
@@ -292,7 +317,7 @@ fn auto_confirm_does_not_override_forbidden() {
     let ws = tmpdir("ws_acforbid");
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: ws,
+            agent_definition_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],

@@ -6,15 +6,15 @@
 
 - [✓] 修复拖拽 AutoAllow、菜单授权、CwdLazyPrompt 与 config_set 等入口绕过 deny 的风险。
 - [✓] `PermissionGate` 新增当前会话运行时 path_rules，`[r]/[d]` 与 `config_set primitive.path_rules` 写盘后立即生效。
-- [✓] 统一 `cwd_snapshot`、`agent_workspace_trail`、`agent_workspace_definition` 的代码与 Prompt 语义。
-- [✓] 将 Layer0 tool-results 从设计态 workspace 迁移到运行态 agent 目录：`agent_workspace_trail/tool-results/{session_id}/`。
+- [✓] 统一当前目录 snapshot、`agent_trail_dir`、`agent_definition_dir` 的代码与 Prompt 语义。
+- [✓] 将 Layer0 tool-results 从设计态 workspace 迁移到运行态 agent 目录：`agent_trail_dir/tool-results/{session_id}/`。
 - [✓] 补齐拖拽路径切分、运行时 path_rules、生效顺序、Layer0 路径、二进制读取反馈回归测试。
 
 ### INTERFACE（接口变更）
 
 - `PermissionGate` 新增 `grant_path_rule(PathRule)`，用于当前会话内热追加 deny / readonly。
 - `ConfigToolContext` 可携带共享 `PermissionGate`，用于 `config_set` 前置 deny 预检与 path_rules 热生效。
-- `AgentLoopConfig.agent_workspace_trail`（原字段名 `work_dir`）：Agent 运行态轨迹目录字符串，用作 Layer0 落盘根；命名与 `ChatContext::agent_workspace_trail` 对齐，避免与 `storage.work_dir` / cwd 混淆。
+- `AgentLoopConfig.agent_trail_dir`（原字段名 `work_dir`）：Agent 运行态轨迹目录字符串，用作 Layer0 落盘根；命名与 `ChatContext::agent_trail_dir` 对齐，避免与 `storage.work_dir` / cwd 混淆。
 
 ### TEST（门禁）
 

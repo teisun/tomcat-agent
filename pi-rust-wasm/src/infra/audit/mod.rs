@@ -23,10 +23,11 @@ pub enum AuditPrimitiveOp {
 /// - `permission_level`：操作权限等级（`Read` / `Write` / `Bash` /
 ///   `BashApproval` / `Forbidden`）。
 /// - `grant_source`：授权来源（`AgentWorkspace` / `SessionGrant` / `BashPolicy` 等）。
-/// - `in_working_dir`：路径是否在 `agent_workspace_dir` / `extra_roots` 范围内。
+/// - `in_working_dir`：历史字段名；当前表示是否来自默认定义目录或配置额外根，
+///   不再等同于启动 cwd。
 ///
-/// 所有 3 个字段都是 `Option`：legacy 路径（未启用 gate）写 `None`，gate 路径写
-/// `Some(...)`，向后兼容已有 JSONL 行。
+/// 所有 3 个字段都是 `Option`：早期 JSONL 行可能没有这些字段；当前 executor
+/// 强制启用 gate，正常新记录会写 `Some(...)`。
 #[derive(Debug, Clone, Default)]
 pub struct PrimitiveAuditEntry {
     pub operation: AuditPrimitiveOp,
@@ -39,7 +40,7 @@ pub struct PrimitiveAuditEntry {
     pub permission_level: Option<String>,
     /// 授权来源（仅 gate 模式填）。
     pub grant_source: Option<String>,
-    /// 路径是否在工作目录内（仅原语 op 适用，bash 默认 None）。
+    /// 历史字段名；当前不再等同于启动 cwd（仅原语 op 适用，bash 默认 None）。
     pub in_working_dir: Option<bool>,
 }
 

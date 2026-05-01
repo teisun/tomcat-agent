@@ -29,7 +29,7 @@
 | `assets/.versions.json` | 内嵌资源版本记录（SHA-256 + extracted_at），`ensure_embedded_assets` 写入 |
 | `assets/.lock` | 并发写入保护文件锁（fs2 exclusive lock），`ensure_embedded_assets` 使用 |
 
-- **全局额外授权目录**：沙箱中与各 agent `workspace_dir` 并集的额外根路径由主配置文件 **`pi.config.toml` 的 `[workspace] extra_roots`** 列出（**所有 agent 共用**，不按 agent 分文件；与 `[agent].workspace` 指向的 `workspace-{id}/` 设计态目录不同）。由 `pi workspace add/list/remove` 或手编 TOML 维护。
+- **全局额外授权目录**：除每个 agent 默认可写的 `agent_definition_dir`（`[agent].workspace` 指向的 `workspace-{id}/` 设计态目录）外，额外允许访问的外部目录根由主配置文件 **`pi.config.toml` 的 `[workspace] extra_roots`** 列出（**所有 agent 共用**，不按 agent 分文件）。启动 `pi chat` 时的 shell 当前目录 `agent_workspace_dir` 不会自动进入授权根；需要通过 `pi workspace add --cwd`、cwd lazy prompt、拖拽菜单或本会话授权显式加入。由 `pi workspace add/list/remove` 或手编 TOML 维护。
 
 - **当前仅一个 agent**：agentId 固定为 `main`，即使用 `work_dir/agents/main/` 下各子目录。
 - **可配置覆盖**：`agent_dir` 和 `workspace` 可通过 `[agent]` 配置节覆盖；`sessions/logs/audit` 始终从 `work_dir/agents/{id}/` 独立推导，不受 `agent_dir` 配置影响。

@@ -92,9 +92,11 @@ fn extract_target_from_preview_blank_returns_none() {
 
 // ── decorator behavior（异步 + tempdir 集成）──
 
-fn make_gate(workspace: &Path) -> Arc<dyn PermissionGate> {
+/// `definition` 在 gate 中作为默认 writable root（即 `agent_definition_dir`）；
+/// 启动 cwd 不会自动落入 writable 集合，需要显式 extra_roots / session_grants。
+fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
     let cfg = GateConfig {
-        agent_workspace_dir: workspace.to_path_buf(),
+        agent_definition_dir: definition.to_path_buf(),
         extra_roots: vec![],
         agent_data_readonly_dirs: vec![],
         user_path_rules: vec![],

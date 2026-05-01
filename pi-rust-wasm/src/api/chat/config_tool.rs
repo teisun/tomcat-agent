@@ -690,7 +690,7 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                agent_workspace_dir: dir.path().join("workspace"),
+                agent_definition_dir: dir.path().join("workspace"),
                 extra_roots: vec![],
                 agent_data_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(
@@ -771,7 +771,7 @@ mod tests {
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                agent_workspace_dir: dir.path().join("workspace"),
+                agent_definition_dir: dir.path().join("workspace"),
                 extra_roots: vec![],
                 agent_data_readonly_dirs: vec![],
                 user_path_rules: vec![],

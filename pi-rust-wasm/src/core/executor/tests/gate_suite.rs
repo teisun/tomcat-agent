@@ -71,13 +71,13 @@ fn workspace_dir(name: &str) -> PathBuf {
 }
 
 fn make_executor(
-    agent_workspace_dir: PathBuf,
+    agent_definition_dir: PathBuf,
     user_path_rules: Vec<PathRule>,
     confirm: Arc<dyn UserConfirmationProvider>,
 ) -> DefaultPrimitiveExecutor {
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: agent_workspace_dir.clone(),
+            agent_definition_dir,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules,
@@ -88,16 +88,12 @@ fn make_executor(
         SessionGrants::new(),
         DraggedPaths::new(),
     );
-    let cfg = PrimitiveConfig::default();
-    // gate 模式下 needs_confirmation 不被调用，无需关闭 legacy 字段。
-
     DefaultPrimitiveExecutor::new(
-        cfg,
+        PrimitiveConfig::default(),
         confirm,
         Arc::new(TracingAuditRecorder),
-        agent_workspace_dir,
+        gate.into_arc(),
     )
-    .with_gate(gate.into_arc())
 }
 
 #[tokio::test]
@@ -185,13 +181,13 @@ async fn gate_bash_forbidden_blocks() {
 // ── PR-9：Agent data dir read-only / 凭据 deny 经 executor 落地 ──
 
 fn make_executor_with_agent_ro(
-    agent_workspace_dir: PathBuf,
+    agent_definition_dir: PathBuf,
     agent_ro: Vec<PathBuf>,
     confirm: Arc<dyn UserConfirmationProvider>,
 ) -> DefaultPrimitiveExecutor {
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: agent_workspace_dir.clone(),
+            agent_definition_dir,
             extra_roots: vec![],
             agent_data_readonly_dirs: agent_ro,
             user_path_rules: vec![],
@@ -206,9 +202,8 @@ fn make_executor_with_agent_ro(
         PrimitiveConfig::default(),
         confirm,
         Arc::new(TracingAuditRecorder),
-        agent_workspace_dir,
+        gate.into_arc(),
     )
-    .with_gate(gate.into_arc())
 }
 
 #[tokio::test]

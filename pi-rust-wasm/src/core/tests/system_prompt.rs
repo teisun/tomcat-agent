@@ -97,8 +97,8 @@ fn fixture_state() -> WorkspaceState {
     WorkspaceState {
         read_write: vec![
             WorkspaceRootDescriptor {
-                path: "/Users/yan/proj".into(),
-                label: "agent_workspace_dir".into(),
+                path: "/Users/yan/.pi_/workspace-main".into(),
+                label: "agent_definition_dir".into(),
                 alias: None,
                 description: None,
             },
@@ -153,8 +153,9 @@ fn fixture_context() -> WorkspaceContext {
 fn workspace_state_section_renders_read_write() {
     let s = WorkspaceStateSection::new(fixture_state()).render(&fixture_context());
     assert!(s.contains("Workspace State"));
-    assert!(s.contains("/Users/yan/proj"));
-    assert!(s.contains("[agent_workspace_dir]"));
+    assert!(s.contains("/Users/yan/.pi_/workspace-main"));
+    assert!(s.contains("[agent_definition_dir]"));
+    assert!(!s.contains("[agent_workspace_dir]"));
     assert!(s.contains("/Users/yan/scratch"));
     assert!(s.contains("alias=scratch"));
     assert!(s.contains("desc=\"用户附加根\""));
@@ -219,7 +220,8 @@ fn workspace_state_section_handles_empty_state() {
 fn build_system_prompt_with_state_includes_workspace_state() {
     let prompt = build_system_prompt_with_state(fixture_context(), fixture_state());
     assert!(prompt.contains("Workspace State"));
-    assert!(prompt.contains("/Users/yan/proj"));
+    assert!(prompt.contains("/Users/yan/.pi_/workspace-main"));
+    assert!(prompt.contains("Agent workspace directory (agent_workspace_dir): /Users/yan/proj"));
     // 默认 4 个 section + 新加的 1 个，仍包含工具说明
     assert!(prompt.contains("read_file"));
     assert!(prompt.contains("Current date and time"));
@@ -243,6 +245,7 @@ fn workspace_context_section_describes_three_directories() {
     let prompt = build_system_prompt_with_state(fixture_context(), fixture_state());
     assert!(prompt.contains("Agent workspace directory (agent_workspace_dir): /Users/yan/proj"));
     assert!(prompt.contains("current directory"));
+    assert!(prompt.contains("NOT automatically authorized"));
     assert!(prompt.contains("Agent definition directory (agent_definition_dir):"));
     assert!(prompt.contains("Permission: read/write"));
     assert!(prompt.contains("Agent trail directory (agent_trail_dir):"));

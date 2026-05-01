@@ -347,7 +347,7 @@ mod tests {
         std::fs::create_dir_all(&denied).unwrap();
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                agent_workspace_dir: workspace,
+                agent_definition_dir: workspace,
                 extra_roots: vec![],
                 agent_data_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(

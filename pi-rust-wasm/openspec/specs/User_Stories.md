@@ -19,7 +19,7 @@
 **作为用户**，我希望Agent能通过4原语安全地操作文件、执行命令，所有操作可控、可追溯。
 **验收标准**：
 - [ ] 完全对齐pi-mono的read/write/edit/bash API规范，功能完整
-- [ ] 实现路径授权根机制：`agent_workspace_dir` 与 `workspace.extra_roots` 为允许根，`primitive.path_rules` 提供 deny / readonly 规则
+- [ ] 实现路径授权根机制：`agent_definition_dir` 为默认允许根，`workspace.extra_roots` / 会话授权用于扩大外部目录访问，`primitive.path_rules` 提供 deny / readonly 规则；`agent_workspace_dir` 只作为当前目录语义来源，不自动授权
 - [ ] 实现bash命令管控：`bash_forbidden` 直接拦截，`bash_approval_required` 需用户确认，路径 token 与 `NAME=/path` assignment RHS 都必须进入同一套路径权限预检
 - [ ] write/edit操作前自动备份原文件，支持回滚，操作前显示diff预览与用户确认
 - [ ] 所有4原语操作完整记录审计日志，包含操作内容、用户确认状态、执行结果、时间戳

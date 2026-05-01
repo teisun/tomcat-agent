@@ -27,7 +27,7 @@ fn deny_path_drag_menu_only_allows_cancel_contract() {
 
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_workspace_dir: workspace,
+            agent_definition_dir: workspace,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
