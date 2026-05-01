@@ -1,37 +1,29 @@
-//! # 拖拽路径解析（plan §7）
+//! # 拖拽路径解析
 //!
-//! 用户从终端拖入文件/目录时，shell 会把绝对路径插入命令行。本模块负责区分两种语义：
+//! 用户从终端拖入文件/目录时，shell 会把路径插入命令行。本模块只识别一种拖拽授权语义：
 //!
-//! - **行内含意图（拖拽 + 文字）**：例如「帮我看下 /Users/yan/proj/foo」。
-//!   把所有路径加进 `SessionGrants`（AllowOnce），原行原样发给 LLM。
-//! - **整行只有路径 token（纯拖拽）**：例如「/Users/yan/proj/foo」。
-//!   弹一个 5 选项 TUI 菜单，让用户选择如何持久化授权范围。
+//! - **整行只有路径 token（纯拖拽）**：例如「/Users/yan/proj/foo」会弹出授权菜单。
+//! - **路径 + 意图文字**：例如「帮我看下 /Users/yan/proj/foo」或
+//!   `'/abs/path'看下里面`，完全等同普通聊天输入，不在拖拽层自动授权。
 //!
-//! 详细设计与流程图见 plan §7。
+//! 后续 read/write/bash 是否允许，由 LLM 触发工具调用时的 `PermissionGate` 统一决定。
 //!
 //! ## 模块边界
 //!
 //! - 本模块只做**解析**与**菜单数据结构**，不直接操作 `SessionGrants` /
 //!   `pi.config.toml`。具体落盘由 [`crate::infra::config::append`] 系列函数承担。
-//! - 实际接入 chat_loop 时由调用方决定：基于 `DragOutcome` 选择走 AutoAllow（直接发
-//!   LLM）还是 PromptMenu（与用户做一轮交互）。
+//! - 实际接入 chat_loop 时由调用方决定：`DragOutcome::None` 直接走普通对话，
+//!   `DragOutcome::PromptMenu` 与用户做一轮授权交互。
 
 use std::path::PathBuf;
 
 use crate::core::permission::{PathRuleMode, PermissionDecision, PermissionGate};
 
-/// 拖拽解析结果（三态）。
+/// 拖拽解析结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DragOutcome {
-    /// 行内未发现任何路径 token —— 调用方按普通输入处理。
+    /// 非纯路径行 —— 调用方按普通输入处理。
     None,
-    /// 行内含意图文字 + 一个或多个路径 → 路径自动 AllowOnce；原行发给 LLM。
-    AutoAllow {
-        /// 命中的路径（去重后保留输入顺序）。
-        paths: Vec<PathBuf>,
-        /// 原输入行（可直接发 LLM）。
-        original_line: String,
-    },
     /// 整行只是一个或多个纯路径 → 弹 TUI 5 选项菜单。
     PromptMenu {
         paths: Vec<PathBuf>,
@@ -39,25 +31,13 @@ pub enum DragOutcome {
     },
 }
 
-/// 解析一行用户输入，区分「拖拽 + 文字」/「纯拖拽」/「无路径」。
+/// 解析一行用户输入，只在整行都是路径 token 时返回授权菜单。
 ///
-/// 判定规则（plan §7 + hotfix §B 修正）：
+/// 判定规则：
 ///
 /// 1. `shell-words::split(line)` 取出所有 token；
-/// 2. 形如 `/...`、`~/...` 的 token 走 [`split_path_and_suffix`] 在 token 内做
-///    「存在性 + 字符边界切分」 —— 因为 POSIX shell 单引号闭合后紧贴的字符仍属
-///    同一 token（例：`'foo''bar'` = `foobar`），所以 `'/abs/path'紧贴中文意图`
-///    会被合成单 token；纯前缀判断会把整个 token 当路径，导致用户「拖拽 + 中文意图」
-///    误入纯拖拽 5 选项菜单。
-/// 3. 切分结果：
-///    - `(path, "")` —— token 整体是有效路径，path 计入候选；
-///    - `(path, suffix)` —— token 由真实存在路径 + 非 ASCII suffix 组成，
-///      path 计入候选，同时 `has_intent_text = true`（消除 §7 原 bug）；
-///    - `None` —— token 不像路径（`/` 单字符 / 纯 ASCII 不存在路径仍按
-///      [`DragOutcome::PromptMenu`] 旧规则处理）。
-/// 4. 路径 token 数 = 0 → [`DragOutcome::None`]；
-///    `has_intent_text = false` → [`DragOutcome::PromptMenu`]；
-///    否则 → [`DragOutcome::AutoAllow`]。
+/// 2. 所有 token 都必须是合法路径 token；
+/// 3. 只要任一 token 是普通文字或「路径 + 意图」混合形态，就返回 [`DragOutcome::None`]。
 ///
 /// 注意：本函数**不**对路径做归一化或权限决策，仅做字符串/存在性级别的分类。
 /// 实际授权 / 持久化由 menu 阶段或 [`crate::core::permission`] 处理。
@@ -76,53 +56,28 @@ pub fn interpret_dragged_paths(line: &str) -> DragOutcome {
     }
 
     let mut paths = Vec::new();
-    let mut has_intent_text = false;
     for tok in &tokens {
-        if !is_path_prefix_token(tok) {
-            // 普通文字 token（如 "帮我看下"）。
-            has_intent_text = true;
-            continue;
+        if !is_valid_pure_path_token(tok) {
+            return DragOutcome::None;
         }
-
-        match split_path_and_suffix(tok) {
-            Some((path, suffix)) => {
-                let pb = PathBuf::from(path);
-                if !paths.contains(&pb) {
-                    paths.push(pb);
-                }
-                if !suffix.is_empty() {
-                    // 路径后紧贴 suffix（多为非 ASCII 中文意图）—— hotfix §B
-                    // 关键修正点：此时 `has_intent_text = true`，避免误入纯拖拽菜单。
-                    has_intent_text = true;
-                }
-            }
-            None => {
-                // 看起来像路径但既不存在又是 ASCII 边角 case（例如 `/` 单独出现）；
-                // 这里不计入 paths，但视作普通文字。
-                has_intent_text = true;
-            }
+        let pb = PathBuf::from(tok);
+        if !paths.contains(&pb) {
+            paths.push(pb);
         }
     }
 
     if paths.is_empty() {
         return DragOutcome::None;
     }
-    if has_intent_text {
-        DragOutcome::AutoAllow {
-            paths,
-            original_line: trimmed.to_string(),
-        }
-    } else {
-        DragOutcome::PromptMenu {
-            paths,
-            original_line: trimmed.to_string(),
-        }
+    DragOutcome::PromptMenu {
+        paths,
+        original_line: trimmed.to_string(),
     }
 }
 
 /// 路径前缀判定：以 `/` 或 `~/` 开头，且长度 > 1。
 ///
-/// 仅用作快速过滤；真正的路径合法性由 [`split_path_and_suffix`] 决定。
+/// 仅用作快速过滤；真正的纯路径合法性由 [`is_valid_pure_path_token`] 决定。
 fn is_path_prefix_token(tok: &str) -> bool {
     if tok == "/" || tok == "~" {
         return false;
@@ -130,58 +85,14 @@ fn is_path_prefix_token(tok: &str) -> bool {
     tok.starts_with('/') || tok.starts_with("~/")
 }
 
-/// Token 内「存在性 + 字符边界」切分 —— hotfix §B.3：
-///
-/// 1. 整个 token 在文件系统上存在 → 返回 `(token, "")`，case A；
-/// 2. token 不存在 + 含非 ASCII 字符 → 从右往左按 char 边界逐次缩短 path，
-///    直到找到一个真实存在的前缀；命中则返回 `(prefix, suffix)`，case B；
-/// 3. token 不存在 + 纯 ASCII → 兼容 plan §7 旧行为，整段视作路径 token，
-///    返回 `(token, "")`，case C；
-/// 4. 极端情况（无任何 char 边界匹配）→ `None`，case D，调用方按文字处理。
-///
-/// 区分 ASCII / 非 ASCII 的原因（hotfix §B.4）：shell-words 的 token 切分依赖
-/// 空白；非 ASCII 字符不是空白，单引号闭合后会被并进同一 token，这是「拖拽 +
-/// 中文意图」的典型外观；ASCII 之间必有空格分隔，所以 ASCII 不存在路径保留旧
-/// 行为可避免回归。
-pub fn split_path_and_suffix(tok: &str) -> Option<(String, String)> {
-    let path_obj = std::path::Path::new(tok);
-    if path_obj.exists() {
-        return Some((tok.to_string(), String::new()));
+fn is_valid_pure_path_token(tok: &str) -> bool {
+    if !is_path_prefix_token(tok) {
+        return false;
     }
-
-    if tok.is_ascii() {
-        // case C：兼容旧行为（用户敲不存在但合法的纯 ASCII 路径）。
-        return Some((tok.to_string(), String::new()));
+    if std::path::Path::new(tok).exists() {
+        return true;
     }
-
-    // case B：从右往左按 char 边界剥离 suffix，找最长存在前缀。
-    let chars: Vec<char> = tok.chars().collect();
-    for end in (1..chars.len()).rev() {
-        let prefix: String = chars[..end].iter().collect();
-        // 至少要 > 1 字符且仍以路径前缀开头，避免把 `/` 当合法 path。
-        if prefix.len() <= 1 {
-            break;
-        }
-        if !is_path_prefix_token(&prefix) {
-            break;
-        }
-        let prefix_path = std::path::Path::new(&prefix);
-        if prefix_path.exists() {
-            let suffix: String = chars[end..].iter().collect();
-            if prefix_path.is_dir() {
-                let suffix_starts_like_path_component = suffix
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c == std::path::MAIN_SEPARATOR || c.is_ascii());
-                if suffix_starts_like_path_component {
-                    return None;
-                }
-            }
-            return Some((prefix, suffix));
-        }
-    }
-
-    None
+    tok.is_ascii()
 }
 
 /// TUI 菜单可用选项集合。`render_drag_menu` 根据 path_rule 预检查结果裁剪。
@@ -347,18 +258,9 @@ mod tests {
     }
 
     #[test]
-    fn drag_plus_intent_returns_auto_allow() {
+    fn mixed_line_returns_none() {
         let out = interpret_dragged_paths("帮我看下 /Users/yan/proj/foo");
-        match out {
-            DragOutcome::AutoAllow {
-                paths,
-                original_line,
-            } => {
-                assert_eq!(paths, vec![PathBuf::from("/Users/yan/proj/foo")]);
-                assert_eq!(original_line, "帮我看下 /Users/yan/proj/foo");
-            }
-            other => panic!("expected AutoAllow, got {:?}", other),
-        }
+        assert_eq!(out, DragOutcome::None);
     }
 
     #[test]
@@ -445,7 +347,7 @@ mod tests {
         std::fs::create_dir_all(&denied).unwrap();
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                workspace_dir: workspace,
+                agent_workspace_dir: workspace,
                 extra_roots: vec![],
                 agent_data_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(
@@ -454,7 +356,6 @@ mod tests {
                 )],
                 user_bash_forbidden: vec![],
                 user_bash_approval: vec![],
-                user_bash_whitelist: vec![],
                 auto_confirm: false,
             },
             SessionGrants::new(),
@@ -482,95 +383,27 @@ mod tests {
         assert!(m.persist_readonly && m.persist_deny && m.cancel);
     }
 
-    // ── hotfix §B：split_path_and_suffix + 拖拽紧贴中文意图回归 ──
-
     #[test]
-    fn split_path_and_suffix_existing_returns_full_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_string_lossy().to_string();
-        let res = split_path_and_suffix(&dir).expect("existing dir should split");
-        assert_eq!(res.0, dir);
-        assert!(res.1.is_empty());
-    }
-
-    #[test]
-    fn split_path_and_suffix_nonexistent_ascii_keeps_legacy() {
-        // 全 ASCII 不存在路径：保留旧行为（视作整体路径，suffix 空）。
-        let res = split_path_and_suffix("/etc/foo/nonexistent")
-            .expect("ASCII nonexistent should still classify as path");
-        assert_eq!(res.0, "/etc/foo/nonexistent");
-        assert!(res.1.is_empty());
-    }
-
-    #[test]
-    fn split_path_and_suffix_nonascii_suffix_splits_correctly() {
-        let tmp = tempfile::tempdir().unwrap();
-        let real = tmp.path().to_string_lossy().to_string();
-        let mixed = format!("{}这个项目下面", real);
-        let (path, suffix) =
-            split_path_and_suffix(&mixed).expect("nonascii suffix should split off");
-        assert_eq!(path, real);
-        assert_eq!(suffix, "这个项目下面");
-    }
-
-    #[test]
-    fn split_path_and_suffix_missing_file_with_intent_does_not_authorize_parent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("missing.png");
-        let mixed = format!("{}看下", missing.to_string_lossy());
-        assert_eq!(
-            split_path_and_suffix(&mixed),
-            None,
-            "不存在文件 + 中文意图不得回退到父目录"
-        );
-    }
-
-    #[test]
-    fn split_path_and_suffix_nonascii_existing_path_intact() {
-        let tmp = tempfile::tempdir().unwrap();
-        let nested = tmp.path().join("项目").join("foo");
-        std::fs::create_dir_all(&nested).unwrap();
-        let s = nested.to_string_lossy().to_string();
-        let (path, suffix) =
-            split_path_and_suffix(&s).expect("existing nonascii path should split");
-        assert_eq!(path, s);
-        assert!(suffix.is_empty(), "整体存在的非 ASCII 路径应保留完整");
-    }
-
-    #[test]
-    fn quoted_path_with_intent_text_returns_auto_allow() {
+    fn quoted_path_with_intent_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().to_string_lossy().to_string();
         let line = format!("'{}'这个文件夹下面有几个文件?", real);
-        match interpret_dragged_paths(&line) {
-            DragOutcome::AutoAllow { paths, .. } => {
-                assert_eq!(paths, vec![PathBuf::from(real)]);
-            }
-            other => panic!(
-                "带引号路径 + 紧贴中文意图应识别为 AutoAllow，得到 {:?}",
-                other
-            ),
-        }
+        assert_eq!(interpret_dragged_paths(&line), DragOutcome::None);
     }
 
     #[test]
-    fn quoted_path_with_space_and_intent_returns_auto_allow() {
+    fn quoted_path_with_space_and_intent_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("My Documents").join("foo");
         std::fs::create_dir_all(&nested).unwrap();
         let real = nested.to_string_lossy().to_string();
         let line = format!("\"{}\" 帮我看下", real);
-        match interpret_dragged_paths(&line) {
-            DragOutcome::AutoAllow { paths, .. } => {
-                assert_eq!(paths, vec![PathBuf::from(real)]);
-            }
-            other => panic!("expected AutoAllow, got {:?}", other),
-        }
+        assert_eq!(interpret_dragged_paths(&line), DragOutcome::None);
     }
 
     #[test]
     fn nonexistent_ascii_path_keeps_prompt_menu() {
-        // 全 ASCII 不存在路径：仍走 PromptMenu（plan §7 兼容性）。
+        // 全 ASCII 不存在路径仍可作为用户想授权的纯路径。
         let out = interpret_dragged_paths("/etc/foo/nonexistent");
         match out {
             DragOutcome::PromptMenu { paths, .. } => {
@@ -578,5 +411,10 @@ mod tests {
             }
             other => panic!("expected PromptMenu, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn nonascii_token_without_existence_returns_none() {
+        assert_eq!(interpret_dragged_paths("/abs/path中文"), DragOutcome::None);
     }
 }

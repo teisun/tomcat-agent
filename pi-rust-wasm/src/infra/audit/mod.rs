@@ -20,10 +20,10 @@ pub enum AuditPrimitiveOp {
 ///
 /// 与 plan §2/§6 对齐——新增 3 个授权来源字段：
 ///
-/// - `permission_level`：操作权限等级（`Read` / `Write` / `BashWhitelist` /
+/// - `permission_level`：操作权限等级（`Read` / `Write` / `Bash` /
 ///   `BashApproval` / `Forbidden`）。
-/// - `grant_source`：授权来源（`AgentWorkspace` / `SessionGrant` / `BashWhitelist` 等）。
-/// - `in_working_dir`：路径是否在 `workspace_dir` / `extra_roots` 范围内。
+/// - `grant_source`：授权来源（`AgentWorkspace` / `SessionGrant` / `BashPolicy` 等）。
+/// - `in_working_dir`：路径是否在 `agent_workspace_dir` / `extra_roots` 范围内。
 ///
 /// 所有 3 个字段都是 `Option`：legacy 路径（未启用 gate）写 `None`，gate 路径写
 /// `Some(...)`，向后兼容已有 JSONL 行。

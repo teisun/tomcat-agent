@@ -101,12 +101,7 @@ async fn test_tool_registry_unregister_plugin_tools_removes_all(
 
 fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
     let mut c = PrimitiveConfig::default();
-    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let path = canonical
-        .to_string_lossy()
-        .trim_end_matches(std::path::MAIN_SEPARATOR)
-        .to_string();
-    c.path_whitelist.push(path);
+    let _ = dir;
     c.auto_confirm = true;
     c
 }
@@ -124,12 +119,7 @@ async fn test_primitive_executor_read_file_in_whitelist_succeeds(
 
     let tmp = TempDir::new()?;
     let canonical_dir = tmp.path().canonicalize()?;
-    let path_whitelist = canonical_dir
-        .to_string_lossy()
-        .trim_end_matches(std::path::MAIN_SEPARATOR)
-        .to_string();
-    let mut config = PrimitiveConfig::default();
-    config.path_whitelist.push(path_whitelist);
+    let config = PrimitiveConfig::default();
     let executor = DefaultPrimitiveExecutor::new(
         config,
         Arc::new(AllowAllConfirmation),

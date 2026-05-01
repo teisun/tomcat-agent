@@ -22,11 +22,10 @@
 //!    │      symlink 还原、Win 反斜杠       │  file_atomic 也在这里）       │
 //!    │                                    └──────────────────────────────┘
 //!    │
-//!    │ ② 路径校验（白名单合并）
+//!    │ ② 路径校验（授权根合并）
 //!    │   合法当且仅当 path 落入：
 //!    │     workspace_dir          （隐式根，用户当前工作目录）
 //!    │   ∪ extra_roots            （pi.config.toml [workspace] extra_roots）
-//!    │   ∪ PrimitiveConfig.path_whitelist（运行时显式追加）
 //!    │   未命中 ► AppError::Permission
 //!    │
 //!    │ ③ 用户确认（写类操作 + bash）
@@ -54,12 +53,12 @@
 //!
 //! ## 横切配置
 //!
-//! - `PrimitiveConfig`（来自 [`crate::infra::PrimitiveConfig`]）：路径白名单 +
-//!   命令白名单 + 备份策略。
+//! - `PrimitiveConfig`（来自 [`crate::infra::PrimitiveConfig`]）：路径规则 +
+//!   bash 禁止 / 审批规则与备份策略。
 //! - `MAX_READ_BYTES = 10 MiB`：read_file 单次读上限，防 OOM。
 //! - `BASH_TIMEOUT_SECS = 30`：bash 默认超时（当前预留，后续接 `tokio::time::timeout`）。
 //! - `workspace_dir` + `extra_roots`：构造时注入，后者来自配置文件，前者来自
-//!   CLI 当前目录，两者并集 ∪ `path_whitelist` 形成最终白名单。
+//!   CLI 当前目录，两者并集形成 legacy 模式授权根。
 //!
 //! ## 与同族子模块的边界
 //!
@@ -95,13 +94,12 @@ const BASH_TIMEOUT_SECS: u64 = 30;
 /// 4 原语执行引擎默认实现：路径权限、用户确认、备份、原子化与审计。
 ///
 /// **权限模型**：当注入了 [`PermissionGate`] 时（`with_gate`），路径与 bash 权限
-/// 完全交由 gate 三层决策；否则回退到 legacy 模式（`config.path_whitelist` ∪
-/// `workspace_dir` ∪ `extra_roots`），以保留旧测试 / 旧调用方零行为变化。
+/// 完全交由 gate 三层决策；否则回退到 legacy 模式（`workspace_dir` ∪ `extra_roots`）。
 pub struct DefaultPrimitiveExecutor {
     config: PrimitiveConfig,
     confirmation: Arc<dyn UserConfirmationProvider>,
     audit: Arc<dyn AuditRecorder>,
-    /// 默认工作目录：path_whitelist 为空时作为隐式白名单根目录。
+    /// 默认工作目录：legacy 模式下作为隐式授权根目录。
     workspace_dir: PathBuf,
     /// `pi.config.toml` 中 `[workspace] extra_roots` 的额外授权根路径，与 `workspace_dir` 并集（全局，所有 agent 共用）。
     extra_roots: Vec<PathBuf>,
@@ -140,24 +138,16 @@ impl DefaultPrimitiveExecutor {
 
     /// 路径白名单/黑名单校验；通过则返回规范化后的 PathBuf。
     ///
-    /// 优先级：config.path_whitelist > (workspace_dir ∪ extra_roots)。
-    /// 当 `path_whitelist` 为空时，以 `workspace_dir` 和 `extra_roots` 的并集作为隐式白名单。
+    /// legacy 模式下以 `workspace_dir` 和 `extra_roots` 的并集作为授权根。
     fn check_path(&self, path: &str) -> Result<PathBuf, AppError> {
         let normalized = normalize_path(path)?;
         let s = normalized.to_string_lossy();
-        let allowed = if self.config.path_whitelist.is_empty() {
-            let ws = self.workspace_dir.to_string_lossy();
-            normalized_starts_with(&s, &ws)
-                || self
-                    .extra_roots
-                    .iter()
-                    .any(|r| normalized_starts_with(&s, &r.to_string_lossy()))
-        } else {
-            self.config
-                .path_whitelist
+        let ws = self.workspace_dir.to_string_lossy();
+        let allowed = normalized_starts_with(&s, &ws)
+            || self
+                .extra_roots
                 .iter()
-                .any(|w| normalized_starts_with(&s, w))
-        };
+                .any(|r| normalized_starts_with(&s, &r.to_string_lossy()));
         if !allowed {
             return Err(AppError::Permission(format!("路径不在白名单内: {}", path)));
         }
@@ -297,7 +287,7 @@ fn permission_level_str(l: PermissionLevel) -> String {
     match l {
         PermissionLevel::Read => "read",
         PermissionLevel::Write => "write",
-        PermissionLevel::BashWhitelist => "bash_whitelist",
+        PermissionLevel::Bash => "bash",
         PermissionLevel::BashApproval => "bash_approval",
         PermissionLevel::Forbidden => "forbidden",
     }
@@ -313,7 +303,7 @@ fn grant_source_str(s: GrantSource) -> String {
         GrantSource::SessionGrant => "session_grant",
         GrantSource::DraggedPath => "dragged_path",
         GrantSource::PathRuleReadOnly => "path_rule_read_only",
-        GrantSource::BashWhitelist => "bash_whitelist",
+        GrantSource::BashPolicy => "bash_policy",
         GrantSource::AutoConfirmFlag => "auto_confirm_flag",
     }
     .to_string()
@@ -720,9 +710,6 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 Some(_) => (command, command),
             };
 
-            let in_whitelist = self.config.bash_whitelist.iter().any(|c| {
-                c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
-            });
             let in_forbidden = self.config.bash_forbidden.iter().any(|c| {
                 c == first_token || check_full_cmd.starts_with(c) || audit_cmd.starts_with(c)
             });
@@ -742,8 +729,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 });
                 return Err(AppError::Permission("命令在禁止列表中".to_string()));
             }
-            let need_confirm =
-                (!in_whitelist && !self.config.bash_whitelist.is_empty()) || needs_approval;
+            let need_confirm = needs_approval;
             if need_confirm && self.needs_confirmation(PrimitiveOperation::Bash) {
                 let ok = self
                     .require_user_confirmation(

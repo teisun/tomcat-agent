@@ -64,7 +64,7 @@ pi 默认将所有数据存放在 `~/.pi_/`。可在 `pi.config.toml` 的 `[stor
 │       ├── sessions/              # 会话 JSONL transcript
 │       ├── logs/                  # 日志文件
 │       └── audit/                 # 审计日志
-├── workspace-main/                # 默认 agent 工作区
+├── workspace-main/                # agent_definition_dir：默认 agent 设计态目录
 ├── assets/
 │   ├── .env                       # API Key 等敏感配置（0600 权限）
 │   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
@@ -77,6 +77,8 @@ pi 默认将所有数据存放在 `~/.pi_/`。可在 `pi.config.toml` 的 `[stor
 ```
 
 详见 [directory-structure.md](../openspec/specs/architecture/directory-structure.md)。
+
+目录概念速记：`agent_workspace_dir` 是用户启动 `pi chat` 时的 shell 当前目录；`agent_definition_dir` 是 `workspace-<agentId>/` 设计态目录；`agent_trail_dir` 是 `agents/<agentId>/` 运行态目录。
 
 ---
 
@@ -306,7 +308,7 @@ pi session delete agent:main:main
 
 ## 5. 工作区管理
 
-pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 自己的设计态工作区 `workspace-{id}` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `extra_roots`），**所有 agent 共用同一份列表**。
+pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 自己的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `extra_roots`），**所有 agent 共用同一份列表**。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.extra_roots` 或 `primitive.path_rules`。
 
 ### 添加工作区
 

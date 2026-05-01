@@ -99,14 +99,10 @@ fn test_hostcall_read_file_with_primitive_returns_ok() {
     let file_path = canonical_dir.join("hostcall_read.txt");
     std::fs::write(&file_path, "hostcall-content").unwrap();
 
-    let mut config = PrimitiveConfig::default();
-    config.path_whitelist.push(
-        canonical_dir
-            .to_string_lossy()
-            .trim_end_matches(std::path::MAIN_SEPARATOR)
-            .to_string(),
-    );
-    config.auto_confirm = true;
+    let config = PrimitiveConfig {
+        auto_confirm: true,
+        ..Default::default()
+    };
     let executor = DefaultPrimitiveExecutor::new(
         config,
         Arc::new(AllowAllConfirmation),

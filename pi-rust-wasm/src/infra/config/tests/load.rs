@@ -33,6 +33,29 @@ fn load_config_from_existing_file() {
 }
 
 #[test]
+fn load_config_rejects_legacy_whitelist_keys() {
+    let dir = std::env::temp_dir().join("pi_wasm_legacy_whitelist_config_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        "[primitive]\npath_whitelist=[]\nbash_whitelist=[]\nauto_confirm_whitelist=[]\n",
+    )
+    .unwrap();
+
+    let err = load_config(Some(path.as_path())).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("primitive.path_whitelist"));
+    assert!(msg.contains("workspace.extra_roots"));
+    assert!(msg.contains("primitive.bash_whitelist"));
+    assert!(msg.contains("primitive.bash_forbidden"));
+    assert!(msg.contains("primitive.auto_confirm_whitelist"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
 fn load_config_from_example_file() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let example_path = manifest_dir.join("pi.config.toml.example");

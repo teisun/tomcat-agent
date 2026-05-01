@@ -90,19 +90,11 @@ enable_plugin_safety_scan = false
 [wasm]
 
 # ------------------------------------------------------------------------------
-# [primitive] 4 原语配置：read/write/edit/bash 的审批与自动确认策略
+# [primitive] 4 原语配置：path_rules 与 bash forbidden/approval 策略
 # ------------------------------------------------------------------------------
 [primitive]
-# path_whitelist：文件操作（read/write/edit/list_dir）允许的路径前缀列表。
-# 空列表 = 仅允许 work_dir/workspace-main 目录下的路径（隐式白名单）。
-# 示例：path_whitelist = ["/home/user/project", "/tmp"]
-path_whitelist = []
-# path_blacklist：即使在白名单内也禁止操作的路径前缀。优先级高于白名单。
-# 示例：path_blacklist = ["/home/user/project/.env", "/home/user/project/.git"]
-path_blacklist = []
-# bash_whitelist：允许执行的 bash 命令前缀。空列表 = 不限制（由 require_approval_for_all_bash 控制）。
-# 示例：bash_whitelist = ["ls", "cat", "grep", "echo"]
-bash_whitelist = []
+# 路径允许根请配置 [workspace].extra_roots；禁止 / 只读路径请配置 path_rules。
+path_rules = []
 # bash_approval_required：即使 auto_confirm=true 也需要用户逐条确认的命令前缀。
 # 示例：bash_approval_required = ["rm", "sudo", "chmod"]
 bash_approval_required = []
@@ -111,10 +103,3 @@ bash_approval_required = []
 bash_forbidden = []
 # auto_confirm：是否对符合条件（如白名单内）的操作自动确认，无需用户逐条确认。
 auto_confirm = false
-# auto_confirm_whitelist：auto_confirm=true 时仅对此列表内路径自动确认；空列表 = 全部自动确认。
-# 示例：auto_confirm_whitelist = ["/home/user/project/src"]
-auto_confirm_whitelist = []
-# require_approval_for_all_write：是否对所有 write 操作强制要求用户确认后再执行。
-require_approval_for_all_write = true
-# require_approval_for_all_bash：是否对所有 bash 命令强制要求用户确认后再执行。
-require_approval_for_all_bash = true

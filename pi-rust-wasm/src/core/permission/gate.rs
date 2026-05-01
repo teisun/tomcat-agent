@@ -10,7 +10,7 @@
 //!    给出 `suggested_root`（默认是父目录或本身）。
 //!    bash 命中 `bash_approval_required` 同样落到此层。
 //! 3. **Layer 3 — Allow**：路径在 `EffectiveRoots.read_write` / `read_only` /
-//!    `agent_data_dir`（仅 read）；bash 命中 `bash_whitelist` 直接 Allow。
+//!    `agent_trail_dir`（仅 read）；bash 未命中 forbidden / approval_required 时 Allow。
 //!
 //! `auto_confirm = true` 仅短路 Layer-2 NeedConfirm（写入审计标记 `AutoConfirmFlag`），
 //! Layer-1 Forbidden 永远不可被绕过。
@@ -23,7 +23,6 @@ use regex::Regex;
 
 use super::defaults::{
     builtin_default_rules, BUILTIN_BASH_APPROVAL_REQUIRED, BUILTIN_BASH_FORBIDDEN,
-    BUILTIN_BASH_WHITELIST,
 };
 use super::path_rule::PathRule;
 use super::session_grants::{DraggedPaths, SessionGrants, SessionPathRules};
@@ -67,8 +66,8 @@ pub trait PermissionGate: Send + Sync {
 /// 默认实现：不可变快照式（构造时把 cfg / workspace_dir / agent_dir / extra_roots
 /// 全部冻结），共享 `SessionGrants` 与 `DraggedPaths` 走 `Arc` + 内部 Mutex。
 pub struct DefaultPermissionGate {
-    /// 工作根（writable）。
-    workspace_dir: PathBuf,
+    /// 用户启动 `pi chat` 时的工作目录（writable）。
+    agent_workspace_dir: PathBuf,
     /// 配置中显式声明的额外根（writable）。
     extra_roots: Vec<PathBuf>,
     /// `{work_dir}/agents/{id}` 一系列只读目录（read only）。
@@ -78,7 +77,6 @@ pub struct DefaultPermissionGate {
     /// 编译好的 bash 三档 regex；构造期一次性编译，bad regex 跳过 + warn。
     bash_forbidden: Vec<Regex>,
     bash_approval: Vec<Regex>,
-    bash_whitelist: Vec<Regex>,
     /// 是否对 Layer-2 NeedConfirm 短路（不影响 Layer-1）。
     auto_confirm: bool,
     /// 共享会话授权与拖入路径。
@@ -91,13 +89,12 @@ pub struct DefaultPermissionGate {
 /// `DefaultPermissionGate::new` 构造参数。
 #[derive(Debug, Clone)]
 pub struct GateConfig {
-    pub workspace_dir: PathBuf,
+    pub agent_workspace_dir: PathBuf,
     pub extra_roots: Vec<PathBuf>,
     pub agent_data_readonly_dirs: Vec<PathBuf>,
     pub user_path_rules: Vec<PathRule>,
     pub user_bash_forbidden: Vec<String>,
     pub user_bash_approval: Vec<String>,
-    pub user_bash_whitelist: Vec<String>,
     pub auto_confirm: bool,
 }
 
@@ -117,16 +114,14 @@ impl DefaultPermissionGate {
         let bash_forbidden = compile_regex_list(BUILTIN_BASH_FORBIDDEN, &cfg.user_bash_forbidden);
         let bash_approval =
             compile_regex_list(BUILTIN_BASH_APPROVAL_REQUIRED, &cfg.user_bash_approval);
-        let bash_whitelist = compile_regex_list(BUILTIN_BASH_WHITELIST, &cfg.user_bash_whitelist);
 
         Self {
-            workspace_dir: cfg.workspace_dir,
+            agent_workspace_dir: cfg.agent_workspace_dir,
             extra_roots: cfg.extra_roots,
             agent_data_readonly_dirs: cfg.agent_data_readonly_dirs,
             path_rules,
             bash_forbidden,
             bash_approval,
-            bash_whitelist,
             auto_confirm: cfg.auto_confirm,
             session_grants,
             dragged_paths,
@@ -150,7 +145,7 @@ impl DefaultPermissionGate {
     /// 路径是否在 `extra_roots` 或 workspace_dir 之中（writable 集合）。
     fn in_writable_set(&self, target: &Path) -> bool {
         let s = target.to_string_lossy();
-        let ws = canonicalize_with_existing_ancestor(&self.workspace_dir);
+        let ws = canonicalize_with_existing_ancestor(&self.agent_workspace_dir);
         if path_starts_with(&s, &ws.to_string_lossy()) {
             return true;
         }
@@ -231,7 +226,7 @@ impl PermissionGate for DefaultPermissionGate {
         // ── Layer 3 第一波：在 writable 集合内（workspace_dir / extra_roots） ──
         if self.in_writable_set(&target) {
             return Ok(PermissionDecision::Allow {
-                source: source_for_writable(&target, &self.workspace_dir, &self.extra_roots),
+                source: source_for_writable(&target, &self.agent_workspace_dir, &self.extra_roots),
                 level: level_for_op(op),
             });
         }
@@ -285,16 +280,6 @@ impl PermissionGate for DefaultPermissionGate {
             }
         }
 
-        // 白名单优先（短路 NeedConfirm，但仍受 forbidden 约束 —— 已在上面检查过）。
-        for re in &self.bash_whitelist {
-            if re.is_match(command) {
-                return Ok(PermissionDecision::Allow {
-                    source: GrantSource::BashWhitelist,
-                    level: PermissionLevel::BashWhitelist,
-                });
-            }
-        }
-
         // Layer 2：bash_approval_required（命中弹 confirm）。
         for re in &self.bash_approval {
             if re.is_match(command) {
@@ -313,13 +298,13 @@ impl PermissionGate for DefaultPermissionGate {
 
         // 默认：bash 命令本身不强制 confirm（路径检查由调用方在 parse 后逐一调用 `check`）。
         Ok(PermissionDecision::Allow {
-            source: GrantSource::BashWhitelist,
-            level: PermissionLevel::BashWhitelist,
+            source: GrantSource::BashPolicy,
+            level: PermissionLevel::Bash,
         })
     }
 
     fn effective_roots(&self) -> EffectiveRoots {
-        let mut read_write = vec![self.workspace_dir.clone()];
+        let mut read_write = vec![self.agent_workspace_dir.clone()];
         read_write.extend(self.extra_roots.iter().cloned());
         read_write.extend(self.session_grants.snapshot());
         read_write.extend(self.dragged_paths.snapshot());
@@ -362,7 +347,7 @@ fn level_for_op(op: PrimitiveOperation) -> PermissionLevel {
     match op {
         PrimitiveOperation::Read => PermissionLevel::Read,
         PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionLevel::Write,
-        PrimitiveOperation::Bash => PermissionLevel::BashWhitelist,
+        PrimitiveOperation::Bash => PermissionLevel::Bash,
     }
 }
 

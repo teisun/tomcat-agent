@@ -23,7 +23,7 @@ pub mod types;
 
 pub use defaults::{
     builtin_default_rules, BUILTIN_BASH_APPROVAL_REQUIRED, BUILTIN_BASH_FORBIDDEN,
-    BUILTIN_BASH_WHITELIST, BUILTIN_DEFAULT_PATH_RULES,
+    BUILTIN_DEFAULT_PATH_RULES,
 };
 pub use gate::{DefaultPermissionGate, GateConfig, PermissionGate};
 pub use path_rule::PathRule;

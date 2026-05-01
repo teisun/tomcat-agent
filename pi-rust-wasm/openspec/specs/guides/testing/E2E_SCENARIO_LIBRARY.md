@@ -68,10 +68,15 @@
 | E2E-CLI-019 | 人工 | `manual_drag_path_denied_shows_cancel_only` | 用户拖拽命中 deny 规则的路径时不能扩大授权 | 预置 `primitive.path_rules=[{path=<secret>, mode="deny"}]` → `pi chat` → 拖入 `<secret>` | 仅允许取消/不授权；不得展示永久允许、本次允许或工作区写授权选项；自动化回归见 `menu_options_deny_only_only_cancel` |
 | E2E-CLI-020 | 人工 | `manual_config_set_path_rules_runtime_effective` | 用户在同一会话内通过配置工具新增 deny 规则后立即生效 | `pi chat` → 触发 `config_set primitive.path_rules` 追加 deny → 再请求 read/write 同一路径 | 后续工具调用被 deny 拦截，无需重启；自动化回归见 `runtime_deny_rule_overrides_existing_session_grant` / `config_set_array_path_rule_appends_with_json_value` |
 | E2E-CLI-021 | 自动 | `read_file_binary_returns_product_error` | 用户要求读取二进制或非 UTF-8 文件时获得明确错误 | 构造非 UTF-8 文件 → `read_file` | 返回产品化错误，提示二进制/非 UTF-8，不把乱码注入上下文 |
-| E2E-CLI-022 | 自动 | `layer0_persist_file_readable` | 大工具结果落盘到 agent runtime trail，不污染 workspace definition | 构造超阈值 tool_result → Layer0 cleanup | 文件写入 `agent_workspace_trail/tool-results/{session_id}`；不写入旧 `workspace/<session>/tool-results` 路径；preview 留在上下文 |
+| E2E-CLI-022 | 自动 | `layer0_persist_file_readable` | 大工具结果落盘到 agent runtime trail，不污染 workspace definition | 构造超阈值 tool_result → Layer0 cleanup | 文件写入 `agent_trail_dir/tool-results/{session_id}`；不写入旧 `workspace/<session>/tool-results` 路径；preview 留在上下文 |
+| E2E-CLI-023 | 自动 | `deny_path_drag_menu_only_allows_cancel_contract` | 用户拖拽命中 deny 的纯路径后不会进入 LLM | 构造 deny `path_rules` → 纯路径拖拽菜单 | 菜单只允许取消；自动化见 `tests/dragged_path_e2e.rs` |
+| E2E-CLI-026 | 自动 | `path_with_intent_silent_passthrough_contract` | 用户输入「路径 + 意图」时不触发拖拽授权 | 输入 `'<abs-path>'看下里面有什么文件` | `interpret_dragged_paths` 返回 `None`，不新增 `DraggedPath`；自动化见 `tests/dragged_path_e2e.rs` |
+| E2E-EXEC-024 | 自动 | `bash_assignment_rhs_denied_in_all_supported_positions` | Bash 中 `NAME=/path` 不绕过 deny | `stat -c %s p=/deny/foo`、`p=/deny/foo cmd`、`p=/deny/foo; cmd` | 每条都返回 Permission deny，错误包含 RHS 路径；自动化见 `tests/bash_assignment_deny.rs` |
+| E2E-PROMPT-025-offline | 自动 | `system_prompt_names_three_directories_and_keeps_state_as_permission_list` | LLM prompt 明确当前目录是 `agent_workspace_dir` | 构造三目录 `WorkspaceContext` + `WorkspaceState` | prompt 包含三目录用途/权限；`WorkspaceStateSection` 不重复 `cwd_snapshot` / runtime trail 解释；自动化见 `tests/system_prompt_cwd_priority.rs` |
+| E2E-CHAT-025-online | 人工 | `cwd_question_e2e`（待在线补验） | 真实 LLM 回答“当前目录”时看用户 cwd | 含 `OPENAI_API_KEY` 时在临时项目下运行 `pi chat` 并询问当前目录 | 回复包含项目哨兵文件，不包含 `workspace-main` / `.pi_` |
 
 
-**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～022 的核心契约已由 `dragged_path`、`permission::gate`、`config_tool`、`executor`、`compaction` 自动化回归覆盖；其中 018～020 的真实终端菜单观感仍按「人工」补验。014、015 待后续补充。
+**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～026、E2E-EXEC-024、E2E-PROMPT-025-offline 的核心契约已由 `dragged_path`、`permission::gate`、`config_tool`、`executor`、`compaction`、`system_prompt` 自动化回归覆盖；其中真实终端菜单观感与 E2E-CHAT-025-online 仍按「人工」补验。014、015 待后续补充。
 
 ---
 

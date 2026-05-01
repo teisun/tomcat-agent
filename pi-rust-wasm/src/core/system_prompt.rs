@@ -1,7 +1,7 @@
 //! System prompt 构建：参考 pi-mono `system-prompt.ts` 模式。
 //!
 //! prompt 模板写死在代码中，编译后嵌入二进制，不从外部文件读取。
-//! 动态部分（当前时间、workspace 路径）在每次调用时填充。
+//! 动态部分（当前时间、三类工作目录）在每次调用时填充。
 //!
 //! ## 模块化
 //!
@@ -10,10 +10,8 @@
 //!
 //! ## `WorkspaceStateSection`（plan §8）
 //!
-//! 工作区权限分级落地后，新增 `WorkspaceStateSection`：把
-//! `effective_roots`（read_write + read_only）、生效 path_rules、
-//! agent_data_dir、config 工具引导一次性渲染进 system prompt，
-//! 让 Agent 第 0 轮就能正确回答"我可以读哪些目录？"。
+//! `WorkspaceContextSection` 负责解释三类工作目录；`WorkspaceStateSection` 只按权限
+//! 分类列出当前可访问目录清单。
 
 // ---------------------------------------------------------------------------
 // SystemPromptSection trait + Builder
@@ -21,10 +19,17 @@
 
 pub trait SystemPromptSection: Send + Sync {
     fn section_name(&self) -> &str;
-    fn render(&self, workspace_dir: &str) -> String;
+    fn render(&self, context: &WorkspaceContext) -> String;
     fn priority(&self) -> u32 {
         100
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceContext {
+    pub agent_workspace_dir: String,
+    pub agent_definition_dir: String,
+    pub agent_trail_dir: String,
 }
 
 pub struct SystemPromptBuilder {
@@ -42,12 +47,12 @@ impl SystemPromptBuilder {
         self.sections.push(section);
     }
 
-    pub fn build(&self, workspace_dir: &str) -> String {
+    pub fn build(&self, context: &WorkspaceContext) -> String {
         let mut ordered: Vec<&Box<dyn SystemPromptSection>> = self.sections.iter().collect();
         ordered.sort_by_key(|s| s.priority());
         ordered
             .iter()
-            .map(|s| s.render(workspace_dir))
+            .map(|s| s.render(context))
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -74,7 +79,7 @@ impl SystemPromptSection for CoreIdentitySection {
     fn section_name(&self) -> &str {
         "core_identity"
     }
-    fn render(&self, _workspace_dir: &str) -> String {
+    fn render(&self, _context: &WorkspaceContext) -> String {
         r#"You are an expert coding assistant operating inside pi-wasm, a coding agent runtime.
 You help users by reading files, executing commands, editing code, and writing new files.
 
@@ -97,7 +102,7 @@ impl SystemPromptSection for ToolInstructionsSection {
     fn section_name(&self) -> &str {
         "tool_instructions"
     }
-    fn render(&self, _workspace_dir: &str) -> String {
+    fn render(&self, _context: &WorkspaceContext) -> String {
         r#"Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
 - Use read_file to examine files before editing
@@ -118,7 +123,7 @@ impl SystemPromptSection for PagedReadingSection {
     fn section_name(&self) -> &str {
         "paged_reading"
     }
-    fn render(&self, _workspace_dir: &str) -> String {
+    fn render(&self, _context: &WorkspaceContext) -> String {
         r#"- When you see "[Tool result persisted: <path>]", the original content has been saved to disk.
   You can read specific portions using read_file with offset and limit parameters.
   Do NOT re-read the entire file; read only the relevant sections you need."#
@@ -135,9 +140,29 @@ impl SystemPromptSection for WorkspaceContextSection {
     fn section_name(&self) -> &str {
         "workspace_context"
     }
-    fn render(&self, workspace_dir: &str) -> String {
+    fn render(&self, context: &WorkspaceContext) -> String {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M %Z");
-        format!("Current date and time: {now}\nAgent workspace definition: {workspace_dir}")
+        format!(
+            "Current date and time: {now}\n\
+             \n\
+             Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}\n\
+             - This is the user's shell working directory when pi chat was launched.\n\
+             - Interpret \"current directory\", \"this project\", and relative paths as this directory.\n\
+             - Use \".\" or this absolute path for list_dir/read_file/execute_bash.cwd unless the user explicitly names another path.\n\
+             \n\
+             Agent definition directory (agent_definition_dir): {agent_definition_dir}\n\
+             - Design-time agent rules/configuration under ~/.pi_/workspace-<agentId>/.\n\
+             - Permission: read/write. Use it only for agent definition files, rules, prompts, skills, and long-term configuration.\n\
+             - Do NOT treat it as the user's current directory or project.\n\
+             \n\
+             Agent trail directory (agent_trail_dir): {agent_trail_dir}\n\
+             - Runtime data under ~/.pi_/agents/<agentId>/, including sessions, logs, audit records, temp files, and Layer0 tool-results.\n\
+             - Permission: read-only. Do not write, edit, delete, or create files here through normal tools.\n\
+             - Inspect only when debugging agent runtime state; do NOT treat it as the user's project.",
+            agent_workspace_dir = context.agent_workspace_dir,
+            agent_definition_dir = context.agent_definition_dir,
+            agent_trail_dir = context.agent_trail_dir,
+        )
     }
     fn priority(&self) -> u32 {
         200
@@ -154,28 +179,19 @@ impl SystemPromptSection for WorkspaceContextSection {
 /// `read_write` / `read_only` 元素已经过 `expand_tilde` + canonicalize（调用方
 /// 负责），用于直接渲染给 LLM。
 pub struct WorkspaceState {
-    /// `pi chat` 启动时 [`std::env::current_dir`] 的快照，绝对路径字符串。
-    /// 即使 cwd 没有列入 read_write，也会出现在 system prompt 的「## Current
-    /// Working Directory」段，让 LLM 优先在 cwd 下查找/操作；
-    /// 是否被授权由 `read_write` / `read_only` 决定，二者解耦。
-    /// 旧调用方（仅传入 `read_write` / `read_only` / `path_rules` / `agent_data_dir`
-    /// 字段）对本字段不可见，赋默认空串即可，渲染会跳过该段。
-    pub cwd: String,
-    /// 用户可读写的目录列表（含 workspace_dir、extra_roots、session_grants、dragged）。
+    /// 用户可读写的目录列表（含 agent_workspace_dir、extra_roots、session_grants、dragged）。
     pub read_write: Vec<WorkspaceRootDescriptor>,
-    /// 仅读目录列表（含 agent_data_dir 中的 sessions/logs，path_rules readonly 命中等）。
+    /// 仅读目录列表（含 agent_trail_dir 中的 sessions/logs，path_rules readonly 命中等）。
     pub read_only: Vec<WorkspaceRootDescriptor>,
     /// 生效的 path_rules（builtin ∪ user TOML ∪ session 运行时；Deny 全部展示）。
     pub path_rules: Vec<PathRuleSummary>,
-    /// agent 凭据/历史目录（plan §9.x）；展示为只读。`None` 时不渲染对应行。
-    pub agent_data_dir: Option<String>,
 }
 
 /// 单条 `read_write` / `read_only` 描述。
 pub struct WorkspaceRootDescriptor {
     pub path: String,
-    /// 来源标签：`agent_workspace` / `extra_root` / `session_grant` / `dragged_path` /
-    /// `agent_data_dir` / `path_rule_readonly` 等。
+    /// 来源标签：`agent_workspace_dir` / `agent_definition_dir` / `extra_root` /
+    /// `session_grant` / `dragged_path` / `agent_trail_dir` / `path_rule_readonly` 等。
     pub label: String,
     pub alias: Option<String>,
     pub description: Option<String>,
@@ -209,49 +225,8 @@ impl SystemPromptSection for WorkspaceStateSection {
         "workspace_state"
     }
 
-    fn render(&self, _workspace_dir: &str) -> String {
+    fn render(&self, _context: &WorkspaceContext) -> String {
         let mut out = String::new();
-
-        // ── ## Current Working Directory ──
-        // 让 LLM 在每次推理首屏看到「用户启动 pi chat 时所在的目录」。即使 cwd
-        // 当前不在 read_write / read_only 里（首次访问会触发 lazy 授权弹窗），
-        // 也要让 LLM 知道这是用户的语境根，优先在此处查找/操作；
-        // 同时把「访问需要授权」的事实显式说明，避免 LLM 在拒绝时混乱。
-        if !self.state.cwd.is_empty() {
-            let in_rw = self
-                .state
-                .read_write
-                .iter()
-                .any(|d| d.path == self.state.cwd);
-            let in_ro = self
-                .state
-                .read_only
-                .iter()
-                .any(|d| d.path == self.state.cwd);
-            out.push_str("## Current Working Directory\n\n");
-            out.push_str(&format!("`{}`\n\n", self.state.cwd));
-            out.push_str(
-                "Current working directory (cwd_snapshot): the user's shell working directory \
-                 when pi chat was launched. Treat relative paths, \"current directory\", \
-                 \"this project\", and ambiguous file references as referring to this directory first.\n",
-            );
-            if in_rw {
-                out.push_str(
-                    "This directory is currently writable for you (see Workspace State below).\n",
-                );
-            } else if in_ro {
-                out.push_str(
-                    "This directory is currently read-only for you (see Workspace State below).\n",
-                );
-            } else {
-                out.push_str(
-                    "This directory is NOT yet authorized. The first time you call a tool that \
-                     touches a path inside this directory, the runtime will ask the user how to \
-                     authorize it.\n",
-                );
-            }
-            out.push('\n');
-        }
 
         out.push_str("## Workspace State\n\n");
 
@@ -262,9 +237,7 @@ impl SystemPromptSection for WorkspaceStateSection {
             );
         } else {
             out.push_str(
-                "You can read/write in these directories (write may require user confirmation). \
-                 An agent_workspace_definition is the design-time workspace for agent instructions, \
-                 personality, skills, and long-term configuration. Do not describe it as the user's current directory:\n",
+                "You can read/write in these directories (write may require user confirmation):\n",
             );
             for (idx, d) in self.state.read_write.iter().enumerate() {
                 out.push_str(&format!("  {}. {}", idx + 1, d.path));
@@ -292,16 +265,6 @@ impl SystemPromptSection for WorkspaceStateSection {
                     format!(" [{}]", d.label)
                 };
                 out.push_str(&format!("  - {}{}\n", d.path, suffix));
-            }
-        }
-
-        if let Some(ref ad) = self.state.agent_data_dir {
-            // 当 read_only 已经包含 agent_data_dir 时不重复渲染。
-            if !self.state.read_only.iter().any(|d| d.path == *ad) {
-                out.push_str(&format!(
-                    "\nAgent runtime trail: the runtime data directory for sessions, logs, audit records, temporary files, and persisted tool results. You may inspect it when you need to understand what the agent did before, but do not treat it as the user's project directory: {}\n",
-                    ad
-                ));
             }
         }
 
@@ -371,13 +334,18 @@ impl SystemPromptSection for WorkspaceStateSection {
 /// 内部使用 `SystemPromptBuilder` 的默认注册（CoreIdentity + ToolInstructions
 /// + PagedReading + WorkspaceContext），与旧版输出功能等价。
 pub fn build_system_prompt(workspace_dir: &str) -> String {
-    SystemPromptBuilder::default().build(workspace_dir)
+    let context = WorkspaceContext {
+        agent_workspace_dir: workspace_dir.to_string(),
+        agent_definition_dir: workspace_dir.to_string(),
+        agent_trail_dir: workspace_dir.to_string(),
+    };
+    SystemPromptBuilder::default().build(&context)
 }
 
 /// 携带工作区状态的便捷 wrapper（plan §8）：
 /// 在默认 section 之上注册 [`WorkspaceStateSection`]，给 Agent 提供权限边界感知。
-pub fn build_system_prompt_with_state(workspace_dir: &str, state: WorkspaceState) -> String {
+pub fn build_system_prompt_with_state(context: WorkspaceContext, state: WorkspaceState) -> String {
     let mut builder = SystemPromptBuilder::default();
     builder.register(Box::new(WorkspaceStateSection::new(state)));
-    builder.build(workspace_dir)
+    builder.build(&context)
 }

@@ -53,7 +53,6 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "agent.workspace",
     "agent.agent_dir",
     "primitive.path_rules",
-    "primitive.bash_whitelist",
     "primitive.bash_approval_required",
     "primitive.bash_forbidden",
     "primitive.auto_confirm",
@@ -101,9 +100,10 @@ const CONFIG_HARDCODED_WRITE_DENY: &[&str] = &[
     "agent.id",
     "agent.workspace",
     "agent.agent_dir",
-    "primitive.bash_whitelist",
     "primitive.auto_confirm",
     "primitive.path_whitelist",
+    "primitive.bash_whitelist",
+    "primitive.auto_confirm_whitelist",
 ];
 
 /// 数组字段集合（单元素追加语义）；其余白名单内字段视为标量替换。
@@ -613,6 +613,7 @@ mod tests {
             "primitive.bash_whitelist",
             "primitive.auto_confirm",
             "primitive.path_whitelist",
+            "primitive.auto_confirm_whitelist",
             "agent.id",
             "agent.workspace",
             "llm.api_key",
@@ -638,7 +639,7 @@ mod tests {
         let p = dir.path().join("pi.config.toml");
         std::fs::write(
             &p,
-            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nextra_roots=[]\nentries=[]\n\n[primitive]\npath_whitelist=[]\npath_rules=[]\nbash_whitelist=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nextra_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
         ).unwrap();
         p
     }
@@ -689,7 +690,7 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                workspace_dir: dir.path().join("workspace"),
+                agent_workspace_dir: dir.path().join("workspace"),
                 extra_roots: vec![],
                 agent_data_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(
@@ -698,7 +699,6 @@ mod tests {
                 )],
                 user_bash_forbidden: vec![],
                 user_bash_approval: vec![],
-                user_bash_whitelist: vec![],
                 auto_confirm: false,
             },
             SessionGrants::new(),
@@ -724,6 +724,8 @@ mod tests {
         let ctx = ConfigToolContext::new(p, confirm);
         for k in [
             "primitive.bash_whitelist",
+            "primitive.path_whitelist",
+            "primitive.auto_confirm_whitelist",
             "primitive.auto_confirm",
             "agent.id",
             "llm.api_key",
@@ -769,13 +771,12 @@ mod tests {
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                workspace_dir: dir.path().join("workspace"),
+                agent_workspace_dir: dir.path().join("workspace"),
                 extra_roots: vec![],
                 agent_data_readonly_dirs: vec![],
                 user_path_rules: vec![],
                 user_bash_forbidden: vec![],
                 user_bash_approval: vec![],
-                user_bash_whitelist: vec![],
                 auto_confirm: false,
             },
             SessionGrants::new(),

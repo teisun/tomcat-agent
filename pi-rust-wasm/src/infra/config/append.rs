@@ -88,7 +88,7 @@ mod tests {
         let p = dir.path().join("pi.config.toml");
         std::fs::write(
             &p,
-            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nextra_roots=[]\nentries=[]\n\n[primitive]\npath_whitelist=[]\npath_rules=[]\nbash_whitelist=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+            "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nextra_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
         )
         .unwrap();
         p

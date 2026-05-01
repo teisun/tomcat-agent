@@ -24,13 +24,12 @@ fn gate_with(
 ) -> DefaultPermissionGate {
     DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: workspace,
+            agent_workspace_dir: workspace,
             extra_roots: extra,
             agent_data_readonly_dirs: agent_ro,
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
@@ -78,7 +77,7 @@ fn deny_path_rule_overrides_workspace() {
     // 注入 user_path_rules：deny <ws>/secret
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws.clone(),
+            agent_workspace_dir: ws.clone(),
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
@@ -87,7 +86,6 @@ fn deny_path_rule_overrides_workspace() {
             )],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
@@ -109,7 +107,7 @@ fn readonly_path_rule_blocks_write_allows_read() {
     let _ = std::fs::create_dir_all(&ro);
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws.clone(),
+            agent_workspace_dir: ws.clone(),
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
@@ -118,7 +116,6 @@ fn readonly_path_rule_blocks_write_allows_read() {
             )],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
@@ -168,13 +165,12 @@ fn session_grant_unblocks_outside() {
     session.add(outside.clone());
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws,
+            agent_workspace_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         session,
@@ -203,13 +199,12 @@ fn runtime_deny_rule_overrides_existing_session_grant() {
     session.add(outside.clone());
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws,
+            agent_workspace_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         session,
@@ -238,13 +233,12 @@ fn dragged_path_unblocks_outside() {
     drag.add(dragged.clone());
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws,
+            agent_workspace_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: false,
         },
         SessionGrants::new(),
@@ -270,13 +264,12 @@ fn auto_confirm_short_circuits_layer2() {
     let ws = tmpdir("ws_autoconf");
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws,
+            agent_workspace_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: true,
         },
         SessionGrants::new(),
@@ -299,13 +292,12 @@ fn auto_confirm_does_not_override_forbidden() {
     let ws = tmpdir("ws_acforbid");
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            workspace_dir: ws,
+            agent_workspace_dir: ws,
             extra_roots: vec![],
             agent_data_readonly_dirs: vec![],
             user_path_rules: vec![],
             user_bash_forbidden: vec![],
             user_bash_approval: vec![],
-            user_bash_whitelist: vec![],
             auto_confirm: true,
         },
         SessionGrants::new(),

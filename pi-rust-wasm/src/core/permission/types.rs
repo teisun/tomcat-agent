@@ -22,8 +22,8 @@ pub enum PermissionLevel {
     Read,
     /// 含 working dir write / extra_root write / session 授权后写。
     Write,
-    /// bash 命令命中 whitelist。
-    BashWhitelist,
+    /// bash 命令通过命令策略。
+    Bash,
     /// bash 命令命中 approval_required（需用户确认）。
     BashApproval,
     /// 命中 path_rules deny / bash_forbidden / hardcoded write deny。
@@ -42,12 +42,12 @@ pub enum GrantSource {
     ConfigExtraRoot,
     /// 用户在 confirm 弹窗显式选了"本次允许"（知情授权）。
     SessionGrant,
-    /// 拖拽产生的临时授权（行内含意图自动 AllowOnce / 拖拽菜单 [a]）。
+    /// 拖拽菜单 [a] 产生的临时授权。
     DraggedPath,
     /// 命中 path_rules readonly + read 操作。
     PathRuleReadOnly,
-    /// 命中 bash_whitelist regex。
-    BashWhitelist,
+    /// Bash 命令未命中 forbidden / approval_required 后按策略放行。
+    BashPolicy,
     /// `primitive.auto_confirm = true` 时短路 Layer-2 NeedConfirm。
     AutoConfirmFlag,
 }

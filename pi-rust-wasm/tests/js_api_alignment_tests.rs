@@ -21,10 +21,10 @@ const WASMEDGE_INSTALL_URL: &str = "https://wasmedge.org/docs/start/install";
 /// 构建带完整 Tokio 运行时 + PrimitiveExecutor 的 Dispatcher，用于 async API 测试。
 fn build_async_dispatcher() -> Arc<HostApiDispatcher> {
     let bus = Arc::new(DefaultEventBus::new());
-    let mut cfg = PrimitiveConfig::default();
-    // Whitelist /tmp for exec/file operations in tests.
-    cfg.path_whitelist.push("/tmp".to_string());
-    cfg.auto_confirm = true;
+    let cfg = PrimitiveConfig {
+        auto_confirm: true,
+        ..Default::default()
+    };
     let executor = DefaultPrimitiveExecutor::new(
         cfg,
         Arc::new(AllowAllConfirmation),

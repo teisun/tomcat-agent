@@ -94,13 +94,12 @@ fn extract_target_from_preview_blank_returns_none() {
 
 fn make_gate(workspace: &Path) -> Arc<dyn PermissionGate> {
     let cfg = GateConfig {
-        workspace_dir: workspace.to_path_buf(),
+        agent_workspace_dir: workspace.to_path_buf(),
         extra_roots: vec![],
         agent_data_readonly_dirs: vec![],
         user_path_rules: vec![],
         user_bash_forbidden: vec![],
         user_bash_approval: vec![],
-        user_bash_whitelist: vec![],
         auto_confirm: false,
     };
     Arc::new(DefaultPermissionGate::new(

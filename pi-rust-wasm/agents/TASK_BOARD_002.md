@@ -229,24 +229,24 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Jerry |
 | **分支** | `fix/drag-deny-cwd-remediation` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-046`、`#T-047`、`#T-048`、`#T-050`、`#T-051` 的 follow-up |
 | **计划文档** | [drag-deny-cwd-remediation_8b74f52d.plan.md](/Users/yankeben/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md) |
 
-**目标**：收敛拖拽授权语义、修复 Bash assignment 路径预检漏判、厘清 cwd / agent definition / agent trail 目录命名，并删除 legacy whitelist 配置面，确保用户说「当前目录 / 这个项目 / 相对路径」时始终以 `cwd_snapshot()` 为准。
+**目标**：收敛拖拽授权语义、修复 Bash assignment 路径预检漏判、厘清 agent workspace / agent definition / agent trail 目录命名，并删除 legacy whitelist 配置面，确保用户说「当前目录 / 这个项目 / 相对路径」时始终以启动时的 `agent_workspace_dir` 为准。
 
 **子项**：
-- [ ] 拖拽 DropPath 仅处理整行纯路径；删除 `DragOutcome::AutoAllow`、`split_path_and_suffix`、`has_intent_text`，`PATH + 意图` 原样交给 LLM 后续工具流程处理。
-- [ ] PromptMenu deny / 用户 cancel 触发 `RecordUserAndSkip`：只写 `[drag-cancel]` 合成 note 到 transcript，直接回到 `u>`，不重建 `cancel_token`、不进 `AgentLoop`。
-- [ ] 修复 `bash_parser` 对 `NAME=/path` 三种形态（命令前缀 / 位置参数 / 子命令首段）的 RHS 路径提取，确保 deny path_rules 在 bash 预检中命中真实路径。
-- [ ] 目录命名与语义对齐：`workspace_dir` 与启动时 `cwd_snapshot()` 一致；`agent_workspace_definition` → `agent_definition_dir`（`workspace-<agentId>/`）；`agent_workspace_trail` → `agent_trail_dir`（`agents/<agentId>/`）。
-- [ ] 修正 system prompt 与 tool description：`cwd_snapshot` 在「当前目录 / 这个项目 / 相对路径」语义中压过 `agent_definition_dir`；`list_dir` / `read_file` / `execute_bash.cwd` 描述同步。
-- [ ] 删除 `primitive.path_whitelist` / `primitive.bash_whitelist` / `primitive.auto_confirm_whitelist` 配置字段与相关代码；旧 TOML 命中时 validation 明确报错并给出迁移建议。
-- [ ] 抽取 `src/api/chat/dragged_handler.rs`，控制 `src/api/chat/mod.rs` 净涨 ≤ 0 行。
-- [ ] 补齐单测、离线 E2E 与可选真实 LLM E2E；同步 `User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`directory-structure.md`、`context-management.md`、`permission-system.md`、`user-guide.md` 与 `docs/status/develop.md`。
+- [x] 拖拽 DropPath 仅处理整行纯路径；删除 `DragOutcome::AutoAllow`、`split_path_and_suffix`、`has_intent_text`，`PATH + 意图` 原样交给 LLM 后续工具流程处理。
+- [x] PromptMenu deny / 用户 cancel 触发 `RecordUserAndSkip`：只写 `[drag-cancel]` 合成 note 到 transcript，直接回到 `u>`，不重建 `cancel_token`、不进 `AgentLoop`。
+- [x] 修复 `bash_parser` 对 `NAME=/path` 三种形态（命令前缀 / 位置参数 / 子命令首段）的 RHS 路径提取，确保 deny path_rules 在 bash 预检中命中真实路径。
+- [x] 目录命名与语义对齐：用户启动 `pi chat` 时的目录统一命名为 `agent_workspace_dir`；`agent_workspace_definition` → `agent_definition_dir`（`workspace-<agentId>/`）；`agent_workspace_trail` → `agent_trail_dir`（`agents/<agentId>/`）。
+- [x] 修正 system prompt 与 tool description：`agent_workspace_dir` 在「当前目录 / 这个项目 / 相对路径」语义中压过 `agent_definition_dir`；`list_dir` / `read_file` / `execute_bash.cwd` 描述同步。
+- [x] 删除 `primitive.path_whitelist` / `primitive.bash_whitelist` / `primitive.auto_confirm_whitelist` 配置字段与相关代码；旧 TOML 命中时 validation 明确报错并给出迁移建议。
+- [x] 抽取 `src/api/chat/dragged_handler.rs`，控制 `src/api/chat/mod.rs` 净涨 ≤ 0 行。
+- [x] 补齐单测、离线 E2E 与可选真实 LLM E2E；同步 `User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`directory-structure.md`、`context-management.md`、`permission-system.md`、`user-guide.md` 与 `docs/status/fix-drag-deny-cwd-remediation.md`。
 
 **依赖**：T2-P0-004（权限分级模型已落地）；当前 plan 中的目录命名决策。
 
@@ -254,13 +254,13 @@
 
 **协作接口**：
 - 消费：`PermissionGate`、`DefaultPrimitiveExecutor`、`bash_parser`、`ChatContext`、`SystemPromptBuilder`、`config_tool`。
-- 提供：纯路径拖拽授权契约、Bash assignment 路径提取契约、`cwd_snapshot` / `agent_definition_dir` / `agent_trail_dir` 目录命名契约、精简后的 primitive 配置 schema。
+- 提供：纯路径拖拽授权契约、Bash assignment 路径提取契约、`agent_workspace_dir` / `agent_definition_dir` / `agent_trail_dir` 目录命名契约、精简后的 primitive 配置 schema。
 
 **验收标准**：
 - `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` 全绿。
 - 定向测试覆盖 `dragged_path`、`dragged_handler`、`bash_parser`、`system_prompt`、`config_tool`、`infra::config`。
 - 离线 E2E 覆盖拖拽 deny/cancel、`PATH+意图` silent passthrough、Bash assignment deny、cwd prompt 渲染；带 `OPENAI_API_KEY` 时补跑真实 cwd 问答 E2E。
-- `docs/status/develop.md` 与本看板记录 follow-up hotfix 结论、命令、日志与 commit SHA。
+- `docs/status/fix-drag-deny-cwd-remediation.md` 与本看板记录 follow-up hotfix 结论、命令、日志与 commit SHA。
 
 ---
 
@@ -839,6 +839,7 @@ flowchart LR
 | 日期 | 变更 | 说明 |
 |------|------|------|
 | 2026-05-01 | 新增 T2-P0-013 | 将 `~/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md` 登记为 P0 follow-up 任务：覆盖拖拽纯路径语义收敛、drag cancel 只写 transcript、bash assignment deny 预检、cwd / agent_definition_dir / agent_trail_dir 命名迁移、删除 legacy whitelist 配置面、补单测/E2E/文档同步；状态 `TODO`，建议分支 `fix/drag-deny-cwd-remediation`。 |
+| 2026-05-01 | T2-P0-013 DOING→PENDING_INTEGRATION | Jerry 在 `fix/drag-deny-cwd-remediation` 完成整改：删除 `DragOutcome::AutoAllow` 与 legacy whitelist 配置面；拖拽 deny/cancel 只写 `[drag-cancel]` transcript note；Bash assignment RHS 纳入权限预检；目录统一为 `agent_workspace_dir` / `agent_definition_dir` / `agent_trail_dir`；同步 User Stories、E2E 场景库、权限/目录/上下文架构文档与用户指南。门禁 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`、`cargo test -- --ignored` 全绿（含真实 OpenAI ignored 用例）；待 Nibbles 集成复核。 |
 | 2026-04-26 | T2-P0-003 调度为 002 全 P0 末位（最低优先） | 任务块重排至 `T2-P0-011` 之后；§4 认领说明、§1.4 风险、§5 拓扑同步；仍属 002 交付与 `#T-131`/`#T-132` 闭环范围，不降低 P0 档 |
 | 2026-04-22 | 新建本看板 | 随 P0-P9 路线图调整；`001-mvp` 归档到 `openspec/specs/archive/` |
 | 2026-04-22 | 认领 T2-P0-007 | Spike 认领（TODO→DOING），破例绕过 T2-P0-001 / T2-P0-003 依赖（见阻塞点）；计划 `interruptible_agent_loop_c77e96ab.plan.md` 经用户确认后进入开发 |

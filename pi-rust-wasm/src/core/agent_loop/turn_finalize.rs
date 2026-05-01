@@ -47,7 +47,7 @@ pub(super) fn finalize_turn_after_text(
         let l0 = run_layer0_cleanup(
             ctx_state,
             &agent.config.context_config,
-            std::path::Path::new(&agent.config.agent_workspace_trail),
+            std::path::Path::new(&agent.config.agent_trail_dir),
             &agent.config.session_id,
         );
         for pr in &l0.persisted {

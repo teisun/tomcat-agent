@@ -802,8 +802,8 @@ flowchart LR
 在 `messages` 中找到最后一个 turn start（通过 `is_turn_start()` 判定），扫描 `messages[last_turn_start..]` 中 `role == Tool` 的消息：单条 tool_result >= `layer0_single_result_max_chars`（默认 **50K chars**，~12.5K token）→ 落盘 + 500 chars preview 占位符（通过 `ChatMessage::set_text_content(preview)` 原地替换）。**先让 LLM 看到完整内容，再收纳落盘**——LLM 在本轮已正常分析和使用了完整结果，落盘是为了未来轮次的上下文不膨胀。
 
 ```
-fn persist_tool_result(result: &ToolResult, agent_workspace_trail: &Path, session_id: &str) -> String:
-    let path = agent_workspace_trail
+fn persist_tool_result(result: &ToolResult, agent_trail_dir: &Path, session_id: &str) -> String:
+    let path = agent_trail_dir
         .join("tool-results")
         .join(session_id)
         .join(format!("{}.txt", result.tool_call_id))
@@ -814,7 +814,7 @@ fn persist_tool_result(result: &ToolResult, agent_workspace_trail: &Path, sessio
             path, result.content.len(), preview)
 ```
 
-`agent_workspace_trail` 当前默认解析为 `~/.pi_/agents/{agent_id}/`。旧的 `workspace-main/workspace/{session_id}/tool-results` 仅作为历史迁移来源，不再作为新写入目标。
+`agent_trail_dir` 当前默认解析为 `~/.pi_/agents/{agent_id}/`。旧的 `agent_definition_dir/workspace/{session_id}/tool-results` 仅作为历史迁移来源，不再作为新写入目标。
 
 **步骤 B：compactable zone 占位符替换**
 
@@ -1255,7 +1255,7 @@ Agent Loop 中有 **三个检查时机** 与上下文管理交互（对应 §5.6
 - 压缩摘要以 `SessionEntry::BranchSummary` entry（JSONL `type: branch_summary`）写入 transcript（**每批次单行**）。
   - 预热阶段 **追加** `is_boundary: false`（含行 `id`）
   - 应用阶段 **原地**将该行改为 `is_boundary: true`（重启时生效；不追加第二份全文）
-- Tool result 落盘文件存储在 `agent_workspace_trail/tool-results/{session_id}/` 目录，即默认 `~/.pi_/agents/{agent_id}/tool-results/{session_id}/`。
+- Tool result 落盘文件存储在 `agent_trail_dir/tool-results/{session_id}/` 目录，即默认 `~/.pi_/agents/{agent_id}/tool-results/{session_id}/`。
 - 初始化时从 transcript 流式读取消息（遵守「禁止全量加载」约定，使用 `BufReader` 逐行解析 + `fold_entries_to_messages` 输出 `Vec<ChatMessage>`），识别 compact boundary，跳过 `is_boundary=false` 的预热记录。
 
 ### 10.3 配置管理（infrastructure-layer.md）

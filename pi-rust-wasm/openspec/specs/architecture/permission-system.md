@@ -47,8 +47,7 @@
 │   ③ session_grants（SessionGrant 仅本会话）                  │
 │   ④ dragged_paths（DraggedPath 拖拽留档）                    │
 │   ⑤ path_rules readonly（PathRuleReadOnly 仅 read）         │
-│   ⑥ bash_whitelist（BashWhitelist 仅 bash）                 │
-│   ⑦ auto_confirm 短路（AutoConfirmFlag）                    │
+│   ⑥ auto_confirm 短路（AutoConfirmFlag）                    │
 └──────────────────────────────────────────────────────────────┘
                        │ 任一命中 → Allow{source}
                        ▼ 全部未命中
@@ -256,7 +255,7 @@ pub enum ConfirmDecision {
 
 `UserConfirmationProvider::confirm(req) -> Result<ConfirmDecision, AppError>`，CLI 实现 `CliConfirmation` 在 `src/api/chat/confirmation.rs`，TUI 渲染 prompt + 5 选项菜单见 `src/api/chat/dragged_path.rs::MenuOptions`。
 
-`auto_confirm = true` 时短路：直接返回 `AllowOnce`，但仍写审计；`auto_confirm_whitelist` 在原 PR-2 设计中被砍掉（白名单语义已经被 `bash_whitelist` / `path_rules.readonly` 覆盖，再多一条等价开关只会让授权来源更模糊）。
+`auto_confirm = true` 时短路：直接返回 `AllowOnce`，但仍写审计；legacy `path_whitelist` / `bash_whitelist` / `auto_confirm_whitelist` 已删除，路径允许根只走 `workspace.extra_roots`，bash 只走 `bash_forbidden` / `bash_approval_required`。
 
 一次 `NeedConfirm` 的完整状态流：
 
@@ -349,9 +348,9 @@ builtin `bash_forbidden` 默认禁掉 `rm -rf /` / `rm -rf ~` / `chmod 777 /` / 
                   │ 全部 Allow
                   ▼
    ┌──────────────────────────┐
-   │ Layer 3: bash_whitelist? │   builtin ∪ user
+   │ Layer 3: bash policy ok? │   no forbidden / approval hit
    └──────────────┬───────────┘
-            hit ──┴──► Allow{BashWhitelist}
+           hit ──┴──► Allow{BashPolicy}
             miss ─────► Allow{<paths' first source>}
                          (空 path 列表时回退到 NeedConfirm)
 ```
@@ -373,91 +372,32 @@ builtin `bash_forbidden` 默认禁掉 `rm -rf /` / `rm -rf ~` / `chmod 777 /` / 
 
 ---
 
-## 8. 拖拽 UX 双语义
+## 8. 拖拽 UX：仅纯路径进入授权菜单
 
-`src/api/chat/dragged_path.rs::interpret_dragged_paths(line) -> DragInterpret`：
+`src/api/chat/dragged_path.rs::interpret_dragged_paths(line) -> DragOutcome`：
 
-- **行内含意图**（行里出现「读」「看」「列」「写」「编辑」等动词，或 `--read` / `--write` flag）→ 直接判定 `AllowOnce`，append 到 `dragged_paths` 后立刻执行。
-- **纯路径**（行里只有路径或加少量空白）→ 弹 5 选项 TUI 菜单：
-  - `[a]` SessionGrant（仅本会话，read+write）
-  - `[r]` SessionGrantReadOnly（仅本会话只读）
-  - `[w]` AllowAndPersistRoot（追加 `extra_roots`）
-  - `[d]` 加 `path_rules deny`
-  - `[c]` 取消
+- **纯路径**：整行所有 token 都是 `/...` 或 `~/...` 路径 token，且每个 token 要么整体存在，要么是纯 ASCII 路径形，返回 `PromptMenu`。
+- **普通输入**：任何 token 是文字、flag、或「路径 + 意图」混合形态，返回 `None`，原样进入普通对话，不新增 `DraggedPaths` / `SessionGrants`。
 
-5 选项里只有 `[w]` 与 `[d]` 落盘，其他都只活在 `SessionGrants` / `DraggedPaths` 内，重启失效。
+纯路径菜单选项：
 
-### 8.1 Token 内存在性切分（hotfix `feature/workspace-permission-tiers-hotfix`）
+- `[a]` SessionGrant（仅本会话）
+- `[w]` 追加 `workspace.extra_roots`
+- `[r]` 追加 readonly `path_rules`
+- `[d]` 追加 deny `path_rules`
+- `[c]` 取消，不发送给 LLM
 
-POSIX shell 的单引号闭合后紧贴的字符仍属同一 token（例：`'foo''bar'` = `foobar`）。
-直接拿 `shell-words::split` + 起始字符前缀判断会把 `'/abs/path'这个文件夹下面有几个文件?`
-合成一个「以 `/` 开头」的 token，从而误入纯拖拽 5 选项菜单。
-
-`src/api/chat/dragged_path.rs::split_path_and_suffix(tok)` 在 token 内做存在性切分，
-区分「整体是路径」「路径 + 非 ASCII 意图」「ASCII 边角 case」三类。决策树：
-
-```text
-candidate token (以 / 或 ~/ 开头)
-        │
-        ▼
-   ┌────────────────────────────────┐
-   │ ① fs::exists(整个 token)?      │
-   └─────────────┬──────────────────┘
-       yes ──┐   │   ┌── no
-             │   │   │
-             ▼   │   ▼
-   返回 (token, "")   │
-   case A: 整个就是路径
-                     │
-                     ▼
-                ┌────────────────────────────┐
-                │ ② token 是否包含非 ASCII   │
-                │    字符（中文/日文/全角）? │
-                └─────────────┬──────────────┘
-                    no ──┐    │    ┌── yes
-                         │    │    │
-                         ▼    │    ▼
-                返回 (token, "")   │
-                case C: 兼容旧行为 │
-                                   │
-                                   ▼
-                          从右往左按 char 边界
-                          逐次缩短 → fs::exists
-                                   │
-                                   ▼
-                          ┌──────────────────┐
-                          │  找到存在前缀?   │
-                          └─────────┬────────┘
-                              yes ──┤── no
-                                ▼   │   ▼
-                       (prefix, suffix)  None
-                       case B: 切分    case D: 跳过
-```
-
-`interpret_dragged_paths` 在拿到 `(path, suffix)` 时，若 `suffix` 非空则置
-`has_intent_text = true` —— 这一步消除原 bug：**带引号路径 + 紧贴中文意图的输入
-被识别成拖拽 + 意图，走 AutoAllow；AutoAllow 仍必须先走 `gate.check(Read, path)`，命中 deny 时不写 `DraggedPaths`。**
-
-若 token 是「已存在父目录 + 不存在文件名 + 中文意图」（例如
-`/Users/me/Downloads/missing.png看下`），不能把父目录当 fallback path；解析结果应为
-`None` 或普通聊天文本，避免把整个目录误授权。
-
-为什么仅对非 ASCII 做存在性切分？shell-words 切 token 的边界是空白字符；非
-ASCII 字符不是空白 → 引号闭合后会被并进同一 token。ASCII 字符之间必有空白
-分隔，不存在「紧贴」场景，故 ASCII 不存在路径仍按旧规则当作 `PromptMenu`，
-零回归。
+如果 `gate.check(Read, path)` 提前发现 deny / readonly → 缩减菜单（`MenuOptions::deny_only` / `readonly_only`），避免给出无效选项。纯路径进入菜单后，命中 deny 或用户 cancel 时只写入 `[drag-cancel]` 合成 user note，并回到 `u>`；原始拖拽行不得发送给 LLM。
 
 回归测试矩阵（`src/api/chat/dragged_path.rs::tests`）：
 
 | case | 输入示例 | 预期 |
 |------|----------|------|
-| 真实存在路径 + 中文意图 | `'/tmp/.../proj'这个文件夹下面有几个文件?` | `AutoAllow{paths=[/tmp/.../proj]}` |
-| 路径整体含中文且存在 | `/tmp/<uuid>/项目/foo` | `PromptMenu{paths=[..完整..]}` |
-| 不存在文件 + 中文意图 | `/tmp/.../missing.png看下` | 不授权父目录 |
-| 全 ASCII 不存在路径 | `/etc/foo/nonexistent` | `PromptMenu`（兼容） |
-| 带空格引号路径 + 意图 | `"/Users/yan/My Documents/foo" 帮我看下` | `AutoAllow` |
-
-如果 `gate.check(Read, path)` 提前发现 deny / readonly → 缩减菜单（`MenuOptions::deny_only` / `readonly_only`），避免给出无效选项。
+| 纯路径 | `/tmp/project` | `PromptMenu` |
+| 文字 + 路径 | `帮我看 /tmp/project` | `None` |
+| 引号路径 + 中文意图 | `'/tmp/project'看下里面` | `None` |
+| 全 ASCII 不存在路径 | `/etc/foo/nonexistent` | `PromptMenu` |
+| 非 ASCII 不存在 token | `/abs/path中文` | `None` |
 
 整体决策树（行内意图 vs 纯路径 → 探针 → 菜单 → 状态变更）：
 
@@ -503,7 +443,7 @@ config_set(key, value) → 二次 confirm + diff + 落盘
 | `CONFIG_READ_ALLOWLIST` | 精确匹配；只有命中的 key 才允许读 |
 | `CONFIG_HARDCODED_READ_DENY` | 通配前缀；`llm.api_key*` / `llm.proxy` / `security.*` / `storage.*` 永不可读 |
 | `CONFIG_WRITE_ALLOWLIST` | 精确匹配；不在表里的一律拒写 |
-| `CONFIG_HARDCODED_WRITE_DENY` | 通配前缀；`llm.*` / `security.*` / `storage.*` / `agent.*` / `primitive.bash_whitelist` / `primitive.auto_confirm` / `primitive.path_whitelist` 永不可写 |
+| `CONFIG_HARDCODED_WRITE_DENY` | 通配前缀；`llm.*` / `security.*` / `storage.*` / `agent.*` / `primitive.auto_confirm` 以及已删除的 legacy whitelist 字段永不可写 |
 | `ARRAY_FIELDS` | 数组类 key（`workspace.extra_roots` / `entries` / `primitive.path_rules` / `bash_*` 等）只允许「单元素追加」语义；删除 / 整数组替换返回错误并引导 `pi config edit` |
 
 每次 `config_set` 都强制走 `UserConfirmationProvider::confirm`，prompt 含 unified diff；用户拒绝 → `applied=false`，配置不动。
@@ -776,7 +716,7 @@ This directory is currently writable for you (see Workspace State below).
                   最终 system prompt → LLM
 ```
 
-`gate` 与 `cwd` 是同一个 `Arc<dyn PermissionGate>` / `PathBuf`：原语执行、bash 检查、cwd lazy prompt 范围比对、system prompt 渲染、`compute_workspace_state` 全都对着这两个对象。会话期间 `[a]` / `[s]` / 拖拽改动 `SessionGrants` / `DraggedPaths`，下一次 system prompt 重建（compaction、子 agent 拆派等）会立即看到。
+`gate` 与 `agent_workspace_dir` 是同一个 `Arc<dyn PermissionGate>` / `PathBuf`：原语执行、bash 检查、cwd lazy prompt 范围比对、system prompt 渲染、`compute_workspace_state` 全都对着这两个对象。会话期间 `[a]` / `[s]` / 拖拽菜单改动 `SessionGrants` / `DraggedPaths`，下一次 system prompt 重建会立即看到。
 
 ---
 
@@ -799,7 +739,7 @@ This directory is currently writable for you (see Workspace State below).
 - **PR-Doc 后置**：本文档为本任务 `post_arch_doc` todo 的产出。
 - **`pi pathrules remove` / `clear-session`**：T2-P0-005 工具系统整改窗口接入；目前先用 `pi config edit` 兜底。
 - **持久化 `dragged_paths`**：当前重启失效；如果用户多次拖拽相同路径仍然被反复弹 prompt，再考虑落盘。
-- **`auto_confirm` 收敛**：长期目标是把 `auto_confirm` 完全替换为 `path_rules.readonly` + `bash_whitelist`，让「我信任这个目录的所有读」这件事用 path_rules 表达，而不是用一个全局开关。
+- **`auto_confirm` 收敛**：长期目标是把 `auto_confirm` 完全替换为更细粒度的 `path_rules` 与 bash forbidden/approval 规则。
 - **多 agent**：当出现多 agent 实例时，每个 agent 各自的 `agents/{id}` 仍走 `agent_data_readonly_dirs` 兜底，但 cross-agent 写入应被默认 deny；规则升级在 [multi-agent.md](multi-agent.md) 里同步。
 
 ---

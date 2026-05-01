@@ -11,12 +11,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 fn temp_whitelist_config(dir: &std::path::Path) -> PrimitiveConfig {
-    let mut c = PrimitiveConfig::default();
-    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    c.path_whitelist = vec![canonical.to_string_lossy().into_owned()];
+    let c = PrimitiveConfig::default();
     // Legacy 模式：write/edit/bash 默认弹 confirm；测试里通常用 AllowAllConfirmation 直通，
     // 或显式开 auto_confirm。
-    c.bash_whitelist = vec!["echo".to_string()];
+    let _ = dir;
     c
 }
 
