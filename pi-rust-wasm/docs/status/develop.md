@@ -1,5 +1,43 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-05-01 23:24 | INTEGRATED | develop | — |
+
+### 集成测试报告 — T2-P0-013 / T2-P0-014（drag-deny & gate-root & permission-source-redesign）
+
+**合并信息**
+
+- 源分支（tip）：`feature/permission-source-redesign` @ `30ecf02`（线性包含 `fix/gate-root-remediation` @ `10bc02a`、`fix/drag-deny-cwd-remediation` 祖先提交）
+- 合并 commit：`623e94c merge: permission-source-redesign（含 drag-deny / gate-root 前置提交）`
+- 合并策略：`--no-ff`，ort 无冲突
+- 负责任务：**T2-P0-013**（拖拽/Bash/CWD 整改）、**T2-P0-014**（权限授权来源重构）→ 本次集成后置 `DONE`
+
+**§4 全量门禁**（`develop` 合并后、`pi-rust-wasm` 根目录）
+
+| 命令 | 结果 |
+| :--- | :--- |
+| `cargo fmt --check` | 通过 |
+| `cargo build --release` | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | 零警告 |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | **lib 574 passed / 0 failed / 1 ignored；integration 各 crate 全绿；doc-tests 0；EXIT_CODE=0** |
+| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | **integration 全绿；含 `cli_tests` 77/77、`wasmedge_e2e_tests` 39/39** |
+
+**编码规范家族对照**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| `Codeing&Architecture_Spec.md` | 通过 | 权限 gate / session grants / 审计 grant 溯源与 chat 层 UX 边界清晰 |
+| `RUST_FILE_LINES_SPEC.md` | 条件通过 | 合并后仍存在既有大文件（如 `config_tool` / `primitives`）；与既有预警一致，不阻塞本次集成 |
+| `RUST_IDIOMS_SPEC.md` | 通过 | `clippy -D warnings` 零警告 |
+| `COMMENT_SPEC.md` | 通过 | 未发现降级断言或糊弄跳测 |
+
+**结论**
+
+T2-P0-013 / T2-P0-014 集成验收**通过**：三条分支所含变更已通过单次合并 tip 进入 `develop`，全量门禁绿灯。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-04-28 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — T2-P0-004 follow-up（drag deny + cwd runtime + agent_trail_dir）

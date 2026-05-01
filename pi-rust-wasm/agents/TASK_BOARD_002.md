@@ -106,7 +106,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Tom |
 | **分支** | `feature/permission-source-redesign` |
 | **阻塞点** | — |
@@ -252,7 +252,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Jerry |
 | **分支** | `fix/drag-deny-cwd-remediation` |
 | **阻塞点** | — |
@@ -861,6 +861,7 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-01 | T2-P0-013 / T2-P0-014 PENDING_INTEGRATION→DONE | Nibbles：`feature/permission-source-redesign` @ `30ecf02` `--no-ff` 合并入 develop（merge `623e94c`，线性包含 `fix/gate-root-remediation`、`fix/drag-deny-cwd-remediation` 祖先提交）；develop 上 `cargo fmt --check`、`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test -j 1` 全量与 `--test '*'` 绿灯；详见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部集成块 |
 | 2026-05-01 | 新增 T2-P0-013 | 将 `~/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md` 登记为 P0 follow-up 任务：覆盖拖拽纯路径语义收敛、drag cancel 只写 transcript、bash assignment deny 预检、cwd / agent_definition_dir / agent_trail_dir 命名迁移、删除 legacy whitelist 配置面、补单测/E2E/文档同步；状态 `TODO`，建议分支 `fix/drag-deny-cwd-remediation`。 |
 | 2026-05-01 | T2-P0-013 DOING→PENDING_INTEGRATION | Jerry 在 `fix/drag-deny-cwd-remediation` 完成整改（实现提交 `981775c`）：删除 `DragOutcome::AutoAllow` 与 legacy whitelist 配置面；拖拽 deny/cancel 只写 `[drag-cancel]` transcript note；Bash assignment RHS 纳入权限预检；目录统一为 `agent_workspace_dir` / `agent_definition_dir` / `agent_trail_dir`；同步 User Stories、E2E 场景库、权限/目录/上下文架构文档与用户指南。门禁 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`、`cargo test -- --ignored` 全绿（含真实 OpenAI ignored 用例）；待 Nibbles 集成复核。 |
 | 2026-04-26 | T2-P0-003 调度为 002 全 P0 末位（最低优先） | 任务块重排至 `T2-P0-011` 之后；§4 认领说明、§1.4 风险、§5 拓扑同步；仍属 002 交付与 `#T-131`/`#T-132` 闭环范围，不降低 P0 档 |
