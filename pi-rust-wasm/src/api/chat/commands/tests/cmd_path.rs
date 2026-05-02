@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use super::super::cmd_path::{is_path_token, render_path_menu, PathMenuChoice, PathMenuOptions};
+use super::super::cmd_path::{
+    effective_workspace_root, extra_root_menu_line, is_path_token, precheck_existence,
+    render_path_menu, PathMenuChoice, PathMenuOptions,
+};
 use super::super::{parse_chat_command, ChatCommand};
 
 use crate::core::permission::{
@@ -176,4 +179,70 @@ fn nonexistent_ascii_path_is_valid_token() {
 #[test]
 fn nonascii_token_without_existence_returns_none() {
     assert!(!is_path_token("/abs/path中文"));
+}
+
+#[test]
+fn effective_workspace_root_for_file_returns_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("note.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    assert_eq!(effective_workspace_root(&file), tmp.path().to_path_buf());
+}
+
+#[test]
+fn effective_workspace_root_for_dir_returns_self() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("sub");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(effective_workspace_root(&dir), dir);
+}
+
+#[test]
+fn extra_root_menu_line_for_file_uses_parent_phrasing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("note.txt");
+    std::fs::write(&file, b"hello").unwrap();
+    let line = extra_root_menu_line(&file);
+    assert!(
+        line.contains("检测到为文件"),
+        "文件场景文案必须明示\"检测到为文件\"：{line}"
+    );
+    assert!(
+        line.contains(&tmp.path().display().to_string()),
+        "文件场景文案必须包含父目录路径：{line}"
+    );
+    assert!(line.starts_with("  [w]"));
+}
+
+#[test]
+fn extra_root_menu_line_for_dir_uses_default_phrasing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("sub");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = extra_root_menu_line(&dir);
+    assert_eq!(
+        line.trim(),
+        "[w] 以后也允许访问（写入配置 workspace.workspace_roots）",
+        "目录场景必须保留旧文案以维持 E2E 契约"
+    );
+}
+
+#[test]
+fn precheck_existence_rejects_missing_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("does-not-exist");
+    let err = precheck_existence(&missing).expect_err("不存在路径必须返回 Err");
+    assert!(
+        err.contains("路径不存在"),
+        "错误文案应包含\"路径不存在\"：{err}"
+    );
+}
+
+#[test]
+fn precheck_existence_accepts_existing_dir_and_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(precheck_existence(tmp.path()).is_ok());
+    let file = tmp.path().join("f.txt");
+    std::fs::write(&file, b"x").unwrap();
+    assert!(precheck_existence(&file).is_ok());
 }

@@ -40,6 +40,10 @@ pub(crate) fn run(
     _original_line: String,
     rl: &mut rustyline::DefaultEditor,
 ) -> ChatCommandOutcome {
+    if let Err(msg) = precheck_existence(&path) {
+        eprintln!("✗ {}", msg);
+        return ChatCommandOutcome::Handled;
+    }
     let opts = render_path_menu(&path, &*ctx.gate);
     let choice = render_menu_and_read(&path, &opts, rl);
     if choice != PathMenuChoice::Cancel {
@@ -48,6 +52,50 @@ pub(crate) fn run(
         }
     }
     ChatCommandOutcome::Handled
+}
+
+/// `/path` 进入菜单前的存在性预检。
+///
+/// 不修改 [`is_path_token`]（拖拽场景仍允许 ASCII 不存在路径作为 token）；这里
+/// 仅在 `/path` 命令链路上拒绝不存在路径，避免后续 `[w]` 写盘被
+/// `workspace_roots` 校验回报「不是目录」之类的二段式错误。
+pub(super) fn precheck_existence(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(format!("路径不存在: {}", path.display()))
+    }
+}
+
+/// 计算 `[w]` 真正写入 `workspace.workspace_roots` 的目标路径。
+///
+/// - 文件 → 取父目录（`workspace_roots` 仅接受目录，见
+///   [`crate::infra::config::resolve_workspace_roots_paths`]）。
+/// - 目录或其它 → 原样返回。
+///
+/// 文件无父目录（理论上仅 `/` 根本身可达此分支，但根不会判为 `is_file()`）的极端情形
+/// fallback 回原路径，由后续 `canonicalize` / 校验链给出清晰错误。
+pub(super) fn effective_workspace_root(path: &Path) -> PathBuf {
+    if path.is_file() {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// 渲染 `[w]` 一行菜单文案；文件场景显式告知会回退到父目录。
+pub(super) fn extra_root_menu_line(path: &Path) -> String {
+    if path.is_file() {
+        let parent = path.parent().unwrap_or(path);
+        format!(
+            "  [w] 以后也允许访问（检测到为文件，将其父目录 {}/ 写入 workspace.workspace_roots）",
+            parent.display()
+        )
+    } else {
+        "  [w] 以后也允许访问（写入配置 workspace.workspace_roots）".to_string()
+    }
 }
 
 /// 路径前缀判定：以 `/` 或 `~/` 开头，且长度 > 1。
@@ -194,7 +242,7 @@ fn render_menu_and_read(
         println!("  [a] 本次会话允许访问");
     }
     if opts.persist_extra_root {
-        println!("  [w] 以后也允许访问（写入配置 workspace.workspace_roots）");
+        println!("{}", extra_root_menu_line(path));
     }
     if opts.persist_readonly {
         println!("  [r] 设为只读：允许读取，禁止写入");
@@ -245,7 +293,8 @@ fn apply_menu_choice(
         }
         PathMenuChoice::PersistWorkspaceRoot => {
             precheck_read_allow(ctx, path)?;
-            let canon = std::fs::canonicalize(path).map_err(AppError::Io)?;
+            let target = effective_workspace_root(path);
+            let canon = std::fs::canonicalize(&target).map_err(AppError::Io)?;
             let cfg_path = crate::api::cli::config_file_path()?;
             crate::infra::config::append_workspace_root_to_disk(
                 &cfg_path,
