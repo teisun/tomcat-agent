@@ -1,5 +1,6 @@
 use super::{
-    extract_target_from_preview, parse_choice, target_in_cwd, CwdLazyPrompt, CwdPromptChoice,
+    extract_target_from_preview, parse_choice, target_in_cwd, unrecognized_choice_message,
+    CwdLazyPrompt, CwdPromptChoice, CWD_PROMPT_CHOICES,
 };
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::primitive::PrimitiveOperation;
@@ -34,6 +35,21 @@ fn parse_choice_recognizes_aliases() {
     assert_eq!(parse_choice("skip"), Some(CwdPromptChoice::Cancel));
     assert_eq!(parse_choice(""), None);
     assert_eq!(parse_choice("xyz"), None);
+}
+
+#[test]
+fn prompt_choice_label_matches_supported_choices() {
+    assert_eq!(CWD_PROMPT_CHOICES, "[s/w/c]");
+    assert!(!CWD_PROMPT_CHOICES.contains('a'));
+    assert!(!CWD_PROMPT_CHOICES.contains('n'));
+}
+
+#[test]
+fn unrecognized_choice_message_names_supported_choices() {
+    let msg = unrecognized_choice_message("a");
+    assert!(msg.contains("未识别的选项"));
+    assert!(msg.contains("[s] / [w] / [c]"));
+    assert!(msg.contains("本次按取消处理"));
 }
 
 // ── target_in_cwd ──

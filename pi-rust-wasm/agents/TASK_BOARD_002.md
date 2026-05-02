@@ -292,21 +292,19 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Spike |
 | **分支** | `feature/tool-system-cleanup` |
 | **阻塞点** | — |
-| **关联 TODOS** | `#T-033`、`#T-034`、`#T-035`、`#T-036`、`#T-037`、`#T-039` |
+| **关联 TODOS** | `#T-033`、`#T-034`、`#T-036` |
+| **关联报告** | [builtin-tool-description-cross-agent-study.md](../docs/reports/builtin-tool-description-cross-agent-study.md)（内置工具 catalog / `description` 与文档结构 / T-034 实施顺序） |
 
-**目标**：修复 Bash 授权类型错配等具体 bug，补齐工具描述清单，让 Agent 在规划阶段能访问当前目录并执行 pi 子命令。
+**目标**：修复 Bash 授权类型错配等具体 bug，建立内置工具 catalog 单一事实源并补齐工具描述清单；cwd 首次触达授权机制保持现状，补齐 prompt 字面一致性与失败恢复指引。实现 **T-034** 时以关联报告的最终审批决策为设计参考：catalog 统一驱动 `build_tool_definitions()` 与 `docs/tool-catalog.md`，`usage` / `example` 仅作为文档或测试 fixture 产物，不进入运行时 catalog 字段。
 
 **子项**：
-- [ ] **T-033**：Bash 授权类型从 `FS` 纠正为 `Exec`（对应 audit scope 枚举）
-- [ ] **T-034**：补齐全部工具的 `description` / `usage` / `example`；产出 `docs/tool-catalog.md`
-- [ ] **T-035**：默认工具内创建目录，不再 spawn `pi` 子进程
-- [ ] **T-036**：Chat 默认尝试访问当前目录；无权限时申请授权而非静默
-- [ ] **T-037**：规划阶段允许调用 pi 命令（新增 workspace、list plugin 等）
-- [ ] **T-039**：删除操作改归档（moved-to `.trash/`，7 天后清理）
+- [x] **T-033**：Bash 授权类型从 `FS` 纠正为 `Exec`（对应 audit scope 枚举）
+- [x] **T-034**：建立内置工具 catalog 单一事实源；补齐全部工具 `description` / 参数说明 / 权限风险元数据；由 catalog 派生 `build_tool_definitions()` 与 `docs/tool-catalog.md`（`usage` / `example` 仅作为文档或测试 fixture 产物）
+- [x] **T-036**：Chat cwd 首次触达授权机制保持现状；修正 `[a/s/n]` → `[s/w/c]` prompt 字面 bug，未识别选项显式 warning，拒绝后失败回执给出恢复授权指引
 
 **依赖**：T2-P0-004（权限模型就位后才好改）
 
@@ -314,12 +312,14 @@
 
 **协作接口**：
 - 消费：`ToolRegistry`、`PermissionGate`
-- 提供：`ToolDescriptor` 增强字段
+- 提供：内置工具 catalog（如 `BuiltinToolCatalogEntry`）、由 catalog 派生的 LLM tool definitions、`docs/tool-catalog.md`
 
 **验收标准**：
-- 6 条 TODO（T-033~T-039）全部闭环
-- `docs/tool-catalog.md` 覆盖所有已注册工具
-- E2E：Bash 授权 / 删除归档 / 规划执行 pi 三个场景通过
+- 3 条当前 TODO（T-033/T-034/T-036）全部闭环
+- `build_tool_definitions()` 不再手写内置工具 schema，改为从 catalog 派生
+- `docs/tool-catalog.md` 覆盖所有已注册内置工具，并按 catalog 生成或与 catalog 保持测试校验一致
+- catalog / `build_tool_definitions()` / `docs/tool-catalog.md` 的工具集合一致，并有测试防漂移
+- E2E：Bash 授权 / cwd 默认访问授权两个场景通过
 
 ---
 
@@ -825,6 +825,39 @@
 
 ---
 
+### T2-P1-007 | tool-system-deferred-followups | 工具系统后置项
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/tool-system-deferred-followups` |
+| **阻塞点** | 等 T2-P0-005 当前范围（T-033/T-034/T-036）闭环后再排期 |
+| **关联 TODOS** | `#T-035`、`#T-037`、`#T-039` |
+
+**目标**：承接从 T2-P0-005 移出的低优先级工具系统改进；先补齐 P0 工具语义与 cwd 授权闭环，再评估这些体验 / 产品策略项是否进入实现。
+
+**子项**：
+- [ ] **T-035**：默认工具内创建目录，不再 spawn `pi` 子进程
+- [ ] **T-037**：规划阶段允许调用 pi 命令（新增 workspace、list plugin 等）；实施前需先定义只读白名单与权限边界
+- [ ] **T-039**：删除操作改归档（moved-to `.trash/`，7 天后清理）；实施前需先确认产品策略
+
+**依赖**：T2-P0-005
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`ToolRegistry`、`PermissionGate`、删除类工具实现
+- 提供：后置工具体验改进与删除归档策略
+
+**验收标准**：
+- `#T-035` / `#T-037` / `#T-039` 分别有明确实施或关闭决议
+- 若实施 `#T-037`，规划阶段 pi 命令必须受只读白名单和权限审计约束
+- 若实施 `#T-039`，删除归档行为需有回收期、清理策略与 E2E 覆盖
+
+---
+
 ## 5. 任务依赖拓扑（概览）
 
 ```mermaid
@@ -851,6 +884,7 @@ flowchart LR
     P103 --> P104
     P008 --> P105[T2-P1-005<br/>Feedback]
     P010 --> P106[T2-P1-006<br/>集成测试规范]
+    P005 --> P107[T2-P1-007<br/>工具系统后置项]
 ```
 
 > **注**：T2-P0-003 仍从 T2-P0-001 出依赖边，**实施顺序**固定为**全部其它 T2-P0-00x 之后**（002 内最低、末位调度）。
@@ -861,6 +895,10 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-02 | T2-P0-005 DOING→PENDING_INTEGRATION | Spike 完成 `feature/tool-system-cleanup`：①权限 gate 语义 `PermissionLevel` → `PermissionScope`，审计字段 `permission_level` → `permission_scope`，Bash audit 新增断言确保 `bash` / `bash_approval` 且无 `fs_*`；②新增 `src/core/tools/catalog.rs` 作为内置工具单一事实源，派生 `build_tool_definitions()`、`CoreIdentitySection` 与 `docs/tool-catalog.md`，补 `gen-tool-catalog` 与漂移测试；③cwd lazy prompt 修 `[a/s/n]` → `[s/w/c]`，未识别选项显式 warning，拒绝后失败回执给出 `pi workspace add <cwd>` 恢复路径。门禁 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -j 1 -- --test-threads=1` 全绿（`.integration_test_output.log`，`EXIT_CODE=0`）。 |
+| 2026-05-02 | T2-P0-005 TODO→DOING | Spike 认领 `tool-system-cleanup`：依赖 T2-P0-004 已 DONE（含 4/27 主体与 4/28 hotfix 集成）；负责人 → Spike，状态 → `DOING`，建议分支 `feature/tool-system-cleanup`。下一步按 Dispatcher §3–§4 读取 specs 与关联报告 [`builtin-tool-description-cross-agent-study.md`](../docs/reports/builtin-tool-description-cross-agent-study.md)，输出开发计划交用户确认后再进入开发。 |
+| 2026-05-02 | T2-P0-005 关联实现参考报告 + T-034 口径细化 | 任务表新增「关联报告」：`docs/reports/builtin-tool-description-cross-agent-study.md`（内置工具 catalog、`description` 与文档结构、T-034 实施顺序）；目标段注明 **T-034** 以该报告的最终审批决策为设计参考，并将 T-034 明确为 catalog 单一事实源、`build_tool_definitions()` 派生、`docs/tool-catalog.md` 生成/校验与防漂移测试；`usage` / `example` 仅作为文档或测试 fixture 产物，不进入运行时 catalog 字段。 |
+| 2026-05-02 | T2-P0-005 收窄 + 新增 T2-P1-007 | 根据当前规划与实际实现，将 `tool-system-cleanup` 当前 P0 范围收窄为 `#T-033` / `#T-034` / `#T-036`；`#T-035` / `#T-037` / `#T-039` 从 P0 任务移出，新增 `T2-P1-007 | tool-system-deferred-followups` 承接，等 P0 工具语义与 cwd 授权闭环后再排期。 |
 | 2026-05-02 | T2-P0-013 / T2-P0-014 follow-up（DONE 不变） | Nibbles 将 `feat/path-command` @ `f0ed1b5` `--no-ff` 合并入 develop（merge commit `398e1a6`，无冲突）；新引入 `274fe3d refactor(chat): 重组聊天命令与工具模块`——把路径授权由整行纯路径自动入菜单切换为显式 `/path <绝对路径>` + `/help` 本地命令，并整理 `chat/{commands,events,permission}/` 与 `core/tools/{primitive,config,registry}/` 子模块边界。集成 review 补漏：① `f0ed1b5` 把 `commands/{cmd_path,cmd_help,parse}.rs` 末尾的 `#[cfg(test)] mod tests` 内联块迁到 `commands/tests/`，业务文件回到 L-1（cmd_path 481→304、parse 108→85、cmd_help 45→22）；② `tests/path_command_e2e.rs` 增 `/help` 用户文案契约与 `/path` UsageError 离线 E2E（4/4），与 `E2E_SCENARIO_LIBRARY` E2E-CLI-026 对齐。develop 上复跑 `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo build --release` + `cargo test -j 1`（lib 572 / integration 207 / doc 0、EXIT_CODE=0）+ `cargo test -j 1 --test '*'`（207 passed）全绿；详见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部集成块 |
 | 2026-05-01 | T2-P0-013 / T2-P0-014 PENDING_INTEGRATION→DONE | Nibbles：`feature/permission-source-redesign` @ `30ecf02` `--no-ff` 合并入 develop（merge `623e94c`，线性包含 `fix/gate-root-remediation`、`fix/drag-deny-cwd-remediation` 祖先提交）；develop 上 `cargo fmt --check`、`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test -j 1` 全量与 `--test '*'` 绿灯；详见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部集成块 |
 | 2026-05-01 | 新增 T2-P0-013 | 将 `~/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md` 登记为 P0 follow-up 任务：覆盖拖拽纯路径语义收敛、drag cancel 只写 transcript、bash assignment deny 预检、cwd / agent_definition_dir / agent_trail_dir 命名迁移、删除 legacy whitelist 配置面、补单测/E2E/文档同步；状态 `TODO`，建议分支 `fix/drag-deny-cwd-remediation`。 |

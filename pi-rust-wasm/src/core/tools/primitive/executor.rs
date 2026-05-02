@@ -43,7 +43,7 @@
 //!    │ ⑤ 审计落库（无论 Ok / Err）
 //!    │   audit.record_primitive(PrimitiveAuditEntry {
 //!    │     plugin_id, op: AuditPrimitiveOp::*, success, detail,
-//!    │     permission_level, grant_type, grant_trigger, ...
+//!    │     permission_scope, grant_type, grant_trigger, ...
 //!    │   })
 //!    ▼
 //!   Result<T, AppError>
@@ -66,7 +66,7 @@
 //!   LLM 工具调用都从那里 dispatch 进来。
 
 use crate::core::permission::{
-    GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionGate, PermissionLevel,
+    GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionGate, PermissionScope,
 };
 use crate::core::tools::primitive::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
@@ -124,21 +124,21 @@ impl DefaultPrimitiveExecutor {
 
     /// 经 gate 决定一个原语对路径的访问，必要时弹 confirm 完成 layer-2。
     ///
-    /// 返回 `Ok((path_buf, level, grant))` 表示放行；
+    /// 返回 `Ok((path_buf, scope, grant))` 表示放行；
     /// `Err(AppError::Permission)` 表示被 gate 拒绝或用户拒绝 confirm。
     async fn gate_check_path(
         &self,
         op: PrimitiveOperation,
         path: &str,
         plugin_id: &str,
-    ) -> Result<(PathBuf, PermissionLevel, GrantTrace), AppError> {
+    ) -> Result<(PathBuf, PermissionScope, GrantTrace), AppError> {
         let gate = &self.gate;
         let normalized = normalize_path(path)?;
         loop {
             let decision = gate.check(op, &normalized.to_string_lossy())?;
             match decision {
-                PermissionDecision::Allow { grant, level } => {
-                    return Ok((normalized, level, grant))
+                PermissionDecision::Allow { grant, scope } => {
+                    return Ok((normalized, scope, grant))
                 }
                 PermissionDecision::Deny { reason } => {
                     return Err(AppError::Permission(reason));
@@ -161,7 +161,8 @@ impl DefaultPrimitiveExecutor {
                     match dec {
                         ConfirmDecision::Deny => {
                             return Err(AppError::Permission(format!(
-                                "用户拒绝授权: {}",
+                                "用户拒绝授权: {}。下次工具再次访问该路径时会重新弹出 [s]/[w]/[c] 授权选项；也可以执行 `pi workspace add {}` 一次性永久授权。",
+                                normalized.display(),
                                 normalized.display()
                             )));
                         }
@@ -191,11 +192,11 @@ impl DefaultPrimitiveExecutor {
         &self,
         command: &str,
         plugin_id: &str,
-    ) -> Result<(PermissionLevel, GrantTrace), AppError> {
+    ) -> Result<(PermissionScope, GrantTrace), AppError> {
         let gate = &self.gate;
         let decision = gate.check_bash(command)?;
         match decision {
-            PermissionDecision::Allow { grant, level } => Ok((level, grant)),
+            PermissionDecision::Allow { grant, scope } => Ok((scope, grant)),
             PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
             PermissionDecision::NeedConfirm { reason, .. } => {
                 let preview = format!(
@@ -209,7 +210,7 @@ impl DefaultPrimitiveExecutor {
                 match dec {
                     ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
                         Ok((
-                            PermissionLevel::BashApproval,
+                            PermissionScope::BashApproval,
                             GrantTrace::new(GrantType::BashPolicy, GrantTrigger::UserConfirm),
                         ))
                     }
@@ -231,14 +232,14 @@ fn op_summary(op: PrimitiveOperation) -> &'static str {
     }
 }
 
-/// 把 [`PermissionLevel`] 序列化为审计字符串（与 serde rename_all = snake_case 一致）。
-fn permission_level_str(l: PermissionLevel) -> String {
-    match l {
-        PermissionLevel::Read => "read",
-        PermissionLevel::Write => "write",
-        PermissionLevel::Bash => "bash",
-        PermissionLevel::BashApproval => "bash_approval",
-        PermissionLevel::Forbidden => "forbidden",
+/// 把 [`PermissionScope`] 序列化为审计字符串（与 serde rename_all = snake_case 一致）。
+fn permission_scope_str(scope: PermissionScope) -> String {
+    match scope {
+        PermissionScope::Read => "read",
+        PermissionScope::Write => "write",
+        PermissionScope::Bash => "bash",
+        PermissionScope::BashApproval => "bash_approval",
+        PermissionScope::Forbidden => "forbidden",
     }
     .to_string()
 }
@@ -274,7 +275,7 @@ fn grant_trigger_str(s: GrantTrigger) -> String {
 #[async_trait]
 impl PrimitiveExecutor for DefaultPrimitiveExecutor {
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError> {
-        let (path_buf, level, grant) = self
+        let (path_buf, scope, grant) = self
             .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
             .await?;
         let meta = std::fs::metadata(&path_buf).map_err(AppError::Io)?;
@@ -304,7 +305,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: None,
-            permission_level: Some(permission_level_str(level)),
+            permission_scope: Some(permission_scope_str(scope)),
             grant_type: Some(grant_type_str(grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
@@ -312,7 +313,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
     }
 
     async fn list_dir(&self, path: &str, plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
-        let (path_buf, level, grant) = self
+        let (path_buf, scope, grant) = self
             .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
             .await?;
         let read = std::fs::read_dir(&path_buf).map_err(AppError::Io)?;
@@ -330,7 +331,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: Some(format!("list_dir {} entries", entries.len())),
-            permission_level: Some(permission_level_str(level)),
+            permission_scope: Some(permission_scope_str(scope)),
             grant_type: Some(grant_type_str(grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
@@ -344,7 +345,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         overwrite: bool,
         plugin_id: &str,
     ) -> Result<WriteFileResult, AppError> {
-        let (path_buf, level, grant) = self
+        let (path_buf, scope, grant) = self
             .gate_check_path(PrimitiveOperation::Write, path, plugin_id)
             .await?;
         let path_str = path_buf.to_string_lossy().to_string();
@@ -362,7 +363,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: None,
-            permission_level: Some(permission_level_str(level)),
+            permission_scope: Some(permission_scope_str(scope)),
             grant_type: Some(grant_type_str(grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
@@ -378,7 +379,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError> {
-        let (path_buf, level, grant) = self
+        let (path_buf, scope, grant) = self
             .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
             .await?;
         let path_str = path_buf.to_string_lossy().to_string();
@@ -479,7 +480,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 user_approved: true,
                 success: false,
                 detail: Some(e.to_string()),
-                permission_level: Some(permission_level_str(level)),
+                permission_scope: Some(permission_scope_str(scope)),
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
@@ -493,7 +494,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
             user_approved: true,
             success: true,
             detail: None,
-            permission_level: Some(permission_level_str(level)),
+            permission_scope: Some(permission_scope_str(scope)),
             grant_type: Some(grant_type_str(grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
@@ -532,8 +533,8 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         };
 
         // bash 决策来源（whitelist / approval）—— 走 gate 三层。
-        let (bash_level, bash_grant) = match self.gate_check_bash(&audit_cmd, plugin_id).await {
-            Ok((l, s)) => (l, s),
+        let (bash_scope, bash_grant) = match self.gate_check_bash(&audit_cmd, plugin_id).await {
+            Ok((scope, grant)) => (scope, grant),
             Err(e) => {
                 self.audit.record_primitive(PrimitiveAuditEntry {
                     operation: AuditPrimitiveOp::Bash,
@@ -621,7 +622,7 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
                 stdout.len(),
                 stderr.len()
             )),
-            permission_level: Some(permission_level_str(bash_level)),
+            permission_scope: Some(permission_scope_str(bash_scope)),
             grant_type: Some(grant_type_str(bash_grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(bash_grant.trigger)),
         });

@@ -8,6 +8,8 @@ fn build_system_prompt_contains_tools_and_workspace() {
     assert!(prompt.contains("edit_file"));
     assert!(prompt.contains("execute_bash"));
     assert!(prompt.contains("list_dir"));
+    assert!(prompt.contains("config_get"));
+    assert!(prompt.contains("config_set"));
     assert!(prompt.contains("/home/user/workspace"));
     assert!(prompt.contains("coding assistant"));
 }

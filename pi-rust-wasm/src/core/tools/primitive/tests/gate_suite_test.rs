@@ -20,12 +20,32 @@ use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::{PrimitiveExecutor, PrimitiveOperation};
 use crate::core::{AllowAllConfirmation, DefaultPrimitiveExecutor};
 use crate::infra::error::AppError;
-use crate::infra::{PrimitiveConfig, TracingAuditRecorder};
+use crate::infra::{
+    AuditRecorder, HostcallAuditEntry, PluginLifecycleAuditEntry, PrimitiveAuditEntry,
+    PrimitiveConfig, ToolAuditEntry, TracingAuditRecorder,
+};
 
 /// 可控 confirm provider：每次 confirm_decision 返回预设值。
 #[derive(Debug, Default)]
 struct ProgrammableConfirm {
     answers: Mutex<Vec<ConfirmDecision>>,
+}
+
+#[derive(Default)]
+struct MemoryAuditRecorder {
+    primitive_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>>,
+}
+
+impl AuditRecorder for MemoryAuditRecorder {
+    fn record_primitive(&self, entry: PrimitiveAuditEntry) {
+        self.primitive_entries.lock().unwrap().push(entry);
+    }
+
+    fn record_tool_call(&self, _entry: ToolAuditEntry) {}
+
+    fn record_hostcall(&self, _entry: HostcallAuditEntry) {}
+
+    fn record_plugin_lifecycle(&self, _entry: PluginLifecycleAuditEntry) {}
 }
 
 impl ProgrammableConfirm {
@@ -161,7 +181,16 @@ async fn gate_need_confirm_deny_blocks() {
     let r = exec
         .write_file(&target.to_string_lossy(), "ok", false, "p1")
         .await;
-    assert!(matches!(r, Err(AppError::Permission(_))));
+    match r {
+        Err(AppError::Permission(msg)) => {
+            assert!(msg.contains("[s]/[w]/[c]"));
+            assert!(msg.contains("pi workspace add"));
+        }
+        other => panic!(
+            "expected permission denial with recovery hint, got: {:?}",
+            other
+        ),
+    }
     let _ = std::fs::remove_dir_all(&outside);
 }
 
@@ -173,6 +202,49 @@ async fn gate_bash_forbidden_blocks() {
         .execute_bash("pi config set llm.api_key xxx", None, "p1", None)
         .await;
     assert!(matches!(r, Err(AppError::Permission(_))));
+    let _ = std::fs::remove_dir(&ws);
+}
+
+#[tokio::test]
+async fn execute_bash_audit_records_bash_scope() {
+    let ws = workspace_dir("bash_audit_scope");
+    let audit = Arc::new(MemoryAuditRecorder::default());
+    let entries = audit.primitive_entries.clone();
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: ws.clone(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    );
+    let exec = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(AllowAllConfirmation),
+        audit,
+        gate.into_arc(),
+    );
+    let r = exec
+        .execute_bash("echo ok", Some(&ws.to_string_lossy()), "p1", None)
+        .await
+        .unwrap();
+    assert_eq!(r.exit_code, 0);
+
+    let entries = entries.lock().unwrap();
+    let bash_entry = entries
+        .iter()
+        .find(|entry| entry.operation == crate::infra::AuditPrimitiveOp::Bash)
+        .expect("bash audit entry");
+    assert_eq!(bash_entry.permission_scope.as_deref(), Some("bash"));
+    assert_eq!(bash_entry.grant_type.as_deref(), Some("bash_policy"));
+    assert!(
+        !format!("{:?}", *bash_entry).contains("fs_"),
+        "bash audit must not contain fs_* legacy labels"
+    );
     let _ = std::fs::remove_dir(&ws);
 }
 

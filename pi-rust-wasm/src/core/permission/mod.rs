@@ -5,7 +5,7 @@
 //!
 //! 子模块：
 //!
-//! - [`types`]：[`PermissionDecision`] / [`GrantTrace`] / [`PermissionLevel`] /
+//! - [`types`]：[`PermissionDecision`] / [`GrantTrace`] / [`PermissionScope`] /
 //!   [`PathRuleMode`] / [`EffectiveRoots`]
 //! - [`path_rule`]：[`PathRule`] 单条 path 规则与匹配逻辑（含 globset 支持）
 //! - [`defaults`]：内置默认规则常量（凭据保护 / Agent 自我提权防护）
@@ -30,7 +30,7 @@ pub use path_rule::PathRule;
 pub use session_grants::{SessionGrants, SessionPathRules};
 pub use types::{
     EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode, PermissionDecision,
-    PermissionLevel,
+    PermissionScope,
 };
 
 #[cfg(test)]

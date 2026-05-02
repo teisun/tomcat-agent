@@ -27,9 +27,9 @@ pub enum AuditKindPayload {
         success: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        /// 操作权限等级（plan §6 PR-6）；老 JSONL 行缺该字段时反序列化为 None。
+        /// 操作权限范围（T2-P0-005）；老 JSONL 行缺该字段时反序列化为 None。
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        permission_level: Option<String>,
+        permission_scope: Option<String>,
         /// 授权类型。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant_type: Option<String>,

@@ -20,7 +20,7 @@ pub enum AuditPrimitiveOp {
 ///
 /// 与权限 gate 对齐——记录权限等级、授权类型与触发来源：
 ///
-/// - `permission_level`：操作权限等级（`Read` / `Write` / `Bash` /
+/// - `permission_scope`：操作权限范围（`Read` / `Write` / `Bash` /
 ///   `BashApproval` / `Forbidden`）。
 /// - `grant_type`：授权类型（`AgentDefinitionDir` / `SessionScope` / `BashPolicy` 等）。
 /// - `grant_trigger`：触发来源（`UserConfirm` / `WorkspaceRootsConfig` / `DraggedPathMenu` 等）。
@@ -35,8 +35,8 @@ pub struct PrimitiveAuditEntry {
     pub user_approved: bool,
     pub success: bool,
     pub detail: Option<String>,
-    /// 操作权限等级（仅 gate 模式填）。
-    pub permission_level: Option<String>,
+    /// 操作权限范围（仅 gate 模式填）。
+    pub permission_scope: Option<String>,
     /// 授权类型（仅 gate 模式填）。
     pub grant_type: Option<String>,
     /// 触发来源（仅 gate 模式填）。
@@ -97,7 +97,7 @@ impl AuditRecorder for TracingAuditRecorder {
             user_approved = entry.user_approved,
             success = entry.success,
             detail = ?entry.detail,
-            permission_level = ?entry.permission_level,
+            permission_scope = ?entry.permission_scope,
             grant_type = ?entry.grant_type,
             grant_trigger = ?entry.grant_trigger,
             "audit primitive"
@@ -167,7 +167,7 @@ impl AuditRecorder for FileAuditRecorder {
                 user_approved: entry.user_approved,
                 success: entry.success,
                 detail: entry.detail,
-                permission_level: entry.permission_level,
+                permission_scope: entry.permission_scope,
                 grant_type: entry.grant_type,
                 grant_trigger: entry.grant_trigger,
             },

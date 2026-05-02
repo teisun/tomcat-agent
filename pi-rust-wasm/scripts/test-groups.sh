@@ -24,6 +24,7 @@ PI_WASM_INTEGRATION_SERIAL_TESTS=(
   js_api_alignment_tests
   hostcall_tests
   primitives_tools_tests
+  tool_catalog_doc
 )
 
 PI_WASM_WASMEDGE_TESTS=(

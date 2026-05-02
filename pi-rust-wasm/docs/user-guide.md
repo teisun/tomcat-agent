@@ -308,7 +308,7 @@ pi session delete agent:main:main
 
 ## 5. 工作区管理
 
-pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 默认可写的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `workspace_roots`），**所有 agent 共用同一份列表**。启动 `pi chat` 时的当前目录不会自动加入该列表；需要访问当前项目时，可用 `pi workspace add --cwd`、对话中的 cwd lazy prompt 或 `/path <路径>` 授权命令显式加入。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.workspace_roots` 或 `primitive.path_rules`。
+pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 默认可写的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `workspace_roots`），**所有 agent 共用同一份列表**。启动 `pi chat` 时的当前目录不会自动加入该列表；需要访问当前项目时，可用 `pi workspace add --cwd`、对话中的 cwd lazy prompt 或 `/path <路径>` 授权命令显式加入。cwd lazy prompt 使用 `[s]` 本次会话允许、`[w]` 写入 `workspace_roots`、`[c]` 取消；输错选项会提示可选项并按取消处理，不会静默吞掉。若取消后工具再次因当前目录未授权失败，错误会提示下次触达 cwd 可重新选择 `[s]/[w]/[c]`，也可执行 `pi workspace add <路径>` 永久授权。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.workspace_roots` 或 `primitive.path_rules`。
 
 ### 添加工作区
 

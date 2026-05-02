@@ -1,22 +1,22 @@
 //! # 工作区权限分级 - 核心类型
 //!
 //! 与 `.cursor/plans/workspace_permission_tiers_design_1ad7681a.plan.md` §2 对齐：
-//! `PermissionDecision` / `GrantTrace` / `PermissionLevel` / `PathRuleMode` /
+//! `PermissionDecision` / `GrantTrace` / `PermissionScope` / `PathRuleMode` /
 //! `EffectiveRoots`。
 //!
 //! - `PermissionDecision` 描述 [`PermissionGate::check`](super::PermissionGate)
 //!   返回的三态结果。
 //! - `GrantTrace` 同时记录授权类型与触发来源，供审计/溯源使用。
-//! - `PermissionLevel` 描述操作权限等级；与目录来源解耦。
+//! - `PermissionScope` 描述操作权限范围；与目录来源解耦。
 //! - `PathRuleMode` 仅两种合法模式：`Deny` / `ReadOnly`；"未命中"自然表达 allow。
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// 操作权限等级。
+/// 操作权限范围。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PermissionLevel {
+pub enum PermissionScope {
     /// 含默认定义目录 read / extra_root read / readonly path_rule / agent_trail_dir。
     Read,
     /// 含默认定义目录 write / extra_root write / session 授权后写。
@@ -91,7 +91,7 @@ pub enum PermissionDecision {
     /// 通过；附带审计来源与操作等级。
     Allow {
         grant: GrantTrace,
-        level: PermissionLevel,
+        scope: PermissionScope,
     },
     /// 需要 confirm（Layer-2 外部路径）；
     /// `suggested_root` 为可建议持久化为 `workspace_roots` 的父目录。

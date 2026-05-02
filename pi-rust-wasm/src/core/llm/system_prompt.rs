@@ -80,16 +80,14 @@ impl SystemPromptSection for CoreIdentitySection {
         "core_identity"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        r#"You are an expert coding assistant operating inside pi-wasm, a coding agent runtime.
+        format!(
+            "You are an expert coding assistant operating inside pi-wasm, a coding agent runtime.
 You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
-- read_file: Read file contents
-- write_file: Create or overwrite files
-- edit_file: Make surgical edits to files (find exact text and replace with new text)
-- execute_bash: Execute bash commands
-- list_dir: List directory contents"#
-            .to_string()
+{}",
+            crate::core::tools::catalog::render_core_identity_tool_lines()
+        )
     }
     fn priority(&self) -> u32 {
         10
