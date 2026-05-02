@@ -61,7 +61,7 @@
 //! ## 与同族子模块的边界
 //!
 //! - `super::diff::build_simple_diff`：edit_file 的 diff 文本生成。
-//! - `super::primitives` 与 `super::confirmation`：trait + 用户确认 trait。
+//! - `crate::core::primitives` 与 `crate::core::confirmation`：trait + 用户确认 trait。
 //! - 调用方：`agent_loop::tool_exec::execute_tool` 是唯一直接调用方，所有
 //!   LLM 工具调用都从那里 dispatch 进来。
 
@@ -98,8 +98,8 @@ pub struct DefaultPrimitiveExecutor {
     config: PrimitiveConfig,
     confirmation: Arc<dyn UserConfirmationProvider>,
     audit: Arc<dyn AuditRecorder>,
-    /// 路径与 bash 权限决策入口；由 [`crate::api::chat::ChatContext`] 注入并与
-    /// `cwd_lazy_prompt` / `config_tool` 共享同一份 `SessionGrants` 视图。
+    /// 路径与 bash 权限决策入口；由调用方注入并与
+    /// `permission::cwd_lazy` / `tools::config` 共享同一份 `SessionGrants` 视图。
     gate: Arc<dyn PermissionGate>,
 }
 

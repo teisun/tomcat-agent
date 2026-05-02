@@ -14,12 +14,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
-use crate::core::executor::DefaultPrimitiveExecutor;
 use crate::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,
 };
 use crate::core::primitives::{PrimitiveExecutor, PrimitiveOperation};
-use crate::core::AllowAllConfirmation;
+use crate::core::{AllowAllConfirmation, DefaultPrimitiveExecutor};
 use crate::infra::error::AppError;
 use crate::infra::{PrimitiveConfig, TracingAuditRecorder};
 

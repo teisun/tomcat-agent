@@ -87,7 +87,7 @@ fn cwd_already_authorized(cwd: &Path, gate: &dyn PermissionGate) -> bool {
     er.read_write.iter().any(|p| p == cwd) || er.read_only.iter().any(|p| p == cwd)
 }
 
-/// 从 [`crate::core::executor::primitives::DefaultPrimitiveExecutor::gate_check_path`]
+/// 从 [`crate::core::tools::primitive::DefaultPrimitiveExecutor::gate_check_path`]
 /// 拼装的 `preview` 中提取真实目标路径。
 ///
 /// 现行格式（`gate_check_path`）：
@@ -97,7 +97,7 @@ fn cwd_already_authorized(cwd: &Path, gate: &dyn PermissionGate) -> bool {
 /// 原因: 路径 `/Users/yan/work/sub/file.txt` 不在已授权范围内
 /// ```
 ///
-/// 解析失败（`config_tool` 等其它入口不带 `路径:` 行）时返回 `None`，
+/// 解析失败（`tools::config` 等其它入口不带 `路径:` 行）时返回 `None`，
 /// 装饰器将 fall-through 给底层 provider。
 fn extract_target_from_preview(preview: &str) -> Option<PathBuf> {
     for line in preview.lines() {
@@ -187,7 +187,7 @@ impl UserConfirmationProvider for CwdLazyPrompt {
         plugin_id: &str,
     ) -> Result<bool, AppError> {
         // 旧 API 不带 `suggested_root` —— 直接转发。新代码路径走
-        // `confirm_decision`（gate_check_path / config_tool 都用此版）。
+        // `confirm_decision`（gate_check_path / tools::config 都用此版）。
         self.inner.confirm(operation, preview, plugin_id).await
     }
 
@@ -336,5 +336,5 @@ fn ensure_not_denied(gate: &dyn PermissionGate, path: &Path) -> Result<(), AppEr
 }
 
 #[cfg(test)]
-#[path = "tests/cwd_lazy_prompt.rs"]
+#[path = "../tests/cwd_lazy_prompt.rs"]
 mod tests;

@@ -6,7 +6,6 @@ pub mod agent_loop;
 pub mod compaction;
 pub mod confirmation;
 pub mod context_metrics;
-pub mod executor;
 pub mod llm;
 pub mod permission;
 pub mod primitives;
@@ -19,7 +18,6 @@ pub use confirmation::{
     AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
 };
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
-pub use executor::DefaultPrimitiveExecutor;
 pub use llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, OpenAiProvider,
     SessionTokenUsage, StreamEvent,
@@ -33,6 +31,7 @@ pub use session::{
     ApiUsage, BranchSummaryEntry, CompactionResult, ContextState, SessionEntry, SessionHeader,
     SessionManager, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
+pub use tools::primitive::DefaultPrimitiveExecutor;
 pub use tools::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ pub enum GrantTrigger {
     UserConfirm,
     /// cwd lazy prompt 产生的授权。
     CwdLazyPrompt,
-    /// 拖拽路径菜单产生的授权。
+    /// 路径授权菜单产生的授权；名字为兼容历史审计中的 dragged_path_menu 保留。
     DraggedPathMenu,
     /// `primitive.auto_confirm = true` 时自动允许。
     AutoConfirmFlag,
