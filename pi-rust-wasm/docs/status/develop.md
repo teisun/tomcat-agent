@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-02 08:50 | INTEGRATED | develop | — |
+| Nibbles | 2026-05-02 10:16 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — `feat/path-command`（chat 命令模块化 + `/path` 显式授权，T2-P0-013/014 follow-up）
 
