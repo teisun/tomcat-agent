@@ -120,14 +120,21 @@ my_project/
 ## 7. 执行与持续集成 (CI)
 
 ### 7.1 本地执行
-*   **串行约定（本仓库）**：`cargo test` 须加 **`-j 1`**（串行执行各测试目标/二进制）与 **`--test-threads=1`**（串行执行同一目标内用例，写在 `--` 之后）。涉及 Wasm/Tokio/spawn_blocking 时并行易导致挂起或 flaky；一键脚本 `./scripts/run-integration-tests.sh` 已按此执行。
-*   运行所有集成测试：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1`
-*   运行特定文件：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test api_tests -- --nocapture --test-threads=1`
-*   显示打印输出（含库内单元测试）：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`
+*   **分类执行约定（本仓库）**：默认让可并发的测试目标并发执行；只有涉及进程级全局资源、真实 Wasm 运行时、长生命周期 VM 或重子进程的目标进入串行组，使用 `-j 1` 与 `--test-threads=1`。一键脚本 `./scripts/run-integration-tests.sh` 是分类执行的唯一入口。
+*   运行所有集成测试：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration`
+*   仅运行可并发集成测试：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration-parallel`
+*   仅运行必须串行集成测试：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration-serial`
+*   运行特定文件：若该目标无全局资源依赖，可用 `RUST_LOG=pi_wasm=debug,info cargo test --test audit_tests -- --nocapture`；若属于串行组，须用 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`。
+*   显示打印输出（含库内单元测试）：`RUST_LOG=pi_wasm=debug,info cargo test --lib -- --nocapture`
 
-### 7.2 串行执行（与 7.1 一致）
-涉及全局资源、Wasm 真实运行时或长生命周期 VM 的测试：**必须**使用 `-j 1` 与 `--test-threads=1`，例如：
-`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`
+### 7.2 并发组与串行组
+集成测试二进制名单维护在 `scripts/test-groups.sh`。新增集成测试 binary 时默认加入串行组；确认满足以下条件后才可移入并发组：不修改进程全局 env / cwd，不依赖共享宿主文件路径，不启动真实 WasmEdge / 长生命周期 VM，不启动重子进程并依赖其全局环境。
+
+**可并发组**（默认 cargo 并发）：
+`audit_tests`、`event_tests`、`agent_loop_tests`、`bash_assignment_deny`、`system_prompt_cwd_priority`、`path_command_e2e`、`cwd_lazy_prompt_e2e`、`session_tests`、`plugin_tests`、`llm_tests`、`context_management_tests`、`robustness_tests`。
+
+**必须串行组**（强制 `-j 1 --test-threads=1`）：
+`cli_tests`、`wasmedge_e2e_tests`、`long_lived_vm_tests`、`js_api_alignment_tests`、`hostcall_tests`、`primitives_tools_tests`。
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：
@@ -137,7 +144,8 @@ my_project/
 4.  **覆盖率要求**：集成测试应覆盖核心业务路径（使用 `cargo-tarpaulin` 统计）。
 
 ### 7.4 全量集成测试
-跑全量集成测试时与外部真实环境交互
+跑全量集成测试时与外部真实环境交互，使用：
+`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh all`
 
 ## 8. 最佳实践建议
 *   **不要过度 Mock**：集成测试的价值在于真实性，如果所有外部依赖都被 Mock 了，那它就变成了单元测试。
@@ -158,7 +166,7 @@ my_project/
 2. **上下文**：为每个测试用例创建 `info_span!`（或使用 `#[instrument]`）标注用例名与关键参数（如 plugin_id、session_key）。
 3. **AAA 日志锚点**：在 Arrange / Act / Assert 三个阶段的关键步骤**至少各记录一条** `tracing::info!`（必要时补 `tracing::debug!` 记录关键变量）。
 
-> 说明：默认 `cargo test` 会捕获输出，需使用 `-- --nocapture --test-threads=1` 才能在终端实时看到日志；全量测试建议同时加 **`cargo test -j 1`**。详细技术说明与目录结构见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)。
+> 说明：默认 `cargo test` 会捕获输出，需使用 `-- --nocapture` 才能在终端实时看到日志；若为了阅读连续日志而临时串行化，可追加 `--test-threads=1`。详细技术说明与目录结构见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)。
 
 ---
 
@@ -167,8 +175,8 @@ my_project/
 **集成测试门禁**：全量集成测试须包含并通过鲁棒性/异常边界类用例（如 `robustness_tests` 或等价的异常、边界、超时、资源类用例）；具体要求与清单见子文档 [集成测试鲁棒性保障](INTEGRATION_TEST_ROBUSTNESS.md)。
 
 - **鲁棒性编写要求**：须包含并维护 `robustness_tests.rs`（或等效的异常、边界、超时、资源泄露等用例），符合 [INTEGRATION_TEST_ROBUSTNESS.md](INTEGRATION_TEST_ROBUSTNESS.md) 要求。
-- **鲁棒性验证门禁**：全量 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 须包含并通过鲁棒性用例（如 `--test robustness_tests`）；不满足则与日志门禁同样处理（补全后再跑全量验收）。
-- **验收清单项**：**鲁棒性集成测试**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test robustness_tests -- --nocapture --test-threads=1` 通过（或等价地，`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 已包含 robustness_tests 并通过）。
+- **鲁棒性验证门禁**：全量 `RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration` 须包含并通过鲁棒性用例（如并发组中的 `--test robustness_tests`）；不满足则与日志门禁同样处理（补全后再跑全量验收）。
+- **验收清单项**：**鲁棒性集成测试**：`RUST_LOG=pi_wasm=debug,info cargo test --test robustness_tests -- --nocapture` 通过（或等价地，`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration` 已包含 robustness_tests 并通过）。
 
 集成测试须覆盖异常与边界场景（环境/契约/状态边界），包括故障注入、超时控制、脏数据与非法路径、资源泄露验证及异常测试的断言准则与清单。正文见子文档 [集成测试鲁棒性保障](INTEGRATION_TEST_ROBUSTNESS.md)。
 

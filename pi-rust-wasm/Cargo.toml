@@ -72,3 +72,4 @@ predicates = "3"
 # / `start_paused = true` 让重试退避走虚拟时钟（详见 src/core/compaction/tests/preheat_and_truncation.rs）。
 # `features` 是 additive：生产构建仍只用 [dependencies] 里的 `full` 集合，不引入测试工具。
 tokio = { version = "1.0", features = ["test-util"] }
+serial_test = "3.4.0"

@@ -7,8 +7,10 @@
 
 use super::super::*;
 use super::mocks::test_config;
+use serial_test::serial;
 
 #[test]
+#[serial(env_lock)]
 fn run_init_returns_ok() {
     let r = run_init();
     assert!(r.is_ok());
@@ -69,6 +71,7 @@ fn run_config_set_returns_ok() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_config_edit_returns_ok() {
     run_init().unwrap();
 
@@ -96,6 +99,7 @@ fn run_doctor_is_always_ok() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_doctor_after_init_returns_ok() {
     run_init().unwrap();
     let r = run_doctor();

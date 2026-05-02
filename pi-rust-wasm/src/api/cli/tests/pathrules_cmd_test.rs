@@ -10,8 +10,10 @@
 use super::super::*;
 use super::mocks::{test_config, with_pi_config_in_home};
 use crate::load_config_toml_file;
+use serial_test::serial;
 
 #[test]
+#[serial(env_lock)]
 fn run_pathrules_add_then_user_section_contains_path() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -46,6 +48,7 @@ fn run_pathrules_add_then_user_section_contains_path() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_pathrules_add_dedupes_on_repeat() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -85,6 +88,7 @@ fn run_pathrules_add_dedupes_on_repeat() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_pathrules_add_unknown_mode_errors() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -102,6 +106,7 @@ fn run_pathrules_add_unknown_mode_errors() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_pathrules_add_nonexistent_path_warns_but_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -120,6 +125,7 @@ fn run_pathrules_add_nonexistent_path_warns_but_succeeds() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_pathrules_list_works_with_no_user_rules() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());

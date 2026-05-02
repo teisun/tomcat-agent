@@ -50,16 +50,16 @@
 ## 4. 日志查看控制
 
 *   **静默模式（默认）**：直接运行 `cargo test` 时，日志不会打印，除非断言失败；集成测试的 tracing 输出需配合本节的 `--nocapture` 才能实时查看。
-*   **串行**：本仓库规范要求 **`cargo test -j 1`** 与各目标内 **`--test-threads=1`**（写在 `--` 之后），见 [INTEGRATION_TEST_SPEC.md §7.1](INTEGRATION_TEST_SPEC.md)。
-*   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数；**集成测试**建议：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1`，避免误以为未打日志。
-*   **按顺序输出（便于阅读）**：默认多线程并行跑测试时，各用例的 Arrange/Act/Assert 日志会交错。若希望**同一测试的日志连续、按执行顺序**出现，须 **`cargo test -j 1`** 且 **`--test-threads=1`**（与 §4「串行」一致）。
+*   **分类执行**：本仓库规范要求按 [INTEGRATION_TEST_SPEC.md §7.1 / §7.2](INTEGRATION_TEST_SPEC.md) 分类执行；可并发目标默认并发，涉及全局资源、真实 Wasm 或重子进程的目标使用串行组。
+*   **实时查看**：若需查看运行中的日志，使用 `--nocapture` 参数；**集成测试**建议：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration`，避免误以为未打日志。
+*   **按顺序输出（便于阅读）**：默认多线程并行跑测试时，各用例的 Arrange/Act/Assert 日志会交错。若希望**同一测试的日志连续、按执行顺序**出现，可临时使用 `cargo test -j 1 ... -- --nocapture --test-threads=1` 调试；不要把调试命令当作默认门禁。
     ```bash
-    RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1
-    RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1
+    RUST_LOG=pi_wasm=debug,info cargo test --lib -- --nocapture
+    RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration
     ```
 *   **级别控制**：利用 `RUST_LOG` 环境变量动态调整日志等级：
     ```bash
-    RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test api_tests -- --nocapture --test-threads=1
+    RUST_LOG=pi_wasm=debug,info cargo test --test audit_tests -- --nocapture
     ```
 
 ## 5. 断言日志输出 (可选)

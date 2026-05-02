@@ -12,8 +12,10 @@ use super::super::*;
 use super::mocks::{test_config, with_pi_config_in_home};
 use crate::load_config_toml_file;
 use crate::resolve_workspace_roots_paths;
+use serial_test::serial;
 
 #[test]
+#[serial(env_lock)]
 fn run_workspace_add_list_remove() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -44,6 +46,7 @@ fn run_workspace_add_list_remove() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_workspace_add_nonexistent_fails() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -62,6 +65,7 @@ fn run_workspace_add_nonexistent_fails() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_workspace_add_duplicate_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -92,6 +96,7 @@ fn run_workspace_add_duplicate_is_noop() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_workspace_add_cwd_adds_current_dir() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -120,6 +125,7 @@ fn run_workspace_add_cwd_adds_current_dir() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_workspace_remove_nonexistent_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());

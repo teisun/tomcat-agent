@@ -74,7 +74,7 @@ RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --te
 RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1
 
 # 一键全量（含 E2E，含日志）
-./scripts/run-integration-tests.sh
+RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration
 ```
 
 ---
@@ -102,4 +102,4 @@ RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocap
 
 - P0 User Stories 的所有「用户可 X」验收标准，须有对应 `test_user_*` E2E 用例
 - 每次 Nibbles 集成循环，E2E 步骤必须全部通过，不可跳过
-- 新用例须通过 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 验证日志可见
+- 新用例须通过所属分类命令验证日志可见：CLI / Wasm E2E 属于串行组，使用 `RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration-serial`；可并发 E2E 使用 `RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration-parallel`

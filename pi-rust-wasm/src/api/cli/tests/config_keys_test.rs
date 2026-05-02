@@ -9,6 +9,7 @@
 //!   配置文件实际存在。
 
 use super::super::*;
+use serial_test::serial;
 
 #[test]
 fn resolve_toml_key_finds_nested() {
@@ -80,6 +81,7 @@ fn set_toml_key_rejects_bad_integer() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn config_set_with_real_file() {
     run_init().unwrap();
     let config_path = crate::normalize_path(DEFAULT_CONFIG_PATH).unwrap();
