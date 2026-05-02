@@ -43,9 +43,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::permission::{GrantTrigger, PermissionDecision, PermissionGate, SessionGrants};
-use crate::core::primitives::PrimitiveOperation;
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
 use crate::infra::error::AppError;
 
 /// 用户在 cwd 范围级提示中的选择。
@@ -336,5 +336,5 @@ fn ensure_not_denied(gate: &dyn PermissionGate, path: &Path) -> Result<(), AppEr
 }
 
 #[cfg(test)]
-#[path = "../tests/cwd_lazy_prompt.rs"]
+#[path = "../tests/cwd_lazy_prompt_test.rs"]
 mod tests;

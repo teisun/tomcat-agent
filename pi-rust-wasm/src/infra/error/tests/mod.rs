@@ -1,1 +1,1 @@
-mod suite;
+mod suite_test;

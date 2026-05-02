@@ -9,7 +9,7 @@ use crate::core::permission::types::{
     GrantTrigger, GrantType, PathRuleMode, PermissionDecision, PermissionLevel,
 };
 use crate::core::permission::PermissionGate;
-use crate::core::primitives::PrimitiveOperation;
+use crate::core::tools::primitive::PrimitiveOperation;
 
 fn tmpdir(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("pi_perm_test_{}", name));

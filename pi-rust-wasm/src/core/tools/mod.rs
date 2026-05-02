@@ -7,3 +7,6 @@ pub mod primitive;
 mod registry;
 
 pub use registry::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};
+
+#[cfg(test)]
+mod tests;

@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use crate::core::primitives::{EditOperation, EditOperationType, PrimitiveExecutor};
+use crate::core::tools::primitive::{EditOperation, EditOperationType, PrimitiveExecutor};
 
 use super::config_backend::SharedConfigBackend;
 use super::types::ToolCallInfo;

@@ -1,10 +1,12 @@
 //! 会话管理：元数据 store（sessions.json）与 transcript（pi 系 JSONL）的 CRUD、上下文组装。
 
 mod append_message_chain;
+pub mod context_metrics;
 pub(crate) mod manager;
 pub(crate) mod store;
 pub mod transcript;
 
+pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, ApiUsage,
     CompactionResult, ContextState, SessionManager,

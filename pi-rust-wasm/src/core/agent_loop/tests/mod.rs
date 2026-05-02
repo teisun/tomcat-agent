@@ -9,22 +9,22 @@
 //!
 //! - `mocks`：MockLlmProvider / MockLlmProviderFatal / MockPrimitiveExecutor /
 //!   SleepyMockPrimitive / SteerableMockPrimitive。
-//! - `classify`：`error_classifier::classify_error` 4 个等价类断言。
-//! - `run_basic`：text-only / 重试 / 工具循环 / 空消息 4 个基础正向测试。
-//! - `events_order`：wire 事件全序列 + Fatal 终结 + chat_stream Err 分类。
-//! - `steering_followup`：Steering 跳过剩余工具 + FollowUp 第二轮上下文。
-//! - `metrics`：5 个 ContextMetricsUpdate 用例（顺序 / payload / 多轮累计 /
+//! - `classify_test`：`error_classifier::classify_error` 4 个等价类断言。
+//! - `run_basic_test`：text-only / 重试 / 工具循环 / 空消息 4 个基础正向测试。
+//! - `events_order_test`：wire 事件全序列 + Fatal 终结 + chat_stream Err 分类。
+//! - `steering_followup_test`：Steering 跳过剩余工具 + FollowUp 第二轮上下文。
+//! - `metrics_test`：5 个 ContextMetricsUpdate 用例（顺序 / payload / 多轮累计 /
 //!   无 ctx 跳过 / 纯文本路径）。
-//! - `interrupt`：Abort / 工具间中断 / 流式中断 partial / token 重建 4 个
+//! - `interrupt_test`：Abort / 工具间中断 / 流式中断 partial / token 重建 4 个
 //!   T-003/T-004/T-017 硬验收。
-//! - `submodules`：直接调用 `pub(super)` 子模块函数的焦小测
+//! - `submodules_test`：直接调用 `pub(super)` 子模块函数的焦小测
 //!   （handle_overflow_retry / execute_tool）。
 
-mod classify;
-mod events_order;
-mod interrupt;
-mod metrics;
+mod classify_test;
+mod events_order_test;
+mod interrupt_test;
+mod metrics_test;
 mod mocks;
-mod run_basic;
-mod steering_followup;
-mod submodules;
+mod run_basic_test;
+mod steering_followup_test;
+mod submodules_test;

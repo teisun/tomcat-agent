@@ -181,7 +181,7 @@ impl PathMenuOptions {
 /// - 命中 `PathRuleReadOnly` —— `[a]/[r]/[d]/[c]`，不允许 `[w]`；
 /// - 其它 —— 全 5 选项。
 pub fn render_path_menu(path: &Path, gate: &dyn PermissionGate) -> PathMenuOptions {
-    use crate::core::primitives::PrimitiveOperation;
+    use crate::core::tools::primitive::PrimitiveOperation;
 
     let probe = gate.check(PrimitiveOperation::Read, &path.to_string_lossy());
     match probe {
@@ -335,7 +335,7 @@ fn apply_menu_choice(
 }
 
 fn precheck_read_allow(ctx: &ChatContext, path: &Path) -> Result<PathBuf, AppError> {
-    use crate::core::primitives::PrimitiveOperation;
+    use crate::core::tools::primitive::PrimitiveOperation;
 
     let canon = crate::infra::platform::normalize_path(&path.to_string_lossy())
         .unwrap_or_else(|_| path.to_path_buf());

@@ -1,5 +1,4 @@
-use super::super::confirmation::*;
-use super::super::primitives::PrimitiveOperation;
+use super::super::*;
 
 #[tokio::test]
 async fn allow_all_returns_true() {

@@ -274,8 +274,8 @@ impl ChatContext {
 
 // ─── CLI UserConfirmationProvider ─────────────────────────────────────────────
 
-use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
-use crate::core::primitives::PrimitiveOperation;
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
 
 pub struct CliConfirmation;
 
@@ -508,9 +508,11 @@ fn build_tool_definitions() -> Vec<serde_json::Value> {
 ///
 /// 直接读 `ctx.gate.effective_roots()` / `effective_path_rules()`，与 executor /
 /// 路径授权 UI 共享同一份决策视图。
-fn compute_workspace_state(ctx: &ChatContext) -> crate::core::system_prompt::WorkspaceState {
+fn compute_workspace_state(ctx: &ChatContext) -> crate::core::llm::system_prompt::WorkspaceState {
+    use crate::core::llm::system_prompt::{
+        PathRuleSummary, WorkspaceRootDescriptor, WorkspaceState,
+    };
     use crate::core::permission::PathRuleMode;
-    use crate::core::system_prompt::{PathRuleSummary, WorkspaceRootDescriptor, WorkspaceState};
     use std::collections::HashSet;
 
     let cfg = &ctx.config;
@@ -649,13 +651,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
     // ContextState: 在 loop 外一次性初始化，跨迭代复用
     let context_config = &ctx.config.context;
-    let workspace_context = crate::core::system_prompt::WorkspaceContext {
+    let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
         agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
         agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
     };
     let workspace_state = compute_workspace_state(ctx);
-    let system_text = crate::core::system_prompt::build_system_prompt_with_state(
+    let system_text = crate::core::llm::system_prompt::build_system_prompt_with_state(
         workspace_context,
         workspace_state,
     );

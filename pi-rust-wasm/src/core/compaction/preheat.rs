@@ -788,5 +788,5 @@ pub(super) fn messages_to_text(messages: &[ChatMessage]) -> String {
 }
 
 #[cfg(test)]
-#[path = "tests/preheat.rs"]
+#[path = "tests/preheat_test.rs"]
 mod tests;

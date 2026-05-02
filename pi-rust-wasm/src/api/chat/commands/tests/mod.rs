@@ -5,6 +5,6 @@
 //!
 //! [`RUST_FILE_LINES_SPEC`]: ../../../../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md
 
-mod cmd_help;
-mod cmd_path;
-mod parse;
+mod cmd_help_test;
+mod cmd_path_test;
+mod parse_test;

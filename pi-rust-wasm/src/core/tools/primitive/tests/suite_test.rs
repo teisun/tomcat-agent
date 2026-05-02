@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use crate::core::primitives::{
+use crate::core::tools::primitive::{
     EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation,
 };
 use crate::core::{AllowAllConfirmation, DenyAllConfirmation};

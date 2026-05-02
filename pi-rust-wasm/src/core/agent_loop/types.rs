@@ -5,8 +5,8 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::llm::{ChatMessage, LlmProvider};
-use crate::core::primitives::PrimitiveExecutor;
 use crate::core::session::manager::ContextState;
+use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;

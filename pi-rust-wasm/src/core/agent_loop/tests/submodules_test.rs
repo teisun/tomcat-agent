@@ -21,7 +21,7 @@ use crate::core::agent_loop::error_classifier::handle_overflow_retry;
 use crate::core::agent_loop::tool_exec::execute_tool;
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
 use crate::core::llm::ChatMessage;
-use crate::core::primitives::PrimitiveExecutor;
+use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::DefaultEventBus;
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};

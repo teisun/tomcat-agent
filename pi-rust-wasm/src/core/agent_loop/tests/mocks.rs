@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use crate::core::llm::ChatMessage;
 use crate::core::llm::{ChatRequest, ChatResponse, LlmProvider, StreamEvent};
-use crate::core::primitives::PrimitiveExecutor;
+use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::error::AppError;
 
 /// 标准流式 Mock：构造时传入"每次调用"返回的事件序列；调用时按顺序消费。
@@ -90,7 +90,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         &self,
         _path: &str,
         _plugin_id: &str,
-    ) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
         Ok(vec![])
     }
     async fn write_file(
@@ -99,8 +99,8 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         content: &str,
         overwrite: bool,
         _plugin_id: &str,
-    ) -> Result<crate::core::primitives::WriteFileResult, AppError> {
-        Ok(crate::core::primitives::WriteFileResult {
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
         })
@@ -108,10 +108,10 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
     async fn edit_file(
         &self,
         path: &str,
-        _edits: Vec<crate::core::primitives::EditOperation>,
+        _edits: Vec<crate::core::tools::primitive::EditOperation>,
         _plugin_id: &str,
-    ) -> Result<crate::core::primitives::EditFileResult, AppError> {
-        Ok(crate::core::primitives::EditFileResult {
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        Ok(crate::core::tools::primitive::EditFileResult {
             path: path.to_string(),
             applied: true,
         })
@@ -122,8 +122,8 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-    ) -> Result<crate::core::primitives::BashResult, AppError> {
-        Ok(crate::core::primitives::BashResult {
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
@@ -131,7 +131,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
     }
     async fn require_user_confirmation(
         &self,
-        _operation: crate::core::primitives::PrimitiveOperation,
+        _operation: crate::core::tools::primitive::PrimitiveOperation,
         _preview: &str,
         _plugin_id: &str,
     ) -> Result<bool, AppError> {
@@ -153,7 +153,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         &self,
         _path: &str,
         _plugin_id: &str,
-    ) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
         Ok(vec![])
     }
     async fn write_file(
@@ -162,8 +162,8 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         content: &str,
         overwrite: bool,
         _plugin_id: &str,
-    ) -> Result<crate::core::primitives::WriteFileResult, AppError> {
-        Ok(crate::core::primitives::WriteFileResult {
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
         })
@@ -171,10 +171,10 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
     async fn edit_file(
         &self,
         path: &str,
-        _edits: Vec<crate::core::primitives::EditOperation>,
+        _edits: Vec<crate::core::tools::primitive::EditOperation>,
         _plugin_id: &str,
-    ) -> Result<crate::core::primitives::EditFileResult, AppError> {
-        Ok(crate::core::primitives::EditFileResult {
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        Ok(crate::core::tools::primitive::EditFileResult {
             path: path.to_string(),
             applied: true,
         })
@@ -185,8 +185,8 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-    ) -> Result<crate::core::primitives::BashResult, AppError> {
-        Ok(crate::core::primitives::BashResult {
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
@@ -194,7 +194,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
     }
     async fn require_user_confirmation(
         &self,
-        _operation: crate::core::primitives::PrimitiveOperation,
+        _operation: crate::core::tools::primitive::PrimitiveOperation,
         _preview: &str,
         _plugin_id: &str,
     ) -> Result<bool, AppError> {
@@ -226,7 +226,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         &self,
         _path: &str,
         _plugin_id: &str,
-    ) -> Result<Vec<crate::core::primitives::DirEntry>, AppError> {
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
         Ok(vec![])
     }
     async fn write_file(
@@ -235,8 +235,8 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         content: &str,
         overwrite: bool,
         _plugin_id: &str,
-    ) -> Result<crate::core::primitives::WriteFileResult, AppError> {
-        Ok(crate::core::primitives::WriteFileResult {
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
         })
@@ -244,10 +244,10 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
     async fn edit_file(
         &self,
         path: &str,
-        _edits: Vec<crate::core::primitives::EditOperation>,
+        _edits: Vec<crate::core::tools::primitive::EditOperation>,
         _plugin_id: &str,
-    ) -> Result<crate::core::primitives::EditFileResult, AppError> {
-        Ok(crate::core::primitives::EditFileResult {
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        Ok(crate::core::tools::primitive::EditFileResult {
             path: path.to_string(),
             applied: true,
         })
@@ -258,8 +258,8 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-    ) -> Result<crate::core::primitives::BashResult, AppError> {
-        Ok(crate::core::primitives::BashResult {
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
@@ -267,7 +267,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
     }
     async fn require_user_confirmation(
         &self,
-        _operation: crate::core::primitives::PrimitiveOperation,
+        _operation: crate::core::tools::primitive::PrimitiveOperation,
         _preview: &str,
         _plugin_id: &str,
     ) -> Result<bool, AppError> {

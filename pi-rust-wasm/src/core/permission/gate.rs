@@ -30,7 +30,7 @@ use super::types::{
     path_starts_with, EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode,
     PermissionDecision, PermissionLevel,
 };
-use crate::core::primitives::PrimitiveOperation;
+use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 

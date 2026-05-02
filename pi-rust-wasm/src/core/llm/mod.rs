@@ -6,6 +6,7 @@
 
 mod openai;
 mod provider;
+pub mod system_prompt;
 mod token_usage;
 mod types;
 

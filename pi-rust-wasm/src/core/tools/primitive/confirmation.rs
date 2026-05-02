@@ -15,7 +15,7 @@
 //! - CLI 端 `CliConfirmation` 在 PR-4（drag UX）/PR-2（executor 接入）中
 //!   override `confirm_decision` 给出 3 选项 UI。
 
-use crate::core::primitives::PrimitiveOperation;
+use super::types::PrimitiveOperation;
 use crate::infra::error::AppError;
 use async_trait::async_trait;
 use std::path::PathBuf;

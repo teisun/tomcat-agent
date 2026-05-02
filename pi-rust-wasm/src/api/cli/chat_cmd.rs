@@ -70,5 +70,5 @@ pub(super) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
 }
 
 #[cfg(test)]
-#[path = "tests/chat_cmd.rs"]
+#[path = "tests/chat_cmd_test.rs"]
 mod tests;

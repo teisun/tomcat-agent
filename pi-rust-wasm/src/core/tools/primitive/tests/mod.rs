@@ -1,2 +1,3 @@
-mod gate_suite;
-mod suite;
+mod confirmation_test;
+mod gate_suite_test;
+mod suite_test;

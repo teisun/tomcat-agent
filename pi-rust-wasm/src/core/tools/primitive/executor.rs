@@ -1,6 +1,6 @@
 //! # 4+1 原语执行引擎（DefaultPrimitiveExecutor）
 //!
-//! 实现 [`crate::core::primitives::PrimitiveExecutor`] trait，是 Agent 与文件系统 / Shell
+//! 实现 [`super::PrimitiveExecutor`] trait，是 Agent 与文件系统 / Shell
 //! 的 **唯一受信通道**：任何 LLM 工具调用最终都要落到这 5 个方法上，安全策略
 //! （`PermissionGate` 三层决策 / 用户确认 / 备份 / 原子写 / 审计）全部在此横切。
 //!
@@ -61,18 +61,18 @@
 //! ## 与同族子模块的边界
 //!
 //! - `super::diff::build_simple_diff`：edit_file 的 diff 文本生成。
-//! - `crate::core::primitives` 与 `crate::core::confirmation`：trait + 用户确认 trait。
+//! - `super`：原语 trait / 类型与用户确认 trait。
 //! - 调用方：`agent_loop::tool_exec::execute_tool` 是唯一直接调用方，所有
 //!   LLM 工具调用都从那里 dispatch 进来。
 
-use crate::core::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::permission::{
     GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionGate, PermissionLevel,
 };
-use crate::core::primitives::{
+use crate::core::tools::primitive::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
     PrimitiveOperation, WriteFileResult,
 };
+use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
 use crate::infra::audit::{AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::platform::{normalize_path, read_file_utf8, write_file_atomic};

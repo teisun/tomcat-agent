@@ -28,9 +28,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::agent_loop::ConfigBackend;
-use crate::core::confirmation::UserConfirmationProvider;
 use crate::core::permission::{PathRule, PermissionDecision, PermissionGate};
-use crate::core::primitives::PrimitiveOperation;
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::core::tools::primitive::UserConfirmationProvider;
 use crate::infra::config::{
     append_path_rule_to_disk, append_workspace_entry_to_disk, append_workspace_root_to_disk,
     load_config, with_config_lock, AppConfig, WorkspaceEntry,
@@ -632,7 +632,7 @@ mod tests {
         assert!(!is_array_field("llm.default_model"));
     }
 
-    use crate::core::confirmation::AllowAllConfirmation;
+    use crate::core::tools::primitive::AllowAllConfirmation;
     use tempfile::TempDir;
 
     fn empty_config(dir: &TempDir) -> std::path::PathBuf {
@@ -740,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn config_set_user_denied_returns_applied_false() {
-        use crate::core::confirmation::DenyAllConfirmation;
+        use crate::core::tools::primitive::DenyAllConfirmation;
         let dir = TempDir::new().unwrap();
         let p = empty_config(&dir);
         let extra = dir.path().join("proj2");
@@ -761,7 +761,7 @@ mod tests {
         use crate::core::permission::{
             DefaultPermissionGate, GateConfig, PermissionDecision, SessionGrants,
         };
-        use crate::core::primitives::PrimitiveOperation;
+        use crate::core::tools::primitive::PrimitiveOperation;
 
         let dir = TempDir::new().unwrap();
         let p = empty_config(&dir);

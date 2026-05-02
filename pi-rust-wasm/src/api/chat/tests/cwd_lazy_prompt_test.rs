@@ -1,11 +1,11 @@
 use super::{
     extract_target_from_preview, parse_choice, target_in_cwd, CwdLazyPrompt, CwdPromptChoice,
 };
-use crate::core::confirmation::{
+use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::core::tools::primitive::{
     AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
 };
-use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use crate::core::primitives::PrimitiveOperation;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

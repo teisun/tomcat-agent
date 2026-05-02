@@ -1,6 +1,6 @@
 //! E2E-PROMPT-025-offline：system prompt 中 agent_workspace_dir 是“当前目录”的唯一来源。
 
-use pi_wasm::core::system_prompt::{
+use pi_wasm::core::llm::system_prompt::{
     build_system_prompt_with_state, WorkspaceContext, WorkspaceRootDescriptor, WorkspaceState,
 };
 
