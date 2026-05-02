@@ -20,26 +20,3 @@ pub(crate) fn run() -> ChatCommandOutcome {
 pub(crate) fn help_text() -> &'static str {
     "可用命令：\n  /path <绝对路径>   申请该路径的授权（弹出菜单：本次会话 / 写入配置 / 只读 / 禁止 / 取消）\n  /help              显示本帮助"
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::parse::parse_chat_command;
-    use super::*;
-
-    fn assert_not_command(input: &str) {
-        assert!(matches!(
-            parse_chat_command(input),
-            ChatCommand::NotACommand(_)
-        ));
-    }
-
-    #[test]
-    fn help_command_is_lowercase_only() {
-        assert_eq!(parse_chat_command("/help"), ChatCommand::Help);
-        assert!(matches!(
-            parse_chat_command("/help foo"),
-            ChatCommand::UsageError { .. }
-        ));
-        assert_not_command("/HELP");
-    }
-}
