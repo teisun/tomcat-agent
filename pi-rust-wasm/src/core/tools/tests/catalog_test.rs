@@ -78,6 +78,43 @@ fn catalog_scope_and_category_contracts_hold() {
     }
 }
 
+#[test]
+fn search_files_catalog_contract_matches_plan() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "search_files")
+        .expect("search_files catalog entry");
+
+    assert_eq!(entry.scope, PermissionScope::Read);
+    assert!(entry.read_only);
+    assert!(!entry.destructive);
+
+    let schema = (entry.parameters)();
+    let properties = schema["properties"].as_object().expect("properties");
+    assert_eq!(
+        properties["target"]["enum"]
+            .as_array()
+            .expect("target enum")
+            .len(),
+        2
+    );
+    assert_eq!(
+        properties["output_mode"]["enum"]
+            .as_array()
+            .expect("output mode enum")
+            .len(),
+        3
+    );
+    assert!(
+        properties.get("multiline").is_none(),
+        "首版 schema 不应暴露 multiline"
+    );
+    assert!(
+        entry.description.contains("rg") && entry.description.contains("fd"),
+        "description 应说明系统二进制依赖"
+    );
+}
+
 fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
     assert_eq!(
         schema["type"].as_str(),

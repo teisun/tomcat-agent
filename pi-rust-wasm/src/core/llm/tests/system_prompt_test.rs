@@ -8,6 +8,7 @@ fn build_system_prompt_contains_tools_and_workspace() {
     assert!(prompt.contains("edit_file"));
     assert!(prompt.contains("execute_bash"));
     assert!(prompt.contains("list_dir"));
+    assert!(prompt.contains("search_files"));
     assert!(prompt.contains("config_get"));
     assert!(prompt.contains("config_set"));
     assert!(prompt.contains("/home/user/workspace"));
@@ -27,6 +28,15 @@ fn build_system_prompt_contains_anti_hallucination_constraint() {
     assert!(
         prompt.contains("Only claim you can access"),
         "system prompt 应包含防幻觉约束"
+    );
+}
+
+#[test]
+fn build_system_prompt_prefers_search_files_over_bash_search() {
+    let prompt = build_system_prompt("/tmp");
+    assert!(
+        prompt.contains("prefer it over execute_bash with grep/find/ls -R"),
+        "system prompt 应引导模型优先使用 search_files，而不是 bash 搜索"
     );
 }
 

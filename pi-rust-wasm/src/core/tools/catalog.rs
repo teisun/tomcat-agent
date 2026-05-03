@@ -139,6 +139,18 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         search_hint: Some("list directory files"),
     },
     BuiltinToolCatalogEntry {
+        name: "search_files",
+        label: "Search Files",
+        description: "Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.\n\nUse this instead of execute_bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read_file when you already know the exact path.\n\nDual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.\n",
+        display_summary: Some("Search authorized files by content or file-path glob."),
+        parameters: search_files_parameters,
+        scope: PermissionScope::Read,
+        category: None,
+        read_only: true,
+        destructive: false,
+        search_hint: Some("search grep glob files content regex"),
+    },
+    BuiltinToolCatalogEntry {
         name: "config_get",
         label: "Config Get",
         description: "Read the current value of an allowed pi configuration key. The tool is constrained by CONFIG_READ_ALLOWLIST and CONFIG_HARDCODED_READ_DENY: workspace.*, agent.id, primitive.path_rules, primitive.bash_*, llm.default_model and similar non-sensitive fields are readable; llm.api_key*, llm.api_base, security.*, storage.* and other sensitive fields are denied. Missing dot-path keys return not_set.\n",
@@ -289,6 +301,65 @@ fn list_dir_parameters() -> Value {
             "path": { "type": "string", "description": "Directory path to list without recursion." }
         }),
         &["path"],
+    )
+}
+
+fn search_files_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "pattern": {
+                "type": "string",
+                "description": "[both] Search expression. With target=content this is a ripgrep regex matched against file contents. With target=files this is a file-path glob such as `*.rs` or `src/**/*.rs`."
+            },
+            "target": {
+                "type": "string",
+                "enum": ["content", "files"],
+                "description": "[both] What to search. `content` searches inside files; `files` searches file paths by glob. Defaults to `content`."
+            },
+            "path": {
+                "type": "string",
+                "description": "[both] Optional file or directory to search. Defaults to the current workspace path and must pass Read permission checks."
+            },
+            "glob": {
+                "type": "string",
+                "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`."
+            },
+            "type": {
+                "type": "string",
+                "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`."
+            },
+            "output_mode": {
+                "type": "string",
+                "enum": ["content", "files_with_matches", "count"],
+                "description": "[content only] Return matched lines, files with matches, or per-file counts. Defaults to `files_with_matches`."
+            },
+            "context": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "[content only] Number of surrounding context lines when output_mode=content. Ignored for other output modes."
+            },
+            "head_limit": {
+                "anyOf": [
+                    { "type": "integer", "minimum": 1, "maximum": 1024 },
+                    { "type": "null" }
+                ],
+                "description": "[both] Maximum returned items after offset. Defaults to 64 for target=content and 128 for target=files. Use null for unlimited; 0 is rejected."
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "[both] Skip this many result items before applying head_limit. Use next_offset when truncated=true."
+            },
+            "case_insensitive": {
+                "type": "boolean",
+                "description": "[content only] Ignore case, equivalent to ripgrep -i. Defaults to false."
+            },
+            "include_hidden": {
+                "type": "boolean",
+                "description": "[both] Include hidden files and directories. Defaults to false; .gitignore is still respected."
+            }
+        }),
+        &["pattern"],
     )
 }
 

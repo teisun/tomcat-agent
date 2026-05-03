@@ -7,6 +7,7 @@ use crate::infra::{wire, EventBus};
 
 pub(crate) struct ChatSessionStderrListenerIds {
     metrics: EventListenerId,
+    search_tools: EventListenerId,
     l1_start: EventListenerId,
     l1_end: EventListenerId,
     l1_err: EventListenerId,
@@ -79,6 +80,29 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 "\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | saved {} tok | persisted {}{}\x1b[0m",
                 tokens, ratio_pct, compactions, saved, persisted_display, en_suffix
             );
+            let _ = io::stderr().flush();
+            Ok(())
+        }),
+    );
+    let search_tools = bus.on(
+        wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
+        Box::new(|evt: EventContext| {
+            let status = evt
+                .payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("update");
+            let message = evt
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let color = if status == "failed" {
+                "\x1b[33m"
+            } else {
+                "\x1b[90m"
+            };
+            eprintln!("\n{}[tools] {}\x1b[0m", color, message);
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -268,6 +292,7 @@ pub(crate) fn register_chat_session_stderr_listeners(
 
     ChatSessionStderrListenerIds {
         metrics,
+        search_tools,
         l1_start,
         l1_end,
         l1_err,
@@ -283,6 +308,7 @@ pub(crate) fn unregister_chat_session_stderr_listeners(
     ids: &ChatSessionStderrListenerIds,
 ) {
     bus.off(ids.metrics);
+    bus.off(ids.search_tools);
     bus.off(ids.l1_start);
     bus.off(ids.l1_end);
     bus.off(ids.l1_err);

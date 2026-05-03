@@ -28,5 +28,6 @@ pub use lock::with_config_lock;
 pub use types::WorkspaceEntry;
 pub use types::{
     compute_context_budget_chars, AgentConfig, AppConfig, ContextConfig, LlmConfig, LogConfig,
-    PrimitiveConfig, SecurityConfig, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
+    PreflightConfig, PrimitiveConfig, SecurityConfig, WasmConfig, WorkspaceConfig,
+    DEFAULT_LLM_MODEL,
 };

@@ -305,6 +305,7 @@
 - [x] **T-033**：Bash 授权类型从 `FS` 纠正为 `Exec`（对应 audit scope 枚举）
 - [x] **T-034**：建立内置工具 catalog 单一事实源；补齐全部工具 `description` / 参数说明 / 权限风险元数据；由 catalog 派生 `build_tool_definitions()` 与 `docs/tool-catalog.md`（`usage` / `example` 仅作为文档或测试 fixture 产物）
 - [x] **T-036**：Chat cwd 首次触达授权机制保持现状；修正 `[a/s/n]` → `[s/w/c]` prompt 字面 bug，未识别选项显式 warning，拒绝后失败回执给出恢复授权指引
+- [x] **search_files 兜底与预检**（PENDING_INTEGRATION）：`search_files` 单工具双实现 + 同一 schema；Tier1 spawn `rg`/`fd`，缺则自动回落 Tier2（`ignore::WalkBuilder` + globset + regex，默认遵守 `.gitignore`）；`pi chat` 入口 `start_search_tools_preflight` 后台探测并按平台（brew / winget / apt / dnf / pacman / Termux pkg）尝试安装，事件经 `WIRE_SEARCH_TOOLS_PREFLIGHT` 推到 stderr，全程不阻塞会话；普通 Android App 不自动装；预检开关由 `[preflight] auto_install_search_tools` + `PI_SKIP_SEARCH_TOOLS_PREFLIGHT` 双开关控制（env > config > 默认）；技术方案见 `openspec/specs/architecture/search_files.md`；计划文档 `~/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`。**与 T2-P1-008 历史口径关系**：T2-P1-008 验收要求"缺 rg/fd 时返回安装指引、不做 fallback"维持不变；本子项作为 T2-P0-005 增量推进（参见计划 §0 口径冲突说明）。
 
 **依赖**：T2-P0-004（权限模型就位后才好改）
 
@@ -856,6 +857,38 @@
 - 若实施 `#T-037`，规划阶段 pi 命令必须受只读白名单和权限审计约束
 - 若实施 `#T-039`，删除归档行为需有回收期、清理策略与 E2E 覆盖
 
+### T2-P1-008 | search-files-tool | 内置 search_files 只读搜索工具
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Spike |
+| **分支** | `feature/tool-system-cleanup` |
+| **阻塞点** | — |
+| **关联 TODOS** | `#T-152` |
+
+**目标**：新增一个单入口 `search_files` 只读工具，支持 `target=content|files`，让 LLM 用受权限管控的结构化工具完成内容搜索与文件名 glob 搜索，减少退回 `execute_bash + grep/find`。
+
+**子项**：
+- [x] **T-152**：新增内置 `search_files` 只读工具（`target=content|files`），对齐 catalog / 权限 / 工具文档生成链路
+
+**依赖**：T2-P0-005、T2-P0-014
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`ToolRegistry`、`PermissionGate`、`PrimitiveExecutor`
+- 提供：`search_files` 内置工具、catalog 派生的 LLM tool definitions、`docs/tool-catalog.md` 条目
+
+**验收标准**：
+- `search_files` 从 catalog 派生到 LLM tool definitions 与 `docs/tool-catalog.md`
+- `target=content` 支持 `content` / `files_with_matches` / `count` 三类输出
+- `target=files` 支持 glob 文件路径搜索，content-only 字段静默忽略
+- 缺 `rg`/`fd` 时返回安装指引，不做 fallback
+- Read 权限检查与 deny path_rules 生效，结果不泄露 deny 子树
+- fmt / clippy / 单测 / 集成测试通过
+
 ---
 
 ## 5. 任务依赖拓扑（概览）
@@ -895,6 +928,7 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-02 | T2-P1-008 DOING→PENDING_INTEGRATION | Spike 在当前分支完成 `search_files` 内置只读工具：① catalog 新增 `search_files`，派生 LLM tool definitions 与 `docs/tool-catalog.md`；② `PrimitiveExecutor` 新增 `search_files`，默认执行器 spawn 系统 `rg`/`fd`（无 fallback，缺失返回安装指引），支持 `target=content|files`、分页、`files_with_matches/content/count` 输出；③ `tool_exec` 接入 JSON Result Schema，system prompt 引导优先使用 `search_files` 而非 bash grep/find；④ 新增 `tests/search_files_tests.rs` 覆盖分页、deny 过滤、glob、content/count、缺二进制与 head_limit 边界。门禁：`cargo fmt --check && cargo clippy --all-targets -- -D warnings` 通过，`cargo test -j 1 -- --test-threads=1` 全绿。 |
 | 2026-05-02 | T2-P0-005 DOING→PENDING_INTEGRATION | Spike 完成 `feature/tool-system-cleanup`：①权限 gate 语义 `PermissionLevel` → `PermissionScope`，审计字段 `permission_level` → `permission_scope`，Bash audit 新增断言确保 `bash` / `bash_approval` 且无 `fs_*`；②新增 `src/core/tools/catalog.rs` 作为内置工具单一事实源，派生 `build_tool_definitions()`、`CoreIdentitySection` 与 `docs/tool-catalog.md`，补 `gen-tool-catalog` 与漂移测试；③cwd lazy prompt 修 `[a/s/n]` → `[s/w/c]`，未识别选项显式 warning，拒绝后失败回执给出 `pi workspace add <cwd>` 恢复路径。门禁 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -j 1 -- --test-threads=1` 全绿（`.integration_test_output.log`，`EXIT_CODE=0`）。 |
 | 2026-05-02 | T2-P0-005 TODO→DOING | Spike 认领 `tool-system-cleanup`：依赖 T2-P0-004 已 DONE（含 4/27 主体与 4/28 hotfix 集成）；负责人 → Spike，状态 → `DOING`，建议分支 `feature/tool-system-cleanup`。下一步按 Dispatcher §3–§4 读取 specs 与关联报告 [`builtin-tool-description-cross-agent-study.md`](../docs/reports/builtin-tool-description-cross-agent-study.md)，输出开发计划交用户确认后再进入开发。 |
 | 2026-05-02 | T2-P0-005 关联实现参考报告 + T-034 口径细化 | 任务表新增「关联报告」：`docs/reports/builtin-tool-description-cross-agent-study.md`（内置工具 catalog、`description` 与文档结构、T-034 实施顺序）；目标段注明 **T-034** 以该报告的最终审批决策为设计参考，并将 T-034 明确为 catalog 单一事实源、`build_tool_definitions()` 派生、`docs/tool-catalog.md` 生成/校验与防漂移测试；`usage` / `example` 仅作为文档或测试 fixture 产物，不进入运行时 catalog 字段。 |

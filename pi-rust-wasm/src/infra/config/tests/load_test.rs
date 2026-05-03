@@ -33,6 +33,23 @@ fn load_config_from_existing_file() {
 }
 
 #[test]
+fn load_config_accepts_preflight_section() {
+    let dir = std::env::temp_dir().join("pi_wasm_preflight_config_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        "[preflight]\nauto_install_search_tools = false\n[log]\nlevel = \"info\"\n",
+    )
+    .unwrap();
+    let cfg = load_config(Some(path.as_path())).unwrap();
+    assert!(!cfg.preflight.auto_install_search_tools);
+    assert!(validate_config(&cfg).is_ok());
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
 fn load_config_rejects_legacy_whitelist_keys() {
     let dir = std::env::temp_dir().join("pi_wasm_legacy_whitelist_config_test");
     std::fs::create_dir_all(&dir).unwrap();

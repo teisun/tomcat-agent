@@ -104,6 +104,7 @@ impl SystemPromptSection for ToolInstructionsSection {
         r#"Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
 - Use read_file to examine files before editing
+- Use search_files to find file paths or content; prefer it over execute_bash with grep/find/ls -R
 - Use edit_file for precise changes (old_content must match the file exactly, including whitespace)
 - Use write_file only for new files or complete rewrites
 - Be concise in your responses

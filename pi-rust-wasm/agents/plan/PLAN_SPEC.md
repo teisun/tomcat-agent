@@ -26,7 +26,7 @@
 4. **文件职责总览（One-Glance Map，条件触发 MUST）**  
    - **触发条件**：本计划的「关键改动」涉及 **≥ 2 个 `*.rs` 业务源文件**（含独立 `tests.rs`）时**必须**画。仅 1 个文件的小改动可省略并写一句"不适用：仅改 X"。  
    - **位置**：紧邻"对每个子项给出"（一.3）所列文件清单**之后**、"实施顺序与依赖关系"（一.5）之前，作为 **§x.0 子节开篇**或独立 §x 章节。  
-   - **内容与硬约束**：参照 [`DOCUMENTATION_GUIDE.md §2B.4`](../../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md)（**MUST**），逐条满足该节"硬约束 1–5"：①节点之间须以 `│` + `▼` 或 `→` 标明调用方向；②"关键改动（按文件）"清单中每个 `*.rs` 在图中**必须**有节点，缺一不可；③同时标注配套独立 `tests.rs`（按 [`RUST_FILE_LINES_SPEC §A`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)）；④图后紧跟 2–3 句"阅读顺序建议"用 12 岁原则复述链路；⑤若实施期发现节点设计偏离原计划（如未改签名、保留旧出口），须以 **【未改签名 / 依赖 Drop】** 等显式标签**就地标注**，避免 stale 设计误导后续读者。  
+   - **内容与硬约束**：参照 [`ARCHITECTURE_SPEC.md §3「文件职责总览（One-Glance Map）」`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（**MUST**），逐条满足该节"硬约束 1–6"：①节点之间须以 `│` + `▼` 或 `→` 标明调用方向；②"关键改动"清单中每个 `*.rs` 在图中**必须**有节点，缺一不可；③节点内要点列函数 / 类型 / 常量 / 关键行为，不允许只写文件名；④同时标注配套独立 `tests.rs`（按 [`RUST_FILE_LINES_SPEC §A`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)）；⑤图后紧跟 2–3 句"阅读顺序建议"用 12 岁原则复述链路；⑥若实施期发现节点设计偏离原计划（如未改签名、保留旧出口），须以 **【未改签名 / 依赖 Drop】** 等显式标签**就地标注**，避免 stale 设计误导后续读者。  
    - **形式**：ASCII 框图（`text` 代码块）或 Mermaid，**优先 ASCII**（终端友好、便于 diff）。每个节点内须列「函数 / 类型 / 常量 / 关键行为」要点，禁止只写文件名。  
    - **不做的后果**：跨文件链路只能靠读者自己拼图，Review 时极易遗漏隐式依赖（如本计划里"transcript 字段扩展 ⇄ preheat 退避耗尽留痕"两个 Phase 的耦合）。  
    - **参考样板**：[`interrupt-and-cancellation.md §9.0`](../../openspec/specs/architecture/interrupt-and-cancellation.md)（T2-P0-007 定稿）。
@@ -63,7 +63,7 @@
 | :--- | :--- |
 | **当前基线 / 现状与差距** | 列出关键类型、入口函数、旧行为与新目标一行对比，减少「从哪改起」的歧义。 |
 | **已定产品 / 技术决策表** | 用户或架构师已拍板的选项（删除/保留某路径、默认值、是否保留 deprecated 等）**表格式列出**；实施阶段不得再悬而未决。 |
-| **文档先行与阶段边界** | 若采用「先只改 openspec、后改代码」的两阶段策略，须在计划中写明**阶段范围**与**不包含**的交付物，避免 Agent 越界改 `src/`。若本任务需**新增技术方案文档**到 `openspec/specs/architecture/**`，撰写时须遵循 [`DOCUMENTATION_GUIDE.md §2B`](../../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md)，其中「文件职责总览图（One-Glance Map）」为 MUST（**注**：本规范「一.4」已对**计划文本本身**提出同名 MUST，覆盖范围更广——计划的图针对"本计划影响的文件"，规格文档的图针对"该规格落地的文件"，两张图可形态相似但**不可互替**）。 |
+| **文档先行与阶段边界** | 若采用「先只改 openspec、后改代码」的两阶段策略，须在计划中写明**阶段范围**与**不包含**的交付物，避免 Agent 越界改 `src/`。若本任务需**新增技术方案文档**到 `openspec/specs/architecture/**`，撰写时须遵循 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)，其中「文件职责总览（One-Glance Map）」为 MUST（**注**：本规范「一.4」已对**计划文本本身**提出同名 MUST，覆盖范围更广——计划的图针对"本计划影响的文件"，规格文档的图针对"该规格落地的文件"，两张图可形态相似但**不可互替**）。 |
 
 **糟粕勿抄**：勿在计划里堆超长 API 清单或与 `TASK_BOARD` 完全重复的 Phase 正文；超大任务可拆为独立 `agents/plan/PLAN_<任务简写>.md`，本规范只定义共性要求。
 

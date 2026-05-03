@@ -103,6 +103,7 @@ mod tests;
 pub mod commands;
 pub mod events;
 pub mod permission;
+pub mod preflight;
 
 use commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
 
@@ -550,6 +551,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
     let session_stderr_ids =
         events::stderr::register_chat_session_stderr_listeners(&*ctx.event_bus);
+    preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
 
     loop {
         let input = match rl.readline("u> ") {

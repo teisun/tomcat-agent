@@ -136,6 +136,98 @@ Parameters:
 }
 ```
 
+### `search_files`
+
+- Label: Search Files
+- Category: `filesystem`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `search grep glob files content regex`
+
+Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.
+
+Use this instead of execute_bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read_file when you already know the exact path.
+
+Dual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "case_insensitive": {
+      "description": "[content only] Ignore case, equivalent to ripgrep -i. Defaults to false.",
+      "type": "boolean"
+    },
+    "context": {
+      "description": "[content only] Number of surrounding context lines when output_mode=content. Ignored for other output modes.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "glob": {
+      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`.",
+      "type": "string"
+    },
+    "head_limit": {
+      "anyOf": [
+        {
+          "maximum": 1024,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "[both] Maximum returned items after offset. Defaults to 64 for target=content and 128 for target=files. Use null for unlimited; 0 is rejected."
+    },
+    "include_hidden": {
+      "description": "[both] Include hidden files and directories. Defaults to false; .gitignore is still respected.",
+      "type": "boolean"
+    },
+    "offset": {
+      "description": "[both] Skip this many result items before applying head_limit. Use next_offset when truncated=true.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "output_mode": {
+      "description": "[content only] Return matched lines, files with matches, or per-file counts. Defaults to `files_with_matches`.",
+      "enum": [
+        "content",
+        "files_with_matches",
+        "count"
+      ],
+      "type": "string"
+    },
+    "path": {
+      "description": "[both] Optional file or directory to search. Defaults to the current workspace path and must pass Read permission checks.",
+      "type": "string"
+    },
+    "pattern": {
+      "description": "[both] Search expression. With target=content this is a ripgrep regex matched against file contents. With target=files this is a file-path glob such as `*.rs` or `src/**/*.rs`.",
+      "type": "string"
+    },
+    "target": {
+      "description": "[both] What to search. `content` searches inside files; `files` searches file paths by glob. Defaults to `content`.",
+      "enum": [
+        "content",
+        "files"
+      ],
+      "type": "string"
+    },
+    "type": {
+      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pattern"
+  ],
+  "type": "object"
+}
+```
+
 ## Exec
 
 ### `execute_bash`

@@ -21,21 +21,35 @@
 
 ## 测试执行策略：子 Agent 跑测试 + 主 Agent 监控
 
-集成测试与 E2E 测试可能因死锁、无限循环、外部依赖超时等原因**长时间挂起不返回**。为避免浪费时间和阻塞交付流程，**所有 §2–§4 中的测试执行**必须采用以下模式：
+集成测试与 E2E 测试可能因死锁、无限循环、外部依赖超时等原因**长时间挂起不返回**。为避免浪费时间和阻塞交付流程，**所有 §2–§4 中的测试执行**必须采用以下模式。
+
+> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：分类执行（默认并发组并发，仅进程级全局资源 / 真实 WasmEdge / 长生命周期 VM / 重子进程目标进串行组用 `-j 1 --test-threads=1`）的唯一入口是 [`scripts/run-integration-tests.sh`](../scripts/run-integration-tests.sh)；测试目标的并发/串行分组以 [`scripts/test-groups.sh`](../scripts/test-groups.sh) 为单一事实源（详见 §7.2）。下面的模板与 §4 自动化门禁均围绕这两个入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
 
 ### 执行模式
 
-1. **主 Agent 启动子 Agent（或后台 Shell）执行测试命令**：将 `cargo test ...` 等测试命令交由子 Agent / 后台终端执行，主 Agent **不得阻塞等待**。
-   - **推荐模板**（项目根为 `pi-rust-wasm/`，日志便于轮询与留存）：
+1. **主 Agent 启动子 Agent（或后台 Shell）执行测试命令**：将 `./scripts/run-integration-tests.sh ...` 或 `cargo test ...` 等测试命令交由子 Agent / 后台终端执行，主 Agent **不得阻塞等待**。
+   - **推荐模板 A（首选，分类执行，与 §7.1/§7.2 一致）**：
+
+```bash
+cd pi-rust-wasm
+RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration \
+  > .integration_test_output.log 2>&1 &
+TEST_PID=$!
+# 脚本内部按 scripts/test-groups.sh 自动拆分并发组与串行组，无需手填 -j 1 / --test-threads=1
+# 轮询：反复执行 tail -80 .integration_test_output.log（间隔按指数退避 5s→10s→20s→30s，上限 30s）
+# 超时：kill $TEST_PID（单用例约 120s 无新输出、全量约 10 分钟仍不结束则介入，见下文）
+# 结束判定：日志文件末尾出现 EXIT_CODE=0 为通过；非 0 为失败
+```
+
+   - **推荐模板 B（兜底，环境无法跑脚本时全量串行回退）**：
 
 ```bash
 cd pi-rust-wasm
 RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1 \
   > .integration_test_output.log 2>&1 &
 TEST_PID=$!
-# 轮询：反复执行 tail -80 .integration_test_output.log（间隔按指数退避 5s→10s→20s→30s，上限 30s）
-# 超时：kill $TEST_PID（单用例约 120s 无新输出、全量约 10 分钟仍不结束则介入，见下文）
-# 结束判定：日志文件末尾出现 EXIT_CODE=0 为通过；非 0 为失败
+# 注意：此模板**所有目标都强制串行**，仅在脚本不可用 / 容器内调试时使用；
+# 正式交付仍以模板 A 为准，避免把 §7 的并发优化吃掉。
 ```
 
 ### 常见错误（须避免）
@@ -51,7 +65,10 @@ TEST_PID=$!
 3. **把「全量测试」当成「应快速失败」的探测命令**  
    快速失败只适用于**缩小范围**后的单测（如 `cargo test -j 1 某测试名 -- --test-threads=1`）。**§4 全量门禁**必须按上文模板**写日志文件 + 后台跑**，再通过 `tail -f .integration_test_output.log` 或周期性 `tail -80 .integration_test_output.log` 观察；**不得以「先前台跑一下看会不会马上挂」代替正规验收**。
 
-4. **正确习惯**：全量一律 **重定向到 `pi-rust-wasm/.integration_test_output.log`（已 gitignore）**、`&` 后台、`echo EXIT_CODE=$? >>` 收尾；需要时 `kill $(jobs -p)` 或记录 `$!` 后 `kill` 中止。
+4. **手写 `cargo test --test xxx` 序列覆盖全量**  
+   会绕开 [INTEGRATION_TEST_SPEC §7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#72-并发组与串行组) 的分组约定（并发组该并发跑、串行组该串行跑），出现「漏跑某个 binary」或「把串行组当并发跑」的隐式漂移。需要按目标筛选时，只能用脚本子命令（`integration-parallel` / `integration-serial`）或精确指定该目标对应的 `-j` / `--test-threads` 参数。
+
+5. **正确习惯**：全量一律 **重定向到 `pi-rust-wasm/.integration_test_output.log`（已 gitignore）**、`&` 后台、`echo EXIT_CODE=$? >>` 收尾；需要时 `kill $(jobs -p)` 或记录 `$!` 后 `kill` 中止。
 
 2. **主 Agent 持续轮询监控**：主 Agent 通过读取终端输出文件（**优先**打开 `.integration_test_output.log`），按指数退避（如 5s → 10s → 20s → 30s，上限 30s）轮询检查测试进度。
 3. **超时判定与介入**：
@@ -137,17 +154,19 @@ cargo test -j 1 -p pi_wasm --test cli_tests --test llm_tests -- --nocapture --te
 
 ### §4 全量测试与验收清单
 
-完成 §1–§3 后须通过以下全量验收。**一键（可选）**：`./scripts/run-integration-tests.sh`（含 `release` → `clippy` → `lib` → `integration`，与下方自动化门禁对齐）。
+完成 §1–§3 后须通过以下全量验收。**首选一键入口**：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh all`（按 [INTEGRATION_TEST_SPEC §7.4](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#74-全量集成测试) 串起 `release` → `clippy` → `lib` → `integration`，并自动按 [§7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#72-并发组与串行组) 分组并发/串行执行，与下方自动化门禁逐项对齐）。
 
-以下为全量验收依据；细节与门禁另见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章。
+以下为全量验收依据；分类执行约定（§7.1）、并发/串行组（§7.2）、CI 检查项（§7.3）、全量入口（§7.4）以及日志/鲁棒性门禁，详见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章。
+
+> **门禁与 §7 的映射**：第 1 项对应 §7.3 第 1–2 项 + §7.1 本地执行；第 3 项对应 §7.1 + §7.2（脚本内部完成分组）；第 4 项对应 §7.1 中 `cli_tests` / `wasmedge_e2e_tests` 串行组要求。本节不重复 §7.2 的目标清单；新增/移动 binary 时仅改 [`scripts/test-groups.sh`](../scripts/test-groups.sh) 与 §7.2 文档，本节自动跟随。
 
 #### 自动化门禁（脚本/测试，必须 pass）
 
-1. **构建与静态检查**：`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1`
-2. **CLI 子命令**：`pi init`、`pi doctor`、`pi config`、`pi session`、`pi plugin`、`pi audit` 可执行且帮助完整
-3. **集成测试（含门禁）**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 通过，含日志门禁与鲁棒性集成测试
-4. **E2E**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；WasmEdge 已就绪时 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` 通过；须符合 E2E_TEST_SPEC §6
-5. **Wasm 真实运行时（若任务涉及插件/Wasm）**：按 INTEGRATION_TEST_SPEC 5.4 执行
+1. **构建与静态检查（§7.3 第 1–2 项）**：`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`RUST_LOG=pi_wasm=debug,info cargo test --lib -- --nocapture` 通过。
+2. **CLI 子命令**：`pi init`、`pi doctor`、`pi config`、`pi session`、`pi plugin`、`pi audit` 可执行且帮助完整。
+3. **集成测试（§7.1/§7.2 分类执行 + §9/§10 门禁）**：首选 `RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration`（脚本内并发组 cargo 默认并发、串行组 `-j 1 --test-threads=1`，覆盖日志门禁与鲁棒性集成测试）；脚本不可用时回退「测试执行策略」中的模板 B 走全量串行。**禁止**用 `cargo test --test '<某 binary>'` 序列拼凑全量集成验证。
+4. **E2E**：`RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；WasmEdge 已就绪时 `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` 通过（二者均位于 §7.2 串行组，必须 `-j 1 --test-threads=1`）；须符合 E2E_TEST_SPEC §6。
+5. **Wasm 真实运行时（若任务涉及插件/Wasm）**：按 INTEGRATION_TEST_SPEC 5.4 + §7.2 串行组要求执行。
 
 **WasmEdge stderr 说明**：VM cleanup 阶段日志中可能出现 `[error] execution failed: host function failed, Code: 0x8d`（event channel 关闭后宿主调用返回错误）。**这不代表测试失败**；是否通过以 Rust test harness 输出的 `ok` / `FAILED` 为准。
 

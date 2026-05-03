@@ -37,6 +37,22 @@ impl Default for LogConfig {
     }
 }
 
+/// 运行前预检配置：控制 chat 入口是否后台尝试安装增强型外部工具。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PreflightConfig {
+    /// 是否在 `pi chat` 入口后台探测并尝试安装 search_files 的 Tier1 依赖（rg/fd）。
+    #[serde(default = "default_true")]
+    pub auto_install_search_tools: bool,
+}
+
+impl Default for PreflightConfig {
+    fn default() -> Self {
+        Self {
+            auto_install_search_tools: true,
+        }
+    }
+}
+
 /// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流与重试。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
@@ -331,6 +347,8 @@ pub struct WasmConfig {}
 pub struct AppConfig {
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub preflight: PreflightConfig,
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]

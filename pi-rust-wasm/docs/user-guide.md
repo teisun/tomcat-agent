@@ -235,6 +235,29 @@ pi config set log.file_enabled true
 
 值类型自动推断：整数、布尔（`true`/`false`）、字符串。修改后程序会对新配置做合法性校验。
 
+### 启动预检与搜索工具安装
+
+进入 `pi chat` 后，pi 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装并通过 CLI/TUI 事件提示开始、成功或失败；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。
+
+如需关闭后台安装尝试，可在配置中设置：
+
+```toml
+[preflight]
+auto_install_search_tools = false
+```
+
+也可以通过配置命令修改：
+
+```bash
+pi config set preflight.auto_install_search_tools false
+```
+
+CI 或一次性运行可用环境变量覆盖：
+
+```bash
+PI_WASM__PREFLIGHT__AUTO_INSTALL_SEARCH_TOOLS=false pi chat
+```
+
 ### 用编辑器打开配置
 
 ```bash

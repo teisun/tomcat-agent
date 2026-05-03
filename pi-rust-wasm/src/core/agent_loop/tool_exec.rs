@@ -23,7 +23,10 @@
 
 use std::sync::Arc;
 
-use crate::core::tools::primitive::{EditOperation, EditOperationType, PrimitiveExecutor};
+use crate::core::tools::primitive::{
+    EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
+};
+use crate::infra::error::AppError;
 
 use super::config_backend::SharedConfigBackend;
 use super::types::ToolCallInfo;
@@ -144,6 +147,17 @@ pub(super) async fn execute_tool(
                         .collect();
                     lines.join("\n")
                 })
+                .map_err(|e| e.to_string())
+        }
+        "search_files" => {
+            let search_args: SearchFilesArgs = match serde_json::from_value(args.clone()) {
+                Ok(args) => args,
+                Err(e) => return (format!("search_files 参数解析失败: {}", e), true),
+            };
+            primitive
+                .search_files(search_args, AGENT_PLUGIN_ID)
+                .await
+                .and_then(|output| serde_json::to_string_pretty(&output).map_err(AppError::from))
                 .map_err(|e| e.to_string())
         }
         "config_get" => {

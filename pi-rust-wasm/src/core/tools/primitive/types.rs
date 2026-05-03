@@ -34,6 +34,112 @@ pub struct BashResult {
     pub exit_code: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchFilesTarget {
+    #[default]
+    Content,
+    Files,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchFilesOutputMode {
+    Content,
+    #[default]
+    FilesWithMatches,
+    Count,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchFilesResultMode {
+    ContentFiles,
+    ContentLines,
+    ContentCount,
+    Files,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilesArgs {
+    pub pattern: String,
+    #[serde(default)]
+    pub target: SearchFilesTarget,
+    pub path: Option<String>,
+    pub glob: Option<String>,
+    #[serde(rename = "type")]
+    pub file_type: Option<String>,
+    #[serde(default)]
+    pub output_mode: SearchFilesOutputMode,
+    pub context: Option<usize>,
+    /// `None` = schema field omitted (use target default);
+    /// `Some(None)` = explicit JSON null (unlimited);
+    /// `Some(Some(n))` = explicit limit.
+    #[serde(default)]
+    pub head_limit: Option<Option<usize>>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub case_insensitive: bool,
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilesQuery {
+    pub pattern: String,
+    pub target: SearchFilesTarget,
+    pub path: String,
+    pub glob: Option<String>,
+    #[serde(rename = "type")]
+    pub file_type: Option<String>,
+    pub output_mode: Option<SearchFilesOutputMode>,
+    pub head_limit: Option<usize>,
+    pub offset: usize,
+    pub case_insensitive: bool,
+    pub include_hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFileMatch {
+    pub path: String,
+    pub line: u64,
+    pub text: String,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFileCount {
+    pub path: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilesStats {
+    pub scanned_files: usize,
+    pub elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilesOutput {
+    pub mode: SearchFilesResultMode,
+    pub query: SearchFilesQuery,
+    pub files: Option<Vec<String>>,
+    pub matches: Option<Vec<SearchFileMatch>>,
+    pub counts: Option<Vec<SearchFileCount>>,
+    pub stats: SearchFilesStats,
+    pub truncated: bool,
+    pub next_offset: Option<usize>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditOperation {
@@ -66,6 +172,15 @@ pub enum PrimitiveOperation {
 pub trait PrimitiveExecutor: Send + Sync + 'static {
     async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError>;
     async fn list_dir(&self, path: &str, plugin_id: &str) -> Result<Vec<DirEntry>, AppError>;
+    async fn search_files(
+        &self,
+        _args: SearchFilesArgs,
+        _plugin_id: &str,
+    ) -> Result<SearchFilesOutput, AppError> {
+        Err(AppError::Primitive(
+            "search_files is not implemented by this PrimitiveExecutor".to_string(),
+        ))
+    }
     async fn write_file(
         &self,
         path: &str,
