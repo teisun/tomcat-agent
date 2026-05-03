@@ -37,7 +37,7 @@ build/
 /src/main/resources/application-api.properties
 
 ### pi-rust-wasm — local / E2E scratch workspace ###
-pi-rust-wasm/workspace/
+pi-rust-wasm/workspace-temp/
 pi-rust-wasm/.integration_test_output.log
 pi-rust-wasm/.integration_test_output_lib.log
 pi-rust-wasm/.integration_develop_merge.log

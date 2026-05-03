@@ -129,13 +129,13 @@ fn path_menu_options_deny_only_only_cancel() {
 #[test]
 fn path_menu_with_deny_rule_hides_authorization_choices() {
     let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("workspace");
+    let agent_def_dir = tmp.path().join("workspace-temp");
     let denied = tmp.path().join("secret");
-    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&agent_def_dir).unwrap();
     std::fs::create_dir_all(&denied).unwrap();
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_definition_dir: workspace,
+            agent_definition_dir: agent_def_dir,
             workspace_roots: vec![],
             agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(

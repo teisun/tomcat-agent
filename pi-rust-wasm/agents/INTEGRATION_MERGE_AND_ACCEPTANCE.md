@@ -23,7 +23,7 @@
 
 集成测试与 E2E 测试可能因死锁、无限循环、外部依赖超时等原因**长时间挂起不返回**。为避免浪费时间和阻塞交付流程，**所有 §2–§4 中的测试执行**必须采用以下模式。
 
-> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：分类执行（默认并发组并发，仅进程级全局资源 / 真实 WasmEdge / 长生命周期 VM / 重子进程目标进串行组用 `-j 1 --test-threads=1`）的唯一入口是 [`scripts/run-integration-tests.sh`](../scripts/run-integration-tests.sh)；测试目标的并发/串行分组以 [`scripts/test-groups.sh`](../scripts/test-groups.sh) 为单一事实源（详见 §7.2）。下面的模板与 §4 自动化门禁均围绕这两个入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
+> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：分类执行（默认并发组并发，仅进程级全局资源 / 真实 WasmEdge / 长生命周期 VM / 重子进程目标进串行组用 `-j 1 --test-threads=1`）的唯一入口是 [`scripts/run-integration-tests.sh`](../scripts/run-integration-tests.sh)；测试目标的并发/串行分组以 [`scripts/test-groups.sh`](../scripts/test-groups.sh) 为单一事实源（详见 §7.2）。**交付前顺序**：凡新增或调整 integration 测试二进制，须先按 §7.2 更新 `test-groups.sh`（并行或串行**两组之一**登记即可，但必须登记），再跑全量集成；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这两个入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
 
 ### 执行模式
 

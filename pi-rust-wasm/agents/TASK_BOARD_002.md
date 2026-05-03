@@ -99,6 +99,8 @@
 >
 > 字段约定：`关联 TODOS` 字段列出 `docs/TODOS.md` 中对应 `#T-XXX` 条目，便于双向追溯。
 
+**门禁口径（统一引用，避免任务表重复粘贴长命令）**：fmt/clippy、分类集成与全量验收以 [INTEGRATION_TEST_SPEC §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 本地分类执行、§7.2 `test-groups.sh` 分组、§7.4 全量集成）为准；E2E 与场景库覆盖另见同目录下 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。integration 二进制分组以 [`scripts/test-groups.sh`](../scripts/test-groups.sh) 为准（交付前更新分组见 [Dispatcher §5](./Dispatcher.md)）。下文「验收」栏宜概括为上述章节 + 必要时一句 PASS 摘要；历史行保留当时的日志结论亦可。
+
 ---
 
 ### T2-P0-014 | permission-source-redesign | 权限授权来源重构
@@ -120,7 +122,7 @@
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test --all-targets`
+- 测试：`cargo test --lib`；集成与分类全量见 [INTEGRATION_TEST_SPEC §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 / §7.2 / §7.4）与 `./scripts/run-integration-tests.sh integration`
 
 ---
 

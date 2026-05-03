@@ -27,14 +27,14 @@ fn path_with_intent_silent_passthrough_contract() {
 #[test]
 fn deny_path_command_menu_only_allows_cancel_contract() {
     let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("workspace");
+    let agent_def_dir = tmp.path().join("workspace-temp");
     let denied = tmp.path().join("deny-target");
-    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&agent_def_dir).unwrap();
     std::fs::create_dir_all(&denied).unwrap();
 
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_definition_dir: workspace,
+            agent_definition_dir: agent_def_dir,
             workspace_roots: vec![],
             agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(

@@ -6,7 +6,7 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` |
-| Update Time | 2026-05-03 13:40 |
+| Update Time | 2026-05-03 14:45 |
 | Cov% | - |
 
 ## Step-by-Step
@@ -34,12 +34,10 @@
 
 ## 门禁
 
-- `cargo test -j 1 execute_bash_audit_records_bash_scope -- --test-threads=1`：PASS
-- `cargo test -j 1 catalog -- --test-threads=1`：PASS
-- `cargo test -j 1 cwd_lazy -- --test-threads=1`：PASS
-- `cargo test -j 1 --test cwd_lazy_prompt_e2e -- --test-threads=1`：PASS
-- `cargo test -j 1 --test cli_tests test_workspace_add_cwd_e2e -- --test-threads=1`：PASS
-- Full gate：`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -j 1 -- --test-threads=1`：PASS（`.integration_test_output.log`，`EXIT_CODE=0`）
+口径：[INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 / §7.2 / §7.4）；新增/调整 integration 二进制须同步 [`scripts/test-groups.sh`](../../scripts/test-groups.sh)（见 [Dispatcher §5](../../agents/Dispatcher.md)）。
+
+- 焦测（节选）：`execute_bash_audit_records_bash_scope`、`catalog`、`cwd_lazy`、`cwd_lazy_prompt_e2e`、`cli_tests test_workspace_add_cwd_e2e`：PASS
+- Full gate：`cargo fmt --check` · `cargo clippy --all-targets -- -D warnings` · 分类集成（`./scripts/run-integration-tests.sh integration` 或等价流程）：PASS（`.integration_test_output.log`，`EXIT_CODE=0`）
 
 ### 2026-05-02 22:25 | 认领 #T-152 search_files
 
@@ -53,11 +51,7 @@
 - 已实现 `search_files` catalog entry、`PrimitiveExecutor::search_files`、`tool_exec` 路由、system prompt 使用指引与 `docs/tool-catalog.md` 派生文档。
 - 行为覆盖：`target=content` 支持 `files_with_matches` / `content` / `count`，`target=files` 使用 `fd` glob；缺少 `rg`/`fd` 返回安装指引；`PermissionScope::Read` 与 deny path_rules 生效。
 - 新增 `tests/search_files_tests.rs` 5 个集成用例，使用临时 fake `rg`/`fd` 覆盖分页、glob、content/count、缺二进制、head_limit 边界与 deny 过滤。
-- 门禁：
-  - `cargo test -j 1 --test search_files_tests -- --test-threads=1`：PASS（5 passed）
-  - `cargo test -j 1 catalog -- --test-threads=1 && cargo test -j 1 system_prompt -- --test-threads=1 && cargo test -j 1 --test tool_catalog_doc -- --test-threads=1`：PASS
-  - `cargo fmt --check && cargo clippy --all-targets -- -D warnings`：PASS
-  - `cargo test -j 1 -- --test-threads=1`：PASS
+- 门禁（口径同上；焦测含 `search_files_tests`、`catalog` / `system_prompt` / `tool_catalog_doc`）：PASS；全量分类集成 PASS。
 
 ### 2026-05-03 12:50 | T2-P0-005 子项 search_files 兜底与预检 → PENDING_INTEGRATION
 
@@ -77,15 +71,17 @@
   - 预检：`should_skip_preflight_when_env_set` / `should_skip_preflight_when_config_disables_auto_install` / `trim_for_event_truncates_when_too_long`
   - 配置：`load_config_accepts_preflight_section`
 - **架构文档**：新增 `openspec/specs/architecture/search_files.md`（含 One-Glance Map + 行为对照 + 预检策略 + 测试映射）。
-- **门禁**：
-  - `cargo fmt --check`：PASS
-  - `cargo clippy --all-targets -- -D warnings`：PASS
-  - `cargo test --test search_files_tests -- --test-threads=1`：PASS（10 passed）
-  - `cargo test -j 1 -- --test-threads=1`：PASS（全量）
+- **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`：PASS；`search_files_tests`（10 passed）、分类集成全量：PASS（口径见 [INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)、[`scripts/test-groups.sh`](../../scripts/test-groups.sh)）。
 - **看板**：`agents/TASK_BOARD_002.md` T2-P0-005 子项追加「search_files 兜底与预检」，状态 `PENDING_INTEGRATION`，并写明与 T2-P1-008 的口径关系。
+
+### 2026-05-03 14:45 | 集成验收口径与门禁文档对齐提交
+
+- 门禁与流程：`Dispatcher` 全量前 `test-groups`、`TASK_BOARD` / `develop` status / `UNIT_TEST_SPEC` 验收引用统一为 **INTEGRATION_TEST_SPEC §7**（不再从 specs 链到 `agents/INTEGRATION_MERGE_AND_ACCEPTANCE`）；§7.2 正文列举与 `scripts/test-groups.sh` 对齐（含 `search_files_tests`、`tool_catalog_doc`）。
+- 仓库：`Tomcat/.gitignore` 与 `pi-rust-wasm/.gitignore`  scratch 目录 **`workspace-temp/`**；本地已将目录 **`workspace` → `workspace-temp`**（若其他克隆仍有旧名请自行 `mv`）。
+- 代码要点：`truncation` 空 `work_dir` 不落盘 `tool-results`；测试用 `agent_definition_dir` 子目录名 **`workspace-temp`**；`test-groups` 已含 `search_files_tests`。
 
 ### 2026-05-03 13:40 | 文档编写规范拆分与引用对齐
 
 - `openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md` 精简为索引页；新增 `MODULE_README_SPEC.md`、`ARCHITECTURE_SPEC.md`；`openspec/specs/Architecture.md`、`agents/plan/PLAN_SPEC.md`、`PLAN_SKELETON.md` 中架构方案与 One-Glance Map 硬约束改为指向 `ARCHITECTURE_SPEC.md`（标杆：`architecture/search_files.md`）。
 - `openspec/specs/architecture/search_files.md` 扩充协议表、竞品分析、时序与状态机 ASCII 图。
-- 仓库根 `pi-rust-wasm/.gitignore` 忽略本地 `tool-results/` 测试产物，避免误提交。
+- 仓库根 `pi-rust-wasm/.gitignore` 忽略本地 `tool-results/` 与 `workspace-temp/`（研发 scratch 约定见 `UNIT_TEST_SPEC.md` §1.2），避免误提交。

@@ -31,6 +31,11 @@ impl Drop for PathGuard {
     }
 }
 
+/// TempDir 子目录名与仓库约定 `pi-rust-wasm/workspace-temp/` 对齐（openspec UNIT_TEST_SPEC §1.2）。
+fn test_agent_definition_root(tmp: &TempDir) -> std::path::PathBuf {
+    tmp.path().join("workspace-temp")
+}
+
 fn make_gate(
     definition: &std::path::Path,
     user_path_rules: Vec<PathRule>,
@@ -77,7 +82,7 @@ fn write_executable(path: &std::path::Path, content: &str) -> std::io::Result<()
 async fn test_search_files_content_files_with_matches_paginates_and_filters_denied(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(root.join("secret"))?;
@@ -130,7 +135,7 @@ async fn test_search_files_content_files_with_matches_paginates_and_filters_deni
 async fn test_search_files_content_lines_and_count_modes() -> Result<(), Box<dyn std::error::Error>>
 {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
@@ -197,7 +202,7 @@ printf 'src/lib.rs:3:1:needle here\n'
 #[serial(env_lock)]
 async fn test_search_files_target_files_uses_fd_glob() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(root.join("secret"))?;
@@ -242,7 +247,7 @@ async fn test_search_files_target_files_uses_fd_glob() -> Result<(), Box<dyn std
 async fn test_search_files_missing_binary_uses_tier2_content_fallback(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("empty-bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
@@ -284,7 +289,7 @@ async fn test_search_files_missing_binary_uses_tier2_content_fallback(
 async fn test_search_files_missing_fd_uses_tier2_files_fallback(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("empty-bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(root.join(".hidden"))?;
@@ -325,7 +330,7 @@ async fn test_search_files_missing_fd_uses_tier2_files_fallback(
 #[serial(env_lock)]
 async fn test_search_files_tier2_count_and_deny() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("empty-bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(root.join("secret"))?;
@@ -370,7 +375,7 @@ async fn test_search_files_tier2_count_and_deny() -> Result<(), Box<dyn std::err
 async fn test_search_files_tier2_lookaround_returns_empty_with_warning(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("empty-bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
@@ -411,7 +416,7 @@ async fn test_search_files_tier2_lookaround_returns_empty_with_warning(
 async fn test_search_files_tier2_skips_binary_and_large_files(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("empty-bin");
     std::fs::create_dir_all(root.join("src"))?;
     std::fs::create_dir_all(&bin)?;
@@ -460,7 +465,7 @@ async fn test_search_files_tier2_skips_binary_and_large_files(
 #[serial(env_lock)]
 async fn test_search_files_tier2_include_hidden_toggle() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     let bin = tmp.path().join("empty-bin");
     std::fs::create_dir_all(root.join(".hidden"))?;
     std::fs::create_dir_all(&bin)?;
@@ -517,7 +522,7 @@ async fn test_search_files_tier2_include_hidden_toggle() -> Result<(), Box<dyn s
 #[tokio::test]
 async fn test_search_files_head_limit_validation() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
-    let root = tmp.path().join("workspace");
+    let root = test_agent_definition_root(&tmp);
     std::fs::create_dir_all(&root)?;
     let executor = make_executor(&root.canonicalize()?, vec![]);
     let err = executor

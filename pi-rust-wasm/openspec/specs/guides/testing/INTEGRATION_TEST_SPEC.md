@@ -128,13 +128,13 @@ my_project/
 *   显示打印输出（含库内单元测试）：`RUST_LOG=pi_wasm=debug,info cargo test --lib -- --nocapture`
 
 ### 7.2 并发组与串行组
-集成测试二进制名单维护在 `scripts/test-groups.sh`。新增集成测试 binary 时默认加入串行组；确认满足以下条件后才可移入并发组：不修改进程全局 env / cwd，不依赖共享宿主文件路径，不启动真实 WasmEdge / 长生命周期 VM，不启动重子进程并依赖其全局环境。
+集成测试二进制名单维护在 `scripts/test-groups.sh`。**每一个**新增或更名的 integration 测试目标（`cargo test --test <name>` 之 `<name>`）**都必须**写入 `PI_WASM_INTEGRATION_PARALLEL_TESTS` 与 `PI_WASM_INTEGRATION_SERIAL_TESTS` **二者之一**；未列入任一阵列时，`./scripts/run-integration-tests.sh` **不会**执行该二进制（与最终选并行还是串行无关，两组清单都必须维护）。新增集成测试 binary 时**默认加入串行组**；确认满足以下条件后才可移入并发组：不修改进程全局 env / cwd，不依赖共享宿主文件路径，不启动真实 WasmEdge / 长生命周期 VM，不启动重子进程并依赖其全局环境。工程师全量集成前登记分组的要求见 [Dispatcher.md](../../../../agents/Dispatcher.md) §5「开发流程」。
 
-**可并发组**（默认 cargo 并发）：
-`audit_tests`、`event_tests`、`agent_loop_tests`、`bash_assignment_deny`、`system_prompt_cwd_priority`、`path_command_e2e`、`cwd_lazy_prompt_e2e`、`session_tests`、`plugin_tests`、`llm_tests`、`context_management_tests`、`robustness_tests`。
+**可并发组**（默认 cargo 并发；与 `scripts/test-groups.sh` 中 `PI_WASM_INTEGRATION_PARALLEL_TESTS` 对齐）：
+`audit_tests`、`event_tests`、`agent_loop_tests`、`bash_assignment_deny`、`system_prompt_cwd_priority`、`path_command_e2e`、`cwd_lazy_prompt_e2e`、`search_files_tests`、`session_tests`、`plugin_tests`、`llm_tests`、`context_management_tests`、`robustness_tests`。
 
-**必须串行组**（强制 `-j 1 --test-threads=1`）：
-`cli_tests`、`wasmedge_e2e_tests`、`long_lived_vm_tests`、`js_api_alignment_tests`、`hostcall_tests`、`primitives_tools_tests`。
+**必须串行组**（强制 `-j 1 --test-threads=1`；与 `PI_WASM_INTEGRATION_SERIAL_TESTS` 对齐）：
+`cli_tests`、`wasmedge_e2e_tests`、`long_lived_vm_tests`、`js_api_alignment_tests`、`hostcall_tests`、`primitives_tools_tests`、`tool_catalog_doc`。
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：

@@ -27,13 +27,15 @@
 
 **§4 全量门禁**（在 develop 合并后、`pi-rust-wasm` 根目录；`source .env` + `source ~/.wasmedge/env` + `DYLD_FALLBACK_LIBRARY_PATH=$HOME/.wasmedge/lib`）
 
-| 命令 | 结果 |
+验收步骤与分类执行见 [INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 本地执行、§7.2 分组清单、§7.4 全量集成）；集成测试目标清单见 [`scripts/test-groups.sh`](../../scripts/test-groups.sh)。下列结果为当时跑测记录（具体命令以规范为准，勿把散装 `cargo test -j 1 -- …` 当作唯一口径）。
+
+| 步骤 | 结果 |
 | :--- | :--- |
 | `cargo fmt --check` | 通过 |
 | `cargo clippy --all-targets -- -D warnings` | 零警告 |
 | `cargo build --release` | 通过 |
-| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 -- --nocapture --test-threads=1` | **lib 572 passed / 0 failed / 1 ignored；integration 19 crate 207 passed / 0 failed；doc 0 passed；EXIT_CODE=0**，日志 `.integration_test_output.log` |
-| `RUST_LOG=pi_wasm=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` | **integration 18 crate 207 passed / 0 failed**（含 `cli_tests` 77、`wasmedge_e2e_tests` 39、`path_command_e2e` 4），日志 `.integration_only.log` |
+| 分类集成全量（`RUST_LOG=pi_wasm=debug,info`，日志 `.integration_test_output.log`） | **lib 572 passed / 0 failed / 1 ignored；integration 19 crate 207 passed / 0 failed；doc 0 passed；EXIT_CODE=0** |
+| 仅 integration crate 复查（日志 `.integration_only.log`） | **integration 18 crate 207 passed / 0 failed**（含 `cli_tests` 77、`wasmedge_e2e_tests` 39、`path_command_e2e` 4） |
 
 **编码规范家族对照**
 

@@ -10,6 +10,7 @@ PI_WASM_INTEGRATION_PARALLEL_TESTS=(
   system_prompt_cwd_priority
   path_command_e2e
   cwd_lazy_prompt_e2e
+  search_files_tests
   session_tests
   plugin_tests
   llm_tests

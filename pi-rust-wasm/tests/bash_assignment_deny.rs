@@ -11,12 +11,12 @@ use pi_wasm::{
 };
 
 fn make_executor(
-    workspace: &std::path::Path,
+    agent_definition_dir: &std::path::Path,
     denied: &std::path::Path,
 ) -> DefaultPrimitiveExecutor {
     let gate = DefaultPermissionGate::new(
         GateConfig {
-            agent_definition_dir: workspace.to_path_buf(),
+            agent_definition_dir: agent_definition_dir.to_path_buf(),
             workspace_roots: vec![],
             agent_trail_readonly_dirs: vec![],
             user_path_rules: vec![PathRule::new(
@@ -41,14 +41,14 @@ fn make_executor(
 #[tokio::test]
 async fn bash_assignment_rhs_denied_in_all_supported_positions() {
     let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("workspace");
+    let agent_def_dir = tmp.path().join("workspace-temp");
     let denied_dir = tmp.path().join("deny-target");
     let denied = denied_dir.join("foo");
-    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&agent_def_dir).unwrap();
     std::fs::create_dir_all(&denied_dir).unwrap();
     std::fs::write(&denied, "secret").unwrap();
 
-    let exec = make_executor(&workspace, &denied);
+    let exec = make_executor(&agent_def_dir, &denied);
     for command in [
         format!("stat -c %s p={}", denied.display()),
         format!("p={} ls -la \"$p\"", denied.display()),
