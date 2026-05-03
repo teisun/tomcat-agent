@@ -38,6 +38,9 @@ impl Default for LogConfig {
 }
 
 /// 运行前预检配置：控制 chat 入口是否后台尝试安装增强型外部工具。
+///
+/// 预检使用 [`std::process::Command::output`]，**无 pi 侧超时**；与 Tier2 搜索环境变量
+/// `PI_SEARCH_TIER2_DEADLINE_MS`（仅 `search_files` 兜底）无关。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PreflightConfig {
     /// 是否在 `pi chat` 入口后台探测并尝试安装 search_files 的 Tier1 依赖（rg/fd）。

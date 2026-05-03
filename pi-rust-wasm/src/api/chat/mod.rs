@@ -536,6 +536,12 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
 
+    let search_tools_printer = rl.create_external_printer().ok().map(|p| {
+        Arc::new(std::sync::Mutex::new(
+            Box::new(p) as Box<dyn rustyline::ExternalPrinter + Send>
+        ))
+    });
+
     // ContextState: 在 loop 外一次性初始化，跨迭代复用
     let context_config = &ctx.config.context;
     let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
@@ -549,8 +555,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         workspace_state,
     );
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
-    let session_stderr_ids =
-        events::stderr::register_chat_session_stderr_listeners(&*ctx.event_bus);
+    let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
+        &*ctx.event_bus,
+        search_tools_printer,
+    );
     preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
 
     loop {

@@ -251,6 +251,11 @@ SearchFilesStats
 │  • start_search_tools_preflight(cfg, bus)                    │
 │  • should_skip_preflight: env > config > 默认 true           │
 │  • missing_search_tools: find_binary("rg"/"fd"/"fdfind")     │
+│  • 包管理器子进程：Command::output()，无 pi 侧超时（勿与     │
+│    PI_SEARCH_TIER2_DEADLINE_MS 混淆；后者仅 Tier2 搜索）      │
+│  • 每次安装尝试落盘 ~/.pi_/agents/main/logs/                │
+│    preflight-file-log-<时间戳>.log（stdout+stderr 全文）      │
+│  • tracing target：pi_wasm_preflight（RUST_LOG=debug）       │
 │  • install_plan: cfg!(target_os) + TERMUX_VERSION 决策       │
 │      macOS  → brew install ripgrep fd                        │
 │      Win    → winget install (UAC 弹窗为系统行为)            │

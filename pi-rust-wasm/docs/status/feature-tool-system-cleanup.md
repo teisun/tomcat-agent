@@ -6,7 +6,7 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` |
-| Update Time | 2026-05-03 14:45 |
+| Update Time | 2026-05-03 19:16 |
 | Cov% | - |
 
 ## Step-by-Step
@@ -85,3 +85,9 @@
 - `openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md` 精简为索引页；新增 `MODULE_README_SPEC.md`、`ARCHITECTURE_SPEC.md`；`openspec/specs/Architecture.md`、`agents/plan/PLAN_SPEC.md`、`PLAN_SKELETON.md` 中架构方案与 One-Glance Map 硬约束改为指向 `ARCHITECTURE_SPEC.md`（标杆：`architecture/search_files.md`）。
 - `openspec/specs/architecture/search_files.md` 扩充协议表、竞品分析、时序与状态机 ASCII 图。
 - 仓库根 `pi-rust-wasm/.gitignore` 忽略本地 `tool-results/` 与 `workspace-temp/`（研发 scratch 约定见 `UNIT_TEST_SPEC.md` §1.2），避免误提交。
+
+### 2026-05-03 19:16 | search_tools 预检可观测性与 CLI 展示
+
+- **预检**：包管理器每次安装尝试将完整 stdout/stderr 落盘 `~/.pi_/agents/main/logs/preflight-file-log-<ts>.log`；`tracing` target `pi_wasm_preflight`（`RUST_LOG=debug`）；成功/失败事件 `extra` 带 `logPath`；文档明确 `Command::output` 无 pi 侧超时，勿与 `PI_SEARCH_TIER2_DEADLINE_MS` 混淆；`PreflightConfig` 注释同步。
+- **stderr 监听**：`WIRE_SEARCH_TOOLS_PREFLIGHT` 优先经 `rustyline::ExternalPrinter` 输出，避免 `readline` 阻塞时 `[tools]` 与输入行错位；失败时附加截断后的 stderr / error / log 路径摘要。
+- **架构**：`search_files.md` One-Glance Map 补充上述行为。

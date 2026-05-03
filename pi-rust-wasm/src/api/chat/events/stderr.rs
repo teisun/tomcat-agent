@@ -1,7 +1,14 @@
 //! CLI 会话级 stderr 事件监听：`readline` 等待期间 Layer1 仍可能 emit，须在整段 `chat_loop` 内保持注册。
+//!
+//! `search_tools` 事件优先走 [`rustyline::ExternalPrinter`]，以便在 `readline("u> ")` 阻塞期间把 `[tools]`
+//! 插在输入行上方；无 TTY / 创建失败时回退 `eprintln!`。
 
 use std::io::{self, Write as IoWrite};
+use std::sync::{Arc, Mutex};
 
+use rustyline::ExternalPrinter;
+
+use crate::api::chat::preflight;
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::{wire, EventBus};
 
@@ -19,6 +26,7 @@ pub(crate) struct ChatSessionStderrListenerIds {
 
 pub(crate) fn register_chat_session_stderr_listeners(
     bus: &dyn EventBus,
+    search_tools_printer: Option<Arc<Mutex<Box<dyn ExternalPrinter + Send>>>>,
 ) -> ChatSessionStderrListenerIds {
     let metrics = bus.on(
         wire::WIRE_CONTEXT_METRICS_UPDATE,
@@ -84,9 +92,10 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
+    let printer = search_tools_printer;
     let search_tools = bus.on(
         wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
-        Box::new(|evt: EventContext| {
+        Box::new(move |evt: EventContext| {
             let status = evt
                 .payload
                 .get("status")
@@ -97,12 +106,63 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
+            let extra = evt.payload.get("extra");
+            let stderr_chars = extra
+                .and_then(|e| e.get("stderr"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            tracing::debug!(
+                target: preflight::TRACE_TARGET,
+                status = %status,
+                message_len = message.len(),
+                extra_stderr_chars = stderr_chars,
+                has_log_path = extra.and_then(|e| e.get("logPath")).is_some(),
+                "search_tools_preflight stderr listener"
+            );
             let color = if status == "failed" {
                 "\x1b[33m"
             } else {
                 "\x1b[90m"
             };
-            eprintln!("\n{}[tools] {}\x1b[0m", color, message);
+            let mut block = format!("\n{}[tools] {}\x1b[0m", color, message);
+            if status == "failed" {
+                if let Some(ex) = extra {
+                    if let Some(s) = ex.get("stderr").and_then(|v| v.as_str()) {
+                        if !s.is_empty() {
+                            block.push_str(&format!(
+                                "\n\x1b[90m[tools] {}\x1b[0m",
+                                preflight::trim_for_event(s)
+                            ));
+                        }
+                    }
+                    if let Some(e) = ex.get("error").and_then(|v| v.as_str()) {
+                        if !e.is_empty() {
+                            block.push_str(&format!(
+                                "\n\x1b[90m[tools] {}\x1b[0m",
+                                preflight::trim_for_event(e)
+                            ));
+                        }
+                    }
+                    if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
+                        if !p.is_empty() {
+                            block.push_str(&format!(
+                                "\n\x1b[90m[tools] log: {}\x1b[0m",
+                                p
+                            ));
+                        }
+                    }
+                }
+            }
+            block.push('\n');
+            if let Some(ref pr) = printer {
+                if let Ok(mut guard) = pr.lock() {
+                    if guard.print(block.clone()).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            eprint!("{}", block);
             let _ = io::stderr().flush();
             Ok(())
         }),
