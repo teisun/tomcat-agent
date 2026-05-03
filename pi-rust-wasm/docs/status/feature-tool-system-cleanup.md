@@ -6,7 +6,7 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` |
-| Update Time | 2026-05-03 19:16 |
+| Update Time | 2026-05-03（detached 预检 + 单测目录化） |
 | Cov% | - |
 
 ## Step-by-Step
@@ -85,6 +85,14 @@
 - `openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md` 精简为索引页；新增 `MODULE_README_SPEC.md`、`ARCHITECTURE_SPEC.md`；`openspec/specs/Architecture.md`、`agents/plan/PLAN_SPEC.md`、`PLAN_SKELETON.md` 中架构方案与 One-Glance Map 硬约束改为指向 `ARCHITECTURE_SPEC.md`（标杆：`architecture/search_files.md`）。
 - `openspec/specs/architecture/search_files.md` 扩充协议表、竞品分析、时序与状态机 ASCII 图。
 - 仓库根 `pi-rust-wasm/.gitignore` 忽略本地 `tool-results/` 与 `workspace-temp/`（研发 scratch 约定见 `UNIT_TEST_SPEC.md` §1.2），避免误提交。
+
+### 2026-05-03（同日追加）| Unix：退出 chat 后 Tier1 安装可继续（nohup detached）
+
+- **`preflight.rs`**：`cfg(unix)` 路径用 `/bin/sh -c 'nohup … >> log 2>&1 &'` + `spawn`，不 `output()` 等待；Homebrew 并发用 `pgrep -f` 窄匹配；可选 `preflight-detached-log.marker` 仅记日志路径（UX）；Windows 仍阻塞 `output()`，源码内 TODO：PowerShell detached。
+- **`stderr.rs`**：处理 wire `detached` / `already_installing`（灰字 + `logPath` + `tail -f` 提示）。
+- **`search_files.md`**：§4 / §7 / §8 / §9 / §12 与上述行为对齐。
+- **测试**：`api/chat/tests/preflight_test.rs` + `preflight.rs` `#[path]` 挂载（`RUST_FILE_LINES_SPEC` §A.9）；用例含 `nohup_shell_quotes_log_path_with_spaces`。**未**新增 integration 二进制（无需改 `test-groups.sh`）。
+- **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test -p pi_wasm --lib api::chat::preflight::tests`：提交前执行。
 
 ### 2026-05-03 19:16 | search_tools 预检可观测性与 CLI 展示
 

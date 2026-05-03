@@ -146,8 +146,17 @@ pub(crate) fn register_chat_session_stderr_listeners(
                     }
                     if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
                         if !p.is_empty() {
+                            block.push_str(&format!("\n\x1b[90m[tools] log: {}\x1b[0m", p));
+                        }
+                    }
+                }
+            } else if status == "detached" || status == "already_installing" {
+                if let Some(ex) = extra {
+                    if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
+                        if !p.is_empty() {
+                            block.push_str(&format!("\n\x1b[90m[tools] log: {}\x1b[0m", p));
                             block.push_str(&format!(
-                                "\n\x1b[90m[tools] log: {}\x1b[0m",
+                                "\n\x1b[90m[tools] 可查看进度：tail -f {}\x1b[0m",
                                 p
                             ));
                         }

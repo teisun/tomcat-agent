@@ -251,10 +251,11 @@ SearchFilesStats
 │  • start_search_tools_preflight(cfg, bus)                    │
 │  • should_skip_preflight: env > config > 默认 true           │
 │  • missing_search_tools: find_binary("rg"/"fd"/"fdfind")     │
-│  • 包管理器子进程：Command::output()，无 pi 侧超时（勿与     │
-│    PI_SEARCH_TIER2_DEADLINE_MS 混淆；后者仅 Tier2 搜索）      │
-│  • 每次安装尝试落盘 ~/.pi_/agents/main/logs/                │
-│    preflight-file-log-<时间戳>.log（stdout+stderr 全文）      │
+│  • Unix：nohup 重定向 + sh -c spawn，不等待安装结束；         │
+│    并发仅进程表（Homebrew 窄匹配），可选 log-path marker     │
+│  • Windows：Command::output() 阻塞；v1 无 detached           │
+│  • 日志：Unix 由 shell 实时写 preflight-file-log-*.log；     │
+│    Windows 由 pi 在 output 后汇总写入                        │
 │  • tracing target：pi_wasm_preflight（RUST_LOG=debug）       │
 │  • install_plan: cfg!(target_os) + TERMUX_VERSION 决策       │
 │      macOS  → brew install ripgrep fd                        │
@@ -268,8 +269,9 @@ SearchFilesStats
                  ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ src/api/chat/events/stderr.rs      ── CLI/TUI 反馈           │
-│  • 监听 WIRE_SEARCH_TOOLS_PREFLIGHT，向 stderr 输出           │
-│    started / progress / succeeded / failed                   │
+│  • 监听 WIRE_SEARCH_TOOLS_PREFLIGHT，向 stderr 输出          │
+│    ready/start/progress/success/failed 与 detached/        │
+│    already_installing（灰字 + log + tail 提示）              │
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
@@ -389,9 +391,13 @@ SearchFilesStats
 |----|------|
 | 入口 | `chat_loop` 注册完 stderr 监听后调用 `preflight::start_search_tools_preflight(cfg, bus)`；与会话循环并行；不影响首屏 |
 | 探测 | `find_binary("rg")` / `find_binary("fd")` / `find_binary("fdfind")`；即时读 `PATH`，无缓存 |
-| 安装 | 后台线程异步 spawn 平台命令；建议每工具 90 s 上限 |
+| 安装（Unix） | 后台线程内对包管理器使用 **`nohup … >> ~/.pi_/agents/main/logs/preflight-file-log-<ts>.log 2>&1 &`**，经 `/bin/sh -c` **`spawn`**；**不**阻塞等待安装结束，退出 `pi chat` / 结束 `pi` 后安装可继续 |
+| 安装（Windows） | v1 仍为 **`Command::output()` 阻塞**直至结束；detached 留代码 TODO（PowerShell `Start-Process -NoWait`） |
+| 并发（Unix / Homebrew） | 仅依据 **进程表**（如 `pgrep -f` 匹配 `brew.rb` / Homebrew `build.rb` 等窄模式）判断是否已有安装/编译；为真则 emit `already_installing`，**不**再起第二套 nohup |
+| log-path marker（UX） | 可选文件 `preflight-detached-log.marker`（与日志同目录）仅存**一行**本次 detached 日志绝对路径，便于 `already_installing` 时提示 `tail -f`；**从不**单独作为「正在安装」的判定依据 |
+| 日志清理 | v1 **不**自动删除历史 `preflight-file-log-*.log`（保持实现简单） |
 | 平台决策 | `cfg!(target_os)` + 运行期 `TERMUX_VERSION` env；详见 §9 决策树 |
-| 事件 | `WIRE_SEARCH_TOOLS_PREFLIGHT`：`started` / `progress` / `succeeded` / `failed{tool, stderr_tail}` |
+| 事件 | `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `progress`（主要为 Windows）/ `success` \|\| `failed`（Windows 阻塞路径）/ **`detached`** / **`already_installing`**（Unix 后台路径） |
 | 取消 | 复用 `ctx.cancel_token`；Ctrl+C 软中断同时取消子进程 |
 | 竞态 | 装完前用户调用 `search_files`：行为不变（缺一策略回落 Tier2） |
 | sudo / 权限 | Linux 不抢 root；失败发事件，不静默 |
@@ -401,6 +407,8 @@ SearchFilesStats
 ---
 
 ## 8. 预检事件状态机
+
+实现侧 wire `payload.status` 字符串（非下图字面量）：`ready`、`start`、`progress`、`success`、`failed`、`detached`、`already_installing`。
 
 ```text
                        ┌──────────────────┐
@@ -416,23 +424,24 @@ SearchFilesStats
       missing_search_tools ──┐
                              ▼
                 ┌──────────────────────────┐
-                │      preflight.started    │  emit Started
-                └──────────────┬────────────┘
-                               │ spawn 包管理器
-                               ▼
-                ┌──────────────────────────┐
-                │    preflight.progress     │  按行 emit Progress（stdout/err 摘要）
-                └──────┬─────────────┬──────┘
-                       │             │
-              exit=0 ─┘             └─ exit≠0 / cancel
-                ▼                         ▼
-          ╔══════════════╗          ╔═══════════════╗
-          ║  succeeded   ║          ║    failed     ║
-          ║ (tool, ms)   ║          ║ (tool, tail)  ║
-          ╚══════════════╝          ╚═══════════════╝
-                │                         │
-                └────────► chat 继续 ◄────┘
-                          (Tier1 自动接管 / Tier2 兜底)
+                │       start             │  emit start（仍缺工具）
+                └──────────────┬──────────┘
+                               │
+              ┌────────────────┴────────────────┐
+              │ Unix（v1）                     │ Windows（v1）
+              ▼                                ▼
+   install_plan 有方案？              install_plan 有方案？
+       │ no → failed                         │ no → failed
+       │ yes                                 │ yes
+       ▼                                     ▼
+   Homebrew 安装中？                  progress → output() 阻塞
+       │ yes → already_installing              │
+       │ no                                  ┘
+       ▼                                  success / failed
+   spawn nohup + detached
+       │
+       └────────► chat 继续（Tier1 就绪后自动接管 / 否则 Tier2 兜底）
+
 ```
 
 > 状态机不影响 `chat_loop`：所有节点都通过 `EventBus` 异步推送，主循环只负责渲染 / 不阻塞。
@@ -473,8 +482,9 @@ SearchFilesStats
                 │                         │        │          │           │         │
                 └────────────┬────────────┴────────┴──────────┴───────────┴─────────┘
                              ▼
-                  emit started → progress → succeeded / failed
-                  (chat_loop 永远不被阻塞)
+                  Unix：start → detached / already_installing / failed（不阻塞）
+                  Windows：start → progress → success / failed（阻塞至 output 返回）
+                  (chat_loop 永远不被预检线程阻塞)
 ```
 
 | 形态 | `search_files` 主路径 | 预检 / 安装 |
@@ -550,11 +560,11 @@ auto_install_search_tools = true
 | T9 | `test_search_files_tier2_skips_binary_and_large_files` | 二进制 NUL 嗅探 + > 5 MiB 跳过 + warning |
 | T10 | `test_search_files_tier2_include_hidden_toggle` | `include_hidden=true/false` 与 Tier1 `--hidden` 对齐 |
 
-预检相关单元测试（[`src/api/chat/preflight.rs`](../../../src/api/chat/preflight.rs)）：
+预检相关单元测试（[`src/api/chat/tests/preflight_test.rs`](../../../src/api/chat/tests/preflight_test.rs)，经 `preflight.rs` 末尾 `#[path]` 挂载；见 `RUST_FILE_LINES_SPEC` §A.9）：
 
-- `should_skip_preflight_when_env_set`
 - `should_skip_preflight_when_config_disables_auto_install`
-- `trim_for_event_truncates_when_too_long`
+- `trim_for_event_limits_long_messages`
+- （Unix）`nohup_shell_quotes_log_path_with_spaces`：`shell_words` 拼接 nohup 重定向路径
 
 配置加载测试（[`src/infra/config/tests/load_test.rs`](../../../src/infra/config/tests/load_test.rs)）：
 
