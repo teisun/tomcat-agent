@@ -299,7 +299,7 @@
 | **分支** | `feature/tool-system-cleanup` |
 | **阻塞点** | — |
 | **关联 TODOS** | `#T-033`、`#T-034`、`#T-036` |
-| **关联报告** | [builtin-tool-description-cross-agent-study.md](../docs/reports/builtin-tool-description-cross-agent-study.md)（内置工具 catalog / `description` 与文档结构 / T-034 实施顺序） |
+| **关联报告** | [builtin-tool-description-cross-agent-study.md](../docs/reports/builtin-tool-description-cross-agent-study.md)（内置工具 catalog / `description` 与文档结构 / T-034 实施顺序）；[multi-agent-openai-api-integration.md](../docs/reports/multi-agent-openai-api-integration.md)（五仓对标；子项「多 LLM + Responses」设计与 pi_agent_rust / openclaw 锚点）；实施边界见 [llm-multiprovider-integration.md](../openspec/specs/architecture/llm-multiprovider-integration.md) **§6.5** |
 
 **目标**：修复 Bash 授权类型错配等具体 bug，建立内置工具 catalog 单一事实源并补齐工具描述清单；cwd 首次触达授权机制保持现状，补齐 prompt 字面一致性与失败恢复指引。实现 **T-034** 时以关联报告的最终审批决策为设计参考：catalog 统一驱动 `build_tool_definitions()` 与 `docs/tool-catalog.md`，`usage` / `example` 仅作为文档或测试 fixture 产物，不进入运行时 catalog 字段。
 
@@ -308,6 +308,7 @@
 - [x] **T-034**：建立内置工具 catalog 单一事实源；补齐全部工具 `description` / 参数说明 / 权限风险元数据；由 catalog 派生 `build_tool_definitions()` 与 `docs/tool-catalog.md`（`usage` / `example` 仅作为文档或测试 fixture 产物）
 - [x] **T-036**：Chat cwd 首次触达授权机制保持现状；修正 `[a/s/n]` → `[s/w/c]` prompt 字面 bug，未识别选项显式 warning，拒绝后失败回执给出恢复授权指引
 - [x] **search_files 兜底与预检**（PENDING_INTEGRATION）：`search_files` 单工具双实现 + 同一 schema；Tier1 spawn `rg`/`fd`，缺则自动回落 Tier2（`ignore::WalkBuilder` + globset + regex，默认遵守 `.gitignore`）；`pi chat` 入口 `start_search_tools_preflight` 后台探测并按平台（brew / winget / apt / dnf / pacman / Termux pkg）尝试安装，事件经 `WIRE_SEARCH_TOOLS_PREFLIGHT` 推到 stderr，全程不阻塞会话；普通 Android App 不自动装；预检开关由 `[preflight] auto_install_search_tools` + `PI_SKIP_SEARCH_TOOLS_PREFLIGHT` 双开关控制（env > config > 默认）；技术方案见 `openspec/specs/architecture/tools/search_files.md`；计划文档 `~/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`。**macOS Homebrew 预检**：`brew install --force-bottle ripgrep fd`，detached shell 带 `HOMEBREW_NO_BUILD_FROM_SOURCE=1`，禁止源码构建。**与 T2-P1-008 历史口径关系**：T2-P1-008 验收要求"缺 rg/fd 时返回安装指引、不做 fallback"维持不变；本子项作为 T2-P0-005 增量推进（参见计划 §0 口径冲突说明）。
+- [ ] **多 LLM 层改造 + OpenAI Responses**：**①** 引入 Provider **注册表**（建议 `src/core/llm/registry.rs`）与 **`resolve_llm(&LlmConfig) -> Arc<dyn LlmProvider>`**，`ChatContext::from_config`（或唯一装配点）按 **`[llm] provider`** 字符串选型，避免在入口手写冗长 `match` 作为长期形态。**②** 新增 **`OpenAiResponsesProvider`**（建议 `src/core/llm/openai_responses.rs`）：`impl LlmProvider`，`POST {base}/v1/responses`；在实现内将 **同一套** `ChatRequest` / `ChatMessage` 翻译为 **`input` + `instructions`（及 tools 映射）**；流式 **SSE / NDJSON** 解析并入现有 **`StreamEvent`**。对标与核对单见 [llm-multiprovider-integration.md §6.5](../openspec/specs/architecture/llm-multiprovider-integration.md)、报告 [§7–§9](../docs/reports/multi-agent-openai-api-integration.md)。
 
 **依赖**：T2-P0-004（权限模型就位后才好改）
 
@@ -316,6 +317,7 @@
 **协作接口**：
 - 消费：`ToolRegistry`、`PermissionGate`
 - 提供：内置工具 catalog（如 `BuiltinToolCatalogEntry`）、由 catalog 派生的 LLM tool definitions、`docs/tool-catalog.md`
+- **LLM 子项（与 catalog 正交）**：消费 **`LlmConfig`**（含已有 `provider` 字符串与横切字段）；提供 **`resolve_llm` → `Arc<dyn LlmProvider>`**（至少含既有 Completions **`OpenAiProvider`** 与新建 Responses **`OpenAiResponsesProvider`**）
 
 **验收标准**：
 - 3 条当前 TODO（T-033/T-034/T-036）全部闭环
@@ -323,6 +325,13 @@
 - `docs/tool-catalog.md` 覆盖所有已注册内置工具，并按 catalog 生成或与 catalog 保持测试校验一致
 - catalog / `build_tool_definitions()` / `docs/tool-catalog.md` 的工具集合一致，并有测试防漂移
 - E2E：Bash 授权 / cwd 默认访问授权两个场景通过
+- **多 LLM + Responses（开发交付）**：
+  - **注册表**：`provider` 字符串（如 **`openai`** / **`openai-responses`**，具体 id 以 registry 约定为准）映射到 **`Arc<dyn LlmProvider>`**；**`LlmConfig` 不因多 Provider 无限膨胀专属字段**（横切项共用，与 spec **§6.5.2 / `LlmConfig` 小节**一致）。
+  - **`OpenAiResponsesProvider`**：`chat` / `chat_stream` 请求 **`POST …/v1/responses`**；**`ChatMessage` → `input` 条目 + `instructions`（及 tools 形状）** 在 Provider 内完成；**Agent Loop 仍只组一套 `ChatRequest`**（与 spec **§3.2.1** 一致）。
+  - **流式**：流式路径解析 **SSE 与分行 JSON**（若 API 返回其一或二者），输出 **`StreamEvent`**；**`count_tokens`** 行为明确（沿用启发式或文档标注近似）。
+  - **Compaction**：`generate_summary` 仍走 **`LlmProvider::chat`**；若主对话切到 Responses，摘要与主对话协议关系按 spec **§6.5 表格 · Compaction** 处理（同一 trait 注入或另配摘要 provider，避免静默分叉）。
+  - **测试**：至少 **单元 / mock** 覆盖 Responses 路径一轮（非流式或流式其一）；与 Completions 回归并存 **`cargo test`** 全绿。
+  - **文档**：实现与 [llm-multiprovider-integration.md §6.5](../openspec/specs/architecture/llm-multiprovider-integration.md) 核对；[`Architecture.md`](../openspec/specs/Architecture.md) 索引已挂 `llm-multiprovider-integration.md` 则交付前确认未丢链。
 
 ---
 
@@ -930,6 +939,7 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-05 | T2-P0-005 子项 + 关联报告 + 验收 | 在 **T-033 / T-034 / T-036 / search_files** 之后新增子项；关联报告含 multi-agent 报告 + **llm-multiprovider-integration §6.5**。同日将子项从「文档对标」改为 **开发任务**：**Provider 注册表 + `resolve_llm` + `OpenAiResponsesProvider`（`/v1/responses`）**；**验收标准**改为工程交付清单（注册表、`ChatRequest` 单套、流失真、Compaction、测试、文档核对）。 |
 | 2026-05-02 | T2-P1-008 DOING→PENDING_INTEGRATION | Spike 在当前分支完成 `search_files` 内置只读工具：① catalog 新增 `search_files`，派生 LLM tool definitions 与 `docs/tool-catalog.md`；② `PrimitiveExecutor` 新增 `search_files`，默认执行器 spawn 系统 `rg`/`fd`（无 fallback，缺失返回安装指引），支持 `target=content|files`、分页、`files_with_matches/content/count` 输出；③ `tool_exec` 接入 JSON Result Schema，system prompt 引导优先使用 `search_files` 而非 bash grep/find；④ 新增 `tests/search_files_tests.rs` 覆盖分页、deny 过滤、glob、content/count、缺二进制与 head_limit 边界。门禁：`cargo fmt --check && cargo clippy --all-targets -- -D warnings` 通过，`cargo test -j 1 -- --test-threads=1` 全绿。 |
 | 2026-05-02 | T2-P0-005 DOING→PENDING_INTEGRATION | Spike 完成 `feature/tool-system-cleanup`：①权限 gate 语义 `PermissionLevel` → `PermissionScope`，审计字段 `permission_level` → `permission_scope`，Bash audit 新增断言确保 `bash` / `bash_approval` 且无 `fs_*`；②新增 `src/core/tools/catalog.rs` 作为内置工具单一事实源，派生 `build_tool_definitions()`、`CoreIdentitySection` 与 `docs/tool-catalog.md`，补 `gen-tool-catalog` 与漂移测试；③cwd lazy prompt 修 `[a/s/n]` → `[s/w/c]`，未识别选项显式 warning，拒绝后失败回执给出 `pi workspace add <cwd>` 恢复路径。门禁 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -j 1 -- --test-threads=1` 全绿（`.integration_test_output.log`，`EXIT_CODE=0`）。 |
 | 2026-05-02 | T2-P0-005 TODO→DOING | Spike 认领 `tool-system-cleanup`：依赖 T2-P0-004 已 DONE（含 4/27 主体与 4/28 hotfix 集成）；负责人 → Spike，状态 → `DOING`，建议分支 `feature/tool-system-cleanup`。下一步按 Dispatcher §3–§4 读取 specs 与关联报告 [`builtin-tool-description-cross-agent-study.md`](../docs/reports/builtin-tool-description-cross-agent-study.md)，输出开发计划交用户确认后再进入开发。 |
