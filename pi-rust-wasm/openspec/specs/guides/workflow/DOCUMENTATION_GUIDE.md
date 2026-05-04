@@ -5,7 +5,7 @@
 | 类别 | 落盘位置 | 规范 | 标杆案例 |
 |------|----------|------|----------|
 | **A. 模块 README** | `src/**/README.md` | [`MODULE_README_SPEC.md`](MODULE_README_SPEC.md) | 各子模块 README + [`src/README.md`](../../../../src/README.md) 顶层索引 |
-| **B. 架构方案** | `openspec/specs/architecture/**/*.md` | [`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) | [`architecture/search_files.md`](../../architecture/search_files.md) · [`architecture/interrupt-and-cancellation.md`](../../architecture/interrupt-and-cancellation.md) |
+| **B. 架构方案** | `openspec/specs/architecture/**/*.md` | [`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) | [`architecture/tools/search_files.md`](../../architecture/tools/search_files.md) · [`architecture/interrupt-and-cancellation.md`](../../architecture/interrupt-and-cancellation.md) |
 
 ## 二选一速判
 

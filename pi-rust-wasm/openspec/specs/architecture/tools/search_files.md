@@ -1,8 +1,8 @@
 # search_files 工具：双实现 + 启动预检
 
 本文档是 `search_files` 工具的最终技术方案（架构 spec），承接计划
-[`search_files_兜底选型_c8b4a778.plan.md`](../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
-与 [`TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) T2-P0-005 子项「search_files 兜底与预检」。
+[`search_files_兜底选型_c8b4a778.plan.md`](../../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
+与 [`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) T2-P0-005 子项「search_files 兜底与预检」。
 
 > **位置说明**：计划文档（plan）记录决策过程与待办清单；本文为冻结后的技术方案，包含协议、调度逻辑、竞品分析、One-Glance Map 与运行时图。
 
@@ -104,9 +104,9 @@
 
 ## 3. 协议（入参 / 出参 / Schema）
 
-> 单一事实源：[`src/core/tools/primitive/types.rs`](../../../src/core/tools/primitive/types.rs)；
-> 派生：[`src/core/tools/catalog.rs::search_files_parameters`](../../../src/core/tools/catalog.rs)
-> → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../docs/tool-catalog.md)。
+> 单一事实源：[`src/core/tools/primitive/types.rs`](../../../../src/core/tools/primitive/types.rs)；
+> 派生：[`src/core/tools/catalog.rs::search_files_parameters`](../../../../src/core/tools/catalog.rs)
+> → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)。
 
 ### 3.1 入参 `SearchFilesArgs`
 
@@ -547,7 +547,7 @@ auto_install_search_tools = true
 
 ## 12. 测试矩阵（实现 ↔ 用例）
 
-集成测试 [`tests/search_files_tests.rs`](../../../tests/search_files_tests.rs)：
+集成测试 [`tests/search_files_tests.rs`](../../../../tests/search_files_tests.rs)：
 
 | ID | 用例名 | 覆盖目标 |
 |----|--------|----------|
@@ -561,14 +561,14 @@ auto_install_search_tools = true
 | T9 | `test_search_files_tier2_skips_binary_and_large_files` | 二进制 NUL 嗅探 + > 5 MiB 跳过 + warning |
 | T10 | `test_search_files_tier2_include_hidden_toggle` | `include_hidden=true/false` 与 Tier1 `--hidden` 对齐 |
 
-预检相关单元测试（[`src/api/chat/tests/preflight_test.rs`](../../../src/api/chat/tests/preflight_test.rs)，经 `preflight.rs` 末尾 `#[path]` 挂载；见 `RUST_FILE_LINES_SPEC` §A.9）：
+预检相关单元测试（[`src/api/chat/tests/preflight_test.rs`](../../../../src/api/chat/tests/preflight_test.rs)，经 `preflight.rs` 末尾 `#[path]` 挂载；见 `RUST_FILE_LINES_SPEC` §A.9）：
 
 - `should_skip_preflight_when_config_disables_auto_install`
 - `trim_for_event_limits_long_messages`
 - （Unix）`nohup_shell_quotes_log_path_with_spaces`：`shell_words` 拼接 nohup 重定向路径；**brew** 计划含 `HOMEBREW_NO_BUILD_FROM_SOURCE=1` 与 `--force-bottle`
 - （Unix）`nohup_shell_non_brew_has_no_homebrew_env_prefix`：非 brew 计划不注入 Homebrew 环境变量
 
-配置加载测试（[`src/infra/config/tests/load_test.rs`](../../../src/infra/config/tests/load_test.rs)）：
+配置加载测试（[`src/infra/config/tests/load_test.rs`](../../../../src/infra/config/tests/load_test.rs)）：
 
 - `load_config_accepts_preflight_section`
 
@@ -587,10 +587,10 @@ auto_install_search_tools = true
 
 ## 14. 关联文档
 
-- 计划：[`/Users/yankeben/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`](../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
-- 工具目录：[`docs/tool-catalog.md`](../../../docs/tool-catalog.md)
-- 用户指南：[`docs/user-guide.md`](../../../docs/user-guide.md)
-- 看板：[`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) T2-P0-005
-- 跨 Agent 工具描述报告：[`docs/reports/builtin-tool-description-cross-agent-study.md`](../../../docs/reports/builtin-tool-description-cross-agent-study.md)
-- Cursor 内置工具参考：[`docs/reports/cursor-builtin-tools-reference.md`](../../../docs/reports/cursor-builtin-tools-reference.md)
-- 相关架构：[`permission-system.md`](permission-system.md)（gate / deny 规则）、[`audit-log.md`](audit-log.md)（审计 `implementation` 字段）、[`interrupt-and-cancellation.md`](interrupt-and-cancellation.md)（取消令牌）
+- 计划：[`/Users/yankeben/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`](../../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
+- 工具目录：[`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)
+- 用户指南：[`docs/user-guide.md`](../../../../docs/user-guide.md)
+- 看板：[`agents/TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) T2-P0-005
+- 跨 Agent 工具描述报告：[`docs/reports/builtin-tool-description-cross-agent-study.md`](../../../../docs/reports/builtin-tool-description-cross-agent-study.md)
+- Cursor 内置工具参考：[`docs/reports/cursor-builtin-tools-reference.md`](../../../../docs/reports/cursor-builtin-tools-reference.md)
+- 相关架构：[`permission-system.md`](../permission-system.md)（gate / deny 规则）、[`audit-log.md`](../audit-log.md)（审计 `implementation` 字段）、[`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md)（取消令牌）

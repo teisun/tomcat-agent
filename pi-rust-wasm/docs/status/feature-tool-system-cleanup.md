@@ -70,7 +70,7 @@
   - T10：`test_search_files_tier2_include_hidden_toggle`
   - 预检：`should_skip_preflight_when_env_set` / `should_skip_preflight_when_config_disables_auto_install` / `trim_for_event_truncates_when_too_long`
   - 配置：`load_config_accepts_preflight_section`
-- **架构文档**：新增 `openspec/specs/architecture/search_files.md`（含 One-Glance Map + 行为对照 + 预检策略 + 测试映射）。
+- **架构文档**：新增 `openspec/specs/architecture/tools/search_files.md`（含 One-Glance Map + 行为对照 + 预检策略 + 测试映射）。
 - **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`：PASS；`search_files_tests`（10 passed）、分类集成全量：PASS（口径见 [INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)、[`scripts/test-groups.sh`](../../scripts/test-groups.sh)）。
 - **看板**：`agents/TASK_BOARD_002.md` T2-P0-005 子项追加「search_files 兜底与预检」，状态 `PENDING_INTEGRATION`，并写明与 T2-P1-008 的口径关系。
 
@@ -82,8 +82,8 @@
 
 ### 2026-05-03 13:40 | 文档编写规范拆分与引用对齐
 
-- `openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md` 精简为索引页；新增 `MODULE_README_SPEC.md`、`ARCHITECTURE_SPEC.md`；`openspec/specs/Architecture.md`、`agents/plan/PLAN_SPEC.md`、`PLAN_SKELETON.md` 中架构方案与 One-Glance Map 硬约束改为指向 `ARCHITECTURE_SPEC.md`（标杆：`architecture/search_files.md`）。
-- `openspec/specs/architecture/search_files.md` 扩充协议表、竞品分析、时序与状态机 ASCII 图。
+- `openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md` 精简为索引页；新增 `MODULE_README_SPEC.md`、`ARCHITECTURE_SPEC.md`；`openspec/specs/Architecture.md`、`agents/plan/PLAN_SPEC.md`、`PLAN_SKELETON.md` 中架构方案与 One-Glance Map 硬约束改为指向 `ARCHITECTURE_SPEC.md`（标杆：`architecture/tools/search_files.md`）。
+- `openspec/specs/architecture/tools/search_files.md` 扩充协议表、竞品分析、时序与状态机 ASCII 图。
 - 仓库根 `pi-rust-wasm/.gitignore` 忽略本地 `tool-results/` 与 `workspace-temp/`（研发 scratch 约定见 `UNIT_TEST_SPEC.md` §1.2），避免误提交。
 
 ### 2026-05-03（同日追加）| Unix：退出 chat 后 Tier1 安装可继续（nohup detached）

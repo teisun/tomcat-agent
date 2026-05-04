@@ -1,7 +1,7 @@
 # Architecture Spec 规范
 
 > 适用：`openspec/specs/architecture/**/*.md`（跨模块技术方案）。
-> 标杆案例：[`architecture/search_files.md`](../../architecture/search_files.md)、[`architecture/interrupt-and-cancellation.md`](../../architecture/interrupt-and-cancellation.md)。
+> 标杆案例：[`architecture/tools/search_files.md`](../../architecture/tools/search_files.md)、[`architecture/interrupt-and-cancellation.md`](../../architecture/interrupt-and-cancellation.md)。
 > 上位规范：[`Constitution.md`](../../Constitution.md) · [`DOCUMENTATION_GUIDE.md`](DOCUMENTATION_GUIDE.md)。
 
 ## 1. 何时写一份新方案
@@ -99,7 +99,7 @@ ASCII 框图，**不可省**。硬约束：
 
 按需组合：
 
-- **多列 ASCII 时序图**：如 [`search_files.md §5`](../../architecture/search_files.md)，按"用户 / 入口 / 调度层 / 子进程"排列泳道；终端友好、易 diff。
+- **多列 ASCII 时序图**：如 [`search_files.md §5`](../../architecture/tools/search_files.md)，按"用户 / 入口 / 调度层 / 子进程"排列泳道；终端友好、易 diff。
 - **Mermaid `sequenceDiagram autonumber`**：用于在 IDE 里渲染。
 - **控制流伪码**：复杂嵌套循环 / 状态迁移用文字伪代码（如 [`agent-loop.md §13.3.2`](../../architecture/agent-loop.md) 三层循环）。
 
@@ -214,7 +214,7 @@ ASCII 框图，**不可省**。硬约束：
 
 ---
 
-## 5. 案例：[`architecture/search_files.md`](../../architecture/search_files.md)
+## 5. 案例：[`architecture/tools/search_files.md`](../../architecture/tools/search_files.md)
 
 `search_files.md` 是本规范的标杆案例（每节为何这么组织）：
 
