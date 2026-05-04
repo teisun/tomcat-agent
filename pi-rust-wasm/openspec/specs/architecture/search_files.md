@@ -392,6 +392,7 @@ SearchFilesStats
 | 入口 | `chat_loop` 注册完 stderr 监听后调用 `preflight::start_search_tools_preflight(cfg, bus)`；与会话循环并行；不影响首屏 |
 | 探测 | `find_binary("rg")` / `find_binary("fd")` / `find_binary("fdfind")`；即时读 `PATH`，无缓存 |
 | 安装（Unix） | 后台线程内对包管理器使用 **`nohup … >> ~/.pi_/agents/main/logs/preflight-file-log-<ts>.log 2>&1 &`**，经 `/bin/sh -c` **`spawn`**；**不**阻塞等待安装结束，退出 `pi chat` / 结束 `pi` 后安装可继续 |
+| macOS Homebrew | **`brew install --force-bottle ripgrep fd`**，且 detached shell 前缀 **`HOMEBREW_NO_BUILD_FROM_SOURCE=1`**：仅用 bottle，**禁止**从源码构建（避免 llvm 等超长后台编译）；无 bottle 时安装失败，会话仍可用 Tier2 |
 | 安装（Windows） | v1 仍为 **`Command::output()` 阻塞**直至结束；detached 留代码 TODO（PowerShell `Start-Process -NoWait`） |
 | 并发（Unix / Homebrew） | 仅依据 **进程表**（如 `pgrep -f` 匹配 `brew.rb` / Homebrew `build.rb` 等窄模式）判断是否已有安装/编译；为真则 emit `already_installing`，**不**再起第二套 nohup |
 | log-path marker（UX） | 可选文件 `preflight-detached-log.marker`（与日志同目录）仅存**一行**本次 detached 日志绝对路径，便于 `already_installing` 时提示 `tail -f`；**从不**单独作为「正在安装」的判定依据 |
@@ -564,7 +565,8 @@ auto_install_search_tools = true
 
 - `should_skip_preflight_when_config_disables_auto_install`
 - `trim_for_event_limits_long_messages`
-- （Unix）`nohup_shell_quotes_log_path_with_spaces`：`shell_words` 拼接 nohup 重定向路径
+- （Unix）`nohup_shell_quotes_log_path_with_spaces`：`shell_words` 拼接 nohup 重定向路径；**brew** 计划含 `HOMEBREW_NO_BUILD_FROM_SOURCE=1` 与 `--force-bottle`
+- （Unix）`nohup_shell_non_brew_has_no_homebrew_env_prefix`：非 brew 计划不注入 Homebrew 环境变量
 
 配置加载测试（[`src/infra/config/tests/load_test.rs`](../../../src/infra/config/tests/load_test.rs)）：
 

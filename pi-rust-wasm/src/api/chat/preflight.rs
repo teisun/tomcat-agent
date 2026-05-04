@@ -222,12 +222,12 @@ fn run_unix_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: I
                 "logPath": log_path.display().to_string(),
                 "elapsedMs": started.elapsed().as_millis(),
             });
-            emit_preflight(
-                bus,
-                "detached",
-                "search_files Tier1 安装已在后台继续，退出 chat 不影响",
-                extra,
-            );
+            let detached_msg = if plan.program == "brew" {
+                "search_files Tier1 安装已在后台继续（Homebrew 仅 bottle、禁止源码编译）；退出 chat 不影响"
+            } else {
+                "search_files Tier1 安装已在后台继续，退出 chat 不影响"
+            };
+            emit_preflight(bus, "detached", detached_msg, extra);
         }
         Err(err) => {
             tracing::warn!(
@@ -365,7 +365,12 @@ fn build_nohup_shell_command(plan: &InstallPlan, log_path: &Path) -> String {
     let joined = shell_words::join(std::iter::once(plan.program).chain(plan.args.iter().copied()));
     let log_lossy = log_path.to_string_lossy();
     let quoted_log = shell_words::quote(log_lossy.as_ref());
-    format!("nohup {joined} >> {quoted_log} 2>&1 &")
+    let body = format!("nohup {joined} >> {quoted_log} 2>&1 &");
+    if plan.program == "brew" {
+        format!("HOMEBREW_NO_BUILD_FROM_SOURCE=1 {body}")
+    } else {
+        body
+    }
 }
 
 fn should_skip_preflight(config: &AppConfig) -> bool {
@@ -407,7 +412,7 @@ fn install_plan() -> Option<InstallPlan> {
     if cfg!(target_os = "macos") && find_binary(&["brew"]).is_some() {
         return Some(InstallPlan {
             program: "brew",
-            args: vec!["install", "ripgrep", "fd"],
+            args: vec!["install", "--force-bottle", "ripgrep", "fd"],
         });
     }
 

@@ -28,15 +28,36 @@ fn nohup_shell_quotes_log_path_with_spaces() {
 
     let plan = InstallPlan {
         program: "brew",
-        args: vec!["install", "ripgrep", "fd"],
+        args: vec!["install", "--force-bottle", "ripgrep", "fd"],
     };
     let log = Path::new("/tmp/fake preflight.log");
     let cmd = build_nohup_shell_command(&plan, log);
-    assert!(cmd.starts_with("nohup "));
+    assert!(
+        cmd.starts_with("HOMEBREW_NO_BUILD_FROM_SOURCE=1 nohup "),
+        "brew install should forbid source builds: {cmd}"
+    );
+    assert!(cmd.contains("--force-bottle"));
     assert!(cmd.contains(">>"));
     assert!(cmd.ends_with(" 2>&1 &"));
     assert!(
         cmd.contains("'") || !log.display().to_string().contains(' '),
         "path with spaces should be quoted: {cmd}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn nohup_shell_non_brew_has_no_homebrew_env_prefix() {
+    use super::{build_nohup_shell_command, InstallPlan};
+
+    let plan = InstallPlan {
+        program: "apt-get",
+        args: vec!["install", "-y", "ripgrep", "fd-find"],
+    };
+    let cmd = build_nohup_shell_command(&plan, Path::new("/tmp/p.log"));
+    assert!(
+        !cmd.contains("HOMEBREW_NO_BUILD_FROM_SOURCE"),
+        "non-brew plans must not inject brew env: {cmd}"
+    );
+    assert!(cmd.starts_with("nohup apt-get "));
 }

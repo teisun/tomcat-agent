@@ -6,7 +6,7 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` |
-| Update Time | 2026-05-03（detached 预检 + 单测目录化） |
+| Update Time | 2026-05-04（Homebrew 预检 bottle-only） |
 | Cov% | - |
 
 ## Step-by-Step
@@ -99,3 +99,10 @@
 - **预检**：包管理器每次安装尝试将完整 stdout/stderr 落盘 `~/.pi_/agents/main/logs/preflight-file-log-<ts>.log`；`tracing` target `pi_wasm_preflight`（`RUST_LOG=debug`）；成功/失败事件 `extra` 带 `logPath`；文档明确 `Command::output` 无 pi 侧超时，勿与 `PI_SEARCH_TIER2_DEADLINE_MS` 混淆；`PreflightConfig` 注释同步。
 - **stderr 监听**：`WIRE_SEARCH_TOOLS_PREFLIGHT` 优先经 `rustyline::ExternalPrinter` 输出，避免 `readline` 阻塞时 `[tools]` 与输入行错位；失败时附加截断后的 stderr / error / log 路径摘要。
 - **架构**：`search_files.md` One-Glance Map 补充上述行为。
+
+### 2026-05-04 | macOS Homebrew 预检仅 bottle、stderr 提示 Tier2
+
+- **`preflight.rs`**：`brew install` 使用 `--force-bottle`；`build_nohup_shell_command` 在 `program == "brew"` 时前缀 `HOMEBREW_NO_BUILD_FROM_SOURCE=1`，避免缺 bottle 时长时间源码编译；`detached` 事件文案区分 Homebrew 与通用路径。
+- **`stderr.rs`**：`already_installing` 分支追加灰字说明 Tier1 未就绪时仍可用进程内 Tier2 搜索。
+- **文档**：`search_files.md`、`TASK_BOARD_002` 与上述行为对齐；`docs/reports/agent-tools-comparison.md` 为五项目 Agent 工具对比调研归档。
+- **测试**：`preflight_test` 覆盖 brew 命令前缀与「非 brew 不注入 `HOMEBREW_NO_BUILD_FROM_SOURCE`」。

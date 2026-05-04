@@ -150,6 +150,9 @@ pub(crate) fn register_chat_session_stderr_listeners(
                         }
                     }
                 }
+                block.push_str(
+                    "\n\x1b[90m[tools] search_files 仍可用进程内搜索（Tier2）| Tier2 in-process search still available\x1b[0m",
+                );
             } else if status == "detached" || status == "already_installing" {
                 if let Some(ex) = extra {
                     if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
