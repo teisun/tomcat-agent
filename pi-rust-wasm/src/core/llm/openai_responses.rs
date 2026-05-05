@@ -32,8 +32,8 @@ use crate::infra::LlmConfig;
 
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse,
-    ChatResponseChoice, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
+    ChatResponse, ChatResponseChoice, StreamEvent,
 };
 
 /// `POST {base}/v1/responses` 适配器；与 [`OpenAiProvider`] 共享 [`LlmConfig`] 横切字段
@@ -357,16 +357,24 @@ impl LlmProvider for OpenAiResponsesProvider {
         Ok(Box::new(event_stream))
     }
 
+    /// Trait 启发式 token 估算：`chars / 3`（与 Completions 同口径，便于上层统一近似预算）。
+    ///
+    /// 多模态 `Parts` 走 [`ChatMessageContentPart::estimated_chars`]
+    /// (IMAGE_CHAR_ESTIMATE = 3600 / FILE_CHAR_ESTIMATE = 8000)。
+    ///
+    /// **业务预算请用** [`crate::core::session::manager::types::ContextState::estimated_token_count`]：
+    /// 优先 OpenAI Responses stream 回填的真实 `usage.input_tokens`（写入 `last_api_usage`）；
+    /// 缺失时 fallback 到 `chars / 4`，同样把 IMAGE/FILE_CHAR_ESTIMATE 计入
+    /// （与 `usage_ratio()` 口径一致）。这里 `chars / 3` 仅给 trait 调用方做粗略上估，
+    /// 二者有意保留不同分母。
     fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, AppError> {
-        // 启发式：与 Completions 同口径（chars / 3），便于上下文预算共用统一估算。
         let total_chars: usize = messages
             .iter()
             .map(|m| match &m.content {
                 Some(ChatMessageContent::Text(s)) => s.chars().count(),
-                Some(ChatMessageContent::Parts(parts)) => parts
-                    .iter()
-                    .map(|p| p.text.as_deref().unwrap_or("").chars().count())
-                    .sum::<usize>(),
+                Some(ChatMessageContent::Parts(parts)) => {
+                    parts.iter().map(|p| p.estimated_chars()).sum::<usize>()
+                }
                 None => 0,
             })
             .sum();
@@ -395,6 +403,13 @@ fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value
     let mut first_seen = false;
 
     for msg in messages {
+        // System / Assistant / Tool 角色出现非 text part 时 warn 一次并丢弃非文本部分
+        // （仅 User 角色透传多模态 part；见 §3.3 角色规则）。
+        if !matches!(msg.role, ChatMessageRole::User) {
+            if let Some(ChatMessageContent::Parts(parts)) = &msg.content {
+                warn_drop_non_text_parts(msg.role.clone(), parts);
+            }
+        }
         match msg.role {
             ChatMessageRole::System => {
                 let text = extract_text(&msg.content).unwrap_or_default();
@@ -515,13 +530,17 @@ fn convert_tools_to_responses(tools: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// 从 message content 抽出**纯文本**视图：仅累加 `InputText`，其它变体跳过。
+///
+/// 用于 token 估算与 system / assistant / tool 角色的文本字段构造；这些角色出现
+/// 非文本 part 时不会进入 wire（见 `build_responses_input` 的 warn 路径）。
 fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
     match content {
         Some(ChatMessageContent::Text(s)) => Some(s.clone()),
         Some(ChatMessageContent::Parts(parts)) => {
             let s: String = parts
                 .iter()
-                .filter_map(|p| p.text.clone())
+                .filter_map(|p| p.as_text().map(str::to_string))
                 .collect::<Vec<_>>()
                 .join("");
             if s.is_empty() {
@@ -534,23 +553,83 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
     }
 }
 
+/// 把单个 [`ChatMessageContentPart`] 翻译成 Responses 协议的 `content[i]` JSON。
+///
+/// `file_id` 通道优先（已上传），否则走 inline `data:` URL；两个通道都缺时退化为
+/// 形状最小的占位（`{type: input_image}` / `{type: input_file}`，由上游 API 报错）。
+fn part_to_responses_value(p: &ChatMessageContentPart) -> Value {
+    match p {
+        ChatMessageContentPart::InputText { text } => {
+            json!({"type": "input_text", "text": text})
+        }
+        ChatMessageContentPart::InputImage {
+            mime_type,
+            data,
+            file_id,
+            detail,
+        } => {
+            let mut v = json!({"type": "input_image"});
+            if let Some(id) = file_id {
+                v["file_id"] = Value::String(id.clone());
+            } else if let (Some(mt), Some(b64)) = (mime_type, data) {
+                v["image_url"] = Value::String(format!("data:{};base64,{}", mt, b64));
+            }
+            if let Some(d) = detail {
+                v["detail"] = Value::String(d.clone());
+            }
+            v
+        }
+        ChatMessageContentPart::InputFile {
+            filename,
+            mime_type,
+            data,
+            file_id,
+        } => {
+            let mut v = json!({"type": "input_file"});
+            if let Some(name) = filename {
+                v["filename"] = Value::String(name.clone());
+            }
+            if let Some(id) = file_id {
+                v["file_id"] = Value::String(id.clone());
+            } else if let (Some(b64), Some(mt)) = (data, mime_type) {
+                v["file_data"] = Value::String(format!("data:{};base64,{}", mt, b64));
+            }
+            v
+        }
+    }
+}
+
+/// 仅 `user` 角色调用：把 content 翻译为 Responses 的 `content` 数组（input_text /
+/// input_image / input_file）。空 parts 兜底成单个空 input_text。
 fn user_content_parts(content: &Option<ChatMessageContent>) -> Vec<Value> {
     match content {
         Some(ChatMessageContent::Text(s)) => {
             vec![json!({"type": "input_text", "text": s})]
         }
         Some(ChatMessageContent::Parts(parts)) => {
-            let mut out = Vec::with_capacity(parts.len());
-            for p in parts {
-                let text = p.text.clone().unwrap_or_default();
-                out.push(json!({"type": "input_text", "text": text}));
-            }
+            let mut out: Vec<Value> = parts.iter().map(part_to_responses_value).collect();
             if out.is_empty() {
                 out.push(json!({"type": "input_text", "text": ""}));
             }
             out
         }
         None => vec![json!({"type": "input_text", "text": ""})],
+    }
+}
+
+/// system / assistant / tool 角色出现非文本 part 时调用一次：warn 并丢弃非文本部分。
+///
+/// 设计取舍：这些角色在 Responses 协议里 wire 形态主要承载文本与 function_call，
+/// 强行透传图片/文件会触发 API 4xx；warn-and-drop 可保留 wire 兼容、避免主链路中断。
+fn warn_drop_non_text_parts(role: ChatMessageRole, parts: &[ChatMessageContentPart]) {
+    let non_text = parts.iter().filter(|p| p.is_non_text()).count();
+    if non_text > 0 {
+        warn!(
+            role = ?role,
+            non_text_parts = non_text,
+            "role={:?} 非 user 角色出现非 text part {} 个，wire 仅取文本部分；如需多模态请置于 user 消息",
+            role, non_text
+        );
     }
 }
 

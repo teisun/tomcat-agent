@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 use crate::core::compaction::preheat::Preheat;
-use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
 use crate::infra::error::AppError;
 
 // ---------------------------------------------------------------------------
@@ -204,9 +204,21 @@ pub fn estimated_tokens_from_chars(chars: usize) -> usize {
     chars / 4
 }
 
-/// 估算单条 ChatMessage 的字符数（文本内容 + tool_calls 序列化长度）。
+/// 估算单条 ChatMessage 的「字符等价长度」（用于 `estimate_context_chars` fallback）。
+///
+/// 多模态 `Parts` 调用 [`ChatMessageContentPart::estimated_chars`](crate::core::llm::types::ChatMessageContentPart::estimated_chars)
+/// 折算（IMAGE_CHAR_ESTIMATE = 3600 / FILE_CHAR_ESTIMATE = 8000，常量定义在
+/// [`crate::core::llm::types`] 顶部），从而与 `OpenAiProvider::count_tokens` /
+/// `OpenAiResponsesProvider::count_tokens` 的分子口径对齐——保证 `ContextState::estimated_token_count`
+/// 在首轮 stream 完成、`last_api_usage` 还是 `None` 时不会把多模态请求体积当成 0。
 pub fn estimate_msg_chars(msg: &ChatMessage) -> usize {
-    let content_len = msg.text_content().map_or(0, |s| s.len());
+    let content_len = match &msg.content {
+        Some(ChatMessageContent::Text(s)) => s.len(),
+        Some(ChatMessageContent::Parts(parts)) => {
+            parts.iter().map(|p| p.estimated_chars()).sum::<usize>()
+        }
+        None => 0,
+    };
     let tc_len = msg.tool_calls.as_ref().map_or(0, |tcs| {
         tcs.iter().map(|tc| tc.to_string().len()).sum::<usize>()
     });

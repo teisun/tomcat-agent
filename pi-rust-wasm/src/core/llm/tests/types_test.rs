@@ -8,7 +8,8 @@
 //! - `TokenUsage::default` / `StreamEvent::ContentDelta` 序列化默认值。
 
 use super::super::types::{
-    ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, StreamEvent, TokenUsage,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
+    StreamEvent, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 
 #[test]
@@ -76,4 +77,111 @@ fn stream_event_serialize() {
         Some("content_delta")
     );
     assert_eq!(j.get("delta").and_then(|v| v.as_str()), Some("hello"));
+}
+
+// ============================================================================
+// ChatMessageContentPart：serde 往返 + helper 校验失败用例（plan §5）
+// ============================================================================
+
+const TINY_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+#[test]
+fn content_part_serde_roundtrip_text() {
+    let p = ChatMessageContentPart::text("hi");
+    let j = serde_json::to_value(&p).unwrap();
+    assert_eq!(j["type"], "input_text");
+    assert_eq!(j["text"], "hi");
+    let back: ChatMessageContentPart = serde_json::from_value(j).unwrap();
+    assert!(matches!(back, ChatMessageContentPart::InputText { text } if text == "hi"));
+}
+
+#[test]
+fn content_part_serde_roundtrip_image_b64() {
+    let p = ChatMessageContentPart::image_b64("image/png", TINY_PNG_B64.to_string()).unwrap();
+    let j = serde_json::to_value(&p).unwrap();
+    assert_eq!(j["type"], "input_image");
+    assert_eq!(j["mime_type"], "image/png");
+    assert_eq!(j["image_b64"], TINY_PNG_B64);
+    assert!(j.get("file_id").is_none());
+    let back: ChatMessageContentPart = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        back,
+        ChatMessageContentPart::InputImage {
+            mime_type: Some(_),
+            data: Some(_),
+            file_id: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn content_part_serde_roundtrip_file_id() {
+    let p = ChatMessageContentPart::file_file_id("file-xyz", Some("a.pdf".to_string())).unwrap();
+    let j = serde_json::to_value(&p).unwrap();
+    assert_eq!(j["type"], "input_file");
+    assert_eq!(j["file_id"], "file-xyz");
+    assert_eq!(j["filename"], "a.pdf");
+    let back: ChatMessageContentPart = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        back,
+        ChatMessageContentPart::InputFile {
+            file_id: Some(id),
+            filename: Some(name),
+            data: None,
+            mime_type: None,
+        } if id == "file-xyz" && name == "a.pdf"
+    ));
+}
+
+#[test]
+fn image_b64_rejects_invalid_base64() {
+    let err = ChatMessageContentPart::image_b64("image/png", "@@@not-base64@@@".to_string())
+        .expect_err("非法 base64 应拒绝");
+    let s = err.to_string();
+    assert!(s.contains("非法 base64"), "错误文案不对: {}", s);
+}
+
+#[test]
+fn image_b64_rejects_oversize() {
+    // 构造 IMAGE_MAX_BYTES + 1 字节的伪图字节，再 base64 编码送进 helper。
+    let oversize_bytes = vec![0u8; IMAGE_MAX_BYTES + 1];
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &oversize_bytes);
+    let err =
+        ChatMessageContentPart::image_b64("image/png", b64).expect_err("超 IMAGE_MAX_BYTES 应拒绝");
+    let s = err.to_string();
+    assert!(s.contains("IMAGE_MAX_BYTES"), "错误文案不对: {}", s);
+}
+
+#[test]
+fn image_b64_rejects_non_whitelisted_mime() {
+    let err = ChatMessageContentPart::image_b64("image/svg+xml", TINY_PNG_B64.to_string())
+        .expect_err("svg 不在白名单应拒绝");
+    let s = err.to_string();
+    assert!(s.contains("mime_type"), "错误文案不对: {}", s);
+}
+
+#[test]
+fn file_b64_rejects_invalid_base64() {
+    let err = ChatMessageContentPart::file_b64("a.pdf", "application/pdf", "@@@".to_string())
+        .expect_err("非法 base64 应拒绝");
+    let s = err.to_string();
+    assert!(s.contains("非法 base64"), "错误文案不对: {}", s);
+}
+
+#[test]
+fn file_b64_rejects_oversize() {
+    let oversize_bytes = vec![0u8; FILE_MAX_BYTES + 1];
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &oversize_bytes);
+    let err = ChatMessageContentPart::file_b64("a.pdf", "application/pdf", b64)
+        .expect_err("超 FILE_MAX_BYTES 应拒绝");
+    let s = err.to_string();
+    assert!(s.contains("FILE_MAX_BYTES"), "错误文案不对: {}", s);
+}
+
+#[test]
+fn image_file_id_rejects_empty() {
+    let err = ChatMessageContentPart::image_file_id("   ").expect_err("空 file_id 应拒绝");
+    assert!(err.to_string().contains("不能为空"));
 }

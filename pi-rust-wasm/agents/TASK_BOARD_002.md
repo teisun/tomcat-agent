@@ -576,11 +576,14 @@
 
 **子项**（具体方案由计划阶段确定，先列待研究方向）：
 - [ ] 新增文件类型判定层：按 MIME / magic bytes / UTF-8 可解码性区分 text、image、generic binary；文本文件继续走现有 `read_file`，二进制文件禁止静默 UTF-8 解码
-- [ ] 设计 `ChatRequest` / message content 的 attachment 抽象：支持 image（PNG/JPEG/WebP/GIF 等）与 generic binary（文件名、MIME、大小、bytes/ref），并记录 provider capability
-- [ ] Provider 适配：OpenAI / Anthropic / Qwen 分别映射到各自多模态输入协议；不支持的 provider 返回明确可恢复错误，不回退为乱码文本
+- [x] 设计 `ChatRequest` / message content 的 attachment 抽象：`ChatMessageContentPart` 升级为 `#[serde(tag="type")]` 三态枚举（`InputText` / `InputImage` / `InputFile`），双通道（inline base64 + 已知 file_id）helper 落地于 [`src/core/llm/types.rs`](../src/core/llm/types.rs)
+- [x] Provider 适配（Responses 部分）：[`OpenAiResponsesProvider::part_to_responses_value`](../src/core/llm/openai_responses.rs) 翻译 `input_image` / `input_file`；Completions（`OpenAiProvider`）入口结构化拒绝并指向 `provider=openai-responses`；Anthropic / Qwen 等其它 provider 的多模态映射等对应 Provider 接入再补
 - [ ] TUI / 拖拽路径接入：用户拖入图片或二进制文件时显示附件 chip / 文件摘要，并将附件随下一轮 user message 发送给 LLM
-- [ ] 安全与预算：文件大小上限、MIME allowlist、权限复用 `PermissionGate`，transcript 只落 metadata / content hash，避免把原始二进制直接写进历史
-- [ ] 回归测试：图片附件能被 mock LLM 收到；随机二进制不会触发 UTF-8 `read_file`；不支持多模态的 provider 给出结构化错误
+- [x] 安全与预算（inline 部分）：`IMAGE_MAX_BYTES = 4.5 MB` / `FILE_MAX_BYTES = 25 MB` 硬限 + image MIME 白名单 + base64 合法性校验，落地在 helper 入口；transcript metadata-only 与 `PermissionGate` 复用待 read_file/TUI 路径接入时一并完成
+- [x] 回归测试（wire 部分）：5 个 unit test 覆盖 wire（image_data_url / file_data_url / image_file_id / file_file_id / system 降级）、1 个拒绝测试（Completions）、5 个 helper 失败用例、3 个真 API roundtrip 集成测试（image / pdf / oversize helper）；详见 [`tests/openai_responses_integration_tests.rs`](../tests/openai_responses_integration_tests.rs) 与 [`tests/fixtures/llm_multimodal/`](../tests/fixtures/llm_multimodal/)
+- [ ] **OpenAI Files Upload Manager**（multipart `POST /v1/files` + 生命周期 + reuse cache + 异步 helper）：拆为独立任务 **T2-P0-015 | llm-files-upload-manager**（见下文）
+
+**进度（2026-05-05）**：wire 期已闭环（types + Responses 翻译 + Completions 拒绝 + 单测 + 集成测试 + fixtures）。其余子项（read_file 二进制分流、TUI 拖拽 chip、Files 上传管理）拆出后单独排期，状态保持 `TODO`。
 
 **依赖**：T2-P0-005（工具系统整改后再调整 `read_file`/attachment 边界）；T2-P0-006（LLM content 抽象与 provider 适配先就位）；T2-P0-008（TUI 附件展示与拖拽交互承载）
 
@@ -597,6 +600,48 @@
 - 多模态不支持场景有单测覆盖，行为为结构化失败而非 silent fallback
 
 **说明（来源溯源）**：本任务承接用户反馈——当前用户想把图片 / 二进制文件交给 LLM 时，容易被系统当作 UTF-8 文本文件读取，造成乱码、token 浪费和模型误判。修复重点是「输入语义分流 + LLM 多模态附件通道」，不是扩大 `read_file` 的文本读取能力。
+
+---
+
+### T2-P0-015 | llm-files-upload-manager | OpenAI Files 上传管理
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/llm-files-upload-manager` |
+| **阻塞点** | — |
+| **关联 TODOS** | 由 T2-P0-012 wire 完成后衍生（多模态 inline → upload 复用通道） |
+
+**目标**：在 `T2-P0-012` 已落地的 inline base64 通道基础上，补齐**两步上传**路径——新增 `OpenAiFilesClient` 走 `/v1/files`，让大文件 / 多轮复用场景能用 `file_id` 引用而非每轮重传 base64。同时管理 OpenAI 侧文件生命周期（默认不过期 1 年，需自管 DELETE），避免账户内堆积。
+
+**子项**（具体方案由计划阶段确定，先列待研究方向）：
+- [ ] 启用 `reqwest` 的 `multipart` feature；新增 `src/core/llm/openai_files.rs`：`OpenAiFilesClient::{upload, get, delete}`，`FilePurpose::{Vision, UserData}`；`is_retriable` 行为与 `OpenAiResponsesProvider` 对齐
+- [ ] `ChatMessageContentPart` 上加异步 helper：`image_upload(client, mime, bytes, filename) -> Result<Self>` / `file_upload(...)`；内部 upload → 拿 file_id → 走 §T2-P0-012 已建好的 `image_file_id` / `file_file_id` 通道
+- [ ] reuse cache：以 `(sha256(bytes), mime, purpose)` 为 key 缓存 `file_id`，避免同一文件重复上传；cache 持久化策略（内存 vs SQLite 落盘）由计划阶段决定
+- [ ] 文件生命周期：提供 `OpenAiFilesClient::list(prefix?, since?)` + `cleanup(predicate)` helper；SessionManager 退出时按策略 GC（可配置 `files.cleanup_on_exit = always | never | older_than:7d`）
+- [ ] 单测：mock multipart endpoint（wiremock 或现有 mock infra），覆盖 upload/get/delete + 429 重试 + 404 当成功 + reuse cache 命中
+- [ ] 集成测试：真 API roundtrip（upload → Responses input_image 用 file_id 引用 → 拿到回复 → DELETE 清理）；env 缺失 `OPENAI_API_KEY` 时按现有 dotenv 约定；纳入并行测试组；测试以 `Drop guard` 保证失败也尝试 DELETE，**不在 OpenAI 账户留垃圾**
+- [ ] 文档：`openspec/specs/architecture/llm-multiprovider-integration.md` 新增 §6.5.4「Files 上传管理」节，写明 inline vs upload 决策树（< 1MB inline / 1–10MB upload+复用 / > 10MB 必须 upload）；`pi.config.toml.example` 注释 API key 需 `files` scope（默认开）；`core/llm/README.md` 补 upload 通道示例
+
+**依赖**：
+- T2-P0-012 子项（wire + types + Responses 翻译）必须先完成——本任务直接复用 `ChatMessageContentPart::image_file_id` / `file_file_id` 通道，不再扩类型层
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`LlmConfig`（`base_url` / `api_key`）、`reqwest::Client`、`AppError`、`SessionManager`（cleanup hook 可选注入）
+- 提供：`OpenAiFilesClient`（不在 lib.rs 顶层 re-export，仅作为 helper 内部 + 高级用户显式 import）；`ChatMessageContentPart::{image_upload, file_upload}` 异步 helper；`files.cleanup_on_exit` 配置项
+
+**验收标准**：
+- 1KB / 10KB / 1MB 三档真文件上传 → 拿 file_id → Responses 引用成功 → DELETE 清理；roundtrip 集成测试稳定通过
+- 同一文件 5 次连续上传只触发 1 次真实 `POST /v1/files`（reuse cache 命中 4 次），mock 测试可断言
+- API key 缺 `files` scope 时给出结构化错误「OpenAI API key 没有 files 权限，请改用 inline 通道（`image_b64`/`file_b64`）」
+- `cleanup_on_exit = older_than:7d` 配置下，会话退出自动 DELETE 7 天前上传文件，留有审计日志
+- OpenAI 账户在所有集成测试运行后**不应有任何残留 file**（最后用 `client.list()` 断言 0 条与本测试 prefix 匹配）
+
+**说明（来源溯源）**：本任务从 `T2-P0-012` 拆出。原 wire 期与 Files 上传管理捆在一起会让任务面翻倍且引入正交的复杂子系统（multipart、生命周期、cache），并且经调研 5 个对标项目（pi_agent_rust / pi-mono / hermes-agent / openclaw / OpenAI cookbook 主路径）**没有**任何一个把 `/v1/files` 用作 chat/responses 输入路径——属自研增量。先单独成卡，避免污染 wire 期审阅与门禁面。**ID 选 015 而非原计划 013**：因 T2-P0-013 已被 `drag-deny-cwd-remediation` 占用、T2-P0-014 已被 `permission-source-redesign` 占用，按编号顺位取下一个空闲号。
 
 ---
 
@@ -921,6 +966,7 @@ flowchart LR
     P005 --> P011
     P006 --> P012
     P008 --> P012
+    P012 --> P015[T2-P0-015<br/>Files 上传管理]
     P007 --> P101[T2-P1-001<br/>Checkpoint]
     P101 --> P102[T2-P1-002<br/>PLAN 增强]
     P008 --> P103[T2-P1-003<br/>提问/应答]
@@ -941,6 +987,7 @@ flowchart LR
 |------|------|------|
 | 2026-05-05 | T2-P0-005 DOING→PENDING_INTEGRATION（多 LLM + Responses） | 本分支 tip：`resolve_llm` + `OpenAiResponsesProvider`（`/v1/responses`），默认 `openai-responses`；单测与 `openai_responses_integration_tests`（需 `OPENAI_API_KEY`）、`test-groups.sh` 登记；spec / README / 示例配置同步。门禁 `fmt` / `clippy -D warnings` / `lib` / `./scripts/run-integration-tests.sh integration` PASS，待集成复核与 push。 |
 | 2026-05-05 | T2-P0-005 PENDING_INTEGRATION → DOING | Spike 承接子项「多 LLM 层改造 + OpenAI Responses」，按 plan `~/.cursor/plans/llm-multiprovider-and-responses_d469e7f0.plan.md` 在当前分支 `feature/tool-system-cleanup`（origin ahead 6 commits）继续开发。决策：默认 `[llm] provider = "openai-responses"`（D3）；本子项 commits 与已有 6 个 ahead commits 一并延后到本子项完成再交集成。 |
+| 2026-05-05 | T2-P0-012 wire 期落档 + 新增 T2-P0-015 | 多模态 wire 期（plan `llm-multimodal-parts-wire_9933d5fc`）实施完成：`ChatMessageContentPart` 升级为 `#[serde(tag="type")]` 三态枚举（`InputText` / `InputImage` / `InputFile`）+ inline base64 / 已知 file_id 双通道 helper；`OpenAiResponsesProvider::part_to_responses_value` 翻译 `input_image` / `input_file`；`OpenAiProvider` 入口结构化拒绝并把诊断指向 `provider=openai-responses`；新增 5 单测（wire）+ 1 单测（拒绝）+ 5 helper 失败用例 + 3 集成测试（image describe / pdf summarize / oversize helper）+ fixtures `tests/fixtures/llm_multimodal/`；T2-P0-012 子项 4 项 `[x]` 勾选，剩余 3 项（read_file 二进制分流 / TUI 拖拽 chip / **Files 上传管理**）状态保持 `TODO`。**Files 上传管理** 拆出至新任务 **T2-P0-015 \| llm-files-upload-manager**（plan 原拟用 013 号但已被占用，顺位取 015）；§5 拓扑增加 `T2-P0-012 → T2-P0-015` 边。架构 spec `llm-multiprovider-integration.md` §1.3 / §2.1 / §6.5.3 / §6.6 同步；`core/llm/README.md` 新增「多模态 parts」小节。 |
 | 2026-05-05 | T2-P0-005 子项 + 关联报告 + 验收 | 在 **T-033 / T-034 / T-036 / search_files** 之后新增子项；关联报告含 multi-agent 报告 + **llm-multiprovider-integration §6.5**。同日将子项从「文档对标」改为 **开发任务**：**Provider 注册表 + `resolve_llm` + `OpenAiResponsesProvider`（`/v1/responses`）**；**验收标准**改为工程交付清单（注册表、`ChatRequest` 单套、流失真、Compaction、测试、文档核对）。 |
 | 2026-05-02 | T2-P1-008 DOING→PENDING_INTEGRATION | Spike 在当前分支完成 `search_files` 内置只读工具：① catalog 新增 `search_files`，派生 LLM tool definitions 与 `docs/tool-catalog.md`；② `PrimitiveExecutor` 新增 `search_files`，默认执行器 spawn 系统 `rg`/`fd`（无 fallback，缺失返回安装指引），支持 `target=content|files`、分页、`files_with_matches/content/count` 输出；③ `tool_exec` 接入 JSON Result Schema，system prompt 引导优先使用 `search_files` 而非 bash grep/find；④ 新增 `tests/search_files_tests.rs` 覆盖分页、deny 过滤、glob、content/count、缺二进制与 head_limit 边界。门禁：`cargo fmt --check && cargo clippy --all-targets -- -D warnings` 通过，`cargo test -j 1 -- --test-threads=1` 全绿。 |
 | 2026-05-02 | T2-P0-005 DOING→PENDING_INTEGRATION | Spike 完成 `feature/tool-system-cleanup`：①权限 gate 语义 `PermissionLevel` → `PermissionScope`，审计字段 `permission_level` → `permission_scope`，Bash audit 新增断言确保 `bash` / `bash_approval` 且无 `fs_*`；②新增 `src/core/tools/catalog.rs` 作为内置工具单一事实源，派生 `build_tool_definitions()`、`CoreIdentitySection` 与 `docs/tool-catalog.md`，补 `gen-tool-catalog` 与漂移测试；③cwd lazy prompt 修 `[a/s/n]` → `[s/w/c]`，未识别选项显式 warning，拒绝后失败回执给出 `pi workspace add <cwd>` 恢复路径。门禁 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -j 1 -- --test-threads=1` 全绿（`.integration_test_output.log`，`EXIT_CODE=0`）。 |

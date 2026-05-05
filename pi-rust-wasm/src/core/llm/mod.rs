@@ -21,8 +21,9 @@ pub use registry::{registered_provider_ids, resolve_llm};
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
-    ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse,
-    ChatResponseChoice, MessageKind, StreamEvent, TokenUsage,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
+    ChatResponse, ChatResponseChoice, MessageKind, StreamEvent, TokenUsage, FILE_MAX_BYTES,
+    IMAGE_MAX_BYTES,
 };
 
 #[cfg(test)]

@@ -6,10 +6,39 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` + `T2-P0-005 子项「多 LLM 层改造 + OpenAI Responses」` |
-| Update Time | 2026-05-05（LLM registry 单点 + 测试 #[path] 内挂） |
+| Update Time | 2026-05-05（多模态 fallback 字符估算 + 全量 LLM wire 收口） |
 | Cov% | - |
 
 ## Step-by-Step
+
+### 2026-05-05（同日追加 #3）| Session：`estimate_msg_chars` 覆盖 Parts，fallback 与多模态权重对齐
+
+- **动机**：`ContextState::estimated_token_count` 在首轮 stream 完成、`last_api_usage` 仍为 `None` 时走 `estimate_context_chars / 4`；原先 `estimate_msg_chars` 仅等价于纯文本或误调用不存在方法，导致含 `InputImage` / `InputFile` 的 `Parts` 消息在 fallback 路径被当成 0，`usage_ratio()` 与 Compaction 触发严重低估。
+- **代码**：[`src/core/session/manager/types.rs`](../../src/core/session/manager/types.rs) — `estimate_msg_chars` 对 `ChatMessageContent::Text` 用 `len()`、`Parts` 对各 part 调用 `ChatMessageContentPart::estimated_chars()`（与 `IMAGE_CHAR_ESTIMATE` / `FILE_CHAR_ESTIMATE` 一致），并保留 `tool_calls` 序列化长度累加。
+- **测试**：[`src/core/session/manager/tests/context_state_test.rs`](../../src/core/session/manager/tests/context_state_test.rs) — 新增 `estimate_msg_chars_text_only_returns_string_len`、`estimate_msg_chars_with_image_part_uses_image_estimate`、`estimate_msg_chars_with_file_part_uses_file_estimate`；测试 import 改为 `crate::core::llm::` 公开 re-export（满足 clippy `--all-targets`）。
+- **文档**：[`src/core/llm/openai.rs`](../../src/core/llm/openai.rs) / [`openai_responses.rs`](../../src/core/llm/openai_responses.rs) — `count_tokens` 上补充 doc-comment：trait 启发式为 `chars/3`，业务预算以 `ContextState::estimated_token_count`（优先 API usage，否则 `chars/4`）为准，二者分母不同为有意设计。
+- **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --test-threads=1`：PASS。
+
+### 2026-05-05（同日追加 #2）| LLM 多模态 wire（T2-P0-012）：types 三态枚举 + Responses input_image / input_file + Completions 拒绝
+
+- **动机**：用户希望「先支持图片、文件、PDF 附件」，wire 期不做 OpenAI Files API 上传管理（拆 T2-P0-015）。`/v1/responses` 主线已通；只需补 types + 翻译层 + 单测/集成测试。
+- **代码**：
+  - [`src/core/llm/types.rs`](../../src/core/llm/types.rs) — `ChatMessageContentPart` 升级为 `#[serde(tag = "type", rename_all = "snake_case")]` 三态枚举（`InputText` / `InputImage` / `InputFile`），加 `text` / `image_b64` / `file_b64` / `image_file_id` / `file_file_id` helper 与 `ChatMessage::user_with_parts`；`IMAGE_MAX_BYTES = 4_718_592` (4.5 MB) / `FILE_MAX_BYTES = 25 MB` 硬限 + image MIME 白名单 + base64 合法性校验；`count_tokens` 启发式：`InputImage = 3600` chars / `InputFile = 8000` chars
+  - [`src/core/llm/openai_responses.rs`](../../src/core/llm/openai_responses.rs) — 新增 `part_to_responses_value` 显式按变体写 wire（`image_url=data:..` / `file_data=data:..` / `file_id` 三选一，`file_id` 优先）；`extract_text` 仅取 `InputText`；`build_responses_input` 角色规则：仅 `User` 透传非 text part，其它角色 `tracing::warn!` 并丢弃非 text 部分
+  - [`src/core/llm/openai.rs`](../../src/core/llm/openai.rs) — 新增 `reject_multimodal_parts`，`chat` / `chat_stream` 入口扫描 messages，含非 `InputText` part 时返回结构化非可重试错误「`provider=openai 不支持多模态附件，请改用 provider=openai-responses`」
+  - [`Cargo.toml`](../../Cargo.toml) — 新增 `base64 = "0.22"` 依赖（helper 解码长度校验）；不动 `reqwest` 的 `multipart` feature（留给 T2-P0-015）
+- **测试**：
+  - 5 单测（wire / 角色降级）+ 1 拒绝测试（Completions）+ 5 helper 失败用例（`base64` 非法 / 超 IMAGE_MAX_BYTES / 非白名单 mime / 超 FILE_MAX_BYTES / file_id 空字串）
+  - 3 集成测试（[`tests/openai_responses_integration_tests.rs`](../../tests/openai_responses_integration_tests.rs)）：
+    1. `responses_inline_image_describe_roundtrip` — 一张 46 KB 小狗 PNG → `/v1/responses` input_image data URL → 断言文本至少命中通用词（`dog/puppy/animal/...`）或常见品种词（`beagle/labrador/...`）之一
+    2. `responses_inline_pdf_input_file_summarize_roundtrip` — reportlab 生成的 1.8 KB 单页 PDF → input_file data URL → 断言文本至少命中 `[hello/pdf/summary/summarize/test]`
+    3. `responses_inline_image_b64_helper_rejects_oversize` — 本地 helper 校验，构造 `IMAGE_MAX_BYTES + 1` 字节，断言返回结构化错误，不打 OpenAI、不带 `#[ignore]`
+  - 测试 fixtures：[`tests/fixtures/llm_multimodal/`](../../tests/fixtures/llm_multimodal/) 含 `sample_image.png` / `sample_image_b64.txt` / `sample_pdf_b64.txt` / `gen_sample_pdf.py` / `README.md`（图片来源 Unsplash CC0；PDF 由 reportlab 一次性生成，测试本身只 `include_str!` 读 `.txt`）
+- **文档**：
+  - `openspec/specs/architecture/llm-multiprovider-integration.md` §1.3 / §2.1 / §6.5.3（PDF / input_file 改为「已实现 wire」）/ §6.6（仅 vision 改为「与 §6.5 互斥落地，Completions 路径结构化拒绝」）/ §8 修订记录追加
+  - `src/core/llm/README.md` 新增 §3.5「多模态 parts」小节（双通道 helper 表 + 最小调用示例 + 角色与 wire 规则）
+  - `agents/TASK_BOARD_002.md` §T2-P0-012 子项 4 项 `[x]` 勾选；新增 `T2-P0-015 | llm-files-upload-manager` 任务卡（**ID 选 015 而非原计划 013**：因 013 / 014 已被占用，顺位取 015）；§5 拓扑增加 `T2-P0-012 → T2-P0-015` 边
+- **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --test-threads=1`、`cargo test --test openai_responses_integration_tests -- --test-threads=1`：PASS（image roundtrip 真实命中 "a happy beagle ..."；PDF roundtrip 真实命中 "the pdf contains a brief test message: hello pdf ..."）。
 
 ### 2026-05-05（同日追加）| LLM：`registry` 接管 `mod` + 测试按 §A.9 内挂 + 对外只暴露 `resolve_llm`
 

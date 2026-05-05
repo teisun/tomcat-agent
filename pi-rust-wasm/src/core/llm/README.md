@@ -60,6 +60,60 @@
 
 - `ChatRequest.model_override: Option<String>` 与 SessionEntry.model_override 约定一致；为 None 时使用请求的 model 字段（通常由上层从 LlmConfig.default_model 或 SessionEntry 填入）。
 
+## 3.5 多模态 parts（图片 / PDF 附件）
+
+`ChatMessageContentPart` 是 `#[serde(tag = "type", rename_all = "snake_case")]` 三态枚举：`InputText` / `InputImage` / `InputFile`，对齐 OpenAI Responses 的 `input_text` / `input_image` / `input_file` content part 形状。**默认 provider `openai-responses` 完整支持**；`provider = "openai"`（Completions）遇到非文本 part 立即结构化拒绝并把诊断指向 `provider=openai-responses`。
+
+### 通道与 helper
+
+| 通道 | helper | 校验 |
+|------|--------|------|
+| **A · inline base64**（同一请求内附带字节） | `ChatMessageContentPart::image_b64(mime, b64)` | base64 合法 + `<= IMAGE_MAX_BYTES` (4.5 MB) + MIME ∈ {png,jpeg,gif,webp} |
+| | `ChatMessageContentPart::file_b64(filename, mime, b64)` | base64 合法 + `<= FILE_MAX_BYTES` (25 MB) |
+| **B · 已知 file_id 透传**（已经从 OpenAI Files API 拿到 id） | `ChatMessageContentPart::image_file_id(id)` | 非空 |
+| | `ChatMessageContentPart::file_file_id(id, filename?)` | 非空 |
+
+> **「读字节 → 上传 → 拿 file_id」一站式 helper 不在本期**：归到独立任务 **T2-P0-013 | llm-files-upload-manager**（multipart `POST /v1/files` 客户端 + 生命周期 + reuse cache + 异步 helper），见 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §T2-P0-013。
+
+### 最小调用示例
+
+```rust
+use pi_wasm::{resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, LlmConfig};
+
+let cfg = LlmConfig { provider: "openai-responses".to_string(), ..LlmConfig::default() };
+let provider = resolve_llm(&cfg)?;
+
+// A 通道：inline 图片
+let img_b64 = std::fs::read_to_string("photo.png.b64")?;
+let parts = vec![
+    ChatMessageContentPart::text("Describe this image:"),
+    ChatMessageContentPart::image_b64("image/png", img_b64)?,
+];
+
+// B 通道：已知 file_id
+// let parts = vec![
+//     ChatMessageContentPart::text("Summarize this PDF:"),
+//     ChatMessageContentPart::file_file_id("file-abc", Some("notes.pdf".to_string()))?,
+// ];
+
+let req = ChatRequest {
+    messages: vec![ChatMessage::user_with_parts(parts)],
+    model: cfg.default_model.clone(),
+    max_tokens: Some(96),
+    ..Default::default()
+};
+let resp = provider.chat(req).await?;
+```
+
+### 角色与 wire
+
+`OpenAiResponsesProvider::part_to_responses_value` 翻译规则：
+- `InputText` → `{type: "input_text", text}`
+- `InputImage` → `{type: "input_image", image_url: "data:..."}`（A 通道）或 `{type: "input_image", file_id}`（B 通道）；`file_id` 优先
+- `InputFile` → `{type: "input_file", file_data: "data:..."}`（A 通道）或 `{type: "input_file", file_id}`（B 通道）
+
+仅 `User` 角色把非文本 part 透传 Responses；`System` / `Assistant` / `Tool` 角色出现非文本 part 时 **`tracing::warn!` 一次并丢弃非文本部分**（保留 wire 兼容）。
+
 ## 4. 扩展
 
 - **新增其它 OpenAI 形后端**：实现 `LlmProvider`，在 **`registry.rs`** 的 **`PROVIDERS`** 表追加一行 `(id, ctor)`。

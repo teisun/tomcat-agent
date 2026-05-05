@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::core::llm::provider::LlmProvider;
-use crate::core::llm::types::{ChatMessage, StreamEvent};
+use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, StreamEvent};
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
@@ -434,4 +434,91 @@ fn is_retriable_detects_429_and_5xx() {
     assert!(!OpenAiResponsesProvider::is_retriable(&AppError::Llm(
         "API 错误 400: bad request".to_string()
     )));
+}
+
+// ============================================================================
+// 多模态 wire 翻译（plan §5 单元测试）
+// ============================================================================
+
+/// 一段固定的 1x1 PNG base64（仅供 wire 形状断言，不做大小/视觉判断）。
+const TINY_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+#[test]
+fn user_image_b64_renders_input_image_data_url() {
+    let part = ChatMessageContentPart::image_b64("image/png", TINY_PNG_B64.to_string())
+        .expect("image_b64 should accept valid input");
+    let msg = ChatMessage::user_with_parts(vec![ChatMessageContentPart::text("see this:"), part]);
+    let (_ins, input) = build_responses_input(&[msg]);
+    assert_eq!(input.len(), 1);
+    let content = &input[0]["content"];
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "see this:");
+    assert_eq!(content[1]["type"], "input_image");
+    let url = content[1]["image_url"].as_str().expect("image_url present");
+    assert!(
+        url.starts_with("data:image/png;base64,"),
+        "data URL prefix wrong: {}",
+        url
+    );
+    assert!(content[1].get("file_id").is_none());
+}
+
+#[test]
+fn user_file_b64_renders_input_file_data_url() {
+    // 一段最小合法 base64（解码后仅 "PDF"），不真发 API；只断言 wire 形状。
+    let pdf_b64 = "UERG"; // base64("PDF")
+    let part =
+        ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", pdf_b64.to_string())
+            .expect("file_b64 should accept valid input");
+    let msg = ChatMessage::user_with_parts(vec![part]);
+    let (_ins, input) = build_responses_input(&[msg]);
+    let content = &input[0]["content"];
+    assert_eq!(content[0]["type"], "input_file");
+    assert_eq!(content[0]["filename"], "sample.pdf");
+    let data = content[0]["file_data"].as_str().expect("file_data present");
+    assert_eq!(data, "data:application/pdf;base64,UERG");
+    assert!(content[0].get("file_id").is_none());
+}
+
+#[test]
+fn user_image_file_id_renders_file_id_field() {
+    let part = ChatMessageContentPart::image_file_id("file-abc")
+        .expect("image_file_id should accept non-empty id");
+    let msg = ChatMessage::user_with_parts(vec![part]);
+    let (_ins, input) = build_responses_input(&[msg]);
+    let content = &input[0]["content"];
+    assert_eq!(content[0]["type"], "input_image");
+    assert_eq!(content[0]["file_id"], "file-abc");
+    assert!(content[0].get("image_url").is_none());
+}
+
+#[test]
+fn user_file_file_id_renders_file_id_field() {
+    let part = ChatMessageContentPart::file_file_id("file-xyz", Some("notes.pdf".to_string()))
+        .expect("file_file_id should accept non-empty id");
+    let msg = ChatMessage::user_with_parts(vec![part]);
+    let (_ins, input) = build_responses_input(&[msg]);
+    let content = &input[0]["content"];
+    assert_eq!(content[0]["type"], "input_file");
+    assert_eq!(content[0]["filename"], "notes.pdf");
+    assert_eq!(content[0]["file_id"], "file-xyz");
+    assert!(content[0].get("file_data").is_none());
+}
+
+#[test]
+fn system_with_image_part_silently_drops_non_text() {
+    // System / Assistant / Tool 角色出现非 text part 时 warn 并丢弃；wire 仅取文本。
+    let mut sys = ChatMessage::system("");
+    sys.content = Some(crate::core::llm::types::ChatMessageContent::Parts(vec![
+        ChatMessageContentPart::text("system rules"),
+        ChatMessageContentPart::image_b64("image/png", TINY_PNG_B64.to_string())
+            .expect("image_b64 ok"),
+    ]));
+    let user = ChatMessage::user("ping");
+    let (ins, input) = build_responses_input(&[sys, user]);
+    assert_eq!(ins.as_deref(), Some("system rules"));
+    assert_eq!(input.len(), 1);
+    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[0]["content"][0]["type"], "input_text");
 }

@@ -55,6 +55,7 @@ regex = "1"
 globset = "0.4"
 shell-words = "1"
 ignore = "0.4"
+base64 = "0.22"
 
 [build-dependencies]
 sha2 = "0.10"

@@ -21,6 +21,27 @@ use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent, TokenUsage,
 };
 
+/// 提供商不匹配的固定文案：Completions 路径不接受多模态附件，必须改用 `openai-responses`。
+/// 单测和上层 UI 都会按字符串子串断言这个文案，请勿改动。
+const COMPLETIONS_REJECT_MULTIMODAL_MSG: &str =
+    "provider=openai 不支持多模态附件，请改用 provider=openai-responses";
+
+/// 扫描 messages 是否含非 `InputText` part；返回 `Err` 即结构化非可重试错误。
+///
+/// Completions wire (`/v1/chat/completions`) 默认走文本 + image_url 旁路；本期不为
+/// Completions 实现 vision/file 翻译，遇到多模态 part 直接拒绝并把诊断指向
+/// `provider=openai-responses`。
+fn reject_multimodal_parts(messages: &[ChatMessage]) -> Result<(), AppError> {
+    for msg in messages {
+        if let Some(ChatMessageContent::Parts(parts)) = &msg.content {
+            if parts.iter().any(|p| p.is_non_text()) {
+                return Err(AppError::Llm(COMPLETIONS_REJECT_MULTIMODAL_MSG.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 发给 OpenAI API 的请求体（不含 model_override，stream 由调用方定）。
 /// 使用 max_completion_tokens 以兼容新模型（部分模型已不再接受 max_tokens）。
 #[derive(serde::Serialize)]
@@ -246,6 +267,8 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
+        reject_multimodal_parts(&request.messages)?;
+
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
                 sem.acquire()
@@ -298,6 +321,8 @@ impl LlmProvider for OpenAiProvider {
         request: ChatRequest,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
+        reject_multimodal_parts(&request.messages)?;
+
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
                 sem.acquire()
@@ -341,15 +366,23 @@ impl LlmProvider for OpenAiProvider {
         Ok(Box::new(event_stream))
     }
 
+    /// Trait 启发式 token 估算：`chars / 3`（保守上估，留出英文场景余量）。
+    ///
+    /// 多模态 `Parts` 走 [`ChatMessageContentPart::estimated_chars`]
+    /// (IMAGE_CHAR_ESTIMATE = 3600 / FILE_CHAR_ESTIMATE = 8000)。
+    ///
+    /// **业务预算请用** [`crate::core::session::manager::types::ContextState::estimated_token_count`]：
+    /// 优先 OpenAI 实际返回的 `usage.prompt_tokens`；缺失时 fallback 到 `chars / 4`，
+    /// 同样把 IMAGE/FILE_CHAR_ESTIMATE 计入（与 `usage_ratio()` 口径一致）。
+    /// 这里 `chars / 3` 仅给 trait 调用方做粗略上估，二者有意保留不同分母。
     fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, AppError> {
         let total_chars: usize = messages
             .iter()
             .map(|m| match &m.content {
                 Some(ChatMessageContent::Text(s)) => s.chars().count(),
-                Some(ChatMessageContent::Parts(parts)) => parts
-                    .iter()
-                    .map(|p| p.text.as_deref().unwrap_or("").chars().count())
-                    .sum::<usize>(),
+                Some(ChatMessageContent::Parts(parts)) => {
+                    parts.iter().map(|p| p.estimated_chars()).sum::<usize>()
+                }
                 None => 0,
             })
             .sum();

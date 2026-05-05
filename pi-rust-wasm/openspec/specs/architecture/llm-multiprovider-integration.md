@@ -73,7 +73,7 @@ Anthropic…                                                           Completio
 
 - **`LlmProvider`**（[`src/core/llm/provider.rs`](../../../src/core/llm/provider.rs)）：**`chat` / `chat_stream` / `count_tokens`**。
 - **`resolve_llm`**（[`src/core/llm/registry.rs`](../../../src/core/llm/registry.rs)）：按 **`LlmConfig.provider`** 字符串构造 **`Arc<dyn LlmProvider>`**（当前登记 **`openai`** → Completions、**`openai-responses`** → Responses）。
-- **`ChatMessage` / `ChatRequest`**（[`src/core/llm/types.rs`](../../../src/core/llm/types.rs)）：与 OpenAI **messages** 对齐；`ChatMessageContent` 虽支持 **Parts**，**`ChatMessageContentPart` 当前仅有 `text`**——**尚无 `image_url` / PDF** 的系统化序列化。
+- **`ChatMessage` / `ChatRequest`**（[`src/core/llm/types.rs`](../../../src/core/llm/types.rs)）：与 OpenAI **messages** 对齐；`ChatMessageContent` 支持 **Parts**，**`ChatMessageContentPart` 已升级为 `#[serde(tag = "type")]` 三态枚举**：`InputText` / `InputImage` / `InputFile`，**Responses 路径已通 inline base64 + 已知 `file_id` 双通道**；Completions 路径见 §4 拒绝策略。
 
 ### 2.2 HTTP 与能力边界
 
@@ -304,13 +304,29 @@ pi-rust-wasm **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire
                └────────────► POST …/v1/responses   (stream, tools 映射, SSE/NDJSON 解析)
 ```
 
-#### 6.5.3 PDF / `input_file`（Responses 增值能力）
+#### 6.5.3 PDF / `input_file`（Responses 增值能力）— 已实现 wire
 
-在 **`/v1/responses` 主线接通后**，文件类输入需扩展 **`ChatMessage` / 映射层** 支持 **input_file（或官方当前等价字段）**，对标 openclaw / pi_agent_rust 文档与测试；**不单属于 Completions**。
+**已实现**（T2-P0-012）：`ChatMessageContentPart::{InputImage, InputFile}` 三态枚举落地，`OpenAiResponsesProvider::part_to_responses_value` 把内部 part 翻译成 Responses 的 `input_image` / `input_file`，wire 默认走 **inline base64 data URL**（`data:{mime};base64,{b64}`），**`file_id` 通道**已在 schema 留好（`image_file_id` / `file_file_id` helper），方便调用方传入由其它途径取得的 OpenAI Files API id。
 
-### 6.6 仅 vision（Completions 路径，低风险增量）
+构造 helper（[`types.rs`](../../../src/core/llm/types.rs)）：
 
-在 **`ChatMessageContentPart` + `openai.rs`** 补 **`image_url`**，仍走 **`/v1/chat/completions`**，与 pi_agent_rust OpenAI Completions 一致；与 §6.5 **正交**。
+| Helper | 通道 | 校验 |
+|--------|------|------|
+| `ChatMessageContentPart::text(s)` | — | — |
+| `image_b64(mime, b64)` | A：inline | base64 合法 + `<= IMAGE_MAX_BYTES` (4.5 MB) + MIME ∈ {png,jpeg,gif,webp} |
+| `file_b64(filename, mime, b64)` | A：inline | base64 合法 + `<= FILE_MAX_BYTES` (25 MB) |
+| `image_file_id(file_id)` | B：已知 id | 非空 |
+| `file_file_id(file_id, filename?)` | B：已知 id | 非空 |
+
+`build_responses_input` 角色规则：仅 **`User`** 把非文本 part 透传 Responses；`System` / `Assistant` / `Tool` 出现非文本 part 时 **`tracing::warn!` 并丢弃非文本部分**（保留 wire 兼容、避免 API 4xx）。
+
+**Files 上传管理（multipart `POST /v1/files` + 生命周期 + reuse cache）**：拆为独立任务 **T2-P0-013 | llm-files-upload-manager**，详见 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §T2-P0-013；本 spec 后续在 **§6.5.4** 补充该子系统。
+
+### 6.6 仅 vision（Completions 路径，低风险增量）—— 与 §6.5 互斥落地
+
+**当前选型**：默认走 §6.5 Responses 路径（默认 `provider = "openai-responses"`），多模态附件由 `OpenAiResponsesProvider` 翻译 input_image / input_file。
+
+**Completions 路径**（`OpenAiProvider`）**不实现** vision/file 翻译：`chat` / `chat_stream` 入口扫描 `messages`，发现任何非 `InputText` 的 `ChatMessageContentPart` 立即返回**结构化非可重试**错误「`provider=openai 不支持多模态附件，请改用 provider=openai-responses`」（[`openai.rs::reject_multimodal_parts`](../../../src/core/llm/openai.rs)）。如未来确有 Completions 网关 vision 需求，再单独评估补 `image_url` 翻译；与 §6.5 互斥即可。
 
 ---
 
@@ -338,3 +354,4 @@ pi-rust-wasm **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire
 | 2026-05-04 | §6.5.1 表第三列：「职责」改为 **「白话（这篇代码能帮到你什么）」** 并重写各格 |
 | 2026-05-04 | 新增 **§3.2.1**：注册表 id 选 **Provider**；**同一 `ChatRequest`** 由不同实现翻译 wire；何时才扩展类型 |
 | 2026-05-05 | **实施落档**：`registry.rs` + **`resolve_llm`**；**`OpenAiResponsesProvider`**（`/v1/responses`）；默认 **`provider = openai-responses`**；更新 **§2 / §4 OGM / §5.1**；**§1.3** 横向表「路由 / OpenAI」行 |
+| 2026-05-05 | **多模态 wire（T2-P0-012）**：`ChatMessageContentPart` 升级为 `#[serde(tag="type")]` 三态枚举（`InputText` / `InputImage` / `InputFile`）；`OpenAiResponsesProvider` 翻译 `input_image` / `input_file`（inline base64 + 已知 file_id 双通道）；`OpenAiProvider` 入口结构化拒绝非文本 part；**Files 上传管理** 拆出至 **T2-P0-013**；更新 **§1.3 / §2.1 / §6.5.3 / §6.6** |
