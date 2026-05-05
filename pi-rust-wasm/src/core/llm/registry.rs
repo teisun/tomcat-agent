@@ -32,7 +32,10 @@ use super::provider::LlmProvider;
 
 #[path = "openai.rs"]
 mod openai;
-#[path = "openai_responses.rs"]
+// `openai_responses` 已升级为目录模块（L-3 拆分整改：mod / payload / stream 三文件）。
+// 用 `#[path = "<dir>/mod.rs"]` 显式锁定入口，与既有「在 registry 内本地声明 mod」
+// 风格对齐；新增 single-file Provider 仍可走 `#[path = "<new>.rs"]`。
+#[path = "openai_responses/mod.rs"]
 mod openai_responses;
 
 use openai::OpenAiProvider;
