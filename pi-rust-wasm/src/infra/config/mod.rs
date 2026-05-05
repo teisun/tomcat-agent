@@ -31,3 +31,5 @@ pub use types::{
     PreflightConfig, PrimitiveConfig, SecurityConfig, WasmConfig, WorkspaceConfig,
     DEFAULT_LLM_MODEL,
 };
+#[allow(unused_imports)]
+pub use types::{ToolsConfig, ToolsReadConfig, DEFAULT_TOOLS_READ_MAX_BYTES};

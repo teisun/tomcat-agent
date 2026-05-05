@@ -85,8 +85,8 @@
 | ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **R1 分页/截断**             | offset/limit + 默认 2000 行                                                   | cc-fork                                                   | catalog 字段 + executor 流读                                                                             | §2 T1   | cc-fork 默认上限工程上验证最稳，2000 行 ≈ 模型一次能消化的上限                                  | × `hermes` 100K 字符硬拒：触发后整个任务停摆，阻断大日志/dump 合理需求 × `pi_agent_rust` 1 MB 截断：上限太小，2000 行常触上限 × `openclaw` 模型 ctx 自适配：耦合 Pi 调用栈，独立项目难复用 × `cc-fork` 25k token API 估算：依赖 Anthropic SDK          |
 | ↳                        | 续读 `offset=next, limit=same` 提示                                            | pi-mono                                                   | 截断尾部固定模板字符串                                                                                          | §2 T1   | pi-mono 模板纯字符串、可直接搬到 Rust，零依赖                                            | （同上行）                                                                                                                                                                                     |
-| **R2 多模态**               | discriminated union `Image / Pdf / FileUnchanged`                          | cc-fork                                                   | 输出 schema 改 enum                                                                                     | §4 T3   | ① schema 自描述，下游 agent_loop 易做 image content block 路由 ② 编译期 enum 强制覆盖所有分支 | × `cc-fork` `Notebook` / `Parts`：Notebook 依赖 Jupyter、Parts 需 PDF 拆页落盘，复杂度收益比差 × `hermes` 仅扩展拒绝 + vision 引导：不真正返图，仍要 agent 用 bash 拼 base64 × `pi_agent_rust` 仅 image 不带 schema：未来加 PDF 改动大 |
-| ↳                        | 图像 1568px 长边降采样                                                            | cc-fork                                                   | `image` crate + `imageops::resize`                                                                   | §4 T3   | Anthropic 推荐上限，省 token 且保证 vision 模型可识别                                  | × `cc-fork` token-aware compress：依赖 SDK，独立项目无对应接口                                                                                                                                         |
+| **R2 多模态**               | discriminated union `Image / Pdf / FileUnchanged`                          | cc-fork                                                   | 输出 schema 改 enum；按扩展名 + 头几字节 magic 判 mime；**不解码、不缩放**，直接读字节                                            | §4 T3   | ① schema 自描述，下游 `tool_exec` 易做 wire 注入 ② 编译期 enum 强制覆盖所有分支 ③ 不引图像 / PDF 解码依赖 → 零 crate 体积代价 | × `cc-fork` `Notebook` / `Parts`：Notebook 依赖 Jupyter、Parts 需 PDF 拆页落盘，复杂度收益比差 × `hermes` 仅扩展拒绝 + vision 引导：不真正返图，仍要 agent 用 bash 拼 base64 × `pi_agent_rust` 仅 image 不带 schema：未来加 PDF 改动大 |
+| ↳                        | inline base64 wire（复用 `ChatMessageContentPart` helper）                     | 自设（与 T2-P0-012 多模态 wire 对齐）                              | 重构 `image_b64` / `file_b64` 签名为 `(mime, &Path)` / `(filename, mime, &Path)`，helper 内部 metadata 预检 + 读盘 + base64；**不引** `image` crate，**不缩放** | §4 T3   | ① 与已合入多模态 wire 单一通道复用，避免双轨 ② 大小检查在 metadata 阶段，零内存 ③ 1568px 缩放是 Anthropic 服务端推荐，OpenAI 端 4.5 MiB 上限内已足够 | × `cc-fork` 1568px 缩放：依赖 `image` crate + Lanczos3 算法，传递依赖 7–10 个，编译时间不可控 × `cc-fork` token-aware compress：依赖 Anthropic SDK，wasm 无对应接口                                       |
 | **R3 行号渲染**              | `{:>6}\t{}` cat -n 风格                                                      | cc-fork                                                   | `format_with_line_numbers` helper                                                                    | §3 T2   | cat -n 默认体验最好，与几乎所有 IDE/diff 工具兼容                                        | × `pi_agent_rust` `NN→` 简单行号：被 cat -n 完全覆盖，无独立价值 × `hermes` `LINE_NUM                                                                                                                     |
 | ↳                        | 可选 `hashline=true` 输出 `N#AB:`                                              | pi_agent_rust                                             | read schema 加 `hashline?: bool` + executor 分支                                                        | §4 T3   | 给 edit 精细场景兜底，配合 R5 staleness 实现「行级一致性校验」（详见 §4.3.1）                     | （同上行）                                                                                                                                                                                     |
 | **R4 二进制识别**             | 失败时返回结构化 hint「This is `<mime>`, try `bash file <path>` or wait for vision」 | hermes（措辞）+ cc-fork（device 检测）                            | `read_file` 非 UTF-8 分支替换裸 Err                                                                        | §2 T1   | ① cc-fork 路径黑名单思路防 read `/dev/zero` 卡死 ② hermes 引导措辞自然，模型按提示能立即转策略       | × `hermes` 完整 device 路径黑名单：与 pi-rust-wasm 已有 audit gate 三层授权重复，避免治理冲突 × `pi-mono` 仅图片走特殊分支：忽略其它二进制类型，模型仍会撞错                                                                               |
@@ -99,20 +99,22 @@
 
 **核心选型口诀（与上表 1:1 对齐）**：
 
-- **cc-fork 拿 5 项**：R1 主体（offset/limit）、R2 全套（union + 1568px）、R3 cat -n、R4 device 思路、R5 软 stub —— 业界落地最完整；
+- **cc-fork 拿 4 项**：R1 主体（offset/limit）、R2 union 形态、R3 cat -n、R4 device 思路、R5 软 stub —— 业界落地最完整；**砍掉**「1568px 缩放」**因为不引 `image` crate**（OpenAI 4.5 MiB 上限内已够用，Anthropic 端的 1568 推荐改由服务端处理）；
 - **pi_agent_rust 拿 3 项**：R3 hashline、R5 hashline 互补、R6 分块流式抽窗 —— Rust 原生、无 SDK 依赖；
 - **pi-mono 拿 2 项**：R1 续读模板、§1 命名 —— 零依赖、最小可移植；
 - **hermes 拿 1 项**：R4 措辞 —— 引导句式自然，BLOCK 思路被否；
 - **openclaw 不取**：模型 ctx 自适配耦合 Pi 调用栈，read 自身无独立增强。
+- **本仓自设 1 项**：R2 helper 复用通道（`ChatMessageContentPart::image_b64 / file_b64` 签名重构为 `(mime, &Path)`），与已合入的 T2-P0-012 多模态 wire 走同一通道，避免双轨。
 
-> **维度覆盖核对**：R1（2 行）、R2（2 行）、R3（2 行）、R4（1 行）、R5（2 行）、R6（2 行）+ 命名（1 行）= **共 12 行落地点，6 个维度全部 ≥ 1 项覆盖**。
+> **维度覆盖核对**：R1（2 行）、R2（2 行，原"1568px 缩放"换为"helper 复用通道"）、R3（2 行）、R4（1 行）、R5（2 行）、R6（2 行）+ 命名（1 行）= **共 12 行落地点，6 个维度全部 ≥ 1 项覆盖**。
 > 阶段分布：**§1 命名（1）、§2 T1（5）、§3 T2（2）、§4 T3（4）**，刚好对应 §0.A.4 评分演进 3.0 → 5.5 → 7.5 → 9.0+ 的跃迁节奏。
 
 > **横向只取 cc-fork 不行吗？** 不行。
 > ① **R6 性能/上限**：cc-fork 的 256 KB 字节预检 + token 估算依赖 Anthropic SDK，wasm 环境无法直接搬，必须改用 **分块流式读 + 自设 25 MiB**（思路对齐 `pi_agent_rust` `ReadTool`，见 §2.4）；
 > ② **R3 行号**：edit 强一致场景需要 hashline 兜底，cc-fork 没有这套协议，要从 `pi_agent_rust` 借；
-> ③ **R1 续读 hint**：cc-fork 的截断措辞偏英语长句，pi-mono 的「`offset=<next>, limit=<same>`」更精炼，模型按规则即可继续读。
-> 所以最终选型 = **cc-fork 5 + pi_agent_rust 3 + pi-mono 2 + hermes 1** 的复合最优解。
+> ③ **R1 续读 hint**：cc-fork 的截断措辞偏英语长句，pi-mono 的「`offset=<next>, limit=<same>`」更精炼，模型按规则即可继续读；
+> ④ **R2 1568px 缩放**：cc-fork 走 Anthropic Messages API + `image` crate Lanczos3 缩放；本仓走 OpenAI（4.5 MiB inline 上限内 vision 模型可识别），不需要 `image` crate；改为复用已合入的 [`ChatMessageContentPart::image_b64`](../../../../src/core/llm/types.rs) helper（PR-RJ-0 重构其签名为 `(mime, &Path)`）。
+> 所以最终选型 = **cc-fork 4 + pi_agent_rust 3 + pi-mono 2 + hermes 1 + 本仓自设 1** 的复合最优解。
 
 ##### 项目级移植说明（解释为什么 §0.A.3 多数行只「取设计」而不「搬代码」）
 
@@ -122,7 +124,7 @@
 - **pi_agent_rust** —— Rust 同栈最易借鉴，但 hashline 字典需引入 `xxhash-rust` crate；其 `NN→` 简单行号已被 cc-fork `cat -n` 完全覆盖，所以**只取 hashline 部分**而非整个行号实现。
 - **openclaw** —— read 行为完全依赖 `pi-coding-agent` 包装、无独立增强逻辑；模型 ctx 自适配耦合于 Pi 调用栈，独立项目无对应抽象——这就是表中**几乎全表「× openclaw」**的根本原因。
 - **hermes-agent** —— Python 栈无法直搬 Rust；其 BLOCK 策略过激被否；**只取「失败措辞 / vision 引导」的 prompt 思路**而非任何代码。
-- **cc-fork-01** —— TS/Bun 私有 utils 复杂度高 + `token-aware compress` 依赖 Anthropic SDK；wasm 环境无法复用——所以 5 项虽全取 cc-fork，但**仅照搬设计形态**（schema / 行号 / state 表语义），代码层面需 Rust 重写。
+- **cc-fork-01** —— TS/Bun 私有 utils 复杂度高 + `token-aware compress` 依赖 Anthropic SDK + `image` crate Lanczos3 缩放传递依赖太多；wasm 环境无法复用——所以 4 项虽全取 cc-fork，但**仅照搬设计形态**（schema / 行号 / state 表语义），代码层面需 Rust 重写；**1568px 缩放**直接砍掉，改走 OpenAI 4.5 MiB inline 上限 + 复用 `ChatMessageContentPart` helper。
 
 #### 0.A.4 评分演进路径
 
@@ -184,7 +186,7 @@ flowchart LR
                   ╌╌╌╌╌╌  评分 7.5（write/edit 有 staleness 底座）╌╌╌╌╌╌
 
   [§4 T3]      R2 多模态   ⑨  ReadResult enum (Text/Image/Pdf/Stub)      §4.1
-               R2 多模态   ⑩  image crate + 1568px 长边降采样            §4.2
+               R2 多模态   ⑩  helper 复用 inline base64 + tool→user 注入  §4.2
                R3 锚点     ⑪  hashline=true 输出 `N#AB:line`             §4.3
                R5 兜底     ⑫  hashline 互补 staleness（与 ⑪ 共底座）     §4.4
 
@@ -231,6 +233,11 @@ flowchart LR
 模型 tool_call.name = "read"     → tool_exec → executor（唯一合法路径）
 模型 tool_call.name = "read_file" → 无匹配分支 → 失败（与拼错工具名相同语义）
 ```
+
+> **fallback 口径（与 plan §7 / YAML `rename-read` 三处必须一致）**：
+> - **运行时**：无别名。新对话 / 新 tool_call 收到 `read_file` 一律按未知工具回错。
+> - **transcript 重放器**：解码历史 `tool_call.name == "read_file"` 时仅 `tracing::warn!("legacy tool name: read_file → read")`，**不**重定向到 `read` 执行；保留回放确定性，避免历史 audit 与新工具语义混淆。
+> - 三处描述（plan YAML `rename-read` / 本节 / plan §7 风险）禁止再写"单迭代 fallback"等含糊措辞。
 
 - **为什么单独一个 PR-RA**：改动跨 catalog、tool_exec、system_prompt、全仓测试断言，宜单 PR 原子提交。
 - **不动分**：仅工具名变化，不增减能力，评分维持基线 3.0。
@@ -327,18 +334,18 @@ file foo.rs (10 000 行):
 > **概念前置**：从「裸 Err 让模型困惑」升级到「结构化 hint 给出 3 条出路」——错误信息也是 prompt 的一部分，要为模型留可执行的下一步。
 
 ```text
-裸 Err（旧 / 劣）:                  结构化 hint（新 / 优）:
-┌──────────────────────┐           ┌────────────────────────────────────┐
-│ Tool error:          │           │ File is binary or non-UTF-8        │
-│  "stream did not     │   vs      │ (detected: 0x89).                  │
-│   contain valid      │           │ • try `bash file <path>` to inspect│
-│   utf-8"             │           │ • multimodal coming in T3 (see §4) │
-└──────────────────────┘           └────────────────────────────────────┘
-       ↓                                    ↓
-   模型瞎猜：再 read？                  模型有选择：
-   read 重试 → 同样失败                 ① 据 hex 推类型（0x89 → PNG）
-                                        ② bash file 验证
-                                        ③ 等 T3 multimodal
+裸 Err（旧 / 劣，对应 executor.rs:982-988 当前实现）:    结构化 hint（新 / 优）:
+┌──────────────────────────────────────────┐             ┌────────────────────────────────────┐
+│ Primitive error:                         │             │ File is binary or non-UTF-8        │
+│  "文件存在且权限已通过检查，但它是二进制    │   vs        │ (detected: 0x89).                  │
+│   或非 UTF-8 文本，不能用 read_file 按     │             │ • try `bash file <path>` to inspect│
+│   文本读取：/abs/path"                    │             │ • multimodal available in T3 (§4)  │
+└──────────────────────────────────────────┘             └────────────────────────────────────┘
+       ↓                                                         ↓
+   模型瞎猜：再 read？                                       模型有选择：
+   read 重试 → 同样失败                                      ① 据 hex 推类型（0x89 → PNG）
+                                                              ② bash file 验证
+                                                              ③ 直接走 T3 multimodal 路径
 ```
 
 - **first-byte hex 暗示文件类型**：`0x89` → PNG，`0x25` → PDF，`0x7F` → ELF，`0xCAFEBABE` → JVM bytecode...
@@ -381,35 +388,49 @@ file foo.rs (10 000 行):
 - **R6 入选理由**（§0.A.3）：流式避免整文件入内存；wasm 必备；大 `offset` 下优于全程 `lines()`。
 - 验证测试：在 §2.7 内集成（无独立测试，与 §2.1 用例共底座）。
 
-#### 2.5 `MAX_READ_BYTES = 25 MiB`（R6 #2，自设）
+#### 2.5 `MAX_READ_BYTES = 25 MiB` + 图片 4.5 MiB（R6 #2，自设；统一 metadata 预检）
 
-> **概念前置**：「软上限」=「无 offset/limit 才检查」——大文件可被 offset/limit 抽窗，但裸读时必须显式声明窗口。这样既保护堆内存，又不一刀切地禁掉合理的 dump/log 抽样。
+> **概念前置**：「软上限」=「无 offset/limit 才检查」——大文件可被 offset/limit 抽窗，但裸读时必须显式声明窗口。**所有大小检查统一在 `std::fs::metadata().len()` 阶段做掉，绝不先把文件读进内存再校验**——避免 100 MB 文件先 OOM 才报错。
 
 ```text
 read 入口
    │
-   ├─ 有 offset 或 limit ?
-   │      ├─ yes ─→ 跳过 size 检查 ─→ 流式抽窗（§2.4 分块单循环 + §2.1 窗口）
-   │      │         （窗口本身受 limit ≤ 10000 行约束）
+   ├─ 路由判定（扩展名 + 头几字节 magic）
+   │      ├─ image (PNG/JPEG/GIF/WebP)
+   │      │     │
+   │      │     ↓ metadata().len() > IMAGE_MAX_BYTES (4.5 MiB) ?
+   │      │     ├─ yes ─→ 拒绝 + hint「图片超 4.5 MiB inline 上限」
+   │      │     └─ no  ─→ helper image_b64(mime, &path) 内部读盘 + base64
    │      │
-   │      └─ no ──↓
-   │
-   └─ 文件 size > MAX_READ_BYTES (25 MiB) ?
-           ├─ yes ─→ 拒绝 + 结构化 hint:
-           │         "File exceeds 25 MiB. Add offset/limit to read in chunks."
-           │
-           └─ no ──→ 整文件流式读 + 默认 2000 行截断 + §2.2 尾注
+   │      ├─ file / pdf
+   │      │     │
+   │      │     ↓ metadata().len() > FILE_MAX_BYTES (25 MiB) ?
+   │      │     ├─ yes ─→ 拒绝 + hint「文件超 25 MiB inline 上限」
+   │      │     └─ no  ─→ helper file_b64(filename, mime, &path) 内部读盘 + base64
+   │      │
+   │      └─ text
+   │            │
+   │            ├─ 有 offset 或 limit ?
+   │            │      ├─ yes ─→ 跳过 size 检查 ─→ 流式抽窗（§2.4 分块单循环 + §2.1 窗口）
+   │            │      └─ no ──↓
+   │            │
+   │            └─ metadata().len() > MAX_READ_BYTES (25 MiB) ?
+   │                   ├─ yes ─→ 拒绝 + hint「请加 offset/limit 分窗重试」
+   │                   └─ no ──→ 整文件流式读 + 默认 2000 行截断 + §2.2 尾注
 ```
 
-- **取值依据**：cc-fork 256 KB（太小，正常源码就被拒）vs pi_agent_rust 100 MB（太大，wasm 堆易爆）；25 MiB 介于两者，覆盖 99% 合理 dump 文件。
-- **可配置**：`pi.config.toml [tools.read] max_bytes` 覆盖。
-- **不二刀切**：让模型可用 offset/limit 抽 GB 级日志的「特定窗口」（如 `read offset=999000 limit=200`）。
-- 大小预检策略：
-  - **有 offset/limit** → 跳过整文件大小拒绝（允许从大文件抽窗）；
-  - **无 offset/limit** 且文件 > `MAX_READ_BYTES` → 拒绝并提示模型「请加 offset/limit 重试」。
-- 常量定义：`const MAX_READ_BYTES: u64 = 25 * 1024 * 1024;`，可由 `pi.config.toml [tools.read] max_bytes` 覆盖。
+- **三个上限统一在 metadata 阶段判定**，绝不先 `read_to_string` / `read_to_end` 后再校验：
+  - `IMAGE_MAX_BYTES = 4_718_592`（4.5 MiB，与 [`pi-rust-wasm/src/core/llm/types.rs`](../../../../src/core/llm/types.rs) 顶部常量一致）
+  - `FILE_MAX_BYTES = 25 * 1024 * 1024`（25 MiB）
+  - `MAX_READ_BYTES = 25 * 1024 * 1024`（25 MiB，文本路径，与 FILE_MAX_BYTES 同值；当前 [`executor.rs:96`](../../../../src/core/tools/primitive/executor.rs) 是 `10 MiB`，PR-RB 升到 25 MiB）
+- **图片 / 文件的实际读盘在 helper 内部**：PR-RJ-0 重构后 `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)` 自己负责打开文件 + `metadata` 二次校验 + `read_to_end` + base64 编码；executor 端仅做路由 + 第一道 metadata 大小预检。
+- **可配置**：`pi.config.toml [tools.read] max_bytes` 覆盖文本路径上限；图片 / 文件常量由 `types.rs` 集中管理，**不**进 config（与 multimodal wire 同口径）。
+- **不二刀切**：文本路径仍可用 offset/limit 抽 GB 级日志的「特定窗口」（如 `read offset=999000 limit=200`）。
 - 25 MiB 介于 cc-fork 256 KB（太小，正常源码就被拒）与 pi_agent_rust 100 MB（太大，wasm 堆易爆）之间——兼顾合理 dump 文件 + 防爆 ctx（§0.A.3 R6 入选理由）。
-- 验证测试：`read_no_offset_large_file_rejected_with_hint`。
+- 验证测试（用 [`tests/fixtures/llm_multimodal/`](../../../../tests/fixtures/llm_multimodal/) 真实文件）：
+  - `read_no_offset_large_file_rejected_with_hint`（>25 MiB 文本）
+  - `read_oversize_image_rejected_at_metadata_stage`（>4.5 MiB PNG，断言**无**任何 `read_to_end` 调用，仅 `metadata` 触发拒绝）
+  - `read_oversize_file_rejected_at_metadata_stage`（>25 MiB 二进制）
 
 #### 2.6 执行端 schema 校验（横切，处理 §2.1 入参越界）
 
@@ -439,15 +460,17 @@ tool_exec.rs read 分支（horizontal gate）：
 
 新增到 `[src/core/tools/primitive/tests/suite_test.rs](../../../../src/core/tools/primitive/tests/suite_test.rs)`：
 
+> **fixture 口径**：二进制 / 图片 / 大文件用例**统一**用 [`tests/fixtures/llm_multimodal/`](../../../../tests/fixtures/llm_multimodal/) 真实文件（PNG / PDF / 由 reportlab 生成的 PDF），**禁止**手造 base64 字符串或 `vec![0u8; N]` 的人造大文件，避免「测试通过但生产挂掉」的假绿。
 
-| 落地点               | 测试用例                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------- |
-| §2.1 offset/limit | `read_offset_limit_returns_window` · `read_offset_beyond_eof_returns_empty_with_hint` |
-| §2.2 续读 hint      | `read_limit_truncates_with_resume_hint`                                               |
-| §2.3 二进制 hint     | `read_binary_returns_structured_hint`                                                 |
-| §2.4 分块 + 单循环     | （集成在 §2.1 用例内）                                                                        |
-| §2.5 25 MiB 上限    | `read_no_offset_large_file_rejected_with_hint`                                        |
-| §2.6 schema 校验    | `read_offset_limit_invalid_int_returns_tool_error`                                    |
+
+| 落地点               | 测试用例                                                                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| §2.1 offset/limit | `read_offset_limit_returns_window`（用真实源码文件）· `read_offset_beyond_eof_returns_empty_with_hint`                                                   |
+| §2.2 续读 hint      | `read_limit_truncates_with_resume_hint`                                                                                                         |
+| §2.3 二进制 hint     | `read_binary_returns_structured_hint`（用真实 PNG fixture：`tests/fixtures/llm_multimodal/sample_image.png`）                                          |
+| §2.4 分块 + 单循环     | （集成在 §2.1 用例内）                                                                                                                                  |
+| §2.5 25 MiB / 4.5 MiB metadata 预检 | `read_no_offset_large_file_rejected_with_hint`（>25 MiB 文本 metadata 预检）· `read_oversize_image_rejected_at_metadata_stage`（>4.5 MiB PNG，断言 **未** `read_to_end`）· `read_oversize_file_rejected_at_metadata_stage` |
+| §2.6 schema 校验    | `read_offset_limit_invalid_int_returns_tool_error`                                                                                              |
 
 
 ### 3. T2 — 2 项落地点：cat -n 行号 + readFileState（含 FILE_UNCHANGED stub）
@@ -506,12 +529,12 @@ edit oldText="send(r);"          edit anchor=14 + oldText="send(r);"
 - **为什么 R3 同时入选行号 + hashline**：行号解决「定位」，hashline（§4.3）解决「定位 + 内容一致性」；浏览/调试用行号即可，精细 edit 配 hashline。
 - 输出统一加行号前缀：
   - 格式：`{:>6}\t{}`（行宽 6 + tab + 内容），与 cc-fork `[addLineNumbers](../../../../../cc-fork-01/src/utils/file.js)` 一致；行号从 `offset` 起算。
-  - 配置开关 `pi.config.toml [tools.read] line_numbers = true`（默认 true，可关）。
+  - **开关由 LLM 控制**：read schema 新增 `line_numbers: bool`（默认 `true`），由模型按需关闭（如要把内容 pipe 给 diff 工具时）；**不进 config**——避免管理员侧静默改变模型上下文。
 - 实现位置：`primitive/executor.rs` 流式段（§2.4）后；新增 helper：
   ```rust
   fn format_with_line_numbers(start: usize, lines: &[String]) -> String
   ```
-- 验证测试：`read_returns_line_numbered_output` · `read_line_numbers_start_at_offset` · `read_disable_line_numbers_via_config`。
+- 验证测试：`read_returns_line_numbered_output` · `read_line_numbers_start_at_offset` · `read_disable_line_numbers_via_schema_arg`（schema 字段控制，**不**测 config）。
 
 #### 3.2 `FILE_UNCHANGED` 软 stub + `readFileState`（R5 #1，取自 cc-fork）
 
@@ -592,22 +615,68 @@ flowchart LR
 
 | 落地点                       | 测试用例                                                                                                                                  |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| §3.1 cat -n 行号            | `read_returns_line_numbered_output` · `read_line_numbers_start_at_offset` · `read_disable_line_numbers_via_config`                    |
+| §3.1 cat -n 行号            | `read_returns_line_numbered_output` · `read_line_numbers_start_at_offset` · `read_disable_line_numbers_via_schema_arg`                |
 | §3.2 readFileState + stub | `read_returns_unchanged_stub_on_repeat` · `read_state_invalidates_on_mtime_bump` · `read_state_partial_view_does_not_match_full_read` |
 
 
-### 4. T3 — 4 项落地点：discriminated union + 1568px 降采样 + hashline 输出 + hashline 互补
+### 4. T3 — 4 项落地点：discriminated union + helper 复用 inline base64 + hashline 输出 + hashline 互补
 
-> ↩ **对应 §0.A.3 决策表 4 项**（R2×2 + R3×1 + R5×1，评分 7.5 → 9.0+），下列 4 个子节顺序与决策表行顺序 1:1 对齐：
+> ↩ **对应 §0.A.3 决策表 4 项**（R2×2 + R3×1 + R5×1，评分 7.5 → 9.0+），下列 4 个子节顺序与决策表行顺序 1:1 对齐。
+> **本期实施口径**（与 plan YAML 一致）：**不引入** `image` / `pdf-extract` / `lopdf` crate；**不缩放、不解码**；read 直接读字节 → 复用 `ChatMessageContentPart::image_b64 / file_b64` helper（PR-RJ-0 重构其签名为 `(mime, &Path)`）→ tool 消息文本 + 下一条 user 消息 Parts 注入。
 
 
-| #   | 决策表落地点                                            | 取自            | 形态                                                 | 实施小节 |
-| --- | ------------------------------------------------- | ------------- | -------------------------------------------------- | ---- |
-| 1   | discriminated union `Image / Pdf / FileUnchanged` | cc-fork       | 输出 schema 改 enum，按扩展名 + magic bytes 路由（含 PDF 可选实现） | §4.1 |
-| 2   | 图像 1568px 长边降采样                                   | cc-fork       | `image` crate + `imageops::resize`                 | §4.2 |
-| 3   | 可选 `hashline=true` 输出 `N#AB:`                     | pi_agent_rust | read schema 加 `hashline?: bool` + executor 分支      | §4.3 |
-| 4   | hashline 内容指纹（互补 R5）                              | pi_agent_rust | 复用 §4.3 hashline 输出做二次校验                           | §4.4 |
+| #   | 决策表落地点                                            | 取自                              | 形态                                                                                                              | 实施小节 |
+| --- | ------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---- |
+| 1   | discriminated union `Image / Pdf / FileUnchanged` | cc-fork                         | 输出 schema 改 enum；按扩展名 + 头几字节 magic 判 mime；不解码                                                                   | §4.1 |
+| 2   | inline base64 wire（复用 helper，不缩放）                 | 自设（与 T2-P0-012 多模态 wire 对齐）     | 重构 `ChatMessageContentPart` helper 签名为 `(mime, &Path)`；executor 走 metadata 预检（§2.5）→ helper → tool→user 注入       | §4.2 |
+| 3   | 可选 `hashline=true` 输出 `N#AB:`                     | pi_agent_rust                   | read schema 加 `hashline?: bool` + executor 分支                                                                   | §4.3 |
+| 4   | hashline 内容指纹（互补 R5）                              | pi_agent_rust                   | 复用 §4.3 hashline 输出做二次校验                                                                                        | §4.4 |
 
+
+#### 4.0 PR-RJ-0：helper 签名重构（前置子 PR，不动分）
+
+> **概念前置**：T2-P0-012 多模态 wire 已合入的 `image_b64` / `file_b64` helper 当前签名是 `(mime, base64_string)`——**仅测试代码在用**。read T3 要把这条通道接到工具产物上，需要把 helper 改成「传 mime + 文件路径」，**helper 内部** 完成读盘 + metadata 校验 + base64，避免 read 端和 helper 端各做一次校验、且避免大文件先 base64 字符串化（base64 比原文胀 33%）再校验大小。
+
+```text
+旧（当前已合入，仅测试用）:                  新（PR-RJ-0 重构后，read 复用）:
+┌─────────────────────────────┐              ┌─────────────────────────────────────┐
+│ image_b64(mime, b64_string) │              │ image_b64(mime, &Path)               │
+│   ├─ decode base64 测长度    │     vs       │   ├─ fs::metadata().len() 校验上限    │
+│   ├─ 与 IMAGE_MAX_BYTES 比  │              │   ├─ fs::read 读盘                    │
+│   ├─ 校验 MIME 白名单        │              │   ├─ base64 编码                      │
+│   └─ 构造 InputImage        │              │   ├─ 校验 MIME 白名单                  │
+└─────────────────────────────┘              │   └─ 构造 InputImage                 │
+        ↑ 调用方需先把文件读到 String         └─────────────────────────────────────┘
+        ↑ 大文件先胀 33% base64 再校验大小            ↑ read 工具直接 image_b64(mime, &path)
+        ↑ 内存压力 + 校验时机晚                        ↑ 内存压力小 + metadata 阶段就能拒
+```
+
+- **签名变更**（[`pi-rust-wasm/src/core/llm/types.rs`](../../../../src/core/llm/types.rs)，line 117–165）：
+  ```rust
+  // 重构前
+  pub fn image_b64(mime_type: impl Into<String>, data: String) -> Result<Self, AppError>;
+  pub fn file_b64(filename: impl Into<String>, mime_type: impl Into<String>, data: String) -> Result<Self, AppError>;
+
+  // 重构后
+  pub fn image_b64(mime_type: impl Into<String>, path: impl AsRef<Path>) -> Result<Self, AppError>;
+  pub fn file_b64(filename: impl Into<String>, mime_type: impl Into<String>, path: impl AsRef<Path>) -> Result<Self, AppError>;
+  ```
+- **helper 内部职责**（一处而非两处）：
+  1. `std::fs::metadata(path)?.len()` 取文件大小；
+  2. 与 `IMAGE_MAX_BYTES` (4.5 MiB) / `FILE_MAX_BYTES` (25 MiB) 比对，超限直接返结构化错误（`AppError::Llm`）；
+  3. `std::fs::read(path)?` 读字节；
+  4. `base64::engine::general_purpose::STANDARD.encode(...)`；
+  5. 校验 MIME 白名单（图片）；
+  6. 构造 `InputImage` / `InputFile` 变体。
+- **调用方收敛**：
+  - 现有调用方（仅测试）：`tests/openai_responses_integration_tests.rs` / `tests/llm_multimodal/*` / 单测——全部由"读 base64 字符串 fixture 再传给 helper"改为"传 fixture 文件路径"。
+  - 新增调用方（PR-RJ）：`primitive/executor.rs` read 命中 Image/Pdf 时直接 `image_b64(mime, &resolved_path)` / `file_b64(filename, mime, &resolved_path)`。
+- **不动分**：纯重构，能力不变；评分维持 7.5。
+- **为什么单独一个 PR-RJ-0 而不是直接并入 PR-RJ**：helper 重构涉及修改已合入的 `pi-rust-wasm/src/core/llm/types.rs` 与全部测试 fixture，**改动面与 PR-RJ 业务逻辑正交**；单独一个 PR 让 reviewer 一眼看清"只是签名变了"，避免 PR-RJ 业务 PR diff 被 fixture 重写淹没。
+- 验证测试（PR-RJ-0 内）：
+  - `image_b64_helper_reads_path_and_validates_metadata_size`（断言传入 4.5 MiB+1 字节文件 → 在 `read` 之前就报错）
+  - `file_b64_helper_reads_path_and_validates_metadata_size`
+  - `image_b64_helper_rejects_non_whitelisted_mime`（保留原有 MIME 白名单测试，只换签名）
 
 #### 4.1 discriminated union `Image / Pdf / FileUnchanged`（R2 #1，取自 cc-fork）
 
@@ -616,79 +685,95 @@ flowchart LR
 ```text
 read("photo.png")
    │
-   ├─ 路由：扩展名 + magic bytes 双重检查
-   │        .png/.jpg/.gif/.webp           → Image
-   │        .pdf                           → Pdf
-   │        FILE_UNCHANGED 命中（§3.2）    → FileUnchanged
-   │        其余                           → Text
+   ├─ 路由：扩展名 + 头几字节 magic 判 mime（不解码、不缩放）
+   │        .png + 89 50 4E 47           → Image  mime=image/png
+   │        .jpg/.jpeg + FF D8 FF        → Image  mime=image/jpeg
+   │        .gif + 47 49 46 38           → Image  mime=image/gif
+   │        .webp + RIFF....WEBP         → Image  mime=image/webp
+   │        .pdf + 25 50 44 46           → Pdf    mime=application/pdf
+   │        FILE_UNCHANGED 命中（§3.2）  → FileUnchanged
+   │        其余                          → Text
    ↓
 enum ReadResult {
     Text         { content, num_lines, start_line, total_lines }
-    Image        { base64, mime, original_size, dimensions }     ← §4.2 处理
-    Pdf          { base64, original_size, pages }                ← 可选实现
-    FileUnchanged{ path }                                         ← §3.2 联动
+    Image        { base64, mime, original_size }         ← §4.2 走 helper，不带 dimensions
+    Pdf          { base64, mime, original_size }         ← 与 Image 同形态，仅 mime 不同
+    FileUnchanged{ path }                                ← §3.2 联动
 }
    │
    ↓
-agent_loop/tool_exec.rs 序列化为不同 LLM content block:
-   • Text          → "type": "text"
-   • Image         → "type": "image" / "image_url"     ← §4.2 ⑩ 序列化
-   • Pdf           → "type": "text" + base64 hint
-   • FileUnchanged → "type": "text" 短句（节省 token）
+agent_loop/tool_exec.rs 按 LLM 路径分发（详见 §4.2）:
+   • Text          → tool 消息 "type": "text"
+   • Image / Pdf   → tool 消息 "type": "text" 占位句 + 注入下一条 user 消息 Parts
+   • FileUnchanged → tool 消息 "type": "text" 短句（节省 token）
 ```
 
-- **不再字符串化 image**：旧设计若把 base64 拼到 text 里，模型只能描述十六进制乱码；enum + content block 让 vision LLM 真正"看到"图。
-- **PDF 分支可选**：见原文，按本迭代预算决定（砍掉总分仍 ≈ 8.5）。
-- **FileUnchanged 与 §3.2 dedup 联动**：read_state 命中时直接返 `FileUnchanged`，省整个 base64 / 文件内容 token。
+- **不再字符串化 image**：旧设计若把 base64 拼到 text 里，模型只能描述十六进制乱码；enum + helper 复用让 vision LLM 真正"看到"图。
+- **不引解码 / 缩放依赖**：路由仅靠扩展名 + 头 4–12 字节 magic 判 mime；字节流原样交给 helper 做 base64。这样 `image` / `pdf-extract` / `lopdf` 全部不引入，`Cargo.lock` 零增长。
+- **FileUnchanged 与 §3.2 dedup 联动**：`read_state` 命中时直接返 `FileUnchanged`，省整个 base64 / 文件内容 token。
 - 把单一字符串结果改为 enum：
   ```rust
   enum ReadResult {
       Text { content: String, num_lines: u64, start_line: u64, total_lines: u64 },
-      Image { base64: String, mime: String, original_size: u64, dimensions: ImageDims },
-      Pdf { base64: String, original_size: u64, pages: u32 },
+      Image { base64: String, mime: String, original_size: u64 },
+      Pdf { base64: String, mime: String, original_size: u64 },
       FileUnchanged { path: String },
   }
   ```
-  对齐 `[cc-fork-01/.../FileReadTool/FileReadTool.ts](../../../../../cc-fork-01/src/tools/FileReadTool/FileReadTool.ts)` `outputSchema` 248–331。
+  形态对齐 `[cc-fork-01/.../FileReadTool/FileReadTool.ts](../../../../../cc-fork-01/src/tools/FileReadTool/FileReadTool.ts)` `outputSchema` 248–331，但**去掉** `dimensions` / `pages` 字段（不解码就拿不到，且 LLM 也不需要）。
 - 通过扩展名 + magic bytes 路由：
-  - `.png/.jpg/.jpeg/.gif/.webp` → Image（实现见 §4.2）
-  - `.pdf` → Pdf（PDF 实现可选，见下）
+  - `.png/.jpg/.jpeg/.gif/.webp` + 头 4–12 字节 magic 双重确认 → Image
+  - `.pdf` + `25 50 44 46`（`%PDF`）→ Pdf
   - 其他 → Text
 - 保留 `FileUnchanged` 与 §3.2 `FILE_UNCHANGED_STUB` 路径融合（命中即返）。
-- **PDF 分支可选实现**（按本迭代预算决定是否落地）：
-  - 候选 crate：`pdf-extract`（纯文本抽取）/ `lopdf`（更底层）。
-  - 简化方案：先支持「PDF 直接 base64 + 页数提示」，文本抽取留给后续；与 cc-fork「inline below threshold, otherwise extract pages」对齐但不做拆页落盘。
-  - 阈值：`PDF_INLINE_THRESHOLD = 4 MiB`；超过返回 `Pdf` + 提示「文件过大，建议下载后用专用工具处理」。
-  - 砍单方案：见 §7 风险与回滚（不做 PDF 总分仍 ≈ 8.5）。
-- 验证测试：`read_pdf_inline_below_threshold` · `read_pdf_oversize_returns_hint`。
+- 验证测试（用 [`tests/fixtures/llm_multimodal/sample_image.png`](../../../../tests/fixtures/llm_multimodal/sample_image.png) / `sample_pdf_b64.txt` decode 后的真实 PDF）：
+  - `read_routes_png_to_image_variant`
+  - `read_routes_pdf_to_pdf_variant`
+  - `read_unknown_extension_falls_back_to_text`
 
-#### 4.2 图像 1568px 长边降采样（R2 #2，取自 cc-fork）
+#### 4.2 inline base64 wire（复用 helper，不缩放）（R2 #2，自设，与 T2-P0-012 多模态 wire 对齐）
 
-> **概念前置**：1568px 是 Anthropic Vision 推荐的图像长边上限——超过会被服务端二次缩放（既浪费 token 又损失细节）；本地预先按长边缩到 ≤ 1568 既省 token 又保清晰度。
+> **概念前置**：本仓走 OpenAI Responses API + 4.5 MiB inline 上限，**不需要** cc-fork 的 1568px 缩放（那是 Anthropic 服务端推荐）。read 命中图片 / PDF 时：
+> ① 在 metadata 阶段判大小（§2.5），不达标早拒；
+> ② 调 [`ChatMessageContentPart::image_b64(mime, &Path)`](../../../../src/core/llm/types.rs)（PR-RJ-0 重构后签名）由 helper 内部读盘 + base64；
+> ③ tool message 文本写占位句，**真正的图像 part 注入到下一条 user 消息的 `Parts`**——因为 OpenAI 的 `role: "tool"` 消息不接受图像 part（与 [`openai_responses.rs::build_responses_input`](../../../../src/core/llm/openai_responses.rs) 的 `Tool` 角色丢弃非 text part 一致）。
 
 ```text
-原图 4096×3072（4:3）              缩后 1568×1176
-┌──────────────────────────┐       ┌────────────┐
-│                          │       │            │
-│         原 图            │  →    │   缩 图    │   长边 4096 → 1568（÷ 2.6）
-│      （12.6 MP）         │       │ (1.84 MP)  │   短边按比例 3072 → 1176
-│                          │       │            │
-└──────────────────────────┘       └────────────┘
-       原始 token ≈ 1500                token ≈ 600（≈ 减 60%）
-       服务端会再次缩放                 已在本地推荐范围内
-       浪费 1 次上传 + 模糊             清晰度保留 + token 最优
+read("photo.png")  ──executor──▶ ReadResult::Image { base64, mime, original_size }
+                                                    │
+                                                    ▼
+                                  agent_loop / tool_exec read 分支
+                                                    │
+            ┌───────────────────────────────────────┴───────────────────────────────────────┐
+            │ OpenAI 路径（本期）                                                              │
+            │                                                                                │
+            │   tool message:                                                                │
+            │     role: "tool", tool_call_id: <id>                                           │
+            │     content: "Image saved as next user input. See vision content for details." │
+            │                                                                                │
+            │   下一条 user message:                                                          │
+            │     role: "user"                                                               │
+            │     content: Parts [ InputImage { mime, data: <base64> } ]                     │
+            │              （由 ChatMessageContentPart::image_b64(mime, &Path) 构造）          │
+            │                                                                                │
+            └───────────────────────────────────────┬───────────────────────────────────────┘
+                                                    │
+            ┌───────────────────────────────────────┴───────────────────────────────────────┐
+            │ Anthropic 路径（本期不实现，仅注释预留）                                          │
+            │   tool_result block 直接内嵌 image block，无需注入下一条 user                     │
+            └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **算法**：`image::imageops::resize`（默认 Lanczos3 高质量）；只缩长边，按比例算短边，保持纵横比。
-- **大小阈值**：`MAX_IMAGE_BYTES = 10 MiB`，超限走「按原始大小直 base64 + 建议下采样」分支（不在 server 端二次拒）。
-- **不取 cc-fork token-aware compress**：依赖 Anthropic SDK，wasm 环境无对应接口（§0.A.3 R2 #2 拒因）。
-- 用 `image` crate（`cargo add image --features png,jpeg,gif,webp` —— 编译期允许）：
-  - 限制 `MAX_IMAGE_BYTES = 10 MiB`，超限 → 走「按原始大小直 base64 但建议下采样」分支；
-  - 当宽或高 > 1568px（Anthropic 推荐上限）→ 用 `image::imageops::resize` 缩到长边 1568；
-  - 输出 `dimensions { original_w/h, display_w/h }`。
-- 在 `[src/core/agent_loop/tool_exec.rs](../../../../src/core/agent_loop/tool_exec.rs)` read 分支：检测到 `ReadResult::Image` 时，把工具结果序列化为 LLM 可识别的图片 content block（OpenAI `image_url` / Anthropic `image` 二选一，按现有 provider 适配）。
-- **不取** cc-fork token-aware compress：依赖 Anthropic SDK，wasm 环境无对应接口（§0.A.3 R2 #2 拒因）。
-- 验证测试：`read_image_png_returns_base64_and_dims` · `read_image_oversize_resizes_to_long_edge_1568` · `tool_exec_image_result_serialized_as_content_block`（agent_loop 集成）。
+- **OpenAI tool→user 注入边界**（PR-RJ 最大风险）：`role: "tool"` 消息只接受 string content，不接受图像 part；这是与刚合入的 T2-P0-012 多模态 wire 一致的约束（[`openai_responses.rs::part_to_responses_value`](../../../../src/core/llm/openai_responses.rs) 对 `System / Assistant / Tool` 角色丢弃非 text part）。本期改为：tool 消息文本写占位句 + 下一条 user 消息的 `Parts` 注入实际图像 part。
+- **不缩放、不解码**：4.5 MiB inline 上限内 vision 模型可识别（与 T2-P0-012 集成测试 `responses_inline_image_describe_roundtrip` 实测命中"a happy beagle..."一致）；不引 `image` crate，`Cargo.lock` 零增长。
+- **helper 复用**：调用 PR-RJ-0 重构后的 `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)`，helper 内部完成 metadata 二次校验 + 读盘 + base64；executor 端零重复实现。
+- **大小预检在 §2.5**：read 入口 metadata 阶段已经做掉 `IMAGE_MAX_BYTES = 4.5 MiB` / `FILE_MAX_BYTES = 25 MiB` 拒绝，**不**走「超限缩放」分支（cc-fork 那套要 `image` crate）。
+- **Anthropic 路径预留**：`tool_result` 块支持嵌 image block；本期仅在 [`tool_exec.rs`](../../../../src/core/agent_loop/tool_exec.rs) 注释里写「Anthropic 路径未来可走 tool_result.image」，**不**实现，等接入 Anthropic provider 时再加。
+- 验证测试（用 [`tests/fixtures/llm_multimodal/sample_image.png`](../../../../tests/fixtures/llm_multimodal/sample_image.png) 真图）：
+  - `read_image_png_returns_base64_via_helper`（断言 `ReadResult::Image.base64` 与 helper 输出一致，无 dimensions 字段）
+  - `tool_exec_image_result_injects_into_next_user_message_parts`（agent_loop 集成：read PNG → 下一条 user message 的 `Parts` 含 `InputImage`，tool message content 是占位句）
+  - `tool_exec_pdf_result_injects_into_next_user_message_parts`（同上，PDF 真文件）
+  - `read_oversize_image_rejected_at_metadata_stage`（已在 §2.5 列）
 
 #### 4.3 可选 `hashline=true` 输出 `N#AB:`（R3 #2，取自 pi_agent_rust）
 
@@ -776,12 +861,12 @@ T2   agent edit foo.rs（基于 T0 旧上下文）
 #### 4.5 测试一览
 
 
-| 落地点               | 测试用例                                                                                                                                                             |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| §4.1 union schema | `read_pdf_inline_below_threshold` · `read_pdf_oversize_returns_hint`                                                                                             |
-| §4.2 image 降采样    | `read_image_png_returns_base64_and_dims` · `read_image_oversize_resizes_to_long_edge_1568` · `tool_exec_image_result_serialized_as_content_block`（agent_loop 集成） |
-| §4.3 hashline 输出  | `read_hashline_format_matches_pi_agent_rust`                                                                                                                     |
-| §4.4 hashline 互补  | （集成在 §4.3 用例内，验证 hash 错配拒绝路径）                                                                                                                                    |
+| 落地点                            | 测试用例（图片 / PDF 用例统一用 [`tests/fixtures/llm_multimodal/`](../../../../tests/fixtures/llm_multimodal/) 真实文件）                                                                                                  |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| §4.1 union schema 路由             | `read_routes_png_to_image_variant` · `read_routes_pdf_to_pdf_variant` · `read_unknown_extension_falls_back_to_text`                                                                                |
+| §4.2 helper 复用 + tool→user 注入   | `read_image_png_returns_base64_via_helper` · `tool_exec_image_result_injects_into_next_user_message_parts` · `tool_exec_pdf_result_injects_into_next_user_message_parts`（agent_loop 集成）；`read_oversize_image_rejected_at_metadata_stage` 已在 §2.5 |
+| §4.3 hashline 输出                | `read_hashline_format_matches_pi_agent_rust`                                                                                                                                                       |
+| §4.4 hashline 互补                | （集成在 §4.3 用例内，验证 hash 错配拒绝路径）                                                                                                                                                                      |
 
 
 ## 3. 协议（入参 / 出参 / Schema）
@@ -791,12 +876,13 @@ T2   agent edit foo.rs（基于 T0 旧上下文）
 ### 3.1 入参 `ReadArgs`（目标 schema）
 
 
-| 字段         | JSON 类型           | 必填    | 默认值   | 说明                                       |
-| ---------- | ----------------- | ----- | ----- | ---------------------------------------- |
-| `path`     | string            | **是** | —     | 绝对或相对路径；经 `PermissionGate` Read。         |
-| `offset`   | integer ≥ 1       | 否     | 1     | 1-based 行号；与 §2.1 分页窗口一致。                |
-| `limit`    | integer 1..=10000 | 否     | 2000  | 最大返回行数；与 cc-fork `MAX_LINES_TO_READ` 对齐。 |
-| `hashline` | boolean           | 否     | false | true 时 Text 分支输出 `N#AB:line`（§2 §4.3）。   |
+| 字段              | JSON 类型           | 必填    | 默认值   | 说明                                                                      |
+| --------------- | ----------------- | ----- | ----- | ----------------------------------------------------------------------- |
+| `path`          | string            | **是** | —     | 绝对或相对路径；经 `PermissionGate` Read。                                        |
+| `offset`        | integer ≥ 1       | 否     | 1     | 1-based 行号；与 §2.1 分页窗口一致。                                               |
+| `limit`         | integer 1..=10000 | 否     | 2000  | 最大返回行数；与 cc-fork `MAX_LINES_TO_READ` 对齐。                                |
+| `line_numbers`  | boolean           | 否     | true  | Text 分支是否输出 `cat -n` 行号前缀；由 LLM 控制（如要把内容 pipe 给 diff 工具时设 false）。       |
+| `hashline`      | boolean           | 否     | false | true 时 Text 分支输出 `N#AB:line`（§2 §4.3）；与 `line_numbers` 互斥（hashline 优先）。 |
 
 
 ### 3.2 出参 `ReadResult`（discriminated union）
@@ -805,8 +891,8 @@ T2   agent edit foo.rs（基于 T0 旧上下文）
 | 变体              | 字段                                                  | 说明                                     |
 | --------------- | --------------------------------------------------- | -------------------------------------- |
 | `Text`          | `content`, `num_lines`, `start_line`, `total_lines` | 默认文本；可叠 cat-n / hashline。              |
-| `Image`         | `base64`, `mime`, `original_size`, `dimensions`     | 经 magic + 扩展名路由；1568px 长边降采样（§2 §4.2）。 |
-| `Pdf`           | `base64`, `original_size`, `pages`                  | 可选；超阈值返回 hint。                         |
+| `Image`         | `base64`, `mime`, `original_size`                   | 经扩展名 + magic 头几字节路由判 mime；不解码、不缩放；由 helper 在 metadata 阶段做大小预检（§2 §4.2）。 |
+| `Pdf`           | `base64`, `mime`, `original_size`                   | 与 `Image` 同形态，仅 mime = `application/pdf`；不解析、不抽页；25 MiB metadata 阶段拒。 |
 | `FileUnchanged` | `path`                                              | dedup stub，短句省 token（§2 §3.2）。         |
 
 
@@ -827,12 +913,12 @@ T2   agent edit foo.rs（基于 T0 旧上下文）
 
 ### 3.4 配置与环境变量
 
+> **设计决定**：`line_numbers` / `hashline` 不进 config，由 LLM 通过 schema 字段直接控制；config 只保留磁盘资源相关的硬上限。这样既避免管理员侧静默改变模型上下文，又把工具开关的责任留给 LLM 推理过程（与 cc-fork / pi_agent_rust 同口径）。
 
-| 键                               | 默认     | 说明                  |
-| ------------------------------- | ------ | ------------------- |
-| `[tools.read] max_bytes`        | 25 MiB | 裸读字节上限；有分页窗口时可绕过。   |
-| `[tools.read] line_numbers`     | true   | cat-n 行号开关。         |
-| `[tools.read] hashline_default` | false  | 可选；若实现默认关 hashline。 |
+
+| 键                          | 默认     | 说明                                                                          |
+| -------------------------- | ------ | --------------------------------------------------------------------------- |
+| `[tools.read] max_bytes`   | 25 MiB | 文本路径裸读字节上限；有 `offset` / `limit` 时可绕过；图片 / 文件 inline 上限由 `types.rs` 常量集中管理，不进 config。 |
 
 
 ---

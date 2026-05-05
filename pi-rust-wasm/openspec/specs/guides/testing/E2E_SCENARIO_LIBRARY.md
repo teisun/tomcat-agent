@@ -67,7 +67,12 @@
 | E2E-CLI-018 | 自动 | `path_with_intent_silent_passthrough_contract` | 用户输入「路径 + 意图」时不触发本地路径授权命令 | `pi chat` → 输入 `<abs-path> 看下里面有什么文件` | `parse_chat_command` 返回 `NotACommand`；自动化见 `tests/path_command_e2e.rs` |
 | E2E-CLI-019 | 人工 | `manual_path_command_denied_shows_cancel_only` | 用户通过 `/path` 授权命中 deny 规则的路径时不能扩大授权 | 预置 `primitive.path_rules=[{path=<secret>, mode="deny"}]` → `pi chat` → 输入 `/path <secret>` | 仅允许取消/不授权；不得展示永久允许、本次允许或工作区写授权选项；自动化回归见 `path_menu_with_deny_rule_hides_authorization_choices` |
 | E2E-CLI-020 | 人工 | `manual_config_set_path_rules_runtime_effective` | 用户在同一会话内通过配置工具新增 deny 规则后立即生效 | `pi chat` → 触发 `config_set primitive.path_rules` 追加 deny → 再请求 read/write 同一路径 | 后续工具调用被 deny 拦截，无需重启；自动化回归见 `runtime_deny_rule_overrides_existing_session_grant` / `config_set_array_path_rule_appends_with_json_value` |
-| E2E-CLI-021 | 自动 | `read_file_binary_returns_product_error` | 用户要求读取二进制或非 UTF-8 文件时获得明确错误 | 构造非 UTF-8 文件 → `read_file` | 返回产品化错误，提示二进制/非 UTF-8，不把乱码注入上下文 |
+| E2E-CLI-021 | 自动 | `read_binary_returns_structured_hint` | 用户要求读取二进制或非 UTF-8 文件时获得明确错误 | 构造未知扩展 + 含 NUL 字节文件 → `read` | 返回产品化错误，提示「binary / non-UTF-8 + 首字节 hex」，不把乱码注入上下文；自动化见 `tests/read_tool_tests.rs` |
+| E2E-CLI-021a | 自动 | `read_text_offset_limit_window_with_line_numbers` | 用户用 `read` 工具按窗口查看文件并保留绝对行号 | 写 20 行文件 → `read{path,offset:15,limit:3,line_numbers:true}` | 返回 `    15\tL15\n    16\tL16\n    17\tL17\n` 形态；分页绝对行号；自动化见 `tests/read_tool_tests.rs` |
+| E2E-CLI-021b | 自动 | `read_hashline_renders_two_char_hash_prefix` | 用户启用 `hashline` 获取行级 `xxh32` 短指纹用于 hashline 编辑 | 3 行小文件 → `read{path,line_numbers:true,hashline:true}` | 每行形如 `    1#XX:alpha`（6 + 1 + 2 + 1 + body 字节）；hashline 优先于 `line_numbers`；自动化见 `tests/read_tool_tests.rs` |
+| E2E-CLI-021c | 自动 | `read_png_routes_to_image_and_can_build_input_image_part` | 用户读 PNG 时 `read` 自动走多模态路径并能注入 LLM | 拷贝 fixture PNG → `read` → `ChatMessageContentPart::image_b64(mime,&path)` | 返回 `ReadResult::Image{mime:image/png,filename,...}`；后续 helper 构造 `input_image` part 成功；自动化见 `tests/read_tool_tests.rs` |
+| E2E-CLI-021d | 自动 | `read_pdf_routes_to_pdf_and_can_build_input_file_part` | 用户读 PDF 时 `read` 自动走多模态路径并能注入 LLM | 写 PDF fixture → `read` → `ChatMessageContentPart::file_b64(filename,mime,&path)` | 返回 `ReadResult::Pdf{mime:application/pdf,filename}`；后续 helper 构造 `input_file` part 成功；自动化见 `tests/read_tool_tests.rs` |
+| E2E-CLI-021e | 自动 | `read_oversize_image_rejected_before_loading_bytes` | 用户读超大图片在 metadata 阶段被拒，避免 base64 膨胀 OOM | 构造 5 MiB PNG-magic blob → `read` | 返回 `AppError::Primitive`，错误信息含 `IMAGE_MAX_BYTES` / size 关键字；不读全文；自动化见 `tests/read_tool_tests.rs` |
 | E2E-CLI-022 | 自动 | `layer0_persist_file_readable` | 大工具结果落盘到 agent runtime trail，不污染 workspace definition | 构造超阈值 tool_result → Layer0 cleanup | 文件写入 `agent_trail_dir/tool-results/{session_id}`；不写入旧 `workspace/<session>/tool-results` 路径；preview 留在上下文 |
 | E2E-CLI-023 | 自动 | `deny_path_command_menu_only_allows_cancel_contract` | 用户通过 `/path` 命中 deny 的路径后不会进入 LLM | 构造 deny `path_rules` → `/path <secret>` 路径授权菜单 | 菜单只允许取消；自动化见 `tests/path_command_e2e.rs` |
 | E2E-CLI-026 | 自动 | `path_help_command_contract` | 用户可通过 `/help` 查看本地命令 | `pi chat` → 输入 `/help` | 输出包含 `/path <绝对路径>` 与 `/help`；解析契约见 `parse_chat_command` 单测 |
@@ -76,7 +81,7 @@
 | E2E-CHAT-025-online | 人工 | `cwd_question_e2e`（待在线补验） | 真实 LLM 回答“当前目录”时看用户 cwd | 含 `OPENAI_API_KEY` 时在临时项目下运行 `pi chat` 并询问当前目录 | 回复包含项目哨兵文件，不包含 `workspace-main` / `.pi_` |
 
 
-**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～026、E2E-EXEC-024、E2E-PROMPT-025-offline 的核心契约已由 `path_command`、`permission::gate`、`core::tools::config`、`tools::primitive`、`compaction`、`system_prompt` 自动化回归覆盖；其中真实终端菜单观感与 E2E-CHAT-025-online 仍按「人工」补验。014、015 待后续补充。
+**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～026、E2E-EXEC-024、E2E-PROMPT-025-offline 的核心契约已由 `path_command`、`permission::gate`、`core::tools::config`、`tools::primitive`、`compaction`、`system_prompt` 自动化回归覆盖；其中真实终端菜单观感与 E2E-CHAT-025-online 仍按「人工」补验。014、015 待后续补充。E2E-CLI-021/021a/021b/021c/021d/021e 已实现于 `tests/read_tool_tests.rs`（PR-RA/RB/RF/RJ/RM 的 6 个集成用例，覆盖文本分页、二进制结构化提示、hashline、PNG/PDF 多模态路由、超限拒绝）。
 
 ---
 

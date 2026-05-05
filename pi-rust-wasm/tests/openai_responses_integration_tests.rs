@@ -125,9 +125,10 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
 
     let image_b64 = SAMPLE_IMAGE_B64.trim();
+    let img_tmp = decode_b64_to_tempfile(image_b64);
     let parts = vec![
         ChatMessageContentPart::text("Describe what you see in this image in one short sentence."),
-        ChatMessageContentPart::image_b64("image/png", image_b64.to_string())?,
+        ChatMessageContentPart::image_b64("image/png", img_tmp.path())?,
     ];
     let request = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
@@ -209,9 +210,10 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
 
     let pdf_b64 = SAMPLE_PDF_B64.trim();
+    let pdf_tmp = decode_b64_to_tempfile(pdf_b64);
     let parts = vec![
         ChatMessageContentPart::text("Summarize the attached PDF in one short sentence."),
-        ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", pdf_b64.to_string())?,
+        ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", pdf_tmp.path())?,
     ];
     let request = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
@@ -257,8 +259,9 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
 #[test]
 fn responses_inline_image_b64_helper_rejects_oversize() {
     let oversize = vec![0u8; IMAGE_MAX_BYTES + 1];
-    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &oversize);
-    let err = ChatMessageContentPart::image_b64("image/png", b64)
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut tmp, &oversize).unwrap();
+    let err = ChatMessageContentPart::image_b64("image/png", tmp.path())
         .expect_err("超 IMAGE_MAX_BYTES 应返回结构化错误");
     let s = err.to_string();
     assert!(
@@ -266,4 +269,16 @@ fn responses_inline_image_b64_helper_rejects_oversize() {
         "错误文案应含 IMAGE_MAX_BYTES，实际: {}",
         s
     );
+}
+
+/// PR-RJ-0：把 inline base64 fixture 解码后写到 tempfile，
+/// 喂给新签名 `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)`。
+fn decode_b64_to_tempfile(b64: &str) -> tempfile::NamedTempFile {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .expect("decode b64 fixture");
+    let mut f = tempfile::NamedTempFile::new().expect("temp file");
+    std::io::Write::write_all(&mut f, &bytes).expect("write temp file");
+    f
 }

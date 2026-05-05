@@ -150,8 +150,16 @@ pub(super) async fn run_tool_calls(
 
         // 工具执行本身是 await 点，用 select! 包住；`kill_on_drop(true)` 由
         // PrimitiveExecutor::execute_bash 内部兜底，保证子进程 / HTTP 连接被及时释放。
-        let (result_content, is_error) = {
-            let exec = tool_exec::execute_tool(&agent.primitive, &agent.config_backend, tc);
+        // PR-RJ T3-c：返回值新增 `follow_up_parts`——image / pdf 等需要在
+        // **下一条 user 消息** 注入 `Parts` 的场景由本调度器在 push tool 之后立刻
+        // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
+        let (result_content, is_error, follow_up_parts) = {
+            let exec = tool_exec::execute_tool(
+                &agent.primitive,
+                &agent.config_backend,
+                Some(&agent.config.read_file_state),
+                tc,
+            );
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -190,6 +198,27 @@ pub(super) async fn run_tool_calls(
 
         messages.push(ChatMessage::tool(&tc.id, &result_content));
         tool_results.push(Message(serde_json::json!({ "content": result_content })));
+
+        // PR-RJ T3-c：read 命中 image / pdf → tool 消息已经写了占位句，
+        // 这里紧接着 push 一条 user 消息把真正的 InputImage / InputFile 注入对话。
+        // 注意时序：必须**在** tool 消息之后、steering break 之前——
+        // 1) tool→user 顺序固定，OpenAI Responses 才能把 part 关联到上一条 tool；
+        // 2) 若 follow-up 之后被 steering break 跳过剩余 tool，下一轮 LLM
+        //    仍能看到完整的「占位句 + 实物」对，不丢图。
+        if !follow_up_parts.is_empty() {
+            let parts_chars: usize = follow_up_parts
+                .iter()
+                .map(|p| match p {
+                    crate::core::llm::ChatMessageContentPart::InputText { text } => text.len(),
+                    crate::core::llm::ChatMessageContentPart::InputImage { .. } => 3600,
+                    crate::core::llm::ChatMessageContentPart::InputFile { .. } => 8000,
+                })
+                .sum();
+            if let Some(ref mut ctx_state) = agent.context_state {
+                ctx_state.on_message_appended(parts_chars);
+            }
+            messages.push(ChatMessage::user_with_parts(follow_up_parts));
+        }
 
         // Steering break：每个 tool 执行后检查 queue；非空则注入 + 跳过剩余。
         let mut q = agent.steering_queue.lock();

@@ -56,6 +56,8 @@ globset = "0.4"
 shell-words = "1"
 ignore = "0.4"
 base64 = "0.22"
+memchr = "2"
+xxhash-rust = { version = "0.8.15", features = ["xxh32"] }
 
 [build-dependencies]
 sha2 = "0.10"

@@ -17,6 +17,7 @@ PI_WASM_INTEGRATION_PARALLEL_TESTS=(
   openai_responses_integration_tests
   context_management_tests
   robustness_tests
+  read_tool_tests
 )
 
 PI_WASM_INTEGRATION_SERIAL_TESTS=(

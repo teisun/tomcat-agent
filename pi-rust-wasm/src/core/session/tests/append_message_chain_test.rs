@@ -18,7 +18,7 @@ fn mk_assistant_tc(ids: &[&str]) -> Value {
             serde_json::json!({
                 "id": *id,
                 "type": "function",
-                "function": { "name": "read_file", "arguments": "{}" }
+                "function": { "name": "read", "arguments": "{}" }
             })
         })
         .collect();

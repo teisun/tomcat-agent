@@ -103,7 +103,7 @@ impl SystemPromptSection for ToolInstructionsSection {
     fn render(&self, _context: &WorkspaceContext) -> String {
         r#"Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
-- Use read_file to examine files before editing
+- Use read to examine files before editing
 - Use search_files to find file paths or content; prefer it over execute_bash with grep/find/ls -R
 - Use edit_file for precise changes (old_content must match the file exactly, including whitespace)
 - Use write_file only for new files or complete rewrites
@@ -124,7 +124,7 @@ impl SystemPromptSection for PagedReadingSection {
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
         r#"- When you see "[Tool result persisted: <path>]", the original content has been saved to disk.
-  You can read specific portions using read_file with offset and limit parameters.
+  You can read specific portions using read with offset and limit parameters.
   Do NOT re-read the entire file; read only the relevant sections you need."#
             .to_string()
     }

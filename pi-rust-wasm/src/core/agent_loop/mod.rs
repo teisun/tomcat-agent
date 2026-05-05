@@ -70,7 +70,7 @@
 //! │   │     │       emit: ExtensionEvent ToolCall → tool_call                    │
 //! │   │     │       execute_tool(tc) → (content, is_error)                       │
 //! │   │     │       emit: ExtensionEvent ToolResult → tool_result                │
-//! │   │     │         ├── read_file / list_dir / write_file                       │
+//! │   │     │         ├── read / list_dir / write_file                            │
 //! │   │     │         ├── edit_file / execute_bash                                │
 //! │   │     │         └── unknown ──► is_error=true                              │
 //! │   │     │       emit: ToolExecutionEnd → tool_execution_end                 │

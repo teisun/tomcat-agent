@@ -5,22 +5,41 @@
 
 ## Filesystem
 
-### `read_file`
+### `read`
 
-- Label: Read File
+- Label: Read
 - Category: `filesystem`
 - Permission scope: `Read`
 - Read only: `true`
 - Destructive: `false`
 - Search hint: `read file text utf-8 inspect`
 
-Read a UTF-8 text file from an authorized path. Use this before editing or when the user asks to inspect file contents. Do not use it for directories, binary files, images, or very large files; use list_dir for directories and explain binary attachment limits when UTF-8 decoding fails.
+Read a file from the local filesystem. Use this before editing or when the user asks to inspect file contents. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of raw decode errors.
 
 Parameters:
 
 ```json
 {
   "properties": {
+    "hashline": {
+      "description": "When true, render each line as `{:>6}#{2-char hash}:{content}` (xxh32 over whitespace-stripped content). Use for hashline-aware edits where you want both line addressing and external-edit detection. Mutually exclusive with line_numbers — hashline takes priority. Defaults to false.",
+      "type": "boolean"
+    },
+    "limit": {
+      "description": "Optional max number of lines to return; defaults to 2000. When the file has more lines, the result includes a `... [N more lines truncated; resume with offset=<next>, limit=<same>]` hint so you can paginate.",
+      "maximum": 10000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "line_numbers": {
+      "description": "Render output with `cat -n` style line numbers (`{:>6}\\t{content}`); defaults to true. Set false only when piping the content into a tool that itself parses line numbers (e.g. diff).",
+      "type": "boolean"
+    },
+    "offset": {
+      "description": "Optional 1-based line number to start reading from. Defaults to 1 (first line).",
+      "minimum": 1,
+      "type": "integer"
+    },
     "path": {
       "description": "Absolute or relative file path to read as UTF-8 text.",
       "type": "string"
@@ -117,7 +136,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `list directory files`
 
-List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read_file or edit_file. It does not recurse; call it on subdirectories as needed instead of guessing paths.
+List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read or edit_file. It does not recurse; call it on subdirectories as needed instead of guessing paths.
 
 Parameters:
 
@@ -147,7 +166,7 @@ Parameters:
 
 Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.
 
-Use this instead of execute_bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read_file when you already know the exact path.
+Use this instead of execute_bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read when you already know the exact path.
 
 Dual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.
 

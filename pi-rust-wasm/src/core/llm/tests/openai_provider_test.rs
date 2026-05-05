@@ -82,10 +82,15 @@ fn is_retriable_returns_false_for_non_llm_error() {
 /// **不可重试**（不被 `is_retriable` 命中），避免在 Agent Loop 的退避循环里反复打。
 #[test]
 fn parts_with_image_returns_structured_error() {
+    use base64::Engine;
     const TINY_PNG_B64: &str =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
-    let part = ChatMessageContentPart::image_b64("image/png", TINY_PNG_B64.to_string())
-        .expect("image_b64 ok");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(TINY_PNG_B64)
+        .unwrap();
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut tmp, &bytes).unwrap();
+    let part = ChatMessageContentPart::image_b64("image/png", tmp.path()).expect("image_b64 ok");
     let msgs = vec![ChatMessage::user_with_parts(vec![
         ChatMessageContentPart::text("see this:"),
         part,

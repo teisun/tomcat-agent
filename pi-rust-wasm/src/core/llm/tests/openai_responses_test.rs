@@ -444,9 +444,22 @@ fn is_retriable_detects_429_and_5xx() {
 const TINY_PNG_B64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
+/// PR-RJ-0：把 inline base64 fixture 解码后写到 tempfile，
+/// 供新签名 `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)` 使用。
+fn write_tempfile_from_b64(b64: &str) -> tempfile::NamedTempFile {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut f, &bytes).unwrap();
+    f
+}
+
 #[test]
 fn user_image_b64_renders_input_image_data_url() {
-    let part = ChatMessageContentPart::image_b64("image/png", TINY_PNG_B64.to_string())
+    let f = write_tempfile_from_b64(TINY_PNG_B64);
+    let part = ChatMessageContentPart::image_b64("image/png", f.path())
         .expect("image_b64 should accept valid input");
     let msg = ChatMessage::user_with_parts(vec![ChatMessageContentPart::text("see this:"), part]);
     let (_ins, input) = build_responses_input(&[msg]);
@@ -468,9 +481,9 @@ fn user_image_b64_renders_input_image_data_url() {
 fn user_file_b64_renders_input_file_data_url() {
     // 一段最小合法 base64（解码后仅 "PDF"），不真发 API；只断言 wire 形状。
     let pdf_b64 = "UERG"; // base64("PDF")
-    let part =
-        ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", pdf_b64.to_string())
-            .expect("file_b64 should accept valid input");
+    let f = write_tempfile_from_b64(pdf_b64);
+    let part = ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", f.path())
+        .expect("file_b64 should accept valid input");
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input(&[msg]);
     let content = &input[0]["content"];
@@ -510,10 +523,10 @@ fn user_file_file_id_renders_file_id_field() {
 fn system_with_image_part_silently_drops_non_text() {
     // System / Assistant / Tool 角色出现非 text part 时 warn 并丢弃；wire 仅取文本。
     let mut sys = ChatMessage::system("");
+    let f = write_tempfile_from_b64(TINY_PNG_B64);
     sys.content = Some(crate::core::llm::types::ChatMessageContent::Parts(vec![
         ChatMessageContentPart::text("system rules"),
-        ChatMessageContentPart::image_b64("image/png", TINY_PNG_B64.to_string())
-            .expect("image_b64 ok"),
+        ChatMessageContentPart::image_b64("image/png", f.path()).expect("image_b64 ok"),
     ]));
     let user = ChatMessage::user("ping");
     let (ins, input) = build_responses_input(&[sys, user]);

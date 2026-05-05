@@ -3,7 +3,8 @@ use super::super::system_prompt::*;
 #[test]
 fn build_system_prompt_contains_tools_and_workspace() {
     let prompt = build_system_prompt("/home/user/workspace");
-    assert!(prompt.contains("read_file"));
+    assert!(prompt.contains("read"));
+    assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("write_file"));
     assert!(prompt.contains("edit_file"));
     assert!(prompt.contains("execute_bash"));
@@ -228,7 +229,8 @@ fn build_system_prompt_with_state_includes_workspace_state() {
     assert!(prompt.contains("/Users/yan/.pi_/workspace-main"));
     assert!(prompt.contains("Agent workspace directory (agent_workspace_dir): /Users/yan/proj"));
     // 默认 4 个 section + 新加的 1 个，仍包含工具说明
-    assert!(prompt.contains("read_file"));
+    assert!(prompt.contains("read"));
+    assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("Current date and time"));
 }
 

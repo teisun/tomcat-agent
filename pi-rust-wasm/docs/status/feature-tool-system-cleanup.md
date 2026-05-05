@@ -6,10 +6,33 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` + `T2-P0-005 子项「多 LLM 层改造 + OpenAI Responses」` |
-| Update Time | 2026-05-05（多模态 fallback 字符估算 + 全量 LLM wire 收口） |
+| Update Time | 2026-05-05（read 工具加强 PR-RA/RB/RF/RJ/RM 6 PR 实施 + 集成测试登记） |
 | Cov% | - |
 
 ## Step-by-Step
+
+### 2026-05-05（同日追加 #4）| read 工具加强：PR-RA/RB/RF/RJ/RM 全部落地 + 集成测试登记
+
+- **动机**：承接计划 `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md`，按 `openspec/specs/architecture/tools/read.md` §0–§4 决策表把 `read_file → read` 命名 + 分页 + 二进制结构化提示 + 行号 + dedup/staleness + image/PDF 多模态 + hashline 一次性补齐到 v3.0。
+- **代码**：
+  - **PR-RA 命名切换**：`src/core/tools/catalog.rs` `read_file → read`（`description` 改 cc-fork 风格短句）；`src/core/agent_loop/tool_exec.rs` 仅留 `"read"` 分支，`"read_file"` 按未知工具回错；`src/core/llm/system_prompt.rs` 全量字面量切换；`src/core/session/manager/context.rs` 用 `OnceLock` 守 `tracing::warn!("legacy tool name: read_file → read")`，**不重定向**历史回放。
+  - **PR-RB T1 read（offset/limit + 二进制 hint + 分块流式 + 25 MiB 上限）**：`src/core/tools/primitive/executor.rs` 新增 `read_window_blocking`（`memchr` 单循环抽窗，跳过段不建行级 `String`）；`src/infra/config/types.rs` 新增 `[tools.read].max_bytes`（默认 `DEFAULT_TOOLS_READ_MAX_BYTES = 25 MiB`），metadata 阶段无 `offset/limit` 时拒大文件；二进制返回结构化 `AppError` 含首字节 hex（不污染上下文）。
+  - **PR-RF T2（行号 + dedup/staleness + FILE_UNCHANGED stub）**：`format_with_line_numbers`（`{:>6}\t{content}`，默认 `line_numbers=true`）；新建 `src/core/tools/read_state.rs`（`ReadStamp{mtime,size,content_hash,offset,limit,is_partial_view}` + `ReadFileState` `RwLock<HashMap<PathBuf,ReadStamp>>` + `FILE_UNCHANGED_STUB`）；`AgentLoopConfig` / `ChatContext` 跨轮持有 `Arc<ReadFileState>`；`tool_exec` dedup 短路命中时返回 stub 字面量。
+  - **PR-RJ T3（多模态 + ChatMessageContentPart 重构）**：
+    - PR-RJ-0：`src/core/llm/types.rs` 重构 `ChatMessageContentPart::image_b64` / `file_b64` 为 `(mime, &Path)`，集中 `metadata` 二次校验 + `read` + base64 编码；`decode_b64_len` 标 `#[allow(dead_code)]` 留作测试 helper。
+    - PR-RJ T3-a：`src/core/tools/primitive/types.rs` 升级 `read` 输出 schema 为 `ReadResult` 4 态枚举（`Text`/`Image`/`Pdf`/`FileUnchanged`）；`PrimitiveExecutor::read` 默认实现回退到 `read_file` → 包成 `Text`，旧 mock **零改动** 升级。
+    - PR-RJ T3-b：`executor.rs` 新增 `detect_inline_mime`（PNG/JPEG/GIF/WebP/PDF magic + ext）+ metadata 阶段 `IMAGE_MAX_BYTES`/`FILE_MAX_BYTES` 预检，命中 → `ReadResult::Image|Pdf`（**只**带元信息，不读字节）。
+    - PR-RJ T3-c：`tool_exec` 返回签名升 `(String, bool, Vec<ChatMessageContentPart>)`；`tool_dispatcher` 在 tool message 之后**注入下一条 user message**承载 image/file part（OpenAI tool→user 注入边界，spec §4.2）。
+  - **PR-RM T3 hashline**：`Cargo.toml` 新增 `xxhash-rust = { version = "0.8.15", features = ["xxh32"] }`；`executor.rs` 新增 `compute_line_hash`（whitespace-stripped + nibble→XX）+ `format_with_hashlines`（`{:>6}#XX:{content}`）；`hashline:bool` 优先于 `line_numbers`，schema 与 system prompt 同步。
+- **测试**：
+  - **lib 单测 +33**（674 全量绿）：T1 read window 6 例、T2 行号/状态 13 例、T3-a/b 路由 4 例、T3-c 多模态注入 + dedup 5 例、PR-RM hashline 2 例、`read_state` 8 例、helper 重构修订 ~10 例。
+  - **集成测试 `tests/read_tool_tests.rs` ＋ 6 例**：`read_text_offset_limit_window_with_line_numbers` / `read_binary_returns_structured_hint` / `read_hashline_renders_two_char_hash_prefix` / `read_png_routes_to_image_and_can_build_input_image_part` / `read_pdf_routes_to_pdf_and_can_build_input_file_part` / `read_oversize_image_rejected_before_loading_bytes`。**全 6 例满足 INTEGRATION_TEST_SPEC §9.0 强制门禁**：入口 `common::setup_logging()`，每用例 `info_span!`，AAA 三阶段各落 `tracing::info!`。
+  - **test-groups 登记**：`scripts/test-groups.sh` `PI_WASM_INTEGRATION_PARALLEL_TESTS` 追加 `read_tool_tests`；`openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md` §7.2 并发组清单同步。
+  - **`docs/tool-catalog.md`** 用 `UPDATE_TOOL_CATALOG=1 cargo run --bin gen-tool-catalog` 重新派生（`read_file` → `read`，5 个新参数 schema 全量覆盖）。
+- **文档**：
+  - `openspec/specs/architecture/tools/read.md` v2 → v3，§0/§1/§2/§3/§4 全量补齐 12 项落地点 + One-Glance Map；`openspec/specs/User_Stories.md` 把单条「`read_file` 二进制错误」扩成「`read` 分页 + 行号 + hashline + dedup + 多模态 + 二进制结构化错误」两条；`E2E_SCENARIO_LIBRARY.md` E2E-CLI-021 拆出 021/021a/021b/021c/021d/021e 6 条 + 「已实现」段引用 `tests/read_tool_tests.rs`。
+  - `pi-rust-wasm/src/lib.rs` / `core/mod.rs` 公开 re-export `ReadResult` / `ReadTextResult` / `ReadBinaryResult`，给集成测试与未来插件层使用。
+- **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --test-threads=1`（674 PASS）、`cargo test --test read_tool_tests`（6 PASS）、`cargo test --test agent_loop_tests`（11 PASS）：PASS。
 
 ### 2026-05-05（同日追加 #3）| Session：`estimate_msg_chars` 覆盖 Parts，fallback 与多模态权重对齐
 

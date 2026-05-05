@@ -15,7 +15,7 @@ pub use confirmation::{
 pub use executor::DefaultPrimitiveExecutor;
 pub use types::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
-    PrimitiveOperation, SearchFileCount, SearchFileMatch, SearchFilesArgs, SearchFilesOutput,
-    SearchFilesOutputMode, SearchFilesQuery, SearchFilesResultMode, SearchFilesStats,
-    SearchFilesTarget, WriteFileResult,
+    PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount,
+    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
+    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
 };

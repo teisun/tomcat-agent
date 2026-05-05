@@ -114,3 +114,16 @@ bash_approval_required = []
 bash_forbidden = []
 # auto_confirm：是否对符合条件（如白名单内）的操作自动确认，无需用户逐条确认。
 auto_confirm = false
+
+# ------------------------------------------------------------------------------
+# [tools] 内建工具的可调上限（每个工具一个子表）
+# 仅放「磁盘 / 安全」相关硬上限；可由 LLM 通过 schema 字段控制的开关
+# （如 read 的 line_numbers / hashline）不进 config，避免管理员侧静默改变模型上下文。
+# ------------------------------------------------------------------------------
+[tools.read]
+# max_bytes：read 工具文本路径的「裸读字节上限」。
+# - 仅当 LLM 未传 offset/limit 时在 metadata 阶段判定，超限直接拒绝；
+# - 传入 offset/limit（即明确分窗）时不触发该上限——大日志可被分窗读。
+# - 默认 25 MiB（介于 cc-fork 256 KiB 与 pi_agent_rust 100 MiB 之间）。
+# - 图片 / PDF inline 上限（4.5 MiB / 25 MiB）由 core::llm::types 集中管理，不进 config。
+max_bytes = 26214400  # 25 * 1024 * 1024

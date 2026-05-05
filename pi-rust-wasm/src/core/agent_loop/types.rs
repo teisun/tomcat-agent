@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
 use crate::core::tools::primitive::PrimitiveExecutor;
+use crate::core::tools::read_state::ReadFileState;
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
@@ -56,6 +57,13 @@ pub struct AgentLoopConfig {
     pub context_config: ContextConfig,
     /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
     pub agent_trail_dir: String,
+    /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 表。
+    ///
+    /// 默认 `Arc::new(ReadFileState::default())`（空表）；`AgentLoop` 析构时
+    /// 随 `Arc` 引用计数归零自动释放（即「session 结束自动 cleanup」）。
+    /// 跨 session 复用同一 `Arc` 时建议在新 session 起点显式调用
+    /// [`ReadFileState::clear`]，避免上一会话的 stamp 干扰新会话的 dedup 判定。
+    pub read_file_state: Arc<ReadFileState>,
 }
 
 impl Default for AgentLoopConfig {
@@ -69,6 +77,7 @@ impl Default for AgentLoopConfig {
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
             agent_trail_dir: String::new(),
+            read_file_state: Arc::new(ReadFileState::default()),
         }
     }
 }

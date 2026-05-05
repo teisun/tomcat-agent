@@ -11,7 +11,8 @@
 //!   * 缺 `context_state` → `applied == false`，无事件。
 //! - `tool_exec::execute_tool`：
 //!   * unknown 工具名 → `(msg, true)`；
-//!   * `read_file` 正常路径 → `(content, false)`。
+//!   * `read` 正常路径 → `(content, false)`；
+//!   * 旧 `read_file` 名 → 走 unknown 分支（PR-RA：运行时无别名）。
 
 use std::sync::Arc;
 
@@ -79,7 +80,7 @@ async fn tool_exec_unknown_tool_returns_is_error() {
         name: "no_such_tool".to_string(),
         arguments: "{}".to_string(),
     };
-    let (msg, is_error) = execute_tool(&primitive, &None, &tc).await;
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
     assert!(is_error, "unknown tool must report is_error=true");
     assert!(
         msg.contains("no_such_tool") || msg.to_lowercase().contains("unknown"),
@@ -88,20 +89,77 @@ async fn tool_exec_unknown_tool_returns_is_error() {
     );
 }
 
-/// read_file 正常路径：execute_tool 返回 `is_error == false`，content 由 mock 直接产出。
+/// read 正常路径：execute_tool 返回 `is_error == false`，content 由 mock 直接产出。
 #[tokio::test]
-async fn tool_exec_read_file_returns_content() {
+async fn tool_exec_read_returns_content() {
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
     let tc = ToolCallInfo {
         id: "r1".to_string(),
-        name: "read_file".to_string(),
+        name: "read".to_string(),
         arguments: r#"{"path":"/tmp/abc"}"#.to_string(),
     };
-    let (msg, is_error) = execute_tool(&primitive, &None, &tc).await;
-    assert!(!is_error, "read_file success must report is_error=false");
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    assert!(!is_error, "read success must report is_error=false");
     assert!(
         msg.contains("/tmp/abc"),
         "content should include path from mock: {}",
+        msg
+    );
+}
+
+/// PR-RA：旧 `read_file` 名 → 运行时按未知工具回错（无别名 / 无重定向）。
+#[tokio::test]
+async fn tool_exec_legacy_read_file_returns_unknown_tool_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "legacy_1".to_string(),
+        name: "read_file".to_string(),
+        arguments: r#"{"path":"/tmp/legacy"}"#.to_string(),
+    };
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    assert!(
+        is_error,
+        "legacy 'read_file' must NOT be aliased to 'read'; it should return is_error=true"
+    );
+    assert!(
+        msg.contains("read_file") || msg.to_lowercase().contains("unknown"),
+        "msg should mention the unknown tool name: {}",
+        msg
+    );
+}
+
+/// PR-RB §2.6：`read.offset = 0` 触发 horizontal gate，返回结构化错误。
+#[tokio::test]
+async fn tool_exec_read_offset_zero_returns_bound_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "b1".to_string(),
+        name: "read".to_string(),
+        arguments: r#"{"path":"/tmp/x","offset":0,"limit":10}"#.to_string(),
+    };
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    assert!(is_error);
+    assert!(
+        msg.contains("offset") && msg.contains(">= 1"),
+        "bound error should mention `offset` and `>= 1`, got: {}",
+        msg
+    );
+}
+
+/// PR-RB §2.6：`read.limit = 99999` 越上界，返回结构化错误。
+#[tokio::test]
+async fn tool_exec_read_limit_over_max_returns_bound_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "b2".to_string(),
+        name: "read".to_string(),
+        arguments: r#"{"path":"/tmp/x","limit":99999}"#.to_string(),
+    };
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    assert!(is_error);
+    assert!(
+        msg.contains("limit") && msg.contains("[1, 10000]"),
+        "bound error should mention `limit` range, got: {}",
         msg
     );
 }

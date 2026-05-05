@@ -139,6 +139,10 @@ pub struct ChatContext {
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 路径授权 UI
     /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
+    /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 状态。
+    /// 由 `ChatContext` 持有 → 每次 turn 创建 `AgentLoopConfig` 时 `Arc::clone` 注入，
+    /// 多轮 turn 内复用同一张表（实现「同 session 跨 turn dedup」）。
+    pub read_file_state: Arc<crate::core::tools::read_state::ReadFileState>,
 }
 
 impl ChatContext {
@@ -261,6 +265,7 @@ impl ChatContext {
             session_grants,
             config_backend,
             gate,
+            read_file_state: Arc::new(crate::core::tools::read_state::ReadFileState::default()),
         })
     }
 
@@ -649,6 +654,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             tool_definitions: build_tool_definitions(),
             context_config: context_config.clone(),
             agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+            read_file_state: ctx.read_file_state.clone(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),

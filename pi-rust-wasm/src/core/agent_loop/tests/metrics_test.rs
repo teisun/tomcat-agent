@@ -30,7 +30,7 @@ async fn context_metrics_update_emitted_before_turn_end() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("call_m1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/tmp/m"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -105,7 +105,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("call_v1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/tmp/v"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -182,7 +182,7 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("call_a1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -193,7 +193,7 @@ async fn context_metrics_compaction_count_accumulates_across_rounds() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("call_a2".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -270,7 +270,7 @@ async fn context_metrics_update_skipped_when_no_context_state() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("call_n1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/tmp/n"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {

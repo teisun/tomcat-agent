@@ -68,10 +68,12 @@
 
 | 通道 | helper | 校验 |
 |------|--------|------|
-| **A · inline base64**（同一请求内附带字节） | `ChatMessageContentPart::image_b64(mime, b64)` | base64 合法 + `<= IMAGE_MAX_BYTES` (4.5 MB) + MIME ∈ {png,jpeg,gif,webp} |
-| | `ChatMessageContentPart::file_b64(filename, mime, b64)` | base64 合法 + `<= FILE_MAX_BYTES` (25 MB) |
+| **A · inline base64**（同一请求内附带字节） | `ChatMessageContentPart::image_b64(mime, &Path)` | metadata 字节 `<= IMAGE_MAX_BYTES` (4.5 MB) + MIME ∈ {png,jpeg,gif,webp}；helper 内部 `read + base64` |
+| | `ChatMessageContentPart::file_b64(filename, mime, &Path)` | metadata 字节 `<= FILE_MAX_BYTES` (25 MB)；helper 内部 `read + base64` |
 | **B · 已知 file_id 透传**（已经从 OpenAI Files API 拿到 id） | `ChatMessageContentPart::image_file_id(id)` | 非空 |
 | | `ChatMessageContentPart::file_file_id(id, filename?)` | 非空 |
+
+> **PR-RJ-0 重构**：`image_b64` / `file_b64` 已统一为 `(mime, &Path)` 签名，让 helper 自己读盘 + base64，避免「`read` 工具读一遍 + LLM 客户端再读一遍」的重复 IO 与重复校验。已知 `file_id` 通道（B）保持不变。
 
 > **「读字节 → 上传 → 拿 file_id」一站式 helper 不在本期**：归到独立任务 **T2-P0-013 | llm-files-upload-manager**（multipart `POST /v1/files` 客户端 + 生命周期 + reuse cache + 异步 helper），见 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §T2-P0-013。
 
@@ -83,11 +85,10 @@ use pi_wasm::{resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, Llm
 let cfg = LlmConfig { provider: "openai-responses".to_string(), ..LlmConfig::default() };
 let provider = resolve_llm(&cfg)?;
 
-// A 通道：inline 图片
-let img_b64 = std::fs::read_to_string("photo.png.b64")?;
+// A 通道：inline 图片（PR-RJ-0：直接传路径，helper 自动读盘 + base64）
 let parts = vec![
     ChatMessageContentPart::text("Describe this image:"),
-    ChatMessageContentPart::image_b64("image/png", img_b64)?,
+    ChatMessageContentPart::image_b64("image/png", "photo.png")?,
 ];
 
 // B 通道：已知 file_id

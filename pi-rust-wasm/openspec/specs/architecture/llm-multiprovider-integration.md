@@ -313,8 +313,8 @@ pi-rust-wasm **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire
 | Helper | 通道 | 校验 |
 |--------|------|------|
 | `ChatMessageContentPart::text(s)` | — | — |
-| `image_b64(mime, b64)` | A：inline | base64 合法 + `<= IMAGE_MAX_BYTES` (4.5 MB) + MIME ∈ {png,jpeg,gif,webp} |
-| `file_b64(filename, mime, b64)` | A：inline | base64 合法 + `<= FILE_MAX_BYTES` (25 MB) |
+| `image_b64(mime, &Path)` | A：inline | metadata 字节 `<= IMAGE_MAX_BYTES` (4.5 MB) + MIME ∈ {png,jpeg,gif,webp}；helper 内部读盘 + base64（PR-RJ-0 重构） |
+| `file_b64(filename, mime, &Path)` | A：inline | metadata 字节 `<= FILE_MAX_BYTES` (25 MB)；helper 内部读盘 + base64（PR-RJ-0 重构） |
 | `image_file_id(file_id)` | B：已知 id | 非空 |
 | `file_file_id(file_id, filename?)` | B：已知 id | 非空 |
 

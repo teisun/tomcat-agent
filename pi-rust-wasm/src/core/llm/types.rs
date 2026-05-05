@@ -8,9 +8,11 @@
 //! 三态枚举：`InputText` / `InputImage` / `InputFile`，对齐 OpenAI Responses 的
 //! `input_text` / `input_image` / `input_file` content part 形状。
 //!
-//! - **A 通道（inline base64）**：调用方持有 `(mime_type, base64_data)`，通过
-//!   `image_b64` / `file_b64` helper 构造；wire 翻译时拼成 `data:{mime};base64,{b64}`
-//!   data URL，封装在 [`OpenAiResponsesProvider`] 内，类型层不暴露 wire 字符串。
+//! - **A 通道（inline base64）**：调用方传 `(mime_type, &Path)` 让 helper
+//!   `image_b64` / `file_b64` 自己**打开文件 + metadata 二次校验 + 读字节 + base64
+//!   编码**（PR-RJ-0 重构：避免 read 工具与 LLM 客户端各写一遍 IO）；wire 翻译
+//!   时再拼 `data:{mime};base64,{b64}` data URL，封装在 [`OpenAiResponsesProvider`]
+//!   内，类型层不暴露 wire 字符串。
 //! - **B 通道（已知 file_id 透传）**：调用方已经从 OpenAI Files API 拿到 file_id
 //!   时，通过 `image_file_id` / `file_file_id` helper 构造；本期不提供"读字节 → 上传 →
 //!   拿 id" 一站式 helper，那部分由独立任务 `T2-P0-013 | llm-files-upload-manager` 提供。
@@ -19,6 +21,8 @@
 //! - `IMAGE_MAX_BYTES = 4_718_592` (4.5 MB)，与 [`pi_agent_rust`] 一致
 //! - `FILE_MAX_BYTES = 25 * 1024 * 1024` (25 MB)，按 OpenAI Responses 单次请求体硬上限近似
 //! - image MIME 仅允许 `image/{png,jpeg,gif,webp}` 白名单（与 [`pi_agent_rust`] 对齐）
+
+use std::path::Path;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -114,10 +118,24 @@ impl ChatMessageContentPart {
         Self::InputText { text: s.into() }
     }
 
-    /// inline 图片 helper：校验 base64 格式 / 大小 / MIME 白名单。
+    /// inline 图片 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputImage`。
     ///
-    /// `data` 应为标准 base64 字符串（不带 `data:` 前缀）。
-    pub fn image_b64(mime_type: impl Into<String>, data: String) -> Result<Self, AppError> {
+    /// 调用方提供 `(mime_type, &Path)`，helper 内部完成：
+    /// 1. MIME 白名单校验（`image/{png,jpeg,gif,webp}`）
+    /// 2. `metadata().len()` **预检**（廉价，无 base64 33% 膨胀开销）
+    /// 3. `std::fs::read(path)` 读字节
+    /// 4. base64 编码并装入 `InputImage` variant
+    ///
+    /// 设计契约：
+    /// - **不**接受 `data: String` 入参——避免 `read` 工具与 LLM 客户端各写一遍
+    ///   `decode_b64_len + size check`，把唯一可信数据源固定到「文件路径」。
+    /// - metadata 与 `read` 工具的 25 MiB metadata 预检**互不冲突**：read 工具在
+    ///   路由前先做一道 metadata；本 helper 是 LLM 类型层的最后一道，确保即便
+    ///   绕过 read 工具直接构造 part 也能拒绝超大字节。
+    pub fn image_b64(
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, AppError> {
         let mime = mime_type.into();
         let mime_lower = mime.to_ascii_lowercase();
         if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
@@ -126,14 +144,29 @@ impl ChatMessageContentPart {
                 mime, ALLOWED_IMAGE_MIMES
             )));
         }
-        let decoded_len = decode_b64_len(&data)
-            .map_err(|e| AppError::Llm(format!("image_b64: 非法 base64: {}", e)))?;
-        if decoded_len > IMAGE_MAX_BYTES {
+        let path_ref = path.as_ref();
+        let meta = std::fs::metadata(path_ref).map_err(|e| {
+            AppError::Llm(format!(
+                "image_b64: 无法 stat 路径 {}: {}",
+                path_ref.display(),
+                e
+            ))
+        })?;
+        if meta.len() as usize > IMAGE_MAX_BYTES {
             return Err(AppError::Llm(format!(
                 "image_b64: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
-                decoded_len, IMAGE_MAX_BYTES
+                meta.len(),
+                IMAGE_MAX_BYTES
             )));
         }
+        let bytes = std::fs::read(path_ref).map_err(|e| {
+            AppError::Llm(format!(
+                "image_b64: 读取 {} 失败: {}",
+                path_ref.display(),
+                e
+            ))
+        })?;
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Self::InputImage {
             mime_type: Some(mime),
             data: Some(data),
@@ -142,20 +175,34 @@ impl ChatMessageContentPart {
         })
     }
 
-    /// inline 文件 helper：校验 base64 格式 / 大小。
+    /// inline 文件 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputFile`。
+    ///
+    /// 与 [`Self::image_b64`] 相同设计契约：metadata 预检 → 读字节 → base64 → 装 variant。
+    /// 不做 MIME 白名单校验（PDF / 文本 / 二进制都可走 inline 文件通道）。
     pub fn file_b64(
         filename: impl Into<String>,
         mime_type: impl Into<String>,
-        data: String,
+        path: impl AsRef<Path>,
     ) -> Result<Self, AppError> {
-        let decoded_len = decode_b64_len(&data)
-            .map_err(|e| AppError::Llm(format!("file_b64: 非法 base64: {}", e)))?;
-        if decoded_len > FILE_MAX_BYTES {
+        let path_ref = path.as_ref();
+        let meta = std::fs::metadata(path_ref).map_err(|e| {
+            AppError::Llm(format!(
+                "file_b64: 无法 stat 路径 {}: {}",
+                path_ref.display(),
+                e
+            ))
+        })?;
+        if meta.len() as usize > FILE_MAX_BYTES {
             return Err(AppError::Llm(format!(
                 "file_b64: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
-                decoded_len, FILE_MAX_BYTES
+                meta.len(),
+                FILE_MAX_BYTES
             )));
         }
+        let bytes = std::fs::read(path_ref).map_err(|e| {
+            AppError::Llm(format!("file_b64: 读取 {} 失败: {}", path_ref.display(), e))
+        })?;
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Self::InputFile {
             filename: Some(filename.into()),
             mime_type: Some(mime_type.into()),
@@ -219,6 +266,12 @@ impl ChatMessageContentPart {
     }
 }
 
+/// 仅供测试 / 已知 base64 字符串场景：解码并返回字节长度。
+///
+/// PR-RJ-0 重构后生产路径改走 [`ChatMessageContentPart::image_b64`] /
+/// [`ChatMessageContentPart::file_b64`]（直接读盘 + base64），本函数保留
+/// 给单元测试断言「base64 编/解码长度对齐」的边角场景。
+#[allow(dead_code)]
 fn decode_b64_len(data: &str) -> Result<usize, base64::DecodeError> {
     base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())

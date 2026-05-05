@@ -343,6 +343,53 @@ pub fn compute_context_budget_chars(config: &ContextConfig) -> usize {
     available_tokens * 4
 }
 
+/// 工具子系统配置：每个内建工具的可调上限聚合在此表，避免 `LlmConfig` / `PrimitiveConfig`
+/// 等已有结构再被工具相关字段污染（与 `openspec/specs/architecture/tools/read.md` §3.4 对齐）。
+///
+/// **设计口径**（与 `read.md` §3.4 一致）：
+/// - 仅放「磁盘资源 / 安全相关」的硬上限；
+/// - **不**放可由 LLM 通过 schema 字段直接控制的开关（如 `line_numbers` / `hashline`），
+///   避免管理员侧静默改变模型上下文。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub read: ToolsReadConfig,
+}
+
+/// `[tools.read]` 子表：当前仅含 `max_bytes`。
+///
+/// `max_bytes` 是 **read 工具文本路径的「裸读字节上限」**：
+/// - 当模型**未传** `offset` / `limit` 时，先在 `std::fs::metadata().len()` 阶段
+///   与该值比对，超限直接返结构化错误，**不**触发任何 `read_to_*`；
+/// - 当模型传入 `offset` / `limit`（即明确分窗）时，**不**触发该上限——
+///   合理 dump / 大日志可被分窗读取（详见 `read.md` §2.5 决策图）。
+///
+/// 默认 25 MiB（介于 cc-fork 的 256 KiB 与 pi_agent_rust 的 100 MiB 之间，
+/// 兼顾「合理 dump 文件」与「防爆 ctx」），可通过
+/// `pi.config.toml [tools.read] max_bytes = ...` 或环境变量
+/// `PI_WASM__TOOLS__READ__MAX_BYTES` 覆盖。图片 / PDF inline 上限由
+/// `core::llm::types` 集中管理，**不**进 config。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolsReadConfig {
+    #[serde(default = "default_tools_read_max_bytes")]
+    pub max_bytes: u64,
+}
+
+/// 25 MiB；read.md §2.5 决策表 R6 #2「自设」入选值。
+pub const DEFAULT_TOOLS_READ_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+fn default_tools_read_max_bytes() -> u64 {
+    DEFAULT_TOOLS_READ_MAX_BYTES
+}
+
+impl Default for ToolsReadConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_tools_read_max_bytes(),
+        }
+    }
+}
+
 /// Wasm 运行时配置（feature "wasmedge" 时使用）。
 /// quickjs wasm 路径由 [`resolve_quickjs_path`] 从 work_dir 推导，回退到环境变量。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -371,6 +418,8 @@ pub struct AppConfig {
     pub primitive: PrimitiveConfig,
     #[serde(default)]
     pub context: ContextConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
     #[serde(default)]
     pub wasm: WasmConfig,
 }
