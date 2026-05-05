@@ -16,8 +16,8 @@ pub use confirmation::{
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use llm::system_prompt;
 pub use llm::{
-    ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, OpenAiProvider,
-    OpenAiResponsesProvider, SessionTokenUsage, StreamEvent,
+    resolve_llm, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider,
+    SessionTokenUsage, StreamEvent,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,

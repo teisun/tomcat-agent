@@ -8,7 +8,7 @@
 //! ┌─────────────────────────────────────────────────────────────────────────┐
 //! │  ChatContext::from_config(AppConfig)                ① 装配阶段           │
 //! │   ├─ SessionManager      （sessions_dir，transcript JSONL 持久层）       │
-//! │   ├─ Arc<dyn LlmProvider>（OpenAiProvider / ...）                        │
+//! │   ├─ Arc<dyn LlmProvider>（resolve_llm 按 [llm] provider 路由）          │
 //! │   ├─ Arc<dyn PrimitiveExecutor>（DefaultPrimitiveExecutor + 白名单）     │
 //! │   ├─ Arc<dyn ToolRegistry>     （内置 + 插件 tool）                       │
 //! │   ├─ Arc<dyn EventBus>         （DefaultEventBus）                       │

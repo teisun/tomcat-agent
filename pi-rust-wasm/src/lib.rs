@@ -15,14 +15,13 @@ pub use core::{
     SessionManager, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use core::{
-    AgentLoop, AgentLoopConfig, AgentRunResult, AllowAllConfirmation, BashResult, ChatMessage,
-    ChatRequest, ChatResponse, ChatResponseChoice, DefaultPrimitiveExecutor, DefaultToolRegistry,
-    DenyAllConfirmation, DirEntry, EditFileResult, EditOperation, EditOperationType, LlmProvider,
-    OpenAiProvider, OpenAiResponsesProvider, PrimitiveExecutor, PrimitiveOperation,
-    SearchFileCount, SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode,
-    SearchFilesQuery, SearchFilesResultMode, SearchFilesStats, SearchFilesTarget,
-    SessionTokenUsage, StreamEvent, Tool, ToolCallInfo, ToolExecutor, ToolRegistry,
-    UserConfirmationProvider, WriteFileResult,
+    resolve_llm, AgentLoop, AgentLoopConfig, AgentRunResult, AllowAllConfirmation, BashResult,
+    ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DefaultPrimitiveExecutor,
+    DefaultToolRegistry, DenyAllConfirmation, DirEntry, EditFileResult, EditOperation,
+    EditOperationType, LlmProvider, PrimitiveExecutor, PrimitiveOperation, SearchFileCount,
+    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
+    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, SessionTokenUsage, StreamEvent,
+    Tool, ToolCallInfo, ToolExecutor, ToolRegistry, UserConfirmationProvider, WriteFileResult,
 };
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, transpile_pi_plugin_for_quickjs,

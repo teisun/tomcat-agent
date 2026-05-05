@@ -7,8 +7,8 @@
 //! - `SseEventStream`：把多段 `data: {...}\n\n` 流式解析成 `ContentDelta` /
 //!   `FinishReason` 等事件序列。
 
-use super::super::openai::{openai_chunk_to_stream_events, OpenAiStreamChunk, SseEventStream};
-use super::super::types::StreamEvent;
+use super::*;
+use crate::core::llm::types::StreamEvent;
 use crate::infra::error::AppError;
 use bytes::Bytes;
 

@@ -30,8 +30,8 @@ use tracing::warn;
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
-use super::provider::LlmProvider;
-use super::types::{
+use crate::core::llm::provider::LlmProvider;
+use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse,
     ChatResponseChoice, StreamEvent,
 };
@@ -194,7 +194,7 @@ impl OpenAiResponsesProvider {
         Ok(responses_payload_to_chat_response(&raw))
     }
 
-    pub(crate) fn is_retriable(err: &AppError) -> bool {
+    fn is_retriable(err: &AppError) -> bool {
         let s = err.to_string();
         s.contains("429")
             || s.contains("500")
@@ -389,7 +389,7 @@ impl LlmProvider for OpenAiResponsesProvider {
 /// - `Assistant` 带 `tool_calls` → 文本部分单独发一条 message item，每个 tool_call 翻成
 ///   `{ type: "function_call", call_id, name, arguments }`；
 /// - `Tool` → `{ type: "function_call_output", call_id: tool_call_id, output: text }`。
-pub(crate) fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
+fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     let mut instructions: Option<String> = None;
     let mut input: Vec<Value> = Vec::with_capacity(messages.len());
     let mut first_seen = false;
@@ -484,7 +484,7 @@ pub(crate) fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>
 /// Chat Completions 的 function tool（`{"type":"function","function":{name,description,parameters}}`）
 /// → Responses 顶层 `{"type":"function","name":..,"description":..,"parameters":..}`。
 /// 输入若不是 function 类型则原样保留（向前兼容用户/插件已声明的 Responses 形状）。
-pub(crate) fn convert_tools_to_responses(tools: &[Value]) -> Vec<Value> {
+fn convert_tools_to_responses(tools: &[Value]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
@@ -560,7 +560,7 @@ fn user_content_parts(content: &Option<ChatMessageContent>) -> Vec<Value> {
 
 /// 把 Responses `POST /v1/responses` 的非流式 JSON 翻译为内部 [`ChatResponse`]，
 /// 与 Completions choices[0] 形状对齐（`message.content` + `finish_reason` + `usage`）。
-pub(crate) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
+fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
     let id = raw.get("id").and_then(Value::as_str).map(str::to_string);
 
     // 拼合 output[].content[].text 中所有 output_text 片段，作为 assistant 的可见内容。
@@ -632,14 +632,16 @@ pub(crate) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
             }
         });
 
-    let usage = raw.get("usage").map(|u| super::types::TokenUsage {
-        prompt_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-        completion_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-        total_tokens: u
-            .get("total_tokens")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32),
-    });
+    let usage = raw
+        .get("usage")
+        .map(|u| crate::core::llm::types::TokenUsage {
+            prompt_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+            completion_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
+            total_tokens: u
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32),
+        });
 
     let message = if tool_calls.is_empty() {
         ChatMessage::assistant(text_buf)
@@ -667,7 +669,7 @@ pub(crate) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
 /// Responses 流式解析器：默认按 SSE（`event: ...\ndata: {...}\n\n`）解码；
 /// 若 Content-Type 为 NDJSON 或首帧不是 SSE 形态，则切换到 **一行一条 JSON** 的 NDJSON 模式。
 /// 切换决策只做一次（一次性锁定，避免每帧重判抖动）。
-pub(crate) struct ResponsesStream<S> {
+struct ResponsesStream<S> {
     inner: S,
     buffer: Vec<u8>,
     pending: std::vec::IntoIter<StreamEvent>,
@@ -679,7 +681,7 @@ pub(crate) struct ResponsesStream<S> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ToolCallTrack {
+struct ToolCallTrack {
     item_id: String,
     call_id: String,
     name: String,
@@ -687,7 +689,7 @@ pub(crate) struct ToolCallTrack {
 }
 
 impl<S> ResponsesStream<S> {
-    pub(crate) fn new(inner: S, prefer_ndjson: bool) -> Self {
+    fn new(inner: S, prefer_ndjson: bool) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
@@ -836,7 +838,7 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
 }
 
 /// 把单条 Responses chunk JSON 翻译为 0..N 个 [`StreamEvent`]。
-pub(crate) fn responses_chunk_to_events(
+fn responses_chunk_to_events(
     value: &Value,
     tool_calls: &mut Vec<ToolCallTrack>,
 ) -> Vec<StreamEvent> {
@@ -970,3 +972,6 @@ pub(crate) fn responses_chunk_to_events(
 
 // 单测见 `core::llm::tests::openai_responses_test`（wire + tools + payload + count_tokens
 // + 流式解析覆盖在外部测试目录中按 plan §5 Phase E.2 / E.3 拆分）。
+#[cfg(test)]
+#[path = "tests/openai_responses_test.rs"]
+mod tests;

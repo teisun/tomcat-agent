@@ -8,10 +8,9 @@
 //!   非 LLM 错误一律不重试。
 //! - `chat_real_request_response_print`：`#[ignore]` 真实 API 冒烟。
 
-use super::super::openai::OpenAiProvider;
-use super::super::provider::LlmProvider;
-use super::super::types::{ChatMessage, ChatRequest};
-use super::mocks::load_dotenv;
+use super::*;
+use crate::core::llm::tests::mocks::load_dotenv;
+use crate::core::llm::types::{ChatMessage, ChatRequest};
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 

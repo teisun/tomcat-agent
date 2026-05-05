@@ -6,10 +6,16 @@
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
 | Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` + `T2-P0-005 子项「多 LLM 层改造 + OpenAI Responses」` |
-| Update Time | 2026-05-05（承接多 LLM + Responses 子项） |
+| Update Time | 2026-05-05（LLM registry 单点 + 测试 #[path] 内挂） |
 | Cov% | - |
 
 ## Step-by-Step
+
+### 2026-05-05（同日追加）| LLM：`registry` 接管 `mod` + 测试按 §A.9 内挂 + 对外只暴露 `resolve_llm`
+
+- **动机**：消除「为单测放宽 `pub(crate)` / `pub(super)`」与「每加 Provider 改 `core/llm/mod.rs`」两类扩散；上层与集成测试统一通过 `resolve_llm` 拿 `Arc<dyn LlmProvider>`。
+- **代码**：`registry.rs` 内 `#[path] mod openai` / `openai_responses`；`openai.rs` / `openai_responses.rs` 私有 wire/SSE 辅助全部私有，`#[cfg(test)] #[path]` 挂载 `tests/openai_*`；`mocks::load_dotenv` 升为 `pub(crate)` 供内挂测试复用；`lib.rs` / `core/mod.rs` 去掉 `OpenAiProvider` / `OpenAiResponsesProvider` 重导出，改导出 `resolve_llm`；`tests/llm_tests` 与 `openai_responses_integration_tests` 改走 registry。
+- **门禁**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --test-threads=1`、`./scripts/run-integration-tests.sh integration`：PASS。
 
 ### 2026-05-05 | 子项「多 LLM + OpenAI Responses」实现与文档同步
 

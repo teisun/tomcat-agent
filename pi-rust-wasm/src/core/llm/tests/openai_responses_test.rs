@@ -11,12 +11,9 @@
 //!   + usage 等映射到 `StreamEvent`。
 //! - `ResponsesStream`：SSE 帧切分、NDJSON fallback；上层与 `OpenAiProvider` 同 Stream 契约。
 
-use super::super::openai_responses::{
-    build_responses_input, convert_tools_to_responses, responses_chunk_to_events,
-    responses_payload_to_chat_response, OpenAiResponsesProvider, ResponsesStream, ToolCallTrack,
-};
-use super::super::provider::LlmProvider;
-use super::super::types::{ChatMessage, StreamEvent};
+use super::*;
+use crate::core::llm::provider::LlmProvider;
+use crate::core::llm::types::{ChatMessage, StreamEvent};
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 

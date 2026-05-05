@@ -1,13 +1,17 @@
-//! 集成测试：`OpenAiResponsesProvider` 与真实 OpenAI Responses API（`POST /v1/responses`）。
+//! 集成测试：OpenAI Responses 适配器与真实 API（`POST /v1/responses`）。
 //!
 //! 不 Mock 网络；已配置 `OPENAI_API_KEY` 时真实发起 HTTP；无 key 时视为失败，不得 `ignore`。
 //! 写法与 `tests/llm_tests.rs` 对齐：`mod common`、`dotenvy::dotenv`、`setup_logging`、60s 超时
 //! （INTEGRATION_TEST_ROBUSTNESS 2.2）。
+//!
+//! 调用面：通过 [`pi_wasm::resolve_llm`] 拿 `Arc<dyn LlmProvider>`，**不直接构造**
+//! 任何 concrete Provider 类型；`provider = "openai-responses"` 即可路由到
+//! Responses 适配器（实现细节由 `core/llm/registry.rs` 单点维护）。
 
 mod common;
 
 use futures_util::StreamExt;
-use pi_wasm::{ChatMessage, ChatRequest, LlmConfig, LlmProvider, OpenAiResponsesProvider};
+use pi_wasm::{resolve_llm, ChatMessage, ChatRequest, LlmConfig};
 use std::time::Duration;
 
 fn responses_config() -> LlmConfig {
@@ -17,7 +21,7 @@ fn responses_config() -> LlmConfig {
     }
 }
 
-/// [Responses 非流式 chat] 真实 API 调用 `OpenAiResponsesProvider::chat` 返回合法响应
+/// [Responses 非流式 chat] 真实 API 调用返回合法响应
 ///
 /// 验证：choices 非空、首条 index=0（超时 60s）
 #[tokio::test]
@@ -28,7 +32,7 @@ async fn test_openai_responses_chat_real_request_returns_ok(
     let _ = dotenvy::dotenv().ok();
 
     let config = responses_config();
-    let provider = OpenAiResponsesProvider::new(&config)
+    let provider = resolve_llm(&config)
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
@@ -40,7 +44,7 @@ async fn test_openai_responses_chat_real_request_returns_ok(
         tools: None,
     };
     tracing::info!(
-        "Arrange: LlmConfig(provider=openai-responses)、OpenAiResponsesProvider、ChatRequest"
+        "Arrange: LlmConfig(provider=openai-responses) → resolve_llm → Arc<dyn LlmProvider>"
     );
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
         .await
@@ -64,7 +68,7 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
     let _ = dotenvy::dotenv().ok();
 
     let config = responses_config();
-    let provider = OpenAiResponsesProvider::new(&config)
+    let provider = resolve_llm(&config)
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],

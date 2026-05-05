@@ -16,8 +16,8 @@ use tracing::warn;
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
-use super::provider::LlmProvider;
-use super::types::{
+use crate::core::llm::provider::LlmProvider;
+use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent, TokenUsage,
 };
 
@@ -178,7 +178,7 @@ impl OpenAiProvider {
     }
 
     /// 判断是否为可重试错误（429、5xx、超时等）。
-    pub(crate) fn is_retriable(err: &AppError) -> bool {
+    fn is_retriable(err: &AppError) -> bool {
         let s = err.to_string();
         s.contains("429")
             || s.contains("500")
@@ -359,7 +359,7 @@ impl LlmProvider for OpenAiProvider {
 
 /// 将 Bytes 流解析为 StreamEvent 流；缓冲 SSE 行，按 "data: {...}\n\n" 解析。
 /// 调用方可通过 drop 提前结束流以释放连接；流式超时可由上层消费时用 tokio::time::timeout 包裹。
-pub(super) struct SseEventStream<S> {
+struct SseEventStream<S> {
     inner: S,
     buffer: Vec<u8>,
     /// 已解析待输出的事件队列（同一 chunk 可能解析出多个事件）。
@@ -367,7 +367,7 @@ pub(super) struct SseEventStream<S> {
 }
 
 impl<S> SseEventStream<S> {
-    pub(super) fn new(inner: S) -> Self {
+    fn new(inner: S) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
@@ -465,7 +465,7 @@ fn parse_sse_buffer(
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) struct OpenAiStreamChunk {
+struct OpenAiStreamChunk {
     choices: Option<Vec<OpenAiStreamChoice>>,
     usage: Option<TokenUsage>,
 }
@@ -499,7 +499,7 @@ struct OpenAiStreamFunctionDelta {
     arguments: Option<String>,
 }
 
-pub(super) fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
+fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     if let Some(choices) = chunk.choices {
@@ -539,3 +539,14 @@ pub(super) fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<Str
 
     events
 }
+
+// 测试落在外部目录的 `tests/openai_provider_test.rs` / `tests/openai_stream_test.rs`，
+// 通过 `#[cfg(test)] #[path]` 内挂为本文件的子模块；这样测试可直接访问私有项，
+// 业务源文件**无需**为测试放宽可见性（RUST_FILE_LINES_SPEC §A 第 9 条）。
+#[cfg(test)]
+#[path = "tests/openai_provider_test.rs"]
+mod provider_tests;
+
+#[cfg(test)]
+#[path = "tests/openai_stream_test.rs"]
+mod stream_tests;
