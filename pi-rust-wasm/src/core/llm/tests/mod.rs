@@ -17,7 +17,9 @@
 
 mod mocks;
 mod openai_provider_test;
+mod openai_responses_test;
 mod openai_stream_test;
+mod registry_test;
 mod system_prompt_test;
 mod token_usage_test;
 mod types_test;

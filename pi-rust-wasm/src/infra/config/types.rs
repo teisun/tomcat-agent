@@ -84,8 +84,11 @@ pub struct LlmConfig {
     pub api_base_fallback: Option<String>,
 }
 
+/// 默认 LLM 后端 id；与 [`crate::core::llm::registered_provider_ids`] 对齐。
+/// `"openai-responses"` 走 OpenAI Responses API（`POST /v1/responses`）；
+/// 改 `"openai"` 切回 Chat Completions（`POST /v1/chat/completions`）。
 fn default_llm_provider() -> String {
-    "openai".to_string()
+    "openai-responses".to_string()
 }
 
 /// 全局默认 LLM 模型 id（`LlmConfig` 默认值、`pi init` 首次写入与文档一致）。

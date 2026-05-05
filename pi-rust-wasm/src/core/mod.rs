@@ -17,7 +17,7 @@ pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use llm::system_prompt;
 pub use llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, OpenAiProvider,
-    SessionTokenUsage, StreamEvent,
+    OpenAiResponsesProvider, SessionTokenUsage, StreamEvent,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,

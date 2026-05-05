@@ -192,7 +192,7 @@ level = "info"
 file_enabled = true
 
 [llm]
-provider = "openai"
+provider = "openai-responses"
 api_key_env = "OPENAI_API_KEY"
 default_model = "gpt-5.2"
 ...

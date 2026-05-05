@@ -43,8 +43,8 @@
 |------|----------------|--------------|----------|---------|----------------------|
 | **抽象单元** | `Provider` trait | `ProviderTransport` + `api_mode` | `StreamFn` + `openai` SDK 封装 | `packages/ai` Provider | **`LlmProvider`** |
 | **对话表示** | 内部 `model::Message` | 偏 OpenAI wire，再转换 | `Context` / pi-ai 管线 | `packages/ai` 类型 | **`ChatMessage`（OpenAI 形）** |
-| **路由方式** | `ModelEntry.api` + `create_provider` | `api_mode` → Transport | 模型元数据选 Completions vs Responses | 模型 / provider 选实现 | **单一 `OpenAiProvider`** |
-| **OpenAI** | Completions + Responses | Completions + codex Responses | Completions + Responses | Completions（+ Responses 相关模块） | **仅 Completions** |
+| **路由方式** | `ModelEntry.api` + `create_provider` | `api_mode` → Transport | 模型元数据选 Completions vs Responses | 模型 / provider 选实现 | **`resolve_llm` + [`registry.rs`](../../../src/core/llm/registry.rs)**（`[llm] provider` 字符串 → `Arc<dyn LlmProvider>`） |
+| **OpenAI** | Completions + Responses | Completions + codex Responses | Completions + Responses | Completions（+ Responses 相关模块） | **Completions（`OpenAiProvider`）+ Responses（`OpenAiResponsesProvider`，默认）** |
 | **扩展新厂商** | 新 `impl Provider` + match | 新 Transport | 新 transport 工厂 | 新 `packages/ai` provider | **新 `impl LlmProvider` + 接线** |
 
 ```text
@@ -54,8 +54,8 @@ Message AST     OAI-ish wire      pi-ai Context    packages/ai          ChatMess
      │              │                  │                 │                      │
 trait Provider   Transport         StreamFn          TS Provider          LlmProvider
      │              │                  │                 │                      │
-HTTP×N          normalize…        事件流             coding-agent          OpenAiProvider
-Anthropic…                                                           （仅 completions）
+HTTP×N          normalize…        事件流             coding-agent          registry → OpenAi*
+Anthropic…                                                           Completions / Responses
 ```
 
 ### 1.4 对标仓库要点（摘要）
@@ -72,12 +72,14 @@ Anthropic…                                                           （仅 co
 ### 2.1 抽象层
 
 - **`LlmProvider`**（[`src/core/llm/provider.rs`](../../../src/core/llm/provider.rs)）：**`chat` / `chat_stream` / `count_tokens`**。
+- **`resolve_llm`**（[`src/core/llm/registry.rs`](../../../src/core/llm/registry.rs)）：按 **`LlmConfig.provider`** 字符串构造 **`Arc<dyn LlmProvider>`**（当前登记 **`openai`** → Completions、**`openai-responses`** → Responses）。
 - **`ChatMessage` / `ChatRequest`**（[`src/core/llm/types.rs`](../../../src/core/llm/types.rs)）：与 OpenAI **messages** 对齐；`ChatMessageContent` 虽支持 **Parts**，**`ChatMessageContentPart` 当前仅有 `text`**——**尚无 `image_url` / PDF** 的系统化序列化。
 
 ### 2.2 HTTP 与能力边界
 
-- **`OpenAiProvider`**（[`src/core/llm/openai.rs`](../../../src/core/llm/openai.rs)）：固定 **`POST {base}/v1/chat/completions`**，body 为 **`OpenAiRequestBody`**（model、messages、temperature、max_tokens、tools、stream）。
-- **结论（架构边界）**：主线 **仅 Chat Completions**；**Responses / `input_file`（PDF）** 或完整 vision 需 **第二套 `LlmProvider` + 请求映射**（岔路 A，见 **§6.2 / §6.5**）。
+- **`OpenAiProvider`**（[`src/core/llm/openai.rs`](../../../src/core/llm/openai.rs)）：固定 **`POST {base}/v1/chat/completions`**，body 为 **`OpenAiRequestBody`**（model、messages、temperature、max_tokens、tools、stream）。**`[llm] provider = "openai"`** 时选用。
+- **`OpenAiResponsesProvider`**（[`src/core/llm/openai_responses.rs`](../../../src/core/llm/openai_responses.rs)）：固定 **`POST {base}/v1/responses`**；同一套 **`ChatRequest` / `ChatMessage`** 在实现内翻译为 **`input` + `instructions` + tools 映射**；流式 **SSE / NDJSON** → **`StreamEvent`**。**默认** **`[llm] provider = "openai-responses"`**。
+- **结论（架构边界）**：主线默认 **Responses**；退回 Completions 仅通过 **`provider = "openai"`**。**vision / `input_file`（PDF）** 等增值能力仍按 **§6.5.3 / §6.6** 演进。
 
 ### 2.3 全链路 ASCII（入口 → Agent → LLM HTTP）
 
@@ -94,24 +96,25 @@ Anthropic…                                                           （仅 co
   ChatRequest { model, messages, tools?, stream, … }
          │
          ▼
-  trait LlmProvider → OpenAiProvider
+  resolve_llm(&config.llm) → Arc<dyn LlmProvider>
          │
-         ▼
-  POST {api_base}/v1/chat/completions
-         ├─ stream: true  → SSE → StreamEvent::…
-         └─ stream: false → JSON choices[0].message
+         ├─ OpenAiProvider ─────────► POST …/v1/chat/completions
+         └─ OpenAiResponsesProvider ─► POST …/v1/responses
+         │
+         ├─ stream: true  → SSE / NDJSON → StreamEvent::…
+         └─ stream: false → JSON → ChatResponse
 ```
 
 ### 2.4 配置：Provider 类型 vs 模型字符串 vs 场景键
 
 | 维度 | 谁决定 | 说明 |
 |------|--------|------|
-| **`LlmProvider` 具体类型** | **代码** | [`ChatContext::from_config`](../../../src/api/chat/mod.rs)：**`Arc::new(OpenAiProvider::new(&config.llm)?)`**；运行时 **不** 按 TOML 切换 Anthropic 等实现。 |
+| **`LlmProvider` 具体类型** | **配置 + 注册表** | **[`llm`] `provider`** 字符串 → [`resolve_llm`](../../../src/core/llm/registry.rs) → **`Arc<dyn LlmProvider>`**（[`ChatContext::from_config`](../../../src/api/chat/mod.rs)）；新增后端 **登记表一行**，**不**在入口手写长篇 `match`。Anthropic 等非 OpenAI 形后端仍按 **岔路 A** 新增 `impl LlmProvider`。 |
 | **主对话模型 ID** | **配置 + 会话** | **[`llm`] `default_model`** + **`SessionEntry.model_override`** → **`effective_model`**（会话优先）。 |
 | **Compaction 摘要模型** | **配置** | **[`context`] `compaction_model`** → [`generate_summary`](../../../src/core/compaction/preheat.rs)；与主对话解耦，可配低成本模型。 |
 | **测试** | **注入** | `MockLlmProvider` 等替换 **`Arc<dyn LlmProvider>`**。 |
 
-**场景化扩展惯例（建议）**：未来 **vision / PDF 专用路径** 可新增 **`vision_model` / `pdf_model`** 等键，在**该路径**组 `ChatRequest` 时读取——**仍同一 `OpenAiProvider`**，除非协议升级为 Responses。详见报告 §9.3。
+**场景化扩展惯例（建议）**：未来 **vision / PDF 专用路径** 可新增 **`vision_model` / `pdf_model`** 等键，在**该路径**组 `ChatRequest` 时读取——仍由 **当前选中的 `LlmProvider` impl** 负责 wire（Completions 或 Responses）。详见报告 §9.3。
 
 ---
 
@@ -147,7 +150,7 @@ Anthropic…                                                           （仅 co
 
 ### 3.4 配置-driven 的客户端参数
 
-**[`LlmConfig`](../../../src/infra/config/types.rs)**：`api_base`、`api_key_env`、`retry_count`、`stream_timeout_sec`、`proxy`、`api_base_fallback` 等——**与「选哪个 Provider impl」正交**；同一 **`OpenAiProvider`** 消费上述字段。
+**[`LlmConfig`](../../../src/infra/config/types.rs)**：`api_base`、`api_key_env`、`retry_count`、`stream_timeout_sec`、`proxy`、`api_base_fallback` 等——**与「选哪个 Provider impl」正交**；**`OpenAiProvider` / `OpenAiResponsesProvider`** 等实现 **共用**上述横切字段。
 
 ---
 
@@ -158,8 +161,10 @@ Anthropic…                                                           （仅 co
 ```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  src/api/chat/mod.rs          ChatContext::from_config                   │
-│    · Arc<dyn LlmProvider>：OpenAiProvider（现状）或 OpenAiResponsesProvider │
+│    · resolve_llm(&config.llm) → Arc<dyn LlmProvider>                     │
 │    · effective_model（会话 model_override 优先）                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│  src/core/llm/registry.rs    PROVIDERS 表 · resolve_llm / registered ids │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  src/core/agent_loop/*        AgentLoop · preflight · tool_exec          │
 │    · 组装 ChatRequest（主对话）                                           │
@@ -167,12 +172,12 @@ Anthropic…                                                           （仅 co
 │  src/core/llm/types.rs        ChatMessage · ChatRequest · StreamEvent    │
 │  src/core/llm/provider.rs     trait LlmProvider                          │
 │  src/core/llm/openai.rs       Completions · /v1/chat/completions          │
-│  src/core/llm/openai_responses.rs（规划）  Responses · /v1/responses      │
+│  src/core/llm/openai_responses.rs   Responses · /v1/responses            │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  src/core/compaction/preheat.rs                                          │
 │    · generate_summary → ChatRequest { model: compaction_model, tools: None } │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  src/infra/config/types.rs    LlmConfig（+ openai 面选择）· ContextConfig  │
+│  src/infra/config/types.rs    LlmConfig（provider 字符串 · 横切字段）· ContextConfig │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -192,8 +197,8 @@ Anthropic…                                                           （仅 co
 User input
     → build_context (system + transcript + tool results)
     → AgentLoop: chat_stream(ChatRequest { model: effective_model, tools: Some(...) })
-    → OpenAiProvider
-    → SSE chunks
+    → LlmProvider（注入实现：默认 OpenAiResponsesProvider）
+    → SSE / NDJSON chunks
     → 若有 tool_calls → tool_exec → 回填 tool message → 循环
     → 无 tool_calls → 返回 assistant 文本
 ```
@@ -332,3 +337,4 @@ pi-rust-wasm **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire
 | 2026-05-04 | §6.5.2：横切行改为 **provider 字符串 + 注册表**；新增 **`LlmConfig` 与 TOML** 小节；核对单 **配置/工厂** 两行改为 **不改中央结构体、registry 解析** |
 | 2026-05-04 | §6.5.1 表第三列：「职责」改为 **「白话（这篇代码能帮到你什么）」** 并重写各格 |
 | 2026-05-04 | 新增 **§3.2.1**：注册表 id 选 **Provider**；**同一 `ChatRequest`** 由不同实现翻译 wire；何时才扩展类型 |
+| 2026-05-05 | **实施落档**：`registry.rs` + **`resolve_llm`**；**`OpenAiResponsesProvider`**（`/v1/responses`）；默认 **`provider = openai-responses`**；更新 **§2 / §4 OGM / §5.1**；**§1.3** 横向表「路由 / OpenAI」行 |

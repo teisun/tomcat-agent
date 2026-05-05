@@ -91,8 +91,8 @@ use crate::infra::{
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
     resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
-    SessionManager, Tool, ToolExecutor, ToolRegistry,
+    DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool,
+    ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -161,7 +161,7 @@ impl ChatContext {
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
-        let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(&config.llm)?);
+        let llm: Arc<dyn LlmProvider> = crate::core::llm::resolve_llm(&config.llm)?;
 
         let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),

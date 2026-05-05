@@ -25,8 +25,10 @@ auto_install_search_tools = true
 # [llm] LLM 接入配置：大模型 API 地址、密钥、限流与重试
 # ------------------------------------------------------------------------------
 [llm]
-# provider：当前使用的 LLM 提供商标识。如 "openai"，用于选择对应适配器。
-provider = "openai"
+# provider：注册表 id（src/core/llm/registry.rs）。
+# - "openai-responses"（默认）：Responses API → POST …/v1/responses
+# - "openai"：Chat Completions → POST …/v1/chat/completions
+provider = "openai-responses"
 # api_base：API 根地址。不填则默认 https://api.openai.com；自建或代理时可改写。
 # api_key_env：存 API Key 的环境变量名。不填则默认从 OPENAI_API_KEY 读取。
 default_model = "gpt-5.2"

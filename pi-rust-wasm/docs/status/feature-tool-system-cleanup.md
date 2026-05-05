@@ -5,11 +5,18 @@
 | Owner | Spike |
 | State | PENDING_INTEGRATION |
 | Branch | `feature/tool-system-cleanup` |
-| Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` |
-| Update Time | 2026-05-04（Homebrew 预检 bottle-only） |
+| Task | `T2-P0-005 | tool-system-cleanup` + `T2-P1-007 | tool-system-deferred-followups / #T-152 search_files` + `T2-P0-005 子项「多 LLM 层改造 + OpenAI Responses」` |
+| Update Time | 2026-05-05（承接多 LLM + Responses 子项） |
 | Cov% | - |
 
 ## Step-by-Step
+
+### 2026-05-05 | 子项「多 LLM + OpenAI Responses」实现与文档同步
+
+- **代码**：`src/core/llm/registry.rs` + `resolve_llm`；`openai_responses.rs`；`ChatContext::from_config` 经 registry 装配；`default_llm_provider = "openai-responses"`。
+- **测试**：`core/llm/tests` 下 registry / wire / stream 单测；`tests/openai_responses_integration_tests.rs` 与 `llm_tests` 同口径（需 `OPENAI_API_KEY`）；`scripts/test-groups.sh` 已加入 `openai_responses_integration_tests` 并发组。
+- **文档**：`openspec/.../llm-multiprovider-integration.md` §1.3 / §2 / §4 / §5.1 / §8；`src/core/llm/README.md`；`pi.config.toml.example`；`docs/user-guide.md` 示例块。
+- **Phase G（2026-05-05）**：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test -j 1 --lib -- --test-threads=1`、`./scripts/run-integration-tests.sh integration`：PASS。看板 `T2-P0-005` 已收 `PENDING_INTEGRATION`；实现已落于本分支 tip（待 push `origin/feature/tool-system-cleanup`）。
 
 ### 2026-05-02 14:50 | A.0 Bash audit 错配定位
 
@@ -38,6 +45,7 @@
 
 - 焦测（节选）：`execute_bash_audit_records_bash_scope`、`catalog`、`cwd_lazy`、`cwd_lazy_prompt_e2e`、`cli_tests test_workspace_add_cwd_e2e`：PASS
 - Full gate：`cargo fmt --check` · `cargo clippy --all-targets -- -D warnings` · 分类集成（`./scripts/run-integration-tests.sh integration` 或等价流程）：PASS（`.integration_test_output.log`，`EXIT_CODE=0`）
+- **2026-05-05（多 LLM + Responses 收口）**：同上全量门禁 PASS；`openai_responses_integration_tests` 依赖 `OPENAI_API_KEY`（与 `llm_tests` 同口径）；请求体 `max_output_tokens` 与上游最小值（16）对齐，避免 400。
 
 ### 2026-05-02 22:25 | 认领 #T-152 search_files
 
@@ -99,6 +107,19 @@
 - **预检**：包管理器每次安装尝试将完整 stdout/stderr 落盘 `~/.pi_/agents/main/logs/preflight-file-log-<ts>.log`；`tracing` target `pi_wasm_preflight`（`RUST_LOG=debug`）；成功/失败事件 `extra` 带 `logPath`；文档明确 `Command::output` 无 pi 侧超时，勿与 `PI_SEARCH_TIER2_DEADLINE_MS` 混淆；`PreflightConfig` 注释同步。
 - **stderr 监听**：`WIRE_SEARCH_TOOLS_PREFLIGHT` 优先经 `rustyline::ExternalPrinter` 输出，避免 `readline` 阻塞时 `[tools]` 与输入行错位；失败时附加截断后的 stderr / error / log 路径摘要。
 - **架构**：`search_files.md` One-Glance Map 补充上述行为。
+
+### 2026-05-05 | 承接子项「多 LLM 层改造 + OpenAI Responses」
+
+- **状态**：T2-P0-005 由 `PENDING_INTEGRATION` 改回 `DOING`；本子项与已有 6 个 ahead commits（origin 未 push）一并延后到本子项完成后再 push 交集成。
+- **范围**（plan `~/.cursor/plans/llm-multiprovider-and-responses_d469e7f0.plan.md`）：
+  - Phase A 新建 `src/core/llm/registry.rs` + `resolve_llm`，`src/api/chat/mod.rs:164` 一行替换为 registry 调用；`default_llm_provider()` 翻为 `"openai-responses"`（D3）。
+  - Phase B 新建 `src/core/llm/openai_responses.rs`：`build_responses_input`（system → instructions、user/assistant/tool 翻 `input` items）+ `convert_tools_to_responses` + `count_tokens`。
+  - Phase C `ResponsesStream`：默认 SSE 解析，第一帧无 `data:` 前缀且能 parse 整行 JSON 时切 NDJSON 兜底；retry / fallback / proxy / 信号量复用 `LlmConfig`。
+  - Phase D Compaction 联动：`generate_summary` 已走 `LlmProvider::chat`，主对话翻 Responses 后摘要随之，无代码改动；仅回归 preheat 测试。
+  - Phase E 单测（registry / wire / stream）+ 集成 `tests/openai_responses_integration_tests.rs`（httptest 或 wiremock，登记 `scripts/test-groups.sh` 并发组）+ 全量门禁。
+  - Phase F 文档：spec `llm-multiprovider-integration.md` §4 / §2.4 / §7 / §8、`README.md`、`pi.config.toml.example`、`user-guide.md`、看板子项勾选。
+  - Phase G commit-guard 分阶段提交 + 6 ahead commits + 本子项 commits 一起 push + 看板回 PENDING_INTEGRATION。
+- **决策摘要**：D1–D7（plan §2 / §2.1）；架构走 spec 岔路 A，Agent Loop 仍组一份 `ChatRequest`，wire 翻译封装在 Provider 内部。
 
 ### 2026-05-04 | macOS Homebrew 预检仅 bottle、stderr 提示 Tier2
 

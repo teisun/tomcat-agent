@@ -5,13 +5,17 @@
 //! 本模块不直接依赖 SessionEntry，仅消费已解析的 ChatRequest。
 
 mod openai;
+mod openai_responses;
 mod provider;
+mod registry;
 pub mod system_prompt;
 mod token_usage;
 mod types;
 
 pub use openai::OpenAiProvider;
+pub use openai_responses::OpenAiResponsesProvider;
 pub use provider::LlmProvider;
+pub use registry::{registered_provider_ids, resolve_llm};
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{

@@ -14,6 +14,7 @@ PI_WASM_INTEGRATION_PARALLEL_TESTS=(
   session_tests
   plugin_tests
   llm_tests
+  openai_responses_integration_tests
   context_management_tests
   robustness_tests
 )
