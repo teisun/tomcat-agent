@@ -1,5 +1,18 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Cursor | 2026-05-05 22:23 | ACTIVE | develop | — |
+
+### 文档与 OpenSpec（无代码变更）
+
+- [✓] **[P0]** 看板 **TASK_BOARD_002**：插入 **T2-P0-017**（`edit` 独立任务，锚 [edit.md](../openspec/specs/architecture/tools/edit.md)）；收敛 **T2-P0-016**；§1 交付任务数 18→19；§5 拓扑 `P005→P017`；§6 变更记录。
+- [✓] **规范**：`ARCHITECTURE_SPEC` / `PLAN_SPEC` / `DOCUMENTATION_GUIDE` / `MODULE_README_SPEC` / `DEBUG_SPEC` / `PLAN_SKELETON` —「说人话」段落 + 表格列、去掉 12 岁表述；`Constitution` 二.10 改为先专业后口语。
+- [✓] **read.md**：与 `edit`/`search_files` 同类章节编排收缩；**edit.md** 新增为冻结版 `edit` 工具方案。
+- [✓] **其它**：`Architecture.md` / `interrupt-and-cancellation.md` / `search_files.md` / `plan-mode-execution-playbook` 小步对齐引用或措辞。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-05-05 19:18 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — `refactor/split-l3-files`（L-3 红区文件拆分整改 follow-up）

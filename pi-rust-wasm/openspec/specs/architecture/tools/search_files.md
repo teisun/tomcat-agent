@@ -12,6 +12,7 @@
 
 - [1. 目标与设计原则](#1-目标与设计原则)
 - [2. 竞品 / 选型对比](#2-竞品--选型对比)
+- [2.5 实施点（已闭环）](#25-实施点已闭环)
 - [3. 协议（入参 / 出参 / Schema）](#3-协议入参--出参--schema)
 - [4. One-Glance Map（文件职责总览）](#4-one-glance-map文件职责总览)
 - [5. 调度时序（运行时图）](#5-调度时序运行时图)
@@ -99,6 +100,14 @@
 │                      │   • implementation 写入审计                       │
 └──────────────────────┴──────────────────────────────────────────────────┘
 ```
+
+### 2.5 实施点（已闭环）
+
+本方案为 **Tier1 + Tier2 + 预检** 主线能力**单次合入**演进（见 [`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) **T2-P0-005** 及上文 §2.3「最终决策」），无再拆子 PR 叙事；验收以 **§12 测试矩阵** 为权威。
+
+| 实施点 | 交付范围 | 主要代码落点 | 验收锚点（示例） |
+|--------|----------|--------------|------------------|
+| **单次合入** | Tier1（`rg`+`fd`）+ Tier2（`ignore` + globset + regex）自动回落；`pi chat` 启动预检与安装探测；`warnings` / `implementation` 审计字段 | 见 [§4 One-Glance Map](#4-one-glance-map文件职责总览) | 见 [§12 测试矩阵](#12-测试矩阵实现--用例)（全表函数名 + 状态列） |
 
 ---
 
@@ -310,7 +319,7 @@ SearchFilesStats
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**阅读顺序（12 岁原则）**：用户进 chat（`chat_cmd.rs`）→ 后台偷偷装 `rg/fd`（`preflight.rs`，事件经 `stderr.rs` 显示）→ LLM 真要搜的时候由 `executor.rs` 决定走 Tier1（rg/fd）还是 Tier2 兜底（`search_files_fallback`）→ 不管走哪条，返回 JSON 都来自 `types.rs`，描述给 LLM 的话术来自 `catalog.rs`。
+**阅读顺序（说人话）**：用户进 chat（`chat_cmd.rs`）→ 后台偷偷装 `rg/fd`（`preflight.rs`，事件经 `stderr.rs` 显示）→ LLM 真要搜的时候由 `executor.rs` 决定走 Tier1（rg/fd）还是 Tier2 兜底（`search_files_fallback`）→ 不管走哪条，返回 JSON 都来自 `types.rs`，描述给 LLM 的话术来自 `catalog.rs`。
 
 ---
 

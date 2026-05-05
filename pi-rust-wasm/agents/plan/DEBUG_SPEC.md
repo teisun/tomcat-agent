@@ -4,6 +4,8 @@
 
 由实际案例驱动：TASK-17 上下文管理 L3 截断后水位虚高（53.8%），重启后恢复正常（0.9%）。
 
+**「说人话」辅助**：技术分析段落**先**写证据与结论，**再**可加短段口语归纳；多列对照表 **SHOULD** 末列 **`说人话`**。与 [`ARCHITECTURE_SPEC.md §4.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 一致。
+
 ---
 
 ## 一、排查流程总览

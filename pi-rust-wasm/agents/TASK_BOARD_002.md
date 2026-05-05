@@ -23,7 +23,7 @@
 3. **Agent Loop 模块化**：`src/core/agent_loop/run.rs`（832 行）拆为 dispatcher / tool_exec / stream_handler / error_classifier 子模块；三套管道（`src/ext/`）语义统一；
 4. **Thinking API + 展示**：`src/core/llm/` 接入 Claude/GPT/Qwen 的 thinking 协议，TUI 支持可折叠展示；
 5. **状态管理**：Checkpoint 机制 + 断点续跑、PLAN 模式增强、提问/应答机制、结果验证 review 子流程、Feedback 回路、集成测试规范 6 个方向全部达标；
-6. **交付口径**：18 个 T2-P0/P1 任务全部 DONE；macOS/Linux 上单 Agent 可连续运行 ≥ 4 小时不退化；compaction 触发不产生死循环。
+6. **交付口径**：19 个 T2-P0/P1 任务全部 DONE；macOS/Linux 上单 Agent 可连续运行 ≥ 4 小时不退化；compaction 触发不产生死循环。
 
 ### 1.2 不做的范围
 
@@ -40,7 +40,7 @@
 
 ### 1.3 验收口径
 
-1. 18 个 T2-P0/P1 任务全部标记 `DONE` 并通过 Nibbles 复核；
+1. 19 个 T2-P0/P1 任务全部标记 `DONE` 并通过 Nibbles 复核；
 2. 单元测试覆盖率 ≥ 80%，集成测试（compaction、agent loop、权限、中断恢复）全部绿灯；
 3. `docs/TODOS.md` 的 P0 条目逐项在看板中有对应 T2 任务闭环；
 4. `openspec/specs/Product_Brief.md` 与本看板、`docs/TODOS.md` 在档位/映射上内部一致（归档回归检查通过）。
@@ -275,7 +275,7 @@
 
 **依赖**：T2-P0-004（权限分级模型已落地）；当前 plan 中的目录命名决策。
 
-**被依赖**：T2-P0-005（工具系统整改）、T2-P0-012（图片/二进制附件）应基于收敛后的授权与目录语义推进。
+**被依赖**：T2-P0-005（工具系统整改）、**T2-P0-016**（四内置工具契约加强余量）、**T2-P0-017**（`edit` 工具契约与实现）、T2-P0-012（图片/二进制附件）应基于收敛后的授权与目录语义推进。
 
 **协作接口**：
 - 消费：`PermissionGate`、`DefaultPrimitiveExecutor`、`bash_parser`、`ChatContext`、`SystemPromptBuilder`、`config_tool`。
@@ -286,6 +286,43 @@
 - 定向测试覆盖 `dragged_path`、`dragged_handler`、`bash_parser`、`system_prompt`、`config_tool`、`infra::config`。
 - 离线 E2E 覆盖拖拽 deny/cancel、`PATH+意图` silent passthrough、Bash assignment deny、cwd prompt 渲染；带 `OPENAI_API_KEY` 时补跑真实 cwd 问答 E2E。
 - `docs/status/fix-drag-deny-cwd-remediation.md` 与本看板记录 follow-up hotfix 结论、命令、日志与 commit SHA。
+
+---
+
+### T2-P0-016 | strengthen-four-core-tools | 四内置工具契约加强（write / bash 余量）
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/strengthen-four-core-tools`（建议；可与主计划分 PR 串行合入 `develop`） |
+| **阻塞点** | — |
+| **关联 TODOS** | —（落地后按 PR 拆 `#T-xxx`） |
+| **计划文档** | [strengthen-four-core-tools_b51c9eae.plan.md](/Users/yankeben/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md) |
+| **横向调研** | [agent-tools-comparison.md](../docs/reports/agent-tools-comparison.md) §4.2 |
+
+**目标**：在 **T2-P0-005** 已交付 catalog / `read` 全栈加强 / `read_state` 等基线之上，按主计划把 **`write` / `bash`** 及 **PR-A 四工具短名**（`read/write/edit/bash`）与 **T1→T2→T3** 余量对齐 pi-mono 契约 + cc-fork / pi_agent_rust 工程化切片；**`edit` 实现与验收见独立卡 T2-P0-017**；主计划 §0.7–0.8 选型表为权威。
+
+**说人话**：`read` 已在 develop；**改文件**单独一张 **T2-P0-017** 跟；本卡盯住 **写文件、跑 shell、统一短工具名** 和主计划里剩下的 PR。
+
+**子项**：
+- [x] **read（已完成）**：交付见 **T2-P0-005** 子项「**T2-P0-tools-read | read 工具加强**」（2026-05-05 DONE）；冻结版技术方案 [read.md](../openspec/specs/architecture/tools/read.md)；专项执行计划 `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md`。与主计划 **§2.1 read** / **§4.1 read 多模态** / **§4.4 hashline** 等对齐部分已随该子项落地。
+- [ ] **`edit`（归并 T2-P0-017）**：OpenSpec + 代码实现与测试矩阵不在本卡展开；唯一追踪入口 **T2-P0-017**（本 §4 中位于 **T2-P0-005** 之后）+ [edit.md](../openspec/specs/architecture/tools/edit.md)。与 **T2-P0-016** 同主计划分支合入时协调 **PR-A** 中 `edit` 短名/schema 与 **T2-P0-017** 的落地顺序。
+- [ ] **write + bash + 短名总闸（PR-A～E 等）**：**PR-A** 四工具 `catalog`/`tool_exec`/`system_prompt`/测试断言短名 + transcript 单迭代 fallback（主计划 §1）；**PR-B～E** T1 read 余量核对、write staleness/overwrite、bash 超时与输出累积（主计划 §2）；T2/T3 按主计划 §3–§4 拆 PR；汇总契约见主计划 §5 `builtin-tools.md`（待建）。
+
+**依赖**：**T2-P0-005** `DONE`（含 read、`read_state`、catalog 派生链）；**T2-P0-004**；**T2-P0-013**（`agent_workspace_dir` 等目录语义，影响 cwd/bash 描述）。
+
+**被依赖**：**T2-P1-007**（工具系统后置项）可在本卡阶段性 DONE 后继续排期；与 **T2-P0-011**（大文件编辑策略）在 `edit` 语义上相关——以 [edit.md](../openspec/specs/architecture/tools/edit.md) 与 **T2-P0-017** 为权威。
+
+**协作接口**：
+- 消费：`BuiltinToolCatalog`、`tool_exec`、`read_state`、`write_file_atomic`、bash 执行器
+- 提供：短名工具 wire、`write`/`bash` 与主计划一致的 schema 与错误语义、openspec `tools/*.md` 与（待建）`builtin-tools.md`（`edit` 侧接口与 **T2-P0-017** 对齐）
+
+**验收标准**（对齐主计划 §6 测试矩阵 + 各 PR 门禁）：
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib` 全绿；相关集成测按主计划登记 `scripts/test-groups.sh`
+- **`edit`**：**T2-P0-017** `DONE` 且 [edit.md](../openspec/specs/architecture/tools/edit.md) §10 测试矩阵随 PR-D/H/M 从 PENDING→✅（函数名以合入时仓库为准）
+- **write/bash/命名**：主计划 §6 表中对应阶段用例覆盖；`docs/tool-catalog.md` 与 catalog 无漂移
 
 ---
 
@@ -313,7 +350,7 @@
 
 **依赖**：T2-P0-004（权限模型就位后才好改）
 
-**被依赖**：T2-P0-008（TUI 要展示新描述清单）
+**被依赖**：T2-P0-008（TUI 要展示新描述清单）；**T2-P0-016**（四工具余量加强在 catalog/描述链路上继承本卡交付）；**T2-P0-017**（`edit` 工具契约与实现）
 
 **协作接口**：
 - 消费：`ToolRegistry`、`PermissionGate`
@@ -333,6 +370,42 @@
   - **Compaction**：`generate_summary` 仍走 **`LlmProvider::chat`**；若主对话切到 Responses，摘要与主对话协议关系按 spec **§6.5 表格 · Compaction** 处理（同一 trait 注入或另配摘要 provider，避免静默分叉）。
   - **测试**：至少 **单元 / mock** 覆盖 Responses 路径一轮（非流式或流式其一）；与 Completions 回归并存 **`cargo test`** 全绿。
   - **文档**：实现与 [llm-multiprovider-integration.md §6.5](../openspec/specs/architecture/llm-multiprovider-integration.md) 核对；[`Architecture.md`](../openspec/specs/Architecture.md) 索引已挂 `llm-multiprovider-integration.md` 则交付前确认未丢链。
+
+---
+
+### T2-P0-017 | strengthen-edit-tool | `edit` 工具契约与实现
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/strengthen-four-core-tools`（建议；与 **T2-P0-016** 同主计划、可分 PR 串行合入 `develop`） |
+| **阻塞点** | — |
+| **关联 TODOS** | —（落地后按 PR 拆 `#T-xxx`） |
+| **计划文档** | [strengthen-four-core-tools_b51c9eae.plan.md](/Users/yankeben/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)（**§0.4 edit**、**§2.3 edit**、**PR-D / PR-H / PR-M**、**T3-K**） |
+| **横向调研** | [agent-tools-comparison.md](../docs/reports/agent-tools-comparison.md) §4.2 |
+
+**目标**：在 **T2-P0-005** 已交付 `read`、`read_state`、staleness 底座之上，按主计划将 **`edit`** 对齐 pi-mono 原文快照语义 + cc-fork / pi_agent_rust 工程切片：**PR-D（T1）** `edits[]` / `replace_all` / 重叠检测 / 单次原子写 / `edit` 前 staleness；**PR-H（T2）** normalize、curly-quote、结构化诊断、`.ipynb` 拒绝；**PR-M + T3-K（T3）** `hashline_edit` 工具注册（与 [read.md](../openspec/specs/architecture/tools/read.md) §4 闭环）+ `new_content` secrets 扫描。单一事实源：[edit.md](../openspec/specs/architecture/tools/edit.md)。
+
+**说人话**：读文件那条线已经做完；这张卡专门把「改文件」按 frozen spec 落到代码里，分 T1/T2/T3 几刀合完。
+
+**子项**：
+- [x] **read（已完成）**：交付见 **T2-P0-005** 子项「**T2-P0-tools-read | read 工具加强**」（2026-05-05 DONE）；[read.md](../openspec/specs/architecture/tools/read.md)；`hashline` / `ReadFileState` 等与 `edit` 的衔接以 read 正文为准，本卡不再重复实现 read。
+- [ ] **`edit` 规格 + 实现**：OpenSpec 冻结方案 [edit.md](../openspec/specs/architecture/tools/edit.md)（`edits[]` 对 **original** 一次应用、`replace_all`、staleness、`hashline_edit`、PR-D/H/M 排期、§10 测试矩阵）；代码按 edit.md §2.4 与主计划 **PR-D**、**PR-H**、**PR-M**、**T3-K** 实施。
+
+**依赖**：**T2-P0-005** `DONE`（含 read、`read_state`、catalog 派生链）；**T2-P0-004**；**T2-P0-013**（目录语义影响 prompt/工具描述时）
+
+**被依赖**：**T2-P0-016**（`write`/`bash`/PR-A 与 `edit` 同仓合入时协调）；**T2-P0-011**（大文件编辑策略）— 以 [edit.md](../openspec/specs/architecture/tools/edit.md) 为权威
+
+**协作接口**：
+- 消费：`BuiltinToolCatalog`、`tool_exec`、`ReadFileState`（[`read_state.rs`](../src/core/tools/read_state.rs)）、`write_edit` / `write_file_atomic`
+- 提供：`edit` 工具短名与 schema（`oneOf` 形状 A/B）、结构化错误语义、`hashline_edit` 注册（T3）、与 [read.md](../openspec/specs/architecture/tools/read.md) §4 一致的 hashline 协议消费方
+
+**验收标准**（对齐 [edit.md](../openspec/specs/architecture/tools/edit.md) §10 + 主计划门禁）：
+- `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib` 全绿；相关集成测登记 `scripts/test-groups.sh`
+- **edit.md §10** 所列用例随 PR-D/H/M（及 T3）逐项从 PENDING→✅（函数名以合入时仓库为准）
+- `docs/tool-catalog.md` 与 catalog 中 `edit` 条目与实现无漂移
 
 ---
 
@@ -659,7 +732,7 @@
 
 **目标**：把 `src/core/llm/openai.rs` 中的 `stream_timeout_sec` 接 `tokio::time::timeout`；替换 `src/core/agent_loop/types.rs:38-40` 的 `MAX_TOOL_ROUNDS` 硬限为 ToolLoopGuard 三道防线。
 
-**调度说明（2026-04-26）**：仍在 002 范围与「18 个 T2-P0/P1 全 DONE」交付内。主动取消 + `reqwest` 整请求超时已降低挂死概率；本任务为体验加固，**不阻塞**其它 P0 认领与合并；若迭代末期时间仍紧，以「末位调度」压线排期，接受短期依赖现有超时与取消路径。
+**调度说明（2026-04-26）**：仍在 002 范围与「19 个 T2-P0/P1 全 DONE」交付内（2026-05-05 起含 **T2-P0-017**）。主动取消 + `reqwest` 整请求超时已降低挂死概率；本任务为体验加固，**不阻塞**其它 P0 认领与合并；若迭代末期时间仍紧，以「末位调度」压线排期，接受短期依赖现有超时与取消路径。
 
 **子项**：
 - [ ] `OpenAiProvider::chat_stream` 接入 `tokio::time::timeout` + 心跳超时；超时抛 `LlmError::StreamTimeout`（Retryable）
@@ -891,10 +964,10 @@
 | **状态** | `TODO` |
 | **负责人** | — |
 | **分支** | `feature/tool-system-deferred-followups` |
-| **阻塞点** | 等 T2-P0-005 当前范围（T-033/T-034/T-036）闭环后再排期 |
+| **阻塞点** | 等 **T2-P0-016** / **T2-P0-017**（`write`/`edit`/`bash` 与短名余量）主线阶段性推进后再排期；**T2-P0-005** 已 `DONE` 不构成阻塞 |
 | **关联 TODOS** | `#T-035`、`#T-037`、`#T-039` |
 
-**目标**：承接从 T2-P0-005 移出的低优先级工具系统改进；先补齐 P0 工具语义与 cwd 授权闭环，再评估这些体验 / 产品策略项是否进入实现。
+**目标**：承接从 T2-P0-005 移出的低优先级工具系统改进；在 **T2-P0-016** / **T2-P0-017** 推进四工具契约与 **T2-P0-013** 目录语义就位后，再评估这些体验 / 产品策略项是否进入实现。
 
 **子项**：
 - [ ] **T-035**：默认工具内创建目录，不再 spawn `pi` 子进程
@@ -961,7 +1034,11 @@ flowchart LR
     P004[T2-P0-004<br/>权限分级] --> P013[T2-P0-013<br/>拖拽/Bash/CWD 整改]
     P013 --> P005[T2-P0-005<br/>工具系统]
     P013 --> P012[T2-P0-012<br/>图片/二进制附件]
+    P005 --> P016[T2-P0-016<br/>四工具契约加强余量]
+    P005 --> P017[T2-P0-017<br/>edit 工具]
     P005 --> P008[T2-P0-008<br/>TUI 强化]
+    P016 --> P107[T2-P1-007<br/>工具系统后置项]
+    P005 --> P107
     P006 --> P008
     P002 --> P011[T2-P0-011<br/>大文件编辑策略<br/>由 #T-043 抽出]
     P005 --> P011
@@ -975,7 +1052,6 @@ flowchart LR
     P103 --> P104
     P008 --> P105[T2-P1-005<br/>Feedback]
     P010 --> P106[T2-P1-006<br/>集成测试规范]
-    P005 --> P107[T2-P1-007<br/>工具系统后置项]
 ```
 
 > **注**：T2-P0-003 仍从 T2-P0-001 出依赖边，**实施顺序**固定为**全部其它 T2-P0-00x 之后**（002 内最低、末位调度）。
@@ -986,6 +1062,8 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-05 | 新增 **T2-P0-017** + 收敛 **T2-P0-016** | 在 **T2-P0-005** 与 **T2-P0-006** 之间插入 **T2-P0-017 \| strengthen-edit-tool**（P0，`TODO`）：主计划 [strengthen-four-core-tools_b51c9eae.plan.md](/Users/yankeben/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)；子项 **[x] read（已完成）** + **[ ] `edit`**（OpenSpec [edit.md](../openspec/specs/architecture/tools/edit.md) + **PR-D / PR-H / PR-M** 与 **T3-K** `new_content` secrets，见 edit.md §2.4.5）。**T2-P0-016** 原 `edit` 子项改为归并至 **T2-P0-017**；**T2-P0-005**「被依赖」增链 **T2-P0-017**；§5 拓扑增 `P005→P017`；§1.1/§1.3 交付任务总数 **18→19**；**T2-P0-013**「被依赖」增 **T2-P0-017**；**T2-P1-007** 阻塞口径含 **T2-P0-017**。 |
+| 2026-05-05 | 新增 **T2-P0-016 \| strengthen-four-core-tools** | 按 `~/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md` 在看板 **§4** 登记 P0 大任务：`read` 子项标 **已完成**（归并 **T2-P0-005**「T2-P0-tools-read」交付）；**edit** 子项锚定 OpenSpec [edit.md](../openspec/specs/architecture/tools/edit.md) + 主计划 PR-D/H/M；**write/bash/PR-A～E** 单列余量子项；**T2-P0-005**「被依赖」增链 **T2-P0-016**；**T2-P0-013**「被依赖」增链 **T2-P0-016**；§5 拓扑增 `P005→P016`、`P016→P107` 且保留 `P005→P107`。状态 `TODO`。 |
 | 2026-05-05 | L-3 红区 follow-up 闭环（DONE 不变） | Nibbles 在 `refactor/split-l3-files`（单 commit `4ad9423`）按 `~/.cursor/plans/l3_红区文件拆分整改_c7d01211.plan.md` 把上一轮 review 标出的两个 L-3 红区文件拆回 L-1 / L-2 上沿——`primitive/executor.rs` 2105→`executor/{mod 241/gate 140/helpers 77/read 537/search 955/write_edit 182/bash 150/confirm 26}.rs`（trait impl 整块留 mod.rs，每个方法 1 行委托 `xxx_impl(self,…)`；`pub(crate)` helper 由 mod.rs `pub(crate) use` 重导出，外部引用路径零变化）；`llm/openai_responses.rs` 1056→`openai_responses/{mod 411/payload 373/stream 321}.rs`（impl LlmProvider 整块留 mod.rs；`#[cfg(test)] #[path = "../tests/openai_responses_test.rs"] mod tests` 守 §A.9 私有项例外路径）；`registry.rs` 同步把 `#[path]` 指向 `openai_responses/mod.rs`。无 trait / catalog schema / 配置键 / 事件 wire / 错误码变更。`--no-ff` 合并入 develop（merge `6baf427`），全量门禁 `fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `./scripts/run-integration-tests.sh integration`（lib 674 + integration 229 = **903 PASS / 0 failed**，`.integration_test_output.log` 19:07–19:12，并发组 1m30s + 串行组 3m51s）全绿。Status 块写入 `docs/status/develop.md` 顶部。其他既有 L-2 黄区文件（`core/tools/config.rs` 826 / `api/chat/mod.rs` 820 / `compaction/preheat.rs` 792）按 plan §「不在范围」保持现状。 |
 | 2026-05-05 | T2-P0-005 PENDING_INTEGRATION→DONE | Nibbles：`feature/tool-system-cleanup`（12 ahead commits）通过 `--no-ff` 合并入 develop（merge `71183c4`）；develop 上 `fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `./scripts/run-integration-tests.sh integration`（lib 674 + integration 229 = **903 PASS / 0 failed**，`.integration_test_output.log` `EXIT_CODE=0`，并发组 1m35s + 串行组 3m47s）全量门禁绿。涵盖 5 子项：T-033 / T-034 / T-036 / search_files 兜底（含 macOS Homebrew 预检 + Tier1/Tier2 双实现）/ 多 LLM Responses（`registry` + `OpenAiResponsesProvider`）/ read 工具加强（PR-RA 命名 + RB T1 分页/二进制 hint/25 MiB + RF T2 行号/dedup/FILE_UNCHANGED + RJ T3 多模态 4 态 ReadResult/image/PDF 注入下一条 user/PR-RJ-0 `(mime,&Path)` helper + RM hashline xxh32）。Status 块写入 `docs/status/develop.md` 顶部；Follow-up：`primitive/executor.rs` 2105 行 / `llm/openai_responses.rs` 1056 行跨入 RUST_FILE_LINES_SPEC L-3 红区，记下一轮按子模块拆。 |
 | 2026-05-05 | T2-P0-005 子项 `T2-P0-tools-read \| read 工具加强` DONE | Spike 按 plan `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md` 完成 6 PR：PR-RA 命名 `read_file→read`（含 `OnceLock` 守 transcript fallback warn）/ PR-RB T1 `offset/limit` + 二进制结构化 hint + memchr 单循环抽窗 + `[tools.read].max_bytes` 25 MiB 上限 / PR-RF T2 `cat -n` 行号 + `read_state.rs` (`ReadStamp`/`ReadFileState`/`FILE_UNCHANGED_STUB`) 跨轮 dedup / PR-RJ-0 重构 `ChatMessageContentPart::image_b64`/`file_b64` 为 `(mime,&Path)` / PR-RJ T3-a `ReadResult` 4 态枚举 / T3-b PNG/JPEG/GIF/WebP/PDF magic 路由 + metadata 阶段 `IMAGE_MAX_BYTES`/`FILE_MAX_BYTES` 预检 / T3-c `tool_exec` 返回 `(String,bool,Vec<ChatMessageContentPart>)` + `tool_dispatcher` 把 image/file part 注入下一条 user message / PR-RM `hashline:bool` xxh32 行级短指纹（与 `line_numbers` 互斥并优先）。新增 `tests/read_tool_tests.rs` 6 例集成测试登记并发组；`docs/tool-catalog.md` 由 `gen-tool-catalog` 重派生；`User_Stories.md` / `E2E_SCENARIO_LIBRARY.md`（E2E-CLI-021/021a–e）/ `docs/status/feature-tool-system-cleanup.md`（追加 #4）/ `INTEGRATION_TEST_SPEC §7.2` 同步。门禁：`fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `read_tool_tests`（6 PASS）/ `agent_loop_tests`（11 PASS）：PASS。 |

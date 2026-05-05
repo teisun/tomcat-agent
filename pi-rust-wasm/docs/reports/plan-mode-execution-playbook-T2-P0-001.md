@@ -105,7 +105,7 @@
 
 **动作**：得到用户回答后，**再**并行读 3 份规范：
 
-- [PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md) — 计划必须包含的 7 维度 + 12 岁原则 + 自检清单
+- [PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md) — 计划必须包含的 7 维度 +「说人话」辅助（先专业后口语）+ 自检清单
 - [PLAN_SKELETON.md](../../agents/plan/PLAN_SKELETON.md) — 一屏骨架模板
 - [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) — § 4 全量门禁的"写日志 + 后台 + 轮询"执行模式
 
@@ -126,7 +126,7 @@
 
 **计划结构**（严格对齐 PLAN_SPEC 七维度）：
 
-1. 大白话先说（12 岁原则） — PLAN_SPEC § 3
+1. 先专业、后「说人话」— PLAN_SPEC 文首 + § 三
 2. 认领与分支（Dispatcher）
 3. 研发流程表
 4. **看板子项 ↔ 计划映射表**（防止编号对不上 — PLAN_SPEC § 1.1）
@@ -359,7 +359,7 @@ When writing mermaid diagrams:
 | 层 | 约束方 | 内容 |
 |---|---|---|
 | L1（Cursor 平台） | Cursor IDE 系统提示 | 工具能力 / 提问时机 / CreatePlan 交付 / mermaid 语法 |
-| L2（项目规范） | Dispatcher.md + PLAN_SPEC.md | 7 维度内容 / Todo 总表 / 集成 E2E 描述 / 12 岁原则 |
+| L2（项目规范） | Dispatcher.md + PLAN_SPEC.md | 7 维度内容 / Todo 总表 / 集成 E2E 描述 /「说人话」辅助 |
 
 L1 决定 **"怎么走"**（流程与工具），L2 决定 **"走完要交什么"**（计划内容质量）。两者**互为前提、不可替代**：
 - 只有 L1 没 L2：会交出"格式合规但内容空洞"的计划（例如没有风险段 / 没有 Todo 总表）

@@ -1,1019 +1,405 @@
-# read 工具技术方案（架构 spec）
+# `read` 工具：分页、去重、多模态与陈旧检测
 
-本文档承接独立执行计划 `[strengthen-read-tool_92f396c7.plan.md](../../../../../.cursor/plans/strengthen-read-tool_92f396c7.plan.md)` 与 PR-RS 文档治理计划 `[tools-read-spec-migration_cb4d7b57.plan.md](../../../../../.cursor/plans/tools-read-spec-migration_cb4d7b57.plan.md)`。
-
-> **位置说明**：计划文档（plan）记录决策过程与待办清单；本文为冻结后的技术方案摘要（§1–§2 自计划搬运）+ 协议 / One-Glance Map / 调度时序（§3–§5）。
+本文档是内置工具 **`read`** 的冻结版技术方案（OpenSpec **B 类**：`openspec/specs/architecture/tools/`），承接看板子项 **T2-P0-tools-read**（[`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md)）与计划 [`strengthen-read-tool_92f396c7.plan.md`](../../../../../.cursor/plans/strengthen-read-tool_92f396c7.plan.md)、[`tools-read-spec-migration_cb4d7b57.plan.md`](../../../../../.cursor/plans/tools-read-spec-migration_cb4d7b57.plan.md)。**实现以仓库代码为准**；计划文档保留讨论过程与 PR 治理顺序，本文只保留**已定稿的行为与契约**。
 
 ---
 
-## 1. 背景与对比
+## 目录
 
-> **调研 + 选型，无代码改动**。本部分包含 §0 现状速览 + §0.A 五项目横向对比（含 §0.A.1–§0.A.4 共 4 个子节），回答三个问题：
-> ① pi-rust-wasm read 工具**当前在哪**（§0 评分基线 3.0）；
-> ② 五个对照 agent **各自怎么做**（§0.A.2 横向对照表，列头含语言栈 + file:line 锚点）；
-> ③ 我们**应该怎么做**（§0.A.3 单一权威决策表 + 表后「项目级移植说明」 + §0.A.4 评分演进路径）。
->
-> 实施期需要的术语手册已下沉到对应实施小节作为「概念前置」：**staleness / dedup → §3.2.1 / §3.2.2**；**hashline → §4.3.1**。
+- [1. 目标与设计原则](#1-目标与设计原则)
+- [2. 竞品 / 选型对比](#2-竞品--选型对比)
+  - [2.1 Agent 读文件的典型关切](#21-agent-读文件的典型关切)
+  - [2.2 常见实现横向对比](#22-常见实现横向对比)
+  - [2.3 落地选型决策表](#23-落地选型决策表)
+  - [2.4 实施点（已闭环）](#24-实施点已闭环)
+- [3. 术语统一](#3-术语统一)
+- [4. 协议（入参 / 出参 / Schema）](#4-协议入参--出参--schema)
+- [5. One-Glance Map（文件职责总览）](#5-one-glance-map文件职责总览)
+- [6. 调度时序（运行时图）](#6-调度时序运行时图)
+- [7. 状态机与会话表](#7-状态机与会话表)
+- [8. 配置与环境变量](#8-配置与环境变量)
+- [9. 错误模型 / 截断 / Stub](#9-错误模型--截断--stub)
+- [10. 测试矩阵（验收）](#10-测试矩阵验收)
+- [11. 风险与应对](#11-风险与应对)
+- [12. 历史决策（已被本方案取代）](#12-历史决策已被本方案取代)
+- [13. 关联文档](#13-关联文档)
+- [附录：旧节号 → 本版对照](#附录旧节号--本版对照)
 
-### 0. 现状速览（read 单工具）
+---
 
+## 1. 目标与设计原则
 
-| 项                      | pi-rust-wasm 现状              | 关键 file:line                                                                                                    | 评分（满 10） |
-| ---------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------- | -------- |
-| 工具名                    | `read_file`                  | `[src/core/tools/catalog.rs](../../../../src/core/tools/catalog.rs)` `BUILTIN_TOOL_CATALOG` 80–95               | —        |
-| 输入 schema              | 仅 `path: string`             | `[src/core/tools/catalog.rs](../../../../src/core/tools/catalog.rs)` `read_file_parameters` 257–264             | —        |
-| 实现                     | 一次 `read_file_utf8` 整文件读     | `[src/core/tools/primitive/executor.rs](../../../../src/core/tools/primitive/executor.rs)` `read_file` 965–1000 | —        |
-| 大小上限                   | `MAX_READ_BYTES = 10 MiB`    | 同上 95–96                                                                                                        | —        |
-| **R1 分页/截断**           | 无                            | —                                                                                                               | 1        |
-| **R2 多模态**             | 仅 UTF-8（图片/PDF/Notebook 均拒）  | —                                                                                                               | 1        |
-| **R3 行号渲染**            | 无                            | —                                                                                                               | 1        |
-| **R4 二进制识别**           | `String::from_utf8` 失败 → 裸错误 | —                                                                                                               | 4        |
-| **R5 staleness/dedup** | 无                            | —                                                                                                               | 1        |
-| **R6 性能/上限**           | 整文件入内存，10 MiB                | —                                                                                                               | 5        |
-| **加权分**                | —                            | —                                                                                                               | **3.0**  |
-
-
-**目标分**（与主计划 §0.6 对齐）：T1 完成 ≈ **5.5**，T2 完成 ≈ **7.5**，T3 完成 **≥ 9.0**（追平 cc-fork-01 8.5、超过 hermes/pi_agent_rust 7.5）。
-
-### 0.A 五项目 read 工具横向对比
-
-#### 0.A.1 维度定义（read 专用）
+**一句话**：让模型在本地读盘时 **可控体量、可读错误、可续读、少重复刷屏**，并在改文件前有机会发现「磁盘已变」——而不是把整份大文件或裸二进制直接倒进上下文。
 
 
-| 维度                       | 定义                                        | 作用（为什么必须有）                                                                                                                                                          | 缺位代价（pi-rust-wasm 现状代价）                                                 |
-| ------------------------ | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **R1 分页/截断**             | 是否支持 `offset` / `limit` 入参与默认行/字节上限       | ① **保护上下文窗口**：模型只看需要的几百行，避免一次注入 10 MiB；② **支撑大文件场景**：可分批读 log/dump/数据集；③ **与 edit 配合**：edit 失败后只重读受影响窗口而非整文件                                                        | 单次 read 极易把 ctx 撑爆 → loop 早期就 OOM；遇到 5–10 MiB 文件直接报错或刷屏，模型无法继续推进任务      |
-| **R2 多模态**               | 图片 / PDF / Notebook 等非纯文本路径的覆盖度           | ① **让 vision 模型看图**：截图、UI 设计稿、错误截屏直接进对话；② **覆盖产品场景**：PDF/Notebook 是业务实际产物；③ **闭合「调试-截屏-反馈」回路**：用户贴图后 agent 能立刻 read 出 base64 喂回 LLM                                 | 任何非 UTF-8 文件直接 Err；用户截屏调试只能让 agent 用 `file`/`base64` 走 bash 拼装，链路冗长易错   |
-| **R3 行号渲染**              | 是否输出可被 edit 工具直接引用的行号或哈希锚点                | ① **edit 工具的输入桥梁**：edit 需要精确行号定位；② **降低 oldText 歧义**：行号 + 内容双重锚点降低误改概率；③ **支撑 hashline_edit**：N#AB:line 协议要求 read 端先打哈希                                             | 模型给 edit 的 `old_content` 只能用裸字符串匹配，遇到重复行直接拒；多段 edit 必须人肉数行号，错误率高        |
-| **R4 二进制识别**             | 非 UTF-8 文件失败时的结构化程度（裸 Err / 引导提示 / 自动转视觉） | ① **可恢复诊断**：返回「这是 PNG，建议用 vision」而不是「invalid utf-8」；② **避免 retry 风暴**：明确告知不可读后模型不会反复重试；③ **配合 R2 落地多模态**：识别后路由到 image/pdf 分支                                        | 模型拿到裸 utf8 错误，常见错误链：read 失败 → 改 cat → cat 输出二进制乱码 → 占满 ctx → 任务失败       |
-| **R5 staleness / dedup** | 与 write/edit 的「先 read」契约 + 重复读阻断策略        | ① **edit/write 安全门**：要求修改前必须 read，且 read 后未被外部改动；② **省 token**：同一 (path,offset,limit) 自上次 read 后未变 → 返回 `FILE_UNCHANGED` stub；③ **防 loop**：同窗口反复 read 直接软阻断，强制模型换策略 | 模型在 loop 中反复 read 同一文件耗 token；外部编辑器改了文件，agent 仍按旧内容 edit → 改坏代码         |
-| **R6 性能 / 上限**           | 单次 max bytes、是否流式行读、是否做 token 估算          | ① **可预测延迟**：流式行读避免一次性把 100 MB 拉进内存；② **保护进程**：上限阻止恶意/误操作 read 设备节点；③ **token 预算**：预估输出 token 后才能在 ctx 紧张时主动截断                                                       | 现 10 MiB 上限「不大不小」：小到塞不下日常 dump，大到一次塞满 32k ctx；无流式读 → 大文件全量入内存，wasm 环境易爆 |
+| 原则（可观察）            | 说明                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| **单名对外**           | 内置 catalog 仅注册 `read`；`read_file` 得到与拼错名一致的**未知工具**类错误                                                 |
+| **窗口可控**           | `offset`（1-based 行）+ `limit`（1..=10000，默认 2000）；截断时正文尾附带 `resume with offset=<next>, limit=<same>`     |
+| **裸读有上限**          | 未传窗口时 `metadata().len()` 超过文本上限（默认 25 MiB）→ 结构化错误并提示分窗；**已传** `offset` 或 `limit` 时可绕过（允许只读大文件的一小段）     |
+| **二进制可诊断**         | 非 UTF-8 文本路径 → `AppError::Tool`，文案含 first-byte 十六进制与可执行建议（如 `bash file`），避免裸 `invalid utf-8`           |
+| **行级可定位**          | 默认 `cat -n`（6 格右对齐行号 + Tab）；`hashline=true` 时为 `行号#双字符哈希:正文`（与 `line_numbers` 互斥，**hashline 优先**）      |
+| **多模态走 OpenAI 约束** | 图 / PDF：`tool` 消息里占位句；真实 `InputImage` / `InputFile` 注入**下一条** `user` 的 `Parts`（`role=tool` 不接受图像 part） |
+| **会话去重**           | 同一 `(path, offset, limit)` 且磁盘 `mtime+size` 未变 → 第二次起返回 `FILE_UNCHANGED` 短 stub                        |
+| **陈旧检测底座**         | `read_state` 存上次成功 read 的指纹；`write` / `edit` 入口可比对，防止按旧上下文误改                                           |
 
 
-> 这 6 个维度并非孤立：R1（分页）+ R3（行号）+ R5（staleness）共同支撑 **edit 闭环**；R2（多模态）+ R4（二进制识别）共同覆盖 **非文本调试场景**；R6 是底座，决定前 5 项的成本上限。后续 §0.A.2 评分、§0.A.3 选型决策、§2–§4 的 T1/T2/T3 排期都按这个分组推进。
-
-#### 0.A.2 横向能力对照表
-
-> 列头小字给出每个 agent 的**语言栈 + read 实现的关键 file:line 锚点**（原 §0.A.4 已并入），点击可直接跳转源码核对。
+### 1.1 观察指标表（与 §10 验收一一对应）
 
 
-| 维度                     | **pi-rust-wasm**（现状） Rust + wasm `[executor.rs` `read_file` 965–1000](../../../../src/core/tools/primitive/executor.rs) | **pi-mono** TypeScript / Bun `[read.ts` 17–21 / 121–134](../../../../../pi-mono/packages/coding-agent/src/core/tools/read.ts) | **pi_agent_rust** Rust `[tools.rs` 1368–1447 / 5468–5471](../../../../../pi_agent_rust/src/tools.rs) | **openclaw** TypeScript `[pi-tools.ts` 42–51 / 306](../../../../../openclaw/src/agents/pi-tools.ts) | **hermes-agent** Python `[file_tools.py` 1029–1040 / 482–538](../../../../../hermes-agent/tools/file_tools.py) | **cc-fork-01** TypeScript / Bun `[FileReadTool.ts` 227–243 / 248–331](../../../../../cc-fork-01/src/tools/FileReadTool/FileReadTool.ts) |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **R1 分页/截断**           | 无 offset/limit；整文件 ≤ 10 MiB                                                                                             | offset/limit + 截断头部 + 续读提示                                                                                                    | offset/limit + 2000 行 / 1MB 截断 + 续读 `offset=next`                                                    | 透传 Pi + 模型 ctx 缩放                                                                                   | offset/limit ≤ **2000 行** + ~100K 字符硬拒                                                                         | offset/limit + `MAX_LINES_TO_READ=2000` + maxTokens=25k                                                                                 |
-| **R2 多模态**             | 仅 UTF-8                                                                                                                 | 图片 base64 + resize                                                                                                            | 图片 jpg/png/gif/webp                                                                                  | 经 Pi + 扩展                                                                                           | 二进制扩展拒绝 → vision 引导                                                                                            | **图片+PDF+Notebook+Parts** 完整 discriminated union                                                                                        |
-| **R3 行号渲染**            | 无                                                                                                                       | 截断后行号提示                                                                                                                       | `NN→` 或 `N#AB:` hashline                                                                             | 透传                                                                                                  | `LINE_NUM                                                                                                      | CONTENT` 风格                                                                                                                             |
-| **R4 二进制识别**           | 抛 `非 UTF-8` Err（裸）                                                                                                      | 仅图片走特殊分支                                                                                                                      | `READ_TOOL_MAX_BYTES=100MB` + 图分支                                                                    | —                                                                                                   | 设备路径 + 二进制扩展拒绝                                                                                                 | `BLOCKED_DEVICE_PATHS` + binary ext 检测                                                                                                  |
-| **R5 staleness/dedup** | 无                                                                                                                       | 无                                                                                                                             | 无                                                                                                    | —                                                                                                   | (path,offset,limit,mtime) **dedup** + 多次 BLOCK                                                                 | `readFileState` + `FILE_UNCHANGED` stub                                                                                                 |
-| **R6 性能/上限**           | 一次 read 整文件，10 MiB                                                                                                      | 整文件入内存再 split                                                                                                                 | 流式行读，100 MB                                                                                          | —                                                                                                   | 100K 字符硬拒                                                                                                      | 256 KB 字节预检 + 25k token cap                                                                                                             |
-| **加权分**¹               | **3.0**                                                                                                                 | 6.0                                                                                                                           | 7.5                                                                                                  | 5.5                                                                                                 | 7.5                                                                                                            | **8.5**                                                                                                                                 |
+| 目标            | 观察指标（落地后可核对）                                           |
+| ------------- | ------------------------------------------------------ |
+| G1 工具名统一      | catalog 仅 `read`；`read_file` → 未知工具错误                  |
+| G2 大文件可控      | `offset` + `limit`；截断带续读尾注                             |
+| G3 裸读有上限      | 无窗口超 `max_bytes` → 结构化错误；有窗口可绕过                        |
+| G4 二进制可诊断     | Tool 错误含 hex 与建议                                       |
+| G5 行级可定位      | `cat -n` 或 hashline 二选一渲染                              |
+| G6 多模态 inline | magic + 扩展名路由；图 4.5 MiB、PDF 25 MiB 在 **metadata 阶段**拒绝 |
+| G7 OpenAI 路径  | 图 / PDF 占位 + 下一条 `user` 注入                             |
+| G8 会话去重       | 同窗口未变 → `FileUnchanged` stub                           |
+| G9 陈旧检测       | `read_state` 供写改前比对                                    |
 
 
-¹ 权重：R1×0.20、R2×0.15、R3×0.15、R4×0.10、R5×0.20、R6×0.20。
-
-#### 0.A.3 维度 → 落地点选型决策表
-
-> **本节是整个对比段的「单一权威表」**——合并了早期版本的「按维度收口（拒因）」与「按落地点收口（取自/形态/阶段）」两张表，**以 §0.A.1 的 R1–R6 维度为主键，每个维度可有多个子落地点（用 `↳` 表示同维度续行）**。
->
-> 一行回答四个问题：
-> ① 这条落地点要补强哪个维度？（**维度** 列）
-> ② 抄谁的，怎么落到 pi-rust-wasm？（**落地点 / 取自 / 形态** 列）
-> ③ 什么时候做？（**阶段** 列）
-> ④ 为什么选这个、为什么不选别家？（**入选理由 / 未入选项 + 拒因** 两列）
+### 1.2 非目标
 
 
-| 维度                       | 落地点                                                                        | 取自                                                        | 形态（实施位置）                                                                                             | 阶段      | 入选理由                                                                     | 未入选项 + 拒因                                                                                                                                                                                 |
-| ------------------------ | -------------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **R1 分页/截断**             | offset/limit + 默认 2000 行                                                   | cc-fork                                                   | catalog 字段 + executor 流读                                                                             | §2 T1   | cc-fork 默认上限工程上验证最稳，2000 行 ≈ 模型一次能消化的上限                                  | × `hermes` 100K 字符硬拒：触发后整个任务停摆，阻断大日志/dump 合理需求 × `pi_agent_rust` 1 MB 截断：上限太小，2000 行常触上限 × `openclaw` 模型 ctx 自适配：耦合 Pi 调用栈，独立项目难复用 × `cc-fork` 25k token API 估算：依赖 Anthropic SDK          |
-| ↳                        | 续读 `offset=next, limit=same` 提示                                            | pi-mono                                                   | 截断尾部固定模板字符串                                                                                          | §2 T1   | pi-mono 模板纯字符串、可直接搬到 Rust，零依赖                                            | （同上行）                                                                                                                                                                                     |
-| **R2 多模态**               | discriminated union `Image / Pdf / FileUnchanged`                          | cc-fork                                                   | 输出 schema 改 enum；按扩展名 + 头几字节 magic 判 mime；**不解码、不缩放**，直接读字节                                            | §4 T3   | ① schema 自描述，下游 `tool_exec` 易做 wire 注入 ② 编译期 enum 强制覆盖所有分支 ③ 不引图像 / PDF 解码依赖 → 零 crate 体积代价 | × `cc-fork` `Notebook` / `Parts`：Notebook 依赖 Jupyter、Parts 需 PDF 拆页落盘，复杂度收益比差 × `hermes` 仅扩展拒绝 + vision 引导：不真正返图，仍要 agent 用 bash 拼 base64 × `pi_agent_rust` 仅 image 不带 schema：未来加 PDF 改动大 |
-| ↳                        | inline base64 wire（复用 `ChatMessageContentPart` helper）                     | 自设（与 T2-P0-012 多模态 wire 对齐）                              | 重构 `image_b64` / `file_b64` 签名为 `(mime, &Path)` / `(filename, mime, &Path)`，helper 内部 metadata 预检 + 读盘 + base64；**不引** `image` crate，**不缩放** | §4 T3   | ① 与已合入多模态 wire 单一通道复用，避免双轨 ② 大小检查在 metadata 阶段，零内存 ③ 1568px 缩放是 Anthropic 服务端推荐，OpenAI 端 4.5 MiB 上限内已足够 | × `cc-fork` 1568px 缩放：依赖 `image` crate + Lanczos3 算法，传递依赖 7–10 个，编译时间不可控 × `cc-fork` token-aware compress：依赖 Anthropic SDK，wasm 无对应接口                                       |
-| **R3 行号渲染**              | `{:>6}\t{}` cat -n 风格                                                      | cc-fork                                                   | `format_with_line_numbers` helper                                                                    | §3 T2   | cat -n 默认体验最好，与几乎所有 IDE/diff 工具兼容                                        | × `pi_agent_rust` `NN→` 简单行号：被 cat -n 完全覆盖，无独立价值 × `hermes` `LINE_NUM                                                                                                                     |
-| ↳                        | 可选 `hashline=true` 输出 `N#AB:`                                              | pi_agent_rust                                             | read schema 加 `hashline?: bool` + executor 分支                                                        | §4 T3   | 给 edit 精细场景兜底，配合 R5 staleness 实现「行级一致性校验」（详见 §4.3.1）                     | （同上行）                                                                                                                                                                                     |
-| **R4 二进制识别**             | 失败时返回结构化 hint「This is `<mime>`, try `bash file <path>` or wait for vision」 | hermes（措辞）+ cc-fork（device 检测）                            | `read_file` 非 UTF-8 分支替换裸 Err                                                                        | §2 T1   | ① cc-fork 路径黑名单思路防 read `/dev/zero` 卡死 ② hermes 引导措辞自然，模型按提示能立即转策略       | × `hermes` 完整 device 路径黑名单：与 pi-rust-wasm 已有 audit gate 三层授权重复，避免治理冲突 × `pi-mono` 仅图片走特殊分支：忽略其它二进制类型，模型仍会撞错                                                                               |
-| **R5 staleness / dedup** | `FILE_UNCHANGED` 软 stub + `readFileState`                                  | cc-fork                                                   | 新增 `[src/core/tools/read_state.rs](../../../../src/core/tools/read_state.rs)` 公共底座                   | §3 T2   | 软 stub 既省 token 又允许合理 retry，比硬阻断鲁棒                                       | × `hermes` `(path,offset,limit,mtime)` dedup + 多次 BLOCK：太激进，合理 retry 也被拒，需改 prompt 绕开 × `pi-mono` 无 staleness：缺这层，edit 易改坏外部修改过的文件                                                        |
-| ↳                        | hashline 内容指纹（互补）                                                          | pi_agent_rust                                             | 复用 R3 的 hashline 输出做二次校验                                                                             | §4 T3   | 在「文件变了但 mtime 没变」（如 git checkout 保留时间戳）边角 case 兜底                        | （同上行）                                                                                                                                                                                     |
-| **R6 性能 / 上限**           | `AsyncRead` 固定缓冲分块 + `memchr` 扫 `\n`，**单循环**抽窗；跳过段不建行级 `String`            | pi_agent_rust（同类思路：分块 + 换行扫描，非 `BufReader::lines` 字面 API） | 替换现 `read_file_utf8` 整文件读                                                                            | §2 T1   | 流式避免整文件入内存；大 `offset` 时避免对跳过段逐行分配，wasm 友好                                | × `cc-fork` 256 KB 字节预检：太小，正常源码就被拒 × `pi_agent_rust` 100 MB：太大，单文件能塞满 wasm 堆 × `cc-fork` 25k token 估算：依赖 Anthropic SDK × `hermes` 100K 字符硬拒：实质同 R1 拒因                                     |
-| ↳                        | `MAX_READ_BYTES = 25 MiB`                                                  | 自设（介于 cc-fork 256KB 与 pi_agent_rust 100MB 之间）             | catalog 常量 + `pi.config.toml [tools.read] max_bytes` 覆盖                                              | §2 T1   | 兼顾合理 dump 文件 + 防爆 ctx                                                    | （同上行）                                                                                                                                                                                     |
-| **— (命名)**               | 工具短名 `read`                                                                | pi-mono                                                   | catalog / `tool_exec` / system prompt **仅暴露 `read`**（**不**做 `read_file` 别名、**不**打 `legacy_name` 兼容层） | §1 命名切换 | 与 pi-mono / cc-fork / pi_agent_rust 短名生态对齐；开发期避免双轨与 audit 分支             | × `cc-fork` 长名 `Read` / `FileReadTool`：与短名生态不一致 × **过渡 alias**：增加代码路径与测试面，本阶段不采用                                                                                                          |
-
-
-**核心选型口诀（与上表 1:1 对齐）**：
-
-- **cc-fork 拿 4 项**：R1 主体（offset/limit）、R2 union 形态、R3 cat -n、R4 device 思路、R5 软 stub —— 业界落地最完整；**砍掉**「1568px 缩放」**因为不引 `image` crate**（OpenAI 4.5 MiB 上限内已够用，Anthropic 端的 1568 推荐改由服务端处理）；
-- **pi_agent_rust 拿 3 项**：R3 hashline、R5 hashline 互补、R6 分块流式抽窗 —— Rust 原生、无 SDK 依赖；
-- **pi-mono 拿 2 项**：R1 续读模板、§1 命名 —— 零依赖、最小可移植；
-- **hermes 拿 1 项**：R4 措辞 —— 引导句式自然，BLOCK 思路被否；
-- **openclaw 不取**：模型 ctx 自适配耦合 Pi 调用栈，read 自身无独立增强。
-- **本仓自设 1 项**：R2 helper 复用通道（`ChatMessageContentPart::image_b64 / file_b64` 签名重构为 `(mime, &Path)`），与已合入的 T2-P0-012 多模态 wire 走同一通道，避免双轨。
-
-> **维度覆盖核对**：R1（2 行）、R2（2 行，原"1568px 缩放"换为"helper 复用通道"）、R3（2 行）、R4（1 行）、R5（2 行）、R6（2 行）+ 命名（1 行）= **共 12 行落地点，6 个维度全部 ≥ 1 项覆盖**。
-> 阶段分布：**§1 命名（1）、§2 T1（5）、§3 T2（2）、§4 T3（4）**，刚好对应 §0.A.4 评分演进 3.0 → 5.5 → 7.5 → 9.0+ 的跃迁节奏。
-
-> **横向只取 cc-fork 不行吗？** 不行。
-> ① **R6 性能/上限**：cc-fork 的 256 KB 字节预检 + token 估算依赖 Anthropic SDK，wasm 环境无法直接搬，必须改用 **分块流式读 + 自设 25 MiB**（思路对齐 `pi_agent_rust` `ReadTool`，见 §2.4）；
-> ② **R3 行号**：edit 强一致场景需要 hashline 兜底，cc-fork 没有这套协议，要从 `pi_agent_rust` 借；
-> ③ **R1 续读 hint**：cc-fork 的截断措辞偏英语长句，pi-mono 的「`offset=<next>, limit=<same>`」更精炼，模型按规则即可继续读；
-> ④ **R2 1568px 缩放**：cc-fork 走 Anthropic Messages API + `image` crate Lanczos3 缩放；本仓走 OpenAI（4.5 MiB inline 上限内 vision 模型可识别），不需要 `image` crate；改为复用已合入的 [`ChatMessageContentPart::image_b64`](../../../../src/core/llm/types.rs) helper（PR-RJ-0 重构其签名为 `(mime, &Path)`）。
-> 所以最终选型 = **cc-fork 4 + pi_agent_rust 3 + pi-mono 2 + hermes 1 + 本仓自设 1** 的复合最优解。
-
-##### 项目级移植说明（解释为什么 §0.A.3 多数行只「取设计」而不「搬代码」）
-
-每条对应表中一个或多个 × 拒因背后的**跨维度根因**：
-
-- **pi-mono** —— TS/Bun 实现，read 主体逻辑无法直搬 Rust；可取**设计形态**（schema 字段 + `offset=<next>` 续读模板字符串），代码需 Rust 重写。
-- **pi_agent_rust** —— Rust 同栈最易借鉴，但 hashline 字典需引入 `xxhash-rust` crate；其 `NN→` 简单行号已被 cc-fork `cat -n` 完全覆盖，所以**只取 hashline 部分**而非整个行号实现。
-- **openclaw** —— read 行为完全依赖 `pi-coding-agent` 包装、无独立增强逻辑；模型 ctx 自适配耦合于 Pi 调用栈，独立项目无对应抽象——这就是表中**几乎全表「× openclaw」**的根本原因。
-- **hermes-agent** —— Python 栈无法直搬 Rust；其 BLOCK 策略过激被否；**只取「失败措辞 / vision 引导」的 prompt 思路**而非任何代码。
-- **cc-fork-01** —— TS/Bun 私有 utils 复杂度高 + `token-aware compress` 依赖 Anthropic SDK + `image` crate Lanczos3 缩放传递依赖太多；wasm 环境无法复用——所以 4 项虽全取 cc-fork，但**仅照搬设计形态**（schema / 行号 / state 表语义），代码层面需 Rust 重写；**1568px 缩放**直接砍掉，改走 OpenAI 4.5 MiB inline 上限 + 复用 `ChatMessageContentPart` helper。
-
-#### 0.A.4 评分演进路径
-
-```mermaid
-flowchart LR
-  cur["pi-rust-wasm 现状 3.0"]
-  t1["T1 完成 5.5\n(offset/limit + 二进制提示 + 流式)"]
-  t2["T2 完成 7.5\n(行号 + FILE_UNCHANGED + read_state)"]
-  t3["T3 完成 9.0+\n(图片+PDF+hashline)"]
-  ccf["cc-fork-01 基线 8.5"]
-  pir["pi_agent_rust 基线 7.5"]
-  herm["hermes 基线 7.5"]
-
-  cur --> t1 --> t2 --> t3
-  ccf -.超越.-> t3
-  pir -.对齐.-> t2
-  herm -.对齐.-> t2
-```
-
+| 非目标                         | 说明                                     |
+| --------------------------- | -------------------------------------- |
+| 服务端缩放图片                     | 不引入 `image` crate；大图由上游或用户预处理          |
+| PDF 文本抽取 / Notebook         | 不解码 PDF 为文本；不解析 `.ipynb`               |
+| `read_file` 运行时别名           | 不重定向；历史回放仅 warn（见代码注释）                 |
+| Anthropic `tool_result` 内嵌图 | 当前主线为 OpenAI Responses；Anthropic 另接时再扩 |
 
 
 ---
 
-## 2. 实施排期（12 项落地点）
+## 2. 竞品 / 选型对比
 
-> **按 T1 → T2 → T3 三阶段递进**，对应评分跃迁 3.0 → 5.5 → 7.5 → 9.0+（详见 §0.A.4）。
-> §1 命名切换是 T1 前的破坏性前置 PR；§2 (T1) / §3 (T2) / §4 (T3) 三阶段独立合入，每阶段都带测试与配置开关，可单独回滚。
->
-> **本部分所有子节与 §0.A.3 决策表 1:1 对应**——每个子节标题就是决策表里的一条「落地点」，子节顺序与决策表行顺序完全一致。术语手册（staleness / dedup / hashline）已下沉到对应实施小节内（§3.2 / §4.3）作为「概念前置」。
-> **每个实施小节** 都以 `> **概念前置**：...` 开头，配 1 张 ASCII 小图说明机制；其后才是实现细节列表。
+对标过 pi-mono、pi_agent_rust、openclaw、hermes、cc-fork 等读文件策略。下列表格为 **已写入代码的决策**，不是待办 brainstorm。
 
-#### 全景图（12 项落地点 → 实施小节 → 代码触达）
+### 2.1 Agent 读文件的典型关切
 
-> 一图看懂第二部分：12 个落地点（① ~ ⑫）+ 1 个横切节（★）按阶段排布；每行末尾标实施小节编号；图下方按文件汇总「这个文件被哪些落地点改动」。
+本地 `read` 类工具通常要同时解决四类问题：**体量**、**编码与类型**、**模型重复调用**、**写改一致性**。本方案用 **offset/limit + metadata 门 + read_state（mtime/size 快路径）+ 下一条 user 注入多模态** 四条线分别收口。
 
 ```text
-+════════════════════════════════════════════════════════════════════════════+
-║  read 工具加强 · 12 项落地点全景图（§0.A.3 决策表 ↔ §1–§4 实施小节）       ║
-+════════════════════════════════════════════════════════════════════════════+
-
-  阶段          维度        落地点                                       实施
-  ──────       ─────       ─────────────────────────────────────────    ────
-  [§1 命名]   （—命名—）   ①  read_file → read（仅注册 read，无旧名 fallback）       §1
-
-                  ╌╌╌╌╌╌  评分 3.0（基线，命名不动分） ╌╌╌╌╌╌
-
-  [§2 T1]      R1 分页     ②  offset/limit + 默认 2000 行                §2.1
-               R1 续读     ③  截断尾注 `offset=next, limit=same`         §2.2
-               R4 二进制   ④  结构化非 UTF-8 hint（含 first-byte hex）   §2.3
-               R6 性能     ⑤  分块流式 + 单循环抽窗（§2.4）               §2.4
-               R6 上限     ⑥  MAX_READ_BYTES = 25 MiB                    §2.5
-              （横切）     ★  executor schema 校验（offset/limit 兜底）  §2.6
-
-                  ╌╌╌╌╌╌  评分 5.5（read 不再爆 ctx） ╌╌╌╌╌╌
-
-  [§3 T2]      R3 行号     ⑦  cat -n `{:>6}\t{}` 行号                    §3.1
-               R5 状态     ⑧  readFileState + FILE_UNCHANGED stub        §3.2
-
-                  ╌╌╌╌╌╌  评分 7.5（write/edit 有 staleness 底座）╌╌╌╌╌╌
-
-  [§4 T3]      R2 多模态   ⑨  ReadResult enum (Text/Image/Pdf/Stub)      §4.1
-               R2 多模态   ⑩  helper 复用 inline base64 + tool→user 注入  §4.2
-               R3 锚点     ⑪  hashline=true 输出 `N#AB:line`             §4.3
-               R5 兜底     ⑫  hashline 互补 staleness（与 ⑪ 共底座）     §4.4
-
-                  ╌╌╌╌╌╌  评分 9.0+（cc-fork 同档） ╌╌╌╌╌╌
-
-
-  ┌─────────────────── 代码触达点（按文件聚合，含新建） ───────────────────┐
-  │                                                                          │
-  │  src/core/llm/system_prompt.rs ──────── ① 描述模板调整                   │
-  │                                                                          │
-  │  src/core/tools/catalog.rs ──────────── ① 短名      ② ⑥ ⑨ ⑪ schema      │
-  │                                                                          │
-  │  src/core/agent_loop/tool_exec.rs ───── ★ 入参兜底  ⑩ image content      │
-  │                                                       block 序列化        │
-  │                                                                          │
-  │  src/core/tools/primitive/executor.rs ─ ② ③ ④ ⑤ ⑦ ⑨ ⑪ 主体逻辑           │
-  │                                                                          │
-  │  src/core/tools/read_state.rs（新建）── ⑧ 公共底座  ⑫ hashline 兜底注释  │
-  │                                                                          │
-  │  src/api/chat/mod.rs ─────────────────── ⑧ AgentLoopConfig 挂底座        │
-  │                                                                          │
-  └──────────────────────────────────────────────────────────────────────────┘
-
-  阅读路径建议：
-   • 想看「为什么这么排」 → §0.A.3 决策表 + §0.A.4 评分演进
-   • 想看「具体怎么做」   → 按 ① → ⑫ 顺序读 §1 → §4
-   • 想看「关键概念」     → ⑧ 看 §3.2.1 staleness / §3.2.2 dedup；⑪ 看 §4.3.1 hashline
-   • 想看「测试矩阵」     → §2.7 / §3.3 / §4.5（共 18+ 用例）
+┌────────────────────────────────────────────────────────────────────────────┐
+│  本地 read 工具通常要同时解决的四类问题                                    │
+├────────────────────┬─────────────────────────────────────────────────────┤
+│  体量              │  整文件进上下文 → OOM / 费 token → 需要分页与硬上限      │
+│  编码与类型        │  UTF-8 文本 vs 二进制 vs 图 / PDF → 路由与可读错误    │
+│  模型行为          │  重复 read 同一窗口 → 需要软 dedup，而非误伤合法重试   │
+│  写改一致性        │  文件在磁盘已变 → 需要指纹，供 edit/write 前陈旧拦截   │
+└────────────────────┴─────────────────────────────────────────────────────┘
 ```
 
-### 1. 命名切换（破坏性，仅一次） — 决策表「— (命名)」行
-
-> ↩ **对应 §0.A.3 决策表 1 项**（共 1 项）：
+### 2.2 常见实现横向对比
 
 
-| 决策表落地点      | 取自      | 形态                                                          | 实施小节 |
-| ----------- | ------- | ----------------------------------------------------------- | ---- |
-| 工具短名 `read` | pi-mono | catalog / `tool_exec` / prompt 仅暴露 `read`（无 `read_file` 别名） | 本节   |
+| 来源 / 形态                | 分页与上限                  | 行号 / 锚点               | 重复读                   | 多模态                                 | 备注                      |
+| ---------------------- | ---------------------- | --------------------- | --------------------- | ----------------------------------- | ----------------------- |
+| **cc-fork 系**          | 大行数窗口 + 续读提示           | 常见 `cat -n`           | 软 stub 省 token        | 视产品而定                               | 工程上验证「窗口默认 ~2k 行」较稳     |
+| **pi_agent_rust**      | 类似 Agent 读盘            | **hashline**（xxh 短指纹） | 可与 edit 对齐            | 依部署                                 | 本仓库 **hashline 算法对齐**   |
+| **Claude / Cursor 内置** | 产品化分页策略                | 因产品而异                 | 通常由宿主去重               | 强多模态                                | 协议细节不公开处用「占位 + 侧信道」思路参照 |
+| **本仓库 `read`**         | 默认 2000 行 + 25 MiB 裸读门 | `cat -n` 或 hashline   | `FILE_UNCHANGED` stub | OpenAI：**tool 占位 + 下一条 user Parts** | wasm 友好、单测锁行为           |
 
 
-> **概念前置**：**开发阶段不做 `read_file` → `read` 的兼容别名**：不在 `tool_exec` 做重定向，不在 audit 写 `legacy_name`。对外只注册 `**read`**；若调用方仍传 `read_file`，按**未知工具**处理（与未注册工具名一致），由 **system prompt / 工具列表** 约束模型使用 `read`。
+### 2.3 落地选型决策表
+
+
+| 决策点         | 默认选择                             | 主要替代方案              | 选择理由（为何不是替代）                                            |
+| ----------- | -------------------------------- | ------------------- | ------------------------------------------------------- |
+| 工具对外名       | 仅 `read`                         | `read_file` 并存或别名   | 单名减少双轨、审计与 prompt 分叉；历史调用用 transcript fallback **warn** |
+| 分页默认上限      | 2000 行                           | 512 / 整文件           | 与「一屏 + α」及 cc-fork 实践一致；整文件易炸 wasm 堆                    |
+| 裸读字节上限      | 25 MiB（`[tools.read] max_bytes`） | 256 KB / 100 MiB    | 比过小阈值实用；比过大上限省内存                                        |
+| 行号默认        | `cat -n` 6 格 + Tab               | 无前缀 / LSP 风格        | 与 IDE、diff、人工扫读一致                                       |
+| 同窗口重复读      | 软 stub（`FileUnchanged`）          | 硬拒绝或全文重发            | 省 token；合法「再确认」仍可得全文（磁盘变则重读）                            |
+| dedup 判定    | `mtime_ms + size` 快路径            | `content_hash` 参与命中 | 后者会迫使短路前再读全文，与省读目标矛盾；hash 仍存作诊断与 edit 纵深                |
+| 图片策略        | 不缩放、不解码；metadata 限长              | 引入 `image` 缩放       | 控制依赖与编译体积；上限对齐 OpenAI inline                            |
+| hashline    | xxh32 + 双字符表                     | 无行级指纹 / MD5 前缀      | 与 pi_agent_rust 生态对齐、锚点短                                |
+| 图 / PDF 进模型 | 注入下一条 `user`                     | 塞进 `role=tool`      | OpenAI API **不接受** tool 消息中的图像 part                     |
+
+
+### 2.4 实施点（已闭环）
+
+下列顺序与 [`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) **T2-P0-tools-read** 及 `strengthen-read-tool_92f396c7.plan.md` §6–§8 一致；**2026-05-05** 已全量合入主线（见看板 Changelog 行）。
+
+
+| 实施点            | 交付范围                                                                                 | 主要代码落点                                      | 验收锚点（示例）                                                          |
+| -------------- | ------------------------------------------------------------------------------------ | ------------------------------------------- | ----------------------------------------------------------------- |
+| **PR-RA**      | `read_file` → `read` 命名统一；历史 transcript 仅 fallback warn                              | `catalog.rs`、`tool_exec`、未知工具路径             | `tool_exec_legacy_read_file_returns_unknown_tool_error`           |
+| **PR-RB（T1）**  | `offset` / `limit`、二进制结构化 hint、memchr 单循环抽窗、`[tools.read] max_bytes` 默认 25 MiB       | `primitive/executor/read.rs`、`infra/config` | `read_window_test::*`、`read_with_offset_bypasses_max_bytes_check` |
+| **PR-RF（T2）**  | `cat -n` 行号、`read_state`（`ReadStamp` / `ReadFileState`）、`FILE_UNCHANGED_STUB`、会话结束清理 | `read_state.rs`、`tool_exec.rs`              | `tool_exec_dedup_test::*`                                         |
+| **PR-RJ-0**    | `image_b64` / `file_b64` 统一为 `(mime, &Path)`，metadata 白名单 + 读盘 base64 单点             | `types.rs`                                  | `src/core/llm/tests/types_test.rs`                                |
+| **PR-RJ T3-a** | `ReadResult` 四态枚举（Text / Image / Pdf / FileUnchanged）                                | `primitive/types.rs`、wire 翻译                | `read_routes_*`                                                   |
+| **PR-RJ T3-b** | PNG/JPEG/GIF/WebP/PDF magic 路由；metadata 阶段 `IMAGE_MAX_BYTES` / `FILE_MAX_BYTES` 拒绝   | `executor/read.rs`、`types.rs`               | `read_oversize_image_rejected_at_metadata_stage`                  |
+| **PR-RJ T3-c** | `tool_exec` 返回可携带 `Vec<ChatMessageContentPart>`；`tool_dispatcher` 注入**下一条** `user`   | `tool_exec.rs`、agent loop 调度                | `tool_exec_image_result_injects_into_next_user_message_parts` 等   |
+| **PR-RM**      | `hashline: bool`（xxh32）；与 `line_numbers` 互斥且 **hashline 优先**                         | `executor/read.rs`、`catalog`                | `read_with_hashline_renders_hash_prefixed_lines`                  |
+| **PR-RS**      | 文档合入                                                                                 | 本 `read.md` 等                               | 不计代码 PR                                                           |
+
+
+集成与并发组登记见 `tests/read_tool_tests.rs`、`scripts/test-groups.sh`（看板条目中已列门禁结果）。
+
+下文按实施点展开**技术要点与示意图**；**交付边界与代码落点仍以表为准**，避免与表冲突。
+
+#### 2.4.1 PR-RA：对外单名 `read`
+
+- **交付**：catalog / system_prompt / 相关字面量统一为短名 `read`；`tool_exec` 仅匹配 `"read"`；`"read_file"` 走**未知工具**路径，语义与拼错工具名一致。
+- **历史回放**：`session` 侧用 `OnceLock` 对 legacy 名打 **`tracing::warn`**（不重定向、不静默改写调用），避免双轨审计。
 
 ```text
-模型 tool_call.name = "read"     → tool_exec → executor（唯一合法路径）
-模型 tool_call.name = "read_file" → 无匹配分支 → 失败（与拼错工具名相同语义）
-```
-
-> **fallback 口径（与 plan §7 / YAML `rename-read` 三处必须一致）**：
-> - **运行时**：无别名。新对话 / 新 tool_call 收到 `read_file` 一律按未知工具回错。
-> - **transcript 重放器**：解码历史 `tool_call.name == "read_file"` 时仅 `tracing::warn!("legacy tool name: read_file → read")`，**不**重定向到 `read` 执行；保留回放确定性，避免历史 audit 与新工具语义混淆。
-> - 三处描述（plan YAML `rename-read` / 本节 / plan §7 风险）禁止再写"单迭代 fallback"等含糊措辞。
-
-- **为什么单独一个 PR-RA**：改动跨 catalog、tool_exec、system_prompt、全仓测试断言，宜单 PR 原子提交。
-- **不动分**：仅工具名变化，不增减能力，评分维持基线 3.0。
-- 改 `[src/core/tools/catalog.rs](../../../../src/core/tools/catalog.rs)` `BUILTIN_TOOL_CATALOG` 中 `name: "read_file"` → `"read"`；description 改为 cc-fork 风格短句「Read a file from the local filesystem.」（保留中文段落入口指向 prompt）。
-- 改 `[src/core/agent_loop/tool_exec.rs](../../../../src/core/agent_loop/tool_exec.rs)` 55–131 行 `match tc.name.as_str()`：**仅**保留 `"read"` 分支，**删除**（或不新增）`"read_file"` 分支。
-- 改 `[src/core/llm/system_prompt.rs](../../../../src/core/llm/system_prompt.rs)` 与 `[src/core/llm/tests/system_prompt_test.rs](../../../../src/core/llm/tests/system_prompt_test.rs)` 内所有 `read_file` 字面量为 `read`。
-- 同步以下断言与测例名（按需重命名）：`[src/api/chat/tests/suite_test.rs](../../../../src/api/chat/tests/suite_test.rs)`、`[src/core/agent_loop/tests/submodules_test.rs](../../../../src/core/agent_loop/tests/submodules_test.rs)`、`[src/ext/dispatcher/tests/dispatch_with_extension_test.rs](../../../../src/ext/dispatcher/tests/dispatch_with_extension_test.rs)`、`[tests/primitives_tools_tests.rs](../../../../tests/primitives_tools_tests.rs)` 中原 `read_file` 相关命名。
-
-### 2. T1 — 5 项落地点：分页 + 续读 hint + 二进制提示 + 流式行读 + 25 MiB 上限
-
-> ↩ **对应 §0.A.3 决策表 5 项**（R1×2 + R4×1 + R6×2，评分 3.0 → 5.5），下列 5 个子节顺序与决策表行顺序 1:1 对齐：
-
-
-| #   | 决策表落地点                           | 取自                                            | 形态                                                      | 实施小节 |
-| --- | -------------------------------- | --------------------------------------------- | ------------------------------------------------------- | ---- |
-| 1   | offset/limit + 默认 2000 行         | cc-fork                                       | catalog schema + executor 流读                            | §2.1 |
-| 2   | 续读 `offset=next, limit=same` 提示  | pi-mono                                       | 截断尾部固定模板字符串                                             | §2.2 |
-| 3   | 二进制结构化 hint「This is `<mime>`...」 | hermes（措辞）+ cc-fork（device 检测）                | `read_file` 非 UTF-8 分支替换裸 Err                           | §2.3 |
-| 4   | 分块扫行 + 单循环抽窗（§2.4）               | pi_agent_rust（思路对齐）                           | 替换 `read_file_utf8` 整文件读                                | §2.4 |
-| 5   | `MAX_READ_BYTES = 25 MiB`        | 自设（介于 cc-fork 256KB 与 pi_agent_rust 100MB 之间） | catalog 常量 + `pi.config.toml [tools.read] max_bytes` 覆盖 | §2.5 |
-
-
-> 横切节：§2.6 执行端 schema 校验（处理 §2.1 入参越界）；§2.7 测试一览。
-
-#### 2.1 offset/limit + 默认 2000 行（R1 #1，取自 cc-fork）
-
-> **概念前置**：「分页读」契约 = `offset` 跳过前 N 行 + `limit` 取接下来 K 行（皆 1-based 行号）。让大文件可被分窗读取，避免一次塞满 ctx。
-
-```text
-file foo.rs (10 000 行):
-
-  line   1 ┐
-        ... │── 跳过 offset-1 行（offset=100 → 跳前 99 行）
-        99 ┘
-       100 ┐
-       101 │── 返回 limit 行（默认 2000，最大 10000）
-       ...  │
-      2099 │
-      2100 ┘── 截断点（仍有剩余 → 触发 §2.2 续读尾注）
-      2101 ─ 剩余未读
-       ...
-     10000
-```
-
-- **默认值取自 cc-fork**：`DEFAULT_LIMIT = 2000` ≈ 中型源码文件"看一眼足以"。
-- **1-based 设计**：与 IDE 跳转 / `cat -n` / hashline tag 保持一致，避免 0/1 转换混乱。
-- **越界行为**：`offset > total_lines` → 返回空 + `read_offset_beyond_eof_returns_empty_with_hint` 提示。
-- catalog schema 加字段：
-  ```json
-  {
-    "path": "string (absolute or relative)",
-    "offset?": "int, 1-based; default 1",
-    "limit?": "int, default 2000, max 10000"
-  }
-  ```
-  参考 `[cc-fork-01/.../FileReadTool/FileReadTool.ts](../../../../../cc-fork-01/src/tools/FileReadTool/FileReadTool.ts)` 227–243 行 `inputSchema`。
-- 默认行数上限：`DEFAULT_LIMIT = 2000`，与 cc-fork `[prompt.ts](../../../../../cc-fork-01/src/tools/FileReadTool/prompt.ts)` `MAX_LINES_TO_READ` 对齐。
-- executor 跳过 `offset-1` 行后取 `limit` 行（流式读细节见 §2.4）。
-- 验证测试：`read_offset_limit_returns_window`（10 行文件读 offset=3, limit=2 → 第 3、4 行）、`read_offset_beyond_eof_returns_empty_with_hint`。
-
-#### 2.2 续读 `offset=next, limit=same` 提示（R1 #2，取自 pi-mono）
-
-> **概念前置**：截断尾注是模型与工具之间的"分页协议"——告诉模型下一次怎么调，让多次 read 拼起来等价于一次 full read。
-
-```text
-首次:  read(path, offset=1, limit=50)
-       ↓
-       <内容 50 行>
-       ... [N more lines truncated; resume with offset=51, limit=50]
-                                              ↑              ↑
-                                              next_offset   same limit
-
-续读:  read(path, offset=51, limit=50)        ← 模型按 hint 自动调
-       ↓
-       <内容 50 行>
-       （无尾注 = 已到 EOF；模型推断停止）
-
-  契约: <next> = 上次 offset + limit；<same> = 上次 limit（建议同步以便行号对齐）
-```
-
-- **取自 pi-mono 模板**而非 cc-fork 长句：模板纯字符串、零依赖，`<next>` / `<same>` 直接由 executor 算出填充。
-- **协议契约**：`offset=next` 等价于上次 `offset+limit`；`limit=same` 不强制保持，但建议同步 → 行号对齐易调试。
-- 当截断时附固定尾注：
-  ```
-  ... [N more lines truncated; resume with offset=<next>, limit=<same>]
-  ```
-  参考 `[pi-mono/.../tools/read.ts](../../../../../pi-mono/packages/coding-agent/src/core/tools/read.ts)` 217–239 行截断提示。
-- 实现位置：`primitive/executor.rs` 流式段结束后，若 `读取行数 >= limit && 仍有剩余` → 拼接尾注；`<next>` = `offset + limit`，`<same>` 保持 `limit` 不变（让模型按规则即可继续读）。
-- 选取 pi-mono 模板而非 cc-fork 的英语长句：模板纯字符串、零依赖（§0.A.3 R1 #2 入选理由）。
-- 验证测试：`read_limit_truncates_with_resume_hint`（200 行 + limit=50 → 末尾包含 `offset=51`）。
-
-#### 2.3 二进制结构化 hint（R4，取自 hermes 措辞 + cc-fork device 检测）
-
-> **概念前置**：从「裸 Err 让模型困惑」升级到「结构化 hint 给出 3 条出路」——错误信息也是 prompt 的一部分，要为模型留可执行的下一步。
-
-```text
-裸 Err（旧 / 劣，对应 executor.rs:982-988 当前实现）:    结构化 hint（新 / 优）:
-┌──────────────────────────────────────────┐             ┌────────────────────────────────────┐
-│ Primitive error:                         │             │ File is binary or non-UTF-8        │
-│  "文件存在且权限已通过检查，但它是二进制    │   vs        │ (detected: 0x89).                  │
-│   或非 UTF-8 文本，不能用 read_file 按     │             │ • try `bash file <path>` to inspect│
-│   文本读取：/abs/path"                    │             │ • multimodal available in T3 (§4)  │
-└──────────────────────────────────────────┘             └────────────────────────────────────┘
-       ↓                                                         ↓
-   模型瞎猜：再 read？                                       模型有选择：
-   read 重试 → 同样失败                                      ① 据 hex 推类型（0x89 → PNG）
-                                                              ② bash file 验证
-                                                              ③ 直接走 T3 multimodal 路径
-```
-
-- **first-byte hex 暗示文件类型**：`0x89` → PNG，`0x25` → PDF，`0x7F` → ELF，`0xCAFEBABE` → JVM bytecode...
-- **3 条出路**：① first-byte hex 帮识别；② `bash file <path>` 备选；③ T3 multimodal 后路。
-- **不抄 hermes device 黑名单**：与 pi-rust-wasm audit gate 三层授权机制重复（§0.A.3 R4 拒因）。
-- 维持「文件 ≠ UTF-8」分支检测，但替换裸 `String::from_utf8` Err 为结构化 `AppError::Tool` 文案：
-  ```
-  File is binary or non-UTF-8 (detected: <first-byte hex>). For images use offset/limit not applicable; consider `bash file <path>` to inspect, or wait for read multimodal (T3).
-  ```
-- 引导句包含三步策略：① 给出 first-byte hex 帮助模型识别文件类型；② 提示 `bash file <path>` 备选；③ 暗示 T3 上线后会有 multimodal（§4.1 union）。
-- 思路取自 `[hermes-agent/tools/file_tools.py](../../../../../hermes-agent/tools/file_tools.py)` 二进制扩展拒绝时的 vision 引导措辞，**不复用**其完整 device 路径黑名单（§0.A.3 R4 拒因解释：与 pi-rust-wasm audit gate 三层授权重复）。
-- 验证测试：`read_binary_returns_structured_hint`（含 `\x00` 文件 → 错误体含 `File is binary or non-UTF-8`）。
-
-#### 2.4 分块流式 + 单循环抽窗（R6 #1，思路对齐 pi_agent_rust）
-
-> **概念前置**：流式 vs 整文件 —— 旧实现把整个文件 `read_to_string` 入内存，wasm 堆容易爆。**本仓库选定「折中 + 单循环」**：**跳过段**只分块扫字节、用 `memchr` 数 `\n`，**不**对每一跳行建 `String`；**窗口内**（最多 `limit` 行，且受 `DEFAULT_MAX_BYTES` 管）再逐行 UTF-8 成文。全程 **一个 `AsyncRead` 读循环**到底，**不**在文件中间 `seek` 再起第二套 `BufReader::lines()`（避免 UTF-8 边界与 reader 状态分叉）。
-
-```text
-整文件读（旧）:                 折中 + 单循环（新）:
-┌──────────────┐                ┌─────────────────────────────────────┐
-│ 整文件入堆    │                │ 固定 buf（如 64KB）循环 read          │
-│ read_to_str  │       vs       │ memchr 找 \n：仅计数 / 仅窗口内攒 String │
-│ 堆 ≈ 文件大小 │                │ 单行循环，从文件头扫到 EOF（或早停）    │
-└──────────────┘                └─────────────────────────────────────┘
- wasm 大文件易爆                  堆 ≈ buf + 输出上限（见 §2.5），大 offset 友好
-
-全程 lines() 跳过 10 万行:       折中:
-  可能 ≈ 10 万次行级分配          跳过段只移动指针/计数，窗口内 ≤10000 行分配
-```
-
-- **与 pi_agent_rust 的关系**：上游 `[ReadTool](../../../../../pi_agent_rust/src/tools.rs)` 文本路径是 `**read_some` + 固定块 + `memchr`**（注释为 *optimized streaming read*），**不是** `tokio::io::BufReader::lines()`。本节 **对齐其内存模型**，实现细节允许使用 `memchr` / `read_buf` 等与上游同构的 API，**不强制**字面搬 `BufReader::lines`。
-- **单循环（后者）**：同一次打开的文件句柄上 **单一状态机** —— 读块 → 处理换行 → 更新「当前行号 / 是否在 `[offset, offset+limit)` / 是否已达输出字节上限」→ 直到 EOF 或窗口与尾注条件满足。**不采用**：先扫到行首字节再 `seek` + 新开 `BufReader` + `lines()` 读窗口（实现复杂且易踩 UTF-8 切分）。
-- **与 §2.1 协同**：逻辑上仍等价于「跳过 `offset-1` 个换行边界，再收集最多 `limit` 行」；物理上由 **同循环内的行计数** 完成，而非 `for _ in 0..offset-1 { next_line() }`。
-- **CRLF / UTF-8**：跨块 `\r\n` 需小状态机（可与上游类似 helper）；输出文本仅在窗口内 `String::from_utf8` / `lossy` —— 与「跳过段零行级分配」不冲突。
-- **总行数 / 截断尾注（§2.2）**：若尾注需要「剩余行数」，可在 **同一扫描** 中继续数 `\n` 至 EOF（仅计数不缓存），或第二策略在 spec 阶段约定；避免为计数再整文件 `read_to_string`。
-- 替换 `[src/core/tools/primitive/executor.rs](../../../../src/core/tools/primitive/executor.rs)` 965–1000 行 `read_file` 整文件 `read_file_utf8`：
-  - 仍走 `gate_check_path` + 目录检测；
-  - `tokio::fs::File::open`（或等价）+ **单循环分块读** + `**memchr::memchr_iter(b'\n', chunk)*`*（或同义实现）；
-  - 窗口内行写入 `Vec<String>` / 拼接 `String`，再接 §3.1 `format_with_line_numbers`。
-- **R6 入选理由**（§0.A.3）：流式避免整文件入内存；wasm 必备；大 `offset` 下优于全程 `lines()`。
-- 验证测试：在 §2.7 内集成（无独立测试，与 §2.1 用例共底座）。
-
-#### 2.5 `MAX_READ_BYTES = 25 MiB` + 图片 4.5 MiB（R6 #2，自设；统一 metadata 预检）
-
-> **概念前置**：「软上限」=「无 offset/limit 才检查」——大文件可被 offset/limit 抽窗，但裸读时必须显式声明窗口。**所有大小检查统一在 `std::fs::metadata().len()` 阶段做掉，绝不先把文件读进内存再校验**——避免 100 MB 文件先 OOM 才报错。
-
-```text
-read 入口
-   │
-   ├─ 路由判定（扩展名 + 头几字节 magic）
-   │      ├─ image (PNG/JPEG/GIF/WebP)
-   │      │     │
-   │      │     ↓ metadata().len() > IMAGE_MAX_BYTES (4.5 MiB) ?
-   │      │     ├─ yes ─→ 拒绝 + hint「图片超 4.5 MiB inline 上限」
-   │      │     └─ no  ─→ helper image_b64(mime, &path) 内部读盘 + base64
-   │      │
-   │      ├─ file / pdf
-   │      │     │
-   │      │     ↓ metadata().len() > FILE_MAX_BYTES (25 MiB) ?
-   │      │     ├─ yes ─→ 拒绝 + hint「文件超 25 MiB inline 上限」
-   │      │     └─ no  ─→ helper file_b64(filename, mime, &path) 内部读盘 + base64
-   │      │
-   │      └─ text
-   │            │
-   │            ├─ 有 offset 或 limit ?
-   │            │      ├─ yes ─→ 跳过 size 检查 ─→ 流式抽窗（§2.4 分块单循环 + §2.1 窗口）
-   │            │      └─ no ──↓
-   │            │
-   │            └─ metadata().len() > MAX_READ_BYTES (25 MiB) ?
-   │                   ├─ yes ─→ 拒绝 + hint「请加 offset/limit 分窗重试」
-   │                   └─ no ──→ 整文件流式读 + 默认 2000 行截断 + §2.2 尾注
-```
-
-- **三个上限统一在 metadata 阶段判定**，绝不先 `read_to_string` / `read_to_end` 后再校验：
-  - `IMAGE_MAX_BYTES = 4_718_592`（4.5 MiB，与 [`pi-rust-wasm/src/core/llm/types.rs`](../../../../src/core/llm/types.rs) 顶部常量一致）
-  - `FILE_MAX_BYTES = 25 * 1024 * 1024`（25 MiB）
-  - `MAX_READ_BYTES = 25 * 1024 * 1024`（25 MiB，文本路径，与 FILE_MAX_BYTES 同值；当前 [`executor.rs:96`](../../../../src/core/tools/primitive/executor.rs) 是 `10 MiB`，PR-RB 升到 25 MiB）
-- **图片 / 文件的实际读盘在 helper 内部**：PR-RJ-0 重构后 `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)` 自己负责打开文件 + `metadata` 二次校验 + `read_to_end` + base64 编码；executor 端仅做路由 + 第一道 metadata 大小预检。
-- **可配置**：`pi.config.toml [tools.read] max_bytes` 覆盖文本路径上限；图片 / 文件常量由 `types.rs` 集中管理，**不**进 config（与 multimodal wire 同口径）。
-- **不二刀切**：文本路径仍可用 offset/limit 抽 GB 级日志的「特定窗口」（如 `read offset=999000 limit=200`）。
-- 25 MiB 介于 cc-fork 256 KB（太小，正常源码就被拒）与 pi_agent_rust 100 MB（太大，wasm 堆易爆）之间——兼顾合理 dump 文件 + 防爆 ctx（§0.A.3 R6 入选理由）。
-- 验证测试（用 [`tests/fixtures/llm_multimodal/`](../../../../tests/fixtures/llm_multimodal/) 真实文件）：
-  - `read_no_offset_large_file_rejected_with_hint`（>25 MiB 文本）
-  - `read_oversize_image_rejected_at_metadata_stage`（>4.5 MiB PNG，断言**无**任何 `read_to_end` 调用，仅 `metadata` 触发拒绝）
-  - `read_oversize_file_rejected_at_metadata_stage`（>25 MiB 二进制）
-
-#### 2.6 执行端 schema 校验（横切，处理 §2.1 入参越界）
-
-> **概念前置**：横切节，不属于决策表 12 项落地点；在 executor 入口对 §2.1 入参做边界兜底，避免越界值（`offset=0` / `limit=99999` / `limit=-1`）进入主流程导致 panic 或返回乱七八糟的窗口。
-
-```text
-LLM tool_call(read, {offset: 0, limit: 99999})
-   │
-   ↓
-tool_exec.rs read 分支（horizontal gate）：
-   • offset >= 1 ?              否 → AppError::Tool("offset must be >= 1")
-   • 1 ≤ limit ≤ 10000 ?        否 → AppError::Tool("limit must be in [1, 10000]")
-   • 类型解析失败（非整数）?    是 → AppError::Tool("offset/limit must be integers")
-   │
-   ↓ （全部通过）
-（主体）primitive/executor.rs 流式段
-```
-
-- **早失败**：在 executor 入口拒绝，避免错误窗口落到磁盘 IO 之后。
-- **错误信息可执行**：直接告诉模型边界条件，便于其下一轮自我修正。
-- 改 `[src/core/agent_loop/tool_exec.rs](../../../../src/core/agent_loop/tool_exec.rs)` read 分支：解析 `offset`/`limit`，越界给结构化错误：
-  - `offset must be >= 1`
-  - `limit must be in [1, 10000]`
-- 验证测试：`read_offset_limit_invalid_int_returns_tool_error`。
-
-#### 2.7 测试一览
-
-新增到 `[src/core/tools/primitive/tests/suite_test.rs](../../../../src/core/tools/primitive/tests/suite_test.rs)`：
-
-> **fixture 口径**：二进制 / 图片 / 大文件用例**统一**用 [`tests/fixtures/llm_multimodal/`](../../../../tests/fixtures/llm_multimodal/) 真实文件（PNG / PDF / 由 reportlab 生成的 PDF），**禁止**手造 base64 字符串或 `vec![0u8; N]` 的人造大文件，避免「测试通过但生产挂掉」的假绿。
-
-
-| 落地点               | 测试用例                                                                                                                                            |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| §2.1 offset/limit | `read_offset_limit_returns_window`（用真实源码文件）· `read_offset_beyond_eof_returns_empty_with_hint`                                                   |
-| §2.2 续读 hint      | `read_limit_truncates_with_resume_hint`                                                                                                         |
-| §2.3 二进制 hint     | `read_binary_returns_structured_hint`（用真实 PNG fixture：`tests/fixtures/llm_multimodal/sample_image.png`）                                          |
-| §2.4 分块 + 单循环     | （集成在 §2.1 用例内）                                                                                                                                  |
-| §2.5 25 MiB / 4.5 MiB metadata 预检 | `read_no_offset_large_file_rejected_with_hint`（>25 MiB 文本 metadata 预检）· `read_oversize_image_rejected_at_metadata_stage`（>4.5 MiB PNG，断言 **未** `read_to_end`）· `read_oversize_file_rejected_at_metadata_stage` |
-| §2.6 schema 校验    | `read_offset_limit_invalid_int_returns_tool_error`                                                                                              |
-
-
-### 3. T2 — 2 项落地点：cat -n 行号 + readFileState（含 FILE_UNCHANGED stub）
-
-> ↩ **对应 §0.A.3 决策表 2 项**（R3×1 + R5×1，评分 5.5 → 7.5），下列 2 个子节顺序与决策表行顺序 1:1 对齐：
-
-
-| #   | 决策表落地点                                    | 取自      | 形态                                                                                                     | 实施小节 |
-| --- | ----------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------ | ---- |
-| 1   | `{:>6}\t{}` cat -n 风格行号                   | cc-fork | `format_with_line_numbers` helper + `[tools.read] line_numbers` 配置开关                                   | §3.1 |
-| 2   | `FILE_UNCHANGED` 软 stub + `readFileState` | cc-fork | 新增 `[src/core/tools/read_state.rs](../../../../src/core/tools/read_state.rs)` 公共底座，挂 `AgentLoopConfig` | §3.2 |
-
-
-> 备注：续读 `offset=next` 提示属 §2 T1（决策表 R1 第 2 行），不在本节范围。
-
-#### 3.1 cat -n 行号（R3 #1，取自 cc-fork）
-
-> **概念前置**：行号渲染让 edit 工具能用「第 N 行」做精确定位，把模糊的 `oldText` 模式匹配升级为锚点匹配，避免「多处 `Ok(())` 命中歧义」类问题。
-
-```text
-不带行号（旧）:                      带行号（cat -n 风格，新）:
-fn handle(req: Req) {                  12      fn handle(req: Req) {
-  let r = parse();                     13        let r = parse();
-  send(r);                             14        send(r);
-}                                      15      }
-        ↓                                       ↓
-edit oldText="send(r);"          edit anchor=14 + oldText="send(r);"
-若文件多处 send(r) → 歧义        行号定位 → 唯一 → 直接命中
-拒绝（避免改错位置）             成功
-```
-
-- **格式 `{:>6}\t{}` 的含义**（对应 Rust `format!` 写法，非用户可见原文）：
-  - `**{:>6}`**：第一个参数（行号）**总占 6 个字符宽**、**右对齐**，左侧用空格垫齐（如行号 `2` 显示为 5 个空格 + `2`，行号 `12345` 占满 6 格）。这样多行输出时**数字列竖直对齐**，和终端 `cat -n` 观感一致。
-  - `**\t`**：一个 **Tab**，分隔行号列与正文，便于眼扫与程序解析。
-  - `**{}`**：第二个参数，该行的**正文内容**（不含换行；换行用 `\n` 接下一行）。
-- **行号是哪来的**：不是磁盘上的单独字段，而是 read **按 `\n` 切行时数出来的**——从文件头开始第 1 个换行前为第 1 行，依此类推（**全文件 1-based 绝对行号**）。分页时仍显示**绝对行号**（见下例），不是窗口内的 1…limit。
-
-```text
-场景：foo.rs 共 5 行，调用 read(path, offset=2, limit=2)（读第 2、3 行）
-
-  磁盘逻辑行（仅示意）              工具输出（{:>6} + tab + 行内容）
-  ─────────────────────            ─────────────────────────────────
-  行 1  use std::io;               （offset 跳过行 1，不输出）
-  行 2  fn main() {        ──►           2<TAB>fn main() {
-         ^^^                           ^^^^^^^
-         绝对行号 2                      6 格右对齐展示 "2"，再 tab，再接正文
-  行 3    println!();      ──►           3<TAB>  println!();
-  行 4  }                  （limit=2 已满，行 4 不输出）
-  行 5  // eof
-
-  若不用 {:>6} 而用裸字符串拼接 "2 | fn main()"，多位行号时列会歪；右对齐 6 格与 cc-fork addLineNumbers 一致。
-```
-
-- **格式**（实现时对标）：与 cc-fork `[addLineNumbers](../../../../../cc-fork-01/src/utils/file.js)` 一字对齐：`{:>6}\t{}`。
-- **分页与行号**：显示的数字仍是**文件绝对行号**（上例中为 2、3），**不是**窗口内从 1 开始重编——便于 edit「改第 N 行」与 IDE / `offset=` 续读同一坐标系。
-- **为什么 R3 同时入选行号 + hashline**：行号解决「定位」，hashline（§4.3）解决「定位 + 内容一致性」；浏览/调试用行号即可，精细 edit 配 hashline。
-- 输出统一加行号前缀：
-  - 格式：`{:>6}\t{}`（行宽 6 + tab + 内容），与 cc-fork `[addLineNumbers](../../../../../cc-fork-01/src/utils/file.js)` 一致；行号从 `offset` 起算。
-  - **开关由 LLM 控制**：read schema 新增 `line_numbers: bool`（默认 `true`），由模型按需关闭（如要把内容 pipe 给 diff 工具时）；**不进 config**——避免管理员侧静默改变模型上下文。
-- 实现位置：`primitive/executor.rs` 流式段（§2.4）后；新增 helper：
-  ```rust
-  fn format_with_line_numbers(start: usize, lines: &[String]) -> String
-  ```
-- 验证测试：`read_returns_line_numbered_output` · `read_line_numbers_start_at_offset` · `read_disable_line_numbers_via_schema_arg`（schema 字段控制，**不**测 config）。
-
-#### 3.2 `FILE_UNCHANGED` 软 stub + `readFileState`（R5 #1，取自 cc-fork）
-
-> **概念前置（实施前必读）**：本节实现两个底层机制 —— **staleness（陈旧检测）** + **dedup（重复读阻断）**，两者共用同一张 `read_file_state` 表。
-
-##### 3.2.1 staleness（陈旧检测）
-
-- **字面**：`stale = 过期的`。指「**上次 read 拿到的内容已不是当前磁盘的最新内容**」的状态。
-- **机制**：每次 read 成功后把 `(mtime_ms, content_hash, offset, limit)` 记入 `ReadFileState`；后续 write/edit 调用前先比对当前文件指纹 vs 快照。
-  - **指纹一致** → 放行（模型脑里的内容就是磁盘上的，安全）；
-  - **指纹不一致** → 拒绝并要求重 read（文件被外部因素改过：用户手改、git pull、并发 agent…）。
-- **典型场景**：
-  ```
-  T0  agent read foo.rs       → 看到第 42 行是 fn old()
-  T1  用户在 IDE 把第 42 行改成 fn new()
-  T2  agent edit old="fn old()"  → 文件已经没这行
-  ```
-  - 无 staleness：edit 报「找不到 oldText」让模型困惑；更糟时模型凭旧上下文猜一段 newText 写回 → 改坏代码。
-  - 有 staleness：T2 直接收到「文件已变，请重 read」结构化错误，模型重 read 后基于新内容重新规划。
-- **来源参考**：`[cc-fork-01/.../FileReadTool/FileReadTool.ts](../../../../../cc-fork-01/src/tools/FileReadTool/FileReadTool.ts)` `readFileState`（与 `FILE_UNCHANGED_STUB` 共用同一张表）。
-
-##### 3.2.2 dedup（重复读阻断）
-
-- **字面**：`deduplicate = 去重`。指「**同一窗口被反复 read 时，不再返回完整内容，而是返回 stub 占位**」。
-- **机制**：key = `(path, offset, limit, mtime, hash)`；同一会话内：
-  - 第一次 read → 正常返回内容并入表；
-  - 同 key 再读且 mtime+hash 未变 → 返回 `FILE_UNCHANGED` stub「`File unchanged since last read. Refer to the earlier read result.`」，**省去几千 token 的重复内容**。
-- **典型场景**：模型 loop 里常见的「read → 没思路 → 又 read」死循环；3 次重复就烧 15k token。
-- **激进 vs 温和**：hermes 直接 BLOCK 后续 read（`[hermes-agent/tools/file_tools.py](../../../../../hermes-agent/tools/file_tools.py)` 482–538）；cc-fork 用 stub 软提示。pi-rust-wasm 选 cc-fork 的软策略 —— 既省 token，又不会拒绝合理 retry。
-- **与 staleness 的关系**：两者**共用同一张 `read_file_state` 表** —— dedup 在 read 端发挥作用（出文件→省 token），staleness 在 edit/write 端发挥作用（入文件→防误改）。
-
-```mermaid
-flowchart LR
-  read["read(path, offset, limit)"]
-  state["readFileState 表\n{path -> (mtime, hash, off, lim)}"]
-  edit["write / edit"]
-  full["返回完整内容\n并更新 state"]
-  stub["返回 FILE_UNCHANGED stub\n(dedup 生效)"]
-  ok["放行修改\n(staleness 通过)"]
-  reject["拒绝并要求重 read\n(staleness 拦截)"]
-
-  read -->|"第一次或文件已变"| full
-  read -->|"key 命中且未变"| stub
-  full --> state
-  stub --> state
-  edit -->|"对比指纹"| state
-  state -->|"一致"| ok
-  state -->|"不一致"| reject
-```
-
-
-
-##### 3.2.3 实现
-
-- 新建 `[src/core/tools/read_state.rs](../../../../src/core/tools/read_state.rs)`：
-  ```rust
-  pub struct ReadStamp {
-      pub mtime_ms: i64,
-      pub content_hash: u64,        // xxhash 或 std 的 DefaultHasher 即可
-      pub offset: Option<u64>,
-      pub limit: Option<u64>,
-      pub is_partial_view: bool,
-  }
-  pub struct ReadFileState { /* RwLock<HashMap<PathBuf, ReadStamp>> */ }
-  ```
-- 挂在 `AgentLoopConfig` / `SessionState`：见 `[src/api/chat/mod.rs](../../../../src/api/chat/mod.rs)` `AgentLoopConfig` 642 行附近，新增 `read_file_state: Arc<ReadFileState>`。
-- 每次 read 成功后：`set(path, mtime, hash, offset, limit, is_partial_view = (offset.is_some() || limit < total))`。
-- 命中检查（同会话再次 read 同 path 同 offset/limit）
-  - mtime 不变 + content_hash 不变 → 返回 `FILE_UNCHANGED_STUB`：
-    ```
-    File unchanged since last read. Refer to the earlier read result.
-    ```
-  - 与 cc-fork `[FILE_UNCHANGED_STUB](../../../../../cc-fork-01/src/tools/FileReadTool/prompt.ts)` 7–8 行一字对齐英文版本，中文环境保留同一英文短语避免翻译歧义。
-- 验证测试：`read_returns_unchanged_stub_on_repeat` · `read_state_invalidates_on_mtime_bump` · `read_state_partial_view_does_not_match_full_read`。
-
-#### 3.3 测试一览
-
-
-| 落地点                       | 测试用例                                                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| §3.1 cat -n 行号            | `read_returns_line_numbered_output` · `read_line_numbers_start_at_offset` · `read_disable_line_numbers_via_schema_arg`                |
-| §3.2 readFileState + stub | `read_returns_unchanged_stub_on_repeat` · `read_state_invalidates_on_mtime_bump` · `read_state_partial_view_does_not_match_full_read` |
-
-
-### 4. T3 — 4 项落地点：discriminated union + helper 复用 inline base64 + hashline 输出 + hashline 互补
-
-> ↩ **对应 §0.A.3 决策表 4 项**（R2×2 + R3×1 + R5×1，评分 7.5 → 9.0+），下列 4 个子节顺序与决策表行顺序 1:1 对齐。
-> **本期实施口径**（与 plan YAML 一致）：**不引入** `image` / `pdf-extract` / `lopdf` crate；**不缩放、不解码**；read 直接读字节 → 复用 `ChatMessageContentPart::image_b64 / file_b64` helper（PR-RJ-0 重构其签名为 `(mime, &Path)`）→ tool 消息文本 + 下一条 user 消息 Parts 注入。
-
-
-| #   | 决策表落地点                                            | 取自                              | 形态                                                                                                              | 实施小节 |
-| --- | ------------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---- |
-| 1   | discriminated union `Image / Pdf / FileUnchanged` | cc-fork                         | 输出 schema 改 enum；按扩展名 + 头几字节 magic 判 mime；不解码                                                                   | §4.1 |
-| 2   | inline base64 wire（复用 helper，不缩放）                 | 自设（与 T2-P0-012 多模态 wire 对齐）     | 重构 `ChatMessageContentPart` helper 签名为 `(mime, &Path)`；executor 走 metadata 预检（§2.5）→ helper → tool→user 注入       | §4.2 |
-| 3   | 可选 `hashline=true` 输出 `N#AB:`                     | pi_agent_rust                   | read schema 加 `hashline?: bool` + executor 分支                                                                   | §4.3 |
-| 4   | hashline 内容指纹（互补 R5）                              | pi_agent_rust                   | 复用 §4.3 hashline 输出做二次校验                                                                                        | §4.4 |
-
-
-#### 4.0 PR-RJ-0：helper 签名重构（前置子 PR，不动分）
-
-> **概念前置**：T2-P0-012 多模态 wire 已合入的 `image_b64` / `file_b64` helper 当前签名是 `(mime, base64_string)`——**仅测试代码在用**。read T3 要把这条通道接到工具产物上，需要把 helper 改成「传 mime + 文件路径」，**helper 内部** 完成读盘 + metadata 校验 + base64，避免 read 端和 helper 端各做一次校验、且避免大文件先 base64 字符串化（base64 比原文胀 33%）再校验大小。
-
-```text
-旧（当前已合入，仅测试用）:                  新（PR-RJ-0 重构后，read 复用）:
-┌─────────────────────────────┐              ┌─────────────────────────────────────┐
-│ image_b64(mime, b64_string) │              │ image_b64(mime, &Path)               │
-│   ├─ decode base64 测长度    │     vs       │   ├─ fs::metadata().len() 校验上限    │
-│   ├─ 与 IMAGE_MAX_BYTES 比  │              │   ├─ fs::read 读盘                    │
-│   ├─ 校验 MIME 白名单        │              │   ├─ base64 编码                      │
-│   └─ 构造 InputImage        │              │   ├─ 校验 MIME 白名单                  │
-└─────────────────────────────┘              │   └─ 构造 InputImage                 │
-        ↑ 调用方需先把文件读到 String         └─────────────────────────────────────┘
-        ↑ 大文件先胀 33% base64 再校验大小            ↑ read 工具直接 image_b64(mime, &path)
-        ↑ 内存压力 + 校验时机晚                        ↑ 内存压力小 + metadata 阶段就能拒
-```
-
-- **签名变更**（[`pi-rust-wasm/src/core/llm/types.rs`](../../../../src/core/llm/types.rs)，line 117–165）：
-  ```rust
-  // 重构前
-  pub fn image_b64(mime_type: impl Into<String>, data: String) -> Result<Self, AppError>;
-  pub fn file_b64(filename: impl Into<String>, mime_type: impl Into<String>, data: String) -> Result<Self, AppError>;
-
-  // 重构后
-  pub fn image_b64(mime_type: impl Into<String>, path: impl AsRef<Path>) -> Result<Self, AppError>;
-  pub fn file_b64(filename: impl Into<String>, mime_type: impl Into<String>, path: impl AsRef<Path>) -> Result<Self, AppError>;
-  ```
-- **helper 内部职责**（一处而非两处）：
-  1. `std::fs::metadata(path)?.len()` 取文件大小；
-  2. 与 `IMAGE_MAX_BYTES` (4.5 MiB) / `FILE_MAX_BYTES` (25 MiB) 比对，超限直接返结构化错误（`AppError::Llm`）；
-  3. `std::fs::read(path)?` 读字节；
-  4. `base64::engine::general_purpose::STANDARD.encode(...)`；
-  5. 校验 MIME 白名单（图片）；
-  6. 构造 `InputImage` / `InputFile` 变体。
-- **调用方收敛**：
-  - 现有调用方（仅测试）：`tests/openai_responses_integration_tests.rs` / `tests/llm_multimodal/*` / 单测——全部由"读 base64 字符串 fixture 再传给 helper"改为"传 fixture 文件路径"。
-  - 新增调用方（PR-RJ）：`primitive/executor.rs` read 命中 Image/Pdf 时直接 `image_b64(mime, &resolved_path)` / `file_b64(filename, mime, &resolved_path)`。
-- **不动分**：纯重构，能力不变；评分维持 7.5。
-- **为什么单独一个 PR-RJ-0 而不是直接并入 PR-RJ**：helper 重构涉及修改已合入的 `pi-rust-wasm/src/core/llm/types.rs` 与全部测试 fixture，**改动面与 PR-RJ 业务逻辑正交**；单独一个 PR 让 reviewer 一眼看清"只是签名变了"，避免 PR-RJ 业务 PR diff 被 fixture 重写淹没。
-- 验证测试（PR-RJ-0 内）：
-  - `image_b64_helper_reads_path_and_validates_metadata_size`（断言传入 4.5 MiB+1 字节文件 → 在 `read` 之前就报错）
-  - `file_b64_helper_reads_path_and_validates_metadata_size`
-  - `image_b64_helper_rejects_non_whitelisted_mime`（保留原有 MIME 白名单测试，只换签名）
-
-#### 4.1 discriminated union `Image / Pdf / FileUnchanged`（R2 #1，取自 cc-fork）
-
-> **概念前置**：判别式联合类型（`enum ReadResult`）让一个工具按文件类型分发到不同 LLM content block，而不是把 `[image bytes]` 字符串化塞进 text 里让模型猜——后者等于喂十六进制乱码。
-
-```text
-read("photo.png")
-   │
-   ├─ 路由：扩展名 + 头几字节 magic 判 mime（不解码、不缩放）
-   │        .png + 89 50 4E 47           → Image  mime=image/png
-   │        .jpg/.jpeg + FF D8 FF        → Image  mime=image/jpeg
-   │        .gif + 47 49 46 38           → Image  mime=image/gif
-   │        .webp + RIFF....WEBP         → Image  mime=image/webp
-   │        .pdf + 25 50 44 46           → Pdf    mime=application/pdf
-   │        FILE_UNCHANGED 命中（§3.2）  → FileUnchanged
-   │        其余                          → Text
-   ↓
-enum ReadResult {
-    Text         { content, num_lines, start_line, total_lines }
-    Image        { base64, mime, original_size }         ← §4.2 走 helper，不带 dimensions
-    Pdf          { base64, mime, original_size }         ← 与 Image 同形态，仅 mime 不同
-    FileUnchanged{ path }                                ← §3.2 联动
-}
-   │
-   ↓
-agent_loop/tool_exec.rs 按 LLM 路径分发（详见 §4.2）:
-   • Text          → tool 消息 "type": "text"
-   • Image / Pdf   → tool 消息 "type": "text" 占位句 + 注入下一条 user 消息 Parts
-   • FileUnchanged → tool 消息 "type": "text" 短句（节省 token）
-```
-
-- **不再字符串化 image**：旧设计若把 base64 拼到 text 里，模型只能描述十六进制乱码；enum + helper 复用让 vision LLM 真正"看到"图。
-- **不引解码 / 缩放依赖**：路由仅靠扩展名 + 头 4–12 字节 magic 判 mime；字节流原样交给 helper 做 base64。这样 `image` / `pdf-extract` / `lopdf` 全部不引入，`Cargo.lock` 零增长。
-- **FileUnchanged 与 §3.2 dedup 联动**：`read_state` 命中时直接返 `FileUnchanged`，省整个 base64 / 文件内容 token。
-- 把单一字符串结果改为 enum：
-  ```rust
-  enum ReadResult {
-      Text { content: String, num_lines: u64, start_line: u64, total_lines: u64 },
-      Image { base64: String, mime: String, original_size: u64 },
-      Pdf { base64: String, mime: String, original_size: u64 },
-      FileUnchanged { path: String },
-  }
-  ```
-  形态对齐 `[cc-fork-01/.../FileReadTool/FileReadTool.ts](../../../../../cc-fork-01/src/tools/FileReadTool/FileReadTool.ts)` `outputSchema` 248–331，但**去掉** `dimensions` / `pages` 字段（不解码就拿不到，且 LLM 也不需要）。
-- 通过扩展名 + magic bytes 路由：
-  - `.png/.jpg/.jpeg/.gif/.webp` + 头 4–12 字节 magic 双重确认 → Image
-  - `.pdf` + `25 50 44 46`（`%PDF`）→ Pdf
-  - 其他 → Text
-- 保留 `FileUnchanged` 与 §3.2 `FILE_UNCHANGED_STUB` 路径融合（命中即返）。
-- 验证测试（用 [`tests/fixtures/llm_multimodal/sample_image.png`](../../../../tests/fixtures/llm_multimodal/sample_image.png) / `sample_pdf_b64.txt` decode 后的真实 PDF）：
-  - `read_routes_png_to_image_variant`
-  - `read_routes_pdf_to_pdf_variant`
-  - `read_unknown_extension_falls_back_to_text`
-
-#### 4.2 inline base64 wire（复用 helper，不缩放）（R2 #2，自设，与 T2-P0-012 多模态 wire 对齐）
-
-> **概念前置**：本仓走 OpenAI Responses API + 4.5 MiB inline 上限，**不需要** cc-fork 的 1568px 缩放（那是 Anthropic 服务端推荐）。read 命中图片 / PDF 时：
-> ① 在 metadata 阶段判大小（§2.5），不达标早拒；
-> ② 调 [`ChatMessageContentPart::image_b64(mime, &Path)`](../../../../src/core/llm/types.rs)（PR-RJ-0 重构后签名）由 helper 内部读盘 + base64；
-> ③ tool message 文本写占位句，**真正的图像 part 注入到下一条 user 消息的 `Parts`**——因为 OpenAI 的 `role: "tool"` 消息不接受图像 part（与 [`openai_responses.rs::build_responses_input`](../../../../src/core/llm/openai_responses.rs) 的 `Tool` 角色丢弃非 text part 一致）。
-
-```text
-read("photo.png")  ──executor──▶ ReadResult::Image { base64, mime, original_size }
-                                                    │
-                                                    ▼
-                                  agent_loop / tool_exec read 分支
-                                                    │
-            ┌───────────────────────────────────────┴───────────────────────────────────────┐
-            │ OpenAI 路径（本期）                                                              │
-            │                                                                                │
-            │   tool message:                                                                │
-            │     role: "tool", tool_call_id: <id>                                           │
-            │     content: "Image saved as next user input. See vision content for details." │
-            │                                                                                │
-            │   下一条 user message:                                                          │
-            │     role: "user"                                                               │
-            │     content: Parts [ InputImage { mime, data: <base64> } ]                     │
-            │              （由 ChatMessageContentPart::image_b64(mime, &Path) 构造）          │
-            │                                                                                │
-            └───────────────────────────────────────┬───────────────────────────────────────┘
-                                                    │
-            ┌───────────────────────────────────────┴───────────────────────────────────────┐
-            │ Anthropic 路径（本期不实现，仅注释预留）                                          │
-            │   tool_result block 直接内嵌 image block，无需注入下一条 user                     │
-            └────────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **OpenAI tool→user 注入边界**（PR-RJ 最大风险）：`role: "tool"` 消息只接受 string content，不接受图像 part；这是与刚合入的 T2-P0-012 多模态 wire 一致的约束（[`openai_responses.rs::part_to_responses_value`](../../../../src/core/llm/openai_responses.rs) 对 `System / Assistant / Tool` 角色丢弃非 text part）。本期改为：tool 消息文本写占位句 + 下一条 user 消息的 `Parts` 注入实际图像 part。
-- **不缩放、不解码**：4.5 MiB inline 上限内 vision 模型可识别（与 T2-P0-012 集成测试 `responses_inline_image_describe_roundtrip` 实测命中"a happy beagle..."一致）；不引 `image` crate，`Cargo.lock` 零增长。
-- **helper 复用**：调用 PR-RJ-0 重构后的 `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)`，helper 内部完成 metadata 二次校验 + 读盘 + base64；executor 端零重复实现。
-- **大小预检在 §2.5**：read 入口 metadata 阶段已经做掉 `IMAGE_MAX_BYTES = 4.5 MiB` / `FILE_MAX_BYTES = 25 MiB` 拒绝，**不**走「超限缩放」分支（cc-fork 那套要 `image` crate）。
-- **Anthropic 路径预留**：`tool_result` 块支持嵌 image block；本期仅在 [`tool_exec.rs`](../../../../src/core/agent_loop/tool_exec.rs) 注释里写「Anthropic 路径未来可走 tool_result.image」，**不**实现，等接入 Anthropic provider 时再加。
-- 验证测试（用 [`tests/fixtures/llm_multimodal/sample_image.png`](../../../../tests/fixtures/llm_multimodal/sample_image.png) 真图）：
-  - `read_image_png_returns_base64_via_helper`（断言 `ReadResult::Image.base64` 与 helper 输出一致，无 dimensions 字段）
-  - `tool_exec_image_result_injects_into_next_user_message_parts`（agent_loop 集成：read PNG → 下一条 user message 的 `Parts` 含 `InputImage`，tool message content 是占位句）
-  - `tool_exec_pdf_result_injects_into_next_user_message_parts`（同上，PDF 真文件）
-  - `read_oversize_image_rejected_at_metadata_stage`（已在 §2.5 列）
-
-#### 4.3 可选 `hashline=true` 输出 `N#AB:`（R3 #2，取自 pi_agent_rust）
-
-> **概念前置（实施前必读）**：hashline 是「行号 + 内容指纹复合锚点」，让 edit 既能精确寻址，又能在文件被外部改动时**主动失败**而非默默改错位置。
-
-##### 4.3.1 hashline 概念释义
-
-- **格式**：每行输出 `{1-based 行号}#{2 字符内容哈希}:{原行内容}`，例：
-  ```
-   12#KJ:    fn handle_request(req: Request) -> Result<Response> {
-  ```
-  整段 `12#KJ` 称为 **hashline tag**。
-- **哈希算法**（来源 `[pi_agent_rust/src/tools.rs](../../../../../pi_agent_rust/src/tools.rs)` `compute_line_hash` 5451–5466）：
-  1. `strip_suffix('\r')` 去 Windows 换行残留；
-  2. **去掉所有空白字符**得到 `significant`（缩进改动**不影响 hash**，formatter 友好）；
-  3. seed：含字母数字 → 0；纯标点/空行 → 行号（让空行也有唯一 hash）；
-  4. `xxh32(significant_bytes, seed) & 0xFF`；
-  5. 低字节按 4-bit nibble 拆 → 字典 `b"ZPMQVRWSNKTXJBYH"` 映射成 2 个字符（避开 `O/I/0/1` 等易混字母）。
-- **3 种 op**（hashline_edit 端，本计划只负责 read 端输出，但需对齐协议）：
-
-  | op        | pos              | end    | 含义                      |
-  | --------- | ---------------- | ------ | ----------------------- |
-  | `replace` | `5#KJ`           | `8#WB` | 把第 5–8 行（含端点）换成 `lines` |
-  | `prepend` | `5#KJ`（或省 = BOF） | —      | 在第 5 行**之前**插入          |
-  | `append`  | `5#KJ`（或省 = EOF） | —      | 在第 5 行**之后**插入          |
-
-- **解析容错**：`[pi_agent_rust/src/tools.rs](../../../../../pi_agent_rust/src/tools.rs)` `HASHLINE_TAG_RE` 5497 允许 `5#KJ` / `> +  5 # KJ` 等 diff 风格变体；`strip_hashline_prefix` 5522 自动剥模型误粘的 tag 前缀。
-- **vs §3.1 cat -n 行号** —— 这就是为什么 R3 同时入选 cat -n + hashline：
-
-  | 场景                 | `cat -n` 行号（§3.1）           | `hashline`（本节）         |
-  | ------------------ | --------------------------- | ---------------------- |
-  | 文件被外部改了            | 仍按 `第 12 行` 改 → **改错位置**    | hash 不匹配 → 直接拒绝        |
-  | 多个相似行（多个 `Ok(())`） | `oldText="Ok(())"` 命中多处 → 拒 | `12#KJ` 精确锁定           |
-  | 缩进刚被 formatter 改过  | 行号不变但 oldText 变 → 失败        | 算 hash 时去空白 → **仍能匹配** |
-  | 跨段编辑（多 op）         | 每次改完行号偏移，后续编辑全错             | 工具内部按行号重排 + 一次性 apply  |
-
-- **何时开启**（read schema `hashline?: bool`，默认 `false`）：
-  - **要做精细 edit**（多段、相似行、外部可能改文件）→ 开；
-  - **只是浏览/调试** → 关，节省 ~5% 输出 token；
-  - **大文件分页读** → 配合 `offset/limit` 一起开，每页都打 hash，定位精准。
-- **一句话总结**：hashline = 「行号」+「2 字母内容哈希」，把传统 `第 N 行` 升级为 `第 N 行且当时内容仍是 KJ 这个指纹` —— 它是 §0.A.1 **R3（行号渲染）和 R5（staleness）的合体方案**，一个机制同时解决精确定位 + 修改前一致性两件事（R5 的兜底逻辑见 §4.4）。
-
-##### 4.3.2 实现
-
-- read schema 新增可选字段 `hashline: bool`（default false）：
-  - true 时 Text 分支输出格式 `{line_no}#{2-char hash}:{content}`，与 `[pi_agent_rust/src/tools.rs](../../../../../pi_agent_rust/src/tools.rs)` 1786–1789 / 5468–5471 hashline 一致；
-  - hash 算法：搬 `pi_agent_rust` `compute_line_hash` 25 行实现（xxh32 + nibble 字典），引入 `xxhash-rust` crate（轻量、无 SDK 依赖）。
-- 实现位置：`primitive/executor.rs` 行号渲染段（§3.1）的兄弟分支，根据 `hashline` 入参分发。
-- 与 `hashline_edit` 工具配套（hashline_edit 工具本身放主计划 PR-M，本计划只负责 read 端输出格式）。
-- 验证测试：`read_hashline_format_matches_pi_agent_rust`。
-
-#### 4.4 hashline 内容指纹互补（R5 #2，取自 pi_agent_rust，与 §4.3 共底座）
-
-> **概念前置**：`mtime + content_hash`（§3.2 staleness）在某些边缘场景会同时失效（保留时间戳的 `git checkout` / `touch -r`）；行级 hashline hash 提供独立的二次校验通道——一个被绕过，另一个仍能拦截。
-
-```text
-mtime + hash 共同盲区场景：
-
-T0   agent read foo.rs                      → snapshot: mtime=1700000000, hash=ABCD
-                                              （第 12 行 hash = "KJ"）
-
-T1   外部命令: `touch -r foo.rs.bak foo.rs`
-        ├─ mtime 保持 = 1700000000           ← §3.2 mtime 检查 PASS（误以为没变）
-        └─ 内容已被替换：第 12 行 hash 实际 = "WB"
-
-T2   agent edit foo.rs（基于 T0 旧上下文）
-        ├─ §3.2 staleness 漏判（mtime 没变 → 没重算 hash）
+  LLM / transcript
         │
-        └─ §4.4 hashline 兜底：edit 时按行比对 hashline hash
-              ├─ 模型传 anchor "12#KJ"
-              ├─ 当前文件第 12 行 hash 实际是 "WB"
-              └─ KJ ≠ WB → 拒绝 + "file changed externally, please re-read"
-                    → 模型重 read 拿新 hashline → 重新规划 edit
+        ▼
+┌───────────────────┐     注册名仅 "read"
+│  catalog.rs       │──────────────────────────────┐
+└───────────────────┘                              │
+        │                                            ▼
+        ▼                               ┌────────────────────┐
+  tool_exec  match "read"                │ "read_file" 等    │
+        │                                │ → UnknownTool 错误 │
+        ▼                                └────────────────────┘
+   正常 read 路径
 ```
 
-- **本节无独立代码** —— 复用 §4.3 启用的 hashline 输出做 R5 二次校验；仅在 `[read_state.rs](../../../../src/core/tools/read_state.rs)` 注释里说明「hashline 启用后可作为 staleness 兜底」。
-- **后续 hashline_edit（主计划 PR-M）**调用时实际验证。
-- **R5 双层防御**：第一层 `(mtime, content_hash)` 整文件指纹（§3.2，便宜），第二层 hashline 行级 hash（本节，需 §4.3 启用）—— 形成纵深防御。
-- 复用 §4.3 启用的 hashline 输出做 R5 staleness 二次校验：
-  - 在「文件变了但 mtime 没变」（如 `git checkout` 保留时间戳、touch -r 复制时间戳）边角 case 下，§3.2 的 `(mtime, hash)` 指纹可能漏判；
-  - 此时 hashline 的「**行级哈希**」提供二次校验：edit 比对每行 hash，发现错配立即拒绝。
-- 实现：本节无独立代码——仅在 `[src/core/tools/read_state.rs](../../../../src/core/tools/read_state.rs)`（§3.2）注释里说明「**hashline 输出在 §4.3 启用后，可作为 staleness 兜底**」；后续 hashline_edit（主计划 PR-M）调用时验证。
-- 验证测试：在 §4.5 内 `read_hashline_format_matches_pi_agent_rust` 的扩展用例覆盖（hashline 输出后 mtime 不变但内容变 → edit 拒绝）。
+#### 2.4.2 PR-RB（T1）：分页、二进制 hint、流式抽窗与裸读上限
 
-#### 4.5 测试一览
+- **`offset` / `limit`**：1-based 行窗口；截断时在正文尾附带续读提示（见 §4、§9）。
+- **流式与内存**：分块读盘 + `memchr` 找换行，**单循环**抽出窗口内行，避免先把整文件读进 `String` 再切行（wasm / 大文件友好）。
+- **`[tools.read] max_bytes`**：默认 25 MiB；**仅当** primitive 入参里 **`offset` / `limit` 均未显式出现**（`has_window = offset.is_some() || limit.is_some()` 为假）时，在 metadata 阶段用 `len()` 拒绝过大文本路径；**显式传 `offset` 或 `limit` 之一**即可绕过，用于「只窥一角」读大文件。
+- **二进制 / 非 UTF-8**：返回结构化 `AppError::Tool`，带首字节 hex 与运维向建议，避免裸 `invalid utf-8` 污染模型上下文。
+
+```text
+  open(path)
+      │
+      ▼
+ metadata.len()  +  has_window?
+      │
+      ├─ has_window=false 且 len > max_bytes ──▶ Tool Err（提示 offset/limit）
+      │
+      └─ 否则 ──▶ 分块读 + memchr ──▶ 窗口内 UTF-8 文本 + 行号/hashline
+```
+
+#### 2.4.3 PR-RF（T2）：`cat -n`、会话表与 `FILE_UNCHANGED`
+
+- **行号**：`format_with_line_numbers` → `{:>6}\t{content}`，默认 `line_numbers=true`。
+- **`read_state.rs`**：`ReadStamp { mtime, size, content_hash, offset, limit, is_partial_view }` + `ReadFileState`（`RwLock<HashMap<PathBuf, ReadStamp>>`）+ 常量 `FILE_UNCHANGED_STUB`。
+- **挂载**：`Arc<ReadFileState>` 挂在 `AgentLoopConfig` / `ChatContext`，跨轮复用；会话结束清理，避免表无限涨。
+- **dedup**：`tool_exec` 在调 primitive 前查表；命中且磁盘指纹未变 → 直接 `ReadResult::FileUnchanged`（**不调** executor）。
+
+```text
+        read 请求 (path, offset, limit)
+                    │
+                    ▼
+            ReadFileState.lookup
+                    │
+         ┌──────────┴──────────┐
+         ▼                     ▼
+    mtime/size 变          key 命中且未变
+         │                     │
+         ▼                     ▼
+   executor/read          FileUnchanged stub
+   + put_stamp             （不调 primitive）
+```
+
+#### 2.4.4 PR-RJ-0 与 T3-a / b / c：多模态与 OpenAI 注入边界
+
+- **PR-RJ-0**：`ChatMessageContentPart::image_b64` / `file_b64` 统一为 **`(mime, &Path)`**（及 `file_b64` 的文件名参数）：helper 内 **metadata 二次校验 + 读盘 + base64**，避免 read 与 LLM 客户端重复 IO、重复校验。
+- **T3-a**：`ReadResult` 四态 **`Text` / `Image` / `Pdf` / `FileUnchanged`**；primitive 只产出前三者，`FileUnchanged` **仅** `tool_exec` 构造。
+- **T3-b**：`detect_inline_mime`（magic + 扩展名）路由 PNG/JPEG/GIF/WebP/PDF；在 metadata 阶段用 `IMAGE_MAX_BYTES` / `FILE_MAX_BYTES` 拒绝超限，**不**加载全字节。
+- **T3-c**：`tool_exec` 返回值升级，可附带 `Vec<ChatMessageContentPart>`；`tool_dispatcher` 在 tool 消息之后向**下一条 user**追加 image/file part——对齐 OpenAI「tool 里不能塞图」的硬约束。
+
+```text
+  ReadResult::Image | Pdf
+            │
+            ├─▶ role=tool 文本：短占位说明（无 binary part）
+            │
+            └─▶ 紧随其后的 role=user：Parts += InputImage / InputFile
+```
+
+#### 2.4.5 PR-RM：`hashline`（xxh32）
+
+- **依赖**：`xxhash-rust`（`xxh32`）。
+- **算法**：行内容经 whitespace-stripped 后做 xxh32，取 nibbles 映射为**双字符**指纹前缀；渲染 `{:>6}#XX:{content}`。
+- **优先级**：`hashline=true` 时 **覆盖** `line_numbers`（schema、system prompt、executor 分支一致）。
+
+```text
+  line_numbers=true, hashline=false     →  "    42\tcode"
+  hashline=true（优先）                 →  "    42#Ab:code"
+```
+
+#### 2.4.6 PR-RS：文档
+
+- 将冻结 spec 合入 `openspec/specs/architecture/tools/read.md`，并与 tool catalog、看板、集成测试登记交叉引用（见 §13）。
+
+---
+
+## 3. 术语统一
 
 
-| 落地点                            | 测试用例（图片 / PDF 用例统一用 [`tests/fixtures/llm_multimodal/`](../../../../tests/fixtures/llm_multimodal/) 真实文件）                                                                                                  |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| §4.1 union schema 路由             | `read_routes_png_to_image_variant` · `read_routes_pdf_to_pdf_variant` · `read_unknown_extension_falls_back_to_text`                                                                                |
-| §4.2 helper 复用 + tool→user 注入   | `read_image_png_returns_base64_via_helper` · `tool_exec_image_result_injects_into_next_user_message_parts` · `tool_exec_pdf_result_injects_into_next_user_message_parts`（agent_loop 集成）；`read_oversize_image_rejected_at_metadata_stage` 已在 §2.5 |
-| §4.3 hashline 输出                | `read_hashline_format_matches_pi_agent_rust`                                                                                                                                                       |
-| §4.4 hashline 互补                | （集成在 §4.3 用例内，验证 hash 错配拒绝路径）                                                                                                                                                                      |
-
-
-## 3. 协议（入参 / 出参 / Schema）
-
-> 单一事实源（目标态，随 PR-RA / RB / RF / RJ / RM 合入后锁定）：`src/core/tools/primitive/types.rs` + `src/core/tools/catalog.rs` 中 `read` 工具参数与 `ReadResult`；派生 `docs/tool-catalog.md`。
-
-### 3.1 入参 `ReadArgs`（目标 schema）
-
-
-| 字段              | JSON 类型           | 必填    | 默认值   | 说明                                                                      |
-| --------------- | ----------------- | ----- | ----- | ----------------------------------------------------------------------- |
-| `path`          | string            | **是** | —     | 绝对或相对路径；经 `PermissionGate` Read。                                        |
-| `offset`        | integer ≥ 1       | 否     | 1     | 1-based 行号；与 §2.1 分页窗口一致。                                               |
-| `limit`         | integer 1..=10000 | 否     | 2000  | 最大返回行数；与 cc-fork `MAX_LINES_TO_READ` 对齐。                                |
-| `line_numbers`  | boolean           | 否     | true  | Text 分支是否输出 `cat -n` 行号前缀；由 LLM 控制（如要把内容 pipe 给 diff 工具时设 false）。       |
-| `hashline`      | boolean           | 否     | false | true 时 Text 分支输出 `N#AB:line`（§2 §4.3）；与 `line_numbers` 互斥（hashline 优先）。 |
-
-
-### 3.2 出参 `ReadResult`（discriminated union）
-
-
-| 变体              | 字段                                                  | 说明                                     |
-| --------------- | --------------------------------------------------- | -------------------------------------- |
-| `Text`          | `content`, `num_lines`, `start_line`, `total_lines` | 默认文本；可叠 cat-n / hashline。              |
-| `Image`         | `base64`, `mime`, `original_size`                   | 经扩展名 + magic 头几字节路由判 mime；不解码、不缩放；由 helper 在 metadata 阶段做大小预检（§2 §4.2）。 |
-| `Pdf`           | `base64`, `mime`, `original_size`                   | 与 `Image` 同形态，仅 mime = `application/pdf`；不解析、不抽页；25 MiB metadata 阶段拒。 |
-| `FileUnchanged` | `path`                                              | dedup stub，短句省 token（§2 §3.2）。         |
-
-
-序列化到 LLM：`tool_exec` 将 `Image` 转为 provider 对应的 image content block（§2 §4.2）。
-
-### 3.3 错误与 Stub 码（逻辑名 → 恢复策略）
-
-
-| 逻辑名                       | 触发条件                                        | 模型侧恢复策略                              |
-| ------------------------- | ------------------------------------------- | ------------------------------------ |
-| `BinaryFile` / 非 UTF-8    | 内容非合法 UTF-8                                 | 读 §2.3 hint；必要时 `bash file`；等待多模态路径。 |
-| `FileTooLarge`            | 无 offset/limit 且文件 `MAX_READ_BYTES`（25 MiB） | 增加 `offset`/`limit` 分窗重试。            |
-| `OffsetOutOfRange` / 非法入参 | schema 校验失败（§2.6）                           | 按错误文案修正 `offset`/`limit` 再调。         |
-| `NeedsOffset`             | （保留）大文件策略别名                                 | 同 `FileTooLarge`。                    |
-| `FileUnchanged`           | dedup 命中（§3.2）                              | **非错误**：引用前文 read 结果，勿重复刷屏。          |
-| `IoError`                 | 读盘失败 / 权限拒绝                                 | 检查路径、权限与工作区。                         |
-
-
-### 3.4 配置与环境变量
-
-> **设计决定**：`line_numbers` / `hashline` 不进 config，由 LLM 通过 schema 字段直接控制；config 只保留磁盘资源相关的硬上限。这样既避免管理员侧静默改变模型上下文，又把工具开关的责任留给 LLM 推理过程（与 cc-fork / pi_agent_rust 同口径）。
-
-
-| 键                          | 默认     | 说明                                                                          |
-| -------------------------- | ------ | --------------------------------------------------------------------------- |
-| `[tools.read] max_bytes`   | 25 MiB | 文本路径裸读字节上限；有 `offset` / `limit` 时可绕过；图片 / 文件 inline 上限由 `types.rs` 常量集中管理，不进 config。 |
+| 术语                      | 语义（人话）                                                     | 数据载体                                                                    | 行为约束                                                                                                  |
+| ----------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **窗口**                  | 从第几行开始、最多读几行                                               | `offset: Option<u64>`, `limit: Option<u64>`                             | `offset` 缺省等价 1；`limit` 缺省等价默认 2000；**显式** `limit` 才参与「是否分窗」判定（与 `read_state` 的 `is_partial_view` 一致） |
+| **dedup（重复读短路）**        | 同一窗口、文件看起来没变，就不再塞全文                                        | [`read_state::ReadFileState`](../../../../src/core/tools/read_state.rs) | 命中 → `ReadResult::FileUnchanged`（在 **tool_exec** 短路，不调 primitive）                                     |
+| **staleness（陈旧）**       | 模型脑中的内容已不是磁盘最新                                             | 同上表中的 `ReadStamp`                                                       | **edit/write 入口**查表：指纹不一致 → 拒绝并要求先 `read`                                                             |
+| **FILE_UNCHANGED stub** | 告诉模型「别读了，跟上一次一样」                                           | 常量 [`FILE_UNCHANGED_STUB`](../../../../src/core/tools/read_state.rs)    | 非错误；模型应引用上一轮 read 结果                                                                                  |
+| **hashline**            | 行号 + 内容指纹前缀，供精细 edit 锚点                                    | executor 文本渲染分支                                                         | `hashline=true` 时覆盖 `line_numbers`；算法对齐 pi_agent_rust                                                 |
+| **「LLM 收到 tool 结果后」**   | 指 **`tool_exec` 已把 `ReadResult` 落成 chat 消息、即将进入下一轮模型推理之前** | —                                                                       | 与去重 / 注入时序讨论绑在此边界                                                                                     |
 
 
 ---
 
-## 4. One-Glance Map（文件职责总览）
+## 4. 协议（入参 / 出参 / Schema）
+
+**单一事实源**：
+
+- JSON Schema：[`catalog.rs::read_parameters`](../../../../src/core/tools/catalog.rs) → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)。
+- Rust 类型：[`primitive/types.rs`](../../../../src/core/tools/primitive/types.rs) 中 `ReadResult` / `ReadTextResult` / `ReadBinaryResult`。
+
+### 4.1 入参（工具 arguments）
+
+
+| 字段             | JSON 类型           | 必填    | 默认      | 说明                                    |
+| -------------- | ----------------- | ----- | ------- | ------------------------------------- |
+| `path`         | string            | **是** | —       | 绝对或相对路径；经 `PermissionGate` Read       |
+| `offset`       | integer ≥ 1       | 否     | 1       | 从第几行开始读（1-based）                      |
+| `limit`        | integer 1..=10000 | 否     | 2000    | 最多返回多少行；截断则附续读尾注                      |
+| `line_numbers` | boolean           | 否     | `true`  | `cat -n` 风格前缀；与 `hashline` 互斥         |
+| `hashline`     | boolean           | 否     | `false` | `行号#XX:内容`；开启时 **优先于** `line_numbers` |
+
+
+### 4.2 出参（Rust：`ReadResult`）
+
+判别式枚举四种结局（wire / UI 再序列化）：
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  LLM / User                                                                  │
-└─────────────────────────────────────────────────────────────────────────────┘
-        │  tool_definitions（built-in read）
+ReadResult
+├── Text(ReadTextResult)
+│     • content      — 已带行号或 hashline、可能带截断尾注的最终字符串
+│     • start_line   — 窗口起始行号（1-based）
+│     • num_lines    — 本响应实际行数
+│     • truncated    — 是否因 limit 截断
+│     • remaining_lines — 截断时后面还剩多少行；未截断为 0
+├── Image(ReadBinaryResult)   — mime + size + path + filename（primitive 不 base64）
+├── Pdf(ReadBinaryResult)     — 同上，mime 为 application/pdf
+└── FileUnchanged { path }    — 仅 tool_exec dedup 路径构造；primitive **不**产出此变体
+```
+
+**Image / Pdf 与 helper**：`tool_exec` 用路径调用 `ChatMessageContentPart::image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)` 完成读盘与 base64（[`types.rs`](../../../../src/core/llm/types.rs)）。
+
+### 4.3 调用样例（jsonc）
+
+**文本分页**：
+
+```jsonc
+{
+  "path": "src/lib.rs",
+  "offset": 1,
+  "limit": 80
+}
+```
+
+**精细锚点（hashline）**：
+
+```jsonc
+{
+  "path": "src/lib.rs",
+  "offset": 10,
+  "limit": 40,
+  "hashline": true
+}
+```
+
+---
+
+## 5. One-Glance Map（文件职责总览）
+
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│  src/core/llm/system_prompt.rs                                             │
+│  • 工具说明里使用短名 `read`，引导 offset/limit / hashline                  │
+└────────────────────────────────────────────────────────────────────────────┘
+        │
         ▼
-┌───────────────────────┐     ┌────────────────────────┐
-│ system_prompt.rs      │     │ catalog.rs             │
-│ 工具说明与命名规范      │     │ BUILTIN_TOOL_CATALOG    │
-│ 落地点 ①               │     │ name/schema ①②⑥⑨⑪     │
-└───────────────────────┘     └───────────┬────────────┘
-                                          │ build_function_definitions
-                                          ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ agent_loop / tool_exec.rs                                                      │
-│ • match `read` only（无 read_file 别名）  ★ schema 校验 offset/limit             │
-│ • ReadResult::Image → LLM image content block  ⑩                               │
-└───────────────────────────────┬───────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│  src/core/tools/catalog.rs                                                 │
+│  • BUILTIN_TOOL_CATALOG：`name = "read"`，`read_parameters()` JSON Schema   │
+└────────────────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  src/core/agent_loop/tool_exec.rs                                          │
+│  • match `"read"`：解析 offset/limit/line_numbers/hashline，越界早失败       │
+│  • dedup：命中 ReadFileState → 直接 FileUnchanged                           │
+│  • ReadResult::Image|Pdf → 占位 tool 文本 + 注入下一条 user Parts            │
+└───────────────────────────────┬────────────────────────────────────────────┘
                                 │
                                 ▼
-┌───────────────────────────────────────────────────────────────────────────────┐
-│ primitive / executor.rs                                                        │
-│ gate · 分块流式单循环 · offset/limit · 二进制 hint · cat-n · hashline · union │
-│ 落地点 ②③④⑤⑦⑨⑪                                                                │
-└───────────────────────────────┬───────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│  src/core/tools/primitive/executor/read.rs                                 │
+│  • read / read_file_impl：gate → metadata 上限 → 路由 Text|Image|Pdf       │
+│  • 文本：分块读 + memchr 找换行，单循环抽窗；UTF-8 校验；尾注；行号/hashline │
+│  • 二进制拒绝：结构化 Tool 错误                                             │
+└───────────────────────────────┬────────────────────────────────────────────┘
                                 │
-              ┌─────────────────┴─────────────────┐
-              ▼                                   ▼
-┌─────────────────────────────┐       ┌─────────────────────────────┐
-│ read_state.rs（新建）         │       │ api/chat/mod.rs            │
-│ ReadFileState / FILE_UNCHANGED │◀────│ AgentLoopConfig 挂接        │
-│ ⑧ ⑫ 注释与 staleness 兜底    │       │ ⑧                          │
-└─────────────────────────────┘       └─────────────────────────────┘
-
-图例：① 命名 ②offset/limit ③续读 ④二进制 ⑤流式+上限 ⑥schema ⑦cat-n ⑧state ⑨union ⑩image block ⑪hashline ⑫互补
+              ┌─────────────────┴──────────────────┐
+              ▼                                    ▼
+┌──────────────────────────────┐      ┌──────────────────────────────────────┐
+│  src/core/tools/read_state.rs │      │  src/core/llm/types.rs               │
+│  • ReadFileState / ReadStamp   │      │  • image_b64 / file_b64(path 签名)    │
+│  • put_stamp / check_stamp     │      │  • metadata 尺寸白名单 + 读盘 base64 │
+└──────────────────────────────┘      └──────────────────────────────────────┘
+              ▲
+              │ Arc 挂在 AgentLoopConfig（见 src/api/chat/mod.rs 装配）
 ```
+
+**怎么读这张图**：请求先进 **`tool_exec`**（参数与去重），再进 **`executor/read`**（真 IO 与渲染），会话指纹记在 **`read_state`**；图 / PDF 的昂贵编码只在 **`types.rs` helper** 做一次。
 
 ---
 
-## 5. 调度时序（运行时图）
+## 6. 调度时序（运行时图）
 
-### 5.1 ASCII（首次 read + 分页）
-
-```text
-User/LLM        agent_loop           executor              read_state
-   │                 │                    │                     │
-   │ read(path,o,l)  │                    │                     │
-   │────────────────>│ 解析参数 ★          │                     │
-   │                 │──────────────────>│ open + 分块读循环     │
-   │                 │                    │ memchr 跳过 o-1 行， │
-   │                 │                    │ 窗口内收 l 行        │
-   │                 │                    │──┐                  │
-   │                 │                    │<─┘ set_stamp       │
-   │                 │                    │────────────────────>│ insert
-   │                 │<──────────────────│ ReadResult::Text    │
-   │<────────────────│ tool_result       │                     │
-```
-
-### 5.2 ASCII（重复 read → stub）
+### 6.1 首次 read（文本窗口）
 
 ```text
-User/LLM        agent_loop           executor              read_state
-   │                 │                    │                     │
-   │ read 同 key      │                    │                     │
-   │────────────────>│                    │ lookup              │
-   │                 │──────────────────>│────────────────────>│ hit
-   │                 │<──────────────────│ FileUnchanged stub  │
-   │<────────────────│                    │                     │
+LLM          tool_exec              executor/read           read_state
+ │               │                       │                    │
+ │ read(args)    │                       │                    │
+ │──────────────>│ 校验 offset/limit      │                    │
+ │               │──────────────────────>│ gate + open       │
+ │               │                       │ 流式扫行/拼 content │
+ │               │                       │───────────────────>│ put_stamp
+ │               │<──────────────────────│ ReadResult::Text   │
+ │<──────────────│ tool 消息文本         │                    │
 ```
 
-### 5.3 Mermaid（staleness：edit 前校验）
+### 6.2 同窗口第二次 read（dedup）{#sec-read-dedup}
+
+```text
+LLM          tool_exec                       read_state
+ │               │                               │
+ │ read(同路径同窗口) │ lookup：mtime+size 未变      │
+ │──────────────>│──────────────────────────────>│
+ │               │<──────────────────────────────│ hit
+ │               │ 组装 FileUnchanged（不调 executor）
+ │<──────────────│ stub 文本
+```
+
+### 6.3 edit 前陈旧检查（概念）
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant L as LLM
     participant E as tool_exec
-    participant X as executor
     participant S as read_state
 
     L->>E: edit(path, ...)
     E->>S: check_stamp(path)
-    alt mtime+hash 一致
+    alt mtime+size 等与 stamp 一致
         S-->>E: ok
-        E->>X: apply_edit
-        X-->>L: ok
-    else 指纹不一致
+    else 不一致
         S-->>E: stale
-        E-->>L: AppError 请重 read
+        E-->>L: 请重新 read
     end
 ```
 
@@ -1021,11 +407,155 @@ sequenceDiagram
 
 ---
 
-## 6. 关联文档
+## 7. 状态机与会话表
 
-- 兄弟工具 spec：`[search_files.md](search_files.md)`（同目录）
-- 权限子系统：`[../permission-system.md](../permission-system.md)`（§1「目标与不变量」第 1 条「统一入口」）
-- 工具目录（派生）：`[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)`
-- 跨 Agent 调研：`[../../../../docs/reports/builtin-tool-description-cross-agent-study.md](../../../../docs/reports/builtin-tool-description-cross-agent-study.md)` · `[../../../../docs/reports/cursor-builtin-tools-reference.md](../../../../docs/reports/cursor-builtin-tools-reference.md)`
-- 看板：`[../../../../agents/TASK_BOARD_002.md](../../../../agents/TASK_BOARD_002.md)`（`T2-P0-tools-read`）
+**dedup 命中**（简化条件，完整见 `ReadStamp::matches_request`）：
+
+```text
+           ┌─────────────┐
+  首次 read │  no record  │
+           └──────┬──────┘
+                  │ put_stamp
+                  ▼
+           ┌─────────────┐
+  再次 read │  key 对齐   │──mtime/size 变──▶ 全量重读 + 更新 stamp
+           │  且磁盘未变 │
+           └──────┬──────┘
+                  │ 同窗口 + 未变
+                  ▼
+           ┌─────────────┐
+           │ FILE_UNCHANGED stub
+           └─────────────┘
+```
+
+
+| 字段 / 概念             | 作用                                         |
+| ------------------- | ------------------------------------------ |
+| `mtime_ms` + `size` | dedup 快路径：未变才允许短路                          |
+| `content_hash`      | 存储供诊断与后续 hashline_edit；**dedup 命中不强制重算比对** |
+| `is_partial_view`   | 分窗读与整文件读不互相 dedup                          |
+
+
+---
+
+## 8. 配置与环境变量
+
+**总则**：`env > config > 默认`（若某 env 未实现则省略该行）。
+
+
+| 来源               | 键                                               | 含义                | 备注                                                                                           |
+| ---------------- | ----------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------- |
+| `pi.config.toml` | `[tools.read] max_bytes`                        | 文本路径**无窗口**时的字节上限 | 默认 25 MiB；[`infra/config/types.rs`](../../../../src/infra/config/types.rs) `ToolsReadConfig` |
+| 代码常量             | `IMAGE_MAX_BYTES` 等                             | 图 / PDF inline 上限 | [`types.rs`](../../../../src/core/llm/types.rs)                                              |
+| 测试               | `DefaultPrimitiveExecutor::with_read_max_bytes` | 缩小阈值注入执行器         | 避免造 25 MiB fixture                                                                           |
+
+
+`line_numbers` / `hashline` **不进** config：由模型按次决定，避免管理员静默改变模型上下文形状。
+
+---
+
+## 9. 错误模型 / 截断 / Stub
+
+```text
+                    read 请求
+                        │
+        ┌───────────────┼───────────────┐
+        ▼               ▼               ▼
+   参数非法         权限 / IO        文本非 UTF-8
+   AppError::Tool   Permission/IO   AppError::Tool（结构化 hint）
+        │               │               │
+        └───────────────┴───────────────┘
+                        │
+        ┌───────────────┴───────────────┐
+        ▼                               ▼
+  裸读超 max_bytes                 limit 截断
+  AppError::Tool（提示 offset/limit）  Ok(Text{truncated=true, 尾注})
+        │
+        ▼
+  dedup 命中
+  Ok(FileUnchanged) — 非错误
+```
+
+---
+
+## 10. 测试矩阵（验收）
+
+
+| 维度             | 用例（实际函数名）                                                                                                                                                                                                                                                                                                                                                                                    | 状态           |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| 分页 / 尾注        | `read_window_test::read_offset_limit_returns_window`、`read_offset_beyond_eof_returns_empty`、`read_limit_truncates_with_resume_hint`、`read_with_offset_bypasses_max_bytes_check`                                                                                                                                                                                                              | ✅ 2026-05-05 |
+| 大文件 / 二进制 hint | `read_window_test::read_no_offset_large_file_rejected_with_hint`、`read_binary_returns_structured_hint`                                                                                                                                                                                                                                                                                       | ✅ 2026-05-05 |
+| 行号 / hashline  | `read_window_test::read_default_renders_cat_n_line_numbers`、`read_offset_window_uses_absolute_line_numbers`、`read_with_hashline_renders_hash_prefixed_lines`                                                                                                                                                                                                                                 | ✅ 2026-05-05 |
+| 路由 Image/Pdf   | `read_window_test::read_routes_png_to_image_variant`、`read_routes_pdf_to_pdf_variant`、`read_unknown_extension_falls_back_to_text`、`read_oversize_image_rejected_at_metadata_stage`                                                                                                                                                                                                           | ✅ 2026-05-05 |
+| 集成（黑盒）         | `tests/read_tool_tests.rs`：`read_text_offset_limit_window_with_line_numbers`、`read_binary_returns_structured_hint`、`read_hashline_renders_two_char_hash_prefix`、`read_png_routes_to_image_and_can_build_input_image_part`、`read_pdf_routes_to_pdf_and_can_build_input_file_part`、`read_oversize_image_rejected_before_loading_bytes`                                                         | ✅ 2026-05-05 |
+| tool_exec 参数   | `submodules_test::tool_exec_read_returns_content`、`tool_exec_legacy_read_file_returns_unknown_tool_error`、`tool_exec_read_offset_zero_returns_bound_error`、`tool_exec_read_limit_over_max_returns_bound_error`                                                                                                                                                                               | ✅ 2026-05-05 |
+| dedup / 注入     | `tool_exec_dedup_test::tool_exec_read_second_call_returns_unchanged_stub`、`tool_exec_read_after_mtime_bump_refetches`、`tool_exec_read_partial_then_full_does_not_dedup`、`tool_exec_read_different_window_does_not_dedup`、`tool_exec_read_state_clear_resets_dedup`、`tool_exec_image_result_injects_into_next_user_message_parts`、`tool_exec_pdf_result_injects_into_next_user_message_parts` | ✅ 2026-05-05 |
+| helper 签名      | `src/core/llm/tests/types_test.rs` 中 `image_b64` / `file_b64`                                                                                                                                                                                                                                                                                                                                | ✅ 2026-05-05 |
+| 配置解析           | `infra/config/tests/tools_cfg_test.rs`（`[tools.read] max_bytes` 覆盖）                                                                                                                                                                                                                                                                                                                          | ✅ 2026-05-05 |
+
+
+§1.1 观察指标表与本表可逐行对照（G1–G9）。
+
+---
+
+## 11. 风险与应对
+
+
+| 风险                | 影响          | 应对（已实现或约定）                                             |
+| ----------------- | ----------- | ------------------------------------------------------ |
+| 模型坚持传 `read_file` | 工具调用失败      | catalog 仅 `read`；`submodules_test` 锁未知工具语义；prompt 写明短名 |
+| 大文件 OOM           | wasm / 主机内存 | metadata 门 + 分块扫行；禁止整文件读后再判大小                          |
+| OpenAI tool 消息塞图片 | API 拒收 / 浪费 | 图 / PDF **仅**注入下一条 `user` Parts；单测锁注入行为                |
+| `mtime` 欺骗式不变     | 陈旧漏判        | 存 `content_hash` + hashline 给 edit 侧纵深；§7 写明边界         |
+| 重复 read 烧 token   | 成本          | dedup stub；`ReadFileState` 按会话释放                       |
+
+
+---
+
+## 12. 历史决策（已被本方案取代）
+
+- ~~整文件 `read_file_utf8` 唯一路径~~ → **否**：LLM 工具走 `read()` + 窗口 + `ReadResult`。
+- ~~`read_file` 与 `read` 双注册~~ → **否**：避免双轨与审计分叉。
+- ~~非 UTF-8 仅裸错误~~ → **否**：改为结构化 Tool 错误 + hex 提示。
+- ~~图片在 primitive 内 base64~~ → **否**：统一到 `ChatMessageContentPart` helper，单点限长与白名单。
+- ~~用 content_hash 做 dedup 命中条件~~ → **否**：会迫使「短路前再读一遍全文」，与省读目标矛盾；改用 `mtime_ms + size` 快路径（`read_state.rs` 头注释）。
+
+---
+
+## 13. 关联文档
+
+- 兄弟工具：[search_files.md](search_files.md)
+- 权限：[../permission-system.md](../permission-system.md)
+- 派生工具目录：[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)
+- 看板：[TASK_BOARD_002.md](../../../../agents/TASK_BOARD_002.md)（`T2-P0-tools-read`）
+
+---
+
+**一句话总结**：`read` 在 **`tool_exec`** 做参数与去重、在 **`executor/read`** 做流式窗口与渲染、在 **`read_state`** 记下指纹供后续写改校验；图 / PDF 走 **helper + 下一条 user 注入**；协议以 **`primitive/types.rs` + `catalog.rs`** 为单一事实源。
+
+---
+
+## 附录：旧节号 → 本版对照
+
+仓库里部分 `//!` / 错误文案仍写「`read.md` §2.x / §3.2 / §4.x」（计划期编号）。本版按 [`ARCHITECTURE_SPEC.md`](../../guides/workflow/ARCHITECTURE_SPEC.md) 与 `search_files.md` 重排章节，按下表跳转即可。
+
+
+| 旧锚点                           | 本版位置                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------- |
+| §0 / §0.A 对标与决策表              | [§2](#2-竞品--选型对比)                                                               |
+| §1 命名切换                       | [§1](#1-目标与设计原则) 原则表 · G1                                                       |
+| §2.1 分页 offset/limit          | [§4.1](#41-入参工具-arguments)、G2                                                   |
+| §2.2 续读尾注                     | G2、[§9](#9-错误模型--截断--stub)                                                      |
+| §2.3 二进制 hint                 | G4、[§9](#9-错误模型--截断--stub)                                                      |
+| §2.4 分块流式                     | [§5 One-Glance](#5-one-glance-map文件职责总览)（`executor/read.rs`）                    |
+| §2.5 metadata 上限              | [§8](#8-配置与环境变量)、G3、[§9](#9-错误模型--截断--stub)                                     |
+| §2.6 tool_exec 参数校验           | [§4.1](#41-入参工具-arguments)；边界见 [§10](#10-测试矩阵验收) `tool_exec_read_*_bound_error` |
+| §3.1 cat-n 行号                 | [§4.1](#41-入参工具-arguments) `line_numbers`、G5                                    |
+| §3.2 readFileState、dedup、stub | [§3](#3-术语统一)、[§7](#7-状态机与会话表)、[§6.2](#sec-read-dedup)                          |
+| §4.1 多模态路由                    | [§4.2](#42-出参rustreadresult)、G6                                                 |
+| §4.2 tool→user 注入             | G7、[§6](#6-调度时序运行时图)                                                            |
+| §4.3 / §4.4 hashline          | [§3](#3-术语统一)、[§4.1](#41-入参工具-arguments) `hashline`                             |
+| 上一版「§7 选型摘要」                  | [§2.3](#23-落地选型决策表)                                                             |
+| 上一版无独立「实施排期」节                 | [§2.4](#24-实施点已闭环)                                                         |
+
 
