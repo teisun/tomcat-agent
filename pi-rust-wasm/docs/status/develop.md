@@ -1,5 +1,71 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-05-05 19:18 | INTEGRATED | develop | — |
+
+### 集成测试报告 — `refactor/split-l3-files`（L-3 红区文件拆分整改 follow-up）
+
+**合并信息**
+
+- 源分支（tip）：`refactor/split-l3-files` @ `4ad9423`（单 commit `refactor(executor,llm)`）
+- 合并 commit：`6baf427 merge: refactor/split-l3-files (L-3 红区文件拆分整改 follow-up)`
+- 合并策略：`--no-ff`，ort 无冲突
+- 来源：上一轮 `feature/tool-system-cleanup` 集成 review 标出的 L-3 红区 follow-up（`primitive/executor.rs` 2105 / `llm/openai_responses.rs` 1056），按 `~/.cursor/plans/l3_红区文件拆分整改_c7d01211.plan.md` 闭环
+
+**§1 拆分前后行数核对**（[`RUST_FILE_LINES_SPEC.md`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) L-1 黄金区间 300–500 / L-2 黄区 500–1000 / L-3 红区 1000+）
+
+| 拆分前 | 行数 | 区间 | → 拆分后子文件 | 行数 | 区间 |
+| :--- | ---: | :--- | :--- | ---: | :--- |
+| `src/core/tools/primitive/executor.rs` | **2105** | **L-3** | `executor/mod.rs`（trait impl 委托表） | 241 | L-1 |
+| | | | `executor/gate.rs`（PermissionGate 桥接 + run_search_command） | 140 | L-1 |
+| | | | `executor/helpers.rs`（审计字符串 + find_binary） | 77 | < L-1 |
+| | | | `executor/read.rs`（read_file/read/list_dir + cat-n/hashline/multimodal magic） | 537 | L-2 下沿 |
+| | | | `executor/search.rs`（Tier1 rg/fd + Tier2 rust-fallback） | 955 | L-2 上沿 |
+| | | | `executor/write_edit.rs`（write_file + edit_file） | 182 | L-1 |
+| | | | `executor/bash.rs`（execute_bash） | 150 | L-1 |
+| | | | `executor/confirm.rs`（require_user_confirmation） | 26 | < L-1 |
+| `src/core/llm/openai_responses.rs` | **1056** | **L-3** | `openai_responses/mod.rs`（Provider + impl LlmProvider + HTTP 客户端 + retry/fallback） | 411 | L-1 |
+| | | | `openai_responses/payload.rs`（ChatRequest ↔ /v1/responses 翻译） | 373 | L-1 |
+| | | | `openai_responses/stream.rs`（SSE/NDJSON 解析 + ResponsesStream + ToolCallTrack） | 321 | L-1 |
+
+L-3 红区清空。`executor/search.rs` 仍处 L-2 上沿（955 < 1000），未触红；按 spec L-2「自检」即可，下一轮按 Tier1/Tier2 二次切分可继续降。其他原 L-2 黄区文件（`core/tools/config.rs` 826 / `api/chat/mod.rs` 820 / `compaction/preheat.rs` 792）按 plan §「不在范围」保持现状，不在本次变更面。
+
+**§2 不变量核对**
+
+- `PrimitiveExecutor` trait（read_file / read / list_dir / search_files / write_file / edit_file / execute_bash / require_user_confirmation）签名零改动；`impl PrimitiveExecutor for DefaultPrimitiveExecutor` 整块留 `executor/mod.rs`，每个方法体改为 `read::read_impl(self, …).await` 一行委托——trait 实现不可跨文件，方法体可以下沉。
+- `LlmProvider` trait（chat / chat_stream / count_tokens / provider_name）签名零改动；`impl LlmProvider for OpenAiResponsesProvider` 整块留 `openai_responses/mod.rs`，wire 翻译入口（`build_responses_input` / `convert_tools_to_responses` / `responses_payload_to_chat_response`）与流式解析（`ResponsesStream` / `responses_chunk_to_events`）下沉到 `payload.rs` / `stream.rs`。
+- `pub(crate)` helper（`detect_inline_mime` / `compute_line_hash` / `format_with_hashlines` / `format_with_line_numbers`）由 `executor/mod.rs` `pub(crate) use read::{…}` 重导出，保持 `primitive::executor::xxx` 引用路径在拆分前后等价（[`tests/read_window_test.rs`](../../src/core/tools/primitive/tests/read_window_test.rs) 的 `super::super::executor::format_with_line_numbers` 引用零改动）。
+- `openai_responses_test.rs` 走 `#[cfg(test)] #[path = "../tests/openai_responses_test.rs"] mod tests;`（[`RUST_FILE_LINES_SPEC §A.9`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) 私有项例外口径）；mod.rs 内 `use payload::{…}; use stream::{…};` 把私有 helper 拉入命名空间，子 `tests` 模块通过 `super::*` 看见——未为测试放宽任何可见性。
+- `registry.rs` 把 `#[path = "openai_responses.rs"]` 改为 `#[path = "openai_responses/mod.rs"]`，与既有「在 registry 内本地声明 mod」风格对齐；新增 single-file Provider 仍可走 `#[path = "<new>.rs"]`。
+- 配置键、错误码、事件 wire、日志键名、`Cargo.toml` 依赖、MSRV、feature 拓扑全部零改动。
+
+**§3 全量门禁**（在 `pi-rust-wasm` 根目录；`set -a; source .env; set +a` + `source $HOME/.wasmedge/env` + `DYLD_FALLBACK_LIBRARY_PATH=$HOME/.wasmedge/lib`）
+
+| 步骤 | 命令 | 结果 |
+| :--- | :--- | :--- |
+| `cargo fmt --check` | — | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | — | 零警告 |
+| `cargo test --lib -- --test-threads=1` | — | 674 PASS / 0 failed / 1 ignored |
+| 分类集成全量 | `RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration` | **lib 674 + integration 229 = 903 PASS / 0 failed**（详见 `.integration_test_output.log`，2026-05-05 19:07:32 开始 → 19:12:53 结束，并发组 1m30s + 串行组 3m51s） |
+
+数字与上一轮 `feature/tool-system-cleanup` 集成块完全一致——本次纯结构调整，不该有任何用例数变化。
+
+**编码规范家族对照**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| [`Codeing&Architecture_Spec.md`](../../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) | 通过 | 分层不变；trait 实现单点收敛于父 mod.rs，子模块只承担「方法体」与「子域 helper」，权限决策仍单点收敛于 `PermissionGate`。 |
+| [`RUST_FILE_LINES_SPEC.md`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) | 通过（**L-3 follow-up 闭环**） | 详见 §1 行数表。原 L-3 follow-up 项已清空，新增子文件全部落 L-1 / L-2 上沿。`pub(crate) use` / `use` 别名按 spec §A.9 / §A.7 守住可见性边界，不为测试放宽 `pub(super)` / `pub(crate)`。 |
+| [`RUST_IDIOMS_SPEC.md`](../../openspec/specs/guides/coding/RUST_IDIOMS_SPEC.md) | 通过 | `clippy --all-targets -D warnings` 零警告。 |
+| [`COMMENT_SPEC.md`](../../openspec/specs/guides/coding/COMMENT_SPEC.md) | 通过 | 8 个新子文件均带模块级 `//!` 头注释，标明拆分来由 + 与父 `mod.rs` 边界；原文件的核心决策注释（25 MiB 读上限、Tier2 墙钟、hashline 字典、ResponsesStream 模式探测等）随职能整体迁移到对应子文件，未失真。 |
+
+**结论**
+
+`refactor/split-l3-files` 集成验收**通过**：单 commit `4ad9423` 通过 `--no-ff` 合并 tip 进入 develop（merge `6baf427`），全量门禁绿。上一轮 review 标出的 L-3 红区 follow-up（`primitive/executor.rs` 2105 行 / `llm/openai_responses.rs` 1056 行）闭环；其他既有 L-2 黄区文件按 plan §「不在范围」保持现状。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-05-05 18:21 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — `feature/tool-system-cleanup`（T2-P0-005 工具系统整改 + read 加强 + 多 LLM Responses + 多模态 wire + search_files 兜底）
