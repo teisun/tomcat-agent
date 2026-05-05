@@ -1,8 +1,50 @@
 //! # LLM 请求/响应类型
 //!
-//! 与 OpenAI API 兼容，供宿主与插件共用；字段命名与 pi-mono/OpenAI 对齐（camelCase）。
+//! 与 OpenAI API 兼容，供宿主与插件共用；字段命名与 pi-mono/OpenAI 对齐（snake_case）。
+//!
+//! ## 多模态 parts
+//!
+//! [`ChatMessageContentPart`] 是 `#[serde(tag = "type", rename_all = "snake_case")]`
+//! 三态枚举：`InputText` / `InputImage` / `InputFile`，对齐 OpenAI Responses 的
+//! `input_text` / `input_image` / `input_file` content part 形状。
+//!
+//! - **A 通道（inline base64）**：调用方传 `(mime_type, &Path)` 让 helper
+//!   `image_b64` / `file_b64` 自己**打开文件 + metadata 二次校验 + 读字节 + base64
+//!   编码**（PR-RJ-0 重构：避免 read 工具与 LLM 客户端各写一遍 IO）；wire 翻译
+//!   时再拼 `data:{mime};base64,{b64}` data URL，封装在 [`OpenAiResponsesProvider`]
+//!   内，类型层不暴露 wire 字符串。
+//! - **B 通道（已知 file_id 透传）**：调用方已经从 OpenAI Files API 拿到 file_id
+//!   时，通过 `image_file_id` / `file_file_id` helper 构造；本期不提供"读字节 → 上传 →
+//!   拿 id" 一站式 helper，那部分由独立任务 `T2-P0-013 | llm-files-upload-manager` 提供。
+//!
+//! 限制：
+//! - `IMAGE_MAX_BYTES = 4_718_592` (4.5 MB)，与 [`pi_agent_rust`] 一致
+//! - `FILE_MAX_BYTES = 25 * 1024 * 1024` (25 MB)，按 OpenAI Responses 单次请求体硬上限近似
+//! - image MIME 仅允许 `image/{png,jpeg,gif,webp}` 白名单（与 [`pi_agent_rust`] 对齐）
 
+use std::path::Path;
+
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+
+use crate::infra::error::AppError;
+
+/// inline 图片字节上限（解码后），与 [`pi_agent_rust/src/tools.rs`] 对齐。
+pub const IMAGE_MAX_BYTES: usize = 4_718_592;
+
+/// inline 文件字节上限（解码后）；OpenAI Responses 单次请求体硬上限 ~25 MB，
+/// base64 膨胀 33%，所以 25 MB 字节已是 inline 路径的上沿。
+pub const FILE_MAX_BYTES: usize = 25 * 1024 * 1024;
+
+/// `count_tokens` 启发式：单张 inline 图片折合的字符数（≈ 1200 token），
+/// 与 [`pi_agent_rust/src/compaction.rs`] `IMAGE_CHAR_ESTIMATE` 同值。
+const IMAGE_CHAR_ESTIMATE: usize = 3600;
+
+/// `count_tokens` 启发式：单份 inline 文件折合的字符数（≈ 2700 token），PDF 通常远大于单图。
+const FILE_CHAR_ESTIMATE: usize = 8000;
+
+/// image MIME 白名单（与 OpenAI vision 模型实际接受集合对齐）。
+const ALLOWED_IMAGE_MIMES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// 单条对话消息，与 OpenAI chat completions messages 兼容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,11 +64,218 @@ pub enum ChatMessageContent {
     Parts(Vec<ChatMessageContentPart>),
 }
 
+/// 单条 content part：文本 / 图片 / 文件 三态枚举，wire 由 provider 适配层翻译。
+///
+/// 序列化使用 `#[serde(tag = "type", rename_all = "snake_case")]`，外部 JSON 形态：
+///
+/// ```json
+/// {"type": "input_text",  "text": "..."}
+/// {"type": "input_image", "mime_type": "image/png", "image_b64": "...", "detail": "high"}
+/// {"type": "input_image", "file_id": "file-abc"}
+/// {"type": "input_file",  "filename": "x.pdf", "mime_type": "application/pdf", "file_b64": "..."}
+/// {"type": "input_file",  "file_id": "file-abc"}
+/// ```
+///
+/// 字段命名约定：`data` 在 wire 上叫 `image_b64` / `file_b64`，避免与 file_id 通道混淆。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessageContentPart {
-    #[serde(rename = "type")]
-    pub part_type: String,
-    pub text: Option<String>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChatMessageContentPart {
+    /// 文本片段。
+    InputText { text: String },
+    /// 图片：inline base64 或已知 file_id（二选一，file_id 优先）。
+    InputImage {
+        /// e.g. "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        /// 标准 base64（不带 `data:` 前缀）；wire 拼装由 provider 层做。
+        #[serde(rename = "image_b64", skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        /// OpenAI Files API 引用通道；本期 schema 保留 + 公开 helper 接收已知 id；
+        /// 「读字节 → 上传 → 拿 id」由 T2-P0-013 提供。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        /// vision detail：`auto` / `low` / `high`，可选，默认 auto。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// 文件（PDF 等）：inline base64 或已知 file_id（二选一，file_id 优先）。
+    InputFile {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+        /// e.g. "application/pdf"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        #[serde(rename = "file_b64", skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+}
+
+impl ChatMessageContentPart {
+    /// 文本片段。
+    pub fn text(s: impl Into<String>) -> Self {
+        Self::InputText { text: s.into() }
+    }
+
+    /// inline 图片 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputImage`。
+    ///
+    /// 调用方提供 `(mime_type, &Path)`，helper 内部完成：
+    /// 1. MIME 白名单校验（`image/{png,jpeg,gif,webp}`）
+    /// 2. `metadata().len()` **预检**（廉价，无 base64 33% 膨胀开销）
+    /// 3. `std::fs::read(path)` 读字节
+    /// 4. base64 编码并装入 `InputImage` variant
+    ///
+    /// 设计契约：
+    /// - **不**接受 `data: String` 入参——避免 `read` 工具与 LLM 客户端各写一遍
+    ///   `decode_b64_len + size check`，把唯一可信数据源固定到「文件路径」。
+    /// - metadata 与 `read` 工具的 25 MiB metadata 预检**互不冲突**：read 工具在
+    ///   路由前先做一道 metadata；本 helper 是 LLM 类型层的最后一道，确保即便
+    ///   绕过 read 工具直接构造 part 也能拒绝超大字节。
+    pub fn image_b64(
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, AppError> {
+        let mime = mime_type.into();
+        let mime_lower = mime.to_ascii_lowercase();
+        if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
+            return Err(AppError::Llm(format!(
+                "image_b64: 不支持的 mime_type {:?}, 仅允许 {:?}",
+                mime, ALLOWED_IMAGE_MIMES
+            )));
+        }
+        let path_ref = path.as_ref();
+        let meta = std::fs::metadata(path_ref).map_err(|e| {
+            AppError::Llm(format!(
+                "image_b64: 无法 stat 路径 {}: {}",
+                path_ref.display(),
+                e
+            ))
+        })?;
+        if meta.len() as usize > IMAGE_MAX_BYTES {
+            return Err(AppError::Llm(format!(
+                "image_b64: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
+                meta.len(),
+                IMAGE_MAX_BYTES
+            )));
+        }
+        let bytes = std::fs::read(path_ref).map_err(|e| {
+            AppError::Llm(format!(
+                "image_b64: 读取 {} 失败: {}",
+                path_ref.display(),
+                e
+            ))
+        })?;
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(Self::InputImage {
+            mime_type: Some(mime),
+            data: Some(data),
+            file_id: None,
+            detail: None,
+        })
+    }
+
+    /// inline 文件 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputFile`。
+    ///
+    /// 与 [`Self::image_b64`] 相同设计契约：metadata 预检 → 读字节 → base64 → 装 variant。
+    /// 不做 MIME 白名单校验（PDF / 文本 / 二进制都可走 inline 文件通道）。
+    pub fn file_b64(
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, AppError> {
+        let path_ref = path.as_ref();
+        let meta = std::fs::metadata(path_ref).map_err(|e| {
+            AppError::Llm(format!(
+                "file_b64: 无法 stat 路径 {}: {}",
+                path_ref.display(),
+                e
+            ))
+        })?;
+        if meta.len() as usize > FILE_MAX_BYTES {
+            return Err(AppError::Llm(format!(
+                "file_b64: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
+                meta.len(),
+                FILE_MAX_BYTES
+            )));
+        }
+        let bytes = std::fs::read(path_ref).map_err(|e| {
+            AppError::Llm(format!("file_b64: 读取 {} 失败: {}", path_ref.display(), e))
+        })?;
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(Self::InputFile {
+            filename: Some(filename.into()),
+            mime_type: Some(mime_type.into()),
+            data: Some(data),
+            file_id: None,
+        })
+    }
+
+    /// 已知 file_id 引用图片（B 通道），不做字节大小校验（字节已在 OpenAI 侧）。
+    pub fn image_file_id(file_id: impl Into<String>) -> Result<Self, AppError> {
+        let id = file_id.into();
+        if id.trim().is_empty() {
+            return Err(AppError::Llm("image_file_id: file_id 不能为空".to_string()));
+        }
+        Ok(Self::InputImage {
+            mime_type: None,
+            data: None,
+            file_id: Some(id),
+            detail: None,
+        })
+    }
+
+    /// 已知 file_id 引用文件（B 通道），可附带 filename 提示。
+    pub fn file_file_id(
+        file_id: impl Into<String>,
+        filename: Option<String>,
+    ) -> Result<Self, AppError> {
+        let id = file_id.into();
+        if id.trim().is_empty() {
+            return Err(AppError::Llm("file_file_id: file_id 不能为空".to_string()));
+        }
+        Ok(Self::InputFile {
+            filename,
+            mime_type: None,
+            data: None,
+            file_id: Some(id),
+        })
+    }
+
+    /// `count_tokens` 启发式：按变体折算字符数；inline 字节不进入字符统计。
+    pub(crate) fn estimated_chars(&self) -> usize {
+        match self {
+            Self::InputText { text } => text.chars().count(),
+            Self::InputImage { .. } => IMAGE_CHAR_ESTIMATE,
+            Self::InputFile { .. } => FILE_CHAR_ESTIMATE,
+        }
+    }
+
+    /// 仅 `InputText` 返回文本视图，其它变体返回 `None`（用于角色降级与 system/assistant
+    /// 文本提取）。
+    pub(crate) fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::InputText { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// 是否非文本变体；Completions 入口用它做结构化拒绝。
+    pub fn is_non_text(&self) -> bool {
+        !matches!(self, Self::InputText { .. })
+    }
+}
+
+/// 仅供测试 / 已知 base64 字符串场景：解码并返回字节长度。
+///
+/// PR-RJ-0 重构后生产路径改走 [`ChatMessageContentPart::image_b64`] /
+/// [`ChatMessageContentPart::file_b64`]（直接读盘 + base64），本函数保留
+/// 给单元测试断言「base64 编/解码长度对齐」的边角场景。
+#[allow(dead_code)]
+fn decode_b64_len(data: &str) -> Result<usize, base64::DecodeError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map(|v| v.len())
 }
 
 /// Internal semantic tag for messages that share the same LLM wire role.
@@ -74,6 +323,21 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Text(text.into())),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+            msg_id: None,
+            kind: MessageKind::Normal,
+            timestamp: None,
+        }
+    }
+
+    /// 多模态 user 消息：parts 数组直接驱动 `Responses /v1/responses` 的
+    /// `content` 字段。空 parts 仍允许，wire 层会兜底成单个空 `input_text`。
+    pub fn user_with_parts(parts: Vec<ChatMessageContentPart>) -> Self {
+        Self {
+            role: ChatMessageRole::User,
+            content: Some(ChatMessageContent::Parts(parts)),
             name: None,
             tool_calls: None,
             tool_call_id: None,

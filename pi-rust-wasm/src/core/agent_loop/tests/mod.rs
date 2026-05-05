@@ -28,3 +28,4 @@ mod mocks;
 mod run_basic_test;
 mod steering_followup_test;
 mod submodules_test;
+mod tool_exec_dedup_test;

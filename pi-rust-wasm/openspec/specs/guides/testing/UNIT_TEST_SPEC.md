@@ -13,7 +13,13 @@
 - **执行与验收**：默认跑 `cargo test --lib`（或在多 crate 工作区中跑对应 `cargo test -p <crate> --lib`），让可并发单测并发执行；凡修改进程级全局状态（如 `std::env::set_var`、`std::env::remove_var`、`std::env::set_current_dir`、全局日志初始化以外的单例状态）的用例必须使用 `serial_test` 的同名锁（本仓库统一 `#[serial(env_lock)]`）隔离。若并发失败，先用 `cargo test --lib -- --test-threads=1` 回退定位，再修复隔离问题。
 - **禁止为过 CI 弱化断言**：不得以放宽断言阈值、删除或注释关键 `assert`、仅 `println!` 而不失败、无评审依据滥用 `#[ignore]` 等方式使失败用例「形式上通过」。须修复实现或重写测试，使断言真实反映契约；与 [Constitution.md](../../Constitution.md)「测试不通过则查因改码」及集成/E2E 规范一致。
 
-### 1.2 Mock 策略：外部接口 vs 内部模块
+### 1.2 仓库内临时目录（研发 / 单测 / 本地 harness）
+
+- **运行态 Layer0 落盘**（真实 `pi chat`）：根目录为 `agent_trail_dir`，即 `~/.pi_/agents/<agentId>/` 下 `tool-results/<session_id>/`（见 [context-management.md](../../architecture/context-management.md)、[work-dir-and-data-layout.md](../../architecture/work-dir-and-data-layout.md)）。**不要**把「用户态」大工具结果写到 crate 根目录。
+- **单测里构造 `AgentLoopConfig` 时**：`agent_trail_dir` 要么指向 `tempfile::TempDir` 的绝对路径，要么留空表示**不做文件落盘**（仅走内存内占位/截断语义，见 `AgentLoopConfig` 注释与 `layer0_persist_large_results` 对空 `work_dir` 的短路）。**禁止**依赖 `agent_trail_dir` 默认空串却在 cwd 下误创建 `pi-rust-wasm/tool-results/`（旧实现曾把 `Path::new("")` 当相对根，已修复）。
+- **若必须把 scratch 放在仓库树内**（例如本地复现脚本、不经过 `~/.pi_` 的临时文件）：统一放在 **`pi-rust-wasm/workspace-temp/`** 下按子目录分用途（`temp` 后缀，与产品里的 `agent_definition_dir` / `pi workspace` 等「workspace」语义区分）；该目录已在 `pi-rust-wasm/.gitignore` 中忽略，避免误提交。不要在 `pi-rust-wasm/` 根目录散落 `tool-results/`、`tmp/` 等。
+
+### 1.3 Mock 策略：外部接口 vs 内部模块
 
 | 测试对象 | 策略 | 说明 |
 | :--- | :--- | :--- |
@@ -93,6 +99,7 @@
 
 1. 是否有新增功能？若有，必须附带至少一个测试用例。
 2. 本地是否已按分类流程通过：`cargo test --lib`，以及 `./scripts/run-integration-tests.sh integration`（见 INTEGRATION_TEST_SPEC §7.1 / §7.2）？
+   - **反模式**：把 `cargo test -j 1 --all-targets -- --test-threads=1` 当作默认「全量门禁」——该串行命令仅适合**缩小范围调试 flaky / 对照日志**（亦见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)）。分支侧全量验收口径以 [INTEGRATION_TEST_SPEC.md](INTEGRATION_TEST_SPEC.md) **§7** 为准（尤其 **§7.1** 分类执行与脚本入口、**§7.2** `test-groups.sh` 并发/串行登记、**§7.4** 全量集成测试约定），优先分类脚本而非一刀切串行。
 3. 是否存在被 `#[ignore]` 的遗留问题？
 4. 涉及 Key 的测试是否在本地（或私有 CI）验证通过？
 5. 是否仅保留关键链路日志，清空不必要的 `println!`？

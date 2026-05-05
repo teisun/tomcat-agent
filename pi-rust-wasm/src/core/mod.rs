@@ -16,12 +16,15 @@ pub use confirmation::{
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use llm::system_prompt;
 pub use llm::{
-    ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, OpenAiProvider,
-    SessionTokenUsage, StreamEvent,
+    resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, ChatResponse,
+    ChatResponseChoice, LlmProvider, SessionTokenUsage, StreamEvent, FILE_MAX_BYTES,
+    IMAGE_MAX_BYTES,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
-    PrimitiveOperation, WriteFileResult,
+    PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount,
+    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
+    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
 };
 pub use session::context_metrics;
 pub use session::{

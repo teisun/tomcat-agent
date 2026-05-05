@@ -10,11 +10,14 @@ PI_WASM_INTEGRATION_PARALLEL_TESTS=(
   system_prompt_cwd_priority
   path_command_e2e
   cwd_lazy_prompt_e2e
+  search_files_tests
   session_tests
   plugin_tests
   llm_tests
+  openai_responses_integration_tests
   context_management_tests
   robustness_tests
+  read_tool_tests
 )
 
 PI_WASM_INTEGRATION_SERIAL_TESTS=(
@@ -24,6 +27,7 @@ PI_WASM_INTEGRATION_SERIAL_TESTS=(
   js_api_alignment_tests
   hostcall_tests
   primitives_tools_tests
+  tool_catalog_doc
 )
 
 PI_WASM_WASMEDGE_TESTS=(

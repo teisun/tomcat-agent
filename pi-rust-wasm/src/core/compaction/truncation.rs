@@ -62,6 +62,13 @@ pub fn layer0_persist_large_results(
     let mut persist_chars_freed = 0usize;
     let single_max = config.layer0_single_result_max_chars;
 
+    // `AgentLoopConfig::agent_trail_dir` 为空时表示「不做 Layer0 文件落盘」（见 types.rs 注释）。
+    // 若不短路，`Path::new("")` 与 `tool-results` 拼接会变成**相对路径**，在 `cargo test`
+    // 下落到进程 cwd（常为仓库根 `pi-rust-wasm/tool-results/`，污染 git 工作区）。
+    if work_dir.as_os_str().is_empty() {
+        return (results, persist_chars_freed);
+    }
+
     // Find the start of the last turn (last user/compaction boundary).
     let last_turn_start = state
         .messages

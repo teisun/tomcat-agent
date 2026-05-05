@@ -41,7 +41,7 @@ fn test_audit_store_write_query_export_roundtrip() -> Result<(), Box<dyn std::er
         user_approved: true,
         success: true,
         detail: None,
-        permission_level: None,
+        permission_scope: None,
         grant_type: None,
         grant_trigger: None,
     });

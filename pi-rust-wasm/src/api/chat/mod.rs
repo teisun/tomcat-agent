@@ -8,7 +8,7 @@
 //! ┌─────────────────────────────────────────────────────────────────────────┐
 //! │  ChatContext::from_config(AppConfig)                ① 装配阶段           │
 //! │   ├─ SessionManager      （sessions_dir，transcript JSONL 持久层）       │
-//! │   ├─ Arc<dyn LlmProvider>（OpenAiProvider / ...）                        │
+//! │   ├─ Arc<dyn LlmProvider>（resolve_llm 按 [llm] provider 路由）          │
 //! │   ├─ Arc<dyn PrimitiveExecutor>（DefaultPrimitiveExecutor + 白名单）     │
 //! │   ├─ Arc<dyn ToolRegistry>     （内置 + 插件 tool）                       │
 //! │   ├─ Arc<dyn EventBus>         （DefaultEventBus）                       │
@@ -91,8 +91,8 @@ use crate::infra::{
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
     resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, LlmProvider, OpenAiProvider, PrimitiveExecutor, SessionEntry,
-    SessionManager, Tool, ToolExecutor, ToolRegistry,
+    DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool,
+    ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -103,6 +103,7 @@ mod tests;
 pub mod commands;
 pub mod events;
 pub mod permission;
+pub mod preflight;
 
 use commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
 
@@ -138,6 +139,10 @@ pub struct ChatContext {
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 路径授权 UI
     /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
+    /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 状态。
+    /// 由 `ChatContext` 持有 → 每次 turn 创建 `AgentLoopConfig` 时 `Arc::clone` 注入，
+    /// 多轮 turn 内复用同一张表（实现「同 session 跨 turn dedup」）。
+    pub read_file_state: Arc<crate::core::tools::read_state::ReadFileState>,
 }
 
 impl ChatContext {
@@ -160,7 +165,7 @@ impl ChatContext {
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
-        let llm: Arc<dyn LlmProvider> = Arc::new(OpenAiProvider::new(&config.llm)?);
+        let llm: Arc<dyn LlmProvider> = crate::core::llm::resolve_llm(&config.llm)?;
 
         let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
@@ -260,6 +265,7 @@ impl ChatContext {
             session_grants,
             config_backend,
             gate,
+            read_file_state: Arc::new(crate::core::tools::read_state::ReadFileState::default()),
         })
     }
 
@@ -384,121 +390,7 @@ impl ToolExecutor for NoopToolExecutor {
 // ─── Tool definitions for LLM ─────────────────────────────────────────────────
 
 fn build_tool_definitions() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "读取文件内容",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件路径" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "写入文件内容",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件路径" },
-                        "content": { "type": "string", "description": "文件内容" },
-                        "overwrite": { "type": "boolean", "description": "是否覆盖" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "编辑文件（基于内容匹配替换）",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "文件路径" },
-                        "old_content": { "type": "string", "description": "被替换的原内容" },
-                        "new_content": { "type": "string", "description": "替换后的新内容" }
-                    },
-                    "required": ["path", "old_content", "new_content"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "execute_bash",
-                "description": "执行 bash 命令",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "要执行的命令" },
-                        "cwd": { "type": "string", "description": "工作目录（可选）" }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "list_dir",
-                "description": "列出目录内容",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "目录路径" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "config_get",
-                "description": "读取 pi 配置项的当前值。受键级白名单（CONFIG_READ_ALLOWLIST）+ 硬黑名单（CONFIG_HARDCODED_READ_DENY）双重约束：可读 workspace.* / agent.id / primitive.path_rules / primitive.bash_* / llm.default_model 等非敏感字段；llm.api_key* / llm.api_base / security.* / storage.* 等敏感字段一律拒绝。键 dot 路径不存在时返回 'not_set'。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "配置键的 dot 路径，例：'workspace.workspace_roots' / 'workspace.entries' / 'primitive.path_rules' / 'primitive.bash_forbidden' / 'agent.id'"
-                        }
-                    },
-                    "required": ["key"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "config_set",
-                "description": "向受允许的 pi 配置项追加或修改值，每次调用都会触发用户 confirm（用户看到 unified diff 后 y/N）。受键级白名单（CONFIG_WRITE_ALLOWLIST）+ 硬黑名单（CONFIG_HARDCODED_WRITE_DENY）双重约束。\n\n语义：\n- 数组字段（workspace.workspace_roots / workspace.entries / primitive.path_rules / primitive.bash_forbidden / primitive.bash_approval_required）：value 是单个新元素的 JSON 字符串（追加 only，不替换整数组）。例：value='{\"path\":\"~/myproj\",\"mode\":\"deny\"}'\n- 标量字段（llm.default_model / log.level / context.compaction_turns 等）：value 直接是新值字符串（替换语义）\n- 删除/修改不支持：返回 error 引导用户使用 `pi config edit` 手编 TOML（未来版本将提供 `pi pathrules remove` / `pi workspace remove`）\n\n禁止字段：llm.api_key* / security.* / storage.* / agent.id / agent.workspace / primitive.auto_confirm 等（自我提权防护）。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "description": "配置键的 dot 路径"
-                        },
-                        "value": {
-                            "type": "string",
-                            "description": "标量字段：新值（如 'gpt-4o' / 'debug' / 30）；数组字段：单个元素的 JSON 字符串（如 '\"/Users/x/proj\"' 或 '{\"path\":\"~/.foo\",\"mode\":\"readonly\"}'）"
-                        }
-                    },
-                    "required": ["key", "value"]
-                }
-            }
-        }),
-    ]
+    crate::core::tools::catalog::build_function_definitions()
 }
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────
@@ -649,6 +541,12 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
 
+    let search_tools_printer = rl.create_external_printer().ok().map(|p| {
+        Arc::new(std::sync::Mutex::new(
+            Box::new(p) as Box<dyn rustyline::ExternalPrinter + Send>
+        ))
+    });
+
     // ContextState: 在 loop 外一次性初始化，跨迭代复用
     let context_config = &ctx.config.context;
     let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
@@ -662,8 +560,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         workspace_state,
     );
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
-    let session_stderr_ids =
-        events::stderr::register_chat_session_stderr_listeners(&*ctx.event_bus);
+    let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
+        &*ctx.event_bus,
+        search_tools_printer,
+    );
+    preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
 
     loop {
         let input = match rl.readline("u> ") {
@@ -753,6 +654,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             tool_definitions: build_tool_definitions(),
             context_config: context_config.clone(),
             agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+            read_file_state: ctx.read_file_state.clone(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),

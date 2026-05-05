@@ -99,6 +99,8 @@
 >
 > 字段约定：`关联 TODOS` 字段列出 `docs/TODOS.md` 中对应 `#T-XXX` 条目，便于双向追溯。
 
+**门禁口径（统一引用，避免任务表重复粘贴长命令）**：fmt/clippy、分类集成与全量验收以 [INTEGRATION_TEST_SPEC §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 本地分类执行、§7.2 `test-groups.sh` 分组、§7.4 全量集成）为准；E2E 与场景库覆盖另见同目录下 [E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。integration 二进制分组以 [`scripts/test-groups.sh`](../scripts/test-groups.sh) 为准（交付前更新分组见 [Dispatcher §5](./Dispatcher.md)）。下文「验收」栏宜概括为上述章节 + 必要时一句 PASS 摘要；历史行保留当时的日志结论亦可。
+
 ---
 
 ### T2-P0-014 | permission-source-redesign | 权限授权来源重构
@@ -120,7 +122,7 @@
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test --all-targets`
+- 测试：`cargo test --lib`；集成与分类全量见 [INTEGRATION_TEST_SPEC §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 / §7.2 / §7.4）与 `./scripts/run-integration-tests.sh integration`
 
 ---
 
@@ -292,21 +294,22 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Spike |
 | **分支** | `feature/tool-system-cleanup` |
 | **阻塞点** | — |
-| **关联 TODOS** | `#T-033`、`#T-034`、`#T-035`、`#T-036`、`#T-037`、`#T-039` |
+| **关联 TODOS** | `#T-033`、`#T-034`、`#T-036` |
+| **关联报告** | [builtin-tool-description-cross-agent-study.md](../docs/reports/builtin-tool-description-cross-agent-study.md)（内置工具 catalog / `description` 与文档结构 / T-034 实施顺序）；[multi-agent-openai-api-integration.md](../docs/reports/multi-agent-openai-api-integration.md)（五仓对标；子项「多 LLM + Responses」设计与 pi_agent_rust / openclaw 锚点）；实施边界见 [llm-multiprovider-integration.md](../openspec/specs/architecture/llm-multiprovider-integration.md) **§6.5** |
 
-**目标**：修复 Bash 授权类型错配等具体 bug，补齐工具描述清单，让 Agent 在规划阶段能访问当前目录并执行 pi 子命令。
+**目标**：修复 Bash 授权类型错配等具体 bug，建立内置工具 catalog 单一事实源并补齐工具描述清单；cwd 首次触达授权机制保持现状，补齐 prompt 字面一致性与失败恢复指引。实现 **T-034** 时以关联报告的最终审批决策为设计参考：catalog 统一驱动 `build_tool_definitions()` 与 `docs/tool-catalog.md`，`usage` / `example` 仅作为文档或测试 fixture 产物，不进入运行时 catalog 字段。
 
 **子项**：
-- [ ] **T-033**：Bash 授权类型从 `FS` 纠正为 `Exec`（对应 audit scope 枚举）
-- [ ] **T-034**：补齐全部工具的 `description` / `usage` / `example`；产出 `docs/tool-catalog.md`
-- [ ] **T-035**：默认工具内创建目录，不再 spawn `pi` 子进程
-- [ ] **T-036**：Chat 默认尝试访问当前目录；无权限时申请授权而非静默
-- [ ] **T-037**：规划阶段允许调用 pi 命令（新增 workspace、list plugin 等）
-- [ ] **T-039**：删除操作改归档（moved-to `.trash/`，7 天后清理）
+- [x] **T-033**：Bash 授权类型从 `FS` 纠正为 `Exec`（对应 audit scope 枚举）
+- [x] **T-034**：建立内置工具 catalog 单一事实源；补齐全部工具 `description` / 参数说明 / 权限风险元数据；由 catalog 派生 `build_tool_definitions()` 与 `docs/tool-catalog.md`（`usage` / `example` 仅作为文档或测试 fixture 产物）
+- [x] **T-036**：Chat cwd 首次触达授权机制保持现状；修正 `[a/s/n]` → `[s/w/c]` prompt 字面 bug，未识别选项显式 warning，拒绝后失败回执给出恢复授权指引
+- [x] **search_files 兜底与预检**（PENDING_INTEGRATION）：`search_files` 单工具双实现 + 同一 schema；Tier1 spawn `rg`/`fd`，缺则自动回落 Tier2（`ignore::WalkBuilder` + globset + regex，默认遵守 `.gitignore`）；`pi chat` 入口 `start_search_tools_preflight` 后台探测并按平台（brew / winget / apt / dnf / pacman / Termux pkg）尝试安装，事件经 `WIRE_SEARCH_TOOLS_PREFLIGHT` 推到 stderr，全程不阻塞会话；普通 Android App 不自动装；预检开关由 `[preflight] auto_install_search_tools` + `PI_SKIP_SEARCH_TOOLS_PREFLIGHT` 双开关控制（env > config > 默认）；技术方案见 `openspec/specs/architecture/tools/search_files.md`；计划文档 `~/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`。**macOS Homebrew 预检**：`brew install --force-bottle ripgrep fd`，detached shell 带 `HOMEBREW_NO_BUILD_FROM_SOURCE=1`，禁止源码构建。**与 T2-P1-008 历史口径关系**：T2-P1-008 验收要求"缺 rg/fd 时返回安装指引、不做 fallback"维持不变；本子项作为 T2-P0-005 增量推进（参见计划 §0 口径冲突说明）。
+- [x] **多 LLM 层改造 + OpenAI Responses**：**①** 引入 Provider **注册表**（建议 `src/core/llm/registry.rs`）与 **`resolve_llm(&LlmConfig) -> Arc<dyn LlmProvider>`**，`ChatContext::from_config`（或唯一装配点）按 **`[llm] provider`** 字符串选型，避免在入口手写冗长 `match` 作为长期形态。**②** 新增 **`OpenAiResponsesProvider`**（建议 `src/core/llm/openai_responses.rs`）：`impl LlmProvider`，`POST {base}/v1/responses`；在实现内将 **同一套** `ChatRequest` / `ChatMessage` 翻译为 **`input` + `instructions`（及 tools 映射）**；流式 **SSE / NDJSON** 解析并入现有 **`StreamEvent`**。对标与核对单见 [llm-multiprovider-integration.md §6.5](../openspec/specs/architecture/llm-multiprovider-integration.md)、报告 [§7–§9](../docs/reports/multi-agent-openai-api-integration.md)。
+- [x] **T2-P0-tools-read | read 工具加强**（**2026-05-05 完成**：PR-RA/RB/RF/RJ-0/RJ T3-a/T3-b/T3-c/RM 全量落地；`tests/read_tool_tests.rs` 6 例集成测试登记 `scripts/test-groups.sh` 并发组与 `INTEGRATION_TEST_SPEC §7.2`；`docs/tool-catalog.md` 由 `gen-tool-catalog` 重派生；`User_Stories.md` / `E2E_SCENARIO_LIBRARY.md` 同步；`docs/status/feature-tool-system-cleanup.md` 追加 #4 状态条目；门禁 `fmt`/`clippy --all-targets -D warnings`/`cargo test --lib`（674 PASS）/`read_tool_tests`（6 PASS）/`agent_loop_tests`（11 PASS）：PASS）：仅覆盖 **read** 工具（`write` / `edit` / `bash` 仍归主计划 `~/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md`）。**冻结版技术方案**：[read.md](../openspec/specs/architecture/tools/read.md)；**执行治理与 PR 顺序**：`~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md`（§6–§8：PR-**RA** 命名 `read_file`→`read` 含 transcript fallback → PR-**RB** T1 offset/limit、二进制提示、流式行读、25 MiB 上限 → PR-**RF** T2 行号 / `read_state` / FILE_UNCHANGED stub / session end cleanup → PR-**RJ** T3 多模态 image（及可选 PDF）+ agent_loop 图片 content block → PR-**RM** `hashline=true`；PR-RS 文档已合入不计代码 PR）。**负责人**：Spike；**开发分支**：与本卡一致，在 `feature/tool-system-cleanup` 上按该 plan 迭代即可（不另开 feature 分支）。全量验收见该 plan §8（含 `T2-P0-tools-read` 标记 DONE 且经 Nibbles 复核）。
 
 **依赖**：T2-P0-004（权限模型就位后才好改）
 
@@ -314,12 +317,22 @@
 
 **协作接口**：
 - 消费：`ToolRegistry`、`PermissionGate`
-- 提供：`ToolDescriptor` 增强字段
+- 提供：内置工具 catalog（如 `BuiltinToolCatalogEntry`）、由 catalog 派生的 LLM tool definitions、`docs/tool-catalog.md`
+- **LLM 子项（与 catalog 正交）**：消费 **`LlmConfig`**（含已有 `provider` 字符串与横切字段）；提供 **`resolve_llm` → `Arc<dyn LlmProvider>`**（至少含既有 Completions **`OpenAiProvider`** 与新建 Responses **`OpenAiResponsesProvider`**）
 
 **验收标准**：
-- 6 条 TODO（T-033~T-039）全部闭环
-- `docs/tool-catalog.md` 覆盖所有已注册工具
-- E2E：Bash 授权 / 删除归档 / 规划执行 pi 三个场景通过
+- 3 条当前 TODO（T-033/T-034/T-036）全部闭环
+- `build_tool_definitions()` 不再手写内置工具 schema，改为从 catalog 派生
+- `docs/tool-catalog.md` 覆盖所有已注册内置工具，并按 catalog 生成或与 catalog 保持测试校验一致
+- catalog / `build_tool_definitions()` / `docs/tool-catalog.md` 的工具集合一致，并有测试防漂移
+- E2E：Bash 授权 / cwd 默认访问授权两个场景通过
+- **多 LLM + Responses（开发交付）**：
+  - **注册表**：`provider` 字符串（如 **`openai`** / **`openai-responses`**，具体 id 以 registry 约定为准）映射到 **`Arc<dyn LlmProvider>`**；**`LlmConfig` 不因多 Provider 无限膨胀专属字段**（横切项共用，与 spec **§6.5.2 / `LlmConfig` 小节**一致）。
+  - **`OpenAiResponsesProvider`**：`chat` / `chat_stream` 请求 **`POST …/v1/responses`**；**`ChatMessage` → `input` 条目 + `instructions`（及 tools 形状）** 在 Provider 内完成；**Agent Loop 仍只组一套 `ChatRequest`**（与 spec **§3.2.1** 一致）。
+  - **流式**：流式路径解析 **SSE 与分行 JSON**（若 API 返回其一或二者），输出 **`StreamEvent`**；**`count_tokens`** 行为明确（沿用启发式或文档标注近似）。
+  - **Compaction**：`generate_summary` 仍走 **`LlmProvider::chat`**；若主对话切到 Responses，摘要与主对话协议关系按 spec **§6.5 表格 · Compaction** 处理（同一 trait 注入或另配摘要 provider，避免静默分叉）。
+  - **测试**：至少 **单元 / mock** 覆盖 Responses 路径一轮（非流式或流式其一）；与 Completions 回归并存 **`cargo test`** 全绿。
+  - **文档**：实现与 [llm-multiprovider-integration.md §6.5](../openspec/specs/architecture/llm-multiprovider-integration.md) 核对；[`Architecture.md`](../openspec/specs/Architecture.md) 索引已挂 `llm-multiprovider-integration.md` 则交付前确认未丢链。
 
 ---
 
@@ -564,11 +577,14 @@
 
 **子项**（具体方案由计划阶段确定，先列待研究方向）：
 - [ ] 新增文件类型判定层：按 MIME / magic bytes / UTF-8 可解码性区分 text、image、generic binary；文本文件继续走现有 `read_file`，二进制文件禁止静默 UTF-8 解码
-- [ ] 设计 `ChatRequest` / message content 的 attachment 抽象：支持 image（PNG/JPEG/WebP/GIF 等）与 generic binary（文件名、MIME、大小、bytes/ref），并记录 provider capability
-- [ ] Provider 适配：OpenAI / Anthropic / Qwen 分别映射到各自多模态输入协议；不支持的 provider 返回明确可恢复错误，不回退为乱码文本
+- [x] 设计 `ChatRequest` / message content 的 attachment 抽象：`ChatMessageContentPart` 升级为 `#[serde(tag="type")]` 三态枚举（`InputText` / `InputImage` / `InputFile`），双通道（inline base64 + 已知 file_id）helper 落地于 [`src/core/llm/types.rs`](../src/core/llm/types.rs)
+- [x] Provider 适配（Responses 部分）：[`OpenAiResponsesProvider::part_to_responses_value`](../src/core/llm/openai_responses.rs) 翻译 `input_image` / `input_file`；Completions（`OpenAiProvider`）入口结构化拒绝并指向 `provider=openai-responses`；Anthropic / Qwen 等其它 provider 的多模态映射等对应 Provider 接入再补
 - [ ] TUI / 拖拽路径接入：用户拖入图片或二进制文件时显示附件 chip / 文件摘要，并将附件随下一轮 user message 发送给 LLM
-- [ ] 安全与预算：文件大小上限、MIME allowlist、权限复用 `PermissionGate`，transcript 只落 metadata / content hash，避免把原始二进制直接写进历史
-- [ ] 回归测试：图片附件能被 mock LLM 收到；随机二进制不会触发 UTF-8 `read_file`；不支持多模态的 provider 给出结构化错误
+- [x] 安全与预算（inline 部分）：`IMAGE_MAX_BYTES = 4.5 MB` / `FILE_MAX_BYTES = 25 MB` 硬限 + image MIME 白名单 + base64 合法性校验，落地在 helper 入口；transcript metadata-only 与 `PermissionGate` 复用待 read_file/TUI 路径接入时一并完成
+- [x] 回归测试（wire 部分）：5 个 unit test 覆盖 wire（image_data_url / file_data_url / image_file_id / file_file_id / system 降级）、1 个拒绝测试（Completions）、5 个 helper 失败用例、3 个真 API roundtrip 集成测试（image / pdf / oversize helper）；详见 [`tests/openai_responses_integration_tests.rs`](../tests/openai_responses_integration_tests.rs) 与 [`tests/fixtures/llm_multimodal/`](../tests/fixtures/llm_multimodal/)
+- [ ] **OpenAI Files Upload Manager**（multipart `POST /v1/files` + 生命周期 + reuse cache + 异步 helper）：拆为独立任务 **T2-P0-015 | llm-files-upload-manager**（见下文）
+
+**进度（2026-05-05）**：wire 期已闭环（types + Responses 翻译 + Completions 拒绝 + 单测 + 集成测试 + fixtures）。其余子项（read_file 二进制分流、TUI 拖拽 chip、Files 上传管理）拆出后单独排期，状态保持 `TODO`。
 
 **依赖**：T2-P0-005（工具系统整改后再调整 `read_file`/attachment 边界）；T2-P0-006（LLM content 抽象与 provider 适配先就位）；T2-P0-008（TUI 附件展示与拖拽交互承载）
 
@@ -585,6 +601,48 @@
 - 多模态不支持场景有单测覆盖，行为为结构化失败而非 silent fallback
 
 **说明（来源溯源）**：本任务承接用户反馈——当前用户想把图片 / 二进制文件交给 LLM 时，容易被系统当作 UTF-8 文本文件读取，造成乱码、token 浪费和模型误判。修复重点是「输入语义分流 + LLM 多模态附件通道」，不是扩大 `read_file` 的文本读取能力。
+
+---
+
+### T2-P0-015 | llm-files-upload-manager | OpenAI Files 上传管理
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P0 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/llm-files-upload-manager` |
+| **阻塞点** | — |
+| **关联 TODOS** | 由 T2-P0-012 wire 完成后衍生（多模态 inline → upload 复用通道） |
+
+**目标**：在 `T2-P0-012` 已落地的 inline base64 通道基础上，补齐**两步上传**路径——新增 `OpenAiFilesClient` 走 `/v1/files`，让大文件 / 多轮复用场景能用 `file_id` 引用而非每轮重传 base64。同时管理 OpenAI 侧文件生命周期（默认不过期 1 年，需自管 DELETE），避免账户内堆积。
+
+**子项**（具体方案由计划阶段确定，先列待研究方向）：
+- [ ] 启用 `reqwest` 的 `multipart` feature；新增 `src/core/llm/openai_files.rs`：`OpenAiFilesClient::{upload, get, delete}`，`FilePurpose::{Vision, UserData}`；`is_retriable` 行为与 `OpenAiResponsesProvider` 对齐
+- [ ] `ChatMessageContentPart` 上加异步 helper：`image_upload(client, mime, bytes, filename) -> Result<Self>` / `file_upload(...)`；内部 upload → 拿 file_id → 走 §T2-P0-012 已建好的 `image_file_id` / `file_file_id` 通道
+- [ ] reuse cache：以 `(sha256(bytes), mime, purpose)` 为 key 缓存 `file_id`，避免同一文件重复上传；cache 持久化策略（内存 vs SQLite 落盘）由计划阶段决定
+- [ ] 文件生命周期：提供 `OpenAiFilesClient::list(prefix?, since?)` + `cleanup(predicate)` helper；SessionManager 退出时按策略 GC（可配置 `files.cleanup_on_exit = always | never | older_than:7d`）
+- [ ] 单测：mock multipart endpoint（wiremock 或现有 mock infra），覆盖 upload/get/delete + 429 重试 + 404 当成功 + reuse cache 命中
+- [ ] 集成测试：真 API roundtrip（upload → Responses input_image 用 file_id 引用 → 拿到回复 → DELETE 清理）；env 缺失 `OPENAI_API_KEY` 时按现有 dotenv 约定；纳入并行测试组；测试以 `Drop guard` 保证失败也尝试 DELETE，**不在 OpenAI 账户留垃圾**
+- [ ] 文档：`openspec/specs/architecture/llm-multiprovider-integration.md` 新增 §6.5.4「Files 上传管理」节，写明 inline vs upload 决策树（< 1MB inline / 1–10MB upload+复用 / > 10MB 必须 upload）；`pi.config.toml.example` 注释 API key 需 `files` scope（默认开）；`core/llm/README.md` 补 upload 通道示例
+
+**依赖**：
+- T2-P0-012 子项（wire + types + Responses 翻译）必须先完成——本任务直接复用 `ChatMessageContentPart::image_file_id` / `file_file_id` 通道，不再扩类型层
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`LlmConfig`（`base_url` / `api_key`）、`reqwest::Client`、`AppError`、`SessionManager`（cleanup hook 可选注入）
+- 提供：`OpenAiFilesClient`（不在 lib.rs 顶层 re-export，仅作为 helper 内部 + 高级用户显式 import）；`ChatMessageContentPart::{image_upload, file_upload}` 异步 helper；`files.cleanup_on_exit` 配置项
+
+**验收标准**：
+- 1KB / 10KB / 1MB 三档真文件上传 → 拿 file_id → Responses 引用成功 → DELETE 清理；roundtrip 集成测试稳定通过
+- 同一文件 5 次连续上传只触发 1 次真实 `POST /v1/files`（reuse cache 命中 4 次），mock 测试可断言
+- API key 缺 `files` scope 时给出结构化错误「OpenAI API key 没有 files 权限，请改用 inline 通道（`image_b64`/`file_b64`）」
+- `cleanup_on_exit = older_than:7d` 配置下，会话退出自动 DELETE 7 天前上传文件，留有审计日志
+- OpenAI 账户在所有集成测试运行后**不应有任何残留 file**（最后用 `client.list()` 断言 0 条与本测试 prefix 匹配）
+
+**说明（来源溯源）**：本任务从 `T2-P0-012` 拆出。原 wire 期与 Files 上传管理捆在一起会让任务面翻倍且引入正交的复杂子系统（multipart、生命周期、cache），并且经调研 5 个对标项目（pi_agent_rust / pi-mono / hermes-agent / openclaw / OpenAI cookbook 主路径）**没有**任何一个把 `/v1/files` 用作 chat/responses 输入路径——属自研增量。先单独成卡，避免污染 wire 期审阅与门禁面。**ID 选 015 而非原计划 013**：因 T2-P0-013 已被 `drag-deny-cwd-remediation` 占用、T2-P0-014 已被 `permission-source-redesign` 占用，按编号顺位取下一个空闲号。
 
 ---
 
@@ -825,6 +883,71 @@
 
 ---
 
+### T2-P1-007 | tool-system-deferred-followups | 工具系统后置项
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `TODO` |
+| **负责人** | — |
+| **分支** | `feature/tool-system-deferred-followups` |
+| **阻塞点** | 等 T2-P0-005 当前范围（T-033/T-034/T-036）闭环后再排期 |
+| **关联 TODOS** | `#T-035`、`#T-037`、`#T-039` |
+
+**目标**：承接从 T2-P0-005 移出的低优先级工具系统改进；先补齐 P0 工具语义与 cwd 授权闭环，再评估这些体验 / 产品策略项是否进入实现。
+
+**子项**：
+- [ ] **T-035**：默认工具内创建目录，不再 spawn `pi` 子进程
+- [ ] **T-037**：规划阶段允许调用 pi 命令（新增 workspace、list plugin 等）；实施前需先定义只读白名单与权限边界
+- [ ] **T-039**：删除操作改归档（moved-to `.trash/`，7 天后清理）；实施前需先确认产品策略
+
+**依赖**：T2-P0-005
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`ToolRegistry`、`PermissionGate`、删除类工具实现
+- 提供：后置工具体验改进与删除归档策略
+
+**验收标准**：
+- `#T-035` / `#T-037` / `#T-039` 分别有明确实施或关闭决议
+- 若实施 `#T-037`，规划阶段 pi 命令必须受只读白名单和权限审计约束
+- 若实施 `#T-039`，删除归档行为需有回收期、清理策略与 E2E 覆盖
+
+### T2-P1-008 | search-files-tool | 内置 search_files 只读搜索工具
+
+| 字段 | 内容 |
+|------|------|
+| **优先级** | P1 |
+| **状态** | `PENDING_INTEGRATION` |
+| **负责人** | Spike |
+| **分支** | `feature/tool-system-cleanup` |
+| **阻塞点** | — |
+| **关联 TODOS** | `#T-152` |
+
+**目标**：新增一个单入口 `search_files` 只读工具，支持 `target=content|files`，让 LLM 用受权限管控的结构化工具完成内容搜索与文件名 glob 搜索，减少退回 `execute_bash + grep/find`。
+
+**子项**：
+- [x] **T-152**：新增内置 `search_files` 只读工具（`target=content|files`），对齐 catalog / 权限 / 工具文档生成链路
+
+**依赖**：T2-P0-005、T2-P0-014
+
+**被依赖**：—
+
+**协作接口**：
+- 消费：`ToolRegistry`、`PermissionGate`、`PrimitiveExecutor`
+- 提供：`search_files` 内置工具、catalog 派生的 LLM tool definitions、`docs/tool-catalog.md` 条目
+
+**验收标准**：
+- `search_files` 从 catalog 派生到 LLM tool definitions 与 `docs/tool-catalog.md`
+- `target=content` 支持 `content` / `files_with_matches` / `count` 三类输出
+- `target=files` 支持 glob 文件路径搜索，content-only 字段静默忽略
+- 缺 `rg`/`fd` 时返回安装指引，不做 fallback
+- Read 权限检查与 deny path_rules 生效，结果不泄露 deny 子树
+- fmt / clippy / 单测 / 集成测试通过
+
+---
+
 ## 5. 任务依赖拓扑（概览）
 
 ```mermaid
@@ -844,6 +967,7 @@ flowchart LR
     P005 --> P011
     P006 --> P012
     P008 --> P012
+    P012 --> P015[T2-P0-015<br/>Files 上传管理]
     P007 --> P101[T2-P1-001<br/>Checkpoint]
     P101 --> P102[T2-P1-002<br/>PLAN 增强]
     P008 --> P103[T2-P1-003<br/>提问/应答]
@@ -851,6 +975,7 @@ flowchart LR
     P103 --> P104
     P008 --> P105[T2-P1-005<br/>Feedback]
     P010 --> P106[T2-P1-006<br/>集成测试规范]
+    P005 --> P107[T2-P1-007<br/>工具系统后置项]
 ```
 
 > **注**：T2-P0-003 仍从 T2-P0-001 出依赖边，**实施顺序**固定为**全部其它 T2-P0-00x 之后**（002 内最低、末位调度）。
@@ -861,6 +986,16 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-05 | T2-P0-005 子项 `T2-P0-tools-read \| read 工具加强` DONE | Spike 按 plan `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md` 完成 6 PR：PR-RA 命名 `read_file→read`（含 `OnceLock` 守 transcript fallback warn）/ PR-RB T1 `offset/limit` + 二进制结构化 hint + memchr 单循环抽窗 + `[tools.read].max_bytes` 25 MiB 上限 / PR-RF T2 `cat -n` 行号 + `read_state.rs` (`ReadStamp`/`ReadFileState`/`FILE_UNCHANGED_STUB`) 跨轮 dedup / PR-RJ-0 重构 `ChatMessageContentPart::image_b64`/`file_b64` 为 `(mime,&Path)` / PR-RJ T3-a `ReadResult` 4 态枚举 / T3-b PNG/JPEG/GIF/WebP/PDF magic 路由 + metadata 阶段 `IMAGE_MAX_BYTES`/`FILE_MAX_BYTES` 预检 / T3-c `tool_exec` 返回 `(String,bool,Vec<ChatMessageContentPart>)` + `tool_dispatcher` 把 image/file part 注入下一条 user message / PR-RM `hashline:bool` xxh32 行级短指纹（与 `line_numbers` 互斥并优先）。新增 `tests/read_tool_tests.rs` 6 例集成测试登记并发组；`docs/tool-catalog.md` 由 `gen-tool-catalog` 重派生；`User_Stories.md` / `E2E_SCENARIO_LIBRARY.md`（E2E-CLI-021/021a–e）/ `docs/status/feature-tool-system-cleanup.md`（追加 #4）/ `INTEGRATION_TEST_SPEC §7.2` 同步。门禁：`fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `read_tool_tests`（6 PASS）/ `agent_loop_tests`（11 PASS）：PASS。 |
+| 2026-05-05 | T2-P0-005 DOING→PENDING_INTEGRATION（多 LLM + Responses） | 本分支 tip：`resolve_llm` + `OpenAiResponsesProvider`（`/v1/responses`），默认 `openai-responses`；单测与 `openai_responses_integration_tests`（需 `OPENAI_API_KEY`）、`test-groups.sh` 登记；spec / README / 示例配置同步。门禁 `fmt` / `clippy -D warnings` / `lib` / `./scripts/run-integration-tests.sh integration` PASS，待集成复核与 push。 |
+| 2026-05-05 | T2-P0-005 PENDING_INTEGRATION → DOING | Spike 承接子项「多 LLM 层改造 + OpenAI Responses」，按 plan `~/.cursor/plans/llm-multiprovider-and-responses_d469e7f0.plan.md` 在当前分支 `feature/tool-system-cleanup`（origin ahead 6 commits）继续开发。决策：默认 `[llm] provider = "openai-responses"`（D3）；本子项 commits 与已有 6 个 ahead commits 一并延后到本子项完成再交集成。 |
+| 2026-05-05 | T2-P0-012 wire 期落档 + 新增 T2-P0-015 | 多模态 wire 期（plan `llm-multimodal-parts-wire_9933d5fc`）实施完成：`ChatMessageContentPart` 升级为 `#[serde(tag="type")]` 三态枚举（`InputText` / `InputImage` / `InputFile`）+ inline base64 / 已知 file_id 双通道 helper；`OpenAiResponsesProvider::part_to_responses_value` 翻译 `input_image` / `input_file`；`OpenAiProvider` 入口结构化拒绝并把诊断指向 `provider=openai-responses`；新增 5 单测（wire）+ 1 单测（拒绝）+ 5 helper 失败用例 + 3 集成测试（image describe / pdf summarize / oversize helper）+ fixtures `tests/fixtures/llm_multimodal/`；T2-P0-012 子项 4 项 `[x]` 勾选，剩余 3 项（read_file 二进制分流 / TUI 拖拽 chip / **Files 上传管理**）状态保持 `TODO`。**Files 上传管理** 拆出至新任务 **T2-P0-015 \| llm-files-upload-manager**（plan 原拟用 013 号但已被占用，顺位取 015）；§5 拓扑增加 `T2-P0-012 → T2-P0-015` 边。架构 spec `llm-multiprovider-integration.md` §1.3 / §2.1 / §6.5.3 / §6.6 同步；`core/llm/README.md` 新增「多模态 parts」小节。 |
+| 2026-05-05 | T2-P0-005 子项 + 关联报告 + 验收 | 在 **T-033 / T-034 / T-036 / search_files** 之后新增子项；关联报告含 multi-agent 报告 + **llm-multiprovider-integration §6.5**。同日将子项从「文档对标」改为 **开发任务**：**Provider 注册表 + `resolve_llm` + `OpenAiResponsesProvider`（`/v1/responses`）**；**验收标准**改为工程交付清单（注册表、`ChatRequest` 单套、流失真、Compaction、测试、文档核对）。 |
+| 2026-05-02 | T2-P1-008 DOING→PENDING_INTEGRATION | Spike 在当前分支完成 `search_files` 内置只读工具：① catalog 新增 `search_files`，派生 LLM tool definitions 与 `docs/tool-catalog.md`；② `PrimitiveExecutor` 新增 `search_files`，默认执行器 spawn 系统 `rg`/`fd`（无 fallback，缺失返回安装指引），支持 `target=content|files`、分页、`files_with_matches/content/count` 输出；③ `tool_exec` 接入 JSON Result Schema，system prompt 引导优先使用 `search_files` 而非 bash grep/find；④ 新增 `tests/search_files_tests.rs` 覆盖分页、deny 过滤、glob、content/count、缺二进制与 head_limit 边界。门禁：`cargo fmt --check && cargo clippy --all-targets -- -D warnings` 通过，`cargo test -j 1 -- --test-threads=1` 全绿。 |
+| 2026-05-02 | T2-P0-005 DOING→PENDING_INTEGRATION | Spike 完成 `feature/tool-system-cleanup`：①权限 gate 语义 `PermissionLevel` → `PermissionScope`，审计字段 `permission_level` → `permission_scope`，Bash audit 新增断言确保 `bash` / `bash_approval` 且无 `fs_*`；②新增 `src/core/tools/catalog.rs` 作为内置工具单一事实源，派生 `build_tool_definitions()`、`CoreIdentitySection` 与 `docs/tool-catalog.md`，补 `gen-tool-catalog` 与漂移测试；③cwd lazy prompt 修 `[a/s/n]` → `[s/w/c]`，未识别选项显式 warning，拒绝后失败回执给出 `pi workspace add <cwd>` 恢复路径。门禁 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test -j 1 -- --test-threads=1` 全绿（`.integration_test_output.log`，`EXIT_CODE=0`）。 |
+| 2026-05-02 | T2-P0-005 TODO→DOING | Spike 认领 `tool-system-cleanup`：依赖 T2-P0-004 已 DONE（含 4/27 主体与 4/28 hotfix 集成）；负责人 → Spike，状态 → `DOING`，建议分支 `feature/tool-system-cleanup`。下一步按 Dispatcher §3–§4 读取 specs 与关联报告 [`builtin-tool-description-cross-agent-study.md`](../docs/reports/builtin-tool-description-cross-agent-study.md)，输出开发计划交用户确认后再进入开发。 |
+| 2026-05-02 | T2-P0-005 关联实现参考报告 + T-034 口径细化 | 任务表新增「关联报告」：`docs/reports/builtin-tool-description-cross-agent-study.md`（内置工具 catalog、`description` 与文档结构、T-034 实施顺序）；目标段注明 **T-034** 以该报告的最终审批决策为设计参考，并将 T-034 明确为 catalog 单一事实源、`build_tool_definitions()` 派生、`docs/tool-catalog.md` 生成/校验与防漂移测试；`usage` / `example` 仅作为文档或测试 fixture 产物，不进入运行时 catalog 字段。 |
+| 2026-05-02 | T2-P0-005 收窄 + 新增 T2-P1-007 | 根据当前规划与实际实现，将 `tool-system-cleanup` 当前 P0 范围收窄为 `#T-033` / `#T-034` / `#T-036`；`#T-035` / `#T-037` / `#T-039` 从 P0 任务移出，新增 `T2-P1-007 | tool-system-deferred-followups` 承接，等 P0 工具语义与 cwd 授权闭环后再排期。 |
 | 2026-05-02 | T2-P0-013 / T2-P0-014 follow-up（DONE 不变） | Nibbles 将 `feat/path-command` @ `f0ed1b5` `--no-ff` 合并入 develop（merge commit `398e1a6`，无冲突）；新引入 `274fe3d refactor(chat): 重组聊天命令与工具模块`——把路径授权由整行纯路径自动入菜单切换为显式 `/path <绝对路径>` + `/help` 本地命令，并整理 `chat/{commands,events,permission}/` 与 `core/tools/{primitive,config,registry}/` 子模块边界。集成 review 补漏：① `f0ed1b5` 把 `commands/{cmd_path,cmd_help,parse}.rs` 末尾的 `#[cfg(test)] mod tests` 内联块迁到 `commands/tests/`，业务文件回到 L-1（cmd_path 481→304、parse 108→85、cmd_help 45→22）；② `tests/path_command_e2e.rs` 增 `/help` 用户文案契约与 `/path` UsageError 离线 E2E（4/4），与 `E2E_SCENARIO_LIBRARY` E2E-CLI-026 对齐。develop 上复跑 `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo build --release` + `cargo test -j 1`（lib 572 / integration 207 / doc 0、EXIT_CODE=0）+ `cargo test -j 1 --test '*'`（207 passed）全绿；详见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部集成块 |
 | 2026-05-01 | T2-P0-013 / T2-P0-014 PENDING_INTEGRATION→DONE | Nibbles：`feature/permission-source-redesign` @ `30ecf02` `--no-ff` 合并入 develop（merge `623e94c`，线性包含 `fix/gate-root-remediation`、`fix/drag-deny-cwd-remediation` 祖先提交）；develop 上 `cargo fmt --check`、`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test -j 1` 全量与 `--test '*'` 绿灯；详见 [`docs/status/develop.md`](../docs/status/develop.md) 顶部集成块 |
 | 2026-05-01 | 新增 T2-P0-013 | 将 `~/.cursor/plans/drag-deny-cwd-remediation_8b74f52d.plan.md` 登记为 P0 follow-up 任务：覆盖拖拽纯路径语义收敛、drag cancel 只写 transcript、bash assignment deny 预检、cwd / agent_definition_dir / agent_trail_dir 命名迁移、删除 legacy whitelist 配置面、补单测/E2E/文档同步；状态 `TODO`，建议分支 `fix/drag-deny-cwd-remediation`。 |

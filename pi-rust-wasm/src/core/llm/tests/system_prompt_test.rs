@@ -3,11 +3,15 @@ use super::super::system_prompt::*;
 #[test]
 fn build_system_prompt_contains_tools_and_workspace() {
     let prompt = build_system_prompt("/home/user/workspace");
-    assert!(prompt.contains("read_file"));
+    assert!(prompt.contains("read"));
+    assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("write_file"));
     assert!(prompt.contains("edit_file"));
     assert!(prompt.contains("execute_bash"));
     assert!(prompt.contains("list_dir"));
+    assert!(prompt.contains("search_files"));
+    assert!(prompt.contains("config_get"));
+    assert!(prompt.contains("config_set"));
     assert!(prompt.contains("/home/user/workspace"));
     assert!(prompt.contains("coding assistant"));
 }
@@ -25,6 +29,15 @@ fn build_system_prompt_contains_anti_hallucination_constraint() {
     assert!(
         prompt.contains("Only claim you can access"),
         "system prompt 应包含防幻觉约束"
+    );
+}
+
+#[test]
+fn build_system_prompt_prefers_search_files_over_bash_search() {
+    let prompt = build_system_prompt("/tmp");
+    assert!(
+        prompt.contains("prefer it over execute_bash with grep/find/ls -R"),
+        "system prompt 应引导模型优先使用 search_files，而不是 bash 搜索"
     );
 }
 
@@ -216,7 +229,8 @@ fn build_system_prompt_with_state_includes_workspace_state() {
     assert!(prompt.contains("/Users/yan/.pi_/workspace-main"));
     assert!(prompt.contains("Agent workspace directory (agent_workspace_dir): /Users/yan/proj"));
     // 默认 4 个 section + 新加的 1 个，仍包含工具说明
-    assert!(prompt.contains("read_file"));
+    assert!(prompt.contains("read"));
+    assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("Current date and time"));
 }
 

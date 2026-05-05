@@ -65,6 +65,7 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "context.compaction_model",
     "context.compaction_max_tokens",
     "log.level",
+    "preflight.auto_install_search_tools",
 ];
 
 /// 读硬黑名单：通配前缀，优先级高于 [`CONFIG_READ_ALLOWLIST`]，即使误列也会被拦。
@@ -87,6 +88,7 @@ const CONFIG_WRITE_ALLOWLIST: &[&str] = &[
     "primitive.bash_forbidden",
     "llm.default_model",
     "log.level",
+    "preflight.auto_install_search_tools",
     "context.compaction_turns",
     "context.keep_recent_turns",
     "context.compaction_max_tokens",
@@ -690,7 +692,7 @@ mod tests {
         std::fs::create_dir_all(&extra).unwrap();
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                agent_definition_dir: dir.path().join("workspace"),
+                agent_definition_dir: dir.path().join("workspace-temp"),
                 workspace_roots: vec![],
                 agent_trail_readonly_dirs: vec![],
                 user_path_rules: vec![PathRule::new(
@@ -770,7 +772,7 @@ mod tests {
         let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
         let gate = DefaultPermissionGate::new(
             GateConfig {
-                agent_definition_dir: dir.path().join("workspace"),
+                agent_definition_dir: dir.path().join("workspace-temp"),
                 workspace_roots: vec![],
                 agent_trail_readonly_dirs: vec![],
                 user_path_rules: vec![],

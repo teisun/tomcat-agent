@@ -29,7 +29,8 @@
 - [ ] `/path` 路径授权命中 deny 或用户选择 cancel 时，本地命令不得发送给 LLM，也不写入 `[drag-cancel]` 合成 note；`/help` 可显示当前本地命令列表
 - [ ] deny / readonly `path_rules` 在同一会话内热生效：`[r]`、`[d]` 或 `config_set primitive.path_rules` 写入后，后续 read/write/edit/bash 立即按新规则拦截或降级，不需重启
 - [ ] cwd 首次触达授权与 `workspace.workspace_roots` 扩大授权前必须先做 deny 预检；命中 deny 时不得展示“永久允许/本次允许”等扩大授权选项
-- [ ] `read_file` 读取二进制或非 UTF-8 文件时返回明确、产品化错误提示，不把乱码注入上下文；图片/二进制多模态输入由后续附件通道承接
+- [ ] `read` 工具（PR-RA：从 `read_file` 重命名）支持 `offset`/`limit` 分页 + `[tools.read].max_bytes`（默认 25 MiB，metadata 阶段判定）+ `cat -n` 行号渲染（默认 `line_numbers=true`）+ `hashline` 行级 `xxh32` 短指纹（默认 `false`，与 `line_numbers` 互斥并优先），重复 read 命中 mtime/size/window 廉价指纹时返回 `FILE_UNCHANGED` stub 短路占用
+- [ ] `read` 工具读取**二进制 / 非 UTF-8** 文件返回结构化错误（含首字节十六进制提示），不把乱码注入上下文；命中 PNG/JPEG/GIF/WebP/PDF MIME 时改走 `ReadResult::Image`/`Pdf` 路径，由 wire 翻译层在下一条 user 消息注入 `input_image`/`input_file` parts（≤ `IMAGE_MAX_BYTES` / `FILE_MAX_BYTES`，超限在 metadata 阶段拒绝）
 - [ ] LLM 必须把 `agent_workspace_dir` 视为“当前目录 / 这个项目 / 相对路径”的唯一来源；`agent_definition_dir`（`workspace-<agentId>/`）和 `agent_trail_dir`（`agents/<agentId>/`）不得替代用户工作目录
 - [ ] 单条大工具结果按 Layer 0 落盘到 `agent_trail_dir/tool-results/{session_id}/` 并在上下文中留下 preview；`agent_definition_dir` 仅是 agent 行为定义工作区，不承载运行态 tool-results
 

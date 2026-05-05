@@ -28,7 +28,7 @@ use super::path_rule::PathRule;
 use super::session_grants::{SessionGrants, SessionPathRules};
 use super::types::{
     path_starts_with, EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode,
-    PermissionDecision, PermissionLevel,
+    PermissionDecision, PermissionScope,
 };
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
@@ -219,7 +219,7 @@ impl PermissionGate for DefaultPermissionGate {
                             GrantType::PathRuleReadOnly,
                             GrantTrigger::PathRulesConfig,
                         ),
-                        level: PermissionLevel::Read,
+                        scope: PermissionScope::Read,
                     });
                 }
             }
@@ -233,7 +233,7 @@ impl PermissionGate for DefaultPermissionGate {
                     &self.agent_definition_dir,
                     &self.workspace_roots,
                 ),
-                level: level_for_op(op),
+                scope: scope_for_op(op),
             });
         }
 
@@ -245,7 +245,7 @@ impl PermissionGate for DefaultPermissionGate {
                 .unwrap_or(GrantTrigger::UserConfirm);
             return Ok(PermissionDecision::Allow {
                 grant: GrantTrace::new(GrantType::SessionScope, trigger),
-                level: level_for_op(op),
+                scope: scope_for_op(op),
             });
         }
 
@@ -253,7 +253,7 @@ impl PermissionGate for DefaultPermissionGate {
         if matches!(op, PrimitiveOperation::Read) && self.in_agent_readonly_set(&target) {
             return Ok(PermissionDecision::Allow {
                 grant: GrantTrace::new(GrantType::AgentTrailDir, GrantTrigger::BuiltinDefault),
-                level: PermissionLevel::Read,
+                scope: PermissionScope::Read,
             });
         }
 
@@ -261,7 +261,7 @@ impl PermissionGate for DefaultPermissionGate {
         if self.auto_confirm {
             return Ok(PermissionDecision::Allow {
                 grant: GrantTrace::new(GrantType::SessionScope, GrantTrigger::AutoConfirmFlag),
-                level: level_for_op(op),
+                scope: scope_for_op(op),
             });
         }
         let suggested_root = target
@@ -293,7 +293,7 @@ impl PermissionGate for DefaultPermissionGate {
                             GrantType::BashPolicy,
                             GrantTrigger::AutoConfirmFlag,
                         ),
-                        level: PermissionLevel::BashApproval,
+                        scope: PermissionScope::BashApproval,
                     });
                 }
                 return Ok(PermissionDecision::NeedConfirm {
@@ -306,7 +306,7 @@ impl PermissionGate for DefaultPermissionGate {
         // 默认：bash 命令本身不强制 confirm（路径检查由调用方在 parse 后逐一调用 `check`）。
         Ok(PermissionDecision::Allow {
             grant: GrantTrace::new(GrantType::BashPolicy, GrantTrigger::BashRegexConfig),
-            level: PermissionLevel::Bash,
+            scope: PermissionScope::Bash,
         })
     }
 
@@ -346,11 +346,11 @@ impl PermissionGate for DefaultPermissionGate {
 // 辅助
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn level_for_op(op: PrimitiveOperation) -> PermissionLevel {
+fn scope_for_op(op: PrimitiveOperation) -> PermissionScope {
     match op {
-        PrimitiveOperation::Read => PermissionLevel::Read,
-        PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionLevel::Write,
-        PrimitiveOperation::Bash => PermissionLevel::Bash,
+        PrimitiveOperation::Read => PermissionScope::Read,
+        PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionScope::Write,
+        PrimitiveOperation::Bash => PermissionScope::Bash,
     }
 }
 

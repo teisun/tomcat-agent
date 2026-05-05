@@ -123,6 +123,32 @@ pub(super) struct FoldEntriesOutcome {
     pub pending_preheat: Option<CompactionResult>,
 }
 
+/// PR-RA：检测 transcript 中遗留的 `read_file` 工具名（旧名）。
+///
+/// 仅 **`tracing::warn!` 一次**（按 process 去重）；**不**重写为 `read`，**不**重定向执行。
+/// 旧对话历史保留原 wire；新一轮 LLM 调用 `read_file` 会走 `tool_exec` 的 unknown 分支。
+fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    for tc in tool_calls {
+        let name = tc
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        if name == "read_file"
+            && WARNED
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                tool = "read_file",
+                "legacy tool name: read_file → read (no redirect; transcript replay only)"
+            );
+        }
+    }
+}
+
 fn chat_message_from_entry(
     me: &crate::core::session::transcript::MessageEntry,
 ) -> Option<ChatMessage> {
@@ -146,6 +172,10 @@ fn chat_message_from_entry(
         .get("tool_calls")
         .and_then(|v| v.as_array())
         .map(|arr| arr.to_vec());
+
+    if let Some(ref arr) = tool_calls {
+        warn_if_legacy_tool_name(arr);
+    }
 
     let tool_call_id = me
         .message

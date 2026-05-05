@@ -6,7 +6,7 @@
 use std::path::Path;
 
 /// 从 crate 根目录加载 .env，便于本地有 key 时跑测试。
-pub(super) fn load_dotenv() {
+pub(crate) fn load_dotenv() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
     let _ = dotenvy::from_path(path);
 }

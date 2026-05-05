@@ -14,6 +14,85 @@ use std::path::PathBuf;
 use super::super::*;
 use super::mocks::temp_sessions_dir;
 use crate::core::compaction::preheat::Preheat;
+use crate::core::llm::{ChatMessage, ChatMessageContentPart};
+
+const TINY_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+/// PR-RJ-0：把 inline base64 fixture 解码后写到 tempfile，给新签名
+/// `image_b64(mime, &Path)` / `file_b64(filename, mime, &Path)` 用。
+fn write_b64_tempfile(b64: &str) -> tempfile::NamedTempFile {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .unwrap();
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut f, &bytes).unwrap();
+    f
+}
+
+#[test]
+fn estimate_msg_chars_user_with_parts_counts_multimodal_weights() {
+    let png = write_b64_tempfile(TINY_PNG_B64);
+    let pdf = write_b64_tempfile("UERG");
+    let m = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("hello"),
+        ChatMessageContentPart::image_b64("image/png", png.path()).expect("png"),
+        ChatMessageContentPart::file_b64("x.pdf", "application/pdf", pdf.path()).expect("pdf"),
+    ]);
+    let n = estimate_msg_chars(&m);
+    assert_eq!(n, "hello".len() + 3600 + 8000);
+}
+
+/// 纯 `InputText` parts 字符数等于各 part 文本 `chars().count()` 之和。
+///
+/// 数字来源：[`ChatMessageContentPart::estimated_chars`](crate::core::llm::types)
+/// 对 `InputText` 走 `text.chars().count()`。
+#[test]
+fn estimate_msg_chars_text_only_returns_string_len() {
+    let m = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("hello"),
+        ChatMessageContentPart::text(" world"),
+    ]);
+    assert_eq!(estimate_msg_chars(&m), "hello".len() + " world".len());
+}
+
+/// 含 `InputImage` part → 至少累计一份 IMAGE_CHAR_ESTIMATE = 3600。
+///
+/// 数字来源：`crate::core::llm::types` 顶部 `IMAGE_CHAR_ESTIMATE` 常量。
+#[test]
+fn estimate_msg_chars_with_image_part_uses_image_estimate() {
+    let png = write_b64_tempfile(TINY_PNG_B64);
+    let m = ChatMessage::user_with_parts(vec![ChatMessageContentPart::image_b64(
+        "image/png",
+        png.path(),
+    )
+    .expect("png")]);
+    let n = estimate_msg_chars(&m);
+    assert!(
+        n >= 3600,
+        "image part should contribute >= IMAGE_CHAR_ESTIMATE (3600), got {n}"
+    );
+}
+
+/// 含 `InputFile` part → 至少累计一份 FILE_CHAR_ESTIMATE = 8000。
+///
+/// 数字来源：`crate::core::llm::types` 顶部 `FILE_CHAR_ESTIMATE` 常量。
+#[test]
+fn estimate_msg_chars_with_file_part_uses_file_estimate() {
+    let pdf = write_b64_tempfile("UERG");
+    let m = ChatMessage::user_with_parts(vec![ChatMessageContentPart::file_b64(
+        "x.pdf",
+        "application/pdf",
+        pdf.path(),
+    )
+    .expect("pdf")]);
+    let n = estimate_msg_chars(&m);
+    assert!(
+        n >= 8000,
+        "file part should contribute >= FILE_CHAR_ESTIMATE (8000), got {n}"
+    );
+}
 
 #[test]
 fn test_estimated_token_count_uses_api_usage_when_present() {

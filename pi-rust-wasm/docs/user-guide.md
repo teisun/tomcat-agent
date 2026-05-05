@@ -192,7 +192,7 @@ level = "info"
 file_enabled = true
 
 [llm]
-provider = "openai"
+provider = "openai-responses"
 api_key_env = "OPENAI_API_KEY"
 default_model = "gpt-5.2"
 ...
@@ -234,6 +234,29 @@ pi config set log.file_enabled true
 ```
 
 值类型自动推断：整数、布尔（`true`/`false`）、字符串。修改后程序会对新配置做合法性校验。
+
+### 启动预检与搜索工具安装
+
+进入 `pi chat` 后，pi 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装并通过 CLI/TUI 事件提示开始、成功或失败；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。
+
+如需关闭后台安装尝试，可在配置中设置：
+
+```toml
+[preflight]
+auto_install_search_tools = false
+```
+
+也可以通过配置命令修改：
+
+```bash
+pi config set preflight.auto_install_search_tools false
+```
+
+CI 或一次性运行可用环境变量覆盖：
+
+```bash
+PI_WASM__PREFLIGHT__AUTO_INSTALL_SEARCH_TOOLS=false pi chat
+```
 
 ### 用编辑器打开配置
 
@@ -308,7 +331,7 @@ pi session delete agent:main:main
 
 ## 5. 工作区管理
 
-pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 默认可写的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `workspace_roots`），**所有 agent 共用同一份列表**。启动 `pi chat` 时的当前目录不会自动加入该列表；需要访问当前项目时，可用 `pi workspace add --cwd`、对话中的 cwd lazy prompt 或 `/path <路径>` 授权命令显式加入。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.workspace_roots` 或 `primitive.path_rules`。
+pi 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 默认可写的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.pi_/pi.config.toml` 的 `[workspace]` 表（字段 `workspace_roots`），**所有 agent 共用同一份列表**。启动 `pi chat` 时的当前目录不会自动加入该列表；需要访问当前项目时，可用 `pi workspace add --cwd`、对话中的 cwd lazy prompt 或 `/path <路径>` 授权命令显式加入。cwd lazy prompt 使用 `[s]` 本次会话允许、`[w]` 写入 `workspace_roots`、`[c]` 取消；输错选项会提示可选项并按取消处理，不会静默吞掉。若取消后工具再次因当前目录未授权失败，错误会提示下次触达 cwd 可重新选择 `[s]/[w]/[c]`，也可执行 `pi workspace add <路径>` 永久授权。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.workspace_roots` 或 `primitive.path_rules`。
 
 ### 添加工作区
 

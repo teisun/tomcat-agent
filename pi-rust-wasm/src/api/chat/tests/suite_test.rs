@@ -17,7 +17,8 @@ fn build_tool_definitions_contains_all_primitives() {
         .iter()
         .filter_map(|d| d["function"]["name"].as_str().map(String::from))
         .collect();
-    assert!(names.contains(&"read_file".to_string()));
+    assert!(names.contains(&"read".to_string()));
+    assert!(!names.contains(&"read_file".to_string()));
     assert!(names.contains(&"write_file".to_string()));
     assert!(names.contains(&"edit_file".to_string()));
     assert!(names.contains(&"execute_bash".to_string()));
@@ -48,7 +49,7 @@ fn chat_message_assistant_with_tool_calls_has_tool_calls() {
         "id": "call_1",
         "type": "function",
         "function": {
-            "name": "read_file",
+            "name": "read",
             "arguments": r#"{"path":"/tmp/x"}"#
         }
     })];
@@ -56,7 +57,7 @@ fn chat_message_assistant_with_tool_calls_has_tool_calls() {
     assert!(msg.tool_calls.is_some());
     let tc_val = msg.tool_calls.as_ref().unwrap();
     assert_eq!(tc_val.len(), 1);
-    assert_eq!(tc_val[0]["function"]["name"], "read_file");
+    assert_eq!(tc_val[0]["function"]["name"], "read");
 }
 
 #[test]
@@ -160,13 +161,13 @@ fn interrupt_persists_transcript_hard_ack() {
     let tc_json = vec![serde_json::json!({
         "id": "call_1",
         "type": "function",
-        "function": { "name": "read_file", "arguments": r#"{"path":"/x"}"# }
+        "function": { "name": "read", "arguments": r#"{"path":"/x"}"# }
     })];
     let partial = AgentRunResult {
         final_text: "thinking about foo...".to_string(),
         new_messages: vec![
             ChatMessage::assistant_with_tool_calls(Some("thinking about foo..."), tc_json),
-            ChatMessage::tool("call_1", "result_of_read_file"),
+            ChatMessage::tool("call_1", "result_of_read"),
         ],
     };
 

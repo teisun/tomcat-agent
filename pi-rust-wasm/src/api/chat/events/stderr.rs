@@ -1,12 +1,20 @@
 //! CLI 会话级 stderr 事件监听：`readline` 等待期间 Layer1 仍可能 emit，须在整段 `chat_loop` 内保持注册。
+//!
+//! `search_tools` 事件优先走 [`rustyline::ExternalPrinter`]，以便在 `readline("u> ")` 阻塞期间把 `[tools]`
+//! 插在输入行上方；无 TTY / 创建失败时回退 `eprintln!`。
 
 use std::io::{self, Write as IoWrite};
+use std::sync::{Arc, Mutex};
 
+use rustyline::ExternalPrinter;
+
+use crate::api::chat::preflight;
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::{wire, EventBus};
 
 pub(crate) struct ChatSessionStderrListenerIds {
     metrics: EventListenerId,
+    search_tools: EventListenerId,
     l1_start: EventListenerId,
     l1_end: EventListenerId,
     l1_err: EventListenerId,
@@ -18,6 +26,7 @@ pub(crate) struct ChatSessionStderrListenerIds {
 
 pub(crate) fn register_chat_session_stderr_listeners(
     bus: &dyn EventBus,
+    search_tools_printer: Option<Arc<Mutex<Box<dyn ExternalPrinter + Send>>>>,
 ) -> ChatSessionStderrListenerIds {
     let metrics = bus.on(
         wire::WIRE_CONTEXT_METRICS_UPDATE,
@@ -79,6 +88,93 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 "\x1b[90m[ctx] {} tok | {:.1}% | compact x{} | saved {} tok | persisted {}{}\x1b[0m",
                 tokens, ratio_pct, compactions, saved, persisted_display, en_suffix
             );
+            let _ = io::stderr().flush();
+            Ok(())
+        }),
+    );
+    let printer = search_tools_printer;
+    let search_tools = bus.on(
+        wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
+        Box::new(move |evt: EventContext| {
+            let status = evt
+                .payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("update");
+            let message = evt
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let extra = evt.payload.get("extra");
+            let stderr_chars = extra
+                .and_then(|e| e.get("stderr"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            tracing::debug!(
+                target: preflight::TRACE_TARGET,
+                status = %status,
+                message_len = message.len(),
+                extra_stderr_chars = stderr_chars,
+                has_log_path = extra.and_then(|e| e.get("logPath")).is_some(),
+                "search_tools_preflight stderr listener"
+            );
+            let color = if status == "failed" {
+                "\x1b[33m"
+            } else {
+                "\x1b[90m"
+            };
+            let mut block = format!("\n{}[tools] {}\x1b[0m", color, message);
+            if status == "failed" {
+                if let Some(ex) = extra {
+                    if let Some(s) = ex.get("stderr").and_then(|v| v.as_str()) {
+                        if !s.is_empty() {
+                            block.push_str(&format!(
+                                "\n\x1b[90m[tools] {}\x1b[0m",
+                                preflight::trim_for_event(s)
+                            ));
+                        }
+                    }
+                    if let Some(e) = ex.get("error").and_then(|v| v.as_str()) {
+                        if !e.is_empty() {
+                            block.push_str(&format!(
+                                "\n\x1b[90m[tools] {}\x1b[0m",
+                                preflight::trim_for_event(e)
+                            ));
+                        }
+                    }
+                    if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
+                        if !p.is_empty() {
+                            block.push_str(&format!("\n\x1b[90m[tools] log: {}\x1b[0m", p));
+                        }
+                    }
+                }
+                block.push_str(
+                    "\n\x1b[90m[tools] search_files 仍可用进程内搜索（Tier2）| Tier2 in-process search still available\x1b[0m",
+                );
+            } else if status == "detached" || status == "already_installing" {
+                if let Some(ex) = extra {
+                    if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
+                        if !p.is_empty() {
+                            block.push_str(&format!("\n\x1b[90m[tools] log: {}\x1b[0m", p));
+                            block.push_str(&format!(
+                                "\n\x1b[90m[tools] 可查看进度：tail -f {}\x1b[0m",
+                                p
+                            ));
+                        }
+                    }
+                }
+            }
+            block.push('\n');
+            if let Some(ref pr) = printer {
+                if let Ok(mut guard) = pr.lock() {
+                    if guard.print(block.clone()).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            eprint!("{}", block);
             let _ = io::stderr().flush();
             Ok(())
         }),
@@ -268,6 +364,7 @@ pub(crate) fn register_chat_session_stderr_listeners(
 
     ChatSessionStderrListenerIds {
         metrics,
+        search_tools,
         l1_start,
         l1_end,
         l1_err,
@@ -283,6 +380,7 @@ pub(crate) fn unregister_chat_session_stderr_listeners(
     ids: &ChatSessionStderrListenerIds,
 ) {
     bus.off(ids.metrics);
+    bus.off(ids.search_tools);
     bus.off(ids.l1_start);
     bus.off(ids.l1_end);
     bus.off(ids.l1_err);

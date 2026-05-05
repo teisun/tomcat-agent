@@ -1,0 +1,4 @@
+# Harness / local test output (do not commit)
+tool-results/
+# Repo-local scratch: 约定见 openspec/specs/guides/testing/UNIT_TEST_SPEC.md §1.2
+workspace-temp/

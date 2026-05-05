@@ -6,7 +6,7 @@ use crate::core::permission::gate::{DefaultPermissionGate, GateConfig};
 use crate::core::permission::path_rule::PathRule;
 use crate::core::permission::session_grants::SessionGrants;
 use crate::core::permission::types::{
-    GrantTrigger, GrantType, PathRuleMode, PermissionDecision, PermissionLevel,
+    GrantTrigger, GrantType, PathRuleMode, PermissionDecision, PermissionScope,
 };
 use crate::core::permission::PermissionGate;
 use crate::core::tools::primitive::PrimitiveOperation;
@@ -49,10 +49,10 @@ fn allow_inside_agent_definition_dir() {
         )
         .unwrap();
     match dec {
-        PermissionDecision::Allow { grant, level } => {
+        PermissionDecision::Allow { grant, scope } => {
             assert_eq!(grant.grant_type, GrantType::AgentDefinitionDir);
             assert_eq!(grant.trigger, GrantTrigger::BuiltinDefault);
-            assert_eq!(level, PermissionLevel::Write);
+            assert_eq!(scope, PermissionScope::Write);
         }
         other => panic!("unexpected: {:?}", other),
     }
@@ -172,7 +172,7 @@ fn agent_trail_dir_read_only_allow() {
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow { grant, level: PermissionLevel::Read }
+        PermissionDecision::Allow { grant, scope: PermissionScope::Read }
             if grant.grant_type == GrantType::AgentTrailDir
                 && grant.trigger == GrantTrigger::BuiltinDefault
     ));
@@ -437,7 +437,7 @@ fn pr9_agent_trail_dir_read_allow_write_deny() {
         .unwrap();
     assert!(matches!(
         read_dec,
-        PermissionDecision::Allow { grant, level: PermissionLevel::Read }
+        PermissionDecision::Allow { grant, scope: PermissionScope::Read }
             if grant.grant_type == GrantType::AgentTrailDir
                 && grant.trigger == GrantTrigger::BuiltinDefault
     ));
@@ -471,7 +471,7 @@ fn workspace_roots_grant_writable() {
         .unwrap();
     assert!(matches!(
         dec,
-        PermissionDecision::Allow { grant, level: PermissionLevel::Write }
+        PermissionDecision::Allow { grant, scope: PermissionScope::Write }
             if grant.grant_type == GrantType::AgentWorkspaceRoot
                 && grant.trigger == GrantTrigger::WorkspaceRootsConfig
     ));

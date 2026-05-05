@@ -8,10 +8,9 @@
 //!   非 LLM 错误一律不重试。
 //! - `chat_real_request_response_print`：`#[ignore]` 真实 API 冒烟。
 
-use super::super::openai::OpenAiProvider;
-use super::super::provider::LlmProvider;
-use super::super::types::{ChatMessage, ChatRequest};
-use super::mocks::load_dotenv;
+use super::*;
+use crate::core::llm::tests::mocks::load_dotenv;
+use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
@@ -76,6 +75,42 @@ fn is_retriable_returns_false_for_non_llm_error() {
     assert!(!OpenAiProvider::is_retriable(&AppError::Config(
         "config error".to_string()
     )));
+}
+
+/// Completions 路径不支持多模态附件：含非 InputText part 的 messages 必须立刻拒绝，
+/// 错误文案必须把诊断指向 `provider=openai-responses` 以引导调用方迁移；并且要
+/// **不可重试**（不被 `is_retriable` 命中），避免在 Agent Loop 的退避循环里反复打。
+#[test]
+fn parts_with_image_returns_structured_error() {
+    use base64::Engine;
+    const TINY_PNG_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(TINY_PNG_B64)
+        .unwrap();
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    std::io::Write::write_all(&mut tmp, &bytes).unwrap();
+    let part = ChatMessageContentPart::image_b64("image/png", tmp.path()).expect("image_b64 ok");
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("see this:"),
+        part,
+    ])];
+    let err = reject_multimodal_parts(&msgs).expect_err("应拒绝多模态 part");
+    let s = err.to_string();
+    assert!(
+        s.contains("openai-responses"),
+        "错误文案应引导改用 openai-responses，实际: {}",
+        s
+    );
+    assert!(
+        s.contains("不支持多模态附件"),
+        "错误文案应说明拒绝原因，实际: {}",
+        s
+    );
+    assert!(
+        !OpenAiProvider::is_retriable(&err),
+        "多模态拒绝错误必须是不可重试的"
+    );
 }
 
 /// 依赖 OPENAI_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。

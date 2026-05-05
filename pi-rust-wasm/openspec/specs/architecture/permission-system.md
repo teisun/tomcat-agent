@@ -53,7 +53,7 @@ Layer 3: 未授权
 
 ```rust
 pub enum PermissionDecision {
-    Allow { grant: GrantTrace, level: PermissionLevel },
+    Allow { grant: GrantTrace, scope: PermissionScope },
     NeedConfirm { reason: String, suggested_root: Option<PathBuf> },
     Deny { reason: String },
 }
@@ -124,7 +124,7 @@ pub struct EffectiveRoots {
 - `[d]` 持久写入 `path_rules deny`。
 - `[c]` 取消，不向 LLM 发送本地命令内容。
 
-`CwdLazyPrompt` 只在首次工具调用触达 `agent_workspace_dir` 子树且 cwd 尚未授权时触发，按键同样是 `[s]/[w]/[c]`。选择 `[c]` 会拒绝当前操作并将 cwd lazy 标记为 dismissed；之后同会话内 cwd 子树路径走普通三选项菜单，不再弹 cwd lazy prompt。
+`CwdLazyPrompt` 只在首次工具调用触达 `agent_workspace_dir` 子树且 cwd 尚未授权时触发，按键同样是 `[s]/[w]/[c]`。选择 `[c]` 会拒绝当前操作并将 cwd lazy 标记为 dismissed；之后同会话内 cwd 子树路径走普通三选项菜单，不再弹 cwd lazy prompt。用户输入未识别选项时会打印 warning 并按取消处理，不会静默吞掉输入；工具失败回执会提示用户下次触达 cwd 时可重新选择 `[s]/[w]/[c]`，或执行 `pi workspace add <cwd>` 永久授权。
 
 bash approval 命中时不展示路径持久化选项，只展示命令、命中规则和 `[y/N]`。同意后记录 `GrantType::BashPolicy` + `GrantTrigger::UserConfirm`。
 
@@ -144,7 +144,7 @@ Bash 执行分两部分：
 
 `PrimitiveAuditEntry` 当前字段：
 
-- `permission_level: Option<String>`
+- `permission_scope: Option<String>`
 - `grant_type: Option<String>`
 - `grant_trigger: Option<String>`
 

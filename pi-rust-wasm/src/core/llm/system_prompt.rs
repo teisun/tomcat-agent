@@ -80,16 +80,14 @@ impl SystemPromptSection for CoreIdentitySection {
         "core_identity"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        r#"You are an expert coding assistant operating inside pi-wasm, a coding agent runtime.
+        format!(
+            "You are an expert coding assistant operating inside pi-wasm, a coding agent runtime.
 You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
-- read_file: Read file contents
-- write_file: Create or overwrite files
-- edit_file: Make surgical edits to files (find exact text and replace with new text)
-- execute_bash: Execute bash commands
-- list_dir: List directory contents"#
-            .to_string()
+{}",
+            crate::core::tools::catalog::render_core_identity_tool_lines()
+        )
     }
     fn priority(&self) -> u32 {
         10
@@ -105,7 +103,8 @@ impl SystemPromptSection for ToolInstructionsSection {
     fn render(&self, _context: &WorkspaceContext) -> String {
         r#"Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
-- Use read_file to examine files before editing
+- Use read to examine files before editing
+- Use search_files to find file paths or content; prefer it over execute_bash with grep/find/ls -R
 - Use edit_file for precise changes (old_content must match the file exactly, including whitespace)
 - Use write_file only for new files or complete rewrites
 - Be concise in your responses
@@ -125,7 +124,7 @@ impl SystemPromptSection for PagedReadingSection {
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
         r#"- When you see "[Tool result persisted: <path>]", the original content has been saved to disk.
-  You can read specific portions using read_file with offset and limit parameters.
+  You can read specific portions using read with offset and limit parameters.
   Do NOT re-read the entire file; read only the relevant sections you need."#
             .to_string()
     }

@@ -16,12 +16,12 @@ fn agent_event_serialize_type_snake_case() {
 fn agent_event_tool_execution_uses_pi_mono_wire_names() {
     let start = AgentEvent::ToolExecutionStart {
         tool_call_id: "c1".into(),
-        tool_name: "read_file".into(),
+        tool_name: "read".into(),
         args: serde_json::json!({}),
     };
     let end = AgentEvent::ToolExecutionEnd {
         tool_call_id: "c1".into(),
-        tool_name: "read_file".into(),
+        tool_name: "read".into(),
         result: ToolOutput(serde_json::json!({})),
         is_error: false,
     };
@@ -42,12 +42,12 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
 #[test]
 fn extension_event_tool_hooks_use_tool_call_tool_result_wire_names() {
     let call = ExtensionEvent::ToolCall {
-        tool_name: "read_file".into(),
+        tool_name: "read".into(),
         tool_call_id: "c1".into(),
         input: serde_json::json!({}),
     };
     let result = ExtensionEvent::ToolResult {
-        tool_name: "read_file".into(),
+        tool_name: "read".into(),
         tool_call_id: "c1".into(),
         input: serde_json::json!({}),
         content: vec![ContentBlock(serde_json::json!({"text": "ok"}))],
@@ -88,7 +88,7 @@ fn agent_event_compaction_error_serializes() {
 #[test]
 fn agent_event_tool_result_truncated_serializes() {
     let e = AgentEvent::ToolResultTruncated {
-        tool_name: "read_file".to_string(),
+        tool_name: "read".to_string(),
         original_chars: 600_000,
         truncated_chars: 400_000,
     };

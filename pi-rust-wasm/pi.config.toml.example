@@ -13,11 +13,22 @@ level = "info"
 file_enabled = false
 
 # ------------------------------------------------------------------------------
+# [preflight] 启动前后台预检：增强工具依赖自动安装
+# ------------------------------------------------------------------------------
+[preflight]
+# auto_install_search_tools：进入 `pi chat` 后后台探测 search_files 的 Tier1 依赖
+#（rg/fd）。缺失时按平台尝试安装；不阻塞聊天。CI 可用
+# PI_WASM__PREFLIGHT__AUTO_INSTALL_SEARCH_TOOLS=false 覆盖。
+auto_install_search_tools = true
+
+# ------------------------------------------------------------------------------
 # [llm] LLM 接入配置：大模型 API 地址、密钥、限流与重试
 # ------------------------------------------------------------------------------
 [llm]
-# provider：当前使用的 LLM 提供商标识。如 "openai"，用于选择对应适配器。
-provider = "openai"
+# provider：注册表 id（src/core/llm/registry.rs）。
+# - "openai-responses"（默认）：Responses API → POST …/v1/responses
+# - "openai"：Chat Completions → POST …/v1/chat/completions
+provider = "openai-responses"
 # api_base：API 根地址。不填则默认 https://api.openai.com；自建或代理时可改写。
 # api_key_env：存 API Key 的环境变量名。不填则默认从 OPENAI_API_KEY 读取。
 default_model = "gpt-5.2"
@@ -103,3 +114,16 @@ bash_approval_required = []
 bash_forbidden = []
 # auto_confirm：是否对符合条件（如白名单内）的操作自动确认，无需用户逐条确认。
 auto_confirm = false
+
+# ------------------------------------------------------------------------------
+# [tools] 内建工具的可调上限（每个工具一个子表）
+# 仅放「磁盘 / 安全」相关硬上限；可由 LLM 通过 schema 字段控制的开关
+# （如 read 的 line_numbers / hashline）不进 config，避免管理员侧静默改变模型上下文。
+# ------------------------------------------------------------------------------
+[tools.read]
+# max_bytes：read 工具文本路径的「裸读字节上限」。
+# - 仅当 LLM 未传 offset/limit 时在 metadata 阶段判定，超限直接拒绝；
+# - 传入 offset/limit（即明确分窗）时不触发该上限——大日志可被分窗读。
+# - 默认 25 MiB（介于 cc-fork 256 KiB 与 pi_agent_rust 100 MiB 之间）。
+# - 图片 / PDF inline 上限（4.5 MiB / 25 MiB）由 core::llm::types 集中管理，不进 config。
+max_bytes = 26214400  # 25 * 1024 * 1024

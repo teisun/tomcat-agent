@@ -48,6 +48,8 @@ use crate::core::tools::primitive::PrimitiveOperation;
 use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
 use crate::infra::error::AppError;
 
+pub const CWD_PROMPT_CHOICES: &str = "[s/w/c]";
+
 /// 用户在 cwd 范围级提示中的选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CwdPromptChoice {
@@ -61,7 +63,7 @@ pub enum CwdPromptChoice {
 
 /// 解析用户输入字符串为 [`CwdPromptChoice`]。
 ///
-/// 返回 `None` 表示无法识别 —— 调用方默认按 `[c] Cancel` 处理。
+/// 返回 `None` 表示无法识别 —— 调用方会提示并按 `[c] Cancel` 处理。
 pub fn parse_choice(s: &str) -> Option<CwdPromptChoice> {
     match s.trim().to_lowercase().as_str() {
         "s" | "session" | "once" => Some(CwdPromptChoice::AllowSessionOnly),
@@ -69,6 +71,13 @@ pub fn parse_choice(s: &str) -> Option<CwdPromptChoice> {
         "c" | "cancel" | "n" | "no" | "skip" => Some(CwdPromptChoice::Cancel),
         _ => None,
     }
+}
+
+pub fn unrecognized_choice_message(input: &str) -> String {
+    format!(
+        "未识别的选项「{}」；可选项为 [s] / [w] / [c]，本次按取消处理。",
+        input.trim()
+    )
 }
 
 /// 判断 `target` 是否在 `cwd` 子树内（含 cwd 自身）。
@@ -111,8 +120,8 @@ fn extract_target_from_preview(preview: &str) -> Option<PathBuf> {
     None
 }
 
-/// TTY 场景下从 stdin 读一行并解析为 [`CwdPromptChoice`]；EOF/IO 错误返回 `None`。
-fn read_choice_from_stdin() -> Option<CwdPromptChoice> {
+/// TTY 场景下从 stdin 读一行；EOF/IO 错误返回 `None`。
+fn read_choice_from_stdin() -> Option<String> {
     let stdin = io::stdin();
     if !stdin.is_terminal() {
         return None;
@@ -121,7 +130,7 @@ fn read_choice_from_stdin() -> Option<CwdPromptChoice> {
     if stdin.lock().read_line(&mut line).is_err() {
         return None;
     }
-    parse_choice(&line)
+    Some(line)
 }
 
 /// `UserConfirmationProvider` 装饰器：仅当 op 目标 `target` ∈ `cwd` 子树
@@ -173,7 +182,7 @@ impl CwdLazyPrompt {
         eprintln!("[s] 本次会话期间允许访问");
         eprintln!("[w] 以后也允许访问（写入配置 ~/.pi_/pi.config.toml workspace.workspace_roots）");
         eprintln!("[c] 取消本次操作（后续按文件粒度逐次询问）");
-        eprint!("选择 [a/s/n]: ");
+        eprint!("选择 {}: ", CWD_PROMPT_CHOICES);
         let _ = io::stderr().flush();
     }
 }
@@ -242,7 +251,11 @@ impl UserConfirmationProvider for CwdLazyPrompt {
         }
 
         self.render_prompt(&target);
-        let choice = read_choice_from_stdin().unwrap_or(CwdPromptChoice::Cancel);
+        let raw_choice = read_choice_from_stdin().unwrap_or_default();
+        let choice = parse_choice(&raw_choice).unwrap_or_else(|| {
+            eprintln!("{}", unrecognized_choice_message(&raw_choice));
+            CwdPromptChoice::Cancel
+        });
         self.apply_choice(choice, operation, preview, plugin_id, suggested_root)
             .await
     }

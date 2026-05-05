@@ -23,6 +23,8 @@
 #### 2.2 LLM接入模块
 基于适配器模式实现统一LLM Provider Trait，兼容所有OpenAI格式大模型，支持流式响应、限流重试、Token统计、会话级模型配置，是插件调用LLM能力的唯一可信入口。
 
+多厂商 / OpenAI Completions 与 Responses 边界、**`LlmProvider` 与 `OpenAiProvider` 当前能力、配置与演进约束** 的冻结说明见 [**多 LLM / OpenAI 对接技术方案**](llm-multiprovider-integration.md)；与 pi-mono、hermes、openclaw、pi_agent_rust 的完整横向对照见 [`docs/reports/multi-agent-openai-api-integration.md`](../../../docs/reports/multi-agent-openai-api-integration.md)。
+
 #### 2.3 4原语执行引擎
 宿主可信核心，完全对齐pi-mono的4原语规范，是插件访问系统资源的唯一通道，所有操作必须经过权限校验、用户确认、审计日志记录。
 - **Read原语**：文件读取、目录列表、元数据获取，路径白名单校验，大文件分块读取

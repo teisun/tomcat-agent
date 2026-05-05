@@ -32,13 +32,13 @@ async fn run_aborts_returns_interrupted() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("c1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
         }),
         Ok(StreamEvent::ToolCallDelta {
             index: 1,
             id: Some("c2".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -93,13 +93,13 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("c1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
         }),
         Ok(StreamEvent::ToolCallDelta {
             index: 1,
             id: Some("c2".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {

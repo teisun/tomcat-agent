@@ -68,7 +68,7 @@
 
 > 触发条件：本计划「关键改动」涉及 ≥ 2 个 `*.rs` 业务源文件。仅 1 个文件可写"不适用：仅改 X"。
 >
-> 硬约束遵循 [DOCUMENTATION_GUIDE §2B.4](../../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md)：①箭头标方向；②每个 `*.rs` 都有节点；③同时挂独立 `tests.rs`；④图后 2–3 句"阅读顺序建议"；⑤实施期偏离须就地标注 `【未改签名 / 依赖 Drop】` 等显式标签。
+> 硬约束遵循 [ARCHITECTURE_SPEC §3「文件职责总览（One-Glance Map）」](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)：①箭头标方向；②每个 `*.rs` 都有节点；③节点内列函数 / 类型 / 关键行为；④同时挂独立 `tests.rs`；⑤图后 2–3 句"阅读顺序建议"；⑥实施期偏离须就地标注 `【未改签名 / 依赖 Drop】` 等显式标签。
 
 ```text
  ┌────────────────────────────────┐

@@ -348,18 +348,18 @@ async fn test_agent_loop_abort_stops_after_current_tool() -> Result<(), Box<dyn 
     common::setup_logging();
     let _span = info_span!("test_agent_loop_abort_stops_after_current_tool").entered();
 
-    info!("Arrange: LLM 返回两个 read_file 工具调用，SlowMockPrimitive 增加延迟触发 abort");
+    info!("Arrange: LLM 返回两个 read 工具调用，SlowMockPrimitive 增加延迟触发 abort");
     let streams = vec![vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("c1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
         }),
         Ok(StreamEvent::ToolCallDelta {
             index: 1,
             id: Some("c2".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -742,18 +742,20 @@ async fn test_agent_loop_steering_skips_remaining_tools() -> Result<(), Box<dyn 
     common::setup_logging();
     let _span = info_span!("test_agent_loop_steering_skips_remaining_tools").entered();
 
-    info!("Arrange: LLM 返回两个 read_file 工具调用；预注入 steer(\"redirect\")；第二轮 LLM 返回 steered");
+    info!(
+        "Arrange: LLM 返回两个 read 工具调用；预注入 steer(\"redirect\")；第二轮 LLM 返回 steered"
+    );
     let stream_tools = vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("c1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
         }),
         Ok(StreamEvent::ToolCallDelta {
             index: 1,
             id: Some("c2".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -797,8 +799,8 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
     common::setup_logging();
     let _span = info_span!("test_context_metrics_update_event_published").entered();
 
-    info!("Arrange: LLM 返回 read_file 工具调用 → 纯文本结束；AgentLoop 注入 ContextState");
-    let stream_tool = tool_call_stream("cm1", "read_file", r#"{"path":"/tmp/cm"}"#);
+    info!("Arrange: LLM 返回 read 工具调用 → 纯文本结束；AgentLoop 注入 ContextState");
+    let stream_tool = tool_call_stream("cm1", "read", r#"{"path":"/tmp/cm"}"#);
     let stream_text = text_stream("metrics done");
     let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_text]));
     let primitive = Arc::new(MockPrimitive);

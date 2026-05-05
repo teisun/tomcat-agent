@@ -74,14 +74,14 @@ async fn run_retries_on_429_then_succeeds() {
     assert_eq!(result.final_text, "OK");
 }
 
-/// 工具循环：第 1 次 LLM 返回 read_file tool call，第 2 次返回纯文本；断言 final_text 含第 2 次文本。
+/// 工具循环：第 1 次 LLM 返回 read tool call，第 2 次返回纯文本；断言 final_text 含第 2 次文本。
 #[tokio::test]
 async fn run_tool_loop_calls_tool_then_returns_text() {
     let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
             id: Some("call_1".to_string()),
-            name: Some("read_file".to_string()),
+            name: Some("read".to_string()),
             arguments_delta: Some(r#"{"path":"/tmp/x"}"#.to_string()),
         }),
         Ok(StreamEvent::FinishReason {
