@@ -378,8 +378,8 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
+| **状态** | `PENDING_INTEGRATION`（2026-05-05 Tom：Phase1/2/3 + INTEGRATION §1–§4 全量门禁通过；NoPriorRead 待与 T2-P0-016 同 PR 锁同节奏） |
+| **负责人** | Tom |
 | **分支** | `feature/strengthen-four-core-tools`（建议；与 **T2-P0-016** 同主计划、可分 PR 串行合入 `develop`） |
 | **阻塞点** | — |
 | **关联 TODOS** | —（落地后按 PR 拆 `#T-xxx`） |

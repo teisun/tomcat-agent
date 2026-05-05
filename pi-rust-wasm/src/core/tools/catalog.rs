@@ -93,7 +93,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "write_file",
         label: "Write File",
-        description: "Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit_file for small surgical changes to existing files. Writes may require user confirmation and are audited.\n",
+        description: "Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit for small surgical changes to existing files. Writes may require user confirmation and are audited.\n",
         display_summary: Some("Create or overwrite a file after permission checks."),
         parameters: write_file_parameters,
         scope: PermissionScope::Write,
@@ -103,16 +103,28 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         search_hint: Some("write create overwrite file"),
     },
     BuiltinToolCatalogEntry {
-        name: "edit_file",
+        name: "edit",
         label: "Edit File",
-        description: "Edit an existing text file by replacing exact old_content with new_content. Use this for focused changes after reading the file. old_content must match exactly, including whitespace; if the same snippet appears more than once, include more surrounding context before calling the tool. Do not use it for binary files or broad rewrites.\n",
-        display_summary: Some("Replace exact text in an existing file."),
-        parameters: edit_file_parameters,
+        description: "Edit an existing text file by replacing exact text. Two input shapes are accepted:\n  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }\n  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write_file for new files or complete rewrites; do not use edit on binary files.\n",
+        display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
+        parameters: edit_parameters,
         scope: PermissionScope::Write,
         category: None,
         read_only: false,
         destructive: true,
         search_hint: Some("edit replace old_content new_content file"),
+    },
+    BuiltinToolCatalogEntry {
+        name: "hashline_edit",
+        label: "Hashline Edit File",
+        description: "Edit a file with line-number + 2-char content hash anchors (use AFTER `read` with `hashline: true`). Each edit segment carries an anchor `<line>#<2char>` that must match the file's CURRENT content; if the line content changed, the anchor stops matching and the call returns HashMismatch (no write). Operations: `replace` (anchor → lines), `insert` (insert `lines` BEFORE anchor line), `delete` (anchor[..end] → empty). Use this when sub-string `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. Reads are still required first; the file's read stamp is checked.\n",
+        display_summary: Some("Line-number + content-hash anchored edits (companion to read hashline=true)."),
+        parameters: hashline_edit_parameters,
+        scope: PermissionScope::Write,
+        category: None,
+        read_only: false,
+        destructive: true,
+        search_hint: Some("hashline edit line anchor hash"),
     },
     BuiltinToolCatalogEntry {
         name: "execute_bash",
@@ -129,7 +141,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "list_dir",
         label: "List Directory",
-        description: "List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read or edit_file. It does not recurse; call it on subdirectories as needed instead of guessing paths.\n",
+        description: "List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read or edit. It does not recurse; call it on subdirectories as needed instead of guessing paths.\n",
         display_summary: Some("List immediate entries in a directory."),
         parameters: list_dir_parameters,
         scope: PermissionScope::Read,
@@ -293,15 +305,54 @@ fn write_file_parameters() -> Value {
     )
 }
 
-fn edit_file_parameters() -> Value {
-    object_schema(
-        serde_json::json!({
-            "path": { "type": "string", "description": "Absolute or relative file path to edit." },
-            "old_content": { "type": "string", "description": "Exact existing text to replace; include enough context to make it unique." },
-            "new_content": { "type": "string", "description": "Replacement text." }
-        }),
-        &["path", "old_content", "new_content"],
-    )
+fn edit_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Edit a file. Provide either Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching).",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or relative file path to edit."
+            },
+            "old_content": {
+                "type": "string",
+                "description": "Shape A only: exact existing text to replace; include enough context to make it unique unless `replace_all: true`."
+            },
+            "new_content": {
+                "type": "string",
+                "description": "Shape A only: replacement text."
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Shape A only: replace every occurrence of `old_content` instead of failing on multiple matches. Defaults to false."
+            },
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "description": "Shape B (preferred): list of edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected with Overlap.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_content": {
+                            "type": "string",
+                            "description": "Exact existing text to replace within this segment."
+                        },
+                        "new_content": {
+                            "type": "string",
+                            "description": "Replacement text for this segment."
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every occurrence of `old_content` for this segment. Defaults to false."
+                        }
+                    },
+                    "required": ["old_content", "new_content"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["path"]
+    })
 }
 
 fn execute_bash_parameters() -> Value {
@@ -321,6 +372,49 @@ fn list_dir_parameters() -> Value {
         }),
         &["path"],
     )
+}
+
+fn hashline_edit_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Line-anchored edit. Each segment carries a `<line>#<2char>` anchor (output of `read hashline=true`). Anchors are validated against the file's current hashline before any write; mismatches return HashMismatch.",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or relative file path to edit."
+            },
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "description": "List of line-anchored edit operations applied against the CURRENT file content.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "enum": ["replace", "insert", "delete"],
+                            "description": "Edit operation kind."
+                        },
+                        "pos": {
+                            "type": "string",
+                            "description": "Anchor for the start line, formatted `<1-based-line>#<2char-hash>` (e.g. `42#Ab`). For `insert`, content is inserted BEFORE this line."
+                        },
+                        "end": {
+                            "type": "string",
+                            "description": "Optional anchor for the inclusive end line (only valid for `replace` / `delete`). Defaults to `pos`."
+                        },
+                        "lines": {
+                            "type": "string",
+                            "description": "Replacement / insertion text (must end with a newline if multi-line). Ignored by `delete`."
+                        }
+                    },
+                    "required": ["op", "pos"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["path", "edits"]
+    })
 }
 
 fn search_files_parameters() -> Value {

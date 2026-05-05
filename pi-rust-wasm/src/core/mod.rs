@@ -6,6 +6,7 @@ pub mod agent_loop;
 pub mod compaction;
 pub mod llm;
 pub mod permission;
+pub mod security;
 pub mod session;
 pub mod tools;
 

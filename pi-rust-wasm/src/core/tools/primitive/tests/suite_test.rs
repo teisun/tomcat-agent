@@ -406,3 +406,387 @@ async fn workspace_roots_still_rejects_unlisted_path() {
 
     let _ = std::fs::remove_dir_all(&ws_dir);
 }
+
+// ─── T2-P0-017 PR-D（T1） edit 工具测试矩阵 ──────────────────────────────────
+
+/// 用 `EDIT_REPLACE_ALL_MARKER` 构造一条 LLM 主路径段（无行号、`Replace`）。
+fn edit_seg(old: &str, new: &str, replace_all: bool) -> EditOperation {
+    let encoded = if replace_all {
+        format!(
+            "{}{}",
+            crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER,
+            old
+        )
+    } else {
+        old.to_string()
+    };
+    EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: None,
+        end_line: None,
+        old_content: Some(encoded),
+        new_content: new.to_string(),
+    }
+}
+
+fn temp_edit_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.canonicalize().unwrap()
+}
+
+#[tokio::test]
+async fn edit_replace_all_replaces_every_match() {
+    let dir = temp_edit_dir("pi_wasm_edit_replace_all");
+    let f = dir.join("a.txt");
+    // 多命中 + 多字节 + 尾换行：原文必须保留行尾 `\n`。
+    let body = "TODO 文档\nbody\nTODO 文档\n";
+    std::fs::write(&f, body).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let edits = vec![edit_seg("TODO 文档", "DONE 文档", true)];
+    let res = exec
+        .edit_file(&f.to_string_lossy(), edits, "p1")
+        .await
+        .unwrap();
+    assert!(res.applied);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "DONE 文档\nbody\nDONE 文档\n",
+        "replace_all 必须命中每一处且保留尾换行"
+    );
+    assert!(!dir.join("a.bak").exists(), "成功路径不应残留 .bak");
+}
+
+#[tokio::test]
+async fn edit_multiple_edits_apply_against_original() {
+    // 关键 fixture：第二段 old `B->X` 仅在原始文件中存在；如果实现是链式，
+    // 第一段 `A->B` 改完后会出现两个 `B`（原 `B` + 新 `B`），第二段会变成
+    // Ambiguous（count=2）。本测要求多段都对 `original` 算 → 应成功。
+    let dir = temp_edit_dir("pi_wasm_edit_multi_original");
+    let f = dir.join("b.txt");
+    std::fs::write(&f, "A\nB\nC\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let edits = vec![
+        edit_seg("A", "B", false), // 把 A 改成 B
+        edit_seg("B", "X", false), // 同时把原文里的 B 改成 X
+    ];
+    let res = exec
+        .edit_file(&f.to_string_lossy(), edits, "p1")
+        .await
+        .unwrap();
+    assert!(res.applied);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "B\nX\nC\n",
+        "多段 edit 必须都对 original 算 span，而不是链式"
+    );
+}
+
+#[tokio::test]
+async fn edit_overlap_rejected() {
+    let dir = temp_edit_dir("pi_wasm_edit_overlap");
+    let f = dir.join("c.txt");
+    let original = "abcdef\n";
+    std::fs::write(&f, original).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    // 段1: "abcd" → "X"；段2: "cde" → "Y"。两段相交于 "cd"，必须 Overlap。
+    let edits = vec![edit_seg("abcd", "X", false), edit_seg("cde", "Y", false)];
+    let r = exec.edit_file(&f.to_string_lossy(), edits, "p1").await;
+    assert!(r.is_err(), "重叠段必须拒绝");
+    let msg = r.unwrap_err().to_string();
+    assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        original,
+        "校验失败磁盘必须字节级未变"
+    );
+    assert!(!dir.join("c.bak").exists(), "校验失败必须无 .bak 残留");
+}
+
+#[tokio::test]
+async fn edit_overlap_adjacent_not_rejected() {
+    // 边界相邻（s2 == e1）不算重叠，必须允许。
+    let dir = temp_edit_dir("pi_wasm_edit_adjacent");
+    let f = dir.join("d.txt");
+    std::fs::write(&f, "abcdef").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let edits = vec![edit_seg("abc", "1", false), edit_seg("def", "2", false)];
+    let res = exec
+        .edit_file(&f.to_string_lossy(), edits, "p1")
+        .await
+        .unwrap();
+    assert!(res.applied);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "12");
+}
+
+#[tokio::test]
+async fn edit_validation_failure_restores_or_noop() {
+    // NotFound：磁盘必须未变 + 无 .bak。
+    let dir = temp_edit_dir("pi_wasm_edit_notfound");
+    let f = dir.join("e.txt");
+    let original = "hello\n";
+    std::fs::write(&f, original).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("missing", "x", false)],
+            "p1",
+        )
+        .await;
+    assert!(r.is_err());
+    let msg = r.unwrap_err().to_string();
+    assert!(msg.contains("NotFound"), "错误文案应含 NotFound：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
+    assert!(!dir.join("e.bak").exists());
+
+    // Ambiguous：同样磁盘未变 + 无 .bak。
+    let f2 = dir.join("f.txt");
+    let original2 = "x\nx\n";
+    std::fs::write(&f2, original2).unwrap();
+    let r2 = exec
+        .edit_file(&f2.to_string_lossy(), vec![edit_seg("x", "y", false)], "p1")
+        .await;
+    assert!(r2.is_err());
+    let msg2 = r2.unwrap_err().to_string();
+    assert!(
+        msg2.contains("Ambiguous"),
+        "错误文案应含 Ambiguous：{}",
+        msg2
+    );
+    assert_eq!(std::fs::read_to_string(&f2).unwrap(), original2);
+    assert!(!dir.join("f.bak").exists());
+}
+
+#[tokio::test]
+async fn edit_preserves_trailing_newline() {
+    // 旧实现 `lines().join("\n")` 会吃掉尾换行；本测锁定尾换行保留。
+    let dir = temp_edit_dir("pi_wasm_edit_trailing_lf");
+    let f = dir.join("g.txt");
+    std::fs::write(&f, "line1\nline2\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let res = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("line1", "X", false)],
+            "p1",
+        )
+        .await
+        .unwrap();
+    assert!(res.applied);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "X\nline2\n",
+        "尾换行必须保留"
+    );
+}
+
+#[tokio::test]
+async fn edit_curly_quote_matches_disk_straight_quote() {
+    let dir = temp_edit_dir("pi_wasm_edit_curly");
+    let f = dir.join("q.txt");
+    // 磁盘：直引号；模型：弯引号
+    std::fs::write(&f, "let s = \"hello\";\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("\u{201C}hello\u{201D}", "\"world\"", false)],
+            "p1",
+        )
+        .await
+        .unwrap();
+    assert!(r.applied);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "let s = \"world\";\n",
+        "弯引号 old 应当命中直引号磁盘"
+    );
+}
+
+#[tokio::test]
+async fn edit_desanitize_matches_nbsp_and_zwsp() {
+    // 磁盘有 NBSP + 零宽空格；模型用普通空格 + 删掉零宽。
+    let dir = temp_edit_dir("pi_wasm_edit_desanitize");
+    let f = dir.join("d.txt");
+    let body = "foo\u{00A0}\u{200B}bar\n";
+    std::fs::write(&f, body).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("foo bar", "X Y", false)],
+            "p1",
+        )
+        .await
+        .unwrap();
+    assert!(r.applied);
+    let after = std::fs::read_to_string(&f).unwrap();
+    assert_eq!(after, "X Y\n", "归一化匹配后磁盘应当被改成 X Y\\n");
+}
+
+#[tokio::test]
+async fn edit_preserves_crlf_line_endings() {
+    let dir = temp_edit_dir("pi_wasm_edit_crlf");
+    let f = dir.join("crlf.txt");
+    let body = b"alpha\r\nbeta\r\ngamma\r\n";
+    std::fs::write(&f, body).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            // 模型用 LF；磁盘是 CRLF；管线应当保留 CRLF。
+            vec![edit_seg("beta", "BETA", false)],
+            "p1",
+        )
+        .await
+        .unwrap();
+    assert!(r.applied);
+    let bytes = std::fs::read(&f).unwrap();
+    assert_eq!(
+        bytes, b"alpha\r\nBETA\r\ngamma\r\n",
+        "CRLF 文件改后行尾必须仍是 CRLF"
+    );
+}
+
+#[tokio::test]
+async fn edit_preserves_bom() {
+    let dir = temp_edit_dir("pi_wasm_edit_bom");
+    let f = dir.join("bom.txt");
+    let mut body = vec![0xEF, 0xBB, 0xBF];
+    body.extend_from_slice(b"head\nline2\n");
+    std::fs::write(&f, &body).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("head", "HEAD", false)],
+            "p1",
+        )
+        .await
+        .unwrap();
+    assert!(r.applied);
+    let bytes = std::fs::read(&f).unwrap();
+    assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "BOM 必须仍在文件头");
+    assert_eq!(&bytes[3..], b"HEAD\nline2\n");
+}
+
+#[tokio::test]
+async fn edit_secrets_hit_denied_reverts_to_no_op() {
+    let dir = temp_edit_dir("pi_wasm_edit_secrets_deny");
+    let f = dir.join("s.rs");
+    std::fs::write(&f, "let x = 1;\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        // DenyAll：confirm 返回 false → SecretsRejected
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            // 引入 OpenAI key 模式 → secrets::scan 命中
+            vec![edit_seg(
+                "let x = 1;",
+                "let k = \"sk-ABCDEFGHIJKLMNOPQRSTUV\";",
+                false,
+            )],
+            "p1",
+        )
+        .await;
+    assert!(r.is_err(), "DenyAll confirmation 下应当被拒");
+    let msg = r.unwrap_err().to_string();
+    assert!(
+        msg.contains("SecretsRejected"),
+        "错误文案应含 SecretsRejected：{}",
+        msg
+    );
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "let x = 1;\n",
+        "拒绝时磁盘必须未变"
+    );
+    assert!(!dir.join("s.bak").exists(), "拒绝时不应有 .bak 残留");
+}
+
+#[tokio::test]
+async fn edit_legacy_line_oriented_path_still_works() {
+    // 兼容路径：`Replace` 带 start_line（dispatcher / extension 内部使用）走旧逻辑。
+    let dir = temp_edit_dir("pi_wasm_edit_line_oriented");
+    let f = dir.join("h.txt");
+    std::fs::write(&f, "line1\nline2\nline3").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let edits = vec![EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: Some(2),
+        end_line: Some(2),
+        old_content: Some("line2".to_string()),
+        new_content: "replaced".to_string(),
+    }];
+    let res = exec
+        .edit_file(&f.to_string_lossy(), edits, "p1")
+        .await
+        .unwrap();
+    assert!(res.applied);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "line1\nreplaced\nline3"
+    );
+}

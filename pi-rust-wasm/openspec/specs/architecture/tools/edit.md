@@ -252,6 +252,10 @@ right:
 
 - **`is_partial_view` / `offset` / `limit` 不参与 staleness**：`ReadFileState` 每 path **只保留最新** stamp（`put` 覆盖语义）；这些字段服务 **read dedup** 同窗口短路，**不是**「禁止 edit」的门槛。
 - **允许** `read(path, offset, limit)` 分窗后立刻 `edit`：只要 stamp 仍在且 `mtime`+`size` 未变（与 cc-fork 系「mtime 比对」一致）。
+- **NoPriorRead 与 T2-P0-016 write 同 PR 锁同节奏**（**T2-P0-017 Phase1 决策 4，2026-05-05 落地**）：
+  当前 `tool_exec::check_edit_staleness`「stamp == None」分支**不**单边硬拒，避免 edit 与 write 政策分叉；
+  与 [T2-P0-016 write](../../../../agents/TASK_BOARD_002.md) 落地 NoPriorRead 时**同一 PR**统一打开门禁。
+  门禁打开前模型可以「未读 → 直接 edit」（只要权限允许），但 staleness 仍会拦「读过又被外部改了」的情况。
 
 #### 2.4.4 PR-H（T2）：体验
 

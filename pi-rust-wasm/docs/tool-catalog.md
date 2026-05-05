@@ -61,7 +61,7 @@ Parameters:
 - Destructive: `true`
 - Search hint: `write create overwrite file`
 
-Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit_file for small surgical changes to existing files. Writes may require user confirmation and are audited.
+Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit for small surgical changes to existing files. Writes may require user confirmation and are audited.
 
 Parameters:
 
@@ -89,7 +89,7 @@ Parameters:
 }
 ```
 
-### `edit_file`
+### `edit`
 
 - Label: Edit File
 - Category: `filesystem`
@@ -98,20 +98,120 @@ Parameters:
 - Destructive: `true`
 - Search hint: `edit replace old_content new_content file`
 
-Edit an existing text file by replacing exact old_content with new_content. Use this for focused changes after reading the file. old_content must match exactly, including whitespace; if the same snippet appears more than once, include more surrounding context before calling the tool. Do not use it for binary files or broad rewrites.
+Edit an existing text file by replacing exact text. Two input shapes are accepted:
+  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }
+  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
+When both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write_file for new files or complete rewrites; do not use edit on binary files.
 
 Parameters:
 
 ```json
 {
+  "description": "Edit a file. Provide either Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching).",
   "properties": {
+    "edits": {
+      "description": "Shape B (preferred): list of edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected with Overlap.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "new_content": {
+            "description": "Replacement text for this segment.",
+            "type": "string"
+          },
+          "old_content": {
+            "description": "Exact existing text to replace within this segment.",
+            "type": "string"
+          },
+          "replace_all": {
+            "description": "Replace every occurrence of `old_content` for this segment. Defaults to false.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "old_content",
+          "new_content"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
     "new_content": {
-      "description": "Replacement text.",
+      "description": "Shape A only: replacement text.",
       "type": "string"
     },
     "old_content": {
-      "description": "Exact existing text to replace; include enough context to make it unique.",
+      "description": "Shape A only: exact existing text to replace; include enough context to make it unique unless `replace_all: true`.",
       "type": "string"
+    },
+    "path": {
+      "description": "Absolute or relative file path to edit.",
+      "type": "string"
+    },
+    "replace_all": {
+      "description": "Shape A only: replace every occurrence of `old_content` instead of failing on multiple matches. Defaults to false.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "type": "object"
+}
+```
+
+### `hashline_edit`
+
+- Label: Hashline Edit File
+- Category: `filesystem`
+- Permission scope: `Write`
+- Read only: `false`
+- Destructive: `true`
+- Search hint: `hashline edit line anchor hash`
+
+Edit a file with line-number + 2-char content hash anchors (use AFTER `read` with `hashline: true`). Each edit segment carries an anchor `<line>#<2char>` that must match the file's CURRENT content; if the line content changed, the anchor stops matching and the call returns HashMismatch (no write). Operations: `replace` (anchor → lines), `insert` (insert `lines` BEFORE anchor line), `delete` (anchor[..end] → empty). Use this when sub-string `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. Reads are still required first; the file's read stamp is checked.
+
+Parameters:
+
+```json
+{
+  "description": "Line-anchored edit. Each segment carries a `<line>#<2char>` anchor (output of `read hashline=true`). Anchors are validated against the file's current hashline before any write; mismatches return HashMismatch.",
+  "properties": {
+    "edits": {
+      "description": "List of line-anchored edit operations applied against the CURRENT file content.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "Optional anchor for the inclusive end line (only valid for `replace` / `delete`). Defaults to `pos`.",
+            "type": "string"
+          },
+          "lines": {
+            "description": "Replacement / insertion text (must end with a newline if multi-line). Ignored by `delete`.",
+            "type": "string"
+          },
+          "op": {
+            "description": "Edit operation kind.",
+            "enum": [
+              "replace",
+              "insert",
+              "delete"
+            ],
+            "type": "string"
+          },
+          "pos": {
+            "description": "Anchor for the start line, formatted `<1-based-line>#<2char-hash>` (e.g. `42#Ab`). For `insert`, content is inserted BEFORE this line.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "pos"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "path": {
       "description": "Absolute or relative file path to edit.",
@@ -120,8 +220,7 @@ Parameters:
   },
   "required": [
     "path",
-    "old_content",
-    "new_content"
+    "edits"
   ],
   "type": "object"
 }
@@ -136,7 +235,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `list directory files`
 
-List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read or edit_file. It does not recurse; call it on subdirectories as needed instead of guessing paths.
+List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read or edit. It does not recurse; call it on subdirectories as needed instead of guessing paths.
 
 Parameters:
 

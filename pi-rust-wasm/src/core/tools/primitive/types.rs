@@ -160,6 +160,59 @@ pub enum EditOperationType {
     Delete,
 }
 
+/// 解析后的 hashline_edit 段（T2-P0-017 Phase3 / PR-M）。
+///
+/// `tool_exec` 在调用 `PrimitiveExecutor::hashline_edit` 之前把 JSON
+/// `{ op, pos, end?, lines }` 解析成本结构。算法见 [`crate::core::tools::primitive::executor::hashline_edit`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashlineSegment {
+    pub op: HashlineOp,
+    pub start_line: u64,
+    pub start_hash: String,
+    pub end_line: u64,
+    pub end_hash: String,
+    pub lines: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashlineOp {
+    Replace,
+    Insert,
+    Delete,
+}
+
+impl HashlineSegment {
+    /// 解析 `<line_no>#<2char>` 锚点；非法格式 → 结构化错误。
+    pub fn parse_anchor(s: &str, ctx_idx: usize, field: &str) -> Result<(u64, String), AppError> {
+        let (line_str, hash_str) = s.split_once('#').ok_or_else(|| {
+            AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 锚点格式应为 `<line>#<2char>`，实际 `{}`",
+                ctx_idx, field, s
+            ))
+        })?;
+        let line_no: u64 = line_str.trim().parse().map_err(|_| {
+            AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 行号 `{}` 不是有效正整数",
+                ctx_idx, field, line_str
+            ))
+        })?;
+        if line_no == 0 {
+            return Err(AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 行号必须 ≥ 1",
+                ctx_idx, field
+            )));
+        }
+        let hash = hash_str.trim().to_string();
+        if hash.chars().count() != 2 {
+            return Err(AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 哈希应为 2 字符，实际 `{}`",
+                ctx_idx, field, hash
+            )));
+        }
+        Ok((line_no, hash))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum PrimitiveOperation {
@@ -328,6 +381,21 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError>;
+    /// T2-P0-017 Phase3 / PR-M：行级强一致编辑。**默认实现** 返回 `Unsupported` 错误，
+    /// 让 mock / 简化 executor 不必实现；生产路径由 `DefaultPrimitiveExecutor` 覆盖。
+    ///
+    /// 入参为已解析的 [`crate::core::tools::primitive::executor::hashline_edit::HashlineSegment`]
+    /// 列表（`tool_exec` 入口处解析 JSON）。
+    async fn hashline_edit(
+        &self,
+        _path: &str,
+        _segments: Vec<HashlineSegment>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        Err(AppError::Primitive(
+            "hashline_edit is not implemented by this PrimitiveExecutor".to_string(),
+        ))
+    }
     /// 执行 bash/进程。
     /// - `argv` 为 `None`：`command` 视为完整 shell 命令（经 `sh -c` / `cmd /C`）。
     /// - `argv` 为 `Some`：`command` 为可执行文件名，`argv` 为其参数列表（不经 shell，与 pi-mono `exec(cmd, args)` 对齐）。

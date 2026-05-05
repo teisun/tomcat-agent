@@ -6,7 +6,8 @@ fn build_system_prompt_contains_tools_and_workspace() {
     assert!(prompt.contains("read"));
     assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("write_file"));
-    assert!(prompt.contains("edit_file"));
+    assert!(prompt.contains("edit"));
+    assert!(!prompt.contains("edit_file"));
     assert!(prompt.contains("execute_bash"));
     assert!(prompt.contains("list_dir"));
     assert!(prompt.contains("search_files"));
@@ -231,6 +232,8 @@ fn build_system_prompt_with_state_includes_workspace_state() {
     // 默认 4 个 section + 新加的 1 个，仍包含工具说明
     assert!(prompt.contains("read"));
     assert!(!prompt.contains("read_file"));
+    assert!(prompt.contains("edit"));
+    assert!(!prompt.contains("edit_file"));
     assert!(prompt.contains("Current date and time"));
 }
 

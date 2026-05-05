@@ -210,29 +210,44 @@ pub(super) async fn execute_tool(
                 })
                 .map_err(|e| e.to_string())
         }
-        "edit_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let old_content = args["old_content"].as_str().unwrap_or("");
-            let new_content = args["new_content"].as_str().unwrap_or("");
-            let edits = vec![EditOperation {
-                operation_type: EditOperationType::Replace,
-                start_line: None,
-                end_line: None,
-                old_content: Some(old_content.to_string()),
-                new_content: new_content.to_string(),
-            }];
-            primitive
-                .edit_file(path, edits, AGENT_PLUGIN_ID)
-                .await
-                .map(|r| {
-                    if r.applied {
-                        format!("已编辑: {}", r.path)
-                    } else {
-                        format!("编辑被拒绝: {}", r.path)
+        // T2-P0-017 Phase1（PR-命名 + PR-D）：
+        //   - 短名 `edit`（旧 `edit_file` 走 unknown 分支；transcript warn 在 session/manager/context.rs）
+        //   - oneOf 入参（A: 顶层 old/new；B: edits[]）；同时存在时 `edits` 优先
+        //   - staleness：与 `read` 共用 `ReadFileState`，mtime+size 与 stamp 不一致 → `Stale`
+        //   - 多段语义在 primitive (`write_edit::edit_file_impl`) 中对原文快照一次应用 + 重叠检测
+        //   - `NoPriorRead`（无 stamp 时是否硬拒）与 T2-P0-016 write 同 PR 锁；本 Phase 不单边强拒
+        "edit" => match parse_edit_args(&args) {
+            Err(msg) => Err(msg),
+            Ok((path, edits)) => {
+                // PR-H：`.ipynb` 在 primitive 之前直接拒，避免读盘 / 占位 .bak。
+                if crate::core::tools::edit_normalize::is_unsupported_structured_file(path) {
+                    return (
+                        format!(
+                            "Notebook: `{}` 是 Jupyter 笔记本（.ipynb），edit 不支持；请使用专用 nbformat 工具或先把目标 cell 导出为 .py / .md 再 edit",
+                            path
+                        ),
+                        true,
+                        Vec::new(),
+                    );
+                }
+                if let Some(state) = read_file_state {
+                    if let Err(stale_msg) = check_edit_staleness(state, path) {
+                        return (stale_msg, true, Vec::new());
                     }
-                })
-                .map_err(|e| e.to_string())
-        }
+                }
+                primitive
+                    .edit_file(path, edits, AGENT_PLUGIN_ID)
+                    .await
+                    .map(|r| {
+                        if r.applied {
+                            format!("已编辑: {}", r.path)
+                        } else {
+                            format!("编辑被拒绝: {}", r.path)
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
+        },
         "execute_bash" => {
             let command = args["command"].as_str().unwrap_or("");
             let cwd = args["cwd"].as_str();
@@ -283,6 +298,27 @@ pub(super) async fn execute_tool(
                 })
                 .map_err(|e| e.to_string())
         }
+        "hashline_edit" => match parse_hashline_edit_args(&args) {
+            Err(msg) => Err(msg),
+            Ok((path, segments)) => {
+                if let Some(state) = read_file_state {
+                    if let Err(stale_msg) = check_edit_staleness(state, path) {
+                        return (stale_msg, true, Vec::new());
+                    }
+                }
+                primitive
+                    .hashline_edit(path, segments, AGENT_PLUGIN_ID)
+                    .await
+                    .map(|r| {
+                        if r.applied {
+                            format!("已 hashline 编辑: {}", r.path)
+                        } else {
+                            format!("hashline 编辑被拒绝: {}", r.path)
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
+        },
         "search_files" => {
             let search_args: SearchFilesArgs = match serde_json::from_value(args.clone()) {
                 Ok(args) => args,
@@ -356,6 +392,202 @@ fn parse_optional_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
         return None;
     }
     v.as_u64()
+}
+
+/// T2-P0-017 PR-D：`edit` 工具入参解析（oneOf 形状 A / B）。
+///
+/// **形状 A**：`{ path, old_content, new_content, replace_all? }`
+/// **形状 B**：`{ path, edits: [{ old_content, new_content, replace_all? }, ...] }`
+///
+/// 当同时存在 `edits` 与顶层 `old_content`/`new_content` 时 **`edits` 优先**
+/// （与 [edit.md §4.2](../../../openspec/specs/architecture/tools/edit.md) 对齐）。
+///
+/// 解析后转换为 [`EditOperation`]（仅 `Replace`、无行号；行号 API 仅留给 dispatcher
+/// extension 内部使用）。`replace_all` 通过 `new_content` 字段携带的 magic 前缀
+/// 传递给 primitive 是不可行的——这里只做形状归一化，多段语义在
+/// [`crate::core::tools::primitive::executor::write_edit::edit_file_impl`] 落地。
+///
+/// **决策（lock，详见计划文件 Phase1 决策 6）**：保留 `PrimitiveExecutor::edit_file`
+/// trait 方法签名不动，避免牵动 dispatcher / 多个 mock。`replace_all` 信号通过
+/// [`crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER`] 编码到段的
+/// `old_content` 前缀，由 `write_edit::edit_file_impl` 在分段解析时识别并剥离。
+fn parse_edit_args(args: &serde_json::Value) -> Result<(&str, Vec<EditOperation>), String> {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "edit: 缺少必填字段 `path`".to_string())?;
+
+    // Shape B：优先识别 edits 数组。
+    if let Some(edits_v) = args.get("edits") {
+        let arr = edits_v
+            .as_array()
+            .ok_or_else(|| "edit: `edits` 必须是数组".to_string())?;
+        if arr.is_empty() {
+            return Err("edit: `edits` 至少需要一条编辑段".to_string());
+        }
+        let mut ops = Vec::with_capacity(arr.len());
+        for (i, seg) in arr.iter().enumerate() {
+            let old = seg
+                .get("old_content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("edit: edits[{}].old_content 缺失或非字符串", i))?;
+            let new_c = seg
+                .get("new_content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("edit: edits[{}].new_content 缺失或非字符串", i))?;
+            let replace_all = seg
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            ops.push(make_edit_op(old, new_c, replace_all));
+        }
+        return Ok((path, ops));
+    }
+
+    // Shape A：顶层 old_content / new_content。
+    let old = args
+        .get("old_content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "edit: 缺少 `old_content`（或 `edits`）".to_string())?;
+    let new_c = args
+        .get("new_content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "edit: 缺少 `new_content`".to_string())?;
+    let replace_all = args
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((path, vec![make_edit_op(old, new_c, replace_all)]))
+}
+
+fn make_edit_op(old: &str, new_c: &str, replace_all: bool) -> EditOperation {
+    let encoded_old = if replace_all {
+        format!(
+            "{}{}",
+            crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER,
+            old
+        )
+    } else {
+        old.to_string()
+    };
+    EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: None,
+        end_line: None,
+        old_content: Some(encoded_old),
+        new_content: new_c.to_string(),
+    }
+}
+
+/// T2-P0-017 Phase3 / PR-M：`hashline_edit` 入参解析。
+///
+/// JSON 形状：
+/// ```jsonc
+/// {
+///   "path": "src/foo.rs",
+///   "edits": [
+///     { "op": "replace", "pos": "42#Ab", "lines": "x\n" },
+///     { "op": "replace", "pos": "55#Cd", "end": "57#Ef", "lines": "y\n" }
+///   ]
+/// }
+/// ```
+fn parse_hashline_edit_args(
+    args: &serde_json::Value,
+) -> Result<(&str, Vec<crate::core::tools::primitive::HashlineSegment>), String> {
+    use crate::core::tools::primitive::{HashlineOp, HashlineSegment};
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "hashline_edit: 缺少必填字段 `path`".to_string())?;
+    let edits_v = args
+        .get("edits")
+        .ok_or_else(|| "hashline_edit: 缺少必填字段 `edits`".to_string())?;
+    let arr = edits_v
+        .as_array()
+        .ok_or_else(|| "hashline_edit: `edits` 必须是数组".to_string())?;
+    if arr.is_empty() {
+        return Err("hashline_edit: `edits` 至少需要一条段".to_string());
+    }
+    let mut segments = Vec::with_capacity(arr.len());
+    for (i, seg) in arr.iter().enumerate() {
+        let op_str = seg
+            .get("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("hashline_edit: edits[{}].op 缺失或非字符串", i))?;
+        let op = match op_str {
+            "replace" => HashlineOp::Replace,
+            "insert" => HashlineOp::Insert,
+            "delete" => HashlineOp::Delete,
+            other => {
+                return Err(format!(
+                    "hashline_edit: edits[{}].op 必须是 replace|insert|delete，实际 `{}`",
+                    i, other
+                ))
+            }
+        };
+        let pos = seg
+            .get("pos")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("hashline_edit: edits[{}].pos 缺失或非字符串", i))?;
+        let (start_line, start_hash) =
+            HashlineSegment::parse_anchor(pos, i, "pos").map_err(|e| e.to_string())?;
+        let (end_line, end_hash) = match seg.get("end").and_then(|v| v.as_str()) {
+            Some(end_s) => {
+                HashlineSegment::parse_anchor(end_s, i, "end").map_err(|e| e.to_string())?
+            }
+            None => (start_line, start_hash.clone()),
+        };
+        let lines = seg
+            .get("lines")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        segments.push(HashlineSegment {
+            op,
+            start_line,
+            start_hash,
+            end_line,
+            end_hash,
+            lines,
+        });
+    }
+    Ok((path, segments))
+}
+
+/// T2-P0-017 PR-D：`edit` 前的 staleness 兜底。
+///
+/// 与 read 同形态读 `ReadFileState`：拿到 stamp + 当前 metadata（mtime_ms / size），
+/// 若指纹漂移 → 返回 `Stale` 文案要求重新 `read`；若 `get == None`（NoPriorRead），
+/// **本 Phase 不单边硬拒**（与 write T2-P0-016 同 PR 锁定，避免分叉）。
+///
+/// 失败仅在 stamp 存在且不匹配时拒绝；其它情况（路径无法 normalize、metadata
+/// 读不到等）让 primitive 自己用更具体的 IO/permission 错误回执。
+fn check_edit_staleness(
+    state: &Arc<crate::core::tools::read_state::ReadFileState>,
+    path: &str,
+) -> Result<(), String> {
+    let resolved = match crate::infra::platform::normalize_path(path) {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // 让 primitive 报权限/IO 具体错
+    };
+    let Some(stamp) = state.get(&resolved) else {
+        // NoPriorRead：本 Phase 暂不强拒；待 T2-P0-016 同 PR 锁同节奏后启用
+        return Ok(());
+    };
+    let Ok(meta) = std::fs::metadata(&resolved) else {
+        return Ok(()); // 让 primitive 报具体 IO
+    };
+    if meta.is_dir() {
+        return Err(format!("edit: 目标 `{}` 是目录，不能作为 edit 入参", path));
+    }
+    let cur_mtime = crate::core::tools::read_state::metadata_mtime_ms(&meta);
+    if stamp.mtime_ms != cur_mtime || stamp.size != meta.len() {
+        return Err(format!(
+            "Stale: 文件 `{}` 自上次 read 后已被修改（mtime/size 不一致），请先重新 `read` 再 `edit`",
+            path
+        ));
+    }
+    Ok(())
 }
 
 /// PR-RB（§2.6）`read` 入参 horizontal gate：边界违反返回结构化错误，使模型可自我修正。

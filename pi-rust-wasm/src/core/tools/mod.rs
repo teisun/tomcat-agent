@@ -4,6 +4,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod edit_normalize;
 pub mod primitive;
 pub mod read_state;
 mod registry;

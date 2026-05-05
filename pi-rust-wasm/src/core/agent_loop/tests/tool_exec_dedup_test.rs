@@ -305,3 +305,293 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
         other => panic!("expected InputFile variant, got {:?}", other),
     }
 }
+
+// ─── T2-P0-017 PR-D（T1）edit 工具：staleness + unknown-tool 焦小测 ──
+
+fn make_edit_tc(args_json: &str) -> ToolCallInfo {
+    ToolCallInfo {
+        id: "edit-1".into(),
+        name: "edit".into(),
+        arguments: args_json.into(),
+    }
+}
+
+#[tokio::test]
+async fn edit_legacy_edit_file_returns_unknown_tool_error() {
+    // PR-命名：旧 `edit_file` 必须按未知工具回错（不重定向、无别名）。
+    let dir = tempfile::tempdir().unwrap();
+    let primitive = make_executor(dir.path());
+    let state = Arc::new(ReadFileState::new());
+    let tc = ToolCallInfo {
+        id: "legacy-edit-1".into(),
+        name: "edit_file".into(),
+        arguments: r#"{"path":"/tmp/x","old_content":"a","new_content":"b"}"#.into(),
+    };
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(is_error, "legacy edit_file 必须按未知工具回错");
+    assert!(
+        msg.contains("edit_file") || msg.to_lowercase().contains("unknown") || msg.contains("未知"),
+        "错误文案应提示未知工具：{}",
+        msg
+    );
+}
+
+#[tokio::test]
+async fn edit_rejected_when_read_stamp_stale() {
+    // 先 read 落 stamp → 外部改文件（mtime+size 都变）→ edit 必须被 Stale 拦截。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("stale.txt");
+    std::fs::write(&f, b"hello\nworld\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    // 先 read 让 ReadFileState 落 stamp。
+    let read_args = format!(
+        r#"{{"path":{:?},"line_numbers":false}}"#,
+        f.to_string_lossy()
+    );
+    let read_tc = make_tc(&read_args);
+    let (_, err1, _) = execute_tool(&primitive, &None, Some(&state), &read_tc).await;
+    assert!(!err1);
+    assert_eq!(state.len(), 1);
+
+    // 外部修改文件（同时变 mtime 和 size）。
+    bump_mtime(&f);
+
+    // 此时 edit 必须被 Stale 拦截（在 primitive 调用之前）。
+    let edit_args = format!(
+        r#"{{"path":{:?},"old_content":"hello","new_content":"hi"}}"#,
+        f.to_string_lossy()
+    );
+    let edit_tc = make_edit_tc(&edit_args);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    assert!(is_error, "stamp 不一致必须返回 is_error");
+    assert!(msg.contains("Stale"), "错误文案应含 Stale：{}", msg);
+}
+
+#[tokio::test]
+async fn edit_no_prior_read_does_not_block_phase1() {
+    // 决策 4：本 Phase 不单边强拒 NoPriorRead；待 T2-P0-016 同 PR 锁同节奏。
+    // 这里验证：从未 read 过的文件，edit 仍可正常进入 primitive（成功改写）。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("noread.txt");
+    std::fs::write(&f, b"foo\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let edit_args = format!(
+        r#"{{"path":{:?},"old_content":"foo","new_content":"bar"}}"#,
+        f.to_string_lossy()
+    );
+    let edit_tc = make_edit_tc(&edit_args);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    assert!(!is_error, "Phase1 NoPriorRead 不强拒：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "bar\n");
+}
+
+#[tokio::test]
+async fn edit_rejects_ipynb_before_touching_disk() {
+    // PR-H：`.ipynb` 直接拒；磁盘不应被读 / 改；无 .bak。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("notebook.ipynb");
+    std::fs::write(&f, b"{\"cells\":[]}\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let edit_args = format!(
+        r#"{{"path":{:?},"old_content":"cells","new_content":"DONE"}}"#,
+        f.to_string_lossy()
+    );
+    let edit_tc = make_edit_tc(&edit_args);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    assert!(is_error);
+    assert!(
+        msg.contains("Notebook"),
+        "ipynb 应当返回 Notebook 错误：{}",
+        msg
+    );
+    // 磁盘字节级未变 + 无 .bak
+    assert_eq!(std::fs::read(&f).unwrap(), b"{\"cells\":[]}\n");
+    assert!(!dir_path.join("notebook.bak").exists());
+}
+
+#[tokio::test]
+async fn edit_error_codes_normalized() {
+    // 单测覆盖 PR-H E5 错误码集合：NotFound / Ambiguous / Overlap / Stale / Notebook。
+    // BinaryFile / Io / NoPriorRead 在其它用例覆盖。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("e.txt");
+    std::fs::write(&f, "x\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    // NotFound
+    let tc = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"missing","new_content":"y"}}"#,
+        f.to_string_lossy()
+    ));
+    let (msg, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(err);
+    assert!(msg.contains("NotFound"), "期望 NotFound：{}", msg);
+
+    // Ambiguous
+    std::fs::write(&f, "x\nx\n").unwrap();
+    let tc = make_edit_tc(&format!(
+        r#"{{"path":{:?},"old_content":"x","new_content":"y"}}"#,
+        f.to_string_lossy()
+    ));
+    let (msg, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(err);
+    assert!(msg.contains("Ambiguous"), "期望 Ambiguous：{}", msg);
+
+    // Overlap
+    std::fs::write(&f, "abcdef\n").unwrap();
+    let tc = make_edit_tc(&format!(
+        r#"{{"path":{:?},"edits":[{{"old_content":"abcd","new_content":"X"}},{{"old_content":"cde","new_content":"Y"}}]}}"#,
+        f.to_string_lossy()
+    ));
+    let (msg, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(err);
+    assert!(msg.contains("Overlap"), "期望 Overlap：{}", msg);
+}
+
+// ─── T2-P0-017 Phase3 / PR-M：hashline_edit + read 闭环 ─────────────────────
+
+#[tokio::test]
+async fn hashline_edit_replace_matches_read_hashline() {
+    use crate::core::tools::primitive::compute_line_hash;
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("h.txt");
+    let body = "alpha\nbeta\ngamma\ndelta\n";
+    std::fs::write(&f, body).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    // 取第 2 行（beta）的 2 字符 hash
+    let beta_hash = compute_line_hash("beta", 2);
+    let edit_args = format!(
+        r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#{}","lines":"BETA\n"}}]}}"#,
+        f.to_string_lossy(),
+        beta_hash
+    );
+    let tc = ToolCallInfo {
+        id: "hl-1".into(),
+        name: "hashline_edit".into(),
+        arguments: edit_args,
+    };
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(!is_error, "hashline_edit 应当成功：{}", msg);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "alpha\nBETA\ngamma\ndelta\n",
+        "第 2 行被替换为 BETA"
+    );
+}
+
+#[tokio::test]
+async fn hashline_edit_rejects_hash_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("hm.txt");
+    std::fs::write(&f, "a\nb\nc\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    // 故意给一个错的哈希（XX 一定与真实哈希字符不同）
+    let edit_args = format!(
+        r#"{{"path":{:?},"edits":[{{"op":"replace","pos":"2#XX","lines":"B\n"}}]}}"#,
+        f.to_string_lossy()
+    );
+    let tc = ToolCallInfo {
+        id: "hl-2".into(),
+        name: "hashline_edit".into(),
+        arguments: edit_args,
+    };
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(is_error, "哈希不一致必须拒绝");
+    assert!(
+        msg.contains("HashMismatch"),
+        "错误文案应含 HashMismatch：{}",
+        msg
+    );
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "a\nb\nc\n",
+        "拒绝时磁盘必须未变"
+    );
+}
+
+// ─── T2-P0-017 Phase3 / T3-K：secrets 扫描 ──────────────────────────────────
+
+#[tokio::test]
+async fn edit_secrets_pass_when_no_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("s.rs");
+    std::fs::write(&f, "fn main() { println!(\"hello\"); }\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    let edit_args = format!(
+        r#"{{"path":{:?},"old_content":"hello","new_content":"world"}}"#,
+        f.to_string_lossy()
+    );
+    let tc = make_edit_tc(&edit_args);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(!is_error, "普通代码不应当走 confirm：{}", msg);
+}
+
+#[tokio::test]
+async fn edit_secrets_hit_proceeds_with_allow_all_confirmation() {
+    // 默认 mock confirmation = AllowAll → 命中后 confirm 通过；磁盘被改。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("k.rs");
+    std::fs::write(&f, "let key = \"OLD_KEY\";\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    // 把 OLD_KEY 改成 OpenAI 风格 key
+    let edit_args = format!(
+        r#"{{"path":{:?},"old_content":"OLD_KEY","new_content":"sk-ABCDEFGHIJKLMNOPQRSTUV"}}"#,
+        f.to_string_lossy()
+    );
+    let tc = make_edit_tc(&edit_args);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    assert!(
+        !is_error,
+        "AllowAll confirmation 下 secrets 命中应当放行：{}",
+        msg
+    );
+    let after = std::fs::read_to_string(&f).unwrap();
+    assert!(
+        after.contains("sk-ABCDEFGHIJKLMNOPQRSTUV"),
+        "磁盘应已写入新 key"
+    );
+}
+
+#[tokio::test]
+async fn edit_oneof_shape_b_edits_array_is_parsed() {
+    // 形状 B（edits[]）端到端走通：替换两段 + 第二段 replace_all。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("multi.txt");
+    std::fs::write(&f, "use std::io;\nTODO\nbody\nTODO\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let edit_args = format!(
+        r#"{{"path":{:?},"edits":[{{"old_content":"use std::io;","new_content":"use std::io::{{self, Write}};"}},{{"old_content":"TODO","new_content":"DONE","replace_all":true}}]}}"#,
+        f.to_string_lossy()
+    );
+    let edit_tc = make_edit_tc(&edit_args);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    assert!(!is_error, "形状 B 应当成功：{}", msg);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "use std::io::{self, Write};\nDONE\nbody\nDONE\n"
+    );
+}

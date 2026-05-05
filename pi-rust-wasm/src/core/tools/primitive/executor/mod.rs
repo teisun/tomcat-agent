@@ -95,6 +95,7 @@ use crate::core::permission::PermissionGate;
 mod bash;
 mod confirm;
 mod gate;
+pub(crate) mod hashline_edit;
 mod helpers;
 mod read;
 mod search;
@@ -218,6 +219,15 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError> {
         write_edit::edit_file_impl(self, path, edits, plugin_id).await
+    }
+
+    async fn hashline_edit(
+        &self,
+        path: &str,
+        segments: Vec<crate::core::tools::primitive::HashlineSegment>,
+        plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        hashline_edit::hashline_edit_impl(self, path, segments, plugin_id).await
     }
 
     async fn execute_bash(

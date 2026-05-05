@@ -105,7 +105,7 @@ impl SystemPromptSection for ToolInstructionsSection {
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
 - Use read to examine files before editing
 - Use search_files to find file paths or content; prefer it over execute_bash with grep/find/ls -R
-- Use edit_file for precise changes (old_content must match the file exactly, including whitespace)
+- Use edit for precise changes (old_content must match the file exactly, including whitespace; pass `edits[]` for multi-segment edits — all segments match the ORIGINAL snapshot, not chained)
 - Use write_file only for new files or complete rewrites
 - Be concise in your responses
 - Show file paths clearly when working with files
@@ -314,7 +314,7 @@ impl SystemPromptSection for WorkspaceStateSection {
         }
 
         out.push_str(
-            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.pi_/pi.config.toml directly with write_file/edit_file (will be denied).\n",
+            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.pi_/pi.config.toml directly with write_file/edit (will be denied).\n",
         );
 
         out
