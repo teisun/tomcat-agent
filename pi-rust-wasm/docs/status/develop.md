@@ -1,5 +1,63 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-05-05 18:21 | INTEGRATED | develop | — |
+
+### 集成测试报告 — `feature/tool-system-cleanup`（T2-P0-005 工具系统整改 + read 加强 + 多 LLM Responses + 多模态 wire + search_files 兜底）
+
+**合并信息**
+
+- 源分支（tip）：`feature/tool-system-cleanup` @ `ed0a5b3`（含 12 个 ahead commits）
+- 合并 commit：`71183c4 merge: feature/tool-system-cleanup (T2-P0-005 工具系统整改 + read 工具加强 + 多 LLM Responses + 多模态 wire)`
+- 合并策略：`--no-ff`，无冲突
+- 涵盖任务：`T2-P0-005`（5 子项 [x]，状态 PENDING_INTEGRATION）
+- 12 ahead commits：`5661fbf` catalog 单一事实源 → `65239b6` search_files 双实现 → `48630f7` 集成文档对齐 → `8c34f7d`/`676e8cc`/`55b6324` chat 预检 → `26ea338` PR-RS spec 移到 tools/ → `660417f` chore docs → `cccdb0e` 多 LLM 注册表 + Responses → `d012b28` registry 单点声明 → `21db4d3` 多模态 wire + estimate_msg_chars Parts → `ed0a5b3` read 工具加强 PR-RA/RB/RF/RJ-0/RJ T3-a/b/c/RM。
+
+**§1 规格 & 场景库核对**
+
+- [`User_Stories.md`](../../openspec/specs/User_Stories.md) Story 2：`read_file` 二进制单条已扩成「`read` 分页 + 行号 + hashline + dedup + 多模态 + 二进制结构化错误」两条；其余条目（cwd 授权 / agent_workspace_dir / Layer0 落盘）保持。
+- [`E2E_SCENARIO_LIBRARY.md`](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) E2E-CLI-021 拆 6 条（021 + 021a/b/c/d/e）覆盖文本分页 / 二进制 hint / hashline / PNG 多模态 / PDF 多模态 / oversize 拒绝；末段「已实现」段引用 `tests/read_tool_tests.rs`。
+- [`tools/read.md`](../../openspec/specs/architecture/tools/read.md) v3 与 [`llm-multiprovider-integration.md`](../../openspec/specs/architecture/llm-multiprovider-integration.md) §6.5 / §1.3 / §2.1 / §6.6 同步；[`docs/tool-catalog.md`](../tool-catalog.md) 由 `gen-tool-catalog` 重派生（`read_file → read` + 5 个新参数 schema）。
+- [`INTEGRATION_TEST_SPEC.md`](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) §7.2 并发组清单同步追加 `read_tool_tests` / `openai_responses_integration_tests`。
+
+**§2 / §3 测试 review + 实测数据**
+
+| 类别 | binary | 用例数 |
+|---|---|---|
+| lib | `pi_wasm` | **674 PASS** / 0 failed / 1 ignored |
+| 并发组（15） | agent_loop / audit / bash_assignment_deny / context_management / cwd_lazy_prompt_e2e / event / llm / openai_responses_integration / path_command_e2e / plugin / **read_tool_tests** / robustness / search_files / session / system_prompt_cwd_priority | **82 PASS** |
+| 串行组（7） | cli_tests **77** / hostcall **13** / js_api_alignment **5** / long_lived_vm **2** / primitives_tools **10** / tool_catalog_doc **1** / wasmedge_e2e **39** | **147 PASS** |
+| 合计 | — | **lib 674 + integration 229 = 903 PASS / 0 failed** |
+
+新增/调整 integration binary：`read_tool_tests`（6 例）已登记 `scripts/test-groups.sh` 并发组与 §7.2 文档；`openai_responses_integration_tests`（5 例）由「多 LLM」子项一并登记。
+
+**§4 全量门禁**（在 `pi-rust-wasm` 根目录；`set -a; source .env; set +a` + `source $HOME/.wasmedge/env` + `DYLD_FALLBACK_LIBRARY_PATH=$HOME/.wasmedge/lib`）
+
+| 步骤 | 命令 | 结果 |
+| :--- | :--- | :--- |
+| `cargo fmt --check` | — | 通过 |
+| `cargo clippy --all-targets -- -D warnings` | — | 零警告 |
+| `cargo test --lib -- --test-threads=1` | — | 674 PASS / 0 failed / 1 ignored |
+| 分类集成全量 | `RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh integration` | **EXIT_CODE=0**（详见 `.integration_test_output.log`，2026-05-05 18:15:52 开始 → 18:21:14 结束，并发组 1m35s + 串行组 3m47s） |
+
+WasmEdge cleanup 阶段日志可见 `[error] execution failed: host function failed, Code: 0x8d` 与 `js_api_async_test: FATAL ERROR: ASSERT FAILED: once handler ...`；按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §4「WasmEdge stderr 说明」与 `cli_tests`/`wasmedge_e2e_tests` 历史口径，均为运行时清理噪声，最终以 `test result: ok` 为准（hostcall_tests 13 ok / wasmedge_e2e_tests 39 ok / js_api_alignment_tests 5 ok）。
+
+**编码规范家族对照**
+
+| 规范 | 结果 | 备注 |
+| :--- | :--- | :--- |
+| [`Codeing&Architecture_Spec.md`](../../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) | 通过 | LLM 走注册表 (`src/core/llm/registry.rs` + `resolve_llm`) 单点装配；`ChatRequest` 单套结构由 Provider 内部翻译 Completions / Responses，避免 `ChatContext::from_config` 散写 `match`。read 工具 4 态 `ReadResult` 由 `tool_exec` 单口翻译，多模态 part 注入「下一条 user message」遵守 OpenAI tool→user 边界。权限决策仍单点收敛于 `PermissionGate`。 |
+| [`RUST_FILE_LINES_SPEC.md`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) | 通过（含 follow-up） | 新文件 `read_state.rs` 261 / `tool_dispatcher.rs` 236 / `tool_exec.rs` 386 / `types.rs` 347 / `catalog.rs` 406 / `registry.rs` 73 均落 L-1。**L-3 follow-up（不阻塞）**：`primitive/executor.rs` 2105 行（既有大文件 + 本次 read 路由 / hashline / 行号 helper 加剧）；`llm/openai_responses.rs` 1056 行（多 LLM 子项引入）。**与既有 develop.md L-2 follow-up 同口径**，记入 follow-up 列表，下一轮按子模块拆。 |
+| [`RUST_IDIOMS_SPEC.md`](../../openspec/specs/guides/coding/RUST_IDIOMS_SPEC.md) | 通过 | `clippy --all-targets -D warnings` 零警告（合并前已修 `len_without_is_empty` for `ReadFileState`）。 |
+| [`COMMENT_SPEC.md`](../../openspec/specs/guides/coding/COMMENT_SPEC.md) | 通过 | 新模块 `read_state.rs` / `read_window_test.rs` / `tool_exec_dedup_test.rs` / `tools_cfg_test.rs` / `tests/read_tool_tests.rs` 均带模块级 `//!` + 决策注释；`ReadResult` 4 态枚举每 variant 注释清晰指向 `read.md` §3.2 / §4.2 锚点；无降级断言 / `#[ignore]` 糊弄。 |
+
+**结论**
+
+`feature/tool-system-cleanup` 集成验收**通过**：12 ahead commits 通过单次 `--no-ff` 合并 tip 进入 develop（merge `71183c4`），全量门禁绿。`T2-P0-005` 5 子项（T-033 / T-034 / T-036 / search_files 兜底 / 多 LLM Responses / read 工具加强）全部闭环；看板状态由 `PENDING_INTEGRATION` → `DONE`。Follow-up：`primitive/executor.rs` 与 `llm/openai_responses.rs` 跨入 L-3 红区，记下一轮按子模块拆。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-05-02 10:16 | INTEGRATED | develop | — |
 
 ### 集成测试报告 — `feat/path-command`（chat 命令模块化 + `/path` 显式授权，T2-P0-013/014 follow-up）

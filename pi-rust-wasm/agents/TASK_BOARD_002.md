@@ -294,7 +294,7 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `PENDING_INTEGRATION` |
+| **状态** | `DONE` |
 | **负责人** | Spike |
 | **分支** | `feature/tool-system-cleanup` |
 | **阻塞点** | — |
@@ -986,6 +986,7 @@ flowchart LR
 
 | 日期 | 变更 | 说明 |
 |------|------|------|
+| 2026-05-05 | T2-P0-005 PENDING_INTEGRATION→DONE | Nibbles：`feature/tool-system-cleanup`（12 ahead commits）通过 `--no-ff` 合并入 develop（merge `71183c4`）；develop 上 `fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `./scripts/run-integration-tests.sh integration`（lib 674 + integration 229 = **903 PASS / 0 failed**，`.integration_test_output.log` `EXIT_CODE=0`，并发组 1m35s + 串行组 3m47s）全量门禁绿。涵盖 5 子项：T-033 / T-034 / T-036 / search_files 兜底（含 macOS Homebrew 预检 + Tier1/Tier2 双实现）/ 多 LLM Responses（`registry` + `OpenAiResponsesProvider`）/ read 工具加强（PR-RA 命名 + RB T1 分页/二进制 hint/25 MiB + RF T2 行号/dedup/FILE_UNCHANGED + RJ T3 多模态 4 态 ReadResult/image/PDF 注入下一条 user/PR-RJ-0 `(mime,&Path)` helper + RM hashline xxh32）。Status 块写入 `docs/status/develop.md` 顶部；Follow-up：`primitive/executor.rs` 2105 行 / `llm/openai_responses.rs` 1056 行跨入 RUST_FILE_LINES_SPEC L-3 红区，记下一轮按子模块拆。 |
 | 2026-05-05 | T2-P0-005 子项 `T2-P0-tools-read \| read 工具加强` DONE | Spike 按 plan `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md` 完成 6 PR：PR-RA 命名 `read_file→read`（含 `OnceLock` 守 transcript fallback warn）/ PR-RB T1 `offset/limit` + 二进制结构化 hint + memchr 单循环抽窗 + `[tools.read].max_bytes` 25 MiB 上限 / PR-RF T2 `cat -n` 行号 + `read_state.rs` (`ReadStamp`/`ReadFileState`/`FILE_UNCHANGED_STUB`) 跨轮 dedup / PR-RJ-0 重构 `ChatMessageContentPart::image_b64`/`file_b64` 为 `(mime,&Path)` / PR-RJ T3-a `ReadResult` 4 态枚举 / T3-b PNG/JPEG/GIF/WebP/PDF magic 路由 + metadata 阶段 `IMAGE_MAX_BYTES`/`FILE_MAX_BYTES` 预检 / T3-c `tool_exec` 返回 `(String,bool,Vec<ChatMessageContentPart>)` + `tool_dispatcher` 把 image/file part 注入下一条 user message / PR-RM `hashline:bool` xxh32 行级短指纹（与 `line_numbers` 互斥并优先）。新增 `tests/read_tool_tests.rs` 6 例集成测试登记并发组；`docs/tool-catalog.md` 由 `gen-tool-catalog` 重派生；`User_Stories.md` / `E2E_SCENARIO_LIBRARY.md`（E2E-CLI-021/021a–e）/ `docs/status/feature-tool-system-cleanup.md`（追加 #4）/ `INTEGRATION_TEST_SPEC §7.2` 同步。门禁：`fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `read_tool_tests`（6 PASS）/ `agent_loop_tests`（11 PASS）：PASS。 |
 | 2026-05-05 | T2-P0-005 DOING→PENDING_INTEGRATION（多 LLM + Responses） | 本分支 tip：`resolve_llm` + `OpenAiResponsesProvider`（`/v1/responses`），默认 `openai-responses`；单测与 `openai_responses_integration_tests`（需 `OPENAI_API_KEY`）、`test-groups.sh` 登记；spec / README / 示例配置同步。门禁 `fmt` / `clippy -D warnings` / `lib` / `./scripts/run-integration-tests.sh integration` PASS，待集成复核与 push。 |
 | 2026-05-05 | T2-P0-005 PENDING_INTEGRATION → DOING | Spike 承接子项「多 LLM 层改造 + OpenAI Responses」，按 plan `~/.cursor/plans/llm-multiprovider-and-responses_d469e7f0.plan.md` 在当前分支 `feature/tool-system-cleanup`（origin ahead 6 commits）继续开发。决策：默认 `[llm] provider = "openai-responses"`（D3）；本子项 commits 与已有 6 个 ahead commits 一并延后到本子项完成再交集成。 |
