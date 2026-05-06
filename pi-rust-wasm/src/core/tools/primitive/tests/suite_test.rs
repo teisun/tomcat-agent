@@ -361,6 +361,106 @@ async fn bash_persists_full_output_when_truncated() {
     let _ = std::fs::remove_dir(&dir);
 }
 
+// ─── T2-P0-016 PR-L（bash T3）AST allowlist 集成测 ──────────────────────────
+
+/// bash.md §10 T3：denylist 命中应在到达 `gate_check_bash` 之前以 `AstDeny` 拒绝，
+/// 即便对应命令本不在 builtin forbidden 集合中。复合命令 `git pull && rm -rf X`
+/// 中第二段 `rm` 命中，整条命令早退、磁盘上的 fixture 文件**不**被删除。
+#[tokio::test]
+async fn bash_ast_allowlist_denies_compound_command_short_circuit() {
+    use crate::core::permission::BashAstChecker;
+
+    let dir = std::env::temp_dir().join("pi_wasm_exec_bash_ast_deny");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    // 留个 fixture 文件验证 rm 真没执行。
+    let probe = dir.join("must_survive.txt");
+    std::fs::write(&probe, b"alive").unwrap();
+
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_ast(BashAstChecker::new(
+        true,
+        vec!["git".to_string()], // git 命中 allow 仍跳 approval；rm 命中 deny → 整条拒
+        vec!["rm".to_string()],
+    ));
+
+    let cmd = format!("git --version && rm -rf {}", probe.display());
+    let err = exec
+        .execute_bash(&cmd, Some(&path_str), "p1", None, None)
+        .await
+        .expect_err("AST deny 应当返回 Err，不进入 gate / spawn");
+    let msg = err.to_string();
+    assert!(msg.contains("AstDeny"), "错误文案应含 AstDeny：{}", msg);
+    assert!(
+        msg.contains("rm"),
+        "错误文案应指出 deny token 是 rm：{}",
+        msg
+    );
+    assert!(probe.exists(), "AST 早退后 rm 不应执行；文件应仍在");
+
+    let _ = std::fs::remove_file(&probe);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// bash.md §10 T3：空 allow/deny 列表 + enabled=true → 行为与今日（无 AST）字节级等价。
+/// 这是 [bash-pr-l-scope.md §4 兼容性] 的硬性回归。
+#[tokio::test]
+async fn bash_ast_default_empty_lists_keeps_legacy_behavior() {
+    use crate::core::permission::BashAstChecker;
+
+    let dir = std::env::temp_dir().join("pi_wasm_exec_bash_ast_default");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_ast(BashAstChecker::new(true, vec![], vec![]));
+
+    let res = exec
+        .execute_bash("echo ast-skeleton-ok", Some(&path_str), "p1", None, None)
+        .await
+        .expect("空 list 时 AST 不应改变行为");
+    assert_eq!(res.exit_code, 0);
+    assert!(res.stdout.contains("ast-skeleton-ok"));
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// bash.md §10 T3：MVP 不支持 heredoc → AstUnsupported 早退；
+/// 不进入 gate / spawn，与 deny 路径同形态（仅错误前缀不同）。
+#[tokio::test]
+async fn bash_ast_heredoc_returns_unsupported_error() {
+    use crate::core::permission::BashAstChecker;
+
+    let dir = std::env::temp_dir().join("pi_wasm_exec_bash_ast_heredoc");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_ast(BashAstChecker::new(true, vec![], vec![]));
+
+    let err = exec
+        .execute_bash("cat <<EOF\nhi\nEOF\n", Some(&path_str), "p1", None, None)
+        .await
+        .expect_err("heredoc 应当 AstUnsupported 早退");
+    assert!(err.to_string().contains("AstUnsupported"));
+    let _ = std::fs::remove_dir(&dir);
+}
+
 #[tokio::test]
 async fn execute_bash_forbidden() {
     // builtin bash_forbidden 命中 (`pi config set llm.api_key`) → Deny；

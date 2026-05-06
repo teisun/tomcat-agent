@@ -60,6 +60,7 @@
 | **T2-P1-006** | 集成测试规范 | `TODO` | — | `feature/integration-test-standard` | [tasks/T2-P1-006.md](./tasks/T2-P1-006.md) |
 | **T2-P1-007** | 工具系统后置项 | `TODO` | — | `feature/tool-system-deferred-followups` | [tasks/T2-P1-007.md](./tasks/T2-P1-007.md) |
 | **T2-P1-008** | 内置 search_files 只读搜索工具 | `PENDING_INTEGRATION` | Spike | `feature/tool-system-cleanup` | [tasks/T2-P1-008.md](./tasks/T2-P1-008.md) |
+| **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理 | `TODO` | — | `feature/bash-ast-detect-precision` | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 
 ## 5. 任务依赖拓扑（概览）
 

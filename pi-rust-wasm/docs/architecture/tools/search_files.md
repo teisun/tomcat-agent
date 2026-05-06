@@ -596,6 +596,7 @@ auto_install_search_tools = true
 
 ## 14. 关联文档
 
+- 兄弟工具：[bash.md](bash.md)（shell 与内容搜索边界）
 - 计划：[`/Users/yankeben/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`](../../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
 - 工具目录：[`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)
 - 用户指南：[`docs/user-guide.md`](../../../../docs/user-guide.md)

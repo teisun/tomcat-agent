@@ -163,6 +163,12 @@ pub struct DefaultPrimitiveExecutor {
     /// [`crate::infra::resolve_agent_trail_dir`] + `/tool-results`。测试可设 `tempfile::tempdir()`
     /// 验证「超限落盘」路径，或保持 `None` 验证「仅截断」路径。
     pub(super) bash_persist_dir: Option<std::path::PathBuf>,
+    /// T2-P0-016 PR-L（bash T3）：AST allowlist 检查器，**叠在** `gate_check_bash`
+    /// 之前生效（详见 [bash-pr-l-scope.md §1 / §4](../../../../docs/architecture/tools/bash-pr-l-scope.md)）。
+    /// 默认 **`enabled=false`**（`BashAstChecker::new(false, …)`）：不切段、不跑
+    /// `detect_unsupported`，与无 AST 栈行为一致；需要切段/allow/deny 时
+    /// 用 [`Self::with_bash_ast`] 或后续 `[tools.bash.ast]` 配置注入 `enabled=true`。
+    pub(super) bash_ast: crate::core::permission::BashAstChecker,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -182,7 +188,15 @@ impl DefaultPrimitiveExecutor {
             bash_timeout_ms: crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS,
             bash_max_output_chars: crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
             bash_persist_dir: None,
+            bash_ast: crate::core::permission::BashAstChecker::new(false, vec![], vec![]),
         }
+    }
+
+    /// T2-P0-016 PR-L：注入自定义 AST allow/deny（含 `enabled`）。生产路径后续由
+    /// `[tools.bash.ast]` config 反序列化注入；当前为 builder 入口。
+    pub fn with_bash_ast(mut self, checker: crate::core::permission::BashAstChecker) -> Self {
+        self.bash_ast = checker;
+        self
     }
 
     /// T2-P0-016 PR-E.2：覆盖 bash 工具默认墙钟超时。

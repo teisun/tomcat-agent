@@ -143,6 +143,23 @@ pub(super) async fn execute_bash_impl(
         }
     };
 
+    // T2-P0-016 PR-L：AST 切段 + allow/deny 命中判定，**叠在** gate_check_bash 之前。
+    // 默认空 list 时 BashAstChecker 仅做切段、不做命中——与今日行为字节级等价；
+    // 命中 deny 立即 AppError + 审计 false / 不进入 gate。详见 bash-pr-l-scope §4。
+    if let Err(reject) = executor.bash_ast.check(&audit_cmd) {
+        let err = AppError::Primitive(reject.to_string());
+        executor.audit.record_primitive(PrimitiveAuditEntry {
+            operation: AuditPrimitiveOp::Bash,
+            path_or_cmd: audit_cmd.clone(),
+            plugin_id: plugin_id.to_string(),
+            user_approved: false,
+            success: false,
+            detail: Some(err.to_string()),
+            ..Default::default()
+        });
+        return Err(err);
+    }
+
     // bash 决策来源（whitelist / approval）—— 走 gate 三层。
     let (bash_scope, bash_grant) = match executor.gate_check_bash(&audit_cmd, plugin_id).await {
         Ok((scope, grant)) => (scope, grant),

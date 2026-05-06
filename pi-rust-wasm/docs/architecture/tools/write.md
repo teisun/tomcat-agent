@@ -126,7 +126,7 @@
 
 ### 3.3 落地选型决策表
 
-| 决策点 | 默认选择 | 主要参考 | 阶段 | 未入选简注 | 说人话 |
+| 决策点 | 选择 | 现状/过去/其他 | 阶段 | 未入选简注 | 说人话 |
 | --- | --- | --- | --- | --- | --- |
 | 覆盖前 **必须先 read**（已存在文件） | `overwrite=true` 时校验 stamp | cc-fork `FileWriteTool` validate 段 | T1 PR-C | 不在 primitive 内藏「隐式 read」 | 不许工具偷偷帮你读盘凑 stamp；**模型自己先 `read`**。 |
 | 原子写 | 保持 `write_file_atomic` | 现状 + pi_agent_rust 同类模式 | 已有 | — | 落盘方式**已经够用**，别为了对齐而重写一套 IO。 |
@@ -502,6 +502,7 @@ sequenceDiagram
 
 - [read.md](read.md) — `ReadFileState`、`ReadStamp`、`FILE_UNCHANGED`、dedup 与 staleness 术语。
 - [edit.md](edit.md) — 多段编辑、`NoPriorRead` / `Stale` 与 write 同 PR 节奏、secrets T3-K。
+- [bash.md](bash.md) — shell 执行、gate、审计与超时/输出路线图（`execute_bash` → `bash`）。
 - [../permission-system.md](../permission-system.md) — Write 权限与确认流。
 - 主计划：[strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)。
 - 调研：[agent-tools-comparison.md](../../../../docs/reports/agent-tools-comparison.md)。

@@ -106,7 +106,7 @@
 ### 2.3 落地选型决策表
 
 
-| 决策点         | 默认选择                             | 主要替代方案              | 选择理由（为何不是替代）                                            |
+| 决策点         | 选择                                 | 现状/过去/其他            | 选择理由（为何不是其他）                                            |
 | ----------- | -------------------------------- | ------------------- | ------------------------------------------------------- |
 | 工具对外名       | 仅 `read`                         | `read_file` 并存或别名   | 单名减少双轨、审计与 prompt 分叉；历史调用用 transcript fallback **warn** |
 | 分页默认上限      | 2000 行                           | 512 / 整文件           | 与「一屏 + α」及 cc-fork 实践一致；整文件易炸 wasm 堆                    |
@@ -524,7 +524,7 @@ sequenceDiagram
 
 ## 13. 关联文档
 
-- 兄弟工具：[search_files.md](search_files.md)
+- 兄弟工具：[search_files.md](search_files.md) · [bash.md](bash.md)
 - 权限：[../permission-system.md](../permission-system.md)
 - 派生工具目录：[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)
 

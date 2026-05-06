@@ -145,9 +145,9 @@
 
 > ² **staleness 行脚注**：与 write「必须先 read」**同 PR 节奏**落地时，edit 侧复用同一张 `ReadFileState`；语义见 [`read.md`](read.md) **§3**（术语）、**§6.3**（edit 前陈旧检查概念）、**§7**（会话表字段）。
 
-#### 2.3.1 形态 A 摘要（`ARCHITECTURE_SPEC` §7.1 列名）
+#### 2.3.1 形态 A 摘要（`ARCHITECTURE_SPEC` §7.1 形态 A 列名）
 
-| 决策点 | 默认选择 | 主要替代方案 | 选择理由（为何不是替代） | 说人话 |
+| 决策点 | 选择 | 现状/过去/其他 | 选择理由（为何不是其他） | 说人话 |
 | --- | --- | --- | --- | --- |
 | 多段编辑语义 | 全程对 `original` 快照一次应用 | 链式 `replacen` 逐步改 | 与 pi-mono / 模型训练一致；链式会误判跨度 | 多段别「改一步找一步」。 |
 | `replace_all` | 每段独立 bool，默认 `false` | 无字段、只靠扩唯一子串 | 批量替换需显式开关，否则 Ambiguous 可诊断 | 想全换要说一声，别默认瞎换。 |
@@ -677,6 +677,7 @@ sequenceDiagram
 
 - [`read.md`](read.md) — §3 术语；§4 `hashline` 协议；§6–§7 调度与会话表；§9 错误；§10 测试。
 - [`search_files.md`](search_files.md) — 先搜后改。
+- [`bash.md`](bash.md) — shell 工具与 `search_files` 分工（勿用 bash 跑 rg）。
 - [`../permission-system.md`](../permission-system.md) — Edit 权限与 secrets `confirm`。
 - 主计划：[strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)。
 - 调研：[agent-tools-comparison.md](../../../../docs/reports/agent-tools-comparison.md) §4.2。

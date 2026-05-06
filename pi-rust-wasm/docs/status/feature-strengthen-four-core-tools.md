@@ -1,6 +1,39 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-05-07 00:30 | ACTIVE | feature/strengthen-four-core-tools | - |
+| Tom | 2026-05-07 18:30 | ACTIVE | feature/strengthen-four-core-tools | - |
+
+### 2026-05-07 | bash AST 默认 `enabled=false` + P1 任务 T2-P1-009
+
+- **动机**：`detect_unsupported` 手写粗匹配易误伤（意图/对标见本机 Cursor 计划 `~/.cursor/plans/bash_detect_unsupported_对比_ac5d829c.plan.md`）。
+- **代码**：`DefaultPrimitiveExecutor::new` 默认 `BashAstChecker::new(false, [], [])`；`ToolsBashAstConfig::default().enabled = false`；[bash-pr-l-scope.md §4](../architecture/tools/bash-pr-l-scope.md) 默认值与任务卡同步。
+- **看板**：新建 [T2-P1-009.md](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)（简卡 + 计划外链）；[README.md](../../agents/TASK_BOARD_002/README.md) 索引；[T2-P0-016.md](../../agents/TASK_BOARD_002/tasks/T2-P0-016.md) bash 子项链至 T2-P1-009。
+- **测试**：`suite_test` 三条 `bash_ast_*` 仍显式 `.with_bash_ast(BashAstChecker::new(true, …))`，行为不变。
+
+### 2026-05-07 | T2-P0-016 子项 `bash` PR-L（T3 AST allowlist + SandboxBackend 骨架）落地
+
+- **范围冻结依据**：[bash-pr-l-scope.md](../architecture/tools/bash-pr-l-scope.md)（plan §六风险表「Phase-L AST/Sandbox 范围未定义」的关闭文）。
+- **新模块** `src/core/permission/bash_ast.rs`：
+  - `BashAstChecker { enabled, allowlist, denylist }`：手写切段（识别 `;` `&` `\n` `&&` `||` `|` 顶层操作符；引号 / 反引号 / `$(...)` / `(...)` 一律按字面量处理，**不**触发外层切段；MVP 拒 heredoc `<<` 与 `for/while/until/if/case/function/select/{` 流程控制）+ allowlist/denylist 命中判定（命中 deny → `AstReject::AstDeny`；命中 allow → `AstSegmentVerdict::AllowedSkipApproval`；其余 → `AstSegmentVerdict::Defer`，由调用方 fallback 旧 gate 三层）。
+  - `SandboxBackend` trait + `NoopSandboxBackend`：占位接口，PR-L 内仅交付 `Noop`（直接 `cmd.spawn()`，与 PR-E.2 行为字节级等价）；后续 PR 挂 macOS Seatbelt / Linux Landlock 时仅替换 `Arc<dyn SandboxBackend>` 注入。
+  - `PersistentShell` trait 占位：真 PTY 循环不在 PR-L 范围。
+  - `ToolsBashAstConfig`：`{ enabled, allowlist, denylist, sandbox_backend }`；**默认 `enabled=false`**（与 executor 一致）。**当** `enabled=true` 且 allow/deny 皆空时，仅切段 + `detect_unsupported`、不做列表命中，除 unsupported 命中外与旧 gate-only 字节级等价（scope spec §4）。
+- **wire**：`DefaultPrimitiveExecutor` 新增 `bash_ast: BashAstChecker` 字段 + `with_bash_ast` builder；`executor/bash.rs::execute_bash_impl` 在 `gate_check_bash` **之前**调 `executor.bash_ast.check(&audit_cmd)` —— 任何 `AstDeny` / `AstUnsupported` 早退 + 审计 `success=false`，不进入 gate / 不 spawn。
+- **测试**：
+  - `bash_ast` 模块 14 个 `#[cfg(test)]`：disabled 单段 Defer / 拆 ; && || | / deny 短路 / allow 跳 approval / 赋值前缀属性 / 子 shell 字面量 / 子 shell 内分隔符不切段 / 子 shell 未配对 / 引号未配对 / 流程控制拒 / heredoc 拒 / glob 前缀模式 / NoopSandboxBackend spawn echo。
+  - `suite_test` 3 个端到端 `#[tokio::test]`：`bash_ast_allowlist_denies_compound_command_short_circuit`（`git --version && rm -rf <probe>` deny 命中早退 + 磁盘 fixture 文件未被删）/ `bash_ast_default_empty_lists_keeps_legacy_behavior`（空 list 行为等价回归）/ `bash_ast_heredoc_returns_unsupported_error`（heredoc 早退）。
+  - `cargo test --lib` 765 全绿（748 → 762 PR-L.bash_ast 14 例 → 765 PR-L.suite 3 例），`cargo fmt --check` / `cargo clippy --all-targets -D warnings` 全绿；`agent_loop_tests` / `bash_assignment_deny` / `cli_tests` / `primitives_tools_tests` / `tool_catalog_doc` 集成测 100% 回归通过。
+- **不变量**：`PrimitiveExecutor::execute_bash` trait 方法名 / dispatcher / 所有 mock / `wasmedge_e2e_tests` host_call 全部未动；**默认 `enabled=false`** 时 `bash_ast.check` 不切段，与无 AST 栈一致；**显式 `enabled=true` 且空 allow/deny** 时除 `detect_unsupported` 早退外 `gate_check_bash` 与 PR-E.2 一字不差（scope spec §4）。
+- **遗留 / 后续 PR**：
+  - `[tools.bash.ast]` config 段反序列化 + `api/chat` 装配注入：本 PR 仅暴露 builder（`with_bash_ast`），TOML 接入留给后续 PR；
+  - `AllowedSkipApproval` 当前**未**在 `gate_check_bash` 上真正跳 approval（仅切段判定；deny 已早退）：跳 approval 的接线动会牵动 grant trace + 审计字段，独立 PR 处理更安全；
+  - 真实 SandboxBackend / PersistentShell 实现：按 scope spec §3「显式不在 PR-L 内」。
+
+### 🔌 INTERFACE (接口变更，T2-P0-016 bash 子项 PR-L)
+
+- **新模块**：`crate::core::permission::{ BashAstChecker, AstReject, AstSegmentVerdict, BashSegment, SandboxBackend, NoopSandboxBackend, PersistentShell, ToolsBashAstConfig }`。
+- **`bash` 工具运行时行为**：**默认 `executor.bash_ast.enabled=false`**，不跑 AST 前置；**`with_bash_ast(..., true, ...)` 或未来 TOML 打开后**：空 allow/deny 时与 PR-E.2 字节级等价（除 unsupported 早退）；命中 deny → `AppError::Primitive("AstDeny: ...")` + 审计 `success=false`；命中 unsupported（heredoc / 流程控制） → `AppError::Primitive("AstUnsupported: ...")`。
+- **`DefaultPrimitiveExecutor` builder**：新增 `with_bash_ast(BashAstChecker)`；不调用时默认 `BashAstChecker::new(false, [], [])`（与无 AST 等价）。
+- **配置**：`[tools.bash.ast].{ enabled, allowlist, denylist }` 与 `[tools.bash.sandbox].backend` 已在 `ToolsBashAstConfig` 定义；TOML 反序列化接入待后续 PR。
 
 ### 2026-05-07 | T2-P0-016 子项 `bash` PR-I（T2 后台三件套）落地
 
