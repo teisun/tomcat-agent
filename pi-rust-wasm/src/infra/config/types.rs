@@ -226,7 +226,7 @@ pub struct PrimitiveConfig {
     pub bash_forbidden: Vec<String>,
     #[serde(default)]
     pub auto_confirm: bool,
-    /// `execute_bash` 在 Unix 上 `sh -c` 前可选 source 的 env 脚本路径；`None` 时默认 `$HOME/.wasmedge/env`。
+    /// `bash` 在 Unix 上 `sh -c` 前可选 source 的 env 脚本路径；`None` 时默认 `$HOME/.wasmedge/env`。
     #[serde(default)]
     pub wasmedge_env_path: Option<String>,
 }

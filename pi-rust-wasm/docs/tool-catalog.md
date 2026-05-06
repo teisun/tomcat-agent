@@ -265,7 +265,7 @@ Parameters:
 
 Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.
 
-Use this instead of execute_bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read when you already know the exact path.
+Use this instead of bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read when you already know the exact path.
 
 Dual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.
 
@@ -348,9 +348,9 @@ Parameters:
 
 ## Exec
 
-### `execute_bash`
+### `bash`
 
-- Label: Execute Bash
+- Label: Bash
 - Category: `exec`
 - Permission scope: `Bash`
 - Read only: `false`

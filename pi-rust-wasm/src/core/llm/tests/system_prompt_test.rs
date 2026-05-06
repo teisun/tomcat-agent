@@ -9,7 +9,10 @@ fn build_system_prompt_contains_tools_and_workspace() {
     assert!(!prompt.contains("write_file"));
     assert!(prompt.contains("edit"));
     assert!(!prompt.contains("edit_file"));
-    assert!(prompt.contains("execute_bash"));
+    // T2-P0-016 PR-E 命名闸：bash 工具短名（catalog `name: "bash"`，对外可见名）
+    // 在 prompt 中出现；旧名 `execute_bash` 已撤出 prompt（与 read/write/edit 同口径）。
+    assert!(prompt.contains("bash"));
+    assert!(!prompt.contains("execute_bash"));
     assert!(prompt.contains("list_dir"));
     assert!(prompt.contains("search_files"));
     assert!(prompt.contains("config_get"));
@@ -38,7 +41,7 @@ fn build_system_prompt_contains_anti_hallucination_constraint() {
 fn build_system_prompt_prefers_search_files_over_bash_search() {
     let prompt = build_system_prompt("/tmp");
     assert!(
-        prompt.contains("prefer it over execute_bash with grep/find/ls -R"),
+        prompt.contains("prefer it over bash with grep/find/ls -R"),
         "system prompt 应引导模型优先使用 search_files，而不是 bash 搜索"
     );
 }

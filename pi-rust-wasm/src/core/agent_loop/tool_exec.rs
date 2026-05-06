@@ -1,8 +1,11 @@
 //! # Agent Loop 工具执行子模块
 //!
 //! 职责单一：把 `ToolCallInfo` 解析为具体 primitive 调用，返回 `(content, is_error)`。
-//! 7 分支（read / write / edit / execute_bash / list_dir /
+//! 7 分支（read / write / edit / bash / list_dir /
 //! 未知工具 / 参数解析失败）逐字搬自 `run.rs`，**不依赖 `AgentLoop`**——
+//! 旧名 `execute_bash` **不**做运行时 fallback（与 read / write / edit 同口径）：
+//! transcript 旧名由 `session::manager::context::warn_if_legacy_tool_name` 加载时
+//! 一次性 `tracing::warn!`，新一轮 LLM 调用旧名走 `unknown` 分支。
 //!
 //! ## 命名切换（PR-RA / T2-P0-016 / T2-P0-017 PR-命名）
 //!
@@ -22,9 +25,10 @@
 //!   避免模型把策略拒绝当成功 tool 结果。primitive 内 `written=false` 已作为
 //!   `AppError::Tool` 早退；本编排层不再产生 `written=false` 文本。
 //! - 未知工具名、参数 JSON 解析失败 → `is_error = true`。
-//! - `execute_bash` 的失败通过 `PrimitiveExecutor::execute_bash` 的 `Result::Err`
-//!   传出；`exit_code != 0` 本身**不**置 `is_error`（与原行为一致，保留给下游
-//!   LLM 自行判断）。
+//! - `bash` 的失败通过 `PrimitiveExecutor::execute_bash` 的 `Result::Err` 传出
+//!   （**trait 方法名**保留 `execute_bash`，与 `write_file` / `edit_file` 同形；
+//!   仅 LLM 可见的工具名为短名 `bash`）；`exit_code != 0` 本身**不**置
+//!   `is_error`（与原行为一致，保留给下游 LLM 自行判断）。
 //!
 //! ## `AGENT_PLUGIN_ID`
 //!
@@ -307,7 +311,7 @@ pub(super) async fn execute_tool(
                     .map_err(|e| e.to_string())
             }
         },
-        "execute_bash" => {
+        "bash" => {
             let command = args["command"].as_str().unwrap_or("");
             let cwd = args["cwd"].as_str();
             let argv_store: Option<Vec<String>> =

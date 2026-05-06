@@ -49,12 +49,12 @@ fn catalog_and_function_definitions_have_same_names() {
 
 #[test]
 fn catalog_scope_and_category_contracts_hold() {
-    let execute_bash = BUILTIN_TOOL_CATALOG
+    let bash = BUILTIN_TOOL_CATALOG
         .iter()
-        .find(|entry| entry.name == "execute_bash")
-        .expect("execute_bash catalog entry");
+        .find(|entry| entry.name == "bash")
+        .expect("bash catalog entry");
     assert!(matches!(
-        execute_bash.scope,
+        bash.scope,
         PermissionScope::Bash | PermissionScope::BashApproval
     ));
 

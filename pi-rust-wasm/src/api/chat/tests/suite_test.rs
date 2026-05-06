@@ -23,7 +23,8 @@ fn build_tool_definitions_contains_all_primitives() {
     assert!(!names.contains(&"write_file".to_string()));
     assert!(names.contains(&"edit".to_string()));
     assert!(!names.contains(&"edit_file".to_string()));
-    assert!(names.contains(&"execute_bash".to_string()));
+    assert!(names.contains(&"bash".to_string()));
+    assert!(!names.contains(&"execute_bash".to_string()));
     assert!(names.contains(&"list_dir".to_string()));
 }
 

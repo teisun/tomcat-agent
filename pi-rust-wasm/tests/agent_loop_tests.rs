@@ -144,7 +144,7 @@ impl PrimitiveExecutor for MockPrimitive {
     }
 }
 
-/// 第一次 execute_bash 时返回 Err（用于「工具错误不终止 Loop」测试）。
+/// 第一次 bash 时返回 Err（用于「工具错误不终止 Loop」测试）。
 struct ErrorOnFirstBashPrimitive {
     call_count: Arc<AtomicUsize>,
 }
@@ -472,8 +472,8 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     common::setup_logging();
     let _span = info_span!("test_agent_loop_tool_error_does_not_terminate_loop").entered();
 
-    info!("Arrange: Stream1 返回 execute_bash 工具调用；ErrorOnFirstBash 首次返回 Err；Stream2 返回 recovered 文本");
-    let stream_tool = tool_call_stream("bash1", "execute_bash", r#"{"command":"ls","cwd":null}"#);
+    info!("Arrange: Stream1 返回 bash 工具调用；ErrorOnFirstBash 首次返回 Err；Stream2 返回 recovered 文本");
+    let stream_tool = tool_call_stream("bash1", "bash", r#"{"command":"ls","cwd":null}"#);
     let stream_recovered = text_stream("recovered after error");
     let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_recovered]));
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -565,7 +565,7 @@ async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn 
     common::setup_logging();
     let _span = info_span!("test_agent_loop_tool_pi_mono_event_subsequence").entered();
 
-    let stream_tool = tool_call_stream("bash1", "execute_bash", r#"{"command":"ls","cwd":null}"#);
+    let stream_tool = tool_call_stream("bash1", "bash", r#"{"command":"ls","cwd":null}"#);
     let stream_text = text_stream("done");
     let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_text]));
     let primitive = Arc::new(MockPrimitive);

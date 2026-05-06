@@ -127,11 +127,11 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         search_hint: Some("hashline edit line anchor hash"),
     },
     BuiltinToolCatalogEntry {
-        name: "execute_bash",
-        label: "Execute Bash",
+        name: "bash",
+        label: "Bash",
         description: "Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.\n",
         display_summary: Some("Run an audited shell command."),
-        parameters: execute_bash_parameters,
+        parameters: bash_parameters,
         scope: PermissionScope::Bash,
         category: None,
         read_only: false,
@@ -153,7 +153,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "search_files",
         label: "Search Files",
-        description: "Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.\n\nUse this instead of execute_bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read when you already know the exact path.\n\nDual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.\n",
+        description: "Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.\n\nUse this instead of bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read when you already know the exact path.\n\nDual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.\n",
         display_summary: Some("Search authorized files by content or file-path glob."),
         parameters: search_files_parameters,
         scope: PermissionScope::Read,
@@ -355,7 +355,7 @@ fn edit_parameters() -> Value {
     })
 }
 
-fn execute_bash_parameters() -> Value {
+fn bash_parameters() -> Value {
     object_schema(
         serde_json::json!({
             "command": { "type": "string", "description": "Shell command to execute." },

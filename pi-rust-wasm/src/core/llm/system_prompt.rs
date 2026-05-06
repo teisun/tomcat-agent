@@ -104,7 +104,7 @@ impl SystemPromptSection for ToolInstructionsSection {
         r#"Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
 - Use read to examine files before editing
-- Use search_files to find file paths or content; prefer it over execute_bash with grep/find/ls -R
+- Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R
 - Use edit for precise changes (old_content must match the file exactly, including whitespace; pass `edits[]` for multi-segment edits — all segments match the ORIGINAL snapshot, not chained)
 - Use write only for new files or complete rewrites
 - Be concise in your responses
@@ -148,7 +148,7 @@ impl SystemPromptSection for WorkspaceContextSection {
              - This is the user's shell working directory when pi chat was launched.\n\
              - Interpret \"current directory\", \"this project\", and relative paths as this directory.\n\
              - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `workspace_roots` or a session-only grant.\n\
-             - For execute_bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
+             - For bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
              \n\
              Agent definition directory (agent_definition_dir): {agent_definition_dir}\n\
              - Design-time agent rules/configuration under ~/.pi_/workspace-<agentId>/.\n\

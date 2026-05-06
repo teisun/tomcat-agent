@@ -124,7 +124,7 @@ pub(super) struct FoldEntriesOutcome {
 }
 
 /// PR-RA / T2-P0-016 / T2-P0-017 PR-命名：检测 transcript 中遗留的旧工具名
-/// （`read_file` / `write_file` / `edit_file`）。
+/// （`read_file` / `write_file` / `edit_file` / `execute_bash`）。
 ///
 /// 仅 **`tracing::warn!` 一次**（每个旧名按 process 去重）；**不**重写为短名，
 /// **不**重定向执行。旧对话历史保留原 wire；新一轮 LLM 调用旧名会走
@@ -134,6 +134,7 @@ fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
     static WARNED_READ: AtomicBool = AtomicBool::new(false);
     static WARNED_WRITE: AtomicBool = AtomicBool::new(false);
     static WARNED_EDIT: AtomicBool = AtomicBool::new(false);
+    static WARNED_BASH: AtomicBool = AtomicBool::new(false);
     for tc in tool_calls {
         let name = tc
             .get("function")
@@ -169,6 +170,16 @@ fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
                 tracing::warn!(
                     tool = "edit_file",
                     "legacy tool name: edit_file → edit (no redirect; transcript replay only)"
+                );
+            }
+            "execute_bash"
+                if WARNED_BASH
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                tracing::warn!(
+                    tool = "execute_bash",
+                    "legacy tool name: execute_bash → bash (no redirect; transcript replay only)"
                 );
             }
             _ => {}
