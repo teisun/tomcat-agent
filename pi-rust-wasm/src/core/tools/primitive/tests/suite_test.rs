@@ -233,6 +233,134 @@ async fn execute_bash_success() {
     let _ = std::fs::remove_dir(&dir);
 }
 
+/// T2-P0-016 PR-E.2 / bash.md §10 T1：墙钟超时 → kill 子进程 + 标记 timed_out。
+///
+/// 用 `with_bash_timeout_ms(50)` 把超时压到 50 ms，命令 `sleep 5` 触发 Elapsed 分支；
+/// 期望 `timed_out=true`、`exit_code=-1`、stderr 含 "timed out" 提示。
+#[tokio::test]
+async fn bash_wallclock_timeout_kills_process() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_bash_timeout");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_timeout_ms(50);
+
+    let started = std::time::Instant::now();
+    let res = exec
+        .execute_bash("sleep 5", Some(&path_str), "p1", None, None)
+        .await
+        .expect("bash impl 应返回 Ok（即便超时）");
+    let elapsed = started.elapsed();
+
+    assert!(res.timed_out, "墙钟超时应置 timed_out=true");
+    assert_eq!(res.exit_code, -1, "超时退出码约定 -1");
+    assert!(
+        res.stderr.contains("timed out"),
+        "stderr 应携带 timed out 提示，实际: {:?}",
+        res.stderr
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "墙钟超时 50ms + kill 后整体应远小于 sleep 时长，实际 elapsed={:?}",
+        elapsed
+    );
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// T2-P0-016 PR-E.3 / bash.md §10 T1：超长 stdout 走 EndTruncatingAccumulator 头尾保留。
+#[tokio::test]
+async fn bash_output_truncation_keeps_head_tail() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_bash_truncate");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    // max_output_chars 压到 64：fixture 命令打印 ~2000 字符肯定触发截断。
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_max_output_chars(64);
+
+    let res = exec
+        .execute_bash(
+            // 用 printf 输出可控长度，避开 yes/seq 平台差异。
+            r#"printf 'A%.0s' $(seq 1 2000)"#,
+            Some(&path_str),
+            "p1",
+            None,
+            None,
+        )
+        .await
+        .expect("bash 应返回 Ok");
+
+    assert_eq!(res.exit_code, 0);
+    assert!(res.truncated, "stdout 超 64 应置 truncated=true");
+    assert!(
+        res.stdout.contains("[truncated"),
+        "截断后文本应含 [truncated 标记，实际: {:?}",
+        res.stdout
+    );
+    assert!(
+        res.persisted_output_path.is_none(),
+        "未注入 bash_persist_dir 时，应不落盘",
+    );
+    // stdout 字符数 应 ≤ max_output_chars + truncation hint 余量
+    assert!(
+        res.stdout.chars().count() < 1500,
+        "截断后字符数应远小于原始 2000，实际 {}",
+        res.stdout.chars().count()
+    );
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// T2-P0-016 PR-E.3 / bash.md §10 T1：截断 + 落盘——`persisted_output_path` 指向完整原文。
+#[tokio::test]
+async fn bash_persists_full_output_when_truncated() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_bash_persist");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let persist_dir = dir.join("tool-results");
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_max_output_chars(64)
+    .with_bash_persist_dir(persist_dir.clone());
+
+    let res = exec
+        .execute_bash(
+            r#"printf 'A%.0s' $(seq 1 2000)"#,
+            Some(&path_str),
+            "p1",
+            None,
+            None,
+        )
+        .await
+        .expect("bash 应返回 Ok");
+
+    assert!(res.truncated, "应置 truncated=true");
+    let p = res
+        .persisted_output_path
+        .as_ref()
+        .expect("注入 persist_dir 后应回填路径");
+    let on_disk = std::fs::read_to_string(p).expect("应能读盘");
+    assert_eq!(on_disk.chars().count(), 2000, "落盘字符数应等于原始 stdout");
+    assert!(p.contains("bash-stdout-"));
+    let _ = std::fs::remove_dir_all(&persist_dir);
+    let _ = std::fs::remove_dir(&dir);
+}
+
 #[tokio::test]
 async fn execute_bash_forbidden() {
     // builtin bash_forbidden 命中 (`pi config set llm.api_key`) → Deny；

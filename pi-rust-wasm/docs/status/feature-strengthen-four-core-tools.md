@@ -1,6 +1,34 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-05-06 20:05 | ACTIVE | feature/strengthen-four-core-tools | - |
+| Tom | 2026-05-06 23:30 | ACTIVE | feature/strengthen-four-core-tools | - |
+
+### 2026-05-06 | T2-P0-016 子项 `bash` PR-E（命名闸 + T1 超时 + 输出累积）全部 6 个 phase-e-* 子 todo 完成
+
+- **PR-E.0 命名闸**：`catalog::execute_bash → bash`、`tool_exec` `match "bash"`、`system_prompt` 旧名移除；`session/manager/context.rs::warn_if_legacy_tool_name` 追加 `execute_bash → bash` OnceLock 节流 warn；`docs/tool-catalog.md` 重派生（schema 含 `args` + `timeout_ms`）。trait `PrimitiveExecutor::execute_bash` 方法名 / dispatcher `("primitive","executeBash")` / 所有 mock / `wasmedge_e2e_tests` 中的 `executeBash` host_call 名 全部未动（与 read/write/edit 同型）。
+- **PR-E.1 Schema + Config**：`catalog.rs` 的 `bash_parameters` 补 `args: array<string>`（PR-A 尾扫）+ 新增 `timeout_ms: integer`（min=1, max=600_000）；`infra::config::types` 新增 `ToolsBashConfig { timeout_ms: u64 = 120_000, max_output_chars: usize = 30_000 }` + `DEFAULT_TOOLS_BASH_TIMEOUT_MS / MAX_TOOLS_BASH_TIMEOUT_MS / DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS / MAX_TOOLS_BASH_MAX_OUTPUT_CHARS` 常量；`infra/config/mod.rs` 与 `infra/mod.rs` 重导出；`tool_exec` `bash` 分支解析并 clamp `timeout_ms` 后透传。
+- **PR-E.2 核心超时（spawn + timeout(wait) + kill）**：`executor/bash.rs` 从 `Command::output()` 重写为 `Command::spawn` + 并行 `tokio::task` 读 stdout/stderr 管道 + `tokio::time::timeout(_, child.wait())`；超时分支 `kill_process_tree` 在 Unix 下用 `Command::process_group(0)` 把子进程做新进程组 leader、再 `libc::killpg(pgid, SIGKILL)` 杀整组——单 PID kill 无法处理 `sh -c '...; sleep N'` 派生孙子进程的场景；Windows 退化为 `Child::kill`；不论平台 `child.wait()` 收尸防僵尸。新依赖 `[target.'cfg(unix)'.dependencies] libc = "0.2"`。
+- **PR-E.3 输出累积 + 落盘**：新建 `src/core/tools/primitive/executor/output_accum.rs`，`accumulate_with_persist(text, max_chars, persist_dir, prefix)` 做「头尾保留 + 中段省略 hint」（多字节安全），超限且配置了 `bash_persist_dir` 时把完整原文写入 `<persist_dir>/<prefix>-<unix_ms>-<rand6>.txt`；`BashResult` 扩 `timed_out / truncated / persisted_output_path`（均 `#[serde(default)]`，`persisted_output_path` 加 `skip_serializing_if = Option::is_none`，`#[derive(Default)]` 让 mock `..Default::default()` 兼容）；`DefaultPrimitiveExecutor` 新增 `bash_timeout_ms / bash_max_output_chars / bash_persist_dir` 字段 + `with_*` builder。
+- **PR-E.4 单测**：bash.md §10 T1 三例 `bash_wallclock_timeout_kills_process` / `bash_output_truncation_keeps_head_tail` / `bash_persists_full_output_when_truncated` 落地于 `core::tools::primitive::tests::suite_test`；`output_accum.rs` 内置 8 例 `#[cfg(test)]`（空输出、阈值边界、head+tail、持久化路径）；回归 `gate_suite_*` / permission gate_test 中所有 bash 相关用例（`cargo test --lib` 741 全绿，本卡 +11：3 §10 T1 + 8 output_accum）。
+- **PR-E.5 集成测**：`tests/{agent_loop_tests, cli_tests, primitives_tools_tests, bash_assignment_deny, context_management_tests, wasmedge_e2e_tests}` rename 后全绿；未新增 integration 二进制 → `scripts/test-groups.sh` 不动；`E2E_SCENARIO_LIBRARY.md` **不适用**（BashResult 仅追加 optional 字段、向后兼容；现有 E2E 用例的 expected stdout 都是文本输出/文件存在等，不依赖结构字段名）。
+- **门禁**：`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib`（741） 全绿；3 个 §10 T1 集成场景在单测层即覆盖（spawn 真实 sh），不再额外起 integration 二进制。
+- **不变量**：`PrimitiveExecutor::execute_bash` trait 方法名（含已加的 `timeout_ms: Option<u64>` 形参）/ dispatcher `("primitive","executeBash")` / 所有 mock 全部就地扩参，未改名；`wasmedge_e2e_tests` host_call `executeBash` 维持。
+
+### 🔌 INTERFACE (接口变更，T2-P0-016 bash 子项 PR-E)
+
+- **LLM 工具名**：`execute_bash → bash`（短名，无运行时别名）；transcript 旧名仅 `tracing::warn` 一次。
+- **`bash` 入参**：`{ command, cwd?, args?, timeout_ms? }`（与冻结 [bash.md](../../docs/architecture/tools/bash.md) §4 一致）；`timeout_ms` 上界 600_000ms，`tool_exec` 与 trait 实现各 clamp 一次。
+- **`bash` 语义**：`spawn` + 并行 reader + `timeout(wait)`；超时 `killpg(SIGKILL)` 杀整组（Unix），`exit_code = -1 + timed_out = true` 回执；输出超 `[tools.bash].max_output_chars`（默认 30_000）头尾截断 + 可选落盘。
+- **新配置**：`[tools.bash].timeout_ms` / `[tools.bash].max_output_chars` / 环境变量 `PI_WASM__TOOLS__BASH__*`，默认 120_000ms / 30_000 chars。
+- **新出参字段**：`BashResult.timedOut: bool` / `BashResult.truncated: bool` / `BashResult.persistedOutputPath?: string`（截断且配置 `bash_persist_dir` 时回填）。
+
+### ⚠️ BLOCKED (阻塞/风险)
+
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无（PR-E 完结） | bash T2 后台（PR-I）/ T3 AST/Sandbox（PR-L）按 plan §六 在 PR-E 合入后串行开 PR；先出 1 页 `phase-l-scope-spec` 再启 PR-L | 同 PR 或下卡 |
+
+---
+
 
 ### 2026-05-06 | T2-P0-016 子项 `write` 全部 10 个 todo 完成（PENDING_INTEGRATION）
 

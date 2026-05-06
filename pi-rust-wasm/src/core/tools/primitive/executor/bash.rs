@@ -64,6 +64,28 @@ fn resolve_max_output_chars(executor: &DefaultPrimitiveExecutor) -> usize {
 /// `spawn_pipe_readers` 的返回类型别名（避开 `clippy::type_complexity`）。
 type PipeReader = tokio::task::JoinHandle<std::io::Result<Vec<u8>>>;
 
+/// 超时分支收尸：Unix 下用 `killpg(-pgid, SIGKILL)` 杀整组（含 sh 的孙子进程），
+/// Windows 退化为 `Child::kill`（CreateProcess + JOB_OBJECT 路径目前不在 Phase-E 范围）。
+/// 调用前提：`Command::process_group(0)`，使 child pid == pgid。
+async fn kill_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // SAFETY: `killpg` 是 POSIX 信号 API，pid 来自当前活着的 child；
+            // 错误码无意义（进程已退也会 ESRCH），下面的 wait 才是收尸的正手。
+            unsafe {
+                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill().await;
+    }
+    // 不论平台，wait 一次确保子进程被回收，避免僵尸 + 让 reader 端拿到 EOF。
+    let _ = child.wait().await;
+}
+
 /// 启动并行 reader：把 `Child::stdout / stderr` 边读边落入两条 `Vec<u8>`。
 ///
 /// 不在 reader 里做截断 / 落盘——先收齐字节再交给上层逻辑（Phase-E.3 会替换为
@@ -195,6 +217,12 @@ pub(super) async fn execute_bash_impl(
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
 
+    // Unix：让子进程做新进程组的 leader（pgid = pid），超时分支 SIGKILL 整组。
+    // 否则 `sh -c '...; sleep N'` 派生出的孙子进程（sleep）只会被遗弃、继续撑住 stdout 管道
+    // 直到自然退出，导致 reader 卡死，整个 timeout 路径名存实亡。
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     // 5. spawn —— 必须 spawn 才能在超时分支拿到 Child::kill 的句柄
     let mut child = cmd
         .spawn()
@@ -217,11 +245,10 @@ pub(super) async fn execute_bash_impl(
             return Err(AppError::Primitive(e.to_string()));
         }
         Err(_elapsed) => {
-            // Elapsed: 子进程仍在跑 → 必须 kill（句柄还在手里），再 wait 收口收尸。
+            // Elapsed: 子进程仍在跑 → kill 整个进程组，再 wait 收口收尸。
+            // 单 PID kill 在 `sh -c '...; sleep N'` 场景只杀 sh，sleep 被遗弃、撑住管道。
             timed_out = true;
-            let _ = child.kill().await;
-            // 即便 kill 失败，wait 等到子进程消失也是必要的，避免僵尸。
-            let _ = child.wait().await;
+            kill_process_tree(&mut child).await;
             -1
         }
     };
