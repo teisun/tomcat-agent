@@ -364,13 +364,26 @@ Parameters:
 ```json
 {
   "properties": {
+    "args": {
+      "description": "Optional argv elements appended to `command`. When present, the command runs argv-style (no shell) — safer for paths with spaces or quotes. When absent, the command is interpreted by the system shell.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "command": {
-      "description": "Shell command to execute.",
+      "description": "Shell command to execute. With `args` set, runs argv-style without sh -c; otherwise runs through `sh -c` (Unix) / `cmd /C` (Windows).",
       "type": "string"
     },
     "cwd": {
-      "description": "Optional working directory. Use the project cwd when the user asks to run in the current project.",
+      "description": "Optional working directory. Use the project cwd when the user asks to run in the current project; missing falls back to the agent process working directory.",
       "type": "string"
+    },
+    "timeout_ms": {
+      "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`.",
+      "maximum": 600000,
+      "minimum": 1,
+      "type": "integer"
     }
   },
   "required": [

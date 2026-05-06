@@ -358,8 +358,25 @@ fn edit_parameters() -> Value {
 fn bash_parameters() -> Value {
     object_schema(
         serde_json::json!({
-            "command": { "type": "string", "description": "Shell command to execute." },
-            "cwd": { "type": "string", "description": "Optional working directory. Use the project cwd when the user asks to run in the current project." }
+            "command": {
+                "type": "string",
+                "description": "Shell command to execute. With `args` set, runs argv-style without sh -c; otherwise runs through `sh -c` (Unix) / `cmd /C` (Windows)."
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Optional working directory. Use the project cwd when the user asks to run in the current project; missing falls back to the agent process working directory."
+            },
+            "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional argv elements appended to `command`. When present, the command runs argv-style (no shell) — safer for paths with spaces or quotes. When absent, the command is interpreted by the system shell."
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600000,
+                "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`."
+            }
         }),
         &["command"],
     )
