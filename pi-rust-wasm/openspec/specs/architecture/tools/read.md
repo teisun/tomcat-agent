@@ -239,9 +239,9 @@
 | 术语                      | 语义（人话）                                                     | 数据载体                                                                    | 行为约束                                                                                                  |
 | ----------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | **窗口**                  | 从第几行开始、最多读几行                                               | `offset: Option<u64>`, `limit: Option<u64>`                             | `offset` 缺省等价 1；`limit` 缺省等价默认 2000；**显式** `limit` 才参与「是否分窗」判定（与 `read_state` 的 `is_partial_view` 一致） |
-| **dedup（重复读短路）**        | 同一窗口、文件看起来没变，就不再塞全文                                        | [`read_state::ReadFileState`](../../../../src/core/tools/read_state.rs) | 命中 → `ReadResult::FileUnchanged`（在 **tool_exec** 短路，不调 primitive）                                     |
+| **dedup（重复读短路）**        | 同一窗口、文件看起来没变，就不再塞全文                                        | [`read_state::ReadFileState`](../../../../src/core/tools/pipeline/read_state.rs) | 命中 → `ReadResult::FileUnchanged`（在 **tool_exec** 短路，不调 primitive）                                     |
 | **staleness（陈旧）**       | 模型脑中的内容已不是磁盘最新                                             | 同上表中的 `ReadStamp`                                                       | **edit/write 入口**查表：指纹不一致 → 拒绝并要求先 `read`                                                             |
-| **FILE_UNCHANGED stub** | 告诉模型「别读了，跟上一次一样」                                           | 常量 [`FILE_UNCHANGED_STUB`](../../../../src/core/tools/read_state.rs)    | 非错误；模型应引用上一轮 read 结果                                                                                  |
+| **FILE_UNCHANGED stub** | 告诉模型「别读了，跟上一次一样」                                           | 常量 [`FILE_UNCHANGED_STUB`](../../../../src/core/tools/pipeline/read_state.rs)    | 非错误；模型应引用上一轮 read 结果                                                                                  |
 | **hashline**            | 行号 + 内容指纹前缀，供精细 edit 锚点                                    | executor 文本渲染分支                                                         | `hashline=true` 时覆盖 `line_numbers`；算法对齐 pi_agent_rust                                                 |
 | **「LLM 收到 tool 结果后」**   | 指 **`tool_exec` 已把 `ReadResult` 落成 chat 消息、即将进入下一轮模型推理之前** | —                                                                       | 与去重 / 注入时序讨论绑在此边界                                                                                     |
 
@@ -252,7 +252,7 @@
 
 **单一事实源**：
 
-- JSON Schema：[`catalog.rs::read_parameters`](../../../../src/core/tools/catalog.rs) → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)。
+- JSON Schema：[`catalog.rs::read_parameters`](../../../../src/core/tools/contract/catalog.rs) → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)。
 - Rust 类型：[`primitive/types.rs`](../../../../src/core/tools/primitive/types.rs) 中 `ReadResult` / `ReadTextResult` / `ReadBinaryResult`。
 
 ### 4.1 入参（工具 arguments）
@@ -321,7 +321,7 @@ ReadResult
         │
         ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│  src/core/tools/catalog.rs                                                 │
+│  src/core/tools/contract/catalog.rs                                                 │
 │  • BUILTIN_TOOL_CATALOG：`name = "read"`，`read_parameters()` JSON Schema   │
 └────────────────────────────────────────────────────────────────────────────┘
         │
@@ -344,7 +344,7 @@ ReadResult
               ┌─────────────────┴──────────────────┐
               ▼                                    ▼
 ┌──────────────────────────────┐      ┌──────────────────────────────────────┐
-│  src/core/tools/read_state.rs │      │  src/core/llm/types.rs               │
+│  src/core/tools/pipeline/read_state.rs │      │  src/core/llm/types.rs               │
 │  • ReadFileState / ReadStamp   │      │  • image_b64 / file_b64(path 签名)    │
 │  • put_stamp / check_stamp     │      │  • metadata 尺寸白名单 + 读盘 base64 │
 └──────────────────────────────┘      └──────────────────────────────────────┘

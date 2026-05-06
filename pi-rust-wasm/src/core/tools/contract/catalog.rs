@@ -219,7 +219,7 @@ pub fn render_core_identity_tool_lines() -> String {
 pub fn render_tool_catalog_markdown() -> String {
     let mut out = String::new();
     out.push_str("# Tool Catalog\n\n");
-    out.push_str("> This file is generated from `src/core/tools/catalog.rs`.\n");
+    out.push_str("> This file is generated from `src/core/tools/contract/catalog.rs`.\n");
     out.push_str(
         "> Run `UPDATE_TOOL_CATALOG=1 cargo run --bin gen-tool-catalog` after catalog changes.\n\n",
     );
@@ -496,5 +496,5 @@ fn config_set_parameters() -> Value {
 }
 
 #[cfg(test)]
-#[path = "tests/catalog_test.rs"]
+#[path = "../tests/catalog_test.rs"]
 mod tests;

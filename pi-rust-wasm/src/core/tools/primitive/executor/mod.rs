@@ -80,9 +80,10 @@
 //! `impl PrimitiveExecutor for DefaultPrimitiveExecutor` 整块留在本文件，
 //! 每个方法做一行委托——trait 不能跨文件实现，但方法体可以下沉。
 
+use crate::core::tools::contract::confirmation::UserConfirmationProvider;
 use crate::core::tools::primitive::{
     BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
-    ReadResult, SearchFilesArgs, SearchFilesOutput, UserConfirmationProvider, WriteFileResult,
+    ReadResult, SearchFilesArgs, SearchFilesOutput, WriteFileResult,
 };
 use crate::infra::audit::AuditRecorder;
 use crate::infra::error::AppError;
@@ -135,7 +136,7 @@ pub struct DefaultPrimitiveExecutor {
     pub(super) confirmation: Arc<dyn UserConfirmationProvider>,
     pub(super) audit: Arc<dyn AuditRecorder>,
     /// 路径与 bash 权限决策入口；由调用方注入并与
-    /// `permission::cwd_lazy` / `tools::config` 共享同一份 `SessionGrants` 视图。
+    /// `permission::cwd_lazy` / `tools::config_tool` 共享同一份 `SessionGrants` 视图。
     pub(super) gate: Arc<dyn PermissionGate>,
     /// PR-RB（T1）read 工具文本路径的「裸读字节上限」。
     ///

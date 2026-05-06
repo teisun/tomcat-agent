@@ -304,7 +304,7 @@ impl ReadResult {
                 b.original_size
             ),
             ReadResult::FileUnchanged { .. } => {
-                crate::core::tools::read_state::FILE_UNCHANGED_STUB.to_string()
+                crate::core::tools::pipeline::read_state::FILE_UNCHANGED_STUB.to_string()
             }
         }
     }

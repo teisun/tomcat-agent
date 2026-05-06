@@ -114,7 +114,7 @@
 ## 3. 协议（入参 / 出参 / Schema）
 
 > 单一事实源：[`src/core/tools/primitive/types.rs`](../../../../src/core/tools/primitive/types.rs)；
-> 派生：[`src/core/tools/catalog.rs::search_files_parameters`](../../../../src/core/tools/catalog.rs)
+> 派生：[`src/core/tools/contract/catalog.rs::search_files_parameters`](../../../../src/core/tools/contract/catalog.rs)
 > → `build_function_definitions()` → [`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)。
 
 ### 3.1 入参 `SearchFilesArgs`
@@ -313,7 +313,7 @@ SearchFilesStats
                  ▲
                  │ catalog 派生
 ┌──────────────────────────────────────────────────────────────┐
-│ src/core/tools/catalog.rs           ── 单一事实源            │
+│ src/core/tools/contract/catalog.rs           ── 单一事实源            │
 │  • search_files 描述含「双实现 / .gitignore / warnings」     │
 │  • build_tool_definitions() / docs/tool-catalog.md 派生不变  │
 └──────────────────────────────────────────────────────────────┘

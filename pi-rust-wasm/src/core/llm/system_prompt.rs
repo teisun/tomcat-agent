@@ -86,7 +86,7 @@ You help users by reading files, executing commands, editing code, and writing n
 
 Available tools:
 {}",
-            crate::core::tools::catalog::render_core_identity_tool_lines()
+            crate::core::tools::contract::catalog::render_core_identity_tool_lines()
         )
     }
     fn priority(&self) -> u32 {

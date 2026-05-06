@@ -1,3 +1,25 @@
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Tom | 2026-05-06 14:32 | ACTIVE | feature/strengthen-four-core-tools | - |
+
+### ✅ DONE (已完成/进行中)
+
+- [✓] **[P0]** `core::tools` 按四层分包：`contract`（catalog / registry / confirmation）、`primitive`、`config_tool`、`pipeline`（edit_normalize / read_state）；删除根模块兼容 `pub use`，全仓 `use` 与 openspec / 任务板路径对齐。
+- [✓] **[P0]** `config.rs` 拆为 `config_tool/{allowlist,get,set,mod}` + `tests_config_tool.rs`；补回迁移时丢失的设计注释；`toml_to_json` 收紧为模块内私有；`docs/tool-catalog.md` 由 `gen-tool-catalog` 与源路径一致。
+- [✓] **[P0]** 验证：`cargo test -p pi_wasm` 全量（含集成与 wasmedge e2e）通过。
+
+### 🔌 INTERFACE (接口变更)
+
+- Rust 调用方须改用 `crate::core::tools::contract::*`、`config_tool`、`pipeline::*`；`crate::core` 对外 re-export 已指向新路径。
+
+### ⚠️ BLOCKED (阻塞/风险)
+
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
+
+---
+
 # feature/strengthen-four-core-tools 状态
 
 | 字段 | 值 |

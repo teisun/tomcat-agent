@@ -1,6 +1,6 @@
 # Tool Catalog
 
-> This file is generated from `src/core/tools/catalog.rs`.
+> This file is generated from `src/core/tools/contract/catalog.rs`.
 > Run `UPDATE_TOOL_CATALOG=1 cargo run --bin gen-tool-catalog` after catalog changes.
 
 ## Filesystem

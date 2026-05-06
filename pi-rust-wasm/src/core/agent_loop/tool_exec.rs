@@ -52,7 +52,7 @@ pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
 pub(super) async fn execute_tool(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
-    read_file_state: Option<&Arc<crate::core::tools::read_state::ReadFileState>>,
+    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     tc: &ToolCallInfo,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
@@ -98,9 +98,9 @@ pub(super) async fn execute_tool(
                 if meta.is_dir() {
                     return None;
                 }
-                let mtime = crate::core::tools::read_state::metadata_mtime_ms(&meta);
+                let mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
                 if stamp.matches_request(mtime, meta.len(), offset, limit) {
-                    Some(crate::core::tools::read_state::FILE_UNCHANGED_STUB.to_string())
+                    Some(crate::core::tools::pipeline::read_state::FILE_UNCHANGED_STUB.to_string())
                 } else {
                     None
                 }
@@ -139,10 +139,10 @@ pub(super) async fn execute_tool(
                             }
                             crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => &[],
                         };
-                        let stamp = crate::core::tools::read_state::ReadStamp {
-                            mtime_ms: crate::core::tools::read_state::metadata_mtime_ms(&meta),
+                        let stamp = crate::core::tools::pipeline::read_state::ReadStamp {
+                            mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta),
                             size: meta.len(),
-                            content_hash: crate::core::tools::read_state::hash_content(hash_input),
+                            content_hash: crate::core::tools::pipeline::read_state::hash_content(hash_input),
                             offset,
                             limit,
                             is_partial_view: offset.is_some() || limit.is_some(),
@@ -220,7 +220,7 @@ pub(super) async fn execute_tool(
             Err(msg) => Err(msg),
             Ok((path, edits)) => {
                 // PR-H：`.ipynb` 在 primitive 之前直接拒，避免读盘 / 占位 .bak。
-                if crate::core::tools::edit_normalize::is_unsupported_structured_file(path) {
+                if crate::core::tools::pipeline::edit_normalize::is_unsupported_structured_file(path) {
                     return (
                         format!(
                             "Notebook: `{}` 是 Jupyter 笔记本（.ipynb），edit 不支持；请使用专用 nbformat 工具或先把目标 cell 导出为 .py / .md 再 edit",
@@ -563,7 +563,7 @@ fn parse_hashline_edit_args(
 /// 失败仅在 stamp 存在且不匹配时拒绝；其它情况（路径无法 normalize、metadata
 /// 读不到等）让 primitive 自己用更具体的 IO/permission 错误回执。
 fn check_edit_staleness(
-    state: &Arc<crate::core::tools::read_state::ReadFileState>,
+    state: &Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
     path: &str,
 ) -> Result<(), String> {
     let resolved = match crate::infra::platform::normalize_path(path) {
@@ -580,7 +580,7 @@ fn check_edit_staleness(
     if meta.is_dir() {
         return Err(format!("edit: 目标 `{}` 是目录，不能作为 edit 入参", path));
     }
-    let cur_mtime = crate::core::tools::read_state::metadata_mtime_ms(&meta);
+    let cur_mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
     if stamp.mtime_ms != cur_mtime || stamp.size != meta.len() {
         return Err(format!(
             "Stale: 文件 `{}` 自上次 read 后已被修改（mtime/size 不一致），请先重新 `read` 再 `edit`",

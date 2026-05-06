@@ -19,7 +19,7 @@ use crate::core::agent_loop::tool_exec::execute_tool;
 use crate::core::agent_loop::ToolCallInfo;
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
-use crate::core::tools::read_state::{ReadFileState, FILE_UNCHANGED_STUB};
+use crate::core::tools::pipeline::read_state::{ReadFileState, FILE_UNCHANGED_STUB};
 use crate::core::AllowAllConfirmation;
 use crate::infra::{PrimitiveConfig, TracingAuditRecorder};
 

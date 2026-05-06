@@ -399,7 +399,7 @@
 **被依赖**：**T2-P0-016**（`write`/`bash`/PR-A 与 `edit` 同仓合入时协调）；**T2-P0-011**（大文件编辑策略）— 以 [edit.md](../openspec/specs/architecture/tools/edit.md) 为权威
 
 **协作接口**：
-- 消费：`BuiltinToolCatalog`、`tool_exec`、`ReadFileState`（[`read_state.rs`](../src/core/tools/read_state.rs)）、`write_edit` / `write_file_atomic`
+- 消费：`BuiltinToolCatalog`、`tool_exec`、`ReadFileState`（[`read_state.rs`](../src/core/tools/pipeline/read_state.rs)）、`write_edit` / `write_file_atomic`
 - 提供：`edit` 工具短名与 schema（`oneOf` 形状 A/B）、结构化错误语义、`hashline_edit` 注册（T3）、与 [read.md](../openspec/specs/architecture/tools/read.md) §4 一致的 hashline 协议消费方
 
 **验收标准**（对齐 [edit.md](../openspec/specs/architecture/tools/edit.md) §10 + 主计划门禁）：

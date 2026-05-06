@@ -45,7 +45,7 @@ use async_trait::async_trait;
 
 use crate::core::permission::{GrantTrigger, PermissionDecision, PermissionGate, SessionGrants};
 use crate::core::tools::primitive::PrimitiveOperation;
-use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::infra::error::AppError;
 
 pub const CWD_PROMPT_CHOICES: &str = "[s/w/c]";
@@ -106,7 +106,7 @@ fn cwd_already_authorized(cwd: &Path, gate: &dyn PermissionGate) -> bool {
 /// 原因: 路径 `/Users/yan/work/sub/file.txt` 不在已授权范围内
 /// ```
 ///
-/// 解析失败（`tools::config` 等其它入口不带 `路径:` 行）时返回 `None`，
+/// 解析失败（`tools::config_tool` 等其它入口不带 `路径:` 行）时返回 `None`，
 /// 装饰器将 fall-through 给底层 provider。
 fn extract_target_from_preview(preview: &str) -> Option<PathBuf> {
     for line in preview.lines() {
@@ -196,7 +196,7 @@ impl UserConfirmationProvider for CwdLazyPrompt {
         plugin_id: &str,
     ) -> Result<bool, AppError> {
         // 旧 API 不带 `suggested_root` —— 直接转发。新代码路径走
-        // `confirm_decision`（gate_check_path / tools::config 都用此版）。
+        // `confirm_decision`（gate_check_path / tools::config_tool 都用此版）。
         self.inner.confirm(operation, preview, plugin_id).await
     }
 

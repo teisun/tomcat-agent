@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use pi_wasm::api::chat::permission::cwd_lazy::{CwdLazyPrompt, CwdPromptChoice};
 use pi_wasm::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use pi_wasm::core::tools::primitive::ConfirmDecision;
+use pi_wasm::core::tools::contract::confirmation::ConfirmDecision;
 use pi_wasm::{
     AllowAllConfirmation, DenyAllConfirmation, PrimitiveOperation, UserConfirmationProvider,
 };

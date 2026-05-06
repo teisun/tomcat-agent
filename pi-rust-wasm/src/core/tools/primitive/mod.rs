@@ -2,16 +2,12 @@
 //!
 //! Default implementation for read/write/edit/bash/list-dir primitives.
 
-pub mod confirmation;
 mod diff;
 mod executor;
 #[cfg(test)]
 mod tests;
 mod types;
 
-pub use confirmation::{
-    AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
-};
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
 pub use executor::DefaultPrimitiveExecutor;

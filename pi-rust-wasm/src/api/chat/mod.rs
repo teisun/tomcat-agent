@@ -142,7 +142,7 @@ pub struct ChatContext {
     /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 状态。
     /// 由 `ChatContext` 持有 → 每次 turn 创建 `AgentLoopConfig` 时 `Arc::clone` 注入，
     /// 多轮 turn 内复用同一张表（实现「同 session 跨 turn dedup」）。
-    pub read_file_state: Arc<crate::core::tools::read_state::ReadFileState>,
+    pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
 }
 
 impl ChatContext {
@@ -231,8 +231,8 @@ impl ChatContext {
         // 时降级为 `None`，工具命中返回"未启用"错误，主流程不阻塞。
         let config_backend: Option<crate::core::agent_loop::SharedConfigBackend> =
             match crate::api::cli::config_file_path() {
-                Ok(p) => Some(Arc::new(crate::core::tools::config::ChatConfigBackend {
-                    ctx: crate::core::tools::config::ConfigToolContext::new(
+                Ok(p) => Some(Arc::new(crate::core::tools::config_tool::ChatConfigBackend {
+                    ctx: crate::core::tools::config_tool::ConfigToolContext::new(
                         p,
                         confirmation.clone(),
                     )
@@ -265,7 +265,7 @@ impl ChatContext {
             session_grants,
             config_backend,
             gate,
-            read_file_state: Arc::new(crate::core::tools::read_state::ReadFileState::default()),
+            read_file_state: Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default()),
         })
     }
 
@@ -281,7 +281,7 @@ impl ChatContext {
 // ─── CLI UserConfirmationProvider ─────────────────────────────────────────────
 
 use crate::core::tools::primitive::PrimitiveOperation;
-use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 
 pub struct CliConfirmation;
 
@@ -390,7 +390,7 @@ impl ToolExecutor for NoopToolExecutor {
 // ─── Tool definitions for LLM ─────────────────────────────────────────────────
 
 fn build_tool_definitions() -> Vec<serde_json::Value> {
-    crate::core::tools::catalog::build_function_definitions()
+    crate::core::tools::contract::catalog::build_function_definitions()
 }
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────

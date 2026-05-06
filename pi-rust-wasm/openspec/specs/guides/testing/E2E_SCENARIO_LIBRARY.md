@@ -81,7 +81,7 @@
 | E2E-CHAT-025-online | 人工 | `cwd_question_e2e`（待在线补验） | 真实 LLM 回答“当前目录”时看用户 cwd | 含 `OPENAI_API_KEY` 时在临时项目下运行 `pi chat` 并询问当前目录 | 回复包含项目哨兵文件，不包含 `workspace-main` / `.pi_` |
 
 
-**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～026、E2E-EXEC-024、E2E-PROMPT-025-offline 的核心契约已由 `path_command`、`permission::gate`、`core::tools::config`、`tools::primitive`、`compaction`、`system_prompt` 自动化回归覆盖；其中真实终端菜单观感与 E2E-CHAT-025-online 仍按「人工」补验。014、015 待后续补充。E2E-CLI-021/021a/021b/021c/021d/021e 已实现于 `tests/read_tool_tests.rs`（PR-RA/RB/RF/RJ/RM 的 6 个集成用例，覆盖文本分页、二进制结构化提示、hashline、PNG/PDF 多模态路由、超限拒绝）。
+**已实现**：E2E-CLI-013 已实现于 `test_user_asks_pi_to_write_hello_world_bash`（工作区 workspace 下写 hello_e2e.txt）；E2E-CLI-016 已实现于 `test_user_asks_pi_to_run_bash_command`。E2E-CLI-018～026、E2E-EXEC-024、E2E-PROMPT-025-offline 的核心契约已由 `path_command`、`permission::gate`、`core::tools::config_tool`、`tools::primitive`、`compaction`、`system_prompt` 自动化回归覆盖；其中真实终端菜单观感与 E2E-CHAT-025-online 仍按「人工」补验。014、015 待后续补充。E2E-CLI-021/021a/021b/021c/021d/021e 已实现于 `tests/read_tool_tests.rs`（PR-RA/RB/RF/RJ/RM 的 6 个集成用例，覆盖文本分页、二进制结构化提示、hashline、PNG/PDF 多模态路由、超限拒绝）。
 
 ---
 

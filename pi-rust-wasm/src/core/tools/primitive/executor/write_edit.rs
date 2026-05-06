@@ -23,7 +23,7 @@
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
 use super::DefaultPrimitiveExecutor;
-use crate::core::tools::edit_normalize::{
+use crate::core::tools::pipeline::edit_normalize::{
     detect_line_ending, fold_curly_quotes, normalize_to_lf, restore_line_endings, strip_bom,
 };
 use crate::core::tools::primitive::diff::build_simple_diff;
@@ -260,13 +260,13 @@ fn apply_string_edits(
     let kind = detect_line_ending(no_bom);
     let working_lf: String = normalize_to_lf(no_bom).into_owned();
     let (n_text, n_to_w_map) =
-        crate::core::tools::edit_normalize::build_normalized_byte_map(&working_lf);
+        crate::core::tools::pipeline::edit_normalize::build_normalized_byte_map(&working_lf);
 
     // 收集 (working_lf 起, working_lf 止, replacement) 区间。
     let mut spans: Vec<(usize, usize, String)> = Vec::new();
     for (idx, op) in edits.iter().enumerate() {
         let seg = parse_segment(op)?;
-        let n_old = crate::core::tools::edit_normalize::normalize_for_match(seg.old);
+        let n_old = crate::core::tools::pipeline::edit_normalize::normalize_for_match(seg.old);
         if n_old.is_empty() {
             return Err(AppError::Primitive(format!(
                 "edit: edits[{}] 的 old_content 归一化后为空（仅含 BOM/零宽字符），无法匹配",

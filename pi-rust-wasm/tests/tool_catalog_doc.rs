@@ -1,4 +1,4 @@
-use pi_wasm::core::tools::catalog::render_tool_catalog_markdown;
+use pi_wasm::core::tools::contract::catalog::render_tool_catalog_markdown;
 
 #[test]
 fn committed_tool_catalog_matches_catalog_renderer() {
