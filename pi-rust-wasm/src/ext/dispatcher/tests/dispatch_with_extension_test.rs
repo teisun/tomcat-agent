@@ -146,6 +146,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(

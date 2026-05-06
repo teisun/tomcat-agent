@@ -190,6 +190,7 @@ async fn async_timeout_produces_error() {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(

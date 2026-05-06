@@ -1506,6 +1506,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
                             stdout: " M src/main.rs\n?? new_file.txt\n".to_string(),
                             stderr: String::new(),
                             exit_code: 0,
+                            ..Default::default()
                         });
                     }
                 }
@@ -1514,6 +1515,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(
@@ -1980,6 +1982,7 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
                             stdout: " M src/main.rs\n?? new.txt\n".into(),
                             stderr: String::new(),
                             exit_code: 0,
+                            ..Default::default()
                         });
                     }
                 }
@@ -1988,6 +1991,7 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(

@@ -21,6 +21,7 @@
 //!   先用「头尾保留」简化截断（不写盘），保证 `BashResult` 字段不变。
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
+use super::output_accum::accumulate_with_persist;
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::primitive::{BashResult, PrimitiveOperation};
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
@@ -89,31 +90,6 @@ fn spawn_pipe_readers(child: &mut Child) -> (PipeReader, PipeReader) {
         Ok(buf)
     });
     (stdout_task, stderr_task)
-}
-
-/// 简易头尾保留截断（Phase-E.2 兜底，Phase-E.3 替换为 `EndTruncatingAccumulator` + 落盘）。
-///
-/// 为避免在多字节 UTF-8 中间切断，按 `char_indices` 逐字符切。当总长不超过 `max_chars`
-/// 时直接返回原文；否则：保留前 `max_chars / 2` 与后 `max_chars / 2` 字符，中间插入
-/// `... [N chars truncated] ...`。
-fn truncate_head_tail(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars || max_chars < 16 {
-        return s.to_string();
-    }
-    let half = max_chars / 2;
-    let total: Vec<(usize, char)> = s.char_indices().collect();
-    let head_end = total.get(half).map(|(i, _)| *i).unwrap_or_else(|| s.len());
-    let tail_start = total
-        .get(total.len().saturating_sub(half))
-        .map(|(i, _)| *i)
-        .unwrap_or(0);
-    let truncated_chars = total.len().saturating_sub(max_chars);
-    format!(
-        "{}\n... [truncated {} chars; full output not persisted in PR-E.2] ...\n{}",
-        &s[..head_end],
-        truncated_chars,
-        &s[tail_start..]
-    )
 }
 
 pub(super) async fn execute_bash_impl(
@@ -260,13 +236,25 @@ pub(super) async fn execute_bash_impl(
         .unwrap_or_else(|_| Ok(Vec::new()))
         .unwrap_or_default();
 
-    let mut stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let mut stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let raw_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let raw_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
-    // Phase-E.2 简化截断（Phase-E.3 接入 EndTruncatingAccumulator + 落盘）：分别对
-    // stdout / stderr 头尾保留 `max_output_chars` 字符，避免单流溢出 LLM 上下文。
-    stdout = truncate_head_tail(&stdout, max_output_chars);
-    stderr = truncate_head_tail(&stderr, max_output_chars);
+    // Phase-E.3：用 `output_accum::accumulate_with_persist` 替换 Phase-E.2 简易截断；
+    // 超限自动落盘 `bash_persist_dir/<prefix>-<unix_ms>-<rand6>.txt`，回填 `persisted_output_path`。
+    let persist_dir = executor.bash_persist_dir.as_deref();
+    let stdout_outcome =
+        accumulate_with_persist(&raw_stdout, max_output_chars, persist_dir, "bash-stdout");
+    let stderr_outcome =
+        accumulate_with_persist(&raw_stderr, max_output_chars, persist_dir, "bash-stderr");
+
+    let mut stdout = stdout_outcome.text;
+    let mut stderr = stderr_outcome.text;
+    let truncated = stdout_outcome.truncated || stderr_outcome.truncated;
+    // 优先返回 stdout 的落盘路径；如 stdout 未截断而 stderr 截断，则回填 stderr 路径。
+    let persisted_output_path = stdout_outcome
+        .persisted_path
+        .or(stderr_outcome.persisted_path)
+        .map(|p| p.display().to_string());
 
     if timed_out {
         let hint = format!(
@@ -280,6 +268,22 @@ pub(super) async fn execute_bash_impl(
             stderr.push_str(&hint);
         }
     }
+    if truncated {
+        let mut hint = format!(
+            "(output truncated; head/tail kept; original {}/{} chars)",
+            raw_stdout.chars().count(),
+            raw_stderr.chars().count()
+        );
+        if let Some(ref p) = persisted_output_path {
+            hint.push_str(&format!("; full output persisted to {}", p));
+        }
+        if stdout.is_empty() {
+            stdout = hint;
+        } else {
+            stdout.push('\n');
+            stdout.push_str(&hint);
+        }
+    }
 
     executor.audit.record_primitive(PrimitiveAuditEntry {
         operation: AuditPrimitiveOp::Bash,
@@ -288,12 +292,14 @@ pub(super) async fn execute_bash_impl(
         user_approved: true,
         success: !timed_out && exit_code == 0,
         detail: Some(format!(
-            "exit_code={} timed_out={} stdout_len={} stderr_len={} timeout_ms={}",
+            "exit_code={} timed_out={} truncated={} stdout_len={} stderr_len={} timeout_ms={} persisted={}",
             exit_code,
             timed_out,
+            truncated,
             stdout.len(),
             stderr.len(),
-            timeout_ms
+            timeout_ms,
+            persisted_output_path.as_deref().unwrap_or("-"),
         )),
         permission_scope: Some(permission_scope_str(bash_scope)),
         grant_type: Some(grant_type_str(bash_grant.grant_type)),
@@ -303,42 +309,14 @@ pub(super) async fn execute_bash_impl(
         stdout,
         stderr,
         exit_code,
+        timed_out,
+        truncated,
+        persisted_output_path,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_head_tail_preserves_short_input() {
-        let s = "hello world";
-        assert_eq!(truncate_head_tail(s, 100), s);
-    }
-
-    #[test]
-    fn truncate_head_tail_skips_when_max_chars_too_small() {
-        // 阈值过小（< 16）直接返原文，避免「截后比原文更长」反例
-        let s = "0123456789abcdef";
-        assert_eq!(truncate_head_tail(s, 8), s);
-    }
-
-    #[test]
-    fn truncate_head_tail_keeps_head_and_tail() {
-        let s: String = (0..200).map(|i| (b'a' + (i % 26) as u8) as char).collect();
-        let out = truncate_head_tail(&s, 32);
-        assert!(out.contains("[truncated"));
-        // 头部前 16 字符仍在
-        assert!(out.starts_with(&s[..16]));
-        // 尾部最后 16 字符仍在
-        assert!(out.ends_with(&s[s.len() - 16..]));
-    }
-
-    #[test]
-    fn truncate_head_tail_handles_multibyte_safely() {
-        let s = "中文a".repeat(100);
-        let out = truncate_head_tail(&s, 32);
-        assert!(out.contains("[truncated"));
-        // 不应 panic（按 char_indices 切，不会切到字符中间）
-    }
-}
+// Phase-E.3：截断 / 落盘相关纯逻辑单测已迁到 [`super::output_accum`] 模块。
+// 端到端 bash 单测（wallclock_timeout_kills_process / output_truncation_keeps_head_tail /
+// persists_full_output_when_truncated）放在 `primitive/tests/suite_test.rs`，与既有
+// `execute_bash_success` / `execute_bash_forbidden` 同栈，避免本文件重复装配
+// PermissionGate / Audit 等基础设施（详见 Phase-E.4 单测计划）。

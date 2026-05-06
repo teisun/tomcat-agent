@@ -98,6 +98,7 @@ mod confirm;
 mod gate;
 pub(crate) mod hashline_edit;
 mod helpers;
+pub(crate) mod output_accum;
 mod read;
 mod search;
 mod write_edit;
@@ -154,9 +155,14 @@ pub struct DefaultPrimitiveExecutor {
     /// 由 [`Self::with_bash_timeout_ms`] 覆盖（生产由 `[tools.bash] timeout_ms` config 注入）。
     pub(super) bash_timeout_ms: u64,
     /// T2-P0-016 PR-E.2：bash 工具单流字符上限（stdout / stderr 各算一份）；默认
-    /// [`crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS`]。Phase-E.2 仅做头尾保留兜底；
-    /// Phase-E.3 接入 `output_accum.rs` 后扩为「超限落盘 + persisted_output_path」。
+    /// [`crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS`]。Phase-E.3 起接入
+    /// `output_accum.rs`，超限走头尾保留 + 落盘 `bash_persist_dir`。
     pub(super) bash_max_output_chars: usize,
+    /// T2-P0-016 PR-E.3：bash 工具超限输出的落盘目录；`None` 时不落盘（仅截断）。
+    /// 生产路径：由 `api/chat` 装配时调用 [`Self::with_bash_persist_dir`] 注入
+    /// [`crate::infra::resolve_agent_trail_dir`] + `/tool-results`。测试可设 `tempfile::tempdir()`
+    /// 验证「超限落盘」路径，或保持 `None` 验证「仅截断」路径。
+    pub(super) bash_persist_dir: Option<std::path::PathBuf>,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -175,6 +181,7 @@ impl DefaultPrimitiveExecutor {
             write_normalize_crlf: crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
             bash_timeout_ms: crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS,
             bash_max_output_chars: crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
+            bash_persist_dir: None,
         }
     }
 
@@ -201,6 +208,13 @@ impl DefaultPrimitiveExecutor {
         } else {
             n.min(crate::infra::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS)
         };
+        self
+    }
+
+    /// T2-P0-016 PR-E.3：注入超限输出落盘目录（生产侧 `~/.pi_/agents/<id>/tool-results/`）。
+    /// `None` 表示「不落盘，仅截断」（测试默认 + 极小心智的 mock）。
+    pub fn with_bash_persist_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.bash_persist_dir = Some(dir);
         self
     }
 

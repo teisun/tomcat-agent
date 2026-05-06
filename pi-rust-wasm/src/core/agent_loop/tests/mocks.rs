@@ -130,6 +130,7 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -196,6 +197,7 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -272,6 +274,7 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(

@@ -35,13 +35,26 @@ pub struct EditFileResult {
     pub applied: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashResult {
     pub stdout: String,
     pub stderr: String,
     #[serde(rename = "code")]
     pub exit_code: i32,
+    /// T2-P0-016 PR-E.3：墙钟超时被 kill 时为 `true`；正常退出 / 立即结束为 `false`。
+    /// 历史 mock / 第三方 PrimitiveExecutor 反序列化兼容：缺省 `false`。
+    #[serde(default)]
+    pub timed_out: bool,
+    /// T2-P0-016 PR-E.3：原始 stdout / stderr 字符数超过 `[tools.bash].max_output_chars`
+    /// 上限被 [`crate::core::tools::primitive::executor::output_accum`] 头尾截断时为 `true`。
+    #[serde(default)]
+    pub truncated: bool,
+    /// T2-P0-016 PR-E.3：当 `truncated=true` 且配置了 `bash_persist_dir` 时，指向
+    /// `~/.pi_/agents/<id>/tool-results/<prefix>-<unix_ms>-<rand6>.txt`（合并后的完整原文）。
+    /// LLM 收到回执后可用 `read` 工具按需取回完整原文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_output_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

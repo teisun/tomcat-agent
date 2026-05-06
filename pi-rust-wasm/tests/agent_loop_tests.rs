@@ -133,6 +133,7 @@ impl PrimitiveExecutor for MockPrimitive {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -199,6 +200,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
                 stdout: "ok".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
     }
@@ -262,6 +264,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(

@@ -64,6 +64,7 @@ impl PrimitiveExecutor for MockPrimitive {
             stdout: "ok".to_string(),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
