@@ -199,7 +199,7 @@ async fn gate_bash_forbidden_blocks() {
     let ws = workspace_dir("bash_forbid");
     let exec = make_executor(ws.clone(), vec![], Arc::new(AllowAllConfirmation));
     let r = exec
-        .execute_bash("pi config set llm.api_key xxx", None, "p1", None)
+        .execute_bash("pi config set llm.api_key xxx", None, "p1", None, None)
         .await;
     assert!(matches!(r, Err(AppError::Permission(_))));
     let _ = std::fs::remove_dir(&ws);
@@ -229,7 +229,7 @@ async fn execute_bash_audit_records_bash_scope() {
         gate.into_arc(),
     );
     let r = exec
-        .execute_bash("echo ok", Some(&ws.to_string_lossy()), "p1", None)
+        .execute_bash("echo ok", Some(&ws.to_string_lossy()), "p1", None, None)
         .await
         .unwrap();
     assert_eq!(r.exit_code, 0);
@@ -366,7 +366,7 @@ async fn gate_bash_approval_allow_once() {
         Arc::new(ProgrammableConfirm::new(vec![ConfirmDecision::AllowOnce])),
     );
     let cmd = format!("rm -rf {}", target.display());
-    let r = exec.execute_bash(&cmd, None, "p1", None).await;
+    let r = exec.execute_bash(&cmd, None, "p1", None, None).await;
     if let Err(AppError::Permission(msg)) = r {
         panic!("permission denied unexpectedly: {}", msg)
     }

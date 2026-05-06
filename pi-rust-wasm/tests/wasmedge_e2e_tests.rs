@@ -1497,6 +1497,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
             _cwd: Option<&str>,
             _: &str,
             argv: Option<&[String]>,
+            _: Option<u64>,
         ) -> Result<BashResult, pi_wasm::AppError> {
             if cmd == "git" {
                 if let Some(args) = argv {
@@ -1970,6 +1971,7 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
             _: Option<&str>,
             _: &str,
             argv: Option<&[String]>,
+            _: Option<u64>,
         ) -> Result<BashResult, pi_wasm::AppError> {
             if cmd == "git" {
                 if let Some(args) = argv {

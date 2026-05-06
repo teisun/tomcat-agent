@@ -387,6 +387,7 @@ async fn test_primitive_executor_execute_bash_echo_succeeds(
             Some(canonical_dir.to_str().unwrap()),
             "test_plugin",
             None,
+            None,
         )
         .await?;
     tracing::info!("Act: execute_bash('echo hello')");
@@ -422,6 +423,7 @@ async fn test_primitive_executor_execute_bash_argv_echo() -> Result<(), Box<dyn 
             Some(canonical_dir.to_str().unwrap()),
             "test_plugin",
             Some(&argv),
+            None,
         )
         .await?;
     assert_eq!(result.exit_code, 0);

@@ -133,6 +133,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             _cwd: Option<&str>,
             _id: &str,
             argv: Option<&[String]>,
+            _timeout_ms: Option<u64>,
         ) -> Result<BashResult, AppError> {
             if cmd == "echo" {
                 if let Some(a) = argv {

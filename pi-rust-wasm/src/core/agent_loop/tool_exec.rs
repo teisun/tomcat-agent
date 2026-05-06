@@ -321,8 +321,14 @@ pub(super) async fn execute_tool(
                         .collect()
                 });
             let argv_ref = argv_store.as_deref();
+            // T2-P0-016 PR-E.2：解析 schema `timeout_ms`，clamp 到 [1, MAX_TOOLS_BASH_TIMEOUT_MS]
+            // 后传给 primitive；None / 0 / 越界一律由 primitive 兜底为 config 默认。
+            let timeout_ms_override: Option<u64> = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.min(crate::infra::MAX_TOOLS_BASH_TIMEOUT_MS));
             primitive
-                .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref)
+                .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref, timeout_ms_override)
                 .await
                 .map(|r| {
                     let mut out = String::new();

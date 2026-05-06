@@ -55,7 +55,7 @@ async fn bash_assignment_rhs_denied_in_all_supported_positions() {
         format!("p={}; ls -la \"$p\"", denied.display()),
     ] {
         let err = exec
-            .execute_bash(&command, None, "__test__", None)
+            .execute_bash(&command, None, "__test__", None, None)
             .await
             .unwrap_err();
         assert!(

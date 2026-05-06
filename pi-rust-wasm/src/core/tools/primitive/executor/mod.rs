@@ -150,6 +150,13 @@ pub struct DefaultPrimitiveExecutor {
     /// config 注入，测试可关掉验证「字节透传」语义）。详见
     /// `docs/architecture/tools/write.md` §3.3 / §8。
     pub(super) write_normalize_crlf: bool,
+    /// T2-P0-016 PR-E.2：bash 工具墙钟超时（毫秒）；默认 [`crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS`]。
+    /// 由 [`Self::with_bash_timeout_ms`] 覆盖（生产由 `[tools.bash] timeout_ms` config 注入）。
+    pub(super) bash_timeout_ms: u64,
+    /// T2-P0-016 PR-E.2：bash 工具单流字符上限（stdout / stderr 各算一份）；默认
+    /// [`crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS`]。Phase-E.2 仅做头尾保留兜底；
+    /// Phase-E.3 接入 `output_accum.rs` 后扩为「超限落盘 + persisted_output_path」。
+    pub(super) bash_max_output_chars: usize,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -166,7 +173,35 @@ impl DefaultPrimitiveExecutor {
             gate,
             read_max_bytes: MAX_READ_BYTES,
             write_normalize_crlf: crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
+            bash_timeout_ms: crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS,
+            bash_max_output_chars: crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
         }
+    }
+
+    /// T2-P0-016 PR-E.2：覆盖 bash 工具默认墙钟超时。
+    ///
+    /// **生产路径**：由 `[tools.bash] timeout_ms` config 在 `api/chat` 装配
+    /// `DefaultPrimitiveExecutor` 时调用（与 [`Self::with_read_max_bytes`] 同形）。
+    /// **测试路径**：可设小到 50 ms 模拟 wall-clock kill 行为。
+    pub fn with_bash_timeout_ms(mut self, ms: u64) -> Self {
+        self.bash_timeout_ms = if ms == 0 {
+            crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS
+        } else {
+            ms.min(crate::infra::MAX_TOOLS_BASH_TIMEOUT_MS)
+        };
+        self
+    }
+
+    /// T2-P0-016 PR-E.2：覆盖 bash 工具单流字符上限。
+    ///
+    /// 测试侧用极小值（如 64）让 fixture 命令 stdout 触发头尾保留分支。
+    pub fn with_bash_max_output_chars(mut self, n: usize) -> Self {
+        self.bash_max_output_chars = if n == 0 {
+            crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS
+        } else {
+            n.min(crate::infra::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS)
+        };
+        self
     }
 
     /// PR-RB（T1）覆盖 read 工具文本路径的字节上限。
@@ -254,8 +289,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         cwd: Option<&str>,
         plugin_id: &str,
         argv: Option<&[String]>,
+        timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
-        bash::execute_bash_impl(self, command, cwd, plugin_id, argv).await
+        bash::execute_bash_impl(self, command, cwd, plugin_id, argv, timeout_ms).await
     }
 
     async fn require_user_confirmation(

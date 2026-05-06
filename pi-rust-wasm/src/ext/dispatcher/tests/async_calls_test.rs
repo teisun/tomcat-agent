@@ -183,6 +183,7 @@ async fn async_timeout_produces_error() {
             _: Option<&str>,
             _: &str,
             _: Option<&[String]>,
+            _: Option<u64>,
         ) -> Result<BashResult, AppError> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             Ok(BashResult {

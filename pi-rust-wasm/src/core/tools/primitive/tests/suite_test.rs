@@ -225,7 +225,7 @@ async fn execute_bash_success() {
         make_gate(&dir),
     );
     let res = exec
-        .execute_bash("echo ok", Some(&path_str), "p1", None)
+        .execute_bash("echo ok", Some(&path_str), "p1", None, None)
         .await
         .unwrap();
     assert_eq!(res.exit_code, 0);
@@ -248,7 +248,13 @@ async fn execute_bash_forbidden() {
         make_gate(&dir),
     );
     let r = exec
-        .execute_bash("pi config set llm.api_key xxx", Some(&path_str), "p1", None)
+        .execute_bash(
+            "pi config set llm.api_key xxx",
+            Some(&path_str),
+            "p1",
+            None,
+            None,
+        )
         .await;
     assert!(r.is_err());
     assert!(matches!(r.unwrap_err(), AppError::Permission(_)));

@@ -127,6 +127,7 @@ impl PrimitiveExecutor for MockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -188,6 +189,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
@@ -253,6 +255,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
         Ok(BashResult {
