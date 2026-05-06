@@ -1,6 +1,33 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-05-06 14:32 | ACTIVE | feature/strengthen-four-core-tools | - |
+| Tom | 2026-05-06 16:35 | ACTIVE | feature/strengthen-four-core-tools | - |
+
+### 2026-05-06 | T2-P0-016 子项 `write` 全部 10 个 todo 完成（PENDING_INTEGRATION）
+
+- **PR-命名**：`catalog::write_file → write`、`tool_exec` `match "write"`、`system_prompt` 旧名移除；`session/manager/context.rs` 的 `warn_if_legacy_tool_name` 追加 `write_file → write` 旧名 warn 分支（OnceLock 节流，无重定向；与 `read_file` / `edit_file` 同处汇总）；`docs/tool-catalog.md` 重派生（`write_file → write`，edit description 字面量同步）。
+- **PR-C（T1）契约门禁**：`tool_exec` `write` 分支用 `normalize_path` 算 `resolved`（与 read 落 stamp 同形 key）；新增 `Exists` / `NoPriorRead` / `Stale` 三类策略拒 = `is_error: true` 早退；成功写盘后 `ReadFileState::invalidate(&resolved)`；`write_file_impl` 加 `exists && !overwrite → AppError::Primitive(Exists)` 二道防线，防止 trait 直调（dispatcher / extension）绕过。
+- **NoPriorRead 与 edit 同 PR 强拒**：抽公共函数 `tool_exec::check_mutation_stamp(state, path, op_label)`（前身 `check_edit_staleness`），无 stamp → `NoPriorRead`；`edit` / `hashline_edit` / `write` 三分支统一调用；`tool_exec_dedup_test::edit_no_prior_read_does_not_block_phase1` 改造为 `edit_no_prior_read_rejects_after_t2_p0_016`（断言反转 + 改名 + 磁盘字节级未变断言）；其它 6 个 edit/hashline_edit/secrets 单测加 `prime_read_stamp` helper 先 `read` 再 `edit`；同步 [edit.md](../../openspec/specs/architecture/tools/edit.md) §2.4.2 表 5 / §2.4.3 / §9 表 / §10 测试矩阵 / §10.2「Phase1 策略」段。
+- **PR-G（T2）LF + 回执**：`infra::config::types` 新增 `ToolsWriteConfig { normalize_crlf }`（默认 `true`，常量 `DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF`）；`infra/config/mod.rs` 与 `infra/mod.rs` 重导出；`DefaultPrimitiveExecutor` 增 `write_normalize_crlf` 字段 + `with_write_normalize_crlf` builder（与 `with_read_max_bytes` 模式一致）；`api/chat` 装配处注入；`write_file_impl` 在 `write_file_atomic` 之前做 `\r\n → \n`，并先 `read_file_utf8` 旧内容用于 `build_simple_diff`；`WriteFileResult` 扩字段 `bytes_written: u64` + `diff_hint: Option<String>`（`#[serde(default)]`，老调用方 `bytes_written=0/diff_hint=None` 兼容；mocks / e2e fixture 全部补齐）；`tool_exec` 回执文案：`已写入 / 已覆盖: <path> (N bytes)` + 可选 `--- diff` 块。
+- **T3-K secrets**：`write_file_impl` 在 LF 规范化后、`.bak` / 落盘之前调 `scan_new_content_for_secrets(original_or_empty, final_text)`（与 edit 共用函数，仅扫**新引入**的命中，避免 false-positive）；命中走 `require_user_confirmation(PrimitiveOperation::Write, …)`，拒 → `AppError::Primitive("SecretsRejected: …")` + 审计 `success=false / user_approved=false` + 磁盘字节级未变（新建场景文件根本不会被创建）。
+- **测试**：`cargo test --lib` 730 通过（674 → 704 → 714 → 730，本卡 +16：5 PR-C/PR-命名 + 3 PR-G + 3 T3-K + 5 config）；`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 全绿。
+- **不变量**：`PrimitiveExecutor::write_file` trait 方法名 / dispatcher `("fs"|"primitive","writeFile")` / 所有 mock / `wasmedge_e2e_tests` 中的 `writeFile` host_call 名 全部未动；`tests/context_management_tests.rs::test_build_context_preserves_order_with_mixed_turns` fixture 故意保留 `write_file` 旧名以验证 transcript 历史回放。
+
+### 🔌 INTERFACE (接口变更，T2-P0-016 write 子项)
+
+- **LLM 工具名**：`write_file → write`（短名，无运行时别名）；transcript 旧名仅 `tracing::warn` 一次。
+- **`write` 入参**：`{ path, content, overwrite? }`（与冻结 [write.md](../../openspec/specs/architecture/tools/write.md) §4.1 一致；**不**新增 per-call `normalize_line_endings?`）。
+- **`write` 语义**：`overwrite=false && exists → Exists`；`overwrite=true && exists` 必先 `read`（否则 `NoPriorRead`）+ stamp 与 `mtime/size` 一致（否则 `Stale`）；成功后 `ReadFileState::invalidate(&resolved)`；磁盘上 `\r\n` 默认折叠为 `\n`（`[tools.write] normalize_crlf=false` 关掉）；回执含 UTF-8 字节数 + 可选 diff 摘要。
+- **共享门禁**：`edit` / `hashline_edit` 与 `write(overwrite=true)` 在无 prior read 时**统一强拒** `NoPriorRead`（同函数 `check_mutation_stamp`）。
+- **新配置**：`[tools.write] normalize_crlf` / 环境变量 `PI_WASM__TOOLS__WRITE__NORMALIZE_CRLF`，默认 `true`。
+
+### ⚠️ BLOCKED (阻塞/风险)
+
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无（write 子项） | T2-P0-016 卡内 L313「bash + 短名总闸」仍 TODO，由另认领推进，不在本 PR 范围 | - |
+
+---
+
 
 ### ✅ DONE (已完成/进行中)
 

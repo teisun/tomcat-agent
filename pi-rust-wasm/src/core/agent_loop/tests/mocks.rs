@@ -103,6 +103,8 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -166,6 +168,8 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -239,6 +243,8 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(

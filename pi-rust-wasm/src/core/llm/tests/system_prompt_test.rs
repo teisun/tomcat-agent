@@ -5,7 +5,8 @@ fn build_system_prompt_contains_tools_and_workspace() {
     let prompt = build_system_prompt("/home/user/workspace");
     assert!(prompt.contains("read"));
     assert!(!prompt.contains("read_file"));
-    assert!(prompt.contains("write_file"));
+    assert!(prompt.contains("write"));
+    assert!(!prompt.contains("write_file"));
     assert!(prompt.contains("edit"));
     assert!(!prompt.contains("edit_file"));
     assert!(prompt.contains("execute_bash"));

@@ -354,6 +354,8 @@ pub fn compute_context_budget_chars(config: &ContextConfig) -> usize {
 pub struct ToolsConfig {
     #[serde(default)]
     pub read: ToolsReadConfig,
+    #[serde(default)]
+    pub write: ToolsWriteConfig,
 }
 
 /// `[tools.read]` 子表：当前仅含 `max_bytes`。
@@ -386,6 +388,38 @@ impl Default for ToolsReadConfig {
     fn default() -> Self {
         Self {
             max_bytes: default_tools_read_max_bytes(),
+        }
+    }
+}
+
+/// `[tools.write]` 子表：当前仅含 `normalize_crlf`（PR-G）。
+///
+/// 与 `read.md` § 工具子系统配置一致的设计口径：仅放「磁盘 / 安全相关」全局开关；
+/// `normalize_crlf` 控制 [`crate::core::tools::primitive::executor::write_edit::write_file_impl`]
+/// 写入字节前是否将 `\r\n` 折叠为 `\n`（与 [write.md](../../../openspec/specs/architecture/tools/write.md)
+/// §3.3 / §8 一致）。**默认 `true`**：跨平台仓库统一收 `\n`，行为与
+/// pi-mono / cc-fork-01 同档。
+///
+/// **schema 决策（write.md §4.1）**：**不**新增 per-call `normalize_line_endings?` 字段，
+/// 避免 schema 多一维让 LLM 混淆；用户可通过 `pi.config.toml [tools.write] normalize_crlf = false`
+/// 或环境变量 `PI_WASM__TOOLS__WRITE__NORMALIZE_CRLF=false` 关掉。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolsWriteConfig {
+    #[serde(default = "default_tools_write_normalize_crlf")]
+    pub normalize_crlf: bool,
+}
+
+/// 默认开启 LF 规范化（write.md §3.3 / §8 决策表）。
+pub const DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF: bool = true;
+
+fn default_tools_write_normalize_crlf() -> bool {
+    DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF
+}
+
+impl Default for ToolsWriteConfig {
+    fn default() -> Self {
+        Self {
+            normalize_crlf: default_tools_write_normalize_crlf(),
         }
     }
 }

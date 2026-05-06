@@ -220,24 +220,30 @@ impl ChatContext {
             ));
 
         let _ = workspace_roots; // 已通过 GateConfig.workspace_roots 落入 gate；executor 不再单独保存。
-        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
-            config.primitive.clone(),
-            confirmation.clone(),
-            audit.clone(),
-            gate.clone(),
-        ));
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
+            DefaultPrimitiveExecutor::new(
+                config.primitive.clone(),
+                confirmation.clone(),
+                audit.clone(),
+                gate.clone(),
+            )
+            // T2-P0-016 PR-G：把 `[tools.write] normalize_crlf` 注入 executor。
+            .with_write_normalize_crlf(config.tools.write.normalize_crlf),
+        );
 
         // PR-7：构造 config_get / config_set 工具后端。失败（无法解析 config_path）
         // 时降级为 `None`，工具命中返回"未启用"错误，主流程不阻塞。
         let config_backend: Option<crate::core::agent_loop::SharedConfigBackend> =
             match crate::api::cli::config_file_path() {
-                Ok(p) => Some(Arc::new(crate::core::tools::config_tool::ChatConfigBackend {
-                    ctx: crate::core::tools::config_tool::ConfigToolContext::new(
-                        p,
-                        confirmation.clone(),
-                    )
-                    .with_gate(gate.clone()),
-                })),
+                Ok(p) => Some(Arc::new(
+                    crate::core::tools::config_tool::ChatConfigBackend {
+                        ctx: crate::core::tools::config_tool::ConfigToolContext::new(
+                            p,
+                            confirmation.clone(),
+                        )
+                        .with_gate(gate.clone()),
+                    },
+                )),
                 Err(_) => None,
             };
 
@@ -265,7 +271,9 @@ impl ChatContext {
             session_grants,
             config_backend,
             gate,
-            read_file_state: Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default()),
+            read_file_state: Arc::new(
+                crate::core::tools::pipeline::read_state::ReadFileState::default(),
+            ),
         })
     }
 
@@ -280,8 +288,8 @@ impl ChatContext {
 
 // ─── CLI UserConfirmationProvider ─────────────────────────────────────────────
 
-use crate::core::tools::primitive::PrimitiveOperation;
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::tools::primitive::PrimitiveOperation;
 
 pub struct CliConfirmation;
 

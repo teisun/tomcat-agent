@@ -44,8 +44,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::core::permission::{GrantTrigger, PermissionDecision, PermissionGate, SessionGrants};
-use crate::core::tools::primitive::PrimitiveOperation;
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
 
 pub const CWD_PROMPT_CHOICES: &str = "[s/w/c]";

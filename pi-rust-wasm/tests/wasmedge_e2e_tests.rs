@@ -1476,6 +1476,8 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(
@@ -1947,6 +1949,8 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(

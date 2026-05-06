@@ -47,12 +47,68 @@ pub(super) async fn write_file_impl(
         .await?;
     let path_str = path_buf.to_string_lossy().to_string();
 
-    if overwrite && path_buf.exists() {
+    // T2-P0-016 PR-C 二道防线：tool_exec 已先做 `exists && !overwrite` 早退，
+    // 但 dispatcher / extension 可能直接调 trait（绕过编排），这里再挡一次。
+    // 与 edit 的 `.ipynb` 在 tool_exec + primitive 双层一致。
+    let pre_existed = path_buf.exists();
+    if !overwrite && pre_existed {
+        return Err(AppError::Primitive(format!(
+            "Exists: 路径 `{}` 已存在；如需替换请显式 `overwrite=true`",
+            path
+        )));
+    }
+
+    // T2-P0-016 PR-G：覆盖写时先读旧内容用于 diff hint（顺序：先 metadata 由编排层
+    // 校验 stamp → 这里读全文算 diff → 落 .bak → 写盘）。读盘失败不阻断写流程，
+    // 只是回执里不带 diff 摘要。
+    let original: Option<String> = if overwrite && pre_existed {
+        crate::infra::platform::read_file_utf8(&path_buf).ok()
+    } else {
+        None
+    };
+
+    // T2-P0-016 PR-G：可配置 LF 规范化（默认开）。关闭时按字节透传模型给的 `content`。
+    let final_bytes: Vec<u8> = if executor.write_normalize_crlf {
+        content.replace("\r\n", "\n").into_bytes()
+    } else {
+        content.as_bytes().to_vec()
+    };
+
+    // T2-P0-016 T3-K：secrets 扫描在 .bak / 落盘之前。命中走 require_user_confirmation；
+    // 用户拒 → 返回 SecretsRejected，磁盘字节级未变（与 edit `edit_file_impl` L118–L142 对称，
+    // 两条路径**仅 op_label 不同**：Edit / Write）。
+    let final_text = std::str::from_utf8(&final_bytes).unwrap_or("");
+    let original_for_secrets = original.as_deref().unwrap_or("");
+    if let Some(hits) = scan_new_content_for_secrets(original_for_secrets, final_text) {
+        let preview = crate::core::security::secrets::format_preview(&hits);
+        let approved = executor
+            .require_user_confirmation(PrimitiveOperation::Write, &preview, plugin_id)
+            .await?;
+        if !approved {
+            executor.audit.record_primitive(PrimitiveAuditEntry {
+                operation: AuditPrimitiveOp::Write,
+                path_or_cmd: path_str.clone(),
+                plugin_id: plugin_id.to_string(),
+                user_approved: false,
+                success: false,
+                detail: Some(format!("SecretsRejected: {} hits", hits.len())),
+                permission_scope: Some(permission_scope_str(scope)),
+                grant_type: Some(grant_type_str(grant.grant_type)),
+                grant_trigger: Some(grant_trigger_str(grant.trigger)),
+            });
+            return Err(AppError::Primitive(format!(
+                "SecretsRejected: write 内容命中 {} 条潜在敏感信息且用户拒绝写入；磁盘未被修改",
+                hits.len()
+            )));
+        }
+    }
+
+    if overwrite && pre_existed {
         let backup = path_buf.with_extension("bak");
         let _ = std::fs::copy(&path_buf, &backup);
     }
 
-    write_file_atomic(&path_buf, content.as_bytes())?;
+    write_file_atomic(&path_buf, &final_bytes)?;
     executor.audit.record_primitive(PrimitiveAuditEntry {
         operation: AuditPrimitiveOp::Write,
         path_or_cmd: path_str,
@@ -64,9 +120,18 @@ pub(super) async fn write_file_impl(
         grant_type: Some(grant_type_str(grant.grant_type)),
         grant_trigger: Some(grant_trigger_str(grant.trigger)),
     });
+
+    let diff_hint = original.as_deref().map(|orig| {
+        // 写盘后的字节再以 UTF-8 解码用于 diff；非 UTF-8（理论上 LF 规范化前 content 就已是 &str）回退为空。
+        let after = std::str::from_utf8(&final_bytes).unwrap_or("");
+        build_simple_diff(orig, after)
+    });
+
     Ok(WriteFileResult {
         path: path.to_string(),
         written: true,
+        bytes_written: final_bytes.len() as u64,
+        diff_hint,
     })
 }
 

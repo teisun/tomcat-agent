@@ -294,22 +294,23 @@
 | 字段 | 内容 |
 |------|------|
 | **优先级** | P0 |
-| **状态** | `TODO` |
-| **负责人** | — |
-| **分支** | `feature/strengthen-four-core-tools`（建议；可与主计划分 PR 串行合入 `develop`） |
-| **阻塞点** | — |
+| **状态** | `PENDING_INTEGRATION`（**write** 子项 L312 已交付，自测全绿；**bash + 短名总闸** L313 仍 `TODO`，由另 PR / 另认领跟进；本卡须等 L313 完成后再整体 `DONE`） |
+| **负责人** | Tom（write 子项） / —（bash + 短名总闸 L313） |
+| **分支** | `feature/strengthen-four-core-tools`（write 子项已落本分支；bash 子项可同分支或另开 PR 串行合入 `develop`） |
+| **阻塞点** | L313 bash + 短名总闸尚未认领；不影响 write 子项独立验收 |
 | **关联 TODOS** | —（落地后按 PR 拆 `#T-xxx`） |
-| **计划文档** | [strengthen-four-core-tools_b51c9eae.plan.md](/Users/yankeben/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md) |
+| **计划文档** | [strengthen-four-core-tools_b51c9eae.plan.md](/Users/yankeben/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)；**write 子项执行计划**：[t2-p0-016_write_子项_2f15e19f.plan.md](/Users/yankeben/.cursor/plans/t2-p0-016_write_子项_2f15e19f.plan.md) |
 | **横向调研** | [agent-tools-comparison.md](../docs/reports/agent-tools-comparison.md) §4.2 |
 
 **目标**：在 **T2-P0-005** 已交付 catalog / `read` 全栈加强 / `read_state` 等基线之上，按主计划把 **`write` / `bash`** 及 **PR-A 四工具短名**（`read/write/edit/bash`）与 **T1→T2→T3** 余量对齐 pi-mono 契约 + cc-fork / pi_agent_rust 工程化切片；**`edit` 实现与验收见独立卡 T2-P0-017**；主计划 §0.7–0.8 选型表为权威。
 
-**说人话**：`read` 已在 develop；**改文件**单独一张 **T2-P0-017** 跟；本卡盯住 **写文件、跑 shell、统一短工具名** 和主计划里剩下的 PR。
+**说人话**：`read` 已在 develop；**改文件**单独 **T2-P0-017**；**写文件**的冻结方案见 [write.md](../openspec/specs/architecture/tools/write.md)，代码与 **T2-P0-017**（含 NoPriorRead）同节奏联调；本卡还盯住 **bash**、**四工具短名总闸** 和主计划里剩下的 PR。
 
 **子项**：
 - [x] **read（已完成）**：交付见 **T2-P0-005** 子项「**T2-P0-tools-read | read 工具加强**」（2026-05-05 DONE）；冻结版技术方案 [read.md](../openspec/specs/architecture/tools/read.md)；专项执行计划 `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md`。与主计划 **§2.1 read** / **§4.1 read 多模态** / **§4.4 hashline** 等对齐部分已随该子项落地。
-- [ ] **`edit`（归并 T2-P0-017）**：OpenSpec + 代码实现与测试矩阵不在本卡展开；唯一追踪入口 **T2-P0-017**（本 §4 中位于 **T2-P0-005** 之后）+ [edit.md](../openspec/specs/architecture/tools/edit.md)。与 **T2-P0-016** 同主计划分支合入时协调 **PR-A** 中 `edit` 短名/schema 与 **T2-P0-017** 的落地顺序。
-- [ ] **write + bash + 短名总闸（PR-A～E 等）**：**PR-A** 四工具 `catalog`/`tool_exec`/`system_prompt`/测试断言短名 + transcript 单迭代 fallback（主计划 §1）；**PR-B～E** T1 read 余量核对、write staleness/overwrite、bash 超时与输出累积（主计划 §2）；T2/T3 按主计划 §3–§4 拆 PR；汇总契约见主计划 §5 `builtin-tools.md`（待建）。
+- [x] **`edit`（归并 T2-P0-017）**：本卡**不**展开 OpenSpec / 实现 / 测试矩阵；唯一追踪入口 **T2-P0-017**（本 §4 中 **T2-P0-005** 之后）+ [edit.md](../openspec/specs/architecture/tools/edit.md)。**说明**：「归并」指责任边界已切走；**edit 代码与集成收尾**仍以 **T2-P0-017** 状态为准（当前 **PENDING_INTEGRATION**，含 **NoPriorRead** 与下方 **write** 子项同 PR 节奏，见 edit.md §10.2）。与 **T2-P0-016** 同主计划分支合入时协调 **PR-A** 中 `edit` 短名/schema 与 **T2-P0-017** 的落地顺序。
+- [x] **`write`（staleness / overwrite / 回执 / secrets）**：冻结版技术方案 [write.md](../openspec/specs/architecture/tools/write.md)。**2026-05-06 PENDING_INTEGRATION**：执行计划 [t2-p0-016_write_子项_2f15e19f.plan.md](/Users/yankeben/.cursor/plans/t2-p0-016_write_子项_2f15e19f.plan.md) 全部 10 个 todo 完成。落地内容：① PR-命名 `write_file → write` + transcript warn；② PR-C **T1** 真 `overwrite` / `ReadFileState` 陈旧校验（`Exists` / `NoPriorRead` / `Stale` 早退）+ 写后 `invalidate` + `write_file_impl` 二道防线；③ 与 **T2-P0-017 edit** 同一 PR 抽 `tool_exec::check_mutation_stamp` 共用函数 → 无 stamp 强拒 `NoPriorRead`，同步 [edit.md](../openspec/specs/architecture/tools/edit.md) §2.4.3 / §10.2；④ PR-G **T2** `[tools.write] normalize_crlf=true` 默认（可关）+ `WriteFileResult.bytes_written` / `diff_hint` 回执；⑤ T3-K `content` secrets 扫描 + `require_user_confirmation(Write)` + `SecretsRejected` 拒后磁盘字节级未变。`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib`（730 passed）全绿；`docs/tool-catalog.md` 已重派生；`docs/status/feature-strengthen-four-core-tools.md` 同步更新。
+- [ ] **`bash` + 四工具短名总闸（PR-A～E 等）**：**PR-A** 四工具 `read`/`write`/`edit`/`bash` 的 `catalog` / `tool_exec` / `system_prompt` / 测试断言短名 + transcript 单迭代 fallback（主计划 §1）；**PR-B～E** T1 **read** 余量核对、**bash** wall-clock 超时与输出累积/落盘（主计划 §2）；bash 的 T2/T3（后台任务、AST 等）按主计划 §3–§4 另拆 PR；汇总契约见主计划 §5 `builtin-tools.md`（待建）。
 
 **依赖**：**T2-P0-005** `DONE`（含 read、`read_state`、catalog 派生链）；**T2-P0-004**；**T2-P0-013**（`agent_workspace_dir` 等目录语义，影响 cwd/bash 描述）。
 
@@ -317,12 +318,13 @@
 
 **协作接口**：
 - 消费：`BuiltinToolCatalog`、`tool_exec`、`read_state`、`write_file_atomic`、bash 执行器
-- 提供：短名工具 wire、`write`/`bash` 与主计划一致的 schema 与错误语义、openspec `tools/*.md` 与（待建）`builtin-tools.md`（`edit` 侧接口与 **T2-P0-017** 对齐）
+- 提供：短名工具 wire；**`write`** 与 [write.md](../openspec/specs/architecture/tools/write.md) 一致的 schema / 错误语义 / 写后 `invalidate`；**`bash`** 与主计划 §2–§4 一致的超时与输出语义；openspec `tools/*.md` 与（待建）`builtin-tools.md`（`edit` 侧接口与 **T2-P0-017** 对齐）
 
 **验收标准**（对齐主计划 §6 测试矩阵 + 各 PR 门禁）：
 - `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib` 全绿；相关集成测按主计划登记 `scripts/test-groups.sh`
 - **`edit`**：**T2-P0-017** `DONE` 且 [edit.md](../openspec/specs/architecture/tools/edit.md) §10 测试矩阵随 PR-D/H/M 从 PENDING→✅（函数名以合入时仓库为准）
-- **write/bash/命名**：主计划 §6 表中对应阶段用例覆盖；`docs/tool-catalog.md` 与 catalog 无漂移
+- **`write`**：[write.md](../openspec/specs/architecture/tools/write.md) §10 矩阵随 PR-C / PR-G / T3-K 推进；主计划 §6 与 write.md 所列用例覆盖；`docs/tool-catalog.md` 与 catalog 中 `write` 条目无漂移
+- **`bash` + 短名**：主计划 §6 表中 PR-A、PR-E（及 bash T2/T3）对应阶段用例覆盖；`docs/tool-catalog.md` 与 catalog 无漂移
 
 ---
 
@@ -1064,6 +1066,7 @@ flowchart LR
 |------|------|------|
 | 2026-05-05 | 新增 **T2-P0-017** + 收敛 **T2-P0-016** | 在 **T2-P0-005** 与 **T2-P0-006** 之间插入 **T2-P0-017 \| strengthen-edit-tool**（P0，`TODO`）：主计划 [strengthen-four-core-tools_b51c9eae.plan.md](/Users/yankeben/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)；子项 **[x] read（已完成）** + **[ ] `edit`**（OpenSpec [edit.md](../openspec/specs/architecture/tools/edit.md) + **PR-D / PR-H / PR-M** 与 **T3-K** `new_content` secrets，见 edit.md §2.4.5）。**T2-P0-016** 原 `edit` 子项改为归并至 **T2-P0-017**；**T2-P0-005**「被依赖」增链 **T2-P0-017**；§5 拓扑增 `P005→P017`；§1.1/§1.3 交付任务总数 **18→19**；**T2-P0-013**「被依赖」增 **T2-P0-017**；**T2-P1-007** 阻塞口径含 **T2-P0-017**。 |
 | 2026-05-05 | 新增 **T2-P0-016 \| strengthen-four-core-tools** | 按 `~/.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md` 在看板 **§4** 登记 P0 大任务：`read` 子项标 **已完成**（归并 **T2-P0-005**「T2-P0-tools-read」交付）；**edit** 子项锚定 OpenSpec [edit.md](../openspec/specs/architecture/tools/edit.md) + 主计划 PR-D/H/M；**write/bash/PR-A～E** 单列余量子项；**T2-P0-005**「被依赖」增链 **T2-P0-016**；**T2-P0-013**「被依赖」增链 **T2-P0-016**；§5 拓扑增 `P005→P016`、`P016→P107` 且保留 `P005→P107`。状态 `TODO`。 |
+| 2026-05-06 | **T2-P0-016** 子项：`edit` 归并勾选 + `write`/`bash` 拆分 | ① **`edit`（归并 T2-P0-017）** 标 **[x]**：表示责任已 exclusively **T2-P0-017**（实现收尾仍以该卡 **PENDING_INTEGRATION** 为准，含 NoPriorRead）。② 原 **write + bash + 短名** 拆为 **`write`**（挂 OpenSpec [write.md](../openspec/specs/architecture/tools/write.md)，PR-C/G/T3-K 与 invalidate 叙事）与 **`bash` + 四工具短名总闸**（PR-A～E、bash T2/T3）。③ 「说人话」与 **验收标准** 同步按子项拆开。 |
 | 2026-05-05 | L-3 红区 follow-up 闭环（DONE 不变） | Nibbles 在 `refactor/split-l3-files`（单 commit `4ad9423`）按 `~/.cursor/plans/l3_红区文件拆分整改_c7d01211.plan.md` 把上一轮 review 标出的两个 L-3 红区文件拆回 L-1 / L-2 上沿——`primitive/executor.rs` 2105→`executor/{mod 241/gate 140/helpers 77/read 537/search 955/write_edit 182/bash 150/confirm 26}.rs`（trait impl 整块留 mod.rs，每个方法 1 行委托 `xxx_impl(self,…)`；`pub(crate)` helper 由 mod.rs `pub(crate) use` 重导出，外部引用路径零变化）；`llm/openai_responses.rs` 1056→`openai_responses/{mod 411/payload 373/stream 321}.rs`（impl LlmProvider 整块留 mod.rs；`#[cfg(test)] #[path = "../tests/openai_responses_test.rs"] mod tests` 守 §A.9 私有项例外路径）；`registry.rs` 同步把 `#[path]` 指向 `openai_responses/mod.rs`。无 trait / catalog schema / 配置键 / 事件 wire / 错误码变更。`--no-ff` 合并入 develop（merge `6baf427`），全量门禁 `fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `./scripts/run-integration-tests.sh integration`（lib 674 + integration 229 = **903 PASS / 0 failed**，`.integration_test_output.log` 19:07–19:12，并发组 1m30s + 串行组 3m51s）全绿。Status 块写入 `docs/status/develop.md` 顶部。其他既有 L-2 黄区文件（`core/tools/config.rs` 826 / `api/chat/mod.rs` 820 / `compaction/preheat.rs` 792）按 plan §「不在范围」保持现状。 |
 | 2026-05-05 | T2-P0-005 PENDING_INTEGRATION→DONE | Nibbles：`feature/tool-system-cleanup`（12 ahead commits）通过 `--no-ff` 合并入 develop（merge `71183c4`）；develop 上 `fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `./scripts/run-integration-tests.sh integration`（lib 674 + integration 229 = **903 PASS / 0 failed**，`.integration_test_output.log` `EXIT_CODE=0`，并发组 1m35s + 串行组 3m47s）全量门禁绿。涵盖 5 子项：T-033 / T-034 / T-036 / search_files 兜底（含 macOS Homebrew 预检 + Tier1/Tier2 双实现）/ 多 LLM Responses（`registry` + `OpenAiResponsesProvider`）/ read 工具加强（PR-RA 命名 + RB T1 分页/二进制 hint/25 MiB + RF T2 行号/dedup/FILE_UNCHANGED + RJ T3 多模态 4 态 ReadResult/image/PDF 注入下一条 user/PR-RJ-0 `(mime,&Path)` helper + RM hashline xxh32）。Status 块写入 `docs/status/develop.md` 顶部；Follow-up：`primitive/executor.rs` 2105 行 / `llm/openai_responses.rs` 1056 行跨入 RUST_FILE_LINES_SPEC L-3 红区，记下一轮按子模块拆。 |
 | 2026-05-05 | T2-P0-005 子项 `T2-P0-tools-read \| read 工具加强` DONE | Spike 按 plan `~/.cursor/plans/strengthen-read-tool_92f396c7.plan.md` 完成 6 PR：PR-RA 命名 `read_file→read`（含 `OnceLock` 守 transcript fallback warn）/ PR-RB T1 `offset/limit` + 二进制结构化 hint + memchr 单循环抽窗 + `[tools.read].max_bytes` 25 MiB 上限 / PR-RF T2 `cat -n` 行号 + `read_state.rs` (`ReadStamp`/`ReadFileState`/`FILE_UNCHANGED_STUB`) 跨轮 dedup / PR-RJ-0 重构 `ChatMessageContentPart::image_b64`/`file_b64` 为 `(mime,&Path)` / PR-RJ T3-a `ReadResult` 4 态枚举 / T3-b PNG/JPEG/GIF/WebP/PDF magic 路由 + metadata 阶段 `IMAGE_MAX_BYTES`/`FILE_MAX_BYTES` 预检 / T3-c `tool_exec` 返回 `(String,bool,Vec<ChatMessageContentPart>)` + `tool_dispatcher` 把 image/file part 注入下一条 user message / PR-RM `hashline:bool` xxh32 行级短指纹（与 `line_numbers` 互斥并优先）。新增 `tests/read_tool_tests.rs` 6 例集成测试登记并发组；`docs/tool-catalog.md` 由 `gen-tool-catalog` 重派生；`User_Stories.md` / `E2E_SCENARIO_LIBRARY.md`（E2E-CLI-021/021a–e）/ `docs/status/feature-tool-system-cleanup.md`（追加 #4）/ `INTEGRATION_TEST_SPEC §7.2` 同步。门禁：`fmt` / `clippy --all-targets -D warnings` / `cargo test --lib`（674 PASS）/ `read_tool_tests`（6 PASS）/ `agent_loop_tests`（11 PASS）：PASS。 |

@@ -162,6 +162,8 @@ async fn async_timeout_produces_error() {
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(

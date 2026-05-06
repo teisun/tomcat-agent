@@ -83,6 +83,8 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: true,
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(

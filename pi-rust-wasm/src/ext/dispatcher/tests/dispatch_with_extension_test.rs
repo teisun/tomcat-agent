@@ -112,6 +112,8 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(

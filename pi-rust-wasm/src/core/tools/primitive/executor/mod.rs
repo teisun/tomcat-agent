@@ -143,6 +143,13 @@ pub struct DefaultPrimitiveExecutor {
     /// 默认 [`MAX_READ_BYTES`]（25 MiB）；可由
     /// [`Self::with_read_max_bytes`] 覆盖。仅当模型未传 `offset`/`limit` 时生效。
     pub(super) read_max_bytes: u64,
+    /// T2-P0-016 PR-G：write 工具是否在写盘前把 `\r\n` 折叠为 `\n`。
+    ///
+    /// 默认 [`crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF`]（`true`）；
+    /// 由 [`Self::with_write_normalize_crlf`] 覆盖（生产由 `[tools.write] normalize_crlf`
+    /// config 注入，测试可关掉验证「字节透传」语义）。详见
+    /// `openspec/specs/architecture/tools/write.md` §3.3 / §8。
+    pub(super) write_normalize_crlf: bool,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -158,6 +165,7 @@ impl DefaultPrimitiveExecutor {
             audit,
             gate,
             read_max_bytes: MAX_READ_BYTES,
+            write_normalize_crlf: crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
         }
     }
 
@@ -169,6 +177,15 @@ impl DefaultPrimitiveExecutor {
     /// 避免单测生成 25 MiB+ 的临时文件。
     pub fn with_read_max_bytes(mut self, bytes: u64) -> Self {
         self.read_max_bytes = bytes;
+        self
+    }
+
+    /// T2-P0-016 PR-G 覆盖 write 工具的 LF 规范化开关。
+    ///
+    /// **生产路径**：由 `[tools.write] normalize_crlf` config 在 `api/chat` 装配时调用。
+    /// **测试路径**：可置 `false` 验证「字节透传」语义，或置 `true` 验证 CRLF → LF 折叠。
+    pub fn with_write_normalize_crlf(mut self, on: bool) -> Self {
+        self.write_normalize_crlf = on;
         self
     }
 }

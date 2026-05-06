@@ -18,6 +18,14 @@ pub struct DirEntry {
 pub struct WriteFileResult {
     pub path: String,
     pub written: bool,
+    /// T2-P0-016 PR-G：实际写入磁盘的字节数（已含 LF 规范化）。
+    /// 为兼容历史调用方默认 `0`；编排层可据此渲染回执。
+    #[serde(default)]
+    pub bytes_written: u64,
+    /// T2-P0-016 PR-G：覆盖写时的 unified-style diff 摘要（相对写前快照），
+    /// 新建文件场景为 `None`；同样为兼容默认 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

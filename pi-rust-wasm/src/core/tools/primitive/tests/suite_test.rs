@@ -790,3 +790,162 @@ async fn edit_legacy_line_oriented_path_still_works() {
         "line1\nreplaced\nline3"
     );
 }
+
+// ─── T2-P0-016 PR-G：write LF 规范化 + 字节数 / diff 回执 ──────────────────
+
+#[tokio::test]
+async fn write_normalizes_crlf_when_enabled() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_lf_on");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let f = dir.join("crlf.txt");
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let res = exec
+        .write_file(&path_str, "a\r\nb\r\nc\r\n", false, "p1")
+        .await
+        .unwrap();
+    assert!(res.written);
+    let on_disk = std::fs::read(&f).unwrap();
+    assert_eq!(on_disk, b"a\nb\nc\n", "CRLF 应被折叠为 LF");
+    assert_eq!(res.bytes_written, on_disk.len() as u64);
+    assert!(res.diff_hint.is_none(), "新建文件不带 diff hint");
+    let _ = std::fs::remove_file(&f);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn write_does_not_normalize_when_disabled() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_lf_off");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let f = dir.join("crlf_off.txt");
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_write_normalize_crlf(false);
+    let res = exec
+        .write_file(&path_str, "a\r\nb\r\n", false, "p1")
+        .await
+        .unwrap();
+    assert!(res.written);
+    let on_disk = std::fs::read(&f).unwrap();
+    assert_eq!(on_disk, b"a\r\nb\r\n", "normalize_crlf=false 时字节透传");
+    assert_eq!(res.bytes_written, on_disk.len() as u64);
+    let _ = std::fs::remove_file(&f);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn write_secrets_pass_when_no_hit() {
+    let dir = temp_edit_dir("pi_wasm_write_secrets_pass");
+    let f = dir.join("clean.rs");
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let res = exec
+        .write_file(&path_str, "fn main() { println!(\"hi\"); }\n", false, "p1")
+        .await
+        .unwrap();
+    assert!(res.written, "无敏感命中应直接写盘");
+    assert!(f.exists());
+}
+
+#[tokio::test]
+async fn write_secrets_hit_proceeds_with_allow_all_confirmation() {
+    let dir = temp_edit_dir("pi_wasm_write_secrets_allow");
+    let f = dir.join("k.rs");
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let res = exec
+        .write_file(
+            &path_str,
+            "let k = \"sk-ABCDEFGHIJKLMNOPQRSTUV\";\n",
+            false,
+            "p1",
+        )
+        .await
+        .unwrap();
+    assert!(res.written, "AllowAll 下命中应放行写盘");
+    let on_disk = std::fs::read_to_string(&f).unwrap();
+    assert!(on_disk.contains("sk-ABCDEFGHIJKLMNOPQRSTUV"));
+}
+
+#[tokio::test]
+async fn write_secrets_hit_denied_reverts_to_no_op() {
+    let dir = temp_edit_dir("pi_wasm_write_secrets_deny");
+    let f = dir.join("k.rs");
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let r = exec
+        .write_file(
+            &path_str,
+            "let k = \"sk-ABCDEFGHIJKLMNOPQRSTUV\";\n",
+            false,
+            "p1",
+        )
+        .await;
+    assert!(r.is_err(), "DenyAll 下命中必须被拒");
+    let msg = r.unwrap_err().to_string();
+    assert!(
+        msg.contains("SecretsRejected"),
+        "错误文案应含 SecretsRejected：{}",
+        msg
+    );
+    assert!(!f.exists(), "拒绝时新文件不应被创建（磁盘字节级未变）");
+}
+
+#[tokio::test]
+async fn write_result_includes_byte_count_and_diff_hint() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_diff");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let f = dir.join("diff.txt");
+    std::fs::write(&f, "line1\nline2\nline3\n").unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let new_content = "line1\nLINE2\nline3\n";
+    let res = exec
+        .write_file(&path_str, new_content, true, "p1")
+        .await
+        .unwrap();
+    assert!(res.written);
+    assert_eq!(res.bytes_written, new_content.len() as u64);
+    let hint = res.diff_hint.expect("覆盖写应返回 diff hint");
+    assert!(
+        hint.contains("line2") && hint.contains("LINE2"),
+        "diff hint 应同时含旧行与新行：{}",
+        hint
+    );
+    let _ = std::fs::remove_file(&f);
+    let _ = std::fs::remove_file(dir.join("diff.bak"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

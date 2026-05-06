@@ -106,6 +106,8 @@ impl PrimitiveExecutor for MockPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -165,6 +167,8 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -228,6 +232,8 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(

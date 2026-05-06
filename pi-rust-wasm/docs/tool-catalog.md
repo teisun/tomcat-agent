@@ -52,7 +52,7 @@ Parameters:
 }
 ```
 
-### `write_file`
+### `write`
 
 - Label: Write File
 - Category: `filesystem`
@@ -101,7 +101,7 @@ Parameters:
 Edit an existing text file by replacing exact text. Two input shapes are accepted:
   Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }
   Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
-When both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write_file for new files or complete rewrites; do not use edit on binary files.
+When both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write for new files or complete rewrites; do not use edit on binary files.
 
 Parameters:
 

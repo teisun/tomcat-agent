@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    config_get_impl, config_set_impl, ConfigToolContext, is_array_field, is_readable, is_writable,
+    config_get_impl, config_set_impl, is_array_field, is_readable, is_writable, ConfigToolContext,
 };
 use crate::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, PermissionDecision, SessionGrants,

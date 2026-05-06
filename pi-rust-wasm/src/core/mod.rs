@@ -11,9 +11,6 @@ pub mod session;
 pub mod tools;
 
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentRunResult, ToolCallInfo};
-pub use tools::contract::confirmation::{
-    AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
-};
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use llm::system_prompt;
 pub use llm::{
@@ -33,7 +30,10 @@ pub use session::{
     ApiUsage, BranchSummaryEntry, CompactionResult, ContextState, SessionEntry, SessionHeader,
     SessionManager, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
-pub use tools::primitive as primitives;
 pub use tools::contract::confirmation;
-pub use tools::primitive::DefaultPrimitiveExecutor;
+pub use tools::contract::confirmation::{
+    AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
+};
 pub use tools::contract::registry::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};
+pub use tools::primitive as primitives;
+pub use tools::primitive::DefaultPrimitiveExecutor;

@@ -225,7 +225,7 @@ right:
 | 2 | **`replace_all`** | 默认 `false`：`count>1` → `Ambiguous`；`true`：替换全部命中。 | 没开「全换」却撞见多处一样，就报错别瞎改。 |
 | 3 | **重叠检测** | 多段均在 `original` 上算 **UTF-8 字符区间或字节区间（二选一做全仓统一）**；任两段 span 相交或嵌套 → `Overlap`。 | 两段改到同一块肉上，必须拦下来。 |
 | 4 | **单次写盘** | 仅校验全通过后调用 `write_file_atomic`。 | 算对了才落盘，别边算边写。 |
-| 5 | **staleness 接入** | `dispatch_tool` / `tool_exec` 的 `edit` 分支接收 `read_file_state: Option<&Arc<ReadFileState>>`（与 **`read`** 分支同形态，见 `tool_exec.rs`）：① `state.get(canonical_path)`；② 当前 `fs::metadata` 的 `mtime_ms` + `size` 与 stamp **不一致** → `Stale`；③ **stamp 不存在**时是否与 write 同节奏拒 `NoPriorRead` —— **须与 write T1 同一 PR 锁死**，避免 edit 单独宽松。`put` 仍仅在 read 成功路径（见 `read.md` §6–§7 数据流）。 | 动手前先问：这文件还是你上次看的那份吗？和 write 同一套规矩。 |
+| 5 | **staleness 接入** | `dispatch_tool` / `tool_exec` 的 `edit` 分支接收 `read_file_state: Option<&Arc<ReadFileState>>`（与 **`read`** 分支同形态，见 `tool_exec.rs`）：① `state.get(resolved)`（**`resolved = normalize_path(path)`**，与 read 落 stamp 同形 key）；② 当前 `fs::metadata` 的 `mtime_ms` + `size` 与 stamp **不一致** → `Stale`；③ **stamp 不存在** → `NoPriorRead`（**T2-P0-016 同 PR 强拒**，`is_error: true`，与 write `overwrite=true` 同函数 `tool_exec::check_mutation_stamp`）。`put` 仍仅在 read 成功路径（见 `read.md` §6–§7 数据流）。 | 动手前先问：这文件还是你上次看的那份吗？和 write 同一套规矩。 |
 | 6 | **行号 API 不改** | `EditOperation` 行号路径（`Replace`/`Insert`/`Delete`）保留给 **dispatcher / extension**；**本期 LLM 主路径**只暴露字符串 `edits[]`。 | 扩展还能用行号；模型这边本期只玩子串数组。 |
 
 **T1 刻意不做（防 PR 膨胀）**：BOM/LF 全量规范化留在 **PR-H（T2）**，与 pi-mono `stripBom` / `normalizeToLF` 对齐。
@@ -252,10 +252,11 @@ right:
 
 - **`is_partial_view` / `offset` / `limit` 不参与 staleness**：`ReadFileState` 每 path **只保留最新** stamp（`put` 覆盖语义）；这些字段服务 **read dedup** 同窗口短路，**不是**「禁止 edit」的门槛。
 - **允许** `read(path, offset, limit)` 分窗后立刻 `edit`：只要 stamp 仍在且 `mtime`+`size` 未变（与 cc-fork 系「mtime 比对」一致）。
-- **NoPriorRead 与 T2-P0-016 write 同 PR 锁同节奏**（**T2-P0-017 Phase1 决策 4，2026-05-05 落地**）：
-  当前 `tool_exec::check_edit_staleness`「stamp == None」分支**不**单边硬拒，避免 edit 与 write 政策分叉；
-  与 [T2-P0-016 write](../../../../agents/TASK_BOARD_002.md) 落地 NoPriorRead 时**同一 PR**统一打开门禁。
-  门禁打开前模型可以「未读 → 直接 edit」（只要权限允许），但 staleness 仍会拦「读过又被外部改了」的情况。
+- **NoPriorRead 与 T2-P0-016 write 同 PR 锁同节奏**（**T2-P0-016 同 PR 落地，2026-05-06**）：
+  `tool_exec::check_mutation_stamp`（前身为 `check_edit_staleness`，与 write 共用）在「stamp == None」分支
+  **强拒** `NoPriorRead`（`is_error: true`），与 [T2-P0-016 write](../../../../agents/TASK_BOARD_002.md) 同一 PR 统一打开门禁，
+  避免 edit / write 节奏分叉。模型必须先 `read(path)` 再 `edit` / `hashline_edit` / `write(overwrite=true)`，
+  staleness 也仍会继续拦「读过又被外部改了」的情况。
 
 #### 2.4.4 PR-H（T2）：体验
 
@@ -330,7 +331,7 @@ flowchart LR
 | **`replace_all`** | 允许多次命中同一子串全部替换 | 每段 bool，默认 `false` | `false` 且 `count≠1` → `Ambiguous` | 出现很多次时，要么扩上下文，要么明说「全换」。 |
 | **形状 A / B** | 单段 vs 多段两种 JSON 形状 | `catalog` `oneOf` | 同时出现时 **`edits` 优先**；否则包装为单元素 `edits` | 老写法一段、新写法数组，两套都认。 |
 | **`Stale`** | 磁盘文件在你上次 read 之后又变了 | `ReadFileState::get` + `metadata` | 必须先 `read` 再 `edit`；见 [`read.md`](read.md) §3「staleness」 | 文件被人动过了，别拿旧脑子改。 |
-| **`NoPriorRead`** | 这张表里没有该 path 的成功 read 记录 | `get` 返回 `None` | 是否与 write 同节奏拒绝 —— **与 write T1 锁死** | 你压根没读过这文件，就别先改（策略和 write 一致）。 |
+| **`NoPriorRead`** | 这张表里没有该 path 的成功 read 记录 | `get` 返回 `None` | **强拒**（T2-P0-016 同 PR 落地，2026-05-06）；与 write `overwrite=true` 同函数 `check_mutation_stamp` | 你压根没读过这文件，就别先改（策略和 write 完全一致）。 |
 | **`hashline_edit`** | 用 `行号#哈希` 锚点做行级改 | 独立工具名 | 与普通 `edit` **互斥职责**；算法见 `read.md` §4 | 要锁「第几行」时用另一个工具，别和普通查找替换混谈。 |
 
 **时间点钉死**：「**LLM 发出 `edit` tool_call 之后、进入 `write_file_atomic` 之前**」统称为 **校验阶段**；此阶段**不得**创建 `.bak`、**不得**改写目标文件（见 §9）。
@@ -623,14 +624,14 @@ sequenceDiagram
 | T1 重叠 | `edit_overlap_rejected`、`edit_overlap_adjacent_not_rejected` | `suite_test.rs` | ✅ 2026-05-06 |
 | T1 校验不写盘 | `edit_validation_failure_restores_or_noop` | `suite_test.rs` | ✅ 2026-05-06 |
 | T1 staleness | `edit_rejected_when_read_stamp_stale` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
-| T1 NoPriorRead（Phase1 策略） | `edit_no_prior_read_does_not_block_phase1` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06（见 §10.2） |
+| T1 NoPriorRead（**T2-P0-016 同 PR 强拒**） | `edit_no_prior_read_rejects_after_t2_p0_016` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06（见 §10.2） |
 | T2 normalize / 行尾 / BOM | `edit_curly_quote_matches_disk_straight_quote`、`edit_desanitize_matches_nbsp_and_zwsp`、`edit_preserves_trailing_newline`、`edit_preserves_crlf_line_endings`、`edit_preserves_bom` | `suite_test.rs` | ✅ 2026-05-06 |
 | T2 `.ipynb` | `edit_rejects_ipynb_before_touching_disk` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | T3 `hashline_edit` + read 闭环 | `hashline_edit_replace_matches_read_hashline`、`hashline_edit_rejects_hash_mismatch`；read 侧见 `read.md` §10 `read_with_hashline_*` / `read_tool_tests.rs` | `tool_exec_dedup_test.rs` 等 | ✅ 2026-05-06 |
 | T3 secrets | `edit_secrets_hit_denied_reverts_to_no_op`、`edit_secrets_pass_when_no_hit`、`edit_secrets_hit_proceeds_with_allow_all_confirmation` | `suite_test.rs`、`tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | oneOf / 诊断归一 | `edit_oneof_shape_b_edits_array_is_parsed`、`edit_error_codes_normalized` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | 扩展路径（dispatcher 行号 API） | `edit_legacy_line_oriented_path_still_works` | `suite_test.rs` | ✅ 2026-05-06 |
-| 观察指标 §1.1 G1–G8 | 以上用例组合对照 G1–G8 | — | ✅ 2026-05-06（**G6 硬门禁 `NoPriorRead`**：待与 **T2-P0-016** write 同 PR 打开后再补「强拒」用例，见 §10.2） |
+| 观察指标 §1.1 G1–G8 | 以上用例组合对照 G1–G8 | — | ✅ 2026-05-06（**G6 硬门禁 `NoPriorRead`**：T2-P0-016 同 PR 落地强拒，对应 `edit_no_prior_read_rejects_after_t2_p0_016` + write 侧 `write_overwrite_without_prior_read_rejected_with_no_prior_read`） |
 
 ### 10.2 `NoPriorRead` 是什么
 
@@ -638,7 +639,10 @@ sequenceDiagram
 
 **与 `Stale` 的区别**：`Stale` 是「**读过**，但磁盘 `mtime`/`size` 已与 stamp 不一致」；`NoPriorRead` 是「**会话里压根没有**该文件的 read stamp」。
 
-**本仓库当前策略（Phase1，§2.4.3 / T2-P0-017 决策 4）**：`edit` 在 **stamp 缺失时不单边硬拒**（`edit_no_prior_read_does_not_block_phase1` 锁定行为），以免与尚未落地的 **write** 侧 `NoPriorRead` 节奏分叉。待 **T2-P0-016** 与 write **同一 PR** 统一打开强门禁后，再为 **edit + write** 补齐一致的「无 prior read → 拒绝」验收用例。
+**本仓库当前策略（T2-P0-016 同 PR 强拒，2026-05-06 落地）**：`edit` / `hashline_edit` / `write(overwrite=true)` 在 **stamp 缺失时统一强拒** `NoPriorRead`（`is_error: true`）。共享门禁函数为 `tool_exec::check_mutation_stamp`（前身 `check_edit_staleness`，与 write 共用，仅在错误文案里区分 `op_label`）。已落锁的验收用例：
+
+- `edit_no_prior_read_rejects_after_t2_p0_016`（替换原 `edit_no_prior_read_does_not_block_phase1` 的 Phase1 反向断言）；
+- `write_overwrite_without_prior_read_rejected_with_no_prior_read`（write 侧对称用例，见 [write.md](write.md) §10）。
 
 ---
 

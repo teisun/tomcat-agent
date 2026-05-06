@@ -1,22 +1,26 @@
 //! # Agent Loop 工具执行子模块
 //!
 //! 职责单一：把 `ToolCallInfo` 解析为具体 primitive 调用，返回 `(content, is_error)`。
-//! 7 分支（read / write_file / edit_file / execute_bash / list_dir /
+//! 7 分支（read / write / edit / execute_bash / list_dir /
 //! 未知工具 / 参数解析失败）逐字搬自 `run.rs`，**不依赖 `AgentLoop`**——
 //!
-//! ## 命名切换（PR-RA）
+//! ## 命名切换（PR-RA / T2-P0-016 / T2-P0-017 PR-命名）
 //!
-//! 工具名 `read_file` 已弃用，改为短名 `read`（与 pi-mono / cc-fork 短名生态对齐）。
-//! 运行时**无别名 / 无重定向**：调用 `read_file` 走 `unknown` 分支，等同拼错工具名。
-//! transcript 中的旧 `read_file` 调用由 `session::manager::context` 在加载时
+//! 工具名 `read_file` / `write_file` / `edit_file` 已弃用，改为短名
+//! `read` / `write` / `edit`（与 pi-mono / cc-fork 短名生态对齐）。
+//! 运行时**无别名 / 无重定向**：调用旧名走 `unknown` 分支，等同拼错工具名。
+//! transcript 中的旧名调用由 `session::manager::context` 在加载时统一
 //! `tracing::warn!`，但**不**重写，老对话只是历史记录。
 //! 只接 `&Arc<dyn PrimitiveExecutor>` + `&ToolCallInfo`，便于独立单测。
 //!
 //! ## 语义约定
 //!
-//! - `write_file` / `edit_file` 的"应用层拒绝"（`written=false` / `applied=false`）
-//!   **不是错误**：`is_error` 保持 `false`，返回文案以"写入被拒绝" / "编辑被拒绝"
-//!   开头，与原语义严格一致。
+//! - **`edit`** 的"应用层拒绝"（`applied=false`）**不是错误**：`is_error` 保持
+//!   `false`，返回文案以"编辑被拒绝"开头，与原语义严格一致。
+//! - **`write`**（T2-P0-016 PR-C）的 **策略拒绝**（`Exists` / `NoPriorRead` /
+//!   `Stale`）**是错误**：`is_error: true`，与 `Stale` 在 `edit` 中的处理一致，
+//!   避免模型把策略拒绝当成功 tool 结果。primitive 内 `written=false` 已作为
+//!   `AppError::Tool` 早退；本编排层不再产生 `written=false` 文本。
 //! - 未知工具名、参数 JSON 解析失败 → `is_error = true`。
 //! - `execute_bash` 的失败通过 `PrimitiveExecutor::execute_bash` 的 `Result::Err`
 //!   传出；`exit_code != 0` 本身**不**置 `is_error`（与原行为一致，保留给下游
@@ -140,9 +144,13 @@ pub(super) async fn execute_tool(
                             crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => &[],
                         };
                         let stamp = crate::core::tools::pipeline::read_state::ReadStamp {
-                            mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta),
+                            mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(
+                                &meta,
+                            ),
                             size: meta.len(),
-                            content_hash: crate::core::tools::pipeline::read_state::hash_content(hash_input),
+                            content_hash: crate::core::tools::pipeline::read_state::hash_content(
+                                hash_input,
+                            ),
                             offset,
                             limit,
                             is_partial_view: offset.is_some() || limit.is_some(),
@@ -194,21 +202,70 @@ pub(super) async fn execute_tool(
                 Err(e) => Err(e.to_string()),
             }
         }
-        "write_file" => {
+        // T2-P0-016 PR-C：write 编排层硬门禁
+        //   - `resolved` 由 `normalize_path` 派生（与 read 分支 L98 / L154 同形 key）；
+        //   - `exists && !overwrite` → `Exists`（`is_error: true`，与 `Stale` 一致）；
+        //   - `exists && overwrite` → 走 `check_mutation_stamp` 强拒 NoPriorRead / Stale；
+        //   - 任何成功写盘 → `state.invalidate(&resolved)`，避免下一轮 read 误命中
+        //     `FILE_UNCHANGED` 撒谎（write.md §6.1 / §6.2）。
+        //   - primitive 内 `write_file_impl` 还有一道 `exists && !overwrite` 二道防线，
+        //     防止 trait 直调（dispatcher / extension）绕过本编排（write.md §3.4.2）。
+        "write" => {
             let path = args["path"].as_str().unwrap_or("");
             let content = args["content"].as_str().unwrap_or("");
             let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-            primitive
-                .write_file(path, content, overwrite, AGENT_PLUGIN_ID)
-                .await
-                .map(|r| {
-                    if r.written {
-                        format!("已写入: {}", r.path)
-                    } else {
-                        format!("写入被拒绝: {}", r.path)
+            let resolved = crate::infra::platform::normalize_path(path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(path));
+            let exists = resolved.exists();
+            if exists && !overwrite {
+                return (
+                    format!(
+                        "Exists: 路径 `{}` 已存在；如需替换请先 `read` 该文件，然后再用 `overwrite=true` 调用 `write`",
+                        path
+                    ),
+                    true,
+                    Vec::new(),
+                );
+            }
+            if exists && overwrite {
+                if let Some(state) = read_file_state {
+                    if let Err(msg) = check_mutation_stamp(state, path, "write") {
+                        return (msg, true, Vec::new());
                     }
-                })
-                .map_err(|e| e.to_string())
+                }
+            }
+            let result = primitive
+                .write_file(path, content, overwrite, AGENT_PLUGIN_ID)
+                .await;
+            match result {
+                Ok(r) => {
+                    if let Some(state) = read_file_state {
+                        // 写后失效：与 read 同形 key（不再额外 canonicalize），无 key 时是 no-op。
+                        state.invalidate(&resolved);
+                    }
+                    if r.written {
+                        // PR-G 回执：created/updated + 字节数 + 可选 diff 摘要。
+                        let verb = if r.diff_hint.is_some() {
+                            "已覆盖"
+                        } else {
+                            "已写入"
+                        };
+                        let mut msg = format!("{}: {} ({} bytes)", verb, r.path, r.bytes_written);
+                        if let Some(diff) = r.diff_hint.as_ref() {
+                            if !diff.is_empty() {
+                                msg.push_str("\n--- diff (truncated)\n");
+                                msg.push_str(diff);
+                            }
+                        }
+                        Ok(msg)
+                    } else {
+                        // PR-C 之后 primitive 走 Err 早退，理论上不再出现 written=false；
+                        // 保留这条文案兜底（dispatcher / extension 直调）。
+                        Ok(format!("写入被拒绝: {}", r.path))
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            }
         }
         // T2-P0-017 Phase1（PR-命名 + PR-D）：
         //   - 短名 `edit`（旧 `edit_file` 走 unknown 分支；transcript warn 在 session/manager/context.rs）
@@ -220,7 +277,9 @@ pub(super) async fn execute_tool(
             Err(msg) => Err(msg),
             Ok((path, edits)) => {
                 // PR-H：`.ipynb` 在 primitive 之前直接拒，避免读盘 / 占位 .bak。
-                if crate::core::tools::pipeline::edit_normalize::is_unsupported_structured_file(path) {
+                if crate::core::tools::pipeline::edit_normalize::is_unsupported_structured_file(
+                    path,
+                ) {
                     return (
                         format!(
                             "Notebook: `{}` 是 Jupyter 笔记本（.ipynb），edit 不支持；请使用专用 nbformat 工具或先把目标 cell 导出为 .py / .md 再 edit",
@@ -231,7 +290,7 @@ pub(super) async fn execute_tool(
                     );
                 }
                 if let Some(state) = read_file_state {
-                    if let Err(stale_msg) = check_edit_staleness(state, path) {
+                    if let Err(stale_msg) = check_mutation_stamp(state, path, "edit") {
                         return (stale_msg, true, Vec::new());
                     }
                 }
@@ -302,7 +361,7 @@ pub(super) async fn execute_tool(
             Err(msg) => Err(msg),
             Ok((path, segments)) => {
                 if let Some(state) = read_file_state {
-                    if let Err(stale_msg) = check_edit_staleness(state, path) {
+                    if let Err(stale_msg) = check_mutation_stamp(state, path, "edit") {
                         return (stale_msg, true, Vec::new());
                     }
                 }
@@ -554,37 +613,48 @@ fn parse_hashline_edit_args(
     Ok((path, segments))
 }
 
-/// T2-P0-017 PR-D：`edit` 前的 staleness 兜底。
+/// T2-P0-016 PR-C / T2-P0-017 PR-D：`edit` / `write`（覆盖写）前共享的 staleness + NoPriorRead 兜底。
 ///
-/// 与 read 同形态读 `ReadFileState`：拿到 stamp + 当前 metadata（mtime_ms / size），
-/// 若指纹漂移 → 返回 `Stale` 文案要求重新 `read`；若 `get == None`（NoPriorRead），
-/// **本 Phase 不单边硬拒**（与 write T2-P0-016 同 PR 锁定，避免分叉）。
+/// 与 read 同形态读 `ReadFileState`：用 [`crate::infra::platform::normalize_path`] 算出
+/// `resolved`（**与 read primitive 内 `put_stamp` 的 key 一致** —— `tool_exec`
+/// `read` 分支 L98 / L154 也以此 `resolved` 为 key），再：
 ///
-/// 失败仅在 stamp 存在且不匹配时拒绝；其它情况（路径无法 normalize、metadata
-/// 读不到等）让 primitive 自己用更具体的 IO/permission 错误回执。
-fn check_edit_staleness(
+/// - `state.get(&resolved) == None` → `NoPriorRead`（自 T2-P0-016 同 PR 起对 edit 与 write
+///   均**强拒**，与 write.md §9 / edit.md §10.2 一致）；
+/// - `state.get` 命中且 `mtime_ms` / `size` 与 `metadata` 漂移 → `Stale`，要求重新 read；
+/// - 路径 `normalize_path` 失败、`metadata` 读不到等情况让 primitive 自己用更具体的
+///   IO / permission 错误回执（不在编排层猜原因）。
+///
+/// `op_label` 仅用于错误文案（`"edit"` / `"write"`），不影响判定逻辑。
+fn check_mutation_stamp(
     state: &Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
     path: &str,
+    op_label: &str,
 ) -> Result<(), String> {
     let resolved = match crate::infra::platform::normalize_path(path) {
         Ok(p) => p,
         Err(_) => return Ok(()), // 让 primitive 报权限/IO 具体错
     };
     let Some(stamp) = state.get(&resolved) else {
-        // NoPriorRead：本 Phase 暂不强拒；待 T2-P0-016 同 PR 锁同节奏后启用
-        return Ok(());
+        return Err(format!(
+            "NoPriorRead: 当前会话未对 `{}` 执行过 `read`，禁止盲写/盲改；请先 `read` 再 `{}`",
+            path, op_label
+        ));
     };
     let Ok(meta) = std::fs::metadata(&resolved) else {
         return Ok(()); // 让 primitive 报具体 IO
     };
     if meta.is_dir() {
-        return Err(format!("edit: 目标 `{}` 是目录，不能作为 edit 入参", path));
+        return Err(format!(
+            "{}: 目标 `{}` 是目录，不能作为入参",
+            op_label, path
+        ));
     }
     let cur_mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
     if stamp.mtime_ms != cur_mtime || stamp.size != meta.len() {
         return Err(format!(
-            "Stale: 文件 `{}` 自上次 read 后已被修改（mtime/size 不一致），请先重新 `read` 再 `edit`",
-            path
+            "Stale: 文件 `{}` 自上次 read 后已被修改（mtime/size 不一致），请先重新 `read` 再 `{}`",
+            path, op_label
         ));
     }
     Ok(())

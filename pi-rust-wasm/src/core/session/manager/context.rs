@@ -123,7 +123,8 @@ pub(super) struct FoldEntriesOutcome {
     pub pending_preheat: Option<CompactionResult>,
 }
 
-/// PR-RA / T2-P0-017 PR-命名：检测 transcript 中遗留的旧工具名（`read_file` / `edit_file`）。
+/// PR-RA / T2-P0-016 / T2-P0-017 PR-命名：检测 transcript 中遗留的旧工具名
+/// （`read_file` / `write_file` / `edit_file`）。
 ///
 /// 仅 **`tracing::warn!` 一次**（每个旧名按 process 去重）；**不**重写为短名，
 /// **不**重定向执行。旧对话历史保留原 wire；新一轮 LLM 调用旧名会走
@@ -131,6 +132,7 @@ pub(super) struct FoldEntriesOutcome {
 fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED_READ: AtomicBool = AtomicBool::new(false);
+    static WARNED_WRITE: AtomicBool = AtomicBool::new(false);
     static WARNED_EDIT: AtomicBool = AtomicBool::new(false);
     for tc in tool_calls {
         let name = tc
@@ -147,6 +149,16 @@ fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
                 tracing::warn!(
                     tool = "read_file",
                     "legacy tool name: read_file → read (no redirect; transcript replay only)"
+                );
+            }
+            "write_file"
+                if WARNED_WRITE
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                tracing::warn!(
+                    tool = "write_file",
+                    "legacy tool name: write_file → write (no redirect; transcript replay only)"
                 );
             }
             "edit_file"

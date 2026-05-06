@@ -91,11 +91,11 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         search_hint: Some("read file text utf-8 inspect"),
     },
     BuiltinToolCatalogEntry {
-        name: "write_file",
+        name: "write",
         label: "Write File",
         description: "Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit for small surgical changes to existing files. Writes may require user confirmation and are audited.\n",
         display_summary: Some("Create or overwrite a file after permission checks."),
-        parameters: write_file_parameters,
+        parameters: write_parameters,
         scope: PermissionScope::Write,
         category: None,
         read_only: false,
@@ -105,7 +105,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "edit",
         label: "Edit File",
-        description: "Edit an existing text file by replacing exact text. Two input shapes are accepted:\n  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }\n  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write_file for new files or complete rewrites; do not use edit on binary files.\n",
+        description: "Edit an existing text file by replacing exact text. Two input shapes are accepted:\n  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }\n  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write for new files or complete rewrites; do not use edit on binary files.\n",
         display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
         parameters: edit_parameters,
         scope: PermissionScope::Write,
@@ -294,7 +294,7 @@ fn read_parameters() -> Value {
     )
 }
 
-fn write_file_parameters() -> Value {
+fn write_parameters() -> Value {
     object_schema(
         serde_json::json!({
             "path": { "type": "string", "description": "Absolute or relative file path to create or overwrite." },

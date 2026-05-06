@@ -66,3 +66,48 @@ fn app_config_default_roundtrip_preserves_tools_read() {
     let back: AppConfig = serde_json::from_str(&j).unwrap();
     assert_eq!(back.tools.read.max_bytes, DEFAULT_TOOLS_READ_MAX_BYTES);
 }
+
+// ── T2-P0-016 PR-G：[tools.write] normalize_crlf ─────────────────────────────
+
+#[test]
+fn tools_write_config_default_value() {
+    let cfg = ToolsWriteConfig::default();
+    assert!(cfg.normalize_crlf);
+    assert_eq!(cfg.normalize_crlf, DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF);
+}
+
+#[test]
+fn app_config_includes_tools_write_default() {
+    let cfg = AppConfig::default();
+    assert!(cfg.tools.write.normalize_crlf);
+}
+
+#[test]
+fn deserialize_empty_tools_write_section_uses_default() {
+    let s = r#"{"tools":{"write":{}}}"#;
+    let cfg: AppConfig = serde_json::from_str(s).unwrap();
+    assert!(cfg.tools.write.normalize_crlf);
+}
+
+#[test]
+fn tools_write_normalize_crlf_toml_override_off() {
+    let dir = std::env::temp_dir().join("pi_wasm_tools_write_cfg_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(b"[tools.write]\nnormalize_crlf = false\n")
+        .unwrap();
+    drop(f);
+    let cfg = load_config(Some(path.as_path())).expect("load_config");
+    assert!(!cfg.tools.write.normalize_crlf);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn app_config_default_roundtrip_preserves_tools_write() {
+    let cfg = AppConfig::default();
+    let j = serde_json::to_string(&cfg).unwrap();
+    let back: AppConfig = serde_json::from_str(&j).unwrap();
+    assert!(back.tools.write.normalize_crlf);
+}
