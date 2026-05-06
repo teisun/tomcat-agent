@@ -2,12 +2,16 @@
 //!
 //! Default implementation for read/write/edit/bash/list-dir primitives.
 
+pub mod bash_task;
 mod diff;
 mod executor;
 #[cfg(test)]
 mod tests;
 mod types;
 
+pub use bash_task::{
+    BashTaskId, BashTaskInfo, BashTaskOutputChunk, BashTaskRegistry, BashTaskStatus, BashTaskTicket,
+};
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
 pub use executor::DefaultPrimitiveExecutor;

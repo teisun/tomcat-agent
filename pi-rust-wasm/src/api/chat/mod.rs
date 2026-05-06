@@ -136,6 +136,10 @@ pub struct ChatContext {
     /// `config_get` / `config_set` LLM 工具后端（plan §6 / PR-7）。
     /// 为 `None` 时工具命中返回"未启用"错误，正常 4 原语 / chat 流程不受影响。
     pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
+    /// T2-P0-016 PR-I：bash 后台任务三件套（task_output / task_stop / task_list）的
+    /// 共享注册表；落盘根目录 = `<agent_trail_dir>/tool-results/`。每个 ChatContext
+    /// 单实例，跨 turn 内复用。
+    pub bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 路径授权 UI
     /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
@@ -255,6 +259,12 @@ impl ChatContext {
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
         let last_interrupt_at = Arc::new(Mutex::new(None));
 
+        // T2-P0-016 PR-I：bash 后台任务注册表；persist_dir 与 PR-E.3 同盘——
+        // `<agent_trail_dir>/tool-results/` 既装超时/超长输出落盘，也装后台任务日志。
+        let bash_task_registry = Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+            agent_trail_dir.join("tool-results"),
+        ));
+
         Ok(Self {
             session,
             llm,
@@ -270,6 +280,7 @@ impl ChatContext {
             cfg_path: cfg_path_snapshot,
             session_grants,
             config_backend,
+            bash_task_registry,
             gate,
             read_file_state: Arc::new(
                 crate::core::tools::pipeline::read_state::ReadFileState::default(),
@@ -674,6 +685,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         if let Some(backend) = ctx.config_backend.clone() {
             agent_loop = agent_loop.with_config_backend(backend);
         }
+        // T2-P0-016 PR-I：注入 bash 后台任务注册表，启用 task_* 三件套。
+        agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
         agent_loop.set_context_state(Some(context_state));
 
         let renderer_clone = Arc::clone(&renderer);

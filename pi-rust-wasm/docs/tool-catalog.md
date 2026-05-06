@@ -355,9 +355,11 @@ Parameters:
 - Permission scope: `Bash`
 - Read only: `false`
 - Destructive: `true`
-- Search hint: `bash shell command test build git`
+- Search hint: `bash shell command test build git background`
 
 Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.
+
+Set `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round.
 
 Parameters:
 
@@ -379,8 +381,12 @@ Parameters:
       "description": "Optional working directory. Use the project cwd when the user asks to run in the current project; missing falls back to the agent process working directory.",
       "type": "string"
     },
+    "run_in_background": {
+      "description": "When true, spawn the command as a background task and return immediately with { task_id, log_path } instead of blocking the tool call until the process exits. Use this for builds, watchers or dev servers; pair with `task_output` (tail), `task_stop` (kill) and `task_list` (enumerate). Defaults to false.",
+      "type": "boolean"
+    },
     "timeout_ms": {
-      "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`.",
+      "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`. Ignored when `run_in_background=true` — background tasks have no implicit deadline; use `task_stop` to terminate them.",
       "maximum": 600000,
       "minimum": 1,
       "type": "integer"
@@ -389,6 +395,88 @@ Parameters:
   "required": [
     "command"
   ],
+  "type": "object"
+}
+```
+
+### `task_output`
+
+- Label: Bash Task Output
+- Category: `exec`
+- Permission scope: `Bash`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `bash background task output tail log`
+
+Read incremental output from a background `bash` task started with `run_in_background: true`. Returns a UTF-8 lossy chunk of `[since, next_offset)` bytes from the task's log file plus a `finished` flag. Use the previous response's `next_offset` as the next `since` to tail the task across turns; first call may omit `since` to read from byte 0. When the task has finished or been stopped, `finished=true` and `exit_code` is populated.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "since": {
+      "description": "Byte offset to start reading from; pass the previous response's `next_offset` to tail. Defaults to 0 (read from start).",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "task_id": {
+      "description": "The task_id returned by a previous `bash` call with run_in_background=true.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "type": "object"
+}
+```
+
+### `task_stop`
+
+- Label: Bash Task Stop
+- Category: `exec`
+- Permission scope: `Bash`
+- Read only: `false`
+- Destructive: `true`
+- Search hint: `bash background task stop kill cancel`
+
+Stop a background `bash` task by its `task_id`. Sends SIGKILL to the entire process group on Unix (mirroring the foreground `bash` timeout path) and marks the task `Stopped`. Subsequent `task_output` calls return `finished=true` with `exit_code=-1`.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "task_id": {
+      "description": "The task_id returned by a previous `bash` call with run_in_background=true.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "type": "object"
+}
+```
+
+### `task_list`
+
+- Label: Bash Task List
+- Category: `exec`
+- Permission scope: `Bash`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `bash background task list status enumerate`
+
+Enumerate every background `bash` task started in the current session with its current status (`Running`, `Stopped`, or `Finished{exit_code}`), the originating command, the started_at timestamp, and the log path. Use this to discover task ids when you need to follow up on a long-running task.
+
+Parameters:
+
+```json
+{
+  "properties": {},
+  "required": [],
   "type": "object"
 }
 ```

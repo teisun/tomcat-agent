@@ -129,14 +129,50 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "bash",
         label: "Bash",
-        description: "Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.\n",
-        display_summary: Some("Run an audited shell command."),
+        description: "Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.\n\nSet `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round.\n",
+        display_summary: Some("Run an audited shell command (foreground or background)."),
         parameters: bash_parameters,
         scope: PermissionScope::Bash,
         category: None,
         read_only: false,
         destructive: true,
-        search_hint: Some("bash shell command test build git"),
+        search_hint: Some("bash shell command test build git background"),
+    },
+    BuiltinToolCatalogEntry {
+        name: "task_output",
+        label: "Bash Task Output",
+        description: "Read incremental output from a background `bash` task started with `run_in_background: true`. Returns a UTF-8 lossy chunk of `[since, next_offset)` bytes from the task's log file plus a `finished` flag. Use the previous response's `next_offset` as the next `since` to tail the task across turns; first call may omit `since` to read from byte 0. When the task has finished or been stopped, `finished=true` and `exit_code` is populated.\n",
+        display_summary: Some("Tail incremental output from a background bash task."),
+        parameters: task_output_parameters,
+        scope: PermissionScope::Bash,
+        category: None,
+        read_only: true,
+        destructive: false,
+        search_hint: Some("bash background task output tail log"),
+    },
+    BuiltinToolCatalogEntry {
+        name: "task_stop",
+        label: "Bash Task Stop",
+        description: "Stop a background `bash` task by its `task_id`. Sends SIGKILL to the entire process group on Unix (mirroring the foreground `bash` timeout path) and marks the task `Stopped`. Subsequent `task_output` calls return `finished=true` with `exit_code=-1`.\n",
+        display_summary: Some("Force-stop a background bash task by task_id."),
+        parameters: task_stop_parameters,
+        scope: PermissionScope::Bash,
+        category: None,
+        read_only: false,
+        destructive: true,
+        search_hint: Some("bash background task stop kill cancel"),
+    },
+    BuiltinToolCatalogEntry {
+        name: "task_list",
+        label: "Bash Task List",
+        description: "Enumerate every background `bash` task started in the current session with its current status (`Running`, `Stopped`, or `Finished{exit_code}`), the originating command, the started_at timestamp, and the log path. Use this to discover task ids when you need to follow up on a long-running task.\n",
+        display_summary: Some("List background bash tasks and their status."),
+        parameters: task_list_parameters,
+        scope: PermissionScope::Bash,
+        category: None,
+        read_only: true,
+        destructive: false,
+        search_hint: Some("bash background task list status enumerate"),
     },
     BuiltinToolCatalogEntry {
         name: "list_dir",
@@ -375,11 +411,48 @@ fn bash_parameters() -> Value {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 600000,
-                "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`."
+                "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`. Ignored when `run_in_background=true` — background tasks have no implicit deadline; use `task_stop` to terminate them."
+            },
+            "run_in_background": {
+                "type": "boolean",
+                "description": "When true, spawn the command as a background task and return immediately with { task_id, log_path } instead of blocking the tool call until the process exits. Use this for builds, watchers or dev servers; pair with `task_output` (tail), `task_stop` (kill) and `task_list` (enumerate). Defaults to false."
             }
         }),
         &["command"],
     )
+}
+
+fn task_output_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "task_id": {
+                "type": "string",
+                "description": "The task_id returned by a previous `bash` call with run_in_background=true."
+            },
+            "since": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Byte offset to start reading from; pass the previous response's `next_offset` to tail. Defaults to 0 (read from start)."
+            }
+        }),
+        &["task_id"],
+    )
+}
+
+fn task_stop_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "task_id": {
+                "type": "string",
+                "description": "The task_id returned by a previous `bash` call with run_in_background=true."
+            }
+        }),
+        &["task_id"],
+    )
+}
+
+fn task_list_parameters() -> Value {
+    object_schema(serde_json::json!({}), &[])
 }
 
 fn list_dir_parameters() -> Value {

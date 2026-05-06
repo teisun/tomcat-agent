@@ -39,7 +39,7 @@
 use std::sync::Arc;
 
 use crate::core::tools::primitive::{
-    EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
+    BashTaskRegistry, EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
 };
 use crate::infra::error::AppError;
 
@@ -60,6 +60,7 @@ pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
 pub(super) async fn execute_tool(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
+    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     tc: &ToolCallInfo,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
@@ -327,26 +328,41 @@ pub(super) async fn execute_tool(
                 .get("timeout_ms")
                 .and_then(|v| v.as_u64())
                 .map(|v| v.min(crate::infra::MAX_TOOLS_BASH_TIMEOUT_MS));
-            primitive
-                .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref, timeout_ms_override)
-                .await
-                .map(|r| {
-                    let mut out = String::new();
-                    if !r.stdout.is_empty() {
-                        out.push_str(&r.stdout);
-                    }
-                    if !r.stderr.is_empty() {
-                        if !out.is_empty() {
-                            out.push('\n');
+            let run_in_background = args
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // T2-P0-016 PR-I：run_in_background=true 走后台注册表，立即返回 ticket；
+            // 同步路径完全不变（PR-E 行为）。
+            if run_in_background {
+                handle_bash_background(bash_task_registry, command, cwd, argv_store).await
+            } else {
+                primitive
+                    .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref, timeout_ms_override)
+                    .await
+                    .map(|r| {
+                        let mut out = String::new();
+                        if !r.stdout.is_empty() {
+                            out.push_str(&r.stdout);
                         }
-                        out.push_str("STDERR: ");
-                        out.push_str(&r.stderr);
-                    }
-                    out.push_str(&format!("\n(exit code: {})", r.exit_code));
-                    out
-                })
-                .map_err(|e| e.to_string())
+                        if !r.stderr.is_empty() {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str("STDERR: ");
+                            out.push_str(&r.stderr);
+                        }
+                        out.push_str(&format!("\n(exit code: {})", r.exit_code));
+                        out
+                    })
+                    .map_err(|e| e.to_string())
+            }
         }
+        // T2-P0-016 PR-I：bash 后台任务三件套；未注入 registry 时返回友好错误，
+        // 主流程不阻塞（与 config_get / config_set 「未启用」语义一致）。
+        "task_output" => handle_task_output(bash_task_registry, &args).await,
+        "task_stop" => handle_task_stop(bash_task_registry, &args).await,
+        "task_list" => handle_task_list(bash_task_registry).await,
         "list_dir" => {
             let path = args["path"].as_str().unwrap_or("");
             primitive
@@ -449,6 +465,71 @@ pub(super) async fn execute_tool(
         Ok(s) => (s, false, follow_up_parts),
         Err(s) => (s, true, Vec::new()),
     }
+}
+
+/// T2-P0-016 PR-I：`bash run_in_background=true` 进入后台路径，立即返回
+/// `task_id` + `log_path`；不阻塞当前 tool 轮次。返回的 JSON 结构与 catalog
+/// `bash` description 中给模型的承诺一致。
+async fn handle_bash_background(
+    registry: &Option<Arc<BashTaskRegistry>>,
+    command: &str,
+    cwd: Option<&str>,
+    argv: Option<Vec<String>>,
+) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("bash 后台任务未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let cwd_pb = cwd.map(std::path::PathBuf::from);
+    registry
+        .spawn(command.to_string(), argv, cwd_pb)
+        .await
+        .map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "{}".to_string()))
+        .map_err(|e| e.to_string())
+}
+
+async fn handle_task_output(
+    registry: &Option<Arc<BashTaskRegistry>>,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("task_output 未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "task_output 缺少 task_id".to_string())?;
+    let since = args.get("since").and_then(|v| v.as_u64());
+    registry
+        .read_output(task_id, since)
+        .await
+        .map(|c| serde_json::to_string(&c).unwrap_or_else(|_| "{}".to_string()))
+        .map_err(|e| e.to_string())
+}
+
+async fn handle_task_stop(
+    registry: &Option<Arc<BashTaskRegistry>>,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("task_stop 未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "task_stop 缺少 task_id".to_string())?;
+    registry
+        .stop(task_id)
+        .await
+        .map(|_| format!("已停止: {}", task_id))
+        .map_err(|e| e.to_string())
+}
+
+async fn handle_task_list(registry: &Option<Arc<BashTaskRegistry>>) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("task_list 未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let infos = registry.list();
+    Ok(serde_json::to_string(&infos).unwrap_or_else(|_| "[]".to_string()))
 }
 
 /// PR-RB（§2.6）解析 `read` 工具的可选整数入参（`offset` / `limit`）。

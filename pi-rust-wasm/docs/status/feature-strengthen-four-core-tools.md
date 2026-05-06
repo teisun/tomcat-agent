@@ -1,6 +1,27 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-05-06 23:30 | ACTIVE | feature/strengthen-four-core-tools | - |
+| Tom | 2026-05-07 00:30 | ACTIVE | feature/strengthen-four-core-tools | - |
+
+### 2026-05-07 | T2-P0-016 子项 `bash` PR-I（T2 后台三件套）落地
+
+- **新模块** `src/core/tools/primitive/bash_task.rs`：`BashTaskRegistry` + `BashTask{ info, pid }` + `spawn / read_output / stop / list` 四个 API；锁分层避开「stop 等 wait」死锁——`Child` 句柄 move 进 wait 任务独占 `await`、stop 路径靠 `pid → libc::killpg(SIGKILL)` 不依赖句柄；wait 任务感知 `child.wait()` 返回时**不**回退覆盖 `Stopped`（人为 stop 不会被「自然 Finished」误判）。
+- **schema 扩展**：`bash_parameters` 新增 `run_in_background?: bool`；catalog 新增 `task_output / task_stop / task_list` 三个工具，schema 分别为 `{ task_id, since? }` / `{ task_id }` / `{}`；`docs/tool-catalog.md` 重派生。
+- **wire**：`tool_exec` `bash` 分支新增 `run_in_background=true → handle_bash_background` 走注册表立即返回 ticket；新增 `task_output / task_stop / task_list` 三分支；execute_tool 签名扩 `bash_task_registry: &Option<Arc<BashTaskRegistry>>`，未注入时四个新路径返回「未启用」错误（与 `config_get/set` 同形态），同步 bash 路径完全不变。
+- **AgentLoop**：`types.rs` 加 `bash_task_registry: Option<Arc<BashTaskRegistry>>` 字段；`accessors.rs` 加 `with_bash_task_registry` builder + 两条构造器都初始化为 `None`；`tool_dispatcher` 透传 `&agent.bash_task_registry`。
+- **api/chat 装配**：`ChatContext` 新增 `bash_task_registry: Arc<BashTaskRegistry>` 字段，`from_config` 用 `<agent_trail_dir>/tool-results/` 作 `persist_dir` 构造；turn 启动时 `agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone())` 注入。
+- **测试**：`bash_task` 模块 3 个 `#[cfg(test)]`（spawn→read→stop→list 全链 / 自然 Finished 携带 exit_code / 未知 task_id 错误）；`tool_exec` 4 个新 `#[tokio::test]`（未注入 registry 时 background bash / task_output / task_list 友好错误 + 真实 registry 跑通 background bash → task_output → task_stop → task_list 全 lifecycle，断言 ticket JSON / chunk JSON / list 中状态 = `stopped`）；`cargo test --lib` 748 全绿（738 → 741 PR-E.4 → 744 PR-I.bash_task → 748 PR-I.tool_exec），`cargo fmt --check` / `cargo clippy --all-targets -D warnings` 全绿；现有 `gate_suite_*` / `bash_assignment_deny` / `agent_loop_tests` / `cli_tests` / `primitives_tools_tests` / `tool_catalog_doc` 集成测全部 100% 回归通过。
+- **不变量**：`PrimitiveExecutor::execute_bash` trait 方法名 / dispatcher `("primitive","executeBash")` / 所有 mock 全部未动；新增 `task_*` 三件套**不**走 PrimitiveExecutor（直接 tool_exec ↔ BashTaskRegistry）—— extension / dispatcher 路径完全不感知。
+
+### 🔌 INTERFACE (接口变更，T2-P0-016 bash 子项 PR-I)
+
+- **LLM 工具名**：新增 `task_output` / `task_stop` / `task_list`；`bash` 入参新增 `run_in_background?: bool`（默认 false）。
+- **`bash run_in_background=true` 出参**：`{ taskId, logPath, startedAtUnixMs }`（camelCase JSON）；同步路径仍返回原 BashResult 文本格式。
+- **`task_output` 出参**：`{ taskId, content, startOffset, nextOffset, finished, exitCode? }`；`finished=true` 时 `exitCode` 一定有值（`Stopped` → `-1`，`Finished{ code }` → 实际退出码）。
+- **`task_list` 出参**：`[{ taskId, command, startedAtUnixMs, logPath, status: { state, exitCode? } }]`；按 startedAtUnixMs 升序。
+- **持久化路径**：与 PR-E.3 共用 `<agent_trail_dir>/tool-results/`，文件名 `bash-<taskId>.log`；模型可用 `read` 工具按路径取尾部全文。
+
+---
+
 
 ### 2026-05-06 | T2-P0-016 子项 `bash` PR-E（命名闸 + T1 超时 + 输出累积）全部 6 个 phase-e-* 子 todo 完成
 

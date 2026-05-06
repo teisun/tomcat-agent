@@ -80,7 +80,7 @@ async fn tool_exec_unknown_tool_returns_is_error() {
         name: "no_such_tool".to_string(),
         arguments: "{}".to_string(),
     };
-    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(is_error, "unknown tool must report is_error=true");
     assert!(
         msg.contains("no_such_tool") || msg.to_lowercase().contains("unknown"),
@@ -98,7 +98,7 @@ async fn tool_exec_read_returns_content() {
         name: "read".to_string(),
         arguments: r#"{"path":"/tmp/abc"}"#.to_string(),
     };
-    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(!is_error, "read success must report is_error=false");
     assert!(
         msg.contains("/tmp/abc"),
@@ -116,7 +116,7 @@ async fn tool_exec_legacy_read_file_returns_unknown_tool_error() {
         name: "read_file".to_string(),
         arguments: r#"{"path":"/tmp/legacy"}"#.to_string(),
     };
-    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(
         is_error,
         "legacy 'read_file' must NOT be aliased to 'read'; it should return is_error=true"
@@ -137,7 +137,7 @@ async fn tool_exec_read_offset_zero_returns_bound_error() {
         name: "read".to_string(),
         arguments: r#"{"path":"/tmp/x","offset":0,"limit":10}"#.to_string(),
     };
-    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(is_error);
     assert!(
         msg.contains("offset") && msg.contains(">= 1"),
@@ -155,11 +155,139 @@ async fn tool_exec_read_limit_over_max_returns_bound_error() {
         name: "read".to_string(),
         arguments: r#"{"path":"/tmp/x","limit":99999}"#.to_string(),
     };
-    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, None, &tc).await;
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(is_error);
     assert!(
         msg.contains("limit") && msg.contains("[1, 10000]"),
         "bound error should mention `limit` range, got: {}",
         msg
+    );
+}
+
+// ─── T2-P0-016 PR-I：bash 后台三件套分支 ─────────────────────────────────
+
+/// 未注入 BashTaskRegistry 时，`bash run_in_background=true` 走「未启用」错误，
+/// 而**不**误调 PrimitiveExecutor::execute_bash 的同步路径。
+#[tokio::test]
+async fn tool_exec_bash_background_without_registry_returns_friendly_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "bg1".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"sleep 1","run_in_background":true}"#.to_string(),
+    };
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, None, &tc).await;
+    assert!(
+        is_error,
+        "未注入 registry 时 background bash 必须 is_error=true"
+    );
+    assert!(msg.contains("未启用"), "错误文案应提示「未启用」：{}", msg);
+}
+
+#[tokio::test]
+async fn tool_exec_task_output_without_registry_returns_friendly_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "to1".to_string(),
+        name: "task_output".to_string(),
+        arguments: r#"{"task_id":"abc"}"#.to_string(),
+    };
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, None, &tc).await;
+    assert!(is_error);
+    assert!(msg.contains("未启用"));
+}
+
+#[tokio::test]
+async fn tool_exec_task_list_without_registry_returns_friendly_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "tl1".to_string(),
+        name: "task_list".to_string(),
+        arguments: "{}".to_string(),
+    };
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, None, &tc).await;
+    assert!(is_error);
+    assert!(msg.contains("未启用"));
+}
+
+/// 起后台 → 拉输出 → stop → list：bash.md §2.4.4 验收的端到端路径，
+/// 在 tool_exec 层用真实 BashTaskRegistry 走通。
+#[tokio::test]
+async fn tool_exec_bash_background_full_lifecycle() {
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    // 起：background bash 应当立即返回 ticket JSON。
+    let start_tc = ToolCallInfo {
+        id: "bg-1".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"i=0; while [ $i -lt 50 ]; do echo line-$i; i=$((i+1)); sleep 0.1; done","run_in_background":true}"#.to_string(),
+    };
+    let (start_msg, start_err, _) =
+        execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    assert!(!start_err, "起后台必须成功：{}", start_msg);
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).expect("ticket 应为合法 JSON");
+    let task_id = ticket["taskId"]
+        .as_str()
+        .expect("ticket 含 taskId")
+        .to_string();
+    assert!(!task_id.is_empty());
+
+    // 等几行写出来再拉。
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+    // 拉：task_output 必须返回非空 content + finished=false。
+    let out_tc = ToolCallInfo {
+        id: "to-1".to_string(),
+        name: "task_output".to_string(),
+        arguments: format!(r#"{{"task_id":"{}"}}"#, task_id),
+    };
+    let (out_msg, out_err, _) = execute_tool(&primitive, &None, &registry_opt, None, &out_tc).await;
+    assert!(!out_err, "task_output 必须成功：{}", out_msg);
+    let chunk: serde_json::Value = serde_json::from_str(&out_msg).expect("chunk 应为合法 JSON");
+    assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
+    assert!(
+        chunk["content"]
+            .as_str()
+            .map(|s| s.contains("line-0"))
+            .unwrap_or(false),
+        "content 应含 line-0：{}",
+        out_msg
+    );
+
+    // stop：返回成功提示。
+    let stop_tc = ToolCallInfo {
+        id: "ts-1".to_string(),
+        name: "task_stop".to_string(),
+        arguments: format!(r#"{{"task_id":"{}"}}"#, task_id),
+    };
+    let (stop_msg, stop_err, _) =
+        execute_tool(&primitive, &None, &registry_opt, None, &stop_tc).await;
+    assert!(!stop_err, "task_stop 必须成功：{}", stop_msg);
+    assert!(stop_msg.contains(&task_id));
+
+    // 给 wait 任务 reap 留点时间。
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // list：返回 1 条且 status.state == "stopped"。
+    let list_tc = ToolCallInfo {
+        id: "tl-1".to_string(),
+        name: "task_list".to_string(),
+        arguments: "{}".to_string(),
+    };
+    let (list_msg, list_err, _) =
+        execute_tool(&primitive, &None, &registry_opt, None, &list_tc).await;
+    assert!(!list_err, "task_list 必须成功：{}", list_msg);
+    let infos: serde_json::Value = serde_json::from_str(&list_msg).expect("list 应为合法 JSON");
+    let arr = infos.as_array().expect("list 是数组");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["taskId"], serde_json::Value::String(task_id));
+    assert_eq!(
+        arr[0]["status"]["state"],
+        serde_json::Value::String("stopped".to_string())
     );
 }

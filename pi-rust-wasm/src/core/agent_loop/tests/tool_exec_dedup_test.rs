@@ -82,7 +82,7 @@ async fn tool_exec_read_second_call_returns_unchanged_stub() {
     );
     let tc = make_tc(&args);
 
-    let (first, err1, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (first, err1, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!err1, "first read must succeed");
     assert!(
         first.contains("hello"),
@@ -91,7 +91,7 @@ async fn tool_exec_read_second_call_returns_unchanged_stub() {
     );
     assert_eq!(state.len(), 1, "first read should populate stamp");
 
-    let (second, err2, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (second, err2, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!err2, "second read should not flag is_error");
     assert_eq!(
         second, FILE_UNCHANGED_STUB,
@@ -115,10 +115,10 @@ async fn tool_exec_read_after_mtime_bump_refetches() {
     );
     let tc = make_tc(&args);
 
-    let _ = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let _ = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     bump_mtime(&f);
 
-    let (out, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (out, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!err, "post-bump read should succeed");
     assert!(
         out.contains("changed-content") && !out.contains("File unchanged"),
@@ -143,14 +143,14 @@ async fn tool_exec_read_partial_then_full_does_not_dedup() {
         r#"{{"path":{:?},"offset":10,"limit":5,"line_numbers":false}}"#,
         f.to_string_lossy()
     ));
-    let _ = execute_tool(&primitive, &None, Some(&state), &partial_tc).await;
+    let _ = execute_tool(&primitive, &None, &None, Some(&state), &partial_tc).await;
 
     // full：no offset / limit
     let full_tc = make_tc(&format!(
         r#"{{"path":{:?},"line_numbers":false}}"#,
         f.to_string_lossy()
     ));
-    let (out, err, _) = execute_tool(&primitive, &None, Some(&state), &full_tc).await;
+    let (out, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &full_tc).await;
 
     assert!(!err);
     assert!(
@@ -180,8 +180,8 @@ async fn tool_exec_read_different_window_does_not_dedup() {
         f.to_string_lossy()
     ));
 
-    let _ = execute_tool(&primitive, &None, Some(&state), &tc1).await;
-    let (out, err, _) = execute_tool(&primitive, &None, Some(&state), &tc2).await;
+    let _ = execute_tool(&primitive, &None, &None, Some(&state), &tc1).await;
+    let (out, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc2).await;
     assert!(!err);
     assert!(
         out.starts_with("L06\n") && !out.contains("File unchanged"),
@@ -205,13 +205,13 @@ async fn tool_exec_read_state_clear_resets_dedup() {
         f.to_string_lossy()
     ));
 
-    let _ = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let _ = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert_eq!(state.len(), 1);
 
     state.clear();
     assert_eq!(state.len(), 0, "session-end cleanup must drop all stamps");
 
-    let (out, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (out, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!err);
     assert!(
         !out.contains("File unchanged"),
@@ -240,7 +240,8 @@ async fn tool_exec_image_result_injects_into_next_user_message_parts() {
     let state = Arc::new(ReadFileState::new());
     let tc = make_tc(&format!(r#"{{"path":{:?}}}"#, png.to_string_lossy()));
 
-    let (msg, is_error, follow_ups) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, follow_ups) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "image read should succeed");
     assert!(
         msg.contains("Image saved as next user input"),
@@ -283,7 +284,8 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
     let state = Arc::new(ReadFileState::new());
     let tc = make_tc(&format!(r#"{{"path":{:?}}}"#, pdf.to_string_lossy()));
 
-    let (msg, is_error, follow_ups) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, follow_ups) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "pdf read should succeed");
     assert!(
         msg.contains("PDF attached as next user input"),
@@ -328,7 +330,7 @@ async fn prime_read_stamp(
         path.to_string_lossy()
     );
     let tc = make_tc(&args);
-    let (_, err, _) = execute_tool(primitive, &None, Some(state), &tc).await;
+    let (_, err, _) = execute_tool(primitive, &None, &None, Some(state), &tc).await;
     assert!(!err, "prime_read_stamp 必须成功落 stamp");
 }
 
@@ -343,7 +345,7 @@ async fn edit_legacy_edit_file_returns_unknown_tool_error() {
         name: "edit_file".into(),
         arguments: r#"{"path":"/tmp/x","old_content":"a","new_content":"b"}"#.into(),
     };
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "legacy edit_file 必须按未知工具回错");
     assert!(
         msg.contains("edit_file") || msg.to_lowercase().contains("unknown") || msg.contains("未知"),
@@ -368,7 +370,7 @@ async fn edit_rejected_when_read_stamp_stale() {
         f.to_string_lossy()
     );
     let read_tc = make_tc(&read_args);
-    let (_, err1, _) = execute_tool(&primitive, &None, Some(&state), &read_tc).await;
+    let (_, err1, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err1);
     assert_eq!(state.len(), 1);
 
@@ -381,7 +383,7 @@ async fn edit_rejected_when_read_stamp_stale() {
         f.to_string_lossy()
     );
     let edit_tc = make_edit_tc(&edit_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
     assert!(is_error, "stamp 不一致必须返回 is_error");
     assert!(msg.contains("Stale"), "错误文案应含 Stale：{}", msg);
 }
@@ -403,7 +405,7 @@ async fn edit_no_prior_read_rejects_after_t2_p0_016() {
         f.to_string_lossy()
     );
     let edit_tc = make_edit_tc(&edit_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
     assert!(is_error, "NoPriorRead 必须 is_error=true：{}", msg);
     assert!(
         msg.contains("NoPriorRead"),
@@ -432,7 +434,7 @@ async fn edit_rejects_ipynb_before_touching_disk() {
         f.to_string_lossy()
     );
     let edit_tc = make_edit_tc(&edit_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
     assert!(is_error);
     assert!(
         msg.contains("Notebook"),
@@ -463,7 +465,7 @@ async fn edit_error_codes_normalized() {
         r#"{{"path":{:?},"old_content":"missing","new_content":"y"}}"#,
         f.to_string_lossy()
     ));
-    let (msg, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(err);
     assert!(msg.contains("NotFound"), "期望 NotFound：{}", msg);
 
@@ -475,7 +477,7 @@ async fn edit_error_codes_normalized() {
         r#"{{"path":{:?},"old_content":"x","new_content":"y"}}"#,
         f.to_string_lossy()
     ));
-    let (msg, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(err);
     assert!(msg.contains("Ambiguous"), "期望 Ambiguous：{}", msg);
 
@@ -487,7 +489,7 @@ async fn edit_error_codes_normalized() {
         r#"{{"path":{:?},"edits":[{{"old_content":"abcd","new_content":"X"}},{{"old_content":"cde","new_content":"Y"}}]}}"#,
         f.to_string_lossy()
     ));
-    let (msg, err, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, err, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(err);
     assert!(msg.contains("Overlap"), "期望 Overlap：{}", msg);
 }
@@ -518,7 +520,7 @@ async fn hashline_edit_replace_matches_read_hashline() {
         name: "hashline_edit".into(),
         arguments: edit_args,
     };
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "hashline_edit 应当成功：{}", msg);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
@@ -547,7 +549,7 @@ async fn hashline_edit_rejects_hash_mismatch() {
         name: "hashline_edit".into(),
         arguments: edit_args,
     };
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "哈希不一致必须拒绝");
     assert!(
         msg.contains("HashMismatch"),
@@ -577,7 +579,7 @@ async fn edit_secrets_pass_when_no_hit() {
         f.to_string_lossy()
     );
     let tc = make_edit_tc(&edit_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(!is_error, "普通代码不应当走 confirm：{}", msg);
 }
 
@@ -597,7 +599,7 @@ async fn edit_secrets_hit_proceeds_with_allow_all_confirmation() {
         f.to_string_lossy()
     );
     let tc = make_edit_tc(&edit_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(
         !is_error,
         "AllowAll confirmation 下 secrets 命中应当放行：{}",
@@ -626,7 +628,7 @@ async fn edit_oneof_shape_b_edits_array_is_parsed() {
         f.to_string_lossy()
     );
     let edit_tc = make_edit_tc(&edit_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &edit_tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
     assert!(!is_error, "形状 B 应当成功：{}", msg);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
@@ -655,7 +657,7 @@ async fn tool_exec_legacy_write_file_returns_unknown_tool_error() {
         name: "write_file".into(),
         arguments: r#"{"path":"/tmp/x","content":"hi"}"#.into(),
     };
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "legacy write_file 必须按未知工具回错");
     assert!(
         msg.contains("write_file")
@@ -678,7 +680,7 @@ async fn write_existing_path_without_overwrite_rejected_with_exists() {
 
     let args = format!(r#"{{"path":{:?},"content":"new"}}"#, f.to_string_lossy());
     let tc = make_write_tc(&args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "Exists 必须 is_error=true：{}", msg);
     assert!(msg.contains("Exists"), "错误文案应含 Exists：{}", msg);
     assert_eq!(
@@ -703,7 +705,7 @@ async fn write_overwrite_without_prior_read_rejected_with_no_prior_read() {
         f.to_string_lossy()
     );
     let tc = make_write_tc(&args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
     assert!(is_error, "NoPriorRead 必须 is_error=true：{}", msg);
     assert!(
         msg.contains("NoPriorRead"),
@@ -732,7 +734,7 @@ async fn write_overwrite_after_external_change_rejected_with_stale() {
         f.to_string_lossy()
     );
     let read_tc = make_tc(&read_args);
-    let (_, err1, _) = execute_tool(&primitive, &None, Some(&state), &read_tc).await;
+    let (_, err1, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err1);
     assert_eq!(state.len(), 1);
 
@@ -743,7 +745,7 @@ async fn write_overwrite_after_external_change_rejected_with_stale() {
         f.to_string_lossy()
     );
     let write_tc = make_write_tc(&write_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &write_tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &write_tc).await;
     assert!(is_error, "Stale 必须 is_error=true：{}", msg);
     assert!(msg.contains("Stale"), "错误文案应含 Stale：{}", msg);
     assert_ne!(
@@ -769,7 +771,7 @@ async fn write_success_invalidates_read_stamp() {
         f.to_string_lossy()
     );
     let read_tc = make_tc(&read_args);
-    let (_, err1, _) = execute_tool(&primitive, &None, Some(&state), &read_tc).await;
+    let (_, err1, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err1);
     assert_eq!(state.len(), 1, "read 后应落一个 stamp");
 
@@ -778,7 +780,7 @@ async fn write_success_invalidates_read_stamp() {
     // 为绕过同秒 mtime+size 都未变的廉价判定，先 bump_mtime 一次让 stamp 与新内容“看起来一致”，
     // 重新读一次刷 stamp，再覆盖写）。
     bump_mtime(&f);
-    let (_, err_re, _) = execute_tool(&primitive, &None, Some(&state), &read_tc).await;
+    let (_, err_re, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err_re, "重新 read 必须成功");
 
     let write_args = format!(
@@ -786,7 +788,7 @@ async fn write_success_invalidates_read_stamp() {
         f.to_string_lossy()
     );
     let write_tc = make_write_tc(&write_args);
-    let (msg, is_error, _) = execute_tool(&primitive, &None, Some(&state), &write_tc).await;
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &write_tc).await;
     assert!(!is_error, "覆盖写应成功：{}", msg);
 
     // 关键断言 1：write 后 stamp 已被 invalidate（HashMap key 应被移除）。
@@ -797,7 +799,7 @@ async fn write_success_invalidates_read_stamp() {
     );
 
     // 关键断言 2：再次 read 必须返回真实新内容，而非 FILE_UNCHANGED stub。
-    let (after_msg, err3, _) = execute_tool(&primitive, &None, Some(&state), &read_tc).await;
+    let (after_msg, err3, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!err3);
     assert_ne!(
         after_msg, FILE_UNCHANGED_STUB,
