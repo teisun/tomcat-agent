@@ -558,7 +558,7 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
 /// [工具事件 pi-mono 五段序] 单工具轮内先发观察向 tool_execution_*，再发钩子 tool_call/tool_result
 ///
 /// 验证：EventBus 上事件名序列为 tool_execution_start → tool_call → tool_result → tool_execution_end（子序列）
-/// 意义：与 [events.md](../openspec/specs/architecture/plugin-system/events.md) 工具链对照一致
+/// 意义：与 [events.md](../docs/architecture/plugin-system/events.md) 工具链对照一致
 #[tokio::test]
 async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn std::error::Error>>
 {

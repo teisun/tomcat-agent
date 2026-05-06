@@ -26,7 +26,7 @@ pub use types::{
 /// 选用 `\u{0000}` 边界字符是因为：UTF-8 文本 `read_file_utf8` 阶段就会拒掉
 /// 含 NUL 的二进制文件，因此 sentinel 不会与合法用户输入冲突。
 ///
-/// 决策动机（详见 [edit.md §2.4.3](../../../../openspec/specs/architecture/tools/edit.md)
+/// 决策动机（详见 [edit.md §2.4.3](../../../../docs/architecture/tools/edit.md)
 /// 与计划文件 `t2-p0-017_edit_工具_*.plan.md` Phase1 决策 6）：
 /// 保留 `PrimitiveExecutor::edit_file` trait 方法签名不动，避免牵动 dispatcher
 /// extension / 多个 mock / 集成测试一起改名。`replace_all` 信号通过此 marker

@@ -116,7 +116,7 @@ pub(crate) use read::{
 ///
 /// PR-RB（T1）将上限从历史 10 MiB 提升到 **25 MiB**，介于 cc-fork 256 KiB 与
 /// pi_agent_rust 100 MiB 之间——兼顾「合理 dump 文件」与「防爆 ctx」。
-/// 详见 `openspec/specs/architecture/tools/read.md` §2.5 决策表 R6 #2。
+/// 详见 `docs/architecture/tools/read.md` §2.5 决策表 R6 #2。
 ///
 /// **作用范围**：仅在 [`DefaultPrimitiveExecutor::read`] 的「无 `offset` / 无 `limit`」
 /// 路径生效（`metadata.len() > MAX_READ_BYTES` → 拒绝并提示加 offset/limit 重试）。
@@ -148,7 +148,7 @@ pub struct DefaultPrimitiveExecutor {
     /// 默认 [`crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF`]（`true`）；
     /// 由 [`Self::with_write_normalize_crlf`] 覆盖（生产由 `[tools.write] normalize_crlf`
     /// config 注入，测试可关掉验证「字节透传」语义）。详见
-    /// `openspec/specs/architecture/tools/write.md` §3.3 / §8。
+    /// `docs/architecture/tools/write.md` §3.3 / §8。
     pub(super) write_normalize_crlf: bool,
 }
 

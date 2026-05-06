@@ -1,6 +1,6 @@
 //! # `edit` 工具：T2 normalize 管道（PR-H）
 //!
-//! 实现 [openspec/specs/architecture/tools/edit.md §2.4.4](../../../openspec/specs/architecture/tools/edit.md)
+//! 实现 [docs/architecture/tools/edit.md §2.4.4](../../../docs/architecture/tools/edit.md)
 //! 的 normalize 数据流：
 //!
 //! ```text
@@ -260,7 +260,7 @@ pub fn build_normalized_byte_map(input: &str) -> (String, Vec<usize>) {
 
 /// 探测扩展名是否需要走专用工具而非纯文本 `edit`。
 ///
-/// 当前仅 `.ipynb`（[edit.md §2.4.4](../../../openspec/specs/architecture/tools/edit.md)
+/// 当前仅 `.ipynb`（[edit.md §2.4.4](../../../docs/architecture/tools/edit.md)
 /// 第 4 条）；后续若新增扩展名（如 `.parquet`）在此扩展。
 pub fn is_unsupported_structured_file(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();

@@ -1,6 +1,6 @@
 //! # `read` 工具的会话级状态表（PR-RF · T2-b/c）
 //!
-//! 实现 `openspec/specs/architecture/tools/read.md` §3.2 的 **dedup（重复读阻断）**
+//! 实现 `docs/architecture/tools/read.md` §3.2 的 **dedup（重复读阻断）**
 //! 与 **staleness（陈旧检测）** 共用底座：一张 `path → ReadStamp` 哈希表，挂在
 //! [`crate::core::agent_loop::AgentLoopConfig`] 上，**每个会话独立** —— `AgentLoop`
 //! 析构时自动随之释放（**无需** 显式 `clear()`；详见 §3.2.3 「cleanup on session end」）。

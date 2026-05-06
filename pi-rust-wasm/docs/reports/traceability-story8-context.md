@@ -30,5 +30,5 @@
 
 ## 相关规格路径
 
-- [context-management.md §5.7 / §5.7.5.1](../../openspec/specs/architecture/context-management.md)
-- [session-storage.md — transcript / BranchSummaryEntry](../../openspec/specs/architecture/session-storage.md)
+- [context-management.md §5.7 / §5.7.5.1](../../docs/architecture/context-management.md)
+- [session-storage.md — transcript / BranchSummaryEntry](../../docs/architecture/session-storage.md)

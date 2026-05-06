@@ -1,6 +1,6 @@
 //! # PR-RF（T2-c）`tool_exec` 上的 `read` dedup / staleness 端到端焦小测
 //!
-//! 覆盖 `openspec/specs/architecture/tools/read.md` §3.2「重复 read 阻断」与
+//! 覆盖 `docs/architecture/tools/read.md` §3.2「重复 read 阻断」与
 //! §4.x「外部修改触发重读」共 5 个场景，复用 `DefaultPrimitiveExecutor` + 真实
 //! `tempdir` fs（**不**使用 mock），确保「stamp 写入 → 元数据比对 → 短路 stub」
 //! 这条链路在生产 PrimitiveExecutor 上闭环可工作。

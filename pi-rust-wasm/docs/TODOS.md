@@ -1,10 +1,10 @@
 # PI Agent TODOS
 
-> 个人灵感 / 想法 / 待办收集池。成熟条目可晋升为 [TASK_BOARD_002](../agents/TASK_BOARD_002.md) 正式任务。
+> 个人灵感 / 想法 / 待办收集池。成熟条目可晋升为 [TASK_BOARD_002 索引](../agents/TASK_BOARD_002/README.md) 正式任务。
 >
 > 组织方式：**先按领域分类，再在每条上标注档位（P0-P9）**；同档位内用「紧急度标签」`[BUG]/[UX]/[REF]/[DOC]` 做二次排序。
 >
-> 最近更新：2026-04-22（**路线图重排**：档位由旧「P0 破损 / P1 高价值 / ... / P5 灵感」改为 P0-P9「执行编排顺序」；与 [Product_Brief.md](../openspec/specs/Product_Brief.md) 的 P0-P9、[TASK_BOARD_002.md](../agents/TASK_BOARD_002.md) 的 T2-P0/P1 映射一致）
+> 最近更新：2026-04-22（**路线图重排**：档位由旧「P0 破损 / P1 高价值 / ... / P5 灵感」改为 P0-P9「执行编排顺序」；与 [Product_Brief.md](../openspec/specs/Product_Brief.md) 的 P0-P9、[TASK_BOARD_002 索引](../agents/TASK_BOARD_002/README.md) 的 T2-P0/P1 映射一致）
 
 ---
 
@@ -265,7 +265,7 @@
 
 - [x] **[P0] `[UX]`** `#T-003` 工具输出过程中无法中断
   - **核对 2026-04-22**：`AgentLoop::run` 全流式 / 工具 await 由 `tokio::select!` + `CancellationToken` 可取消；Ctrl+C 软中断 soft-cancel 当前 turn，`execute_bash` 子进程通过 `tokio::process::Command::kill_on_drop(true)` 被 Drop 时终止
-  - 架构：[interrupt-and-cancellation.md](../openspec/specs/architecture/interrupt-and-cancellation.md)
+  - 架构：[interrupt-and-cancellation.md](../docs/architecture/interrupt-and-cancellation.md)
   - 代码：`src/core/agent_loop/run.rs`、`src/api/chat/mod.rs`、`src/api/cli/chat_cmd.rs`
   - 档位：T2-P0-007
 
@@ -350,7 +350,7 @@
 
 - [ ] **[P0] `[REF]`** `#T-131` `max_tool_rounds` 待 tool-loop-detection 方案替代
   - 来源：代码 TODO `src/core/agent_loop/types.rs:38-40`
-  - 规格侧 TODO：`openspec/specs/architecture/context-management.md:1017-1019`
+  - 规格侧 TODO：`docs/architecture/context-management.md:1017-1019`
   - 档位：T2-P0-003
 
 ---
@@ -766,8 +766,8 @@
 
 ### 同步变更（本次改造一并完成）
 
-- 建 `openspec/specs/archive/`；`openspec/changes/001-mvp/` 与 `agents/TASK_BOARD.md` 归档
-- 建 `agents/TASK_BOARD_002.md`（吸收迭代立项）
+- ~~建 `openspec/specs/archive/`~~（目录已删除；历史见 Git）
+- 建 `agents/TASK_BOARD_002/` 目录化看板（吸收迭代立项；索引 `README.md` + `tasks/`）
 - `openspec/specs/Product_Brief.md` 重写为 P0-P9 路线图
 - T-135（Product_Brief 产品级 TODO）关闭
 

@@ -333,7 +333,7 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
     ///   的完整读」），让现有 mock / 旧 PrimitiveExecutor 实现 **零改动** 升级；
     /// - [`super::executor::DefaultPrimitiveExecutor`] 重写本方法为分块流式
     ///   单循环抽窗 + 25 MiB metadata 上限 + 二进制 hint（详见
-    ///   `openspec/specs/architecture/tools/read.md` §2.1–§2.5）。
+    ///   `docs/architecture/tools/read.md` §2.1–§2.5）。
     ///
     /// 入参语义：
     /// - `offset`：1-based 起始行号；`None` 等价于 `Some(1)`；

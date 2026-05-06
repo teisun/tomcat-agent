@@ -758,8 +758,8 @@ flowchart LR
 | `pi-mono_docs/README.md` |
 | `pi_agent_rust-docs/插件与-pi-mono-扩展系统兼容说明.md` |
 | `pi-rust-wasm/src/ext/README.md`（旁证） |
-| `pi-rust-wasm/openspec/specs/architecture/plugin-system/host-call-protocol.md`（旁证） |
-| `pi-rust-wasm/openspec/specs/architecture/plugin-system/phase2-long-lived-vm.md`（旁证） |
+| `pi-rust-wasm/docs/architecture/plugin-system/host-call-protocol.md`（旁证） |
+| `pi-rust-wasm/docs/architecture/plugin-system/phase2-long-lived-vm.md`（旁证） |
 | `pi-rust-wasm/docs/reports/pi_mono_gap_analysis.md` §3（旁证） |
 
 ### A.2 源码主锚点（v1.1 复核）

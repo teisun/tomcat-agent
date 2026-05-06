@@ -46,7 +46,7 @@ stream_timeout_sec = 60
 # ------------------------------------------------------------------------------
 # [storage] 存储配置：工作根目录
 # agent 系统子目录（sessions/logs/audit 等）全部由 work_dir 按架构推导，不可单独配置。
-# 详见 openspec/specs/architecture/work-dir-and-data-layout.md
+# 详见 docs/architecture/work-dir-and-data-layout.md
 # ------------------------------------------------------------------------------
 [storage]
 # work_dir：工作根目录。所有 agent 系统子目录从此推导。默认 ~/.pi_/

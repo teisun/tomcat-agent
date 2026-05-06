@@ -26,7 +26,7 @@
 
 ## 2. 目标工作目录结构
 
-与 [工作目录结构](../../openspec/specs/architecture/directory-structure.md) 一致（总控设计另见 [work-dir-and-data-layout](../../openspec/specs/architecture/work-dir-and-data-layout.md)）。本节强调与初始化、内嵌资源相关的布局；根目录承载主配置，全局运行时文件集中在 `assets/`。
+与 [工作目录结构](../../docs/architecture/directory-structure.md) 一致（总控设计另见 [work-dir-and-data-layout](../../docs/architecture/work-dir-and-data-layout.md)）。本节强调与初始化、内嵌资源相关的布局；根目录承载主配置，全局运行时文件集中在 `assets/`。
 
 ```
 ~/.pi_/                             # work_dir 根目录
@@ -76,7 +76,7 @@
         └── (80+ Node.js 兼容 shim) # 内嵌资源自动释放目标
 ```
 
-各 agent 还可具备 `agents/<agentId>/plugins/`（agent 专属插件）；根级 `plugins/` 为全局共享，与 [directory-structure](../../openspec/specs/architecture/directory-structure.md) 一致。
+各 agent 还可具备 `agents/<agentId>/plugins/`（agent 专属插件）；根级 `plugins/` 为全局共享，与 [directory-structure](../../docs/architecture/directory-structure.md) 一致。
 
 ### 与现有代码的映射
 
@@ -335,8 +335,8 @@ pi doctor
 | `src/infra/config.rs` | 新增 `ensure_embedded_assets`（SHA-256 比对 + 文件锁 + 原子写入）；修改 `resolve_quickjs_path`（增加自动释放逻辑） |
 | `src/api/cli.rs` | 重写 `run_init` 为交互式向导（幂等、旧目录迁移）；增强 `run_doctor`（权限检查、SHA-256 展示）；入口加载 `.env` |
 | `docs/user-guide.md` | 更新安装说明（区分用户安装与开发者编译）、目录结构、init 流程 |
-| `openspec/specs/architecture/work-dir-and-data-layout.md` | 同步新目录布局 |
-| `openspec/specs/architecture/directory-structure.md` | 与本文档第 2 节保持一致 |
+| `docs/architecture/work-dir-and-data-layout.md` | 同步新目录布局 |
+| `docs/architecture/directory-structure.md` | 与本文档第 2 节保持一致 |
 
 ---
 
@@ -372,8 +372,8 @@ pi                     # 开始使用
 
 ## 9. 引用
 
-- [directory-structure](../../openspec/specs/architecture/directory-structure.md) — 工作目录结构（权威树形说明）
-- [work-dir-and-data-layout](../../openspec/specs/architecture/work-dir-and-data-layout.md) — 工作目录与数据布局
-- [infrastructure-layer](../../openspec/specs/architecture/infrastructure-layer.md) — 基础设施层
-- [host-core-layer](../../openspec/specs/architecture/host-core-layer.md) — 宿主核心层
-- [plugin-system-overview](../../openspec/specs/architecture/plugin-system-overview.md) — 插件系统概览
+- [directory-structure](../../docs/architecture/directory-structure.md) — 工作目录结构（权威树形说明）
+- [work-dir-and-data-layout](../../docs/architecture/work-dir-and-data-layout.md) — 工作目录与数据布局
+- [infrastructure-layer](../../docs/architecture/infrastructure-layer.md) — 基础设施层
+- [host-core-layer](../../docs/architecture/host-core-layer.md) — 宿主核心层
+- [plugin-system-overview](../../docs/architecture/plugin-system-overview.md) — 插件系统概览

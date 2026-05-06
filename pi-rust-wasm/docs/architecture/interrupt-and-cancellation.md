@@ -1,6 +1,6 @@
 # Interrupt & Cancellation 传播设计
 
-> 本文为 [agent-loop.md](./agent-loop.md) §13.2「Abort」语义与 §13.3.2 控制流伪代码的**补充设计**，聚焦"Ctrl+C 按下之后，信号如何一路穿过 CLI → chat_loop → AgentLoop → PrimitiveExecutor，并在任意 `await` 点把正在飞的 future 真正停下来"。落地看板单见 [T2-P0-007](../../../agents/TASK_BOARD_002.md)。
+> 本文为 [agent-loop.md](./agent-loop.md) §13.2「Abort」语义与 §13.3.2 控制流伪代码的**补充设计**，聚焦"Ctrl+C 按下之后，信号如何一路穿过 CLI → chat_loop → AgentLoop → PrimitiveExecutor，并在任意 `await` 点把正在飞的 future 真正停下来"。落地任务 **T2-P0-007**（工程任务看板位于 `agents/` 目录）。
 >
 > 与 `agent-loop.md` 出现冲突时，**以 `agent-loop.md` 为准**；本文补充"如何实现"的机制，`agent-loop.md` 定义"是什么行为"。
 
@@ -34,7 +34,7 @@
 本文适用 **[`ARCHITECTURE_SPEC.md`](../guides/workflow/ARCHITECTURE_SPEC.md) §7.0 豁免**（对 [`agent-loop.md`](./agent-loop.md) 的补充，不新增对外工具名 / wire 字段）。**不重复**另起与 [`read.md`](./tools/read.md) 同形的整表，而由下列既有节承担 **`ARCHITECTURE_SPEC` §7.1 / §7.2** 职责：
 
 - **§7.1 落地选型决策表** → **§11 设计选型与权衡**；
-- **§7.2 实施点（已闭环）** → 交付与验收函数名见 **§14 验收**（对齐 [`TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) **T2-P0-007**），主要代码落点见 **§9 关键改动（按文件）**。
+- **§7.2 实施点（已闭环）** → 交付与验收函数名见 **§14 验收**（对齐 **T2-P0-007**），主要代码落点见 **§9 关键改动（按文件）**。
 
 ---
 
@@ -719,7 +719,7 @@ ctrlc::set_handler(move || {
 7. **`AgentRunOutcome` 与调用面评估**：`agent_loop.run` 现有调用者仅 `src/api/chat/mod.rs:384` 一处；`AppError::Config("用户中断")` 文本可能被日志 / 测试期待——实施期第一步应 `rg "用户中断" src/ tests/` 扫一遍是否有依赖方，如有则保留兼容路径。
 8. **`cancelled: Arc<AtomicBool>` 跨文件引用**：`ext/dispatcher/session_ops.rs` 也在用；本设计**保留 AtomicBool 作为 poll 兼容出口**（从 token 派生），不在本次清理这些引用。
 9. **preheat 在中断时不显式 abort**：依赖下一轮 `check_before_request` 兜底；若实测发现中断后 preheat 泄露或状态机卡住，再补 `preheat.abort()` 调用。**标为风险项，不阻塞本设计**。
-10. **spec 文档同步**：`openspec/specs/architecture/agent-loop.md` 中关于 Abort 语义的段落按 §10 修订。
+10. **spec 文档同步**：`docs/architecture/agent-loop.md` 中关于 Abort 语义的段落按 §10 修订。
 
 ---
 

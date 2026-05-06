@@ -1,7 +1,7 @@
 # ExtensionAPI 差距分析（TASK-05a / Phase 0）
 
 **基准**：pi-mono `ExtensionAPI`（`packages/coding-agent/src/core/extensions/types.ts`）与 pi-rust-wasm `assets/js/pi_bridge.js` + `HostApiDispatcher`。  
-**策略来源**：[pi-mono-compat-strategy.md](../openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md) §13.4、§13.5。
+**策略来源**：[pi-mono-compat-strategy.md](../docs/architecture/plugin-system/pi-mono-compat-strategy.md) §13.4、§13.5。
 
 ---
 

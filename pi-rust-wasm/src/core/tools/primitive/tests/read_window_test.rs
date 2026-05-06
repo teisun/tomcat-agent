@@ -1,6 +1,6 @@
 //! # PR-RB（T1）`read` 工具：分页 + 流式 + 二进制提示 + 25 MiB 上限
 //!
-//! 覆盖 `openspec/specs/architecture/tools/read.md` §2.1 / §2.2 / §2.3 / §2.5
+//! 覆盖 `docs/architecture/tools/read.md` §2.1 / §2.2 / §2.3 / §2.5
 //! 决策表所要求的 6 个 T1 单测：
 //!
 //! 1. `read_offset_limit_returns_window`：跳过 `offset-1` 行，返回 `limit` 行；

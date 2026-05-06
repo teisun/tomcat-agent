@@ -155,7 +155,7 @@ pub(crate) fn format_with_hashlines(start_line: u64, body: &str) -> String {
 /// - **行号语义**：`start_line` 是该 body **第一行的绝对行号**（1-based）；
 ///   后续行依次递增。截断尾注由调用方追加，**不**进入本函数。
 /// - **格式来源**：与 `cc-fork-01` `addLineNumbers` 一致，便于 IDE / diff 工具
-///   横向比对（详见 `openspec/specs/architecture/tools/read.md` §3.1）。
+///   横向比对（详见 `docs/architecture/tools/read.md` §3.1）。
 /// - **行尾处理**：`split_inclusive('\n')` 保留每行末尾换行；最后一行若无换行
 ///   也按裸行渲染（与原始内容一致，不补 `\n`）。
 /// - **空 body**：返回空字符串（不强行打印 `1\t`），与 cat -n 行为一致。
@@ -338,7 +338,7 @@ pub(super) async fn read_file_impl(
 
 /// PR-RB（T1）`read` 工具入口：metadata 阶段大小预检 + 分块流式 + memchr 单循环抽窗。
 ///
-/// 详见 `openspec/specs/architecture/tools/read.md` §2.1–§2.5。
+/// 详见 `docs/architecture/tools/read.md` §2.1–§2.5。
 /// `offset`/`limit` 的边界（`offset >= 1` / `1 ≤ limit ≤ 10000`）已在
 /// [`crate::core::agent_loop::tool_exec`] 入口（§2.6）兜底，本方法仅
 /// `clamp` 防御。
@@ -415,7 +415,7 @@ pub(super) async fn read_impl(
     let has_window = offset.is_some() || limit.is_some();
     if !has_window && meta.len() > executor.read_max_bytes {
         return Err(AppError::Primitive(format!(
-            "File is large ({} bytes > {} bytes). Pass `offset` and `limit` to read a specific window, e.g. `read(path, offset=1, limit=2000)`. (decision: openspec/specs/architecture/tools/read.md §2.5)",
+            "File is large ({} bytes > {} bytes). Pass `offset` and `limit` to read a specific window, e.g. `read(path, offset=1, limit=2000)`. (decision: docs/architecture/tools/read.md §2.5)",
             meta.len(),
             executor.read_max_bytes
         )));
@@ -480,7 +480,7 @@ pub(super) async fn read_impl(
         }
         ReadWindowOutcome::Binary { first_byte_hex } => {
             return Err(AppError::Primitive(format!(
-                "File is binary or non-UTF-8 (detected: 0x{first}). • try `bash file <path>` to inspect the type; • multimodal image/PDF will be supported in a later read upgrade (T3, openspec/specs/architecture/tools/read.md §4.1).",
+                "File is binary or non-UTF-8 (detected: 0x{first}). • try `bash file <path>` to inspect the type; • multimodal image/PDF will be supported in a later read upgrade (T3, docs/architecture/tools/read.md §4.1).",
                 first = first_byte_hex
             )));
         }

@@ -7,7 +7,7 @@
 
 - 任意一级 `src/` 子目录默认应有一份 `README.md`；新增子模块时必须同步建。
 - 与代码改动同步更新；**不替代**用户指南、组内分享、status 进度文档。
-- 若某项设计点同时出现在本 README 与 `openspec/specs/architecture/` 下的方案文档，**以方案文档为权威**，README 加回链不重复内容。
+- 若某项设计点同时出现在本 README 与 `docs/architecture/` 下的方案文档，**以方案文档为权威**，README 加回链不重复内容。
 
 ## 2. 章节模板
 

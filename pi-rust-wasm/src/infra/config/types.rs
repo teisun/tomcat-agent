@@ -125,7 +125,7 @@ impl Default for LlmConfig {
 }
 
 /// 存储配置：仅 work_dir。agent 系统子目录由 resolve 函数从 work_dir 推导。
-/// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
+/// 详见 docs/architecture/work-dir-and-data-layout.md。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct StorageConfig {
     /// 工作根目录；默认 `~/.pi_/`。支持 `~` 与相对路径。
@@ -263,7 +263,7 @@ impl Default for SecurityConfig {
 }
 
 /// 上下文管理配置：token-aware 滑窗与 Compaction 参数。
-/// 详见 `openspec/specs/architecture/context-management.md`。
+/// 详见 `docs/architecture/context-management.md`。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContextConfig {
     /// LLM 上下文窗口大小（token 数），默认 400,000（GPT-5.2）。
@@ -344,7 +344,7 @@ pub fn compute_context_budget_chars(config: &ContextConfig) -> usize {
 }
 
 /// 工具子系统配置：每个内建工具的可调上限聚合在此表，避免 `LlmConfig` / `PrimitiveConfig`
-/// 等已有结构再被工具相关字段污染（与 `openspec/specs/architecture/tools/read.md` §3.4 对齐）。
+/// 等已有结构再被工具相关字段污染（与 `docs/architecture/tools/read.md` §3.4 对齐）。
 ///
 /// **设计口径**（与 `read.md` §3.4 一致）：
 /// - 仅放「磁盘资源 / 安全相关」的硬上限；
@@ -396,7 +396,7 @@ impl Default for ToolsReadConfig {
 ///
 /// 与 `read.md` § 工具子系统配置一致的设计口径：仅放「磁盘 / 安全相关」全局开关；
 /// `normalize_crlf` 控制 [`crate::core::tools::primitive::executor::write_edit::write_file_impl`]
-/// 写入字节前是否将 `\r\n` 折叠为 `\n`（与 [write.md](../../../openspec/specs/architecture/tools/write.md)
+/// 写入字节前是否将 `\r\n` 折叠为 `\n`（与 [write.md](../../../docs/architecture/tools/write.md)
 /// §3.3 / §8 一致）。**默认 `true`**：跨平台仓库统一收 `\n`，行为与
 /// pi-mono / cc-fork-01 同档。
 ///

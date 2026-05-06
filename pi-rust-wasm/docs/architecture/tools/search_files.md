@@ -2,7 +2,7 @@
 
 本文档是 `search_files` 工具的最终技术方案（架构 spec），承接计划
 [`search_files_兜底选型_c8b4a778.plan.md`](../../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
-与 [`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) T2-P0-005 子项「search_files 兜底与预检」。
+与迭代子项 **T2-P0-005**「search_files 兜底与预检」对齐。
 
 > **位置说明**：计划文档（plan）记录决策过程与待办清单；本文为冻结后的技术方案，包含协议、调度逻辑、竞品分析、One-Glance Map 与运行时图。
 
@@ -103,7 +103,7 @@
 
 ### 2.5 实施点（已闭环）
 
-本方案为 **Tier1 + Tier2 + 预检** 主线能力**单次合入**演进（见 [`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) **T2-P0-005** 及上文 §2.3「最终决策」），无再拆子 PR 叙事；验收以 **§12 测试矩阵** 为权威。
+本方案为 **Tier1 + Tier2 + 预检** 主线能力**单次合入**演进（见 **T2-P0-005** 及上文 §2.3「最终决策」），无再拆子 PR 叙事；验收以 **§12 测试矩阵** 为权威。
 
 | 实施点 | 交付范围 | 主要代码落点 | 验收锚点（示例） |
 |--------|----------|--------------|------------------|
@@ -599,7 +599,6 @@ auto_install_search_tools = true
 - 计划：[`/Users/yankeben/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`](../../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
 - 工具目录：[`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)
 - 用户指南：[`docs/user-guide.md`](../../../../docs/user-guide.md)
-- 看板：[`agents/TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) T2-P0-005
 - 跨 Agent 工具描述报告：[`docs/reports/builtin-tool-description-cross-agent-study.md`](../../../../docs/reports/builtin-tool-description-cross-agent-study.md)
 - Cursor 内置工具参考：[`docs/reports/cursor-builtin-tools-reference.md`](../../../../docs/reports/cursor-builtin-tools-reference.md)
 - 相关架构：[`permission-system.md`](../permission-system.md)（gate / deny 规则）、[`audit-log.md`](../audit-log.md)（审计 `implementation` 字段）、[`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md)（取消令牌）

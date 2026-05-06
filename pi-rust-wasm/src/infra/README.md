@@ -100,7 +100,7 @@ MVP 会话与审计均不使用 SQLite，故不包含 `Db` 变体。各层通过
 - **AppConfig**：顶层配置，包含 `log`、`llm`、`storage`、`plugin`、`security`、`primitive`。
 - **LogConfig**：`level`（trace/debug/info/warn/error）、`file_enabled`。文件目录为 `resolve_log_dir`（`work_dir/agents/{id}/logs/`），按日滚动、文件名前缀 `pi_wasm`，最多保留 5 个历史文件。
 - **LlmConfig**：`provider`、`api_base`、`api_key_env`、`default_model`、`max_concurrent_requests`、`retry_count`、`stream_timeout_sec`；可选 `proxy`（显式 HTTP 代理 URL，如 `http://127.0.0.1:7890`，未设置时仍使用环境变量 `HTTPS_PROXY`/`HTTP_PROXY`）；可选 `api_base_fallback`（当对主 API 地址请求不通时自动用该 URL 重试，示例 `https://api.chatanywhere.tech`，留空关闭自动降级）。
-- **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认 `~/.pi_/`；多 agent 子目录与数据布局见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)）。
+- **StorageConfig**：`sessions_dir`、`work_dir`（工作根目录，默认 `~/.pi_/`；多 agent 子目录与数据布局见 [工作目录与数据布局](../../docs/architecture/work-dir-and-data-layout.md)）。
 - **PluginConfig**：`plugins_dir`、`auto_load`。
 - **PrimitiveConfig**：路径/命令白名单与审批、`auto_confirm`、`require_approval_for_all_write` 等。
 - **SecurityConfig**：`default_plugin_permission_level`、`enable_audit_log`、`audit_log_retention_days`、`enable_plugin_safety_scan`。

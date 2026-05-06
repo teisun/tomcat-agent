@@ -1137,7 +1137,7 @@ Use this EXACT format (same as the original summary):
 
 ### 7.5 Compaction v2 修订（T2-P0-002）
 
-> 本小节为 [T2-P0-002 计划](../../../agents/TASK_BOARD_002.md#t2-p0-002--compaction-prompt-and-ctx-v2--摘要-prompt-升级--context-v2-收尾) 的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../../../docs/reports/compaction-prompt-cc-vs-pi.md)。
+> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../../../docs/reports/compaction-prompt-cc-vs-pi.md)。
 
 #### 7.5.1 模板升级为 9 节
 
@@ -1183,12 +1183,12 @@ pub attempts: Option<u32>,
 
 #### 7.5.4 三项不实施决议（关闭/转后续）
 
-T2-P0-002 立项决议中**明确不做**的三项相关动作（决议落档于 [`docs/TODOS.md`](../../../docs/TODOS.md) 与 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §6 变更记录，背景论证见 [报告 §5.7](../../../docs/reports/compaction-prompt-cc-vs-pi.md)）：
+T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`docs/TODOS.md`](../../../docs/TODOS.md) 与工程变更记录，背景论证见 [报告 §5.7](../../../docs/reports/compaction-prompt-cc-vs-pi.md)）：
 
 | 决议 | 范围 | 承接路径 |
 | :--- | :--- | :--- |
 | `#T-040` 不在 `messages_to_text` 做内容硬截断 | compaction 不兼任输入校验；现有 Layer 0（`>= 50K` 落盘 + 200 字 preview）已覆盖 Tool 路径 | User/Assistant 巨量消息让 LLM 自行返回 `context_length_exceeded`，由 §7.5.3 退避 + 失败留痕路径承接 |
-| `#T-043` 不新增 `tool-results/_index.jsonl` 落盘索引 | 信息可由 transcript 占位符 + fs mtime + 文件名（tool_call_id）完全重建，主路径无消费者 | 真实归属 `executor/primitives.rs::edit_file`（agent 写大文件方式），抽出 [T2-P0-011 large-file-edit-strategy](../../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 承接 |
+| `#T-043` 不新增 `tool-results/_index.jsonl` 落盘索引 | 信息可由 transcript 占位符 + fs mtime + 文件名（tool_call_id）完全重建，主路径无消费者 | 真实归属 `executor/primitives.rs::edit_file`（agent 写大文件方式），抽出 **T2-P0-011 large-file-edit-strategy** 承接 |
 | `#T-044` 不实施 Two-pass summary | CC 用 fork 子代理 + prompt cache 抵消草稿成本，Pi 单次 LLM 直发性价比不好 | 模板指令区追加 `First reason internally, then output the final summary.` 隐式诱导，不开第二轮 LLM |
 
 ---

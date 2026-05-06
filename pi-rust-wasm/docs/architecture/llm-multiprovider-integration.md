@@ -320,7 +320,7 @@ pi-rust-wasm **当下**已固定 **OpenAI 形 `ChatMessage`**，更接近 **wire
 
 `build_responses_input` 角色规则：仅 **`User`** 把非文本 part 透传 Responses；`System` / `Assistant` / `Tool` 出现非文本 part 时 **`tracing::warn!` 并丢弃非文本部分**（保留 wire 兼容、避免 API 4xx）。
 
-**Files 上传管理（multipart `POST /v1/files` + 生命周期 + reuse cache）**：拆为独立任务 **T2-P0-013 | llm-files-upload-manager**，详见 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §T2-P0-013；本 spec 后续在 **§6.5.4** 补充该子系统。
+**Files 上传管理（multipart `POST /v1/files` + 生命周期 + reuse cache）**：拆为独立任务 **T2-P0-013 | llm-files-upload-manager**；本 spec 后续在 **§6.5.4** 补充该子系统。
 
 ### 6.6 仅 vision（Completions 路径，低风险增量）—— 与 §6.5 互斥落地
 

@@ -1,7 +1,7 @@
 //! `pi chat` 子命令入口：启动交互式对话模式。
 //!
 //! 本模块负责 L0（进程级）中断信号到 L1（chat 会话）取消令牌的桥接，
-//! 具体分层与时序参见 `openspec/specs/architecture/interrupt-and-cancellation.md`。
+//! 具体分层与时序参见 `docs/architecture/interrupt-and-cancellation.md`。
 
 use std::time::{Duration, Instant};
 

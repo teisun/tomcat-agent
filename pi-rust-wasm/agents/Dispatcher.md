@@ -6,29 +6,29 @@ Agent 读取本文件后，须按以下流程执行。
 
 ---
 ## 背景了解
- agent根据自身角色定义读取主项目 [specs规格文档](../openspec/specs/)下文档，实现当前迭代看板（当前为 [TASK_BOARD_002.md](./TASK_BOARD_002.md)）规划好的任务，完成对应功能后提交代码到各自分支，按要求同步进度到本分支的 [docs/status/{branch}.md]
+Agent 根据自身角色定义读取主项目 [openspec/specs 规范文档](../openspec/specs/)，并按当前迭代看板（索引与立项 [TASK_BOARD_002/README.md](./TASK_BOARD_002/README.md)；单卡 `TASK_BOARD_002/tasks/T2-*.md`）规划好的任务实现功能，提交到各自分支，并同步本分支 [docs/status/{branch}.md](../docs/status/)
 
 ## 1、领取任务
 
-1. 读取 [TASK_BOARD_002.md](./TASK_BOARD_002.md)。
-2. 查看顶部「当前迭代上下文」区，获取 specs 路径、需求文档路径等。
-3. 在任务列表中，找到**状态为 `TODO` 且负责人为空**的最高优先级任务（P0 > P1）。仅 `TODO` 可认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
-4. 若有多个同优先级可选任务，优先选排在前面的（已按推荐顺序排列）。
+1. 读取 [TASK_BOARD_002/README.md](./TASK_BOARD_002/README.md) 的 **§4 任务索引表**。
+2. 打开目标任务的 **[tasks/T2-*.md](./TASK_BOARD_002/tasks/)** 单卡，确认状态、依赖与验收。
+3. 在 **§4 索引** 与任务卡中，找到**状态为 `TODO` 且负责人为空**的最高优先级任务（P0 > P1）。仅 `TODO` 可认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
+4. 若有多个同优先级可选任务，优先选索引表中排在前面的（已按推荐顺序排列）。
 5. 有依赖的任务，所有依赖须为 `DONE` 才可认领。
 6. **一次只认领一个任务**，完成或标记 `BLOCKED` 后才可领下一个。
 
 ## 2、认领任务
 
-1. 将该任务的**负责人**改为自己的名字（Tom / Jerry / Spike）。
+1. 在该任务对应的 **`TASK_BOARD_002/tasks/T2-*.md`** 中，将**负责人**改为自己的名字（Tom / Jerry / Spike）。
 2. 将**状态**改为 `DOING`。
 
 ## 3、读取上下文
 
-根据 TASK_BOARD_002.md 顶部的「当前迭代上下文」，读取以下文档：
+根据 [TASK_BOARD_002/README.md](./TASK_BOARD_002/README.md) 的「当前迭代上下文」与 **已认领的 `tasks/T2-*.md`**，读取以下文档：
 
-1. **specs 规格文档**（含 Architecture.md、Constitution.md、Product_Brief.md 及子文档）
-2. **当前迭代立项块 + 待办任务**（TASK_BOARD_002.md 第 1/4 节）
-3. **全集想法池**：[docs/TODOS.md](../docs/TODOS.md)（查对应 `#T-XXX` 条目说明）
+1. **openspec/specs 规范层**（须读、无省略）：含 [Constitution.md](../openspec/specs/Constitution.md)、[Product_Brief.md](../openspec/specs/Product_Brief.md)、[Architecture.md](../openspec/specs/Architecture.md)（索引）、`guides/` 下与工作相关的规范等。
+2. **架构 / 工具长文**：在 [`docs/architecture/`](../docs/architecture/) 下**按任务卡点名的子路径**打开即可；**勿**将整棵 `docs/architecture` 当作默认附件通读。
+3. **当前迭代立项 + 任务索引**：README §1 / §4；具体字段与验收以对应 **`tasks/T2-*.md`** 为准。
 
 ## 4、制定开发计划
 
@@ -60,7 +60,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 遇依赖阻塞、技术问题、需求不明确时：
 
-1. 在 TASK_BOARD_002.md 中将任务状态改为 `BLOCKED`，填写**阻塞点**描述
+1. 在对应 **`TASK_BOARD_002/tasks/T2-*.md`** 中将任务状态改为 `BLOCKED`，填写**阻塞点**描述
 2. 在**当前 Git 分支**对应的 status 文件（`docs/status/` 下「当前分支名，`/` 换 `-`」.md）中更新阻塞状态（含原因与预计解决时间）
 3. 禁止静默阻塞
 
@@ -68,7 +68,7 @@ Agent 读取本文件后，须按以下流程执行。
 
 1. 确认所有子项完成，通过门禁（rustfmt/clippy/单测），且已按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成 **分支侧全量集成/E2E测试验收**（集成/E2E 失败须在本分支修复，禁止弱化断言通过）
 2. 更新**当前 Git 分支**对应的 status 文件（即 `docs/status/` 下文件名为「当前分支名，`/` 替换为 `-`」的 .md 文件），标记任务完成；若在 develop 上开发则更新 `docs/status/develop.md`。
-3. 将 TASK_BOARD_002.md 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
+3. 将 **`TASK_BOARD_002/tasks/T2-*.md`** 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
 4. **完成前自检（必做）**：
    - 已确认**当前分支**，并已更新 **docs/status/当前分支对应.md**（分支名中 `/` → `-`）。
    - **test-groups**：若本次有新增或调整 integration 测试二进制，已按 §5 更新 `scripts/test-groups.sh`（§7.2 并发/串行组二选一登记）。

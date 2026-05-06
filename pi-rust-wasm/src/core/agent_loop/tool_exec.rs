@@ -459,7 +459,7 @@ fn parse_optional_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
 /// **形状 B**：`{ path, edits: [{ old_content, new_content, replace_all? }, ...] }`
 ///
 /// 当同时存在 `edits` 与顶层 `old_content`/`new_content` 时 **`edits` 优先**
-/// （与 [edit.md §4.2](../../../openspec/specs/architecture/tools/edit.md) 对齐）。
+/// （与 [edit.md §4.2](../../../docs/architecture/tools/edit.md) 对齐）。
 ///
 /// 解析后转换为 [`EditOperation`]（仅 `Replace`、无行号；行号 API 仅留给 dispatcher
 /// extension 内部使用）。`replace_all` 通过 `new_content` 字段携带的 magic 前缀
@@ -662,7 +662,7 @@ fn check_mutation_stamp(
 
 /// PR-RB（§2.6）`read` 入参 horizontal gate：边界违反返回结构化错误，使模型可自我修正。
 ///
-/// 边界（与 `openspec/specs/architecture/tools/read.md` §2.1 / §2.6 一致）：
+/// 边界（与 `docs/architecture/tools/read.md` §2.1 / §2.6 一致）：
 /// - `offset` 若提供则必须 ≥ 1；
 /// - `limit` 若提供则必须在 `[1, 10000]`（cc-fork 同档）；
 /// - 入参不是整数（`as_u64` 解析失败）由调用方先用 [`parse_optional_u64`]

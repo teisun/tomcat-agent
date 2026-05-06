@@ -5,7 +5,7 @@
 //! ## `edit_file`：T2-P0-017 PR-D 重写（2026-05-05）
 //!
 //! 替换早期「逐段 `replacen` 链式应用」实现，对齐
-//! [openspec/specs/architecture/tools/edit.md](../../../../../openspec/specs/architecture/tools/edit.md) §2.4.1：
+//! [docs/architecture/tools/edit.md](../../../../../docs/architecture/tools/edit.md) §2.4.1：
 //!
 //! 1. **原文快照**：读入磁盘 `original: String` 后，**所有**段的匹配 / 重叠 / 计数都在
 //!    `original` 上完成（**字节索引** `match_indices`），禁止链式增量。
@@ -287,7 +287,7 @@ fn parse_segment(op: &EditOperation) -> Result<EditSegment<'_>, AppError> {
 
 /// T2-P0-017 PR-D + PR-H 主路径：BOM/换行/curly/desanitize 归一化匹配后，对 working_lf splice。
 ///
-/// **PR-H normalize 接入**（[edit.md §2.4.4](../../../../../openspec/specs/architecture/tools/edit.md)）：
+/// **PR-H normalize 接入**（[edit.md §2.4.4](../../../../../docs/architecture/tools/edit.md)）：
 /// 1. 读盘 → `disk_text`；
 /// 2. `strip_bom` + `detect_line_ending` → `(no_bom, kind, had_bom)`；
 /// 3. `normalize_to_lf(no_bom)` → `working_lf`（仅 splice 用，CRLF 折叠为 LF）；

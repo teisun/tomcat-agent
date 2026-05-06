@@ -1,6 +1,6 @@
 # `read` 工具：分页、去重、多模态与陈旧检测
 
-本文档是内置工具 **`read`** 的冻结版技术方案（OpenSpec **B 类**：`openspec/specs/architecture/tools/`），承接看板子项 **T2-P0-tools-read**（[`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md)）与计划 [`strengthen-read-tool_92f396c7.plan.md`](../../../../../.cursor/plans/strengthen-read-tool_92f396c7.plan.md)、[`tools-read-spec-migration_cb4d7b57.plan.md`](../../../../../.cursor/plans/tools-read-spec-migration_cb4d7b57.plan.md)。**实现以仓库代码为准**；计划文档保留讨论过程与 PR 治理顺序，本文只保留**已定稿的行为与契约**。
+本文档是内置工具 **`read`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接迭代子项 **T2-P0-tools-read** 与计划 [`strengthen-read-tool_92f396c7.plan.md`](../../../../../.cursor/plans/strengthen-read-tool_92f396c7.plan.md)、[`tools-read-spec-migration_cb4d7b57.plan.md`](../../../../../.cursor/plans/tools-read-spec-migration_cb4d7b57.plan.md)。**实现以仓库代码为准**；计划文档保留讨论过程与 PR 治理顺序，本文只保留**已定稿的行为与契约**。
 
 ---
 
@@ -121,7 +121,7 @@
 
 ### 2.4 实施点（已闭环）
 
-下列顺序与 [`TASK_BOARD_002.md`](../../../../agents/TASK_BOARD_002.md) **T2-P0-tools-read** 及 `strengthen-read-tool_92f396c7.plan.md` §6–§8 一致；**2026-05-05** 已全量合入主线（见看板 Changelog 行）。
+下列顺序与 **T2-P0-tools-read** 及 `strengthen-read-tool_92f396c7.plan.md` §6–§8 一致；**2026-05-05** 已全量合入主线。
 
 
 | 实施点            | 交付范围                                                                                 | 主要代码落点                                      | 验收锚点（示例）                                                          |
@@ -229,7 +229,7 @@
 
 #### 2.4.6 PR-RS：文档
 
-- 将冻结 spec 合入 `openspec/specs/architecture/tools/read.md`，并与 tool catalog、看板、集成测试登记交叉引用（见 §13）。
+- 将冻结 spec 合入 `docs/architecture/tools/read.md`，并与 tool catalog、看板、集成测试登记交叉引用（见 §13）。
 
 ---
 
@@ -527,7 +527,6 @@ sequenceDiagram
 - 兄弟工具：[search_files.md](search_files.md)
 - 权限：[../permission-system.md](../permission-system.md)
 - 派生工具目录：[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)
-- 看板：[TASK_BOARD_002.md](../../../../agents/TASK_BOARD_002.md)（`T2-P0-tools-read`）
 
 ---
 

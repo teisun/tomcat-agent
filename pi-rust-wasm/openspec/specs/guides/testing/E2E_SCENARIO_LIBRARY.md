@@ -225,7 +225,7 @@
 
 > **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 为主、`src/core/compaction/tests.rs` 为 Layer0/L2 单测补充（见上表「用例名」列）。
 > **TASK-20 备注**：E2E-CLI-087~090 异步预热与 Boundary/L3 语义：集成见 `context_management_tests.rs`，状态机与 `apply_boundary` 见 `src/core/compaction/tests.rs`；时机 ② `check_before_request` 见 `apply.rs` 与 `api/chat`。
-> **TASK-21 备注**：§5.7 消息级 ID、锚点插入、`S::E`：`src/core/session/transcript/tests.rs` 与 `context_management_tests.rs` 中重载/边界用例对齐 JSONL 行序与 fold。**§5.7.5.1 陈旧 apply** 见 **E2E-CLI-092**；**read_entries_tail 跳过未知 type** 见 **E2E-CLI-093**。开发阶段不读盘兼容 `type: compaction`，见 [session-storage.md](../../architecture/session-storage.md) transcript 说明。
+> **TASK-21 备注**：§5.7 消息级 ID、锚点插入、`S::E`：`src/core/session/transcript/tests.rs` 与 `context_management_tests.rs` 中重载/边界用例对齐 JSONL 行序与 fold。**§5.7.5.1 陈旧 apply** 见 **E2E-CLI-092**；**read_entries_tail 跳过未知 type** 见 **E2E-CLI-093**。开发阶段不读盘兼容 `type: compaction`，见 [session-storage.md](../../../../docs/architecture/session-storage.md) transcript 说明。
 > **上下文可观测性完善**：E2E-CLI-091 中 `test_context_metrics_update_event_published` 位于 `tests/agent_loop_tests.rs`，`persist_context_observability_writes_sessions_json` 位于 `src/core/session/manager/tests.rs`（lib 单测）。
 
 ---

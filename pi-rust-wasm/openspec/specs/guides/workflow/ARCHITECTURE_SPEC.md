@@ -1,7 +1,7 @@
 # Architecture Spec 规范
 
-> 适用：`openspec/specs/architecture/**/*.md`（跨模块技术方案）。
-> 标杆案例：[`architecture/tools/search_files.md`](../../architecture/tools/search_files.md)、[`architecture/tools/read.md`](../../architecture/tools/read.md)（**§7.1 / §7.2 写法**）、[`architecture/tools/edit.md`](../../architecture/tools/edit.md)（原则 / 选型 / 协议 / 状态机 / 测试等**多表带「说人话」列**范例）、[`architecture/interrupt-and-cancellation.md`](../../architecture/interrupt-and-cancellation.md)（**§7.0 豁免**：回链主方案）。
+> 适用：`docs/architecture/**/*.md`（跨模块技术方案）。
+> 标杆案例：[`architecture/tools/search_files.md`](../../../../docs/architecture/tools/search_files.md)、[`architecture/tools/read.md`](../../../../docs/architecture/tools/read.md)（**§7.1 / §7.2 写法**）、[`architecture/tools/edit.md`](../../../../docs/architecture/tools/edit.md)（原则 / 选型 / 协议 / 状态机 / 测试等**多表带「说人话」列**范例）、[`architecture/interrupt-and-cancellation.md`](../../../../docs/architecture/interrupt-and-cancellation.md)（**§7.0 豁免**：回链主方案）。
 > 上位规范：[`Constitution.md`](../../Constitution.md)（**二.10「说人话」辅助**）· [`DOCUMENTATION_GUIDE.md`](DOCUMENTATION_GUIDE.md)。
 
 ## 1. 何时写一份新方案
@@ -106,9 +106,9 @@ ASCII 框图，**不可省**。硬约束：
 
 按需组合：
 
-- **多列 ASCII 时序图**：如 [`search_files.md §5`](../../architecture/tools/search_files.md)，按"用户 / 入口 / 调度层 / 子进程"排列泳道；终端友好、易 diff。
+- **多列 ASCII 时序图**：如 [`search_files.md §5`](../../../../docs/architecture/tools/search_files.md)，按"用户 / 入口 / 调度层 / 子进程"排列泳道；终端友好、易 diff。
 - **Mermaid `sequenceDiagram autonumber`**：用于在 IDE 里渲染。
-- **控制流伪码**：复杂嵌套循环 / 状态迁移用文字伪代码（如 [`agent-loop.md §13.3.2`](../../architecture/agent-loop.md) 三层循环）。
+- **控制流伪码**：复杂嵌套循环 / 状态迁移用文字伪代码（如 [`agent-loop.md §13.3.2`](../../../../docs/architecture/agent-loop.md) 三层循环）。
 
 每条事件 / 状态迁移必须显式标"何时发布、订阅方在哪"。
 
@@ -138,8 +138,8 @@ ASCII 框图，**不可省**。硬约束：
 
 #### §7.0 章节编排与豁免
 
-- **推荐**：与 [`search_files.md`](../../architecture/tools/search_files.md)、[`read.md`](../../architecture/tools/read.md) 一致，把「关切 / 横向对比 + **§7.1** + **§7.2**」放在**协议与 One-Glance 之前**，便于 reviewer 先吃决策再下钻契约（章节编号可为文档内 **§2**，语义上仍对应本规范的 §7）。
-- **豁免（不必重复长竞品表 + 长实施表）**：文首声明为**另一份架构主文档的补充**（例：[`interrupt-and-cancellation.md`](../../architecture/interrupt-and-cancellation.md) 对 [`agent-loop.md`](../../architecture/agent-loop.md)），且本文**不引入**新的对外工具名 / wire 字段时：**须**在正文**显式回链**主文档。**§7.1 / §7.2** 二选一落地：（**a**）被链主文档（或其已链子文档）中**已有**与本交付对齐的等价决策表 + 实施点表 → 本文不重复；（**b**）否则本文须在「选型 / 原理 / 背景」任一章内给出**至少各一行**的精简 **§7.1** + **§7.2** 表（含 PR 或看板锚点 + **验收函数名**），竞品横向可省略。若本文提出**新的**弃案或新的分阶段交付，则必须在本文内**增补对应表格行**。
+- **推荐**：与 [`search_files.md`](../../../../docs/architecture/tools/search_files.md)、[`read.md`](../../../../docs/architecture/tools/read.md) 一致，把「关切 / 横向对比 + **§7.1** + **§7.2**」放在**协议与 One-Glance 之前**，便于 reviewer 先吃决策再下钻契约（章节编号可为文档内 **§2**，语义上仍对应本规范的 §7）。
+- **豁免（不必重复长竞品表 + 长实施表）**：文首声明为**另一份架构主文档的补充**（例：[`interrupt-and-cancellation.md`](../../../../docs/architecture/interrupt-and-cancellation.md) 对 [`agent-loop.md`](../../../../docs/architecture/agent-loop.md)），且本文**不引入**新的对外工具名 / wire 字段时：**须**在正文**显式回链**主文档。**§7.1 / §7.2** 二选一落地：（**a**）被链主文档（或其已链子文档）中**已有**与本交付对齐的等价决策表 + 实施点表 → 本文不重复；（**b**）否则本文须在「选型 / 原理 / 背景」任一章内给出**至少各一行**的精简 **§7.1** + **§7.2** 表（含 PR 或看板锚点 + **验收函数名**），竞品横向可省略。若本文提出**新的**弃案或新的分阶段交付，则必须在本文内**增补对应表格行**。
 
 #### §7.1 落地选型决策表（MUST）
 
@@ -154,7 +154,7 @@ ASCII 框图，**不可省**。硬约束：
 
 前四列语义与审计要求不变；末列「说人话」为 **SHOULD**（见 **§4.1**）。未加该列不视为缺 §7.1，但**新增或大面积改版**的架构文档宜补上。
 
-**形态 B（路线对比表，与 [`search_files.md` §2.3](../../architecture/tools/search_files.md) 同类）**：多列对比若干候选路线（如 A/B/C），表下**必须**用一段话或短列表钉死 **最终默认 = 哪一列 / 哪一组合**，并写明 **弃用列及原因**（等价于形态 A 的「为何不是替代」）。**SHOULD** 在表末追加「说人话」列，每行一句扫读用语。
+**形态 B（路线对比表，与 [`search_files.md` §2.3](../../../../docs/architecture/tools/search_files.md) 同类）**：多列对比若干候选路线（如 A/B/C），表下**必须**用一段话或短列表钉死 **最终默认 = 哪一列 / 哪一组合**，并写明 **弃用列及原因**（等价于形态 A 的「为何不是替代」）。**SHOULD** 在表末追加「说人话」列，每行一句扫读用语。
 
 硬约束：
 
@@ -175,7 +175,7 @@ ASCII 框图，**不可省**。硬约束：
 
 硬约束：
 
-1. **SHOULD（强烈建议）**：表后按实施点拆小节（如 `read.md` **§2.4.1** 起），每小结配 **技术要点** + **ASCII**（或显式写「见图：本文 §5 / §6」），帮助把「表上一格」映射到调用栈与数据流。完整范例：[`read.md` §2.3–§2.4](../../architecture/tools/read.md)；**同构另一例**（术语章在前、实施点为 **§3.4**）：[`write.md` §3.4.1](../../architecture/tools/write.md)。
+1. **SHOULD（强烈建议）**：表后按实施点拆小节（如 `read.md` **§2.4.1** 起），每小结配 **技术要点** + **ASCII**（或显式写「见图：本文 §5 / §6」），帮助把「表上一格」映射到调用栈与数据流。完整范例：[`read.md` §2.3–§2.4](../../../../docs/architecture/tools/read.md)；**同构另一例**（术语章在前、实施点为 **§3.4**）：[`write.md` §3.4.1](../../../../docs/architecture/tools/write.md)。
 2. **单行压缩（仅当单次合入、无子 PR 叙事）**：允许全表 **仅一行**——`实施点` 写 `单次合入` 或主 merge / tag；`验收锚点` 列**必须**含「见本文 **§10 测试矩阵**（§ 号随文档）」**或**直接列出 **≥1** 个测试函数名；**禁止**写「已测」而无指针。
 3. **与 1 的边界（避免「含糊」）**：本条 **SHOULD** 的强度随**实施点行数**变化——表内 **≥2 行**（或多 PR、多交付边界）却**无**对应拆节、又无等价「见图 §x / §y」指针时，属可读性 **SHOULD** 未落实，review **可要求**作者补 **§7.2.1** 式小节；**不**自动等同 MUST 缺项。仅 **一行**且满足上条 **「单行压缩」** 时，**可不拆**子节。
 
@@ -259,7 +259,7 @@ ASCII 框图，**不可省**。硬约束：
 | 表格优先 | 选型 / 状态转移 / 风险 / 验收 / 配置等结构化内容用表格 |
 | **说人话** | 见 **§4.1**（**先专业、后口语**：段落辅助 + 表格末列）；与 [`Constitution.md`](../../Constitution.md) **二.10** 同向 |
 | No-Stale | 实施期调整须就地更新文档，并标 `【未改签名 / 依赖 Drop】` 等显式标签；禁止留"原计划/现落地"两份真相 |
-| 短句收尾 | 篇幅 > 300 行的方案末尾补一段"一句话总结"（参考 [`interrupt-and-cancellation.md §4.6`](../../architecture/interrupt-and-cancellation.md) 末尾） |
+| 短句收尾 | 篇幅 > 300 行的方案末尾补一段"一句话总结"（参考 [`interrupt-and-cancellation.md §4.6`](../../../../docs/architecture/interrupt-and-cancellation.md) 末尾） |
 
 ### 4.1 「说人话」辅助理解（SHOULD）
 
@@ -273,7 +273,7 @@ ASCII 框图，**不可省**。硬约束：
 
 #### 表格末列「说人话」
 
-在信息密度高的 Markdown 表末追加一列，列名固定为 **`说人话`**，与 [`architecture/tools/edit.md`](../../architecture/tools/edit.md) 等标杆一致。
+在信息密度高的 Markdown 表末追加一列，列名固定为 **`说人话`**，与 [`architecture/tools/edit.md`](../../../../docs/architecture/tools/edit.md) 等标杆一致。
 
 **何时 SHOULD 加**
 
@@ -297,7 +297,7 @@ ASCII 框图，**不可省**。硬约束：
 
 ## 5. 标杆案例
 
-### 5.1 [`architecture/tools/search_files.md`](../../architecture/tools/search_files.md)
+### 5.1 [`architecture/tools/search_files.md`](../../../../docs/architecture/tools/search_files.md)
 
 | 节 | 对应规范 | 看点 |
 |----|----------|------|
@@ -313,7 +313,7 @@ ASCII 框图，**不可省**。硬约束：
 | §12 测试矩阵 | §10 | T1–T10 对应实际测试函数名 |
 | §13 历史决策 | §12 | 6 条删除线 + "→ 否：理由" |
 
-### 5.2 [`architecture/tools/read.md`](../../architecture/tools/read.md)
+### 5.2 [`architecture/tools/read.md`](../../../../docs/architecture/tools/read.md)
 
 **§7.1 / §7.2 落地写法**（文档内编号为 **§2.3 / §2.4**，与「选型靠前」编排一致）：
 

@@ -1,6 +1,6 @@
 # `edit` 工具：原文契约、陈旧检测与分阶段增强
 
-本文档是内置工具 **`edit`**（当前代码中仍为 `edit_file`）的冻结版技术方案（OpenSpec **B 类**：`openspec/specs/architecture/tools/`），承接主计划 [`strengthen-four-core-tools_b51c9eae.plan.md`](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)（§0.4 edit 维度、§2.3 **PR-D**、§3.3 **PR-H**、§4.4 **PR-M** / T3-K）、看板中与四工具相关的条目，以及调研 [`docs/reports/agent-tools-comparison.md`](../../../../docs/reports/agent-tools-comparison.md) §4.2。**已定稿部分**与 **计划合入部分** 在 §2.4 用「实施点」表区分；**实现以合入后的仓库代码为准**。
+本文档是内置工具 **`edit`**（当前代码中仍为 `edit_file`）的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接主计划 [`strengthen-four-core-tools_b51c9eae.plan.md`](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)（§0.4 edit 维度、§2.3 **PR-D**、§3.3 **PR-H**、§4.4 **PR-M** / T3-K）、看板中与四工具相关的条目，以及调研 [`docs/reports/agent-tools-comparison.md`](../../../../docs/reports/agent-tools-comparison.md) §4.2。**已定稿部分**与 **计划合入部分** 在 §2.4 用「实施点」表区分；**实现以合入后的仓库代码为准**。
 
 **兄弟 spec**：[`read.md`](read.md)（`ReadFileState`、dedup、`hashline`、edit 前陈旧检查 **§6.3**、会话表 **§7**）；[`search_files.md`](search_files.md)（先搜后改工作流）。
 
@@ -254,7 +254,7 @@ right:
 - **允许** `read(path, offset, limit)` 分窗后立刻 `edit`：只要 stamp 仍在且 `mtime`+`size` 未变（与 cc-fork 系「mtime 比对」一致）。
 - **NoPriorRead 与 T2-P0-016 write 同 PR 锁同节奏**（**T2-P0-016 同 PR 落地，2026-05-06**）：
   `tool_exec::check_mutation_stamp`（前身为 `check_edit_staleness`，与 write 共用）在「stamp == None」分支
-  **强拒** `NoPriorRead`（`is_error: true`），与 [T2-P0-016 write](../../../../agents/TASK_BOARD_002.md) 同一 PR 统一打开门禁，
+  **强拒** `NoPriorRead`（`is_error: true`），与 **T2-P0-016 write** 子项同一 PR 统一打开门禁，
   避免 edit / write 节奏分叉。模型必须先 `read(path)` 再 `edit` / `hashline_edit` / `write(overwrite=true)`，
   staleness 也仍会继续拦「读过又被外部改了」的情况。
 
