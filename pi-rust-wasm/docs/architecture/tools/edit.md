@@ -2,7 +2,7 @@
 
 本文档是内置工具 **`edit`**（当前代码中仍为 `edit_file`）的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接主计划 [`strengthen-four-core-tools_b51c9eae.plan.md`](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)（§0.4 edit 维度、§2.3 **PR-D**、§3.3 **PR-H**、§4.4 **PR-M** / T3-K）、看板中与四工具相关的条目，以及调研 [`docs/reports/agent-tools-comparison.md`](../../../../docs/reports/agent-tools-comparison.md) §4.2。**已定稿部分**与 **计划合入部分** 在 §2.4 用「实施点」表区分；**实现以合入后的仓库代码为准**。
 
-**兄弟 spec**：[`read.md`](read.md)（`ReadFileState`、dedup、`hashline`、edit 前陈旧检查 **§6.3**、会话表 **§7**）；[`search_files.md`](search_files.md)（先搜后改工作流）。
+**兄弟 spec**：[`read.md`](read.md)（`ReadFileState`、dedup、`hashline`、edit 前陈旧检查 **§7.3**、会话表 **§8**）；[`search_files.md`](search_files.md)（先搜后改工作流）。
 
 ---
 
@@ -50,10 +50,10 @@
 | **契约对齐 pi-mono** | 每条 `edits[].old_content` 匹配**同一份原文**；禁止链式增量 patch | 多段一起改时，每段都在「改之前的整份文件」里找字，不要改完第一段再去找第二段。 |
 | **多段 + `replace_all`** | `oneOf` 形状 A/B；每段可选 `replace_all`；`count>1` 且无 `replace_all` → 明确 `Ambiguous` | 一段里同样的字出现好几次时，要么说清楚「全换」，要么报错让模型加上下文。 |
 | **重叠可检测** | 多段替换 span 在原文坐标上相交 → `Overlap`，不写盘 | 两段修改不能「踩到同一块肉」，否则直接拒，避免半成品写进磁盘。 |
-| **陈旧可拦截** | 与 [`read.md`](read.md) **§3** 术语、`read_state` **§7** 表一致：`mtime_ms` + `size` 快路径；与 write 同节奏时可要求 **先 read** | 你上次读过之后文件要是被人动过了，先别改，让模型重新读一遍再动手。 |
+| **陈旧可拦截** | 与 [`read.md`](read.md) **§1** 术语、`read_state` **§8** 表一致：`mtime_ms` + `size` 快路径；与 write 同节奏时可要求 **先 read** | 你上次读过之后文件要是被人动过了，先别改，让模型重新读一遍再动手。 |
 | **校验先于写** | 校验阶段**不**创建 `.bak`、**不**改写目标文件；`.bak` 仅覆盖「校验已通过后的写盘途中失败」 | 没算清楚之前别碰文件；备份只防「写一半崩了」。 |
 | **命名对齐 read** | 对外仅 `edit`；无 `edit_file` 运行时别名（与 `read` 的 PR-RA 口径一致） | 工具名就叫 `edit`，别搞两套名字让模型和日志对不上。 |
-| **锚点双轨** | 普通 `edit` 保持子串模型；**行级强一致**走独立 `hashline_edit` + `read hashline=true`（算法只维护在 [`read.md`](read.md) **§4**） | 普通替换用子串；要「第几行、还带指纹」那种精细活，用另一个工具，别全塞进 `edit`。 |
+| **锚点双轨** | 普通 `edit` 保持子串模型；**行级强一致**走独立 `hashline_edit` + `read hashline=true`（算法与入参字段见 [`read.md`](read.md) **§5**、实施拆节 **§4.2.5**） | 普通替换用子串；要「第几行、还带指纹」那种精细活，用另一个工具，别全塞进 `edit`。 |
 
 ### 1.1 观察指标表（与 §10 验收一一对应）
 
@@ -66,7 +66,7 @@
 | G5 | `ReadFileState::get` + `metadata`：`mtime`/`size` 与 stamp 不一致 → `Stale` | 文件大小或修改时间变了，就别按旧记忆改。 |
 | G6 | （与 write 同节奏时）无 prior read → `NoPriorRead` 或等价策略**在 spec 与代码中一致** | 若规定要先读再改，没读过就不让改（和写文件一条心）。 |
 | G7 | T2：`normalize` 后匹配成功且写回保留原 BOM/行尾（见 §2.4.4） | 智能引号、换行那种「差一点就对不上」的事，工具帮你对齐，但别乱改文件原来的行尾习惯。 |
-| G8 | T3：`hashline_edit` 与 `read` hashline 输出可闭环验证（见 `read.md` §10 与本文件 §10.1「T3 `hashline_edit`」行） | 带「行号+指纹」的读和专门的改要能配套测通。 |
+| G8 | T3：`hashline_edit` 与 `read` hashline 输出可闭环验证（见 `read.md` §11 与本文件 §10.1「T3 `hashline_edit`」行） | 带「行号+指纹」的读和专门的改要能配套测通。 |
 
 ### 1.2 非目标
 
@@ -126,32 +126,32 @@
 
 ### 2.3 落地选型决策表
 
-#### 2.3.0 维度 → 落地点矩阵（完整保留 / 单一权威表）
+#### 2.3.0 落地选型决策表（维度取舍）
 
-以下矩阵与主计划 §0.7「取其精华」行一一对应，**实施 PR 不得静默删行**；若弃案须在 §12 登记。
+以下矩阵与主计划 §0.7「取其精华」行一一对应，**实施 PR 不得静默删行**；若弃案须在 §12 登记。**代码落点、交付物、阶段**见 **[§2.4](#24-实施点排期与已规划-pr)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
 
-| 维度 | 落地点 | 取自 | 形态（实施位置） | 阶段 | 入选理由 | 未入选 + 拒因 | 说人话 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **E1** | `edits[]` + **原文快照**一次应用 | pi-mono | `catalog` `oneOf` 形状 B + `tool_exec` 解析 + `write_edit.rs` 重写主循环 | §2.4.3（PR-D） | 契约权威；与模型训练分布一致 | × 保留链式：与 pi-mono 冲突 | 多段一起改：都在「刚读的那份字」上算完再写。 |
-| **E2** | 每段 `replace_all?: bool` | cc-fork | schema 字段 + 计数分支 | §2.4.3（PR-D） | 显式控制多命中 | — | 想全局替换同一句话，要有一个明确的开关。 |
-| **E3** | **`hashline_edit` 独立工具** + read `hashline=true` | pi_agent_rust + 已落地 read | 新工具注册；算法与 wire **只维护一份**于 [`read.md`](read.md) §4 | §2.4.5（PR-M） | 行级强一致；与 read 输出闭环 | × 在普通 `edit` 内嵌 V4A：范围爆炸；× 本仓本期不做 `apply_patch` | 特别准的「第几行」编辑单独做，别和子串 `edit` 搅在一起。 |
-| **E4** | curly-quote、de-sanitize、BOM strip + LF **工作副本** | cc-fork + pi-mono | 建议 `src/core/tools/pipeline/edit_normalize.rs`（纯函数） | §2.4.4（PR-H） | 显著降「假未找到」 | × hermes 九策略模糊匹配：难测 | 弯引号、消毒字符这类坑，用一小套规则消化掉。 |
-| **E5** | 逻辑错误码 + 可执行 hint | cc-fork | `AppError::Tool` 或枚举映射 | §2.4.4（PR-H） | 模型可恢复 | — | 报错要带「下一步咋办」，别只骂一句。 |
-| **E6** | 先校验后写；`.bak` 仅兜底写失败 | 现状 + 强化 | `write_edit.rs` | §2.4.3（PR-D） | 与主 plan PR-D 一致 | — | 算不对就不写；备份只防写一半崩了。 |
-| **E7** | `.ipynb` 拒绝 + 指引 | cc-fork | `gate` 后扩展名检测 | §2.4.4（PR-H） | 不实现 Notebook 本体 | — | 笔记本先别用纯文本改，直接拦。 |
-| **—（staleness）** | `edit` 前 `ReadFileState::get` + `metadata` | cc-fork + 已落地 [`read_state.rs`](../../../../src/core/tools/pipeline/read_state.rs) | `tool_exec` `edit` 分支与 `read` 同形注入 `read_file_state` | §2.4.3（PR-D）² | 与 read 共用表 | × 无校验：与 read 设计目标相悖 | 改之前对一下表：文件还是不是你上次看的那份。 |
-| **—（命名）** | 工具短名 **`edit`** | pi-mono | `catalog` / `tool_exec` / `system_prompt` | §2.4.2 | 与 `read` 短名一致 | 不做 `edit_file` 运行时别名 | 就叫 `edit`，和 `read` 一样短、一样好记。 |
-| **—（secrets）** | 每段 `new_content` 扫描 | cc-fork（主 plan T3-K） | 未来 `src/core/security/secrets.rs` | §2.4.5（T3-K） | 与 write 共用钩子 | — | 往文件里贴密钥前，先扫一眼能不能过。 |
+| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **E1** | 多段 `edits[]` 是否对**同一份原文快照** | 链式 `replacen` vs pi-mono「全程对 original」 | pi-mono | 计数 / 重叠 / `replace_all` 均在读入后的 `original`（及 T2 起 `working`）上完成；单次 `write_file_atomic` | × 保留链式：与 pi-mono / 训练分布冲突、跨度误判 | 多段一起改：都在「刚读的那份字」上算完再写。 |
+| **E2** | 多命中子串是否需显式 `replace_all` | 仅靠扩唯一子串 vs cc-fork **replace_all** 一等公民 | cc-fork | 每段 `replace_all?: bool`；否则 `Ambiguous` 可诊断 | — | 想全局替换同一句话，要有一个明确的开关。 |
+| **E3** | 行级强锚点是否塞进子串 `edit` | 内嵌 V4A / MD5 vs **pi_agent_rust** 独立 `hashline_edit` + [`read.md`](read.md) `hashline` | pi_agent_rust + 已落地 read | 协议隔离；算法与 wire 单点维护于 read §5 / §4.2.5 | × 普通 `edit` 内嵌 V4A：范围爆炸；× 本期不做 `apply_patch` | 特别准的「第几行」编辑单独做，别和子串 `edit` 搅在一起。 |
+| **E4** | 模型字面与磁盘微差如何消化 | 九策略模糊 vs 有限 normalize | cc-fork + pi-mono | curly-quote / de-sanitize / BOM + LF **工作副本**；纯函数管道 | × hermes 式多策略模糊：难测 | 弯引号、消毒字符这类坑，用一小套规则消化掉。 |
+| **E5** | 失败时模型能否自愈 | 含糊中文 vs errorCode 式细分 | cc-fork | 逻辑错误码 + 可执行 hint（`AppError::Tool` / 枚举映射） | — | 报错要带「下一步咋办」，别只骂一句。 |
+| **E6** | 写盘失败是否留半成品 | 现状 `.bak` + 恢复 | 现状 + 主 plan PR-D | 先校验后写；`.bak` 仅兜底写失败路径 | — | 算不对就不写；备份只防写一半崩了。 |
+| **E7** | `.ipynb` 是否走纯文本 `edit` | Notebook 另工具 vs 纯文本一把梭 | cc-fork | `gate` 后扩展名拒绝 + 指引 | — | 笔记本先别用纯文本改，直接拦。 |
+| **—（staleness）** | 改前是否校验「仍是上次读的那份」 | 无校验 vs read 共用 `ReadFileState` | cc-fork + [`read_state.rs`](../../../../src/core/tools/pipeline/read_state.rs) | `mtime_ms + size` 快路径；与 read 同形注入 `tool_exec` | × 无校验：与 read 陈旧目标相悖 | 改之前对一下表：文件还是不是你上次看的那份。 |
+| **—（命名）** | 对外工具名是否短名单轨 | `edit_file` 别名 vs `read` PR-RA 口径 | pi-mono + 本仓库 read | 仅 `edit`；transcript legacy **warn** + UnknownTool | × `edit_file` 运行时别名 | 就叫 `edit`，和 `read` 一样短、一样好记。 |
+| **—（secrets）** | `new_content` 是否可能夹带密钥 | 无扫描 vs cc-fork 类钩子 | cc-fork（主 plan T3-K） | 每段 `new_content` 扫描；与 write 共用 `secrets` 钩子 | — | 往文件里贴密钥前，先扫一眼能不能过。 |
 
-> ² **staleness 行脚注**：与 write「必须先 read」**同 PR 节奏**落地时，edit 侧复用同一张 `ReadFileState`；语义见 [`read.md`](read.md) **§3**（术语）、**§6.3**（edit 前陈旧检查概念）、**§7**（会话表字段）。
+> ² **staleness 行脚注**：与 write「必须先 read」**同 PR 节奏**落地时，edit 侧复用同一张 `ReadFileState`；语义见 [`read.md`](read.md) **§1**（术语）、**§7.3**（edit 前陈旧检查概念）、**§8**（会话表字段）。
 
-#### 2.3.1 形态 A 摘要（`ARCHITECTURE_SPEC` §7.1 形态 A 列名）
+#### 2.3.1 摘要表（`ARCHITECTURE_SPEC` §4.1 下可选扫读；列名与 §2.3.0 七列分工一致）
 
 | 决策点 | 选择 | 现状/过去/其他 | 选择理由（为何不是其他） | 说人话 |
 | --- | --- | --- | --- | --- |
 | 多段编辑语义 | 全程对 `original` 快照一次应用 | 链式 `replacen` 逐步改 | 与 pi-mono / 模型训练一致；链式会误判跨度 | 多段别「改一步找一步」。 |
 | `replace_all` | 每段独立 bool，默认 `false` | 无字段、只靠扩唯一子串 | 批量替换需显式开关，否则 Ambiguous 可诊断 | 想全换要说一声，别默认瞎换。 |
-| 行级强锚点 | 独立 `hashline_edit` + `read hashline` | 在 `edit` 内嵌 V4A / MD5 块 | 协议隔离、算法单点维护于 `read.md` §4 | 精细活单独工具，协议别搅成一锅粥。 |
+| 行级强锚点 | 独立 `hashline_edit` + `read hashline` | 在 `edit` 内嵌 V4A / MD5 块 | 协议隔离、算法单点维护于 `read.md` §5 / §4.2.5 | 精细活单独工具，协议别搅成一锅粥。 |
 | 模糊匹配深度 | 有限 normalize（T2） | hermes 多策略模糊 | 可测性与产品定位 | 只做「能讲清楚规则」的容错，不做玄学猜词。 |
 | partial view 后能否 edit | **允许**（stamp 在且 mtime/size 未变） | 强制仅全文 stamp 才允许 | 与 read 分页一致；不逼模型整文件 read | 读了半文件也允许改，只要文件本身没变。 |
 | staleness 指纹 | `mtime_ms` + `size` | `content_hash` 参与硬门 | 与 read dedup 同哲学；hash 存表供诊断与 hashline 纵深 | 先看「改没改过」用轻量指纹，别每次全文件哈希卡性能。 |
@@ -160,14 +160,14 @@
 
 ### 2.4 实施点（排期与已规划 PR）
 
-总表列名对齐 `ARCHITECTURE_SPEC` §7.2；**验收锚点**在 §10 展开，**合入与用例名以 §10 矩阵与仓库测试为准**。
+总表列名对齐 `ARCHITECTURE_SPEC` **§4.2**；**验收锚点**在 §10 展开，**合入与用例名以 §10 矩阵与仓库测试为准**。
 
-| 实施点 | 交付范围 | 主要代码落点 | 验收锚点（示例） | 说人话 |
+| 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 | --- | --- | --- | --- | --- |
-| **PR-命名** | `edit_file` → `edit`；无运行时别名；transcript 仅 warn | `catalog.rs`、`tool_exec.rs`、`system_prompt.rs`、全仓测试字面量 | 见 §10「命名」行 | 把名字改短、改干净，和 `read` 一套规矩。 |
-| **PR-D（T1）** | `oneOf` schema；原文快照；`replace_all`；重叠检测；单次 `write_file_atomic`；staleness 注入 `edit` 分支；校验阶段不写盘 | `catalog.rs`、`tool_exec.rs`、`write_edit.rs` | `edit_replace_all_replaces_every_match`、`edit_multiple_edits_apply_against_original`、`edit_overlap_rejected`、`edit_validation_failure_restores_or_noop`、`edit_rejected_when_read_stamp_stale`（§10） | 第一刀：契约、安全、能测的核心行为先落地。 |
-| **PR-H（T2）** | normalize 管道；curly-quote / de-sanitize；结构化 E5；`.ipynb` 拒绝；轻量成功回执 | `edit_normalize.rs`（新）、`write_edit.rs`、`tool_exec.rs` | `edit_curly_quote_matches`、`edit_desanitize_matches`、`edit_rejects_ipynb`（§10） | 第二刀：用起来少撞墙、报错听得懂。 |
-| **PR-M + T3-K（T3）** | `hashline_edit` 工具注册；`new_content` secrets 扫描 | `catalog.rs`、`tools.rs` 或独立模块、`secrets.rs`（新） | 与 `read.md` §10 hashline 用例 + 新增工具测（§10） | 第三刀：行级精修 + 密钥别误写进仓库。 |
+| **PR-命名** | **交付物**：catalog/schema/system_prompt/测试字面量仅 `edit`；legacy **warn**。**落地点**：对外工具名与 match 表 | `src/core/tools/contract/catalog.rs`、`src/core/agent_loop/tool_exec.rs`、`src/core/llm/system_prompt.rs`、全仓断言 | 见 §10「命名」行 | 把名字改短、改干净，和 `read` 一套规矩。 |
+| **PR-D（T1）** | **交付物**：`oneOf` + `edits[]` + 原文快照 + `replace_all` + 重叠检测 + staleness 注入 + 单次原子写。**落地点**：schema 解析 / 编辑主循环 / 写路径 | `src/core/tools/contract/catalog.rs`、`src/core/agent_loop/tool_exec.rs`、`src/core/tools/primitive/executor/write_edit.rs` | `edit_replace_all_replaces_every_match`、`edit_multiple_edits_apply_against_original`、`edit_overlap_rejected`、`edit_validation_failure_restores_or_noop`、`edit_rejected_when_read_stamp_stale`（§10） | 第一刀：契约、安全、能测的核心行为先落地。 |
+| **PR-H（T2）** | **交付物**：normalize 管道、E5 文案、`.ipynb` 拒绝。**落地点**：normalize 纯函数模块 + 执行层 + tool_exec | `src/core/tools/pipeline/edit_normalize.rs`（新）、`write_edit.rs`、`tool_exec.rs` | `edit_curly_quote_matches`、`edit_desanitize_matches`、`edit_rejects_ipynb`（§10） | 第二刀：用起来少撞墙、报错听得懂。 |
+| **PR-M + T3-K（T3）** | **交付物**：`hashline_edit` 注册；secrets 扫描钩子。**落地点**：catalog / tools 分发 / `secrets.rs` | `catalog.rs`、`tools.rs` 或独立模块、`src/core/security/secrets.rs`（新） | 与 `read.md` §11 hashline 用例 + 新增工具测（§10） | 第三刀：行级精修 + 密钥别误写进仓库。 |
 
 下列小节保留**全部技术点描述与 ASCII 图**（对应旧版 §0.0、§2 命名、§3.1–§3.3），文字上做了分层标题，便于与上表对照。
 
@@ -184,7 +184,7 @@
 
 #### 2.4.2 PR-命名：对齐 `read` §1
 
-与 [`read.md`](read.md) **§1**、**PR-RA** 口径**完全对齐**：
+与 [`read.md`](read.md) **§4.2.1**（PR-RA）口径**完全对齐**：
 
 - [`catalog.rs`](../../../../src/core/tools/contract/catalog.rs)：`name: "edit_file"` → **`"edit"`**；`description` 内 `edit_file` 字面量同步改 **`edit`**。
 - [`tool_exec.rs`](../../../../src/core/agent_loop/tool_exec.rs)：`match` **仅** `"edit"`；**不**新增 `"edit_file"` 分支，**不**做重定向。
@@ -225,7 +225,7 @@ right:
 | 2 | **`replace_all`** | 默认 `false`：`count>1` → `Ambiguous`；`true`：替换全部命中。 | 没开「全换」却撞见多处一样，就报错别瞎改。 |
 | 3 | **重叠检测** | 多段均在 `original` 上算 **UTF-8 字符区间或字节区间（二选一做全仓统一）**；任两段 span 相交或嵌套 → `Overlap`。 | 两段改到同一块肉上，必须拦下来。 |
 | 4 | **单次写盘** | 仅校验全通过后调用 `write_file_atomic`。 | 算对了才落盘，别边算边写。 |
-| 5 | **staleness 接入** | `dispatch_tool` / `tool_exec` 的 `edit` 分支接收 `read_file_state: Option<&Arc<ReadFileState>>`（与 **`read`** 分支同形态，见 `tool_exec.rs`）：① `state.get(resolved)`（**`resolved = normalize_path(path)`**，与 read 落 stamp 同形 key）；② 当前 `fs::metadata` 的 `mtime_ms` + `size` 与 stamp **不一致** → `Stale`；③ **stamp 不存在** → `NoPriorRead`（**T2-P0-016 同 PR 强拒**，`is_error: true`，与 write `overwrite=true` 同函数 `tool_exec::check_mutation_stamp`）。`put` 仍仅在 read 成功路径（见 `read.md` §6–§7 数据流）。 | 动手前先问：这文件还是你上次看的那份吗？和 write 同一套规矩。 |
+| 5 | **staleness 接入** | `dispatch_tool` / `tool_exec` 的 `edit` 分支接收 `read_file_state: Option<&Arc<ReadFileState>>`（与 **`read`** 分支同形态，见 `tool_exec.rs`）：① `state.get(resolved)`（**`resolved = normalize_path(path)`**，与 read 落 stamp 同形 key）；② 当前 `fs::metadata` 的 `mtime_ms` + `size` 与 stamp **不一致** → `Stale`；③ **stamp 不存在** → `NoPriorRead`（**T2-P0-016 同 PR 强拒**，`is_error: true`，与 write `overwrite=true` 同函数 `tool_exec::check_mutation_stamp`）。`put` 仍仅在 read 成功路径（见 `read.md` §7–§8 数据流）。 | 动手前先问：这文件还是你上次看的那份吗？和 write 同一套规矩。 |
 | 6 | **行号 API 不改** | `EditOperation` 行号路径（`Replace`/`Insert`/`Delete`）保留给 **dispatcher / extension**；**本期 LLM 主路径**只暴露字符串 `edits[]`。 | 扩展还能用行号；模型这边本期只玩子串数组。 |
 
 **T1 刻意不做（防 PR 膨胀）**：BOM/LF 全量规范化留在 **PR-H（T2）**，与 pi-mono `stripBom` / `normalizeToLF` 对齐。
@@ -293,7 +293,7 @@ right:
 
 | # | 落地点 | 说明 | 说人话 |
 | --- | --- | --- | --- |
-| 1 | **`hashline_edit`** | 独立注册；入参 `{ path, edits: [{ op, pos?, end?, lines }] }`；**行哈希与 tag 语法** → 只读 [`read.md`](read.md) **§4**（含调用样例 §4.3），本文不重复 `xxh32` 与双字符表。 | 要「对哪一行下刀」用专用工具，细节全在 read 那一篇。 |
+| 1 | **`hashline_edit`** | 独立注册；入参 `{ path, edits: [{ op, pos?, end?, lines }] }`；**行哈希与 tag 语法** → 只读 [`read.md`](read.md) **§5**（含调用样例 §5.3），本文不重复 `xxh32` 与双字符表。 | 要「对哪一行下刀」用专用工具，细节全在 read 那一篇。 |
 | 2 | **secrets** | 每段 `new_content` 写入前扫描；命中 → 拒绝并走 permission `confirm`（主计划 §4.2）。 | 新内容里像密钥的东西，先拦再问人。 |
 | 3 | **`apply_patch`（V4A）** | **不在本期范围**；openclaw 仅作行业对照。 | 大段 unified diff 式补丁本期不接。 |
 
@@ -315,7 +315,7 @@ flowchart LR
 
 - **pi-mono**：TS 不可直搬；**只搬契约**（`edits[]`、原文匹配、BOM/LF 顺序）。
 - **cc-fork-01**：取 `replace_all`、诊断分层、quote/sanitize **设计**；Rust 重写。
-- **pi_agent_rust**：`hashline_edit` 协议 → [`read.md`](read.md) §4。
+- **pi_agent_rust**：`hashline_edit` 协议 → [`read.md`](read.md) §5。
 - **hermes**：多策略 patch **不移植**。
 - **openclaw**：`apply_patch` **本期不做**。
 
@@ -330,9 +330,9 @@ flowchart LR
 | **`edits[]`** | 一次 tool_call 里多段互不相交的修改意图 | JSON `edits` 数组 | 每段对 **同一 `original`/`working`**；禁止链式 | 一口气好几刀，但都是对着同一张照片下刀。 |
 | **`replace_all`** | 允许多次命中同一子串全部替换 | 每段 bool，默认 `false` | `false` 且 `count≠1` → `Ambiguous` | 出现很多次时，要么扩上下文，要么明说「全换」。 |
 | **形状 A / B** | 单段 vs 多段两种 JSON 形状 | `catalog` `oneOf` | 同时出现时 **`edits` 优先**；否则包装为单元素 `edits` | 老写法一段、新写法数组，两套都认。 |
-| **`Stale`** | 磁盘文件在你上次 read 之后又变了 | `ReadFileState::get` + `metadata` | 必须先 `read` 再 `edit`；见 [`read.md`](read.md) §3「staleness」 | 文件被人动过了，别拿旧脑子改。 |
+| **`Stale`** | 磁盘文件在你上次 read 之后又变了 | `ReadFileState::get` + `metadata` | 必须先 `read` 再 `edit`；见 [`read.md`](read.md) §1「staleness」 | 文件被人动过了，别拿旧脑子改。 |
 | **`NoPriorRead`** | 这张表里没有该 path 的成功 read 记录 | `get` 返回 `None` | **强拒**（T2-P0-016 同 PR 落地，2026-05-06）；与 write `overwrite=true` 同函数 `check_mutation_stamp` | 你压根没读过这文件，就别先改（策略和 write 完全一致）。 |
-| **`hashline_edit`** | 用 `行号#哈希` 锚点做行级改 | 独立工具名 | 与普通 `edit` **互斥职责**；算法见 `read.md` §4 | 要锁「第几行」时用另一个工具，别和普通查找替换混谈。 |
+| **`hashline_edit`** | 用 `行号#哈希` 锚点做行级改 | 独立工具名 | 与普通 `edit` **互斥职责**；算法见 `read.md` §5 / §4.2.5 | 要锁「第几行」时用另一个工具，别和普通查找替换混谈。 |
 
 **时间点钉死**：「**LLM 发出 `edit` tool_call 之后、进入 `write_file_atomic` 之前**」统称为 **校验阶段**；此阶段**不得**创建 `.bak`、**不得**改写目标文件（见 §9）。
 
@@ -474,7 +474,7 @@ LLM          tool_exec              ReadFileState
  │<──────────────│ Stale / NoPriorRead    │（不调 primitive）
 ```
 
-### 6.3 Mermaid（Stale 拦截，与 read.md §6.3 概念一致）
+### 6.3 Mermaid（Stale 拦截，与 read.md §7.3 概念一致）
 
 ```mermaid
 sequenceDiagram
@@ -590,7 +590,7 @@ sequenceDiagram
 | `Stale` | stamp 与 `metadata` 不一致 | **必须**重新 `read` | 磁盘上的文件已经和你脑子里的不一样了。 |
 | `NoPriorRead` | `get` 为空且策略要求先 read | 先 `read(path)` | 会话里没这条文件的 read 记录，先读再改。 |
 | `Oversized` | `new_content` 超上限 | 拆段或 `write` 整文件 | 一段塞太大，要么拆开要么整文件写。 |
-| `BinaryFile` | 非 UTF-8 | 对齐 [`read.md`](read.md) §9：结构化 Tool 错误 + hex + `bash file` 等建议 | 这不是 UTF-8 文本，别硬当代码改。 |
+| `BinaryFile` | 非 UTF-8 | 对齐 [`read.md`](read.md) §10：结构化 Tool 错误 + hex + `bash file` 等建议 | 这不是 UTF-8 文本，别硬当代码改。 |
 | `Notebook` | `.ipynb`（T2） | 等专用工具或结构化路径 | Jupyter 笔记本走别的道。 |
 | `Io` | 读/写/metadata 失败 | 查权限与路径 | 盘或权限出了问题。 |
 
@@ -600,9 +600,9 @@ sequenceDiagram
 
 节号以当前 [`read.md`](read.md) 为准。
 
-- **dedup**：只影响 **read** 的返回值，与 **edit** 无直接耦合。见 [`read.md`](read.md) **§3**（`FILE_UNCHANGED`）、**§6.2**。
-- **staleness**：见 [`read.md`](read.md) **§3**「staleness」、**§6.3**、**§7** 字段表。
-- **hashline 纵深**：[`read.md`](read.md) **§4**；**edit 本文不重复** `xxh32` 细节。
+- **dedup**：只影响 **read** 的返回值，与 **edit** 无直接耦合。见 [`read.md`](read.md) **§1**（`FILE_UNCHANGED`）、**§7.2**。
+- **staleness**：见 [`read.md`](read.md) **§1**「staleness」、**§7.3**、**§8** 字段表。
+- **hashline 纵深**：[`read.md`](read.md) **§5** / **§4.2.5**；**edit 本文不重复** `xxh32` 细节。
 
 ---
 
@@ -612,7 +612,7 @@ sequenceDiagram
 
 - 原语 / `write_edit`：`src/core/tools/primitive/tests/suite_test.rs`
 - `tool_exec`（含 staleness、未知工具、`hashline_edit`、secrets 编排）：`src/core/agent_loop/tests/tool_exec_dedup_test.rs`
-- `read` 侧 `hashline` 与多模态：`read.md` §10、`src/core/tools/primitive/tests/read_window_test.rs`、`tests/read_tool_tests.rs`
+- `read` 侧 `hashline` 与多模态：`read.md` §11、`src/core/tools/primitive/tests/read_window_test.rs`、`tests/read_tool_tests.rs`
 
 ### 10.1 测试矩阵
 
@@ -627,7 +627,7 @@ sequenceDiagram
 | T1 NoPriorRead（**T2-P0-016 同 PR 强拒**） | `edit_no_prior_read_rejects_after_t2_p0_016` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06（见 §10.2） |
 | T2 normalize / 行尾 / BOM | `edit_curly_quote_matches_disk_straight_quote`、`edit_desanitize_matches_nbsp_and_zwsp`、`edit_preserves_trailing_newline`、`edit_preserves_crlf_line_endings`、`edit_preserves_bom` | `suite_test.rs` | ✅ 2026-05-06 |
 | T2 `.ipynb` | `edit_rejects_ipynb_before_touching_disk` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
-| T3 `hashline_edit` + read 闭环 | `hashline_edit_replace_matches_read_hashline`、`hashline_edit_rejects_hash_mismatch`；read 侧见 `read.md` §10 `read_with_hashline_*` / `read_tool_tests.rs` | `tool_exec_dedup_test.rs` 等 | ✅ 2026-05-06 |
+| T3 `hashline_edit` + read 闭环 | `hashline_edit_replace_matches_read_hashline`、`hashline_edit_rejects_hash_mismatch`；read 侧见 `read.md` §11 `read_with_hashline_*` / `read_tool_tests.rs` | `tool_exec_dedup_test.rs` 等 | ✅ 2026-05-06 |
 | T3 secrets | `edit_secrets_hit_denied_reverts_to_no_op`、`edit_secrets_pass_when_no_hit`、`edit_secrets_hit_proceeds_with_allow_all_confirmation` | `suite_test.rs`、`tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | oneOf / 诊断归一 | `edit_oneof_shape_b_edits_array_is_parsed`、`edit_error_codes_normalized` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | 扩展路径（dispatcher 行号 API） | `edit_legacy_line_oriented_path_still_works` | `suite_test.rs` | ✅ 2026-05-06 |
@@ -675,7 +675,7 @@ sequenceDiagram
 
 ## 13. 关联文档
 
-- [`read.md`](read.md) — §3 术语；§4 `hashline` 协议；§6–§7 调度与会话表；§9 错误；§10 测试。
+- [`read.md`](read.md) — §1 术语；§5 `hashline` 等协议；§7–§8 调度与会话表；§10 错误；§11 测试。
 - [`search_files.md`](search_files.md) — 先搜后改。
 - [`bash.md`](bash.md) — shell 工具与 `search_files` 分工（勿用 bash 跑 rg）。
 - [`../permission-system.md`](../permission-system.md) — Edit 权限与 secrets `confirm`。
@@ -693,7 +693,7 @@ sequenceDiagram
 | §0.0 不变量 | [§2.4.1](#241-不变量与-pi-mono-对齐实施-pr-d-时-must-满足) | 必须遵守的规则在 §2.4.1。 |
 | §0.A.1 维度 | [§2.1](#21-agent-编辑文件的典型关切) + [§2.2](#22-常见实现横向对比e1e7) | E1–E7 那套关切拆到 §2.1 / §2.2。 |
 | §0.A.2 横向表 | [§2.2](#22-常见实现横向对比e1e7) | 横向对比就是现在的 §2.2 大表。 |
-| §0.A.3 决策矩阵 | [§2.3.0](#230-维度--落地点矩阵完整保留--单一权威表) | 维度→落地点一张总表在 §2.3.0。 |
+| §0.A.3 决策矩阵 | [§2.3.0](#230-落地选型决策表维度取舍) | 维度取舍一张总表在 §2.3.0；代码落点 / 交付在 §2.4。 |
 | §0.A.4 mermaid | [§2.5](#25-评分演进路径) | 分数演进图在 §2.5。 |
 | §0.A.5 移植说明 | [§2.6](#26-项目级移植说明) | 各项目抄啥不抄啥在 §2.6。 |
 | §2 命名 | [§2.4.2](#242-pr-命名对齐-read-1) | 改名 `edit` 在 §2.4.2。 |

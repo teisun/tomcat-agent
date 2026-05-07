@@ -1,6 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-05-07 18:30 | ACTIVE | feature/strengthen-four-core-tools | - |
+| Tom | 2026-05-07 15:55 | ACTIVE | feature/strengthen-four-core-tools | - |
+
+### 2026-05-07 | 四工具与中断文档及 openspec 工作流同步
+
+- **文档**：`docs/architecture/tools/{read,write,edit,bash,search_files}.md`、`interrupt-and-cancellation.md`；`agents/plan/{PLAN_SPEC,PLAN_SKELETON,DEBUG_SPEC}.md`；openspec 中 Architecture、Constitution 与 `ARCHITECTURE_SPEC` / `DOCUMENTATION_GUIDE` / `MODULE_README_SPEC`。
+- **动机**：与已落地 T2 工具契约及中断语义对齐，收紧宪法与工作流指南表述，降低实现与 spec 漂移。
 
 ### 2026-05-07 | bash AST 默认 `enabled=false` + P1 任务 T2-P1-009
 
@@ -147,7 +152,7 @@
 
 - **Phase1（PR-命名 + PR-D / T1）**：`catalog::edit` 短名 + `oneOf` schema；`tool_exec` `match "edit"` 分支 + `parse_edit_args` + `check_edit_staleness`；`session/manager/context.rs` 加 `edit_file → edit` 旧名 transcript warn（OnceLock 节流，无重定向）；`write_edit::edit_file_impl` 重写为「原文快照 → 字节索引 `match_indices` → `replace_all` / `Ambiguous` / `Overlap` 校验 → 一次性按起点降序 splice → `.bak` 仅在校验通过后写盘前建、写成功删、写失败回滚」；保留 `PrimitiveExecutor::edit_file` trait 方法名（决策 6 lock）；`replace_all` 信号通过 `EDIT_REPLACE_ALL_MARKER` (`\u0000…\u0000`) 编码到 `old_content` 前缀；`docs/tool-catalog.md` 重新派生。
 - **Phase2（PR-H / T2）**：新建 `src/core/tools/edit_normalize.rs` —— `strip_bom` / `detect_line_ending` / `normalize_to_lf`（**字节级实现**修补 `as char` 多字节 bug）/ `restore_line_endings` / `fold_curly_quotes` / `desanitize` / `normalize_for_match` / `build_normalized_byte_map` 双轨（normalized → 原文字节偏移映射）；`apply_string_edits` 接入 `(disk_text, write_back)` 链路：模型 `“foo”` 命中磁盘 `"foo"`、NBSP / 零宽字符 desanitize、CRLF/BOM 文件改后行尾保留；`tool_exec` 增 `.ipynb` 拒绝 + Notebook 错误文案；E5 错误码（NotFound / Ambiguous / Overlap / Stale / Notebook / BinaryFile / Io）回执统一格式 + hint。
-- **Phase3（PR-M + T3-K / T3）**：注册新工具 `hashline_edit`（`{ path, edits: [{ op, pos, end?, lines }] }`）；trait 方法 `PrimitiveExecutor::hashline_edit` 默认 `Unsupported`；`DefaultPrimitiveExecutor` 实现 `hashline_edit_impl` 复用 `read::compute_line_hash`（与 read.md §4 算法 byte-equal），校验每段锚点（`OutOfRange` / `HashMismatch`）+ 行号区间重叠 + 自下而上 splice + `.bak` 兜底；新建 `src/core/security/secrets.rs`（regex：openai_api_key / aws_access_key_id / slack_token / high_entropy_hex）；`scan_new_content_for_secrets` 仅扫「edit 新引入」的 secrets（避免 false-positive 反复打扰）；命中走 `require_user_confirmation`，拒 → `SecretsRejected` + 磁盘字节级未变 + 无 `.bak` 残留。
+- **Phase3（PR-M + T3-K / T3）**：注册新工具 `hashline_edit`（`{ path, edits: [{ op, pos, end?, lines }] }`）；trait 方法 `PrimitiveExecutor::hashline_edit` 默认 `Unsupported`；`DefaultPrimitiveExecutor` 实现 `hashline_edit_impl` 复用 `read::compute_line_hash`（与 `read.md` §5 / §4.2.5 算法 byte-equal），校验每段锚点（`OutOfRange` / `HashMismatch`）+ 行号区间重叠 + 自下而上 splice + `.bak` 兜底；新建 `src/core/security/secrets.rs`（regex：openai_api_key / aws_access_key_id / slack_token / high_entropy_hex）；`scan_new_content_for_secrets` 仅扫「edit 新引入」的 secrets（避免 false-positive 反复打扰）；命中走 `require_user_confirmation`，拒 → `SecretsRejected` + 磁盘字节级未变 + 无 `.bak` 残留。
 - **测试**：lib +30 例（674 → 704 → 714）覆盖 §10 测试矩阵 T1 / T2 / T3 + secrets + hashline；`scripts/run-integration-tests.sh all` 全量门禁 EXIT_CODE=0（release / clippy / lib 714 / integration parallel + serial 39 全绿，含 wasmedge_e2e 与 dispatcher 等）。
 - **文档**：`docs/architecture/tools/edit.md` §2.4.3 追加「NoPriorRead 与 T2-P0-016 write 同 PR 锁同节奏」决策行；`docs/tool-catalog.md` 同步生成（新增 `edit` `oneOf` + `hashline_edit`）。
 - **不变量**：`PrimitiveExecutor::edit_file` 方法名 / dispatcher `("fs"|"primitive","editFile")` / 所有 mock / 旧 `tests/primitives_tools_tests.rs::test_primitive_executor_edit_file_replaces_content` / `wasmedge_e2e_tests` 中的 `editFile` host_call 名 全部未动；改的只有 LLM 短名与底层语义。

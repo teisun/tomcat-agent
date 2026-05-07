@@ -4,7 +4,7 @@
 
 **兄弟 spec**：[read.md](read.md)（`ReadFileState`、`ReadStamp`、`FILE_UNCHANGED`、dedup）；[edit.md](edit.md)（同表 staleness、`NoPriorRead` 与 write 同 PR 节奏、secrets T3-K）；[search_files.md](search_files.md)（先定位再写的工作流）。
 
-**「说人话」写法**（对齐 [ARCHITECTURE_SPEC.md](../../guides/workflow/ARCHITECTURE_SPEC.md) §4.1 / §7.1）：本文件在信息密度高的表末追加 **`说人话`** 列；图、状态机后附 **2–5 句**口语串链路。**禁止**用口语替代技术定义正文列。
+**「说人话」写法**（对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 与 **§4** 落地选型章节）：本文件在信息密度高的表末追加 **`说人话`** 列；图、状态机后附 **2–5 句**口语串链路。**禁止**用口语替代技术定义正文列。
 
 ---
 
@@ -78,13 +78,13 @@
 
 ## 2. 术语统一
 
-对齐 [ARCHITECTURE_SPEC.md](../../guides/workflow/ARCHITECTURE_SPEC.md) **§2 术语统一（MUST）**：先钉死用词，再读 §3 选型与 §4 协议，避免「overwrite / stamp / invalidate」与兄弟工具文档各说各话。
+对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1 术语统一（MUST）**：先钉死用词，再读 **§4** 已定稿选型与 **§5** 协议，避免「overwrite / stamp / invalidate」与兄弟工具文档各说各话。
 
 | 术语 | 语义 | 数据载体 / 约束 | 说人话 |
 | --- | --- | --- | --- |
 | **`overwrite`** | 是否允许替换**已存在**文件 | JSON boolean；**缺省 `false`**（与 schema description 一致） | 「能不能盖已有文件」的**总闸**；不写就默认**不盖**。 |
 | **`NoPriorRead`** | 会话表无该 path 的成功 read stamp | `ReadFileState::get` 为 `None` 且策略要求先 read | 会话里**从没成功读过**这个路径，就别想覆盖写。 |
-| **`Stale`** | 有 stamp，但当前 `metadata` 的 `mtime_ms`/`size` 与 stamp 不一致 | 与 [read.md](read.md) §3、`edit` §9 同名 | 你读过之后**磁盘又变了**（别人改、git 切分支等），先别写。 |
+| **`Stale`** | 有 stamp，但当前 `metadata` 的 `mtime_ms`/`size` 与 stamp 不一致 | 与 [read.md](read.md) §1、`edit` §9 同名 | 你读过之后**磁盘又变了**（别人改、git 切分支等），先别写。 |
 | **`atomic_write`** | 临时文件写入 + `rename` 到目标路径 | [`write_file_atomic`](../../../../src/infra/platform/mod.rs) | 「要么整文件换上去，要么别动旧文件」那种**一次性落盘**。 |
 | **`invalidate`** | 写成功后移除该 path 的 stamp，强制后续 `read` 重新读盘 | [`ReadFileState::invalidate`](../../../../src/core/tools/pipeline/read_state.rs) | 写完了**忘掉旧指纹**，逼下一轮 `read` 真读盘。 |
 | **与 `edit` 边界** | 全文已知、新建文件 → `write`；局部替换、保留上下文行 → `edit` | catalog `description` | 整篇换血用 `write`，抠几个字用 `edit`。 |
@@ -124,27 +124,29 @@
 | W6 | T2：CRLF→LF **默认开**，由 `[tools.write] normalize_crlf` 关闭 | UTF-8 字节 | code-units 对齐 Pi | 配置 | — | 强制 LF 等 | 换行符**默认收成 `\n`**；想保留模型字节把配置关掉，别静默乱改编码。 |
 | W7 | T2：字节数 + 可选 `build_simple_diff` 式摘要 | `content.length` | 字节数 | — | JSON 警告字段 | structuredPatch + gitDiff 思路 | 写完了告诉模型**写了多少**；有余力再给点 **diff 摘要**当收据。 |
 
-### 3.3 落地选型决策表
+### 3.3 落地选型决策表（维度取舍）
 
-| 决策点 | 选择 | 现状/过去/其他 | 阶段 | 未入选简注 | 说人话 |
-| --- | --- | --- | --- | --- | --- |
-| 覆盖前 **必须先 read**（已存在文件） | `overwrite=true` 时校验 stamp | cc-fork `FileWriteTool` validate 段 | T1 PR-C | 不在 primitive 内藏「隐式 read」 | 不许工具偷偷帮你读盘凑 stamp；**模型自己先 `read`**。 |
-| 原子写 | 保持 `write_file_atomic` | 现状 + pi_agent_rust 同类模式 | 已有 | — | 落盘方式**已经够用**，别为了对齐而重写一套 IO。 |
-| 写后 **invalidate** stamp | `ReadFileState::invalidate` | `read_state.rs` 已预留 API | T1 PR-C | × 保留旧 stamp：与 `FILE_UNCHANGED` 矛盾 | 写完就把「读过」的条子撕掉，**别骗 dedup**。 |
-| LF 规范化 | **默认开**（与主计划 PR-G 一致）；由 `[tools.write] normalize_crlf=false` 关闭；**不**新增 per-call 字段 | cc-fork 行尾策略 | T2 PR-G | × 静默改 UTF-16：非目标；× per-call schema 字段：让模型多一维易混淆 | 默认把 `\r\n` 收成 `\n`，团队想保留**改全局配置**，别给每次调用塞开关。 |
-| diff 回执 | 复用 [`build_simple_diff`](../../../../src/core/tools/primitive/diff.rs) 或同类 | edit 已引用 | T2 PR-G | × 依赖 git binary：非目标 | 给模型看「改了啥」用**内存里 diff 几句**就行，别绑 `git`。 |
-| secrets | `scan(content)`，编排层与 edit 一致 | cc-fork `checkTeamMemSecrets` 模式 | T3 T3-K | × 重型 SaaS 扫描器 | 轻量正则集 + **命中走确认**；不搞企业级扫描器。 |
+**代码落点、交付物、阶段**见 **[§3.4](#34-实施点排期与状态)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+
+| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **已存在文件 + overwrite** | `overwrite=true` 时 stamp 是否可信 | cc-fork `FileWriteTool` validate；× primitive 内隐式读盘 | cc-fork | 编排层要求模型先 `read`；`overwrite=true` 时 `check_stamp` 与 read 共用 `ReadFileState` | × 在 primitive 内藏「隐式 read」凑 stamp | 不许工具偷偷帮你读盘凑 stamp；**模型自己先 `read`**。 |
+| **原子写** | 是否重写落盘 IO | `write_file_atomic`；pi_agent_rust 同类单文件原子 | 现状 + pi_agent_rust | 审计、`.bak`、错误路径已在 primitive 收敛 | × 为「对齐」重写 IO | 落盘方式**已经够用**，别为了对齐而重写一套 IO。 |
+| **写后 stamp** | dedup 与真实磁盘是否一致 | `ReadFileState::invalidate` API 已预留 | `read_state.rs` 设计 + cc-fork 思路 | 写成功后 `invalidate(path)`，避免 `FILE_UNCHANGED` 与磁盘脱节 | × 保留旧 stamp | 写完就把「读过」的条子撕掉，**别骗 dedup**。 |
+| **LF 规范化** | CRLF 默认行为与 schema 面 | PR-G 默认 `\r\n→\n`；× per-call 字段 | cc-fork 行尾策略 | `[tools.write] normalize_crlf` **仅**全局配置；与主计划 PR-G 一致 | × 静默改 UTF-16；× per-call schema 字段让模型多一维 | 默认把 `\r\n` 收成 `\n`，团队想保留**改全局配置**，别给每次调用塞开关。 |
+| **diff 回执** | 写后如何让模型看见 delta | [`build_simple_diff`](../../../../src/core/tools/primitive/diff.rs)；× `git diff` 依赖 | edit 已引用 diff 模块 | 成功回执可选短 unified diff（写前快照 vs 新 content） | × 依赖 git binary | 给模型看「改了啥」用**内存里 diff 几句**就行，别绑 `git`。 |
+| **secrets** | 全文件 `content` 是否过密钥钩子 | cc-fork `checkTeamMemSecrets`；× SaaS 扫描器 | cc-fork（T3-K） | `scan(content)`；编排层与 `edit` 共用 `secrets` + confirm gate | × 重型 SaaS 扫描器 | 轻量正则集 + **命中走确认**；不搞企业级扫描器。 |
 
 ### 3.4 实施点（排期与状态）
 
-| 实施点 | 交付范围 | 主要代码落点 | 验收锚点（示例） | 状态 | 说人话 |
+| 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 状态 | 说人话 |
 | --- | --- | --- | --- | --- | --- |
-| **PR-命名** | `write_file` → `write`；无运行时别名；transcript warn | [`catalog.rs`](../../../../src/core/tools/contract/catalog.rs)、[`tool_exec.rs`](../../../../src/core/agent_loop/tool_exec.rs)、[`system_prompt.rs`](../../../../src/core/llm/system_prompt.rs)、测试字面量 | 与 G1 一致：`tool_exec_legacy_write_file_returns_unknown_tool_error`（命名合入后补） | ⏳ 待 PR-A | 把名字改短，和 `read`/`edit` 一排站齐。 |
-| **PR-C（T1）** | `overwrite=false` 拒已存在；`overwrite=true`+exists：`check_stamp`；成功后 `invalidate` | `tool_exec.rs` `write` 分支、[`read_state.rs`](../../../../src/core/tools/pipeline/read_state.rs)、必要时 [`write_edit.rs`](../../../../src/core/tools/primitive/executor/write_edit.rs) 拆校验 | `write_overwrite_false_blocks_existing`、`write_requires_prior_read_when_existing`、`write_rejects_when_mtime_changed_after_read`、`write_success_invalidates_read_stamp` | ⏳ 待 PR-C | **第一刀**：别瞎覆盖、别按旧上下文写、写完别卡 dedup。 |
-| **PR-G（T2）** | 可选 `\r\n→\n`；成功回执：字节数 + 可选 diff 摘要 | `write_edit.rs` 或独立 normalize 小函数、`infra/config` `[tools.write]` | `write_normalizes_crlf_when_enabled`、`write_result_includes_byte_count_and_diff_hint` | ⏳ 待 PR-G | **第二刀**：行尾好读一点，回执让模型心里有数。 |
-| **T3-K（write 侧）** | 对 `content` 调 `secrets::scan`，命中走 gate confirm（与 edit 对齐） | `tool_exec.rs` 或 `write_file_impl` 前编排 | `write_secrets_hit_denied_*`、`write_secrets_pass_when_no_hit`（命名对齐 edit 现有用例风格） | ⏳ 待 write 编排接入（`edit` 已部分落地） | **第三刀**：整文件内容也要过密钥扫描，和 `edit` 一条绳。 |
+| **PR-命名** | **交付物**：catalog / `tool_exec` / `system_prompt` / 测试仅 `write`；legacy **warn**。**落地点**：对外短名与 match 表 | [`catalog.rs`](../../../../src/core/tools/contract/catalog.rs)、[`tool_exec.rs`](../../../../src/core/agent_loop/tool_exec.rs)、[`system_prompt.rs`](../../../../src/core/llm/system_prompt.rs)、测试字面量 | 与 G1 一致：`tool_exec_legacy_write_file_returns_unknown_tool_error`（命名合入后补） | ⏳ 待 PR-A | 把名字改短，和 `read`/`edit` 一排站齐。 |
+| **PR-C（T1）** | **交付物**：`overwrite` 语义；stamp 校验；`invalidate`。**落地点**：`tool_exec` write 分支、`read_state`、必要时 `write_edit` 拆校验 | `tool_exec.rs` `write` 分支、[`read_state.rs`](../../../../src/core/tools/pipeline/read_state.rs)、必要时 [`write_edit.rs`](../../../../src/core/tools/primitive/executor/write_edit.rs) | `write_overwrite_false_blocks_existing`、`write_requires_prior_read_when_existing`、`write_rejects_when_mtime_changed_after_read`、`write_success_invalidates_read_stamp` | ⏳ 待 PR-C | **第一刀**：别瞎覆盖、别按旧上下文写、写完别卡 dedup。 |
+| **PR-G（T2）** | **交付物**：可选 CRLF→LF；字节数 + 可选 diff 摘要。**落地点**：normalize 小函数 + `[tools.write]` | `write_edit.rs` 或独立 normalize 小函数、`infra/config` `[tools.write]` | `write_normalizes_crlf_when_enabled`、`write_result_includes_byte_count_and_diff_hint` | ⏳ 待 PR-G | **第二刀**：行尾好读一点，回执让模型心里有数。 |
+| **T3-K（write 侧）** | **交付物**：`content` 过 `secrets::scan` + confirm。**落地点**：`tool_exec` 或 `write_file_impl` 前编排 | `tool_exec.rs` 或 `write_file_impl` 前编排 | `write_secrets_hit_denied_*`、`write_secrets_pass_when_no_hit`（命名对齐 edit 现有用例风格） | ⏳ 待 write 编排接入（`edit` 已部分落地） | **第三刀**：整文件内容也要过密钥扫描，和 `edit` 一条绳。 |
 
-下文按实施点展开**技术要点**与**数据流示意**；**交付边界与代码落点仍以上表为准**，避免与表冲突。写法对齐 [ARCHITECTURE_SPEC.md](../../guides/workflow/ARCHITECTURE_SPEC.md) **§7.2** 硬约束 1（表后拆小节；范例 [`read.md`](read.md) **§2.4.1** 起——`read` 文档内节号；本文件对应 **§3.4.1** 起）。**端到端泳道**见图：**§6**；**分支组合**见：**§7**。
+下文按实施点展开**技术要点**与**数据流示意**；**交付边界与代码落点仍以上表为准**，避免与表冲突。写法对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.2** 硬约束 1（表后拆小节；范例 [`read.md`](read.md) **§4.2.1** 起；本文件对应 **§3.4.1** 起）。**端到端泳道**见图：**§6**；**分支组合**见：**§7**。
 
 #### 3.4.1 PR-命名：短名 `write`
 
@@ -473,7 +475,7 @@ sequenceDiagram
 | **invalidate 遗漏** | `FILE_UNCHANGED` 基于旧 mtime 短路，模型误判 | PR-C 单测强制：write 后必须 `invalidate` 或 `put` 新指纹（若选 put，须再读一次算 hash，成本更高；**推荐 invalidate**） | 忘了撕条子 → 模型以为文件**还跟上一眼一样**。 |
 | **与 `edit` 竞态** | 同一轮次交替写同一文件 | 文档与 prompt：优先单一工具链；staleness 至少防「读旧写新」 | 别同一会话里对同一文件 **又 write 又 edit 乱炖**；至少 staleness 挡读旧。 |
 | **大 `content` 内存** | wasm 堆压力 | 配置 `max_content_bytes`；提示分段 `edit` | 一次塞几兆字符串会**撑爆**；该切文件或改策略。 |
-| **`touch -r` 保留 mtime** | 极端陈旧漏判 | 与 [read.md](read.md) §11 一致：依赖 `content_hash` / hashline 纵深（T3） | 有人**伪造 mtime** 时，单靠时间戳会瞎；靠 hashline 等补一刀。 |
+| **`touch -r` 保留 mtime** | 极端陈旧漏判 | 与 [read.md](read.md) §12 一致：依赖 `content_hash` / hashline 纵深（T3） | 有人**伪造 mtime** 时，单靠时间戳会瞎；靠 hashline 等补一刀。 |
 | **secrets 误报** | 合法常量串被拒 | 与 `edit` 相同：命中走 `confirm`，可配置规则集 | 别把正常代码**一棍子打死**；给人点「确认」的出路。 |
 
 ---

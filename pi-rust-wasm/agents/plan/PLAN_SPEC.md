@@ -5,7 +5,7 @@
 
 由 [Dispatcher.md](../Dispatcher.md)「四、制定开发计划」引用。
 
-**「说人话」辅助（与架构 spec 对齐）**：撰写须遵守 **先专业、后口语**（[`Constitution.md`](../../openspec/specs/Constitution.md) **二.10**，[`ARCHITECTURE_SPEC.md §4.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）。
+**「说人话」辅助（与架构 spec 对齐）**：撰写须遵守 **先专业、后口语**（[`Constitution.md`](../../openspec/specs/Constitution.md) **二.10**，[`ARCHITECTURE_SPEC.md §14.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）。
 
 1. **段落**：每个主要技术块（子项详情、实现思路、依赖关系、风险分析等）在**写完**术语、路径、调用链、边界之后，**SHOULD** 可跟 **2–5 句**「说人话」段（或小标题 **`说人话`**），串意图与阅读顺序；**禁止**只有口语没有可执行技术信息。  
 2. **表格**：凡 Markdown **多列对照表**（现状 vs 目标、看板子项 ↔ 计划子项映射、已定决策表、风险表、验收 / 测试矩阵等），**SHOULD** 在末列加 **`说人话`**，每行一句口语化中文；纯两列「id — 简述」且简述已极短的可省略。
@@ -31,7 +31,7 @@
 4. **文件职责总览（One-Glance Map，条件触发 MUST）**  
    - **触发条件**：本计划的「关键改动」涉及 **≥ 2 个 `*.rs` 业务源文件**（含独立 `tests.rs`）时**必须**画。仅 1 个文件的小改动可省略并写一句"不适用：仅改 X"。  
    - **位置**：紧邻"对每个子项给出"（一.3）所列文件清单**之后**、"实施顺序与依赖关系"（一.5）之前，作为 **§x.0 子节开篇**或独立 §x 章节。  
-   - **内容与硬约束**：参照 [`ARCHITECTURE_SPEC.md §3「文件职责总览（One-Glance Map）」`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（**MUST**），逐条满足该节"硬约束 1–6"：①节点之间须以 `│` + `▼` 或 `→` 标明调用方向；②"关键改动"清单中每个 `*.rs` 在图中**必须**有节点，缺一不可；③节点内要点列函数 / 类型 / 常量 / 关键行为，不允许只写文件名；④同时标注配套独立 `tests.rs`（按 [`RUST_FILE_LINES_SPEC §A`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)）；⑤图后紧跟 2–3 句「阅读顺序建议」（**说人话**，口语串链路），与 [`ARCHITECTURE_SPEC.md §4.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 段落级要求一致；⑥若实施期发现节点设计偏离原计划（如未改签名、保留旧出口），须以 **【未改签名 / 依赖 Drop】** 等显式标签**就地标注**，避免 stale 设计误导后续读者。  
+   - **内容与硬约束**：参照 [`ARCHITECTURE_SPEC.md §6「文件职责总览（One-Glance Map）」`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（**MUST**），逐条满足该节"硬约束 1–6"：①节点之间须以 `│` + `▼` 或 `→` 标明调用方向；②"关键改动"清单中每个 `*.rs` 在图中**必须**有节点，缺一不可；③节点内要点列函数 / 类型 / 常量 / 关键行为，不允许只写文件名；④同时标注配套独立 `tests.rs`（按 [`RUST_FILE_LINES_SPEC §A`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)）；⑤图后紧跟 2–3 句「阅读顺序建议」（**说人话**，口语串链路），与 [`ARCHITECTURE_SPEC.md §14.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 段落级要求一致；⑥若实施期发现节点设计偏离原计划（如未改签名、保留旧出口），须以 **【未改签名 / 依赖 Drop】** 等显式标签**就地标注**，避免 stale 设计误导后续读者。  
    - **形式**：ASCII 框图（`text` 代码块）或 Mermaid，**优先 ASCII**（终端友好、便于 diff）。每个节点内须列「函数 / 类型 / 常量 / 关键行为」要点，禁止只写文件名。  
    - **不做的后果**：跨文件链路只能靠读者自己拼图，Review 时极易遗漏隐式依赖（如本计划里"transcript 字段扩展 ⇄ preheat 退避耗尽留痕"两个 Phase 的耦合）。  
    - **参考样板**：[`interrupt-and-cancellation.md §9.0`](../../docs/architecture/interrupt-and-cancellation.md)（T2-P0-007 定稿）。
@@ -76,7 +76,7 @@
 
 ## 三、好的计划的特征
 
-- **先专业、后「说人话」**：计划须先写清可执行技术信息（路径、接口、顺序、边界、验收），再按需加口语化辅助（段落或小标题 **`说人话`**；多列表末列 **`说人话`**）。见文首说明与 [Constitution.md](../../openspec/specs/Constitution.md) **二.10**、[`ARCHITECTURE_SPEC.md` §4.1](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。
+- **先专业、后「说人话」**：计划须先写清可执行技术信息（路径、接口、顺序、边界、验收），再按需加口语化辅助（段落或小标题 **`说人话`**；多列表末列 **`说人话`**）。见文首说明与 [Constitution.md](../../openspec/specs/Constitution.md) **二.10**、[`ARCHITECTURE_SPEC.md` §14.1](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。
 - **可执行**：读完后能按顺序动手，不需要再猜「先改哪一块」。  
 - **可验收**：目标与验收标准清晰，完成后能判断是否算「做完」。  
 - **可回溯**：关键步骤有「作用与意义」说明，便于后续维护或需求变更时理解设计。  

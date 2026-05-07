@@ -7,7 +7,7 @@
 - **§3–§6、§8–§9 前半**：描述**当前仓库**已落地的行为与代码锚点；与实现不一致处以 **`src/` 代码为准**。
 - **§1 观察指标表、§2.3–§2.4、§9 后半、§10 中 PENDING 行**：描述**契约草案与路线图**（与 strengthen 计划一致）；合入后以 PR 更新本文状态列。
 
-规范对齐：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（MUST：观察指标、术语、§7.1/§7.2 决策与实施表、One-Glance、测试矩阵、风险）。
+写作约定见 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语 → 调研 → 目标 → **§4.1/§4.2** 已定稿选型与实施、One-Glance、测试、风险）。
 
 ---
 
@@ -91,32 +91,34 @@
 
 **结论（写入路线图）**：**契约与短名**对齐 **pi-mono**；**超时 + 输出截断 + 落盘**对齐 **cc-fork-01**；**有序 IO** 借鉴 **pi_agent_rust**；**多后端沙箱**仅留 trait，不照搬 hermes/openclaw 运行时。
 
-### 2.3 落地选型决策表
+### 2.3 落地选型决策表（维度取舍）
 
-| 决策点 | 默认选择 | 主要替代方案 | 选择理由（为何不是替代） | 说人话 |
-|--------|----------|--------------|--------------------------|--------|
-| 对外工具名 | 终态 **`bash`**（PR-A）；legacy **`execute_bash` 无运行时别名**（与 read PR-RA 同口径） | 单迭代 `execute_bash`→`bash` 运行时重定向 + `audit legacy_name` | 双轨执行会分叉审计与 prompt；与已落地的 `read`/`write`/`edit` **单名对外**一致 | 只注册一个名；老 transcript 别静默改写成还能跑。 |
-| 默认墙钟超时 | **120 s**（PR-E），可配上限 **600 s** | 沿用 `BASH_TIMEOUT_SECS` 常量且不接 `timeout` | 常量已存在但未接线；120 s 兼顾编译/测试；600 s 防止无限挂起 | 两分钟不够再加，别默认卡死大构建。 |
-| 输出策略 | 头尾截断 + **`persisted_output_path`**（PR-E） | 仅硬截断、不落盘路径 | 模型需要「去哪读全文」的可执行提示 | 中间砍掉，头尾留下，全文去文件里看。 |
-| 后台模型 | **`run_in_background` + task 三件套**（PR-I） | 仅前台 + 用户 Ctrl+C | 长任务与 Agent loop 解耦 | 大任务别堵在同一轮 tool 里。 |
-| 安全栈 | gate + 路径预检 **保留**；T3 **叠加** AST allowlist | 仅 AST、弃 gate | gate 已接审计与用户确认；AST 补复合命令盲区 | 老的别拆，新的叠上去。 |
-| argv 模式 | **保留** `command` + **`args`** 不经 shell（已实现） | 仅 `sh -c` 字符串 | 减少注入面、对齐 pi-mono 风格 | 能不用字符串 shell 就不用。 |
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点现状与路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+
+| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **对外工具名** | legacy transcript 是否还能静默执行 | 单迭代运行时重定向 vs 仅 `bash` match | pi-mono 契约名 + [`read.md`](read.md) PR-RA | 与 `read`/`write`/`edit` **单名对外**；审计与 prompt 不双轨 | × `execute_bash`→`bash` 运行时重定向 + 双轨审计 | 只注册一个名；老 transcript 别静默改写成还能跑。 |
+| **默认墙钟超时** | 长命令如何有界 | `BASH_TIMEOUT_SECS` 常量未接线 vs PR-E 接线 | strengthen 计划 + 本仓库现状 | **120 s** 默认、**600 s** 可配上限；兼顾编译与防挂死 | × 无限等默认 | 两分钟不够再加，别默认卡死大构建。 |
+| **输出策略** | 大 stdout/stderr 如何不进爆上下文 | 仅硬截断 vs 截断 + 落盘路径 | cc-fork-01 | 头尾截断 + **`persisted_output_path`**（PR-E） | × 仅截断、模型无处读全文 | 中间砍掉，头尾留下，全文去文件里看。 |
+| **后台模型** | 长任务是否与 loop 解耦 | 仅前台 vs `run_in_background` + task API | openclaw / strengthen PR-I | **task 三件套**（PR-I）与 event_bus 衔接 | × 仅前台依赖用户 Ctrl+C | 大任务别堵在同一轮 tool 里。 |
+| **安全栈** | gate 与 AST 是否二选一 | 仅 AST vs 仅 gate vs 叠层 | 本仓库 gate + strengthen T3 | **保留** gate + 路径预检；T3 **叠加** AST allowlist | × 弃 gate 纯 AST | 老的别拆，新的叠上去。 |
+| **`argv` 模式** | 是否强制 `sh -c` 字符串 | `command`+`args` exec vs shell 一行 | pi-mono | **保留**不经 shell 的 argv 拼接（已实现） | × 仅 `sh -c` 宽注入面 | 能不用字符串 shell 就不用。 |
 
 ### 2.4 实施点（现状与路线图）
 
 **实施顺序（本方案，与 strengthen 总计划协调）**：**① PR-A**（`execute_bash` → **`bash`**，测试与 prompt 扫尾）→ **② PR-E**（T1 超时 + 输出有界）→ **③ PR-I**（T2 后台 + task 三件套）→ **④ PR-L**（T3 AST + Sandbox 骨架）。**先改名**可避免后续 PR 在 **`execute_bash` / `bash`** 双套字面量上反复改断言与文档。
 
-| 实施点 | 交付范围 | 主要代码落点 | 验收锚点（示例） | 说人话 |
-|--------|----------|--------------|------------------|--------|
-| **PR-A（优先）** | `execute_bash` → **`bash`**；全仓字面量 / 断言扫尾；**无** `execute_bash` 运行时重定向（与 read 一致）；**宜**顺带把 `args` 写入 catalog schema | catalog、`tool_exec`、tests、system_prompt、回放 warn | strengthen 计划 §1（**命名**采纳；**fallback 句**以本文为准）+ `catalog_test` | **先改名**，后面 T1/T2/T3 只盯一个工具名。 |
-| **PR-E（T1）** | `tokio::time::timeout`；`timeout_ms`；输出累积器 + 落盘；与 PR-A 已统一的 wire 字段对齐 | `bash.rs`；新 `output_accum.rs`；config | `bash_wallclock_timeout_kills_process` 等（**PENDING**） | 超时真杀进程，输出别撑爆内存。 |
-| **PR-I（T2）** | `run_in_background`；`task_output` / `task_stop` / `task_list`；registry | 新 `bash_task.rs`；`tool_exec`；event_bus | 计划 §6 E2E 行（**PENDING**） | 后台跑、分段取日志。 |
-| **PR-L（T3）** | tree-sitter-bash（或等价）；`SandboxBackend` trait；PersistentShell **骨架** | 新模块 + config allow/deny | 计划 §4.3（**PENDING**） | AST 与沙箱接口先立住，再填实现。 |
-| **PR-现状（基线）** | 当前仓：`execute_bash`；`sh -c` / `cmd`；gate + path 预检；wire 拼接 stderr | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs) `execute_bash_parameters`；[`bash.rs`](../../../src/core/tools/primitive/executor/bash.rs)；[`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)；[`gate.rs`](../../../src/core/tools/primitive/executor/gate.rs) | `suite_test::execute_bash_success`、`execute_bash_forbidden`；`gate_suite_test::*`；`tests/primitives_tools_tests.rs`；`tests/bash_assignment_deny.rs`；`dispatch_with_extension_test::*` | 描述**今天**代码；PR-A 合入后本行由 **`bash`** 替代，行为链不变。 |
+| 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
+| --- | --- | --- | --- | --- |
+| **PR-A（优先）** | **交付物**：短名 `bash`；schema 含 `args`；legacy **warn**。**落地点**：catalog / `tool_exec` / tests / system_prompt | catalog、`tool_exec`、tests、system_prompt、回放 warn | strengthen 计划 §1（**命名**采纳；**fallback 句**以本文为准）+ `catalog_test` | **先改名**，后面 T1/T2/T3 只盯一个工具名。 |
+| **PR-E（T1）** | **交付物**：墙钟超时；`timeout_ms`；输出累积 + `persisted_output_path`。**落地点**：`bash.rs`、`output_accum`、config | `bash.rs`；新 `output_accum.rs`；config | `bash_wallclock_timeout_kills_process` 等（**PENDING**） | 超时真杀进程，输出别撑爆内存。 |
+| **PR-I（T2）** | **交付物**：`run_in_background`；task 三件套 API。**落地点**：`bash_task.rs`、`tool_exec`、event_bus | 新 `bash_task.rs`；`tool_exec`；event_bus | 计划 §6 E2E 行（**PENDING**） | 后台跑、分段取日志。 |
+| **PR-L（T3）** | **交付物**：AST allowlist；`SandboxBackend` trait；PersistentShell 骨架。**落地点**：新模块 + config | 新模块 + config allow/deny | 计划 §4.3（**PENDING**） | AST 与沙箱接口先立住，再填实现。 |
+| **PR-现状（基线）** | **交付物**：描述当前 `execute_bash` 行为链。**落地点**：catalog `execute_bash_*`；primitive `bash`；gate | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs) `execute_bash_parameters`；[`bash.rs`](../../../src/core/tools/primitive/executor/bash.rs)；[`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)；[`gate.rs`](../../../src/core/tools/primitive/executor/gate.rs) | `suite_test::execute_bash_success`、`execute_bash_forbidden`；`gate_suite_test::*`；`tests/primitives_tools_tests.rs`；`tests/bash_assignment_deny.rs`；`dispatch_with_extension_test::*` | 描述**今天**代码；PR-A 合入后本行由 **`bash`** 替代，行为链不变。 |
 
 集成测试登记见 **§10**；门禁脚本若扩展 bash 专组，在 PR 合入后于此处补一行路径。
 
-下文按 **实施顺序** 展开技术要点（**2.4.1 = PR-A** 优先，**2.4.2 = PR-现状** 基线，再 **PR-E / I / L**）；**交付边界与代码落点仍以表为准**。写法对齐 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§7.2** 硬约束 1（表后拆小节 + ASCII）。
+下文按 **实施顺序** 展开技术要点（**2.4.1 = PR-A** 优先，**2.4.2 = PR-现状** 基线，再 **PR-E / I / L**）；**交付边界与代码落点仍以表为准**。写法对齐 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.2** 硬约束 1（表后拆小节 + ASCII）。
 
 #### 2.4.1 PR-A：对外短名 `bash`（优先）
 
@@ -616,5 +618,5 @@ LLM          tool_exec              bash::execute_bash_impl        gate / spawn
 | §0.5 bash 维度表 / §1 差距 bash 行 | §2.2 |
 | §1 命名 PR-A（**本方案要求最先实施**；**fallback 句以本文 + read 为准**） | §2.3、§2.4 表首行、§2.4.1、§3、§4、§11、§12 |
 | §2.4 bash T1 | §2.4 PR-E、§2.4.3、§6.2、§9.2、§10 PENDING |
-| §3.4 bash T2 | §1 G4、§7.2、§10 PENDING |
+| §3.4 bash T2 | §1 G4、§4.2、§10 PENDING |
 | §4.3 bash T3 | §1 G5、§2.4 PR-L、§2.4.5 |

@@ -29,12 +29,12 @@
 | Windows 平台 Ctrl+Break 区分 | 暂不支持，沿用 `ctrlc` crate 默认行为 |
 | 清理 `ext/dispatcher/session_ops.rs` 等既有 `abort_signal` / `cancelled` 引用 | 保留 `AtomicBool` 作为 poll 兼容出口 |
 
-### 1.3 架构规范对齐（`ARCHITECTURE_SPEC` §7）
+### 1.3 架构规范对齐（`ARCHITECTURE_SPEC` §4 补充文档）
 
-本文适用 **[`ARCHITECTURE_SPEC.md`](../guides/workflow/ARCHITECTURE_SPEC.md) §7.0 豁免**（对 [`agent-loop.md`](./agent-loop.md) 的补充，不新增对外工具名 / wire 字段）。**不重复**另起与 [`read.md`](./tools/read.md) 同形的整表，而由下列既有节承担 **`ARCHITECTURE_SPEC` §7.1 / §7.2** 职责：
+本文适用 **[`ARCHITECTURE_SPEC.md`](../guides/workflow/ARCHITECTURE_SPEC.md) §4.0 章节编排**所允许的「节号与主骨架不对齐」写法（对 [`agent-loop.md`](./agent-loop.md) 的补充，不新增对外工具名 / wire 字段）。**不重复**另起与 [`read.md`](./tools/read.md) 同形的整表，而由下列既有节承担 **`ARCHITECTURE_SPEC` §4.1 / §4.2** 职责：
 
-- **§7.1 落地选型决策表** → **§11 设计选型与权衡**；
-- **§7.2 实施点（已闭环）** → 交付与验收函数名见 **§14 验收**（对齐 **T2-P0-007**），主要代码落点见 **§9 关键改动（按文件）**。
+- **§4.1 落地选型决策表** → **§11 设计选型与权衡**；
+- **§4.2 实施点（已闭环）** → 交付与验收函数名见 **§14 验收**（对齐 **T2-P0-007**），主要代码落点见 **§9 关键改动（按文件）**。
 
 ---
 
