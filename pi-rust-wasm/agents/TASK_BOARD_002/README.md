@@ -50,8 +50,8 @@
 | **T2-P0-013** | 拖拽授权 / Bash 路径 / CWD 语义整改 | `DONE` | Jerry | `fix/drag-deny-cwd-remediation` | [tasks/T2-P0-013.md](./tasks/T2-P0-013.md) |
 | **T2-P0-014** | 权限授权来源重构 | `DONE` | Tom | `feature/permission-source-redesign` | [tasks/T2-P0-014.md](./tasks/T2-P0-014.md) |
 | **T2-P0-015** | OpenAI Files 上传管理 | `TODO` | — | `feature/llm-files-upload-manager` | [tasks/T2-P0-015.md](./tasks/T2-P0-015.md) |
-| **T2-P0-016** | 四内置工具契约加强（write / bash 余量） | `PENDING_INTEGRATION`（L312 write + L313 PR-A 短名已交付；PR-B～E bash 余量 TODO） | Tom | `feature/strengthen-four-core-tools` | [tasks/T2-P0-016.md](./tasks/T2-P0-016.md) |
-| **T2-P0-017** | `edit` 工具契约与实现 | `PENDING_INTEGRATION`（edit 规格与实现收尾；NoPriorRead 与 T2-P0-016 同 PR 节奏） | Tom | `feature/strengthen-four-core-tools` | [tasks/T2-P0-017.md](./tasks/T2-P0-017.md) |
+| **T2-P0-016** | 四内置工具契约加强（write / bash 余量） | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `develop` | [tasks/T2-P0-016.md](./tasks/T2-P0-016.md) |
+| **T2-P0-017** | `edit` 工具契约与实现 | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，同上全量门禁） | Tom | `develop` | [tasks/T2-P0-017.md](./tasks/T2-P0-017.md) |
 | **T2-P1-001** | Checkpoint + 断点续跑 | `TODO` | — | `feature/checkpoint-resume` | [tasks/T2-P1-001.md](./tasks/T2-P1-001.md) |
 | **T2-P1-002** | PLAN 模式增强 | `TODO` | — | `feature/plan-mode-enhance` | [tasks/T2-P1-002.md](./tasks/T2-P1-002.md) |
 | **T2-P1-003** | 提问/应答机制 | `TODO` | — | `feature/ask-answer` | [tasks/T2-P1-003.md](./tasks/T2-P1-003.md) |

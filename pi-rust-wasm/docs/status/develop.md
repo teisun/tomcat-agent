@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Cursor | 2026-05-05 22:35 | ACTIVE | develop | — |
+| Cursor | 2026-05-07 16:13 | ACTIVE | develop | — |
+
+### 2026-05-07 | merge `feature/strengthen-four-core-tools` → develop @ a09ac01
+
+- **阶段 R（评审）**：`scripts/test-groups.sh` 与合入变更面对照完整；`tests/` 下无无理由 `#[ignore]`；User_Stories / E2E 场景库与 read、bash 等已有自动化条目一致。
+- **阶段 T（门禁）**：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests` 等）。
+- **看板**：T2-P0-016、T2-P0-017 本提交置为 `DONE`。
 
 ### 文档与 OpenSpec（无代码变更）
 
