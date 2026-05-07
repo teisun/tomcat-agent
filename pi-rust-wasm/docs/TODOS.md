@@ -4,7 +4,7 @@
 >
 > 组织方式：**先按领域分类，再在每条上标注档位（P0-P9）**；同档位内用「紧急度标签」`[BUG]/[UX]/[REF]/[DOC]` 做二次排序。
 >
-> 最近更新：2026-04-22（**路线图重排**：档位由旧「P0 破损 / P1 高价值 / ... / P5 灵感」改为 P0-P9「执行编排顺序」；与 [Product_Brief.md](../openspec/specs/Product_Brief.md) 的 P0-P9、[TASK_BOARD_002 索引](../agents/TASK_BOARD_002/README.md) 的 T2-P0/P1 映射一致）
+> 最近更新：2026-05-07（新增 T-153：`web_search` / `web_fetch` 架构文档落地与 HTTP 字段核对后续）
 
 ---
 
@@ -42,7 +42,7 @@
 
 ## 优先级速查（P0-P9）
 
-### P0 — 单 Agent 基础体验（~37 条）
+### P0 — 单 Agent 基础体验（~38 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 | T2 映射 |
 |------|------|------|-----------|---------|
@@ -68,6 +68,7 @@
 | T-037 | 工具 | 无法在规划中执行 pi 命令 | 规划模式约束 | T2-P0-005 |
 | T-039 | 工具 | 拦截删除换成归档 | 安全增强 | T2-P0-005 |
 | T-152 | 工具 | 内置 `search_files` 只读工具 | 单入口支持内容搜索与文件名 glob，依赖系统 `rg`/`fd` | T2-P1-008 |
+| T-153 | 工具/Web | 按架构文档实现 `web_search` + `web_fetch` | 契约与路线图见 [`docs/architecture/tools/web_search.md`](architecture/tools/web_search.md)、[`docs/architecture/tools/web_fetch.md`](architecture/tools/web_fetch.md)（含 PR-WS-* / PR-WF-*、`openai-responses` 门闩、§2.4.2.1 HTTP 上游字段、cc-fork/hermes/openclaw 对标）；认领时把文档验收矩阵与 `src/core/tools/web_*` 单测对齐；晋升正式卡可走 **T2-P1-007** 或另拆 T2 子任务 | T2-P1-007（占位） |
 | T-040 | 上下文 | 超大文件处理崩溃 | compaction 崩溃 | T2-P0-002（**关闭归并 2026-04-26**：Layer 0 + Phase D 已覆盖） |
 | T-041 | 上下文 | 压缩任务失败重试 | 可靠性 | T2-P0-002 |
 | T-043 | 工具/原语 | 大文件多次编辑写入 | agent 写大文件方式（`edit_file` 偏好） | T2-P0-011（**改判 2026-04-26**：归属由 compaction 转 executor primitives） |
@@ -783,6 +784,7 @@
 | T-150 | P0 | path_rules 双层存储（builtin 常量 + TOML 可见性段） | T2-P0-004 PR-1/PR-5 follow-up；当前仅常量 |
 | T-151 | P5 | Bash 动态路径访问与提示词注入防御 | gate-root-remediation follow-up；`bash_parser` 对运行时拼接路径只能尽力解析 |
 | T-152 | P1 | 内置 `search_files` 只读工具 | T2-P1-008；对齐 Cursor Search files/folders 体验 |
+| T-153 | P0 | `web_search` + `web_fetch` 按 [`web_search.md`](architecture/tools/web_search.md) / [`web_fetch.md`](architecture/tools/web_fetch.md) 落地 | T2-P1-007 占位；HTTP 字段见 web_search §2.4.2.1 |
 
 ---
 
@@ -801,7 +803,7 @@
 
 | 档位 | 条目数（估） | 说明 |
 |------|--------------|------|
-| **P0** | ~40 | 单 Agent 基础体验；全部映射到 002 T2-P0-001~010；含 T-148/T-149/T-150（2026-04-27 新增） |
+| **P0** | ~41 | 单 Agent 基础体验；全部映射到 002 T2-P0-001~010；含 T-148/T-149/T-150（2026-04-27 新增）、T-153（2026-05-07） |
 | **P1** | ~13 | 状态管理；全部映射到 002 T2-P1-001~007 |
 | **P2** | ~5 | Skill 系统（T-114/T-115/T-138/T-139）+ 安全研究（T-147） |
 | **P3** | ~10 | 系统提示词 + 记忆 |
@@ -813,7 +815,7 @@
 | **P9** | ~11 | UI / 远期愿景 / 阅读 |
 | **已实现** | 5 | T-005/T-006/T-024/T-038/T-072（2026-04-19 核对） |
 | **已关闭** | 1 | T-135（本次随改造关闭） |
-| **合计** | **~146** | 含 T-136~T-146 新增 11 条；T-147~T-152 新增 6 条 |
+| **合计** | **~147** | 含 T-136~T-146 新增 11 条；T-147~T-152 新增 6 条；T-153 新增 1 条 |
 
 ### 与前一版（P0-P5 紧急度档）变更一览
 
