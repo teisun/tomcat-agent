@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use crate::api::chat::ChatContext;
 
-use super::{cmd_help, cmd_path};
+use super::{cmd_help, cmd_path, cmd_thinking};
+
+pub use cmd_thinking::ThinkingAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
@@ -27,6 +29,8 @@ pub enum ChatCommand {
     },
     /// `/help`.
     Help,
+    /// `/thinking on|off|toggle`：切换 CliTurnRenderer 的折叠/展开开关。
+    Thinking { action: ThinkingAction },
     /// Recognized command with invalid arguments.
     UsageError { message: String },
 }
@@ -45,7 +49,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
     }
 
     let first_token = trimmed.split_whitespace().next().unwrap_or_default();
-    if first_token != "/path" && first_token != "/help" {
+    if !matches!(first_token, "/path" | "/help" | "/thinking") {
         return ChatCommand::NotACommand(line.to_string());
     }
 
@@ -61,6 +65,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
     match first_token {
         "/path" => cmd_path::parse_args(tokens, trimmed),
         "/help" => cmd_help::parse_args(tokens),
+        "/thinking" => cmd_thinking::parse_args(tokens),
         _ => ChatCommand::NotACommand(line.to_string()),
     }
 }
@@ -81,5 +86,6 @@ pub(crate) fn dispatch_chat_command(
             path,
             original_line,
         } => cmd_path::run(ctx, path, original_line, rl),
+        ChatCommand::Thinking { action } => cmd_thinking::run(ctx, action),
     }
 }

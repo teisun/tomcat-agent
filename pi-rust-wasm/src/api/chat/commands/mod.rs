@@ -2,6 +2,7 @@
 
 mod cmd_help;
 mod cmd_path;
+mod cmd_thinking;
 mod parse;
 
 #[cfg(test)]
