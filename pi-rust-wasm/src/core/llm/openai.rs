@@ -90,6 +90,10 @@ pub struct OpenAiProvider {
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
+    /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
+    thinking_cfg: crate::infra::config::ThinkingConfig,
+    /// `provider id`，给 ThinkingFormat::Auto 推断使用；`OpenAiProvider` 固定为 `"openai"`。
+    thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
 }
 
 fn stream_timeout_error(stream_timeout_sec: u64) -> AppError {
@@ -155,6 +159,10 @@ impl OpenAiProvider {
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
+        let thinking_format = crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
+            config.thinking.format.as_deref(),
+        )
+        .resolve("openai");
         Ok(Self {
             client,
             base_url,
@@ -164,6 +172,8 @@ impl OpenAiProvider {
             semaphore,
             retry_count: config.retry_count,
             stream_timeout_sec: config.stream_timeout_sec,
+            thinking_cfg: config.thinking.clone(),
+            thinking_format,
         })
     }
 
@@ -189,6 +199,10 @@ impl OpenAiProvider {
         request: &ChatRequest,
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
+        let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
+            &self.thinking_cfg,
+            self.thinking_format,
+        );
         let body = OpenAiRequestBody {
             model: self.effective_model(request),
             messages: request.messages.clone(),
@@ -197,8 +211,8 @@ impl OpenAiProvider {
             stream: false,
             tools: request.tools.clone(),
             stream_options: None,
-            reasoning_effort: None,
-            thinking: None,
+            reasoning_effort: thinking_fields.reasoning_effort,
+            thinking: thinking_fields.thinking,
         };
 
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
@@ -374,6 +388,10 @@ impl LlmProvider for OpenAiProvider {
             None
         };
 
+        let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
+            &self.thinking_cfg,
+            self.thinking_format,
+        );
         let body = OpenAiRequestBody {
             model: self.effective_model(&request),
             messages: request.messages.clone(),
@@ -384,8 +402,8 @@ impl LlmProvider for OpenAiProvider {
             stream_options: Some(StreamOptionsBody {
                 include_usage: true,
             }),
-            reasoning_effort: None,
-            thinking: None,
+            reasoning_effort: thinking_fields.reasoning_effort,
+            thinking: thinking_fields.thinking,
         };
 
         let resp = self.stream_post_once(&self.base_url, &body).await;

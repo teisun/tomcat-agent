@@ -178,6 +178,29 @@ fn test_openai_request_body_serializes_thinking_object() {
     assert!(j.get("reasoning_effort").is_none());
 }
 
+#[test]
+fn test_openai_provider_default_config_has_no_reasoning_fields_in_request() {
+    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
+    use crate::infra::config::ThinkingConfig;
+    let cfg = ThinkingConfig::default();
+    let r = resolve_request_fields(&cfg, ThinkingFormat::Openai);
+    assert!(r.reasoning_effort.is_none(), "默认 enabled=false 不应写 reasoning_effort");
+    assert!(r.thinking.is_none());
+}
+
+#[test]
+fn test_openai_provider_thinking_high_writes_reasoning_effort() {
+    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
+    use crate::infra::config::ThinkingConfig;
+    let cfg = ThinkingConfig {
+        enabled: true,
+        level: "high".into(),
+        ..ThinkingConfig::default()
+    };
+    let r = resolve_request_fields(&cfg, ThinkingFormat::Openai);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+}
+
 #[tokio::test]
 async fn sse_stream_parses_and_yields_events() {
     use tokio_stream::StreamExt;

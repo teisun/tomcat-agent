@@ -13,6 +13,7 @@
 mod provider;
 mod registry;
 pub mod system_prompt;
+pub mod thinking_policy;
 mod token_usage;
 mod types;
 

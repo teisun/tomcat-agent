@@ -308,6 +308,60 @@ fn responses_chunk_completed_emits_finish_and_usage() {
 }
 
 #[test]
+fn responses_build_request_body_default_omits_reasoning_field() {
+    let p = provider_with_stub_key();
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert!(
+        body.get("reasoning").is_none(),
+        "默认 thinking.enabled=false 不应写 reasoning: {}",
+        body
+    );
+    assert!(body.get("thinking").is_none());
+}
+
+#[test]
+fn responses_build_request_body_high_writes_reasoning_effort() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        thinking: crate::infra::config::ThinkingConfig {
+            enabled: true,
+            level: "high".into(),
+            ..crate::infra::config::ThinkingConfig::default()
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(
+        body["reasoning"]["effort"], "high",
+        "thinking 启用后应写 reasoning.effort: {}",
+        body
+    );
+    assert!(body.get("thinking").is_none(), "OpenAI 系不应同时写 thinking 对象");
+}
+
+#[test]
 fn responses_chunk_reasoning_delta_emits_thinking() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     // 旧命名：response.reasoning.delta

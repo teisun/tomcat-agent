@@ -72,6 +72,9 @@ pub struct OpenAiResponsesProvider {
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
+    /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
+    thinking_cfg: crate::infra::config::ThinkingConfig,
+    thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
 }
 
 fn stream_timeout_error(stream_timeout_sec: u64) -> AppError {
@@ -137,6 +140,10 @@ impl OpenAiResponsesProvider {
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
+        let thinking_format = crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
+            config.thinking.format.as_deref(),
+        )
+        .resolve("openai-responses");
         Ok(Self {
             client,
             base_url,
@@ -146,6 +153,8 @@ impl OpenAiResponsesProvider {
             semaphore,
             retry_count: config.retry_count,
             stream_timeout_sec: config.stream_timeout_sec,
+            thinking_cfg: config.thinking.clone(),
+            thinking_format,
         })
     }
 
@@ -193,6 +202,18 @@ impl OpenAiResponsesProvider {
         }
         if let Some(tools) = tools_payload {
             body["tools"] = Value::Array(tools);
+        }
+        // T2-P0-006 P5：把 ThinkingLevel/format 翻成 Responses 期望的 `reasoning.effort` 对象。
+        // 与 Completions 的 `reasoning_effort` 字段不同：Responses 走 `{reasoning: {effort: "low|medium|high"}}`。
+        let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
+            &self.thinking_cfg,
+            self.thinking_format,
+        );
+        if let Some(effort) = thinking_fields.reasoning_effort {
+            body["reasoning"] = json!({ "effort": effort });
+        }
+        if let Some(thinking) = thinking_fields.thinking {
+            body["thinking"] = thinking;
         }
         body
     }

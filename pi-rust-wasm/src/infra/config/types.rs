@@ -82,6 +82,68 @@ pub struct LlmConfig {
     /// 当对主 api_base 请求不通（连接失败、超时等）时，自动用该 URL 重试；示例 `https://api.chatanywhere.tech`。留空则关闭自动降级。
     #[serde(default)]
     pub api_base_fallback: Option<String>,
+    /// Thinking / Reasoning 协议接入子配置（T2-P0-006 P5）；省略时全部默认（关闭）。
+    #[serde(default)]
+    pub thinking: ThinkingConfig,
+}
+
+/// Thinking / Reasoning 协议子配置。
+///
+/// **默认 `enabled=false`**：与历史行为完全等价，不发任何 reasoning 请求字段，
+/// 也不期望 provider 返回 thinking。需要打开时同时设：
+///
+/// - `enabled = true`
+/// - `level = "low" | "medium" | ...`
+/// - `format = "openai" | "openrouter" | "deepseek" | "zai" | "qwen" | ...`（None=按 provider 自动）
+///
+/// 详细策略见 `docs/architecture/llm-stream-events-cli-pipeline.md` §4.2.2。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ThinkingConfig {
+    /// 全局 thinking 总开关；关闭则其它字段失效（也不发请求）。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 强度档位：`off | minimal | low | medium | high | xhigh`。
+    /// 字符串形式由 `core/llm/thinking_policy::ThinkingLevel` 解析。
+    #[serde(default = "default_thinking_level")]
+    pub level: String,
+    /// 厂商请求格式：`openai | openrouter | deepseek | zai | qwen | doubao` 等；
+    /// `None` 表示按 provider 名称自动推断。
+    #[serde(default)]
+    pub format: Option<String>,
+    /// 部分厂商（豆包/Moonshot）支持显式设置 thinking max_tokens；None=厂商默认。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// CLI 默认是否展示 thinking（PI_CHAT_SHOW_THINKING 环境变量优先）。
+    #[serde(default)]
+    pub show: bool,
+    /// 是否把 thinking 落到 transcript（默认 false：仅展示，不持久化）。
+    #[serde(default)]
+    pub persist: bool,
+    /// 多轮重发是否剥离上下文中的 thinking 内容（默认 true，避免 DeepSeek 等模型 400）。
+    #[serde(default = "default_true")]
+    pub strip_on_resend: bool,
+    /// thinking 是否打到 stderr（默认 false：走 stdout 与正文同流）。
+    #[serde(default)]
+    pub print_to_stderr: bool,
+}
+
+fn default_thinking_level() -> String {
+    "medium".to_string()
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            level: default_thinking_level(),
+            format: None,
+            max_tokens: None,
+            show: false,
+            persist: false,
+            strip_on_resend: true,
+            print_to_stderr: false,
+        }
+    }
 }
 
 /// 默认 LLM 后端 id；与 [`crate::core::llm::registered_provider_ids`] 对齐。
@@ -120,6 +182,7 @@ impl Default for LlmConfig {
             stream_timeout_sec: default_stream_timeout_sec(),
             proxy: None,
             api_base_fallback: None,
+            thinking: ThinkingConfig::default(),
         }
     }
 }
