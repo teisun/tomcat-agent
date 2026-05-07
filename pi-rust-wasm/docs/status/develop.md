@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Cursor | 2026-05-07 16:13 | ACTIVE | develop | — |
+| Nibbles | 2026-05-07 17:45 | ACTIVE | develop | — |
+
+### 2026-05-07 | merge `feature/stream-timeout` → develop @ a067393
+
+- **范围**：T2-P0-003（`openai` / `openai-responses` 流式 bytes 层空闲超时、`#T-132` 关闭、单测与 `docs/TODOS.md` 核对）。
+- **阶段 T（门禁）**：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh all` → 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests`）。
+- **看板**：`T2-P0-003` 由 `PENDING_INTEGRATION` 置为 `DONE`。
 
 ### 2026-05-07 | merge `feature/strengthen-four-core-tools` → develop @ a09ac01
 
