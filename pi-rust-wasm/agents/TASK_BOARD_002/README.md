@@ -40,7 +40,7 @@
 | **T2-P0-003** | OpenAI 流式 `stream_timeout_sec` | `DONE`（`2026-05-07` Nibbles 合并入 `develop` @ `a067393`，develop 上全量门禁复跑通过） | Jerry | `feature/stream-timeout` | [tasks/T2-P0-003.md](./tasks/T2-P0-003.md) |
 | **T2-P0-004** | 工作目录权限分级 | `DONE`（`2026-04-27` Nibbles 合并入 `develop` @ `11eb5e7`，develop 上全量门禁复跑通过） | Jerry | `feature/workspace-permission-tiers` | [tasks/T2-P0-004.md](./tasks/T2-P0-004.md) |
 | **T2-P0-005** | 工具系统整改 | `DONE` | Spike | `feature/tool-system-cleanup` | [tasks/T2-P0-005.md](./tasks/T2-P0-005.md) |
-| **T2-P0-006** | Thinking API 接入 + TUI 展示 | `TODO` | — | `feature/thinking-api-display` | [tasks/T2-P0-006.md](./tasks/T2-P0-006.md) |
+| **T2-P0-006** | Thinking API 接入 + TUI 展示 | `DOING` | Tom | `feature/thinking-api-display` | [tasks/T2-P0-006.md](./tasks/T2-P0-006.md) |
 | **T2-P0-007** | 中断/恢复 + transcript 完整性 | `DONE` | Spike | `feature/interrupt-resume` | [tasks/T2-P0-007.md](./tasks/T2-P0-007.md) |
 | **T2-P0-008** | TUI 体验强化（合并 TASK-08） | `TODO` | — | `feature/tui-experience` | [tasks/T2-P0-008.md](./tasks/T2-P0-008.md) |
 | **T2-P0-009** | 三套管道重构 | `TODO` | — | `feature/pipeline-unify` | [tasks/T2-P0-009.md](./tasks/T2-P0-009.md) |
