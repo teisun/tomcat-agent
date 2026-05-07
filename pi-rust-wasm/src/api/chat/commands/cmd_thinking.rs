@@ -58,10 +58,7 @@ pub(crate) fn run(ctx: &ChatContext, action: ThinkingAction) -> ChatCommandOutco
 }
 
 /// 把 `ThinkingAction` 应用到 `show_thinking` AtomicBool；返回应用后的新值，便于测试。
-pub fn apply_action(
-    flag: &std::sync::atomic::AtomicBool,
-    action: ThinkingAction,
-) -> bool {
+pub fn apply_action(flag: &std::sync::atomic::AtomicBool, action: ThinkingAction) -> bool {
     match action {
         ThinkingAction::On => {
             flag.store(true, Ordering::Release);

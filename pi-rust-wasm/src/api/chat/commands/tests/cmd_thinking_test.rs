@@ -51,7 +51,11 @@ fn thinking_unknown_subcommand_is_usage_error() {
         ChatCommand::UsageError { message } => message,
         other => panic!("应为 UsageError，实际：{:?}", other),
     };
-    assert!(msg.contains("on/off/toggle"), "错误文案应说明合法值：{}", msg);
+    assert!(
+        msg.contains("on/off/toggle"),
+        "错误文案应说明合法值：{}",
+        msg
+    );
     assert!(msg.contains("foo"), "错误文案应回显未知子命令：{}", msg);
 }
 
@@ -66,25 +70,25 @@ fn thinking_extra_args_is_usage_error() {
 #[test]
 fn apply_on_sets_true_regardless_of_prev() {
     let f = AtomicBool::new(false);
-    assert_eq!(apply_action(&f, ThinkingAction::On), true);
+    assert!(apply_action(&f, ThinkingAction::On));
     assert!(f.load(Ordering::Acquire));
-    assert_eq!(apply_action(&f, ThinkingAction::On), true);
+    assert!(apply_action(&f, ThinkingAction::On));
     assert!(f.load(Ordering::Acquire));
 }
 
 #[test]
 fn apply_off_sets_false_regardless_of_prev() {
     let f = AtomicBool::new(true);
-    assert_eq!(apply_action(&f, ThinkingAction::Off), false);
+    assert!(!apply_action(&f, ThinkingAction::Off));
     assert!(!f.load(Ordering::Acquire));
 }
 
 #[test]
 fn apply_toggle_flips_strictly() {
     let f = AtomicBool::new(false);
-    assert_eq!(apply_action(&f, ThinkingAction::Toggle), true);
+    assert!(apply_action(&f, ThinkingAction::Toggle));
     assert!(f.load(Ordering::Acquire));
-    assert_eq!(apply_action(&f, ThinkingAction::Toggle), false);
+    assert!(!apply_action(&f, ThinkingAction::Toggle));
     assert!(!f.load(Ordering::Acquire));
 }
 

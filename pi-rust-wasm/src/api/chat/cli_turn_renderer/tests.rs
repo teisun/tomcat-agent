@@ -11,9 +11,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use super::{
-    error_extra_lines, one_line_summary, result_summary, CliTurnRenderer, CliWriter,
-};
+use super::{error_extra_lines, one_line_summary, result_summary, CliTurnRenderer, CliWriter};
 use crate::api::render::MarkdownRenderer;
 
 #[derive(Default)]
@@ -47,12 +45,7 @@ fn make_renderer(show_thinking: bool) -> (Arc<CliTurnRenderer>, Arc<CapturedWrit
     let writer = CapturedWriter::new();
     let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
     let flag = Arc::new(AtomicBool::new(show_thinking));
-    let r = CliTurnRenderer::with_writer(
-        md,
-        flag,
-        writer.clone() as Arc<dyn CliWriter>,
-        false,
-    );
+    let r = CliTurnRenderer::with_writer(md, flag, writer.clone() as Arc<dyn CliWriter>, false);
     (r, writer)
 }
 
@@ -121,11 +114,7 @@ fn content_delta_after_thinking_inserts_newline() {
     let s = w.stdout();
     let thinking_idx = s.find("[thinking]").expect("thinking 必现");
     let answer_idx = s.find("answer").expect("answer 必现");
-    assert!(
-        thinking_idx < answer_idx,
-        "thinking 应早于正文: {:?}",
-        s
-    );
+    assert!(thinking_idx < answer_idx, "thinking 应早于正文: {:?}", s);
     let between = &s[thinking_idx..answer_idx];
     assert!(
         between.contains('\n'),
@@ -173,8 +162,16 @@ fn tool_start_emits_gray_summary_on_stderr() {
         "args": {"path": "src/main.rs", "limit": 200},
     }));
     let err = w.stderr();
-    assert!(err.contains("[tool] read"), "应有 [tool] read 装饰: {:?}", err);
-    assert!(err.contains("path=src/main.rs"), "应有 path 摘要: {:?}", err);
+    assert!(
+        err.contains("[tool] read"),
+        "应有 [tool] read 装饰: {:?}",
+        err
+    );
+    assert!(
+        err.contains("path=src/main.rs"),
+        "应有 path 摘要: {:?}",
+        err
+    );
     assert!(err.contains("limit=200"), "应有 limit 摘要: {:?}", err);
     assert!(err.contains("\x1b[90m"), "应使用 gray ANSI: {:?}", err);
 }
@@ -197,7 +194,11 @@ fn tool_end_success_uses_green_check_and_elapsed() {
     assert!(err.contains("✓"), "成功应有 ✓: {:?}", err);
     assert!(err.contains("\x1b[32m"), "成功应使用绿色: {:?}", err);
     assert!(err.contains("42 lines"), "应展示行数摘要: {:?}", err);
-    assert!(err.contains("ms") || err.contains("s)"), "应展示 elapsed: {:?}", err);
+    assert!(
+        err.contains("ms") || err.contains("s)"),
+        "应展示 elapsed: {:?}",
+        err
+    );
 }
 
 #[test]
@@ -220,7 +221,11 @@ fn tool_end_failure_uses_red_cross_and_extra_lines() {
     let err = w.stderr();
     assert!(err.contains("✗"), "失败应有 ✗: {:?}", err);
     assert!(err.contains("\x1b[31m"), "失败应使用红色: {:?}", err);
-    assert!(err.contains("build failed"), "失败应展示 error 摘要: {:?}", err);
+    assert!(
+        err.contains("build failed"),
+        "失败应展示 error 摘要: {:?}",
+        err
+    );
     assert!(
         err.contains("E0308"),
         "失败应展开 stderr 前 3 行: {:?}",
@@ -270,10 +275,7 @@ fn result_summary_picks_best_field_for_success_and_error() {
         "all good"
     );
     assert_eq!(result_summary(&json!({}), false), "ok");
-    assert_eq!(
-        result_summary(&json!({"error": "boom"}), true),
-        "boom"
-    );
+    assert_eq!(result_summary(&json!({"error": "boom"}), true), "boom");
 }
 
 #[test]

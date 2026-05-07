@@ -107,10 +107,7 @@ fn stream_event_thinking_serde_with_signature() {
     };
     let j = serde_json::to_value(&e).unwrap();
     assert_eq!(j.get("type").and_then(|v| v.as_str()), Some("thinking"));
-    assert_eq!(
-        j.get("signature").and_then(|v| v.as_str()),
-        Some("sig-abc")
-    );
+    assert_eq!(j.get("signature").and_then(|v| v.as_str()), Some("sig-abc"));
     let back: StreamEvent = serde_json::from_value(j).unwrap();
     assert!(matches!(
         back,

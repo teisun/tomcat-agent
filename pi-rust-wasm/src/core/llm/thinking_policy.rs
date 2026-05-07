@@ -111,10 +111,7 @@ pub struct ThinkingRequestFields {
 /// - OpenAI 系：`reasoning_effort` 为 level 字符串；`xhigh` 不在白名单（外部决定）时 caller 应降级为 `high`；
 /// - 豆包/Moonshot：`thinking={"type":"enabled"}`，带 `max_tokens` 时附带；
 /// - DeepSeek/Qwen 等无显式请求字段：返回 None（响应解析仍走 reasoning_content 三路兜底）。
-pub fn resolve_request_fields(
-    cfg: &ThinkingConfig,
-    fmt: ThinkingFormat,
-) -> ThinkingRequestFields {
+pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> ThinkingRequestFields {
     if !cfg.enabled {
         return ThinkingRequestFields::default();
     }

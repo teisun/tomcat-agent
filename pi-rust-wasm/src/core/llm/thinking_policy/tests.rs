@@ -48,7 +48,10 @@ fn level_parse_unknown_falls_back_to_medium_and_signals_false() {
 
 #[test]
 fn format_resolve_auto_by_provider_id() {
-    assert_eq!(ThinkingFormat::Auto.resolve("openai"), ThinkingFormat::Openai);
+    assert_eq!(
+        ThinkingFormat::Auto.resolve("openai"),
+        ThinkingFormat::Openai
+    );
     assert_eq!(
         ThinkingFormat::Auto.resolve("openai-responses"),
         ThinkingFormat::Openai
@@ -97,7 +100,10 @@ fn doubao_level_maps_to_thinking_object() {
     let v = r.thinking.expect("doubao 应返回 thinking 对象");
     assert_eq!(v["type"], "enabled");
     assert!(v.get("max_tokens").is_none());
-    assert!(r.reasoning_effort.is_none(), "互斥：豆包不应出 reasoning_effort");
+    assert!(
+        r.reasoning_effort.is_none(),
+        "互斥：豆包不应出 reasoning_effort"
+    );
 }
 
 #[test]
@@ -157,8 +163,10 @@ fn persist_default_is_false_even_when_enabled() {
 
 #[test]
 fn persist_requires_both_enabled_and_persist_true() {
-    let mut cfg = ThinkingConfig::default();
-    cfg.persist = true;
+    let mut cfg = ThinkingConfig {
+        persist: true,
+        ..ThinkingConfig::default()
+    };
     // 仅 persist=true、enabled=false → 不持久化（避免 thinking 关闭时落孤儿数据）。
     assert!(!should_persist_thinking(&cfg));
     cfg.enabled = true;

@@ -358,7 +358,10 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         "thinking 启用后应写 reasoning.effort: {}",
         body
     );
-    assert!(body.get("thinking").is_none(), "OpenAI 系不应同时写 thinking 对象");
+    assert!(
+        body.get("thinking").is_none(),
+        "OpenAI 系不应同时写 thinking 对象"
+    );
 }
 
 #[test]
@@ -406,7 +409,11 @@ fn responses_chunk_reasoning_empty_delta_is_skipped() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     let v = json!({"type": "response.reasoning_text.delta", "delta": ""});
     let e = responses_chunk_to_events(&v, &mut tracks);
-    assert!(e.is_empty(), "空 reasoning delta 不应触发 Thinking: {:?}", e);
+    assert!(
+        e.is_empty(),
+        "空 reasoning delta 不应触发 Thinking: {:?}",
+        e
+    );
 }
 
 #[test]

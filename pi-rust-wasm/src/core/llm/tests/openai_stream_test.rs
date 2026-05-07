@@ -53,10 +53,9 @@ fn test_openai_chunk_without_usage_no_usage_event() {
 
 #[test]
 fn test_openai_chunk_reasoning_content_emits_thinking() {
-    let chunk: OpenAiStreamChunk = serde_json::from_str(
-        r#"{"choices":[{"delta":{"reasoning_content":"step 1"}}]}"#,
-    )
-    .expect("should parse chunk with reasoning_content");
+    let chunk: OpenAiStreamChunk =
+        serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"step 1"}}]}"#)
+            .expect("should parse chunk with reasoning_content");
     let events = openai_chunk_to_stream_events(chunk);
     assert_eq!(events.len(), 1);
     assert!(
@@ -184,7 +183,10 @@ fn test_openai_provider_default_config_has_no_reasoning_fields_in_request() {
     use crate::infra::config::ThinkingConfig;
     let cfg = ThinkingConfig::default();
     let r = resolve_request_fields(&cfg, ThinkingFormat::Openai);
-    assert!(r.reasoning_effort.is_none(), "默认 enabled=false 不应写 reasoning_effort");
+    assert!(
+        r.reasoning_effort.is_none(),
+        "默认 enabled=false 不应写 reasoning_effort"
+    );
     assert!(r.thinking.is_none());
 }
 
