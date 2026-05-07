@@ -25,12 +25,14 @@
 //!   `impl LlmProvider`，每个 wire 翻译入口做一行委托。
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use serde_json::{json, Value};
 use std::error::Error;
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::Semaphore;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
 use crate::infra::error::AppError;
@@ -68,9 +70,36 @@ pub struct OpenAiResponsesProvider {
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
     semaphore: Option<Semaphore>,
     retry_count: u32,
-    /// TODO（与 Completions 对齐）：接 `tokio::time::timeout` 实现流式心跳超时
-    #[allow(dead_code)]
+    /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
+}
+
+fn stream_timeout_error(stream_timeout_sec: u64) -> AppError {
+    AppError::Llm(format!(
+        "流式空闲超时: stream_timeout_sec={}s",
+        stream_timeout_sec
+    ))
+}
+
+fn apply_stream_idle_timeout<S>(
+    stream: S,
+    stream_timeout_sec: u64,
+) -> Pin<Box<dyn Stream<Item = Result<Bytes, AppError>> + Send>>
+where
+    S: Stream<Item = Result<Bytes, AppError>> + Send + 'static,
+{
+    if stream_timeout_sec == 0 {
+        return Box::pin(stream);
+    }
+
+    Box::pin(
+        stream
+            .timeout(Duration::from_secs(stream_timeout_sec))
+            .map(move |item| match item {
+                Ok(chunk) => chunk,
+                Err(_) => Err(stream_timeout_error(stream_timeout_sec)),
+            }),
+    )
 }
 
 impl OpenAiResponsesProvider {
@@ -372,6 +401,7 @@ impl LlmProvider for OpenAiResponsesProvider {
         let bytes_stream = resp
             .bytes_stream()
             .map_err(|e| AppError::Llm(format!("流读取错误: {}", e)));
+        let bytes_stream = apply_stream_idle_timeout(bytes_stream, self.stream_timeout_sec);
         let event_stream = stream::ResponsesStream::new(bytes_stream, prefer_ndjson);
         Ok(Box::new(event_stream))
     }

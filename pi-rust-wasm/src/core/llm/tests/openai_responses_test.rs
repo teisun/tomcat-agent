@@ -19,6 +19,7 @@ use crate::infra::LlmConfig;
 
 use bytes::Bytes;
 use serde_json::json;
+use std::time::Duration;
 
 const TEST_KEY_ENV: &str = "__OPENAI_RESPONSES_TEST_KEY__";
 
@@ -421,6 +422,60 @@ async fn responses_stream_auto_detects_ndjson_when_no_data_prefix() {
         "{:?}",
         evt
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
+    use tokio_stream::StreamExt;
+
+    let source = tokio_stream::pending::<Result<Bytes, AppError>>();
+    let mut stream = apply_stream_idle_timeout(source, 3);
+    let next_task = tokio::spawn(async move { stream.next().await });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+
+    let item = next_task
+        .await
+        .expect("join ok")
+        .expect("should produce timeout error");
+    match item {
+        Err(AppError::Llm(msg)) => {
+            assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains("stream_timeout_sec=3s"),
+                "unexpected msg: {}",
+                msg
+            );
+        }
+        other => panic!("expected timeout AppError::Llm, got {:?}", other),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn responses_keepalive_bytes_do_not_trigger_idle_timeout() {
+    use tokio_stream::wrappers::IntervalStream;
+    use tokio_stream::StreamExt;
+
+    let interval = tokio::time::interval(Duration::from_millis(200));
+    let source = IntervalStream::new(interval)
+        .take(3)
+        .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
+    let mut stream = apply_stream_idle_timeout(source, 1);
+    let collect_task = tokio::spawn(async move {
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            out.push(item);
+        }
+        out
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    let out = collect_task.await.expect("join ok");
+    assert_eq!(out.len(), 3);
+    assert!(out.into_iter().all(|item| item.is_ok()));
 }
 
 #[test]

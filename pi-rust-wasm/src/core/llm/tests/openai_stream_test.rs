@@ -11,6 +11,7 @@ use super::*;
 use crate::core::llm::types::StreamEvent;
 use crate::infra::error::AppError;
 use bytes::Bytes;
+use std::time::Duration;
 
 #[test]
 fn test_openai_chunk_with_usage_emits_usage_event() {
@@ -75,4 +76,58 @@ async fn sse_stream_parses_and_yields_events() {
     assert!(matches!(&events[0], Ok(StreamEvent::ContentDelta { delta } ) if delta == "Hello"));
     assert!(matches!(&events[1], Ok(StreamEvent::ContentDelta { delta } ) if delta == " world"));
     assert!(matches!(&events[2], Ok(StreamEvent::FinishReason { reason } ) if reason == "stop"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_timeout_errors_when_no_bytes_arrive() {
+    use tokio_stream::StreamExt;
+
+    let source = tokio_stream::pending::<Result<Bytes, AppError>>();
+    let mut stream = apply_stream_idle_timeout(source, 3);
+    let next_task = tokio::spawn(async move { stream.next().await });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+
+    let item = next_task
+        .await
+        .expect("join ok")
+        .expect("should produce timeout error");
+    match item {
+        Err(AppError::Llm(msg)) => {
+            assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
+            assert!(
+                msg.contains("stream_timeout_sec=3s"),
+                "unexpected msg: {}",
+                msg
+            );
+        }
+        other => panic!("expected timeout AppError::Llm, got {:?}", other),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn keepalive_bytes_do_not_trigger_idle_timeout() {
+    use tokio_stream::wrappers::IntervalStream;
+    use tokio_stream::StreamExt;
+
+    let interval = tokio::time::interval(Duration::from_millis(200));
+    let source = IntervalStream::new(interval)
+        .take(3)
+        .map(|_| Ok(Bytes::from_static(b": keepalive\n\n")));
+    let mut stream = apply_stream_idle_timeout(source, 1);
+    let collect_task = tokio::spawn(async move {
+        let mut out = Vec::new();
+        while let Some(item) = stream.next().await {
+            out.push(item);
+        }
+        out
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    let out = collect_task.await.expect("join ok");
+    assert_eq!(out.len(), 3);
+    assert!(out.into_iter().all(|item| item.is_ok()));
 }

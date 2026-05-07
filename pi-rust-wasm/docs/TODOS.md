@@ -4,7 +4,7 @@
 >
 > 组织方式：**先按领域分类，再在每条上标注档位（P0-P9）**；同档位内用「紧急度标签」`[BUG]/[UX]/[REF]/[DOC]` 做二次排序。
 >
-> 最近更新：2026-05-07（新增 T-153：`web_search` / `web_fetch` 架构文档落地与 HTTP 字段核对后续）
+> 最近更新：2026-05-07（`#T-132` 已实现关闭；T2-P0-003 进入流式超时实现阶段）
 
 ---
 
@@ -42,7 +42,7 @@
 
 ## 优先级速查（P0-P9）
 
-### P0 — 单 Agent 基础体验（~38 条）
+### P0 — 单 Agent 基础体验（~37 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 | T2 映射 |
 |------|------|------|-----------|---------|
@@ -80,7 +80,6 @@
 | T-051 | 权限 | 工作目录说话就可以改配置 | 便捷性 | T2-P0-004 |
 | T-071 | LLM | 接入 thinking API + 展示 | 思考链路 | T2-P0-006 |
 | T-101 | 规范 | 耗时操作后台化写入规范 | 关联 T-020 | T2-P0-010 |
-| T-131 | Agent Loop | `max_tool_rounds` → tool-loop-detection | 硬编码替换 | T2-P0-003 |
 | T-132 | LLM | `stream_timeout_sec` 接入 tokio 超时 | stream 超时 | T2-P0-003 |
 | T-136 | 上下文 | 摘要 prompt 9 节模板升级 | 对齐 CC | T2-P0-002 |
 | T-137 | 上下文 | Compaction 禁 tools 调用 | 首行声明 | T2-P0-002 |
@@ -232,7 +231,7 @@
 | T-143 | LLM | 多 LLM 适配层（Anthropic/Gemini/local-llm） | 新增 |
 | T-144 | IM/网关 | IM 网关（Telegram/Slack/企微/邮件/Webhook） | 新增 |
 
-### P9 — UI / 远期（~11 条）
+### P9 — UI / 远期（~12 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
@@ -245,6 +244,7 @@
 | T-127 | 阅读 | 《Functional Programming in Scala》 | |
 | T-096-mem | 记忆/愿景 | 用户兴趣推送 | 长期 |
 | T-100-dev | 规范 | 编码规范增加面向对象思想 | 与 UI 无关但远期打磨 |
+| T-131 | Agent Loop | 可选 ToolLoopGuard / tool-loop-detection | 本期不做；依赖 `max_tool_rounds` + 上下文预算兜底；规格 TODO 见 `docs/architecture/context-management.md` 6.7 段 | 无 T2 映射（远期） |
 | T-135 | 规范/文档 | Product_Brief 产品级 TODO（已执行：本次改造） | 本次关闭 |
 
 ---
@@ -349,10 +349,9 @@
 - [ ] **[P5] `[REF]`** `#T-023` 一心二用：开子 agent 干活，自己继续思考
   - 依赖多 Agent 基础设施
 
-- [ ] **[P0] `[REF]`** `#T-131` `max_tool_rounds` 待 tool-loop-detection 方案替代
-  - 来源：代码 TODO `src/core/agent_loop/types.rs:38-40`
-  - 规格侧 TODO：`docs/architecture/context-management.md:1017-1019`
-  - 档位：T2-P0-003
+- [ ] **[P9] `[REF]`** `#T-131` 可选 ToolLoopGuard / tool-loop-detection（**本期不做**）
+  - 当前：`max_tool_rounds` + 上下文预算兜底；规格侧说明见 `docs/architecture/context-management.md` §6.7
+  - 远期若实施：连续同名 tool 阈值、近 N 轮输出相似度、总轮数可配上限等，再评估是否恢复正式 T2 任务卡
 
 ---
 
@@ -561,10 +560,11 @@
   - 关联报告：[llm-tool-rounds-cli-display-thinking-protocol.md](reports/llm-tool-rounds-cli-display-thinking-protocol.md)
 
 - [x] **[已实现主干]** `#T-072` 流式输出修复
-  - **核对 2026-04-19**：推理主路径 `chat_stream`；残余 `stream_timeout_sec` → T-132
+  - **核对 2026-04-19**：推理主路径 `chat_stream`；后续空闲超时补强见 `#T-132`
 
-- [ ] **[P0] `[BUG]`** `#T-132` `stream_timeout_sec` 待接入 `tokio::time::timeout`
-  - 来源：代码 TODO `src/core/llm/openai.rs`
+- [x] **[P0] `[BUG]`** `#T-132` `stream_timeout_sec` 接入流式空闲超时
+  - **核对 2026-05-07**：`openai.rs` / `openai_responses/mod.rs` 在 bytes 层接入 `tokio_stream::StreamExt::timeout`；`stream_timeout_sec==0` 语义统一为关闭；超时错误固定为 `流式空闲超时: stream_timeout_sec=<n>s`（可被 classify_error 归类为 Retryable）
+  - 测试：`openai_stream_test` 与 `openai_responses_test` 新增无字节超时、keepalive 不误超时用例
   - 档位：T2-P0-003
 
 ---

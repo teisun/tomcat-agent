@@ -37,7 +37,7 @@
 |------|------|------|--------|------|------|
 | **T2-P0-001** | Agent Loop 模块化拆分 | `DONE` | Jerry | `feature/agent-loop-split` | [tasks/T2-P0-001.md](./tasks/T2-P0-001.md) |
 | **T2-P0-002** | 摘要 prompt 升级 + context v2 收尾 | `DONE`（`2026-04-26` Nibbles 合并入 `develop` @ `1fb0a62`，develop 上全量门禁复跑通过） | Spike | `feature/compaction-prompt-9section` | [tasks/T2-P0-002.md](./tasks/T2-P0-002.md) |
-| **T2-P0-003** | Stream timeout + Tool loop detection | `TODO` | — | `feature/stream-timeout-loop-guard` | [tasks/T2-P0-003.md](./tasks/T2-P0-003.md) |
+| **T2-P0-003** | OpenAI 流式 `stream_timeout_sec` | `PENDING_INTEGRATION` | Jerry | `feature/stream-timeout` | [tasks/T2-P0-003.md](./tasks/T2-P0-003.md) |
 | **T2-P0-004** | 工作目录权限分级 | `DONE`（`2026-04-27` Nibbles 合并入 `develop` @ `11eb5e7`，develop 上全量门禁复跑通过） | Jerry | `feature/workspace-permission-tiers` | [tasks/T2-P0-004.md](./tasks/T2-P0-004.md) |
 | **T2-P0-005** | 工具系统整改 | `DONE` | Spike | `feature/tool-system-cleanup` | [tasks/T2-P0-005.md](./tasks/T2-P0-005.md) |
 | **T2-P0-006** | Thinking API 接入 + TUI 展示 | `TODO` | — | `feature/thinking-api-display` | [tasks/T2-P0-006.md](./tasks/T2-P0-006.md) |
@@ -71,7 +71,7 @@ flowchart LR
     P001 --> P007[T2-P0-007<br/>Interrupt/Resume]
     P001 --> P009[T2-P0-009<br/>Pipeline 重构]
     P001 --> P010[T2-P0-010<br/>长任务后台]
-    P001 --> P003[T2-P0-003<br/>Stream timeout + Loop 002末位]
+    P001 --> P003[T2-P0-003<br/>Stream timeout 002末位]
     P004[T2-P0-004<br/>权限分级] --> P013[T2-P0-013<br/>拖拽/Bash/CWD 整改]
     P013 --> P005[T2-P0-005<br/>工具系统]
     P013 --> P012[T2-P0-012<br/>图片/二进制附件]
