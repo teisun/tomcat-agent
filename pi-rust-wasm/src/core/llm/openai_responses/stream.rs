@@ -313,8 +313,40 @@ pub(super) fn responses_chunk_to_events(
                 reason: format!("error:{}", msg),
             });
         }
-        _ => {
-            // 其它 event 暂忽略（reasoning / output_item.done 等），不影响主链路。
+        // T2-P0-006 P2b：Reasoning / Thinking 流式事件归一映射。
+        //
+        // OpenAI Responses 在不同版本/网关下出现过以下事件名（均包含 reasoning 字段）：
+        // - `response.reasoning.delta`           （旧 reasoning text 流）
+        // - `response.reasoning_text.delta`      （reasoning text 主流命名）
+        // - `response.reasoning_summary_text.delta`（reasoning summary 文本流）
+        // 它们都按 `delta: string` 形态携带增量；`*.done` 事件不携带新增 delta，
+        // 因此本期忽略，避免重复 emit；后续若需要 done 信号可再扩展。
+        "response.reasoning.delta"
+        | "response.reasoning_text.delta"
+        | "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    events.push(StreamEvent::Thinking {
+                        delta: delta.to_string(),
+                        signature: None,
+                    });
+                }
+            }
+        }
+        "response.reasoning.done"
+        | "response.reasoning_text.done"
+        | "response.reasoning_summary_text.done" => {
+            // 已知的「reasoning 段结束」事件——本期不发额外 StreamEvent，仅静默吃掉，
+            // 避免被下面 `_` 分支的未知事件 trace 误报。
+        }
+        other => {
+            // 未知事件类型：trace 一行供运维排查，但**不阻断**主链路。
+            // 用 `debug!` 而非 `warn!`，避免某些网关的 ping/keepalive 事件刷日志。
+            tracing::debug!(
+                target: "pi_wasm::llm::openai_responses",
+                event = %other,
+                "ignoring unknown Responses SSE event"
+            );
         }
     }
     events

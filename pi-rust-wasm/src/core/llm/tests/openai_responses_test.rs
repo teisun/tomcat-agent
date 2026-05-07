@@ -308,6 +308,62 @@ fn responses_chunk_completed_emits_finish_and_usage() {
 }
 
 #[test]
+fn responses_chunk_reasoning_delta_emits_thinking() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    // 旧命名：response.reasoning.delta
+    let v1 = json!({"type": "response.reasoning.delta", "delta": "step a"});
+    let e1 = responses_chunk_to_events(&v1, &mut tracks);
+    assert_eq!(e1.len(), 1);
+    assert!(
+        matches!(&e1[0], StreamEvent::Thinking { delta, signature: None } if delta == "step a"),
+        "got {:?}",
+        e1[0]
+    );
+
+    // 主流命名：response.reasoning_text.delta
+    let v2 = json!({"type": "response.reasoning_text.delta", "delta": "step b"});
+    let e2 = responses_chunk_to_events(&v2, &mut tracks);
+    assert!(
+        matches!(&e2[0], StreamEvent::Thinking { delta, .. } if delta == "step b"),
+        "got {:?}",
+        e2[0]
+    );
+
+    // Summary 流：response.reasoning_summary_text.delta
+    let v3 = json!({"type": "response.reasoning_summary_text.delta", "delta": "outline"});
+    let e3 = responses_chunk_to_events(&v3, &mut tracks);
+    assert!(
+        matches!(&e3[0], StreamEvent::Thinking { delta, .. } if delta == "outline"),
+        "got {:?}",
+        e3[0]
+    );
+}
+
+#[test]
+fn responses_chunk_reasoning_done_is_silent() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({"type": "response.reasoning_text.done"});
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "reasoning *.done 不应额外发事件: {:?}", e);
+}
+
+#[test]
+fn responses_chunk_reasoning_empty_delta_is_skipped() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({"type": "response.reasoning_text.delta", "delta": ""});
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "空 reasoning delta 不应触发 Thinking: {:?}", e);
+}
+
+#[test]
+fn responses_chunk_unknown_event_is_silent_not_panic() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({"type": "response.something.never.heard.of"});
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "未知事件应静默忽略: {:?}", e);
+}
+
+#[test]
 fn responses_chunk_failed_event_emits_error_finish_reason() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     let value = json!({
