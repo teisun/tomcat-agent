@@ -32,10 +32,10 @@ pi-rust-wasm是一款参考pi-agent-rust设计、基于Rust+WasmEdge构建的轻
 - **新路线图使用 P0-P9 十档**：P0-P9 不再是「紧急度」，而是**执行编排顺序**（上一档完成后再投入下一档），具体见下文。
 
 ## 当前状态（001-mvp 已关闭）
-一期核心交付已完成并冻结：Rust 宿主核心、WasmEdge+QuickJS 沙箱、4 原语执行引擎、pi-mono 兼容层、异步 Hostcall、长生命周期 VM（VM Actor）、CLI 对话模式、Agent Loop 三层循环、基础审计日志。详情见 [archive/001-mvp/](archive/001-mvp/)。
+一期核心交付已完成并冻结：Rust 宿主核心、WasmEdge+QuickJS 沙箱、4 原语执行引擎、pi-mono 兼容层、异步 Hostcall、长生命周期 VM（VM Actor）、CLI 对话模式、Agent Loop 三层循环、基础审计日志。`001-mvp` 时期归档文档已从仓库移除；若需溯源可查 **Git 历史**（曾位于 `openspec/specs/archive/001-mvp/`）。
 
 ## 当前迭代：002-single-agent-complete（单 Agent 完善期）
-完成 P0 + P1 两档，目标：让单 Agent 在 macOS/Linux 上的基础体验、状态管理、任务循环达到「无 P0 bug、可稳定长时间运行」。执行看板：[`agents/TASK_BOARD_002.md`](../../agents/TASK_BOARD_002.md)。
+完成 P0 + P1 两档，目标：让单 Agent 在 macOS/Linux 上的基础体验、状态管理、任务循环达到「无 P0 bug、可稳定长时间运行」。执行看板：[`agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)。
 
 核心方向（对应 P0-P1 十六个顶层任务）：
 1. **基础体验**：bug 修复（VMActor shutdown / 三套管道 / stream timeout / tool loop detection）、工作目录权限分级、工具系统整改、TUI 体验强化、中断/恢复 transcript 完整性、长任务后台化；

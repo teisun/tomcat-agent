@@ -2162,6 +2162,7 @@ dependencies = [
  "globset",
  "ignore",
  "include_dir",
+ "libc",
  "memchr",
  "parking_lot",
  "predicates",

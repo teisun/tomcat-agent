@@ -1,4 +1,7 @@
-use super::super::*;
+use crate::core::tools::contract::confirmation::{
+    AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider,
+};
+use crate::core::tools::primitive::PrimitiveOperation;
 
 #[tokio::test]
 async fn allow_all_returns_true() {

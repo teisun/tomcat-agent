@@ -162,6 +162,8 @@ async fn async_timeout_produces_error() {
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(
@@ -181,12 +183,14 @@ async fn async_timeout_produces_error() {
             _: Option<&str>,
             _: &str,
             _: Option<&[String]>,
+            _: Option<u64>,
         ) -> Result<BashResult, AppError> {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             Ok(BashResult {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(

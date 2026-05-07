@@ -193,11 +193,11 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 
 ### 5.6 落地 TODO
 
-- [x] 将 §5.3 / §5.4 模板同步到 `context-management.md` §7（已通过 [§7.5 Compaction v2 修订](../../openspec/specs/architecture/context-management.md) 简明补充落地，单一事实来源指向 `preheat.rs` 的 `pub(super) const`）
+- [x] 将 §5.3 / §5.4 模板同步到 `context-management.md` §7（已通过 [§7.5 Compaction v2 修订](../../docs/architecture/context-management.md) 简明补充落地，单一事实来源指向 `preheat.rs` 的 `pub(super) const`）
 - [x] 将 `preheat.rs` 中 `SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 与新模板对齐（含 `Recent User Messages` 最近 10 条 + `First reason internally, then output the final summary.`；测试锁点 [`prompt_snapshot.rs`](../../src/core/compaction/tests/prompt_snapshot.rs) 13 用例）
 - [x] Compaction 专用 ChatRequest 中显式 `tools: None`（双保险：模板首行 `Respond with text only. Do not call any tools.` + 请求体不携带 tool schema）
 
-> 落地工作由 plan [`compaction-prompt-9section`](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md) 承接（T2-P0-002 / Phase B），架构 spec 补充见 [`context-management.md` §7.5](../../openspec/specs/architecture/context-management.md)。
+> 落地工作由 plan [`compaction-prompt-9section`](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md) 承接（T2-P0-002 / Phase B），架构 spec 补充见 [`context-management.md` §7.5](../../docs/architecture/context-management.md)。
 
 ### 5.7 明确不做的事项（Anti-goals）
 
@@ -206,13 +206,13 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 | 不做的事 | 来源 | 决议 | 理由 | 回链 |
 |---------|------|------|------|------|
 | **Two-pass `<analysis>` 草稿区** | 本报告 §5.2 第 1 行（已标"不采纳"） | 不实施；模板指令区追加 `First reason internally, then output the final summary.` 做隐式诱导 | CC 走 fork 子代理 + prompt cache 抵消草稿成本；Pi 单次 LLM 直发，多一轮草稿 = 输出 token 翻倍 + 撞 max_tokens 上限，性价比不好 | [§5.7.1 Two-pass 决议固化](#571-two-pass-summary-不实施决议固化关闭-t-044)；TODOS [#T-044](../TODOS.md) |
-| **在 compaction 层对超大单条消息做字符硬截断 + 哨兵** | TODOS [#T-040](../TODOS.md)、[TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) 子项 3 | 不实施 / 关闭归并 | ① compaction 是「读 → 总结 → 写」的二次加工层，**不应兼任输入校验**——若真要限制单条字符，正确位置是在用户输入入口或 LLM 调用 provider 边界，不是 compaction；② 核实代码后发现 [`preheat.rs::messages_to_text`](../../src/core/compaction/preheat.rs) 对 User/Assistant **不做切片**，**不存在字符边界 panic**——原 #T-040 描述把 Layer 0 的 `floor_char_boundary` 风险（已多年稳定）误外推到 messages_to_text；③ 唯一剩余风险（拼出超长 batch_text → LLM 拒绝）由 plan Phase D 的退避 + transcript 失败留痕直接承接，**用户视角是「ratio 高 + 一条 fail entry」，不 panic / 不 abort，可接受**；④ 引入 `truncate_with_sentinel` + 配置项会新增高风险代码（字符边界 panic）+ 新测试 + spec 字段，收益与成本不对称 | plan [§6.C 决议段](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md)；TODOS [#T-040](../TODOS.md) 行尾备注 |
-| **在 compaction 层为多次落盘建立 `_index.jsonl` 合并锚点** | TODOS [#T-043](../TODOS.md)、[TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) 子项 5 | 不实施 / #T-043 改判**归属错位**，已抽出独立任务 [T2-P0-011](../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 承接 | ① **TODO 原始文案错配**——[#T-043](../TODOS.md) 写的是「**更新大文件时应该多次编辑写入**」，最自然读法是「agent 写大文件时偏好多次小 `edit_file` 而不是一次性 overwrite」，归属应在 `src/core/executor/primitives.rs::edit_file`，看板把它分进 compaction 任务（关联模块 `src/core/compaction/`）属分类错配；② **方案是过度发挥**——`_index.jsonl` 这个具体方案是 plan 起草时根据"分块落盘 + 合并锚点"两个词凑出来的，本报告 / `context-management.md` / 任何 spec 都没明确要求过这个文件；③ **价值评估为零**——所提供的全部信息（落盘哪些块 / 时间序 / 原始大小 / 工具名）可由 **transcript 占位符 `[Tool result persisted: {path} ({len} chars)]` + 文件系统 mtime + 文件名（即 `tool_call_id`）** 完全重建；④ **无消费者**——主路径 [`PersistedResult.persisted_path`](../../src/core/compaction/truncation.rs) 直接持文件路径，没有任何代码读 `_index.jsonl`；⑤ 反观成本：~50 行业务 + ~80 行测试 + 1 份新 JSONL schema + spec 一节，收益 / 成本严重失衡 | plan [§6.E 决议段](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md)；TODOS [#T-043](../TODOS.md) T2 映射改判 T2-P0-011；看板 [T2-P0-011 large-file-edit-strategy](../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 任务详情 |
+| **在 compaction 层对超大单条消息做字符硬截断 + 哨兵** | TODOS [#T-040](../TODOS.md)、[T2-P0-002](../../agents/TASK_BOARD_002/tasks/T2-P0-002.md) 子项 3 | 不实施 / 关闭归并 | ① compaction 是「读 → 总结 → 写」的二次加工层，**不应兼任输入校验**——若真要限制单条字符，正确位置是在用户输入入口或 LLM 调用 provider 边界，不是 compaction；② 核实代码后发现 [`preheat.rs::messages_to_text`](../../src/core/compaction/preheat.rs) 对 User/Assistant **不做切片**，**不存在字符边界 panic**——原 #T-040 描述把 Layer 0 的 `floor_char_boundary` 风险（已多年稳定）误外推到 messages_to_text；③ 唯一剩余风险（拼出超长 batch_text → LLM 拒绝）由 plan Phase D 的退避 + transcript 失败留痕直接承接，**用户视角是「ratio 高 + 一条 fail entry」，不 panic / 不 abort，可接受**；④ 引入 `truncate_with_sentinel` + 配置项会新增高风险代码（字符边界 panic）+ 新测试 + spec 字段，收益与成本不对称 | plan [§6.C 决议段](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md)；TODOS [#T-040](../TODOS.md) 行尾备注 |
+| **在 compaction 层为多次落盘建立 `_index.jsonl` 合并锚点** | TODOS [#T-043](../TODOS.md)、[T2-P0-002](../../agents/TASK_BOARD_002/tasks/T2-P0-002.md) 子项 5 | 不实施 / #T-043 改判**归属错位**，已抽出独立任务 [T2-P0-011](../../agents/TASK_BOARD_002/tasks/T2-P0-011.md) 承接 | ① **TODO 原始文案错配**——[#T-043](../TODOS.md) 写的是「**更新大文件时应该多次编辑写入**」，最自然读法是「agent 写大文件时偏好多次小 `edit_file` 而不是一次性 overwrite」，归属应在 `src/core/executor/primitives.rs::edit_file`，看板把它分进 compaction 任务（关联模块 `src/core/compaction/`）属分类错配；② **方案是过度发挥**——`_index.jsonl` 这个具体方案是 plan 起草时根据"分块落盘 + 合并锚点"两个词凑出来的，本报告 / `context-management.md` / 任何 spec 都没明确要求过这个文件；③ **价值评估为零**——所提供的全部信息（落盘哪些块 / 时间序 / 原始大小 / 工具名）可由 **transcript 占位符 `[Tool result persisted: {path} ({len} chars)]` + 文件系统 mtime + 文件名（即 `tool_call_id`）** 完全重建；④ **无消费者**——主路径 [`PersistedResult.persisted_path`](../../src/core/compaction/truncation.rs) 直接持文件路径，没有任何代码读 `_index.jsonl`；⑤ 反观成本：~50 行业务 + ~80 行测试 + 1 份新 JSONL schema + spec 一节，收益 / 成本严重失衡 | plan [§6.E 决议段](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md)；TODOS [#T-043](../TODOS.md) T2 映射改判 T2-P0-011；看板 [T2-P0-011](../../agents/TASK_BOARD_002/tasks/T2-P0-011.md) 任务详情 |
 
 **反向逃生口**：
 - 若线上观测到「LLM `context_length_exceeded` 因超长 Assistant/User 消息触发」频率显著（例如 > 1%），单开 ticket 在 Phase D 的失败留痕路径之上加一道 batch_text 长度预检（短路浪费的 3 次 retry），改动 < 5 行，**与本报告 / 当前 plan 解耦**。
 - 若将来真要做"按时间序可视化落盘历史"功能（例如 debug 工具），单开 ticket 加一份独立 `_index.jsonl`（< 30 行），**与本报告 / 当前 plan 解耦**。
-- `#T-043` 的原始诉求（agent 写大文件时偏好多次 `edit_file`）由独立任务 [T2-P0-011 large-file-edit-strategy](../../agents/TASK_BOARD_002.md#t2-p0-011--large-file-edit-strategy--大文件编辑策略) 承接（system prompt 引导 / `write_file` 大字符串 hint / tool description 增强 三选一或组合，由计划阶段决定，与 compaction 解耦）。
+- `#T-043` 的原始诉求（agent 写大文件时偏好多次 `edit_file`）由独立任务 [T2-P0-011 large-file-edit-strategy](../../agents/TASK_BOARD_002/tasks/T2-P0-011.md) 承接（system prompt 引导 / `write_file` 大字符串 hint / tool description 增强 三选一或组合，由计划阶段决定，与 compaction 解耦）。
 
 #### 5.7.1 Two-pass summary 不实施决议固化（关闭 [#T-044](../TODOS.md)）
 
@@ -245,7 +245,7 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 
 **关闭轨迹**：
 
-- [`docs/TODOS.md`](../TODOS.md) 中 `#T-044` 的状态/备注同步标注为「**报告决议关闭**：详见 `compaction-prompt-cc-vs-pi.md §5.7.1`」（已于 2026-04-26 在 [TASK_BOARD_002.md §6 变更记录](../../agents/TASK_BOARD_002.md) 同日 entry 落档）。
+- [`docs/TODOS.md`](../TODOS.md) 中 `#T-044` 的状态/备注同步标注为「**报告决议关闭**：详见 `compaction-prompt-cc-vs-pi.md §5.7.1`」（已于 2026-04-26 在看板侧落档；详见 **Git 历史**）。
 - plan [`compaction_prompt_9-section_41653219.plan.md` §6.A](../../../.cursor/plans/compaction_prompt_9-section_41653219.plan.md) 的 `impl-A-adr-two-pass` 子项指向本节，作为决议落地凭证。
 
 ---
@@ -257,6 +257,6 @@ Use the EXACT same format as the original summary (Goal / Constraints & Preferen
 | CC 摘要 prompt | `cc-fork-01/src/services/compact/prompt.ts` |
 | CC 上下文总览 | `cc-fork-01/docs/CONTEXT_MANAGEMENT.md` |
 | Pi 运行时 prompt | `pi-rust-wasm/src/core/compaction/summary.rs` |
-| Pi 规格模板 | `pi-rust-wasm/openspec/specs/architecture/context-management.md` §7 |
+| Pi 规格模板 | `pi-rust-wasm/docs/architecture/context-management.md` §7 |
 
 

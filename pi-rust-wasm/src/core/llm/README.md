@@ -25,7 +25,7 @@
 
 装配入口：**`crate::core::llm::resolve_llm(&config.llm)`**（例如 `ChatContext::from_config`）。未知 id 返回 **`AppError::Config`** 并列出已注册 id。
 
-详见 openspec **[`architecture/llm-multiprovider-integration.md`](../../../openspec/specs/architecture/llm-multiprovider-integration.md)**。
+详见 openspec **[`architecture/llm-multiprovider-integration.md`](../../../docs/architecture/llm-multiprovider-integration.md)**。
 
 ### 1.2 LLM 调用路径（ASCII）
 
@@ -75,7 +75,7 @@
 
 > **PR-RJ-0 重构**：`image_b64` / `file_b64` 已统一为 `(mime, &Path)` 签名，让 helper 自己读盘 + base64，避免「`read` 工具读一遍 + LLM 客户端再读一遍」的重复 IO 与重复校验。已知 `file_id` 通道（B）保持不变。
 
-> **「读字节 → 上传 → 拿 file_id」一站式 helper 不在本期**：归到独立任务 **T2-P0-013 | llm-files-upload-manager**（multipart `POST /v1/files` 客户端 + 生命周期 + reuse cache + 异步 helper），见 [`agents/TASK_BOARD_002.md`](../../../agents/TASK_BOARD_002.md) §T2-P0-013。
+> **「读字节 → 上传 → 拿 file_id」一站式 helper 不在本期**：归到独立任务 **T2-P0-015 | llm-files-upload-manager**（multipart `POST /v1/files` 客户端 + 生命周期 + reuse cache + 异步 helper），见 [`agents/TASK_BOARD_002/tasks/T2-P0-015.md`](../../../agents/TASK_BOARD_002/tasks/T2-P0-015.md)。
 
 ### 最小调用示例
 

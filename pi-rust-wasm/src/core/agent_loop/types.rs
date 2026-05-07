@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
+use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
-use crate::core::tools::read_state::ReadFileState;
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
@@ -161,6 +161,13 @@ pub struct AgentLoop {
     /// CLI / 单测路径继续传 `None`，工具命中时返回"未启用"错误（不影响
     /// 4 原语的 execute_tool 主流程）。
     pub(super) config_backend: Option<super::config_backend::SharedConfigBackend>,
+    /// T2-P0-016 PR-I：bash 后台任务三件套（task_output / task_stop / task_list）
+    /// 共享的注册表。注入路径：`ChatContext::from_config` 用 `agent_trail_dir/tool-results`
+    /// 作 persist_dir 构造一份 `Arc<BashTaskRegistry>`，通过
+    /// [`AgentLoop::with_bash_task_registry`] 设入；CLI / 单测路径继续传 `None`，
+    /// `bash run_in_background=true` / `task_*` 命中时返回「未启用」错误，
+    /// 同步 `bash` 路径不受影响。
+    pub(super) bash_task_registry: Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     pub(super) follow_up_queue: Arc<Mutex<Vec<ChatMessage>>>,

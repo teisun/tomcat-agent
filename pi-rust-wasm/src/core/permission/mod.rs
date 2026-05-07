@@ -14,12 +14,18 @@
 //!
 //! 调用方仅依赖 [`PermissionGate`] trait + 类型即可（PR-2 起 executor 接入）。
 
+pub mod bash_ast;
 pub mod bash_parser;
 pub mod defaults;
 pub mod gate;
 pub mod path_rule;
 pub mod session_grants;
 pub mod types;
+
+pub use bash_ast::{
+    AstReject, AstSegmentVerdict, BashAstChecker, BashSegment, NoopSandboxBackend, PersistentShell,
+    SandboxBackend, ToolsBashAstConfig,
+};
 
 pub use defaults::{
     builtin_default_rules, BUILTIN_BASH_APPROVAL_REQUIRED, BUILTIN_BASH_FORBIDDEN,

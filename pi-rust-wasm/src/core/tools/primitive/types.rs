@@ -18,6 +18,14 @@ pub struct DirEntry {
 pub struct WriteFileResult {
     pub path: String,
     pub written: bool,
+    /// T2-P0-016 PR-G：实际写入磁盘的字节数（已含 LF 规范化）。
+    /// 为兼容历史调用方默认 `0`；编排层可据此渲染回执。
+    #[serde(default)]
+    pub bytes_written: u64,
+    /// T2-P0-016 PR-G：覆盖写时的 unified-style diff 摘要（相对写前快照），
+    /// 新建文件场景为 `None`；同样为兼容默认 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,13 +35,26 @@ pub struct EditFileResult {
     pub applied: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashResult {
     pub stdout: String,
     pub stderr: String,
     #[serde(rename = "code")]
     pub exit_code: i32,
+    /// T2-P0-016 PR-E.3：墙钟超时被 kill 时为 `true`；正常退出 / 立即结束为 `false`。
+    /// 历史 mock / 第三方 PrimitiveExecutor 反序列化兼容：缺省 `false`。
+    #[serde(default)]
+    pub timed_out: bool,
+    /// T2-P0-016 PR-E.3：原始 stdout / stderr 字符数超过 `[tools.bash].max_output_chars`
+    /// 上限被 [`crate::core::tools::primitive::executor::output_accum`] 头尾截断时为 `true`。
+    #[serde(default)]
+    pub truncated: bool,
+    /// T2-P0-016 PR-E.3：当 `truncated=true` 且配置了 `bash_persist_dir` 时，指向
+    /// `~/.pi_/agents/<id>/tool-results/<prefix>-<unix_ms>-<rand6>.txt`（合并后的完整原文）。
+    /// LLM 收到回执后可用 `read` 工具按需取回完整原文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_output_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -160,6 +181,59 @@ pub enum EditOperationType {
     Delete,
 }
 
+/// 解析后的 hashline_edit 段（T2-P0-017 Phase3 / PR-M）。
+///
+/// `tool_exec` 在调用 `PrimitiveExecutor::hashline_edit` 之前把 JSON
+/// `{ op, pos, end?, lines }` 解析成本结构。算法见 [`crate::core::tools::primitive::executor::hashline_edit`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashlineSegment {
+    pub op: HashlineOp,
+    pub start_line: u64,
+    pub start_hash: String,
+    pub end_line: u64,
+    pub end_hash: String,
+    pub lines: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HashlineOp {
+    Replace,
+    Insert,
+    Delete,
+}
+
+impl HashlineSegment {
+    /// 解析 `<line_no>#<2char>` 锚点；非法格式 → 结构化错误。
+    pub fn parse_anchor(s: &str, ctx_idx: usize, field: &str) -> Result<(u64, String), AppError> {
+        let (line_str, hash_str) = s.split_once('#').ok_or_else(|| {
+            AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 锚点格式应为 `<line>#<2char>`，实际 `{}`",
+                ctx_idx, field, s
+            ))
+        })?;
+        let line_no: u64 = line_str.trim().parse().map_err(|_| {
+            AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 行号 `{}` 不是有效正整数",
+                ctx_idx, field, line_str
+            ))
+        })?;
+        if line_no == 0 {
+            return Err(AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 行号必须 ≥ 1",
+                ctx_idx, field
+            )));
+        }
+        let hash = hash_str.trim().to_string();
+        if hash.chars().count() != 2 {
+            return Err(AppError::Primitive(format!(
+                "hashline_edit: edits[{}].{} 哈希应为 2 字符，实际 `{}`",
+                ctx_idx, field, hash
+            )));
+        }
+        Ok((line_no, hash))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum PrimitiveOperation {
@@ -251,7 +325,7 @@ impl ReadResult {
                 b.original_size
             ),
             ReadResult::FileUnchanged { .. } => {
-                crate::core::tools::read_state::FILE_UNCHANGED_STUB.to_string()
+                crate::core::tools::pipeline::read_state::FILE_UNCHANGED_STUB.to_string()
             }
         }
     }
@@ -272,7 +346,7 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
     ///   的完整读」），让现有 mock / 旧 PrimitiveExecutor 实现 **零改动** 升级；
     /// - [`super::executor::DefaultPrimitiveExecutor`] 重写本方法为分块流式
     ///   单循环抽窗 + 25 MiB metadata 上限 + 二进制 hint（详见
-    ///   `openspec/specs/architecture/tools/read.md` §2.1–§2.5）。
+    ///   `docs/architecture/tools/read.md` §2.1–§2.5）。
     ///
     /// 入参语义：
     /// - `offset`：1-based 起始行号；`None` 等价于 `Some(1)`；
@@ -328,15 +402,38 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError>;
+    /// T2-P0-017 Phase3 / PR-M：行级强一致编辑。**默认实现** 返回 `Unsupported` 错误，
+    /// 让 mock / 简化 executor 不必实现；生产路径由 `DefaultPrimitiveExecutor` 覆盖。
+    ///
+    /// 入参为已解析的 [`crate::core::tools::primitive::executor::hashline_edit::HashlineSegment`]
+    /// 列表（`tool_exec` 入口处解析 JSON）。
+    async fn hashline_edit(
+        &self,
+        _path: &str,
+        _segments: Vec<HashlineSegment>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        Err(AppError::Primitive(
+            "hashline_edit is not implemented by this PrimitiveExecutor".to_string(),
+        ))
+    }
     /// 执行 bash/进程。
     /// - `argv` 为 `None`：`command` 视为完整 shell 命令（经 `sh -c` / `cmd /C`）。
     /// - `argv` 为 `Some`：`command` 为可执行文件名，`argv` 为其参数列表（不经 shell，与 pi-mono `exec(cmd, args)` 对齐）。
+    /// - `timeout_ms`（T2-P0-016 PR-E）：墙钟超时（毫秒）；`None` 时使用
+    ///   `[tools.bash].timeout_ms`（默认 120_000）。`tool_exec` 入口已按
+    ///   [`crate::infra::config::types::MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000 clamp，
+    ///   trait 实现侧再做一次防御性 clamp。`DefaultPrimitiveExecutor` 用
+    ///   `tokio::time::timeout(..., child.wait())` 包裹等待；超时分支对 `Child` 调用
+    ///   `kill` 并 `wait` 收口，避免 `wait_with_output` 反模式（bash.md §2.4.3 / §6.2 / §9.2）。
+    ///   旧 mock / 第三方 PrimitiveExecutor 实现可忽略此参数（默认行为不变）。
     async fn execute_bash(
         &self,
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
         argv: Option<&[String]>,
+        timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError>;
     async fn require_user_confirmation(
         &self,

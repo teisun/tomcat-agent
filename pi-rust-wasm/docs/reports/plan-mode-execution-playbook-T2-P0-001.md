@@ -2,7 +2,7 @@
 
 > 本报告复盘 2026-04-24 在 Cursor PLAN 模式下为 `T2-P0-001 | agent-loop-modularization` 制定开发计划的真实执行流程，提炼为可复用的执行手册。
 >
-> 读者对象：后续承接 [TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) 其它任务的工程师 Agent（Tom / Jerry / Spike），以及希望理解 Cursor PLAN 模式底层约束与最佳实践的研发人员。
+> 读者对象：后续承接 [TASK_BOARD_002 看板](../../agents/TASK_BOARD_002/README.md)（单卡 `tasks/T2-*.md`）其它任务的工程师 Agent（Tom / Jerry / Spike），以及希望理解 Cursor PLAN 模式底层约束与最佳实践的研发人员。
 >
 > 案例计划产物：`~/.cursor/plans/agent-loop-modularization_e99e067f.plan.md`
 
@@ -38,7 +38,7 @@
 
 - [agents/Jerry.md](../../agents/Jerry.md) — 角色能力边界
 - [agents/Dispatcher.md](../../agents/Dispatcher.md) — 领任务 → 读上下文 → 制定计划 → 开发 → 完成的 6 步流程
-- [agents/TASK_BOARD_002.md](../../agents/TASK_BOARD_002.md) — 整个迭代看板 + T2-P0-001 任务细节
+- [agents/TASK_BOARD_002/README.md](../../agents/TASK_BOARD_002/README.md) + [tasks/T2-P0-001.md](../../agents/TASK_BOARD_002/tasks/T2-P0-001.md) — 迭代索引与 T2-P0-001 任务细节
 
 **产出**：确认任务 ID `T2-P0-001`、优先级 P0、分支名 `feature/agent-loop-split`、看板列出的 **7 条子项** 与 **4 条验收标准**。
 
@@ -393,7 +393,7 @@ L1 决定 **"怎么走"**（流程与工具），L2 决定 **"走完要交什么
 - [PLAN_SPEC.md 全文](../../agents/plan/PLAN_SPEC.md)
 - [PLAN_SKELETON.md 一屏骨架](../../agents/plan/PLAN_SKELETON.md)
 - [INTEGRATION_MERGE_AND_ACCEPTANCE.md § 4 全量门禁](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md)
-- [TASK_BOARD_002.md § T2-P0-001](../../agents/TASK_BOARD_002.md)
+- [tasks/T2-P0-001.md](../../agents/TASK_BOARD_002/tasks/T2-P0-001.md)
 - [RUST_FILE_LINES_SPEC.md § A 测试分离](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
 - 历史计划范例：[PLAN_EXAMPLE_TASK21.md](../../agents/plan/PLAN_EXAMPLE_TASK21.md)
 - 本案例计划产物：`~/.cursor/plans/agent-loop-modularization_e99e067f.plan.md`（用户环境本地）

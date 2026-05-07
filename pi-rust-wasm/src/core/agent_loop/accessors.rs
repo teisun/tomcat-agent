@@ -49,6 +49,7 @@ impl AgentLoop {
             primitive,
             event_bus,
             config_backend: None,
+            bash_task_registry: None,
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
@@ -70,6 +71,17 @@ impl AgentLoop {
         self
     }
 
+    /// T2-P0-016 PR-I：注入 bash 后台任务注册表，启用
+    /// `bash run_in_background=true` / `task_output` / `task_stop` / `task_list`
+    /// 四件套；不调用此方法时上述工具命中返回「未启用」错误，同步 `bash` 不受影响。
+    pub fn with_bash_task_registry(
+        mut self,
+        registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
+    ) -> Self {
+        self.bash_task_registry = Some(registry);
+        self
+    }
+
     /// 测试用：注入 steering_queue，便于 mock 在工具执行中推入 steering 消息。
     #[cfg(test)]
     pub fn new_with_steering_queue(
@@ -85,6 +97,7 @@ impl AgentLoop {
             primitive,
             event_bus,
             config_backend: None,
+            bash_task_registry: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_queue,

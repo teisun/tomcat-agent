@@ -136,13 +136,17 @@ pub struct ChatContext {
     /// `config_get` / `config_set` LLM 工具后端（plan §6 / PR-7）。
     /// 为 `None` 时工具命中返回"未启用"错误，正常 4 原语 / chat 流程不受影响。
     pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
+    /// T2-P0-016 PR-I：bash 后台任务三件套（task_output / task_stop / task_list）的
+    /// 共享注册表；落盘根目录 = `<agent_trail_dir>/tool-results/`。每个 ChatContext
+    /// 单实例，跨 turn 内复用。
+    pub bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 路径授权 UI
     /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
     /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 状态。
     /// 由 `ChatContext` 持有 → 每次 turn 创建 `AgentLoopConfig` 时 `Arc::clone` 注入，
     /// 多轮 turn 内复用同一张表（实现「同 session 跨 turn dedup」）。
-    pub read_file_state: Arc<crate::core::tools::read_state::ReadFileState>,
+    pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
 }
 
 impl ChatContext {
@@ -220,24 +224,30 @@ impl ChatContext {
             ));
 
         let _ = workspace_roots; // 已通过 GateConfig.workspace_roots 落入 gate；executor 不再单独保存。
-        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DefaultPrimitiveExecutor::new(
-            config.primitive.clone(),
-            confirmation.clone(),
-            audit.clone(),
-            gate.clone(),
-        ));
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
+            DefaultPrimitiveExecutor::new(
+                config.primitive.clone(),
+                confirmation.clone(),
+                audit.clone(),
+                gate.clone(),
+            )
+            // T2-P0-016 PR-G：把 `[tools.write] normalize_crlf` 注入 executor。
+            .with_write_normalize_crlf(config.tools.write.normalize_crlf),
+        );
 
         // PR-7：构造 config_get / config_set 工具后端。失败（无法解析 config_path）
         // 时降级为 `None`，工具命中返回"未启用"错误，主流程不阻塞。
         let config_backend: Option<crate::core::agent_loop::SharedConfigBackend> =
             match crate::api::cli::config_file_path() {
-                Ok(p) => Some(Arc::new(crate::core::tools::config::ChatConfigBackend {
-                    ctx: crate::core::tools::config::ConfigToolContext::new(
-                        p,
-                        confirmation.clone(),
-                    )
-                    .with_gate(gate.clone()),
-                })),
+                Ok(p) => Some(Arc::new(
+                    crate::core::tools::config_tool::ChatConfigBackend {
+                        ctx: crate::core::tools::config_tool::ConfigToolContext::new(
+                            p,
+                            confirmation.clone(),
+                        )
+                        .with_gate(gate.clone()),
+                    },
+                )),
                 Err(_) => None,
             };
 
@@ -248,6 +258,12 @@ impl ChatContext {
         let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
         let last_interrupt_at = Arc::new(Mutex::new(None));
+
+        // T2-P0-016 PR-I：bash 后台任务注册表；persist_dir 与 PR-E.3 同盘——
+        // `<agent_trail_dir>/tool-results/` 既装超时/超长输出落盘，也装后台任务日志。
+        let bash_task_registry = Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+            agent_trail_dir.join("tool-results"),
+        ));
 
         Ok(Self {
             session,
@@ -264,8 +280,11 @@ impl ChatContext {
             cfg_path: cfg_path_snapshot,
             session_grants,
             config_backend,
+            bash_task_registry,
             gate,
-            read_file_state: Arc::new(crate::core::tools::read_state::ReadFileState::default()),
+            read_file_state: Arc::new(
+                crate::core::tools::pipeline::read_state::ReadFileState::default(),
+            ),
         })
     }
 
@@ -280,8 +299,8 @@ impl ChatContext {
 
 // ─── CLI UserConfirmationProvider ─────────────────────────────────────────────
 
+use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
-use crate::core::tools::primitive::{ConfirmDecision, UserConfirmationProvider};
 
 pub struct CliConfirmation;
 
@@ -390,7 +409,7 @@ impl ToolExecutor for NoopToolExecutor {
 // ─── Tool definitions for LLM ─────────────────────────────────────────────────
 
 fn build_tool_definitions() -> Vec<serde_json::Value> {
-    crate::core::tools::catalog::build_function_definitions()
+    crate::core::tools::contract::catalog::build_function_definitions()
 }
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────
@@ -666,6 +685,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         if let Some(backend) = ctx.config_backend.clone() {
             agent_loop = agent_loop.with_config_backend(backend);
         }
+        // T2-P0-016 PR-I：注入 bash 后台任务注册表，启用 task_* 三件套。
+        agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
         agent_loop.set_context_state(Some(context_state));
 
         let renderer_clone = Arc::clone(&renderer);

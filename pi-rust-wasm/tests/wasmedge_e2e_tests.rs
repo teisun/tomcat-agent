@@ -1476,6 +1476,8 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(
@@ -1495,6 +1497,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
             _cwd: Option<&str>,
             _: &str,
             argv: Option<&[String]>,
+            _: Option<u64>,
         ) -> Result<BashResult, pi_wasm::AppError> {
             if cmd == "git" {
                 if let Some(args) = argv {
@@ -1503,6 +1506,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
                             stdout: " M src/main.rs\n?? new_file.txt\n".to_string(),
                             stderr: String::new(),
                             exit_code: 0,
+                            ..Default::default()
                         });
                     }
                 }
@@ -1511,6 +1515,7 @@ async fn test_wasmedge_e2e_tier3_diff_real_ts() -> Result<(), Box<dyn std::error
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(
@@ -1947,6 +1952,8 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(
@@ -1966,6 +1973,7 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
             _: Option<&str>,
             _: &str,
             argv: Option<&[String]>,
+            _: Option<u64>,
         ) -> Result<BashResult, pi_wasm::AppError> {
             if cmd == "git" {
                 if let Some(args) = argv {
@@ -1974,6 +1982,7 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
                             stdout: " M src/main.rs\n?? new.txt\n".into(),
                             stderr: String::new(),
                             exit_code: 0,
+                            ..Default::default()
                         });
                     }
                 }
@@ -1982,6 +1991,7 @@ async fn test_e2e_community_diff() -> Result<(), Box<dyn std::error::Error>> {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(

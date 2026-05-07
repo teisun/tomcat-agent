@@ -1,26 +1,34 @@
 //! # Agent Loop 工具执行子模块
 //!
 //! 职责单一：把 `ToolCallInfo` 解析为具体 primitive 调用，返回 `(content, is_error)`。
-//! 7 分支（read / write_file / edit_file / execute_bash / list_dir /
+//! 7 分支（read / write / edit / bash / list_dir /
 //! 未知工具 / 参数解析失败）逐字搬自 `run.rs`，**不依赖 `AgentLoop`**——
+//! 旧名 `execute_bash` **不**做运行时 fallback（与 read / write / edit 同口径）：
+//! transcript 旧名由 `session::manager::context::warn_if_legacy_tool_name` 加载时
+//! 一次性 `tracing::warn!`，新一轮 LLM 调用旧名走 `unknown` 分支。
 //!
-//! ## 命名切换（PR-RA）
+//! ## 命名切换（PR-RA / T2-P0-016 / T2-P0-017 PR-命名）
 //!
-//! 工具名 `read_file` 已弃用，改为短名 `read`（与 pi-mono / cc-fork 短名生态对齐）。
-//! 运行时**无别名 / 无重定向**：调用 `read_file` 走 `unknown` 分支，等同拼错工具名。
-//! transcript 中的旧 `read_file` 调用由 `session::manager::context` 在加载时
+//! 工具名 `read_file` / `write_file` / `edit_file` 已弃用，改为短名
+//! `read` / `write` / `edit`（与 pi-mono / cc-fork 短名生态对齐）。
+//! 运行时**无别名 / 无重定向**：调用旧名走 `unknown` 分支，等同拼错工具名。
+//! transcript 中的旧名调用由 `session::manager::context` 在加载时统一
 //! `tracing::warn!`，但**不**重写，老对话只是历史记录。
 //! 只接 `&Arc<dyn PrimitiveExecutor>` + `&ToolCallInfo`，便于独立单测。
 //!
 //! ## 语义约定
 //!
-//! - `write_file` / `edit_file` 的"应用层拒绝"（`written=false` / `applied=false`）
-//!   **不是错误**：`is_error` 保持 `false`，返回文案以"写入被拒绝" / "编辑被拒绝"
-//!   开头，与原语义严格一致。
+//! - **`edit`** 的"应用层拒绝"（`applied=false`）**不是错误**：`is_error` 保持
+//!   `false`，返回文案以"编辑被拒绝"开头，与原语义严格一致。
+//! - **`write`**（T2-P0-016 PR-C）的 **策略拒绝**（`Exists` / `NoPriorRead` /
+//!   `Stale`）**是错误**：`is_error: true`，与 `Stale` 在 `edit` 中的处理一致，
+//!   避免模型把策略拒绝当成功 tool 结果。primitive 内 `written=false` 已作为
+//!   `AppError::Tool` 早退；本编排层不再产生 `written=false` 文本。
 //! - 未知工具名、参数 JSON 解析失败 → `is_error = true`。
-//! - `execute_bash` 的失败通过 `PrimitiveExecutor::execute_bash` 的 `Result::Err`
-//!   传出；`exit_code != 0` 本身**不**置 `is_error`（与原行为一致，保留给下游
-//!   LLM 自行判断）。
+//! - `bash` 的失败通过 `PrimitiveExecutor::execute_bash` 的 `Result::Err` 传出
+//!   （**trait 方法名**保留 `execute_bash`，与 `write_file` / `edit_file` 同形；
+//!   仅 LLM 可见的工具名为短名 `bash`）；`exit_code != 0` 本身**不**置
+//!   `is_error`（与原行为一致，保留给下游 LLM 自行判断）。
 //!
 //! ## `AGENT_PLUGIN_ID`
 //!
@@ -31,7 +39,7 @@
 use std::sync::Arc;
 
 use crate::core::tools::primitive::{
-    EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
+    BashTaskRegistry, EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
 };
 use crate::infra::error::AppError;
 
@@ -52,7 +60,8 @@ pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
 pub(super) async fn execute_tool(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
-    read_file_state: Option<&Arc<crate::core::tools::read_state::ReadFileState>>,
+    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
+    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     tc: &ToolCallInfo,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
@@ -98,9 +107,9 @@ pub(super) async fn execute_tool(
                 if meta.is_dir() {
                     return None;
                 }
-                let mtime = crate::core::tools::read_state::metadata_mtime_ms(&meta);
+                let mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
                 if stamp.matches_request(mtime, meta.len(), offset, limit) {
-                    Some(crate::core::tools::read_state::FILE_UNCHANGED_STUB.to_string())
+                    Some(crate::core::tools::pipeline::read_state::FILE_UNCHANGED_STUB.to_string())
                 } else {
                     None
                 }
@@ -139,10 +148,14 @@ pub(super) async fn execute_tool(
                             }
                             crate::core::tools::primitive::ReadResult::FileUnchanged { .. } => &[],
                         };
-                        let stamp = crate::core::tools::read_state::ReadStamp {
-                            mtime_ms: crate::core::tools::read_state::metadata_mtime_ms(&meta),
+                        let stamp = crate::core::tools::pipeline::read_state::ReadStamp {
+                            mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(
+                                &meta,
+                            ),
                             size: meta.len(),
-                            content_hash: crate::core::tools::read_state::hash_content(hash_input),
+                            content_hash: crate::core::tools::pipeline::read_state::hash_content(
+                                hash_input,
+                            ),
                             offset,
                             limit,
                             is_partial_view: offset.is_some() || limit.is_some(),
@@ -194,46 +207,112 @@ pub(super) async fn execute_tool(
                 Err(e) => Err(e.to_string()),
             }
         }
-        "write_file" => {
+        // T2-P0-016 PR-C：write 编排层硬门禁
+        //   - `resolved` 由 `normalize_path` 派生（与 read 分支 L98 / L154 同形 key）；
+        //   - `exists && !overwrite` → `Exists`（`is_error: true`，与 `Stale` 一致）；
+        //   - `exists && overwrite` → 走 `check_mutation_stamp` 强拒 NoPriorRead / Stale；
+        //   - 任何成功写盘 → `state.invalidate(&resolved)`，避免下一轮 read 误命中
+        //     `FILE_UNCHANGED` 撒谎（write.md §6.1 / §6.2）。
+        //   - primitive 内 `write_file_impl` 还有一道 `exists && !overwrite` 二道防线，
+        //     防止 trait 直调（dispatcher / extension）绕过本编排（write.md §3.4.2）。
+        "write" => {
             let path = args["path"].as_str().unwrap_or("");
             let content = args["content"].as_str().unwrap_or("");
             let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-            primitive
+            let resolved = crate::infra::platform::normalize_path(path)
+                .unwrap_or_else(|_| std::path::PathBuf::from(path));
+            let exists = resolved.exists();
+            if exists && !overwrite {
+                return (
+                    format!(
+                        "Exists: 路径 `{}` 已存在；如需替换请先 `read` 该文件，然后再用 `overwrite=true` 调用 `write`",
+                        path
+                    ),
+                    true,
+                    Vec::new(),
+                );
+            }
+            if exists && overwrite {
+                if let Some(state) = read_file_state {
+                    if let Err(msg) = check_mutation_stamp(state, path, "write") {
+                        return (msg, true, Vec::new());
+                    }
+                }
+            }
+            let result = primitive
                 .write_file(path, content, overwrite, AGENT_PLUGIN_ID)
-                .await
-                .map(|r| {
+                .await;
+            match result {
+                Ok(r) => {
+                    if let Some(state) = read_file_state {
+                        // 写后失效：与 read 同形 key（不再额外 canonicalize），无 key 时是 no-op。
+                        state.invalidate(&resolved);
+                    }
                     if r.written {
-                        format!("已写入: {}", r.path)
+                        // PR-G 回执：created/updated + 字节数 + 可选 diff 摘要。
+                        let verb = if r.diff_hint.is_some() {
+                            "已覆盖"
+                        } else {
+                            "已写入"
+                        };
+                        let mut msg = format!("{}: {} ({} bytes)", verb, r.path, r.bytes_written);
+                        if let Some(diff) = r.diff_hint.as_ref() {
+                            if !diff.is_empty() {
+                                msg.push_str("\n--- diff (truncated)\n");
+                                msg.push_str(diff);
+                            }
+                        }
+                        Ok(msg)
                     } else {
-                        format!("写入被拒绝: {}", r.path)
+                        // PR-C 之后 primitive 走 Err 早退，理论上不再出现 written=false；
+                        // 保留这条文案兜底（dispatcher / extension 直调）。
+                        Ok(format!("写入被拒绝: {}", r.path))
                     }
-                })
-                .map_err(|e| e.to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            }
         }
-        "edit_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let old_content = args["old_content"].as_str().unwrap_or("");
-            let new_content = args["new_content"].as_str().unwrap_or("");
-            let edits = vec![EditOperation {
-                operation_type: EditOperationType::Replace,
-                start_line: None,
-                end_line: None,
-                old_content: Some(old_content.to_string()),
-                new_content: new_content.to_string(),
-            }];
-            primitive
-                .edit_file(path, edits, AGENT_PLUGIN_ID)
-                .await
-                .map(|r| {
-                    if r.applied {
-                        format!("已编辑: {}", r.path)
-                    } else {
-                        format!("编辑被拒绝: {}", r.path)
+        // T2-P0-017 Phase1（PR-命名 + PR-D）：
+        //   - 短名 `edit`（旧 `edit_file` 走 unknown 分支；transcript warn 在 session/manager/context.rs）
+        //   - oneOf 入参（A: 顶层 old/new；B: edits[]）；同时存在时 `edits` 优先
+        //   - staleness：与 `read` 共用 `ReadFileState`，mtime+size 与 stamp 不一致 → `Stale`
+        //   - 多段语义在 primitive (`write_edit::edit_file_impl`) 中对原文快照一次应用 + 重叠检测
+        //   - `NoPriorRead`（无 stamp 时是否硬拒）与 T2-P0-016 write 同 PR 锁；本 Phase 不单边强拒
+        "edit" => match parse_edit_args(&args) {
+            Err(msg) => Err(msg),
+            Ok((path, edits)) => {
+                // PR-H：`.ipynb` 在 primitive 之前直接拒，避免读盘 / 占位 .bak。
+                if crate::core::tools::pipeline::edit_normalize::is_unsupported_structured_file(
+                    path,
+                ) {
+                    return (
+                        format!(
+                            "Notebook: `{}` 是 Jupyter 笔记本（.ipynb），edit 不支持；请使用专用 nbformat 工具或先把目标 cell 导出为 .py / .md 再 edit",
+                            path
+                        ),
+                        true,
+                        Vec::new(),
+                    );
+                }
+                if let Some(state) = read_file_state {
+                    if let Err(stale_msg) = check_mutation_stamp(state, path, "edit") {
+                        return (stale_msg, true, Vec::new());
                     }
-                })
-                .map_err(|e| e.to_string())
-        }
-        "execute_bash" => {
+                }
+                primitive
+                    .edit_file(path, edits, AGENT_PLUGIN_ID)
+                    .await
+                    .map(|r| {
+                        if r.applied {
+                            format!("已编辑: {}", r.path)
+                        } else {
+                            format!("编辑被拒绝: {}", r.path)
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
+        },
+        "bash" => {
             let command = args["command"].as_str().unwrap_or("");
             let cwd = args["cwd"].as_str();
             let argv_store: Option<Vec<String>> =
@@ -243,26 +322,47 @@ pub(super) async fn execute_tool(
                         .collect()
                 });
             let argv_ref = argv_store.as_deref();
-            primitive
-                .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref)
-                .await
-                .map(|r| {
-                    let mut out = String::new();
-                    if !r.stdout.is_empty() {
-                        out.push_str(&r.stdout);
-                    }
-                    if !r.stderr.is_empty() {
-                        if !out.is_empty() {
-                            out.push('\n');
+            // T2-P0-016 PR-E.2：解析 schema `timeout_ms`，clamp 到 [1, MAX_TOOLS_BASH_TIMEOUT_MS]
+            // 后传给 primitive；None / 0 / 越界一律由 primitive 兜底为 config 默认。
+            let timeout_ms_override: Option<u64> = args
+                .get("timeout_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.min(crate::infra::MAX_TOOLS_BASH_TIMEOUT_MS));
+            let run_in_background = args
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // T2-P0-016 PR-I：run_in_background=true 走后台注册表，立即返回 ticket；
+            // 同步路径完全不变（PR-E 行为）。
+            if run_in_background {
+                handle_bash_background(bash_task_registry, command, cwd, argv_store).await
+            } else {
+                primitive
+                    .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref, timeout_ms_override)
+                    .await
+                    .map(|r| {
+                        let mut out = String::new();
+                        if !r.stdout.is_empty() {
+                            out.push_str(&r.stdout);
                         }
-                        out.push_str("STDERR: ");
-                        out.push_str(&r.stderr);
-                    }
-                    out.push_str(&format!("\n(exit code: {})", r.exit_code));
-                    out
-                })
-                .map_err(|e| e.to_string())
+                        if !r.stderr.is_empty() {
+                            if !out.is_empty() {
+                                out.push('\n');
+                            }
+                            out.push_str("STDERR: ");
+                            out.push_str(&r.stderr);
+                        }
+                        out.push_str(&format!("\n(exit code: {})", r.exit_code));
+                        out
+                    })
+                    .map_err(|e| e.to_string())
+            }
         }
+        // T2-P0-016 PR-I：bash 后台任务三件套；未注入 registry 时返回友好错误，
+        // 主流程不阻塞（与 config_get / config_set 「未启用」语义一致）。
+        "task_output" => handle_task_output(bash_task_registry, &args).await,
+        "task_stop" => handle_task_stop(bash_task_registry, &args).await,
+        "task_list" => handle_task_list(bash_task_registry).await,
         "list_dir" => {
             let path = args["path"].as_str().unwrap_or("");
             primitive
@@ -283,6 +383,27 @@ pub(super) async fn execute_tool(
                 })
                 .map_err(|e| e.to_string())
         }
+        "hashline_edit" => match parse_hashline_edit_args(&args) {
+            Err(msg) => Err(msg),
+            Ok((path, segments)) => {
+                if let Some(state) = read_file_state {
+                    if let Err(stale_msg) = check_mutation_stamp(state, path, "edit") {
+                        return (stale_msg, true, Vec::new());
+                    }
+                }
+                primitive
+                    .hashline_edit(path, segments, AGENT_PLUGIN_ID)
+                    .await
+                    .map(|r| {
+                        if r.applied {
+                            format!("已 hashline 编辑: {}", r.path)
+                        } else {
+                            format!("hashline 编辑被拒绝: {}", r.path)
+                        }
+                    })
+                    .map_err(|e| e.to_string())
+            }
+        },
         "search_files" => {
             let search_args: SearchFilesArgs = match serde_json::from_value(args.clone()) {
                 Ok(args) => args,
@@ -346,6 +467,71 @@ pub(super) async fn execute_tool(
     }
 }
 
+/// T2-P0-016 PR-I：`bash run_in_background=true` 进入后台路径，立即返回
+/// `task_id` + `log_path`；不阻塞当前 tool 轮次。返回的 JSON 结构与 catalog
+/// `bash` description 中给模型的承诺一致。
+async fn handle_bash_background(
+    registry: &Option<Arc<BashTaskRegistry>>,
+    command: &str,
+    cwd: Option<&str>,
+    argv: Option<Vec<String>>,
+) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("bash 后台任务未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let cwd_pb = cwd.map(std::path::PathBuf::from);
+    registry
+        .spawn(command.to_string(), argv, cwd_pb)
+        .await
+        .map(|t| serde_json::to_string(&t).unwrap_or_else(|_| "{}".to_string()))
+        .map_err(|e| e.to_string())
+}
+
+async fn handle_task_output(
+    registry: &Option<Arc<BashTaskRegistry>>,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("task_output 未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "task_output 缺少 task_id".to_string())?;
+    let since = args.get("since").and_then(|v| v.as_u64());
+    registry
+        .read_output(task_id, since)
+        .await
+        .map(|c| serde_json::to_string(&c).unwrap_or_else(|_| "{}".to_string()))
+        .map_err(|e| e.to_string())
+}
+
+async fn handle_task_stop(
+    registry: &Option<Arc<BashTaskRegistry>>,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("task_stop 未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "task_stop 缺少 task_id".to_string())?;
+    registry
+        .stop(task_id)
+        .await
+        .map(|_| format!("已停止: {}", task_id))
+        .map_err(|e| e.to_string())
+}
+
+async fn handle_task_list(registry: &Option<Arc<BashTaskRegistry>>) -> Result<String, String> {
+    let Some(registry) = registry.as_ref() else {
+        return Err("task_list 未启用：未注入 BashTaskRegistry".to_string());
+    };
+    let infos = registry.list();
+    Ok(serde_json::to_string(&infos).unwrap_or_else(|_| "[]".to_string()))
+}
+
 /// PR-RB（§2.6）解析 `read` 工具的可选整数入参（`offset` / `limit`）。
 ///
 /// 接受 JSON `null` / 缺失 → `None`；接受任何非负整数（`u64`）。
@@ -358,9 +544,216 @@ fn parse_optional_u64(args: &serde_json::Value, key: &str) -> Option<u64> {
     v.as_u64()
 }
 
+/// T2-P0-017 PR-D：`edit` 工具入参解析（oneOf 形状 A / B）。
+///
+/// **形状 A**：`{ path, old_content, new_content, replace_all? }`
+/// **形状 B**：`{ path, edits: [{ old_content, new_content, replace_all? }, ...] }`
+///
+/// 当同时存在 `edits` 与顶层 `old_content`/`new_content` 时 **`edits` 优先**
+/// （与 [edit.md §4.2](../../../docs/architecture/tools/edit.md) 对齐）。
+///
+/// 解析后转换为 [`EditOperation`]（仅 `Replace`、无行号；行号 API 仅留给 dispatcher
+/// extension 内部使用）。`replace_all` 通过 `new_content` 字段携带的 magic 前缀
+/// 传递给 primitive 是不可行的——这里只做形状归一化，多段语义在
+/// [`crate::core::tools::primitive::executor::write_edit::edit_file_impl`] 落地。
+///
+/// **决策（lock，详见计划文件 Phase1 决策 6）**：保留 `PrimitiveExecutor::edit_file`
+/// trait 方法签名不动，避免牵动 dispatcher / 多个 mock。`replace_all` 信号通过
+/// [`crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER`] 编码到段的
+/// `old_content` 前缀，由 `write_edit::edit_file_impl` 在分段解析时识别并剥离。
+fn parse_edit_args(args: &serde_json::Value) -> Result<(&str, Vec<EditOperation>), String> {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "edit: 缺少必填字段 `path`".to_string())?;
+
+    // Shape B：优先识别 edits 数组。
+    if let Some(edits_v) = args.get("edits") {
+        let arr = edits_v
+            .as_array()
+            .ok_or_else(|| "edit: `edits` 必须是数组".to_string())?;
+        if arr.is_empty() {
+            return Err("edit: `edits` 至少需要一条编辑段".to_string());
+        }
+        let mut ops = Vec::with_capacity(arr.len());
+        for (i, seg) in arr.iter().enumerate() {
+            let old = seg
+                .get("old_content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("edit: edits[{}].old_content 缺失或非字符串", i))?;
+            let new_c = seg
+                .get("new_content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("edit: edits[{}].new_content 缺失或非字符串", i))?;
+            let replace_all = seg
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            ops.push(make_edit_op(old, new_c, replace_all));
+        }
+        return Ok((path, ops));
+    }
+
+    // Shape A：顶层 old_content / new_content。
+    let old = args
+        .get("old_content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "edit: 缺少 `old_content`（或 `edits`）".to_string())?;
+    let new_c = args
+        .get("new_content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "edit: 缺少 `new_content`".to_string())?;
+    let replace_all = args
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((path, vec![make_edit_op(old, new_c, replace_all)]))
+}
+
+fn make_edit_op(old: &str, new_c: &str, replace_all: bool) -> EditOperation {
+    let encoded_old = if replace_all {
+        format!(
+            "{}{}",
+            crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER,
+            old
+        )
+    } else {
+        old.to_string()
+    };
+    EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: None,
+        end_line: None,
+        old_content: Some(encoded_old),
+        new_content: new_c.to_string(),
+    }
+}
+
+/// T2-P0-017 Phase3 / PR-M：`hashline_edit` 入参解析。
+///
+/// JSON 形状：
+/// ```jsonc
+/// {
+///   "path": "src/foo.rs",
+///   "edits": [
+///     { "op": "replace", "pos": "42#Ab", "lines": "x\n" },
+///     { "op": "replace", "pos": "55#Cd", "end": "57#Ef", "lines": "y\n" }
+///   ]
+/// }
+/// ```
+fn parse_hashline_edit_args(
+    args: &serde_json::Value,
+) -> Result<(&str, Vec<crate::core::tools::primitive::HashlineSegment>), String> {
+    use crate::core::tools::primitive::{HashlineOp, HashlineSegment};
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "hashline_edit: 缺少必填字段 `path`".to_string())?;
+    let edits_v = args
+        .get("edits")
+        .ok_or_else(|| "hashline_edit: 缺少必填字段 `edits`".to_string())?;
+    let arr = edits_v
+        .as_array()
+        .ok_or_else(|| "hashline_edit: `edits` 必须是数组".to_string())?;
+    if arr.is_empty() {
+        return Err("hashline_edit: `edits` 至少需要一条段".to_string());
+    }
+    let mut segments = Vec::with_capacity(arr.len());
+    for (i, seg) in arr.iter().enumerate() {
+        let op_str = seg
+            .get("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("hashline_edit: edits[{}].op 缺失或非字符串", i))?;
+        let op = match op_str {
+            "replace" => HashlineOp::Replace,
+            "insert" => HashlineOp::Insert,
+            "delete" => HashlineOp::Delete,
+            other => {
+                return Err(format!(
+                    "hashline_edit: edits[{}].op 必须是 replace|insert|delete，实际 `{}`",
+                    i, other
+                ))
+            }
+        };
+        let pos = seg
+            .get("pos")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("hashline_edit: edits[{}].pos 缺失或非字符串", i))?;
+        let (start_line, start_hash) =
+            HashlineSegment::parse_anchor(pos, i, "pos").map_err(|e| e.to_string())?;
+        let (end_line, end_hash) = match seg.get("end").and_then(|v| v.as_str()) {
+            Some(end_s) => {
+                HashlineSegment::parse_anchor(end_s, i, "end").map_err(|e| e.to_string())?
+            }
+            None => (start_line, start_hash.clone()),
+        };
+        let lines = seg
+            .get("lines")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        segments.push(HashlineSegment {
+            op,
+            start_line,
+            start_hash,
+            end_line,
+            end_hash,
+            lines,
+        });
+    }
+    Ok((path, segments))
+}
+
+/// T2-P0-016 PR-C / T2-P0-017 PR-D：`edit` / `write`（覆盖写）前共享的 staleness + NoPriorRead 兜底。
+///
+/// 与 read 同形态读 `ReadFileState`：用 [`crate::infra::platform::normalize_path`] 算出
+/// `resolved`（**与 read primitive 内 `put_stamp` 的 key 一致** —— `tool_exec`
+/// `read` 分支 L98 / L154 也以此 `resolved` 为 key），再：
+///
+/// - `state.get(&resolved) == None` → `NoPriorRead`（自 T2-P0-016 同 PR 起对 edit 与 write
+///   均**强拒**，与 write.md §9 / edit.md §10.2 一致）；
+/// - `state.get` 命中且 `mtime_ms` / `size` 与 `metadata` 漂移 → `Stale`，要求重新 read；
+/// - 路径 `normalize_path` 失败、`metadata` 读不到等情况让 primitive 自己用更具体的
+///   IO / permission 错误回执（不在编排层猜原因）。
+///
+/// `op_label` 仅用于错误文案（`"edit"` / `"write"`），不影响判定逻辑。
+fn check_mutation_stamp(
+    state: &Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    path: &str,
+    op_label: &str,
+) -> Result<(), String> {
+    let resolved = match crate::infra::platform::normalize_path(path) {
+        Ok(p) => p,
+        Err(_) => return Ok(()), // 让 primitive 报权限/IO 具体错
+    };
+    let Some(stamp) = state.get(&resolved) else {
+        return Err(format!(
+            "NoPriorRead: 当前会话未对 `{}` 执行过 `read`，禁止盲写/盲改；请先 `read` 再 `{}`",
+            path, op_label
+        ));
+    };
+    let Ok(meta) = std::fs::metadata(&resolved) else {
+        return Ok(()); // 让 primitive 报具体 IO
+    };
+    if meta.is_dir() {
+        return Err(format!(
+            "{}: 目标 `{}` 是目录，不能作为入参",
+            op_label, path
+        ));
+    }
+    let cur_mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
+    if stamp.mtime_ms != cur_mtime || stamp.size != meta.len() {
+        return Err(format!(
+            "Stale: 文件 `{}` 自上次 read 后已被修改（mtime/size 不一致），请先重新 `read` 再 `{}`",
+            path, op_label
+        ));
+    }
+    Ok(())
+}
+
 /// PR-RB（§2.6）`read` 入参 horizontal gate：边界违反返回结构化错误，使模型可自我修正。
 ///
-/// 边界（与 `openspec/specs/architecture/tools/read.md` §2.1 / §2.6 一致）：
+/// 边界（与 `docs/architecture/tools/read.md` §2.1 / §2.6 一致）：
 /// - `offset` 若提供则必须 ≥ 1；
 /// - `limit` 若提供则必须在 `[1, 10000]`（cc-fork 同档）；
 /// - 入参不是整数（`as_u64` 解析失败）由调用方先用 [`parse_optional_u64`]

@@ -3,10 +3,10 @@ use super::{
     CwdLazyPrompt, CwdPromptChoice, CWD_PROMPT_CHOICES,
 };
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use crate::core::tools::primitive::PrimitiveOperation;
-use crate::core::tools::primitive::{
+use crate::core::tools::contract::confirmation::{
     AllowAllConfirmation, ConfirmDecision, DenyAllConfirmation, UserConfirmationProvider,
 };
+use crate::core::tools::primitive::PrimitiveOperation;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

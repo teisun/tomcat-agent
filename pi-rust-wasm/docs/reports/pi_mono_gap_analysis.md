@@ -483,7 +483,7 @@ TASK-05a~05e 完成 15/15 pi-mono 社区插件端到端验收。`globalThis.pi` 
 | 兼容矩阵 | `docs/reports/extension_compat_matrix.md` |
 | 任务看板 | `agents/TASK_BOARD.md` |
 | 架构文档 | `openspec/specs/Architecture.md` |
-| 兼容策略 | `openspec/specs/architecture/plugin-system/pi-mono-compat-strategy.md` |
+| 兼容策略 | `docs/architecture/plugin-system/pi-mono-compat-strategy.md` |
 
 ---
 

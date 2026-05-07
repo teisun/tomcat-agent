@@ -86,7 +86,7 @@ You help users by reading files, executing commands, editing code, and writing n
 
 Available tools:
 {}",
-            crate::core::tools::catalog::render_core_identity_tool_lines()
+            crate::core::tools::contract::catalog::render_core_identity_tool_lines()
         )
     }
     fn priority(&self) -> u32 {
@@ -104,9 +104,9 @@ impl SystemPromptSection for ToolInstructionsSection {
         r#"Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
 - Use read to examine files before editing
-- Use search_files to find file paths or content; prefer it over execute_bash with grep/find/ls -R
-- Use edit_file for precise changes (old_content must match the file exactly, including whitespace)
-- Use write_file only for new files or complete rewrites
+- Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R
+- Use edit for precise changes (old_content must match the file exactly, including whitespace; pass `edits[]` for multi-segment edits — all segments match the ORIGINAL snapshot, not chained)
+- Use write only for new files or complete rewrites
 - Be concise in your responses
 - Show file paths clearly when working with files
 - IMPORTANT: Only claim you can access directories that you have successfully listed or read from using tools. Do not guess or fabricate which directories are accessible. If unsure, use list_dir to verify first."#.to_string()
@@ -148,7 +148,7 @@ impl SystemPromptSection for WorkspaceContextSection {
              - This is the user's shell working directory when pi chat was launched.\n\
              - Interpret \"current directory\", \"this project\", and relative paths as this directory.\n\
              - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `workspace_roots` or a session-only grant.\n\
-             - For execute_bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
+             - For bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
              \n\
              Agent definition directory (agent_definition_dir): {agent_definition_dir}\n\
              - Design-time agent rules/configuration under ~/.pi_/workspace-<agentId>/.\n\
@@ -314,7 +314,7 @@ impl SystemPromptSection for WorkspaceStateSection {
         }
 
         out.push_str(
-            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.pi_/pi.config.toml directly with write_file/edit_file (will be denied).\n",
+            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.pi_/pi.config.toml directly with write/edit (will be denied).\n",
         );
 
         out

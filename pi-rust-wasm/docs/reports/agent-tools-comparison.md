@@ -72,7 +72,7 @@
 |----|------|
 | **定位** | `@mariozechner/pi-coding-agent` 等指标包的 **上游契约仓**；[`packages/coding-agent/README.md`](../../../pi-mono/packages/coding-agent/README.md) 明确 **核心不包含 MCP**、强调扩展 `registerTool`。 |
 | **内置工具** | [`packages/coding-agent/src/core/tools/index.ts`](../../../pi-mono/packages/coding-agent/src/core/tools/index.ts) **`createAllToolDefinitions`**（约 **156–165** 行）：**7** 个——`read/bash/edit/write/grep/find/ls`；**默认仅启用 4**（[`sdk.ts`](../../../pi-mono/packages/coding-agent/src/core/sdk.ts) 约 **271–277** 行会话默认 active 列表）。 |
-| **与 Rust** | 本仓 [`openspec/specs/archive/001-mvp/design.md`](../../openspec/specs/archive/001-mvp/design.md) 等文档约定：**语义冲突以 pi-mono 为准**。 |
+| **与 Rust** | 本仓历史 MVP 设计文档（原 `openspec/specs/archive/001-mvp/`，已移除）约定：**语义冲突以 pi-mono 为准**。 |
 
 ### 2.6 形态分层（摘要）
 

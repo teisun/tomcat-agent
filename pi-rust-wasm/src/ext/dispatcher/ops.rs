@@ -93,8 +93,11 @@ impl HostApiDispatcher {
                     .collect()
             });
         let argv_ref = argv_store.as_deref();
+        // T2-P0-016 PR-E.2：扩展 `executeBash` HostCall 参数，可选 `timeout_ms`；
+        // 与 `tool_exec` 同口径在 trait 层接受 `Option<u64>`，未提供则用 config 默认。
+        let timeout_ms = params.get("timeout_ms").and_then(|v| v.as_u64());
         let result = p
-            .execute_bash(command, cwd.as_deref(), plugin_id, argv_ref)
+            .execute_bash(command, cwd.as_deref(), plugin_id, argv_ref, timeout_ms)
             .await?;
         Ok(HostResponse::ok(
             serde_json::to_value(result).map_err(AppError::Serialize)?,

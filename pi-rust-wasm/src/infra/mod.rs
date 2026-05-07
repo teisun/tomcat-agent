@@ -25,7 +25,10 @@ pub use config::{
     resolve_memory_dir, resolve_plugins_dir, resolve_quickjs_path, resolve_sessions_dir,
     resolve_tmp_dir, resolve_workspace_dir, resolve_workspace_roots_paths, validate_config,
     AgentConfig, AppConfig, ContextConfig, LlmConfig, LogConfig, PreflightConfig, PrimitiveConfig,
-    SecurityConfig, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
+    SecurityConfig, ToolsBashConfig, ToolsConfig, ToolsReadConfig, ToolsWriteConfig, WasmConfig,
+    WorkspaceConfig, DEFAULT_LLM_MODEL, DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
+    DEFAULT_TOOLS_BASH_TIMEOUT_MS, DEFAULT_TOOLS_READ_MAX_BYTES,
+    DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF, MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
 };
 pub use error::AppError;
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};

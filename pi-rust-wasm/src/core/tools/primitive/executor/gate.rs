@@ -15,7 +15,8 @@ use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{
     GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionScope,
 };
-use crate::core::tools::primitive::{ConfirmDecision, PrimitiveOperation};
+use crate::core::tools::contract::confirmation::ConfirmDecision;
+use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 use std::path::PathBuf;

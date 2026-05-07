@@ -32,4 +32,9 @@ pub use types::{
     DEFAULT_LLM_MODEL,
 };
 #[allow(unused_imports)]
-pub use types::{ToolsConfig, ToolsReadConfig, DEFAULT_TOOLS_READ_MAX_BYTES};
+pub use types::{
+    ToolsBashConfig, ToolsConfig, ToolsReadConfig, ToolsWriteConfig,
+    DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_BASH_TIMEOUT_MS,
+    DEFAULT_TOOLS_READ_MAX_BYTES, DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
+    MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
+};

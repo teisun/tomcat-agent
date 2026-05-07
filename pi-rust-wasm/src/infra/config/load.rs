@@ -163,7 +163,7 @@ pub fn resolve_workspace_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, Ap
 
 /// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.pi_/`。
 ///
-/// 详见 openspec/specs/architecture/work-dir-and-data-layout.md。
+/// 详见 docs/architecture/work-dir-and-data-layout.md。
 pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     if let Some(ref s) = cfg.storage.work_dir {
         let s = s.trim();

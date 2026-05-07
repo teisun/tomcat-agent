@@ -76,7 +76,7 @@ pi 默认将所有数据存放在 `~/.pi_/`。可在 `pi.config.toml` 的 `[stor
 └── memory/                        # 向量检索索引
 ```
 
-详见 [directory-structure.md](../openspec/specs/architecture/directory-structure.md)。
+详见 [directory-structure.md](../docs/architecture/directory-structure.md)。
 
 目录概念速记：`agent_workspace_dir` 是用户启动 `pi chat` 时的 shell 当前目录，是“当前目录 / 这个项目 / 相对路径”的语义来源，但不自动授权文件访问；`agent_definition_dir` 是 `workspace-<agentId>/` 设计态目录，也是默认可写根；`agent_trail_dir` 是 `agents/<agentId>/` 运行态目录。
 

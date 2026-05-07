@@ -29,7 +29,7 @@ docs/
 └── user-guide.md
 ```
 
-运行时工作区目录树（`~/.pi_/`）不在 `docs/` 下，见 [directory-structure.md](../openspec/specs/architecture/directory-structure.md)（与 [work-dir-and-data-layout](../openspec/specs/architecture/work-dir-and-data-layout.md) 配套）。
+运行时工作区目录树（`~/.pi_/`）不在 `docs/` 下，见 [directory-structure.md](../docs/architecture/directory-structure.md)（与 [work-dir-and-data-layout](../docs/architecture/work-dir-and-data-layout.md) 配套）。
 
 ---
 

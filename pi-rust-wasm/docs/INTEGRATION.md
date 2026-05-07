@@ -273,7 +273,7 @@
 | - | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明（host_call 协议与宪法流程）
-- **协议子文档为权威**：Architecture 第 3 节已写明 Hostcall 与 Guest 的 JSON 协议以 [host-call-protocol.md](openspec/specs/architecture/plugin-system/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
+- **协议子文档为权威**：Architecture 第 3 节已写明 Hostcall 与 Guest 的 JSON 协议以 [host-call-protocol.md](docs/architecture/plugin-system/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
 - **注入与 Guest 侧说明**：host-call-protocol 第 5 节已补充「执行时注入」（每次 run_script/run_script_file 当次 Vm 已挂载 env.__pi_host_call；Guest 须从 env 导入并暴露给 JS，JS 调用约定见第 5 节）；wasmedge-runtime-layer 4.1 已补充宿主导入绑定与 Guest 侧要求。无代码改动，仅文档更新。
 
 ### ✅ 执行的检查与验收项

@@ -123,28 +123,66 @@ pub(super) struct FoldEntriesOutcome {
     pub pending_preheat: Option<CompactionResult>,
 }
 
-/// PR-RA：检测 transcript 中遗留的 `read_file` 工具名（旧名）。
+/// PR-RA / T2-P0-016 / T2-P0-017 PR-命名：检测 transcript 中遗留的旧工具名
+/// （`read_file` / `write_file` / `edit_file` / `execute_bash`）。
 ///
-/// 仅 **`tracing::warn!` 一次**（按 process 去重）；**不**重写为 `read`，**不**重定向执行。
-/// 旧对话历史保留原 wire；新一轮 LLM 调用 `read_file` 会走 `tool_exec` 的 unknown 分支。
+/// 仅 **`tracing::warn!` 一次**（每个旧名按 process 去重）；**不**重写为短名，
+/// **不**重定向执行。旧对话历史保留原 wire；新一轮 LLM 调用旧名会走
+/// `tool_exec` 的 unknown 分支（与短名生态保持单轨审计，避免双名漂移）。
 fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
     use std::sync::atomic::{AtomicBool, Ordering};
-    static WARNED: AtomicBool = AtomicBool::new(false);
+    static WARNED_READ: AtomicBool = AtomicBool::new(false);
+    static WARNED_WRITE: AtomicBool = AtomicBool::new(false);
+    static WARNED_EDIT: AtomicBool = AtomicBool::new(false);
+    static WARNED_BASH: AtomicBool = AtomicBool::new(false);
     for tc in tool_calls {
         let name = tc
             .get("function")
             .and_then(|f| f.get("name"))
             .and_then(|n| n.as_str())
             .unwrap_or("");
-        if name == "read_file"
-            && WARNED
-                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            tracing::warn!(
-                tool = "read_file",
-                "legacy tool name: read_file → read (no redirect; transcript replay only)"
-            );
+        match name {
+            "read_file"
+                if WARNED_READ
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                tracing::warn!(
+                    tool = "read_file",
+                    "legacy tool name: read_file → read (no redirect; transcript replay only)"
+                );
+            }
+            "write_file"
+                if WARNED_WRITE
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                tracing::warn!(
+                    tool = "write_file",
+                    "legacy tool name: write_file → write (no redirect; transcript replay only)"
+                );
+            }
+            "edit_file"
+                if WARNED_EDIT
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                tracing::warn!(
+                    tool = "edit_file",
+                    "legacy tool name: edit_file → edit (no redirect; transcript replay only)"
+                );
+            }
+            "execute_bash"
+                if WARNED_BASH
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok() =>
+            {
+                tracing::warn!(
+                    tool = "execute_bash",
+                    "legacy tool name: execute_bash → bash (no redirect; transcript replay only)"
+                );
+            }
+            _ => {}
         }
     }
 }

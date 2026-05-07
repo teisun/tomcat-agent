@@ -157,6 +157,7 @@ pub(super) async fn run_tool_calls(
             let exec = tool_exec::execute_tool(
                 &agent.primitive,
                 &agent.config_backend,
+                &agent.bash_task_registry,
                 Some(&agent.config.read_file_state),
                 tc,
             );

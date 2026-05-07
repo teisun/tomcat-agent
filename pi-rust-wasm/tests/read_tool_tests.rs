@@ -1,6 +1,6 @@
 //! 集成测试：`read` 工具（PR-RA / RB / RF / RJ / RM）。
 //!
-//! 黑盒覆盖 `openspec/specs/architecture/tools/read.md`：
+//! 黑盒覆盖 `docs/architecture/tools/read.md`：
 //!
 //! - §2.1 / §2.2：分页（offset/limit）窗口语义；
 //! - §2.3：二进制 → 结构化 hint（不读全文、不污染 LLM 上下文）；

@@ -7,7 +7,7 @@
 | 工程师（Tom/Jerry/Spike） | 标 `PENDING_INTEGRATION` 前，在功能分支 | 完成 §1–§3 与 §4 全量验收 |
 | Nibbles | 合并到 `develop` 后 | 按本文相同顺序与命令复跑与验收 |
 
-**TASK_BOARD_002.md** 中 `PENDING_INTEGRATION` 状态说明引用本文档。
+**TASK_BOARD_002/tasks/T2-*.md** 中 `PENDING_INTEGRATION` 状态说明引用本文档（看板索引见 [TASK_BOARD_002/README.md](./TASK_BOARD_002/README.md)）。
 
 ---
 

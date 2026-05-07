@@ -1,6 +1,6 @@
 # 模块技术文档（`src/`）
 
-本目录下的 **`README.md` 与 `src/` 代码子目录一一对应**，便于开发与 Code Review 时快速对照实现。宏观设计与契约仍以 [openspec/specs/architecture](../openspec/specs/architecture) 为准。
+本目录下的 **`README.md` 与 `src/` 代码子目录一一对应**，便于开发与 Code Review 时快速对照实现。宏观设计与契约仍以 [docs/architecture](../docs/architecture) 为准。
 
 ---
 
@@ -62,7 +62,7 @@
 | [ext/README.md](./ext/README.md) | WasmEdge、Hostcall、插件生命周期 |
 | [core/README.md](./core/README.md) | Agent 循环、Compaction、core 层其它子模块索引 |
 
-运行时工作区目录树（非 `src` 模块）见 [openspec/specs/architecture/directory-structure.md](../openspec/specs/architecture/directory-structure.md)。
+运行时工作区目录树（非 `src` 模块）见 [docs/architecture/directory-structure.md](../docs/architecture/directory-structure.md)。
 
 ---
 
@@ -92,5 +92,5 @@
                +-------------+
 ```
 
-- **边界**：持久化格式与路径约定见 [工作目录与数据布局](../openspec/specs/architecture/work-dir-and-data-layout.md)；各模块细节见上表。
+- **边界**：持久化格式与路径约定见 [工作目录与数据布局](../docs/architecture/work-dir-and-data-layout.md)；各模块细节见上表。
 - **core/llm**、**core/session** 内另有针对本模块的精简 ASCII，可与本图对照阅读。

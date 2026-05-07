@@ -103,6 +103,8 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -122,11 +124,13 @@ impl PrimitiveExecutor for MockPrimitiveExecutor {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -166,6 +170,8 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -185,11 +191,13 @@ impl PrimitiveExecutor for SleepyMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -239,6 +247,8 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         Ok(crate::core::tools::primitive::WriteFileResult {
             path: path.to_string(),
             written: overwrite || content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -258,11 +268,13 @@ impl PrimitiveExecutor for SteerableMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         Ok(crate::core::tools::primitive::BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(

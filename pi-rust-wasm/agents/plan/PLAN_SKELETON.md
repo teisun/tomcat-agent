@@ -4,7 +4,7 @@
 
 ## 认领与分支（Dispatcher）
 
-- [TASK_BOARD_002.md](../TASK_BOARD_002.md)：负责人、状态、**分支名**（与 Git 一致）；依赖任务是否已 `DONE` / 是否需先合并 `develop`。
+- [TASK_BOARD_002/tasks/T2-*.md](../TASK_BOARD_002/tasks/)（认领卡）：负责人、状态、**分支名**（与 Git 一致）；依赖任务是否已 `DONE` / 是否需先合并 `develop`。索引见 [README §4](../TASK_BOARD_002/README.md)。
 - 行为规范：[Constitution.md](../../openspec/specs/Constitution.md) 及任务引用的规范链接。
 
 ## 研发流程（对照 Dispatcher）
@@ -16,7 +16,7 @@
 | 开发中 | 单测 / 集成测；**小步提交** |
 | 门禁 | `cargo fmt`、`cargo clippy -D warnings`；§4 全量按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md)；todo：`dev-gates` |
 | 提交与进度 | [commit-guard.mdc](../../.cursor/rules/commit-guard.mdc)；`docs/status/{branch}.md`；todo：`status-ship` |
-| 完成 | TASK_BOARD → `PENDING_INTEGRATION`、推送 |
+| 完成 | 对应 **tasks/T2-*.md** → `PENDING_INTEGRATION`、推送 |
 
 ## 子项清单与状态（对照看板 x.y）
 
@@ -68,7 +68,7 @@
 
 > 触发条件：本计划「关键改动」涉及 ≥ 2 个 `*.rs` 业务源文件。仅 1 个文件可写"不适用：仅改 X"。
 >
-> 硬约束遵循 [ARCHITECTURE_SPEC §3「文件职责总览（One-Glance Map）」](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)：①箭头标方向；②每个 `*.rs` 都有节点；③节点内列函数 / 类型 / 关键行为；④同时挂独立 `tests.rs`；⑤图后 2–3 句"阅读顺序建议"；⑥实施期偏离须就地标注 `【未改签名 / 依赖 Drop】` 等显式标签。
+> 硬约束遵循 [ARCHITECTURE_SPEC §6「文件职责总览（One-Glance Map）」](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)：①箭头标方向；②每个 `*.rs` 都有节点；③节点内列函数 / 类型 / 关键行为；④同时挂独立 `tests.rs`；⑤图后 2–3 句"阅读顺序建议"；⑥实施期偏离须就地标注 `【未改签名 / 依赖 Drop】` 等显式标签。
 
 ```text
  ┌────────────────────────────────┐
@@ -96,7 +96,7 @@
 
 **阅读顺序（说人话）**：①入口接收事件 → ②核心逻辑处理状态 → ③落盘持久化（口语一句串起链路）。
 
-参考样板：[interrupt-and-cancellation.md §9.0](../../openspec/specs/architecture/interrupt-and-cancellation.md)（T2-P0-007 定稿）。
+参考样板：[interrupt-and-cancellation.md §9.0](../../docs/architecture/interrupt-and-cancellation.md)（T2-P0-007 定稿）。
 
 ---
 

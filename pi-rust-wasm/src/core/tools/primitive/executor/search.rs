@@ -5,7 +5,7 @@
 //! - **Tier2**：缺二进制时自动回落到 `ignore::WalkBuilder` + `globset` + `regex`，
 //!   默认遵守 `.gitignore`；带墙钟、单文件 5 MiB 上限、二进制嗅探与 deny 剪枝。
 //!
-//! 详见 `openspec/specs/architecture/tools/search_files.md` 与 plan §5–§7。
+//! 详见 `docs/architecture/tools/search_files.md` 与 plan §5–§7。
 
 use super::helpers::{find_binary, grant_trigger_str, grant_type_str, permission_scope_str};
 use super::DefaultPrimitiveExecutor;

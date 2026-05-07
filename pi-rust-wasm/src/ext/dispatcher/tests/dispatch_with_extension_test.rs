@@ -112,6 +112,8 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             Ok(WriteFileResult {
                 path: String::new(),
                 written: false,
+                bytes_written: 0,
+                diff_hint: None,
             })
         }
         async fn edit_file(
@@ -131,6 +133,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             _cwd: Option<&str>,
             _id: &str,
             argv: Option<&[String]>,
+            _timeout_ms: Option<u64>,
         ) -> Result<BashResult, AppError> {
             if cmd == "echo" {
                 if let Some(a) = argv {
@@ -143,6 +146,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
         async fn require_user_confirmation(

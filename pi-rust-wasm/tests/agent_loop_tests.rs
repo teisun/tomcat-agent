@@ -106,6 +106,8 @@ impl PrimitiveExecutor for MockPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -125,11 +127,13 @@ impl PrimitiveExecutor for MockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -142,7 +146,7 @@ impl PrimitiveExecutor for MockPrimitive {
     }
 }
 
-/// 第一次 execute_bash 时返回 Err（用于「工具错误不终止 Loop」测试）。
+/// 第一次 bash 时返回 Err（用于「工具错误不终止 Loop」测试）。
 struct ErrorOnFirstBashPrimitive {
     call_count: Arc<AtomicUsize>,
 }
@@ -165,6 +169,8 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -184,6 +190,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
@@ -193,6 +200,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
                 stdout: "ok".to_string(),
                 stderr: String::new(),
                 exit_code: 0,
+                ..Default::default()
             })
         }
     }
@@ -228,6 +236,8 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -247,12 +257,14 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
         Ok(BashResult {
             stdout: format!("out:{}", command),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(
@@ -466,8 +478,8 @@ async fn test_agent_loop_tool_error_does_not_terminate_loop(
     common::setup_logging();
     let _span = info_span!("test_agent_loop_tool_error_does_not_terminate_loop").entered();
 
-    info!("Arrange: Stream1 返回 execute_bash 工具调用；ErrorOnFirstBash 首次返回 Err；Stream2 返回 recovered 文本");
-    let stream_tool = tool_call_stream("bash1", "execute_bash", r#"{"command":"ls","cwd":null}"#);
+    info!("Arrange: Stream1 返回 bash 工具调用；ErrorOnFirstBash 首次返回 Err；Stream2 返回 recovered 文本");
+    let stream_tool = tool_call_stream("bash1", "bash", r#"{"command":"ls","cwd":null}"#);
     let stream_recovered = text_stream("recovered after error");
     let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_recovered]));
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -552,14 +564,14 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
 /// [工具事件 pi-mono 五段序] 单工具轮内先发观察向 tool_execution_*，再发钩子 tool_call/tool_result
 ///
 /// 验证：EventBus 上事件名序列为 tool_execution_start → tool_call → tool_result → tool_execution_end（子序列）
-/// 意义：与 [events.md](../openspec/specs/architecture/plugin-system/events.md) 工具链对照一致
+/// 意义：与 [events.md](../docs/architecture/plugin-system/events.md) 工具链对照一致
 #[tokio::test]
 async fn test_agent_loop_tool_pi_mono_event_subsequence() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
     let _span = info_span!("test_agent_loop_tool_pi_mono_event_subsequence").entered();
 
-    let stream_tool = tool_call_stream("bash1", "execute_bash", r#"{"command":"ls","cwd":null}"#);
+    let stream_tool = tool_call_stream("bash1", "bash", r#"{"command":"ls","cwd":null}"#);
     let stream_text = text_stream("done");
     let llm = Arc::new(MockLlm::new(vec![stream_tool, stream_text]));
     let primitive = Arc::new(MockPrimitive);

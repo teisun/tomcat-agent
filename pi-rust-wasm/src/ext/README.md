@@ -37,7 +37,7 @@
        +---> 4 原语 / tools / llm / session / event ...
 ```
 
-- **单入口**：Guest 仅通过 `__pi_host_call` 进入宿主；路由集中在 `HostApiDispatcher`（与规格 [host-call-protocol](../../openspec/specs/architecture/plugin-system/host-call-protocol.md) 一致）。
+- **单入口**：Guest 仅通过 `__pi_host_call` 进入宿主；路由集中在 `HostApiDispatcher`（与规格 [host-call-protocol](../../docs/architecture/plugin-system/host-call-protocol.md) 一致）。
 - **Mermaid**：实例化到单次 `run_script` 的细粒度流程见下文「3.1」中的流程图，与本 ASCII 互补。
 
 ## 2. 设计要点
@@ -50,7 +50,7 @@
 
 - **构建方式**：默认即启用 WasmEdge，`cargo build` 即可；需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install，或运行 `./scripts/install-wasmedge.sh`（Linux/macOS））。
 - **WasmEngine**：全局单例，Config 开启 WASI、统计、内存上限（max_memory_pages）；`set_memory_limit` 已预留，MVP 使用固定 Standard 值。
-- **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` / `run_script_file` 通过 wasmedge_quickjs.wasm 执行 JS，每次执行新建 Vm 与 WasiModule（argv + preopen），脚本会被真正执行。`run_script` 写入的临时 script.js 可放在工作目录的 agent tmp（见 [工作目录与数据布局](../../openspec/specs/architecture/work-dir-and-data-layout.md)）；QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `PI_WASM__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
+- **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` / `run_script_file` 通过 wasmedge_quickjs.wasm 执行 JS，每次执行新建 Vm 与 WasiModule（argv + preopen），脚本会被真正执行。`run_script` 写入的临时 script.js 可放在工作目录的 agent tmp（见 [工作目录与数据布局](../../docs/architecture/work-dir-and-data-layout.md)）；QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `PI_WASM__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
 - **线性内存边界**：Hostcall 时宿主通过 WasmEdge 的 `get_data`/`set_data` 访问线性内存；**边界检查由 WasmEdge 运行时保证**，防止越界访问。响应缓冲区不足时仅回写长度，由 guest 重试更大缓冲区。
 
@@ -102,7 +102,7 @@ flowchart LR
 
 - **build_vm 懒创建 env**：仅在首次调用 `build_vm` 时用 `ImportObjectBuilder` 创建 env 模块（含 `__pi_host_call`），之后复用同一 `import_object`；`HostData` 携带 `plugin_id` 与 `host_invoke`。
 - **每次执行新建 Vm 与 WasiModule**：每次 `run_script`/`run_script_file` 都会先设置当次 `WasiModule`（argv、preopen），再 `build_vm` 得到新 Vm（Store 持有当次 env + wasi），然后加载 quickjs 模块并执行 `_start`。
-- **Guest 侧**：wasmedge_quickjs.wasm 须从 env 导入 `__pi_host_call` 并暴露给 JS，JS 方能通过约定协议调用宿主；协议与调用约定见 [Hostcall JSON 协议](../../openspec/specs/architecture/plugin-system/host-call-protocol.md)。
+- **Guest 侧**：wasmedge_quickjs.wasm 须从 env 导入 `__pi_host_call` 并暴露给 JS，JS 方能通过约定协议调用宿主；协议与调用约定见 [Hostcall JSON 协议](../../docs/architecture/plugin-system/host-call-protocol.md)。
 
 **关键代码节点**
 

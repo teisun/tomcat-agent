@@ -80,9 +80,10 @@
 //! `impl PrimitiveExecutor for DefaultPrimitiveExecutor` 整块留在本文件，
 //! 每个方法做一行委托——trait 不能跨文件实现，但方法体可以下沉。
 
+use crate::core::tools::contract::confirmation::UserConfirmationProvider;
 use crate::core::tools::primitive::{
     BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
-    ReadResult, SearchFilesArgs, SearchFilesOutput, UserConfirmationProvider, WriteFileResult,
+    ReadResult, SearchFilesArgs, SearchFilesOutput, WriteFileResult,
 };
 use crate::infra::audit::AuditRecorder;
 use crate::infra::error::AppError;
@@ -95,7 +96,9 @@ use crate::core::permission::PermissionGate;
 mod bash;
 mod confirm;
 mod gate;
+pub(crate) mod hashline_edit;
 mod helpers;
+pub(crate) mod output_accum;
 mod read;
 mod search;
 mod write_edit;
@@ -114,7 +117,7 @@ pub(crate) use read::{
 ///
 /// PR-RB（T1）将上限从历史 10 MiB 提升到 **25 MiB**，介于 cc-fork 256 KiB 与
 /// pi_agent_rust 100 MiB 之间——兼顾「合理 dump 文件」与「防爆 ctx」。
-/// 详见 `openspec/specs/architecture/tools/read.md` §2.5 决策表 R6 #2。
+/// 详见 `docs/architecture/tools/read.md` §2.5 决策表 R6 #2。
 ///
 /// **作用范围**：仅在 [`DefaultPrimitiveExecutor::read`] 的「无 `offset` / 无 `limit`」
 /// 路径生效（`metadata.len() > MAX_READ_BYTES` → 拒绝并提示加 offset/limit 重试）。
@@ -134,13 +137,38 @@ pub struct DefaultPrimitiveExecutor {
     pub(super) confirmation: Arc<dyn UserConfirmationProvider>,
     pub(super) audit: Arc<dyn AuditRecorder>,
     /// 路径与 bash 权限决策入口；由调用方注入并与
-    /// `permission::cwd_lazy` / `tools::config` 共享同一份 `SessionGrants` 视图。
+    /// `permission::cwd_lazy` / `tools::config_tool` 共享同一份 `SessionGrants` 视图。
     pub(super) gate: Arc<dyn PermissionGate>,
     /// PR-RB（T1）read 工具文本路径的「裸读字节上限」。
     ///
     /// 默认 [`MAX_READ_BYTES`]（25 MiB）；可由
     /// [`Self::with_read_max_bytes`] 覆盖。仅当模型未传 `offset`/`limit` 时生效。
     pub(super) read_max_bytes: u64,
+    /// T2-P0-016 PR-G：write 工具是否在写盘前把 `\r\n` 折叠为 `\n`。
+    ///
+    /// 默认 [`crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF`]（`true`）；
+    /// 由 [`Self::with_write_normalize_crlf`] 覆盖（生产由 `[tools.write] normalize_crlf`
+    /// config 注入，测试可关掉验证「字节透传」语义）。详见
+    /// `docs/architecture/tools/write.md` §3.3 / §8。
+    pub(super) write_normalize_crlf: bool,
+    /// T2-P0-016 PR-E.2：bash 工具墙钟超时（毫秒）；默认 [`crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS`]。
+    /// 由 [`Self::with_bash_timeout_ms`] 覆盖（生产由 `[tools.bash] timeout_ms` config 注入）。
+    pub(super) bash_timeout_ms: u64,
+    /// T2-P0-016 PR-E.2：bash 工具单流字符上限（stdout / stderr 各算一份）；默认
+    /// [`crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS`]。Phase-E.3 起接入
+    /// `output_accum.rs`，超限走头尾保留 + 落盘 `bash_persist_dir`。
+    pub(super) bash_max_output_chars: usize,
+    /// T2-P0-016 PR-E.3：bash 工具超限输出的落盘目录；`None` 时不落盘（仅截断）。
+    /// 生产路径：由 `api/chat` 装配时调用 [`Self::with_bash_persist_dir`] 注入
+    /// [`crate::infra::resolve_agent_trail_dir`] + `/tool-results`。测试可设 `tempfile::tempdir()`
+    /// 验证「超限落盘」路径，或保持 `None` 验证「仅截断」路径。
+    pub(super) bash_persist_dir: Option<std::path::PathBuf>,
+    /// T2-P0-016 PR-L（bash T3）：AST allowlist 检查器，**叠在** `gate_check_bash`
+    /// 之前生效（详见 [bash-pr-l-scope.md §1 / §4](../../../../docs/architecture/tools/bash-pr-l-scope.md)）。
+    /// 默认 **`enabled=false`**（`BashAstChecker::new(false, …)`）：不切段、不跑
+    /// `detect_unsupported`，与无 AST 栈行为一致；需要切段/allow/deny 时
+    /// 用 [`Self::with_bash_ast`] 或后续 `[tools.bash.ast]` 配置注入 `enabled=true`。
+    pub(super) bash_ast: crate::core::permission::BashAstChecker,
 }
 
 impl DefaultPrimitiveExecutor {
@@ -156,7 +184,52 @@ impl DefaultPrimitiveExecutor {
             audit,
             gate,
             read_max_bytes: MAX_READ_BYTES,
+            write_normalize_crlf: crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
+            bash_timeout_ms: crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS,
+            bash_max_output_chars: crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
+            bash_persist_dir: None,
+            bash_ast: crate::core::permission::BashAstChecker::new(false, vec![], vec![]),
         }
+    }
+
+    /// T2-P0-016 PR-L：注入自定义 AST allow/deny（含 `enabled`）。生产路径后续由
+    /// `[tools.bash.ast]` config 反序列化注入；当前为 builder 入口。
+    pub fn with_bash_ast(mut self, checker: crate::core::permission::BashAstChecker) -> Self {
+        self.bash_ast = checker;
+        self
+    }
+
+    /// T2-P0-016 PR-E.2：覆盖 bash 工具默认墙钟超时。
+    ///
+    /// **生产路径**：由 `[tools.bash] timeout_ms` config 在 `api/chat` 装配
+    /// `DefaultPrimitiveExecutor` 时调用（与 [`Self::with_read_max_bytes`] 同形）。
+    /// **测试路径**：可设小到 50 ms 模拟 wall-clock kill 行为。
+    pub fn with_bash_timeout_ms(mut self, ms: u64) -> Self {
+        self.bash_timeout_ms = if ms == 0 {
+            crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS
+        } else {
+            ms.min(crate::infra::MAX_TOOLS_BASH_TIMEOUT_MS)
+        };
+        self
+    }
+
+    /// T2-P0-016 PR-E.2：覆盖 bash 工具单流字符上限。
+    ///
+    /// 测试侧用极小值（如 64）让 fixture 命令 stdout 触发头尾保留分支。
+    pub fn with_bash_max_output_chars(mut self, n: usize) -> Self {
+        self.bash_max_output_chars = if n == 0 {
+            crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS
+        } else {
+            n.min(crate::infra::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS)
+        };
+        self
+    }
+
+    /// T2-P0-016 PR-E.3：注入超限输出落盘目录（生产侧 `~/.pi_/agents/<id>/tool-results/`）。
+    /// `None` 表示「不落盘，仅截断」（测试默认 + 极小心智的 mock）。
+    pub fn with_bash_persist_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.bash_persist_dir = Some(dir);
+        self
     }
 
     /// PR-RB（T1）覆盖 read 工具文本路径的字节上限。
@@ -167,6 +240,15 @@ impl DefaultPrimitiveExecutor {
     /// 避免单测生成 25 MiB+ 的临时文件。
     pub fn with_read_max_bytes(mut self, bytes: u64) -> Self {
         self.read_max_bytes = bytes;
+        self
+    }
+
+    /// T2-P0-016 PR-G 覆盖 write 工具的 LF 规范化开关。
+    ///
+    /// **生产路径**：由 `[tools.write] normalize_crlf` config 在 `api/chat` 装配时调用。
+    /// **测试路径**：可置 `false` 验证「字节透传」语义，或置 `true` 验证 CRLF → LF 折叠。
+    pub fn with_write_normalize_crlf(mut self, on: bool) -> Self {
+        self.write_normalize_crlf = on;
         self
     }
 }
@@ -220,14 +302,24 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         write_edit::edit_file_impl(self, path, edits, plugin_id).await
     }
 
+    async fn hashline_edit(
+        &self,
+        path: &str,
+        segments: Vec<crate::core::tools::primitive::HashlineSegment>,
+        plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        hashline_edit::hashline_edit_impl(self, path, segments, plugin_id).await
+    }
+
     async fn execute_bash(
         &self,
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
         argv: Option<&[String]>,
+        timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
-        bash::execute_bash_impl(self, command, cwd, plugin_id, argv).await
+        bash::execute_bash_impl(self, command, cwd, plugin_id, argv, timeout_ms).await
     }
 
     async fn require_user_confirmation(

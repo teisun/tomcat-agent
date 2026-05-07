@@ -4,7 +4,7 @@
 //! 外部直接调用 `confirmation.confirm` 的兼容场景：
 //! - Read 操作不需要 confirm；
 //! - `auto_confirm = true` 时直接放行；
-//! - 其他情况转发给底层 [`crate::core::tools::primitive::UserConfirmationProvider::confirm`]。
+//! - 其他情况转发给底层 [`crate::core::tools::contract::confirmation::UserConfirmationProvider::confirm`]。
 
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::primitive::PrimitiveOperation;

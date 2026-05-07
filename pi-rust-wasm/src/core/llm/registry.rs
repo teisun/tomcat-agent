@@ -2,7 +2,7 @@
 //!
 //! 按 [`LlmConfig::provider`] 字符串选实现：`"openai"` → [`OpenAiProvider`]（Chat Completions，
 //! `POST /v1/chat/completions`），`"openai-responses"` → [`OpenAiResponsesProvider`]（Responses API，
-//! `POST /v1/responses`）。详见 [`openspec/specs/architecture/llm-multiprovider-integration.md`] §6.5。
+//! `POST /v1/responses`）。详见 [`docs/architecture/llm-multiprovider-integration.md`] §6.5。
 //!
 //! ## 新增后端的标准动作（仅 2 步，集中在本文件 + 新文件）
 //!

@@ -37,6 +37,8 @@ impl PrimitiveExecutor for MockPrimitive {
         Ok(WriteFileResult {
             path: path.to_string(),
             written: true,
+            bytes_written: 0,
+            diff_hint: None,
         })
     }
     async fn edit_file(
@@ -56,11 +58,13 @@ impl PrimitiveExecutor for MockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: "ok".to_string(),
             stderr: String::new(),
             exit_code: 0,
+            ..Default::default()
         })
     }
     async fn require_user_confirmation(

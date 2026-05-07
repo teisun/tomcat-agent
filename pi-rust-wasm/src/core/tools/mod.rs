@@ -1,14 +1,15 @@
 //! # 工具系统
 //!
-//! 聚合工具注册中心、LLM 配置工具后端，以及文件 / shell primitive 执行器。
+//! 四层架构：
+//! - [`contract`]：LLM 与 host 之间的工具契约（catalog / registry / confirmation）。
+//! - [`primitive`]：5 原语 + 安全流水（受信内核执行通道）。
+//! - [`config_tool`]：`config_get` / `config_set` 工具通道（走 ConfigBackend）。
+//! - [`pipeline`]：跨工具的纯算法与会话状态（edit_normalize / read_state）。
 
-pub mod catalog;
-pub mod config;
+pub mod config_tool;
+pub mod contract;
+pub mod pipeline;
 pub mod primitive;
-pub mod read_state;
-mod registry;
-
-pub use registry::{DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry};
 
 #[cfg(test)]
 mod tests;
