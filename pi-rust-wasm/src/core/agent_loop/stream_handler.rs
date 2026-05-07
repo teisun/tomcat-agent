@@ -114,6 +114,9 @@ pub(super) async fn run_chat_stream(
                     ),
                 });
             }
+            // P1 阶段：Thinking 事件先静默落地以保证 match 穷尽；
+            // P3（T2-P0-006 phase1-p3）会替换为带 `kind=thinking_delta` 的 MessageUpdate。
+            Ok(StreamEvent::Thinking { .. }) => {}
             Ok(StreamEvent::ToolCallDelta {
                 index,
                 id,
