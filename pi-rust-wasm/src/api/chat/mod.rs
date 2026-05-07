@@ -83,10 +83,8 @@ use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::ChatMessage;
 use crate::core::session::manager::{build_context_from_state, init_context_state};
 use crate::infra::error::AppError;
-use crate::infra::event_bus::EventContext;
 use crate::infra::{
-    wire, AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder,
-    TracingAuditRecorder,
+    AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
@@ -100,6 +98,7 @@ use super::render::MarkdownRenderer;
 #[cfg(test)]
 mod tests;
 
+pub mod cli_turn_renderer;
 pub mod commands;
 pub mod events;
 pub mod permission;
@@ -147,6 +146,10 @@ pub struct ChatContext {
     /// 由 `ChatContext` 持有 → 每次 turn 创建 `AgentLoopConfig` 时 `Arc::clone` 注入，
     /// 多轮 turn 内复用同一张表（实现「同 session 跨 turn dedup」）。
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    /// `CliTurnRenderer` 的 thinking 折叠/展开开关（T2-P0-006 P0/P4）。
+    /// 进程级初值由 `PI_CHAT_SHOW_THINKING=0/1` 环境变量决定，缺省 `false`；
+    /// `/thinking on|off|toggle` 命令在运行时切换；`CliTurnRenderer` 持有同一 Arc 读位。
+    pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatContext {
@@ -285,6 +288,12 @@ impl ChatContext {
             read_file_state: Arc::new(
                 crate::core::tools::pipeline::read_state::ReadFileState::default(),
             ),
+            show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(
+                std::env::var("PI_CHAT_SHOW_THINKING")
+                    .ok()
+                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True" | "yes" | "on"))
+                    .unwrap_or(false),
+            )),
         })
     }
 
@@ -689,30 +698,13 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
         agent_loop.set_context_state(Some(context_state));
 
-        let renderer_clone = Arc::clone(&renderer);
-        let listener_id = ctx.event_bus.on(
-            wire::WIRE_MESSAGE_UPDATE,
-            Box::new(move |evt: EventContext| {
-                let event = match evt.payload.get("assistantMessageEvent") {
-                    Some(e) => e,
-                    None => return Ok(()),
-                };
-                // P3：thinking_delta 不进 MarkdownRenderer 主体；本期保持「不可见」默认行为，
-                // 真正的折叠/展开渲染会在 P0（CliTurnRenderer）+ P4（/thinking）落地。
-                let kind = event.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                if kind == "thinking_delta" {
-                    return Ok(());
-                }
-                if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                    renderer_clone.lock().push(delta);
-                    while let Some(chunk) = renderer_clone.lock().take_ready() {
-                        print!("{}", chunk);
-                        let _ = io::stdout().flush();
-                    }
-                }
-                Ok(())
-            }),
+        // T2-P0-006 P0：CLI 单订阅者渲染器，统一处理 thinking / 正文 / tool_execution，
+        // 避免多个回调各自 `print!` 引起乱序。
+        let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
+            Arc::clone(&renderer),
+            Arc::clone(&ctx.show_thinking),
         );
+        let listener_ids = cli_turn_renderer.register(&*ctx.event_bus);
 
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
@@ -724,7 +716,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             message_stream_listener_registered = true
         );
         let outcome = agent_loop.run(messages).await;
-        ctx.event_bus.off(listener_id);
+        cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.event_bus, &listener_ids);
 
         // T-004 / T-017：`Completed` 与 `Interrupted` 走**同一条**持久化路径——
         // partial assistant（content_buf 截短处）+ 已完成的 tool_result 都已被
