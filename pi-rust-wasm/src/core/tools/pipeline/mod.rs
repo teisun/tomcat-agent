@@ -4,3 +4,6 @@
 
 pub mod edit_normalize;
 pub mod read_state;
+
+#[cfg(test)]
+mod tests;

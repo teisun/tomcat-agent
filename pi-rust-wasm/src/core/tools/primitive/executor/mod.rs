@@ -103,6 +103,9 @@ mod read;
 mod search;
 mod write_edit;
 
+#[cfg(test)]
+mod tests;
+
 // 重导出供 tests/read_window_test.rs 与潜在外部读取的私有 helper：
 // 拆分前路径是 `primitive::executor::{xxx}`；拆分后保持完全等价，避免引用方
 // import 路径变化（spec L-3 拆分整改要求「外部 API 零改动」）。

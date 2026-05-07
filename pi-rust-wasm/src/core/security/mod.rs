@@ -4,3 +4,6 @@
 //! 后续若新增 `policies` / `gating` 等独立模块在此目录扩展。
 
 pub mod secrets;
+
+#[cfg(test)]
+mod tests;
