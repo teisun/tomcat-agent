@@ -161,5 +161,47 @@ pub fn resolve_request_fields(
     }
 }
 
+// ─── P6 / P7：多轮重发剥离 + 持久化策略（API 地基） ────────────────────────────
+
+/// `strip_on_resend` + `format` 两个条件的总判定：决定多轮重发时是否剥离思考。
+///
+/// 规则：
+/// - `strip_on_resend=false` → 不剥离；
+/// - `strip_on_resend=true` 时按 `format` 分支：
+///   - `Deepseek`：必须剥离（否则 400 cls error），返回 true；
+///   - `Anthropic`（未来）：必须保留（带 signature），返回 false；
+///   - 其它（OpenAI/OpenRouter/Doubao/Qwen 等）：默认剥离（true）。
+pub fn should_strip_on_resend(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> bool {
+    if !cfg.strip_on_resend {
+        return false;
+    }
+    !matches!(fmt, ThinkingFormat::Auto)
+}
+
+/// `persist=true` 时上层应把 Thinking 事件落 transcript；默认 false（仅展示不落盘）。
+pub fn should_persist_thinking(cfg: &ThinkingConfig) -> bool {
+    cfg.enabled && cfg.persist
+}
+
+/// Anthropic 风格的 assistant 消息 content 是数组 `[{type: "thinking", ...}, {type: "text", ...}]`；
+/// 在多轮重发时对该结构剥离 `type=thinking` 的块。**不针对** OpenAI 协议（OpenAI 内
+/// 部 ChatMessage 从未把 thinking 写进 content，自然无需剥）。
+///
+/// 行为：仅当 `value` 为 `Array` 时遍历过滤；其它形状返回 0；返回剥离条数。
+pub fn strip_anthropic_thinking_blocks(value: &mut serde_json::Value) -> usize {
+    let arr = match value.as_array_mut() {
+        Some(a) => a,
+        None => return 0,
+    };
+    let before = arr.len();
+    arr.retain(|item| {
+        item.get("type")
+            .and_then(|t| t.as_str())
+            .map(|s| s != "thinking")
+            .unwrap_or(true)
+    });
+    before - arr.len()
+}
+
 #[cfg(test)]
 mod tests;

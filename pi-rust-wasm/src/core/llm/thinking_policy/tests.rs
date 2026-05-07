@@ -1,7 +1,8 @@
 //! `thinking_policy` 单测：覆盖 ThinkingLevel/Format 解析与 resolve_request_fields 映射表。
 
 use super::{
-    resolve_request_fields, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+    resolve_request_fields, should_persist_thinking, should_strip_on_resend,
+    strip_anthropic_thinking_blocks, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -117,6 +118,85 @@ fn deepseek_qwen_have_no_request_field() {
         resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Qwen),
         ThinkingRequestFields::default()
     );
+}
+
+#[test]
+fn strip_on_resend_default_is_true_for_known_formats() {
+    let cfg = ThinkingConfig::default();
+    // 默认 enabled=false，但 strip_on_resend 默认 true，因此具备「保留剥离意愿」语义。
+    assert!(should_strip_on_resend(&cfg, ThinkingFormat::Openai));
+    assert!(should_strip_on_resend(&cfg, ThinkingFormat::Deepseek));
+    assert!(should_strip_on_resend(&cfg, ThinkingFormat::Doubao));
+}
+
+#[test]
+fn strip_on_resend_off_when_explicitly_disabled() {
+    let cfg = ThinkingConfig {
+        strip_on_resend: false,
+        ..ThinkingConfig::default()
+    };
+    assert!(!should_strip_on_resend(&cfg, ThinkingFormat::Openai));
+    assert!(!should_strip_on_resend(&cfg, ThinkingFormat::Deepseek));
+}
+
+#[test]
+fn strip_on_resend_returns_false_for_auto_unresolved_format() {
+    let cfg = ThinkingConfig::default();
+    // Auto 未推断时不下结论，留给 caller 显式 resolve 后再判。
+    assert!(!should_strip_on_resend(&cfg, ThinkingFormat::Auto));
+}
+
+#[test]
+fn persist_default_is_false_even_when_enabled() {
+    let cfg = ThinkingConfig {
+        enabled: true,
+        ..ThinkingConfig::default()
+    };
+    assert!(!should_persist_thinking(&cfg));
+}
+
+#[test]
+fn persist_requires_both_enabled_and_persist_true() {
+    let mut cfg = ThinkingConfig::default();
+    cfg.persist = true;
+    // 仅 persist=true、enabled=false → 不持久化（避免 thinking 关闭时落孤儿数据）。
+    assert!(!should_persist_thinking(&cfg));
+    cfg.enabled = true;
+    assert!(should_persist_thinking(&cfg));
+}
+
+#[test]
+fn anthropic_strip_removes_thinking_blocks() {
+    let mut v = serde_json::json!([
+        {"type": "thinking", "data": "internal"},
+        {"type": "text", "text": "hello"},
+        {"type": "thinking", "data": "more"},
+    ]);
+    let removed = strip_anthropic_thinking_blocks(&mut v);
+    assert_eq!(removed, 2);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["type"], "text");
+}
+
+#[test]
+fn anthropic_strip_is_noop_on_non_array() {
+    let mut v = serde_json::json!({"type":"text", "text":"hi"});
+    assert_eq!(strip_anthropic_thinking_blocks(&mut v), 0);
+    let mut v = serde_json::json!("plain string");
+    assert_eq!(strip_anthropic_thinking_blocks(&mut v), 0);
+}
+
+#[test]
+fn anthropic_strip_keeps_unknown_types() {
+    let mut v = serde_json::json!([
+        {"type": "tool_use", "name": "bash"},
+        {"type": "thinking", "data": "x"},
+        {"unknown": true},
+    ]);
+    let removed = strip_anthropic_thinking_blocks(&mut v);
+    assert_eq!(removed, 1, "只剥 type=thinking，其它包括无 type 的全保留");
+    assert_eq!(v.as_array().unwrap().len(), 2);
 }
 
 #[test]
