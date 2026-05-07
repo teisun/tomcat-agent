@@ -693,12 +693,17 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let listener_id = ctx.event_bus.on(
             wire::WIRE_MESSAGE_UPDATE,
             Box::new(move |evt: EventContext| {
-                if let Some(delta) = evt
-                    .payload
-                    .get("assistantMessageEvent")
-                    .and_then(|e| e.get("delta"))
-                    .and_then(|d| d.as_str())
-                {
+                let event = match evt.payload.get("assistantMessageEvent") {
+                    Some(e) => e,
+                    None => return Ok(()),
+                };
+                // P3：thinking_delta 不进 MarkdownRenderer 主体；本期保持「不可见」默认行为，
+                // 真正的折叠/展开渲染会在 P0（CliTurnRenderer）+ P4（/thinking）落地。
+                let kind = event.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "thinking_delta" {
+                    return Ok(());
+                }
+                if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                     renderer_clone.lock().push(delta);
                     while let Some(chunk) = renderer_clone.lock().take_ready() {
                         print!("{}", chunk);
