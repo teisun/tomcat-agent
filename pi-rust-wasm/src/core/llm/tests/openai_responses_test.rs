@@ -536,6 +536,33 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
         "got {:?}",
         e6[0]
     );
+
+    // 部分网关仅在 summary_part.done 给出文本。
+    let v7 = json!({
+        "type": "response.reasoning_summary_part.done",
+        "part": {"type": "summary_text", "text": "final summary"}
+    });
+    let e7 = responses_chunk_to_events(&v7, &mut tracks);
+    assert!(
+        matches!(&e7[0], StreamEvent::Thinking { delta, .. } if delta == "final summary"),
+        "got {:?}",
+        e7[0]
+    );
+
+    // 兼容 output_item.done 中的 reasoning item（无 delta 事件时兜底）。
+    let v8 = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "from output item"}]
+        }
+    });
+    let e8 = responses_chunk_to_events(&v8, &mut tracks);
+    assert!(
+        matches!(&e8[0], StreamEvent::Thinking { delta, .. } if delta == "from output item"),
+        "got {:?}",
+        e8[0]
+    );
 }
 
 #[test]
@@ -591,6 +618,20 @@ fn responses_chunk_unknown_event_is_silent_not_panic() {
     let v = json!({"type": "response.something.never.heard.of"});
     let e = responses_chunk_to_events(&v, &mut tracks);
     assert!(e.is_empty(), "未知事件应静默忽略: {:?}", e);
+}
+
+#[test]
+fn responses_chunk_output_item_done_non_reasoning_is_silent() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "final text"}]
+        }
+    });
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "非 reasoning output_item.done 不应映射 Thinking: {:?}", e);
 }
 
 #[test]

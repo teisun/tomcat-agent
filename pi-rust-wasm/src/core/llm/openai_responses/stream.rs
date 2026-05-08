@@ -326,7 +326,24 @@ pub(super) fn responses_chunk_to_events(
         "response.reasoning.delta"
         | "response.reasoning_text.delta"
         | "response.reasoning_summary_text.delta"
-        | "response.reasoning_summary.delta" => push_reasoning_delta_event(&mut events, value, kind),
+        | "response.reasoning_summary.delta"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_part.added" => {
+            push_reasoning_delta_event(&mut events, value, kind)
+        }
+        "response.output_item.done" => {
+            // 某些 Responses 样本不会发 `reasoning_*delta`，而是把 reasoning 摘要仅放在
+            // output_item.done.item 里；仅当 item.type=reasoning* 时抽取，避免误把正文当 thinking。
+            if is_reasoning_output_item(value) {
+                push_reasoning_delta_event(&mut events, value, kind);
+            } else {
+                tracing::debug!(
+                    target: "pi_wasm::llm::openai_responses",
+                    event = %kind,
+                    "ignoring unknown Responses SSE event"
+                );
+            }
+        }
         "response.reasoning.done"
         | "response.reasoning_text.done"
         | "response.reasoning_summary_text.done"
@@ -373,7 +390,14 @@ fn push_reasoning_delta_event(events: &mut Vec<StreamEvent>, value: &Value, kind
 }
 
 fn extract_reasoning_delta(value: &Value) -> Option<String> {
-    for key in ["delta", "summary", "text"] {
+    for key in ["delta", "summary", "text", "summary_text", "content"] {
+        if let Some(raw) = value.get(key) {
+            if let Some(text) = extract_text(raw) {
+                return Some(text);
+            }
+        }
+    }
+    for key in ["part", "item"] {
         if let Some(raw) = value.get(key) {
             if let Some(text) = extract_text(raw) {
                 return Some(text);
@@ -381,6 +405,15 @@ fn extract_reasoning_delta(value: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn is_reasoning_output_item(value: &Value) -> bool {
+    value
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .map(|t| t.contains("reasoning"))
+        .unwrap_or(false)
 }
 
 fn extract_text(value: &Value) -> Option<String> {
