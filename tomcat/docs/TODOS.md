@@ -71,7 +71,7 @@
 | T-153 | 工具/Web | 按架构文档实现 `web_search` + `web_fetch` | 契约与路线图见 [`docs/architecture/tools/web_search.md`](architecture/tools/web_search.md)、[`docs/architecture/tools/web_fetch.md`](architecture/tools/web_fetch.md)（含 PR-WS-* / PR-WF-*、`openai-responses` 门闩、§2.4.2.1 HTTP 上游字段、cc-fork/hermes/openclaw 对标）；认领时把文档验收矩阵与 `src/core/tools/web_*` 单测对齐；晋升正式卡可走 **T2-P1-007** 或另拆 T2 子任务 | T2-P1-007（占位） |
 | T-040 | 上下文 | 超大文件处理崩溃 | compaction 崩溃 | T2-P0-002（**关闭归并 2026-04-26**：Layer 0 + Phase D 已覆盖） |
 | T-041 | 上下文 | 压缩任务失败重试 | 可靠性 | T2-P0-002 |
-| T-043 | 工具/原语 | 大文件多次编辑写入 | agent 写大文件方式（`edit_file` 偏好） | T2-P0-011（**改判 2026-04-26**：归属由 compaction 转 executor primitives） |
+| T-043 | 工具/原语 | 大文件多次编辑写入 | **DONE 2026-05-08**（`edit`/`hashline_edit` + read 戳 + catalog/`system_prompt`；见下方「P0 已实现」表与 [edit.md](architecture/tools/edit.md) / [write.md](architecture/tools/write.md)） | T2-P0-011 |
 | T-044 | 上下文 | 摘要先写草稿再输出正文 | Two-pass | T2-P0-002（**报告决议关闭 2026-04-26**：详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1`](reports/compaction-prompt-cc-vs-pi.md#571-two-pass-summary-不实施决议固化关闭-t-044)） |
 | T-046 | 权限 | 工作目录读写授权分级缺失 | 读/写权限未分级 | T2-P0-004 |
 | T-047 | 权限 | 非工作目录操作被直接拒绝而非申请授权 | 直接 403 | T2-P0-004 |
@@ -92,8 +92,11 @@
 | T-005 | Ctrl+D 退出已可用；`/exit` 字符串命令未实现（按需可另开增强） | `src/api/chat/mod.rs` |
 | T-006 | 主路径已使用 `chat_stream` + `StreamEvent::ToolCallDelta` | `src/core/agent_loop/run.rs` |
 | T-024 | `append_message` 持久化 new_messages；`append_message_chain` 做 tool_calls ↔ tool 链校验 | `src/api/chat/mod.rs` |
-| T-038 | 系统提示词含 `WorkspaceContextSection`（`Current working directory: {workspace_dir}`） | `src/core/system_prompt.rs` |
+| T-038 | 系统提示词含 `WorkspaceContextSection`（`Current working directory: {workspace_dir}`） | `src/core/llm/system_prompt.rs` |
 | T-072 | 主路径已流式；残余「流式超时」合并到 T-132 | `src/core/llm/openai.rs` |
+| T-020 | Bash **后台路径** `run_in_background=true`：立即返票 + `tokio::spawn` 泵日志，主 tool 轮不 `await` 子进程结束；同步路径仍单轮阻塞（`timeout_ms`） | `src/core/agent_loop/tool_exec.rs`、`src/core/tools/primitive/bash_task.rs`；**T2-P0-016 PR-I**；[bash.md](architecture/tools/bash.md) §2.4.4 |
+| T-101 | 「耗时操作后台化」已写入 **bash.md**（多轮 LLM + `task_*`）；未另建 `coding-style.md` 专章，可节选迁入 `Codeing&Architecture_Spec.md` | 同上 **bash.md** |
+| T-043 | 大文件：**优先 `edit`/`edits[]`/`hashline_edit` + read 戳**；`write` 仅新文件或整文件重写（catalog + `system_prompt`）；**未**做 `write` 超大 `content` 软 hint 配置 | `catalog.rs`、`src/core/llm/system_prompt.rs`、**T2-P0-017**、[edit.md](architecture/tools/edit.md)、[write.md](architecture/tools/write.md) |
 
 ### P1 — 状态管理（~12 条）
 
@@ -335,9 +338,9 @@
   - 档位升档自 P1：T2-P0-001（或 T2-P0-009）
   - 关联模块：`src/ext/dispatcher/`
 
-- [ ] **[P0] `[UX]`** `#T-020` 执行 Bash 或长任务不要用主 Agent
-  - 耗时操作要在后台不要卡主线程，写到编码规范里
-  - 档位：T2-P0-010
+- [x] **[已实现] `#T-020`** 执行 Bash 长任务可走后台，不占用当前 tool 轮等子进程结束
+  - **2026-05-08**：`run_in_background=true` + `BashTaskRegistry` + `task_output` / `task_stop` / `task_list`；规范见 [bash.md](architecture/tools/bash.md)。初版卡片中的泛型 `LongRunningTask` / `EventBus::TaskProgress` **未**实现。
+  - 档位：T2-P0-010（**DONE**，交付归并 **T2-P0-016**）
   - 关联：`#T-101`
 
 - [ ] **[P5] `[REF]`** `#T-021` 任务开始前先做好信息搜集和评估
@@ -438,10 +441,10 @@
 - [ ] **[P1] `[REF]`** `#T-042` Checkpoint 机制
   - 档位：T2-P1-001
 
-- [ ] **[P0] `[REF]`** `#T-043` 更新大文件时应该多次编辑写入 — **改判归属 2026-04-26**
-  - 档位升档自 P2：~~T2-P0-002~~ → **T2-P0-011 `large-file-edit-strategy`**
-  - 关联模块：`src/core/executor/primitives.rs::edit_file` / `src/core/executor/primitives.rs::write_file` / `src/core/system_prompt.rs`（**不在 compaction 路径**）
-  - **决议（plan T2-P0-002 §6.E）**：原始 TODO 文案「更新大文件时应该多次编辑写入」真实归属是「agent 写大文件时偏好多次小 `edit_file` 而非一次性 `write_file` 大字符串」，与 compaction 无关；原看板把它归到 T2-P0-002 子项 5 属归属错位，已抽出独立任务 T2-P0-011 承接。详见 [报告 §5.7 Anti-goals](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 3 行。
+- [x] **[已实现] `#T-043`** 更新大文件时偏好多次精确 `edit`（含 `edits[]` / `hashline_edit`）而非整文件 `write` 大 `content` — **改判归属 2026-04-26，DONE 2026-05-08**
+  - 档位：~~T2-P0-002~~ → **T2-P0-011**（本卡 DONE；交付归 **T2-P0-016 catalog** + **T2-P0-017 edit** + `src/core/llm/system_prompt.rs`）
+  - 关联：`src/core/tools/primitive/executor/write_edit.rs`、`contract/catalog.rs`、`src/core/llm/system_prompt.rs`（**不在 compaction 路径**）
+  - **决议**：与 [报告 §5.7](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 3 行一致。初版 **方案 ②**（`write` 超阈 hint + 配置项）**未**采用；以 **read 戳 + Stale/NoPriorRead + 多段 edit** 替代。结论与叙事以 [edit.md](architecture/tools/edit.md)、[write.md](architecture/tools/write.md) 为 SSoT（**不**另建 `agents/plan` 短文）。专立 **1MB E2E** 仍可选未写。
 
 - [-] **[P0] `[REF]`** `#T-044` 摘要先写分析草稿思考，再输出摘要正文 — **报告决议关闭**（`2026-04-26`）
   - 档位升档自 P2：T2-P0-002
@@ -651,8 +654,9 @@
 - [ ] **[P9] `[DOC]`** `#T-100-dev` 编码规范增加面向对象思想优先
   - 档位：远期规范打磨
 
-- [ ] **[P0] `[DOC]`** `#T-101` 耗时操作后台化写入规范
-  - 档位：T2-P0-010
+- [x] **[已实现] `#T-101`** 耗时 Bash 后台化已写入 [bash.md](architecture/tools/bash.md)（SSoT）
+  - **2026-05-08**：与 `#T-020` 同批 closure；若需「编码规范总册」专章，可从 bash.md 摘录迁入 `openspec/specs/guides/coding/Codeing&Architecture_Spec.md`。
+  - 档位：T2-P0-010（DONE）
   - 关联：`#T-020`
 
 - [ ] **[P1] `[DOC]`** `#T-102` 集成测试也要负责修复代码

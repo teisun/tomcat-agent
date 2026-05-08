@@ -44,8 +44,8 @@
 | **T2-P0-007** | 中断/恢复 + transcript 完整性 | `DONE` | Spike | `feature/interrupt-resume` | [tasks/T2-P0-007.md](./tasks/T2-P0-007.md) |
 | **T2-P0-008** | TUI 体验强化（合并 TASK-08） | `TODO` | — | `feature/tui-experience` | [tasks/T2-P0-008.md](./tasks/T2-P0-008.md) |
 | **T2-P0-009** | 三套管道重构 | `TODO` | — | `feature/pipeline-unify` | [tasks/T2-P0-009.md](./tasks/T2-P0-009.md) |
-| **T2-P0-010** | 长任务后台化 | `TODO` | — | `feature/long-task-background` | [tasks/T2-P0-010.md](./tasks/T2-P0-010.md) |
-| **T2-P0-011** | 大文件编辑策略 | `TODO` | — | `feature/large-file-edit-strategy` | [tasks/T2-P0-011.md](./tasks/T2-P0-011.md) |
+| **T2-P0-010** | 长任务后台化 | `DONE`（**2026-05-08**：交付归 **T2-P0-016** `run_in_background` + `task_*`；见 [T2-P0-010.md](./tasks/T2-P0-010.md)） | — | `develop`（经 strengthen 分支） | [tasks/T2-P0-010.md](./tasks/T2-P0-010.md) |
+| **T2-P0-011** | 大文件编辑策略 | `DONE`（**2026-05-08**：catalog + `system_prompt` + T2-P0-017 `edit`/`hashline_edit`；**未**做 `write` 超阈 hint；见 [T2-P0-011.md](./tasks/T2-P0-011.md)） | — | `develop` | [tasks/T2-P0-011.md](./tasks/T2-P0-011.md) |
 | **T2-P0-012** | 图片/二进制文件传给 LLM | `TODO` | — | `feature/llm-binary-attachments` | [tasks/T2-P0-012.md](./tasks/T2-P0-012.md) |
 | **T2-P0-013** | 拖拽授权 / Bash 路径 / CWD 语义整改 | `DONE` | Jerry | `fix/drag-deny-cwd-remediation` | [tasks/T2-P0-013.md](./tasks/T2-P0-013.md) |
 | **T2-P0-014** | 权限授权来源重构 | `DONE` | Tom | `feature/permission-source-redesign` | [tasks/T2-P0-014.md](./tasks/T2-P0-014.md) |
