@@ -40,6 +40,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::api::render::MarkdownRenderer;
+use crate::infra::config::ToolCliVerbosity;
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::{wire, EventBus};
 
@@ -89,6 +90,7 @@ pub struct CliTurnRenderer {
     md: Arc<Mutex<MarkdownRenderer>>,
     show_thinking: Arc<AtomicBool>,
     print_to_stderr: bool,
+    tool_cli_verbosity: ToolCliVerbosity,
     state: Mutex<RendererState>,
     writer: Arc<dyn CliWriter>,
     /// `tool_execution_start` 收到时记录起始时间，end 时算 elapsed。
@@ -108,8 +110,21 @@ struct RendererState {
 
 impl CliTurnRenderer {
     /// 业务路径用此构造：包装 stdout/stderr 真·writer。
-    pub fn new(md: Arc<Mutex<MarkdownRenderer>>, show_thinking: Arc<AtomicBool>) -> Arc<Self> {
-        Self::with_writer(md, show_thinking, Arc::new(StdCliWriter), false)
+    /// `print_to_stderr` 由调用方读 `config.llm.thinking.print_to_stderr` 后传入；
+    /// 见 chat/mod.rs（架构 §3.1 / 计划 §1 已决策「print_to_stderr」）。
+    pub fn new(
+        md: Arc<Mutex<MarkdownRenderer>>,
+        show_thinking: Arc<AtomicBool>,
+        print_to_stderr: bool,
+        tool_cli_verbosity: ToolCliVerbosity,
+    ) -> Arc<Self> {
+        Self::with_writer(
+            md,
+            show_thinking,
+            Arc::new(StdCliWriter),
+            print_to_stderr,
+            tool_cli_verbosity,
+        )
     }
 
     /// 测试 / 高级路径：可注入自定义 writer 与 `print_to_stderr` 开关。
@@ -118,11 +133,13 @@ impl CliTurnRenderer {
         show_thinking: Arc<AtomicBool>,
         writer: Arc<dyn CliWriter>,
         print_to_stderr: bool,
+        tool_cli_verbosity: ToolCliVerbosity,
     ) -> Arc<Self> {
         Arc::new(Self {
             md,
             show_thinking,
             print_to_stderr,
+            tool_cli_verbosity,
             state: Mutex::new(RendererState {
                 last_kind: LastKind::None,
                 thinking_prefix_printed: false,
@@ -233,6 +250,9 @@ impl CliTurnRenderer {
         self.tool_starts
             .lock()
             .insert(call_id.to_string(), Instant::now());
+        if self.tool_cli_verbosity != ToolCliVerbosity::Full {
+            return;
+        }
         let summary = one_line_summary(tool_name, &args);
         // 切到 stderr 装饰区前，先把 markdown 残余冲掉以保证排序。
         if let Some(remaining) = self.md.lock().flush() {
@@ -263,6 +283,10 @@ impl CliTurnRenderer {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let result = payload.get("result").cloned().unwrap_or(Value::Null);
+        if self.tool_cli_verbosity == ToolCliVerbosity::Off {
+            self.tool_starts.lock().remove(call_id);
+            return;
+        }
         let elapsed = self
             .tool_starts
             .lock()
@@ -292,7 +316,7 @@ impl CliTurnRenderer {
         );
         self.writer.write_stderr(&line);
         // 失败时把错误摘要再扩 N 行，便于快速看到原因。
-        if is_error {
+        if is_error && self.tool_cli_verbosity == ToolCliVerbosity::Full {
             for line in error_extra_lines(&result, 3) {
                 self.writer
                     .write_stderr(&format!("\x1b[31m       {}\x1b[0m\n", line));
@@ -384,18 +408,7 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             format!("path={} (replace)", path)
         }
-        "bash" | "shell" | "execute_command" => {
-            let cmd = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            format!("command={}", cmd)
-        }
+        "bash" | "shell" | "execute_command" => format!("command={}", shell_command_preview(args)),
         _ => {
             // 通用回退：JSON 化后压成一行
             args.to_string().replace('\n', " ")
@@ -404,10 +417,79 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
     truncate_chars(&summary, MAX_CHARS)
 }
 
+fn shell_command_preview(args: &Value) -> String {
+    let command = args
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let argv: Vec<&str> = args
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    if let Some(script_preview) = shell_script_preview_from_argv(&argv) {
+        return script_preview;
+    }
+
+    if !argv.is_empty() {
+        let joined_argv = argv.join(" ");
+        let combined = if command.is_empty() {
+            joined_argv
+        } else {
+            format!("{} {}", command, joined_argv)
+        };
+        let first = first_non_empty_line(&combined);
+        if !first.is_empty() {
+            return first;
+        }
+    }
+
+    let first = first_non_empty_line(command);
+    if first.is_empty() {
+        command.to_string()
+    } else {
+        first
+    }
+}
+
+fn shell_script_preview_from_argv(argv: &[&str]) -> Option<String> {
+    if argv.len() < 2 {
+        return None;
+    }
+    let launcher_flag = argv[0];
+    if launcher_flag == "-c"
+        || launcher_flag == "-lc"
+        || launcher_flag == "/c"
+        || launcher_flag == "/C"
+    {
+        let first = first_non_empty_line(argv[1]);
+        if !first.is_empty() {
+            return Some(first);
+        }
+    }
+    None
+}
+
+fn first_non_empty_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// 工具结果摘要（`✓/✗ {summary}`），尽量挑可读字段；失败时塞 error 文案。
 pub fn result_summary(result: &Value, is_error: bool) -> String {
     const MAX_CHARS: usize = 80;
     if is_error {
+        if let Some(s) = result.as_str() {
+            let msg = s.trim();
+            if !msg.is_empty() {
+                return truncate_chars(msg, MAX_CHARS);
+            }
+        }
         let msg = result
             .get("error")
             .and_then(|v| v.as_str())
@@ -433,6 +515,7 @@ pub fn error_extra_lines(result: &Value, n: usize) -> Vec<String> {
         .get("stderr")
         .and_then(|v| v.as_str())
         .or_else(|| result.get("error").and_then(|v| v.as_str()))
+        .or_else(|| result.as_str())
         .unwrap_or("");
     raw.lines()
         .filter(|l| !l.trim().is_empty())

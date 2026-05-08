@@ -13,6 +13,7 @@ use serde_json::json;
 
 use super::{error_extra_lines, one_line_summary, result_summary, CliTurnRenderer, CliWriter};
 use crate::api::render::MarkdownRenderer;
+use crate::infra::config::ToolCliVerbosity;
 
 #[derive(Default)]
 struct CapturedWriter {
@@ -42,10 +43,23 @@ impl CliWriter for CapturedWriter {
 }
 
 fn make_renderer(show_thinking: bool) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
+    make_renderer_with_tool_verbosity(show_thinking, ToolCliVerbosity::Full)
+}
+
+fn make_renderer_with_tool_verbosity(
+    show_thinking: bool,
+    tool_cli_verbosity: ToolCliVerbosity,
+) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
     let writer = CapturedWriter::new();
     let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
     let flag = Arc::new(AtomicBool::new(show_thinking));
-    let r = CliTurnRenderer::with_writer(md, flag, writer.clone() as Arc<dyn CliWriter>, false);
+    let r = CliTurnRenderer::with_writer(
+        md,
+        flag,
+        writer.clone() as Arc<dyn CliWriter>,
+        false,
+        tool_cli_verbosity,
+    );
     (r, writer)
 }
 
@@ -234,6 +248,34 @@ fn tool_end_failure_uses_red_cross_and_extra_lines() {
 }
 
 #[test]
+fn tool_end_failure_with_string_result_shows_real_error_message() {
+    let (r, w) = make_renderer(false);
+    r.on_tool_start(&json!({
+        "toolCallId": "c4",
+        "toolName": "read",
+        "args": {"path": "missing.txt"},
+    }));
+    r.on_tool_end(&json!({
+        "toolCallId": "c4",
+        "toolName": "read",
+        "result": "No such file or directory (os error 2)",
+        "isError": true,
+    }));
+    let err = w.stderr();
+    assert!(err.contains("✗"), "失败应有 ✗: {:?}", err);
+    assert!(
+        err.contains("No such file or directory"),
+        "字符串错误结果应直接可见，不应退化为 failed: {:?}",
+        err
+    );
+    assert!(
+        !err.contains("✗ failed"),
+        "有真实字符串错误时不应显示 failed 占位: {:?}",
+        err
+    );
+}
+
+#[test]
 fn one_line_summary_handles_known_and_unknown_tools() {
     assert_eq!(
         one_line_summary("read", &json!({"path": "a.rs", "offset": 1, "limit": 10})),
@@ -252,6 +294,28 @@ fn one_line_summary_handles_known_and_unknown_tools() {
         unknown.contains("\"k\""),
         "未知工具应回退 JSON 串联: {}",
         unknown
+    );
+}
+
+#[test]
+fn one_line_summary_handles_bash_argv_and_script_preview() {
+    assert_eq!(
+        one_line_summary(
+            "bash",
+            &json!({"command": "bash", "args": ["-lc", "echo hi && pwd"]})
+        ),
+        "command=echo hi && pwd"
+    );
+    assert_eq!(
+        one_line_summary(
+            "bash",
+            &json!({"command": "bash", "args": ["-lc", "\n\n  echo first\npwd"]})
+        ),
+        "command=echo first"
+    );
+    assert_eq!(
+        one_line_summary("bash", &json!({"command": "bash", "args": ["-lc"]})),
+        "command=bash -lc"
     );
 }
 
@@ -276,6 +340,10 @@ fn result_summary_picks_best_field_for_success_and_error() {
     );
     assert_eq!(result_summary(&json!({}), false), "ok");
     assert_eq!(result_summary(&json!({"error": "boom"}), true), "boom");
+    assert_eq!(
+        result_summary(&json!("No such file or directory"), true),
+        "No such file or directory"
+    );
 }
 
 #[test]
@@ -297,6 +365,7 @@ fn show_thinking_flag_can_flip_at_runtime() {
         flag.clone(),
         writer.clone() as Arc<dyn CliWriter>,
         false,
+        ToolCliVerbosity::Full,
     );
     // 折叠：只有省略号
     r.on_message_update(&json!({
@@ -316,5 +385,54 @@ fn show_thinking_flag_can_flip_at_runtime() {
         writer.stdout().contains("after"),
         "切换到展开后应输出 delta: {:?}",
         writer.stdout()
+    );
+}
+
+#[test]
+fn tool_cli_verbosity_off_hides_start_and_end_lines() {
+    let (r, w) = make_renderer_with_tool_verbosity(false, ToolCliVerbosity::Off);
+    r.on_tool_start(&json!({
+        "toolCallId": "c-off",
+        "toolName": "read",
+        "args": {"path": "a.rs"},
+    }));
+    r.on_tool_end(&json!({
+        "toolCallId": "c-off",
+        "toolName": "read",
+        "result": {"lines": 1},
+        "isError": false,
+    }));
+    assert!(
+        w.stderr().is_empty(),
+        "off 档位不应打印任何 [tool] 行: {:?}",
+        w.stderr()
+    );
+}
+
+#[test]
+fn tool_cli_verbosity_brief_prints_end_without_start_and_extra_lines() {
+    let (r, w) = make_renderer_with_tool_verbosity(false, ToolCliVerbosity::Brief);
+    r.on_tool_start(&json!({
+        "toolCallId": "c-brief",
+        "toolName": "bash",
+        "args": {"command": "echo hi"},
+    }));
+    r.on_tool_end(&json!({
+        "toolCallId": "c-brief",
+        "toolName": "bash",
+        "result": {"error":"failed", "stderr":"line1\nline2"},
+        "isError": true,
+    }));
+    let err = w.stderr();
+    assert!(
+        !err.contains("command=echo hi"),
+        "brief 档位不应打印 start 摘要: {:?}",
+        err
+    );
+    assert!(err.contains("[tool] bash"), "brief 应打印 end 行: {:?}", err);
+    assert!(
+        !err.contains("line1"),
+        "brief 档位不应展开失败 stderr 额外行: {:?}",
+        err
     );
 }

@@ -129,7 +129,7 @@ fn deepseek_qwen_have_no_request_field() {
 #[test]
 fn strip_on_resend_default_is_true_for_known_formats() {
     let cfg = ThinkingConfig::default();
-    // 默认 enabled=false，但 strip_on_resend 默认 true，因此具备「保留剥离意愿」语义。
+    // 默认 strip_on_resend=true，已知 format 下具备「保留剥离意愿」语义。
     assert!(should_strip_on_resend(&cfg, ThinkingFormat::Openai));
     assert!(should_strip_on_resend(&cfg, ThinkingFormat::Deepseek));
     assert!(should_strip_on_resend(&cfg, ThinkingFormat::Doubao));
@@ -156,6 +156,7 @@ fn strip_on_resend_returns_false_for_auto_unresolved_format() {
 fn persist_default_is_false_even_when_enabled() {
     let cfg = ThinkingConfig {
         enabled: true,
+        persist: false,
         ..ThinkingConfig::default()
     };
     assert!(!should_persist_thinking(&cfg));
@@ -164,6 +165,7 @@ fn persist_default_is_false_even_when_enabled() {
 #[test]
 fn persist_requires_both_enabled_and_persist_true() {
     let mut cfg = ThinkingConfig {
+        enabled: false,
         persist: true,
         ..ThinkingConfig::default()
     };

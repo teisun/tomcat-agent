@@ -89,8 +89,9 @@
 | G2 折叠 | `show_thinking=false` 时仅一行 `[thinking] …`，`true` 时流式展开 | 报告方案 D。 |
 | G3 协议闭环 | Completions `reasoning_content` + Responses `reasoning_*` 事件均能映射到 `StreamEvent::Thinking` | 不能只有一半。 |
 | G4 ThinkingLevel | 改配置后下一请求 wire 体携带正确字段 | 旋钮真生效。 |
-| G5 不破坏默认 | `thinking.enabled=false` 时行为与当前主线一致 | 老用户无感。 |
+| G5 默认策略（方案 B） | `ThinkingConfig::default()` 为 `enabled=true`、`show=true`（CLI 默认展开） | 这是破变更，需在 changelog / G5 明示。 |
 | G6 多消费者 | TUI/审计可订阅同一 EventBus payload | 不为 CLI 私有造第二协议。 |
+| G7 三条管线解耦 | 展示（EventBus→CLI）≠ 持久化（persist）≠ 上行（messages） | 关显示不应影响上行，落盘也不应污染正文。 |
 
 ### 3.2 非目标
 
@@ -116,7 +117,7 @@
 | R6 工具行样式 | 与报告示例对齐 | 对标：pi-mono/openclaw 都有专门 ToolExecution 组件，而非裸 JSON | `pi-mono/packages/coding-agent/src/modes/interactive/components/tool-execution.ts`；`openclaw/src/tui/components/tool-execution.ts`；`pi-rust-wasm/src/core/tool_dispatcher.rs` | 设计：`CliTurnRenderer` 为内置工具输出一行摘要（start/end 配对 + 状态色）；理由：用户一眼可读，且显著降低超长 JSON 对会话可读性的破坏。 | 未入选：沿用通用「完整参数/结果 JSON 直出」样式（参考 openclaw 组件里 full 模式可展开细节）；拒因：CLI 默认视图噪声高，关键状态反而不突出。 | 用户只看一眼能懂。 |
 | R7 ANSI 策略 | italic 兼容性 | 对标：pi-mono thinking 块常用 italic，终端支持并不稳定 | `pi-mono/packages/coding-agent/src/modes/interactive/components/assistant-message.ts`；`pi-rust-wasm/docs/reports/llm-tool-rounds-cli-display-thinking-protocol.md`（终端兼容性结论） | 设计：thinking 主样式用 `dim + gray`，italic 仅可选；理由：dim 在主流终端兼容更稳，避免「有颜色没字形」导致可读性退化。 | 未入选：pi-mono `assistant-message.ts` 的「主要依赖 italic 区分」样式；拒因：跨终端一致性不足。 | 少作妖，兼容性优先。 |
 | R8 持久化 | transcript 是否含 thinking | 对标：报告建议 thinking 与正文分存；本仓有现成会话上下文拼装路径 | `pi-rust-wasm/src/core/session/manager.rs`；`pi-rust-wasm/src/infra/config.rs`；`pi-mono/packages/ai/src/types.ts` | 设计：默认 `persist=false`，若开启则写结构化字段（非正文拼接）；理由：兼顾隐私/合规与回放可控，避免把思考草稿永久混入 assistant 正文。 | 未入选：把 thinking 直接拼进 assistant 正文后持久化（参考 openclaw `src/tui/tui-formatters.ts` 的拼接展示思路外推到存储）；拒因：后续无法按类型裁剪或做权限隔离。 | 默认别把隐私草稿写进历史。 |
-| R9 多轮 replay | DeepSeek / Anthropic 差异 | 对标：报告指出 DeepSeek 重放 reasoning 会报错，厂商差异显著 | `openclaw/src/agents/pi-embedded-runner/moonshot-stream-wrappers.ts`；`pi-rust-wasm/src/core/session/manager.rs`；`pi-rust-wasm/docs/reports/llm-tool-rounds-cli-display-thinking-protocol.md`（DeepSeek 风险） | 设计：`strip_thinking_on_resend=true` 默认开启 + provider 策略表；理由：先保证跨厂商可用性，再按能力白名单细化保留逻辑。 | 未入选：统一“原样全量重放历史”方案（当前 `pi-rust-wasm/src/core/session/manager.rs` 默认路径）；拒因：在 DeepSeek 等模型上触发 400，且白白消耗上下文窗口。 | 重发要听厂商的话。 |
+| R9 多轮 replay | DeepSeek / Anthropic 差异 | 对标：报告指出 DeepSeek 重放 reasoning 会报错，厂商差异显著 | `openclaw/src/agents/pi-embedded-runner/moonshot-stream-wrappers.ts`；`pi-rust-wasm/src/core/session/manager.rs`；`pi-rust-wasm/docs/reports/llm-tool-rounds-cli-display-thinking-protocol.md`（DeepSeek 风险） | 设计：重发剥留由 provider / 出站层按 API 规则决定（用户 toml 不暴露 `strip_on_resend`）；理由：避免用户开关与厂商协议错配。 | 未入选：统一“原样全量重放历史”方案（当前 `pi-rust-wasm/src/core/session/manager.rs` 默认路径）；拒因：在 DeepSeek 等模型上触发 400，且白白消耗上下文窗口。 | 重发要听厂商的话。 |
 | R10 硬上限 | token vs rounds | 对标：pi-mono 更偏 token/compaction；openclaw 有 tool-loop 检测 | `pi-mono/packages/coding-agent/src/core/compaction/compaction.ts`；`openclaw/src/agents/tool-loop-detection.ts`；`pi-rust-wasm/src/core/agent_loop.rs` | 设计：保留 `max_tool_rounds`（建议 20-30）作为硬上限，同时以 token 预算作主防线；理由：双闸门能同时覆盖“工具循环”与“超长上下文”两类失控场景。 | 未入选：仅依赖 token 压缩/预算、不设轮次硬阈值（参考 `pi-mono/.../compaction.ts` 路线）；拒因：循环类异常在 token 未超限前仍可长时间消耗成本。 | 钱包要管，循环也要管。 |
 
 ### 4.2 实施点（已闭环定义）
@@ -130,7 +131,7 @@
 | **P3** | `stream_handler`：`Thinking` 分支 → `MessageUpdate` payload `kind=thinking_delta` | `src/core/agent_loop/stream_handler.rs` + `src/infra/events/mod.rs`（序列化字段） | `stream_handler_emits_thinking_message_update` | Agent 层透出思考。 |
 | **P4** | 折叠：`show_thinking` 运行时状态 + `/thinking on|off|toggle` | `src/api/chat/commands/*` + `ChatContext` 或 renderer 状态 | `chat_command_toggles_thinking_fold` | CLI 版方案 D。 |
 | **P5** | `ThinkingLevel` + `thinking_format` + `map_reasoning_effort` | `src/infra/config.rs` + `src/core/llm/thinking_policy.rs`（新） | `thinking_level_maps_to_openai_request` | 旋钮不是摆设。 |
-| **P6** | 多轮：`strip_thinking_on_resend` + 厂商表（DeepSeek strip、Anthropic signature 保留策略占位） | `src/core/session/...` 或 `agent_loop` 组装请求前钩子 | `deepseek_rerun_strips_reasoning`（mock） | 别让用户多轮就 400。 |
+| **P6** | 多轮：provider / 出站剥留策略表（DeepSeek strip、Anthropic signature 保留策略占位） | `src/core/session/...` 或 `agent_loop` 组装请求前钩子 | `deepseek_rerun_strips_reasoning`（mock） | 别让用户多轮就 400。 |
 | **P7** | 持久化：`llm.thinking.persist` + audit 钩子 | transcript writer + audit | `thinking_not_in_transcript_by_default` | 合规默认值。 |
 
 **实施小节索引（避免与 §4.1 重复堆叠）**：协议与请求/响应映射见 **§4.2.1**；`ThinkingLevel` 映射见 **§4.2.2**；报告 **§2.2** 的 CLI 排版与 `CliTurnRenderer` 算法见 **§4.2.3**；报告 **§2.7 方案 D** 的折叠与 `/thinking` 见 **§4.2.4**。
@@ -147,7 +148,7 @@
 
 2. **响应表（Inbound）**：`(provider, stream_chunk_shape) -> Vec<StreamEvent>`  
    - Chat Completions：`delta.reasoning_content` / `delta.reasoning` / `delta.reasoning_text`（报告 §3.5：三路检测）  
-   - Responses：`response.output_text.delta`（正文）+ `response.reasoning_summary_text.delta`（**以实际 SSE 事件名为准：实现时以官方文档 + 线上抓包锁定**，当前 `stream.rs` 的 `_ => ignore` 必须替换为显式映射 + 未知事件计数日志）  
+  - Responses：`response.output_text.delta`（正文）+ `response.reasoning_summary_text.delta`（**以实际 SSE 事件名为准：实现时以官方文档 + 线上抓包锁定**，当前 `stream.rs` 的 `_ => ignore` 必须替换为显式映射 + 未知事件 debug 日志）  
    - Anthropic：`thinking_delta` + `signature`（后续）
 
 **依赖顺序（对齐报告「跨章节依赖」）**：
@@ -385,33 +386,41 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
 
 | 键 | 类型 | 默认 | 含义 | 说人话 |
 |----|------|------|------|--------|
-| `llm.thinking.enabled` | bool | `false` | 是否启用思考协议总开关 | 先默认关，避免行为变化。 |
-| `llm.thinking.level` | enum | `off` | `ThinkingLevel` | 想多深。 |
+| `llm.thinking.enabled` | bool | `true` | 是否启用思考协议总开关 | 方案 B：开箱默认开。 |
+| `llm.thinking.level` | enum | `high` | `ThinkingLevel` | 默认深度推理档位。 |
 | `llm.thinking.format` | string? | auto | `thinking_format` | 告诉翻译表用哪套键。 |
-| `llm.thinking.max_tokens` | u32? | model default | Anthropic budget 等 | 控制最长思考。 |
-| `llm.thinking.show` | bool | `false` | CLI 是否展开打印 | 方案 D。 |
+| `llm.thinking.max_tokens` | u32? | model default | 仅豆包 / Moonshot `thinking` 对象路径生效 | OpenAI/Responses 走 `reasoning.effort`。 |
+| `llm.thinking.show` | bool | `true` | CLI 是否展开打印 | 方案 B 默认展开。 |
 | `llm.thinking.persist` | bool | `false` | 是否写入 transcript | 默认别存草稿。 |
-| `llm.thinking.strip_on_resend` | bool | `true` | 多轮重发是否剔除 thinking | 防 DeepSeek 400。 |
 | `llm.thinking.print_to_stderr` | bool | `false` | 与 prompt 冲突时逃生 | 调试用。 |
+| `llm.tool_cli_verbosity` | enum(`off/brief/full`) | `full` | 工具执行行输出档位 | 与 `show_thinking` 解耦。 |
 | `agent.max_tool_rounds` | usize | `20~30`（建议） | 硬上限防死循环 | 最后一道闸。 |
 
-优先级：**env > config > 默认**。
+`show_thinking` 初值优先级：`PI_CHAT_SHOW_THINKING`（已设置）> `llm.thinking.show` > 代码默认。  
+`strip_on_resend`：用户侧不再提供 toml 配置项，重放剥留由 provider / 出站层按 API 规则决定。
+`provider=openai-responses` 时：若 `thinking.enabled && (thinking.show || thinking.persist)`，请求体自动附加 `reasoning.summary="auto"`；否则不请求 summary。
+语言策略：已回退 Prompt 层“强制跟随用户语言”的硬规则；当前以模型默认行为为主，后续是否进入 `Accept-Language` 头方案取决于语言行为观测结果。
 
 ---
 
 ## 10. 错误模型 / 截断 / 警告
 
 ```text
-未知 reasoning SSE 事件
-  -> metrics.counter += 1
+未知 `response.reasoning*` SSE 事件或非预期 payload 形态
   -> debug 日志一行（含 event type）
   -> 不中断主链路
 
 thinking 解析成功但 show=false
   -> 仅维护缓冲，不写屏
 
+reasoning delta 分片包含空白
+  -> 原样透传（不 trim），避免单词粘连
+
 tool 结果超长
   -> 只展示前 N 行 + "...(truncated)"
+
+tool 失败结果为纯字符串
+  -> 直接展示原始错误文本（不退化为 "failed"）
 ```
 
 | 结局 | 抛错？ | 用户可见 | 说人话 |
@@ -426,12 +435,18 @@ tool 结果超长
 
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 |------|-------------|------|--------|
-| 单元 | `openai_stream_test`：reasoning_content → Thinking | PENDING | Completions 线。 |
-| 单元 | `openai_responses_test`：reasoning SSE → Thinking | PENDING | Responses 线。 |
-| 单元 | `stream_handler`：thinking + content 交错顺序 | PENDING | 顺序不能乱。 |
-| 单元 | `CliTurnRenderer`：折叠模式只一行 | PENDING | 方案 D。 |
-| 集成 | `chat`：/thinking toggle + 工具行 | PENDING | 手测自动化。 |
-| 属性 | `thinking_level_mapping`：每档生成请求 JSON 快照 | PENDING | 防回归。 |
+| 单元 | `openai_stream_test`：reasoning_content → Thinking | ✅ | Completions 线已锁定。 |
+| 单元 | `openai_responses_test`：reasoning SSE → Thinking | ✅ | Responses 线已锁定。 |
+| 集成 | `openai_responses_integration_tests::test_openai_responses_chat_stream_reasoning_emits_thinking` | ✅ | 真实 `/v1/responses` 回归，防止“有流无 thinking”漏测。 |
+| 集成 | `openai_responses_integration_tests::...latest_user_language_behavior..._opt_in` | opt-in | 语言行为观测开关：`PI_WASM_E2E_LANGUAGE_BEHAVIOR=1`（兼容旧开关）。 |
+| 单元 | `events_order_test` / `stream_handler`：thinking + content 交错顺序 | ✅ | 顺序不能乱。 |
+| 单元 | `cli_turn_renderer/tests`：折叠模式只一行 + tool 样式 | ✅ | 方案 D 与工具行样式已覆盖。 |
+| 单元 | `cli_turn_renderer/tests::tool_end_failure_with_string_result_shows_real_error_message` | ✅ | 工具失败时展示真实错误，不再只显示 `failed`。 |
+| 单元 | `primitive/tests/suite_test::read_file_missing_path_returns_not_found_error` | ✅ | `read` 不存在路径语义有明确断言。 |
+| 集成 | `cli_tests::test_user_sees_read_failure_reason_in_tool_line` | ✅ | 用户侧可见真实 `read` 失败原因。 |
+| 单元 | `show_thinking_resolve_test`：env > config 覆盖 | ✅ | 初值来源优先级已覆盖。 |
+| 单元 | `thinking_persist_test` + `hydrate_test`：persist 写独立字段且 hydrate 不混正文 | ✅ | 三条管线解耦已覆盖最小闭环。 |
+| 属性 | `thinking_policy/tests::level_to_effort_table_is_stable` | ✅ | 档位映射快照化防回归。 |
 | 文档 | 本文与报告交叉链接一致 | ✅ 2026-05-07 | 字跟得上代码。 |
 
 ---
@@ -462,12 +477,12 @@ tool 结果超长
 1. **终端 ANSI**：thinking 优先 **dim** 而非依赖 italic（报告「流式渲染终端兼容性」）。
 2. **事件模型**：thinking / text / toolcall **分通道**（报告 §2.3 pi-mono 事件链）。
 3. **工具展示**：`ToolCallDelta` 累积 + `tool_execution_*` 展示；结果不单独「漂一条」破坏配对（报告 §2.3 表）。
-4. **verbosity 思想**：openclaw `verboseLevel` → 本方案 `llm.tool_cli_verbosity`（预留键，本期可先实现 `normal/full` 两档）。
+4. **verbosity 思想**：openclaw `verboseLevel` → 本方案 `llm.tool_cli_verbosity`（已落地 `off/brief/full` 三档）。
 5. **协议类型**：OpenAI `reasoning_content`、豆包 `thinking` 对象、Anthropic `thinking_delta + signature`（报告 §3.1）——映射进统一 `StreamEvent::Thinking`。
 6. **三路检测**：`reasoning_content` / `reasoning` / `reasoning_text`（报告 §3.5）。
 7. **双端点策略**：Completions（广覆盖）+ Responses（强推理/跨轮）长期并存（报告 §3.7 方案 B）。
 8. **持久化三案**：禁止纯拼接；推荐结构化字段；独立变体复杂（报告 §3.8）——本方案默认 **不落盘**，若落盘走 **独立字段**。
-9. **多轮策略表**：DeepSeek 必须 strip、Anthropic signature、Responses 自动保留等（报告「Thinking 内容的上下文占用」）——落实为 `strip_on_resend` + provider 表。
+9. **多轮策略表**：DeepSeek 必须 strip、Anthropic signature、Responses 自动保留等（报告「Thinking 内容的上下文占用」）——落实为 provider / 出站策略表（用户侧不暴露 `strip_on_resend`）。
 10. **Token 估算**：`chars/4` 起步 + 中文偏差补偿策略 + 未来 tiktoken（报告「Token 估算精度」）。
 11. **`max_tool_rounds`**：保留并提高到 20–30（报告 §风险）。
 12. **实施顺序指针**：先协议层 `StreamEvent::Thinking`，再展示层，再 token/动态阈值（报告「跨章节依赖」）——反映在 **§4.2.1**（协议）与 **§4.2.3**（CLI 展示）。

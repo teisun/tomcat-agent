@@ -209,8 +209,17 @@ impl OpenAiResponsesProvider {
             &self.thinking_cfg,
             self.thinking_format,
         );
+        let include_reasoning_summary =
+            self.thinking_cfg.enabled && (self.thinking_cfg.show || self.thinking_cfg.persist);
+        let mut reasoning = serde_json::Map::new();
         if let Some(effort) = thinking_fields.reasoning_effort {
-            body["reasoning"] = json!({ "effort": effort });
+            reasoning.insert("effort".to_string(), Value::String(effort));
+        }
+        if include_reasoning_summary {
+            reasoning.insert("summary".to_string(), Value::String("auto".to_string()));
+        }
+        if !reasoning.is_empty() {
+            body["reasoning"] = Value::Object(reasoning);
         }
         if let Some(thinking) = thinking_fields.thinking {
             body["thinking"] = thinking;

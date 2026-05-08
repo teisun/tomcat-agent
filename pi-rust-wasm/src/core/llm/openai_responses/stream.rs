@@ -319,35 +319,93 @@ pub(super) fn responses_chunk_to_events(
         // - `response.reasoning.delta`           （旧 reasoning text 流）
         // - `response.reasoning_text.delta`      （reasoning text 主流命名）
         // - `response.reasoning_summary_text.delta`（reasoning summary 文本流）
-        // 它们都按 `delta: string` 形态携带增量；`*.done` 事件不携带新增 delta，
+        // - `response.reasoning_summary.delta`   （部分网关的 summary 事件）
+        // 它们大多按 `delta: string` 形态携带增量，但也可能是对象/数组；
+        // 这里尽量提取可读文本映射为 Thinking。`*.done` 事件不携带新增 delta，
         // 因此本期忽略，避免重复 emit；后续若需要 done 信号可再扩展。
         "response.reasoning.delta"
         | "response.reasoning_text.delta"
-        | "response.reasoning_summary_text.delta" => {
-            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                if !delta.is_empty() {
-                    events.push(StreamEvent::Thinking {
-                        delta: delta.to_string(),
-                        signature: None,
-                    });
-                }
-            }
-        }
+        | "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary.delta" => push_reasoning_delta_event(&mut events, value, kind),
         "response.reasoning.done"
         | "response.reasoning_text.done"
-        | "response.reasoning_summary_text.done" => {
+        | "response.reasoning_summary_text.done"
+        | "response.reasoning_summary.done" => {
             // 已知的「reasoning 段结束」事件——本期不发额外 StreamEvent，仅静默吃掉，
             // 避免被下面 `_` 分支的未知事件 trace 误报。
         }
         other => {
-            // 未知事件类型：trace 一行供运维排查，但**不阻断**主链路。
-            // 用 `debug!` 而非 `warn!`，避免某些网关的 ping/keepalive 事件刷日志。
-            tracing::debug!(
-                target: "pi_wasm::llm::openai_responses",
-                event = %other,
-                "ignoring unknown Responses SSE event"
-            );
+            if other.starts_with("response.reasoning") {
+                tracing::debug!(
+                    target: "pi_wasm::llm::openai_responses",
+                    event = %other,
+                    payload = ?value,
+                    "unhandled Responses reasoning event; ignoring"
+                );
+            } else {
+                // 未知事件类型：trace 一行供运维排查，但**不阻断**主链路。
+                // 用 `debug!` 而非 `warn!`，避免某些网关的 ping/keepalive 事件刷日志。
+                tracing::debug!(
+                    target: "pi_wasm::llm::openai_responses",
+                    event = %other,
+                    "ignoring unknown Responses SSE event"
+                );
+            }
         }
     }
     events
+}
+
+fn push_reasoning_delta_event(events: &mut Vec<StreamEvent>, value: &Value, kind: &str) {
+    if let Some(delta) = extract_reasoning_delta(value) {
+        events.push(StreamEvent::Thinking {
+            delta,
+            signature: None,
+        });
+    } else {
+        tracing::debug!(
+            target: "pi_wasm::llm::openai_responses",
+            event = %kind,
+            payload = ?value,
+            "reasoning delta event had no extractable text"
+        );
+    }
+}
+
+fn extract_reasoning_delta(value: &Value) -> Option<String> {
+    for key in ["delta", "summary", "text"] {
+        if let Some(raw) = value.get(key) {
+            if let Some(text) = extract_text(raw) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn extract_text(value: &Value) -> Option<String> {
+    match value {
+        // 流式 delta 必须保留原始空白（尤其 token 边界空格），否则会出现单词粘连。
+        // 仅在真正空串时跳过；" " 这类空白分片也应保留。
+        Value::String(text) => (!text.is_empty()).then(|| text.to_string()),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().filter_map(extract_text).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" "))
+            }
+        }
+        Value::Object(map) => {
+            for key in ["text", "delta", "summary", "summary_text", "content"] {
+                if let Some(child) = map.get(key) {
+                    if let Some(text) = extract_text(child) {
+                        return Some(text);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }

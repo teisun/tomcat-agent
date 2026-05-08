@@ -15,7 +15,8 @@ use crate::core::session::store::{
 use crate::core::session::transcript::{
     append_entry, get_branch, get_children, get_entry, get_leaf_entry, read_entries_tail,
     read_header, write_header, BranchSummaryEntry, LabelEntry, MessageEntry, ModelChangeEntry,
-    SessionHeader, SessionInfoEntry, ThinkingLevelChangeEntry, TranscriptEntry,
+    SessionHeader, SessionInfoEntry, ThinkingLevelChangeEntry, ThinkingTraceEntry,
+    TranscriptEntry,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -241,6 +242,31 @@ impl SessionManager {
             parent_id: None,
             timestamp: iso_ts_now()?,
             thinking_level: Some(thinking_level.to_string()),
+        });
+        append_entry(&path, &entry)
+    }
+
+    /// 追加 `thinking_trace`（`llm.thinking.persist=true` 时由 chat 层调用）。
+    ///
+    /// 注意：该条目仅用于调试 / 审计回放，不参与 `init_context_state` hydrate；
+    /// 上行 messages 仍保持 `build_context_from_state -> messages.clone()` 不变。
+    pub fn append_thinking_trace(
+        &self,
+        text: &str,
+        signature: Option<&str>,
+    ) -> Result<(), AppError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        let entry = TranscriptEntry::ThinkingTrace(ThinkingTraceEntry {
+            id: None,
+            parent_id: None,
+            timestamp: iso_ts_now()?,
+            text: text.to_string(),
+            signature: signature.map(str::to_string),
         });
         append_entry(&path, &entry)
     }

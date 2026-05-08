@@ -178,14 +178,17 @@ fn test_openai_request_body_serializes_thinking_object() {
 }
 
 #[test]
-fn test_openai_provider_default_config_has_no_reasoning_fields_in_request() {
+fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
     use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
     use crate::infra::config::ThinkingConfig;
-    let cfg = ThinkingConfig::default();
+    let cfg = ThinkingConfig {
+        enabled: false,
+        ..ThinkingConfig::default()
+    };
     let r = resolve_request_fields(&cfg, ThinkingFormat::Openai);
     assert!(
         r.reasoning_effort.is_none(),
-        "默认 enabled=false 不应写 reasoning_effort"
+        "enabled=false 不应写 reasoning_effort"
     );
     assert!(r.thinking.is_none());
 }

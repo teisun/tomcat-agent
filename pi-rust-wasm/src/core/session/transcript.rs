@@ -25,13 +25,14 @@
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## 8 种 TranscriptEntry（tag = "type"）
+//! ## 9 种 TranscriptEntry（tag = "type"）
 //!
 //! ```text
 //! TranscriptEntry
 //! ├─ Message               role + kind + content[]    （主流：user/assistant/tool）
 //! ├─ ModelChange           model_id 切换记录          （/model 命令）
 //! ├─ ThinkingLevelChange   thinking_level 切换记录    （/thinking 命令）
+//! ├─ ThinkingTrace         thinking 独立持久化条目    （`persist=true` 时写入）
 //! ├─ BranchSummary         分支摘要 + isBoundary       （Layer-1 压缩落点）
 //! ├─ Label                 用户书签                   （/label 命令）
 //! ├─ SessionInfo           会话级元数据                （新版会话补充信息）
@@ -130,6 +131,9 @@ pub enum TranscriptEntry {
     Message(MessageEntry),
     ModelChange(ModelChangeEntry),
     ThinkingLevelChange(ThinkingLevelChangeEntry),
+    /// 模型思考链条独立条目：仅在 `llm.thinking.persist=true` 时写入；
+    /// **不**参与 hydrate 重放（避免污染 assistant 正文与上行 messages）。
+    ThinkingTrace(ThinkingTraceEntry),
     BranchSummary(BranchSummaryEntry),
     Label(LabelEntry),
     SessionInfo(SessionInfoEntry),
@@ -163,6 +167,21 @@ pub struct ThinkingLevelChangeEntry {
     pub parent_id: Option<String>,
     pub timestamp: String,
     pub thinking_level: Option<String>,
+}
+
+/// `type=thinking_trace`：单条 assistant 消息流期间累计的 thinking 文本（合并写入），
+/// 仅在 `llm.thinking.persist = true` 时由 chat 层 listener 落盘。`signature` 仅当
+/// provider 在 `StreamEvent::Thinking` 携带时填入（Anthropic 等），多块/多 signature
+/// 场景留给后续 `outbound-transform-followup` 进一步细化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingTraceEntry {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub timestamp: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// JSONL `type: branch_summary`：上下文压缩摘要行（原 compaction 语义），含 `S::E` 与 boundary 等字段。
@@ -477,6 +496,7 @@ fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::Message(e) => e.id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
+        TranscriptEntry::ThinkingTrace(e) => e.id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
         TranscriptEntry::Label(e) => e.id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
@@ -489,6 +509,7 @@ fn entry_parent_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::Message(e) => e.parent_id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.parent_id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.parent_id.as_deref(),
+        TranscriptEntry::ThinkingTrace(e) => e.parent_id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.parent_id.as_deref(),
         TranscriptEntry::Label(e) => e.parent_id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.parent_id.as_deref(),

@@ -31,6 +31,35 @@ stream_timeout_sec = 60
 proxy = "http://127.0.0.1:7890"
 # api_base_fallback：主 api_base 不可达（连接失败、超时等）时，自动用此 URL 重试；留空则关闭降级。
 api_base_fallback = "https://api.chatanywhere.tech"
+# tool_cli_verbosity：CLI 工具执行行输出档位（与 show_thinking 解耦）。
+# off=不打印工具行；brief=仅打印结束行；full=打印开始+结束，失败时追加 stderr 前 3 行（默认）。
+tool_cli_verbosity = "full"
+
+# ------------------------------------------------------------------------------
+# [llm.thinking] LLM Thinking / Reasoning 协议子配置
+# 产品默认（方案 B）：enabled=true、show=true、level="high"。库集成方若想退回旧
+# 行为请显式设 enabled=false。详见 llm-stream-events-cli-pipeline.md §3.1 G5。
+# ------------------------------------------------------------------------------
+[llm.thinking]
+# enabled：是否在请求体里写 reasoning / thinking 字段并消费 thinking 流；false 时与旧行为完全等价。
+enabled = true
+# level：思考强度档位，可选 off | minimal | low | medium | high | xhigh。代码默认 high。
+level = "high"
+# format：厂商请求格式；省略表示按 [llm].provider 自动推断。
+# 可显式：openai / openrouter / deepseek / zai / qwen / doubao（含 moonshot）
+# format = "openai"
+# max_tokens：仅豆包 / Moonshot 等走 `thinking: { type, max_tokens? }` 时进入请求体；
+# OpenAI / openai-responses 路径用 reasoning.effort（由 level 推导），本字段忽略。
+# max_tokens = 2048
+# show：CLI 默认是否展开 thinking。运行时优先级 PI_CHAT_SHOW_THINKING(env) > 本字段；
+# false 时整回合只打一行 `[thinking] …`。
+show = true
+# persist：是否把 thinking 以独立结构化条目落入 transcript（不污染 assistant 正文）。
+# 默认 false：仅展示，不落盘；调试或合规需要时再开。
+persist = false
+# print_to_stderr：thinking 是否走 stderr。默认 false 与正文同 stdout；遇到
+# readline 抢行时可改 true 让 thinking 改写到 stderr 通道。
+print_to_stderr = false
 
 # ------------------------------------------------------------------------------
 # [storage] 存储配置：工作根目录
