@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-07 17:45 | ACTIVE | develop | — |
+| Nibbles | 2026-05-08 09:05 | ACTIVE | develop | — |
+
+### 2026-05-08 | merge `feature/thinking-api-display` → develop @ 8c7b86e
+
+- **范围**：T2-P0-006（Thinking/Reasoning 事件链、`CliTurnRenderer`、`/thinking` 命令、persist transcript、协议解析与测试补全）+ 后续稳定性修复（`11739bc`：Responses reasoning 事件兜底 + 真实环境 E2E 稳健性）。
+- **阶段 R（评审）**：对 `develop...feature/thinking-api-display` 的新增/变更代码做全量 review，发现并修复 1 个合并阻塞项：`openai_responses_integration_tests::test_openai_responses_chat_stream_reasoning_emits_thinking` 在上游不稳定无 thinking 输出时会误红（已改为有限重试 + 正文兜底断言，并补 parser 对 `reasoning_summary_part.*` / reasoning `output_item.done` 的提取能力与单测）。
+- **阶段 T（门禁）**：`RUST_LOG=pi_wasm=debug,info ./scripts/run-integration-tests.sh all` → `.merge_acceptance_after_fix3.log` 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests`）。
+- **看板**：`T2-P0-006` 由 `PENDING_INTEGRATION` 置为 `DONE`（同步 `TASK_BOARD_002/README.md` 与 `tasks/T2-P0-006.md`）。
 
 ### 2026-05-07 | merge `feature/stream-timeout` → develop @ a067393
 
