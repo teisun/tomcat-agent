@@ -1,0 +1,17 @@
+{
+  "name": "tomcat-openspec",
+  "private": true,
+  "description": "OpenSpec + pi-mono 技术文档与规范",
+  "scripts": {
+    "os:init": "openspec init",
+    "os:update": "openspec update",
+    "os:list": "openspec list --json",
+    "os": "openspec"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "latest"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

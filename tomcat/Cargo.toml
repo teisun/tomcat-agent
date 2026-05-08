@@ -1,0 +1,84 @@
+[package]
+name = "tomcat"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tomcat"
+path = "src/main.rs"
+
+[features]
+default = []
+standalone = ["wasmedge-sdk/standalone"]
+
+[dependencies]
+thiserror = "2.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+config = "0.14"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5.0"
+async-trait = "0.1"
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing-appender = "0.2"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+bytes = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dialoguer = "0.11"
+toml = "0.8"
+tempfile = "3.10"
+parking_lot = "0.12"
+dashmap = "6"
+rustyline = "15"
+syntect = "5"
+ctrlc = { version = "3", features = ["termination"] }
+# 0.13.5-newapi 对应 WasmEdge C 0.13.5，与 install-wasmedge.sh 默认版本一致
+wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot"] }
+swc_common = "18.0.1"
+swc_ecma_ast = "20.0.1"
+swc_ecma_codegen = "23.0.0"
+swc_ecma_parser = "34.0.0"
+swc_ecma_transforms_base = "37.0.0"
+swc_ecma_transforms_typescript = "41.0.0"
+swc_ecma_visit = "20.0.0"
+sha2 = "0.10"
+fs2 = "0.4"
+include_dir = "0.7"
+dotenvy = "0.15"
+regex = "1"
+globset = "0.4"
+shell-words = "1"
+ignore = "0.4"
+base64 = "0.22"
+memchr = "2"
+xxhash-rust = { version = "0.8.15", features = ["xxh32"] }
+
+# Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
+# （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[dev-dependencies]
+tempfile = "3.10"
+assert_cmd = "2"
+predicates = "3"
+# 启用 tokio test-util 仅在测试构建中生效；T2-P0-002 Phase D 用 `tokio::time::pause`
+# / `start_paused = true` 让重试退避走虚拟时钟（详见 src/core/compaction/tests/preheat_and_truncation.rs）。
+# `features` 是 additive：生产构建仍只用 [dependencies] 里的 `full` 集合，不引入测试工具。
+tokio = { version = "1.0", features = ["test-util"] }
+serial_test = "3.4.0"

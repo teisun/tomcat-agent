@@ -1,0 +1,9 @@
+# Harness / local test output (do not commit)
+tool-results/
+node_modules/
+.integration_test_output.log
+.integration_develop_merge.log
+# Repo-local scratch: 约定见 openspec/specs/guides/testing/UNIT_TEST_SPEC.md §1.2
+workspace-temp/
+# 易与「工作区」语义混淆的误创建目录（E2E 等已改用 workspace-temp）
+/workspace/
