@@ -61,6 +61,35 @@ async fn read_file_success() {
 }
 
 #[tokio::test]
+async fn read_file_missing_path_returns_not_found_error() {
+    let dir = std::env::temp_dir().join("pi_wasm_exec_read_missing");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let missing = dir.join("missing_file_for_read.txt");
+    let path_str = missing.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let err = exec
+        .read_file(&path_str, "p1")
+        .await
+        .expect_err("读取不存在路径应返回错误");
+    let msg = err.to_string().to_ascii_lowercase();
+    assert!(
+        msg.contains("no such file")
+            || msg.contains("not found")
+            || msg.contains("os error 2")
+            || msg.contains("不存在"),
+        "错误文案应包含路径不存在语义，实际: {}",
+        err
+    );
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
 async fn read_file_binary_returns_product_error() {
     let dir = std::env::temp_dir().join("pi_wasm_exec_binary_read");
     std::fs::create_dir_all(&dir).unwrap();

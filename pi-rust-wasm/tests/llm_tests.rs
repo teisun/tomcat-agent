@@ -35,7 +35,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
         model: config.default_model.clone(),
-        temperature: Some(0.0),
+        temperature: None,
         max_tokens: Some(10),
         stream: Some(false),
         model_override: None,
@@ -71,7 +71,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],
         model: config.default_model.clone(),
-        temperature: Some(0.0),
+        temperature: None,
         max_tokens: Some(5),
         stream: Some(true),
         model_override: None,

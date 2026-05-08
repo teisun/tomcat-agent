@@ -56,6 +56,20 @@ impl Default for PreflightConfig {
     }
 }
 
+/// CLI 工具执行行的输出档位（与 `show_thinking` 解耦）。
+///
+/// - `off`：不打印 `[tool]` 开始/结束行；
+/// - `brief`：仅打印结束行（成功/失败摘要 + 耗时）；
+/// - `full`：打印开始 + 结束，失败时附加前 3 行 stderr（当前默认行为）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCliVerbosity {
+    Off,
+    Brief,
+    #[default]
+    Full,
+}
+
 /// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流与重试。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
@@ -82,6 +96,91 @@ pub struct LlmConfig {
     /// 当对主 api_base 请求不通（连接失败、超时等）时，自动用该 URL 重试；示例 `https://api.chatanywhere.tech`。留空则关闭自动降级。
     #[serde(default)]
     pub api_base_fallback: Option<String>,
+    /// Thinking / Reasoning 协议接入子配置（T2-P0-006 P5）。
+    #[serde(default)]
+    pub thinking: ThinkingConfig,
+    /// CLI `[tool]` 行输出档位（与 `show_thinking` 独立）。
+    #[serde(default)]
+    pub tool_cli_verbosity: ToolCliVerbosity,
+}
+
+/// Thinking / Reasoning 协议子配置。
+///
+/// **产品默认（方案 B）**：`enabled = true`、`show = true`、`level = "high"`。
+/// 库集成方若希望「装好就和旧行为一致」需显式 `enabled = false`。详见 changelog 与
+/// 架构 §3.1 G5。其它字段：
+///
+/// - `level`: `off | minimal | low | medium | high | xhigh`，由
+///   [`crate::core::llm::thinking_policy::ThinkingLevel`] 解析。
+/// - `format`: `openai | openrouter | deepseek | zai | qwen | doubao` 等；`None`
+///   表示按 provider 名称自动推断。
+/// - `max_tokens`: 仅豆包 / Moonshot 等走 `thinking: { type, max_tokens? }` 时生效；
+///   `openai-responses` / OpenAI 路径用 `reasoning.effort`，**不写**该字段。
+///
+/// **`strip_on_resend` 不再暴露给用户 toml**（`#[serde(skip)]`）：是否剥离重放历史
+/// 中的 thinking 由 provider / 出站层根据各家 API 规则决定，避免用户开关与网关行为
+/// 错配。字段保留供内部 / provider 实现 / 单测使用。
+///
+/// 详细策略见 `docs/architecture/llm-stream-events-cli-pipeline.md` §4.2.2。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ThinkingConfig {
+    /// 全局 thinking 总开关；关闭则其它字段失效（也不发请求）。
+    #[serde(default = "default_thinking_enabled")]
+    pub enabled: bool,
+    /// 强度档位：`off | minimal | low | medium | high | xhigh`。
+    /// 字符串形式由 `core/llm/thinking_policy::ThinkingLevel` 解析。
+    #[serde(default = "default_thinking_level")]
+    pub level: String,
+    /// 厂商请求格式：`openai | openrouter | deepseek | zai | qwen | doubao` 等；
+    /// `None` 表示按 provider 名称自动推断。
+    #[serde(default)]
+    pub format: Option<String>,
+    /// 仅豆包 / Moonshot 等走 `thinking: { type, max_tokens? }` 时进入请求体；
+    /// OpenAI / openai-responses 路径忽略本字段（用 `reasoning.effort`）。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// CLI 默认是否展示 thinking。运行时优先级：
+    /// `PI_CHAT_SHOW_THINKING`（已设置）> 本字段 > 代码默认。
+    #[serde(default = "default_thinking_show")]
+    pub show: bool,
+    /// 是否把 thinking 以独立结构化条目落 transcript（默认 false：仅展示，不持久化）。
+    #[serde(default)]
+    pub persist: bool,
+    /// **不暴露给用户 toml**（`serde(skip)`）：序列化 / 反序列化都跳过；由 provider /
+    /// 出站层赋值或在测试里显式构造。语义：多轮重发是否剥离上下文中的 thinking 块。
+    #[serde(skip, default = "default_true")]
+    pub strip_on_resend: bool,
+    /// thinking 是否打到 stderr（默认 false：走 stdout 与正文同流）。`true` 时
+    /// `CliTurnRenderer` 把 `[thinking]` 区块改写到 stderr，便于 prompt 抢行场景。
+    #[serde(default)]
+    pub print_to_stderr: bool,
+}
+
+fn default_thinking_level() -> String {
+    "high".to_string()
+}
+
+fn default_thinking_enabled() -> bool {
+    true
+}
+
+fn default_thinking_show() -> bool {
+    true
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_thinking_enabled(),
+            level: default_thinking_level(),
+            format: None,
+            max_tokens: None,
+            show: default_thinking_show(),
+            persist: false,
+            strip_on_resend: true,
+            print_to_stderr: false,
+        }
+    }
 }
 
 /// 默认 LLM 后端 id；与 [`crate::core::llm::registered_provider_ids`] 对齐。
@@ -120,6 +219,8 @@ impl Default for LlmConfig {
             stream_timeout_sec: default_stream_timeout_sec(),
             proxy: None,
             api_base_fallback: None,
+            thinking: ThinkingConfig::default(),
+            tool_cli_verbosity: ToolCliVerbosity::default(),
         }
     }
 }

@@ -22,6 +22,7 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
         TranscriptEntry::Message(e) => &e.timestamp,
         TranscriptEntry::ModelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
+        TranscriptEntry::ThinkingTrace(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
         TranscriptEntry::Label(e) => &e.timestamp,
         TranscriptEntry::SessionInfo(e) => &e.timestamp,

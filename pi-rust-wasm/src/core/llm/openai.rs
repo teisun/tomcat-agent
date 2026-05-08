@@ -44,6 +44,14 @@ fn reject_multimodal_parts(messages: &[ChatMessage]) -> Result<(), AppError> {
 
 /// 发给 OpenAI API 的请求体（不含 model_override，stream 由调用方定）。
 /// 使用 max_completion_tokens 以兼容新模型（部分模型已不再接受 max_tokens）。
+///
+/// `reasoning_effort` / `thinking` 是 T2-P0-006 P2a 阶段引入的可选字段：
+/// - `reasoning_effort`：OpenAI 系（gpt-5.x 等）走 `low/medium/high/...` 字符串档位；
+/// - `thinking`：豆包 / Moonshot / 部分网关使用 `{"type": "enabled", ...}` 对象；
+/// - 两者**互斥**，由 P5 阶段的 `thinking_policy` 映射决定使用哪一个；
+/// - 本期均默认 `None`，与 LlmConfig 默认行为一致（不改变现网请求体）。
+///
+/// 详见 `docs/architecture/llm-stream-events-cli-pipeline.md` §4.2.1 / §4.2.2。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 struct OpenAiRequestBody {
@@ -57,6 +65,10 @@ struct OpenAiRequestBody {
     tools: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptionsBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -78,6 +90,10 @@ pub struct OpenAiProvider {
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
+    /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
+    thinking_cfg: crate::infra::config::ThinkingConfig,
+    /// `provider id`，给 ThinkingFormat::Auto 推断使用；`OpenAiProvider` 固定为 `"openai"`。
+    thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
 }
 
 fn stream_timeout_error(stream_timeout_sec: u64) -> AppError {
@@ -143,6 +159,10 @@ impl OpenAiProvider {
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
+        let thinking_format = crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
+            config.thinking.format.as_deref(),
+        )
+        .resolve("openai");
         Ok(Self {
             client,
             base_url,
@@ -152,6 +172,8 @@ impl OpenAiProvider {
             semaphore,
             retry_count: config.retry_count,
             stream_timeout_sec: config.stream_timeout_sec,
+            thinking_cfg: config.thinking.clone(),
+            thinking_format,
         })
     }
 
@@ -177,6 +199,10 @@ impl OpenAiProvider {
         request: &ChatRequest,
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
+        let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
+            &self.thinking_cfg,
+            self.thinking_format,
+        );
         let body = OpenAiRequestBody {
             model: self.effective_model(request),
             messages: request.messages.clone(),
@@ -185,6 +211,8 @@ impl OpenAiProvider {
             stream: false,
             tools: request.tools.clone(),
             stream_options: None,
+            reasoning_effort: thinking_fields.reasoning_effort,
+            thinking: thinking_fields.thinking,
         };
 
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
@@ -360,6 +388,10 @@ impl LlmProvider for OpenAiProvider {
             None
         };
 
+        let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
+            &self.thinking_cfg,
+            self.thinking_format,
+        );
         let body = OpenAiRequestBody {
             model: self.effective_model(&request),
             messages: request.messages.clone(),
@@ -370,6 +402,8 @@ impl LlmProvider for OpenAiProvider {
             stream_options: Some(StreamOptionsBody {
                 include_usage: true,
             }),
+            reasoning_effort: thinking_fields.reasoning_effort,
+            thinking: thinking_fields.thinking,
         };
 
         let resp = self.stream_post_once(&self.base_url, &body).await;
@@ -538,6 +572,13 @@ struct OpenAiStreamChoice {
     finish_reason: Option<String>,
 }
 
+/// 三路 reasoning 字段检测（报告 §3.5）：
+/// - `reasoning_content`：OpenAI 主线 + DeepSeek / Doubao / Moonshot 等兼容网关；
+/// - `reasoning`：部分网关 / OpenRouter 派生命名；
+/// - `reasoning_text`：少量历史样本（保守保留兼容性）。
+///
+/// 三者只要有非空值，就向上发射 `StreamEvent::Thinking`；
+/// 同一帧内出现多个字段时按上述顺序优先取一项，避免重复发射。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct OpenAiStreamDelta {
@@ -545,6 +586,9 @@ struct OpenAiStreamDelta {
     #[allow(dead_code)]
     role: Option<String>,
     tool_calls: Option<Vec<OpenAiStreamToolCallDelta>>,
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
+    reasoning_text: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -566,6 +610,17 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
     if let Some(choices) = chunk.choices {
         if let Some(choice) = choices.into_iter().next() {
             if let Some(delta) = choice.delta {
+                let reasoning_delta = delta
+                    .reasoning_content
+                    .or(delta.reasoning)
+                    .or(delta.reasoning_text)
+                    .filter(|s| !s.is_empty());
+                if let Some(rc) = reasoning_delta {
+                    events.push(StreamEvent::Thinking {
+                        delta: rc,
+                        signature: None,
+                    });
+                }
                 if let Some(content) = delta.content {
                     if !content.is_empty() {
                         events.push(StreamEvent::ContentDelta { delta: content });

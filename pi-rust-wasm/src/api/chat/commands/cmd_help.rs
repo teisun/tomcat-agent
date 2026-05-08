@@ -18,5 +18,5 @@ pub(crate) fn run() -> ChatCommandOutcome {
 }
 
 pub(crate) fn help_text() -> &'static str {
-    "可用命令：\n  /path <绝对路径>   申请该路径的授权（弹出菜单：本次会话 / 写入配置 / 只读 / 禁止 / 取消）\n  /help              显示本帮助"
+    "可用命令：\n  /path <绝对路径>     申请该路径的授权（弹出菜单：本次会话 / 写入配置 / 只读 / 禁止 / 取消）\n  /thinking [on|off|toggle]  折叠/展开模型 thinking 输出（缺省=toggle）\n  /help                显示本帮助"
 }

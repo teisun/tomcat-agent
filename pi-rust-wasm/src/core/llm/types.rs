@@ -494,11 +494,25 @@ pub struct ChatResponseChoice {
 }
 
 /// 流式事件类型，与 pi-mono 流式 API 对齐。
+///
+/// `Thinking` 与 `ContentDelta` 物理同源（都是模型流），但 **语义分通道**：
+/// - `ContentDelta`：assistant 正文，进 Markdown 渲染 / transcript；
+/// - `Thinking`：思考/推理增量（OpenAI `reasoning_content`、Responses
+///   `response.reasoning_summary_text.delta`、Anthropic `thinking_delta` 等
+///   归一映射），由上层决定是否折叠展示与是否落盘。
+///
+/// 详细决策见 `docs/architecture/llm-stream-events-cli-pipeline.md` §4.1 R2 / §5.1。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
     ContentDelta {
         delta: String,
+    },
+    /// 思考/推理增量；`signature` 仅 Anthropic 类协议会带（用于多轮重发校验）。
+    Thinking {
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     /// Tool call 增量（OpenAI streaming 格式）。
     ToolCallDelta {

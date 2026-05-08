@@ -308,6 +308,333 @@ fn responses_chunk_completed_emits_finish_and_usage() {
 }
 
 #[test]
+fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        thinking: crate::infra::config::ThinkingConfig {
+            enabled: false,
+            ..crate::infra::config::ThinkingConfig::default()
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert!(
+        body.get("reasoning").is_none(),
+        "thinking.enabled=false 不应写 reasoning: {}",
+        body
+    );
+    assert!(body.get("thinking").is_none());
+}
+
+#[test]
+fn responses_build_request_body_high_writes_reasoning_effort() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        thinking: crate::infra::config::ThinkingConfig {
+            enabled: true,
+            level: "high".into(),
+            show: false,
+            persist: false,
+            ..crate::infra::config::ThinkingConfig::default()
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(
+        body["reasoning"]["effort"], "high",
+        "thinking 启用后应写 reasoning.effort: {}",
+        body
+    );
+    assert!(
+        body["reasoning"].get("summary").is_none(),
+        "show=false && persist=false 时不应请求 reasoning.summary: {}",
+        body
+    );
+    assert!(
+        body.get("thinking").is_none(),
+        "OpenAI 系不应同时写 thinking 对象"
+    );
+}
+
+#[test]
+fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        thinking: crate::infra::config::ThinkingConfig {
+            enabled: true,
+            show: true,
+            persist: false,
+            ..crate::infra::config::ThinkingConfig::default()
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(body["reasoning"]["summary"], "auto", "show=true 时应请求 summary");
+}
+
+#[test]
+fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        thinking: crate::infra::config::ThinkingConfig {
+            enabled: true,
+            show: false,
+            persist: true,
+            ..crate::infra::config::ThinkingConfig::default()
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(
+        body["reasoning"]["summary"], "auto",
+        "persist=true 时应请求 summary，即使 show=false"
+    );
+}
+
+#[test]
+fn responses_build_request_body_show_and_persist_false_omits_reasoning_summary() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        thinking: crate::infra::config::ThinkingConfig {
+            enabled: true,
+            show: false,
+            persist: false,
+            ..crate::infra::config::ThinkingConfig::default()
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert!(
+        body["reasoning"].get("summary").is_none(),
+        "show/persist 都为 false 时不应请求 summary: {}",
+        body
+    );
+}
+
+#[test]
+fn responses_chunk_reasoning_delta_emits_thinking() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    // 旧命名：response.reasoning.delta
+    let v1 = json!({"type": "response.reasoning.delta", "delta": "step a"});
+    let e1 = responses_chunk_to_events(&v1, &mut tracks);
+    assert_eq!(e1.len(), 1);
+    assert!(
+        matches!(&e1[0], StreamEvent::Thinking { delta, signature: None } if delta == "step a"),
+        "got {:?}",
+        e1[0]
+    );
+
+    // 主流命名：response.reasoning_text.delta
+    let v2 = json!({"type": "response.reasoning_text.delta", "delta": "step b"});
+    let e2 = responses_chunk_to_events(&v2, &mut tracks);
+    assert!(
+        matches!(&e2[0], StreamEvent::Thinking { delta, .. } if delta == "step b"),
+        "got {:?}",
+        e2[0]
+    );
+
+    // Summary 流：response.reasoning_summary_text.delta
+    let v3 = json!({"type": "response.reasoning_summary_text.delta", "delta": "outline"});
+    let e3 = responses_chunk_to_events(&v3, &mut tracks);
+    assert!(
+        matches!(&e3[0], StreamEvent::Thinking { delta, .. } if delta == "outline"),
+        "got {:?}",
+        e3[0]
+    );
+
+    // 兼容形态：response.reasoning_summary.delta（summary 数组）
+    let v4 = json!({
+        "type": "response.reasoning_summary.delta",
+        "summary": [{"type": "summary_text", "text": "plan first"}]
+    });
+    let e4 = responses_chunk_to_events(&v4, &mut tracks);
+    assert!(
+        matches!(&e4[0], StreamEvent::Thinking { delta, .. } if delta == "plan first"),
+        "got {:?}",
+        e4[0]
+    );
+
+    // 空格敏感：前导空格必须保留，避免词边界丢失。
+    let v5 = json!({"type": "response.reasoning_text.delta", "delta": " step c"});
+    let e5 = responses_chunk_to_events(&v5, &mut tracks);
+    assert!(
+        matches!(&e5[0], StreamEvent::Thinking { delta, .. } if delta == " step c"),
+        "got {:?}",
+        e5[0]
+    );
+
+    // 仅空格分片也应透传（用于跨帧拼词）。
+    let v6 = json!({"type": "response.reasoning_text.delta", "delta": " "});
+    let e6 = responses_chunk_to_events(&v6, &mut tracks);
+    assert!(
+        matches!(&e6[0], StreamEvent::Thinking { delta, .. } if delta == " "),
+        "got {:?}",
+        e6[0]
+    );
+
+    // 部分网关仅在 summary_part.done 给出文本。
+    let v7 = json!({
+        "type": "response.reasoning_summary_part.done",
+        "part": {"type": "summary_text", "text": "final summary"}
+    });
+    let e7 = responses_chunk_to_events(&v7, &mut tracks);
+    assert!(
+        matches!(&e7[0], StreamEvent::Thinking { delta, .. } if delta == "final summary"),
+        "got {:?}",
+        e7[0]
+    );
+
+    // 兼容 output_item.done 中的 reasoning item（无 delta 事件时兜底）。
+    let v8 = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "from output item"}]
+        }
+    });
+    let e8 = responses_chunk_to_events(&v8, &mut tracks);
+    assert!(
+        matches!(&e8[0], StreamEvent::Thinking { delta, .. } if delta == "from output item"),
+        "got {:?}",
+        e8[0]
+    );
+}
+
+#[test]
+fn responses_chunk_reasoning_delta_preserves_word_boundaries_between_frames() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v1 = json!({"type": "response.reasoning_text.delta", "delta": "hello "});
+    let v2 = json!({"type": "response.reasoning_text.delta", "delta": "world"});
+    let e1 = responses_chunk_to_events(&v1, &mut tracks);
+    let e2 = responses_chunk_to_events(&v2, &mut tracks);
+    let joined = [e1, e2]
+        .into_iter()
+        .flatten()
+        .filter_map(|ev| match ev {
+            StreamEvent::Thinking { delta, .. } => Some(delta),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(joined, "hello world");
+}
+
+#[test]
+fn responses_chunk_reasoning_done_is_silent() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({"type": "response.reasoning_text.done"});
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "reasoning *.done 不应额外发事件: {:?}", e);
+
+    let v2 = json!({"type": "response.reasoning_summary.done"});
+    let e2 = responses_chunk_to_events(&v2, &mut tracks);
+    assert!(
+        e2.is_empty(),
+        "reasoning summary *.done 不应额外发事件: {:?}",
+        e2
+    );
+}
+
+#[test]
+fn responses_chunk_reasoning_empty_delta_is_skipped() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({"type": "response.reasoning_text.delta", "delta": ""});
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(
+        e.is_empty(),
+        "空 reasoning delta 不应触发 Thinking: {:?}",
+        e
+    );
+}
+
+#[test]
+fn responses_chunk_unknown_event_is_silent_not_panic() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({"type": "response.something.never.heard.of"});
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "未知事件应静默忽略: {:?}", e);
+}
+
+#[test]
+fn responses_chunk_output_item_done_non_reasoning_is_silent() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let v = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "content": [{"type": "output_text", "text": "final text"}]
+        }
+    });
+    let e = responses_chunk_to_events(&v, &mut tracks);
+    assert!(e.is_empty(), "非 reasoning output_item.done 不应映射 Thinking: {:?}", e);
+}
+
+#[test]
 fn responses_chunk_failed_event_emits_error_finish_reason() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     let value = json!({

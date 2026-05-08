@@ -133,6 +133,19 @@ pub mod wire {
 pub struct Message(pub serde_json::Value);
 
 /// 占位：Assistant 消息流式事件。
+///
+/// **payload schema（T2-P0-006 P3 起）**：
+///
+/// ```json
+/// {
+///   "kind": "content_delta" | "thinking_delta",   // 必有；老消费者可忽略
+///   "delta": "...",                                 // 必有：增量文本
+///   "signature": "..."                              // 可选：仅 thinking_delta + Anthropic
+/// }
+/// ```
+///
+/// 兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径，
+/// 除非订阅者显式按 `kind` 分流）。
 #[derive(Debug, Clone, Serialize)]
 pub struct AssistantMessageEvent(pub serde_json::Value);
 

@@ -75,7 +75,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
@@ -83,10 +83,8 @@ use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::ChatMessage;
 use crate::core::session::manager::{build_context_from_state, init_context_state};
 use crate::infra::error::AppError;
-use crate::infra::event_bus::EventContext;
 use crate::infra::{
-    wire, AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder,
-    TracingAuditRecorder,
+    AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
@@ -100,6 +98,7 @@ use super::render::MarkdownRenderer;
 #[cfg(test)]
 mod tests;
 
+pub mod cli_turn_renderer;
 pub mod commands;
 pub mod events;
 pub mod permission;
@@ -147,6 +146,10 @@ pub struct ChatContext {
     /// 由 `ChatContext` 持有 → 每次 turn 创建 `AgentLoopConfig` 时 `Arc::clone` 注入，
     /// 多轮 turn 内复用同一张表（实现「同 session 跨 turn dedup」）。
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    /// `CliTurnRenderer` 的 thinking 折叠/展开开关（T2-P0-006 P0/P4）。
+    /// 进程级初值由 `PI_CHAT_SHOW_THINKING=0/1` 环境变量决定，缺省 `false`；
+    /// `/thinking on|off|toggle` 命令在运行时切换；`CliTurnRenderer` 持有同一 Arc 读位。
+    pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ChatContext {
@@ -265,6 +268,10 @@ impl ChatContext {
             agent_trail_dir.join("tool-results"),
         ));
 
+        // 在 `config` 被 move 进 Self 之前求值：`PI_CHAT_SHOW_THINKING` 已设置时优先环境变量，
+        // 否则回落到 `config.llm.thinking.show`（架构 §3.1 / §1 已决策「`show` 初值来源」）。
+        let initial_show_thinking = resolve_initial_show_thinking(&config.llm.thinking);
+
         Ok(Self {
             session,
             llm,
@@ -285,6 +292,9 @@ impl ChatContext {
             read_file_state: Arc::new(
                 crate::core::tools::pipeline::read_state::ReadFileState::default(),
             ),
+            show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(
+                initial_show_thinking,
+            )),
         })
     }
 
@@ -689,25 +699,27 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
         agent_loop.set_context_state(Some(context_state));
 
-        let renderer_clone = Arc::clone(&renderer);
-        let listener_id = ctx.event_bus.on(
-            wire::WIRE_MESSAGE_UPDATE,
-            Box::new(move |evt: EventContext| {
-                if let Some(delta) = evt
-                    .payload
-                    .get("assistantMessageEvent")
-                    .and_then(|e| e.get("delta"))
-                    .and_then(|d| d.as_str())
-                {
-                    renderer_clone.lock().push(delta);
-                    while let Some(chunk) = renderer_clone.lock().take_ready() {
-                        print!("{}", chunk);
-                        let _ = io::stdout().flush();
-                    }
-                }
-                Ok(())
-            }),
+        // T2-P0-006 P0：CLI 单订阅者渲染器，统一处理 thinking / 正文 / tool_execution，
+        // 避免多个回调各自 `print!` 引起乱序。
+        let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
+            Arc::clone(&renderer),
+            Arc::clone(&ctx.show_thinking),
+            ctx.config.llm.thinking.print_to_stderr,
+            ctx.config.llm.tool_cli_verbosity,
         );
+        let listener_ids = cli_turn_renderer.register(&*ctx.event_bus);
+        let thinking_persist_listener_ids = if ctx.config.llm.thinking.persist {
+            let transcript_path = ctx
+                .session
+                .current_transcript_path()?
+                .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+            Some(register_thinking_persist_listeners(
+                &*ctx.event_bus,
+                transcript_path,
+            ))
+        } else {
+            None
+        };
 
         print!("\npi.{}> ", ctx.config.agent.id);
         io::stdout().flush().map_err(AppError::Io)?;
@@ -719,7 +731,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             message_stream_listener_registered = true
         );
         let outcome = agent_loop.run(messages).await;
-        ctx.event_bus.off(listener_id);
+        if let Some(ids) = &thinking_persist_listener_ids {
+            unregister_thinking_persist_listeners(&*ctx.event_bus, ids);
+        }
+        cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.event_bus, &listener_ids);
 
         // T-004 / T-017：`Completed` 与 `Interrupted` 走**同一条**持久化路径——
         // partial assistant（content_buf 截短处）+ 已完成的 tool_result 都已被
@@ -804,6 +819,100 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 /// 判断错误是否致命（配置缺失等不可恢复场景）；API/网络错误为非致命。
 fn is_fatal_error(e: &AppError) -> bool {
     matches!(e, AppError::Config(_))
+}
+
+/// CLI 启动时 `show_thinking` 初值的来源裁决：
+///
+/// 优先级 `PI_CHAT_SHOW_THINKING` env（已设置）> `config.llm.thinking.show`。
+/// env 取值与历史一致：`1 / true / yes / on`（大小写）当作 true，其余字符串当作 false。
+/// env **未设置**时直接读 toml 中的 `show`，让用户配置不被静默忽略。
+///
+/// 见架构 §3.1 G5 与计划 §1 已决策「`show` 初值来源」。
+fn resolve_initial_show_thinking(thinking: &crate::infra::config::ThinkingConfig) -> bool {
+    match std::env::var("PI_CHAT_SHOW_THINKING") {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "True" | "yes" | "on"),
+        Err(_) => thinking.show,
+    }
+}
+
+#[derive(Default)]
+struct ThinkingPersistState {
+    text: String,
+    signature: Option<String>,
+}
+
+struct ThinkingPersistListenerIds {
+    msg_update: crate::infra::event_bus::EventListenerId,
+    msg_end: crate::infra::event_bus::EventListenerId,
+}
+
+fn register_thinking_persist_listeners(
+    bus: &dyn EventBus,
+    transcript_path: std::path::PathBuf,
+) -> ThinkingPersistListenerIds {
+    let state = Arc::new(Mutex::new(ThinkingPersistState::default()));
+
+    let state_for_update = Arc::clone(&state);
+    let msg_update = bus.on(
+        crate::infra::wire::WIRE_MESSAGE_UPDATE,
+        Box::new(move |evt: crate::infra::event_bus::EventContext| {
+            let event = match evt.payload.get("assistantMessageEvent") {
+                Some(e) => e,
+                None => return Ok(()),
+            };
+            if event.get("kind").and_then(|v| v.as_str()) != Some("thinking_delta") {
+                return Ok(());
+            }
+            let delta = event.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+            if delta.is_empty() {
+                return Ok(());
+            }
+            let mut st = state_for_update.lock();
+            st.text.push_str(delta);
+            if let Some(sig) = event.get("signature").and_then(|v| v.as_str()) {
+                st.signature = Some(sig.to_string());
+            }
+            Ok(())
+        }),
+    );
+
+    let state_for_end = Arc::clone(&state);
+    let msg_end = bus.on(
+        crate::infra::wire::WIRE_MESSAGE_END,
+        Box::new(move |_evt: crate::infra::event_bus::EventContext| {
+            let (text, signature) = {
+                let mut st = state_for_end.lock();
+                if st.text.is_empty() {
+                    return Ok(());
+                }
+                (std::mem::take(&mut st.text), st.signature.take())
+            };
+            let entry = crate::core::session::TranscriptEntry::ThinkingTrace(
+                crate::core::session::ThinkingTraceEntry {
+                    id: None,
+                    parent_id: None,
+                    timestamp: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    text,
+                    signature,
+                },
+            );
+            if let Err(e) = crate::core::session::append_entry(&transcript_path, &entry) {
+                warn!(error = %e, "append thinking_trace entry failed");
+            }
+            Ok(())
+        }),
+    );
+
+    ThinkingPersistListenerIds {
+        msg_update,
+        msg_end,
+    }
+}
+
+fn unregister_thinking_persist_listeners(bus: &dyn EventBus, ids: &ThinkingPersistListenerIds) {
+    bus.off(ids.msg_update);
+    bus.off(ids.msg_end);
 }
 
 fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {

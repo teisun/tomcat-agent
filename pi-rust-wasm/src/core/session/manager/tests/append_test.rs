@@ -42,6 +42,30 @@ fn append_model_change_succeeds() {
 }
 
 #[test]
+fn append_thinking_trace_succeeds() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_thinking_trace("chain-of-thought-part", Some("sig-1"))
+        .unwrap();
+
+    let entries = mgr.get_entries(10).unwrap();
+    assert_eq!(entries.len(), 1);
+    match &entries[0] {
+        TranscriptEntry::ThinkingTrace(e) => {
+            assert_eq!(e.text, "chain-of-thought-part");
+            assert_eq!(e.signature.as_deref(), Some("sig-1"));
+        }
+        other => panic!("expected thinking_trace, got {:?}", other),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn try_append_returns_err_on_violation() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

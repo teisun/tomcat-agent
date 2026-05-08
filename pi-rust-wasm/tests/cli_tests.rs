@@ -8,6 +8,7 @@ mod common;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::path::PathBuf;
 use tracing::{info, info_span};
 
 #[allow(deprecated)]
@@ -1557,15 +1558,15 @@ fn test_user_asks_pi_to_run_bash_command() {
     );
 }
 
-/// [E2E-CLI-013] 用户要求 pi 在工作区 workspace 目录下写文件
+/// [E2E-CLI-016B] 用户触发 read 失败时，终端应显示真实错误原因（非 failed 占位）
 ///
-/// 验证：exit 0；workspace-main/hello_e2e.txt 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
-/// 意义：默认白名单为 work_dir/workspace-main，write_file 工具调用 E2E 门禁
+/// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
+/// 要求：OPENAI_API_KEY 环境变量已设置
 #[test]
-fn test_user_asks_pi_to_write_hello_world_bash() {
+fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
     let _ = dotenvy::dotenv().ok();
-    let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
+    let _span = info_span!("test_user_sees_read_failure_reason_in_tool_line").entered();
 
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
@@ -1585,13 +1586,102 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         )
     });
 
-    info!("Act: pi chat stdin 要求在 workspace 下创建 hello_e2e.txt，timeout 60s");
+    let missing_path = work_dir.join("workspace-main/definitely_missing_read_e2e.txt");
+    let prompt = format!(
+        "请只调用一次 read 工具读取文件 {}，offset=1，limit=5。不要调用其他工具。",
+        missing_path.display()
+    );
+
+    info!("Act: pi chat 触发 read 不存在路径错误，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("OPENAI_API_KEY", &api_key)
         .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
-        .write_stdin("请在当前工作区的 workspace 目录下创建文件 hello_e2e.txt，内容写 Hello E2E\n")
+        .write_stdin(format!("{prompt}\n"))
+        .timeout(std::time::Duration::from_secs(60));
+    let assert = c.assert();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    info!("Assert: stderr 含 [tool] read + 真实错误；stderr: {}", trunc(&stderr, 1200));
+    assert.success();
+    assert!(
+        stderr.contains("[tool] read"),
+        "stderr 应出现 [tool] read 行，实际: {}",
+        trunc(&stderr, 600)
+    );
+    let stderr_lower = stderr.to_ascii_lowercase();
+    assert!(
+        stderr_lower.contains("no such file")
+            || stderr_lower.contains("not found")
+            || stderr_lower.contains("os error 2")
+            || stderr.contains("不存在"),
+        "stderr 应包含路径不存在语义，实际: {}",
+        trunc(&stderr, 800)
+    );
+    assert!(
+        !stderr.contains("✗ failed"),
+        "有真实错误文本时不应退化成 failed 占位，实际: {}",
+        trunc(&stderr, 800)
+    );
+}
+
+/// [E2E-CLI-013] 用户要求 pi 在仓库约定的 `workspace-temp` 子目录下写文件
+///
+/// 验证：exit 0；`{CARGO_MANIFEST_DIR}/workspace-temp/e2e_cli013_hello/hello_e2e.txt` 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
+/// 意义：scratch 走 `workspace-temp/`（UNIT_TEST_SPEC §1.2），避免提示词里的「workspace 目录」被模型误解为 crate 下 `workspace/` 子目录
+#[test]
+fn test_user_asks_pi_to_write_hello_world_bash() {
+    common::setup_logging();
+    let _ = dotenvy::dotenv().ok();
+    let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
+    let config_path = dir.path().join(".pi_").join("pi.config.toml");
+
+    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("workspace-temp")
+        .join("e2e_cli013_hello");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let scratch_canon = scratch.canonicalize().expect("workspace-temp scratch path");
+    let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
+
+    info!("Arrange: pi init + OPENAI_API_KEY");
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
+    });
+
+    info!("Arrange: pi workspace add {}", scratch_str);
+    cmd()
+        .args(["workspace", "add", scratch_str])
+        .env("HOME", dir.path())
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加工作区"));
+
+    let prompt = format!(
+        "请在目录 {} 下创建文件 hello_e2e.txt，内容写 Hello E2E。不要写到其他路径。\n",
+        scratch_canon.display()
+    );
+    info!("Act: pi chat stdin 要求在 workspace-temp 子目录创建 hello_e2e.txt，timeout 60s");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("PI_WASM__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &api_key)
+        .env("PI_WASM__CONFIG_PATH", config_path.to_str().unwrap())
+        .write_stdin(prompt)
         .timeout(std::time::Duration::from_secs(60));
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
@@ -1601,7 +1691,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     );
     assert.success();
 
-    let hello_path = work_dir.join("workspace-main/hello_e2e.txt");
+    let hello_path = scratch_canon.join("hello_e2e.txt");
     if hello_path.exists() {
         let content = fs::read_to_string(&hello_path).unwrap();
         assert!(

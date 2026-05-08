@@ -1,0 +1,232 @@
+//! `thinking_policy` 单测：覆盖 ThinkingLevel/Format 解析与 resolve_request_fields 映射表。
+
+use super::{
+    resolve_request_fields, should_persist_thinking, should_strip_on_resend,
+    strip_anthropic_thinking_blocks, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+};
+use crate::infra::config::ThinkingConfig;
+
+fn cfg_with(enabled: bool, level: &str) -> ThinkingConfig {
+    ThinkingConfig {
+        enabled,
+        level: level.to_string(),
+        ..ThinkingConfig::default()
+    }
+}
+
+#[test]
+fn level_parse_known_strings() {
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("off"),
+        (ThinkingLevel::Off, true)
+    );
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("MINIMAL"),
+        (ThinkingLevel::Minimal, true)
+    );
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("Medium"),
+        (ThinkingLevel::Medium, true)
+    );
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("xhigh"),
+        (ThinkingLevel::Xhigh, true)
+    );
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("x-high"),
+        (ThinkingLevel::Xhigh, true)
+    );
+}
+
+#[test]
+fn level_parse_unknown_falls_back_to_medium_and_signals_false() {
+    assert_eq!(
+        ThinkingLevel::parse_or_medium("turbo"),
+        (ThinkingLevel::Medium, false)
+    );
+}
+
+#[test]
+fn format_resolve_auto_by_provider_id() {
+    assert_eq!(
+        ThinkingFormat::Auto.resolve("openai"),
+        ThinkingFormat::Openai
+    );
+    assert_eq!(
+        ThinkingFormat::Auto.resolve("openai-responses"),
+        ThinkingFormat::Openai
+    );
+    assert_eq!(
+        ThinkingFormat::Auto.resolve("deepseek"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        ThinkingFormat::Auto.resolve("doubao"),
+        ThinkingFormat::Doubao
+    );
+    // 已显式指定的 format 不会被改写
+    assert_eq!(
+        ThinkingFormat::Doubao.resolve("openai"),
+        ThinkingFormat::Doubao
+    );
+}
+
+#[test]
+fn disabled_or_off_yields_no_fields() {
+    let off = resolve_request_fields(&cfg_with(false, "high"), ThinkingFormat::Openai);
+    assert_eq!(off, ThinkingRequestFields::default());
+    let off2 = resolve_request_fields(&cfg_with(true, "off"), ThinkingFormat::Openai);
+    assert_eq!(off2, ThinkingRequestFields::default());
+}
+
+#[test]
+fn openai_level_maps_to_reasoning_effort() {
+    let r = resolve_request_fields(&cfg_with(true, "minimal"), ThinkingFormat::Openai);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("low"));
+    assert!(r.thinking.is_none());
+    let r = resolve_request_fields(&cfg_with(true, "medium"), ThinkingFormat::Openai);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("medium"));
+    let r = resolve_request_fields(&cfg_with(true, "xhigh"), ThinkingFormat::Openai);
+    assert_eq!(
+        r.reasoning_effort.as_deref(),
+        Some("high"),
+        "xhigh 默认降级到 high，避免在不支持的模型上 400"
+    );
+}
+
+#[test]
+fn doubao_level_maps_to_thinking_object() {
+    let r = resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Doubao);
+    let v = r.thinking.expect("doubao 应返回 thinking 对象");
+    assert_eq!(v["type"], "enabled");
+    assert!(v.get("max_tokens").is_none());
+    assert!(
+        r.reasoning_effort.is_none(),
+        "互斥：豆包不应出 reasoning_effort"
+    );
+}
+
+#[test]
+fn doubao_max_tokens_propagates_when_set() {
+    let mut c = cfg_with(true, "high");
+    c.max_tokens = Some(2048);
+    let r = resolve_request_fields(&c, ThinkingFormat::Doubao);
+    assert_eq!(r.thinking.as_ref().unwrap()["max_tokens"], 2048);
+}
+
+#[test]
+fn deepseek_qwen_have_no_request_field() {
+    assert_eq!(
+        resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Deepseek),
+        ThinkingRequestFields::default()
+    );
+    assert_eq!(
+        resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Qwen),
+        ThinkingRequestFields::default()
+    );
+}
+
+#[test]
+fn strip_on_resend_default_is_true_for_known_formats() {
+    let cfg = ThinkingConfig::default();
+    // 默认 strip_on_resend=true，已知 format 下具备「保留剥离意愿」语义。
+    assert!(should_strip_on_resend(&cfg, ThinkingFormat::Openai));
+    assert!(should_strip_on_resend(&cfg, ThinkingFormat::Deepseek));
+    assert!(should_strip_on_resend(&cfg, ThinkingFormat::Doubao));
+}
+
+#[test]
+fn strip_on_resend_off_when_explicitly_disabled() {
+    let cfg = ThinkingConfig {
+        strip_on_resend: false,
+        ..ThinkingConfig::default()
+    };
+    assert!(!should_strip_on_resend(&cfg, ThinkingFormat::Openai));
+    assert!(!should_strip_on_resend(&cfg, ThinkingFormat::Deepseek));
+}
+
+#[test]
+fn strip_on_resend_returns_false_for_auto_unresolved_format() {
+    let cfg = ThinkingConfig::default();
+    // Auto 未推断时不下结论，留给 caller 显式 resolve 后再判。
+    assert!(!should_strip_on_resend(&cfg, ThinkingFormat::Auto));
+}
+
+#[test]
+fn persist_default_is_false_even_when_enabled() {
+    let cfg = ThinkingConfig {
+        enabled: true,
+        persist: false,
+        ..ThinkingConfig::default()
+    };
+    assert!(!should_persist_thinking(&cfg));
+}
+
+#[test]
+fn persist_requires_both_enabled_and_persist_true() {
+    let mut cfg = ThinkingConfig {
+        enabled: false,
+        persist: true,
+        ..ThinkingConfig::default()
+    };
+    // 仅 persist=true、enabled=false → 不持久化（避免 thinking 关闭时落孤儿数据）。
+    assert!(!should_persist_thinking(&cfg));
+    cfg.enabled = true;
+    assert!(should_persist_thinking(&cfg));
+}
+
+#[test]
+fn anthropic_strip_removes_thinking_blocks() {
+    let mut v = serde_json::json!([
+        {"type": "thinking", "data": "internal"},
+        {"type": "text", "text": "hello"},
+        {"type": "thinking", "data": "more"},
+    ]);
+    let removed = strip_anthropic_thinking_blocks(&mut v);
+    assert_eq!(removed, 2);
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["type"], "text");
+}
+
+#[test]
+fn anthropic_strip_is_noop_on_non_array() {
+    let mut v = serde_json::json!({"type":"text", "text":"hi"});
+    assert_eq!(strip_anthropic_thinking_blocks(&mut v), 0);
+    let mut v = serde_json::json!("plain string");
+    assert_eq!(strip_anthropic_thinking_blocks(&mut v), 0);
+}
+
+#[test]
+fn anthropic_strip_keeps_unknown_types() {
+    let mut v = serde_json::json!([
+        {"type": "tool_use", "name": "bash"},
+        {"type": "thinking", "data": "x"},
+        {"unknown": true},
+    ]);
+    let removed = strip_anthropic_thinking_blocks(&mut v);
+    assert_eq!(removed, 1, "只剥 type=thinking，其它包括无 type 的全保留");
+    assert_eq!(v.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn level_to_effort_table_is_stable() {
+    let cases = [
+        ("off", None),
+        ("minimal", Some("low")),
+        ("low", Some("low")),
+        ("medium", Some("medium")),
+        ("high", Some("high")),
+        ("xhigh", Some("high")),
+    ];
+    for (level, expected) in cases {
+        let r = resolve_request_fields(&cfg_with(true, level), ThinkingFormat::Openai);
+        assert_eq!(
+            r.reasoning_effort.as_deref(),
+            expected,
+            "level={} 不符: {:?}",
+            level,
+            r
+        );
+    }
+}

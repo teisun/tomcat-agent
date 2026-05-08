@@ -313,9 +313,132 @@ pub(super) fn responses_chunk_to_events(
                 reason: format!("error:{}", msg),
             });
         }
-        _ => {
-            // 其它 event 暂忽略（reasoning / output_item.done 等），不影响主链路。
+        // T2-P0-006 P2b：Reasoning / Thinking 流式事件归一映射。
+        //
+        // OpenAI Responses 在不同版本/网关下出现过以下事件名（均包含 reasoning 字段）：
+        // - `response.reasoning.delta`           （旧 reasoning text 流）
+        // - `response.reasoning_text.delta`      （reasoning text 主流命名）
+        // - `response.reasoning_summary_text.delta`（reasoning summary 文本流）
+        // - `response.reasoning_summary.delta`   （部分网关的 summary 事件）
+        // 它们大多按 `delta: string` 形态携带增量，但也可能是对象/数组；
+        // 这里尽量提取可读文本映射为 Thinking。`*.done` 事件不携带新增 delta，
+        // 因此本期忽略，避免重复 emit；后续若需要 done 信号可再扩展。
+        "response.reasoning.delta"
+        | "response.reasoning_text.delta"
+        | "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary.delta"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_part.added" => {
+            push_reasoning_delta_event(&mut events, value, kind)
+        }
+        "response.output_item.done" => {
+            // 某些 Responses 样本不会发 `reasoning_*delta`，而是把 reasoning 摘要仅放在
+            // output_item.done.item 里；仅当 item.type=reasoning* 时抽取，避免误把正文当 thinking。
+            if is_reasoning_output_item(value) {
+                push_reasoning_delta_event(&mut events, value, kind);
+            } else {
+                tracing::debug!(
+                    target: "pi_wasm::llm::openai_responses",
+                    event = %kind,
+                    "ignoring unknown Responses SSE event"
+                );
+            }
+        }
+        "response.reasoning.done"
+        | "response.reasoning_text.done"
+        | "response.reasoning_summary_text.done"
+        | "response.reasoning_summary.done" => {
+            // 已知的「reasoning 段结束」事件——本期不发额外 StreamEvent，仅静默吃掉，
+            // 避免被下面 `_` 分支的未知事件 trace 误报。
+        }
+        other => {
+            if other.starts_with("response.reasoning") {
+                tracing::debug!(
+                    target: "pi_wasm::llm::openai_responses",
+                    event = %other,
+                    payload = ?value,
+                    "unhandled Responses reasoning event; ignoring"
+                );
+            } else {
+                // 未知事件类型：trace 一行供运维排查，但**不阻断**主链路。
+                // 用 `debug!` 而非 `warn!`，避免某些网关的 ping/keepalive 事件刷日志。
+                tracing::debug!(
+                    target: "pi_wasm::llm::openai_responses",
+                    event = %other,
+                    "ignoring unknown Responses SSE event"
+                );
+            }
         }
     }
     events
+}
+
+fn push_reasoning_delta_event(events: &mut Vec<StreamEvent>, value: &Value, kind: &str) {
+    if let Some(delta) = extract_reasoning_delta(value) {
+        events.push(StreamEvent::Thinking {
+            delta,
+            signature: None,
+        });
+    } else {
+        tracing::debug!(
+            target: "pi_wasm::llm::openai_responses",
+            event = %kind,
+            payload = ?value,
+            "reasoning delta event had no extractable text"
+        );
+    }
+}
+
+fn extract_reasoning_delta(value: &Value) -> Option<String> {
+    for key in ["delta", "summary", "text", "summary_text", "content"] {
+        if let Some(raw) = value.get(key) {
+            if let Some(text) = extract_text(raw) {
+                return Some(text);
+            }
+        }
+    }
+    for key in ["part", "item"] {
+        if let Some(raw) = value.get(key) {
+            if let Some(text) = extract_text(raw) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn is_reasoning_output_item(value: &Value) -> bool {
+    value
+        .get("item")
+        .and_then(|item| item.get("type"))
+        .and_then(Value::as_str)
+        .map(|t| t.contains("reasoning"))
+        .unwrap_or(false)
+}
+
+fn extract_text(value: &Value) -> Option<String> {
+    match value {
+        // 流式 delta 必须保留原始空白（尤其 token 边界空格），否则会出现单词粘连。
+        // 仅在真正空串时跳过；" " 这类空白分片也应保留。
+        Value::String(text) => (!text.is_empty()).then(|| text.to_string()),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().filter_map(extract_text).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" "))
+            }
+        }
+        Value::Object(map) => {
+            for key in ["text", "delta", "summary", "summary_text", "content"] {
+                if let Some(child) = map.get(key) {
+                    if let Some(text) = extract_text(child) {
+                        return Some(text);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }

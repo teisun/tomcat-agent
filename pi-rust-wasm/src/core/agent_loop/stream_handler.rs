@@ -107,11 +107,29 @@ pub(super) async fn run_chat_stream(
         match item {
             Ok(StreamEvent::ContentDelta { delta }) => {
                 content_buf.push_str(&delta);
+                // 兼容老订阅者：`delta` 字段保留为正文增量；
+                // 新增 `kind=content_delta`，让单订阅者（CLI/TUI）能与 thinking_delta 分流。
                 agent.emit_event(AgentEvent::MessageUpdate {
                     message: Message(serde_json::json!({})),
-                    assistant_message_event: AssistantMessageEvent(
-                        serde_json::json!({ "delta": delta }),
-                    ),
+                    assistant_message_event: AssistantMessageEvent(serde_json::json!({
+                        "kind": "content_delta",
+                        "delta": delta,
+                    })),
+                });
+            }
+            // P3：Thinking 透传——单独走 thinking_delta 通道，不写 content_buf，
+            // 不进入 transcript 主体；上层（CLI/TUI/扩展）按 show_thinking 决定是否渲染。
+            Ok(StreamEvent::Thinking { delta, signature }) => {
+                let mut payload = serde_json::json!({
+                    "kind": "thinking_delta",
+                    "delta": delta,
+                });
+                if let Some(sig) = signature {
+                    payload["signature"] = serde_json::Value::String(sig);
+                }
+                agent.emit_event(AgentEvent::MessageUpdate {
+                    message: Message(serde_json::json!({})),
+                    assistant_message_event: AssistantMessageEvent(payload),
                 });
             }
             Ok(StreamEvent::ToolCallDelta {

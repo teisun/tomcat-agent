@@ -79,6 +79,42 @@ fn stream_event_serialize() {
     assert_eq!(j.get("delta").and_then(|v| v.as_str()), Some("hello"));
 }
 
+#[test]
+fn stream_event_thinking_serde_minimal() {
+    let e = StreamEvent::Thinking {
+        delta: "step 1".to_string(),
+        signature: None,
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(j.get("type").and_then(|v| v.as_str()), Some("thinking"));
+    assert_eq!(j.get("delta").and_then(|v| v.as_str()), Some("step 1"));
+    assert!(
+        j.get("signature").is_none(),
+        "signature=None 应被 skip_serializing"
+    );
+    let back: StreamEvent = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        back,
+        StreamEvent::Thinking { delta, signature: None } if delta == "step 1"
+    ));
+}
+
+#[test]
+fn stream_event_thinking_serde_with_signature() {
+    let e = StreamEvent::Thinking {
+        delta: "secret reasoning".to_string(),
+        signature: Some("sig-abc".to_string()),
+    };
+    let j = serde_json::to_value(&e).unwrap();
+    assert_eq!(j.get("type").and_then(|v| v.as_str()), Some("thinking"));
+    assert_eq!(j.get("signature").and_then(|v| v.as_str()), Some("sig-abc"));
+    let back: StreamEvent = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        back,
+        StreamEvent::Thinking { signature: Some(s), .. } if s == "sig-abc"
+    ));
+}
+
 // ============================================================================
 // ChatMessageContentPart：serde 往返 + helper 校验失败用例（plan §5）
 // ============================================================================

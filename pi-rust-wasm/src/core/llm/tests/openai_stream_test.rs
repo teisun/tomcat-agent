@@ -51,6 +51,161 @@ fn test_openai_chunk_without_usage_no_usage_event() {
     assert!(matches!(&events[0], StreamEvent::ContentDelta { delta } if delta == "hi"));
 }
 
+#[test]
+fn test_openai_chunk_reasoning_content_emits_thinking() {
+    let chunk: OpenAiStreamChunk =
+        serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"step 1"}}]}"#)
+            .expect("should parse chunk with reasoning_content");
+    let events = openai_chunk_to_stream_events(chunk);
+    assert_eq!(events.len(), 1);
+    assert!(
+        matches!(&events[0], StreamEvent::Thinking { delta, signature: None } if delta == "step 1"),
+        "got: {:?}",
+        events[0]
+    );
+}
+
+#[test]
+fn test_openai_chunk_reasoning_alias_falls_back() {
+    let chunk: OpenAiStreamChunk =
+        serde_json::from_str(r#"{"choices":[{"delta":{"reasoning":"alt-name"}}]}"#)
+            .expect("should parse chunk with reasoning alias");
+    let events = openai_chunk_to_stream_events(chunk);
+    assert_eq!(events.len(), 1);
+    assert!(
+        matches!(&events[0], StreamEvent::Thinking { delta, .. } if delta == "alt-name"),
+        "got: {:?}",
+        events[0]
+    );
+}
+
+#[test]
+fn test_openai_chunk_thinking_and_content_order() {
+    let chunk: OpenAiStreamChunk = serde_json::from_str(
+        r#"{"choices":[{"delta":{"reasoning_content":"plan","content":"answer"}}]}"#,
+    )
+    .expect("should parse chunk with both reasoning and content");
+    let events = openai_chunk_to_stream_events(chunk);
+    assert_eq!(events.len(), 2, "thinking + content should both emit");
+    assert!(
+        matches!(&events[0], StreamEvent::Thinking { delta, .. } if delta == "plan"),
+        "expected Thinking first; got: {:?}",
+        events[0]
+    );
+    assert!(
+        matches!(&events[1], StreamEvent::ContentDelta { delta } if delta == "answer"),
+        "expected ContentDelta second; got: {:?}",
+        events[1]
+    );
+}
+
+#[test]
+fn test_openai_chunk_empty_reasoning_is_ignored() {
+    let chunk: OpenAiStreamChunk =
+        serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#)
+            .expect("should parse chunk with empty reasoning_content");
+    let events = openai_chunk_to_stream_events(chunk);
+    assert!(
+        events.is_empty(),
+        "empty reasoning should not emit Thinking, got {:?}",
+        events
+    );
+}
+
+#[test]
+fn test_openai_request_body_does_not_serialize_reasoning_when_none() {
+    let body = OpenAiRequestBody {
+        model: "gpt-4".into(),
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        stream: false,
+        tools: None,
+        stream_options: None,
+        reasoning_effort: None,
+        thinking: None,
+    };
+    let j = serde_json::to_value(&body).unwrap();
+    assert!(
+        j.get("reasoning_effort").is_none(),
+        "None reasoning_effort 不应进 wire JSON: {}",
+        j
+    );
+    assert!(
+        j.get("thinking").is_none(),
+        "None thinking 不应进 wire JSON: {}",
+        j
+    );
+}
+
+#[test]
+fn test_openai_request_body_serializes_reasoning_effort() {
+    let body = OpenAiRequestBody {
+        model: "gpt-5".into(),
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        stream: true,
+        tools: None,
+        stream_options: None,
+        reasoning_effort: Some("high".into()),
+        thinking: None,
+    };
+    let j = serde_json::to_value(&body).unwrap();
+    assert_eq!(
+        j.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("high")
+    );
+    assert!(j.get("thinking").is_none());
+}
+
+#[test]
+fn test_openai_request_body_serializes_thinking_object() {
+    let body = OpenAiRequestBody {
+        model: "doubao-seed-1.6-thinking".into(),
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        stream: true,
+        tools: None,
+        stream_options: None,
+        reasoning_effort: None,
+        thinking: Some(serde_json::json!({"type":"enabled"})),
+    };
+    let j = serde_json::to_value(&body).unwrap();
+    assert_eq!(j["thinking"]["type"], "enabled");
+    assert!(j.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
+    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
+    use crate::infra::config::ThinkingConfig;
+    let cfg = ThinkingConfig {
+        enabled: false,
+        ..ThinkingConfig::default()
+    };
+    let r = resolve_request_fields(&cfg, ThinkingFormat::Openai);
+    assert!(
+        r.reasoning_effort.is_none(),
+        "enabled=false 不应写 reasoning_effort"
+    );
+    assert!(r.thinking.is_none());
+}
+
+#[test]
+fn test_openai_provider_thinking_high_writes_reasoning_effort() {
+    use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
+    use crate::infra::config::ThinkingConfig;
+    let cfg = ThinkingConfig {
+        enabled: true,
+        level: "high".into(),
+        ..ThinkingConfig::default()
+    };
+    let r = resolve_request_fields(&cfg, ThinkingFormat::Openai);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+}
+
 #[tokio::test]
 async fn sse_stream_parses_and_yields_events() {
     use tokio_stream::StreamExt;

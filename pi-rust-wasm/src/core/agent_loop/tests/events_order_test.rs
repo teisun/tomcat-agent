@@ -91,6 +91,108 @@ async fn run_fatal_401_terminates_immediately() {
     assert!(result.unwrap_err().to_string().contains("401"));
 }
 
+/// P3：Thinking 与 ContentDelta 必须分别带 `kind=thinking_delta` / `content_delta`，
+/// 保证 CLI/TUI 单订阅者可以分流渲染（折叠/正文/工具）。
+#[tokio::test]
+async fn run_message_update_carries_kind_for_thinking_and_content() {
+    let stream1: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::Thinking {
+            delta: "let me think".to_string(),
+            signature: None,
+        }),
+        Ok(StreamEvent::ContentDelta {
+            delta: "hello".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream1]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let kinds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let kinds_cb = Arc::clone(&kinds);
+    event_bus.on(
+        wire::WIRE_MESSAGE_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            // payload schema: AssistantMessageEvent(serde_json::Value) wrapped in `assistantMessageEvent`
+            let p = &ctx.payload;
+            let kind = p
+                .pointer("/assistantMessageEvent/kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing>")
+                .to_string();
+            kinds_cb.lock().unwrap().push(kind);
+            Ok(())
+        }),
+    );
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let messages = vec![ChatMessage::user("hi")];
+    let _ = loop_.run(messages).await.unwrap();
+    let observed = kinds.lock().unwrap().clone();
+    assert_eq!(
+        observed,
+        vec!["thinking_delta".to_string(), "content_delta".to_string()],
+        "应分别走 thinking_delta 与 content_delta，且顺序保持流式到达顺序"
+    );
+}
+
+/// P3：Thinking 携带 signature 时（Anthropic 协议）必须透传到 payload，
+/// 用于多轮重发时按 provider 决定 strip 还是保留。
+#[tokio::test]
+async fn run_message_update_thinking_signature_propagates() {
+    let stream1: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::Thinking {
+            delta: "anthropic".to_string(),
+            signature: Some("sig-xyz".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream1]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_cb = Arc::clone(&captured);
+    event_bus.on(
+        wire::WIRE_MESSAGE_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            let p = ctx
+                .payload
+                .pointer("/assistantMessageEvent")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            *captured_cb.lock().unwrap() = Some(p);
+            Ok(())
+        }),
+    );
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let messages = vec![ChatMessage::user("hi")];
+    let _ = loop_.run(messages).await.unwrap();
+    let payload = captured.lock().unwrap().clone().expect("应捕获到 payload");
+    assert_eq!(
+        payload.get("kind").and_then(|v| v.as_str()),
+        Some("thinking_delta")
+    );
+    assert_eq!(
+        payload.get("signature").and_then(|v| v.as_str()),
+        Some("sig-xyz")
+    );
+}
+
 /// chat_stream 直接返回 Err（非 stream 内 Err）时也被正确分类并终止。
 #[tokio::test]
 async fn run_chat_stream_returns_err_is_classified() {

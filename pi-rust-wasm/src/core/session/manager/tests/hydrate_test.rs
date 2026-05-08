@@ -221,3 +221,42 @@ fn init_context_state_non_boundary_compaction_preserves_prior() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn init_context_state_ignores_thinking_trace_entries() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_thinking_trace("internal plan", Some("sig-test"))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"}))
+        .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+
+    assert_eq!(
+        state.messages.len(),
+        2,
+        "thinking_trace 不应 hydrate 进上行 messages"
+    );
+    let texts: Vec<String> = state
+        .messages
+        .iter()
+        .filter_map(|m| m.text_content().map(str::to_string))
+        .collect();
+    assert!(texts.iter().any(|t| t == "q1"));
+    assert!(texts.iter().any(|t| t == "a1"));
+    assert!(
+        !texts.iter().any(|t| t.contains("internal plan")),
+        "thinking_trace 内容不应进入 assistant 正文"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
