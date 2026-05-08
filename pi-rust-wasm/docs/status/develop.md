@@ -1,6 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-08 09:05 | ACTIVE | develop | — |
+| Nibbles | 2026-05-08 10:30 | ACTIVE | develop | — |
+
+### 2026-05-08 | 架构文档 `llm-stream-events-cli-pipeline.md` 增补 §5.3
+
+- **范围**：Thinking 端到端 ASCII 图、Responses SSE 解析流程图、完整 JSON 样例（A–F）与字段速查，便于对照 `openai_responses/stream.rs` 实现。
+- **阶段 T**：文档-only，未重跑全量门禁。
 
 ### 2026-05-08 | merge `feature/thinking-api-display` → develop @ 8c7b86e
 

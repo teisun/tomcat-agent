@@ -21,6 +21,7 @@
 - [4. 落地选型与实施（已定稿）](#4-落地选型与实施已定稿)
   - 原独立章 **§6 CLI 显示（报告 §2.2）**、**§7 Thinking 折叠（报告 §2.7）** 已并入 **§4.2.3 / §4.2.4**。
 - [5. 协议（入参 / 出参 / Schema）](#5-协议入参--出参--schema)
+  - [5.3 Thinking 端到端与 Responses 字段解析（ASCII）](#53-thinking-端到端与-responses-字段解析ascii)
 - [6. One-Glance Map（文件职责总览）](#6-one-glance-map文件职责总览)
 - [7. 调度时序（运行时图）](#7-调度时序运行时图)
 - [8. 状态机](#8-状态机)
@@ -299,6 +300,209 @@ P1 StreamEvent::Thinking
 | `delta` | string | 条件 | `kind=*_delta` 时必填 | 兼容老字段名。 |
 | `signature` | string? | 否 | Anthropic 思考签名 | Claude 专供。 |
 | `finishReason` | string? | 否 | 若要在 UI 展示 stop/tool/length | 一般可不填。 |
+
+### 5.3 Thinking 端到端与 Responses 字段解析（ASCII）
+
+下面两张图把「从配置到终端」和「OpenAI Responses 一条 SSE 进来后字段怎么抠」串在一起；实现入口分别是 `openai_responses/mod.rs`（请求）、`openai_responses/stream.rs`（响应解析）、`agent_loop/stream_handler.rs`（统一发射）、`api/chat/mod.rs` + `cli_turn_renderer.rs`（展示与可选 persist）。
+
+#### 5.3.1 端到端：请求 → 流事件 → 总线 → CLI（含 persist 旁路）
+
+```text
+  [用户 / pi.config.toml / 环境变量]
+           |
+           v
+  +---------------------------+
+  | LlmConfig.thinking        |  enabled / level / show / persist / print_to_stderr
+  | + tool_cli_verbosity      |  （与 show_thinking 解耦，只管 [tool] 行档位）
+  +-------------+-------------+
+                |
+                v
+  +---------------------------+     POST /v1/responses
+  | OpenAiResponsesProvider   | --> reasoning.effort（档位）
+  | build_request_body()      |     reasoning.summary="auto"（仅当需展示或 persist）
+  +-------------+-------------+
+                |
+                v   SSE chunks（每条 JSON 带 "type": "..."）
+  +---------------------------+
+  | stream.rs                 |
+  | responses_chunk_to_events | --> StreamEvent::Thinking { delta, signature }
+  |                           | --> StreamEvent::ContentDelta { delta }
+  +-------------+-------------+
+                |
+                v
+  +---------------------------+
+  | stream_handler.rs         |  message_update.assistantMessageEvent:
+  | AgentLoop                 |    kind=thinking_delta | content_delta + delta
+  +-------------+-------------+
+                |
+                v
+  +---------------------------+
+  | EventBus                  |
+  +--+-----------+------------+
+     |           |
+     |           +--------------------------+
+     |                                      v
+     v                          +---------------------------+
++---------------------------+   | persist 监听器（可选）   |
+| CliTurnRenderer           |   | WIRE_MESSAGE_UPDATE/END  |
+| show_thinking 折叠/展开   |   | -> TranscriptEntry       |
+| [thinking] dim 区         |   |    ThinkingTrace         |
+| Markdown 正文 stdout      |   +---------------------------+
+| [tool] stderr             |
++---------------------------+
+                |
+                v
+           用户终端
+```
+
+**说人话**：配置决定「要不要向模型要推理摘要」；`stream.rs` 把各家 SSE 形状收成同一种 `Thinking`；`stream_handler` 贴上 `kind` 给 UI；`CliTurnRenderer` 只负责长得好看；`persist` 是另一条旁路写审计，不进 hydrate 上行。
+
+#### 5.3.2 Responses：一条 SSE `type` 进来后的解析（字段作用）
+
+同一条流里，**正文**和**思考**可能来自不同 `type`；解析器先按 **事件名字符串** 分流，再在 **JSON 树** 上按固定 key 顺序抠字符串（`extract_reasoning_delta` → `extract_text`，空白不随意 trim，避免词粘连）。
+
+```text
+                    SSE JSON（顶层）
+                           |
+                           v
+              +------------------------+
+              | match event["type"]    |
+              +-----------+------------+
+                          |
+     +--------------------+--------------------+-------------------------+
+     |                    |                    |                         |
+     v                    v                    v                         v
+ reasoning_*        reasoning_summary    output_item.done          其它 type
+ .delta /            _part.added /        且 item.type               （多数忽略或
+ _text.delta 等      .done 等             含 "reasoning"）            debug 一行）
+     |                    |                    |
+     +--------+-----------+--------------------+
+              |
+              v
+   +------------------------------+
+   | extract_reasoning_delta()    |  依次尝试顶层 key：
+   |                                |    delta, summary, text,
+   |                                |    summary_text, content
+   |                                |  再尝试嵌套：
+   |                                |    part, item
+   +---------------+----------------+
+                   |
+                   v
+   +------------------------------+
+   | extract_text(Value)          |  String -> 原样（仅空串跳过）
+   |                              |  Array  -> 子项拼接（空格 join）
+   |                              |  Object -> 子 key: text, delta,
+   |                              |            summary, summary_text, content
+   +---------------+----------------+
+                   |
+                   v
+        Some(非空字符串) --> StreamEvent::Thinking { delta, signature: None }
+        None         --> 不发 Thinking；debug 记录「无可抽取文本」
+```
+
+**字段作用速查（Responses 侧）**：
+
+| 常见位置 | 作用（人话） |
+|----------|--------------|
+| `type` | 告诉解析器走哪条分支（delta 流 / summary 分片 / item 收口）。 |
+| `delta` | 最常见的「增量一段字」，直接进 thinking。 |
+| `summary` | 经常是数组（多段 summary_text）；要拆成可读串再 emit。 |
+| `part` | `reasoning_summary_part.*` 里携带当前分片；`text` 可能在里层。 |
+| `item` | `output_item.done` 里整包 reasoning；`item.type` 用来门禁，避免误把 message 当 thinking。 |
+
+以下为 **`responses_chunk_to_events` 入口所见的「单条事件」JSON 形态**（真实流里还会夹杂 `response.created`、`response.in_progress`、`response.output_text.delta` 等，此处只列与 Thinking 抽取相关的完整样例）。字段名以 OpenAI Responses SSE 常见形态为准，网关若多包一层需先剥壳再喂解析器。
+
+**示例 A：`reasoning_text` 字符串增量（最常见）**
+
+```json
+{
+  "type": "response.reasoning_text.delta",
+  "delta": "先估算 387×249"
+}
+```
+
+→ 顶层 `delta` 命中 → 发出一条 `StreamEvent::Thinking`，`delta` 与 JSON 中字符串一致（含首尾空白时原样保留）。
+
+**示例 B：`reasoning_summary_text` 字符串增量**
+
+```json
+{
+  "type": "response.reasoning_summary_text.delta",
+  "delta": "用分配律拆分乘法"
+}
+```
+
+→ 与 A 相同分支，走 `push_reasoning_delta_event`。
+
+**示例 C：`reasoning_summary.delta` 顶层为 `summary` 数组（多段 `summary_text`）**
+
+```json
+{
+  "type": "response.reasoning_summary.delta",
+  "summary": [
+    { "type": "summary_text", "text": "第一步：分解因数。" },
+    { "type": "summary_text", "text": "第二步：合并结果。" }
+  ]
+}
+```
+
+→ 顶层 key `summary` → `extract_text` 对数组逐项取 `text` → 用空格拼成一条字符串 → 一条 `Thinking`。
+
+**示例 D：`reasoning_summary_part.done`，文本在嵌套 `part` 里**
+
+```json
+{
+  "type": "response.reasoning_summary_part.done",
+  "item_id": "rs_…",
+  "output_index": 0,
+  "summary_index": 0,
+  "part": {
+    "type": "summary_text",
+    "text": "最终摘要：96363。"
+  }
+}
+```
+
+→ 顶层 `delta/summary/...` 无有效串后命中 `part` → 从 `part` 对象中取 `text` → 一条 `Thinking`。
+
+**示例 E：`output_item.done` 且 `item.type` 为 `reasoning`（整包收口；`summary` 可为空数组）**
+
+```json
+{
+  "type": "response.output_item.done",
+  "output_index": 0,
+  "sequence_number": 3,
+  "item": {
+    "id": "rs_…",
+    "type": "reasoning",
+    "summary": [
+      { "type": "summary_text", "text": "口算校验：249×400=99600，再扣减…" }
+    ]
+  }
+}
+```
+
+→ 先过 `is_reasoning_output_item`（`item.type` 含 `reasoning`）→ 再 `extract_reasoning_delta` 扫到嵌套 `item` → 从 `item.summary` 数组抽出 `text` 拼接 → 一条 `Thinking`。若 `summary` 为 `[]` 且其它字段也无文本，则**不 emit** `Thinking`，仅 debug「无可抽取文本」（真机里偶发）。
+
+**示例 F：对照 — `output_item.done` 但为普通 `message`（不得当 Thinking）**
+
+```json
+{
+  "type": "response.output_item.done",
+  "output_index": 1,
+  "item": {
+    "id": "msg_…",
+    "type": "message",
+    "content": [
+      { "type": "output_text", "text": "最终答案是 96363。" }
+    ]
+  }
+}
+```
+
+→ `item.type` 不含 `reasoning` → **不**走 `push_reasoning_delta_event`；正文由其它分支（如 `response.output_text.delta` / 对应 content 事件）处理。
+
+> 与 openclaw 等「先 `output_item.added` 建块再 delta/done 填」的状态机不同，本仓 **以「每条 SSE 尽量独立抽出 delta」为主**；多条 `Thinking` 事件在 UI 侧顺序拼接即完整思考区。
 
 ---
 
