@@ -37,6 +37,31 @@ fn provider_with_stub_key() -> OpenAiResponsesProvider {
 }
 
 #[test]
+fn openai_files_client_is_lazy_once_per_provider() {
+    // SAFETY: 单测串行，临时注入 stub key。
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    // SAFETY: 清理环境变量，避免污染后续用例。
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let c1 = p
+        .openai_files_client(&cfg.files)
+        .expect("openai-responses should support files");
+    let c2 = p
+        .openai_files_client(&cfg.files)
+        .expect("openai-responses should support files");
+    assert_eq!(
+        c1.instance_id(),
+        c2.instance_id(),
+        "same provider should lazily init files client once"
+    );
+}
+
+#[test]
 fn build_responses_input_extracts_first_system_to_instructions() {
     let msgs = vec![ChatMessage::system("be helpful"), ChatMessage::user("hi")];
     let (ins, input) = build_responses_input(&msgs);

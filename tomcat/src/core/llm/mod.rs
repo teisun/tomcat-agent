@@ -10,6 +10,7 @@
 //! `SessionEntry` 约定一致。本模块不直接依赖 `SessionEntry`，仅消费已解析的
 //! [`ChatRequest`]。
 
+pub mod openai_files;
 mod provider;
 mod registry;
 pub mod system_prompt;

@@ -49,7 +49,7 @@
 | **T2-P0-012** | 图片/二进制文件传给 LLM | `TODO` | — | `feature/llm-binary-attachments` | [tasks/T2-P0-012.md](./tasks/T2-P0-012.md) |
 | **T2-P0-013** | 拖拽授权 / Bash 路径 / CWD 语义整改 | `DONE` | Jerry | `fix/drag-deny-cwd-remediation` | [tasks/T2-P0-013.md](./tasks/T2-P0-013.md) |
 | **T2-P0-014** | 权限授权来源重构 | `DONE` | Tom | `feature/permission-source-redesign` | [tasks/T2-P0-014.md](./tasks/T2-P0-014.md) |
-| **T2-P0-015** | OpenAI Files 上传管理 | `TODO` | — | `feature/llm-files-upload-manager` | [tasks/T2-P0-015.md](./tasks/T2-P0-015.md) |
+| **T2-P0-015** | OpenAI Files 上传管理 | `PENDING_INTEGRATION` | Jerry | `feature/llm-files-upload-manager` | [tasks/T2-P0-015.md](./tasks/T2-P0-015.md) |
 | **T2-P0-016** | 四内置工具契约加强（write / bash 余量） | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `develop` | [tasks/T2-P0-016.md](./tasks/T2-P0-016.md) |
 | **T2-P0-017** | `edit` 工具契约与实现 | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，同上全量门禁） | Tom | `develop` | [tasks/T2-P0-017.md](./tasks/T2-P0-017.md) |
 | **T2-P1-001** | Checkpoint + 断点续跑 | `TODO` | — | `feature/checkpoint-resume` | [tasks/T2-P1-001.md](./tasks/T2-P1-001.md) |
@@ -59,7 +59,7 @@
 | **T2-P1-005** | Feedback 回路（新增） | `TODO` | — | `feature/feedback-loop` | [tasks/T2-P1-005.md](./tasks/T2-P1-005.md) |
 | **T2-P1-006** | 集成测试规范 | `TODO` | — | `feature/integration-test-standard` | [tasks/T2-P1-006.md](./tasks/T2-P1-006.md) |
 | **T2-P1-007** | 工具系统后置项 | `TODO` | — | `feature/tool-system-deferred-followups` | [tasks/T2-P1-007.md](./tasks/T2-P1-007.md) |
-| **T2-P1-008** | 内置 search_files 只读搜索工具 | `PENDING_INTEGRATION` | Spike | `feature/tool-system-cleanup` | [tasks/T2-P1-008.md](./tasks/T2-P1-008.md) |
+| **T2-P1-008** | 内置 search_files 只读搜索工具 | `DONE`（**2026-05-08**：`develop` 已含；验收④演进为 Tier2+预检，见 [T2-P1-008.md](./tasks/T2-P1-008.md)） | Spike | `develop` | [tasks/T2-P1-008.md](./tasks/T2-P1-008.md) |
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理 | `TODO` | — | `feature/bash-ast-detect-precision` | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 
 ## 5. 任务依赖拓扑（概览）

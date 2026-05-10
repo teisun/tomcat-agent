@@ -36,8 +36,10 @@ use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
 use crate::infra::error::AppError;
+use crate::infra::config::LlmFilesConfig;
 use crate::infra::LlmConfig;
 
+use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent,
@@ -72,6 +74,9 @@ pub struct OpenAiResponsesProvider {
     retry_count: u32,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
+    /// Files client 懒加载实例（U10）：同一 provider 生命周期只构造一次。
+    files_client: std::sync::OnceLock<OpenAiFilesClient>,
+    files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
     thinking_cfg: crate::infra::config::ThinkingConfig,
     thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
@@ -153,6 +158,8 @@ impl OpenAiResponsesProvider {
             semaphore,
             retry_count: config.retry_count,
             stream_timeout_sec: config.stream_timeout_sec,
+            files_client: std::sync::OnceLock::new(),
+            files_expires_after_seconds: config.files.expires_after_seconds,
             thinking_cfg: config.thinking.clone(),
             thinking_format,
         })
@@ -458,6 +465,45 @@ impl LlmProvider for OpenAiResponsesProvider {
             })
             .sum();
         Ok((total_chars / 3).max(1) as u32)
+    }
+
+    fn supports_openai_files_api(&self) -> bool {
+        true
+    }
+
+    fn openai_files_context(&self) -> Option<OpenAiFilesProviderContext> {
+        Some(OpenAiFilesProviderContext {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            retry_count: self.retry_count,
+        })
+    }
+
+    fn openai_files_client(&self, files_cfg: &LlmFilesConfig) -> Option<OpenAiFilesClient> {
+        if !self.supports_openai_files_api() {
+            return None;
+        }
+        let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
+            self.files_expires_after_seconds
+        } else {
+            files_cfg.expires_after_seconds
+        };
+        let cfg = LlmFilesConfig {
+            expires_after_seconds: expires,
+        };
+        let client = self.files_client.get_or_init(|| {
+            OpenAiFilesClient::from_provider_context(
+                OpenAiFilesProviderContext {
+                    client: self.client.clone(),
+                    base_url: self.base_url.clone(),
+                    api_key: self.api_key.clone(),
+                    retry_count: self.retry_count,
+                },
+                &cfg,
+            )
+        });
+        Some(client.clone())
     }
 }
 

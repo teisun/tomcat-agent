@@ -15,13 +15,15 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::core::agent_loop::tool_exec::execute_tool;
+use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::ToolCallInfo;
+use crate::core::llm::openai_files::{CacheEntry, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime};
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::pipeline::read_state::{ReadFileState, FILE_UNCHANGED_STUB};
 use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
 use crate::core::AllowAllConfirmation;
 use crate::infra::{PrimitiveConfig, TracingAuditRecorder};
+use sha2::{Digest, Sha256};
 
 fn make_gate(definition: &std::path::Path) -> Arc<dyn PermissionGate> {
     DefaultPermissionGate::new(
@@ -64,6 +66,25 @@ fn bump_mtime(path: &std::path::Path) {
     if let Ok(file) = std::fs::File::open(path) {
         let _ = file.set_modified(new_t);
     }
+}
+
+fn write_fake_pdf(path: &std::path::Path, total_bytes: usize) {
+    let mut bytes = Vec::with_capacity(total_bytes.max(16));
+    bytes.extend_from_slice(b"%PDF-1.7\n");
+    if total_bytes > bytes.len() {
+        bytes.resize(total_bytes, b'0');
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn sha256_file(path: &std::path::Path) -> [u8; 32] {
+    let raw = std::fs::read(path).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(raw);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest[..]);
+    out
 }
 
 #[tokio::test]
@@ -305,6 +326,100 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
             assert!(data.as_ref().map(|s| !s.is_empty()).unwrap_or(false));
         }
         other => panic!("expected InputFile variant, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let pdf = dir_path.join("oversize.pdf");
+    write_fake_pdf(&pdf, 11 * 1024 * 1024);
+
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    let tc = make_tc(&format!(r#"{{"path":{:?}}}"#, pdf.to_string_lossy()));
+
+    let (msg, is_error, follow_ups) =
+        execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
+    assert!(is_error, "without files runtime, oversize pdf must fail by policy");
+    assert!(
+        msg.contains("requires OpenAI Files upload"),
+        "should guide to Files upload path, got: {:?}",
+        msg
+    );
+    assert!(follow_ups.is_empty());
+}
+
+#[tokio::test]
+async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let pdf = dir_path.join("oversize.pdf");
+    write_fake_pdf(&pdf, 11 * 1024 * 1024);
+    let meta = std::fs::metadata(&pdf).unwrap();
+    let mtime_ms = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
+    let size = meta.len();
+    let sha256 = sha256_file(&pdf);
+
+    let runtime = Arc::new(OpenAiFilesRuntime::new(
+        OpenAiFilesClient::new_for_test(
+            reqwest::Client::new(),
+            "http://127.0.0.1:9".to_string(),
+            "stub".to_string(),
+            0,
+            86_400,
+        ),
+        dir_path.join("openai-files-registry.json"),
+    ));
+    runtime.cache.by_path.insert(
+        std::fs::canonicalize(&pdf).unwrap_or(pdf.clone()),
+        CacheEntry {
+            mtime_ms,
+            size,
+            sha256,
+            file_id: "file-cached-pdf".to_string(),
+            purpose: FilePurpose::UserData,
+            mime: "application/pdf".to_string(),
+            uploaded_at: SystemTime::now(),
+            expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+            bytes: Some(size),
+            created_at: Some(1_700_000_000),
+        },
+    );
+
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+    let tc = make_tc(&format!(r#"{{"path":{:?}}}"#, pdf.to_string_lossy()));
+
+    let (msg, is_error, follow_ups) = execute_tool_with_openai_files(
+        &primitive,
+        &None,
+        &None,
+        Some(&state),
+        Some(&runtime),
+        &tc,
+    )
+    .await;
+    assert!(
+        !is_error,
+        "with runtime + cached file_id, oversize should succeed; msg={:?}",
+        msg
+    );
+    assert!(msg.contains("PDF attached as next user input"));
+    assert_eq!(follow_ups.len(), 1);
+    match &follow_ups[0] {
+        crate::core::llm::ChatMessageContentPart::InputFile {
+            file_id,
+            data,
+            filename,
+            ..
+        } => {
+            assert_eq!(file_id.as_deref(), Some("file-cached-pdf"));
+            assert!(data.is_none(), "upload path should use file_id not inline base64");
+            assert_eq!(filename.as_deref(), Some("oversize.pdf"));
+        }
+        other => panic!("expected InputFile(file_id), got {:?}", other),
     }
 }
 

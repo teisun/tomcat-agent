@@ -22,6 +22,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
 
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
   cli_tests
+  openai_files_integration_tests
   wasmedge_e2e_tests
   long_lived_vm_tests
   js_api_alignment_tests

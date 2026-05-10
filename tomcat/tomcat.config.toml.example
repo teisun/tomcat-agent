@@ -21,6 +21,12 @@ stream_timeout_sec = 60
 # proxy = "http://127.0.0.1:7890"
 # api_base_fallback = "https://api.chatanywhere.tech"
 
+[llm.files]
+# OpenAI Files 上传兜底 TTL（秒）：
+# - 默认 86400（24h）；
+# - 0 表示不传 expires_after 字段（交给服务端默认策略）。
+expires_after_seconds = 86400
+
 [storage]
 # 默认 ~/.tomcat/
 # work_dir = "~/.tomcat/"

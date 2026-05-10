@@ -95,3 +95,19 @@ fn load_config_from_example_file() {
     });
     assert!(validate_config(&cfg).is_ok());
 }
+
+#[test]
+fn load_config_env_overrides_llm_files_expires_after_seconds() {
+    let dir = std::env::temp_dir().join("tomcat_files_env_override_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[llm]\nprovider = \"openai-responses\"\n").unwrap();
+    // SAFETY: 用例串行执行；仅在本测试作用域内临时覆盖环境变量。
+    unsafe { std::env::set_var("TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS", "7200") };
+    let cfg = load_config(Some(path.as_path())).unwrap();
+    assert_eq!(cfg.llm.files.expires_after_seconds, 7200);
+    // SAFETY: 清理测试环境变量，避免污染后续用例。
+    unsafe { std::env::remove_var("TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS") };
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
