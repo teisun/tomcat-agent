@@ -1,7 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-08 10:30 | ACTIVE | develop | — |
-| Jerry | 2026-05-10 23:20 | PENDING_INTEGRATION | feature/llm-files-upload-manager | — |
+| Nibbles | 2026-05-12 17:56 | ACTIVE | develop | — |
+
+### 2026-05-12 | merge `feature/llm-files-upload-manager` → develop @ cb924eb
+
+- **阶段 R（评审）**：重点复核 Files 通道与门禁相关差异（`openai_files` 客户端/缓存/清理、`read` 上传分流、`scripts/test-groups.sh`、架构索引与集成测试）；补修代理环境下本地 mock 测试不稳定问题（session/chat cleanup 与 files mock 改为 localhost 直连）。
+- **阶段 T（门禁）**：功能分支与 `develop` 均执行 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`，`tomcat/.integration_test_output.log` 与 `tomcat/.integration_test_output_develop.log` 末尾均为 `EXIT_CODE=0`。
+- **看板**：`T2-P0-015` 由 `PENDING_INTEGRATION` 置为 `DONE`（同步 `TASK_BOARD_002/README.md` 与 `tasks/T2-P0-015.md`）。
 
 ### 2026-05-10 | T2-P0-015 OpenAI Files 上传管理进入集成前状态
 
