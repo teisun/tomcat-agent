@@ -183,6 +183,13 @@ fn parse_content_length(header_bytes: &[u8]) -> usize {
     0
 }
 
+fn test_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build no-proxy reqwest client for local mock server")
+}
+
 #[test]
 fn upload_decision_matches_arch_thresholds() {
     assert_eq!(
@@ -190,7 +197,7 @@ fn upload_decision_matches_arch_thresholds() {
         UploadDecision::InlinePreferred
     );
     assert_eq!(
-        upload_decision_by_size(1 * 1024 * 1024),
+        upload_decision_by_size(1024 * 1024),
         UploadDecision::UploadPreferred
     );
     assert_eq!(
@@ -230,7 +237,7 @@ fn registry_persist_roundtrip() {
     let registry = dir.path().join("openai-files-test.json");
     let runtime = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             "https://api.openai.com".to_string(),
             "stub".to_string(),
             0,
@@ -244,7 +251,7 @@ fn registry_persist_roundtrip() {
 
     let runtime2 = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             "https://api.openai.com".to_string(),
             "stub".to_string(),
             0,
@@ -266,7 +273,7 @@ async fn upload_retries_on_500_then_succeeds() {
     ])
     .await;
     let client = OpenAiFilesClient::new_for_test(
-        reqwest::Client::new(),
+        test_http_client(),
         server.base_url.clone(),
         "stub".to_string(),
         1,
@@ -283,15 +290,22 @@ async fn upload_retries_on_500_then_succeeds() {
 
 #[tokio::test]
 async fn delete_404_is_ok() {
-    let server = MockServer::start(vec![ScriptedResponse::json(404, r#"{"error":"not found"}"#)]).await;
+    let server = MockServer::start(vec![ScriptedResponse::json(
+        404,
+        r#"{"error":"not found"}"#,
+    )])
+    .await;
     let client = OpenAiFilesClient::new_for_test(
-        reqwest::Client::new(),
+        test_http_client(),
         server.base_url.clone(),
         "stub".to_string(),
         0,
         86_400,
     );
-    client.delete("file-missing").await.expect("404 should be idempotent ok");
+    client
+        .delete("file-missing")
+        .await
+        .expect("404 should be idempotent ok");
     assert_eq!(server.request_count(), 1);
     server.shutdown().await;
 }
@@ -304,14 +318,19 @@ async fn upload_expires_after_default_vs_zero_semantics() {
     )])
     .await;
     let client_a = OpenAiFilesClient::new_for_test(
-        reqwest::Client::new(),
+        test_http_client(),
         server_a.base_url.clone(),
         "stub".to_string(),
         0,
         86_400,
     );
     client_a
-        .upload(FilePurpose::UserData, "a.pdf", "application/pdf", &[1, 2, 3])
+        .upload(
+            FilePurpose::UserData,
+            "a.pdf",
+            "application/pdf",
+            &[1, 2, 3],
+        )
         .await
         .unwrap();
     let req_a = server_a.request_texts().remove(0);
@@ -326,14 +345,19 @@ async fn upload_expires_after_default_vs_zero_semantics() {
     )])
     .await;
     let client_b = OpenAiFilesClient::new_for_test(
-        reqwest::Client::new(),
+        test_http_client(),
         server_b.base_url.clone(),
         "stub".to_string(),
         0,
         0,
     );
     client_b
-        .upload(FilePurpose::UserData, "b.pdf", "application/pdf", &[4, 5, 6])
+        .upload(
+            FilePurpose::UserData,
+            "b.pdf",
+            "application/pdf",
+            &[4, 5, 6],
+        )
         .await
         .unwrap();
     let req_b = server_b.request_texts().remove(0);
@@ -357,7 +381,7 @@ async fn cache_hit_only_one_post() {
     let registry_dir = tempfile::tempdir().unwrap();
     let runtime = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             server.base_url.clone(),
             "stub".to_string(),
             0,
@@ -374,7 +398,11 @@ async fn cache_hit_only_one_post() {
         .await
         .unwrap();
     assert_eq!(a.id, b.id);
-    assert_eq!(server.request_count(), 1, "cache hit should skip second POST");
+    assert_eq!(
+        server.request_count(),
+        1,
+        "cache hit should skip second POST"
+    );
     server.shutdown().await;
 }
 
@@ -397,7 +425,7 @@ async fn cache_path_changed_uploads_new_id_and_enqueues_delete() {
     let registry_path = registry_dir.path().join("registry.json");
     let runtime = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             server.base_url.clone(),
             "stub".to_string(),
             0,
@@ -443,7 +471,7 @@ async fn cache_evicts_expired_entry_then_reuploads() {
     std::fs::write(tmp.path(), [5u8, 5, 5]).unwrap();
     let runtime = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             server.base_url.clone(),
             "stub".to_string(),
             0,
@@ -469,7 +497,10 @@ async fn cache_evicts_expired_entry_then_reuploads() {
         )
         .await
         .unwrap();
-    assert_ne!(first.id, second.id, "expired cache entry should trigger reupload");
+    assert_ne!(
+        first.id, second.id,
+        "expired cache entry should trigger reupload"
+    );
     assert_eq!(server.request_count(), 2);
     server.shutdown().await;
 }
@@ -486,7 +517,7 @@ async fn concurrent_same_hash_single_flight() {
     std::fs::write(tmp.path(), [9u8, 9, 9]).unwrap();
     let runtime = Arc::new(OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             server.base_url.clone(),
             "stub".to_string(),
             0,
@@ -520,7 +551,11 @@ async fn concurrent_same_hash_single_flight() {
     let (id1, id2) = tokio::join!(r1, r2);
     assert_eq!(id1.unwrap(), "file-single-flight");
     assert_eq!(id2.unwrap(), "file-single-flight");
-    assert_eq!(server.request_count(), 1, "single-flight should collapse concurrent uploads");
+    assert_eq!(
+        server.request_count(),
+        1,
+        "single-flight should collapse concurrent uploads"
+    );
     server.shutdown().await;
 }
 
@@ -529,7 +564,7 @@ async fn cleanup_empty_registry_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             "https://api.openai.com".to_string(),
             "stub".to_string(),
             0,
@@ -556,7 +591,7 @@ async fn tui_two_phase_attachment_order_interface() {
     std::fs::write(&path, b"%PDF-1.7\nx").unwrap();
     let runtime = OpenAiFilesRuntime::new(
         OpenAiFilesClient::new_for_test(
-            reqwest::Client::new(),
+            test_http_client(),
             server.base_url.clone(),
             "stub".to_string(),
             0,
@@ -567,18 +602,13 @@ async fn tui_two_phase_attachment_order_interface() {
 
     // 阶段 A：仅上传（不组 ChatRequest）。
     let uploaded = runtime
-        .resolve_or_upload_path(
-            &path,
-            "application/pdf",
-            "phase.pdf",
-            FilePurpose::UserData,
-        )
+        .resolve_or_upload_path(&path, "application/pdf", "phase.pdf", FilePurpose::UserData)
         .await
         .unwrap();
     assert_eq!(uploaded.id, "file-tui-phase");
 
     // 阶段 B：文本 + 阶段 A 累积的 file_id 组装 user parts。
-    let parts = vec![
+    let parts = [
         ChatMessageContentPart::text("请总结附件"),
         ChatMessageContentPart::file_file_id(uploaded.id, Some("phase.pdf".to_string())).unwrap(),
     ];

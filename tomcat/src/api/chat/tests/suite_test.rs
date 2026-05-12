@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-fn spawn_single_response_server(status: u16, body: &'static str) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+fn spawn_single_response_server(
+    status: u16,
+    body: &'static str,
+) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -273,8 +276,14 @@ fn interrupt_persists_transcript_hard_ack() {
 
 #[tokio::test]
 async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
-    let (base_url, hits, handle) =
-        spawn_single_response_server(404, r#"{"error":"not found"}"#);
+    let (base_url, hits, handle) = spawn_single_response_server(404, r#"{"error":"not found"}"#);
+    let old_no_proxy = std::env::var("NO_PROXY").ok();
+    let old_no_proxy_lower = std::env::var("no_proxy").ok();
+    // SAFETY: 测试作用域内确保本地 mock 地址不走代理，避免 127.0.0.1 请求被外部代理改写。
+    unsafe {
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    }
     let mut cfg = AppConfig::default();
     let dir = tempfile::tempdir().unwrap();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
@@ -300,5 +309,15 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
     assert_eq!(hits.load(Ordering::SeqCst), 1, "应发起 1 次 DELETE");
     handle.join().unwrap();
     // SAFETY: 清理测试环境变量。
-    unsafe { std::env::remove_var("TOMCAT_CHAT_CLEANUP_TEST_KEY") };
+    unsafe {
+        std::env::remove_var("TOMCAT_CHAT_CLEANUP_TEST_KEY");
+        match old_no_proxy {
+            Some(v) => std::env::set_var("NO_PROXY", v),
+            None => std::env::remove_var("NO_PROXY"),
+        }
+        match old_no_proxy_lower {
+            Some(v) => std::env::set_var("no_proxy", v),
+            None => std::env::remove_var("no_proxy"),
+        }
+    };
 }

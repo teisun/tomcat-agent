@@ -155,6 +155,7 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [docs/architecture/multi-agent.md](../../docs/architecture/multi-agent.md)                                                         | 多 Agent 架构设计                              |
 | [docs/architecture/context-management.md](../../docs/architecture/context-management.md)                                           | 上下文管理技术方案                                 |
 | [docs/architecture/llm-multiprovider-integration.md](../../docs/architecture/llm-multiprovider-integration.md)                   | 多 LLM / OpenAI 对接（`LlmProvider`、Completions/Responses 边界、配置与演进） |
+| [docs/architecture/llm-files-upload-manager.md](../../docs/architecture/llm-files-upload-manager.md)                             | OpenAI Files 上传管理（`POST /v1/files`、reuse cache、生命周期、T2-P0-015；与上条 §6.5.4 互链） |
 
 > **新增技术方案文档须知**：任何新增到 `docs/architecture/` 的 `*.md` 均属"技术方案文档（Architecture Spec）"，必须遵循 [`guides/workflow/ARCHITECTURE_SPEC.md`](guides/workflow/ARCHITECTURE_SPEC.md) 的章节骨架；其中 **「文件职责总览图（One-Glance Map）」为 MUST**——必须有一张 ASCII 图把方案涉及的所有业务 `*.rs` 与独立 `tests.rs` 按调用层次串起来，每节点内要点说明该文件做了什么。标杆案例：**One-Glance** 见 [`docs/architecture/tools/search_files.md` §4](../../docs/architecture/tools/search_files.md)；设有 **§4 落地选型与实施** 时 **§4.1 + §4.2** 为 MUST，见 [`guides/workflow/ARCHITECTURE_SPEC.md`](guides/workflow/ARCHITECTURE_SPEC.md) §4.1 / §4.2 与 [`docs/architecture/tools/read.md` §4.1–§4.2](../../docs/architecture/tools/read.md)；**取消 / 生命周期** 见 [`docs/architecture/interrupt-and-cancellation.md` §9.0](../../docs/architecture/interrupt-and-cancellation.md)。
 

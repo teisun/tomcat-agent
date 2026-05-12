@@ -128,6 +128,13 @@ fn run_session_delete_triggers_openai_files_cleanup_registry() {
     let mut cfg = test_config(dir.path());
     cfg.llm.api_base = Some(base_url);
     cfg.llm.api_key_env = Some("TOMCAT_SESSION_CLEANUP_TEST_KEY".to_string());
+    let old_no_proxy = std::env::var("NO_PROXY").ok();
+    let old_no_proxy_lower = std::env::var("no_proxy").ok();
+    // SAFETY: 测试作用域内强制本地 127.0.0.1 请求绕过代理，避免 mock 请求被外部代理劫持。
+    unsafe {
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    }
     // SAFETY: 测试内部临时注入 key。
     unsafe { std::env::set_var("TOMCAT_SESSION_CLEANUP_TEST_KEY", "stub") };
     crate::ensure_work_dir_structure(&cfg).unwrap();
@@ -151,7 +158,10 @@ fn run_session_delete_triggers_openai_files_cleanup_registry() {
         },
         &cfg,
     );
-    assert!(r.is_ok(), "session delete should still succeed with cleanup");
+    assert!(
+        r.is_ok(),
+        "session delete should still succeed with cleanup"
+    );
     assert!(
         !registry.exists(),
         "cleanup 成功后应移除 registry 文件（404 视成功）"
@@ -159,7 +169,17 @@ fn run_session_delete_triggers_openai_files_cleanup_registry() {
     assert_eq!(hits.load(Ordering::SeqCst), 1, "应发起 1 次 DELETE 请求");
     handle.join().unwrap();
     // SAFETY: 清理测试环境变量。
-    unsafe { std::env::remove_var("TOMCAT_SESSION_CLEANUP_TEST_KEY") };
+    unsafe {
+        std::env::remove_var("TOMCAT_SESSION_CLEANUP_TEST_KEY");
+        match old_no_proxy {
+            Some(v) => std::env::set_var("NO_PROXY", v),
+            None => std::env::remove_var("NO_PROXY"),
+        }
+        match old_no_proxy_lower {
+            Some(v) => std::env::set_var("no_proxy", v),
+            None => std::env::remove_var("no_proxy"),
+        }
+    };
 }
 
 #[test]

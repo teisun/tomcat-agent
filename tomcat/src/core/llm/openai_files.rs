@@ -23,7 +23,7 @@ use crate::infra::error::AppError;
 static NEXT_FILES_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// `< 1MiB`：默认走 inline（A 通道）。
-pub const INLINE_SMALL_BYTES: u64 = 1 * 1024 * 1024;
+pub const INLINE_SMALL_BYTES: u64 = 1024 * 1024;
 /// `>= 10MiB`：策略层要求必须走 upload（B 通道）。
 pub const MUST_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -207,7 +207,9 @@ impl OpenAiFilesClient {
         bytes: &[u8],
     ) -> Result<OpenAiFileMeta, AppError> {
         if bytes.is_empty() {
-            return Err(AppError::Llm("OpenAI Files upload: 空文件不可上传".to_string()));
+            return Err(AppError::Llm(
+                "OpenAI Files upload: 空文件不可上传".to_string(),
+            ));
         }
 
         let part = reqwest::multipart::Part::bytes(bytes.to_vec())
@@ -218,12 +220,10 @@ impl OpenAiFilesClient {
             .text("purpose", purpose.as_str().to_string())
             .part("file", part);
         if self.expires_after_seconds > 0 {
-            form = form
-                .text("expires_after[anchor]", "created_at")
-                .text(
-                    "expires_after[seconds]",
-                    self.expires_after_seconds.to_string(),
-                );
+            form = form.text("expires_after[anchor]", "created_at").text(
+                "expires_after[seconds]",
+                self.expires_after_seconds.to_string(),
+            );
         }
 
         let url = self.files_base_url();
@@ -305,11 +305,7 @@ impl OpenAiFilesClient {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(self.classify_http_error(
-                status,
-                &String::from_utf8_lossy(&body),
-                "get",
-            ));
+            return Err(self.classify_http_error(status, &String::from_utf8_lossy(&body), "get"));
         }
         let raw: OpenAiFileObject = serde_json::from_slice(&body)
             .map_err(|e| AppError::Llm(format!("OpenAI Files get 解析响应失败: {e}")))?;
@@ -401,15 +397,15 @@ impl OpenAiFilesClient {
             .await
             .map_err(|e| AppError::Llm(format!("OpenAI Files list 读响应失败: {e}")))?;
         if !status.is_success() {
-            return Err(self.classify_http_error(
-                status,
-                &String::from_utf8_lossy(&body),
-                "list",
-            ));
+            return Err(self.classify_http_error(status, &String::from_utf8_lossy(&body), "list"));
         }
         let raw: OpenAiFilesListResponse = serde_json::from_slice(&body)
             .map_err(|e| AppError::Llm(format!("OpenAI Files list 解析响应失败: {e}")))?;
-        Ok(raw.data.into_iter().map(OpenAiFileObject::into_meta).collect())
+        Ok(raw
+            .data
+            .into_iter()
+            .map(OpenAiFileObject::into_meta)
+            .collect())
     }
 
     pub async fn list(
@@ -546,8 +542,12 @@ impl OpenAiFilesRuntime {
     }
 
     fn read_bytes_and_sha(path: &Path) -> Result<(Vec<u8>, [u8; 32]), AppError> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| AppError::Llm(format!("OpenAI Files cache: 读取 {} 失败: {e}", path.display())))?;
+        let bytes = std::fs::read(path).map_err(|e| {
+            AppError::Llm(format!(
+                "OpenAI Files cache: 读取 {} 失败: {e}",
+                path.display()
+            ))
+        })?;
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         let digest = hasher.finalize();
@@ -688,7 +688,9 @@ impl OpenAiFilesRuntime {
                     size,
                     ..prev.clone()
                 };
-                self.cache.by_path.insert(cache_path.clone(), refreshed.clone());
+                self.cache
+                    .by_path
+                    .insert(cache_path.clone(), refreshed.clone());
                 let out = OpenAiFileMeta {
                     id: refreshed.file_id,
                     filename: filename.to_string(),
@@ -821,7 +823,8 @@ impl OpenAiFilesRuntime {
                         None
                     } else {
                         Some(
-                            SystemTime::now() + Duration::from_secs(self.client.expires_after_seconds()),
+                            SystemTime::now()
+                                + Duration::from_secs(self.client.expires_after_seconds()),
                         )
                     }
                 });
