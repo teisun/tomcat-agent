@@ -11,6 +11,7 @@ use super::super::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
     StreamEvent, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
+use crate::core::llm::openai_files::OpenAiFilesClient;
 
 #[test]
 fn chat_message_constructors() {
@@ -242,4 +243,34 @@ fn file_b64_rejects_oversize() {
 fn image_file_id_rejects_empty() {
     let err = ChatMessageContentPart::image_file_id("   ").expect_err("空 file_id 应拒绝");
     assert!(err.to_string().contains("不能为空"));
+}
+
+#[tokio::test]
+async fn image_upload_rejects_non_whitelisted_mime_before_network() {
+    let client = OpenAiFilesClient::new_for_test(
+        reqwest::Client::new(),
+        "http://127.0.0.1:9".to_string(),
+        "stub".to_string(),
+        0,
+        86_400,
+    );
+    let err = ChatMessageContentPart::image_upload(&client, "image/svg+xml", &[1, 2], "a.svg")
+        .await
+        .expect_err("非白名单 mime 应在发请求前失败");
+    assert!(err.to_string().contains("mime_type"));
+}
+
+#[tokio::test]
+async fn file_upload_rejects_empty_bytes_before_network() {
+    let client = OpenAiFilesClient::new_for_test(
+        reqwest::Client::new(),
+        "http://127.0.0.1:9".to_string(),
+        "stub".to_string(),
+        0,
+        86_400,
+    );
+    let err = ChatMessageContentPart::file_upload(&client, "a.pdf", "application/pdf", &[])
+        .await
+        .expect_err("空字节应在发请求前失败");
+    assert!(err.to_string().contains("为空"));
 }

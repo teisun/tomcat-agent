@@ -376,7 +376,7 @@ pub(super) async fn read_impl(
         };
         if meta.len() > max_bytes {
             return Err(AppError::Primitive(format!(
-                "File ({} bytes, mime={}) exceeds {} for inline content parts. Either trim the asset, host it externally, or upload via the Files API once the upload manager lands (T2-P0-013).",
+                "File ({} bytes, mime={}) exceeds {} for inline content parts. Either trim the asset, host it externally, or upload via the Files API once the upload manager lands (T2-P0-015).",
                 meta.len(),
                 detected.mime,
                 label

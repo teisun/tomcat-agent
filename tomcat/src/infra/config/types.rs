@@ -102,6 +102,21 @@ pub struct LlmConfig {
     /// CLI `[tool]` 行输出档位（与 `show_thinking` 独立）。
     #[serde(default)]
     pub tool_cli_verbosity: ToolCliVerbosity,
+    /// OpenAI Files 上传子配置（T2-P0-015）。
+    #[serde(default)]
+    pub files: LlmFilesConfig,
+}
+
+/// OpenAI Files 子配置（T2-P0-015）。
+///
+/// 仅保留最小可配置项：`expires_after_seconds`。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LlmFilesConfig {
+    /// 上传时 `expires_after[seconds]`：
+    /// - `86400`（默认）= 24h 后服务端自动回收；
+    /// - `0` = 不传 `expires_after` 字段，回退 OpenAI 默认策略。
+    #[serde(default = "default_llm_files_expires_after_seconds")]
+    pub expires_after_seconds: u64,
 }
 
 /// Thinking / Reasoning 协议子配置。
@@ -206,6 +221,18 @@ fn default_llm_retry_count() -> u32 {
 fn default_stream_timeout_sec() -> u64 {
     60
 }
+pub const DEFAULT_LLM_FILES_EXPIRES_AFTER_SECONDS: u64 = 86_400;
+fn default_llm_files_expires_after_seconds() -> u64 {
+    DEFAULT_LLM_FILES_EXPIRES_AFTER_SECONDS
+}
+
+impl Default for LlmFilesConfig {
+    fn default() -> Self {
+        Self {
+            expires_after_seconds: default_llm_files_expires_after_seconds(),
+        }
+    }
+}
 
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -221,6 +248,7 @@ impl Default for LlmConfig {
             api_base_fallback: None,
             thinking: ThinkingConfig::default(),
             tool_cli_verbosity: ToolCliVerbosity::default(),
+            files: LlmFilesConfig::default(),
         }
     }
 }

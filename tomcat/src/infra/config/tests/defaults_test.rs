@@ -33,3 +33,9 @@ fn app_config_includes_context() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.context.context_window, 400_000);
 }
+
+#[test]
+fn llm_files_default_expires_after_seconds_is_86400() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.llm.files.expires_after_seconds, 86_400);
+}

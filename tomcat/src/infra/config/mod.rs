@@ -27,9 +27,9 @@ pub use lock::with_config_lock;
 #[allow(unused_imports)]
 pub use types::WorkspaceEntry;
 pub use types::{
-    compute_context_budget_chars, AgentConfig, AppConfig, ContextConfig, LlmConfig, LogConfig,
-    PreflightConfig, PrimitiveConfig, SecurityConfig, ThinkingConfig, ToolCliVerbosity,
-    WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
+    compute_context_budget_chars, AgentConfig, AppConfig, ContextConfig, LlmConfig,
+    LlmFilesConfig, LogConfig, PreflightConfig, PrimitiveConfig, SecurityConfig, ThinkingConfig,
+    ToolCliVerbosity, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
 };
 #[allow(unused_imports)]
 pub use types::{

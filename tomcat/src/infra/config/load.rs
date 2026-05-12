@@ -300,7 +300,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
 /// * `cfg` - 待校验的 [`AppConfig`]。
 ///
 /// # Errors
-/// * [`AppError::Config`] - `audit_log_retention_days` 为 0、`log.level` 非法，或 `llm.proxy` 格式非法（非 `http://`/`https://` 开头）时返回。
+/// * [`AppError::Config`] - `audit_log_retention_days` 为 0、`log.level` 非法、`llm.proxy` 格式非法（非 `http://`/`https://` 开头），或 `llm.files.expires_after_seconds` 越界（非 0 且不在 [3600, 2592000]）时返回。
 pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     if cfg.security.audit_log_retention_days == 0 {
         return Err(AppError::Config(
@@ -322,6 +322,13 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
                 proxy
             )));
         }
+    }
+    let expires = cfg.llm.files.expires_after_seconds;
+    if expires != 0 && !(3_600..=2_592_000).contains(&expires) {
+        return Err(AppError::Config(format!(
+            "llm.files.expires_after_seconds 非法: {}（允许 0 或 [3600, 2592000]）",
+            expires
+        )));
     }
     resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())

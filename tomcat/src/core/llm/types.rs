@@ -13,9 +13,9 @@
 //!   编码**（PR-RJ-0 重构：避免 read 工具与 LLM 客户端各写一遍 IO）；wire 翻译
 //!   时再拼 `data:{mime};base64,{b64}` data URL，封装在 [`OpenAiResponsesProvider`]
 //!   内，类型层不暴露 wire 字符串。
-//! - **B 通道（已知 file_id 透传）**：调用方已经从 OpenAI Files API 拿到 file_id
-//!   时，通过 `image_file_id` / `file_file_id` helper 构造；本期不提供"读字节 → 上传 →
-//!   拿 id" 一站式 helper，那部分由独立任务 `T2-P0-013 | llm-files-upload-manager` 提供。
+//! - **B 通道（已知 file_id 透传 / 上传 helper）**：调用方可直接使用
+//!   `image_file_id` / `file_file_id` 构造，也可调用异步上传 helper
+//!   `image_upload` / `file_upload` 完成「字节上传 -> file_id part」一步到位。
 //!
 //! 限制：
 //! - `IMAGE_MAX_BYTES = 4_718_592` (4.5 MB)，与 [`pi_agent_rust`] 一致
@@ -27,6 +27,7 @@ use std::path::Path;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::core::llm::openai_files::{FilePurpose, OpenAiFilesClient};
 use crate::infra::error::AppError;
 
 /// inline 图片字节上限（解码后），与 [`pi_agent_rust/src/tools.rs`] 对齐。
@@ -91,7 +92,7 @@ pub enum ChatMessageContentPart {
         #[serde(rename = "image_b64", skip_serializing_if = "Option::is_none")]
         data: Option<String>,
         /// OpenAI Files API 引用通道；本期 schema 保留 + 公开 helper 接收已知 id；
-        /// 「读字节 → 上传 → 拿 id」由 T2-P0-013 提供。
+        /// 「读字节 → 上传 → 拿 id」由 T2-P0-015 提供。
         #[serde(skip_serializing_if = "Option::is_none")]
         file_id: Option<String>,
         /// vision detail：`auto` / `low` / `high`，可选，默认 auto。
@@ -240,6 +241,51 @@ impl ChatMessageContentPart {
             data: None,
             file_id: Some(id),
         })
+    }
+
+    /// 上传图片到 OpenAI Files（B 通道），并返回 `file_id` part。
+    ///
+    /// 仅在当前 provider 声明支持 Files API 时应调用；否则请回退 inline helper。
+    pub async fn image_upload(
+        client: &OpenAiFilesClient,
+        mime_type: impl Into<String>,
+        bytes: &[u8],
+        filename: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let filename = filename.into();
+        let mime = mime_type.into();
+        let mime_lower = mime.to_ascii_lowercase();
+        if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
+            return Err(AppError::Llm(format!(
+                "image_upload: 不支持的 mime_type {:?}, 仅允许 {:?}",
+                mime, ALLOWED_IMAGE_MIMES
+            )));
+        }
+        if bytes.is_empty() {
+            return Err(AppError::Llm("image_upload: 文件内容为空".to_string()));
+        }
+        let upload = client
+            .upload(FilePurpose::Vision, &filename, &mime, bytes)
+            .await?;
+        Self::image_file_id(upload.id)
+    }
+
+    /// 上传通用文件到 OpenAI Files（B 通道），并返回 `file_id` part。
+    pub async fn file_upload(
+        client: &OpenAiFilesClient,
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        bytes: &[u8],
+    ) -> Result<Self, AppError> {
+        let filename = filename.into();
+        let mime = mime_type.into();
+        if bytes.is_empty() {
+            return Err(AppError::Llm("file_upload: 文件内容为空".to_string()));
+        }
+        let upload = client
+            .upload(FilePurpose::UserData, &filename, &mime, bytes)
+            .await?;
+        Self::file_file_id(upload.id, Some(filename))
     }
 
     /// `count_tokens` 启发式：按变体折算字符数；inline 字节不进入字符统计。

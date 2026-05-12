@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
 use crate::core::tools::pipeline::read_state::ReadFileState;
@@ -64,6 +65,9 @@ pub struct AgentLoopConfig {
     /// 跨 session 复用同一 `Arc` 时建议在新 session 起点显式调用
     /// [`ReadFileState::clear`]，避免上一会话的 stamp 干扰新会话的 dedup 判定。
     pub read_file_state: Arc<ReadFileState>,
+    /// T2-P0-015：OpenAI Files 会话级运行时（含 client/cache/cleanup registry）。
+    /// 不支持 Files 的 provider 该字段为 `None`。
+    pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -78,6 +82,7 @@ impl Default for AgentLoopConfig {
             context_config: ContextConfig::default(),
             agent_trail_dir: String::new(),
             read_file_state: Arc::new(ReadFileState::default()),
+            openai_files_runtime: None,
         }
     }
 }

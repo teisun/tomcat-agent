@@ -150,6 +150,8 @@ pub struct ChatContext {
     /// 进程级初值由 `PI_CHAT_SHOW_THINKING=0/1` 环境变量决定，缺省 `false`；
     /// `/thinking on|off|toggle` 命令在运行时切换；`CliTurnRenderer` 持有同一 Arc 读位。
     pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
+    /// T2-P0-015：OpenAI Files 会话级 runtime（不支持 Files 的 provider 为 `None`）。
+    pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
 }
 
 impl ChatContext {
@@ -173,6 +175,13 @@ impl ChatContext {
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
         let llm: Arc<dyn LlmProvider> = crate::core::llm::resolve_llm(&config.llm)?;
+        let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
+            llm.as_ref(),
+            &config.llm.files,
+            session.sessions_dir(),
+            session.current_session_key(),
+        )
+        .map(Arc::new);
 
         let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
             Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
@@ -295,6 +304,7 @@ impl ChatContext {
             show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(
                 initial_show_thinking,
             )),
+            openai_files_runtime,
         })
     }
 
@@ -684,6 +694,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             context_config: context_config.clone(),
             agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
             read_file_state: ctx.read_file_state.clone(),
+            openai_files_runtime: ctx.openai_files_runtime.clone(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -797,6 +808,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             if is_fatal {
                 eprintln!("(致命错误，退出对话)");
                 context_state.preheat.abort();
+                cleanup_openai_files_on_session_end(ctx, "chat_fatal_exit").await;
                 events::stderr::unregister_chat_session_stderr_listeners(
                     &*ctx.event_bus,
                     &session_stderr_ids,
@@ -810,6 +822,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!();
     }
 
+    cleanup_openai_files_on_session_end(ctx, "session_end").await;
     events::stderr::unregister_chat_session_stderr_listeners(&*ctx.event_bus, &session_stderr_ids);
     Ok(())
 }
@@ -924,6 +937,32 @@ fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
         ctx.session.create_session(key, cwd)?;
     }
     Ok(())
+}
+
+async fn cleanup_openai_files_on_session_end(ctx: &ChatContext, reason: &str) {
+    let Some(runtime) = ctx.openai_files_runtime.as_ref() else {
+        return;
+    };
+    let summary = runtime.cleanup_registered_files(reason).await;
+    if summary.total == 0 {
+        return;
+    }
+    if summary.failed > 0 {
+        warn!(
+            reason = reason,
+            total = summary.total,
+            deleted = summary.deleted,
+            failed = summary.failed,
+            "openai files cleanup finished with failures"
+        );
+    } else {
+        info!(
+            reason = reason,
+            total = summary.total,
+            deleted = summary.deleted,
+            "openai files cleanup completed"
+        );
+    }
 }
 
 fn migrate_legacy_layer0_tool_results(

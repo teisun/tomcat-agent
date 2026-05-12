@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-05-08 10:30 | ACTIVE | develop | — |
+| Jerry | 2026-05-10 23:20 | PENDING_INTEGRATION | feature/llm-files-upload-manager | — |
+
+### 2026-05-10 | T2-P0-015 OpenAI Files 上传管理进入集成前状态
+
+- **范围**：落地 `OpenAiFilesClient`（`upload/get/delete/list` + retry + `DELETE 404` 幂等）、`ChatMessageContentPart::{image_upload,file_upload}`、会话级双索引 cache（path/hash + inflight 单飞）、`read` inline/upload 决策注入、CLI/chat 退出 cleanup、`[llm.files] expires_after_seconds` 配置链路与文档同步。
+- **阶段 T（门禁）**：已跑关键单测/焦小测（openai_files 模块、tool_exec oversize 路由、chat/session cleanup、config 边界与 env 覆盖、provider lazy files client）；`openai_files_integration_tests` 已新增并完成编译（默认 `#[ignore]`，手动触发真实 API）。
+- **看板**：`TASK_BOARD_002` 中 `T2-P0-015` 更新为 `PENDING_INTEGRATION`（任务卡与总览同步）。
 
 ### 2026-05-08 | 架构文档 `llm-stream-events-cli-pipeline.md` 增补 §5.3
 

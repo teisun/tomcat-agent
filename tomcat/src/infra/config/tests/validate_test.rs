@@ -77,6 +77,24 @@ fn validate_config_accepts_workspace_roots_when_dirs_exist() {
 }
 
 #[test]
+fn validate_config_accepts_llm_files_expires_after_zero_and_min_bound() {
+    let mut cfg = AppConfig::default();
+    cfg.llm.files.expires_after_seconds = 0;
+    assert!(validate_config(&cfg).is_ok());
+    cfg.llm.files.expires_after_seconds = 3600;
+    assert!(validate_config(&cfg).is_ok());
+}
+
+#[test]
+fn validate_config_rejects_llm_files_expires_after_out_of_range() {
+    let mut cfg = AppConfig::default();
+    cfg.llm.files.expires_after_seconds = 3599;
+    assert!(validate_config(&cfg).is_err());
+    cfg.llm.files.expires_after_seconds = 2_592_001;
+    assert!(validate_config(&cfg).is_err());
+}
+
+#[test]
 fn resolve_workspace_roots_skips_blank_entries() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();

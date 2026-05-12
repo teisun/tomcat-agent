@@ -1,5 +1,41 @@
 use super::super::*;
 use crate::SessionEntry;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+fn spawn_single_response_server(
+    status: u16,
+    body: &'static str,
+) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&hits);
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            hits_clone.fetch_add(1, Ordering::SeqCst);
+            let reason = match status {
+                200 => "OK",
+                404 => "Not Found",
+                _ => "Unknown",
+            };
+            let resp = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                reason,
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    (format!("http://{}", addr), hits, handle)
+}
 
 #[test]
 fn build_tool_definitions_is_non_empty() {
@@ -236,4 +272,52 @@ fn interrupt_persists_transcript_hard_ack() {
         "call_1",
         "tool_call_id 应与 assistant 发起的调用匹配"
     );
+}
+
+#[tokio::test]
+async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
+    let (base_url, hits, handle) = spawn_single_response_server(404, r#"{"error":"not found"}"#);
+    let old_no_proxy = std::env::var("NO_PROXY").ok();
+    let old_no_proxy_lower = std::env::var("no_proxy").ok();
+    // SAFETY: 测试作用域内确保本地 mock 地址不走代理，避免 127.0.0.1 请求被外部代理改写。
+    unsafe {
+        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+        std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    }
+    let mut cfg = AppConfig::default();
+    let dir = tempfile::tempdir().unwrap();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_base = Some(base_url);
+    cfg.llm.api_key_env = Some("TOMCAT_CHAT_CLEANUP_TEST_KEY".to_string());
+    // SAFETY: 测试内部临时设置 env，结束后立即清理。
+    unsafe { std::env::set_var("TOMCAT_CHAT_CLEANUP_TEST_KEY", "stub") };
+
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let runtime = ctx
+        .openai_files_runtime
+        .as_ref()
+        .expect("openai-responses should expose files runtime");
+    runtime.enqueue_delete("file-chat-cleanup".to_string(), Some(10), Some(1), "test");
+    assert!(runtime.pending_cleanup_count() >= 1);
+
+    cleanup_openai_files_on_session_end(&ctx, "chat_test_end").await;
+    assert_eq!(
+        runtime.pending_cleanup_count(),
+        0,
+        "404 删除应按幂等成功清空队列"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "应发起 1 次 DELETE");
+    handle.join().unwrap();
+    // SAFETY: 清理测试环境变量。
+    unsafe {
+        std::env::remove_var("TOMCAT_CHAT_CLEANUP_TEST_KEY");
+        match old_no_proxy {
+            Some(v) => std::env::set_var("NO_PROXY", v),
+            None => std::env::remove_var("NO_PROXY"),
+        }
+        match old_no_proxy_lower {
+            Some(v) => std::env::set_var("no_proxy", v),
+            None => std::env::remove_var("no_proxy"),
+        }
+    };
 }
