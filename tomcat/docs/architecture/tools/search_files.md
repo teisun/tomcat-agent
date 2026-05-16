@@ -399,6 +399,7 @@ SearchFilesStats
 | 点 | 说明 |
 |----|------|
 | 入口 | `chat_loop` 注册完 stderr 监听后调用 `preflight::start_search_tools_preflight(cfg, bus)`；与会话循环并行；不影响首屏 |
+| **git 预检（对称，拟定）** | **`start_git_preflight`** 与上格 **同构**：detached 安装、`WIRE_GIT_PREFLIGHT` 字段镜像 `WIRE_SEARCH_TOOLS_PREFLIGHT`、stderr 与 env 对称；详见 [`checkpoint-resume.md` §2.2.2](./checkpoint-resume.md#222-chat-入口-git-预检与后台安装拟定)。 |
 | 探测 | `find_binary("rg")` / `find_binary("fd")` / `find_binary("fdfind")`；即时读 `PATH`，无缓存 |
 | 安装（Unix） | 后台线程内对包管理器使用 **`nohup … >> ~/.tomcat/agents/main/logs/preflight-file-log-<ts>.log 2>&1 &`**，经 `/bin/sh -c` **`spawn`**；**不**阻塞等待安装结束，退出 `tomcat chat` / tomcat 进程结束后安装可继续 |
 | macOS Homebrew | **`brew install --force-bottle ripgrep fd`**，且 detached shell 前缀 **`HOMEBREW_NO_BUILD_FROM_SOURCE=1`**：仅用 bottle，**禁止**从源码构建（避免 llvm 等超长后台编译）；无 bottle 时安装失败，会话仍可用 Tier2 |
