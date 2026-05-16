@@ -2,6 +2,7 @@
 
 > This file is generated from `src/core/tools/contract/catalog.rs`.
 > Run `UPDATE_TOOL_CATALOG=1 cargo run --bin gen-tool-catalog` after catalog changes.
+> `checkpoint` / `restore` 不在 tool catalog 中：它们是 `tomcat chat` 的本地斜杠命令（`/ckpt`、`/restore`），由 chat 层直接处理，不暴露给 LLM 作为工具。
 
 ## Filesystem
 

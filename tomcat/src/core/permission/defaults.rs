@@ -34,7 +34,10 @@ pub const BUILTIN_DEFAULT_PATH_RULES: &[(&str, PathRuleMode)] = &[
         PathRuleMode::Deny,
     ),
     ("~/.tomcat/agents/*/agent/credentials", PathRuleMode::Deny),
-    ("~/.tomcat/agents/*/agent/credentials/**", PathRuleMode::Deny),
+    (
+        "~/.tomcat/agents/*/agent/credentials/**",
+        PathRuleMode::Deny,
+    ),
     // ── Agent 历史与审计：可读不可写 ──
     ("~/.tomcat/agents/*/sessions", PathRuleMode::Readonly),
     ("~/.tomcat/agents/*/sessions/**", PathRuleMode::Readonly),

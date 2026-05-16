@@ -82,15 +82,16 @@ use crate::core::compaction::apply::check_before_request;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::ChatMessage;
 use crate::core::session::manager::{build_context_from_state, init_context_state};
+use crate::core::session::read_entries_tail;
 use crate::infra::error::AppError;
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
-    resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, AppConfig, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool,
-    ToolExecutor, ToolRegistry,
+    compound_turn_id, resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
+    resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, AppConfig, CheckpointKind,
+    CheckpointRecordRequest, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
+    PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use super::render::MarkdownRenderer;
@@ -115,6 +116,9 @@ pub struct ChatContext {
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
     pub event_bus: Arc<dyn EventBus>,
+    pub audit: Arc<dyn AuditRecorder>,
+    pub checkpoint_switcher: Arc<crate::core::SwitchingCheckpointStore>,
+    pub checkpoint_store: Arc<dyn crate::core::CheckpointStore>,
     /// 当前回合用户中断令牌。ctrlc handler 会 `lock().cancel()`；
     /// `chat_loop` 在每次 readline 读到非空输入后**重建**它（`CancellationToken`
     /// 一旦 cancel 不可逆），保证新回合不会被上一回合的中断信号污染。
@@ -152,6 +156,16 @@ pub struct ChatContext {
     pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
     /// T2-P0-015：OpenAI Files 会话级 runtime（不支持 Files 的 provider 为 `None`）。
     pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+}
+
+fn git_available_for_checkpoints() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 impl ChatContext {
@@ -263,9 +277,16 @@ impl ChatContext {
                 Err(_) => None,
             };
 
+        let checkpoint_switcher = Arc::new(crate::core::SwitchingCheckpointStore::new(
+            agent_trail_dir.clone(),
+            agent_workspace_dir.clone(),
+            git_available_for_checkpoints(),
+        ));
+        let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
+
         let tool_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
         let tool_registry: Arc<dyn ToolRegistry> =
-            Arc::new(DefaultToolRegistry::new(tool_executor, audit));
+            Arc::new(DefaultToolRegistry::new(tool_executor, audit.clone()));
 
         let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
@@ -288,6 +309,9 @@ impl ChatContext {
             primitive,
             tool_registry,
             event_bus,
+            audit,
+            checkpoint_switcher,
+            checkpoint_store,
             cancel_token,
             last_interrupt_at,
             agent_workspace_dir,
@@ -301,9 +325,7 @@ impl ChatContext {
             read_file_state: Arc::new(
                 crate::core::tools::pipeline::read_state::ReadFileState::default(),
             ),
-            show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(
-                initial_show_thinking,
-            )),
+            show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(initial_show_thinking)),
             openai_files_runtime,
         })
     }
@@ -598,12 +620,24 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         workspace_context,
         workspace_state,
     );
+    schedule_checkpoint_prune(ctx);
+    if let Some(path) = ctx.session.current_transcript_path()? {
+        let tail = read_entries_tail(&path, 64).unwrap_or_default();
+        let _ = crate::core::compute_resume_plan(entry.as_ref(), &tail);
+    } else {
+        let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
+    }
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
     let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
         &*ctx.event_bus,
         search_tools_printer,
     );
     preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
+    preflight::start_git_preflight(
+        &ctx.config,
+        ctx.event_bus.clone(),
+        ctx.checkpoint_switcher.clone(),
+    );
 
     loop {
         let input = match rl.readline("u> ") {
@@ -695,6 +729,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
             read_file_state: ctx.read_file_state.clone(),
             openai_files_runtime: ctx.openai_files_runtime.clone(),
+            checkpoint_store: ctx.checkpoint_store.clone(),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -789,13 +824,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         });
 
         if let Some(result) = maybe_result {
-            for msg in result.new_messages {
-                let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
-                let mut cm = msg;
-                cm.msg_id = Some(row_id);
-                context_state.messages.push(cm);
-            }
-            ctx.session.persist_context_observability(&context_state)?;
+            persist_turn_result(
+                ctx,
+                &mut context_state,
+                result.new_messages,
+                if was_interrupted {
+                    CheckpointKind::Interrupt
+                } else {
+                    CheckpointKind::TurnEnd
+                },
+            )?;
 
             if was_interrupted {
                 eprintln!("\n^C 已中断（partial 已保存）");
@@ -832,6 +870,70 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 /// 判断错误是否致命（配置缺失等不可恢复场景）；API/网络错误为非致命。
 fn is_fatal_error(e: &AppError) -> bool {
     matches!(e, AppError::Config(_))
+}
+
+fn schedule_checkpoint_prune(ctx: &ChatContext) {
+    let store = ctx.checkpoint_store.clone();
+    let retention = crate::core::RetentionPolicy {
+        retention_max: ctx.config.checkpoint.retention_max,
+        retention_days: ctx.config.checkpoint.retention_days,
+    };
+    std::thread::spawn(move || {
+        if let Err(err) = store.prune(retention) {
+            warn!(error = %err, "checkpoint prune failed");
+        }
+    });
+}
+
+fn persist_turn_result(
+    ctx: &ChatContext,
+    context_state: &mut crate::core::ContextState,
+    new_messages: Vec<crate::core::llm::ChatMessage>,
+    kind: CheckpointKind,
+) -> Result<Vec<String>, AppError> {
+    let mut appended_row_ids = Vec::new();
+    for msg in new_messages {
+        let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
+        let mut cm = msg;
+        cm.msg_id = Some(row_id);
+        appended_row_ids.push(cm.msg_id.clone().unwrap_or_default());
+        context_state.messages.push(cm);
+    }
+    ctx.session.persist_context_observability(context_state)?;
+    maybe_record_turn_checkpoint(ctx, kind, &appended_row_ids);
+    Ok(appended_row_ids)
+}
+
+fn maybe_record_turn_checkpoint(
+    ctx: &ChatContext,
+    kind: CheckpointKind,
+    appended_row_ids: &[String],
+) {
+    let Some(request) =
+        build_turn_checkpoint_request(ctx.session.current_session_key(), kind, appended_row_ids)
+    else {
+        return;
+    };
+    if let Err(err) = ctx.checkpoint_store.record(request) {
+        warn!(error = %err, "checkpoint record failed");
+    }
+}
+
+fn build_turn_checkpoint_request(
+    session_id: &str,
+    kind: CheckpointKind,
+    appended_row_ids: &[String],
+) -> Option<CheckpointRecordRequest> {
+    let (Some(start_id), Some(end_id)) = (appended_row_ids.first(), appended_row_ids.last()) else {
+        return None;
+    };
+    Some(CheckpointRecordRequest {
+        session_id: session_id.to_string(),
+        turn_id: compound_turn_id(start_id, end_id),
+        kind,
+        message_anchor: Some(end_id.clone()),
+        notes: None,
+    })
 }
 
 /// CLI 启动时 `show_thinking` 初值的来源裁决：

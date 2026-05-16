@@ -232,7 +232,7 @@
 | G6 启动期幂等 | `compute_resume_plan` 恒 **Continue** | 重启策略不变。 |
 | G7 GC | 启动期默认后台 `prune`（不阻塞 readline）；**无**其它 prune 入口 | 别撑爆磁盘。 |
 | G8 wasm/无 git 降级 | `NoopStore` + 可选 `start_git_preflight` | 没 git 不挡聊。 |
-| G9 运行中挂断 | 运行中关窗 ≈ interrupt → **Interrupt** ckpt | 关窗不当静默丢尾。 |
+| G9 运行中挂断 | `AgentLoop::run` 未返回时挂断/SIGHUP/关窗 ⇒ `cancel_token` → partial 落盘 → **`kind=Interrupt` ckpt**（§4.1 **C15**）；验收见 §11「集成（C15 / G9）」 | 关窗不当静默丢尾。 |
 
 ### 3.2 非目标
 
@@ -269,6 +269,7 @@
 | C10 Resume 推算位置 | 启动期 vs 第一条 user 输入时 | T2-P0-007 当前 `--resume` 在 `chat_loop` 启动早段 | `tomcat/src/api/chat/mod.rs`、`tomcat/src/api/cli/chat_cmd.rs` | **设计**：在 **第一次 `readline` 之前** 完成 `load session →（可选）read_tail → compute_resume_plan（恒 `Continue`，可无操作）→ init_context_state / hydrate`；**不**在首条 user 输入之后再 hydrate | 拖到首条 user 后：与 `AgentLoop::run` 抢顺序、单测难固定 | 先 hydrate 再等人打字。 |
 | C11 预览 / 试运行 | 是否提供「先看再回」 | **Cursor** 预览面板 | [Cursor Docs · Checkpoints](https://cursor.com/docs/agent/chat/checkpoints) | **设计**：`/restore <ck> --dry-run` + `/ckpt diff <ck>` | 不做预览：成本陡增 | 与 Cursor 同思路。 |
 | C14 pre-rollback | 后悔药 | hermes：**每次** restore 前整树 `_take` | `checkpoint_manager.py:766-767` | **设计**：**仅** restore 目标 **`kind == TurnEnd`** 前 `record(Manual{label:"pre-rollback …"})`（**整树**，hermes 同形）；**Interrupt / Manual / Milestone** restore **不** pre-rollback；失败 ⇒ **fatal**、不继续 restore（§10） | hermes 全 kind 都 pre-rollback：Tomcat 收窄到整轮锚点 | 只给「撤整轮」留后悔药。 |
+| C15 运行期挂断 | **`AgentLoop::run` 未返回**时关终端 / 关 CLI / stdin 挂断 / SIGHUP 等，是否走软中断并拍 **Interrupt** ckpt | T-007 Soft Interrupt（`cancel_token` + partial 落盘）；POSIX 关终端常伴 SIGHUP；**空闲 `readline` 时 Ctrl+D** 另议（§5.0） | [`interrupt-and-cancellation.md §6.1`](../interrupt-and-cancellation.md)、`tomcat/src/api/chat/mod.rs`、`tomcat/src/core/agent_loop/run.rs`（`terminate_interrupted`） | **设计**：运行中挂断 **等价** `cancel_token.cancel()` → **`Interrupted`** → partial **先**落盘（T-004/T-017）→ **`record(Interrupt)`**（PR-CKB，与 C2 同路径）。**信号注册 / 挂断检测**归 **T2-P0-007**；ckpt 只消费已完成的软中断收尾。**理由**：关窗不当静默丢尾；与 G9 一致。**与空闲 Ctrl+D 分离**（后者可不 cancel、直接退出，见 §5.0） | ① 静默 `exit`：partial 与 **Interrupt** ckpt 皆无，重启对不上盘；② 等同 **Hard Interrupt（exit 130）** 且不写 ckpt：双击/强杀场景丢锚（§12）；③ 运行中挂断也走 **空闲 Ctrl+D** 路径：语义混乱、无法保证 partial + ckpt | 跑一半关窗 = 软中断，落盘后再拍中断照；闲着按 Ctrl+D 另算。 |
 | C12 终端副作用 | DB 迁移、`pnpm install` 之类 | **Cursor 显式声明无法撤销**；hermes 同样无法 | [Cursor Docs · Checkpoints](https://cursor.com/docs/agent/chat/checkpoints) | **设计**：明确列入 [§3.2 非目标](#32-非目标)、[§12 风险](#12-风险与应对)；rollback 仅还原 `agent_workspace_dir` 文件树，不重放 / 反向跑 bash 命令 | 假装能撤：会让用户误以为 `npm install` 也能回退 → 灾难性误用 | 跟 Cursor 同款边界：能回文件，回不了外部世界。 |
 | C13 与 Git 的关系 | 是否替代版本控制 | hermes：本地、与 Git 分离；**Cursor**：本地隐藏目录、与 Git 历史分离，建议「commit before / restore between / commit after」 | hermes 文档；[Cursor Docs · Checkpoints](https://cursor.com/docs/agent/chat/checkpoints) | **设计**：影子 Git **物理上**就是 git 仓库，但 `GIT_DIR` 在 `~/.tomcat/...` 下，**与用户工作区 `.git` 完全分离**；文档里同样建议「重要节点用 Git commit，过程态用 ckpt」 | 复用用户 `.git`：污染历史、推送时把 ckpt commit 推上 origin → 灾难 | 影子 git 藏在用户目录外，长期版本控制还是用真 Git。 |
 
@@ -279,7 +280,7 @@
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | **PR-CKA** | `CheckpointStore` trait + `ShadowGitStore` / `NoopStore`；`CheckpointId` / `CheckpointKind` / `CheckpointMeta`；`Arc<dyn CheckpointStore>` 注入 `AgentLoopConfig`；**配置**仅 `retention_max` / `retention_days`（见 §9） | 新增 `src/core/checkpoint/{mod.rs,types.rs,shadow_git.rs,noop.rs,store.rs}`；`src/core/agent_loop/types.rs`；`src/infra/config/types.rs`（`CheckpointConfig` 极简） | `core::checkpoint::tests::shadow_git::*`、`infra/config/tests/checkpoint_cfg_test.rs`（仅 retention 键） | 先把"存"做出来。 |
-| **PR-CKB** | **`TurnEnd` + `Interrupt`**（+ Manual / Milestone API）；**dedup** `(session_id, turn_id, kind)`；**无 ToolPre** | `src/api/chat/mod.rs`（TurnEnd）、`src/core/agent_loop/run.rs`（Interrupt）、`src/core/checkpoint/store.rs` | `turn_end_writes_checkpoint`、`interrupt_writes_checkpoint_after_partial_persist` | 只钉回合末与中断。 |
+| **PR-CKB** | **`TurnEnd` + `Interrupt`**（+ Manual / Milestone API）；**dedup** `(session_id, turn_id, kind)`；**无 ToolPre**；消费 **C15** 软中断收尾后的 `record(Interrupt)` | `src/api/chat/mod.rs`（TurnEnd）、`src/core/agent_loop/run.rs`（Interrupt）、`src/core/checkpoint/store.rs` | `turn_end_writes_checkpoint`、`interrupt_writes_checkpoint_after_partial_persist`；**C15/G9**：`hangup_during_agent_run_writes_interrupt_ckpt_after_partial`（**拟定**；信号/mock cancel 归 T-007） | 只钉回合末与中断；跑一半关窗走同一条 Interrupt 拍照链。 |
 | **PR-CKC** | **`/restore [--path …]`** + `/ckpt …`；`restore` 实现 pathspec checkout；**TurnEnd** pre-rollback；**条件 superseded**（§5.4）；**无** `/ckpt prune` | `parse.rs`、`dispatch.rs`、`shadow_git.rs` | `restore_path_checkout_*`、`restore_turn_end_supersedes_transcript`、`restore_manual_ckpt_no_superseded`、`pre_rollback_only_for_turn_end` | restore 主入口。 |
 | **PR-CKD** | `compute_resume_plan`（**恒 `Continue`**）+ **启动期默认 `prune`**（**后台、不阻塞主线程**，见 §9）+ `init_context_state` / hydrate（**跳过 `superseded`**）；`SessionEntry.last_checkpoint_id`；与 `--resume` 合流 | `src/api/chat/mod.rs`、`src/core/session/store.rs`、`src/core/checkpoint/resume.rs`（**拟定**） | `resume_plan_always_continue`、`startup_prune_scheduled_without_blocking_readline`、`hydrate_skips_superseded_messages` | 重启接上次；清盘只在启动。 |
 | **PR-CKE** | 本文件冻结合入；与 [README §4](../../../agents/TASK_BOARD_002/README.md)、[`tool-catalog.md`](../../tool-catalog.md)（说明 ckpt 不入 catalog）、[`work-dir-and-data-layout.md §2`](../work-dir-and-data-layout.md)（新增 `checkpoints/` 子目录）、[`audit-log.md`](../audit-log.md)（rollback 写一条 hostcall 审计）、[`interrupt-and-cancellation.md §14.1`](../interrupt-and-cancellation.md) 交叉引用；**门禁**：分组测试登记 | `docs/architecture/tools/checkpoint-resume.md`、`docs/architecture/work-dir-and-data-layout.md`、`docs/tool-catalog.md`、`scripts/test-groups.sh` | 不计代码 PR；门禁组登记 | 字和门禁对齐。 |
@@ -795,16 +796,17 @@ sequenceDiagram
 
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 |------|-------------|------|--------|
-| 单元（store） | `core::checkpoint::tests::shadow_git::record_returns_ck_id`、`shadow_git::dedup_per_turn_per_kind_returns_existing`（**整轮去重**）、`shadow_git::no_op_when_workdir_unchanged_returns_prev_id`、`shadow_git::skip_when_dir_file_count_exceeds_threshold_returns_null_id`、`shadow_git::orphan_workdir_pruned_at_startup`、`shadow_git::prune_runs_git_gc_and_releases_disk` | PENDING | 锁定存储行为。 |
-| 单元（resume） | `resume_plan_always_continue`、进程重启后 partial 仍在（T-004/T-017） | PENDING | 恒 Continue 与 hydrate。 |
-| 单元（dispatch） | `interrupt_writes_checkpoint_after_partial_persist`、`turn_end_writes_checkpoint` | PENDING | 钩子打没打到。 |
-| 集成（preflight） | `tests/chat_git_preflight_tests.rs`（**拟定**）：detached spawn 不阻塞、`auto_install_git=false` 不 spawn 安装、安装成功后 `git --version` 可见 | PENDING | 与 rg 预检同构。 |
-| 集成（chat 斜杠） | `restore_path_checkout_single_file`、`restore_turn_end_supersedes_transcript`、`restore_manual_ckpt_no_superseded`、`pre_rollback_only_before_turn_end_restore`；**无** `/ckpt prune` | PENDING | `/restore` + 条件 superseded + TurnEnd pre-rollback。 |
-| 集成（resume） | `resume_after_interrupt_keeps_partial_assistant`；`startup_prune_scheduled_without_blocking_readline`；`hydrate_skips_superseded_messages`；**无** `resume_with_torn_compaction_suggests_rewind` | PENDING | 重启接得上；启动 prune；hydrate 语义。 |
-| E2E | `E2E-CLI-070 test_resume_after_interrupt`（待新增）、`E2E-CLI-071 test_slash_restore_recovers_after_bad_edit` | PENDING | 用户能摸到的整条链路。 |
-| 观察指标 | G1–G9 对应锁死机制 | PENDING | §3.1 吹的牛在这里钉死。 |
-| 配置 | `infra/config/tests/checkpoint_cfg_test.rs::cfg_defaults`、`cfg_retention_validation`（**仅** `retention_max` / `retention_days` / `auto_install_git`） | PENDING | 配置极简。 |
-| 文档 | 本文定稿 + [`tool-catalog.md`](../../tool-catalog.md) / [`work-dir-and-data-layout.md`](../work-dir-and-data-layout.md) / [`audit-log.md`](../audit-log.md) / [`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md) 同步 | PENDING | 字和代码别两张皮。 |
+| 单元（store） | `record_and_list_round_trip`、`dedup_per_turn_per_kind_returns_existing`、`no_op_when_workdir_unchanged_returns_prev_id`、`record_first_no_diff_empty_worktree_creates_baseline_checkpoint`、`skip_when_dir_file_count_exceeds_threshold_returns_null_id`、`orphan_workdir_pruned_at_startup`、`prune_runs_git_gc_and_releases_disk`、`new_canonicalizes_existing_worktree_path` | ✅ 2026-05-16 | 锁定存储行为、baseline checkpoint 与工作区别名语义。 |
+| 单元（resume） | `resume_plan_always_continue`、`startup_prune_scheduled_without_blocking_readline`、`init_context_state_skips_superseded_messages` | ✅ 2026-05-16 | 恒 Continue、后台 prune 与 hydrate。 |
+| 单元（dispatch） | `interrupt_writes_checkpoint_after_partial_persist`、`turn_end_writes_checkpoint` | ✅ 2026-05-16 | checkpoint 钩子时序已锁定。 |
+| 集成（preflight） | `git_preflight_auto_install_disabled_keeps_noop`、`git_preflight_detached_spawn_does_not_block`、`git_preflight_install_enables_shadow_on_next_checkpoint` | ✅ 2026-05-16 | 覆盖 detached spawn、不自动安装、Noop -> Shadow 惰性升级。 |
+| 集成（chat 斜杠） | `restore_path_checkout_only_touches_selected_file`、`restore_turn_end_supersedes_transcript_and_updates_last_checkpoint`、`restore_manual_checkpoint_keeps_transcript_live`、`test_pre_rollback_only_before_turn_end_restore`；**无** `/ckpt prune` | ✅ 2026-05-16 | `/restore` + 条件 superseded + TurnEnd pre-rollback。 |
+| 集成（resume） | `resume_after_interrupt_keeps_partial_assistant`；`startup_prune_scheduled_without_blocking_readline`；`init_context_state_skips_superseded_messages`；**无** `resume_with_torn_compaction_suggests_rewind` | ✅ 2026-05-16 | 重启接得上；启动 prune；hydrate 语义。 |
+| 集成（**C15 / G9**） | `test_hangup_during_run_leaves_interrupt_ckpt`、`test_idle_readline_eof_exits_without_interrupt_ckpt`、`interrupt_writes_checkpoint_after_partial_persist`：`AgentLoop::run` 执行中挂断 / `SIGHUP` / 关 stdin ⇒ 先 `cancel_token.cancel()` → `Interrupted` → partial 已落盘 → 再 `record(Interrupt)`；阻塞在 `readline` 且无在飞 run 时 EOF / `Ctrl+D` ⇒ 不 `cancel`、无 `Interrupt` ckpt | ✅ 2026-05-16 | G9：跑一半关窗要有中断照；闲着 EOF 不算中断。 |
+| E2E | `E2E-CLI-070 test_resume_after_interrupt`、`E2E-CLI-075 test_slash_restore_recovers_after_bad_edit`、`E2E-CLI-076 test_hangup_during_run_leaves_interrupt_ckpt` | ✅ 2026-05-16 | 用户能摸到的整条链路；含跑一半挂断。 |
+| 观察指标 | G1–G9 见本表对应行；G9 由上行「集成（C15 / G9）」+ `E2E-CLI-076` 锁定 | ✅ 2026-05-16 | §3.1 指标与用例逐条对齐。 |
+| 配置 | `defaults_test` / `load_test` / `validate_test` 已覆盖 `checkpoint.retention_*`、`preflight.auto_install_git` | ✅ 2026-05-16 | 配置极简且默认值稳定。 |
+| 文档 | 本文定稿 + [`tool-catalog.md`](../../tool-catalog.md) / [`work-dir-and-data-layout.md`](../work-dir-and-data-layout.md) / [`audit-log.md`](../audit-log.md) / [`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md) 同步 | ✅ 2026-05-16 | 字和代码别两张皮。 |
 
 §3.1 观察指标表与本表逐行对照（G1–G9）。状态列只允许 `✅ 日期` / `PENDING` / `阻塞于 X`。
 

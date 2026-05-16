@@ -279,3 +279,92 @@ fn remove_branch_summary_entry_by_id_not_found_returns_err() {
     let r = remove_branch_summary_entry_by_id(&path, "nope");
     assert!(r.is_err());
 }
+
+#[test]
+fn mark_message_entries_after_anchor_superseded_marks_only_later_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("superseded.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    append_entry(
+        &path,
+        &TranscriptEntry::Message(MessageEntry {
+            id: Some("m1".to_string()),
+            parent_id: None,
+            timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+            message: serde_json::json!({"role":"user","content":"u1"}),
+        }),
+    )
+    .unwrap();
+    append_entry(
+        &path,
+        &TranscriptEntry::Message(MessageEntry {
+            id: Some("m2".to_string()),
+            parent_id: None,
+            timestamp: "2025-01-01T00:00:02.000Z".to_string(),
+            message: serde_json::json!({"role":"assistant","content":"a1"}),
+        }),
+    )
+    .unwrap();
+    append_entry(
+        &path,
+        &TranscriptEntry::Message(MessageEntry {
+            id: Some("m3".to_string()),
+            parent_id: None,
+            timestamp: "2025-01-01T00:00:03.000Z".to_string(),
+            message: serde_json::json!({"role":"assistant","content":"a2"}),
+        }),
+    )
+    .unwrap();
+
+    let changed = mark_message_entries_after_anchor_superseded(&path, "m1").unwrap();
+    assert_eq!(changed, 2);
+
+    let entries = read_entries_tail(&path, 10).unwrap();
+    match &entries[0] {
+        TranscriptEntry::Message(me) => assert_eq!(
+            me.message.get("superseded").and_then(|v| v.as_bool()),
+            None,
+            "锚点本身不应被标 superseded"
+        ),
+        other => panic!("unexpected first entry: {other:?}"),
+    }
+    for entry in &entries[1..] {
+        match entry {
+            TranscriptEntry::Message(me) => assert_eq!(
+                me.message.get("superseded").and_then(|v| v.as_bool()),
+                Some(true)
+            ),
+            other => panic!("unexpected non-message entry: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn mark_message_entries_after_anchor_superseded_requires_anchor() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("superseded_missing.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let err = mark_message_entries_after_anchor_superseded(&path, "missing");
+    assert!(err.is_err());
+}

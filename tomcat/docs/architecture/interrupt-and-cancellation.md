@@ -750,8 +750,10 @@ ctrlc::set_handler(move || {
 
 | 档 | 做法 | 本设计立场 |
 |---|---|---|
-| 最小版 | 中断时 partial 落盘到 session JSONL → 下次启动同 session 天然读到完整 transcript（含 partial assistant）→ 用户下一句自动续上 | **本次做**：T-004 / T-017 落地后自动满足 |
-| 完整版 | 新 `ChatSession::resume_from_transcript` API、新 `tomcat session resume` 子命令、跨 session 的 Checkpoint | **不做**：推给 T2-P1-001 Checkpoint |
+| 最小版 | 中断时 partial 落盘到 session JSONL → 下次启动同 session 天然读到完整 transcript（含 partial assistant）→ 用户下一句自动续上 | **本次做**：T-004 / T-017 落地后自动满足；T2-P1-001 的 C15 / G9 直接复用这条链路，把它作为 `record(Interrupt)` 的前置条件 |
+| 完整版 | 新 `ChatSession::resume_from_transcript` API、新 `tomcat session resume` 子命令、跨 session 的 Checkpoint | **不做**：文件树级 checkpoint / `/ckpt` `/restore` 由 T2-P1-001 单独实现，见 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) §4.1 / §11 |
+
+补充：T2-P1-001 约束了「运行中挂断」与「空闲 EOF」必须分离。也就是运行中 `SIGHUP` / stdin 挂断等价于 `cancel -> Interrupted -> partial 落盘 -> record(Interrupt)`；而阻塞在 `readline` 时的 `Ctrl+D` / EOF 只做安静退出，不写 `Interrupt` checkpoint。对应测试矩阵见 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) §11。
 
 ---
 

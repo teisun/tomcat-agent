@@ -19,6 +19,7 @@ use std::time::Instant;
 use serde_json::json;
 use shell_words;
 
+use crate::core::SwitchingCheckpointStore;
 use crate::infra::{wire, AppConfig, EventBus, EventContext};
 
 const SKIP_ENV: &str = "PI_SKIP_SEARCH_TOOLS_PREFLIGHT";
@@ -181,6 +182,97 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, event_bus: Arc<dy
     });
 }
 
+pub fn start_git_preflight(
+    config: &AppConfig,
+    event_bus: Arc<dyn EventBus>,
+    checkpoint_switcher: Arc<SwitchingCheckpointStore>,
+) {
+    if should_skip_git_preflight(config) {
+        tracing::debug!(
+            target: TRACE_TARGET,
+            "git preflight skipped (preflight.auto_install_git=false)"
+        );
+        return;
+    }
+
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        if find_binary(&["git"]).is_some() {
+            checkpoint_switcher.force_activate_shadow();
+            emit_git_preflight(
+                &*event_bus,
+                "ready",
+                "git 已可用，checkpoint 将使用影子仓库",
+                json!({}),
+            );
+            return;
+        }
+
+        emit_git_preflight(
+            &*event_bus,
+            "start",
+            "git 缺失，正在尝试后台安装以启用 checkpoint",
+            json!({}),
+        );
+
+        let Some(plan) = git_install_plan() else {
+            emit_git_preflight(
+                &*event_bus,
+                "failed",
+                "未找到可用于自动安装 git 的包管理器",
+                json!({}),
+            );
+            return;
+        };
+
+        #[cfg(unix)]
+        {
+            run_unix_git_preflight_install(&*event_bus, &plan, started);
+        }
+
+        #[cfg(windows)]
+        {
+            let output = StdCommand::new(plan.program).args(&plan.args).output();
+            match output {
+                Ok(output) if output.status.success() && find_binary(&["git"]).is_some() => {
+                    checkpoint_switcher.force_activate_shadow();
+                    emit_git_preflight(
+                        &*event_bus,
+                        "success",
+                        "git 安装完成，后续 checkpoint 将自动启用",
+                        json!({
+                            "elapsedMs": started.elapsed().as_millis(),
+                        }),
+                    );
+                }
+                Ok(output) => {
+                    emit_git_preflight(
+                        &*event_bus,
+                        "failed",
+                        "git 安装未成功完成，checkpoint 仍将退化为 Noop",
+                        json!({
+                            "elapsedMs": started.elapsed().as_millis(),
+                            "stderr": trim_for_event(&String::from_utf8_lossy(&output.stderr)),
+                            "exitCode": output.status.code(),
+                        }),
+                    );
+                }
+                Err(err) => {
+                    emit_git_preflight(
+                        &*event_bus,
+                        "failed",
+                        "git 安装命令无法启动，checkpoint 仍将退化为 Noop",
+                        json!({
+                            "elapsedMs": started.elapsed().as_millis(),
+                            "error": err.to_string(),
+                        }),
+                    );
+                }
+            }
+        }
+    });
+}
+
 #[cfg(unix)]
 fn run_unix_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: Instant) {
     remove_detached_log_marker_if_homebrew_idle();
@@ -242,6 +334,46 @@ fn run_unix_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: I
                 json!({
                     "error": err.to_string(),
                     "elapsedMs": started.elapsed().as_millis(),
+                }),
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run_unix_git_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: Instant) {
+    let Some(log_path) = new_preflight_log_file_path() else {
+        emit_git_preflight(
+            bus,
+            "failed",
+            "git 安装无法创建日志文件，checkpoint 将继续退化为 Noop",
+            json!({
+                "elapsedMs": started.elapsed().as_millis(),
+            }),
+        );
+        return;
+    };
+
+    match spawn_unix_detached_install(plan, &log_path) {
+        Ok(()) => {
+            emit_git_preflight(
+                bus,
+                "detached",
+                "git 安装已在后台继续；安装完成后下次 checkpoint 操作会自动启用影子仓库",
+                json!({
+                    "elapsedMs": started.elapsed().as_millis(),
+                    "logPath": log_path.display().to_string(),
+                }),
+            );
+        }
+        Err(err) => {
+            emit_git_preflight(
+                bus,
+                "failed",
+                "git 安装无法启动，checkpoint 将继续退化为 Noop",
+                json!({
+                    "elapsedMs": started.elapsed().as_millis(),
+                    "error": err.to_string(),
                 }),
             );
         }
@@ -380,6 +512,10 @@ fn should_skip_preflight(config: &AppConfig) -> bool {
     !config.preflight.auto_install_search_tools
 }
 
+fn should_skip_git_preflight(config: &AppConfig) -> bool {
+    !config.preflight.auto_install_git
+}
+
 fn missing_search_tools() -> Vec<&'static str> {
     let mut missing = Vec::new();
     if find_binary(&["rg", "ripgrep"]).is_none() {
@@ -448,6 +584,57 @@ fn install_plan() -> Option<InstallPlan> {
     None
 }
 
+fn git_install_plan() -> Option<InstallPlan> {
+    if is_termux() && find_binary(&["pkg"]).is_some() {
+        return Some(InstallPlan {
+            program: "pkg",
+            args: vec!["install", "-y", "git"],
+        });
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        return None;
+    }
+
+    if cfg!(target_os = "macos") && find_binary(&["brew"]).is_some() {
+        return Some(InstallPlan {
+            program: "brew",
+            args: vec!["install", "--force-bottle", "git"],
+        });
+    }
+
+    if cfg!(target_os = "windows") && find_binary(&["winget"]).is_some() {
+        return Some(InstallPlan {
+            program: "cmd",
+            args: vec![
+                "/C",
+                "winget install --id Git.Git --silent --accept-source-agreements --accept-package-agreements",
+            ],
+        });
+    }
+
+    if find_binary(&["apt-get"]).is_some() {
+        return Some(InstallPlan {
+            program: "apt-get",
+            args: vec!["install", "-y", "git"],
+        });
+    }
+    if find_binary(&["dnf"]).is_some() {
+        return Some(InstallPlan {
+            program: "dnf",
+            args: vec!["install", "-y", "git"],
+        });
+    }
+    if find_binary(&["pacman"]).is_some() {
+        return Some(InstallPlan {
+            program: "pacman",
+            args: vec!["-S", "--noconfirm", "git"],
+        });
+    }
+    None
+}
+
 fn is_termux() -> bool {
     std::env::var_os("TERMUX_VERSION").is_some()
         || Path::new("/data/data/com.termux/files/usr/bin/pkg").exists()
@@ -475,7 +662,12 @@ fn find_binary(candidates: &[&str]) -> Option<PathBuf> {
 
 fn preflight_log_dir() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    Some(home.join(".tomcat").join("agents").join("main").join("logs"))
+    Some(
+        home.join(".tomcat")
+            .join("agents")
+            .join("main")
+            .join("logs"),
+    )
 }
 
 /// 将安装子进程完整 stdout/stderr 写入 `~/.tomcat/agents/main/logs/preflight-file-log-<ts>.log`。
@@ -535,6 +727,18 @@ fn emit_preflight(bus: &dyn EventBus, status: &str, message: &str, extra: serde_
     let _ = bus.emit_sync(
         wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
         EventContext::new(wire::WIRE_SEARCH_TOOLS_PREFLIGHT, payload),
+    );
+}
+
+fn emit_git_preflight(bus: &dyn EventBus, status: &str, message: &str, extra: serde_json::Value) {
+    let payload = json!({
+        "status": status,
+        "message": message,
+        "extra": extra,
+    });
+    let _ = bus.emit_sync(
+        wire::WIRE_GIT_PREFLIGHT,
+        EventContext::new(wire::WIRE_GIT_PREFLIGHT, payload),
     );
 }
 

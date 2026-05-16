@@ -9,6 +9,7 @@ use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
+use crate::core::{CheckpointStore, NoopStore};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
@@ -68,6 +69,8 @@ pub struct AgentLoopConfig {
     /// T2-P0-015：OpenAI Files 会话级运行时（含 client/cache/cleanup registry）。
     /// 不支持 Files 的 provider 该字段为 `None`。
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    /// Checkpoint 存储：turn_end / interrupt / restore 使用。
+    pub checkpoint_store: Arc<dyn CheckpointStore>,
 }
 
 impl Default for AgentLoopConfig {
@@ -83,6 +86,7 @@ impl Default for AgentLoopConfig {
             agent_trail_dir: String::new(),
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,
+            checkpoint_store: Arc::new(NoopStore),
         }
     }
 }

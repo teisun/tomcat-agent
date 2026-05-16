@@ -191,6 +191,14 @@ fn warn_if_legacy_tool_name(tool_calls: &[serde_json::Value]) {
 fn chat_message_from_entry(
     me: &crate::core::session::transcript::MessageEntry,
 ) -> Option<ChatMessage> {
+    if me
+        .message
+        .get("superseded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let role_str = me.message.get("role").and_then(|r| r.as_str())?;
     let role = match role_str {
         "user" => ChatMessageRole::User,

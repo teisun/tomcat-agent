@@ -39,3 +39,11 @@ fn llm_files_default_expires_after_seconds_is_86400() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.llm.files.expires_after_seconds, 86_400);
 }
+
+#[test]
+fn checkpoint_config_defaults_are_wired_into_app_config() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.checkpoint.retention_max, 50);
+    assert_eq!(cfg.checkpoint.retention_days, 7);
+    assert!(cfg.preflight.auto_install_git);
+}

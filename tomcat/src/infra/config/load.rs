@@ -226,6 +226,11 @@ pub fn resolve_audit_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(resolve_agent_trail_dir(cfg)?.join("audit"))
 }
 
+/// `work_dir/agents/{id}/checkpoints` — 影子 git checkpoint 根目录。
+pub fn resolve_checkpoints_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(resolve_agent_trail_dir(cfg)?.join("checkpoints"))
+}
+
 /// agent 设计态目录。优先 `cfg.agent.workspace`，否则 `work_dir/workspace-{id}`。
 pub fn resolve_agent_definition_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     if let Some(ref ws) = cfg.agent.workspace {
@@ -278,7 +283,14 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     std::fs::create_dir_all(&agent_dir).map_err(AppError::Io)?;
 
     let agent_base = resolve_agent_trail_dir(cfg)?;
-    for sub in ["sessions", "logs", "audit", "tmp", "tool-results"] {
+    for sub in [
+        "sessions",
+        "logs",
+        "audit",
+        "tmp",
+        "tool-results",
+        "checkpoints",
+    ] {
         std::fs::create_dir_all(agent_base.join(sub)).map_err(AppError::Io)?;
     }
 
@@ -305,6 +317,16 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     if cfg.security.audit_log_retention_days == 0 {
         return Err(AppError::Config(
             "audit_log_retention_days 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.checkpoint.retention_max == 0 {
+        return Err(AppError::Config(
+            "checkpoint.retention_max 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.checkpoint.retention_days == 0 {
+        return Err(AppError::Config(
+            "checkpoint.retention_days 必须大于 0".to_string(),
         ));
     }
     let level = cfg.log.level.to_lowercase();

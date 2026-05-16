@@ -104,6 +104,8 @@ pub mod wire {
     pub const WIRE_EXTENSION_ERROR: &str = "extension_error";
     /// `tomcat chat` 入口后台预检 search_files Tier1 依赖（rg/fd）的状态更新。
     pub const WIRE_SEARCH_TOOLS_PREFLIGHT: &str = "search_tools_preflight";
+    /// `tomcat chat` 入口后台预检 git 的状态更新。
+    pub const WIRE_GIT_PREFLIGHT: &str = "git_preflight";
     /// `AgentEvent::Interrupted` 的 JSON `type`：用户中断（Ctrl+C 软中断）。
     /// 与现有 `AgentEnd { error: Some("interrupted") }` **并存**——前者供需要区分
     /// "失败 vs 中断"的订阅者使用，后者保留给原有订阅者做向后兼容。

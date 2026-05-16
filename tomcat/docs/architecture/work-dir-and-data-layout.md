@@ -17,6 +17,7 @@
 | `agents/<agentId>/sessions/` | 该 agent 的会话与 transcript（sessions.json、JSONL 等） |
 | `agents/<agentId>/logs/` | 该 agent 的日志（per-agent，若写文件则用此路径） |
 | `agents/<agentId>/audit/` | 该 agent 的审计日志（JSONL） |
+| `agents/<agentId>/checkpoints/` | 该 agent 的 checkpoint 影子 Git 根目录；按 `sha256(agent_workspace_dir)` 分桶存放元数据与 git 对象库 |
 | `workspace-<agentId>/` | 该 agent 的工作区（AGENTS.md 等设计态文件，根级目录，可配置覆盖） |
 | `memory/` | 向量检索索引 |
 | `credentials/` | OAuth 凭据 |
@@ -32,7 +33,7 @@
 - **全局额外授权目录**：除每个 agent 默认可写的 `agent_definition_dir`（`[agent].workspace` 指向的 `workspace-{id}/` 设计态目录）外，额外允许访问的外部目录根由主配置文件 **`tomcat.config.toml` 的 `[workspace] workspace_roots`** 列出（**所有 agent 共用**，不按 agent 分文件）。启动 `tomcat chat` 时的 shell 当前目录 `agent_workspace_dir` 不会自动进入授权根；需要通过 `tomcat workspace add --cwd`、cwd lazy prompt、`/path <路径>` 命令或本会话授权显式加入。由 `tomcat workspace add/list/remove` 或手编 TOML 维护。
 
 - **当前仅一个 agent**：agentId 固定为 `main`，即使用 `work_dir/agents/main/` 下各子目录。
-- **可配置覆盖**：`agent_dir` 和 `workspace` 可通过 `[agent]` 配置节覆盖；`sessions/logs/audit` 始终从 `work_dir/agents/{id}/` 独立推导，不受 `agent_dir` 配置影响。
+- **可配置覆盖**：`agent_dir` 和 `workspace` 可通过 `[agent]` 配置节覆盖；`sessions/logs/audit/checkpoints` 始终从 `work_dir/agents/{id}/` 独立推导，不受 `agent_dir` 配置影响。
 
 ## 3. 启动时创建目录
 
@@ -43,6 +44,7 @@
   - `work_dir/agents/main/sessions`
   - `work_dir/agents/main/logs`
   - `work_dir/agents/main/audit`
+  - `work_dir/agents/main/checkpoints`
   - `work_dir/workspace-main`（根级工作区，可配置覆盖）
   - `work_dir/memory`、`credentials`、`media`、`subagents`
   - `work_dir/plugins`（全局共享插件）

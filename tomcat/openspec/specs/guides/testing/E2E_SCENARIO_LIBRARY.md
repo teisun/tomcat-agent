@@ -230,15 +230,18 @@
 
 ---
 
-## 边界与健壮性场景（跨 Story）（4 条）
+## 边界与健壮性场景（跨 Story）（7 条）
 
 
 | 编号          | 验收 | 用例名                                    | 用户意图                       | 操作序列                    | 必须断言                                                    |
 | ----------- | -- | -------------------------------------- | -------------------------- | ----------------------- | ------------------------------------------------------- |
+| E2E-CLI-070 | 自动 | `test_resume_after_interrupt`          | 用户在一次中断后重启 chat，已持久化 partial transcript 可继续 hydrate | `tomcat chat` 中断一轮 → 重新执行 `tomcat chat --resume` | 第二次启动不丢已落盘 partial；hydrate 后可继续输入；`/ckpt list` 可见 Interrupt ckpt |
 | E2E-CLI-071 | 自动 | `test_user_views_full_help`            | 用户查看帮助，所有子命令可见             | `tomcat --help`             | exit 0；stdout 含 init/doctor/config/session/workspace/plugin/audit |
 | E2E-CLI-072 | 自动 | `test_user_views_version`              | 用户查看版本号                    | `tomcat --version`          | exit 0；stdout 含版本号字符串                                   |
 | E2E-CLI-073 | 自动 | `test_user_runs_unknown_command`       | 用户输入错误命令时看到帮助              | `tomcat nonexistent_cmd`    | exit 非 0；stderr 含"error"                                |
 | E2E-CLI-074 | 自动 | `test_user_init_then_doctor_roundtrip` | 用户 init 后 doctor 通过，完整引导流程 | `tomcat init` → `tomcat doctor` | 两步 exit 0；doctor 含"配置合法"+"内嵌资源已就绪" |
+| E2E-CLI-075 | 自动 | `test_slash_restore_recovers_after_bad_edit` | 用户通过 `/restore` 从坏编辑中恢复工作区并作废后续对话 | 先产生 TurnEnd ckpt → 人为改坏文件并追加新对话 → `/restore <ck>` | 文件内容回到 checkpoint；锚点之后 transcript 标记 `superseded`；追加 `Custom{checkpoint.restore}` |
+| E2E-CLI-076 | 自动 | `test_hangup_during_run_leaves_interrupt_ckpt` | 用户在模型输出进行中挂断终端，重启后仍能看到 partial transcript 与中断锚点 | 启动 `tomcat chat` 并让 mock LLM 流式回包 → 输出进行中发送 `SIGHUP`/关闭 stdin → 重启或检查 `/ckpt list` | 当次会话以 `Interrupted` 收尾；transcript 已落盘 partial assistant；`/ckpt list` 含 `Interrupt` checkpoint；空闲 EOF 对照场景不写此类 ckpt |
 
 
 ---

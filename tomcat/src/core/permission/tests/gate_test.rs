@@ -317,7 +317,9 @@ fn auto_confirm_does_not_override_forbidden() {
         SessionGrants::new(),
     );
     // 命中 builtin bash_forbidden（tomcat config set）。
-    let dec = gate.check_bash("tomcat config set llm.api_key xxx").unwrap();
+    let dec = gate
+        .check_bash("tomcat config set llm.api_key xxx")
+        .unwrap();
     assert!(matches!(dec, PermissionDecision::Deny { .. }));
 }
 

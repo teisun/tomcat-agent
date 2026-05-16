@@ -46,12 +46,42 @@ pub struct PreflightConfig {
     /// 是否在 `tomcat chat` 入口后台探测并尝试安装 search_files 的 Tier1 依赖（rg/fd）。
     #[serde(default = "default_true")]
     pub auto_install_search_tools: bool,
+    /// 是否在 `tomcat chat` 入口后台探测并尝试安装 git。
+    #[serde(default = "default_true")]
+    pub auto_install_git: bool,
 }
 
 impl Default for PreflightConfig {
     fn default() -> Self {
         Self {
             auto_install_search_tools: true,
+            auto_install_git: true,
+        }
+    }
+}
+
+/// Checkpoint 配置：仅暴露 retention 策略。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CheckpointConfig {
+    #[serde(default = "default_checkpoint_retention_max")]
+    pub retention_max: usize,
+    #[serde(default = "default_checkpoint_retention_days")]
+    pub retention_days: u32,
+}
+
+fn default_checkpoint_retention_max() -> usize {
+    50
+}
+
+fn default_checkpoint_retention_days() -> u32 {
+    7
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            retention_max: default_checkpoint_retention_max(),
+            retention_days: default_checkpoint_retention_days(),
         }
     }
 }
@@ -628,6 +658,8 @@ pub struct AppConfig {
     pub log: LogConfig,
     #[serde(default)]
     pub preflight: PreflightConfig,
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]

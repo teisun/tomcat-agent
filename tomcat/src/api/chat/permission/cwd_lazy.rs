@@ -180,7 +180,9 @@ impl CwdLazyPrompt {
         eprintln!("当前目录 {} 尚未授权访问。", self.cwd.display());
         eprintln!("即将操作: {}", target.display());
         eprintln!("[s] 本次会话期间允许访问");
-        eprintln!("[w] 以后也允许访问（写入配置 ~/.tomcat/tomcat.config.toml workspace.workspace_roots）");
+        eprintln!(
+            "[w] 以后也允许访问（写入配置 ~/.tomcat/tomcat.config.toml workspace.workspace_roots）"
+        );
         eprintln!("[c] 取消本次操作（后续按文件粒度逐次询问）");
         eprint!("选择 {}: ", CWD_PROMPT_CHOICES);
         let _ = io::stderr().flush();
