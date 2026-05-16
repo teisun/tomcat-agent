@@ -260,3 +260,36 @@ fn init_context_state_ignores_thinking_trace_entries() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn init_context_state_skips_superseded_messages() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"user","content":"q2","superseded":true}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"a2","superseded":true}))
+        .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let texts: Vec<String> = state
+        .messages
+        .iter()
+        .filter_map(|m| m.text_content().map(str::to_string))
+        .collect();
+    assert!(texts.iter().any(|t| t == "q1"));
+    assert!(texts.iter().any(|t| t == "a1"));
+    assert!(!texts.iter().any(|t| t == "q2"));
+    assert!(!texts.iter().any(|t| t == "a2"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

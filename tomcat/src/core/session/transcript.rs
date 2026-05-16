@@ -377,6 +377,67 @@ pub fn insert_entry_after_message_id(
     Ok(())
 }
 
+/// 将锚点 message **之后**的所有 message 行标记为 `message.superseded=true`。
+///
+/// 非 message 行保持原样；锚点本身不改写。若锚点不存在返回错误。
+pub fn mark_message_entries_after_anchor_superseded(
+    path: &Path,
+    anchor_message_id: &str,
+) -> Result<usize, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut found_anchor = false;
+    let mut changed = 0usize;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+        match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::Message(mut me)) => {
+                if me.id.as_deref() == Some(anchor_message_id) {
+                    found_anchor = true;
+                    out.push(line);
+                    continue;
+                }
+                if found_anchor {
+                    if let Some(message_obj) = me.message.as_object_mut() {
+                        message_obj.insert("superseded".to_string(), serde_json::json!(true));
+                    }
+                    changed += 1;
+                    out.push(serde_json::to_string(&TranscriptEntry::Message(me))?);
+                } else {
+                    out.push(line);
+                }
+            }
+            _ => out.push(line),
+        }
+    }
+
+    if !found_anchor {
+        return Err(AppError::Config(format!(
+            "transcript: anchor message id {anchor_message_id:?} not found for supersede"
+        )));
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    write_file_atomic(path, content.as_bytes())?;
+    Ok(changed)
+}
+
 /// 按 `branch_summary` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
 ///
 /// 使用临时文件 + `rename` 原子替换目标路径，避免写入中途崩溃导致 transcript 损坏。

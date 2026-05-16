@@ -3,6 +3,7 @@
 //! 会话管理、LLM 接入、4 原语、工具注册、插件生命周期等核心引擎，仅在宿主层运行。
 
 pub mod agent_loop;
+pub mod checkpoint;
 pub mod compaction;
 pub mod llm;
 pub mod permission;
@@ -11,6 +12,12 @@ pub mod session;
 pub mod tools;
 
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentRunResult, ToolCallInfo};
+pub use checkpoint::{
+    compute_resume_plan, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
+    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
+    NoopStore, RestoreOptions, ResumePlan, RetentionPolicy, ShadowGitStore,
+    SwitchingCheckpointStore,
+};
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use llm::system_prompt;
 pub use llm::{

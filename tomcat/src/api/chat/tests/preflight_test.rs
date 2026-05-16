@@ -4,13 +4,20 @@ use std::path::Path;
 
 use crate::infra::AppConfig;
 
-use super::{should_skip_preflight, trim_for_event};
+use super::{should_skip_git_preflight, should_skip_preflight, trim_for_event};
 
 #[test]
 fn should_skip_preflight_when_config_disables_auto_install() {
     let mut cfg = AppConfig::default();
     cfg.preflight.auto_install_search_tools = false;
     assert!(should_skip_preflight(&cfg));
+}
+
+#[test]
+fn should_skip_git_preflight_when_config_disables_auto_install() {
+    let mut cfg = AppConfig::default();
+    cfg.preflight.auto_install_git = false;
+    assert!(should_skip_git_preflight(&cfg));
 }
 
 #[test]

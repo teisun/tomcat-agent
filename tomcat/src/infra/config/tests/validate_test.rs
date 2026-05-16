@@ -31,6 +31,17 @@ fn validate_config_rejects_zero_audit_retention() {
 }
 
 #[test]
+fn validate_config_rejects_invalid_checkpoint_retention() {
+    let mut cfg = AppConfig::default();
+    cfg.checkpoint.retention_max = 0;
+    assert!(validate_config(&cfg).is_err());
+
+    let mut cfg = AppConfig::default();
+    cfg.checkpoint.retention_days = 0;
+    assert!(validate_config(&cfg).is_err());
+}
+
+#[test]
 fn validate_config_rejects_invalid_proxy() {
     let mut cfg = AppConfig::default();
     cfg.log.level = "info".to_string();

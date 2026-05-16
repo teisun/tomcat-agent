@@ -1,7 +1,9 @@
 //! Local commands handled by `tomcat chat` before a line is sent to the LLM.
 
+mod cmd_ckpt;
 mod cmd_help;
 mod cmd_path;
+mod cmd_restore;
 mod cmd_thinking;
 mod parse;
 

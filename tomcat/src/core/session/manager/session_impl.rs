@@ -14,9 +14,9 @@ use crate::core::session::store::{
 };
 use crate::core::session::transcript::{
     append_entry, get_branch, get_children, get_entry, get_leaf_entry, read_entries_tail,
-    read_header, write_header, BranchSummaryEntry, LabelEntry, MessageEntry, ModelChangeEntry,
-    SessionHeader, SessionInfoEntry, ThinkingLevelChangeEntry, ThinkingTraceEntry,
-    TranscriptEntry,
+    read_header, write_header, BranchSummaryEntry, CustomEntry, LabelEntry, MessageEntry,
+    ModelChangeEntry, SessionHeader, SessionInfoEntry, ThinkingLevelChangeEntry,
+    ThinkingTraceEntry, TranscriptEntry,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -115,6 +115,7 @@ impl SessionManager {
             compaction_count: None,
             compaction_tokens_freed: None,
             tool_result_chars_persisted: None,
+            last_checkpoint_id: None,
         };
         let mut store = self.load_store()?;
         store.insert(session_key.to_string(), entry.clone());
@@ -267,6 +268,20 @@ impl SessionManager {
             timestamp: iso_ts_now()?,
             text: text.to_string(),
             signature: signature.map(str::to_string),
+        });
+        append_entry(&path, &entry)
+    }
+
+    /// 追加自定义 transcript 事件（如 checkpoint.restore）。
+    pub fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        let entry = TranscriptEntry::Custom(CustomEntry {
+            id: Some(generate_entry_id()),
+            parent_id: None,
+            timestamp: iso_ts_now()?,
+            extra,
         });
         append_entry(&path, &entry)
     }

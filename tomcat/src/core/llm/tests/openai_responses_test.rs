@@ -433,7 +433,10 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         tools: None,
     };
     let body = p.build_request_body(&req, true);
-    assert_eq!(body["reasoning"]["summary"], "auto", "show=true 时应请求 summary");
+    assert_eq!(
+        body["reasoning"]["summary"], "auto",
+        "show=true 时应请求 summary"
+    );
 }
 
 #[test]
@@ -656,7 +659,11 @@ fn responses_chunk_output_item_done_non_reasoning_is_silent() {
         }
     });
     let e = responses_chunk_to_events(&v, &mut tracks);
-    assert!(e.is_empty(), "非 reasoning output_item.done 不应映射 Thinking: {:?}", e);
+    assert!(
+        e.is_empty(),
+        "非 reasoning output_item.done 不应映射 Thinking: {:?}",
+        e
+    );
 }
 
 #[test]

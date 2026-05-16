@@ -15,6 +15,7 @@ use crate::infra::{wire, EventBus};
 pub(crate) struct ChatSessionStderrListenerIds {
     metrics: EventListenerId,
     search_tools: EventListenerId,
+    git_preflight: EventListenerId,
     l1_start: EventListenerId,
     l1_end: EventListenerId,
     l1_err: EventListenerId,
@@ -92,7 +93,7 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
-    let printer = search_tools_printer;
+    let printer = search_tools_printer.clone();
     let search_tools = bus.on(
         wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
         Box::new(move |evt: EventContext| {
@@ -163,6 +164,55 @@ pub(crate) fn register_chat_session_stderr_listeners(
                                 p
                             ));
                         }
+                    }
+                }
+            }
+            block.push('\n');
+            if let Some(ref pr) = printer {
+                if let Ok(mut guard) = pr.lock() {
+                    if guard.print(block.clone()).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            eprint!("{}", block);
+            let _ = io::stderr().flush();
+            Ok(())
+        }),
+    );
+    let printer = search_tools_printer;
+    let git_preflight = bus.on(
+        wire::WIRE_GIT_PREFLIGHT,
+        Box::new(move |evt: EventContext| {
+            let status = evt
+                .payload
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("update");
+            let message = evt
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let extra = evt.payload.get("extra");
+            let color = if status == "failed" {
+                "\x1b[33m"
+            } else {
+                "\x1b[90m"
+            };
+            let mut block = format!("\n{}[git] {}\x1b[0m", color, message);
+            if let Some(ex) = extra {
+                if let Some(e) = ex.get("error").and_then(|v| v.as_str()) {
+                    if !e.is_empty() {
+                        block.push_str(&format!(
+                            "\n\x1b[90m[git] {}\x1b[0m",
+                            preflight::trim_for_event(e)
+                        ));
+                    }
+                }
+                if let Some(p) = ex.get("logPath").and_then(|v| v.as_str()) {
+                    if !p.is_empty() {
+                        block.push_str(&format!("\n\x1b[90m[git] log: {}\x1b[0m", p));
                     }
                 }
             }
@@ -365,6 +415,7 @@ pub(crate) fn register_chat_session_stderr_listeners(
     ChatSessionStderrListenerIds {
         metrics,
         search_tools,
+        git_preflight,
         l1_start,
         l1_end,
         l1_err,
@@ -381,6 +432,7 @@ pub(crate) fn unregister_chat_session_stderr_listeners(
 ) {
     bus.off(ids.metrics);
     bus.off(ids.search_tools);
+    bus.off(ids.git_preflight);
     bus.off(ids.l1_start);
     bus.off(ids.l1_end);
     bus.off(ids.l1_err);

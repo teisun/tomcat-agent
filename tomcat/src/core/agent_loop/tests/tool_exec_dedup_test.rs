@@ -17,7 +17,9 @@ use std::time::{Duration, SystemTime};
 
 use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::ToolCallInfo;
-use crate::core::llm::openai_files::{CacheEntry, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime};
+use crate::core::llm::openai_files::{
+    CacheEntry, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime,
+};
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::pipeline::read_state::{ReadFileState, FILE_UNCHANGED_STUB};
 use crate::core::tools::primitive::{DefaultPrimitiveExecutor, PrimitiveExecutor};
@@ -342,7 +344,10 @@ async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
 
     let (msg, is_error, follow_ups) =
         execute_tool(&primitive, &None, &None, Some(&state), &tc).await;
-    assert!(is_error, "without files runtime, oversize pdf must fail by policy");
+    assert!(
+        is_error,
+        "without files runtime, oversize pdf must fail by policy"
+    );
     assert!(
         msg.contains("requires OpenAI Files upload"),
         "should guide to Files upload path, got: {:?}",
@@ -392,15 +397,9 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
     let state = Arc::new(ReadFileState::new());
     let tc = make_tc(&format!(r#"{{"path":{:?}}}"#, pdf.to_string_lossy()));
 
-    let (msg, is_error, follow_ups) = execute_tool_with_openai_files(
-        &primitive,
-        &None,
-        &None,
-        Some(&state),
-        Some(&runtime),
-        &tc,
-    )
-    .await;
+    let (msg, is_error, follow_ups) =
+        execute_tool_with_openai_files(&primitive, &None, &None, Some(&state), Some(&runtime), &tc)
+            .await;
     assert!(
         !is_error,
         "with runtime + cached file_id, oversize should succeed; msg={:?}",
@@ -416,7 +415,10 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
             ..
         } => {
             assert_eq!(file_id.as_deref(), Some("file-cached-pdf"));
-            assert!(data.is_none(), "upload path should use file_id not inline base64");
+            assert!(
+                data.is_none(),
+                "upload path should use file_id not inline base64"
+            );
             assert_eq!(filename.as_deref(), Some("oversize.pdf"));
         }
         other => panic!("expected InputFile(file_id), got {:?}", other),

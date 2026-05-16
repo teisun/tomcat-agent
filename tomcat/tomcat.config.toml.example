@@ -10,6 +10,13 @@ file_enabled = false
 # 进入 `tomcat chat` 后后台探测 search_files Tier1 依赖。
 # 可通过 TOMCAT__PREFLIGHT__AUTO_INSTALL_SEARCH_TOOLS=false 覆盖。
 auto_install_search_tools = true
+# 进入 `tomcat chat` 后后台探测 git，可在后续 turn 中启用 checkpoint。
+auto_install_git = true
+
+[checkpoint]
+# 影子 git checkpoint 保留策略：最多保留最近 50 个、且不超过 7 天。
+retention_max = 50
+retention_days = 7
 
 [llm]
 # "openai-responses"（默认）或 "openai"。

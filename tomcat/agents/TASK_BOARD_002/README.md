@@ -52,7 +52,7 @@
 | **T2-P0-015** | OpenAI Files 上传管理 | `DONE`（`2026-05-12` 合入 `develop` @ `cb924eb`，`run-integration-tests.sh all` EXIT_CODE=0） | Jerry | `develop` | [tasks/T2-P0-015.md](./tasks/T2-P0-015.md) |
 | **T2-P0-016** | 四内置工具契约加强（write / bash 余量） | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `develop` | [tasks/T2-P0-016.md](./tasks/T2-P0-016.md) |
 | **T2-P0-017** | `edit` 工具契约与实现 | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，同上全量门禁） | Tom | `develop` | [tasks/T2-P0-017.md](./tasks/T2-P0-017.md) |
-| **T2-P1-001** | Checkpoint + 断点续跑 | `TODO` | — | `feature/checkpoint-resume` | [tasks/T2-P1-001.md](./tasks/T2-P1-001.md) |
+| **T2-P1-001** | Checkpoint + 断点续跑 | `PENDING_INTEGRATION`（`2026-05-16` 本地 `run-integration-tests.sh integration/all` `EXIT_CODE=0`） | Jerry | `feature/checkpoint-resume` | [tasks/T2-P1-001.md](./tasks/T2-P1-001.md) |
 | **T2-P1-002** | PLAN 模式增强 | `TODO` | — | `feature/plan-mode-enhance` | [tasks/T2-P1-002.md](./tasks/T2-P1-002.md) |
 | **T2-P1-003** | 提问/应答机制 | `TODO` | — | `feature/ask-answer` | [tasks/T2-P1-003.md](./tasks/T2-P1-003.md) |
 | **T2-P1-004** | 结果验证 + review 子流程 | `TODO` | — | `feature/review-verification` | [tasks/T2-P1-004.md](./tasks/T2-P1-004.md) |

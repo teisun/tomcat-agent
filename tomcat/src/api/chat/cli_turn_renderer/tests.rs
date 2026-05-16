@@ -429,7 +429,11 @@ fn tool_cli_verbosity_brief_prints_end_without_start_and_extra_lines() {
         "brief 档位不应打印 start 摘要: {:?}",
         err
     );
-    assert!(err.contains("[tool] bash"), "brief 应打印 end 行: {:?}", err);
+    assert!(
+        err.contains("[tool] bash"),
+        "brief 应打印 end 行: {:?}",
+        err
+    );
     assert!(
         !err.contains("line1"),
         "brief 档位不应展开失败 stderr 额外行: {:?}",

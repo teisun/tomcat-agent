@@ -35,8 +35,8 @@ use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
-use crate::infra::error::AppError;
 use crate::infra::config::LlmFilesConfig;
+use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
 use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};

@@ -257,7 +257,10 @@ pub fn render_tool_catalog_markdown() -> String {
     out.push_str("# Tool Catalog\n\n");
     out.push_str("> This file is generated from `src/core/tools/contract/catalog.rs`.\n");
     out.push_str(
-        "> Run `UPDATE_TOOL_CATALOG=1 cargo run --bin gen-tool-catalog` after catalog changes.\n\n",
+        "> Run `UPDATE_TOOL_CATALOG=1 cargo run --bin gen-tool-catalog` after catalog changes.\n",
+    );
+    out.push_str(
+        "> `checkpoint` / `restore` 不在 tool catalog 中：它们是 `tomcat chat` 的本地斜杠命令（`/ckpt`、`/restore`），由 chat 层直接处理，不暴露给 LLM 作为工具。\n\n",
     );
 
     for category in [

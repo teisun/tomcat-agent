@@ -1,9 +1,13 @@
 use super::super::*;
 use crate::SessionEntry;
+use crate::{
+    CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
+    CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,
+};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 fn spawn_single_response_server(
     status: u16,
@@ -129,6 +133,7 @@ fn effective_model_uses_session_override() {
         compaction_count: None,
         compaction_tokens_freed: None,
         tool_result_chars_persisted: None,
+        last_checkpoint_id: None,
     };
     let config = AppConfig::default();
     let model = entry
@@ -153,6 +158,7 @@ fn effective_model_uses_global_when_no_override() {
         compaction_count: None,
         compaction_tokens_freed: None,
         tool_result_chars_persisted: None,
+        last_checkpoint_id: None,
     };
     let config = AppConfig::default();
     let model = entry
@@ -272,6 +278,277 @@ fn interrupt_persists_transcript_hard_ack() {
         "call_1",
         "tool_call_id 应与 assistant 发起的调用匹配"
     );
+}
+
+#[test]
+fn build_turn_checkpoint_request_uses_first_and_last_row_ids() {
+    let request = build_turn_checkpoint_request(
+        "sess-1",
+        CheckpointKind::TurnEnd,
+        &[
+            "msg_user".to_string(),
+            "msg_assistant".to_string(),
+            "msg_tool".to_string(),
+        ],
+    )
+    .expect("row ids should produce checkpoint request");
+
+    assert_eq!(request.session_id, "sess-1");
+    assert_eq!(request.turn_id, "msg_user::msg_tool");
+    assert_eq!(request.message_anchor.as_deref(), Some("msg_tool"));
+    assert!(matches!(request.kind, CheckpointKind::TurnEnd));
+}
+
+#[test]
+fn build_turn_checkpoint_request_skips_empty_turns() {
+    assert!(
+        build_turn_checkpoint_request("sess-1", CheckpointKind::Interrupt, &[]).is_none(),
+        "空 turn 不应尝试 record checkpoint"
+    );
+}
+
+struct PruneSpyStore {
+    calls: Arc<AtomicUsize>,
+    sleep: Duration,
+}
+
+impl CheckpointStore for PruneSpyStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        Ok(CheckpointId::null())
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn prune(&self, _retention: RetentionPolicy) -> Result<usize, CheckpointError> {
+        std::thread::sleep(self.sleep);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(0)
+    }
+}
+
+#[test]
+fn startup_prune_scheduled_without_blocking_readline() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_PRUNE_TEST_KEY";
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+
+    // SAFETY: 单测内部设置独立 env key，结束后立即清理。
+    unsafe { std::env::set_var(ENV_KEY, "stub") };
+    let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let prune_calls = Arc::new(AtomicUsize::new(0));
+    ctx.checkpoint_store = Arc::new(PruneSpyStore {
+        calls: prune_calls.clone(),
+        sleep: Duration::from_millis(150),
+    });
+
+    let started = Instant::now();
+    schedule_checkpoint_prune(&ctx);
+    assert!(
+        started.elapsed() < Duration::from_millis(50),
+        "schedule_checkpoint_prune 应立即返回，不阻塞 readline 主线程"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while prune_calls.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        prune_calls.load(Ordering::SeqCst),
+        1,
+        "后台线程应触发一次 prune"
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[derive(Default)]
+struct RecordSpyState {
+    requests: Vec<CheckpointRecordRequest>,
+    observed_leaf_ids: Vec<Option<String>>,
+}
+
+struct RecordSpyStore {
+    transcript_path: std::path::PathBuf,
+    state: Arc<Mutex<RecordSpyState>>,
+}
+
+impl CheckpointStore for RecordSpyStore {
+    fn record(&self, request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        let observed_leaf = crate::core::session::read_entries_tail(&self.transcript_path, 1)
+            .ok()
+            .and_then(|entries| entries.into_iter().next_back())
+            .and_then(|entry| match entry {
+                crate::core::TranscriptEntry::Message(me) => me.id,
+                _ => None,
+            });
+        let mut guard = self.state.lock().unwrap();
+        guard.requests.push(request);
+        guard.observed_leaf_ids.push(observed_leaf);
+        Ok(CheckpointId::new(format!("ck-spy-{}", guard.requests.len())))
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<crate::CheckpointDiff, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn prune(&self, _retention: RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
+fn checkpoint_recording_test_context(
+    env_key: &str,
+) -> (tempfile::TempDir, ChatContext, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(env_key.to_string());
+
+    // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
+    unsafe { std::env::set_var(env_key, "stub") };
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx.session.current_session_key().to_string();
+    ctx.session.create_session(&session_key, None).unwrap();
+    let transcript_path = ctx
+        .session
+        .current_transcript_path()
+        .unwrap()
+        .expect("transcript path");
+    (dir, ctx, transcript_path)
+}
+
+#[test]
+fn turn_end_writes_checkpoint() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_TURN_END_CKPT_KEY";
+
+    let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let spy_state = Arc::new(Mutex::new(RecordSpyState::default()));
+    ctx.checkpoint_store = Arc::new(RecordSpyStore {
+        transcript_path,
+        state: Arc::clone(&spy_state),
+    });
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let messages = vec![crate::ChatMessage::assistant("turn end reply")];
+
+    let appended_ids =
+        persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::TurnEnd).unwrap();
+
+    let guard = spy_state.lock().unwrap();
+    assert_eq!(guard.requests.len(), 1, "TurnEnd 应写入一次 checkpoint");
+    assert_eq!(guard.observed_leaf_ids.len(), 1);
+    assert_eq!(
+        guard.requests[0].message_anchor.as_deref(),
+        appended_ids.last().map(String::as_str),
+        "checkpoint anchor 应指向刚落盘的 assistant 行"
+    );
+    assert_eq!(
+        guard.observed_leaf_ids[0].as_deref(),
+        appended_ids.last().map(String::as_str),
+        "record() 触发时 transcript 末尾应已是新写入消息"
+    );
+    assert!(matches!(
+        guard.requests[0].kind,
+        crate::CheckpointKind::TurnEnd
+    ));
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn interrupt_writes_checkpoint_after_partial_persist() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_INTERRUPT_CKPT_KEY";
+
+    let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let spy_state = Arc::new(Mutex::new(RecordSpyState::default()));
+    ctx.checkpoint_store = Arc::new(RecordSpyStore {
+        transcript_path,
+        state: Arc::clone(&spy_state),
+    });
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let tool_calls = vec![serde_json::json!({
+        "id": "call_1",
+        "type": "function",
+        "function": { "name": "read", "arguments": r#"{"path":"note.txt"}"# }
+    })];
+    let messages = vec![
+        crate::ChatMessage::assistant_with_tool_calls(Some("partial reply"), tool_calls),
+        crate::ChatMessage::tool("call_1", "tool result"),
+    ];
+
+    let appended_ids = persist_turn_result(
+        &ctx,
+        &mut state,
+        messages,
+        crate::CheckpointKind::Interrupt,
+    )
+    .unwrap();
+
+    let guard = spy_state.lock().unwrap();
+    assert_eq!(guard.requests.len(), 1, "Interrupt 应写入一次 checkpoint");
+    assert_eq!(
+        guard.requests[0].message_anchor.as_deref(),
+        appended_ids.last().map(String::as_str),
+        "Interrupt checkpoint anchor 应指向最后一条 partial/tool transcript 行"
+    );
+    assert_eq!(
+        guard.observed_leaf_ids[0].as_deref(),
+        appended_ids.last().map(String::as_str),
+        "record(Interrupt) 必须发生在 partial transcript 落盘之后"
+    );
+    assert!(matches!(
+        guard.requests[0].kind,
+        crate::CheckpointKind::Interrupt
+    ));
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
 }
 
 #[tokio::test]

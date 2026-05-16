@@ -44,6 +44,9 @@ pub struct SessionEntry {
     /// L0 落盘原始字符累计（Unicode），与 `ContextState.session_obs.tool_result_chars_persisted` 同步。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result_chars_persisted: Option<u64>,
+    /// 最近一次会话级 restore 成功落到的 checkpoint（仅 TurnEnd/Interrupt）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checkpoint_id: Option<String>,
 }
 
 /// 从路径加载 SessionStore；文件不存在或为空时返回空 HashMap。

@@ -1,6 +1,4 @@
-use super::super::{
-    register_thinking_persist_listeners, unregister_thinking_persist_listeners,
-};
+use super::super::{register_thinking_persist_listeners, unregister_thinking_persist_listeners};
 use crate::infra::event_bus::EventContext;
 use crate::infra::events::wire;
 use crate::infra::{DefaultEventBus, EventBus};
