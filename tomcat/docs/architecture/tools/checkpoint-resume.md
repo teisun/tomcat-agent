@@ -4,7 +4,7 @@
 
 > 章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议 → One-Glance → …）。本方案承接调研报告 [`plan-mode-and-checkpoint-survey.md`](../reports/plan-mode-and-checkpoint-survey.md)（**§3 / §4 / §8**）的「**Plan 与 Checkpoint 模块边界清晰、按里程碑分阶段交付**」结论。
 
-**说人话**：本文按架构规范把「词怎么叫、别人怎么做的、我们定啥、协议长啥样、文件谁管谁、咋测、有啥坑」一次写全；Plan 面板另开 T2-P1-002，不在这里糊成一团。
+**说人话**：本文按架构规范把「词怎么叫、别人怎么做的、我们定啥、协议长啥样、文件谁管谁、咋测、有啥坑」一次写全；Plan 面板与 `todo` / `/plan` / `/goal` 的上层编排另见 [`plan-runtime.md`](../plan-runtime.md)，不在这里糊成一团。
 
 ---
 
@@ -866,6 +866,8 @@ sequenceDiagram
 - 数据布局：[`work-dir-and-data-layout.md`](../work-dir-and-data-layout.md)、[`session-storage.md`](../session-storage.md)
 - 审计：[`audit-log.md`](../audit-log.md)（restore 走一条 hostcall 审计）
 - 后置依赖：[`agents/TASK_BOARD_002/tasks/T2-P1-002.md`](../../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)（PlanRuntime 消费 `CheckpointStore`）
+- 上层运行时编排：[`plan-runtime.md`](../plan-runtime.md)（定义 PLAN 模式 / `todos` / `/plan` / `/goal` / reviewer / TodosPanel 如何消费本方案）
+- 上层 LLM 工具与子 Agent 契约：[`planner.md`](./planner.md)（PLAN 模式整体规范）、[`create-plan.md`](./create-plan.md)（`PlanRecord` 写入器 + 内联 reviewer 派发；milestone checkpoint hook 在此挂接）、[`ask-question.md`](./ask-question.md)（PLAN 模式结构化提问）、[`todos.md`](./todos.md)（执行态待办 + TodosPanel；里程碑完成回调触发 milestone checkpoint）、[`reviewer.md`](./reviewer.md)（审稿子 Agent 派生契约）
 - 工具规范：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（本文遵循 §1→§13 骨架）
 - 标杆参考：[`tools/read.md`](./read.md)（§1 / §4.1 / §4.2 写法）
 

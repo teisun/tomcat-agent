@@ -90,7 +90,11 @@
 | **AgentHandle** | 注册表中单个实例的元数据记录（`session_id`、`abort_signal`、`spawn_depth`、`parent_session_id`）。 |
 | **RootAgent** | 由用户/API 直接发起的 `AgentLoop`，`spawn_depth=0`，`parent_session_id=None`。 |
 | **SubAgent / ChildAgent** | 由主 Agent 通过 `dispatch_agent` 工具创建的 `AgentLoop`，`spawn_depth=parent+1`。 |
-| **dispatch_agent** | 注册到 `tool_definitions` 中的 LLM 可调用工具，触发子 Agent 创建与执行。 |
+| **dispatch_agent** | 注册到 `tool_definitions` 中的 LLM 可调用工具，触发子 Agent 创建与执行；schema 见 §14.4.1，含 `task` / `subagent_type` / `role` / `allowed_tools` / `model` / `max_turns`。 |
+| **subagent_type** | `dispatch_agent` 与 `AgentLoopConfig` 上的子 Agent 画像枚举（`general` / `explore` / `shell` / `cursor-guide`），决定 system prompt 模板与默认 `allowed_tools` 集；与 cc-fork-01 `Task.subagent_type` 同名。 |
+| **role** | 子 Agent 派生角色（`leaf` / `orchestrator`），决定子 Agent 自身能否再调用 `dispatch_agent`；对标 hermes `delegate_task.role`；取代旧的 `allow_sub_dispatch: bool`。 |
+| **allowed_tools** | 子 Agent 工具白名单（数组），与父 catalog 取交集后生效；省略时取 `subagent_type` 默认集；与 [`plan-runtime.md`](./plan-runtime.md) reviewer 的 `allowed_tools` 字段同名同义。 |
+| **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（不进 catalog），与 LLM-facing `dispatch_agent` 互补，复用 §14 基础设施；对标 codex `run_codex_thread_one_shot`；reviewer 即此路径消费方，详见 §14.6.1 与 [`tools/reviewer.md`](./tools/reviewer.md)。 |
 | **spawn_depth** | 当前 `AgentInstance` 距根 Agent 的嵌套层数，防止无限递归（参考 openclaw `spawnDepth`、LangGraph `recursion_limit`）。 |
 | **MAX_SPAWN_DEPTH** | 全局可配置的最大嵌套深度，默认值 `3`；超限时 `dispatch_agent` 返回错误 ToolResult，不终止主 Agent。 |
 | **MAX_CONCURRENT_AGENTS** | 进程级最大并发 `AgentInstance` 数，默认值 `16`。 |
@@ -149,6 +153,13 @@ pub struct AgentLoopConfig {
     pub parent_session_id: Option<String>,
     /// 当前嵌套层数；RootAgent 为 0。递归检查上限为 MAX_SPAWN_DEPTH。
     pub spawn_depth: u32,
+    /// 预设子 Agent 画像（决定 system prompt 模板与默认 allowed_tools）；
+    /// RootAgent 取 SubagentType::None；由父 Agent 通过 dispatch_agent.subagent_type
+    /// 入参或 internal subagent dispatch 调用方决定。
+    pub subagent_type: SubagentType,
+    /// 子 Agent 派生角色；leaf 不可再派发，orchestrator 可再派发；
+    /// 取代旧的 allow_sub_dispatch: bool 字段。RootAgent 取 Role::Orchestrator。
+    pub role: Role,
 }
 ```
 
@@ -179,6 +190,21 @@ pub struct AgentLoopConfig {
         "type": "string",
         "description": "子任务的完整描述（含必要上下文），子 Agent 将以此为初始消息开始工作"
       },
+      "subagent_type": {
+        "type": "string",
+        "enum": ["general", "explore", "shell", "cursor-guide"],
+        "description": "预设子 Agent 画像；决定 system prompt 模板与默认 allowed_tools 集；省略时取 \"general\""
+      },
+      "role": {
+        "type": "string",
+        "enum": ["leaf", "orchestrator"],
+        "description": "leaf：子 Agent 不可再调用 dispatch_agent（防递归，对标 hermes role='leaf'）；orchestrator：可继续派发但仍受 spawn_depth 与 MAX_SPAWN_DEPTH 约束（对标 hermes role='orchestrator'）；省略时取 leaf"
+      },
+      "allowed_tools": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "显式工具白名单。省略时 = subagent_type 预设默认集 ∩ 父 Agent 当前 catalog；传入时 = 入参列表 ∩ 父 catalog（双保险）。runtime 始终先剔除 dispatch_agent，role=orchestrator 时再重新注入"
+      },
       "model": {
         "type": "string",
         "description": "子 Agent 使用的模型，不填则继承父 Agent 的模型配置"
@@ -193,7 +219,9 @@ pub struct AgentLoopConfig {
 }
 ```
 
-> **设计决策**：与 claude-code 的 `Agent` 工具对齐（只需 `task` 字符串，子 Agent 独立运行），相比 openclaw 的 `sessions_spawn` 参数更简洁；不传入父 Agent messages 历史，避免 token 重复消耗。
+> **设计决策**：保持「单工具 + 多形态参数化」（与 hermes-agent `delegate_task`、cc-fork-01 `Task` 同构），不拆成多个 `dispatch_*` 工具——多形态间只在 `subagent_type` / `role` / `allowed_tools` 三个参数上分化，避免工具目录爆炸。`task` 字符串只描述任务，**不再**承担工具约束与递归权限，权限边界由 `role` + `allowed_tools` + `subagent_type` 三参数共同决定。
+>
+> **历史决策（已替换）**：早期方案使用 `allow_sub_dispatch: bool` 单一布尔开关控制递归权限，已被 `role` 枚举取代（`leaf` 等价旧的 `false`，`orchestrator` 等价旧的 `true`）。
 
 ### 14.4.2 子 Agent 创建与执行流
 
@@ -220,9 +248,16 @@ execute_tool("dispatch_agent", args)
 │     session_id:        "S1:sub:<uuid>",
 │     parent_session_id: Some("S1"),
 │     spawn_depth:       self.config.spawn_depth + 1,    // = 1
+│     subagent_type:     args.subagent_type.unwrap_or("general"),
+│     role:              args.role.unwrap_or("leaf"),
 │     model:             args.model.unwrap_or(self.config.model.clone()),
 │     max_turns:         args.max_turns.unwrap_or(20),
-│     tool_definitions:  父 Agent 工具集（排除 dispatch_agent，防止无限递归）,
+│     tool_definitions:  resolve_child_tools(
+│                            parent_catalog,
+│                            subagent_type,        // 预设默认集
+│                            args.allowed_tools,   // 可选覆盖/收紧
+│                            role,                 // orchestrator 时重新注入 dispatch_agent
+│                        ),
 │   }
 │
 ├─ 构造子 AgentLoop，注入相同的 Arc<dyn LlmProvider> / Arc<dyn PrimitiveExecutor> / Arc<EventBus>
@@ -246,9 +281,12 @@ execute_tool("dispatch_agent", args)
 
 参考 claude-code 的强隔离设计（只返回 final message）和 openclaw 的 system prompt 注入方式：
 
-- **不继承 messages 历史**：子 Agent 只接收 `args.task` 字符串，外加宿主注入的系统 prompt（含子 Agent 身份描述、`spawn_depth`、`parent_session_id`）。
+- **不继承 messages 历史**：子 Agent 只接收 `args.task` 字符串，外加宿主注入的系统 prompt（由 `subagent_type` 决定模板，含子 Agent 身份描述、`spawn_depth`、`parent_session_id`）。
 - **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/main/sessions/{child_session_id}.jsonl`，或通过配置设为不落盘（ephemeral）。
-- **工具集独立**：子 Agent 默认继承父 Agent 的工具集，但**排除** `dispatch_agent` 工具（防止无限递归）。如需允许孙 Agent，显式在 `args` 中传入 `allow_sub_dispatch: true` 并受 `spawn_depth` 检查约束。
+- **工具集由三参数共同决定**：子 Agent 工具集 = `subagent_type` 预设默认集 ∩ 父 Agent 当前 catalog ∩ （可选）`args.allowed_tools`，再按 `role` 决定是否重新注入 `dispatch_agent`：
+  - `role = "leaf"`（默认）：剔除 `dispatch_agent`，子 Agent 不可再派发（对标 hermes `role='leaf'`、claude-code 子 Agent 不再可派发）。
+  - `role = "orchestrator"`：重新注入 `dispatch_agent`，但仍受 `spawn_depth` / `MAX_SPAWN_DEPTH` 约束（对标 hermes `role='orchestrator'`）。
+- **双保险**：即使 LLM 在 `allowed_tools` 中传入了父 catalog 不存在的工具名，runtime 端也会过滤；与 [`plan-runtime.md`](./plan-runtime.md) §4.2.3 reviewer `allowed_tools` 「白名单 ∩ 父 catalog」原则一致。
 
 ### 14.4.4 嵌套深度限制
 
@@ -306,7 +344,22 @@ SubAgentEnd {
 | **第 8 节（事件系统）** | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；EventBus 共享实例，以 `session_id` 区分事件来源；订阅方通过前缀过滤追踪父子关系。 |
 | **第 9 节（会话存储）** | `SessionEntry` 预留注释「channel/agent 相关字段供三期多 channel 使用」；本节给出 `parent_session_id` 的具体语义与写入时机（子 Agent 创建时 patch）。 |
 | **第 10 节（工作目录）** | 子 Agent session 的 transcript 路径沿用 `agents/<agentId>/sessions/` 布局，以 `child_session_id`（含冒号，需 URL encode 或替换为下划线）作为文件名。 |
-| **第 13 节（Agent Loop）** | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` 两个字段。 |
+| **第 13 节（Agent Loop）** | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` / `subagent_type` / `role` 四个字段。 |
+
+### 14.6.1 internal subagent dispatch（reviewer 消费方）
+
+[`plan-runtime.md`](./plan-runtime.md) 与 [`tools/reviewer.md`](./tools/reviewer.md) 中描述的 **reviewer** 子 Agent 走的是「**internal subagent dispatch**」路径，与本节 §14.4 的 LLM-facing `dispatch_agent` 工具互补：
+
+| 维度 | LLM-facing `dispatch_agent`（§14.4） | internal subagent dispatch（reviewer） |
+|------|--------------------------------------|----------------------------------------|
+| 入口 | LLM 自主决定的 tool_call | 内部 Rust API（`AgentRegistry::spawn_subagent_internal(...)` 拟定），由 `CreatePlan` 工具内部同步 await |
+| 是否进 catalog | 是 | 否 |
+| `subagent_type` | 由 LLM 在 schema 内传入 | 不走 schema，调用方硬编码（reviewer 固定模板） |
+| `allowed_tools` | 由 LLM 传入或继承父 catalog | 调用方硬编码（默认 `{read, grep, find}`；runtime 内部参数 `allow_review_edit=true` 时附加 `edit`，且 `tool_exec` 守卫强制路径 `~/.tomcat/plans/*.plan.md` + diff ⊆ `## Review` 段） |
+| 复用 §14 基础设施 | 全部（`AgentRegistry` / `spawn_depth` / `CascadeAbort` / `SubAgentStart`/`End` 事件） | 全部（同左） |
+| 对标项目 | hermes `delegate_task`、claude-code `Task` / `Agent` | codex [`codex-rs/core/src/codex_delegate.rs::run_codex_thread_one_shot`](https://example/codex_delegate) |
+
+**关键边界**：reviewer 的 `allowed_tools` **不**占用 `dispatch_agent` schema 的 `subagent_type` 枚举位；两条路径共享同一套 `AgentRegistry` / `spawn_depth` / `CascadeAbort`，但各自独立鉴权与构图。详细派生契约见 [`tools/reviewer.md`](./tools/reviewer.md)。
 
 ---
 

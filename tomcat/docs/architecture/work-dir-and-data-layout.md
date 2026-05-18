@@ -15,6 +15,7 @@
 |------|------|
 | `agents/<agentId>/agent/` | 该 agent 的身份与凭据目录（可配置覆盖） |
 | `agents/<agentId>/sessions/` | 该 agent 的会话与 transcript（sessions.json、JSONL 等） |
+| `agents/<agentId>/todos/` | 轻路待办文件 `<todos_id>.todo.md`；`activeTodosId` 指针在 `sessions.json`（见 [`tools/todos.md`](tools/todos.md) §3.4） |
 | `agents/<agentId>/logs/` | 该 agent 的日志（per-agent，若写文件则用此路径） |
 | `agents/<agentId>/audit/` | 该 agent 的审计日志（JSONL） |
 | `agents/<agentId>/checkpoints/` | 该 agent 的 checkpoint 影子 Git 根目录；按 `sha256(agent_workspace_dir)` 分桶存放元数据与 git 对象库 |
