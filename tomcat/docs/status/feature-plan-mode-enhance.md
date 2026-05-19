@@ -1,0 +1,45 @@
+# feature/plan-mode-enhance — Status
+
+> 三卡同分支交付：**T2-P1-002 / T2-P1-003 / T2-P1-004**
+> 计划单一事实来源：[`~/.cursor/plans/plan_三卡单分支_7e09fef1.plan.md`]
+> Dispatcher 偏离说明：本次按用户要求 **三卡同领、同分支**，与默认「一次一卡」不同。
+
+---
+
+## 当前状态
+
+| 字段 | 值 |
+|------|------|
+| 负责人 | Tom |
+| 状态 | DOING |
+| 分支 | `feature/plan-mode-enhance` (from `develop`) |
+| 起点 commit | (待写入首个 commit 后回填) |
+| 阶段 | P0 认领 → P0.5 横切前置 |
+
+## Phase 进度
+
+- [x] **P0** 认领三卡、切分支、README/任务卡/status 更新
+- [ ] **P0.5** 横切前置（依赖 / `AgentLoopConfig::Default` / catalog / 事件 type / `[plan]`/`[reviewer]` config / gen-tool-catalog）
+- [ ] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover、user prefix
+- [ ] **P2** PR-PLB — file_store、todos、update_plan、create_plan(stub review)
+- [ ] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort
+- [ ] **P4** RV+CP-D — dispatch_reviewer、tool guards、集成 create_plan/reviewer
+- [ ] **P5** AQ — ask_question + CliAskQuestionPanel
+- [ ] **P6** PR-PLC — /plan build 五件事 + 原子回滚 + E2E-PLAN-001
+- [ ] **P7** PR-PLD/PLE/PLF — TodosPanel、milestone ckpt、cancel→pending、raw edit 拦截、/restore 联动
+- [ ] **P8a** 扫尾单测（D1–D12 防御路径）
+- [ ] **P8b** `plan_runtime_integration_tests` 全绿 + tokio::time::timeout(30s)
+- [ ] **P8c** `plan_cli_e2e` + E2E_SCENARIO_LIBRARY E2E-PLAN-001～016
+- [ ] **P8d** gen-tool-catalog + integration/all EXIT_CODE=0 + 人工 PLAN-UX-01～04
+- [ ] **done** 三卡子项勾选、PENDING_INTEGRATION、push
+
+## 关键决策
+
+- `ask_question` 因 T2-P0-008 (TUI) 仍 TODO，采用 **CLI MVP**（`readline` + `spawn_blocking`）；IDE 侧为 trait stub
+- reviewer / `dispatch_agent` 共用 `AgentRegistry::spawn_subagent_internal`
+- 测试 hang 防御：所有 L1/L2 async `tokio::time::timeout(30s)` 包裹；L3 子进程 `kill_on_drop` + 120s 上限
+- 测试稳定性：默认 MockLlm/mock HTTP；真 LLM 用例 `#[ignore]`
+
+## 提交日志
+
+(每个 Phase 完成后追加一行 `<commit> — <phase>`)
