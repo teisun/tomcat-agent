@@ -14,7 +14,7 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P8a 扫尾完成 → lib 全测 1025 passed / 0 failed → 进入 P8b 集成 |
+| 阶段 | P8b 集成测完成 → lib 1025/0 + plan_runtime_integration 8/0 → 进入 P8c CLI E2E |
 
 ## Phase 进度
 
@@ -29,7 +29,7 @@
 - [x] **P7 (核心)** PR-PLE finalize_completed_to_chat + PR-PLF demote_to_pending_on_cancel（释放 lock）+ PR-PLF allow_raw_edit_to_path（canonicalize 双侧）+ attach_cancel_hook/current_cancel_token + 5 个新单测全绿（cancel→pending / cancel_outside_exec_noop / cancel_releases_lock / finalize_completed_clears_first_exec_turn / raw_edit_blocked_for_plan_files）
 - [ ] **P7 (延期)** PR-PLD TodosPanel + RefreshNotifier + milestone checkpoint record(Milestone) + /restore reload_active_plan_from_disk — 需要 chat_loop 装配层联动，推到 P8b 集成测一起做
 - [x] **P8a** 扫尾单测 — D2 attach_cancel_hook_rebinds_replaces_old_token + D9 concurrent_write_plan_serialized_by_lock + 修 P2~P7 测试间 HOME env 污染（orig_home OnceLock + cleanup_home 还原）→ lib 全测 1025 passed / 0 failed
-- [ ] **P8b** `plan_runtime_integration_tests` 全绿 + tokio::time::timeout(30s)
+- [x] **P8b** `plan_runtime_integration_tests` 全绿（8 个端到端用例：full_plan_lifecycle / build→cancel→resume / ask_question 双答案 + Ctrl+C cancelled / reviewer summary 入 tool result / raw_edit guard / todos 路由 / friendly hint）+ 全部 await 用 `tokio::time::timeout(30s)` 包裹（防 D12）+ HOME 隔离 + 串/并行均通过
 - [ ] **P8c** `plan_cli_e2e` + E2E_SCENARIO_LIBRARY E2E-PLAN-001～016
 - [ ] **P8d** gen-tool-catalog + integration/all EXIT_CODE=0 + 人工 PLAN-UX-01～04
 - [ ] **done** 三卡子项勾选、PENDING_INTEGRATION、push
