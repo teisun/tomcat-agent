@@ -41,9 +41,15 @@ fn spawn_single_response_server(
     (format!("http://{}", addr), hits, handle)
 }
 
+// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 PlanMode 过滤。
+// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 PlanMode::Chat 时等价）。
+fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
+    crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
+}
+
 #[test]
 fn build_tool_definitions_is_non_empty() {
-    let defs = build_tool_definitions();
+    let defs = build_tool_definitions_default_view();
     assert!(defs.len() >= 4);
     for d in &defs {
         assert!(d["function"]["name"].is_string());
@@ -52,7 +58,7 @@ fn build_tool_definitions_is_non_empty() {
 
 #[test]
 fn build_tool_definitions_contains_all_primitives() {
-    let defs = build_tool_definitions();
+    let defs = build_tool_definitions_default_view();
     let names: Vec<String> = defs
         .iter()
         .filter_map(|d| d["function"]["name"].as_str().map(String::from))
@@ -70,7 +76,7 @@ fn build_tool_definitions_contains_all_primitives() {
 
 #[test]
 fn build_tool_definitions_contains_config_tools() {
-    let defs = build_tool_definitions();
+    let defs = build_tool_definitions_default_view();
     let names: Vec<String> = defs
         .iter()
         .filter_map(|d| d["function"]["name"].as_str().map(String::from))
@@ -83,6 +89,21 @@ fn build_tool_definitions_contains_config_tools() {
         names.contains(&"config_set".to_string()),
         "config_set tool must be registered (PR-7)"
     );
+}
+
+#[test]
+fn build_tool_definitions_default_view_excludes_plan_only_tools() {
+    let defs = build_tool_definitions_default_view();
+    let names: Vec<String> = defs
+        .iter()
+        .filter_map(|d| d["function"]["name"].as_str().map(String::from))
+        .collect();
+    for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
+        assert!(
+            !names.contains(&plan_tool.to_string()),
+            "CHAT 默认视图不应暴露 plan_only 工具 {plan_tool}, got: {names:?}"
+        );
+    }
 }
 
 #[test]

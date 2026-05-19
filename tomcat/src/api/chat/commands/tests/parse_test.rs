@@ -1,6 +1,6 @@
 //! Tests for `commands::parse` — slash-command recognition contract.
 
-use super::super::{parse_chat_command, ChatCommand};
+use super::super::{parse_chat_command, ChatCommand, PlanCommand};
 
 fn assert_not_command(input: &str) {
     assert!(matches!(
@@ -54,4 +54,51 @@ fn restore_command_parses_paths_and_dry_run() {
             dry_run: true,
         }
     );
+}
+
+// ─── T2-P1-002 PR-PLA：`/plan` 三件套解析回归 ───────────────────────────────
+
+#[test]
+fn plan_command_with_quoted_objective_parses() {
+    assert_eq!(
+        parse_chat_command(r#"/plan "ship plan mode""#),
+        ChatCommand::Plan(PlanCommand::Enter {
+            objective: "ship plan mode".to_string()
+        })
+    );
+}
+
+#[test]
+fn plan_command_exit_parses() {
+    assert_eq!(
+        parse_chat_command("/plan exit"),
+        ChatCommand::Plan(PlanCommand::Exit)
+    );
+}
+
+#[test]
+fn plan_command_build_with_id_parses() {
+    assert_eq!(
+        parse_chat_command("/plan build ship-001"),
+        ChatCommand::Plan(PlanCommand::Build {
+            plan_id: "ship-001".to_string(),
+        })
+    );
+}
+
+#[test]
+fn plan_command_bare_returns_usage_error() {
+    assert!(matches!(
+        parse_chat_command("/plan"),
+        ChatCommand::UsageError { .. }
+    ));
+}
+
+#[test]
+fn plan_command_in_chat_text_does_not_match() {
+    // `/plan` 必须是行首 token；混在普通文本里不解析为命令
+    assert!(matches!(
+        parse_chat_command("帮我 /plan exit"),
+        ChatCommand::NotACommand(_)
+    ));
 }

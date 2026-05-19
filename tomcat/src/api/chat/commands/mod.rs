@@ -3,9 +3,12 @@
 mod cmd_ckpt;
 mod cmd_help;
 mod cmd_path;
+mod cmd_plan;
 mod cmd_restore;
 mod cmd_thinking;
 mod parse;
+
+pub use cmd_plan::PlanCommand;
 
 #[cfg(test)]
 mod tests;

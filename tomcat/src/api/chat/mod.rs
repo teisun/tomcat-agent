@@ -103,6 +103,7 @@ pub mod cli_turn_renderer;
 pub mod commands;
 pub mod events;
 pub mod permission;
+pub mod plan_runtime;
 pub mod preflight;
 
 use commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
@@ -156,6 +157,10 @@ pub struct ChatContext {
     pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
     /// T2-P0-015：OpenAI Files 会话级 runtime（不支持 Files 的 provider 为 `None`）。
     pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    /// T2-P1-002 PR-PLA：PLAN 模式 per-session 编排器。挂在 ChatContext 上跨 turn 持久；
+    /// chat_loop 装配 `tool_definitions` / system reminder / user prefix 时基于 `plan_runtime.mode()`。
+    /// 禁止每轮重建（会丢失 PLAN/EXEC 的持续语义）。
+    pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
 }
 
 fn git_available_for_checkpoints() -> bool {
@@ -302,6 +307,12 @@ impl ChatContext {
         // 否则回落到 `config.llm.thinking.show`（架构 §3.1 / §1 已决策「`show` 初值来源」）。
         let initial_show_thinking = resolve_initial_show_thinking(&config.llm.thinking);
 
+        // T2-P1-002 PR-PLA：PlanRuntime per-session，与 session_key 绑定。
+        let plan_runtime = plan_runtime::PlanRuntime::new(session.current_session_key());
+        if let Err(err) = plan_runtime.recover() {
+            warn!(error = %err, "plan_runtime recover failed; continuing with Chat mode");
+        }
+
         Ok(Self {
             session,
             llm,
@@ -327,6 +338,7 @@ impl ChatContext {
             ),
             show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(initial_show_thinking)),
             openai_files_runtime,
+            plan_runtime,
         })
     }
 
@@ -450,10 +462,12 @@ impl ToolExecutor for NoopToolExecutor {
 
 // ─── Tool definitions for LLM ─────────────────────────────────────────────────
 
-fn build_tool_definitions() -> Vec<serde_json::Value> {
-    // P0.5：chat_loop 默认视图排除 plan_only 工具（PlanMode == Chat）；
-    // P1 起 `PlanRuntime::visible_tools_for_mode` 接管，按 Planning/Executing 合入 plan 工具。
-    crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
+fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
+    // T2-P1-002 PR-PLA：按 PlanMode 过滤 LLM 可见工具集。
+    // - Chat / Pending / Completed：等价默认视图（含 chat 默认工具，排除 plan_only）
+    // - Planning：包含 create_plan / ask_question / todos / update_plan，排除 write/edit/bash
+    // - Executing：含 update_plan / todos，排除 create_plan / ask_question
+    plan_runtime::catalog::visible_tools_for_mode(&ctx.plan_runtime.mode())
 }
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────
@@ -716,8 +730,29 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
         // Build messages from ContextState
         let mut messages = build_context_from_state(&context_state);
-        messages.insert(0, ChatMessage::system(&system_text));
-        messages.push(ChatMessage::user(&input));
+
+        // T2-P1-002 PR-PLA：按当前 PlanMode 决定 system reminder / tool_definitions / user prefix
+        let plan_mode = ctx.plan_runtime.mode();
+        let system_text_with_reminder = match &plan_mode {
+            plan_runtime::PlanMode::Planning => {
+                format!("{}{}", system_text, plan_runtime::prompts::PLANNER_REMINDER)
+            }
+            plan_runtime::PlanMode::Executing { plan_id } => format!(
+                "{}{}",
+                system_text,
+                plan_runtime::prompts::render_executor_reminder(plan_id)
+            ),
+            _ => system_text.clone(),
+        };
+        let user_prefix = plan_runtime::session_prefix::user_prefix_for_mode(&plan_mode);
+        let decorated_user_text = if user_prefix.is_empty() {
+            input.clone()
+        } else {
+            format!("{}{}", user_prefix, input)
+        };
+
+        messages.insert(0, ChatMessage::system(&system_text_with_reminder));
+        messages.push(ChatMessage::user(&decorated_user_text));
 
         let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
         let config = AgentLoopConfig {
@@ -726,7 +761,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             retry_base_delay_ms: 300,
             model: model.clone(),
             session_id: ctx.session.current_session_key().to_string(),
-            tool_definitions: build_tool_definitions(),
+            tool_definitions: build_tool_definitions(ctx),
             context_config: context_config.clone(),
             agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
             read_file_state: ctx.read_file_state.clone(),
@@ -898,6 +933,16 @@ fn persist_turn_result(
 ) -> Result<Vec<String>, AppError> {
     let mut appended_row_ids = Vec::new();
     for msg in new_messages {
+        // T2-P1-002 PR-PLA / D5：transcript 中 user 文本不写 mode prefix（避免 hydrate 后双重贴前缀）。
+        let mut msg = msg;
+        if matches!(msg.role, crate::core::llm::ChatMessageRole::User) {
+            if let Some(content) = msg.text_content() {
+                let stripped = plan_runtime::session_prefix::strip_user_prefix(content);
+                if stripped.len() != content.len() {
+                    msg.set_text_content(stripped.to_string());
+                }
+            }
+        }
         let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
         let mut cm = msg;
         cm.msg_id = Some(row_id);

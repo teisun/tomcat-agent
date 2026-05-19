@@ -14,8 +14,9 @@ use std::path::PathBuf;
 
 use crate::api::chat::ChatContext;
 
-use super::{cmd_ckpt, cmd_help, cmd_path, cmd_restore, cmd_thinking};
+use super::{cmd_ckpt, cmd_help, cmd_path, cmd_plan, cmd_restore, cmd_thinking};
 
+pub use cmd_plan::PlanCommand;
 pub use cmd_thinking::ThinkingAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +50,8 @@ pub enum ChatCommand {
         paths: Vec<PathBuf>,
         dry_run: bool,
     },
+    /// `/plan` 子命令族（plan-runtime.md §4.1 R1）。
+    Plan(PlanCommand),
     /// Recognized command with invalid arguments.
     UsageError {
         message: String,
@@ -71,7 +74,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
     let first_token = trimmed.split_whitespace().next().unwrap_or_default();
     if !matches!(
         first_token,
-        "/path" | "/help" | "/thinking" | "/ckpt" | "/restore"
+        "/path" | "/help" | "/thinking" | "/ckpt" | "/restore" | "/plan"
     ) {
         return ChatCommand::NotACommand(line.to_string());
     }
@@ -91,6 +94,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/thinking" => cmd_thinking::parse_args(tokens),
         "/ckpt" => parse_ckpt_args(tokens),
         "/restore" => parse_restore_args(tokens),
+        "/plan" => cmd_plan::parse_args(tokens),
         _ => ChatCommand::NotACommand(line.to_string()),
     }
 }
@@ -120,6 +124,7 @@ pub(crate) fn dispatch_chat_command(
             paths,
             dry_run,
         } => cmd_restore::run(ctx, checkpoint_id, paths, dry_run),
+        ChatCommand::Plan(plan_cmd) => cmd_plan::run(ctx, plan_cmd),
     }
 }
 

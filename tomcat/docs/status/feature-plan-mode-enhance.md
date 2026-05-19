@@ -14,13 +14,13 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P0 认领 → P0.5 横切前置 |
+| 阶段 | P1 PR-PLA 完成 → P2 PR-PLB 进行中 |
 
 ## Phase 进度
 
 - [x] **P0** 认领三卡、切分支、README/任务卡/status 更新
 - [x] **P0.5** 横切前置（依赖 `serde_yaml` / `AgentLoopConfig` + `SubagentType` / 4 plan 工具进 catalog / transcript 事件 type 常量 / `[plan]`+`[reviewer]` config / `gen-tool-catalog` + `tool_catalog_doc` 回归）
-- [ ] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover、user prefix
+- [x] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover(stub)、user prefix（+ §9.3A P1 单测 38 个全绿；recover 真正生效随 P2 file_store 补齐）
 - [ ] **P2** PR-PLB — file_store、todos、update_plan、create_plan(stub review)
 - [ ] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort
 - [ ] **P4** RV+CP-D — dispatch_reviewer、tool guards、集成 create_plan/reviewer
