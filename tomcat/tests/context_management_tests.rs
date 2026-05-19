@@ -4,6 +4,11 @@
 mod common;
 
 use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tomcat::core::compaction::compact_tool_results;
 use tomcat::core::llm::{ChatMessageRole, MessageKind};
 use tomcat::core::session::estimate_msg_chars;
@@ -13,11 +18,6 @@ use tomcat::{
     DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
     PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, WriteFileResult,
 };
-use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio_util::sync::CancellationToken;
 use tracing::{info, info_span};
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────

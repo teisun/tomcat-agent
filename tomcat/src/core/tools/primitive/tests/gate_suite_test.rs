@@ -321,6 +321,7 @@ async fn pr9_executor_writes_agent_trail_dir_blocked_or_confirms() {
 
 #[tokio::test]
 async fn pr9_executor_credentials_glob_denies_write() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = workspace_dir("pr9_creds_ws");
     // builtin path_rules 自动加载 → 不需要 user_path_rules。
     let exec = make_executor(ws.clone(), vec![], Arc::new(AllowAllConfirmation));
@@ -339,6 +340,7 @@ async fn pr9_executor_credentials_glob_denies_write() {
 
 #[tokio::test]
 async fn pr9_executor_sessions_glob_denies_write() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = workspace_dir("pr9_sess_ws");
     let exec = make_executor(ws.clone(), vec![], Arc::new(AllowAllConfirmation));
     let home = dirs::home_dir().expect("home");

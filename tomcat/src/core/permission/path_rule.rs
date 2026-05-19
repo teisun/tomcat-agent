@@ -73,10 +73,7 @@ impl PathRule {
             Err(_) => return false,
         };
         if self.has_glob() {
-            match globset::Glob::new(&expanded) {
-                Ok(g) => g.compile_matcher().is_match(&*target_s),
-                Err(_) => false,
-            }
+            glob_matches_canonicalized(&expanded, &target_s)
         } else {
             // 直接比较 expanded（已 canonicalize）与 target 字符串。
             if path_starts_with(&target_s, &expanded) {
@@ -92,4 +89,31 @@ impl PathRule {
             )
         }
     }
+}
+
+fn glob_matches_canonicalized(pattern: &str, target: &str) -> bool {
+    let matcher = |pat: &str| match globset::Glob::new(pat) {
+        Ok(g) => g.compile_matcher().is_match(target),
+        Err(_) => false,
+    };
+    if matcher(pattern) {
+        return true;
+    }
+    canonicalized_glob_pattern(pattern)
+        .as_deref()
+        .is_some_and(matcher)
+}
+
+fn canonicalized_glob_pattern(pattern: &str) -> Option<String> {
+    let first_glob = pattern.find(['*', '?'])?;
+    let prefix_dir = pattern[..first_glob]
+        .rfind(std::path::MAIN_SEPARATOR)
+        .map(|idx| &pattern[..idx])
+        .unwrap_or("");
+    if prefix_dir.is_empty() {
+        return None;
+    }
+    let canon_prefix = super::gate::canonicalize_with_existing_ancestor(Path::new(prefix_dir));
+    let remainder = &pattern[prefix_dir.len()..];
+    Some(format!("{}{}", canon_prefix.to_string_lossy(), remainder))
 }

@@ -34,6 +34,15 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   tool_catalog_doc
 )
 
+# 真 LLM E2E（需 OPENAI_API_KEY；缺 key 时 fixture panic）。
+# 这两个 test target 串行运行：fixture 都改 HOME，并发会互踩；进程 B `--resume`
+# 必须读到进程 A 留下的 sessions.json。run-integration-tests.sh 显式跳过本组，
+# 用户/CI 需要时按需 `cargo test --test plan_real_llm_*` 单独触发。
+TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
+  plan_real_llm_inprocess_tests
+  plan_real_llm_cli_e2e
+)
+
 TOMCAT_WASMEDGE_TESTS=(
   wasmedge_e2e_tests
   long_lived_vm_tests

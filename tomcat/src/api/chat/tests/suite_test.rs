@@ -408,6 +408,26 @@ fn startup_prune_scheduled_without_blocking_readline() {
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
+#[test]
+fn chat_context_attaches_cli_ask_question_panel() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_ASKQ_PANEL_KEY";
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+
+    // SAFETY: 测试使用独立 env key，作用域结束后立即清理。
+    unsafe { std::env::set_var(ENV_KEY, "stub") };
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    assert!(
+        ctx.plan_runtime.ask_question_panel().is_some(),
+        "CLI ChatContext 应默认挂载 AskQuestionPanel，避免真 LLM 调 ask_question 时直接报工具不可用"
+    );
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
 #[derive(Default)]
 struct RecordSpyState {
     requests: Vec<CheckpointRecordRequest>,
@@ -431,7 +451,10 @@ impl CheckpointStore for RecordSpyStore {
         let mut guard = self.state.lock().unwrap();
         guard.requests.push(request);
         guard.observed_leaf_ids.push(observed_leaf);
-        Ok(CheckpointId::new(format!("ck-spy-{}", guard.requests.len())))
+        Ok(CheckpointId::new(format!(
+            "ck-spy-{}",
+            guard.requests.len()
+        )))
     }
 
     fn list(
@@ -543,13 +566,8 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
         crate::ChatMessage::tool("call_1", "tool result"),
     ];
 
-    let appended_ids = persist_turn_result(
-        &ctx,
-        &mut state,
-        messages,
-        crate::CheckpointKind::Interrupt,
-    )
-    .unwrap();
+    let appended_ids =
+        persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::Interrupt).unwrap();
 
     let guard = spy_state.lock().unwrap();
     assert_eq!(guard.requests.len(), 1, "Interrupt 应写入一次 checkpoint");

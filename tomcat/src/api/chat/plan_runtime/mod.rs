@@ -118,10 +118,6 @@ pub struct PlanRuntime {
     /// 触发首轮注入的 plan body 缓存（与 `first_exec_turn_pending` 配对，
     /// 在 build_plan 写盘成功后预读，避免首轮 chat_loop 再做一次 disk IO）。
     first_exec_turn_body: Mutex<Option<String>>,
-    /// `[reviewer].default_allow_edit`：是否允许 reviewer 子 Agent 自己 edit
-    /// 计划文件 `## Review` 段。生产由 `ChatContext::from_config` 从配置读出；
-    /// 默认 `false`（与 plan-runtime.md §9 一致）。
-    reviewer_default_allow_edit: AtomicBool,
     /// `[ask_question].timeout_ms`：ask_question 等待用户回答的墙钟超时（毫秒）。
     /// `0` 表示无超时；生产由 `ChatContext::from_config` 写入；默认 0（按工具内置默认 300_000 处理）。
     ask_question_timeout_ms: std::sync::atomic::AtomicU64,
@@ -129,21 +125,27 @@ pub struct PlanRuntime {
     /// 工具仅写内存，不落盘——保留给纯单元测试与早期阶段使用。
     todos_persist_base: Mutex<Option<std::path::PathBuf>>,
     /// 当前 active todos 文件的 id（写入 sessions.json 的 `activeTodosId` 字段镜像）。
-    /// 由 [`Self::ensure_active_todos_id`] 在首次写盘时生成 stable id；后续 replace 仅在
-    /// `[todos] auto_new_todos_on_replace_after_terminal=true` 时切换新 id。
+    /// 由 [`Self::ensure_active_todos_id`] 在首次写盘时生成 stable id；`todos.new_todos=true`
+    /// 时可通过 [`Self::rotate_active_todos_id`] 显式切换到新文件。
     active_todos_id: Mutex<Option<String>>,
     /// E：UI 刷新广播——todos / update_plan 成功后，runtime 把 snapshot fanout 给所有
     /// 注册的 panel。生产由 `ChatContext::from_config` 注入 CLI/IDE 适配；测试可空。
     refresh_notifier: Arc<RefreshNotifier>,
-    /// E6：checkpoint store（默认 None；ChatContext::from_config 注入 ShadowGit/Noop）。
-    /// `update_plan` 检测到 milestone 刚完成 → 写 `Milestone{milestone_id}` 记录；
-    /// `build_plan` 完成 → 按配置写 `Manual{label="plan_build:<id>"}`。失败仅 warning。
+    /// checkpoint store（默认 None；ChatContext::from_config 注入 ShadowGit/Noop）。
+    /// 当前 plan runtime 仅在 `build_plan` 完成后按配置写
+    /// `Manual{label="plan_build:<id>"}`；失败仅 warning。
     checkpoint_store: Mutex<Option<Arc<dyn crate::core::CheckpointStore>>>,
-    /// `[plan].auto_checkpoint_on_milestone`：里程碑完成时是否自动 record。默认 true。
-    auto_checkpoint_on_milestone: AtomicBool,
     /// `[plan].auto_checkpoint_on_build`：build_plan 时是否自动 record。默认 false。
     auto_checkpoint_on_build: AtomicBool,
+    /// transcript 自定义事件 appender；由 `ChatContext::from_config` 装配
+    /// `SessionManager::append_custom_entry` 的闭包。`None` 时 dispatch_reviewer 等不写
+    /// transcript（单元测试 / 早期阶段）。
+    transcript_appender: Mutex<Option<TranscriptAppender>>,
 }
+
+/// 由 PlanRuntime 调用，把 `serde_json::Value` 写入当前 transcript 的 `Custom` 行。
+pub type TranscriptAppender =
+    Arc<dyn Fn(serde_json::Value) -> Result<(), crate::infra::error::AppError> + Send + Sync>;
 
 impl PlanRuntime {
     /// 构造一个绑定到 session_key 的 PlanRuntime。
@@ -155,10 +157,7 @@ impl PlanRuntime {
     }
 
     /// 显式给 `lock_timeout_ms`（测试用；生产从 `[plan] lock_timeout_ms` 读取）。
-    pub fn with_lock_timeout(
-        session_key: impl Into<String>,
-        lock_timeout_ms: u64,
-    ) -> Arc<Self> {
+    pub fn with_lock_timeout(session_key: impl Into<String>, lock_timeout_ms: u64) -> Arc<Self> {
         Arc::new(Self {
             mode: RwLock::new(PlanMode::Chat),
             session_key: session_key.into(),
@@ -171,15 +170,29 @@ impl PlanRuntime {
             ask_question_panel: Mutex::new(None),
             first_exec_turn_pending: AtomicBool::new(false),
             first_exec_turn_body: Mutex::new(None),
-            reviewer_default_allow_edit: AtomicBool::new(false),
             ask_question_timeout_ms: std::sync::atomic::AtomicU64::new(0),
             todos_persist_base: Mutex::new(None),
             active_todos_id: Mutex::new(None),
             refresh_notifier: Arc::new(RefreshNotifier::new()),
             checkpoint_store: Mutex::new(None),
-            auto_checkpoint_on_milestone: AtomicBool::new(true),
             auto_checkpoint_on_build: AtomicBool::new(false),
+            transcript_appender: Mutex::new(None),
         })
+    }
+
+    /// 注入 transcript 自定义事件 appender（由 `ChatContext::from_config` 装配）。
+    pub fn attach_transcript_appender(&self, appender: TranscriptAppender) {
+        *self.transcript_appender.lock() = Some(appender);
+    }
+
+    /// 写一条 transcript 自定义事件；appender 未注入时静默忽略（不阻塞主流程）。
+    pub(crate) fn write_transcript_custom(&self, extra: serde_json::Value) {
+        let appender = self.transcript_appender.lock().clone();
+        if let Some(f) = appender {
+            if let Err(e) = f(extra) {
+                tracing::warn!(error = %e, "PlanRuntime::write_transcript_custom failed");
+            }
+        }
     }
 
     /// 注入 checkpoint store（生产 ShadowGit / 测试 Noop / Spy）。
@@ -190,15 +203,6 @@ impl PlanRuntime {
     /// 读 checkpoint store（克隆 Arc）。`None` 时跳过 record。
     pub fn checkpoint_store(&self) -> Option<Arc<dyn crate::core::CheckpointStore>> {
         self.checkpoint_store.lock().clone()
-    }
-
-    /// `[plan].auto_checkpoint_on_milestone` 当前值。
-    pub fn auto_checkpoint_on_milestone(&self) -> bool {
-        self.auto_checkpoint_on_milestone.load(Ordering::Acquire)
-    }
-
-    pub fn set_auto_checkpoint_on_milestone(&self, v: bool) {
-        self.auto_checkpoint_on_milestone.store(v, Ordering::Release);
     }
 
     /// `[plan].auto_checkpoint_on_build` 当前值。
@@ -243,31 +247,32 @@ impl PlanRuntime {
         if let Some(id) = g.as_ref() {
             return id.clone();
         }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let id = format!("td_{}_{now_ms}", self.session_key);
+        let id = self.fresh_todos_id();
         *g = Some(id.clone());
         id
     }
 
-    /// 读取 `[reviewer].default_allow_edit`（B1 / tool_exec 分发 `create_plan` 时使用）。
-    pub fn reviewer_default_allow_edit(&self) -> bool {
-        self.reviewer_default_allow_edit
-            .load(std::sync::atomic::Ordering::Acquire)
+    /// 强制切到一个新的 active todos id；供 `todos.new_todos=true` 使用。
+    pub fn rotate_active_todos_id(&self) -> String {
+        let mut g = self.active_todos_id.lock();
+        let id = self.fresh_todos_id();
+        *g = Some(id.clone());
+        id
     }
 
-    /// 由 `ChatContext::from_config` 在装配阶段写入。
-    pub fn set_reviewer_default_allow_edit(&self, allow: bool) {
-        self.reviewer_default_allow_edit
-            .store(allow, std::sync::atomic::Ordering::Release);
+    fn fresh_todos_id(&self) -> String {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        format!("td_{}_{now_ms}", self.session_key)
     }
 
     /// 读取 `[ask_question].timeout_ms`（N13 / B1 tool_exec 分发 `ask_question` 时使用）。
     /// 返回 `None` 表示「未配置」（工具按内置默认 300_000ms 处理）；`Some(0)` 表示无超时。
     pub fn ask_question_timeout_ms(&self) -> Option<u64> {
-        let v = self.ask_question_timeout_ms
+        let v = self
+            .ask_question_timeout_ms
             .load(std::sync::atomic::Ordering::Acquire);
         if v == u64::MAX {
             None
@@ -427,8 +432,8 @@ impl PlanRuntime {
                 && plan.frontmatter.session_key.as_deref() == Some(self.session_key.as_str())
             {
                 let plan_id = plan.frontmatter.plan_id.clone();
-                let plan_text = file_store::serialize_plan_file(&plan)
-                    .unwrap_or_else(|_| plan.body.clone());
+                let plan_text =
+                    file_store::serialize_plan_file(&plan).unwrap_or_else(|_| plan.body.clone());
                 *self.first_exec_turn_body.lock() = Some(plan_text);
                 self.first_exec_turn_pending.store(true, Ordering::Release);
                 *self.mode.write() = PlanMode::Executing {
@@ -527,9 +532,7 @@ impl PlanRuntime {
         };
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
-            Err(e) => {
-                return review::ReviewSummary::aborted_with(format!("read plan 失败: {e}"))
-            }
+            Err(e) => return review::ReviewSummary::aborted_with(format!("read plan 失败: {e}")),
         };
 
         let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -538,6 +541,36 @@ impl PlanRuntime {
             .await;
         if rounds > 1 {
             summary.summary = format!("[round {rounds}] {}", summary.summary);
+        }
+        // 落 transcript 自定义事件（reviewer.md §11 / events::wire::WIRE_PLAN_REVIEW）。
+        // 失败仅 warning，create_plan 主流程不受影响。
+        let mut review_payload = summary.to_json();
+        if let Some(obj) = review_payload.as_object_mut() {
+            obj.insert(
+                "event".to_string(),
+                serde_json::Value::String(crate::infra::wire::WIRE_PLAN_REVIEW.to_string()),
+            );
+            obj.insert(
+                "plan_id".to_string(),
+                serde_json::Value::String(plan_id.to_string()),
+            );
+            obj.insert(
+                "rounds".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(rounds)),
+            );
+        }
+        self.write_transcript_custom(review_payload);
+        // round > 1 时额外写一条 warning 事件，便于审计排查 "为何复盘了 N 次"。
+        if rounds > 1 {
+            let warn_payload = serde_json::json!({
+                "event": crate::infra::wire::WIRE_PLAN_REVIEW_WARNING,
+                "plan_id": plan_id,
+                "rounds": rounds,
+                "reviewer_turns_used": summary.reviewer_turns_used,
+                "reviewer_turns_limit": summary.reviewer_turns_limit,
+                "reviewer_stop_reason": summary.reviewer_stop_reason,
+            });
+            self.write_transcript_custom(warn_payload);
         }
         summary
     }
@@ -636,7 +669,8 @@ impl PlanRuntime {
             });
             if has_active {
                 return Err(PlanRuntimeError::BuildBlocked(
-                    "当前 session 有未完成 todos；先收口（todos remove / set completed）后再 build".into(),
+                    "当前 session 有未完成 todos；先收口（todos remove / set completed）后再 build"
+                        .into(),
                 ));
             }
         }
@@ -704,8 +738,8 @@ impl PlanRuntime {
         };
         *self.active_planning_plan_id.lock() = None;
         // 5: 首轮注入旗标 + 缓存 plan body（含 frontmatter 以便上下文可读）
-        let plan_text = file_store::serialize_plan_file(&plan)
-            .unwrap_or_else(|_| plan.body.clone());
+        let plan_text =
+            file_store::serialize_plan_file(&plan).unwrap_or_else(|_| plan.body.clone());
         *self.first_exec_turn_body.lock() = Some(plan_text);
         self.first_exec_turn_pending.store(true, Ordering::Release);
 
@@ -744,10 +778,7 @@ impl PlanRuntime {
     /// flag→false 后取走缓存（`take()`），返回前一次 build 缓存的 body；
     /// 与 catalog/reminder/prefix 派生平行——所有 EXEC 副作用均不可漏。
     pub fn consume_first_exec_turn_user_meta(&self) -> Option<String> {
-        if self
-            .first_exec_turn_pending
-            .swap(false, Ordering::AcqRel)
-        {
+        if self.first_exec_turn_pending.swap(false, Ordering::AcqRel) {
             self.first_exec_turn_body.lock().take()
         } else {
             None
@@ -851,9 +882,7 @@ impl PlanRuntime {
         };
         // macOS `/var/folders` 实际是 `/private/var/folders` 的 symlink；只比较
         // canonical 形态可避免误放过 plan_dir 下的写入。两侧都尽量 canonicalize。
-        let canon_path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let canon_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let canon_plans = plans_dir.canonicalize().unwrap_or(plans_dir);
         if !canon_path.starts_with(&canon_plans) {
             return true;

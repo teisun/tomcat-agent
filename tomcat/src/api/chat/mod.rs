@@ -161,6 +161,12 @@ pub struct ChatContext {
     /// chat_loop 装配 `tool_definitions` / system reminder / user prefix 时基于 `plan_runtime.mode()`。
     /// 禁止每轮重建（会丢失 PLAN/EXEC 的持续语义）。
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
+    /// 多 Agent 派生注册表（multi-agent.md §14）。reviewer 子 Agent 通过
+    /// `agent_registry.spawn_subagent_internal` 派发；顶层 chat session 启动时
+    /// 注册 root handle，guard 与 ctx 同生命周期（drop 时自动注销）。
+    pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
+    /// root agent handle 的注销 guard；drop 时自动从 `agent_registry` 移除。
+    _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
 }
 
 fn git_available_for_checkpoints() -> bool {
@@ -176,6 +182,7 @@ fn git_available_for_checkpoints() -> bool {
 impl ChatContext {
     pub fn from_config(config: AppConfig) -> Result<Self, AppError> {
         let sessions_path = resolve_sessions_dir(&config)?;
+        let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
 
@@ -311,21 +318,74 @@ impl ChatContext {
         let plan_runtime = plan_runtime::PlanRuntime::new(session.current_session_key());
         // T2-P1-* GAP-N12 / G3：把 ChatContext 已知的 plan/ask_question/todos 配置注入运行时。
         // 注意：这些 setter 都是幂等 atomic store；后续 hot-reload 也走同入口。
-        plan_runtime.set_reviewer_default_allow_edit(config.reviewer.default_allow_edit);
+        // reviewer 改稿权 (`allow_review_edit`) 已硬编码为 true，不再有配置开关。
         plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
         plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
-        // E6：里程碑 / build checkpoint 自动化（默认 milestone=true、build=false，与文档一致）。
-        plan_runtime.set_auto_checkpoint_on_milestone(config.plan.auto_checkpoint_on_milestone);
+        // build checkpoint 自动化。
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         // E：CLI 默认 panel——把 todos / update_plan 后的 snapshot 渲染到 stderr，
         // 让用户在 CLI 下也能感知 in_progress 切换；IDE 适配后可替换为 IpcTodosPanel。
         plan_runtime.register_todos_panel(Arc::new(plan_runtime::CliTodosPanel));
-        // D：挂载生产 reviewer dispatcher（当前为结构化 aborted 占位；后续 PR 替换为
-        // AgentRegistry::spawn_subagent_internal 真实派发）。
-        plan_runtime.attach_reviewer(Arc::new(
-            plan_runtime::prod_reviewer::ProdReviewerDispatcher::new("chat_context"),
+        // CLI 运行态默认也应提供 ask_question 面板；否则真实对话里模型一旦调用
+        // ask_question，会直接得到 "PlanRuntime 未配置 AskQuestionPanel" 并卡死等待。
+        plan_runtime.attach_ask_question_panel(Arc::new(
+            plan_runtime::ask_question_panel::CliAskQuestionPanel,
         ));
+
+        // ─── 多 Agent 注册表 + reviewer 子 Agent 真派发装配 ─────────────────
+        // multi-agent.md §14：reviewer / 未来 dispatch_agent 走唯一构造点
+        // `agent_registry.spawn_subagent_internal`。顶层 chat session 注册 root handle
+        // 与 ctx 同生命周期；guard 落在 ChatContext._root_agent_guard，drop 时自动注销。
+        let agent_registry =
+            crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone());
+        let root_agent_guard = agent_registry
+            .register_root(session.current_session_key())
+            .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
+
+        // reviewer max_turns 上限优先读 env（便于 CI 临时调）；env 未设 → ReviewerConfig.max_turns。
+        let reviewer_max_turns = std::env::var("TOMCAT_REVIEWER_MAX_TURNS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(config.reviewer.max_turns);
+        let reviewer_model = config
+            .reviewer
+            .model_override
+            .clone()
+            .unwrap_or_else(|| config.llm.default_model.clone());
+        let read_file_state =
+            Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
+        let prod_reviewer = plan_runtime::prod_reviewer::ProdReviewerDispatcher::new(
+            "chat_context",
+            plan_runtime::prod_reviewer::ProdReviewerDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: session.current_session_key().to_string(),
+                llm: llm.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: config.context.clone(),
+                read_file_state: read_file_state.clone(),
+                openai_files_runtime: openai_files_runtime.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                model: reviewer_model,
+                max_turns: reviewer_max_turns,
+            },
+        );
+        plan_runtime.attach_reviewer(Arc::new(prod_reviewer));
+
+        // transcript 自定义事件 appender：把 SessionManager::append_custom_entry 包成闭包
+        // 注入 PlanRuntime，dispatch_reviewer 完成后写 `plan.review` / `plan.review.warning`。
+        // SessionManager 内部只持有 sessions_dir 路径，重新构造廉价；这样不需要把
+        // ChatContext.session 改为 Arc。
+        {
+            plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
+                let sm = SessionManager::new(sessions_path_for_appender.clone());
+                sm.append_custom_entry(extra)
+            }));
+        }
+
         // E8：装配完成后再 recover——确保扫盘失败也仅 warning，主流程继续以 Chat 启动。
         if let Err(err) = plan_runtime.recover() {
             warn!(error = %err, "plan_runtime recover failed; continuing with Chat mode");
@@ -351,12 +411,12 @@ impl ChatContext {
             config_backend,
             bash_task_registry,
             gate,
-            read_file_state: Arc::new(
-                crate::core::tools::pipeline::read_state::ReadFileState::default(),
-            ),
+            read_file_state,
             show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(initial_show_thinking)),
             openai_files_runtime,
             plan_runtime,
+            agent_registry,
+            _root_agent_guard: root_agent_guard,
         })
     }
 
@@ -505,6 +565,9 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::llm::system_prompt
     let cfg = &ctx.config;
     let agent_definition_dir = ctx.agent_definition_dir.clone();
     let workspace_roots = resolve_workspace_roots_paths(cfg).unwrap_or_default();
+    let agent_plans_dir = crate::infra::config::resolve_plans_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
 
     let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
         Some(ctx.agent_trail_dir.clone()),
@@ -581,6 +644,8 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::llm::system_prompt
         }
         let label = if agent_trail_set.contains(&s) {
             "agent_trail_dir"
+        } else if agent_plans_dir.as_deref() == Some(&s) {
+            "agent_plans_dir"
         } else {
             "path_rule_readonly"
         };
@@ -647,6 +712,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
         agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
         agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
+        agent_plans_dir: plan_runtime::file_store::plans_dir()
+            .map(|path| crate::infra::platform::format_home_path(&path))
+            .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
     };
     let workspace_state = compute_workspace_state(ctx);
@@ -707,235 +775,38 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         // 读到新输入后重建 CancellationToken。
         // 关键约束：token 一旦 cancel 不可逆——如果用户 Ctrl+C 落在 prompt 处，
         // 旧 token 已被 cancel；这里替换成新 token，新回合才能正常运行。
-        // 必须在 `agent_loop.run` 之前完成。
+        // 必须在 `run_chat_turn` 之前完成；SIGINT handler 通过 `ctx.cancel_token`
+        // 看到新 token，从而只取消本回合而不污染未来回合。
         let turn_token = {
             let mut guard = ctx.cancel_token.lock();
             *guard = CancellationToken::new();
             guard.clone()
         };
-        // T2-P1-* C：PlanRuntime 监听本轮 token——一旦 Ctrl+C 触发，runtime 在 EXEC
-        // 模式下会自动 demote 到 Pending，写盘 frontmatter.mode=pending 并清 active id。
-        ctx.plan_runtime.attach_cancel_hook(turn_token.clone());
 
-        let entry = ctx.session.get_session(ctx.session.current_session_key())?;
-        let model = ctx.effective_model(entry.as_ref());
+        let outcome =
+            run_chat_turn(ctx, &input, &system_text, &mut context_state, turn_token).await?;
 
-        // Update context estimate for the new user input
-        context_state.on_message_appended(input.len());
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "chat_after_user_append",
-            ratio = context_state.usage_ratio(),
-            compaction_count = context_state.session_obs.compaction_count,
-            turns = context_state.turn_count()
-        );
-
-        // Timing ②: restore pending preheat + apply boundary before request
-        context_state.preheat.try_restart_if_pending(
-            context_state.usage_ratio(),
-            &context_state.messages,
-            &context_state.transcript_path,
-            ctx.llm.clone(),
-            context_config,
-            ctx.event_bus.clone(),
-        );
-        check_before_request(&mut context_state, &*ctx.event_bus).await;
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "chat_after_timing2_check",
-            session_stderr_listeners_active = true,
-            message_stream_listener_registered = false,
-            ratio = context_state.usage_ratio(),
-            compaction_count = context_state.session_obs.compaction_count
-        );
-
-        // Build messages from ContextState
-        let mut messages = build_context_from_state(&context_state);
-
-        // T2-P1-002 PR-PLA：按当前 PlanMode 决定 system reminder / tool_definitions / user prefix
-        let plan_mode = ctx.plan_runtime.mode();
-        let system_text_with_reminder = match &plan_mode {
-            plan_runtime::PlanMode::Planning => {
-                format!("{}{}", system_text, &*plan_runtime::prompts::PLANNER_REMINDER)
-            }
-            plan_runtime::PlanMode::Executing { plan_id } => format!(
-                "{}{}",
-                system_text,
-                plan_runtime::prompts::render_executor_reminder(plan_id)
-            ),
-            _ => system_text.clone(),
-        };
-        let user_prefix = plan_runtime::session_prefix::user_prefix_for_mode(&plan_mode);
-        let decorated_user_text = if user_prefix.is_empty() {
-            input.clone()
-        } else {
-            format!("{}{}", user_prefix, input)
-        };
-
-        messages.insert(0, ChatMessage::system(&system_text_with_reminder));
-
-        // T2-P1-* C：进入 EXEC 后的第一轮，先把 plan body 作为 system_meta user 消息注入，
-        // 让 LLM 直接看到完整计划文本；后续轮次返回 None，避免重复注入超长计划。
-        if matches!(plan_mode, plan_runtime::PlanMode::Executing { .. }) {
-            if let Some(body) = ctx.plan_runtime.consume_first_exec_turn_user_meta() {
-                messages.push(ChatMessage::user(&format!(
-                    "<plan_meta>\n{body}\n</plan_meta>"
-                )));
-            }
-        }
-        messages.push(ChatMessage::user(&decorated_user_text));
-
-        let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
-        let config = AgentLoopConfig {
-            max_attempts: 3,
-            max_tool_rounds: usize::MAX,
-            retry_base_delay_ms: 300,
-            model: model.clone(),
-            session_id: ctx.session.current_session_key().to_string(),
-            tool_definitions: build_tool_definitions(ctx),
-            context_config: context_config.clone(),
-            agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
-            read_file_state: ctx.read_file_state.clone(),
-            openai_files_runtime: ctx.openai_files_runtime.clone(),
-            checkpoint_store: ctx.checkpoint_store.clone(),
-            parent_session_id: None,
-            spawn_depth: 0,
-            subagent_type: crate::core::agent_loop::SubagentType::User,
-            plan_runtime: Some(ctx.plan_runtime.clone()),
-        };
-        let mut agent_loop = AgentLoop::new(
-            ctx.llm.clone(),
-            ctx.primitive.clone(),
-            ctx.event_bus.clone(),
-            config,
-            turn_token,
-        );
-        if let Some(backend) = ctx.config_backend.clone() {
-            agent_loop = agent_loop.with_config_backend(backend);
-        }
-        // T2-P0-016 PR-I：注入 bash 后台任务注册表，启用 task_* 三件套。
-        agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
-        agent_loop.set_context_state(Some(context_state));
-
-        // T2-P0-006 P0：CLI 单订阅者渲染器，统一处理 thinking / 正文 / tool_execution，
-        // 避免多个回调各自 `print!` 引起乱序。
-        let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
-            Arc::clone(&renderer),
-            Arc::clone(&ctx.show_thinking),
-            ctx.config.llm.thinking.print_to_stderr,
-            ctx.config.llm.tool_cli_verbosity,
-        );
-        let listener_ids = cli_turn_renderer.register(&*ctx.event_bus);
-        let thinking_persist_listener_ids = if ctx.config.llm.thinking.persist {
-            let transcript_path = ctx
-                .session
-                .current_transcript_path()?
-                .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-            Some(register_thinking_persist_listeners(
-                &*ctx.event_bus,
-                transcript_path,
-            ))
-        } else {
-            None
-        };
-
-        // J1：CLI 状态行——把当前 PlanMode 渲染为 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` /
-        // `[DONE plan_id]` tag，便于用户在 readline 提示符里识别"自己处在哪种模式"。
-        let mode_tag = match ctx.plan_runtime.mode() {
-            plan_runtime::PlanMode::Chat => String::new(),
-            plan_runtime::PlanMode::Planning => " [PLAN]".to_string(),
-            plan_runtime::PlanMode::Executing { plan_id } => format!(" [EXEC {plan_id}]"),
-            plan_runtime::PlanMode::Pending { plan_id } => format!(" [PENDING {plan_id}]"),
-            plan_runtime::PlanMode::Completed { plan_id } => format!(" [DONE {plan_id}]"),
-        };
-        print!("\ntomcat.{}{}> ", ctx.config.agent.id, mode_tag);
-        io::stdout().flush().map_err(AppError::Io)?;
-
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "chat_before_agent_run",
-            session_stderr_listeners_active = true,
-            message_stream_listener_registered = true
-        );
-        let outcome = agent_loop.run(messages).await;
-        if let Some(ids) = &thinking_persist_listener_ids {
-            unregister_thinking_persist_listeners(&*ctx.event_bus, ids);
-        }
-        cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.event_bus, &listener_ids);
-
-        // T-004 / T-017：`Completed` 与 `Interrupted` 走**同一条**持久化路径——
-        // partial assistant（content_buf 截短处）+ 已完成的 tool_result 都已被
-        // `AgentLoop::run` 装进 `AgentRunResult.new_messages`，这里只需 append +
-        // observability，不区分成功与中断。
-        let (maybe_result, was_interrupted, maybe_error) = match outcome {
-            AgentRunOutcome::Completed(r) => (Some(r), false, None),
-            AgentRunOutcome::Interrupted(r) => (Some(r), true, None),
-            AgentRunOutcome::Failed(e) => (None, false, Some(e)),
-        };
-
-        if let Some(remaining) = renderer.lock().flush() {
-            print!("{}", remaining);
-            let _ = io::stdout().flush();
-        }
-
-        context_state = agent_loop.take_context_state().unwrap_or_else(|| {
-            init_context_state(&ctx.session, context_config, &system_text).unwrap_or(
-                crate::core::ContextState {
-                    messages: Vec::new(),
-                    estimate_context_chars: system_text.len(),
-                    context_budget_chars: crate::infra::config::compute_context_budget_chars(
-                        context_config,
-                    ),
-                    context_budget_tokens: context_config
-                        .context_window
-                        .saturating_sub(context_config.max_output_tokens),
-                    last_api_usage: None,
-                    post_usage_appended_chars: 0,
-                    transcript_path: ctx
-                        .session
-                        .current_transcript_path()
-                        .ok()
-                        .flatten()
-                        .unwrap_or_default(),
-                    preheat: Preheat::new(),
-                    session_obs: Default::default(),
-                    live: Default::default(),
-                },
-            )
-        });
-
-        if let Some(result) = maybe_result {
-            persist_turn_result(
-                ctx,
-                &mut context_state,
-                result.new_messages,
-                if was_interrupted {
-                    CheckpointKind::Interrupt
-                } else {
-                    CheckpointKind::TurnEnd
-                },
-            )?;
-
-            if was_interrupted {
+        match outcome {
+            AgentRunOutcome::Completed(_) => {}
+            AgentRunOutcome::Interrupted(_) => {
                 eprintln!("\n^C 已中断（partial 已保存）");
             }
-        } else if let Some(e) = maybe_error {
-            let _ = ctx.session.persist_context_observability(&context_state);
-
-            let is_fatal = is_fatal_error(&e);
-            eprintln!("\n[错误] {}", e);
-            if is_fatal {
-                eprintln!("(致命错误，退出对话)");
-                context_state.preheat.abort();
-                cleanup_openai_files_on_session_end(ctx, "chat_fatal_exit").await;
-                events::stderr::unregister_chat_session_stderr_listeners(
-                    &*ctx.event_bus,
-                    &session_stderr_ids,
-                );
-                return Err(e);
+            AgentRunOutcome::Failed(e) => {
+                let is_fatal = is_fatal_error(&e);
+                eprintln!("\n[错误] {}", e);
+                if is_fatal {
+                    eprintln!("(致命错误，退出对话)");
+                    context_state.preheat.abort();
+                    cleanup_openai_files_on_session_end(ctx, "chat_fatal_exit").await;
+                    events::stderr::unregister_chat_session_stderr_listeners(
+                        &*ctx.event_bus,
+                        &session_stderr_ids,
+                    );
+                    return Err(e);
+                }
+                eprintln!("(可重试，请继续输入)\n");
+                continue;
             }
-            eprintln!("(可重试，请继续输入)\n");
-            continue;
         }
 
         println!();
@@ -944,6 +815,267 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     cleanup_openai_files_on_session_end(ctx, "session_end").await;
     events::stderr::unregister_chat_session_stderr_listeners(&*ctx.event_bus, &session_stderr_ids);
     Ok(())
+}
+
+// ─── Single-turn driver ──────────────────────────────────────────────────────
+
+/// 驱动单轮 chat 推理（不含 rustyline / `dispatch_chat_command`），供 `chat_loop`
+/// 与集成 / 真 LLM E2E 测试共用。
+///
+/// 调用方需自备 `ContextState`（首轮用 [`init_context_state`] 构造、跨轮复用），
+/// 并预先 build 好 `system_text`（避免每轮重算 `compute_workspace_state`）。
+/// `turn_token` 由调用方持有；CLI 路径在 `chat_loop` 中将其与 `ctx.cancel_token`
+/// 同步（让 SIGINT handler 取消当前回合）。
+///
+/// 本函数承担 `chat_loop` 原内层循环的全部副作用：preheat / boundary check /
+/// PlanMode prompt 装配 / AgentLoop 装配与渲染器注册 / `AgentLoop::run` /
+/// outcome 持久化（`persist_turn_result` 或 `persist_context_observability`）。
+/// 错误打印 / fatal 退出 / `^C 已中断` 提示由调用方根据返回的 `AgentRunOutcome` 处理。
+pub async fn run_chat_turn(
+    ctx: &ChatContext,
+    input: &str,
+    system_text: &str,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
+    // T2-P1-* C：PlanRuntime 监听本轮 token——一旦 Ctrl+C 触发，runtime 在 EXEC
+    // 模式下会自动 demote 到 Pending，写盘 frontmatter.mode=pending 并清 active id。
+    ctx.plan_runtime.attach_cancel_hook(turn_token.clone());
+
+    let entry = ctx.session.get_session(ctx.session.current_session_key())?;
+    let model = ctx.effective_model(entry.as_ref());
+    let context_config = &ctx.config.context;
+
+    context_state.on_message_appended(input.len());
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "chat_after_user_append",
+        ratio = context_state.usage_ratio(),
+        compaction_count = context_state.session_obs.compaction_count,
+        turns = context_state.turn_count()
+    );
+
+    // Timing ②: restore pending preheat + apply boundary before request
+    context_state.preheat.try_restart_if_pending(
+        context_state.usage_ratio(),
+        &context_state.messages,
+        &context_state.transcript_path,
+        ctx.llm.clone(),
+        context_config,
+        ctx.event_bus.clone(),
+    );
+    check_before_request(context_state, &*ctx.event_bus).await;
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "chat_after_timing2_check",
+        session_stderr_listeners_active = true,
+        message_stream_listener_registered = false,
+        ratio = context_state.usage_ratio(),
+        compaction_count = context_state.session_obs.compaction_count
+    );
+
+    let mut messages = build_context_from_state(context_state);
+
+    // T2-P1-002 PR-PLA：按当前 PlanMode 决定 system reminder / tool_definitions / user prefix
+    let plan_mode = ctx.plan_runtime.mode();
+    let system_text_with_reminder = match &plan_mode {
+        plan_runtime::PlanMode::Planning => {
+            format!(
+                "{}{}",
+                system_text,
+                &*plan_runtime::prompts::PLANNER_REMINDER
+            )
+        }
+        plan_runtime::PlanMode::Executing { plan_id } => format!(
+            "{}{}",
+            system_text,
+            plan_runtime::prompts::render_executor_reminder(plan_id)
+        ),
+        _ => system_text.to_string(),
+    };
+    let current_plan_path = match &plan_mode {
+        plan_runtime::PlanMode::Planning => ctx
+            .plan_runtime
+            .active_planning_plan_id()
+            .and_then(|plan_id| plan_runtime::file_store::plan_path_for_id(&plan_id).ok()),
+        plan_runtime::PlanMode::Executing { plan_id } => {
+            plan_runtime::file_store::plan_path_for_id(plan_id).ok()
+        }
+        plan_runtime::PlanMode::Chat
+        | plan_runtime::PlanMode::Pending { .. }
+        | plan_runtime::PlanMode::Completed { .. } => None,
+    };
+    let user_prefix = plan_runtime::session_prefix::user_prefix_for_mode(
+        &plan_mode,
+        current_plan_path.as_deref(),
+    );
+    let decorated_user_text = if user_prefix.is_empty() {
+        input.to_string()
+    } else {
+        format!("{}{}", user_prefix, input)
+    };
+
+    messages.insert(0, ChatMessage::system(&system_text_with_reminder));
+
+    // T2-P1-* C：进入 EXEC 后的第一轮，先把 plan body 作为 system_meta user 消息注入，
+    // 让 LLM 直接看到完整计划文本；后续轮次返回 None，避免重复注入超长计划。
+    if matches!(plan_mode, plan_runtime::PlanMode::Executing { .. }) {
+        if let Some(body) = ctx.plan_runtime.consume_first_exec_turn_user_meta() {
+            messages.push(ChatMessage::user(&format!(
+                "<plan_meta>\n{body}\n</plan_meta>"
+            )));
+        }
+    }
+    messages.push(ChatMessage::user(&decorated_user_text));
+
+    let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
+    let config = AgentLoopConfig {
+        max_attempts: 3,
+        max_tool_rounds: usize::MAX,
+        retry_base_delay_ms: 300,
+        model,
+        session_id: ctx.session.current_session_key().to_string(),
+        tool_definitions: build_tool_definitions(ctx),
+        context_config: context_config.clone(),
+        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+        read_file_state: ctx.read_file_state.clone(),
+        openai_files_runtime: ctx.openai_files_runtime.clone(),
+        checkpoint_store: ctx.checkpoint_store.clone(),
+        parent_session_id: None,
+        spawn_depth: 0,
+        subagent_type: crate::core::agent_loop::SubagentType::User,
+        plan_runtime: Some(ctx.plan_runtime.clone()),
+    };
+    let mut agent_loop = AgentLoop::new(
+        ctx.llm.clone(),
+        ctx.primitive.clone(),
+        ctx.event_bus.clone(),
+        config,
+        turn_token,
+    );
+    if let Some(backend) = ctx.config_backend.clone() {
+        agent_loop = agent_loop.with_config_backend(backend);
+    }
+    // T2-P0-016 PR-I：注入 bash 后台任务注册表，启用 task_* 三件套。
+    agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
+
+    // ContextState ownership 切换：临时 swap 出 owned 给 AgentLoop；
+    // 运行结束后 take_context_state 写回调用方 `&mut`。
+    let prev_state = std::mem::replace(
+        context_state,
+        make_fallback_context_state(ctx, system_text, context_config),
+    );
+    agent_loop.set_context_state(Some(prev_state));
+
+    // T2-P0-006 P0：CLI 单订阅者渲染器，统一处理 thinking / 正文 / tool_execution，
+    // 避免多个回调各自 `print!` 引起乱序。
+    let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
+        Arc::clone(&renderer),
+        Arc::clone(&ctx.show_thinking),
+        ctx.config.llm.thinking.print_to_stderr,
+        ctx.config.llm.tool_cli_verbosity,
+    );
+    let listener_ids = cli_turn_renderer.register(&*ctx.event_bus);
+    let thinking_persist_listener_ids = if ctx.config.llm.thinking.persist {
+        let transcript_path = ctx
+            .session
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        Some(register_thinking_persist_listeners(
+            &*ctx.event_bus,
+            transcript_path,
+        ))
+    } else {
+        None
+    };
+
+    // J1：CLI 状态行——把当前 PlanMode 渲染为 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` /
+    // `[DONE plan_id]` tag，便于用户在 readline 提示符里识别"自己处在哪种模式"。
+    let mode_tag = match ctx.plan_runtime.mode() {
+        plan_runtime::PlanMode::Chat => String::new(),
+        plan_runtime::PlanMode::Planning => " [PLAN]".to_string(),
+        plan_runtime::PlanMode::Executing { plan_id } => format!(" [EXEC {plan_id}]"),
+        plan_runtime::PlanMode::Pending { plan_id } => format!(" [PENDING {plan_id}]"),
+        plan_runtime::PlanMode::Completed { plan_id } => format!(" [DONE {plan_id}]"),
+    };
+    print!("\ntomcat.{}{}> ", ctx.config.agent.id, mode_tag);
+    io::stdout().flush().map_err(AppError::Io)?;
+
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "chat_before_agent_run",
+        session_stderr_listeners_active = true,
+        message_stream_listener_registered = true
+    );
+    let outcome = agent_loop.run(messages).await;
+    if let Some(ids) = &thinking_persist_listener_ids {
+        unregister_thinking_persist_listeners(&*ctx.event_bus, ids);
+    }
+    cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.event_bus, &listener_ids);
+
+    if let Some(remaining) = renderer.lock().flush() {
+        print!("{}", remaining);
+        let _ = io::stdout().flush();
+    }
+
+    *context_state = agent_loop.take_context_state().unwrap_or_else(|| {
+        init_context_state(&ctx.session, context_config, system_text)
+            .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, context_config))
+    });
+
+    // T-004 / T-017：`Completed` 与 `Interrupted` 走**同一条**持久化路径——
+    // partial assistant（content_buf 截短处）+ 已完成的 tool_result 都已被
+    // `AgentLoop::run` 装进 `AgentRunResult.new_messages`，这里只需 append +
+    // observability，不区分成功与中断。
+    match &outcome {
+        AgentRunOutcome::Completed(result) => {
+            persist_turn_result(
+                ctx,
+                context_state,
+                result.new_messages.clone(),
+                CheckpointKind::TurnEnd,
+            )?;
+        }
+        AgentRunOutcome::Interrupted(result) => {
+            persist_turn_result(
+                ctx,
+                context_state,
+                result.new_messages.clone(),
+                CheckpointKind::Interrupt,
+            )?;
+        }
+        AgentRunOutcome::Failed(_) => {
+            let _ = ctx.session.persist_context_observability(context_state);
+        }
+    }
+
+    Ok(outcome)
+}
+
+fn make_fallback_context_state(
+    ctx: &ChatContext,
+    system_text: &str,
+    context_config: &crate::infra::ContextConfig,
+) -> crate::core::ContextState {
+    crate::core::ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: system_text.len(),
+        context_budget_chars: crate::infra::config::compute_context_budget_chars(context_config),
+        context_budget_tokens: context_config
+            .context_window
+            .saturating_sub(context_config.max_output_tokens),
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: ctx
+            .session
+            .current_transcript_path()
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

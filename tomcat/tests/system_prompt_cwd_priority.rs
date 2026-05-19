@@ -17,6 +17,12 @@ fn system_prompt_names_three_directories_and_keeps_state_as_permission_list() {
     let context = WorkspaceContext {
         agent_workspace_dir: agent_workspace_dir.to_string_lossy().to_string(),
         agent_definition_dir: agent_definition_dir.to_string_lossy().to_string(),
+        agent_plans_dir: tmp
+            .path()
+            .join(".tomcat")
+            .join("plans")
+            .to_string_lossy()
+            .to_string(),
         agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
     };
     let state = WorkspaceState {

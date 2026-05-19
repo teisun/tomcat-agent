@@ -46,7 +46,6 @@ pub enum CheckpointKind {
     TurnEnd,
     Interrupt,
     Manual { label: String },
-    Milestone { milestone_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

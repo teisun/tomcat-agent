@@ -393,11 +393,7 @@ impl CheckpointStore for ShadowGitStore {
             if previous_head.is_none() {
                 return self.commit_index_as_checkpoint(&request, None, true);
             }
-            return self.save_checkpoint_meta(
-                Self::new_checkpoint_id(),
-                &request,
-                previous_head,
-            );
+            return self.save_checkpoint_meta(Self::new_checkpoint_id(), &request, previous_head);
         }
 
         self.commit_index_as_checkpoint(&request, previous_head, false)

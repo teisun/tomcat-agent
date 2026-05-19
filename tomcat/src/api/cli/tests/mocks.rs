@@ -6,17 +6,13 @@
 //! - `test_config`：返回一个把 `storage.work_dir` 指向给定路径的 `AppConfig`，
 //!   供 session/plugin/audit 用例隔离会话目录。
 
-use std::sync::Mutex;
-
 use super::super::*;
-
-static WORKSPACE_CLI_HOME_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn with_tomcat_config_in_home<R>(
     work_dir: &std::path::Path,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _lock = WORKSPACE_CLI_HOME_LOCK.lock().unwrap();
+    let _lock = crate::test_support::home_env_lock().lock().unwrap();
     let home = tempfile::tempdir().unwrap();
     let tomcat = home.path().join(".tomcat");
     std::fs::create_dir_all(&tomcat).unwrap();

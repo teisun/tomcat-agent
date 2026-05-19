@@ -6,7 +6,7 @@
 //! | 工具 | 可见模式 | 写入对象 | 说人话 |
 //! |------|----------|----------|--------|
 //! | [`create_plan`] | Planning | 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md` | 第一稿计划 |
-//! | [`update_plan`] | 任何模式 | 增量改 PlanFile.frontmatter.todos[]/milestones[] | 推进/编辑 |
+//! | [`update_plan`] | 任何模式 | 增量改 PlanFile.frontmatter.todos[] | 推进/编辑 |
 //! | [`todos`] | 任何模式 | **仅** session TodoFile（与 PlanFile 无关；推进 plan 用 `update_plan`） | 我的待办 |
 //! | `ask_question` | Planning + Chat/Pending/Completed（EXEC 隐藏） | 透传 UI | 结构化提问 |
 //!
@@ -15,6 +15,7 @@
 
 pub mod ask_question;
 pub mod create_plan;
+pub(crate) mod shared_todo_ops;
 pub mod todos;
 pub mod update_plan;
 

@@ -97,13 +97,15 @@ fn resolve_timeout_ms(config_timeout_ms: Option<u64>) -> Option<u64> {
     }
 }
 
-fn parse_and_validate_questions(
-    raw: &serde_json::Value,
-) -> Result<Vec<Question>, ToolError> {
+fn parse_and_validate_questions(raw: &serde_json::Value) -> Result<Vec<Question>, ToolError> {
     let questions: Vec<Question> = match raw.get("questions") {
         Some(v) => serde_json::from_value(v.clone())
             .map_err(|e| ToolError::BadArgs(format!("questions 反序列化失败: {e}")))?,
-        None => return Err(ToolError::BadArgs("ask_question 缺少 questions 字段".into())),
+        None => {
+            return Err(ToolError::BadArgs(
+                "ask_question 缺少 questions 字段".into(),
+            ))
+        }
     };
     if questions.is_empty() {
         return Err(ToolError::BadArgs("questions 至少 1 题".into()));
@@ -173,10 +175,7 @@ fn validate_single_question(q: &Question) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn validate_answers(
-    questions: &[Question],
-    result: &AskQuestionResult,
-) -> Result<(), ToolError> {
+fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Result<(), ToolError> {
     if result.answers.len() != questions.len() {
         return Err(ToolError::Internal(format!(
             "panel 返回答案数 {} 与问题数 {} 不一致",

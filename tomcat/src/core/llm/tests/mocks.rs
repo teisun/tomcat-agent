@@ -5,8 +5,9 @@
 
 use std::path::Path;
 
-/// 从 crate 根目录加载 .env，便于本地有 key 时跑测试。
+/// 从 crate 根目录加载 `.env`，便于本地有 key 时跑测试（与 `tests/common::load_openai_test_env` 对齐）。
 pub(crate) fn load_dotenv() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
-    let _ = dotenvy::from_path(path);
+    let _ = dotenvy::from_path(&path);
+    let _ = dotenvy::dotenv();
 }

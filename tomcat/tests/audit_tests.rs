@@ -5,12 +5,12 @@
 
 mod common;
 
+use std::sync::Arc;
+use tempfile::TempDir;
 use tomcat::{
     ensure_work_dir_structure, AppConfig, AuditRecorder, FileAuditRecorder,
     PluginLifecycleAuditEntry, PrimitiveAuditEntry,
 };
-use std::sync::Arc;
-use tempfile::TempDir;
 
 /// [AuditStore + FileAuditRecorder] 写入原语与插件生命周期记录后，query 可查出且 export_to 可导出
 ///

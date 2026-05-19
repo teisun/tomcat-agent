@@ -12,6 +12,7 @@ use serial_test::serial;
 #[test]
 #[serial(env_lock)]
 fn run_init_returns_ok() {
+    let _home = crate::test_support::home_env_lock().lock().unwrap();
     let r = run_init();
     assert!(r.is_ok());
 }
@@ -73,6 +74,7 @@ fn run_config_set_returns_ok() {
 #[test]
 #[serial(env_lock)]
 fn run_config_edit_returns_ok() {
+    let _home = crate::test_support::home_env_lock().lock().unwrap();
     run_init().unwrap();
 
     let old_editor = std::env::var("EDITOR").ok();
@@ -101,6 +103,7 @@ fn run_doctor_is_always_ok() {
 #[test]
 #[serial(env_lock)]
 fn run_doctor_after_init_returns_ok() {
+    let _home = crate::test_support::home_env_lock().lock().unwrap();
     run_init().unwrap();
     let r = run_doctor();
     assert!(r.is_ok());

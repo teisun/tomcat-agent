@@ -4,7 +4,7 @@
 
 本文档定义 `update_plan` 的入参 / 出参、跨模式门控矩阵、自动派生触发点、跨 session 语义。
 
-**说人话**：`update_plan` 是 LLM 推进 `~/.tomcat/plans/<*>.plan.md` 内 `todos[]` / `milestones[]` 状态的**主力工具**。任何模式都能调；`/plan build` 之后改的是「正在执行的 plan」，CHAT/PLAN 下改的是「指定 plan_id 的待办 / 阶段」。**整盘重写**仍是 `create_plan` 的事（且只 PLAN 模式能用）。
+**说人话**：`update_plan` 是 LLM 推进 `~/.tomcat/plans/<*>.plan.md` 内 `todos[]` 状态的**主力工具**。任何模式都能调；`/plan build` 之后改的是「正在执行的 plan」，CHAT/PLAN 下改的是「指定 plan_id 的待办」。**整盘重写**仍是 `create_plan` 的事（且只 PLAN 模式能用）。
 
 ---
 
@@ -31,9 +31,9 @@
 
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
-| **`update_plan`** | 对 PlanFile `todos[]` / `milestones[]` 的**增量**编辑工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "update_plan"` | **任何模式可见**；按 `plan_id` 路由；frontmatter 中**只**能动 `todos[]` / `milestones[]`；不能动 mode / session_* / plan_id / goal / created_at 等机器字段；不能动 markdown 正文 | 改 plan 的待办进度用这个。 |
+| **`update_plan`** | 对 PlanFile `todos[]` 的**增量**编辑工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "update_plan"` | **任何模式可见**；按 `plan_id` 路由；frontmatter 中**只**能动 `todos[]`；不能动 mode / session_* / plan_id / goal / created_at 等机器字段；不能动 markdown 正文 | 改 plan 的待办进度用这个。 |
 | **target PlanFile** | 本次操作的目标计划文件 | 由 `plan_id`（首选）或 `path` 解析，落在 `~/.tomcat/plans/` 下 | EXEC 模式 `plan_id` 可缺省 → `session.active_plan_id`；其它模式必填 | 改哪份 plan 要说清楚。 |
-| **同 op 模型** | 复用 `todos` 的 op 数据结构 | `kind ∈ {upsert, set_status, remove}` for todos；`kind ∈ {milestone_upsert, milestone_remove}` for milestones | `id` 在目标 PlanFile 内唯一；同一文件最多一个 `in_progress` | 操作语义与 `todos` 一致。 |
+| **同 op 模型** | 复用 `todos` 的 op 数据结构 | `kind ∈ {upsert, set_status, remove}` | `id` 在目标 PlanFile 内唯一；同一文件最多一个 `in_progress` | 操作语义与 `todos` 一致。 |
 | **跨 session 编辑** | 任何 session 都能改任意 plan 的 todos | `update_plan` 不读 / 不写 session_* frontmatter | 跨 session 改 todos 允许；但同时只一个 session 能「执行」（active_plan_id 受 build gate 约束） | 任意聊天窗口都能勾 plan 待办。 |
 | **`active_plan_id`（per-session runtime）** | 当前 session 正在 EXEC 的 plan id | `PlanRuntime.active_plan_id: Option<PlanId>`；不写 frontmatter | EXEC 下 update_plan 默认指向它 | 执行态默认改自己手上的那份。 |
 
@@ -44,15 +44,15 @@
 | 工具 | 写什么文件 | 模式可见性 | 语义 | 代码层 | 说人话 |
 |------|-----------|-----------|------|--------|--------|
 | **`todos`** | `~/.tomcat/agents/<agentId>/todos/<todos_id>.todo.md`（session 路径） | **任何模式**（PLAN 期也可调，做 LLM 个人 scratchpad） | 个人 / 会话级待办；**不**写 plan.md | `apply_todos_op(TodoStore)` | 聊天里随手记的清单。 |
-| **`update_plan`** | `~/.tomcat/plans/<*>.plan.md` 的 frontmatter `todos[]` / `milestones[]` | **任何模式** | plan 级待办的**增量**修订 | `apply_todos_op(PlanStore, plan_id)` —— 复用 `todos` 的 op 引擎 + 不同 store + 不同 schema | 改 plan 文件的待办用这个。 |
-| **`create_plan`** | `~/.tomcat/plans/<*>.plan.md` 的**整盘**（frontmatter 初稿 + 正文 `## Goal` / `## Draft` / `## Todos`） | **仅 PLAN 模式** | 重写：把 LLM 提供的 `goal / draft / todos / milestones` 全量落盘，并同步派 reviewer | 独立实现 | 计划结构推倒重来时用。 |
+| **`update_plan`** | `~/.tomcat/plans/<*>.plan.md` 的 frontmatter `todos[]` | **任何模式** | plan 级待办的**增量**修订 | `apply_todos_op(PlanStore, plan_id)` —— 复用 `todos` 的 op 引擎 + 不同 store + 不同 schema | 改 plan 文件的待办用这个。 |
+| **`create_plan`** | `~/.tomcat/plans/<*>.plan.md` 的**整盘**（frontmatter 初稿 + 正文 `## Goal` / `## Draft` / `## Todos`） | **仅 PLAN 模式** | 重写：把 LLM 提供的 `goal / draft / todos` 全量落盘，并同步派 reviewer | 独立实现 | 计划结构推倒重来时用。 |
 
 ```text
                        ┌──────────────────────────────────────┐
                        │  frontmatter 四方协同 (PlanFile)       │
                        ├──────────────┬───────────────────────┤
                        │ create_plan  │ 初稿写盘（PLAN only）  │
-                       │ update_plan  │ todos[]/milestones[] 增量编辑（any mode） │
+                       │ update_plan  │ todos[] 增量编辑（any mode）              │
                        │ runtime      │ /plan build 时写 session_key/id / mode │
                        │ 自动派生     │ mode=completed (all todos done) /         │
                        │              │ mode=pending (cancel_token)               │
@@ -70,11 +70,7 @@
    │
    ├─ 仅 todos[] 状态 / 增删 ──▶ update_plan
    │
-   ├─ 仅 milestone 标题 / 重新分组 ──▶ update_plan（milestone_upsert）
-   │
-   ├─ 改正文 ## Goal / ## Draft / ## Notes ──▶ raw write/edit（PLAN 模式路径白名单生效）
-   │
-   ├─ 改正文 ## Review 段 ──▶ raw edit（reviewer subagent 内部，或用户在任意模式）
+   ├─ 改 plan 正文任意段 ──▶ raw write/edit（PLAN 模式路径白名单生效；reviewer 也走这里）
    │
    └─ 改 frontmatter 其它机器字段（mode / session_* / plan_id 等） ──▶ 任何工具都不能，由 runtime 写
 ```
@@ -88,10 +84,10 @@
 | G1 | 任何模式都可见、单一入口；不再分裂 `todos.active_scope=plan` 分支 | `update_plan_visible_in_all_modes` | 改 plan 待办随时能改。 |
 | G2 | 复用 `todos` 的 op 引擎与文件锁；不重新实现 op 模型 | `update_plan_reuses_todos_op_engine` | 共享代码，减少漂移。 |
 | G3 | `plan_id` 路由：EXEC 缺省 → `active_plan_id`；其它模式必填 | `update_plan_requires_plan_id_outside_exec` | 改哪份 plan 必须明确。 |
-| G4 | 只能动 `todos[]` / `milestones[]`；其它 frontmatter 字段 / markdown 正文均拒 | `update_plan_rejects_non_todo_frontmatter_writes`、`update_plan_rejects_body_writes` | 别越界。 |
+| G4 | 只能动 `todos[]`；其它 frontmatter 字段 / markdown 正文均拒 | `update_plan_rejects_non_todo_frontmatter_writes`、`update_plan_rejects_body_writes` | 别越界。 |
 | G5 | EXEC 模式下提交后触发 `mode=completed` 自动派生；其它模式只改 frontmatter，不改 mode | `update_plan_in_exec_promotes_completed`、`update_plan_outside_exec_does_not_change_mode` | EXEC 才会自动收口。 |
 | G6 | 跨 session 编辑允许；同 session 不能同时 EXEC 两份 plan（build gate 不变） | `update_plan_cross_session_allowed`、`active_plan_id_unique_per_session` | 任意聊天窗口可改，开干仍受 build gate。 |
-| G7 | ToolResult 自带完整 items + milestones snapshot；LLM 不必再 `read` plan.md | `update_plan_result_carries_full_snapshot` | 工具结果自带全貌。 |
+| G7 | ToolResult 自带完整 `items` snapshot；LLM 不必再 `read` plan.md | `update_plan_result_carries_full_snapshot` | 工具结果自带全貌。 |
 | G8 | reviewer subagent 默认可用 `update_plan`（只读 reviewer 也可用 todos；改稿 reviewer 才可用 update_plan） | `reviewer_can_use_update_plan_when_allowed` | 让 reviewer 也能落地修订建议。 |
 
 ---
@@ -109,9 +105,9 @@
 
 | target `PlanFile.mode` | 是否允许 | 行为 |
 |------------------------|---------|------|
-| `planning` | ✅ | 改 todos[] / milestones[]；不触发 mode 自动派生 |
+| `planning` | ✅ | 改 todos[]；不触发 mode 自动派生 |
 | `executing` | ✅（仅当 `target.session_key == 当前 session.session_key`） | 改 todos[]；EXEC 模式下可触发 mode=completed 自动派生 |
-| `pending` | ✅ | 改 todos[] / milestones[]；不触发 mode 自动派生（要续跑请用 `/plan build`） |
+| `pending` | ✅ | 改 todos[]；不触发 mode 自动派生（要续跑请用 `/plan build`） |
 | `completed` | ❌ tool error | 已结案的 plan 不让乱改；如需重新规划用 `create_plan` 开新 plan |
 
 > 「`executing` + 跨 session」拒绝原因：避免另一个 session 在你执行中改你手上 todo 造成竞争。CHAT/PLAN 期的 plan（`session_key == null`）跨 session 改无问题。
@@ -125,9 +121,6 @@
 | `set_status(in_progress)` | ✗ | ✓ | ✗ |
 | `set_status(completed/cancelled)` | ✓ | ✓（触发自动派生检查） | ✓ |
 | `remove` | ✓ | ✓ | ✓ |
-| `milestone_upsert`（新 id） | ✓ | ✗（执行期不许新增 milestone） | ✓ |
-| `milestone_upsert`（改 title / todo_ids） | ✓ | ✓ | ✓ |
-| `milestone_remove` | ✓ | ✗ | ✓ |
 
 ---
 
@@ -138,7 +131,7 @@
 ```json
 {
   "name": "update_plan",
-  "description": "Incrementally update a PlanFile's todos[] / milestones[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo under an existing milestone\n- rename a milestone or re-group todo ids\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose mode is planning or pending; an executing plan can only be edited by the session that owns it. Plans whose mode is completed cannot be edited.\n\nReturn value: every successful call returns full items + milestones snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.mode == executing; new milestones can only be added in planning/pending.",
+  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose mode is planning or pending; an executing plan can only be edited by the session that owns it. Plans whose mode is completed cannot be edited.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.mode == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -150,6 +143,10 @@
         "type": "string",
         "description": "Alternative to plan_id: absolute path under ~/.tomcat/plans/. If both given, plan_id wins."
       },
+      "replace": {
+        "type": "boolean",
+        "description": "If true, todos[] is replaced by the upsert results in ops. Default false."
+      },
       "ops": {
         "type": "array",
         "description": "Sequence of mutations applied in order under a single file lock.",
@@ -158,19 +155,15 @@
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["upsert", "set_status", "remove", "milestone_upsert", "milestone_remove"]
+              "enum": ["upsert", "set_status", "remove"]
             },
             "id":           { "type": "string" },
-            "content":      { "type": "string", "description": "Required for upsert (todo content) and milestone_upsert (milestone title)." },
-            "status":       { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] },
-            "milestone_id": { "type": "string", "description": "For todo upsert/set_status: assign / move todo into this milestone." },
-            "todo_ids":     { "type": "array", "items": { "type": "string" }, "description": "For milestone_upsert: rewrite the milestone's todo_ids list." }
+            "content":      { "type": "string", "description": "For upsert: todo content. Required when creating a brand-new todo." },
+            "status":       { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] }
           },
           "required": ["kind", "id"]
         }
-      },
-      "replace_todos":      { "type": "boolean", "description": "If true, todos[] is replaced by the upsert results in ops. Default false." },
-      "replace_milestones": { "type": "boolean", "description": "If true, milestones[] is replaced by the milestone_upsert results in ops. Default false." }
+      }
     },
     "required": ["ops"]
   }
@@ -196,32 +189,19 @@
         "properties": {
           "id":           { "type": "string" },
           "content":      { "type": "string" },
-          "status":       { "type": "string", "enum": ["pending","in_progress","completed","cancelled"] },
-          "milestone_id": { "type": "string", "nullable": true }
+          "status":       { "type": "string", "enum": ["pending","in_progress","completed","cancelled"] }
         },
         "required": ["id", "content", "status"]
-      }
-    },
-    "milestones": {                         // ★ 完整 milestones 快照
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "id":       { "type": "string" },
-          "title":    { "type": "string" },
-          "todo_ids": { "type": "array", "items": { "type": "string" } }
-        },
-        "required": ["id", "title", "todo_ids"]
       }
     },
     "panel_snapshot_id": { "type": "string" },
     "warnings":          { "type": "array", "items": {"type":"string"} }
   },
-  "required": ["applied", "plan_id", "plan_mode_before", "plan_mode_after", "items", "milestones", "panel_snapshot_id"]
+  "required": ["applied", "plan_id", "plan_mode_before", "plan_mode_after", "items", "panel_snapshot_id"]
 }
 ```
 
-**说人话**：返回当前 plan 完整 items + milestones、本次改了几条、操作前后的 mode（用以观察 runtime 是否自动派生 completed）、面板快照编号。
+**说人话**：返回当前 plan 完整 items、本次改了几条、操作前后的 mode（用以观察 runtime 是否自动派生 completed）、面板快照编号。
 
 ### 5.3 代码复用细节
 
@@ -234,10 +214,10 @@ pub struct SessionTodoStore { todos_id: TodosId, file: PathBuf, ... }
 pub struct PlanTodoStore    { plan_id: PlanId,  file: PathBuf, frontmatter_lock: ... }
 
 impl TodoStore for SessionTodoStore { ... }   // 写 ~/.tomcat/agents/<agentId>/todos/<id>.todo.md
-impl TodoStore for PlanTodoStore    { ... }   // 写 ~/.tomcat/plans/<*>.plan.md 的 frontmatter todos[]/milestones[]
+impl TodoStore for PlanTodoStore    { ... }   // 写 ~/.tomcat/plans/<*>.plan.md 的 frontmatter todos[]
 ```
 
-**说人话**：op 引擎 + 文件锁是一份；store 实现是两份；提示词 + schema 也是两份。
+**说人话**：共享的是 todo-op 语义层；`update_plan` 只比 `todos` 多 plan 定位（`plan_id/path`）与 `replace` 的顶层协议。
 
 ---
 
@@ -252,7 +232,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
                             │ 2. mode gate（§4）                                    │
                             │ 3. acquire advisory file lock                         │
                             │ 4. apply_todos_op(PlanTodoStore, ops)                 │
-                            │    - frontmatter.todos[] / milestones[] in-place      │
+                            │    - frontmatter.todos[] in-place                     │
                             │    - 同 op 引擎（与 todos 工具一致）                  │
                             │ 5. write frontmatter back (round-trip via serde_yaml) │
                             │ 6. release lock                                       │
@@ -275,7 +255,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
                             └──────────────────────────────────────────────────────┘
                                                                 │
                                                                 ▼
-                            ToolResult { applied, items, milestones, plan_mode_after, ... }
+                            ToolResult { applied, items, plan_mode_after, ... }
 ```
 
 **说人话**：解析目标 → 校验门控 → 加锁 → 复用 todos op 引擎写 frontmatter → 解锁 → 看是否触发完成派生 → 刷面板 → 返回快照。
@@ -297,8 +277,6 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 |------------------|------|------|
 | `completed` | 任意 op | ❌ `CrossSessionDenied("plan is completed")` |
 | `planning` / `pending` | `set_status: in_progress` | ❌ `BadOp("in_progress only allowed in executing")` |
-| `executing` | `milestone_upsert`（新 id） | ❌ `BadOp("cannot add new milestone in executing")` |
-| `executing` | `milestone_remove` | ❌ `BadOp("cannot remove milestone in executing")` |
 
 ---
 
@@ -357,8 +335,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 | 跨 session 改 `executing` plan | tool error，usage「该 plan 正由 session X 执行」 | 跨 session 不许动正在跑的。 |
 | `set_status(in_progress)` 且 `target.mode != executing` | tool error | plan 没在 EXEC 标 in_progress 没意义。 |
 | 同 plan 两个 `in_progress` | tool error；整批回滚 | 一个 plan 文件最多一个在干。 |
-| 未知 `id` / 未知 `milestone_id` | tool error | 别瞎编 id。 |
-| `milestone_upsert` 新 id 但 `target.mode == executing` | tool error | 执行期别新增阶段。 |
+| 未知 `id` | tool error | 别瞎编 id。 |
 | frontmatter round-trip 解析失败 | tool error，附最后 50 字节上下文 | 文件被外部改坏了。 |
 | advisory lock 抢不到 | tool error，`LockBusy`，retry hint | 拿不到锁。 |
 
@@ -385,7 +362,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 | 风险 | 影响 | 应对 | 说人话 |
 |------|------|------|--------|
 | LLM 把 `update_plan` 当 `todos` 用（在 CHAT 改个人备忘） | 中 | description 第一段明确「per-session personal todos → use `todos`」；schema 缺省 plan_id 在非 EXEC 报错；测试覆盖 | 描述里讲清楚。 |
-| LLM 把 `update_plan` 当 `create_plan` 用（试图整盘重写） | 中 | schema 不支持 `goal` / `draft` 入参；replace_todos / replace_milestones 仍要逐项 upsert | 工具入参就不让你重写。 |
+| LLM 把 `update_plan` 当 `create_plan` 用（试图整盘重写） | 中 | schema 不支持 `goal` / `draft` 入参；`replace=true` 也仍需逐项 `upsert` | 工具入参就不让你重写。 |
 | 跨 session 并发竞争 | 中 | advisory file lock + 跨 session executing 拒绝 | 文件锁挡。 |
 | frontmatter 写坏 | 高 | 写前 round-trip + atomic rename；写失败保留原文件；增加 `update_plan_frontmatter_corruption_recovery` 测试 | 写坏要可回滚。 |
 | 自动派生在多 op 批次中误触发 | 中 | 在批次提交后**一次性**计算 all completed；批内中间态不触发 | 批量改时只在末尾判一次。 |
@@ -401,7 +378,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 | ~~PLAN 模式下用户要求改 todos 必须再次调 `create_plan` 整盘重写~~ | **替代**：用 `update_plan` 增量改；`create_plan` 仅当结构大改时用 | 不用每次小修就重写整盘。 |
 | ~~CHAT 模式下完全无法改 plan.md 的 todos[]~~ | **修复**：`update_plan` 在 CHAT 可见；按 `plan_id` 路由 | 修上一版的缺口。 |
 | ~~把 `plan_id` 入参也藏起来由 runtime 推断~~ | **否**：EXEC 缺省取 active，其它模式必填 | 改哪份 plan 必须明说。 |
-| ~~把 markdown 正文写权也合到 `update_plan`~~ | **否**：正文走 raw write/edit；本工具只管 frontmatter todos/milestones | 工具职责单一。 |
+| ~~把 markdown 正文写权也合到 `update_plan`~~ | **否**：正文走 raw write/edit；本工具只管 frontmatter `todos[]` | 工具职责单一。 |
 | ~~允许改 `target.mode == completed` 的 plan~~ | **否**：已结案的 plan 拒绝修改；要重新做请用 `create_plan` 开新 plan | 结案的别动。 |
 | ~~跨 session 改 `executing` plan~~ | **否**：拒绝；只有 owning session 能改正在跑的那份 | 别越界。 |
 | ~~自动派生在任意模式都触发~~ | **否**：仅 EXEC + target.mode==executing + 同 session 时；其它模式只改 frontmatter | mode 转移由 EXEC 触发。 |

@@ -112,5 +112,18 @@ fn resolve_workspace_roots_skips_blank_entries() {
     cfg.workspace.workspace_roots =
         vec!["  ".to_string(), dir.path().to_str().unwrap().to_string()];
     let roots = resolve_workspace_roots_paths(&cfg).unwrap();
-    assert_eq!(roots.len(), 1);
+    assert_eq!(roots.len(), 2, "用户根 + 内置 ~/.tomcat/temp");
+}
+
+#[test]
+fn resolve_workspace_roots_always_includes_dot_tomcat_temp() {
+    let cfg = AppConfig::default();
+    let roots = crate::resolve_workspace_roots_paths(&cfg).unwrap();
+    let temp = crate::resolve_dot_tomcat_temp_dir().unwrap();
+    let temp_canon = std::fs::canonicalize(&temp).unwrap_or(temp);
+    assert!(
+        roots.iter().any(|r| r == &temp_canon),
+        "应始终包含 ~/.tomcat/temp，实际: {:?}",
+        roots
+    );
 }

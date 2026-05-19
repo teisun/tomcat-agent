@@ -3,14 +3,14 @@
 
 mod common;
 
+use std::sync::Arc;
+use tempfile::TempDir;
 use tomcat::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use tomcat::{
     AllowAllConfirmation, DefaultPrimitiveExecutor, DefaultToolRegistry, DenyAllConfirmation,
     EditOperation, EditOperationType, PrimitiveConfig, PrimitiveExecutor, Tool, ToolExecutor,
     ToolRegistry, TracingAuditRecorder,
 };
-use std::sync::Arc;
-use tempfile::TempDir;
 
 /// 测试 helper：把 `dir` 作为 `agent_definition_dir` 注入 gate（默认 writable）。
 fn make_gate(definition: &std::path::Path, auto_confirm: bool) -> Arc<dyn PermissionGate> {

@@ -9,13 +9,13 @@
 
 mod common;
 
+use std::path::Path;
+use std::sync::Arc;
 use tomcat::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use tomcat::{
     AllowAllConfirmation, DefaultEventBus, DefaultPrimitiveExecutor, HostApiDispatcher,
     PrimitiveConfig, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
 };
-use std::path::Path;
-use std::sync::Arc;
 
 const WASMEDGE_INSTALL_URL: &str = "https://wasmedge.org/docs/start/install";
 

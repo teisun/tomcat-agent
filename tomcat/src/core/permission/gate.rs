@@ -23,6 +23,7 @@ use regex::Regex;
 
 use super::defaults::{
     builtin_default_rules, BUILTIN_BASH_APPROVAL_REQUIRED, BUILTIN_BASH_FORBIDDEN,
+    BUILTIN_DEFAULT_PATH_RULES,
 };
 use super::path_rule::PathRule;
 use super::session_grants::{SessionGrants, SessionPathRules};
@@ -166,6 +167,16 @@ impl DefaultPermissionGate {
         })
     }
 
+    /// 路径是否在 `~/.tomcat/plans` 默认计划目录内。
+    fn in_agent_plans_set(&self, target: &Path) -> bool {
+        let Some(plans_dir) = agent_plans_dir_path() else {
+            return false;
+        };
+        let s = target.to_string_lossy();
+        let plans = canonicalize_with_existing_ancestor(&plans_dir);
+        path_starts_with(&s, &plans.to_string_lossy())
+    }
+
     fn path_rules_snapshot(&self) -> Vec<PathRule> {
         let mut rules = self.path_rules.clone();
         rules.extend(self.session_path_rules.snapshot());
@@ -213,11 +224,24 @@ impl PermissionGate for DefaultPermissionGate {
                             reason: format!("path_rule readonly: {}", rule.path),
                         });
                     }
+                    if is_builtin_default_path_rule(&rule) && self.in_agent_readonly_set(&target) {
+                        return Ok(PermissionDecision::Allow {
+                            grant: GrantTrace::new(
+                                GrantType::AgentTrailDir,
+                                GrantTrigger::BuiltinDefault,
+                            ),
+                            scope: PermissionScope::Read,
+                        });
+                    }
                     // read 通过 readonly。
                     return Ok(PermissionDecision::Allow {
                         grant: GrantTrace::new(
                             GrantType::PathRuleReadOnly,
-                            GrantTrigger::PathRulesConfig,
+                            if is_builtin_default_path_rule(&rule) {
+                                GrantTrigger::BuiltinDefault
+                            } else {
+                                GrantTrigger::PathRulesConfig
+                            },
                         ),
                         scope: PermissionScope::Read,
                     });
@@ -237,7 +261,15 @@ impl PermissionGate for DefaultPermissionGate {
             });
         }
 
-        // ── Layer 3 第二波：session grant ──
+        // ── Layer 3 第二波：agent_plans_dir 默认授权根 ──
+        if self.in_agent_plans_set(&target) {
+            return Ok(PermissionDecision::Allow {
+                grant: GrantTrace::new(GrantType::AgentPlansDir, GrantTrigger::BuiltinDefault),
+                scope: scope_for_op(op),
+            });
+        }
+
+        // ── Layer 3 第三波：session grant ──
         if self.session_grants.contains(&target) {
             let trigger = self
                 .session_grants
@@ -249,7 +281,7 @@ impl PermissionGate for DefaultPermissionGate {
             });
         }
 
-        // ── Layer 3 第三波：agent 数据目录（仅 read） ──
+        // ── Layer 3 第四波：agent 数据目录（仅 read） ──
         if matches!(op, PrimitiveOperation::Read) && self.in_agent_readonly_set(&target) {
             return Ok(PermissionDecision::Allow {
                 grant: GrantTrace::new(GrantType::AgentTrailDir, GrantTrigger::BuiltinDefault),
@@ -312,10 +344,14 @@ impl PermissionGate for DefaultPermissionGate {
 
     fn effective_roots(&self) -> EffectiveRoots {
         let mut read_write = vec![self.agent_definition_dir.clone()];
+        if let Some(plans_dir) = agent_plans_dir_path() {
+            read_write.push(plans_dir);
+        }
         read_write.extend(self.workspace_roots.iter().cloned());
         read_write.extend(self.session_grants.snapshot());
 
-        let mut read_only = self.agent_trail_readonly_dirs.clone();
+        let mut read_only = Vec::new();
+        read_only.extend(self.agent_trail_readonly_dirs.clone());
         for r in self.path_rules_snapshot() {
             if r.mode == PathRuleMode::Readonly {
                 if let Ok(s) = r.expanded_path() {
@@ -340,6 +376,18 @@ impl PermissionGate for DefaultPermissionGate {
     fn grant_path_rule(&self, rule: PathRule) {
         self.session_path_rules.add(rule);
     }
+}
+
+fn is_builtin_default_path_rule(rule: &PathRule) -> bool {
+    BUILTIN_DEFAULT_PATH_RULES
+        .iter()
+        .any(|(path, mode)| *path == rule.path && *mode == rule.mode)
+}
+
+fn agent_plans_dir_path() -> Option<PathBuf> {
+    crate::infra::config::resolve_plans_dir()
+        .ok()
+        .map(|path| canonicalize_with_existing_ancestor(&path))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

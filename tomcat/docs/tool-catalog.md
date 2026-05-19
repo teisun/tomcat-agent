@@ -354,9 +354,9 @@ Parameters:
 - Permission scope: `Write`
 - Read only: `false`
 - Destructive: `false`
-- Search hint: `plan create planning goal milestones todos reviewer`
+- Search hint: `plan create planning goal draft todos reviewer`
 
-Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective) and `draft` (markdown body for the `## Draft` section); the runtime derives `plan_id` from goal (caller does NOT supply plan_id) and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.
+Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (caller does NOT supply plan_id), normalizes `draft` into the plan body's `## Plan` section, and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.
 
 Parameters:
 
@@ -365,43 +365,15 @@ Parameters:
   "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
   "properties": {
     "draft": {
-      "description": "Markdown content for the plan body's `## Draft` section: ordered bullet points covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Notes` / `## Review` / `## Todos Board` sections; do NOT include those headings yourself.",
+      "description": "Markdown content for the plan body's `## Plan` section: ordered bullet points or short paragraphs covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Plan` / `## Todos Board`; do NOT include those headings yourself. If you accidentally include legacy headings such as `## Draft` or `## Notes`, runtime will normalize them.",
       "type": "string"
     },
     "goal": {
       "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field and the seed for the derived `plan_id`.",
       "type": "string"
     },
-    "milestones": {
-      "description": "Optional ordered milestones (each maps to a contiguous span of todos). Empty array allowed; can be added later via update_plan.",
-      "items": {
-        "properties": {
-          "id": {
-            "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`).",
-            "type": "string"
-          },
-          "title": {
-            "description": "Human-readable milestone title (max 200 chars).",
-            "type": "string"
-          },
-          "todo_ids": {
-            "description": "Optional list of todo.id strings this milestone tracks (must reference todos declared above).",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "id",
-          "title"
-        ],
-        "type": "object"
-      },
-      "type": "array"
-    },
     "todos": {
-      "description": "Initial flat todo list (≥ 1 item) with milestone references. `status` defaults to `pending`.",
+      "description": "Initial flat todo list (≥ 1 item). `status` defaults to `pending`.",
       "items": {
         "properties": {
           "content": {
@@ -410,10 +382,6 @@ Parameters:
           },
           "id": {
             "description": "Stable kebab-case todo id, unique within the plan.",
-            "type": "string"
-          },
-          "milestone_id": {
-            "description": "References a milestone.id declared in `milestones`; omit if the todo is unscoped.",
             "type": "string"
           },
           "status": {
@@ -453,64 +421,121 @@ Parameters:
 - Permission scope: `Write`
 - Read only: `false`
 - Destructive: `false`
-- Search hint: `plan update todos milestones ops complete add remove`
+- Search hint: `plan update todos upsert set_status remove replace`
 
-Apply incremental ops (`add` / `update` / `complete` / `remove`) to the active plan's todos and milestones, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to advance todos during EXEC, or to refine the draft during PLAN. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. Each op carries an `id` (todo or milestone id) and only mutates frontmatter; plan body markdown is left untouched.
+Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to refine the todo list during PLAN or to advance todos during EXEC. `plan_id` and `path` are plan-specific targeting fields; `replace=true` swaps the entire todo list with the provided upsert results. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. The tool only mutates frontmatter.todos; plan body markdown is left untouched.
 
 Parameters:
 
 ```json
 {
-  "description": "Apply incremental ops to the active plan's todos / milestones. Callable in CHAT / PLAN / EXEC; requires an active plan.",
+  "description": "Apply incremental todo-only ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `plan_id` and `path` target the plan, `replace=true` replaces the whole todo list with the provided upsert results, and each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
   "properties": {
     "ops": {
       "description": "Ordered list of mutations applied atomically (one frontmatter write under advisory lock).",
       "items": {
-        "properties": {
-          "content": {
-            "description": "New content / title for add_* and update_* ops.",
-            "type": "string"
-          },
-          "id": {
-            "description": "Target todo / milestone id (kebab-case).",
-            "type": "string"
-          },
-          "kind": {
-            "description": "Operation kind. `complete_todo` is a shortcut for `update_todo { status: completed }`.",
-            "enum": [
-              "add_todo",
-              "update_todo",
-              "complete_todo",
-              "remove_todo",
-              "add_milestone",
-              "update_milestone",
-              "remove_milestone"
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
+            "properties": {
+              "content": {
+                "description": "Todo content. Required when creating a brand-new todo.",
+                "type": "string"
+              },
+              "id": {
+                "description": "Target todo id (kebab-case).",
+                "type": "string"
+              },
+              "kind": {
+                "const": "upsert",
+                "description": "Operation kind.",
+                "type": "string"
+              },
+              "status": {
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.mode == executing.",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed",
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
             ],
-            "type": "string"
+            "type": "object"
           },
-          "milestone_id": {
-            "description": "Optional milestone reference for add_todo / update_todo.",
-            "type": "string"
-          },
-          "status": {
-            "description": "New status for update_todo / add_todo. At most one todo may be `in_progress`.",
-            "enum": [
-              "pending",
-              "in_progress",
-              "completed",
-              "cancelled"
+          {
+            "additionalProperties": false,
+            "description": "`set_status` only changes status for an existing todo.",
+            "properties": {
+              "id": {
+                "description": "Target todo id (kebab-case).",
+                "type": "string"
+              },
+              "kind": {
+                "const": "set_status",
+                "description": "Operation kind.",
+                "type": "string"
+              },
+              "status": {
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.mode == executing.",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed",
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "status"
             ],
-            "type": "string"
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`remove` deletes a todo by id.",
+            "properties": {
+              "id": {
+                "description": "Target todo id (kebab-case).",
+                "type": "string"
+              },
+              "kind": {
+                "const": "remove",
+                "description": "Operation kind.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "kind",
-          "id"
-        ],
-        "type": "object"
+        ]
       },
       "minItems": 1,
       "type": "array"
+    },
+    "path": {
+      "description": "Alternative target path under ~/.tomcat/plans/. If both `plan_id` and `path` are provided, `plan_id` wins.",
+      "type": "string"
+    },
+    "plan_id": {
+      "description": "Target plan_id. Optional in EXEC mode (defaults to the active plan); REQUIRED in CHAT / PLAN / Pending / Completed.",
+      "type": "string"
+    },
+    "replace": {
+      "description": "If true, replace the entire todos[] list with the upsert results in `ops`. Default false.",
+      "type": "boolean"
     }
   },
   "required": [
@@ -527,57 +552,121 @@ Parameters:
 - Permission scope: `Write`
 - Read only: `false`
 - Destructive: `false`
-- Search hint: `todos add complete update remove snapshot in_progress`
+- Search hint: `todos upsert set_status remove scratchpad new_todos replace`
 
-Manage a lightweight ordered todo list (`add` / `update` / `complete` / `remove`) and return a full snapshot of all items after each call. In CHAT mode the list is persisted under `~/.tomcat/agents/<id>/todos/*.todo.md`; in EXEC mode the list IS the active plan's `todos[]` and is written to that plan file. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.
+Manage a session-local todo scratchpad and return a full snapshot of all items after each call. The list is persisted under `~/.tomcat/agents/<id>/sessions/<session_key>/todos/<todos_id>.todo.md` when persistence is configured, and it NEVER writes the active PlanFile. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.
 
 Parameters:
 
 ```json
 {
-  "description": "Maintain a single-source todo list. CHAT mode persists under `~/.tomcat/agents/<id>/todos/`; EXEC writes the active plan's frontmatter todos. Returns the full items snapshot after each call.",
+  "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results.",
   "properties": {
+    "new_todos": {
+      "description": "If true, create a new active todos file for this session before applying ops. Default false.",
+      "type": "boolean"
+    },
     "ops": {
-      "description": "Ordered list of mutations (same op kinds as update_plan, restricted to *_todo).",
+      "description": "Ordered list of mutations applied in order.",
       "items": {
-        "properties": {
-          "content": {
-            "description": "New content for add_todo / update_todo.",
-            "type": "string"
-          },
-          "id": {
-            "description": "Target todo id (kebab-case).",
-            "type": "string"
-          },
-          "kind": {
-            "description": "Operation kind.",
-            "enum": [
-              "add_todo",
-              "update_todo",
-              "complete_todo",
-              "remove_todo"
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
+            "properties": {
+              "content": {
+                "description": "Todo content. Required when creating a brand-new todo.",
+                "type": "string"
+              },
+              "id": {
+                "description": "Target todo id (kebab-case).",
+                "type": "string"
+              },
+              "kind": {
+                "const": "upsert",
+                "description": "Operation kind.",
+                "type": "string"
+              },
+              "status": {
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`.",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed",
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
             ],
-            "type": "string"
+            "type": "object"
           },
-          "status": {
-            "description": "New status. At most one todo may be `in_progress`.",
-            "enum": [
-              "pending",
-              "in_progress",
-              "completed",
-              "cancelled"
+          {
+            "additionalProperties": false,
+            "description": "`set_status` only changes status for an existing todo.",
+            "properties": {
+              "id": {
+                "description": "Target todo id (kebab-case).",
+                "type": "string"
+              },
+              "kind": {
+                "const": "set_status",
+                "description": "Operation kind.",
+                "type": "string"
+              },
+              "status": {
+                "description": "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`.",
+                "enum": [
+                  "pending",
+                  "in_progress",
+                  "completed",
+                  "cancelled"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "status"
             ],
-            "type": "string"
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "`remove` deletes a todo by id.",
+            "properties": {
+              "id": {
+                "description": "Target todo id (kebab-case).",
+                "type": "string"
+              },
+              "kind": {
+                "const": "remove",
+                "description": "Operation kind.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "kind",
-          "id"
-        ],
-        "type": "object"
+        ]
       },
       "minItems": 1,
       "type": "array"
+    },
+    "replace": {
+      "description": "If true, replace the entire todo list with the upsert results in `ops`. Default false.",
+      "type": "boolean"
+    },
+    "title": {
+      "description": "Optional title stored in the new .todo.md frontmatter when `new_todos=true`.",
+      "type": "string"
     }
   },
   "required": [

@@ -40,9 +40,7 @@ const LOCK_RETRY_MAX_MS: u64 = 80;
 pub enum PlanError {
     /// 抢 advisory file lock 超时；`waited_ms` 是实际等待毫秒数；
     /// `holder_pid` 为侧车 lock 文件内当前持有锁的进程 pid（用于调试）。
-    #[error(
-        "plan 文件锁繁忙（等待 {waited_ms} ms 仍未释放；可能由 pid={holder_pid:?} 持有）"
-    )]
+    #[error("plan 文件锁繁忙（等待 {waited_ms} ms 仍未释放；可能由 pid={holder_pid:?} 持有）")]
     LockBusy {
         waited_ms: u64,
         holder_pid: Option<i32>,
@@ -135,87 +133,6 @@ pub struct TodoItem {
     pub id: String,
     pub content: String,
     pub status: TodoStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub milestone_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Milestone {
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub todo_ids: Vec<String>,
-    /// E2：milestone 状态。
-    /// - `pending`：尚未开始（默认）；
-    /// - `in_progress`：含至少 1 个 in_progress / completed 的 todo；
-    /// - `completed`：所有 todo 都 completed。
-    /// `update_plan` 在每次写盘前**派生**该字段（基于 todo 状态聚合），不应由 LLM 直接传入。
-    #[serde(default = "default_milestone_status")]
-    pub status: MilestoneStatus,
-    /// 可选描述（markdown），由 LLM 通过 `create_plan` / `update_plan` 注入。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// Milestone 状态（E2）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MilestoneStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-fn default_milestone_status() -> MilestoneStatus {
-    MilestoneStatus::Pending
-}
-
-impl MilestoneStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::InProgress => "in_progress",
-            Self::Completed => "completed",
-        }
-    }
-}
-
-/// 由 todos 派生 milestone status（E2 交叉校验入口）。
-///
-/// - `todo_ids` 为空 → 一律 `pending`（与"未声明 todo 归属"语义一致）；
-/// - 至少 1 个非 completed/cancelled → `in_progress`；
-/// - 所有 todo completed/cancelled → `completed`；
-/// - 否则 → `pending`。
-pub fn derive_milestone_status(milestone_todo_ids: &[String], todos: &[TodoItem]) -> MilestoneStatus {
-    if milestone_todo_ids.is_empty() {
-        return MilestoneStatus::Pending;
-    }
-    let mut all_done = true;
-    let mut any_started = false;
-    for tid in milestone_todo_ids {
-        let Some(t) = todos.iter().find(|x| &x.id == tid) else {
-            // 未声明的 todo_id → 视为"没开始"，保 pending
-            all_done = false;
-            continue;
-        };
-        match t.status {
-            TodoStatus::Completed | TodoStatus::Cancelled => {}
-            TodoStatus::InProgress => {
-                any_started = true;
-                all_done = false;
-            }
-            TodoStatus::Pending => {
-                all_done = false;
-            }
-        }
-    }
-    if all_done {
-        MilestoneStatus::Completed
-    } else if any_started {
-        MilestoneStatus::InProgress
-    } else {
-        MilestoneStatus::Pending
-    }
 }
 
 /// PlanFile 顶部 YAML frontmatter；**v1 schema**。
@@ -233,7 +150,6 @@ pub struct PlanFileFrontmatter {
     pub session_id: Option<String>,
     pub created_at: String,
     pub schema_version: i32,
-    pub milestones: Vec<Milestone>,
     pub todos: Vec<TodoItem>,
     /// 未来扩展字段；read 时收集，write 时原样写回（保前向兼容）。
     #[serde(flatten)]
@@ -252,10 +168,8 @@ pub struct PlanFile {
 
 /// 返回 `~/.tomcat/plans` 目录路径（不创建）。
 pub fn plans_dir() -> Result<PathBuf, std::io::Error> {
-    let home = dirs::home_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "无法定位 HOME 目录")
-    })?;
-    Ok(home.join(".tomcat").join("plans"))
+    crate::infra::config::resolve_plans_dir()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
 }
 
 /// `~/.tomcat/plans/<plan_id>.plan.md`；落盘前已 `assert_plan_id_safe_for_disk`。
@@ -284,8 +198,8 @@ fn lock_path_for(plan_path: &Path) -> PathBuf {
 /// 把 PlanFile 序列化为带 `---` 分隔符的文本（适合写入磁盘）。
 pub fn serialize_plan_file(plan: &PlanFile) -> Result<String, PlanError> {
     validate_frontmatter_invariants(&plan.frontmatter)?;
-    let yaml =
-        serde_yaml::to_string(&plan.frontmatter).map_err(|e| PlanError::YamlParse(e.to_string()))?;
+    let yaml = serde_yaml::to_string(&plan.frontmatter)
+        .map_err(|e| PlanError::YamlParse(e.to_string()))?;
     // serde_yaml::to_string 默认以 `---\n` 起头；统一裁掉前导分隔符再手动包裹。
     let yaml_trimmed = yaml.trim_start_matches("---\n").trim_end().to_string();
     let mut out = String::with_capacity(yaml_trimmed.len() + plan.body.len() + 16);
@@ -303,7 +217,9 @@ pub fn serialize_plan_file(plan: &PlanFile) -> Result<String, PlanError> {
 
 /// 从磁盘文本反序列化 PlanFile（分离 frontmatter / body）。
 pub fn parse_plan_file(text: &str) -> Result<PlanFile, PlanError> {
-    let stripped = text.strip_prefix("---\n").ok_or(PlanError::FrontmatterDelimMissing)?;
+    let stripped = text
+        .strip_prefix("---\n")
+        .ok_or(PlanError::FrontmatterDelimMissing)?;
     let end = stripped
         .find("\n---")
         .ok_or(PlanError::FrontmatterDelimMissing)?;
@@ -391,11 +307,7 @@ pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
 /// 写盘：抢锁 → 原子 rename → 释放锁。
 ///
 /// `lock_timeout_ms` 通常来自 `[plan] lock_timeout_ms`；典型值 2000。
-pub fn write_plan(
-    path: &Path,
-    plan: &PlanFile,
-    lock_timeout_ms: u64,
-) -> Result<(), PlanError> {
+pub fn write_plan(path: &Path, plan: &PlanFile, lock_timeout_ms: u64) -> Result<(), PlanError> {
     let serialized = serialize_plan_file(plan)?;
     let parent = path.parent().ok_or_else(|| {
         PlanError::Io(std::io::Error::new(
@@ -417,7 +329,8 @@ pub fn write_plan(
             .truncate(true)
             .open(&tmp)
             .map_err(PlanError::Io)?;
-        file.write_all(serialized.as_bytes()).map_err(PlanError::Io)?;
+        file.write_all(serialized.as_bytes())
+            .map_err(PlanError::Io)?;
         file.sync_all().map_err(PlanError::Io)?;
         drop(file);
         std::fs::rename(&tmp, path).map_err(|e| {
@@ -490,66 +403,3 @@ fn next_tmp_seq() -> u64 {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod milestone_status_tests {
-    use super::*;
-
-    fn td(id: &str, status: TodoStatus) -> TodoItem {
-        TodoItem {
-            id: id.into(),
-            content: id.into(),
-            status,
-            milestone_id: None,
-        }
-    }
-
-    #[test]
-    fn derive_pending_when_no_todo_ids() {
-        let r = derive_milestone_status(&[], &[td("t1", TodoStatus::Completed)]);
-        assert!(matches!(r, MilestoneStatus::Pending));
-    }
-
-    #[test]
-    fn derive_in_progress_when_any_in_progress() {
-        let r = derive_milestone_status(
-            &["t1".into(), "t2".into()],
-            &[
-                td("t1", TodoStatus::InProgress),
-                td("t2", TodoStatus::Pending),
-            ],
-        );
-        assert!(matches!(r, MilestoneStatus::InProgress));
-    }
-
-    #[test]
-    fn derive_pending_when_all_pending() {
-        let r = derive_milestone_status(
-            &["t1".into(), "t2".into()],
-            &[td("t1", TodoStatus::Pending), td("t2", TodoStatus::Pending)],
-        );
-        assert!(matches!(r, MilestoneStatus::Pending));
-    }
-
-    #[test]
-    fn derive_completed_when_all_done_or_cancelled() {
-        let r = derive_milestone_status(
-            &["t1".into(), "t2".into()],
-            &[
-                td("t1", TodoStatus::Completed),
-                td("t2", TodoStatus::Cancelled),
-            ],
-        );
-        assert!(matches!(r, MilestoneStatus::Completed));
-    }
-
-    #[test]
-    fn derive_pending_when_referenced_todo_missing() {
-        // 引用未声明 → 视为未开始
-        let r = derive_milestone_status(
-            &["missing".into()],
-            &[td("t1", TodoStatus::Completed)],
-        );
-        assert!(matches!(r, MilestoneStatus::Pending));
-    }
-}

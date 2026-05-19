@@ -11,11 +11,11 @@
 mod common;
 
 use futures_util::StreamExt;
+use std::time::Duration;
 use tomcat::{
     resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, LlmConfig, StreamEvent,
     IMAGE_MAX_BYTES,
 };
-use std::time::Duration;
 
 /// Sample puppy PNG (≈ 46 KB), base64 字面量；fixture 详见
 /// [`tests/fixtures/llm_multimodal/README.md`](tests/fixtures/llm_multimodal/README.md)。
@@ -58,7 +58,7 @@ async fn test_openai_responses_chat_real_request_returns_ok(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span = tracing::info_span!("test_openai_responses_chat_real_request_returns_ok").entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = responses_config();
     let provider = resolve_llm(&config)
@@ -94,7 +94,7 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
     common::setup_logging();
     let _span = tracing::info_span!("test_openai_responses_chat_stream_real_request_yields_events")
         .entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = responses_config();
     let provider = resolve_llm(&config)
@@ -135,9 +135,9 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
 async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _span = tracing::info_span!("test_openai_responses_chat_stream_reasoning_emits_thinking")
-        .entered();
-    let _ = dotenvy::dotenv().ok();
+    let _span =
+        tracing::info_span!("test_openai_responses_chat_stream_reasoning_emits_thinking").entered();
+    common::load_openai_test_env();
 
     let config = responses_config();
     let provider = resolve_llm(&config)
@@ -223,7 +223,7 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
     common::setup_logging();
     let _span =
         tracing::info_span!("test_openai_responses_latest_user_language_behavior_opt_in").entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = responses_config();
     let provider = resolve_llm(&config)
@@ -285,7 +285,7 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
 async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span = tracing::info_span!("responses_inline_image_describe_roundtrip").entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = responses_config();
     let provider = resolve_llm(&config)
@@ -370,7 +370,7 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
     common::setup_logging();
     let _span =
         tracing::info_span!("responses_inline_pdf_input_file_summarize_roundtrip").entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = responses_config();
     let provider = resolve_llm(&config)

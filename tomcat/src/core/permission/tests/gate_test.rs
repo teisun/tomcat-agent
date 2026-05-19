@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use serial_test::serial;
+
 use crate::core::permission::gate::{DefaultPermissionGate, GateConfig};
 use crate::core::permission::path_rule::PathRule;
 use crate::core::permission::session_grants::SessionGrants;
@@ -174,6 +176,58 @@ fn agent_trail_dir_read_only_allow() {
         dec,
         PermissionDecision::Allow { grant, scope: PermissionScope::Read }
             if grant.grant_type == GrantType::AgentTrailDir
+                && grant.trigger == GrantTrigger::BuiltinDefault
+    ));
+}
+
+#[test]
+#[serial(env_lock)]
+fn builtin_plan_dir_grants_read_and_write() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tmpdir("home_plan_readonly");
+    let plans = home.join(".tomcat").join("plans");
+    let _ = std::fs::create_dir_all(&plans);
+    let target = plans.join("demo.plan.md");
+    struct HomeGuard(Option<String>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _guard = HomeGuard(std::env::var("HOME").ok());
+    std::env::set_var("HOME", &home);
+
+    let gate = gate_with(tmpdir("ws_plan_readonly"), vec![], vec![]);
+    let read_ok = gate
+        .check(PrimitiveOperation::Read, target.to_str().unwrap())
+        .unwrap();
+    assert!(matches!(
+        read_ok,
+        PermissionDecision::Allow { grant, scope: PermissionScope::Read }
+            if grant.grant_type == GrantType::AgentPlansDir
+                && grant.trigger == GrantTrigger::BuiltinDefault
+    ));
+
+    let write_ok = gate
+        .check(PrimitiveOperation::Write, target.to_str().unwrap())
+        .unwrap();
+    assert!(matches!(
+        write_ok,
+        PermissionDecision::Allow { grant, scope: PermissionScope::Write }
+            if grant.grant_type == GrantType::AgentPlansDir
+                && grant.trigger == GrantTrigger::BuiltinDefault
+    ));
+
+    let edit_ok = gate
+        .check(PrimitiveOperation::Edit, target.to_str().unwrap())
+        .unwrap();
+    assert!(matches!(
+        edit_ok,
+        PermissionDecision::Allow { grant, scope: PermissionScope::Write }
+            if grant.grant_type == GrantType::AgentPlansDir
                 && grant.trigger == GrantTrigger::BuiltinDefault
     ));
 }
@@ -355,7 +409,9 @@ fn bash_approval_required_layer2() {
 
 /// 写 `~/.tomcat/agents/main/agent/auth-profiles.json` → builtin path_rule deny。
 #[test]
+#[serial(env_lock)]
 fn pr9_credentials_glob_denies_write() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_cred");
     let gate = gate_with(ws, vec![], vec![]);
     let home = dirs::home_dir().expect("home dir");
@@ -373,7 +429,9 @@ fn pr9_credentials_glob_denies_write() {
 /// 读 `~/.tomcat/agents/main/agent/auth-profiles.json` → builtin path_rule deny
 /// （凭据 deny 优先于 agent_trail_dir read_only）。
 #[test]
+#[serial(env_lock)]
 fn pr9_credentials_glob_denies_read_too() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_cred_read");
     let home = dirs::home_dir().expect("home dir");
     let agent_root = home.join(".tomcat/agents/main/agent");
@@ -391,7 +449,9 @@ fn pr9_credentials_glob_denies_read_too() {
 /// 写 `~/.tomcat/agents/main/sessions/anything.jsonl` → builtin readonly path_rule
 /// 阻止 write（命中 readonly + write/edit/bash → Deny）。
 #[test]
+#[serial(env_lock)]
 fn pr9_sessions_glob_blocks_write() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_sess");
     let gate = gate_with(ws, vec![], vec![]);
     let home = dirs::home_dir().expect("home dir");
@@ -409,7 +469,9 @@ fn pr9_sessions_glob_blocks_write() {
 /// 读 `~/.tomcat/agents/main/sessions/foo.jsonl` → builtin readonly 通过
 /// （grant_type=`PathRuleReadOnly`）。
 #[test]
+#[serial(env_lock)]
 fn pr9_sessions_glob_allows_read_with_path_rule_source() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_sess_read");
     let gate = gate_with(ws, vec![], vec![]);
     let home = dirs::home_dir().expect("home dir");

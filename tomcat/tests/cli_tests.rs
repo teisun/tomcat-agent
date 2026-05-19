@@ -752,7 +752,7 @@ fn test_chat_without_config_exits_with_error() {
 #[test]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span =
         info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
 
@@ -787,7 +787,9 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     info!("Assert: exit 0 and stdout contains 对话模式 banner or AI output");
     assert.success();
     assert!(
-        out_str.contains("对话模式") || out_str.contains("模型:") || out_str.contains("tomcat.main>"),
+        out_str.contains("对话模式")
+            || out_str.contains("模型:")
+            || out_str.contains("tomcat.main>"),
         "chat 应输出对话模式 banner 或模型信息或 tomcat.main> 提示，实际: {}",
         out_str.chars().take(500).collect::<String>()
     );
@@ -1064,7 +1066,7 @@ fn test_audit_export_creates_file() {
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1412,7 +1414,7 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
 #[test]
 fn test_user_asks_pi_a_question() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_a_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1459,7 +1461,7 @@ fn test_user_asks_pi_a_question() {
 #[test]
 fn test_user_asks_pi_technical_question() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_technical_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1509,7 +1511,7 @@ fn test_user_asks_pi_technical_question() {
 #[test]
 fn test_user_asks_pi_to_run_bash_command() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_to_run_bash_command").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1565,7 +1567,7 @@ fn test_user_asks_pi_to_run_bash_command() {
 #[test]
 fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_sees_read_failure_reason_in_tool_line").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1603,7 +1605,10 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    info!("Assert: stderr 含 [tool] read + 真实错误；stderr: {}", trunc(&stderr, 1200));
+    info!(
+        "Assert: stderr 含 [tool] read + 真实错误；stderr: {}",
+        trunc(&stderr, 1200)
+    );
     assert.success();
     assert!(
         stderr.contains("[tool] read"),
@@ -1633,7 +1638,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
 #[test]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1963,7 +1968,7 @@ fn test_user_loads_nonexistent_plugin_path_shows_error() {
 #[test]
 fn test_user_chats_with_llm_gets_streaming_response() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chats_with_llm_gets_streaming_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2013,7 +2018,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 #[test]
 fn test_user_receives_nonempty_llm_response() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_receives_nonempty_llm_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2490,7 +2495,7 @@ fn test_user_init_then_doctor_roundtrip() {
 #[test]
 fn test_user_chat_resumes_last_session() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chat_resumes_last_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2550,7 +2555,7 @@ fn test_user_chat_resumes_last_session() {
 #[test]
 fn test_user_chat_non_interactive_with_prompt_flag() {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chat_non_interactive_with_prompt_flag").entered();
 
     let dir = tempfile::tempdir().unwrap();

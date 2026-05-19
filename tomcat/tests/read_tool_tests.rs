@@ -20,12 +20,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine;
+use tempfile::TempDir;
 use tomcat::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use tomcat::{
     AllowAllConfirmation, ChatMessageContentPart, DefaultPrimitiveExecutor, PrimitiveConfig,
     PrimitiveExecutor, ReadResult, TracingAuditRecorder,
 };
-use tempfile::TempDir;
 use tracing::{info, info_span, Instrument};
 
 const FIXTURE_PNG: &str = "tests/fixtures/llm_multimodal/sample_image.png";

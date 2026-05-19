@@ -64,7 +64,6 @@ pub(crate) fn checkpoint_kind_label(kind: &CheckpointKind) -> &'static str {
         CheckpointKind::TurnEnd => "turn_end",
         CheckpointKind::Interrupt => "interrupt",
         CheckpointKind::Manual { .. } => "manual",
-        CheckpointKind::Milestone { .. } => "milestone",
     }
 }
 
@@ -82,7 +81,6 @@ fn print_checkpoint_meta(meta: &CheckpointMeta) {
     }
     match &meta.kind {
         CheckpointKind::Manual { label } => println!("label: {label}"),
-        CheckpointKind::Milestone { milestone_id } => println!("milestone: {milestone_id}"),
         _ => {}
     }
 }

@@ -15,25 +15,16 @@ fn sample_frontmatter() -> PlanFileFrontmatter {
         session_id: None,
         created_at: "2026-05-19T10:00:00+08:00".to_string(),
         schema_version: PLAN_FILE_SCHEMA_VERSION,
-        milestones: vec![Milestone {
-            id: "m1".into(),
-            title: "milestone 1".into(),
-            todo_ids: vec!["t1".into(), "t2".into()],
-            status: super::MilestoneStatus::Pending,
-            description: None,
-        }],
         todos: vec![
             TodoItem {
                 id: "t1".into(),
                 content: "step 1".into(),
                 status: TodoStatus::Pending,
-                milestone_id: Some("m1".into()),
             },
             TodoItem {
                 id: "t2".into(),
                 content: "step 2".into(),
                 status: TodoStatus::InProgress,
-                milestone_id: Some("m1".into()),
             },
         ],
         unknown: serde_yaml::Mapping::new(),
@@ -67,7 +58,10 @@ fn plan_file_round_trip_preserves_unknown_keys() {
         serde_yaml::Value::String("forward-compat".into()),
     );
     fm.unknown = extra;
-    let plan = PlanFile { frontmatter: fm, body: String::new() };
+    let plan = PlanFile {
+        frontmatter: fm,
+        body: String::new(),
+    };
     let text = serialize_plan_file(&plan).unwrap();
     assert!(
         text.contains("future_field: forward-compat"),
@@ -75,28 +69,35 @@ fn plan_file_round_trip_preserves_unknown_keys() {
     );
     let parsed = parse_plan_file(&text).unwrap();
     assert_eq!(
-        parsed.frontmatter.unknown.get(&serde_yaml::Value::String("future_field".into())),
+        parsed
+            .frontmatter
+            .unknown
+            .get(&serde_yaml::Value::String("future_field".into())),
         Some(&serde_yaml::Value::String("forward-compat".into()))
     );
 }
 
 #[test]
 fn plan_file_missing_required_field_returns_error() {
-    let yaml_missing_plan_id = "---\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 1\nmilestones: []\ntodos: []\n---\n";
-    let err = parse_plan_file(yaml_missing_plan_id)
-        .expect_err("缺 plan_id 应失败");
-    matches!(err, PlanError::YamlParse(_) | PlanError::MissingField { .. });
+    let yaml_missing_plan_id =
+        "---\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
+    let err = parse_plan_file(yaml_missing_plan_id).expect_err("缺 plan_id 应失败");
+    matches!(
+        err,
+        PlanError::YamlParse(_) | PlanError::MissingField { .. }
+    );
 
     // 空 plan_id 走 runtime 必填校验
-    let yaml_empty_plan_id = "---\nplan_id: \"\"\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 1\nmilestones: []\ntodos: []\n---\n";
-    let err = parse_plan_file(yaml_empty_plan_id)
-        .expect_err("空 plan_id 应失败");
+    let yaml_empty_plan_id =
+        "---\nplan_id: \"\"\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
+    let err = parse_plan_file(yaml_empty_plan_id).expect_err("空 plan_id 应失败");
     match &err {
         PlanError::MissingField { field } => assert_eq!(field, "plan_id"),
         other => panic!("expected MissingField(plan_id), got {other:?}"),
     }
 
-    let yaml_empty_goal = "---\nplan_id: x\ngoal: \"\"\nmode: planning\ncreated_at: t\nschema_version: 1\nmilestones: []\ntodos: []\n---\n";
+    let yaml_empty_goal =
+        "---\nplan_id: x\ngoal: \"\"\nmode: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
     let err = parse_plan_file(yaml_empty_goal).expect_err("空 goal 应失败");
     match &err {
         PlanError::MissingField { field } => assert_eq!(field, "goal"),
@@ -106,10 +107,16 @@ fn plan_file_missing_required_field_returns_error() {
 
 #[test]
 fn plan_file_schema_version_v1_locked() {
-    let yaml = "---\nplan_id: x\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 2\nmilestones: []\ntodos: []\n---\n";
+    let yaml = "---\nplan_id: x\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 2\ntodos: []\n---\n";
     let err = parse_plan_file(yaml).expect_err("schema_version=2 应被拒");
     assert!(
-        matches!(err, PlanError::SchemaVersion { actual: 2, expected: 1 }),
+        matches!(
+            err,
+            PlanError::SchemaVersion {
+                actual: 2,
+                expected: 1
+            }
+        ),
         "expected SchemaVersion(2,1), got {err:?}"
     );
 }
@@ -122,9 +129,11 @@ fn plan_file_rejects_multiple_in_progress_on_write() {
         id: "t3".into(),
         content: "另一个 in_progress".into(),
         status: TodoStatus::InProgress,
-        milestone_id: Some("m1".into()),
     });
-    let plan = PlanFile { frontmatter: fm, body: String::new() };
+    let plan = PlanFile {
+        frontmatter: fm,
+        body: String::new(),
+    };
     let err = serialize_plan_file(&plan).expect_err("应拒多个 in_progress");
     assert!(
         matches!(err, PlanError::MultipleInProgress { count: 2 }),
@@ -139,9 +148,11 @@ fn plan_file_rejects_duplicate_todo_ids_on_write() {
         id: "t1".into(),
         content: "dup".into(),
         status: TodoStatus::Pending,
-        milestone_id: None,
     });
-    let plan = PlanFile { frontmatter: fm, body: String::new() };
+    let plan = PlanFile {
+        frontmatter: fm,
+        body: String::new(),
+    };
     let err = serialize_plan_file(&plan).expect_err("应拒重复 id");
     match &err {
         PlanError::DuplicateTodoId { id } => assert_eq!(id, "t1"),
@@ -159,16 +170,25 @@ fn plan_file_frontmatter_delim_missing_returns_error() {
 
     // 缺结尾 ---
     let err = parse_plan_file("---\nplan_id: x\n").expect_err("缺结尾 --- 应失败");
-    assert!(matches!(err, PlanError::FrontmatterDelimMissing), "got {err:?}");
+    assert!(
+        matches!(err, PlanError::FrontmatterDelimMissing),
+        "got {err:?}"
+    );
 }
 
 #[test]
 fn plan_path_for_id_rejects_unsafe() {
     let err = plan_path_for_id("../etc/passwd").expect_err("应拒穿越");
-    assert!(matches!(err, PlanError::InvalidPlanId { .. }), "got {err:?}");
+    assert!(
+        matches!(err, PlanError::InvalidPlanId { .. }),
+        "got {err:?}"
+    );
 
     let err = plan_path_for_id("a/b").expect_err("应拒斜杠");
-    assert!(matches!(err, PlanError::InvalidPlanId { .. }), "got {err:?}");
+    assert!(
+        matches!(err, PlanError::InvalidPlanId { .. }),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -176,7 +196,9 @@ fn plan_file_path_fixed_under_dot_tomcat() {
     let path = plan_path_for_id("safe_id_1").unwrap();
     let canonical = path.to_string_lossy();
     assert!(
-        canonical.contains(".tomcat") && canonical.contains("plans") && canonical.ends_with("safe_id_1.plan.md"),
+        canonical.contains(".tomcat")
+            && canonical.contains("plans")
+            && canonical.ends_with("safe_id_1.plan.md"),
         "plan 文件路径必须位于 ~/.tomcat/plans/，实际：{canonical}"
     );
 }
@@ -244,11 +266,7 @@ fn write_plan_atomic_rename_recovers_when_tmp_leftover_exists() {
     // （`.<name>.tmp.<seq>` 命名按 seq 隔离，不会撞）。
     let dir = temp_plans_dir();
     let path = dir.join("demo_plan_1.plan.md");
-    std::fs::write(
-        dir.join(".demo_plan_1.plan.md.tmp.999"),
-        "stale junk",
-    )
-    .unwrap();
+    std::fs::write(dir.join(".demo_plan_1.plan.md.tmp.999"), "stale junk").unwrap();
     let plan = PlanFile {
         frontmatter: sample_frontmatter(),
         body: "## fresh\n".into(),
@@ -302,7 +320,11 @@ fn plan_file_lock_timeout_returns_lock_busy() {
         "got {err:?}"
     );
     // 验证 timeout 大致兑现（不大于 500ms，远小于持锁的 600ms）
-    assert!(elapsed < Duration::from_millis(500), "elapsed={:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "elapsed={:?}",
+        elapsed
+    );
     handle.join().unwrap();
 }
 
@@ -318,7 +340,10 @@ fn plan_file_lock_is_exclusive_serialized_via_lock() {
     let plan2 = {
         let mut fm = sample_frontmatter();
         fm.todos[0].status = TodoStatus::Completed;
-        PlanFile { frontmatter: fm, body: "## B\n".into() }
+        PlanFile {
+            frontmatter: fm,
+            body: "## B\n".into(),
+        }
     };
 
     let path1 = path.clone();

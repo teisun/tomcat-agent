@@ -4,10 +4,10 @@
 
 mod common;
 
+use std::sync::Arc;
 use tomcat::{
     parse_manifest, AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
 };
-use std::sync::Arc;
 
 /// [非法 JSON] parse_manifest 遇到非法 JSON 返回 Err 不 panic
 ///

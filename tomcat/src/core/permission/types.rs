@@ -35,6 +35,8 @@ pub enum PermissionScope {
 pub enum GrantType {
     /// `agent_definition_dir`（`workspace-<agentId>/`）—— 默认 writable 根。
     AgentDefinitionDir,
+    /// `~/.tomcat/plans/`—— 默认计划目录；read/write 仍受上层 plan-aware 守卫约束。
+    AgentPlansDir,
     /// `tomcat.config.toml` 中 `[workspace] workspace_roots`（用户工作区根，持久）。
     AgentWorkspaceRoot,
     /// 仅本会话生效的授权范围。

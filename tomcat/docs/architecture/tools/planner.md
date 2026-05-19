@@ -292,15 +292,15 @@ You are now in PLAN mode. Behavior contract (12 rules; D-plan):
 
 5.  Frontmatter is off-limits to raw write/edit. PlanFile YAML is managed by
     four writers: `create_plan` (initial whole-plan draft), `update_plan`
-    (incremental todos[]/milestones[] edits), runtime (mode / session binding
-    on `/plan build`), and auto-derivation (mode=completed on all-completed,
+    (incremental `todos[]` edits), runtime (mode / session binding on
+    `/plan build`), and auto-derivation (mode=completed on all-completed,
     mode=pending on cancel_token). Raw-editing YAML keys returns a tool error.
 
 6.  Draft via `create_plan` for the FIRST draft or a WHOLESALE rewrite:
-    provide `goal`, `draft` (free-form markdown body), `todos[]`, and optional
-    `milestones[]`. The runtime fills the rest of the frontmatter. Do NOT
-    include frontmatter fields in your `create_plan` arguments. After this
-    call, the runtime internally dispatches a reviewer (advisory only).
+    provide `goal`, `draft` (free-form markdown body), and `todos[]`. The
+    runtime fills the rest of the frontmatter. Do NOT include frontmatter
+    fields in your `create_plan` arguments. After this call, the runtime
+    internally dispatches a reviewer (advisory only).
 
 7.  Reviewer is advisory, not a gate: every `create_plan` call returns a
     `review_summary`. The summary lands in `transcript.plan.review` and the
@@ -308,16 +308,16 @@ You are now in PLAN mode. Behavior contract (12 rules; D-plan):
     decides whether to issue `/plan build`.
 
 8.  Revise INCREMENTALLY via `update_plan`: to mark a todo done, add a single
-    todo under an existing milestone, rename a milestone, or re-group
-    `todo_ids`, call `update_plan` — do NOT rewrite the entire plan via
-    `create_plan` for small edits. `update_plan` is visible in all modes.
+    todo, or rewrite the current todo list in place, call `update_plan` — do
+    NOT rewrite the entire plan via `create_plan` for small edits.
+    `update_plan` is visible in all modes.
 
 9.  When to use `todos` vs `update_plan`:
     - `todos` writes to your session-local `.todo.md` scratchpad. Use it to
       track your own research / inspection steps (3+ steps) that are NOT part
       of the plan; it never touches the PlanFile.
-    - `update_plan` writes to the PlanFile's frontmatter `todos[]` /
-      `milestones[]`. Use it to revise the actual plan.
+    - `update_plan` writes to the PlanFile's frontmatter `todos[]`. Use it to
+      revise the actual plan.
     In planning, default todo status is `pending` — do NOT mark steps
     `in_progress` until execution actually starts.
 
@@ -353,13 +353,16 @@ You are in EXEC mode. Your mission: drive the active plan to completion using AN
 
 2.  Update via update_plan only: claim the next todo with `set_status(in_progress)` BEFORE running side-effecting tools; mark `completed` immediately when done; use `cancelled` for steps deliberately skipped. Never more than one `in_progress` in the same PlanFile. In EXEC mode `plan_id` defaults to the active plan, so you can omit it.
 
-3.  Tool result is the source of truth: every successful `update_plan` call returns a full items + milestones snapshot. You do NOT need to re-read the PlanFile to know the current state — trust the snapshot.
+3.  Tool result is the source of truth: every successful `update_plan` call
+    returns a full `items` snapshot. You do NOT need to re-read the PlanFile
+    to know the current state — trust the snapshot.
 
 4.  Plan file is off-limits to raw write/edit/delete (frontmatter AND body). The runtime rejects any direct write to `~/.tomcat/plans/*.plan.md` in EXEC. Use `update_plan` for progress. If the plan needs structural rewrite, ask the user to exit and re-plan; do NOT try to leave EXEC via tool calls.
 
-5.  Milestone checkpoints are automatic when all todos under a milestone become `completed` (config `[plan].auto_checkpoint_on_milestone`).
-
-6.  Completion is automatic: when ALL todos in the PlanFile flip to `completed`, the runtime promotes `mode = completed`, swaps the reminder/prefix/catalog back to CHAT, and you do NOT need to "close" the plan.
+5.  Completion is automatic: when ALL todos in the PlanFile flip to
+    `completed`, the runtime promotes `mode = completed`, swaps the
+    reminder/prefix/catalog back to CHAT, and you do NOT need to "close" the
+    plan.
 </system_reminder>
 "#;
 ```
@@ -702,7 +705,7 @@ EXEC 中：
 | `Planning` | `/plan build <plan_id\|path>`（指向当前 session 创建的 plan） | `Executing` | runtime 5 件事；可选 `record(Manual{plan_build:plan_id})` | 现在才算正式开干。 |
 | `Chat` | `/plan build <plan_id\|path>`（续跑 pending） | `Executing` | 同上 + warning「旧 session 已覆盖」 | 续跑被打断的 plan。 |
 | `Executing` | `todos` 更新但未完结 | `Executing` | 更新 frontmatter `todos[]` + panel；返回 full items snapshot | 干活中。 |
-| `Executing` | 所有 todo `= completed` | `Completed` | 自动写 frontmatter `mode=completed`；reminder/catalog/prefix 复位 CHAT；写 `plan.complete` 事件；可选 milestone checkpoint | 做完了。 |
+| `Executing` | 所有 todo `= completed` | `Completed` | 自动写 frontmatter `mode=completed`；reminder/catalog/prefix 复位 CHAT；写 `plan.complete` 事件 | 做完了。 |
 | `Executing` | cancel_token / SIGTERM / parent abort | `Pending` | 写 frontmatter `mode=pending`；reminder/catalog/prefix 复位 CHAT；写 `plan.pending` 事件 | 被打断转 pending。 |
 | `Completed` | 用户开新 plan（`/plan "<obj>"`） | `Planning` | 与 `Chat → Planning` 同 | 开下一盘。 |
 | `Pending` | `/plan build <plan_id>` | `Executing` | 续跑流程 | 续跑。 |

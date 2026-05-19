@@ -4,14 +4,14 @@
 
 mod common;
 
+use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use tomcat::{
     parse_manifest, transpile_pi_plugin_for_quickjs, wire, DefaultEventBus, HostApiDispatcher,
     HostResponse, PluginInstance, PluginManager, PluginStatus, RuntimeManager,
     SharedRuntimeManager, WasmEngine, WasmEngineConfig,
 };
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
 fn require_quickjs_wasm() -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/wasm/wasmedge_quickjs.wasm");

@@ -32,6 +32,7 @@ pub(super) fn permission_scope_str(scope: PermissionScope) -> String {
 pub(super) fn grant_type_str(s: GrantType) -> String {
     match s {
         GrantType::AgentDefinitionDir => "agent_definition_dir",
+        GrantType::AgentPlansDir => "agent_plans_dir",
         GrantType::AgentWorkspaceRoot => "agent_workspace_root",
         GrantType::SessionScope => "session_scope",
         GrantType::PathRuleReadOnly => "path_rule_read_only",

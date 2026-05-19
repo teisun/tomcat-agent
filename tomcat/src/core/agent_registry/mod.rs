@@ -16,10 +16,10 @@
 //! 注：本模块**不**与 [`AgentLoop`] 直接耦合（避免循环依赖）。spawn 函数以闭包形式注入，
 //! 集成 reviewer 时由调用方包装真实的 `AgentLoop::new + run()`；测试时可用 mock 闭包。
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
 
 use crate::core::agent_loop::SubagentType;
 use crate::infra::event_bus::EventContext;
@@ -109,10 +109,7 @@ impl std::fmt::Debug for AgentHandle {
             .field("subagent_type", &self.subagent_type)
             .field("spawn_depth", &self.spawn_depth)
             .field("parent_session_id", &self.parent_session_id)
-            .field(
-                "aborted",
-                &self.abort_signal.load(Ordering::Relaxed),
-            )
+            .field("aborted", &self.abort_signal.load(Ordering::Relaxed))
             .field("children", &*self.children.lock())
             .finish()
     }
@@ -296,7 +293,8 @@ impl AgentRegistry {
         F: FnOnce(SubagentSpawnContext) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = SubagentOutcome> + Send + 'static,
     {
-        let (child_handle, _parent_arc) = self.preflight_and_register(parent_session_id, subagent_type)?;
+        let (child_handle, _parent_arc) =
+            self.preflight_and_register(parent_session_id, subagent_type)?;
         let child_session_id = child_handle.session_id.clone();
         let abort_signal = Arc::clone(&child_handle.abort_signal);
         let spawn_depth = child_handle.spawn_depth;
@@ -414,7 +412,9 @@ impl AgentRegistry {
             abort_signal: Arc::clone(&parent.abort_signal),
             children: Mutex::new(Vec::new()),
         });
-        self.handles.write().insert(child_session_id.clone(), Arc::clone(&child));
+        self.handles
+            .write()
+            .insert(child_session_id.clone(), Arc::clone(&child));
         parent.children.lock().push(child_session_id.clone());
         self.active.fetch_add(1, Ordering::Relaxed);
 
@@ -435,8 +435,10 @@ impl AgentRegistry {
         let _ = bus.emit_sync(&event_name, ctx);
     }
 
-    /// 测试用：构造一个顶层 root handle（spawn_depth=0、subagent_type=User）并注册。
-    pub fn register_root_for_test(
+    /// 构造一个顶层 root handle（spawn_depth=0、subagent_type=User）并注册。
+    /// 生产路径由 `ChatContext::from_config` 在装配阶段调用；
+    /// `RegistrationGuard` 与 `ChatContext` 同生命周期，drop 时自动注销。
+    pub fn register_root(
         self: &Arc<Self>,
         session_id: impl Into<String>,
     ) -> Result<RegistrationGuard, RegisterError> {
@@ -450,6 +452,14 @@ impl AgentRegistry {
             children: Mutex::new(Vec::new()),
         });
         self.register(handle)
+    }
+
+    /// 测试用别名（保持向后兼容；与 [`Self::register_root`] 行为一致）。
+    pub fn register_root_for_test(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+    ) -> Result<RegistrationGuard, RegisterError> {
+        self.register_root(session_id)
     }
 }
 
@@ -474,4 +484,3 @@ impl Drop for RegistrationGuard {
 }
 
 // ─── 等待小工具（测试可见） ─────────────────────────────────────────────────
-

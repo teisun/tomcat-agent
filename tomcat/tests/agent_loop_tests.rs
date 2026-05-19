@@ -5,15 +5,15 @@
 mod common;
 
 use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tomcat::{
     wire, AgentLoop, AgentLoopConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
     DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
     PrimitiveExecutor, PrimitiveOperation, StreamEvent, WriteFileResult,
 };
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio_util::sync::CancellationToken;
 use tracing::{info, info_span};
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────

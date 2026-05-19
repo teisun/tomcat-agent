@@ -3,9 +3,9 @@
 
 mod common;
 
-use tomcat::{SessionManager, TranscriptEntry};
 use std::path::PathBuf;
 use tempfile::TempDir;
+use tomcat::{SessionManager, TranscriptEntry};
 
 /// [create + list] 创建会话后 list_sessions 包含该会话
 ///

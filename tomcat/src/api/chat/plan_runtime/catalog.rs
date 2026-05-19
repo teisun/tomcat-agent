@@ -114,10 +114,7 @@ mod tests {
         assert!(n.contains("update_plan"), "EXEC must keep update_plan");
         assert!(n.contains("todos"), "EXEC must keep todos");
         for hidden in HIDDEN_IN_EXECUTING {
-            assert!(
-                !n.contains(*hidden),
-                "EXEC must hide {hidden}, got: {n:?}"
-            );
+            assert!(!n.contains(*hidden), "EXEC must hide {hidden}, got: {n:?}");
         }
         assert!(n.contains("write"), "EXEC must keep write at catalog layer");
         assert!(n.contains("bash"), "EXEC must keep bash");

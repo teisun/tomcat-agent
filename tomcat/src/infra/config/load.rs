@@ -159,7 +159,28 @@ pub fn resolve_workspace_roots_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, Ap
         }
         out.push(canon);
     }
+    push_builtin_workspace_root(&mut seen, &mut out)?;
     Ok(out)
+}
+
+/// 把内置可写根并入 `workspace_roots` 解析结果（当前为 `~/.tomcat/temp/`）。
+fn push_builtin_workspace_root(
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), AppError> {
+    let temp = resolve_dot_tomcat_temp_dir()?;
+    std::fs::create_dir_all(&temp).map_err(AppError::Io)?;
+    let canon = std::fs::canonicalize(&temp).unwrap_or(temp);
+    if !canon.is_dir() {
+        return Err(AppError::Config(format!(
+            "内置 workspace 根不是目录: {}",
+            canon.display()
+        )));
+    }
+    if seen.insert(canon.clone()) {
+        out.push(canon);
+    }
+    Ok(())
 }
 
 /// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.tomcat/`。
@@ -173,6 +194,22 @@ pub fn get_work_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
         }
     }
     normalize_path(DEFAULT_WORK_DIR)
+}
+
+/// 解析计划目录：固定为默认工作根 `DEFAULT_WORK_DIR/plans/`。
+///
+/// 计划文件按架构约定始终落在默认 `~/.tomcat/plans/`，**不**随 `storage.work_dir`
+/// 覆盖而漂移，避免与 agent 运行态轨迹目录或用户项目工作区混在一起。
+pub fn resolve_plans_dir() -> Result<PathBuf, AppError> {
+    Ok(normalize_path(DEFAULT_WORK_DIR)?.join("plans"))
+}
+
+/// 解析临时/测试工作目录：固定为 `~/.tomcat/temp/`。
+///
+/// 与 [`resolve_plans_dir`] 相同，始终落在默认 `~/.tomcat/` 下，不随 `storage.work_dir`
+/// 覆盖漂移；默认并入 [`resolve_workspace_roots_paths`] 供工具读写授权。
+pub fn resolve_dot_tomcat_temp_dir() -> Result<PathBuf, AppError> {
+    Ok(normalize_path(DEFAULT_WORK_DIR)?.join("temp"))
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +340,8 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
 
     std::fs::create_dir_all(work.join("assets").join("wasm")).map_err(AppError::Io)?;
     std::fs::create_dir_all(work.join("assets").join("modules")).map_err(AppError::Io)?;
+    std::fs::create_dir_all(resolve_dot_tomcat_temp_dir()?).map_err(AppError::Io)?;
+    std::fs::create_dir_all(resolve_plans_dir()?).map_err(AppError::Io)?;
     Ok(())
 }
 

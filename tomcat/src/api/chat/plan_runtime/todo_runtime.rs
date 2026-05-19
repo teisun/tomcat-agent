@@ -27,6 +27,8 @@ pub struct TodoFile {
     pub todos_id: String,
     /// 创建该 todos 文件的 session_key。
     pub session_key: String,
+    /// 可选标题；用于给新 scratchpad 命名。
+    pub title: Option<String>,
     /// 创建时间（RFC3339 字符串），用于 purge / 排序。
     pub created_at: String,
     /// items 列表。
@@ -35,10 +37,15 @@ pub struct TodoFile {
 
 impl TodoFile {
     /// 新建空 TodoFile（`created_at` 自动取当前时间）。
-    pub fn new(todos_id: impl Into<String>, session_key: impl Into<String>) -> Self {
+    pub fn new(
+        todos_id: impl Into<String>,
+        session_key: impl Into<String>,
+        title: Option<String>,
+    ) -> Self {
         Self {
             todos_id: todos_id.into(),
             session_key: session_key.into(),
+            title,
             created_at: chrono::Local::now().to_rfc3339(),
             items: Vec::new(),
         }
@@ -49,6 +56,9 @@ impl TodoFile {
         let mut out = String::from("---\n");
         out.push_str(&format!("todos_id: {}\n", self.todos_id));
         out.push_str(&format!("session_key: {}\n", self.session_key));
+        if let Some(title) = &self.title {
+            out.push_str(&format!("title: {}\n", title));
+        }
         out.push_str(&format!("created_at: {}\n", self.created_at));
         out.push_str("schema_version: 1\n");
         out.push_str("---\n\n## Todos\n\n");
@@ -62,12 +72,7 @@ impl TodoFile {
                     TodoStatus::Cancelled => "-",
                     TodoStatus::Pending => " ",
                 };
-                let m = it
-                    .milestone_id
-                    .as_deref()
-                    .map(|m| format!(" (milestone={m})"))
-                    .unwrap_or_default();
-                out.push_str(&format!("- [{checkbox}] {}: {}{m}\n", it.id, it.content));
+                out.push_str(&format!("- [{checkbox}] {}: {}\n", it.id, it.content));
             }
         }
         out
@@ -126,11 +131,7 @@ pub fn list_session_todos_files(
 /// purge：删除除 `keep_id` 之外的所有 inactive todos 文件（GAP-N12 `purge_inactive_on_new_todos`）。
 ///
 /// 调用方在生成"新 todos 文件"时按需调用。失败仅 log，不阻塞主流程。
-pub fn purge_inactive(
-    base_dir: &Path,
-    session_key: &str,
-    keep_id: &str,
-) -> std::io::Result<usize> {
+pub fn purge_inactive(base_dir: &Path, session_key: &str, keep_id: &str) -> std::io::Result<usize> {
     let files = list_session_todos_files(base_dir, session_key)?;
     let mut removed = 0;
     for f in files {
@@ -159,29 +160,28 @@ mod tests {
 
     #[test]
     fn todo_file_roundtrips_markdown_with_status_checkboxes() {
-        let mut f = TodoFile::new("td_1", "ses-a");
+        let mut f = TodoFile::new("td_1", "ses-a", Some("scratch".into()));
         f.items.push(TodoItem {
             id: "t1".into(),
             content: "first".into(),
             status: TodoStatus::InProgress,
-            milestone_id: None,
         });
         f.items.push(TodoItem {
             id: "t2".into(),
             content: "second".into(),
             status: TodoStatus::Completed,
-            milestone_id: Some("m1".into()),
         });
         let md = f.to_markdown();
         assert!(md.contains("todos_id: td_1"));
+        assert!(md.contains("title: scratch"));
         assert!(md.contains("- [~] t1: first"));
-        assert!(md.contains("- [x] t2: second (milestone=m1)"));
+        assert!(md.contains("- [x] t2: second"));
     }
 
     #[test]
     fn persist_writes_atomically_to_expected_path() {
         let dir = tmp_base();
-        let f = TodoFile::new("td_2", "ses-b");
+        let f = TodoFile::new("td_2", "ses-b", None);
         let p = persist(dir.path(), &f).unwrap();
         let expected = dir
             .path()
@@ -198,9 +198,9 @@ mod tests {
     #[test]
     fn purge_inactive_removes_only_other_ids() {
         let dir = tmp_base();
-        persist(dir.path(), &TodoFile::new("a", "s1")).unwrap();
-        persist(dir.path(), &TodoFile::new("b", "s1")).unwrap();
-        persist(dir.path(), &TodoFile::new("c", "s1")).unwrap();
+        persist(dir.path(), &TodoFile::new("a", "s1", None)).unwrap();
+        persist(dir.path(), &TodoFile::new("b", "s1", None)).unwrap();
+        persist(dir.path(), &TodoFile::new("c", "s1", None)).unwrap();
         let removed = purge_inactive(dir.path(), "s1", "b").unwrap();
         assert_eq!(removed, 2);
         let left = list_session_todos_files(dir.path(), "s1").unwrap();

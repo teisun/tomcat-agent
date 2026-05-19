@@ -8,7 +8,7 @@
 //! - 多次 `update_plan` 串成"5 次 plan.panel + 1 次 plan.complete"序列；
 //! - cancel 信号 → EXEC → Pending 的磁盘/内存联动；
 //! - write/edit 越界路径 → safety::enforce_write_path_policy 拒；
-//! - 关键策略：N1（ask_question CHAT）、N2（completed 全禁）、N3（mode 矩阵）、E6 milestone checkpoint。
+//! - 关键策略：N1（ask_question CHAT）、N2（completed 全禁）、N3（mode 矩阵）。
 //!
 //! 与 `plan_runtime_integration_tests.rs` 的差异：那个文件验证单点 API 不变量；本文件
 //! 验证"完整业务回合"的 panel/checkpoint 事件序。
@@ -21,12 +21,10 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use tomcat::api::chat::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, MilestoneStatus, PlanFileMode, TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFileMode, TodoStatus,
 };
 use tomcat::api::chat::plan_runtime::tools::{create_plan, todos, update_plan};
-use tomcat::api::chat::plan_runtime::{
-    PlanMode, PlanRuntime, TodosPanel, TodosPanelSnapshot,
-};
+use tomcat::api::chat::plan_runtime::{PlanMode, PlanRuntime, TodosPanel, TodosPanelSnapshot};
 use tomcat::core::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
     CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,
@@ -52,10 +50,7 @@ struct CheckpointSpy {
 }
 
 impl CheckpointStore for CheckpointSpy {
-    fn record(
-        &self,
-        request: CheckpointRecordRequest,
-    ) -> Result<CheckpointId, CheckpointError> {
+    fn record(&self, request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
         let id = CheckpointId::new(format!("ck_{}", self.records.lock().len()));
         self.records.lock().push(request);
         Ok(id)
@@ -120,7 +115,6 @@ fn build_runtime_with_spies() -> (
     let ckpt = Arc::new(CheckpointSpy::default());
     rt.register_todos_panel(panel.clone());
     rt.attach_checkpoint_store(ckpt.clone());
-    rt.set_auto_checkpoint_on_milestone(true);
     (rt, panel, ckpt)
 }
 
@@ -150,30 +144,21 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
         create_plan::CreatePlanArgs {
             goal: "ship feature X".into(),
             draft: "## Goal\nship X".into(),
-            milestones: vec![create_plan::MilestoneArg {
-                id: "m1".into(),
-                title: "M1".into(),
-                description: None,
-                todo_ids: vec!["t1".into(), "t2".into(), "t3".into()],
-            }],
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: Some("m1".into()),
                 },
                 create_plan::TodoArg {
                     id: "t2".into(),
                     content: "step 2".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: Some("m1".into()),
                 },
                 create_plan::TodoArg {
                     id: "t3".into(),
                     content: "step 3".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: Some("m1".into()),
                 },
             ],
         },
@@ -197,13 +182,13 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
             &rt,
             update_plan::UpdatePlanArgs {
                 plan_id: Some(plan_id.clone()),
+                path: None,
+                replace: false,
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: (*id).into(),
+                    content: None,
                     status: st.clone(),
                 }],
-                milestones_ops: serde_json::Value::Null,
-                replace_todos: false,
-                replace_milestones: false,
             },
         )
         .unwrap();
@@ -217,10 +202,10 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
     // 6 次 update_plan → 6 次 panel refresh
     let snaps = panel.snapshots.lock().clone();
     assert_eq!(snaps.len(), 6, "应触发 6 次 panel snapshot");
-    // 最后一次 snapshot：m1 已完成
+    // 最后一次 snapshot：最后一条 todo 已完成
     let last = snaps.last().unwrap();
-    let m1 = last.milestones.iter().find(|m| m.id == "m1").unwrap();
-    assert!(matches!(m1.status, MilestoneStatus::Completed));
+    assert_eq!(last.items.last().unwrap().id, "t3");
+    assert_eq!(last.items.last().unwrap().status, TodoStatus::Completed);
     cleanup_home(&home);
 }
 
@@ -265,12 +250,10 @@ fn h4_exec_mode_raw_edit_on_plan_file_is_blocked() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )
@@ -300,12 +283,10 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )
@@ -340,12 +321,10 @@ fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )
@@ -357,13 +336,13 @@ fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
+                content: None,
                 status: TodoStatus::InProgress,
             }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
         },
     )
     .expect_err("Planning 期 set_status(in_progress) 必须拒");
@@ -372,64 +351,6 @@ fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
         msg.contains("ModePolicy") || msg.contains("in_progress") || msg.contains("planning"),
         "应是 mode 矩阵闸门错误：{msg}"
     );
-    cleanup_home(&home);
-}
-
-// ─── H8：milestone 完成时 checkpoint_store 收到 Milestone record ───────────
-
-#[tokio::test]
-async fn h8_milestone_checkpoint_recorded_when_milestone_completes() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_home();
-    let (rt, _panel, ckpt) = build_runtime_with_spies();
-
-    rt.enter_planning("obj").unwrap();
-    let out = create_plan::execute(
-        &rt,
-        create_plan::CreatePlanArgs {
-            goal: "g".into(),
-            draft: "ok".into(),
-            milestones: vec![create_plan::MilestoneArg {
-                id: "m1".into(),
-                title: "M1".into(),
-                description: None,
-                todo_ids: vec!["t1".into()],
-            }],
-            todos: vec![create_plan::TodoArg {
-                id: "t1".into(),
-                content: "a".into(),
-                status: TodoStatus::Pending,
-                milestone_id: Some("m1".into()),
-            }],
-        },
-    )
-    .unwrap();
-    let plan_id = out["plan_id"].as_str().unwrap().to_string();
-    promote_to_exec(&rt, &plan_id);
-
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                status: TodoStatus::Completed,
-            }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
-        },
-    )
-    .unwrap();
-
-    let recs = ckpt.records.lock().clone();
-    assert_eq!(recs.len(), 1, "milestone 完成应 record 一次");
-    match &recs[0].kind {
-        tomcat::core::CheckpointKind::Milestone { milestone_id } => {
-            assert_eq!(milestone_id, "m1");
-        }
-        other => panic!("expected Milestone, got {other:?}"),
-    }
     cleanup_home(&home);
 }
 
@@ -445,11 +366,13 @@ fn h2_chat_mode_todos_tool_persists_and_emits_session_panel() {
     let _ = todos::execute(
         &rt,
         todos::TodosArgs {
-            ops: vec![todos::TodoOpArg::AddTodo {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
                 id: "t1".into(),
-                content: "chat scratchpad".into(),
-                status: TodoStatus::Pending,
-                milestone_id: None,
+                content: Some("chat scratchpad".into()),
+                status: Some(TodoStatus::Pending),
             }],
         },
     )
@@ -475,12 +398,10 @@ async fn h5_reviewer_aborted_summary_used_when_dispatcher_returns_aborted() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )

@@ -5,8 +5,6 @@
 //! - **不变量验证**：mode 守卫 / 跨 session 守卫 / 单 in_progress / id 唯一。
 //! - **完整 snapshot 返回**：每个工具结果都包含 `items` / `applied` / `active_in_progress`。
 
-use std::sync::{Mutex, OnceLock};
-
 use super::*;
 use crate::api::chat::plan_runtime::{
     file_store::{PlanFileMode, TodoStatus},
@@ -18,9 +16,8 @@ use crate::api::chat::plan_runtime::{
 ///
 /// **注意**：cargo test 默认多线程，且 plan_path_for_id 读 HOME；为防测试并发互相污染，
 /// 这里用全局 `HomeMutex` 串行化所有走盘的 plan tools 测试。
-fn home_lock() -> &'static Mutex<()> {
-    static M: OnceLock<Mutex<()>> = OnceLock::new();
-    M.get_or_init(|| Mutex::new(()))
+fn home_lock() -> &'static std::sync::Mutex<()> {
+    crate::test_support::home_env_lock()
 }
 
 /// **模块级**记录的首个 HOME 快照（在第一次 setup_isolated_home 前抓取，永不更新）。
@@ -66,12 +63,10 @@ fn create_plan_invisible_outside_planning_returns_error() {
     let args = create_plan::CreatePlanArgs {
         goal: "g".into(),
         draft: "d".into(),
-        milestones: vec![],
         todos: vec![create_plan::TodoArg {
             id: "t1".into(),
             content: "x".into(),
             status: TodoStatus::Pending,
-            milestone_id: None,
         }],
     };
     let err = create_plan::execute(&rt, args).expect_err("CHAT 模式应被拒");
@@ -94,26 +89,94 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
     let args = create_plan::CreatePlanArgs {
         goal: "为 chat 补齐 plan 闭环".into(),
         draft: "step 1; step 2; step 3".into(),
-        milestones: vec![],
         todos: vec![create_plan::TodoArg {
             id: "t1".into(),
             content: "first".into(),
             status: TodoStatus::Pending,
-            milestone_id: None,
         }],
     };
     let out = create_plan::execute(&rt, args).expect("create_plan OK");
-    let plan_id = out["plan_id"].as_str().expect("plan_id present").to_string();
-    assert!(plan_id.starts_with("plan_"), "派生 plan_id 应以 plan_ 开头: {plan_id}");
+    let plan_id = out["plan_id"]
+        .as_str()
+        .expect("plan_id present")
+        .to_string();
+    assert!(
+        plan_id.starts_with("plan_"),
+        "派生 plan_id 应以 plan_ 开头: {plan_id}"
+    );
     assert_eq!(out["mode"], "planning");
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
 
-    assert_eq!(rt.active_planning_plan_id().as_deref(), Some(plan_id.as_str()));
+    assert_eq!(
+        rt.active_planning_plan_id().as_deref(),
+        Some(plan_id.as_str())
+    );
     let path = home
         .join(".tomcat")
         .join("plans")
         .join(format!("{plan_id}.plan.md"));
     assert!(path.exists(), "{path:?} 应该已写盘");
+    let plan_text = std::fs::read_to_string(&path).expect("plan file readable");
+    assert!(plan_text.contains("## Goal"), "新 plan 应包含 ## Goal 段");
+    assert!(plan_text.contains("## Plan"), "新 plan 应包含 ## Plan 段");
+    assert!(
+        !plan_text.contains("## Draft"),
+        "新 plan 不应再带 ## Draft 段"
+    );
+    assert!(
+        !plan_text.contains("## Notes"),
+        "新 plan 不应再带 ## Notes 段"
+    );
+    assert!(
+        !plan_text.contains("## Review"),
+        "新 plan 不应再带 ## Review 段"
+    );
+    cleanup_home(&home);
+}
+
+#[test]
+fn create_plan_normalizes_legacy_heading_wrapped_draft() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.enter_planning("test obj").unwrap();
+    let args = create_plan::CreatePlanArgs {
+        goal: "Draft a minimal internal plan with two clear next steps.".into(),
+        draft: "## Goal\n\nDraft a minimal internal plan.\n\n## Notes\n\nKeep scope small and actionable.\n".into(),
+        todos: vec![create_plan::TodoArg {
+            id: "t1".into(),
+            content: "first".into(),
+            status: TodoStatus::Pending,
+        }],
+    };
+    let out = create_plan::execute(&rt, args).expect("create_plan OK");
+    let plan_id = out["plan_id"]
+        .as_str()
+        .expect("plan_id present")
+        .to_string();
+    let path = home
+        .join(".tomcat")
+        .join("plans")
+        .join(format!("{plan_id}.plan.md"));
+    let plan_text = std::fs::read_to_string(&path).expect("plan file readable");
+    assert_eq!(
+        plan_text.matches("## Goal").count(),
+        1,
+        "plan 正文里不应重复写出第二个 ## Goal"
+    );
+    assert_eq!(
+        plan_text.matches("## Plan").count(),
+        1,
+        "plan 正文里应只保留一个 ## Plan"
+    );
+    assert!(
+        !plan_text.contains("## Draft") && !plan_text.contains("## Notes"),
+        "旧式 Draft/Notes heading 应在写盘前被规范化"
+    );
+    assert!(
+        plan_text.contains("Keep scope small and actionable."),
+        "旧式 Notes 内容应并入 ## Plan，而不是整段丢失"
+    );
     cleanup_home(&home);
 }
 
@@ -126,12 +189,10 @@ fn create_plan_rejects_empty_goal() {
     let args = create_plan::CreatePlanArgs {
         goal: "".into(),
         draft: "d".into(),
-        milestones: vec![],
         todos: vec![create_plan::TodoArg {
             id: "t1".into(),
             content: "x".into(),
             status: TodoStatus::Pending,
-            milestone_id: None,
         }],
     };
     let err = create_plan::execute(&rt, args).expect_err("空 goal 应被拒");
@@ -151,12 +212,10 @@ fn create_plan_rejects_empty_draft_or_todos() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "   ".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "x".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )
@@ -168,7 +227,6 @@ fn create_plan_rejects_empty_draft_or_todos() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "d".into(),
-            milestones: vec![],
             todos: vec![],
         },
     )
@@ -217,19 +275,16 @@ fn fresh_planning_plan(rt: &PlanRuntime) -> String {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "fresh draft body".into(),
-            milestones: vec![],
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: None,
                 },
                 create_plan::TodoArg {
                     id: "t2".into(),
                     content: "step 2".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: None,
                 },
             ],
         },
@@ -245,7 +300,9 @@ fn update_plan_set_status_returns_full_items_snapshot() {
     let rt = PlanRuntime::new("session-a");
     let plan_id = fresh_planning_plan(&rt);
     // G1 + G2：set_status(in_progress) 仅在 executing 允许；先把 plan 切到 executing 再走 update_plan
-    use crate::api::chat::plan_runtime::file_store::{plan_path_for_id, read_plan, write_plan, PlanFileMode};
+    use crate::api::chat::plan_runtime::file_store::{
+        plan_path_for_id, read_plan, write_plan, PlanFileMode,
+    };
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
     plan.frontmatter.mode = PlanFileMode::Executing;
@@ -258,13 +315,13 @@ fn update_plan_set_status_returns_full_items_snapshot() {
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
+                content: None,
                 status: TodoStatus::InProgress,
             }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
         },
     )
     .unwrap();
@@ -286,7 +343,9 @@ fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
     let rt = PlanRuntime::new("session-a");
     let plan_id = fresh_planning_plan(&rt);
     // 切 executing 才能用 in_progress
-    use crate::api::chat::plan_runtime::file_store::{plan_path_for_id, read_plan, write_plan, PlanFileMode};
+    use crate::api::chat::plan_runtime::file_store::{
+        plan_path_for_id, read_plan, write_plan, PlanFileMode,
+    };
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
     plan.frontmatter.mode = PlanFileMode::Executing;
@@ -298,19 +357,20 @@ fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id),
+            path: None,
+            replace: false,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
+                    content: None,
                     status: TodoStatus::InProgress,
                 },
                 update_plan::UpdateOp::SetStatus {
                     id: "t2".into(),
+                    content: None,
                     status: TodoStatus::InProgress,
                 },
             ],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
         },
     )
     .expect_err("两个 in_progress 应被 ops 引擎拒");
@@ -332,15 +392,13 @@ fn update_plan_cross_session_allowed_for_planning_pending() {
         &rt_b,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id),
+            path: None,
+            replace: false,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("edited by b".into()),
                 status: None,
-                milestone_id: None,
             }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
         },
     )
     .unwrap();
@@ -371,15 +429,13 @@ fn update_plan_cross_session_rejected_for_executing() {
         &rt_b,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id),
+            path: None,
+            replace: false,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("intruder".into()),
                 status: None,
-                milestone_id: None,
             }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
         },
     )
     .expect_err("session-b 不应能写入 session-a 的 executing plan");
@@ -409,19 +465,20 @@ fn update_plan_in_exec_promotes_completed() {
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
+                    content: None,
                     status: TodoStatus::Completed,
                 },
                 update_plan::UpdateOp::SetStatus {
                     id: "t2".into(),
+                    content: None,
                     status: TodoStatus::Completed,
                 },
             ],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
         },
     )
     .unwrap();
@@ -446,21 +503,23 @@ fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
     let out = todos::execute(
         &rt,
         todos::TodosArgs {
+            new_todos: false,
+            title: None,
+            replace: false,
             ops: vec![
-                todos::TodoOpArg::AddTodo {
+                todos::TodoOpArg::Upsert {
                     id: "x1".into(),
-                    content: "scratchpad 1".into(),
-                    status: TodoStatus::Pending,
-                    milestone_id: None,
+                    content: Some("scratchpad 1".into()),
+                    status: Some(TodoStatus::Pending),
                 },
-                todos::TodoOpArg::AddTodo {
+                todos::TodoOpArg::Upsert {
                     id: "x2".into(),
-                    content: "scratchpad 2".into(),
-                    status: TodoStatus::Pending,
-                    milestone_id: None,
+                    content: Some("scratchpad 2".into()),
+                    status: Some(TodoStatus::Pending),
                 },
                 todos::TodoOpArg::SetStatus {
                     id: "x1".into(),
+                    content: None,
                     status: TodoStatus::InProgress,
                 },
             ],
@@ -489,11 +548,13 @@ fn todos_persists_to_disk_when_persist_base_configured() {
     let out = todos::execute(
         &rt,
         todos::TodosArgs {
-            ops: vec![todos::TodoOpArg::AddTodo {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
                 id: "p1".into(),
-                content: "persist me".into(),
-                status: TodoStatus::Pending,
-                milestone_id: None,
+                content: Some("persist me".into()),
+                status: Some(TodoStatus::Pending),
             }],
         },
     )
@@ -518,11 +579,13 @@ fn todos_never_writes_plan_file_in_chat() {
     todos::execute(
         &rt,
         todos::TodosArgs {
-            ops: vec![todos::TodoOpArg::AddTodo {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
                 id: "x1".into(),
-                content: "should not touch plan".into(),
-                status: TodoStatus::Pending,
-                milestone_id: None,
+                content: Some("should not touch plan".into()),
+                status: Some(TodoStatus::Pending),
             }],
         },
     )
@@ -534,7 +597,10 @@ fn todos_never_writes_plan_file_in_chat() {
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .filter(|s| s.ends_with(".plan.md"))
         .collect();
-    assert!(entries.is_empty(), "CHAT 下 todos 不应写 plan，发现：{entries:?}");
+    assert!(
+        entries.is_empty(),
+        "CHAT 下 todos 不应写 plan，发现：{entries:?}"
+    );
     cleanup_home(&home);
 }
 
@@ -546,18 +612,19 @@ fn todos_state_enforces_single_in_progress() {
     todos::execute(
         &rt,
         todos::TodosArgs {
+            new_todos: false,
+            title: None,
+            replace: false,
             ops: vec![
-                todos::TodoOpArg::AddTodo {
+                todos::TodoOpArg::Upsert {
                     id: "x1".into(),
-                    content: "1".into(),
-                    status: TodoStatus::InProgress,
-                    milestone_id: None,
+                    content: Some("1".into()),
+                    status: Some(TodoStatus::InProgress),
                 },
-                todos::TodoOpArg::AddTodo {
+                todos::TodoOpArg::Upsert {
                     id: "x2".into(),
-                    content: "2".into(),
-                    status: TodoStatus::Pending,
-                    milestone_id: None,
+                    content: Some("2".into()),
+                    status: Some(TodoStatus::Pending),
                 },
             ],
         },
@@ -566,8 +633,12 @@ fn todos_state_enforces_single_in_progress() {
     let err = todos::execute(
         &rt,
         todos::TodosArgs {
+            new_todos: false,
+            title: None,
+            replace: false,
             ops: vec![todos::TodoOpArg::SetStatus {
                 id: "x2".into(),
+                content: None,
                 status: TodoStatus::InProgress,
             }],
         },
@@ -580,9 +651,7 @@ fn todos_state_enforces_single_in_progress() {
 #[test]
 fn todos_in_exec_writes_session_not_plan_file() {
     // D 方案：todos 在任何模式（含 EXEC）都只写 session 本地 scratchpad，绝不动 PlanFile。
-    use crate::api::chat::plan_runtime::file_store::{
-        plan_path_for_id, read_plan, write_plan,
-    };
+    use crate::api::chat::plan_runtime::file_store::{plan_path_for_id, read_plan, write_plan};
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -599,11 +668,13 @@ fn todos_in_exec_writes_session_not_plan_file() {
     todos::execute(
         &rt,
         todos::TodosArgs {
-            ops: vec![todos::TodoOpArg::AddTodo {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
                 id: "sub-1".into(),
-                content: "debug step".into(),
-                status: TodoStatus::Pending,
-                milestone_id: None,
+                content: Some("debug step".into()),
+                status: Some(TodoStatus::Pending),
             }],
         },
     )
@@ -611,8 +682,12 @@ fn todos_in_exec_writes_session_not_plan_file() {
     let out = todos::execute(
         &rt,
         todos::TodosArgs {
+            new_todos: false,
+            title: None,
+            replace: false,
             ops: vec![todos::TodoOpArg::SetStatus {
                 id: "sub-1".into(),
+                content: None,
                 status: TodoStatus::InProgress,
             }],
         },
@@ -687,6 +762,7 @@ fn ok_review() -> ReviewSummary {
         summary: "looks ok".into(),
         changes_summary: "none".into(),
         applied_changes: false,
+        ..Default::default()
     }
 }
 
@@ -694,12 +770,10 @@ fn good_args_with_todo() -> create_plan::CreatePlanArgs {
     create_plan::CreatePlanArgs {
         goal: "g".into(),
         draft: "draft body content".into(),
-        milestones: vec![],
         todos: vec![create_plan::TodoArg {
             id: "t1".into(),
             content: "step".into(),
             status: TodoStatus::Pending,
-            milestone_id: None,
         }],
     }
 }
@@ -709,7 +783,9 @@ async fn create_plan_internally_dispatches_reviewer_with_real_summary() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![ok_review()])));
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        ok_review(),
+    ])));
     rt.enter_planning("obj").unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
@@ -797,6 +873,7 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
                     summary: "lock acquired by reviewer (write_plan 已释放)".into(),
                     changes_summary: "none".into(),
                     applied_changes: false,
+                    ..Default::default()
                 },
                 Err(e) => ReviewSummary::aborted_with(format!("LockBusy: {e}")),
             }
@@ -813,6 +890,144 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
         "dispatch_reviewer 应能拿到 lock（说明 write_plan 已释放），实际：{:?}",
         out["review"]
     );
+    cleanup_home(&home);
+}
+
+/// reviewer.md §11 RV-T7：plan.review transcript 自定义事件必须落 transcript_appender，
+/// 含 `event=plan.review`、`plan_id`、`reviewer_turns_*`、`reviewer_stop_reason`。
+#[tokio::test]
+async fn reviewer_summary_lands_in_transcript_plan_review() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+
+    let summary = ReviewSummary {
+        aborted: false,
+        summary: "ok".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+        reviewer_turns_used: 2,
+        reviewer_turns_limit: 64,
+        reviewer_stop_reason: "completed".into(),
+        child_session_id: "child-1".into(),
+        ..Default::default()
+    };
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        summary,
+    ])));
+    rt.enter_planning("obj").unwrap();
+    let _ = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
+        .await
+        .unwrap();
+
+    let events = captured.lock();
+    let plan_review = events
+        .iter()
+        .find(|v| v["event"] == "plan.review")
+        .expect("缺少 plan.review 事件");
+    assert_eq!(plan_review["reviewer_turns_used"], 2);
+    assert_eq!(plan_review["reviewer_turns_limit"], 64);
+    assert_eq!(plan_review["reviewer_stop_reason"], "completed");
+    assert!(plan_review["plan_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("plan_"));
+    cleanup_home(&home);
+}
+
+/// reviewer.md §11 RV-T8：第二轮 dispatch_reviewer 写一条 `plan.review.warning`，
+/// 含 rounds=2，便于审计是否过度复盘。
+#[tokio::test]
+async fn reviewer_writes_warning_event_on_second_round() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        ok_review(),
+        ok_review(),
+    ])));
+    rt.enter_planning("obj").unwrap();
+    let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
+        .await
+        .unwrap();
+    let plan_id = out1["plan_id"].as_str().unwrap().to_string();
+    // 二次评审
+    let _ = rt.dispatch_reviewer(&plan_id, true).await;
+
+    let events = captured.lock();
+    let warning = events
+        .iter()
+        .find(|v| v["event"] == "plan.review.warning")
+        .expect("第二轮应有 plan.review.warning");
+    assert_eq!(warning["rounds"], 2);
+    cleanup_home(&home);
+}
+
+/// reviewer.md §11 RV-T9：父 cascade abort 信号传给 dispatcher 时返回 aborted=true 摘要。
+/// MockReviewerDispatcher 不直接读 abort，但 ProdReviewerDispatcher 行为通过 outcome 转换实现；
+/// 这里用 mock 验证 PlanRuntime 完整 ferry 了 abort_signal 到 dispatcher.dispatch（不丢字段）。
+#[tokio::test]
+async fn reviewer_dispatch_passes_through_abort_signal() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+
+    struct AbortPeekMock {
+        saw_signal: std::sync::Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl ReviewerDispatcher for AbortPeekMock {
+        async fn dispatch(
+            &self,
+            _plan_id: &str,
+            _plan_text: &str,
+            _allow_review_edit: bool,
+            abort: std::sync::Arc<AtomicBool>,
+        ) -> ReviewSummary {
+            // 仅记录 dispatcher 收到了非 null 的 abort signal（不读其值）。
+            self.saw_signal
+                .store(true, std::sync::atomic::Ordering::Release);
+            // 模拟"对方观察到 abort=true"返回 aborted=true。
+            if abort.load(std::sync::atomic::Ordering::Acquire) {
+                ReviewSummary::aborted_with("aborted by parent cascade")
+            } else {
+                ok_review()
+            }
+        }
+    }
+    let saw = std::sync::Arc::new(AtomicBool::new(false));
+    rt.attach_reviewer(std::sync::Arc::new(AbortPeekMock {
+        saw_signal: std::sync::Arc::clone(&saw),
+    }));
+    rt.enter_planning("obj").unwrap();
+    let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
+        .await
+        .unwrap();
+    assert!(
+        saw.load(std::sync::atomic::Ordering::Acquire),
+        "dispatcher 未收到 abort signal"
+    );
+    assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(false));
     cleanup_home(&home);
 }
 
@@ -863,10 +1078,33 @@ fn from_json_helpers_reject_bad_args() {
     let err = update_plan::UpdatePlanArgs::from_json(&serde_json::json!({"ops": "not_array"}))
         .expect_err("ops 必须是数组");
     matches!(err, ToolError::BadArgs(_));
-    let err = todos::TodosArgs::from_json(&serde_json::json!({}))
-        .expect_err("缺 ops 字段应被拒");
+    let err = todos::TodosArgs::from_json(&serde_json::json!({})).expect_err("缺 ops 字段应被拒");
     matches!(err, ToolError::BadArgs(_));
     cleanup_home(&home);
+}
+
+#[test]
+fn update_plan_from_json_accepts_set_status_with_extra_content_field() {
+    let args = update_plan::UpdatePlanArgs::from_json(&serde_json::json!({
+        "ops": [
+            {
+                "kind": "set_status",
+                "id": "t1",
+                "status": "in_progress",
+                "content": "model carried over old field"
+            }
+        ]
+    }))
+    .expect("set_status 应容忍冗余 content 字段");
+
+    assert_eq!(args.ops.len(), 1);
+    match &args.ops[0] {
+        update_plan::UpdateOp::SetStatus { id, status, .. } => {
+            assert_eq!(id, "t1");
+            assert_eq!(*status, TodoStatus::InProgress);
+        }
+        other => panic!("unexpected op parsed: {other:?}"),
+    }
 }
 
 // ─── P6 /plan build 五件事单测（§9.3 A build 行 + plan_build_*） ────────────
@@ -886,12 +1124,10 @@ fn write_disk_plan(plan_id: &str, disk_mode: PlanFileMode) -> std::path::PathBuf
         session_id: Some("orig-uuid".into()),
         created_at: "2026-05-19T00:00:00Z".into(),
         schema_version: 1,
-        milestones: vec![],
         todos: vec![TodoItem {
             id: "step1".into(),
             content: "do the thing".into(),
             status: TodoStatus::Pending,
-            milestone_id: None,
         }],
         unknown: Default::default(),
     };
@@ -921,7 +1157,6 @@ fn plan_build_requires_no_active_plan_or_todos() {
         id: "live".into(),
         content: "x".into(),
         status: TodoStatus::Pending,
-        milestone_id: None,
     }]);
     let err = rt.build_plan("blockee", None).unwrap_err();
     match err {
@@ -965,7 +1200,10 @@ fn plan_build_rejects_nonexistent_plan_id() {
     match err {
         PlanRuntimeError::BuildPlanNotFound { plan_id, hint } => {
             assert_eq!(plan_id, "missing_plan");
-            assert!(hint.contains("create_plan"), "hint 应引导 create_plan：{hint}");
+            assert!(
+                hint.contains("create_plan"),
+                "hint 应引导 create_plan：{hint}"
+            );
         }
         other => panic!("expected BuildPlanNotFound, got {other:?}"),
     }
@@ -1008,8 +1246,14 @@ fn plan_build_swaps_session_reminder_prefix_meta_catalog() {
     use crate::api::chat::plan_runtime::file_store::*;
     let plan = read_plan(&plan_path_for_id("five_things").unwrap()).unwrap();
     assert!(matches!(plan.frontmatter.mode, PlanFileMode::Executing));
-    assert_eq!(plan.frontmatter.session_key.as_deref(), Some("new-session-key"));
-    assert_eq!(plan.frontmatter.session_id.as_deref(), Some("new-session-uuid"));
+    assert_eq!(
+        plan.frontmatter.session_key.as_deref(),
+        Some("new-session-key")
+    );
+    assert_eq!(
+        plan.frontmatter.session_id.as_deref(),
+        Some("new-session-uuid")
+    );
 
     // 上一磁盘模式正确报告
     assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Planning));
@@ -1027,7 +1271,11 @@ fn pending_plan_resumable_via_build() {
     let outcome = rt.build_plan("resumable", None).expect("续跑 build 成功");
     assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Pending));
     // 同 session_key 续跑不应 warning
-    assert!(outcome.warnings.is_empty(), "同 key 续跑无 warning：{:?}", outcome.warnings);
+    assert!(
+        outcome.warnings.is_empty(),
+        "同 key 续跑无 warning：{:?}",
+        outcome.warnings
+    );
     match rt.mode() {
         PlanMode::Executing { plan_id } => assert_eq!(plan_id, "resumable"),
         other => panic!("expected Executing, got {other:?}"),
@@ -1065,9 +1313,15 @@ fn exec_first_turn_injects_plan_body_user_meta_only_once() {
     let body1 = rt
         .consume_first_exec_turn_user_meta()
         .expect("首轮应返回 plan body");
-    assert!(body1.contains("plan_id: oneshot"), "应含 frontmatter plan_id");
+    assert!(
+        body1.contains("plan_id: oneshot"),
+        "应含 frontmatter plan_id"
+    );
     assert!(body1.contains("## Goal"), "应含正文");
-    assert!(body1.contains("mode: executing"), "frontmatter 已更新为 executing");
+    assert!(
+        body1.contains("mode: executing"),
+        "frontmatter 已更新为 executing"
+    );
 
     // 第二、第三轮：返回 None（防止重复注入）
     assert!(rt.consume_first_exec_turn_user_meta().is_none());
@@ -1155,7 +1409,6 @@ fn concurrent_write_plan_serialized_by_lock() {
             session_id: None,
             created_at: "2026-05-19T00:00:00Z".into(),
             schema_version: 1,
-            milestones: vec![],
             todos: vec![],
             unknown: Default::default(),
         },
@@ -1172,7 +1425,6 @@ fn concurrent_write_plan_serialized_by_lock() {
                 id: format!("t{i}-a"),
                 content: format!("a-{i}"),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }];
             write_plan(&p1, &plan, 2000).unwrap();
         }
@@ -1184,7 +1436,6 @@ fn concurrent_write_plan_serialized_by_lock() {
                 id: format!("t{i}-b"),
                 content: format!("b-{i}"),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }];
             write_plan(&p2, &plan, 2000).unwrap();
         }
@@ -1298,7 +1549,10 @@ fn plan_build_atomic_rollback_on_write_failure() {
     assert!(!rt.first_exec_turn_pending_for_test());
     match err {
         PlanRuntimeError::Io(s) => {
-            assert!(s.contains("锁") || s.contains("lock") || s.contains("LockBusy"), "应是锁/IO 错：{s}")
+            assert!(
+                s.contains("锁") || s.contains("lock") || s.contains("LockBusy"),
+                "应是锁/IO 错：{s}"
+            )
         }
         other => panic!("expected Io (LockBusy), got {other:?}"),
     }
@@ -1307,215 +1561,10 @@ fn plan_build_atomic_rollback_on_write_failure() {
     FileExt::unlock(&_f).unwrap();
     drop(_f);
     let rt = PlanRuntime::with_lock_timeout("session-a", 1000);
-    let _ok = rt.build_plan("rollback", None).expect("放锁后 build 应成功");
+    let _ok = rt
+        .build_plan("rollback", None)
+        .expect("放锁后 build 应成功");
     assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
-    cleanup_home(&home);
-}
-
-// ─── E 测试：milestone checkpoint + recover + reload_active_plan_from_disk ──
-
-/// Spy 实现：捕获 record/list/show 调用，便于 E6 测试断言。
-#[derive(Default)]
-struct CheckpointRecordSpy {
-    records: parking_lot::Mutex<Vec<crate::core::CheckpointRecordRequest>>,
-}
-
-impl crate::core::CheckpointStore for CheckpointRecordSpy {
-    fn record(
-        &self,
-        request: crate::core::CheckpointRecordRequest,
-    ) -> Result<crate::core::CheckpointId, crate::core::CheckpointError> {
-        let id = crate::core::CheckpointId::new(format!("ck_{}", self.records.lock().len()));
-        self.records.lock().push(request);
-        Ok(id)
-    }
-    fn list(
-        &self,
-        _session_id: &str,
-        _opts: crate::core::ListOptions,
-    ) -> Result<Vec<crate::core::CheckpointMeta>, crate::core::CheckpointError> {
-        Ok(vec![])
-    }
-    fn show(
-        &self,
-        _id: &crate::core::CheckpointId,
-    ) -> Result<Option<crate::core::CheckpointMeta>, crate::core::CheckpointError> {
-        Ok(None)
-    }
-    fn diff(
-        &self,
-        _id: &crate::core::CheckpointId,
-    ) -> Result<crate::core::CheckpointDiff, crate::core::CheckpointError> {
-        Ok(crate::core::CheckpointDiff::default())
-    }
-    fn restore(
-        &self,
-        _id: &crate::core::CheckpointId,
-        _opts: crate::core::RestoreOptions,
-    ) -> Result<crate::core::CheckpointRestoreReport, crate::core::CheckpointError> {
-        Ok(crate::core::CheckpointRestoreReport::default())
-    }
-    fn prune(
-        &self,
-        _retention: crate::core::RetentionPolicy,
-    ) -> Result<usize, crate::core::CheckpointError> {
-        Ok(0)
-    }
-}
-
-#[test]
-fn e6_update_plan_records_milestone_checkpoint_on_completion() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-
-    // 准备：planning → create_plan → 切 executing → update_plan 把 milestone 下两条 todo 完成。
-    rt.enter_planning("obj").unwrap();
-    let out = create_plan::execute(
-        &rt,
-        create_plan::CreatePlanArgs {
-            goal: "g".into(),
-            draft: "ok".into(),
-            milestones: vec![create_plan::MilestoneArg {
-                id: "m1".into(),
-                title: "Milestone 1".into(),
-                description: None,
-                todo_ids: vec!["t1".into(), "t2".into()],
-            }],
-            todos: vec![
-                create_plan::TodoArg {
-                    id: "t1".into(),
-                    content: "a".into(),
-                    status: TodoStatus::Pending,
-                    milestone_id: Some("m1".into()),
-                },
-                create_plan::TodoArg {
-                    id: "t2".into(),
-                    content: "b".into(),
-                    status: TodoStatus::Pending,
-                    milestone_id: Some("m1".into()),
-                },
-            ],
-        },
-    )
-    .unwrap();
-    let plan_id = out["plan_id"].as_str().unwrap().to_string();
-
-    use crate::api::chat::plan_runtime::file_store::{
-        plan_path_for_id, read_plan, write_plan, PlanFileMode,
-    };
-    let path = plan_path_for_id(&plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
-    plan.frontmatter.session_key = Some("session-a".into());
-    write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
-
-    // 注入 spy + 打开 auto_checkpoint_on_milestone
-    let spy = std::sync::Arc::new(CheckpointRecordSpy::default());
-    rt.attach_checkpoint_store(spy.clone());
-    rt.set_auto_checkpoint_on_milestone(true);
-
-    // 完成 t1：milestone 仍是 in_progress（t2 未完）→ 不应 record。
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                status: TodoStatus::Completed,
-            }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
-        },
-    )
-    .unwrap();
-    assert_eq!(spy.records.lock().len(), 0, "t2 未完时不应 record");
-
-    // 完成 t2：m1 完成 → 应 record 一次 Milestone{milestone_id=m1}。
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t2".into(),
-                status: TodoStatus::Completed,
-            }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
-        },
-    )
-    .unwrap();
-    let recs = spy.records.lock().clone();
-    assert_eq!(recs.len(), 1, "完成 milestone 后应 record 一次");
-    match &recs[0].kind {
-        crate::core::CheckpointKind::Milestone { milestone_id } => {
-            assert_eq!(milestone_id, "m1");
-        }
-        other => panic!("expected Milestone kind, got {other:?}"),
-    }
-    cleanup_home(&home);
-}
-
-#[test]
-fn e6_update_plan_skips_record_when_auto_checkpoint_disabled() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("obj").unwrap();
-    let out = create_plan::execute(
-        &rt,
-        create_plan::CreatePlanArgs {
-            goal: "g".into(),
-            draft: "ok".into(),
-            milestones: vec![create_plan::MilestoneArg {
-                id: "m1".into(),
-                title: "M1".into(),
-                description: None,
-                todo_ids: vec!["t1".into()],
-            }],
-            todos: vec![create_plan::TodoArg {
-                id: "t1".into(),
-                content: "a".into(),
-                status: TodoStatus::Pending,
-                milestone_id: Some("m1".into()),
-            }],
-        },
-    )
-    .unwrap();
-    let plan_id = out["plan_id"].as_str().unwrap().to_string();
-
-    use crate::api::chat::plan_runtime::file_store::{
-        plan_path_for_id, read_plan, write_plan, PlanFileMode,
-    };
-    let path = plan_path_for_id(&plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
-    plan.frontmatter.session_key = Some("session-a".into());
-    write_plan(&path, &plan, 2000).unwrap();
-    rt.set_executing_for_test(plan_id.clone());
-
-    let spy = std::sync::Arc::new(CheckpointRecordSpy::default());
-    rt.attach_checkpoint_store(spy.clone());
-    rt.set_auto_checkpoint_on_milestone(false);
-
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                status: TodoStatus::Completed,
-            }],
-            milestones_ops: serde_json::Value::Null,
-            replace_todos: false,
-            replace_milestones: false,
-        },
-    )
-    .unwrap();
-    assert_eq!(spy.records.lock().len(), 0, "禁用时不应 record");
     cleanup_home(&home);
 }
 

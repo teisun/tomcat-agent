@@ -230,6 +230,20 @@
 
 ---
 
+## Story 10 — Plan 模式真 LLM 全路径（reviewer 子 Agent，2 条）
+
+> 需要 `OPENAI_API_KEY`；无 key 时用例 fixture **必须** `panic!`（与 INTEGRATION_TEST_SPEC §5.2、reviewer.md §11 对齐）。默认模型来自 `TOMCAT_E2E_LLM_MODEL`，未设 → `gpt-5.2`。
+> 这两个用例与 [`plan_e2e_with_mock_llm_tests.rs`](../../../../tests/plan_e2e_with_mock_llm_tests.rs) **互补**：那个测试用 mock 工具路径覆盖事件序，本组用例真起 LLM + 真 reviewer 子 Agent 跑完整链路。
+
+| 编号 | 验收 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
+| ---- | ---- | ------ | -------- | -------- | -------- |
+| E2E-PLAN-RL-001 | 自动（需 `OPENAI_API_KEY`） | `cli_full_plan_path_with_real_llm`（[`tests/plan_real_llm_cli_e2e.rs`](../../../../tests/plan_real_llm_cli_e2e.rs)） | 真起两次 `tomcat chat` 子进程跑 PLAN→EXEC→Completed | 进程 A：stdin `/plan "..."` + PLANNING_PROMPT → EOF；测试主程扫盘取 `plan_id`；进程 B：`chat --resume` + stdin `/plan build {id}` + EXEC_PROMPT → EOF | 两次子进程 exit 0；磁盘 `frontmatter.mode == Completed`；所有 todos `Completed`；进程 B stdout 非空 |
+| E2E-PLAN-RL-002 | 自动（需 `OPENAI_API_KEY`） | `inprocess_full_plan_path_with_real_llm`（[`tests/plan_real_llm_inprocess_tests.rs`](../../../../tests/plan_real_llm_inprocess_tests.rs)） | 进程内驱动 `ChatContext` + `run_chat_turn` 真起一次主 LLM + reviewer 子 LLM 跑全路径 | `dispatch_chat_command(/plan "...")` → `run_chat_turn(PLANNING_PROMPT)` → 扫盘取 plan_id → `build_plan` → `run_chat_turn(EXEC_PROMPT)`（最多 3 轮）→ `finalize_completed_to_chat` | 磁盘 `frontmatter.mode == Completed`；所有 todos `Completed`；`PlanRuntime::mode() == Chat` after finalize；transcript 至少一条 `plan.review` 自定义事件 |
+
+> **reviewer 子 Agent**：两条用例都默认走 [`prod_reviewer.rs`](../../../../src/api/chat/plan_runtime/prod_reviewer.rs) 真派发，主 LLM 每次 `create_plan` 都会消耗一段子 LLM token。transcript 中的 `plan.review` 事件包含 `reviewer_turns_used` / `reviewer_turns_limit` / `reviewer_stop_reason`，便于事后分析。
+
+---
+
 ## 边界与健壮性场景（跨 Story）（7 条）
 
 

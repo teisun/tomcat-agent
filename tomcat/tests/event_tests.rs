@@ -3,8 +3,8 @@
 
 mod common;
 
-use tomcat::{DefaultEventBus, EventBus, EventContext};
 use std::sync::atomic::{AtomicU32, Ordering};
+use tomcat::{DefaultEventBus, EventBus, EventContext};
 
 /// [on + emit_sync] 注册回调后 emit_sync 触发一次
 ///

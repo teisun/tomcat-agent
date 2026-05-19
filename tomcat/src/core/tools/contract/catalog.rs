@@ -261,42 +261,42 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective) and `draft` (markdown body for the `## Draft` section); the runtime derives `plan_id` from goal (caller does NOT supply plan_id) and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (caller does NOT supply plan_id), normalizes `draft` into the plan body's `## Plan` section, and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
         display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,
         category: None,
         read_only: false,
         destructive: false,
-        search_hint: Some("plan create planning goal milestones todos reviewer"),
+        search_hint: Some("plan create planning goal draft todos reviewer"),
         plan_only: true,
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
-        description: "Apply incremental ops (`add` / `update` / `complete` / `remove`) to the active plan's todos and milestones, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to advance todos during EXEC, or to refine the draft during PLAN. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. Each op carries an `id` (todo or milestone id) and only mutates frontmatter; plan body markdown is left untouched.\n",
-        display_summary: Some("Apply incremental ops to the active plan's todos/milestones (CHAT/PLAN/EXEC)."),
+        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to refine the todo list during PLAN or to advance todos during EXEC. `plan_id` and `path` are plan-specific targeting fields; `replace=true` swaps the entire todo list with the provided upsert results. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. The tool only mutates frontmatter.todos; plan body markdown is left untouched.\n",
+        display_summary: Some("Apply todo-only incremental ops to the active plan (CHAT/PLAN/EXEC)."),
         parameters: update_plan_parameters,
         scope: PermissionScope::Write,
         category: None,
         read_only: false,
         destructive: false,
-        search_hint: Some("plan update todos milestones ops complete add remove"),
+        search_hint: Some("plan update todos upsert set_status remove replace"),
         plan_only: true,
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "todos",
         label: "Todos",
-        description: "Manage a lightweight ordered todo list (`add` / `update` / `complete` / `remove`) and return a full snapshot of all items after each call. In CHAT mode the list is persisted under `~/.tomcat/agents/<id>/todos/*.todo.md`; in EXEC mode the list IS the active plan's `todos[]` and is written to that plan file. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.\n",
-        display_summary: Some("Maintain a single-source todo list (single in_progress; returns full snapshot)."),
+        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. The list is persisted under `~/.tomcat/agents/<id>/sessions/<session_key>/todos/<todos_id>.todo.md` when persistence is configured, and it NEVER writes the active PlanFile. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.\n",
+        display_summary: Some("Maintain a session todo scratchpad (single in_progress; returns full snapshot)."),
         parameters: todos_parameters,
         scope: PermissionScope::Write,
         category: None,
         read_only: false,
         destructive: false,
-        search_hint: Some("todos add complete update remove snapshot in_progress"),
+        search_hint: Some("todos upsert set_status remove scratchpad new_todos replace"),
         plan_only: true,
         requires_user_interaction: false,
     },
@@ -420,6 +420,78 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
         "type": "object",
         "properties": properties,
         "required": required,
+    })
+}
+
+fn todo_status_property(description: &str) -> Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["pending", "in_progress", "completed", "cancelled"],
+        "description": description
+    })
+}
+
+fn shared_todo_op_item_schema(status_description: &str) -> Value {
+    serde_json::json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "const": "upsert",
+                        "description": "Operation kind."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Target todo id (kebab-case)."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Todo content. Required when creating a brand-new todo."
+                    },
+                    "status": todo_status_property(status_description)
+                },
+                "required": ["kind", "id"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "description": "`set_status` only changes status for an existing todo.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "const": "set_status",
+                        "description": "Operation kind."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Target todo id (kebab-case)."
+                    },
+                    "status": todo_status_property(status_description)
+                },
+                "required": ["kind", "id", "status"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "description": "`remove` deletes a todo by id.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "const": "remove",
+                        "description": "Operation kind."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Target todo id (kebab-case)."
+                    }
+                },
+                "required": ["kind", "id"],
+                "additionalProperties": false
+            }
+        ]
     })
 }
 
@@ -719,11 +791,11 @@ fn create_plan_parameters() -> Value {
             },
             "draft": {
                 "type": "string",
-                "description": "Markdown content for the plan body's `## Draft` section: ordered bullet points covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Notes` / `## Review` / `## Todos Board` sections; do NOT include those headings yourself."
+                "description": "Markdown content for the plan body's `## Plan` section: ordered bullet points or short paragraphs covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Plan` / `## Todos Board`; do NOT include those headings yourself. If you accidentally include legacy headings such as `## Draft` or `## Notes`, runtime will normalize them."
             },
             "todos": {
                 "type": "array",
-                "description": "Initial flat todo list (≥ 1 item) with milestone references. `status` defaults to `pending`.",
+                "description": "Initial flat todo list (≥ 1 item). `status` defaults to `pending`.",
                 "minItems": 1,
                 "items": {
                     "type": "object",
@@ -736,10 +808,6 @@ fn create_plan_parameters() -> Value {
                             "type": "string",
                             "description": "Single-sentence imperative todo description."
                         },
-                        "milestone_id": {
-                            "type": "string",
-                            "description": "References a milestone.id declared in `milestones`; omit if the todo is unscoped."
-                        },
                         "status": {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
@@ -747,29 +815,6 @@ fn create_plan_parameters() -> Value {
                         }
                     },
                     "required": ["id", "content"]
-                }
-            },
-            "milestones": {
-                "type": "array",
-                "description": "Optional ordered milestones (each maps to a contiguous span of todos). Empty array allowed; can be added later via update_plan.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`)."
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Human-readable milestone title (max 200 chars)."
-                        },
-                        "todo_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Optional list of todo.id strings this milestone tracks (must reference todos declared above)."
-                        }
-                    },
-                    "required": ["id", "title"]
                 }
             }
         },
@@ -780,40 +825,27 @@ fn create_plan_parameters() -> Value {
 fn update_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Apply incremental ops to the active plan's todos / milestones. Callable in CHAT / PLAN / EXEC; requires an active plan.",
+        "description": "Apply incremental todo-only ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `plan_id` and `path` target the plan, `replace=true` replaces the whole todo list with the provided upsert results, and each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
         "properties": {
+            "plan_id": {
+                "type": "string",
+                "description": "Target plan_id. Optional in EXEC mode (defaults to the active plan); REQUIRED in CHAT / PLAN / Pending / Completed."
+            },
+            "path": {
+                "type": "string",
+                "description": "Alternative target path under ~/.tomcat/plans/. If both `plan_id` and `path` are provided, `plan_id` wins."
+            },
+            "replace": {
+                "type": "boolean",
+                "description": "If true, replace the entire todos[] list with the upsert results in `ops`. Default false."
+            },
             "ops": {
                 "type": "array",
                 "description": "Ordered list of mutations applied atomically (one frontmatter write under advisory lock).",
                 "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["add_todo", "update_todo", "complete_todo", "remove_todo", "add_milestone", "update_milestone", "remove_milestone"],
-                            "description": "Operation kind. `complete_todo` is a shortcut for `update_todo { status: completed }`."
-                        },
-                        "id": {
-                            "type": "string",
-                            "description": "Target todo / milestone id (kebab-case)."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "New content / title for add_* and update_* ops."
-                        },
-                        "milestone_id": {
-                            "type": "string",
-                            "description": "Optional milestone reference for add_todo / update_todo."
-                        },
-                        "status": {
-                            "type": "string",
-                            "enum": ["pending", "in_progress", "completed", "cancelled"],
-                            "description": "New status for update_todo / add_todo. At most one todo may be `in_progress`."
-                        }
-                    },
-                    "required": ["kind", "id"]
-                }
+                "items": shared_todo_op_item_schema(
+                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.mode == executing."
+                )
             }
         },
         "required": ["ops"]
@@ -823,36 +855,27 @@ fn update_plan_parameters() -> Value {
 fn todos_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Maintain a single-source todo list. CHAT mode persists under `~/.tomcat/agents/<id>/todos/`; EXEC writes the active plan's frontmatter todos. Returns the full items snapshot after each call.",
+        "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results.",
         "properties": {
+            "new_todos": {
+                "type": "boolean",
+                "description": "If true, create a new active todos file for this session before applying ops. Default false."
+            },
+            "title": {
+                "type": "string",
+                "description": "Optional title stored in the new .todo.md frontmatter when `new_todos=true`."
+            },
+            "replace": {
+                "type": "boolean",
+                "description": "If true, replace the entire todo list with the upsert results in `ops`. Default false."
+            },
             "ops": {
                 "type": "array",
-                "description": "Ordered list of mutations (same op kinds as update_plan, restricted to *_todo).",
+                "description": "Ordered list of mutations applied in order.",
                 "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "kind": {
-                            "type": "string",
-                            "enum": ["add_todo", "update_todo", "complete_todo", "remove_todo"],
-                            "description": "Operation kind."
-                        },
-                        "id": {
-                            "type": "string",
-                            "description": "Target todo id (kebab-case)."
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "New content for add_todo / update_todo."
-                        },
-                        "status": {
-                            "type": "string",
-                            "enum": ["pending", "in_progress", "completed", "cancelled"],
-                            "description": "New status. At most one todo may be `in_progress`."
-                        }
-                    },
-                    "required": ["kind", "id"]
-                }
+                "items": shared_todo_op_item_schema(
+                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`."
+                )
             }
         },
         "required": ["ops"]

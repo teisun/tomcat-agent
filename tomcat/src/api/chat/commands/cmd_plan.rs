@@ -124,7 +124,10 @@ fn print_plan_list() {
     let entries = match std::fs::read_dir(&plans_dir) {
         Ok(e) => e,
         Err(_) => {
-            println!("[plan list] 暂无 plan（目录不存在或为空）：{}", plans_dir.display());
+            println!(
+                "[plan list] 暂无 plan（目录不存在或为空）：{}",
+                plans_dir.display()
+            );
             return;
         }
     };
@@ -138,7 +141,13 @@ fn print_plan_list() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let goal_line = plan.frontmatter.goal.lines().next().unwrap_or("").to_string();
+        let goal_line = plan
+            .frontmatter
+            .goal
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
         rows.push((
             plan.frontmatter.plan_id.clone(),
             plan.frontmatter.mode.as_str().to_string(),
@@ -151,7 +160,11 @@ fn print_plan_list() {
         return;
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
-    println!("[plan list] {} plan(s) in {}：", rows.len(), plans_dir.display());
+    println!(
+        "[plan list] {} plan(s) in {}：",
+        rows.len(),
+        plans_dir.display()
+    );
     for (id, mode, goal, ts) in rows {
         println!("  - {id:<32} [{mode:<10}]  {goal}  (created {ts})");
     }

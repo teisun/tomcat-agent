@@ -103,7 +103,7 @@ impl Drop for CleanupGuard {
 #[serial]
 async fn openai_files_roundtrip_four_sizes_real_api() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let cfg = responses_config();
     let provider = resolve_llm(&cfg)
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
@@ -148,7 +148,7 @@ async fn openai_files_roundtrip_four_sizes_real_api() -> Result<(), Box<dyn std:
 #[serial]
 async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let cfg = responses_config();
     let provider = resolve_llm(&cfg)
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
@@ -210,7 +210,7 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
 async fn openai_files_cli_single_turn_image_describe_real_api(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let cfg = responses_config();
     let provider = resolve_llm(&cfg)
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
@@ -290,7 +290,7 @@ async fn openai_files_cli_single_turn_image_describe_real_api(
 async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
     let cfg = responses_config();
     let provider = resolve_llm(&cfg)
         .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");

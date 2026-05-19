@@ -85,28 +85,39 @@ fn prompts_render_executor_reminder_substitutes_plan_id() {
 
 #[test]
 fn session_prefix_for_chat_is_empty() {
-    assert!(session_prefix::user_prefix_for_mode(&PlanMode::Chat).is_empty());
+    assert!(session_prefix::user_prefix_for_mode(&PlanMode::Chat, None).is_empty());
 }
 
 #[test]
-fn session_prefix_for_planning_is_plan_label() {
-    let p = session_prefix::user_prefix_for_mode(&PlanMode::Planning);
-    assert!(p.contains("[mode: PLAN]"));
+fn session_prefix_for_planning_carries_plan_path_when_present() {
+    let p = session_prefix::user_prefix_for_mode(
+        &PlanMode::Planning,
+        Some(std::path::Path::new("/tmp/active.plan.md")),
+    );
+    assert!(p.starts_with("[mode: PLAN "));
+    assert!(p.contains("plan_path=/tmp/active.plan.md"));
 }
 
 #[test]
 fn session_prefix_for_executing_carries_plan_id() {
-    let p = session_prefix::user_prefix_for_mode(&PlanMode::Executing {
-        plan_id: "ship-001".into(),
-    });
-    assert!(p.contains("[mode: EXEC plan_id=ship-001]"));
+    let p = session_prefix::user_prefix_for_mode(
+        &PlanMode::Executing {
+            plan_id: "ship-001".into(),
+        },
+        Some(std::path::Path::new("/tmp/exec.plan.md")),
+    );
+    assert!(p.contains("[mode: EXEC plan_id=ship-001"));
+    assert!(p.contains("plan_path=/tmp/exec.plan.md"));
 }
 
 #[test]
 fn session_prefix_for_pending_is_empty() {
-    let p = session_prefix::user_prefix_for_mode(&PlanMode::Pending {
-        plan_id: "ship-001".into(),
-    });
+    let p = session_prefix::user_prefix_for_mode(
+        &PlanMode::Pending {
+            plan_id: "ship-001".into(),
+        },
+        None,
+    );
     assert!(p.is_empty(), "pending must NOT prefix LLM input");
 }
 

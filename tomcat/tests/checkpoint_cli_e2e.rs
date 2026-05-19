@@ -139,7 +139,10 @@ fn wait_for_stage(stage: &Arc<AtomicUsize>, target: usize, timeout: Duration) {
 }
 
 #[cfg(unix)]
-fn wait_for_child_output(mut child: std::process::Child, timeout: Duration) -> std::process::Output {
+fn wait_for_child_output(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> std::process::Output {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(_status) = child.try_wait().unwrap() {
@@ -368,8 +371,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         })
         .count();
     assert_eq!(
-        pre_rollback_count_after_manual,
-        pre_rollback_count_after_turn_end,
+        pre_rollback_count_after_manual, pre_rollback_count_after_turn_end,
         "Manual restore 不应新增 pre-rollback checkpoint"
     );
 }

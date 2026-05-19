@@ -661,10 +661,7 @@ pub struct WasmConfig {}
 /// env 覆盖：
 /// - `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` → `lock_timeout_ms`
 /// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_BUILD` → `auto_checkpoint_on_build`
-/// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_MILESTONE` → `auto_checkpoint_on_milestone`
 /// - `TOMCAT_PLAN_MAX_REVIEW_ROUNDS` → `max_review_rounds`
-/// - `TOMCAT_PLAN_AUTO_MILESTONE_THRESHOLD` → `auto_milestone_threshold`
-/// - `TOMCAT_PLAN_MILESTONE_CHECKPOINT_REQUIRES_PLAN_SCOPE` → `milestone_checkpoint_requires_plan_scope`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlanConfig {
     /// `~/.tomcat/plans/*.plan.md` advisory lock 等待上限（毫秒）。默认 2000。
@@ -673,21 +670,10 @@ pub struct PlanConfig {
     /// `/plan build` 时是否自动打 `CheckpointKind::Manual{label:"plan_build:<id>"}`。默认 false。
     #[serde(default)]
     pub auto_checkpoint_on_build: bool,
-    /// milestone 全 completed 时是否自动打 `CheckpointKind::Milestone{milestone_id}`。默认 true。
-    #[serde(default = "default_true")]
-    pub auto_checkpoint_on_milestone: bool,
     /// 单 plan 累计 review 软上限：超过时仅 transcript warning，**不**阻 `create_plan` / `/plan build`。
     /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
     #[serde(default = "default_plan_max_review_rounds")]
     pub max_review_rounds: u32,
-    /// 自动 milestone checkpoint 的最少 todo 数阈值（todo 数 < 该值时不触发，避免极小 plan 频繁打点）。
-    /// 默认 3。设 0 表示无下限。
-    #[serde(default = "default_plan_auto_milestone_threshold")]
-    pub auto_milestone_threshold: u32,
-    /// 自动 milestone checkpoint 是否仅作用于 plan scope（受影响文件集合限定 `~/.tomcat/plans/<id>.plan.md`），
-    /// 默认 true（不污染 workspace 全量 snapshot）。
-    #[serde(default = "default_true")]
-    pub milestone_checkpoint_requires_plan_scope: bool,
 }
 
 fn default_plan_lock_timeout_ms() -> u64 {
@@ -698,19 +684,12 @@ fn default_plan_max_review_rounds() -> u32 {
     1
 }
 
-fn default_plan_auto_milestone_threshold() -> u32 {
-    3
-}
-
 impl Default for PlanConfig {
     fn default() -> Self {
         Self {
             lock_timeout_ms: default_plan_lock_timeout_ms(),
             auto_checkpoint_on_build: false,
-            auto_checkpoint_on_milestone: true,
             max_review_rounds: default_plan_max_review_rounds(),
-            auto_milestone_threshold: default_plan_auto_milestone_threshold(),
-            milestone_checkpoint_requires_plan_scope: true,
         }
     }
 }
@@ -766,21 +745,19 @@ impl Default for TodosConfig {
 /// `[reviewer]` 子表（T2-P1-004 RV-A/B/E）：reviewer 内联子 Agent 派发参数。
 ///
 /// reviewer 子 Agent 走 `AgentRegistry::spawn_subagent_internal`，**不**进 LLM catalog；
-/// 本表仅控制：默认是否允许 reviewer 改 plan、子 loop 最大轮次、（可选）覆盖父 model /
-/// system prompt。
+/// 本表仅控制：子 loop 最大轮次、（可选）覆盖父 model / system prompt。
+///
+/// **改稿权 (`allow_review_edit`) 已固定为 `true`**——实现层硬编码，不再提供配置项。
+/// 历史变更：移除 `TOMCAT_REVIEWER_DEFAULT_ALLOW_EDIT` / `[reviewer].default_allow_edit`。
 ///
 /// env 覆盖（plan §P0.5 / reviewer §11）：
-/// - `TOMCAT_REVIEWER_DEFAULT_ALLOW_EDIT` → `default_allow_edit`
-/// - `TOMCAT_REVIEWER_MAX_TURNS` → `max_turns`
+/// - `TOMCAT_REVIEWER_MAX_TURNS` → `max_turns`（默认 64）
 /// - `TOMCAT_REVIEWER_MODEL` → `model_override`
 /// - `TOMCAT_REVIEWER_SYSTEM_PROMPT_OVERRIDE_PATH` → `system_prompt_override_path`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReviewerConfig {
-    /// `dispatch_reviewer` 默认 `allow_review_edit`（启用后 reviewer 子工具集附加 `update_plan` / scoped `edit`）。
-    /// 默认 false。
-    #[serde(default)]
-    pub default_allow_edit: bool,
-    /// reviewer 子 loop 最大轮次（与 `max_tool_rounds` 同档）。默认 8。
+    /// reviewer 子 loop 最大 LLM reasoning 轮次（映射到 `AgentLoopConfig.max_tool_rounds`）。
+    /// 默认 64；transcript 落 `reviewer_turns_used/limit/stop_reason` 便于调参。
     #[serde(default = "default_reviewer_max_turns")]
     pub max_turns: u32,
     /// 显式覆盖 reviewer 子 Agent 使用的 LLM 模型；`None` 时继承父 Agent。
@@ -792,13 +769,12 @@ pub struct ReviewerConfig {
 }
 
 fn default_reviewer_max_turns() -> u32 {
-    8
+    64
 }
 
 impl Default for ReviewerConfig {
     fn default() -> Self {
         Self {
-            default_allow_edit: false,
             max_turns: default_reviewer_max_turns(),
             model_override: None,
             system_prompt_override_path: None,

@@ -8,8 +8,8 @@
 mod common;
 
 use futures_util::StreamExt;
-use tomcat::{resolve_llm, ChatMessage, ChatRequest, LlmConfig};
 use std::time::Duration;
+use tomcat::{resolve_llm, ChatMessage, ChatRequest, LlmConfig};
 
 fn completions_config() -> LlmConfig {
     LlmConfig {
@@ -27,7 +27,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
 {
     common::setup_logging();
     let _span = tracing::info_span!("test_llm_provider_chat_real_request_returns_ok").entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = completions_config();
     let provider = resolve_llm(&config)
@@ -65,7 +65,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     common::setup_logging();
     let _span =
         tracing::info_span!("test_llm_provider_chat_stream_real_request_yields_events").entered();
-    let _ = dotenvy::dotenv().ok();
+    common::load_openai_test_env();
 
     let config = completions_config();
     let provider = resolve_llm(&config)

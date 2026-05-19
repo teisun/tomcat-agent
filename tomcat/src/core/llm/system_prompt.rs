@@ -29,6 +29,7 @@ pub trait SystemPromptSection: Send + Sync {
 pub struct WorkspaceContext {
     pub agent_workspace_dir: String,
     pub agent_definition_dir: String,
+    pub agent_plans_dir: String,
     pub agent_trail_dir: String,
 }
 
@@ -155,12 +156,18 @@ impl SystemPromptSection for WorkspaceContextSection {
              - Permission: read/write. Use it only for agent definition files, rules, prompts, skills, and long-term configuration.\n\
              - Do NOT treat it as the user's current directory or project.\n\
              \n\
+             Agent plans directory (agent_plans_dir): {agent_plans_dir}\n\
+             - Runtime plan files under ~/.tomcat/plans/.\n\
+             - Permission: read by default; plan-aware guards decide whether write/edit is allowed for the current mode/tool.\n\
+             - Prefer plan tools and exact plan paths here instead of searching random temp directories.\n\
+             \n\
              Agent trail directory (agent_trail_dir): {agent_trail_dir}\n\
              - Runtime data under ~/.tomcat/agents/<agentId>/, including sessions, logs, audit records, temp files, and Layer0 tool-results.\n\
              - Permission: read-only. Do not write, edit, delete, or create files here through normal tools.\n\
              - Inspect only when debugging agent runtime state; do NOT treat it as the user's project.",
             agent_workspace_dir = context.agent_workspace_dir,
             agent_definition_dir = context.agent_definition_dir,
+            agent_plans_dir = context.agent_plans_dir,
             agent_trail_dir = context.agent_trail_dir,
         )
     }
@@ -337,6 +344,7 @@ pub fn build_system_prompt(workspace_dir: &str) -> String {
     let context = WorkspaceContext {
         agent_workspace_dir: workspace_dir.to_string(),
         agent_definition_dir: workspace_dir.to_string(),
+        agent_plans_dir: workspace_dir.to_string(),
         agent_trail_dir: workspace_dir.to_string(),
     };
     SystemPromptBuilder::default().build(&context)

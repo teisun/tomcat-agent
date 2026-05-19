@@ -598,7 +598,7 @@ SubAgentEnd {
 | 入口 | LLM 自主决定的 tool_call | 内部 Rust API（`AgentRegistry::spawn_subagent_internal(...)` 拟定），由 `CreatePlan` 工具内部同步 await |
 | 是否进 catalog | 是 | 否 |
 | `subagent_type` | 由 LLM 在 schema 内传入 | 不走 schema，调用方硬编码（reviewer 固定模板） |
-| `allowed_tools` | 由 LLM 传入或继承父 catalog | 调用方硬编码（默认 `{read, grep, find}`；runtime 内部参数 `allow_review_edit=true` 时附加 `edit`，且 `tool_exec` 守卫强制路径 `~/.tomcat/plans/*.plan.md` + diff ⊆ `## Review` 段） |
+| `allowed_tools` | 由 LLM 传入或继承父 catalog | 调用方硬编码（默认 `{read, grep, find}`；runtime 内部参数 `allow_review_edit=true` 时附加 `edit` / `update_plan`，且 `tool_exec` 守卫强制 `edit` 仅能作用于 `~/.tomcat/plans/*.plan.md` 且不得 raw 改 frontmatter） |
 | 复用 §14 基础设施 | 全部（`AgentRegistry` / `spawn_depth` / `CascadeAbort` / `SubAgentStart`/`End` 事件） | 全部（同左） |
 | 对标项目 | hermes `delegate_task`、claude-code `Task` / `Agent` | codex [`codex-rs/core/src/codex_delegate.rs::run_codex_thread_one_shot`](https://example/codex_delegate) |
 

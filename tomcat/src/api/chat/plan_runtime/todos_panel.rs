@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::api::chat::plan_runtime::file_store::{Milestone, TodoItem};
+use crate::api::chat::plan_runtime::file_store::TodoItem;
 
 /// 一次 todos / update_plan mutation 完成后推给 panel 的 snapshot。
 #[derive(Debug, Clone)]
@@ -23,8 +23,6 @@ pub struct TodosPanelSnapshot {
     pub scope: String,
     /// 当前 items 列表（顺序与 `update_plan` 返回保持一致）。
     pub items: Vec<TodoItem>,
-    /// 当前 milestones 列表（可空）。
-    pub milestones: Vec<Milestone>,
     /// `update_plan` 累积的 warnings（一致性校验等）。
     pub warnings: Vec<String>,
 }
@@ -35,17 +33,15 @@ impl TodosPanelSnapshot {
             panel_snapshot_id: next_panel_snapshot_id(),
             scope: "session".to_string(),
             items,
-            milestones: Vec::new(),
             warnings: Vec::new(),
         }
     }
 
-    pub fn new_plan(plan_id: &str, items: Vec<TodoItem>, milestones: Vec<Milestone>) -> Self {
+    pub fn new_plan(plan_id: &str, items: Vec<TodoItem>) -> Self {
         Self {
             panel_snapshot_id: next_panel_snapshot_id(),
             scope: format!("plan:{plan_id}"),
             items,
-            milestones,
             warnings: Vec::new(),
         }
     }
@@ -170,7 +166,10 @@ mod tests {
         let a = next_panel_snapshot_id();
         let b = next_panel_snapshot_id();
         let c = next_panel_snapshot_id();
-        assert!(a < b && b < c, "ids should be strictly increasing: {a} {b} {c}");
+        assert!(
+            a < b && b < c,
+            "ids should be strictly increasing: {a} {b} {c}"
+        );
     }
 
     #[test]
@@ -184,7 +183,6 @@ mod tests {
             id: "t".into(),
             content: "x".into(),
             status: TodoStatus::Pending,
-            milestone_id: None,
         }]);
         n.notify(&snap);
         assert_eq!(p1.log.lock().len(), 1);

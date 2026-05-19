@@ -1,3 +1,6 @@
+use serial_test::serial;
+use std::sync::Arc;
+use tempfile::TempDir;
 use tomcat::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, PermissionGate, SessionGrants,
 };
@@ -5,9 +8,6 @@ use tomcat::{
     AllowAllConfirmation, DefaultPrimitiveExecutor, PrimitiveConfig, PrimitiveExecutor,
     SearchFilesArgs, SearchFilesOutputMode, SearchFilesTarget, TracingAuditRecorder,
 };
-use serial_test::serial;
-use std::sync::Arc;
-use tempfile::TempDir;
 
 struct PathGuard {
     old_path: Option<std::ffi::OsString>,

@@ -5,7 +5,8 @@
 //!   离开此目录的任何写一律拒。
 //! - **EXEC**：`~/.tomcat/plans/*` **全拒**（含 plan 文件正文与 frontmatter）；推进任务仅走 `update_plan`。
 //! - **CHAT / Pending / Completed**：plan 文件经 plan 工具间接写；外部路径按常规权限。
-//! - **Reviewer subagent**：`edit` 仅 `## Review` 段（在 tool_exec 的 edit 分支内做 diff 段位检查）。
+//! - **Reviewer subagent**：`edit` 仅允许作用于 `~/.tomcat/plans/*.plan.md`，且 raw edit
+//!   不能改 frontmatter（在 tool_exec 的 edit 分支内做 diff 检查）。
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -67,7 +68,7 @@ pub enum WritePathDenied {
         "EXEC 模式下 ~/.tomcat/plans/* 全部禁写（含正文与 frontmatter）；推进任务请使用 update_plan 工具。目标 {target:?}"
     )]
     ExecModePlanFilesReadOnly { target: PathBuf },
-    #[error("reviewer 子 Agent 只能写 ~/.tomcat/plans/*.plan.md（且仅 ## Review 段，由 edit 守卫具体检查）")]
+    #[error("reviewer 子 Agent 只能写 ~/.tomcat/plans/*.plan.md（frontmatter raw edit 仍由 edit 守卫具体检查）")]
     ReviewerOnlyPlanFiles,
     #[error("无法解析 ~/.tomcat/plans/ 目录：{0}")]
     PlansDirUnavailable(String),
@@ -86,8 +87,8 @@ pub enum SubagentKind {
 ///
 /// 失败返回 `WritePathDenied`；调用方应转成 `ToolError`，给 LLM 明确提示。
 ///
-/// 这里只做**路径维度**的拒绝；reviewer 的「仅 `## Review` 段」由 edit 分支再做 diff 检查（
-/// 因为它需要新旧两份内容，无法在路径层判断）。
+/// 这里只做**路径维度**的拒绝；reviewer 的 frontmatter raw-edit 守卫由 edit 分支再做
+/// diff 检查（因为它需要新旧两份内容，无法在路径层判断）。
 pub fn enforce_write_path_policy(
     mode: &PlanMode,
     subagent: SubagentKind,
@@ -99,16 +100,22 @@ pub fn enforce_write_path_policy(
     // 目标文件未必存在（如 PLAN 期 LLM `write` 新文件），canonicalize 会失败；
     // 优先 canonicalize 父目录，再拼回文件名，保证 macOS `/var/folders` →
     // `/private/var/folders` 这种 symlink 边界两侧都用统一形态比较。
-    let canon_target: PathBuf = if let Ok(canon) = target_path.canonicalize() {
+    let normalized_target = target_path
+        .to_str()
+        .and_then(|raw| crate::infra::platform::normalize_path(raw).ok())
+        .unwrap_or_else(|| target_path.to_path_buf());
+    let canon_target: PathBuf = if let Ok(canon) = normalized_target.canonicalize() {
         canon
-    } else if let Some(parent) = target_path.parent() {
-        let canon_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
-        match target_path.file_name() {
+    } else if let Some(parent) = normalized_target.parent() {
+        let canon_parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        match normalized_target.file_name() {
             Some(name) => canon_parent.join(name),
-            None => target_path.to_path_buf(),
+            None => normalized_target,
         }
     } else {
-        target_path.to_path_buf()
+        normalized_target
     };
 
     let in_plans_dir = canon_target.starts_with(&canon_plans);
@@ -132,16 +139,42 @@ pub fn enforce_write_path_policy(
     }
 }
 
+/// reviewer 在 plan 文件上做 `edit` 时的「frontmatter 不可 raw 改」守卫。
+///
+/// 在 `tool_exec` 的 `edit` 分支被调用：传入原文 + 模拟应用 edits 后的新文，
+/// 返回 `Err` 表示 frontmatter 有变化。正文其余部分全部允许。
+pub fn reviewer_body_diff_guard(old: &str, new: &str) -> Result<(), ReviewDiffDenied> {
+    if extract_frontmatter(old) != extract_frontmatter(new) {
+        return Err(ReviewDiffDenied::FrontmatterTouched);
+    }
+    Ok(())
+}
+
+/// reviewer 段守卫拒绝原因。
+#[derive(Debug, thiserror::Error)]
+pub enum ReviewDiffDenied {
+    #[error("reviewer 不能 raw 修改 plan 文件 frontmatter；请用 update_plan 修改结构化字段")]
+    FrontmatterTouched,
+}
+
+fn extract_frontmatter(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return "";
+    };
+    let Some(end) = rest.find("\n---\n") else {
+        return "";
+    };
+    &text[..end + 5]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
 
     /// 全套件共享一把 HOME 锁——`safety::tests` 修改 HOME 后还原；与 plan_runtime::tools::tests
     /// 的 home_lock 行为一致，避免污染 permission/cli config_keys 等其他 suite。
-    fn home_lock() -> &'static Mutex<()> {
-        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn home_lock() -> &'static std::sync::Mutex<()> {
+        crate::test_support::home_env_lock()
     }
 
     fn orig_home() -> &'static Option<String> {
@@ -179,7 +212,7 @@ mod tests {
 
     #[test]
     fn plan_mode_rejects_writes_outside_plans_dir() {
-        let _g = home_lock().lock();
+        let _g = home_lock().lock().unwrap();
         let _home = setup_home();
         let outside = std::path::PathBuf::from("/tmp/foo.txt");
         let err = enforce_write_path_policy(&PlanMode::Planning, SubagentKind::Other, &outside)
@@ -189,7 +222,7 @@ mod tests {
 
     #[test]
     fn plan_mode_allows_writes_inside_plans_dir() {
-        let _g = home_lock().lock();
+        let _g = home_lock().lock().unwrap();
         let home = setup_home();
         let target = home.path.join(".tomcat/plans/foo.plan.md");
         enforce_write_path_policy(&PlanMode::Planning, SubagentKind::Other, &target)
@@ -198,7 +231,7 @@ mod tests {
 
     #[test]
     fn exec_mode_rejects_writes_to_any_plans_dir_file() {
-        let _g = home_lock().lock();
+        let _g = home_lock().lock().unwrap();
         let home = setup_home();
         let target = home.path.join(".tomcat/plans/foo.plan.md");
         let err = enforce_write_path_policy(
@@ -214,7 +247,7 @@ mod tests {
 
     #[test]
     fn exec_mode_allows_writes_outside_plans_dir() {
-        let _g = home_lock().lock();
+        let _g = home_lock().lock().unwrap();
         let _home = setup_home();
         let outside = std::path::PathBuf::from("/tmp/foo.txt");
         enforce_write_path_policy(
@@ -229,7 +262,7 @@ mod tests {
 
     #[test]
     fn chat_mode_does_not_restrict() {
-        let _g = home_lock().lock();
+        let _g = home_lock().lock().unwrap();
         let _home = setup_home();
         let outside = std::path::PathBuf::from("/tmp/foo.txt");
         enforce_write_path_policy(&PlanMode::Chat, SubagentKind::Other, &outside)
@@ -238,11 +271,44 @@ mod tests {
 
     #[test]
     fn reviewer_subagent_must_target_plan_files() {
-        let _g = home_lock().lock();
+        let _g = home_lock().lock().unwrap();
         let _home = setup_home();
         let outside = std::path::PathBuf::from("/tmp/foo.txt");
         let err = enforce_write_path_policy(&PlanMode::Chat, SubagentKind::Reviewer, &outside)
             .expect_err("reviewer 不能写 plans/ 外路径");
         matches!(err, WritePathDenied::ReviewerOnlyPlanFiles);
+    }
+
+    #[test]
+    fn reviewer_subagent_allows_tilde_expanded_plan_file() {
+        let _g = home_lock().lock().unwrap();
+        let _home = setup_home();
+        let target = std::path::PathBuf::from("~/.tomcat/plans/foo.plan.md");
+        enforce_write_path_policy(&PlanMode::Chat, SubagentKind::Reviewer, &target)
+            .expect("reviewer 应接受 ~ 展开的 plans 路径");
+    }
+
+    // ─── reviewer_body_diff_guard ───────────────────────────────────────
+
+    const SAMPLE_PLAN: &str =
+        "---\nplan_id: x\ngoal: sample\n---\n## Goal\n\ngoal\n\n## Draft\n\ndraft\n\n## Notes\n\nnote\n\n## Todos Board\n\nboard\n";
+
+    #[test]
+    fn reviewer_body_diff_guard_allows_goal_change() {
+        let new = SAMPLE_PLAN.replace("## Goal\n\ngoal", "## Goal\n\nupdated goal");
+        reviewer_body_diff_guard(SAMPLE_PLAN, &new).expect("改正文应放行");
+    }
+
+    #[test]
+    fn reviewer_body_diff_guard_allows_todos_board_change() {
+        let new = SAMPLE_PLAN.replace("board", "rewritten board");
+        reviewer_body_diff_guard(SAMPLE_PLAN, &new).expect("改正文应放行");
+    }
+
+    #[test]
+    fn reviewer_body_diff_guard_rejects_frontmatter_change() {
+        let new = SAMPLE_PLAN.replace("plan_id: x", "plan_id: y");
+        let err = reviewer_body_diff_guard(SAMPLE_PLAN, &new).expect_err("改 frontmatter 应被拒");
+        matches!(err, ReviewDiffDenied::FrontmatterTouched);
     }
 }

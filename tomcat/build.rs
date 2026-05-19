@@ -43,7 +43,38 @@ fn collect_files(base: &Path, current: &Path, out: &mut Vec<(String, String)>) {
     }
 }
 
+/// 运行时 `dyld` 需能解析 `@rpath/libwasmedge.0.dylib`。默认动态链接无 LC_RPATH 时
+/// 只能依赖 `DYLD_LIBRARY_PATH`（须 `source ~/.wasmedge/env`）。在编译期注入常见安装路径，
+/// 避免误删 `target/**/libwasmedge*.dylib` 副本后本地 `cargo test` 全部 SIGABRT。
+fn emit_wasmedge_rpath_if_present() {
+    let candidates: Vec<std::path::PathBuf> = [
+        std::env::var("WASMEDGE_LIB_DIR")
+            .ok()
+            .map(std::path::PathBuf::from),
+        std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join(".wasmedge/lib")),
+        Some(std::path::PathBuf::from("/usr/local/lib")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    for dir in candidates {
+        let dylib = dir.join("libwasmedge.0.dylib");
+        if !dylib.is_file() {
+            continue;
+        }
+        let dir_str = dir.to_string_lossy();
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir_str}");
+        println!("cargo:warning=WasmEdge rpath 已注入: {dir_str}（存在 libwasmedge.0.dylib）");
+        break;
+    }
+}
+
 fn main() {
+    emit_wasmedge_rpath_if_present();
+
     let wasm_path = Path::new("assets/wasm/wasmedge_quickjs.wasm");
     let modules_dir = Path::new("assets/modules");
 

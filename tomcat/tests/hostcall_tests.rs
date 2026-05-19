@@ -3,13 +3,13 @@
 
 mod common;
 
+use std::path::Path;
+use std::sync::Arc;
 use tomcat::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use tomcat::{
     invoke_host_func_with, AllowAllConfirmation, DefaultEventBus, DefaultPrimitiveExecutor,
     HostApiDispatcher, PrimitiveConfig, TracingAuditRecorder,
 };
-use std::path::Path;
-use std::sync::Arc;
 
 fn make_gate(definition: &Path) -> Arc<dyn PermissionGate> {
     DefaultPermissionGate::new(

@@ -23,11 +23,6 @@ pub enum TodoOp {
     SetStatus { id: String, status: TodoStatus },
     /// 改正文。
     SetContent { id: String, content: String },
-    /// 改归属 milestone（None 表示脱离）。
-    SetMilestone {
-        id: String,
-        milestone_id: Option<String>,
-    },
     /// 删除 todo。
     RemoveTodo { id: String },
 }
@@ -80,14 +75,6 @@ fn apply_one(todos: &mut Vec<TodoItem>, op: &TodoOp) -> Result<(), OpError> {
             t.content = content.clone();
             Ok(())
         }
-        TodoOp::SetMilestone { id, milestone_id } => {
-            let t = todos
-                .iter_mut()
-                .find(|t| &t.id == id)
-                .ok_or_else(|| OpError::TodoNotFound(id.clone()))?;
-            t.milestone_id = milestone_id.clone();
-            Ok(())
-        }
         TodoOp::RemoveTodo { id } => {
             let before = todos.len();
             todos.retain(|t| &t.id != id);
@@ -114,7 +101,10 @@ fn enforce_single_in_progress(todos: &[TodoItem]) -> Result<(), OpError> {
 /// 派生：所有 todo 都 completed → true；否则 false。空列表返回 false（`completed` 模式
 /// 需要至少完成一件事才转入，避免空 plan 误判已完成）。
 pub fn all_completed(todos: &[TodoItem]) -> bool {
-    !todos.is_empty() && todos.iter().all(|t| matches!(t.status, TodoStatus::Completed))
+    !todos.is_empty()
+        && todos
+            .iter()
+            .all(|t| matches!(t.status, TodoStatus::Completed))
 }
 
 #[cfg(test)]
@@ -126,7 +116,6 @@ mod tests {
             id: id.into(),
             content: id.into(),
             status,
-            milestone_id: None,
         }
     }
 
@@ -181,10 +170,7 @@ mod tests {
 
     #[test]
     fn enforces_single_in_progress_after_batch() {
-        let mut v = vec![
-            td("a", TodoStatus::Pending),
-            td("b", TodoStatus::Pending),
-        ];
+        let mut v = vec![td("a", TodoStatus::Pending), td("b", TodoStatus::Pending)];
         let err = apply_todos_ops(
             &mut v,
             &[
@@ -203,24 +189,17 @@ mod tests {
     }
 
     #[test]
-    fn set_content_and_milestone_ok() {
+    fn set_content_ok() {
         let mut v = vec![td("a", TodoStatus::Pending)];
         apply_todos_ops(
             &mut v,
-            &[
-                TodoOp::SetContent {
-                    id: "a".into(),
-                    content: "new".into(),
-                },
-                TodoOp::SetMilestone {
-                    id: "a".into(),
-                    milestone_id: Some("m1".into()),
-                },
-            ],
+            &[TodoOp::SetContent {
+                id: "a".into(),
+                content: "new".into(),
+            }],
         )
         .unwrap();
         assert_eq!(v[0].content, "new");
-        assert_eq!(v[0].milestone_id.as_deref(), Some("m1"));
     }
 
     #[test]
@@ -230,10 +209,7 @@ mod tests {
 
     #[test]
     fn all_completed_mixed_returns_false() {
-        let v = vec![
-            td("a", TodoStatus::Completed),
-            td("b", TodoStatus::Pending),
-        ];
+        let v = vec![td("a", TodoStatus::Completed), td("b", TodoStatus::Pending)];
         assert!(!all_completed(&v));
     }
 
@@ -248,10 +224,7 @@ mod tests {
 
     #[test]
     fn cancelled_does_not_block_in_progress() {
-        let mut v = vec![
-            td("a", TodoStatus::Cancelled),
-            td("b", TodoStatus::Pending),
-        ];
+        let mut v = vec![td("a", TodoStatus::Cancelled), td("b", TodoStatus::Pending)];
         apply_todos_ops(
             &mut v,
             &[TodoOp::SetStatus {

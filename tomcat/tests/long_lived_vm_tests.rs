@@ -8,13 +8,13 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use tomcat::{
     parse_manifest, wire, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
     PluginManager, PluginStatus, RuntimeManager, SharedRuntimeManager, VmActorHandle, VmActorState,
     VmCommand, VmRuntimeKey,
 };
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
 
 fn stub_handle() -> VmActorHandle {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);

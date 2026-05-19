@@ -78,6 +78,7 @@ impl ReviewerDispatcher for AcceptReviewer {
             summary: "looks good".into(),
             changes_summary: "none".into(),
             applied_changes: false,
+            ..Default::default()
         }
     }
 }
@@ -101,27 +102,30 @@ async fn full_plan_lifecycle_create_build_complete() {
             create_plan::CreatePlanArgs {
                 goal: "ship full path".into(),
                 draft: "## Goal\n收口".into(),
-                milestones: vec![],
                 todos: vec![
                     create_plan::TodoArg {
                         id: "a".into(),
                         content: "step a".into(),
                         status: TodoStatus::Pending,
-                        milestone_id: None,
                     },
                     create_plan::TodoArg {
                         id: "b".into(),
                         content: "step b".into(),
                         status: TodoStatus::Pending,
-                        milestone_id: None,
                     },
                 ],
             },
         )
         .unwrap();
-        let plan_id = out["plan_id"].as_str().expect("plan_id present").to_string();
+        let plan_id = out["plan_id"]
+            .as_str()
+            .expect("plan_id present")
+            .to_string();
         assert!(plan_id.starts_with("plan_"));
-        assert_eq!(rt.active_planning_plan_id().as_deref(), Some(plan_id.as_str()));
+        assert_eq!(
+            rt.active_planning_plan_id().as_deref(),
+            Some(plan_id.as_str())
+        );
 
         // 3) /plan build → EXEC + 首轮 user_meta 缓存
         let outcome = rt.build_plan(&plan_id, Some("uuid-1".into())).unwrap();
@@ -138,13 +142,13 @@ async fn full_plan_lifecycle_create_build_complete() {
             &rt,
             update_plan::UpdatePlanArgs {
                 plan_id: Some(plan_id.clone()),
+                path: None,
+                replace: false,
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: "a".into(),
+                    content: None,
                     status: TodoStatus::InProgress,
                 }],
-                milestones_ops: serde_json::Value::Null,
-                replace_todos: false,
-                replace_milestones: false,
             },
         )
         .unwrap();
@@ -153,13 +157,13 @@ async fn full_plan_lifecycle_create_build_complete() {
             &rt,
             update_plan::UpdatePlanArgs {
                 plan_id: Some(plan_id.clone()),
+                path: None,
+                replace: false,
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: "a".into(),
+                    content: None,
                     status: TodoStatus::Completed,
                 }],
-                milestones_ops: serde_json::Value::Null,
-                replace_todos: false,
-                replace_milestones: false,
             },
         )
         .unwrap();
@@ -168,13 +172,13 @@ async fn full_plan_lifecycle_create_build_complete() {
             &rt,
             update_plan::UpdatePlanArgs {
                 plan_id: Some(plan_id.clone()),
+                path: None,
+                replace: false,
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: "b".into(),
+                    content: None,
                     status: TodoStatus::Completed,
                 }],
-                milestones_ops: serde_json::Value::Null,
-                replace_todos: false,
-                replace_milestones: false,
             },
         )
         .unwrap();
@@ -208,12 +212,10 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
             create_plan::CreatePlanArgs {
                 goal: "long task".into(),
                 draft: "long bullets".into(),
-                milestones: vec![],
                 todos: vec![create_plan::TodoArg {
                     id: "t1".into(),
                     content: "long".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: None,
                 }],
             },
         )
@@ -331,9 +333,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
     });
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
-        tomcat::api::chat::plan_runtime::tools::ask_question::execute(
-            &rt, &panel, &args, cancel,
-        ),
+        tomcat::api::chat::plan_runtime::tools::ask_question::execute(&rt, &panel, &args, cancel),
     )
     .await
     .expect("ask_question cancel 超时（D8 失效）")
@@ -358,12 +358,10 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
             create_plan::CreatePlanArgs {
                 goal: "integ".into(),
                 draft: "outline".into(),
-                milestones: vec![],
                 todos: vec![create_plan::TodoArg {
                     id: "t1".into(),
                     content: "step".into(),
                     status: TodoStatus::Pending,
-                    milestone_id: None,
                 }],
             },
             false,
@@ -396,12 +394,10 @@ async fn raw_edit_to_plan_file_blocked_in_planning_and_executing() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "d".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "x".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )
@@ -436,11 +432,13 @@ async fn todos_always_writes_session_never_plan_file() {
     todos::execute(
         &rt,
         todos::TodosArgs {
-            ops: vec![todos::TodoOpArg::AddTodo {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
                 id: "session_x".into(),
-                content: "scratch".into(),
-                status: TodoStatus::Pending,
-                milestone_id: None,
+                content: Some("scratch".into()),
+                status: Some(TodoStatus::Pending),
             }],
         },
     )
@@ -451,8 +449,12 @@ async fn todos_always_writes_session_never_plan_file() {
     todos::execute(
         &rt,
         todos::TodosArgs {
+            new_todos: false,
+            title: None,
+            replace: false,
             ops: vec![todos::TodoOpArg::SetStatus {
                 id: "session_x".into(),
+                content: None,
                 status: TodoStatus::Completed,
             }],
         },
@@ -466,12 +468,10 @@ async fn todos_always_writes_session_never_plan_file() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "d".into(),
-            milestones: vec![],
             todos: vec![create_plan::TodoArg {
                 id: "plan_t1".into(),
                 content: "plan task".into(),
                 status: TodoStatus::Pending,
-                milestone_id: None,
             }],
         },
     )
@@ -483,11 +483,13 @@ async fn todos_always_writes_session_never_plan_file() {
     todos::execute(
         &rt,
         todos::TodosArgs {
-            ops: vec![todos::TodoOpArg::AddTodo {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
                 id: "plan_y".into(),
-                content: "in plan".into(),
-                status: TodoStatus::Pending,
-                milestone_id: None,
+                content: Some("in plan".into()),
+                status: Some(TodoStatus::Pending),
             }],
         },
     )

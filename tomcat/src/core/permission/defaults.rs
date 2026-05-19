@@ -15,7 +15,11 @@ use super::types::PathRuleMode;
 /// 内置默认 path_rules。
 ///
 /// 涉及凭据保护（`~/.ssh` / `~/.aws` 等）+ tomcat 自身配置/凭据保护（`~/.tomcat/...`）
-/// + Agent 数据目录可读不可写（`~/.tomcat/agents/*/{sessions,logs,audit}`）。
+/// + Agent 数据目录只读（`~/.tomcat/agents/*/{sessions,logs,audit}`）。
+///
+/// `~/.tomcat/plans/` 不再放在 builtin readonly path_rules 中，而是由
+/// `PermissionGate` 作为 `agent_plans_dir` 默认授权根直接处理，这样 read/write
+/// 都能继续交给上层 plan-runtime 守卫细分。
 pub const BUILTIN_DEFAULT_PATH_RULES: &[(&str, PathRuleMode)] = &[
     // ── 凭据保护 ──
     // 不含 glob 字符 → 走前缀匹配，自动覆盖目录内全部文件。

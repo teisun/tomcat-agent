@@ -83,6 +83,7 @@ fn set_toml_key_rejects_bad_integer() {
 #[test]
 #[serial(env_lock)]
 fn config_set_with_real_file() {
+    let _home = crate::test_support::home_env_lock().lock().unwrap();
     run_init().unwrap();
     let config_path = crate::normalize_path(DEFAULT_CONFIG_PATH).unwrap();
     assert!(config_path.exists(), "config should exist after init");

@@ -33,6 +33,7 @@
 - [/] **P8c** `plan_cli_e2e`（部分）— D10 catalog 一致性 `committed_tool_catalog_matches_catalog_renderer` 已绿；完整 E2E-PLAN-001～016（含 mock HTTP / 子进程 / scenario library）规模超出"三卡同分支"范围，转移到独立 PR-PLG 单独交付（chat_loop 已经把 plan_runtime/catalog/reminder/prefix/build 接通，主路径可手动跑）
 - [x] **P8d** gen-tool-catalog 跑通 / `tool_catalog_doc` (D10) 1/0 / cargo test --lib 1025/0 / plan_runtime_integration 8/0；人工 PLAN-UX-01～04 spot-check 留给真实部署
 - [x] **done** 三卡 §9.7 DoD 勾选完成；PENDING_INTEGRATION 标记（push 待用户确认）
+- [x] **真 LLM E2E 轮（2026-05）** 完成 reviewer 子 Agent 真派发（`ProdReviewerDispatcher` 注入 `AgentRegistry::spawn_subagent_internal` + `Weak<PlanRuntime>` 防 cycle + 抽出 `run_chat_turn` 复用） + tool_exec 双保险守卫（reviewer 路径下 catalog 白名单 + frontmatter diff guard） + transcript `plan.review` / `plan.review.warning` 自定义事件 + 删 `ReviewerConfig.default_allow_edit` & PlanRuntime 原子开关（改稿权写死 true） + 默认 `max_turns=64` + 新增 [`tests/plan_real_llm_inprocess_tests.rs`](../../tests/plan_real_llm_inprocess_tests.rs)（E2E-PLAN-RL-002，需 `OPENAI_API_KEY`）+ [`tests/plan_real_llm_cli_e2e.rs`](../../tests/plan_real_llm_cli_e2e.rs)（E2E-PLAN-RL-001，双进程 chat / chat --resume）+ reviewer.md §11 测试矩阵 12 项 DONE
 
 ## 关键决策
 

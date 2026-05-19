@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// 保留 option id；LLM 不得显式声明此 id；UI 端 panel 自动追加同 id 的兜底槽。
 pub const CUSTOM_OPTION_ID: &str = "__custom__";
+const ASK_QUESTION_TEST_AUTO_PICK_ENV: &str = "TOMCAT_ASK_QUESTION_TEST_AUTO_PICK";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Question {
@@ -90,6 +91,15 @@ impl AskQuestionPanel for CliAskQuestionPanel {
                     cancelled: true,
                 };
             }
+            if let Some(answer) = auto_pick_answer_for_test(q) {
+                let picked = answer.option_ids.join(",");
+                eprintln!(
+                    "[ask_question:auto-pick] qid={} strategy=recommended picks={picked}",
+                    q.id
+                );
+                answers.push(answer);
+                continue;
+            }
             // 渲染到 stderr，避免污染 chat 主流
             eprintln!("\n{}", q.prompt);
             for (i, opt) in q.options.iter().enumerate() {
@@ -99,7 +109,11 @@ impl AskQuestionPanel for CliAskQuestionPanel {
             eprintln!("  c. 自定义…");
             eprintln!("  q. 取消");
             let allow_multi = q.allow_multiple;
-            let prompt = if allow_multi { "多选(逗号分隔)/c/q > " } else { "单选/c/q > " };
+            let prompt = if allow_multi {
+                "多选(逗号分隔)/c/q > "
+            } else {
+                "单选/c/q > "
+            };
             eprint!("{}", prompt);
 
             // 阻塞 stdin 读 1 行（spawn_blocking）
@@ -178,10 +192,35 @@ impl AskQuestionPanel for CliAskQuestionPanel {
     }
 }
 
+fn auto_pick_answer_for_test(question: &Question) -> Option<Answer> {
+    let strategy = std::env::var(ASK_QUESTION_TEST_AUTO_PICK_ENV).ok()?;
+    if !strategy.eq_ignore_ascii_case("recommended") {
+        return None;
+    }
+    let picked = question
+        .options
+        .iter()
+        .find(|opt| opt.recommended)
+        .or_else(|| question.options.first())?;
+    Some(Answer {
+        question_id: question.id.clone(),
+        option_ids: vec![picked.id.clone()],
+        custom_text: None,
+        picked_recommended: picked.recommended,
+    })
+}
+
 async fn read_one_line_blocking() -> std::io::Result<String> {
     tokio::task::spawn_blocking(|| {
         let mut line = String::new();
-        std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)?;
+        let n =
+            std::io::BufRead::read_line(&mut std::io::BufReader::new(std::io::stdin()), &mut line)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "stdin closed",
+            ));
+        }
         Ok(line)
     })
     .await
@@ -287,6 +326,34 @@ impl AskQuestionPanel for MockAskQuestionPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+
+    fn ask_question_env_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     fn dummy_question() -> Question {
         Question {
@@ -302,6 +369,26 @@ mod tests {
                 QuestionOption {
                     id: "b".into(),
                     label: "B".into(),
+                    recommended: false,
+                },
+            ],
+        }
+    }
+
+    fn question_without_recommended() -> Question {
+        Question {
+            id: "q2".into(),
+            prompt: "无推荐项".into(),
+            allow_multiple: false,
+            options: vec![
+                QuestionOption {
+                    id: "first".into(),
+                    label: "First".into(),
+                    recommended: false,
+                },
+                QuestionOption {
+                    id: "second".into(),
+                    label: "Second".into(),
                     recommended: false,
                 },
             ],
@@ -354,6 +441,39 @@ mod tests {
             .ask(vec![dummy_question()], Arc::new(AtomicBool::new(false)))
             .await;
         assert!(start.elapsed() >= std::time::Duration::from_millis(40));
+    }
+
+    #[tokio::test]
+    async fn cli_panel_auto_picks_recommended_when_env_enabled() {
+        let _guard = ask_question_env_lock().lock();
+        let _env = EnvVarGuard::set(ASK_QUESTION_TEST_AUTO_PICK_ENV, "recommended");
+        let panel = CliAskQuestionPanel;
+        let out = panel
+            .ask(vec![dummy_question()], Arc::new(AtomicBool::new(false)))
+            .await;
+        assert!(!out.cancelled);
+        assert_eq!(out.answers.len(), 1);
+        assert_eq!(out.answers[0].question_id, "q1");
+        assert_eq!(out.answers[0].option_ids, vec!["a".to_string()]);
+        assert!(out.answers[0].picked_recommended);
+    }
+
+    #[tokio::test]
+    async fn cli_panel_auto_pick_falls_back_to_first_option() {
+        let _guard = ask_question_env_lock().lock();
+        let _env = EnvVarGuard::set(ASK_QUESTION_TEST_AUTO_PICK_ENV, "recommended");
+        let panel = CliAskQuestionPanel;
+        let out = panel
+            .ask(
+                vec![question_without_recommended()],
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+        assert!(!out.cancelled);
+        assert_eq!(out.answers.len(), 1);
+        assert_eq!(out.answers[0].question_id, "q2");
+        assert_eq!(out.answers[0].option_ids, vec!["first".to_string()]);
+        assert!(!out.answers[0].picked_recommended);
     }
 
     #[tokio::test]

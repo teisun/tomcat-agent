@@ -25,6 +25,26 @@ pub fn normalize_path(path: &str) -> Result<PathBuf, AppError> {
     Ok(expanded.canonicalize().unwrap_or(expanded))
 }
 
+/// 把绝对路径格式化为对 HOME 友好的展示串：
+/// - 位于 HOME 下 → `~/<rest>`
+/// - 恰好等于 HOME → `~`
+/// - 其它路径 → 原样 `display()`
+pub fn format_home_path(path: &Path) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return path.display().to_string();
+    };
+    if path == home {
+        return "~".to_string();
+    }
+    if let Ok(rest) = path.strip_prefix(&home) {
+        if rest.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
 /// 以 UTF-8 读取文件全部内容。
 ///
 /// # Arguments

@@ -14,8 +14,8 @@ use serde::Deserialize;
 
 use crate::api::chat::plan_runtime::{
     file_store::{
-        plan_path_for_id, write_plan, Milestone, PlanFile, PlanFileFrontmatter, PlanFileMode,
-        TodoItem, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
+        plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem,
+        TodoStatus, PLAN_FILE_SCHEMA_VERSION,
     },
     mode::PlanMode,
     ops,
@@ -30,30 +30,17 @@ use super::ToolError;
 /// **D3 破坏性变更（2026-05）**：
 /// - 移除 `plan_id`：由 runtime 通过 [`derive_plan_id`] 派生（slug + hash），
 ///   LLM 传 `plan_id` 将报 [`ToolError::BadArgs`]；
-/// - `body` 重命名为 `draft`：仅承载 `## Draft` 段的草案要点，其它段落由模板拼接，
+/// - `body` 重命名为 `draft`：保留为入参名，但其内容会被规范化后写入 `## Plan` 段，
+///   其它段落由模板拼接，
 ///   传 `body` 将报 [`ToolError::BadArgs`]；
-/// - `milestones` 默认空（与 GAP-C03 对齐：MVP 可省略，后续 update_plan 补）。
 #[derive(Debug, Deserialize)]
 pub struct CreatePlanArgs {
     /// 高层目标（必填）。runtime 由此派生 plan_id。
     pub goal: String,
-    /// `## Draft` 段要点（必填）。template 会把它插入 `## Goal` 与 `## Review` 之间。
+    /// 计划正文要点（必填）。runtime 会把它规范化后写入 `## Plan` 段。
     pub draft: String,
     /// 任务列表（必填，至少 1 项）。
     pub todos: Vec<TodoArg>,
-    /// milestones（可选；空数组也合法）。
-    #[serde(default)]
-    pub milestones: Vec<MilestoneArg>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MilestoneArg {
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub todo_ids: Vec<String>,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,8 +49,6 @@ pub struct TodoArg {
     pub content: String,
     #[serde(default = "default_pending")]
     pub status: TodoStatus,
-    #[serde(default)]
-    pub milestone_id: Option<String>,
 }
 
 fn default_pending() -> TodoStatus {
@@ -83,7 +68,7 @@ impl CreatePlanArgs {
             }
             if obj.contains_key("body") {
                 return Err(ToolError::BadArgs(
-                    "create_plan 字段 body 已重命名为 draft（仅承载 `## Draft` 段要点）".into(),
+                    "create_plan 字段 body 已重命名为 draft（承载计划正文要点，落盘到 `## Plan` 段）".into(),
                 ));
             }
         }
@@ -168,7 +153,6 @@ pub fn execute(
             id: t.id.clone(),
             content: t.content.clone(),
             status: t.status,
-            milestone_id: t.milestone_id.clone(),
         })
         .collect();
     // 复用 ops 引擎的不变量校验：duplicate id / single in_progress
@@ -179,24 +163,6 @@ pub fn execute(
         .collect();
     ops::apply_todos_ops(&mut v, &add_ops)?;
 
-    let milestones: Vec<Milestone> = args
-        .milestones
-        .into_iter()
-        .map(|m| {
-            let status = crate::api::chat::plan_runtime::file_store::derive_milestone_status(
-                &m.todo_ids,
-                &todos,
-            );
-            Milestone {
-                id: m.id,
-                title: m.title,
-                todo_ids: m.todo_ids,
-                status,
-                description: m.description,
-            }
-        })
-        .collect();
-
     let now = chrono::Local::now().to_rfc3339();
     let frontmatter = PlanFileFrontmatter {
         plan_id: plan_id.clone(),
@@ -206,7 +172,6 @@ pub fn execute(
         session_id: None,
         created_at: now,
         schema_version: PLAN_FILE_SCHEMA_VERSION,
-        milestones,
         todos,
         unknown: serde_yaml::Mapping::new(),
     };
@@ -219,7 +184,7 @@ pub fn execute(
 
     Ok(serde_json::json!({
         "plan_id": plan_id,
-        "path": path.display().to_string(),
+        "path": crate::infra::platform::format_home_path(&path),
         "mode": "planning",
         "review": {
             "aborted": true,
@@ -262,8 +227,135 @@ fn reload_after_review(_runtime: &PlanRuntime, plan_id: &str) -> Result<(), Tool
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftHeadingKind {
+    Goal,
+    Plan,
+    Notes,
+    Other,
+}
+
+fn top_level_heading(line: &str) -> Option<String> {
+    line.trim()
+        .strip_prefix("## ")
+        .map(|heading| heading.trim().to_string())
+}
+
+fn classify_heading(heading: &str) -> DraftHeadingKind {
+    match heading.trim().to_ascii_lowercase().as_str() {
+        "goal" => DraftHeadingKind::Goal,
+        "draft" | "plan" => DraftHeadingKind::Plan,
+        "notes" => DraftHeadingKind::Notes,
+        _ => DraftHeadingKind::Other,
+    }
+}
+
+fn normalize_for_compare(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn push_normalized_section(
+    goal: &str,
+    heading: Option<&str>,
+    lines: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
+    let body = lines.join("\n").trim().to_string();
+    lines.clear();
+    if body.is_empty() {
+        return;
+    }
+
+    match heading {
+        None => out.push(body),
+        Some(heading) => match classify_heading(heading) {
+            DraftHeadingKind::Goal => {
+                if normalize_for_compare(&body) != normalize_for_compare(goal) {
+                    out.push(body);
+                }
+            }
+            DraftHeadingKind::Plan | DraftHeadingKind::Notes => out.push(body),
+            DraftHeadingKind::Other => out.push(format!("### {heading}\n\n{body}")),
+        },
+    }
+}
+
+fn strip_top_level_headings(draft: &str) -> String {
+    let mut out = Vec::new();
+    for line in draft.lines() {
+        match top_level_heading(line) {
+            Some(heading) => {
+                if classify_heading(&heading) == DraftHeadingKind::Other {
+                    out.push(format!("### {heading}"));
+                }
+            }
+            None => out.push(line.to_string()),
+        }
+    }
+    out.join("\n").trim().to_string()
+}
+
+fn normalize_plan_body(goal: &str, draft: &str) -> String {
+    let draft = draft.trim();
+    if draft.is_empty() {
+        return String::new();
+    }
+
+    let mut saw_top_level_heading = false;
+    let mut current_heading: Option<String> = None;
+    let mut current_lines: Vec<String> = Vec::new();
+    let mut sections: Vec<String> = Vec::new();
+
+    for line in draft.lines() {
+        if let Some(heading) = top_level_heading(line) {
+            saw_top_level_heading = true;
+            push_normalized_section(
+                goal,
+                current_heading.as_deref(),
+                &mut current_lines,
+                &mut sections,
+            );
+            current_heading = Some(heading);
+        } else {
+            current_lines.push(line.to_string());
+        }
+    }
+    push_normalized_section(
+        goal,
+        current_heading.as_deref(),
+        &mut current_lines,
+        &mut sections,
+    );
+
+    if !saw_top_level_heading {
+        return draft.to_string();
+    }
+
+    let normalized = sections
+        .into_iter()
+        .filter(|section| !section.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string();
+    if !normalized.is_empty() {
+        return normalized;
+    }
+
+    let stripped = strip_top_level_headings(draft);
+    if stripped.is_empty() {
+        draft.to_string()
+    } else {
+        stripped
+    }
+}
+
 fn default_body(goal: &str, draft: &str) -> String {
+    let plan = normalize_plan_body(goal, draft);
     format!(
-        "## Goal\n\n{goal}\n\n## Draft\n\n{draft}\n\n## Notes\n\n_(empty)_\n\n## Review\n\n（等待 reviewer 子 Agent 写入或保持空白）\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n（由 update_plan 自动维护，请勿手工编辑标记之间内容）\n<!-- todos-board:auto:end -->\n"
+        "## Goal\n\n{goal}\n\n## Plan\n\n{plan}\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n（由 update_plan 自动维护，请勿手工编辑标记之间内容）\n<!-- todos-board:auto:end -->\n"
     )
 }

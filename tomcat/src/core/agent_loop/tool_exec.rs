@@ -50,6 +50,55 @@ use super::types::ToolCallInfo;
 /// 与"插件上下文中触发的工具调用"区分，便于 hostcall 审计层分桶。
 pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
 
+/// reviewer 子 Agent 在 tool_exec 层允许调用的工具名白名单（与
+/// `prod_reviewer::REVIEWER_ALLOWED_TOOLS` 保持一致）。
+///
+/// 这是 catalog 过滤之外的第二道防线：即便上游误注入了 catalog 之外的工具
+/// 定义，或 dispatcher 绕过了 catalog，tool_exec 也要把这些调用拦在外面。
+fn is_reviewer_whitelisted_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read" | "search_files" | "list_dir" | "todos" | "update_plan" | "edit"
+    )
+}
+
+/// 在内存里模拟 `primitive.edit_file` 的字符串替换语义，供 reviewer 段守卫做
+/// dry-run。与 [`crate::core::tools::primitive::executor::write_edit::edit_file_impl`]
+/// 保持等价的简化实现：
+///
+/// - 单段：`EDIT_REPLACE_ALL_MARKER` 前缀 → `replace_all`，否则 `replacen(old, new, 1)`；
+/// - 多段：按数组顺序依次应用到累计字符串上（与 primitive 相同的「全段串行 apply」）。
+///
+/// 注意：本 simulate 不做重叠检测、不处理换行 normalization——这些边界 primitive
+/// 内部自己会处理 / 拒绝，本预检失败时 primitive 同样会失败，反之亦然；reviewer
+/// 段守卫只关心「是否会改到非 `## Review` 段」，与上述边界正交。
+fn simulate_apply_edits(
+    original: &str,
+    edits: &[crate::core::tools::primitive::EditOperation],
+) -> String {
+    let marker = crate::core::tools::primitive::EDIT_REPLACE_ALL_MARKER;
+    let mut cur = original.to_string();
+    for op in edits {
+        let Some(raw_old) = op.old_content.as_deref() else {
+            continue;
+        };
+        let (replace_all, old_text) = if let Some(stripped) = raw_old.strip_prefix(marker) {
+            (true, stripped)
+        } else {
+            (false, raw_old)
+        };
+        if old_text.is_empty() {
+            continue;
+        }
+        if replace_all {
+            cur = cur.replace(old_text, &op.new_content);
+        } else {
+            cur = cur.replacen(old_text, &op.new_content, 1);
+        }
+    }
+    cur
+}
+
 /// 执行单次 tool call 并返回 `(输出文本, is_error)`。
 ///
 /// 自由函数设计（**不**接收 `&AgentLoop`）：调用方持有 `Arc<dyn PrimitiveExecutor>`
@@ -122,21 +171,37 @@ pub(super) async fn execute_tool_full(
         Err(e) => return (format!("参数解析失败: {}", e), true, Vec::new()),
     };
 
+    // B3-guard：reviewer 子 Agent 不允许调 catalog 白名单外的任何工具（双保险——
+    // catalog 已被 `resolve_internal_tools` 过滤过，这里再拦一道，防 dispatcher 直调或
+    // catalog 漂移；与 reviewer.md §5.2 / §5.5 一致）。
+    if subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
+        && !is_reviewer_whitelisted_tool(tc.name.as_str())
+    {
+        return (
+            format!(
+                "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 read/search_files/list_dir/todos/update_plan/edit；create_plan 防套娃；bash/write/dispatch_agent/checkpoint 永不可用）",
+                tc.name
+            ),
+            true,
+            Vec::new(),
+        );
+    }
+
     // B1：plan 工具分发（优先于 primitive，因为这些工具不走 primitive）。
     if matches!(
         tc.name.as_str(),
         "create_plan" | "update_plan" | "todos" | "ask_question"
     ) {
-        return dispatch_plan_tool(&tc.name, &args, plan_runtime, cancel).await;
+        return dispatch_plan_tool(&tc.name, &args, plan_runtime, subagent_type, cancel).await;
     }
 
     // B12：write 类工具在主体之前做路径策略守卫。
-    if matches!(tc.name.as_str(), "write" | "edit" | "hashline_edit" | "delete") {
+    if matches!(
+        tc.name.as_str(),
+        "write" | "edit" | "hashline_edit" | "delete"
+    ) {
         if let Some(rt) = plan_runtime {
-            let path_arg = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let path_arg = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if !path_arg.is_empty() {
                 let mode = rt.mode();
                 let subagent_kind = match subagent_type {
@@ -521,6 +586,39 @@ pub(super) async fn execute_tool_full(
                 if let Some(state) = read_file_state {
                     if let Err(stale_msg) = check_mutation_stamp(state, path, "edit") {
                         return (stale_msg, true, Vec::new());
+                    }
+                }
+                // B3-guard：reviewer 子 Agent 在 plan 文件上的 edit 允许改正文，但不能 raw 改
+                // frontmatter。simulate apply edits 之后做 diff，越界即拒（不真正写盘）。
+                if subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer {
+                    let normalized_path = match crate::infra::platform::normalize_path(path) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            return (
+                                format!("reviewer edit 预检路径解析失败：{e}"),
+                                true,
+                                Vec::new(),
+                            );
+                        }
+                    };
+                    match std::fs::read_to_string(&normalized_path) {
+                        Ok(old) => {
+                            let new = simulate_apply_edits(&old, &edits);
+                            if let Err(denied) =
+                                crate::api::chat::plan_runtime::safety::reviewer_body_diff_guard(
+                                    &old, &new,
+                                )
+                            {
+                                return (format!("reviewer edit 被拒：{denied}"), true, Vec::new());
+                            }
+                        }
+                        Err(e) => {
+                            return (
+                                format!("reviewer edit 预检读原文失败：{e}"),
+                                true,
+                                Vec::new(),
+                            );
+                        }
                     }
                 }
                 primitive
@@ -1014,6 +1112,7 @@ async fn dispatch_plan_tool(
     name: &str,
     args: &serde_json::Value,
     plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
+    subagent_type: crate::core::agent_loop::types::SubagentType,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let Some(rt) = plan_runtime else {
@@ -1025,25 +1124,32 @@ async fn dispatch_plan_tool(
             Vec::new(),
         );
     };
+    // B3-guard：reviewer 路径再拦一次 create_plan（防套娃 / 防绕过）。
+    if name == "create_plan"
+        && subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
+    {
+        return (
+            "reviewer 子 Agent 禁止调用 `create_plan`（防套娃；reviewer.md §5.2 / §5.5）".into(),
+            true,
+            Vec::new(),
+        );
+    }
     use crate::api::chat::plan_runtime::tools as plan_tools;
     let result: Result<serde_json::Value, plan_tools::ToolError> = match name {
-        "create_plan" => match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(
-            args.clone(),
-        ) {
-            // `allow_review_edit` 由 PlanRuntime 内部的 [reviewer].default_allow_edit 决定；
-            // 这里直接读 runtime 配置。
-            Ok(a) => {
-                let allow_edit = rt.reviewer_default_allow_edit();
-                plan_tools::create_plan::execute_with_reviewer(rt, a, allow_edit).await
+        "create_plan" => {
+            match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(args.clone()) {
+                // `allow_review_edit` 在生产路径恒为 `true`（reviewer.md §5.2 / §5.5 拍板）；
+                // Mock 单测可以通过 trait 直接构造 `MockReviewerDispatcher` 注入 false。
+                Ok(a) => plan_tools::create_plan::execute_with_reviewer(rt, a, true).await,
+                Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
-            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
-        },
-        "update_plan" => match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(
-            args.clone(),
-        ) {
-            Ok(a) => plan_tools::update_plan::execute(rt, a),
-            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
-        },
+        }
+        "update_plan" => {
+            match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
+                Ok(a) => plan_tools::update_plan::execute(rt, a),
+                Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
+            }
+        }
         "todos" => match serde_json::from_value::<plan_tools::todos::TodosArgs>(args.clone()) {
             Ok(a) => plan_tools::todos::execute(rt, a),
             Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
@@ -1057,8 +1163,7 @@ async fn dispatch_plan_tool(
                 );
             };
             // 将 CancellationToken 桥接为 AtomicBool（ask_question 接口）。
-            let cancel_flag =
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let watcher_flag = cancel_flag.clone();
             let cancel_clone = cancel.clone();
             let bridge = tokio::spawn(async move {
@@ -1083,5 +1188,276 @@ async fn dispatch_plan_tool(
     match result {
         Ok(v) => (v.to_string(), false, Vec::new()),
         Err(e) => (format!("{name} 失败：{e}"), true, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod reviewer_guards_tests {
+    use super::*;
+    use crate::core::agent_loop::types::SubagentType;
+    use serial_test::serial;
+
+    /// 占位 PrimitiveExecutor——本套测试不会真正进 primitive 分支（reviewer 守卫早退），
+    /// 所有方法 unreachable!() 反向证伪：一旦真有调用就会 panic。
+    struct UnusedPrimitive;
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for UnusedPrimitive {
+        async fn read(
+            &self,
+            _path: &str,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+            _line_numbers: bool,
+            _hashline: bool,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::ReadResult, AppError> {
+            unreachable!("reviewer guard 应在 primitive 之前 short-circuit")
+        }
+        async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+            unreachable!()
+        }
+        async fn list_dir(
+            &self,
+            _path: &str,
+            _plugin_id: &str,
+        ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+            unreachable!()
+        }
+        async fn write_file(
+            &self,
+            _path: &str,
+            _content: &str,
+            _overwrite: bool,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+            unreachable!()
+        }
+        async fn edit_file(
+            &self,
+            _path: &str,
+            _edits: Vec<crate::core::tools::primitive::EditOperation>,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+            unreachable!()
+        }
+        async fn execute_bash(
+            &self,
+            _command: &str,
+            _cwd: Option<&str>,
+            _plugin_id: &str,
+            _argv: Option<&[String]>,
+            _timeout_ms_override: Option<u64>,
+        ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+            unreachable!()
+        }
+        async fn hashline_edit(
+            &self,
+            _path: &str,
+            _segments: Vec<crate::core::tools::primitive::HashlineSegment>,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+            unreachable!()
+        }
+        async fn search_files(
+            &self,
+            _args: crate::core::tools::primitive::SearchFilesArgs,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::SearchFilesOutput, AppError> {
+            unreachable!()
+        }
+        async fn require_user_confirmation(
+            &self,
+            _operation: crate::core::tools::primitive::PrimitiveOperation,
+            _preview: &str,
+            _plugin_id: &str,
+        ) -> Result<bool, AppError> {
+            unreachable!()
+        }
+    }
+
+    struct EditOkPrimitive;
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for EditOkPrimitive {
+        async fn read(
+            &self,
+            _path: &str,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+            _line_numbers: bool,
+            _hashline: bool,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::ReadResult, AppError> {
+            unreachable!()
+        }
+        async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+            unreachable!()
+        }
+        async fn list_dir(
+            &self,
+            _path: &str,
+            _plugin_id: &str,
+        ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+            unreachable!()
+        }
+        async fn write_file(
+            &self,
+            _path: &str,
+            _content: &str,
+            _overwrite: bool,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+            unreachable!()
+        }
+        async fn edit_file(
+            &self,
+            path: &str,
+            _edits: Vec<crate::core::tools::primitive::EditOperation>,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+            Ok(crate::core::tools::primitive::EditFileResult {
+                path: path.to_string(),
+                applied: true,
+            })
+        }
+        async fn execute_bash(
+            &self,
+            _command: &str,
+            _cwd: Option<&str>,
+            _plugin_id: &str,
+            _argv: Option<&[String]>,
+            _timeout_ms_override: Option<u64>,
+        ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+            unreachable!()
+        }
+        async fn hashline_edit(
+            &self,
+            _path: &str,
+            _segments: Vec<crate::core::tools::primitive::HashlineSegment>,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+            unreachable!()
+        }
+        async fn search_files(
+            &self,
+            _args: crate::core::tools::primitive::SearchFilesArgs,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::SearchFilesOutput, AppError> {
+            unreachable!()
+        }
+        async fn require_user_confirmation(
+            &self,
+            _operation: crate::core::tools::primitive::PrimitiveOperation,
+            _preview: &str,
+            _plugin_id: &str,
+        ) -> Result<bool, AppError> {
+            unreachable!()
+        }
+    }
+
+    /// reviewer.md §11 RV-T2：tool_exec 在 reviewer 路径下，对白名单外的工具直接 tool error。
+    #[tokio::test]
+    async fn reviewer_blocks_non_whitelisted_tool() {
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+        let tc = ToolCallInfo {
+            id: "tc1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        };
+        let (msg, is_err, _) = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::Reviewer,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+        assert!(is_err);
+        assert!(msg.contains("reviewer 子 Agent 禁止调用工具"));
+    }
+
+    /// reviewer.md §11 RV-T4：reviewer 路径下 `create_plan` 被白名单守卫早退（防套娃）。
+    #[tokio::test]
+    async fn reviewer_blocks_create_plan_subagent() {
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+        let tc = ToolCallInfo {
+            id: "tc1".into(),
+            name: "create_plan".into(),
+            arguments: "{}".into(),
+        };
+        let (msg, is_err, _) = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::Reviewer,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+        assert!(is_err);
+        assert!(msg.contains("reviewer 子 Agent 禁止调用工具 `create_plan`"));
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
+        let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+        let old_home = std::env::var("HOME").ok();
+        let temp_home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", temp_home.path());
+
+        struct HomeGuard(Option<String>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(home) => std::env::set_var("HOME", home),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+        let _guard = HomeGuard(old_home);
+
+        let plan_id = "reviewer_tilde_smoke";
+        let plan_path =
+            crate::api::chat::plan_runtime::file_store::plan_path_for_id(plan_id).unwrap();
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &plan_path,
+            "---\nplan_id: reviewer_tilde_smoke\ngoal: smoke\nmode: planning\nschema_version: 1\ntodos: []\n---\n## Goal\n\nsmoke\n\n## Notes\n\nold note\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n<!-- todos-board:auto:end -->\n",
+        )
+        .unwrap();
+
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(EditOkPrimitive);
+        let tc = ToolCallInfo {
+            id: "tc1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({
+                "path": format!("~/.tomcat/plans/{plan_id}.plan.md"),
+                "old_content": "## Goal\n\nsmoke\n\n## Notes",
+                "new_content": "## Goal\n\nupdated smoke\n\n## Notes"
+            })
+            .to_string(),
+        };
+        let (msg, is_err, _) = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::Reviewer,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+
+        assert!(!is_err, "unexpected error: {msg}");
+        assert!(msg.contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
     }
 }

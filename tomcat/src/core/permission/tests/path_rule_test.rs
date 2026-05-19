@@ -22,6 +22,7 @@ fn glob_rule_matches_globset() {
 
 #[test]
 fn tilde_expansion_no_glob() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let r = PathRule::new("~/some/dir", PathRuleMode::Deny);
     let expanded = r.expanded_path().expect("expand");
     let home = dirs::home_dir().expect("home");

@@ -7,8 +7,12 @@ pub mod api;
 pub mod core;
 pub mod ext;
 pub mod infra;
+#[cfg(test)]
+pub(crate) mod test_support;
 
+pub use api::chat::{chat_loop, run_chat_turn, ChatContext};
 pub use api::run_cli;
+pub use core::agent_loop::AgentRunOutcome;
 pub use core::{
     build_context_from_state, compound_turn_id, init_context_state, load_store, save_store,
     BranchSummaryEntry, CompactionResult, ContextState, SessionEntry, SessionHeader,
@@ -41,7 +45,8 @@ pub use infra::{
     resolve_agent_dir, resolve_agent_trail_dir, resolve_assets_dir, resolve_audit_dir,
     resolve_checkpoints_dir, resolve_log_dir, resolve_memory_dir, resolve_plugins_dir,
     resolve_quickjs_path, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
-    resolve_workspace_roots_paths, validate_config, wire, write_file_atomic, AgentConfig,
+    resolve_dot_tomcat_temp_dir, resolve_workspace_roots_paths, validate_config, wire,
+    write_file_atomic, AgentConfig,
     AgentEvent, AppConfig, AppError, AuditEntry, AuditFilter, AuditPrimitiveOp, AuditRecorder,
     AuditStore, CheckpointConfig, ContextConfig, DefaultEventBus, EventBus, EventContext,
     EventListenerId, ExtensionEvent, FileAuditRecorder, HostcallAuditEntry, LlmConfig, LogConfig,

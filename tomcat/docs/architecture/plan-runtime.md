@@ -206,7 +206,7 @@
   ```
   任何一步失败整体回滚。`CreatePlan` 工具走同款单写入路径但语义不同（详见 [`tools/create-plan.md`](./tools/create-plan.md)）。
 - **文件锁**：基于 `fs2::FileExt::try_lock_exclusive` 在 `<slug>_<hash>.plan.md.lock` 上加 advisory lock；忙等超时（默认 2s）→ `LockBusy` 错误。
-- **frontmatter round-trip**：`serde_yaml` 反序列化 → `PlanFileFrontmatter`；正文按 `## Goal` / `## Draft` / `## Review` / `## Todos Board` 锚点段落级重写，**保留**人类自由备注段。
+- **frontmatter round-trip**：`serde_yaml` 反序列化 → `PlanFileFrontmatter`；正文按 `## Goal` / `## Draft` / `## Notes` / `## Todos Board` 锚点段落级重写，**保留**人类自由备注段。
 
 **说人话**：`todos` 是模型唯一能改 todo 列表的口子；`CreatePlan` 是创建计划文件的唯一口子；两者都走「校验 → 文件锁 → 落盘 → 面板刷新 → 返回 snapshot」单线路径。
 
@@ -215,13 +215,13 @@
 - **交付**：reviewer 子 Agent（无主链上下文污染、不进 catalog、走 `internal subagent dispatch`）、`/plan build <plan_id\|path>` 闸门；详细派发契约见 [`tools/reviewer.md`](./tools/reviewer.md)。
 - **派发入口**：reviewer **不**作为 LLM 工具暴露；由 `CreatePlan` 工具内部调用 `internal subagent dispatch` API（`AgentRegistry::spawn_subagent_internal(...)`）。
 - **subagent 隔离**：reviewer 起一个 `AgentLoop` 子任务，注入专属 `SubagentContext { system_prompt, allowed_tools, transcript=fresh, parent_session_id, token_budget }`；`allowed_tools` 由 internal dispatch 路径**硬编码**为 `{read, grep, find, todos}`（默认）或 `{read, grep, find, todos, update_plan, edit}`（当 runtime 配 `allow_review_edit=true`）；**永不**含 `create_plan`（防套娃）；**禁止**调 `bash` / `write` / `dispatch_agent` / `checkpoint`。
-- **reviewer 输出契约**：reviewer 最终消息含 `summary:` 自由文本（≤600 字符），可选用 `update_plan` 修订 frontmatter `todos[]` / `milestones[]`、或用 `edit` 改 `## Review` 段；**无 verdict 字段**；runtime 把摘要写入 `transcript.plan.review` 事件，**不**改 `mode`。
+- **reviewer 输出契约**：reviewer 最终消息含 `summary:` 自由文本（≤600 字符），可选用 `update_plan` 修订 frontmatter `todos[]`、或用 `edit` 改 plan 正文；**无 verdict 字段**；runtime 把摘要与修改说明写入 `transcript.plan.review` 事件，**不**回写 `.plan.md` 中的审稿块，也**不**改 `mode`。
 - **`/plan build` 闸门**：仅当 `当前 session 无 active plan && 无 active todos` 且 `指定的 PlanFile.mode ∈ {planning, pending}` 才允许迁移到 `Executing`；按 `[plan] auto_checkpoint_on_build`（默认 false）决定是否 `CheckpointStore::record(Manual{label=format!("plan_build:{plan_id}")})`。
 - **build 时 runtime 动作**（5 件事）：
   1. 写 `PlanFile.frontmatter.session_key = 当前 session_key`、`session_id = 当前 session_id`（pending 续跑覆盖旧值，warning）；
   2. 写 `PlanFile.frontmatter.mode = executing`；
   3. swap system reminder：移除 PLANNER（若有）/ 注入 EXECUTOR；
-  4. user message 装配阶段切换前缀为 `[mode: EXEC plan_id=...]`；首轮 user meta 携带 plan 全文（详见 §5.5）；
+  4. user message 装配阶段切换前缀为 `[mode: EXEC plan_id=... plan_path=~/.tomcat/plans/... ]`；首轮 user meta 携带 plan 全文（详见 §5.5）；
   5. catalog swap：PLAN/CHAT 集 → EXEC 集（与 CHAT 相同：全工具集 + `todos` + `update_plan` − `create_plan`）。
 
 ```text
@@ -475,10 +475,6 @@ todos:
 - 在 PLAN 模式中生成计划草案
 - reviewer 摘要仅作辅助；进入 EXEC 由用户敲 /plan build
 - 进入 EXEC 后由 `todos` 推进步骤状态
-
-## Review
-
-（等待 reviewer 子 Agent 写入或保持空白）
 
 ## Todos Board
 
@@ -750,7 +746,7 @@ impl PlanRuntime {
      |
      v
   reviewer reads repo; default tools: read/grep/find + todos
-     allow_review_edit=true → +update_plan + edit (## Review section only)
+     allow_review_edit=true → +update_plan + edit (plan body allowed; frontmatter raw still forbidden)
      emits transcript event plan.review (+ ToolResult.review); does NOT gate EXEC
      |
      +-- user iterates: tweak todos via update_plan; rewrite via create_plan --+
@@ -971,7 +967,7 @@ EXEC 中：
 | `[plan] auto_checkpoint_on_build` | `true/false`，默认 `false` | `/plan build` 时是否自动 `record(Manual{plan_build:plan_id})` | 开干前打一张快照。 |
 | `[plan] auto_milestone_threshold` | 正整数，默认 `5` | LLM 未传 milestones 时，todos 数 ≥ 阈值自动插入 `m-default` | 计划长了就自动分段。 |
 | `[reviewer] max_rounds` | 正整数，默认 `1` | reviewer 单 plan 累计派发上限 | reviewer 不能无限挑刺。 |
-| `[reviewer] default_allow_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` `## Review` 段 | 审稿员能不能动手补 Review。 |
+| `[reviewer] default_allow_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` 计划正文（frontmatter raw 仍拒绝） | 审稿员能不能直接修正文。 |
 | `[ask_question] timeout_ms` / `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | 默认 `300000`（5 分钟），`0` = 不超时 | `ask_question` 等待 UI 返回的硬超时 | 别让模型死等用户。 |
 | `[todos] purge_inactive_on_new_todos` | `true/false`，默认 `true` | 切换 active todos 时清理同 session 其它非 active 文件 | session 目录别堆垃圾。 |
 | `[todos] auto_new_todos_on_replace_after_terminal` | `true/false`，默认 `true` | 全 completed/cancelled 后再 `replace_todos` 自动开新 TodoFile | 旧账翻篇。 |
@@ -1095,7 +1091,7 @@ EXEC 中：
 | ~~把 reviewer 暴露为 LLM 可见 tool 或独立 dispatch_agent 子类~~ | **否**：走 `internal subagent dispatch`，不进 catalog。 | reviewer 是子 Agent，不是 LLM 工具。 |
 | ~~reviewer verdict 二态做 gate~~ | **否**：reviewer 仅输出 `summary` 自由文本，**不**改 mode、**不**写 frontmatter；进 EXEC 由用户 `/plan build` 拍板。 | 审稿员只挑刺。 |
 | ~~`create_plan` 入参含 `apply_changes`~~ | **否**：删除；reviewer 改稿权改为 runtime 内部参数 `allow_review_edit`，不暴露 LLM。 | 改稿决定权交给代码。 |
-| ~~reviewer 改稿调 `create_plan`~~ | **否**：改稿走专用内部工具 `edit_plan_review_section`，仅能动 `## Review` 段；不再递归调 `create_plan`，避免套娃。 | reviewer 改稿只动 Review 段。 |
+| ~~reviewer 改稿调 `create_plan`~~ | **否**：改稿直接走通用 `edit` + `update_plan`；不再递归调 `create_plan`，避免套娃。 | reviewer 改稿不重建整盘。 |
 | ~~`PlanFile` 路径放在 `agent_definition_dir/agents/plan/`~~ | **替代**：固定到 `~/.tomcat/plans/<slug>_<hash>.plan.md`。 | 单独目录。 |
 | ~~把 checkpoint 暴露给模型，计划里自己 `take_checkpoint`~~ | **否**：沿用 [`checkpoint-resume.md`](./tools/checkpoint-resume.md)。 | 别让模型把快照当 todo 用。 |
 | ~~只写 markdown 复选框，不做结构化 frontmatter~~ | **否**：frontmatter 承担 source of truth。 | 机器得有机器能稳读的部分。 |
@@ -1108,7 +1104,7 @@ EXEC 中：
 | ~~CHAT 模式无法修订 plan.md 的 `todos[]` / `milestones[]`（D 方案前的缺口）~~ | **修复（D 方案）**：[`update_plan`](./tools/update-plan.md) 任何模式可见，按 `plan_id` 路由，跨 session 修订亦允许（除非 target.mode=executing 由别 session 持有）。 | 修上一版的缺口。 |
 | ~~PLAN 模式下用户要求改 todos 必须再次调 `create_plan` 整盘重写~~ | **替代（D 方案）**：增量改用 [`update_plan`](./tools/update-plan.md)；`create_plan` 仅当结构大改时用（整盘重写）。 | 小修不必整盘重写。 |
 | ~~frontmatter 三方协同（`create_plan` + `todos` + runtime）~~ | **替代为四方（D 方案）**：`create_plan`（整盘初稿）+ [`update_plan`](./tools/update-plan.md)（增量 todos/milestones）+ runtime（mode/session 绑定 via `/plan build`）+ 自动派生（all completed / cancel_token）。 | 四方各管一段。 |
-| ~~reviewer 子 Agent 的 `allowed_tools` = `{read, grep, find}`（默认）+ `{edit_plan_review_section}`（`allow_review_edit=true`）~~ | **演进（D 方案）**：默认 `{read, grep, find, todos}`（todos 是私人记录无副作用）；`allow_review_edit=true` 附加 `{update_plan, edit}`（前者改 frontmatter todos/milestones，后者改正文 `## Review` 段，受路径与段守卫）；**仍**不含 `create_plan`（防递归套娃）。详见 [`reviewer.md`](./tools/reviewer.md) §5.2。 | 让 reviewer 能落地修订建议。 |
+| ~~reviewer 子 Agent 的 `allowed_tools` = `{read, grep, find}`（默认）+ `{edit_plan_review_section}`（`allow_review_edit=true`）~~ | **演进（D 方案）**：默认 `{read, grep, find, todos}`（todos 是私人记录无副作用）；`allow_review_edit=true` 附加 `{update_plan, edit}`（前者改 frontmatter todos，后者改计划正文任意段，但 frontmatter raw 仍禁止）；**仍**不含 `create_plan`（防递归套娃）。详见 [`reviewer.md`](./tools/reviewer.md) §5.2。 | 让 reviewer 能落地修订建议。 |
 | ~~只靠 system reminder 让模型知道当前 mode~~ | **补充**：PLAN/EXEC 期 user message 装配阶段加 `[mode: PLAN]` / `[mode: EXEC plan_id=...]` 前缀；首轮 EXEC 注入 user meta 携带 plan 全文。 | 每条消息都贴模式 tag。 |
 | ~~所有 `system_reminder` 注入 user message~~ | **否**：所有 reminder 都注入 system 区段尾部；user message 只贴轻量 `[mode: ...]` 前缀。 | reminder 归 reminder，prefix 归 prefix。 |
 

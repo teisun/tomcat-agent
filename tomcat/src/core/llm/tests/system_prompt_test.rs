@@ -157,6 +157,7 @@ fn fixture_context() -> WorkspaceContext {
     WorkspaceContext {
         agent_workspace_dir: "/Users/yan/proj".into(),
         agent_definition_dir: "/Users/yan/.tomcat/workspace-main".into(),
+        agent_plans_dir: "~/.tomcat/plans".into(),
         agent_trail_dir: "/Users/yan/.tomcat/agents/main".into(),
     }
 }
@@ -262,6 +263,8 @@ fn workspace_context_section_describes_three_directories() {
     assert!(prompt.contains("NOT automatically authorized"));
     assert!(prompt.contains("Agent definition directory (agent_definition_dir):"));
     assert!(prompt.contains("Permission: read/write"));
+    assert!(prompt.contains("Agent plans directory (agent_plans_dir): ~/.tomcat/plans"));
+    assert!(prompt.contains("plan-aware guards decide whether write/edit is allowed"));
     assert!(prompt.contains("Agent trail directory (agent_trail_dir):"));
     assert!(prompt.contains("Permission: read-only"));
     assert!(prompt.contains("Do NOT treat it as the user's current directory"));
