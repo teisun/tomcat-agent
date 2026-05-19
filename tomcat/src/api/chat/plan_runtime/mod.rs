@@ -42,6 +42,7 @@ pub mod file_store;
 pub mod mode;
 pub mod ops;
 pub mod prompts;
+pub mod review;
 pub mod safety;
 pub mod session_prefix;
 pub mod tools;
@@ -51,10 +52,12 @@ mod tests;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub use mode::PlanMode;
+pub use review::ReviewSummary;
 
 /// PLAN 模式 per-session 编排器骨架（P1）。
 ///
@@ -89,6 +92,11 @@ pub struct PlanRuntime {
     active_planning_plan_id: Mutex<Option<String>>,
     /// `[plan] lock_timeout_ms`：write_plan / dispatch_reviewer 共享。默认 2000。
     lock_timeout_ms: u64,
+    /// 可选 reviewer 派发器。P4 时由 `ChatContext::from_config` 注入真实实现；
+    /// 测试可注入 mock；未注入时 `create_plan` 返回 `aborted=true` 占位摘要。
+    reviewer: Mutex<Option<Arc<dyn ReviewerDispatcher>>>,
+    /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
+    reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 impl PlanRuntime {
@@ -112,6 +120,8 @@ impl PlanRuntime {
             session_todos: Mutex::new(Vec::new()),
             active_planning_plan_id: Mutex::new(None),
             lock_timeout_ms,
+            reviewer: Mutex::new(None),
+            reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -216,6 +226,94 @@ impl PlanRuntime {
     pub fn set_executing_for_test(&self, plan_id: String) {
         *self.mode.write() = PlanMode::Executing { plan_id };
     }
+
+    // ─── P4 reviewer 派发 API（plan-runtime.md §P4） ──────────────────────
+
+    /// 注入 reviewer 派发器（生产由 `ChatContext::from_config` 装配 reviewer 子 Agent 派发；
+    /// 测试可注入 [`review::MockReviewerDispatcher`] / 自定义实现）。
+    pub fn attach_reviewer(&self, dispatcher: Arc<dyn ReviewerDispatcher>) {
+        *self.reviewer.lock() = Some(dispatcher);
+    }
+
+    /// 同步派发 reviewer（plan-runtime.md §P4 RV14）。语义：
+    ///
+    /// 1. **必须**在 `write_plan` 释放 advisory lock **之后**调用（防 D1 死锁）。
+    /// 2. 读取 plan 文件 → 调 dispatcher → 解析 `<review>` block → 返回 `ReviewSummary`。
+    /// 3. 失败 / parse 错 / max_turns / parent abort → `aborted=true`；
+    ///    调用方（`create_plan` / `/plan build` 等）**不**因此失败。
+    /// 4. 若 dispatcher 未注入（测试 / 简化场景）→ 返回 `placeholder_pending`。
+    pub async fn dispatch_reviewer(
+        &self,
+        plan_id: &str,
+        allow_review_edit: bool,
+    ) -> review::ReviewSummary {
+        let Some(dispatcher) = self.reviewer.lock().clone() else {
+            return review::ReviewSummary::placeholder_pending();
+        };
+        // 软上限：默认 1 轮；超出 → warning（这里以摘要 prefix 表示，
+        // chat_loop 在装配 transcript 时会写 `plan.review.warning`）
+        let rounds = {
+            let mut map = self.reviewer_rounds.lock();
+            let v = map.entry(plan_id.to_string()).or_insert(0);
+            *v += 1;
+            *v
+        };
+
+        // 读 plan 文件作为 reviewer 上下文（不上 advisory lock；
+        // 锁的 acquire 已由 write_plan 释放，reviewer 走只读）。
+        let path = match file_store::plan_path_for_id(plan_id) {
+            Ok(p) => p,
+            Err(e) => return review::ReviewSummary::aborted_with(format!("plan_id 非法: {e}")),
+        };
+        let plan_text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                return review::ReviewSummary::aborted_with(format!("read plan 失败: {e}"))
+            }
+        };
+
+        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut summary = dispatcher
+            .dispatch(plan_id, &plan_text, allow_review_edit, cascade)
+            .await;
+        if rounds > 1 {
+            summary.summary = format!("[round {rounds}] {}", summary.summary);
+        }
+        summary
+    }
+
+    /// 用于单测 / 集成测：清除指定 plan_id 的 reviewer round 计数。
+    pub fn reset_reviewer_rounds(&self, plan_id: &str) {
+        self.reviewer_rounds.lock().remove(plan_id);
+    }
+
+    /// 用于单测：当前 plan_id 的 reviewer 派发轮次。
+    pub fn reviewer_rounds(&self, plan_id: &str) -> u32 {
+        self.reviewer_rounds
+            .lock()
+            .get(plan_id)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// reviewer 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。
+///
+/// **契约**：
+/// - 调用方（`PlanRuntime::dispatch_reviewer`）保证：调度时 plan 文件 advisory lock 已 release（RV14）。
+/// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
+///   构造子 `AgentLoop`，把 `abort_signal` 透传给 `AgentLoopConfig`。
+/// - 返回 `ReviewSummary`：成功 / aborted / parse_failed 都用同一形态承载。
+/// - **不**写父 transcript（reviewer 子 Agent 持独立 session_id；transcript 隔离 D11）。
+#[async_trait]
+pub trait ReviewerDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        plan_id: &str,
+        plan_text: &str,
+        allow_review_edit: bool,
+        abort_signal: Arc<std::sync::atomic::AtomicBool>,
+    ) -> review::ReviewSummary;
 }
 
 /// `PlanRuntime` 操作错误。

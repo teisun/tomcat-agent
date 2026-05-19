@@ -468,6 +468,270 @@ fn todos_in_exec_writes_plan_file() {
     cleanup_home(&home);
 }
 
+// ─── reviewer 集成（§9.3D P4 余量） ─────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::time::Duration;
+
+use async_trait::async_trait;
+
+use crate::api::chat::plan_runtime::review::ReviewSummary;
+use crate::api::chat::plan_runtime::ReviewerDispatcher;
+
+/// MockReviewer：按预编排队列返回 ReviewSummary，并记录 dispatcher 被调用时刻。
+struct MockReviewerDispatcher {
+    summaries: parking_lot::Mutex<Vec<ReviewSummary>>,
+    call_count: AtomicUsize,
+    /// 测试用：dispatcher 内部 sleep；用于验证 write_plan 已释放 lock（D1）。
+    delay: Option<Duration>,
+}
+
+impl MockReviewerDispatcher {
+    fn new(summaries: Vec<ReviewSummary>) -> Self {
+        Self {
+            summaries: parking_lot::Mutex::new(summaries),
+            call_count: AtomicUsize::new(0),
+            delay: None,
+        }
+    }
+
+    fn with_delay(mut self, d: Duration) -> Self {
+        self.delay = Some(d);
+        self
+    }
+}
+
+#[async_trait]
+impl ReviewerDispatcher for MockReviewerDispatcher {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _allow_review_edit: bool,
+        _abort_signal: std::sync::Arc<AtomicBool>,
+    ) -> ReviewSummary {
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(d) = self.delay {
+            tokio::time::sleep(d).await;
+        }
+        let mut q = self.summaries.lock();
+        if q.is_empty() {
+            ReviewSummary::aborted_with("mock 队列耗尽")
+        } else {
+            q.remove(0)
+        }
+    }
+}
+
+fn ok_review() -> ReviewSummary {
+    ReviewSummary {
+        aborted: false,
+        summary: "looks ok".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+    }
+}
+
+#[tokio::test]
+async fn create_plan_internally_dispatches_reviewer_with_real_summary() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![ok_review()])));
+    rt.enter_planning("obj").unwrap();
+    let args = create_plan::CreatePlanArgs {
+        plan_id: "rv_demo".into(),
+        goal: "g".into(),
+        body: None,
+        milestones: vec![],
+        todos: vec![],
+    };
+    let out = create_plan::execute_with_reviewer(&rt, args, false)
+        .await
+        .unwrap();
+    assert_eq!(out["plan_id"], "rv_demo");
+    assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(false));
+    assert_eq!(out["review"]["summary"], "looks ok");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn create_plan_succeeds_even_when_reviewer_aborts() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        ReviewSummary::aborted_with("simulated parse error"),
+    ])));
+    rt.enter_planning("obj").unwrap();
+    let out = create_plan::execute_with_reviewer(
+        &rt,
+        create_plan::CreatePlanArgs {
+            plan_id: "rv_abort".into(),
+            goal: "g".into(),
+            body: None,
+            milestones: vec![],
+            todos: vec![],
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["plan_id"], "rv_abort");
+    assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
+    assert!(out["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("parse error"));
+    // plan 文件仍在 disk
+    let plan_path = home.join(".tomcat").join("plans").join("rv_abort.plan.md");
+    assert!(plan_path.exists());
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn create_plan_without_reviewer_returns_placeholder() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.enter_planning("obj").unwrap();
+    let out = create_plan::execute_with_reviewer(
+        &rt,
+        create_plan::CreatePlanArgs {
+            plan_id: "no_rv".into(),
+            goal: "g".into(),
+            body: None,
+            milestones: vec![],
+            todos: vec![],
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
+    assert!(out["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("P4 接入"));
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
+    // RV14 防 D1：write_plan 必须先释放 lock，dispatch 才能正常 await
+    // （否则 dispatcher 内若再次试图持锁就会死锁/超时）。
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    // dispatcher 在被调用时**也**尝试抢同一个 plan 的 advisory lock：
+    // 如果 create_plan 未释放，则 dispatcher 会 LockBusy；释放则瞬时成功。
+    struct LockAcquiringMock;
+    #[async_trait]
+    impl ReviewerDispatcher for LockAcquiringMock {
+        async fn dispatch(
+            &self,
+            plan_id: &str,
+            _plan_text: &str,
+            _allow_review_edit: bool,
+            _abort: std::sync::Arc<AtomicBool>,
+        ) -> ReviewSummary {
+            use crate::api::chat::plan_runtime::file_store::{
+                plan_path_for_id, with_advisory_lock,
+            };
+            let path = plan_path_for_id(plan_id).unwrap();
+            let lock_path = path.with_file_name(format!(
+                "{}.lock",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+            let r = with_advisory_lock(&lock_path, 150, || Ok::<_, _>(()));
+            match r {
+                Ok(()) => ReviewSummary {
+                    aborted: false,
+                    summary: "lock acquired by reviewer (write_plan 已释放)".into(),
+                    changes_summary: "none".into(),
+                    applied_changes: false,
+                },
+                Err(e) => ReviewSummary::aborted_with(format!("LockBusy: {e}")),
+            }
+        }
+    }
+    rt.attach_reviewer(std::sync::Arc::new(LockAcquiringMock));
+    rt.enter_planning("obj").unwrap();
+    let out = create_plan::execute_with_reviewer(
+        &rt,
+        create_plan::CreatePlanArgs {
+            plan_id: "rv_lock".into(),
+            goal: "g".into(),
+            body: None,
+            milestones: vec![],
+            todos: vec![],
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    let aborted = out["review"]["aborted"].as_bool().unwrap();
+    assert!(
+        !aborted,
+        "dispatch_reviewer 应能拿到 lock（说明 write_plan 已释放），实际：{:?}",
+        out["review"]
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn reviewer_round_count_warns_after_threshold() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        ok_review(),
+        ok_review(),
+    ])));
+    rt.enter_planning("obj").unwrap();
+    // 第一轮
+    let out1 = create_plan::execute_with_reviewer(
+        &rt,
+        create_plan::CreatePlanArgs {
+            plan_id: "rv_round".into(),
+            goal: "g".into(),
+            body: None,
+            milestones: vec![],
+            todos: vec![],
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(!out1["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .starts_with("[round"));
+    assert_eq!(rt.reviewer_rounds("rv_round"), 1);
+
+    // 第二轮：summary 应带 [round 2] 前缀（warning hint）
+    let out2 = create_plan::execute_with_reviewer(
+        &rt,
+        create_plan::CreatePlanArgs {
+            plan_id: "rv_round".into(),
+            goal: "g".into(),
+            body: None,
+            milestones: vec![],
+            todos: vec![],
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(out2["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .starts_with("[round 2]"));
+    assert_eq!(rt.reviewer_rounds("rv_round"), 2);
+    cleanup_home(&home);
+}
+
 #[test]
 fn from_json_helpers_reject_bad_args() {
     let _g = home_lock().lock().unwrap();

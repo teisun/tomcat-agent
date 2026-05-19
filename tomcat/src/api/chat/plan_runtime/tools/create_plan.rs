@@ -75,6 +75,9 @@ impl CreatePlanArgs {
 /// { "plan_id": "...", "path": "...", "mode": "planning",
 ///   "review": { "aborted": true, "summary": "P4 接入" } }
 /// ```
+/// `create_plan` 同步执行（不派发 reviewer）；返回写盘成功后的核心信息。
+/// 当 PlanRuntime 注入了 `ReviewerDispatcher` 时，调用方应使用
+/// [`execute_with_reviewer`] 以获得真实的 review summary。
 pub fn execute(
     runtime: &PlanRuntime,
     args: CreatePlanArgs,
@@ -154,6 +157,38 @@ pub fn execute(
             "applied_changes": false,
         }
     }))
+}
+
+/// 同 `execute`，但在写盘成功后**同步**派发 reviewer 子 Agent。
+///
+/// 顺序严格遵守 RV14：write_plan 完成（lock 已释放）→ dispatch_reviewer。
+/// reviewer 解析失败 / max_turns / 父 abort 都不影响 create_plan 成功；
+/// 摘要写入 ToolResult.review。
+pub async fn execute_with_reviewer(
+    runtime: &PlanRuntime,
+    args: CreatePlanArgs,
+    allow_review_edit: bool,
+) -> Result<serde_json::Value, ToolError> {
+    let mut out = execute(runtime, args)?;
+    let plan_id = out["plan_id"].as_str().unwrap_or("").to_string();
+    // 由 PlanRuntime 自洽派发；advisory lock 已在 write_plan 内 drop。
+    let summary = runtime.dispatch_reviewer(&plan_id, allow_review_edit).await;
+    // 若 reviewer 通过 update_plan / edit 改了 plan 文件 → reload 内存视图
+    // （目前 P2 内存仅持 active_planning_plan_id；具体 reload 字段在 P7 PR-PLE 接 panel 时扩展）
+    if summary.applied_changes {
+        let _ = reload_after_review(runtime, &plan_id);
+    }
+    out["review"] = summary.to_json();
+    Ok(out)
+}
+
+fn reload_after_review(_runtime: &PlanRuntime, plan_id: &str) -> Result<(), ToolError> {
+    use crate::api::chat::plan_runtime::file_store::{plan_path_for_id, read_plan};
+    let path = plan_path_for_id(plan_id)?;
+    // 当前 PlanRuntime 不缓存 plan 内容（todos 直接在 disk 上读改）；
+    // 这里仅做 read 一次以验证仍可解析（防御 D7：reviewer 写坏文件）。
+    let _ = read_plan(&path)?;
+    Ok(())
 }
 
 fn default_body(goal: &str) -> String {

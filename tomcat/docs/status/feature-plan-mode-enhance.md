@@ -14,7 +14,7 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P3 MA 完成 → P4 RV+CP-D 进行中 |
+| 阶段 | P4 RV+CP-D 完成 → P5 AQ 进行中 |
 
 ## Phase 进度
 
@@ -23,7 +23,7 @@
 - [x] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover(stub)、user prefix（+ §9.3A P1 单测 38 个全绿；recover 真正生效随 P2 file_store 补齐）
 - [x] **P2** PR-PLB — file_store、ops、tools/{create_plan,update_plan,todos}（stub review，P4 接入）+ §9.3B 单测 38 个全绿（write_plan 原子写/锁/超时；ops 单 in_progress / id 唯一；mode 守卫 / 跨 session 规则 / 自动 completed）
 - [x] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort + §9.3D P3 单测 11 个全绿（panic 隔离、三道闸门、cascade abort BFS、RegistrationGuard balanced）
-- [ ] **P4** RV+CP-D — dispatch_reviewer、tool guards、集成 create_plan/reviewer
+- [x] **P4** RV+CP-D — review.rs + ReviewerDispatcher trait + PlanRuntime::dispatch_reviewer + create_plan::execute_with_reviewer + §9.3D 余量单测 19 个全绿（parse 严格 / 多块取最后 / aborted 路径 / lock 先释放 / round 计数 warning）
 - [ ] **P5** AQ — ask_question + CliAskQuestionPanel
 - [ ] **P6** PR-PLC — /plan build 五件事 + 原子回滚 + E2E-PLAN-001
 - [ ] **P7** PR-PLD/PLE/PLF — TodosPanel、milestone ckpt、cancel→pending、raw edit 拦截、/restore 联动
