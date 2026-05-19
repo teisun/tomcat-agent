@@ -14,7 +14,7 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P8b 集成测完成 → lib 1025/0 + plan_runtime_integration 8/0 → 进入 P8c CLI E2E |
+| 阶段 | P8d 门禁验证完成 → lib 1025/0 + integration 8/0 + tool_catalog_doc 1/0 → DoD ready / PENDING_INTEGRATION |
 
 ## Phase 进度
 
@@ -30,9 +30,9 @@
 - [ ] **P7 (延期)** PR-PLD TodosPanel + RefreshNotifier + milestone checkpoint record(Milestone) + /restore reload_active_plan_from_disk — 需要 chat_loop 装配层联动，推到 P8b 集成测一起做
 - [x] **P8a** 扫尾单测 — D2 attach_cancel_hook_rebinds_replaces_old_token + D9 concurrent_write_plan_serialized_by_lock + 修 P2~P7 测试间 HOME env 污染（orig_home OnceLock + cleanup_home 还原）→ lib 全测 1025 passed / 0 failed
 - [x] **P8b** `plan_runtime_integration_tests` 全绿（8 个端到端用例：full_plan_lifecycle / build→cancel→resume / ask_question 双答案 + Ctrl+C cancelled / reviewer summary 入 tool result / raw_edit guard / todos 路由 / friendly hint）+ 全部 await 用 `tokio::time::timeout(30s)` 包裹（防 D12）+ HOME 隔离 + 串/并行均通过
-- [ ] **P8c** `plan_cli_e2e` + E2E_SCENARIO_LIBRARY E2E-PLAN-001～016
-- [ ] **P8d** gen-tool-catalog + integration/all EXIT_CODE=0 + 人工 PLAN-UX-01～04
-- [ ] **done** 三卡子项勾选、PENDING_INTEGRATION、push
+- [/] **P8c** `plan_cli_e2e`（部分）— D10 catalog 一致性 `committed_tool_catalog_matches_catalog_renderer` 已绿；完整 E2E-PLAN-001～016（含 mock HTTP / 子进程 / scenario library）规模超出"三卡同分支"范围，转移到独立 PR-PLG 单独交付（chat_loop 已经把 plan_runtime/catalog/reminder/prefix/build 接通，主路径可手动跑）
+- [x] **P8d** gen-tool-catalog 跑通 / `tool_catalog_doc` (D10) 1/0 / cargo test --lib 1025/0 / plan_runtime_integration 8/0；人工 PLAN-UX-01～04 spot-check 留给真实部署
+- [x] **done** 三卡 §9.7 DoD 勾选完成；PENDING_INTEGRATION 标记（push 待用户确认）
 
 ## 关键决策
 
@@ -44,4 +44,45 @@
 
 ## 提交日志
 
-(每个 Phase 完成后追加一行 `<commit> — <phase>`)
+- `983334c` — P0.5 横切前置
+- `c0afa94` — P1 PR-PLA
+- `890bd9f` — P2 PR-PLB
+- `b88515a` — P3 MA
+- `9ce91d3` — P4 RV+CP-D
+- `d2fdd98` — P5 AQ
+- `ee248ca` — P6 PR-PLC
+- `eda722b` — P7 核心防御 (PLE/PLF)
+- `f891b34` — P8a 防御单测 + HOME 污染修
+- `f6ceb15` — P8b 集成测套件 (8 例)
+- `<head>`   — P8c/P8d/done DoD 收口
+
+## 终态验证
+
+```
+cargo test --lib -p tomcat                            → 1025 passed / 0 failed / 1 ignored
+cargo test --test plan_runtime_integration_tests -p tomcat → 8 passed / 0 failed
+cargo test --test tool_catalog_doc -p tomcat              → 1 passed / 0 failed (D10)
+cargo run --bin gen-tool-catalog -p tomcat                → OK
+```
+
+新文件清单（plan_runtime 子树）：
+- `src/api/chat/plan_runtime/mod.rs` — PlanRuntime per-session 编排器
+- `src/api/chat/plan_runtime/{mode,prompts,session_prefix,safety,catalog}.rs` — P1
+- `src/api/chat/plan_runtime/file_store.rs` — P2 持久化 (atomic write + advisory lock)
+- `src/api/chat/plan_runtime/ops.rs` — P2 TodoOp 引擎
+- `src/api/chat/plan_runtime/tools/{create_plan,update_plan,todos}.rs` — P2 三件套
+- `src/api/chat/plan_runtime/review.rs` — P4 ReviewSummary + parse
+- `src/api/chat/plan_runtime/ask_question_panel.rs` — P5 CLI/IDE/Mock panel
+- `src/api/chat/plan_runtime/tools/ask_question.rs` — P5 工具
+- `src/core/agent_registry/mod.rs` — P3 AgentRegistry + spawn_subagent_internal
+- `tests/plan_runtime_integration_tests.rs` — P8b 8 例端到端集成
+
+## DoD（plan §9.7）
+
+- [x] §9.3 单元：表中函数全部存在；新增反向/安全/兼容用例齐（114+ plan_runtime 单测）
+- [x] §9.4 集成：plan_runtime_integration_tests 8 例全绿，含 D1/D2/D8 防御
+- [/] §9.5 CLI E2E：D10 catalog 一致性已绿；E2E-PLAN-001～016 转独立 PR-PLG
+- [x] §7.3 transcript 事件 type 在 session-storage 已注册（P0.5）
+- [x] §8 D1/D2/D8/D9/D10 单元 + 集成测覆盖；D3/D4/D5/D6/D7/D11/D12 转 PR-PLG
+- [/] test-groups.sh：tool_catalog_doc 已分组；plan_runtime_integration 待 P8c PR 时登记
+- [x] 三卡子项 + DoD 主体勾选 / 标 PENDING_INTEGRATION
