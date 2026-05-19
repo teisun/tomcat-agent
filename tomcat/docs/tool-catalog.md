@@ -347,6 +347,324 @@ Parameters:
 }
 ```
 
+### `create_plan`
+
+- Label: Create Plan
+- Category: `filesystem`
+- Permission scope: `Write`
+- Read only: `false`
+- Destructive: `false`
+- Search hint: `plan create planning goal milestones todos reviewer`
+
+Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` from a structured goal + milestones + todos description (PLAN mode only). Writes the plan with frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent (not visible to the LLM) whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.
+
+Parameters:
+
+```json
+{
+  "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning.",
+  "properties": {
+    "goal": {
+      "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field.",
+      "type": "string"
+    },
+    "milestones": {
+      "description": "Ordered milestones (each maps to a contiguous span of todos). Required: at least 1 milestone.",
+      "items": {
+        "properties": {
+          "description": {
+            "description": "Optional longer milestone description (markdown).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`).",
+            "type": "string"
+          },
+          "title": {
+            "description": "Human-readable milestone title (max 200 chars).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "summary": {
+      "description": "Optional longer narrative for the plan body (markdown). Empty when omitted; body is what reviewer / user reads.",
+      "type": "string"
+    },
+    "todos": {
+      "description": "Initial flat todo list with milestone references. `status` defaults to `pending`.",
+      "items": {
+        "properties": {
+          "content": {
+            "description": "Single-sentence imperative todo description.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Stable kebab-case todo id, unique within the plan.",
+            "type": "string"
+          },
+          "milestone_id": {
+            "description": "References a milestone.id declared above; omit if the todo is unscoped.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Initial status. Defaults to `pending`; at most one todo may be `in_progress`.",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "content"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "goal",
+    "milestones",
+    "todos"
+  ],
+  "type": "object"
+}
+```
+
+### `update_plan`
+
+- Label: Update Plan
+- Category: `filesystem`
+- Permission scope: `Write`
+- Read only: `false`
+- Destructive: `false`
+- Search hint: `plan update todos milestones ops complete add remove`
+
+Apply incremental ops (`add` / `update` / `complete` / `remove`) to the active plan's todos and milestones, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to advance todos during EXEC, or to refine the draft during PLAN. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. Each op carries an `id` (todo or milestone id) and only mutates frontmatter; plan body markdown is left untouched.
+
+Parameters:
+
+```json
+{
+  "description": "Apply incremental ops to the active plan's todos / milestones. Callable in CHAT / PLAN / EXEC; requires an active plan.",
+  "properties": {
+    "ops": {
+      "description": "Ordered list of mutations applied atomically (one frontmatter write under advisory lock).",
+      "items": {
+        "properties": {
+          "content": {
+            "description": "New content / title for add_* and update_* ops.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Target todo / milestone id (kebab-case).",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Operation kind. `complete_todo` is a shortcut for `update_todo { status: completed }`.",
+            "enum": [
+              "add_todo",
+              "update_todo",
+              "complete_todo",
+              "remove_todo",
+              "add_milestone",
+              "update_milestone",
+              "remove_milestone"
+            ],
+            "type": "string"
+          },
+          "milestone_id": {
+            "description": "Optional milestone reference for add_todo / update_todo.",
+            "type": "string"
+          },
+          "status": {
+            "description": "New status for update_todo / add_todo. At most one todo may be `in_progress`.",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "ops"
+  ],
+  "type": "object"
+}
+```
+
+### `todos`
+
+- Label: Todos
+- Category: `filesystem`
+- Permission scope: `Write`
+- Read only: `false`
+- Destructive: `false`
+- Search hint: `todos add complete update remove snapshot in_progress`
+
+Manage a lightweight ordered todo list (`add` / `update` / `complete` / `remove`) and return a full snapshot of all items after each call. In CHAT mode the list is persisted under `~/.tomcat/agents/<id>/todos/*.todo.md`; in EXEC mode the list IS the active plan's `todos[]` and is written to that plan file. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.
+
+Parameters:
+
+```json
+{
+  "description": "Maintain a single-source todo list. CHAT mode persists under `~/.tomcat/agents/<id>/todos/`; EXEC writes the active plan's frontmatter todos. Returns the full items snapshot after each call.",
+  "properties": {
+    "ops": {
+      "description": "Ordered list of mutations (same op kinds as update_plan, restricted to *_todo).",
+      "items": {
+        "properties": {
+          "content": {
+            "description": "New content for add_todo / update_todo.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Target todo id (kebab-case).",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Operation kind.",
+            "enum": [
+              "add_todo",
+              "update_todo",
+              "complete_todo",
+              "remove_todo"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "New status. At most one todo may be `in_progress`.",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "ops"
+  ],
+  "type": "object"
+}
+```
+
+### `ask_question`
+
+- Label: Ask Question
+- Category: `filesystem`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `plan ask question single multi choice recommended custom`
+
+Ask the user 1–4 structured single/multi-choice questions during PLAN mode. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars. The tool blocks until the user answers or cancels (cancel → `{ cancelled: true }`, not a ToolError). Visible only when `mode == Planning`; in EXEC / CHAT the model must `/plan exit` and ask in natural language instead.
+
+Parameters:
+
+```json
+{
+  "description": "Block-await structured multiple-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot — do not declare it yourself.",
+  "properties": {
+    "questions": {
+      "description": "1–4 questions presented to the user in one panel turn.",
+      "items": {
+        "properties": {
+          "allow_multiple": {
+            "description": "When true, user may select multiple options. Defaults to false.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Stable question id (kebab-case), unique within the panel turn.",
+            "type": "string"
+          },
+          "options": {
+            "description": "2–4 options. Exactly one option must carry `recommended: true`.",
+            "items": {
+              "properties": {
+                "id": {
+                  "description": "Stable option id (kebab-case), unique within this question. Reserved id `__custom__` is forbidden — the UI appends it automatically.",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "Human-readable option label (max 200 chars).",
+                  "type": "string"
+                },
+                "recommended": {
+                  "description": "Mark exactly one option per question as recommended; the UI suffixes it with `— 推荐`.",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "label"
+              ],
+              "type": "object"
+            },
+            "maxItems": 4,
+            "minItems": 2,
+            "type": "array"
+          },
+          "prompt": {
+            "description": "Question text shown to the user (max 500 chars).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "prompt",
+          "options"
+        ],
+        "type": "object"
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "questions"
+  ],
+  "type": "object"
+}
+```
+
 ## Exec
 
 ### `bash`

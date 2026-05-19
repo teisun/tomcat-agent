@@ -19,7 +19,7 @@
 ## Phase 进度
 
 - [x] **P0** 认领三卡、切分支、README/任务卡/status 更新
-- [ ] **P0.5** 横切前置（依赖 / `AgentLoopConfig::Default` / catalog / 事件 type / `[plan]`/`[reviewer]` config / gen-tool-catalog）
+- [x] **P0.5** 横切前置（依赖 `serde_yaml` / `AgentLoopConfig` + `SubagentType` / 4 plan 工具进 catalog / transcript 事件 type 常量 / `[plan]`+`[reviewer]` config / `gen-tool-catalog` + `tool_catalog_doc` 回归）
 - [ ] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover、user prefix
 - [ ] **P2** PR-PLB — file_store、todos、update_plan、create_plan(stub review)
 - [ ] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort

@@ -21,6 +21,7 @@
 //!   （handle_overflow_retry / execute_tool）。
 
 mod classify_test;
+mod defaults_test;
 mod events_order_test;
 mod interrupt_test;
 mod metrics_test;

@@ -43,6 +43,17 @@ pub struct BuiltinToolCatalogEntry {
     pub read_only: bool,
     pub destructive: bool,
     pub search_hint: Option<&'static str>,
+    /// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）。
+    /// 默认 `false`：进入 chat_loop 默认 LLM 工具集；`true` 时：
+    /// - 工具仍在 `BUILTIN_TOOL_CATALOG` 中（保持单一事实源、`tool-catalog.md` 文档完整）；
+    /// - 不进 `build_function_definitions_for_chat_default()`（chat_loop 默认视图）；
+    /// - 由 `PlanRuntime::visible_tools_for_mode(PlanMode)` 在 PLAN/EXEC 模式时显式合入。
+    /// 详见 [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1 R6。
+    pub plan_only: bool,
+    /// 调用本工具是否需要等待用户交互（如 `ask_question` 在 CLI/IDE panel 阻塞 await）。
+    /// 这是工具元属性，与 `read_only` / `destructive` 并列；写 catalog 时用作"工具是否会让 chat 主循环让出 stdin"的硬约束声明。
+    /// 详见 [`ask-question.md`](../../../../docs/architecture/tools/ask-question.md) §4.2.1。
+    pub requires_user_interaction: bool,
 }
 
 impl BuiltinToolCatalogEntry {
@@ -89,6 +100,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: true,
         destructive: false,
         search_hint: Some("read file text utf-8 inspect"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "write",
@@ -101,6 +114,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("write create overwrite file"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "edit",
@@ -113,6 +128,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("edit replace old_content new_content file"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "hashline_edit",
@@ -125,6 +142,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("hashline edit line anchor hash"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "bash",
@@ -137,6 +156,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("bash shell command test build git background"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "task_output",
@@ -149,6 +170,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: true,
         destructive: false,
         search_hint: Some("bash background task output tail log"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "task_stop",
@@ -161,6 +184,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("bash background task stop kill cancel"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "task_list",
@@ -173,6 +198,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: true,
         destructive: false,
         search_hint: Some("bash background task list status enumerate"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "list_dir",
@@ -185,6 +212,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: true,
         destructive: false,
         search_hint: Some("list directory files"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "search_files",
@@ -197,6 +226,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: true,
         destructive: false,
         search_hint: Some("search grep glob files content regex"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "config_get",
@@ -209,6 +240,8 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: true,
         destructive: false,
         search_hint: Some("config get workspace primitive model"),
+        plan_only: false,
+        requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
         name: "config_set",
@@ -221,6 +254,65 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         read_only: false,
         destructive: true,
         search_hint: Some("config set workspace roots path rules model"),
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    // ─── PLAN 模式专属工具（T2-P1-002/003）：plan_only=true，默认 chat catalog 不暴露 ───
+    BuiltinToolCatalogEntry {
+        name: "create_plan",
+        label: "Create Plan",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` from a structured goal + milestones + todos description (PLAN mode only). Writes the plan with frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent (not visible to the LLM) whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
+        display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
+        parameters: create_plan_parameters,
+        scope: PermissionScope::Write,
+        category: None,
+        read_only: false,
+        destructive: false,
+        search_hint: Some("plan create planning goal milestones todos reviewer"),
+        plan_only: true,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "update_plan",
+        label: "Update Plan",
+        description: "Apply incremental ops (`add` / `update` / `complete` / `remove`) to the active plan's todos and milestones, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to advance todos during EXEC, or to refine the draft during PLAN. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. Each op carries an `id` (todo or milestone id) and only mutates frontmatter; plan body markdown is left untouched.\n",
+        display_summary: Some("Apply incremental ops to the active plan's todos/milestones (CHAT/PLAN/EXEC)."),
+        parameters: update_plan_parameters,
+        scope: PermissionScope::Write,
+        category: None,
+        read_only: false,
+        destructive: false,
+        search_hint: Some("plan update todos milestones ops complete add remove"),
+        plan_only: true,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "todos",
+        label: "Todos",
+        description: "Manage a lightweight ordered todo list (`add` / `update` / `complete` / `remove`) and return a full snapshot of all items after each call. In CHAT mode the list is persisted under `~/.tomcat/agents/<id>/todos/*.todo.md`; in EXEC mode the list IS the active plan's `todos[]` and is written to that plan file. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.\n",
+        display_summary: Some("Maintain a single-source todo list (single in_progress; returns full snapshot)."),
+        parameters: todos_parameters,
+        scope: PermissionScope::Write,
+        category: None,
+        read_only: false,
+        destructive: false,
+        search_hint: Some("todos add complete update remove snapshot in_progress"),
+        plan_only: true,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "ask_question",
+        label: "Ask Question",
+        description: "Ask the user 1–4 structured single/multi-choice questions during PLAN mode. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars. The tool blocks until the user answers or cancels (cancel → `{ cancelled: true }`, not a ToolError). Visible only when `mode == Planning`; in EXEC / CHAT the model must `/plan exit` and ask in natural language instead.\n",
+        display_summary: Some("Block-await structured multiple-choice answers from the user (PLAN mode only)."),
+        parameters: ask_question_parameters,
+        scope: PermissionScope::Read,
+        category: None,
+        read_only: true,
+        destructive: false,
+        search_hint: Some("plan ask question single multi choice recommended custom"),
+        plan_only: true,
+        requires_user_interaction: true,
     },
 ];
 
@@ -231,6 +323,32 @@ pub fn builtin_tool_by_name(name: &str) -> Option<&'static BuiltinToolCatalogEnt
 pub fn build_function_definitions() -> Vec<Value> {
     BUILTIN_TOOL_CATALOG
         .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "parameters": (entry.parameters)(),
+                }
+            })
+        })
+        .collect()
+}
+
+/// chat_loop 默认 LLM 工具集（不含 `plan_only` 工具）。
+///
+/// PLAN 模式专属工具（`create_plan` / `update_plan` / `todos` / `ask_question`）依据 plan-runtime.md
+/// §4.1 R6 在 PLAN/EXEC 模式由 `PlanRuntime::visible_tools_for_mode` 显式合入；
+/// 未启用 `PlanRuntime` 时（or `mode == Chat`），chat_loop 用本 helper 装配 `tool_definitions`，
+/// 避免 plan 工具暴露给 CHAT 期 LLM。
+///
+/// 全集（含 plan_only）仍由 [`build_function_definitions`] 输出，用于
+/// `tool-catalog.md` 文档与 `catalog_and_function_definitions_have_same_names` 回归。
+pub fn build_function_definitions_for_chat_default() -> Vec<Value> {
+    BUILTIN_TOOL_CATALOG
+        .iter()
+        .filter(|entry| !entry.plan_only)
         .map(|entry| {
             serde_json::json!({
                 "type": "function",
@@ -586,6 +704,217 @@ fn config_set_parameters() -> Value {
         }),
         &["key", "value"],
     )
+}
+
+// ─── PLAN 模式工具 schema（T2-P1-002/003） ─────────────────────────────────
+
+fn create_plan_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning.",
+        "properties": {
+            "goal": {
+                "type": "string",
+                "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field."
+            },
+            "summary": {
+                "type": "string",
+                "description": "Optional longer narrative for the plan body (markdown). Empty when omitted; body is what reviewer / user reads."
+            },
+            "milestones": {
+                "type": "array",
+                "description": "Ordered milestones (each maps to a contiguous span of todos). Required: at least 1 milestone.",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`)."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Human-readable milestone title (max 200 chars)."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional longer milestone description (markdown)."
+                        }
+                    },
+                    "required": ["id", "title"]
+                }
+            },
+            "todos": {
+                "type": "array",
+                "description": "Initial flat todo list with milestone references. `status` defaults to `pending`.",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Stable kebab-case todo id, unique within the plan."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Single-sentence imperative todo description."
+                        },
+                        "milestone_id": {
+                            "type": "string",
+                            "description": "References a milestone.id declared above; omit if the todo is unscoped."
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            "description": "Initial status. Defaults to `pending`; at most one todo may be `in_progress`."
+                        }
+                    },
+                    "required": ["id", "content"]
+                }
+            }
+        },
+        "required": ["goal", "milestones", "todos"]
+    })
+}
+
+fn update_plan_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Apply incremental ops to the active plan's todos / milestones. Callable in CHAT / PLAN / EXEC; requires an active plan.",
+        "properties": {
+            "ops": {
+                "type": "array",
+                "description": "Ordered list of mutations applied atomically (one frontmatter write under advisory lock).",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["add_todo", "update_todo", "complete_todo", "remove_todo", "add_milestone", "update_milestone", "remove_milestone"],
+                            "description": "Operation kind. `complete_todo` is a shortcut for `update_todo { status: completed }`."
+                        },
+                        "id": {
+                            "type": "string",
+                            "description": "Target todo / milestone id (kebab-case)."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "New content / title for add_* and update_* ops."
+                        },
+                        "milestone_id": {
+                            "type": "string",
+                            "description": "Optional milestone reference for add_todo / update_todo."
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            "description": "New status for update_todo / add_todo. At most one todo may be `in_progress`."
+                        }
+                    },
+                    "required": ["kind", "id"]
+                }
+            }
+        },
+        "required": ["ops"]
+    })
+}
+
+fn todos_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Maintain a single-source todo list. CHAT mode persists under `~/.tomcat/agents/<id>/todos/`; EXEC writes the active plan's frontmatter todos. Returns the full items snapshot after each call.",
+        "properties": {
+            "ops": {
+                "type": "array",
+                "description": "Ordered list of mutations (same op kinds as update_plan, restricted to *_todo).",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["add_todo", "update_todo", "complete_todo", "remove_todo"],
+                            "description": "Operation kind."
+                        },
+                        "id": {
+                            "type": "string",
+                            "description": "Target todo id (kebab-case)."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "New content for add_todo / update_todo."
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            "description": "New status. At most one todo may be `in_progress`."
+                        }
+                    },
+                    "required": ["kind", "id"]
+                }
+            }
+        },
+        "required": ["ops"]
+    })
+}
+
+fn ask_question_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Block-await structured multiple-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot — do not declare it yourself.",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "description": "1–4 questions presented to the user in one panel turn.",
+                "minItems": 1,
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Stable question id (kebab-case), unique within the panel turn."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Question text shown to the user (max 500 chars)."
+                        },
+                        "allow_multiple": {
+                            "type": "boolean",
+                            "description": "When true, user may select multiple options. Defaults to false."
+                        },
+                        "options": {
+                            "type": "array",
+                            "description": "2–4 options. Exactly one option must carry `recommended: true`.",
+                            "minItems": 2,
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {
+                                        "type": "string",
+                                        "description": "Stable option id (kebab-case), unique within this question. Reserved id `__custom__` is forbidden — the UI appends it automatically."
+                                    },
+                                    "label": {
+                                        "type": "string",
+                                        "description": "Human-readable option label (max 200 chars)."
+                                    },
+                                    "recommended": {
+                                        "type": "boolean",
+                                        "description": "Mark exactly one option per question as recommended; the UI suffixes it with `— 推荐`."
+                                    }
+                                },
+                                "required": ["id", "label"]
+                            }
+                        }
+                    },
+                    "required": ["id", "prompt", "options"]
+                }
+            }
+        },
+        "required": ["questions"]
+    })
 }
 
 #[cfg(test)]

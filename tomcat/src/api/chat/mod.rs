@@ -451,7 +451,9 @@ impl ToolExecutor for NoopToolExecutor {
 // ─── Tool definitions for LLM ─────────────────────────────────────────────────
 
 fn build_tool_definitions() -> Vec<serde_json::Value> {
-    crate::core::tools::contract::catalog::build_function_definitions()
+    // P0.5：chat_loop 默认视图排除 plan_only 工具（PlanMode == Chat）；
+    // P1 起 `PlanRuntime::visible_tools_for_mode` 接管，按 Planning/Executing 合入 plan 工具。
+    crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
 }
 
 // ─── Workspace state for system prompt（plan §8 / PR-8） ─────────────────────
@@ -730,6 +732,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             read_file_state: ctx.read_file_state.clone(),
             openai_files_runtime: ctx.openai_files_runtime.clone(),
             checkpoint_store: ctx.checkpoint_store.clone(),
+            parent_session_id: None,
+            spawn_depth: 0,
+            subagent_type: crate::core::agent_loop::SubagentType::User,
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),

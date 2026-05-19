@@ -110,6 +110,34 @@ pub mod wire {
     /// 与现有 `AgentEnd { error: Some("interrupted") }` **并存**——前者供需要区分
     /// "失败 vs 中断"的订阅者使用，后者保留给原有订阅者做向后兼容。
     pub const WIRE_AGENT_INTERRUPTED: &str = "agent_interrupted";
+    /// `AgentEvent::SubAgentStart` 的 JSON `type`（multi-agent §14.5）：
+    /// 父 Agent 通过 `AgentRegistry::spawn_subagent_internal` 派生子 Agent 时发射。
+    pub const WIRE_SUB_AGENT_START: &str = "sub_agent_start";
+    /// `AgentEvent::SubAgentEnd` 的 JSON `type`（multi-agent §14.5）：
+    /// 子 Agent run() 收敛 / abort / fatal 时发射。
+    pub const WIRE_SUB_AGENT_END: &str = "sub_agent_end";
+
+    // --- transcript 自定义事件 type（plan §P0.5 / §7.3 注册口径） ---
+    //
+    // 与 `TranscriptEntry::Custom` 中的 `extra.event` 字段对齐，并不出现在 `AgentEvent`
+    // 枚举（这些是 transcript 落盘语义，不发到 EventBus）。集中常量化以避免字面量散落。
+    //
+    // 写入路径：`PlanRuntime` / `reviewer` 子流程在落盘后通过 `append_entry` 写 `Custom`
+    // 行；读路径：hydrate / 审计在反序列化时直接以 `extra.event == 这些常量之一` 分流。
+    /// `~/.tomcat/plans/<slug>_<hash>.plan.md` 落盘成功。
+    pub const WIRE_PLAN_CREATE: &str = "plan.create";
+    /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
+    pub const WIRE_PLAN_REVIEW: &str = "plan.review";
+    /// reviewer parse 失败 / 超 `max_review_rounds` 软上限时的告警。
+    pub const WIRE_PLAN_REVIEW_WARNING: &str = "plan.review.warning";
+    /// `ask_question` 工具完成（含 cancelled）。
+    pub const WIRE_PLAN_ASK_QUESTION: &str = "plan.ask_question";
+    /// `todos` / `update_plan` 写入完成。
+    pub const WIRE_PLAN_TODOS: &str = "plan.todos";
+    /// `TodosPanel` 节流刷新快照（用户可见但不进 LLM 上下文）。
+    pub const WIRE_PLAN_PANEL: &str = "plan.panel";
+    /// PlanRuntime `mode → completed` 派生时落痕。
+    pub const WIRE_PLAN_COMPLETE: &str = "plan.complete";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";
@@ -373,6 +401,34 @@ pub enum AgentEvent {
         /// 本回合已追加到 messages 的 tool_result 数量。
         #[serde(rename = "toolResultsCount")]
         tool_results_count: usize,
+    },
+    /// 父 Agent 通过 `AgentRegistry::spawn_subagent_internal` 派生子 Agent 时发射。
+    /// 用于审计 / TUI 关联父子关系；与 `Interrupted` 同档「描述生命周期」语义。
+    ///
+    /// 注：reviewer 子 Agent **不**写父 transcript（隔离），仅靠本事件让父侧观察到子的存在。
+    SubAgentStart {
+        #[serde(rename = "parentSessionId")]
+        parent_session_id: String,
+        #[serde(rename = "childSessionId")]
+        child_session_id: String,
+        /// `SubagentType::as_str()`（如 `"reviewer"`）。
+        #[serde(rename = "subagentType")]
+        subagent_type: String,
+        #[serde(rename = "spawnDepth")]
+        spawn_depth: u32,
+    },
+    /// 子 Agent run() 收敛 / abort / fatal 时发射；`outcome ∈ {"completed","interrupted","failed"}`。
+    SubAgentEnd {
+        #[serde(rename = "parentSessionId")]
+        parent_session_id: String,
+        #[serde(rename = "childSessionId")]
+        child_session_id: String,
+        #[serde(rename = "subagentType")]
+        subagent_type: String,
+        outcome: String,
+        /// 失败 / abort 时的简短理由（成功为 `None`）。
+        #[serde(rename = "errorMessage", skip_serializing_if = "Option::is_none")]
+        error_message: Option<String>,
     },
 }
 

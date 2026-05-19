@@ -651,6 +651,97 @@ impl Default for ToolsBashConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WasmConfig {}
 
+/// `[plan]` 子表（T2-P1-002 PR-PLA/PLB）：PLAN 模式运行时全局参数。
+///
+/// 设计口径：仅放「锁等待 / 自动 checkpoint 开关」这类**运行时与磁盘资源**相关的全局
+/// 参数；reviewer 子流程参数独立到 [`ReviewerConfig`]，避免单表字段膨胀。
+///
+/// 详见 `docs/architecture/plan-runtime.md`（PR-PLB / PR-PLE）。
+///
+/// env 覆盖：
+/// - `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` → `lock_timeout_ms`
+/// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_BUILD` → `auto_checkpoint_on_build`
+/// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_MILESTONE` → `auto_checkpoint_on_milestone`
+/// - `TOMCAT_PLAN_MAX_REVIEW_ROUNDS` → `max_review_rounds`
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PlanConfig {
+    /// `~/.tomcat/plans/*.plan.md` advisory lock 等待上限（毫秒）。默认 2000。
+    #[serde(default = "default_plan_lock_timeout_ms")]
+    pub lock_timeout_ms: u64,
+    /// `/plan build` 时是否自动打 `CheckpointKind::Manual{label:"plan_build:<id>"}`。默认 false。
+    #[serde(default)]
+    pub auto_checkpoint_on_build: bool,
+    /// milestone 全 completed 时是否自动打 `CheckpointKind::Milestone{milestone_id}`。默认 true。
+    #[serde(default = "default_true")]
+    pub auto_checkpoint_on_milestone: bool,
+    /// 单 plan 累计 review 软上限：超过时仅 transcript warning，**不**阻 `create_plan` / `/plan build`。
+    /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
+    #[serde(default = "default_plan_max_review_rounds")]
+    pub max_review_rounds: u32,
+}
+
+fn default_plan_lock_timeout_ms() -> u64 {
+    2000
+}
+
+fn default_plan_max_review_rounds() -> u32 {
+    1
+}
+
+impl Default for PlanConfig {
+    fn default() -> Self {
+        Self {
+            lock_timeout_ms: default_plan_lock_timeout_ms(),
+            auto_checkpoint_on_build: false,
+            auto_checkpoint_on_milestone: true,
+            max_review_rounds: default_plan_max_review_rounds(),
+        }
+    }
+}
+
+/// `[reviewer]` 子表（T2-P1-004 RV-A/B/E）：reviewer 内联子 Agent 派发参数。
+///
+/// reviewer 子 Agent 走 `AgentRegistry::spawn_subagent_internal`，**不**进 LLM catalog；
+/// 本表仅控制：默认是否允许 reviewer 改 plan、子 loop 最大轮次、（可选）覆盖父 model /
+/// system prompt。
+///
+/// env 覆盖（plan §P0.5 / reviewer §11）：
+/// - `TOMCAT_REVIEWER_DEFAULT_ALLOW_EDIT` → `default_allow_edit`
+/// - `TOMCAT_REVIEWER_MAX_TURNS` → `max_turns`
+/// - `TOMCAT_REVIEWER_MODEL` → `model_override`
+/// - `TOMCAT_REVIEWER_SYSTEM_PROMPT_OVERRIDE_PATH` → `system_prompt_override_path`
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReviewerConfig {
+    /// `dispatch_reviewer` 默认 `allow_review_edit`（启用后 reviewer 子工具集附加 `update_plan` / scoped `edit`）。
+    /// 默认 false。
+    #[serde(default)]
+    pub default_allow_edit: bool,
+    /// reviewer 子 loop 最大轮次（与 `max_tool_rounds` 同档）。默认 8。
+    #[serde(default = "default_reviewer_max_turns")]
+    pub max_turns: u32,
+    /// 显式覆盖 reviewer 子 Agent 使用的 LLM 模型；`None` 时继承父 Agent。
+    #[serde(default)]
+    pub model_override: Option<String>,
+    /// 显式覆盖 reviewer system prompt 的本地文件路径（调试用）；`None` 时使用内置 `REVIEWER_SYSTEM_PROMPT`。
+    #[serde(default)]
+    pub system_prompt_override_path: Option<String>,
+}
+
+fn default_reviewer_max_turns() -> u32 {
+    8
+}
+
+impl Default for ReviewerConfig {
+    fn default() -> Self {
+        Self {
+            default_allow_edit: false,
+            max_turns: default_reviewer_max_turns(),
+            model_override: None,
+            system_prompt_override_path: None,
+        }
+    }
+}
+
 /// 应用顶层配置，聚合 log / llm / storage / agent / plugin / security / primitive / wasm 子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -680,4 +771,10 @@ pub struct AppConfig {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub wasm: WasmConfig,
+    /// PLAN 模式运行时全局参数（T2-P1-002 PR-PLA/PLB）。
+    #[serde(default)]
+    pub plan: PlanConfig,
+    /// reviewer 内联子 Agent 派发参数（T2-P1-004 RV-A/B/E）。
+    #[serde(default)]
+    pub reviewer: ReviewerConfig,
 }

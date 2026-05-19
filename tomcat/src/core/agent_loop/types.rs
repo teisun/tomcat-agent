@@ -45,6 +45,35 @@ pub enum LoopError {
     },
 }
 
+// ─── 子 Agent 类型（multi-agent §14.3.3） ──────────────────────────────────
+
+/// 子 Agent 类型枚举。**仅** internal dispatch 用，**不**进 OpenAI function schema。
+///
+/// `User` 是父 Agent（顶层 chat_loop）的默认；`Reviewer` 由 `PlanRuntime::dispatch_reviewer`
+/// 通过 `AgentRegistry::spawn_subagent_internal` 设入。未来 `dispatch_agent` 工具的通用子 Agent
+/// 类型在 Phase 3 全量阶段补充。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentType {
+    /// 顶层 chat_loop 的 user-facing Agent；reviewer 不可使用此值。
+    User,
+    /// reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
+    Reviewer,
+}
+
+impl SubagentType {
+    /// 是否为顶层（root）Agent；用于 `spawn_subagent_internal` 时断言不允许深嵌套同类。
+    pub fn is_root(self) -> bool {
+        matches!(self, SubagentType::User)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubagentType::User => "user",
+            SubagentType::Reviewer => "reviewer",
+        }
+    }
+}
+
 // ─── 配置与结果 ─────────────────────────────────────────────────────────────
 
 pub struct AgentLoopConfig {
@@ -71,6 +100,17 @@ pub struct AgentLoopConfig {
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
     /// Checkpoint 存储：turn_end / interrupt / restore 使用。
     pub checkpoint_store: Arc<dyn CheckpointStore>,
+    /// 父 session id（multi-agent §14.3.3）。**仅** `spawn_subagent_internal` 时设置；
+    /// 顶层 chat_loop 始终为 `None`。reviewer 子 Agent 透传此值到 `SubAgentStart` 事件，
+    /// 便于在审计 / TUI 中关联父子关系。
+    pub parent_session_id: Option<String>,
+    /// 派生深度。顶层 chat_loop 为 0；`spawn_subagent_internal` 时设为 `parent.spawn_depth + 1`。
+    /// `AgentRegistry::spawn_subagent_internal` 会校验 `spawn_depth + 1 <= MAX_SPAWN_DEPTH`（默认 2）。
+    pub spawn_depth: u32,
+    /// 子 Agent 类型。顶层永远为 `User`；reviewer 子 Agent 为 `Reviewer`。
+    /// 既参与 catalog 过滤（reviewer 强制硬编码 `allowed_tools`），也参与 `create_plan`
+    /// 防套娃（reviewer 调 create_plan 不再二次派发 reviewer）。
+    pub subagent_type: SubagentType,
 }
 
 impl Default for AgentLoopConfig {
@@ -87,6 +127,9 @@ impl Default for AgentLoopConfig {
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,
             checkpoint_store: Arc::new(NoopStore),
+            parent_session_id: None,
+            spawn_depth: 0,
+            subagent_type: SubagentType::User,
         }
     }
 }

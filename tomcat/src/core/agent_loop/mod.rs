@@ -139,5 +139,6 @@ mod tests;
 
 pub use config_backend::{ConfigBackend, SharedConfigBackend};
 pub use types::{
-    AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError, ToolCallInfo,
+    AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, LoopError, SubagentType,
+    ToolCallInfo,
 };
