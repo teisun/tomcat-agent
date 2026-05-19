@@ -38,17 +38,20 @@
 //! `cancel`。
 
 pub mod catalog;
+pub mod file_store;
 pub mod mode;
+pub mod ops;
 pub mod prompts;
 pub mod safety;
 pub mod session_prefix;
+pub mod tools;
 
 #[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub use mode::PlanMode;
@@ -70,13 +73,22 @@ pub struct PlanRuntime {
     /// 本 PlanRuntime 绑定的 session_key（来自 `SessionManager::current_session_key`）。
     /// 用于 `recover()` 区分 executing 是当前 session 在跑（保留）还是异 session 残留
     /// （降级 pending + warning），实现 D6 防御。
-    #[allow(dead_code)] // P2/P7 起 recover / build 时使用
     session_key: String,
     /// 本回合 `CancellationToken` 的弱引用。chat_loop 每轮 readline 后重建 token，
     /// 必须立即 `attach_cancel_hook(&new_token)` 重挂，否则上一轮的 hook 监听
     /// 失效 → cancel→pending 不工作（D2 防御）。
     #[allow(dead_code)] // P7 接入
-    cancel_token: parking_lot::Mutex<Option<CancellationToken>>,
+    cancel_token: Mutex<Option<CancellationToken>>,
+    /// CHAT 模式下 `todos` 工具的 session-local scratchpad，**不**落盘 plan 文件
+    /// （落盘文件路径由 P7 PR-PLD 引入 `~/.tomcat/agents/.../todos/*.todo.md`，
+    /// 当前 P2 内存即可）。EXEC/Planning/Pending 模式下 `todos` 操作走 PlanFile。
+    session_todos: Mutex<Vec<file_store::TodoItem>>,
+    /// Planning 状态的 active plan_id。P1 的 `PlanMode::Planning` 没有携带 plan_id 字段；
+    /// 这里用辅助字段保留 `create_plan` 写盘后的 plan_id，供后续 `update_plan` /
+    /// `/plan build` 默认路由使用。EXEC/Pending 状态请直接读 `mode().active_plan_id()`。
+    active_planning_plan_id: Mutex<Option<String>>,
+    /// `[plan] lock_timeout_ms`：write_plan / dispatch_reviewer 共享。默认 2000。
+    lock_timeout_ms: u64,
 }
 
 impl PlanRuntime {
@@ -85,11 +97,27 @@ impl PlanRuntime {
     /// session_key 在 `ChatContext::from_config` 装配阶段已知（chat session 同生命周期）。
     /// 当前 P1 实现：`mode = Chat`，等待 `enter_planning` 或 `recover` 改写。
     pub fn new(session_key: impl Into<String>) -> Arc<Self> {
+        Self::with_lock_timeout(session_key, file_store::DEFAULT_LOCK_TIMEOUT_MS)
+    }
+
+    /// 显式给 `lock_timeout_ms`（测试用；生产从 `[plan] lock_timeout_ms` 读取）。
+    pub fn with_lock_timeout(
+        session_key: impl Into<String>,
+        lock_timeout_ms: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             mode: RwLock::new(PlanMode::Chat),
             session_key: session_key.into(),
-            cancel_token: parking_lot::Mutex::new(None),
+            cancel_token: Mutex::new(None),
+            session_todos: Mutex::new(Vec::new()),
+            active_planning_plan_id: Mutex::new(None),
+            lock_timeout_ms,
         })
+    }
+
+    /// 本 runtime 绑定的 session_key（只读）。
+    pub fn session_key(&self) -> &str {
+        &self.session_key
     }
 
     /// 读当前 mode（轻量 RwLock 读锁；不分配）。
@@ -142,6 +170,51 @@ impl PlanRuntime {
     pub fn recover(&self) -> Result<(), PlanRuntimeError> {
         debug_assert!(matches!(*self.mode.read(), PlanMode::Chat));
         Ok(())
+    }
+
+    // ─── P2 PR-PLB 内部 API（供 tools/* 模块调用） ──────────────────────────
+
+    /// 当前 `[plan] lock_timeout_ms`。
+    pub fn lock_timeout_ms(&self) -> u64 {
+        self.lock_timeout_ms
+    }
+
+    /// session_todos 的快照（克隆，供 `todos` CHAT 路径使用）。
+    pub fn snapshot_session_todos(&self) -> Vec<file_store::TodoItem> {
+        self.session_todos.lock().clone()
+    }
+
+    /// 整体替换 session_todos（不暴露细粒度 API，避免 ops 引擎语义被绕过）。
+    pub fn replace_session_todos(&self, todos: Vec<file_store::TodoItem>) {
+        *self.session_todos.lock() = todos;
+    }
+
+    /// Planning 模式下记 active_plan_id（写入 mode 内的 plan_id 影子字段）。
+    ///
+    /// 用 Planning(plan_id?) 容易破坏现有 `PlanMode` 形态（P1 已签合约：Planning 不带 plan_id）。
+    /// 改为另存 `active_planning_plan_id`，仅在 Planning 状态有意义。
+    pub fn set_active_planning_plan_id(&self, plan_id: String) {
+        *self.active_planning_plan_id.lock() = Some(plan_id);
+    }
+
+    /// 读 Planning 模式下的 active_plan_id。EXEC/Pending 应直接看 `mode().active_plan_id()`。
+    pub fn active_planning_plan_id(&self) -> Option<String> {
+        self.active_planning_plan_id.lock().clone()
+    }
+
+    /// 内存切到 `Completed { plan_id }`；由 update_plan / todos 在所有 todo 完成时调用。
+    pub fn set_mode_completed(&self, plan_id: String) {
+        *self.mode.write() = PlanMode::Completed { plan_id };
+        // active planning 已经收口，清空辅助字段
+        *self.active_planning_plan_id.lock() = None;
+    }
+
+    /// 测试辅助：直接把内存 mode 切到 `Executing { plan_id }`，
+    /// **不**做任何 frontmatter / disk 校验。仅供集成单测短路 `/plan build` 路径。
+    /// 真实路径请等待 P6 PR-PLC 的 `build_plan` API。
+    #[doc(hidden)]
+    pub fn set_executing_for_test(&self, plan_id: String) {
+        *self.mode.write() = PlanMode::Executing { plan_id };
     }
 }
 
