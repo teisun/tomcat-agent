@@ -138,7 +138,7 @@ fn strip_user_prefix_passthrough_when_lookalike_does_not_close() {
 fn plan_enter_injects_planner_reminder_into_system() {
     // chat_loop 的 system 注入逻辑（见 chat/mod.rs）等价于 `format!("{}{}", system_text, PLANNER_REMINDER)`。
     // 本测试锁住 PLANNER_REMINDER 的关键结构（system_reminder 标签 + 关键关键词），并验证拼接副作用。
-    let reminder = prompts::PLANNER_REMINDER;
+    let reminder: &str = &prompts::PLANNER_REMINDER;
     assert!(
         reminder.contains("<system_reminder") && reminder.contains("</system_reminder>"),
         "PLANNER_REMINDER 必须使用 <system_reminder ...> ... </system_reminder> 包裹，实际：\n{reminder}"

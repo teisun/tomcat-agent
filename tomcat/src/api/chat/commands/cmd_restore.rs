@@ -92,6 +92,18 @@ pub(crate) fn run(
             restored_paths.join(", ")
         );
     }
+    // E7：树恢复完成后，把内存里的 plan 模式与磁盘对齐——若磁盘 active executing
+    // plan 与本 session 绑定，则把 PlanRuntime 切回 Executing；否则保持当前模式。
+    // 失败仅 warning，不影响树恢复的成功结果。
+    match ctx.plan_runtime.reload_active_plan_from_disk() {
+        Ok(Some(plan_id)) => {
+            println!("plan_runtime 已对齐磁盘：EXEC plan_id={plan_id}");
+        }
+        Ok(None) => {}
+        Err(err) => {
+            println!("plan_runtime 重新对齐失败（仅警告）：{err}");
+        }
+    }
     record_restore_audit(
         ctx,
         true,

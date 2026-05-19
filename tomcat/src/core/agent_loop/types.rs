@@ -111,6 +111,13 @@ pub struct AgentLoopConfig {
     /// 既参与 catalog 过滤（reviewer 强制硬编码 `allowed_tools`），也参与 `create_plan`
     /// 防套娃（reviewer 调 create_plan 不再二次派发 reviewer）。
     pub subagent_type: SubagentType,
+    /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
+    /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
+    /// - 读取当前 `PlanMode` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
+    ///
+    /// 顶层 chat_loop 必填；reviewer 子 Agent 与脱离 PlanRuntime 的单测/独立 AgentLoop 可为 `None`，
+    /// 此时 tool_exec 收到这四个工具的调用会返回 `ToolError::PlanRuntimeUnavailable` 文案。
+    pub plan_runtime: Option<Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -130,6 +137,7 @@ impl Default for AgentLoopConfig {
             parent_session_id: None,
             spawn_depth: 0,
             subagent_type: SubagentType::User,
+            plan_runtime: None,
         }
     }
 }

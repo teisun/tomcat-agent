@@ -309,6 +309,24 @@ impl ChatContext {
 
         // T2-P1-002 PR-PLA：PlanRuntime per-session，与 session_key 绑定。
         let plan_runtime = plan_runtime::PlanRuntime::new(session.current_session_key());
+        // T2-P1-* GAP-N12 / G3：把 ChatContext 已知的 plan/ask_question/todos 配置注入运行时。
+        // 注意：这些 setter 都是幂等 atomic store；后续 hot-reload 也走同入口。
+        plan_runtime.set_reviewer_default_allow_edit(config.reviewer.default_allow_edit);
+        plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
+        plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
+        // E6：里程碑 / build checkpoint 自动化（默认 milestone=true、build=false，与文档一致）。
+        plan_runtime.set_auto_checkpoint_on_milestone(config.plan.auto_checkpoint_on_milestone);
+        plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
+        plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
+        // E：CLI 默认 panel——把 todos / update_plan 后的 snapshot 渲染到 stderr，
+        // 让用户在 CLI 下也能感知 in_progress 切换；IDE 适配后可替换为 IpcTodosPanel。
+        plan_runtime.register_todos_panel(Arc::new(plan_runtime::CliTodosPanel));
+        // D：挂载生产 reviewer dispatcher（当前为结构化 aborted 占位；后续 PR 替换为
+        // AgentRegistry::spawn_subagent_internal 真实派发）。
+        plan_runtime.attach_reviewer(Arc::new(
+            plan_runtime::prod_reviewer::ProdReviewerDispatcher::new("chat_context"),
+        ));
+        // E8：装配完成后再 recover——确保扫盘失败也仅 warning，主流程继续以 Chat 启动。
         if let Err(err) = plan_runtime.recover() {
             warn!(error = %err, "plan_runtime recover failed; continuing with Chat mode");
         }
@@ -695,6 +713,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             *guard = CancellationToken::new();
             guard.clone()
         };
+        // T2-P1-* C：PlanRuntime 监听本轮 token——一旦 Ctrl+C 触发，runtime 在 EXEC
+        // 模式下会自动 demote 到 Pending，写盘 frontmatter.mode=pending 并清 active id。
+        ctx.plan_runtime.attach_cancel_hook(turn_token.clone());
 
         let entry = ctx.session.get_session(ctx.session.current_session_key())?;
         let model = ctx.effective_model(entry.as_ref());
@@ -735,7 +756,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let plan_mode = ctx.plan_runtime.mode();
         let system_text_with_reminder = match &plan_mode {
             plan_runtime::PlanMode::Planning => {
-                format!("{}{}", system_text, plan_runtime::prompts::PLANNER_REMINDER)
+                format!("{}{}", system_text, &*plan_runtime::prompts::PLANNER_REMINDER)
             }
             plan_runtime::PlanMode::Executing { plan_id } => format!(
                 "{}{}",
@@ -752,6 +773,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         };
 
         messages.insert(0, ChatMessage::system(&system_text_with_reminder));
+
+        // T2-P1-* C：进入 EXEC 后的第一轮，先把 plan body 作为 system_meta user 消息注入，
+        // 让 LLM 直接看到完整计划文本；后续轮次返回 None，避免重复注入超长计划。
+        if matches!(plan_mode, plan_runtime::PlanMode::Executing { .. }) {
+            if let Some(body) = ctx.plan_runtime.consume_first_exec_turn_user_meta() {
+                messages.push(ChatMessage::user(&format!(
+                    "<plan_meta>\n{body}\n</plan_meta>"
+                )));
+            }
+        }
         messages.push(ChatMessage::user(&decorated_user_text));
 
         let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
@@ -770,6 +801,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             parent_session_id: None,
             spawn_depth: 0,
             subagent_type: crate::core::agent_loop::SubagentType::User,
+            plan_runtime: Some(ctx.plan_runtime.clone()),
         };
         let mut agent_loop = AgentLoop::new(
             ctx.llm.clone(),
@@ -807,7 +839,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             None
         };
 
-        print!("\ntomcat.{}> ", ctx.config.agent.id);
+        // J1：CLI 状态行——把当前 PlanMode 渲染为 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` /
+        // `[DONE plan_id]` tag，便于用户在 readline 提示符里识别"自己处在哪种模式"。
+        let mode_tag = match ctx.plan_runtime.mode() {
+            plan_runtime::PlanMode::Chat => String::new(),
+            plan_runtime::PlanMode::Planning => " [PLAN]".to_string(),
+            plan_runtime::PlanMode::Executing { plan_id } => format!(" [EXEC {plan_id}]"),
+            plan_runtime::PlanMode::Pending { plan_id } => format!(" [PENDING {plan_id}]"),
+            plan_runtime::PlanMode::Completed { plan_id } => format!(" [DONE {plan_id}]"),
+        };
+        print!("\ntomcat.{}{}> ", ctx.config.agent.id, mode_tag);
         io::stdout().flush().map_err(AppError::Io)?;
 
         info!(

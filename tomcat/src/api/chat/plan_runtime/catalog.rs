@@ -4,26 +4,26 @@
 //! plan_only 工具）配对使用：chat_loop 装配 `tool_definitions` 时调用本函数，避免在
 //! CHAT 期把 `create_plan` / `ask_question` 暴露给 LLM。
 //!
-//! 规则（plan-runtime.md §4.1 R6）：
-//! - **Chat**：排除 `create_plan` / `ask_question` / `todos` / `update_plan`
-//!   （CHAT 期不需要 plan 工具；用户用 `/plan` slash 切模式）
+//! 规则（plan-runtime.md §4.1 R6 / 2026-05 调整）：
+//! - **Chat / Pending / Completed**：保留 `todos` / `update_plan` / `ask_question`；
+//!   **排除** `create_plan`（仅 PLAN 可创建新计划）
 //! - **Planning**：包含 `create_plan` / `ask_question` / `todos` / `update_plan`；
-//!   隐藏写盘/exec 工具中的 `write` / `edit` / `bash`（白名单仍可触达 `~/.tomcat/plans/*` 通过 plan 工具）
-//! - **Executing { plan_id }**：包含 `todos` / `update_plan`；排除 `create_plan` / `ask_question`
-//! - **Pending { .. }**：与 Chat 等价（pending 期不暴露 plan 工具，等用户 /plan build）
-//! - **Completed { .. }**：与 Chat 等价（自动收口后回 CHAT 视图）
+//!   写工具（`write`/`edit`/`hashline_edit`/`delete`/`bash`）**全部保留**——写盘路径由
+//!   [`safety::enforce_write_path_policy`] 在 `tool_exec` 路径层拦截到 `~/.tomcat/plans/*.plan.md`。
+//! - **Executing { plan_id }**：包含 `todos` / `update_plan`；**排除** `create_plan` / `ask_question`；
+//!   plan 文件全禁写由 `safety` 在路径层守护，推进任务仅走 `update_plan`。
 
 use serde_json::Value;
 
 use super::mode::PlanMode;
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
-/// PLAN 模式期间隐藏的「执行向」工具名称（仅 Planning 模式生效）。
-/// PR-PLF 还会在 executor 路径上额外拦截 `~/.tomcat/plans/*` 直写——这里只是 LLM-facing 过滤。
-const HIDDEN_IN_PLANNING: &[&str] = &["write", "edit", "hashline_edit", "bash"];
-
 /// EXEC 模式排除的 plan 工具（plan-runtime.md §4.1 R6：EXEC 不允许 create_plan / ask_question）。
 const HIDDEN_IN_EXECUTING: &[&str] = &["create_plan", "ask_question"];
+
+/// CHAT / Pending / Completed 视图排除的 plan 工具（仅 `create_plan`；`todos` / `update_plan` /
+/// `ask_question` 在这些模式保留）。
+const HIDDEN_IN_CHAT_VIEW: &[&str] = &["create_plan"];
 
 /// 按 PlanMode 过滤生成 LLM 可见工具的 OpenAI function definition 列表。
 ///
@@ -48,27 +48,18 @@ pub fn visible_tools_for_mode(mode: &PlanMode) -> Vec<Value> {
         .collect()
 }
 
-fn filter_for_mode(name: &str, plan_only: bool, mode: &PlanMode) -> bool {
+fn filter_for_mode(name: &str, _plan_only: bool, mode: &PlanMode) -> bool {
     match mode {
         PlanMode::Chat | PlanMode::Pending { .. } | PlanMode::Completed { .. } => {
-            // CHAT 等价视图：排除所有 plan_only 工具
-            !plan_only
+            // CHAT 视图：仅排除 create_plan；保留 todos / update_plan / ask_question
+            !HIDDEN_IN_CHAT_VIEW.contains(&name)
         }
         PlanMode::Planning => {
-            if HIDDEN_IN_PLANNING.contains(&name) {
-                return false;
-            }
-            // 含 plan_only 工具，但排除 EXEC 专属（todos 中的 EXEC-only 行为由 PlanRuntime 路由）
-            // Planning 包含 create_plan / ask_question / todos / update_plan
+            // Planning：全集（含 create_plan / ask_question / todos / update_plan）；
+            // 写工具不在 catalog 层屏蔽，由 safety::enforce_write_path_policy 在路径层拦截。
             true
         }
-        PlanMode::Executing { .. } => {
-            if plan_only && HIDDEN_IN_EXECUTING.contains(&name) {
-                return false;
-            }
-            // EXEC：保留 todos / update_plan；排除 create_plan / ask_question
-            true
-        }
+        PlanMode::Executing { .. } => !HIDDEN_IN_EXECUTING.contains(&name),
     }
 }
 
@@ -84,19 +75,20 @@ mod tests {
     }
 
     #[test]
-    fn chat_mode_excludes_all_plan_only_tools() {
+    fn chat_mode_excludes_create_plan_only() {
         let tools = visible_tools_for_mode(&PlanMode::Chat);
         let n = names(&tools);
-        for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
-            assert!(
-                !n.contains(plan_tool),
-                "CHAT mode must not expose {plan_tool}"
-            );
+        assert!(
+            !n.contains("create_plan"),
+            "CHAT mode must hide create_plan"
+        );
+        for kept in ["update_plan", "todos", "ask_question", "write", "bash"] {
+            assert!(n.contains(kept), "CHAT must expose {kept}, got: {n:?}");
         }
     }
 
     #[test]
-    fn planning_mode_includes_plan_tools_and_excludes_writers() {
+    fn planning_mode_exposes_full_set_including_writers_and_bash() {
         let tools = visible_tools_for_mode(&PlanMode::Planning);
         let n = names(&tools);
         for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
@@ -105,16 +97,16 @@ mod tests {
                 "PLANNING must expose {plan_tool}, got: {n:?}"
             );
         }
-        for hidden in HIDDEN_IN_PLANNING {
+        for kept in ["write", "edit", "bash"] {
             assert!(
-                !n.contains(*hidden),
-                "PLANNING must hide writer tool {hidden}, got: {n:?}"
+                n.contains(kept),
+                "PLANNING must NOT hide writer/bash at catalog layer (path policy guards it): {kept}, got: {n:?}"
             );
         }
     }
 
     #[test]
-    fn executing_mode_keeps_writers_and_excludes_create_plan_ask_question() {
+    fn executing_mode_excludes_create_plan_and_ask_question() {
         let tools = visible_tools_for_mode(&PlanMode::Executing {
             plan_id: "demo".into(),
         });
@@ -127,7 +119,7 @@ mod tests {
                 "EXEC must hide {hidden}, got: {n:?}"
             );
         }
-        assert!(n.contains("write"), "EXEC must keep write");
+        assert!(n.contains("write"), "EXEC must keep write at catalog layer");
         assert!(n.contains("bash"), "EXEC must keep bash");
     }
 

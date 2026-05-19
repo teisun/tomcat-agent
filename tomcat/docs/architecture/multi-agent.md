@@ -96,7 +96,7 @@
 | **allowed_tools** | 子 Agent 工具白名单（数组），与父 catalog 取交集后生效；省略时取 `subagent_type` 默认集；与 [`plan-runtime.md`](./plan-runtime.md) reviewer 的 `allowed_tools` 字段同名同义。 |
 | **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（不进 catalog），与 LLM-facing `dispatch_agent` 互补，复用 §14 基础设施；对标 codex `run_codex_thread_one_shot`；reviewer 即此路径消费方，详见 §14.6.1 与 [`tools/reviewer.md`](./tools/reviewer.md)。 |
 | **spawn_depth** | 当前 `AgentInstance` 距根 Agent 的嵌套层数，防止无限递归（参考 openclaw `spawnDepth`、LangGraph `recursion_limit`）。 |
-| **MAX_SPAWN_DEPTH** | 全局可配置的最大嵌套深度，默认值 `3`；超限时 `dispatch_agent` 返回错误 ToolResult，不终止主 Agent。 |
+| **MAX_SPAWN_DEPTH** | 全局可配置的最大嵌套深度，默认值 `2`（与 `agent_registry` 常量一致）；超限时 `dispatch_agent` 返回错误 ToolResult，不终止主 Agent。 |
 | **MAX_CONCURRENT_AGENTS** | 进程级最大并发 `AgentInstance` 数，默认值 `16`。 |
 | **CascadeAbort** | 父 Agent 中止时通过 Registry 遍历所有子 Agent 并触发其 `abort_signal`（参考 AutoGen CancellationToken）。 |
 
@@ -276,7 +276,7 @@ pub struct AgentLoopConfig {
 ▼
 execute_tool("dispatch_agent", args)
 │
-├─ [Guard 1] 检查 spawn_depth >= MAX_SPAWN_DEPTH (默认 3)
+├─ [Guard 1] 检查 spawn_depth >= MAX_SPAWN_DEPTH (默认 2)
 │   → 超限：返回错误 ToolResult，说明原因，不终止主 Agent
 │
 ├─ [Guard 2] 检查 registry.active_count() >= MAX_CONCURRENT_AGENTS
@@ -536,7 +536,7 @@ chat_loop ──── new ────▶ 父 AgentLoop(S1)
 综合 openclaw `spawnDepth + maxSpawnDepth` 与 LangGraph `recursion_limit` 的设计：
 
 - `AgentLoopConfig.spawn_depth` 在构造子 Agent 时以 `parent.spawn_depth + 1` 传入。
-- 执行 `dispatch_agent` 时，若 `self.config.spawn_depth >= MAX_SPAWN_DEPTH`（默认 `3`），拒绝并向 LLM 返回错误 ToolResult，附带说明文本，不终止主 Agent（LLM 可自行选择其他工具继续）。
+- 执行 `dispatch_agent` 时，若 `self.config.spawn_depth >= MAX_SPAWN_DEPTH`（默认 `2`），拒绝并向 LLM 返回错误 ToolResult，附带说明文本，不终止主 Agent（LLM 可自行选择其他工具继续）。
 - `MAX_SPAWN_DEPTH` 可通过 `AgentLoopConfig.max_spawn_depth` 字段覆盖（字段级），也可通过全局 config 配置（进程级）。
 
 ### 14.4.5 CascadeAbort（级联中止）

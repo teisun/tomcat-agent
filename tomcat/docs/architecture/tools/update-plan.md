@@ -138,7 +138,7 @@
 ```json
 {
   "name": "update_plan",
-  "description": "Incrementally update a PlanFile's todos[] / milestones[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo under an existing milestone\n- rename a milestone or re-group todo ids\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose mode is planning or pending; an `executing` plan can only be edited by the session that owns it.\n\nFor whole-plan rewrites use `create_plan` (PLAN mode only). To start execution use the `/plan build` slash command.\n\nReturn value: every successful call returns full items + milestones snapshot; you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; use ops or replace_todos / replace_milestones for full replacement.",
+  "description": "Incrementally update a PlanFile's todos[] / milestones[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo under an existing milestone\n- rename a milestone or re-group todo ids\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose mode is planning or pending; an executing plan can only be edited by the session that owns it. Plans whose mode is completed cannot be edited.\n\nReturn value: every successful call returns full items + milestones snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.mode == executing; new milestones can only be added in planning/pending.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -279,6 +279,26 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 ```
 
 **说人话**：解析目标 → 校验门控 → 加锁 → 复用 todos op 引擎写 frontmatter → 解锁 → 看是否触发完成派生 → 刷面板 → 返回快照。
+
+### 6.1 Advisory file lock 实现说明（fs2 / 侧车 / 2s 超时）
+
+- **crate**：`fs2 = "0.4"`（`tomcat/Cargo.toml` 直接依赖）。
+- **锁文件**：侧车 `<plan_path>.plan.md.lock`（**每 plan 一把**，位于 `~/.tomcat/plans/`）。`read_plan` 不上锁；只读不参与并发争用。
+- **API**：`fs2::FileExt::try_lock_exclusive()`（OS 级 advisory：协作语义 + 内核锁），闭包返回后显式 `FileExt::unlock`。
+- **写序列**：`with_advisory_lock(...)` 内部执行 `tmp 写 → fsync → atomic rename(tmp, plan)`；任意一步失败磁盘保持上一稳定态。
+- **超时**：默认 `2000ms`（可调 `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS`）；5ms 起指数退避（上限 80ms），溢出返回 `PlanError::LockBusy { waited_ms, holder_pid }`。
+- **Cancel/中止路径**：`PlanRuntime::demote_to_pending_on_cancel()` 走同一把锁的 `write_plan`；锁随闭包结束释放，**没有**独立 `release_lock()` API。
+
+### 6.2 拒写（mode 矩阵闸门）
+
+`update_plan` 在写盘前做模式矩阵检查，**任何**违反即返回 tool error（不写盘、不刷面板）：
+
+| 目标 `plan.mode` | 操作 | 结果 |
+|------------------|------|------|
+| `completed` | 任意 op | ❌ `CrossSessionDenied("plan is completed")` |
+| `planning` / `pending` | `set_status: in_progress` | ❌ `BadOp("in_progress only allowed in executing")` |
+| `executing` | `milestone_upsert`（新 id） | ❌ `BadOp("cannot add new milestone in executing")` |
+| `executing` | `milestone_remove` | ❌ `BadOp("cannot remove milestone in executing")` |
 
 ---
 

@@ -24,7 +24,7 @@
 | **CreatePlan** | PLAN 模式下创建 / 重写 `PlanFile` 的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "create_plan"`；详尽 schema 见 [`tools/create-plan.md`](./tools/create-plan.md) | 仅 `mode == Planning` 时可见；工具名保留不改 | 计划文件主要创建入口。 |
 | **AskQuestion** | PLAN 模式下结构化向用户提问的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "ask_question"`；schema 见 [`tools/ask-question.md`](./tools/ask-question.md) | 仅 `mode == Planning` 时可见；单次 2-4 题、每题 2-4 选项 | 让模型问问题，而不是自己脑补。 |
 | **PlanMode（运行态阶段）** | 当前会话在计划闭环里的阶段 | `Chat` / `Planning` / `Executing` / `Completed` / `Pending` | `/plan` 命令族只改变本地 chat 运行态；`PlanMode` **不是** LLM 工具名 | 计划阶段是会话状态。 |
-| **Reviewer** | 由 `CreatePlan` 工具内部派发的子 Agent | `internal subagent dispatch`；不进 catalog；详见 [`tools/reviewer.md`](./tools/reviewer.md) | 同步阻塞；输出 `summary` 自由文本；**不**做 verdict gate；改稿权由 runtime 内部参数 `allow_review_edit` 控制 | 审稿员是子 Agent，只挑刺，不当法官。 |
+| **Reviewer** | 由 `CreatePlan` 工具内部派发的子 Agent | `internal subagent dispatch`；不进 catalog；详见 [`tools/reviewer.md`](./tools/reviewer.md) | 同步阻塞；输出 `summary` 自由文本；**不**做 verdict gate；改稿权由 runtime 内部参数 `[reviewer].default_allow_edit` 控制 | 审稿员是子 Agent，只挑刺，不当法官。 |
 | **TodoRuntime** | 单 session 内 `TodoFile` 的内存映射与 IO 入口 | `ChatContext.todo_runtime: TodoRuntime`；详见 §6 | per-session 单实例；管 `active_todos_id` / 内存 items / 节流 panel 推送 / IO | 一个聊天会话一个 todo 大管家。 |
 | **PlanRuntime** | 单 session 内 `PlanFile`、PLAN/EXEC mode、reviewer 派发、TodosPanel 投影、checkpoint hook 的编排层 | `ChatContext.plan_runtime: PlanRuntime`；详见 §6 | per-session 单实例；`mode` / `active_plan_id` / build gate 全在里面 | 一个会话一个计划大管家。 |
 | **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)） | `AgentRegistry::spawn_subagent_internal(...)` | 复用 [`multi-agent.md`](./multi-agent.md) §14 基础设施；不进 catalog；`allowed_tools` 由调用方硬编码 | 内部派子 Agent，模型看不到。 |
@@ -96,7 +96,7 @@
 | **G5 计划文件可恢复** | 每次计划变更刷新 `~/.tomcat/plans/<slug>_<hash>.plan.md`；advisory file lock 冲突时有可见错误；`mode == pending` 可被 `/plan build` 续跑；详细协议见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | 重启之后还能接着看，pending 还能续跑。 |
 | **G6 checkpoint 单向依赖** | milestone 完成时调用 `CheckpointStore::record`；checkpoint 语义仍由 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 定义 | 计划会用 checkpoint，但不重新发明 checkpoint。 |
 | **G7 TodosPanel 复用现有 bash 状态** | TodosPanel 显示当前 todo 与 bash 任务摘要，来源于 `BashTaskRegistry`，**不**新增第二套进程管理器 | 面板只看现成任务。 |
-| **G8 PLAN 模式工具收紧** | `mode == Planning` 时 catalog = **全工具集 + `create_plan` − `todos`**；`write/edit` 路径白名单 `~/.tomcat/plans/*.plan.md`；frontmatter raw 改硬拦截 | 规划阶段只允许动计划文件正文，frontmatter 锁死。 |
+| **G8 PLAN 模式工具收紧** | `mode == Planning` 时 catalog = **全集（含 `create_plan` / `ask_question` / `todos` / `update_plan`）**；`write/edit/hashline_edit/delete` 仅允许 `~/.tomcat/plans/*.plan.md`；EXEC 期 plan 文件全禁写（含正文，仅 `update_plan` 推进）；frontmatter raw 改硬拦截 | 规划阶段写工具只能动 plans/；执行阶段 plan 文件锁死，进度只能走 update_plan。 |
 | **G9 Runtime per-session OOD** | `TodoRuntime` 与 `PlanRuntime` 都是 per-session 单实例，挂在 `ChatContext` 上；多 session 由未来 `ChatContextRegistry` 处理 | 每个会话各自一套大管家，不共享全局 HashMap。 |
 | **G10 user message mode prefix** | PLAN/EXEC 模式下 runtime 在 LLM 请求装配阶段给每条 user message 前缀加 `[mode: PLAN]` / `[mode: EXEC plan_id=...]`；CHAT 不加 | 每条消息都贴模式标签，模型不至于忘 mode。 |
 
@@ -127,7 +127,7 @@
 | **R3 进执行态** | 仅 `/plan build <plan_id\|path>` 显式触发；reviewer accepted 不自动 build | 自动 build 绕过用户确认 | 用户拍板。 |
 | **R4 Review 闸门** | reviewer 仅辅助：摘要落 transcript；**不**做 verdict gate；改稿权由 runtime 内部参数控制 | gate 模式让 reviewer 卡 build；改稿权下放给模型违背 frontmatter 锁定原则 | 审稿员只挑刺。 |
 | **R5 持久化与锁** | `~/.tomcat/plans/<slug>_<hash>.plan.md` + advisory file lock；frontmatter 由 **`create_plan`（整盘初稿）+ [`update_plan`](./tools/update-plan.md)（增量）+ runtime（mode / session 绑定）+ 自动派生（all completed / cancel_token）四方协同写** | 单工具写入会让 mode 切换/todo 推进绕弯 | 四方各管一段。 |
-| **R6 Catalog 边界** | CHAT/EXEC/Completed/Pending: 全工具集 + `todos` + `update_plan` − `create_plan`；PLAN: 全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单 | 全开容易在 PLAN 期意外 bash | 模式切 catalog；`todos` / `update_plan` 任何模式可见。 |
+| **R6 Catalog 边界** | CHAT/Pending/Completed: 全集 − `create_plan`（保留 `todos` / `update_plan` / `ask_question`）；PLAN: 全集（含 `create_plan` / `ask_question`）+ 写盘路径仅允许 `~/.tomcat/plans/*.plan.md`；EXEC: 全集 − `create_plan` − `ask_question`（保留 `todos` / `update_plan`）；EXEC 期 plan 文件全禁写 | catalog 不再屏蔽 bash/write；写权限改由路径策略统一拦截 | 三态切 catalog；`todos`/`update_plan`/`ask_question` 默认可见；写权限由路径守卫管。 |
 | **R7 Checkpoint 集成** | 单向：`PlanRuntime -> CheckpointStore` | 双向耦合把基础设施绑死 | 单向消费。 |
 | **R8 执行面板** | `TodosPanel` 复用 `BashTaskRegistry` 做 bash 摘要；不新增第二套进程管理 | 面板自带 subprocess registry 重复造 | 投影即可。 |
 | **R9 里程碑粒度** | `Milestone[]` 结构化字段 + 派生状态 | flat todo 难挂阶段 checkpoint | 大任务分段。 |
@@ -153,9 +153,9 @@
 - **入口契约**：`parse_command` 识别 `/plan` 并返回 `ChatCommand::Plan { sub, args }`；`dispatch_chat_command` 在主循环**优先**消费，**绝不**落到 user 文本扔给 LLM。
 - **状态骨架**：`PlanRuntime { mode: PlanMode, goal: Option<String>, active_plan_id: Option<String>, draft, todos, milestones, build_gate_state, … }`；`PlanMode ∈ {Chat, Planning, Executing, Completed, Pending}`；详细 OOD 见 §6。
 - **catalog 动态过滤**：`tool_exec` 在每轮调用前根据 `current_mode()` 计算可见集——
-  - `Chat` ⇒ 全工具集 + `todos` + `update_plan` − `create_plan` − `ask_question`
-  - `Planning` ⇒ 全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单
-  - `Executing` ⇒ 全工具集 + `todos` + `update_plan` − `create_plan` − `ask_question`
+  - `Chat` ⇒ 全工具集 + `todos` + `update_plan` + `ask_question` − `create_plan`
+  - `Planning` ⇒ 全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan`（写盘路径仅 `~/.tomcat/plans/*.plan.md`，由 `safety.rs` 路径策略统一拦截）
+  - `Executing` ⇒ 全工具集 + `todos` + `update_plan` − `create_plan` − `ask_question`；plan 文件全禁写（仅 `update_plan` 推进）
   - `Completed` / `Pending` ⇒ 同 `Chat`
   - 详见 [`tools/planner.md`](./tools/planner.md) §5。`todos` 和 `update_plan` **任何模式都可见**（D 方案）。
 - **active plan 单一约束**：同一 session 同一时刻**仅一个** `active_plan_id`；若 `mode ∈ {Planning, Executing}` 时再次 `/plan "<objective>"`，本地拒绝并提示先 `/plan exit`；若 EXEC 中再次 `/plan build`，拒绝并提示先完成或 cancel。
@@ -772,16 +772,20 @@ impl PlanRuntime {
      ① frontmatter.session_key / session_id = current session
      ② frontmatter.mode = executing
      ③ PLANNER_REMINDER off, EXECUTOR_REMINDER on
-     ④ user msg prefix [mode: EXEC plan_id=...] + first-turn user meta <plan_file>FULL BODY</plan_file>
-     ⑤ catalog swap: full + todos + update_plan − create_plan
+     ④ user msg prefix [mode: EXEC plan_id=...] + first-turn user meta <user_meta kind="plan_body">FULL BODY</user_meta>
+     ⑤ catalog swap: full + todos + update_plan − create_plan − ask_question
      |
      v
   EXEC mode
      - LLM advances the plan with update_plan (mark in_progress / completed; defaults to active_plan_id)
-     - todos remains available as session-local scratchpad (writes only .todo.md, not plan)
+     - each successful update_plan → emits plan.panel event (throttled 200ms) → TodosPanel UI refresh
+     - todos remains available as session-local scratchpad (writes only .todo.md, never PlanFile)
      - update_plan ToolResult carries full items + milestones snapshot (no user-message re-inject)
      - subsequent turns: only short EXECUTOR reminder (system tail), no full body re-inject
+     - plan file is OFF-LIMITS to raw write/edit/delete (frontmatter AND body); runtime rejects direct writes
      |
+     +---- iterate: update_plan(set_status) → plan.panel refresh → next todo ----+
+     |                                                                            |
      +-------------- all todos completed (via update_plan in EXEC) ----+
      |                                                                  |
      |                                                                  v
@@ -963,13 +967,18 @@ EXEC 中：
 | 配置 / 派生值 | 取值 | 含义 | 说人话 |
 |---------------|------|------|--------|
 | `plan_dir`（派生） | `~/.tomcat/plans/` | 计划文件目录 | 计划文件单独放。 |
-| `[plan] auto_checkpoint_on_milestone` | `true/false`，默认 `false` | 里程碑完成时是否自动 `record(Milestone{...})` | 想要每过一关就打点，就开它。 |
+| `[plan] auto_checkpoint_on_milestone` | `true/false`，默认 `true` | 里程碑完成时是否自动 `record(Milestone{...})` | 默认每过一关就打点。 |
 | `[plan] auto_checkpoint_on_build` | `true/false`，默认 `false` | `/plan build` 时是否自动 `record(Manual{plan_build:plan_id})` | 开干前打一张快照。 |
-| `[plan] max_review_rounds` | 正整数，默认 `1` | reviewer 单 plan 累计派发上限 | reviewer 不能无限挑刺。 |
-| `[plan] allow_review_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` `## Review` 段 | 审稿员能不能动手补 Review。 |
+| `[plan] auto_milestone_threshold` | 正整数，默认 `5` | LLM 未传 milestones 时，todos 数 ≥ 阈值自动插入 `m-default` | 计划长了就自动分段。 |
+| `[reviewer] max_rounds` | 正整数，默认 `1` | reviewer 单 plan 累计派发上限 | reviewer 不能无限挑刺。 |
+| `[reviewer] default_allow_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` `## Review` 段 | 审稿员能不能动手补 Review。 |
+| `[ask_question] timeout_ms` / `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | 默认 `300000`（5 分钟），`0` = 不超时 | `ask_question` 等待 UI 返回的硬超时 | 别让模型死等用户。 |
+| `[todos] purge_inactive_on_new_todos` | `true/false`，默认 `true` | 切换 active todos 时清理同 session 其它非 active 文件 | session 目录别堆垃圾。 |
+| `[todos] auto_new_todos_on_replace_after_terminal` | `true/false`，默认 `true` | 全 completed/cancelled 后再 `replace_todos` 自动开新 TodoFile | 旧账翻篇。 |
 | `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` | 默认 2000ms | 计划文件 advisory lock 等待上限 | 等锁最多 2 秒。 |
+| `TOMCAT_PLANNER_REMINDER_OVERRIDE_PATH` / `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` | 可选路径 | 覆写默认 PLAN/EXEC `<system_reminder>` | 自带 prompt 写运维。 |
 
-**说人话**：本期尽量不加新开关；新增的两个 `allow_review_edit` / `auto_checkpoint_on_build` 都默认关。
+**说人话**：`auto_checkpoint_on_milestone` 默认开（每个里程碑自动 checkpoint）；`default_allow_edit` / `auto_checkpoint_on_build` 默认关。
 
 ---
 

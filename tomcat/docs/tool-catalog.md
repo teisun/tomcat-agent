@@ -356,26 +356,26 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan create planning goal milestones todos reviewer`
 
-Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` from a structured goal + milestones + todos description (PLAN mode only). Writes the plan with frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent (not visible to the LLM) whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.
+Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective) and `draft` (markdown body for the `## Draft` section); the runtime derives `plan_id` from goal (caller does NOT supply plan_id) and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.
 
 Parameters:
 
 ```json
 {
-  "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning.",
+  "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
   "properties": {
+    "draft": {
+      "description": "Markdown content for the plan body's `## Draft` section: ordered bullet points covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Notes` / `## Review` / `## Todos Board` sections; do NOT include those headings yourself.",
+      "type": "string"
+    },
     "goal": {
-      "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field.",
+      "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field and the seed for the derived `plan_id`.",
       "type": "string"
     },
     "milestones": {
-      "description": "Ordered milestones (each maps to a contiguous span of todos). Required: at least 1 milestone.",
+      "description": "Optional ordered milestones (each maps to a contiguous span of todos). Empty array allowed; can be added later via update_plan.",
       "items": {
         "properties": {
-          "description": {
-            "description": "Optional longer milestone description (markdown).",
-            "type": "string"
-          },
           "id": {
             "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`).",
             "type": "string"
@@ -383,6 +383,13 @@ Parameters:
           "title": {
             "description": "Human-readable milestone title (max 200 chars).",
             "type": "string"
+          },
+          "todo_ids": {
+            "description": "Optional list of todo.id strings this milestone tracks (must reference todos declared above).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -391,15 +398,10 @@ Parameters:
         ],
         "type": "object"
       },
-      "minItems": 1,
       "type": "array"
     },
-    "summary": {
-      "description": "Optional longer narrative for the plan body (markdown). Empty when omitted; body is what reviewer / user reads.",
-      "type": "string"
-    },
     "todos": {
-      "description": "Initial flat todo list with milestone references. `status` defaults to `pending`.",
+      "description": "Initial flat todo list (≥ 1 item) with milestone references. `status` defaults to `pending`.",
       "items": {
         "properties": {
           "content": {
@@ -411,7 +413,7 @@ Parameters:
             "type": "string"
           },
           "milestone_id": {
-            "description": "References a milestone.id declared above; omit if the todo is unscoped.",
+            "description": "References a milestone.id declared in `milestones`; omit if the todo is unscoped.",
             "type": "string"
           },
           "status": {
@@ -437,7 +439,7 @@ Parameters:
   },
   "required": [
     "goal",
-    "milestones",
+    "draft",
     "todos"
   ],
   "type": "object"

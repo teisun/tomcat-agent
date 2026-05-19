@@ -222,16 +222,17 @@
 
 | `current_mode()` | catalog 中的 LLM 可见集 | `write/edit` 路径约束 | 说人话 |
 |-------------------|--------------------------|------------------------|--------|
-| `Chat` | 全工具集（含 `dispatch_agent` / bash / read 等）+ `todos` + `update_plan`；**不**含 `create_plan` / `ask_question` | 任意路径（`~/.tomcat/plans/*.plan.md` 的 frontmatter 写仍被 raw 拦截） | 普通 Agent：可创建会话待办、也能改任意 planning/pending 的 plan 内待办。 |
-| `Planning` | 全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan`；保留 `read` / `grep` / `find` / `dispatch_agent` / `bash` 等 | **仅** `~/.tomcat/plans/*.plan.md`（路径白名单）；frontmatter 任意时刻拦截 | 调研、写计划、问用户、用 `update_plan` 调 todos；正文随便改，YAML 锁死。 |
-| `Executing` | 全工具集 + `todos` + `update_plan`；**不**含 `create_plan` / `ask_question` | 任意路径（`~/.tomcat/plans/*.plan.md` 的 frontmatter 写仍被 raw 拦截） | 推进 plan 用 `update_plan`（默认指向 active plan）；可用 `todos` 记 scratchpad。 |
+| `Chat` | 全工具集（含 `dispatch_agent` / bash / read 等）+ `todos` + `update_plan` + `ask_question`；**不**含 `create_plan` | 任意路径（写 `~/.tomcat/plans/*.plan.md` 的 frontmatter 仍被 raw 拦截） | 普通 Agent：可创建会话待办、也能改任意 planning/pending 的 plan 内待办；可结构化提问。 |
+| `Planning` | 全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan`；保留 `read` / `grep` / `find` / `dispatch_agent` / `bash` 等 | `write/edit/hashline_edit/delete` **仅允许** `~/.tomcat/plans/*.plan.md`；frontmatter 仍被 raw 拦截 | 调研、写计划、问用户、用 `update_plan` 调 todos；写工具只能动 plans/。 |
+| `Executing` | 全工具集 + `todos` + `update_plan`；**不**含 `create_plan` / `ask_question` | **拒绝任何对 `~/.tomcat/plans/*` 的写**（含正文与 frontmatter） | 推进 plan 用 `update_plan`（默认指向 active plan）；plan 文件全禁写。 |
 | `Completed` | 同 `Chat` | 同 `Chat` | 计划结束，回到普通工具集。 |
 | `Pending` | 同 `Chat` | 同 `Chat` | 等待 `/plan build` 续跑。 |
 
-> **关键差异（D 方案）**：
-> 1. `todos` 与 `update_plan` 任何模式可见——`todos` 写 `TodoFile`，`update_plan` 写 PlanFile frontmatter；
-> 2. PLAN 模式得到「调研全工具集 + create_plan + ask_question + todos + update_plan」，写盘路径白名单仅约束 `write/edit/delete/str_replace`；
-> 3. mode=completed 自动派生由 `update_plan` 在 EXEC 触发，与 `todos` 无关。
+> **关键差异（D 方案 / 2026-05 收紧）**：
+> 1. `todos` / `update_plan` / `ask_question` 在 CHAT/Planning/Pending/Completed 全可见；`create_plan` 仅 Planning；
+> 2. PLAN 模式写工具硬性限制路径（`~/.tomcat/plans/*.plan.md`），离开此目录的任何写一律拒；
+> 3. EXEC 模式 plan 文件全禁写（含正文），推进任务**只能**走 `update_plan`；
+> 4. mode=completed 自动派生由 `update_plan` 在 EXEC 触发，与 `todos` 无关。
 
 **说人话**：模式一变，模型能看到的工具名单 + 能写的路径就变；不是靠 prompt 提醒，是 catalog + 路径白名单真过滤。
 
@@ -346,64 +347,19 @@ You are now in PLAN mode. Behavior contract (12 rules; D-plan):
 ```rust
 pub const EXECUTOR_SYSTEM_REMINDER: &str = r#"
 <system_reminder kind="executor">
-You are now in EXEC mode. Behavior contract (11 rules; D-plan):
+You are in EXEC mode. Your mission: drive the active plan to completion using ANY available tool. Whenever you make progress on a todo, mark it via update_plan; the runtime handles everything else.
 
-1.  Mode awareness: each user message is tagged with `[mode: EXEC plan_id=...]`.
-    The plan_id points to the PlanFile under `~/.tomcat/plans/*.plan.md` that
-    you are executing. The runtime has already injected the full PlanFile body
-    as `<user_meta kind="plan_body">` on this turn — read it once, then rely on
-    `todos` tool results for incremental state.
+1.  Mission first: each user message tag `[mode: EXEC plan_id=...]` points to the active plan. The runtime injected the full PlanFile body once on turn 1 as `<user_meta kind="plan_body">`. Read it, then advance using whatever tools you need (read / grep / bash / write / edit / search_files / dispatch_agent, etc.).
 
-2.  Catalog awareness: `todos` and `update_plan` are visible; `create_plan` /
-    `ask_question` are hidden. If the plan needs structural revision (new
-    milestones, todo regrouping), use `update_plan` first; only fall back to
-    full rewrite by asking the user to `/plan exit` back to CHAT and then
-    `/plan "<objective>"` to restart planning.
+2.  Update via update_plan only: claim the next todo with `set_status(in_progress)` BEFORE running side-effecting tools; mark `completed` immediately when done; use `cancelled` for steps deliberately skipped. Never more than one `in_progress` in the same PlanFile. In EXEC mode `plan_id` defaults to the active plan, so you can omit it.
 
-3.  Drive via `update_plan`: use `update_plan` with
-    `set_status(in_progress)` to claim the next step BEFORE running
-    side-effecting tools (bash/edit/write). Mark `completed` immediately when
-    done. Use `cancelled` for steps deliberately skipped. Never have more
-    than one `in_progress` in the same PlanFile. In EXEC mode, `plan_id`
-    defaults to the active plan, so you can omit it.
+3.  Tool result is the source of truth: every successful `update_plan` call returns a full items + milestones snapshot. You do NOT need to re-read the PlanFile to know the current state — trust the snapshot.
 
-4.  Tool result is the source of truth: every successful `update_plan` /
-    `todos` call returns a full items snapshot. You do NOT need to re-read
-    the PlanFile to know the current state — trust the snapshot.
+4.  Plan file is off-limits to raw write/edit/delete (frontmatter AND body). The runtime rejects any direct write to `~/.tomcat/plans/*.plan.md` in EXEC. Use `update_plan` for progress. If the plan needs structural rewrite, ask the user to exit and re-plan; do NOT try to leave EXEC via tool calls.
 
-5.  Frontmatter is off-limits to raw write/edit. `todos[]` / `milestones[]`
-    are managed by `update_plan`; `mode` / `session_*` are managed by
-    runtime / auto-derivation. Raw-editing YAML keys returns a tool error.
+5.  Milestone checkpoints are automatic when all todos under a milestone become `completed` (config `[plan].auto_checkpoint_on_milestone`).
 
-6.  `todos` vs `update_plan`:
-    - `update_plan` drives the plan forward (advances `todos[]` /
-      `milestones[]` in the PlanFile). This is your primary tool.
-    - `todos` is an OPTIONAL session-local scratchpad — use it to track
-      sub-steps of a complex single todo (e.g., debugging steps within a
-      single `update_plan` todo). It writes only to `.todo.md` and has no
-      effect on the plan.
-
-7.  Body edits are allowed: `write` / `edit` on `~/.tomcat/plans/*.plan.md`
-    body sections (`## Draft`, `## Review`, `## Goal`, free-form notes) is
-    permitted in EXEC. The runtime still rejects any frontmatter mutation.
-
-8.  Milestone gating: when all todos under a milestone become `completed`,
-    the runtime may automatically record a checkpoint (config:
-    `[plan] auto_checkpoint_on_milestone`). You do NOT need to call checkpoint
-    tools yourself.
-
-9.  Automatic completion: when ALL todos in the PlanFile are `completed`
-    after an `update_plan` submission, the runtime auto-promotes
-    `mode = completed`, swaps the reminder/prefix out, and restores the CHAT
-    catalog. You do NOT need to "close" the plan.
-
-10. Cancellation: if the user terminates the process (Ctrl+C, SIGTERM, or
-    parent abort), the runtime auto-promotes `mode = pending`. The PlanFile is
-    preserved and resumable via `/plan build <plan_id>`.
-
-11. To exit EXEC voluntarily, instruct the user to send SIGINT or to terminate
-    the process — there is no `/plan exit` in EXEC. Do NOT attempt to leave
-    via tool calls.
+6.  Completion is automatic: when ALL todos in the PlanFile flip to `completed`, the runtime promotes `mode = completed`, swaps the reminder/prefix/catalog back to CHAT, and you do NOT need to "close" the plan.
 </system_reminder>
 "#;
 ```
@@ -411,7 +367,7 @@ You are now in EXEC mode. Behavior contract (11 rules; D-plan):
 - **注入位置**：`/plan build` 完成后，runtime 在下一轮上下文构造前注入到 **system 区段尾部**；同一轮还会附 `<user_meta kind="plan_body">`（详见 §7.4）。
 - **退出**：自动 `mode = completed` / `mode = pending` 后下轮不再注入。
 
-**说人话**：进 PLAN 多一段 12 条契约提醒；进 EXEC 多一段 10 条契约提醒；出了模式 reminder 自动消失。
+**说人话**：进 PLAN 多一段 12 条契约提醒；进 EXEC 多一段 6 条精简契约提醒（主旨「推进任务 + 仅 update_plan 改进度 + plan 文件全禁写」）；出了模式 reminder 自动消失。
 
 ### 6.2 catalog 动态过滤实现
 

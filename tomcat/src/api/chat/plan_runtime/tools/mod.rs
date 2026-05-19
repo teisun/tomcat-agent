@@ -7,8 +7,8 @@
 //! |------|----------|----------|--------|
 //! | [`create_plan`] | Planning | 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md` | 第一稿计划 |
 //! | [`update_plan`] | 任何模式 | 增量改 PlanFile.frontmatter.todos[]/milestones[] | 推进/编辑 |
-//! | [`todos`] | 任何模式 | CHAT/Planning 写 session todo；EXEC 写 active plan | 我的待办 |
-//! | `ask_question` | Planning | 透传 UI（P5 PR-AQ 落地） | 结构化提问 |
+//! | [`todos`] | 任何模式 | **仅** session TodoFile（与 PlanFile 无关；推进 plan 用 `update_plan`） | 我的待办 |
+//! | `ask_question` | Planning + Chat/Pending/Completed（EXEC 隐藏） | 透传 UI | 结构化提问 |
 //!
 //! 每个函数都接 `&PlanRuntime + serde_json::Value (args) -> Result<serde_json::Value, ToolError>`，
 //! 调用方（`tool_exec.rs` 在 P6 接入）负责把 OpenAI tool_call 参数透传。

@@ -1,10 +1,10 @@
 # `ask_question` 工具：PLAN 模式下的结构化提问
 
-本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**仅在 PLAN 模式可见**，让模型在规划阶段以「单选 / 多选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
+本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**在 PLAN 与 CHAT/Pending/Completed 模式均可见**（EXEC 模式不可见，避免 agent loop 阻塞在用户输入上），让模型以「单选 / 多选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
-**说人话**：让模型规划时能「弹个选择题」给用户，而不是自己猜。仅 PLAN 模式可见；执行态绝不可调。
+**说人话**：让模型在规划或日常对话时能「弹个选择题」给用户，而不是自己猜。CHAT 与 PLAN 都可见；EXEC 隐藏（执行态由 agent loop 自动推进，不应阻塞）。
 
 ---
 
@@ -31,7 +31,7 @@
 
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
-| **`ask_question` 工具** | PLAN 模式下让模型向用户结构化提问的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "ask_question"` | 仅 `mode == Planning` 时可见；`isReadOnly = true` / `requiresUserInteraction = true` | 模型问问题，不写盘。 |
+| **`ask_question` 工具** | 让模型向用户结构化提问的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "ask_question"` | `mode ∈ {Planning, Chat, Pending, Completed}` 时可见（EXEC 隐藏）；`isReadOnly = true` / `requiresUserInteraction = true` | 模型问问题，不写盘。 |
 | **Question** | 一道结构化题目 | `{ id, prompt, options[], allow_multiple? }` | `id` 单次调用内唯一；`options.length ∈ [2, 4]`（不含 UI 兜底的 `__custom__` 槽）；`options` 中必须**恰好一个** `recommended: true` | 一道题最少 2 个最多 4 个选项，且 LLM 必须先指明推荐项。 |
 | **Option** | 题目的一个候选答案 | `{ id, label, recommended? }` | `id` 题内唯一；`recommended` 缺省 `false`，每题恰好一项为 `true`；UI 在 `recommended=true` 的 label 后追加 `— 推荐` 后缀；LLM **不能**显式声明 `id = "__custom__"` 的选项 | 选项 id 单题内不能重；必须给一个推荐项。 |
 | **`__custom__` 自定义槽（UI 兜底）** | UI 在每题末尾**自动追加**的固定空选项 | `{ id: "__custom__", label: "自定义…", recommended: false, allow_custom_input: true }` | 由 runtime / UI 注入，**不**进 schema、**不**进 LLM 可见 `options`；选中时回填 `custom_text: string`（非空，≤ 500 字符） | 永远多一个让用户自己填的空格。 |
@@ -84,7 +84,7 @@
 
 | ID | 目标 | 验证手段（§11） | 说人话 |
 |----|------|------------------|--------|
-| G1 | 仅 `mode == Planning` 进 catalog | `ask_question_visible_only_in_planning` | 只有规划态能弹选择题。 |
+| G1 | `mode ∈ {Planning, Chat, Pending, Completed}` 进 catalog（EXEC 隐藏） | `ask_question_visible_in_planning_and_chat`、`ask_question_hidden_in_executing` | CHAT/PLAN/Pending/Completed 都能弹；EXEC 隐藏不阻塞。 |
 | G2 | 单次调用 `questions.length ∈ [1, 4]`；每题 LLM 给出 `options.length ∈ [2, 4]`；UI 兜底自动追加 1 个 `__custom__` 槽 | `ask_question_schema_bounds`、`ask_question_ui_appends_custom_slot` | 最多 4 题、每题 2–4 选项 + 1 个用户自定义槽。 |
 | G3 | `requires_user_interaction = true`，工具 await 用户答复 | `ask_question_blocks_until_answered` | 必须等用户点完才返回。 |
 | G4 | 题目 + 答案落 transcript 自定义事件（含 `custom_text` 与 `recommended` 标记） | `ask_question_emits_transcript_event` | 问答要进 transcript 方便回放。 |
@@ -125,7 +125,7 @@
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
-| **AQ-A** | catalog 注册 `ask_question`；`is_read_only=true`、`requires_user_interaction=true`；仅 `Planning` 可见；**交付**：`ToolMetadata` | `src/core/tools/contract/catalog.rs`、`src/api/chat/plan_runtime/catalog.rs`（拟定） | 见 §11：`ask_question_visible_only_in_planning`（PENDING） | 规划态才出现，且标记要等人答。 |
+| **AQ-A** | catalog 注册 `ask_question`；`is_read_only=true`、`requires_user_interaction=true`；`mode ∈ {Planning, Chat, Pending, Completed}` 可见（EXEC 隐藏）；**交付**：`ToolMetadata` | `src/core/tools/contract/catalog.rs`、`src/api/chat/plan_runtime/catalog.rs` | 见 §11：`ask_question_visible_in_planning_and_chat` / `ask_question_hidden_in_executing`（PENDING） | CHAT/PLAN 都出现；执行态隐藏。 |
 | **AQ-B** | 入参校验：`questions∈[1,4]`、每题 `options∈[2,4]`、id 唯一、**恰好一个 `recommended: true`**、`id` **不得**为保留值 `__custom__`；**交付**：校验错误文案 | `src/api/chat/plan_runtime/tool_exec.rs`（拟定） | 见 §11：`ask_question_schema_bounds`、`ask_question_requires_exactly_one_recommended`、`ask_question_rejects_reserved_custom_id`（PENDING） | 题数选项数越界 / 推荐项缺失 / 保留 id 直接拒。 |
 | **AQ-C** | UI panel 阻塞 await 用户选择；CLI/IDE 双实现；**自动在每题末尾追加** `__custom__` 槽（label 默认「自定义…」，可输入文本）；推荐项在 label 后追加「— 推荐」后缀；**交付**：`AskQuestionPanel` trait | `src/api/chat/ui/ask_question_panel.rs`（拟定） | 见 §11：`ask_question_blocks_until_answered`、`ask_question_ui_appends_custom_slot`（PENDING） | 弹窗答完才返回 tool 结果；UI 永远多一个自定义槽，推荐项加后缀。 |
 | **AQ-D** | transcript 写 `plan.ask_question`（题目 + 答案）；**交付**：事件 schema | `src/infra/transcript/...`（既有） | 见 §11：`ask_question_emits_transcript_event`（PENDING） | 问答落盘方便回放。 |
@@ -208,7 +208,7 @@
 ```json
 {
   "name": "ask_question",
-  "description": "Ask the user a small set of structured single- or multi-select questions. Only callable while in PLAN mode. Each question's options must include EXACTLY ONE option with `recommended: true` — the choice you (the model) believe is best given the current context. Do NOT submit any option with `id = \"__custom__\"`; the UI automatically appends a custom-input slot to every question so the user can type a free-form answer if none of your options fit. Returns when the user has chosen options or aborts.",
+  "description": "Ask the user a small set of structured single- or multi-select questions. Callable in PLAN and CHAT/Pending/Completed modes (hidden in EXEC, where the agent loop must drive the plan without blocking on user input). Each question's options must include EXACTLY ONE option with `recommended: true` — the choice you (the model) believe is best given the current context. Do NOT submit any option with `id = \"__custom__\"`; the UI automatically appends a custom-input slot to every question so the user can type a free-form answer if none of your options fit. Returns when the user has chosen options or aborts.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -391,7 +391,7 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 
 | 类型 | 测试 | 状态 | 说人话 |
 |------|------|------|--------|
-| 单元：catalog 可见性 | `ask_question_visible_only_in_planning`（待新增） | PENDING | 执行态看不见就别查。 |
+| 单元：catalog 可见性 | `ask_question_visible_in_planning_and_chat` / `ask_question_hidden_in_executing` | PENDING | EXEC 隐藏，其它模式可见。 |
 | 单元：schema 边界 | `ask_question_schema_bounds`（待新增） | PENDING | 4×4 上下限要硬。 |
 | 单元：阻塞与回填 | `ask_question_blocks_until_answered`（待新增） | PENDING | 没人答就别返回。 |
 | 单元：abort 处理 | `ask_question_handles_user_abort`（待新增） | PENDING | Ctrl+C 不能 hang。 |

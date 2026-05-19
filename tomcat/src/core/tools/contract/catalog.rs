@@ -261,7 +261,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` from a structured goal + milestones + todos description (PLAN mode only). Writes the plan with frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent (not visible to the LLM) whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective) and `draft` (markdown body for the `## Draft` section); the runtime derives `plan_id` from goal (caller does NOT supply plan_id) and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `milestones`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
         display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,
@@ -711,42 +711,19 @@ fn config_set_parameters() -> Value {
 fn create_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning.",
+        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
         "properties": {
             "goal": {
                 "type": "string",
-                "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field."
+                "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field and the seed for the derived `plan_id`."
             },
-            "summary": {
+            "draft": {
                 "type": "string",
-                "description": "Optional longer narrative for the plan body (markdown). Empty when omitted; body is what reviewer / user reads."
-            },
-            "milestones": {
-                "type": "array",
-                "description": "Ordered milestones (each maps to a contiguous span of todos). Required: at least 1 milestone.",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {
-                            "type": "string",
-                            "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`)."
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Human-readable milestone title (max 200 chars)."
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Optional longer milestone description (markdown)."
-                        }
-                    },
-                    "required": ["id", "title"]
-                }
+                "description": "Markdown content for the plan body's `## Draft` section: ordered bullet points covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Notes` / `## Review` / `## Todos Board` sections; do NOT include those headings yourself."
             },
             "todos": {
                 "type": "array",
-                "description": "Initial flat todo list with milestone references. `status` defaults to `pending`.",
+                "description": "Initial flat todo list (≥ 1 item) with milestone references. `status` defaults to `pending`.",
                 "minItems": 1,
                 "items": {
                     "type": "object",
@@ -761,7 +738,7 @@ fn create_plan_parameters() -> Value {
                         },
                         "milestone_id": {
                             "type": "string",
-                            "description": "References a milestone.id declared above; omit if the todo is unscoped."
+                            "description": "References a milestone.id declared in `milestones`; omit if the todo is unscoped."
                         },
                         "status": {
                             "type": "string",
@@ -771,9 +748,32 @@ fn create_plan_parameters() -> Value {
                     },
                     "required": ["id", "content"]
                 }
+            },
+            "milestones": {
+                "type": "array",
+                "description": "Optional ordered milestones (each maps to a contiguous span of todos). Empty array allowed; can be added later via update_plan.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Stable kebab-case milestone id, unique within the plan (e.g. `setup`, `core-impl`)."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Human-readable milestone title (max 200 chars)."
+                        },
+                        "todo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of todo.id strings this milestone tracks (must reference todos declared above)."
+                        }
+                    },
+                    "required": ["id", "title"]
+                }
             }
         },
-        "required": ["goal", "milestones", "todos"]
+        "required": ["goal", "draft", "todos"]
     })
 }
 

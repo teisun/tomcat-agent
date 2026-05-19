@@ -307,18 +307,23 @@ todos:
 <plan body markdown，由 LLM 写>
 
 ## Review
-<reviewer 摘要；可由 reviewer 子 Agent 在 allow_review_edit=true 时直接写入>
+<reviewer 摘要；可由 reviewer 子 Agent 在 [reviewer].default_allow_edit=true 时直接写入>
+
+## Notes
+<自由备注；LLM/用户随手记>
 
 ## Todos Board
+<!-- todos-board:auto:begin -->
 - [ ] t-001  <content>
 - [/] t-002  <content>            # in_progress
 - [x] t-003  <content>            # completed
 - [-] t-004  <content>            # cancelled
+<!-- todos-board:auto:end -->
 ```
 
-> 正文「Todos Board」每次 `create_plan` / `todos` 写入时由 file_store 重新生成，**不**接受人手编辑（手编会在下次写入时被覆盖）。`## Draft` / `## Review` / `## Goal` 允许 LLM 在 PLAN 模式 raw `write/edit`。
+> 正文「Todos Board」每次 `create_plan` / `update_plan` 写入时由 file_store 在 `<!-- todos-board:auto:begin -->` / `<!-- todos-board:auto:end -->` 标记之间**自动重写**，**不**接受人手编辑（手编会在下次写入时被覆盖）。`## Draft` / `## Review` / `## Goal` / `## Notes` 允许 LLM 在 **PLAN 模式**对路径 `~/.tomcat/plans/*.plan.md` 做 raw `write/edit`；EXEC 模式 plan 文件全禁写，只有 `update_plan` 能推进 frontmatter。
 
-**说人话**：frontmatter 是机器真相；正文 Draft/Review 给人看；Todos Board 由 runtime 自动生成；正文允许 raw 改，frontmatter 拒绝 raw 改。
+**说人话**：frontmatter 是机器真相；正文 Draft/Review/Notes 给人看；Todos Board 由 runtime 自动生成；PLAN 期正文允许 raw 改、EXEC 期 plan 文件锁死；frontmatter 任何模式都拒绝 raw 改。
 
 ### 5.4 advisory file lock
 
@@ -365,8 +370,8 @@ fs::rename(&tmp, &path)?; // atomic on POSIX same-fs
 | 改 milestone 标题、重排 `todo_ids` | [`update_plan`](./update-plan.md)（`milestone_upsert`） | 任何模式 | ✗ | 局部分组调整。 |
 | 新增 milestone（执行期之外） | [`update_plan`](./update-plan.md)（`milestone_upsert` 新 id） | Chat / Planning / Pending（**Executing 拒绝**） | ✗ | EXEC 期不许加阶段。 |
 | 整盘结构重写（goal 改写、阶段重切、todo 大幅重排） | **`create_plan`** | 仅 PLAN 模式 | ✓ 同步派 reviewer | 推倒重来。 |
-| 改 `## Goal` / `## Draft` / `## Notes` 正文段 | raw `write` / `edit`（PLAN 模式路径白名单生效；其他模式无限制） | 任何模式（PLAN 仅本盘） | ✗ | 正文段允许 raw 改。 |
-| 改 `## Review` 段 | raw `edit`，或 reviewer subagent 在 `allow_review_edit=true` 时内部改 | 任何模式 | ✗ | 审稿区允许动笔。 |
+| 改 `## Goal` / `## Draft` / `## Notes` 正文段 | raw `write` / `edit`（**PLAN** 模式：路径白名单 `~/.tomcat/plans/*.plan.md`；**EXEC** 模式：禁止；CHAT/Pending/Completed：常规权限） | PLAN / CHAT / Pending / Completed | ✗ | EXEC 期 plan 文件锁死，其它模式允许 raw 改。 |
+| 改 `## Review` 段 | raw `edit`（同上路径策略），或 reviewer subagent 在 `[reviewer].default_allow_edit=true` 时内部改 | PLAN / CHAT / Pending / Completed | ✗ | 审稿区允许动笔；EXEC 同上禁。 |
 | 改 frontmatter `mode` / `session_*` / `plan_id` / `created_at` / `goal` / `schema_version` | **任何工具都不能**；由 runtime 写 | — | — | 机器字段保留给 runtime。 |
 
 ```text

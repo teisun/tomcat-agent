@@ -76,6 +76,7 @@ pub(super) async fn execute_tool(
     .await
 }
 
+#[allow(dead_code)]
 pub(super) async fn execute_tool_with_openai_files(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
@@ -84,10 +85,78 @@ pub(super) async fn execute_tool_with_openai_files(
     openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     tc: &ToolCallInfo,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
+    execute_tool_full(
+        primitive,
+        config_backend,
+        bash_task_registry,
+        read_file_state,
+        openai_files_runtime,
+        None,
+        crate::core::agent_loop::types::SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        tc,
+    )
+    .await
+}
+
+/// 完整版工具执行器：在 `execute_tool_with_openai_files` 基础上额外接受
+/// `plan_runtime` 与 `subagent_type`，用于：
+/// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 四个 plan 工具（B1）
+/// - 在 `write` / `edit` / `hashline_edit` / `delete` 分支触发
+///   [`crate::api::chat::plan_runtime::safety::enforce_write_path_policy`]（B12）
+///
+/// `plan_runtime = None` 时这四个工具会返回「PlanRuntime 未注入」错误；写工具策略跳过。
+pub(super) async fn execute_tool_full(
+    primitive: &Arc<dyn PrimitiveExecutor>,
+    config_backend: &Option<SharedConfigBackend>,
+    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
+    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
+    openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
+    subagent_type: crate::core::agent_loop::types::SubagentType,
+    cancel: &tokio_util::sync::CancellationToken,
+    tc: &ToolCallInfo,
+) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
         Err(e) => return (format!("参数解析失败: {}", e), true, Vec::new()),
     };
+
+    // B1：plan 工具分发（优先于 primitive，因为这些工具不走 primitive）。
+    if matches!(
+        tc.name.as_str(),
+        "create_plan" | "update_plan" | "todos" | "ask_question"
+    ) {
+        return dispatch_plan_tool(&tc.name, &args, plan_runtime, cancel).await;
+    }
+
+    // B12：write 类工具在主体之前做路径策略守卫。
+    if matches!(tc.name.as_str(), "write" | "edit" | "hashline_edit" | "delete") {
+        if let Some(rt) = plan_runtime {
+            let path_arg = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !path_arg.is_empty() {
+                let mode = rt.mode();
+                let subagent_kind = match subagent_type {
+                    crate::core::agent_loop::types::SubagentType::Reviewer => {
+                        crate::api::chat::plan_runtime::safety::SubagentKind::Reviewer
+                    }
+                    _ => crate::api::chat::plan_runtime::safety::SubagentKind::Other,
+                };
+                if let Err(denied) =
+                    crate::api::chat::plan_runtime::safety::enforce_write_path_policy(
+                        &mode,
+                        subagent_kind,
+                        std::path::Path::new(path_arg),
+                    )
+                {
+                    return (denied.to_string(), true, Vec::new());
+                }
+            }
+        }
+    }
 
     // PR-RJ T3-c：read 命中 image / pdf 时，要把 InputImage / InputFile part
     // 注入「**下一条** user 消息」（OpenAI 的 `role: "tool"` 不接受非 text part），
@@ -931,4 +1000,88 @@ fn validate_read_bounds(offset: Option<u64>, limit: Option<u64>) -> Result<(), S
         }
     }
     Ok(())
+}
+
+// ─── B1：plan 工具分发 ─────────────────────────────────────────────────────────
+
+/// 将四个 plan 工具（create_plan / update_plan / todos / ask_question）的调用路由到
+/// `plan_runtime::tools` 实现；plan_runtime 未注入时返回错误文案。
+///
+/// 文案约定：返回 `(content, is_error=true, no_follow_up)`；与 `unknown` 分支一致——
+/// 让 LLM 用收到的错误文本自我修正（一般是上下文里没装 PlanRuntime，比如 reviewer 子 Agent 调本
+/// 不该出现的工具，或单测路径未注入）。
+async fn dispatch_plan_tool(
+    name: &str,
+    args: &serde_json::Value,
+    plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
+    let Some(rt) = plan_runtime else {
+        return (
+            format!(
+                "plan 工具 `{name}` 不可用：当前 AgentLoop 未注入 PlanRuntime（reviewer 子 Agent 或独立测试路径）"
+            ),
+            true,
+            Vec::new(),
+        );
+    };
+    use crate::api::chat::plan_runtime::tools as plan_tools;
+    let result: Result<serde_json::Value, plan_tools::ToolError> = match name {
+        "create_plan" => match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(
+            args.clone(),
+        ) {
+            // `allow_review_edit` 由 PlanRuntime 内部的 [reviewer].default_allow_edit 决定；
+            // 这里直接读 runtime 配置。
+            Ok(a) => {
+                let allow_edit = rt.reviewer_default_allow_edit();
+                plan_tools::create_plan::execute_with_reviewer(rt, a, allow_edit).await
+            }
+            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
+        },
+        "update_plan" => match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(
+            args.clone(),
+        ) {
+            Ok(a) => plan_tools::update_plan::execute(rt, a),
+            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
+        },
+        "todos" => match serde_json::from_value::<plan_tools::todos::TodosArgs>(args.clone()) {
+            Ok(a) => plan_tools::todos::execute(rt, a),
+            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
+        },
+        "ask_question" => {
+            let Some(panel) = rt.ask_question_panel() else {
+                return (
+                    "ask_question 不可用：PlanRuntime 未配置 AskQuestionPanel".into(),
+                    true,
+                    Vec::new(),
+                );
+            };
+            // 将 CancellationToken 桥接为 AtomicBool（ask_question 接口）。
+            let cancel_flag =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let watcher_flag = cancel_flag.clone();
+            let cancel_clone = cancel.clone();
+            let bridge = tokio::spawn(async move {
+                cancel_clone.cancelled().await;
+                watcher_flag.store(true, std::sync::atomic::Ordering::Release);
+            });
+            // N13：从 PlanRuntime 取 ask_question.timeout_ms（None → ask_question 内部默认 300s）。
+            let timeout_ms = rt.ask_question_timeout_ms();
+            let res = plan_tools::ask_question::execute_with_timeout(
+                rt,
+                panel.as_ref(),
+                args,
+                cancel_flag,
+                timeout_ms,
+            )
+            .await;
+            bridge.abort();
+            res
+        }
+        _ => unreachable!("dispatch_plan_tool called with unknown name {name}"),
+    };
+    match result {
+        Ok(v) => (v.to_string(), false, Vec::new()),
+        Err(e) => (format!("{name} 失败：{e}"), true, Vec::new()),
+    }
 }

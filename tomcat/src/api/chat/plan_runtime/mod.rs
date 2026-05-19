@@ -42,10 +42,13 @@ pub mod catalog;
 pub mod file_store;
 pub mod mode;
 pub mod ops;
+pub mod prod_reviewer;
 pub mod prompts;
 pub mod review;
 pub mod safety;
 pub mod session_prefix;
+pub mod todo_runtime;
+pub mod todos_panel;
 pub mod tools;
 
 #[cfg(test)]
@@ -61,6 +64,9 @@ use tokio_util::sync::CancellationToken;
 pub use ask_question_panel::AskQuestionPanel;
 pub use mode::PlanMode;
 pub use review::ReviewSummary;
+pub use todos_panel::{
+    CliTodosPanel, NoopTodosPanel, RefreshNotifier, TodosPanel, TodosPanelSnapshot,
+};
 
 /// PLAN 模式 per-session 编排器骨架（P1）。
 ///
@@ -112,6 +118,31 @@ pub struct PlanRuntime {
     /// 触发首轮注入的 plan body 缓存（与 `first_exec_turn_pending` 配对，
     /// 在 build_plan 写盘成功后预读，避免首轮 chat_loop 再做一次 disk IO）。
     first_exec_turn_body: Mutex<Option<String>>,
+    /// `[reviewer].default_allow_edit`：是否允许 reviewer 子 Agent 自己 edit
+    /// 计划文件 `## Review` 段。生产由 `ChatContext::from_config` 从配置读出；
+    /// 默认 `false`（与 plan-runtime.md §9 一致）。
+    reviewer_default_allow_edit: AtomicBool,
+    /// `[ask_question].timeout_ms`：ask_question 等待用户回答的墙钟超时（毫秒）。
+    /// `0` 表示无超时；生产由 `ChatContext::from_config` 写入；默认 0（按工具内置默认 300_000 处理）。
+    ask_question_timeout_ms: std::sync::atomic::AtomicU64,
+    /// Session-local todos 持久化目录根（如 `~/.tomcat/agents/<id>/`）。`None` 时 todos
+    /// 工具仅写内存，不落盘——保留给纯单元测试与早期阶段使用。
+    todos_persist_base: Mutex<Option<std::path::PathBuf>>,
+    /// 当前 active todos 文件的 id（写入 sessions.json 的 `activeTodosId` 字段镜像）。
+    /// 由 [`Self::ensure_active_todos_id`] 在首次写盘时生成 stable id；后续 replace 仅在
+    /// `[todos] auto_new_todos_on_replace_after_terminal=true` 时切换新 id。
+    active_todos_id: Mutex<Option<String>>,
+    /// E：UI 刷新广播——todos / update_plan 成功后，runtime 把 snapshot fanout 给所有
+    /// 注册的 panel。生产由 `ChatContext::from_config` 注入 CLI/IDE 适配；测试可空。
+    refresh_notifier: Arc<RefreshNotifier>,
+    /// E6：checkpoint store（默认 None；ChatContext::from_config 注入 ShadowGit/Noop）。
+    /// `update_plan` 检测到 milestone 刚完成 → 写 `Milestone{milestone_id}` 记录；
+    /// `build_plan` 完成 → 按配置写 `Manual{label="plan_build:<id>"}`。失败仅 warning。
+    checkpoint_store: Mutex<Option<Arc<dyn crate::core::CheckpointStore>>>,
+    /// `[plan].auto_checkpoint_on_milestone`：里程碑完成时是否自动 record。默认 true。
+    auto_checkpoint_on_milestone: AtomicBool,
+    /// `[plan].auto_checkpoint_on_build`：build_plan 时是否自动 record。默认 false。
+    auto_checkpoint_on_build: AtomicBool,
 }
 
 impl PlanRuntime {
@@ -140,7 +171,116 @@ impl PlanRuntime {
             ask_question_panel: Mutex::new(None),
             first_exec_turn_pending: AtomicBool::new(false),
             first_exec_turn_body: Mutex::new(None),
+            reviewer_default_allow_edit: AtomicBool::new(false),
+            ask_question_timeout_ms: std::sync::atomic::AtomicU64::new(0),
+            todos_persist_base: Mutex::new(None),
+            active_todos_id: Mutex::new(None),
+            refresh_notifier: Arc::new(RefreshNotifier::new()),
+            checkpoint_store: Mutex::new(None),
+            auto_checkpoint_on_milestone: AtomicBool::new(true),
+            auto_checkpoint_on_build: AtomicBool::new(false),
         })
+    }
+
+    /// 注入 checkpoint store（生产 ShadowGit / 测试 Noop / Spy）。
+    pub fn attach_checkpoint_store(&self, store: Arc<dyn crate::core::CheckpointStore>) {
+        *self.checkpoint_store.lock() = Some(store);
+    }
+
+    /// 读 checkpoint store（克隆 Arc）。`None` 时跳过 record。
+    pub fn checkpoint_store(&self) -> Option<Arc<dyn crate::core::CheckpointStore>> {
+        self.checkpoint_store.lock().clone()
+    }
+
+    /// `[plan].auto_checkpoint_on_milestone` 当前值。
+    pub fn auto_checkpoint_on_milestone(&self) -> bool {
+        self.auto_checkpoint_on_milestone.load(Ordering::Acquire)
+    }
+
+    pub fn set_auto_checkpoint_on_milestone(&self, v: bool) {
+        self.auto_checkpoint_on_milestone.store(v, Ordering::Release);
+    }
+
+    /// `[plan].auto_checkpoint_on_build` 当前值。
+    pub fn auto_checkpoint_on_build(&self) -> bool {
+        self.auto_checkpoint_on_build.load(Ordering::Acquire)
+    }
+
+    pub fn set_auto_checkpoint_on_build(&self, v: bool) {
+        self.auto_checkpoint_on_build.store(v, Ordering::Release);
+    }
+
+    /// 注册一个 panel（CLI/IDE/test）；同一 runtime 可挂多个 panel，按注册顺序通知。
+    pub fn register_todos_panel(&self, panel: Arc<dyn TodosPanel>) {
+        self.refresh_notifier.register(panel);
+    }
+
+    /// 取出 `RefreshNotifier`（克隆 Arc）。`update_plan` / `todos` 写完后调
+    /// `notify(&snapshot)` 触发 UI 刷新；调用方避免持锁时 notify（防 D2/D8 类回路）。
+    pub fn refresh_notifier(&self) -> Arc<RefreshNotifier> {
+        self.refresh_notifier.clone()
+    }
+
+    /// 注入 session-local todos 落盘根目录（生产由 `ChatContext::from_config` 通过
+    /// `resolve_agent_trail_dir` 传入；测试与早期阶段可保持 `None`）。
+    pub fn set_todos_persist_base(&self, base: Option<std::path::PathBuf>) {
+        *self.todos_persist_base.lock() = base;
+    }
+
+    /// 读当前 todos 持久化根目录（克隆）。
+    pub fn todos_persist_base(&self) -> Option<std::path::PathBuf> {
+        self.todos_persist_base.lock().clone()
+    }
+
+    /// 当前 active todos 文件 id（mirrors `sessions.json.activeTodosId`）。
+    pub fn active_todos_id(&self) -> Option<String> {
+        self.active_todos_id.lock().clone()
+    }
+
+    /// 获取或派生当前 active todos id；首次调用时按"session_key + ms 时间戳"派生。
+    pub fn ensure_active_todos_id(&self) -> String {
+        let mut g = self.active_todos_id.lock();
+        if let Some(id) = g.as_ref() {
+            return id.clone();
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let id = format!("td_{}_{now_ms}", self.session_key);
+        *g = Some(id.clone());
+        id
+    }
+
+    /// 读取 `[reviewer].default_allow_edit`（B1 / tool_exec 分发 `create_plan` 时使用）。
+    pub fn reviewer_default_allow_edit(&self) -> bool {
+        self.reviewer_default_allow_edit
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 由 `ChatContext::from_config` 在装配阶段写入。
+    pub fn set_reviewer_default_allow_edit(&self, allow: bool) {
+        self.reviewer_default_allow_edit
+            .store(allow, std::sync::atomic::Ordering::Release);
+    }
+
+    /// 读取 `[ask_question].timeout_ms`（N13 / B1 tool_exec 分发 `ask_question` 时使用）。
+    /// 返回 `None` 表示「未配置」（工具按内置默认 300_000ms 处理）；`Some(0)` 表示无超时。
+    pub fn ask_question_timeout_ms(&self) -> Option<u64> {
+        let v = self.ask_question_timeout_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        if v == u64::MAX {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    /// 由 `ChatContext::from_config` 在装配阶段写入。`None` → 内置默认；`Some(0)` → 无超时。
+    pub fn set_ask_question_timeout_ms(&self, timeout_ms: Option<u64>) {
+        let v = timeout_ms.unwrap_or(u64::MAX);
+        self.ask_question_timeout_ms
+            .store(v, std::sync::atomic::Ordering::Release);
     }
 
     /// 本 runtime 绑定的 session_key（只读）。
@@ -177,27 +317,129 @@ impl PlanRuntime {
         }
     }
 
-    /// `/plan exit` → 退回 Chat（或 Pending 时直接退）。
+    /// `/plan exit` → 退回 Chat。
+    ///
+    /// **N3（2026-05）**：仅在 `Planning` 模式下允许。Executing 期不允许通过 `/plan exit`
+    /// 退出（需要用户发 SIGINT 或 Ctrl+C 走 cancel→pending 路径）；Pending / Completed
+    /// 也不允许（已退出 plan 模式，再 exit 无意义；返回 `NotInPlanning`）。
     ///
     /// **不**删 plan 文件（PR-PLE：退出规划不删盘）。
     pub fn exit_to_chat(&self) -> Result<(), PlanRuntimeError> {
         let mut mode = self.mode.write();
         match &*mode {
-            PlanMode::Chat => Err(PlanRuntimeError::AlreadyInMode("chat".into())),
-            // Planning / Executing / Pending / Completed 都允许显式退出
-            _ => {
+            PlanMode::Planning => {
                 *mode = PlanMode::Chat;
                 Ok(())
             }
+            PlanMode::Chat => Err(PlanRuntimeError::AlreadyInMode("chat".into())),
+            other => Err(PlanRuntimeError::NotInPlanning(other.as_str().into())),
         }
     }
 
-    /// 启动 recover：扫描 `~/.tomcat/plans/` 还原 active plan（P2 起接入 file_store）。
+    /// 启动 recover（E8）：扫描 `~/.tomcat/plans/` 还原 active plan。
     ///
-    /// P1 占位：什么都不做，仅断言 `mode == Chat`（启动时初始态）。
+    /// 规则（plan-runtime.md §4.1 D7 / D6 / E8）：
+    /// - PlanFile.mode == Executing：
+    ///   - 当前 session 拥有（`session_key == self.session_key()`）→ 内存切回 `Executing { plan_id }`，
+    ///     缓存 plan 全文供首轮 user_meta 注入（与 `build_plan` 一致）；
+    ///   - 其它 session 遗留（`session_key != self`）→ 把磁盘 mode 降为 Pending（孤儿清理），
+    ///     内存保持 Chat；调用方可在 transcript 写一行 warning（chat_loop 装配阶段）。
+    /// - 其它 mode（Planning / Pending / Completed）→ 不动盘，不切内存（用户用 `/restore`
+    ///   或新 /plan 再决定）。
+    ///
+    /// 防御：单条 plan 错误（解析失败 / lock 超时 / IO）只 warning 跳过，不 Err，
+    /// 保证 chat 主流程能继续启动（D 防御：磁盘异常不阻 in-memory）。
     pub fn recover(&self) -> Result<(), PlanRuntimeError> {
-        debug_assert!(matches!(*self.mode.read(), PlanMode::Chat));
+        // 启动阶段允许 mode == Chat；recover 自己只读 + 选择性写。
+        let plans_dir = match file_store::plans_dir() {
+            Ok(p) => p,
+            Err(_) => return Ok(()),
+        };
+        let entries = match std::fs::read_dir(&plans_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !path.to_string_lossy().ends_with(".plan.md") {
+                continue;
+            }
+            let plan = match file_store::read_plan(&path) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(target: "plan_runtime::recover",
+                        "跳过损坏的 plan 文件 {}: {e}", path.display());
+                    continue;
+                }
+            };
+            let plan_id = plan.frontmatter.plan_id.clone();
+            match plan.frontmatter.mode {
+                file_store::PlanFileMode::Executing => {
+                    let owner = plan.frontmatter.session_key.as_deref().unwrap_or("");
+                    if owner == self.session_key.as_str() {
+                        // 当前 session 拥有 → 还原内存到 EXEC
+                        let plan_text = file_store::serialize_plan_file(&plan)
+                            .unwrap_or_else(|_| plan.body.clone());
+                        *self.first_exec_turn_body.lock() = Some(plan_text);
+                        self.first_exec_turn_pending.store(true, Ordering::Release);
+                        *self.mode.write() = PlanMode::Executing { plan_id };
+                    } else {
+                        // 异 session 遗留 → 盘 demote 到 pending（保留 body / todos）
+                        let mut demoted = plan.clone();
+                        demoted.frontmatter.mode = file_store::PlanFileMode::Pending;
+                        if let Err(e) =
+                            file_store::write_plan(&path, &demoted, self.lock_timeout_ms)
+                        {
+                            tracing::warn!(target: "plan_runtime::recover",
+                                "降级孤儿 executing plan {} 到 pending 失败: {e}", plan_id);
+                        } else {
+                            tracing::info!(target: "plan_runtime::recover",
+                                "孤儿 executing plan {} 已降级为 pending（原 session={owner}）", plan_id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(())
+    }
+
+    /// E7：`/restore` 命令完成 git 树恢复后，重新读取磁盘上的 active plan
+    /// （`session_key == self && mode == executing`）并把内存 EXEC 状态对齐。
+    ///
+    /// 返回还原后的 `plan_id`（若未发现 active plan 返回 None）。
+    pub fn reload_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
+        let plans_dir = file_store::plans_dir().map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
+        let entries = match std::fs::read_dir(&plans_dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(None),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !path.to_string_lossy().ends_with(".plan.md") {
+                continue;
+            }
+            let plan = match file_store::read_plan(&path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if matches!(plan.frontmatter.mode, file_store::PlanFileMode::Executing)
+                && plan.frontmatter.session_key.as_deref() == Some(self.session_key.as_str())
+            {
+                let plan_id = plan.frontmatter.plan_id.clone();
+                let plan_text = file_store::serialize_plan_file(&plan)
+                    .unwrap_or_else(|_| plan.body.clone());
+                *self.first_exec_turn_body.lock() = Some(plan_text);
+                self.first_exec_turn_pending.store(true, Ordering::Release);
+                *self.mode.write() = PlanMode::Executing {
+                    plan_id: plan_id.clone(),
+                };
+                return Ok(Some(plan_id));
+            }
+        }
+        // 无 active executing plan：保持当前内存 mode 不变（/restore 只是树恢复，
+        // 并不强制改变 plan_runtime 状态机）。
+        Ok(None)
     }
 
     // ─── P2 PR-PLB 内部 API（供 tools/* 模块调用） ──────────────────────────
@@ -363,6 +605,9 @@ impl PlanRuntime {
             let mode = self.mode.read();
             match &*mode {
                 PlanMode::Chat | PlanMode::Planning => { /* 允许 */ }
+                PlanMode::Pending { plan_id: cur } if cur == plan_id => {
+                    // N3（2026-05）：Pending 的本盘可直接续跑 build。
+                }
                 PlanMode::Executing { plan_id: cur } => {
                     return Err(PlanRuntimeError::BuildBlocked(format!(
                         "当前 session 已在 EXEC（plan_id={cur}）；先等结束或 cancel→pending"
@@ -370,12 +615,12 @@ impl PlanRuntime {
                 }
                 PlanMode::Pending { plan_id: cur } => {
                     return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "当前 session 有 pending plan {cur}；先续跑或 /plan exit"
+                        "当前 session 有 pending plan {cur}；先续跑本盘或 /restore 切别盘"
                     )));
                 }
                 PlanMode::Completed { plan_id: cur } => {
                     return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "当前 session 已 completed plan {cur}；新计划请先 /plan exit"
+                        "当前 session 已 completed plan {cur}；新计划请先 /restore 或 /plan \"...\""
                     )));
                 }
             }
@@ -463,6 +708,27 @@ impl PlanRuntime {
             .unwrap_or_else(|_| plan.body.clone());
         *self.first_exec_turn_body.lock() = Some(plan_text);
         self.first_exec_turn_pending.store(true, Ordering::Release);
+
+        // E6：`[plan].auto_checkpoint_on_build`（默认 false）→ 写 `Manual{label="plan_build:..."}`。
+        // record 失败仅 warning（盘异常不阻 EXEC 推进，D 防御）。
+        if self.auto_checkpoint_on_build() {
+            if let Some(store) = self.checkpoint_store() {
+                let req = crate::core::CheckpointRecordRequest {
+                    session_id: self.session_key.clone(),
+                    turn_id: format!("plan_build-{plan_id}"),
+                    kind: crate::core::CheckpointKind::Manual {
+                        label: format!("plan_build:{plan_id}"),
+                    },
+                    message_anchor: None,
+                    notes: Some(serde_json::json!({ "plan_id": plan_id })),
+                };
+                if let Err(e) = store.record(req) {
+                    warnings.push(format!("plan_build checkpoint record 失败: {e}"));
+                    tracing::warn!(target: "plan_runtime::build",
+                        "plan_build checkpoint record 失败: {e}");
+                }
+            }
+        }
 
         Ok(BuildPlanOutcome {
             plan_id: plan_id.to_string(),
@@ -632,6 +898,9 @@ pub enum PlanRuntimeError {
     EmptyObjective,
     #[error("当前已经在 {0} 模式，无法重复进入")]
     AlreadyInMode(String),
+    /// N3（2026-05）：`/plan exit` 只允许在 Planning 模式下使用。
+    #[error("/plan exit 仅在 Planning 模式可用；当前模式 = {0}")]
+    NotInPlanning(String),
     #[error("plan_id 非法或不安全：{0}")]
     UnsafePlanId(String),
     /// PlanFile 文件 IO / serde 错误（P2 起细化）。

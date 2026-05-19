@@ -154,12 +154,15 @@ pub(super) async fn run_tool_calls(
         // **下一条 user 消息** 注入 `Parts` 的场景由本调度器在 push tool 之后立刻
         // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
         let (result_content, is_error, follow_up_parts) = {
-            let exec = tool_exec::execute_tool_with_openai_files(
+            let exec = tool_exec::execute_tool_full(
                 &agent.primitive,
                 &agent.config_backend,
                 &agent.bash_task_registry,
                 Some(&agent.config.read_file_state),
                 agent.config.openai_files_runtime.as_ref(),
+                agent.config.plan_runtime.as_ref(),
+                agent.config.subagent_type,
+                &cancel,
                 tc,
             );
             tokio::select! {

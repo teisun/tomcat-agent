@@ -38,9 +38,15 @@ const LOCK_RETRY_MAX_MS: u64 = 80;
 /// PlanFile 解析 / 落盘错误，**不** panic。
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
-    /// 抢 advisory file lock 超时；`waited_ms` 是实际等待毫秒数。
-    #[error("plan 文件锁繁忙（等待 {waited_ms} ms 仍未释放）")]
-    LockBusy { waited_ms: u64 },
+    /// 抢 advisory file lock 超时；`waited_ms` 是实际等待毫秒数；
+    /// `holder_pid` 为侧车 lock 文件内当前持有锁的进程 pid（用于调试）。
+    #[error(
+        "plan 文件锁繁忙（等待 {waited_ms} ms 仍未释放；可能由 pid={holder_pid:?} 持有）"
+    )]
+    LockBusy {
+        waited_ms: u64,
+        holder_pid: Option<i32>,
+    },
 
     /// 目标 plan 文件不存在。
     #[error("plan 文件不存在: {path}")]
@@ -139,6 +145,77 @@ pub struct Milestone {
     pub title: String,
     #[serde(default)]
     pub todo_ids: Vec<String>,
+    /// E2：milestone 状态。
+    /// - `pending`：尚未开始（默认）；
+    /// - `in_progress`：含至少 1 个 in_progress / completed 的 todo；
+    /// - `completed`：所有 todo 都 completed。
+    /// `update_plan` 在每次写盘前**派生**该字段（基于 todo 状态聚合），不应由 LLM 直接传入。
+    #[serde(default = "default_milestone_status")]
+    pub status: MilestoneStatus,
+    /// 可选描述（markdown），由 LLM 通过 `create_plan` / `update_plan` 注入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Milestone 状态（E2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MilestoneStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+fn default_milestone_status() -> MilestoneStatus {
+    MilestoneStatus::Pending
+}
+
+impl MilestoneStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// 由 todos 派生 milestone status（E2 交叉校验入口）。
+///
+/// - `todo_ids` 为空 → 一律 `pending`（与"未声明 todo 归属"语义一致）；
+/// - 至少 1 个非 completed/cancelled → `in_progress`；
+/// - 所有 todo completed/cancelled → `completed`；
+/// - 否则 → `pending`。
+pub fn derive_milestone_status(milestone_todo_ids: &[String], todos: &[TodoItem]) -> MilestoneStatus {
+    if milestone_todo_ids.is_empty() {
+        return MilestoneStatus::Pending;
+    }
+    let mut all_done = true;
+    let mut any_started = false;
+    for tid in milestone_todo_ids {
+        let Some(t) = todos.iter().find(|x| &x.id == tid) else {
+            // 未声明的 todo_id → 视为"没开始"，保 pending
+            all_done = false;
+            continue;
+        };
+        match t.status {
+            TodoStatus::Completed | TodoStatus::Cancelled => {}
+            TodoStatus::InProgress => {
+                any_started = true;
+                all_done = false;
+            }
+            TodoStatus::Pending => {
+                all_done = false;
+            }
+        }
+    }
+    if all_done {
+        MilestoneStatus::Completed
+    } else if any_started {
+        MilestoneStatus::InProgress
+    } else {
+        MilestoneStatus::Pending
+    }
 }
 
 /// PlanFile 顶部 YAML frontmatter；**v1 schema**。
@@ -362,7 +439,7 @@ pub fn with_advisory_lock<R>(
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(PlanError::Io)?;
     }
-    let lock_file = OpenOptions::new()
+    let mut lock_file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
@@ -377,8 +454,11 @@ pub fn with_advisory_lock<R>(
             Ok(()) => break,
             Err(_) => {
                 if start.elapsed() >= timeout {
+                    // N11：尝试读侧车 lock 文件已有内容（持锁进程在抢到锁后会写 pid）。
+                    let holder_pid = read_lock_holder_pid(lock_path);
                     return Err(PlanError::LockBusy {
                         waited_ms: start.elapsed().as_millis() as u64,
+                        holder_pid,
                     });
                 }
                 std::thread::sleep(Duration::from_millis(backoff));
@@ -386,9 +466,20 @@ pub fn with_advisory_lock<R>(
             }
         }
     }
+    // 写入当前进程 pid 供其它进程读取（N11 调试线索）。
+    use std::io::Write;
+    let _ = lock_file.set_len(0);
+    let _ = writeln!(lock_file, "{}", std::process::id());
+    let _ = lock_file.flush();
     let res = f();
     let _ = FileExt::unlock(&lock_file);
     res
+}
+
+/// N11：从侧车 lock 文件读取首行 pid（容错——读不到/解析失败返回 `None`）。
+fn read_lock_holder_pid(lock_path: &Path) -> Option<i32> {
+    let s = std::fs::read_to_string(lock_path).ok()?;
+    s.lines().next()?.trim().parse::<i32>().ok()
 }
 
 /// 单调递增的 tmp 文件后缀，避免同进程并发 write_plan 命名冲突。
@@ -399,3 +490,66 @@ fn next_tmp_seq() -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod milestone_status_tests {
+    use super::*;
+
+    fn td(id: &str, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: id.into(),
+            status,
+            milestone_id: None,
+        }
+    }
+
+    #[test]
+    fn derive_pending_when_no_todo_ids() {
+        let r = derive_milestone_status(&[], &[td("t1", TodoStatus::Completed)]);
+        assert!(matches!(r, MilestoneStatus::Pending));
+    }
+
+    #[test]
+    fn derive_in_progress_when_any_in_progress() {
+        let r = derive_milestone_status(
+            &["t1".into(), "t2".into()],
+            &[
+                td("t1", TodoStatus::InProgress),
+                td("t2", TodoStatus::Pending),
+            ],
+        );
+        assert!(matches!(r, MilestoneStatus::InProgress));
+    }
+
+    #[test]
+    fn derive_pending_when_all_pending() {
+        let r = derive_milestone_status(
+            &["t1".into(), "t2".into()],
+            &[td("t1", TodoStatus::Pending), td("t2", TodoStatus::Pending)],
+        );
+        assert!(matches!(r, MilestoneStatus::Pending));
+    }
+
+    #[test]
+    fn derive_completed_when_all_done_or_cancelled() {
+        let r = derive_milestone_status(
+            &["t1".into(), "t2".into()],
+            &[
+                td("t1", TodoStatus::Completed),
+                td("t2", TodoStatus::Cancelled),
+            ],
+        );
+        assert!(matches!(r, MilestoneStatus::Completed));
+    }
+
+    #[test]
+    fn derive_pending_when_referenced_todo_missing() {
+        // 引用未声明 → 视为未开始
+        let r = derive_milestone_status(
+            &["missing".into()],
+            &[td("t1", TodoStatus::Completed)],
+        );
+        assert!(matches!(r, MilestoneStatus::Pending));
+    }
+}

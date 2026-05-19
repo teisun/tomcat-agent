@@ -19,6 +19,8 @@ fn sample_frontmatter() -> PlanFileFrontmatter {
             id: "m1".into(),
             title: "milestone 1".into(),
             todo_ids: vec!["t1".into(), "t2".into()],
+            status: super::MilestoneStatus::Pending,
+            description: None,
         }],
         todos: vec![
             TodoItem {
@@ -296,7 +298,7 @@ fn plan_file_lock_timeout_returns_lock_busy() {
     let err = write_plan(&path, &plan, 100).expect_err("应 LockBusy");
     let elapsed = start.elapsed();
     assert!(
-        matches!(err, PlanError::LockBusy { waited_ms } if waited_ms >= 80),
+        matches!(err, PlanError::LockBusy { waited_ms, .. } if waited_ms >= 80),
         "got {err:?}"
     );
     // 验证 timeout 大致兑现（不大于 500ms，远小于持锁的 600ms）

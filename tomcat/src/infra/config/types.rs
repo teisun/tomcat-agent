@@ -663,6 +663,8 @@ pub struct WasmConfig {}
 /// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_BUILD` → `auto_checkpoint_on_build`
 /// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_MILESTONE` → `auto_checkpoint_on_milestone`
 /// - `TOMCAT_PLAN_MAX_REVIEW_ROUNDS` → `max_review_rounds`
+/// - `TOMCAT_PLAN_AUTO_MILESTONE_THRESHOLD` → `auto_milestone_threshold`
+/// - `TOMCAT_PLAN_MILESTONE_CHECKPOINT_REQUIRES_PLAN_SCOPE` → `milestone_checkpoint_requires_plan_scope`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlanConfig {
     /// `~/.tomcat/plans/*.plan.md` advisory lock 等待上限（毫秒）。默认 2000。
@@ -678,6 +680,14 @@ pub struct PlanConfig {
     /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
     #[serde(default = "default_plan_max_review_rounds")]
     pub max_review_rounds: u32,
+    /// 自动 milestone checkpoint 的最少 todo 数阈值（todo 数 < 该值时不触发，避免极小 plan 频繁打点）。
+    /// 默认 3。设 0 表示无下限。
+    #[serde(default = "default_plan_auto_milestone_threshold")]
+    pub auto_milestone_threshold: u32,
+    /// 自动 milestone checkpoint 是否仅作用于 plan scope（受影响文件集合限定 `~/.tomcat/plans/<id>.plan.md`），
+    /// 默认 true（不污染 workspace 全量 snapshot）。
+    #[serde(default = "default_true")]
+    pub milestone_checkpoint_requires_plan_scope: bool,
 }
 
 fn default_plan_lock_timeout_ms() -> u64 {
@@ -688,6 +698,10 @@ fn default_plan_max_review_rounds() -> u32 {
     1
 }
 
+fn default_plan_auto_milestone_threshold() -> u32 {
+    3
+}
+
 impl Default for PlanConfig {
     fn default() -> Self {
         Self {
@@ -695,6 +709,56 @@ impl Default for PlanConfig {
             auto_checkpoint_on_build: false,
             auto_checkpoint_on_milestone: true,
             max_review_rounds: default_plan_max_review_rounds(),
+            auto_milestone_threshold: default_plan_auto_milestone_threshold(),
+            milestone_checkpoint_requires_plan_scope: true,
+        }
+    }
+}
+
+/// `[ask_question]` 子表：`ask_question` 工具运行时参数。
+///
+/// env 覆盖：
+/// - `TOMCAT_ASK_QUESTION_TIMEOUT_MS` → `timeout_ms`
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AskQuestionConfig {
+    /// 一次 ask_question 调用等待用户输入的墙钟超时（毫秒）。0 表示无超时。默认 300_000 ms = 5 min。
+    #[serde(default = "default_ask_question_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_ask_question_timeout_ms() -> u64 {
+    300_000
+}
+
+impl Default for AskQuestionConfig {
+    fn default() -> Self {
+        Self {
+            timeout_ms: default_ask_question_timeout_ms(),
+        }
+    }
+}
+
+/// `[todos]` 子表：session-local todos 持久化与生命周期参数（GAP-N12 / G3）。
+///
+/// env 覆盖：
+/// - `TOMCAT_TODOS_PURGE_INACTIVE_ON_NEW_TODOS` → `purge_inactive_on_new_todos`
+/// - `TOMCAT_TODOS_AUTO_NEW_TODOS_ON_REPLACE_AFTER_TERMINAL` → `auto_new_todos_on_replace_after_terminal`
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TodosConfig {
+    /// 新建 todos 时是否清理 session 下「无 active 项 / 历史 inactive」的旧 todos 文件。默认 true。
+    #[serde(default = "default_true")]
+    pub purge_inactive_on_new_todos: bool,
+    /// 当上一个 active todos 进入 terminal（全 completed / cancelled）后，下一次 todos replace 调用是否自动
+    /// 视为「new todos」开启新文件（而不是 in-place 覆盖原文件）。默认 true。
+    #[serde(default = "default_true")]
+    pub auto_new_todos_on_replace_after_terminal: bool,
+}
+
+impl Default for TodosConfig {
+    fn default() -> Self {
+        Self {
+            purge_inactive_on_new_todos: true,
+            auto_new_todos_on_replace_after_terminal: true,
         }
     }
 }
@@ -777,4 +841,10 @@ pub struct AppConfig {
     /// reviewer 内联子 Agent 派发参数（T2-P1-004 RV-A/B/E）。
     #[serde(default)]
     pub reviewer: ReviewerConfig,
+    /// `ask_question` 工具参数（GAP-N12）。
+    #[serde(default)]
+    pub ask_question: AskQuestionConfig,
+    /// session-local todos 工具参数（GAP-N12 / G3）。
+    #[serde(default)]
+    pub todos: TodosConfig,
 }

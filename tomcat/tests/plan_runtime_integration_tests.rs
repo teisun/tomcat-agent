@@ -56,9 +56,11 @@ fn cleanup_home(p: &std::path::Path) {
 }
 
 /// HOME 隔离测试串行化（plan tools 测试改 HOME，并发会互踩）。
-fn home_lock() -> &'static std::sync::Mutex<()> {
-    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    M.get_or_init(|| std::sync::Mutex::new(()))
+/// 全套件共享一把 HOME 锁——本套件的若干测试 panic 不应让后续测试连环挂；
+/// 切到 parking_lot::Mutex（无 poison 概念），或显式 `unwrap_or_else(into_inner)`。
+fn home_lock() -> &'static parking_lot::Mutex<()> {
+    static M: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| parking_lot::Mutex::new(()))
 }
 
 struct AcceptReviewer;
@@ -84,7 +86,7 @@ impl ReviewerDispatcher for AcceptReviewer {
 
 #[tokio::test]
 async fn full_plan_lifecycle_create_build_complete() {
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("lifecycle-session");
 
@@ -93,13 +95,12 @@ async fn full_plan_lifecycle_create_build_complete() {
         rt.enter_planning("end-to-end").unwrap();
         assert!(matches!(rt.mode(), PlanMode::Planning));
 
-        // 2) create_plan → PlanFile 落盘 + active_planning_plan_id
+        // 2) create_plan → PlanFile 落盘 + active_planning_plan_id（G4：runtime 派生 plan_id）
         let out = create_plan::execute(
             &rt,
             create_plan::CreatePlanArgs {
-                plan_id: "lifecycle".into(),
                 goal: "ship full path".into(),
-                body: Some("## Goal\n收口".into()),
+                draft: "## Goal\n收口".into(),
                 milestones: vec![],
                 todos: vec![
                     create_plan::TodoArg {
@@ -118,11 +119,12 @@ async fn full_plan_lifecycle_create_build_complete() {
             },
         )
         .unwrap();
-        assert_eq!(out["plan_id"], "lifecycle");
-        assert_eq!(rt.active_planning_plan_id().as_deref(), Some("lifecycle"));
+        let plan_id = out["plan_id"].as_str().expect("plan_id present").to_string();
+        assert!(plan_id.starts_with("plan_"));
+        assert_eq!(rt.active_planning_plan_id().as_deref(), Some(plan_id.as_str()));
 
         // 3) /plan build → EXEC + 首轮 user_meta 缓存
-        let outcome = rt.build_plan("lifecycle", Some("uuid-1".into())).unwrap();
+        let outcome = rt.build_plan(&plan_id, Some("uuid-1".into())).unwrap();
         assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
         assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Planning));
         let body = rt.consume_first_exec_turn_user_meta().expect("首轮 body");
@@ -135,12 +137,14 @@ async fn full_plan_lifecycle_create_build_complete() {
         update_plan::execute(
             &rt,
             update_plan::UpdatePlanArgs {
-                plan_id: Some("lifecycle".into()),
+                plan_id: Some(plan_id.clone()),
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: "a".into(),
                     status: TodoStatus::InProgress,
                 }],
-                milestones_ops: vec![],
+                milestones_ops: serde_json::Value::Null,
+                replace_todos: false,
+                replace_milestones: false,
             },
         )
         .unwrap();
@@ -148,12 +152,14 @@ async fn full_plan_lifecycle_create_build_complete() {
         update_plan::execute(
             &rt,
             update_plan::UpdatePlanArgs {
-                plan_id: Some("lifecycle".into()),
+                plan_id: Some(plan_id.clone()),
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: "a".into(),
                     status: TodoStatus::Completed,
                 }],
-                milestones_ops: vec![],
+                milestones_ops: serde_json::Value::Null,
+                replace_todos: false,
+                replace_milestones: false,
             },
         )
         .unwrap();
@@ -161,12 +167,14 @@ async fn full_plan_lifecycle_create_build_complete() {
         let out_final = update_plan::execute(
             &rt,
             update_plan::UpdatePlanArgs {
-                plan_id: Some("lifecycle".into()),
+                plan_id: Some(plan_id.clone()),
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: "b".into(),
                     status: TodoStatus::Completed,
                 }],
-                milestones_ops: vec![],
+                milestones_ops: serde_json::Value::Null,
+                replace_todos: false,
+                replace_milestones: false,
             },
         )
         .unwrap();
@@ -175,7 +183,7 @@ async fn full_plan_lifecycle_create_build_complete() {
 
         // 7) finalize → Chat
         let pid = rt.finalize_completed_to_chat().expect("Some(plan_id)");
-        assert_eq!(pid, "lifecycle");
+        assert_eq!(pid, plan_id);
         assert!(matches!(rt.mode(), PlanMode::Chat));
         "ok"
     })
@@ -189,18 +197,17 @@ async fn full_plan_lifecycle_create_build_complete() {
 
 #[tokio::test]
 async fn build_then_cancel_demotes_pending_and_resume_works() {
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-cancel");
 
     tokio::time::timeout(DEFAULT_TIMEOUT, async {
         rt.enter_planning("obj").unwrap();
-        create_plan::execute(
+        let out = create_plan::execute(
             &rt,
             create_plan::CreatePlanArgs {
-                plan_id: "cancel_able".into(),
                 goal: "long task".into(),
-                body: None,
+                draft: "long bullets".into(),
                 milestones: vec![],
                 todos: vec![create_plan::TodoArg {
                     id: "t1".into(),
@@ -211,15 +218,15 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
             },
         )
         .unwrap();
-        rt.build_plan("cancel_able", None).unwrap();
+        let plan_id = out["plan_id"].as_str().unwrap().to_string();
+        rt.build_plan(&plan_id, None).unwrap();
         // 模拟 Ctrl+C
         rt.demote_to_pending_on_cancel().unwrap();
         assert!(matches!(rt.mode(), PlanMode::Pending { .. }));
 
-        // 续跑：必须能成功（lock 已释放，frontmatter.mode=pending 合规）
-        // 切回 Chat 才能 build（Pending 不能 build；用户 /plan exit）
-        rt.exit_to_chat().unwrap();
-        let out = rt.build_plan("cancel_able", None).unwrap();
+        // 续跑（N3 2026-05）：Pending 状态下，本盘 plan_id 直接 build 即可恢复 EXEC，
+        // 不再需要 /plan exit 中转。
+        let out = rt.build_plan(&plan_id, None).unwrap();
         assert!(matches!(out.prev_disk_mode, PlanFileMode::Pending));
         assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
     })
@@ -232,7 +239,7 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
 
 #[tokio::test]
 async fn ask_question_returns_recommended_then_custom_text() {
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-aq");
     rt.enter_planning("aq").unwrap();
@@ -297,7 +304,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
 #[tokio::test]
 async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
     // D8 防御：用户 Ctrl+C 中断 ask_question 必须立即返回 cancelled，不可 hang
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-cancel");
     rt.enter_planning("aq cancel").unwrap();
@@ -339,7 +346,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
 
 #[tokio::test]
 async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-rv");
     rt.attach_reviewer(Arc::new(AcceptReviewer));
@@ -349,11 +356,15 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
         create_plan::execute_with_reviewer(
             &rt,
             create_plan::CreatePlanArgs {
-                plan_id: "rv_int".into(),
                 goal: "integ".into(),
-                body: None,
+                draft: "outline".into(),
                 milestones: vec![],
-                todos: vec![],
+                todos: vec![create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "step".into(),
+                    status: TodoStatus::Pending,
+                    milestone_id: None,
+                }],
             },
             false,
         ),
@@ -361,7 +372,7 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
     .await
     .expect("reviewer 集成超时")
     .unwrap();
-    assert_eq!(out["plan_id"], "rv_int");
+    assert!(out["plan_id"].as_str().unwrap().starts_with("plan_"));
     assert_eq!(out["review"]["aborted"], false);
     assert_eq!(out["review"]["summary"], "looks good");
     cleanup_home(&home);
@@ -371,36 +382,43 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
 
 #[tokio::test]
 async fn raw_edit_to_plan_file_blocked_in_planning_and_executing() {
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-raw");
+
+    // 先在 CHAT 默认模式下验证：手工 vim 编辑 plan 文件不被运行时拦
+    let arbitrary = home.join(".tomcat").join("plans").join("any_plan.plan.md");
+    assert!(rt.allow_raw_edit_to_path(&arbitrary));
+
     rt.enter_planning("p").unwrap();
-    create_plan::execute(
+    let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
-            plan_id: "raw_guard".into(),
             goal: "g".into(),
-            body: None,
+            draft: "d".into(),
             milestones: vec![],
-            todos: vec![],
+            todos: vec![create_plan::TodoArg {
+                id: "t1".into(),
+                content: "x".into(),
+                status: TodoStatus::Pending,
+                milestone_id: None,
+            }],
         },
     )
     .unwrap();
-
-    let target = home.join(".tomcat").join("plans").join("raw_guard.plan.md");
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+    let target = home
+        .join(".tomcat")
+        .join("plans")
+        .join(format!("{plan_id}.plan.md"));
     assert!(target.exists());
 
     // Planning 模式 → 拒
     assert!(!rt.allow_raw_edit_to_path(&target));
 
     // EXEC 模式 → 拒
-    rt.build_plan("raw_guard", None).unwrap();
+    rt.build_plan(&plan_id, None).unwrap();
     assert!(!rt.allow_raw_edit_to_path(&target));
-
-    // CHAT 模式 → 允许（用户手工 vim 编辑 plan 文件不被运行时拦）
-    rt.demote_to_pending_on_cancel().unwrap(); // EXEC → Pending
-    rt.exit_to_chat().unwrap(); // Pending → Chat
-    assert!(rt.allow_raw_edit_to_path(&target));
 
     cleanup_home(&home);
 }
@@ -408,8 +426,9 @@ async fn raw_edit_to_plan_file_blocked_in_planning_and_executing() {
 // ─── E2E-PLAN-008/013：todos 路由 + 并发不破坏 ─────────────────────────────
 
 #[tokio::test]
-async fn todos_routes_to_plan_file_in_exec_and_session_in_chat() {
-    let _g = home_lock().lock().unwrap();
+async fn todos_always_writes_session_never_plan_file() {
+    // D 方案最终态：todos 在任何模式（含 EXEC）都只写 session 本地，绝不动 PlanFile。
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-todos");
 
@@ -440,20 +459,25 @@ async fn todos_routes_to_plan_file_in_exec_and_session_in_chat() {
     )
     .unwrap();
 
-    // 进 EXEC：todos 应写 PlanFile（而非 session）
+    // 进 EXEC：todos 应继续写 session，PlanFile 不动
     rt.enter_planning("p").unwrap();
-    create_plan::execute(
+    let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
-            plan_id: "td_route".into(),
             goal: "g".into(),
-            body: None,
+            draft: "d".into(),
             milestones: vec![],
-            todos: vec![],
+            todos: vec![create_plan::TodoArg {
+                id: "plan_t1".into(),
+                content: "plan task".into(),
+                status: TodoStatus::Pending,
+                milestone_id: None,
+            }],
         },
     )
     .unwrap();
-    rt.build_plan("td_route", None).unwrap();
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+    rt.build_plan(&plan_id, None).unwrap();
 
     let n_before = rt.snapshot_session_todos().len();
     todos::execute(
@@ -468,12 +492,15 @@ async fn todos_routes_to_plan_file_in_exec_and_session_in_chat() {
         },
     )
     .unwrap();
-    // session 未变化
-    assert_eq!(rt.snapshot_session_todos().len(), n_before);
-    // PlanFile 加了一项
+    // EXEC 期 session todo 也会增长（scratchpad）
+    assert_eq!(rt.snapshot_session_todos().len(), n_before + 1);
+    // PlanFile.todos 不应被 todos 工具改动
     use tomcat::api::chat::plan_runtime::file_store::*;
-    let plan = read_plan(&plan_path_for_id("td_route").unwrap()).unwrap();
-    assert!(plan.frontmatter.todos.iter().any(|t| t.id == "plan_y"));
+    let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert!(
+        !plan.frontmatter.todos.iter().any(|t| t.id == "plan_y"),
+        "todos 工具不应把 plan_y 写入 PlanFile.frontmatter.todos"
+    );
     cleanup_home(&home);
 }
 
@@ -481,7 +508,7 @@ async fn todos_routes_to_plan_file_in_exec_and_session_in_chat() {
 
 #[tokio::test]
 async fn build_unknown_plan_id_returns_friendly_hint() {
-    let _g = home_lock().lock().unwrap();
+    let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-err");
     let err = rt.build_plan("does_not_exist", None).unwrap_err();

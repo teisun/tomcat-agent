@@ -26,17 +26,24 @@ use crate::api::chat::plan_runtime::{
 use super::ToolError;
 
 /// `create_plan` 入参 schema（与 catalog parameters 对齐）。
+///
+/// **D3 破坏性变更（2026-05）**：
+/// - 移除 `plan_id`：由 runtime 通过 [`derive_plan_id`] 派生（slug + hash），
+///   LLM 传 `plan_id` 将报 [`ToolError::BadArgs`]；
+/// - `body` 重命名为 `draft`：仅承载 `## Draft` 段的草案要点，其它段落由模板拼接，
+///   传 `body` 将报 [`ToolError::BadArgs`]；
+/// - `milestones` 默认空（与 GAP-C03 对齐：MVP 可省略，后续 update_plan 补）。
 #[derive(Debug, Deserialize)]
 pub struct CreatePlanArgs {
-    /// 计划 id；必须通过 `assert_plan_id_safe`（仅 `[a-z0-9_-]+`）。
-    pub plan_id: String,
-    /// 高层目标。
+    /// 高层目标（必填）。runtime 由此派生 plan_id。
     pub goal: String,
-    /// 自由 markdown body（`## Goal` / `## Draft` 等段落）。
-    #[serde(default)]
-    pub body: Option<String>,
-    pub milestones: Vec<MilestoneArg>,
+    /// `## Draft` 段要点（必填）。template 会把它插入 `## Goal` 与 `## Review` 之间。
+    pub draft: String,
+    /// 任务列表（必填，至少 1 项）。
     pub todos: Vec<TodoArg>,
+    /// milestones（可选；空数组也合法）。
+    #[serde(default)]
+    pub milestones: Vec<MilestoneArg>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +52,8 @@ pub struct MilestoneArg {
     pub title: String,
     #[serde(default)]
     pub todo_ids: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,10 +72,59 @@ fn default_pending() -> TodoStatus {
 
 impl CreatePlanArgs {
     /// 从 OpenAI tool_call `arguments` JSON 反序列化。
+    ///
+    /// D3 破坏性：检测 LLM 误传旧字段 `plan_id` / `body` 时立即报错，避免静默覆盖派生 id。
     pub fn from_json(raw: &serde_json::Value) -> Result<Self, ToolError> {
+        if let Some(obj) = raw.as_object() {
+            if obj.contains_key("plan_id") {
+                return Err(ToolError::BadArgs(
+                    "create_plan 不再接受 plan_id；runtime 由 goal 派生".into(),
+                ));
+            }
+            if obj.contains_key("body") {
+                return Err(ToolError::BadArgs(
+                    "create_plan 字段 body 已重命名为 draft（仅承载 `## Draft` 段要点）".into(),
+                ));
+            }
+        }
         serde_json::from_value(raw.clone())
             .map_err(|e| ToolError::BadArgs(format!("create_plan args: {e}")))
     }
+}
+
+/// 由 `goal` 派生稳定的 `plan_id`：slug（截 40 字符）+ 8 字符 xxh32 hex。
+///
+/// hash 输入混入当前 ms 时间戳，避免同一 goal 在毫秒内重复 create 产生同 id。
+/// 派生结果通过 `assert_plan_id_safe` 校验。
+pub fn derive_plan_id(goal: &str) -> String {
+    let slug: String = goal
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .chars()
+        .take(40)
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    let slug = if slug.is_empty() {
+        "plan".to_string()
+    } else {
+        slug
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let seed = format!("{goal}{now_ms}");
+    let hash = xxhash_rust::xxh32::xxh32(seed.as_bytes(), 0);
+    format!("plan_{slug}_{hash:08x}")
 }
 
 /// `create_plan` 执行体；返回 ToolResult 内容 JSON：
@@ -89,11 +147,19 @@ pub fn execute(
             mode: mode.as_str().to_string(),
         });
     }
-    assert_plan_id_safe(&args.plan_id)
-        .map_err(|e| ToolError::BadArgs(format!("plan_id 非法: {e}")))?;
     if args.goal.trim().is_empty() {
         return Err(ToolError::BadArgs("goal 不可为空".into()));
     }
+    if args.draft.trim().is_empty() {
+        return Err(ToolError::BadArgs("draft 不可为空".into()));
+    }
+    if args.todos.is_empty() {
+        return Err(ToolError::BadArgs("todos 至少 1 项".into()));
+    }
+    // G4：runtime 由 goal 派生 plan_id；LLM 不传 plan_id。
+    let plan_id = derive_plan_id(&args.goal);
+    assert_plan_id_safe(&plan_id)
+        .map_err(|e| ToolError::BadArgs(format!("派生 plan_id 非法: {e}")))?;
 
     let todos: Vec<TodoItem> = args
         .todos
@@ -116,16 +182,24 @@ pub fn execute(
     let milestones: Vec<Milestone> = args
         .milestones
         .into_iter()
-        .map(|m| Milestone {
-            id: m.id,
-            title: m.title,
-            todo_ids: m.todo_ids,
+        .map(|m| {
+            let status = crate::api::chat::plan_runtime::file_store::derive_milestone_status(
+                &m.todo_ids,
+                &todos,
+            );
+            Milestone {
+                id: m.id,
+                title: m.title,
+                todo_ids: m.todo_ids,
+                status,
+                description: m.description,
+            }
         })
         .collect();
 
     let now = chrono::Local::now().to_rfc3339();
     let frontmatter = PlanFileFrontmatter {
-        plan_id: args.plan_id.clone(),
+        plan_id: plan_id.clone(),
         goal: args.goal.clone(),
         mode: PlanFileMode::Planning,
         session_key: None,
@@ -136,18 +210,15 @@ pub fn execute(
         todos,
         unknown: serde_yaml::Mapping::new(),
     };
-    let body = args
-        .body
-        .unwrap_or_else(|| default_body(&args.goal));
+    let body = default_body(&args.goal, &args.draft);
     let plan = PlanFile { frontmatter, body };
-    let path = plan_path_for_id(&args.plan_id)?;
+    let path = plan_path_for_id(&plan_id)?;
     write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
-    // 内存切换：保持 Planning，记录 active_plan_id 给后续 update_plan / build 用。
-    runtime.set_active_planning_plan_id(args.plan_id.clone());
+    runtime.set_active_planning_plan_id(plan_id.clone());
 
     Ok(serde_json::json!({
-        "plan_id": args.plan_id,
+        "plan_id": plan_id,
         "path": path.display().to_string(),
         "mode": "planning",
         "review": {
@@ -191,8 +262,8 @@ fn reload_after_review(_runtime: &PlanRuntime, plan_id: &str) -> Result<(), Tool
     Ok(())
 }
 
-fn default_body(goal: &str) -> String {
+fn default_body(goal: &str, draft: &str) -> String {
     format!(
-        "## Goal\n\n{goal}\n\n## Draft\n\n（待 reviewer 子 Agent 填入草案要点）\n\n## Review\n\n（等待 reviewer 子 Agent 写入或保持空白）\n\n## Todos Board\n\n（由 update_plan / todos 自动维护）\n"
+        "## Goal\n\n{goal}\n\n## Draft\n\n{draft}\n\n## Notes\n\n_(empty)_\n\n## Review\n\n（等待 reviewer 子 Agent 写入或保持空白）\n\n## Todos Board\n\n<!-- todos-board:auto:begin -->\n（由 update_plan 自动维护，请勿手工编辑标记之间内容）\n<!-- todos-board:auto:end -->\n"
     )
 }

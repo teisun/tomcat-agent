@@ -11,10 +11,10 @@
 | 字段 | 值 |
 |------|------|
 | 负责人 | Tom |
-| 状态 | DOING |
+| 状态 | DOING（plan-mode-full-fix 全量修复轮次，已完成 A-J 全部子项 + I 收尾） |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P8d 门禁验证完成 → lib 1025/0 + integration 8/0 + tool_catalog_doc 1/0 → DoD ready / PENDING_INTEGRATION |
+| 阶段 | 全量修复轮 A-J 完成 → lib 1060/0 + integration 8/0 + plan_e2e 8/0 + tool_catalog_doc 1/0 → 待审 / PENDING_INTEGRATION |
 
 ## Phase 进度
 
@@ -41,6 +41,43 @@
 - 测试 hang 防御：所有 L1/L2 async `tokio::time::timeout(30s)` 包裹；L3 子进程 `kill_on_drop` + 120s 上限
 - 测试稳定性：默认 MockLlm/mock HTTP；真 LLM 用例 `#[ignore]`
 - ~~已知 pre-existing 测试串污染：plan tools 测试改 HOME 后不还原 → 与 permission gate 测试并行/串行时都失败；P8b 修：在 `setup_isolated_home` 用 RAII `EnvGuard` 在 cleanup 时还原原 HOME（不属于 P6 回归）~~ **P8a 已修**（orig_home OnceLock 抓取首次 HOME；cleanup_home 还原）
+
+## plan-mode-full-fix 阶段（A-J）
+
+> 单独一轮全量修复，对齐文档与代码、引入 panel/checkpoint/restore/recover、扩 E2E 覆盖；
+> 计划单一事实源：`~/.cursor/plans/plan-mode-full-fix_78a0646c.plan.md`。
+
+- [x] **A** 文档与图修复：plan-runtime / multi-agent / tools/* 8 篇统一口径（含 ask-question CHAT 可见、PLAN 写路径限制等行为变更说明），executor reminder 强调"如何推进任务"为第一要务
+- [x] **B/B1/B11/B12** catalog 可见性回正（PLAN 模式新增 todos/ask_question；EXEC 模式仅 update_plan）+ tool_exec.rs 把 4 plan 工具接入主分发 + ask_question 在 CHAT 可用 + safety.rs 写路径策略（PLAN 限 `~/.tomcat/plans/`、EXEC 全禁写 plan 文件）+ reviewer 段守卫
+- [x] **C** chat_loop 装配：first_exec_turn user_meta 注入、cancel→pending 降级、finalize_completed_to_chat、session_id 透传、recover hook、transcript 写入对齐
+- [x] **D** reviewer 生产派发：ProdReviewerDispatcher 占位（findings/rounds/reload/warning 协议接通）；后续 PR 替换为 AgentRegistry::spawn_subagent_internal 真实派发
+- [x] **E** TodosPanel + RefreshNotifier + plan.panel + Milestone checkpoint record（`[plan].auto_checkpoint_on_milestone`，默认 true）+ `/restore` reload_active_plan_from_disk + `PlanRuntime::recover()` 真实实现（孤儿 executing → pending 降级；当前 session 拥有 → 重挂内存 EXEC）
+- [x] **E2** Milestone schema 完整化（`status: MilestoneStatus` 派生 + `description`）+ `## Todos Board` 自动重写（`<!-- todos-board:auto:begin/end -->` 标记内）+ 一致性校验（`todo.milestone_id` ⇔ `milestones[].todo_ids`）
+- [x] **F** prompts/executor.txt 重写为英文契约（"first priority: drive todos to completion"），prompts/planner.txt 同步；`render_executor_reminder` 支持 `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` 热覆盖
+- [x] **G1/G2/G5** `update_plan` `op→kind`（破坏性一步到位）+ mode 矩阵闸门（Planning 拒 in_progress 等）+ 完整 JSON 返回（applied / plan_mode_before/after / panel_snapshot_id / warnings / items / milestones / active_in_progress）+ completed 全拒（N2）+ 跨 session 策略（N11，Executing 拒 cross-session、Planning/Pending 允许） + N3（`/plan exit` 仅 Planning）
+- [x] **G3** TodoRuntime 持久化（`~/.tomcat/agents/<id>/sessions/<sid>/todos/<id>.todo.md`）+ `sessions.json.activeTodosId` 镜像（`ensure_active_todos_id`）+ purge_inactive
+- [x] **G4** `create_plan` `body→draft`（破坏性一步到位）+ `plan_id` 派生（slugify + xxhash）+ 显式 reject 老字段 + `## Notes` 模板补全
+- [x] **H** `plan_e2e_with_mock_llm_tests.rs` 8 例：H1 full lifecycle（6 次 panel + 自动 completed）/ H2 CHAT todos panel scope / H3 PLAN raw edit 守卫 / H4 EXEC plan 文件全禁写 / H5 reviewer aborted 占位 / H6 cancel→pending / H7 Planning 拒 in_progress / H8 milestone checkpoint record
+- [x] **J** CLI 模式指示器（readline 提示符渲染 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` / `[DONE plan_id]`）+ `/plan list` 子命令（扫 `~/.tomcat/plans/` 列 id/mode/goal/created_at）
+- [x] **I** status 收尾 + 终态门禁
+
+### 行为变更（5 条 — commit/CHANGELOG 显著标注）
+
+1. `ask_question` 在 CHAT 可见（之前 PLAN-only）；上层 panel 不变。
+2. PLAN 期 `write`/`edit`/`delete` 仅允许在 `~/.tomcat/plans/*.plan.md`；越界 → ToolError。
+3. EXEC 期 plan 文件全禁 raw 写（必须走 `update_plan` 推进）。
+4. `update_plan` 入参仅 `kind`，旧 `op` **不再兼容**，立即失败。
+5. `create_plan` 入参仅 `draft`（旧 `body` 不再兼容）；`plan_id` 由 runtime 派生，LLM 不再传。
+
+### 终态门禁
+
+```
+cargo test --lib -p tomcat                                  → 1060 passed / 0 failed
+cargo test --test plan_runtime_integration_tests -p tomcat → 8 passed / 0 failed
+cargo test --test plan_e2e_with_mock_llm_tests -p tomcat   → 8 passed / 0 failed（H 新增）
+cargo test --test tool_catalog_doc -p tomcat                → 1 passed / 0 failed（catalog 已重生成提交）
+cargo run --bin gen-tool-catalog -p tomcat                  → OK（UPDATE_TOOL_CATALOG=1 写盘）
+```
 
 ## 提交日志
 

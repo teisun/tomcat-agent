@@ -25,30 +25,76 @@ use super::ToolError;
 
 /// `ask_question` 执行入口。`panel` 通常来自 `ChatContext.ask_question_panel`；
 /// `cancel_signal` 来自 chat_loop 当前回合的 `CancellationToken` adapter。
+///
+/// N13：等待用户回答的墙钟超时取自（优先级从高到低）：
+/// 1. 环境变量 `TOMCAT_ASK_QUESTION_TIMEOUT_MS`（解析失败/0 视为不超时）；
+/// 2. `[ask_question].timeout_ms`（由 caller 通过 [`execute_with_timeout`] 传入）；
+/// 3. 默认 300_000 ms（5 分钟）。
+///
+/// 超时后返回 `cancelled: true` 而非 `Err`——与 Ctrl-C 路径同口径。
 pub async fn execute(
     runtime: &PlanRuntime,
     panel: &dyn AskQuestionPanel,
     raw_args: &serde_json::Value,
     cancel_signal: Arc<AtomicBool>,
 ) -> Result<serde_json::Value, ToolError> {
+    execute_with_timeout(runtime, panel, raw_args, cancel_signal, None).await
+}
+
+/// 与 [`execute`] 同语义，但显式接受 caller 提供的超时（毫秒）。`config_timeout_ms == Some(0)`
+/// 或环境变量 `TOMCAT_ASK_QUESTION_TIMEOUT_MS=0` 表示无超时。
+pub async fn execute_with_timeout(
+    runtime: &PlanRuntime,
+    panel: &dyn AskQuestionPanel,
+    raw_args: &serde_json::Value,
+    cancel_signal: Arc<AtomicBool>,
+    config_timeout_ms: Option<u64>,
+) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    if !matches!(mode, PlanMode::Planning) {
+    // B11：CHAT / Planning / Pending / Completed 都可见；EXEC 隐藏（防止 agent loop 阻塞）。
+    if matches!(mode, PlanMode::Executing { .. }) {
         return Err(ToolError::InvisibleInMode {
             tool: "ask_question",
             mode: mode.as_str().to_string(),
         });
     }
     let questions = parse_and_validate_questions(raw_args)?;
-    let result = panel.ask(questions.clone(), cancel_signal).await;
+    let timeout_ms = resolve_timeout_ms(config_timeout_ms);
+    let ask_fut = panel.ask(questions.clone(), cancel_signal);
+    let result = if let Some(ms) = timeout_ms {
+        match tokio::time::timeout(std::time::Duration::from_millis(ms), ask_fut).await {
+            Ok(r) => r,
+            Err(_) => AskQuestionResult {
+                cancelled: true,
+                answers: vec![],
+            },
+        }
+    } else {
+        ask_fut.await
+    };
     if result.cancelled {
         return Ok(serde_json::json!({
             "cancelled": true,
             "answers": [],
         }));
     }
-    // 出参校验
     validate_answers(&questions, &result)?;
     Ok(answer_to_json(&result))
+}
+
+/// 解析超时（毫秒）：env > config > 默认 300_000。`Some(0)` / env `0` → `None`（不超时）。
+fn resolve_timeout_ms(config_timeout_ms: Option<u64>) -> Option<u64> {
+    if let Ok(s) = std::env::var("TOMCAT_ASK_QUESTION_TIMEOUT_MS") {
+        if let Ok(n) = s.trim().parse::<u64>() {
+            return if n == 0 { None } else { Some(n) };
+        }
+    }
+    let cfg = config_timeout_ms.unwrap_or(300_000);
+    if cfg == 0 {
+        None
+    } else {
+        Some(cfg)
+    }
 }
 
 fn parse_and_validate_questions(
@@ -240,19 +286,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_question_invisible_in_chat_returns_tool_error() {
+    async fn ask_question_visible_in_chat() {
+        // B11（2026-05）：ask_question 在 CHAT 模式也可用。
         let rt = PlanRuntime::new("s1");
-        let panel = MockAskQuestionPanel::new(vec![]);
-        let err = execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+        let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+            cancelled: false,
+            answers: vec![Answer {
+                question_id: "q1".into(),
+                option_ids: vec!["a".into()],
+                custom_text: None,
+                picked_recommended: true,
+            }],
+        }]);
+        let out = execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
             .await
-            .unwrap_err();
-        match err {
-            ToolError::InvisibleInMode { tool, mode } => {
-                assert_eq!(tool, "ask_question");
-                assert_eq!(mode, "chat");
-            }
-            other => panic!("expected InvisibleInMode, got {other:?}"),
-        }
+            .expect("CHAT 模式应允许 ask_question");
+        assert_eq!(out["cancelled"], false);
     }
 
     #[tokio::test]
@@ -384,6 +433,8 @@ mod tests {
 
     #[tokio::test]
     async fn ask_question_blocks_until_answered() {
+        let _g = env_mutex().lock();
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
         let rt = rt_planning();
         let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
             answers: vec![Answer {
@@ -419,6 +470,8 @@ mod tests {
 
     #[tokio::test]
     async fn ask_question_first_ctrl_c_returns_cancelled_via_signal() {
+        let _g = env_mutex().lock();
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
         let rt = rt_planning();
         let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
             answers: vec![],
@@ -512,6 +565,90 @@ mod tests {
             .unwrap();
         assert_eq!(out["answers"][0]["option_ids"][0], "__custom__");
         assert_eq!(out["answers"][0]["custom_text"], "free text answer");
+    }
+
+    /// 序列化所有"修改 `TOMCAT_ASK_QUESTION_TIMEOUT_MS` env"的测试，
+    /// 防止与并行的 ask_question_blocks_until_answered 等读 env 的测试相互干扰。
+    fn env_mutex() -> &'static parking_lot::Mutex<()> {
+        static M: parking_lot::Mutex<()> = parking_lot::const_mutex(());
+        &M
+    }
+
+    #[tokio::test]
+    async fn ask_question_timeout_returns_cancelled() {
+        let _g = env_mutex().lock();
+        // 隔离 env 干扰
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+        // N13：config_timeout_ms 触发 → cancelled=true，不报 Err。
+        let rt = rt_planning();
+        let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+            answers: vec![],
+            cancelled: false,
+        }])
+        .with_delay(std::time::Duration::from_secs(2));
+        let out = execute_with_timeout(
+            &rt,
+            &panel,
+            &good_args(),
+            Arc::new(AtomicBool::new(false)),
+            Some(40),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["cancelled"], true);
+        assert!(out["answers"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_question_env_overrides_config_timeout() {
+        let _g = env_mutex().lock();
+        // env 优先级 > config_timeout_ms。
+        let rt = rt_planning();
+        let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+            answers: vec![],
+            cancelled: false,
+        }])
+        .with_delay(std::time::Duration::from_secs(2));
+        std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "40");
+        let out = execute_with_timeout(
+            &rt,
+            &panel,
+            &good_args(),
+            Arc::new(AtomicBool::new(false)),
+            Some(60_000),
+        )
+        .await
+        .unwrap();
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+        assert_eq!(out["cancelled"], true);
+    }
+
+    #[tokio::test]
+    async fn ask_question_zero_timeout_means_no_timeout() {
+        let _g = env_mutex().lock();
+        std::env::remove_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS");
+        // config_timeout_ms=0 → 无超时；env 同。
+        let rt = rt_planning();
+        let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+            cancelled: false,
+            answers: vec![Answer {
+                question_id: "q1".into(),
+                option_ids: vec!["a".into()],
+                custom_text: None,
+                picked_recommended: true,
+            }],
+        }])
+        .with_delay(std::time::Duration::from_millis(80));
+        let out = execute_with_timeout(
+            &rt,
+            &panel,
+            &good_args(),
+            Arc::new(AtomicBool::new(false)),
+            Some(0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["cancelled"], false);
     }
 
     #[tokio::test]
