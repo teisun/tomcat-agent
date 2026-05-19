@@ -135,7 +135,7 @@
 | **CP-A** | built-in `create_plan` + 仅 `Planning` 可见；**交付**：catalog 条目 | `src/core/tools/contract/catalog.rs`、`src/api/chat/plan_runtime/catalog.rs`（拟定） | 见 §13：`create_plan_visible_only_in_planning`（PENDING） | 规划态才能创建计划文件。 |
 | **CP-B** | `tool_exec::create_plan`：校验 mode、组装 `PlanFile` frontmatter、调 file_store + review；**交付**：工具出参含 `review_summary` | `src/api/chat/plan_runtime/tool_exec.rs`、`tools/create_plan.rs`（拟定） | 见 §13：`create_plan_internally_dispatches_reviewer`（PENDING） | 一次 tool 调用写完并审完。 |
 | **CP-C** | 路径 `~/.tomcat/plans/<slug>_<hash>.plan.md`；advisory lock；tmp + atomic rename；frontmatter round-trip；**交付**：§5 schema | `src/api/chat/plan_runtime/file_store.rs`（拟定） | 见 §13：`plan_file_lock_is_exclusive`、`plan_file_round_trip_frontmatter`、`plan_file_path_fixed_under_dot_tomcat`（PENDING） | 落盘带锁、原子写、字段不丢。 |
-| **CP-D** | `review::dispatch_reviewer` + `spawn_subagent_internal`；`allowed_tools` 与 `allow_review_edit` 硬编码；reviewer 改稿时跳过递归内联；**交付**：`ReviewSummary`（不含 verdict gate 字段） | `src/api/chat/plan_runtime/review.rs`（拟定）、`src/core/agent_registry.rs` | 见 §13：`reviewer_subagent_blocks_bash_todos_checkpoint`、`reviewer_create_plan_does_not_redispatch_reviewer`（PENDING） | 内部派审稿员，摘要同条返回。 |
+| **CP-D** | `PlanRuntime::dispatch_reviewer`（方法 API，详见 [`reviewer.md` §4.3 / RV13](./reviewer.md#43-派发入口api-形态)）+ `AgentRegistry::spawn_subagent_internal`（[`multi-agent.md` §14.4.2.1 路径 B](../multi-agent.md#14421-调用栈与代码落点)）；`allowed_tools` 与 `allow_review_edit` 硬编码；reviewer 改稿时跳过递归内联；**交付**：`ReviewSummary`（不含 verdict gate 字段） | `src/api/chat/plan_runtime/mod.rs`（`PlanRuntime::dispatch_reviewer` 方法）+ `src/api/chat/plan_runtime/review.rs`（prompt/parser helpers）+ `src/core/agent_registry.rs` | 见 §13：`reviewer_subagent_blocks_bash_todos_checkpoint`、`reviewer_create_plan_does_not_redispatch_reviewer`（PENDING） | 内部派审稿员，摘要同条返回。 |
 | **CP-E** | 启动 `PlanRuntime::recover()`：坏文件跳过、`planning` 残留保留为草案、`pending` 残留可被 `/plan build` 续跑、多 active 归一；**交付**：recover warning 文案 | `file_store.rs::recover()`（拟定） | 见 §13：`recover_planning_keeps_draft_with_warning`、`recover_pending_resumable_via_build`（PENDING） | 重启把 plan 状态收拾干净；pending 计划可被 build 续跑。 |
 | **CP-F** | transcript `plan.create` / `plan.review` 事件；**交付**：事件 schema | `src/infra/transcript/...`（既有） | 集成测试挂接（PENDING） | 写计划记一笔到 transcript；review 摘要也单独落一条。 |
 | **CP-G** | PLAN 模式期 `tool_exec::write` / `tool_exec::edit` 拦截：path 必须在 `~/.tomcat/plans/`；frontmatter diff 硬拒；**交付**：拦截器规则 | `src/api/chat/plan_runtime/tool_exec.rs`（拟定） | 见 §13：`plan_mode_raw_edit_body_allowed_frontmatter_rejected`（PENDING） | 写盘路径白名单 + frontmatter 写不动。 |
@@ -150,7 +150,7 @@
 
 #### 4.2.2 CP-B：`tool_exec::create_plan` 编排
 
-- **交付**：单入口串行：`validate(mode==Planning)` → `derive_path(goal)` → `runtime.build_frontmatter(input)`（仅 LLM 填 `goal`/`draft`/`todos`/`milestones`；其余由 runtime 拼接） → `file_store::write_plan` → `review::dispatch_reviewer(plan, allow_review_edit=false)` → 据摘要写 transcript → 构造 `ToolResult { plan_id, path, review_summary }`。
+- **交付**：单入口串行：`validate(mode==Planning)` → `derive_path(goal)` → `runtime.build_frontmatter(input)`（仅 LLM 填 `goal`/`draft`/`todos`/`milestones`；其余由 runtime 拼接） → `file_store::write_plan`（**释放 advisory lock**，[`reviewer.md` RV14](./reviewer.md#41-落地选型决策表)） → `PlanRuntime::dispatch_reviewer(plan_id, allow_review_edit=runtime_default)` → 据摘要写 transcript → 构造 `ToolResult { plan_id, path, review_summary }`。
 - **mutex**：与 reviewer 派发共用 `PlanRuntime` 锁，避免并发双写 + 双审。
 
 ```text
@@ -163,7 +163,7 @@
   write_plan (lock → tmp → rename)
         │
         ▼
-  dispatch_reviewer (sync await; allow_review_edit 由 runtime 决定)
+  PlanRuntime::dispatch_reviewer (sync await; allow_review_edit 由 runtime 决定)
         │
         ▼
   transcript: plan.create + plan.review
@@ -193,8 +193,8 @@
 
 #### 4.2.4 CP-D：内联 reviewer（见 [`reviewer.md`](./reviewer.md)）
 
-- **交付**：`dispatch_reviewer` 调 `AgentRegistry::spawn_subagent_internal`；`SubagentType::Reviewer`、`Role::Leaf`；`parent.subagent_type == Reviewer` 时 `create_plan` **不再**二次派 reviewer。
-- **改稿权 runtime 参数**：`dispatch_reviewer` 内部参数 `allow_review_edit: bool`（默认 `false`），**不**作为 `create_plan` 工具入参；当为 `true` 时给 reviewer 加只读 + 仅向 `~/.tomcat/plans/*.plan.md` 正文 `## Review` 段写入的能力（仍不允许改 frontmatter）。
+- **交付**：`PlanRuntime::dispatch_reviewer(plan_id, allow_review_edit)` 调 `AgentRegistry::spawn_subagent_internal`（[`multi-agent.md` §14.4.2.1 路径 B / §14.4.2.2](../multi-agent.md#14421-调用栈与代码落点)）；`SubagentType::Reviewer`、`Role::Leaf`；`parent.subagent_type == Reviewer` 时 `create_plan` **不再**二次派 reviewer。
+- **改稿权 runtime 参数**：`PlanRuntime::dispatch_reviewer` 的内部参数 `allow_review_edit: bool`（默认 `false`），**不**作为 `create_plan` 工具入参；当为 `true` 时给 reviewer 加只读 + 仅向 `~/.tomcat/plans/*.plan.md` 正文 `## Review` 段写入的能力（仍不允许改 frontmatter）；reviewer 通过 `update_plan` 改 frontmatter `todos[]` / `milestones[]` 后，`PlanRuntime` 在 await 返回时**重读 PlanFile** 刷新内存快照（[`reviewer.md` RV15](./reviewer.md#41-落地选型决策表)）。
 - **输出契约**：reviewer 最终消息含 `summary:` 自由文本（≤600 字符）；同时可直接 `write` 计划文件 `## Review` 段（如 runtime 允许）；runtime 把摘要存进 `transcript.plan.review` 事件，**不**写 `PlanFile` frontmatter。
 
 **说人话**：审稿细节在 reviewer spec；这里只保证 create_plan 写完必审、审完必把摘要回填到 ToolResult 与 transcript。
@@ -473,32 +473,51 @@ fs::rename(&tmp, &path)?; // atomic on POSIX same-fs
 
 ### 7.1 派发入口
 
+`dispatch_reviewer` 是 `PlanRuntime` 的方法（见 [`reviewer.md` §4.3](./reviewer.md#43-派发入口api-形态)）。`review.rs` 只保留 prompt / 解析 helpers；本节示意调用方契约：
+
 ```rust
-// review.rs（拟定，由 create_plan 内部调用；allow_review_edit 是 runtime 内部参数）
-pub async fn dispatch_reviewer(
-    plan: &PlanFile,
-    allow_review_edit: bool,           // 默认 false；由 runtime 配置决定，不暴露 LLM
-    parent: &AgentHandle,
-) -> Result<ReviewSummary> {
-    let allowed_tools = if allow_review_edit {
-        // 默认全部 + update_plan（改 frontmatter todos/milestones）+ edit（仅 ## Review 段）
-        // 永远不含 create_plan（防套娃）；通用 edit 在 reviewer 路径上有路径白名单 + 段位 diff guard
-        &["read", "grep", "find", "todos", "update_plan", "edit"][..]
-    } else {
-        // 默认含 todos（个人 scratchpad，写 reviewer 子 Agent 自己的 .todo.md，无副作用）
-        &["read", "grep", "find", "todos"][..]
-    };
+// src/api/chat/plan_runtime/mod.rs（拟定）
+impl PlanRuntime {
+    pub async fn dispatch_reviewer(
+        &self,
+        plan_id: &PlanId,
+        allow_review_edit: bool,        // 默认由 runtime 配置决定，不暴露 LLM
+    ) -> Result<ReviewSummary> {
+        // RV14：write_plan 已释放 advisory lock 后才能调用本方法
+        let allowed_tools = if allow_review_edit {
+            // 默认全部 + update_plan（改 frontmatter todos/milestones）+ edit（仅 ## Review 段）
+            // 永远不含 create_plan（防套娃）；通用 edit 在 reviewer 路径上有路径白名单 + 段位 diff guard
+            &["read", "grep", "find", "todos", "update_plan", "edit"][..]
+        } else {
+            // 默认含 todos（个人 scratchpad，写 reviewer 子 Agent 自己的 .todo.md，无副作用）
+            &["read", "grep", "find", "todos"][..]
+        };
 
-    let cfg = AgentLoopConfig {
-        parent_session_id: Some(parent.session_id.clone()),
-        spawn_depth:       parent.spawn_depth + 1,
-        subagent_type:     SubagentType::Reviewer,    // internal-only 枚举位
-        role:              Role::Leaf,
-        tool_definitions:  resolve_internal_tools(parent_catalog, allowed_tools),
-        // ... model / max_turns / system_prompt（reviewer 模板，见 reviewer.md §5.1）
-    };
+        let parent = self.deps.agent_registry.get(&self.session_id())?;
+        let cfg = AgentLoopConfig {
+            session_id:        format!("{}:sub:reviewer:{}", parent.session_id, Uuid::new_v4()),
+            parent_session_id: Some(parent.session_id.clone()),
+            spawn_depth:       parent.spawn_depth + 1,
+            subagent_type:     SubagentType::Reviewer,    // internal-only 枚举位
+            role:              Role::Leaf,
+            tool_definitions:  resolve_internal_tools(&self.deps.parent_catalog, allowed_tools),
+            // ... model / max_turns / system_prompt（reviewer 模板，见 reviewer.md §5.1）
+            ..Default::default()
+        };
 
-    AgentRegistry::spawn_subagent_internal(cfg, build_review_prompt(plan)).await
+        let summary = self.deps.agent_registry
+            .spawn_subagent_internal(&self.spawn_deps(), &parent, cfg,
+                                     vec![build_review_prompt(&self.state.read_plan(plan_id)?,
+                                                              allow_review_edit)])
+            .await?
+            .try_into_review_summary()?;
+
+        // RV15：reviewer 通过 update_plan 改了 frontmatter → 刷新内存快照
+        if summary.applied_changes {
+            self.state.reload_from_disk(plan_id)?;
+        }
+        Ok(summary)
+    }
 }
 ```
 
@@ -578,7 +597,7 @@ pub async fn dispatch_reviewer(
 | 路径 | 职责 | 说人话 |
 |------|------|--------|
 | `src/api/chat/plan_runtime/catalog.rs`（拟定） | `mode == Planning` 时把 `create_plan` 注入可见集 | 规划态才可见。 |
-| `src/api/chat/plan_runtime/tool_exec.rs`（拟定） | `create_plan` 入口校验；调用 `file_store::write_plan`；调用 `review::dispatch_reviewer`；写 transcript；PLAN 期 write/edit 拦截 | 工具总入口 + raw 写盘拦截。 |
+| `src/api/chat/plan_runtime/tool_exec.rs`（拟定） | `create_plan` 入口校验；调用 `file_store::write_plan`；调用 `PlanRuntime::dispatch_reviewer`（[`reviewer.md` §4.3](./reviewer.md#43-派发入口api-形态)）；写 transcript；PLAN 期 write/edit 拦截 | 工具总入口 + raw 写盘拦截。 |
 | `src/api/chat/plan_runtime/file_store.rs`（拟定） | 路径派生、frontmatter round-trip、advisory lock、原子写、recover | 读写计划文件。 |
 | `src/api/chat/plan_runtime/review.rs`（拟定） | reviewer 派发入口、`allowed_tools` 与 `allow_review_edit` 硬编码 | 内部派审稿员。 |
 | `src/core/agent_registry.rs`（既有/拟扩展） | `spawn_subagent_internal(...)`；复用 `multi-agent.md` §14 | 子 Agent 注册表。 |
@@ -602,7 +621,7 @@ LLM ──tool_call("create_plan", { goal, draft, todos, milestones })──▶ 
                                       file_store::write_plan(...)（advisory lock + atomic rename）
                                                                           │
                                                                           ▼
-                                      review::dispatch_reviewer(plan, allow_review_edit=runtime_cfg)
+                                      PlanRuntime::dispatch_reviewer(plan_id, allow_review_edit=runtime_cfg)
                                                                           │
                                                           （internal subagent dispatch）
                                                                           │

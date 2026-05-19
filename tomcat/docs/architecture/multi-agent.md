@@ -104,6 +104,29 @@
 
 ## 14.3 维度 A：多会话并发
 
+### 14.3.0 落地选型决策表（MA1–MA12）
+
+> 与 [`tools/reviewer.md` §4.1](./tools/reviewer.md#41-落地选型决策表) 同格式（**维度 / 取舍 / 拒因 / 说人话**）。覆盖 §14.3（多会话并发）+ §14.4（主-子编排）的全局选型；§14.6.1 internal subagent dispatch 与 §14.7 数据流图都是这张表的展开。
+
+| 维度 | 取舍 | 拒因 | 说人话 |
+|------|------|------|--------|
+| **MA1 注册表层级** | 进程级 `AgentRegistry`（`session_id` 为 key） | 塞进 `ChatContext` → 跨会话限流 / `CascadeAbort` 都做不了；与文档 §14.3.2 / §14.7.1 既有图示一致 | 全楼一张登记表。 |
+| **MA2 会话壳层级** | `ChatContextRegistry`（`session_key` → `Arc<ChatContext>`）管 [`TodoRuntime`](./plan-runtime.md#62-todoruntimechat-路径) / [`PlanRuntime`](./plan-runtime.md#63-planruntimeplanexec-路径) / mode | 与 Agent 执行树正交；混在一起会让 Phase 2 的多会话路由失语义 | 每间聊天室一个管家。 |
+| **MA3 Handle 内容** | 只存 `session_id / parent_session_id / spawn_depth / abort_signal`（详见 §14.3.2 `AgentHandle`），**不存** `AgentLoop` | `AgentLoop` 每轮新建，进 `DashMap` 会泄漏且析构难；与「子 loop 跑完即 drop」语义冲突 | 登记工牌不登记工人本体。 |
+| **MA4 父子关系登记** | 子 `AgentHandle.parent_session_id = Some(parent)`；`abort_children(parent_id)` **扫表反查**（对标 openclaw `spawnedBy`） | 维护 `children: Vec` 要 register/unregister 双写一致，遇到 panic / abort 半步极易漂移 | 只记上级是谁，查孩子靠扫表。 |
+| **MA5 子 loop 启动点** | **两个唯一入口**：①  `dispatch_agent_tool::run`（LLM 工具，§14.4）；② `AgentRegistry::spawn_subagent_internal`（内部 Rust API，§14.6.1） | 在 LLM 回调或工具内部散落 `AgentLoop::new` 难审计、难做 Guard | 统一两个入口函数，其它地方禁止 new。 |
+| **MA6 子 loop 运行方式** | 调用方 **同步 `await child_loop.run(...)`**；并发体现在多 session 各自有父 loop | 异步 fire-and-forget 会让父 Agent 拿不到 `ToolResult` / `ReviewSummary` 盲继续 | 派出去就要等结果。 |
+| **MA7 共享基础设施** | `Arc<dyn LlmProvider>` / `Arc<dyn PrimitiveExecutor>` / `Arc<EventBus>` **进程级共享**（与 §14.3.1、§14.7.1 一致） | 每 loop 一套：重复 HTTP/MCP 连接、内存/FD 线性涨、全局限流难统一；与 [`ChatContext`](../../src/api/chat/mod.rs) 注入模型冲突；隔离应靠 `session_id` + 独立 `ContextState` + 独立 `abort_signal` | 水电共用，房间隔开。 |
+| **MA8 上下文隔离** | 子 loop **不**继承父 messages；仅 `task` + subagent system prompt（§14.4.3） | 继承历史会爆窗 / 串味，与 claude-code / codex 共识相悖 | 子 Agent 白纸进场。 |
+| **MA9 深度 / 并发上限** | `spawn_depth + MAX_SPAWN_DEPTH` + `MAX_CHILDREN_PER_AGENT` + `MAX_CONCURRENT_AGENTS`（§14.3.4 / §14.4.4） | 任何一个缺位都会被 LLM 幻觉打穿 | 楼层与人数双限。 |
+| **MA10 CascadeAbort** | 父 `abort` → `registry.abort_children(parent_session_id)` 深度优先（§14.4.5） | openclaw 不自动级联踩过坑 | 父停子必停。 |
+| **MA11 internal vs LLM dispatch** | 共用 `AgentRegistry` / `spawn_depth` / `CascadeAbort` / `SubAgentStart/End` 事件；**不**共用 schema / catalog（详见 §14.6.1） | reviewer 权限不能挤进 `dispatch_agent` 的 `subagent_type` 枚举 | 一条登记处，两种进门。 |
+| **MA12 transcript** | 子 `session_id` 独立 `agents/<agentId>/sessions/<child>.jsonl`；含 `:` 时文件名 `replace(':', '_')`（§14.6 / §14.9） | 子事件混进父 transcript → 回放与 compaction 全乱 | 各记各的账。 |
+
+**说人话（§14.3.0 总览）**：先把「谁登记、登记什么、子 loop 在哪起、共享什么、隔离什么、怎么停」一次性钉死，§14.3 起的所有结构图、§14.4 起的所有流程图都只是把这些选项画出来。
+
+---
+
 ### 14.3.1 设计原则
 
 - `AgentLoop` 无全局单例，可按 `session_id` 独立构造多个，天然支持并发。
@@ -141,6 +164,26 @@ pub struct AgentHandle {
 | `abort_all()` | 进程退出时全部中止。 |
 | `active_count() -> usize` | 当前活跃实例数，供 `MAX_CONCURRENT_AGENTS` 上限检查。 |
 | `get(session_id) -> Option<Arc<AgentHandle>>` | 查询指定实例元数据。 |
+
+#### 14.3.2.1 `ChatContextRegistry` vs `AgentRegistry` 分工
+
+两张表都是「进程级 `HashMap`」，但 key、value、生命周期与责任**完全不同**：
+
+| 维度 | `ChatContextRegistry`（详见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)） | `AgentRegistry`（§14.3.2） |
+|------|---------------------------------|---------------------------|
+| Key | `session_key`（持久 chat 会话身份，如 `"agent:main:main"`） | `session_id`（运行时实例 id，含 `:sub:<uuid>` 前缀） |
+| Value | `Arc<ChatContext>`（含 `TodoRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`） | `Arc<AgentHandle>`（仅控制面元数据 + `abort_signal`） |
+| 生命周期 | 与 chat session 同寿（启动 → 退出） | **跑时注册，结束注销**（与 `AgentLoop::run` 同寿） |
+| 关心的事 | mode 切换、PlanFile/TodoFile IO、面板投影、`/plan` 命令 | 并发上限、`spawn_depth`、`CascadeAbort`、`SubAgentStart/End` 路由 |
+| 是否持有 `AgentLoop` | **否**（每轮新建） | **否**（仅持 Handle，Loop 在 `dispatch_agent_tool::run` / `spawn_subagent_internal` 栈帧内拥有） |
+
+**关键不变量**：
+
+- 一个 `session_key` 对应**唯一** `ChatContext`；该 ChatContext 一辈子 0..n 次产生父 `AgentLoop`，每个父 loop 在 `AgentRegistry` 各登记一条 `AgentHandle`（含其下属子 loop 的 handle）。
+- `AgentHandle` 字段**严格收敛**为：`session_id`、`parent_session_id`、`spawn_depth`、`abort_signal`，（可选 Phase 3+ `subagent_type` / `role` 镜像供 `tool_exec` 守卫读）。**不**加入 `AgentLoop`、`messages`、`tool_state` 等执行面字段——这些数据要么在 `AgentLoop` 栈上、要么在 `ContextState` 里。
+- 子 loop 在 `AgentRegistry` 里登记的 `abort_signal` **与子 loop 内部使用的是同一个 `Arc<AtomicBool>`**——`CascadeAbort` 在表上一次 `store(true)`，reasoning 间隙的子 loop 就能看到。
+
+**说人话**：`ChatContextRegistry` 是「楼层档案」（哪间聊天室是谁的）；`AgentRegistry` 是「访客登记处」（谁正在干活、急停按钮在哪）。两张表互不掺和，但要靠 `ChatContext.root_session_id` 把彼此串起来——见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)。
 
 ### 14.3.3 AgentLoopConfig 扩展
 
@@ -276,6 +319,206 @@ execute_tool("dispatch_agent", args)
 │
 └─ 返回 ToolResult { content: child_result.final_text, is_error: false }
 ```
+
+> **图侧注**：`registry.register` 写入的是 `AgentHandle`（仅元数据 + `abort_signal`，§14.3.2.1），**不是** `AgentLoop` 本体；`child_loop` 在 `execute_tool` 的栈帧里 `new` 出来，`run().await` 返回后立即 drop。详见 §14.4.2.2「子 AgentLoop 的所有权与生命周期」。
+
+### 14.4.2.1 调用栈与代码落点
+
+子 `AgentLoop` 有且仅有**两条**启动路径（与 §14.6.1 互补），它们在 `spawn_subagent_internal` 之后汇合：
+
+```text
+路径 A — LLM-facing dispatch_agent（Phase 3，对应 §14.4.1 工具 schema）
+  父 AgentLoop::run
+    │
+    ├─ reasoning 产出 tool_call("dispatch_agent", args)
+    │
+    ├─ AgentLoop::execute_tool（src/core/agent_loop.rs 现有分支扩展）
+    │
+    └─ dispatch_agent_tool::run(parent_handle, args)        ← 新文件 src/core/dispatch_agent_tool.rs
+         │
+         ├─ Guard 1/2/3（spawn_depth / 全局 / 父并发）
+         ├─ 构造 child AgentLoopConfig（session_id / parent / depth / subagent_type / role）
+         │
+         └─ AgentRegistry::spawn_subagent_internal(deps, parent, cfg, initial_messages)   ↘
+                                                                                          │
+路径 B — internal subagent dispatch（reviewer 等，§14.6.1）                                │
+  父 AgentLoop::execute_tool("create_plan", args)                                          │
+    │                                                                                       │
+    ├─ create_plan::write_plan（先释放 plan advisory lock，见 reviewer.md RV14）              │
+    │                                                                                       │
+    └─ PlanRuntime::dispatch_reviewer(allow_review_edit)                                    │
+         │                                                                                  │
+         └─ AgentRegistry::spawn_subagent_internal(deps, parent, cfg, initial_messages)   ──┘
+                │
+                │   ──── 共用后半段 ────
+                │
+                ├─ registry.register(child_session_id, AgentHandle { … })
+                ├─ child_loop = AgentLoop::new(Arc::clone(llm), Arc::clone(primitive),
+                │                              Arc::clone(event_bus), cfg, child_cancel)
+                ├─ event_bus.publish(SubAgentStart { … })
+                ├─ result = child_loop.run(initial_messages).await   ★ 子 loop 在此真正运行
+                ├─ event_bus.publish(SubAgentEnd { … })
+                ├─ registry.unregister(child_session_id)
+                └─ return Ok(result)                                  // child_loop 在此 drop
+```
+
+**与现状代码的差距（Phase 1 → Phase 2/3 PENDING）**：
+
+| 半段 | 现状（Phase 1） | 拟定（Phase 2/3） |
+|------|----------------|-------------------|
+| 父 `chat_loop` → 父 `AgentLoop::new` → `run` | ✅ 已存在（[`src/api/chat/mod.rs`](../../../src/api/chat/mod.rs)） | 增加 `AgentRegistry::register` 自身 handle |
+| `dispatch_agent_tool` 模块 | ❌ 不存在 | Phase 3 新增 `src/core/dispatch_agent_tool.rs` |
+| `AgentRegistry::spawn_subagent_internal` | ❌ 不存在 | Phase 2 新增（`src/core/agent_registry.rs`） |
+| `PlanRuntime::dispatch_reviewer` | ❌ 不存在 | Phase 3，路径 B 入口，见 [`tools/reviewer.md` §4.3](./tools/reviewer.md#43-派发入口api-形态) |
+
+**说人话**：子 Agent 不是 `AgentRegistry` 自动跑起来的，而是某个**调用方**（`dispatch_agent_tool::run` 或 `PlanRuntime::dispatch_reviewer`）`new` 一个 `AgentLoop` 并 `await run`；`AgentRegistry` 只是在跑之前/之后记一笔，方便限流与父停子停。
+
+### 14.4.2.2 子 AgentLoop 的所有权与生命周期
+
+> 本节是 §14.4.2.1 的「所有权与寿命」侧写：聚焦「**谁 new 了 child_loop / 谁拿着它的引用 / 它什么时候 drop**」。`reviewer.md` 等下游文档只引用本节，不重复展开。
+
+#### 1) 现状 vs 拟定
+
+| 角色 | Phase 1（现状代码） | Phase 2 / 3（拟定，PENDING） |
+|------|---------------------|------------------------------|
+| 父 `AgentLoop` | [`chat_loop`](../../../src/api/chat/mod.rs) 每用户输入 `AgentLoop::new(...)` 然后 `run(messages)` | 同左 + `AgentRegistry::register(parent_handle)` |
+| 子 `AgentLoop` | **不存在**（无 dispatch 通路） | 仅在 `dispatch_agent_tool::run` 或 `spawn_subagent_internal` **栈帧**内 `new` |
+| `AgentRegistry` | 仅文档 | `DashMap<session_id, Arc<AgentHandle>>`（不含 `AgentLoop`） |
+| `ChatContext` | 持 `TodoRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id` | 同左；**绝不**加 `subagents[]` 或 `Map<SubagentType, Agent>` |
+
+#### 2) 唯一 `new` 点
+
+子 `AgentLoop` **有且仅有**以下两处构造点（**禁止在 `ChatContext` / `PlanRuntime` / `AgentRegistry` / 工具 handler 散落 `AgentLoop::new`**）：
+
+1. `dispatch_agent_tool::run(...)` 函数体内 → 委托给 `spawn_subagent_internal(...)`。
+2. `AgentRegistry::spawn_subagent_internal(...)` 函数体内 → **真正**调 `AgentLoop::new(...)`。
+
+最终落到 `spawn_subagent_internal` 一处构造，减小审计面。
+
+#### 3) 引用关系（每行都是一个所有权事实）
+
+| 引用方 | 引用什么 | 类型 | 持续多久 |
+|--------|----------|------|----------|
+| `spawn_subagent_internal` 栈帧 | `child_loop: AgentLoop` | **本体（局部变量，stack-owned）** | `AgentLoop::new` → `child_loop.run(...).await` 返回 → **drop** |
+| `child_loop` 内部 | `llm` / `primitive` / `event_bus` | `Arc<dyn …>` clone（来自 `ChatContext` 或 `SpawnDeps`） | 进程级共享，子 loop drop 后 Arc 计数 -1 |
+| `AgentRegistry` | `AgentHandle { abort_signal, parent_session_id, … }` | `Arc<AgentHandle>` | `register(...)` … `unregister(...)` 一窗口 |
+| 父 `AgentLoop` | **不持有**子 loop 任何句柄 | — | 仅在 `execute_tool` 内 `await` `dispatch_agent_tool::run`，await 期间阻塞栈 |
+| `ChatContext` | **不**持子 `AgentLoop`，仅提供共享 `Arc<dyn …>` | — | 与 chat session 同寿 |
+| `PlanRuntime::dispatch_reviewer` | **不**持子 `AgentLoop`，只 `await spawn_subagent_internal` 拿 `AgentRunResult` | — | 单次 reviewer 调用栈帧 |
+
+> 关键事实：`AgentRegistry` **没有** `agents: DashMap<session_id, AgentLoop>` 这样的字段——它只持 `AgentHandle`；子 `AgentLoop` 的真正所有权永远在**栈上**。
+
+#### 4) 拟定伪代码（与实现对齐的契约）
+
+```rust
+// src/core/agent_registry.rs（Phase 2 新增；reviewer / dispatch_agent 共用）
+pub async fn spawn_subagent_internal(
+    deps: &SpawnDeps,             // Arc<dyn LlmProvider> / PrimitiveExecutor / EventBus
+    parent: &ParentSpawnCtx,      // parent_session_id / spawn_depth / abort_signal
+    cfg: AgentLoopConfig,         // 已带 child session_id / parent / depth / subagent_type / role
+    initial_messages: Vec<ChatMessage>,
+) -> Result<AgentRunResult> {
+    // ① 共用 abort_signal：表里和子 loop 看到同一个 Arc<AtomicBool>
+    let child_abort = Arc::new(AtomicBool::new(false));
+    let child_cancel = cfg.cancel_token.clone();
+
+    // ② 登记 Handle（仅元数据，绝不放 AgentLoop）
+    deps.registry.register(
+        cfg.session_id.clone(),
+        Arc::new(AgentHandle {
+            session_id:        cfg.session_id.clone(),
+            parent_session_id: Some(parent.session_id.clone()),
+            spawn_depth:       parent.spawn_depth + 1,
+            abort_signal:      Arc::clone(&child_abort),
+        }),
+    )?;
+
+    // ③ 真正 new：唯一一处，且 stack-owned
+    let mut child_loop = AgentLoop::new(
+        Arc::clone(&deps.llm),
+        Arc::clone(&deps.primitive),
+        Arc::clone(&deps.event_bus),
+        cfg.clone(),
+        child_cancel,
+    );
+
+    // ④ 父在此阻塞 await，子 loop 在自身栈帧内推进 reasoning / tool
+    deps.event_bus.publish(AgentEvent::SubAgentStart { /* … */ });
+    let result = child_loop.run(initial_messages).await;
+    deps.event_bus.publish(AgentEvent::SubAgentEnd { /* … */ });
+
+    // ⑤ 注销 Handle；本帧返回时 child_loop 自动 drop（Arc 服务 refcount -1）
+    deps.registry.unregister(&cfg.session_id);
+    result
+}
+```
+
+#### 5) 父 vs 子对比
+
+| 维度 | 父 `AgentLoop` | 子 `AgentLoop`（reviewer / dispatch_agent） |
+|------|----------------|---------------------------------------------|
+| 触发 | 用户输入 / `/plan build` | 父 `execute_tool` 内派发 |
+| `new` 位置 | [`chat_loop`](../../../src/api/chat/mod.rs)（Phase 1） | `spawn_subagent_internal`（Phase 2/3） |
+| 引用方 | `chat_loop` 栈帧（每用户输入一次） | `spawn_subagent_internal` 栈帧（每 spawn 一次） |
+| `Registry` 是否登记 | Phase 2 起登记（自身 handle） | 始终登记 |
+| `abort_signal` 来源 | 用户/CLI/SDK 注入 | `spawn_subagent_internal` 内新建，**与 Handle 共用同一 Arc** |
+| 寿命 | 单 user turn | 单 spawn（一次 reviewer / 一次 dispatch_agent） |
+| 与 `ChatContext` 关系 | 借共享 `Arc` 服务，不被持有 | 同左 |
+
+#### 6) `AgentRegistry` 里到底有什么（ASCII）
+
+```text
+AgentRegistry
+└── agents: DashMap<session_id, Arc<AgentHandle>>
+      │
+      ├─ "S1"                  → AgentHandle { parent=None,   depth=0, abort_signal_a }
+      ├─ "S1:sub:abc"          → AgentHandle { parent=S1,     depth=1, abort_signal_b }   (子 loop 跑期间)
+      └─ "S1:sub:abc:sub:def"  → AgentHandle { parent=S1:sub:abc, depth=2, abort_signal_c }
+
+                  ▲                 ▲
+                  │                 │
+            AgentLoop 本体       AgentLoop 本体
+            （父 chat_loop      （子 spawn_subagent_internal
+             栈帧拥有）            栈帧拥有，run 完即 drop）
+```
+
+#### 7) 两条触发路径汇总
+
+```text
+ChatContext (session_key=K, root_session_id=S1)
+    │
+    │  user input / /plan build
+    ▼
+chat_loop ──── new ────▶ 父 AgentLoop(S1)
+                            │
+                            │  execute_tool(...)
+                            │
+              ┌─────────────┴──────────────┐
+              │                            │
+        路径 A: dispatch_agent          路径 B: create_plan → PlanRuntime::dispatch_reviewer
+              │                            │
+              └────────────┬───────────────┘
+                           │
+                           ▼
+                AgentRegistry::spawn_subagent_internal
+                   │  ① register(Handle)
+                   │  ② new child AgentLoop
+                   │  ③ child_loop.run().await
+                   │  ④ unregister(Handle)
+                   ▼
+               child_loop drop
+```
+
+#### 8) 历史决策（本节末记）
+
+- ❌ ~~`AgentRegistry` 字段含 `agents: DashMap<session_id, AgentLoop>`~~ → 否；只持 `AgentHandle`。
+- ❌ ~~`ChatContext.subagents: Vec<Agent>` / `HashMap<SubagentType, Agent>`~~ → 否；与「每 spawn 新建 + 跑完即 drop」语义冲突。
+- ❌ ~~每个 `AgentLoop` 自带 `LlmProvider`/`PrimitiveExecutor` 实例~~ → 否；进程级 `Arc<dyn …>` 共享（MA7）。
+- ✅ 子 loop **唯一** `new` 点 = `spawn_subagent_internal`；`dispatch_agent_tool::run` 通过它落地。
+
+**说人话**：子工人只在派遣公司（`spawn_subagent_internal`）里雇一次，干完就散；登记处只记工牌（`AgentHandle`）和急停按钮（`abort_signal`），不把工人养在抽屉里。
+
+---
 
 ### 14.4.3 上下文隔离原则
 

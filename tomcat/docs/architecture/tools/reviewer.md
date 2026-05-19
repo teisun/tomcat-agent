@@ -35,7 +35,7 @@
 |------|--------------|----------|----------|--------|
 | **`reviewer`（subagent）** | 由 `create_plan` 内部派发的审稿子 Agent | `AgentRegistry` 中 `SubagentType::Reviewer`；不进 LLM catalog | 同步阻塞；输出 `ReviewSummary`（非 gate） | 子 Agent 形态的审稿员；只挑刺、不当 gate。 |
 | **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（对标 codex [`run_codex_thread_one_shot`](https://example/codex_delegate)） | `AgentRegistry::spawn_subagent_internal(...)`（拟定） | 与 LLM-facing `dispatch_agent` 工具**互补**：复用 [`multi-agent.md`](../multi-agent.md) §14 基础设施，但不走 schema、不进 catalog | 内部派子 Agent，模型看不到。 |
-| **`ReviewSummary`** | 审稿输出摘要 | `struct ReviewSummary { findings: Vec<Finding>, summary: String, applied_changes: bool }`；`findings.severity ∈ {nit, suggestion, concern}` | reviewer 在最终消息中以约定 fenced block 给出；runtime 解析后落 `transcript.plan.review` + 回填到 `create_plan` tool result | 「过/不过」二态被废弃；只给挑刺清单 + 一句话总结。 |
+| **`ReviewSummary`** | 审稿输出摘要 | `struct ReviewSummary { findings: Vec<Finding>, summary: String, changes_summary: String, applied_changes: bool }`；`findings.severity ∈ {nit, suggestion, concern}` | reviewer 在最终消息中以 `<review>` fenced block 给出；runtime 解析后落 `transcript.plan.review` + 回填到 `create_plan` tool result | 挑刺清单 + 审稿意见 + 修改总结（无修改则 `changes_summary = "none"`）。 |
 | **`allow_review_edit`（runtime 内部参数）** | 是否允许 reviewer 修订 PlanFile（增量改 todos/milestones、写 `## Review` 段） | `bool`；由 `create_plan` 派发时**在代码里**传入 reviewer dispatch；**不**作为 LLM 可见工具入参 | `false`（默认）：reviewer 只读 + 个人 scratchpad（`{read, grep, find, todos}`）+ 输出摘要；`true`：附加 `{update_plan, edit}`——前者改 frontmatter `todos[]` / `milestones[]`，后者仅限 `## Review` 段；**任何模式都不附加 `create_plan`** | 让 reviewer 能动笔还是只挑刺，由代码决定；动笔时通过结构化 `update_plan` + 正文 `edit` 双通道。 |
 | **`/plan build` 与 reviewer 解耦** | 进 EXEC 由用户敲 `/plan build`，与 reviewer verdict 无关 | `PlanRuntime::on_build_command` 不读 `ReviewSummary` | reviewer 在 PLAN 模式期间可能跑多次，每次只追加 transcript 摘要 | reviewer 是顾问，进 EXEC 用户拍板。 |
 | **R-DispatchEntry**（决策） | 「reviewer 派发入口走哪里」决策行 | §4.1 决策表 | 入选：internal subagent dispatch（不进 catalog） | 派发位置选定。 |
@@ -128,6 +128,13 @@
 | RV7 spawn_depth 计费 | reviewer 派发**算入** `spawn_depth`（与 `dispatch_agent` 计费一致） | 不计费会让 reviewer 嵌套绕过深度限制 | 算一层嵌套深度。 |
 | RV8 `subagent_type` 枚举位 | reviewer 在内部使用 `SubagentType::Reviewer`；该值**不**出现在 `dispatch_agent` schema enum | LLM 不应知道有「reviewer」这种角色 | 内部枚举，模型看不见。 |
 | RV9 摘要落点 | `transcript.plan.review` 自定义事件 + 同步回填 `create_plan` tool result.review | 写 frontmatter 会让 frontmatter 字段膨胀；用户也不需感知 `review_status` 之类字段 | 走 transcript，frontmatter 干净。 |
+| **RV10 OOD 三层** | `ChatContextRegistry`（按 `session_key`）+ 进程级 `AgentRegistry`（按 `session_id`，[`multi-agent.md` §14.3.2](../multi-agent.md#1432-agentregistry进程级) / §14.3.2.1）+ 短命 `AgentLoop`（栈上拥有） | 全塞进 `ChatContext` 无法做跨会话并发上限与 CascadeAbort；与 §14.3.0 MA1/MA2/MA3 决策一致 | 管家、登记处、工人三层分离。 |
+| **RV11 ChatContext 不持 Agent 表** | `ChatContext` 只持 `root_session_id` + `TodoRuntime` + `PlanRuntime` + 共享 `Arc` 服务（详见 [`plan-runtime.md` §6.4](../plan-runtime.md#64-chatcontext-持有关系)） | `HashMap<SubagentType, Agent>` 与「每 spawn 新建 + 跑完即 drop」语义冲突 | 聊天室不养一群 Agent 对象。 |
+| **RV12 reviewer 无长期 Runtime** | 每次 `create_plan` 成功 → transient spawn → await → drop handle；状态落 `PlanRuntimeState.last_review_summary` + transcript `plan.review` | 单独 `ReviewerRuntime` 长生命周期对象多余，与 `max_review_rounds` advisory 语义对不齐 | 审稿员用完即走，不养专职岗位。 |
+| **RV13 `dispatch_reviewer` 归属** | `PlanRuntime::dispatch_reviewer(allow_review_edit) -> ReviewSummary`（详见 §4.3） | 游离的 `review::dispatch_reviewer` 自由函数与 plan 编排语义割裂，难做 advisory lock 顺序与 memory reconcile | 派审稿归 PlanRuntime 管。 |
+| **RV14 写盘锁顺序** | `write_plan` 完成并**释放 plan advisory lock 之后**再 `spawn_subagent_internal`；reviewer 内 `update_plan` / `edit` 自行 acquire 同一份 lock | 父持锁 await 子 → 死锁；reviewer 调 update_plan 时会再次 acquire | 先落盘锁再放审稿进来。 |
+| **RV15 审稿后内存 reconcile** | reviewer 通过 `update_plan` 改了 target plan 后，父 `PlanRuntime` 在 await 返回时**重读 PlanFile** 刷新 `state.todos` / `state.milestones`（与 [`plan-runtime.md` §6.3](../plan-runtime.md#63-planruntimeplanexec-路径) 派生逻辑保持一致） | 父内存仍是旧 todos，下一步 LLM 看到过期快照 | 审稿改完要刷新管家手里的副本。 |
+| **RV16 `AgentLoopConfig` 透传** | 落实 `subagent_type` / `parent_session_id` / `spawn_depth`（[`multi-agent.md` §14.3.3 / §14.4.2.1](../multi-agent.md#1433-agentloopconfig-扩展)，Phase 2/3 PENDING） | 不透传 `subagent_type` 则 `tool_exec.edit` / `tool_exec.create_plan` 守卫读不到「调用方是 reviewer」，RV-D 无法生效 | loop 配置里要带「我是审稿员」。 |
 
 ### 4.2 实施点（拟定）
 
@@ -135,10 +142,10 @@
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
-| **RV-A** | `review::dispatch_reviewer` + `spawn_subagent_internal`；不进 catalog；**交付**：内部 API | `src/api/chat/plan_runtime/review.rs`（拟定） | 见 §11：`reviewer_not_in_catalog`、`reviewer_uses_internal_dispatch_via_agent_registry`（PENDING） | 只有 create_plan 内部能派审稿员。 |
+| **RV-A** | `PlanRuntime::dispatch_reviewer(allow_review_edit) -> ReviewSummary`（取代游离 `review::dispatch_reviewer`，详见 §4.3 / RV13）+ `AgentRegistry::spawn_subagent_internal`；不进 catalog；**交付**：方法 API + 写盘锁顺序（RV14）+ memory reconcile（RV15） | `src/api/chat/plan_runtime/mod.rs`（`PlanRuntime` 上的方法）+ `src/api/chat/plan_runtime/review.rs`（仅保留 prompt / 解析 helpers） | 见 §11：`reviewer_not_in_catalog`、`reviewer_uses_internal_dispatch_via_agent_registry`（PENDING） | 派审稿归 PlanRuntime 管，free function 只剩 prompt/parser。 |
 | **RV-B** | `REVIEWER_SYSTEM_PROMPT` + `allowed_tools` 硬编码（`allow_review_edit` 分支）：默认 `{read, grep, find, todos}`；true → 附加 `{update_plan, edit}`；**永不含 `create_plan`**；**交付**：`SubagentType::Reviewer` | `review.rs`、`src/core/agent_loop.rs` | 见 §11：`reviewer_default_allowed_tools_no_create_plan`、`reviewer_can_use_update_plan_when_allowed`、`reviewer_subagent_blocks_bash_checkpoint_write_frontmatter`（PENDING） | 工具白名单写死，默认只读 + todos；改稿走 update_plan + edit。 |
-| **RV-C** | 解析子 Agent 最终消息为 `ReviewSummary { findings[], summary, applied_changes }`；**不**驱动 mode 转移；**交付**：`ReviewSummary` + transcript 事件写入 | `review.rs`、`src/api/chat/plan_runtime/mod.rs`（拟定）、`src/infra/transcript/...`（既有） | 见 §11：`reviewer_summary_does_not_gate_exec`、`reviewer_summary_lands_in_transcript_plan_review`（PENDING） | 摘要进 transcript，不动 mode。 |
-| **RV-D** | reviewer 调 `edit`/`create_plan` 时跳过递归内联 reviewer；`tool_exec.edit` 拦截 reviewer 进程：路径限制 + diff 限制在 `## Review` 段；**交付**：`parent_subagent_type` 检测 + `review_section_diff_guard` | `tool_exec.rs` + `review.rs` | 见 §11：`reviewer_create_plan_does_not_redispatch_reviewer`、`reviewer_edit_scoped_to_review_section`（PENDING） | 审稿员改稿只能动审稿区，且不再套审稿。 |
+| **RV-C** | 解析子 Agent 最终消息为 `ReviewSummary { findings[], summary, changes_summary, applied_changes }`（`<review>` block）；**不**驱动 mode 转移；**交付**：`ReviewSummary` + transcript 事件写入 | `review.rs`、`src/api/chat/plan_runtime/mod.rs`（拟定）、`src/infra/transcript/...`（既有） | 见 §11：`reviewer_summary_does_not_gate_exec`、`reviewer_summary_lands_in_transcript_plan_review`（PENDING） | 摘要进 transcript，不动 mode。 |
+| **RV-D** | reviewer 调 `edit`/`create_plan` 时跳过递归内联 reviewer；`tool_exec.edit` 拦截 reviewer 进程：路径限制 + diff 限制在 `## Review` 段；**依赖** RV16（`AgentLoopConfig.subagent_type` 透传，否则守卫读不到调用方画像）；**交付**：`parent_subagent_type` 检测 + `review_section_diff_guard` | `tool_exec.rs` + `review.rs` | 见 §11：`reviewer_create_plan_does_not_redispatch_reviewer`、`reviewer_edit_scoped_to_review_section`（PENDING） | 审稿员改稿只能动审稿区，且不再套审稿。 |
 | **RV-E** | `CascadeAbort` + `max_turns` + `max_review_rounds`（advisory）；**交付**：超时/abort 语义 | `src/core/agent_registry.rs`、`review.rs` | 见 §11：`reviewer_aborts_on_parent_cascade`、`reviewer_respects_max_review_rounds_advisory`（PENDING） | 父停子停，审太多轮只是 warning。 |
 
 下文按实施点展开**技术要点与示意图**；**API 签名见 [§4.3](#43-派发入口api-形态)**。
@@ -213,31 +220,56 @@
 
 ### 4.3 派发入口（API 形态）
 
+`dispatch_reviewer` 是 `PlanRuntime` 上的**方法**（不是游离的 free function），与 [`plan-runtime.md` §6.3](../plan-runtime.md#63-planruntimeplanexec-路径) 的派生逻辑同源管理；`review.rs` 只保留 prompt 构造与 `<review>` 解析等 helpers。`parent: &AgentHandle` 在调用时从父 loop 在 `AgentRegistry` 中的条目解析得到。
+
 ```rust
-pub async fn dispatch_reviewer(
-    plan: &PlanFile,
-    allow_review_edit: bool,            // runtime 内部参数；非 LLM 入参
-    parent: &AgentHandle,
-) -> Result<ReviewSummary> {
-    let allowed_tools: &[&str] = if allow_review_edit {
-        &["read", "grep", "find", "todos", "update_plan", "edit"]
-    } else {
-        &["read", "grep", "find", "todos"]
-    };
+impl PlanRuntime {
+    pub async fn dispatch_reviewer(
+        &self,
+        plan_id: &PlanId,
+        allow_review_edit: bool,        // runtime 内部参数；非 LLM 入参
+    ) -> Result<ReviewSummary> {
+        // RV14：先释放 plan advisory lock 再派发；本方法只在 write_plan 完成后调用。
+        debug_assert!(!self.holds_plan_lock(plan_id));
 
-    let cfg = AgentLoopConfig {
-        parent_session_id: Some(parent.session_id.clone()),
-        spawn_depth:       parent.spawn_depth + 1,
-        subagent_type:     SubagentType::Reviewer,
-        role:              Role::Leaf,
-        tool_definitions:  resolve_internal_tools(parent_catalog, allowed_tools),
-        max_turns:         REVIEWER_MAX_TURNS,
-    };
+        let plan   = self.state.read_plan(plan_id)?;            // 已落盘版本
+        let parent = self.deps.agent_registry.get(&self.session_id())
+            .ok_or(PlanError::ParentHandleMissing)?;
 
-    let initial_msg = build_review_prompt(plan, allow_review_edit);
-    AgentRegistry::spawn_subagent_internal(cfg, initial_msg).await
+        let allowed_tools: &[&str] = if allow_review_edit {
+            &["read", "grep", "find", "todos", "update_plan", "edit"]
+        } else {
+            &["read", "grep", "find", "todos"]
+        };
+
+        let cfg = AgentLoopConfig {
+            session_id:        format!("{}:sub:reviewer:{}", parent.session_id, Uuid::new_v4()),
+            parent_session_id: Some(parent.session_id.clone()),
+            spawn_depth:       parent.spawn_depth + 1,
+            subagent_type:     SubagentType::Reviewer,   // RV16
+            role:              Role::Leaf,
+            tool_definitions:  resolve_internal_tools(&self.deps.parent_catalog, allowed_tools),
+            max_turns:         REVIEWER_MAX_TURNS,
+            ..Default::default()
+        };
+
+        let initial = build_review_prompt(&plan, allow_review_edit);
+
+        // RV15：await 返回后重读 PlanFile，刷新 state.todos / milestones。
+        let summary = self.deps.agent_registry
+            .spawn_subagent_internal(&self.spawn_deps(), &parent, cfg, vec![initial])
+            .await?
+            .try_into_review_summary()?;
+
+        if summary.applied_changes {
+            self.state.reload_from_disk(plan_id)?;
+        }
+        Ok(summary)
+    }
 }
 ```
+
+> 详细的子 `AgentLoop` 所有权与寿命语义见 [`multi-agent.md` §14.4.2.2 子 AgentLoop 的所有权与生命周期](../multi-agent.md#1442-子-agentloop-的所有权与生命周期)；本节不重复展开。
 
 ### 4.4 与 `multi-agent.md` 的关系
 
@@ -248,6 +280,72 @@ pub async fn dispatch_reviewer(
 
 **说人话**：走 `spawn_subagent_internal`，和 dispatch_agent 用同一套注册表/深度/级联中止，但 LLM 永远调不到 reviewer。
 
+### 4.5 OOD 与双注册表（reviewer 的「嵌套但不开新 ChatContext」）
+
+> 决策依据 RV10–RV16。子 `AgentLoop` 所有权 / 寿命 / `new` 点的**完整**论述见 [`multi-agent.md` §14.4.2.2 子 AgentLoop 的所有权与生命周期](../multi-agent.md#1442-子-agentloop-的所有权与生命周期)；本节仅给出 reviewer 视角的三层简图，不重复展开。
+
+#### 三层 OOD 简图（reviewer 视角）
+
+```text
+   ┌────────────────────────── 进程级（双注册表，互不持有） ──────────────────────────┐
+   │                                                                                   │
+   │   ChatContextRegistry                                AgentRegistry                │
+   │   key = session_key                                  key = session_id             │
+   │   value = Arc<ChatContext>                           value = Arc<AgentHandle>     │
+   │       ▲                                                  ▲                        │
+   └───────┼──────────────────────────────────────────────────┼────────────────────────┘
+           │                                                  │
+           │ 一个 session_key 对应一个 ChatContext              │ Phase 2/3 起，父/子 loop 跑时各登记一行
+           ▼                                                  ▼
+   ┌────────────────────────────── 会话壳（每会话一个，长寿） ────────────────────┐
+   │  ChatContext {                                                              │
+   │     root_session_id,            // 与 AgentRegistry 关联的锚点              │
+   │     TodoRuntime, PlanRuntime,                                               │
+   │     Arc<dyn LlmProvider> / Arc<dyn PrimitiveExecutor> / Arc<EventBus>       │
+   │  }                                                                          │
+   │  ★ 不持子 AgentLoop / 不持 subagents[]（RV11）                                │
+   └─────────────────────────────────────────────────────────────────────────────┘
+                       │
+                       │  user input / /plan build / create_plan tool
+                       ▼
+   ┌────────────────────────── 短命执行循环（栈上拥有，跑完即 drop） ────────────────┐
+   │  父 AgentLoop（chat_loop 栈帧拥有）                                              │
+   │      │                                                                          │
+   │      │  create_plan::write_plan 落盘 → 释放 advisory lock（RV14）                │
+   │      ▼                                                                          │
+   │  PlanRuntime::dispatch_reviewer（RV13）                                          │
+   │      │                                                                          │
+   │      └── AgentRegistry::spawn_subagent_internal                                  │
+   │              ├─ register(child handle, abort_signal)                            │
+   │              ├─ new child AgentLoop（SubagentType::Reviewer, role=Leaf, RV16）    │
+   │              ├─ child.run([build_review_prompt(plan)]).await   ← reviewer 在此跑 │
+   │              ├─ unregister(child handle)                                        │
+   │              └─ child AgentLoop drop                                            │
+   │      │                                                                          │
+   │      ▼                                                                          │
+   │  await 返回 ReviewSummary →（若 applied_changes）父 PlanRuntime 重读 PlanFile（RV15）│
+   └─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 为什么不是 `ChatContext ⊃ { Agent, subagents[] }`
+
+| 误设方案 | 不可行原因 | 落地决策 |
+|----------|-----------|----------|
+| `ChatContext.agents: HashMap<SubagentType, Agent>` | 与「每轮新建 `AgentLoop` + 跑完 drop」（[`multi-agent.md` §14.4.2.2](../multi-agent.md#1442-子-agentloop-的所有权与生命周期)）冲突；会跨 turn 泄漏子 Agent 状态 | RV11：`ChatContext` 不持 Agent 表 |
+| 单独的 `ReviewerRuntime` 长生命周期对象 | reviewer 跨调用**无**残留状态；`rounds` / `last_review_summary` 已落 `PlanRuntimeState` + transcript | RV12：transient spawn |
+| 在 `ChatContext` 之上加 `ChatContextRegistry` 同时也挂 Agent 树 | 一张表既要按会话索引壳又要按运行 id 索引 handle，语义错位 | RV10：双注册表，正交 |
+
+#### reviewer 是「嵌套」但不是「新开 ChatContext」
+
+| 维度 | reviewer 实际行为 |
+|------|-------------------|
+| **并发** | 父 session 的 `create_plan` 同步 await 子 loop；与 codex one-shot 一致 |
+| **嵌套** | `spawn_depth = parent + 1`；`session_id = "{root}:sub:reviewer:{uuid}"`；`parent_session_id = Some(root)` |
+| **session 边界** | **一个** `session_key`（同一个 `ChatContext`）+ **两个** `session_id`（父/子 `AgentLoop`）+ 子 Agent **独立 transcript** |
+| **新 ChatContext？** | ❌ **否**：reviewer 复用父的 `ChatContext.{TodoRuntime, PlanRuntime, Arc<dyn …>}`；只在 `AgentRegistry` 加一条 handle |
+
+**说人话（§4.5）**：reviewer 是同一间聊天室里临时叫起来的审稿员，登记在「访客登记处」（`AgentRegistry`）而不是另开一间聊天室（`ChatContext`）；管家（`ChatContext`）的备忘录（`PlanRuntime`）借给他用，干完就走，备忘录有改动管家立刻重读一次。
+
 ---
 
 ## 5. system prompt / allowed_tools / 输出契约 / allow_review_edit
@@ -256,44 +354,55 @@ pub async fn dispatch_reviewer(
 
 ```rust
 pub const REVIEWER_SYSTEM_PROMPT: &str = r#"
-You are a strict, read-mostly plan reviewer. You are NOT the user-facing agent.
-You are NOT a gate: your output is advisory. The user decides whether to enter
-EXEC mode by issuing `/plan build`.
+You are an internal review subagent. You are NOT the user-facing agent.
+Your output is advisory — you do not gate or approve downstream workflow steps.
 
-Inputs:
-- A PlanFile written under ~/.tomcat/plans/<slug>_<hash>.plan.md.
-- Tools you may use:
-  * read / grep / find: inspect the repo and the PlanFile.
-  {{#if allow_review_edit}}
-  * edit: write into the `## Review` section of the same PlanFile ONLY.
-    The runtime will reject any diff that touches frontmatter, `## Goal`,
-    `## Draft`, or `## Todos`.
-  {{/if}}
+You receive a review brief in the initial user message (what to review, scope,
+constraints, and any artifact paths). Treat that brief as the source of truth.
 
-Output contract (must produce as the final assistant message, exact format):
+Workflow:
+1. Inspect the subject with read / grep / find (and any other read-only tools
+   granted by runtime).
+2. Record findings as you go (nit / suggestion / concern).
+3. For substantive issues: explore the repo, reason about root cause, and
+   formulate fixes. If your toolset includes edit-capable tools, apply
+   proportionate fixes directly; otherwise describe recommended changes in
+   changes_summary.
+4. End with the required output block below (review opinion + changes summary).
 
-```
-<plan_review>
+Tools (runtime-filtered; only granted tools are callable):
+- Always (when in catalog): read, grep, find, todos (personal scratchpad only).
+{{#if allow_review_edit}}
+- Additionally: edit, update_plan, and any other write tools the dispatcher
+  attached. Each write obeys path/scope guards enforced by tool_exec; out-of-
+  scope edits return tool errors — adjust and retry or fall back to read-only
+  recommendations.
+{{else}}
+- Read-only for this run: do not call edit or other write tools.
+{{/if}}
+
+Output contract (must be the final assistant message, exact format):
+
+<review>
 findings:
-  - { severity: nit|suggestion|concern, area: "<goal|draft|todos|other>", note: "<one-line concrete remark>" }
+  - { severity: nit|suggestion|concern, area: "<short label>", note: "<one-line concrete remark>" }
   - ...
-summary: <one-paragraph rationale, <= 600 chars>
-</plan_review>
-```
+summary: <review opinion — what you found and overall assessment, <= 600 chars>
+changes_summary: <what you changed and why; use "none" if read-only or no edits>
+</review>
 
 Rules:
-1. Output is advisory. Do NOT phrase your findings as gate verdicts; do NOT
-   recommend `/plan build` or its absence. The user decides.
-2. Severities: `nit` (style/cleanup), `suggestion` (consider adjusting),
-   `concern` (substantive risk worth flagging).
-3. Do not invent steps the user didn't ask for. The PlanFile's `goal` is the
-   source of truth.
-4. Do not modify code; you can only modify the PlanFile (when allowed) and
-   ONLY within the `## Review` section.
-5. Frontmatter is off-limits. Never emit edits whose diff touches the YAML
-   frontmatter block; the runtime will reject such edits.
-6. Stay within {{max_turns}} turns; if you cannot decide by then, output what
-   you have with a clear summary of what's still unclear and stop.
+1. Advisory only. Do NOT emit gate verdicts (approve/reject/block) or prescribe
+   what the parent agent or user should do next in their workflow.
+2. Severities: nit (style/cleanup), suggestion (worth adjusting), concern
+   (substantive risk or gap).
+3. Stay within the review brief; do not expand scope or invent requirements.
+4. Do not modify repository source unless a write tool was granted and runtime
+   accepts the target path. When writes are denied, put fix guidance in
+   changes_summary as recommendations, not as claims of applied edits.
+5. Stay within {{max_turns}} turns; if you cannot finish, emit findings gathered
+   so far, note what remains unclear in summary, and set changes_summary to
+   "none" or partial edits only.
 "#;
 ```
 
@@ -313,9 +422,10 @@ Rules:
 
 | 字段 | 类型 | 说明 | 说人话 |
 |------|------|------|--------|
-| `findings` | `Vec<Finding { severity, area, note }>` | 离散挑刺清单；`severity ∈ {nit, suggestion, concern}` | 一条条挑刺记下来。 |
-| `summary` | `String`（≤ 600 字符） | 总评，自由文本 | 一句话总结。 |
-| `applied_changes` | `bool` | 本轮 reviewer 是否调用过 `edit` 修改 PlanFile（仅可能落在 `## Review` 段） | 有没有真改过审稿区。 |
+| `findings` | `Vec<Finding { severity, area, note }>` | 离散挑刺清单；`severity ∈ {nit, suggestion, concern}`；`area` 为自由短标签（不限 plan 专用枚举） | 一条条挑刺记下来。 |
+| `summary` | `String`（≤ 600 字符） | 审稿意见总评（发现了什么、整体判断） | 审稿意见一句话。 |
+| `changes_summary` | `String` | 本轮实际修改内容与理由；只读或未改时解析为 `"none"` | 改了什么、为什么改。 |
+| `applied_changes` | `bool` | 本轮 reviewer 是否调用过任一写工具（`edit` / `update_plan` 等，由 runtime 守卫范围） | 有没有真动过笔。 |
 | `rounds` | `u32` | 同一 PlanFile 累计被 review 的轮次（含本次） | 这是第几轮审稿。 |
 
 `ReviewSummary` **不**含 `verdict`、**不**含 mode 转移建议、**不**含 `accepted`/`rejected` 标记。
@@ -331,6 +441,7 @@ Rules:
   "rounds":    1,
   "findings":  [/* ... */],
   "summary":   "...",
+  "changes_summary": "none",
   "applied_changes": false,
   "session_id": "<reviewer subagent session_id>"
 }
@@ -351,7 +462,7 @@ Rules:
 | 改 frontmatter 其它字段（mode / session_* / plan_id / created_at / goal） | ❌ | ❌（`update_plan` 与 `edit` 各自门控均拦截） | runtime 专属字段不许碰。 |
 | 改用户代码（仓库其他路径） | ❌ | ❌（`edit` 路径不在 `~/.tomcat/plans/`） | 用户代码不动。 |
 | reviewer turn 内可调 `create_plan`？ | ❌ | ❌（永远不在 `allowed_tools` 内） | reviewer 永远不重建计划。 |
-| reviewer 改完后必须给摘要？ | — | ✅（仍要 emit `<plan_review>` 块） | 改完也要总结。 |
+| reviewer 改完后必须给摘要？ | — | ✅（仍要 emit `<review>` 块，含 `summary` + `changes_summary`） | 改完也要总结改了什么。 |
 | `ReviewSummary.applied_changes` | `false` | reviewer `update_plan` / `edit` 调用 ≥ 1 时为 `true` | 记有没有真改过 plan。 |
 | reviewer 越界写其它段或 frontmatter 字段 | — | `tool_exec.edit` / `tool_exec.update_plan` 各自拒绝；reviewer 收 tool error，下一轮自行调整 | 越界就 error。 |
 
@@ -380,10 +491,10 @@ Rules:
   └─ tool_call("create_plan", { goal, draft, todos, milestones })
         │
         ▼
-   create_plan 工具 (file_store::write_plan → 落盘成功)
+   create_plan 工具 (file_store::write_plan → 落盘成功；advisory lock 释放 — RV14)
         │
         ▼
-   review::dispatch_reviewer(plan, allow_review_edit=runtime_default, parent_handle)
+   PlanRuntime::dispatch_reviewer(plan_id, allow_review_edit=runtime_default)
         │
         ▼
    AgentRegistry::spawn_subagent_internal(cfg, build_review_prompt(plan))
@@ -397,11 +508,11 @@ Rules:
         │       * edit 改 PlanFile.body 的 ## Review 段（路径白名单 + 段位 diff guard）
         │     （tool_exec.edit guard 拒绝 frontmatter / ## Draft / ## Goal / ## Todos 的修改）
         │   - 输出 final assistant message：
-        │     <plan_review>findings: ... summary: ...</plan_review>
+        │     <review>findings: ... summary: ... changes_summary: ...</review>
         │
         ├──── SubAgentEnd 事件
         ▼
-   ReviewSummary { findings, summary, applied_changes, rounds }
+   ReviewSummary { findings, summary, changes_summary, applied_changes, rounds }
         │
         ▼
    ① transcript 追加 plan.review 自定义事件
@@ -446,6 +557,7 @@ Rules:
 | 同一 active 计划 | `create_plan` 入口 mutex 串行「写盘 → 派 reviewer → 落 transcript」 | 一份计划同时只审一轮。 |
 | 进程级并发上限 | 复用 `MAX_CONCURRENT_AGENTS` / `MAX_CHILDREN_PER_AGENT` | 跟 multi-agent 共用上限。 |
 | 嵌套深度 | reviewer 计入 `spawn_depth`，受 `MAX_SPAWN_DEPTH` 约束 | 算一层子 Agent 深度。 |
+| 嵌套发生位置 | 在 `AgentRegistry`（子 `session_id` 多一条 `AgentHandle`）；**不**创建第二个 `ChatContext` / 不动 `ChatContextRegistry`（RV10–RV11，详见 [`multi-agent.md` §14.4.2.2](../multi-agent.md#1442-子-agentloop-的所有权与生命周期)） | 嵌套只在访客登记处加一行，不开新聊天室。 |
 
 ### 8.3 abort 语义
 
@@ -473,7 +585,7 @@ Rules:
 | 触发 | 反馈 | 说人话 |
 |------|------|--------|
 | reviewer 子 Agent 异常退出 | `create_plan` 仍返回成功；`ToolResult.review = { aborted: true, summary: "<stderr 摘要>" }`；transcript `plan.review.warning` 追加 | 审稿员挂了也不挡进度。 |
-| reviewer 输出不符合 `<plan_review>` 格式 | `ToolResult.review = { aborted: true, summary: "<格式错误，最后一条消息片段>" }`；不静默猜 `ReviewSummary` | 格式不对就 aborted，别瞎猜。 |
+| reviewer 输出不符合 `<review>` 格式 | `ToolResult.review = { aborted: true, summary: "<格式错误，最后一条消息片段>" }`；不静默猜 `ReviewSummary` | 格式不对就 aborted，别瞎猜。 |
 | reviewer 超 `max_turns` 仍未给摘要 | warning + `ReviewSummary { applied_changes: false, summary: "<超时未给出摘要>", aborted: true }` | 超时只 warning。 |
 | reviewer 被父 abort | `ToolResult.review = { aborted: true, ... }`；`PlanFile` 保留 | 用户中断算 aborted。 |
 | `allow_review_edit=true` 但 reviewer 越界 raw 写 frontmatter / `## Draft` / `## Goal` / `## Todos Board` | `tool_exec.edit` 返回 tool error；reviewer 收 error 后可在下一轮自我纠正 | 越界就 error。 |
@@ -506,7 +618,7 @@ Rules:
 | 风险 | 影响 | 应对 | 说人话 |
 |------|------|------|--------|
 | reviewer hang 不收敛 | 高 | `max_turns = 8` + `max_review_rounds = 1`（软上限） + `CascadeAbort` | 卡住要能 abort。 |
-| reviewer 输出格式漂移 | 中 | 明确 `<plan_review>` fenced block + 严格解析 + 失败时标 `aborted`，不静默猜 | 别静默猜摘要。 |
+| reviewer 输出格式漂移 | 中 | 明确 `<review>` fenced block（含 `changes_summary`）+ 严格解析 + 失败时标 `aborted`，不静默猜 | 别静默猜摘要。 |
 | reviewer 误改用户代码 | 高 | `allowed_tools` 默认不含 `write` / `bash` / `dispatch_agent`；`allow_review_edit` 仅放开 `edit` + `update_plan`，且 `tool_exec` 各自二次守卫 | 默认只读；改稿只能改 frontmatter todos/milestones 或审稿区。 |
 | reviewer 越权调 `create_plan` 套娃 | 高 | `allowed_tools` 任何模式都不含 `create_plan`；`tool_exec.create_plan` 在 `subagent_type == Reviewer` 路径上直接 tool error（双保险） | 工具白名单 + 入口拦截。 |
 | reviewer 越界改 frontmatter / `## Draft` | 中 | `tool_exec.edit` `review_section_diff_guard` 强制拒绝；transcript 记 warning | 越界 error。 |
@@ -536,6 +648,9 @@ Rules:
 | ~~`create_plan` 在 reviewer 上下文里 `tool_exec.create_plan` 跳过 dispatch_reviewer 即够~~ | **替代（D 方案）**：双保险——`allowed_tools` 永不含 `create_plan` + `tool_exec.create_plan` 在 reviewer 路径直接 tool error。 | 双保险防套娃。 |
 | ~~把 reviewer 做成 long-lived 后台 daemon~~ | **否**：每次 `create_plan` 派一个；运行结束即销毁；状态由 `transcript.plan.review` 持久化。 | 每次写完派一个，用完即毁。 |
 | ~~`max_review_rounds` 超限切 `Planning` + 阻塞~~ | **否**：超限只 warning，不阻塞 `create_plan` 也不阻塞 `/plan build`；摘要照常落 transcript。 | 软上限，超了只提醒。 |
+| ~~`ChatContext` 内嵌 Agent 注册表（`subagents[]` / `HashMap<SubagentType, Agent>`）~~ | **否**（RV10–RV11）：双注册表正交——`ChatContextRegistry` 按 `session_key` 持壳，进程级 `AgentRegistry` 按 `session_id` 持 handle；子 `AgentLoop` 永远栈上拥有、跑完 drop。详见 [`multi-agent.md` §14.3.2.1 / §14.4.2.2](../multi-agent.md#14321-chatcontextregistry-vs-agentregistry-分工)。 | 聊天室不管 Agent 表，访客登记处管。 |
+| ~~`ReviewerRuntime` 作为长生命周期对象挂在 `ChatContext`~~ | **否**（RV12）：reviewer 跨调用无残留状态；`rounds` / `last_review_summary` 已落 `PlanRuntimeState` + transcript `plan.review`。 | 审稿员不设专职岗位。 |
+| ~~游离 `review::dispatch_reviewer` 自由函数~~ | **替代**（RV13）：派发归 `PlanRuntime::dispatch_reviewer` 方法；`review.rs` 仅保留 prompt 构造 / `<review>` 解析 helpers。 | 派审稿归 PlanRuntime 管。 |
 
 ---
 

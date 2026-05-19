@@ -638,7 +638,11 @@ impl PlanRuntime {
         // 全 completed → self.set_mode(Completed) + reminder/catalog/prefix swap
     }
 
-    pub async fn dispatch_reviewer(&self, plan: &PlanFile) -> Result<ReviewSummary> { /* PR-PLC */ }
+    pub async fn dispatch_reviewer(&self, plan_id: &PlanId, allow_review_edit: bool) -> Result<ReviewSummary> {
+        // PR-PLC: 见 tools/reviewer.md §4.3 / RV-A；write_plan 完成后由 tool_exec::create_plan 调用。
+        // 内部走 AgentRegistry::spawn_subagent_internal（multi-agent.md §14.4.2.1 路径 B）；
+        // 若 summary.applied_changes，await 返回时 reload_from_disk(plan_id) 刷新内存快照（RV15）。
+    }
 
     pub fn on_cancel(&self) {
         // 注册到 cancel_token；触发时把 mode 切 Pending + 写 frontmatter + swap reminder/catalog/prefix
@@ -697,9 +701,18 @@ impl PlanRuntime {
 | `TodoRuntime / PlanRuntime ↔ panel_tx` | 内存改完通过 channel 推 panel | 屏幕只读。 |
 | `PlanRuntime → CheckpointStore` | 单向引用 | 计划用快照，不影响快照。 |
 | `PlanRuntime → BashTaskRegistry` | 单向引用 | 面板要看命令进度时去查。 |
-| 未来 `ChatContextRegistry` | 多 session 路由由 registry 持有 `HashMap<session_key, Arc<ChatContext>>` | 多会话路由不在 runtime 内部。 |
+| 未来 `ChatContextRegistry` | 多 session 路由由 registry 持有 `HashMap<session_key, Arc<ChatContext>>`；与 [`multi-agent.md` §14.3.2 `AgentRegistry`](./multi-agent.md#1432-agentregistry进程级) **正交**，详见 §14.3.2.1 对照表 | 多会话路由不在 runtime 内部。 |
+| `ChatContext` 持 `root_session_id: String` | 该会话当前父 `AgentLoop` 的 `session_id`（chat_loop 每次启动父 loop 时回写）；用作 [`multi-agent.md` §14.4.2.2](./multi-agent.md#1442-子-agentloop-的所有权与生命周期) 中 `AgentRegistry::get(parent.session_id)` 的锚点，让 `PlanRuntime::dispatch_reviewer` / `dispatch_agent_tool::run` 都能定位到当前父 handle | 聊天室记一根线，子 Agent 派发时按线找当前父。 |
 
-**说人话**：runtime 自己不操心"我是哪个 session"——它就是当前会话独占的一份对象；多会话路由交给上层 `ChatContextRegistry`。这样切到第二个聊天窗口时 panel 状态自然不串。
+> **双注册表的边界（与 [`multi-agent.md` §14.3.0 / §14.3.2.1](./multi-agent.md#1430-落地选型决策表-ma1ma12)）**：
+>
+> - `ChatContextRegistry`：key = `session_key`（持久 chat 身份），value = `Arc<ChatContext>`，存 `TodoRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`，与 chat session 同寿。
+> - `AgentRegistry`：key = `session_id`（运行时实例 id，可含 `:sub:<uuid>`），value = `Arc<AgentHandle>`，存 `abort_signal` + `spawn_depth` + `parent_session_id`，**跑时注册结束注销**，**不**持 `AgentLoop`。
+> - 父 `AgentLoop` / 子 reviewer `AgentLoop` 都不是 `ChatContext` 的字段；它们由 `chat_loop` / `spawn_subagent_internal` 各自栈帧拥有，跑完 drop。
+>
+> 详细 OOD 与所有权链见 [`multi-agent.md` §14.4.2.2 子 AgentLoop 的所有权与生命周期](./multi-agent.md#1442-子-agentloop-的所有权与生命周期) 与 [`tools/reviewer.md` §4.5](./tools/reviewer.md#45-ood-与双注册表reviewer-的嵌套但不开新-chatcontext)。
+
+**说人话**：runtime 自己不操心"我是哪个 session"——它就是当前会话独占的一份对象；多会话路由交给上层 `ChatContextRegistry`。这样切到第二个聊天窗口时 panel 状态自然不串。子 Agent（reviewer / `dispatch_agent`）的登记与寿命另走 `AgentRegistry`，两张表互不掺和，只通过 `root_session_id` 一条线连起来。
 
 ---
 
