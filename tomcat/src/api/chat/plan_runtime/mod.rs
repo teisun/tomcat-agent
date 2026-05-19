@@ -51,6 +51,7 @@ pub mod tools;
 #[cfg(test)]
 mod tests;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -104,6 +105,13 @@ pub struct PlanRuntime {
     /// 测试可注入 `MockAskQuestionPanel`。未注入时 `ask_question` 工具返回
     /// `cancelled: true` 兜底（避免 panic / 卡死）。
     ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
+    /// 进入 EXEC 后**首轮**user message 装配阶段的注入标记（P6 PR-PLC §5.5 / §6 first_turn_user_meta）：
+    /// `/plan build` 成功后置 true；`consume_first_exec_turn_user_meta` 第一次调
+    /// 时返回 plan body 并置 false；后续轮次返回 None（避免重复注入超长 plan 全文）。
+    first_exec_turn_pending: AtomicBool,
+    /// 触发首轮注入的 plan body 缓存（与 `first_exec_turn_pending` 配对，
+    /// 在 build_plan 写盘成功后预读，避免首轮 chat_loop 再做一次 disk IO）。
+    first_exec_turn_body: Mutex<Option<String>>,
 }
 
 impl PlanRuntime {
@@ -130,6 +138,8 @@ impl PlanRuntime {
             reviewer: Mutex::new(None),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             ask_question_panel: Mutex::new(None),
+            first_exec_turn_pending: AtomicBool::new(false),
+            first_exec_turn_body: Mutex::new(None),
         })
     }
 
@@ -317,6 +327,182 @@ impl PlanRuntime {
     pub fn ask_question_panel(&self) -> Option<Arc<dyn AskQuestionPanel>> {
         self.ask_question_panel.lock().clone()
     }
+
+    // ─── P6 /plan build 五件事（plan-runtime.md §5.1 + §4.1 R7） ──────────
+
+    /// `/plan build <plan_id>` 入口；执行 plan-runtime §5.1 的 5 件事 + 原子回滚。
+    ///
+    /// **闸门**（任一不通过 → `BuildBlocked`）：
+    /// - 当前内存 mode ∈ `{Chat, Planning}`（已 Executing/Pending/Completed 拒）
+    /// - 当前 session 无 active todos（`session_todos` 全 completed/cancelled 或空）
+    /// - 当前 session 无 active plan_id 占用（mode 不是 Executing/Pending 即可，
+    ///   Planning 期 active_planning_plan_id 与目标 plan_id 相同时不算冲突）
+    /// - 目标 PlanFile 必须存在（不存在 → `BuildPlanNotFound`，附友好提示）
+    /// - PlanFile.frontmatter.mode ∈ `{planning, pending}`（executing/completed 拒）
+    ///
+    /// **5 件事**：
+    /// 1. 改 frontmatter.session_key = `self.session_key`；session_id = `session_id`
+    ///    （pending 续跑时若 `prev_session_key != self.session_key` → push warning，仍执行）
+    /// 2. 改 frontmatter.mode = `executing`
+    /// 3. `write_plan`（atomic + advisory lock）；**失败时内存不动**，返回 PlanFile error
+    /// 4. 写盘成功后切内存 `mode = Executing { plan_id }`、清 `active_planning_plan_id`
+    /// 5. 设置 `first_exec_turn_pending = true`，缓存 plan body 供首轮 user_meta 注入；
+    ///    （reminder/catalog/prefix swap 均由 mode 派生，chat_loop 装配阶段自动 pick up）
+    ///
+    /// **原子性**：盘 write 失败 → 内存不变；盘 write 成功后才动内存——
+    /// 配合 advisory lock 保证 PlanFile 不会出现"executing 但内存仍 Chat"的半态。
+    /// （注：写盘 OK 但内存切换前 panic 这条很窄的窗口由 D7 recover 兜底）。
+    pub fn build_plan(
+        &self,
+        plan_id: &str,
+        session_id: Option<String>,
+    ) -> Result<BuildPlanOutcome, PlanRuntimeError> {
+        safety::assert_plan_id_safe(plan_id)?;
+        // ─── 闸门 1：内存 mode ─────────────────────────────────────────
+        {
+            let mode = self.mode.read();
+            match &*mode {
+                PlanMode::Chat | PlanMode::Planning => { /* 允许 */ }
+                PlanMode::Executing { plan_id: cur } => {
+                    return Err(PlanRuntimeError::BuildBlocked(format!(
+                        "当前 session 已在 EXEC（plan_id={cur}）；先等结束或 cancel→pending"
+                    )));
+                }
+                PlanMode::Pending { plan_id: cur } => {
+                    return Err(PlanRuntimeError::BuildBlocked(format!(
+                        "当前 session 有 pending plan {cur}；先续跑或 /plan exit"
+                    )));
+                }
+                PlanMode::Completed { plan_id: cur } => {
+                    return Err(PlanRuntimeError::BuildBlocked(format!(
+                        "当前 session 已 completed plan {cur}；新计划请先 /plan exit"
+                    )));
+                }
+            }
+        }
+        // ─── 闸门 2：active todos ──────────────────────────────────────
+        {
+            let session_todos = self.session_todos.lock();
+            let has_active = session_todos.iter().any(|t| {
+                matches!(
+                    t.status,
+                    file_store::TodoStatus::Pending | file_store::TodoStatus::InProgress
+                )
+            });
+            if has_active {
+                return Err(PlanRuntimeError::BuildBlocked(
+                    "当前 session 有未完成 todos；先收口（todos remove / set completed）后再 build".into(),
+                ));
+            }
+        }
+        // ─── 闸门 3：active_planning_plan_id 冲突 ──────────────────────
+        {
+            if let Some(active) = self.active_planning_plan_id.lock().clone() {
+                if active != plan_id {
+                    return Err(PlanRuntimeError::BuildBlocked(format!(
+                        "Planning 期已有 active plan {active}；先 /plan exit 或 build 同 plan_id"
+                    )));
+                }
+            }
+        }
+        // ─── 读 PlanFile + 闸门 4/5：存在 + 合法 mode ──────────────────
+        let path = file_store::plan_path_for_id(plan_id)
+            .map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
+        let mut plan = match file_store::read_plan(&path) {
+            Ok(p) => p,
+            Err(file_store::PlanError::NotFound { .. }) => {
+                return Err(PlanRuntimeError::BuildPlanNotFound {
+                    plan_id: plan_id.to_string(),
+                    hint: format!(
+                        "未找到 ~/.tomcat/plans/{plan_id}.plan.md；先通过 PLAN 模式 create_plan 生成"
+                    ),
+                });
+            }
+            Err(e) => return Err(PlanRuntimeError::Io(e.to_string())),
+        };
+        let prev_disk_mode = plan.frontmatter.mode;
+        match prev_disk_mode {
+            file_store::PlanFileMode::Planning | file_store::PlanFileMode::Pending => {}
+            file_store::PlanFileMode::Executing => {
+                return Err(PlanRuntimeError::BuildBlocked(format!(
+                    "PlanFile {plan_id} mode=executing；可能被其它进程占用，请稍后或手工修复"
+                )));
+            }
+            file_store::PlanFileMode::Completed => {
+                return Err(PlanRuntimeError::BuildBlocked(format!(
+                    "PlanFile {plan_id} mode=completed；已完成的 plan 不可再 build"
+                )));
+            }
+        }
+        // ─── 准备五件事 ────────────────────────────────────────────────
+        let mut warnings: Vec<String> = Vec::new();
+        if matches!(prev_disk_mode, file_store::PlanFileMode::Pending) {
+            if let Some(prev_key) = &plan.frontmatter.session_key {
+                if prev_key != self.session_key.as_str() {
+                    warnings.push(format!(
+                        "pending plan {plan_id} 原绑定 session_key={prev_key}；本次将覆盖为 {}",
+                        self.session_key
+                    ));
+                }
+            }
+        }
+        // 1, 2: frontmatter 改 session_key/session_id/mode
+        plan.frontmatter.session_key = Some(self.session_key.clone());
+        plan.frontmatter.session_id = session_id;
+        plan.frontmatter.mode = file_store::PlanFileMode::Executing;
+        // 3: write_plan（原子）
+        file_store::write_plan(&path, &plan, self.lock_timeout_ms)
+            .map_err(PlanRuntimeError::from_plan_io)?;
+        // 4: 切内存（写盘成功后才动）
+        *self.mode.write() = PlanMode::Executing {
+            plan_id: plan_id.to_string(),
+        };
+        *self.active_planning_plan_id.lock() = None;
+        // 5: 首轮注入旗标 + 缓存 plan body（含 frontmatter 以便上下文可读）
+        let plan_text = file_store::serialize_plan_file(&plan)
+            .unwrap_or_else(|_| plan.body.clone());
+        *self.first_exec_turn_body.lock() = Some(plan_text);
+        self.first_exec_turn_pending.store(true, Ordering::Release);
+
+        Ok(BuildPlanOutcome {
+            plan_id: plan_id.to_string(),
+            prev_disk_mode,
+            warnings,
+        })
+    }
+
+    /// 首轮 EXEC user message 装配时调用：返回 plan 全文（含 frontmatter）一次；
+    /// 再次调用返回 None（防止重复注入超长上下文）。
+    ///
+    /// 标志 + 缓存语义：`build_plan` 成功后置 flag=true 并缓存 body。本方法 swap
+    /// flag→false 后取走缓存（`take()`），返回前一次 build 缓存的 body；
+    /// 与 catalog/reminder/prefix 派生平行——所有 EXEC 副作用均不可漏。
+    pub fn consume_first_exec_turn_user_meta(&self) -> Option<String> {
+        if self
+            .first_exec_turn_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            self.first_exec_turn_body.lock().take()
+        } else {
+            None
+        }
+    }
+
+    /// 测试 / debug：当前首轮注入是否仍 pending。
+    #[doc(hidden)]
+    pub fn first_exec_turn_pending_for_test(&self) -> bool {
+        self.first_exec_turn_pending.load(Ordering::Acquire)
+    }
+}
+
+/// `/plan build` 成功返回。
+#[derive(Debug, Clone)]
+pub struct BuildPlanOutcome {
+    pub plan_id: String,
+    /// 目标 PlanFile 的写前 mode（planning / pending）；命令层据此打印不同提示。
+    pub prev_disk_mode: file_store::PlanFileMode,
+    /// 非致命警告（如 pending 续跑 session_key 不一致）。
+    pub warnings: Vec<String>,
 }
 
 /// reviewer 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。
@@ -350,4 +536,22 @@ pub enum PlanRuntimeError {
     /// PlanFile 文件 IO / serde 错误（P2 起细化）。
     #[error("plan io: {0}")]
     Io(String),
+    /// `/plan build` 闸门未通过（active todos / active plan / disk mode 不合规等）。
+    #[error("/plan build 闸门未通过：{0}")]
+    BuildBlocked(String),
+    /// `/plan build` 指定 plan_id 不存在；`hint` 给出友好引导（"先 create_plan"）。
+    #[error("plan_id={plan_id} 不存在：{hint}")]
+    BuildPlanNotFound { plan_id: String, hint: String },
+}
+
+impl PlanRuntimeError {
+    /// 包装 PlanFile IO/lock 错误为 `Io`，保留细节给 chat_loop 打印。
+    pub(crate) fn from_plan_io(e: file_store::PlanError) -> Self {
+        match e {
+            file_store::PlanError::NotFound { path } => {
+                PlanRuntimeError::Io(format!("plan not found: {path}"))
+            }
+            other => PlanRuntimeError::Io(other.to_string()),
+        }
+    }
 }

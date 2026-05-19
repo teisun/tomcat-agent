@@ -16,9 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::api::chat::plan_runtime::{
-    ask_question_panel::{
-        AskQuestionPanel, AskQuestionResult, Question, QuestionOption, CUSTOM_OPTION_ID,
-    },
+    ask_question_panel::{AskQuestionPanel, AskQuestionResult, Question, CUSTOM_OPTION_ID},
     mode::PlanMode,
     PlanRuntime,
 };

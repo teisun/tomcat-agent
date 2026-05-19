@@ -80,14 +80,19 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
             }
         },
         PlanCommand::Build { plan_id } => {
-            // P1 阶段仅做安全校验；闸门 + 五件事在 P6（PR-PLC）落地
-            match crate::api::chat::plan_runtime::safety::assert_plan_id_safe(&plan_id) {
-                Ok(()) => {
-                    eprintln!(
-                        "[plan] /plan build 闸门尚未落地（PR-PLC P6）：plan_id={} 暂时拒绝；当前 mode={}",
-                        plan_id,
-                        rt.mode().as_str()
+            // 当前 chat session 的真实 session_id（uuid）从 ChatContext 取；P6 阶段还
+            // 未把 session_id 注入 ChatContext，先传 None — 续跑 warning 仍依赖 session_key 比对，
+            // 不影响闸门正确性。后续 P7 接入会改 ctx.session_id().clone().
+            let session_id_for_plan: Option<String> = None;
+            match rt.build_plan(&plan_id, session_id_for_plan) {
+                Ok(outcome) => {
+                    println!(
+                        "[plan] /plan build 成功：plan_id={} (prev_disk_mode={:?}) → EXEC",
+                        outcome.plan_id, outcome.prev_disk_mode
                     );
+                    for w in &outcome.warnings {
+                        eprintln!("[plan] warning: {w}");
+                    }
                 }
                 Err(e) => eprintln!("[plan] /plan build 拒绝：{}", e),
             }

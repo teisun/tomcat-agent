@@ -747,3 +747,256 @@ fn from_json_helpers_reject_bad_args() {
     matches!(err, ToolError::BadArgs(_));
     cleanup_home(&home);
 }
+
+// ─── P6 /plan build 五件事单测（§9.3 A build 行 + plan_build_*） ────────────
+
+use crate::api::chat::plan_runtime::PlanRuntimeError;
+
+/// 构造一个 planning 模式的 PlanFile 写盘，但**保持** PlanRuntime 当前为 Chat
+/// （模拟 "其他 session 留下的 planning plan"，本 session 用 build 续跑）。
+fn write_disk_plan(plan_id: &str, disk_mode: PlanFileMode) -> std::path::PathBuf {
+    use crate::api::chat::plan_runtime::file_store::*;
+    let path = plan_path_for_id(plan_id).unwrap();
+    let fm = PlanFileFrontmatter {
+        plan_id: plan_id.into(),
+        goal: "P6 build target".into(),
+        mode: disk_mode,
+        session_key: Some("orig-session-key".into()),
+        session_id: Some("orig-uuid".into()),
+        created_at: "2026-05-19T00:00:00Z".into(),
+        schema_version: 1,
+        milestones: vec![],
+        todos: vec![TodoItem {
+            id: "step1".into(),
+            content: "do the thing".into(),
+            status: TodoStatus::Pending,
+            milestone_id: None,
+        }],
+        unknown: Default::default(),
+    };
+    let plan = PlanFile {
+        frontmatter: fm,
+        body: "## Goal\nbuild target\n".into(),
+    };
+    write_plan(&path, &plan, 1000).unwrap();
+    path
+}
+
+#[test]
+fn plan_build_requires_no_active_plan_or_todos() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("blockee", PlanFileMode::Planning);
+
+    // 1) Executing → 拒
+    rt.set_executing_for_test("other_plan".into());
+    let err = rt.build_plan("blockee", None).unwrap_err();
+    matches!(err, PlanRuntimeError::BuildBlocked(_));
+
+    // 重置 + 给 active todos
+    let rt = PlanRuntime::new("session-a");
+    rt.replace_session_todos(vec![crate::api::chat::plan_runtime::file_store::TodoItem {
+        id: "live".into(),
+        content: "x".into(),
+        status: TodoStatus::Pending,
+        milestone_id: None,
+    }]);
+    let err = rt.build_plan("blockee", None).unwrap_err();
+    match err {
+        PlanRuntimeError::BuildBlocked(s) => assert!(s.contains("未完成 todos"), "{s}"),
+        other => panic!("expected BuildBlocked, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_rejects_completed_plan() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("done", PlanFileMode::Completed);
+    let err = rt.build_plan("done", None).unwrap_err();
+    matches!(err, PlanRuntimeError::BuildBlocked(_));
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_rejects_disk_executing() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("racy", PlanFileMode::Executing);
+    let err = rt.build_plan("racy", None).unwrap_err();
+    match err {
+        PlanRuntimeError::BuildBlocked(s) => assert!(s.contains("executing"), "{s}"),
+        other => panic!("expected BuildBlocked, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_rejects_nonexistent_plan_id() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let err = rt.build_plan("missing_plan", None).unwrap_err();
+    match err {
+        PlanRuntimeError::BuildPlanNotFound { plan_id, hint } => {
+            assert_eq!(plan_id, "missing_plan");
+            assert!(hint.contains("create_plan"), "hint 应引导 create_plan：{hint}");
+        }
+        other => panic!("expected BuildPlanNotFound, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_rejects_unsafe_plan_id() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let err = rt.build_plan("../etc/passwd", None).unwrap_err();
+    matches!(err, PlanRuntimeError::UnsafePlanId(_));
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_swaps_session_reminder_prefix_meta_catalog() {
+    // 五件事一次性生效（disk session_key/id + disk mode=executing + 内存 mode + first_exec_turn flag）。
+    // reminder/prefix/catalog swap 是 mode 派生 → 通过 PlanMode::Executing 间接证明。
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("new-session-key");
+    write_disk_plan("five_things", PlanFileMode::Planning);
+    let outcome = rt
+        .build_plan("five_things", Some("new-session-uuid".into()))
+        .expect("build 成功");
+
+    // 内存 mode = Executing
+    match rt.mode() {
+        PlanMode::Executing { plan_id } => assert_eq!(plan_id, "five_things"),
+        other => panic!("expected Executing, got {other:?}"),
+    }
+    // active_planning_plan_id 已清空
+    assert!(rt.active_planning_plan_id().is_none());
+    // 首轮注入 flag = true
+    assert!(rt.first_exec_turn_pending_for_test());
+
+    // 磁盘 frontmatter: mode=executing + session 改写
+    use crate::api::chat::plan_runtime::file_store::*;
+    let plan = read_plan(&plan_path_for_id("five_things").unwrap()).unwrap();
+    assert!(matches!(plan.frontmatter.mode, PlanFileMode::Executing));
+    assert_eq!(plan.frontmatter.session_key.as_deref(), Some("new-session-key"));
+    assert_eq!(plan.frontmatter.session_id.as_deref(), Some("new-session-uuid"));
+
+    // 上一磁盘模式正确报告
+    assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Planning));
+    // planning → executing 不产生 session 覆盖 warning
+    assert!(outcome.warnings.is_empty());
+    cleanup_home(&home);
+}
+
+#[test]
+fn pending_plan_resumable_via_build() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("orig-session-key");
+    write_disk_plan("resumable", PlanFileMode::Pending);
+    let outcome = rt.build_plan("resumable", None).expect("续跑 build 成功");
+    assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Pending));
+    // 同 session_key 续跑不应 warning
+    assert!(outcome.warnings.is_empty(), "同 key 续跑无 warning：{:?}", outcome.warnings);
+    match rt.mode() {
+        PlanMode::Executing { plan_id } => assert_eq!(plan_id, "resumable"),
+        other => panic!("expected Executing, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[test]
+fn pending_plan_session_override_warns() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("brand-new-session"); // 与 disk 中 orig-session-key 不同
+    write_disk_plan("crossover", PlanFileMode::Pending);
+    let outcome = rt.build_plan("crossover", None).expect("续跑 build 成功");
+    assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Pending));
+    assert_eq!(
+        outcome.warnings.len(),
+        1,
+        "异 session_key 续跑应有 1 条 warning：{:?}",
+        outcome.warnings
+    );
+    assert!(outcome.warnings[0].contains("orig-session-key"));
+    assert!(outcome.warnings[0].contains("brand-new-session"));
+    cleanup_home(&home);
+}
+
+#[test]
+fn exec_first_turn_injects_plan_body_user_meta_only_once() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("oneshot", PlanFileMode::Planning);
+    rt.build_plan("oneshot", None).unwrap();
+    // 第一轮：返回 Some(plan 全文)
+    let body1 = rt
+        .consume_first_exec_turn_user_meta()
+        .expect("首轮应返回 plan body");
+    assert!(body1.contains("plan_id: oneshot"), "应含 frontmatter plan_id");
+    assert!(body1.contains("## Goal"), "应含正文");
+    assert!(body1.contains("mode: executing"), "frontmatter 已更新为 executing");
+
+    // 第二、第三轮：返回 None（防止重复注入）
+    assert!(rt.consume_first_exec_turn_user_meta().is_none());
+    assert!(rt.consume_first_exec_turn_user_meta().is_none());
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_atomic_rollback_on_write_failure() {
+    // 制造 write_plan 失败：把 ~/.tomcat/plans 替换为只读普通文件 → write 时 sync_all 或 rename 失败。
+    // 平台无关方案：用一个被锁定且超 timeout 的同名 lock 文件触发 LockBusy → write_plan 直接报错。
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("rollback", PlanFileMode::Planning);
+
+    use crate::api::chat::plan_runtime::file_store::*;
+    use fs2::FileExt;
+    let plan_path = plan_path_for_id("rollback").unwrap();
+    let lock_path = plan_path.with_file_name(format!(
+        "{}.lock",
+        plan_path.file_name().unwrap().to_string_lossy()
+    ));
+    let _f = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    _f.try_lock_exclusive().unwrap();
+
+    // 用极短超时构造 rt，加快测试
+    let rt = PlanRuntime::with_lock_timeout("session-a", 50);
+    let err = rt.build_plan("rollback", None).unwrap_err();
+    // 内存 mode 必须未变（仍 Chat）— 这才是"原子回滚"的核心
+    assert!(matches!(rt.mode(), PlanMode::Chat), "内存 mode 必须未提升");
+    // first_exec_turn_pending 也必须未置 true
+    assert!(!rt.first_exec_turn_pending_for_test());
+    match err {
+        PlanRuntimeError::Io(s) => {
+            assert!(s.contains("锁") || s.contains("lock") || s.contains("LockBusy"), "应是锁/IO 错：{s}")
+        }
+        other => panic!("expected Io (LockBusy), got {other:?}"),
+    }
+
+    // 释放锁，rt 仍可继续 build（证明状态可恢复）
+    FileExt::unlock(&_f).unwrap();
+    drop(_f);
+    let rt = PlanRuntime::with_lock_timeout("session-a", 1000);
+    let _ok = rt.build_plan("rollback", None).expect("放锁后 build 应成功");
+    assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+    cleanup_home(&home);
+}
