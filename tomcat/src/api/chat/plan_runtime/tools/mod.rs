@@ -13,6 +13,7 @@
 //! 每个函数都接 `&PlanRuntime + serde_json::Value (args) -> Result<serde_json::Value, ToolError>`，
 //! 调用方（`tool_exec.rs` 在 P6 接入）负责把 OpenAI tool_call 参数透传。
 
+pub mod ask_question;
 pub mod create_plan;
 pub mod todos;
 pub mod update_plan;

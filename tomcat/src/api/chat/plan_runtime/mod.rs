@@ -37,6 +37,7 @@
 //! `tools::ask_question`；P6 起补 `/plan build` 五件事；P7 起补 `panel` / `checkpoint` /
 //! `cancel`。
 
+pub mod ask_question_panel;
 pub mod catalog;
 pub mod file_store;
 pub mod mode;
@@ -56,6 +57,7 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
+pub use ask_question_panel::AskQuestionPanel;
 pub use mode::PlanMode;
 pub use review::ReviewSummary;
 
@@ -97,6 +99,11 @@ pub struct PlanRuntime {
     reviewer: Mutex<Option<Arc<dyn ReviewerDispatcher>>>,
     /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 可选 `ask_question` UI 后端（P5）。生产由 `ChatContext::from_config`
+    /// 注入 `CliAskQuestionPanel`（CLI MVP）/ T2-P0-008 完成后改注入 `IdeAskQuestionPanel`。
+    /// 测试可注入 `MockAskQuestionPanel`。未注入时 `ask_question` 工具返回
+    /// `cancelled: true` 兜底（避免 panic / 卡死）。
+    ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
 }
 
 impl PlanRuntime {
@@ -122,6 +129,7 @@ impl PlanRuntime {
             lock_timeout_ms,
             reviewer: Mutex::new(None),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            ask_question_panel: Mutex::new(None),
         })
     }
 
@@ -294,6 +302,20 @@ impl PlanRuntime {
             .get(plan_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    // ─── P5 ask_question 面板注入 ──────────────────────────────────────
+
+    /// 注入 `ask_question` UI 面板。生产由 `ChatContext::from_config` 装配 `CliAskQuestionPanel`；
+    /// 测试可注入 `MockAskQuestionPanel`。
+    pub fn attach_ask_question_panel(&self, panel: Arc<dyn AskQuestionPanel>) {
+        *self.ask_question_panel.lock() = Some(panel);
+    }
+
+    /// 取出当前注入的 panel（克隆 Arc）。`tool_exec.rs` 调 `ask_question::execute`
+    /// 前从此处取；未注入时返回 None，工具层会回写 `cancelled: true`。
+    pub fn ask_question_panel(&self) -> Option<Arc<dyn AskQuestionPanel>> {
+        self.ask_question_panel.lock().clone()
     }
 }
 

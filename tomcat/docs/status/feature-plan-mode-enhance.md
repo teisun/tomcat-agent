@@ -14,7 +14,7 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P4 RV+CP-D 完成 → P5 AQ 进行中 |
+| 阶段 | P5 AQ 完成 → P6 PR-PLC 进行中 |
 
 ## Phase 进度
 
@@ -24,7 +24,7 @@
 - [x] **P2** PR-PLB — file_store、ops、tools/{create_plan,update_plan,todos}（stub review，P4 接入）+ §9.3B 单测 38 个全绿（write_plan 原子写/锁/超时；ops 单 in_progress / id 唯一；mode 守卫 / 跨 session 规则 / 自动 completed）
 - [x] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort + §9.3D P3 单测 11 个全绿（panic 隔离、三道闸门、cascade abort BFS、RegistrationGuard balanced）
 - [x] **P4** RV+CP-D — review.rs + ReviewerDispatcher trait + PlanRuntime::dispatch_reviewer + create_plan::execute_with_reviewer + §9.3D 余量单测 19 个全绿（parse 严格 / 多块取最后 / aborted 路径 / lock 先释放 / round 计数 warning）
-- [ ] **P5** AQ — ask_question + CliAskQuestionPanel
+- [x] **P5** AQ — ask_question + CliAskQuestionPanel + IdeAskQuestionPanel(stub) + MockAskQuestionPanel + §9.3C 单测 18 个全绿（schema 校验 / 1 recommended 约束 / __custom__ 保留 id / picked_recommended 回填 / cancel 信号 / 阻塞语义 / 出参反向校验）
 - [ ] **P6** PR-PLC — /plan build 五件事 + 原子回滚 + E2E-PLAN-001
 - [ ] **P7** PR-PLD/PLE/PLF — TodosPanel、milestone ckpt、cancel→pending、raw edit 拦截、/restore 联动
 - [ ] **P8a** 扫尾单测（D1–D12 防御路径）
