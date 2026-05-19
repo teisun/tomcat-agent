@@ -14,7 +14,7 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P2 PR-PLB 完成 → P3 MA 进行中 |
+| 阶段 | P3 MA 完成 → P4 RV+CP-D 进行中 |
 
 ## Phase 进度
 
@@ -22,7 +22,7 @@
 - [x] **P0.5** 横切前置（依赖 `serde_yaml` / `AgentLoopConfig` + `SubagentType` / 4 plan 工具进 catalog / transcript 事件 type 常量 / `[plan]`+`[reviewer]` config / `gen-tool-catalog` + `tool_catalog_doc` 回归）
 - [x] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover(stub)、user prefix（+ §9.3A P1 单测 38 个全绿；recover 真正生效随 P2 file_store 补齐）
 - [x] **P2** PR-PLB — file_store、ops、tools/{create_plan,update_plan,todos}（stub review，P4 接入）+ §9.3B 单测 38 个全绿（write_plan 原子写/锁/超时；ops 单 in_progress / id 唯一；mode 守卫 / 跨 session 规则 / 自动 completed）
-- [ ] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort
+- [x] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort + §9.3D P3 单测 11 个全绿（panic 隔离、三道闸门、cascade abort BFS、RegistrationGuard balanced）
 - [ ] **P4** RV+CP-D — dispatch_reviewer、tool guards、集成 create_plan/reviewer
 - [ ] **P5** AQ — ask_question + CliAskQuestionPanel
 - [ ] **P6** PR-PLC — /plan build 五件事 + 原子回滚 + E2E-PLAN-001

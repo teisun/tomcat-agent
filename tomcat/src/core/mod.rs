@@ -3,6 +3,7 @@
 //! 会话管理、LLM 接入、4 原语、工具注册、插件生命周期等核心引擎，仅在宿主层运行。
 
 pub mod agent_loop;
+pub mod agent_registry;
 pub mod checkpoint;
 pub mod compaction;
 pub mod llm;
