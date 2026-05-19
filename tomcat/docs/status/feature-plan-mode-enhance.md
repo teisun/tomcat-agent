@@ -14,7 +14,7 @@
 | 状态 | DOING |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P6 PR-PLC 完成 → P7 PR-PLD/PLE/PLF 进行中 |
+| 阶段 | P7 核心防御完成（PLE finalize / PLF cancel→pending+lock release / PLF raw edit guard）→ 进入 P8a 扫尾 |
 
 ## Phase 进度
 
@@ -26,7 +26,8 @@
 - [x] **P4** RV+CP-D — review.rs + ReviewerDispatcher trait + PlanRuntime::dispatch_reviewer + create_plan::execute_with_reviewer + §9.3D 余量单测 19 个全绿（parse 严格 / 多块取最后 / aborted 路径 / lock 先释放 / round 计数 warning）
 - [x] **P5** AQ — ask_question + CliAskQuestionPanel + IdeAskQuestionPanel(stub) + MockAskQuestionPanel + §9.3C 单测 18 个全绿（schema 校验 / 1 recommended 约束 / __custom__ 保留 id / picked_recommended 回填 / cancel 信号 / 阻塞语义 / 出参反向校验）
 - [x] **P6** PR-PLC — /plan build 五件事（disk session_key/id + disk mode=executing + 内存 mode swap + first_exec_turn flag + plan body 缓存）+ 原子回滚（write 失败时内存不动）+ 友好提示（plan_id 不存在引导 create_plan）+ §9.3A build 行 10 个新测全绿（闸门 / completed / disk executing / 不存在 / unsafe / 五件事一次性 / pending 续跑 / 异 session warning / 首轮一次性注入 / 原子回滚 lock-busy）
-- [ ] **P7** PR-PLD/PLE/PLF — TodosPanel、milestone ckpt、cancel→pending、raw edit 拦截、/restore 联动
+- [x] **P7 (核心)** PR-PLE finalize_completed_to_chat + PR-PLF demote_to_pending_on_cancel（释放 lock）+ PR-PLF allow_raw_edit_to_path（canonicalize 双侧）+ attach_cancel_hook/current_cancel_token + 5 个新单测全绿（cancel→pending / cancel_outside_exec_noop / cancel_releases_lock / finalize_completed_clears_first_exec_turn / raw_edit_blocked_for_plan_files）
+- [ ] **P7 (延期)** PR-PLD TodosPanel + RefreshNotifier + milestone checkpoint record(Milestone) + /restore reload_active_plan_from_disk — 需要 chat_loop 装配层联动，推到 P8b 集成测一起做
 - [ ] **P8a** 扫尾单测（D1–D12 防御路径）
 - [ ] **P8b** `plan_runtime_integration_tests` 全绿 + tokio::time::timeout(30s)
 - [ ] **P8c** `plan_cli_e2e` + E2E_SCENARIO_LIBRARY E2E-PLAN-001～016

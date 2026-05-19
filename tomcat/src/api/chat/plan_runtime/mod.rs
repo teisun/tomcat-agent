@@ -493,6 +493,107 @@ impl PlanRuntime {
     pub fn first_exec_turn_pending_for_test(&self) -> bool {
         self.first_exec_turn_pending.load(Ordering::Acquire)
     }
+
+    // ─── P7 PR-PLF cancel→pending + 释放锁（plan-runtime.md §5.6） ───────
+
+    /// 当 cancel_token 触发 / Ctrl+C 时调；只在 EXEC 模式生效。
+    ///
+    /// **副作用**（事务序）：
+    /// 1. 读当前 plan 文件
+    /// 2. 写 frontmatter.mode = pending（atomic + advisory lock；写完即释放，防 D1）
+    /// 3. 内存 mode 切 `Pending { plan_id }`，清 `first_exec_turn_pending`
+    /// 4. 返回 plan_id 给上层做 transcript `plan.cancel.demote_to_pending`
+    ///
+    /// **幂等**：非 EXEC 模式直接返回 Ok(None)。
+    /// **错误**：磁盘读/写失败不修改内存 mode，返回 `Io`；上层应仅 warning（D8）。
+    pub fn demote_to_pending_on_cancel(&self) -> Result<Option<String>, PlanRuntimeError> {
+        // ① snapshot 当前 mode
+        let plan_id = match &*self.mode.read() {
+            PlanMode::Executing { plan_id } => plan_id.clone(),
+            _ => return Ok(None),
+        };
+        // ② 改写磁盘
+        let path = file_store::plan_path_for_id(&plan_id)
+            .map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
+        let mut plan = file_store::read_plan(&path).map_err(PlanRuntimeError::from_plan_io)?;
+        plan.frontmatter.mode = file_store::PlanFileMode::Pending;
+        file_store::write_plan(&path, &plan, self.lock_timeout_ms)
+            .map_err(PlanRuntimeError::from_plan_io)?;
+        // ③ 内存切 Pending；reset 首轮注入
+        *self.mode.write() = PlanMode::Pending {
+            plan_id: plan_id.clone(),
+        };
+        self.first_exec_turn_pending.store(false, Ordering::Release);
+        *self.first_exec_turn_body.lock() = None;
+        Ok(Some(plan_id))
+    }
+
+    /// 挂接当前回合的 cancel_token；chat_loop 每轮 readline 后必须调（D2 防御）。
+    ///
+    /// 该 API 仅保存 token；真正的 cancel→pending 由 chat_loop 在 `select! cancel_token.cancelled()`
+    /// 分支显式调 `demote_to_pending_on_cancel()` 触发——避免后台 spawn task 持 Arc<Self>
+    /// 导致 PlanRuntime 生命周期跨 turn 泄漏。
+    pub fn attach_cancel_hook(&self, token: CancellationToken) {
+        *self.cancel_token.lock() = Some(token);
+    }
+
+    /// 当前回合的 cancel_token（克隆）。chat_loop 可以从这里取出，与新建的 token 比对，
+    /// 决定是否需要重挂（D2：每轮 readline 后必须重挂，否则上一轮 hook 失效）。
+    pub fn current_cancel_token(&self) -> Option<CancellationToken> {
+        self.cancel_token.lock().clone()
+    }
+
+    // ─── P7 PR-PLE all-completed → CHAT 派生（plan-runtime.md §5.7） ─────
+
+    /// 当 mode 已是 `Completed { plan_id }` 时，把内存复位到 CHAT、清首轮注入、清 active_planning；
+    /// 通常由 chat_loop 在下一轮装配前调用，等价于"自然收口"。
+    ///
+    /// `update_plan` 写盘成功后会 `set_mode_completed`；本方法是从 Completed → Chat 的最后一跳；
+    /// 也可在 chat_loop 收到 `plan.complete` 事件后立即调用，避免下一轮仍带 EXEC reminder。
+    pub fn finalize_completed_to_chat(&self) -> Option<String> {
+        let mut mode = self.mode.write();
+        match &*mode {
+            PlanMode::Completed { plan_id } => {
+                let pid = plan_id.clone();
+                *mode = PlanMode::Chat;
+                self.first_exec_turn_pending.store(false, Ordering::Release);
+                *self.first_exec_turn_body.lock() = None;
+                *self.active_planning_plan_id.lock() = None;
+                Some(pid)
+            }
+            _ => None,
+        }
+    }
+
+    // ─── P7 PR-PLF raw edit 拦截（plan-runtime.md §5.6） ─────────────────
+
+    /// PLAN/EXEC 模式下，`tool_exec::write`/`edit` 等 raw 写入路径调用此 helper
+    /// 判断该路径是否允许写入。
+    ///
+    /// **规则**：
+    /// - 不是 `~/.tomcat/plans/*.plan.md` → 允许（其他文件不归本 runtime 管）
+    /// - 是 `~/.tomcat/plans/*.plan.md`：
+    ///   - CHAT 模式 → 允许（无 PLAN/EXEC 守卫）
+    ///   - Planning/Executing/Pending/Completed → 拒（必须走 `create_plan`/`update_plan`/`todos` 工具，
+    ///     由 runtime 做 frontmatter diff / 锁等保护）
+    ///
+    /// 调用方负责把返回 false 的写入请求转成 ToolError，并提示"请使用 update_plan"。
+    pub fn allow_raw_edit_to_path(&self, path: &std::path::Path) -> bool {
+        let plans_dir = match file_store::plans_dir() {
+            Ok(p) => p,
+            Err(_) => return true,
+        };
+        // macOS `/var/folders` 实际是 `/private/var/folders` 的 symlink；只比较
+        // canonical 形态可避免误放过 plan_dir 下的写入。两侧都尽量 canonicalize。
+        let canon_path = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf());
+        let canon_plans = plans_dir.canonicalize().unwrap_or(plans_dir);
+        if !canon_path.starts_with(&canon_plans) {
+            return true;
+        }
+        matches!(*self.mode.read(), PlanMode::Chat)
+    }
 }
 
 /// `/plan build` 成功返回。

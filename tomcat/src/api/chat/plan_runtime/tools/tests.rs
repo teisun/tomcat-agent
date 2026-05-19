@@ -954,6 +954,114 @@ fn exec_first_turn_injects_plan_body_user_meta_only_once() {
     cleanup_home(&home);
 }
 
+// ─── P7 PR-PLE/PLF：cancel→pending、finalize completed、raw edit 拦截 ─────
+
+#[test]
+fn cancel_token_demotes_executing_to_pending() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("cancellable", PlanFileMode::Planning);
+    rt.build_plan("cancellable", None).unwrap();
+    assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+
+    let demoted = rt.demote_to_pending_on_cancel().unwrap();
+    assert_eq!(demoted.as_deref(), Some("cancellable"));
+    match rt.mode() {
+        PlanMode::Pending { plan_id } => assert_eq!(plan_id, "cancellable"),
+        other => panic!("expected Pending, got {other:?}"),
+    }
+    // 首轮注入旗标也清掉（防 D5）
+    assert!(!rt.first_exec_turn_pending_for_test());
+
+    // 磁盘 frontmatter.mode = pending
+    use crate::api::chat::plan_runtime::file_store::*;
+    let plan = read_plan(&plan_path_for_id("cancellable").unwrap()).unwrap();
+    assert!(matches!(plan.frontmatter.mode, PlanFileMode::Pending));
+    cleanup_home(&home);
+}
+
+#[test]
+fn cancel_outside_exec_is_noop() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    assert!(rt.demote_to_pending_on_cancel().unwrap().is_none());
+
+    rt.enter_planning("obj").unwrap();
+    assert!(rt.demote_to_pending_on_cancel().unwrap().is_none());
+    assert!(matches!(rt.mode(), PlanMode::Planning));
+    cleanup_home(&home);
+}
+
+#[test]
+fn cancel_token_releases_plan_lock() {
+    // D1 防御：demote 写盘后 lock 必须释放，否则下次 build 抢锁会超时
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::with_lock_timeout("session-a", 200);
+    write_disk_plan("lockable", PlanFileMode::Planning);
+    rt.build_plan("lockable", None).unwrap();
+    rt.demote_to_pending_on_cancel().unwrap();
+
+    // 再 build 同 plan_id（pending 续跑），如果上次 demote 没释放锁，这里 LockBusy
+    let rt2 = PlanRuntime::with_lock_timeout("session-b", 200);
+    let outcome = rt2
+        .build_plan("lockable", None)
+        .expect("demote 后 lock 应已释放，再 build 应成功");
+    assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Pending));
+    cleanup_home(&home);
+}
+
+#[test]
+fn finalize_completed_to_chat_clears_first_exec_turn() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("done_path", PlanFileMode::Planning);
+    rt.build_plan("done_path", None).unwrap();
+    assert!(rt.first_exec_turn_pending_for_test());
+    // 模拟 update_plan 派生 completed
+    rt.set_mode_completed("done_path".into());
+    let pid = rt.finalize_completed_to_chat().expect("Some(plan_id)");
+    assert_eq!(pid, "done_path");
+    assert!(matches!(rt.mode(), PlanMode::Chat));
+    assert!(!rt.first_exec_turn_pending_for_test());
+    // 非 Completed 状态调一次 → None
+    assert!(rt.finalize_completed_to_chat().is_none());
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_mode_raw_edit_blocked_for_plan_files_in_planning_and_executing() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("guarded", PlanFileMode::Planning);
+    use crate::api::chat::plan_runtime::file_store::*;
+    let plan_path = plan_path_for_id("guarded").unwrap();
+
+    // CHAT 模式 → 允许（无 PLAN/EXEC 守卫）
+    assert!(matches!(rt.mode(), PlanMode::Chat));
+    assert!(rt.allow_raw_edit_to_path(&plan_path));
+
+    // Planning 模式 → 拒
+    rt.enter_planning("obj").unwrap();
+    assert!(!rt.allow_raw_edit_to_path(&plan_path));
+
+    // Executing 模式 → 拒
+    rt.exit_to_chat().unwrap();
+    rt.build_plan("guarded", None).unwrap();
+    assert!(!rt.allow_raw_edit_to_path(&plan_path));
+
+    // 非 plan 文件 → 始终允许
+    let other = home.join(".tomcat").join("notes.md");
+    std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+    std::fs::write(&other, "ok").unwrap();
+    assert!(rt.allow_raw_edit_to_path(&other));
+    cleanup_home(&home);
+}
+
 #[test]
 fn plan_build_atomic_rollback_on_write_failure() {
     // 制造 write_plan 失败：把 ~/.tomcat/plans 替换为只读普通文件 → write 时 sync_all 或 rename 失败。
