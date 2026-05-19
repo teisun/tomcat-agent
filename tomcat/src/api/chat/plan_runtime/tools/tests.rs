@@ -23,6 +23,13 @@ fn home_lock() -> &'static Mutex<()> {
     M.get_or_init(|| Mutex::new(()))
 }
 
+/// **模块级**记录的首个 HOME 快照（在第一次 setup_isolated_home 前抓取，永不更新）。
+/// 用于 cleanup_home 还原 — 避免 HOME 污染其他 suite（permission gate / cli config_keys）。
+fn orig_home() -> &'static Option<String> {
+    static ORIG_HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ORIG_HOME.get_or_init(|| std::env::var("HOME").ok())
+}
+
 fn setup_isolated_home() -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
         "tomcat_tools_test_home_{}_{}",
@@ -33,12 +40,19 @@ fn setup_isolated_home() -> std::path::PathBuf {
             .as_nanos()
     ));
     std::fs::create_dir_all(p.join(".tomcat").join("plans")).unwrap();
+    // 在覆盖 HOME 之前先 lazy-init ORIG_HOME — 保证它一定捕获到原始 HOME。
+    let _ = orig_home();
     std::env::set_var("HOME", &p);
     p
 }
 
+/// 测试结束后清理 tmp + 还原 HOME（防 D-test：HOME 污染破坏 permission gate / cli config_keys 等套件）。
 fn cleanup_home(p: &std::path::Path) {
     let _ = std::fs::remove_dir_all(p);
+    match orig_home() {
+        Some(h) => std::env::set_var("HOME", h),
+        None => std::env::remove_var("HOME"),
+    }
 }
 
 // ─── create_plan ────────────────────────────────────────────────────────────
@@ -991,6 +1005,88 @@ fn cancel_outside_exec_is_noop() {
     rt.enter_planning("obj").unwrap();
     assert!(rt.demote_to_pending_on_cancel().unwrap().is_none());
     assert!(matches!(rt.mode(), PlanMode::Planning));
+    cleanup_home(&home);
+}
+
+#[test]
+fn attach_cancel_hook_rebinds_replaces_old_token() {
+    // D2 防御：每轮 readline 后必须重挂 cancel_token；attach_cancel_hook 应替换上一轮 token
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let first = tokio_util::sync::CancellationToken::new();
+    rt.attach_cancel_hook(first.clone());
+    let cur = rt.current_cancel_token().expect("有 token");
+    assert!(!cur.is_cancelled());
+
+    let second = tokio_util::sync::CancellationToken::new();
+    rt.attach_cancel_hook(second.clone());
+    let cur2 = rt.current_cancel_token().expect("有 token");
+    // 触发上一轮 token：current_cancel_token 应仍未 cancel
+    first.cancel();
+    assert!(!cur2.is_cancelled(), "上一轮 cancel 不应影响新 token");
+    // 触发本轮 token：current 立即 cancelled
+    second.cancel();
+    let cur3 = rt.current_cancel_token().expect("有 token");
+    assert!(cur3.is_cancelled());
+    cleanup_home(&home);
+}
+
+#[test]
+fn concurrent_write_plan_serialized_by_lock() {
+    // D9 防御：双 thread 并发 write_plan 同一 plan_id，advisory lock 串行 → 不破坏数据。
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    use crate::api::chat::plan_runtime::file_store::*;
+    let path = plan_path_for_id("hot_plan").unwrap();
+    let base = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: "hot_plan".into(),
+            goal: "concurrent".into(),
+            mode: PlanFileMode::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: "2026-05-19T00:00:00Z".into(),
+            schema_version: 1,
+            milestones: vec![],
+            todos: vec![],
+            unknown: Default::default(),
+        },
+        body: "## seed\n".into(),
+    };
+    write_plan(&path, &base, 2000).unwrap();
+    // 两个线程同时把 todos 列表覆盖为不同内容，每个跑 5 轮。
+    let p1 = path.clone();
+    let p2 = path.clone();
+    let h1 = std::thread::spawn(move || {
+        for i in 0..5 {
+            let mut plan = read_plan(&p1).unwrap();
+            plan.frontmatter.todos = vec![TodoItem {
+                id: format!("t{i}-a"),
+                content: format!("a-{i}"),
+                status: TodoStatus::Pending,
+                milestone_id: None,
+            }];
+            write_plan(&p1, &plan, 2000).unwrap();
+        }
+    });
+    let h2 = std::thread::spawn(move || {
+        for i in 0..5 {
+            let mut plan = read_plan(&p2).unwrap();
+            plan.frontmatter.todos = vec![TodoItem {
+                id: format!("t{i}-b"),
+                content: format!("b-{i}"),
+                status: TodoStatus::Pending,
+                milestone_id: None,
+            }];
+            write_plan(&p2, &plan, 2000).unwrap();
+        }
+    });
+    h1.join().unwrap();
+    h2.join().unwrap();
+    // 任意时刻磁盘 plan 都必须可解析、frontmatter 合法
+    let final_plan = read_plan(&path).expect("最终态可解析");
+    validate_frontmatter_invariants(&final_plan.frontmatter).expect("最终态合法");
     cleanup_home(&home);
 }
 
