@@ -386,11 +386,10 @@ pub struct CliTurnRendererListenerIds {
 
 /// 工具调用单行摘要（`[tool] {name}  {summary}` 中间那段）。
 ///
-/// 内置 read/write/edit/bash 用更友好的字段；其他工具退回 `arg=value` 串联，
-/// 最长截断到 120 个 char，避免长 JSON 顶满终端。
+/// 内置 read/write/edit/bash 用更友好的字段；其他工具退回 `arg=value` 串联。
+/// bash 完整展示 command+argv（不截断）；其余工具最长 120 char。
 pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
     const DEFAULT_MAX_CHARS: usize = 120;
-    const BASH_MAX_CHARS: usize = 512;
     let summary = match tool_name {
         "read" | "read_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -411,20 +410,22 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             format!("path={} (replace)", path)
         }
-        "bash" | "shell" | "execute_command" => format!("command={}", shell_command_preview(args)),
+        "bash" | "shell" | "execute_command" => {
+            format!("command={}", shell_command_preview(args))
+        }
         _ => {
             // 通用回退：JSON 化后压成一行
             args.to_string().replace('\n', " ")
         }
     };
-    let max_chars = if matches!(tool_name, "bash" | "shell" | "execute_command") {
-        BASH_MAX_CHARS
+    if matches!(tool_name, "bash" | "shell" | "execute_command") {
+        summary
     } else {
-        DEFAULT_MAX_CHARS
-    };
-    truncate_chars(&summary, max_chars)
+        truncate_chars(&summary, DEFAULT_MAX_CHARS)
+    }
 }
 
+/// bash 工具摘要：完整展示 command + argv，不截断、不只取脚本首行。
 fn shell_command_preview(args: &Value) -> String {
     let command = args
         .get("command")
@@ -437,55 +438,32 @@ fn shell_command_preview(args: &Value) -> String {
         .map(|items| items.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
 
-    if let Some(script_preview) = shell_script_preview_from_argv(&argv) {
-        return script_preview;
-    }
-
     if !argv.is_empty() {
         let joined_argv = argv.join(" ");
-        let combined = if command.is_empty() {
-            joined_argv
+        if command.is_empty() {
+            bash_command_for_terminal(&joined_argv)
         } else {
-            format!("{} {}", command, joined_argv)
-        };
-        let first = first_non_empty_line(&combined);
-        if !first.is_empty() {
-            return first;
+            bash_command_for_terminal(&format!("{command} {joined_argv}"))
         }
-    }
-
-    let first = first_non_empty_line(command);
-    if first.is_empty() {
-        command.to_string()
+    } else if command.is_empty() {
+        String::new()
     } else {
-        first
+        bash_command_for_terminal(command)
     }
 }
 
-fn shell_script_preview_from_argv(argv: &[&str]) -> Option<String> {
-    if argv.len() < 2 {
-        return None;
-    }
-    let launcher_flag = argv[0];
-    if launcher_flag == "-c"
-        || launcher_flag == "-lc"
-        || launcher_flag == "/c"
-        || launcher_flag == "/C"
-    {
-        let first = first_non_empty_line(argv[1]);
-        if !first.is_empty() {
-            return Some(first);
-        }
-    }
-    None
-}
-
-fn first_non_empty_line(text: &str) -> String {
-    text.lines()
+/// 把多行脚本压成单行展示，但保留全部非空内容（不截断字符）。
+fn bash_command_for_terminal(text: &str) -> String {
+    let lines: Vec<&str> = text
+        .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .to_string()
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        text.trim().to_string()
+    } else {
+        lines.join(" ")
+    }
 }
 
 /// 解析 `tool_execution_end.result`：plan 工具等常把 JSON 对象序列化成字符串落盘。
