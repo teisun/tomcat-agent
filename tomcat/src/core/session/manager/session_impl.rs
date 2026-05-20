@@ -150,9 +150,7 @@ impl SessionManager {
     pub fn switch_current_to_session_id(&self, session_id: &str) -> Result<SessionEntry, AppError> {
         let path = self.transcript_path(session_id);
         if !path.exists() {
-            return Err(AppError::Config(format!(
-                "会话不存在: {session_id}"
-            )));
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
         }
 
         let header = read_header(&path)?;

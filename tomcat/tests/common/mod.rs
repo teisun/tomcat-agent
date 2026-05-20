@@ -32,8 +32,7 @@ pub fn setup_logging() {
 
 /// 在 `~/.tomcat/temp/` 下创建本次 E2E 专用子目录（已默认在 workspace_roots 内）。
 pub fn dot_tomcat_e2e_workdir(label: &str) -> std::path::PathBuf {
-    let base =
-        tomcat::resolve_dot_tomcat_temp_dir().expect("resolve ~/.tomcat/temp");
+    let base = tomcat::resolve_dot_tomcat_temp_dir().expect("resolve ~/.tomcat/temp");
     let dir = base.join(format!(
         "{label}_{}_{}",
         std::process::id(),
@@ -60,9 +59,7 @@ pub fn repo_workspace_temp_logs_dir() -> std::path::PathBuf {
 
 /// 生成适合文件名的时间戳。
 pub fn filename_timestamp() -> String {
-    chrono::Local::now()
-        .format("%Y%m%d_%H%M%S_%3f")
-        .to_string()
+    chrono::Local::now().format("%Y%m%d_%H%M%S_%3f").to_string()
 }
 
 /// 把任意文本收敛成低噪音 ASCII 文件名片段。
@@ -104,10 +101,7 @@ pub fn begin_fresh_default_session(
 }
 
 /// 把固定 DEFAULT_SESSION_KEY 回切到指定 session_id。
-pub fn switch_default_session(
-    sessions_dir: &Path,
-    session_id: &str,
-) -> tomcat::SessionEntry {
+pub fn switch_default_session(sessions_dir: &Path, session_id: &str) -> tomcat::SessionEntry {
     let mgr = tomcat::SessionManager::new(sessions_dir.to_path_buf());
     mgr.switch_current_to_session_id(session_id)
         .expect("switch default session for e2e")
@@ -155,9 +149,7 @@ pub fn extract_created_plan_from_messages(
     })
 }
 
-pub fn extract_created_plan_from_transcript_path(
-    transcript_path: &Path,
-) -> Option<CreatedPlanRef> {
+pub fn extract_created_plan_from_transcript_path(transcript_path: &Path) -> Option<CreatedPlanRef> {
     let content = std::fs::read_to_string(transcript_path).ok()?;
     content.lines().rev().find_map(|line| {
         let value: serde_json::Value = serde_json::from_str(line).ok()?;

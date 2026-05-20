@@ -17,12 +17,15 @@ use tomcat::api::chat::plan_runtime::{
         Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, Question,
         QuestionOption, CUSTOM_OPTION_ID,
     },
-    file_store::{PlanFileMode, TodoStatus},
+    file_store::{
+        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
+    },
     mode::PlanMode,
     review::ReviewSummary,
     tools::{create_plan, todos, update_plan},
     PlanRuntime, ReviewerDispatcher,
 };
+use tomcat::normalize_path;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -53,6 +56,29 @@ fn cleanup_home(p: &std::path::Path) {
         Some(h) => std::env::set_var("HOME", h),
         None => std::env::remove_var("HOME"),
     }
+}
+
+fn write_external_plan(path: &std::path::Path, plan_id: &str) {
+    let fm = PlanFileFrontmatter {
+        plan_id: plan_id.into(),
+        goal: "external build target".into(),
+        mode: PlanFileMode::Planning,
+        session_key: Some("orig-session-key".into()),
+        session_id: Some("orig-uuid".into()),
+        created_at: "2026-05-19T00:00:00Z".into(),
+        schema_version: 1,
+        todos: vec![TodoItem {
+            id: "t1".into(),
+            content: "ship it".into(),
+            status: TodoStatus::Pending,
+        }],
+        unknown: Default::default(),
+    };
+    let plan = PlanFile {
+        frontmatter: fm,
+        body: "## Goal\nbuild by explicit path\n".into(),
+    };
+    write_plan(path, &plan, 1000).unwrap();
 }
 
 /// HOME 隔离测试串行化（plan tools 测试改 HOME，并发会互踩）。
@@ -234,6 +260,54 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
     })
     .await
     .expect("cancel→resume 超时");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
+    let _g = home_lock().lock();
+    let home = isolated_home();
+    let rt = PlanRuntime::new("ses-path");
+    let external_dir = home.join("external-plans");
+    std::fs::create_dir_all(&external_dir).unwrap();
+    let external_path = external_dir.join("custom.plan.md");
+    write_external_plan(&external_path, "external_path_plan");
+    let expected_path = normalize_path(&external_path.to_string_lossy()).unwrap();
+
+    tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let out = rt
+            .build_plan(&external_path.to_string_lossy(), Some("uuid-path".into()))
+            .unwrap();
+        assert_eq!(out.plan_id, "external_path_plan");
+        assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
+        assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+
+        let out_final = update_plan::execute(
+            &rt,
+            update_plan::UpdatePlanArgs {
+                plan_id: None,
+                path: None,
+                replace: false,
+                ops: vec![update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                }],
+            },
+        )
+        .unwrap();
+        let expected_path_str = expected_path.to_string_lossy().to_string();
+        assert_eq!(out_final["path"].as_str(), Some(expected_path_str.as_str()));
+
+        let final_plan = read_plan(&external_path).unwrap();
+        assert!(matches!(
+            final_plan.frontmatter.mode,
+            PlanFileMode::Completed
+        ));
+        assert!(matches!(rt.mode(), PlanMode::Completed { .. }));
+    })
+    .await
+    .expect("build by path 超时");
     cleanup_home(&home);
 }
 

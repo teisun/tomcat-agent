@@ -85,7 +85,10 @@ fn run_session_switch_existing_returns_ok() {
     let mgr = crate::SessionManager::new(crate::resolve_sessions_dir(&cfg).unwrap());
     let first = mgr.current_session_id().unwrap().expect("first session id");
     let _ = run_session(SessionSub::New, &cfg);
-    let second = mgr.current_session_id().unwrap().expect("second session id");
+    let second = mgr
+        .current_session_id()
+        .unwrap()
+        .expect("second session id");
     assert_ne!(first, second, "第二次 new 应生成新的 session_id");
     let r = run_session(
         SessionSub::Switch {

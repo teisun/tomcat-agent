@@ -180,7 +180,7 @@ pub fn execute(
     let path = plan_path_for_id(&plan_id)?;
     write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
-    runtime.set_active_planning_plan_id(plan_id.clone());
+    runtime.set_active_planning_plan(plan_id.clone(), path.clone());
     runtime.write_transcript_custom(serde_json::json!({
         "event": crate::infra::wire::WIRE_PLAN_CREATE,
         "plan_id": plan_id,

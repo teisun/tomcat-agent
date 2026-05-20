@@ -21,7 +21,7 @@
 //!
 //! diff 文本由 [`super::super::diff::build_simple_diff`] 生成（副作用日志，调用结果可丢弃）。
 
-use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
+use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::pipeline::edit_normalize::{
     detect_line_ending, fold_curly_quotes, normalize_to_lf, restore_line_endings, strip_bom,
@@ -42,6 +42,9 @@ pub(super) async fn write_file_impl(
     overwrite: bool,
     plugin_id: &str,
 ) -> Result<WriteFileResult, AppError> {
+    if let Some(err) = url_like_fs_miss(path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Write, path, plugin_id)
         .await?;
@@ -141,6 +144,9 @@ pub(super) async fn edit_file_impl(
     edits: Vec<EditOperation>,
     plugin_id: &str,
 ) -> Result<EditFileResult, AppError> {
+    if let Some(err) = url_like_fs_miss(path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
         .await?;

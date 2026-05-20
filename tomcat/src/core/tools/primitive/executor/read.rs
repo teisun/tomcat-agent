@@ -9,7 +9,7 @@
 //! 由 [`super`]（`executor/mod.rs`）通过 `pub(crate) use` 重新对外，保持
 //! `primitive::executor::xxx` 引用路径在子模块化前后完全等价。
 
-use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
+use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::primitive::{
     DirEntry, PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult,
@@ -299,6 +299,9 @@ pub(super) async fn read_file_impl(
     path: &str,
     plugin_id: &str,
 ) -> Result<String, AppError> {
+    if let Some(err) = url_like_fs_miss(path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
@@ -351,6 +354,9 @@ pub(super) async fn read_impl(
     hashline: bool,
     plugin_id: &str,
 ) -> Result<ReadResult, AppError> {
+    if let Some(err) = url_like_fs_miss(path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;
@@ -511,6 +517,9 @@ pub(super) async fn list_dir_impl(
     path: &str,
     plugin_id: &str,
 ) -> Result<Vec<DirEntry>, AppError> {
+    if let Some(err) = url_like_fs_miss(path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, path, plugin_id)
         .await?;

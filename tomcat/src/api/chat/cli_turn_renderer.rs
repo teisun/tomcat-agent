@@ -525,7 +525,11 @@ pub fn result_summary(result: &Value, is_error: bool) -> String {
 }
 
 /// 工具结果摘要：优先使用结构化 `display`，否则退化到通用字段。
-pub fn result_summary_for_tool(result: &Value, display: Option<&ToolDisplay>, is_error: bool) -> String {
+pub fn result_summary_for_tool(
+    result: &Value,
+    display: Option<&ToolDisplay>,
+    is_error: bool,
+) -> String {
     const MAX_CHARS: usize = 80;
     if is_error {
         if let Some(s) = result.as_str() {

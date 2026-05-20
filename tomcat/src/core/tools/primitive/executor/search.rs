@@ -685,6 +685,9 @@ pub(super) async fn search_files_impl(
 
     let started = Instant::now();
     let requested_path = args.path.clone().unwrap_or_else(|| ".".to_string());
+    if let Some(err) = super::helpers::url_like_fs_miss(&requested_path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Read, &requested_path, plugin_id)
         .await?;

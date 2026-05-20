@@ -903,12 +903,12 @@ pub async fn run_chat_turn(
         _ => system_text.to_string(),
     };
     let current_plan_path = match &plan_mode {
-        plan_runtime::PlanMode::Planning => ctx
-            .plan_runtime
-            .active_planning_plan_id()
-            .and_then(|plan_id| plan_runtime::file_store::plan_path_for_id(&plan_id).ok()),
-        plan_runtime::PlanMode::Executing { plan_id } => {
-            plan_runtime::file_store::plan_path_for_id(plan_id).ok()
+        plan_runtime::PlanMode::Planning | plan_runtime::PlanMode::Executing { .. } => {
+            ctx.plan_runtime.active_plan_path().or_else(|| {
+                ctx.plan_runtime
+                    .active_planning_plan_id()
+                    .and_then(|plan_id| plan_runtime::file_store::plan_path_for_id(&plan_id).ok())
+            })
         }
         plan_runtime::PlanMode::Chat
         | plan_runtime::PlanMode::Pending { .. }

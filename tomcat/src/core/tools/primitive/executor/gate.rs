@@ -13,7 +13,7 @@
 use super::helpers::op_summary;
 use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{
-    GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionScope,
+    is_url_like, GrantTrace, GrantTrigger, GrantType, PermissionDecision, PermissionScope,
 };
 use crate::core::tools::contract::confirmation::ConfirmDecision;
 use crate::core::tools::primitive::PrimitiveOperation;
@@ -34,6 +34,18 @@ impl DefaultPrimitiveExecutor {
         path: &str,
         plugin_id: &str,
     ) -> Result<(PathBuf, PermissionScope, GrantTrace), AppError> {
+        if is_url_like(path) && op != PrimitiveOperation::Bash {
+            let scope = match op {
+                PrimitiveOperation::Read => PermissionScope::Read,
+                PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionScope::Write,
+                PrimitiveOperation::Bash => unreachable!("bash URL-like path should never bypass"),
+            };
+            return Ok((
+                PathBuf::from(path),
+                scope,
+                GrantTrace::new(GrantType::SessionScope, GrantTrigger::BuiltinDefault),
+            ));
+        }
         let gate = &self.gate;
         let normalized = normalize_path(path)?;
         loop {

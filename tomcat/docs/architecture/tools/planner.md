@@ -6,7 +6,7 @@
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
-**说人话**：PLAN 模式是会话开关，EXEC 模式是 PLAN 结束后用户拍板开干的状态——`/plan` 进 PLAN、`/plan exit` 退出回 CHAT、`/plan build <plan_id>` 进 EXEC；完成由 runtime 自动派生（全 todos completed），中断由 cancel_token 自动转 pending。进 PLAN/EXEC 模式后，runtime 给 LLM **在 system 区段尾部**注一段 reminder、把 catalog 切到模式集、给每条 user message 加 `[mode: PLAN]` / `[mode: EXEC plan_id=…]` 前缀。
+**说人话**：PLAN 模式是会话开关，EXEC 模式是 PLAN 结束后用户拍板开干的状态——`/plan` 进 PLAN、`/plan exit` 退出回 CHAT、`/plan build <plan_id/path>` 进 EXEC；完成由 runtime 自动派生（全 todos completed），中断由 cancel_token 自动转 pending。进 PLAN/EXEC 模式后，runtime 给 LLM **在 system 区段尾部**注一段 reminder、把 catalog 切到模式集、给每条 user message 加 `[mode: PLAN]` / `[mode: EXEC plan_id=…]` 前缀。
 
 ---
 
@@ -35,9 +35,9 @@
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
 | **PLAN 模式（Planner Mode）** | 会话被切到「规划」语义下 | `PlanRuntime.mode == Planning` | 由本地命令 `/plan` 进入；非 LLM 工具；非 subagent | 一种会话模式。 |
-| **EXEC 模式（Executing）** | 推进 `PlanFile` 待办的执行态 | `PlanRuntime.mode == Executing` | 由本地命令 `/plan build <plan_id>` 进入；catalog 切 EXEC 集；首轮注入 plan 全文 | 真正开干的模式。 |
+| **EXEC 模式（Executing）** | 推进 `PlanFile` 待办的执行态 | `PlanRuntime.mode == Executing` | 由本地命令 `/plan build <plan_id/path>` 进入；catalog 切 EXEC 集；首轮注入 plan 全文 | 真正开干的模式。 |
 | **CHAT 模式** | 默认普通聊天 | `PlanRuntime.mode == Chat` | catalog = 全工具集 + `todos` − `create_plan` | 不在规划也不在执行的日常。 |
-| **`/plan` 命令族** | 控制 PLAN/EXEC 模式与计划闭环的本地 slash | `src/api/chat/commands/cmd_plan.rs`（拟定） | 解析在本地完成，不丢给 LLM；`/plan` / `/plan exit` / `/plan build <plan_id>` 三条 | 用户控会话流的把手。 |
+| **`/plan` 命令族** | 控制 PLAN/EXEC 模式与计划闭环的本地 slash | `src/api/chat/commands/cmd_plan.rs`（拟定） | 解析在本地完成，不丢给 LLM；`/plan` / `/plan exit` / `/plan build <plan_id/path>` 三条 | 用户控会话流的把手。 |
 | **PLANNER_SYSTEM_REMINDER** | 进入 PLAN 模式时注入到 transcript **system 区段尾部**的 `<system_reminder kind="planner">` | 进程内常量 + 装配阶段注入 | 仅在 `Planning` 期间存在；切换后下一轮装配不再注入 | 规划模式提示词。 |
 | **EXECUTOR_SYSTEM_REMINDER** | 进入 EXEC 模式时注入到 **system 区段尾部**的 `<system_reminder kind="executor">` | 进程内常量 + 装配阶段注入 | 仅在 `Executing` 期间存在；切换后下一轮装配不再注入 | 执行模式提示词。 |
 | **user message mode prefix** | PLAN/EXEC 模式下给每条 user message 前缀加 `[mode: PLAN]` / `[mode: EXEC plan_id=…]` | runtime 在 LLM 请求装配阶段贴；详见 §7.3 | CHAT 不贴；不污染 transcript JSONL | 每条消息都贴模式 tag。 |
@@ -130,7 +130,7 @@
 | 维度 | 关切 | 说人话 |
 |------|------|--------|
 | P1 形态 | slash + reminder + catalog + user prefix，非 LLM tool / 非 subagent | 会话开关四件套。 |
-| P2 进入 | `/plan` / `/plan build <plan_id>` 本地命令 | 用户控进入。 |
+| P2 进入 | `/plan` / `/plan build <plan_id/path>` 本地命令 | 用户控进入。 |
 | P3 catalog | `current_mode()` 驱动白名单 | 按 mode 真裁工具。 |
 | P4 退出 | `/plan exit`（仅 PLAN）、`/plan build`（PLAN→EXEC）、自动完成 / 自动 pending | 不要 close 命令。 |
 
@@ -210,10 +210,10 @@
 |------|--------|--------|----------|--------|
 | `/plan` | 本地 chat 命令解析（不入 LLM） | 写 `goal`、`mode = Planning`，注入 PLANNER reminder 到 system 区段尾部，catalog 切到 PLAN 集（含写盘路径白名单 `~/.tomcat/plans/*.plan.md`），user prefix 切 `[mode: PLAN]` | 当前 session 无 active 计划（`mode != Planning && mode != Executing`） | 进 PLAN 模式。 |
 | `/plan exit` | 本地 | `mode = Chat`；保留 PlanFile 不动（不写盘、不改 frontmatter）；reminder/catalog/prefix 复位 CHAT；写 `plan.exit` 事件 | **`mode == Planning` 仅可用**；其他状态友好提示 | 不要这次规划了，回到 CHAT。 |
-| `/plan build <plan_id>` | 本地 | runtime 5 件事（详见 [`plan-runtime.md`](../plan-runtime.md) §5.1）：① 写 `frontmatter.session_key/session_id`；② `frontmatter.mode = executing`；③ swap reminder PLANNER→EXECUTOR；④ user prefix 切 `[mode: EXEC plan_id=…]`，首轮注入 user meta plan body；⑤ catalog 切 EXEC 集 | `当前 session 无 active plan && 无 active todos`；指定的 PlanFile `mode ∈ {planning, pending}` | 把审过 / 续跑的计划推到执行态。 |
+| `/plan build <plan_id/path>` | 本地 | runtime 5 件事（详见 [`plan-runtime.md`](../plan-runtime.md) §5.1）：① 写 `frontmatter.session_key/session_id`；② `frontmatter.mode = executing`；③ swap reminder PLANNER→EXECUTOR；④ user prefix 切 `[mode: EXEC plan_id=…]`，首轮注入 user meta plan body；⑤ catalog 切 EXEC 集 | `当前 session 无 active plan && 无 active todos`；指定的 PlanFile `mode ∈ {planning, pending}` | 把审过 / 续跑的计划推到执行态。 |
 
 > **历史命令下线**（详见 §14）：
-> - `/plan apply` → `/plan build <plan_id>`
+> - `/plan apply` → `/plan build <plan_id/path>`
 > - `/plan close [completed\|cancelled]` → 移除；完成由 runtime 自动派生（全 todos completed），暂停由 cancel_token 自动 pending
 > - `/plan show` → 暂缓；用户直接打开 `.plan.md`
 > - `/goal` → 暂缓；目标在进入 PLAN 后通过自然对话收敛
@@ -331,7 +331,7 @@ You are now in PLAN mode. Behavior contract (12 rules; D-plan):
     `ask_question`.
 
 12. To leave PLAN mode, the user issues `/plan exit` (back to CHAT) or
-    `/plan build <plan_id>` (into EXEC). Do NOT attempt to leave via
+    `/plan build <plan_id/path>` (into EXEC). Do NOT attempt to leave via
     tool calls. Once the user issues `/plan build`, the runtime will swap the
     system reminder, prefix, and catalog automatically.
 </system_reminder>
@@ -605,7 +605,7 @@ impl PlanRuntime {
                   transcript: plan.exit
 ```
 
-### 8.3 `/plan build <plan_id>` 进入 EXEC（含 pending 续跑）
+### 8.3 `/plan build <plan_id/path>` 进入 EXEC（含 pending 续跑）
 
 ```text
 用户 ──/plan build <id|path>──▶ build_plan()
@@ -678,14 +678,14 @@ EXEC 中：
             ┌──────────┐                                │
             │ Planning │── /plan exit ──────────────────┤
             └────┬─────┘                                │
-                 │ /plan build <plan_id>           │
+                 │ /plan build <plan_id/path>           │
                  ▼                                      │
             ┌──────────────┐                             │
             │  Executing   │── all todos completed ────▶│
             └──────┬───────┘                             │
                    │ cancel_token / SIGTERM / parent abort│
                    ▼                                     │
-            ┌──────────┐  /plan build <plan_id>          │
+            ┌──────────┐  /plan build <plan_id/path>          │
             │ Pending  │────────────────────────▶ Executing
             └──────────┘
                 ▲
@@ -702,13 +702,13 @@ EXEC 中：
 | `Planning` | LLM 调 `create_plan(...)` | `Planning` | tool 内 advisory lock + 写 `PlanFile` + 内部派 reviewer；mode 不变 | 模型写计划。 |
 | `Planning` | reviewer 返回 summary | `Planning` | 摘要落 transcript `plan.review`、内存 `last_review_summary` 更新；**不**改 mode、**不**改 frontmatter | 审稿员只挑刺。 |
 | `Planning` | `/plan exit` | `Chat` | reminder/catalog/prefix 复位 CHAT；保留 PlanFile 不动；写 `plan.exit` 事件 | 中途取消规划。 |
-| `Planning` | `/plan build <plan_id>`（指向当前 session 创建的 plan） | `Executing` | runtime 5 件事；可选 `record(Manual{plan_build:plan_id})` | 现在才算正式开干。 |
-| `Chat` | `/plan build <plan_id>`（续跑 pending） | `Executing` | 同上 + warning「旧 session 已覆盖」 | 续跑被打断的 plan。 |
+| `Planning` | `/plan build <plan_id/path>`（指向当前 session 创建的 plan） | `Executing` | runtime 5 件事；可选 `record(Manual{plan_build:plan_id})` | 现在才算正式开干。 |
+| `Chat` | `/plan build <plan_id/path>`（续跑 pending） | `Executing` | 同上 + warning「旧 session 已覆盖」 | 续跑被打断的 plan。 |
 | `Executing` | `todos` 更新但未完结 | `Executing` | 更新 frontmatter `todos[]` + panel；返回 full items snapshot | 干活中。 |
 | `Executing` | 所有 todo `= completed` | `Completed` | 自动写 frontmatter `mode=completed`；reminder/catalog/prefix 复位 CHAT；写 `plan.complete` 事件 | 做完了。 |
 | `Executing` | cancel_token / SIGTERM / parent abort | `Pending` | 写 frontmatter `mode=pending`；reminder/catalog/prefix 复位 CHAT；写 `plan.pending` 事件 | 被打断转 pending。 |
 | `Completed` | 用户开新 plan（`/plan`） | `Planning` | 与 `Chat → Planning` 同 | 开下一盘。 |
-| `Pending` | `/plan build <plan_id>` | `Executing` | 续跑流程 | 续跑。 |
+| `Pending` | `/plan build <plan_id/path>` | `Executing` | 续跑流程 | 续跑。 |
 
 完整运行时编排见 [`plan-runtime.md`](../plan-runtime.md) §8。
 
@@ -795,7 +795,7 @@ EXEC 中：
 | ~~`Idle` 模式名~~ | **替代**：改名为 `Chat`，更直观。 | 默认状态叫 CHAT。 |
 | ~~`ReadyToApply` 中间态~~ | **下线**：reviewer 仅辅助、不做 gate；从 `Planning` 直接经 `/plan build` 跳 `Executing`。 | 状态机少一档。 |
 | ~~`Cancelled` 状态~~ | **下线**：cancel_token / 进程退出统一记为 `Pending`，可被 `/plan build` 续跑；用户不要 → `/plan exit` 退 PLAN 文件留着。 | 留可续跑余地，不强收口。 |
-| ~~`/plan apply` 进执行态~~ | **替代**：改名 `/plan build <plan_id>`，承载 5 件事。 | apply 字面不够，build 涵盖更多。 |
+| ~~`/plan apply` 进执行态~~ | **替代**：改名 `/plan build <plan_id/path>`，承载 5 件事。 | apply 字面不够，build 涵盖更多。 |
 | ~~`/plan close [completed\|cancelled]`~~ | **下线**：完成由 runtime 自动派生；不要可以 `/plan exit`；cancel 由 cancel_token 自动 pending。 | 状态自然演化。 |
 | ~~`/plan show` 命令~~ | **暂缓**：用户直接打开 `.plan.md` 看。 | 用文件代替命令。 |
 | ~~独立 `/goal` 命令~~ | **暂缓**：目标在进入 PLAN 后通过自然对话收敛。 | 简化命令族。 |

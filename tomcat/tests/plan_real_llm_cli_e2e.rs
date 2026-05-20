@@ -6,6 +6,7 @@
 //! - 进程 A：`tomcat chat` + `/plan` + planning prompt；EOF 退出后落盘 mode=planning。
 //! - 测试主程：优先从本次 session transcript 提取 `create_plan` 结果。
 //! - 进程 B：`tomcat chat --resume` + `/plan build {plan_id}` + exec prompt；EOF 退出后落盘 mode=completed。
+//!   这个真 LLM 用例继续覆盖 `plan_id` 入口；`/plan build <path>` 由 runtime 集成测试单独回归。
 //!
 //! 拆两个进程是因为 stdin 是一次性写完的（rustyline pipe 行为）：测试主程必须能在
 //! 进程 A 结束后拿到真实派生的 `plan_id`，再写进程 B 的 stdin。
@@ -32,7 +33,9 @@ use std::time::Duration;
 
 use serial_test::serial;
 use tomcat::api::chat::plan_runtime::file_store::{read_plan, PlanFileMode, TodoStatus};
-use tomcat::{load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths};
+use tomcat::{
+    load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
+};
 
 const COUNTER_PLAN_GOAL: &str = "cli e2e: write counter.py that prints 0";
 const CUSTOM_PLAN_GOAL_ENV: &str = "TOMCAT_E2E_PLAN_GOAL";
@@ -353,7 +356,7 @@ fn run_tomcat_chat(
     phase: &str,
     args: &[&str],
     stdin_text: &str,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Output {
     let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
     cmd.current_dir(&fx.workdir)
@@ -463,7 +466,11 @@ fn text_delta_from_bytes(bytes: &[u8], cursor: &mut Utf8StreamCursor) -> Option<
                     let valid = err.valid_up_to();
                     let text = String::from_utf8_lossy(&chunk[..valid]).to_string();
                     cursor.carry = chunk[valid..].to_vec();
-                    if text.is_empty() { None } else { Some(text) }
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
                 }
             }
         }
@@ -563,17 +570,25 @@ fn push_live_delta_sections(
     }
 }
 
-fn push_changed_state_sections(body: &mut String, fx: &CliFixture, run_state: &mut CliRunDiagState) {
+fn push_changed_state_sections(
+    body: &mut String,
+    fx: &CliFixture,
+    run_state: &mut CliRunDiagState,
+) {
     if let Some(plan_snapshot) =
         changed_snapshot(format_focus_plan(fx), &mut run_state.last_plan_snapshot)
     {
         let _ = writeln!(body, "---- current plan snapshot (after above deltas) ----");
         body.push_str(&plan_snapshot);
     }
-    if let Some(workdir_snapshot) =
-        changed_snapshot(format_workdir_snapshot(fx), &mut run_state.last_workdir_snapshot)
-    {
-        let _ = writeln!(body, "---- current workdir snapshot (after above deltas) ----");
+    if let Some(workdir_snapshot) = changed_snapshot(
+        format_workdir_snapshot(fx),
+        &mut run_state.last_workdir_snapshot,
+    ) {
+        let _ = writeln!(
+            body,
+            "---- current workdir snapshot (after above deltas) ----"
+        );
         body.push_str(&workdir_snapshot);
     }
 }
@@ -614,7 +629,11 @@ fn dump_live_diag(
     }
 
     let mut out = String::new();
-    let _ = writeln!(&mut out, "\n==== [{label}] HOME = {} ====", fx.home.display());
+    let _ = writeln!(
+        &mut out,
+        "\n==== [{label}] HOME = {} ====",
+        fx.home.display()
+    );
     out.push_str(&body);
     emit_diag(fx, &out);
 }
@@ -643,7 +662,11 @@ fn dump_phase_summary(
     }
 
     let mut out = String::new();
-    let _ = writeln!(&mut out, "\n==== [{label}] HOME = {} ====", fx.home.display());
+    let _ = writeln!(
+        &mut out,
+        "\n==== [{label}] HOME = {} ====",
+        fx.home.display()
+    );
     out.push_str(&body);
     emit_diag(fx, &out);
 }
@@ -674,14 +697,22 @@ fn emit_plan_resolved_block(label: &str, fx: &CliFixture) {
     drop(run_state);
 
     let mut out = String::new();
-    let _ = writeln!(&mut out, "\n==== [{label}] HOME = {} ====", fx.home.display());
+    let _ = writeln!(
+        &mut out,
+        "\n==== [{label}] HOME = {} ====",
+        fx.home.display()
+    );
     out.push_str(&body);
     emit_diag(fx, &out);
 }
 
 fn dump_single_process_diag(label: &str, fx: &CliFixture, stdout: &[u8], stderr: &[u8]) {
     let mut text = String::new();
-    let _ = writeln!(&mut text, "\n==== [{label}] HOME = {} ====", fx.home.display());
+    let _ = writeln!(
+        &mut text,
+        "\n==== [{label}] HOME = {} ====",
+        fx.home.display()
+    );
     text.push_str(&format_focus_plan(fx));
     if let Some(tail) = tail_text_file(&fx.transcript_path, 80) {
         let _ = writeln!(
@@ -703,7 +734,7 @@ fn wait_for_child_output(
     mut child: std::process::Child,
     fx: &CliFixture,
     phase: &str,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Output {
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::new()));
@@ -748,28 +779,30 @@ fn wait_for_child_output(
                     );
                     last_heartbeat = std::time::Instant::now();
                 }
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let status = child.wait().unwrap_or_else(|_| panic!("kill+wait timeout"));
-                    let _ = stdout_handle.join();
-                    let _ = stderr_handle.join();
-                    let out = Output {
-                        status,
-                        stdout: stdout_buf.lock().unwrap().clone(),
-                        stderr: stderr_buf.lock().unwrap().clone(),
-                    };
-                    dump_single_process_diag(
-                        &format!("{phase}_timeout"),
-                        fx,
-                        &out.stdout,
-                        &out.stderr,
-                    );
-                    panic!(
-                        "tomcat chat 子进程超时 ({}s)；stdout={}\nstderr={}",
-                        timeout.as_secs(),
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr),
-                    );
+                if let Some(timeout) = timeout {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let status = child.wait().unwrap_or_else(|_| panic!("kill+wait timeout"));
+                        let _ = stdout_handle.join();
+                        let _ = stderr_handle.join();
+                        let out = Output {
+                            status,
+                            stdout: stdout_buf.lock().unwrap().clone(),
+                            stderr: stderr_buf.lock().unwrap().clone(),
+                        };
+                        dump_single_process_diag(
+                            &format!("{phase}_timeout"),
+                            fx,
+                            &out.stdout,
+                            &out.stderr,
+                        );
+                        panic!(
+                            "tomcat chat 子进程超时 ({}s)；stdout={}\nstderr={}",
+                            timeout.as_secs(),
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr),
+                        );
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(200));
             }
@@ -785,7 +818,11 @@ fn wait_for_child_output(
 
 fn dump_diag(label: &str, fx: &CliFixture, out_a: &Output, out_b: Option<&Output>) {
     let mut out = String::new();
-    let _ = writeln!(&mut out, "\n==== [{label}] HOME = {} ====", fx.home.display());
+    let _ = writeln!(
+        &mut out,
+        "\n==== [{label}] HOME = {} ====",
+        fx.home.display()
+    );
     out.push_str(&format_focus_plan(fx));
     if let Some(tail) = tail_text_file(&fx.transcript_path, 80) {
         let _ = writeln!(
@@ -873,6 +910,8 @@ fn run_cli_real_llm_case(
     workdir_override: Option<&Path>,
     planning_prompt_override: Option<PlanningPromptOverride>,
     exec_prompt_override: Option<ExecPromptOverride>,
+    planning_timeout: Option<Duration>,
+    exec_timeout: Option<Duration>,
     verify_artifact: ArtifactAssert,
 ) {
     common::setup_logging();
@@ -885,7 +924,7 @@ fn run_cli_real_llm_case(
     };
 
     let stdin_a = format!("/plan\n{prompt}\n", prompt = planning_prompt);
-    let out_a = run_tomcat_chat(&fx, "planning_proc", &[], &stdin_a, PLANNING_TIMEOUT);
+    let out_a = run_tomcat_chat(&fx, "planning_proc", &[], &stdin_a, planning_timeout);
     if !out_a.status.success() {
         dump_diag("proc_a_failed", &fx, &out_a, None);
         panic!("进程 A 退出码非 0: {:?}", out_a.status);
@@ -937,7 +976,7 @@ fn run_cli_real_llm_case(
         plan_id = plan_id,
         prompt = exec_prompt
     );
-    let out_b = run_tomcat_chat(&fx, "exec_proc", &["--resume"], &stdin_b, EXEC_TIMEOUT);
+    let out_b = run_tomcat_chat(&fx, "exec_proc", &["--resume"], &stdin_b, exec_timeout);
     if !out_b.status.success() {
         dump_diag("proc_b_failed", &fx, &out_a, Some(&out_b));
         panic!("进程 B 退出码非 0: {:?}", out_b.status);
@@ -989,6 +1028,8 @@ fn cli_full_plan_path_with_real_llm() {
         None,
         Some(build_counter_planning_prompt),
         Some(build_counter_exec_prompt),
+        Some(PLANNING_TIMEOUT),
+        Some(EXEC_TIMEOUT),
         assert_counter_artifact,
     );
 }
@@ -1005,6 +1046,7 @@ fn cli_full_plan_path_with_real_llm() {
 ///
 /// - `TOMCAT_E2E_PLAN_GOAL`：必填。
 /// - `TOMCAT_E2E_WORKDIR`：可选；不传则用 `~/.tomcat/temp/...` 临时目录。若指定，须在配置的 `workspace.workspace_roots` 可写根内。
+/// - 该观察用例不设 planning / exec 墙钟超时；仅保留 heartbeat 诊断输出。
 #[test]
 #[ignore = "manual real-LLM observation test; run with --ignored --nocapture"]
 #[serial]
@@ -1021,6 +1063,8 @@ fn cli_plan_path_with_real_llm_custom_goal() {
     run_cli_real_llm_case(
         &goal,
         workdir_buf.as_deref(),
+        None,
+        None,
         None,
         None,
         noop_artifact_assert,

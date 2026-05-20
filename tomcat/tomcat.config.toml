@@ -19,7 +19,7 @@ tool_cli_verbosity = "full"
 
 [llm.thinking]
 enabled = true
-level = "high"
+level = "xhigh"
 show = true
 persist = false
 print_to_stderr = false

@@ -1145,9 +1145,12 @@ use crate::api::chat::plan_runtime::PlanRuntimeError;
 
 /// 构造一个 planning 模式的 PlanFile 写盘，但**保持** PlanRuntime 当前为 Chat
 /// （模拟 "其他 session 留下的 planning plan"，本 session 用 build 续跑）。
-fn write_disk_plan(plan_id: &str, disk_mode: PlanFileMode) -> std::path::PathBuf {
+fn write_plan_file_at(
+    path: &std::path::Path,
+    plan_id: &str,
+    disk_mode: PlanFileMode,
+) -> std::path::PathBuf {
     use crate::api::chat::plan_runtime::file_store::*;
-    let path = plan_path_for_id(plan_id).unwrap();
     let fm = PlanFileFrontmatter {
         plan_id: plan_id.into(),
         goal: "P6 build target".into(),
@@ -1167,8 +1170,16 @@ fn write_disk_plan(plan_id: &str, disk_mode: PlanFileMode) -> std::path::PathBuf
         frontmatter: fm,
         body: "## Goal\nbuild target\n".into(),
     };
-    write_plan(&path, &plan, 1000).unwrap();
-    path
+    write_plan(path, &plan, 1000).unwrap();
+    path.to_path_buf()
+}
+
+/// 构造一个 planning 模式的 PlanFile 写盘，但**保持** PlanRuntime 当前为 Chat
+/// （模拟 "其他 session 留下的 planning plan"，本 session 用 build 续跑）。
+fn write_disk_plan(plan_id: &str, disk_mode: PlanFileMode) -> std::path::PathBuf {
+    use crate::api::chat::plan_runtime::file_store::plan_path_for_id;
+    let path = plan_path_for_id(plan_id).unwrap();
+    write_plan_file_at(&path, plan_id, disk_mode)
 }
 
 #[test]
@@ -1243,12 +1254,76 @@ fn plan_build_rejects_nonexistent_plan_id() {
 }
 
 #[test]
+fn plan_build_rejects_nonexistent_explicit_path() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let missing = home.join("external").join("missing.plan.md");
+    let err = rt.build_plan(&missing.to_string_lossy(), None).unwrap_err();
+    match err {
+        PlanRuntimeError::BuildPlanPathNotFound { path, hint } => {
+            assert!(path.ends_with("missing.plan.md"), "{path}");
+            assert!(hint.contains("<plan_id/path>"), "{hint}");
+        }
+        other => panic!("expected BuildPlanPathNotFound, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[test]
 fn plan_build_rejects_unsafe_plan_id() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    let err = rt.build_plan("../etc/passwd", None).unwrap_err();
-    matches!(err, PlanRuntimeError::UnsafePlanId(_));
+    let err = rt.build_plan("BAD", None).unwrap_err();
+    assert!(matches!(err, PlanRuntimeError::UnsafePlanId(_)));
+    cleanup_home(&home);
+}
+
+#[test]
+fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_path() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let external_dir = home.join("external-plans");
+    std::fs::create_dir_all(&external_dir).unwrap();
+    let external_path = external_dir.join("external.plan.md");
+    write_plan_file_at(&external_path, "external_plan", PlanFileMode::Planning);
+    let expected_path =
+        crate::infra::platform::normalize_path(&external_path.to_string_lossy()).unwrap();
+
+    let outcome = rt
+        .build_plan(
+            &external_path.to_string_lossy(),
+            Some("sid-external".into()),
+        )
+        .expect("path build should succeed");
+    assert_eq!(outcome.plan_id, "external_plan");
+    assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: None,
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "step1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .expect("update_plan should reuse active path");
+    let expected_path_str = crate::infra::platform::format_home_path(&expected_path);
+    assert_eq!(out["path"].as_str(), Some(expected_path_str.as_str()));
+
+    let plan = crate::api::chat::plan_runtime::file_store::read_plan(&external_path).unwrap();
+    assert!(matches!(plan.frontmatter.mode, PlanFileMode::Completed));
+    assert!(matches!(
+        plan.frontmatter.todos[0].status,
+        TodoStatus::Completed
+    ));
     cleanup_home(&home);
 }
 

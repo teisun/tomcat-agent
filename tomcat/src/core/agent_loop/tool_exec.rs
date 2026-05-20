@@ -1266,13 +1266,12 @@ async fn dispatch_plan_tool(
     match result {
         Ok(v) => {
             *display_out = match name {
-                "create_plan" | "update_plan" => {
-                    v.get("path").and_then(|value| value.as_str()).map(|plan| {
-                        ToolDisplay::Plan {
-                            plan: plan.to_string(),
-                        }
-                    })
-                }
+                "create_plan" | "update_plan" => v
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .map(|plan| ToolDisplay::Plan {
+                        plan: plan.to_string(),
+                    }),
                 _ => None,
             };
             (v.to_string(), false, Vec::new())
@@ -1284,8 +1283,8 @@ async fn dispatch_plan_tool(
 #[cfg(test)]
 mod display_contract_tests {
     use super::*;
-    use crate::core::agent_loop::ConfigBackend;
     use crate::core::agent_loop::types::SubagentType;
+    use crate::core::agent_loop::ConfigBackend;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -1387,7 +1386,11 @@ mod display_contract_tests {
             unreachable!()
         }
 
-        async fn config_set(&self, _key: &str, _value: &str) -> Result<serde_json::Value, AppError> {
+        async fn config_set(
+            &self,
+            _key: &str,
+            _value: &str,
+        ) -> Result<serde_json::Value, AppError> {
             Ok(json!({
                 "applied": true,
                 "message": "已设置 llm.default_model = gpt-5.2"

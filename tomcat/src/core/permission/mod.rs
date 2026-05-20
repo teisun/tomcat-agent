@@ -21,6 +21,7 @@ pub mod gate;
 pub mod path_rule;
 pub mod session_grants;
 pub mod types;
+pub mod url_like;
 
 pub use bash_ast::{
     AstReject, AstSegmentVerdict, BashAstChecker, BashSegment, NoopSandboxBackend, PersistentShell,
@@ -38,6 +39,7 @@ pub use types::{
     EffectiveRoots, GrantTrace, GrantTrigger, GrantType, PathRuleMode, PermissionDecision,
     PermissionScope,
 };
+pub use url_like::is_url_like;
 
 #[cfg(test)]
 mod tests;

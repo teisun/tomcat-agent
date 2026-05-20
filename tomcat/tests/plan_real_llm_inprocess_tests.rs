@@ -229,10 +229,8 @@ fn format_plan_snapshot(plan_path: Option<&Path>) -> String {
             let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{content}\n"));
         }
         Err(err) => {
-            let _ = std::fmt::Write::write_fmt(
-                &mut out,
-                format_args!("(无法读取当前 plan: {err})\n"),
-            );
+            let _ =
+                std::fmt::Write::write_fmt(&mut out, format_args!("(无法读取当前 plan: {err})\n"));
         }
     }
     out
@@ -252,9 +250,10 @@ fn changed_snapshot(current: String, last: &mut Option<String>) -> Option<String
 }
 
 fn push_plan_snapshot(body: &mut String, plan_path: Option<&Path>, state: &mut InprocessDiagState) {
-    if let Some(plan_snapshot) =
-        changed_snapshot(format_plan_snapshot(plan_path), &mut state.last_plan_snapshot)
-    {
+    if let Some(plan_snapshot) = changed_snapshot(
+        format_plan_snapshot(plan_path),
+        &mut state.last_plan_snapshot,
+    ) {
         let _ = std::fmt::Write::write_str(body, "---- current plan snapshot ----\n");
         body.push_str(&plan_snapshot);
     }
@@ -485,7 +484,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
             "planning 阶段 create_plan 不应绑定 session_key/session_id"
         );
 
-        // 4) /plan build <plan_id> → Executing
+        // 4) /plan build <plan_id/path> → Executing
         ctx.plan_runtime
             .build_plan(&plan_id, Some(fresh_session.session_id.clone()))
             .expect("build_plan 失败");

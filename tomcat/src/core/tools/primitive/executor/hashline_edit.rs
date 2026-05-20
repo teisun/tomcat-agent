@@ -26,7 +26,7 @@
 //! 4. 收集所有 `(start_line, end_line, replacement)` 区间，按行号检查重叠；
 //! 5. 自下而上 splice → `new_content` → `write_file_atomic`；写失败回滚 `.bak`。
 
-use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
+use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::read::compute_line_hash;
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::primitive::{
@@ -44,6 +44,9 @@ pub async fn hashline_edit_impl(
     segments: Vec<HashlineSegment>,
     plugin_id: &str,
 ) -> Result<EditFileResult, AppError> {
+    if let Some(err) = url_like_fs_miss(path) {
+        return Err(err);
+    }
     let (path_buf, scope, grant) = executor
         .gate_check_path(PrimitiveOperation::Edit, path, plugin_id)
         .await?;

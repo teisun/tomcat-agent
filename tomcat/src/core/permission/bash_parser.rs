@@ -24,6 +24,8 @@
 
 use std::path::PathBuf;
 
+use super::is_url_like;
+
 /// 把 bash 命令拆成子命令并提取候选路径。
 ///
 /// 返回值未做去重 / 规范化；调用方应负责把结果交给 gate.check 做规范化与判定。
@@ -97,6 +99,9 @@ fn is_env_assignment(tok: &str) -> Option<&str> {
 
 fn looks_like_path(s: &str) -> bool {
     if s.is_empty() {
+        return false;
+    }
+    if is_url_like(s) {
         return false;
     }
     // 以 - 开头视作 flag。
@@ -261,5 +266,23 @@ mod tests {
     fn handles_quoted_strings() {
         let v = extract_paths("rm \"my file.txt\" /tmp/x");
         assert!(v.contains(&"/tmp/x".to_string()));
+    }
+
+    #[test]
+    fn skips_http_and_https_urls() {
+        let v = extract_paths("curl http://127.0.0.1:4173/ https://example.com/api");
+        assert!(v.is_empty(), "URL-like token 不应被当成路径: {:?}", v);
+    }
+
+    #[test]
+    fn skips_flag_value_urls() {
+        let v = extract_paths("curl --url=https://example.com/api --output=/tmp/out");
+        assert_eq!(v, vec!["/tmp/out"]);
+    }
+
+    #[test]
+    fn skips_assignment_urls_but_keeps_real_paths() {
+        let v = extract_paths("ENDPOINT=https://example.com/api ROOT=./src tool");
+        assert_eq!(v, vec!["./src"]);
     }
 }

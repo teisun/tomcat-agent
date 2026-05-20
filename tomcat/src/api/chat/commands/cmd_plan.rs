@@ -5,7 +5,7 @@
 //! ```text
 //! /plan                      → PlanRuntime::enter_planning  → mode=Planning
 //! /plan exit                 → PlanRuntime::exit_to_chat   → mode=Chat
-//! /plan build <plan_id>      → PlanRuntime::build_plan     → mode=Executing { plan_id }
+//! /plan build <plan_id/path> → PlanRuntime::build_plan     → mode=Executing { plan_id }
 //! ```
 //!
 //! P1 只闭环 `enter_planning` / `exit_to_chat` 两条；`build` 在 P6 接入
@@ -22,8 +22,8 @@ pub enum PlanCommand {
     Enter,
     /// `/plan exit`，退回 Chat。
     Exit,
-    /// `/plan build <plan_id>`，进入 EXEC（P6 才完整闭环）。
-    Build { plan_id: String },
+    /// `/plan build <plan_id/path>`，进入 EXEC（P6 才完整闭环）。
+    Build { plan_target: String },
     /// J2：`/plan list`，列出 `~/.tomcat/plans/` 下所有 plan 文件的 id / mode / goal。
     List,
 }
@@ -33,8 +33,8 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
         [_cmd] => ChatCommand::Plan(PlanCommand::Enter),
         [_cmd, sub] if sub == "exit" => ChatCommand::Plan(PlanCommand::Exit),
         [_cmd, sub] if sub == "list" => ChatCommand::Plan(PlanCommand::List),
-        [_cmd, sub, plan_id] if sub == "build" => ChatCommand::Plan(PlanCommand::Build {
-            plan_id: plan_id.clone(),
+        [_cmd, sub, plan_target] if sub == "build" => ChatCommand::Plan(PlanCommand::Build {
+            plan_target: plan_target.clone(),
         }),
         _ => ChatCommand::UsageError {
             message: usage_text(),
@@ -43,7 +43,7 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
 }
 
 fn usage_text() -> String {
-    "用法错误：/plan | /plan exit | /plan build <plan_id> | /plan list".to_string()
+    "用法错误：/plan | /plan exit | /plan build <plan_id/path> | /plan list".to_string()
 }
 
 /// `/plan` 子命令分发。`ctx.plan_runtime` 在 P1 起由 `ChatContext::from_config` 注入。
@@ -53,7 +53,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
         PlanCommand::Enter => match rt.enter_planning() {
             Ok(()) => {
                 println!(
-                    "[plan] 已进入 PLAN 模式。\n[plan] 先与模型讨论目标；用 /plan exit 退回 Chat；用 /plan build <plan_id> 进入 EXEC。"
+                    "[plan] 已进入 PLAN 模式。\n[plan] 先与模型讨论目标；用 /plan exit 退回 Chat；用 /plan build <plan_id/path> 进入 EXEC。"
                 );
                 ChatCommandOutcome::Handled
             }
@@ -72,7 +72,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                 ChatCommandOutcome::Handled
             }
         },
-        PlanCommand::Build { plan_id } => {
+        PlanCommand::Build { plan_target } => {
             let session_id_for_plan = match ctx.session.current_session_id() {
                 Ok(Some(v)) => Some(v),
                 Ok(None) => {
@@ -84,11 +84,11 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                     return ChatCommandOutcome::Handled;
                 }
             };
-            match rt.build_plan(&plan_id, session_id_for_plan) {
+            match rt.build_plan(&plan_target, session_id_for_plan) {
                 Ok(outcome) => {
                     println!(
-                        "[plan] /plan build 成功：plan_id={} (prev_disk_mode={:?}) → EXEC",
-                        outcome.plan_id, outcome.prev_disk_mode
+                        "[plan] /plan build 成功：target={} → plan_id={} (prev_disk_mode={:?}) → EXEC",
+                        plan_target, outcome.plan_id, outcome.prev_disk_mode
                     );
                     for w in &outcome.warnings {
                         eprintln!("[plan] warning: {w}");
@@ -188,7 +188,21 @@ mod tests {
         let cmd = parse_args(vec!["/plan".into(), "build".into(), "ship-001".into()]);
         assert!(matches!(
             cmd,
-            ChatCommand::Plan(PlanCommand::Build { ref plan_id }) if plan_id == "ship-001"
+            ChatCommand::Plan(PlanCommand::Build { ref plan_target }) if plan_target == "ship-001"
+        ));
+    }
+
+    #[test]
+    fn parse_plan_build_with_path() {
+        let cmd = parse_args(vec![
+            "/plan".into(),
+            "build".into(),
+            "/tmp/ship-001.plan.md".into(),
+        ]);
+        assert!(matches!(
+            cmd,
+            ChatCommand::Plan(PlanCommand::Build { ref plan_target })
+                if plan_target == "/tmp/ship-001.plan.md"
         ));
     }
 

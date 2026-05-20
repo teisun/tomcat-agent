@@ -15,7 +15,10 @@ pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOu
             return ChatCommandOutcome::Handled;
         }
     };
-    match ctx.checkpoint_store.list(&session_id, ListOptions { limit }) {
+    match ctx
+        .checkpoint_store
+        .list(&session_id, ListOptions { limit })
+    {
         Ok(entries) => {
             if entries.is_empty() {
                 println!("暂无 checkpoint。");

@@ -4,7 +4,7 @@
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
-**说人话**：这是 PLAN 模式里唯一会主动**创建**计划文件的工具——把 LLM 写的草案落到 `~/.tomcat/plans/<slug>_<hash>.plan.md`，加文件锁，然后立刻派一个 reviewer 子 Agent 来挑刺，审稿摘要一起返回。reviewer 只是辅助：是否进入执行态由用户敲 `/plan build <plan_id>` 决定。**`create_plan` 名字保留**，职责也不变；执行态推进 `todos[]` / `mode` 字段走 [`update_plan`](./update-plan.md) 工具，整盘 mode 切换走 [`/plan`](../plan-runtime.md#51-本地-slash-命令) 命令族与 runtime 自动转移，**三者协同**改动 `PlanFile` frontmatter，互不重叠。
+**说人话**：这是 PLAN 模式里唯一会主动**创建**计划文件的工具——把 LLM 写的草案落到 `~/.tomcat/plans/<slug>_<hash>.plan.md`，加文件锁，然后立刻派一个 reviewer 子 Agent 来挑刺，审稿摘要一起返回。reviewer 只是辅助：是否进入执行态由用户敲 `/plan build <plan_id/path>` 决定。**`create_plan` 名字保留**，职责也不变；执行态推进 `todos[]` / `mode` 字段走 [`update_plan`](./update-plan.md) 工具，整盘 mode 切换走 [`/plan`](../plan-runtime.md#51-本地-slash-命令) 命令族与 runtime 自动转移，**三者协同**改动 `PlanFile` frontmatter，互不重叠。
 
 ---
 
@@ -81,7 +81,7 @@
 | C4 审稿时机 | 写完立刻 / 仅显式触发 | 写完即同步派 reviewer |
 | C5 审稿者形态 | LLM-facing tool / internal dispatch | internal dispatch（与 codex 同构） |
 | C6 reviewer 改稿权 | LLM 入参 / runtime 内部参数 | **runtime 内部参数**，**不**进工具 schema |
-| C7 进执行态 | reviewer accepted 自动 / 用户显式 | **用户显式** `/plan build <plan_id>` |
+| C7 进执行态 | reviewer accepted 自动 / 用户显式 | **用户显式** `/plan build <plan_id/path>` |
 
 ---
 
@@ -124,7 +124,7 @@
 | C4 审稿时机 | 写完立刻同步 await reviewer，摘要同条 ToolResult 返回 | 异步派会让 LLM 在没有 verdict 的情况下盲改；显式触发会要求 LLM 多一个 tool_call。 | 写完马上审，别分两轮。 |
 | C5 审稿者形态 | internal subagent dispatch；不进 catalog | LLM-facing tool 把 reviewer 当通用工具会被乱调；通用 `dispatch_agent` 暴露过多 schema。 | 内部派子 Agent，不进工具表。 |
 | C6 reviewer 改稿权 | **runtime 内部硬编码 `allow_review_edit: bool`**，**不**作为 `create_plan` 工具入参；允许用 `edit + update_plan` 修改计划内容，但 frontmatter raw 仍不允许 | LLM 入参形态会把改稿权下放给模型，违背「frontmatter 不让 LLM 碰」原则 | 改不改稿代码决定，不是模型决定。 |
-| C7 进执行态 | 仅 `/plan build <plan_id>` 显式触发 | reviewer accepted 自动 build 会绕过用户确认；多 plan 共存时无法二选一 | 用户拍板，工具不替。 |
+| C7 进执行态 | 仅 `/plan build <plan_id/path>` 显式触发 | reviewer accepted 自动 build 会绕过用户确认；多 plan 共存时无法二选一 | 用户拍板，工具不替。 |
 
 ### 4.2 实施点（拟定）
 
@@ -201,7 +201,7 @@
 
 #### 4.2.5 CP-E：`recover()`
 
-- **交付**：扫描 `~/.tomcat/plans/*.plan.md`；不可解析 → warning skip；`mode==planning` 残留 → 保留为草案（用户回 PLAN 模式重新编辑或 `/plan build` 后续 pending）；`mode==pending` → 等待 `/plan build` 续跑；多 plan 共存 → 没有「active」概念，由 `/plan build <plan_id>` 二选一。
+- **交付**：扫描 `~/.tomcat/plans/*.plan.md`；不可解析 → warning skip；`mode==planning` 残留 → 保留为草案（用户回 PLAN 模式重新编辑或 `/plan build` 后续 pending）；`mode==pending` → 等待 `/plan build` 续跑；多 plan 共存 → 没有「active」概念，由 `/plan build <plan_id/path>` 二选一。
 
 **说人话**：启动时只看 frontmatter，pending 的等用户敲 build 续跑。
 
@@ -343,7 +343,7 @@ fs::rename(&tmp, &path)?; // atomic on POSIX same-fs
 
 1. 解析 frontmatter；不可解析的写 warning 并跳过。
 2. `mode == planning` 残留 → **保留**为草案，提示用户在 PLAN 模式重新打开（无 active 概念，无需强转）。
-3. `mode == pending` → 等待用户 `/plan build <plan_id>` 续跑；runtime 把它列入「可恢复列表」。
+3. `mode == pending` → 等待用户 `/plan build <plan_id/path>` 续跑；runtime 把它列入「可恢复列表」。
 4. `mode == executing` 残留 → 强制降级为 `pending`（前一进程崩溃的语义等价于被 cancel_token 截断）；warning。
 5. `mode == completed` → 只读展示。
 6. 多份 `pending` 共存 → 不强制选一份；由用户在 `/plan build` 时指定 `plan_id` / 路径。
@@ -394,7 +394,7 @@ todos                  Goal / Draft / Notes / Board      （结构大变）
 ```json
 {
   "name": "create_plan",
-  "description": "Draft a new PlanFile, or REWRITE an existing one wholesale, under ~/.tomcat/plans/. Only callable while in PLAN mode. After persisting, internally dispatches a reviewer subagent and returns its summary in the same tool result. The reviewer is advisory only — entering EXEC mode requires the user to issue `/plan build <plan_id>` separately.\n\nWhen to use this vs `update_plan`:\n- create_plan = WHOLESALE rewrite of the plan body (goal / draft / todos). Use it on first draft, or when the plan structure changes substantially.\n- update_plan = INCREMENTAL edit of frontmatter `todos[]`. Use it 99% of the time you want to mark a todo done, add a single todo, or revise one item in place. update_plan is callable in ANY mode; create_plan is PLAN-only.\n\nNotes for the model: you only provide `goal` / `draft` / `todos`. The runtime fills the rest of the frontmatter (plan_id, mode, created_at, session_key/id when /plan build runs). Do NOT touch frontmatter YAML via raw write/edit.",
+  "description": "Draft a new PlanFile, or REWRITE an existing one wholesale, under ~/.tomcat/plans/. Only callable while in PLAN mode. After persisting, internally dispatches a reviewer subagent and returns its summary in the same tool result. The reviewer is advisory only — entering EXEC mode requires the user to issue `/plan build <plan_id/path>` separately.\n\nWhen to use this vs `update_plan`:\n- create_plan = WHOLESALE rewrite of the plan body (goal / draft / todos). Use it on first draft, or when the plan structure changes substantially.\n- update_plan = INCREMENTAL edit of frontmatter `todos[]`. Use it 99% of the time you want to mark a todo done, add a single todo, or revise one item in place. update_plan is callable in ANY mode; create_plan is PLAN-only.\n\nNotes for the model: you only provide `goal` / `draft` / `todos`. The runtime fills the rest of the frontmatter (plan_id, mode, created_at, session_key/id when /plan build runs). Do NOT touch frontmatter YAML via raw write/edit.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -516,7 +516,7 @@ impl PlanRuntime {
 | reviewer 用 `edit` 改 plan 正文（仅 `allow_review_edit=true`） | 用户看 `.plan.md` 时能直接读到 | **不**修改 frontmatter | 改稿可直接修正文。 |
 | reviewer 异常退出 | tool error；`PlanFile` 保留 | **不**修改 `mode`（停留 `planning`） | 审稿挂了不影响计划文件本身。 |
 
-> **关键改动**：reviewer 不再是 verdict gate。是否进入 `executing` **仅由** `/plan build <plan_id>` 命令决定（详见 [`plan-runtime.md`](../plan-runtime.md) §5.1 与 §8）。
+> **关键改动**：reviewer 不再是 verdict gate。是否进入 `executing` **仅由** `/plan build <plan_id/path>` 命令决定（详见 [`plan-runtime.md`](../plan-runtime.md) §5.1 与 §8）。
 
 详细契约见 [`reviewer.md`](./reviewer.md) §5。
 
@@ -541,7 +541,7 @@ impl PlanRuntime {
 |------|------|----------|----------|--------|
 | PLAN 期建初稿 / 整盘重写 | `create_plan` | `~/.tomcat/plans/*.plan.md`（runtime 派生） | LLM 只填 goal/draft/todos | 主要入口；仅 PLAN 可见。 |
 | PLAN 期改正文 | raw `write` / `edit` | **必须**在 `~/.tomcat/plans/*.plan.md` | **frontmatter 整体不可变**，正文可改 | PLAN 模式下其他路径写盘全部拒绝。 |
-| 任意模式改 frontmatter `todos[]` | [`update_plan`](./update-plan.md) | 目标 PlanFile（按 `plan_id` 路由） | LLM 仅传 ops，runtime 改 YAML；只能动 todos | 推进 plan 待办用 update_plan。 |
+| 任意模式改 frontmatter `todos[]` | [`update_plan`](./update-plan.md) | 目标 PlanFile（按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随 active plan path） | LLM 仅传 ops，runtime 改 YAML；只能动 todos | 推进 plan 待办用 update_plan。 |
 | 任意模式改正文 | raw `write` / `edit` | `~/.tomcat/plans/*.plan.md`（PLAN 模式仅限本盘） | 同 PLAN 期正文约束（frontmatter 不可变） | 笔记可补，YAML 锁死。 |
 | 整盘 mode 切换 | `/plan build` + runtime；自动派生 mode=completed（由 `update_plan` 触发）/ mode=pending（cancel_token 触发） | 目标 PlanFile | runtime 写 `mode` / `session_key` / `session_id` | 用户拍板 + runtime 兜底。 |
 | 任意模式记会话级 scratchpad | [`todos`](./todos.md) | `~/.tomcat/agents/<agentId>/todos/*.todo.md` | 不写 plan.md | 写自己的 .todo.md。 |
@@ -707,13 +707,13 @@ LLM ──tool_call("create_plan", { goal, draft, todos })──▶ tool_exec
 | ~~`create_plan` 改名为 `plan`~~ | **否**：名字保留 `create_plan`，职责也不变（仅创建/重写 plan.md）；mode/todos 推进由 [`update_plan`](./update-plan.md)（增量）+ `/plan` 命令族 + runtime 自动派生协同。 | 工具名稳定，不折腾下游。 |
 | ~~frontmatter 三方协同（`create_plan` + `todos` + runtime）~~ | **替代为四方**：`create_plan`（整盘初稿）+ [`update_plan`](./update-plan.md)（增量 todos）+ runtime（mode/session 绑定）+ 自动派生（all completed / cancel_token）。 | 四方各管一段。 |
 | ~~mode=completed 由 `todos` 在 EXEC 全 completed 时触发~~ | **替代**：由 [`update_plan`](./update-plan.md) 在 EXEC + target.mode==executing + 全 completed 时触发；`todos` 永远不写 plan，自然不触发。 | 改 plan 的工具负责派生 mode。 |
-| ~~CHAT 模式无法修订 plan.md 的 `todos[]`（D 方案前的缺口）~~ | **修复**：[`update_plan`](./update-plan.md) 任何模式可见，按 `plan_id` 路由。 | 修上一版的缺口。 |
+| ~~CHAT 模式无法修订 plan.md 的 `todos[]`（D 方案前的缺口）~~ | **修复**：[`update_plan`](./update-plan.md) 任何模式可见，可按 `plan_id` 或显式 `path` 路由。 | 修上一版的缺口。 |
 | ~~frontmatter 保留 `review_status` / `last_review` / `active` / `last_checkpoint_id` / `updated_at`~~ | **否**：全部下线。review 走 transcript `plan.review`；active 由 `mode` 派生；checkpoint id 由 `CheckpointStore` 自管；updated_at 用 mtime；机器字段越少越省维护。 | schema 精简，只留必备。 |
 | ~~frontmatter 加 `org_session_key` / `org_session_id` 表示创建源~~ | **否**：去掉 `org_` 前缀；改为 `session_key` / `session_id`，**仅在 `/plan build` 时写入**当前执行会话，作为 provenance；创建期不绑 session。 | 不区分「创建会话」与「执行会话」，build 一次性绑定。 |
 | ~~`mode` 包含 `ready_to_apply`~~ | **否**：移除；reviewer 仅辅助，是否 build 由用户拍板，无需中间态。 | 状态机少一档。 |
 | ~~`mode` 包含 `cancelled`~~ | **否**：cancel_token / 进程退出统一记为 `pending`，可被 `/plan build` 续跑；用户不要的计划由 `/plan exit` 在 PLAN 模式回 CHAT 即可，文件留着不强制收口。 | 别区分「取消」和「暂停」，留可续跑的余地。 |
 | ~~工具入参含 `apply_changes`~~ | **否**：删除；reviewer 改稿权改为 **runtime 内部参数** `allow_review_edit`，模型看不到。 | 改稿决定权交给代码。 |
-| ~~`/plan apply` 是进执行态入口~~ | **替代**：改名 `/plan build <plan_id>`；同时承载「写 session_key/id」「reminder swap」「user meta 注入 plan 全文」「catalog swap」四件事。 | apply 名字不够直观，改 build。 |
+| ~~`/plan apply` 是进执行态入口~~ | **替代**：改名 `/plan build <plan_id/path>`；同时承载「写 session_key/id」「reminder swap」「user meta 注入 plan 全文」「catalog swap」四件事。 | apply 名字不够直观，改 build。 |
 | ~~`/plan close` 显式收口~~ | **下线**：完成由 `mode = completed`（runtime 自动派生）触发；不要可以 `/plan exit` 退 PLAN，文件留着；执行中按 Ctrl+C / 进程退出 → `pending`。 | 不要把「关闭」做成命令，状态自然演化。 |
 | ~~reviewer verdict 二态做 gate（accepted → ReadyToApply）~~ | **否**：verdict 字段下线，只留 summary 字段；reviewer 改稿权由 runtime 控制；用户敲 `/plan build` 才进 executing。 | reviewer 是顾问不是法官。 |
 

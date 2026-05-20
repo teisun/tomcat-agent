@@ -31,11 +31,11 @@
 
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
-| **`update_plan`** | 对 PlanFile `todos[]` 的**增量**编辑工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "update_plan"` | **任何模式可见**；按 `plan_id` 路由；frontmatter 中**只**能动 `todos[]`；不能动 mode / session_* / plan_id / goal / created_at 等机器字段；不能动 markdown 正文 | 改 plan 的待办进度用这个。 |
-| **target PlanFile** | 本次操作的目标计划文件 | 由 `plan_id`（首选）或 `path` 解析，落在 `~/.tomcat/plans/` 下 | EXEC 模式 `plan_id` 可缺省 → `session.active_plan_id`；其它模式必填 | 改哪份 plan 要说清楚。 |
+| **`update_plan`** | 对 PlanFile `todos[]` 的**增量**编辑工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "update_plan"` | **任何模式可见**；按 `plan_id` 或显式 `path` 路由，EXEC/Pending 缺省跟随当前 active plan path；frontmatter 中**只**能动 `todos[]`；不能动 mode / session_* / plan_id / goal / created_at 等机器字段；不能动 markdown 正文 | 改 plan 的待办进度用这个。 |
+| **target PlanFile** | 本次操作的目标计划文件 | 由 `plan_id` 或显式 `path` 解析；若当前 session 已在 EXEC/Pending，缺省目标跟随 active plan path | EXEC/Pending 可缺省；其它模式需显式传 `plan_id` 或 `path` | 改哪份 plan 要说清楚。 |
 | **同 op 模型** | 复用 `todos` 的 op 数据结构 | `kind ∈ {upsert, set_status, remove}` | `id` 在目标 PlanFile 内唯一；同一文件最多一个 `in_progress` | 操作语义与 `todos` 一致。 |
 | **跨 session 编辑** | 任何 session 都能改任意 plan 的 todos | `update_plan` 不读 / 不写 session_* frontmatter | 跨 session 改 todos 允许；但同时只一个 session 能「执行」（active_plan_id 受 build gate 约束） | 任意聊天窗口都能勾 plan 待办。 |
-| **`active_plan_id`（per-session runtime）** | 当前 session 正在 EXEC 的 plan id | `PlanRuntime.active_plan_id: Option<PlanId>`；不写 frontmatter | EXEC 下 update_plan 默认指向它 | 执行态默认改自己手上的那份。 |
+| **active plan path（per-session runtime）** | 当前 session 正在 EXEC/Pending 的真实 plan 路径 | `PlanRuntime.active_plan_path: Option<PathBuf>`；不写 frontmatter | EXEC/Pending 下 update_plan 默认指向它；`plan_id` 仍来自 frontmatter | 执行态默认改自己手上的那份。 |
 
 ---
 
@@ -44,7 +44,7 @@
 | 工具 | 写什么文件 | 模式可见性 | 语义 | 代码层 | 说人话 |
 |------|-----------|-----------|------|--------|--------|
 | **`todos`** | `~/.tomcat/agents/<agentId>/todos/<todos_id>.todo.md`（session 路径） | **任何模式**（PLAN 期也可调，做 LLM 个人 scratchpad） | 个人 / 会话级待办；**不**写 plan.md | `apply_todos_op(TodoStore)` | 聊天里随手记的清单。 |
-| **`update_plan`** | `~/.tomcat/plans/<*>.plan.md` 的 frontmatter `todos[]` | **任何模式** | plan 级待办的**增量**修订 | `apply_todos_op(PlanStore, plan_id)` —— 复用 `todos` 的 op 引擎 + 不同 store + 不同 schema | 改 plan 文件的待办用这个。 |
+| **`update_plan`** | 目标 `PlanFile` 的 frontmatter `todos[]` | **任何模式** | plan 级待办的**增量**修订 | `apply_todos_op(PlanStore, target)` —— 复用 `todos` 的 op 引擎 + 不同 store + 不同 schema | 改 plan 文件的待办用这个。 |
 | **`create_plan`** | `~/.tomcat/plans/<*>.plan.md` 的**整盘**（frontmatter 初稿 + 正文 `## Goal` / `## Draft` / `## Todos`） | **仅 PLAN 模式** | 重写：把 LLM 提供的 `goal / draft / todos` 全量落盘，并同步派 reviewer | 独立实现 | 计划结构推倒重来时用。 |
 
 ```text
@@ -376,7 +376,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 |---------------|------|--------|
 | ~~`todos` 一个工具 + `active_scope ∈ {session, plan}` 分支~~ | **拆**：`todos` 只管 session；`update_plan` 管 plan；二者**代码复用**op 引擎 + **提示词分裂** | 工具职责单一，LLM 更难混。 |
 | ~~PLAN 模式下用户要求改 todos 必须再次调 `create_plan` 整盘重写~~ | **替代**：用 `update_plan` 增量改；`create_plan` 仅当结构大改时用 | 不用每次小修就重写整盘。 |
-| ~~CHAT 模式下完全无法改 plan.md 的 todos[]~~ | **修复**：`update_plan` 在 CHAT 可见；按 `plan_id` 路由 | 修上一版的缺口。 |
+| ~~CHAT 模式下完全无法改 plan.md 的 todos[]~~ | **修复**：`update_plan` 在 CHAT 可见；按 `plan_id` 或显式 `path` 路由 | 修上一版的缺口。 |
 | ~~把 `plan_id` 入参也藏起来由 runtime 推断~~ | **否**：EXEC 缺省取 active，其它模式必填 | 改哪份 plan 必须明说。 |
 | ~~把 markdown 正文写权也合到 `update_plan`~~ | **否**：正文走 raw write/edit；本工具只管 frontmatter `todos[]` | 工具职责单一。 |
 | ~~允许改 `target.mode == completed` 的 plan~~ | **否**：已结案的 plan 拒绝修改；要重新做请用 `create_plan` 开新 plan | 结案的别动。 |

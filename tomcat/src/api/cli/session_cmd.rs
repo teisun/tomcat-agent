@@ -43,7 +43,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
                 println!("会话不存在: {}", session_id);
             }
             Err(e) => return Err(e),
-        }
+        },
         SessionSub::Delete { key } => {
             cleanup_openai_files_for_session(cfg, sessions_path.as_path(), &key, "session_delete");
             mgr.delete_session(&key)?;

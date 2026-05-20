@@ -30,10 +30,19 @@ fn help_text_mentions_checkpoint_commands() {
 #[test]
 fn help_text_mentions_plan_without_goal_argument() {
     let h = help_text();
-    assert!(h.contains("\n  /plan                      "), "/help 应列出无参 /plan：{}", h);
+    assert!(
+        h.contains("\n  /plan                      "),
+        "/help 应列出无参 /plan：{}",
+        h
+    );
     assert!(
         !h.contains("/plan \"<目标>\""),
         "/help 不应再暴露旧的 /plan 目标参数用法：{}",
+        h
+    );
+    assert!(
+        h.contains("/plan build <plan_id/path>"),
+        "/help 应恢复 /plan build 的 path 语义：{}",
         h
     );
 }

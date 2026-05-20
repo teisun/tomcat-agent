@@ -20,7 +20,7 @@
 //!   `BashResult` 结构扩 `timed_out / truncated / persisted_output_path`。当前 Phase-E.2
 //!   先用「头尾保留」简化截断（不写盘），保证 `BashResult` 字段不变。
 
-use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
+use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::output_accum::accumulate_with_persist;
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::primitive::{BashResult, PrimitiveOperation};
@@ -123,6 +123,9 @@ pub(super) async fn execute_bash_impl(
     timeout_ms_override: Option<u64>,
 ) -> Result<BashResult, AppError> {
     let cwd_path = if let Some(c) = cwd {
+        if let Some(err) = url_like_fs_miss(c) {
+            return Err(err);
+        }
         let (p, _l, _s) = executor
             .gate_check_path(PrimitiveOperation::Read, c, plugin_id)
             .await?;

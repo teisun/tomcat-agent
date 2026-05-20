@@ -3,8 +3,9 @@
 //! 与 [`super::DefaultPrimitiveExecutor`] 共用的字符串化 / 二进制查找等无状态 helper。
 //! 所有函数仅暴露给 `executor` 子模块（`pub(super)`），不向外扩散。
 
-use crate::core::permission::{GrantTrigger, GrantType, PermissionScope};
+use crate::core::permission::{is_url_like, GrantTrigger, GrantType, PermissionScope};
 use crate::core::tools::primitive::PrimitiveOperation;
+use crate::infra::error::AppError;
 use std::path::PathBuf;
 
 pub(super) fn op_summary(op: PrimitiveOperation) -> &'static str {
@@ -75,4 +76,10 @@ pub(super) fn find_binary(candidates: &[&str]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 纯文件工具收到 URL-like 输入时，直接以“这不是本地文件路径”失败，
+/// 避免把 `http://...` 误当成磁盘路径继续读写。
+pub(super) fn url_like_fs_miss(path: &str) -> Option<AppError> {
+    is_url_like(path).then(|| AppError::Primitive(format!("No such file or directory: {}", path)))
 }

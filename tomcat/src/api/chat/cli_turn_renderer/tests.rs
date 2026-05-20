@@ -459,7 +459,11 @@ fn config_set_falls_back_to_message_without_display() {
         "applied": false,
         "message": "user_denied",
     });
-    let summary = result_summary_for_tool(&json!(serde_json::to_string(&payload).unwrap()), None, false);
+    let summary = result_summary_for_tool(
+        &json!(serde_json::to_string(&payload).unwrap()),
+        None,
+        false,
+    );
     assert_eq!(summary, "user_denied");
 }
 

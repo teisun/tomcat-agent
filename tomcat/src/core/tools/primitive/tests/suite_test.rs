@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::tools::primitive::{
-    EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation,
+    EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation, SearchFilesArgs,
+    SearchFilesOutputMode, SearchFilesTarget,
 };
 use crate::core::{AllowAllConfirmation, DenyAllConfirmation};
 use crate::infra::error::AppError;
@@ -260,6 +261,96 @@ async fn execute_bash_success() {
     assert_eq!(res.exit_code, 0);
     assert!(res.stdout.trim().contains("ok"));
     let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
+async fn execute_bash_url_argument_does_not_trigger_path_gate() {
+    let dir = std::env::temp_dir().join("tomcat_exec_bash_url");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let res = exec
+        .execute_bash(
+            "printf '%s\\n' http://127.0.0.1:4173/",
+            Some(&path_str),
+            "p1",
+            None,
+            None,
+        )
+        .await
+        .expect("URL 参数不应再被 bash 当成路径授权");
+    assert_eq!(res.exit_code, 0);
+    assert!(res.stdout.contains("http://127.0.0.1:4173/"));
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
+async fn read_file_url_like_returns_non_permission_error() {
+    let exec = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&PathBuf::from("/nonexistent_pi_workspace")),
+    );
+    let err = exec
+        .read_file("http://127.0.0.1:4173/", "p1")
+        .await
+        .expect_err("URL-like 输入应由文件工具自然失败，而不是走路径授权");
+    assert!(
+        !matches!(err, AppError::Permission(_)),
+        "不应再返回路径权限错误: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("No such file or directory"),
+        "应返回文件系统自然失败文案: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn search_files_url_like_returns_non_permission_error() {
+    let exec = DefaultPrimitiveExecutor::new(
+        PrimitiveConfig::default(),
+        Arc::new(DenyAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&PathBuf::from("/nonexistent_pi_workspace")),
+    );
+    let err = exec
+        .search_files(
+            SearchFilesArgs {
+                pattern: "needle".to_string(),
+                target: SearchFilesTarget::Content,
+                path: Some("http://127.0.0.1:4173/".to_string()),
+                glob: None,
+                file_type: None,
+                output_mode: SearchFilesOutputMode::FilesWithMatches,
+                context: None,
+                head_limit: Some(Some(10)),
+                offset: 0,
+                case_insensitive: false,
+                include_hidden: false,
+            },
+            "p1",
+        )
+        .await
+        .expect_err("search_files 的 URL-like path 不应触发路径授权");
+    assert!(
+        !matches!(err, AppError::Permission(_)),
+        "不应再返回路径权限错误: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("No such file or directory"),
+        "应返回文件系统自然失败文案: {}",
+        err
+    );
 }
 
 /// T2-P0-016 PR-E.2 / bash.md §10 T1：墙钟超时 → kill 子进程 + 标记 timed_out。

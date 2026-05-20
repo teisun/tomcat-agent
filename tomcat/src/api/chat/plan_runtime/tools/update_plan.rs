@@ -156,7 +156,11 @@ fn resolve_target_plan_path(
         return Ok(plan_path_for_id(&id)?);
     }
     if let Some(path) = explicit_path {
-        return Ok(PathBuf::from(path));
+        return crate::infra::platform::normalize_path(&path)
+            .map_err(|e| ToolError::BadArgs(format!("update_plan path 非法：{e}")));
+    }
+    if let Some(path) = runtime.active_plan_path() {
+        return Ok(path);
     }
     if let PlanMode::Executing { plan_id } | PlanMode::Pending { plan_id } = runtime.mode() {
         return Ok(plan_path_for_id(&plan_id)?);
