@@ -69,7 +69,7 @@ fn run_session_switch_nonexistent_returns_ok() {
     crate::ensure_work_dir_structure(&cfg).unwrap();
     let r = run_session(
         SessionSub::Switch {
-            key: "nonexistent".to_string(),
+            session_id: "nonexistent".to_string(),
         },
         &cfg,
     );
@@ -82,13 +82,23 @@ fn run_session_switch_existing_returns_ok() {
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
     let _ = run_session(SessionSub::New, &cfg);
+    let mgr = crate::SessionManager::new(crate::resolve_sessions_dir(&cfg).unwrap());
+    let first = mgr.current_session_id().unwrap().expect("first session id");
+    let _ = run_session(SessionSub::New, &cfg);
+    let second = mgr.current_session_id().unwrap().expect("second session id");
+    assert_ne!(first, second, "第二次 new 应生成新的 session_id");
     let r = run_session(
         SessionSub::Switch {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
+            session_id: first.clone(),
         },
         &cfg,
     );
     assert!(r.is_ok());
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(first.as_str()),
+        "switch 后 current 应指向目标 session_id"
+    );
 }
 
 #[test]

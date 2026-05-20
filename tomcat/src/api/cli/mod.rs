@@ -122,8 +122,8 @@ pub enum SessionSub {
     List,
     /// 创建新会话
     New,
-    /// 切换到指定会话
-    Switch { key: String },
+    /// 切换到指定 session_id
+    Switch { session_id: String },
     /// 删除会话
     Delete { key: String },
     /// 归档会话

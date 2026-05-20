@@ -83,10 +83,17 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
             }
         },
         PlanCommand::Build { plan_id } => {
-            // 当前 chat session 的真实 session_id（uuid）从 ChatContext 取；P6 阶段还
-            // 未把 session_id 注入 ChatContext，先传 None — 续跑 warning 仍依赖 session_key 比对，
-            // 不影响闸门正确性。后续 P7 接入会改 ctx.session_id().clone().
-            let session_id_for_plan: Option<String> = None;
+            let session_id_for_plan = match ctx.session.current_session_id() {
+                Ok(Some(v)) => Some(v),
+                Ok(None) => {
+                    eprintln!("[plan] /plan build 失败：当前无会话，无法确定 session_id");
+                    return ChatCommandOutcome::Handled;
+                }
+                Err(e) => {
+                    eprintln!("[plan] /plan build 失败：读取当前 session_id 失败：{}", e);
+                    return ChatCommandOutcome::Handled;
+                }
+            };
             match rt.build_plan(&plan_id, session_id_for_plan) {
                 Ok(outcome) => {
                     println!(

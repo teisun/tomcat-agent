@@ -46,8 +46,8 @@ use tomcat::core::llm::system_prompt::{
 };
 use tomcat::core::session::ContextState;
 use tomcat::{
-    init_context_state, load_config_toml_file, run_chat_turn, AgentRunOutcome, ChatContext,
-    SessionManager,
+    init_context_state, load_config_toml_file, resolve_sessions_dir, run_chat_turn,
+    AgentRunOutcome, ChatContext, SessionManager,
 };
 
 const PLANNING_PROMPT: &str = r##"You are helping draft an internal plan. Use the create_plan tool to draft a minimal 2-todo plan for the goal above.
@@ -172,39 +172,195 @@ fn pick_newest_planning_plan_id(home: &Path) -> Option<String> {
     best.map(|(_, id)| id)
 }
 
-fn dump_diagnostic(home: &Path, ctx: &ChatContext, label: &str) {
-    eprintln!("\n==== [{label}] HOME = {} ====", home.display());
-    eprintln!("plan_runtime.mode = {:?}", ctx.plan_runtime.mode());
-    let plans_dir = home.join(".tomcat").join("plans");
-    if let Ok(rd) = std::fs::read_dir(&plans_dir) {
-        for entry in rd.flatten() {
-            eprintln!("---- plan: {} ----", entry.path().display());
-            if let Ok(s) = std::fs::read_to_string(entry.path()) {
-                eprintln!("{}", s);
-            }
+fn created_plan_from_outcome(outcome: &AgentRunOutcome) -> Option<common::CreatedPlanRef> {
+    match outcome {
+        AgentRunOutcome::Completed(result) | AgentRunOutcome::Interrupted(result) => {
+            common::extract_created_plan_from_messages(&result.new_messages)
+        }
+        AgentRunOutcome::Failed(_) => None,
+    }
+}
+
+#[derive(Default)]
+struct InprocessDiagState {
+    transcript_offset: usize,
+    last_plan_snapshot: Option<String>,
+}
+
+fn tail_text_file(path: &Path, lines: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(
+        content
+            .lines()
+            .rev()
+            .take(lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn text_delta_from_file(path: &Path, offset: &mut usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let bytes = content.as_bytes();
+    let start = if *offset <= bytes.len() { *offset } else { 0 };
+    let delta = &bytes[start..];
+    *offset = bytes.len();
+    if delta.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(delta).to_string())
+    }
+}
+
+fn format_plan_snapshot(plan_path: Option<&Path>) -> String {
+    let Some(path) = plan_path else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("---- plan: {} ----\n", path.display()),
+    );
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{content}\n"));
+        }
+        Err(err) => {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("(无法读取当前 plan: {err})\n"),
+            );
         }
     }
+    out
+}
+
+fn changed_snapshot(current: String, last: &mut Option<String>) -> Option<String> {
+    if current.is_empty() {
+        return None;
+    }
+    match last {
+        Some(prev) if prev == &current => None,
+        _ => {
+            *last = Some(current.clone());
+            Some(current)
+        }
+    }
+}
+
+fn push_plan_snapshot(body: &mut String, plan_path: Option<&Path>, state: &mut InprocessDiagState) {
+    if let Some(plan_snapshot) =
+        changed_snapshot(format_plan_snapshot(plan_path), &mut state.last_plan_snapshot)
+    {
+        let _ = std::fmt::Write::write_str(body, "---- current plan snapshot ----\n");
+        body.push_str(&plan_snapshot);
+    }
+}
+
+fn push_transcript_phase_summary(
+    body: &mut String,
+    ctx: &ChatContext,
+    state: &mut InprocessDiagState,
+) {
     if let Ok(Some(t)) = ctx.session.current_transcript_path() {
-        eprintln!("---- transcript: {} (tail 80) ----", t.display());
-        if let Ok(content) = std::fs::read_to_string(&t) {
-            for line in content
-                .lines()
-                .rev()
-                .take(80)
-                .collect::<Vec<_>>()
-                .iter()
-                .rev()
-            {
-                eprintln!("  {line}");
-            }
+        if let Some(delta) = text_delta_from_file(&t, &mut state.transcript_offset) {
+            let _ = std::fmt::Write::write_fmt(
+                body,
+                format_args!(
+                    "---- persisted transcript summary (phase end, may lag live state changes): {} ----\n",
+                    t.display()
+                ),
+            );
+            let _ = std::fmt::Write::write_fmt(body, format_args!("{delta}\n"));
         }
     }
+}
+
+fn dump_diagnostic(
+    home: &Path,
+    ctx: &ChatContext,
+    label: &str,
+    plan_path: Option<&Path>,
+    diag_state: Option<&mut InprocessDiagState>,
+    full_snapshot: bool,
+) {
+    if !full_snapshot && diag_state.is_none() {
+        return;
+    }
+
+    let mut out = String::new();
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("\n==== [{label}] HOME = {} ====\n", home.display()),
+    );
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("plan_runtime.mode = {:?}\n", ctx.plan_runtime.mode()),
+    );
+
+    if full_snapshot {
+        out.push_str(&format_plan_snapshot(plan_path));
+        if let Ok(Some(t)) = ctx.session.current_transcript_path() {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!("---- transcript: {} (tail 80) ----\n", t.display()),
+            );
+            if let Some(tail) = tail_text_file(&t, 80) {
+                for line in tail.lines() {
+                    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("  {line}\n"));
+                }
+            }
+        }
+        eprint!("{out}");
+        return;
+    }
+
+    let state = diag_state.expect("diag state required for delta diagnostic");
+    let mut body = String::new();
+    push_plan_snapshot(&mut body, plan_path, state);
+    if body.trim().is_empty() {
+        return;
+    }
+    out.push_str(&body);
+    eprint!("{out}");
+}
+
+fn dump_phase_summary(
+    home: &Path,
+    ctx: &ChatContext,
+    label: &str,
+    plan_path: Option<&Path>,
+    diag_state: &mut InprocessDiagState,
+) {
+    let mut out = String::new();
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("\n==== [{label}] HOME = {} ====\n", home.display()),
+    );
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("plan_runtime.mode = {:?}\n", ctx.plan_runtime.mode()),
+    );
+
+    let mut body = String::new();
+    push_plan_snapshot(&mut body, plan_path, diag_state);
+    push_transcript_phase_summary(&mut body, ctx, diag_state);
+    if body.trim().is_empty() {
+        return;
+    }
+    out.push_str(&body);
+    eprint!("{out}");
 }
 
 async fn run_chat_turn_observed(
     home: &Path,
     ctx: &ChatContext,
     label: &str,
+    plan_path: Option<&Path>,
+    diag_state: &mut InprocessDiagState,
     prompt: &str,
     system_text: &str,
     context_state: &mut ContextState,
@@ -225,17 +381,32 @@ async fn run_chat_turn_observed(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                dump_diagnostic(home, ctx, &format!("{label}_heartbeat"));
+                dump_diagnostic(
+                    home,
+                    ctx,
+                    &format!("{label}_heartbeat"),
+                    plan_path,
+                    Some(diag_state),
+                    false,
+                );
             }
             _ = &mut deadline => {
-                dump_diagnostic(home, ctx, &format!("{label}_timeout"));
+                dump_diagnostic(home, ctx, &format!("{label}_timeout"), plan_path, None, true);
                 panic!("{label} 在 {}s 内未完成", timeout.as_secs());
             }
             res = &mut turn => {
-                return res.unwrap_or_else(|e| {
-                    dump_diagnostic(home, ctx, &format!("{label}_err"));
+                let outcome = res.unwrap_or_else(|e| {
+                    dump_diagnostic(home, ctx, &format!("{label}_err"), plan_path, None, true);
                     panic!("{label} run_chat_turn 返回 Err: {e}");
                 });
+                dump_phase_summary(
+                    home,
+                    ctx,
+                    &format!("{label}_phase_summary"),
+                    plan_path,
+                    diag_state,
+                );
+                return outcome;
             }
         }
     }
@@ -253,10 +424,13 @@ async fn inprocess_full_plan_path_with_real_llm() {
     let config = load_user_config();
     let workdir = common::dot_tomcat_e2e_workdir("inprocess_real_llm");
     let _cwd = common::CwdGuard::set(&workdir);
+    let sessions_dir = resolve_sessions_dir(&config).expect("resolve sessions dir");
+    let fresh_session = common::begin_fresh_default_session(&sessions_dir, Some(&workdir));
 
     let result = tokio::time::timeout(TOTAL_TIMEOUT, async {
         let ctx = ChatContext::from_config(config).expect("ChatContext::from_config 失败");
         ensure_session(&ctx);
+        let mut diag_state = InprocessDiagState::default();
 
         let system_text = build_system_text_minimal(&ctx);
         let mut context_state = init_context_state(&ctx.session, &ctx.config.context, &system_text)
@@ -273,6 +447,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
             &home,
             &ctx,
             "planning_phase",
+            None,
+            &mut diag_state,
             PLANNING_PROMPT,
             &system_text,
             &mut context_state,
@@ -282,23 +458,36 @@ async fn inprocess_full_plan_path_with_real_llm() {
         match &outcome {
             AgentRunOutcome::Completed(_) => {}
             AgentRunOutcome::Interrupted(_) | AgentRunOutcome::Failed(_) => {
-                dump_diagnostic(&home, &ctx, "planning_phase");
+                dump_diagnostic(&home, &ctx, "planning_phase", None, None, true);
                 panic!("planning 阶段未 Completed: {outcome:?}");
             }
         }
 
-        // 3) 扫盘取最新 mode=planning 的 plan_id
-        let plan_id = pick_newest_planning_plan_id(&home).unwrap_or_else(|| {
-            dump_diagnostic(&home, &ctx, "no_planning_plan");
-            panic!("create_plan 未生成任何 mode=planning 的盘文件");
+        // 3) 优先从本次 run 的 tool result 取 create_plan 产物；失败时退回扫盘做诊断。
+        let created_plan = created_plan_from_outcome(&outcome).unwrap_or_else(|| {
+            let plan_id = pick_newest_planning_plan_id(&home).unwrap_or_else(|| {
+                dump_diagnostic(&home, &ctx, "no_planning_plan", None, None, true);
+                panic!("create_plan 未生成任何 mode=planning 的盘文件");
+            });
+            let plan_path = plan_path_for_id(&plan_id).expect("plan_path_for_id 失败");
+            common::CreatedPlanRef {
+                plan_id,
+                path: plan_path,
+            }
         });
-        let plan_path = plan_path_for_id(&plan_id).expect("plan_path_for_id 失败");
+        let plan_id = created_plan.plan_id.clone();
+        let plan_path = created_plan.path.clone();
         assert!(plan_path.exists(), "{plan_path:?} 应存在");
+        let planning_plan = read_plan(&plan_path).expect("read planning plan 失败");
+        assert!(
+            planning_plan.frontmatter.session_key.is_none()
+                && planning_plan.frontmatter.session_id.is_none(),
+            "planning 阶段 create_plan 不应绑定 session_key/session_id"
+        );
 
         // 4) /plan build <plan_id> → Executing
-        let session_key = ctx.session.current_session_key().to_string();
         ctx.plan_runtime
-            .build_plan(&plan_id, Some(session_key))
+            .build_plan(&plan_id, Some(fresh_session.session_id.clone()))
             .expect("build_plan 失败");
         match ctx.plan_runtime.mode() {
             PlanMode::Executing { plan_id: pid } => assert_eq!(pid, plan_id),
@@ -319,6 +508,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 &home,
                 &ctx,
                 &format!("exec_round_{exec_rounds}"),
+                Some(&plan_path),
+                &mut diag_state,
                 &prompt,
                 &system_text,
                 &mut context_state,
@@ -326,7 +517,14 @@ async fn inprocess_full_plan_path_with_real_llm() {
             )
             .await;
             if matches!(outcome, AgentRunOutcome::Failed(_)) {
-                dump_diagnostic(&home, &ctx, &format!("exec_round_{exec_rounds}_failed"));
+                dump_diagnostic(
+                    &home,
+                    &ctx,
+                    &format!("exec_round_{exec_rounds}_failed"),
+                    Some(&plan_path),
+                    None,
+                    true,
+                );
                 panic!("exec round {exec_rounds} 失败：{outcome:?}");
             }
             let plan = read_plan(&plan_path).expect("read_plan 失败");
@@ -341,9 +539,27 @@ async fn inprocess_full_plan_path_with_real_llm() {
             }
         }
         if !completed {
-            dump_diagnostic(&home, &ctx, "exec_not_completed_after_3_rounds");
+            dump_diagnostic(
+                &home,
+                &ctx,
+                "exec_not_completed_after_3_rounds",
+                Some(&plan_path),
+                None,
+                true,
+            );
             panic!("EXEC 阶段 3 轮内未 completed");
         }
+        let final_plan = read_plan(&plan_path).expect("read final plan 失败");
+        assert_eq!(
+            final_plan.frontmatter.session_key.as_deref(),
+            Some(tomcat::DEFAULT_SESSION_KEY),
+            "EXEC/completed 盘应绑定固定 DEFAULT_SESSION_KEY"
+        );
+        assert_eq!(
+            final_plan.frontmatter.session_id.as_deref(),
+            Some(fresh_session.session_id.as_str()),
+            "EXEC/completed 盘应绑定本次 inprocess run 的真实 session_id"
+        );
 
         // 6) finalize_completed_to_chat → Chat
         let finalized = ctx.plan_runtime.finalize_completed_to_chat();
@@ -368,7 +584,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
     if let Err(_e) = result {
         // 兜底诊断输出（timeout 时也写一遍）
         if let Ok(ctx) = ChatContext::from_config(load_user_config()) {
-            dump_diagnostic(&home, &ctx, "timeout_600s");
+            dump_diagnostic(&home, &ctx, "timeout_600s", None, None, true);
         }
         panic!(
             "inprocess_full_plan_path_with_real_llm 在 {}s 内未完成",

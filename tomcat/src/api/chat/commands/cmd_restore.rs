@@ -120,9 +120,14 @@ pub(crate) fn run(
 fn record_pre_rollback(ctx: &ChatContext, checkpoint_id: &CheckpointId) -> Result<(), String> {
     let label = format!("pre-rollback to {}", checkpoint_id.short());
     let message_anchor = current_leaf_message_id(ctx);
+    let session_id = ctx
+        .session
+        .current_session_id()
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "无当前会话".to_string())?;
     ctx.checkpoint_store
         .record(CheckpointRecordRequest {
-            session_id: ctx.session.current_session_key().to_string(),
+            session_id,
             turn_id: format!(
                 "restore::pre-rollback::{}::{}",
                 checkpoint_id,

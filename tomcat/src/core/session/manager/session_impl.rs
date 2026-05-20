@@ -81,6 +81,16 @@ impl SessionManager {
         DEFAULT_SESSION_KEY
     }
 
+    /// 当前会话条目；无当前映射时返回 None。
+    pub fn current_session_entry(&self) -> Result<Option<SessionEntry>, AppError> {
+        self.get_session(self.current_session_key())
+    }
+
+    /// 当前会话 session_id；无当前映射时返回 None。
+    pub fn current_session_id(&self) -> Result<Option<String>, AppError> {
+        Ok(self.current_session_entry()?.map(|entry| entry.session_id))
+    }
+
     /// 获取某 sessionKey 的 transcript 文件路径（基于 session_id）。
     pub fn transcript_path(&self, session_id: &str) -> PathBuf {
         self.sessions_dir.join(format!("{}.jsonl", session_id))
@@ -121,6 +131,72 @@ impl SessionManager {
         store.insert(session_key.to_string(), entry.clone());
         self.save_store(&store)?;
         Ok(entry)
+    }
+
+    /// 为当前固定 key 创建新的 session，并把 current 映射切到它。
+    pub fn new_current_session(&self, cwd: Option<String>) -> Result<SessionEntry, AppError> {
+        self.create_session(self.current_session_key(), cwd)
+    }
+
+    /// 确保当前固定 key 已绑定某个 session；缺失时创建新的 current session。
+    pub fn ensure_current_session(&self, cwd: Option<String>) -> Result<SessionEntry, AppError> {
+        if let Some(entry) = self.current_session_entry()? {
+            return Ok(entry);
+        }
+        self.new_current_session(cwd)
+    }
+
+    /// 把当前固定 key 切到某个已存在的 session_id。
+    pub fn switch_current_to_session_id(&self, session_id: &str) -> Result<SessionEntry, AppError> {
+        let path = self.transcript_path(session_id);
+        if !path.exists() {
+            return Err(AppError::Config(format!(
+                "会话不存在: {session_id}"
+            )));
+        }
+
+        let header = read_header(&path)?;
+        let entry = SessionEntry {
+            session_id: session_id.to_string(),
+            updated_at: Utc::now().timestamp_millis(),
+            session_file: Some(path.to_string_lossy().to_string()),
+            cwd: header.cwd,
+            thinking_level: None,
+            model_override: None,
+            input_tokens: None,
+            output_tokens: None,
+            compaction_count: None,
+            compaction_tokens_freed: None,
+            tool_result_chars_persisted: None,
+            last_checkpoint_id: None,
+        };
+
+        let mut store = self.load_store()?;
+        store.insert(self.current_session_key().to_string(), entry.clone());
+        self.save_store(&store)?;
+        Ok(entry)
+    }
+
+    /// 列出 sessions 目录下所有历史 session_id（按文件名倒序，通常也是时间倒序）。
+    pub fn list_session_ids(&self) -> Result<Vec<String>, AppError> {
+        let rd = match std::fs::read_dir(&self.sessions_dir) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(AppError::Io(e)),
+        };
+        let mut ids: Vec<String> = rd
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .filter_map(|path| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(ToOwned::to_owned)
+            })
+            .collect();
+        ids.sort();
+        ids.reverse();
+        Ok(ids)
     }
 
     /// 按 sessionKey 获取元数据。
@@ -181,9 +257,9 @@ impl SessionManager {
 
     /// 获取当前会话的 transcript 路径；无当前会话返回 None。
     pub fn current_transcript_path(&self) -> Result<Option<PathBuf>, AppError> {
-        let store = self.load_store()?;
-        let key = self.current_session_key();
-        Ok(store.get(key).map(|e| self.transcript_path(&e.session_id)))
+        Ok(self
+            .current_session_entry()?
+            .map(|entry| self.transcript_path(&entry.session_id)))
     }
 
     // TODO: 并发 append 存在 TOCTOU 竞态，当前假设单线程串行调用；后续若引入并发需加文件锁或 Mutex

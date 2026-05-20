@@ -185,6 +185,10 @@ impl ChatContext {
         let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
+        let session_cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
 
         let agent_definition_dir = resolve_agent_definition_dir(&config)?;
         std::fs::create_dir_all(&agent_definition_dir).map_err(AppError::Io)?;
@@ -340,7 +344,7 @@ impl ChatContext {
         let agent_registry =
             crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone());
         let root_agent_guard = agent_registry
-            .register_root(session.current_session_key())
+            .register_root(current_session_entry.session_id.clone())
             .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
 
         // reviewer max_turns 上限优先读 env（便于 CI 临时调）；env 未设 → ReviewerConfig.max_turns。
@@ -359,7 +363,7 @@ impl ChatContext {
             "chat_context",
             plan_runtime::prod_reviewer::ProdReviewerDeps {
                 agent_registry: agent_registry.clone(),
-                parent_session_id: session.current_session_key().to_string(),
+                parent_session_id: current_session_entry.session_id.clone(),
                 llm: llm.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
@@ -844,6 +848,10 @@ pub async fn run_chat_turn(
 
     let entry = ctx.session.get_session(ctx.session.current_session_key())?;
     let model = ctx.effective_model(entry.as_ref());
+    let session_id = ctx
+        .session
+        .current_session_id()?
+        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
     let context_config = &ctx.config.context;
 
     context_state.on_message_appended(input.len());
@@ -934,7 +942,7 @@ pub async fn run_chat_turn(
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: 300,
         model,
-        session_id: ctx.session.current_session_key().to_string(),
+        session_id,
         tool_definitions: build_tool_definitions(ctx),
         context_config: context_config.clone(),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
@@ -1132,9 +1140,10 @@ fn maybe_record_turn_checkpoint(
     kind: CheckpointKind,
     appended_row_ids: &[String],
 ) {
-    let Some(request) =
-        build_turn_checkpoint_request(ctx.session.current_session_key(), kind, appended_row_ids)
-    else {
+    let Ok(Some(session_id)) = ctx.session.current_session_id() else {
+        return;
+    };
+    let Some(request) = build_turn_checkpoint_request(&session_id, kind, appended_row_ids) else {
         return;
     };
     if let Err(err) = ctx.checkpoint_store.record(request) {
@@ -1254,13 +1263,10 @@ fn unregister_thinking_persist_listeners(bus: &dyn EventBus, ids: &ThinkingPersi
 }
 
 fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
-    let key = ctx.session.current_session_key();
-    if ctx.session.get_session(key)?.is_none() {
-        let cwd = std::env::current_dir()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-        ctx.session.create_session(key, cwd)?;
-    }
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let _ = ctx.session.ensure_current_session(cwd)?;
     Ok(())
 }
 

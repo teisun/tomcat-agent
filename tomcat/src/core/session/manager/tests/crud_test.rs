@@ -31,6 +31,56 @@ fn create_session_and_list() {
 }
 
 #[test]
+fn new_current_session_repoints_default_key_and_keeps_history() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+
+    let first = mgr
+        .new_current_session(Some("/tmp/one".to_string()))
+        .expect("first session");
+    let second = mgr
+        .new_current_session(Some("/tmp/two".to_string()))
+        .expect("second session");
+
+    assert_ne!(first.session_id, second.session_id);
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(second.session_id.as_str())
+    );
+    let ids = mgr.list_session_ids().unwrap();
+    assert!(ids.contains(&first.session_id));
+    assert!(ids.contains(&second.session_id));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn switch_current_to_session_id_repoints_default_key() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+
+    let first = mgr.new_current_session(None).expect("first");
+    let second = mgr.new_current_session(None).expect("second");
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(second.session_id.as_str())
+    );
+
+    let switched = mgr
+        .switch_current_to_session_id(&first.session_id)
+        .expect("switch to first");
+    assert_eq!(switched.session_id, first.session_id);
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(first.session_id.as_str())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn load_store_empty_when_no_file() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

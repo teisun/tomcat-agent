@@ -10,26 +10,39 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
     let mgr = SessionManager::new(sessions_path.clone());
     match sub {
         SessionSub::List => {
-            let list = mgr.list_sessions()?;
+            let list = mgr.list_session_ids()?;
             if list.is_empty() {
                 println!("当前无会话。使用 session new 创建。");
                 return Ok(());
             }
-            for (key, entry) in list {
-                println!("{}  {}  {}", key, entry.session_id, entry.updated_at);
+            let current_id = mgr.current_session_id()?;
+            for session_id in list {
+                let marker = if current_id.as_deref() == Some(session_id.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                println!("{} {}  {}", marker, session_id, mgr.current_session_key());
             }
         }
         SessionSub::New => {
-            let key = mgr.current_session_key();
-            let entry = mgr.create_session(key, None)?;
-            println!("已创建会话: {}  {}", entry.session_id, key);
+            let entry = mgr.new_current_session(None)?;
+            println!(
+                "已创建会话: {}  {}",
+                entry.session_id,
+                mgr.current_session_key()
+            );
         }
-        SessionSub::Switch { key } => {
-            if mgr.get_session(&key)?.is_none() {
-                println!("会话不存在: {}", key);
-                return Ok(());
+        SessionSub::Switch { session_id } => match mgr.switch_current_to_session_id(&session_id) {
+            Ok(_) => println!(
+                "已切换到会话: {}  {}",
+                session_id,
+                mgr.current_session_key()
+            ),
+            Err(AppError::Config(_)) => {
+                println!("会话不存在: {}", session_id);
             }
-            println!("当前会话 key 固定为 agent:main:main，切换逻辑占位。");
+            Err(e) => return Err(e),
         }
         SessionSub::Delete { key } => {
             cleanup_openai_files_for_session(cfg, sessions_path.as_path(), &key, "session_delete");
@@ -42,15 +55,16 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             println!("已归档会话: {}", key);
         }
         SessionSub::Search { query } => {
-            let list = mgr.list_sessions()?;
-            if list.is_empty() {
+            let ids = mgr.list_session_ids()?;
+            if ids.is_empty() {
                 println!("无会话");
                 return Ok(());
             }
             let q = query.as_deref().unwrap_or("");
-            for (key, entry) in list {
-                if q.is_empty() || key.contains(q) || entry.session_id.contains(q) {
-                    println!("{}  {}", key, entry.session_id);
+            let key = mgr.current_session_key();
+            for session_id in ids {
+                if q.is_empty() || key.contains(q) || session_id.contains(q) {
+                    println!("{}  {}", key, session_id);
                 }
             }
         }

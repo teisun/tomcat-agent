@@ -727,7 +727,7 @@ impl PlanRuntime {
         }
         // 1, 2: frontmatter 改 session_key/session_id/mode
         plan.frontmatter.session_key = Some(self.session_key.clone());
-        plan.frontmatter.session_id = session_id;
+        plan.frontmatter.session_id = session_id.clone();
         plan.frontmatter.mode = file_store::PlanFileMode::Executing;
         // 3: write_plan（原子）
         file_store::write_plan(&path, &plan, self.lock_timeout_ms)
@@ -748,7 +748,9 @@ impl PlanRuntime {
         if self.auto_checkpoint_on_build() {
             if let Some(store) = self.checkpoint_store() {
                 let req = crate::core::CheckpointRecordRequest {
-                    session_id: self.session_key.clone(),
+                    session_id: session_id
+                        .clone()
+                        .unwrap_or_else(|| self.session_key.clone()),
                     turn_id: format!("plan_build-{plan_id}"),
                     kind: crate::core::CheckpointKind::Manual {
                         label: format!("plan_build:{plan_id}"),

@@ -4,10 +4,18 @@ use crate::core::{CheckpointKind, CheckpointMeta, ListOptions};
 use super::parse::ChatCommandOutcome;
 
 pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOutcome {
-    match ctx
-        .checkpoint_store
-        .list(ctx.session.current_session_key(), ListOptions { limit })
-    {
+    let session_id = match ctx.session.current_session_id() {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            println!("暂无当前会话。");
+            return ChatCommandOutcome::Handled;
+        }
+        Err(err) => {
+            println!("读取当前 session_id 失败：{err}");
+            return ChatCommandOutcome::Handled;
+        }
+    };
+    match ctx.checkpoint_store.list(&session_id, ListOptions { limit }) {
         Ok(entries) => {
             if entries.is_empty() {
                 println!("暂无 checkpoint。");
