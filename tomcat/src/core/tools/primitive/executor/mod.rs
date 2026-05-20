@@ -29,9 +29,8 @@
 //!    │                            └─ Deny → AppError::Permission(用户拒绝)
 //!    │
 //!    │ ③ Bash 命令决策（execute_bash 专属）
-//!    │   gate.check_bash(audit_cmd) 同样三态；命中后再用 `bash_parser::extract_paths`
-//!    │   把命令里出现的路径逐一交给 gate.check(Bash) 做路径级预检
-//!    │   （layer-1 deny / layer-2 confirm）。
+//!    │   gate.check_bash(audit_cmd) 同样三态；本期不再对命令字符串做路径级预检，
+//!    │   避免 `node:fs/promises` / `@scope/pkg` / heredoc 脚本等被误当成磁盘路径。
 //!    │
 //!    │ ④ 业务执行（按方法分支）
 //!    │   read_file    ► 大小预检（≤ MAX_READ_BYTES=10MB）► read_file_utf8

@@ -319,7 +319,10 @@ impl ChatContext {
         let initial_show_thinking = resolve_initial_show_thinking(&config.llm.thinking);
 
         // T2-P1-002 PR-PLA：PlanRuntime per-session，与 session_key 绑定。
-        let plan_runtime = plan_runtime::PlanRuntime::new(session.current_session_key());
+        let plan_runtime = plan_runtime::PlanRuntime::new_with_session_id(
+            session.current_session_key(),
+            current_session_entry.session_id.clone(),
+        );
         // T2-P1-* GAP-N12 / G3：把 ChatContext 已知的 plan/ask_question/todos 配置注入运行时。
         // 注意：这些 setter 都是幂等 atomic store；后续 hot-reload 也走同入口。
         // reviewer 改稿权 (`allow_review_edit`) 已硬编码为 true，不再有配置开关。

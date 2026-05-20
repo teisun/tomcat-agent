@@ -1676,26 +1676,27 @@ fn plan_build_atomic_rollback_on_write_failure() {
 }
 
 #[test]
-fn e8_recover_demotes_orphan_executing_plan_to_pending() {
+fn e8_recover_ignores_executing_plan_from_other_session_id() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    // 写一个 mode=executing 但 session_key=别人 的 plan 到盘。
+    // 写一个 mode=executing 但 session_id 属于上一次 run 的 plan 到盘。
     use crate::api::chat::plan_runtime::file_store::*;
     let plan_id = "orphan-plan";
     write_disk_plan(plan_id, PlanFileMode::Executing);
-    // 修一下 session_key 让它属于别的 session
+    // 故意保留相同 session_key，只改旧 session_id，覆盖“fixed key + fresh session”的真实问题。
     let path = plan_path_for_id(plan_id).unwrap();
     let mut p = read_plan(&path).unwrap();
-    p.frontmatter.session_key = Some("session-other".into());
+    p.frontmatter.session_key = Some("session-a".into());
+    p.frontmatter.session_id = Some("run-old".into());
     write_plan(&path, &p, 2000).unwrap();
 
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "run-new");
     rt.recover().unwrap();
 
-    // 磁盘应已降级为 pending
+    // 磁盘保持原状；fresh session 不应接管或改写别的 run 的 executing plan。
     let p2 = read_plan(&path).unwrap();
-    assert_eq!(p2.frontmatter.mode, PlanFileMode::Pending);
-    // 内存仍 Chat（孤儿不应自动接管）
+    assert_eq!(p2.frontmatter.mode, PlanFileMode::Executing);
+    // 内存仍 Chat（其他 session_id 的 executing plan 不应自动接管）
     assert!(matches!(rt.mode(), PlanMode::Chat));
     cleanup_home(&home);
 }
@@ -1710,9 +1711,10 @@ fn e8_recover_restores_executing_for_current_session() {
     let path = plan_path_for_id(plan_id).unwrap();
     let mut p = read_plan(&path).unwrap();
     p.frontmatter.session_key = Some("session-a".into());
+    p.frontmatter.session_id = Some("run-a".into());
     write_plan(&path, &p, 2000).unwrap();
 
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
     rt.recover().unwrap();
 
     // 内存切回 Executing
@@ -1735,10 +1737,11 @@ fn e7_reload_active_plan_from_disk_picks_up_session_owned_executing() {
     let path = plan_path_for_id(plan_id).unwrap();
     let mut p = read_plan(&path).unwrap();
     p.frontmatter.session_key = Some("session-a".into());
+    p.frontmatter.session_id = Some("run-a".into());
     write_plan(&path, &p, 2000).unwrap();
 
     // rt 起初是 Chat（模拟 /restore 调用前的状态机）
-    let rt = PlanRuntime::new("session-a");
+    let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
     assert!(matches!(rt.mode(), PlanMode::Chat));
 
     let restored = rt.reload_active_plan_from_disk().unwrap();

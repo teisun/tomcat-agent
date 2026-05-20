@@ -419,6 +419,26 @@ fn path_display_shows_absolute_path() {
 }
 
 #[test]
+fn bash_one_line_summary_keeps_long_absolute_workdir_path() {
+    let long_path = "/Users/yankeben/.tomcat/temp/cli_real_llm_wwww-mi-com_2794_1779277773225413000/docs/screenshots";
+    let summary = one_line_summary(
+        "bash",
+        &json!({"command": format!("mkdir -p {long_path}")}),
+    );
+    assert_eq!(summary, format!("command=mkdir -p {long_path}"));
+}
+
+#[test]
+fn result_summary_keeps_long_permission_error_path() {
+    let long_path = "/Users/yankeben/.tomcat/temp/cli_real_llm_wwww-mi-com_2794_1779277773225413000/docs/screenshots";
+    let err = format!(
+        "权限错误: 用户拒绝授权: {long_path}。下次工具再次访问该路径时会重新弹出 [s]/[w]/[c] 授权选项。"
+    );
+    let summary = result_summary(&json!(err.clone()), true);
+    assert_eq!(summary, err);
+}
+
+#[test]
 fn update_plan_success_shows_absolute_plan_path() {
     let home = dirs::home_dir().expect("HOME");
     let plan_path = home.join(".tomcat/plans/plan_demo_update.plan.md");

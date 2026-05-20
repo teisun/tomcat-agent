@@ -423,17 +423,15 @@
                                 ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
 │  src/core/tools/primitive/executor/bash.rs                                   │
-│  • execute_bash_impl：cwd gate → audit_cmd → gate_check_bash                 │
-│  • extract_paths 循环 gate_check_path(Bash, ...)                           │
+│  • execute_bash_impl：cwd gate → audit_cmd → bash_ast → gate_check_bash      │
 │  • Command::output()【当前无 tokio::timeout 包裹】                           │
 │  • BASH_TIMEOUT_SECS：#[allow(dead_code)]，未接线                           │
 └───────────────────────────────┬────────────────────────────────────────────┘
-              ┌─────────────────┴──────────────────┐
-              ▼                                    ▼
-┌──────────────────────────────┐      ┌──────────────────────────────────────┐
-│  gate.rs::gate_check_bash     │      │  core/permission/bash_parser         │
-│  + PermissionGate::check_bash   │      │  extract_paths（尽力路径预检）        │
-└──────────────────────────────┘      └──────────────────────────────────────┘
+              ▼
+┌──────────────────────────────┐
+│  gate.rs::gate_check_bash     │
+│  + PermissionGate::check_bash │
+└──────────────────────────────┘
               │
               ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
@@ -442,7 +440,7 @@
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**阅读顺序（说人话）**：模型先看到 **catalog 里的名字与参数**；真正执行时 **tool_exec** 把 JSON 解出来交给 **`execute_bash_impl`**；后者先问 **cwd 能不能读**、再问 **整条命令 bash 策略**、再把**命令里抠出来的路径**逐个用 **Bash** 作用域过 gate；最后才 **spawn**；**审计**记一条，不管成功失败。
+**阅读顺序（说人话）**：模型先看到 **catalog 里的名字与参数**；真正执行时 **tool_exec** 把 JSON 解出来交给 **`execute_bash_impl`**；后者先问 **cwd 能不能读**、再跑 **bash_ast** 和 **整条命令的 bash 策略**；不再从命令字符串里猜路径；最后才 **spawn**；**审计**记一条，不管成功失败。
 
 **配套测试**：[`primitive/tests/suite_test.rs`](../../../src/core/tools/primitive/tests/suite_test.rs)、[`primitive/tests/gate_suite_test.rs`](../../../src/core/tools/primitive/tests/gate_suite_test.rs)。
 

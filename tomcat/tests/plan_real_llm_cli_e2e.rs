@@ -19,6 +19,9 @@
 //! - 子进程**继承真实 HOME**（不注入临时 `HOME`）；plan 落盘到 `~/.tomcat/plans/`。
 //! - 默认 cwd 用 `~/.tomcat/temp/<run>/`（内置 workspace_roots）；自定义 cwd 必须显式位于可写根内。
 //! - 诊断日志写到仓库内 `workspace-temp/logs/`，运行一开始就打印可点击路径。
+//! - 每次 run 都会通过 `begin_fresh_default_session()` 生成新的真实 `session_id`；
+//!   因此 `recover()` 必须按 `session_id` 而不是仅按固定 `DEFAULT_SESSION_KEY`
+//!   识别 executing plan，否则旧 run 的盘状态会 hijack 新用例。
 
 #![allow(clippy::field_reassign_with_default)]
 
@@ -1047,6 +1050,8 @@ fn cli_full_plan_path_with_real_llm() {
 /// - `TOMCAT_E2E_PLAN_GOAL`：必填。
 /// - `TOMCAT_E2E_WORKDIR`：可选；不传则用 `~/.tomcat/temp/...` 临时目录。若指定，须在配置的 `workspace.workspace_roots` 可写根内。
 /// - 该观察用例不设 planning / exec 墙钟超时；仅保留 heartbeat 诊断输出。
+/// - 该用例每次都会创建 fresh `session_id`；若一启动就落到 EXEC，说明产品侧
+///   `PlanRuntime::recover()` 仍错误地只按 `DEFAULT_SESSION_KEY` 认盘，而不是按本次 run 的 `session_id`。
 #[test]
 #[ignore = "manual real-LLM observation test; run with --ignored --nocapture"]
 #[serial]

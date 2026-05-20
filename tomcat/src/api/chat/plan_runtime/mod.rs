@@ -84,9 +84,12 @@ pub struct PlanRuntime {
     /// 都基于此值；跨 turn 持久（**禁止**每轮重建 `PlanRuntime`）。
     mode: RwLock<PlanMode>,
     /// 本 PlanRuntime 绑定的 session_key（来自 `SessionManager::current_session_key`）。
-    /// 用于 `recover()` 区分 executing 是当前 session 在跑（保留）还是异 session 残留
-    /// （降级 pending + warning），实现 D6 防御。
+    /// 用于 `build_plan` / todos id 等固定 key 语义；当前实现里是 `DEFAULT_SESSION_KEY`。
     session_key: String,
+    /// 当前 chat run 的真实 session_id。
+    /// `recover()` / `reload_active_plan_from_disk()` 优先按这个字段判断 executing plan
+    /// 是否属于本次 run，避免仅凭固定的 session_key 误认旧盘。
+    current_session_id: Mutex<Option<String>>,
     /// 本回合 `CancellationToken` 的弱引用。chat_loop 每轮 readline 后重建 token，
     /// 必须立即 `attach_cancel_hook(&new_token)` 重挂，否则上一轮的 hook 监听
     /// 失效 → cancel→pending 不工作（D2 防御）。
@@ -157,14 +160,35 @@ impl PlanRuntime {
     /// session_key 在 `ChatContext::from_config` 装配阶段已知（chat session 同生命周期）。
     /// 当前 P1 实现：`mode = Chat`，等待 `enter_planning` 或 `recover` 改写。
     pub fn new(session_key: impl Into<String>) -> Arc<Self> {
-        Self::with_lock_timeout(session_key, file_store::DEFAULT_LOCK_TIMEOUT_MS)
+        Self::with_session_identity(session_key, None::<String>, file_store::DEFAULT_LOCK_TIMEOUT_MS)
     }
 
     /// 显式给 `lock_timeout_ms`（测试用；生产从 `[plan] lock_timeout_ms` 读取）。
     pub fn with_lock_timeout(session_key: impl Into<String>, lock_timeout_ms: u64) -> Arc<Self> {
+        Self::with_session_identity(session_key, None::<String>, lock_timeout_ms)
+    }
+
+    /// 生产装配入口：同时绑定固定 session_key 与本次 run 的真实 session_id。
+    pub fn new_with_session_id(
+        session_key: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Arc<Self> {
+        Self::with_session_identity(
+            session_key,
+            Some(session_id.into()),
+            file_store::DEFAULT_LOCK_TIMEOUT_MS,
+        )
+    }
+
+    fn with_session_identity(
+        session_key: impl Into<String>,
+        current_session_id: Option<String>,
+        lock_timeout_ms: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             mode: RwLock::new(PlanMode::Chat),
             session_key: session_key.into(),
+            current_session_id: Mutex::new(current_session_id),
             cancel_token: Mutex::new(None),
             session_todos: Mutex::new(Vec::new()),
             active_planning_plan_id: Mutex::new(None),
@@ -183,6 +207,13 @@ impl PlanRuntime {
             auto_checkpoint_on_build: AtomicBool::new(false),
             transcript_appender: Mutex::new(None),
         })
+    }
+
+    fn owns_executing_plan(&self, plan: &file_store::PlanFile) -> bool {
+        if let Some(current_id) = self.current_session_id.lock().clone() {
+            return plan.frontmatter.session_id.as_deref() == Some(current_id.as_str());
+        }
+        plan.frontmatter.session_key.as_deref() == Some(self.session_key.as_str())
     }
 
     /// 注入 transcript 自定义事件 appender（由 `ChatContext::from_config` 装配）。
@@ -347,10 +378,12 @@ impl PlanRuntime {
     ///
     /// 规则（plan-runtime.md §4.1 D7 / D6 / E8）：
     /// - PlanFile.mode == Executing：
-    ///   - 当前 session 拥有（`session_key == self.session_key()`）→ 内存切回 `Executing { plan_id }`，
+    ///   - 当前 run 拥有（优先 `session_id == current_session_id`；测试旧入口无 session_id
+    ///     时回退到 `session_key == self.session_key()`）→ 内存切回 `Executing { plan_id }`，
     ///     缓存 plan 全文供首轮 user_meta 注入（与 `build_plan` 一致）；
-    ///   - 其它 session 遗留（`session_key != self`）→ 把磁盘 mode 降为 Pending（孤儿清理），
-    ///     内存保持 Chat；调用方可在 transcript 写一行 warning（chat_loop 装配阶段）。
+    ///   - 其它 session 遗留：
+    ///     - 生产 fresh session（已有 `current_session_id`）→ **忽略**，不接管、也不改盘；
+    ///     - 旧测试入口（无 `current_session_id`）→ 仍按 session_key 语义做 pending demote。
     /// - 其它 mode（Planning / Pending / Completed）→ 不动盘，不切内存（用户用 `/restore`
     ///   或新 /plan 再决定）。
     ///
@@ -382,8 +415,7 @@ impl PlanRuntime {
             let plan_id = plan.frontmatter.plan_id.clone();
             match plan.frontmatter.mode {
                 file_store::PlanFileMode::Executing => {
-                    let owner = plan.frontmatter.session_key.as_deref().unwrap_or("");
-                    if owner == self.session_key.as_str() {
+                    if self.owns_executing_plan(&plan) {
                         // 当前 session 拥有 → 还原内存到 EXEC
                         let plan_text = file_store::serialize_plan_file(&plan)
                             .unwrap_or_else(|_| plan.body.clone());
@@ -391,10 +423,12 @@ impl PlanRuntime {
                         self.first_exec_turn_pending.store(true, Ordering::Release);
                         *self.mode.write() = PlanMode::Executing { plan_id };
                         *self.active_plan_path.lock() = Some(path.clone());
-                    } else {
+                    } else if self.current_session_id.lock().is_none() {
                         // 异 session 遗留 → 盘 demote 到 pending（保留 body / todos）
                         let mut demoted = plan.clone();
                         demoted.frontmatter.mode = file_store::PlanFileMode::Pending;
+                        let owner_key = plan.frontmatter.session_key.as_deref().unwrap_or("");
+                        let owner_id = plan.frontmatter.session_id.as_deref().unwrap_or("");
                         if let Err(e) =
                             file_store::write_plan(&path, &demoted, self.lock_timeout_ms)
                         {
@@ -402,8 +436,19 @@ impl PlanRuntime {
                                 "降级孤儿 executing plan {} 到 pending 失败: {e}", plan_id);
                         } else {
                             tracing::info!(target: "plan_runtime::recover",
-                                "孤儿 executing plan {} 已降级为 pending（原 session={owner}）", plan_id);
+                                "孤儿 executing plan {} 已降级为 pending（原 session_key={} session_id={}）",
+                                plan_id,
+                                owner_key,
+                                owner_id);
                         }
+                    } else {
+                        let current_session_id =
+                            self.current_session_id.lock().clone().unwrap_or_default();
+                        tracing::info!(target: "plan_runtime::recover",
+                            "跳过其他 session_id 的 executing plan {}（disk session_id={} current session_id={}）",
+                            plan_id,
+                            plan.frontmatter.session_id.as_deref().unwrap_or(""),
+                            current_session_id);
                     }
                 }
                 _ => {}
@@ -413,7 +458,8 @@ impl PlanRuntime {
     }
 
     /// E7：`/restore` 命令完成 git 树恢复后，重新读取磁盘上的 active plan
-    /// （`session_key == self && mode == executing`）并把内存 EXEC 状态对齐。
+    /// （优先 `session_id == current_session_id`；测试旧入口无 session_id 时回退 session_key）
+    /// 并把内存 EXEC 状态对齐。
     ///
     /// 返回还原后的 `plan_id`（若未发现 active plan 返回 None）。
     pub fn reload_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
@@ -432,7 +478,7 @@ impl PlanRuntime {
                 Err(_) => continue,
             };
             if matches!(plan.frontmatter.mode, file_store::PlanFileMode::Executing)
-                && plan.frontmatter.session_key.as_deref() == Some(self.session_key.as_str())
+                && self.owns_executing_plan(&plan)
             {
                 let plan_id = plan.frontmatter.plan_id.clone();
                 let plan_text =

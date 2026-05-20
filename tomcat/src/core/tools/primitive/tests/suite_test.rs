@@ -264,7 +264,7 @@ async fn execute_bash_success() {
 }
 
 #[tokio::test]
-async fn execute_bash_url_argument_does_not_trigger_path_gate() {
+async fn execute_bash_tokens_no_longer_trigger_path_gate() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_url");
     std::fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
@@ -277,16 +277,18 @@ async fn execute_bash_url_argument_does_not_trigger_path_gate() {
     );
     let res = exec
         .execute_bash(
-            "printf '%s\\n' http://127.0.0.1:4173/",
+            "printf '%s\\n' http://127.0.0.1:4173/ node:fs/promises @playwright/test",
             Some(&path_str),
             "p1",
             None,
             None,
         )
         .await
-        .expect("URL 参数不应再被 bash 当成路径授权");
+        .expect("bash token 不应再触发路径授权");
     assert_eq!(res.exit_code, 0);
     assert!(res.stdout.contains("http://127.0.0.1:4173/"));
+    assert!(res.stdout.contains("node:fs/promises"));
+    assert!(res.stdout.contains("@playwright/test"));
     let _ = std::fs::remove_dir(&dir);
 }
 

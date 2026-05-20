@@ -1,11 +1,14 @@
-//! # Bash 命令路径提取
+//! # Legacy Bash 路径提取
 //!
-//! 用 `shell-words` 把命令切成 token，然后启发式提取"看起来像路径"的 token：
+//! 该模块保留给历史测试 / 调研使用，**不再参与** `execute_bash` 主执行链。
+//! 过去这里会用启发式从命令字符串里猜测路径，但这会误伤 `node:fs/promises`、
+//! `@scope/pkg`、jq 过滤式、`node -e` / heredoc 脚本等大量非文件 token。
+//!
+//! 现在只保留**显式前缀**路径识别：
 //!
 //! - 以 `/` 开头（绝对路径）
 //! - 以 `~` 开头（home 缩写）
 //! - 以 `./` / `../` 开头（相对路径）
-//! - 含 `/` 但不以 `-` 开头（相对路径，如 `src/main.rs`）
 //!
 //! 不会展开 glob、不会触碰 stdin/stdout 重定向；
 //! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令再分别提取。
@@ -23,8 +26,6 @@
 //!   `bash_forbidden` regex 兜底（plan §4.1/§4.3）。
 
 use std::path::PathBuf;
-
-use super::is_url_like;
 
 /// 把 bash 命令拆成子命令并提取候选路径。
 ///
@@ -101,18 +102,11 @@ fn looks_like_path(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    if is_url_like(s) {
-        return false;
-    }
     // 以 - 开头视作 flag。
     if s.starts_with('-') {
         return false;
     }
-    if s.starts_with('/') || s.starts_with("~") || s.starts_with("./") || s.starts_with("../") {
-        return true;
-    }
-    // 含 `/`：相对路径（src/main.rs）。
-    s.contains('/')
+    s.starts_with('/') || s.starts_with("~") || s.starts_with("./") || s.starts_with("../")
 }
 
 /// 把一条命令按 `|` `;` `&` `>` `<` `&&` `||` 拆成子命令。
@@ -184,8 +178,8 @@ mod tests {
     }
 
     #[test]
-    fn extracts_relative_path() {
-        assert_eq!(extract_paths("rm src/main.rs"), vec!["src/main.rs"]);
+    fn plain_relative_path_without_prefix_is_not_extracted() {
+        assert!(extract_paths("rm src/main.rs").is_empty());
     }
 
     #[test]
@@ -243,7 +237,7 @@ mod tests {
     #[test]
     fn ignores_non_identifier_lhs() {
         let v = extract_paths("echo 123=/path");
-        assert_eq!(v, vec!["123=/path"]);
+        assert!(v.is_empty());
     }
 
     #[test]
@@ -269,20 +263,8 @@ mod tests {
     }
 
     #[test]
-    fn skips_http_and_https_urls() {
-        let v = extract_paths("curl http://127.0.0.1:4173/ https://example.com/api");
-        assert!(v.is_empty(), "URL-like token 不应被当成路径: {:?}", v);
-    }
-
-    #[test]
-    fn skips_flag_value_urls() {
-        let v = extract_paths("curl --url=https://example.com/api --output=/tmp/out");
-        assert_eq!(v, vec!["/tmp/out"]);
-    }
-
-    #[test]
-    fn skips_assignment_urls_but_keeps_real_paths() {
-        let v = extract_paths("ENDPOINT=https://example.com/api ROOT=./src tool");
-        assert_eq!(v, vec!["./src"]);
+    fn no_longer_treats_plain_slash_tokens_as_paths() {
+        let v = extract_paths("npm i -D @playwright/test && node -e \"console.log('http://x/y')\"");
+        assert!(v.is_empty(), "legacy helper 只应识别显式路径前缀: {:?}", v);
     }
 }

@@ -4,14 +4,13 @@
 //! 1. cwd 路径预检（走 `gate_check_path`，复用 read scope）；
 //! 2. 拼装审计字符串 `audit_cmd`（命令 + 参数）；
 //! 3. `gate_check_bash`（whitelist / approval 三层）→ `(scope, grant)`；
-//! 4. 用 `bash_parser::extract_paths` 把命令里出现的路径逐一交回 gate；
-//! 5. **`spawn`** 子进程（Unix `sh -c` + 注入 wasmedge env，Windows `cmd /C`）或显式 argv；
-//! 6. **`tokio::time::timeout(timeout_ms, child.wait_with_output())` 等价**：
+//! 4. **`spawn`** 子进程（Unix `sh -c` + 注入 wasmedge env，Windows `cmd /C`）或显式 argv；
+//! 5. **`tokio::time::timeout(timeout_ms, child.wait_with_output())` 等价**：
 //!    本实现用 **手工分离**——`Child::stdout/stderr.take()` → 并行 reader 任务读管道，
 //!    `tokio::time::timeout(_, child.wait())` 等退出，超时 `child.kill().await + child.wait()` 收口。
 //!    **禁止** `tokio::time::timeout(_, child.wait_with_output())` 反模式：`wait_with_output`
 //!    会消费 `Child`，超时分支拿不到句柄做 `kill`（bash.md §2.4.3 / §6.2 / §9.2）。
-//! 7. 收集 stdout / stderr / exit_code，写审计并返回。
+//! 6. 收集 stdout / stderr / exit_code，写审计并返回。
 //!
 //! ## 与 PR-现状的差异（T2-P0-016 PR-E）
 //! - **MUST**：`Command::output()` → `spawn` + 并行 reader + `timeout(child.wait())`；
@@ -20,7 +19,7 @@
 //!   `BashResult` 结构扩 `timed_out / truncated / persisted_output_path`。当前 Phase-E.2
 //!   先用「头尾保留」简化截断（不写盘），保证 `BashResult` 字段不变。
 
-use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
+use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
 use super::output_accum::accumulate_with_persist;
 use super::DefaultPrimitiveExecutor;
 use crate::core::tools::primitive::{BashResult, PrimitiveOperation};
@@ -123,9 +122,6 @@ pub(super) async fn execute_bash_impl(
     timeout_ms_override: Option<u64>,
 ) -> Result<BashResult, AppError> {
     let cwd_path = if let Some(c) = cwd {
-        if let Some(err) = url_like_fs_miss(c) {
-            return Err(err);
-        }
         let (p, _l, _s) = executor
             .gate_check_path(PrimitiveOperation::Read, c, plugin_id)
             .await?;
@@ -179,26 +175,6 @@ pub(super) async fn execute_bash_impl(
             return Err(e);
         }
     };
-
-    // 把命令里出现的路径逐一交给 gate.check 处理（layer-1 deny / layer-2 confirm）。
-    // 仅作"尽力而为"——shell_words 解析失败的命令，依赖 forbidden regex 兜底。
-    for raw in crate::core::permission::bash_parser::extract_paths(&audit_cmd) {
-        if let Err(e) = executor
-            .gate_check_path(PrimitiveOperation::Bash, &raw, plugin_id)
-            .await
-        {
-            executor.audit.record_primitive(PrimitiveAuditEntry {
-                operation: AuditPrimitiveOp::Bash,
-                path_or_cmd: audit_cmd.clone(),
-                plugin_id: plugin_id.to_string(),
-                user_approved: false,
-                success: false,
-                detail: Some(format!("路径未授权: {} ({})", raw, e)),
-                ..Default::default()
-            });
-            return Err(e);
-        }
-    }
 
     let timeout_ms = resolve_timeout_ms(executor, timeout_ms_override);
     let max_output_chars = resolve_max_output_chars(executor);

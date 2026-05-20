@@ -389,7 +389,8 @@ pub struct CliTurnRendererListenerIds {
 /// 内置 read/write/edit/bash 用更友好的字段；其他工具退回 `arg=value` 串联，
 /// 最长截断到 120 个 char，避免长 JSON 顶满终端。
 pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
-    const MAX_CHARS: usize = 120;
+    const DEFAULT_MAX_CHARS: usize = 120;
+    const BASH_MAX_CHARS: usize = 512;
     let summary = match tool_name {
         "read" | "read_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -416,7 +417,12 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
             args.to_string().replace('\n', " ")
         }
     };
-    truncate_chars(&summary, MAX_CHARS)
+    let max_chars = if matches!(tool_name, "bash" | "shell" | "execute_command") {
+        BASH_MAX_CHARS
+    } else {
+        DEFAULT_MAX_CHARS
+    };
+    truncate_chars(&summary, max_chars)
 }
 
 fn shell_command_preview(args: &Value) -> String {
@@ -530,12 +536,13 @@ pub fn result_summary_for_tool(
     display: Option<&ToolDisplay>,
     is_error: bool,
 ) -> String {
-    const MAX_CHARS: usize = 80;
+    const DEFAULT_MAX_CHARS: usize = 80;
+    const PATH_MAX_CHARS: usize = 512;
     if is_error {
         if let Some(s) = result.as_str() {
             let msg = s.trim();
             if !msg.is_empty() {
-                return truncate_chars(msg, MAX_CHARS);
+                return truncate_chars(msg, PATH_MAX_CHARS);
             }
         }
         let parsed = parse_tool_result_value(result);
@@ -544,13 +551,19 @@ pub fn result_summary_for_tool(
             .and_then(|v| v.as_str())
             .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
             .unwrap_or("failed");
-        return truncate_chars(msg, MAX_CHARS);
+        return truncate_chars(msg, PATH_MAX_CHARS);
     }
 
     if let Some(display) = display {
         let summary = display_summary(display);
         if !summary.is_empty() {
-            return truncate_chars(&summary, MAX_CHARS);
+            let max_chars = if matches!(display, ToolDisplay::File { .. } | ToolDisplay::Plan { .. })
+            {
+                PATH_MAX_CHARS
+            } else {
+                DEFAULT_MAX_CHARS
+            };
+            return truncate_chars(&summary, max_chars);
         }
     }
 
@@ -566,13 +579,14 @@ pub fn result_summary_for_tool(
         .and_then(|v| v.as_str())
         .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
     {
-        return truncate_chars(s, MAX_CHARS);
+        return truncate_chars(s, DEFAULT_MAX_CHARS);
     }
     "ok".to_string()
 }
 
 /// 失败时附加最多 `n` 行的错误细节（取 `stderr` / `error` 字段的前 N 行）。
 pub fn error_extra_lines(result: &Value, n: usize) -> Vec<String> {
+    const ERROR_LINE_MAX_CHARS: usize = 512;
     let raw = result
         .get("stderr")
         .and_then(|v| v.as_str())
@@ -582,7 +596,7 @@ pub fn error_extra_lines(result: &Value, n: usize) -> Vec<String> {
     raw.lines()
         .filter(|l| !l.trim().is_empty())
         .take(n)
-        .map(|s| truncate_chars(s, 200))
+        .map(|s| truncate_chars(s, ERROR_LINE_MAX_CHARS))
         .collect()
 }
 

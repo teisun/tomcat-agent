@@ -136,9 +136,9 @@ Bash 执行分两部分：
    - 命中 `bash_forbidden` -> `Deny`
    - 命中 `bash_approval_required` -> `NeedConfirm`
    - 未命中 -> `Allow { grant_type: BashPolicy, trigger: BashRegexConfig }`
-2. `DefaultPrimitiveExecutor::execute_bash` 调用 `bash_parser::extract_paths(command)` 静态提取候选路径，并对每个路径执行 `gate_check_path(Write, path)`。
+2. `DefaultPrimitiveExecutor::execute_bash` 仅对真实 `cwd` 做 `gate_check_path(Read, cwd)`，随后直接进入 `bash_ast` / `check_bash(command)` / `spawn`。
 
-当前 `bash_parser` 是静态、尽力而为的解析器，不能保证发现运行时才出现的路径，例如 `eval $X`、复杂 shell 展开、脚本内部访问、命令替换拼接路径等；该限制已作为安全 TODO 记录。
+不再从 bash 命令字符串里静态猜测路径再做 `gate_check_path(Bash, token)`。原因是 `node:fs/promises`、`@scope/pkg`、jq 过滤式、heredoc、`node -e` 等组合太多，误判成本远高于收益。
 
 ## 8. Audit Schema
 
