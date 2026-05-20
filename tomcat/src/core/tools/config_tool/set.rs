@@ -20,7 +20,7 @@ use super::ConfigToolContext;
 const CONFIG_TOOL_PLUGIN_ID: &str = "__config_tool__";
 
 /// `config_set` 工具的返回载荷（序列化为 JSON 给 LLM）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ConfigSetOutcome {
     pub applied: bool,
     pub message: String,

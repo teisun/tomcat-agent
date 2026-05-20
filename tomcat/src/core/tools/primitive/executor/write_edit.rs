@@ -128,7 +128,7 @@ pub(super) async fn write_file_impl(
     });
 
     Ok(WriteFileResult {
-        path: path.to_string(),
+        path: crate::infra::platform::format_home_path(&path_buf),
         written: true,
         bytes_written: final_bytes.len() as u64,
         diff_hint,
@@ -252,7 +252,7 @@ pub(super) async fn edit_file_impl(
         grant_trigger: Some(grant_trigger_str(grant.trigger)),
     });
     Ok(EditFileResult {
-        path: path.to_string(),
+        path: crate::infra::platform::format_home_path(&path_buf),
         applied: true,
     })
 }

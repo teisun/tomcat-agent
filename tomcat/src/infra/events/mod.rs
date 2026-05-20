@@ -68,7 +68,7 @@
 //! 中以"任意 JSON"携带，不强制 wire schema——避免 LLM provider 升级时全链路
 //! 改 enum；强类型断言留在调用方（如 `agent_loop::reasoning_loop`）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
 pub mod wire {
@@ -183,6 +183,15 @@ pub struct AssistantMessageEvent(pub serde_json::Value);
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolOutput(pub serde_json::Value);
 
+/// 工具执行成功后给 CLI/TUI 的结构化展示提示。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolDisplay {
+    File { file: String },
+    Plan { plan: String },
+    Text { text: String },
+}
+
 /// 占位：AssistantMessage。
 #[derive(Debug, Clone, Serialize)]
 pub struct AssistantMessage(pub serde_json::Value);
@@ -266,6 +275,8 @@ pub enum AgentEvent {
         #[serde(rename = "toolName")]
         tool_name: String,
         result: ToolOutput,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<ToolDisplay>,
         #[serde(rename = "isError")]
         is_error: bool,
     },

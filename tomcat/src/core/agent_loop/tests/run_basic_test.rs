@@ -8,13 +8,15 @@
 //! - 空消息：messages=[] 不崩溃，run 仍能 Ok 返回。
 
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::core::llm::{ChatMessage, StreamEvent};
 use crate::infra::error::AppError;
-use crate::infra::DefaultEventBus;
+use crate::infra::event_bus::EventBus;
+use crate::infra::{wire, DefaultEventBus, EventContext};
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
 
@@ -109,6 +111,64 @@ async fn run_tool_loop_calls_tool_then_returns_text() {
     let messages = vec![ChatMessage::user("read /tmp/x")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("done"));
+}
+
+#[tokio::test]
+async fn run_tool_loop_emits_display_on_tool_execution_end() {
+    let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".to_string()),
+            name: Some("write".to_string()),
+            arguments_delta: Some(
+                r#"{"path":"~/workspace/demo.txt","content":"","overwrite":false}"#.to_string(),
+            ),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "done".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_cb = Arc::clone(&captured);
+    event_bus.on(
+        wire::WIRE_TOOL_EXECUTION_END,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let messages = vec![ChatMessage::user("write demo file")];
+    let _ = loop_.run(messages).await.unwrap();
+
+    let payload = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应捕获到 tool_execution_end payload");
+    assert_eq!(payload["toolName"].as_str(), Some("write"));
+    assert_eq!(payload["display"]["kind"].as_str(), Some("file"));
+    assert_eq!(
+        payload["display"]["file"].as_str(),
+        Some("~/workspace/demo.txt")
+    );
 }
 
 /// 边界：空消息列表不崩溃，run 仍可调用（LLM 可能返回错误或空回复）。

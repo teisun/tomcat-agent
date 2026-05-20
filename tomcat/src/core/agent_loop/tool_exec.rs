@@ -42,6 +42,7 @@ use crate::core::tools::primitive::{
     BashTaskRegistry, EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
 };
 use crate::infra::error::AppError;
+use crate::infra::events::ToolDisplay;
 
 use super::config_backend::SharedConfigBackend;
 use super::types::ToolCallInfo;
@@ -49,6 +50,22 @@ use super::types::ToolCallInfo;
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
 /// 与"插件上下文中触发的工具调用"区分，便于 hostcall 审计层分桶。
 pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
+
+/// `tool_exec` 提供给 dispatcher 的完整结果：
+/// - `model_text` 保持给 transcript / LLM
+/// - `display` 只给观察层 UI 使用
+pub(super) struct ToolExecOutcome {
+    pub(super) model_text: String,
+    pub(super) is_error: bool,
+    pub(super) follow_up_parts: Vec<crate::core::llm::ChatMessageContentPart>,
+    pub(super) display: Option<ToolDisplay>,
+}
+
+impl ToolExecOutcome {
+    fn into_legacy_tuple(self) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
+        (self.model_text, self.is_error, self.follow_up_parts)
+    }
+}
 
 /// reviewer 子 Agent 在 tool_exec 层允许调用的工具名白名单（与
 /// `prod_reviewer::REVIEWER_ALLOWED_TOOLS` 保持一致）。
@@ -99,7 +116,7 @@ fn simulate_apply_edits(
     cur
 }
 
-/// 执行单次 tool call 并返回 `(输出文本, is_error)`。
+/// 执行单次 tool call 并返回兼容旧测试的 `(输出文本, is_error)`。
 ///
 /// 自由函数设计（**不**接收 `&AgentLoop`）：调用方持有 `Arc<dyn PrimitiveExecutor>`
 /// 即可直接调用；test 只需 mock `PrimitiveExecutor`，不必 mock 整个 AgentLoop。
@@ -146,6 +163,7 @@ pub(super) async fn execute_tool_with_openai_files(
         tc,
     )
     .await
+    .into_legacy_tuple()
 }
 
 /// 完整版工具执行器：在 `execute_tool_with_openai_files` 基础上额外接受
@@ -165,6 +183,41 @@ pub(super) async fn execute_tool_full(
     subagent_type: crate::core::agent_loop::types::SubagentType,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
+) -> ToolExecOutcome {
+    let mut display = None;
+    let (model_text, is_error, follow_up_parts) = execute_tool_tuple_full(
+        primitive,
+        config_backend,
+        bash_task_registry,
+        read_file_state,
+        openai_files_runtime,
+        plan_runtime,
+        subagent_type,
+        cancel,
+        tc,
+        &mut display,
+    )
+    .await;
+
+    ToolExecOutcome {
+        display,
+        model_text,
+        is_error,
+        follow_up_parts,
+    }
+}
+
+async fn execute_tool_tuple_full(
+    primitive: &Arc<dyn PrimitiveExecutor>,
+    config_backend: &Option<SharedConfigBackend>,
+    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
+    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
+    openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
+    subagent_type: crate::core::agent_loop::types::SubagentType,
+    cancel: &tokio_util::sync::CancellationToken,
+    tc: &ToolCallInfo,
+    display_out: &mut Option<ToolDisplay>,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
@@ -192,7 +245,15 @@ pub(super) async fn execute_tool_full(
         tc.name.as_str(),
         "create_plan" | "update_plan" | "todos" | "ask_question"
     ) {
-        return dispatch_plan_tool(&tc.name, &args, plan_runtime, subagent_type, cancel).await;
+        return dispatch_plan_tool(
+            &tc.name,
+            &args,
+            plan_runtime,
+            subagent_type,
+            cancel,
+            display_out,
+        )
+        .await;
     }
 
     // B12：write 类工具在主体之前做路径策略守卫。
@@ -538,6 +599,9 @@ pub(super) async fn execute_tool_full(
                         state.invalidate(&resolved);
                     }
                     if r.written {
+                        *display_out = Some(ToolDisplay::File {
+                            file: r.path.clone(),
+                        });
                         // PR-G 回执：created/updated + 字节数 + 可选 diff 摘要。
                         let verb = if r.diff_hint.is_some() {
                             "已覆盖"
@@ -555,7 +619,9 @@ pub(super) async fn execute_tool_full(
                     } else {
                         // PR-C 之后 primitive 走 Err 早退，理论上不再出现 written=false；
                         // 保留这条文案兜底（dispatcher / extension 直调）。
-                        Ok(format!("写入被拒绝: {}", r.path))
+                        let msg = format!("写入被拒绝: {}", r.path);
+                        *display_out = Some(ToolDisplay::Text { text: msg.clone() });
+                        Ok(msg)
                     }
                 }
                 Err(e) => Err(e.to_string()),
@@ -626,9 +692,14 @@ pub(super) async fn execute_tool_full(
                     .await
                     .map(|r| {
                         if r.applied {
+                            *display_out = Some(ToolDisplay::File {
+                                file: r.path.clone(),
+                            });
                             format!("已编辑: {}", r.path)
                         } else {
-                            format!("编辑被拒绝: {}", r.path)
+                            let msg = format!("编辑被拒绝: {}", r.path);
+                            *display_out = Some(ToolDisplay::Text { text: msg.clone() });
+                            msg
                         }
                     })
                     .map_err(|e| e.to_string())
@@ -718,9 +789,14 @@ pub(super) async fn execute_tool_full(
                     .await
                     .map(|r| {
                         if r.applied {
+                            *display_out = Some(ToolDisplay::File {
+                                file: r.path.clone(),
+                            });
                             format!("已 hashline 编辑: {}", r.path)
                         } else {
-                            format!("hashline 编辑被拒绝: {}", r.path)
+                            let msg = format!("hashline 编辑被拒绝: {}", r.path);
+                            *display_out = Some(ToolDisplay::Text { text: msg.clone() });
+                            msg
                         }
                     })
                     .map_err(|e| e.to_string())
@@ -771,12 +847,13 @@ pub(super) async fn execute_tool_full(
             backend
                 .config_set(key, value)
                 .await
-                .map(|(applied, msg)| {
-                    serde_json::json!({
-                        "applied": applied,
-                        "message": msg,
-                    })
-                    .to_string()
+                .map(|v| {
+                    if let Some(text) = v.get("message").and_then(|value| value.as_str()) {
+                        *display_out = Some(ToolDisplay::Text {
+                            text: text.to_string(),
+                        });
+                    }
+                    serde_json::to_string(&v).unwrap_or_else(|_| v.to_string())
                 })
                 .map_err(|e| e.to_string())
         }
@@ -1114,6 +1191,7 @@ async fn dispatch_plan_tool(
     plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
     cancel: &tokio_util::sync::CancellationToken,
+    display_out: &mut Option<ToolDisplay>,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let Some(rt) = plan_runtime else {
         return (
@@ -1186,8 +1264,204 @@ async fn dispatch_plan_tool(
         _ => unreachable!("dispatch_plan_tool called with unknown name {name}"),
     };
     match result {
-        Ok(v) => (v.to_string(), false, Vec::new()),
+        Ok(v) => {
+            *display_out = match name {
+                "create_plan" | "update_plan" => {
+                    v.get("path").and_then(|value| value.as_str()).map(|plan| {
+                        ToolDisplay::Plan {
+                            plan: plan.to_string(),
+                        }
+                    })
+                }
+                _ => None,
+            };
+            (v.to_string(), false, Vec::new())
+        }
         Err(e) => (format!("{name} 失败：{e}"), true, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod display_contract_tests {
+    use super::*;
+    use crate::core::agent_loop::ConfigBackend;
+    use crate::core::agent_loop::types::SubagentType;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct DisplayPrimitive;
+
+    #[async_trait::async_trait]
+    impl PrimitiveExecutor for DisplayPrimitive {
+        async fn read(
+            &self,
+            _path: &str,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+            _line_numbers: bool,
+            _hashline: bool,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::ReadResult, AppError> {
+            unreachable!()
+        }
+
+        async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+            unreachable!()
+        }
+
+        async fn list_dir(
+            &self,
+            _path: &str,
+            _plugin_id: &str,
+        ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+            unreachable!()
+        }
+
+        async fn write_file(
+            &self,
+            _path: &str,
+            _content: &str,
+            _overwrite: bool,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+            Ok(crate::core::tools::primitive::WriteFileResult {
+                path: "~/workspace/demo.txt".to_string(),
+                written: true,
+                bytes_written: 12,
+                diff_hint: None,
+            })
+        }
+
+        async fn edit_file(
+            &self,
+            _path: &str,
+            _edits: Vec<crate::core::tools::primitive::EditOperation>,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+            unreachable!()
+        }
+
+        async fn execute_bash(
+            &self,
+            _command: &str,
+            _cwd: Option<&str>,
+            _plugin_id: &str,
+            _argv: Option<&[String]>,
+            _timeout_ms_override: Option<u64>,
+        ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+            unreachable!()
+        }
+
+        async fn hashline_edit(
+            &self,
+            _path: &str,
+            _segments: Vec<crate::core::tools::primitive::HashlineSegment>,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+            unreachable!()
+        }
+
+        async fn search_files(
+            &self,
+            _args: crate::core::tools::primitive::SearchFilesArgs,
+            _plugin_id: &str,
+        ) -> Result<crate::core::tools::primitive::SearchFilesOutput, AppError> {
+            unreachable!()
+        }
+
+        async fn require_user_confirmation(
+            &self,
+            _operation: crate::core::tools::primitive::PrimitiveOperation,
+            _preview: &str,
+            _plugin_id: &str,
+        ) -> Result<bool, AppError> {
+            unreachable!()
+        }
+    }
+
+    struct DisplayConfigBackend;
+
+    #[async_trait::async_trait]
+    impl ConfigBackend for DisplayConfigBackend {
+        async fn config_get(&self, _key: &str) -> Result<serde_json::Value, AppError> {
+            unreachable!()
+        }
+
+        async fn config_set(&self, _key: &str, _value: &str) -> Result<serde_json::Value, AppError> {
+            Ok(json!({
+                "applied": true,
+                "message": "已设置 llm.default_model = gpt-5.2"
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn write_success_populates_file_display() {
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+        let tc = ToolCallInfo {
+            id: "w1".into(),
+            name: "write".into(),
+            arguments: json!({
+                "path": "~/workspace/demo.txt",
+                "content": "hello",
+                "overwrite": false
+            })
+            .to_string(),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::User,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+        assert!(!outcome.is_error);
+        assert_eq!(
+            outcome.display,
+            Some(ToolDisplay::File {
+                file: "~/workspace/demo.txt".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn config_set_success_populates_text_display() {
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+        let backend: SharedConfigBackend = Arc::new(DisplayConfigBackend);
+        let config_backend = Some(backend);
+        let tc = ToolCallInfo {
+            id: "cfg1".into(),
+            name: "config_set".into(),
+            arguments: json!({
+                "key": "llm.default_model",
+                "value": "gpt-5.2"
+            })
+            .to_string(),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &config_backend,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::User,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+        assert!(!outcome.is_error);
+        assert_eq!(
+            outcome.display,
+            Some(ToolDisplay::Text {
+                text: "已设置 llm.default_model = gpt-5.2".to_string(),
+            })
+        );
     }
 }
 
@@ -1363,7 +1637,7 @@ mod reviewer_guards_tests {
             name: "bash".into(),
             arguments: "{}".into(),
         };
-        let (msg, is_err, _) = execute_tool_full(
+        let outcome = execute_tool_full(
             &primitive,
             &None,
             &None,
@@ -1375,8 +1649,10 @@ mod reviewer_guards_tests {
             &tc,
         )
         .await;
-        assert!(is_err);
-        assert!(msg.contains("reviewer 子 Agent 禁止调用工具"));
+        assert!(outcome.is_error);
+        assert!(outcome
+            .model_text
+            .contains("reviewer 子 Agent 禁止调用工具"));
     }
 
     /// reviewer.md §11 RV-T4：reviewer 路径下 `create_plan` 被白名单守卫早退（防套娃）。
@@ -1388,7 +1664,7 @@ mod reviewer_guards_tests {
             name: "create_plan".into(),
             arguments: "{}".into(),
         };
-        let (msg, is_err, _) = execute_tool_full(
+        let outcome = execute_tool_full(
             &primitive,
             &None,
             &None,
@@ -1400,8 +1676,10 @@ mod reviewer_guards_tests {
             &tc,
         )
         .await;
-        assert!(is_err);
-        assert!(msg.contains("reviewer 子 Agent 禁止调用工具 `create_plan`"));
+        assert!(outcome.is_error);
+        assert!(outcome
+            .model_text
+            .contains("reviewer 子 Agent 禁止调用工具 `create_plan`"));
     }
 
     #[tokio::test]
@@ -1444,7 +1722,7 @@ mod reviewer_guards_tests {
             })
             .to_string(),
         };
-        let (msg, is_err, _) = execute_tool_full(
+        let outcome = execute_tool_full(
             &primitive,
             &None,
             &None,
@@ -1457,7 +1735,13 @@ mod reviewer_guards_tests {
         )
         .await;
 
-        assert!(!is_err, "unexpected error: {msg}");
-        assert!(msg.contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
+        assert!(
+            !outcome.is_error,
+            "unexpected error: {}",
+            outcome.model_text
+        );
+        assert!(outcome
+            .model_text
+            .contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));
     }
 }

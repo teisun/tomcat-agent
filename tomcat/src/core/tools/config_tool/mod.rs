@@ -86,9 +86,10 @@ impl ConfigBackend for ChatConfigBackend {
         config_get_impl(key, &cfg)
     }
 
-    async fn config_set(&self, key: &str, value: &str) -> Result<(bool, String), AppError> {
+    async fn config_set(&self, key: &str, value: &str) -> Result<serde_json::Value, AppError> {
         let outcome = config_set_impl(key, value, &self.ctx).await?;
-        Ok((outcome.applied, outcome.message))
+        serde_json::to_value(&outcome)
+            .map_err(|e| AppError::Config(format!("序列化 config_set 结果失败: {}", e)))
     }
 }
 

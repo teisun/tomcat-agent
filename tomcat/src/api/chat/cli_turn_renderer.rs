@@ -42,6 +42,7 @@ use serde_json::Value;
 use crate::api::render::MarkdownRenderer;
 use crate::infra::config::ToolCliVerbosity;
 use crate::infra::event_bus::{EventContext, EventListenerId};
+use crate::infra::events::ToolDisplay;
 use crate::infra::{wire, EventBus};
 
 /// 上一次打印通道类型，决定是否需要补换行；`Tool` 始终 stderr，`Thinking` /
@@ -283,6 +284,7 @@ impl CliTurnRenderer {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let result = payload.get("result").cloned().unwrap_or(Value::Null);
+        let display = payload.get("display").and_then(parse_tool_display);
         if self.tool_cli_verbosity == ToolCliVerbosity::Off {
             self.tool_starts.lock().remove(call_id);
             return;
@@ -300,7 +302,7 @@ impl CliTurnRenderer {
                 }
             })
             .unwrap_or_else(|| "?".to_string());
-        let summary = result_summary(&result, is_error);
+        let summary = result_summary_for_tool(&result, display.as_ref(), is_error);
         let (icon, color) = if is_error {
             ("✗", "\x1b[31m")
         } else {
@@ -480,8 +482,50 @@ fn first_non_empty_line(text: &str) -> String {
         .to_string()
 }
 
+/// 解析 `tool_execution_end.result`：plan 工具等常把 JSON 对象序列化成字符串落盘。
+fn parse_tool_result_value(result: &Value) -> Value {
+    if let Some(s) = result.as_str() {
+        if let Ok(v) = serde_json::from_str::<Value>(s) {
+            return v;
+        }
+    }
+    result.clone()
+}
+
+fn parse_tool_display(value: &Value) -> Option<ToolDisplay> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+/// 把 `~/.tomcat/...` 展开成绝对路径，便于终端识别为可点击 file link。
+fn expand_path_for_terminal(path: &str) -> String {
+    if path == "~" {
+        return dirs::home_dir()
+            .map(|h| h.display().to_string())
+            .unwrap_or_else(|| path.to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest).display().to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn display_summary(display: &ToolDisplay) -> String {
+    match display {
+        ToolDisplay::File { file } => expand_path_for_terminal(file),
+        ToolDisplay::Plan { plan } => expand_path_for_terminal(plan),
+        ToolDisplay::Text { text } => text.trim().to_string(),
+    }
+}
+
 /// 工具结果摘要（`✓/✗ {summary}`），尽量挑可读字段；失败时塞 error 文案。
 pub fn result_summary(result: &Value, is_error: bool) -> String {
+    result_summary_for_tool(result, None, is_error)
+}
+
+/// 工具结果摘要：优先使用结构化 `display`，否则退化到通用字段。
+pub fn result_summary_for_tool(result: &Value, display: Option<&ToolDisplay>, is_error: bool) -> String {
     const MAX_CHARS: usize = 80;
     if is_error {
         if let Some(s) = result.as_str() {
@@ -490,20 +534,34 @@ pub fn result_summary(result: &Value, is_error: bool) -> String {
                 return truncate_chars(msg, MAX_CHARS);
             }
         }
-        let msg = result
+        let parsed = parse_tool_result_value(result);
+        let msg = parsed
             .get("error")
             .and_then(|v| v.as_str())
-            .or_else(|| result.get("message").and_then(|v| v.as_str()))
+            .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
             .unwrap_or("failed");
         return truncate_chars(msg, MAX_CHARS);
     }
-    if let Some(lines) = result.get("lines").and_then(|v| v.as_u64()) {
+
+    if let Some(display) = display {
+        let summary = display_summary(display);
+        if !summary.is_empty() {
+            return truncate_chars(&summary, MAX_CHARS);
+        }
+    }
+
+    let parsed = parse_tool_result_value(result);
+    if let Some(lines) = parsed.get("lines").and_then(|v| v.as_u64()) {
         return format!("{} lines", lines);
     }
-    if let Some(bytes) = result.get("bytes").and_then(|v| v.as_u64()) {
+    if let Some(bytes) = parsed.get("bytes").and_then(|v| v.as_u64()) {
         return format!("{} bytes", bytes);
     }
-    if let Some(s) = result.get("summary").and_then(|v| v.as_str()) {
+    if let Some(s) = parsed
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
+    {
         return truncate_chars(s, MAX_CHARS);
     }
     "ok".to_string()

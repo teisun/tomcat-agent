@@ -153,7 +153,7 @@ pub(super) async fn run_tool_calls(
         // PR-RJ T3-c：返回值新增 `follow_up_parts`——image / pdf 等需要在
         // **下一条 user 消息** 注入 `Parts` 的场景由本调度器在 push tool 之后立刻
         // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
-        let (result_content, is_error, follow_up_parts) = {
+        let outcome = {
             let exec = tool_exec::execute_tool_full(
                 &agent.primitive,
                 &agent.config_backend,
@@ -173,6 +173,7 @@ pub(super) async fn run_tool_calls(
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
                         result: ToolOutput(serde_json::json!("[interrupted]")),
+                        display: None,
                         is_error: true,
                     });
                     return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
@@ -180,12 +181,18 @@ pub(super) async fn run_tool_calls(
                 out = exec => out,
             }
         };
+        let model_text = outcome.model_text;
+        let is_error = outcome.is_error;
+        let display = outcome.display;
+        let follow_up_parts = outcome.follow_up_parts;
 
         agent.emit_extension_event(ExtensionEvent::ToolResult {
             tool_name: tc.name.clone(),
             tool_call_id: tc.id.clone(),
             input: args,
-            content: vec![ContentBlock(serde_json::json!({ "text": result_content }))],
+            content: vec![ContentBlock(
+                serde_json::json!({ "text": model_text.clone() }),
+            )],
             details: None,
             is_error,
         });
@@ -193,16 +200,19 @@ pub(super) async fn run_tool_calls(
         agent.emit_event(AgentEvent::ToolExecutionEnd {
             tool_call_id: tc.id.clone(),
             tool_name: tc.name.clone(),
-            result: ToolOutput(serde_json::json!(result_content)),
+            result: ToolOutput(serde_json::json!(model_text.clone())),
+            display: display.clone(),
             is_error,
         });
 
         if let Some(ref mut ctx_state) = agent.context_state {
-            ctx_state.on_message_appended(result_content.len());
+            ctx_state.on_message_appended(model_text.len());
         }
 
-        messages.push(ChatMessage::tool(&tc.id, &result_content));
-        tool_results.push(Message(serde_json::json!({ "content": result_content })));
+        messages.push(ChatMessage::tool(&tc.id, &model_text));
+        tool_results.push(Message(
+            serde_json::json!({ "content": model_text.clone() }),
+        ));
 
         // PR-RJ T3-c：read 命中 image / pdf → tool 消息已经写了占位句，
         // 这里紧接着 push 一条 user 消息把真正的 InputImage / InputFile 注入对话。

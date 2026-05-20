@@ -30,8 +30,9 @@ pub trait ConfigBackend: Send + Sync + 'static {
     /// 读取一个配置项；返回值会被工具直接序列化给 LLM。
     async fn config_get(&self, key: &str) -> Result<serde_json::Value, AppError>;
 
-    /// 写入（或追加）一个配置项；返回 `(applied, message)`，由工具序列化给 LLM。
-    async fn config_set(&self, key: &str, value: &str) -> Result<(bool, String), AppError>;
+    /// 写入（或追加）一个配置项；返回结构化 JSON（至少含 `applied` / `message`），
+    /// 由工具直接序列化给 LLM；CLI 展示提示由 `tool_exec` 额外补充。
+    async fn config_set(&self, key: &str, value: &str) -> Result<serde_json::Value, AppError>;
 }
 
 /// 类型别名：方便 `AgentLoop` / `tool_exec` 处使用。

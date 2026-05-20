@@ -184,7 +184,7 @@ pub async fn hashline_edit_impl(
         grant_trigger: Some(grant_trigger_str(grant.trigger)),
     });
     Ok(EditFileResult {
-        path: path.to_string(),
+        path: crate::infra::platform::format_home_path(&path_buf),
         applied: true,
     })
 }

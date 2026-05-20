@@ -11,9 +11,13 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use super::{error_extra_lines, one_line_summary, result_summary, CliTurnRenderer, CliWriter};
+use super::{
+    error_extra_lines, one_line_summary, result_summary, result_summary_for_tool, CliTurnRenderer,
+    CliWriter,
+};
 use crate::api::render::MarkdownRenderer;
 use crate::infra::config::ToolCliVerbosity;
+use crate::infra::events::ToolDisplay;
 
 #[derive(Default)]
 struct CapturedWriter {
@@ -344,6 +348,159 @@ fn result_summary_picks_best_field_for_success_and_error() {
         result_summary(&json!("No such file or directory"), true),
         "No such file or directory"
     );
+}
+
+#[test]
+fn create_plan_success_shows_absolute_plan_path() {
+    let home = dirs::home_dir().expect("HOME");
+    let plan_path = home.join(".tomcat/plans/plan_demo_abcd1234.plan.md");
+    let payload = json!({
+        "plan_id": "plan_demo_abcd1234",
+        "path": format!("~/{}", plan_path.strip_prefix(&home).unwrap().display()),
+        "mode": "planning",
+    });
+    let as_string = serde_json::to_string(&payload).unwrap();
+    let summary = result_summary_for_tool(
+        &json!(as_string),
+        Some(&ToolDisplay::Plan {
+            plan: format!("~/{}", plan_path.strip_prefix(&home).unwrap().display()),
+        }),
+        false,
+    );
+    assert_eq!(summary, plan_path.display().to_string());
+}
+
+#[test]
+fn tool_end_create_plan_prints_clickable_path() {
+    let (r, w) = make_renderer(false);
+    let home = dirs::home_dir().expect("HOME");
+    let plan_path = home.join(".tomcat/plans/plan_cli_e2e__demo.plan.md");
+    let result = json!({
+        "plan_id": "plan_cli_e2e__demo",
+        "path": format!("~/{}", plan_path.strip_prefix(&home).unwrap().display()),
+        "mode": "planning",
+    });
+    r.on_tool_start(&json!({
+        "toolCallId": "cp1",
+        "toolName": "create_plan",
+        "args": {"goal": "demo"},
+    }));
+    r.on_tool_end(&json!({
+        "toolCallId": "cp1",
+        "toolName": "create_plan",
+        "result": serde_json::to_string(&result).unwrap(),
+        "display": {
+            "kind": "plan",
+            "plan": format!("~/{}", plan_path.strip_prefix(&home).unwrap().display()),
+        },
+        "isError": false,
+    }));
+    let err = w.stderr();
+    assert!(
+        err.contains(&plan_path.display().to_string()),
+        "create_plan 成功行应包含绝对 plan 路径: {:?}",
+        err
+    );
+    assert!(err.contains("✓"), "应有成功标记: {:?}", err);
+}
+
+#[test]
+fn path_display_shows_absolute_path() {
+    let home = dirs::home_dir().expect("HOME");
+    let target = home.join("workspace/demo.rs");
+    let summary = result_summary_for_tool(
+        &json!("已写入: ~/workspace/demo.rs (2 bytes)"),
+        Some(&ToolDisplay::File {
+            file: format!("~/{}", target.strip_prefix(&home).unwrap().display()),
+        }),
+        false,
+    );
+    assert_eq!(summary, target.display().to_string());
+}
+
+#[test]
+fn update_plan_success_shows_absolute_plan_path() {
+    let home = dirs::home_dir().expect("HOME");
+    let plan_path = home.join(".tomcat/plans/plan_demo_update.plan.md");
+    let payload = json!({
+        "plan_id": "plan_demo_update",
+        "path": format!("~/{}", plan_path.strip_prefix(&home).unwrap().display()),
+        "applied": 1,
+    });
+    let summary = result_summary_for_tool(
+        &json!(serde_json::to_string(&payload).unwrap()),
+        Some(&ToolDisplay::Plan {
+            plan: format!("~/{}", plan_path.strip_prefix(&home).unwrap().display()),
+        }),
+        false,
+    );
+    assert_eq!(summary, plan_path.display().to_string());
+}
+
+#[test]
+fn config_set_display_prefers_text_message() {
+    let payload = json!({
+        "applied": true,
+        "message": "已设置 llm.default_model = gpt-5.2",
+    });
+    let summary = result_summary_for_tool(
+        &json!(serde_json::to_string(&payload).unwrap()),
+        Some(&ToolDisplay::Text {
+            text: "已设置 llm.default_model = gpt-5.2".to_string(),
+        }),
+        false,
+    );
+    assert_eq!(summary, "已设置 llm.default_model = gpt-5.2");
+}
+
+#[test]
+fn config_set_falls_back_to_message_without_display() {
+    let payload = json!({
+        "applied": false,
+        "message": "user_denied",
+    });
+    let summary = result_summary_for_tool(&json!(serde_json::to_string(&payload).unwrap()), None, false);
+    assert_eq!(summary, "user_denied");
+}
+
+#[test]
+fn write_plaintext_without_display_falls_back_to_ok() {
+    let payload = "已写入: ~/workspace/demo.txt (12 bytes)";
+    let summary = result_summary_for_tool(&json!(payload), None, false);
+    assert_eq!(summary, "ok");
+}
+
+#[test]
+fn tool_end_write_prints_clickable_path() {
+    let (r, w) = make_renderer(false);
+    let home = dirs::home_dir().expect("HOME");
+    let target = home.join("workspace/demo.txt");
+    let result = format!(
+        "已写入: ~/{} (2 bytes)",
+        target.strip_prefix(&home).unwrap().display()
+    );
+    r.on_tool_start(&json!({
+        "toolCallId": "w1",
+        "toolName": "write",
+        "args": {"path": "demo.txt"},
+    }));
+    r.on_tool_end(&json!({
+        "toolCallId": "w1",
+        "toolName": "write",
+        "result": result,
+        "display": {
+            "kind": "file",
+            "file": format!("~/{}", target.strip_prefix(&home).unwrap().display()),
+        },
+        "isError": false,
+    }));
+    let err = w.stderr();
+    assert!(
+        err.contains(&target.display().to_string()),
+        "write 成功行应包含绝对目标路径: {:?}",
+        err
+    );
+    assert!(err.contains("✓"), "应有成功标记: {:?}", err);
 }
 
 #[test]
