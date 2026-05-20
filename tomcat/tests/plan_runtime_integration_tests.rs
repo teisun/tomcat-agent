@@ -93,7 +93,7 @@ async fn full_plan_lifecycle_create_build_complete() {
 
     let body = tokio::time::timeout(DEFAULT_TIMEOUT, async {
         // 1) /plan → Planning
-        rt.enter_planning("end-to-end").unwrap();
+        rt.enter_planning().unwrap();
         assert!(matches!(rt.mode(), PlanMode::Planning));
 
         // 2) create_plan → PlanFile 落盘 + active_planning_plan_id（G4：runtime 派生 plan_id）
@@ -206,7 +206,7 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
     let rt = PlanRuntime::new("ses-cancel");
 
     tokio::time::timeout(DEFAULT_TIMEOUT, async {
-        rt.enter_planning("obj").unwrap();
+        rt.enter_planning().unwrap();
         let out = create_plan::execute(
             &rt,
             create_plan::CreatePlanArgs {
@@ -244,7 +244,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-aq");
-    rt.enter_planning("aq").unwrap();
+    rt.enter_planning().unwrap();
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![
             Answer {
@@ -309,7 +309,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-cancel");
-    rt.enter_planning("aq cancel").unwrap();
+    rt.enter_planning().unwrap();
 
     let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
         answers: vec![],
@@ -350,7 +350,7 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-rv");
     rt.attach_reviewer(Arc::new(AcceptReviewer));
-    rt.enter_planning("integration").unwrap();
+    rt.enter_planning().unwrap();
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
         create_plan::execute_with_reviewer(
@@ -388,7 +388,7 @@ async fn raw_edit_to_plan_file_blocked_in_planning_and_executing() {
     let arbitrary = home.join(".tomcat").join("plans").join("any_plan.plan.md");
     assert!(rt.allow_raw_edit_to_path(&arbitrary));
 
-    rt.enter_planning("p").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -462,7 +462,7 @@ async fn todos_always_writes_session_never_plan_file() {
     .unwrap();
 
     // 进 EXEC：todos 应继续写 session，PlanFile 不动
-    rt.enter_planning("p").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {

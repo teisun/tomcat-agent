@@ -6,23 +6,23 @@ use super::*;
 fn enter_planning_from_chat_transitions_to_planning() {
     let rt = PlanRuntime::new("sess-1");
     assert!(matches!(rt.mode(), PlanMode::Chat));
-    rt.enter_planning("ship plan mode").unwrap();
+    rt.enter_planning().unwrap();
     assert!(matches!(rt.mode(), PlanMode::Planning));
 }
 
 #[test]
-fn enter_planning_rejects_empty_objective() {
+fn enter_planning_from_completed_transitions_to_planning() {
     let rt = PlanRuntime::new("sess-1");
-    let err = rt.enter_planning("   ").unwrap_err();
-    assert!(matches!(err, PlanRuntimeError::EmptyObjective));
-    assert!(matches!(rt.mode(), PlanMode::Chat));
+    rt.set_mode_completed("done-1".into());
+    rt.enter_planning().unwrap();
+    assert!(matches!(rt.mode(), PlanMode::Planning));
 }
 
 #[test]
 fn enter_planning_twice_is_rejected() {
     let rt = PlanRuntime::new("sess-1");
-    rt.enter_planning("first").unwrap();
-    let err = rt.enter_planning("second").unwrap_err();
+    rt.enter_planning().unwrap();
+    let err = rt.enter_planning().unwrap_err();
     assert!(matches!(err, PlanRuntimeError::AlreadyInMode(_)));
     assert!(matches!(rt.mode(), PlanMode::Planning));
 }
@@ -30,7 +30,7 @@ fn enter_planning_twice_is_rejected() {
 #[test]
 fn exit_to_chat_from_planning_resets() {
     let rt = PlanRuntime::new("sess-1");
-    rt.enter_planning("x").unwrap();
+    rt.enter_planning().unwrap();
     rt.exit_to_chat().unwrap();
     assert!(matches!(rt.mode(), PlanMode::Chat));
 }

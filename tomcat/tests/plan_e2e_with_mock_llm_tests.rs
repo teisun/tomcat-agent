@@ -138,7 +138,7 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
     let (rt, panel, _ckpt) = build_runtime_with_spies();
 
     // PLAN：LLM → create_plan
-    rt.enter_planning("ship feature").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -218,7 +218,7 @@ fn h3_plan_mode_raw_edit_outside_plans_dir_is_blocked_only_for_plan_files() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
 
     let plan_path = home.join(".tomcat").join("plans").join("p.plan.md");
     std::fs::write(&plan_path, "stub").unwrap();
@@ -244,7 +244,7 @@ fn h4_exec_mode_raw_edit_on_plan_file_is_blocked() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
 
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -277,7 +277,7 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
 
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -315,7 +315,7 @@ fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
 
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {
@@ -392,7 +392,7 @@ async fn h5_reviewer_aborted_summary_used_when_dispatcher_returns_aborted() {
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
     // 不挂 reviewer dispatcher → 走 placeholder_pending 路径（plan-runtime §RV14）。
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         &rt,
         create_plan::CreatePlanArgs {

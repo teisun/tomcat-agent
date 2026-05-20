@@ -6,7 +6,7 @@
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
-**说人话**：reviewer 是一个内部子 Agent，模型看不到也不能调；它由 `create_plan` 在写完计划文件后内部叫起来，读计划、读代码，给出**摘要建议**写进 transcript（`plan.review` 自定义事件）+ 同步返回到 `create_plan` 的工具结果里；它**不**决定能不能进 EXEC，进 EXEC 永远由用户敲 `/plan build <plan_id|path>`。默认 reviewer 还可以用 [`todos`](./todos.md) 给自己列调研步骤（无副作用、不动 plan）。如果 runtime 内部参数 `allow_review_edit=true`（**不**暴露为 LLM 入参），reviewer 还可以：① 用 [`update_plan`](./update-plan.md) 增量改 PlanFile frontmatter 的 `todos[]`；② 用 `edit` 改 `PlanFile.body` 的任意正文内容。**唯一硬边界是不能 raw 改 frontmatter**；`## Review` / 修改说明只存在于 reviewer 返回给主 Agent 的摘要与 transcript 中，不写进 `.plan.md`。**任何模式下 reviewer 都不能调 `create_plan`**（防递归套娃 + 职责单一）。
+**说人话**：reviewer 是一个内部子 Agent，模型看不到也不能调；它由 `create_plan` 在写完计划文件后内部叫起来，读计划、读代码，给出**摘要建议**写进 transcript（`plan.review` 自定义事件）+ 同步返回到 `create_plan` 的工具结果里；它**不**决定能不能进 EXEC，进 EXEC 永远由用户敲 `/plan build <plan_id>`。review brief 会带上主会话启动时捕获的项目根目录；若该目录尚未授权，读仓库时仍要遵守 `workspace_roots` / session grant 的运行时确认。默认 reviewer 还可以用 [`todos`](./todos.md) 给自己列调研步骤（无副作用、不动 plan）。如果 runtime 内部参数 `allow_review_edit=true`（**不**暴露为 LLM 入参），reviewer 还可以：① 用 [`update_plan`](./update-plan.md) 增量改 PlanFile frontmatter 的 `todos[]`；② 用 `edit` 改 `PlanFile.body` 的任意正文内容。**唯一硬边界是不能 raw 改 frontmatter**；`## Review` / 修改说明只存在于 reviewer 返回给主 Agent 的摘要与 transcript 中，不写进 `.plan.md`。**任何模式下 reviewer 都不能调 `create_plan`**（防递归套娃 + 职责单一）。
 
 ---
 
@@ -473,7 +473,7 @@ impl PlanRuntime {
    父 Agent 看到 review 摘要 → 继续 PLAN 对话 / 修正 create_plan
         │
         ▼
-   （任意轮次后）用户敲 /plan build <plan_id|path>
+   （任意轮次后）用户敲 /plan build <plan_id>
         │
         ▼
    PlanRuntime 切 mode=executing；与 review 摘要无关

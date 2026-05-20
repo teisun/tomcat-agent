@@ -70,6 +70,7 @@ pub struct ProdReviewerDeps {
     pub context_config: ContextConfig,
     pub read_file_state: Arc<ReadFileState>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    pub agent_workspace_dir: std::path::PathBuf,
     /// Weak 引用避免与 `PlanRuntime::reviewer: Arc<dyn ReviewerDispatcher>` 形成 cycle。
     pub plan_runtime: Weak<PlanRuntime>,
     pub model: String,
@@ -123,7 +124,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
             .unwrap_or_else(|_| {
                 std::path::PathBuf::from(format!("~/.tomcat/plans/{plan_id}.plan.md"))
             });
-        let workspace_root = std::env::current_dir().ok();
+        let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let initial_user_message =
             build_review_prompt(plan_id, plan_text, &plan_path, workspace_root.as_deref());
         let tool_defs = resolve_internal_tools(REVIEWER_ALLOWED_TOOLS);

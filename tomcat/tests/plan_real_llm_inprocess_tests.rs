@@ -50,7 +50,7 @@ use tomcat::{
     AgentRunOutcome, ChatContext, SessionManager,
 };
 
-const PLANNING_PROMPT: &str = r##"You are helping draft an internal plan. Use the create_plan tool to draft a minimal 2-todo plan for the goal above.
+const PLANNING_PROMPT: &str = r##"You are helping draft an internal plan. Use the create_plan tool to draft a minimal 2-todo plan for the active discussion goal in this PLAN session.
 Constraints:
 - todos: exactly two, ids "t1" and "t2", short content (<= 30 chars each)
 - draft: markdown content for the `## Plan` section only; do NOT include `## Goal`, `## Plan`, or `## Notes` headings yourself
@@ -436,9 +436,9 @@ async fn inprocess_full_plan_path_with_real_llm() {
         let mut context_state = init_context_state(&ctx.session, &ctx.config.context, &system_text)
             .expect("init_context_state 失败");
 
-        // 1) /plan "<goal>" → Planning
+        // 1) /plan → Planning
         ctx.plan_runtime
-            .enter_planning("inprocess e2e: simple counter plan")
+            .enter_planning()
             .expect("enter_planning 失败");
         assert!(matches!(ctx.plan_runtime.mode(), PlanMode::Planning));
 

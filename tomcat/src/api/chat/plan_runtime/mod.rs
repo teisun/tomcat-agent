@@ -8,7 +8,7 @@
 //! ## 状态机（plan-runtime.md §4.1 R3 / R11）
 //!
 //! ```text
-//!                    /plan "<obj>"
+//!                    /plan
 //!         Chat ─────────────────────► Planning
 //!          ▲                              │
 //!          │                  /plan exit  │
@@ -71,7 +71,7 @@ pub use todos_panel::{
 /// PLAN 模式 per-session 编排器骨架（P1）。
 ///
 /// 当前 PR-PLA 范围只支持：
-/// - `/plan "<obj>"` → `enter_planning`
+/// - `/plan` → `enter_planning`
 /// - `/plan exit` → `exit_to_chat`
 /// - `recover()`（启动时扫描 `~/.tomcat/plans/`）— 占位实现，P2 起接入 file_store
 ///
@@ -298,14 +298,11 @@ impl PlanRuntime {
         self.mode.read().clone()
     }
 
-    /// `/plan "<objective>"` → 进入 Planning 模式。
+    /// `/plan` → 进入 Planning 模式。
     ///
     /// 在 P2 接入 `file_store` 前，本方法只做内存状态切换：`Chat | Completed { .. } → Planning`。
     /// 已在 `Planning` / `Executing` / `Pending` 时返回 `Err`（用户须先 `/plan exit` 或 `/plan build`）。
-    pub fn enter_planning(&self, objective: &str) -> Result<(), PlanRuntimeError> {
-        if objective.trim().is_empty() {
-            return Err(PlanRuntimeError::EmptyObjective);
-        }
+    pub fn enter_planning(&self) -> Result<(), PlanRuntimeError> {
         let mut mode = self.mode.write();
         match &*mode {
             PlanMode::Chat | PlanMode::Completed { .. } => {
@@ -925,8 +922,6 @@ pub trait ReviewerDispatcher: Send + Sync {
 /// `PlanRuntime` 操作错误。
 #[derive(Debug, thiserror::Error)]
 pub enum PlanRuntimeError {
-    #[error("/plan 需要非空 objective")]
-    EmptyObjective,
     #[error("当前已经在 {0} 模式，无法重复进入")]
     AlreadyInMode(String),
     /// N3（2026-05）：`/plan exit` 只允许在 Planning 模式下使用。

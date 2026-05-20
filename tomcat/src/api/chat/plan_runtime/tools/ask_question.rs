@@ -266,7 +266,7 @@ mod tests {
 
     fn rt_planning() -> std::sync::Arc<PlanRuntime> {
         let rt = PlanRuntime::new("s1");
-        rt.enter_planning("obj").unwrap();
+        rt.enter_planning().unwrap();
         rt
     }
 

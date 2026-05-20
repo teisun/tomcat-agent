@@ -3,7 +3,7 @@
 //! 通过 `assert_cmd::Command::cargo_bin("tomcat")` 真起 `tomcat chat`，让真 LLM
 //! 在两段 stdin 里推进 PLAN→EXEC→Completed 全程：
 //!
-//! - 进程 A：`tomcat chat` + `/plan "..."` + planning prompt；EOF 退出后落盘 mode=planning。
+//! - 进程 A：`tomcat chat` + `/plan` + planning prompt；EOF 退出后落盘 mode=planning。
 //! - 测试主程：优先从本次 session transcript 提取 `create_plan` 结果。
 //! - 进程 B：`tomcat chat --resume` + `/plan build {plan_id}` + exec prompt；EOF 退出后落盘 mode=completed。
 //!
@@ -884,11 +884,7 @@ fn run_cli_real_llm_case(
         default_planning_prompt(goal, &fx.workdir)
     };
 
-    let stdin_a = format!(
-        "/plan \"{goal}\"\n{prompt}\n",
-        goal = goal,
-        prompt = planning_prompt
-    );
+    let stdin_a = format!("/plan\n{prompt}\n", prompt = planning_prompt);
     let out_a = run_tomcat_chat(&fx, "planning_proc", &[], &stdin_a, PLANNING_TIMEOUT);
     if !out_a.status.success() {
         dump_diag("proc_a_failed", &fx, &out_a, None);
@@ -997,6 +993,18 @@ fn cli_full_plan_path_with_real_llm() {
     );
 }
 
+/// 手动真 LLM 观察用例：自定义 goal 经 planning prompt 注入（`/plan` 仅进入 PLAN，不再带目标参数）。
+///
+/// ```text
+/// cd /Users/yankeben/workspace/Tomcat/tomcat
+///
+/// TOMCAT_E2E_PLAN_GOAL='为当前目录实现一个最小可运行的脚本并自验证' \
+/// TOMCAT_E2E_WORKDIR='/绝对路径/你的工作目录' \
+/// cargo test -p tomcat --test plan_real_llm_cli_e2e cli_plan_path_with_real_llm_custom_goal -- --ignored --nocapture
+/// ```
+///
+/// - `TOMCAT_E2E_PLAN_GOAL`：必填。
+/// - `TOMCAT_E2E_WORKDIR`：可选；不传则用 `~/.tomcat/temp/...` 临时目录。若指定，须在配置的 `workspace.workspace_roots` 可写根内。
 #[test]
 #[ignore = "manual real-LLM observation test; run with --ignored --nocapture"]
 #[serial]

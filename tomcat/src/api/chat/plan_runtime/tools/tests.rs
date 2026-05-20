@@ -85,7 +85,7 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("test obj").unwrap();
+    rt.enter_planning().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "为 chat 补齐 plan 闭环".into(),
         draft: "step 1; step 2; step 3".into(),
@@ -139,7 +139,7 @@ fn create_plan_normalizes_legacy_heading_wrapped_draft() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("test obj").unwrap();
+    rt.enter_planning().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "Draft a minimal internal plan with two clear next steps.".into(),
         draft: "## Goal\n\nDraft a minimal internal plan.\n\n## Notes\n\nKeep scope small and actionable.\n".into(),
@@ -185,7 +185,7 @@ fn create_plan_rejects_empty_goal() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let args = create_plan::CreatePlanArgs {
         goal: "".into(),
         draft: "d".into(),
@@ -205,7 +205,7 @@ fn create_plan_rejects_empty_draft_or_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     // empty draft
     let err = create_plan::execute(
         &rt,
@@ -269,7 +269,7 @@ fn create_plan_derived_id_passes_safety_check() {
 /// 创建一个 Planning 模式下的 plan，返回**派生**的 `plan_id`（G4：LLM 不传 id）。
 /// 调用方应 capture 返回的 plan_id 用于后续 update_plan / build。
 fn fresh_planning_plan(rt: &PlanRuntime) -> String {
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute(
         rt,
         create_plan::CreatePlanArgs {
@@ -387,7 +387,7 @@ fn update_plan_cross_session_allowed_for_planning_pending() {
     let plan_id = fresh_planning_plan(&rt_a);
     // session-b 不同 session，对同一 plan（planning）做 update_plan：允许
     let rt_b = PlanRuntime::new("session-b");
-    rt_b.enter_planning("b obj").unwrap();
+    rt_b.enter_planning().unwrap();
     let out = update_plan::execute(
         &rt_b,
         update_plan::UpdatePlanArgs {
@@ -726,11 +726,6 @@ impl MockReviewerDispatcher {
             delay: None,
         }
     }
-
-    fn with_delay(mut self, d: Duration) -> Self {
-        self.delay = Some(d);
-        self
-    }
 }
 
 #[async_trait]
@@ -786,7 +781,7 @@ async fn create_plan_internally_dispatches_reviewer_with_real_summary() {
     rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
         ok_review(),
     ])));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -804,7 +799,7 @@ async fn create_plan_succeeds_even_when_reviewer_aborts() {
     rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
         ReviewSummary::aborted_with("simulated parse error"),
     ])));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -827,7 +822,7 @@ async fn create_plan_without_reviewer_returns_placeholder() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -880,7 +875,7 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
         }
     }
     rt.attach_reviewer(std::sync::Arc::new(LockAcquiringMock));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
         .unwrap();
@@ -889,6 +884,43 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
         !aborted,
         "dispatch_reviewer 应能拿到 lock（说明 write_plan 已释放），实际：{:?}",
         out["review"]
+    );
+    cleanup_home(&home);
+}
+
+/// reviewer.md §11 RV-T7：plan.review transcript 自定义事件必须落 transcript_appender，
+/// 含 `event=plan.review`、`plan_id`、`reviewer_turns_*`、`reviewer_stop_reason`。
+#[test]
+fn create_plan_writes_transcript_plan_create_event() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+
+    rt.enter_planning().unwrap();
+    let out = create_plan::execute(&rt, good_args_with_todo()).expect("create_plan OK");
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+
+    let events = captured.lock();
+    let plan_create = events
+        .iter()
+        .find(|v| v["event"] == "plan.create")
+        .expect("缺少 plan.create 事件");
+    assert_eq!(plan_create["plan_id"], plan_id);
+    assert_eq!(plan_create["mode"], "planning");
+    assert!(
+        plan_create["path"].as_str().unwrap().ends_with(".plan.md"),
+        "plan.create 路径应指向计划文件：{:?}",
+        plan_create
     );
     cleanup_home(&home);
 }
@@ -925,7 +957,7 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
     rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
         summary,
     ])));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let _ = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -966,7 +998,7 @@ async fn reviewer_writes_warning_event_on_second_round() {
         ok_review(),
         ok_review(),
     ])));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -1019,7 +1051,7 @@ async fn reviewer_dispatch_passes_through_abort_signal() {
     rt.attach_reviewer(std::sync::Arc::new(AbortPeekMock {
         saw_signal: std::sync::Arc::clone(&saw),
     }));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
@@ -1040,7 +1072,7 @@ async fn reviewer_round_count_warns_after_threshold() {
         ok_review(),
         ok_review(),
     ])));
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     // 第一轮：使用稳定 goal，让两次 create_plan 派生出相同的 slug 前缀。
     let out1 = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
@@ -1303,7 +1335,7 @@ fn pending_plan_session_override_warns() {
 }
 
 #[test]
-fn exec_first_turn_injects_plan_body_user_meta_only_once() {
+fn exec_first_turn_injects_plan_meta_only_once() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -1363,7 +1395,7 @@ fn cancel_outside_exec_is_noop() {
     let rt = PlanRuntime::new("session-a");
     assert!(rt.demote_to_pending_on_cancel().unwrap().is_none());
 
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     assert!(rt.demote_to_pending_on_cancel().unwrap().is_none());
     assert!(matches!(rt.mode(), PlanMode::Planning));
     cleanup_home(&home);
@@ -1500,7 +1532,7 @@ fn plan_mode_raw_edit_blocked_for_plan_files_in_planning_and_executing() {
     assert!(rt.allow_raw_edit_to_path(&plan_path));
 
     // Planning 模式 → 拒
-    rt.enter_planning("obj").unwrap();
+    rt.enter_planning().unwrap();
     assert!(!rt.allow_raw_edit_to_path(&plan_path));
 
     // Executing 模式 → 拒

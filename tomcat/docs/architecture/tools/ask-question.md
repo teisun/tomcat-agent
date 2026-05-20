@@ -374,7 +374,7 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 
 | 触发 | 反馈 | 说人话 |
 |------|------|--------|
-| `mode != Planning` | catalog 已不可见；强行调用返回 tool error，附 usage `先 /plan "<objective>"` | 非规划态调不了。 |
+| `mode != Planning` | catalog 已不可见；强行调用返回 tool error，附 usage `先 /plan` | 非规划态调不了。 |
 | `questions.length < 1` 或 `> 4` | tool error | 题数越界。 |
 | `options.length < 2` 或 `> 4`（不含 UI 兜底的 `__custom__` 槽） | tool error | 选项数越界。 |
 | 重复 `id`（题或选项） | tool error | id 不能重复。 |

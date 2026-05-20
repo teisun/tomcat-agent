@@ -3,7 +3,7 @@
 //! 三个子命令均在 chat 层处理，**不**进 LLM、**不**入 tool catalog：
 //!
 //! ```text
-//! /plan "<objective>"        → PlanRuntime::enter_planning  → mode=Planning
+//! /plan                      → PlanRuntime::enter_planning  → mode=Planning
 //! /plan exit                 → PlanRuntime::exit_to_chat   → mode=Chat
 //! /plan build <plan_id>      → PlanRuntime::build_plan     → mode=Executing { plan_id }
 //! ```
@@ -18,8 +18,8 @@ use super::parse::{ChatCommand, ChatCommandOutcome};
 /// `/plan` 子命令解析结果（仅在 chat 层使用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanCommand {
-    /// `/plan "<objective>"`，进入 Planning。
-    Enter { objective: String },
+    /// `/plan`，进入 Planning。
+    Enter,
     /// `/plan exit`，退回 Chat。
     Exit,
     /// `/plan build <plan_id>`，进入 EXEC（P6 才完整闭环）。
@@ -30,18 +30,9 @@ pub enum PlanCommand {
 
 pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
     match tokens.as_slice() {
-        [_cmd] => ChatCommand::UsageError {
-            message: usage_text(),
-        },
+        [_cmd] => ChatCommand::Plan(PlanCommand::Enter),
         [_cmd, sub] if sub == "exit" => ChatCommand::Plan(PlanCommand::Exit),
         [_cmd, sub] if sub == "list" => ChatCommand::Plan(PlanCommand::List),
-        [_cmd, sub] => {
-            // `/plan "<objective>"` —— shell_words 已剥引号，整 token 作 objective
-            // 拒绝纯 `exit` / `build` 缺参的歧义情况（必须 quote 才能用 exit 作 objective）
-            ChatCommand::Plan(PlanCommand::Enter {
-                objective: sub.clone(),
-            })
-        }
         [_cmd, sub, plan_id] if sub == "build" => ChatCommand::Plan(PlanCommand::Build {
             plan_id: plan_id.clone(),
         }),
@@ -52,18 +43,17 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
 }
 
 fn usage_text() -> String {
-    "用法错误：/plan \"<objective>\" | /plan exit | /plan build <plan_id> | /plan list".to_string()
+    "用法错误：/plan | /plan exit | /plan build <plan_id> | /plan list".to_string()
 }
 
 /// `/plan` 子命令分发。`ctx.plan_runtime` 在 P1 起由 `ChatContext::from_config` 注入。
 pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
     let rt = ctx.plan_runtime.clone();
     match cmd {
-        PlanCommand::Enter { objective } => match rt.enter_planning(&objective) {
+        PlanCommand::Enter => match rt.enter_planning() {
             Ok(()) => {
                 println!(
-                    "[plan] 进入 PLAN 模式：{}\n[plan] 用 /plan exit 退回 Chat；用 /plan build <plan_id> 进入 EXEC。",
-                    objective
+                    "[plan] 已进入 PLAN 模式。\n[plan] 先与模型讨论目标；用 /plan exit 退回 Chat；用 /plan build <plan_id> 进入 EXEC。"
                 );
                 ChatCommandOutcome::Handled
             }
@@ -182,12 +172,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_plan_with_objective() {
-        let cmd = parse_args(vec!["/plan".into(), "ship plan mode".into()]);
-        assert!(matches!(
-            cmd,
-            ChatCommand::Plan(PlanCommand::Enter { ref objective }) if objective == "ship plan mode"
-        ));
+    fn parse_plan_without_args_enters_planning() {
+        let cmd = parse_args(vec!["/plan".into()]);
+        assert!(matches!(cmd, ChatCommand::Plan(PlanCommand::Enter)));
     }
 
     #[test]
@@ -206,8 +193,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_plan_bare_returns_usage_error() {
-        let cmd = parse_args(vec!["/plan".into()]);
+    fn parse_plan_with_extra_arg_returns_usage_error() {
+        let cmd = parse_args(vec!["/plan".into(), "ship".into()]);
         assert!(matches!(cmd, ChatCommand::UsageError { .. }));
     }
 
@@ -220,10 +207,6 @@ mod tests {
     #[test]
     fn parse_plan_build_without_id_returns_usage_error() {
         let cmd = parse_args(vec!["/plan".into(), "build".into()]);
-        // 这等价于 /plan <objective="build">，按 Enter 处理（语义上 ambiguous 但安全）；
-        // 用户若想 build 应当传 plan_id。
-        // 我们这里就接受为 Enter("build")；
-        // 真正 /plan build 必须带 plan_id，所以 UsageError 也合理——但为了简单不做 Enter("build") 的 special-case。
-        assert!(matches!(cmd, ChatCommand::Plan(PlanCommand::Enter { .. })));
+        assert!(matches!(cmd, ChatCommand::UsageError { .. }));
     }
 }

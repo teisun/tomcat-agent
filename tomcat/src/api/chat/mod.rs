@@ -372,6 +372,7 @@ impl ChatContext {
                 context_config: config.context.clone(),
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
                 model: reviewer_model,
                 max_turns: reviewer_max_turns,

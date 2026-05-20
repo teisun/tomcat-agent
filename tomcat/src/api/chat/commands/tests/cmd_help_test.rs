@@ -26,3 +26,14 @@ fn help_text_mentions_checkpoint_commands() {
     assert!(h.contains("/ckpt"), "/help 应列出 /ckpt：{}", h);
     assert!(h.contains("/restore"), "/help 应列出 /restore：{}", h);
 }
+
+#[test]
+fn help_text_mentions_plan_without_goal_argument() {
+    let h = help_text();
+    assert!(h.contains("\n  /plan                      "), "/help 应列出无参 /plan：{}", h);
+    assert!(
+        !h.contains("/plan \"<目标>\""),
+        "/help 不应再暴露旧的 /plan 目标参数用法：{}",
+        h
+    );
+}

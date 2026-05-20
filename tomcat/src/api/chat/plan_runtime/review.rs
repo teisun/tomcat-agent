@@ -333,7 +333,8 @@ pub fn build_review_prompt(
     let workspace_hint = workspace_root
         .map(|path| {
             format!(
-                "         - Project/workspace root (start repo inspection here first): `{}`\n",
+                "         - Project/workspace root (start repo inspection here first): `{}`\n\
+                 - Access note: this is the startup workspace snapshot; reads may still require runtime authorization (`workspace_roots` or a session grant) before they succeed.\n",
                 crate::infra::platform::format_home_path(path)
             )
         })
@@ -451,6 +452,7 @@ mod tests {
         );
         assert!(prompt.contains("/tmp/plan-1.plan.md"));
         assert!(prompt.contains("/repo/root"));
+        assert!(prompt.contains("workspace_roots"));
         assert!(prompt.contains("do not guess"));
     }
 

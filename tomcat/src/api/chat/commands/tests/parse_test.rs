@@ -59,12 +59,10 @@ fn restore_command_parses_paths_and_dry_run() {
 // ─── T2-P1-002 PR-PLA：`/plan` 三件套解析回归 ───────────────────────────────
 
 #[test]
-fn plan_command_with_quoted_objective_parses() {
+fn plan_command_without_args_enters_planning() {
     assert_eq!(
-        parse_chat_command(r#"/plan "ship plan mode""#),
-        ChatCommand::Plan(PlanCommand::Enter {
-            objective: "ship plan mode".to_string()
-        })
+        parse_chat_command("/plan"),
+        ChatCommand::Plan(PlanCommand::Enter)
     );
 }
 
@@ -87,9 +85,9 @@ fn plan_command_build_with_id_parses() {
 }
 
 #[test]
-fn plan_command_bare_returns_usage_error() {
+fn plan_command_with_extra_arg_returns_usage_error() {
     assert!(matches!(
-        parse_chat_command("/plan"),
+        parse_chat_command("/plan ship-plan-mode"),
         ChatCommand::UsageError { .. }
     ));
 }
