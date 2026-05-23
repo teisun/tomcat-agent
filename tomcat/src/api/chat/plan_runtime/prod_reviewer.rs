@@ -126,7 +126,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
             });
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let initial_user_message =
-            build_review_prompt(plan_id, plan_text, &plan_path, workspace_root.as_deref());
+            build_review_prompt(plan_id, plan_text, &plan_path, workspace_root);
         let tool_defs = resolve_internal_tools(REVIEWER_ALLOWED_TOOLS);
         let turns_limit = deps.max_turns.max(1);
 

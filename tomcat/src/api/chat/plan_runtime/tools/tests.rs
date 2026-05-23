@@ -4,6 +4,7 @@
 //! - **路径隔离**：`tools/*` 用 `plan_path_for_id` 走 `~/.tomcat/plans/`；测试用 `HOME` env override 隔离。
 //! - **不变量验证**：mode 守卫 / 跨 session 守卫 / 单 in_progress / id 唯一。
 //! - **完整 snapshot 返回**：每个工具结果都包含 `items` / `applied` / `active_in_progress`。
+#![allow(clippy::await_holding_lock)]
 
 use super::*;
 use crate::api::chat::plan_runtime::{
@@ -293,8 +294,21 @@ fn fresh_planning_plan(rt: &PlanRuntime) -> String {
     out["plan_id"].as_str().unwrap().to_string()
 }
 
-#[test]
-fn update_plan_set_status_returns_full_items_snapshot() {
+fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
+    use crate::api::chat::plan_runtime::file_store::{
+        plan_path_for_id, read_plan, write_plan, PlanFileMode,
+    };
+    let path = plan_path_for_id(plan_id).unwrap();
+    let mut plan = read_plan(&path).unwrap();
+    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.session_key = Some(session_key.into());
+    plan.frontmatter.session_id = Some(format!("sid-{session_key}"));
+    write_plan(&path, &plan, 2000).unwrap();
+    rt.set_executing_for_test(plan_id.to_string());
+}
+
+#[tokio::test]
+async fn update_plan_set_status_returns_full_items_snapshot() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -324,6 +338,7 @@ fn update_plan_set_status_returns_full_items_snapshot() {
             }],
         },
     )
+    .await
     .unwrap();
     assert_eq!(out["plan_id"], plan_id);
     let items = out["items"].as_array().unwrap();
@@ -336,8 +351,8 @@ fn update_plan_set_status_returns_full_items_snapshot() {
     cleanup_home(&home);
 }
 
-#[test]
-fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
+#[tokio::test]
+async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -373,13 +388,14 @@ fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
             ],
         },
     )
+    .await
     .expect_err("两个 in_progress 应被 ops 引擎拒");
     matches!(err, ToolError::Op(_));
     cleanup_home(&home);
 }
 
-#[test]
-fn update_plan_cross_session_allowed_for_planning_pending() {
+#[tokio::test]
+async fn update_plan_cross_session_allowed_for_planning_pending() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     // session-a 创建 plan（planning）
@@ -401,14 +417,15 @@ fn update_plan_cross_session_allowed_for_planning_pending() {
             }],
         },
     )
+    .await
     .unwrap();
     let items = out["items"].as_array().unwrap();
     assert_eq!(items[0]["content"], "edited by b");
     cleanup_home(&home);
 }
 
-#[test]
-fn update_plan_cross_session_rejected_for_executing() {
+#[tokio::test]
+async fn update_plan_cross_session_rejected_for_executing() {
     use crate::api::chat::plan_runtime::file_store::{
         plan_path_for_id, read_plan, write_plan, PlanFileMode,
     };
@@ -438,13 +455,14 @@ fn update_plan_cross_session_rejected_for_executing() {
             }],
         },
     )
+    .await
     .expect_err("session-b 不应能写入 session-a 的 executing plan");
     matches!(err, ToolError::CrossSessionDenied(_));
     cleanup_home(&home);
 }
 
-#[test]
-fn update_plan_in_exec_promotes_completed() {
+#[tokio::test]
+async fn update_plan_in_exec_promotes_completed() {
     use crate::api::chat::plan_runtime::file_store::{
         plan_path_for_id, read_plan, write_plan, PlanFileMode,
     };
@@ -481,6 +499,7 @@ fn update_plan_in_exec_promotes_completed() {
             ],
         },
     )
+    .await
     .unwrap();
     assert_eq!(out["plan_mode_before"], "executing");
     assert_eq!(out["plan_mode_after"], "completed");
@@ -708,7 +727,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::api::chat::plan_runtime::review::ReviewSummary;
-use crate::api::chat::plan_runtime::ReviewerDispatcher;
+use crate::api::chat::plan_runtime::verify::{VerifyCheck, VerifySummary};
+use crate::api::chat::plan_runtime::{ReviewerDispatcher, VerifierDispatcher};
 
 /// MockReviewer：按预编排队列返回 ReviewSummary，并记录 dispatcher 被调用时刻。
 struct MockReviewerDispatcher {
@@ -757,6 +777,72 @@ fn ok_review() -> ReviewSummary {
         summary: "looks ok".into(),
         changes_summary: "none".into(),
         applied_changes: false,
+        ..Default::default()
+    }
+}
+
+/// MockVerifier：按预编排队列返回 VerifySummary，并记录调用次数。
+struct MockVerifierDispatcher {
+    summaries: parking_lot::Mutex<Vec<VerifySummary>>,
+    call_count: AtomicUsize,
+}
+
+impl MockVerifierDispatcher {
+    fn new(summaries: Vec<VerifySummary>) -> Self {
+        Self {
+            summaries: parking_lot::Mutex::new(summaries),
+            call_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl VerifierDispatcher for MockVerifierDispatcher {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _abort_signal: std::sync::Arc<AtomicBool>,
+    ) -> VerifySummary {
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut q = self.summaries.lock();
+        if q.is_empty() {
+            VerifySummary::aborted_with("mock verifier 队列耗尽")
+        } else {
+            q.remove(0)
+        }
+    }
+}
+
+fn ok_verify_pass() -> VerifySummary {
+    VerifySummary {
+        checks: vec![VerifyCheck {
+            name: "unit".into(),
+            command: "cargo test -p tomcat plan_runtime".into(),
+            result: "pass".into(),
+            output_excerpt: "1 passed".into(),
+        }],
+        verdict: "pass".into(),
+        summary: "verification passed".into(),
+        verifier_turns_limit: 64,
+        verifier_stop_reason: "completed".into(),
+        ..Default::default()
+    }
+}
+
+fn fail_verify() -> VerifySummary {
+    VerifySummary {
+        checks: vec![VerifyCheck {
+            name: "unit".into(),
+            command: "cargo test -p tomcat plan_runtime".into(),
+            result: "fail".into(),
+            output_excerpt: "1 failed".into(),
+        }],
+        verdict: "fail".into(),
+        summary: "unit verification failed".into(),
+        verifier_turns_limit: 64,
+        verifier_stop_reason: "completed".into(),
         ..Default::default()
     }
 }
@@ -1094,6 +1180,330 @@ async fn reviewer_round_count_warns_after_threshold() {
     cleanup_home(&home);
 }
 
+#[tokio::test]
+async fn verifier_spawned_on_all_completed() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![ok_verify_pass()]));
+    rt.attach_verifier(verifier.clone());
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(out["verify"]["verdict"], "pass");
+    assert_eq!(out["plan_mode_after"], "completed");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn verify_event_in_transcript() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        ok_verify_pass(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let _ = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    let events = captured.lock();
+    let verify_event = events
+        .iter()
+        .find(|v| v["event"] == "plan.verify")
+        .expect("缺少 plan.verify 事件");
+    assert_eq!(verify_event["plan_id"], plan_id);
+    assert_eq!(verify_event["verdict"], "pass");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn update_plan_tool_result_has_verify_field() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        ok_verify_pass(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(out.get("verify").is_some());
+    assert_eq!(out["verify"]["summary"], "verification passed");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn verify_gate_soft_does_not_block() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.set_verify_gate_mode("soft");
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        fail_verify(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["verify"]["verdict"], "fail");
+    assert_eq!(out["plan_mode_after"], "completed");
+    match rt.mode() {
+        PlanMode::Completed { plan_id: cur } => assert_eq!(cur, plan_id),
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn verify_gate_blocks_completed_on_fail() {
+    use crate::api::chat::plan_runtime::file_store::{plan_path_for_id, read_plan, PlanFileMode};
+
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.set_verify_gate_mode("gate");
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        fail_verify(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["plan_mode_after"], "executing");
+    let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert!(matches!(plan.frontmatter.mode, PlanFileMode::Executing));
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn gate_fail_keeps_mode_executing_but_returns_verify() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.set_verify_gate_mode("gate");
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        fail_verify(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["verify"]["verdict"], "fail");
+    assert_eq!(out["plan_mode_after"], "executing");
+    match rt.mode() {
+        PlanMode::Executing { plan_id: cur } => assert_eq!(cur, plan_id),
+        other => panic!("expected Executing, got {other:?}"),
+    }
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn main_agent_can_reopen_todo_after_gate_fail() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.set_verify_gate_mode("gate");
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        fail_verify(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let _ = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    let reopen = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(reopen["plan_mode_after"], "executing");
+    assert_eq!(reopen["active_in_progress"], "t1");
+    assert!(reopen["verify"].is_null());
+    cleanup_home(&home);
+}
+
 #[test]
 fn from_json_helpers_reject_bad_args() {
     let _g = home_lock().lock().unwrap();
@@ -1280,8 +1690,8 @@ fn plan_build_rejects_unsafe_plan_id() {
     cleanup_home(&home);
 }
 
-#[test]
-fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_path() {
+#[tokio::test]
+async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_path() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -1314,6 +1724,7 @@ fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_path() {
             }],
         },
     )
+    .await
     .expect("update_plan should reuse active path");
     let expected_path_str = crate::infra::platform::format_home_path(&expected_path);
     assert_eq!(out["path"].as_str(), Some(expected_path_str.as_str()));
@@ -1641,6 +2052,7 @@ fn plan_build_atomic_rollback_on_write_failure() {
     ));
     let _f = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)

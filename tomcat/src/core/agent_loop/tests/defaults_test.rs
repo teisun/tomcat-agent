@@ -27,6 +27,8 @@ fn agent_loop_config_default_includes_subagent_fields() {
 fn subagent_type_root_and_as_str_are_correct() {
     assert!(SubagentType::User.is_root());
     assert!(!SubagentType::Reviewer.is_root());
+    assert!(!SubagentType::Verifier.is_root());
     assert_eq!(SubagentType::User.as_str(), "user");
     assert_eq!(SubagentType::Reviewer.as_str(), "reviewer");
+    assert_eq!(SubagentType::Verifier.as_str(), "verifier");
 }

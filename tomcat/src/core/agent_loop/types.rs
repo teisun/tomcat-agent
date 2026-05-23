@@ -49,15 +49,17 @@ pub enum LoopError {
 
 /// 子 Agent 类型枚举。**仅** internal dispatch 用，**不**进 OpenAI function schema。
 ///
-/// `User` 是父 Agent（顶层 chat_loop）的默认；`Reviewer` 由 `PlanRuntime::dispatch_reviewer`
-/// 通过 `AgentRegistry::spawn_subagent_internal` 设入。未来 `dispatch_agent` 工具的通用子 Agent
-/// 类型在 Phase 3 全量阶段补充。
+/// `User` 是父 Agent（顶层 chat_loop）的默认；`Reviewer` / `Verifier` 由
+/// `PlanRuntime::dispatch_*` 通过 `AgentRegistry::spawn_subagent_internal` 设入。未来
+/// `dispatch_agent` 工具的通用子 Agent 类型在 Phase 3 全量阶段补充。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentType {
     /// 顶层 chat_loop 的 user-facing Agent；reviewer 不可使用此值。
     User,
     /// reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
     Reviewer,
+    /// verifier 内联子 Agent。详见 `docs/architecture/plan-exec-code-verification.md`。
+    Verifier,
 }
 
 impl SubagentType {
@@ -70,6 +72,7 @@ impl SubagentType {
         match self {
             SubagentType::User => "user",
             SubagentType::Reviewer => "reviewer",
+            SubagentType::Verifier => "verifier",
         }
     }
 }
@@ -107,9 +110,8 @@ pub struct AgentLoopConfig {
     /// 派生深度。顶层 chat_loop 为 0；`spawn_subagent_internal` 时设为 `parent.spawn_depth + 1`。
     /// `AgentRegistry::spawn_subagent_internal` 会校验 `spawn_depth + 1 <= MAX_SPAWN_DEPTH`（默认 2）。
     pub spawn_depth: u32,
-    /// 子 Agent 类型。顶层永远为 `User`；reviewer 子 Agent 为 `Reviewer`。
-    /// 既参与 catalog 过滤（reviewer 强制硬编码 `allowed_tools`），也参与 `create_plan`
-    /// 防套娃（reviewer 调 create_plan 不再二次派发 reviewer）。
+    /// 子 Agent 类型。顶层永远为 `User`；reviewer / verifier 子 Agent 分别为
+    /// `Reviewer` / `Verifier`。既参与 catalog 过滤，也参与 plan-only 工具防套娃。
     pub subagent_type: SubagentType,
     /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具

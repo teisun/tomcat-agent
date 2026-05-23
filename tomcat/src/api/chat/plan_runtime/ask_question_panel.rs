@@ -325,6 +325,8 @@ impl AskQuestionPanel for MockAskQuestionPanel {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use parking_lot::Mutex;
 

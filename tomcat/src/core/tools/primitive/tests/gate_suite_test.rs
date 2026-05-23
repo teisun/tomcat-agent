@@ -7,6 +7,7 @@
 //! - gate NeedConfirm + Deny 阻止后审计 user_approved=false
 //! - gate bash forbidden 命中拒绝
 //! - gate bash approval_required 命中弹 confirm
+#![allow(clippy::await_holding_lock)]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

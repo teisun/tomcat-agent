@@ -90,8 +90,7 @@ fn print_checkpoint_meta(meta: &CheckpointMeta) {
     if let Some(commit) = &meta.git_commit {
         println!("git_commit: {commit}");
     }
-    match &meta.kind {
-        CheckpointKind::Manual { label } => println!("label: {label}"),
-        _ => {}
+    if let CheckpointKind::Manual { label } = &meta.kind {
+        println!("label: {label}");
     }
 }

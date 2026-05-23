@@ -72,7 +72,7 @@ fn plan_file_round_trip_preserves_unknown_keys() {
         parsed
             .frontmatter
             .unknown
-            .get(&serde_yaml::Value::String("future_field".into())),
+            .get(serde_yaml::Value::String("future_field".into())),
         Some(&serde_yaml::Value::String("forward-compat".into()))
     );
 }

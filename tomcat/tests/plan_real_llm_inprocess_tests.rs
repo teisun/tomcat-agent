@@ -354,6 +354,7 @@ fn dump_phase_summary(
     eprint!("{out}");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_chat_turn_observed(
     home: &Path,
     ctx: &ChatContext,

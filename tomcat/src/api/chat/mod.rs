@@ -330,6 +330,7 @@ impl ChatContext {
         plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
         // build checkpoint 自动化。
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
+        plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         // E：CLI 默认 panel——把 todos / update_plan 后的 snapshot 渲染到 stderr，
         // 让用户在 CLI 下也能感知 in_progress 切换；IDE 适配后可替换为 IpcTodosPanel。
@@ -382,6 +383,25 @@ impl ChatContext {
             },
         );
         plan_runtime.attach_reviewer(Arc::new(prod_reviewer));
+        let prod_verifier = plan_runtime::verify::ProdVerifierDispatcher::new(
+            "chat_context",
+            plan_runtime::verify::ProdVerifierDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm: llm.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: config.context.clone(),
+                read_file_state: read_file_state.clone(),
+                openai_files_runtime: openai_files_runtime.clone(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                model: config.llm.default_model.clone(),
+            },
+        );
+        plan_runtime.attach_verifier(Arc::new(prod_verifier));
 
         // transcript 自定义事件 appender：把 SessionManager::append_custom_entry 包成闭包
         // 注入 PlanRuntime，dispatch_reviewer 完成后写 `plan.review` / `plan.review.warning`。
@@ -933,7 +953,7 @@ pub async fn run_chat_turn(
     // 让 LLM 直接看到完整计划文本；后续轮次返回 None，避免重复注入超长计划。
     if matches!(plan_mode, plan_runtime::PlanMode::Executing { .. }) {
         if let Some(body) = ctx.plan_runtime.consume_first_exec_turn_user_meta() {
-            messages.push(ChatMessage::user(&format!(
+            messages.push(ChatMessage::user(format!(
                 "<plan_meta>\n{body}\n</plan_meta>"
             )));
         }

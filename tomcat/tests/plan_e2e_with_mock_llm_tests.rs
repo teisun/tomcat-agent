@@ -1,3 +1,5 @@
+#![allow(clippy::await_holding_lock)]
+
 //! `plan_e2e_with_mock_llm_tests` — H 段集成测试（plan-mode-full-fix §H）。
 //!
 //! 这些用例**不**起 rustyline chat_loop（依赖 stdin），而是把"LLM 决策一次 tool_call"
@@ -187,10 +189,11 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
                 ops: vec![update_plan::UpdateOp::SetStatus {
                     id: (*id).into(),
                     content: None,
-                    status: st.clone(),
+                    status: *st,
                 }],
             },
         )
+        .await
         .unwrap();
     }
 
@@ -309,8 +312,8 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
 
 // ─── H7：Planning 期 set_status(in_progress) → 拒（mode 矩阵闸门） ──────────
 
-#[test]
-fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
+#[tokio::test]
+async fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
@@ -345,6 +348,7 @@ fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
             }],
         },
     )
+    .await
     .expect_err("Planning 期 set_status(in_progress) 必须拒");
     let msg = format!("{err:?}");
     assert!(

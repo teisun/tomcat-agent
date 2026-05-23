@@ -79,6 +79,12 @@ fn is_reviewer_whitelisted_tool(name: &str) -> bool {
     )
 }
 
+/// verifier 子 Agent 在 tool_exec 层允许调用的工具名白名单（与
+/// `plan_runtime::verify::VERIFIER_ALLOWED_TOOLS` 保持一致）。
+fn is_verifier_whitelisted_tool(name: &str) -> bool {
+    matches!(name, "read" | "search_files" | "list_dir" | "bash")
+}
+
 /// 在内存里模拟 `primitive.edit_file` 的字符串替换语义，供 reviewer 段守卫做
 /// dry-run。与 [`crate::core::tools::primitive::executor::write_edit::edit_file_impl`]
 /// 保持等价的简化实现：
@@ -173,6 +179,7 @@ pub(super) async fn execute_tool_with_openai_files(
 ///   [`crate::api::chat::plan_runtime::safety::enforce_write_path_policy`]（B12）
 ///
 /// `plan_runtime = None` 时这四个工具会返回「PlanRuntime 未注入」错误；写工具策略跳过。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_full(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
@@ -207,6 +214,7 @@ pub(super) async fn execute_tool_full(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_tuple_full(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
@@ -233,6 +241,18 @@ async fn execute_tool_tuple_full(
         return (
             format!(
                 "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 read/search_files/list_dir/todos/update_plan/edit；create_plan 防套娃；bash/write/dispatch_agent/checkpoint 永不可用）",
+                tc.name
+            ),
+            true,
+            Vec::new(),
+        );
+    }
+    if subagent_type == crate::core::agent_loop::types::SubagentType::Verifier
+        && !is_verifier_whitelisted_tool(tc.name.as_str())
+    {
+        return (
+            format!(
+                "verifier 子 Agent 禁止调用工具 `{}`（仅允许 read/search_files/list_dir/bash；create_plan/update_plan/todos/ask_question/edit/write/dispatch_agent/checkpoint 永不可用）",
                 tc.name
             ),
             true,
@@ -1224,7 +1244,7 @@ async fn dispatch_plan_tool(
         }
         "update_plan" => {
             match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
-                Ok(a) => plan_tools::update_plan::execute(rt, a),
+                Ok(a) => plan_tools::update_plan::execute(rt, a).await,
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }
@@ -1470,6 +1490,8 @@ mod display_contract_tests {
 
 #[cfg(test)]
 mod reviewer_guards_tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::core::agent_loop::types::SubagentType;
     use serial_test::serial;
@@ -1683,6 +1705,32 @@ mod reviewer_guards_tests {
         assert!(outcome
             .model_text
             .contains("reviewer 子 Agent 禁止调用工具 `create_plan`"));
+    }
+
+    #[tokio::test]
+    async fn verifier_blocks_non_whitelisted_tool() {
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+        let tc = ToolCallInfo {
+            id: "tc1".into(),
+            name: "update_plan".into(),
+            arguments: "{}".into(),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::Verifier,
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+        assert!(outcome.is_error);
+        assert!(outcome
+            .model_text
+            .contains("verifier 子 Agent 禁止调用工具"));
     }
 
     #[tokio::test]

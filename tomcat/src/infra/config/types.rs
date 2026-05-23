@@ -662,6 +662,8 @@ pub struct WasmConfig {}
 /// - `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` → `lock_timeout_ms`
 /// - `TOMCAT_PLAN_AUTO_CHECKPOINT_ON_BUILD` → `auto_checkpoint_on_build`
 /// - `TOMCAT_PLAN_MAX_REVIEW_ROUNDS` → `max_review_rounds`
+///
+/// `verify_gate` 暂不提供 env 覆盖：只走 `[plan].verify_gate = "soft" | "gate"`。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlanConfig {
     /// `~/.tomcat/plans/*.plan.md` advisory lock 等待上限（毫秒）。默认 2000。
@@ -674,6 +676,9 @@ pub struct PlanConfig {
     /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
     #[serde(default = "default_plan_max_review_rounds")]
     pub max_review_rounds: u32,
+    /// Verifier gate 模式：`soft`（默认，FAIL 仅 advisory）或 `gate`（FAIL 阻止 completed）。
+    #[serde(default = "default_plan_verify_gate")]
+    pub verify_gate: String,
 }
 
 fn default_plan_lock_timeout_ms() -> u64 {
@@ -684,12 +689,17 @@ fn default_plan_max_review_rounds() -> u32 {
     1
 }
 
+fn default_plan_verify_gate() -> String {
+    "soft".to_string()
+}
+
 impl Default for PlanConfig {
     fn default() -> Self {
         Self {
             lock_timeout_ms: default_plan_lock_timeout_ms(),
             auto_checkpoint_on_build: false,
             max_review_rounds: default_plan_max_review_rounds(),
+            verify_gate: default_plan_verify_gate(),
         }
     }
 }

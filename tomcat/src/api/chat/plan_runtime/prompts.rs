@@ -65,4 +65,29 @@ mod tests {
         assert!(rendered.contains("update_plan"));
         assert!(rendered.contains("off-limits"));
     }
+
+    #[test]
+    fn executor_prompt_contains_mini_verification_section() {
+        let rendered = render_executor_reminder("plan_demo_aaaa1111");
+        assert!(rendered.contains("## Mini verification"));
+        assert!(rendered.contains("Before you set any todo to completed"));
+        assert!(rendered.contains("P0-P6 discovery"));
+    }
+
+    #[test]
+    fn planner_prompt_contains_test_plan_hint() {
+        let s: &String = &PLANNER_REMINDER;
+        assert!(s.contains("## Verification hints in plans"));
+        assert!(s.contains("Test plan"));
+        assert!(s.contains("discover test command from manifest during EXEC"));
+    }
+
+    #[test]
+    fn prompt_forbids_default_npm_or_full_workspace_test() {
+        let rendered = render_executor_reminder("plan_demo_aaaa1111");
+        assert!(rendered.contains("FORBIDDEN"));
+        assert!(rendered.contains("npm test"));
+        assert!(rendered.contains("cargo test` for the whole workspace"));
+        assert!(rendered.contains("pytest` for the entire repo"));
+    }
 }

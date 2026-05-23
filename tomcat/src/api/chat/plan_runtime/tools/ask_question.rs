@@ -258,6 +258,8 @@ fn answer_to_json(result: &AskQuestionResult) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use crate::api::chat::plan_runtime::ask_question_panel::{
         Answer, AskQuestionResult, MockAskQuestionPanel,

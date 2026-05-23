@@ -50,6 +50,7 @@ pub mod session_prefix;
 pub mod todo_runtime;
 pub mod todos_panel;
 pub mod tools;
+pub mod verify;
 
 #[cfg(test)]
 mod tests;
@@ -68,6 +69,7 @@ pub use review::ReviewSummary;
 pub use todos_panel::{
     CliTodosPanel, NoopTodosPanel, RefreshNotifier, TodosPanel, TodosPanelSnapshot,
 };
+pub use verify::VerifySummary;
 
 /// PLAN 模式 per-session 编排器骨架（P1）。
 ///
@@ -111,6 +113,11 @@ pub struct PlanRuntime {
     /// 可选 reviewer 派发器。P4 时由 `ChatContext::from_config` 注入真实实现；
     /// 测试可注入 mock；未注入时 `create_plan` 返回 `aborted=true` 占位摘要。
     reviewer: Mutex<Option<Arc<dyn ReviewerDispatcher>>>,
+    /// 可选 verifier 派发器。PR-V1 由 `ChatContext::from_config` 注入真实实现；
+    /// 测试可注入 mock；未注入时 `update_plan(all_completed)` 返回 `aborted` 占位摘要。
+    verifier: Mutex<Option<Arc<dyn VerifierDispatcher>>>,
+    /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
+    verify_gate_mode: RwLock<String>,
     /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 可选 `ask_question` UI 后端（P5）。生产由 `ChatContext::from_config`
@@ -160,7 +167,11 @@ impl PlanRuntime {
     /// session_key 在 `ChatContext::from_config` 装配阶段已知（chat session 同生命周期）。
     /// 当前 P1 实现：`mode = Chat`，等待 `enter_planning` 或 `recover` 改写。
     pub fn new(session_key: impl Into<String>) -> Arc<Self> {
-        Self::with_session_identity(session_key, None::<String>, file_store::DEFAULT_LOCK_TIMEOUT_MS)
+        Self::with_session_identity(
+            session_key,
+            None::<String>,
+            file_store::DEFAULT_LOCK_TIMEOUT_MS,
+        )
     }
 
     /// 显式给 `lock_timeout_ms`（测试用；生产从 `[plan] lock_timeout_ms` 读取）。
@@ -195,6 +206,8 @@ impl PlanRuntime {
             active_plan_path: Mutex::new(None),
             lock_timeout_ms,
             reviewer: Mutex::new(None),
+            verifier: Mutex::new(None),
+            verify_gate_mode: RwLock::new("soft".into()),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             ask_question_panel: Mutex::new(None),
             first_exec_turn_pending: AtomicBool::new(false),
@@ -413,45 +426,40 @@ impl PlanRuntime {
                 }
             };
             let plan_id = plan.frontmatter.plan_id.clone();
-            match plan.frontmatter.mode {
-                file_store::PlanFileMode::Executing => {
-                    if self.owns_executing_plan(&plan) {
-                        // 当前 session 拥有 → 还原内存到 EXEC
-                        let plan_text = file_store::serialize_plan_file(&plan)
-                            .unwrap_or_else(|_| plan.body.clone());
-                        *self.first_exec_turn_body.lock() = Some(plan_text);
-                        self.first_exec_turn_pending.store(true, Ordering::Release);
-                        *self.mode.write() = PlanMode::Executing { plan_id };
-                        *self.active_plan_path.lock() = Some(path.clone());
-                    } else if self.current_session_id.lock().is_none() {
-                        // 异 session 遗留 → 盘 demote 到 pending（保留 body / todos）
-                        let mut demoted = plan.clone();
-                        demoted.frontmatter.mode = file_store::PlanFileMode::Pending;
-                        let owner_key = plan.frontmatter.session_key.as_deref().unwrap_or("");
-                        let owner_id = plan.frontmatter.session_id.as_deref().unwrap_or("");
-                        if let Err(e) =
-                            file_store::write_plan(&path, &demoted, self.lock_timeout_ms)
-                        {
-                            tracing::warn!(target: "plan_runtime::recover",
-                                "降级孤儿 executing plan {} 到 pending 失败: {e}", plan_id);
-                        } else {
-                            tracing::info!(target: "plan_runtime::recover",
-                                "孤儿 executing plan {} 已降级为 pending（原 session_key={} session_id={}）",
-                                plan_id,
-                                owner_key,
-                                owner_id);
-                        }
+            if plan.frontmatter.mode == file_store::PlanFileMode::Executing {
+                if self.owns_executing_plan(&plan) {
+                    // 当前 session 拥有 → 还原内存到 EXEC
+                    let plan_text = file_store::serialize_plan_file(&plan)
+                        .unwrap_or_else(|_| plan.body.clone());
+                    *self.first_exec_turn_body.lock() = Some(plan_text);
+                    self.first_exec_turn_pending.store(true, Ordering::Release);
+                    *self.mode.write() = PlanMode::Executing { plan_id };
+                    *self.active_plan_path.lock() = Some(path.clone());
+                } else if self.current_session_id.lock().is_none() {
+                    // 异 session 遗留 → 盘 demote 到 pending（保留 body / todos）
+                    let mut demoted = plan.clone();
+                    demoted.frontmatter.mode = file_store::PlanFileMode::Pending;
+                    let owner_key = plan.frontmatter.session_key.as_deref().unwrap_or("");
+                    let owner_id = plan.frontmatter.session_id.as_deref().unwrap_or("");
+                    if let Err(e) = file_store::write_plan(&path, &demoted, self.lock_timeout_ms) {
+                        tracing::warn!(target: "plan_runtime::recover",
+                            "降级孤儿 executing plan {} 到 pending 失败: {e}", plan_id);
                     } else {
-                        let current_session_id =
-                            self.current_session_id.lock().clone().unwrap_or_default();
                         tracing::info!(target: "plan_runtime::recover",
-                            "跳过其他 session_id 的 executing plan {}（disk session_id={} current session_id={}）",
+                            "孤儿 executing plan {} 已降级为 pending（原 session_key={} session_id={}）",
                             plan_id,
-                            plan.frontmatter.session_id.as_deref().unwrap_or(""),
-                            current_session_id);
+                            owner_key,
+                            owner_id);
                     }
+                } else {
+                    let current_session_id =
+                        self.current_session_id.lock().clone().unwrap_or_default();
+                    tracing::info!(target: "plan_runtime::recover",
+                        "跳过其他 session_id 的 executing plan {}（disk session_id={} current session_id={}）",
+                        plan_id,
+                        plan.frontmatter.session_id.as_deref().unwrap_or(""),
+                        current_session_id);
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -549,7 +557,7 @@ impl PlanRuntime {
         if let Some(path) = self
             .mode()
             .active_plan_id()
-            .and_then(|id| file_store::plan_path_for_id(&id).ok())
+            .and_then(|id| file_store::plan_path_for_id(id).ok())
         {
             *self.active_plan_path.lock() = Some(path);
         }
@@ -561,6 +569,31 @@ impl PlanRuntime {
     /// 测试可注入 [`review::MockReviewerDispatcher`] / 自定义实现）。
     pub fn attach_reviewer(&self, dispatcher: Arc<dyn ReviewerDispatcher>) {
         *self.reviewer.lock() = Some(dispatcher);
+    }
+
+    /// 注入 verifier 派发器（生产由 `ChatContext::from_config` 装配 verifier 子 Agent 派发；
+    /// 测试可注入 mock / 自定义实现）。
+    pub fn attach_verifier(&self, dispatcher: Arc<dyn VerifierDispatcher>) {
+        *self.verifier.lock() = Some(dispatcher);
+    }
+
+    /// 设置 `[plan].verify_gate` 当前值。仅接受 `soft` / `gate`；其它值回落为 `soft`。
+    pub fn set_verify_gate_mode(&self, value: impl Into<String>) {
+        let normalized = match value.into().trim().to_ascii_lowercase().as_str() {
+            "gate" => "gate",
+            _ => "soft",
+        };
+        *self.verify_gate_mode.write() = normalized.to_string();
+    }
+
+    /// 当前 `[plan].verify_gate` 值（标准化后，仅 `soft` / `gate`）。
+    pub fn verify_gate_mode(&self) -> String {
+        self.verify_gate_mode.read().clone()
+    }
+
+    /// 是否处于 gate 严模式。
+    pub fn verify_gate_is_strict(&self) -> bool {
+        self.verify_gate_mode.read().as_str() == "gate"
     }
 
     /// 同步派发 reviewer（plan-runtime.md §P4 RV14）。语义：
@@ -635,6 +668,44 @@ impl PlanRuntime {
             });
             self.write_transcript_custom(warn_payload);
         }
+        summary
+    }
+
+    /// 同步派发 verifier。语义与 reviewer 类似，但无 round 概念：
+    ///
+    /// 1. **必须**在 `write_plan` 释放 advisory lock **之后**调用。
+    /// 2. 读取 plan 文件 → 调 dispatcher → 解析 `<verify>` block → 返回 `VerifySummary`。
+    /// 3. 失败 / parse 错 / max_turns / parent abort → `verdict=aborted`；
+    ///    调用方（`update_plan`）**不**因此失败，而是按 `verify_gate` 决定是否收工。
+    /// 4. 若 dispatcher 未注入 → 返回 `placeholder_pending`。
+    pub async fn dispatch_verifier(&self, plan_id: &str) -> verify::VerifySummary {
+        let Some(dispatcher) = self.verifier.lock().clone() else {
+            return verify::VerifySummary::placeholder_pending();
+        };
+        let path = match file_store::plan_path_for_id(plan_id) {
+            Ok(p) => p,
+            Err(e) => return verify::VerifySummary::aborted_with(format!("plan_id 非法: {e}")),
+        };
+        let plan_text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => return verify::VerifySummary::aborted_with(format!("read plan 失败: {e}")),
+        };
+
+        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let summary = dispatcher.dispatch(plan_id, &plan_text, cascade).await;
+
+        let mut payload = summary.to_json();
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "event".to_string(),
+                serde_json::Value::String(crate::infra::wire::WIRE_PLAN_VERIFY.to_string()),
+            );
+            obj.insert(
+                "plan_id".to_string(),
+                serde_json::Value::String(plan_id.to_string()),
+            );
+        }
+        self.write_transcript_custom(payload);
         summary
     }
 
@@ -1022,6 +1093,24 @@ pub trait ReviewerDispatcher: Send + Sync {
         allow_review_edit: bool,
         abort_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> review::ReviewSummary;
+}
+
+/// verifier 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。
+///
+/// **契约**：
+/// - 调用方（`PlanRuntime::dispatch_verifier`）保证：调度时 plan 文件 advisory lock 已 release。
+/// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
+///   构造子 `AgentLoop`，把 `abort_signal` 透传给 `AgentLoopConfig`。
+/// - 返回 `VerifySummary`：成功 / aborted / parse_failed 都用同一形态承载。
+/// - **不**写父 transcript（verifier 子 Agent 持独立 session_id；transcript 隔离）。
+#[async_trait]
+pub trait VerifierDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        plan_id: &str,
+        plan_text: &str,
+        abort_signal: Arc<std::sync::atomic::AtomicBool>,
+    ) -> verify::VerifySummary;
 }
 
 /// `PlanRuntime` 操作错误。

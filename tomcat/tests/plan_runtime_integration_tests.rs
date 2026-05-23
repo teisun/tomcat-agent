@@ -7,6 +7,7 @@
 //! - 所有 `await` 必须 `tokio::time::timeout(30s, ...)` 包裹（防 D12 hang）；
 //! - HOME env 通过 [`isolated_home`] 在 tmp 中隔离；每个测试 owns 自己的 dir；
 //! - **不**真正连 LLM provider；reviewer 用 mock dispatcher、ask_question 用 mock panel。
+#![allow(clippy::await_holding_lock)]
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -177,6 +178,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 }],
             },
         )
+        .await
         .unwrap();
         // 5) update_plan：a completed
         update_plan::execute(
@@ -192,6 +194,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 }],
             },
         )
+        .await
         .unwrap();
         // 6) update_plan：b completed → 全 completed → 内存切 Completed
         let out_final = update_plan::execute(
@@ -207,6 +210,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 }],
             },
         )
+        .await
         .unwrap();
         assert_eq!(out_final["plan_mode_after"], "completed");
         assert!(matches!(rt.mode(), PlanMode::Completed { .. }));
@@ -295,6 +299,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
                 }],
             },
         )
+        .await
         .unwrap();
         let expected_path_str = expected_path.to_string_lossy().to_string();
         assert_eq!(out_final["path"].as_str(), Some(expected_path_str.as_str()));

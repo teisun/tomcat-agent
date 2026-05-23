@@ -168,8 +168,7 @@ pub struct PlanFile {
 
 /// 返回 `~/.tomcat/plans` 目录路径（不创建）。
 pub fn plans_dir() -> Result<PathBuf, std::io::Error> {
-    crate::infra::config::resolve_plans_dir()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    crate::infra::config::resolve_plans_dir().map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// `~/.tomcat/plans/<plan_id>.plan.md`；落盘前已 `assert_plan_id_safe_for_disk`。

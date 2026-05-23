@@ -9,10 +9,11 @@
 //! - 跨 session 编辑规则：
 //!   - 目标 plan `mode ∈ {planning, pending}`：允许（协作改稿）
 //!   - 目标 plan `mode == executing` 且 `session_key != current_session_key`：拒
-//! - 写盘后 EXEC 自动派生：所有 todos completed → 切 `mode=completed`。
+//! - 写盘后 EXEC 自动派生：所有 todos completed → 先写 `Executing`，再派发 verifier，
+//!   最后按 `verify_gate` 决定是否第二次写 `Completed`。
 //! - 返回 JSON（G1）：`plan_id` / `path` / `applied` / `items[]` /
 //!   `active_in_progress` / `plan_mode_before` / `plan_mode_after` / `warnings[]` /
-//!   `panel_snapshot_id`（节流后 panel 刷新版本；目前与 timestamp 等价）。
+//!   `panel_snapshot_id` / `verify`（节流后 panel 刷新版本；目前与 timestamp 等价）。
 
 use std::path::PathBuf;
 
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use crate::api::chat::plan_runtime::{
     file_store::{plan_path_for_id, read_plan, write_plan, PlanFileMode, TodoStatus},
     mode::PlanMode,
-    ops, PlanRuntime,
+    ops, verify, PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
@@ -71,7 +72,7 @@ impl UpdatePlanArgs {
     }
 }
 
-pub fn execute(
+pub async fn execute(
     runtime: &PlanRuntime,
     args: UpdatePlanArgs,
 ) -> Result<serde_json::Value, ToolError> {
@@ -95,24 +96,41 @@ pub fn execute(
 
     apply_shared_todo_ops(&mut plan.frontmatter.todos, &args.ops, args.replace)?;
 
-    let warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     let applied = args.ops.len();
 
     let derived_completed = matches!(plan_mode_before, PlanFileMode::Executing)
         && ops::all_completed(&plan.frontmatter.todos);
-    if derived_completed {
-        plan.frontmatter.mode = PlanFileMode::Completed;
-    }
 
     // E2：在 body 的 `## Todos Board` 标记区间内自动重写当前 todos 状态视图。
     rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
 
-    write_plan(&path, &plan, runtime.lock_timeout_ms())?;
-    let plan_mode_after = plan.frontmatter.mode;
+    let mut verify_json = serde_json::Value::Null;
+    let plan_mode_after = if derived_completed {
+        // 第一写：todos 完成，但 mode 保持 Executing，确保 verifier 看到的磁盘态是已完成未收工。
+        plan.frontmatter.mode = PlanFileMode::Executing;
+        write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
-    if derived_completed {
-        runtime.set_mode_completed(target_plan_id.clone());
-    }
+        let mut verify_summary = runtime.dispatch_verifier(&target_plan_id).await;
+        warnings.extend(verify::normalize_for_gate(&mut verify_summary));
+        verify_json = verify_summary.to_json();
+
+        let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");
+        if allow_complete {
+            plan.frontmatter.mode = PlanFileMode::Completed;
+            write_plan(&path, &plan, runtime.lock_timeout_ms())?;
+            runtime.set_mode_completed(target_plan_id.clone());
+            PlanFileMode::Completed
+        } else {
+            warnings.push(
+                "verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into(),
+            );
+            PlanFileMode::Executing
+        }
+    } else {
+        write_plan(&path, &plan, runtime.lock_timeout_ms())?;
+        plan.frontmatter.mode
+    };
 
     let active_in_progress = plan
         .frontmatter
@@ -144,6 +162,7 @@ pub fn execute(
         "warnings": warnings,
         "active_in_progress": active_in_progress,
         "items": items_json(&plan.frontmatter.todos),
+        "verify": verify_json,
     }))
 }
 
