@@ -99,16 +99,16 @@
 
 ### 2.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
-| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
-| **工具与文档拆分** | `web_search` / `web_fetch` 是否合一 | 合并 `web` 二选一参数；双工具单 markdown | cc-fork / hermes / openclaw（双工具）+ 本仓库文档惯例 | schema、权限（fetch 按 domain）、缓存键（query vs url）分离；**一工具一 md** 与 read/write/edit/bash 一致 | × 单文件双口吻、PR 互相拖拽 | 一个工具一份文档；找路标 vs 抓正文是两件事。 |
-| **多供应商抽象** | 换 key / 换模型是否丢检索能力 | 单一硬编码 vs `trait` + 多 adapter | hermes-agent + 本仓库路线图 | `WebSearchBackend` + OpenAI server-side / Tavily / Brave / Serper；OpenAI 系可走注入免自建 HTTP | × 仅单一 HTTP / 仅 server-side | 一套接口、四个 provider；坏一个不影响其他。 |
-| **默认 backend** | 用户无配置时走哪条路 | 默认 Tavily vs 默认 server-side vs 分叉 | openclaw「eligible 才 native」思路 + 本仓 **双 OpenAI provider** 事实 | **`auto`**：**仅** `[llm] provider = "openai-responses"`→server-side；`"openai"`（Completions）与其余→Tavily；`[tools.web_search] backend` 可强制 | × 把 Chat Completions 误当成能塞 `type:web_search` 的 Responses 管线 | 跟着 **API 形态**走，不是跟着「OpenAI 三个字」走。 |
-| **输入字段集** | LLM 常用约束是否进 schema | 仅 `query` vs 6 字段 | openclaw `web-search.ts` 字段集 | `query`+`count`+`freshness`+`country`+`language`+`domain_filter`；跨 provider 归一化 | × 一锅端塞 `page_token` 等易混字段 | 6 个字段够用；不要让模型猜怎么 query。 |
-| **输出归一化** | 模型是否要学多套 JSON | 各 backend 原样透传 vs 统一 hits | cc-fork-01（Output 思路）+ hermes | 单一 `{ hits, stats, warnings, backend }`；`warnings` 透传截断/限速 | × 原样三套 shape；× 仅 title+url 过短 | 模型只学一套字段。 |
-| **缓存策略** | 同会话重复 query 成本 | 无缓存 vs 磁盘持久化 | cc-fork-01 `utils.ts` LRU 思路 | 进程内 LRU + TTL；key 含 backend 与全参数字段 | × 不缓存烧钱；× 落盘持久化非目标 | 同样的搜索别花两次钱。 |
+| **工具与文档拆分** | `web_search` / `web_fetch` 是否合一 | **采用** `web_search` / `web_fetch` 双工具双文档。 | cc-fork / hermes / openclaw（双工具）+ 本仓库文档惯例 | schema、权限（fetch 按 domain）、缓存键（query vs url）分离；**一工具一 md** 与 read/write/edit/bash 一致 | × 单文件双口吻、PR 互相拖拽 | 一个工具一份文档；找路标 vs 抓正文是两件事。 |
+| **多供应商抽象** | 换 key / 换模型是否丢检索能力 | **采用** `WebSearchBackend` trait + 多 adapter。 | hermes-agent + 本仓库路线图 | `WebSearchBackend` + OpenAI server-side / Tavily / Brave / Serper；OpenAI 系可走注入免自建 HTTP | × 仅单一 HTTP / 仅 server-side | 一套接口、四个 provider；坏一个不影响其他。 |
+| **默认 backend** | 用户无配置时走哪条路 | **采用** `auto`：Responses→server-side，其余→Tavily。 | openclaw「eligible 才 native」思路 + 本仓 **双 OpenAI provider** 事实 | **`auto`**：**仅** `[llm] provider = "openai-responses"`→server-side；`"openai"`（Completions）与其余→Tavily；`[tools.web_search] backend` 可强制 | × 把 Chat Completions 误当成能塞 `type:web_search` 的 Responses 管线 | 跟着 **API 形态**走，不是跟着「OpenAI 三个字」走。 |
+| **输入字段集** | LLM 常用约束是否进 schema | **采用** 6 字段 schema（query/count/freshness/country/language/domain_filter）。 | openclaw `web-search.ts` 字段集 | `query`+`count`+`freshness`+`country`+`language`+`domain_filter`；跨 provider 归一化 | × 一锅端塞 `page_token` 等易混字段 | 6 个字段够用；不要让模型猜怎么 query。 |
+| **输出归一化** | 模型是否要学多套 JSON | **采用** 统一 `{ hits, stats, warnings, backend }`。 | cc-fork-01（Output 思路）+ hermes | 单一 `{ hits, stats, warnings, backend }`；`warnings` 透传截断/限速 | × 原样三套 shape；× 仅 title+url 过短 | 模型只学一套字段。 |
+| **缓存策略** | 同会话重复 query 成本 | **采用** 进程内 LRU + TTL（key 含 backend 与全参）。 | cc-fork-01 `utils.ts` LRU 思路 | 进程内 LRU + TTL；key 含 backend 与全参数字段 | × 不缓存烧钱；× 落盘持久化非目标 | 同样的搜索别花两次钱。 |
 
 ### 2.4 实施点（路线图）
 

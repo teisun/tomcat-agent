@@ -99,14 +99,14 @@
 
 ### 2.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
-| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Backend 形态** | 正文抽取是否要多 vendor | Firecrawl / 浏览器渲染 / 多 SaaS vs 单 reqwest | hermes（Firecrawl）+ 三家 Agent 常见形态 | **reqwest** + 自家 HTML→Markdown；维护面可控；与自托管目标一致 | × 多 backend 维护成本高；× Firecrawl SaaS | 一条 reqwest 路打到底；不引 SaaS。 |
-| **输出形态** | MVP 是否绑 small model 摘要 | 一律 LLM 摘要 / 一律 raw HTML vs 截断 markdown | hermes `web_extract` `use_llm_processing=False` 路径 | 默认 markdown **截断**（`MAX_MARKDOWN_LENGTH`）；PR-WF-P 再接可选摘要 | × MVP 卷入客户端 small model 选型 | MVP：直接给 markdown；嫌大让模型自己读截断尾。 |
-| **域名权限** | fetch 是否与 Read 共用一维 | 任意 URL / 误用 Read scope vs 独立 Domain op | cc-fork-01 `checkPermissions` + [`permission/types.rs::PermissionScope`](../../../src/core/permission/types.rs) | 新增 `PermissionGate::Domain` + config + confirm；与 Read/Write/Bash 并列 | × 无权限裸连；× 复用 Read 维度耦合错位 | 抓网络 != 读文件，权限要分开；老的 Read 维度别污染。 |
-| **重定向策略** | open-redirect 与可用性平衡 | reqwest 默认 follow-all vs 全拒 | cc-fork-01 `getWithPermittedRedirects` + `isPermittedRedirect` | **`Policy::none()` + 手写循环**：同源 / `www.` 允许；off-host **结构化** `redirect_off_host` | × 默认 follow-all；× 全拒过严 | 同源跳转跟，跨域跳转停下来问模型。 |
+| **Backend 形态** | 正文抽取是否要多 vendor | **采用** reqwest + 自研 HTML→Markdown；**拒绝** 多 SaaS backend。 | hermes（Firecrawl）+ 三家 Agent 常见形态 | **reqwest** + 自家 HTML→Markdown；维护面可控；与自托管目标一致 | × 多 backend 维护成本高；× Firecrawl SaaS | 一条 reqwest 路打到底；不引 SaaS。 |
+| **输出形态** | MVP 是否绑 small model 摘要 | **采用** 默认 markdown 截断（`MAX_MARKDOWN_LENGTH`）。 | hermes `web_extract` `use_llm_processing=False` 路径 | 默认 markdown **截断**（`MAX_MARKDOWN_LENGTH`）；PR-WF-P 再接可选摘要 | × MVP 卷入客户端 small model 选型 | MVP：直接给 markdown；嫌大让模型自己读截断尾。 |
+| **域名权限** | fetch 是否与 Read 共用一维 | **采用** `PermissionGate::Domain` 独立维度。 | cc-fork-01 `checkPermissions` + [`permission/types.rs::PermissionScope`](../../../src/core/permission/types.rs) | 新增 `PermissionGate::Domain` + config + confirm；与 Read/Write/Bash 并列 | × 无权限裸连；× 复用 Read 维度耦合错位 | 抓网络 != 读文件，权限要分开；老的 Read 维度别污染。 |
+| **重定向策略** | open-redirect 与可用性平衡 | **采用** `Policy::none()` + 手写同源/`www.` 循环。 | cc-fork-01 `getWithPermittedRedirects` + `isPermittedRedirect` | **`Policy::none()` + 手写循环**：同源 / `www.` 允许；off-host **结构化** `redirect_off_host` | × 默认 follow-all；× 全拒过严 | 同源跳转跟，跨域跳转停下来问模型。 |
 
 ### 2.4 实施点（路线图）
 

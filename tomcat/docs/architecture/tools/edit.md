@@ -128,20 +128,20 @@
 
 #### 2.3.0 落地选型决策表（维度取舍）
 
-以下矩阵与主计划 §0.7「取其精华」行一一对应，**实施 PR 不得静默删行**；若弃案须在 §12 登记。**代码落点、交付物、阶段**见 **[§2.4](#24-实施点排期与已规划-pr)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+以下矩阵与主计划 §0.7「取其精华」行一一对应，**实施 PR 不得静默删行**；若弃案须在 §12 登记。**代码落点、交付物、阶段**见 **[§2.4](#24-实施点排期与已规划-pr)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
-| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
-| **E1** | 多段 `edits[]` 是否对**同一份原文快照** | 链式 `replacen` vs pi-mono「全程对 original」 | pi-mono | 计数 / 重叠 / `replace_all` 均在读入后的 `original`（及 T2 起 `working`）上完成；单次 `write_file_atomic` | × 保留链式：与 pi-mono / 训练分布冲突、跨度误判 | 多段一起改：都在「刚读的那份字」上算完再写。 |
-| **E2** | 多命中子串是否需显式 `replace_all` | 仅靠扩唯一子串 vs cc-fork **replace_all** 一等公民 | cc-fork | 每段 `replace_all?: bool`；否则 `Ambiguous` 可诊断 | — | 想全局替换同一句话，要有一个明确的开关。 |
-| **E3** | 行级强锚点是否塞进子串 `edit` | 内嵌 V4A / MD5 vs **pi_agent_rust** 独立 `hashline_edit` + [`read.md`](read.md) `hashline` | pi_agent_rust + 已落地 read | 协议隔离；算法与 wire 单点维护于 read §5 / §4.2.5 | × 普通 `edit` 内嵌 V4A：范围爆炸；× 本期不做 `apply_patch` | 特别准的「第几行」编辑单独做，别和子串 `edit` 搅在一起。 |
-| **E4** | 模型字面与磁盘微差如何消化 | 九策略模糊 vs 有限 normalize | cc-fork + pi-mono | curly-quote / de-sanitize / BOM + LF **工作副本**；纯函数管道 | × hermes 式多策略模糊：难测 | 弯引号、消毒字符这类坑，用一小套规则消化掉。 |
-| **E5** | 失败时模型能否自愈 | 含糊中文 vs errorCode 式细分 | cc-fork | 逻辑错误码 + 可执行 hint（`AppError::Tool` / 枚举映射） | — | 报错要带「下一步咋办」，别只骂一句。 |
-| **E6** | 写盘失败是否留半成品 | 现状 `.bak` + 恢复 | 现状 + 主 plan PR-D | 先校验后写；`.bak` 仅兜底写失败路径 | — | 算不对就不写；备份只防写一半崩了。 |
-| **E7** | `.ipynb` 是否走纯文本 `edit` | Notebook 另工具 vs 纯文本一把梭 | cc-fork | `gate` 后扩展名拒绝 + 指引 | — | 笔记本先别用纯文本改，直接拦。 |
-| **—（staleness）** | 改前是否校验「仍是上次读的那份」 | 无校验 vs read 共用 `ReadFileState` | cc-fork + [`read_state.rs`](../../../../src/core/tools/pipeline/read_state.rs) | `mtime_ms + size` 快路径；与 read 同形注入 `tool_exec` | × 无校验：与 read 陈旧目标相悖 | 改之前对一下表：文件还是不是你上次看的那份。 |
-| **—（命名）** | 对外工具名是否短名单轨 | `edit_file` 别名 vs `read` PR-RA 口径 | pi-mono + 本仓库 read | 仅 `edit`；transcript legacy **warn** + UnknownTool | × `edit_file` 运行时别名 | 就叫 `edit`，和 `read` 一样短、一样好记。 |
-| **—（secrets）** | `new_content` 是否可能夹带密钥 | 无扫描 vs cc-fork 类钩子 | cc-fork（主 plan T3-K） | 每段 `new_content` 扫描；与 write 共用 `secrets` 钩子 | — | 往文件里贴密钥前，先扫一眼能不能过。 |
+| **E1** | 多段 `edits[]` 是否对**同一份原文快照** | **采用** 多段 `edits[]` 对同一份 `original` 快照一次应用。 | pi-mono | 计数 / 重叠 / `replace_all` 均在读入后的 `original`（及 T2 起 `working`）上完成；单次 `write_file_atomic` | × 保留链式：与 pi-mono / 训练分布冲突、跨度误判 | 多段一起改：都在「刚读的那份字」上算完再写。 |
+| **E2** | 多命中子串是否需显式 `replace_all` | **采用** 每段 `replace_all?: bool`，默认 false。 | cc-fork | 每段 `replace_all?: bool`；否则 `Ambiguous` 可诊断 | — | 想全局替换同一句话，要有一个明确的开关。 |
+| **E3** | 行级强锚点是否塞进子串 `edit` | **采用** 独立 `hashline_edit`；**拒绝** 子串 edit 内嵌 V4A。 | pi_agent_rust + 已落地 read | 协议隔离；算法与 wire 单点维护于 read §5 / §4.2.5 | × 普通 `edit` 内嵌 V4A：范围爆炸；× 本期不做 `apply_patch` | 特别准的「第几行」编辑单独做，别和子串 `edit` 搅在一起。 |
+| **E4** | 模型字面与磁盘微差如何消化 | **采用** 有限 normalize 工作副本（curly-quote / BOM / LF）。 | cc-fork + pi-mono | curly-quote / de-sanitize / BOM + LF **工作副本**；纯函数管道 | × hermes 式多策略模糊：难测 | 弯引号、消毒字符这类坑，用一小套规则消化掉。 |
+| **E5** | 失败时模型能否自愈 | **采用** 逻辑错误码 + 可执行 hint。 | cc-fork | 逻辑错误码 + 可执行 hint（`AppError::Tool` / 枚举映射） | — | 报错要带「下一步咋办」，别只骂一句。 |
+| **E6** | 写盘失败是否留半成品 | **采用** 先校验后写；`.bak` 仅写失败兜底。 | 现状 + 主 plan PR-D | 先校验后写；`.bak` 仅兜底写失败路径 | — | 算不对就不写；备份只防写一半崩了。 |
+| **E7** | `.ipynb` 是否走纯文本 `edit` | **采用** `.ipynb` gate 拒绝 + 指引。 | cc-fork | `gate` 后扩展名拒绝 + 指引 | — | 笔记本先别用纯文本改，直接拦。 |
+| **—（staleness）** | 改前是否校验「仍是上次读的那份」 | **采用** `mtime_ms+size` 与 read 共用 `ReadFileState`。 | cc-fork + [`read_state.rs`](../../../../src/core/tools/pipeline/read_state.rs) | `mtime_ms + size` 快路径；与 read 同形注入 `tool_exec` | × 无校验：与 read 陈旧目标相悖 | 改之前对一下表：文件还是不是你上次看的那份。 |
+| **—（命名）** | 对外工具名是否短名单轨 | **采用** 仅 `edit`；legacy warn + UnknownTool。 | pi-mono + 本仓库 read | 仅 `edit`；transcript legacy **warn** + UnknownTool | × `edit_file` 运行时别名 | 就叫 `edit`，和 `read` 一样短、一样好记。 |
+| **—（secrets）** | `new_content` 是否可能夹带密钥 | **采用** `new_content` 扫描 + write 共用 secrets。 | cc-fork（主 plan T3-K） | 每段 `new_content` 扫描；与 write 共用 `secrets` 钩子 | — | 往文件里贴密钥前，先扫一眼能不能过。 |
 
 > ² **staleness 行脚注**：与 write「必须先 read」**同 PR 节奏**落地时，edit 侧复用同一张 `ReadFileState`；语义见 [`read.md`](read.md) **§1**（术语）、**§7.3**（edit 前陈旧检查概念）、**§8**（会话表字段）。
 

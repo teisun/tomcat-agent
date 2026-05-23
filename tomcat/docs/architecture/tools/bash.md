@@ -93,16 +93,16 @@
 
 ### 2.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§2.4](#24-实施点现状与路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点现状与路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
-| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
-| **对外工具名** | legacy transcript 是否还能静默执行 | 单迭代运行时重定向 vs 仅 `bash` match | pi-mono 契约名 + [`read.md`](read.md) PR-RA | 与 `read`/`write`/`edit` **单名对外**；审计与 prompt 不双轨 | × `execute_bash`→`bash` 运行时重定向 + 双轨审计 | 只注册一个名；老 transcript 别静默改写成还能跑。 |
-| **默认墙钟超时** | 长命令如何有界 | `BASH_TIMEOUT_SECS` 常量未接线 vs PR-E 接线 | strengthen 计划 + 本仓库现状 | **120 s** 默认、**600 s** 可配上限；兼顾编译与防挂死 | × 无限等默认 | 两分钟不够再加，别默认卡死大构建。 |
-| **输出策略** | 大 stdout/stderr 如何不进爆上下文 | 仅硬截断 vs 截断 + 落盘路径 | cc-fork-01 | 头尾截断 + **`persisted_output_path`**（PR-E） | × 仅截断、模型无处读全文 | 中间砍掉，头尾留下，全文去文件里看。 |
-| **后台模型** | 长任务是否与 loop 解耦 | 仅前台 vs `run_in_background` + task API | openclaw / strengthen PR-I | **task 三件套**（PR-I）与 event_bus 衔接 | × 仅前台依赖用户 Ctrl+C | 大任务别堵在同一轮 tool 里。 |
-| **安全栈** | gate 与 AST 是否二选一 | 仅 AST vs 仅 gate vs 叠层 | 本仓库 gate + strengthen T3 | **保留** gate + 路径预检；T3 **叠加** AST allowlist | × 弃 gate 纯 AST | 老的别拆，新的叠上去。 |
-| **`argv` 模式** | 是否强制 `sh -c` 字符串 | `command`+`args` exec vs shell 一行 | pi-mono | **保留**不经 shell 的 argv 拼接（已实现） | × 仅 `sh -c` 宽注入面 | 能不用字符串 shell 就不用。 |
+| **对外工具名** | legacy transcript 是否还能静默执行 | **采用** 仅 `bash` match；legacy warn + UnknownTool，**拒绝** 运行时重定向。 | pi-mono 契约名 + [`read.md`](read.md) PR-RA | 与 `read`/`write`/`edit` **单名对外**；审计与 prompt 不双轨 | × `execute_bash`→`bash` 运行时重定向 + 双轨审计 | 只注册一个名；老 transcript 别静默改写成还能跑。 |
+| **默认墙钟超时** | 长命令如何有界 | **采用** 120 s 默认、600 s 可配上限（PR-E）；**拒绝** 无限等。 | strengthen 计划 + 本仓库现状 | **120 s** 默认、**600 s** 可配上限；兼顾编译与防挂死 | × 无限等默认 | 两分钟不够再加，别默认卡死大构建。 |
+| **输出策略** | 大 stdout/stderr 如何不进爆上下文 | **采用** 头尾截断 + `persisted_output_path`（PR-E）。 | cc-fork-01 | 头尾截断 + **`persisted_output_path`**（PR-E） | × 仅截断、模型无处读全文 | 中间砍掉，头尾留下，全文去文件里看。 |
+| **后台模型** | 长任务是否与 loop 解耦 | **采用** task 三件套（PR-I）+ event_bus。 | openclaw / strengthen PR-I | **task 三件套**（PR-I）与 event_bus 衔接 | × 仅前台依赖用户 Ctrl+C | 大任务别堵在同一轮 tool 里。 |
+| **安全栈** | gate 与 AST 是否二选一 | **采用** 保留 gate + 路径预检，T3 叠加 AST。 | 本仓库 gate + strengthen T3 | **保留** gate + 路径预检；T3 **叠加** AST allowlist | × 弃 gate 纯 AST | 老的别拆，新的叠上去。 |
+| **`argv` 模式** | 是否强制 `sh -c` 字符串 | **采用** 不经 shell 的 argv 拼接。 | pi-mono | **保留**不经 shell 的 argv 拼接（已实现） | × 仅 `sh -c` 宽注入面 | 能不用字符串 shell 就不用。 |
 
 ### 2.4 实施点（现状与路线图）
 

@@ -4,7 +4,7 @@
 
 **兄弟 spec**：[read.md](read.md)（`ReadFileState`、`ReadStamp`、`FILE_UNCHANGED`、dedup）；[edit.md](edit.md)（同表 staleness、`NoPriorRead` 与 write 同 PR 节奏、secrets T3-K）；[search_files.md](search_files.md)（先定位再写的工作流）。
 
-**「说人话」写法**（对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 与 **§4** 落地选型章节）：本文件在信息密度高的表末追加 **`说人话`** 列；图、状态机后附 **2–5 句**口语串链路。**禁止**用口语替代技术定义正文列。
+**表格末列**（对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1**）：**§3.3** 落地选型决策表 **`决策`** 列（每行一句裁决结论）；其他高密度表末列 **`说人话`**。图、状态机后附 **2–5 句**口语串链路。**禁止**用口语或裁决句替代技术定义正文列。
 
 ---
 
@@ -126,16 +126,16 @@
 
 ### 3.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§3.4](#34-实施点排期与状态)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。
+**代码落点、交付物、阶段**见 **[§3.4](#34-实施点排期与状态)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
-| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
-| **已存在文件 + overwrite** | `overwrite=true` 时 stamp 是否可信 | cc-fork `FileWriteTool` validate；× primitive 内隐式读盘 | cc-fork | 编排层要求模型先 `read`；`overwrite=true` 时 `check_stamp` 与 read 共用 `ReadFileState` | × 在 primitive 内藏「隐式 read」凑 stamp | 不许工具偷偷帮你读盘凑 stamp；**模型自己先 `read`**。 |
-| **原子写** | 是否重写落盘 IO | `write_file_atomic`；pi_agent_rust 同类单文件原子 | 现状 + pi_agent_rust | 审计、`.bak`、错误路径已在 primitive 收敛 | × 为「对齐」重写 IO | 落盘方式**已经够用**，别为了对齐而重写一套 IO。 |
-| **写后 stamp** | dedup 与真实磁盘是否一致 | `ReadFileState::invalidate` API 已预留 | `read_state.rs` 设计 + cc-fork 思路 | 写成功后 `invalidate(path)`，避免 `FILE_UNCHANGED` 与磁盘脱节 | × 保留旧 stamp | 写完就把「读过」的条子撕掉，**别骗 dedup**。 |
-| **LF 规范化** | CRLF 默认行为与 schema 面 | PR-G 默认 `\r\n→\n`；× per-call 字段 | cc-fork 行尾策略 | `[tools.write] normalize_crlf` **仅**全局配置；与主计划 PR-G 一致 | × 静默改 UTF-16；× per-call schema 字段让模型多一维 | 默认把 `\r\n` 收成 `\n`，团队想保留**改全局配置**，别给每次调用塞开关。 |
-| **diff 回执** | 写后如何让模型看见 delta | [`build_simple_diff`](../../../../src/core/tools/primitive/diff.rs)；× `git diff` 依赖 | edit 已引用 diff 模块 | 成功回执可选短 unified diff（写前快照 vs 新 content） | × 依赖 git binary | 给模型看「改了啥」用**内存里 diff 几句**就行，别绑 `git`。 |
-| **secrets** | 全文件 `content` 是否过密钥钩子 | cc-fork `checkTeamMemSecrets`；× SaaS 扫描器 | cc-fork（T3-K） | `scan(content)`；编排层与 `edit` 共用 `secrets` + confirm gate | × 重型 SaaS 扫描器 | 轻量正则集 + **命中走确认**；不搞企业级扫描器。 |
+| **已存在文件 + overwrite** | `overwrite=true` 时 stamp 是否可信 | **采用** 先 `read` + `check_stamp`；**拒绝** primitive 隐式读盘。 | cc-fork | 编排层要求模型先 `read`；`overwrite=true` 时 `check_stamp` 与 read 共用 `ReadFileState` | × 在 primitive 内藏「隐式 read」凑 stamp | 不许工具偷偷帮你读盘凑 stamp；**模型自己先 `read`**。 |
+| **原子写** | 是否重写落盘 IO | **采用** 沿用 `write_file_atomic`；**拒绝** 为对齐重写 IO。 | 现状 + pi_agent_rust | 审计、`.bak`、错误路径已在 primitive 收敛 | × 为「对齐」重写 IO | 落盘方式**已经够用**，别为了对齐而重写一套 IO。 |
+| **写后 stamp** | dedup 与真实磁盘是否一致 | **采用** 写成功后 `invalidate(path)`。 | `read_state.rs` 设计 + cc-fork 思路 | 写成功后 `invalidate(path)`，避免 `FILE_UNCHANGED` 与磁盘脱节 | × 保留旧 stamp | 写完就把「读过」的条子撕掉，**别骗 dedup**。 |
+| **LF 规范化** | CRLF 默认行为与 schema 面 | **采用** `normalize_crlf` 仅全局配置。 | cc-fork 行尾策略 | `[tools.write] normalize_crlf` **仅**全局配置；与主计划 PR-G 一致 | × 静默改 UTF-16；× per-call schema 字段让模型多一维 | 默认把 `\r\n` 收成 `\n`，团队想保留**改全局配置**，别给每次调用塞开关。 |
+| **diff 回执** | 写后如何让模型看见 delta | **采用** 内存 short unified diff。 | edit 已引用 diff 模块 | 成功回执可选短 unified diff（写前快照 vs 新 content） | × 依赖 git binary | 给模型看「改了啥」用**内存里 diff 几句**就行，别绑 `git`。 |
+| **secrets** | 全文件 `content` 是否过密钥钩子 | **采用** `scan(content)` + confirm gate。 | cc-fork（T3-K） | `scan(content)`；编排层与 `edit` 共用 `secrets` + confirm gate | × 重型 SaaS 扫描器 | 轻量正则集 + **命中走确认**；不搞企业级扫描器。 |
 
 ### 3.4 实施点（排期与状态）
 

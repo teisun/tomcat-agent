@@ -1132,6 +1132,7 @@ EXEC 中：
 ## 14. 关联文档
 
 - 工具 spec（`tools/`）：[planner.md](./tools/planner.md)（PLAN 模式整体规范）、[create-plan.md](./tools/create-plan.md)（LLM 工具 + PlanFile 协议 + 内联 reviewer）、[ask-question.md](./tools/ask-question.md)、[todos.md](./tools/todos.md)（含 TodosPanel UI 投影）、[reviewer.md](./tools/reviewer.md)
+- EXEC 完工后代码验证（verifier，与 reviewer 分拆）：[plan-exec-code-verification.md](./plan-exec-code-verification.md)
 - 子 Agent 基础设施：[multi-agent.md](./multi-agent.md)
 - 底座依赖：[checkpoint-resume.md](./tools/checkpoint-resume.md)
 - 标杆写法：[tools/read.md](./tools/read.md)

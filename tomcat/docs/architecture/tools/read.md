@@ -2,7 +2,7 @@
 
 本文档是内置工具 **`read`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接迭代子项 **T2-P0-tools-read** 与计划 [`strengthen-read-tool_92f396c7.plan.md`](../../../../../.cursor/plans/strengthen-read-tool_92f396c7.plan.md)、[`tools-read-spec-migration_cb4d7b57.plan.md`](../../../../../.cursor/plans/tools-read-spec-migration_cb4d7b57.plan.md)。**实现以仓库代码为准**；计划文档保留讨论过程与 PR 治理顺序，本文只保留**已定稿的行为与契约**。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐：在已写清技术列的前提下，每行一句口语扫读；与 §1「语义（人话）」并存时，**语义列钉定义，说人话列作速记**（不替代技术表述）。
+§4.1 落地选型决策表 **「决策」** 列（每行一句裁决结论，见 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1**）。其他高密度表末列 **「说人话」** 与 **§14.1** 对齐：在已写清技术列的前提下，每行一句口语扫读；与 §1「语义（人话）」并存时，**语义列钉定义，说人话列作速记**（不替代技术表述）。
 
 **说人话**：这是一份「读文件工具」的定稿 spec——怎么分页、怎么报错、怎么 dedup、图往哪塞，都按下面表格和协议来。
 
@@ -153,19 +153,19 @@
 
 ### 4.1 落地选型决策表（维度取舍）
 
-**核对**：每个可辩驳分叉独占一行；读者能回答「若不采纳本行**入选理由**，代价是什么」。**落地点、交付物、阶段**见 **[§4.2](#42-实施点已闭环)**（[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工）。末列「说人话」为扫读用 **SHOULD**，与 **§14.1** 同向。
+**核对**：每个可辩驳分叉独占一行；读者能回答「若不采纳本行**入选理由**，代价是什么」。**落地点、交付物、阶段**见 **[§4.2](#42-实施点已闭环)**（[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工）。第三列 **「决策」** 钉专业裁决结论；末列 **「说人话」** 为口语扫读（**SHOULD**，与 **§14.1** 同向）。
 
-| 维度 | 关切 | 现状/对标 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
-|------|------|-----------|------|----------|---------------|--------|
-| R1 对外命名 | catalog 与 transcript 是否双轨 | `read_file` 并存或别名 | 本仓库 PR-RA；与 `read` 单名策略一致 | 仅注册 `read`；legacy 名 → UnknownTool + `warn`，审计单轨 | 运行时把 `read_file` 当别名执行 → 双轨与 prompt 分叉 | 一条名字走到底。 |
-| R2 分页默认 | 大文件进上下文与 wasm 堆 | 512 行 / 整文件直读 | cc-fork 系大行数窗口实践 | 默认 `limit=2000` + 截断续读尾注；可控 token | 整文件默认读入 → OOM / 费 token | 一屏加一点。 |
-| R3 裸读门 | 无窗读巨文件 | 256 KB～100 MiB 等业界阈值 | `infra/config` + executor metadata | 无窗时 `max_bytes`（默认 25 MiB）拒绝；**有** `offset`/`limit` 之一可绕过 | 不设门或门过低 → 误伤或仍 OOM | 没窗才挡整锅；有窗只窥一角。 |
-| R4 行号默认 | IDE / diff / 人工扫读 | 无前缀、LSP 风格等 | 常见 `cat -n` 实践 | 默认 `cat -n` 6 格 + Tab | 无前缀 → 对行号不友好 | 跟终端习惯对齐。 |
-| R5 同窗重复读 | 合法重试 vs 烧 token | 硬拒绝或每次全文重发 | dedup stub 类产品实践 | 同窗磁盘未变 → `FileUnchanged` stub | 硬拒绝误伤「再确认」；每次全文 → 烧 token | 没变就别再灌全文。 |
-| R5 dedup 指纹 | 短路前是否再读全文 | `content_hash` 参与命中 | `read_state.rs` 头注释与 PR-RF | `mtime_ms + size` 快路径；`content_hash` 存表供诊断与 edit 纵深 | hash 参与 dedup 命中 → 短路前被迫再读全文 | 省读优先，hash 做纵深。 |
-| R6 图片策略 | 依赖与 wasm 体积 | 引入 `image` 缩放等 | OpenAI inline 限制 | metadata 限长、路径级不缩放；对齐上限 | 在工具内解码缩放 → 依赖与编译膨胀 | wasm 可控，贴 OpenAI。 |
-| R4 hashline | 行级强锚点 | 无指纹 / MD5 前缀等 | **pi_agent_rust** hashline | xxh32 + 双字符表；与 edit 纵深一致 | 无行级指纹 → 精细 edit 难闭环 | 短指纹好对齐生态。 |
-| R6 图 / PDF 进模型 | OpenAI tool 能否带 binary | 塞进 `role=tool` | OpenAI API 约束 + PR-RJ T3-c | tool 占位 + **下一条** `user` Parts 注入 | 在 tool 消息内嵌图 → API 拒收 / 浪费 | 图走侧信道，单测锁住。 |
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+| --- | --- | --- | --- | --- | --- | --- |
+| R1 对外命名 | catalog 与 transcript 是否双轨 | **采用** 单名 `read`；legacy 仅 warn，不当别名执行。 | 本仓库 PR-RA；与 `read` 单名策略一致 | 仅注册 `read`；legacy 名 → UnknownTool + `warn`，审计单轨 | 运行时把 `read_file` 当别名执行 → 双轨与 prompt 分叉 | 一条名字走到底。 |
+| R2 分页默认 | 大文件进上下文与 wasm 堆 | **采用** 默认 `limit=2000` 分页 + 截断续读尾注。 | cc-fork 系大行数窗口实践 | 默认 `limit=2000` + 截断续读尾注；可控 token | 整文件默认读入 → OOM / 费 token | 一屏加一点。 |
+| R3 裸读门 | 无窗读巨文件 | **采用** 无窗 `max_bytes` 门（默认 25 MiB）；有窗可绕过。 | `infra/config` + executor metadata | 无窗时 `max_bytes`（默认 25 MiB）拒绝；**有** `offset`/`limit` 之一可绕过 | 不设门或门过低 → 误伤或仍 OOM | 没窗才挡整锅；有窗只窥一角。 |
+| R4 行号默认 | IDE / diff / 人工扫读 | **采用** 默认 `cat -n`（6 格 + Tab）。 | 常见 `cat -n` 实践 | 默认 `cat -n` 6 格 + Tab | 无前缀 → 对行号不友好 | 跟终端习惯对齐。 |
+| R5 同窗重复读 | 合法重试 vs 烧 token | **采用** 同窗未变 → `FileUnchanged` stub。 | dedup stub 类产品实践 | 同窗磁盘未变 → `FileUnchanged` stub | 硬拒绝误伤「再确认」；每次全文 → 烧 token | 没变就别再灌全文。 |
+| R5 dedup 指纹 | 短路前是否再读全文 | **采用** dedup 命中 `mtime_ms+size`；`content_hash` 仅诊断/纵深。 | `read_state.rs` 头注释与 PR-RF | `mtime_ms + size` 快路径；`content_hash` 存表供诊断与 edit 纵深 | hash 参与 dedup 命中 → 短路前被迫再读全文 | 省读优先，hash 做纵深。 |
+| R6 图片策略 | 依赖与 wasm 体积 | **采用** metadata 限长、路径级不缩放（wasm 可控）。 | OpenAI inline 限制 | metadata 限长、路径级不缩放；对齐上限 | 在工具内解码缩放 → 依赖与编译膨胀 | wasm 可控，贴 OpenAI。 |
+| R4 hashline | 行级强锚点 | **采用** xxh32 + 双字符表 hashline（对齐 pi 生态）。 | **pi_agent_rust** hashline | xxh32 + 双字符表；与 edit 纵深一致 | 无行级指纹 → 精细 edit 难闭环 | 短指纹好对齐生态。 |
+| R6 图 / PDF 进模型 | OpenAI tool 能否带 binary | **采用** tool 占位 + 下条 `user` Parts 注入（单测锁住）。 | OpenAI API 约束 + PR-RJ T3-c | tool 占位 + **下一条** `user` Parts 注入 | 在 tool 消息内嵌图 → API 拒收 / 浪费 | 图走侧信道，单测锁住。 |
 
 ### 4.2 实施点（已闭环）
 
