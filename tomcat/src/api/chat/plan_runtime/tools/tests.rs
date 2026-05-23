@@ -270,6 +270,7 @@ fn create_plan_derived_id_passes_safety_check() {
 /// 创建一个 Planning 模式下的 plan，返回**派生**的 `plan_id`（G4：LLM 不传 id）。
 /// 调用方应 capture 返回的 plan_id 用于后续 update_plan / build。
 fn fresh_planning_plan(rt: &PlanRuntime) -> String {
+    rt.set_max_code_review_rounds(0);
     rt.enter_planning().unwrap();
     let out = create_plan::execute(
         rt,
@@ -304,6 +305,7 @@ fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
     plan.frontmatter.session_key = Some(session_key.into());
     plan.frontmatter.session_id = Some(format!("sid-{session_key}"));
     write_plan(&path, &plan, 2000).unwrap();
+    rt.set_max_code_review_rounds(0);
     rt.set_executing_for_test(plan_id.to_string());
 }
 
@@ -312,6 +314,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    rt.set_max_code_review_rounds(0);
     let plan_id = fresh_planning_plan(&rt);
     // G1 + G2：set_status(in_progress) 仅在 executing 允许；先把 plan 切到 executing 再走 update_plan
     use crate::api::chat::plan_runtime::file_store::{
@@ -754,6 +757,7 @@ impl ReviewerDispatcher for MockReviewerDispatcher {
         &self,
         _plan_id: &str,
         _plan_text: &str,
+        kind: crate::api::chat::plan_runtime::review::ReviewKind,
         _allow_review_edit: bool,
         _abort_signal: std::sync::Arc<AtomicBool>,
     ) -> ReviewSummary {
@@ -764,9 +768,11 @@ impl ReviewerDispatcher for MockReviewerDispatcher {
         }
         let mut q = self.summaries.lock();
         if q.is_empty() {
-            ReviewSummary::aborted_with("mock 队列耗尽")
+            ReviewSummary::aborted_with_kind(kind, "mock 队列耗尽")
         } else {
-            q.remove(0)
+            let mut summary = q.remove(0);
+            summary.kind = kind;
+            summary
         }
     }
 }
@@ -775,6 +781,30 @@ fn ok_review() -> ReviewSummary {
     ReviewSummary {
         aborted: false,
         summary: "looks ok".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+        ..Default::default()
+    }
+}
+
+fn pass_code_review() -> ReviewSummary {
+    ReviewSummary {
+        kind: crate::api::chat::plan_runtime::review::ReviewKind::Code,
+        aborted: false,
+        verdict: Some("pass".into()),
+        summary: "code review passed".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+        ..Default::default()
+    }
+}
+
+fn fail_code_review() -> ReviewSummary {
+    ReviewSummary {
+        kind: crate::api::chat::plan_runtime::review::ReviewKind::Code,
+        aborted: false,
+        verdict: Some("fail".into()),
+        summary: "code review found a concrete issue".into(),
         changes_summary: "none".into(),
         applied_changes: false,
         ..Default::default()
@@ -962,6 +992,7 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
             &self,
             plan_id: &str,
             _plan_text: &str,
+            _kind: crate::api::chat::plan_runtime::review::ReviewKind,
             _allow_review_edit: bool,
             _abort: std::sync::Arc<AtomicBool>,
         ) -> ReviewSummary {
@@ -1145,6 +1176,7 @@ async fn reviewer_dispatch_passes_through_abort_signal() {
             &self,
             _plan_id: &str,
             _plan_text: &str,
+            _kind: crate::api::chat::plan_runtime::review::ReviewKind,
             _allow_review_edit: bool,
             abort: std::sync::Arc<AtomicBool>,
         ) -> ReviewSummary {
@@ -1247,6 +1279,241 @@ async fn verifier_spawned_on_all_completed() {
     );
     assert_eq!(out["verify"]["verdict"], "pass");
     assert_eq!(out["plan_mode_after"], "completed");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn code_review_pass_runs_verifier_in_same_turn() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        pass_code_review(),
+    ])));
+    let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![ok_verify_pass()]));
+    rt.attach_verifier(verifier.clone());
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["code_review"]["verdict"], "pass");
+    assert_eq!(out["verify"]["verdict"], "pass");
+    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_skips_review() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    let reviewer = std::sync::Arc::new(MockReviewerDispatcher::new(vec![fail_code_review()]));
+    let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![ok_verify_pass()]));
+    rt.attach_reviewer(reviewer.clone());
+    rt.attach_verifier(verifier.clone());
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let first = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["code_review"]["verdict"], "fail");
+    assert!(first["verify"].is_null());
+    assert_eq!(first["plan_mode_after"], "executing");
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    let reopen = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(reopen["verify"].is_null());
+
+    let second = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(second["code_review"].is_null());
+    assert_eq!(second["verify"]["verdict"], "pass");
+    assert_eq!(second["plan_mode_after"], "completed");
+    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    let events = captured.lock();
+    let warning = events
+        .iter()
+        .find(|v| v["event"] == "plan.code_review.warning")
+        .expect("缺少 plan.code_review.warning");
+    assert_eq!(warning["reason"], "rounds_exhausted");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn code_review_transcript_matches_tool_result_after_normalization() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+        ReviewSummary {
+            kind: crate::api::chat::plan_runtime::review::ReviewKind::Code,
+            aborted: false,
+            verdict: None,
+            summary: "review finished without verdict".into(),
+            changes_summary: "none".into(),
+            applied_changes: false,
+            ..Default::default()
+        },
+    ])));
+    rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
+        ok_verify_pass(),
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["code_review"]["kind"], "code");
+    assert_eq!(out["code_review"]["verdict"], "partial");
+    let events = captured.lock();
+    let code_review_event = events
+        .iter()
+        .find(|v| v["event"] == "plan.code_review")
+        .expect("缺少 plan.code_review");
+    assert_eq!(code_review_event["verdict"], out["code_review"]["verdict"]);
+    assert_eq!(code_review_event["summary"], out["code_review"]["summary"]);
     cleanup_home(&home);
 }
 
@@ -1376,6 +1643,7 @@ async fn update_plan_tool_result_has_verify_field() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    rt.set_max_code_review_rounds(0);
     rt.attach_verifier(std::sync::Arc::new(MockVerifierDispatcher::new(vec![
         ok_verify_pass(),
     ])));
@@ -1960,6 +2228,7 @@ async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_pat
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    rt.set_max_code_review_rounds(0);
     let external_dir = home.join("external-plans");
     std::fs::create_dir_all(&external_dir).unwrap();
     let external_path = external_dir.join("external.plan.md");
@@ -2010,6 +2279,7 @@ fn plan_build_swaps_session_reminder_prefix_meta_catalog() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("new-session-key");
+    rt.set_max_code_review_rounds(0);
     write_disk_plan("five_things", PlanFileMode::Planning);
     let outcome = rt
         .build_plan("five_things", Some("new-session-uuid".into()))

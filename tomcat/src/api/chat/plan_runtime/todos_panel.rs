@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::api::chat::plan_runtime::file_store::TodoItem;
+use crate::api::chat::plan_runtime::file_store::{TodoItem, TodoStatus};
 
 /// 一次 todos / update_plan mutation 完成后推给 panel 的 snapshot。
 #[derive(Debug, Clone)]
@@ -45,6 +45,32 @@ impl TodosPanelSnapshot {
             warnings: Vec::new(),
         }
     }
+
+    /// 当前已完成条数（仅 `Completed` 计入）。
+    pub fn completed_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|t| matches!(t.status, TodoStatus::Completed))
+            .count()
+    }
+
+    /// 当前总条数（包含 `Cancelled`，与列表长度保持一致）。
+    pub fn total_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// 供 panel 头部展示的进度汇总，例如 `3 of 5 Done`。
+    pub fn progress_summary(&self) -> String {
+        format!("{} of {} Done", self.completed_count(), self.total_count())
+    }
+
+    fn active_in_progress_id(&self) -> &str {
+        self.items
+            .iter()
+            .find(|t| matches!(t.status, TodoStatus::InProgress))
+            .map(|t| t.id.as_str())
+            .unwrap_or("-")
+    }
 }
 
 /// 单调递增的 panel_snapshot_id；与 `update_plan` 返回值同源。
@@ -75,28 +101,25 @@ impl TodosPanel for NoopTodosPanel {
 ///
 /// 行格式：
 /// ```text
-/// [panel#<id>] <scope> items=<n> in_progress=<id|->
+/// [panel#<id>] <scope> <done> of <total> Done in_progress=<id|->
 ///   [~] t1 ▸ step a
 ///   [ ] t2 ▸ step b
 /// ```
 pub struct CliTodosPanel;
 
+fn render_cli_panel_header(snapshot: &TodosPanelSnapshot) -> String {
+    format!(
+        "[panel#{}] {} {} in_progress={}",
+        snapshot.panel_snapshot_id,
+        snapshot.scope,
+        snapshot.progress_summary(),
+        snapshot.active_in_progress_id()
+    )
+}
+
 impl TodosPanel for CliTodosPanel {
     fn refresh(&self, s: &TodosPanelSnapshot) {
-        use crate::api::chat::plan_runtime::file_store::TodoStatus;
-        let in_progress = s
-            .items
-            .iter()
-            .find(|t| matches!(t.status, TodoStatus::InProgress))
-            .map(|t| t.id.as_str())
-            .unwrap_or("-");
-        eprintln!(
-            "[panel#{}] {} items={} in_progress={}",
-            s.panel_snapshot_id,
-            s.scope,
-            s.items.len(),
-            in_progress
-        );
+        eprintln!("{}", render_cli_panel_header(s));
         for t in &s.items {
             let mark = match t.status {
                 TodoStatus::Completed => "x",
@@ -187,6 +210,97 @@ mod tests {
         n.notify(&snap);
         assert_eq!(p1.log.lock().len(), 1);
         assert_eq!(p2.log.lock().len(), 1);
+    }
+
+    #[test]
+    fn progress_summary_counts_completed_only() {
+        let snap = TodosPanelSnapshot {
+            panel_snapshot_id: 42,
+            scope: "session".into(),
+            items: vec![
+                TodoItem {
+                    id: "t1".into(),
+                    content: "done".into(),
+                    status: TodoStatus::Completed,
+                },
+                TodoItem {
+                    id: "t2".into(),
+                    content: "doing".into(),
+                    status: TodoStatus::InProgress,
+                },
+                TodoItem {
+                    id: "t3".into(),
+                    content: "todo".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        assert_eq!(snap.completed_count(), 1);
+        assert_eq!(snap.total_count(), 3);
+        assert_eq!(snap.progress_summary(), "1 of 3 Done");
+    }
+
+    #[test]
+    fn progress_summary_counts_cancelled_in_total_only() {
+        let snap = TodosPanelSnapshot {
+            panel_snapshot_id: 43,
+            scope: "session".into(),
+            items: vec![
+                TodoItem {
+                    id: "t1".into(),
+                    content: "done".into(),
+                    status: TodoStatus::Completed,
+                },
+                TodoItem {
+                    id: "t2".into(),
+                    content: "skip".into(),
+                    status: TodoStatus::Cancelled,
+                },
+                TodoItem {
+                    id: "t3".into(),
+                    content: "todo".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        assert_eq!(snap.completed_count(), 1);
+        assert_eq!(snap.total_count(), 3);
+        assert_eq!(snap.progress_summary(), "1 of 3 Done");
+    }
+
+    #[test]
+    fn progress_summary_handles_empty_list() {
+        let snap = TodosPanelSnapshot::new_session(vec![]);
+        assert_eq!(snap.completed_count(), 0);
+        assert_eq!(snap.total_count(), 0);
+        assert_eq!(snap.progress_summary(), "0 of 0 Done");
+    }
+
+    #[test]
+    fn cli_panel_header_includes_progress_summary() {
+        let snap = TodosPanelSnapshot {
+            panel_snapshot_id: 44,
+            scope: "plan:demo".into(),
+            items: vec![
+                TodoItem {
+                    id: "t1".into(),
+                    content: "done".into(),
+                    status: TodoStatus::Completed,
+                },
+                TodoItem {
+                    id: "t2".into(),
+                    content: "doing".into(),
+                    status: TodoStatus::InProgress,
+                },
+            ],
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            render_cli_panel_header(&snap),
+            "[panel#44] plan:demo 1 of 2 Done in_progress=t2"
+        );
     }
 
     #[test]

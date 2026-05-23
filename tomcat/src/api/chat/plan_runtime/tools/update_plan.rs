@@ -9,11 +9,12 @@
 //! - 跨 session 编辑规则：
 //!   - 目标 plan `mode ∈ {planning, pending}`：允许（协作改稿）
 //!   - 目标 plan `mode == executing` 且 `session_key != current_session_key`：拒
-//! - 写盘后 EXEC 自动派生：所有 todos completed → 先写 `Executing`，再派发 verifier，
-//!   最后按 `verify_gate` 决定是否第二次写 `Completed`。
+//! - 写盘后 EXEC 自动派生：所有 todos completed → 先写 `Executing`，若 code review
+//!   轮次未耗尽则先派发 code reviewer；`verdict=pass` 时同回合 verifier，否则把
+//!   `code_review` 返回给主 Agent。code review 轮次耗尽后直接走 verifier。
 //! - 返回 JSON（G1）：`plan_id` / `path` / `applied` / `items[]` /
 //!   `active_in_progress` / `plan_mode_before` / `plan_mode_after` / `warnings[]` /
-//!   `panel_snapshot_id` / `verify`（节流后 panel 刷新版本；目前与 timestamp 等价）。
+//!   `panel_snapshot_id` / `code_review` / `verify`（节流后 panel 刷新版本；目前与 timestamp 等价）。
 
 use std::path::PathBuf;
 
@@ -22,7 +23,7 @@ use serde::Deserialize;
 use crate::api::chat::plan_runtime::{
     file_store::{plan_path_for_id, read_plan, write_plan, PlanFileMode, TodoStatus},
     mode::PlanMode,
-    ops, verify, PlanRuntime,
+    ops, review, verify, PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
@@ -105,28 +106,53 @@ pub async fn execute(
     // E2：在 body 的 `## Todos Board` 标记区间内自动重写当前 todos 状态视图。
     rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
 
+    let mut code_review_json = serde_json::Value::Null;
     let mut verify_json = serde_json::Value::Null;
     let plan_mode_after = if derived_completed {
         // 第一写：todos 完成，但 mode 保持 Executing，确保 verifier 看到的磁盘态是已完成未收工。
         plan.frontmatter.mode = PlanFileMode::Executing;
         write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
-        let mut verify_summary = runtime.dispatch_verifier(&target_plan_id).await;
-        warnings.extend(verify::normalize_for_gate(&mut verify_summary));
-        runtime.write_verify_transcript(&target_plan_id, &verify_summary);
-        verify_json = verify_summary.to_json();
+        if let Some(round) = runtime.try_begin_code_review_round(&target_plan_id) {
+            let mut code_review_summary = runtime.dispatch_code_reviewer(&target_plan_id).await;
+            warnings.extend(review::normalize_for_code_review_result(
+                &mut code_review_summary,
+            ));
+            runtime.write_code_review_transcript(&target_plan_id, &code_review_summary, round);
+            code_review_json = code_review_summary.to_json();
 
-        let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");
-        if allow_complete {
-            plan.frontmatter.mode = PlanFileMode::Completed;
-            write_plan(&path, &plan, runtime.lock_timeout_ms())?;
-            runtime.set_mode_completed(target_plan_id.clone());
-            PlanFileMode::Completed
+            if code_review_summary.verdict.as_deref() == Some("pass") {
+                let (mode_after, verify_payload) =
+                    run_verifier_after_code_review(runtime, &target_plan_id, &path, &mut plan, &mut warnings)
+                        .await?;
+                verify_json = verify_payload;
+                mode_after
+            } else {
+                warnings.push(format!(
+                    "code review verdict={}，plan 保持 executing，等待主 Agent 修复或重新 complete",
+                    code_review_summary
+                        .verdict
+                        .as_deref()
+                        .unwrap_or("partial")
+                ));
+                PlanFileMode::Executing
+            }
         } else {
-            warnings.push(
-                "verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into(),
+            warnings.push(format!(
+                "code review rounds 已用尽（{}/{}），跳过 code review 直接 verifier",
+                runtime.code_review_rounds(&target_plan_id),
+                runtime.max_code_review_rounds()
+            ));
+            runtime.write_code_review_warning_transcript(
+                &target_plan_id,
+                "rounds_exhausted",
+                runtime.code_review_rounds(&target_plan_id),
             );
-            PlanFileMode::Executing
+            let (mode_after, verify_payload) =
+                run_verifier_after_code_review(runtime, &target_plan_id, &path, &mut plan, &mut warnings)
+                    .await?;
+            verify_json = verify_payload;
+            mode_after
         }
     } else {
         write_plan(&path, &plan, runtime.lock_timeout_ms())?;
@@ -163,8 +189,33 @@ pub async fn execute(
         "warnings": warnings,
         "active_in_progress": active_in_progress,
         "items": items_json(&plan.frontmatter.todos),
+        "code_review": code_review_json,
         "verify": verify_json,
     }))
+}
+
+async fn run_verifier_after_code_review(
+    runtime: &PlanRuntime,
+    target_plan_id: &str,
+    path: &PathBuf,
+    plan: &mut crate::api::chat::plan_runtime::file_store::PlanFile,
+    warnings: &mut Vec<String>,
+) -> Result<(PlanFileMode, serde_json::Value), ToolError> {
+    let mut verify_summary = runtime.dispatch_verifier(target_plan_id).await;
+    warnings.extend(verify::normalize_for_gate(&mut verify_summary));
+    runtime.write_verify_transcript(target_plan_id, &verify_summary);
+    let verify_json = verify_summary.to_json();
+
+    let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");
+    if allow_complete {
+        plan.frontmatter.mode = PlanFileMode::Completed;
+        write_plan(path, plan, runtime.lock_timeout_ms())?;
+        runtime.set_mode_completed(target_plan_id.to_string());
+        Ok((PlanFileMode::Completed, verify_json))
+    } else {
+        warnings.push("verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into());
+        Ok((PlanFileMode::Executing, verify_json))
+    }
 }
 
 fn resolve_target_plan_path(

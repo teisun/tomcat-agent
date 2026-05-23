@@ -20,13 +20,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use tomcat::api::chat::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFileMode, TodoStatus,
 };
 use tomcat::api::chat::plan_runtime::tools::{create_plan, todos, update_plan};
-use tomcat::api::chat::plan_runtime::{PlanMode, PlanRuntime, TodosPanel, TodosPanelSnapshot};
+use tomcat::api::chat::plan_runtime::review::{ReviewKind, ReviewSummary};
+use tomcat::api::chat::plan_runtime::verify::{VerifyCheck, VerifySummary};
+use tomcat::api::chat::plan_runtime::{
+    PlanMode, PlanRuntime, ReviewerDispatcher, TodosPanel, TodosPanelSnapshot, VerifierDispatcher,
+};
 use tomcat::core::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
     CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,
@@ -82,6 +87,114 @@ impl CheckpointStore for CheckpointSpy {
     }
 }
 
+struct QueueReviewer {
+    summaries: Mutex<Vec<ReviewSummary>>,
+    call_count: std::sync::atomic::AtomicUsize,
+}
+
+impl QueueReviewer {
+    fn new(summaries: Vec<ReviewSummary>) -> Self {
+        Self {
+            summaries: Mutex::new(summaries),
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ReviewerDispatcher for QueueReviewer {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        kind: ReviewKind,
+        _allow_review_edit: bool,
+        _abort_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> ReviewSummary {
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut summaries = self.summaries.lock();
+        let mut summary = if summaries.is_empty() {
+            ReviewSummary::aborted_with_kind(kind, "mock reviewer queue exhausted")
+        } else {
+            summaries.remove(0)
+        };
+        summary.kind = kind;
+        summary
+    }
+}
+
+struct QueueVerifier {
+    summaries: Mutex<Vec<VerifySummary>>,
+    call_count: std::sync::atomic::AtomicUsize,
+}
+
+impl QueueVerifier {
+    fn new(summaries: Vec<VerifySummary>) -> Self {
+        Self {
+            summaries: Mutex::new(summaries),
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl VerifierDispatcher for QueueVerifier {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _abort_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> VerifySummary {
+        self.call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut summaries = self.summaries.lock();
+        if summaries.is_empty() {
+            VerifySummary::aborted_with("mock verifier queue exhausted")
+        } else {
+            summaries.remove(0)
+        }
+    }
+}
+
+fn pass_code_review() -> ReviewSummary {
+    ReviewSummary {
+        kind: ReviewKind::Code,
+        aborted: false,
+        verdict: Some("pass".into()),
+        summary: "implementation looks good".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+        ..Default::default()
+    }
+}
+
+fn fail_code_review() -> ReviewSummary {
+    ReviewSummary {
+        kind: ReviewKind::Code,
+        aborted: false,
+        verdict: Some("fail".into()),
+        summary: "missed a concrete fix".into(),
+        changes_summary: "none".into(),
+        applied_changes: false,
+        ..Default::default()
+    }
+}
+
+fn pass_verify() -> VerifySummary {
+    VerifySummary {
+        checks: vec![VerifyCheck {
+            name: "unit".into(),
+            command: "cargo test -p tomcat smoke".into(),
+            result: "pass".into(),
+            output_excerpt: "ok".into(),
+        }],
+        verdict: "pass".into(),
+        summary: "verification passed".into(),
+        ..Default::default()
+    }
+}
+
 /// HOME 隔离锁——本文件多个测试串行（默认 cargo test 多线程会污染 plan_path_for_id）。
 fn home_lock() -> &'static std::sync::Mutex<()> {
     static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -113,6 +226,7 @@ fn build_runtime_with_spies() -> (
     Arc<CheckpointSpy>,
 ) {
     let rt = PlanRuntime::new("session-a");
+    rt.set_max_code_review_rounds(0);
     let panel = Arc::new(CapturePanel::default());
     let ckpt = Arc::new(CheckpointSpy::default());
     rt.register_todos_panel(panel.clone());
@@ -129,6 +243,31 @@ fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
     rt.set_executing_for_test(plan_id.to_string());
+}
+
+async fn complete_all_plan_todos(rt: &PlanRuntime, plan_id: &str) -> serde_json::Value {
+    update_plan::execute(
+        rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.to_string()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap()
 }
 
 // ─── H1：full lifecycle, 多次 update_plan → plan.complete ──────────────────
@@ -209,6 +348,7 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
     let last = snaps.last().unwrap();
     assert_eq!(last.items.last().unwrap().id, "t3");
     assert_eq!(last.items.last().unwrap().status, TodoStatus::Completed);
+    assert_eq!(last.progress_summary(), "3 of 3 Done");
     cleanup_home(&home);
 }
 
@@ -385,6 +525,7 @@ fn h2_chat_mode_todos_tool_persists_and_emits_session_panel() {
     assert_eq!(snaps.len(), 1, "CHAT todos 应触发一次 panel snapshot");
     assert_eq!(snaps[0].scope, "session", "CHAT 应是 session scope");
     assert_eq!(snaps[0].items.len(), 1);
+    assert_eq!(snaps[0].progress_summary(), "0 of 1 Done");
     cleanup_home(&home);
 }
 
@@ -415,5 +556,162 @@ async fn h5_reviewer_aborted_summary_used_when_dispatcher_returns_aborted() {
     let summary = rt.dispatch_reviewer(&plan_id, false).await;
     // 未挂 dispatcher → placeholder_pending（aborted = true 或 summary 含 placeholder）
     assert!(summary.aborted || summary.summary.contains("placeholder"));
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn h8_code_review_pass_runs_verifier_in_same_update_plan_turn() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    rt.set_max_code_review_rounds(1);
+    let reviewer = Arc::new(QueueReviewer::new(vec![pass_code_review()]));
+    let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
+    rt.attach_reviewer(reviewer.clone());
+    rt.attach_verifier(verifier.clone());
+
+    rt.enter_planning().unwrap();
+    let out = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "g".into(),
+            draft: "ok".into(),
+            todos: vec![
+                create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "a".into(),
+                    status: TodoStatus::Pending,
+                },
+                create_plan::TodoArg {
+                    id: "t2".into(),
+                    content: "b".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+    promote_to_exec(&rt, &plan_id);
+
+    let out = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(out["code_review"]["verdict"], "pass");
+    assert_eq!(out["verify"]["verdict"], "pass");
+    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_review() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    rt.set_max_code_review_rounds(1);
+    let reviewer = Arc::new(QueueReviewer::new(vec![fail_code_review()]));
+    let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
+    rt.attach_reviewer(reviewer.clone());
+    rt.attach_verifier(verifier.clone());
+
+    rt.enter_planning().unwrap();
+    let out = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "g".into(),
+            draft: "ok".into(),
+            todos: vec![
+                create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "a".into(),
+                    status: TodoStatus::Pending,
+                },
+                create_plan::TodoArg {
+                    id: "t2".into(),
+                    content: "b".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+    promote_to_exec(&rt, &plan_id);
+
+    let first = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(first["code_review"]["verdict"], "fail");
+    assert_eq!(first["verify"], serde_json::Value::Null);
+    assert_eq!(first["plan_mode_after"], "executing");
+    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    let second = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(second["code_review"], serde_json::Value::Null);
+    assert_eq!(second["verify"]["verdict"], "pass");
+    assert_eq!(second["plan_mode_after"], "completed");
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
     cleanup_home(&home);
 }

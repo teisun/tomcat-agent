@@ -168,6 +168,9 @@ fn build_default_exec_prompt(goal: &str, todo_ids: &[String], workdir: &Path) ->
         "- You may use list_dir, read, search_files, write, edit, bash, and update_plan.".to_string(),
         "- Do NOT call ask_question. Do NOT edit the plan file directly.".to_string(),
         "- Do NOT write outside the current working directory.".to_string(),
+        "- When the last todo becomes completed, inspect the `update_plan` tool result.".to_string(),
+        "- If `code_review.verdict != pass` or `plan_mode_after` stays `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo with `update_plan`, fix the work, and complete the plan again.".to_string(),
+        "- Only stop once the tool result includes verifier output or the plan reaches `completed`.".to_string(),
         "Todo ids to finish:".to_string(),
     ];
     for id in todo_ids {
@@ -196,6 +199,9 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
         "- You may use `list_dir`, `read`, `search_files`, `write`, `edit`, `bash`, and `update_plan`.".to_string(),
         "- Do NOT call ask_question. Do NOT edit the plan file directly.".to_string(),
         "- Do NOT write outside the current working directory.".to_string(),
+        "- When the final `update_plan` returns, inspect `code_review` / `verify` in the tool result.".to_string(),
+        "- If `code_review.verdict != pass` or `plan_mode_after` stays `executing`, do NOT stop: reopen or add a fix todo with `update_plan`, repair the file, and drive the plan to completion again.".to_string(),
+        "- Only stop once the tool result includes verifier output or the plan reaches `completed`.".to_string(),
         "Todo ids to finish:".to_string(),
     ];
     for id in todo_ids {
@@ -281,7 +287,7 @@ fn setup_fixture(log_slug: &str, workdir_override: Option<&Path>) -> CliFixture 
     let model = default_model();
     let home = dirs::home_dir().expect("无法定位 HOME 目录");
     std::fs::create_dir_all(home.join(".tomcat").join("plans")).unwrap();
-    let config_path = {
+    let user_config_path = {
         let p = home.join(".tomcat").join("tomcat.config.toml");
         if p.exists() {
             Some(p)
@@ -289,7 +295,19 @@ fn setup_fixture(log_slug: &str, workdir_override: Option<&Path>) -> CliFixture 
             None
         }
     };
-    let cfg = load_user_config(config_path.as_deref());
+    let mut cfg = load_user_config(user_config_path.as_deref());
+    cfg.plan.max_code_review_rounds = 1;
+    let generated_config_dir = common::repo_workspace_temp_dir().join("generated-configs");
+    std::fs::create_dir_all(&generated_config_dir).expect("create generated-configs for cli e2e");
+    let effective_config_path = generated_config_dir.join(format!(
+        "plan_real_llm_cli_e2e_{}_{}.toml",
+        common::filename_timestamp(),
+        common::slugify_filename(log_slug, "run", 48)
+    ));
+    let effective_toml =
+        toml::to_string_pretty(&cfg).expect("serialize cli real llm effective config");
+    std::fs::write(&effective_config_path, effective_toml)
+        .expect("write cli real llm effective config");
     let workdir = resolve_case_workdir(&cfg, workdir_override, log_slug);
     let sessions_dir = resolve_sessions_dir(&cfg).expect("resolve sessions dir");
     let session = common::begin_fresh_default_session(&sessions_dir, Some(&workdir));
@@ -301,7 +319,7 @@ fn setup_fixture(log_slug: &str, workdir_override: Option<&Path>) -> CliFixture 
         workdir,
         run_session_id: session.session_id,
         transcript_path,
-        config_path,
+        config_path: Some(effective_config_path),
         api_key,
         model,
         current_plan_path: Arc::new(Mutex::new(None)),
@@ -1020,6 +1038,34 @@ fn run_cli_real_llm_case(
         !out_b.stdout.is_empty(),
         "进程 B 应有用户可见 stdout 输出；日志文件：{}",
         fx.diag_log.path.display()
+    );
+
+    let transcript =
+        std::fs::read_to_string(&fx.transcript_path).expect("read cli real llm transcript");
+    let lines: Vec<&str> = transcript.lines().collect();
+    let plan_review_idx = lines.iter().position(|l| l.contains("\"plan.review\""));
+    let plan_code_review_idx = lines
+        .iter()
+        .position(|l| l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\""));
+    let plan_verify_idx = lines.iter().position(|l| l.contains("\"plan.verify\""));
+    if plan_review_idx.is_none() || plan_code_review_idx.is_none() || plan_verify_idx.is_none() {
+        dump_diag("transcript_missing_review_events", &fx, &out_a, Some(&out_b));
+    }
+    assert!(
+        plan_review_idx.is_some(),
+        "CLI 真 LLM transcript 应含至少一条 plan.review 自定义事件"
+    );
+    assert!(
+        plan_code_review_idx.is_some(),
+        "CLI 真 LLM transcript 应含至少一条 plan.code_review 自定义事件"
+    );
+    assert!(
+        plan_verify_idx.is_some(),
+        "CLI 真 LLM transcript 应含至少一条 plan.verify 自定义事件"
+    );
+    assert!(
+        plan_code_review_idx.unwrap() < plan_verify_idx.unwrap(),
+        "CLI 真 LLM transcript 中 plan.code_review 应早于 plan.verify"
     );
 }
 

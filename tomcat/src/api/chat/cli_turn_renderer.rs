@@ -535,12 +535,12 @@ pub fn result_summary_for_tool(
     if let Some(display) = display {
         let summary = display_summary(display);
         if !summary.is_empty() {
-            let max_chars = if matches!(display, ToolDisplay::File { .. } | ToolDisplay::Plan { .. })
-            {
-                PATH_MAX_CHARS
-            } else {
-                DEFAULT_MAX_CHARS
-            };
+            let max_chars =
+                if matches!(display, ToolDisplay::File { .. } | ToolDisplay::Plan { .. }) {
+                    PATH_MAX_CHARS
+                } else {
+                    DEFAULT_MAX_CHARS
+                };
             return truncate_chars(&summary, max_chars);
         }
     }

@@ -192,12 +192,7 @@ pub fn execute(
         "plan_id": plan_id,
         "path": crate::infra::platform::format_home_path(&path),
         "mode": "planning",
-        "review": {
-            "aborted": true,
-            "summary": "reviewer 子 Agent 将在 P4 接入；当前阶段返回 aborted 占位",
-            "changes_summary": "none",
-            "applied_changes": false,
-        }
+        "review": crate::api::chat::plan_runtime::review::ReviewSummary::placeholder_pending().to_json(),
     }))
 }
 

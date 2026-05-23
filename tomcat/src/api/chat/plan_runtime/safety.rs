@@ -70,6 +70,8 @@ pub enum WritePathDenied {
     ExecModePlanFilesReadOnly { target: PathBuf },
     #[error("reviewer 子 Agent 只能写 ~/.tomcat/plans/*.plan.md（frontmatter raw edit 仍由 edit 守卫具体检查）")]
     ReviewerOnlyPlanFiles,
+    #[error("code reviewer 是严格只读子 Agent；禁止调用任何 write/edit/delete 类工具")]
+    CodeReviewerReadOnly,
     #[error("无法解析 ~/.tomcat/plans/ 目录：{0}")]
     PlansDirUnavailable(String),
 }
@@ -81,6 +83,8 @@ pub enum SubagentKind {
     Other,
     /// reviewer subagent（`SubagentType::Reviewer`）
     Reviewer,
+    /// code reviewer subagent（`ReviewKind::Code`）
+    CodeReviewer,
 }
 
 /// 在 `tool_exec` 的 `write` / `edit` / `hashline_edit` / `delete` 分支首行调用。
@@ -120,6 +124,10 @@ pub fn enforce_write_path_policy(
 
     let in_plans_dir = canon_target.starts_with(&canon_plans);
     let is_plan_file = in_plans_dir && canon_target.extension() == Some(OsStr::new("md"));
+
+    if subagent == SubagentKind::CodeReviewer {
+        return Err(WritePathDenied::CodeReviewerReadOnly);
+    }
 
     // Reviewer：只能写 plan 文件（且段位再由 edit guard 检查）。
     if subagent == SubagentKind::Reviewer && !is_plan_file {
@@ -286,6 +294,16 @@ mod tests {
         let target = std::path::PathBuf::from("~/.tomcat/plans/foo.plan.md");
         enforce_write_path_policy(&PlanMode::Chat, SubagentKind::Reviewer, &target)
             .expect("reviewer 应接受 ~ 展开的 plans 路径");
+    }
+
+    #[test]
+    fn code_reviewer_is_always_read_only() {
+        let _g = home_lock().lock().unwrap();
+        let _home = setup_home();
+        let target = std::path::PathBuf::from("/tmp/foo.txt");
+        let err = enforce_write_path_policy(&PlanMode::Chat, SubagentKind::CodeReviewer, &target)
+            .expect_err("code reviewer 任意写路径都应拒绝");
+        matches!(err, WritePathDenied::CodeReviewerReadOnly);
     }
 
     // ─── reviewer_body_diff_guard ───────────────────────────────────────

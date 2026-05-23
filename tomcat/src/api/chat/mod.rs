@@ -331,6 +331,7 @@ impl ChatContext {
         // build checkpoint 自动化。
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
+        plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         // E：CLI 默认 panel——把 todos / update_plan 后的 snapshot 渲染到 stderr，
         // 让用户在 CLI 下也能感知 in_progress 切换；IDE 适配后可替换为 IpcTodosPanel。
@@ -976,6 +977,7 @@ pub async fn run_chat_turn(
         parent_session_id: None,
         spawn_depth: 0,
         subagent_type: crate::core::agent_loop::SubagentType::User,
+        review_kind: None,
         plan_runtime: Some(ctx.plan_runtime.clone()),
     };
     let mut agent_loop = AgentLoop::new(

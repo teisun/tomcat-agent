@@ -113,6 +113,9 @@ pub struct AgentLoopConfig {
     /// 子 Agent 类型。顶层永远为 `User`；reviewer / verifier 子 Agent 分别为
     /// `Reviewer` / `Verifier`。既参与 catalog 过滤，也参与 plan-only 工具防套娃。
     pub subagent_type: SubagentType,
+    /// reviewer 的更细分运行形态：`Plan`（create_plan 后计划审稿）或 `Code`
+    ///（verifier 前代码审查）。仅 reviewer 子 Agent 需要；其它 Agent 为 `None`。
+    pub review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
     /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
     /// - 读取当前 `PlanMode` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
@@ -139,6 +142,7 @@ impl Default for AgentLoopConfig {
             parent_session_id: None,
             spawn_depth: 0,
             subagent_type: SubagentType::User,
+            review_kind: None,
             plan_runtime: None,
         }
     }

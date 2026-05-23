@@ -97,6 +97,7 @@ impl ReviewerDispatcher for AcceptReviewer {
         &self,
         _plan_id: &str,
         _plan_text: &str,
+        _kind: tomcat::api::chat::plan_runtime::review::ReviewKind,
         _allow_review_edit: bool,
         _abort: Arc<AtomicBool>,
     ) -> ReviewSummary {

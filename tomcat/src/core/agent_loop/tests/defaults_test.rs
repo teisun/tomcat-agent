@@ -21,6 +21,10 @@ fn agent_loop_config_default_includes_subagent_fields() {
         SubagentType::User,
         "default subagent_type should be User (chat_loop), not Reviewer"
     );
+    assert!(
+        cfg.review_kind.is_none(),
+        "default review_kind should be None for non-reviewer loops"
+    );
 }
 
 #[test]

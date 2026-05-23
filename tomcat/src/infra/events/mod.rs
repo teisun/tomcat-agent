@@ -128,10 +128,14 @@ pub mod wire {
     pub const WIRE_PLAN_CREATE: &str = "plan.create";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
+    /// verifier 前 code reviewer 子 Agent 返回。
+    pub const WIRE_PLAN_CODE_REVIEW: &str = "plan.code_review";
     /// verifier 子 Agent 返回（含 `verdict=aborted` / `partial` / `fail` 分支）。
     pub const WIRE_PLAN_VERIFY: &str = "plan.verify";
     /// reviewer parse 失败 / 超 `max_review_rounds` 软上限时的告警。
     pub const WIRE_PLAN_REVIEW_WARNING: &str = "plan.review.warning";
+    /// code reviewer 跳过 / rounds 用尽等告警。
+    pub const WIRE_PLAN_CODE_REVIEW_WARNING: &str = "plan.code_review.warning";
     /// `ask_question` 工具完成（含 cancelled）。
     pub const WIRE_PLAN_ASK_QUESTION: &str = "plan.ask_question";
     /// `todos` / `update_plan` 写入完成。

@@ -275,7 +275,7 @@ TodosPanelSnapshot::new_session(items)
 CLI 默认渲染形态：
 
 ```text
-[panel#1747656000000000] session items=2 in_progress=t2
+[panel#1747656000000000] session 1 of 2 Done in_progress=t2
   [x] t1 ▸ inspect API surface
   [~] t2 ▸ run focused regression
 ```

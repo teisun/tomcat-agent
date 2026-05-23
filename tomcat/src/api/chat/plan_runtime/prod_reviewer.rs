@@ -22,7 +22,8 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::chat::plan_runtime::review::{
-    build_review_prompt, parse_review_block, resolve_internal_tools, ReviewSummary,
+    build_code_review_prompt, build_review_prompt, parse_review_block, resolve_internal_tools,
+    reviewer_allowed_tools_for, ReviewKind, ReviewSummary, CODE_REVIEW_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
 };
 use crate::api::chat::plan_runtime::{PlanRuntime, ReviewerDispatcher};
@@ -37,20 +38,6 @@ use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::CheckpointStore;
 use crate::infra::config::ContextConfig;
 use crate::infra::event_bus::EventBus;
-
-/// reviewer 子 Agent allowed_tools 硬白名单（reviewer.md §5.2）。
-/// 任何模式下都不含 `create_plan` / `bash` / `write` / `dispatch_agent` / `checkpoint`。
-///
-/// 注：本仓库的 catalog 把 grep/find 合并为 `search_files`（按 mode/glob/regex 分发），
-/// 这里以 catalog 的实际工具名为准。
-pub(crate) const REVIEWER_ALLOWED_TOOLS: &[&str] = &[
-    "read",
-    "search_files",
-    "list_dir",
-    "todos",
-    "update_plan",
-    "edit",
-];
 
 /// 生产 reviewer dispatcher。装配点：[`crate::api::chat::ChatContext::from_config`]。
 pub struct ProdReviewerDispatcher {
@@ -99,25 +86,27 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
         &self,
         plan_id: &str,
         plan_text: &str,
-        allow_review_edit: bool,
+        kind: ReviewKind,
+        _allow_review_edit: bool,
         _abort_signal: Arc<AtomicBool>,
     ) -> ReviewSummary {
-        debug_assert!(
-            allow_review_edit,
-            "生产路径恒为 true；false 仅 Mock 单测注入"
-        );
-
         let Some(deps) = self.deps.as_ref() else {
-            return ReviewSummary::aborted_with(format!(
+            return ReviewSummary::aborted_with_kind(
+                kind,
+                format!(
                 "[{}] 生产 reviewer 子 Agent 未注入依赖（stub 模式）",
                 self.origin
-            ));
+                ),
+            );
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
-            return ReviewSummary::aborted_with(format!(
+            return ReviewSummary::aborted_with_kind(
+                kind,
+                format!(
                 "[{}] PlanRuntime 已被 drop，reviewer 取消派发",
                 self.origin
-            ));
+                ),
+            );
         };
 
         let plan_path = crate::api::chat::plan_runtime::file_store::plan_path_for_id(plan_id)
@@ -125,9 +114,24 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                 std::path::PathBuf::from(format!("~/.tomcat/plans/{plan_id}.plan.md"))
             });
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
-        let initial_user_message =
-            build_review_prompt(plan_id, plan_text, &plan_path, workspace_root);
-        let tool_defs = resolve_internal_tools(REVIEWER_ALLOWED_TOOLS);
+        let initial_user_message = match kind {
+            ReviewKind::Plan => {
+                build_review_prompt(plan_id, plan_text, &plan_path, workspace_root)
+            }
+            ReviewKind::Code => {
+                let (diff_stat, changed_files) =
+                    collect_git_diff_context(deps.agent_workspace_dir.as_path());
+                build_code_review_prompt(
+                    plan_id,
+                    plan_text,
+                    &plan_path,
+                    workspace_root,
+                    &diff_stat,
+                    &changed_files,
+                )
+            }
+        };
+        let tool_defs = resolve_internal_tools(reviewer_allowed_tools_for(kind));
         let turns_limit = deps.max_turns.max(1);
 
         // spawn 闭包需要 'static + Send，所有依赖一次性 clone。
@@ -174,7 +178,8 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
 
                     let system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
-                        REVIEWER_SYSTEM_PROMPT, turns_limit
+                        reviewer_system_prompt(kind),
+                        turns_limit
                     );
                     let cfg = AgentLoopConfig {
                         max_attempts: 3,
@@ -191,6 +196,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Reviewer,
+                        review_kind: Some(kind),
                         plan_runtime: Some(plan_runtime_for_loop),
                     };
                     let mut agent_loop =
@@ -203,6 +209,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                     watcher.abort();
 
                     let (summary, label) = build_summary_from_outcome(
+                        kind,
                         origin,
                         &child_session_id,
                         turns_limit,
@@ -233,10 +240,8 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                 )),
             },
             Err(e) => {
-                let mut s = ReviewSummary::aborted_with(format!(
-                    "[{}] reviewer spawn 失败：{e}",
-                    self.origin
-                ));
+                let mut s =
+                    ReviewSummary::aborted_with_kind(kind, format!("[{}] reviewer spawn 失败：{e}", self.origin));
                 s.reviewer_turns_limit = turns_limit;
                 s.reviewer_stop_reason = "spawn_error".into();
                 s
@@ -246,6 +251,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
 }
 
 fn build_summary_from_outcome(
+    kind: ReviewKind,
     origin: &'static str,
     child_session_id: &str,
     turns_limit: u32,
@@ -257,6 +263,7 @@ fn build_summary_from_outcome(
             let text = extract_review_text(&result);
             match parse_review_block(&text) {
                 Some(mut s) => {
+                    s.kind = kind;
                     s.reviewer_turns_used = turns_used;
                     s.reviewer_turns_limit = turns_limit;
                     s.reviewer_stop_reason = if turns_used >= turns_limit {
@@ -268,9 +275,12 @@ fn build_summary_from_outcome(
                     (s, SubagentOutcomeLabel::Completed)
                 }
                 None => {
-                    let mut s = ReviewSummary::aborted_with(format!(
-                        "[{origin}] reviewer 输出不符合 <review> 契约（child={child_session_id}）"
-                    ));
+                    let mut s = ReviewSummary::aborted_with_kind(
+                        kind,
+                        format!(
+                            "[{origin}] reviewer 输出不符合 <review> 契约（child={child_session_id}）"
+                        ),
+                    );
                     s.reviewer_turns_used = turns_used;
                     s.reviewer_turns_limit = turns_limit;
                     s.reviewer_stop_reason = "parse_error".into();
@@ -281,9 +291,10 @@ fn build_summary_from_outcome(
         }
         AgentRunOutcome::Interrupted(result) => {
             let turns_used = count_assistant_turns(&result.new_messages);
-            let mut s = ReviewSummary::aborted_with(format!(
-                "[{origin}] reviewer 被父 abort / cancel（child={child_session_id}）"
-            ));
+            let mut s = ReviewSummary::aborted_with_kind(
+                kind,
+                format!("[{origin}] reviewer 被父 abort / cancel（child={child_session_id}）"),
+            );
             s.reviewer_turns_used = turns_used;
             s.reviewer_turns_limit = turns_limit;
             s.reviewer_stop_reason = "parent_abort".into();
@@ -291,8 +302,10 @@ fn build_summary_from_outcome(
             (s, SubagentOutcomeLabel::Interrupted)
         }
         AgentRunOutcome::Failed(e) => {
-            let mut s =
-                ReviewSummary::aborted_with(format!("[{origin}] reviewer 子 Agent 失败：{e}"));
+            let mut s = ReviewSummary::aborted_with_kind(
+                kind,
+                format!("[{origin}] reviewer 子 Agent 失败：{e}"),
+            );
             s.reviewer_turns_limit = turns_limit;
             s.reviewer_stop_reason = "spawn_error".into();
             s.child_session_id = child_session_id.to_string();
@@ -328,17 +341,85 @@ fn count_assistant_turns(messages: &[ChatMessage]) -> u32 {
         .count() as u32
 }
 
+fn reviewer_system_prompt(kind: ReviewKind) -> &'static str {
+    match kind {
+        ReviewKind::Plan => REVIEWER_SYSTEM_PROMPT,
+        ReviewKind::Code => CODE_REVIEW_SYSTEM_PROMPT,
+    }
+}
+
+fn collect_git_diff_context(workspace_root: &std::path::Path) -> (String, Vec<String>) {
+    use std::collections::BTreeSet;
+    let diff_stat = run_git_capture(workspace_root, &["diff", "--stat", "--no-ext-diff", "HEAD"])
+        .unwrap_or_default();
+
+    let mut changed_files = BTreeSet::new();
+    for line in run_git_lines(
+        workspace_root,
+        &["diff", "--name-only", "--no-ext-diff", "HEAD"],
+    ) {
+        if !line.is_empty() {
+            changed_files.insert(line);
+        }
+    }
+    for line in run_git_lines(
+        workspace_root,
+        &["ls-files", "--others", "--exclude-standard"],
+    ) {
+        if !line.is_empty() {
+            changed_files.insert(line);
+        }
+    }
+
+    (diff_stat, changed_files.into_iter().collect())
+}
+
+fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string(),
+    )
+}
+
+fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
+    run_git_capture(workspace_root, args)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::chat::plan_runtime::review::resolve_internal_tools;
+    use crate::api::chat::plan_runtime::review::{resolve_internal_tools, reviewer_allowed_tools_for, ReviewKind};
     use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
     #[tokio::test]
     async fn prod_reviewer_stub_returns_aborted_with_origin() {
         let d = ProdReviewerDispatcher::stub("test_origin");
         let r = d
-            .dispatch("demo", "noop", true, Arc::new(AtomicBool::new(false)))
+            .dispatch(
+                "demo",
+                "noop",
+                ReviewKind::Plan,
+                true,
+                Arc::new(AtomicBool::new(false)),
+            )
             .await;
         assert!(r.aborted);
         assert!(r.summary.contains("test_origin"));
@@ -359,7 +440,7 @@ mod tests {
     /// dispatch_agent/checkpoint，即便它们出现在 catalog 里。
     #[test]
     fn reviewer_default_allowed_tools_no_create_plan() {
-        let tools = resolve_internal_tools(REVIEWER_ALLOWED_TOOLS);
+        let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Plan));
         let names: std::collections::BTreeSet<String> = tools
             .iter()
             .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -373,6 +454,19 @@ mod tests {
         assert!(names.contains("update_plan"));
         assert!(names.contains("edit"));
         assert!(names.contains("read"));
+    }
+
+    #[test]
+    fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
+        let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Code));
+        let names: std::collections::BTreeSet<String> = tools
+            .iter()
+            .map(|v| v["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains("bash"));
+        assert!(!names.contains("todos"));
+        assert!(!names.contains("update_plan"));
+        assert!(!names.contains("edit"));
     }
 
     /// reviewer.md §9：max_turns 默认 64，落到 ReviewSummary.reviewer_turns_limit；

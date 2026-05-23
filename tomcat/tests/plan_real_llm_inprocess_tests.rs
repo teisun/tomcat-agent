@@ -17,10 +17,12 @@
 //! ## 业务断言（硬门禁）
 //! 1. `~/.tomcat/plans/<plan_id>.plan.md` 存在且 `frontmatter.mode == Completed`
 //! 2. 所有 `frontmatter.todos[].status == Completed`
-//! 3. 内存 `PlanRuntime::mode()` 与磁盘同步
-//! 4. `finalize_completed_to_chat()` 返回 `Some(plan_id)`；之后 mode = Chat
-//! 5. transcript 至少有一条 `plan.review` 自定义事件
-//! 6. transcript 至少有一条 `plan.verify` 自定义事件
+//! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
+//! 4. 内存 `PlanRuntime::mode()` 与磁盘同步
+//! 5. `finalize_completed_to_chat()` 返回 `Some(plan_id)`；之后 mode = Chat
+//! 6. transcript 至少有一条 `plan.review` 自定义事件
+//! 7. transcript 至少有一条 `plan.code_review` 自定义事件，且顺序早于 `plan.verify`
+//! 8. transcript 至少有一条 `plan.verify` 自定义事件
 //!
 //! ## 软断言（不强求）
 //! - reviewer summary aborted=false（reviewer LLM 可能格式漂移）
@@ -33,6 +35,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::Duration;
 
 use serial_test::serial;
@@ -51,23 +54,11 @@ use tomcat::{
     AgentRunOutcome, ChatContext, SessionManager,
 };
 
-const PLANNING_PROMPT: &str = r##"You are helping draft an internal plan. Use the create_plan tool to draft a minimal 2-todo plan for the active discussion goal in this PLAN session.
-Constraints:
-- todos: exactly two, ids "t1" and "t2", short content (<= 30 chars each)
-- draft: markdown content for the `## Plan` section only; do NOT include `## Goal`, `## Plan`, or `## Notes` headings yourself
-- Do NOT call ask_question. Do NOT call any other tool. After create_plan returns successfully, reply with a short acknowledgement (<= 1 line) and stop."##;
-
-const EXEC_PROMPT: &str = r##"Advance the active plan to completion using only update_plan.
-Sequence (you MUST follow exactly this order; combine into fewer calls is fine):
-1. update_plan set_status t1 in_progress
-2. update_plan set_status t1 completed
-3. update_plan set_status t2 in_progress
-4. update_plan set_status t2 completed
-Do NOT edit the plan file directly. Do NOT call ask_question. After step 4 lands successfully, reply "done" and stop."##;
+const COUNTER_PLAN_GOAL: &str = "inprocess e2e: write counter.py that prints 0";
 
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(420);
 const PLANNING_TIMEOUT: Duration = Duration::from_secs(180);
-const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(180);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 fn require_api_key() {
@@ -103,6 +94,90 @@ fn load_user_config() -> tomcat::AppConfig {
     } else {
         tomcat::load_config(None).expect("load_config 失败")
     }
+}
+
+fn counter_path(workdir: &Path) -> PathBuf {
+    workdir.join("counter.py")
+}
+
+fn build_counter_planning_prompt(goal: &str, workdir: &Path) -> String {
+    format!(
+        concat!(
+            "Use the create_plan tool to draft a minimal plan for this exact goal: \"{goal}\". ",
+            "The exact writable working directory for this run is `{workdir}`. ",
+            "If you mention or inspect a directory, use this exact absolute path and do not substitute alternate roots such as `/home/sandbox/...`. ",
+            "Constraints: the deliverable is a single file named `counter.py` in the current writable working directory; ",
+            "running `python3 counter.py` must exit 0, write exactly `0\\n` to stdout, and write nothing to stderr; ",
+            "todos must be exactly two with ids `t1` and `t2`; `t1` must cover creating `counter.py`; ",
+            "`t2` must cover running/verifying it and finishing the plan; ",
+            "prefer to call create_plan immediately; only if a critical ambiguity truly blocks planning may you call ask_question first; ",
+            "the `draft` must be short markdown for the `## Plan` section only and must not include `## Goal`, `## Plan`, or `## Notes` headings; ",
+            "do not use any tools during planning besides an optional ask_question followed by create_plan; ",
+            "after create_plan returns, do NOT call update_plan, edit, or any other tool; ",
+            "if reviewer feedback appears in the create_plan result, stop after a short acknowledgement."
+        ),
+        goal = goal,
+        workdir = workdir.display()
+    )
+}
+
+fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
+    let counter = counter_path(workdir);
+    let mut lines = vec![
+        format!("Advance the active plan to completion for this exact goal: `{COUNTER_PLAN_GOAL}`."),
+        format!("Write a single file at `{}`.", counter.display()),
+        format!(
+            "The exact working directory for this run is `{}`. Use this path literally and do not substitute `/home/sandbox/...` or other aliases.",
+            workdir.display()
+        ),
+        "Requirements:".to_string(),
+        "- The file must be valid Python.".to_string(),
+        "- Running `python3 counter.py` from the current working directory must exit 0, print exactly `0\\n` to stdout, and print nothing to stderr.".to_string(),
+        "- Use `bash` to run and verify the program yourself before closing the plan.".to_string(),
+        "- Use update_plan to claim progress, perform the work, and finish all current todos.".to_string(),
+        "The current todo ids are:".to_string(),
+    ];
+    for id in todo_ids {
+        lines.push(format!("- {id}"));
+    }
+    lines.extend([
+        "Rules:".to_string(),
+        "- You may use list_dir, read, search_files, write, edit, bash, and update_plan.".to_string(),
+        "- Use the exact current todo ids from the latest plan/tool results.".to_string(),
+        "- Do NOT rewrite, replace, or upsert todo ids/content unless a non-pass code review or verify result truly requires adding a fix todo.".to_string(),
+        "- Prefer `set_status` on existing todos; only add a new fix todo if the runtime kept the plan in EXEC after code_review or verify.".to_string(),
+        "- When the final update_plan returns, inspect the tool result.".to_string(),
+        "- If `code_review.verdict != pass` or `plan_mode_after` is still `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo, perform the fix, and continue.".to_string(),
+        "- Only stop once the runtime has either returned `verify` or moved the plan to `completed`.".to_string(),
+        "- Do NOT edit the plan file directly. Do NOT call ask_question.".to_string(),
+    ]);
+    lines.join(" ")
+}
+
+fn assert_counter_artifact(workdir: &Path) {
+    let counter = counter_path(workdir);
+    assert!(counter.exists(), "应生成产物文件: {}", counter.display());
+    let run = StdCommand::new("python3")
+        .current_dir(workdir)
+        .arg("counter.py")
+        .output()
+        .unwrap_or_else(|e| panic!("运行 counter.py 失败: {e}"));
+    assert!(
+        run.status.success(),
+        "counter.py 退出码应为 0，实际：{:?}",
+        run.status
+    );
+    assert_eq!(
+        run.stdout,
+        b"0\n",
+        "counter.py stdout 应恰好为 `0\\n`，实际：{:?}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        run.stderr.is_empty(),
+        "counter.py stderr 应为空，实际：{:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 fn build_system_text_minimal(ctx: &ChatContext) -> String {
@@ -422,7 +497,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
     std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "5000");
     std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", default_model());
     let home = real_home();
-    let config = load_user_config();
+    let mut config = load_user_config();
+    config.plan.max_code_review_rounds = 1;
     let workdir = common::dot_tomcat_e2e_workdir("inprocess_real_llm");
     let _cwd = common::CwdGuard::set(&workdir);
     let sessions_dir = resolve_sessions_dir(&config).expect("resolve sessions dir");
@@ -444,13 +520,14 @@ async fn inprocess_full_plan_path_with_real_llm() {
         assert!(matches!(ctx.plan_runtime.mode(), PlanMode::Planning));
 
         // 2) 用真 LLM 跑 PLANNING_PROMPT；期望它调 create_plan
+        let planning_prompt = build_counter_planning_prompt(COUNTER_PLAN_GOAL, &workdir);
         let outcome = run_chat_turn_observed(
             &home,
             &ctx,
             "planning_phase",
             None,
             &mut diag_state,
-            PLANNING_PROMPT,
+            &planning_prompt,
             &system_text,
             &mut context_state,
             PLANNING_TIMEOUT,
@@ -500,11 +577,14 @@ async fn inprocess_full_plan_path_with_real_llm() {
         let mut completed = false;
         while exec_rounds < 3 && !completed {
             exec_rounds += 1;
-            let prompt = if exec_rounds == 1 {
-                EXEC_PROMPT.to_string()
-            } else {
-                "Continue advancing the plan with update_plan as specified. Do NOT do anything else.".to_string()
-            };
+            let current_plan = read_plan(&plan_path).expect("read current exec plan 失败");
+            let todo_ids: Vec<String> = current_plan
+                .frontmatter
+                .todos
+                .iter()
+                .map(|todo| todo.id.clone())
+                .collect();
+            let prompt = build_counter_exec_prompt(&todo_ids, &workdir);
             let outcome = run_chat_turn_observed(
                 &home,
                 &ctx,
@@ -561,28 +641,42 @@ async fn inprocess_full_plan_path_with_real_llm() {
             Some(fresh_session.session_id.as_str()),
             "EXEC/completed 盘应绑定本次 inprocess run 的真实 session_id"
         );
+        assert_counter_artifact(&workdir);
 
         // 6) finalize_completed_to_chat → Chat
         let finalized = ctx.plan_runtime.finalize_completed_to_chat();
         assert_eq!(finalized.as_deref(), Some(plan_id.as_str()));
         assert!(matches!(ctx.plan_runtime.mode(), PlanMode::Chat));
 
-        // 7) transcript 软断言：至少一条 plan.review + plan.verify
+        // 7) transcript 软断言：至少一条 plan.review + plan.code_review + plan.verify，
+        //    且 code_review 早于 verify。
         let transcript_path = ctx
             .session
             .current_transcript_path()
             .expect("current_transcript_path 失败")
             .expect("transcript path 缺失");
         let transcript = std::fs::read_to_string(&transcript_path).expect("read transcript 失败");
-        let has_plan_review = transcript.lines().any(|l| l.contains("\"plan.review\""));
-        let has_plan_verify = transcript.lines().any(|l| l.contains("\"plan.verify\""));
+        let lines: Vec<&str> = transcript.lines().collect();
+        let plan_review_idx = lines.iter().position(|l| l.contains("\"plan.review\""));
+        let plan_code_review_idx = lines
+            .iter()
+            .position(|l| l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\""));
+        let plan_verify_idx = lines.iter().position(|l| l.contains("\"plan.verify\""));
         assert!(
-            has_plan_review,
+            plan_review_idx.is_some(),
             "transcript 应含至少一条 plan.review 自定义事件，实际未发现"
         );
         assert!(
-            has_plan_verify,
+            plan_code_review_idx.is_some(),
+            "transcript 应含至少一条 plan.code_review 自定义事件，实际未发现"
+        );
+        assert!(
+            plan_verify_idx.is_some(),
             "transcript 应含至少一条 plan.verify 自定义事件，实际未发现"
+        );
+        assert!(
+            plan_code_review_idx.unwrap() < plan_verify_idx.unwrap(),
+            "plan.code_review 应早于 plan.verify 出现"
         );
     })
     .await;

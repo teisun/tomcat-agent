@@ -162,6 +162,7 @@ pub(super) async fn run_tool_calls(
                 agent.config.openai_files_runtime.as_ref(),
                 agent.config.plan_runtime.as_ref(),
                 agent.config.subagent_type,
+                agent.config.review_kind,
                 &cancel,
                 tc,
             );

@@ -327,10 +327,7 @@ fn one_line_summary_handles_bash_argv_and_script_preview() {
 fn one_line_summary_does_not_truncate_long_bash_command() {
     let long_path = "/Users/yankeben/.tomcat/temp/cli_real_llm_wwww-mi-com_2794_1779277773225413000/docs/screenshots";
     let script = format!("mkdir -p {long_path} && npm i -D tsx && node scripts/snapshot.ts");
-    let summary = one_line_summary(
-        "bash",
-        &json!({"command": "bash", "args": ["-lc", script]}),
-    );
+    let summary = one_line_summary("bash", &json!({"command": "bash", "args": ["-lc", script]}));
     assert_eq!(summary, format!("command=bash -lc {script}"));
     assert!(!summary.ends_with('…'));
 }
@@ -433,10 +430,7 @@ fn path_display_shows_absolute_path() {
 #[test]
 fn bash_one_line_summary_keeps_long_absolute_workdir_path() {
     let long_path = "/Users/yankeben/.tomcat/temp/cli_real_llm_wwww-mi-com_2794_1779277773225413000/docs/screenshots";
-    let summary = one_line_summary(
-        "bash",
-        &json!({"command": format!("mkdir -p {long_path}")}),
-    );
+    let summary = one_line_summary("bash", &json!({"command": format!("mkdir -p {long_path}")}));
     assert_eq!(summary, format!("command=mkdir -p {long_path}"));
 }
 

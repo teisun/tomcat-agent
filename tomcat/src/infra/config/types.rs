@@ -676,6 +676,9 @@ pub struct PlanConfig {
     /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
     #[serde(default = "default_plan_max_review_rounds")]
     pub max_review_rounds: u32,
+    /// EXEC 完成前 code reviewer 的最大尝试轮次。默认 1；0 表示直接跳过 code review。
+    #[serde(default = "default_plan_max_code_review_rounds")]
+    pub max_code_review_rounds: u32,
     /// Verifier gate 模式：`soft`（默认，FAIL 仅 advisory）或 `gate`（FAIL 阻止 completed）。
     #[serde(default = "default_plan_verify_gate")]
     pub verify_gate: String,
@@ -689,6 +692,10 @@ fn default_plan_max_review_rounds() -> u32 {
     1
 }
 
+fn default_plan_max_code_review_rounds() -> u32 {
+    1
+}
+
 fn default_plan_verify_gate() -> String {
     "soft".to_string()
 }
@@ -699,6 +706,7 @@ impl Default for PlanConfig {
             lock_timeout_ms: default_plan_lock_timeout_ms(),
             auto_checkpoint_on_build: false,
             max_review_rounds: default_plan_max_review_rounds(),
+            max_code_review_rounds: default_plan_max_code_review_rounds(),
             verify_gate: default_plan_verify_gate(),
         }
     }

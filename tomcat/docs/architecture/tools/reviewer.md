@@ -1,12 +1,14 @@
 # `reviewer`：审稿 subagent 派生契约（非 LLM 工具）
 
-> **重要**：`reviewer` **不是** LLM 工具，**也不进** catalog。它是一个**子 Agent**，由 [`create_plan`](./create-plan.md) 工具在写完 `PlanFile` 后通过**内部 Rust API**（`internal subagent dispatch`，对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)）同步派发，与 LLM-facing 的 [`dispatch_agent`](../multi-agent.md) 工具互补。本文档定义 reviewer 的派生契约：派发入口、`allowed_tools`、system prompt 模板、**输出契约（顾问、非 gate）**、`allow_review_edit`（runtime 内部参数）行为、并发 / abort 语义。
+> **重要**：`reviewer` **不是** LLM 工具，**也不进** catalog。它是一个**子 Agent**，当前已统一为 `ReviewKind::{Plan, Code}` 两种运行形态：`create_plan` 写完 `PlanFile` 后派发 `ReviewKind::Plan`，`update_plan` 命中 `all_completed` 后在 verifier 前派发 `ReviewKind::Code`（若 rounds 未耗尽）。两者都走**内部 Rust API**（`internal subagent dispatch`，对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)）同步派发，与 LLM-facing 的 [`dispatch_agent`](../multi-agent.md) 工具互补。本文档定义 reviewer 的派生契约：派发入口、`allowed_tools`、system prompt 模板、输出契约、`allow_review_edit`（仅 Plan kind 使用）行为、并发 / abort 语义。
 
 本文档是 **B 类**：`docs/architecture/tools/`，承接 [`plan-runtime.md`](../plan-runtime.md)、[`multi-agent.md`](../multi-agent.md) §14（基础设施）、[`create-plan.md`](./create-plan.md)（派发入口）。**实现以仓库代码为准**。
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
-**说人话**：reviewer 是一个内部子 Agent，模型看不到也不能调；它由 `create_plan` 在写完计划文件后内部叫起来，读计划、读代码，给出**摘要建议**写进 transcript（`plan.review` 自定义事件）+ 同步返回到 `create_plan` 的工具结果里；它**不**决定能不能进 EXEC，进 EXEC 永远由用户敲 `/plan build <plan_id/path>`。review brief 会带上主会话启动时捕获的项目根目录；若该目录尚未授权，读仓库时仍要遵守 `workspace_roots` / session grant 的运行时确认。默认 reviewer 还可以用 [`todos`](./todos.md) 给自己列调研步骤（无副作用、不动 plan）。如果 runtime 内部参数 `allow_review_edit=true`（**不**暴露为 LLM 入参），reviewer 还可以：① 用 [`update_plan`](./update-plan.md) 增量改 PlanFile frontmatter 的 `todos[]`；② 用 `edit` 改 `PlanFile.body` 的任意正文内容。**唯一硬边界是不能 raw 改 frontmatter**；`## Review` / 修改说明只存在于 reviewer 返回给主 Agent 的摘要与 transcript 中，不写进 `.plan.md`。**任何模式下 reviewer 都不能调 `create_plan`**（防递归套娃 + 职责单一）。
+**说人话**：reviewer 是一个内部子 Agent，模型看不到也不能调。`ReviewKind::Plan` 负责 `create_plan` 之后的计划审稿，结论落到 `plan.review` + `create_plan.review`，仍由用户决定何时 `/plan build`；`ReviewKind::Code` 负责 EXEC 收口时的只读代码审查，结论落到 `plan.code_review` + `update_plan.code_review`，`verdict=pass` 时同回合直连 verifier，非 `pass` 时把问题交回主 Agent 修。只有 Plan kind 会使用 `allow_review_edit`：它可通过 [`update_plan`](./update-plan.md) 调整 plan todos，或通过 `edit` 改 `PlanFile.body` 正文；**唯一硬边界是不能 raw 改 frontmatter**。Code kind 则**完全只读**：不能改 plan、不能改代码、不能改 todos，只能返回结构化结论。**任何 kind 下 reviewer 都不能调 `create_plan`**（防递归套娃 + 职责单一）。
+
+> **实现提示**：下文若未显式写 `ReviewKind`，历史描述默认指 `ReviewKind::Plan`；以 §5 的差异表与仓库代码为当前口径。
 
 ---
 
@@ -352,38 +354,48 @@ impl PlanRuntime {
 
 ### 5.1 reviewer system prompt（常量内容）
 
-实现状态：`allow_review_edit` 在实现层已固定为 `true`（不再保留 `{{#if}}` 分支）；prompt
-原文以 [`src/api/chat/plan_runtime/review.rs::REVIEWER_SYSTEM_PROMPT`](../../../src/api/chat/plan_runtime/review.rs) 为准。
-当前 catalog 把 grep / find 合并为 `search_files`，故文案以 `read / search_files / list_dir / todos`
-描述只读工具；`{{max_turns}}` 占位由 dispatcher 在拼装时替换为实际配置值（`TOMCAT_REVIEWER_MAX_TURNS`，默认 64）。
+当前实现按 `ReviewKind` 分两套 prompt：
+
+| `ReviewKind` | prompt 常量 | 主要职责 | 说人话 |
+|--------------|-------------|----------|--------|
+| `Plan` | [`review.rs::REVIEWER_SYSTEM_PROMPT`](../../../src/api/chat/plan_runtime/review.rs) | 审 plan 质量；可在 runtime 允许时改 plan；输出顾问摘要 | 开工前审稿。 |
+| `Code` | [`review.rs::CODE_REVIEW_SYSTEM_PROMPT`](../../../src/api/chat/plan_runtime/review.rs) | 审 EXEC 期间的代码实现；必须给 `verdict`；提醒“结论交给主 Agent” | verifier 前的代码二审。 |
+
+当前 catalog 把 grep / find 合并为 `search_files`，故文案统一以 `read / search_files / list_dir ...` 描述工具；`max_turns` 由 dispatcher 传入，Plan/Code 两种 kind 当前都使用 64。
 
 ### 5.2 allowed_tools
 
-| 模式 | `allowed_tools` | 备注 | 说人话 |
-|------|-----------------|------|--------|
-| **实现层固定 `allow_review_edit = true`** | `{read, search_files, list_dir, todos, update_plan, edit}` | catalog 把 grep / find 合并为 `search_files`；`update_plan` 仅能动 target 的 `todos[]`（受其本身门控）；`edit` 路径 ⊆ `~/.tomcat/plans/*.plan.md` 且 raw frontmatter diff 为空 | 实现写死改稿权；改 frontmatter todos + 改 plan 正文。 |
-| ~~`allow_review_edit = false`~~ | ~~`{read, grep, find, todos}`~~ | 历史方案，已弃用；保留 trait 形参仅供 Mock 单测注入只读路径 | 不再走配置。 |
+| `ReviewKind` | `allowed_tools` | 备注 | 说人话 |
+|--------------|-----------------|------|--------|
+| `Plan` | `{read, search_files, list_dir, todos, update_plan, edit}` | `update_plan` 只允许走它自身的 plan/todo 门控；`edit` 仅限 `~/.tomcat/plans/*.plan.md` 且 raw frontmatter diff 为空 | 可以修 plan，但不能碰仓库代码。 |
+| `Code` | `{read, search_files, list_dir, bash}` | `bash` 不额外做细粒度白名单，但仍受 permission / timeout / 审计约束；`tool_exec` 与 `safety` 额外拦截全部写工具 | 只读看代码，可跑命令取证。 |
 
 > **三条铁律**：
 > 1. **永远不含 `create_plan`**——避免 reviewer 套娃 / 重定计划；reviewer 只挑刺与落地建议，不重写整盘。
-> 2. **永远不含 `bash` / `write` / `dispatch_agent` / `checkpoint`**——副作用收到最小集。
-> 3. **双保险**：`AgentRegistry::spawn_subagent_internal` 构造子 catalog 时与父 catalog 取交集；`tool_exec.edit` 与 `tool_exec.update_plan` 在 reviewer 上下文中各自有守卫；即使 `allowed_tools` 错误传入了不存在的工具名，runtime 也会过滤。
+> 2. **Plan kind 不含 `bash`，Code kind 不含任何写工具**——两侧边界相反但都硬编码在 runtime。
+> 3. **双保险**：`AgentRegistry::spawn_subagent_internal` 构造子 catalog 时与父 catalog 取交集；`tool_exec` 与 `safety` 在 reviewer 上下文中还有二次守卫；即使 `allowed_tools` 错误传入了不存在的工具名，runtime 也会过滤。
 
 ### 5.3 输出契约（`ReviewSummary`）
 
 | 字段 | 类型 | 说明 | 说人话 |
 |------|------|------|--------|
+| `kind` | `ReviewKind` (`plan \| code`) | 本次 reviewer 的运行形态 | 这是 plan 审稿还是 code 审查。 |
 | `findings` | `Vec<Finding { severity, area, note }>` | 离散挑刺清单；`severity ∈ {nit, suggestion, concern}`；`area` 为自由短标签（不限 plan 专用枚举） | 一条条挑刺记下来。 |
 | `summary` | `String`（≤ 600 字符） | 审稿意见总评（发现了什么、整体判断） | 审稿意见一句话。 |
 | `changes_summary` | `String` | 本轮实际修改内容与理由；只读或未改时解析为 `"none"` | 改了什么、为什么改。 |
 | `applied_changes` | `bool` | 本轮 reviewer 是否调用过任一写工具（`edit` / `update_plan` 等，由 runtime 守卫范围） | 有没有真动过笔。 |
+| `verdict` | `Option<String>` | 仅 `Code` 时使用：`pass \| fail \| partial \| aborted`；`Plan` 永远为 `None` | code review 给个明确结论。 |
 | `rounds` | `u32` | 同一 PlanFile 累计被 review 的轮次（含本次） | 这是第几轮审稿。 |
 
-`ReviewSummary` **不**含 `verdict`、**不**含 mode 转移建议、**不**含 `accepted`/`rejected` 标记。
+`ReviewSummary` 仍**不**直接携带 mode 转移指令，也**不**含 `accepted`/`rejected` 标记；runtime 只会对 `Code` kind 的 `verdict` 做轻量规范化，再决定是同回合直连 verifier 还是回主 Agent 修复。
 
-### 5.4 摘要落点：`transcript.plan.review`
+### 5.4 摘要落点：tool result + transcript 双通道
 
-- runtime 解析 `ReviewSummary` 后立刻写一条 `transcript.plan.review` 自定义事件（注册见 [`session-storage.md`](../session-storage.md)），结构示意：
+- `ReviewKind::Plan`：runtime 解析 `ReviewSummary` 后写 `transcript.plan.review`，并同步回填 `create_plan` 的 `ToolResult.review`。
+- `ReviewKind::Code`：runtime 在 `normalize_for_code_review_result()` 后写 `transcript.plan.code_review`，并同步回填 `update_plan` 的 `ToolResult.code_review`；若 rounds 用尽则补一条 `plan.code_review.warning`。
+- 两种 kind 都保证 **tool result 与 transcript 口径一致**；Code kind 的 `verdict=pass` 回合里，同一条 `update_plan` tool result 会同时带 `code_review` 与 `verify`。
+
+- `ReviewKind::Plan` 的 transcript 事件结构示意：
 
 ```jsonc
 {
@@ -398,23 +410,23 @@ impl PlanRuntime {
 }
 ```
 
-- **同步**回填到 `create_plan` 的 `ToolResult.review` 字段（结构与上一致），让父 Agent 在同一条 tool result 里就拿到摘要，无须再读 transcript。
-- **不**写 `PlanFile.body` 中的审稿块，也**不**写 `PlanFile` frontmatter；frontmatter 仍保持 `mode = planning`、不引入 `review_status` / `last_review` 字段（详见 [`create-plan.md` §5.2](./create-plan.md#52-frontmatter-schema)）。
-- 进 EXEC 由 `/plan build` 触发，与 `ReviewSummary` 完全解耦（见 [`plan-runtime.md` §5.1](../plan-runtime.md#51-plan-build-的-5-件事)）。
+- **不**写 `PlanFile.body` 中的审稿块，也**不**写 `PlanFile` frontmatter；frontmatter 仍不引入 `review_status` / `last_review` 字段。
+- `Plan` kind 与进 EXEC 解耦：是否 `/plan build` 仍由用户决定。
+- `Code` kind 与 EXEC 收口绑定：非 `pass` 时主 Agent 需要根据 `code_review` 结论 reopen 旧 todo 或新增修复 todo，再次 complete。
 
-### 5.5 `allow_review_edit` 行为
+### 5.5 `allow_review_edit` / `ReviewKind` 行为
 
-| 步骤 | `allow_review_edit = false` | `allow_review_edit = true` | 说人话 |
-|------|------------------------------|-----------------------------|--------|
-| reviewer 可用工具 | `{read, grep, find, todos}` | `{read, grep, find, todos, update_plan, edit}` | 改稿权一开就多两件武器。 |
-| 改 frontmatter `todos[]` | ❌（无 `update_plan`） | ✅（通过 `update_plan`） | 改 plan 待办用结构化工具。 |
-| 改 plan 正文任意段 | ❌（无 `edit`） | ✅（`edit` 路径白名单 + frontmatter 守卫） | 正文都能改，但前提是仍在计划文件内。 |
-| 改 frontmatter 其它字段（mode / session_* / plan_id / created_at / goal） | ❌ | ❌（`update_plan` 与 `edit` 各自门控均拦截） | runtime 专属字段不许碰。 |
-| 改用户代码（仓库其他路径） | ❌ | ❌（`edit` 路径不在 `~/.tomcat/plans/`） | 用户代码不动。 |
-| reviewer turn 内可调 `create_plan`？ | ❌ | ❌（永远不在 `allowed_tools` 内） | reviewer 永远不重建计划。 |
-| reviewer 改完后必须给摘要？ | — | ✅（仍要 emit `<review>` 块，含 `summary` + `changes_summary`） | 改完也要总结改了什么。 |
-| `ReviewSummary.applied_changes` | `false` | reviewer `update_plan` / `edit` 调用 ≥ 1 时为 `true` | 记有没有真改过 plan。 |
-| reviewer 越界写其它段或 frontmatter 字段 | — | `tool_exec.edit` / `tool_exec.update_plan` 各自拒绝；reviewer 收 tool error，下一轮自行调整 | 越界就 error。 |
+| 维度 | `ReviewKind::Plan` | `ReviewKind::Code` | 说人话 |
+|------|--------------------|--------------------|--------|
+| `allow_review_edit` 是否生效 | ✅ 生效；当前实现固定允许 | ❌ 不生效；Code kind 始终只读 | 只有 plan 审稿能动 plan。 |
+| 改 frontmatter `todos[]` | ✅ 通过 `update_plan` | ❌ | 改计划待办只属于 Plan kind。 |
+| 改 plan 正文任意段 | ✅ 通过 `edit`（frontmatter 守卫仍在） | ❌ | Code kind 连 plan 正文都不能动。 |
+| 改 frontmatter 其它字段（mode / session_* / plan_id / created_at / goal） | ❌ | ❌ | runtime 专属字段始终不许碰。 |
+| 改用户代码（仓库其他路径） | ❌ | ❌ | reviewer 两种 kind 都不改仓库代码。 |
+| `bash` | ❌ | ✅ | code reviewer 可以跑只读命令取证。 |
+| reviewer turn 内可调 `create_plan`？ | ❌ | ❌ | reviewer 永远不重建计划。 |
+| `ReviewSummary.applied_changes` | 可能为 `true` | 运行时强制为 `false` | code review 只提结论不动手。 |
+| 非 `pass` 后续动作 | 与 EXEC 无关，仍由用户决定是否 build | 主 Agent 读取 `code_review` 后 reopen / 新增 todo，再 complete | 代码审查打回后由主 Agent 接力修。 |
 
 ---
 

@@ -56,7 +56,7 @@ pub mod verify;
 mod tests;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -65,7 +65,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use ask_question_panel::AskQuestionPanel;
 pub use mode::PlanMode;
-pub use review::ReviewSummary;
+pub use review::{ReviewKind, ReviewSummary};
 pub use todos_panel::{
     CliTodosPanel, NoopTodosPanel, RefreshNotifier, TodosPanel, TodosPanelSnapshot,
 };
@@ -118,8 +118,12 @@ pub struct PlanRuntime {
     verifier: Mutex<Option<Arc<dyn VerifierDispatcher>>>,
     /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
     verify_gate_mode: RwLock<String>,
+    /// verifier 前 code reviewer 的最大尝试轮次。默认 1；0 表示直接跳过 code review。
+    max_code_review_rounds: AtomicU32,
     /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 计数 verifier 前 code reviewer 实际派发轮次。
+    code_review_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 可选 `ask_question` UI 后端（P5）。生产由 `ChatContext::from_config`
     /// 注入 `CliAskQuestionPanel`（CLI MVP）/ T2-P0-008 完成后改注入 `IdeAskQuestionPanel`。
     /// 测试可注入 `MockAskQuestionPanel`。未注入时 `ask_question` 工具返回
@@ -208,7 +212,9 @@ impl PlanRuntime {
             reviewer: Mutex::new(None),
             verifier: Mutex::new(None),
             verify_gate_mode: RwLock::new("soft".into()),
+            max_code_review_rounds: AtomicU32::new(1),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             ask_question_panel: Mutex::new(None),
             first_exec_turn_pending: AtomicBool::new(false),
             first_exec_turn_body: Mutex::new(None),
@@ -596,6 +602,14 @@ impl PlanRuntime {
         self.verify_gate_mode.read().as_str() == "gate"
     }
 
+    pub fn set_max_code_review_rounds(&self, value: u32) {
+        self.max_code_review_rounds.store(value, Ordering::Release);
+    }
+
+    pub fn max_code_review_rounds(&self) -> u32 {
+        self.max_code_review_rounds.load(Ordering::Acquire)
+    }
+
     /// 同步派发 reviewer（plan-runtime.md §P4 RV14）。语义：
     ///
     /// 1. **必须**在 `write_plan` 释放 advisory lock **之后**调用（防 D1 死锁）。
@@ -633,7 +647,13 @@ impl PlanRuntime {
 
         let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut summary = dispatcher
-            .dispatch(plan_id, &plan_text, allow_review_edit, cascade)
+            .dispatch(
+                plan_id,
+                &plan_text,
+                review::ReviewKind::Plan,
+                allow_review_edit,
+                cascade,
+            )
             .await;
         if rounds > 1 {
             summary.summary = format!("[round {rounds}] {}", summary.summary);
@@ -669,6 +689,45 @@ impl PlanRuntime {
             self.write_transcript_custom(warn_payload);
         }
         summary
+    }
+
+    /// 同步派发 verifier 前的 code reviewer。调用方负责：
+    /// 1. 先判断 / 递增 `code_review_rounds`
+    /// 2. 调用 `normalize_for_code_review_result()`
+    /// 3. 再写 transcript，保证 transcript 与 `update_plan.code_review` 口径一致
+    pub async fn dispatch_code_reviewer(&self, plan_id: &str) -> review::ReviewSummary {
+        let Some(dispatcher) = self.reviewer.lock().clone() else {
+            return review::ReviewSummary::placeholder_pending_for(review::ReviewKind::Code);
+        };
+        let path = match file_store::plan_path_for_id(plan_id) {
+            Ok(p) => p,
+            Err(e) => {
+                return review::ReviewSummary::aborted_with_kind(
+                    review::ReviewKind::Code,
+                    format!("plan_id 非法: {e}"),
+                );
+            }
+        };
+        let plan_text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                return review::ReviewSummary::aborted_with_kind(
+                    review::ReviewKind::Code,
+                    format!("read plan 失败: {e}"),
+                );
+            }
+        };
+
+        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dispatcher
+            .dispatch(
+                plan_id,
+                &plan_text,
+                review::ReviewKind::Code,
+                false,
+                cascade,
+            )
+            .await
     }
 
     /// 同步派发 verifier。语义与 reviewer 类似，但无 round 概念：
@@ -716,6 +775,45 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
+    pub(crate) fn write_code_review_transcript(
+        &self,
+        plan_id: &str,
+        summary: &review::ReviewSummary,
+        rounds: u32,
+    ) {
+        let mut payload = summary.to_json();
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "event".to_string(),
+                serde_json::Value::String(crate::infra::wire::WIRE_PLAN_CODE_REVIEW.to_string()),
+            );
+            obj.insert(
+                "plan_id".to_string(),
+                serde_json::Value::String(plan_id.to_string()),
+            );
+            obj.insert(
+                "rounds".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(rounds)),
+            );
+        }
+        self.write_transcript_custom(payload);
+    }
+
+    pub(crate) fn write_code_review_warning_transcript(
+        &self,
+        plan_id: &str,
+        reason: &str,
+        rounds: u32,
+    ) {
+        self.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_WARNING,
+            "plan_id": plan_id,
+            "reason": reason,
+            "rounds": rounds,
+            "max_code_review_rounds": self.max_code_review_rounds(),
+        }));
+    }
+
     /// 用于单测 / 集成测：清除指定 plan_id 的 reviewer round 计数。
     pub fn reset_reviewer_rounds(&self, plan_id: &str) {
         self.reviewer_rounds.lock().remove(plan_id);
@@ -724,6 +822,30 @@ impl PlanRuntime {
     /// 用于单测：当前 plan_id 的 reviewer 派发轮次。
     pub fn reviewer_rounds(&self, plan_id: &str) -> u32 {
         self.reviewer_rounds
+            .lock()
+            .get(plan_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn try_begin_code_review_round(&self, plan_id: &str) -> Option<u32> {
+        let max_rounds = self.max_code_review_rounds();
+        let mut rounds = self.code_review_rounds.lock();
+        let current = rounds.get(plan_id).copied().unwrap_or(0);
+        if current >= max_rounds {
+            return None;
+        }
+        let next = current + 1;
+        rounds.insert(plan_id.to_string(), next);
+        Some(next)
+    }
+
+    pub fn reset_code_review_rounds(&self, plan_id: &str) {
+        self.code_review_rounds.lock().remove(plan_id);
+    }
+
+    pub fn code_review_rounds(&self, plan_id: &str) -> u32 {
+        self.code_review_rounds
             .lock()
             .get(plan_id)
             .copied()
@@ -1097,6 +1219,7 @@ pub trait ReviewerDispatcher: Send + Sync {
         &self,
         plan_id: &str,
         plan_text: &str,
+        kind: review::ReviewKind,
         allow_review_edit: bool,
         abort_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> review::ReviewSummary;

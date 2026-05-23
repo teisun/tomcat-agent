@@ -72,11 +72,32 @@ impl ToolExecOutcome {
 ///
 /// 这是 catalog 过滤之外的第二道防线：即便上游误注入了 catalog 之外的工具
 /// 定义，或 dispatcher 绕过了 catalog，tool_exec 也要把这些调用拦在外面。
-fn is_reviewer_whitelisted_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read" | "search_files" | "list_dir" | "todos" | "update_plan" | "edit"
-    )
+fn is_reviewer_whitelisted_tool(
+    name: &str,
+    review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
+) -> bool {
+    match review_kind.unwrap_or(crate::api::chat::plan_runtime::review::ReviewKind::Plan) {
+        crate::api::chat::plan_runtime::review::ReviewKind::Plan => matches!(
+            name,
+            "read" | "search_files" | "list_dir" | "todos" | "update_plan" | "edit"
+        ),
+        crate::api::chat::plan_runtime::review::ReviewKind::Code => {
+            matches!(name, "read" | "search_files" | "list_dir" | "bash")
+        }
+    }
+}
+
+fn reviewer_allowed_tools_description(
+    review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
+) -> &'static str {
+    match review_kind.unwrap_or(crate::api::chat::plan_runtime::review::ReviewKind::Plan) {
+        crate::api::chat::plan_runtime::review::ReviewKind::Plan => {
+            "read/search_files/list_dir/todos/update_plan/edit"
+        }
+        crate::api::chat::plan_runtime::review::ReviewKind::Code => {
+            "read/search_files/list_dir/bash"
+        }
+    }
 }
 
 /// verifier 子 Agent 在 tool_exec 层允许调用的工具名白名单（与
@@ -165,6 +186,7 @@ pub(super) async fn execute_tool_with_openai_files(
         openai_files_runtime,
         None,
         crate::core::agent_loop::types::SubagentType::User,
+        None,
         &tokio_util::sync::CancellationToken::new(),
         tc,
     )
@@ -188,6 +210,7 @@ pub(super) async fn execute_tool_full(
     openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
+    review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
 ) -> ToolExecOutcome {
@@ -200,6 +223,7 @@ pub(super) async fn execute_tool_full(
         openai_files_runtime,
         plan_runtime,
         subagent_type,
+        review_kind,
         cancel,
         tc,
         &mut display,
@@ -223,6 +247,7 @@ async fn execute_tool_tuple_full(
     openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     plan_runtime: Option<&Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
+    review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
     display_out: &mut Option<ToolDisplay>,
@@ -236,12 +261,13 @@ async fn execute_tool_tuple_full(
     // catalog 已被 `resolve_internal_tools` 过滤过，这里再拦一道，防 dispatcher 直调或
     // catalog 漂移；与 reviewer.md §5.2 / §5.5 一致）。
     if subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
-        && !is_reviewer_whitelisted_tool(tc.name.as_str())
+        && !is_reviewer_whitelisted_tool(tc.name.as_str(), review_kind)
     {
         return (
             format!(
-                "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 read/search_files/list_dir/todos/update_plan/edit；create_plan 防套娃；bash/write/dispatch_agent/checkpoint 永不可用）",
-                tc.name
+                "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 {}；create_plan 防套娃；write/dispatch_agent/checkpoint 永不可用）",
+                tc.name,
+                reviewer_allowed_tools_description(review_kind),
             ),
             true,
             Vec::new(),
@@ -285,8 +311,12 @@ async fn execute_tool_tuple_full(
             let path_arg = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if !path_arg.is_empty() {
                 let mode = rt.mode();
-                let subagent_kind = match subagent_type {
-                    crate::core::agent_loop::types::SubagentType::Reviewer => {
+                let subagent_kind = match (subagent_type, review_kind) {
+                    (
+                        crate::core::agent_loop::types::SubagentType::Reviewer,
+                        Some(crate::api::chat::plan_runtime::review::ReviewKind::Code),
+                    ) => crate::api::chat::plan_runtime::safety::SubagentKind::CodeReviewer,
+                    (crate::core::agent_loop::types::SubagentType::Reviewer, _) => {
                         crate::api::chat::plan_runtime::safety::SubagentKind::Reviewer
                     }
                     _ => crate::api::chat::plan_runtime::safety::SubagentKind::Other,
@@ -676,7 +706,10 @@ async fn execute_tool_tuple_full(
                 }
                 // B3-guard：reviewer 子 Agent 在 plan 文件上的 edit 允许改正文，但不能 raw 改
                 // frontmatter。simulate apply edits 之后做 diff，越界即拒（不真正写盘）。
-                if subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer {
+                if subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
+                    && review_kind
+                        != Some(crate::api::chat::plan_runtime::review::ReviewKind::Code)
+                {
                     let normalized_path = match crate::infra::platform::normalize_path(path) {
                         Ok(path) => path,
                         Err(e) => {
@@ -1439,6 +1472,7 @@ mod display_contract_tests {
             None,
             None,
             SubagentType::User,
+            None,
             &tokio_util::sync::CancellationToken::new(),
             &tc,
         )
@@ -1474,6 +1508,7 @@ mod display_contract_tests {
             None,
             None,
             SubagentType::User,
+            None,
             &tokio_util::sync::CancellationToken::new(),
             &tc,
         )
@@ -1670,6 +1705,7 @@ mod reviewer_guards_tests {
             None,
             None,
             SubagentType::Reviewer,
+            Some(crate::api::chat::plan_runtime::review::ReviewKind::Plan),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
         )
@@ -1678,6 +1714,31 @@ mod reviewer_guards_tests {
         assert!(outcome
             .model_text
             .contains("reviewer 子 Agent 禁止调用工具"));
+    }
+
+    #[tokio::test]
+    async fn code_reviewer_blocks_write_capable_tools() {
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+        let tc = ToolCallInfo {
+            id: "tc_code_edit".into(),
+            name: "edit".into(),
+            arguments: r#"{"path":"~/.tomcat/plans/demo.plan.md","old_string":"a","new_string":"b"}"#.into(),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &None,
+            None,
+            None,
+            None,
+            SubagentType::Reviewer,
+            Some(crate::api::chat::plan_runtime::review::ReviewKind::Code),
+            &tokio_util::sync::CancellationToken::new(),
+            &tc,
+        )
+        .await;
+        assert!(outcome.is_error);
+        assert!(outcome.model_text.contains("仅允许 read/search_files/list_dir/bash"));
     }
 
     /// reviewer.md §11 RV-T4：reviewer 路径下 `create_plan` 被白名单守卫早退（防套娃）。
@@ -1697,6 +1758,7 @@ mod reviewer_guards_tests {
             None,
             None,
             SubagentType::Reviewer,
+            Some(crate::api::chat::plan_runtime::review::ReviewKind::Plan),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
         )
@@ -1731,6 +1793,7 @@ mod reviewer_guards_tests {
                 None,
                 None,
                 SubagentType::Verifier,
+                None,
                 &tokio_util::sync::CancellationToken::new(),
                 &tc,
             )
@@ -1794,6 +1857,7 @@ mod reviewer_guards_tests {
             None,
             None,
             SubagentType::Reviewer,
+            Some(crate::api::chat::plan_runtime::review::ReviewKind::Plan),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
         )
