@@ -1,6 +1,6 @@
 # Plan / Todo 执行完成后的代码验证（Verifier）技术方案
 
-本文档是 **T2-P1-002 | plan-mode-enhance** 的横向调研 + 落地选型方案，承接 [`plan-runtime.md`](./plan-runtime.md)、[`tools/reviewer.md`](./tools/reviewer.md)、[`tools/read.md`](./tools/read.md) 与 [`openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。**实现以仓库代码为准**；文中 **PENDING** 验收项表示尚未合入。
+本文档是 **T2-P1-002 | plan-mode-enhance** 的横向调研 + 落地选型方案，承接 [`plan-runtime.md`](./plan-runtime.md)、[`tools/reviewer.md`](./tools/reviewer.md)、[`tools/read.md`](./tools/read.md) 与 [`openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。**实现以仓库代码为准**；文中 **PENDING / PARTIAL** 验收项表示仍有缺口待补。
 
 §4.1 **「决策」**列（裁决结论）；其他表末列 **「说人话」** 与 ARCHITECTURE_SPEC **§14.1** 对齐。
 
@@ -443,10 +443,10 @@ When drafting todos that touch code, prefer actionable verification over a vague
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点 | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------|------------------|--------|
-| **PR-V0 prompt** | `executor.txt` / `planner.txt` 追加 **§4.1.1 合入用 Prompt**（Mini + P0–P6 发现）；文档同步 | `src/api/chat/plan_runtime/prompts/*.txt` | `executor_prompt_contains_mini_verification_section`、`planner_prompt_contains_test_plan_hint`、`prompt_forbids_default_npm_or_full_workspace_test`（PENDING）+ 人工 smoke：改代码 todo 在 `completed` 前应 bash/read smoke；禁止无 manifest 猜 `npm test` | 先靠提示词补 B 层（**V7+V9**）。 |
-| **PR-V1 verifier 核心** | `SubagentType::Verifier`、`VERIFY_SYSTEM_PROMPT`、`VerifySummary` 解析、`dispatch_verifier`；**代码常量** `VERIFIER_MAX_TURNS = 64`（与 reviewer 同值，**不进** TOML） | `plan_runtime/verify.rs`（新）、`agent_registry.rs`、`plan_runtime/mod.rs`、`plan_runtime/tools/update_plan.rs` | `verifier_spawned_on_all_completed`、`verifier_blocked_write_tools`、`verifier_max_turns_default_is_64`（PENDING） | 勾完 todo 拉验货子 Agent。 |
-| **PR-V2 transcript + tool result** | `transcript.plan.verify` 事件落盘；`update_plan` 成功 tool result JSON 增加 `verify: VerifySummary \| null` 字段（双通道回传主 Agent，无 `/plan verify` CLI、无 frontmatter 字段） | `session-storage` 事件序列化、`update_plan.rs` tool result 拼装 | `verify_event_in_transcript`、`update_plan_tool_result_has_verify_field`（PENDING） | 事件落 transcript，结果同时回主 Agent 当轮 prompt。 |
-| **PR-V3 gate 配置** | `[plan].verify_gate: String`（枚举 `soft\|gate`，默认 `"soft"`）；`verify_gate="gate" && verdict="fail"` 时 runtime **不**调 `set_mode_completed`、`PlanFile.mode` 保持 `Executing`、tool result.verify 仍回传主 Agent | `infra/config/mod.rs`、`update_plan.rs` | `verify_gate_soft_does_not_block`、`verify_gate_blocks_completed_on_fail`（PENDING） | 严模式卡完工，主 Agent 自己退 todo 续跑。 |
+| **PR-V0 prompt** | `executor.txt` / `planner.txt` 追加 **§4.1.1 合入用 Prompt**（Mini + P0–P6 发现）；文档同步 | `src/api/chat/plan_runtime/prompts/*.txt` | `executor_prompt_contains_mini_verification_section`、`planner_prompt_contains_test_plan_hint`、`prompt_forbids_default_npm_or_full_workspace_test`、`executor_prompt_mentions_verifier_gate_behavior`、`verifier_system_prompt_contains_contract`、`build_verify_prompt_mentions_discovery_order_and_inferred_rules` | 先靠提示词补 B 层（**V7+V9**）。 |
+| **PR-V1 verifier 核心** | `SubagentType::Verifier`、`VERIFY_SYSTEM_PROMPT`、`VerifySummary` 解析、`dispatch_verifier`；**代码常量** `VERIFIER_MAX_TURNS = 64`（与 reviewer 同值，**不进** TOML） | `plan_runtime/verify.rs`（新）、`agent_registry.rs`、`plan_runtime/mod.rs`、`plan_runtime/tools/update_plan.rs` | `verifier_spawned_on_all_completed`、`verifier_blocks_non_whitelisted_tools`、`verifier_max_turns_default_is_64`、`build_summary_from_outcome_marks_turn_budget_cutoff_as_aborted`、`build_summary_from_outcome_keeps_pass_when_limit_is_used_exactly_and_normally` | 勾完 todo 拉验货子 Agent。 |
+| **PR-V2 transcript + tool result** | `transcript.plan.verify` 事件落盘；`update_plan` 成功 tool result JSON 增加 `verify: VerifySummary \| null` 字段（双通道回传主 Agent，无 `/plan verify` CLI、无 frontmatter 字段） | `session-storage` 事件序列化、`update_plan.rs` tool result 拼装 | `verify_event_in_transcript`、`verify_event_matches_tool_result_after_normalization`、`update_plan_tool_result_has_verify_field`、`inprocess_full_plan_path_with_real_llm`（full-chain `plan.verify`） | 事件落 transcript，结果同时回主 Agent 当轮 prompt。 |
+| **PR-V3 gate 配置** | `[plan].verify_gate: String`（枚举 `soft\|gate`，默认 `"soft"`）；`verify_gate="gate" && verdict="fail"` 时 runtime **不**调 `set_mode_completed`、`PlanFile.mode` 保持 `Executing`、tool result.verify 仍回传主 Agent | `infra/config/mod.rs`、`update_plan.rs` | `verify_gate_soft_does_not_block`、`verify_gate_blocks_completed_on_fail`、`gate_fail_keeps_mode_executing_but_returns_verify`、`verify_gate_allows_completed_on_partial`、`verify_gate_allows_completed_on_aborted`、`main_agent_can_reopen_todo_after_gate_fail`、`gate_fail_then_recomplete_respawns_verifier` | 严模式卡完工，主 Agent 自己退 todo 续跑。 |
 
 ### 4.2.1 PR-V1 调度要点（ASCII）
 
@@ -458,7 +458,15 @@ update_plan (last todo → completed)
         │ no ──▶ 常规返回 snapshot
         │ yes
         ▼
-  PlanRuntime::dispatch_verifier(plan)  ── sync await ──▶ VerifySummary
+  first write: todos=completed, mode=executing
+        │
+        ▼
+  PlanRuntime::dispatch_verifier(plan)  ── sync await ──▶ raw VerifySummary
+        │
+        ▼
+  normalize_for_gate(raw) ──▶ final VerifySummary
+        │
+        ├─ write transcript.plan.verify (normalized)
         │
         ├─ config[plan].verify_gate == "gate" && verdict == "fail"
         │     ──▶ 保持 EXEC，不写 completed mode；tool result 仍含 verify
@@ -475,7 +483,7 @@ update_plan (last todo → completed)
 
 **说人话**：frontmatter 一刀切不动，配置就一项；要严模式就改 `[plan].verify_gate = "gate"`。
 
-### 5.2 `VerifySummary`（单一事实源：拟定 `plan_runtime/verify.rs`）
+### 5.2 `VerifySummary`（单一事实源：runtime normalize 后的最终 JSON）
 
 ```yaml
 # 子 Agent 最终消息内 <verify> block（yaml 子集）
@@ -492,7 +500,8 @@ summary: "≤600 chars"
 |------|------|--------|
 | `checks[].command` | `result=pass` 必填；缺则 runtime 单条降 `skip` + warning；关键 build/test 全 `skip` → `verdict=partial`（详 §10） | 没命令别说过；单条漏不诛连。 |
 | `checks[].output_excerpt` | ≤ 500 chars；超长尾部截断（保留命令最后若干行 + `…[truncated]` 尾注） | 输出别撑爆 transcript。 |
-| `verdict` | `aborted`：parse 失败 / 超 `VERIFIER_MAX_TURNS`（代码常量 64）/ parent abort；其他四态见 §4.1.1 Q1 | 验货中断。 |
+| `verdict` | `aborted`：parse 失败 / 达到 `VERIFIER_MAX_TURNS` 预算仍未正常收口 / parent abort；其他四态见 §4.1.1 Q1 | 验货中断。 |
+| transcript / tool result | `plan.verify` 事件与 `update_plan.verify` 共用 runtime `normalize_for_gate()` 之后的最终 `VerifySummary` | 审计口径和当轮推理口径一致。 |
 | Tool result 挂载 | `update_plan` 成功 JSON 增加 `verify: VerifySummary \| null` | 主 Agent 一眼看见验货结果。 |
 
 ### 5.3 Verifier system prompt（设计要点，节选）
@@ -548,8 +557,9 @@ sequenceDiagram
   UP->>PR: all_completed?
   alt all_completed
     PR->>VR: spawn_subagent_internal (sync)
-    VR-->>PR: VerifySummary
-    PR->>TR: plan.verify event
+    VR-->>PR: raw VerifySummary
+    PR->>PR: normalize_for_gate(raw)
+    PR->>TR: plan.verify event (normalized)
   end
   PR->>PR: set_mode_completed (unless verify_gate=="gate" && verdict=="fail")
   UP-->>Main: snapshot + verify
@@ -570,14 +580,13 @@ sequenceDiagram
 
 ## 9. 配置与环境变量
 
-> **不进 TOML**：verifier 子 loop 轮次上限 **`VERIFIER_MAX_TURNS = 64`**，与 reviewer 默认 `max_turns` 同值，在 `plan_runtime/verify.rs` 以 `const` 写死，映射 `AgentLoopConfig.max_tool_rounds`；超限 → `verdict=aborted` + warning（详 §10）。**不提供** `[plan].verifier_max_turns` 或 env 覆盖，保持配置面精简。
+> **不进 TOML**：verifier 子 loop 轮次上限 **`VERIFIER_MAX_TURNS = 64`**，与 reviewer 默认 `max_turns` 同值，在 `plan_runtime/verify.rs` 以 `const` 写死，映射 `AgentLoopConfig.max_tool_rounds`；达到预算仍未正常收口 → `verdict=aborted` + `verifier_stop_reason=max_turns`（详 §10）。**不提供** `[plan].verifier_max_turns` 或 env 覆盖，保持配置面精简。
 
 > **frontmatter 零改造**：本期不向 PlanFile frontmatter 新增任何 verify 相关字段（详 §5.1）；verifier soft/gate 行为只看下表 `[plan].verify_gate` 全局配置。
 
 | 键 / env | 类型 | 默认 | 说明 | 说人话 |
 |----------|------|------|------|--------|
 | `[plan].verify_gate` | string（枚举 `soft \| gate`） | `"soft"` | `soft`：verifier 始终派发，FAIL 仅写 transcript + tool result，不阻塞 `set_mode_completed`。`gate`：FAIL 时 runtime 不调 `set_mode_completed`，PlanFile.mode 保持 Executing，主 Agent 在收到 tool result.verify 后自行 `update_plan` 把目标 todo 退回 `in_progress`（详 §4.1 V8、§10）。 | 一项 config 控全开关：默认软验货，改 `gate` 即严模式。 |
-| `TOMCAT_VERIFIER_SYSTEM_PROMPT_OVERRIDE_PATH` | path | 未设 | 测试用：从指定文件读取 verifier system prompt 覆写默认常量（PR-V1 接线，与 reviewer 同名 env 同构） | 单测可换验货提示词。 |
 
 ---
 
@@ -586,10 +595,10 @@ sequenceDiagram
 | 情况 | 结局 | 说人话 |
 |------|------|--------|
 | Verifier spawn 失败 | `verdict=aborted`；**不**阻塞 completed（除非 gate） | 验货员没起来也先收工。 |
-| Parse `<verify>` 失败 | 同 aborted；tool result `verify.aborted=true` | 格式乱了当没验。 |
+| Parse `<verify>` 失败 | 同 `verdict=aborted`；`verifier_stop_reason=parse_error` | 格式乱了当没验。 |
 | Bash 被 permission 拒 | check `result=fail` 或 `skip` + note；多条全被拒 → `verdict=aborted`（permission 全否） | 命令没跑成记下来。 |
 | `result=pass` 但缺 `command` | runtime 单条降 `skip` + warning；关键 build/test 全 skip → `verdict=partial`（与 §5.2 / §3.1 G2 一致） | 没跑命令不算过；单漏一条不诛连。 |
-| 子 Agent 超 `VERIFIER_MAX_TURNS`（64） | `verdict=aborted` + warning；**不**自动重派 | 验太久就停。 |
+| 子 Agent 达到 `VERIFIER_MAX_TURNS`（64）预算仍未正常收口 | `verdict=aborted`；`verifier_stop_reason=max_turns`；**不**自动重派 | 验太久就停。 |
 | Gate 拦下 `mode=completed`（`verdict=fail` 且 `[plan].verify_gate="gate"`） | `PlanFile.mode` 保持 `Executing`；todos 仍全 `completed`；主 Agent 收到 tool result.verify 后 **自行** `update_plan` 把目标 todo 退回 `in_progress` 或追加新 todo 续跑（详 §4.1 V8） | 严模式拦下后，主 Agent 下轮自己退 todo 修。 |
 | 无任何 plan body 命令提示 | verifier prompt 走 P0–P6 命令发现算法（manifest/README/AGENTS），从仓库自行推断最小 build + test | 没写命令就按算法自己探。 |
 
@@ -599,14 +608,14 @@ sequenceDiagram
 
 | ID | 场景 | 期望 | 状态 |
 |----|------|------|------|
-| T-V1 | 最后一个 todo completed + `[plan].verify_gate="soft"`（默认） | spawn verifier；transcript 有 `plan.verify`；`update_plan` tool result JSON 含 `verify` 字段；mode → completed | PENDING |
-| T-V2 | verifier 调用 `write` / `edit` / `update_plan` | tool_exec 拒绝；summary 含失败 check | PENDING |
-| T-V3 | check `result=pass` 但无 `command` | 单条降 `skip` + warning；若关键 build/test 全部 `skip` → `verdict=partial`（详 §5.2 / §10） | PENDING |
-| T-V4 | `[plan].verify_gate="gate"` + verdict=fail | `mode` 保持 `Executing`；`set_mode_completed` 未调用；transcript 有 `plan.verify`；tool result 仍含 verify | PENDING |
-| T-V5 | `[plan].verify_gate="soft"` + verdict=fail | `mode` 仍 → completed；FAIL 写 transcript + tool result；不阻塞 | PENDING |
-| T-V6 | reviewer 与 verifier 同 plan | create_plan 只触发 reviewer；all_completed 只触发 verifier；两者 prompt / SubagentType 不同 | PENDING |
-| T-V7 | 子 loop 超 `VERIFIER_MAX_TURNS`（64） | `verdict=aborted` + transcript warning；不重派 | PENDING |
-| T-V8 | gate 拦下后主 Agent 下轮 `update_plan(todo_x, in_progress)` | mode 仍 Executing → 主 Agent 推进 → 全部完成后 runtime 自动再 spawn verifier | PENDING |
+| T-V1 | 最后一个 todo completed + `[plan].verify_gate="soft"`（默认） | spawn verifier；transcript 有 `plan.verify`；`update_plan` tool result JSON 含 `verify` 字段；mode → completed | DONE（`verifier_spawned_on_all_completed`、`verify_event_in_transcript`、`update_plan_tool_result_has_verify_field`、`inprocess_full_plan_path_with_real_llm`） |
+| T-V2 | verifier 调用 `write` / `edit` / `update_plan` | tool_exec 拒绝；summary 含失败 check | DONE（`verifier_blocks_non_whitelisted_tools`） |
+| T-V3 | check `result=pass` 但无 `command` | 单条降 `skip` + warning；若关键 build/test 全部 `skip` → `verdict=partial`（详 §5.2 / §10） | DONE（`normalize_for_gate_demotes_empty_command_pass_and_partializes_key_checks`、`verify_event_matches_tool_result_after_normalization`） |
+| T-V4 | `[plan].verify_gate="gate"` + verdict=fail | `mode` 保持 `Executing`；`set_mode_completed` 未调用；transcript 有 `plan.verify`；tool result 仍含 verify | DONE（`verify_gate_blocks_completed_on_fail`、`gate_fail_keeps_mode_executing_but_returns_verify`） |
+| T-V5 | `[plan].verify_gate="soft"` + verdict=fail | `mode` 仍 → completed；FAIL 写 transcript + tool result；不阻塞 | DONE（`verify_gate_soft_does_not_block`） |
+| T-V6 | reviewer 与 verifier 同 plan | create_plan 只触发 reviewer；all_completed 只触发 verifier；两者 prompt / SubagentType 不同 | PARTIAL（已有 `plan.review` / `plan.verify` 分别覆盖，但缺一条显式 lifecycle 分离断言） |
+| T-V7 | 子 loop 达到 `VERIFIER_MAX_TURNS`（64）预算仍未正常收口 | `verdict=aborted`；`verifier_stop_reason=max_turns`；不重派；gate 不把它当 fail | DONE（`build_summary_from_outcome_marks_turn_budget_cutoff_as_aborted`、`verify_gate_allows_completed_on_aborted`） |
+| T-V8 | gate 拦下后主 Agent 下轮 `update_plan(todo_x, in_progress)` | mode 仍 Executing → 主 Agent 推进 → 全部完成后 runtime 自动再 spawn verifier | DONE（`main_agent_can_reopen_todo_after_gate_fail`、`gate_fail_then_recomplete_respawns_verifier`） |
 
 ---
 

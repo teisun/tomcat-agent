@@ -113,6 +113,7 @@ pub async fn execute(
 
         let mut verify_summary = runtime.dispatch_verifier(&target_plan_id).await;
         warnings.extend(verify::normalize_for_gate(&mut verify_summary));
+        runtime.write_verify_transcript(&target_plan_id, &verify_summary);
         verify_json = verify_summary.to_json();
 
         let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");

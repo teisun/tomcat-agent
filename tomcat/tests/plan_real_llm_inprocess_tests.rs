@@ -1,4 +1,4 @@
-//! E2E-PLAN-RL-002：进程内真 LLM 全路径测试（真 LlmProvider + real reviewer subagent）。
+//! E2E-PLAN-RL-002：进程内真 LLM 全路径测试（真 LlmProvider + real reviewer/verifier subagents）。
 //!
 //! 与 [`plan_e2e_with_mock_llm_tests.rs`](./plan_e2e_with_mock_llm_tests.rs) 互补：那个
 //! 测试把 "LLM 决策一次 tool_call" 用直接调 `tools::execute` 代替，本测试不做任何 mock，
@@ -20,6 +20,7 @@
 //! 3. 内存 `PlanRuntime::mode()` 与磁盘同步
 //! 4. `finalize_completed_to_chat()` 返回 `Some(plan_id)`；之后 mode = Chat
 //! 5. transcript 至少有一条 `plan.review` 自定义事件
+//! 6. transcript 至少有一条 `plan.verify` 自定义事件
 //!
 //! ## 软断言（不强求）
 //! - reviewer summary aborted=false（reviewer LLM 可能格式漂移）
@@ -566,7 +567,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         assert_eq!(finalized.as_deref(), Some(plan_id.as_str()));
         assert!(matches!(ctx.plan_runtime.mode(), PlanMode::Chat));
 
-        // 7) reviewer transcript 软断言：至少一条 plan.review
+        // 7) transcript 软断言：至少一条 plan.review + plan.verify
         let transcript_path = ctx
             .session
             .current_transcript_path()
@@ -574,9 +575,14 @@ async fn inprocess_full_plan_path_with_real_llm() {
             .expect("transcript path 缺失");
         let transcript = std::fs::read_to_string(&transcript_path).expect("read transcript 失败");
         let has_plan_review = transcript.lines().any(|l| l.contains("\"plan.review\""));
+        let has_plan_verify = transcript.lines().any(|l| l.contains("\"plan.verify\""));
         assert!(
             has_plan_review,
             "transcript 应含至少一条 plan.review 自定义事件，实际未发现"
+        );
+        assert!(
+            has_plan_verify,
+            "transcript 应含至少一条 plan.verify 自定义事件，实际未发现"
         );
     })
     .await;

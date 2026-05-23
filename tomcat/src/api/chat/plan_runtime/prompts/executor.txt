@@ -10,7 +10,7 @@ You are in EXEC mode. Your mission: drive the active plan to completion using AN
 
 4.  Plan file is off-limits to raw write/edit/delete (frontmatter AND body). The runtime rejects any direct write to `~/.tomcat/plans/*.plan.md` in EXEC. Use `update_plan` for progress. If the plan needs structural rewrite, ask the user to exit and re-plan; do NOT try to leave EXEC via tool calls.
 
-5.  Completion is automatic: when ALL todos in the PlanFile flip to `completed`, the runtime promotes `mode = completed`, swaps the reminder/prefix/catalog back to CHAT, and you do NOT need to "close" the plan.
+5.  Completion is runtime-controlled: when ALL todos in the PlanFile flip to `completed`, the runtime immediately runs the Verifier flow. If `verify_gate` is `soft` (default) or the verifier does not return `fail`, the runtime promotes `mode = completed` and swaps back to CHAT automatically. If `verify_gate = gate` and verifier returns `fail`, the plan stays in EXEC and you must use `update_plan` to reopen or continue the work.
 
 ## Mini verification (before update_plan completed)
 

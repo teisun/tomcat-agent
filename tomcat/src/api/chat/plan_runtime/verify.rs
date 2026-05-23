@@ -51,13 +51,24 @@ Tool policy:
   other write-capable tool are NEVER available.
 - If you cannot verify because the environment blocks you, report that explicitly.
 
-Command discovery:
-1. Reuse concrete commands already present in the plan body or brief.
-2. Otherwise inspect nearby manifests first (package.json, Cargo.toml, pyproject.toml,
-   Makefile, justfile, go.mod, pom.xml, etc.).
-3. Then inspect nearby README / CONTRIBUTING docs.
-4. Do not guess default repo-wide commands without first reading a manifest or doc.
-5. Prefer the smallest scoped check that meaningfully exercises the deliverable.
+Command discovery (P0-P6; stop once you have a concrete scoped command):
+P0. Reuse explicit commands already present in the plan body, verification brief, or
+    user-provided note.
+P1. Reuse commands already injected in system context (rules / AGENTS.md /
+    CLAUDE.md summaries), if any.
+P2. Inspect the nearest manifest to the changed area first (package.json scripts,
+    Cargo.toml member, pyproject.toml, Makefile, justfile, go.mod, pom.xml, etc.).
+P3. Inspect nearby README / CONTRIBUTING / docs for the relevant directory or repo.
+P4. If still unknown, read AGENTS.md or CLAUDE.md as a fallback source of repo norms.
+P5. Infer a runner from nearby tests/layout, but confirm it by reading a manifest or
+    repo doc before using bash.
+P6. Last resort: run one minimal inferred smoke command tied to the changed directory
+    and label that check or summary as inferred.
+
+Forbidden guesses:
+- Do NOT default to repo-wide `npm test`, workspace-wide `cargo test`, or whole-repo
+  `pytest` without first reading a manifest or doc in this workspace.
+- Prefer the smallest scoped check that meaningfully exercises the deliverable.
 
 Verification workflow:
 1. Read the plan file and inspect the workspace around the target area.
@@ -265,9 +276,14 @@ pub fn build_verify_prompt(
          Scope:\n\
          - Treat all todos as already marked completed; you are checking whether that is justified.\n\
          - Read the exact plan file path above before broad search if you need to confirm current disk content.\n\
-         - Discover commands in this order: plan body / brief, nearby manifest, nearby README, then minimal inferred smoke.\n\
+         - Discover commands in this exact P0-P6 order and stop once you have a concrete scoped command:\n\
+           P0 plan body / brief / user note; P1 injected system context; P2 nearest manifest;\n\
+           P3 README / CONTRIBUTING / docs; P4 AGENTS.md or CLAUDE.md fallback;\n\
+           P5 infer from nearby tests/layout but confirm by manifest/doc; P6 one minimal inferred smoke.\n\
+         - If you use a P6 fallback, label the check or summary as inferred.\n\
          - Do NOT default to repo-wide `npm test`, workspace-wide `cargo test`, or whole-repo `pytest` without reading a manifest/doc first.\n\
          - Prefer the smallest scoped build/test/lint command that matches the changed area.\n\
+         - Include at least one adversarial probe when relevant.\n\
          - End with the required <verify> output block.\n\n\
          ----- BEGIN PLAN -----\n{plan_text}\n----- END PLAN -----\n"
         ,
@@ -460,26 +476,41 @@ fn build_summary_from_outcome(
     match outcome {
         AgentRunOutcome::Completed(result) => {
             let turns_used = count_assistant_turns(&result.new_messages);
+            let exhausted_budget =
+                exhausted_turn_budget_without_terminal_completion(&result, turns_used, turns_limit);
             let text = extract_verify_text(&result);
             match parse_verify_block(&text) {
                 Some(mut s) => {
                     s.verifier_turns_used = turns_used;
                     s.verifier_turns_limit = turns_limit;
-                    s.verifier_stop_reason = if turns_used >= turns_limit {
-                        "max_turns".into()
-                    } else {
-                        "completed".into()
-                    };
                     s.child_session_id = child_session_id.to_string();
-                    (s, SubagentOutcomeLabel::Completed)
+                    if exhausted_budget {
+                        s.verdict = "aborted".into();
+                        s.verifier_stop_reason = "max_turns".into();
+                        append_budget_exhausted_note(&mut s.summary, turns_limit);
+                        (s, SubagentOutcomeLabel::Failed)
+                    } else {
+                        s.verifier_stop_reason = "completed".into();
+                        (s, SubagentOutcomeLabel::Completed)
+                    }
                 }
                 None => {
-                    let mut s = VerifySummary::aborted_with(format!(
-                        "[{origin}] verifier 输出不符合 <verify> 契约（child={child_session_id}）"
-                    ));
+                    let mut s = if exhausted_budget {
+                        VerifySummary::aborted_with(format!(
+                            "[{origin}] verifier 在 {turns_limit} 轮预算内未正常收口（child={child_session_id}）"
+                        ))
+                    } else {
+                        VerifySummary::aborted_with(format!(
+                            "[{origin}] verifier 输出不符合 <verify> 契约（child={child_session_id}）"
+                        ))
+                    };
                     s.verifier_turns_used = turns_used;
                     s.verifier_turns_limit = turns_limit;
-                    s.verifier_stop_reason = "parse_error".into();
+                    s.verifier_stop_reason = if exhausted_budget {
+                        "max_turns".into()
+                    } else {
+                        "parse_error".into()
+                    };
                     s.child_session_id = child_session_id.to_string();
                     (s, SubagentOutcomeLabel::Failed)
                 }
@@ -530,6 +561,43 @@ fn count_assistant_turns(messages: &[ChatMessage]) -> u32 {
         .iter()
         .filter(|m| matches!(m.role, ChatMessageRole::Assistant))
         .count() as u32
+}
+
+fn exhausted_turn_budget_without_terminal_completion(
+    result: &AgentRunResult,
+    turns_used: u32,
+    turns_limit: u32,
+) -> bool {
+    if turns_used > turns_limit {
+        return true;
+    }
+    if turns_used < turns_limit {
+        return false;
+    }
+    !ended_with_terminal_assistant_message(&result.new_messages)
+}
+
+fn ended_with_terminal_assistant_message(messages: &[ChatMessage]) -> bool {
+    use crate::core::llm::ChatMessageRole;
+    matches!(
+        messages.last().map(|msg| &msg.role),
+        Some(ChatMessageRole::Assistant)
+    )
+}
+
+fn append_budget_exhausted_note(summary: &mut String, turns_limit: u32) {
+    let note = format!(
+        "[runtime override] verifier exhausted the {turns_limit}-turn budget before normal completion."
+    );
+    if summary.is_empty() {
+        *summary = note;
+    } else if !summary.contains(&note) {
+        summary.push(' ');
+        summary.push_str(&note);
+    }
+    if summary.len() > 600 {
+        summary.truncate(600);
+    }
 }
 
 #[cfg(test)]
@@ -614,12 +682,130 @@ summary: nope
     }
 
     #[test]
+    fn normalize_for_gate_demotes_empty_command_pass_and_partializes_key_checks() {
+        let mut summary = VerifySummary {
+            checks: vec![VerifyCheck {
+                name: "unit test".into(),
+                command: String::new(),
+                result: "pass".into(),
+                output_excerpt: "ok".into(),
+            }],
+            verdict: "pass".into(),
+            summary: "claimed success".into(),
+            ..Default::default()
+        };
+
+        let warnings = normalize_for_gate(&mut summary);
+
+        assert_eq!(summary.checks[0].result, "skip");
+        assert_eq!(summary.verdict, "partial");
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("command 为空"));
+        assert!(warnings[1].contains("降级为 partial"));
+    }
+
+    #[test]
+    fn build_summary_from_outcome_marks_turn_budget_cutoff_as_aborted() {
+        let verify_block = r#"<verify>
+checks:
+  - name: smoke
+    command: cargo test -p tomcat verifier
+    result: pass
+    output_excerpt: ok
+verdict: pass
+summary: model claimed success
+</verify>"#;
+        let mut new_messages = Vec::new();
+        for idx in 0..63 {
+            new_messages.push(ChatMessage::assistant(format!("turn {idx}")));
+        }
+        new_messages.push(ChatMessage::assistant_with_tool_calls(
+            Some(verify_block),
+            vec![serde_json::json!({
+                "id": "call_64",
+                "type": "function",
+                "function": { "name": "bash", "arguments": "{}" }
+            })],
+        ));
+        new_messages.push(ChatMessage::tool("call_64", "ok"));
+
+        let (summary, label) = build_summary_from_outcome(
+            "test",
+            "child-1",
+            VERIFIER_MAX_TURNS,
+            AgentRunOutcome::Completed(AgentRunResult {
+                final_text: verify_block.to_string(),
+                new_messages,
+            }),
+        );
+
+        assert_eq!(summary.verdict, "aborted");
+        assert_eq!(summary.verifier_stop_reason, "max_turns");
+        assert_eq!(summary.verifier_turns_used, VERIFIER_MAX_TURNS);
+        assert!(summary.summary.contains("runtime override"));
+        assert_eq!(label, SubagentOutcomeLabel::Failed);
+    }
+
+    #[test]
+    fn build_summary_from_outcome_keeps_pass_when_limit_is_used_exactly_and_normally() {
+        let verify_block = r#"<verify>
+checks:
+  - name: smoke
+    command: cargo test -p tomcat verifier
+    result: pass
+    output_excerpt: ok
+verdict: pass
+summary: model finished on the last turn
+</verify>"#;
+        let mut new_messages = Vec::new();
+        for idx in 0..63 {
+            new_messages.push(ChatMessage::assistant(format!("turn {idx}")));
+        }
+        new_messages.push(ChatMessage::assistant(verify_block));
+
+        let (summary, label) = build_summary_from_outcome(
+            "test",
+            "child-2",
+            VERIFIER_MAX_TURNS,
+            AgentRunOutcome::Completed(AgentRunResult {
+                final_text: verify_block.to_string(),
+                new_messages,
+            }),
+        );
+
+        assert_eq!(summary.verdict, "pass");
+        assert_eq!(summary.verifier_stop_reason, "completed");
+        assert_eq!(summary.verifier_turns_used, VERIFIER_MAX_TURNS);
+        assert_eq!(summary.summary, "model finished on the last turn");
+        assert_eq!(label, SubagentOutcomeLabel::Completed);
+    }
+
+    #[test]
     fn verifier_system_prompt_contains_contract() {
         let prompt = VERIFIER_SYSTEM_PROMPT;
         assert!(prompt.contains("<verify>"));
         assert!(prompt.contains("pass|fail|partial|aborted"));
         assert!(prompt.contains("read, search_files, list_dir, bash"));
-        assert!(prompt.contains("Do not guess default repo-wide commands"));
+        assert!(prompt.contains("P0-P6"));
+        assert!(prompt.contains("AGENTS.md"));
+        assert!(prompt.contains("CLAUDE.md"));
+        assert!(prompt.contains("label that check or summary as inferred"));
+        assert!(prompt.contains("adversarial probe"));
+    }
+
+    #[test]
+    fn build_verify_prompt_mentions_discovery_order_and_inferred_rules() {
+        let prompt = build_verify_prompt(
+            "plan_demo",
+            "## Goal\nship it\n",
+            Path::new("/tmp/plan_demo.plan.md"),
+            Some(Path::new("/tmp/workspace")),
+        );
+        assert!(prompt.contains("P0 plan body / brief / user note"));
+        assert!(prompt.contains("P1 injected system context"));
+        assert!(prompt.contains("P4 AGENTS.md or CLAUDE.md fallback"));
+        assert!(prompt.contains("label the check or summary as inferred"));
+        assert!(prompt.contains("Include at least one adversarial probe"));
     }
 
     #[test]

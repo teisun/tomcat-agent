@@ -14,7 +14,7 @@
 | 状态 | PENDING_INTEGRATION（plan-mode-full-fix + P9 verifier 全部落地，待合并集成） |
 | 分支 | `feature/plan-mode-enhance` (from `develop`) |
 | 起点 commit | (待写入首个 commit 后回填) |
-| 阶段 | P9 verifier 完成 → `cargo fmt --all` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib` + `cargo test --test plan_runtime_integration_tests` + `cargo test --test plan_e2e_with_mock_llm_tests` 全绿 → 待本地提交 / PENDING_INTEGRATION |
+| 阶段 | P9 verifier 完成并完成 remediation 收口（VerifySummary 单一事实源、`max_turns -> aborted`、P0-P6 prompt、gate 边界、full-chain `plan.verify` 断言）→ 待本地验证/集成提交 |
 
 ## Phase 进度
 
@@ -32,8 +32,8 @@
 - [x] **P8b** `plan_runtime_integration_tests` 全绿（8 个端到端用例：full_plan_lifecycle / build→cancel→resume / ask_question 双答案 + Ctrl+C cancelled / reviewer summary 入 tool result / raw_edit guard / todos 路由 / friendly hint）+ 全部 await 用 `tokio::time::timeout(30s)` 包裹（防 D12）+ HOME 隔离 + 串/并行均通过
 - [/] **P8c** `plan_cli_e2e`（部分）— D10 catalog 一致性 `committed_tool_catalog_matches_catalog_renderer` 已绿；完整 E2E-PLAN-001～016（含 mock HTTP / 子进程 / scenario library）规模超出"三卡同分支"范围，转移到独立 PR-PLG 单独交付（chat_loop 已经把 plan_runtime/catalog/reminder/prefix/build 接通，主路径可手动跑）
 - [x] **P8d** gen-tool-catalog 跑通 / `tool_catalog_doc` (D10) 1/0 / cargo test --lib 1025/0 / plan_runtime_integration 8/0；人工 PLAN-UX-01～04 spot-check 留给真实部署
-- [x] **P9 verifier（PR-V0～V3）** DONE Owner=Tom — 已完成 Mini verification prompts + P0-P6 命令发现、internal verifier（`verify.rs` / `SubagentType::Verifier` / `dispatch_verifier` / tool_exec 双保险白名单 / `update_plan` 两次写盘）、`plan.verify` transcript 事件 + `update_plan` tool result `verify` 双通道回传，以及 `[plan].verify_gate = "soft" | "gate"` gate 语义。边界保持不变：**frontmatter 零改造**、唯一配置项仅 `verify_gate`、**不加** `/plan verify` CLI、`VERIFIER_MAX_TURNS = 64`。门禁：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`、`cargo test --test plan_runtime_integration_tests`、`cargo test --test plan_e2e_with_mock_llm_tests` 全绿。子项与验收锚点见 [`T2-P1-002.md`](../agents/TASK_BOARD_002/tasks/T2-P1-002.md) **PR-V0～V3** 与方案 [§4.2](../architecture/plan-exec-code-verification.md#42-实施点分期)。
-- [x] **真 LLM E2E 轮（2026-05）** 完成 reviewer 子 Agent 真派发（`ProdReviewerDispatcher` 注入 `AgentRegistry::spawn_subagent_internal` + `Weak<PlanRuntime>` 防 cycle + 抽出 `run_chat_turn` 复用） + tool_exec 双保险守卫（reviewer 路径下 catalog 白名单 + frontmatter diff guard） + transcript `plan.review` / `plan.review.warning` 自定义事件 + 删 `ReviewerConfig.default_allow_edit` & PlanRuntime 原子开关（改稿权写死 true） + 默认 `max_turns=64` + 新增 [`tests/plan_real_llm_inprocess_tests.rs`](../../tests/plan_real_llm_inprocess_tests.rs)（E2E-PLAN-RL-002，需 `OPENAI_API_KEY`）+ [`tests/plan_real_llm_cli_e2e.rs`](../../tests/plan_real_llm_cli_e2e.rs)（E2E-PLAN-RL-001，双进程 chat / chat --resume）+ reviewer.md §11 测试矩阵 12 项 DONE
+- [x] **P9 verifier（PR-V0～V3）** DONE Owner=Tom — 已完成 Mini verification prompts + P0-P6 命令发现、internal verifier（`verify.rs` / `SubagentType::Verifier` / `dispatch_verifier` / tool_exec 双保险白名单 / `update_plan` 两次写盘）、`plan.verify` transcript 事件 + `update_plan` tool result `verify` 双通道回传，以及 `[plan].verify_gate = "soft" | "gate"` gate 语义。remediation 追加收口：`transcript.plan.verify` 与 `update_plan.verify` 统一为 normalize 后的最终 `VerifySummary`、`max_turns` 改为“预算耗尽未正常收口 => verdict=aborted / stop_reason=max_turns”、verifier prompt 与 executor Mini 统一 P0-P6、补 `partial/aborted` gate 与 re-complete respawn 回归、real-LLM inprocess E2E 明确断言 `plan.verify`。边界保持不变：**frontmatter 零改造**、唯一配置项仅 `verify_gate`、**不加** `/plan verify` CLI、`VERIFIER_MAX_TURNS = 64`。
+- [x] **真 LLM E2E 轮（2026-05）** 完成 reviewer/verifier 子 Agent 真派发装配；[`tests/plan_real_llm_inprocess_tests.rs`](../../tests/plan_real_llm_inprocess_tests.rs)（E2E-PLAN-RL-002，需 `OPENAI_API_KEY`）现同时断言 transcript 中存在 `plan.review` 与 `plan.verify`，作为 full-chain verifier wiring 最低验收；[`tests/plan_real_llm_cli_e2e.rs`](../../tests/plan_real_llm_cli_e2e.rs) 继续保留黑盒链路，但 verifier 侧以 inprocess 用例作为当前主验收锚点。
 
 ## 关键决策
 

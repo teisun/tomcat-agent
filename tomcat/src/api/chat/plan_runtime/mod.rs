@@ -677,7 +677,9 @@ impl PlanRuntime {
     /// 2. 读取 plan 文件 → 调 dispatcher → 解析 `<verify>` block → 返回 `VerifySummary`。
     /// 3. 失败 / parse 错 / max_turns / parent abort → `verdict=aborted`；
     ///    调用方（`update_plan`）**不**因此失败，而是按 `verify_gate` 决定是否收工。
-    /// 4. 若 dispatcher 未注入 → 返回 `placeholder_pending`。
+    /// 4. transcript `plan.verify` 事件由调用方在 `normalize_for_gate()` 之后统一写入，
+    ///    以保证 transcript 与 `update_plan.verify` 共用同一份最终语义。
+    /// 5. 若 dispatcher 未注入 → 返回 `placeholder_pending`。
     pub async fn dispatch_verifier(&self, plan_id: &str) -> verify::VerifySummary {
         let Some(dispatcher) = self.verifier.lock().clone() else {
             return verify::VerifySummary::placeholder_pending();
@@ -692,8 +694,14 @@ impl PlanRuntime {
         };
 
         let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let summary = dispatcher.dispatch(plan_id, &plan_text, cascade).await;
+        dispatcher.dispatch(plan_id, &plan_text, cascade).await
+    }
 
+    /// 把最终版 VerifySummary 写入 transcript `plan.verify` 事件。
+    ///
+    /// 调用方应先完成 `normalize_for_gate()`，再调用本方法，确保 transcript 与
+    /// `update_plan` tool result 共享同一份 VerifySummary。
+    pub(crate) fn write_verify_transcript(&self, plan_id: &str, summary: &verify::VerifySummary) {
         let mut payload = summary.to_json();
         if let Some(obj) = payload.as_object_mut() {
             obj.insert(
@@ -706,7 +714,6 @@ impl PlanRuntime {
             );
         }
         self.write_transcript_custom(payload);
-        summary
     }
 
     /// 用于单测 / 集成测：清除指定 plan_id 的 reviewer round 计数。

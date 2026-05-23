@@ -1708,29 +1708,42 @@ mod reviewer_guards_tests {
     }
 
     #[tokio::test]
-    async fn verifier_blocks_non_whitelisted_tool() {
+    async fn verifier_blocks_non_whitelisted_tools() {
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
-        let tc = ToolCallInfo {
-            id: "tc1".into(),
-            name: "update_plan".into(),
-            arguments: "{}".into(),
-        };
-        let outcome = execute_tool_full(
-            &primitive,
-            &None,
-            &None,
-            None,
-            None,
-            None,
-            SubagentType::Verifier,
-            &tokio_util::sync::CancellationToken::new(),
-            &tc,
-        )
-        .await;
-        assert!(outcome.is_error);
-        assert!(outcome
-            .model_text
-            .contains("verifier 子 Agent 禁止调用工具"));
+        for (name, arguments) in [
+            ("update_plan", "{}"),
+            ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
+            (
+                "edit",
+                r#"{"path":"/tmp/demo.txt","old_string":"a","new_string":"b"}"#,
+            ),
+        ] {
+            let tc = ToolCallInfo {
+                id: format!("tc_{name}"),
+                name: name.into(),
+                arguments: arguments.into(),
+            };
+            let outcome = execute_tool_full(
+                &primitive,
+                &None,
+                &None,
+                None,
+                None,
+                None,
+                SubagentType::Verifier,
+                &tokio_util::sync::CancellationToken::new(),
+                &tc,
+            )
+            .await;
+            assert!(outcome.is_error, "{name} 应被 verifier 白名单拒绝");
+            assert!(
+                outcome
+                    .model_text
+                    .contains(&format!("verifier 子 Agent 禁止调用工具 `{name}`")),
+                "{name} 拒绝文案异常: {}",
+                outcome.model_text
+            );
+        }
     }
 
     #[tokio::test]

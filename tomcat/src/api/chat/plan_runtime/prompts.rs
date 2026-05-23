@@ -90,4 +90,13 @@ mod tests {
         assert!(rendered.contains("cargo test` for the whole workspace"));
         assert!(rendered.contains("pytest` for the entire repo"));
     }
+
+    #[test]
+    fn executor_prompt_mentions_verifier_gate_behavior() {
+        let rendered = render_executor_reminder("plan_demo_aaaa1111");
+        assert!(rendered.contains("Completion is runtime-controlled"));
+        assert!(rendered.contains("Verifier flow"));
+        assert!(rendered.contains("verify_gate = gate"));
+        assert!(rendered.contains("the plan stays in EXEC"));
+    }
 }
