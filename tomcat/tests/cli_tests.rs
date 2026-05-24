@@ -1631,6 +1631,439 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     );
 }
 
+// ──────────────────── Story 2.5: Bash 后台监控 P1 真 LLM 黑盒（E2E-CLI-016C~016E） ────────────────────
+//
+// 这 3 条真测分别锁三条 P1 门禁：
+// - `016C`：finish-only auto-feed。模型起后台 bash 后先做独立工作，不主动 poll，
+//   必须依赖 `<background-task-finished ...>` synthetic user message 继续推进。
+// - `016D`：`task_output(block=true)` 单次 wait-slice。模型必须走阻塞等待路径，
+//   stderr 要出现倒计时 update，transcript 要出现真实 `task_output` / `task_stop`。
+// - `016E`：真实多次 timeout slice 重试。模型必须至少经历两次
+//   `wakeReason="timeout" && finished=false`，然后继续等到 `new_output` 再收尾。
+//
+// 这组 helper 只做四件事：
+// 1. 起临时 HOME + `tomcat init`
+// 2. 把本次 scratch 目录 `workspace add`
+// 3. 统一跑一次 `tomcat chat` 黑盒并捕获 stdout/stderr
+// 4. 统一读取当前 transcript，便于断言真实 tool_call / tool_result
+
+struct BackgroundBashP1RealLlmFixture {
+    _home: tempfile::TempDir,
+    work_dir: PathBuf,
+    config_path: PathBuf,
+    scratch: PathBuf,
+    api_key: String,
+}
+
+struct CliChatRunCapture {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn setup_background_bash_p1_real_llm_fixture(
+    scratch_leaf: &str,
+) -> BackgroundBashP1RealLlmFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let work_dir = dir.path().join("work");
+    std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
+    let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
+
+    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("workspace-temp")
+        .join(scratch_leaf);
+    std::fs::create_dir_all(&scratch).unwrap();
+    let scratch = scratch.canonicalize().expect("workspace-temp scratch path");
+    let scratch_str = scratch.to_str().expect("utf8 scratch path");
+
+    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!(
+            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
+        )
+    });
+
+    info!("Arrange: tomcat workspace add {}", scratch_str);
+    cmd()
+        .args(["workspace", "add", scratch_str])
+        .env("HOME", dir.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已添加工作区"));
+
+    BackgroundBashP1RealLlmFixture {
+        _home: dir,
+        work_dir,
+        config_path,
+        scratch,
+        api_key,
+    }
+}
+
+fn run_background_bash_p1_real_llm_chat(
+    fx: &BackgroundBashP1RealLlmFixture,
+    prompt: String,
+    timeout: std::time::Duration,
+) -> CliChatRunCapture {
+    let mut c = cmd();
+    c.arg("chat")
+        .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", &fx.api_key)
+        .env("TOMCAT__CONFIG_PATH", fx.config_path.to_str().unwrap())
+        .env("RUST_LOG", "tomcat=info")
+        .write_stdin(prompt)
+        .timeout(timeout);
+    let assert = c.assert();
+    let output = assert.get_output();
+    CliChatRunCapture {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    }
+}
+
+fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixture) -> String {
+    let cfg = tomcat::load_config_toml_file(&fx.config_path).expect("load temp cli config");
+    let sessions_dir = fx.work_dir.join("agents").join(&cfg.agent.id).join("sessions");
+    let session = tomcat::SessionManager::new(sessions_dir);
+    let transcript_path = session
+        .current_transcript_path()
+        .expect("current_transcript_path")
+        .expect("transcript path should exist");
+    fs::read_to_string(&transcript_path).expect("read transcript")
+}
+
+/// [E2E-CLI-016C] bash 后台任务 finish-only auto-feed 真 LLM 黑盒回归
+///
+/// 用户意图：让模型严格走一次 `bash(run_in_background=true)`，先做独立文件写入，
+/// 然后**禁止主动 poll**，必须依赖 runtime 自动注入的
+/// `<background-task-finished ...>` synthetic user message 继续推进。
+///
+/// 验证：
+/// - exit 0；
+/// - stderr 出现 `[bg] task ... queued for next turn`（证明 lifecycle subscriber →
+///   follow_up_queue → between-turns drain 路径真的跑了）；
+/// - 后台任务真实产出 `bg_done.txt`，独立工作真实产出 `marker.txt`；
+/// - stdout 最终包含约定完成词 `AUTOFEED_OK`。
+///
+/// 意义：P1 门禁——这条用例是真 LLM + 真 CLI `chat_loop` 黑盒，不是仅测 tool 层。
+#[test]
+fn test_user_background_bash_autofeed_real_llm_cli() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    let _span = info_span!("test_user_background_bash_autofeed_real_llm_cli").entered();
+
+    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016c_bg_autofeed");
+    let bg_done = fx.scratch.join("bg_done.txt");
+    let marker = fx.scratch.join("marker.txt");
+    let _ = fs::remove_file(&bg_done);
+    let _ = fs::remove_file(&marker);
+
+    let prompt = format!(
+        concat!(
+            "以下内容就是完整步骤；不要要求我重复步骤，不要反问，不要 ask_question。 ",
+            "请严格按下面步骤执行，不要偏离，不要解释策略： ",
+            "1. 只启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+            "2. 这个后台 bash 的 command 必须精确执行：sleep 2; printf BG_DONE > \"{bg_done}\"。 ",
+            "3. 启动后台任务后，立刻创建文件 \"{marker}\"，内容必须精确为 MARKER。 ",
+            "4. 从这一步开始，禁止调用 task_output、task_list、task_stop，也不要再启动新的 bash；你必须等待 runtime 自动注入的 <background-task-finished ...> 系统消息。 ",
+            "5. 只有在看到该系统消息之后，才允许读取并确认 \"{bg_done}\" 和 \"{marker}\" 都存在且内容正确。 ",
+            "6. 全部确认后，只回复一行 AUTOFEED_OK 并停止；不要输出别的结尾。"
+        ),
+        bg_done = bg_done.display(),
+        marker = marker.display(),
+    );
+
+    info!("Act: tomcat chat 触发后台 bash auto-feed，timeout 120s");
+    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
+    let stdout = run.stdout;
+    let stderr = run.stderr;
+    info!("[tomcat chat stdout] {}", trunc(&stdout, 1500));
+    if !stderr.is_empty() {
+        info!("[tomcat chat stderr] {}", trunc(&stderr, 2000));
+    }
+    info!("Assert: exit 0 + stderr 含 [bg] task + 两文件落盘 + stdout 含 AUTOFEED_OK");
+    assert!(run.success, "tomcat chat 应 exit 0；stderr: {}", trunc(&stderr, 1200));
+    assert!(
+        stderr.contains("[bg] task") && stderr.contains("queued for next turn"),
+        "stderr 应含后台完成 auto-feed 提示，实际: {}",
+        trunc(&stderr, 1200)
+    );
+    assert!(bg_done.exists(), "后台任务产物应存在: {}", bg_done.display());
+    assert!(marker.exists(), "独立工作产物应存在: {}", marker.display());
+    let bg_done_text = fs::read_to_string(&bg_done).unwrap_or_default();
+    let marker_text = fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        bg_done_text, "BG_DONE",
+        "bg_done.txt 内容应精确为 BG_DONE，实际: {:?}",
+        bg_done_text
+    );
+    assert_eq!(
+        marker_text, "MARKER",
+        "marker.txt 内容应精确为 MARKER，实际: {:?}",
+        marker_text
+    );
+    assert!(
+        stdout.contains("AUTOFEED_OK"),
+        "stdout 应含 AUTOFEED_OK，实际: {}",
+        trunc(&stdout, 600)
+    );
+}
+
+/// [E2E-CLI-016D] `task_output(block=true)` wait-slice 真 LLM 黑盒回归
+///
+/// 用户意图：模型必须在 `bash(run_in_background=true)` 之后**立即**进入
+/// `task_output(block=true, timeout_ms=300)` 循环，直到拿到 `wakeReason="new_output"`；
+/// 不允许依赖 auto-feed，不允许 `task_output(block=false)`。
+///
+/// 验证：
+/// - exit 0；
+/// - stderr 含 `task_output` 且含 `waiting_for_output` 倒计时 update；
+/// - transcript 中至少有 1 次 `task_output` tool call，且参数包含
+///   `block=true` 与 `timeout_ms=300`；
+/// - 后台任务真实产出 `blockwait_done.txt`；
+/// - stdout 最终包含约定完成词 `BLOCKWAIT_OK`。
+///
+/// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、CLI 倒计时 update、
+/// transcript 中的真实 tool_call，以及 `new_output` 唤醒后的收尾。
+#[test]
+fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    let _span = info_span!("test_user_background_bash_blocking_waitslice_real_llm_cli").entered();
+
+    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016d_blockwait");
+    let done_path = fx.scratch.join("blockwait_done.txt");
+    let _ = fs::remove_file(&done_path);
+
+    let prompt = format!(
+        concat!(
+            "以下内容就是完整指令；不要要求我重复，不要反问，不要 ask_question。 ",
+            "请严格执行，并只在最后回复一行 BLOCKWAIT_OK： ",
+            "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+            "2. 该后台 bash 的 command 必须精确执行：sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > \"{done_path}\"; sleep 30。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=300、since 从 0 开始并按 next_offset 续传。 ",
+            "4. 如果 task_output 返回 wakeReason=timeout 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, timeout_ms=300) 等下一次 wait slice。 ",
+            "5. 当 task_output 返回 wakeReason=new_output 且内容里出现 TOKEN_WAITSLICE 后，必须调用 task_stop 停掉这个后台任务，避免它继续睡眠。 ",
+            "6. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
+            "7. 只有在看到 TOKEN_WAITSLICE 且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 BLOCKWAIT_DONE。 ",
+            "8. 全部确认后，只回复一行 BLOCKWAIT_OK 并停止。"
+        ),
+        done_path = done_path.display(),
+    );
+
+    info!("Act: tomcat chat 触发 block=true wait-slice，timeout 120s");
+    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
+    let stdout = run.stdout;
+    let stderr = run.stderr;
+    info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
+    if !stderr.is_empty() {
+        info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
+    }
+    assert!(run.success, "tomcat chat 应 exit 0；stderr: {}", trunc(&stderr, 1200));
+    assert!(
+        stderr.contains("task_output") && stderr.contains("waiting_for_output"),
+        "stderr 应出现 task_output 倒计时 update，实际: {}",
+        trunc(&stderr, 1200)
+    );
+    assert!(
+        done_path.exists(),
+        "后台任务产物应存在: {}",
+        done_path.display()
+    );
+    let done_text = fs::read_to_string(&done_path).unwrap_or_default();
+    assert_eq!(
+        done_text, "BLOCKWAIT_DONE",
+        "blockwait_done.txt 内容应精确为 BLOCKWAIT_DONE，实际: {:?}",
+        done_text
+    );
+    assert!(
+        stdout.contains("BLOCKWAIT_OK"),
+        "stdout 应含 BLOCKWAIT_OK，实际: {}",
+        trunc(&stdout, 600)
+    );
+
+    // transcript 级硬断言：必须能看到真实 `task_output(block=true)` + `task_stop`。
+    let transcript = load_background_bash_p1_real_llm_transcript(&fx);
+    let task_output_calls = transcript.matches("\"name\":\"task_output\"").count();
+    assert!(
+        task_output_calls >= 1,
+        "transcript 中 task_output 次数应至少为 1（证明真 LLM 走了 block=true 等待路径），实际 {}；transcript: {}",
+        task_output_calls,
+        trunc(&transcript, 1500)
+    );
+    assert!(
+        transcript.contains("\\\"block\\\":true") && transcript.contains("\\\"timeout_ms\\\":300"),
+        "transcript 应含 block=true 与 timeout_ms=300；actual: {}",
+        trunc(&transcript, 1500)
+    );
+    assert!(
+        transcript.contains("TOKEN_WAITSLICE"),
+        "transcript 应能看到 wait-slice 唤醒后的 token；actual: {}",
+        trunc(&transcript, 1500)
+    );
+    assert!(
+        transcript.contains("\"name\":\"task_stop\""),
+        "transcript 应含 task_stop（收尾后台任务），actual: {}",
+        trunc(&transcript, 1500)
+    );
+}
+
+/// [E2E-CLI-016E] 真 LLM 多次 timeout slice 重试
+///
+/// 用户意图：模型必须在同一个后台任务上经历**至少两次**
+/// `wakeReason="timeout" && finished=false`，继续重试 `task_output(block=true, timeout_ms=300)`，
+/// 最后再等到一次 `new_output` 并收尾。
+///
+/// 验证：
+/// - exit 0；
+/// - stderr 含 `task_output` 与 `waiting_for_output`；
+/// - transcript 中 `task_output` tool call 至少 3 次；
+/// - transcript 中 `role=tool` 的结果里，`wakeReason="timeout"` 至少 2 次；
+/// - transcript 中最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；
+/// - 真实产物 `multi_timeout_done.txt` 存在且内容正确；
+/// - stdout 最终包含 `MULTI_TIMEOUT_OK`。
+#[test]
+fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    let _span = info_span!("test_user_background_bash_multiple_timeout_slices_real_llm_cli")
+        .entered();
+
+    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016e_multi_timeout");
+    let done_path = fx.scratch.join("multi_timeout_done.txt");
+    let _ = fs::remove_file(&done_path);
+
+    let prompt = format!(
+        concat!(
+            "以下内容就是完整指令；不要要求我重复，不要反问，不要 ask_question。 ",
+            "请严格执行，并只在最后回复一行 MULTI_TIMEOUT_OK： ",
+            "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+            "2. 该后台 bash 的 command 必须精确执行：sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=300、since 从 0 开始并按 next_offset 续传。 ",
+            "4. 你必须真实观察到至少两次 wakeReason=timeout 且 finished=false；每次 timeout 都必须继续再次调用 task_output(block=true, timeout_ms=300)。 ",
+            "5. 在至少两次 timeout 之后，继续用同样方式等待，直到某次 task_output 返回 wakeReason=new_output 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
+            "6. 一旦看到 TOKEN_MULTI_TIMEOUT，必须调用 task_stop 停掉该后台任务，避免它继续睡眠。 ",
+            "7. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
+            "8. 只有在已经看到至少两次 timeout、随后看到 TOKEN_MULTI_TIMEOUT、并且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 MULTI_TIMEOUT_DONE。 ",
+            "9. 全部确认后，只回复一行 MULTI_TIMEOUT_OK 并停止。"
+        ),
+        done_path = done_path.display(),
+    );
+
+    info!("Act: tomcat chat 触发多次 timeout slice，timeout 150s");
+    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(150));
+    let stdout = run.stdout;
+    let stderr = run.stderr;
+    info!("[tomcat chat stdout] {}", trunc(&stdout, 2200));
+    if !stderr.is_empty() {
+        info!("[tomcat chat stderr] {}", trunc(&stderr, 2600));
+    }
+    assert!(run.success, "tomcat chat 应 exit 0；stderr: {}", trunc(&stderr, 1400));
+    assert!(
+        stderr.contains("task_output") && stderr.contains("waiting_for_output"),
+        "stderr 应出现 task_output 倒计时 update，实际: {}",
+        trunc(&stderr, 1400)
+    );
+    assert!(
+        done_path.exists(),
+        "后台任务产物应存在: {}",
+        done_path.display()
+    );
+    let done_text = fs::read_to_string(&done_path).unwrap_or_default();
+    assert_eq!(
+        done_text, "MULTI_TIMEOUT_DONE",
+        "multi_timeout_done.txt 内容应精确为 MULTI_TIMEOUT_DONE，实际: {:?}",
+        done_text
+    );
+    assert!(
+        stdout.contains("MULTI_TIMEOUT_OK"),
+        "stdout 应含 MULTI_TIMEOUT_OK，实际: {}",
+        trunc(&stdout, 800)
+    );
+
+    let transcript = load_background_bash_p1_real_llm_transcript(&fx);
+
+    let mut task_output_calls = 0usize;
+    let mut timeout_results = 0usize;
+    let mut saw_new_output_token = false;
+    let mut saw_task_stop = false;
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "assistant" {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                for tc in tool_calls {
+                    let name = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let args = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if name == "task_output" {
+                        task_output_calls += 1;
+                        assert!(
+                            args.contains("\"block\":true") && args.contains("\"timeout_ms\":300"),
+                            "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
+                        );
+                    } else if name == "task_stop" {
+                        saw_task_stop = true;
+                    }
+                }
+            }
+        } else if role == "tool" {
+            let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if content.contains("\"wakeReason\":\"timeout\"") {
+                timeout_results += 1;
+            }
+            if content.contains("TOKEN_MULTI_TIMEOUT") && content.contains("\"wakeReason\":\"new_output\"")
+            {
+                saw_new_output_token = true;
+            }
+        }
+    }
+
+    assert!(
+        task_output_calls >= 3,
+        "transcript 中 task_output 次数应至少为 3（至少两次 timeout + 一次 new_output），实际 {}；transcript: {}",
+        task_output_calls,
+        trunc(&transcript, 1800)
+    );
+    assert!(
+        timeout_results >= 2,
+        "transcript 中 timeout slice 次数应至少为 2，实际 {}；transcript: {}",
+        timeout_results,
+        trunc(&transcript, 1800)
+    );
+    assert!(
+        saw_new_output_token,
+        "transcript 中应看到包含 TOKEN_MULTI_TIMEOUT 的 new_output 结果；actual: {}",
+        trunc(&transcript, 1800)
+    );
+    assert!(
+        saw_task_stop || transcript.contains("\"name\":\"task_stop\""),
+        "transcript 应含 task_stop（收尾后台任务），actual: {}",
+        trunc(&transcript, 1800)
+    );
+}
+
 /// [E2E-CLI-013] 用户要求助手在仓库约定的 `workspace-temp` 子目录下写文件
 ///
 /// 验证：exit 0；`{CARGO_MANIFEST_DIR}/workspace-temp/e2e_cli013_hello/hello_e2e.txt` 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）

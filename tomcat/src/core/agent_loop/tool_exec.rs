@@ -42,10 +42,11 @@ use crate::core::tools::primitive::{
     BashTaskRegistry, EditOperation, EditOperationType, PrimitiveExecutor, SearchFilesArgs,
 };
 use crate::infra::error::AppError;
-use crate::infra::events::ToolDisplay;
+use crate::infra::event_bus::EventBus;
+use crate::infra::events::{AgentEvent, ToolDisplay, ToolOutput};
 
 use super::config_backend::SharedConfigBackend;
-use super::types::ToolCallInfo;
+use super::types::{BackgroundCompletionRoutes, CompletionRoute, ToolCallInfo};
 
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
 /// 与"插件上下文中触发的工具调用"区分，便于 hostcall 审计层分桶。
@@ -189,6 +190,8 @@ pub(super) async fn execute_tool_with_openai_files(
         None,
         &tokio_util::sync::CancellationToken::new(),
         tc,
+        None,
+        None,
     )
     .await
     .into_legacy_tuple()
@@ -213,6 +216,11 @@ pub(super) async fn execute_tool_full(
     review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
+    // P1（bash background monitor）：传 event_bus 给 task_output(block=true) 发倒计时
+    // ToolExecutionUpdate；传 completion_routes 让 dispatcher 走 claim-on-entry 去重。
+    // 二者均可为 None（向后兼容独立单测/未注入路径）。
+    event_bus: Option<&Arc<dyn EventBus>>,
+    completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
     let mut display = None;
     let (model_text, is_error, follow_up_parts) = execute_tool_tuple_full(
@@ -227,6 +235,8 @@ pub(super) async fn execute_tool_full(
         cancel,
         tc,
         &mut display,
+        event_bus,
+        completion_routes,
     )
     .await;
 
@@ -251,6 +261,8 @@ async fn execute_tool_tuple_full(
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
     display_out: &mut Option<ToolDisplay>,
+    event_bus: Option<&Arc<dyn EventBus>>,
+    completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
@@ -806,7 +818,17 @@ async fn execute_tool_tuple_full(
         }
         // T2-P0-016 PR-I：bash 后台任务三件套；未注入 registry 时返回友好错误，
         // 主流程不阻塞（与 config_get / config_set 「未启用」语义一致）。
-        "task_output" => handle_task_output(bash_task_registry, &args).await,
+        "task_output" => {
+            handle_task_output(
+                bash_task_registry,
+                &args,
+                cancel,
+                tc,
+                event_bus,
+                completion_routes,
+            )
+            .await
+        }
         "task_stop" => handle_task_stop(bash_task_registry, &args).await,
         "task_list" => handle_task_list(bash_task_registry).await,
         "list_dir" => {
@@ -939,9 +961,21 @@ async fn handle_bash_background(
         .map_err(|e| e.to_string())
 }
 
+/// P1（bash background monitor）：`task_output(block, timeout_ms)` 的默认值与边界。
+/// 与 plan / docs / catalog description 保持一致：`block=true` 时 `timeout_ms`
+/// 默认 `5_000`，上限 `30_000`，`0` 等价 `block=false`。
+const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS: u64 = 5_000;
+const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS: u64 = 30_000;
+/// 倒计时 `ToolExecutionUpdate` 的 tick 间隔。
+const TASK_OUTPUT_TICK_MS: u64 = 500;
+
 async fn handle_task_output(
     registry: &Option<Arc<BashTaskRegistry>>,
     args: &serde_json::Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    tc: &ToolCallInfo,
+    event_bus: Option<&Arc<dyn EventBus>>,
+    completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> Result<String, String> {
     let Some(registry) = registry.as_ref() else {
         return Err("task_output 未启用：未注入 BashTaskRegistry".to_string());
@@ -951,11 +985,288 @@ async fn handle_task_output(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "task_output 缺少 task_id".to_string())?;
     let since = args.get("since").and_then(|v| v.as_u64());
-    registry
-        .read_output(task_id, since)
-        .await
-        .map(|c| serde_json::to_string(&c).unwrap_or_else(|_| "{}".to_string()))
-        .map_err(|e| e.to_string())
+    let block_param = args.get("block").and_then(|v| v.as_bool()).unwrap_or(false);
+    let timeout_ms_raw = args.get("timeout_ms").and_then(|v| v.as_u64());
+
+    // P1：`block=true && timeout_ms=0` 等价 `block=false`；超过上限即 cap。
+    let timeout_ms = match timeout_ms_raw {
+        Some(0) => 0,
+        Some(v) => v.min(TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS),
+        None => TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS,
+    };
+    let block = block_param && timeout_ms > 0;
+
+    if !block {
+        // 非阻塞：保持向后兼容，**不**写出 `wake_reason`。
+        return registry
+            .read_output(task_id, since)
+            .await
+            .map(|c| serde_json::to_string(&c).unwrap_or_else(|_| "{}".to_string()))
+            .map_err(|e| e.to_string());
+    }
+
+    // P1：`block=true` 走带 claim-on-entry + 倒计时 + race-free wait_for_change 的特判路径。
+    handle_task_output_blocking(
+        registry,
+        task_id,
+        since,
+        timeout_ms,
+        cancel,
+        tc,
+        event_bus,
+        completion_routes,
+    )
+    .await
+}
+
+/// P1：`task_output(block=true)` 的核心实现。
+///
+/// claim-on-entry 状态机（与 [`CompletionRoute`] 联动）：
+///
+/// - **entry**：先在 `completion_routes` 上 claim：
+///   - 已 `Delivered` → 跳过 wait，直接读现状返回 `wake_reason=finished`
+///     （lifecycle 已抢先 case，不再额外 push synthetic）；
+///   - 否则 `insert(task_id, ToolWillDeliver)`。
+/// - **wake (Finished)** → `insert(Delivered)`，返回 finished chunk。
+/// - **wake (NewOutput, finished=false)** → 保持 `ToolWillDeliver`。
+/// - **wake (Timeout, finished=false) / Cancel** → `remove(task_id)` 让出 claim，
+///   让后续 lifecycle 兜底；timeout 返回的 chunk `content` 强制空、`next_offset == since`。
+///
+/// 等待循环用 `tokio::select!` 同时监听 `wait_for_change` / `sleep_until(deadline)` /
+/// `cancel.cancelled()` / `tick`（每 500ms 发一次倒计时 `ToolExecutionUpdate`）。
+#[allow(clippy::too_many_arguments)]
+async fn handle_task_output_blocking(
+    registry: &Arc<BashTaskRegistry>,
+    task_id: &str,
+    since: Option<u64>,
+    timeout_ms: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+    tc: &ToolCallInfo,
+    event_bus: Option<&Arc<dyn EventBus>>,
+    completion_routes: Option<&BackgroundCompletionRoutes>,
+) -> Result<String, String> {
+    use std::time::Instant;
+    use tokio::time::{sleep_until, Duration, Instant as TokioInstant};
+
+    let since_value = since.unwrap_or(0);
+
+    // ── claim-on-entry ──────────────────────────────────────────────────────
+    // lifecycle 已抢先 Delivered → 立刻读现状返回 finished，不再 wait/不再额外 claim。
+    let mut already_delivered_by_lifecycle = false;
+    if let Some(routes) = completion_routes {
+        let mut g = routes.lock();
+        match g.get(task_id).copied() {
+            Some(CompletionRoute::Delivered) => {
+                already_delivered_by_lifecycle = true;
+            }
+            _ => {
+                g.insert(task_id.to_string(), CompletionRoute::ToolWillDeliver);
+            }
+        }
+    }
+    if already_delivered_by_lifecycle {
+        // 直接读现状；要求 `wake_reason=finished`。
+        return finish_blocking_with(registry, task_id, since_value, BlockingWakeKind::Finished)
+            .await;
+    }
+
+    let started = Instant::now();
+    let deadline = TokioInstant::now() + Duration::from_millis(timeout_ms);
+
+    // 倒计时 tick：500ms 一次发 ToolExecutionUpdate(phase="waiting_for_output")。
+    let mut ticker = tokio::time::interval(Duration::from_millis(TASK_OUTPUT_TICK_MS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // 第一次 tick 立即发（用于打开 UI 倒计时占位行）。
+    ticker.tick().await;
+    emit_task_output_update(
+        event_bus,
+        tc,
+        task_id,
+        since_value,
+        timeout_ms,
+        timeout_ms.saturating_sub(elapsed_ms(started)),
+        "waiting_for_output",
+        None,
+    );
+
+    let wake_kind = loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                if let Some(routes) = completion_routes {
+                    routes.lock().remove(task_id);
+                }
+                return Err("task_output(block=true) 已被取消".to_string());
+            }
+            wait = registry.wait_for_change(task_id, since) => {
+                match wait {
+                    Ok(crate::core::tools::primitive::WakeReason::NewOutput) => {
+                        break BlockingWakeKind::NewOutput;
+                    }
+                    Ok(crate::core::tools::primitive::WakeReason::Finished) => {
+                        break BlockingWakeKind::Finished;
+                    }
+                    Err(e) => {
+                        if let Some(routes) = completion_routes {
+                            routes.lock().remove(task_id);
+                        }
+                        return Err(e.to_string());
+                    }
+                }
+            }
+            _ = sleep_until(deadline) => {
+                break BlockingWakeKind::Timeout;
+            }
+            _ = ticker.tick() => {
+                let remaining = timeout_ms.saturating_sub(elapsed_ms(started));
+                emit_task_output_update(
+                    event_bus,
+                    tc,
+                    task_id,
+                    since_value,
+                    timeout_ms,
+                    remaining,
+                    "waiting_for_output",
+                    None,
+                );
+            }
+        }
+    };
+
+    // ── 维护 completion_routes 出口状态机 ───────────────────────────────────
+    if let Some(routes) = completion_routes {
+        let mut g = routes.lock();
+        match wake_kind {
+            BlockingWakeKind::Finished => {
+                g.insert(task_id.to_string(), CompletionRoute::Delivered);
+            }
+            BlockingWakeKind::Timeout => {
+                g.remove(task_id);
+            }
+            BlockingWakeKind::NewOutput => {
+                // 保持 ToolWillDeliver；任务还没结束，不让出 claim。
+            }
+        }
+    }
+
+    finish_blocking_with(registry, task_id, since_value, wake_kind).await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BlockingWakeKind {
+    NewOutput,
+    Finished,
+    Timeout,
+}
+
+/// 从 wake 返回到 LLM 看到的 JSON 之间的统一收尾路径：
+/// - Finished / NewOutput：调 `read_output(since)` 拿增量；
+/// - Timeout：构造空 chunk（`content=""` / `next_offset == since`），不去碰文件。
+async fn finish_blocking_with(
+    registry: &Arc<BashTaskRegistry>,
+    task_id: &str,
+    since_value: u64,
+    wake: BlockingWakeKind,
+) -> Result<String, String> {
+    use crate::core::tools::primitive::BashTaskOutputChunk;
+
+    let chunk = match wake {
+        BlockingWakeKind::Finished | BlockingWakeKind::NewOutput => registry
+            .read_output(task_id, Some(since_value))
+            .await
+            .map_err(|e| e.to_string())?,
+        BlockingWakeKind::Timeout => BashTaskOutputChunk {
+            task_id: task_id.to_string(),
+            content: String::new(),
+            start_offset: since_value,
+            next_offset: since_value,
+            finished: false,
+            exit_code: None,
+        },
+    };
+    let wake_reason = match wake {
+        BlockingWakeKind::Finished => "finished",
+        BlockingWakeKind::NewOutput => {
+            // wait_for_change 命中 NewOutput 后，read_output 也可能恰好读到 finished
+            // （pump 与 wait 之间存在串行化但都已发生）。这种情况下
+            // wake_reason 应当反映**最新状态**——以 chunk.finished 为准。
+            if chunk.finished {
+                "finished"
+            } else {
+                "new_output"
+            }
+        }
+        BlockingWakeKind::Timeout => "timeout",
+    };
+    let mut value = serde_json::to_value(&chunk).unwrap_or(serde_json::Value::Null);
+    if let serde_json::Value::Object(ref mut map) = value {
+        map.insert(
+            "wakeReason".to_string(),
+            serde_json::Value::String(wake_reason.to_string()),
+        );
+    }
+    Ok(value.to_string())
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    let dur = started.elapsed();
+    dur.as_secs() * 1000 + (dur.subsec_millis() as u64)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_task_output_update(
+    event_bus: Option<&Arc<dyn EventBus>>,
+    tc: &ToolCallInfo,
+    task_id: &str,
+    since: u64,
+    timeout_ms: u64,
+    remaining_ms: u64,
+    phase: &str,
+    wake_reason: Option<&str>,
+) {
+    let Some(bus) = event_bus else {
+        return;
+    };
+    let mut partial = serde_json::Map::new();
+    partial.insert("phase".to_string(), serde_json::Value::String(phase.into()));
+    if let Some(wr) = wake_reason {
+        partial.insert(
+            "wakeReason".to_string(),
+            serde_json::Value::String(wr.into()),
+        );
+    }
+    partial.insert(
+        "taskId".to_string(),
+        serde_json::Value::String(task_id.into()),
+    );
+    partial.insert(
+        "since".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(since)),
+    );
+    partial.insert(
+        "timeoutMs".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(timeout_ms)),
+    );
+    partial.insert(
+        "remainingMs".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(remaining_ms)),
+    );
+    let args: serde_json::Value =
+        serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+    let event = AgentEvent::ToolExecutionUpdate {
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.name.clone(),
+        args,
+        partial_result: ToolOutput(serde_json::Value::Object(partial)),
+    };
+    let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+    let event_name = payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tool_execution_update")
+        .to_string();
+    let ctx = crate::infra::event_bus::EventContext::new(event_name.clone(), payload);
+    let _ = bus.emit_sync(&event_name, ctx);
 }
 
 async fn handle_task_stop(
@@ -1475,6 +1786,8 @@ mod display_contract_tests {
             None,
             &tokio_util::sync::CancellationToken::new(),
             &tc,
+            None,
+            None,
         )
         .await;
         assert!(!outcome.is_error);
@@ -1511,6 +1824,8 @@ mod display_contract_tests {
             None,
             &tokio_util::sync::CancellationToken::new(),
             &tc,
+            None,
+            None,
         )
         .await;
         assert!(!outcome.is_error);
@@ -1708,6 +2023,8 @@ mod reviewer_guards_tests {
             Some(crate::api::chat::plan_runtime::review::ReviewKind::Plan),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
+            None,
+            None,
         )
         .await;
         assert!(outcome.is_error);
@@ -1735,6 +2052,8 @@ mod reviewer_guards_tests {
             Some(crate::api::chat::plan_runtime::review::ReviewKind::Code),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
+            None,
+            None,
         )
         .await;
         assert!(outcome.is_error);
@@ -1761,6 +2080,8 @@ mod reviewer_guards_tests {
             Some(crate::api::chat::plan_runtime::review::ReviewKind::Plan),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
+            None,
+            None,
         )
         .await;
         assert!(outcome.is_error);
@@ -1796,6 +2117,8 @@ mod reviewer_guards_tests {
                 None,
                 &tokio_util::sync::CancellationToken::new(),
                 &tc,
+                None,
+                None,
             )
             .await;
             assert!(outcome.is_error, "{name} 应被 verifier 白名单拒绝");
@@ -1860,6 +2183,8 @@ mod reviewer_guards_tests {
             Some(crate::api::chat::plan_runtime::review::ReviewKind::Plan),
             &tokio_util::sync::CancellationToken::new(),
             &tc,
+            None,
+            None,
         )
         .await;
 

@@ -144,6 +144,26 @@ pub struct ChatContext {
     /// 共享注册表；落盘根目录 = `<agent_trail_dir>/tool-results/`。每个 ChatContext
     /// 单实例，跨 turn 内复用。
     pub bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
+    /// P1（bash background monitor）：session 级 `follow_up_queue`，跨 turn 共享。
+    /// `run_chat_turn` 通过 `AgentLoop::with_shared_follow_up_queue(...)` 注入；
+    /// host lifecycle subscriber 在后台 shell 完成时把 synthetic notification 推入此 queue。
+    pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
+    /// P1：claim-on-entry 模型的 `task_id → CompletionRoute` 路由表。
+    /// dispatcher（`task_output(block=true)`）与 host lifecycle subscriber
+    /// 共享同一把锁串行化交付决策，杜绝双回灌 TOCTOU race。
+    pub completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes,
+    /// P1：lifecycle subscriber → chat_loop 主循环的唤醒信号；当 host 推入
+    /// synthetic notification 后 `notify_one()`，让主循环在 between-turns drain
+    /// 路径上立即看到 queue 非空。
+    pub follow_up_signal: Arc<tokio::sync::Notify>,
+    /// P1：host 内部去重——已 push synthetic 的 `task_id` 集合。即便
+    /// `completion_routes` 已经通过锁挡掉，这里再兜一道，覆盖
+    /// "broadcast 多 receiver / stop+wait 双触发"等极端情况。
+    pub delivered_completion: Arc<Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>>,
+    /// P1：lifecycle subscriber 后台守护 task 的 abort handle。
+    /// `chat_loop` 启动前 spawn，`ChatContext::shutdown_completion_subscriber` /
+    /// drop 时 abort，避免泄漏。
+    pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// 三层权限决策 gate（plan §3 / PR-1）：与 executor / system prompt / 路径授权 UI
     /// 共享同一份 SessionGrants 视图，保证三处的授权变更彼此可见。
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
@@ -313,6 +333,21 @@ impl ChatContext {
         let bash_task_registry = Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
             agent_trail_dir.join("tool-results"),
         ));
+        // P1（bash background monitor）：session 级共享对象。
+        // - `follow_up_queue`：lifecycle subscriber → AgentLoop 一层 conv loop 的纸条信箱。
+        // - `completion_routes`：claim-on-entry race-free 模型的状态表。
+        // - `follow_up_signal`：lifecycle subscriber → chat_loop 主循环的唤醒信号。
+        // - `delivered_completion`：host 内部 broadcast 去重 guard。
+        let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let follow_up_signal = Arc::new(tokio::sync::Notify::new());
+        let delivered_completion: Arc<
+            Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>,
+        > = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(None));
 
         // 在 `config` 被 move 进 Self 之前求值：`PI_CHAT_SHOW_THINKING` 已设置时优先环境变量，
         // 否则回落到 `config.llm.thinking.show`（架构 §3.1 / §1 已决策「`show` 初值来源」）。
@@ -439,6 +474,11 @@ impl ChatContext {
             session_grants,
             config_backend,
             bash_task_registry,
+            follow_up_queue,
+            completion_routes,
+            follow_up_signal,
+            delivered_completion,
+            completion_subscriber_handle,
             gate,
             read_file_state,
             show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(initial_show_thinking)),
@@ -712,6 +752,125 @@ fn compute_workspace_state(ctx: &ChatContext) -> crate::core::llm::system_prompt
     }
 }
 
+// ─── P1（bash background monitor）：lifecycle subscriber + between-turns drain ───
+
+/// P1：每个真实用户输入之间最多连续 K 次 auto-turn，防止
+/// "synthetic → LLM 启 bash → bash 立刻完成 → 又 synthetic …" 的风暴。
+/// 详见 `docs/architecture/tools/bash.md` 与 plan §P1-D。
+const AUTO_TURN_BUDGET: u32 = 8;
+
+/// P1：把后台 shell 完成事件桥接到 follow_up_queue 的守护 task。
+///
+/// 启动时机：`chat_loop` 进入主循环之前；abort 时机：`ChatContext::shutdown_completion_subscriber` /
+/// drop。
+///
+/// 行为见 plan §P1-D：
+/// 1. 收到 lifecycle finished 事件；
+/// 2. 在 `completion_routes` 上原子检查：若已 `ToolWillDeliver` / `Delivered`
+///    → 丢弃（dispatcher 在交付/已交付）；否则 `insert(Delivered)`；
+/// 3. 进 host 内部 `delivered_completion` 去重；
+/// 4. 取 `tail_log(task_id, 4096)`；
+/// 5. 构造 `<background-task-finished ...>...</background-task-finished>`
+///    text，push 到 `follow_up_queue`；
+/// 6. `follow_up_signal.notify_one()` 唤醒主循环（用于 between-turns 路径）。
+fn spawn_completion_subscriber(ctx: &ChatContext) -> tokio::task::JoinHandle<()> {
+    use crate::core::tools::primitive::{BackgroundTaskLifecycleEvent, BashTaskStatus};
+
+    let registry = ctx.bash_task_registry.clone();
+    let routes = ctx.completion_routes.clone();
+    let queue = ctx.follow_up_queue.clone();
+    let signal = ctx.follow_up_signal.clone();
+    let delivered = ctx.delivered_completion.clone();
+
+    let mut rx = registry.subscribe_lifecycle();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(BackgroundTaskLifecycleEvent {
+                    task_id,
+                    final_status,
+                    log_path,
+                    command,
+                }) => {
+                    // host 内部去重：保证同 task_id 一次会话内最多 push 一次。
+                    {
+                        let mut g = delivered.lock();
+                        if g.contains(&task_id) {
+                            continue;
+                        }
+                        g.insert(task_id.clone());
+                    }
+                    // claim-on-entry 状态机：dispatcher 已 claim/已 Delivered → 丢弃。
+                    let should_push = {
+                        let mut g = routes.lock();
+                        match g.get(&task_id).copied() {
+                            Some(crate::core::agent_loop::CompletionRoute::ToolWillDeliver)
+                            | Some(crate::core::agent_loop::CompletionRoute::Delivered) => false,
+                            _ => {
+                                g.insert(
+                                    task_id.clone(),
+                                    crate::core::agent_loop::CompletionRoute::Delivered,
+                                );
+                                true
+                            }
+                        }
+                    };
+                    if !should_push {
+                        continue;
+                    }
+                    let exit_code = match final_status {
+                        BashTaskStatus::Finished { exit_code } => exit_code,
+                        BashTaskStatus::Stopped => -1,
+                        BashTaskStatus::Running => continue, // 不应到达
+                    };
+                    let tail = registry.tail_log(&task_id, 4096).await;
+                    let text = format!(
+                        "<background-task-finished task_id=\"{task_id}\" exit_code=\"{exit_code}\" log_path=\"{log_path}\" command=\"{cmd}\">\n{tail}\n</background-task-finished>",
+                        task_id = task_id,
+                        exit_code = exit_code,
+                        log_path = log_path,
+                        cmd = command.replace('"', "\\\""),
+                    );
+                    queue
+                        .lock()
+                        .push(crate::core::llm::ChatMessage::user(text));
+                    signal.notify_one();
+                    // CLI 提示一行（不打断 readline；终端会被 readline 重绘但提示已被记录）。
+                    eprintln!(
+                        "\n[bg] task {} finished (exit={}); queued for next turn.",
+                        task_id, exit_code
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        target: "tomcat_chat_diag",
+                        phase = "completion_subscriber_lagged",
+                        skipped = n,
+                        "lifecycle broadcast subscriber lagged; some events skipped"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+impl ChatContext {
+    /// P1：abort lifecycle subscriber 守护 task。`chat_loop` 退出时调用一次；
+    /// `Drop` 也兜底一次，防止泄漏。幂等。
+    fn shutdown_completion_subscriber(&self) {
+        if let Some(handle) = self.completion_subscriber_handle.lock().take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for ChatContext {
+    fn drop(&mut self) {
+        self.shutdown_completion_subscriber();
+    }
+}
+
 // ─── Main chat loop ───────────────────────────────────────────────────────────
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
@@ -770,36 +929,86 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         ctx.checkpoint_switcher.clone(),
     );
 
-    loop {
-        let input = match rl.readline("u> ") {
-            Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Eof) => {
-                println!("\n再见！");
-                context_state.preheat.abort();
-                break;
-            }
-            Err(rustyline::error::ReadlineError::Interrupted) => {
-                continue;
-            }
-            Err(e) => {
-                eprintln!("输入错误: {}", e);
-                context_state.preheat.abort();
-                break;
-            }
-        };
+    // P1（bash background monitor）：在主循环之前 spawn lifecycle subscriber。
+    // 它会把后台 shell 完成事件桥接成 synthetic notification 推入 session 级
+    // follow_up_queue；主循环每轮结束后做 between-turns drain。退出时
+    // shutdown_completion_subscriber 兜底（同时由 Drop 再保险一次）。
+    if ctx.completion_subscriber_handle.lock().is_none() {
+        let handle = spawn_completion_subscriber(ctx);
+        *ctx.completion_subscriber_handle.lock() = Some(handle);
+    }
 
-        let input = input.trim().to_string();
-        if input.is_empty() {
-            continue;
+    // P1：每个真实用户输入之间累计的 auto-turn 次数，超过 AUTO_TURN_BUDGET
+    // 后强制回 readline，避免 synthetic 风暴。
+    let mut auto_turn_count: u32 = 0;
+
+    loop {
+        // P1：between-turns drain——若 follow_up_queue 非空且 auto-turn 预算仍有，
+        // 跳过 readline 直接以 input="" 触发下一轮 run_chat_turn（一层 conv loop
+        // 会 drain queue 注入 synthetic message）。否则走正常 readline 路径，并清零
+        // auto-turn 计数。
+        let auto_drain: bool = {
+            let qlen = ctx.follow_up_queue.lock().len();
+            qlen > 0 && auto_turn_count < AUTO_TURN_BUDGET
+        };
+        if !auto_drain {
+            // 风暴预算已耗尽且 queue 仍非空 → 提示并强制回 readline（用户可手动“回车”再驱动）。
+            if auto_turn_count >= AUTO_TURN_BUDGET && !ctx.follow_up_queue.lock().is_empty() {
+                eprintln!(
+                    "\n[bg] auto-turn budget exhausted ({}); falling back to user input.",
+                    AUTO_TURN_BUDGET
+                );
+            }
+            auto_turn_count = 0;
         }
 
-        // 聊天命令解析：目前支持 `/path` 和 `/help`；其它输入进入普通 LLM 回合。
-        let input = match dispatch_chat_command(ctx, parse_chat_command(&input), &mut rl) {
-            ChatCommandOutcome::Continue { line } => line,
-            ChatCommandOutcome::Handled => continue,
+        let input = if auto_drain {
+            String::new()
+        } else {
+            let raw = match rl.readline("u> ") {
+                Ok(line) => line,
+                Err(rustyline::error::ReadlineError::Eof) => {
+                    println!("\n再见！");
+                    context_state.preheat.abort();
+                    break;
+                }
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("输入错误: {}", e);
+                    context_state.preheat.abort();
+                    break;
+                }
+            };
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                // 空回车：若 queue 有 synthetic，也走 auto-drain；否则再次进 readline。
+                if !ctx.follow_up_queue.lock().is_empty() {
+                    auto_turn_count = 0;
+                } else {
+                    continue;
+                }
+                String::new()
+            } else {
+                // 真实用户输入：聊天命令解析后走正常 LLM 回合。
+                let parsed = match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl)
+                {
+                    ChatCommandOutcome::Continue { line } => line,
+                    ChatCommandOutcome::Handled => continue,
+                };
+                let _ = rl.add_history_entry(&parsed);
+                parsed
+            }
         };
 
-        let _ = rl.add_history_entry(&input);
+        // P1：本轮是 auto-turn（input 为空且 queue 中有 synthetic）→ 计数 +1；
+        // 真实用户输入清零计数。计数用于风暴防护（AUTO_TURN_BUDGET=K=8）。
+        if input.is_empty() {
+            auto_turn_count += 1;
+        } else {
+            auto_turn_count = 0;
+        }
 
         // 读到新输入后重建 CancellationToken。
         // 关键约束：token 一旦 cancel 不可逆——如果用户 Ctrl+C 落在 prompt 处，
@@ -959,7 +1168,21 @@ pub async fn run_chat_turn(
             )));
         }
     }
-    messages.push(ChatMessage::user(&decorated_user_text));
+    if !input.is_empty() {
+        messages.push(ChatMessage::user(&decorated_user_text));
+    }
+    // P1（bash background monitor）：在首轮 reasoning 之前 drain 一次 session 级
+    // follow_up_queue。这条路径覆盖两种场景：
+    // 1) 真实用户输入 + 上一轮跨 turn 之间已积压的 synthetic notification → 用户句之后追加；
+    // 2) auto-turn（input=""）：无用户输入，messages 末尾仅有 system_meta 等，由
+    //    drain 提供本轮的 user content（synthetic 是 ChatMessage::user）。
+    // AgentLoop 一层 conv loop 仍保留 drain 行为，覆盖"turn 内新到达"的 synthetic。
+    {
+        let mut q = ctx.follow_up_queue.lock();
+        if !q.is_empty() {
+            messages.extend(q.drain(..));
+        }
+    }
 
     let renderer = Arc::new(parking_lot::Mutex::new(MarkdownRenderer::new()));
     let config = AgentLoopConfig {
@@ -992,6 +1215,11 @@ pub async fn run_chat_turn(
     }
     // T2-P0-016 PR-I：注入 bash 后台任务注册表，启用 task_* 三件套。
     agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
+    // P1（bash background monitor）：注入 session 级共享 follow_up_queue
+    // 与 completion_routes，让 host lifecycle subscriber 推入的 synthetic
+    // notification 能在同一 turn 内被消费、并与 dispatcher 走 claim-on-entry 去重。
+    agent_loop = agent_loop.with_shared_follow_up_queue(ctx.follow_up_queue.clone());
+    agent_loop = agent_loop.with_completion_routes(ctx.completion_routes.clone());
 
     // ContextState ownership 切换：临时 swap 出 owned 给 AgentLoop；
     // 运行结束后 take_context_state 写回调用方 `&mut`。

@@ -29,7 +29,9 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Notify;
 
 use crate::infra::error::AppError;
 
@@ -87,6 +89,36 @@ struct BashTask {
     /// 子进程 PID（spawn 后立即记录）；stop 路径 `libc::killpg(pid, SIGKILL)`
     /// 杀整组，**不**依赖 `Child` 句柄（句柄已 move 进 wait 任务独占 await）。
     pid: Option<u32>,
+    /// P1：每 task 一份 `Notify`。pump 任务每 flush 一次后 `notify_waiters()`；
+    /// wait 任务把 status 翻成 `Finished` / `Stopped` 时也 `notify_waiters()`。
+    /// 配合 [`BashTaskRegistry::wait_for_change`] 实现"按文件长度 vs since"判定，
+    /// 不依赖事件计数，避免 lost wakeup 与 read 与 wait 之间的字节丢失竞态。
+    notify: Arc<Notify>,
+    /// P1：lifecycle event 已经发出过的去重 guard（pump close + wait task return
+    /// 都可能命中"翻终态"，但只允许 broadcast 一次）。
+    lifecycle_emitted: parking_lot::Mutex<bool>,
+}
+
+/// P1：`task_output(block=true)` 的"为什么醒了"。dispatcher 用它决定写出
+/// `wake_reason` 字段、是否在 `completion_routes` 上 Delivered。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeReason {
+    /// 文件 size 已超过 since（有新字节可读），但任务可能仍 Running。
+    NewOutput,
+    /// 任务已 Finished / Stopped；调用方可同步取 `exit_code`。
+    Finished,
+}
+
+/// P1：registry 级 broadcast 事件。lifecycle subscriber（host/chat_loop 侧）
+/// 用它驱动 completion auto-feed → synthetic notification。
+///
+/// 一次 task 终态翻转**只发一次**（由 [`BashTask::lifecycle_emitted`] 兜底）。
+#[derive(Debug, Clone)]
+pub struct BackgroundTaskLifecycleEvent {
+    pub task_id: BashTaskId,
+    pub final_status: BashTaskStatus,
+    pub log_path: String,
+    pub command: String,
 }
 
 /// `bash` 后台任务三件套的注册表。生产路径：`api/chat` 装配时 `Arc::new` 一份，
@@ -94,14 +126,32 @@ struct BashTask {
 pub struct BashTaskRegistry {
     tasks: RwLock<HashMap<BashTaskId, Arc<BashTask>>>,
     persist_dir: PathBuf,
+    /// P1：所有 task 共用的 lifecycle broadcast。`subscribe_lifecycle()` 取
+    /// `Receiver`；`spawn` 创建 task 时把 sender clone 给 wait 任务，task
+    /// 终态翻转一次性 send。channel 容量按"启动后短期未消费的最大堆积量"
+    /// 估算 256 足够大；满时旧事件丢失但不会阻塞翻转路径。
+    lifecycle_tx: broadcast::Sender<BackgroundTaskLifecycleEvent>,
 }
 
 impl BashTaskRegistry {
     pub fn new(persist_dir: PathBuf) -> Self {
+        let (lifecycle_tx, _) = broadcast::channel(256);
         Self {
             tasks: RwLock::new(HashMap::new()),
             persist_dir,
+            lifecycle_tx,
         }
+    }
+
+    /// P1：host/chat_loop 订阅 lifecycle 事件用。同一个 `task_id` 的终态翻转
+    /// 一次会话内**只会被 broadcast 一次**（由 [`BashTask::lifecycle_emitted`]
+    /// 兜底，pump close + wait task return 双触发收敛）。
+    ///
+    /// 返回的 `Receiver` 在 lag 时会跳过中间事件——P1 完成事件本来就极稀疏
+    /// （task 数量级 = 个），channel 容量 256 已经足够；满到 lag 即视为
+    /// 设计被滥用的信号，host 侧打 warn 即可。
+    pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<BackgroundTaskLifecycleEvent> {
+        self.lifecycle_tx.subscribe()
     }
 
     /// 起一个后台 bash：spawn + 起 stdout/stderr pump + 起 wait 任务回写状态。
@@ -171,17 +221,25 @@ impl BashTaskRegistry {
                 status: BashTaskStatus::Running,
             }),
             pid,
+            notify: Arc::new(Notify::new()),
+            lifecycle_emitted: parking_lot::Mutex::new(false),
         });
         self.tasks.write().insert(task_id.clone(), task.clone());
 
         // 两条 pump 任务：stdout / stderr 边读边追加日志。
         // stderr 行前缀 "STDERR: " 让 task_output 拉到的内容仍可肉眼区分两路。
-        spawn_pump(stdout, log_writer.clone(), "");
-        spawn_pump(stderr, log_writer.clone(), "STDERR: ");
+        // P1：每条 pump flush 后 `notify_waiters()`，唤醒所有挂在
+        // `wait_for_change` 上的等待者；按"文件长度 vs since"判定，避免 lost wakeup。
+        spawn_pump(stdout, log_writer.clone(), "", task.notify.clone());
+        spawn_pump(stderr, log_writer.clone(), "STDERR: ", task.notify.clone());
 
         // wait 任务：独占 Child handle 等结束 → 翻 status。
         // 注意：stop 已把 status 置为 Stopped 时，**不**回退覆盖成 Finished。
         let task_for_wait = task.clone();
+        let lifecycle_tx = self.lifecycle_tx.clone();
+        let task_id_for_wait = task_id.clone();
+        let log_path_for_wait = log_path.display().to_string();
+        let command_for_wait = command.clone();
         tokio::spawn(async move {
             let exit_code = match child.wait().await {
                 Ok(status) => {
@@ -199,10 +257,34 @@ impl BashTaskRegistry {
                 }
                 Err(_) => -1,
             };
-            let mut info = task_for_wait.info.write();
-            if !matches!(info.status, BashTaskStatus::Stopped) {
-                info.status = BashTaskStatus::Finished { exit_code };
+            let final_status = {
+                let mut info = task_for_wait.info.write();
+                if !matches!(info.status, BashTaskStatus::Stopped) {
+                    info.status = BashTaskStatus::Finished { exit_code };
+                }
+                info.status.clone()
+            };
+            // P1：先 emit lifecycle（受 lifecycle_emitted guard 保护），再
+            // notify_waiters；这样阻塞在 wait_for_change 的 dispatcher 醒来后能
+            // 立刻看到终态，host lifecycle subscriber 也能拿到 broadcast。
+            let already_emitted = {
+                let mut g = task_for_wait.lifecycle_emitted.lock();
+                if *g {
+                    true
+                } else {
+                    *g = true;
+                    false
+                }
+            };
+            if !already_emitted {
+                let _ = lifecycle_tx.send(BackgroundTaskLifecycleEvent {
+                    task_id: task_id_for_wait,
+                    final_status,
+                    log_path: log_path_for_wait,
+                    command: command_for_wait,
+                });
             }
+            task_for_wait.notify.notify_waiters();
         });
 
         Ok(BashTaskTicket {
@@ -256,6 +338,10 @@ impl BashTaskRegistry {
 
     /// 主动停止：标记 status = Stopped → killpg(SIGKILL) 整组（Unix）；
     /// wait 任务后续 `child.wait()` 返回**不**回退覆盖（见 spawn 内 `if !matches!(...)`）。
+    ///
+    /// P1：stop 路径同样会 emit lifecycle 一次（由 `lifecycle_emitted` guard 兜底；
+    /// stop 抢先 emit 后 wait 任务 return 时再尝试将被忽略），并 notify_waiters
+    /// 唤醒所有挂在 `wait_for_change` 上的等待者，让它们立即返回 `Finished`。
     pub async fn stop(&self, task_id: &str) -> Result<(), AppError> {
         let task = self
             .tasks
@@ -263,11 +349,17 @@ impl BashTaskRegistry {
             .get(task_id)
             .cloned()
             .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+        let final_status_for_emit;
+        let log_path_for_emit;
+        let command_for_emit;
         {
             let mut info = task.info.write();
             if matches!(info.status, BashTaskStatus::Running) {
                 info.status = BashTaskStatus::Stopped;
             }
+            final_status_for_emit = info.status.clone();
+            log_path_for_emit = info.log_path.clone();
+            command_for_emit = info.command.clone();
         }
         #[cfg(unix)]
         if let Some(pid) = task.pid {
@@ -279,7 +371,119 @@ impl BashTaskRegistry {
         }
         // Windows 下不依赖 killpg；已设置 `kill_on_drop(true)`，且 wait 任务会
         // 在 Child drop 时由 tokio 兜底——此处不再重复 kill 以免 race。
+
+        // P1：emit lifecycle（被 lifecycle_emitted guard 收敛，wait 任务后续
+        // 命中相同 task 的翻转尝试会被忽略）+ 唤醒所有挂在 wait_for_change 的等待者。
+        let already_emitted = {
+            let mut g = task.lifecycle_emitted.lock();
+            if *g {
+                true
+            } else {
+                *g = true;
+                false
+            }
+        };
+        if !already_emitted {
+            let _ = self.lifecycle_tx.send(BackgroundTaskLifecycleEvent {
+                task_id: task_id.to_string(),
+                final_status: final_status_for_emit,
+                log_path: log_path_for_emit,
+                command: command_for_emit,
+            });
+        }
+        task.notify.notify_waiters();
         Ok(())
+    }
+
+    /// P1：阻塞等待"文件长度超过 since"或"task 终态翻转"。
+    ///
+    /// 实现按"先 `notified()` 拿 future → 再读当前文件总长度 / status 判定"
+    /// 的标准 race-free 顺序，避免 pump flush 与等待者注册之间的 lost wakeup。
+    /// 调用方负责自己处理"超时"（在外层 `tokio::select!` 套 `sleep_until`），
+    /// 这里只承诺"要么有新输出要么终态"两条返回路径之一。
+    ///
+    /// `since` 为 `None` 等价 `Some(0)`，即"从头判定"。
+    ///
+    /// `task_id` 不存在时返回 `AppError::Primitive`，与 `read_output` / `stop`
+    /// 一致。
+    pub async fn wait_for_change(
+        &self,
+        task_id: &str,
+        since: Option<u64>,
+    ) -> Result<WakeReason, AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+        let since = since.unwrap_or(0);
+        loop {
+            // 关键顺序：先注册 notified()（等待者句柄），再做条件判定。
+            // 反过来会与 pump 的 `notify_waiters()` 之间存在标准 lost-wakeup 窗口。
+            let notified = task.notify.notified();
+            tokio::pin!(notified);
+
+            // 1) 终态优先于"是否已有新输出"。dispatcher 拿到 Finished 时，会用
+            //    后续 read_output 拉最终 chunk，所以这里直接返回 Finished 即可。
+            let status_snap = task.info.read().status.clone();
+            if !matches!(status_snap, BashTaskStatus::Running) {
+                return Ok(WakeReason::Finished);
+            }
+
+            // 2) 然后看"文件总长度是否已经超过 since"。注意：用文件元数据 size 比，
+            //    而不是事件计数；这样 read_output(since=X) 之后立刻 wait_for_change(since=Y=X+n)
+            //    即便没有新 notify 触发，size 直接判定也不会丢字节。
+            let log_path = task.info.read().log_path.clone();
+            if let Ok(meta) = tokio::fs::metadata(Path::new(&log_path)).await {
+                if meta.len() > since {
+                    return Ok(WakeReason::NewOutput);
+                }
+            }
+
+            // 3) 都不满足 → 让 await 句柄睡，等下一次 pump flush / 终态翻转。
+            notified.await;
+        }
+    }
+
+    /// P1：取最近 `max_bytes` 字节（≤ 4 KiB 推荐）的尾部，UTF-8 lossy 解码。
+    /// 给 host 构造 synthetic notification 的正文用。task 不存在或日志为空时
+    /// 返回空串而**不**报错（tag 仍由 host 包裹）。
+    pub async fn tail_log(&self, task_id: &str, max_bytes: u64) -> String {
+        let log_path = match self.tasks.read().get(task_id).cloned() {
+            Some(t) => t.info.read().log_path.clone(),
+            None => return String::new(),
+        };
+        let mut file = match tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&log_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(_) => return String::new(),
+        };
+        let len = match file.metadata().await {
+            Ok(m) => m.len(),
+            Err(_) => return String::new(),
+        };
+        let start = len.saturating_sub(max_bytes);
+        if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+            return String::new();
+        }
+        let mut buf = Vec::with_capacity(max_bytes as usize);
+        if file.read_to_end(&mut buf).await.is_err() {
+            return String::new();
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// P1：枚举单个 task 的元信息快照。给 host lifecycle subscriber 取
+    /// command / log_path 用，避免重复 broadcast 大字段。
+    pub fn get_info(&self, task_id: &str) -> Option<BashTaskInfo> {
+        self.tasks
+            .read()
+            .get(task_id)
+            .map(|t| t.info.read().clone())
     }
 
     /// 全量枚举：按 started_at 升序，便于模型一眼看出"谁先起、谁还在跑"。
@@ -295,8 +499,12 @@ impl BashTaskRegistry {
     }
 }
 
-fn spawn_pump<R>(reader: Option<R>, writer: Arc<AsyncMutex<tokio::fs::File>>, prefix: &'static str)
-where
+fn spawn_pump<R>(
+    reader: Option<R>,
+    writer: Arc<AsyncMutex<tokio::fs::File>>,
+    prefix: &'static str,
+    notify: Arc<Notify>,
+) where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
     let Some(reader) = reader else {
@@ -319,6 +527,10 @@ where
                     }
                     let _ = f.write_all(&buf[..n]).await;
                     let _ = f.flush().await;
+                    drop(f);
+                    // P1：每次 flush 后唤醒所有挂在 `wait_for_change` 上的等待者；
+                    // 配合"先 notified() 再读 size"的 race-free 顺序，保证不丢字节、不丢唤醒。
+                    notify.notify_waiters();
                 }
                 Err(_) => break,
             }

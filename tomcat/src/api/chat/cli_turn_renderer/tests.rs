@@ -194,6 +194,37 @@ fn tool_start_emits_gray_summary_on_stderr() {
     assert!(err.contains("\x1b[90m"), "应使用 gray ANSI: {:?}", err);
 }
 
+/// P1（bash background monitor）：`task_output(block=true)` 倒计时
+/// `tool_execution_update` 事件 → CLI dim 灰行。
+#[test]
+fn tool_update_emits_dim_countdown_line_on_stderr() {
+    let (r, w) = make_renderer(false);
+    r.on_tool_update(&json!({
+        "toolCallId": "blk-1",
+        "toolName": "task_output",
+        "args": {"task_id": "t-1", "block": true, "timeout_ms": 3000},
+        "partialResult": {
+            "phase": "waiting_for_output",
+            "taskId": "t-1",
+            "since": 0,
+            "timeoutMs": 3000,
+            "remainingMs": 1500
+        },
+    }));
+    let err = w.stderr();
+    assert!(
+        err.contains("waiting_for_output"),
+        "应包含 phase: {:?}",
+        err
+    );
+    assert!(
+        err.contains("task=t-1") && err.contains("remaining=1500/3000ms"),
+        "应展示倒计时: {:?}",
+        err
+    );
+    assert!(err.contains("\x1b[90m"), "倒计时应使用 dim 灰: {:?}", err);
+}
+
 #[test]
 fn tool_end_success_uses_green_check_and_elapsed() {
     let (r, w) = make_renderer(false);

@@ -34,7 +34,7 @@ use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::event_bus::{EventBus, EventContext};
 use crate::infra::events::{AgentEvent, ExtensionEvent};
 
-use super::types::{AgentLoop, AgentLoopConfig, LoopError};
+use super::types::{AgentLoop, AgentLoopConfig, BackgroundCompletionRoutes, LoopError};
 
 impl AgentLoop {
     pub fn new(
@@ -53,6 +53,7 @@ impl AgentLoop {
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
+            completion_routes: None,
             cancel_token,
             context_state: None,
             block_tool_calls: false,
@@ -82,6 +83,40 @@ impl AgentLoop {
         self
     }
 
+    /// P1：注入 `ChatContext` 持有的 session 级共享 `follow_up_queue`。
+    ///
+    /// 不调用此方法时保持原有"单次 AgentLoop 私有 queue"语义（向后兼容
+    /// `agent_loop_tests.rs` 的 FollowUp 单测）；调用后：
+    /// - host lifecycle subscriber 推入的 synthetic notification 会落到这份共享 queue；
+    /// - 同一 `run_chat_turn` 内 conversation loop 在每个 attempt 成功后 drain
+    ///   该 queue 进入下一次 reasoning loop，让后台完成事件能在同一 turn 内被消费；
+    /// - 跨 turn 时，host between-turns drain 会接管未消费的纸条。
+    pub fn with_shared_follow_up_queue(
+        mut self,
+        queue: Arc<Mutex<Vec<ChatMessage>>>,
+    ) -> Self {
+        self.follow_up_queue = queue;
+        self
+    }
+
+    /// P1：注入 `ChatContext` 持有的 session 级 `completion_routes` 路由表。
+    ///
+    /// `task_output(block=true)` 路径据此做 claim-on-entry，并在 wake 时按
+    /// `Finished / NewOutput / Timeout / Cancel` 四态维护 entry；详见
+    /// [`super::types::CompletionRoute`] 与 docs。
+    pub fn with_completion_routes(mut self, routes: BackgroundCompletionRoutes) -> Self {
+        self.completion_routes = Some(routes);
+        self
+    }
+
+    /// P1：typed follow-up 入口。`follow_up(String)` 内部仍 `ChatMessage::user`
+    /// 包装；当调用方需要直接塞已经构造好的 `ChatMessage`（例如 host 构造 synthetic
+    /// notification 时希望保留某种 metadata）时使用本方法。当前 P1 实际只用
+    /// `ChatMessage::user`，但保留 typed 入口便于后续演进。
+    pub fn follow_up_message(&self, msg: ChatMessage) {
+        self.follow_up_queue.lock().push(msg);
+    }
+
     /// 测试用：注入 steering_queue，便于 mock 在工具执行中推入 steering 消息。
     #[cfg(test)]
     pub fn new_with_steering_queue(
@@ -100,6 +135,7 @@ impl AgentLoop {
             bash_task_registry: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
+            completion_routes: None,
             steering_queue,
             cancel_token,
             context_state: None,

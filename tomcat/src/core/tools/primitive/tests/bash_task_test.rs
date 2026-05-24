@@ -3,7 +3,7 @@
 //! 仅触达 `crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus}`
 //! 公共导出；与 [`crate::core::tools::primitive::bash_task`] 模块文档保持一致。
 
-use crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus};
+use crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus, WakeReason};
 
 #[tokio::test]
 async fn spawn_then_read_then_stop_then_list() {
@@ -94,4 +94,141 @@ async fn read_output_unknown_task_id_errors() {
         .await
         .expect_err("应当 not found");
     assert!(format!("{}", err).contains("not found"));
+}
+
+// ─── P1（bash background monitor）追加 ─────────────────────────────────────
+
+/// race-free wait_for_change：read_output(since=X) 拿到 next_offset=Y 之后
+/// 立刻 wait_for_change(since=Y)，期间 pump 仍在写字节，wait 必须能在新字节
+/// 到达后立即返回 NewOutput。**不丢字节**。
+#[tokio::test]
+async fn wait_for_change_returns_new_output_after_pump_flush() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = std::sync::Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let ticket = reg
+        .spawn(
+            "i=0; while [ $i -lt 30 ]; do echo line-$i; i=$((i+1)); sleep 0.1; done".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("spawn");
+
+    // 先等几行被写出来。
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let chunk1 = reg.read_output(&ticket.task_id, None).await.expect("read1");
+    assert!(chunk1.next_offset > 0);
+
+    // 紧接着 wait_for_change(since = next_offset)，超时上限给 2s。
+    let reg2 = reg.clone();
+    let task_id = ticket.task_id.clone();
+    let since = chunk1.next_offset;
+    let waiter = tokio::spawn(async move { reg2.wait_for_change(&task_id, Some(since)).await });
+    let wake = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("wait_for_change 没在 2s 内返回")
+        .expect("join")
+        .expect("wait_for_change err");
+    assert_eq!(wake, WakeReason::NewOutput);
+
+    let _ = reg.stop(&ticket.task_id).await;
+}
+
+/// 任务自然结束 → wait_for_change 立即返回 Finished，不必再等 pump flush。
+#[tokio::test]
+async fn wait_for_change_returns_finished_on_natural_exit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = std::sync::Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let ticket = reg
+        .spawn("echo done; exit 0".to_string(), None, None)
+        .await
+        .expect("spawn");
+    let reg2 = reg.clone();
+    let task_id = ticket.task_id.clone();
+    let waiter = tokio::spawn(async move { reg2.wait_for_change(&task_id, Some(0)).await });
+    let wake = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("timeout")
+        .expect("join")
+        .expect("err");
+    // NewOutput 与 Finished 都可接受（race 上 pump 可能先 flush "done\n"）；
+    // 二次 wait 必须能拿到 Finished。
+    if wake == WakeReason::NewOutput {
+        // 再等一次：现在 task 已 Finished。
+        let info = reg.list();
+        assert!(matches!(info[0].status, BashTaskStatus::Finished { .. }));
+        let wake2 = reg
+            .wait_for_change(&ticket.task_id, Some(u64::MAX))
+            .await
+            .expect("wait2");
+        assert_eq!(wake2, WakeReason::Finished);
+    } else {
+        assert_eq!(wake, WakeReason::Finished);
+    }
+}
+
+/// subscribe_lifecycle：同一 task 的 finished 事件**只发一次**（验证
+/// stop+wait 双触发收敛于 lifecycle_emitted guard）。
+#[tokio::test]
+async fn subscribe_lifecycle_emits_once_per_task() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
+    let mut rx = reg.subscribe_lifecycle();
+    let ticket = reg
+        .spawn(
+            "i=0; while [ $i -lt 50 ]; do echo line-$i; i=$((i+1)); sleep 0.05; done".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("spawn");
+    // 主动 stop → 触发翻 Stopped → emit lifecycle 一次。wait 任务后续 child.wait
+    // 返回时再尝试 emit 但被 lifecycle_emitted guard 挡掉。
+    reg.stop(&ticket.task_id).await.expect("stop");
+
+    // 第一条事件必须能在 1s 内拿到。
+    let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        .await
+        .expect("第一条 lifecycle 必须在 1s 内到")
+        .expect("recv");
+    assert_eq!(first.task_id, ticket.task_id);
+    assert!(matches!(first.final_status, BashTaskStatus::Stopped));
+
+    // 给 wait 任务一段时间，确认它**不**重复发。
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let second = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+    assert!(
+        second.is_err(),
+        "lifecycle 不应重复 emit；实际收到 {:?}",
+        second.ok()
+    );
+}
+
+/// tail_log 取末尾 ≤ N 字节，UTF-8 lossy。
+#[tokio::test]
+async fn tail_log_returns_suffix() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
+    let ticket = reg
+        .spawn(
+            "for i in 1 2 3 4 5; do echo line-$i; done".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("spawn");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let tail = reg.tail_log(&ticket.task_id, 4096).await;
+    assert!(
+        tail.contains("line-5"),
+        "tail 应包含末尾行，实际 = {:?}",
+        tail
+    );
+    // 截断到极小：仍应是有效 UTF-8 lossy 字符串。
+    let small = reg.tail_log(&ticket.task_id, 10).await;
+    assert!(
+        small.len() <= 10,
+        "tail_log(max=10) 长度 {} 应不超过 10",
+        small.len()
+    );
 }

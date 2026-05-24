@@ -165,6 +165,8 @@ pub(super) async fn run_tool_calls(
                 agent.config.review_kind,
                 &cancel,
                 tc,
+                Some(&agent.event_bus),
+                agent.completion_routes.as_ref(),
             );
             tokio::select! {
                 biased;

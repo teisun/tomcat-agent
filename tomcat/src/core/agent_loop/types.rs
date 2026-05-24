@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -214,6 +215,36 @@ impl AgentRunOutcome {
     }
 }
 
+// ─── P1：后台 completion 交付路由（claim-on-entry race-free 模型） ──────────
+
+/// P1：后台任务完成事件的"交付路由状态"。
+///
+/// 用于消除"`task_output(block=true)` 拿到 `wake_reason=finished` 同时
+/// lifecycle subscriber 也推 synthetic notification"的 TOCTOU 双回灌：
+///
+/// - dispatcher 进入 `block=true` 分支的**第一步**就在 [`BackgroundCompletionRoutes`]
+///   中 claim：若已 [`CompletionRoute::Delivered`] → 跳过 wait 直接返回 finished；
+///   否则 [`CompletionRoute::ToolWillDeliver`]。
+/// - dispatcher wake (Finished) → 写 `Delivered`。
+/// - dispatcher wake (Timeout / cancel, finished=false) → 移除 entry 让出 claim。
+/// - lifecycle subscriber push synthetic 前查同一把锁：若 `ToolWillDeliver` /
+///   `Delivered` 即丢弃；否则写 `Delivered` 后 push。
+///
+/// 详见 `docs/architecture/tools/bash.md` 的 P1 章节与 plan 文件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionRoute {
+    /// dispatcher 已 claim，将由 tool result 交付（不允许 host 再 push synthetic）。
+    ToolWillDeliver,
+    /// 已交付完成（任意一路）。终态，进入后不再有交付动作。
+    Delivered,
+}
+
+/// P1：session 级共享的 `task_id → CompletionRoute` 路由表。
+/// 由 [`crate::api::chat::ChatContext`] 持有一份，每轮 `run_chat_turn` 通过
+/// builder 注入到 `AgentLoop`。lifecycle subscriber（host 侧守护 task）
+/// 与 dispatcher 共用同一把锁串行化所有交付决策。
+pub type BackgroundCompletionRoutes = Arc<Mutex<HashMap<String, CompletionRoute>>>;
+
 // ─── AgentLoop 结构体 ───────────────────────────────────────────────────────
 
 pub struct AgentLoop {
@@ -236,7 +267,16 @@ pub struct AgentLoop {
     pub(super) bash_task_registry: Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
+    /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]
+    /// 注入 session 级共享 queue；不注入时保持原有"单次 AgentLoop 私有"语义。
+    /// 一层 conversation loop 在每个 attempt 成功后 drain 此 queue 进入下一次
+    /// reasoning loop，因此后台 shell 完成后由 host 推入的 synthetic notification
+    /// 可在**同一 `run_chat_turn`** 内被消费，不必每次都退回 chat_loop。
     pub(super) follow_up_queue: Arc<Mutex<Vec<ChatMessage>>>,
+    /// P1：claim-on-entry 路由表。`task_output(block=true)` 路径与 host
+    /// lifecycle subscriber 共享同一把锁。`None` 时跳过 claim 逻辑（向后兼容
+    /// 单测/独立 AgentLoop 用法）。
+    pub(super) completion_routes: Option<BackgroundCompletionRoutes>,
     /// 用户中断令牌。`cancel()` 后所有 `select!` 监听分支立即唤醒；
     /// token 是进程级的、可从任意线程调用，**一旦 cancel 不可逆**——
     /// 每回合 `chat_loop` 在 readline 读到非空输入后重建并通过

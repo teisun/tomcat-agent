@@ -269,6 +269,49 @@ impl CliTurnRenderer {
         st.last_kind = LastKind::ToolStart;
     }
 
+    /// P1（bash background monitor）：处理 `tool_execution_update` 事件。
+    /// 当前只渲染 `task_output(block=true)` 的等待倒计时，每条 update 把
+    /// `partial_result.phase` / `wakeReason` / `remainingMs` 拼成一行 dim 灰字
+    /// 写到 stderr，**不**改 `last_kind`，避免影响后续正文分隔。
+    pub fn on_tool_update(&self, payload: &Value) {
+        if self.tool_cli_verbosity != ToolCliVerbosity::Full {
+            return;
+        }
+        let tool_name = payload
+            .get("toolName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let partial = payload
+            .get("partialResult")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let phase = partial
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .unwrap_or("update");
+        let task_id = partial
+            .get("taskId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let remaining = partial
+            .get("remainingMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let timeout = partial
+            .get("timeoutMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let line = format!(
+            "\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}/{timeout}ms\x1b[0m\n",
+            name = tool_name,
+            phase = phase,
+            task = task_id,
+            remaining = remaining,
+            timeout = timeout,
+        );
+        self.writer.write_stderr(&line);
+    }
+
     /// 处理 `tool_execution_end` 事件。
     pub fn on_tool_end(&self, payload: &Value) {
         let tool_name = payload
@@ -356,6 +399,14 @@ impl CliTurnRenderer {
             }),
         );
         let me = Arc::clone(self);
+        let tool_update = bus.on(
+            wire::WIRE_TOOL_EXECUTION_UPDATE,
+            Box::new(move |evt: EventContext| {
+                me.on_tool_update(&evt.payload);
+                Ok(())
+            }),
+        );
+        let me = Arc::clone(self);
         let tool_end = bus.on(
             wire::WIRE_TOOL_EXECUTION_END,
             Box::new(move |evt: EventContext| {
@@ -366,6 +417,7 @@ impl CliTurnRenderer {
         CliTurnRendererListenerIds {
             msg,
             tool_start,
+            tool_update,
             tool_end,
         }
     }
@@ -373,6 +425,7 @@ impl CliTurnRenderer {
     pub fn unregister(bus: &dyn EventBus, ids: &CliTurnRendererListenerIds) {
         bus.off(ids.msg);
         bus.off(ids.tool_start);
+        bus.off(ids.tool_update);
         bus.off(ids.tool_end);
     }
 }
@@ -381,6 +434,7 @@ impl CliTurnRenderer {
 pub struct CliTurnRendererListenerIds {
     pub msg: EventListenerId,
     pub tool_start: EventListenerId,
+    pub tool_update: EventListenerId,
     pub tool_end: EventListenerId,
 }
 

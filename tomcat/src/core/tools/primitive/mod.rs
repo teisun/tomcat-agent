@@ -10,7 +10,8 @@ mod tests;
 mod types;
 
 pub use bash_task::{
-    BashTaskId, BashTaskInfo, BashTaskOutputChunk, BashTaskRegistry, BashTaskStatus, BashTaskTicket,
+    BackgroundTaskLifecycleEvent, BashTaskId, BashTaskInfo, BashTaskOutputChunk, BashTaskRegistry,
+    BashTaskStatus, BashTaskTicket, WakeReason,
 };
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;

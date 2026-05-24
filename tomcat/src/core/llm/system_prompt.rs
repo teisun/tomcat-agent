@@ -65,6 +65,7 @@ impl Default for SystemPromptBuilder {
         builder.register(Box::new(CoreIdentitySection));
         builder.register(Box::new(ToolInstructionsSection));
         builder.register(Box::new(PagedReadingSection));
+        builder.register(Box::new(BackgroundShellMonitorSection));
         builder.register(Box::new(WorkspaceContextSection));
         builder
     }
@@ -131,6 +132,69 @@ impl SystemPromptSection for PagedReadingSection {
     }
     fn priority(&self) -> u32 {
         25
+    }
+}
+
+/// P1（bash background monitor）：教模型如何使用 `bash run_in_background` +
+/// `task_output(block=true|false, timeout_ms=...)` 三种模式，以及如何识别
+/// `<background-task-finished>` 系统注入的 user message。
+struct BackgroundShellMonitorSection;
+
+impl SystemPromptSection for BackgroundShellMonitorSection {
+    fn section_name(&self) -> &str {
+        "background_shell_monitor"
+    }
+    fn render(&self, _context: &WorkspaceContext) -> String {
+        r#"## Background bash tasks
+
+When a long-running command (build, watcher, dev server, test suite) needs to run
+without blocking your tool round, use `bash(run_in_background=true)`; you'll get a
+`task_id` + `log_path` immediately. Use `task_output` / `task_stop` / `task_list`
+to drive it across follow-up turns.
+
+There are exactly three correct usage patterns — pick one:
+
+1. **The current todo strictly depends on the shell result** → call
+   `task_output(task_id, since=..., block=true, timeout_ms=...)`. The runtime
+   blocks until any of {new output | task finished | timeout}, then returns
+   `wakeReason` with one of `"new_output" | "finished" | "timeout"`.
+   - Default `timeout_ms` is 5000, max is 30000 (values above are capped),
+     and `0` is equivalent to `block=false`.
+   - **`timeout` is NOT a failure.** When `wakeReason="timeout" && finished=false`
+     the response is just a wait slice (`content=""`, `next_offset == since`).
+     Call `task_output(block=true)` again with the same `since` to keep waiting.
+   - Loop on this until you see `wakeReason="finished"`, then act on `exit_code`
+     and the tail bytes.
+
+2. **The current todo can do other independent work first** → spawn the
+   background task and **immediately** continue with other tools (read / edit /
+   another bash / etc.). You do **not** need to poll. When the shell finishes,
+   the runtime will automatically inject a synthetic user message of the form
+
+   ```
+   <background-task-finished task_id="..." exit_code="..." log_path="..." command="...">
+   ...tail of last ≤4 KiB of the log...
+   </background-task-finished>
+   ```
+
+   Treat the `<background-task-finished ...>` tag as a **system signal** —
+   *not* as new user input. It means a previously blocked sub-task can now
+   proceed. If the tail body is insufficient, call `task_output(task_id, since=...)`
+   to fetch the full log.
+
+3. **You only want a glimpse of progress** → one-shot `task_output(block=false)`.
+   Do **not** busy-poll: continuous non-blocking polls waste turns. If you need
+   to wait, use `block=true`.
+
+Avoid these mistakes:
+- Treating a `block=true` `timeout` as a failure — it's just a wait slice ending.
+- Repeated `task_output(block=false)` with no other work in between.
+- Returning a final answer to the user before the shell completes (unless the
+  user explicitly asked for fire-and-forget)."#
+            .to_string()
+    }
+    fn priority(&self) -> u32 {
+        30
     }
 }
 

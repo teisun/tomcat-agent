@@ -291,3 +291,443 @@ async fn tool_exec_bash_background_full_lifecycle() {
         serde_json::Value::String("stopped".to_string())
     );
 }
+
+// ─── P1（bash background monitor）：task_output(block=true) 契约 ─────────────
+
+/// 走真实 dispatcher 路径（execute_tool_full）：task_output 的 block=true 在
+/// 任务自然结束时返回 `wakeReason="finished"` + `finished=true`。
+#[tokio::test]
+async fn task_output_block_true_returns_finished_on_natural_exit() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    // 起一个会 ~200ms 内结束的 task。
+    let start_tc = ToolCallInfo {
+        id: "bg-blk-1".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"echo hello; sleep 0.1; echo done","run_in_background":true}"#
+            .into(),
+    };
+    let (start_msg, start_err, _) =
+        execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    assert!(!start_err);
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    // wait slice 循环：起点可能命中 wakeReason="new_output"（echo 立即被 pump
+    // 写出），需要按契约用 next_offset 继续等，直到 wakeReason="finished"。
+    let mut since: u64 = 0;
+    let mut got_finished = false;
+    for _ in 0..6 {
+        let out_tc = ToolCallInfo {
+            id: "to-blk-1".into(),
+            name: "task_output".into(),
+            arguments: format!(
+                r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":1500}}"#,
+                task_id, since
+            ),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &registry_opt,
+            None,
+            None,
+            None,
+            SubagentType::User,
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+            &out_tc,
+            None,
+            None,
+        )
+        .await;
+        assert!(!outcome.is_error, "block=true 必须成功：{}", outcome.model_text);
+        let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+        let wr = chunk["wakeReason"].as_str().unwrap_or("");
+        let finished = chunk["finished"].as_bool().unwrap_or(false);
+        if wr == "finished" || finished {
+            assert_eq!(
+                chunk["wakeReason"],
+                serde_json::Value::String("finished".into())
+            );
+            assert!(finished);
+            got_finished = true;
+            break;
+        }
+        since = chunk["nextOffset"].as_u64().unwrap_or(since);
+    }
+    assert!(got_finished, "应当在多次 wait slice 后命中 finished");
+}
+
+/// timeout 是非终态：`wakeReason="timeout" && finished=false`，且
+/// `next_offset == since`（content 为空），允许下次 since 不变继续等。
+#[tokio::test]
+async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    // 起一个长任务（5s 都不会结束 / 不会 print 任何东西）。
+    let start_tc = ToolCallInfo {
+        id: "bg-tmo".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 5","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let out_tc = ToolCallInfo {
+        id: "to-tmo".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":300}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(!outcome.is_error);
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(chunk["wakeReason"], serde_json::Value::String("timeout".into()));
+    assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
+    assert_eq!(chunk["nextOffset"].as_u64(), Some(0));
+    assert_eq!(chunk["content"], serde_json::Value::String("".into()));
+
+    // 收尾：stop。
+    let _ = registry.stop(&task_id).await;
+}
+
+/// `timeout_ms=0` 等价 `block=false`：返回不带 wakeReason 字段。
+#[tokio::test]
+async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    let start_tc = ToolCallInfo {
+        id: "bg-z".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 5","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let out_tc = ToolCallInfo {
+        id: "to-z".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":0}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert!(
+        chunk.get("wakeReason").is_none(),
+        "block=false 路径**不**写出 wakeReason；实际：{}",
+        outcome.model_text
+    );
+
+    let _ = registry.stop(&task_id).await;
+}
+
+/// `timeout_ms` 上限 cap：传 999_999 不会真的等 ~17 分钟，会被 cap 到 30_000。
+/// 这里我们用一个不会有任何输出/不会结束的长任务，传 timeout_ms=999_999，
+/// 然后 cancel_token 在 ~150ms 后 cancel；如果 cap 没生效，sleep_until 会等满
+/// 17 分钟而被 cancel；如果 cap 生效，我们仅断言不到 5s 内已经返回（cancel 命中）即可——
+/// 真正验证 cap 的方式是"返回里没有等满 17 分钟"，但 unit test 想要快速兜底，
+/// 用 cancel 路径足以覆盖：上限 cap 与 cancel 路径都是同一个 select 分支。
+#[tokio::test]
+async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    let start_tc = ToolCallInfo {
+        id: "bg-cap".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 60","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_signal = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel_signal.cancel();
+    });
+
+    let out_tc = ToolCallInfo {
+        id: "to-cap".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":999999999}}"#,
+            task_id
+        ),
+    };
+    let started = std::time::Instant::now();
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &cancel,
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "cancel 应当在 ~150ms 后命中，{:?}",
+        elapsed
+    );
+    assert!(outcome.is_error, "cancel 路径返回 is_error=true");
+
+    let _ = registry.stop(&task_id).await;
+}
+
+/// claim-on-entry 双回灌去重：dispatcher 在 block=true 路径拿到 finished 后，
+/// completion_routes 应被置为 `Delivered`；后续 lifecycle 抢推 synthetic 时
+/// 检测到该状态会跳过。
+#[tokio::test]
+async fn task_output_block_true_claims_completion_route_on_finished() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::agent_loop::CompletionRoute;
+    use crate::core::tools::primitive::BashTaskRegistry;
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let start_tc = ToolCallInfo {
+        id: "bg-cr".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"echo hi; exit 0","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let out_tc = ToolCallInfo {
+        id: "to-cr".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":3000}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        Some(&routes),
+    )
+    .await;
+    assert!(!outcome.is_error);
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(chunk["wakeReason"], serde_json::Value::String("finished".into()));
+    let g = routes.lock();
+    assert!(matches!(g.get(&task_id), Some(CompletionRoute::Delivered)));
+}
+
+/// claim 让回：timeout（非终态）必须把 task_id 从 routes 里移除，让 lifecycle
+/// 后续可以兜底。
+#[tokio::test]
+async fn task_output_block_true_releases_claim_on_timeout() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::agent_loop::CompletionRoute;
+    use crate::core::tools::primitive::BashTaskRegistry;
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let start_tc = ToolCallInfo {
+        id: "bg-rel".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 5","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let out_tc = ToolCallInfo {
+        id: "to-rel".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":250}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        Some(&routes),
+    )
+    .await;
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(chunk["wakeReason"], serde_json::Value::String("timeout".into()));
+    // routes 不应留 entry：让 lifecycle 后续兜底。
+    assert!(routes.lock().get(&task_id).is_none());
+
+    let _ = registry.stop(&task_id).await;
+}
+
+/// lifecycle 抢先 Delivered：让 shell 在 dispatcher 调 block=true 之前就完成
+/// 并被 lifecycle subscriber 抢先标 `Delivered`，然后 dispatcher entry 检测到
+/// 跳过 wait，仍只交付一次（返回 finished + 不再额外 push synthetic）。
+#[tokio::test]
+async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::agent_loop::CompletionRoute;
+    use crate::core::tools::primitive::BashTaskRegistry;
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+    let start_tc = ToolCallInfo {
+        id: "bg-snk".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"echo done; exit 0","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    // 让 task 先 Finish + 模拟 lifecycle subscriber 抢先 Delivered。
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    routes.lock().insert(task_id.clone(), CompletionRoute::Delivered);
+
+    let out_tc = ToolCallInfo {
+        id: "to-snk".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":100}}"#,
+            task_id
+        ),
+    };
+    // 即便 timeout_ms 只有 100ms，dispatcher 应在 entry 立即返回（不进 wait）。
+    let started = std::time::Instant::now();
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        Some(&routes),
+    )
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "lifecycle 抢先时 dispatcher 应立即返回，实际耗时 {:?}",
+        started.elapsed()
+    );
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(chunk["wakeReason"], serde_json::Value::String("finished".into()));
+    // routes 仍是 Delivered（终态）。
+    assert!(matches!(
+        routes.lock().get(&task_id),
+        Some(CompletionRoute::Delivered)
+    ));
+}

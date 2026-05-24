@@ -314,7 +314,7 @@ agent_start              ← 第一层开始，用户消息进入
 队列与信号设计建议：
 
 - `steering_queue`：`Arc<Mutex<Vec<AgentMessage>>>`，UI 写、Loop 读。
-- `follow_up_queue`：同上。
+- `follow_up_queue`：同上。**P1（bash background monitor）补充**：单 turn AgentLoop 私有的 `follow_up_queue` 仍保留旧语义；`ChatContext` 额外持有一份 **session 级共享 follow_up_queue**，通过 `AgentLoop::with_shared_follow_up_queue(...)` builder 注入。后台 shell 自然完成时由 `chat_loop` 中 spawn 的 lifecycle subscriber 守护 task 推入一条 `<background-task-finished ...>tail</background-task-finished>` synthetic notification（`ChatMessage::user`）。`run_chat_turn` 在装配 messages 后会 drain 一次该 queue（让首轮 reasoning 之前就能看到 synthetic）；AgentLoop 一层 conv loop 仍按旧契约在 attempt 成功后 drain（覆盖"turn 内新到达"的 synthetic）。auto-feed 与 dispatcher `task_output(block=true)` 路径之间的去重由 session 级 `completion_routes` 状态机（`ToolWillDeliver | Delivered`）保证，详见 [`tools/bash.md`](tools/bash.md#claim-on-entry-状态机)。chat_loop 主循环在每个真实用户输入之间最多连续触发 `AUTO_TURN_BUDGET=K=8` 次 auto-turn，超过后强制回 readline，避免 synthetic 风暴。
 - `cancel_token`：`tokio_util::sync::CancellationToken`，可克隆、可 await、支持广播；每个 user turn 在 `readline` 读到非空输入后**重建一个全新 token**（避免上一轮残留 cancel 污染新轮），见 [interrupt-and-cancellation.md](interrupt-and-cancellation.md) §3、§4。
 - Ctrl+C 双击语义：2 秒内两次 SIGINT 触发 `exit(130)`（hard interrupt，进程退出）；首击仅 cancel 当前 turn（soft interrupt，保留 partial）。
 
