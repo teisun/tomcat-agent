@@ -10,20 +10,27 @@
 //! - 以 `~` 开头（home 缩写）
 //! - 以 `./` / `../` 开头（相对路径）
 //!
-//! 不会展开 glob；对 `>` / `<` 仅把后续显式 token 视作重定向目标路径；
-//! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令/重定向段再分别提取。
+//! 不会展开 glob；**不会**把 `>` / `<` 重定向目标当路径提取（见下方 TODO）。
+//! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令再分别提取。
 //!
 //! 命令前缀（如 `rm`、`echo`）不视作路径；
 //! `--flag=value` 中的 `value` 若像路径则会被提取。
 //! `NAME=/path` 形式的 assignment 会只提取 RHS，覆盖命令前缀、位置参数和子命令首段。
 //!
+//! # TODO（勿再扩展 shell 启发式解析）
+//!
+//! - **2026-05-20 `fda4b9a`** 已撤掉更激进的 bash token 路径猜测（误伤 node:/URL/@scope）。
+//! - **2026-05-24 `d8b5bf2` 的 `RedirectTarget` 分段** 已回滚：shell 排列组合太多，
+//!   hard-code 解析无法全覆盖且易误伤/漏拦；重定向、`2>&1`、`<<EOF`、`[[ a < b ]]` 等
+//!   **不要**再在这里加特殊分支。
+//! - 逃逸面（`eval $X`、`bash -c '...'`、重定向写盘等）应靠 `bash_ast` denylist、
+//!   `bash_forbidden` / `bash_approval` regex 与用户确认，而非继续堆 parser 规则。
+//!
 //! # 注意
 //!
 //! - 解析失败（非法 quoting 等）时静默返回空列表，由调用方决定后续策略
 //!   （通常做法是仍让 gate.check_bash regex 跑一遍 forbidden / approval）。
-//! - 该解析器是**保守的尽力而为**：不能依赖它发现"所有"路径；
-//!   逃逸（如 `eval $X`、`bash -c '...'` 中嵌套）由 gate 顶层的
-//!   `bash_forbidden` regex 兜底（plan §4.1/§4.3）。
+//! - 该解析器是**保守的尽力而为**：不能依赖它发现"所有"路径。
 
 use std::path::PathBuf;
 
@@ -32,8 +39,8 @@ use std::path::PathBuf;
 /// 返回值未做去重 / 规范化；调用方应负责把结果交给 gate.check 做规范化与判定。
 pub fn extract_paths(command: &str) -> Vec<String> {
     let mut paths = Vec::new();
-    for segment in split_subcommands(command) {
-        let tokens = match shell_words::split(segment.text) {
+    for sub in split_subcommands(command) {
+        let tokens = match shell_words::split(sub) {
             Ok(t) => t,
             Err(_) => continue,
         };
@@ -47,10 +54,8 @@ pub fn extract_paths(command: &str) -> Vec<String> {
             }
             iter.next();
         }
-        if matches!(segment.kind, SegmentKind::Command) {
-            // 跳过命令名；leading assignment-only 子命令已经在上面被消费。
-            let _cmd_name = iter.next();
-        }
+        // 跳过命令名；leading assignment-only 子命令已经在上面被消费。
+        let _cmd_name = iter.next();
         for tok in iter {
             collect_candidates(tok, &mut paths);
         }
@@ -111,24 +116,13 @@ fn looks_like_path(s: &str) -> bool {
     s.starts_with('/') || s.starts_with("~") || s.starts_with("./") || s.starts_with("../")
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SegmentKind {
-    Command,
-    RedirectTarget,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CommandSegment<'a> {
-    text: &'a str,
-    kind: SegmentKind,
-}
-
 /// 把一条命令按 `|` `;` `&` `>` `<` `&&` `||` 拆成子命令。
-fn split_subcommands(cmd: &str) -> Vec<CommandSegment<'_>> {
+///
+/// TODO: 仅用于切段提取 token，**不要**据此推断重定向目标路径（见模块顶 TODO）。
+fn split_subcommands(cmd: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let bytes = cmd.as_bytes();
     let mut start = 0;
-    let mut next_kind = SegmentKind::Command;
     let mut in_single = false;
     let mut in_double = false;
     let mut i = 0;
@@ -140,16 +134,8 @@ fn split_subcommands(cmd: &str) -> Vec<CommandSegment<'_>> {
             b'|' | b'&' | b';' | b'>' | b'<' if !in_single && !in_double => {
                 let s = cmd[start..i].trim();
                 if !s.is_empty() {
-                    out.push(CommandSegment {
-                        text: s,
-                        kind: next_kind,
-                    });
+                    out.push(s);
                 }
-                next_kind = if matches!(c, b'>' | b'<') {
-                    SegmentKind::RedirectTarget
-                } else {
-                    SegmentKind::Command
-                };
                 // 跳过连续的 |&;<> 组合（&&、||、>>、<<、>>>）。
                 i += 1;
                 while i < bytes.len() {
@@ -169,10 +155,7 @@ fn split_subcommands(cmd: &str) -> Vec<CommandSegment<'_>> {
     }
     let s = cmd[start..].trim();
     if !s.is_empty() {
-        out.push(CommandSegment {
-            text: s,
-            kind: next_kind,
-        });
+        out.push(s);
     }
     out
 }
@@ -193,4 +176,3 @@ pub fn expand_extracted(paths: &[String]) -> Vec<PathBuf> {
         })
         .collect()
 }
-

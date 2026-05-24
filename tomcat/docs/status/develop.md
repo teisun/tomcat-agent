@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-24 18:29 | ACTIVE | develop | — |
+| Nibbles | 2026-05-24 22:00 | ACTIVE | develop | — |
+
+### 2026-05-24 | post-review: 回滚 d8b5bf2 bash 重定向路径 gate
+
+- **阶段 R（评审）**：人工评审 `d8b5bf2` 集成审查结论后，决定回滚 `bash_parser` 的 `RedirectTarget` 重定向目标提取及相关单测；shell 排列组合过多，hard-code 无法全覆盖且易误伤（如 `> /dev/null`），与 `fda4b9a` 产品方向一致。
+- **代码**：撤销 `SegmentKind::RedirectTarget`；在 `bash_parser.rs` / `executor/bash.rs` / `bash_task.rs` 加 TODO，重定向写盘等留待 T-151 / `bash_ast` / regex 方案再加强；删除 `extracts_input_redirection_targets`、`execute_bash_redirection_target_is_path_gated`。
+- **阶段 T（门禁）**：`cargo test --lib handles_pipes_and_subcommands execute_bash` 通过。
 
 ### 2026-05-24 | merge `feature/plan-mode-enhance` → develop @ 2ecc513
 

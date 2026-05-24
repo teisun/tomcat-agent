@@ -264,45 +264,6 @@ async fn execute_bash_success() {
 }
 
 #[tokio::test]
-async fn execute_bash_redirection_target_is_path_gated() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_redirect_gate");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let forbidden = std::env::temp_dir().join(format!(
-        "tomcat_bash_redirect_blocked_{}_{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let _ = std::fs::remove_file(&forbidden);
-
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(DenyAllConfirmation),
-        Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    );
-    let cmd = format!("echo blocked > {}", forbidden.display());
-    let err = exec
-        .execute_bash(&cmd, Some(&path_str), "p1", None, None)
-        .await
-        .expect_err("重定向目标在工作区外时应在 spawn 前被路径 gate 拒绝");
-    assert!(
-        matches!(err, AppError::Permission(_)),
-        "实际错误应为权限拒绝，got: {err:?}"
-    );
-    assert!(
-        !forbidden.exists(),
-        "权限预检失败后不应在磁盘上创建重定向目标"
-    );
-    let _ = std::fs::remove_file(&forbidden);
-    let _ = std::fs::remove_dir(&dir);
-}
-
-#[tokio::test]
 async fn execute_bash_tokens_no_longer_trigger_path_gate() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_url");
     std::fs::create_dir_all(&dir).unwrap();

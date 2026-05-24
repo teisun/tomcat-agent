@@ -81,6 +81,12 @@ fn resolve_preflight_path(raw: &str, cwd_path: &std::path::Path) -> PathBuf {
     PathBuf::from(raw)
 }
 
+/// 对命令串里**显式前缀路径 token**做 gate 预检（`/path`、`~/`、`./`、`../`、
+/// `--flag=/path`、`VAR=/path` 等）。
+///
+/// TODO: **不要**扩展为重定向目标 / 更多 shell 语法启发式（`fda4b9a` / 回滚
+/// `d8b5bf2 RedirectTarget`）：排列组合过多、易误伤且无法全覆盖；重定向写盘等
+/// 靠 `bash_ast` + `bash_forbidden` / `bash_approval` regex 兜底。
 async fn preflight_command_paths(
     executor: &DefaultPrimitiveExecutor,
     command: &str,

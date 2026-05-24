@@ -278,6 +278,8 @@ impl BackgroundBashGuard {
             return Err(AppError::Primitive(reject.to_string()));
         }
 
+        // TODO: 与 `executor/bash.rs::preflight_command_paths` 同口径——勿扩展重定向 parser；
+        // 重定向写盘等见 bash_parser 模块顶 TODO / T-151。
         for raw in crate::core::permission::bash_parser::extract_paths(audit_cmd) {
             let candidate = resolve_preflight_path(&raw, &cwd_path);
             let candidate_owned = candidate.to_string_lossy().into_owned();
