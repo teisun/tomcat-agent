@@ -8,6 +8,8 @@ pub mod checkpoint;
 pub mod compaction;
 pub mod llm;
 pub mod permission;
+pub mod plan_runtime;
+pub mod prompts;
 pub mod security;
 pub mod session;
 pub mod tools;

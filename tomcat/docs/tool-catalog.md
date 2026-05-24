@@ -820,11 +820,28 @@ Parameters:
 
 Read incremental output from a background `bash` task started with `run_in_background: true`. Returns a UTF-8 lossy chunk of `[since, next_offset)` bytes from the task's log file plus a `finished` flag. Use the previous response's `next_offset` as the next `since` to tail the task across turns; first call may omit `since` to read from byte 0. When the task has finished or been stopped, `finished=true` and `exit_code` is populated.
 
+Waiting modes:
+- `block=false` (default): non-blocking; returns immediately with whatever bytes are already on disk. Good for an occasional progress glance — but **do not busy-poll**.
+- `block=true`: blocks until any of {new output appears | the task finishes | `timeout_ms` elapses}. Returns an extra `wakeReason` field with one of `"new_output" | "finished" | "timeout"`. **`timeout` is NOT a failure** — when `wakeReason="timeout" && finished=false` the response is just an empty wait slice (`content=""`, `next_offset == since`); call `task_output(block=true)` again to keep waiting.
+
+When to use which:
+1. The current todo cannot proceed without the shell result → `task_output(block=true, timeout_ms=...)`. Loop on `wakeReason="timeout"`.
+2. The current todo can do other independent work first → spawn `bash(run_in_background=true)` and immediately do other tools/edits/reads. The runtime will inject a synthetic `<background-task-finished task_id="..." exit_code="..." log_path="...">tail</background-task-finished>` user message **automatically** when the shell finishes; you do not need to poll.
+3. Just want a peek at progress → one-shot `task_output(block=false)`.
+
+When you see the `<background-task-finished ...>` tag, treat it as a system signal that a previously blocked todo can now proceed (NOT as new user input); pull the full log with `task_output(task_id, since=...)` if the tail body is insufficient.
+
+`timeout_ms` defaults to 5000, is capped at 30000, and `0` is equivalent to `block=false`.
+
 Parameters:
 
 ```json
 {
   "properties": {
+    "block": {
+      "description": "If true, wait until new output arrives, the task finishes, or `timeout_ms` elapses. Returns an extra `wakeReason` field. Default false (non-blocking).",
+      "type": "boolean"
+    },
     "since": {
       "description": "Byte offset to start reading from; pass the previous response's `next_offset` to tail. Defaults to 0 (read from start).",
       "minimum": 0,
@@ -833,6 +850,12 @@ Parameters:
     "task_id": {
       "description": "The task_id returned by a previous `bash` call with run_in_background=true.",
       "type": "string"
+    },
+    "timeout_ms": {
+      "description": "Wait slice in milliseconds for `block=true`. Default 5000, max 30000 (values above are capped). `0` is equivalent to `block=false`. Timeout is NOT a failure: when `wakeReason=\"timeout\" && finished=false`, you may call `task_output(block=true)` again to continue waiting.",
+      "maximum": 30000,
+      "minimum": 0,
+      "type": "integer"
     }
   },
   "required": [

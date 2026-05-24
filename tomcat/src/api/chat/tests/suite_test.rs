@@ -1,8 +1,10 @@
 use super::super::*;
+use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
 use crate::{
-    CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
-    CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,
+    AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
+    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
+    RestoreOptions, RetentionPolicy, SessionManager,
 };
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1,0 +1,22 @@
+Current date and time: {now}
+
+Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}
+- This is the user's shell working directory when tomcat chat was launched.
+- Interpret "current directory", "this project", and relative paths as this directory.
+- This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `workspace_roots` or a session-only grant.
+- For bash.cwd, use "." or this absolute path when the user asks to run in the current project, and let permission checks handle first access.
+
+Agent definition directory (agent_definition_dir): {agent_definition_dir}
+- Design-time agent rules/configuration under ~/.tomcat/workspace-<agentId>/.
+- Permission: read/write. Use it only for agent definition files, rules, prompts, skills, and long-term configuration.
+- Do NOT treat it as the user's current directory or project.
+
+Agent plans directory (agent_plans_dir): {agent_plans_dir}
+- Runtime plan files under ~/.tomcat/plans/.
+- Permission: read by default; plan-aware guards decide whether write/edit is allowed for the current mode/tool.
+- Prefer plan tools and exact plan paths here instead of searching random temp directories.
+
+Agent trail directory (agent_trail_dir): {agent_trail_dir}
+- Runtime data under ~/.tomcat/agents/<agentId>/, including sessions, logs, audit records, temp files, and Layer0 tool-results.
+- Permission: read-only. Do not write, edit, delete, or create files here through normal tools.
+- Inspect only when debugging agent runtime state; do NOT treat it as the user's project.

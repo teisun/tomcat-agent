@@ -1,0 +1,19 @@
+Verify the finished PlanFile (plan_id = `{plan_id}`).
+Artifact paths (use these first; do not guess alternate locations):
+- Exact plan file path: `{plan_path}`
+{workspace_hint}Scope:
+- Treat all todos as already marked completed; you are checking whether that is justified.
+- Read the exact plan file path above before broad search if you need to confirm current disk content.
+- Discover commands in this exact P0-P6 order and stop once you have a concrete scoped command:
+  P0 plan body / brief / user note; P1 injected system context; P2 nearest manifest;
+  P3 README / CONTRIBUTING / docs; P4 AGENTS.md or CLAUDE.md fallback;
+  P5 infer from nearby tests/layout but confirm by manifest/doc; P6 one minimal inferred smoke.
+- If you use a P6 fallback, label the check or summary as inferred.
+- Do NOT default to repo-wide `npm test`, workspace-wide `cargo test`, or whole-repo `pytest` without reading a manifest/doc first.
+- Prefer the smallest scoped build/test/lint command that matches the changed area.
+- Include at least one adversarial probe when relevant.
+- End with the required <verify> output block.
+
+----- BEGIN PLAN -----
+{plan_text}
+----- END PLAN -----

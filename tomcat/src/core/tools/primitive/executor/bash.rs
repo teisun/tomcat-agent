@@ -3,14 +3,15 @@
 //! ## 流程
 //! 1. cwd 路径预检（走 `gate_check_path`，复用 read scope）；
 //! 2. 拼装审计字符串 `audit_cmd`（命令 + 参数）；
-//! 3. `gate_check_bash`（whitelist / approval 三层）→ `(scope, grant)`；
-//! 4. **`spawn`** 子进程（Unix `sh -c` + 注入 wasmedge env，Windows `cmd /C`）或显式 argv；
-//! 5. **`tokio::time::timeout(timeout_ms, child.wait_with_output())` 等价**：
+//! 3. 对命令中显式出现的路径 token 做预检（assignment RHS / `--flag=value` / 绝对或显式相对路径）；
+//! 4. `gate_check_bash`（whitelist / approval 三层）→ `(scope, grant)`；
+//! 5. **`spawn`** 子进程（Unix `sh -c` + 注入 wasmedge env，Windows `cmd /C`）或显式 argv；
+//! 6. **`tokio::time::timeout(timeout_ms, child.wait_with_output())` 等价**：
 //!    本实现用 **手工分离**——`Child::stdout/stderr.take()` → 并行 reader 任务读管道，
 //!    `tokio::time::timeout(_, child.wait())` 等退出，超时 `child.kill().await + child.wait()` 收口。
 //!    **禁止** `tokio::time::timeout(_, child.wait_with_output())` 反模式：`wait_with_output`
 //!    会消费 `Child`，超时分支拿不到句柄做 `kill`（bash.md §2.4.3 / §6.2 / §9.2）。
-//! 6. 收集 stdout / stderr / exit_code，写审计并返回。
+//! 7. 收集 stdout / stderr / exit_code，写审计并返回。
 //!
 //! ## 与 PR-现状的差异（T2-P0-016 PR-E）
 //! - **MUST**：`Command::output()` → `spawn` + 并行 reader + `timeout(child.wait())`；
@@ -58,6 +59,42 @@ fn resolve_max_output_chars(executor: &DefaultPrimitiveExecutor) -> usize {
     } else {
         v
     }
+}
+
+fn resolve_preflight_path(raw: &str, cwd_path: &std::path::Path) -> PathBuf {
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if raw.starts_with("./") || raw.starts_with("../") {
+        let base = if cwd_path == std::path::Path::new(".") {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            cwd_path.to_path_buf()
+        };
+        return base.join(raw);
+    }
+    PathBuf::from(raw)
+}
+
+async fn preflight_command_paths(
+    executor: &DefaultPrimitiveExecutor,
+    command: &str,
+    cwd_path: &std::path::Path,
+    plugin_id: &str,
+) -> Result<(), AppError> {
+    for raw in crate::core::permission::bash_parser::extract_paths(command) {
+        let candidate = resolve_preflight_path(&raw, cwd_path);
+        let candidate_owned = candidate.to_string_lossy().into_owned();
+        let _ = executor
+            .gate_check_path(PrimitiveOperation::Bash, &candidate_owned, plugin_id)
+            .await?;
+    }
+    Ok(())
 }
 
 /// `spawn_pipe_readers` 的返回类型别名（避开 `clippy::type_complexity`）。
@@ -157,6 +194,19 @@ pub(super) async fn execute_bash_impl(
             ..Default::default()
         });
         return Err(err);
+    }
+
+    if let Err(e) = preflight_command_paths(executor, &audit_cmd, &cwd_path, plugin_id).await {
+        executor.audit.record_primitive(PrimitiveAuditEntry {
+            operation: AuditPrimitiveOp::Bash,
+            path_or_cmd: audit_cmd.clone(),
+            plugin_id: plugin_id.to_string(),
+            user_approved: false,
+            success: false,
+            detail: Some(e.to_string()),
+            ..Default::default()
+        });
+        return Err(e);
     }
 
     // bash 决策来源（whitelist / approval）—— 走 gate 三层。

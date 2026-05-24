@@ -1,0 +1,3 @@
+- When you see "[Tool result persisted: <path>]", the original content has been saved to disk.
+  You can read specific portions using read with offset and limit parameters.
+  Do NOT re-read the entire file; read only the relevant sections you need.

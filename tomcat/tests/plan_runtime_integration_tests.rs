@@ -23,8 +23,9 @@ use tomcat::api::chat::plan_runtime::{
     },
     mode::PlanMode,
     review::ReviewSummary,
+    verify::{VerifyCheck, VerifySummary},
     tools::{create_plan, todos, update_plan},
-    PlanRuntime, ReviewerDispatcher,
+    PlanRuntime, ReviewerDispatcher, VerifierDispatcher,
 };
 use tomcat::normalize_path;
 
@@ -103,12 +104,43 @@ impl ReviewerDispatcher for AcceptReviewer {
     ) -> ReviewSummary {
         ReviewSummary {
             aborted: false,
+            verdict: Some("pass".into()),
             summary: "looks good".into(),
             changes_summary: "none".into(),
             applied_changes: false,
             ..Default::default()
         }
     }
+}
+
+struct AcceptVerifier;
+#[async_trait::async_trait]
+impl VerifierDispatcher for AcceptVerifier {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _abort: Arc<AtomicBool>,
+    ) -> VerifySummary {
+        VerifySummary {
+            checks: vec![VerifyCheck {
+                name: "unit".into(),
+                command: "cargo test -p tomcat plan_runtime_smoke".into(),
+                result: "pass".into(),
+                output_excerpt: "ok".into(),
+            }],
+            verdict: "pass".into(),
+            summary: "verification passed".into(),
+            verifier_turns_limit: 64,
+            verifier_stop_reason: "completed".into(),
+            ..Default::default()
+        }
+    }
+}
+
+fn attach_passing_completion_dispatchers(runtime: &PlanRuntime) {
+    runtime.attach_reviewer(Arc::new(AcceptReviewer));
+    runtime.attach_verifier(Arc::new(AcceptVerifier));
 }
 
 // ─── E2E-PLAN-001：完整生命周期 create → build → exec→completed → chat ────
@@ -118,6 +150,7 @@ async fn full_plan_lifecycle_create_build_complete() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("lifecycle-session");
+    attach_passing_completion_dispatchers(&rt);
 
     let body = tokio::time::timeout(DEFAULT_TIMEOUT, async {
         // 1) /plan → Planning
@@ -273,6 +306,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-path");
+    attach_passing_completion_dispatchers(&rt);
     let external_dir = home.join("external-plans");
     std::fs::create_dir_all(&external_dir).unwrap();
     let external_path = external_dir.join("custom.plan.md");

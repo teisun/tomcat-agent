@@ -1,0 +1,8 @@
+## Workspace State
+
+{read_write_block}{read_only_block}{path_rules_block}
+Configuration management:
+  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.
+  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).
+  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.
+  - DO NOT write to ~/.tomcat/tomcat.config.toml directly with write/edit (will be denied).

@@ -1,0 +1,15 @@
+Review the finished implementation for PlanFile `{plan_id}` before verifier runs.
+Artifact paths (use these first; do not guess alternate locations):
+- Exact plan file path: `{plan_path}`
+{workspace_hint}{diff_section}{changed_files_section}Scope:
+- Treat all plan todos as already marked completed; check whether the actual implementation appears consistent with that claim.
+- Review changed files first, then inspect neighboring implementation only as needed.
+- You are STRICTLY read-only: do not edit plan files, todos, or repository files.
+- If you conclude the implementation is ready for verifier, use `verdict: pass`.
+- If you find a concrete issue the parent agent should fix first, use `verdict: fail`.
+- If evidence is inconclusive, use `verdict: partial`.
+- End with the required <review> output block.
+
+----- BEGIN PLAN -----
+{plan_text}
+----- END PLAN -----

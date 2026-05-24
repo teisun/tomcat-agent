@@ -1,0 +1,15 @@
+Review the following PlanFile (plan_id = `{plan_id}`).
+Artifact paths (use these first; do not guess alternate locations):
+- Exact plan file path: `{plan_path}`
+{workspace_hint}Scope:
+- Inspect frontmatter `goal`, `todos[]`, and the markdown body.
+- Flag risks (unclear acceptance criteria, missing dependencies, oversized todos).
+- Read the exact plan file path above before broad search if you need to confirm current disk content.
+- You may use `update_plan` to adjust `todos[]`, or `edit` the exact plan file above
+  in-place; runtime enforces path guards and rejects raw frontmatter edits.
+- If you inspect repository files, start from the project/workspace root above instead of wandering.
+- End with the required <review> output block.
+
+----- BEGIN PLAN -----
+{plan_text}
+----- END PLAN -----

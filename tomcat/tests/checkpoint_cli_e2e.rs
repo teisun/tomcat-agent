@@ -39,7 +39,7 @@ struct Fixture {
     home_path: PathBuf,
     workdir: PathBuf,
     session: SessionManager,
-    session_key: String,
+    session_id: String,
     store: ShadowGitStore,
 }
 
@@ -63,7 +63,7 @@ fn setup_fixture() -> Fixture {
     fs::create_dir_all(&sessions_dir).unwrap();
     let session = SessionManager::new(sessions_dir);
     let session_key = session.current_session_key().to_string();
-    session.create_session(&session_key, None).unwrap();
+    let session_id = session.create_session(&session_key, None).unwrap().session_id;
     let store = ShadowGitStore::new(resolve_agent_trail_dir(&cfg).unwrap(), workdir.clone());
 
     Fixture {
@@ -71,21 +71,21 @@ fn setup_fixture() -> Fixture {
         home_path,
         workdir,
         session,
-        session_key,
+        session_id,
         store,
     }
 }
 
 fn record_checkpoint(
     store: &dyn CheckpointStore,
-    session_key: &str,
+    session_id: &str,
     turn_id: &str,
     kind: CheckpointKind,
     message_anchor: Option<String>,
 ) -> String {
     store
         .record(CheckpointRecordRequest {
-            session_id: session_key.to_string(),
+            session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
             kind,
             message_anchor,
@@ -176,7 +176,7 @@ fn test_resume_after_interrupt() {
     fs::write(fx.workdir.join("note.txt"), "interrupt-good").unwrap();
     let checkpoint_id = record_checkpoint(
         &fx.store,
-        &fx.session_key,
+        &fx.session_id,
         &format!("{m1}::{m2}"),
         CheckpointKind::Interrupt,
         Some(m2),
@@ -218,7 +218,7 @@ fn test_slash_restore_recovers_after_bad_edit() {
     fs::write(fx.workdir.join("note.txt"), "good").unwrap();
     let checkpoint_id = record_checkpoint(
         &fx.store,
-        &fx.session_key,
+        &fx.session_id,
         "turn-1",
         CheckpointKind::TurnEnd,
         Some(m2.clone()),
@@ -301,7 +301,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
     fs::write(fx.workdir.join("note.txt"), "good").unwrap();
     let turn_end_ckpt = record_checkpoint(
         &fx.store,
-        &fx.session_key,
+        &fx.session_id,
         "turn-end-1",
         CheckpointKind::TurnEnd,
         Some(assistant_id),
@@ -320,7 +320,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
 
     let after_turn_end = fx
         .store
-        .list(&fx.session_key, Default::default())
+        .list(&fx.session_id, Default::default())
         .expect("checkpoint list after turn-end restore");
     let pre_rollback_count_after_turn_end = after_turn_end
         .iter()
@@ -339,7 +339,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
     fs::write(fx.workdir.join("note.txt"), "manual-good").unwrap();
     let manual_ckpt = record_checkpoint(
         &fx.store,
-        &fx.session_key,
+        &fx.session_id,
         "manual-1",
         CheckpointKind::Manual {
             label: "manual save".to_string(),
@@ -359,7 +359,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
 
     let after_manual = fx
         .store
-        .list(&fx.session_key, Default::default())
+        .list(&fx.session_id, Default::default())
         .expect("checkpoint list after manual restore");
     let pre_rollback_count_after_manual = after_manual
         .iter()
@@ -398,7 +398,7 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
 
     let checkpoints = fx
         .store
-        .list(&fx.session_key, Default::default())
+        .list(&fx.session_id, Default::default())
         .expect("checkpoint list after idle EOF");
     assert!(
         checkpoints.is_empty(),
@@ -482,7 +482,7 @@ fn test_hangup_during_run_leaves_interrupt_ckpt() {
 
     let checkpoints = fx
         .store
-        .list(&fx.session_key, Default::default())
+        .list(&fx.session_id, Default::default())
         .expect("checkpoint list after hangup");
     assert!(
         checkpoints

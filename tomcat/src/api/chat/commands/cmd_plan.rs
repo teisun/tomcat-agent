@@ -110,7 +110,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
 /// 输出格式：`<plan_id>  <mode>  <goal_first_line>  (updated <iso>)`
 /// 找不到目录 / 无文件 → 友好提示，不报错。
 fn print_plan_list() {
-    use crate::api::chat::plan_runtime::file_store;
+    use crate::core::plan_runtime::file_store;
     let plans_dir = match file_store::plans_dir() {
         Ok(p) => p,
         Err(e) => {

@@ -1,0 +1,459 @@
+use std::io::{self, Write as IoWrite};
+use std::sync::Arc;
+use std::time::Instant;
+
+use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
+
+use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::infra::error::AppError;
+use crate::infra::{
+    AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
+};
+use crate::{
+    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor,
+    SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry, resolve_agent_definition_dir,
+    resolve_agent_trail_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
+};
+
+use super::{panels, permission, plan_runtime};
+
+pub struct ChatContext {
+    pub session: SessionManager,
+    pub llm: Arc<dyn LlmProvider>,
+    pub config: AppConfig,
+    pub primitive: Arc<dyn PrimitiveExecutor>,
+    pub tool_registry: Arc<dyn ToolRegistry>,
+    pub event_bus: Arc<dyn EventBus>,
+    pub audit: Arc<dyn AuditRecorder>,
+    pub checkpoint_switcher: Arc<crate::core::SwitchingCheckpointStore>,
+    pub checkpoint_store: Arc<dyn crate::core::CheckpointStore>,
+    pub cancel_token: Arc<Mutex<CancellationToken>>,
+    pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
+    pub agent_workspace_dir: std::path::PathBuf,
+    pub agent_definition_dir: std::path::PathBuf,
+    pub agent_trail_dir: std::path::PathBuf,
+    pub cfg_path: std::path::PathBuf,
+    pub session_grants: crate::core::permission::SessionGrants,
+    pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
+    pub bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
+    pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
+    pub completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes,
+    pub follow_up_signal: Arc<tokio::sync::Notify>,
+    pub delivered_completion:
+        Arc<Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>>,
+    pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub gate: Arc<dyn crate::core::permission::PermissionGate>,
+    pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
+    pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
+    pub openai_files_runtime:
+        Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
+    pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
+    _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
+}
+
+fn git_available_for_checkpoints() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+impl ChatContext {
+    pub fn from_config(config: AppConfig) -> Result<Self, AppError> {
+        let sessions_path = resolve_sessions_dir(&config)?;
+        let sessions_path_for_appender = sessions_path.clone();
+        std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
+        let session = SessionManager::new(sessions_path);
+        let session_cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
+
+        let agent_definition_dir = resolve_agent_definition_dir(&config)?;
+        std::fs::create_dir_all(&agent_definition_dir).map_err(AppError::Io)?;
+        let agent_trail_dir = resolve_agent_trail_dir(&config)?;
+        std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
+        migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
+
+        let agent_workspace_dir =
+            std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.clone());
+        let cfg_path_snapshot =
+            crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
+
+        let llm: Arc<dyn LlmProvider> = crate::core::llm::resolve_llm(&config.llm)?;
+        let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
+            llm.as_ref(),
+            &config.llm.files,
+            session.sessions_dir(),
+            session.current_session_key(),
+        )
+        .map(Arc::new);
+
+        let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
+            Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
+            None => Arc::new(TracingAuditRecorder),
+        };
+        let workspace_roots = resolve_workspace_roots_paths(&config)?;
+        let cli_confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
+
+        let session_grants = crate::core::permission::SessionGrants::new();
+        let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
+            Some(agent_trail_dir.clone()),
+            crate::infra::config::resolve_sessions_dir(&config).ok(),
+            crate::infra::config::resolve_log_dir(&config).ok(),
+            crate::infra::config::resolve_audit_dir(&config).ok(),
+            crate::infra::config::resolve_agent_dir(&config).ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let gate_cfg = crate::core::permission::GateConfig {
+            agent_definition_dir: agent_definition_dir.clone(),
+            workspace_roots: workspace_roots.clone(),
+            agent_trail_readonly_dirs: agent_trail_readonly_dirs.clone(),
+            user_path_rules: config.primitive.path_rules.clone(),
+            user_bash_forbidden: config.primitive.bash_forbidden.clone(),
+            user_bash_approval: config.primitive.bash_approval_required.clone(),
+            auto_confirm: config.primitive.auto_confirm,
+        };
+        let gate: Arc<dyn crate::core::permission::PermissionGate> = Arc::new(
+            crate::core::permission::DefaultPermissionGate::new(gate_cfg, session_grants.clone()),
+        );
+
+        let confirmation: Arc<dyn UserConfirmationProvider> =
+            Arc::new(permission::cwd_lazy::CwdLazyPrompt::new(
+                cli_confirmation,
+                agent_workspace_dir.clone(),
+                gate.clone(),
+                session_grants.clone(),
+                cfg_path_snapshot.clone(),
+            ));
+
+        let _ = workspace_roots;
+        let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
+            DefaultPrimitiveExecutor::new(
+                config.primitive.clone(),
+                confirmation.clone(),
+                audit.clone(),
+                gate.clone(),
+            )
+            .with_write_normalize_crlf(config.tools.write.normalize_crlf),
+        );
+
+        let config_backend: Option<crate::core::agent_loop::SharedConfigBackend> =
+            match crate::api::cli::config_file_path() {
+                Ok(p) => Some(Arc::new(
+                    crate::core::tools::config_tool::ChatConfigBackend {
+                        ctx: crate::core::tools::config_tool::ConfigToolContext::new(
+                            p,
+                            confirmation.clone(),
+                        )
+                        .with_gate(gate.clone()),
+                    },
+                )),
+                Err(_) => None,
+            };
+
+        let checkpoint_switcher = Arc::new(crate::core::SwitchingCheckpointStore::new(
+            agent_trail_dir.clone(),
+            agent_workspace_dir.clone(),
+            git_available_for_checkpoints(),
+        ));
+        let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
+
+        let tool_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let tool_registry: Arc<dyn ToolRegistry> =
+            Arc::new(DefaultToolRegistry::new(tool_executor, audit.clone()));
+
+        let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+        let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
+        let last_interrupt_at = Arc::new(Mutex::new(None));
+
+        let bash_task_registry = Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+            agent_trail_dir.join("tool-results"),
+        ));
+        let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let follow_up_signal = Arc::new(tokio::sync::Notify::new());
+        let delivered_completion: Arc<
+            Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>,
+        > = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
+            Arc::new(Mutex::new(None));
+
+        let initial_show_thinking = resolve_initial_show_thinking(&config.llm.thinking);
+
+        let plan_runtime = plan_runtime::PlanRuntime::new_with_session_id(
+            session.current_session_key(),
+            current_session_entry.session_id.clone(),
+        );
+        plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
+        plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
+        plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
+        plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
+        plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
+        plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
+        plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));
+        plan_runtime.attach_ask_question_panel(Arc::new(panels::CliAskQuestionPanel));
+
+        let agent_registry =
+            crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone());
+        let root_agent_guard = agent_registry
+            .register_root(current_session_entry.session_id.clone())
+            .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
+
+        let reviewer_max_turns = std::env::var("TOMCAT_REVIEWER_MAX_TURNS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(config.reviewer.max_turns);
+        let reviewer_model = config
+            .reviewer
+            .model_override
+            .clone()
+            .unwrap_or_else(|| config.llm.default_model.clone());
+        let read_file_state =
+            Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
+        let prod_reviewer = plan_runtime::prod_reviewer::ProdReviewerDispatcher::new(
+            "chat_context",
+            plan_runtime::prod_reviewer::ProdReviewerDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm: llm.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: config.context.clone(),
+                read_file_state: read_file_state.clone(),
+                openai_files_runtime: openai_files_runtime.clone(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                model: reviewer_model,
+                max_turns: reviewer_max_turns,
+            },
+        );
+        plan_runtime.attach_reviewer(Arc::new(prod_reviewer));
+        let prod_verifier = plan_runtime::verify::ProdVerifierDispatcher::new(
+            "chat_context",
+            plan_runtime::verify::ProdVerifierDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm: llm.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: config.context.clone(),
+                read_file_state: read_file_state.clone(),
+                openai_files_runtime: openai_files_runtime.clone(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                model: config.llm.default_model.clone(),
+            },
+        );
+        plan_runtime.attach_verifier(Arc::new(prod_verifier));
+
+        {
+            plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
+                let sm = SessionManager::new(sessions_path_for_appender.clone());
+                sm.append_custom_entry(extra)
+            }));
+        }
+
+        if let Err(err) = plan_runtime.recover() {
+            warn!(error = %err, "plan_runtime recover failed; continuing with Chat mode");
+        }
+
+        Ok(Self {
+            session,
+            llm,
+            config,
+            primitive,
+            tool_registry,
+            event_bus,
+            audit,
+            checkpoint_switcher,
+            checkpoint_store,
+            cancel_token,
+            last_interrupt_at,
+            agent_workspace_dir,
+            agent_definition_dir,
+            agent_trail_dir,
+            cfg_path: cfg_path_snapshot,
+            session_grants,
+            config_backend,
+            bash_task_registry,
+            follow_up_queue,
+            completion_routes,
+            follow_up_signal,
+            delivered_completion,
+            completion_subscriber_handle,
+            gate,
+            read_file_state,
+            show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(initial_show_thinking)),
+            openai_files_runtime,
+            plan_runtime,
+            agent_registry,
+            _root_agent_guard: root_agent_guard,
+        })
+    }
+
+    pub(crate) fn effective_model(&self, entry: Option<&SessionEntry>) -> String {
+        entry
+            .and_then(|e| e.model_override.as_deref())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.config.llm.default_model)
+            .to_string()
+    }
+
+    pub(crate) fn shutdown_completion_subscriber(&self) {
+        if let Some(handle) = self.completion_subscriber_handle.lock().take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for ChatContext {
+    fn drop(&mut self) {
+        self.shutdown_completion_subscriber();
+    }
+}
+
+pub struct CliConfirmation;
+
+#[async_trait::async_trait]
+impl UserConfirmationProvider for CliConfirmation {
+    async fn confirm(
+        &self,
+        operation: PrimitiveOperation,
+        preview: &str,
+        plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        println!("\n--- 操作确认 ---");
+        let source_label = if plugin_id == "__agent__" {
+            "host".to_string()
+        } else {
+            plugin_id.to_string()
+        };
+        println!("类型: {:?}  来源: {}", operation, source_label);
+        if !preview.is_empty() {
+            let lines: Vec<&str> = preview.lines().collect();
+            let display = if lines.len() > 20 {
+                format!("{}\n  ... ({} 行已省略)", lines[..20].join("\n"), lines.len() - 20)
+            } else {
+                preview.to_string()
+            };
+            println!("预览:\n{}", display);
+        }
+        print!("是否执行？[y/N] ");
+        io::stdout().flush().map_err(AppError::Io)?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line).map_err(AppError::Io)?;
+        let answer = line.trim().to_lowercase();
+        Ok(answer == "y" || answer == "yes")
+    }
+
+    async fn confirm_decision(
+        &self,
+        operation: PrimitiveOperation,
+        preview: &str,
+        plugin_id: &str,
+        suggested_root: Option<std::path::PathBuf>,
+    ) -> Result<ConfirmDecision, AppError> {
+        if operation == PrimitiveOperation::Bash {
+            return match self.confirm(operation, preview, plugin_id).await? {
+                true => Ok(ConfirmDecision::AllowOnce),
+                false => Ok(ConfirmDecision::Deny),
+            };
+        }
+
+        let target = extract_path_from_preview(preview).unwrap_or_else(|| {
+            suggested_root
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+        });
+        match permission::prompt::read_path_prompt(
+            &target,
+            suggested_root,
+            Some(&format!("类型: {:?}  来源: {}", operation, plugin_id)),
+        )
+        .map_err(AppError::Io)?
+        {
+            permission::prompt::PathPromptChoice::AllowSession => Ok(ConfirmDecision::AllowOnce),
+            permission::prompt::PathPromptChoice::PersistWorkspaceRoot { root } => {
+                let cfg_path = crate::api::cli::config_file_path()?;
+                crate::infra::config::append_workspace_root_to_disk(
+                    &cfg_path,
+                    root.to_string_lossy().into_owned(),
+                )?;
+                Ok(ConfirmDecision::AllowAndPersistRoot { root })
+            }
+            permission::prompt::PathPromptChoice::Cancel => Ok(ConfirmDecision::Deny),
+        }
+    }
+}
+
+fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
+    preview
+        .lines()
+        .find_map(|line| line.strip_prefix("路径: "))
+        .map(std::path::PathBuf::from)
+}
+
+struct NoopToolExecutor;
+
+#[async_trait::async_trait]
+impl ToolExecutor for NoopToolExecutor {
+    async fn execute(
+        &self,
+        tool: &Tool,
+        _params: serde_json::Value,
+        _caller_plugin_id: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        Err(AppError::Tool(format!(
+            "对话模式下不支持插件工具执行: {}",
+            tool.name
+        )))
+    }
+}
+
+pub(crate) fn resolve_initial_show_thinking(
+    thinking: &crate::infra::config::ThinkingConfig,
+) -> bool {
+    match std::env::var("PI_CHAT_SHOW_THINKING") {
+        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "True" | "yes" | "on"),
+        Err(_) => thinking.show,
+    }
+}
+
+fn migrate_legacy_layer0_tool_results(
+    agent_definition_dir: &std::path::Path,
+    agent_trail_dir: &std::path::Path,
+) {
+    let legacy_root = agent_definition_dir.join("workspace");
+    if !legacy_root.exists() {
+        return;
+    }
+    let target_root = agent_trail_dir.join("tool-results");
+    if let Ok(entries) = std::fs::read_dir(&legacy_root) {
+        let _ = std::fs::create_dir_all(&target_root);
+        for entry in entries.flatten() {
+            let from = entry.path();
+            let name = entry.file_name();
+            let to = target_root.join(name);
+            if to.exists() {
+                continue;
+            }
+            let _ = std::fs::rename(&from, &to);
+        }
+    }
+}

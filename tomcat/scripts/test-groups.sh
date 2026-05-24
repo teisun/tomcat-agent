@@ -18,6 +18,8 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   llm_tests
   openai_responses_integration_tests
   context_management_tests
+  plan_runtime_integration_tests
+  plan_e2e_with_mock_llm_tests
   robustness_tests
   read_tool_tests
 )

@@ -116,14 +116,14 @@ pub struct AgentLoopConfig {
     pub subagent_type: SubagentType,
     /// reviewer 的更细分运行形态：`Plan`（create_plan 后计划审稿）或 `Code`
     ///（verifier 前代码审查）。仅 reviewer 子 Agent 需要；其它 Agent 为 `None`。
-    pub review_kind: Option<crate::api::chat::plan_runtime::review::ReviewKind>,
+    pub review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
     /// - 读取当前 `PlanMode` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
     ///
     /// 顶层 chat_loop 必填；reviewer 子 Agent 与脱离 PlanRuntime 的单测/独立 AgentLoop 可为 `None`，
     /// 此时 tool_exec 收到这四个工具的调用会返回 `ToolError::PlanRuntimeUnavailable` 文案。
-    pub plan_runtime: Option<Arc<crate::api::chat::plan_runtime::PlanRuntime>>,
+    pub plan_runtime: Option<Arc<crate::core::plan_runtime::PlanRuntime>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -240,7 +240,7 @@ pub enum CompletionRoute {
 }
 
 /// P1：session 级共享的 `task_id → CompletionRoute` 路由表。
-/// 由 [`crate::api::chat::ChatContext`] 持有一份，每轮 `run_chat_turn` 通过
+/// 由 `ChatContext` 持有一份，每轮 `run_chat_turn` 通过
 /// builder 注入到 `AgentLoop`。lifecycle subscriber（host 侧守护 task）
 /// 与 dispatcher 共用同一把锁串行化所有交付决策。
 pub type BackgroundCompletionRoutes = Arc<Mutex<HashMap<String, CompletionRoute>>>;

@@ -763,7 +763,7 @@ impl Default for TodosConfig {
 /// `[reviewer]` 子表（T2-P1-004 RV-A/B/E）：reviewer 内联子 Agent 派发参数。
 ///
 /// reviewer 子 Agent 走 `AgentRegistry::spawn_subagent_internal`，**不**进 LLM catalog；
-/// 本表仅控制：子 loop 最大轮次、（可选）覆盖父 model / system prompt。
+/// 本表仅控制：子 loop 最大轮次、（可选）覆盖父 model。
 ///
 /// **改稿权 (`allow_review_edit`) 已固定为 `true`**——实现层硬编码，不再提供配置项。
 /// 历史变更：移除 `TOMCAT_REVIEWER_DEFAULT_ALLOW_EDIT` / `[reviewer].default_allow_edit`。
@@ -771,7 +771,6 @@ impl Default for TodosConfig {
 /// env 覆盖（plan §P0.5 / reviewer §11）：
 /// - `TOMCAT_REVIEWER_MAX_TURNS` → `max_turns`（默认 64）
 /// - `TOMCAT_REVIEWER_MODEL` → `model_override`
-/// - `TOMCAT_REVIEWER_SYSTEM_PROMPT_OVERRIDE_PATH` → `system_prompt_override_path`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReviewerConfig {
     /// reviewer 子 loop 最大 LLM reasoning 轮次（映射到 `AgentLoopConfig.max_tool_rounds`）。
@@ -781,9 +780,6 @@ pub struct ReviewerConfig {
     /// 显式覆盖 reviewer 子 Agent 使用的 LLM 模型；`None` 时继承父 Agent。
     #[serde(default)]
     pub model_override: Option<String>,
-    /// 显式覆盖 reviewer system prompt 的本地文件路径（调试用）；`None` 时使用内置 `REVIEWER_SYSTEM_PROMPT`。
-    #[serde(default)]
-    pub system_prompt_override_path: Option<String>,
 }
 
 fn default_reviewer_max_turns() -> u32 {
@@ -795,7 +791,6 @@ impl Default for ReviewerConfig {
         Self {
             max_turns: default_reviewer_max_turns(),
             model_override: None,
-            system_prompt_override_path: None,
         }
     }
 }

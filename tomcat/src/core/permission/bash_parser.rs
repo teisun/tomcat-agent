@@ -1,6 +1,6 @@
-//! # Legacy Bash 路径提取
+//! # Bash 显式路径提取
 //!
-//! 该模块保留给历史测试 / 调研使用，**不再参与** `execute_bash` 主执行链。
+//! 该模块只用于 `execute_bash` 的**显式路径预检**与相关测试。
 //! 过去这里会用启发式从命令字符串里猜测路径，但这会误伤 `node:fs/promises`、
 //! `@scope/pkg`、jq 过滤式、`node -e` / heredoc 脚本等大量非文件 token。
 //!

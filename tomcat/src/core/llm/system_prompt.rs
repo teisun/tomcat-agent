@@ -1,6 +1,7 @@
 //! System prompt 构建：参考 pi-mono `system-prompt.ts` 模式。
 //!
-//! prompt 模板写死在代码中，编译后嵌入二进制，不从外部文件读取。
+//! prompt 模板位于 `core/prompts/templates/`，通过 `include_str!` 编译后嵌入二进制，
+//! 不从外部文件读取。
 //! 动态部分（当前时间、三类工作目录）在每次调用时填充。
 //!
 //! ## 模块化
@@ -16,6 +17,8 @@
 // ---------------------------------------------------------------------------
 // SystemPromptSection trait + Builder
 // ---------------------------------------------------------------------------
+
+use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 
 pub trait SystemPromptSection: Send + Sync {
     fn section_name(&self) -> &str;
@@ -82,14 +85,8 @@ impl SystemPromptSection for CoreIdentitySection {
         "core_identity"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        format!(
-            "You are an expert coding assistant operating inside Tomcat, a coding agent runtime.
-You help users by reading files, executing commands, editing code, and writing new files.
-
-Available tools:
-{}",
-            crate::core::tools::contract::catalog::render_core_identity_tool_lines()
-        )
+        let tool_lines = crate::core::tools::contract::catalog::render_core_identity_tool_lines();
+        render_prompt(PromptKey::SystemCoreIdentity, &[("tool_lines", &tool_lines)])
     }
     fn priority(&self) -> u32 {
         10
@@ -103,15 +100,7 @@ impl SystemPromptSection for ToolInstructionsSection {
         "tool_instructions"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        r#"Guidelines:
-- When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
-- Use read to examine files before editing
-- Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R
-- Use edit for precise changes (old_content must match the file exactly, including whitespace; pass `edits[]` for multi-segment edits — all segments match the ORIGINAL snapshot, not chained)
-- Use write only for new files or complete rewrites
-- Be concise in your responses
-- Show file paths clearly when working with files
-- IMPORTANT: Only claim you can access directories that you have successfully listed or read from using tools. Do not guess or fabricate which directories are accessible. If unsure, use list_dir to verify first."#.to_string()
+        load_prompt(PromptKey::SystemToolInstructions).to_string()
     }
     fn priority(&self) -> u32 {
         20
@@ -125,10 +114,7 @@ impl SystemPromptSection for PagedReadingSection {
         "paged_reading"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        r#"- When you see "[Tool result persisted: <path>]", the original content has been saved to disk.
-  You can read specific portions using read with offset and limit parameters.
-  Do NOT re-read the entire file; read only the relevant sections you need."#
-            .to_string()
+        load_prompt(PromptKey::SystemPagedReading).to_string()
     }
     fn priority(&self) -> u32 {
         25
@@ -145,53 +131,7 @@ impl SystemPromptSection for BackgroundShellMonitorSection {
         "background_shell_monitor"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        r#"## Background bash tasks
-
-When a long-running command (build, watcher, dev server, test suite) needs to run
-without blocking your tool round, use `bash(run_in_background=true)`; you'll get a
-`task_id` + `log_path` immediately. Use `task_output` / `task_stop` / `task_list`
-to drive it across follow-up turns.
-
-There are exactly three correct usage patterns — pick one:
-
-1. **The current todo strictly depends on the shell result** → call
-   `task_output(task_id, since=..., block=true, timeout_ms=...)`. The runtime
-   blocks until any of {new output | task finished | timeout}, then returns
-   `wakeReason` with one of `"new_output" | "finished" | "timeout"`.
-   - Default `timeout_ms` is 5000, max is 30000 (values above are capped),
-     and `0` is equivalent to `block=false`.
-   - **`timeout` is NOT a failure.** When `wakeReason="timeout" && finished=false`
-     the response is just a wait slice (`content=""`, `next_offset == since`).
-     Call `task_output(block=true)` again with the same `since` to keep waiting.
-   - Loop on this until you see `wakeReason="finished"`, then act on `exit_code`
-     and the tail bytes.
-
-2. **The current todo can do other independent work first** → spawn the
-   background task and **immediately** continue with other tools (read / edit /
-   another bash / etc.). You do **not** need to poll. When the shell finishes,
-   the runtime will automatically inject a synthetic user message of the form
-
-   ```
-   <background-task-finished task_id="..." exit_code="..." log_path="..." command="...">
-   ...tail of last ≤4 KiB of the log...
-   </background-task-finished>
-   ```
-
-   Treat the `<background-task-finished ...>` tag as a **system signal** —
-   *not* as new user input. It means a previously blocked sub-task can now
-   proceed. If the tail body is insufficient, call `task_output(task_id, since=...)`
-   to fetch the full log.
-
-3. **You only want a glimpse of progress** → one-shot `task_output(block=false)`.
-   Do **not** busy-poll: continuous non-blocking polls waste turns. If you need
-   to wait, use `block=true`.
-
-Avoid these mistakes:
-- Treating a `block=true` `timeout` as a failure — it's just a wait slice ending.
-- Repeated `task_output(block=false)` with no other work in between.
-- Returning a final answer to the user before the shell completes (unless the
-  user explicitly asked for fire-and-forget)."#
-            .to_string()
+        load_prompt(PromptKey::SystemBackgroundShellMonitor).to_string()
     }
     fn priority(&self) -> u32 {
         30
@@ -206,33 +146,15 @@ impl SystemPromptSection for WorkspaceContextSection {
     }
     fn render(&self, context: &WorkspaceContext) -> String {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M %Z");
-        format!(
-            "Current date and time: {now}\n\
-             \n\
-             Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}\n\
-             - This is the user's shell working directory when tomcat chat was launched.\n\
-             - Interpret \"current directory\", \"this project\", and relative paths as this directory.\n\
-             - This directory is NOT automatically authorized for file access. Use tools normally; if access is not yet authorized, the runtime will ask the user to grant `workspace_roots` or a session-only grant.\n\
-             - For bash.cwd, use \".\" or this absolute path when the user asks to run in the current project, and let permission checks handle first access.\n\
-             \n\
-             Agent definition directory (agent_definition_dir): {agent_definition_dir}\n\
-             - Design-time agent rules/configuration under ~/.tomcat/workspace-<agentId>/.\n\
-             - Permission: read/write. Use it only for agent definition files, rules, prompts, skills, and long-term configuration.\n\
-             - Do NOT treat it as the user's current directory or project.\n\
-             \n\
-             Agent plans directory (agent_plans_dir): {agent_plans_dir}\n\
-             - Runtime plan files under ~/.tomcat/plans/.\n\
-             - Permission: read by default; plan-aware guards decide whether write/edit is allowed for the current mode/tool.\n\
-             - Prefer plan tools and exact plan paths here instead of searching random temp directories.\n\
-             \n\
-             Agent trail directory (agent_trail_dir): {agent_trail_dir}\n\
-             - Runtime data under ~/.tomcat/agents/<agentId>/, including sessions, logs, audit records, temp files, and Layer0 tool-results.\n\
-             - Permission: read-only. Do not write, edit, delete, or create files here through normal tools.\n\
-             - Inspect only when debugging agent runtime state; do NOT treat it as the user's project.",
-            agent_workspace_dir = context.agent_workspace_dir,
-            agent_definition_dir = context.agent_definition_dir,
-            agent_plans_dir = context.agent_plans_dir,
-            agent_trail_dir = context.agent_trail_dir,
+        render_prompt(
+            PromptKey::SystemWorkspaceContext,
+            &[
+                ("now", &now.to_string()),
+                ("agent_workspace_dir", &context.agent_workspace_dir),
+                ("agent_definition_dir", &context.agent_definition_dir),
+                ("agent_plans_dir", &context.agent_plans_dir),
+                ("agent_trail_dir", &context.agent_trail_dir),
+            ],
         )
     }
     fn priority(&self) -> u32 {
@@ -297,21 +219,16 @@ impl SystemPromptSection for WorkspaceStateSection {
     }
 
     fn render(&self, _context: &WorkspaceContext) -> String {
-        let mut out = String::new();
-
-        out.push_str("## Workspace State\n\n");
-
-        if self.state.read_write.is_empty() {
-            out.push_str(
-                "You currently have no read/write directories. \
-                 Use `config_set(\"workspace.workspace_roots\", \"<abs path>\")` to add one.\n",
-            );
+        let read_write_block = if self.state.read_write.is_empty() {
+            "You currently have no read/write directories. \
+                 Use `config_set(\"workspace.workspace_roots\", \"<abs path>\")` to add one.\n"
+                .to_string()
         } else {
-            out.push_str(
-                "You can read/write in these directories (write may require user confirmation):\n",
-            );
+            let mut block =
+                "You can read/write in these directories (write may require user confirmation):\n"
+                    .to_string();
             for (idx, d) in self.state.read_write.iter().enumerate() {
-                out.push_str(&format!("  {}. {}", idx + 1, d.path));
+                block.push_str(&format!("  {}. {}", idx + 1, d.path));
                 let mut tags: Vec<String> = vec![format!("[{}]", d.label)];
                 if let Some(a) = d.alias.as_ref() {
                     tags.push(format!("alias={}", a));
@@ -320,27 +237,33 @@ impl SystemPromptSection for WorkspaceStateSection {
                     tags.push(format!("desc=\"{}\"", desc));
                 }
                 if !tags.is_empty() {
-                    out.push(' ');
-                    out.push_str(&tags.join(" "));
+                    block.push(' ');
+                    block.push_str(&tags.join(" "));
                 }
-                out.push('\n');
+                block.push('\n');
             }
-        }
+            block
+        };
 
-        if !self.state.read_only.is_empty() {
-            out.push_str("\nYou can READ (but NOT write) these directories:\n");
+        let read_only_block = if self.state.read_only.is_empty() {
+            String::new()
+        } else {
+            let mut block = "\nYou can READ (but NOT write) these directories:\n".to_string();
             for d in &self.state.read_only {
                 let suffix = if d.label.is_empty() {
                     String::new()
                 } else {
                     format!(" [{}]", d.label)
                 };
-                out.push_str(&format!("  - {}{}\n", d.path, suffix));
+                block.push_str(&format!("  - {}{}\n", d.path, suffix));
             }
-        }
+            block
+        };
 
-        if !self.state.path_rules.is_empty() {
-            out.push_str("\nPath rules in effect:\n");
+        let path_rules_block = if self.state.path_rules.is_empty() {
+            String::new()
+        } else {
+            let mut block = "\nPath rules in effect:\n".to_string();
             // deny 优先列出
             let mut deny: Vec<&PathRuleSummary> = self
                 .state
@@ -367,7 +290,7 @@ impl SystemPromptSection for WorkspaceStateSection {
                         }
                     })
                     .collect();
-                out.push_str(&format!("  deny:     {}\n", lst.join(", ")));
+                block.push_str(&format!("  deny:     {}\n", lst.join(", ")));
             }
             if !readonly.is_empty() {
                 let lst: Vec<String> = readonly
@@ -380,15 +303,19 @@ impl SystemPromptSection for WorkspaceStateSection {
                         }
                     })
                     .collect();
-                out.push_str(&format!("  readonly: {}\n", lst.join(", ")));
+                block.push_str(&format!("  readonly: {}\n", lst.join(", ")));
             }
-        }
+            block
+        };
 
-        out.push_str(
-            "\nConfiguration management:\n  - To inspect or modify workspace/permissions, use the `config_get` and `config_set` tools.\n  - These tools enforce a key allowlist (sensitive keys like API keys are blocked).\n  - Array configs (workspace_roots, path_rules, bash_*) are append-only via tools.\n  - DO NOT write to ~/.tomcat/tomcat.config.toml directly with write/edit (will be denied).\n",
-        );
-
-        out
+        render_prompt(
+            PromptKey::SystemWorkspaceState,
+            &[
+                ("read_write_block", &read_write_block),
+                ("read_only_block", &read_only_block),
+                ("path_rules_block", &path_rules_block),
+            ],
+        )
     }
 
     fn priority(&self) -> u32 {
