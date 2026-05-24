@@ -29,7 +29,7 @@
 //!
 //! ## 测试入口
 //!
-//! 见同目录的 `cli_turn_renderer_test.rs`：以 `Sink` 替换 stdout/stderr，覆盖
+//! 见父目录 `tests/cli_turn_renderer_test.rs`：以 `Sink` 替换 stdout/stderr，覆盖
 //! folded vs expanded、tool start/end、kind 切换换行等。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -644,4 +644,5 @@ fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
+#[path = "tests/cli_turn_renderer_test.rs"]
 mod tests;

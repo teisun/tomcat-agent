@@ -507,11 +507,9 @@ impl LlmProvider for OpenAiResponsesProvider {
     }
 }
 
-// 单测见 `core::llm::tests::openai_responses_test`（wire + tools + payload + count_tokens
-// + 流式解析覆盖在外部测试目录中按 plan §5 Phase E.2 / E.3 拆分）。
-//
-// `#[path]` 相对基准是本文件所在目录（即 `openai_responses/`）；测试文件实际在
-// `core/llm/tests/openai_responses_test.rs`，所以走 `../tests/...` 上跳一级。
+// 单测见 `core::llm::openai_responses::tests::openai_responses_test`（wire + tools +
+// payload + count_tokens + 流式解析覆盖在同父目录测试目录中按 plan §5 Phase E.2 /
+// E.3 拆分）。
 #[cfg(test)]
-#[path = "../tests/openai_responses_test.rs"]
+#[path = "tests/openai_responses_test.rs"]
 mod tests;

@@ -57,6 +57,18 @@ pub struct ChatContext {
     _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
 }
 
+#[derive(Default)]
+pub struct ChatContextOverrides {
+    pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
+}
+
+impl ChatContextOverrides {
+    pub fn with_ask_question_panel(mut self, panel: Arc<dyn panels::AskQuestionPanel>) -> Self {
+        self.ask_question_panel = Some(panel);
+        self
+    }
+}
+
 fn git_available_for_checkpoints() -> bool {
     std::process::Command::new("git")
         .arg("--version")
@@ -69,6 +81,13 @@ fn git_available_for_checkpoints() -> bool {
 
 impl ChatContext {
     pub fn from_config(config: AppConfig) -> Result<Self, AppError> {
+        Self::from_config_with_overrides(config, ChatContextOverrides::default())
+    }
+
+    pub fn from_config_with_overrides(
+        config: AppConfig,
+        overrides: ChatContextOverrides,
+    ) -> Result<Self, AppError> {
         let sessions_path = resolve_sessions_dir(&config)?;
         let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
@@ -209,6 +228,9 @@ impl ChatContext {
             session.current_session_key(),
             current_session_entry.session_id.clone(),
         );
+        let ask_question_panel: Arc<dyn panels::AskQuestionPanel> = overrides
+            .ask_question_panel
+            .unwrap_or_else(|| Arc::new(panels::CliAskQuestionPanel));
         plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
         plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
@@ -216,7 +238,7 @@ impl ChatContext {
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));
-        plan_runtime.attach_ask_question_panel(Arc::new(panels::CliAskQuestionPanel));
+        plan_runtime.attach_ask_question_panel(ask_question_panel);
 
         let agent_registry =
             crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone());

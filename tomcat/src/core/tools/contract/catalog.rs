@@ -951,5 +951,5 @@ fn ask_question_parameters() -> Value {
 }
 
 #[cfg(test)]
-#[path = "../tests/catalog_test.rs"]
+#[path = "tests/catalog_test.rs"]
 mod tests;

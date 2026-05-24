@@ -87,7 +87,7 @@ mod backend_b;
 2. **按职责分文件（示例）**  
    - `models/types.rs`：结构体、枚举、简单常量  
    - `models/impls.rs` 或按领域再拆：业务方法  
-   - `models/tests/mod.rs` + `models/tests/*.rs`：对应的单元测试（必须目录化拆分）
+   - `models/tests/mod.rs` + `models/tests/<stem>_test.rs`：对应的单元测试（必须目录化拆分，命名见 [UNIT_TEST_LAYOUT_SPEC.md](../testing/UNIT_TEST_LAYOUT_SPEC.md)）
 
 3. **trait 实现外提**  
    标准库风格与社区实践均支持「类型定义一处、trait 实现按 trait 或按读者场景分文件」。

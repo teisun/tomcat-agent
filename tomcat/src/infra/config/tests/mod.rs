@@ -10,6 +10,7 @@
 //! - `context_cfg_test`：`ContextConfig` 默认值、budget 计算与 toml override。
 
 mod assets_test;
+mod append_test;
 mod context_cfg_test;
 mod defaults_test;
 mod load_test;

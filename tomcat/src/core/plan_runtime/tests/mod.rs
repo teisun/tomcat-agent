@@ -1,17 +1,17 @@
-mod catalog;
-mod completion_flow;
-mod dispatch;
-mod file_store;
-mod file_store_frontmatter;
-mod file_store_plan_path;
-mod ops;
-mod prod_reviewer;
-mod refresh_signals;
-mod review;
-mod runtime_state;
-mod safety;
-mod todo_runtime;
-mod verify;
+mod catalog_test;
+mod completion_flow_test;
+mod dispatch_test;
+mod file_store_frontmatter_test;
+mod file_store_plan_path_test;
+mod file_store_test;
+mod ops_test;
+mod prod_reviewer_test;
+mod refresh_signals_test;
+mod review_test;
+mod runtime_state_test;
+mod safety_test;
+mod todo_runtime_test;
+mod verify_test;
 
 pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
     super::file_store::PlanFileFrontmatter {

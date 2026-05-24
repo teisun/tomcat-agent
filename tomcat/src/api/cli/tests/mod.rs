@@ -12,16 +12,16 @@
 //! - `config_keys_test`：`resolve_toml_key` / `set_toml_key` 工具函数。
 //! - `audit_test`：审计日志解析与导出工具函数。
 //!
-//! `chat_cmd_test.rs` 需要测私有 `DOUBLE_TAP_WINDOW`，按
-//! [RUST_FILE_LINES_SPEC §A 第 9 条] 走 `#[cfg(test)] #[path] mod tests;`
-//! 挂载（测试文件物理位置仍在本目录 `chat_cmd_test.rs`，但模块挂在被测源文件下，
-//! 故此处**不**声明 `mod chat_cmd;`）。
+//! `chat_cmd_test.rs` 与 `pathrules_cmd_test.rs` 需要测私有项，按
+//! [UNIT_TEST_LAYOUT_SPEC §9](../../../../../openspec/specs/guides/testing/UNIT_TEST_LAYOUT_SPEC.md)
+//! 走 `#[cfg(test)] #[path] mod tests;` 挂载（测试文件物理位置仍在本目录，但模块挂在
+//! 被测源文件下，故此处**不**声明对应 `mod`）。
 
 mod audit_test;
 mod config_keys_test;
 mod mocks;
 mod parse_cli_test;
-mod pathrules_cmd_test;
+mod pathrules_cmd_run_test;
 mod plugin_cmd_test;
 mod run_basic_test;
 mod session_cmd_test;

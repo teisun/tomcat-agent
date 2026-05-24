@@ -200,5 +200,3 @@ pub fn strip_anthropic_thinking_blocks(value: &mut serde_json::Value) -> usize {
     before - arr.len()
 }
 
-#[cfg(test)]
-mod tests;

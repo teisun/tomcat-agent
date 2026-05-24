@@ -17,7 +17,7 @@
 //!
 //! ## 测试位置
 //!
-//! 见本模块 `tests_config_tool`：
+//! 见本模块 `tests/config_tool_test.rs`：
 //! - 白名单 / hardcoded deny 矩阵
 //! - 数组单元素追加正反案例
 //! - confirm AllowOnce / Deny / AllowAndPersistRoot 分支
@@ -94,5 +94,4 @@ impl ConfigBackend for ChatConfigBackend {
 }
 
 #[cfg(test)]
-#[path = "tests_config_tool.rs"]
 mod tests;

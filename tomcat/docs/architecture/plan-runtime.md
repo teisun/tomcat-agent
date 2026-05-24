@@ -782,14 +782,15 @@ impl PlanRuntime {
      |
      +---- iterate: update_plan(set_status) → plan.panel refresh → next todo ----+
      |                                                                            |
-     +-------------- all todos completed (via update_plan in EXEC) ----+
-     |                                                                  |
-     |                                                                  v
-     |                                                runtime auto:
-     |                                                   - frontmatter.mode = completed
-     |                                                   - clear runtime.active_plan_id
-     |                                                   - EXECUTOR_REMINDER off
-     |                                                   - catalog / user prefix → CHAT
+    +-------------- all todos completed (via update_plan in EXEC) ----+
+    |                                                                  |
+    |                                                                  v
+    |                                                runtime auto:
+    |                                                   - may run read-only Code Reviewer first
+    |                                                   - then runs Verifier in the same update_plan turn
+    |                                                   - verify_gate=soft (default): verifier fail is advisory, still promote completed
+    |                                                   - verify_gate=gate + verifier fail: stay in EXEC, reopen via update_plan
+    |                                                   - on completed: clear runtime.active_plan_id / EXECUTOR_REMINDER / catalog / user prefix → CHAT
      |
      +-------------- cancel_token --------------------+
                   (Ctrl+C / process exit /          |
@@ -867,7 +868,14 @@ sequenceDiagram
     Note over L,T: todos tool remains available as a session-local scratchpad,<br/>writing only to ~/.tomcat/agents/<id>/todos/*.todo.md (no plan effect).
 ```
 
-**说人话**：EXEC 期推进 plan 走 `update_plan`（默认指向 `active_plan_id`）；它复用 `todos` 的 op 引擎写 `PlanFile.frontmatter.todos[]` / `milestones[]`，自动派生 `mode=completed` 也在这里触发。`todos` 仍可用作个人 scratchpad，写自己的 `.todo.md`，不动 plan。
+**说人话**：EXEC 期推进 plan 走 `update_plan`（默认指向 `active_plan_id`）；它复用 `todos` 的 op 引擎写 `PlanFile.frontmatter.todos[]` / `milestones[]`。所有 todo 完成后，runtime 会先跑 code reviewer / verifier，再按 `verify_gate` 决定是否真正收工。`todos` 仍可用作个人 scratchpad，写自己的 `.todo.md`，不动 plan。
+
+#### 7.2.1 `verify_gate` 语义（固定默认 `soft`）
+
+- `soft` 是默认值，也是当前兼容语义：verifier 结果仅 advisory。即便 verifier 返回 `fail`，runtime 仍会把 plan 从 `executing` 推进到 `completed`，并自动切回 CHAT。
+- `gate` 是显式收紧模式：只有当 verifier 返回 `fail` 时阻塞收工；此时 plan 保持 `executing`，调用方需要用 `update_plan` reopen 现有 todo 或继续新增修复 todo。
+- code reviewer 与 verifier 都发生在“最后一个 todo 被标记完成”的那次 `update_plan` 调用内；`verify_gate` 只决定 verifier `fail` 时是否阻塞，不改变 reviewer 的 advisory 定位。
+- 默认值不再待定：当前产品语义就是 `soft`；若未来要改默认值，必须视为单独的兼容性决策。
 
 ### 7.3 cancel_token 续跑
 

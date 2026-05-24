@@ -656,8 +656,8 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
     events
 }
 
-// 测试统一收敛到 `tests/openai.rs`，再在该文件内部按 provider / stream 子模块组织；
+// 测试统一收敛到 `tests/openai_test.rs`，再在该文件内部按 provider / stream 子模块组织；
 // 业务源文件保持单一 `#[path]` 挂载，符合 RUST_FILE_LINES_SPEC §A.9 的“唯一一行”要求。
 #[cfg(test)]
-#[path = "tests/openai.rs"]
+#[path = "tests/openai_test.rs"]
 mod tests;

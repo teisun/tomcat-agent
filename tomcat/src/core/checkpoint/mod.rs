@@ -12,3 +12,6 @@ pub use types::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
     CheckpointRecordRequest, CheckpointRestoreReport, ListOptions, RestoreOptions, RetentionPolicy,
 };
+
+#[cfg(test)]
+mod tests;

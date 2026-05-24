@@ -9,15 +9,3 @@ pub fn compute_resume_plan(_entry: Option<&SessionEntry>, _tail: &[TranscriptEnt
     ResumePlan::Continue
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resume_plan_always_continue() {
-        assert!(matches!(
-            compute_resume_plan(None, &[]),
-            ResumePlan::Continue
-        ));
-    }
-}

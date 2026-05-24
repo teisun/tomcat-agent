@@ -5,7 +5,10 @@ use async_trait::async_trait;
 
 use crate::core::plan_runtime::panels::{AskQuestionPanel, AskQuestionResult, Question};
 
-/// IDE 端 stub。当前直接 cancelled；后续 TUI 接入后由实际 panel 替换。
+/// IDE 端占位实现。
+///
+/// 当前阶段只保留 `cancelled` 兜底；未来若 IDE host 接入，需复用
+/// `ask_question_wire` 中的通用 bridge，而不是再定义一套 IDE 专用事件。
 pub struct IdeAskQuestionPanel;
 
 #[async_trait]

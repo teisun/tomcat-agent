@@ -136,7 +136,8 @@ pub mod wire {
     pub const WIRE_PLAN_REVIEW_WARNING: &str = "plan.review.warning";
     /// code reviewer 跳过 / rounds 用尽等告警。
     pub const WIRE_PLAN_CODE_REVIEW_WARNING: &str = "plan.code_review.warning";
-    /// `ask_question` 工具完成（含 cancelled）。
+    /// `ask_question` 相关事件基名：一方面用于 transcript 记录工具完成（含 cancelled），
+    /// 另一方面供 AskQuestionPanel ↔ host 的 request/response bridge 复用同名基前缀。
     pub const WIRE_PLAN_ASK_QUESTION: &str = "plan.ask_question";
     /// `todos` / `update_plan` 写入完成。
     pub const WIRE_PLAN_TODOS: &str = "plan.todos";

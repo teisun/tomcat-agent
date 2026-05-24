@@ -122,9 +122,9 @@ pub struct PlanRuntime {
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 计数 verifier 前 code reviewer 实际派发轮次。
     code_review_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
-    /// 可选 `ask_question` UI 后端（P5）。生产由 `ChatContext::from_config`
-    /// 注入 `CliAskQuestionPanel`（CLI MVP）/ T2-P0-008 完成后改注入 `IdeAskQuestionPanel`。
-    /// 测试可注入 `MockAskQuestionPanel`。未注入时 `ask_question` 工具返回
+    /// 可选 `ask_question` UI 后端（P5）。CLI 默认由 `ChatContext::from_config`
+    /// 注入 `CliAskQuestionPanel`；宿主若要接 IDE / 测试 bridge，可通过 overrides
+    /// 显式注入别的 `AskQuestionPanel`。未注入时 `ask_question` 工具返回
     /// `cancelled: true` 兜底（避免 panic / 卡死）。
     ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
     /// 进入 EXEC 后**首轮**user message 装配阶段的注入标记（P6 PR-PLC §5.5 / §6 first_turn_user_meta）：
@@ -634,6 +634,15 @@ impl PlanRuntime {
 
         // 读 plan 文件作为 reviewer 上下文（不上 advisory lock；
         // 锁的 acquire 已由 write_plan 释放，reviewer 走只读）。
+        //
+        // 这里刻意仍走 `plan_path_for_id(plan_id)`，不复用 `resolved_plan_path()`：
+        // 当前 `dispatch_reviewer()` 仅由 `create_plan` 在写盘成功后立即调用，而
+        // `create_plan` 总是先把 plan 写到 canonical `~/.tomcat/plans/<plan_id>.plan.md`，
+        // 再设置 `active_planning_plan_id/active_plan_path`。也就是说，Planning 阶段当前
+        // 不存在“disk 真正路径与 plan_id 推导路径不一致”的合法场景。
+        //
+        // 若未来 planner 支持“从外部草稿导入后直接进入 Planning 并派发 reviewer”，
+        // 这里再切到 `resolved_plan_path()`，与 code reviewer / verifier 对齐。
         let path = match file_store::plan_path_for_id(plan_id) {
             Ok(p) => p,
             Err(e) => return review::ReviewSummary::aborted_with(format!("plan_id 非法: {e}")),

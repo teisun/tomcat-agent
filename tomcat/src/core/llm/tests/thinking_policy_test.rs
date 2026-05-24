@@ -1,6 +1,6 @@
 //! `thinking_policy` 单测：覆盖 ThinkingLevel/Format 解析与 resolve_request_fields 映射表。
 
-use super::{
+use super::super::thinking_policy::{
     resolve_request_fields, should_persist_thinking, should_strip_on_resend,
     strip_anthropic_thinking_blocks, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };

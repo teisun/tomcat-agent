@@ -351,5 +351,5 @@ fn ensure_not_denied(gate: &dyn PermissionGate, path: &Path) -> Result<(), AppEr
 }
 
 #[cfg(test)]
-#[path = "../tests/cwd_lazy_prompt_test.rs"]
+#[path = "tests/cwd_lazy_prompt_test.rs"]
 mod tests;

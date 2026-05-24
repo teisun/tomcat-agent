@@ -16,7 +16,7 @@ pub mod panels;
 pub mod permission;
 pub mod preflight;
 
-pub use context::{ChatContext, CliConfirmation};
+pub use context::{ChatContext, ChatContextOverrides, CliConfirmation};
 pub use run_loop::{chat_loop, run_chat_turn};
 
 #[cfg(test)]

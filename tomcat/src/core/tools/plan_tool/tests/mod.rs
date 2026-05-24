@@ -1,13 +1,13 @@
 #![allow(clippy::await_holding_lock)]
 
-mod ask_question;
-mod build_plan;
-mod code_review;
+mod ask_question_test;
+mod build_plan_test;
+mod code_review_test;
 mod common;
-mod create_plan;
-mod lifecycle;
-mod reviewer;
-mod shared_todo_ops;
-mod todos;
-mod update_plan;
-mod verify;
+mod create_plan_test;
+mod lifecycle_test;
+mod reviewer_test;
+mod shared_todo_ops_test;
+mod todos_test;
+mod update_plan_test;
+mod verify_test;
