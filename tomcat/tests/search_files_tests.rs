@@ -31,7 +31,7 @@ impl Drop for PathGuard {
     }
 }
 
-/// TempDir 子目录名与仓库约定 `tomcat/workspace-temp/` 对齐（openspec UNIT_TEST_SPEC §1.2）。
+/// TempDir 子目录名与仓库约定 `tomcat/workspace-temp/` 对齐（INTEGRATION_TEST_SPEC §2.3）。
 fn test_agent_definition_root(tmp: &TempDir) -> std::path::PathBuf {
     tmp.path().join("workspace-temp")
 }

@@ -31,7 +31,7 @@
 4. **文件职责总览（One-Glance Map，条件触发 MUST）**  
    - **触发条件**：本计划的「关键改动」涉及 **≥ 2 个 `*.rs` 业务源文件**（含独立 `tests.rs`）时**必须**画。仅 1 个文件的小改动可省略并写一句"不适用：仅改 X"。  
    - **位置**：紧邻"对每个子项给出"（一.3）所列文件清单**之后**、"实施顺序与依赖关系"（一.5）之前，作为 **§x.0 子节开篇**或独立 §x 章节。  
-   - **内容与硬约束**：参照 [`ARCHITECTURE_SPEC.md §6「文件职责总览（One-Glance Map）」`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（**MUST**），逐条满足该节"硬约束 1–6"：①节点之间须以 `│` + `▼` 或 `→` 标明调用方向；②"关键改动"清单中每个 `*.rs` 在图中**必须**有节点，缺一不可；③节点内要点列函数 / 类型 / 常量 / 关键行为，不允许只写文件名；④同时标注配套独立 `tests.rs`（按 [`RUST_FILE_LINES_SPEC §A`](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)）；⑤图后紧跟 2–3 句「阅读顺序建议」（**说人话**，口语串链路），与 [`ARCHITECTURE_SPEC.md §14.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 段落级要求一致；⑥若实施期发现节点设计偏离原计划（如未改签名、保留旧出口），须以 **【未改签名 / 依赖 Drop】** 等显式标签**就地标注**，避免 stale 设计误导后续读者。  
+   - **内容与硬约束**：参照 [`ARCHITECTURE_SPEC.md §6「文件职责总览（One-Glance Map）」`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（**MUST**），逐条满足该节"硬约束 1–6"：①节点之间须以 `│` + `▼` 或 `→` 标明调用方向；②"关键改动"清单中每个 `*.rs` 在图中**必须**有节点，缺一不可；③节点内要点列函数 / 类型 / 常量 / 关键行为，不允许只写文件名；④同时标注配套独立 `tests/`（按 [`UNIT_TEST_LAYOUT_SPEC`](../../openspec/specs/guides/testing/UNIT_TEST_LAYOUT_SPEC.md)）；⑤图后紧跟 2–3 句「阅读顺序建议」（**说人话**，口语串链路），与 [`ARCHITECTURE_SPEC.md §14.1`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 段落级要求一致；⑥若实施期发现节点设计偏离原计划（如未改签名、保留旧出口），须以 **【未改签名 / 依赖 Drop】** 等显式标签**就地标注**，避免 stale 设计误导后续读者。  
    - **形式**：ASCII 框图（`text` 代码块）或 Mermaid，**优先 ASCII**（终端友好、便于 diff）。每个节点内须列「函数 / 类型 / 常量 / 关键行为」要点，禁止只写文件名。  
    - **不做的后果**：跨文件链路只能靠读者自己拼图，Review 时极易遗漏隐式依赖（如本计划里"transcript 字段扩展 ⇄ preheat 退避耗尽留痕"两个 Phase 的耦合）。  
    - **参考样板**：[`interrupt-and-cancellation.md §9.0`](../../docs/architecture/interrupt-and-cancellation.md)（T2-P0-007 定稿）。
@@ -302,7 +302,7 @@ Bug 发生后：A 比上述公式多出 572K，这 572K 在 B 中没有对应物
 | 目标类型可见性 | 测试位置 | 示例 |
 | :--- | :--- | :--- |
 | `pub` | `tests/` 集成测试 | `force_drop_oldest_to_target` 的行为 |
-| `pub(crate)` | **同级独立 `tests.rs`** 单元测试（业务源文件 `#[cfg(test)] mod tests;` 引入；**禁止**内联 `mod tests { ... }`，依据 [RUST_FILE_LINES_SPEC.md §A](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)） | `CompactionResult` 的构造与断言 |
+| `pub(crate)` | **同级独立 `tests/` 子目录**单元测试（父模块 `#[cfg(test)] mod tests;` 引入；**禁止**内联 `mod tests { ... }`，依据 [UNIT_TEST_LAYOUT_SPEC.md](../../openspec/specs/guides/testing/UNIT_TEST_LAYOUT_SPEC.md)） | `CompactionResult` 的构造与断言 |
 
 **计划中应明确标注**：每个测试子项涉及的类型/函数的可见性，避免实施时才发现编译不过。
 

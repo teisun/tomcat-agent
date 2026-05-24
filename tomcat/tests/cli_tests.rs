@@ -2067,7 +2067,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 /// [E2E-CLI-013] 用户要求助手在仓库约定的 `workspace-temp` 子目录下写文件
 ///
 /// 验证：exit 0；`{CARGO_MANIFEST_DIR}/workspace-temp/e2e_cli013_hello/hello_e2e.txt` 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
-/// 意义：scratch 走 `workspace-temp/`（UNIT_TEST_SPEC §1.2），避免提示词里的「workspace 目录」被模型误解为 crate 下 `workspace/` 子目录
+/// 意义：scratch 走 `workspace-temp/`（INTEGRATION_TEST_SPEC §2.3），避免提示词里的「workspace 目录」被模型误解为 crate 下 `workspace/` 子目录
 #[test]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();

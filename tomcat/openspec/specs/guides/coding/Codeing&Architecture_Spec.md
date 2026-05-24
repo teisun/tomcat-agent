@@ -9,6 +9,7 @@
 | [RUST_IDIOMS_SPEC.md](RUST_IDIOMS_SPEC.md) | Rust 惯用写法与 Clippy 规则速查（Option 组合子、类型别名、数值安全等） |
 | [RUST_FILE_LINES_SPEC.md](RUST_FILE_LINES_SPEC.md) | 单文件行数区间、预警与拆分策略（可维护性与 IDE 体验） |
 | [COMMENT_SPEC.md](COMMENT_SPEC.md) | 代码注释与 Rustdoc 文档规范 |
+| [UNIT_TEST_LAYOUT_SPEC.md](../testing/UNIT_TEST_LAYOUT_SPEC.md) | 单元测试文件组织规范（目录结构、模块挂载） |
 | [UNIT_TEST_SPEC.md](../testing/UNIT_TEST_SPEC.md) | 单元测试编写规范（覆盖率、Mock 策略、命名） |
 | [INTEGRATION_TEST_SPEC.md](../testing/INTEGRATION_TEST_SPEC.md) | 集成测试编写规范 |
 | [COMMIT_MESSAGE_SPEC.md](../workflow/COMMIT_MESSAGE_SPEC.md) | 提交信息格式规范 |

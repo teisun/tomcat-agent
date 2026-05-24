@@ -55,6 +55,10 @@ my_project/
 *   **避免重复编译**：如果 `tests/` 下文件过多，建议通过子模块形式组织，减少生成的二进制文件数量（每个 `.rs` 文件都会编译成独立的二进制）。
 *   **共享代码**：公共配置或辅助函数必须放在 `tests/common/mod.rs` 中，以防止被 Rust 识别为独立的测试入口（避免出现 "dead code" 警告）。
 
+### 2.3 仓库内 scratch 目录
+
+若必须在仓库树内写临时文件（集成/E2E harness、本地复现）：统一放在 **`tomcat/workspace-temp/`** 下按子目录分用途（`temp` 后缀，与产品里的 `agent_definition_dir` / `tomcat workspace` 等「workspace」语义区分）；该目录已在 `tomcat/.gitignore` 中忽略。不要在 `tomcat/` 根目录散落 `tool-results/`、`tmp/` 等；**不要**使用 crate 下的 `workspace/` 作为 scratch（易与提示词里的「workspace」混淆）。
+
 ## 3. 命名规范
 *   **文件命名**：采用小写字母加下划线，反映测试的主体，如 `auth_flow.rs`。
 *   **函数命名**：遵循 `test_[功能]_[场景]_[预期结果]` 格式。

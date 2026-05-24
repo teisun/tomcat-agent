@@ -28,11 +28,13 @@
    - **开发前**：
         - 检查工作区状态，若处于detached HEAD则自动checkout -b 自己的工作分支
         - 同步 develop 分支，了解全局状态后再开新改动。
-        - 阅读编码规范家族（四者合并构成 Rust 侧编码约束，须一并遵守）：
+        - 阅读编码规范家族（须一并遵守）：
             - [架构与编码总纲](./guides/coding/Codeing&Architecture_Spec.md)
-            - [Rust 文件行数规范](./guides/coding/RUST_FILE_LINES_SPEC.md)（含**单元测试与业务代码强制分离**的单一权威来源，见 §A）
+            - [Rust 文件行数规范](./guides/coding/RUST_FILE_LINES_SPEC.md)
             - [Rust 惯用写法与 Clippy 规则速查](./guides/coding/RUST_IDIOMS_SPEC.md)
             - [代码注释规范](./guides/coding/COMMENT_SPEC.md)
+            - [单元测试文件组织规范](./guides/testing/UNIT_TEST_LAYOUT_SPEC.md)（业务与测试强制分离、目录与挂载的单一权威来源）
+            - [单元测试编写规范](./guides/testing/UNIT_TEST_SPEC.md)
    - **开发流程**：
         - 根据编码规范编码开发(带注释) → 测试 → 修 bug → 单测通过 -> 写技术[文档](../../docs/)
    - **提交前**：更新本分支的 `docs/status/feature-xx.md`（与当前分支对应），再提交。提交时代码变更所需的 `[cov = xx.x%]` 从该 status 文件的 Cov% 读取，不在提交时现跑测试/覆盖率。
@@ -56,7 +58,7 @@
 1. 符合本宪法及 Architecture.md 约束。
 2. 通过规范门禁（rustfmt/clippy 等）与约定测试， 无静默高危操作、无越权。
 3. 代码 review 通过，确保符合编码规范家族（[架构与编码总纲](./guides/coding/Codeing&Architecture_Spec.md) + [Rust 文件行数规范](./guides/coding/RUST_FILE_LINES_SPEC.md) + [Rust 惯用写法与 Clippy 规则速查](./guides/coding/RUST_IDIOMS_SPEC.md) + [代码注释规范](./guides/coding/COMMENT_SPEC.md)）、功能完整、注释完整、无设计缺陷、无需求遗漏
-4. 单元测试通过；覆盖率测量为**可选项**，若需测量可执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package tomcat`，将结果填入 status 元数据表 Cov% 列（格式见 [Status规范](./guides/workflow/STATUS_GUIDE.md)），参考[单元测试规范](./guides/testing/UNIT_TEST_SPEC.md)
+4. 单元测试通过；覆盖率测量为**可选项**，若需测量可执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package tomcat`，将结果填入 status 元数据表 Cov% 列（格式见 [Status规范](./guides/workflow/STATUS_GUIDE.md)），参考 [单元测试编写规范](./guides/testing/UNIT_TEST_SPEC.md) 与 [单元测试文件组织规范](./guides/testing/UNIT_TEST_LAYOUT_SPEC.md)
 5. 集成测试通过，参考[集成测试规范](./guides/testing/INTEGRATION_TEST_SPEC.md)
 6. E2E测试通过
 7. 文档更新：配套说明或文档到位。
