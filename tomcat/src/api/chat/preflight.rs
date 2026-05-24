@@ -26,6 +26,8 @@ const SKIP_ENV: &str = "PI_SKIP_SEARCH_TOOLS_PREFLIGHT";
 
 /// 最近一次 detached 安装的日志路径（仅 UX；**不用作**「是否仍在安装」的判定）。
 pub(crate) const DETACHED_LOG_MARKER_NAME: &str = "preflight-detached-log.marker";
+#[cfg(unix)]
+const GIT_DETACHED_LOG_MARKER_NAME: &str = "preflight-detached-git-log.marker";
 
 /// `tracing` target：仅开预检诊断时用 `RUST_LOG=tomcat_preflight=debug`。
 pub(crate) const TRACE_TARGET: &str = "tomcat_preflight";
@@ -51,7 +53,7 @@ pub(crate) fn start_search_tools_preflight(config: &AppConfig, event_bus: Arc<dy
                 "search_files Tier1 binaries already on PATH"
             );
             #[cfg(unix)]
-            remove_detached_log_marker_file();
+            remove_detached_log_marker_file(DETACHED_LOG_MARKER_NAME);
             emit_preflight(
                 &*event_bus,
                 "ready",
@@ -198,6 +200,8 @@ pub fn start_git_preflight(
     std::thread::spawn(move || {
         let started = Instant::now();
         if find_binary(&["git"]).is_some() {
+            #[cfg(unix)]
+            remove_detached_log_marker_file(GIT_DETACHED_LOG_MARKER_NAME);
             checkpoint_switcher.force_activate_shadow();
             emit_git_preflight(
                 &*event_bus,
@@ -275,11 +279,11 @@ pub fn start_git_preflight(
 
 #[cfg(unix)]
 fn run_unix_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: Instant) {
-    remove_detached_log_marker_if_homebrew_idle();
+    remove_detached_log_marker_if_homebrew_idle(DETACHED_LOG_MARKER_NAME);
 
     if brew_install_already_in_progress(plan) {
         let mut extra = json!({});
-        if let Some(p) = read_valid_detached_marker_log_path() {
+        if let Some(p) = read_valid_detached_marker_log_path(DETACHED_LOG_MARKER_NAME) {
             extra["logPath"] = json!(p.display().to_string());
         }
         emit_preflight(
@@ -309,7 +313,7 @@ fn run_unix_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: I
 
     match spawn_unix_detached_install(plan, &log_path) {
         Ok(()) => {
-            write_detached_log_marker(&log_path);
+            write_detached_log_marker(DETACHED_LOG_MARKER_NAME, &log_path);
             let extra = json!({
                 "logPath": log_path.display().to_string(),
                 "elapsedMs": started.elapsed().as_millis(),
@@ -342,6 +346,24 @@ fn run_unix_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: I
 
 #[cfg(unix)]
 fn run_unix_git_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, started: Instant) {
+    remove_detached_log_marker_if_homebrew_idle(GIT_DETACHED_LOG_MARKER_NAME);
+
+    if brew_install_already_in_progress(plan) {
+        let mut extra = json!({
+            "elapsedMs": started.elapsed().as_millis(),
+        });
+        if let Some(p) = read_valid_detached_marker_log_path(GIT_DETACHED_LOG_MARKER_NAME) {
+            extra["logPath"] = json!(p.display().to_string());
+        }
+        emit_git_preflight(
+            bus,
+            "already_installing",
+            "git 安装已在后台进行中；安装完成后下次 checkpoint 操作会自动启用影子仓库",
+            extra,
+        );
+        return;
+    }
+
     let Some(log_path) = new_preflight_log_file_path() else {
         emit_git_preflight(
             bus,
@@ -356,6 +378,7 @@ fn run_unix_git_preflight_install(bus: &dyn EventBus, plan: &InstallPlan, starte
 
     match spawn_unix_detached_install(plan, &log_path) {
         Ok(()) => {
+            write_detached_log_marker(GIT_DETACHED_LOG_MARKER_NAME, &log_path);
             emit_git_preflight(
                 bus,
                 "detached",
@@ -415,29 +438,29 @@ fn brew_install_already_in_progress(plan: &InstallPlan) -> bool {
 
 /// Marker 仅在「当前没有检测到 Homebrew 活动」时清除，避免陈旧路径。
 #[cfg(unix)]
-fn remove_detached_log_marker_if_homebrew_idle() {
+fn remove_detached_log_marker_if_homebrew_idle(marker_name: &str) {
     if homebrew_install_in_progress() {
         return;
     }
-    remove_detached_log_marker_file();
+    remove_detached_log_marker_file(marker_name);
 }
 
 #[cfg(unix)]
-fn detached_log_marker_path() -> Option<PathBuf> {
+fn detached_log_marker_path(marker_name: &str) -> Option<PathBuf> {
     let dir = preflight_log_dir()?;
-    Some(dir.join(DETACHED_LOG_MARKER_NAME))
+    Some(dir.join(marker_name))
 }
 
 #[cfg(unix)]
-fn remove_detached_log_marker_file() {
-    if let Some(p) = detached_log_marker_path() {
+fn remove_detached_log_marker_file(marker_name: &str) {
+    if let Some(p) = detached_log_marker_path(marker_name) {
         let _ = std::fs::remove_file(p);
     }
 }
 
 #[cfg(unix)]
-fn read_valid_detached_marker_log_path() -> Option<PathBuf> {
-    let marker = detached_log_marker_path()?;
+fn read_valid_detached_marker_log_path(marker_name: &str) -> Option<PathBuf> {
+    let marker = detached_log_marker_path(marker_name)?;
     let raw = std::fs::read_to_string(&marker).ok()?;
     let line = raw.lines().next()?.trim();
     if line.is_empty() {
@@ -452,8 +475,8 @@ fn read_valid_detached_marker_log_path() -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn write_detached_log_marker(log_path: &Path) {
-    let Some(marker_path) = detached_log_marker_path() else {
+fn write_detached_log_marker(marker_name: &str, log_path: &Path) {
+    let Some(marker_path) = detached_log_marker_path(marker_name) else {
         return;
     };
     if let Some(parent) = marker_path.parent() {

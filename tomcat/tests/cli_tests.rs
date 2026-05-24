@@ -9,6 +9,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::PathBuf;
+use tomcat::core::session::DEFAULT_SESSION_KEY;
 use tracing::{info, info_span};
 
 #[allow(deprecated)]
@@ -2472,14 +2473,14 @@ fn test_user_receives_nonempty_llm_response() {
         )
     });
 
-    info!("Act: tomcat chat + stdin 说一个字，timeout 30s");
+    info!("Act: tomcat chat + stdin 说一个字，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("说一个字\n")
-        .timeout(std::time::Duration::from_secs(30));
+        .timeout(std::time::Duration::from_secs(60));
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
@@ -2544,14 +2545,29 @@ fn test_user_lists_sessions() {
         .args(["session", "new"])
         .assert()
         .success();
+    info!("Arrange: create a second historical session");
+    cmd()
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
 
     info!("Act: tomcat session list");
     let assert = cmd()
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .args(["session", "list"])
         .assert();
-    info!("Assert: exit 0");
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: exit 0 + current key only appears once; actual: {}",
+        trunc(&out, 200)
+    );
     assert.success();
+    assert_eq!(
+        out.matches(DEFAULT_SESSION_KEY).count(),
+        1,
+        "只有当前绑定的 session 应显示 default key，历史 session 不应都复用同一个 key"
+    );
 }
 
 /// [E2E-CLI-053] 用户切换到已存在的会话
@@ -2686,7 +2702,7 @@ fn test_user_archives_session() {
 
 /// [E2E-CLI-057] 用户按关键词搜索会话
 ///
-/// 用户意图：搜索含 default 关键词的会话
+/// 用户意图：按当前固定 session key 搜索会话
 /// 验证：exit 0
 #[test]
 fn test_user_searches_sessions_by_keyword() {
@@ -2705,14 +2721,29 @@ fn test_user_searches_sessions_by_keyword() {
         .args(["session", "new"])
         .assert()
         .success();
+    info!("Arrange: create a second historical session");
+    cmd()
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .assert()
+        .success();
 
-    info!("Act: tomcat session search default");
+    info!("Act: tomcat session search {}", DEFAULT_SESSION_KEY);
     let assert = cmd()
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "search", "default"])
+        .args(["session", "search", DEFAULT_SESSION_KEY])
         .assert();
-    info!("Assert: exit 0");
+    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: exit 0 + search only reports current key once; actual: {}",
+        trunc(&out, 200)
+    );
     assert.success();
+    assert_eq!(
+        out.matches(DEFAULT_SESSION_KEY).count(),
+        1,
+        "按 key 搜索时不应把同一个 current key 误投影到所有历史 session"
+    );
 }
 
 /// [E2E-CLI-058] 无 API key 时 chat 快速失败，不挂起

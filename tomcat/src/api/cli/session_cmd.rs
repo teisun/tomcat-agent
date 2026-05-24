@@ -4,25 +4,31 @@ use crate::{resolve_sessions_dir, AppConfig, AppError, SessionManager};
 
 use super::SessionSub;
 
+struct SessionDisplayRow {
+    session_id: String,
+    key: Option<String>,
+    is_current: bool,
+}
+
 pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppError> {
     let sessions_path = resolve_sessions_dir(cfg)?;
     std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
     let mgr = SessionManager::new(sessions_path.clone());
     match sub {
         SessionSub::List => {
-            let list = mgr.list_session_ids()?;
-            if list.is_empty() {
+            let rows = session_display_rows(&mgr)?;
+            if rows.is_empty() {
                 println!("当前无会话。使用 session new 创建。");
                 return Ok(());
             }
-            let current_id = mgr.current_session_id()?;
-            for session_id in list {
-                let marker = if current_id.as_deref() == Some(session_id.as_str()) {
-                    "*"
-                } else {
-                    " "
-                };
-                println!("{} {}  {}", marker, session_id, mgr.current_session_key());
+            for row in rows {
+                let marker = if row.is_current { "*" } else { " " };
+                println!(
+                    "{} {}  {}",
+                    marker,
+                    row.session_id,
+                    row.key.as_deref().unwrap_or("-")
+                );
             }
         }
         SessionSub::New => {
@@ -55,21 +61,63 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             println!("已归档会话: {}", key);
         }
         SessionSub::Search { query } => {
-            let ids = mgr.list_session_ids()?;
-            if ids.is_empty() {
+            let rows = session_display_rows(&mgr)?;
+            if rows.is_empty() {
                 println!("无会话");
                 return Ok(());
             }
             let q = query.as_deref().unwrap_or("");
-            let key = mgr.current_session_key();
-            for session_id in ids {
-                if q.is_empty() || key.contains(q) || session_id.contains(q) {
-                    println!("{}  {}", key, session_id);
+            for row in rows {
+                let key_matches = row.key.as_deref().is_some_and(|key| key.contains(q));
+                if q.is_empty() || key_matches || row.session_id.contains(q) {
+                    println!(
+                        "{}  {}",
+                        row.key.as_deref().unwrap_or("-"),
+                        row.session_id
+                    );
                 }
             }
         }
     }
     Ok(())
+}
+
+fn session_display_rows(mgr: &SessionManager) -> Result<Vec<SessionDisplayRow>, AppError> {
+    let ids = mgr.list_session_ids()?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let current_key = mgr.current_session_key().to_string();
+    let current_entry = mgr.get_session(&current_key)?;
+    let current_id = current_entry.as_ref().map(|entry| entry.session_id.clone());
+
+    let mut rows = Vec::with_capacity(ids.len() + 1);
+    let mut saw_current = false;
+    for session_id in ids {
+        let is_current = current_id.as_deref() == Some(session_id.as_str());
+        saw_current |= is_current;
+        rows.push(SessionDisplayRow {
+            session_id,
+            key: is_current.then(|| current_key.clone()),
+            is_current,
+        });
+    }
+
+    if !saw_current {
+        if let Some(entry) = current_entry {
+            rows.insert(
+                0,
+                SessionDisplayRow {
+                    session_id: entry.session_id,
+                    key: Some(current_key),
+                    is_current: true,
+                },
+            );
+        }
+    }
+
+    Ok(rows)
 }
 
 fn cleanup_openai_files_for_session(

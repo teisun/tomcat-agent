@@ -168,6 +168,65 @@ async fn update_plan_cross_session_rejected_for_executing() {
 }
 
 #[tokio::test]
+async fn update_plan_plan_id_prefers_active_external_path() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = tempfile::tempdir().unwrap();
+    let external_path = workspace.path().join("external.plan.md");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: "external_plan".into(),
+            goal: "g".into(),
+            mode: PlanFileMode::Planning,
+            session_key: Some("session-a".into()),
+            session_id: Some("sid-a".into()),
+            created_at: "2026-05-24T00:00:00Z".into(),
+            schema_version: 1,
+            todos: vec![TodoItem {
+                id: "t1".into(),
+                content: "step 1".into(),
+                status: TodoStatus::Pending,
+            }],
+            unknown: Default::default(),
+        },
+        body: "## Goal\nexternal\n".into(),
+    };
+    write_plan(&external_path, &plan, 2000).unwrap();
+
+    let rt = PlanRuntime::new("session-a");
+    rt.build_plan(&external_path.to_string_lossy(), Some("sid-a".into()))
+        .unwrap();
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some("external_plan".into()),
+            path: None,
+            replace: false,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    let normalized_external_path = crate::infra::platform::normalize_path(
+        external_path.to_string_lossy().as_ref(),
+    )
+    .unwrap();
+    assert_eq!(
+        out["path"],
+        crate::infra::platform::format_home_path(&normalized_external_path)
+    );
+    let parsed = read_plan(&external_path).unwrap();
+    assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::InProgress);
+    cleanup_home(&home);
+}
+
+#[tokio::test]
 async fn update_plan_in_exec_promotes_completed() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();

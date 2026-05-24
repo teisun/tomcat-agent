@@ -233,6 +233,95 @@ async fn max_children_per_agent_enforced() {
     release.notify_waiters();
 }
 
+#[test]
+fn concurrent_preflight_and_register_respects_global_limit_atomically() {
+    let reg = AgentRegistry::with_config(AgentRegistryConfig {
+        max_spawn_depth: 4,
+        max_concurrent_agents: 2,
+        max_children_per_agent: 16,
+    });
+    let _g = reg.register_root_for_test("root").unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut joins = Vec::new();
+    for _ in 0..8 {
+        let reg_clone = Arc::clone(&reg);
+        let barrier_clone = Arc::clone(&barrier);
+        joins.push(std::thread::spawn(move || {
+            barrier_clone.wait();
+            reg_clone.preflight_and_register("root", SubagentType::Reviewer)
+        }));
+    }
+
+    let mut successes = Vec::new();
+    let mut errors = Vec::new();
+    for join in joins {
+        match join.join().unwrap() {
+            Ok((child, _parent)) => successes.push(child),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    assert_eq!(
+        successes.len(),
+        1,
+        "root 已占 1 个全局槽位时，并发注册至多只能再成功 1 个子"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|err| matches!(err, SpawnError::GlobalConcurrencyExceeded { .. })),
+        "其余并发注册都应因全局并发配额被拒，实际 = {errors:?}"
+    );
+    assert_eq!(reg.active_count(), 2);
+    for child in successes {
+        reg.unregister(&child.session_id);
+    }
+}
+
+#[test]
+fn concurrent_preflight_and_register_respects_children_limit_atomically() {
+    let reg = AgentRegistry::with_config(AgentRegistryConfig {
+        max_spawn_depth: 4,
+        max_concurrent_agents: 16,
+        max_children_per_agent: 1,
+    });
+    let _g = reg.register_root_for_test("root").unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut joins = Vec::new();
+    for _ in 0..8 {
+        let reg_clone = Arc::clone(&reg);
+        let barrier_clone = Arc::clone(&barrier);
+        joins.push(std::thread::spawn(move || {
+            barrier_clone.wait();
+            reg_clone.preflight_and_register("root", SubagentType::Reviewer)
+        }));
+    }
+
+    let mut successes = Vec::new();
+    let mut errors = Vec::new();
+    for join in joins {
+        match join.join().unwrap() {
+            Ok((child, _parent)) => successes.push(child),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    assert_eq!(
+        successes.len(),
+        1,
+        "同一父 Agent 的并发子注册必须原子受限于 max_children_per_agent=1"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|err| matches!(err, SpawnError::ChildrenPerAgentExceeded { .. })),
+        "其余并发注册都应因父 children 配额被拒，实际 = {errors:?}"
+    );
+    for child in successes {
+        reg.unregister(&child.session_id);
+    }
+}
+
 #[tokio::test]
 async fn subagent_panic_does_not_kill_parent() {
     let reg = fresh_registry();

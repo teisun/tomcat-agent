@@ -353,10 +353,9 @@ impl AgentRegistry {
         parent_session_id: &str,
         subagent_type: SubagentType,
     ) -> Result<(Arc<AgentHandle>, Arc<AgentHandle>), SpawnError> {
+        let mut handles = self.handles.write();
         // 1) 父存在
-        let parent = self
-            .handles
-            .read()
+        let parent = handles
             .get(parent_session_id)
             .cloned()
             .ok_or_else(|| SpawnError::ParentNotFound(parent_session_id.to_string()))?;
@@ -375,25 +374,13 @@ impl AgentRegistry {
             });
         }
 
-        // 4) 全局并发
-        let current = self.active_count();
+        // 4) 全局并发：与 insert 共持 `handles.write()`，避免多个并发 spawn 同时越过配额。
+        let current = handles.len() as u32;
         if current >= self.config.max_concurrent_agents {
             return Err(SpawnError::GlobalConcurrencyExceeded {
                 current,
                 max: self.config.max_concurrent_agents,
             });
-        }
-
-        // 5) 父的 children 上限
-        {
-            let children = parent.children.lock();
-            if children.len() as u32 >= self.config.max_children_per_agent {
-                return Err(SpawnError::ChildrenPerAgentExceeded {
-                    parent: parent_session_id.to_string(),
-                    current: children.len() as u32,
-                    max: self.config.max_children_per_agent,
-                });
-            }
         }
 
         // 注册子 handle（共享父的 abort_signal 指针，确保 cascade_abort 一次写入全可见）
@@ -412,10 +399,20 @@ impl AgentRegistry {
             abort_signal: Arc::clone(&parent.abort_signal),
             children: Mutex::new(Vec::new()),
         });
-        self.handles
-            .write()
-            .insert(child_session_id.clone(), Arc::clone(&child));
-        parent.children.lock().push(child_session_id.clone());
+
+        // 5) 父的 children 上限：与 push 共持父 children 锁，避免同父并发越过 max_children。
+        {
+            let mut children = parent.children.lock();
+            if children.len() as u32 >= self.config.max_children_per_agent {
+                return Err(SpawnError::ChildrenPerAgentExceeded {
+                    parent: parent_session_id.to_string(),
+                    current: children.len() as u32,
+                    max: self.config.max_children_per_agent,
+                });
+            }
+            handles.insert(child_session_id.clone(), Arc::clone(&child));
+            children.push(child_session_id.clone());
+        }
         self.active.fetch_add(1, Ordering::Relaxed);
 
         Ok((child, parent))

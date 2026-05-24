@@ -10,8 +10,8 @@
 //! - 以 `~` 开头（home 缩写）
 //! - 以 `./` / `../` 开头（相对路径）
 //!
-//! 不会展开 glob、不会触碰 stdin/stdout 重定向；
-//! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令再分别提取。
+//! 不会展开 glob；对 `>` / `<` 仅把后续显式 token 视作重定向目标路径；
+//! 含 `|` `;` `&` `>` `<` 的命令会先按这些分隔符拆分子命令/重定向段再分别提取。
 //!
 //! 命令前缀（如 `rm`、`echo`）不视作路径；
 //! `--flag=value` 中的 `value` 若像路径则会被提取。
@@ -32,8 +32,8 @@ use std::path::PathBuf;
 /// 返回值未做去重 / 规范化；调用方应负责把结果交给 gate.check 做规范化与判定。
 pub fn extract_paths(command: &str) -> Vec<String> {
     let mut paths = Vec::new();
-    for sub in split_subcommands(command) {
-        let tokens = match shell_words::split(sub) {
+    for segment in split_subcommands(command) {
+        let tokens = match shell_words::split(segment.text) {
             Ok(t) => t,
             Err(_) => continue,
         };
@@ -47,8 +47,10 @@ pub fn extract_paths(command: &str) -> Vec<String> {
             }
             iter.next();
         }
-        // 跳过命令名；leading assignment-only 子命令已经在上面被消费。
-        let _cmd_name = iter.next();
+        if matches!(segment.kind, SegmentKind::Command) {
+            // 跳过命令名；leading assignment-only 子命令已经在上面被消费。
+            let _cmd_name = iter.next();
+        }
         for tok in iter {
             collect_candidates(tok, &mut paths);
         }
@@ -109,11 +111,24 @@ fn looks_like_path(s: &str) -> bool {
     s.starts_with('/') || s.starts_with("~") || s.starts_with("./") || s.starts_with("../")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentKind {
+    Command,
+    RedirectTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CommandSegment<'a> {
+    text: &'a str,
+    kind: SegmentKind,
+}
+
 /// 把一条命令按 `|` `;` `&` `>` `<` `&&` `||` 拆成子命令。
-fn split_subcommands(cmd: &str) -> Vec<&str> {
+fn split_subcommands(cmd: &str) -> Vec<CommandSegment<'_>> {
     let mut out = Vec::new();
     let bytes = cmd.as_bytes();
     let mut start = 0;
+    let mut next_kind = SegmentKind::Command;
     let mut in_single = false;
     let mut in_double = false;
     let mut i = 0;
@@ -125,8 +140,16 @@ fn split_subcommands(cmd: &str) -> Vec<&str> {
             b'|' | b'&' | b';' | b'>' | b'<' if !in_single && !in_double => {
                 let s = cmd[start..i].trim();
                 if !s.is_empty() {
-                    out.push(s);
+                    out.push(CommandSegment {
+                        text: s,
+                        kind: next_kind,
+                    });
                 }
+                next_kind = if matches!(c, b'>' | b'<') {
+                    SegmentKind::RedirectTarget
+                } else {
+                    SegmentKind::Command
+                };
                 // 跳过连续的 |&;<> 组合（&&、||、>>、<<、>>>）。
                 i += 1;
                 while i < bytes.len() {
@@ -146,7 +169,10 @@ fn split_subcommands(cmd: &str) -> Vec<&str> {
     }
     let s = cmd[start..].trim();
     if !s.is_empty() {
-        out.push(s);
+        out.push(CommandSegment {
+            text: s,
+            kind: next_kind,
+        });
     }
     out
 }

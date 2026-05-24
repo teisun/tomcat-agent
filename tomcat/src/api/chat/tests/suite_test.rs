@@ -592,6 +592,28 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
+#[test]
+fn restore_raw_user_message_for_persistence_keeps_literal_mode_like_input() {
+    let raw_input = "[mode: PLAN]\n用户真的在讨论这个前缀";
+    let decorated = format!("[mode: EXEC plan_id=ship-001]\n{raw_input}");
+    let messages = vec![
+        crate::ChatMessage::user(&decorated),
+        crate::ChatMessage::assistant("ok"),
+    ];
+
+    let restored = super::super::run_loop::restore_raw_user_message_for_persistence(
+        messages,
+        raw_input,
+        &decorated,
+    );
+
+    assert_eq!(
+        restored[0].text_content(),
+        Some(raw_input),
+        "只应回退当前回合 runtime 注入的 EXEC/PLAN 前缀，不应继续剥掉用户正文里的 lookalike 文本"
+    );
+}
+
 #[tokio::test]
 async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
     let (base_url, hits, handle) = spawn_single_response_server(404, r#"{"error":"not found"}"#);

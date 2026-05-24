@@ -619,18 +619,28 @@ pub async fn run_chat_turn(
 
     match &outcome {
         AgentRunOutcome::Completed(result) => {
+            let new_messages = restore_raw_user_message_for_persistence(
+                result.new_messages.clone(),
+                input,
+                &decorated_user_text,
+            );
             persist_turn_result(
                 ctx,
                 context_state,
-                result.new_messages.clone(),
+                new_messages,
                 CheckpointKind::TurnEnd,
             )?;
         }
         AgentRunOutcome::Interrupted(result) => {
+            let new_messages = restore_raw_user_message_for_persistence(
+                result.new_messages.clone(),
+                input,
+                &decorated_user_text,
+            );
             persist_turn_result(
                 ctx,
                 context_state,
-                result.new_messages.clone(),
+                new_messages,
                 CheckpointKind::Interrupt,
             )?;
         }
@@ -640,6 +650,27 @@ pub async fn run_chat_turn(
     }
 
     Ok(outcome)
+}
+
+pub(crate) fn restore_raw_user_message_for_persistence(
+    mut new_messages: Vec<crate::core::llm::ChatMessage>,
+    raw_input: &str,
+    decorated_user_text: &str,
+) -> Vec<crate::core::llm::ChatMessage> {
+    if raw_input.is_empty() || raw_input == decorated_user_text {
+        return new_messages;
+    }
+    let mut restored = false;
+    for msg in &mut new_messages {
+        if restored || !matches!(msg.role, crate::core::llm::ChatMessageRole::User) {
+            continue;
+        }
+        if msg.text_content() == Some(decorated_user_text) {
+            msg.set_text_content(raw_input.to_string());
+            restored = true;
+        }
+    }
+    new_messages
 }
 
 fn make_fallback_context_state(
@@ -693,15 +724,6 @@ pub(crate) fn persist_turn_result(
 ) -> Result<Vec<String>, AppError> {
     let mut appended_row_ids = Vec::new();
     for msg in new_messages {
-        let mut msg = msg;
-        if matches!(msg.role, crate::core::llm::ChatMessageRole::User) {
-            if let Some(content) = msg.text_content() {
-                let stripped = plan_runtime::session_prefix::strip_user_prefix(content);
-                if stripped.len() != content.len() {
-                    msg.set_text_content(stripped.to_string());
-                }
-            }
-        }
         let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
         let mut cm = msg;
         cm.msg_id = Some(row_id);

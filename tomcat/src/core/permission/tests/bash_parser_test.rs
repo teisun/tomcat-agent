@@ -77,11 +77,8 @@ fn multiple_leading_assignments() {
 #[test]
 fn handles_pipes_and_subcommands() {
     let v = extract_paths("cat /etc/hosts | grep 127.0.0.1 > /tmp/out");
-    // pipe 把命令拆成 [cat /etc/hosts, grep 127.0.0.1, /tmp/out]
-    // 第三段 ">" 之后只剩 "/tmp/out" 整段；split_subcommands 得到 "/tmp/out"
-    // shell_words::split("/tmp/out") = ["/tmp/out"]，第一个被当作命令名跳过 -> 空
-    // 所以这里只拿到 /etc/hosts。
     assert!(v.contains(&"/etc/hosts".to_string()));
+    assert!(v.contains(&"/tmp/out".to_string()));
 }
 
 #[test]
@@ -94,4 +91,10 @@ fn handles_quoted_strings() {
 fn no_longer_treats_plain_slash_tokens_as_paths() {
     let v = extract_paths("npm i -D @playwright/test && node -e \"console.log('http://x/y')\"");
     assert!(v.is_empty(), "legacy helper 只应识别显式路径前缀: {:?}", v);
+}
+
+#[test]
+fn extracts_input_redirection_targets() {
+    let v = extract_paths("cat < ./fixtures/input.txt");
+    assert_eq!(v, vec!["./fixtures/input.txt"]);
 }

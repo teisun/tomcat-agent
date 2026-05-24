@@ -43,6 +43,68 @@ async fn ask_question_visible_in_chat() {
 }
 
 #[tokio::test]
+async fn ask_question_emits_transcript_event_on_answer() {
+    let rt = rt_planning();
+    let captured = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+        cancelled: false,
+        answers: vec![Answer {
+            question_id: "q1".into(),
+            option_ids: vec!["a".into()],
+            custom_text: None,
+            picked_recommended: true,
+        }],
+    }]);
+
+    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(out["cancelled"], false);
+
+    let guard = captured.lock();
+    assert_eq!(guard.len(), 1, "成功回答应写一条 transcript 自定义事件");
+    assert_eq!(guard[0]["event"], crate::infra::wire::WIRE_PLAN_ASK_QUESTION);
+    assert_eq!(guard[0]["mode"], "planning");
+    assert_eq!(guard[0]["questions"][0]["id"], "q1");
+    assert_eq!(guard[0]["result"]["answers"][0]["question_id"], "q1");
+}
+
+#[tokio::test]
+async fn ask_question_emits_transcript_event_on_cancelled() {
+    let rt = rt_planning();
+    let captured = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+        cancelled: true,
+        answers: vec![],
+    }]);
+
+    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(out["cancelled"], true);
+
+    let guard = captured.lock();
+    assert_eq!(guard.len(), 1, "取消也应写一条 transcript 自定义事件");
+    assert_eq!(guard[0]["event"], crate::infra::wire::WIRE_PLAN_ASK_QUESTION);
+    assert_eq!(guard[0]["result"]["cancelled"], true);
+    assert!(guard[0]["result"]["answers"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn ask_question_invisible_in_exec_returns_tool_error() {
     let rt = PlanRuntime::new("s1");
     rt.set_executing_for_test("plan_x".into());

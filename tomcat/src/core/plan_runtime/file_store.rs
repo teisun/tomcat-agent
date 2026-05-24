@@ -288,8 +288,7 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
 
 // ─── 读 / 写 / lock（高层 API） ────────────────────────────────────────────
 
-/// 读取 plan 文件（不上锁，read-only path）。
-pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
+fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
     let bytes = std::fs::read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PlanError::NotFound {
@@ -303,11 +302,7 @@ pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
     parse_plan_file(&text)
 }
 
-/// 写盘：抢锁 → 原子 rename → 释放锁。
-///
-/// `lock_timeout_ms` 通常来自 `[plan] lock_timeout_ms`；典型值 2000。
-pub fn write_plan(path: &Path, plan: &PlanFile, lock_timeout_ms: u64) -> Result<(), PlanError> {
-    let serialized = serialize_plan_file(plan)?;
+fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), PlanError> {
     let parent = path.parent().ok_or_else(|| {
         PlanError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -315,41 +310,91 @@ pub fn write_plan(path: &Path, plan: &PlanFile, lock_timeout_ms: u64) -> Result<
         ))
     })?;
     std::fs::create_dir_all(parent).map_err(PlanError::Io)?;
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        next_tmp_seq()
+    ));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)
+        .map_err(PlanError::Io)?;
+    file.write_all(serialized.as_bytes())
+        .map_err(PlanError::Io)?;
+    file.sync_all().map_err(PlanError::Io)?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        PlanError::Io(e)
+    })?;
+    Ok(())
+}
+
+/// 读取 plan 文件（不上锁，read-only path）。
+pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
+    read_plan_from_disk(path)
+}
+
+/// `update_plan_locked` 的错误：底层 plan I/O / 解析错误与调用方业务错误分流。
+#[derive(Debug)]
+pub enum LockedPlanMutationError<E> {
+    Plan(PlanError),
+    Callback(E),
+}
+
+impl<E> From<PlanError> for LockedPlanMutationError<E> {
+    fn from(value: PlanError) -> Self {
+        Self::Plan(value)
+    }
+}
+
+/// 写盘：抢锁 → 原子 rename → 释放锁。
+///
+/// `lock_timeout_ms` 通常来自 `[plan] lock_timeout_ms`；典型值 2000。
+pub fn write_plan(path: &Path, plan: &PlanFile, lock_timeout_ms: u64) -> Result<(), PlanError> {
+    let serialized = serialize_plan_file(plan)?;
     let lock_path = lock_path_for(path);
     with_advisory_lock(&lock_path, lock_timeout_ms, || {
-        let tmp = parent.join(format!(
-            ".{}.tmp.{}",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            next_tmp_seq()
-        ));
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(PlanError::Io)?;
-        file.write_all(serialized.as_bytes())
-            .map_err(PlanError::Io)?;
-        file.sync_all().map_err(PlanError::Io)?;
-        drop(file);
-        std::fs::rename(&tmp, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            PlanError::Io(e)
-        })?;
-        Ok(())
+        write_serialized_plan_atomic(path, &serialized)
+    })
+}
+
+/// 在同一把 advisory lock 内执行「读 → 改 → 写」事务，避免锁外先读后写造成丢更新。
+///
+/// 闭包返回 `Ok(result)` 时，更新后的 `PlanFile` 会在释放锁前原子写回；
+/// 返回 `Err` 时不写盘，调用方可把错误映射回更高层语义。
+pub fn update_plan_locked<R, E>(
+    path: &Path,
+    lock_timeout_ms: u64,
+    f: impl FnOnce(&mut PlanFile) -> Result<R, E>,
+) -> Result<R, LockedPlanMutationError<E>> {
+    let lock_path = lock_path_for(path);
+    with_advisory_lock(&lock_path, lock_timeout_ms, || {
+        let mut plan = read_plan_from_disk(path).map_err(LockedPlanMutationError::Plan)?;
+        let result = f(&mut plan).map_err(LockedPlanMutationError::Callback)?;
+        let serialized =
+            serialize_plan_file(&plan).map_err(LockedPlanMutationError::Plan)?;
+        write_serialized_plan_atomic(path, &serialized)
+            .map_err(LockedPlanMutationError::Plan)?;
+        Ok(result)
     })
 }
 
 /// 抢 plan 文件 advisory lock；超 `lock_timeout_ms` 不放弃则返回 `LockBusy`。
 ///
 /// 公开供 reviewer dispatch / `update_plan` 共享同一锁文件，保证 R5 串行性。
-pub fn with_advisory_lock<R>(
+pub fn with_advisory_lock<R, E>(
     lock_path: &Path,
     lock_timeout_ms: u64,
-    f: impl FnOnce() -> Result<R, PlanError>,
-) -> Result<R, PlanError> {
+    f: impl FnOnce() -> Result<R, E>,
+) -> Result<R, E>
+where
+    E: From<PlanError>,
+{
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(PlanError::Io)?;
+        std::fs::create_dir_all(parent).map_err(PlanError::Io).map_err(E::from)?;
     }
     let mut lock_file = OpenOptions::new()
         .create(true)
@@ -357,7 +402,8 @@ pub fn with_advisory_lock<R>(
         .write(true)
         .truncate(false)
         .open(lock_path)
-        .map_err(PlanError::Io)?;
+        .map_err(PlanError::Io)
+        .map_err(E::from)?;
     let start = Instant::now();
     let timeout = Duration::from_millis(lock_timeout_ms);
     let mut backoff = LOCK_RETRY_BASE_MS;
@@ -368,10 +414,10 @@ pub fn with_advisory_lock<R>(
                 if start.elapsed() >= timeout {
                     // N11：尝试读侧车 lock 文件已有内容（持锁进程在抢到锁后会写 pid）。
                     let holder_pid = read_lock_holder_pid(lock_path);
-                    return Err(PlanError::LockBusy {
+                    return Err(E::from(PlanError::LockBusy {
                         waited_ms: start.elapsed().as_millis() as u64,
                         holder_pid,
-                    });
+                    }));
                 }
                 std::thread::sleep(Duration::from_millis(backoff));
                 backoff = (backoff * 2).min(LOCK_RETRY_MAX_MS);

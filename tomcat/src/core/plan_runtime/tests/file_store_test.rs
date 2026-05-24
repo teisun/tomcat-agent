@@ -1,5 +1,7 @@
 use super::{sample_frontmatter, temp_plans_dir};
-use super::super::file_store::{read_plan, write_plan, PlanError, PlanFile, TodoStatus};
+use super::super::file_store::{
+    read_plan, update_plan_locked, write_plan, PlanError, PlanFile, TodoItem, TodoStatus,
+};
 use fs2::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -133,4 +135,59 @@ fn plan_file_lock_is_exclusive_serialized_via_lock() {
 
     let parsed = read_plan(&path).unwrap();
     assert!(parsed.body.contains("## A") || parsed.body.contains("## B"));
+}
+
+#[test]
+fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
+    let dir = temp_plans_dir();
+    let path = dir.join("demo_plan_1.plan.md");
+    let plan = PlanFile {
+        frontmatter: sample_frontmatter(),
+        body: "## seed\n".into(),
+    };
+    write_plan(&path, &plan, 2000).unwrap();
+
+    let p1 = path.clone();
+    let p2 = path.clone();
+    let h1 = std::thread::spawn(move || {
+        for i in 0..5 {
+            update_plan_locked(&p1, 2000, |plan| {
+                plan.frontmatter.todos.push(TodoItem {
+                    id: format!("a-{i}"),
+                    content: format!("a-{i}"),
+                    status: TodoStatus::Pending,
+                });
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap();
+        }
+    });
+    let h2 = std::thread::spawn(move || {
+        for i in 0..5 {
+            update_plan_locked(&p2, 2000, |plan| {
+                plan.frontmatter.todos.push(TodoItem {
+                    id: format!("b-{i}"),
+                    content: format!("b-{i}"),
+                    status: TodoStatus::Pending,
+                });
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap();
+        }
+    });
+    h1.join().unwrap();
+    h2.join().unwrap();
+
+    let parsed = read_plan(&path).unwrap();
+    let ids: std::collections::BTreeSet<_> = parsed
+        .frontmatter
+        .todos
+        .iter()
+        .map(|todo| todo.id.as_str())
+        .collect();
+    assert_eq!(ids.len(), 12, "应保留原始 2 个 todo + 10 个并发增量更新");
+    assert!(ids.contains("t1"));
+    assert!(ids.contains("t2"));
+    assert!(ids.contains("a-0"));
+    assert!(ids.contains("b-4"));
 }

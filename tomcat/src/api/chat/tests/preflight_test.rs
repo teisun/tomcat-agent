@@ -68,3 +68,16 @@ fn nohup_shell_non_brew_has_no_homebrew_env_prefix() {
     );
     assert!(cmd.starts_with("nohup apt-get "));
 }
+
+#[cfg(unix)]
+#[test]
+fn detached_marker_paths_are_distinct_per_preflight_kind() {
+    use super::{detached_log_marker_path, DETACHED_LOG_MARKER_NAME, GIT_DETACHED_LOG_MARKER_NAME};
+
+    let search_marker = detached_log_marker_path(DETACHED_LOG_MARKER_NAME).unwrap();
+    let git_marker = detached_log_marker_path(GIT_DETACHED_LOG_MARKER_NAME).unwrap();
+    assert_ne!(
+        search_marker, git_marker,
+        "search_tools 与 git 预检应使用不同 marker，避免互相误判为同一后台安装"
+    );
+}

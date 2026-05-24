@@ -902,40 +902,31 @@ impl PlanRuntime {
     fn resolve_build_target(
         &self,
         plan_id_or_path: &str,
-    ) -> Result<(PathBuf, file_store::PlanFile), PlanRuntimeError> {
+    ) -> Result<(PathBuf, Option<String>), PlanRuntimeError> {
         if !Self::looks_like_plan_path(plan_id_or_path) {
             safety::assert_plan_id_safe(plan_id_or_path)?;
             let path = file_store::plan_path_for_id(plan_id_or_path)
                 .map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
-            let plan = match file_store::read_plan(&path) {
-                Ok(p) => p,
-                Err(file_store::PlanError::NotFound { .. }) => {
-                    return Err(PlanRuntimeError::BuildPlanNotFound {
-                        plan_id: plan_id_or_path.to_string(),
-                        hint: format!(
-                            "未找到 ~/.tomcat/plans/{plan_id_or_path}.plan.md；先通过 PLAN 模式 create_plan 生成"
-                        ),
-                    });
-                }
-                Err(e) => return Err(PlanRuntimeError::Io(e.to_string())),
-            };
-            return Ok((path, plan));
+            if !path.is_file() {
+                return Err(PlanRuntimeError::BuildPlanNotFound {
+                    plan_id: plan_id_or_path.to_string(),
+                    hint: format!(
+                        "未找到 ~/.tomcat/plans/{plan_id_or_path}.plan.md；先通过 PLAN 模式 create_plan 生成"
+                    ),
+                });
+            }
+            return Ok((path, Some(plan_id_or_path.to_string())));
         }
 
         let path = crate::infra::platform::normalize_path(plan_id_or_path)
             .map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
-        let plan = match file_store::read_plan(&path) {
-            Ok(p) => p,
-            Err(file_store::PlanError::NotFound { .. }) => {
-                return Err(PlanRuntimeError::BuildPlanPathNotFound {
-                    path: crate::infra::platform::format_home_path(&path),
-                    hint: "检查 plan path 是否正确，或改用 /plan build <plan_id/path>".into(),
-                });
-            }
-            Err(e) => return Err(PlanRuntimeError::Io(e.to_string())),
-        };
-        safety::assert_plan_id_safe(&plan.frontmatter.plan_id)?;
-        Ok((path, plan))
+        if !path.is_file() {
+            return Err(PlanRuntimeError::BuildPlanPathNotFound {
+                path: crate::infra::platform::format_home_path(&path),
+                hint: "检查 plan path 是否正确，或改用 /plan build <plan_id/path>".into(),
+            });
+        }
+        Ok((path, None))
     }
 
     /// `/plan build <plan_id/path>` 入口；执行 plan-runtime §5.1 的 5 件事 + 原子回滚。
@@ -965,33 +956,7 @@ impl PlanRuntime {
         plan_id_or_path: &str,
         session_id: Option<String>,
     ) -> Result<BuildPlanOutcome, PlanRuntimeError> {
-        let (path, mut plan) = self.resolve_build_target(plan_id_or_path)?;
-        let plan_id = plan.frontmatter.plan_id.clone();
-        // ─── 闸门 1：内存 mode ─────────────────────────────────────────
-        {
-            let mode = self.mode.read();
-            match &*mode {
-                PlanMode::Chat | PlanMode::Planning => { /* 允许 */ }
-                PlanMode::Pending { plan_id: cur } if cur == &plan_id => {
-                    // N3（2026-05）：Pending 的本盘可直接续跑 build。
-                }
-                PlanMode::Executing { plan_id: cur } => {
-                    return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "当前 session 已在 EXEC（plan_id={cur}）；先等结束或 cancel→pending"
-                    )));
-                }
-                PlanMode::Pending { plan_id: cur } => {
-                    return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "当前 session 有 pending plan {cur}；先续跑本盘或 /restore 切别盘"
-                    )));
-                }
-                PlanMode::Completed { plan_id: cur } => {
-                    return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "当前 session 已 completed plan {cur}；新计划请先 /restore 或 /plan"
-                    )));
-                }
-            }
-        }
+        let (path, requested_plan_id) = self.resolve_build_target(plan_id_or_path)?;
         // ─── 闸门 2：active todos ──────────────────────────────────────
         {
             let session_todos = self.session_todos.lock();
@@ -1008,8 +973,46 @@ impl PlanRuntime {
                 ));
             }
         }
-        // ─── 闸门 3：active_planning_plan_id 冲突 ──────────────────────
-        {
+
+        struct BuildCommit {
+            plan_id: String,
+            prev_disk_mode: file_store::PlanFileMode,
+            warnings: Vec<String>,
+            plan_text: String,
+        }
+
+        let build = match file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
+            safety::assert_plan_id_safe(&plan.frontmatter.plan_id)
+                .map_err(|e| PlanRuntimeError::Io(e.to_string()))?;
+            let plan_id = plan.frontmatter.plan_id.clone();
+
+            // ─── 闸门 1：内存 mode ─────────────────────────────────────
+            {
+                let mode = self.mode.read();
+                match &*mode {
+                    PlanMode::Chat | PlanMode::Planning => { /* 允许 */ }
+                    PlanMode::Pending { plan_id: cur } if cur == &plan_id => {
+                        // N3（2026-05）：Pending 的本盘可直接续跑 build。
+                    }
+                    PlanMode::Executing { plan_id: cur } => {
+                        return Err(PlanRuntimeError::BuildBlocked(format!(
+                            "当前 session 已在 EXEC（plan_id={cur}）；先等结束或 cancel→pending"
+                        )));
+                    }
+                    PlanMode::Pending { plan_id: cur } => {
+                        return Err(PlanRuntimeError::BuildBlocked(format!(
+                            "当前 session 有 pending plan {cur}；先续跑本盘或 /restore 切别盘"
+                        )));
+                    }
+                    PlanMode::Completed { plan_id: cur } => {
+                        return Err(PlanRuntimeError::BuildBlocked(format!(
+                            "当前 session 已 completed plan {cur}；新计划请先 /restore 或 /plan"
+                        )));
+                    }
+                }
+            }
+
+            // ─── 闸门 3：active_planning_plan_id 冲突 ──────────────────
             if let Some(active) = self.active_planning_plan_id.lock().clone() {
                 if active != plan_id {
                     return Err(PlanRuntimeError::BuildBlocked(format!(
@@ -1017,41 +1020,74 @@ impl PlanRuntime {
                     )));
                 }
             }
-        }
-        // ─── 读 PlanFile + 闸门 4/5：存在 + 合法 mode ──────────────────
-        let prev_disk_mode = plan.frontmatter.mode;
-        match prev_disk_mode {
-            file_store::PlanFileMode::Planning | file_store::PlanFileMode::Pending => {}
-            file_store::PlanFileMode::Executing => {
-                return Err(PlanRuntimeError::BuildBlocked(format!(
-                    "PlanFile {plan_id} mode=executing；可能被其它进程占用，请稍后或手工修复"
-                )));
-            }
-            file_store::PlanFileMode::Completed => {
-                return Err(PlanRuntimeError::BuildBlocked(format!(
-                    "PlanFile {plan_id} mode=completed；已完成的 plan 不可再 build"
-                )));
-            }
-        }
-        // ─── 准备五件事 ────────────────────────────────────────────────
-        let mut warnings: Vec<String> = Vec::new();
-        if matches!(prev_disk_mode, file_store::PlanFileMode::Pending) {
-            if let Some(prev_key) = &plan.frontmatter.session_key {
-                if prev_key != self.session_key.as_str() {
-                    warnings.push(format!(
-                        "pending plan {plan_id} 原绑定 session_key={prev_key}；本次将覆盖为 {}",
-                        self.session_key
-                    ));
+
+            // ─── 读 PlanFile + 闸门 4/5：存在 + 合法 mode ────────────────
+            let prev_disk_mode = plan.frontmatter.mode;
+            match prev_disk_mode {
+                file_store::PlanFileMode::Planning | file_store::PlanFileMode::Pending => {}
+                file_store::PlanFileMode::Executing => {
+                    return Err(PlanRuntimeError::BuildBlocked(format!(
+                        "PlanFile {plan_id} mode=executing；可能被其它进程占用，请稍后或手工修复"
+                    )));
+                }
+                file_store::PlanFileMode::Completed => {
+                    return Err(PlanRuntimeError::BuildBlocked(format!(
+                        "PlanFile {plan_id} mode=completed；已完成的 plan 不可再 build"
+                    )));
                 }
             }
-        }
-        // 1, 2: frontmatter 改 session_key/session_id/mode
-        plan.frontmatter.session_key = Some(self.session_key.clone());
-        plan.frontmatter.session_id = session_id.clone();
-        plan.frontmatter.mode = file_store::PlanFileMode::Executing;
-        // 3: write_plan（原子）
-        file_store::write_plan(&path, &plan, self.lock_timeout_ms)
-            .map_err(PlanRuntimeError::from_plan_io)?;
+
+            // ─── 准备五件事 ────────────────────────────────────────────
+            let mut warnings: Vec<String> = Vec::new();
+            if matches!(prev_disk_mode, file_store::PlanFileMode::Pending) {
+                if let Some(prev_key) = &plan.frontmatter.session_key {
+                    if prev_key != self.session_key.as_str() {
+                        warnings.push(format!(
+                            "pending plan {plan_id} 原绑定 session_key={prev_key}；本次将覆盖为 {}",
+                            self.session_key
+                        ));
+                    }
+                }
+            }
+            // 1, 2: frontmatter 改 session_key/session_id/mode
+            plan.frontmatter.session_key = Some(self.session_key.clone());
+            plan.frontmatter.session_id = session_id.clone();
+            plan.frontmatter.mode = file_store::PlanFileMode::Executing;
+            let plan_text =
+                file_store::serialize_plan_file(plan).unwrap_or_else(|_| plan.body.clone());
+            Ok(BuildCommit {
+                plan_id,
+                prev_disk_mode,
+                warnings,
+                plan_text,
+            })
+        }) {
+            Ok(v) => v,
+            Err(file_store::LockedPlanMutationError::Plan(file_store::PlanError::NotFound {
+                ..
+            })) => {
+                return match requested_plan_id {
+                    Some(plan_id) => Err(PlanRuntimeError::BuildPlanNotFound {
+                        plan_id: plan_id.clone(),
+                        hint: format!(
+                            "未找到 ~/.tomcat/plans/{plan_id}.plan.md；先通过 PLAN 模式 create_plan 生成"
+                        ),
+                    }),
+                    None => Err(PlanRuntimeError::BuildPlanPathNotFound {
+                        path: crate::infra::platform::format_home_path(&path),
+                        hint: "检查 plan path 是否正确，或改用 /plan build <plan_id/path>".into(),
+                    }),
+                };
+            }
+            Err(file_store::LockedPlanMutationError::Plan(e)) => {
+                return Err(PlanRuntimeError::from_plan_io(e));
+            }
+            Err(file_store::LockedPlanMutationError::Callback(e)) => return Err(e),
+        };
+
+        let plan_id = build.plan_id.clone();
+        let mut warnings = build.warnings;
+        let prev_disk_mode = build.prev_disk_mode;
         // 4: 切内存（写盘成功后才动）
         *self.mode.write() = PlanMode::Executing {
             plan_id: plan_id.to_string(),
@@ -1059,9 +1095,7 @@ impl PlanRuntime {
         *self.active_planning_plan_id.lock() = None;
         *self.active_plan_path.lock() = Some(path.clone());
         // 5: 首轮注入旗标 + 缓存 plan body（含 frontmatter 以便上下文可读）
-        let plan_text =
-            file_store::serialize_plan_file(&plan).unwrap_or_else(|_| plan.body.clone());
-        *self.first_exec_turn_body.lock() = Some(plan_text);
+        *self.first_exec_turn_body.lock() = Some(build.plan_text);
         self.first_exec_turn_pending.store(true, Ordering::Release);
 
         // E6：`[plan].auto_checkpoint_on_build`（默认 false）→ 写 `Manual{label="plan_build:..."}`。
@@ -1138,10 +1172,14 @@ impl PlanRuntime {
             None => file_store::plan_path_for_id(&plan_id)
                 .map_err(|e| PlanRuntimeError::Io(e.to_string()))?,
         };
-        let mut plan = file_store::read_plan(&path).map_err(PlanRuntimeError::from_plan_io)?;
-        plan.frontmatter.mode = file_store::PlanFileMode::Pending;
-        file_store::write_plan(&path, &plan, self.lock_timeout_ms)
-            .map_err(PlanRuntimeError::from_plan_io)?;
+        file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
+            plan.frontmatter.mode = file_store::PlanFileMode::Pending;
+            Ok::<(), PlanRuntimeError>(())
+        })
+        .map_err(|e| match e {
+            file_store::LockedPlanMutationError::Plan(err) => PlanRuntimeError::from_plan_io(err),
+            file_store::LockedPlanMutationError::Callback(err) => err,
+        })?;
         // ③ 内存切 Pending；reset 首轮注入
         *self.mode.write() = PlanMode::Pending {
             plan_id: plan_id.clone(),

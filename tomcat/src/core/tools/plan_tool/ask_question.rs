@@ -73,13 +73,17 @@ pub async fn execute_with_timeout(
         ask_fut.await
     };
     if result.cancelled {
-        return Ok(serde_json::json!({
+        let payload = serde_json::json!({
             "cancelled": true,
             "answers": [],
-        }));
+        });
+        write_ask_question_transcript(runtime, &questions, &payload);
+        return Ok(payload);
     }
     validate_answers(&questions, &result)?;
-    Ok(answer_to_json(&result))
+    let payload = answer_to_json(&result);
+    write_ask_question_transcript(runtime, &questions, &payload);
+    Ok(payload)
 }
 
 /// 解析超时（毫秒）：env > config > 默认 300_000。`Some(0)` / env `0` → `None`（不超时）。
@@ -254,4 +258,26 @@ fn answer_to_json(result: &AskQuestionResult) -> serde_json::Value {
             })
             .collect::<Vec<_>>(),
     })
+}
+
+fn write_ask_question_transcript(
+    runtime: &PlanRuntime,
+    questions: &[Question],
+    payload: &serde_json::Value,
+) {
+    let mut extra = serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
+        "questions": questions,
+        "result": payload,
+        "mode": runtime.mode().as_str(),
+    });
+    let plan_id = runtime
+        .mode()
+        .active_plan_id()
+        .map(ToOwned::to_owned)
+        .or_else(|| runtime.active_planning_plan_id());
+    if let (Some(obj), Some(plan_id)) = (extra.as_object_mut(), plan_id) {
+        obj.insert("plan_id".into(), serde_json::Value::String(plan_id));
+    }
+    runtime.write_transcript_custom(extra);
 }

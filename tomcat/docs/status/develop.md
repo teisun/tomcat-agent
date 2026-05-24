@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-12 17:56 | ACTIVE | develop | — |
+| Nibbles | 2026-05-24 18:29 | ACTIVE | develop | — |
+
+### 2026-05-24 | merge `feature/plan-mode-enhance` → develop @ 2ecc513
+
+- **阶段 R（评审）**：在 `develop` 上对 `plan_runtime` / `ask_question` / reviewer-verifier / `AgentRegistry` / `bash_parser` / session CLI / preflight 等合入差异做全量 review；补修 develop 侧发现的并发、持久化、审计与 CLI 回归，并补齐对应单测/集成/E2E 覆盖。
+- **阶段 T（门禁）**：首轮全量验收暴露真实 LLM CLI 用例 `test_user_receives_nonempty_llm_response` 的 `30s` 超时门限过紧；与同类用例统一为 `60s` 后，使用 `set -a && . "/Users/yankeben/workspace/Tomcat/tomcat/.env" && set +a && ./scripts/run-integration-tests.sh all` 在 `develop` worktree 复跑，`=== 全量测试通过 ===`（release、clippy、lib、integration-parallel、integration-serial 全绿；总耗时 `757756ms`）。
+- **看板**：`T2-P1-002`、`T2-P1-003`、`T2-P1-004` 由 `PENDING_INTEGRATION` 置为 `DONE`，同步 `TASK_BOARD_002/README.md`。
 
 ### 2026-05-12 | merge `feature/llm-files-upload-manager` → develop @ cb924eb
 
