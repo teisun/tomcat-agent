@@ -3,7 +3,42 @@
 //! 仅触达 `crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus}`
 //! 公共导出；与 [`crate::core::tools::primitive::bash_task`] 模块文档保持一致。
 
+use std::sync::Arc;
+
+use crate::core::permission::{
+    BashAstChecker, DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, SessionGrants,
+};
+use crate::core::tools::contract::confirmation::AllowAllConfirmation;
+use crate::core::tools::primitive::bash_task::BackgroundBashGuard;
 use crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus, WakeReason};
+use crate::infra::audit::TracingAuditRecorder;
+
+fn make_guard(
+    workspace_root: &std::path::Path,
+    path_rules: Vec<PathRule>,
+    bash_forbidden: Vec<String>,
+    bash_ast: BashAstChecker,
+) -> BackgroundBashGuard {
+    let guard = Arc::new(DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: workspace_root.to_path_buf(),
+            workspace_roots: vec![workspace_root.to_path_buf()],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: path_rules,
+            user_bash_forbidden: bash_forbidden,
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    ));
+    BackgroundBashGuard::new(
+        "__agent__",
+        guard,
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        bash_ast,
+    )
+}
 
 #[tokio::test]
 async fn spawn_then_read_then_stop_then_list() {
@@ -231,4 +266,78 @@ async fn tail_log_returns_suffix() {
         "tail_log(max=10) 长度 {} 应不超过 10",
         small.len()
     );
+}
+
+#[tokio::test]
+async fn spawn_denied_by_path_preflight_has_no_task_side_effect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let denied_root = dir.path().join("denied");
+    std::fs::create_dir_all(&denied_root).unwrap();
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results")).with_background_guard(
+        make_guard(
+            dir.path(),
+            vec![PathRule::new(
+                denied_root.to_string_lossy(),
+                PathRuleMode::Deny,
+            )],
+            vec![],
+            BashAstChecker::default(),
+        ),
+    );
+    let err = reg
+        .spawn(
+            format!("ls {}", denied_root.join("secret.txt").display()),
+            None,
+            Some(dir.path().to_path_buf()),
+        )
+        .await
+        .expect_err("denied path should fail before spawn");
+    assert!(err.to_string().contains("deny") || err.to_string().contains("拒绝"));
+    assert!(reg.list().is_empty(), "preflight deny must not register a task");
+}
+
+#[tokio::test]
+async fn spawn_denied_by_bash_ast_has_no_task_side_effect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results")).with_background_guard(
+        make_guard(
+            dir.path(),
+            vec![],
+            vec![],
+            BashAstChecker::new(true, vec![], vec!["rm".to_string()]),
+        ),
+    );
+    let err = reg
+        .spawn(
+            "git --version && rm -rf ./danger".to_string(),
+            None,
+            Some(dir.path().to_path_buf()),
+        )
+        .await
+        .expect_err("ast deny should fail before spawn");
+    assert!(err.to_string().contains("AstDeny"));
+    assert!(reg.list().is_empty(), "AST deny must not register a task");
+}
+
+#[tokio::test]
+async fn spawn_denied_by_bash_policy_has_no_task_side_effect() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results")).with_background_guard(
+        make_guard(
+            dir.path(),
+            vec![],
+            vec![r"\becho\b".to_string()],
+            BashAstChecker::default(),
+        ),
+    );
+    let err = reg
+        .spawn(
+            "echo should-not-run".to_string(),
+            None,
+            Some(dir.path().to_path_buf()),
+        )
+        .await
+        .expect_err("forbidden bash should fail before spawn");
+    assert!(err.to_string().contains("forbidden") || err.to_string().contains("拒绝"));
+    assert!(reg.list().is_empty(), "policy deny must not register a task");
 }

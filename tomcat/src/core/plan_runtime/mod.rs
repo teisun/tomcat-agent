@@ -48,7 +48,6 @@ pub mod review;
 pub mod safety;
 pub mod session_prefix;
 pub mod todo_runtime;
-pub mod tools;
 pub mod verify;
 
 #[cfg(test)]
@@ -698,7 +697,7 @@ impl PlanRuntime {
         let Some(dispatcher) = self.reviewer.lock().clone() else {
             return review::ReviewSummary::placeholder_pending_for(review::ReviewKind::Code);
         };
-        let path = match self.resolve_dispatch_plan_path(plan_id) {
+        let path = match self.resolved_plan_path(plan_id) {
             Ok(p) => p,
             Err(e) => {
                 return review::ReviewSummary::aborted_with_kind(
@@ -742,7 +741,7 @@ impl PlanRuntime {
         let Some(dispatcher) = self.verifier.lock().clone() else {
             return verify::VerifySummary::placeholder_pending();
         };
-        let path = match self.resolve_dispatch_plan_path(plan_id) {
+        let path = match self.resolved_plan_path(plan_id) {
             Ok(p) => p,
             Err(e) => return verify::VerifySummary::aborted_with(e),
         };
@@ -755,7 +754,7 @@ impl PlanRuntime {
         dispatcher.dispatch(plan_id, &plan_text, cascade).await
     }
 
-    fn resolve_dispatch_plan_path(&self, plan_id: &str) -> Result<PathBuf, String> {
+    pub(crate) fn resolved_plan_path(&self, plan_id: &str) -> Result<PathBuf, String> {
         let mode = self.mode.read();
         let active_id = mode.active_plan_id();
         let planning_id = self.active_planning_plan_id.lock().clone();

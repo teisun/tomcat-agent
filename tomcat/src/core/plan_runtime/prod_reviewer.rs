@@ -109,10 +109,10 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
             );
         };
 
-        let plan_path = crate::core::plan_runtime::file_store::plan_path_for_id(plan_id)
-            .unwrap_or_else(|_| {
-                std::path::PathBuf::from(format!("~/.tomcat/plans/{plan_id}.plan.md"))
-            });
+        let plan_path = match plan_runtime.resolved_plan_path(plan_id) {
+            Ok(path) => path,
+            Err(err) => return ReviewSummary::aborted_with_kind(kind, err),
+        };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let initial_user_message = match kind {
             ReviewKind::Plan => {
@@ -403,77 +403,3 @@ fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String>
         .unwrap_or_default()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::plan_runtime::review::{resolve_internal_tools, reviewer_allowed_tools_for, ReviewKind};
-    use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
-
-    #[tokio::test]
-    async fn prod_reviewer_stub_returns_aborted_with_origin() {
-        let d = ProdReviewerDispatcher::stub("test_origin");
-        let r = d
-            .dispatch(
-                "demo",
-                "noop",
-                ReviewKind::Plan,
-                true,
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await;
-        assert!(r.aborted);
-        assert!(r.summary.contains("test_origin"));
-        assert!(!r.applied_changes);
-    }
-
-    /// reviewer.md §11 RV-T1：reviewer 没有任何独立 catalog schema，
-    /// LLM 永远见不到 `reviewer` / `review` 名字的工具入口。
-    #[test]
-    fn reviewer_not_in_catalog() {
-        for entry in BUILTIN_TOOL_CATALOG.iter() {
-            assert_ne!(entry.name, "reviewer", "catalog 不应暴露 `reviewer` 工具");
-            assert_ne!(entry.name, "review", "catalog 不应暴露 `review` 工具");
-        }
-    }
-
-    /// reviewer.md §11 RV-T3：reviewer 允许的工具集恒不含 create_plan/bash/write/
-    /// dispatch_agent/checkpoint，即便它们出现在 catalog 里。
-    #[test]
-    fn reviewer_default_allowed_tools_no_create_plan() {
-        let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Plan));
-        let names: std::collections::BTreeSet<String> = tools
-            .iter()
-            .map(|v| v["function"]["name"].as_str().unwrap().to_string())
-            .collect();
-        assert!(!names.contains("create_plan"));
-        assert!(!names.contains("bash"));
-        assert!(!names.contains("write"));
-        assert!(!names.contains("dispatch_agent"));
-        assert!(!names.contains("checkpoint"));
-        // 应该至少包含改稿权这套
-        assert!(names.contains("update_plan"));
-        assert!(names.contains("edit"));
-        assert!(names.contains("read"));
-    }
-
-    #[test]
-    fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
-        let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Code));
-        let names: std::collections::BTreeSet<String> = tools
-            .iter()
-            .map(|v| v["function"]["name"].as_str().unwrap().to_string())
-            .collect();
-        assert!(names.contains("bash"));
-        assert!(!names.contains("todos"));
-        assert!(!names.contains("update_plan"));
-        assert!(!names.contains("edit"));
-    }
-
-    /// reviewer.md §9：max_turns 默认 64，落到 ReviewSummary.reviewer_turns_limit；
-    /// stop_reason 默认 "spawn_error"（dispatcher 未注入依赖时的 path）。
-    #[test]
-    fn reviewer_max_turns_default_is_64() {
-        let config = crate::infra::config::ReviewerConfig::default();
-        assert_eq!(config.max_turns, 64);
-    }
-}

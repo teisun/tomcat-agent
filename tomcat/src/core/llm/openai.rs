@@ -656,13 +656,8 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
     events
 }
 
-// 测试落在外部目录的 `tests/openai_provider_test.rs` / `tests/openai_stream_test.rs`，
-// 通过 `#[cfg(test)] #[path]` 内挂为本文件的子模块；这样测试可直接访问私有项，
-// 业务源文件**无需**为测试放宽可见性（RUST_FILE_LINES_SPEC §A 第 9 条）。
+// 测试统一收敛到 `tests/openai.rs`，再在该文件内部按 provider / stream 子模块组织；
+// 业务源文件保持单一 `#[path]` 挂载，符合 RUST_FILE_LINES_SPEC §A.9 的“唯一一行”要求。
 #[cfg(test)]
-#[path = "tests/openai_provider_test.rs"]
-mod provider_tests;
-
-#[cfg(test)]
-#[path = "tests/openai_stream_test.rs"]
-mod stream_tests;
+#[path = "tests/openai.rs"]
+mod tests;

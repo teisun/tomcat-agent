@@ -33,7 +33,262 @@ use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 
+use crate::core::permission::{
+    is_url_like, BashAstChecker, GrantTrace, GrantTrigger, GrantType, PermissionDecision,
+    PermissionGate, PermissionScope,
+};
+use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
+use crate::core::tools::primitive::PrimitiveOperation;
+use crate::infra::audit::{AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
+use crate::infra::platform::normalize_path;
+
+fn permission_scope_str(scope: PermissionScope) -> String {
+    match scope {
+        PermissionScope::Read => "read",
+        PermissionScope::Write => "write",
+        PermissionScope::Bash => "bash",
+        PermissionScope::BashApproval => "bash_approval",
+        PermissionScope::Forbidden => "forbidden",
+    }
+    .to_string()
+}
+
+fn grant_type_str(s: GrantType) -> String {
+    match s {
+        GrantType::AgentDefinitionDir => "agent_definition_dir",
+        GrantType::AgentPlansDir => "agent_plans_dir",
+        GrantType::AgentWorkspaceRoot => "agent_workspace_root",
+        GrantType::SessionScope => "session_scope",
+        GrantType::PathRuleReadOnly => "path_rule_read_only",
+        GrantType::AgentTrailDir => "agent_trail_dir",
+        GrantType::BashPolicy => "bash_policy",
+    }
+    .to_string()
+}
+
+fn grant_trigger_str(s: GrantTrigger) -> String {
+    match s {
+        GrantTrigger::BuiltinDefault => "builtin_default",
+        GrantTrigger::WorkspaceRootsConfig => "workspace_roots_config",
+        GrantTrigger::PathRulesConfig => "path_rules_config",
+        GrantTrigger::BashRegexConfig => "bash_regex_config",
+        GrantTrigger::UserConfirm => "user_confirm",
+        GrantTrigger::CwdLazyPrompt => "cwd_lazy_prompt",
+        GrantTrigger::DraggedPathMenu => "dragged_path_menu",
+        GrantTrigger::AutoConfirmFlag => "auto_confirm_flag",
+    }
+    .to_string()
+}
+
+fn op_summary(op: PrimitiveOperation) -> &'static str {
+    match op {
+        PrimitiveOperation::Read => "读取",
+        PrimitiveOperation::Write => "写入",
+        PrimitiveOperation::Edit => "编辑",
+        PrimitiveOperation::Bash => "执行命令",
+    }
+}
+
+fn resolve_preflight_path(raw: &str, cwd_path: &Path) -> PathBuf {
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if raw.starts_with("./") || raw.starts_with("../") {
+        let base = if cwd_path == Path::new(".") {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            cwd_path.to_path_buf()
+        };
+        return base.join(raw);
+    }
+    PathBuf::from(raw)
+}
+
+#[derive(Clone)]
+pub struct BackgroundBashGuard {
+    plugin_id: String,
+    gate: Arc<dyn PermissionGate>,
+    confirmation: Arc<dyn UserConfirmationProvider>,
+    audit: Arc<dyn AuditRecorder>,
+    bash_ast: BashAstChecker,
+}
+
+impl BackgroundBashGuard {
+    pub fn new(
+        plugin_id: impl Into<String>,
+        gate: Arc<dyn PermissionGate>,
+        confirmation: Arc<dyn UserConfirmationProvider>,
+        audit: Arc<dyn AuditRecorder>,
+        bash_ast: BashAstChecker,
+    ) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            gate,
+            confirmation,
+            audit,
+            bash_ast,
+        }
+    }
+
+    fn record_failure(&self, audit_cmd: &str, err: &AppError) {
+        self.audit.record_primitive(PrimitiveAuditEntry {
+            operation: AuditPrimitiveOp::Bash,
+            path_or_cmd: audit_cmd.to_string(),
+            plugin_id: self.plugin_id.clone(),
+            user_approved: false,
+            success: false,
+            detail: Some(err.to_string()),
+            ..Default::default()
+        });
+    }
+
+    fn record_spawn_result(
+        &self,
+        audit_cmd: &str,
+        scope: PermissionScope,
+        grant: GrantTrace,
+        success: bool,
+        detail: String,
+    ) {
+        self.audit.record_primitive(PrimitiveAuditEntry {
+            operation: AuditPrimitiveOp::Bash,
+            path_or_cmd: audit_cmd.to_string(),
+            plugin_id: self.plugin_id.clone(),
+            user_approved: true,
+            success,
+            detail: Some(detail),
+            permission_scope: Some(permission_scope_str(scope)),
+            grant_type: Some(grant_type_str(grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(grant.trigger)),
+        });
+    }
+
+    async fn gate_check_path(
+        &self,
+        op: PrimitiveOperation,
+        path: &str,
+    ) -> Result<(PathBuf, PermissionScope, GrantTrace), AppError> {
+        if is_url_like(path) && op != PrimitiveOperation::Bash {
+            let scope = match op {
+                PrimitiveOperation::Read => PermissionScope::Read,
+                PrimitiveOperation::Write | PrimitiveOperation::Edit => PermissionScope::Write,
+                PrimitiveOperation::Bash => unreachable!("bash URL-like path should never bypass"),
+            };
+            return Ok((
+                PathBuf::from(path),
+                scope,
+                GrantTrace::new(GrantType::SessionScope, GrantTrigger::BuiltinDefault),
+            ));
+        }
+
+        let normalized = normalize_path(path)?;
+        loop {
+            match self.gate.check(op, &normalized.to_string_lossy())? {
+                PermissionDecision::Allow { grant, scope } => return Ok((normalized, scope, grant)),
+                PermissionDecision::Deny { reason } => {
+                    return Err(AppError::Permission(reason));
+                }
+                PermissionDecision::NeedConfirm {
+                    reason,
+                    suggested_root,
+                } => {
+                    let preview = format!(
+                        "[{:?}] {}\n路径: {}\n原因: {}",
+                        op,
+                        op_summary(op),
+                        normalized.display(),
+                        reason
+                    );
+                    match self
+                        .confirmation
+                        .confirm_decision(op, &preview, &self.plugin_id, suggested_root.clone())
+                        .await?
+                    {
+                        ConfirmDecision::Deny => {
+                            return Err(AppError::Permission(format!(
+                                "用户拒绝授权: {}。下次工具再次访问该路径时会重新弹出 [s]/[w]/[c] 授权选项；也可以执行 `tomcat workspace add {}` 一次性永久授权。",
+                                normalized.display(),
+                                normalized.display()
+                            )));
+                        }
+                        ConfirmDecision::AllowOnce => {
+                            self.gate
+                                .grant_session(normalized.clone(), GrantTrigger::UserConfirm);
+                        }
+                        ConfirmDecision::AllowAndPersistRoot { root } => {
+                            self.gate.grant_session(root, GrantTrigger::UserConfirm);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn gate_check_bash(&self, command: &str) -> Result<(PermissionScope, GrantTrace), AppError> {
+        match self.gate.check_bash(command)? {
+            PermissionDecision::Allow { grant, scope } => Ok((scope, grant)),
+            PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
+            PermissionDecision::NeedConfirm { reason, .. } => {
+                let preview = format!(
+                    "[Bash] 危险命令命中确认列表\n命令: {}\n原因: {}",
+                    command, reason
+                );
+                match self
+                    .confirmation
+                    .confirm_decision(PrimitiveOperation::Bash, &preview, &self.plugin_id, None)
+                    .await?
+                {
+                    ConfirmDecision::AllowOnce | ConfirmDecision::AllowAndPersistRoot { .. } => {
+                        Ok((
+                            PermissionScope::BashApproval,
+                            GrantTrace::new(GrantType::BashPolicy, GrantTrigger::UserConfirm),
+                        ))
+                    }
+                    ConfirmDecision::Deny => {
+                        Err(AppError::Permission("用户拒绝 bash 确认".to_string()))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn bash_preflight_and_gate(
+        &self,
+        audit_cmd: &str,
+        cwd: Option<&Path>,
+    ) -> Result<(PermissionScope, GrantTrace), AppError> {
+        let cwd_path = if let Some(cwd) = cwd {
+            self.gate_check_path(
+                PrimitiveOperation::Read,
+                cwd.to_string_lossy().as_ref(),
+            )
+            .await?
+            .0
+        } else {
+            PathBuf::from(".")
+        };
+
+        if let Err(reject) = self.bash_ast.check(audit_cmd) {
+            return Err(AppError::Primitive(reject.to_string()));
+        }
+
+        for raw in crate::core::permission::bash_parser::extract_paths(audit_cmd) {
+            let candidate = resolve_preflight_path(&raw, &cwd_path);
+            let candidate_owned = candidate.to_string_lossy().into_owned();
+            let _ = self
+                .gate_check_path(PrimitiveOperation::Bash, &candidate_owned)
+                .await?;
+        }
+
+        self.gate_check_bash(audit_cmd).await
+    }
+}
 
 /// 任务唯一 ID（`<unix_ms>-<rand6>`，避免 `uuid` 依赖）。
 pub type BashTaskId = String;
@@ -126,6 +381,7 @@ pub struct BackgroundTaskLifecycleEvent {
 pub struct BashTaskRegistry {
     tasks: RwLock<HashMap<BashTaskId, Arc<BashTask>>>,
     persist_dir: PathBuf,
+    background_guard: Option<BackgroundBashGuard>,
     /// P1：所有 task 共用的 lifecycle broadcast。`subscribe_lifecycle()` 取
     /// `Receiver`；`spawn` 创建 task 时把 sender clone 给 wait 任务，task
     /// 终态翻转一次性 send。channel 容量按"启动后短期未消费的最大堆积量"
@@ -139,8 +395,14 @@ impl BashTaskRegistry {
         Self {
             tasks: RwLock::new(HashMap::new()),
             persist_dir,
+            background_guard: None,
             lifecycle_tx,
         }
+    }
+
+    pub fn with_background_guard(mut self, guard: BackgroundBashGuard) -> Self {
+        self.background_guard = Some(guard);
+        self
     }
 
     /// P1：host/chat_loop 订阅 lifecycle 事件用。同一个 `task_id` 的终态翻转
@@ -169,6 +431,31 @@ impl BashTaskRegistry {
             .as_millis();
         let task_id = format!("{}-{}", now, simple_rand6());
         let log_path = self.persist_dir.join(format!("bash-{}.log", &task_id));
+        let audit_cmd = match argv.as_deref() {
+            None => command.clone(),
+            Some(args) => {
+                let mut text = command.clone();
+                for arg in args {
+                    text.push(' ');
+                    text.push_str(arg);
+                }
+                text
+            }
+        };
+        let bash_scope_grant = if let Some(guard) = self.background_guard.as_ref() {
+            match guard
+                .bash_preflight_and_gate(&audit_cmd, cwd.as_deref())
+                .await
+            {
+                Ok(scope_grant) => Some(scope_grant),
+                Err(err) => {
+                    guard.record_failure(&audit_cmd, &err);
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
 
         let mut cmd = match argv.as_deref() {
             None => {
@@ -199,7 +486,15 @@ impl BashTaskRegistry {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| AppError::Primitive(e.to_string()))?;
+            .map_err(|e| {
+                let err = AppError::Primitive(e.to_string());
+                if let (Some(guard), Some((scope, grant))) =
+                    (self.background_guard.as_ref(), bash_scope_grant)
+                {
+                    guard.record_spawn_result(&audit_cmd, scope, grant, false, err.to_string());
+                }
+                err
+            })?;
         let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -225,6 +520,21 @@ impl BashTaskRegistry {
             lifecycle_emitted: parking_lot::Mutex::new(false),
         });
         self.tasks.write().insert(task_id.clone(), task.clone());
+        if let (Some(guard), Some((scope, grant))) =
+            (self.background_guard.as_ref(), bash_scope_grant)
+        {
+            guard.record_spawn_result(
+                &audit_cmd,
+                scope,
+                grant,
+                true,
+                format!(
+                    "background task started: task_id={} log_path={}",
+                    task_id,
+                    log_path.display()
+                ),
+            );
+        }
 
         // 两条 pump 任务：stdout / stderr 边读边追加日志。
         // stderr 行前缀 "STDERR: " 让 task_output 拉到的内容仍可肉眼区分两路。

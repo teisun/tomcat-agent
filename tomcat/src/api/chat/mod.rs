@@ -14,7 +14,6 @@ pub mod commands;
 pub mod events;
 pub mod panels;
 pub mod permission;
-pub mod plan_runtime;
 pub mod preflight;
 
 pub use context::{ChatContext, CliConfirmation};

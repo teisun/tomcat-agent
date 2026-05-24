@@ -278,3 +278,36 @@ fn emit_task_output_update(
     let ctx = crate::infra::event_bus::EventContext::new(event_name.clone(), payload);
     let _ = bus.emit_sync(&event_name, ctx);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn finish_blocking_with_new_output_and_finished_marks_delivered() {
+        use crate::core::tools::primitive::BashTaskRegistry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+        let ticket = registry
+            .spawn("echo done; exit 0".to_string(), None, None)
+            .await
+            .expect("spawn");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let (text, delivered) = finish_blocking_with(
+            &registry,
+            &ticket.task_id,
+            0,
+            BlockingWakeKind::NewOutput,
+        )
+        .await
+        .expect("finish_blocking_with");
+        let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+
+        assert_eq!(chunk["wakeReason"], serde_json::Value::String("finished".into()));
+        assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
+        assert!(delivered, "NewOutput + finished must claim Delivered");
+    }
+}

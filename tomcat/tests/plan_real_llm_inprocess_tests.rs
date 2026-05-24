@@ -41,10 +41,8 @@ use std::time::Duration;
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
-use tomcat::api::chat::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, PlanFileMode, TodoStatus,
-};
-use tomcat::api::chat::plan_runtime::PlanMode;
+use tomcat::core::plan_runtime::file_store::{plan_path_for_id, read_plan, PlanFileMode, TodoStatus};
+use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::llm::system_prompt::{
     build_system_prompt_with_state, WorkspaceContext, WorkspaceState,
 };
@@ -200,7 +198,7 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
     let workspace_context = WorkspaceContext {
         agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
         agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
-        agent_plans_dir: tomcat::api::chat::plan_runtime::file_store::plans_dir()
+        agent_plans_dir: tomcat::core::plan_runtime::file_store::plans_dir()
             .map(|path| format_home_path(&path))
             .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),

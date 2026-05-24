@@ -18,9 +18,11 @@ use crate::{
     resolve_workspace_roots_paths,
 };
 
+use crate::core::plan_runtime;
+
 use super::commands::{ChatCommandOutcome, dispatch_chat_command, parse_chat_command};
 use super::context::ChatContext;
-use super::{cli_turn_renderer, events, plan_runtime, preflight};
+use super::{cli_turn_renderer, events, preflight};
 use super::super::render::MarkdownRenderer;
 
 fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
@@ -230,6 +232,27 @@ fn spawn_completion_subscriber(ctx: &ChatContext) -> tokio::task::JoinHandle<()>
     })
 }
 
+fn spawn_readline_waker(
+    signal: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        signal.notified().await;
+        wake_blocking_readline();
+    })
+}
+
+#[cfg(unix)]
+fn wake_blocking_readline() {
+    // `rustyline` 会把 SIGWINCH 转成 `ReadlineError::WindowResized`；借它把阻塞中的
+    // `readline()` 温和唤醒，让 chat loop 立刻进入 auto-drain，而不是等用户再按一次回车。
+    unsafe {
+        libc::raise(libc::SIGWINCH);
+    }
+}
+
+#[cfg(not(unix))]
+fn wake_blocking_readline() {}
+
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
     ensure_session(ctx)?;
 
@@ -257,7 +280,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
         agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
         agent_plans_dir: plan_runtime::file_store::plans_dir()
-            .map(|path| crate::infra::platform::format_home_path(&path))
+            .map(|path| crate::infra::platform::format_home_path(path.as_path()))
             .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
     };
@@ -310,22 +333,36 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let input = if auto_drain {
             String::new()
         } else {
+            let readline_waker = spawn_readline_waker(ctx.follow_up_signal.clone());
             let raw = match rl.readline("u> ") {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {
+                    readline_waker.abort();
                     println!("\n再见！");
                     context_state.preheat.abort();
                     break;
                 }
                 Err(rustyline::error::ReadlineError::Interrupted) => {
+                    readline_waker.abort();
                     continue;
                 }
+                Err(rustyline::error::ReadlineError::WindowResized) => {
+                    readline_waker.abort();
+                    if !ctx.follow_up_queue.lock().is_empty() {
+                        auto_turn_count = 0;
+                        String::new()
+                    } else {
+                        continue;
+                    }
+                }
                 Err(e) => {
+                    readline_waker.abort();
                     eprintln!("输入错误: {}", e);
                     context_state.preheat.abort();
                     break;
                 }
             };
+            readline_waker.abort();
             let trimmed = raw.trim().to_string();
             if trimmed.is_empty() {
                 if !ctx.follow_up_queue.lock().is_empty() {

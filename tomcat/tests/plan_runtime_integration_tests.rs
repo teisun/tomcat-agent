@@ -13,20 +13,18 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tomcat::api::chat::plan_runtime::{
-    ask_question_panel::{
-        Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, Question,
-        QuestionOption, CUSTOM_OPTION_ID,
-    },
-    file_store::{
-        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
-    },
-    mode::PlanMode,
-    review::ReviewSummary,
-    verify::{VerifyCheck, VerifySummary},
-    tools::{create_plan, todos, update_plan},
-    PlanRuntime, ReviewerDispatcher, VerifierDispatcher,
+use tomcat::core::plan_runtime::file_store::{
+    read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
 };
+use tomcat::core::plan_runtime::mode::PlanMode;
+use tomcat::core::plan_runtime::panels::{
+    Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, Question, QuestionOption,
+    CUSTOM_OPTION_ID,
+};
+use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
+use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
+use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
+use tomcat::core::tools::plan_tool::{ask_question, create_plan, todos, update_plan};
 use tomcat::normalize_path;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -98,7 +96,7 @@ impl ReviewerDispatcher for AcceptReviewer {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _kind: tomcat::api::chat::plan_runtime::review::ReviewKind,
+        _kind: ReviewKind,
         _allow_review_edit: bool,
         _abort: Arc<AtomicBool>,
     ) -> ReviewSummary {
@@ -397,7 +395,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
     });
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
-        tomcat::api::chat::plan_runtime::tools::ask_question::execute(
+        ask_question::execute(
             &rt,
             &panel,
             &args,
@@ -447,7 +445,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
     });
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
-        tomcat::api::chat::plan_runtime::tools::ask_question::execute(&rt, &panel, &args, cancel),
+        ask_question::execute(&rt, &panel, &args, cancel),
     )
     .await
     .expect("ask_question cancel 超时（D8 失效）")
@@ -611,7 +609,7 @@ async fn todos_always_writes_session_never_plan_file() {
     // EXEC 期 session todo 也会增长（scratchpad）
     assert_eq!(rt.snapshot_session_todos().len(), n_before + 1);
     // PlanFile.todos 不应被 todos 工具改动
-    use tomcat::api::chat::plan_runtime::file_store::*;
+    use tomcat::core::plan_runtime::file_store::*;
     let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert!(
         !plan.frontmatter.todos.iter().any(|t| t.id == "plan_y"),

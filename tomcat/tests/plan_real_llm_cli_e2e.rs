@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serial_test::serial;
-use tomcat::api::chat::plan_runtime::file_store::{read_plan, PlanFileMode, TodoStatus};
+use tomcat::core::plan_runtime::file_store::{read_plan, PlanFileMode, TodoStatus};
 use tomcat::{
     load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
 };

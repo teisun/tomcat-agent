@@ -23,15 +23,15 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use tomcat::api::chat::plan_runtime::file_store::{
+use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFileMode, TodoStatus,
 };
-use tomcat::api::chat::plan_runtime::tools::{create_plan, todos, update_plan};
-use tomcat::api::chat::plan_runtime::review::{ReviewKind, ReviewSummary};
-use tomcat::api::chat::plan_runtime::verify::{VerifyCheck, VerifySummary};
-use tomcat::api::chat::plan_runtime::{
-    PlanMode, PlanRuntime, ReviewerDispatcher, TodosPanel, TodosPanelSnapshot, VerifierDispatcher,
-};
+use tomcat::core::plan_runtime::mode::PlanMode;
+use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
+use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
+use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
+use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
+use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::core::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
     CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,

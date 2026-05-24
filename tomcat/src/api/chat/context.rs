@@ -18,7 +18,9 @@ use crate::{
     resolve_agent_trail_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
 };
 
-use super::{panels, permission, plan_runtime};
+use crate::core::plan_runtime;
+
+use super::{panels, permission};
 
 pub struct ChatContext {
     pub session: SessionManager,
@@ -137,6 +139,7 @@ impl ChatContext {
             ));
 
         let _ = workspace_roots;
+        let bash_ast = crate::core::permission::BashAstChecker::new(false, vec![], vec![]);
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
             DefaultPrimitiveExecutor::new(
                 config.primitive.clone(),
@@ -144,6 +147,7 @@ impl ChatContext {
                 audit.clone(),
                 gate.clone(),
             )
+            .with_bash_ast(bash_ast.clone())
             .with_write_normalize_crlf(config.tools.write.normalize_crlf),
         );
 
@@ -176,9 +180,18 @@ impl ChatContext {
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
         let last_interrupt_at = Arc::new(Mutex::new(None));
 
-        let bash_task_registry = Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
-            agent_trail_dir.join("tool-results"),
-        ));
+        let bash_task_registry = Arc::new(
+            crate::core::tools::primitive::BashTaskRegistry::new(
+                agent_trail_dir.join("tool-results"),
+            )
+            .with_background_guard(crate::core::tools::primitive::bash_task::BackgroundBashGuard::new(
+                "__agent__",
+                gate.clone(),
+                confirmation.clone(),
+                audit.clone(),
+                bash_ast,
+            )),
+        );
         let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
             Arc::new(Mutex::new(Vec::new()));
         let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
