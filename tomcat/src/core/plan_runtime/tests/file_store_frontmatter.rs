@@ -1,4 +1,7 @@
-use super::*;
+use super::sample_frontmatter;
+use super::super::file_store::{
+    parse_plan_file, serialize_plan_file, PlanError, PlanFile, PlanFileMode, TodoItem, TodoStatus,
+};
 
 #[test]
 fn plan_file_round_trip_frontmatter() {
@@ -20,15 +23,15 @@ fn plan_file_round_trip_frontmatter() {
 
 #[test]
 fn plan_file_round_trip_preserves_unknown_keys() {
-    let mut fm = sample_frontmatter();
+    let mut frontmatter = sample_frontmatter();
     let mut extra = serde_yaml::Mapping::new();
     extra.insert(
         serde_yaml::Value::String("future_field".into()),
         serde_yaml::Value::String("forward-compat".into()),
     );
-    fm.unknown = extra;
+    frontmatter.unknown = extra;
     let plan = PlanFile {
-        frontmatter: fm,
+        frontmatter,
         body: String::new(),
     };
     let text = serialize_plan_file(&plan).unwrap();
@@ -88,14 +91,14 @@ fn plan_file_schema_version_v1_locked() {
 
 #[test]
 fn plan_file_rejects_multiple_in_progress_on_write() {
-    let mut fm = sample_frontmatter();
-    fm.todos.push(TodoItem {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.todos.push(TodoItem {
         id: "t3".into(),
         content: "另一个 in_progress".into(),
         status: TodoStatus::InProgress,
     });
     let plan = PlanFile {
-        frontmatter: fm,
+        frontmatter,
         body: String::new(),
     };
     let err = serialize_plan_file(&plan).expect_err("应拒多个 in_progress");
@@ -107,14 +110,14 @@ fn plan_file_rejects_multiple_in_progress_on_write() {
 
 #[test]
 fn plan_file_rejects_duplicate_todo_ids_on_write() {
-    let mut fm = sample_frontmatter();
-    fm.todos.push(TodoItem {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.todos.push(TodoItem {
         id: "t1".into(),
         content: "dup".into(),
         status: TodoStatus::Pending,
     });
     let plan = PlanFile {
-        frontmatter: fm,
+        frontmatter,
         body: String::new(),
     };
     let err = serialize_plan_file(&plan).expect_err("应拒重复 id");

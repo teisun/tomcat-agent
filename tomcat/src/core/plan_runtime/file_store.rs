@@ -400,5 +400,3 @@ fn next_tmp_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-#[cfg(test)]
-mod tests;

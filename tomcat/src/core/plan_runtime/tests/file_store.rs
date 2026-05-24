@@ -1,4 +1,9 @@
-use super::*;
+use super::{sample_frontmatter, temp_plans_dir};
+use super::super::file_store::{read_plan, write_plan, PlanError, PlanFile, TodoStatus};
+use fs2::FileExt;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 #[test]
 fn write_plan_writes_and_reads_back_atomically() {
@@ -15,9 +20,9 @@ fn write_plan_writes_and_reads_back_atomically() {
 
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    let leftover_tmp: Vec<_> = entries.iter().filter(|s| s.contains(".tmp.")).collect();
+    let leftover_tmp: Vec<_> = entries.iter().filter(|name| name.contains(".tmp.")).collect();
     assert!(
         leftover_tmp.is_empty(),
         "tmp 文件不应残留：{leftover_tmp:?}"
@@ -68,17 +73,17 @@ fn plan_file_lock_timeout_returns_lock_busy() {
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let started_signal = Arc::clone(&started);
     let handle = std::thread::spawn(move || {
-        let f = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(&lock_path_clone)
             .unwrap();
-        f.lock_exclusive().unwrap();
+        file.lock_exclusive().unwrap();
         started_signal.store(true, Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(600));
-        let _ = FileExt::unlock(&f);
+        let _ = FileExt::unlock(&file);
         let _ = holder;
     });
     while !started.load(Ordering::Relaxed) {
@@ -108,10 +113,10 @@ fn plan_file_lock_is_exclusive_serialized_via_lock() {
         body: "## A\n".into(),
     };
     let plan2 = {
-        let mut fm = sample_frontmatter();
-        fm.todos[0].status = TodoStatus::Completed;
+        let mut frontmatter = sample_frontmatter();
+        frontmatter.todos[0].status = TodoStatus::Completed;
         PlanFile {
-            frontmatter: fm,
+            frontmatter,
             body: "## B\n".into(),
         }
     };

@@ -1,4 +1,4 @@
-use super::*;
+use super::super::file_store::{plan_path_for_id, PlanError};
 
 #[test]
 fn plan_path_for_id_rejects_unsafe() {
