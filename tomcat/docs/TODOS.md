@@ -4,7 +4,7 @@
 >
 > 组织方式：**先按领域分类，再在每条上标注档位（P0-P9）**；同档位内用「紧急度标签」`[BUG]/[UX]/[REF]/[DOC]` 做二次排序。
 >
-> 最近更新：2026-05-07（`#T-132` 已实现关闭；T2-P0-003 进入流式超时实现阶段）
+> 最近更新：2026-05-24（对照 `develop` 代码与 002 看板：移除已实现项 22 条、规划冲突/取消项 3 条）
 
 ---
 
@@ -42,14 +42,11 @@
 
 ## 优先级速查（P0-P9）
 
-### P0 — 单 Agent 基础体验（~37 条）
+### P0 — 单 Agent 基础体验（~19 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 | T2 映射 |
 |------|------|------|-----------|---------|
 | T-002 | Bug | 三套管道混乱需重构 | 技术债，功能未损坏 | T2-P0-009 |
-| T-003 | 交互/TUI | 工具输出过程中无法中断 | 执行期间用户无法中断 | T2-P0-007 |
-| T-004 | 交互/TUI | 中断时丢弃 LLM 已回复内容 | 已接收内容不应丢失 | T2-P0-007 |
-| T-007 | 交互/TUI | 大任务中断后应记得上下文 | 中断恢复 | T2-P0-007 |
 | T-008 | 交互/TUI | workspace 没切换到当前目录 | shell `cwd` 未生效 | T2-P0-005 / T2-P0-004 |
 | T-009 | 交互/TUI | user turn list 显示 | TUI 信息展示 | T2-P0-008 |
 | T-010 | 交互/TUI | 状态总览 | TUI 信息展示 | T2-P0-008 |
@@ -57,67 +54,25 @@
 | T-012 | 交互/TUI | 编辑模式美化 | 视觉/美观 | T2-P0-008 |
 | T-013 | 交互/TUI | user content 可重新输入 | 编辑/重发 | T2-P0-008 |
 | T-014 | 交互/TUI | diff 视图 | 增删行数可见 | T2-P0-008 |
-| T-017 | 交互/TUI | 中断 loop 时 transcript 要记录 | 数据完整性 | T2-P0-007 |
-| T-018 | Agent Loop | Agent loop 模块拆分重构 | 832 行拆分 | T2-P0-001 |
-| T-019 | Agent Loop | Dispatcher 分模块 | 同 T-018 | T2-P0-001 |
-| T-020 | Agent Loop | 长任务阻塞主线程 | 后台化 | T2-P0-010 |
-| T-033 | 工具 | Bash 授权类型错误（FS → Exec） | 授权类型错配 | T2-P0-005 |
-| T-034 | 工具 | 工具描述清单 | 影响 LLM 工具选择质量 | T2-P0-005 |
 | T-035 | 工具 | 默认不用子进程工具创建目录 | 可通过 prompt 调优缓解 | T2-P0-005 |
 | T-036 | 工具 | Chat 不访问当前目录也不申请授权 | 不尝试访问也不弹授权 | T2-P0-005 |
 | T-037 | 工具 | 无法在规划中执行 tomcat CLI 命令 | 规划模式约束 | T2-P0-005 |
 | T-039 | 工具 | 拦截删除换成归档 | 安全增强 | T2-P0-005 |
-| T-152 | 工具 | 内置 `search_files` 只读工具 | 单入口支持内容搜索与文件名 glob，依赖系统 `rg`/`fd` | T2-P1-008 |
 | T-153 | 工具/Web | 按架构文档实现 `web_search` + `web_fetch` | 契约与路线图见 [`docs/architecture/tools/web_search.md`](architecture/tools/web_search.md)、[`docs/architecture/tools/web_fetch.md`](architecture/tools/web_fetch.md)（含 PR-WS-* / PR-WF-*、`openai-responses` 门闩、§2.4.2.1 HTTP 上游字段、cc-fork/hermes/openclaw 对标）；认领时把文档验收矩阵与 `src/core/tools/web_*` 单测对齐；晋升正式卡可走 **T2-P1-007** 或另拆 T2 子任务 | T2-P1-007（占位） |
-| T-040 | 上下文 | 超大文件处理崩溃 | compaction 崩溃 | T2-P0-002（**关闭归并 2026-04-26**：Layer 0 + Phase D 已覆盖） |
-| T-041 | 上下文 | 压缩任务失败重试 | 可靠性 | T2-P0-002 |
-| T-043 | 工具/原语 | 大文件多次编辑写入 | **DONE 2026-05-08**（`edit`/`hashline_edit` + read 戳 + catalog/`system_prompt`；见下方「P0 已实现」表与 [edit.md](architecture/tools/edit.md) / [write.md](architecture/tools/write.md)） | T2-P0-011 |
-| T-044 | 上下文 | 摘要先写草稿再输出正文 | Two-pass | T2-P0-002（**报告决议关闭 2026-04-26**：详见 [`docs/reports/compaction-prompt-cc-vs-pi.md §5.7.1`](reports/compaction-prompt-cc-vs-pi.md#571-two-pass-summary-不实施决议固化关闭-t-044)） |
 | T-046 | 权限 | 工作目录读写授权分级缺失 | 读/写权限未分级 | T2-P0-004 |
-| T-047 | 权限 | 非工作目录操作被直接拒绝而非申请授权 | 直接 403 | T2-P0-004 |
-| T-048 | 权限 | 给工作目录加别名和描述 | 体验优化 | T2-P0-004 |
 | T-050 | 权限 | Bash 访问目录限制和授权 | 解析命令限制 | T2-P0-004 |
 | T-051 | 权限 | 工作目录说话就可以改配置 | 便捷性 | T2-P0-004 |
-| T-071 | LLM | 接入 thinking API + 展示 | 思考链路 | T2-P0-006 |
-| T-101 | 规范 | 耗时操作后台化写入规范 | 关联 T-020 | T2-P0-010 |
-| T-132 | LLM | `stream_timeout_sec` 接入 tokio 超时 | stream 超时 | T2-P0-003 |
-| T-136 | 上下文 | 摘要 prompt 9 节模板升级 | 对齐 CC | T2-P0-002 |
-| T-137 | 上下文 | Compaction 禁 tools 调用 | 首行声明 | T2-P0-002 |
-| T-145 | 文档 | `docs/tool-catalog.md` 产出 | 工具描述文档 | T2-P0-005 |
+| T-148 | 权限 | `tomcat pathrules remove` CLI | T2-P0-004 follow-up | T2-P0-004 |
+| T-149 | 权限 | chat `/reload` 配置热加载 | T2-P0-004 follow-up | T2-P0-004 |
+| T-150 | 权限 | path_rules 双层存储（builtin + TOML） | T2-P0-004 follow-up | T2-P0-004 |
 
-#### P0 已实现（2026-04-19 / 2026-04-22 核对）
-
-| 编号 | 结论 | 依据 |
-|------|------|------|
-| T-005 | Ctrl+D 退出已可用；`/exit` 字符串命令未实现（按需可另开增强） | `src/api/chat/mod.rs` |
-| T-006 | 主路径已使用 `chat_stream` + `StreamEvent::ToolCallDelta` | `src/core/agent_loop/run.rs` |
-| T-024 | `append_message` 持久化 new_messages；`append_message_chain` 做 tool_calls ↔ tool 链校验 | `src/api/chat/mod.rs` |
-| T-038 | 系统提示词含 `WorkspaceContextSection`（`Current working directory: {workspace_dir}`） | `src/core/llm/system_prompt.rs` |
-| T-072 | 主路径已流式；残余「流式超时」合并到 T-132 | `src/core/llm/openai.rs` |
-| T-020 | Bash **后台路径** `run_in_background=true`：立即返票 + `tokio::spawn` 泵日志，主 tool 轮不 `await` 子进程结束；同步路径仍单轮阻塞（`timeout_ms`） | `src/core/agent_loop/tool_exec.rs`、`src/core/tools/primitive/bash_task.rs`；**T2-P0-016 PR-I**；[bash.md](architecture/tools/bash.md) §2.4.4 |
-| T-101 | 「耗时操作后台化」已写入 **bash.md**（多轮 LLM + `task_*`）；未另建 `coding-style.md` 专章，可节选迁入 `Codeing&Architecture_Spec.md` | 同上 **bash.md** |
-| T-043 | 大文件：**优先 `edit`/`edits[]`/`hashline_edit` + read 戳**；`write` 仅新文件或整文件重写（catalog + `system_prompt`）；**未**做 `write` 超大 `content` 软 hint 配置 | `catalog.rs`、`src/core/llm/system_prompt.rs`、**T2-P0-017**、[edit.md](architecture/tools/edit.md)、[write.md](architecture/tools/write.md) |
-
-### P1 — 状态管理（~12 条）
+### P1 — 状态管理（~0 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 | T2 映射 |
 |------|------|------|-----------|---------|
-| T-015 | 计划 | Plan 模式执行面板 | | T2-P1-002 |
-| T-032 | 会话 | 回滚操作 | 合并到 Checkpoint | T2-P1-001 |
-| T-042 | 上下文 | Checkpoint 机制 | 需先设计数据模型 | T2-P1-001 |
-| T-085-plan | 计划 | 任务看板先写草稿 | Agent 输出策略 | T2-P1-002 |
-| T-086 | 计划 | Plan 模式增强（review 子 Agent） | | T2-P1-002 |
-| T-087 | 计划 | 更新计划时文件锁 | | T2-P1-002 |
-| T-089-plan | 计划 | 计划过程中记录进展 | | T2-P1-002 |
-| T-090-plan | 计划 | 提问/应答机制 | Agent 向用户提问 | T2-P1-003 |
-| T-091 | 计划 | 拆里程碑拆任务 | | T2-P1-002 |
-| T-092 | 计划 | 红绿灯测试机制 | | T2-P1-004 |
-| T-097 | 系统提示词 | 模板和系统提示词章节 | | T2-P1-004 借用 |
-| T-102 | 规范 | 集成测试也要负责修复代码 | 流程规范 | T2-P1-006 |
+| — | — | （无开放条目） | Plan / Checkpoint / 集成规范 / Review 相关 T2 均已 DONE | — |
 
-> `T-146 Feedback 回路` 见新增条目区；对应 T2-P1-005。
-
-### P2 — Skill 系统（~4 条）
+### P2 — Skill 系统（~5 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
@@ -125,6 +80,7 @@
 | T-115 | 研究/Skill | 对比 openclaw 的 skill 系统 | 升档自 P3 |
 | T-138 | Skill | Skill 注册/发现机制 | 新增 |
 | T-139 | Skill | Skill 工作流引擎 | 新增 |
+| T-147 | 研究/安全 | 自我攻击/自我安全进化机制设计 | P2 研究；不阻塞 002 |
 
 ### P3 — 系统提示词 + 记忆（~10 条）
 
@@ -141,7 +97,7 @@
 | T-140 | 记忆 | USER.md 加载注入 | 新增 |
 | T-141 | 记忆 | MEMORY.md 加载注入 | 新增 |
 
-### P4 — 自进化 / 学习（~12 条）
+### P4 — 自进化 / 学习（~10 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
@@ -155,8 +111,6 @@
 | T-113 | 研究 | coworker | |
 | T-116 | 研究 | 对比 CC 对 MCP 调用的优化 | |
 | T-118 | 愿景 | 每天 surprise me、每周 big surprise idea | 学习灵感 |
-| T-142 | 自进化 | 学习回路（Feedback → SKILL/MEMORY 增量） | 新增 |
-| T-146 | 反馈 | Feedback 回路落盘（为 P3/P4 铺垫） | 新增，目前在 P1 实作 |
 
 ### P5 — 多 Agent + 安全 + 多会话（~30 条）
 
@@ -248,7 +202,6 @@
 | T-096-mem | 记忆/愿景 | 用户兴趣推送 | 长期 |
 | T-100-dev | 规范 | 编码规范增加面向对象思想 | 与 UI 无关但远期打磨 |
 | T-131 | Agent Loop | 可选 ToolLoopGuard / tool-loop-detection | 本期不做；依赖 `max_tool_rounds` + 上下文预算兜底；规格 TODO 见 `docs/architecture/context-management.md` 6.7 段 | 无 T2 映射（远期） |
-| T-135 | 规范/文档 | Product_Brief 产品级 TODO（已执行：本次改造） | 本次关闭 |
 
 ---
 
@@ -266,28 +219,6 @@
 ---
 
 ## 二、交互体验 / TUI
-
-- [x] **[P0] `[UX]`** `#T-003` 工具输出过程中无法中断
-  - **核对 2026-04-22**：`AgentLoop::run` 全流式 / 工具 await 由 `tokio::select!` + `CancellationToken` 可取消；Ctrl+C 软中断 soft-cancel 当前 turn，`execute_bash` 子进程通过 `tokio::process::Command::kill_on_drop(true)` 被 Drop 时终止
-  - 架构：[interrupt-and-cancellation.md](../docs/architecture/interrupt-and-cancellation.md)
-  - 代码：`src/core/agent_loop/run.rs`、`src/api/chat/mod.rs`、`src/api/cli/chat_cmd.rs`
-  - 档位：T2-P0-007
-
-- [x] **[P0] `[UX]`** `#T-004` 中断时不应丢弃 LLM 已回复的内容
-  - **核对 2026-04-22**：`AgentRunOutcome::Interrupted` 与 `Completed` 走同一持久化路径；partial assistant delta 收入 `AgentRunResult.new_messages`；`chat_loop` 对两者调用同一 `SessionManager::append_message` 链
-  - 代码：`src/core/agent_loop/types.rs`（`AgentRunOutcome`）、`src/core/agent_loop/run.rs`（`make_aborted` 保留 `start_idx..` partial）
-  - 档位：T2-P0-007
-
-- [x] **[已实现核心退出路径]** `#T-005` chat 不能退出，没有退出命令
-  - **核对 2026-04-19**：`chat_loop` 在 Ctrl+D（EOF）时正常 `break`；启动时打印提示
-  - 关联：`src/api/chat/mod.rs`
-
-- [x] **[已实现主路径]** `#T-006` 流式输出问题
-  - **核对 2026-04-19**：AgentLoop 使用 `chat_stream`，`StreamEvent`（含 `ToolCallDelta`）
-  - **残留**：LLM 侧流式超时 → `#T-132`
-
-- [ ] **[P0] `[UX]`** `#T-007` 大任务卡很久没输出，中断后应能记得上下文
-  - 档位升档自 P1：与 T-003/T-004/T-017 成组做进 T2-P0-007
 
 - [ ] **[P0] `[BUG]`** `#T-008` tomcat chat 模式下 workspace 没有切换到当前目录
   - 关联模块：`src/api/chat/`
@@ -313,35 +244,14 @@
 - [ ] **[P0] `[UX]`** `#T-014` 每个文件增加和删减的行数和内容可见（diff 视图）
   - 档位：T2-P0-008
 
-- [ ] **[P1] `[UX]`** `#T-015` plan 模式待办和进行中，执行面板（UI + bash）
-  - 档位：T2-P1-002
-
 - [ ] **[P3] `[UX]`** `#T-016` 上下文管理视图
   - 目前的上下文每个实体情况
   - 每个 userturn 的 toolresult 总量和被调阅次数
   - 档位：与 P3 记忆 + 系统提示词一起考虑
 
-- [x] **[P0] `[BUG]`** `#T-017` 中断智能体 loop 时 transcript 要记录
-  - **核对 2026-04-22**：`chat_loop` 在 `Interrupted` 分支同样执行 `agent_loop.take_context_state()` + `ctx.session.append_message` + `persist_context_observability`；partial assistant 与已完成的 tool_result 均落 JSONL
-  - 硬验收：`src/api/chat/tests.rs::interrupt_persists_transcript_hard_ack`
-  - 档位升档自 P1：并入 T2-P0-007
-
 ---
 
 ## 三、Agent Loop 与核心循环
-
-- [ ] **[P0] `[REF]`** `#T-018` Agent loop 模块代码太多，需拆分重构
-  - 档位升档自 P1：T2-P0-001
-  - 关联模块：`src/core/agent_loop/`
-
-- [ ] **[P0] `[REF]`** `#T-019` Dispatcher 太大，要分模块
-  - 档位升档自 P1：T2-P0-001（或 T2-P0-009）
-  - 关联模块：`src/ext/dispatcher/`
-
-- [x] **[已实现] `#T-020`** 执行 Bash 长任务可走后台，不占用当前 tool 轮等子进程结束
-  - **2026-05-08**：`run_in_background=true` + `BashTaskRegistry` + `task_output` / `task_stop` / `task_list`；规范见 [bash.md](architecture/tools/bash.md)。初版卡片中的泛型 `LongRunningTask` / `EventBus::TaskProgress` **未**实现。
-  - 档位：T2-P0-010（**DONE**，交付归并 **T2-P0-016**）
-  - 关联：`#T-101`
 
 - [ ] **[P5] `[REF]`** `#T-021` 任务开始前先做好信息搜集和评估
   - Agent 行为优化，依赖多 Agent 子流程
@@ -359,10 +269,6 @@
 ---
 
 ## 四、会话管理
-
-- [x] **[已实现]** `#T-024` 工具调用没有写入会话记录
-  - **核对 2026-04-19**：`agent_loop.run` 的 `new_messages`（含 assistant `tool_calls`、`tool` 角色结果）经 `session.append_message` 写入 transcript
-  - 关联：`src/api/chat/mod.rs`、`src/core/session/`
 
 - [ ] **[P5] `[REF]`** `#T-025` 无法多 session
   - 档位：多 Agent 同档落地
@@ -384,18 +290,9 @@
 - [ ] **[P3] `[REF]`** `#T-031` 会话上下文可配置
   - 当前会话、父会话、智能体记忆三级可选
 
-- [ ] **[P1] `[REF]`** `#T-032` 回滚操作
-  - 档位：并入 T2-P1-001 Checkpoint
-
 ---
 
 ## 五、工具系统
-
-- [ ] **[P0] `[BUG]`** `#T-033` Bash 没有申请授权，为什么是 FS
-  - 授权类型不匹配的 bug → T2-P0-005
-
-- [ ] **[P0] `[REF]`** `#T-034` 工具描述清单
-  - T2-P0-005；产出 `docs/tool-catalog.md`
 
 - [ ] **[P0] `[BUG]`** `#T-035` 默认不会用 tomcat 子进程工具创建目录
   - T2-P0-005
@@ -408,48 +305,18 @@
 - [ ] **[P0] `[UX]`** `#T-037` 无法在规划中执行 tomcat CLI 命令
   - 档位：T2-P0-005
 
-- [x] **[P1] `[UX]`** `#T-152` 内置 `search_files` 只读工具
-  - 目标：让 LLM 用一个工具完成内容搜索与文件名 glob 搜索，减少退回 `execute_bash + grep/find` 的授权与解析成本。
-  - 档位：T2-P1-008
-  - 关联模块：`src/core/tools/catalog.rs`、`src/core/tools/primitive/`、`src/core/agent_loop/tool_exec.rs`
-  - 核对 2026-05-02：已实现 catalog / executor / tool_exec / system prompt / docs/tool-catalog.md / 集成测试；缺 `rg`/`fd` 返回安装指引。
-
-- [ ] **[P0] `[UX]`** `#T-147` 增加一个工具 `ASK_Question`
-  - 目标：支持智能体在流程中向用户发起结构化提问/确认
-  - 档位：待映射（工具系统能力增强）
-
-- [x] **[已实现]** `#T-038` Agent 不知道自己有什么工作目录
-  - **核对 2026-04-19**：`WorkspaceContextSection` 注入当前目录语义；现行实现明确 `agent_workspace_dir` 只是当前目录/相对路径解释基准，不自动授权文件访问。
-
 - [ ] **[P0] `[BUG]`** `#T-039` 拦截删除操作，换成归档操作
   - 档位：T2-P0-005
+
+- [ ] **[P0] `[REF]`** `#T-153` 按架构文档实现 `web_search` + `web_fetch`
+  - 契约与路线图见 [`web_search.md`](architecture/tools/web_search.md)、[`web_fetch.md`](architecture/tools/web_fetch.md)（含 PR-WS-* / PR-WF-*、`openai-responses` 门闩、§2.4.2.1 HTTP 上游字段、cc-fork/hermes/openclaw 对标）
+  - 认领时把文档验收矩阵与 `src/core/tools/web_*` 单测对齐
+  - 档位：T2-P1-007（占位）；晋升正式卡可走 T2-P1-007 或另拆 T2 子任务
+  - 关联模块：`src/core/tools/`（待建 `web_*`）
 
 ---
 
 ## 六、上下文管理与压缩
-
-- [-] **[P0] `[BUG]`** `#T-040` 超大文件处理 — **关闭归并**（`2026-04-26`）
-  - 超过 800K 字符、超过预算的大文件
-  - 档位：T2-P0-002（不单立子项实施）
-  - 关联模块：`src/core/compaction/`
-  - **决议（plan T2-P0-002 §6.C）**：核实代码后确认 [`preheat.rs::messages_to_text`](../src/core/compaction/preheat.rs) 对 User/Assistant 不做切片，**不存在字符边界 panic**；现有 Layer 0（>=50K Tool 消息落盘 + 200 字 preview）已覆盖主路径；剩余风险（拼出超长 batch_text 让 LLM 返回 `context_length_exceeded`）由 Phase D 退避 + transcript 失败留痕直接承接，用户视角是「ratio 高 + 一条 fail entry」，不 panic / 不 abort，可接受。详见 [报告 §5.7 Anti-goals](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 2 行。
-
-- [ ] **[P0] `[BUG]`** `#T-041` 压缩任务的失败重试
-  - 档位：T2-P0-002
-  - 关联模块：`src/core/compaction/apply.rs`
-
-- [ ] **[P1] `[REF]`** `#T-042` Checkpoint 机制
-  - 档位：T2-P1-001
-
-- [x] **[已实现] `#T-043`** 更新大文件时偏好多次精确 `edit`（含 `edits[]` / `hashline_edit`）而非整文件 `write` 大 `content` — **改判归属 2026-04-26，DONE 2026-05-08**
-  - 档位：~~T2-P0-002~~ → **T2-P0-011**（本卡 DONE；交付归 **T2-P0-016 catalog** + **T2-P0-017 edit** + `src/core/llm/system_prompt.rs`）
-  - 关联：`src/core/tools/primitive/executor/write_edit.rs`、`contract/catalog.rs`、`src/core/llm/system_prompt.rs`（**不在 compaction 路径**）
-  - **决议**：与 [报告 §5.7](reports/compaction-prompt-cc-vs-pi.md#57-明确不做的事项anti-goals) 第 3 行一致。初版 **方案 ②**（`write` 超阈 hint + 配置项）**未**采用；以 **read 戳 + Stale/NoPriorRead + 多段 edit** 替代。结论与叙事以 [edit.md](architecture/tools/edit.md)、[write.md](architecture/tools/write.md) 为 SSoT（**不**另建 `agents/plan` 短文）。专立 **1MB E2E** 仍可选未写。
-
-- [-] **[P0] `[REF]`** `#T-044` 摘要先写分析草稿思考，再输出摘要正文 — **报告决议关闭**（`2026-04-26`）
-  - 档位升档自 P2：T2-P0-002
-  - 关联模块：`src/core/compaction/preheat.rs`
-  - **决议（plan T2-P0-002 Phase A）**：CC 通过 fork 子代理 + prompt cache 抵消草稿成本，tomcat 单次 LLM 直发，多一轮草稿 = 输出 token 翻倍 + 撞 max_tokens 上限，性价比不好；改为在两个 prompt 模板（`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT`）的指令区追加 `First reason internally, then output the final summary.` 做隐式诱导。详见 [报告 §5.7.1 Two-pass 决议固化](reports/compaction-prompt-cc-vs-pi.md#571-two-pass-summary-不实施决议固化关闭-t-044)（plan Phase A 落地）。
 
 - [ ] **[P3] `[REF]`** `#T-045` Token 节省机制
   - 工具结果用完 2 轮后落盘/删除
@@ -462,12 +329,6 @@
 
 - [ ] **[P0] `[BUG]`** `#T-046` 工作目录下读文件不需要授权，写文件可以授权（always / 单次）
   - 档位：T2-P0-004
-
-- [ ] **[P0] `[BUG]`** `#T-047` 非工作目录下所有操作需显式授权，不要直接拒绝
-  - 档位：T2-P0-004
-
-- [ ] **[P0] `[UX]`** `#T-048` 给工作目录加别名和描述
-  - 档位升档自 P2：T2-P0-004
 
 - [ ] **[P5] `[REF]`** `#T-049` 额外的工作目录需要区分 agent
   - 依赖多 Agent
@@ -556,19 +417,7 @@
 
 ## 九、LLM 接入与 Thinking
 
-- [ ] **[P0] `[UX]`** `#T-071` 接入 thinking API
-  - 档位升档自 P1：T2-P0-006
-  - 思考过程可全部显示也可折叠；怎么接思考 API；怎么展示
-  - 关联模块：`src/core/llm/`
-  - 关联报告：[llm-tool-rounds-cli-display-thinking-protocol.md](reports/llm-tool-rounds-cli-display-thinking-protocol.md)
-
-- [x] **[已实现主干]** `#T-072` 流式输出修复
-  - **核对 2026-04-19**：推理主路径 `chat_stream`；后续空闲超时补强见 `#T-132`
-
-- [x] **[P0] `[BUG]`** `#T-132` `stream_timeout_sec` 接入流式空闲超时
-  - **核对 2026-05-07**：`openai.rs` / `openai_responses/mod.rs` 在 bytes 层接入 `tokio_stream::StreamExt::timeout`；`stream_timeout_sec==0` 语义统一为关闭；超时错误固定为 `流式空闲超时: stream_timeout_sec=<n>s`（可被 classify_error 归类为 Retryable）
-  - 测试：`openai_stream_test` 与 `openai_responses_test` 新增无字节超时、keepalive 不误超时用例
-  - 档位：T2-P0-003
+> T-071（Thinking API + TUI 展示）已随 **T2-P0-006** 落地（`develop.md` 2026-05-08）；本区暂无开放条目。
 
 ---
 
@@ -594,31 +443,8 @@
 
 ## 十一、计划与任务管理
 
-- [ ] **[P1] `[UX]`** `#T-085-plan` 任务看板先写草稿再输出正式文档
-  - 档位：T2-P1-002
-
-- [ ] **[P1] `[REF]`** `#T-086` Plan 模式增强
-  - Planner 列计划；另一个无上下文污染的 agent review
-  - 档位：T2-P1-002
-
-- [ ] **[P1] `[REF]`** `#T-087` 更新计划时文件不可编辑（锁机制）
-  - 档位：T2-P1-002
-
 - [ ] **[P5] `[REF]`** `#T-088` 计划里的耗时任务可并行
   - 依赖多 Agent / 异步执行基础设施
-
-- [ ] **[P1] `[REF]`** `#T-089-plan` 计划过程中记录进展
-  - 档位：T2-P1-002
-
-- [ ] **[P1] `[UX]`** `#T-090-plan` 提问/应答机制
-  - 档位：T2-P1-003
-
-- [ ] **[P1] `[REF]`** `#T-091` 拆里程碑拆任务
-  - 每个任务/功能开一个上下文窗口
-  - 档位：T2-P1-002
-
-- [ ] **[P1] `[REF]`** `#T-092` 红绿灯测试机制
-  - 档位：T2-P1-004
 
 ---
 
@@ -638,10 +464,6 @@
 
 ## 十三、系统提示词与模板
 
-- [ ] **[P1] `[REF]`** `#T-097` 模板和系统提示词章节
-  - 档位：T2-P1 中随 review 子流程一并清理
-  - 关联模块：`src/core/system_prompt.rs`
-
 - [ ] **[P3] `[REF]`** `#T-098` 系统提示词文件化
   - 可供大模型修改
 
@@ -654,20 +476,9 @@
 - [ ] **[P9] `[DOC]`** `#T-100-dev` 编码规范增加面向对象思想优先
   - 档位：远期规范打磨
 
-- [x] **[已实现] `#T-101`** 耗时 Bash 后台化已写入 [bash.md](architecture/tools/bash.md)（SSoT）
-  - **2026-05-08**：与 `#T-020` 同批 closure；若需「编码规范总册」专章，可从 bash.md 摘录迁入 `openspec/specs/guides/coding/Codeing&Architecture_Spec.md`。
-  - 档位：T2-P0-010（DONE）
-  - 关联：`#T-020`
-
-- [ ] **[P1] `[DOC]`** `#T-102` 集成测试也要负责修复代码
-  - 档位：T2-P1-006
-
 - [ ] **[P4] `[REF]`** `#T-103` 自举的 AI 编程智能体设计
   - 档位：P4 自进化愿景
   - 极简可读自主进化，少即是多；会话上下文可配置；主要功能插件、用户功能插件、会话级插件
-
-- [x] **[已关闭] `#T-135`** Product_Brief 产品级 TODO
-  - 本次（2026-04-22）改造已落地：Product_Brief 改写为 P0-P9 路线图
 
 ---
 
@@ -757,17 +568,12 @@
 
 | 编号 | 档位 | 条目 | 来源 / 关联 |
 |------|------|------|-------------|
-| T-136 | P0 | 摘要 prompt 升级为 9 节模板 | [compaction-prompt-cc-vs-pi.md](reports/compaction-prompt-cc-vs-pi.md) §5.3/§5.4 → T2-P0-002 |
-| T-137 | P0 | Compaction `ChatRequest` 显式禁 tools + 首行禁工具声明 | 同上 → T2-P0-002 |
 | T-138 | P2 | Skill 注册/发现机制 | [plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) §4 |
 | T-139 | P2 | Skill 工作流引擎（串/并/评审） | 同上 §5 |
 | T-140 | P3 | USER.md 加载注入 | 参考 claude-code；个性化规则 |
 | T-141 | P3 | MEMORY.md 加载注入 | 跨会话长程记忆 |
-| T-142 | P4 | 自进化学习回路（从 Feedback 生成 SKILL/MEMORY 增量） | 参考 [hermes-agent](../../hermes-agent/) |
 | T-143 | P8 | 多 LLM 适配层（Anthropic / Gemini / local-llm） | `src/core/llm/` 解耦 |
 | T-144 | P8 | IM 网关（Telegram / Slack / 企微 / 邮件 / Webhook） | 新增 |
-| T-145 | P0 | `docs/tool-catalog.md` 工具描述文档 | T2-P0-005 子项 |
-| T-146 | P1 | Feedback 回路（session.feedback.jsonl） | T2-P1-005；为 P3/P4 铺垫 |
 
 ### 同步变更（本次改造一并完成）
 
@@ -787,7 +593,6 @@
 | T-149 | P0 | chat `/reload` 配置热加载 | T2-P0-004 原 PR-11；暂不实施 |
 | T-150 | P0 | path_rules 双层存储（builtin 常量 + TOML 可见性段） | T2-P0-004 PR-1/PR-5 follow-up；当前仅常量 |
 | T-151 | P5 | Bash 动态路径访问与提示词注入防御 | gate-root-remediation follow-up；`bash_parser` 对运行时拼接路径只能尽力解析 |
-| T-152 | P1 | 内置 `search_files` 只读工具 | T2-P1-008；对齐 Cursor Search files/folders 体验 |
 | T-153 | P0 | `web_search` + `web_fetch` 按 [`web_search.md`](architecture/tools/web_search.md) / [`web_fetch.md`](architecture/tools/web_fetch.md) 落地 | T2-P1-007 占位；HTTP 字段见 web_search §2.4.2.1 |
 
 ---
@@ -807,19 +612,17 @@
 
 | 档位 | 条目数（估） | 说明 |
 |------|--------------|------|
-| **P0** | ~41 | 单 Agent 基础体验；全部映射到 002 T2-P0-001~010；含 T-148/T-149/T-150（2026-04-27 新增）、T-153（2026-05-07） |
-| **P1** | ~13 | 状态管理；全部映射到 002 T2-P1-001~007 |
+| **P0** | ~19 | 单 Agent 基础体验；开放 T2：T2-P0-008/009；含 T-148/T-149/T-150 follow-up、T-153（web 工具） |
+| **P1** | ~0 | 状态管理；Plan/Checkpoint/集成规范相关 T2 均已 DONE |
 | **P2** | ~5 | Skill 系统（T-114/T-115/T-138/T-139）+ 安全研究（T-147） |
 | **P3** | ~10 | 系统提示词 + 记忆 |
-| **P4** | ~12 | 自进化 / 学习 / 业界研究 |
+| **P4** | ~10 | 自进化 / 学习 / 业界研究（T-142/T-146 已取消） |
 | **P5** | ~35 | 多 Agent + 安全 + 多会话 |
 | **P6** | ~12 | 插件系统（冻结，仅维护） |
 | **P7** | ~4 | 跨平台 |
 | **P8** | ~5 | 多 IM / 多 LLM 适配 |
 | **P9** | ~11 | UI / 远期愿景 / 阅读 |
-| **已实现** | 5 | T-005/T-006/T-024/T-038/T-072（2026-04-19 核对） |
-| **已关闭** | 1 | T-135（本次随改造关闭） |
-| **合计** | **~147** | 含 T-136~T-146 新增 11 条；T-147~T-152 新增 6 条；T-153 新增 1 条 |
+| **合计** | **~104** | 详细清单 `[ ]` 条目数（2026-05-24 代码核对后；含 T-153 恢复） |
 
 ### 与前一版（P0-P5 紧急度档）变更一览
 

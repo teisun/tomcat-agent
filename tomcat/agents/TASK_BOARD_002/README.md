@@ -1,8 +1,8 @@
 # 任务总看板 — 002-single-agent-complete
 
-> 当前迭代：**单 Agent 完善期**。本看板同时承载迭代立项（目标/不做范围/验收/风险）与执行调度，不再拆分 `openspec/changes/00X` 四件套。
+> 当前迭代：**单 Agent 完善期**。本看板同时承载迭代立项（目标/不做范围/验收/风险）与**仍开放**任务的执行调度。
 >
-> 历史迭代已归档，本看板只聚焦当前迭代的立项与执行。
+> **已完成 / 已取消**的 T2 任务卡已从本索引移除，历史见 Git（`agents/TASK_BOARD_002/tasks/` 提交记录）。
 
 ---
 
@@ -20,82 +20,34 @@
 | **DOING** | 开发中（已认领） |
 | **PENDING_INTEGRATION** | 等待集成测试与合并：工程师已在功能分支按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成集成与 E2E 全量验收并推送；等待 Nibbles 合并入 develop 并复核通过 |
 | **BLOCKED** | 阻塞（需在「阻塞点」中说明原因） |
-| **DONE** | 已完成（含集成测试通过） |
 
-**典型流转**：`TODO → DOING → PENDING_INTEGRATION → DONE`。阻塞时可为 `DOING` / `PENDING_INTEGRATION` → `BLOCKED` → `DOING` / `PENDING_INTEGRATION`。仅状态为 `TODO` 且负责人为空的任务可被认领；`PENDING_INTEGRATION` 表示已交集成、不可认领。
+**典型流转**：`TODO → DOING → PENDING_INTEGRATION → DONE`（完成后自本索引移除，仅留 Git 历史）。仅状态为 `TODO` 且负责人为空的任务可被认领。
 
 ---
 
+## 4. 任务索引（开放中）
 
-## 4. 任务索引
+按 P0 → P1 排序。认领时先读本节，再打开对应 `tasks/T2-*.md`。
 
-按 P0 → P1 与依赖排序；**T2-P0-003** 在**全部其它 T2-P0-00x 完成之后**再排期（末位调度）。认领时先读本节索引，再打开对应 `tasks/T2-*.md`；**状态以任务文件内为准**。
-
-**门禁口径**（避免各任务卡重复粘贴长命令）：fmt/clippy、分类集成与全量验收以 [INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 / §7.2 / §7.4）为准；E2E 见 [E2E_TEST_SPEC.md](../../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。integration 二进制分组以 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 为准；交付前更新分组见 [Dispatcher §5](../Dispatcher.md)。
+**门禁口径**：fmt/clippy、分类集成与全量验收以 [INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)（§7.1 / §7.2 / §7.4）为准；E2E 见 [E2E_TEST_SPEC.md](../../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。integration 二进制分组以 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 为准；交付前更新分组见 [Dispatcher §5](../Dispatcher.md)。
 
 | ID | 名称 | 状态 | 负责人 | 分支 | 文件 |
 |------|------|------|--------|------|------|
-| **T2-P0-001** | Agent Loop 模块化拆分 | `DONE` | Jerry | `feature/agent-loop-split` | [tasks/T2-P0-001.md](./tasks/T2-P0-001.md) |
-| **T2-P0-002** | 摘要 prompt 升级 + context v2 收尾 | `DONE`（`2026-04-26` Nibbles 合并入 `develop` @ `1fb0a62`，develop 上全量门禁复跑通过） | Spike | `feature/compaction-prompt-9section` | [tasks/T2-P0-002.md](./tasks/T2-P0-002.md) |
-| **T2-P0-003** | OpenAI 流式 `stream_timeout_sec` | `DONE`（`2026-05-07` Nibbles 合并入 `develop` @ `a067393`，develop 上全量门禁复跑通过） | Jerry | `feature/stream-timeout` | [tasks/T2-P0-003.md](./tasks/T2-P0-003.md) |
-| **T2-P0-004** | 工作目录权限分级 | `DONE`（`2026-04-27` Nibbles 合并入 `develop` @ `11eb5e7`，develop 上全量门禁复跑通过） | Jerry | `feature/workspace-permission-tiers` | [tasks/T2-P0-004.md](./tasks/T2-P0-004.md) |
-| **T2-P0-005** | 工具系统整改 | `DONE` | Spike | `feature/tool-system-cleanup` | [tasks/T2-P0-005.md](./tasks/T2-P0-005.md) |
-| **T2-P0-006** | Thinking API 接入 + TUI 展示 | `DONE`（`2026-05-08` Nibbles 合并入 `develop` @ `8c7b86e`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `feature/thinking-api-display` | [tasks/T2-P0-006.md](./tasks/T2-P0-006.md) |
-| **T2-P0-007** | 中断/恢复 + transcript 完整性 | `DONE` | Spike | `feature/interrupt-resume` | [tasks/T2-P0-007.md](./tasks/T2-P0-007.md) |
 | **T2-P0-008** | TUI 体验强化（合并 TASK-08） | `TODO` | — | `feature/tui-experience` | [tasks/T2-P0-008.md](./tasks/T2-P0-008.md) |
 | **T2-P0-009** | 三套管道重构 | `TODO` | — | `feature/pipeline-unify` | [tasks/T2-P0-009.md](./tasks/T2-P0-009.md) |
-| **T2-P0-010** | 长任务后台化 | `DONE`（**2026-05-08**：交付归 **T2-P0-016** `run_in_background` + `task_*`；见 [T2-P0-010.md](./tasks/T2-P0-010.md)） | — | `develop`（经 strengthen 分支） | [tasks/T2-P0-010.md](./tasks/T2-P0-010.md) |
-| **T2-P0-011** | 大文件编辑策略 | `DONE`（**2026-05-08**：catalog + `system_prompt` + T2-P0-017 `edit`/`hashline_edit`；**未**做 `write` 超阈 hint；见 [T2-P0-011.md](./tasks/T2-P0-011.md)） | — | `develop` | [tasks/T2-P0-011.md](./tasks/T2-P0-011.md) |
-| **T2-P0-012** | 图片/二进制文件传给 LLM | `DONE`（**2026-05-12**：CLI / `read` / Responses 多模态与类型分流已合入；**TUI 拖拽 chip 推迟**，见 [T2-P0-012.md](./tasks/T2-P0-012.md)） | — | `feature/llm-binary-attachments` / `develop` | [tasks/T2-P0-012.md](./tasks/T2-P0-012.md) |
-| **T2-P0-013** | 拖拽授权 / Bash 路径 / CWD 语义整改 | `DONE` | Jerry | `fix/drag-deny-cwd-remediation` | [tasks/T2-P0-013.md](./tasks/T2-P0-013.md) |
-| **T2-P0-014** | 权限授权来源重构 | `DONE` | Tom | `feature/permission-source-redesign` | [tasks/T2-P0-014.md](./tasks/T2-P0-014.md) |
-| **T2-P0-015** | OpenAI Files 上传管理 | `DONE`（`2026-05-12` 合入 `develop` @ `cb924eb`，`run-integration-tests.sh all` EXIT_CODE=0） | Jerry | `develop` | [tasks/T2-P0-015.md](./tasks/T2-P0-015.md) |
-| **T2-P0-016** | 四内置工具契约加强（write / bash 余量） | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `develop` | [tasks/T2-P0-016.md](./tasks/T2-P0-016.md) |
-| **T2-P0-017** | `edit` 工具契约与实现 | `DONE`（`2026-05-07` 合入 `develop` @ `a09ac01`，同上全量门禁） | Tom | `develop` | [tasks/T2-P0-017.md](./tasks/T2-P0-017.md) |
-| **T2-P1-001** | Checkpoint + 断点续跑 | `DONE`（`2026-05-16` Nibbles 合并入 `develop` @ `78d7518`，`run-integration-tests.sh integration` `EXIT_CODE=0`） | Jerry | `develop` | [tasks/T2-P1-001.md](./tasks/T2-P1-001.md) |
-| **T2-P1-002** | PLAN 模式增强 | `DONE`（`2026-05-24` Nibbles 合并入 `develop` @ `2ecc513`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `feature/plan-mode-enhance` | [tasks/T2-P1-002.md](./tasks/T2-P1-002.md) |
-| **T2-P1-003** | 提问/应答机制 | `DONE`（`2026-05-24` Nibbles 合并入 `develop` @ `2ecc513`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `feature/plan-mode-enhance` | [tasks/T2-P1-003.md](./tasks/T2-P1-003.md) |
-| **T2-P1-004** | 结果验证 + review 子流程 | `DONE`（`2026-05-24` Nibbles 合并入 `develop` @ `2ecc513`，`run-integration-tests.sh all` EXIT_CODE=0） | Tom | `feature/plan-mode-enhance` | [tasks/T2-P1-004.md](./tasks/T2-P1-004.md) |
-| **T2-P1-005** | Feedback 回路（新增） | `TODO` | — | `feature/feedback-loop` | [tasks/T2-P1-005.md](./tasks/T2-P1-005.md) |
-| **T2-P1-006** | 集成测试规范 | `TODO` | — | `feature/integration-test-standard` | [tasks/T2-P1-006.md](./tasks/T2-P1-006.md) |
-| **T2-P1-007** | 工具系统后置项 | `TODO` | — | `feature/tool-system-deferred-followups` | [tasks/T2-P1-007.md](./tasks/T2-P1-007.md) |
-| **T2-P1-008** | 内置 search_files 只读搜索工具 | `DONE`（**2026-05-08**：`develop` 已含；验收④演进为 Tier2+预检，见 [T2-P1-008.md](./tasks/T2-P1-008.md)） | Spike | `develop` | [tasks/T2-P1-008.md](./tasks/T2-P1-008.md) |
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理 | `TODO` | — | `feature/bash-ast-detect-precision` | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 
-## 5. 任务依赖拓扑（概览）
+## 5. 开放任务依赖（概览）
 
 ```mermaid
 flowchart LR
-    P001[T2-P0-001<br/>AgentLoop 拆分] --> P002[T2-P0-002<br/>Compaction]
-    P001 --> P006[T2-P0-006<br/>Thinking]
-    P001 --> P007[T2-P0-007<br/>Interrupt/Resume]
-    P001 --> P009[T2-P0-009<br/>Pipeline 重构]
-    P001 --> P010[T2-P0-010<br/>长任务后台]
-    P001 --> P003[T2-P0-003<br/>Stream timeout 002末位]
-    P004[T2-P0-004<br/>权限分级] --> P013[T2-P0-013<br/>拖拽/Bash/CWD 整改]
-    P013 --> P005[T2-P0-005<br/>工具系统]
-    P013 --> P012[T2-P0-012<br/>图片/二进制附件]
-    P005 --> P016[T2-P0-016<br/>四工具契约加强余量]
-    P005 --> P017[T2-P0-017<br/>edit 工具]
-    P005 --> P008[T2-P0-008<br/>TUI 强化]
-    P016 --> P107[T2-P1-007<br/>工具系统后置项]
-    P005 --> P107
-    P006 --> P008
-    P002 --> P011[T2-P0-011<br/>大文件编辑策略<br/>由 #T-043 抽出]
-    P005 --> P011
-    P006 --> P012
-    P008 --> P012
-    P012 --> P015[T2-P0-015<br/>Files 上传管理]
-    P007 --> P101[T2-P1-001<br/>Checkpoint]
-    P101 --> P102[T2-P1-002<br/>PLAN 增强]
-    P008 --> P103[T2-P1-003<br/>提问/应答]
-    P102 --> P104[T2-P1-004<br/>Review]
-    P103 --> P104
-    P008 --> P105[T2-P1-005<br/>Feedback]
-    P010 --> P106[T2-P1-006<br/>集成测试规范]
+    P008[T2-P0-008<br/>TUI 强化]
+    P009[T2-P0-009<br/>Pipeline 重构]
+    P109[T2-P1-009<br/>bash AST 精度]
+    P008 -.->|TUI 增强后可并行| P109
+    P009
 ```
 
-> **注**：T2-P0-003 仍从 T2-P0-001 出依赖边，**实施顺序**固定为**全部其它 T2-P0-00x 之后**（002 内最低、末位调度）。
+> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。
 
 ---
-
