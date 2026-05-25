@@ -241,16 +241,17 @@ fn spawn_readline_waker(
     })
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn wake_blocking_readline() {
-    // `rustyline` 会把 SIGWINCH 转成 `ReadlineError::WindowResized`；借它把阻塞中的
+    // `rustyline` 会把 SIGWINCH 转成 `ReadlineError::Signal(Signal::Resize)`；借它把阻塞中的
     // `readline()` 温和唤醒，让 chat loop 立刻进入 auto-drain，而不是等用户再按一次回车。
     unsafe {
         libc::raise(libc::SIGWINCH);
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "macos"))]
+// macOS 下优先保证 IME 输入稳定，宁可退回“等用户下一次交互再 drain”。
 fn wake_blocking_readline() {}
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
@@ -269,6 +270,12 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut rl = rustyline::DefaultEditor::new()
         .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
 
+    #[cfg(target_os = "macos")]
+    // macOS 中文输入法在 `ExternalPrinter` 激活的输入路径下更容易出现回显异常。
+    let search_tools_printer: Option<
+        Arc<std::sync::Mutex<Box<dyn rustyline::ExternalPrinter + Send>>>,
+    > = None;
+    #[cfg(not(target_os = "macos"))]
     let search_tools_printer = rl.create_external_printer().ok().map(|p| {
         Arc::new(std::sync::Mutex::new(
             Box::new(p) as Box<dyn rustyline::ExternalPrinter + Send>
@@ -346,7 +353,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     readline_waker.abort();
                     continue;
                 }
-                Err(rustyline::error::ReadlineError::WindowResized) => {
+                Err(rustyline::error::ReadlineError::Signal(
+                    rustyline::error::Signal::Resize,
+                )) => {
                     readline_waker.abort();
                     if !ctx.follow_up_queue.lock().is_empty() {
                         auto_turn_count = 0;

@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-25 15:10 | ACTIVE | develop | — |
+| Nibbles | 2026-05-26 01:05 | ACTIVE | develop | — |
+
+### 2026-05-26 | fix(chat): rustyline 18 + macOS IME 稳定
+
+- **依赖**：`rustyline` 15 → 18.0.0（`ReadlineError::WindowResized` → `Signal::Resize`）。
+- **macOS**：禁用 `ExternalPrinter`（search-tools 异步回显）与 `SIGWINCH` 唤醒 readline，避免中文 IME 输入回显异常；非 macOS Unix 仍保留 resize 唤醒 auto-drain。
+- **阶段 T（门禁）**：`cargo build`、`cargo test --lib chat`、`restore_raw_user_message_for_persistence` 单测通过。
 
 ### 2026-05-25 | build: 恢复 no-wasm 默认编译 + log.level 默认 warn
 
