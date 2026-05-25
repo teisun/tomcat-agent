@@ -15,7 +15,6 @@ fn sample_question() -> Question {
     Question {
         id: "color".into(),
         prompt: "pick a color".into(),
-        allow_multiple: false,
         options: vec![
             QuestionOption {
                 id: "red".into(),
@@ -66,6 +65,7 @@ async fn event_bus_panel_round_trips_via_mock_host() {
                     question_id: "color".into(),
                     option_ids: vec!["red".into()],
                     custom_text: None,
+                    skipped: false,
                     picked_recommended: true,
                 }],
                 cancelled: false,

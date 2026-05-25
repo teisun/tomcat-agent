@@ -17,7 +17,6 @@ fn cancel_token_demotes_executing_to_pending() {
         PlanMode::Pending { plan_id } => assert_eq!(plan_id, "cancellable"),
         other => panic!("expected Pending, got {other:?}"),
     }
-    assert!(!rt.first_exec_turn_pending_for_test());
 
     let plan = read_plan(&plan_path_for_id("cancellable").unwrap()).unwrap();
     assert!(matches!(plan.frontmatter.mode, PlanFileMode::Pending));
@@ -128,18 +127,17 @@ fn cancel_token_releases_plan_lock() {
 }
 
 #[test]
-fn finalize_completed_to_chat_clears_first_exec_turn() {
+fn finalize_completed_to_chat_clears_active_plan_state() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     write_disk_plan("done_path", PlanFileMode::Planning);
     rt.build_plan("done_path", None).unwrap();
-    assert!(rt.first_exec_turn_pending_for_test());
     rt.set_mode_completed("done_path".into());
     let pid = rt.finalize_completed_to_chat().expect("Some(plan_id)");
     assert_eq!(pid, "done_path");
     assert!(matches!(rt.mode(), PlanMode::Chat));
-    assert!(!rt.first_exec_turn_pending_for_test());
+    assert!(rt.active_plan_path().is_none());
     assert!(rt.finalize_completed_to_chat().is_none());
     cleanup_home(&home);
 }
@@ -193,7 +191,6 @@ fn plan_build_atomic_rollback_on_write_failure() {
     let rt = PlanRuntime::with_lock_timeout("session-a", 50);
     let err = rt.build_plan("rollback", None).unwrap_err();
     assert!(matches!(rt.mode(), PlanMode::Chat));
-    assert!(!rt.first_exec_turn_pending_for_test());
     match err {
         PlanRuntimeError::Io(s) => {
             assert!(s.contains("锁") || s.contains("lock") || s.contains("LockBusy"));
@@ -251,7 +248,6 @@ fn e8_recover_restores_executing_for_current_session() {
         PlanMode::Executing { plan_id: ref pid } => assert_eq!(pid, plan_id),
         other => panic!("expected Executing, got {other:?}"),
     }
-    assert!(rt.first_exec_turn_pending_for_test());
     cleanup_home(&home);
 }
 

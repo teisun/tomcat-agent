@@ -15,7 +15,6 @@ fn good_args() -> serde_json::Value {
         "questions": [{
             "id": "q1",
             "prompt": "选一个",
-            "allow_multiple": false,
             "options": [
                 {"id": "a", "label": "A", "recommended": true},
                 {"id": "b", "label": "B"}
@@ -33,6 +32,7 @@ async fn ask_question_visible_in_chat() {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
             custom_text: None,
+            skipped: false,
             picked_recommended: true,
         }],
     }]);
@@ -59,6 +59,7 @@ async fn ask_question_emits_transcript_event_on_answer() {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
             custom_text: None,
+            skipped: false,
             picked_recommended: true,
         }],
     }]);
@@ -238,6 +239,7 @@ async fn ask_question_blocks_until_answered() {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
             custom_text: None,
+            skipped: false,
             picked_recommended: true,
         }],
         cancelled: false,
@@ -295,6 +297,7 @@ async fn ask_question_custom_text_required_when_custom_selected() {
             question_id: "q1".into(),
             option_ids: vec!["__custom__".into()],
             custom_text: None,
+            skipped: false,
             picked_recommended: false,
         }],
         cancelled: false,
@@ -313,6 +316,7 @@ async fn ask_question_custom_text_forbidden_otherwise() {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
             custom_text: Some("不该出现".into()),
+            skipped: false,
             picked_recommended: true,
         }],
         cancelled: false,
@@ -331,6 +335,7 @@ async fn ask_question_result_carries_picked_recommended_flag() {
             question_id: "q1".into(),
             option_ids: vec!["b".into()],
             custom_text: None,
+            skipped: false,
             picked_recommended: false,
         }],
         cancelled: false,
@@ -350,6 +355,7 @@ async fn ask_question_ui_appends_custom_slot_via_panel_round_trip() {
             question_id: "q1".into(),
             option_ids: vec!["__custom__".into()],
             custom_text: Some("free text answer".into()),
+            skipped: false,
             picked_recommended: false,
         }],
         cancelled: false,
@@ -359,6 +365,49 @@ async fn ask_question_ui_appends_custom_slot_via_panel_round_trip() {
         .unwrap();
     assert_eq!(out["answers"][0]["option_ids"][0], "__custom__");
     assert_eq!(out["answers"][0]["custom_text"], "free text answer");
+}
+
+#[tokio::test]
+async fn ask_question_result_carries_skipped_flag_for_skipped_question() {
+    let rt = rt_planning();
+    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+        answers: vec![Answer {
+            question_id: "q1".into(),
+            option_ids: vec![],
+            custom_text: None,
+            skipped: true,
+            picked_recommended: false,
+        }],
+        cancelled: false,
+    }]);
+    let out = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+        .await
+        .unwrap();
+    assert_eq!(out["cancelled"], false);
+    assert_eq!(out["answers"][0]["skipped"], true);
+    assert_eq!(out["answers"][0]["option_ids"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn ask_question_skipped_answer_rejects_option_ids() {
+    let rt = rt_planning();
+    let panel = MockAskQuestionPanel::new(vec![AskQuestionResult {
+        answers: vec![Answer {
+            question_id: "q1".into(),
+            option_ids: vec!["a".into()],
+            custom_text: None,
+            skipped: true,
+            picked_recommended: false,
+        }],
+        cancelled: false,
+    }]);
+    let err = ask_question::execute(&rt, &panel, &good_args(), Arc::new(AtomicBool::new(false)))
+        .await
+        .expect_err("skipped answer should reject option_ids");
+    assert!(
+        err.to_string().contains("skipped=true"),
+        "unexpected error: {err}"
+    );
 }
 
 fn env_mutex() -> &'static parking_lot::Mutex<()> {
@@ -423,6 +472,7 @@ async fn ask_question_zero_timeout_means_no_timeout() {
             question_id: "q1".into(),
             option_ids: vec!["a".into()],
             custom_text: None,
+            skipped: false,
             picked_recommended: true,
         }],
     }])

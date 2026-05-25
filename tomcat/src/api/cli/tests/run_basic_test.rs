@@ -18,6 +18,29 @@ fn run_init_returns_ok() {
 }
 
 #[test]
+#[serial(env_lock)]
+fn run_init_writes_openai_responses_as_default_provider() {
+    let _home = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", home.path());
+
+    run_init().expect("init should succeed");
+
+    let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
+    let config_text = std::fs::read_to_string(&config_path).expect("config text");
+    assert!(
+        config_text.contains("provider = \"openai-responses\""),
+        "generated config should default to openai-responses, got:\n{config_text}"
+    );
+
+    match prev_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+}
+
+#[test]
 fn run_doctor_returns_ok() {
     let r = run_doctor();
     assert!(r.is_ok());

@@ -60,7 +60,7 @@ pub enum ChatCommand {
 
 pub(crate) enum ChatCommandOutcome {
     /// Send `line` to the LLM as the current user turn.
-    Continue { line: String },
+    Continue { line: String, echo_user: bool },
     /// Command was fully handled locally; skip the current turn.
     Handled,
 }
@@ -105,7 +105,10 @@ pub(crate) fn dispatch_chat_command(
     rl: &mut rustyline::DefaultEditor,
 ) -> ChatCommandOutcome {
     match command {
-        ChatCommand::NotACommand(line) => ChatCommandOutcome::Continue { line },
+        ChatCommand::NotACommand(line) => ChatCommandOutcome::Continue {
+            line,
+            echo_user: false,
+        },
         ChatCommand::Help => cmd_help::run(),
         ChatCommand::UsageError { message } => {
             println!("{}\n\n{}", message, cmd_help::help_text());

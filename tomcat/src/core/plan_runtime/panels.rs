@@ -18,8 +18,6 @@ pub const CUSTOM_OPTION_ID: &str = "__custom__";
 pub struct Question {
     pub id: String,
     pub prompt: String,
-    #[serde(default)]
-    pub allow_multiple: bool,
     pub options: Vec<QuestionOption>,
 }
 
@@ -37,7 +35,13 @@ pub struct Answer {
     pub option_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_text: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skipped: bool,
     pub picked_recommended: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -130,6 +130,29 @@ fn build_responses_input_translates_tool_call_pair() {
 }
 
 #[test]
+fn build_responses_input_translates_hydrate_recovered_interrupted_tool_result() {
+    let assistant = ChatMessage::assistant_with_tool_calls(
+        Some("calling tool"),
+        vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{}"}
+        })],
+    );
+    let msgs = vec![
+        ChatMessage::user("resume"),
+        assistant,
+        ChatMessage::tool("call_1", "[interrupted]"),
+    ];
+    let (_ins, input) = build_responses_input(&msgs);
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input[3]["call_id"], "call_1");
+    assert_eq!(input[3]["output"], "[interrupted]");
+}
+
+#[test]
 fn convert_tools_to_responses_translates_function_shape() {
     let tools = vec![json!({
         "type": "function",

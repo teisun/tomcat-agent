@@ -110,6 +110,7 @@ async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_pat
         .build_plan(&external_path.to_string_lossy(), Some("sid-external".into()))
         .expect("path build should succeed");
     assert_eq!(outcome.plan_id, "external_plan");
+    assert_eq!(outcome.plan_path, expected_path.clone());
     assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
 
     let out = update_plan::execute(
@@ -137,7 +138,7 @@ async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_pat
 }
 
 #[test]
-fn plan_build_swaps_session_reminder_prefix_meta_catalog() {
+fn plan_build_enters_exec_and_binds_active_plan_path() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("new-session-key");
@@ -152,7 +153,6 @@ fn plan_build_swaps_session_reminder_prefix_meta_catalog() {
         other => panic!("expected Executing, got {other:?}"),
     }
     assert!(rt.active_planning_plan_id().is_none());
-    assert!(rt.first_exec_turn_pending_for_test());
 
     let plan = read_plan(&plan_path_for_id("five_things").unwrap()).unwrap();
     assert!(matches!(plan.frontmatter.mode, PlanFileMode::Executing));
@@ -160,6 +160,10 @@ fn plan_build_swaps_session_reminder_prefix_meta_catalog() {
     assert_eq!(
         plan.frontmatter.session_id.as_deref(),
         Some("new-session-uuid")
+    );
+    assert_eq!(
+        outcome.plan_path,
+        plan_path_for_id("five_things").expect("plan path should resolve")
     );
     assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Planning));
     assert!(outcome.warnings.is_empty());
@@ -196,20 +200,3 @@ fn pending_plan_session_override_warns() {
     cleanup_home(&home);
 }
 
-#[test]
-fn exec_first_turn_injects_plan_meta_only_once() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let rt = PlanRuntime::new("session-a");
-    write_disk_plan("oneshot", PlanFileMode::Planning);
-    rt.build_plan("oneshot", None).unwrap();
-    let body1 = rt
-        .consume_first_exec_turn_user_meta()
-        .expect("首轮应返回 plan body");
-    assert!(body1.contains("plan_id: oneshot"));
-    assert!(body1.contains("## Goal"));
-    assert!(body1.contains("mode: executing"));
-    assert!(rt.consume_first_exec_turn_user_meta().is_none());
-    assert!(rt.consume_first_exec_turn_user_meta().is_none());
-    cleanup_home(&home);
-}

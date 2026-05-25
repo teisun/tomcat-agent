@@ -4,6 +4,7 @@
 //! - `run_loop.rs` 负责对话主循环、单轮驱动与相关运行期 helper。
 
 mod context;
+mod prompt;
 mod run_loop;
 
 #[cfg(test)]

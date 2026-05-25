@@ -14,7 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tomcat::core::plan_runtime::file_store::{
-    read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode,
+    TodoItem, TodoStatus,
 };
 use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::plan_runtime::panels::{
@@ -186,15 +187,14 @@ async fn full_plan_lifecycle_create_build_complete() {
             Some(plan_id.as_str())
         );
 
-        // 3) /plan build → EXEC + 首轮 user_meta 缓存
+        // 3) /plan build → EXEC + active plan path
         let outcome = rt.build_plan(&plan_id, Some("uuid-1".into())).unwrap();
         assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
         assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Planning));
-        let body = rt.consume_first_exec_turn_user_meta().expect("首轮 body");
-        assert!(body.contains("## Goal"));
-        assert!(body.contains("mode: executing"));
-        // 第二次返回 None
-        assert!(rt.consume_first_exec_turn_user_meta().is_none());
+        assert_eq!(
+            rt.active_plan_path(),
+            Some(plan_path_for_id(&plan_id).expect("plan path"))
+        );
 
         // 4) update_plan：a in_progress
         update_plan::execute(
@@ -363,12 +363,14 @@ async fn ask_question_returns_recommended_then_custom_text() {
                 question_id: "q1".into(),
                 option_ids: vec!["yes".into()],
                 custom_text: None,
+                skipped: false,
                 picked_recommended: true,
             },
             Answer {
                 question_id: "q2".into(),
                 option_ids: vec![CUSTOM_OPTION_ID.into()],
                 custom_text: Some("free-form choice".into()),
+                skipped: false,
                 picked_recommended: false,
             },
         ],
@@ -378,14 +380,14 @@ async fn ask_question_returns_recommended_then_custom_text() {
     let args = serde_json::json!({
         "questions": [
             {
-                "id":"q1","prompt":"是否继续?","allow_multiple":false,
+                "id":"q1","prompt":"是否继续?",
                 "options":[
                     {"id":"yes","label":"继续","recommended":true},
                     {"id":"no","label":"取消"}
                 ]
             },
             {
-                "id":"q2","prompt":"补充信息?","allow_multiple":false,
+                "id":"q2","prompt":"补充信息?",
                 "options":[
                     {"id":"a","label":"A","recommended":true},
                     {"id":"b","label":"B"}
@@ -430,7 +432,7 @@ async fn ask_question_user_ctrl_c_during_wait_returns_cancelled_not_err() {
     .with_delay(Duration::from_secs(10));
     let args = serde_json::json!({
         "questions": [{
-            "id":"q1","prompt":"long?","allow_multiple":false,
+            "id":"q1","prompt":"long?",
             "options":[
                 {"id":"a","label":"A","recommended":true},
                 {"id":"b","label":"B"}

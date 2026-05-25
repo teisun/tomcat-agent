@@ -593,24 +593,50 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
 }
 
 #[test]
-fn restore_raw_user_message_for_persistence_keeps_literal_mode_like_input() {
-    let raw_input = "[mode: PLAN]\n用户真的在讨论这个前缀";
-    let decorated = format!("[mode: EXEC plan_id=ship-001]\n{raw_input}");
-    let messages = vec![
-        crate::ChatMessage::user(&decorated),
-        crate::ChatMessage::assistant("ok"),
-    ];
+fn user_prompt_for_mode_formats_all_states() {
+    use crate::core::plan_runtime::PlanMode;
 
-    let restored = super::super::run_loop::restore_raw_user_message_for_persistence(
-        messages,
-        raw_input,
-        &decorated,
+    assert_eq!(super::super::prompt::user_prompt_for_mode(&PlanMode::Chat), "u> ");
+    assert_eq!(
+        super::super::prompt::user_prompt_for_mode(&PlanMode::Planning),
+        "u[Plan]> "
     );
+    assert_eq!(
+        super::super::prompt::user_prompt_for_mode(&PlanMode::Executing {
+            plan_id: "p1".into(),
+        }),
+        "u[Exec]> "
+    );
+    assert_eq!(
+        super::super::prompt::user_prompt_for_mode(&PlanMode::Pending {
+            plan_id: "p1".into(),
+        }),
+        "u[Pending]> "
+    );
+    assert_eq!(
+        super::super::prompt::user_prompt_for_mode(&PlanMode::Completed {
+            plan_id: "p1".into(),
+        }),
+        "u[Done]> "
+    );
+}
+
+#[test]
+fn agent_prompt_for_mode_uses_agent_prefix_and_hides_plan_id() {
+    use crate::core::plan_runtime::PlanMode;
 
     assert_eq!(
-        restored[0].text_content(),
-        Some(raw_input),
-        "只应回退当前回合 runtime 注入的 EXEC/PLAN 前缀，不应继续剥掉用户正文里的 lookalike 文本"
+        super::super::prompt::agent_prompt_for_mode("main", &PlanMode::Chat),
+        "agent.main> "
+    );
+    assert_eq!(
+        super::super::prompt::agent_prompt_for_mode(
+            "main",
+            &PlanMode::Executing {
+                plan_id: "ship-001".into(),
+            }
+        ),
+        "agent.main[Exec]> "
     );
 }
 

@@ -1,6 +1,6 @@
 # `ask_question` 工具：PLAN 模式下的结构化提问
 
-本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**在 PLAN 与 CHAT/Pending/Completed 模式均可见**（EXEC 模式不可见，避免 agent loop 阻塞在用户输入上），让模型以「单选 / 多选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
+本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**在 PLAN 与 CHAT/Pending/Completed 模式均可见**（EXEC 模式不可见，避免 agent loop 阻塞在用户输入上），让模型以「单选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
@@ -32,10 +32,10 @@
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
 | **`ask_question` 工具** | 让模型向用户结构化提问的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "ask_question"` | `mode ∈ {Planning, Chat, Pending, Completed}` 时可见（EXEC 隐藏）；`isReadOnly = true` / `requiresUserInteraction = true` | 模型问问题，不写盘。 |
-| **Question** | 一道结构化题目 | `{ id, prompt, options[], allow_multiple? }` | `id` 单次调用内唯一；`options.length ∈ [2, 4]`（不含 UI 兜底的 `__custom__` 槽）；`options` 中必须**恰好一个** `recommended: true` | 一道题最少 2 个最多 4 个选项，且 LLM 必须先指明推荐项。 |
+| **Question** | 一道结构化题目 | `{ id, prompt, options[] }` | `id` 单次调用内唯一；`options.length ∈ [2, 4]`（不含 UI 兜底的 `__custom__` 槽）；`options` 中必须**恰好一个** `recommended: true` | 一道题最少 2 个最多 4 个选项，且 LLM 必须先指明推荐项。 |
 | **Option** | 题目的一个候选答案 | `{ id, label, recommended? }` | `id` 题内唯一；`recommended` 缺省 `false`，每题恰好一项为 `true`；UI 在 `recommended=true` 的 label 后追加 `— 推荐` 后缀；LLM **不能**显式声明 `id = "__custom__"` 的选项 | 选项 id 单题内不能重；必须给一个推荐项。 |
 | **`__custom__` 自定义槽（UI 兜底）** | UI 在每题末尾**自动追加**的固定空选项 | `{ id: "__custom__", label: "自定义…", recommended: false, allow_custom_input: true }` | 由 runtime / UI 注入，**不**进 schema、**不**进 LLM 可见 `options`；选中时回填 `custom_text: string`（非空，≤ 500 字符） | 永远多一个让用户自己填的空格。 |
-| **AskQuestionResult** | 工具返回结构 | `{ answers: [{ question_id, option_ids, custom_text? }] }` | 与 Question 顺序一致；多选时 `option_ids.length >= 1`；选中 `__custom__` 时必带 `custom_text`，其它情况不带 | 题型决定答案是单选还是多选；自定义答案另带文本。 |
+| **AskQuestionResult** | 工具返回结构 | `{ answers: [{ question_id, option_ids, custom_text?, skipped?, picked_recommended }], cancelled }` | 与 Question 顺序一致；正常答题时 `option_ids.length == 1`；`skipped=true` 时 `option_ids=[]`；选中 `__custom__` 时必带 `custom_text`，其它情况不带 | 结果要么选 1 个，要么跳过当前题；自定义答案另带文本。 |
 | **isReadOnly / requiresUserInteraction** | 工具元属性 | catalog 注册时 `is_read_only = true`、`requires_user_interaction = true` | runtime 据此判断是否纳入「写权限审计」与「打断式 UI」 | 不写盘但要等用户。 |
 
 ---
@@ -58,12 +58,12 @@
 
 ### 2.2 常见实现横向对比
 
-| 来源 / 形态 | 工具名 | 题数上限 | 选项上限 | 多选 | 自定义输入槽 | 推荐项 | 可见时机 | 说人话 |
-|-------------|--------|----------|----------|------|---------------|--------|----------|--------|
+| 来源 / 形态 | 工具名 | 题数上限 | 选项上限 | 单题交互 | 自定义输入槽 | 推荐项 | 可见时机 | 说人话 |
+|-------------|--------|----------|----------|----------|---------------|--------|----------|--------|
 | **cc-fork-01** | `AskUserQuestion` | 4 | 4 | 支持 | 无 | 无 | PLAN 模式 | 4×4 是观察来的稳定上限。 |
 | **claude-code 系** | 无独立工具 | — | — | — | — | — | 通过自然语言追问 | 退化方案，易脑补。 |
 | **Cursor 内置** | `AskQuestion` | 多题 | 数个 | 支持 | **有**（每题自带「Custom answer」输入框） | 无 | 大多任务时机 | UI 永远多一个让用户自填的槽。 |
-| **本仓库 `ask_question`** | `ask_question` | 4 | 4（+ UI `__custom__` 兜底） | 支持 | **有**（沿用 Cursor 风格：UI 端固定追加 `id="__custom__"`） | **强制每题恰好一个** `recommended: true` | **仅 `mode == Planning`** | cc-fork-01 题数 + Cursor 自定义槽 + 强制推荐项。 |
+| **本仓库 `ask_question`** | `ask_question` | 4 | 4（+ UI `__custom__` 兜底） | 不支持 | **有**（沿用 Cursor 风格：UI 端固定追加 `id="__custom__"`） | **强制每题恰好一个** `recommended: true` | **`mode ∈ {Planning, Chat, Pending, Completed}`** | 4×4 上限 + 自定义槽 + 推荐项 + 单题 `skip`。 |
 
 ### 2.3 维度词典
 
@@ -71,8 +71,8 @@
 |------|------|--------|
 | Q1 题数上限 | 一次最多几题 | 4 是观察上限。 |
 | Q2 选项数 | 单题 2-4 个 | 1 个不是选项题，5+ 烦人。 |
-| Q3 单选/多选 | `allow_multiple: bool` | 默认单选；多选要显式开。 |
-| Q4 可见时机 | 是否在执行态也开放 | 只 PLAN，执行态绝不开。 |
+| Q3 单选/跳过 | 仅单选；支持 `skip` 当前题 | 输错留在本题，跳过不取消整面板。 |
+| Q4 可见时机 | 是否在执行态也开放 | CHAT/PLAN/Pending/Completed 可见，EXEC 绝不开。 |
 | Q5 阻塞 vs 非阻塞 | 等待 UI 回填 | 阻塞 await，但不占网络。 |
 | Q6 与 transcript 关系 | 题目和答案是否进 transcript | 是，作为 plan.ask_question 事件落盘。 |
 | Q7 自定义输入槽 | 是否允许用户在 LLM 给定选项外自己填 | UI 自动追加 `__custom__` 兜底，沿用 Cursor 习惯。 |
@@ -112,12 +112,12 @@
 |------|------|------|--------|
 | Q1 题数上限 | 4 | cc-fork-01 实战上限；超过 4 用户疲劳。 | 一次别问太多。 |
 | Q2 选项 | 2-4（不含自定义槽） | 1 个不是选择；超过 4 体验差。 | 每题 2–4 个选项。 |
-| Q3 单选/多选 | 字段 `allow_multiple: bool`，默认 false | 模型默认单选更好控。 | 默认单选，多选要显式开。 |
-| Q4 可见时机 | 仅 `Planning` | 执行态再问会破坏 todos 节奏。 | 只规划态可见。 |
+| Q3 单选/跳过 | 仅单选；支持 `skip` 当前题 | 多选链路复杂且交互噪音大。 | 每题只选一个，不想答就跳当前题。 |
+| Q4 可见时机 | `Planning / Chat / Pending / Completed` | EXEC 再问会破坏 todos 节奏。 | 除执行态外都可见。 |
 | Q5 阻塞模型 | 阻塞 await UI | 与 cc-fork-01 / Cursor `AskQuestion` 一致 | 弹窗等用户答完。 |
 | Q6 transcript 落盘 | 单条 `plan.ask_question` 事件包含题目 + 答案（含 `custom_text` 与是否选中推荐项） | 便于回放与调试 | 问答写进 transcript。 |
 | **Q7 自定义答案槽（Cursor 风格）** | 每题在 LLM 给出的 `options` 之外，UI **自动追加**一个固定 `id = "__custom__"` 的空选项（label 缺省为「自定义…」），用户可现场编辑文本作为答案；选中时出参带 `custom_text: string`；LLM 入参**不需要**也**不允许**显式声明这个选项 | 完全照搬 Cursor `AskQuestion`：UI 兜底永远多一项「我自己写」，避免选项不足时强迫用户选最不差的 | 选项之外永远再给一个空格让用户自己填。 |
-| **Q8 推荐项强制** | 每题 `options` 必须**恰好一个** `recommended: true`（UI 上 label 后缀显示「— 推荐」），代表 LLM 自己最倾向的选项；缺失或多于一个 → tool error；推荐项**不参与** §10 重复 id 校验之外的额外约束，单选 / 多选均适用；与 `__custom__` 槽**互斥**（自定义槽不带 recommended 标） | 让模型先表态再问人，避免「四个选项都看似中性、用户被迫读完所有 prompt」 | LLM 必须先在选项里指出哪个最推荐。 |
+| **Q8 推荐项强制** | 每题 `options` 必须**恰好一个** `recommended: true`（UI 上 label 后缀显示「— 推荐」），代表 LLM 自己最倾向的选项；缺失或多于一个 → tool error；推荐项不参与 §10 重复 id 校验之外的额外约束；与 `__custom__` 槽**互斥**（自定义槽不带 recommended 标） | 让模型先表态再问人，避免「四个选项都看似中性、用户被迫读完所有 prompt」 | LLM 必须先在选项里指出哪个最推荐。 |
 
 ### 4.2 实施点（拟定）
 
@@ -165,9 +165,9 @@
 #### 4.2.3 AQ-C：UI panel 与阻塞 await
 
 - **交付**：`AskQuestionPanel::run(questions) -> AskQuestionResult`；`tool_exec` 在 async 上下文中 `await`；agent loop **暂停**直至返回或 cancel。
-- **多选**：`allow_multiple=true` 时 `option_ids.len() ≥ 1`；默认单选时长度恒为 1。
+- **单选**：正常答题时 `option_ids.len() == 1`；`skip` 当前题时返回 `skipped=true` 与空 `option_ids`。
 - **UI 兜底**：渲染时在每题末尾追加一项 `{ id: "__custom__", label: "自定义…", allow_custom_input: true }`；用户选中时弹出文本输入框，限制 1–500 字符。
-- **推荐项渲染**：`option.recommended == true` 时在 label 末尾追加「— 推荐」后缀，并默认聚焦该选项（单选默认勾选；多选默认勾选但允许取消）。
+- **推荐项渲染**：`option.recommended == true` 时在 label 末尾追加「— 推荐」后缀，并默认聚焦该选项。
 - **回填**：UI 在提交前组装 `picked_recommended`（用户最终勾选中是否包含 `recommended=true` 的那一项）；选中 `__custom__` 时附带 `custom_text`。
 
 ```text
@@ -208,7 +208,7 @@
 ```json
 {
   "name": "ask_question",
-  "description": "Ask the user a small set of structured single- or multi-select questions. Callable in PLAN and CHAT/Pending/Completed modes (hidden in EXEC, where the agent loop must drive the plan without blocking on user input). Each question's options must include EXACTLY ONE option with `recommended: true` — the choice you (the model) believe is best given the current context. Do NOT submit any option with `id = \"__custom__\"`; the UI automatically appends a custom-input slot to every question so the user can type a free-form answer if none of your options fit. Returns when the user has chosen options or aborts.",
+  "description": "Ask the user a small set of structured single-select questions. Callable in PLAN and CHAT/Pending/Completed modes (hidden in EXEC, where the agent loop must drive the plan without blocking on user input). Each question's options must include EXACTLY ONE option with `recommended: true` — the choice you (the model) believe is best given the current context. Do NOT submit any option with `id = \"__custom__\"`; the UI automatically appends a custom-input slot to every question so the user can type a free-form answer if none of your options fit, and also supports skipping only the current question. Returns when the user has chosen, skipped, or aborted.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -221,7 +221,6 @@
           "properties": {
             "id":             { "type": "string", "description": "Unique within this call" },
             "prompt":         { "type": "string" },
-            "allow_multiple": { "type": "boolean", "default": false },
             "options": {
               "type": "array",
               "minItems": 2,
@@ -408,7 +407,7 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 |------|------|------|--------|
 | 模型每轮都问 4 题用户疲劳 | 中 | UI 层节流 + 文档约定「先想清楚再问」 | 别每轮塞满 4 题。 |
 | 用户 hang 不答 | 中 | 默认无超时但允许测试覆写；UI 提供「跳过」按钮（返回 cancelled） | 可提供跳过/测试超时。 |
-| 多选答案与单选混乱 | 中 | runtime 在出参侧统一为 `option_ids` 数组（单选时长度恒为 1） | 出参统一成 option_ids 数组。 |
+| 用户误输 / 想跳题 | 中 | 逐题重试；`skip` 只跳当前题；runtime 在出参侧统一为 `option_ids` 数组（单选时长度恒为 1） | 输错别炸整面板，跳过也要有稳定结构。 |
 | transcript 写失败导致回放缺题 | 低 | warning-only；不阻塞工具 | 记盘失败只 warning。 |
 
 ---
@@ -420,7 +419,7 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 | ~~把提问做成自然语言追问而非工具~~ | **否**：自然语言提问会让模型自己脑补答案；走结构化工具。 | 必须结构化，防脑补。 |
 | ~~允许执行态调用 `ask_question`~~ | **否**：执行态需要追问 → `/plan exit` 回到对话或重进 PLAN。 | 执行态别用这个工具。 |
 | ~~每题 5+ 选项~~ | **否**：4 是 cc-fork-01 实战上限；超过 4 体验差。 | 选项上限 4。 |
-| ~~把 `ask_question` 拆成 `ask_choice` / `ask_multi_choice` 两个工具~~ | **否**：单工具 + `allow_multiple` 字段更简洁。 | 一个工具加 bool 就够。 |
+| ~~把 `ask_question` 拆成 `ask_choice` / `ask_multi_choice` 两个工具~~ | **否**：保留单工具，直接收口为单选 + `skip`。 | 一个工具就够，但不再保留多选分支。 |
 | ~~让 LLM 自行声明「自定义输入」选项~~ | **否**：UI 端固定追加 `id = "__custom__"` 槽（参考 Cursor `AskQuestion` 的「Custom answer」行为）；模型不掺合，也无法绕过——`__custom__` 在 schema 入参侧是保留 id。 | 自定义槽 UI 兜底，不交给模型。 |
 | ~~让推荐项靠自然语言提示（如 `prompt` 文末加「我建议 X」）~~ | **否**：改为 `options[].recommended: true` 结构化字段，UI 渲染时统一在 label 后追加「— 推荐」后缀；模型必须先在选项里表态，避免「四个看似中性的选项让用户读完所有 prompt 才能选」。 | 推荐项做成结构化字段，UI 统一展示。 |
 | ~~允许零个或多个推荐项~~ | **否**：每题**恰好一个** `recommended: true`；零个会让用户失去快速决策的信号，多个等于没推荐。 | 推荐项必须唯一。 |

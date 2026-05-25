@@ -22,6 +22,7 @@ use crate::core::plan_runtime;
 
 use super::commands::{ChatCommandOutcome, dispatch_chat_command, parse_chat_command};
 use super::context::ChatContext;
+use super::prompt::{agent_prompt_for_mode, user_prompt_for_mode};
 use super::{cli_turn_renderer, events, preflight};
 use super::super::render::MarkdownRenderer;
 
@@ -341,7 +342,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             String::new()
         } else {
             let readline_waker = spawn_readline_waker(ctx.follow_up_signal.clone());
-            let raw = match rl.readline("u> ") {
+            let raw = match rl.readline(&user_prompt_for_mode(&ctx.plan_runtime.mode())) {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {
                     readline_waker.abort();
@@ -383,7 +384,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             } else {
                 let parsed = match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl)
                 {
-                    ChatCommandOutcome::Continue { line } => line,
+                    ChatCommandOutcome::Continue { line, echo_user } => {
+                        if echo_user {
+                            print!("{}{}", user_prompt_for_mode(&ctx.plan_runtime.mode()), line);
+                            println!();
+                            io::stdout().flush().map_err(AppError::Io)?;
+                        }
+                        line
+                    }
                     ChatCommandOutcome::Handled => continue,
                 };
                 let _ = rl.add_history_entry(&parsed);
@@ -495,38 +503,9 @@ pub async fn run_chat_turn(
         ),
         _ => system_text.to_string(),
     };
-    let current_plan_path = match &plan_mode {
-        plan_runtime::PlanMode::Planning | plan_runtime::PlanMode::Executing { .. } => ctx
-            .plan_runtime
-            .active_plan_path()
-            .or_else(|| {
-                ctx.plan_runtime
-                    .active_planning_plan_id()
-                    .and_then(|plan_id| plan_runtime::file_store::plan_path_for_id(&plan_id).ok())
-            }),
-        plan_runtime::PlanMode::Chat
-        | plan_runtime::PlanMode::Pending { .. }
-        | plan_runtime::PlanMode::Completed { .. } => None,
-    };
-    let user_prefix =
-        plan_runtime::session_prefix::user_prefix_for_mode(&plan_mode, current_plan_path.as_deref());
-    let decorated_user_text = if user_prefix.is_empty() {
-        input.to_string()
-    } else {
-        format!("{}{}", user_prefix, input)
-    };
-
     messages.insert(0, ChatMessage::system(&system_text_with_reminder));
-
-    if matches!(plan_mode, plan_runtime::PlanMode::Executing { .. }) {
-        if let Some(body) = ctx.plan_runtime.consume_first_exec_turn_user_meta() {
-            messages.push(ChatMessage::user(format!(
-                "<plan_meta>\n{body}\n</plan_meta>"
-            )));
-        }
-    }
     if !input.is_empty() {
-        messages.push(ChatMessage::user(&decorated_user_text));
+        messages.push(ChatMessage::user(input));
     }
     {
         let mut q = ctx.follow_up_queue.lock();
@@ -594,14 +573,10 @@ pub async fn run_chat_turn(
         None
     };
 
-    let mode_tag = match ctx.plan_runtime.mode() {
-        plan_runtime::PlanMode::Chat => String::new(),
-        plan_runtime::PlanMode::Planning => " [PLAN]".to_string(),
-        plan_runtime::PlanMode::Executing { plan_id } => format!(" [EXEC {plan_id}]"),
-        plan_runtime::PlanMode::Pending { plan_id } => format!(" [PENDING {plan_id}]"),
-        plan_runtime::PlanMode::Completed { plan_id } => format!(" [DONE {plan_id}]"),
-    };
-    print!("\ntomcat.{}{}> ", ctx.config.agent.id, mode_tag);
+    print!(
+        "\n{}",
+        agent_prompt_for_mode(&ctx.config.agent.id, &ctx.plan_runtime.mode())
+    );
     io::stdout().flush().map_err(AppError::Io)?;
 
     info!(
@@ -628,28 +603,18 @@ pub async fn run_chat_turn(
 
     match &outcome {
         AgentRunOutcome::Completed(result) => {
-            let new_messages = restore_raw_user_message_for_persistence(
-                result.new_messages.clone(),
-                input,
-                &decorated_user_text,
-            );
             persist_turn_result(
                 ctx,
                 context_state,
-                new_messages,
+                result.new_messages.clone(),
                 CheckpointKind::TurnEnd,
             )?;
         }
         AgentRunOutcome::Interrupted(result) => {
-            let new_messages = restore_raw_user_message_for_persistence(
-                result.new_messages.clone(),
-                input,
-                &decorated_user_text,
-            );
             persist_turn_result(
                 ctx,
                 context_state,
-                new_messages,
+                result.new_messages.clone(),
                 CheckpointKind::Interrupt,
             )?;
         }
@@ -659,27 +624,6 @@ pub async fn run_chat_turn(
     }
 
     Ok(outcome)
-}
-
-pub(crate) fn restore_raw_user_message_for_persistence(
-    mut new_messages: Vec<crate::core::llm::ChatMessage>,
-    raw_input: &str,
-    decorated_user_text: &str,
-) -> Vec<crate::core::llm::ChatMessage> {
-    if raw_input.is_empty() || raw_input == decorated_user_text {
-        return new_messages;
-    }
-    let mut restored = false;
-    for msg in &mut new_messages {
-        if restored || !matches!(msg.role, crate::core::llm::ChatMessageRole::User) {
-            continue;
-        }
-        if msg.text_content() == Some(decorated_user_text) {
-            msg.set_text_content(raw_input.to_string());
-            restored = true;
-        }
-    }
-    new_messages
 }
 
 fn make_fallback_context_state(

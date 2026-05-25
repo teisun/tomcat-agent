@@ -303,14 +303,14 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "ask_question",
         label: "Ask Question",
-        description: "Ask the user 1–4 structured single/multi-choice questions during PLAN mode. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars. The tool blocks until the user answers or cancels (cancel → `{ cancelled: true }`, not a ToolError). Visible only when `mode == Planning`; in EXEC / CHAT the model must `/plan exit` and ask in natural language instead.\n",
-        display_summary: Some("Block-await structured multiple-choice answers from the user (PLAN mode only)."),
+        description: "Ask the user 1–4 structured single-choice questions. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars, and also supports `skip` to skip only the current question. The tool blocks until the user answers, skips, or cancels (cancel → `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / Pending / Completed; hidden in EXEC to avoid blocking the execution loop.\n",
+        display_summary: Some("Block-await structured single-choice answers from the user."),
         parameters: ask_question_parameters,
         scope: PermissionScope::Read,
         category: None,
         read_only: true,
         destructive: false,
-        search_hint: Some("plan ask question single multi choice recommended custom"),
+        search_hint: Some("plan ask question single choice recommended custom skip"),
         plan_only: true,
         requires_user_interaction: true,
     },
@@ -895,7 +895,7 @@ fn todos_parameters() -> Value {
 fn ask_question_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Block-await structured multiple-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot — do not declare it yourself.",
+        "description": "Block-await structured single-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot and a `skip` action for the current question — do not declare `__custom__` yourself.",
         "properties": {
             "questions": {
                 "type": "array",
@@ -912,10 +912,6 @@ fn ask_question_parameters() -> Value {
                         "prompt": {
                             "type": "string",
                             "description": "Question text shown to the user (max 500 chars)."
-                        },
-                        "allow_multiple": {
-                            "type": "boolean",
-                            "description": "When true, user may select multiple options. Defaults to false."
                         },
                         "options": {
                             "type": "array",

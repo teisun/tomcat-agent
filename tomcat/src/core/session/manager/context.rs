@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use chrono::{NaiveDate, Utc};
 
 use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
+use crate::core::session::append_message_chain::collect_recent_chat_messages_from_tail;
 use crate::core::session::transcript::{read_entries_tail, BranchSummaryEntry, TranscriptEntry};
 use crate::infra::config::{compute_context_budget_chars, ContextConfig};
 use crate::infra::error::AppError;
@@ -16,6 +17,8 @@ use crate::core::compaction::preheat::Preheat;
 use super::types::{estimate_msg_chars, CompactionResult, ContextState, SessionContextObservation};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
+const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
+const HYDRATE_INTERRUPTED_TOOL_CALL_EVENT: &str = "session.hydrate_interrupted_tool_call";
 
 fn entry_timestamp(entry: &TranscriptEntry) -> &str {
     match entry {
@@ -303,6 +306,96 @@ fn fold_entries_to_messages(
     }
 }
 
+fn find_dangling_tail_tool_call_id(entries: &[TranscriptEntry]) -> Option<String> {
+    let recent = collect_recent_chat_messages_from_tail(entries);
+    let last = recent.last()?;
+    let last_role = last.get("role").and_then(|v| v.as_str())?;
+    match last_role {
+        "assistant" => missing_last_tool_call_id(last, &[]),
+        "tool" => {
+            let mut trailing_tools_rev: Vec<&serde_json::Value> = Vec::new();
+            for msg in recent.iter().rev() {
+                let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                match role {
+                    "tool" => trailing_tools_rev.push(msg),
+                    "assistant" => return missing_last_tool_call_id(msg, &trailing_tools_rev),
+                    _ => return None,
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn missing_last_tool_call_id(
+    assistant: &serde_json::Value,
+    trailing_tools_rev: &[&serde_json::Value],
+) -> Option<String> {
+    let tool_calls = assistant.get("tool_calls")?.as_array()?;
+    let tool_call_ids: Vec<&str> = tool_calls
+        .iter()
+        .map(|tc| tc.get("id").and_then(|v| v.as_str()))
+        .collect::<Option<Vec<_>>>()?;
+    if tool_call_ids.is_empty() {
+        return None;
+    }
+
+    let trailing_tool_ids: Vec<&str> = trailing_tools_rev
+        .iter()
+        .rev()
+        .map(|msg| msg.get("tool_call_id").and_then(|v| v.as_str()))
+        .collect::<Option<Vec<_>>>()?;
+
+    if trailing_tool_ids.len() + 1 != tool_call_ids.len() {
+        return None;
+    }
+    for (expected, actual) in tool_call_ids
+        .iter()
+        .take(trailing_tool_ids.len())
+        .zip(trailing_tool_ids.iter())
+    {
+        if expected != actual {
+            return None;
+        }
+    }
+    tool_call_ids.last().map(|id| (*id).to_string())
+}
+
+fn heal_dangling_tail_tool_call(
+    session: &SessionManager,
+    entries: &[TranscriptEntry],
+) -> Result<bool, AppError> {
+    let Some(tool_call_id) = find_dangling_tail_tool_call_id(entries) else {
+        return Ok(false);
+    };
+
+    tracing::warn!(
+        tool_call_id = %tool_call_id,
+        "hydrate detected dangling tail tool_call; appending synthetic interrupted tool result"
+    );
+
+    session.append_message(serde_json::json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id.clone(),
+        "content": INTERRUPTED_TOOL_RESULT_TEXT,
+    }))?;
+
+    if let Err(err) = session.append_custom_entry(serde_json::json!({
+        "event": HYDRATE_INTERRUPTED_TOOL_CALL_EVENT,
+        "customType": HYDRATE_INTERRUPTED_TOOL_CALL_EVENT,
+        "toolCallId": tool_call_id,
+        "text": INTERRUPTED_TOOL_RESULT_TEXT,
+    })) {
+        tracing::warn!(
+            error = %err,
+            "hydrate appended synthetic tool result but failed to append interrupted marker"
+        );
+    }
+
+    Ok(true)
+}
+
 /// Returns true if the message is a "turn start" — i.e., starts a new logical turn.
 fn is_turn_start(m: &ChatMessage) -> bool {
     (m.role == ChatMessageRole::User && m.kind != MessageKind::Steering)
@@ -411,7 +504,10 @@ pub fn init_context_state(
         }
     };
     // TODO: 这里读取了 transcript 的最后 2000 条 entries，需要优化为只读取当天 entries。
-    let entries = read_entries_tail(&path, super::BRANCH_MAX_ENTRIES)?;
+    let mut entries = read_entries_tail(&path, super::BRANCH_MAX_ENTRIES)?;
+    if heal_dangling_tail_tool_call(session, &entries)? {
+        entries = read_entries_tail(&path, super::BRANCH_MAX_ENTRIES)?;
+    }
     let today = Utc::now().date_naive();
 
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);

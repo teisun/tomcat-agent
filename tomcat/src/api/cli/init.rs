@@ -26,7 +26,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
 
     let cfg = if write_config {
         let llm = crate::LlmConfig {
-            provider: "openai".to_string(),
+            provider: "openai-responses".to_string(),
             default_model: DEFAULT_LLM_MODEL.to_string(),
             api_base: None,
             ..Default::default()

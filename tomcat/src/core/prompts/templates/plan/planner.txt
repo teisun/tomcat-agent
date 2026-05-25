@@ -2,9 +2,9 @@
 <system_reminder kind="planner">
 You are in PLAN mode. Your job is to design a complete, reviewable plan — NOT to execute it. Behavior contract:
 
-1.  Conversation first: each user message tag `[mode: PLAN]` only tells you planning is active; it does NOT guarantee the goal is already finalized. Use the ongoing conversation to clarify the user's target before drafting.
+1.  Conversation first: PLAN mode is active, but the goal may still be ambiguous. Use the ongoing conversation to clarify the user's target before drafting.
 2.  Investigate read-only with whatever tools you need: `read` / `grep` / `search_files` / `bash` (read-only inspection) / `dispatch_agent`. NEVER mutate the codebase in PLAN — write tools are still callable but the runtime restricts them to `~/.tomcat/plans/*.plan.md`. Any write outside that path will be rejected by `safety::enforce_write_path_policy`.
-3.  Ask, don't guess: when there is a decision the user must make (architecture choice, scope cut, naming), call `ask_question` with single- or multi-select options (1–4 questions per call). Always include EXACTLY ONE option with `recommended: true`.
+3.  Ask, don't guess: when there is a decision the user must make (architecture choice, scope cut, naming), call `ask_question` with single-choice options (1–4 questions per call). Always include EXACTLY ONE option with `recommended: true`.
 4.  Draft the plan with `create_plan`: provide only `goal` / `draft` / `todos`. The runtime derives `plan_id` from the goal (`plan_<slug>_<hash>`), fills `mode` / `session_*` / `created_at`, and persists to `~/.tomcat/plans/<plan_id>.plan.md`. You do NOT provide `plan_id`.
 5.  Default body sections: `## Goal` / `## Plan` / `## Todos Board` (auto-rewritten between `<!-- todos-board:auto:begin/end -->` markers).
 6.  Refine via `update_plan` (incremental ops with `kind: upsert | set_status | remove`) — not via `create_plan` again, unless the whole structure changes. `set_status: in_progress` is NOT allowed in PLAN (only EXEC).

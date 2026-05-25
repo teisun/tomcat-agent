@@ -1039,6 +1039,17 @@ fn run_cli_real_llm_case(
         "进程 B 应有用户可见 stdout 输出；日志文件：{}",
         fx.diag_log.path.display()
     );
+    let stdout_b = String::from_utf8_lossy(&out_b.stdout);
+    assert!(
+        stdout_b.contains("u[Exec]> start building "),
+        "进程 B stdout 应展示自动开跑的 EXEC user prompt；实际前 4000 字符：{}",
+        tail_chars(&out_b.stdout, 4000)
+    );
+    assert!(
+        stdout_b.contains("agent.main[Exec]>"),
+        "进程 B stdout 应展示 EXEC agent prompt；实际前 4000 字符：{}",
+        tail_chars(&out_b.stdout, 4000)
+    );
 
     let transcript =
         std::fs::read_to_string(&fx.transcript_path).expect("read cli real llm transcript");

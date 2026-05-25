@@ -683,24 +683,20 @@ Parameters:
 - Permission scope: `Read`
 - Read only: `true`
 - Destructive: `false`
-- Search hint: `plan ask question single multi choice recommended custom`
+- Search hint: `plan ask question single choice recommended custom skip`
 
-Ask the user 1–4 structured single/multi-choice questions during PLAN mode. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars. The tool blocks until the user answers or cancels (cancel → `{ cancelled: true }`, not a ToolError). Visible only when `mode == Planning`; in EXEC / CHAT the model must `/plan exit` and ask in natural language instead.
+Ask the user 1–4 structured single-choice questions during PLAN mode. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars, and also supports `skip` to skip only the current question. The tool blocks until the user answers or cancels (cancel → `{ cancelled: true }`, not a ToolError). Answer payloads may include `skipped: true` with empty `option_ids` for skipped questions. Visible in CHAT / PLAN / Pending / Completed, but hidden in EXEC to avoid blocking the execution loop.
 
 Parameters:
 
 ```json
 {
-  "description": "Block-await structured multiple-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot — do not declare it yourself.",
+  "description": "Block-await structured single-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot and a current-question `skip` action — do not declare `__custom__` yourself.",
   "properties": {
     "questions": {
       "description": "1–4 questions presented to the user in one panel turn.",
       "items": {
         "properties": {
-          "allow_multiple": {
-            "description": "When true, user may select multiple options. Defaults to false.",
-            "type": "boolean"
-          },
           "id": {
             "description": "Stable question id (kebab-case), unique within the panel turn.",
             "type": "string"
@@ -755,6 +751,8 @@ Parameters:
   "type": "object"
 }
 ```
+
+Result shape note: normal answers return one selected `option_id`, custom answers return `option_ids: ["__custom__"]` plus `custom_text`, and skipped answers return `skipped: true` with empty `option_ids`.
 
 ## Exec
 

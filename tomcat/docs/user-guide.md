@@ -117,7 +117,7 @@ tomcat --version
 tomcat init
 ```
 
-`tomcat init` 为**非交互式**三步流程（不再选择 Provider / 模型 / API Base URL；首次写入默认 `openai` + `gpt-5.2`，与 `tomcat.config.toml.example` 及代码中 `DEFAULT_LLM_MODEL` 一致）：
+`tomcat init` 为**非交互式**三步流程（不再选择 Provider / 模型 / API Base URL；首次写入默认 `openai-responses` + `gpt-5.2`，与 `tomcat.config.toml.example` 及代码中 `DEFAULT_LLM_MODEL` 一致）：
 
 1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（wasm + modules）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、QuickJS wasm、WasmEdge、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
@@ -128,7 +128,7 @@ tomcat init
 ```
 [1/3] 环境初始化
   ✓ 配置文件已写入: ~/.tomcat/tomcat.config.toml
-  ✓ 默认 LLM Provider: openai
+  ✓ 默认 LLM Provider: openai-responses
   ✓ 默认模型: gpt-5.2
   ✓ 目录结构就绪
   ✓ 内嵌资源已释放（wasm + modules）
@@ -405,7 +405,7 @@ tomcat 对话模式 (模型: gpt-5.2)
 ```
 u> 你好，介绍一下你自己
 
-tomcat.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中文或英文和你交流...
+agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中文或英文和你交流...
 ```
 
 退出时：

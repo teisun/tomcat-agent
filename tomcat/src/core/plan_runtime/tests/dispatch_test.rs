@@ -1,7 +1,7 @@
 use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
 };
-use super::super::{safety, session_prefix, PlanMode, PlanRuntime};
+use super::super::{safety, PlanRuntime};
 
 #[test]
 fn safety_assert_plan_id_safe_accepts_normal_id() {
@@ -28,68 +28,6 @@ fn safety_assert_plan_id_safe_rejects_traversal_paths() {
             "should reject unsafe plan_id {id:?}, got: {r:?}"
         );
     }
-}
-
-#[test]
-fn session_prefix_for_chat_is_empty() {
-    assert!(session_prefix::user_prefix_for_mode(&PlanMode::Chat, None).is_empty());
-}
-
-#[test]
-fn session_prefix_for_planning_carries_plan_path_when_present() {
-    let p = session_prefix::user_prefix_for_mode(
-        &PlanMode::Planning,
-        Some(std::path::Path::new("/tmp/active.plan.md")),
-    );
-    assert!(p.starts_with("[mode: PLAN "));
-    assert!(p.contains("plan_path=/tmp/active.plan.md"));
-}
-
-#[test]
-fn session_prefix_for_executing_carries_plan_id() {
-    let p = session_prefix::user_prefix_for_mode(
-        &PlanMode::Executing {
-            plan_id: "ship-001".into(),
-        },
-        Some(std::path::Path::new("/tmp/exec.plan.md")),
-    );
-    assert!(p.contains("[mode: EXEC plan_id=ship-001"));
-    assert!(p.contains("plan_path=/tmp/exec.plan.md"));
-}
-
-#[test]
-fn session_prefix_for_pending_is_empty() {
-    let p = session_prefix::user_prefix_for_mode(
-        &PlanMode::Pending {
-            plan_id: "ship-001".into(),
-        },
-        None,
-    );
-    assert!(p.is_empty(), "pending must NOT prefix LLM input");
-}
-
-#[test]
-fn strip_user_prefix_removes_plan_label_when_present() {
-    let s = session_prefix::strip_user_prefix("[mode: PLAN]\nhello world");
-    assert_eq!(s, "hello world");
-}
-
-#[test]
-fn strip_user_prefix_removes_exec_label_with_plan_id() {
-    let s = session_prefix::strip_user_prefix("[mode: EXEC plan_id=ship-001]\nstart please");
-    assert_eq!(s, "start please");
-}
-
-#[test]
-fn strip_user_prefix_passthrough_when_no_label() {
-    let s = session_prefix::strip_user_prefix("normal user text\nwith linebreak");
-    assert_eq!(s, "normal user text\nwith linebreak");
-}
-
-#[test]
-fn strip_user_prefix_passthrough_when_lookalike_does_not_close() {
-    let s = session_prefix::strip_user_prefix("[mode: malformed\nrest of text");
-    assert_eq!(s, "[mode: malformed\nrest of text");
 }
 
 #[test]

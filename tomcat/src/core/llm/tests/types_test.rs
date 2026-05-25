@@ -61,6 +61,36 @@ fn chat_request_serialize_snake_case() {
 }
 
 #[test]
+fn chat_request_serializes_hydrate_recovered_tool_round_for_openai_wire() {
+    let assistant = ChatMessage::assistant_with_tool_calls(
+        Some("calling tool"),
+        vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{}"}
+        })],
+    );
+    let req = ChatRequest {
+        messages: vec![
+            ChatMessage::user("resume"),
+            assistant,
+            ChatMessage::tool("call_1", "[interrupted]"),
+        ],
+        model: "gpt-4".to_string(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(false),
+        model_override: None,
+        tools: None,
+    };
+    let j = serde_json::to_value(&req).unwrap();
+    assert_eq!(j["messages"][1]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(j["messages"][2]["role"], "tool");
+    assert_eq!(j["messages"][2]["tool_call_id"], "call_1");
+    assert_eq!(j["messages"][2]["content"], "[interrupted]");
+}
+
+#[test]
 fn token_usage_default() {
     let u = TokenUsage::default();
     assert_eq!(u.prompt_tokens, 0);

@@ -30,7 +30,6 @@
 //! - [`catalog`]：`visible_tools_for_mode(PlanMode, base) -> Vec<Value>`，
 //!   PLAN/EXEC 时合入 plan_only 工具；CHAT 时排除
 //! - [`reminders`]：PLANNER / EXECUTOR `<system_reminder>` 常量
-//! - [`session_prefix`]：`[mode: PLAN]` / `[mode: EXEC plan_id=…]` user-message 装饰
 //! - [`safety`]：`assert_plan_id_safe`（防穿越 `../` / `/` / 控制字符）
 //!
 //! P2 起补 `file_store` / `ops`（todos op）；P4 起补 `dispatch_reviewer`；P5 起补
@@ -46,7 +45,6 @@ pub mod prod_reviewer;
 pub mod reminders;
 pub mod review;
 pub mod safety;
-pub mod session_prefix;
 pub mod todo_runtime;
 pub mod verify;
 
@@ -103,8 +101,8 @@ pub struct PlanRuntime {
     /// 这里用辅助字段保留 `create_plan` 写盘后的 plan_id，供后续 `update_plan` /
     /// `/plan build` 默认路由使用。EXEC/Pending 状态请直接读 `mode().active_plan_id()`。
     active_planning_plan_id: Mutex<Option<String>>,
-    /// 当前 active plan 的真实路径镜像。用于 EXEC/Planning 缺省目标解析与 user prefix
-    /// 里的 `plan_path` 展示，尤其覆盖 `/plan build <plan_id/path>` 中的显式 path 场景。
+    /// 当前 active plan 的真实路径镜像。用于 EXEC/Planning 缺省目标解析，
+    /// 尤其覆盖 `/plan build <plan_id/path>` 中的显式 path 场景。
     active_plan_path: Mutex<Option<PathBuf>>,
     /// `[plan] lock_timeout_ms`：write_plan / dispatch_reviewer 共享。默认 2000。
     lock_timeout_ms: u64,
@@ -127,13 +125,6 @@ pub struct PlanRuntime {
     /// 显式注入别的 `AskQuestionPanel`。未注入时 `ask_question` 工具返回
     /// `cancelled: true` 兜底（避免 panic / 卡死）。
     ask_question_panel: Mutex<Option<Arc<dyn AskQuestionPanel>>>,
-    /// 进入 EXEC 后**首轮**user message 装配阶段的注入标记（P6 PR-PLC §5.5 / §6 first_turn_user_meta）：
-    /// `/plan build` 成功后置 true；`consume_first_exec_turn_user_meta` 第一次调
-    /// 时返回 plan body 并置 false；后续轮次返回 None（避免重复注入超长 plan 全文）。
-    first_exec_turn_pending: AtomicBool,
-    /// 触发首轮注入的 plan body 缓存（与 `first_exec_turn_pending` 配对，
-    /// 在 build_plan 写盘成功后预读，避免首轮 chat_loop 再做一次 disk IO）。
-    first_exec_turn_body: Mutex<Option<String>>,
     /// `[ask_question].timeout_ms`：ask_question 等待用户回答的墙钟超时（毫秒）。
     /// `0` 表示无超时；生产由 `ChatContext::from_config` 写入；默认 0（按工具内置默认 300_000 处理）。
     ask_question_timeout_ms: std::sync::atomic::AtomicU64,
@@ -214,8 +205,6 @@ impl PlanRuntime {
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             ask_question_panel: Mutex::new(None),
-            first_exec_turn_pending: AtomicBool::new(false),
-            first_exec_turn_body: Mutex::new(None),
             ask_question_timeout_ms: std::sync::atomic::AtomicU64::new(0),
             todos_persist_base: Mutex::new(None),
             active_todos_id: Mutex::new(None),
@@ -433,10 +422,6 @@ impl PlanRuntime {
             if plan.frontmatter.mode == file_store::PlanFileMode::Executing {
                 if self.owns_executing_plan(&plan) {
                     // 当前 session 拥有 → 还原内存到 EXEC
-                    let plan_text = file_store::serialize_plan_file(&plan)
-                        .unwrap_or_else(|_| plan.body.clone());
-                    *self.first_exec_turn_body.lock() = Some(plan_text);
-                    self.first_exec_turn_pending.store(true, Ordering::Release);
                     *self.mode.write() = PlanMode::Executing { plan_id };
                     *self.active_plan_path.lock() = Some(path.clone());
                 } else if self.current_session_id.lock().is_none() {
@@ -493,10 +478,6 @@ impl PlanRuntime {
                 && self.owns_executing_plan(&plan)
             {
                 let plan_id = plan.frontmatter.plan_id.clone();
-                let plan_text =
-                    file_store::serialize_plan_file(&plan).unwrap_or_else(|_| plan.body.clone());
-                *self.first_exec_turn_body.lock() = Some(plan_text);
-                self.first_exec_turn_pending.store(true, Ordering::Release);
                 *self.mode.write() = PlanMode::Executing {
                     plan_id: plan_id.clone(),
                 };
@@ -945,8 +926,7 @@ impl PlanRuntime {
     /// 2. 改 frontmatter.mode = `executing`
     /// 3. `write_plan`（atomic + advisory lock）；**失败时内存不动**，返回 PlanFile error
     /// 4. 写盘成功后切内存 `mode = Executing { plan_id }`、清 `active_planning_plan_id`
-    /// 5. 设置 `first_exec_turn_pending = true`，缓存 plan body 供首轮 user_meta 注入；
-    ///    （reminder/catalog/prefix swap 均由 mode 派生，chat_loop 装配阶段自动 pick up）
+    /// 5. 更新 `active_plan_path`，供后续 `/plan build` 自动开跑时生成真实 user turn 文本
     ///
     /// **原子性**：盘 write 失败 → 内存不变；盘 write 成功后才动内存——
     /// 配合 advisory lock 保证 PlanFile 不会出现"executing 但内存仍 Chat"的半态。
@@ -978,7 +958,6 @@ impl PlanRuntime {
             plan_id: String,
             prev_disk_mode: file_store::PlanFileMode,
             warnings: Vec<String>,
-            plan_text: String,
         }
 
         let build = match file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
@@ -1053,13 +1032,10 @@ impl PlanRuntime {
             plan.frontmatter.session_key = Some(self.session_key.clone());
             plan.frontmatter.session_id = session_id.clone();
             plan.frontmatter.mode = file_store::PlanFileMode::Executing;
-            let plan_text =
-                file_store::serialize_plan_file(plan).unwrap_or_else(|_| plan.body.clone());
             Ok(BuildCommit {
                 plan_id,
                 prev_disk_mode,
                 warnings,
-                plan_text,
             })
         }) {
             Ok(v) => v,
@@ -1094,9 +1070,6 @@ impl PlanRuntime {
         };
         *self.active_planning_plan_id.lock() = None;
         *self.active_plan_path.lock() = Some(path.clone());
-        // 5: 首轮注入旗标 + 缓存 plan body（含 frontmatter 以便上下文可读）
-        *self.first_exec_turn_body.lock() = Some(build.plan_text);
-        self.first_exec_turn_pending.store(true, Ordering::Release);
 
         // E6：`[plan].auto_checkpoint_on_build`（默认 false）→ 写 `Manual{label="plan_build:..."}`。
         // record 失败仅 warning（盘异常不阻 EXEC 推进，D 防御）。
@@ -1123,29 +1096,10 @@ impl PlanRuntime {
 
         Ok(BuildPlanOutcome {
             plan_id: plan_id.to_string(),
+            plan_path: path,
             prev_disk_mode,
             warnings,
         })
-    }
-
-    /// 首轮 EXEC user message 装配时调用：返回 plan 全文（含 frontmatter）一次；
-    /// 再次调用返回 None（防止重复注入超长上下文）。
-    ///
-    /// 标志 + 缓存语义：`build_plan` 成功后置 flag=true 并缓存 body。本方法 swap
-    /// flag→false 后取走缓存（`take()`），返回前一次 build 缓存的 body；
-    /// 与 catalog/reminder/prefix 派生平行——所有 EXEC 副作用均不可漏。
-    pub fn consume_first_exec_turn_user_meta(&self) -> Option<String> {
-        if self.first_exec_turn_pending.swap(false, Ordering::AcqRel) {
-            self.first_exec_turn_body.lock().take()
-        } else {
-            None
-        }
-    }
-
-    /// 测试 / debug：当前首轮注入是否仍 pending。
-    #[doc(hidden)]
-    pub fn first_exec_turn_pending_for_test(&self) -> bool {
-        self.first_exec_turn_pending.load(Ordering::Acquire)
     }
 
     // ─── P7 PR-PLF cancel→pending + 释放锁（plan-runtime.md §5.6） ───────
@@ -1155,7 +1109,7 @@ impl PlanRuntime {
     /// **副作用**（事务序）：
     /// 1. 读当前 plan 文件
     /// 2. 写 frontmatter.mode = pending（atomic + advisory lock；写完即释放，防 D1）
-    /// 3. 内存 mode 切 `Pending { plan_id }`，清 `first_exec_turn_pending`
+    /// 3. 内存 mode 切 `Pending { plan_id }`
     /// 4. 返回 plan_id 给上层做 transcript `plan.cancel.demote_to_pending`
     ///
     /// **幂等**：非 EXEC 模式直接返回 Ok(None)。
@@ -1180,12 +1134,10 @@ impl PlanRuntime {
             file_store::LockedPlanMutationError::Plan(err) => PlanRuntimeError::from_plan_io(err),
             file_store::LockedPlanMutationError::Callback(err) => err,
         })?;
-        // ③ 内存切 Pending；reset 首轮注入
+        // ③ 内存切 Pending
         *self.mode.write() = PlanMode::Pending {
             plan_id: plan_id.clone(),
         };
-        self.first_exec_turn_pending.store(false, Ordering::Release);
-        *self.first_exec_turn_body.lock() = None;
         Ok(Some(plan_id))
     }
 
@@ -1206,7 +1158,7 @@ impl PlanRuntime {
 
     // ─── P7 PR-PLE all-completed → CHAT 派生（plan-runtime.md §5.7） ─────
 
-    /// 当 mode 已是 `Completed { plan_id }` 时，把内存复位到 CHAT、清首轮注入、清 active_planning；
+    /// 当 mode 已是 `Completed { plan_id }` 时，把内存复位到 CHAT、清 active_planning；
     /// 通常由 chat_loop 在下一轮装配前调用，等价于"自然收口"。
     ///
     /// `update_plan` 写盘成功后会 `set_mode_completed`；本方法是从 Completed → Chat 的最后一跳；
@@ -1217,8 +1169,6 @@ impl PlanRuntime {
             PlanMode::Completed { plan_id } => {
                 let pid = plan_id.clone();
                 *mode = PlanMode::Chat;
-                self.first_exec_turn_pending.store(false, Ordering::Release);
-                *self.first_exec_turn_body.lock() = None;
                 *self.active_planning_plan_id.lock() = None;
                 *self.active_plan_path.lock() = None;
                 Some(pid)
@@ -1260,6 +1210,7 @@ impl PlanRuntime {
 #[derive(Debug, Clone)]
 pub struct BuildPlanOutcome {
     pub plan_id: String,
+    pub plan_path: PathBuf,
     /// 目标 PlanFile 的写前 mode（planning / pending）；命令层据此打印不同提示。
     pub prev_disk_mode: file_store::PlanFileMode,
     /// 非致命警告（如 pending 续跑 session_key 不一致）。

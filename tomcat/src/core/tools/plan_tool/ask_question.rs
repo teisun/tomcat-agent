@@ -8,7 +8,7 @@
 //!   - 每题恰好一个 `recommended: true`
 //! - 调 [`super::super::panels::AskQuestionPanel::ask`] 阻塞 await；
 //!   监听 `cancel_signal` → `cancelled: true`。
-//! - 返回 `{ answers: [{ question_id, option_ids, custom_text?, picked_recommended }], cancelled }`。
+//! - 返回 `{ answers: [{ question_id, option_ids, custom_text?, skipped?, picked_recommended }], cancelled }`。
 //! - **选中 `__custom__`** → 必带 `custom_text`（非空、≤ 500）；
 //!   未选中 `__custom__` → 不得携带 `custom_text`（防止 LLM 误用）。
 
@@ -194,13 +194,28 @@ fn validate_answers(questions: &[Question], result: &AskQuestionResult) -> Resul
                 ans.question_id, q.id
             )));
         }
-        if ans.option_ids.is_empty() {
-            return Err(ToolError::Internal(format!(
-                "question {}: 至少选择 1 个选项",
-                q.id
-            )));
+        if ans.skipped {
+            if !ans.option_ids.is_empty() {
+                return Err(ToolError::Internal(format!(
+                    "question {}: skipped=true 时 option_ids 必须为空",
+                    q.id
+                )));
+            }
+            if ans.custom_text.is_some() {
+                return Err(ToolError::Internal(format!(
+                    "question {}: skipped=true 时不应携带 custom_text",
+                    q.id
+                )));
+            }
+            if ans.picked_recommended {
+                return Err(ToolError::Internal(format!(
+                    "question {}: skipped=true 时 picked_recommended 必须为 false",
+                    q.id
+                )));
+            }
+            continue;
         }
-        if !q.allow_multiple && ans.option_ids.len() != 1 {
+        if ans.option_ids.len() != 1 {
             return Err(ToolError::Internal(format!(
                 "question {}: 单选题应只选 1 个，实际 {}",
                 q.id,
@@ -251,6 +266,9 @@ fn answer_to_json(result: &AskQuestionResult) -> serde_json::Value {
                     "option_ids": a.option_ids,
                     "picked_recommended": a.picked_recommended,
                 });
+                if a.skipped {
+                    obj["skipped"] = serde_json::Value::Bool(true);
+                }
                 if let Some(t) = &a.custom_text {
                     obj["custom_text"] = serde_json::Value::String(t.clone());
                 }

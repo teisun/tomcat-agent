@@ -86,13 +86,16 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
             };
             match rt.build_plan(&plan_target, session_id_for_plan) {
                 Ok(outcome) => {
-                    println!(
-                        "[plan] /plan build 成功：target={} → plan_id={} (prev_disk_mode={:?}) → EXEC",
-                        plan_target, outcome.plan_id, outcome.prev_disk_mode
-                    );
                     for w in &outcome.warnings {
                         eprintln!("[plan] warning: {w}");
                     }
+                    return ChatCommandOutcome::Continue {
+                        line: format!(
+                            "start building {}",
+                            outcome.plan_path.to_string_lossy()
+                        ),
+                        echo_user: true,
+                    };
                 }
                 Err(e) => eprintln!("[plan] /plan build 拒绝：{}", e),
             }

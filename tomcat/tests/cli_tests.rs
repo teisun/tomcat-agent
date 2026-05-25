@@ -79,7 +79,7 @@ fn test_version_output_exits_ok() {
 
 /// [init 子命令] 在临时目录生成配置文件
 ///
-/// 验证：exit 0、tomcat.config.toml 已创建且含 [log] 段、stdout 含三步向导与「配置文件已写入」
+/// 验证：exit 0、tomcat.config.toml 已创建且默认 provider 为 openai-responses、stdout 含三步向导与「配置文件已写入」
 /// 意义：首次使用流程门禁（TASK-02 10.2：引导 LLM 配置、生成配置文件）
 #[test]
 fn test_init_creates_config_file_in_temp_dir() {
@@ -108,6 +108,10 @@ fn test_init_creates_config_file_in_temp_dir() {
     assert!(
         content.contains("[log]"),
         "config should contain [log] section"
+    );
+    assert!(
+        content.contains("provider = \"openai-responses\""),
+        "config should default to openai-responses"
     );
 }
 
@@ -748,7 +752,7 @@ fn test_chat_without_config_exits_with_error() {
 
 /// [chat 有 API key] 有合法配置与 API key 时 chat 启动并产生输出
 ///
-/// 验证：exit 0 且 stdout 包含"对话模式"banner 或模型信息或 AI 提示
+/// 验证：exit 0 且 stdout 包含"对话模式"banner 或模型信息或 agent prompt
 /// 意义：TASK-02 10.1——chat 端到端可用；INTEGRATION_TEST_SPEC：无 key 不得 ignore
 #[test]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
@@ -790,8 +794,8 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     assert!(
         out_str.contains("对话模式")
             || out_str.contains("模型:")
-            || out_str.contains("tomcat.main>"),
-        "chat 应输出对话模式 banner 或模型信息或 tomcat.main> 提示，实际: {}",
+            || out_str.contains("agent.main>"),
+        "chat 应输出对话模式 banner 或模型信息或 agent.main> 提示，实际: {}",
         out_str.chars().take(500).collect::<String>()
     );
 }
@@ -1179,7 +1183,7 @@ fn test_user_doctor_detects_environment() {
 
 /// [TASK-06] init 后生成配置中的 LLM 段
 ///
-/// 验证：tomcat init exit 0；`tomcat.config.toml` 存在且含 LLM 相关字段（.env 仅在用户输入非空 Key 时写入）
+/// 验证：tomcat init exit 0；`tomcat.config.toml` 存在且默认 provider 为 openai-responses（.env 仅在用户输入非空 Key 时写入）
 #[test]
 fn test_init_creates_env_file() {
     common::setup_logging();
@@ -1205,6 +1209,10 @@ fn test_init_creates_env_file() {
     assert!(
         cfg_content.contains("[llm]") || cfg_content.contains("provider"),
         "config should contain LLM section"
+    );
+    assert!(
+        cfg_content.contains("provider = \"openai-responses\""),
+        "config should default to openai-responses"
     );
 }
 

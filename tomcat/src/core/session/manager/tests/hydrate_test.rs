@@ -15,6 +15,17 @@ use super::super::*;
 use super::mocks::temp_sessions_dir;
 use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 
+fn tool_call_json(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": "read",
+            "arguments": "{}"
+        }
+    })
+}
+
 #[test]
 fn init_context_state_empty_session() {
     let dir = temp_sessions_dir();
@@ -290,6 +301,151 @@ fn init_context_state_skips_superseded_messages() {
     assert!(texts.iter().any(|t| t == "a1"));
     assert!(!texts.iter().any(|t| t == "q2"));
     assert!(!texts.iter().any(|t| t == "a2"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"继续"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"准备调用工具",
+        "tool_calls":[tool_call_json("call_1")]
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+
+    let healed_tool = state
+        .messages
+        .iter()
+        .find(|m| m.role == ChatMessageRole::Tool)
+        .expect("hydrated messages should include synthetic tool result");
+    assert_eq!(healed_tool.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(healed_tool.text_content(), Some("[interrupted]"));
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 16).unwrap();
+    let interrupted_tools = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Message(me)
+                    if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
+                        && me.message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_1")
+                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+            )
+        })
+        .count();
+    assert_eq!(interrupted_tools, 1, "should append exactly one synthetic tool result");
+    let interrupted_markers = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Custom(ce)
+                    if ce.extra.get("customType").and_then(|v| v.as_str())
+                        == Some("session.hydrate_interrupted_tool_call")
+                        && ce.extra.get("toolCallId").and_then(|v| v.as_str()) == Some("call_1")
+                        && ce.extra.get("text").and_then(|v| v.as_str()) == Some("[interrupted]")
+            )
+        })
+        .count();
+    assert_eq!(interrupted_markers, 1, "should append visible interrupted marker");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_heals_only_missing_last_tool_result() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"两次工具调用",
+        "tool_calls":[tool_call_json("call_1"), tool_call_json("call_2")]
+    }))
+    .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"tool",
+        "tool_call_id":"call_1",
+        "content":"ok"
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let tool_ids: Vec<&str> = state
+        .messages
+        .iter()
+        .filter_map(|m| m.tool_call_id.as_deref())
+        .collect();
+    assert_eq!(tool_ids, vec!["call_1", "call_2"]);
+    let last_tool = state
+        .messages
+        .iter()
+        .filter(|m| m.role == ChatMessageRole::Tool)
+        .last()
+        .expect("last tool should exist");
+    assert_eq!(last_tool.text_content(), Some("[interrupted]"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_does_not_heal_when_multiple_tool_results_are_missing() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"两次工具调用",
+        "tool_calls":[tool_call_json("call_1"), tool_call_json("call_2")]
+    }))
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    assert!(
+        state.messages
+            .iter()
+            .all(|m| m.text_content() != Some("[interrupted]")),
+        "when more than one tool result is missing, hydrate should not guess"
+    );
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 8).unwrap();
+    assert!(
+        !entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Custom(ce)
+                    if ce.extra.get("customType").and_then(|v| v.as_str())
+                        == Some("session.hydrate_interrupted_tool_call")
+            )
+        }),
+        "multi-missing case should not append interrupted marker"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

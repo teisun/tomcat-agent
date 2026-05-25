@@ -11,6 +11,7 @@
 **验收标准**：
 - [ ] 支持单文件二进制安装，无需额外依赖配置
 - [ ] `tomcat init`命令可完成初始化配置，引导用户配置LLM API密钥、基础安全策略
+- [ ] 首次生成的 `tomcat.config.toml` 默认 `[llm] provider = "openai-responses"`；`provider = "openai"` 仍可手动配置但不再作为 init 默认路径
 - [ ] 配置文件可正确加载并生效（敏感信息加密存储 TODO 后续考虑）
 - [ ] `tomcat doctor`命令可检测运行环境、WasmEdge依赖、配置合法性，给出修复建议
 - [ ] 引擎可正常启动、关闭，无崩溃、无致命错误日志，跨Windows/macOS/Linux三大平台正常运行
@@ -79,6 +80,7 @@
 - [ ] 实现统一LLM Provider Trait，兼容所有OpenAI API格式的大模型
 - [ ] 支持配置模型的温度、最大Token、上下文窗口等参数，会话级模型配置隔离
 - [ ] 实现流式与非流式LLM调用API，完全对齐pi-mono规范，插件可正常调用
+- [ ] 默认 provider 路径使用 `openai-responses`；当 `thinking.show = true` 时，CLI 默认链路可稳定展示 reasoning / thinking 摘要
 - [ ] 支持Token消耗统计与记录，每次对话显示Token消耗
 - [ ] API密钥可配置并生效，调用支持限流与指数退避重试（加密存储 TODO 后续考虑）
 
@@ -102,12 +104,16 @@
 - [ ] `tomcat chat --resume` 可恢复上次会话，历史上下文从持久化 JSONL 文件加载并注入 LLM
 - [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] 实现会话管理功能，支持创建、切换、归档、删除、搜索会话，历史持久化不丢失
+- [ ] PLAN / EXEC / Pending / Done 的 CLI prompt 与实际模式一致：user 端显示 `u[Plan]>` / `u[Exec]>` / `u[Pending]>` / `u[Done]>`，agent 端显示 `agent.<id>[...]>`；普通聊天维持 `u>` / `agent.<id>>`
+- [ ] `/plan build <plan_id/path>` 成功后立即自动进入首个 EXEC 回合，CLI 可见 `u[Exec]> start building <path>`，无需用户再手动补一句触发执行
+- [ ] 非 EXEC 状态下 `ask_question` 交互为单选 + 自定义 + `skip` 当前题：非法输入只重试当前题，`c` 与 `c <文本>` 都可录入自定义答案，返回结果显式携带 `skipped: true`
 - [ ] 对话中Agent调用4原语/工具时，清晰展示操作内容，等待用户确认后执行
 - [ ] 支持Markdown/代码块高亮渲染，快捷键支持（Ctrl+C中断、Ctrl+D退出、↑↓历史导航）
 - [ ] `tomcat session` 系列命令（list/new/switch/delete/archive/search）可完整管理会话生命周期
 - [ ] Agent 执行工具期间，用户发送新消息可触发 Steering——完成当前工具后跳过剩余工具，注入新指令并重新调用 LLM（中途换方向不需要重新创建会话）
 - [ ] Ctrl+C 可触发 Abort——当前工具执行完毕后立即终止 Agent，发布 agent_end(interrupted)
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
+- [ ] `tomcat chat --resume` 遇到 transcript 尾部 dangling `assistant.tool_calls` 时，hydrate 自动补一条 synthetic tool result `[interrupted]` 并在 transcript 追加可见标记；恢复后可直接继续对话，不触发 OpenAI 400
 - [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在等）给出清晰提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
 - [ ] 单条工具结果超过 `[context].layer0_single_result_max_chars`（默认 **50_000** chars，与 [context-management.md §4.4](../../docs/architecture/context-management.md) 一致）时 Layer 0 落盘 + preview，不撑爆单次请求；可观测事件见 `tool_result_truncated` / 压缩相关事件（以代码与 [events.md](../../docs/architecture/plugin-system/events.md) 为准）
