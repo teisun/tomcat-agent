@@ -1,8 +1,8 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-24 23:30 | ACTIVE | develop | — |
+| Nibbles | 2026-05-25 10:13 | ACTIVE | develop | — |
 
-### 2026-05-24 | docs: 002 看板瘦身 + TODOS 对照代码清理
+### 2026-05-25 | docs: 002 看板瘦身 + TODOS 对照代码清理
 
 - **看板**：`TASK_BOARD_002/README.md` 索引仅保留开放任务 **T2-P0-008 / T2-P0-009 / T2-P1-009**；已完成/已取消 T2 任务卡自 `tasks/` 移除（历史见 Git）；`SCOPE_AND_CONTEXT.md` 同步 Feedback 取消说明。
 - **TODOS**：对照 `develop` 源码与看板状态，移除已实现条目（Plan/Checkpoint/Thinking/compaction 等）与规划冲突项（T-146 Feedback、T-142）；保留 T-153（web 工具 backlog）及 T2 已 DONE 但仍有代码缺口的 follow-up（T-008、T-046、T-148~T-151 等）。

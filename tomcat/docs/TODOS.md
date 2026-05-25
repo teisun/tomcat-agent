@@ -4,7 +4,7 @@
 >
 > 组织方式：**先按领域分类，再在每条上标注档位（P0-P9）**；同档位内用「紧急度标签」`[BUG]/[UX]/[REF]/[DOC]` 做二次排序。
 >
-> 最近更新：2026-05-24（对照 `develop` 代码与 002 看板：移除已实现项 22 条、规划冲突/取消项 3 条）
+> 最近更新：2026-05-25（恢复误删的 T-142/T-146 Feedback 相关 backlog）
 
 ---
 
@@ -72,6 +72,8 @@
 |------|------|------|-----------|---------|
 | — | — | （无开放条目） | Plan / Checkpoint / 集成规范 / Review 相关 T2 均已 DONE | — |
 
+> `T-146 Feedback 回路` 见新增条目区与 **四、会话管理**；对应 T2-P1-005（002 迭代看板已取消，TODOS 仍保留为 P3/P4 铺垫）。
+
 ### P2 — Skill 系统（~5 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
@@ -97,7 +99,7 @@
 | T-140 | 记忆 | USER.md 加载注入 | 新增 |
 | T-141 | 记忆 | MEMORY.md 加载注入 | 新增 |
 
-### P4 — 自进化 / 学习（~10 条）
+### P4 — 自进化 / 学习（~12 条）
 
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
@@ -111,6 +113,8 @@
 | T-113 | 研究 | coworker | |
 | T-116 | 研究 | 对比 CC 对 MCP 调用的优化 | |
 | T-118 | 愿景 | 每天 surprise me、每周 big surprise idea | 学习灵感 |
+| T-142 | 自进化 | 学习回路（Feedback → SKILL/MEMORY 增量） | 新增 |
+| T-146 | 反馈 | Feedback 回路落盘（为 P3/P4 铺垫） | 新增，目前在 P1 实作 |
 
 ### P5 — 多 Agent + 安全 + 多会话（~30 条）
 
@@ -290,6 +294,13 @@
 - [ ] **[P3] `[REF]`** `#T-031` 会话上下文可配置
   - 当前会话、父会话、智能体记忆三级可选
 
+- [ ] **[P1] `[UX]`** `#T-146` Feedback 回路落盘（`session.feedback.jsonl`）
+  - **档位说明**：T2-P1-005；002 迭代看板已取消，本条目仍保留为 P3 记忆 / P4 自进化（T-142）的原料采集 backlog
+  - 目标：捕获用户反馈（👍/👎 + 文字），沉淀到会话 feedback 日志
+  - 子项：CLI `/feedback good|bad <text>` 或快捷键；append-only `session.feedback.jsonl`；schema `{turn_id, rating, text, tags?}`；TUI 消息快捷按钮（与 T2-P0-008 一起做）；为 `USER.md` / `MEMORY.md` 预留字段
+  - 依赖：T2-P0-008（TUI 强化）
+  - 关联模块：`session`、`render`；提供 `FeedbackStore`
+
 ---
 
 ## 五、工具系统
@@ -458,6 +469,11 @@
 - [ ] **[P4] `[REF]`** `#T-095-mem` 自总结生成 skill
   - 档位：P4 自进化；关联 [plugin_skills_first_principles_pi_rust_wasm.md](reports/plugin_skills_first_principles_pi_rust_wasm.md) §5
 
+- [ ] **[P4] `[REF]`** `#T-142` 自进化学习回路（从 Feedback 生成 SKILL/MEMORY 增量）
+  - 参考 [hermes-agent](../../hermes-agent/)
+  - 档位：P4 自进化；依赖 `#T-146` Feedback 落盘作为原料
+  - 目标：将用户反馈与会话信号增量写入 SKILL / MEMORY，而非整文件重写
+
 - [ ] **[P9] `[UX]`** `#T-096-mem` 记录用户感兴趣的事物，定时推送
 
 ---
@@ -572,8 +588,10 @@
 | T-139 | P2 | Skill 工作流引擎（串/并/评审） | 同上 §5 |
 | T-140 | P3 | USER.md 加载注入 | 参考 claude-code；个性化规则 |
 | T-141 | P3 | MEMORY.md 加载注入 | 跨会话长程记忆 |
+| T-142 | P4 | 自进化学习回路（从 Feedback 生成 SKILL/MEMORY 增量） | 参考 [hermes-agent](../../hermes-agent/) |
 | T-143 | P8 | 多 LLM 适配层（Anthropic / Gemini / local-llm） | `src/core/llm/` 解耦 |
 | T-144 | P8 | IM 网关（Telegram / Slack / 企微 / 邮件 / Webhook） | 新增 |
+| T-146 | P1 | Feedback 回路（session.feedback.jsonl） | T2-P1-005；为 P3/P4 铺垫 |
 
 ### 同步变更（本次改造一并完成）
 
@@ -616,13 +634,13 @@
 | **P1** | ~0 | 状态管理；Plan/Checkpoint/集成规范相关 T2 均已 DONE |
 | **P2** | ~5 | Skill 系统（T-114/T-115/T-138/T-139）+ 安全研究（T-147） |
 | **P3** | ~10 | 系统提示词 + 记忆 |
-| **P4** | ~10 | 自进化 / 学习 / 业界研究（T-142/T-146 已取消） |
+| **P4** | ~12 | 自进化 / 学习 / 业界研究（含 T-142/T-146 Feedback 回路） |
 | **P5** | ~35 | 多 Agent + 安全 + 多会话 |
 | **P6** | ~12 | 插件系统（冻结，仅维护） |
 | **P7** | ~4 | 跨平台 |
 | **P8** | ~5 | 多 IM / 多 LLM 适配 |
 | **P9** | ~11 | UI / 远期愿景 / 阅读 |
-| **合计** | **~104** | 详细清单 `[ ]` 条目数（2026-05-24 代码核对后；含 T-153 恢复） |
+| **合计** | **~106** | 详细清单 `[ ]` 条目数（含 T-142/T-146 Feedback 恢复） |
 
 ### 与前一版（P0-P5 紧急度档）变更一览
 
