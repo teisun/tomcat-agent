@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-25 10:13 | ACTIVE | develop | — |
+| Nibbles | 2026-05-25 15:10 | ACTIVE | develop | — |
+
+### 2026-05-25 | build: 恢复 no-wasm 默认编译 + log.level 默认 warn
+
+- **构建**：`wasmedge-sdk` 改回 optional；新增 feature `wasmedge`，`standalone` 依赖 `wasmedge`；`ext` 默认导出 stub，`--features wasmedge` 才链接真实 WasmEdge。
+- **测试/脚本**：`wasmedge_e2e_tests` / `js_api_alignment_tests` 设 `required-features = wasmedge`；`TOMCAT_WASMEDGE_TESTS` 仅保留上述两项；`run-integration-tests.sh` 默认不 install/source WasmEdge，新增 `integration-wasm`。
+- **其它**：`vm_actor` / `instance_stub` 适配 no-wasm；`doctor`/`init` 对未启用 Wasm 构建给出明确提示；文档与示例配置同步；`log.level` 默认值 `info` → `warn`。
+- **阶段 T（门禁）**：`cargo build`、`cargo test --lib`、`cargo build --features wasmedge` 通过。
 
 ### 2026-05-25 | docs: 002 看板瘦身 + TODOS 对照代码清理
 

@@ -16,7 +16,7 @@ fn a_init_logging_console_only_succeeds() {
 #[test]
 fn log_config_default_level() {
     let cfg = LogConfig::default();
-    assert_eq!(cfg.level, "info");
+    assert_eq!(cfg.level, "warn");
 }
 
 #[test]

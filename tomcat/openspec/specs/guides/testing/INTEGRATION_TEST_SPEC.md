@@ -107,10 +107,10 @@ my_project/
 *   **E2E 测试**（进程边界黑盒 + 用户操作模拟）的定义、场景库与覆盖规则见 [E2E_TEST_SPEC.md](E2E_TEST_SPEC.md)；完整用户场景清单见 [E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)；新功能合并时须符合其 §6 强制覆盖规则。
 
 ### 5.4 Wasm 运行时（真实 WasmEdge）
-*   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：默认构建即包含 WasmEdge；在环境已安装 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)` 或 `run_script_file(path)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。
+*   **插件/Wasm 相关集成测试**须包含「真实 Wasm 运行时」验证：默认 no-wasm 构建路径**不**要求编译或执行真实 Wasm 测试；当显式启用 `--features wasmedge`（或 `standalone`）且环境已安装/准备好 WasmEdge、并配置好 wasmedge_quickjs.wasm 路径（如 `WASMEDGE_QUICKJS_PATH` 或 config）时，至少有一个集成测试使用真实 `WasmEngine`/`WasmInstance`，执行 `run_script(js_code)` 或 `run_script_file(path)`，并断言宿主侧行为（如 host_call 被调用、返回符合预期）。
 *   wasmedge_quickjs 集成测试包含真实 .js 脚本：Hello World（`tests/fixtures/wasmedge_quickjs/hello.js`）、4 原语（`tests/fixtures/wasmedge_quickjs/primitives_test.js`）、桥接层（`tests/fixtures/wasmedge_quickjs/bridge_test.js`，验证 `pi.readFile/writeFile/editFile/exec` 通过 `pi_bridge.js` 正确路由到 hostCall）、事件分发（`tests/fixtures/wasmedge_quickjs/event_dispatch_test.js`，验证 `dispatch_event()` 触发 JS handler、ctx 代理对象的动态方法均触发 hostCall），依赖 WASI argv/preopen 与每次新建 Vm；工作目录与临时文件约定见 [工作目录与数据布局](../../../../docs/architecture/work-dir-and-data-layout.md)。桥接层与事件分发架构见 [JS 桥接层](../../../../docs/architecture/plugin-system/js-bridge-layer.md)。
-*   **环境缺失不允许跳过或绕过**。执行全量集成测试前须已安装 WasmEdge 并配置 wasmedge_quickjs.wasm 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`）。
-*   **协助安装**：若环境未安装 WasmEdge，应协助客户全局安装。可运行 `scripts/run-integration-tests.sh` 自动检查并安装后执行全量集成测试；或运行 `scripts/install-wasmedge.sh`（Linux/macOS），或见 https://wasmedge.org/docs/start/install，再执行 `cargo build` 与 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1`。
+*   **环境缺失不允许跳过或绕过**。执行真实 Wasm 集成测试前须已安装 WasmEdge 并配置 wasmedge_quickjs.wasm 路径（如 `assets/wasm/wasmedge_quickjs.wasm` 或 `WASMEDGE_QUICKJS_PATH`）。
+*   **协助安装**：若环境未安装 WasmEdge，应协助客户全局安装。可运行 `scripts/install-wasmedge.sh`（Linux/macOS），或见 https://wasmedge.org/docs/start/install，再执行 `cargo build --features wasmedge` 与 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm`。
 *   **失败即失败**：上述构建或测试若失败，视为集成测试不通过，不得以「环境未就绪」为由跳过或记录为通过。
 *   **不得通过降低断言或放宽验收条件使用例通过**：不得通过降低断言或放宽「宿主侧行为」（如 host_call 被调用、返回符合预期）的验收条件来使用例通过；若运行时/环境不满足要求，须查因修复或记录阻塞，用例视为不通过（见 Constitution 第 24 条）。
 *   与 5.2 中 LLM 真实 API 要求并列：Wasm 与 LLM 均为「须在真实环境下验证」的外部依赖。
@@ -124,10 +124,11 @@ my_project/
 ## 7. 执行与持续集成 (CI)
 
 ### 7.1 本地执行
-*   **分类执行约定（本仓库）**：默认让可并发的测试目标并发执行；只有涉及进程级全局资源、真实 Wasm 运行时、长生命周期 VM 或重子进程的目标进入串行组，使用 `-j 1` 与 `--test-threads=1`。一键脚本 `./scripts/run-integration-tests.sh` 是分类执行的唯一入口。
-*   运行所有集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`
+*   **分类执行约定（本仓库）**：默认让可并发的测试目标并发执行；只有涉及进程级全局资源、真实 Wasm 运行时、长生命周期 VM 或重子进程的目标进入串行组，使用 `-j 1` 与 `--test-threads=1`。一键脚本 `./scripts/run-integration-tests.sh` 是分类执行的唯一入口；默认 `integration` / `all` **不包含真实 Wasm 验收**。
+*   运行默认集成测试（不含真实 Wasm 组）：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`
 *   仅运行可并发集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`
 *   仅运行必须串行集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
+*   仅运行真实 Wasm 集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm`
 *   运行特定文件：若该目标无全局资源依赖，可用 `RUST_LOG=tomcat=debug,info cargo test --test audit_tests -- --nocapture`；若属于串行组，须用 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`。
 *   显示打印输出（含库内单元测试）：`RUST_LOG=tomcat=debug,info cargo test --lib -- --nocapture`
 
@@ -140,6 +141,9 @@ my_project/
 **必须串行组**（强制 `-j 1 --test-threads=1`；与 `TOMCAT_INTEGRATION_SERIAL_TESTS` 对齐）：
 `cli_tests`、`wasmedge_e2e_tests`、`long_lived_vm_tests`、`js_api_alignment_tests`、`hostcall_tests`、`primitives_tools_tests`、`tool_catalog_doc`。
 
+**真实 Wasm 组**（与 `TOMCAT_WASMEDGE_TESTS` 对齐；默认 `integration` / `all` 不执行）：
+`wasmedge_e2e_tests`、`js_api_alignment_tests`。
+
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：
 1.  **代码风格检查**：`cargo fmt --check`
@@ -148,8 +152,11 @@ my_project/
 4.  **覆盖率要求**：集成测试应覆盖核心业务路径（使用 `cargo-tarpaulin` 统计）。
 
 ### 7.4 全量集成测试
-跑全量集成测试时与外部真实环境交互，使用：
+跑默认全量集成测试（不含真实 Wasm）时使用：
 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`
+
+需要真实 Wasm 验收时，再单独执行：
+`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm`
 
 ## 8. 最佳实践建议
 *   **不要过度 Mock**：集成测试的价值在于真实性，如果所有外部依赖都被 Mock 了，那它就变成了单元测试。

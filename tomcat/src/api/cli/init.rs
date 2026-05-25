@@ -224,7 +224,12 @@ pub(crate) fn run_doctor_checks(
         Ok(_) => println!("✓ WasmEdge 运行时：可用"),
         Err(e) => {
             println!("✗ WasmEdge 运行时：不可用 ({})", e);
+            #[cfg(feature = "wasmedge")]
             println!("  → 安装 WasmEdge: https://wasmedge.org/docs/start/install");
+            #[cfg(not(feature = "wasmedge"))]
+            println!(
+                "  → 当前构建未启用 Wasm/插件能力；如需扩展功能，请使用 `cargo build --features wasmedge` 或 `--features standalone` 重新编译"
+            );
         }
     }
 

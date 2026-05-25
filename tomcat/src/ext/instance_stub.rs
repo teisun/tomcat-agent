@@ -40,6 +40,11 @@ impl WasmInstance {
         Ok(())
     }
 
+    /// 返回实例对应的插件/运行时 ID。
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
     /// 销毁实例，释放资源（桩：无操作）。
     pub fn destroy(self) {}
 }

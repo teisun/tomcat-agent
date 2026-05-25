@@ -154,7 +154,7 @@ pub trait EventBus: Send + Sync + 'static {
 |--------------------|------|--------|
 | `TOMCAT__*`（`__` 为嵌套分隔） | 覆盖对应配置项 | - |
 | 配置文件 | TOML，由 `load_config(Some(path))` 指定 | - |
-| `log.level` | trace / debug / info / warn / error | info |
+| `log.level` | trace / debug / info / warn / error | warn |
 | `log.file_enabled` | 是否将 tracing 写入 `resolve_log_dir` 下按日文件 | false |
 | `llm.proxy` | 显式 HTTP 代理 URL；不设时 reqwest 使用 `HTTPS_PROXY`/`HTTP_PROXY` | - |
 | `llm.api_base_fallback` | 主 API 不通时自动重试的备用 base | - |

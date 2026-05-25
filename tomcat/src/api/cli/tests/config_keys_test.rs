@@ -17,7 +17,7 @@ fn resolve_toml_key_finds_nested() {
     let val = toml::Value::try_from(&cfg).unwrap();
     let found = resolve_toml_key(&val, "log.level");
     assert!(found.is_some());
-    assert_eq!(found.unwrap().as_str().unwrap(), "info");
+    assert_eq!(found.unwrap().as_str().unwrap(), "warn");
 }
 
 #[test]

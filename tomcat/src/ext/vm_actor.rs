@@ -92,6 +92,7 @@ impl VmActorHandle {
 /// VM actor：封装 WasmInstance，在专属线程中运行。
 pub struct VmActor {
     instance: WasmInstance,
+    #[cfg_attr(not(feature = "wasmedge"), allow(dead_code))]
     script_path: PathBuf,
     cmd_rx: tokio::sync::mpsc::Receiver<VmCommand>,
     event_rx: std::sync::mpsc::Receiver<EventEnvelope>,
@@ -202,6 +203,7 @@ impl VmActor {
         }
     }
 
+    #[cfg(feature = "wasmedge")]
     fn run_vm(&mut self) -> Result<(), AppError> {
         let pid = self.instance.plugin_id().to_string();
         tracing::debug!("[VmActor {pid}] run_vm: init_vm start");
@@ -225,6 +227,13 @@ impl VmActor {
                 }
             }
         }
+    }
+
+    #[cfg(not(feature = "wasmedge"))]
+    fn run_vm(&mut self) -> Result<(), AppError> {
+        Err(AppError::WasmEdge(
+            "VM actor requires `--features wasmedge` or `--features standalone`.".to_string(),
+        ))
     }
 
     /// 获取事件接收端的引用（供 dispatcher waitForEvent 路由使用）。

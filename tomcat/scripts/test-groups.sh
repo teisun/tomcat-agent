@@ -47,8 +47,5 @@ TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
 
 TOMCAT_WASMEDGE_TESTS=(
   wasmedge_e2e_tests
-  long_lived_vm_tests
   js_api_alignment_tests
-  hostcall_tests
-  primitives_tools_tests
 )

@@ -1,5 +1,5 @@
 //! Wasm E2E 集成测试：真实 WasmEngine + run_script + host_call 链路。
-//! 须在安装 WasmEdge 后以 `cargo test -j 1 --test wasmedge_e2e_tests -- --test-threads=1` 运行（默认构建即包含 WasmEdge；串行约定见 INTEGRATION_TEST_SPEC §7.1）；
+//! 须在安装 WasmEdge 后以 `cargo test -j 1 --features wasmedge --test wasmedge_e2e_tests -- --test-threads=1` 运行（真实 Wasm 组默认不进日常全量；串行约定见 INTEGRATION_TEST_SPEC §7.1）；
 //! 环境缺失时用例失败、不允许跳过，见 INTEGRATION_TEST_SPEC 5.4 与 src/ext/README.md。
 
 mod common;

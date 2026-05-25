@@ -39,12 +39,14 @@ chmod +x tomcat && mv tomcat /usr/local/bin/
 | 依赖 | 版本要求 | 用途 |
 |------|----------|------|
 | Rust | stable 1.70+ | 编译 |
-| WasmEdge C 库 | 0.13.5 | 默认需要（通过 `install-wasmedge.sh` 安装） |
+| WasmEdge C 库 | 0.13.5 | 仅 `--features wasmedge` 模式需要（通过 `install-wasmedge.sh` 安装） |
 | CMake + C 编译器 | 任意 | 仅 `--features standalone` 模式需要（自动下载并链接 WasmEdge） |
 
 ```bash
 cd tomcat
-cargo build --release          # 默认使用系统已安装的 WasmEdge，编译快
+cargo build --release                     # 默认 no-wasm：不依赖 WasmEdge，插件能力关闭
+# 显式启用真实 WasmEdge（需已安装 WasmEdge C 库）：
+# cargo build --release --features wasmedge
 # 或自动下载并链接 WasmEdge（无需预装，但首次编译慢）：
 # cargo build --release --features standalone
 ```
@@ -165,12 +167,13 @@ doctor 逐项检查环境并给出可执行的修复建议：
 | 配置文件 | `✓ 配置合法 (~/.tomcat/tomcat.config.toml)` | `✗ 未找到配置文件` |
 | 内嵌资源 | `✓ 内嵌资源已就绪` | `✗ 资源释放失败` |
 | QuickJS wasm | `✓ QuickJS wasm：~/.tomcat/assets/wasm/...` | `✗ QuickJS wasm 未找到` |
-| WasmEdge 运行时 | `✓ WasmEdge 运行时：可用` | `✗ WasmEdge 运行时：不可用` |
+| WasmEdge 运行时 | `✓ WasmEdge 运行时：可用` | `✗ WasmEdge 运行时：不可用` 或“当前构建未启用 Wasm/插件能力” |
 | 资源版本 | `资源版本: wasm=abc123... modules=def456...` | — |
 | .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
 | API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
 每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。
+若当前二进制未启用 `--features wasmedge` / `standalone`，`doctor` 会明确提示“当前构建未启用 Wasm/插件能力”，这属于预期。
 
 ---
 
@@ -188,7 +191,7 @@ tomcat config get
 
 ```toml
 [log]
-level = "info"
+level = "warn"
 file_enabled = true
 
 [llm]
@@ -204,7 +207,7 @@ default_model = "gpt-5.2"
 
 ```bash
 tomcat config get log.level
-# info
+# warn
 
 tomcat config get llm.default_model
 # gpt-5.2
@@ -758,7 +761,16 @@ tomcat init   # 重新运行 init 触发资源释放
 
 **Q: WasmEdge 运行时不可用**
 
-默认编译使用系统已安装的 WasmEdge C 库，需先安装：
+先区分两种情况：
+
+1. **当前构建没开 Wasm 功能**：`tomcat doctor` 会提示“当前构建未启用 Wasm/插件能力”。  
+   这时不是环境坏了，而是你当前编出来的就是 no-wasm 版本。如需插件能力，请重新编译：
+
+```bash
+cargo build --release --features wasmedge
+```
+
+2. **已经开了 `--features wasmedge`，但运行时仍不可用**：说明本机缺 WasmEdge C 库，先安装：
 
 ```bash
 bash scripts/install-wasmedge.sh -y

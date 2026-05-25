@@ -9,7 +9,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-standalone = ["wasmedge-sdk/standalone"]
+wasmedge = ["dep:wasmedge-sdk"]
+standalone = ["wasmedge", "wasmedge-sdk/standalone"]
 
 [dependencies]
 thiserror = "2.0"
@@ -39,7 +40,7 @@ rustyline = "15"
 syntect = "5"
 ctrlc = { version = "3", features = ["termination"] }
 # 0.13.5-newapi 对应 WasmEdge C 0.13.5，与 install-wasmedge.sh 默认版本一致
-wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot"] }
+wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot"], optional = true }
 swc_common = "18.0.1"
 swc_ecma_ast = "20.0.1"
 swc_ecma_codegen = "23.0.0"
@@ -84,3 +85,13 @@ dotenvy = "0.15"
 # `features` 是 additive：生产构建仍只用 [dependencies] 里的 `full` 集合，不引入测试工具。
 tokio = { version = "1.0", features = ["test-util"] }
 serial_test = "3.4.0"
+
+[[test]]
+name = "wasmedge_e2e_tests"
+path = "tests/wasmedge_e2e_tests.rs"
+required-features = ["wasmedge"]
+
+[[test]]
+name = "js_api_alignment_tests"
+path = "tests/js_api_alignment_tests.rs"
+required-features = ["wasmedge"]

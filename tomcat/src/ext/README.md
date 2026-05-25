@@ -6,7 +6,7 @@
 - **所在层级**：扩展层（依赖 `infra`、通过 Trait 使用 `core` 中的类型与执行器）。
 - **核心文件**：
   - `src/ext/mod.rs` — 聚合 engine、instance、host_binding、dispatcher、plugin、VmActor、RuntimeManager 等
-  - `src/ext/engine_wasmedge.rs` — **默认**：`WasmEngine` 单例与 `WasmInstance` 创建（WasmEdge 实现）
+  - `src/ext/engine_wasmedge.rs` — `--features wasmedge` / `standalone` 时启用：`WasmEngine` 单例与 `WasmInstance` 创建（WasmEdge 实现）
   - `src/ext/instance_wasmedge.rs` — 单插件 Wasm 实例：QuickJS、`run_script` / `run_script_file`、宿主导入 `__pi_host_call`
   - `src/ext/engine_stub.rs` / `src/ext/instance_stub.rs` — 桩实现，保留用于测试或最小构建路径（`#[allow(dead_code)]`）
   - `src/ext/host_binding.rs` — HostRequest/HostResponse、`invoke_host_func` / `invoke_host_func_with` 入口
@@ -42,13 +42,16 @@
 
 ## 2. 设计要点
 
-- **007**：WasmEngine 全局单例、单插件独立 WasmInstance、宿主导入绑定骨架；资源上限预留 Standard 默认。**默认构建即包含 WasmEdge 真实实现**（见下节），需安装 WasmEdge C 库。
+- **007**：WasmEngine 全局单例、单插件独立 WasmInstance、宿主导入绑定骨架；资源上限预留 Standard 默认。**默认构建为桩实现**；启用 `--features wasmedge` 或 `--features standalone` 后才接入真实 WasmEdge 运行时。
 - **008**：HostApiDispatcher 单入口多路复用；EventBus 必选，PrimitiveExecutor/ToolRegistry/LlmProvider 可选注入。
 - **009**：PluginManifest 解析与校验；PluginManager 注册/启用/禁用/卸载；卸载时调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools。**9.2 完整加载流程**：`PluginManager::load_plugin(path)` 从磁盘路径完成「读清单与 main → 权限校验与用户确认 → 创建 Wasm 实例 → 注册授权 API → 注入并执行插件初始化代码 → 注册到 PluginManager」；调用前须通过 `set_wasm_engine` 注入引擎，`set_host_dispatcher` / `set_confirm_permissions` 可选；与 design CODE_BLOCK_P1_009 对齐。
 
-## 3. WasmEdge 真实实现（默认包含）
+## 3. WasmEdge 真实实现（显式启用）
 
-- **构建方式**：默认即启用 WasmEdge，`cargo build` 即可；需先安装 WasmEdge C 库（见 https://wasmedge.org/docs/start/install，或运行 `./scripts/install-wasmedge.sh`（Linux/macOS））。
+- **构建方式**：
+  - 默认 `cargo build`：走 `engine_stub.rs` / `instance_stub.rs`，主项目可编译，但插件/Wasm 能力不可用
+  - `cargo build --features wasmedge`：启用真实 WasmEdge，需先安装 WasmEdge C 库
+  - `cargo build --features standalone`：同样启用真实 WasmEdge，但构建时自动下载/链接 C 库
 - **WasmEngine**：全局单例，Config 开启 WASI、统计、内存上限（max_memory_pages）；`set_memory_limit` 已预留，MVP 使用固定 Standard 值。
 - **WasmInstance**：每插件独立 Vm；宿主导入 `env.__pi_host_call` 注册，供 QuickJS 映射到全局；`run_script` / `run_script_file` 通过 wasmedge_quickjs.wasm 执行 JS，每次执行新建 Vm 与 WasiModule（argv + preopen），脚本会被真正执行。`run_script` 写入的临时 script.js 可放在工作目录的 agent tmp（见 [工作目录与数据布局](../../docs/architecture/work-dir-and-data-layout.md)）；QuickJS wasm 路径可通过 config `[wasm] quickjs_path` 或环境变量 `TOMCAT__WASM__QUICKJS_PATH`（覆盖 config）、未设置时回退到 `WASMEDGE_QUICKJS_PATH` 配置。
 - **Node 兼容层**：由 wasmedge_quickjs.wasm 提供，范围包括 fs、path、process、console、http 等常用模块；具体能力以 WasmEdge QuickJS 扩展为准。
@@ -121,7 +124,8 @@ flowchart LR
 
 ### 集成测试要求
 
-- 全量集成测试要求使用真实 Wasm 运行时，**环境缺失不允许跳过**。可执行 `./scripts/run-integration-tests.sh` 自动完成环境检查、未安装则安装（并写入 profile，新开终端无需再 source）、再跑集成测试；或须先全局安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build`、`cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1`；若构建或测试失败则视为集成测试失败。
+- 默认 no-wasm 路径的日常全量脚本**不运行真实 Wasm 集成测试**；真实 Wasm 验收需显式触发。
+- 真实 Wasm 验收要求环境缺失不允许跳过：先安装 WasmEdge（见 https://wasmedge.org/docs/start/install，或执行 `./scripts/install-wasmedge.sh`），并配置 quickjs 路径，再执行 `cargo build --features wasmedge` 与 `./scripts/run-integration-tests.sh integration-wasm`；若构建或测试失败则视为集成测试失败。
 - wasmedge_quickjs 集成测试包含：**真实 .js Hello World**（`tests/fixtures/wasmedge_quickjs/hello.js`，`run_script` 内联与 `run_script_file` 路径两种方式）、**4 原语 .js**（`tests/fixtures/wasmedge_quickjs/primitives_test.js`），依赖 run_script/run_script_file 的 WASI argv/preopen 与每次新建 Vm。
 
 ## 4. 插件完整加载流程（9.2）
@@ -136,4 +140,4 @@ flowchart LR
 ## 5. 依赖与后续
 
 - **005/006/004**：Dispatcher 通过 with_primitive/with_tools/with_llm 注入；未注入时返回明确错误，待合并后接实线。
-- **跨平台**：Windows/macOS/Linux 各需在对应环境安装 WasmEdge 后执行 `cargo build` 验证。
+- **跨平台**：Windows/macOS/Linux 在 no-wasm 模式下都应能执行 `cargo build`；需要插件/Wasm 能力时，再在对应环境安装 WasmEdge 后执行 `cargo build --features wasmedge` 验证。

@@ -3,7 +3,7 @@
 //! 验证 pi_bridge.js 的异步 API（exec、createChatCompletion）与
 //! pi-mono ExtensionAPI 兼容：返回 Promise、结果格式对齐，off/emit/once 行为正确。
 //!
-//! 须在安装 WasmEdge 后运行（同 wasmedge_e2e_tests）；
+//! 须在安装 WasmEdge 后以 `cargo test --features wasmedge --test js_api_alignment_tests` 运行（同 wasmedge_e2e_tests）；
 //! 宿主侧使用 HostApiDispatcher + PrimitiveExecutor + Tokio 运行时，
 //! 模拟真实插件执行环境。
 

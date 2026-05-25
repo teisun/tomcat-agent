@@ -1,15 +1,15 @@
 # tomcat
 
-基于 Rust + WasmEdge 构建的轻量、高安全、可自进化 AI Agent 核心运行时。通过 WasmEdge 内置的 QuickJS 引擎与 Node.js 兼容层，实现 pi-mono 生态 100% 兼容，提供沙箱隔离的插件系统、原子化 4 原语能力。
+基于 Rust 构建的轻量、高安全、可自进化 AI Agent 核心运行时。默认构建可在无 WasmEdge 环境下编译；启用 `--features wasmedge` 或 `--features standalone` 后接入 WasmEdge + QuickJS 插件运行时，提供沙箱隔离的插件系统、原子化 4 原语能力。
 
 ## 快速开始
 
 ### 前置依赖
 
 - Rust 1.70+（推荐 stable）
-- WasmEdge C 库 0.13.5
+- WasmEdge C 库 0.13.5（仅 `--features wasmedge` 时需要）
 
-### 安装 WasmEdge
+### 按需安装 WasmEdge（真实 Wasm 模式）
 
 ```bash
 bash scripts/install-wasmedge.sh -y
@@ -19,7 +19,9 @@ source $HOME/.wasmedge/env
 ### 构建与运行
 
 ```bash
-cargo build --release
+cargo build --release                     # 默认 no-wasm 构建
+# cargo build --release --features wasmedge   # 启用真实 WasmEdge（需预装 C 库）
+# cargo build --release --features standalone # 自动下载并链接 WasmEdge
 ./target/release/tomcat init    # 生成配置文件
 ./target/release/tomcat doctor # 检查环境
 ```
@@ -28,8 +30,9 @@ cargo build --release
 
 ```bash
 # 需要先配置 .env（参考 .env.example）
-# -j 1：串行执行各测试二进制；--test-threads=1：串行执行同一二进制内用例（Wasm/Tokio 场景推荐，见 INTEGRATION_TEST_SPEC §7.1）
-RUST_LOG=tomcat=debug,info cargo test -j 1 --all -- --nocapture --test-threads=1
+RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration
+# 真实 Wasm 验收需单独执行：
+# RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm
 ```
 
 ## 项目结构
