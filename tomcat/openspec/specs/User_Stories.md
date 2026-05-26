@@ -22,6 +22,8 @@
 - [ ] 完全对齐pi-mono的read/write/edit/bash API规范，功能完整
 - [ ] 实现路径授权根机制：`agent_definition_dir` 为默认允许根，`workspace.workspace_roots` / 会话授权用于扩大外部目录访问，`primitive.path_rules` 提供 deny / readonly 规则；`agent_workspace_dir` 只作为当前目录语义来源，不自动授权
 - [ ] 实现bash命令管控：`bash_forbidden` 直接拦截，`bash_approval_required` 需用户确认，路径 token 与 `NAME=/path` assignment RHS 都必须进入同一套路径权限预检
+- [ ] `search_files` 收到空 `type` / 空 `glob` 时按“未传”处理，不得把空字符串继续透传到 `rg` / fallback，也不得再出现 `rg: unrecognized file type:` 这类占位空串导致的伪错误
+- [ ] `bash.cwd` 收到空字符串时按“未传”处理；若路径不存在或不是目录，必须在 `spawn` 前返回可定位错误，文案同时包含解析后路径与原始输入；`$HOME/...` 这类 shell 变量写法只给提示“不自动展开”，不能误伤客观存在的字面目录名
 - [ ] write/edit操作前自动备份原文件，支持回滚，操作前显示diff预览与用户确认
 - [ ] 所有4原语操作完整记录审计日志，包含操作内容、用户确认状态、执行结果、时间戳
 - [ ] 支持全局配置自动确认策略；legacy `path_whitelist` / `bash_whitelist` / `auto_confirm_whitelist` 配置字段已删除

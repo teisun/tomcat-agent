@@ -285,7 +285,7 @@ Parameters:
       "type": "integer"
     },
     "glob": {
-      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`.",
+      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`. Omit when not used; do not pass an empty string.",
       "type": "string"
     },
     "head_limit": {
@@ -336,7 +336,7 @@ Parameters:
       "type": "string"
     },
     "type": {
-      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`.",
+      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`. Omit when not used; do not pass an empty string.",
       "type": "string"
     }
   },
@@ -784,7 +784,7 @@ Parameters:
       "type": "string"
     },
     "cwd": {
-      "description": "Optional working directory. Use the project cwd when the user asks to run in the current project; missing falls back to the agent process working directory.",
+      "description": "Optional working directory. Omit when not needed. Empty strings are treated as missing. Pass a real absolute path or `~/...`; shell env vars like `$HOME/...` are NOT expanded here. When omitted, falls back to the agent process working directory.",
       "type": "string"
     },
     "run_in_background": {

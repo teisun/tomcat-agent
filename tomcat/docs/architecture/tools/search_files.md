@@ -124,8 +124,8 @@
 | `pattern` | string | **是** | — | both | `target=content`：ripgrep regex；`target=files`：路径 glob（如 `*.rs`、`src/**/*.rs`） |
 | `target` | enum `"content"` \| `"files"` | 否 | `"content"` | both | `content` 在文件**内**搜；`files` 搜**路径** |
 | `path` | string | 否 | 当前工作区 | both | 搜索根；必须通过 Read 权限 gate |
-| `glob` | string | 否 | — | content | 文件路径过滤，如 `*.rs`、`**/*.md` |
-| `type` | string | 否 | — | content | ripgrep 文件类型 alias，如 `rust` / `js` / `py` / `md` / `toml` / `json` / `yaml` |
+| `glob` | string | 否 | — | content | 文件路径过滤，如 `*.rs`、`**/*.md`；**不使用就省略**，空字符串按“未传”处理 |
+| `type` | string | 否 | — | content | ripgrep 文件类型 alias，如 `rust` / `js` / `py` / `md` / `toml` / `json` / `yaml`；**不使用就省略**，空字符串按“未传”处理 |
 | `output_mode` | enum `"content"` \| `"files_with_matches"` \| `"count"` | 否 | `"files_with_matches"` | content | 返回行 / 命中文件集 / 每文件计数 |
 | `context` | integer ≥ 0 | 否 | 0 | content（仅 `output_mode=content`） | 命中行前后各 N 行；Tier2 不实现 → warning |
 | `head_limit` | integer 1..=1024 \| `null` | 否 | content=64, files=128 | both | `null` = 不限；`0` 校验失败；与 `offset` 搭配 |
@@ -137,6 +137,8 @@
 > - 字段缺省 → 用 target 默认值；
 > - 显式 `null` → 不限；
 > - 显式整数 → 上限（≤ 1024，0 拒绝）。
+>
+> **空字符串归一化**：`glob=""` / `type=""` 会在反序列化与执行层统一视为“未传”，既不会透传给 Tier1 `rg`，也不会在 Tier2 fallback 里构造空 matcher；`query.glob` / `query.type` 会回显为 `null`。
 
 ### 3.2 出参 `SearchFilesOutput`
 

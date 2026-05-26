@@ -29,7 +29,7 @@ use crate::infra::error::AppError;
 use crate::infra::{
     DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_BASH_TIMEOUT_MS, MAX_TOOLS_BASH_TIMEOUT_MS,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -79,6 +79,84 @@ fn resolve_preflight_path(raw: &str, cwd_path: &std::path::Path) -> PathBuf {
         return base.join(raw);
     }
     PathBuf::from(raw)
+}
+
+fn record_bash_failure(
+    executor: &DefaultPrimitiveExecutor,
+    audit_cmd: &str,
+    plugin_id: &str,
+    err: &AppError,
+) {
+    executor.audit.record_primitive(PrimitiveAuditEntry {
+        operation: AuditPrimitiveOp::Bash,
+        path_or_cmd: audit_cmd.to_string(),
+        plugin_id: plugin_id.to_string(),
+        user_approved: false,
+        success: false,
+        detail: Some(err.to_string()),
+        ..Default::default()
+    });
+}
+
+fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
+    if !path.try_exists().map_err(AppError::Io)? {
+        let mut msg = format!(
+            "bash.cwd does not exist: {} (input: {:?})",
+            path.display(),
+            raw_cwd
+        );
+        if raw_cwd.contains('$') {
+            msg.push_str(
+                "; environment variables are not expanded here; pass an absolute path or ~/...",
+            );
+        }
+        return Err(AppError::Primitive(msg));
+    }
+    if !path.is_dir() {
+        return Err(AppError::Primitive(format!(
+            "bash.cwd is not a directory: {} (input: {:?})",
+            path.display(),
+            raw_cwd
+        )));
+    }
+    Ok(())
+}
+
+async fn resolve_bash_cwd(
+    executor: &DefaultPrimitiveExecutor,
+    cwd: Option<&str>,
+    audit_cmd: &str,
+    plugin_id: &str,
+) -> Result<(PathBuf, Option<String>), AppError> {
+    let raw_cwd = cwd.and_then(|value| {
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    });
+
+    let cwd_path = if let Some(raw_cwd_value) = raw_cwd.as_deref() {
+        let path = match executor
+            .gate_check_path(PrimitiveOperation::Read, raw_cwd_value, plugin_id)
+            .await
+        {
+            Ok((path, _, _)) => path,
+            Err(err) => {
+                record_bash_failure(executor, audit_cmd, plugin_id, &err);
+                return Err(err);
+            }
+        };
+        if let Err(err) = validate_bash_cwd(&path, raw_cwd_value) {
+            record_bash_failure(executor, audit_cmd, plugin_id, &err);
+            return Err(err);
+        }
+        path
+    } else {
+        PathBuf::from(".")
+    };
+
+    Ok((cwd_path, raw_cwd))
 }
 
 /// 对命令串里**显式前缀路径 token**做 gate 预检（`/path`、`~/`、`./`、`../`、
@@ -166,15 +244,6 @@ pub(super) async fn execute_bash_impl(
 ) -> Result<BashResult, AppError> {
     // 空 argv 应等价于“未提供 args”，继续走 shell 模式；真 LLM 常会显式传 `args: []`。
     let argv = argv.filter(|args| !args.is_empty());
-    let cwd_path = if let Some(c) = cwd {
-        let (p, _l, _s) = executor
-            .gate_check_path(PrimitiveOperation::Read, c, plugin_id)
-            .await?;
-        p
-    } else {
-        PathBuf::from(".")
-    };
-
     let audit_cmd = match argv {
         None => command.to_string(),
         Some(args) => {
@@ -186,34 +255,19 @@ pub(super) async fn execute_bash_impl(
             s
         }
     };
+    let (cwd_path, raw_cwd) = resolve_bash_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
 
     // T2-P0-016 PR-L：AST 切段 + allow/deny 命中判定，**叠在** gate_check_bash 之前。
     // 默认空 list 时 BashAstChecker 仅做切段、不做命中——与今日行为字节级等价；
     // 命中 deny 立即 AppError + 审计 false / 不进入 gate。详见 bash-pr-l-scope §4。
     if let Err(reject) = executor.bash_ast.check(&audit_cmd) {
         let err = AppError::Primitive(reject.to_string());
-        executor.audit.record_primitive(PrimitiveAuditEntry {
-            operation: AuditPrimitiveOp::Bash,
-            path_or_cmd: audit_cmd.clone(),
-            plugin_id: plugin_id.to_string(),
-            user_approved: false,
-            success: false,
-            detail: Some(err.to_string()),
-            ..Default::default()
-        });
+        record_bash_failure(executor, &audit_cmd, plugin_id, &err);
         return Err(err);
     }
 
     if let Err(e) = preflight_command_paths(executor, &audit_cmd, &cwd_path, plugin_id).await {
-        executor.audit.record_primitive(PrimitiveAuditEntry {
-            operation: AuditPrimitiveOp::Bash,
-            path_or_cmd: audit_cmd.clone(),
-            plugin_id: plugin_id.to_string(),
-            user_approved: false,
-            success: false,
-            detail: Some(e.to_string()),
-            ..Default::default()
-        });
+        record_bash_failure(executor, &audit_cmd, plugin_id, &e);
         return Err(e);
     }
 
@@ -221,15 +275,7 @@ pub(super) async fn execute_bash_impl(
     let (bash_scope, bash_grant) = match executor.gate_check_bash(&audit_cmd, plugin_id).await {
         Ok((scope, grant)) => (scope, grant),
         Err(e) => {
-            executor.audit.record_primitive(PrimitiveAuditEntry {
-                operation: AuditPrimitiveOp::Bash,
-                path_or_cmd: audit_cmd.clone(),
-                plugin_id: plugin_id.to_string(),
-                user_approved: false,
-                success: false,
-                detail: Some(e.to_string()),
-                ..Default::default()
-            });
+            record_bash_failure(executor, &audit_cmd, plugin_id, &e);
             return Err(e);
         }
     };
@@ -278,9 +324,14 @@ pub(super) async fn execute_bash_impl(
     cmd.process_group(0);
 
     // 5. spawn —— 必须 spawn 才能在超时分支拿到 Child::kill 的句柄
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Primitive(e.to_string()))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        AppError::Primitive(format!(
+            "bash spawn failed (cwd={}, input={:?}): {}",
+            cwd_path.display(),
+            raw_cwd.as_deref().unwrap_or("<inherited>"),
+            e
+        ))
+    })?;
 
     // 6. 并行 reader（与下面的 wait+timeout 解耦，便于超时分支独立 kill）
     let (stdout_task, stderr_task) = spawn_pipe_readers(&mut child);

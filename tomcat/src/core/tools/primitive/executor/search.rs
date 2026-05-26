@@ -195,6 +195,8 @@ fn search_files_query(
     limit: Option<usize>,
     output_mode: Option<SearchFilesOutputMode>,
 ) -> SearchFilesQuery {
+    let query_glob = non_empty_optional_string(args.glob.as_deref());
+    let query_file_type = non_empty_optional_string(args.file_type.as_deref());
     SearchFilesQuery {
         pattern: args.pattern.clone(),
         target: args.target,
@@ -202,12 +204,12 @@ fn search_files_query(
         glob: if args.target == SearchFilesTarget::Files {
             None
         } else {
-            args.glob.clone()
+            query_glob
         },
         file_type: if args.target == SearchFilesTarget::Files {
             None
         } else {
-            args.file_type.clone()
+            query_file_type
         },
         output_mode,
         head_limit: limit,
@@ -230,6 +232,14 @@ fn fallback_warning(warnings: &mut Vec<String>) {
 
 fn tier1_warning(warnings: &mut Vec<String>) {
     warnings.push("implementation=tier1 rg/fd".to_string());
+}
+
+fn non_empty_optional_str(value: Option<&str>) -> Option<&str> {
+    value.filter(|s| !s.trim().is_empty())
+}
+
+fn non_empty_optional_string(value: Option<&str>) -> Option<String> {
+    non_empty_optional_str(value).map(str::to_string)
 }
 
 fn normalize_rel_path(path: &Path) -> String {
@@ -334,7 +344,9 @@ fn collect_fallback_files(
 ) -> Result<Vec<(String, PathBuf)>, AppError> {
     let globset = match args.target {
         SearchFilesTarget::Files => Some(build_globset(&args.pattern)?),
-        SearchFilesTarget::Content => args.glob.as_deref().map(build_globset).transpose()?,
+        SearchFilesTarget::Content => non_empty_optional_str(args.glob.as_deref())
+            .map(build_globset)
+            .transpose()?,
     };
     let start = if path.is_file() { path } else { root };
 
@@ -370,7 +382,7 @@ fn collect_fallback_files(
         }
         let abs = entry.path().to_path_buf();
         let extension_filter = (args.target == SearchFilesTarget::Content)
-            .then_some(args.file_type.as_deref())
+            .then_some(non_empty_optional_str(args.file_type.as_deref()))
             .flatten();
         if !matches_file_type(&abs, extension_filter, warnings) {
             continue;
@@ -790,10 +802,10 @@ pub(super) async fn search_files_impl(
                 if args.include_hidden {
                     cmd.arg("--hidden");
                 }
-                if let Some(glob) = args.glob.as_deref() {
+                if let Some(glob) = non_empty_optional_str(args.glob.as_deref()) {
                     cmd.arg("--glob").arg(glob);
                 }
-                if let Some(file_type) = args.file_type.as_deref() {
+                if let Some(file_type) = non_empty_optional_str(args.file_type.as_deref()) {
                     cmd.arg("--type").arg(file_type);
                 }
                 cmd.arg(&args.pattern)
@@ -825,18 +837,12 @@ pub(super) async fn search_files_impl(
                         let (files, truncated, next_offset) = paginate(files, args.offset, limit);
                         SearchFilesOutput {
                             mode: SearchFilesResultMode::ContentFiles,
-                            query: SearchFilesQuery {
-                                pattern: args.pattern.clone(),
-                                target: args.target,
-                                path: path_buf.to_string_lossy().into_owned(),
-                                glob: args.glob.clone(),
-                                file_type: args.file_type.clone(),
-                                output_mode: Some(args.output_mode),
-                                head_limit: limit,
-                                offset: args.offset,
-                                case_insensitive: args.case_insensitive,
-                                include_hidden: args.include_hidden,
-                            },
+                            query: search_files_query(
+                                &args,
+                                &path_buf,
+                                limit,
+                                Some(args.output_mode),
+                            ),
                             files: Some(files),
                             matches: None,
                             counts: None,
@@ -862,18 +868,12 @@ pub(super) async fn search_files_impl(
                         let (counts, truncated, next_offset) = paginate(counts, args.offset, limit);
                         SearchFilesOutput {
                             mode: SearchFilesResultMode::ContentCount,
-                            query: SearchFilesQuery {
-                                pattern: args.pattern.clone(),
-                                target: args.target,
-                                path: path_buf.to_string_lossy().into_owned(),
-                                glob: args.glob.clone(),
-                                file_type: args.file_type.clone(),
-                                output_mode: Some(args.output_mode),
-                                head_limit: limit,
-                                offset: args.offset,
-                                case_insensitive: args.case_insensitive,
-                                include_hidden: args.include_hidden,
-                            },
+                            query: search_files_query(
+                                &args,
+                                &path_buf,
+                                limit,
+                                Some(args.output_mode),
+                            ),
                             files: None,
                             matches: None,
                             counts: Some(counts),
@@ -900,18 +900,12 @@ pub(super) async fn search_files_impl(
                             paginate(matches, args.offset, limit);
                         SearchFilesOutput {
                             mode: SearchFilesResultMode::ContentLines,
-                            query: SearchFilesQuery {
-                                pattern: args.pattern.clone(),
-                                target: args.target,
-                                path: path_buf.to_string_lossy().into_owned(),
-                                glob: args.glob.clone(),
-                                file_type: args.file_type.clone(),
-                                output_mode: Some(args.output_mode),
-                                head_limit: limit,
-                                offset: args.offset,
-                                case_insensitive: args.case_insensitive,
-                                include_hidden: args.include_hidden,
-                            },
+                            query: search_files_query(
+                                &args,
+                                &path_buf,
+                                limit,
+                                Some(args.output_mode),
+                            ),
                             files: None,
                             matches: Some(matches),
                             counts: None,

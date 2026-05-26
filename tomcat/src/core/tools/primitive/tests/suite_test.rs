@@ -7,8 +7,10 @@ use crate::core::tools::primitive::{
 use crate::core::{AllowAllConfirmation, DenyAllConfirmation};
 use crate::infra::error::AppError;
 use crate::infra::{
-    AuditRecorder, PrimitiveAuditEntry, PrimitiveConfig, ToolAuditEntry, TracingAuditRecorder,
+    AuditPrimitiveOp, AuditRecorder, PrimitiveAuditEntry, PrimitiveConfig, ToolAuditEntry,
+    TracingAuditRecorder,
 };
+use serial_test::serial;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +41,24 @@ fn make_gate_with(
         SessionGrants::new(),
     )
     .into_arc()
+}
+
+struct CurrentDirGuard {
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(path).expect("set_current_dir");
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
 }
 
 #[tokio::test]
@@ -261,6 +281,199 @@ async fn execute_bash_success() {
     assert_eq!(res.exit_code, 0);
     assert!(res.stdout.trim().contains("ok"));
     let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn execute_bash_empty_string_cwd_treated_as_none() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let _cwd = CurrentDirGuard::set(&dir);
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    let res = exec
+        .execute_bash("pwd", Some(""), "p1", None, None)
+        .await
+        .expect("空 cwd 应视同未传");
+
+    assert_eq!(res.exit_code, 0);
+    assert_eq!(res.stdout.trim(), dir.display().to_string());
+}
+
+#[tokio::test]
+async fn execute_bash_nonexistent_absolute_cwd_returns_clear_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let missing = dir.join("missing-subdir");
+    let path_str = missing.display().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    let err = exec
+        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .await
+        .expect_err("不存在 cwd 应前置报错");
+    let msg = err.to_string();
+    assert!(msg.contains("bash.cwd does not exist:"));
+    assert!(msg.contains(&path_str));
+    assert!(msg.contains(&format!("input: {:?}", path_str)));
+}
+
+#[tokio::test]
+async fn execute_bash_non_directory_cwd_returns_clear_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let file = dir.join("not-a-dir.txt");
+    std::fs::write(&file, "hello").unwrap();
+    let path_str = file.display().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    let err = exec
+        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .await
+        .expect_err("文件路径不应被接受为 cwd");
+    let msg = err.to_string();
+    assert!(msg.contains("bash.cwd is not a directory:"));
+    assert!(msg.contains(&path_str));
+    assert!(msg.contains(&format!("input: {:?}", path_str)));
+}
+
+#[tokio::test]
+async fn execute_bash_dollar_var_like_cwd_returns_hint_when_path_missing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    let raw_cwd = "$HOME/this-does-not-exist";
+    let err = exec
+        .execute_bash("echo nope", Some(raw_cwd), "p1", None, None)
+        .await
+        .expect_err("字面 $HOME 且目录缺失时应返回提示");
+    let msg = err.to_string();
+    assert!(msg.contains("bash.cwd does not exist:"));
+    assert!(msg.contains(&format!("input: {:?}", raw_cwd)));
+    assert!(msg.contains("environment variables are not expanded here"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn execute_bash_dollar_var_like_cwd_executes_when_real_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let literal = dir.join("$HOME");
+    std::fs::create_dir_all(&literal).unwrap();
+    let _cwd = CurrentDirGuard::set(&dir);
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    let res = exec
+        .execute_bash("pwd", Some("$HOME"), "p1", None, None)
+        .await
+        .expect("客观存在的 $HOME 字面目录不应被误伤");
+
+    assert_eq!(res.exit_code, 0);
+    assert_eq!(res.stdout.trim(), literal.display().to_string());
+}
+
+#[tokio::test]
+async fn execute_bash_pre_validation_failure_writes_audit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let missing = dir.join("missing-audit-subdir");
+    let path_str = missing.display().to_string();
+    let entries = Arc::new(Mutex::new(Vec::<PrimitiveAuditEntry>::new()));
+    let audit = Arc::new(DenyAuditRecorder(entries.clone()));
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        audit,
+        make_gate(&dir),
+    );
+
+    let err = exec
+        .execute_bash("echo nope", Some(&path_str), "p1", None, None)
+        .await
+        .expect_err("不存在 cwd 应写失败审计");
+    assert!(err.to_string().contains("bash.cwd does not exist:"));
+
+    let entries = entries.lock().unwrap();
+    assert_eq!(entries.len(), 1, "前置校验失败应写一条审计");
+    let entry = &entries[0];
+    assert_eq!(entry.operation, AuditPrimitiveOp::Bash);
+    assert_eq!(entry.path_or_cmd, "echo nope");
+    assert!(!entry.success);
+    assert!(
+        entry
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("bash.cwd does not exist:"),
+        "detail 应记录前置校验错误，实际: {:?}",
+        entry.detail
+    );
+}
+
+#[tokio::test]
+async fn execute_bash_spawn_error_includes_cwd_and_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let path_str = dir.display().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let argv = vec!["--version".to_string()];
+
+    let err = exec
+        .execute_bash(
+            "definitely_missing_binary_for_bash_test",
+            Some(&path_str),
+            "p1",
+            Some(&argv),
+            None,
+        )
+        .await
+        .expect_err("缺失 binary 应走 spawn 失败路径");
+    let msg = err.to_string();
+    assert!(msg.contains("bash spawn failed"));
+    assert!(msg.contains(&format!("cwd={}", path_str)));
+    assert!(msg.contains(&format!("input={:?}", path_str)));
+}
+
+#[test]
+fn tokio_spawn_with_dollar_home_returns_enoent_when_literal_path_missing() {
+    let err = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("pwd")
+        .current_dir("$HOME/definitely-missing-literal")
+        .spawn()
+        .expect_err("tokio spawn 应返回 ENOENT");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[tokio::test]
@@ -985,7 +1198,11 @@ async fn edit_notfound_with_cat_n_prefix_explains_remediation() {
     let err = exec
         .edit_file(
             &f.to_string_lossy(),
-            vec![edit_seg(prefixed_old, "function foo() {\n  return 2;\n}\n", false)],
+            vec![edit_seg(
+                prefixed_old,
+                "function foo() {\n  return 2;\n}\n",
+                false,
+            )],
             "p1",
         )
         .await
@@ -1001,7 +1218,11 @@ async fn edit_notfound_with_cat_n_prefix_explains_remediation() {
         "错误文案应指出 cat -n 来源：{}",
         msg
     );
-    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert!(
+        msg.contains("第 1 行"),
+        "错误文案应给出命中行号 hint：{}",
+        msg
+    );
     assert!(msg.contains("\\t"), "escape_debug 摘要应暴露 Tab：{}", msg);
     assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
     assert!(!dir.join("catn.bak").exists(), "校验失败不应生成 .bak");
@@ -1055,7 +1276,11 @@ async fn edit_notfound_with_hashline_prefix_explains_remediation() {
         "错误文案应指出 hashline 来源：{}",
         msg
     );
-    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert!(
+        msg.contains("第 1 行"),
+        "错误文案应给出命中行号 hint：{}",
+        msg
+    );
     assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
     assert!(!dir.join("hashline.bak").exists(), "校验失败不应生成 .bak");
 }
@@ -1074,7 +1299,11 @@ async fn edit_notfound_with_partial_prefix_does_not_misfire() {
     );
     let mixed_old = "     1\talpha\nbeta\n";
     let err = exec
-        .edit_file(&f.to_string_lossy(), vec![edit_seg(mixed_old, "X\n", false)], "p1")
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg(mixed_old, "X\n", false)],
+            "p1",
+        )
         .await
         .expect_err("混合前缀不应误判为整段 line_prefix_suspected");
     let msg = err.to_string();
@@ -1114,7 +1343,11 @@ async fn edit_notfound_plain_missing_stays_plain_notfound() {
         "普通缺失文本不应落入专用子码：{}",
         msg
     );
-    assert!(msg.contains("escape_debug"), "普通 NotFound 应附 escape_debug 摘要：{}", msg);
+    assert!(
+        msg.contains("escape_debug"),
+        "普通 NotFound 应附 escape_debug 摘要：{}",
+        msg
+    );
     assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
 }
 

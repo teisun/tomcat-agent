@@ -452,7 +452,7 @@ bash(run_in_background=true)
 |------|----------------|----------|----------|--------|
 | **`audit_cmd`** | 写入审计与 gate 的命令快照字符串 | `String`（`bash.rs` 拼装） | argv 模式为 `command` + 空格拼接各 `args` | 日志里看到底跑了啥。 |
 | **argv 模式** | 不经 shell，`Command::new(command).args(args)` | `tool_exec` 解析 `args` 数组 → `Option<&[String]>` | 与 catalog JSON **未声明 `args`** 并存见 §4 | 像 execve 一样传参。 |
-| **`cwd_path`** | 实际 `current_dir` | `PathBuf` | `cwd: None` 时用 `.`（相对进程 CWD）；`Some` 时先 `gate_check_path(Read, cwd)` | 工作目录也要过读权限。 |
+| **`cwd_path`** | 实际 `current_dir` | `PathBuf` | `cwd` 缺省或空串时继承 agent 进程当前目录；`Some` 时先 `gate_check_path(Read, cwd)`，再校验“存在且是目录” | 工作目录也要过读权限；坏 `cwd` 要在 `spawn` 前说清楚。 |
 | **`timed_out`（规划）** | 墙钟超时发生 | JSON / `BashResult` 扩展字段 | 与 `exit_code == -1` 等约定在 PR-E 钉死 | 到点没跑完就算超时类结局。 |
 | **`task_id`（规划）** | 后台任务句柄 | UUID 或字符串 | PR-I 与审计 `task_id` 列对齐 strengthen §7 | 跟进程票号一样用来查杀。 |
 
@@ -473,7 +473,7 @@ bash(run_in_background=true)
 | 字段 | JSON 类型 | 必填 | 默认 | 说明 | 说人话 |
 |------|-----------|------|------|------|--------|
 | `command` | string | **是**（catalog） | — | shell 一行的主体，或 argv 模式的可执行文件路径 | 命令本体。 |
-| `cwd` | string | 否 | 行为上等价 **`.`**（见代码） | 工作目录；应优先传项目绝对路径（system_prompt 已引导） | 在哪跑。 |
+| `cwd` | string | 否 | 缺省或空串 = 继承 agent 进程当前目录 | 工作目录；应优先传项目绝对路径或 `~/...`。**不使用就省略**；`$HOME/...` 这类 shell 变量写法不会自动展开。若路径不存在或不是目录，会在 `spawn` 前返回带 `cwd=<解析路径>` 与 `input=<原始输入>` 的清晰错误 | 在哪跑。 |
 | `args` | string[] | 否 | — | **仅 `tool_exec` 解析**：存在则走 argv 模式，**不**走 `sh -c` | 拆成 argv 就不经过 shell 解析字符串。 |
 
 **Schema 缺口（现状 MUST 写明）**：[`execute_bash_parameters()`](../../../src/core/tools/contract/catalog.rs) 仅声明 `command` 与 `cwd`；**`args` 不在 schema 中**，但 dispatcher / 集成测试会传。文档建议：**随 PR-A（优先）**将 `args` 纳入正式 schema（与改名同 PR 或小步紧跟）；若未做则 PR-E 前须补，避免 T1 合入后仍双轨。
@@ -553,7 +553,7 @@ bash(run_in_background=true)
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**阅读顺序（说人话）**：模型先看到 **catalog 里的名字与参数**；真正执行时 **tool_exec** 把 JSON 解出来交给 **`execute_bash_impl`**；后者先问 **cwd 能不能读**、再跑 **bash_ast** 和 **整条命令的 bash 策略**；不再从命令字符串里猜路径；最后才 **spawn**；**审计**记一条，不管成功失败。
+**阅读顺序（说人话）**：模型先看到 **catalog 里的名字与参数**；真正执行时 **tool_exec** 把 JSON 解出来交给 **`execute_bash_impl`**；后者先把 **空 `cwd` 视为未传**，再校验 **cwd 能不能读、是否存在、是不是目录**；接着跑 **bash_ast** 和 **整条命令的 bash 策略**；不再从命令字符串里猜路径；最后才 **spawn**。如果 `spawn` 仍失败，错误里会带 **`cwd=<解析路径>` + `input=<原始输入>`**；**审计**也会覆盖前置失败。
 
 **配套测试**：[`primitive/tests/suite_test.rs`](../../../src/core/tools/primitive/tests/suite_test.rs)、[`primitive/tests/gate_suite_test.rs`](../../../src/core/tools/primitive/tests/gate_suite_test.rs)。
 

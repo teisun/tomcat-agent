@@ -1,3 +1,4 @@
+use serde_json::json;
 use serial_test::serial;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -65,6 +66,20 @@ fn make_executor(
         Arc::new(TracingAuditRecorder),
         make_gate(definition, user_path_rules),
     )
+}
+
+#[test]
+fn test_search_files_args_deserializes_empty_optional_fields_as_none() {
+    let args: SearchFilesArgs = serde_json::from_value(json!({
+        "pattern": "needle",
+        "target": "content",
+        "glob": "",
+        "type": ""
+    }))
+    .expect("search_files args should deserialize");
+
+    assert_eq!(args.glob, None);
+    assert_eq!(args.file_type, None);
 }
 
 #[cfg(unix)]
@@ -286,6 +301,106 @@ async fn test_search_files_missing_binary_uses_tier2_content_fallback(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn test_search_files_ignores_empty_file_type() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let root = test_agent_definition_root(&tmp);
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(root.join("src/lib.rs"), "needle\n")?;
+    write_executable(
+        &bin.join("rg"),
+        r#"#!/bin/sh
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = "--type" ] && [ -z "$arg" ]; then
+    echo "empty --type argument should not be passed" >&2
+    exit 2
+  fi
+  prev="$arg"
+done
+printf 'src/lib.rs\n'
+"#,
+    )?;
+    let _path = PathGuard::set(&bin);
+
+    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let out = executor
+        .search_files(
+            SearchFilesArgs {
+                pattern: "needle".to_string(),
+                target: SearchFilesTarget::Content,
+                path: Some(root.to_string_lossy().into_owned()),
+                glob: None,
+                file_type: Some("".to_string()),
+                output_mode: SearchFilesOutputMode::FilesWithMatches,
+                context: None,
+                head_limit: Some(Some(10)),
+                offset: 0,
+                case_insensitive: false,
+                include_hidden: false,
+            },
+            "test_plugin",
+        )
+        .await?;
+
+    assert_eq!(out.files.as_ref().expect("files"), &vec!["src/lib.rs"]);
+    assert!(out.query.file_type.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_search_files_ignores_empty_glob() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let root = test_agent_definition_root(&tmp);
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(root.join("src/lib.rs"), "needle\n")?;
+    write_executable(
+        &bin.join("rg"),
+        r#"#!/bin/sh
+prev=''
+for arg in "$@"; do
+  if [ "$prev" = "--glob" ] && [ -z "$arg" ]; then
+    echo "empty --glob argument should not be passed" >&2
+    exit 2
+  fi
+  prev="$arg"
+done
+printf 'src/lib.rs\n'
+"#,
+    )?;
+    let _path = PathGuard::set(&bin);
+
+    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let out = executor
+        .search_files(
+            SearchFilesArgs {
+                pattern: "needle".to_string(),
+                target: SearchFilesTarget::Content,
+                path: Some(root.to_string_lossy().into_owned()),
+                glob: Some("".to_string()),
+                file_type: None,
+                output_mode: SearchFilesOutputMode::FilesWithMatches,
+                context: None,
+                head_limit: Some(Some(10)),
+                offset: 0,
+                case_insensitive: false,
+                include_hidden: false,
+            },
+            "test_plugin",
+        )
+        .await?;
+
+    assert_eq!(out.files.as_ref().expect("files"), &vec!["src/lib.rs"]);
+    assert!(out.query.glob.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn test_search_files_missing_fd_uses_tier2_files_fallback(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tmp = TempDir::new()?;
@@ -365,6 +480,50 @@ async fn test_search_files_tier2_count_and_deny() -> Result<(), Box<dyn std::err
     assert_eq!(counts[0].path, "src/lib.rs");
     assert_eq!(counts[0].count, 2);
     assert!(out.warnings.iter().any(|w| w.contains("read deny")));
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_search_files_tier2_fallback_ignores_empty_type_and_glob(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let root = test_agent_definition_root(&tmp);
+    let bin = tmp.path().join("empty-bin");
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(root.join("src/lib.rs"), "needle\n")?;
+    let _path = PathGuard::set(&bin);
+
+    let executor = make_executor(&root.canonicalize()?, vec![]);
+    let out = executor
+        .search_files(
+            SearchFilesArgs {
+                pattern: "needle".to_string(),
+                target: SearchFilesTarget::Content,
+                path: Some(root.to_string_lossy().into_owned()),
+                glob: Some("".to_string()),
+                file_type: Some("".to_string()),
+                output_mode: SearchFilesOutputMode::FilesWithMatches,
+                context: None,
+                head_limit: Some(Some(10)),
+                offset: 0,
+                case_insensitive: false,
+                include_hidden: false,
+            },
+            "test_plugin",
+        )
+        .await?;
+
+    assert_eq!(out.files.as_ref().expect("files"), &vec!["src/lib.rs"]);
+    assert!(out.query.glob.is_none());
+    assert!(out.query.file_type.is_none());
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported file_type")),
+        "empty file_type 应视同未传，不应再落 unsupported warning"
+    );
     Ok(())
 }
 

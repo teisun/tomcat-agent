@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::infra::error::AppError;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,8 +90,9 @@ pub struct SearchFilesArgs {
     #[serde(default)]
     pub target: SearchFilesTarget,
     pub path: Option<String>,
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub glob: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "empty_string_as_none")]
     pub file_type: Option<String>,
     #[serde(default)]
     pub output_mode: SearchFilesOutputMode,
@@ -107,6 +108,14 @@ pub struct SearchFilesArgs {
     pub case_insensitive: bool,
     #[serde(default)]
     pub include_hidden: bool,
+}
+
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.filter(|s| !s.trim().is_empty()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
