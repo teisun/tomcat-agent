@@ -68,28 +68,28 @@ fn make_renderer_with_tool_verbosity(
 }
 
 #[test]
-fn folded_thinking_only_emits_one_line() {
+fn folded_thinking_shows_summary_but_hides_raw() {
     let (r, w) = make_renderer(false);
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step a"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step a", "source": "summary"}
     }));
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step b"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "internal raw", "source": "raw"}
     }));
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step c"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": " step c", "source": "summary"}
     }));
     let s = w.stdout();
     let count = s.matches("[thinking]").count();
     assert_eq!(count, 1, "折叠模式下整回合只应打一次 [thinking]: {:?}", s);
     assert!(
-        s.contains("[thinking] …"),
-        "折叠模式应使用单行 …省略文案: {:?}",
+        s.contains("step a") && s.contains("step c"),
+        "折叠模式应显示 summary delta 文本: {:?}",
         s
     );
     assert!(
-        !s.contains("step a"),
-        "折叠模式不应输出 thinking delta 文本: {:?}",
+        !s.contains("internal raw"),
+        "折叠模式不应输出 raw thinking delta: {:?}",
         s
     );
 }
@@ -98,10 +98,10 @@ fn folded_thinking_only_emits_one_line() {
 fn expanded_thinking_streams_each_delta_with_dim_color() {
     let (r, w) = make_renderer(true);
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step a"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step a", "source": "raw"}
     }));
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": " step b"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": " step b", "source": "summary"}
     }));
     let s = w.stdout();
     assert_eq!(
@@ -123,7 +123,7 @@ fn expanded_thinking_streams_each_delta_with_dim_color() {
 fn content_delta_after_thinking_inserts_newline() {
     let (r, w) = make_renderer(true);
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "plan"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "plan", "source": "summary"}
     }));
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "content_delta", "delta": "answer"}
@@ -159,11 +159,23 @@ fn missing_kind_defaults_to_content_for_back_compat() {
 fn empty_thinking_delta_is_skipped() {
     let (r, w) = make_renderer(true);
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": ""}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "", "source": "raw"}
     }));
     assert!(
         w.stdout().is_empty() && w.stderr().is_empty(),
         "空 delta 不应触发任何输出"
+    );
+}
+
+#[test]
+fn thinking_delta_without_source_is_ignored() {
+    let (r, w) = make_renderer(true);
+    r.on_message_update(&json!({
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "secret"}
+    }));
+    assert!(
+        w.stdout().is_empty() && w.stderr().is_empty(),
+        "缺 source 的 thinking_delta 应被忽略"
     );
 }
 
@@ -585,19 +597,16 @@ fn show_thinking_flag_can_flip_at_runtime() {
         false,
         ToolCliVerbosity::Full,
     );
-    // 折叠：只有省略号
+    // 折叠：raw 不可见
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "secret"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "secret", "source": "raw"}
     }));
     assert!(!r.is_show_thinking());
     flag.store(true, Ordering::Release);
     assert!(r.is_show_thinking());
-    // 展开：在同一回合切换后可继续打 delta（注意 prefix 已被首次折叠时忽略，
-    // 因此再次切到展开必须保证 prefix 重新出现以让用户感知到切换；当前实现用
-    // `thinking_prefix_printed` 状态位独立于折叠/展开，因此首次打开后会沿用，
-    // 这里至少保证 delta 能输出）。
+    // 展开：在同一回合切换后，后续 raw delta 应开始可见。
     r.on_message_update(&json!({
-        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "after"}
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "after", "source": "raw"}
     }));
     assert!(
         writer.stdout().contains("after"),

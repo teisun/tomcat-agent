@@ -188,7 +188,9 @@ async fn reviewer_blocks_non_whitelisted_tool() {
     )
     .await;
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("reviewer 子 Agent 禁止调用工具"));
+    assert!(outcome
+        .model_text
+        .contains("reviewer 子 Agent 禁止调用工具"));
 }
 
 #[tokio::test]
@@ -216,7 +218,9 @@ async fn code_reviewer_blocks_write_capable_tools() {
     )
     .await;
     assert!(outcome.is_error);
-    assert!(outcome.model_text.contains("仅允许 read/search_files/list_dir/bash"));
+    assert!(outcome
+        .model_text
+        .contains("仅允许 read/search_files/list_dir/bash"));
 }
 
 #[tokio::test]
@@ -345,7 +349,11 @@ async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
     )
     .await;
 
-    assert!(!outcome.is_error, "unexpected error: {}", outcome.model_text);
+    assert!(
+        !outcome.is_error,
+        "unexpected error: {}",
+        outcome.model_text
+    );
     assert!(outcome
         .model_text
         .contains("已编辑: ~/.tomcat/plans/reviewer_tilde_smoke.plan.md"));

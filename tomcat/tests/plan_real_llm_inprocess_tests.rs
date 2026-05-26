@@ -15,7 +15,7 @@
 //! - 与 `cli_full_plan_path_with_real_llm` 共用盘目录，故标记 `#[serial]` 串行执行。
 //!
 //! ## 业务断言（硬门禁）
-//! 1. `~/.tomcat/plans/<plan_id>.plan.md` 存在且 `frontmatter.mode == Completed`
+//! 1. `~/.tomcat/plans/<plan_id>.plan.md` 存在且 `frontmatter.state == Completed`
 //! 2. 所有 `frontmatter.todos[].status == Completed`
 //! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
 //! 4. 内存 `PlanRuntime::mode()` 与磁盘同步
@@ -41,11 +41,13 @@ use std::time::Duration;
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
-use tomcat::core::plan_runtime::file_store::{plan_path_for_id, read_plan, PlanFileMode, TodoStatus};
-use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::llm::system_prompt::{
     build_system_prompt_with_state, WorkspaceContext, WorkspaceState,
 };
+use tomcat::core::plan_runtime::file_store::{
+    plan_path_for_id, read_plan, PlanFileState, TodoStatus,
+};
+use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::session::ContextState;
 use tomcat::{
     init_context_state, load_config_toml_file, resolve_sessions_dir, run_chat_turn,
@@ -145,7 +147,7 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
         "- Do NOT rewrite, replace, or upsert todo ids/content unless a non-pass code review or verify result truly requires adding a fix todo.".to_string(),
         "- Prefer `set_status` on existing todos; only add a new fix todo if the runtime kept the plan in EXEC after code_review or verify.".to_string(),
         "- When the final update_plan returns, inspect the tool result.".to_string(),
-        "- If `code_review.verdict != pass` or `plan_mode_after` is still `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo, perform the fix, and continue.".to_string(),
+        "- If `code_review.verdict != pass` or `plan_state_after` is still `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo, perform the fix, and continue.".to_string(),
         "- Only stop once the runtime has either returned `verify` or moved the plan to `completed`.".to_string(),
         "- Do NOT edit the plan file directly. Do NOT call ask_question.".to_string(),
     ]);
@@ -223,7 +225,7 @@ fn ensure_session(ctx: &ChatContext) {
     }
 }
 
-/// 扫盘挑出 mode=planning 的最新 plan 文件，返回 plan_id。
+/// 扫盘挑出 state=planning 的最新 plan 文件，返回 plan_id。
 fn pick_newest_planning_plan_id(home: &Path) -> Option<String> {
     let plans_dir = home.join(".tomcat").join("plans");
     let mut best: Option<(std::time::SystemTime, String)> = None;
@@ -234,7 +236,7 @@ fn pick_newest_planning_plan_id(home: &Path) -> Option<String> {
             continue;
         }
         let Ok(plan) = read_plan(&path) else { continue };
-        if plan.frontmatter.mode != PlanFileMode::Planning {
+        if plan.frontmatter.state != PlanFileState::Planning {
             continue;
         }
         let mtime = entry.metadata().ok()?.modified().ok()?;
@@ -543,7 +545,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         let created_plan = created_plan_from_outcome(&outcome).unwrap_or_else(|| {
             let plan_id = pick_newest_planning_plan_id(&home).unwrap_or_else(|| {
                 dump_diagnostic(&home, &ctx, "no_planning_plan", None, None, true);
-                panic!("create_plan 未生成任何 mode=planning 的盘文件");
+                panic!("create_plan 未生成任何 state=planning 的盘文件");
             });
             let plan_path = plan_path_for_id(&plan_id).expect("plan_path_for_id 失败");
             common::CreatedPlanRef {
@@ -607,7 +609,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 panic!("exec round {exec_rounds} 失败：{outcome:?}");
             }
             let plan = read_plan(&plan_path).expect("read_plan 失败");
-            if plan.frontmatter.mode == PlanFileMode::Completed
+            if plan.frontmatter.state == PlanFileState::Completed
                 && plan
                     .frontmatter
                     .todos
@@ -656,9 +658,9 @@ async fn inprocess_full_plan_path_with_real_llm() {
         let transcript = std::fs::read_to_string(&transcript_path).expect("read transcript 失败");
         let lines: Vec<&str> = transcript.lines().collect();
         let plan_review_idx = lines.iter().position(|l| l.contains("\"plan.review\""));
-        let plan_code_review_idx = lines
-            .iter()
-            .position(|l| l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\""));
+        let plan_code_review_idx = lines.iter().position(|l| {
+            l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\"")
+        });
         let plan_verify_idx = lines.iter().position(|l| l.contains("\"plan.verify\""));
         assert!(
             plan_review_idx.is_some(),

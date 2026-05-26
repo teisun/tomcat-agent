@@ -13,8 +13,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
-use crate::core::llm::types::StreamEvent;
-use crate::infra::error::AppError;
+use crate::core::llm::types::{StreamEvent, ThinkingSource};
+use crate::infra::error::{llm_error_with_source, AppError, LlmErrorStage};
+
+const PROVIDER_NAME: &str = "openai-responses";
 
 /// Responses 流式解析器：默认按 SSE（`event: ...\ndata: {...}\n\n`）解码；
 /// 若 Content-Type 为 NDJSON 或首帧不是 SSE 形态，则切换到 **一行一条 JSON** 的 NDJSON 模式。
@@ -51,16 +53,20 @@ impl<S> ResponsesStream<S> {
 
     fn process_chunk(&mut self, raw: &str) -> Result<Vec<StreamEvent>, AppError> {
         let value: Value = serde_json::from_str(raw).map_err(|e| {
-            AppError::Llm(format!("解析 Responses chunk 失败: {} | raw={}", e, raw))
+            llm_error_with_source(
+                PROVIDER_NAME,
+                LlmErrorStage::Parse,
+                "解析 Responses chunk 失败".to_string(),
+                anyhow::anyhow!("{e} | raw={raw}"),
+            )
         })?;
         Ok(responses_chunk_to_events(&value, &mut self.tool_calls))
     }
 }
 
-impl<S, E> Stream for ResponsesStream<S>
+impl<S> Stream for ResponsesStream<S>
 where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: std::fmt::Display,
+    S: Stream<Item = Result<Bytes, AppError>> + Unpin,
 {
     type Item = Result<StreamEvent, AppError>;
 
@@ -106,7 +112,7 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(AppError::Llm(e.to_string()))));
+                    return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
                     // 流结束：把残留 buffer 当作最后一帧再尝试解析。
@@ -157,8 +163,14 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
             } else {
                 &line[..]
             };
-            let s = std::str::from_utf8(trimmed_end)
-                .map_err(|e| AppError::Llm(format!("UTF-8 错误: {}", e)))?;
+            let s = std::str::from_utf8(trimmed_end).map_err(|e| {
+                llm_error_with_source(
+                    PROVIDER_NAME,
+                    LlmErrorStage::Parse,
+                    "NDJSON UTF-8 错误".to_string(),
+                    e,
+                )
+            })?;
             let s = s.trim();
             if s.is_empty() {
                 continue;
@@ -171,8 +183,14 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
         while let Some(pos) = buffer.windows(sep.len()).position(|w| w == sep) {
             let end = pos + sep.len();
             let block: Vec<u8> = buffer.drain(..end).collect();
-            let s = std::str::from_utf8(&block)
-                .map_err(|e| AppError::Llm(format!("UTF-8 错误: {}", e)))?;
+            let s = std::str::from_utf8(&block).map_err(|e| {
+                llm_error_with_source(
+                    PROVIDER_NAME,
+                    LlmErrorStage::Parse,
+                    "SSE UTF-8 错误".to_string(),
+                    e,
+                )
+            })?;
             for line in s.lines() {
                 let line = line.trim();
                 if let Some(data) = line.strip_prefix("data: ") {
@@ -321,7 +339,8 @@ pub(super) fn responses_chunk_to_events(
         // - `response.reasoning_summary_text.delta`（reasoning summary 文本流）
         // - `response.reasoning_summary.delta`   （部分网关的 summary 事件）
         // 它们大多按 `delta: string` 形态携带增量，但也可能是对象/数组；
-        // 这里尽量提取可读文本映射为 Thinking。`*.done` 事件不携带新增 delta，
+        // 这里尽量提取可读文本映射为 Thinking，并同时标记 `source=summary|raw`。
+        // `*.done` 事件不携带新增 delta，
         // 因此本期忽略，避免重复 emit；后续若需要 done 信号可再扩展。
         "response.reasoning.delta"
         | "response.reasoning_text.delta"
@@ -375,8 +394,10 @@ pub(super) fn responses_chunk_to_events(
 
 fn push_reasoning_delta_event(events: &mut Vec<StreamEvent>, value: &Value, kind: &str) {
     if let Some(delta) = extract_reasoning_delta(value) {
+        let source = classify_reasoning_source(value, kind);
         events.push(StreamEvent::Thinking {
             delta,
+            source,
             signature: None,
         });
     } else {
@@ -386,6 +407,24 @@ fn push_reasoning_delta_event(events: &mut Vec<StreamEvent>, value: &Value, kind
             payload = ?value,
             "reasoning delta event had no extractable text"
         );
+    }
+}
+
+fn classify_reasoning_source(value: &Value, kind: &str) -> ThinkingSource {
+    match kind {
+        "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary.delta"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_part.added" => ThinkingSource::Summary,
+        "response.reasoning.delta" | "response.reasoning_text.delta" => ThinkingSource::Raw,
+        "response.output_item.done" => {
+            if output_item_contains_summary(value) {
+                ThinkingSource::Summary
+            } else {
+                ThinkingSource::Raw
+            }
+        }
+        _ => ThinkingSource::Raw,
     }
 }
 
@@ -414,6 +453,19 @@ fn is_reasoning_output_item(value: &Value) -> bool {
         .and_then(Value::as_str)
         .map(|t| t.contains("reasoning"))
         .unwrap_or(false)
+}
+
+fn output_item_contains_summary(value: &Value) -> bool {
+    let Some(item) = value.get("item") else {
+        return false;
+    };
+    item.get("summary").is_some()
+        || item.get("summary_text").is_some()
+        || item
+            .get("part")
+            .and_then(|part| part.get("type"))
+            .and_then(Value::as_str)
+            == Some("summary_text")
 }
 
 fn extract_text(value: &Value) -> Option<String> {

@@ -1,10 +1,10 @@
-use super::{sample_frontmatter, temp_plans_dir};
 use super::super::file_store::{
     read_plan, update_plan_locked, write_plan, PlanError, PlanFile, TodoItem, TodoStatus,
 };
+use super::{sample_frontmatter, temp_plans_dir};
 use fs2::FileExt;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -24,7 +24,10 @@ fn write_plan_writes_and_reads_back_atomically() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    let leftover_tmp: Vec<_> = entries.iter().filter(|name| name.contains(".tmp.")).collect();
+    let leftover_tmp: Vec<_> = entries
+        .iter()
+        .filter(|name| name.contains(".tmp."))
+        .collect();
     assert!(
         leftover_tmp.is_empty(),
         "tmp 文件不应残留：{leftover_tmp:?}"
@@ -102,7 +105,11 @@ fn plan_file_lock_timeout_returns_lock_busy() {
         matches!(err, PlanError::LockBusy { waited_ms, .. } if waited_ms >= 80),
         "got {err:?}"
     );
-    assert!(elapsed < Duration::from_millis(500), "elapsed={:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "elapsed={:?}",
+        elapsed
+    );
     handle.join().unwrap();
 }
 

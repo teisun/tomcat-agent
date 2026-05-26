@@ -164,6 +164,8 @@ pub(super) async fn execute_bash_impl(
     argv: Option<&[String]>,
     timeout_ms_override: Option<u64>,
 ) -> Result<BashResult, AppError> {
+    // 空 argv 应等价于“未提供 args”，继续走 shell 模式；真 LLM 常会显式传 `args: []`。
+    let argv = argv.filter(|args| !args.is_empty());
     let cwd_path = if let Some(c) = cwd {
         let (p, _l, _s) = executor
             .gate_check_path(PrimitiveOperation::Read, c, plugin_id)

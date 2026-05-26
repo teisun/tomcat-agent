@@ -66,7 +66,10 @@ fn invalidate_removes_entry() {
 fn clear_drops_all_entries_session_end_cleanup() {
     let state = ReadFileState::new();
     state.put(std::path::PathBuf::from("/a"), stamp(1, 1, None, None));
-    state.put(std::path::PathBuf::from("/b"), stamp(2, 2, Some(1), Some(10)));
+    state.put(
+        std::path::PathBuf::from("/b"),
+        stamp(2, 2, Some(1), Some(10)),
+    );
     assert_eq!(state.len(), 2);
     state.clear();
     assert_eq!(state.len(), 0);

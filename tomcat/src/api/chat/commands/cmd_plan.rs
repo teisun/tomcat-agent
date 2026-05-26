@@ -24,7 +24,7 @@ pub enum PlanCommand {
     Exit,
     /// `/plan build <plan_id/path>`，进入 EXEC（P6 才完整闭环）。
     Build { plan_target: String },
-    /// J2：`/plan list`，列出 `~/.tomcat/plans/` 下所有 plan 文件的 id / mode / goal。
+    /// J2：`/plan list`，列出 `~/.tomcat/plans/` 下所有 plan 文件的 id / state / goal。
     List,
 }
 
@@ -90,10 +90,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                         eprintln!("[plan] warning: {w}");
                     }
                     return ChatCommandOutcome::Continue {
-                        line: format!(
-                            "start building {}",
-                            outcome.plan_path.to_string_lossy()
-                        ),
+                        line: format!("start building {}", outcome.plan_path.to_string_lossy()),
                         echo_user: true,
                     };
                 }
@@ -110,7 +107,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
 
 /// J2：扫 `~/.tomcat/plans/` 并打印每条 plan 的简要状态行。
 ///
-/// 输出格式：`<plan_id>  <mode>  <goal_first_line>  (updated <iso>)`
+/// 输出格式：`<plan_id>  <state>  <goal_first_line>  (updated <iso>)`
 /// 找不到目录 / 无文件 → 友好提示，不报错。
 fn print_plan_list() {
     use crate::core::plan_runtime::file_store;
@@ -150,7 +147,7 @@ fn print_plan_list() {
             .to_string();
         rows.push((
             plan.frontmatter.plan_id.clone(),
-            plan.frontmatter.mode.as_str().to_string(),
+            plan.frontmatter.state.as_str().to_string(),
             goal_line,
             plan.frontmatter.created_at.clone(),
         ));
@@ -169,4 +166,3 @@ fn print_plan_list() {
         println!("  - {id:<32} [{mode:<10}]  {goal}  (created {ts})");
     }
 }
-

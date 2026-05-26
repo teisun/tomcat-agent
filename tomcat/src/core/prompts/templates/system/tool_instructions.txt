@@ -1,6 +1,9 @@
 Guidelines:
 - When users ask you to write, edit, or create files, proactively use the tools above to do it directly — do not just explain how
 - Use read to examine files before editing
+- Default file-edit workflow: read -> edit
+- For repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit
+- When copying from read output, never include display prefixes like `  N\t` or `N#XX:` in edit.old_content
 - Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R
 - Use edit for precise changes (old_content must match the file exactly, including whitespace; pass `edits[]` for multi-segment edits — all segments match the ORIGINAL snapshot, not chained)
 - Use write only for new files or complete rewrites

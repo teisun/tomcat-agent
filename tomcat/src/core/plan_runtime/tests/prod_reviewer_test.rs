@@ -2,7 +2,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::super::file_store::{
-    write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
+    write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
 use super::super::prod_reviewer::ProdReviewerDispatcher;
 use super::super::review::{resolve_internal_tools, reviewer_allowed_tools_for, ReviewKind};
@@ -83,7 +83,7 @@ fn review_prompt_uses_active_external_plan_path() {
             frontmatter: PlanFileFrontmatter {
                 plan_id: "external_path_plan".into(),
                 goal: "goal".into(),
-                mode: PlanFileMode::Planning,
+                state: PlanFileState::Planning,
                 session_key: Some("sess".into()),
                 session_id: Some("uuid".into()),
                 created_at: "2026-05-24T00:00:00Z".into(),
@@ -108,6 +108,9 @@ fn review_prompt_uses_active_external_plan_path() {
     let resolved = runtime.resolved_plan_path("external_path_plan").unwrap();
     let resolved_display = crate::infra::platform::format_home_path(&resolved);
     let prompt = build_review_prompt("external_path_plan", "body", &resolved, None);
-    assert_eq!(resolved, crate::normalize_path(&external_path.to_string_lossy()).unwrap());
+    assert_eq!(
+        resolved,
+        crate::normalize_path(&external_path.to_string_lossy()).unwrap()
+    );
     assert!(prompt.contains(&resolved_display));
 }

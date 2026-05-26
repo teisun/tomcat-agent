@@ -2,7 +2,7 @@
 //!
 //! 语义：
 //! - 仅 `Planning` 模式可见；EXEC/CHAT/Pending/Completed 调用 → `InvisibleInMode`。
-//! - 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md`；runtime 拼 frontmatter（mode/session/created_at/schema_version）。
+//! - 整盘写入 `~/.tomcat/plans/<plan_id>.plan.md`；runtime 拼 frontmatter（state/session/created_at/schema_version）。
 //! - P4 前 `review` 字段返回 `aborted: true` 占位（reviewer 子 Agent 在 P4 接入）。
 //! - 写盘后 PlanRuntime 内存切换为 `Planning`（已是 Planning 时不变），保持 active_plan_id。
 //!
@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{
-        plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem,
+        plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
         TodoStatus, PLAN_FILE_SCHEMA_VERSION,
     },
     mode::PlanMode,
@@ -115,7 +115,7 @@ pub fn derive_plan_id(goal: &str) -> String {
 /// `create_plan` 执行体；返回 ToolResult 内容 JSON：
 ///
 /// ```json
-/// { "plan_id": "...", "path": "...", "mode": "planning",
+/// { "plan_id": "...", "path": "...", "state": "planning",
 ///   "review": { "aborted": true, "summary": "P4 接入" } }
 /// ```
 /// `create_plan` 同步执行（不派发 reviewer）；返回写盘成功后的核心信息。
@@ -167,7 +167,7 @@ pub fn execute(
     let frontmatter = PlanFileFrontmatter {
         plan_id: plan_id.clone(),
         goal: args.goal.clone(),
-        mode: PlanFileMode::Planning,
+        state: PlanFileState::Planning,
         session_key: None,
         session_id: None,
         created_at: now,
@@ -185,13 +185,13 @@ pub fn execute(
         "event": crate::infra::wire::WIRE_PLAN_CREATE,
         "plan_id": plan_id,
         "path": crate::infra::platform::format_home_path(&path),
-        "mode": "planning",
+        "state": "planning",
     }));
 
     Ok(serde_json::json!({
         "plan_id": plan_id,
         "path": crate::infra::platform::format_home_path(&path),
-        "mode": "planning",
+        "state": "planning",
         "review": crate::core::plan_runtime::review::ReviewSummary::placeholder_pending().to_json(),
     }))
 }

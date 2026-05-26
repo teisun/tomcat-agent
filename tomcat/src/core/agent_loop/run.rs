@@ -125,9 +125,17 @@ impl AgentLoop {
 
                     let mut q = self.follow_up_queue.lock();
                     if q.is_empty() {
+                        drop(q);
+                        self.sync_persisted_messages_into_context(&result.new_messages);
                         return AgentRunOutcome::Completed(result);
                     }
-                    messages.extend(q.drain(..));
+                    let drained: Vec<_> = q.drain(..).collect();
+                    drop(q);
+                    for msg in drained {
+                        if let Err(err) = self.push_message(&mut messages, msg) {
+                            return AgentRunOutcome::Failed(err);
+                        }
+                    }
                     continue;
                 }
                 Err(LoopError::Aborted {
@@ -135,12 +143,14 @@ impl AgentLoop {
                     partial_messages,
                 }) => return self.terminate_interrupted(partial_text, partial_messages),
                 Err(LoopError::Fatal(e)) => {
+                    let new_messages = messages[self.start_idx..].to_vec();
+                    self.sync_persisted_messages_into_context(&new_messages);
                     self.emit_event(AgentEvent::AgentEnd {
                         session_id: self.config.session_id.clone(),
                         messages: vec![],
-                        error: Some(e.clone()),
+                        error: Some(e.to_string()),
                     });
-                    return AgentRunOutcome::Failed(AppError::Llm(e));
+                    return AgentRunOutcome::Failed(e);
                 }
                 Err(LoopError::Retryable(_)) => {
                     unreachable!("Retryable 应在 run_attempt_loop 内部处理")
@@ -153,10 +163,11 @@ impl AgentLoop {
     /// （T2-P0-007 引入的细分订阅点），再发兼容老订阅者的 `AgentEnd(error="interrupted")`，
     /// 最后封装 `AgentRunOutcome::Interrupted` 返回。
     fn terminate_interrupted(
-        &self,
+        &mut self,
         partial_text: String,
         partial_messages: Vec<ChatMessage>,
     ) -> AgentRunOutcome {
+        self.sync_persisted_messages_into_context(&partial_messages);
         let session_id = self.config.session_id.clone();
         let tool_results_count = partial_messages
             .iter()
@@ -184,11 +195,14 @@ impl AgentLoop {
         &mut self,
         messages: &mut Vec<ChatMessage>,
     ) -> Result<String, LoopError> {
-        let mut last_err: Option<String> = None;
+        let mut last_err: Option<AppError> = None;
         for attempt in 1..=self.config.max_attempts {
             if attempt > 1 {
                 let delay_ms = self.config.retry_base_delay_ms * 2u64.pow(attempt - 2);
-                let err_msg = last_err.clone().unwrap_or_else(|| "retry".to_string());
+                let err_msg = last_err
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "retry".to_string());
                 self.emit_event(AgentEvent::AutoRetryStart {
                     attempt,
                     max_attempts: self.config.max_attempts,
@@ -222,11 +236,12 @@ impl AgentLoop {
                 }
                 Err(err @ LoopError::Aborted { .. }) => return Err(err),
                 Err(LoopError::Fatal(e)) => {
+                    let err_text = e.to_string();
                     if attempt > 1 {
                         self.emit_event(AgentEvent::AutoRetryEnd {
                             success: false,
                             attempt,
-                            final_error: Some(e.clone()),
+                            final_error: Some(err_text),
                         });
                     }
                     return Err(LoopError::Fatal(e));
@@ -238,11 +253,14 @@ impl AgentLoop {
                     let _stats = handle_overflow_retry(self, messages, attempt, &e);
                     last_err = Some(e);
                     if attempt == self.config.max_attempts {
-                        let fatal = last_err.unwrap_or_else(|| "重试耗尽".to_string());
+                        let fatal = last_err
+                            .take()
+                            .unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+                        let final_error = fatal.to_string();
                         self.emit_event(AgentEvent::AutoRetryEnd {
                             success: false,
                             attempt,
-                            final_error: Some(fatal.clone()),
+                            final_error: Some(final_error),
                         });
                         return Err(LoopError::Fatal(fatal));
                     }
@@ -250,7 +268,7 @@ impl AgentLoop {
             }
         }
         Err(LoopError::Fatal(
-            last_err.unwrap_or_else(|| "重试耗尽".to_string()),
+            last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string())),
         ))
     }
 }

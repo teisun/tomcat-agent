@@ -296,17 +296,16 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        let (text, delivered) = finish_blocking_with(
-            &registry,
-            &ticket.task_id,
-            0,
-            BlockingWakeKind::NewOutput,
-        )
-        .await
-        .expect("finish_blocking_with");
+        let (text, delivered) =
+            finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::NewOutput)
+                .await
+                .expect("finish_blocking_with");
         let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
 
-        assert_eq!(chunk["wakeReason"], serde_json::Value::String("finished".into()));
+        assert_eq!(
+            chunk["wakeReason"],
+            serde_json::Value::String("finished".into())
+        );
         assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
         assert!(delivered, "NewOutput + finished must claim Delivered");
     }

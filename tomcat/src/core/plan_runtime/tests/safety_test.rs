@@ -74,7 +74,10 @@ fn exec_mode_rejects_writes_to_any_plans_dir_file() {
         &target,
     )
     .expect_err("EXEC 期写任何 plans/ 路径都应拒");
-    assert!(matches!(err, WritePathDenied::ExecModePlanFilesReadOnly { .. }));
+    assert!(matches!(
+        err,
+        WritePathDenied::ExecModePlanFilesReadOnly { .. }
+    ));
 }
 
 #[test]

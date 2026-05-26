@@ -20,7 +20,7 @@ use tracing::info;
 use crate::core::compaction::{force_drop_oldest_to_target, is_context_overflow_error};
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::session::manager::{build_context_from_state, estimated_tokens_from_chars};
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_stage, AppError, LlmErrorStage};
 use crate::infra::events::AgentEvent;
 
 use super::types::{AgentLoop, LoopError, OverflowTrimStats};
@@ -44,9 +44,38 @@ fn err_snippet(s: &str) -> String {
 /// 每个分支写入 `target="tomcat_chat_diag"` 的诊断 `info!`，branch 字面值：
 /// `fatal_401 / retryable_context_overflow / fatal_400_generic / retryable_rate_or_server
 /// / retryable_context_heuristic / fatal_default`（观测面保持稳定）。
-pub(super) fn classify_error(err: &AppError) -> LoopError {
+pub(super) fn classify_error(err: AppError) -> LoopError {
     let s = err.to_string();
     let snippet = err_snippet(&s);
+    if let Some(stage) = llm_stage(&err) {
+        let branch = match stage {
+            LlmErrorStage::Connect
+            | LlmErrorStage::Send
+            | LlmErrorStage::BodyRead
+            | LlmErrorStage::IdleTimeout
+            | LlmErrorStage::ReadTimeout => "retryable_llm_transport_stage",
+            LlmErrorStage::RequestTimeout => "fatal_llm_request_timeout_stage",
+            LlmErrorStage::NonStreamStale => "fatal_llm_non_stream_stale_stage",
+            LlmErrorStage::Parse => "fatal_llm_parse_stage",
+        };
+        info!(
+            target: "tomcat_chat_diag",
+            phase = "classify_error",
+            branch,
+            stage = %stage,
+            snippet = %snippet
+        );
+        return match stage {
+            LlmErrorStage::Connect
+            | LlmErrorStage::Send
+            | LlmErrorStage::BodyRead
+            | LlmErrorStage::IdleTimeout
+            | LlmErrorStage::ReadTimeout => LoopError::Retryable(err),
+            LlmErrorStage::RequestTimeout
+            | LlmErrorStage::NonStreamStale
+            | LlmErrorStage::Parse => LoopError::Fatal(err),
+        };
+    }
     if s.contains("401") {
         info!(
             target: "tomcat_chat_diag",
@@ -54,7 +83,7 @@ pub(super) fn classify_error(err: &AppError) -> LoopError {
             branch = "fatal_401",
             snippet = %snippet
         );
-        return LoopError::Fatal(s);
+        return LoopError::Fatal(err);
     }
     // HTTP 400 + context_length_exceeded 等：须为 Retryable，Attempt loop 才能走 L3 截断。
     if is_context_overflow_error(&s) {
@@ -64,7 +93,7 @@ pub(super) fn classify_error(err: &AppError) -> LoopError {
             branch = "retryable_context_overflow",
             snippet = %snippet
         );
-        return LoopError::Retryable(s);
+        return LoopError::Retryable(err);
     }
     if s.contains("400") {
         info!(
@@ -73,7 +102,7 @@ pub(super) fn classify_error(err: &AppError) -> LoopError {
             branch = "fatal_400_generic",
             snippet = %snippet
         );
-        return LoopError::Fatal(s);
+        return LoopError::Fatal(err);
     }
     if s.contains("429")
         || s.contains("500")
@@ -88,7 +117,7 @@ pub(super) fn classify_error(err: &AppError) -> LoopError {
             branch = "retryable_rate_or_server",
             snippet = %snippet
         );
-        return LoopError::Retryable(s);
+        return LoopError::Retryable(err);
     }
     if s.contains("context") && (s.contains("length") || s.contains("token")) {
         info!(
@@ -97,7 +126,7 @@ pub(super) fn classify_error(err: &AppError) -> LoopError {
             branch = "retryable_context_heuristic",
             snippet = %snippet
         );
-        return LoopError::Retryable(s);
+        return LoopError::Retryable(err);
     }
     info!(
         target: "tomcat_chat_diag",
@@ -105,7 +134,7 @@ pub(super) fn classify_error(err: &AppError) -> LoopError {
         branch = "fatal_default",
         snippet = %snippet
     );
-    LoopError::Fatal(s)
+    LoopError::Fatal(err)
 }
 
 /// L3 强制截断 + 消息重建，仅在 `Retryable` 分支内由 Attempt Loop 调用。
@@ -136,11 +165,12 @@ pub(super) fn handle_overflow_retry(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
     attempt: u32,
-    err: &str,
+    err: &AppError,
 ) -> OverflowTrimStats {
-    let overflow_hit = is_context_overflow_error(err);
+    let err_text = err.to_string();
+    let overflow_hit = is_context_overflow_error(&err_text);
     let context_state_some = agent.context_state.is_some();
-    let err_snip = err_snippet(err);
+    let err_snip = err_snippet(&err_text);
     info!(
         target: "tomcat_chat_diag",
         phase = "attempt_loop_retryable",

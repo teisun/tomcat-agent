@@ -3,8 +3,8 @@ use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
 use crate::{
     AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
-    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
-    RestoreOptions, RetentionPolicy, SessionManager,
+    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
+    RetentionPolicy, SessionManager,
 };
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -596,28 +596,31 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
 fn user_prompt_for_mode_formats_all_states() {
     use crate::core::plan_runtime::PlanMode;
 
-    assert_eq!(super::super::prompt::user_prompt_for_mode(&PlanMode::Chat), "u> ");
+    assert_eq!(
+        super::super::prompt::user_prompt_for_mode(&PlanMode::Chat),
+        "u[Chat]> "
+    );
     assert_eq!(
         super::super::prompt::user_prompt_for_mode(&PlanMode::Planning),
-        "u[Plan]> "
+        "u[Plan:planning]> "
     );
     assert_eq!(
         super::super::prompt::user_prompt_for_mode(&PlanMode::Executing {
             plan_id: "p1".into(),
         }),
-        "u[Exec]> "
+        "u[Plan:executing]> "
     );
     assert_eq!(
         super::super::prompt::user_prompt_for_mode(&PlanMode::Pending {
             plan_id: "p1".into(),
         }),
-        "u[Pending]> "
+        "u[Plan:pending]> "
     );
     assert_eq!(
         super::super::prompt::user_prompt_for_mode(&PlanMode::Completed {
             plan_id: "p1".into(),
         }),
-        "u[Done]> "
+        "u[Plan:completed]> "
     );
 }
 
@@ -636,7 +639,7 @@ fn agent_prompt_for_mode_uses_agent_prefix_and_hides_plan_id() {
                 plan_id: "ship-001".into(),
             }
         ),
-        "agent.main[Exec]> "
+        "agent.main[Plan:executing]> "
     );
 }
 

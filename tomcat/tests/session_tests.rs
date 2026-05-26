@@ -5,7 +5,7 @@ mod common;
 
 use std::path::PathBuf;
 use tempfile::TempDir;
-use tomcat::{SessionManager, TranscriptEntry};
+use tomcat::{init_context_state, AppError, ContextConfig, SessionManager, TranscriptEntry};
 
 /// [create + list] 创建会话后 list_sessions 包含该会话
 ///
@@ -120,5 +120,77 @@ fn test_session_manager_add_and_get_messages_persists() -> Result<(), Box<dyn st
         .any(|e| matches!(e, TranscriptEntry::Message(_)));
     assert!(has_message, "entries 中应包含 Message 类型的条目");
 
+    Ok(())
+}
+
+#[test]
+fn test_append_message_invalid_chain_returns_invariant() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let tmp = TempDir::new()?;
+    let mgr = SessionManager::new(tmp.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, Some("/tmp".to_string()))?;
+
+    mgr.append_message(serde_json::json!({
+        "role": "assistant",
+        "content": "call tool",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "read", "arguments": "{}" }
+        }]
+    }))?;
+
+    let err = mgr
+        .append_message(serde_json::json!({"role": "user", "content": "illegal"}))
+        .expect_err("should reject invalid chain");
+    assert!(matches!(
+        err,
+        AppError::Invariant {
+            stage: "append_message_chain",
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_init_context_state_heals_all_missing_tail_tool_results(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let tmp = TempDir::new()?;
+    let mgr = SessionManager::new(tmp.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, Some("/tmp".to_string()))?;
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"两次工具调用",
+        "tool_calls":[
+            {
+                "id":"call_1",
+                "type":"function",
+                "function":{"name":"read","arguments":"{}"}
+            },
+            {
+                "id":"call_2",
+                "type":"function",
+                "function":{"name":"read","arguments":"{}"}
+            }
+        ]
+    }))?;
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys")?;
+    let healed_tools: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|m| m.tool_call_id.is_some())
+        .collect();
+    assert_eq!(healed_tools.len(), 2);
+    assert_eq!(healed_tools[0].tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(healed_tools[1].tool_call_id.as_deref(), Some("call_2"));
+    assert!(healed_tools
+        .iter()
+        .all(|m| m.text_content() == Some("[interrupted]")));
     Ok(())
 }

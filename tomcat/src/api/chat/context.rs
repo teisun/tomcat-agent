@@ -13,9 +13,9 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor,
-    SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry, resolve_agent_definition_dir,
-    resolve_agent_trail_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
+    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
+    resolve_workspace_roots_paths, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry,
+    LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::plan_runtime;
@@ -24,6 +24,7 @@ use super::{panels, permission};
 
 pub struct ChatContext {
     pub session: SessionManager,
+    pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
     pub llm: Arc<dyn LlmProvider>,
     pub config: AppConfig,
     pub primitive: Arc<dyn PrimitiveExecutor>,
@@ -50,8 +51,7 @@ pub struct ChatContext {
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
     pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
-    pub openai_files_runtime:
-        Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
     pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
     _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
@@ -92,6 +92,8 @@ impl ChatContext {
         let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let session = SessionManager::new(sessions_path);
+        let message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink> =
+            Arc::new(session.clone());
         let session_cwd = std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string());
@@ -203,13 +205,15 @@ impl ChatContext {
             crate::core::tools::primitive::BashTaskRegistry::new(
                 agent_trail_dir.join("tool-results"),
             )
-            .with_background_guard(crate::core::tools::primitive::bash_task::BackgroundBashGuard::new(
-                "__agent__",
-                gate.clone(),
-                confirmation.clone(),
-                audit.clone(),
-                bash_ast,
-            )),
+            .with_background_guard(
+                crate::core::tools::primitive::bash_task::BackgroundBashGuard::new(
+                    "__agent__",
+                    gate.clone(),
+                    confirmation.clone(),
+                    audit.clone(),
+                    bash_ast,
+                ),
+            ),
         );
         let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
             Arc::new(Mutex::new(Vec::new()));
@@ -310,6 +314,7 @@ impl ChatContext {
 
         Ok(Self {
             session,
+            message_append_sink,
             llm,
             config,
             primitive,
@@ -383,7 +388,11 @@ impl UserConfirmationProvider for CliConfirmation {
         if !preview.is_empty() {
             let lines: Vec<&str> = preview.lines().collect();
             let display = if lines.len() > 20 {
-                format!("{}\n  ... ({} 行已省略)", lines[..20].join("\n"), lines.len() - 20)
+                format!(
+                    "{}\n  ... ({} 行已省略)",
+                    lines[..20].join("\n"),
+                    lines.len() - 20
+                )
             } else {
                 preview.to_string()
             };

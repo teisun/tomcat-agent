@@ -7,7 +7,7 @@ fn cancel_token_demotes_executing_to_pending() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    write_disk_plan("cancellable", PlanFileMode::Planning);
+    write_disk_plan("cancellable", PlanFileState::Planning);
     rt.build_plan("cancellable", None).unwrap();
     assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
 
@@ -19,7 +19,7 @@ fn cancel_token_demotes_executing_to_pending() {
     }
 
     let plan = read_plan(&plan_path_for_id("cancellable").unwrap()).unwrap();
-    assert!(matches!(plan.frontmatter.mode, PlanFileMode::Pending));
+    assert!(matches!(plan.frontmatter.state, PlanFileState::Pending));
     cleanup_home(&home);
 }
 
@@ -66,7 +66,7 @@ fn concurrent_write_plan_serialized_by_lock() {
         frontmatter: PlanFileFrontmatter {
             plan_id: "hot_plan".into(),
             goal: "concurrent".into(),
-            mode: PlanFileMode::Planning,
+            state: PlanFileState::Planning,
             session_key: None,
             session_id: None,
             created_at: "2026-05-19T00:00:00Z".into(),
@@ -114,7 +114,7 @@ fn cancel_token_releases_plan_lock() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::with_lock_timeout("session-a", 200);
-    write_disk_plan("lockable", PlanFileMode::Planning);
+    write_disk_plan("lockable", PlanFileState::Planning);
     rt.build_plan("lockable", None).unwrap();
     rt.demote_to_pending_on_cancel().unwrap();
 
@@ -122,7 +122,7 @@ fn cancel_token_releases_plan_lock() {
     let outcome = rt2
         .build_plan("lockable", None)
         .expect("demote 后 lock 应已释放，再 build 应成功");
-    assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Pending));
+    assert!(matches!(outcome.prev_disk_state, PlanFileState::Pending));
     cleanup_home(&home);
 }
 
@@ -131,7 +131,7 @@ fn finalize_completed_to_chat_clears_active_plan_state() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    write_disk_plan("done_path", PlanFileMode::Planning);
+    write_disk_plan("done_path", PlanFileState::Planning);
     rt.build_plan("done_path", None).unwrap();
     rt.set_mode_completed("done_path".into());
     let pid = rt.finalize_completed_to_chat().expect("Some(plan_id)");
@@ -147,7 +147,7 @@ fn plan_mode_raw_edit_blocked_for_plan_files_in_planning_and_executing() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    write_disk_plan("guarded", PlanFileMode::Planning);
+    write_disk_plan("guarded", PlanFileState::Planning);
     let plan_path = plan_path_for_id("guarded").unwrap();
 
     assert!(matches!(rt.mode(), PlanMode::Chat));
@@ -172,7 +172,7 @@ fn plan_build_atomic_rollback_on_write_failure() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let _rt = PlanRuntime::new("session-a");
-    write_disk_plan("rollback", PlanFileMode::Planning);
+    write_disk_plan("rollback", PlanFileState::Planning);
 
     let plan_path = plan_path_for_id("rollback").unwrap();
     let lock_path = plan_path.with_file_name(format!(
@@ -213,7 +213,7 @@ fn e8_recover_ignores_executing_plan_from_other_session_id() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let plan_id = "orphan-plan";
-    write_disk_plan(plan_id, PlanFileMode::Executing);
+    write_disk_plan(plan_id, PlanFileState::Executing);
     let path = plan_path_for_id(plan_id).unwrap();
     let mut p = read_plan(&path).unwrap();
     p.frontmatter.session_key = Some("session-a".into());
@@ -224,7 +224,7 @@ fn e8_recover_ignores_executing_plan_from_other_session_id() {
     rt.recover().unwrap();
 
     let p2 = read_plan(&path).unwrap();
-    assert_eq!(p2.frontmatter.mode, PlanFileMode::Executing);
+    assert_eq!(p2.frontmatter.state, PlanFileState::Executing);
     assert!(matches!(rt.mode(), PlanMode::Chat));
     cleanup_home(&home);
 }
@@ -234,7 +234,7 @@ fn e8_recover_restores_executing_for_current_session() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let plan_id = "owned-plan";
-    write_disk_plan(plan_id, PlanFileMode::Executing);
+    write_disk_plan(plan_id, PlanFileState::Executing);
     let path = plan_path_for_id(plan_id).unwrap();
     let mut p = read_plan(&path).unwrap();
     p.frontmatter.session_key = Some("session-a".into());
@@ -256,7 +256,7 @@ fn e7_reload_active_plan_from_disk_picks_up_session_owned_executing() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let plan_id = "reload-plan";
-    write_disk_plan(plan_id, PlanFileMode::Executing);
+    write_disk_plan(plan_id, PlanFileState::Executing);
     let path = plan_path_for_id(plan_id).unwrap();
     let mut p = read_plan(&path).unwrap();
     p.frontmatter.session_key = Some("session-a".into());

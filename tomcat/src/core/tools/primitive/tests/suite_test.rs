@@ -264,6 +264,34 @@ async fn execute_bash_success() {
 }
 
 #[tokio::test]
+async fn execute_bash_empty_argv_uses_shell_mode() {
+    let dir = std::env::temp_dir().join("tomcat_exec_bash_empty_argv");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let empty_args: Vec<String> = vec![];
+    let res = exec
+        .execute_bash(
+            "echo empty-argv-ok",
+            Some(&path_str),
+            "p1",
+            Some(&empty_args),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.exit_code, 0);
+    assert!(res.stdout.trim().contains("empty-argv-ok"));
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
 async fn execute_bash_tokens_no_longer_trigger_path_gate() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_url");
     std::fs::create_dir_all(&dir).unwrap();
@@ -938,6 +966,156 @@ async fn edit_validation_failure_restores_or_noop() {
     );
     assert_eq!(std::fs::read_to_string(&f2).unwrap(), original2);
     assert!(!dir.join("f.bak").exists());
+}
+
+#[tokio::test]
+async fn edit_notfound_with_cat_n_prefix_explains_remediation() {
+    let dir = temp_edit_dir("tomcat_edit_cat_n_prefix");
+    let f = dir.join("catn.txt");
+    let original = "function foo() {\n  return 1;\n}\n";
+    std::fs::write(&f, original).unwrap();
+    let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(DenyAuditRecorder(audit_entries.clone())),
+        make_gate(&dir),
+    );
+    let prefixed_old = "     1\tfunction foo() {\n     2\t  return 1;\n     3\t}\n";
+    let err = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg(prefixed_old, "function foo() {\n  return 2;\n}\n", false)],
+            "p1",
+        )
+        .await
+        .expect_err("带 cat -n 前缀的 old_content 应触发专用 NotFound 诊断");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("NotFound (line_prefix_suspected)"),
+        "错误文案应含子码：{}",
+        msg
+    );
+    assert!(
+        msg.contains("cat -n 行号前缀"),
+        "错误文案应指出 cat -n 来源：{}",
+        msg
+    );
+    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert!(msg.contains("\\t"), "escape_debug 摘要应暴露 Tab：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
+    assert!(!dir.join("catn.bak").exists(), "校验失败不应生成 .bak");
+    let audit = audit_entries.lock().unwrap();
+    let detail = audit
+        .last()
+        .and_then(|entry| entry.detail.as_deref())
+        .expect("失败 edit 应记录 audit detail");
+    assert!(
+        detail.contains("NotFound[line_prefix_suspected] edits[0]"),
+        "audit detail 应带子分类标签：{}",
+        detail
+    );
+}
+
+#[tokio::test]
+async fn edit_notfound_with_hashline_prefix_explains_remediation() {
+    let dir = temp_edit_dir("tomcat_edit_hashline_prefix");
+    let f = dir.join("hashline.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&f, original).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let h1 = crate::core::tools::primitive::compute_line_hash("alpha", 1);
+    let h2 = crate::core::tools::primitive::compute_line_hash("beta", 2);
+    let h3 = crate::core::tools::primitive::compute_line_hash("gamma", 3);
+    let prefixed_old = format!(
+        "{:>6}#{}:alpha\n{:>6}#{}:beta\n{:>6}#{}:gamma\n",
+        1, h1, 2, h2, 3, h3
+    );
+    let err = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg(&prefixed_old, "ALPHA\nBETA\nGAMMA\n", false)],
+            "p1",
+        )
+        .await
+        .expect_err("带 hashline 前缀的 old_content 应触发专用 NotFound 诊断");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("NotFound (line_prefix_suspected)"),
+        "错误文案应含子码：{}",
+        msg
+    );
+    assert!(
+        msg.contains("hashline 前缀"),
+        "错误文案应指出 hashline 来源：{}",
+        msg
+    );
+    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
+    assert!(!dir.join("hashline.bak").exists(), "校验失败不应生成 .bak");
+}
+
+#[tokio::test]
+async fn edit_notfound_with_partial_prefix_does_not_misfire() {
+    let dir = temp_edit_dir("tomcat_edit_partial_prefix");
+    let f = dir.join("partial.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&f, original).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let mixed_old = "     1\talpha\nbeta\n";
+    let err = exec
+        .edit_file(&f.to_string_lossy(), vec![edit_seg(mixed_old, "X\n", false)], "p1")
+        .await
+        .expect_err("混合前缀不应误判为整段 line_prefix_suspected");
+    let msg = err.to_string();
+    assert!(msg.contains("NotFound:"), "仍应返回普通 NotFound：{}", msg);
+    assert!(
+        !msg.contains("line_prefix_suspected"),
+        "混合前缀不应误触发专用子码：{}",
+        msg
+    );
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
+}
+
+#[tokio::test]
+async fn edit_notfound_plain_missing_stays_plain_notfound() {
+    let dir = temp_edit_dir("tomcat_edit_plain_notfound");
+    let f = dir.join("plain.txt");
+    let original = "alpha\nbeta\ngamma\n";
+    std::fs::write(&f, original).unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let err = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("missing", "replacement", false)],
+            "p1",
+        )
+        .await
+        .expect_err("普通缺失文本应保持普通 NotFound");
+    let msg = err.to_string();
+    assert!(msg.contains("NotFound:"), "错误文案应含 NotFound：{}", msg);
+    assert!(
+        !msg.contains("line_prefix_suspected"),
+        "普通缺失文本不应落入专用子码：{}",
+        msg
+    );
+    assert!(msg.contains("escape_debug"), "普通 NotFound 应附 escape_debug 摘要：{}", msg);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
 }
 
 #[tokio::test]

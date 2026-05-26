@@ -13,7 +13,7 @@
 - [1. 术语统一](#1-术语统一)
 - [2. 与 `todos` / `create_plan` 的关系](#2-与-todos--create_plan-的关系)
 - [3. 目标与设计原则](#3-目标与设计原则)
-- [4. 门控矩阵（mode × op × plan.mode）](#4-门控矩阵mode--op--planmode)
+- [4. 门控矩阵（mode × op × plan.state）](#4-门控矩阵mode--op--planstate)
 - [5. 协议（入参 / 出参 / Schema）](#5-协议入参--出参--schema)
 - [6. 调度时序](#6-调度时序)
 - [7. 跨 session 与并发](#7-跨-session-与并发)
@@ -54,8 +54,8 @@
                        │ create_plan  │ 初稿写盘（PLAN only）  │
                        │ update_plan  │ todos[] 增量编辑（any mode）              │
                        │ runtime      │ /plan build 时写 session_key/id / mode │
-                       │ 自动派生     │ mode=completed (all todos done) /         │
-                       │              │ mode=pending (cancel_token)               │
+                       │ 自动派生     │ state=completed (all todos done) /        │
+                       │              │ state=pending (cancel_token)              │
                        └──────────────┴───────────────────────┘
 ```
 
@@ -85,14 +85,14 @@
 | G2 | 复用 `todos` 的 op 引擎与文件锁；不重新实现 op 模型 | `update_plan_reuses_todos_op_engine` | 共享代码，减少漂移。 |
 | G3 | `plan_id` 路由：EXEC 缺省 → `active_plan_id`；其它模式必填 | `update_plan_requires_plan_id_outside_exec` | 改哪份 plan 必须明确。 |
 | G4 | 只能动 `todos[]`；其它 frontmatter 字段 / markdown 正文均拒 | `update_plan_rejects_non_todo_frontmatter_writes`、`update_plan_rejects_body_writes` | 别越界。 |
-| G5 | EXEC 模式下提交后触发 `mode=completed` 自动派生；其它模式只改 frontmatter，不改 mode | `update_plan_in_exec_promotes_completed`、`update_plan_outside_exec_does_not_change_mode` | EXEC 才会自动收口。 |
+| G5 | EXEC 模式下提交后触发 `state=completed` 自动派生；其它模式只改 frontmatter，不改 mode | `update_plan_in_exec_promotes_completed`、`update_plan_outside_exec_does_not_change_mode` | EXEC 才会自动收口。 |
 | G6 | 跨 session 编辑允许；同 session 不能同时 EXEC 两份 plan（build gate 不变） | `update_plan_cross_session_allowed`、`active_plan_id_unique_per_session` | 任意聊天窗口可改，开干仍受 build gate。 |
 | G7 | ToolResult 自带完整 `items` snapshot；LLM 不必再 `read` plan.md | `update_plan_result_carries_full_snapshot` | 工具结果自带全貌。 |
 | G8 | reviewer subagent 默认可用 `update_plan`（只读 reviewer 也可用 todos；改稿 reviewer 才可用 update_plan） | `reviewer_can_use_update_plan_when_allowed` | 让 reviewer 也能落地修订建议。 |
 
 ---
 
-## 4. 门控矩阵（mode × op × plan.mode）
+## 4. 门控矩阵（mode × op × plan.state）
 
 ### 4.1 调用模式 × 必填字段
 
@@ -101,18 +101,18 @@
 | `Chat` / `Planning` / `Completed` / `Pending` | **必填** | — | 自己说清楚改哪份。 |
 | `Executing` | 可省 | `session.active_plan_id`（runtime） | 默认改正在执行的那份。 |
 
-### 4.2 目标 plan.mode 准入
+### 4.2 目标 plan.state 准入
 
-| target `PlanFile.mode` | 是否允许 | 行为 |
+| target `PlanFile.state` | 是否允许 | 行为 |
 |------------------------|---------|------|
 | `planning` | ✅ | 改 todos[]；不触发 mode 自动派生 |
-| `executing` | ✅（仅当 `target.session_key == 当前 session.session_key`） | 改 todos[]；EXEC 模式下可触发 mode=completed 自动派生 |
+| `executing` | ✅（仅当 `target.session_key == 当前 session.session_key`） | 改 todos[]；EXEC 模式下可触发 state=completed 自动派生 |
 | `pending` | ✅ | 改 todos[]；不触发 mode 自动派生（要续跑请用 `/plan build`） |
 | `completed` | ❌ tool error | 已结案的 plan 不让乱改；如需重新规划用 `create_plan` 开新 plan |
 
 > 「`executing` + 跨 session」拒绝原因：避免另一个 session 在你执行中改你手上 todo 造成竞争。CHAT/PLAN 期的 plan（`session_key == null`）跨 session 改无问题。
 
-### 4.3 op × 目标 plan.mode
+### 4.3 op × 目标 plan.state
 
 | op | `planning` | `executing` | `pending` |
 |----|-----------|-------------|-----------|
@@ -131,7 +131,7 @@
 ```json
 {
   "name": "update_plan",
-  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose mode is planning or pending; an executing plan can only be edited by the session that owns it. Plans whose mode is completed cannot be edited.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.mode == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
+  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose state is planning or pending; an executing plan can only be edited by the session that owns it. Plans whose state is completed cannot be edited.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.state == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -179,8 +179,8 @@
     "applied":           { "type": "integer" },
     "plan_id":           { "type": "string" },
     "plan_path":         { "type": "string" },
-    "plan_mode_before":  { "type": "string", "enum": ["planning", "executing", "completed", "pending"] },
-    "plan_mode_after":   { "type": "string", "enum": ["planning", "executing", "completed", "pending"] },  // 仅 EXEC 全 completed 时与 before 不同
+    "plan_state_before": { "type": "string", "enum": ["planning", "executing", "completed", "pending"] },
+    "plan_state_after":  { "type": "string", "enum": ["planning", "executing", "completed", "pending"] },  // 仅 EXEC 全 completed 时与 before 不同
     "active_in_progress":{ "type": "string", "nullable": true },
     "items": {                              // ★ 完整 todos 快照
       "type": "array",
@@ -197,11 +197,11 @@
     "panel_snapshot_id": { "type": "string" },
     "warnings":          { "type": "array", "items": {"type":"string"} }
   },
-  "required": ["applied", "plan_id", "plan_mode_before", "plan_mode_after", "items", "panel_snapshot_id"]
+  "required": ["applied", "plan_id", "plan_state_before", "plan_state_after", "items", "panel_snapshot_id"]
 }
 ```
 
-**说人话**：返回当前 plan 完整 items、本次改了几条、操作前后的 mode（用以观察 runtime 是否自动派生 completed）、面板快照编号。
+**说人话**：返回当前 plan 完整 items、本次改了几条、操作前后的 state（用以观察 runtime 是否自动派生 completed）、面板快照编号。
 
 ### 5.3 代码复用细节
 
@@ -229,7 +229,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
                                                                 ▼
                             ┌──────────────────────────────────────────────────────┐
                             │ 1. resolve plan_id / path → PlanFile path             │
-                            │ 2. mode gate（§4）                                    │
+                            │ 2. state gate（§4）                                   │
                             │ 3. acquire advisory file lock                         │
                             │ 4. apply_todos_op(PlanTodoStore, ops)                 │
                             │    - frontmatter.todos[] in-place                     │
@@ -240,9 +240,9 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
                                                                 │
                                                                 ▼
                             ┌──────────────────────────────────────────────────────┐
-                            │ runtime hook (EXEC 模式 + target.mode==executing 时): │
+                            │ runtime hook (EXEC 模式 + target.state==executing 时): │
                             │    all todos completed? ──▶ PlanRuntime.on_all_todos_completed()  │
-                            │       ① write frontmatter.mode = completed            │
+                            │       ① write frontmatter.state = completed           │
                             │       ② swap reminder (EXECUTOR → 无)                 │
                             │       ③ user prefix → 无                              │
                             │       ④ catalog swap (EXEC → CHAT)                    │
@@ -255,7 +255,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
                             └──────────────────────────────────────────────────────┘
                                                                 │
                                                                 ▼
-                            ToolResult { applied, items, plan_mode_after, ... }
+                            ToolResult { applied, items, plan_state_after, ... }
 ```
 
 **说人话**：解析目标 → 校验门控 → 加锁 → 复用 todos op 引擎写 frontmatter → 解锁 → 看是否触发完成派生 → 刷面板 → 返回快照。
@@ -269,11 +269,11 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 - **超时**：默认 `2000ms`（可调 `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS`）；5ms 起指数退避（上限 80ms），溢出返回 `PlanError::LockBusy { waited_ms, holder_pid }`。
 - **Cancel/中止路径**：`PlanRuntime::demote_to_pending_on_cancel()` 走同一把锁的 `write_plan`；锁随闭包结束释放，**没有**独立 `release_lock()` API。
 
-### 6.2 拒写（mode 矩阵闸门）
+### 6.2 拒写（state 矩阵闸门）
 
 `update_plan` 在写盘前做模式矩阵检查，**任何**违反即返回 tool error（不写盘、不刷面板）：
 
-| 目标 `plan.mode` | 操作 | 结果 |
+| 目标 `plan.state` | 操作 | 结果 |
 |------------------|------|------|
 | `completed` | 任意 op | ❌ `CrossSessionDenied("plan is completed")` |
 | `planning` / `pending` | `set_status: in_progress` | ❌ `BadOp("in_progress only allowed in executing")` |
@@ -284,11 +284,11 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 
 | 场景 | 处理 | 说人话 |
 |------|------|--------|
-| 同一 session 同时改两份 plan（CHAT/PLAN 期，target.mode=planning） | ✓ 允许（这两份 plan 与 active_plan_id 无关） | 改谁都行，反正没在跑。 |
+| 同一 session 同时改两份 plan（CHAT/PLAN 期，target.state=planning） | ✓ 允许（这两份 plan 与 active_plan_id 无关） | 改谁都行，反正没在跑。 |
 | 同一 session 在 EXEC（active_plan_id=P）调 `update_plan(plan_id=P)` | ✓ 默认 op；可省 plan_id | 改自己手上的 plan。 |
 | 同一 session 在 EXEC（active_plan_id=P）调 `update_plan(plan_id=Q)` 改另一份 planning/pending 的 Q | ✓ 允许（只要 Q.mode ∈ {planning, pending}）；warning「正在 EXEC P，建议先稳定本盘」 | 顺手补另一份的 todos OK，但要注意。 |
-| 跨 session 改同一份 plan（target.mode=planning/pending） | ✓ 允许 | plan 没绑 session 期，任意 session 改。 |
-| 跨 session 改 `target.mode=executing` 的 plan | ❌ tool error，提示「该 plan 正由 session X 执行」 | 别越界。 |
+| 跨 session 改同一份 plan（target.state=planning/pending） | ✓ 允许 | plan 没绑 session 期，任意 session 改。 |
+| 跨 session 改 `target.state=executing` 的 plan | ❌ tool error，提示「该 plan 正由 session X 执行」 | 别越界。 |
 | 同进程并发 `update_plan` 同一份 plan | tokio Mutex 串行化 | 同进程排队写。 |
 | 跨进程并发 | advisory file lock（`fs2::FileExt`）；获取失败 → tool error | 跨进程靠文件锁挡。 |
 
@@ -299,12 +299,12 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 仅当**三者同时成立**才触发 `mode = completed` 自动派生：
 
 1. 调用方 session.mode == `Executing`；
-2. `target.mode == executing` 且 `target.session_key == 当前 session.session_key`；
+2. `target.state == executing` 且 `target.session_key == 当前 session.session_key`；
 3. 本次提交后所有 `todos[*].status == completed`。
 
 满足时，runtime 在**同一把文件锁**内追加：
 
-- 写 `frontmatter.mode = completed`；
+- 写 `frontmatter.state = completed`；
 - swap reminder（EXECUTOR → 无）、user prefix → 无、catalog 复位 CHAT；
 - 清 `runtime.active_plan_id`；
 - transcript：追加 `plan.complete` 自定义事件。
@@ -331,9 +331,9 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 |------|------|--------|
 | `plan_id` 缺失且非 EXEC | tool error，usage「在 CHAT/PLAN/Completed/Pending 模式必须传 plan_id」 | 改哪个说清楚。 |
 | `plan_id` 解析不到文件 | tool error | 编错 id。 |
-| `target.mode == completed` | tool error，usage「completed plan 已结案；如需重新规划用 `create_plan` 开新 plan」 | 已结案别改。 |
+| `target.state == completed` | tool error，usage「completed plan 已结案；如需重新规划用 `create_plan` 开新 plan」 | 已结案别改。 |
 | 跨 session 改 `executing` plan | tool error，usage「该 plan 正由 session X 执行」 | 跨 session 不许动正在跑的。 |
-| `set_status(in_progress)` 且 `target.mode != executing` | tool error | plan 没在 EXEC 标 in_progress 没意义。 |
+| `set_status(in_progress)` 且 `target.state != executing` | tool error | plan 没在 EXEC 标 in_progress 没意义。 |
 | 同 plan 两个 `in_progress` | tool error；整批回滚 | 一个 plan 文件最多一个在干。 |
 | 未知 `id` | tool error | 别瞎编 id。 |
 | frontmatter round-trip 解析失败 | tool error，附最后 50 字节上下文 | 文件被外部改坏了。 |
@@ -379,9 +379,9 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 | ~~CHAT 模式下完全无法改 plan.md 的 todos[]~~ | **修复**：`update_plan` 在 CHAT 可见；按 `plan_id` 或显式 `path` 路由 | 修上一版的缺口。 |
 | ~~把 `plan_id` 入参也藏起来由 runtime 推断~~ | **否**：EXEC 缺省取 active，其它模式必填 | 改哪份 plan 必须明说。 |
 | ~~把 markdown 正文写权也合到 `update_plan`~~ | **否**：正文走 raw write/edit；本工具只管 frontmatter `todos[]` | 工具职责单一。 |
-| ~~允许改 `target.mode == completed` 的 plan~~ | **否**：已结案的 plan 拒绝修改；要重新做请用 `create_plan` 开新 plan | 结案的别动。 |
+| ~~允许改 `target.state == completed` 的 plan~~ | **否**：已结案的 plan 拒绝修改；要重新做请用 `create_plan` 开新 plan | 结案的别动。 |
 | ~~跨 session 改 `executing` plan~~ | **否**：拒绝；只有 owning session 能改正在跑的那份 | 别越界。 |
-| ~~自动派生在任意模式都触发~~ | **否**：仅 EXEC + target.mode==executing + 同 session 时；其它模式只改 frontmatter | mode 转移由 EXEC 触发。 |
+| ~~自动派生在任意模式都触发~~ | **否**：仅 EXEC + target.state==executing + 同 session 时；其它模式只改 frontmatter | state 转移由 EXEC 触发。 |
 | ~~reviewer subagent 不能用 `update_plan`~~ | **替代**：`allow_review_edit=true` 时附加 `update_plan` + `edit`；reviewer 可落地修订建议而非只挑刺 | 让审稿员能动手。 |
 
 ---

@@ -104,8 +104,8 @@
 - [ ] `tomcat chat --resume` 可恢复上次会话，历史上下文从持久化 JSONL 文件加载并注入 LLM
 - [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] 实现会话管理功能，支持创建、切换、归档、删除、搜索会话，历史持久化不丢失
-- [ ] PLAN / EXEC / Pending / Done 的 CLI prompt 与实际模式一致：user 端显示 `u[Plan]>` / `u[Exec]>` / `u[Pending]>` / `u[Done]>`，agent 端显示 `agent.<id>[...]>`；普通聊天维持 `u>` / `agent.<id>>`
-- [ ] `/plan build <plan_id/path>` 成功后立即自动进入首个 EXEC 回合，CLI 可见 `u[Exec]> start building <path>`，无需用户再手动补一句触发执行
+- [ ] CLI prompt 与实际模式一致：user 端显示 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>`，agent 端显示 `agent.<id>[Plan:planning]>` / `agent.<id>[Plan:executing]>` / `agent.<id>[Plan:pending]>` / `agent.<id>[Plan:completed]>`；普通聊天维持 `agent.<id>>`
+- [ ] `/plan build <plan_id/path>` 成功后立即自动进入首个 EXEC 回合，CLI 可见 `u[Plan:executing]> start building <path>`，无需用户再手动补一句触发执行
 - [ ] 非 EXEC 状态下 `ask_question` 交互为单选 + 自定义 + `skip` 当前题：非法输入只重试当前题，`c` 与 `c <文本>` 都可录入自定义答案，返回结果显式携带 `skipped: true`
 - [ ] 对话中Agent调用4原语/工具时，清晰展示操作内容，等待用户确认后执行
 - [ ] 支持Markdown/代码块高亮渲染，快捷键支持（Ctrl+C中断、Ctrl+D退出、↑↓历史导航）
@@ -113,8 +113,9 @@
 - [ ] Agent 执行工具期间，用户发送新消息可触发 Steering——完成当前工具后跳过剩余工具，注入新指令并重新调用 LLM（中途换方向不需要重新创建会话）
 - [ ] Ctrl+C 可触发 Abort——当前工具执行完毕后立即终止 Agent，发布 agent_end(interrupted)
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
-- [ ] `tomcat chat --resume` 遇到 transcript 尾部 dangling `assistant.tool_calls` 时，hydrate 自动补一条 synthetic tool result `[interrupted]` 并在 transcript 追加可见标记；恢复后可直接继续对话，不触发 OpenAI 400
-- [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在等）给出清晰提示并终止
+- [ ] `tomcat chat --resume` 遇到 transcript 尾部 dangling `assistant.tool_calls` 时，hydrate 会按最后一个 tool_call block 的原顺序补齐所有缺失的 synthetic tool result `[interrupted]`；若中间混入非 `tool` role 则拒绝猜测并保留告警
+- [ ] mid-turn `Failed` / 流中断后，本轮已落盘的 `user`、完整 `assistant`、`assistant + tool_calls`、已完成 `tool_result` 仍保留在 transcript；用户下一条输入直接开启下一轮，无需 `/retry`
+- [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在、Parse、RequestTimeout / NonStreamStale 等）给出清晰的阶段化提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
 - [ ] 单条工具结果超过 `[context].layer0_single_result_max_chars`（默认 **50_000** chars，与 [context-management.md §4.4](../../docs/architecture/context-management.md) 一致）时 Layer 0 落盘 + preview，不撑爆单次请求；可观测事件见 `tool_result_truncated` / 压缩相关事件（以代码与 [events.md](../../docs/architecture/plugin-system/events.md) 为准）
 - [ ] 长对话 token 超预算时按 [context-management.md](../../docs/architecture/context-management.md) **现行**链路：**Layer 0**（同步：落盘 / compactable 区占位）→ **Layer 1**（异步预热摘要，时机 ⑤ 不阻塞）→ **Layer 2**（Boundary 延迟应用，时机 ②）→ **Layer 3**（仅 API **Context Overflow** 后 `force_drop_oldest_to_target` 兜底）；保护最近若干 turns 与水位线见文档 §4.2；压缩后继续正常对话

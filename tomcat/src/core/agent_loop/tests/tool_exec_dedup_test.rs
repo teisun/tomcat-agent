@@ -611,6 +611,109 @@ async fn edit_error_codes_normalized() {
     assert!(msg.contains("Overlap"), "期望 Overlap：{}", msg);
 }
 
+#[tokio::test]
+async fn read_line_numbers_output_misused_as_edit_old_content_returns_line_prefix_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("line_numbers.txt");
+    let original = "alpha\nbeta\n";
+    std::fs::write(&f, original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let read_tc = make_tc(&serde_json::json!({
+        "path": f.to_string_lossy().to_string()
+    })
+    .to_string());
+    let (read_out, read_err, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
+    assert!(!read_err, "带行号 read 必须成功");
+    assert!(
+        read_out.contains("\talpha"),
+        "read 默认应返回 cat -n 风格行号：{:?}",
+        read_out
+    );
+
+    let edit_tc = make_edit_tc(
+        &serde_json::json!({
+            "path": f.to_string_lossy().to_string(),
+            "old_content": read_out,
+            "new_content": "ALPHA\nBETA\n"
+        })
+        .to_string(),
+    );
+    let (msg, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
+    assert!(is_error, "误把带行号 read 输出喂给 edit 时必须报错：{}", msg);
+    assert!(
+        msg.contains("NotFound (line_prefix_suspected)"),
+        "错误文案应含专用子码：{}",
+        msg
+    );
+    assert!(
+        msg.contains("cat -n 行号前缀"),
+        "错误文案应指出 cat -n 来源：{}",
+        msg
+    );
+    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        original,
+        "专用 NotFound 报错后磁盘必须字节级未变"
+    );
+}
+
+#[tokio::test]
+async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("hashline.txt");
+    let original = "alpha\nbeta\n";
+    std::fs::write(&f, original).unwrap();
+    let primitive = make_executor(&dir_path);
+    let state = Arc::new(ReadFileState::new());
+
+    let read_tc = make_tc(&serde_json::json!({
+        "path": f.to_string_lossy().to_string(),
+        "hashline": true
+    })
+    .to_string());
+    let (read_out, read_err, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
+    assert!(!read_err, "hashline read 必须成功");
+    assert!(
+        read_out.contains("#") && read_out.contains(":alpha"),
+        "hashline read 应返回 `<line>#<hash>:` 前缀：{:?}",
+        read_out
+    );
+
+    let edit_tc = make_edit_tc(
+        &serde_json::json!({
+            "path": f.to_string_lossy().to_string(),
+            "old_content": read_out,
+            "new_content": "ALPHA\nBETA\n"
+        })
+        .to_string(),
+    );
+    let (msg, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
+    assert!(is_error, "误把 hashline read 输出喂给 edit 时必须报错：{}", msg);
+    assert!(
+        msg.contains("NotFound (line_prefix_suspected)"),
+        "错误文案应含专用子码：{}",
+        msg
+    );
+    assert!(
+        msg.contains("hashline 前缀"),
+        "错误文案应指出 hashline 来源：{}",
+        msg
+    );
+    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        original,
+        "专用 NotFound 报错后磁盘必须字节级未变"
+    );
+}
+
 // ─── T2-P0-017 Phase3 / PR-M：hashline_edit + read 闭环 ─────────────────────
 
 #[tokio::test]

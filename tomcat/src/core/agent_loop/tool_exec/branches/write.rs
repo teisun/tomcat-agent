@@ -9,8 +9,8 @@ pub(in super::super) async fn handle_write(
     let path = args["path"].as_str().unwrap_or("");
     let content = args["content"].as_str().unwrap_or("");
     let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-    let resolved =
-        crate::infra::platform::normalize_path(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let resolved = crate::infra::platform::normalize_path(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path));
     let exists = resolved.exists();
     if exists && !overwrite {
         return Err(format!(

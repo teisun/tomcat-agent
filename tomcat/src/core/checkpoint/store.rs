@@ -141,4 +141,3 @@ fn git_available() -> bool {
         .map(|status| status.success())
         .unwrap_or(false)
 }
-

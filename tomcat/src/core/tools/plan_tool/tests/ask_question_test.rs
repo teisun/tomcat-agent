@@ -71,7 +71,10 @@ async fn ask_question_emits_transcript_event_on_answer() {
 
     let guard = captured.lock();
     assert_eq!(guard.len(), 1, "成功回答应写一条 transcript 自定义事件");
-    assert_eq!(guard[0]["event"], crate::infra::wire::WIRE_PLAN_ASK_QUESTION);
+    assert_eq!(
+        guard[0]["event"],
+        crate::infra::wire::WIRE_PLAN_ASK_QUESTION
+    );
     assert_eq!(guard[0]["mode"], "planning");
     assert_eq!(guard[0]["questions"][0]["id"], "q1");
     assert_eq!(guard[0]["result"]["answers"][0]["question_id"], "q1");
@@ -100,7 +103,10 @@ async fn ask_question_emits_transcript_event_on_cancelled() {
 
     let guard = captured.lock();
     assert_eq!(guard.len(), 1, "取消也应写一条 transcript 自定义事件");
-    assert_eq!(guard[0]["event"], crate::infra::wire::WIRE_PLAN_ASK_QUESTION);
+    assert_eq!(
+        guard[0]["event"],
+        crate::infra::wire::WIRE_PLAN_ASK_QUESTION
+    );
     assert_eq!(guard[0]["result"]["cancelled"], true);
     assert!(guard[0]["result"]["answers"].as_array().unwrap().is_empty());
 }

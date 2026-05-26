@@ -1,7 +1,7 @@
-use super::sample_frontmatter;
 use super::super::file_store::{
-    parse_plan_file, serialize_plan_file, PlanError, PlanFile, PlanFileMode, TodoItem, TodoStatus,
+    parse_plan_file, serialize_plan_file, PlanError, PlanFile, PlanFileState, TodoItem, TodoStatus,
 };
+use super::sample_frontmatter;
 
 #[test]
 fn plan_file_round_trip_frontmatter() {
@@ -15,7 +15,7 @@ fn plan_file_round_trip_frontmatter() {
     assert!(text.contains("schema_version: 1"));
     let parsed = parse_plan_file(&text).expect("parse");
     assert_eq!(parsed.frontmatter.plan_id, "demo_plan_1");
-    assert_eq!(parsed.frontmatter.mode, PlanFileMode::Planning);
+    assert_eq!(parsed.frontmatter.state, PlanFileState::Planning);
     assert_eq!(parsed.frontmatter.todos.len(), 2);
     assert_eq!(parsed.frontmatter.todos[1].status, TodoStatus::InProgress);
     assert_eq!(parsed.body.trim(), "## Goal\n\nThis is the goal.".trim());
@@ -52,12 +52,15 @@ fn plan_file_round_trip_preserves_unknown_keys() {
 #[test]
 fn plan_file_missing_required_field_returns_error() {
     let yaml_missing_plan_id =
-        "---\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
+        "---\ngoal: g\nstate: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
     let err = parse_plan_file(yaml_missing_plan_id).expect_err("缺 plan_id 应失败");
-    matches!(err, PlanError::YamlParse(_) | PlanError::MissingField { .. });
+    matches!(
+        err,
+        PlanError::YamlParse(_) | PlanError::MissingField { .. }
+    );
 
     let yaml_empty_plan_id =
-        "---\nplan_id: \"\"\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
+        "---\nplan_id: \"\"\ngoal: g\nstate: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
     let err = parse_plan_file(yaml_empty_plan_id).expect_err("空 plan_id 应失败");
     match &err {
         PlanError::MissingField { field } => assert_eq!(field, "plan_id"),
@@ -65,7 +68,7 @@ fn plan_file_missing_required_field_returns_error() {
     }
 
     let yaml_empty_goal =
-        "---\nplan_id: x\ngoal: \"\"\nmode: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
+        "---\nplan_id: x\ngoal: \"\"\nstate: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n";
     let err = parse_plan_file(yaml_empty_goal).expect_err("空 goal 应失败");
     match &err {
         PlanError::MissingField { field } => assert_eq!(field, "goal"),
@@ -75,7 +78,7 @@ fn plan_file_missing_required_field_returns_error() {
 
 #[test]
 fn plan_file_schema_version_v1_locked() {
-    let yaml = "---\nplan_id: x\ngoal: g\nmode: planning\ncreated_at: t\nschema_version: 2\ntodos: []\n---\n";
+    let yaml = "---\nplan_id: x\ngoal: g\nstate: planning\ncreated_at: t\nschema_version: 2\ntodos: []\n---\n";
     let err = parse_plan_file(yaml).expect_err("schema_version=2 应被拒");
     assert!(
         matches!(

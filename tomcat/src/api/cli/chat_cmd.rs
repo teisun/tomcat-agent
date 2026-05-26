@@ -42,6 +42,7 @@ pub(super) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
     // 桥接 L0 → L1：SIGINT → ChatContext.cancel_token.cancel() + 双击检测。
     let cancel_token = ctx.cancel_token.clone();
     let last_interrupt_at = ctx.last_interrupt_at.clone();
+    let append_in_flight = ctx.session.append_in_flight_counter();
     ctrlc::set_handler(move || {
         let now = Instant::now();
         let prev = {
@@ -52,6 +53,12 @@ pub(super) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
         };
         match check_double_tap(prev, now, DOUBLE_TAP_WINDOW) {
             DoubleTap::Hard => {
+                let deadline = Instant::now() + Duration::from_millis(500);
+                while append_in_flight.load(std::sync::atomic::Ordering::SeqCst) > 0
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
                 // 进程级硬中断：POSIX 约定 128 + SIGINT(2) = 130。
                 // 依赖 `SessionManager` 的 append-only JSONL 在首击 partial 落盘时已
                 // flush，此处即便进程立即结束，transcript 也完整。

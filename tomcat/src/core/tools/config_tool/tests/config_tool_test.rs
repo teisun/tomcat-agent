@@ -10,8 +10,9 @@ use crate::core::tools::contract::confirmation::{
     AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider,
 };
 use crate::core::tools::primitive::PrimitiveOperation;
-use crate::infra::config::load_config;
+use crate::infra::config::{load_config, load_config_toml_file};
 use crate::infra::error::AppError;
+use serial_test::serial;
 use tempfile::TempDir;
 
 #[test]
@@ -251,4 +252,34 @@ async fn config_set_bash_forbidden_rejects_invalid_regex() {
     assert!(matches!(err, AppError::Config(_)));
     let cfg = load_config(Some(&p)).unwrap();
     assert!(cfg.primitive.bash_forbidden.is_empty());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn config_set_bash_forbidden_does_not_persist_env_merged_values() {
+    struct EnvGuard(Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("TOMCAT__LOG__LEVEL", v),
+                None => std::env::remove_var("TOMCAT__LOG__LEVEL"),
+            }
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let p = empty_config(&dir);
+    let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
+    let ctx = ConfigToolContext::new(p.clone(), confirm);
+    let _guard = EnvGuard(std::env::var("TOMCAT__LOG__LEVEL").ok());
+    std::env::set_var("TOMCAT__LOG__LEVEL", "trace");
+
+    let outcome = config_set_impl("primitive.bash_forbidden", "^rm -rf /$", &ctx)
+        .await
+        .unwrap();
+    assert!(outcome.applied);
+
+    let cfg = load_config_toml_file(&p).unwrap();
+    assert_eq!(cfg.log.level, "warn");
+    assert_eq!(cfg.primitive.bash_forbidden, vec!["^rm -rf /$".to_string()]);
 }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode,
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
     TodoItem, TodoStatus,
 };
 use tomcat::core::plan_runtime::mode::PlanMode;
@@ -63,7 +63,7 @@ fn write_external_plan(path: &std::path::Path, plan_id: &str) {
     let fm = PlanFileFrontmatter {
         plan_id: plan_id.into(),
         goal: "external build target".into(),
-        mode: PlanFileMode::Planning,
+        state: PlanFileState::Planning,
         session_key: Some("orig-session-key".into()),
         session_id: Some("orig-uuid".into()),
         created_at: "2026-05-19T00:00:00Z".into(),
@@ -190,7 +190,7 @@ async fn full_plan_lifecycle_create_build_complete() {
         // 3) /plan build → EXEC + active plan path
         let outcome = rt.build_plan(&plan_id, Some("uuid-1".into())).unwrap();
         assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
-        assert!(matches!(outcome.prev_disk_mode, PlanFileMode::Planning));
+        assert!(matches!(outcome.prev_disk_state, PlanFileState::Planning));
         assert_eq!(
             rt.active_plan_path(),
             Some(plan_path_for_id(&plan_id).expect("plan path"))
@@ -244,7 +244,7 @@ async fn full_plan_lifecycle_create_build_complete() {
         )
         .await
         .unwrap();
-        assert_eq!(out_final["plan_mode_after"], "completed");
+        assert_eq!(out_final["plan_state_after"], "completed");
         assert!(matches!(rt.mode(), PlanMode::Completed { .. }));
 
         // 7) finalize → Chat
@@ -291,7 +291,7 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
         // 续跑（N3 2026-05）：Pending 状态下，本盘 plan_id 直接 build 即可恢复 EXEC，
         // 不再需要 /plan exit 中转。
         let out = rt.build_plan(&plan_id, None).unwrap();
-        assert!(matches!(out.prev_disk_mode, PlanFileMode::Pending));
+        assert!(matches!(out.prev_disk_state, PlanFileState::Pending));
         assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
     })
     .await
@@ -339,8 +339,8 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
 
         let final_plan = read_plan(&external_path).unwrap();
         assert!(matches!(
-            final_plan.frontmatter.mode,
-            PlanFileMode::Completed
+            final_plan.frontmatter.state,
+            PlanFileState::Completed
         ));
         assert!(matches!(rt.mode(), PlanMode::Completed { .. }));
     })
@@ -397,12 +397,7 @@ async fn ask_question_returns_recommended_then_custom_text() {
     });
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
-        ask_question::execute(
-            &rt,
-            &panel,
-            &args,
-            Arc::new(AtomicBool::new(false)),
-        ),
+        ask_question::execute(&rt, &panel, &args, Arc::new(AtomicBool::new(false))),
     )
     .await
     .expect("ask_question 超时")

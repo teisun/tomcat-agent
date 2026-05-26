@@ -33,9 +33,14 @@ async fn verifier_spawned_on_all_completed() {
     .await
     .unwrap();
 
-    assert_eq!(verifier.call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
     assert_eq!(out["verify"]["verdict"], "pass");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_after"], "completed");
     cleanup_home(&home);
 }
 
@@ -78,9 +83,14 @@ async fn code_review_pass_runs_verifier_in_same_turn() {
 
     assert_eq!(out["code_review"]["verdict"], "pass");
     assert_eq!(out["verify"]["verdict"], "pass");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_after"], "completed");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
-    assert_eq!(verifier.call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
     cleanup_home(&home);
 }
 
@@ -130,9 +140,19 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_skips_review
     .unwrap();
     assert_eq!(first["code_review"]["verdict"], "fail");
     assert!(first["verify"].is_null());
-    assert_eq!(first["plan_mode_after"], "executing");
-    assert_eq!(reviewer.call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(verifier.call_count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(first["plan_state_after"], "executing");
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 
     let reopen = update_plan::execute(
         &rt,
@@ -168,10 +188,20 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_skips_review
     .unwrap();
     assert!(second["code_review"].is_null());
     assert_eq!(second["verify"]["verdict"], "pass");
-    assert_eq!(second["plan_mode_after"], "completed");
+    assert_eq!(second["plan_state_after"], "completed");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
-    assert_eq!(reviewer.call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert_eq!(verifier.call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
 
     let events = captured.lock();
     let warning = events

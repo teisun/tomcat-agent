@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-26 01:05 | ACTIVE | develop | — |
+| Nibbles | 2026-05-26 16:30 | ACTIVE | develop | — |
+
+### 2026-05-26 | feat(chat,llm): 折叠态流式显示思考摘要 + LLM 超时错误分层
+
+- **Thinking**：`StreamEvent::Thinking` / `thinking_delta` 必填 `source=summary|raw`；`show=false`（新默认）时流式渲染 summary、折叠 raw；`thinking.enabled` 时 Responses 始终请求 `reasoning.summary=auto`。
+- **LLM**：抽取 `http_client`、新增 `LlmError` 阶段化错误；配置补齐 `http_timeout_sec` / `http_read_timeout_sec` / `non_stream_stale_timeout_sec`。
+- **Plan**：`PlanFileFrontmatter.mode` 重命名为 `state`（`PlanFileState`），文档与单测对齐。
+- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（2026-05-26 16:24）。
 
 ### 2026-05-26 | fix(chat): rustyline 18 + macOS IME 稳定
 

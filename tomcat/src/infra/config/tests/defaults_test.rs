@@ -41,9 +41,28 @@ fn llm_files_default_expires_after_seconds_is_86400() {
 }
 
 #[test]
+fn llm_timeout_defaults_match_four_layer_policy() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.llm.http_timeout_sec, 1_800);
+    assert_eq!(cfg.llm.stream_timeout_sec, 180);
+    assert_eq!(cfg.llm.non_stream_stale_timeout_sec, 300);
+    assert_eq!(cfg.llm.http_read_timeout_sec, 120);
+}
+
+#[test]
 fn checkpoint_config_defaults_are_wired_into_app_config() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.checkpoint.retention_max, 50);
     assert_eq!(cfg.checkpoint.retention_days, 7);
     assert!(cfg.preflight.auto_install_git);
+}
+
+#[test]
+fn thinking_show_default_is_false() {
+    let cfg = AppConfig::default();
+    assert!(cfg.llm.thinking.enabled, "thinking 默认仍应启用");
+    assert!(
+        !cfg.llm.thinking.show,
+        "ThinkingConfig::default().show 应为 false"
+    );
 }

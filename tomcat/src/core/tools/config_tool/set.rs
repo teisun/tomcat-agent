@@ -6,7 +6,7 @@ use crate::core::permission::{PathRule, PermissionDecision};
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::config::{
     append_path_rule_to_disk, append_workspace_entry_to_disk, append_workspace_root_to_disk,
-    load_config, with_config_lock, AppConfig, WorkspaceEntry,
+    load_config, load_config_toml_file, with_config_lock, AppConfig, WorkspaceEntry,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::{normalize_path, write_file_atomic};
@@ -254,7 +254,7 @@ fn append_bash_regex_to_disk(
     regex_str: String,
 ) -> Result<(), AppError> {
     with_config_lock(config_path, || {
-        let mut cfg = load_config(Some(config_path))?;
+        let mut cfg = load_config_toml_file(config_path)?;
         let target = match key {
             "primitive.bash_approval_required" => &mut cfg.primitive.bash_approval_required,
             "primitive.bash_forbidden" => &mut cfg.primitive.bash_forbidden,

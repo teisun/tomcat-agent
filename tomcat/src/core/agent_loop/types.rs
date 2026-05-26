@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
+use crate::core::session::manager::MessageAppendSink;
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::{CheckpointStore, NoopStore};
@@ -38,8 +39,8 @@ pub struct ToolCallInfo {
 /// 一致的持久化路径（T-004 / T-017）。
 #[derive(Debug)]
 pub enum LoopError {
-    Retryable(String),
-    Fatal(String),
+    Retryable(AppError),
+    Fatal(AppError),
     Aborted {
         partial_text: String,
         partial_messages: Vec<ChatMessage>,
@@ -104,6 +105,9 @@ pub struct AgentLoopConfig {
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
     /// Checkpoint 存储：turn_end / interrupt / restore 使用。
     pub checkpoint_store: Arc<dyn CheckpointStore>,
+    /// 主 chat 注入的 message append sink；用于把 user / assistant / tool_result
+    /// 前移到合法消息边界即时落盘。非 chat 入口/纯单测可保持 `None`。
+    pub message_append_sink: Option<Arc<dyn MessageAppendSink>>,
     /// 父 session id（multi-agent §14.3.3）。**仅** `spawn_subagent_internal` 时设置；
     /// 顶层 chat_loop 始终为 `None`。reviewer 子 Agent 透传此值到 `SubAgentStart` 事件，
     /// 便于在审计 / TUI 中关联父子关系。
@@ -140,6 +144,7 @@ impl Default for AgentLoopConfig {
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,
             checkpoint_store: Arc::new(NoopStore),
+            message_append_sink: None,
             parent_session_id: None,
             spawn_depth: 0,
             subagent_type: SubagentType::User,

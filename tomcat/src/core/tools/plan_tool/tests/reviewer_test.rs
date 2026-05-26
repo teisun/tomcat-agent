@@ -36,7 +36,10 @@ async fn create_plan_succeeds_even_when_reviewer_aborts() {
         .unwrap();
     let plan_id = out["plan_id"].as_str().unwrap().to_string();
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
-    assert!(out["review"]["summary"].as_str().unwrap().contains("parse error"));
+    assert!(out["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("parse error"));
     let plan_path = home
         .join(".tomcat")
         .join("plans")
@@ -55,7 +58,10 @@ async fn create_plan_without_reviewer_returns_placeholder() {
         .await
         .unwrap();
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
-    assert!(out["review"]["summary"].as_str().unwrap().contains("P4 接入"));
+    assert!(out["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("P4 接入"));
     cleanup_home(&home);
 }
 
@@ -82,7 +88,9 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
                 "{}.lock",
                 path.file_name().unwrap().to_string_lossy()
             ));
-            let r = with_advisory_lock(&lock_path, 150, || Ok::<_, crate::core::plan_runtime::file_store::PlanError>(()));
+            let r = with_advisory_lock(&lock_path, 150, || {
+                Ok::<_, crate::core::plan_runtime::file_store::PlanError>(())
+            });
             match r {
                 Ok(()) => ReviewSummary {
                     aborted: false,
@@ -135,7 +143,7 @@ fn create_plan_writes_transcript_plan_create_event() {
         .find(|v| v["event"] == "plan.create")
         .expect("缺少 plan.create 事件");
     assert_eq!(plan_create["plan_id"], plan_id);
-    assert_eq!(plan_create["mode"], "planning");
+    assert_eq!(plan_create["state"], "planning");
     assert!(plan_create["path"].as_str().unwrap().ends_with(".plan.md"));
     cleanup_home(&home);
 }
@@ -183,7 +191,10 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
     assert_eq!(plan_review["reviewer_turns_used"], 2);
     assert_eq!(plan_review["reviewer_turns_limit"], 64);
     assert_eq!(plan_review["reviewer_stop_reason"], "completed");
-    assert!(plan_review["plan_id"].as_str().unwrap().starts_with("plan_"));
+    assert!(plan_review["plan_id"]
+        .as_str()
+        .unwrap()
+        .starts_with("plan_"));
     cleanup_home(&home);
 }
 
@@ -257,7 +268,10 @@ async fn reviewer_dispatch_passes_through_abort_signal() {
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
-    assert!(saw.load(Ordering::Acquire), "dispatcher 未收到 abort signal");
+    assert!(
+        saw.load(Ordering::Acquire),
+        "dispatcher 未收到 abort signal"
+    );
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(false));
     cleanup_home(&home);
 }
@@ -277,7 +291,10 @@ async fn reviewer_round_count_warns_after_threshold() {
         .await
         .unwrap();
     let plan_id_1 = out1["plan_id"].as_str().unwrap().to_string();
-    assert!(!out1["review"]["summary"].as_str().unwrap().starts_with("[round"));
+    assert!(!out1["review"]["summary"]
+        .as_str()
+        .unwrap()
+        .starts_with("[round"));
     assert_eq!(rt.reviewer_rounds(&plan_id_1), 1);
 
     let summary = rt.dispatch_reviewer(&plan_id_1, false).await;

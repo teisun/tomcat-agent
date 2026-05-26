@@ -12,4 +12,3 @@ pub fn is_url_like(raw: &str) -> bool {
     let lower = trimmed.to_ascii_lowercase();
     lower.starts_with("http://") || lower.starts_with("https://")
 }
-

@@ -174,4 +174,3 @@ fn extract_frontmatter(text: &str) -> &str {
     };
     &text[..end + 5]
 }
-

@@ -9,7 +9,7 @@ pub mod transcript;
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, ApiUsage,
-    CompactionResult, ContextState, SessionManager,
+    CompactionResult, ContextState, MessageAppendSink, SessionManager,
 };
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 pub use transcript::{

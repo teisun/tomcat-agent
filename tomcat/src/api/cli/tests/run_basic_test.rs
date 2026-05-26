@@ -6,38 +6,31 @@
 //! sessions.json、写日志），用集成测试覆盖更细的字段。
 
 use super::super::*;
-use super::mocks::test_config;
+use super::mocks::{test_config, with_temp_home, with_tomcat_config_in_home};
 use serial_test::serial;
 
 #[test]
 #[serial(env_lock)]
 fn run_init_returns_ok() {
-    let _home = crate::test_support::home_env_lock().lock().unwrap();
-    let r = run_init();
-    assert!(r.is_ok());
+    with_temp_home(|| {
+        let r = run_init();
+        assert!(r.is_ok());
+    });
 }
 
 #[test]
 #[serial(env_lock)]
 fn run_init_writes_openai_responses_as_default_provider() {
-    let _home = crate::test_support::home_env_lock().lock().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let prev_home = std::env::var("HOME").ok();
-    std::env::set_var("HOME", home.path());
+    with_temp_home(|| {
+        run_init().expect("init should succeed");
 
-    run_init().expect("init should succeed");
-
-    let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
-    let config_text = std::fs::read_to_string(&config_path).expect("config text");
-    assert!(
-        config_text.contains("provider = \"openai-responses\""),
-        "generated config should default to openai-responses, got:\n{config_text}"
-    );
-
-    match prev_home {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
+        let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
+        let config_text = std::fs::read_to_string(&config_path).expect("config text");
+        assert!(
+            config_text.contains("provider = \"openai-responses\""),
+            "generated config should default to openai-responses, got:\n{config_text}"
+        );
+    });
 }
 
 #[test]
@@ -83,38 +76,48 @@ fn run_config_get_without_key_returns_ok() {
 
 #[test]
 fn run_config_set_returns_ok() {
-    let cfg = AppConfig::default();
-    let r = run_config(
-        ConfigSub::Set {
-            key: "log.level".to_string(),
-            value: "debug".to_string(),
-        },
-        &cfg,
-    );
-    assert!(r.is_ok());
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(dir.path());
+    with_tomcat_config_in_home(dir.path(), || {
+        let r = run_config(
+            ConfigSub::Set {
+                key: "log.level".to_string(),
+                value: "debug".to_string(),
+            },
+            &cfg,
+        );
+        assert!(r.is_ok());
+
+        let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
+        let config_text = std::fs::read_to_string(&config_path).expect("config text");
+        assert!(
+            config_text.contains("level = \"debug\""),
+            "config set should update temp HOME config only, got:\n{config_text}"
+        );
+    });
 }
 
 #[test]
 #[serial(env_lock)]
 fn run_config_edit_returns_ok() {
-    let _home = crate::test_support::home_env_lock().lock().unwrap();
-    run_init().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(dir.path());
+    with_tomcat_config_in_home(dir.path(), || {
+        let old_editor = std::env::var("EDITOR").ok();
+        if cfg!(unix) {
+            std::env::set_var("EDITOR", "true");
+        } else {
+            std::env::set_var("EDITOR", "cmd /c exit 0");
+        }
 
-    let old_editor = std::env::var("EDITOR").ok();
-    if cfg!(unix) {
-        std::env::set_var("EDITOR", "true");
-    } else {
-        std::env::set_var("EDITOR", "cmd /c exit 0");
-    }
+        let r = run_config(ConfigSub::Edit, &cfg);
 
-    let cfg = AppConfig::default();
-    let r = run_config(ConfigSub::Edit, &cfg);
-
-    match old_editor {
-        Some(v) => std::env::set_var("EDITOR", v),
-        None => std::env::remove_var("EDITOR"),
-    }
-    assert!(r.is_ok());
+        match old_editor {
+            Some(v) => std::env::set_var("EDITOR", v),
+            None => std::env::remove_var("EDITOR"),
+        }
+        assert!(r.is_ok());
+    });
 }
 
 #[test]
@@ -126,10 +129,11 @@ fn run_doctor_is_always_ok() {
 #[test]
 #[serial(env_lock)]
 fn run_doctor_after_init_returns_ok() {
-    let _home = crate::test_support::home_env_lock().lock().unwrap();
-    run_init().unwrap();
-    let r = run_doctor();
-    assert!(r.is_ok());
+    with_temp_home(|| {
+        run_init().unwrap();
+        let r = run_doctor();
+        assert!(r.is_ok());
+    });
 }
 
 #[test]

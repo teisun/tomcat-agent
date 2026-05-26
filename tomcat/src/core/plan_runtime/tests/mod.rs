@@ -17,7 +17,7 @@ pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
     super::file_store::PlanFileFrontmatter {
         plan_id: "demo_plan_1".to_string(),
         goal: "为 chat 模式补齐 todos 与 /plan 闭环".to_string(),
-        mode: super::file_store::PlanFileMode::Planning,
+        state: super::file_store::PlanFileState::Planning,
         session_key: None,
         session_id: None,
         created_at: "2026-05-19T10:00:00+08:00".to_string(),

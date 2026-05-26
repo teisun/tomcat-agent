@@ -348,21 +348,10 @@ fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
             )
         })
         .count();
-    assert_eq!(interrupted_tools, 1, "should append exactly one synthetic tool result");
-    let interrupted_markers = entries
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry,
-                TranscriptEntry::Custom(ce)
-                    if ce.extra.get("customType").and_then(|v| v.as_str())
-                        == Some("session.hydrate_interrupted_tool_call")
-                        && ce.extra.get("toolCallId").and_then(|v| v.as_str()) == Some("call_1")
-                        && ce.extra.get("text").and_then(|v| v.as_str()) == Some("[interrupted]")
-            )
-        })
-        .count();
-    assert_eq!(interrupted_markers, 1, "should append visible interrupted marker");
+    assert_eq!(
+        interrupted_tools, 1,
+        "should append exactly one synthetic tool result"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -400,8 +389,7 @@ fn init_context_state_heals_only_missing_last_tool_result() {
     let last_tool = state
         .messages
         .iter()
-        .filter(|m| m.role == ChatMessageRole::Tool)
-        .last()
+        .rfind(|m| m.role == ChatMessageRole::Tool)
         .expect("last tool should exist");
     assert_eq!(last_tool.text_content(), Some("[interrupted]"));
 
@@ -409,7 +397,7 @@ fn init_context_state_heals_only_missing_last_tool_result() {
 }
 
 #[test]
-fn init_context_state_does_not_heal_when_multiple_tool_results_are_missing() {
+fn init_context_state_heals_all_missing_tail_tool_results() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -426,25 +414,94 @@ fn init_context_state_does_not_heal_when_multiple_tool_results_are_missing() {
 
     let cfg = ContextConfig::default();
     let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let interrupted_tools: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|m| m.role == ChatMessageRole::Tool)
+        .collect();
+    assert_eq!(interrupted_tools.len(), 2);
+    assert_eq!(interrupted_tools[0].tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(interrupted_tools[1].tool_call_id.as_deref(), Some("call_2"));
     assert!(
-        state.messages
+        interrupted_tools
             .iter()
-            .all(|m| m.text_content() != Some("[interrupted]")),
-        "when more than one tool result is missing, hydrate should not guess"
+            .all(|m| m.text_content() == Some("[interrupted]")),
+        "all missing tail tool results should be healed with [interrupted]"
     );
 
     let path = mgr.current_transcript_path().unwrap().unwrap();
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 8).unwrap();
+    let appended_interrupted = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Message(me)
+                    if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
+                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
+            )
+        })
+        .count();
+    assert_eq!(
+        appended_interrupted, 2,
+        "multi-missing case should append one synthetic tool result per missing tool"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_does_not_heal_when_non_tool_role_interrupts_tail_tool_round() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"两次工具调用",
+        "tool_calls":[tool_call_json("call_1"), tool_call_json("call_2")]
+    }))
+    .unwrap();
+
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::Message(MessageEntry {
+            id: Some(generate_entry_id()),
+            parent_id: None,
+            timestamp: "2026-05-26T00:00:00.000Z".to_string(),
+            message: serde_json::json!({
+                "role": "user",
+                "content": "steering inserted here"
+            }),
+        }),
+    )
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    assert!(
+        state
+            .messages
+            .iter()
+            .all(|m| m.text_content() != Some("[interrupted]")),
+        "non-tool tail role should make hydrate refuse to guess"
+    );
+
     let entries = crate::core::session::transcript::read_entries_tail(&path, 8).unwrap();
     assert!(
         !entries.iter().any(|entry| {
             matches!(
                 entry,
-                TranscriptEntry::Custom(ce)
-                    if ce.extra.get("customType").and_then(|v| v.as_str())
-                        == Some("session.hydrate_interrupted_tool_call")
+                TranscriptEntry::Message(me)
+                    if me.message.get("role").and_then(|v| v.as_str()) == Some("tool")
+                        && me.message.get("content").and_then(|v| v.as_str()) == Some("[interrupted]")
             )
         }),
-        "multi-missing case should not append interrupted marker"
+        "broken tail should not append synthetic interrupted tool results"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

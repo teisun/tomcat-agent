@@ -86,7 +86,10 @@ impl SystemPromptSection for CoreIdentitySection {
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
         let tool_lines = crate::core::tools::contract::catalog::render_core_identity_tool_lines();
-        render_prompt(PromptKey::SystemCoreIdentity, &[("tool_lines", &tool_lines)])
+        render_prompt(
+            PromptKey::SystemCoreIdentity,
+            &[("tool_lines", &tool_lines)],
+        )
     }
     fn priority(&self) -> u32 {
         10

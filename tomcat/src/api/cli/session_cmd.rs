@@ -70,11 +70,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             for row in rows {
                 let key_matches = row.key.as_deref().is_some_and(|key| key.contains(q));
                 if q.is_empty() || key_matches || row.session_id.contains(q) {
-                    println!(
-                        "{}  {}",
-                        row.key.as_deref().unwrap_or("-"),
-                        row.session_id
-                    );
+                    println!("{}  {}", row.key.as_deref().unwrap_or("-"), row.session_id);
                 }
             }
         }

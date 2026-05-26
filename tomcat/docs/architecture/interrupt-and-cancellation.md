@@ -733,6 +733,12 @@ ctrlc::set_handler(move || {
 | partial 落盘破坏 transcript schema | 下游消费者（UI、export）挂 | partial assistant 的 `role` 仍是 `assistant`、`content` 是部分文本，无新字段；schema 完全不变，仅"消息截短" |
 | Hard Interrupt 丢尾：首击 partial 还没 fsync 就双击 | transcript 尾部消息丢失 | `SessionManager::append_message` 必须在返回前完成 fsync；Hard Interrupt 时序依赖 §6.2 |
 
+### 13.1 2026-05 更新：即时落盘边界
+
+- 软中断 / 双击硬退现在依赖同一套 message 级即时落盘：`user`、完整 `assistant`、`assistant + tool_calls`、每条 `tool_result` 在形成合法 message 边界时就写入 transcript；只有半截 stream delta 仍留在内存里。
+- 因此 `Failed` / 流断开后不会再丢掉整轮 turn：已经落盘的 `user` 与已完成工具进度都会保留；用户下一条输入直接作为新的 `user` 继续追加，不需要额外 `/retry` 清 transcript。
+- 硬中断前会短暂等待正在执行的 `append_message` 返回（最多 500ms）；这样第二次 Ctrl+C 不会把最后一条 JSONL 砍在写盘中间。
+
 ---
 
 ## 14. 验收（与看板 T2-P0-007 对齐）

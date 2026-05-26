@@ -3,17 +3,17 @@
 //! 语义：
 //! - 任何模式可见；按 `plan_id` / `path` 路由（`plan_id` 优先，缺省取 active plan）。
 //! - 入参 **仅认 `kind`**（D3 破坏性）：`upsert | set_status | remove`。
-//! - Mode 矩阵闸门（G2 / `update-plan.md` §6.2）：
-//!   - 目标 `plan.mode == completed` → 全拒（N2）。
+//! - State 矩阵闸门（G2 / `update-plan.md` §6.2）：
+//!   - 目标 `plan.state == completed` → 全拒（N2）。
 //!   - `set_status: in_progress` 仅 `executing` 允许；planning / pending 一律拒。
 //! - 跨 session 编辑规则：
-//!   - 目标 plan `mode ∈ {planning, pending}`：允许（协作改稿）
-//!   - 目标 plan `mode == executing` 且 `session_key != current_session_key`：拒
+//!   - 目标 plan `state ∈ {planning, pending}`：允许（协作改稿）
+//!   - 目标 plan `state == executing` 且 `session_key != current_session_key`：拒
 //! - 写盘后 EXEC 自动派生：所有 todos completed → 先写 `Executing`，若 code review
 //!   轮次未耗尽则先派发 code reviewer；`verdict=pass` 时同回合 verifier，否则把
 //!   `code_review` 返回给主 Agent。code review 轮次耗尽后直接走 verifier。
 //! - 返回 JSON（G1）：`plan_id` / `path` / `applied` / `items[]` /
-//!   `active_in_progress` / `plan_mode_before` / `plan_mode_after` / `warnings[]` /
+//!   `active_in_progress` / `plan_state_before` / `plan_state_after` / `warnings[]` /
 //!   `panel_snapshot_id` / `code_review` / `verify`（节流后 panel 刷新版本；目前与 timestamp 等价）。
 
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::core::plan_runtime::{
-    file_store::{update_plan_locked, write_plan, PlanFileMode, TodoStatus},
+    file_store::{update_plan_locked, write_plan, PlanFileState, TodoStatus},
     mode::PlanMode,
     ops, review, verify, PlanRuntime,
 };
@@ -81,7 +81,7 @@ pub async fn execute(
     struct UpdateTxOutcome {
         plan: crate::core::plan_runtime::file_store::PlanFile,
         target_plan_id: String,
-        plan_mode_before: PlanFileMode,
+        plan_state_before: PlanFileState,
         warnings: Vec<String>,
         active_in_progress: Option<String>,
         derived_completed: bool,
@@ -89,33 +89,33 @@ pub async fn execute(
 
     let tx = match update_plan_locked(&path, runtime.lock_timeout_ms(), |plan| {
         let target_plan_id = plan.frontmatter.plan_id.clone();
-        let plan_mode_before = plan.frontmatter.mode;
+        let plan_state_before = plan.frontmatter.state;
 
         // N2：completed 全拒。
-        if matches!(plan_mode_before, PlanFileMode::Completed) {
+        if matches!(plan_state_before, PlanFileState::Completed) {
             return Err(ToolError::CrossSessionDenied(format!(
                 "plan {target_plan_id} 已 completed，无法再编辑"
             )));
         }
 
-        enforce_cross_session_policy(runtime, &plan.frontmatter, plan_mode_before)?;
+        enforce_cross_session_policy(runtime, &plan.frontmatter, plan_state_before)?;
 
-        // G2 mode 矩阵闸门：先做语义校验，再下沉到 ops 引擎。
-        enforce_mode_matrix(plan_mode_before, &args.ops)?;
+        // G2 state 矩阵闸门：先做语义校验，再下沉到 ops 引擎。
+        enforce_state_matrix(plan_state_before, &args.ops)?;
 
         apply_shared_todo_ops(&mut plan.frontmatter.todos, &args.ops, args.replace)?;
 
         let warnings: Vec<String> = Vec::new();
-        let derived_completed = matches!(plan_mode_before, PlanFileMode::Executing)
+        let derived_completed = matches!(plan_state_before, PlanFileState::Executing)
             && ops::all_completed(&plan.frontmatter.todos);
 
         // E2：在 body 的 `## Todos Board` 标记区间内自动重写当前 todos 状态视图。
         rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
 
         if derived_completed {
-            // 第一写：todos 完成，但 mode 保持 Executing，确保 verifier/code reviewer 看到的是
+            // 第一写：todos 完成，但 state 保持 Executing，确保 verifier/code reviewer 看到的是
             // 「已做完 todos、尚未正式收工」的磁盘态。
-            plan.frontmatter.mode = PlanFileMode::Executing;
+            plan.frontmatter.state = PlanFileState::Executing;
         }
 
         let active_in_progress = plan
@@ -128,7 +128,7 @@ pub async fn execute(
         Ok(UpdateTxOutcome {
             plan: plan.clone(),
             target_plan_id,
-            plan_mode_before,
+            plan_state_before,
             warnings,
             active_in_progress,
             derived_completed,
@@ -146,13 +146,13 @@ pub async fn execute(
     let applied = args.ops.len();
     let mut plan = tx.plan;
     let target_plan_id = tx.target_plan_id;
-    let plan_mode_before = tx.plan_mode_before;
+    let plan_state_before = tx.plan_state_before;
     let active_in_progress = tx.active_in_progress;
     let mut warnings = tx.warnings;
 
     let mut code_review_json = serde_json::Value::Null;
     let mut verify_json = serde_json::Value::Null;
-    let plan_mode_after = if tx.derived_completed {
+    let plan_state_after = if tx.derived_completed {
         if let Some(round) = runtime.try_begin_code_review_round(&target_plan_id) {
             let mut code_review_summary = runtime.dispatch_code_reviewer(&target_plan_id).await;
             warnings.extend(review::normalize_for_code_review_result(
@@ -162,7 +162,7 @@ pub async fn execute(
             code_review_json = code_review_summary.to_json();
 
             if code_review_summary.verdict.as_deref() == Some("pass") {
-                let (mode_after, verify_payload) = run_verifier_after_code_review(
+                let (state_after, verify_payload) = run_verifier_after_code_review(
                     runtime,
                     &target_plan_id,
                     &path,
@@ -171,16 +171,13 @@ pub async fn execute(
                 )
                 .await?;
                 verify_json = verify_payload;
-                mode_after
+                state_after
             } else {
                 warnings.push(format!(
                     "code review verdict={}，plan 保持 executing，等待主 Agent 修复或重新 complete",
-                    code_review_summary
-                        .verdict
-                        .as_deref()
-                        .unwrap_or("partial")
+                    code_review_summary.verdict.as_deref().unwrap_or("partial")
                 ));
-                PlanFileMode::Executing
+                PlanFileState::Executing
             }
         } else {
             warnings.push(format!(
@@ -193,7 +190,7 @@ pub async fn execute(
                 "rounds_exhausted",
                 runtime.code_review_rounds(&target_plan_id),
             );
-            let (mode_after, verify_payload) = run_verifier_after_code_review(
+            let (state_after, verify_payload) = run_verifier_after_code_review(
                 runtime,
                 &target_plan_id,
                 &path,
@@ -202,10 +199,10 @@ pub async fn execute(
             )
             .await?;
             verify_json = verify_payload;
-            mode_after
+            state_after
         }
     } else {
-        plan.frontmatter.mode
+        plan.frontmatter.state
     };
 
     let panel_snapshot_id = crate::core::plan_runtime::panels::next_panel_snapshot_id();
@@ -225,8 +222,8 @@ pub async fn execute(
         "path": crate::infra::platform::format_home_path(&path),
         "applied": applied,
         "replace": args.replace,
-        "plan_mode_before": plan_mode_before.as_str(),
-        "plan_mode_after": plan_mode_after.as_str(),
+        "plan_state_before": plan_state_before.as_str(),
+        "plan_state_after": plan_state_after.as_str(),
         "panel_snapshot_id": panel_snapshot_id,
         "warnings": warnings,
         "active_in_progress": active_in_progress,
@@ -242,7 +239,7 @@ async fn run_verifier_after_code_review(
     path: &std::path::Path,
     plan: &mut crate::core::plan_runtime::file_store::PlanFile,
     warnings: &mut Vec<String>,
-) -> Result<(PlanFileMode, serde_json::Value), ToolError> {
+) -> Result<(PlanFileState, serde_json::Value), ToolError> {
     let mut verify_summary = runtime.dispatch_verifier(target_plan_id).await;
     warnings.extend(verify::normalize_for_gate(&mut verify_summary));
     runtime.write_verify_transcript(target_plan_id, &verify_summary);
@@ -250,13 +247,14 @@ async fn run_verifier_after_code_review(
 
     let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");
     if allow_complete {
-        plan.frontmatter.mode = PlanFileMode::Completed;
+        plan.frontmatter.state = PlanFileState::Completed;
         write_plan(path, plan, runtime.lock_timeout_ms())?;
         runtime.set_mode_completed(target_plan_id.to_string());
-        Ok((PlanFileMode::Completed, verify_json))
+        Ok((PlanFileState::Completed, verify_json))
     } else {
-        warnings.push("verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into());
-        Ok((PlanFileMode::Executing, verify_json))
+        warnings
+            .push("verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into());
+        Ok((PlanFileState::Executing, verify_json))
     }
 }
 
@@ -266,9 +264,7 @@ fn resolve_target_plan_path(
     explicit_path: Option<String>,
 ) -> Result<PathBuf, ToolError> {
     if let Some(id) = explicit_plan_id {
-        return runtime
-            .resolved_plan_path(&id)
-            .map_err(ToolError::BadArgs);
+        return runtime.resolved_plan_path(&id).map_err(ToolError::BadArgs);
     }
     if let Some(path) = explicit_path {
         return crate::infra::platform::normalize_path(&path)
@@ -283,9 +279,7 @@ fn resolve_target_plan_path(
             .map_err(ToolError::BadArgs);
     }
     if let Some(id) = runtime.active_planning_plan_id() {
-        return runtime
-            .resolved_plan_path(&id)
-            .map_err(ToolError::BadArgs);
+        return runtime.resolved_plan_path(&id).map_err(ToolError::BadArgs);
     }
     Err(ToolError::BadArgs(
         "update_plan 需要 plan_id 或 path；当前模式无 active plan".into(),
@@ -295,9 +289,9 @@ fn resolve_target_plan_path(
 fn enforce_cross_session_policy(
     runtime: &PlanRuntime,
     fm: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-    mode: PlanFileMode,
+    state: PlanFileState,
 ) -> Result<(), ToolError> {
-    if !matches!(mode, PlanFileMode::Executing) {
+    if !matches!(state, PlanFileState::Executing) {
         return Ok(());
     }
     let target_key = fm.session_key.as_deref().unwrap_or("");
@@ -311,28 +305,28 @@ fn enforce_cross_session_policy(
     Ok(())
 }
 
-/// G2 mode 矩阵闸门——参考 [update-plan.md] §6.2。
-fn enforce_mode_matrix(plan_mode: PlanFileMode, ops_list: &[UpdateOp]) -> Result<(), ToolError> {
+/// G2 state 矩阵闸门——参考 [update-plan.md] §6.2。
+fn enforce_state_matrix(plan_state: PlanFileState, ops_list: &[UpdateOp]) -> Result<(), ToolError> {
     for op in ops_list {
-        match (plan_mode, op) {
+        match (plan_state, op) {
             // in_progress 仅在 executing 允许
             (
-                PlanFileMode::Planning | PlanFileMode::Pending,
+                PlanFileState::Planning | PlanFileState::Pending,
                 UpdateOp::SetStatus {
                     status: TodoStatus::InProgress,
                     ..
                 },
             )
             | (
-                PlanFileMode::Planning | PlanFileMode::Pending,
+                PlanFileState::Planning | PlanFileState::Pending,
                 UpdateOp::Upsert {
                     status: Some(TodoStatus::InProgress),
                     ..
                 },
             ) => {
                 return Err(ToolError::BadArgs(format!(
-                    "in_progress 仅允许在 executing 模式下使用；当前 plan.mode = {}",
-                    plan_mode.as_str()
+                    "in_progress 仅允许在 executing 状态下使用；当前 plan.state = {}",
+                    plan_state.as_str()
                 )));
             }
             _ => {}

@@ -419,7 +419,7 @@ impl PlanRuntime {
                 }
             };
             let plan_id = plan.frontmatter.plan_id.clone();
-            if plan.frontmatter.mode == file_store::PlanFileMode::Executing {
+            if plan.frontmatter.state == file_store::PlanFileState::Executing {
                 if self.owns_executing_plan(&plan) {
                     // 当前 session 拥有 → 还原内存到 EXEC
                     *self.mode.write() = PlanMode::Executing { plan_id };
@@ -427,7 +427,7 @@ impl PlanRuntime {
                 } else if self.current_session_id.lock().is_none() {
                     // 异 session 遗留 → 盘 demote 到 pending（保留 body / todos）
                     let mut demoted = plan.clone();
-                    demoted.frontmatter.mode = file_store::PlanFileMode::Pending;
+                    demoted.frontmatter.state = file_store::PlanFileState::Pending;
                     let owner_key = plan.frontmatter.session_key.as_deref().unwrap_or("");
                     let owner_id = plan.frontmatter.session_id.as_deref().unwrap_or("");
                     if let Err(e) = file_store::write_plan(&path, &demoted, self.lock_timeout_ms) {
@@ -474,7 +474,7 @@ impl PlanRuntime {
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            if matches!(plan.frontmatter.mode, file_store::PlanFileMode::Executing)
+            if matches!(plan.frontmatter.state, file_store::PlanFileState::Executing)
                 && self.owns_executing_plan(&plan)
             {
                 let plan_id = plan.frontmatter.plan_id.clone();
@@ -690,10 +690,7 @@ impl PlanRuntime {
         let path = match self.resolved_plan_path(plan_id) {
             Ok(p) => p,
             Err(e) => {
-                return review::ReviewSummary::aborted_with_kind(
-                    review::ReviewKind::Code,
-                    e,
-                );
+                return review::ReviewSummary::aborted_with_kind(review::ReviewKind::Code, e);
             }
         };
         let plan_text = match std::fs::read_to_string(&path) {
@@ -918,12 +915,12 @@ impl PlanRuntime {
     /// - 当前 session 无 active plan_id 占用（mode 不是 Executing/Pending 即可，
     ///   Planning 期 active_planning_plan_id 与目标 plan_id 相同时不算冲突）
     /// - 目标 PlanFile 必须存在（不存在 → `BuildPlanNotFound` / `BuildPlanPathNotFound`，附友好提示）
-    /// - PlanFile.frontmatter.mode ∈ `{planning, pending}`（executing/completed 拒）
+    /// - PlanFile.frontmatter.state ∈ `{planning, pending}`（executing/completed 拒）
     ///
     /// **5 件事**：
     /// 1. 改 frontmatter.session_key = `self.session_key`；session_id = `session_id`
     ///    （pending 续跑时若 `prev_session_key != self.session_key` → push warning，仍执行）
-    /// 2. 改 frontmatter.mode = `executing`
+    /// 2. 改 frontmatter.state = `executing`
     /// 3. `write_plan`（atomic + advisory lock）；**失败时内存不动**，返回 PlanFile error
     /// 4. 写盘成功后切内存 `mode = Executing { plan_id }`、清 `active_planning_plan_id`
     /// 5. 更新 `active_plan_path`，供后续 `/plan build` 自动开跑时生成真实 user turn 文本
@@ -956,7 +953,7 @@ impl PlanRuntime {
 
         struct BuildCommit {
             plan_id: String,
-            prev_disk_mode: file_store::PlanFileMode,
+            prev_disk_state: file_store::PlanFileState,
             warnings: Vec<String>,
         }
 
@@ -1000,25 +997,25 @@ impl PlanRuntime {
                 }
             }
 
-            // ─── 读 PlanFile + 闸门 4/5：存在 + 合法 mode ────────────────
-            let prev_disk_mode = plan.frontmatter.mode;
-            match prev_disk_mode {
-                file_store::PlanFileMode::Planning | file_store::PlanFileMode::Pending => {}
-                file_store::PlanFileMode::Executing => {
+            // ─── 读 PlanFile + 闸门 4/5：存在 + 合法 state ────────────────
+            let prev_disk_state = plan.frontmatter.state;
+            match prev_disk_state {
+                file_store::PlanFileState::Planning | file_store::PlanFileState::Pending => {}
+                file_store::PlanFileState::Executing => {
                     return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "PlanFile {plan_id} mode=executing；可能被其它进程占用，请稍后或手工修复"
+                        "PlanFile {plan_id} state=executing；可能被其它进程占用，请稍后或手工修复"
                     )));
                 }
-                file_store::PlanFileMode::Completed => {
+                file_store::PlanFileState::Completed => {
                     return Err(PlanRuntimeError::BuildBlocked(format!(
-                        "PlanFile {plan_id} mode=completed；已完成的 plan 不可再 build"
+                        "PlanFile {plan_id} state=completed；已完成的 plan 不可再 build"
                     )));
                 }
             }
 
             // ─── 准备五件事 ────────────────────────────────────────────
             let mut warnings: Vec<String> = Vec::new();
-            if matches!(prev_disk_mode, file_store::PlanFileMode::Pending) {
+            if matches!(prev_disk_state, file_store::PlanFileState::Pending) {
                 if let Some(prev_key) = &plan.frontmatter.session_key {
                     if prev_key != self.session_key.as_str() {
                         warnings.push(format!(
@@ -1028,13 +1025,13 @@ impl PlanRuntime {
                     }
                 }
             }
-            // 1, 2: frontmatter 改 session_key/session_id/mode
+            // 1, 2: frontmatter 改 session_key/session_id/state
             plan.frontmatter.session_key = Some(self.session_key.clone());
             plan.frontmatter.session_id = session_id.clone();
-            plan.frontmatter.mode = file_store::PlanFileMode::Executing;
+            plan.frontmatter.state = file_store::PlanFileState::Executing;
             Ok(BuildCommit {
                 plan_id,
-                prev_disk_mode,
+                prev_disk_state,
                 warnings,
             })
         }) {
@@ -1063,7 +1060,7 @@ impl PlanRuntime {
 
         let plan_id = build.plan_id.clone();
         let mut warnings = build.warnings;
-        let prev_disk_mode = build.prev_disk_mode;
+        let prev_disk_state = build.prev_disk_state;
         // 4: 切内存（写盘成功后才动）
         *self.mode.write() = PlanMode::Executing {
             plan_id: plan_id.to_string(),
@@ -1097,7 +1094,7 @@ impl PlanRuntime {
         Ok(BuildPlanOutcome {
             plan_id: plan_id.to_string(),
             plan_path: path,
-            prev_disk_mode,
+            prev_disk_state,
             warnings,
         })
     }
@@ -1108,7 +1105,7 @@ impl PlanRuntime {
     ///
     /// **副作用**（事务序）：
     /// 1. 读当前 plan 文件
-    /// 2. 写 frontmatter.mode = pending（atomic + advisory lock；写完即释放，防 D1）
+    /// 2. 写 frontmatter.state = pending（atomic + advisory lock；写完即释放，防 D1）
     /// 3. 内存 mode 切 `Pending { plan_id }`
     /// 4. 返回 plan_id 给上层做 transcript `plan.cancel.demote_to_pending`
     ///
@@ -1127,7 +1124,7 @@ impl PlanRuntime {
                 .map_err(|e| PlanRuntimeError::Io(e.to_string()))?,
         };
         file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
-            plan.frontmatter.mode = file_store::PlanFileMode::Pending;
+            plan.frontmatter.state = file_store::PlanFileState::Pending;
             Ok::<(), PlanRuntimeError>(())
         })
         .map_err(|e| match e {
@@ -1211,8 +1208,8 @@ impl PlanRuntime {
 pub struct BuildPlanOutcome {
     pub plan_id: String,
     pub plan_path: PathBuf,
-    /// 目标 PlanFile 的写前 mode（planning / pending）；命令层据此打印不同提示。
-    pub prev_disk_mode: file_store::PlanFileMode,
+    /// 目标 PlanFile 的写前 state（planning / pending）；命令层据此打印不同提示。
+    pub prev_disk_state: file_store::PlanFileState,
     /// 非致命警告（如 pending 续跑 session_key 不一致）。
     pub warnings: Vec<String>,
 }

@@ -1,5 +1,5 @@
-use crate::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
 use crate::core::plan_runtime::file_store::TodoStatus;
+use crate::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
 
 /// CLI 默认 panel：把 snapshot 渲染成简短 board 写 stderr。
 pub struct CliTodosPanel;

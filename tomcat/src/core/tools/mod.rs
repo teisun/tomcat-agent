@@ -8,8 +8,8 @@
 
 pub mod config_tool;
 pub mod contract;
-pub mod plan_tool;
 pub mod pipeline;
+pub mod plan_tool;
 pub mod primitive;
 
 #[cfg(test)]

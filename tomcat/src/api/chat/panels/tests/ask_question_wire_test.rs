@@ -5,9 +5,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::super::{
-    ask_question_request_event_name, ask_question_response_event_name, Answer,
-    AskQuestionPanel, AskQuestionResult, AskQuestionWireRequest, AskQuestionWireResponse,
-    EventBusAskQuestionPanel, Question, QuestionOption,
+    ask_question_request_event_name, ask_question_response_event_name, Answer, AskQuestionPanel,
+    AskQuestionResult, AskQuestionWireRequest, AskQuestionWireResponse, EventBusAskQuestionPanel,
+    Question, QuestionOption,
 };
 use crate::infra::{DefaultEventBus, EventBus, EventContext};
 
@@ -114,9 +114,12 @@ async fn event_bus_panel_returns_cancelled_when_wait_is_aborted() {
         cancel_for_task.store(true, Ordering::Relaxed);
     });
 
-    let result = tokio::time::timeout(Duration::from_secs(1), panel.ask(vec![sample_question()], cancel))
-        .await
-        .expect("panel should observe cancel promptly");
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        panel.ask(vec![sample_question()], cancel),
+    )
+    .await
+    .expect("panel should observe cancel promptly");
     aborter.await.expect("abort task");
 
     assert!(result.cancelled);

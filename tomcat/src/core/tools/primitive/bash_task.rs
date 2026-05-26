@@ -190,7 +190,9 @@ impl BackgroundBashGuard {
         let normalized = normalize_path(path)?;
         loop {
             match self.gate.check(op, &normalized.to_string_lossy())? {
-                PermissionDecision::Allow { grant, scope } => return Ok((normalized, scope, grant)),
+                PermissionDecision::Allow { grant, scope } => {
+                    return Ok((normalized, scope, grant))
+                }
                 PermissionDecision::Deny { reason } => {
                     return Err(AppError::Permission(reason));
                 }
@@ -230,7 +232,10 @@ impl BackgroundBashGuard {
         }
     }
 
-    async fn gate_check_bash(&self, command: &str) -> Result<(PermissionScope, GrantTrace), AppError> {
+    async fn gate_check_bash(
+        &self,
+        command: &str,
+    ) -> Result<(PermissionScope, GrantTrace), AppError> {
         match self.gate.check_bash(command)? {
             PermissionDecision::Allow { grant, scope } => Ok((scope, grant)),
             PermissionDecision::Deny { reason } => Err(AppError::Permission(reason)),
@@ -264,12 +269,9 @@ impl BackgroundBashGuard {
         cwd: Option<&Path>,
     ) -> Result<(PermissionScope, GrantTrace), AppError> {
         let cwd_path = if let Some(cwd) = cwd {
-            self.gate_check_path(
-                PrimitiveOperation::Read,
-                cwd.to_string_lossy().as_ref(),
-            )
-            .await?
-            .0
+            self.gate_check_path(PrimitiveOperation::Read, cwd.to_string_lossy().as_ref())
+                .await?
+                .0
         } else {
             PathBuf::from(".")
         };
@@ -426,6 +428,8 @@ impl BashTaskRegistry {
         argv: Option<Vec<String>>,
         cwd: Option<PathBuf>,
     ) -> Result<BashTaskTicket, AppError> {
+        // 空 argv 与未提供 args 同义，避免 `command="echo hi", args=[]` 被误当成 argv 模式。
+        let argv = argv.filter(|args| !args.is_empty());
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -486,17 +490,15 @@ impl BashTaskRegistry {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| {
-                let err = AppError::Primitive(e.to_string());
-                if let (Some(guard), Some((scope, grant))) =
-                    (self.background_guard.as_ref(), bash_scope_grant)
-                {
-                    guard.record_spawn_result(&audit_cmd, scope, grant, false, err.to_string());
-                }
-                err
-            })?;
+        let mut child = cmd.spawn().map_err(|e| {
+            let err = AppError::Primitive(e.to_string());
+            if let (Some(guard), Some((scope, grant))) =
+                (self.background_guard.as_ref(), bash_scope_grant)
+            {
+                guard.record_spawn_result(&audit_cmd, scope, grant, false, err.to_string());
+            }
+            err
+        })?;
         let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();

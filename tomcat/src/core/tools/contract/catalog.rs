@@ -92,7 +92,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "read",
         label: "Read",
-        description: "Read a file from the local filesystem. Use this before editing or when the user asks to inspect file contents. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of raw decode errors.\n",
+        description: "Read a file from the local filesystem. Use this before editing or when the user asks to inspect file contents. Default workflow: `read` -> `edit`. For repeated short snippets or line-anchored edits, use `read(hashline=true)` -> `hashline_edit`. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of raw decode errors.\n",
         display_summary: Some("Read a file from an authorized path."),
         parameters: read_parameters,
         scope: PermissionScope::Read,
@@ -120,7 +120,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "edit",
         label: "Edit File",
-        description: "Edit an existing text file by replacing exact text. Two input shapes are accepted:\n  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }\n  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (the tool requires a fresh read stamp; mtime/size mismatch returns a Stale error). Use write for new files or complete rewrites; do not use edit on binary files.\n",
+        description: "Edit an existing text file by replacing exact text. Two input shapes are accepted:\n  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }\n  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }\nWhen both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (default workflow: `read` -> `edit`; the tool requires a fresh read stamp, and mtime/size mismatch returns a Stale error). Do NOT include `cat -n` line-number prefixes (`  N\\t...`) or hashline prefixes (`N#XX:...`) in `old_content` — those are display prefixes, not file content. If repeated short snippets make substring edit ambiguous, prefer `read(hashline=true)` + `hashline_edit`. Use write for new files or complete rewrites; do not use edit on binary files.\n",
         display_summary: Some("Replace exact text in an existing file (multi-segment, original-snapshot)."),
         parameters: edit_parameters,
         scope: PermissionScope::Write,
@@ -134,7 +134,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "hashline_edit",
         label: "Hashline Edit File",
-        description: "Edit a file with line-number + 2-char content hash anchors (use AFTER `read` with `hashline: true`). Each edit segment carries an anchor `<line>#<2char>` that must match the file's CURRENT content; if the line content changed, the anchor stops matching and the call returns HashMismatch (no write). Operations: `replace` (anchor → lines), `insert` (insert `lines` BEFORE anchor line), `delete` (anchor[..end] → empty). Use this when sub-string `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. Reads are still required first; the file's read stamp is checked.\n",
+        description: "Edit a file with line-number + 2-char content hash anchors. Call `read` with `hashline: true` first, then pass those anchors to `hashline_edit`. Each edit segment carries an anchor `<line>#<2char>` that must match the file's CURRENT content; if the line content changed, the anchor stops matching and the call returns HashMismatch (no write). Operations: `replace` (anchor → lines), `insert` (insert `lines` BEFORE anchor line), `delete` (anchor[..end] → empty). Use this when sub-string `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. Reads are still required first; the file's read stamp is checked.\n",
         display_summary: Some("Line-number + content-hash anchored edits (companion to read hashline=true)."),
         parameters: hashline_edit_parameters,
         scope: PermissionScope::Write,
@@ -261,7 +261,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (caller does NOT supply plan_id), normalizes `draft` into the plan body's `## Plan` section, and writes frontmatter (`plan_id`, `goal`, `mode=planning`, `todos`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id/path>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (caller does NOT supply plan_id), normalizes `draft` into the plan body's `## Plan` section, and writes frontmatter (`plan_id`, `goal`, `state=planning`, `todos`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id/path>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.\n",
         display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,
@@ -275,7 +275,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
-        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to refine the todo list during PLAN or to advance todos during EXEC. `plan_id` and `path` are plan-specific targeting fields; `replace=true` swaps the entire todo list with the provided upsert results. When all todos transition to `completed` in EXEC, runtime auto-derives `mode=completed` and resets system reminder / catalog / user prefix. The tool only mutates frontmatter.todos; plan body markdown is left untouched.\n",
+        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to refine the todo list during PLAN or to advance todos during EXEC. `plan_id` and `path` are plan-specific targeting fields; `replace=true` swaps the entire todo list with the provided upsert results. When all todos transition to `completed` in EXEC, runtime auto-derives `state=completed` and resets system reminder / catalog / visible prompt labels. The tool only mutates frontmatter.todos; plan body markdown is left untouched.\n",
         display_summary: Some("Apply todo-only incremental ops to the active plan (CHAT/PLAN/EXEC)."),
         parameters: update_plan_parameters,
         scope: PermissionScope::Write,
@@ -512,11 +512,11 @@ fn read_parameters() -> Value {
             },
             "line_numbers": {
                 "type": "boolean",
-                "description": "Render output with `cat -n` style line numbers (`{:>6}\\t{content}`); defaults to true. Set false only when piping the content into a tool that itself parses line numbers (e.g. diff)."
+                "description": "Render output with `cat -n` style line numbers (`{:>6}\\t{content}`); defaults to true. These prefixes are display-only, so do not paste `  N\\t...` into `edit.old_content`. Set false only when piping the content into a tool that itself parses line numbers (e.g. diff)."
             },
             "hashline": {
                 "type": "boolean",
-                "description": "When true, render each line as `{:>6}#{2-char hash}:{content}` (xxh32 over whitespace-stripped content). Use for hashline-aware edits where you want both line addressing and external-edit detection. Mutually exclusive with line_numbers — hashline takes priority. Defaults to false."
+                "description": "When true, render each line as `{:>6}#{2-char hash}:{content}` (xxh32 over whitespace-stripped content). Use with `hashline_edit` when you need line-number + content-hash anchors. The `N#XX:` prefix is display-only, so do not paste it into `edit.old_content`. Mutually exclusive with line_numbers — hashline takes priority. Defaults to false."
             }
         }),
         &["path"],
@@ -537,7 +537,7 @@ fn write_parameters() -> Value {
 fn edit_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Edit a file. Provide either Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching).",
+        "description": "Edit a file. Default workflow: `read` -> `edit`. Provide either Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`; for repeated short snippets or line-anchored edits, prefer `read(hashline=true)` + `hashline_edit`.",
         "properties": {
             "path": {
                 "type": "string",
@@ -545,7 +545,7 @@ fn edit_parameters() -> Value {
             },
             "old_content": {
                 "type": "string",
-                "description": "Shape A only: exact existing text to replace; include enough context to make it unique unless `replace_all: true`."
+                "description": "Shape A only: exact existing text to replace; include enough context to make it unique unless `replace_all: true`. Copy the real file text, not read-only display prefixes like `  N\\t...` or `N#XX:...`."
             },
             "new_content": {
                 "type": "string",
@@ -564,7 +564,7 @@ fn edit_parameters() -> Value {
                     "properties": {
                         "old_content": {
                             "type": "string",
-                            "description": "Exact existing text to replace within this segment."
+                            "description": "Exact existing text to replace within this segment. Copy the real file text, not read-only display prefixes like `  N\\t...` or `N#XX:...`."
                         },
                         "new_content": {
                             "type": "string",
@@ -670,7 +670,7 @@ fn list_dir_parameters() -> Value {
 fn hashline_edit_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Line-anchored edit. Each segment carries a `<line>#<2char>` anchor (output of `read hashline=true`). Anchors are validated against the file's current hashline before any write; mismatches return HashMismatch.",
+        "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current hashline before any write; mismatches return HashMismatch.",
         "properties": {
             "path": {
                 "type": "string",
@@ -854,7 +854,7 @@ fn update_plan_parameters() -> Value {
                 "description": "Ordered list of mutations applied atomically (one frontmatter write under advisory lock).",
                 "minItems": 1,
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.mode == executing."
+                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing."
                 )
             }
         },

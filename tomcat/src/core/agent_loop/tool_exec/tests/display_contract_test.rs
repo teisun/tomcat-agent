@@ -104,11 +104,7 @@ impl ConfigBackend for DisplayConfigBackend {
         unreachable!()
     }
 
-    async fn config_set(
-        &self,
-        _key: &str,
-        _value: &str,
-    ) -> Result<serde_json::Value, AppError> {
+    async fn config_set(&self, _key: &str, _value: &str) -> Result<serde_json::Value, AppError> {
         Ok(json!({
             "applied": true,
             "message": "已设置 llm.default_model = gpt-5.2"

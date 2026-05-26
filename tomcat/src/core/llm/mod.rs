@@ -10,6 +10,7 @@
 //! `SessionEntry` 约定一致。本模块不直接依赖 `SessionEntry`，仅消费已解析的
 //! [`ChatRequest`]。
 
+pub(crate) mod http_client;
 pub mod openai_files;
 mod provider;
 mod registry;
@@ -24,8 +25,8 @@ pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, MessageKind, StreamEvent, TokenUsage, FILE_MAX_BYTES,
-    IMAGE_MAX_BYTES,
+    ChatResponse, ChatResponseChoice, MessageKind, StreamEvent, ThinkingSource, TokenUsage,
+    FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 
 #[cfg(test)]

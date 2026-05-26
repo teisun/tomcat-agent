@@ -140,6 +140,12 @@ pub enum TranscriptEntry {
     Custom(CustomEntry),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncLevel {
+    Flush,
+    SyncData,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageEntry {
@@ -307,6 +313,10 @@ pub fn read_entries_tail(path: &Path, cap: usize) -> Result<Vec<TranscriptEntry>
 
 /// 追加一行 JSON 到 transcript 文件末尾（append-only）。
 pub fn append_line(path: &Path, json: &str) -> Result<(), AppError> {
+    append_line_with_sync(path, json, SyncLevel::Flush)
+}
+
+pub fn append_line_with_sync(path: &Path, json: &str, sync: SyncLevel) -> Result<(), AppError> {
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(AppError::Io)?;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -314,13 +324,25 @@ pub fn append_line(path: &Path, json: &str) -> Result<(), AppError> {
         .open(path)
         .map_err(AppError::Io)?;
     writeln!(f, "{}", json).map_err(AppError::Io)?;
+    f.flush().map_err(AppError::Io)?;
+    if matches!(sync, SyncLevel::SyncData) {
+        f.sync_data().map_err(AppError::Io)?;
+    }
     Ok(())
 }
 
 /// 追加一条 TranscriptEntry 到文件。
 pub fn append_entry(path: &Path, entry: &TranscriptEntry) -> Result<(), AppError> {
+    append_entry_with_sync(path, entry, SyncLevel::Flush)
+}
+
+pub fn append_entry_with_sync(
+    path: &Path,
+    entry: &TranscriptEntry,
+    sync: SyncLevel,
+) -> Result<(), AppError> {
     let json = serde_json::to_string(entry)?;
-    append_line(path, &json)
+    append_line_with_sync(path, &json, sync)
 }
 
 /// 在首条 `type=message` 且 `id == anchor_message_id` 的 JSONL 行**之后**插入 `entry`（整文件原子写）。

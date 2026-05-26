@@ -197,7 +197,7 @@ async fn verify_gate_soft_does_not_block() {
     .unwrap();
 
     assert_eq!(out["verify"]["verdict"], "fail");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_after"], "completed");
     match rt.mode() {
         PlanMode::Completed { plan_id: cur } => assert_eq!(cur, plan_id),
         other => panic!("expected Completed, got {other:?}"),
@@ -241,7 +241,7 @@ async fn verify_gate_allows_completed_on_partial() {
     .unwrap();
 
     assert_eq!(out["verify"]["verdict"], "partial");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_after"], "completed");
     match rt.mode() {
         PlanMode::Completed { plan_id: cur } => assert_eq!(cur, plan_id),
         other => panic!("expected Completed, got {other:?}"),
@@ -286,7 +286,7 @@ async fn verify_gate_allows_completed_on_aborted() {
 
     assert_eq!(out["verify"]["verdict"], "aborted");
     assert_eq!(out["verify"]["verifier_stop_reason"], "max_turns");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_after"], "completed");
     cleanup_home(&home);
 }
 
@@ -325,9 +325,9 @@ async fn verify_gate_blocks_completed_on_fail() {
     .await
     .unwrap();
 
-    assert_eq!(out["plan_mode_after"], "executing");
+    assert_eq!(out["plan_state_after"], "executing");
     let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert!(matches!(plan.frontmatter.mode, PlanFileMode::Executing));
+    assert!(matches!(plan.frontmatter.state, PlanFileState::Executing));
     cleanup_home(&home);
 }
 
@@ -367,7 +367,7 @@ async fn gate_fail_keeps_mode_executing_but_returns_verify() {
     .unwrap();
 
     assert_eq!(out["verify"]["verdict"], "fail");
-    assert_eq!(out["plan_mode_after"], "executing");
+    assert_eq!(out["plan_state_after"], "executing");
     match rt.mode() {
         PlanMode::Executing { plan_id: cur } => assert_eq!(cur, plan_id),
         other => panic!("expected Executing, got {other:?}"),
@@ -426,7 +426,7 @@ async fn main_agent_can_reopen_todo_after_gate_fail() {
     .await
     .unwrap();
 
-    assert_eq!(reopen["plan_mode_after"], "executing");
+    assert_eq!(reopen["plan_state_after"], "executing");
     assert_eq!(reopen["active_in_progress"], "t1");
     assert!(reopen["verify"].is_null());
     cleanup_home(&home);
@@ -468,7 +468,7 @@ async fn gate_fail_then_recomplete_respawns_verifier() {
     )
     .await
     .unwrap();
-    assert_eq!(first["plan_mode_after"], "executing");
+    assert_eq!(first["plan_state_after"], "executing");
 
     let reopen = update_plan::execute(
         &rt,
@@ -503,8 +503,13 @@ async fn gate_fail_then_recomplete_respawns_verifier() {
     .await
     .unwrap();
 
-    assert_eq!(verifier.call_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
     assert_eq!(second["verify"]["verdict"], "pass");
-    assert_eq!(second["plan_mode_after"], "completed");
+    assert_eq!(second["plan_state_after"], "completed");
     cleanup_home(&home);
 }

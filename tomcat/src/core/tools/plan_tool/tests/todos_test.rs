@@ -98,7 +98,10 @@ fn todos_never_writes_plan_file_in_chat() {
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .filter(|s| s.ends_with(".plan.md"))
         .collect();
-    assert!(entries.is_empty(), "CHAT 下 todos 不应写 plan，发现：{entries:?}");
+    assert!(
+        entries.is_empty(),
+        "CHAT 下 todos 不应写 plan，发现：{entries:?}"
+    );
     cleanup_home(&home);
 }
 
@@ -154,7 +157,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
     let plan_id = fresh_planning_plan(&rt);
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();

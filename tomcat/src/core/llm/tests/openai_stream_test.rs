@@ -8,8 +8,8 @@
 //!   `FinishReason` 等事件序列。
 
 use super::*;
-use crate::core::llm::types::StreamEvent;
-use crate::infra::error::AppError;
+use crate::core::llm::types::{StreamEvent, ThinkingSource};
+use crate::infra::error::{llm_stage, llm_summary, AppError, LlmErrorStage};
 use bytes::Bytes;
 use std::time::Duration;
 
@@ -59,7 +59,14 @@ fn test_openai_chunk_reasoning_content_emits_thinking() {
     let events = openai_chunk_to_stream_events(chunk);
     assert_eq!(events.len(), 1);
     assert!(
-        matches!(&events[0], StreamEvent::Thinking { delta, signature: None } if delta == "step 1"),
+        matches!(
+            &events[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                signature: None
+            } if delta == "step 1"
+        ),
         "got: {:?}",
         events[0]
     );
@@ -73,7 +80,14 @@ fn test_openai_chunk_reasoning_alias_falls_back() {
     let events = openai_chunk_to_stream_events(chunk);
     assert_eq!(events.len(), 1);
     assert!(
-        matches!(&events[0], StreamEvent::Thinking { delta, .. } if delta == "alt-name"),
+        matches!(
+            &events[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                ..
+            } if delta == "alt-name"
+        ),
         "got: {:?}",
         events[0]
     );
@@ -88,7 +102,14 @@ fn test_openai_chunk_thinking_and_content_order() {
     let events = openai_chunk_to_stream_events(chunk);
     assert_eq!(events.len(), 2, "thinking + content should both emit");
     assert!(
-        matches!(&events[0], StreamEvent::Thinking { delta, .. } if delta == "plan"),
+        matches!(
+            &events[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                ..
+            } if delta == "plan"
+        ),
         "expected Thinking first; got: {:?}",
         events[0]
     );
@@ -249,7 +270,9 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
         .expect("join ok")
         .expect("should produce timeout error");
     match item {
-        Err(AppError::Llm(msg)) => {
+        Err(err) => {
+            let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
+            assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
             assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
@@ -257,7 +280,7 @@ async fn idle_timeout_errors_when_no_bytes_arrive() {
                 msg
             );
         }
-        other => panic!("expected timeout AppError::Llm, got {:?}", other),
+        other => panic!("expected timeout AppError, got {:?}", other),
     }
 }
 

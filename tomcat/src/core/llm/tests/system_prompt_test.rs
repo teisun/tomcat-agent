@@ -56,6 +56,23 @@ fn build_system_prompt_contains_paged_reading_guide() {
 }
 
 #[test]
+fn build_system_prompt_contains_edit_workflow_guidance() {
+    let prompt = build_system_prompt("/tmp");
+    assert!(
+        prompt.contains("Default file-edit workflow: read -> edit"),
+        "system prompt 应包含 read -> edit 工作流"
+    );
+    assert!(
+        prompt.contains("read(hashline=true) -> hashline_edit"),
+        "system prompt 应包含 hashline_edit 工作流"
+    );
+    assert!(
+        prompt.contains("never include display prefixes"),
+        "system prompt 应提醒不要把 read 展示前缀粘进 old_content"
+    );
+}
+
+#[test]
 fn builder_sections_ordered_by_priority() {
     struct HighPriority;
     impl SystemPromptSection for HighPriority {

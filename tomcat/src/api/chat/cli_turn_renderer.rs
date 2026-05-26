@@ -20,7 +20,7 @@
 //! - **kind 分流**：`message_update.assistantMessageEvent.kind` 来自 P3，
 //!   `content_delta` 走 `MarkdownRenderer`，`thinking_delta` 走折叠/展开逻辑。
 //! - **show_thinking** 用 `AtomicBool`：让 `/thinking` 命令（P4）能跨线程切换；
-//!   `false` 时全回合只打一行 `[thinking] …`，`true` 时流式打 dim 增量。
+//!   `false` 时折叠 raw thinking、仍流式显示 summary，`true` 时 summary + raw 都流式展开。
 //! - **打印通道**：正文 stdout（沿用 `MarkdownRenderer.flush` 路径），thinking 默认
 //!   stdout（`print_to_stderr=true` 切到 stderr 作为 prompt 打架逃生阀），tool 始终
 //!   stderr（与现有 ctx/search_tools 装饰一致）。
@@ -40,6 +40,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::api::render::MarkdownRenderer;
+use crate::core::llm::ThinkingSource;
 use crate::infra::config::ToolCliVerbosity;
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::events::ToolDisplay;
@@ -102,11 +103,9 @@ pub struct CliTurnRenderer {
 struct RendererState {
     last_kind: LastKind,
     /// 当前回合 thinking 通道是否已经打印过 prefix。
-    /// 折叠模式下：仅在第一次出现 thinking 时打 `[thinking] …`，后续 delta 全部丢弃。
-    /// 展开模式下：第一次打前缀，后续追加 delta。
+    /// 不区分 summary/raw：当前 assistant message 第一次出现可见 thinking 时打前缀，
+    /// 后续 delta 都在同一条 thinking 行追加。
     thinking_prefix_printed: bool,
-    /// 折叠模式下，是否已经打过「省略号一行」（保证整回合只打一次）。
-    folded_one_liner_printed: bool,
 }
 
 impl CliTurnRenderer {
@@ -144,7 +143,6 @@ impl CliTurnRenderer {
             state: Mutex::new(RendererState {
                 last_kind: LastKind::None,
                 thinking_prefix_printed: false,
-                folded_one_liner_printed: false,
             }),
             writer,
             tool_starts: Mutex::new(std::collections::HashMap::new()),
@@ -164,6 +162,16 @@ impl CliTurnRenderer {
         self.show_thinking.load(Ordering::Acquire)
     }
 
+    /// 新 assistant message 开始时重置 thinking 前缀状态；若上一条消息恰好停在
+    /// thinking 行末尾，则先补一个换行，避免下一条消息的 `[thinking]` 接在上一条后面。
+    pub fn on_message_start(&self) {
+        let mut st = self.state.lock();
+        if st.last_kind == LastKind::Thinking {
+            self.write_thinking("\n");
+        }
+        st.thinking_prefix_printed = false;
+    }
+
     /// 处理 `message_update` 事件（含 thinking_delta / content_delta 分流）。
     pub fn on_message_update(&self, payload: &Value) {
         let event = match payload.get("assistantMessageEvent") {
@@ -177,7 +185,11 @@ impl CliTurnRenderer {
                 if delta.is_empty() {
                     return;
                 }
-                self.handle_thinking_delta(delta);
+                let source = match parse_thinking_source(event) {
+                    Some(source) => source,
+                    None => return,
+                };
+                self.handle_thinking_delta(delta, source);
             }
             // 默认（缺 kind）按 content_delta 处理，向后兼容老订阅者。
             "" | "content_delta" => {
@@ -193,8 +205,11 @@ impl CliTurnRenderer {
         }
     }
 
-    fn handle_thinking_delta(&self, delta: &str) {
+    fn handle_thinking_delta(&self, delta: &str, source: ThinkingSource) {
         let show = self.show_thinking.load(Ordering::Acquire);
+        if !show && source == ThinkingSource::Raw {
+            return;
+        }
         let mut st = self.state.lock();
         // 思考通道与正文/工具切换时，先冲走 markdown 残余 + 换行，避免「正文 ... [thinking]」黏一行。
         if st.last_kind == LastKind::Content {
@@ -205,20 +220,12 @@ impl CliTurnRenderer {
             st = self.state.lock();
             self.write_thinking("\n");
         }
-        if show {
-            // 展开态：第一次打前缀，后续 delta 直接追加（仍夹在 dim+gray 区）。
-            if !st.thinking_prefix_printed {
-                self.write_thinking("\x1b[2m\x1b[90m[thinking]\x1b[0m ");
-                st.thinking_prefix_printed = true;
-            }
-            self.write_thinking(&format!("\x1b[2m\x1b[90m{}\x1b[0m", delta));
-        } else {
-            // 折叠态：整回合只打一行 `[thinking] …`，避免淹没正文。
-            if !st.folded_one_liner_printed {
-                self.write_thinking("\x1b[2m\x1b[90m[thinking] …\x1b[0m\n");
-                st.folded_one_liner_printed = true;
-            }
+        // 可见 thinking（show=true 的 raw/summary，或 show=false 的 summary）统一走单行流式追加。
+        if !st.thinking_prefix_printed {
+            self.write_thinking("\x1b[2m\x1b[90m[thinking]\x1b[0m ");
+            st.thinking_prefix_printed = true;
         }
+        self.write_thinking(&format!("\x1b[2m\x1b[90m{}\x1b[0m", delta));
         st.last_kind = LastKind::Thinking;
     }
 
@@ -281,10 +288,7 @@ impl CliTurnRenderer {
             .get("toolName")
             .and_then(|v| v.as_str())
             .unwrap_or("?");
-        let partial = payload
-            .get("partialResult")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let partial = payload.get("partialResult").cloned().unwrap_or(Value::Null);
         let phase = partial
             .get("phase")
             .and_then(|v| v.as_str())
@@ -383,6 +387,14 @@ impl CliTurnRenderer {
     /// 注册到 EventBus，返回需要在回合结束时反注册的 listener id 集合。
     pub fn register(self: &Arc<Self>, bus: &dyn EventBus) -> CliTurnRendererListenerIds {
         let me = Arc::clone(self);
+        let msg_start = bus.on(
+            wire::WIRE_MESSAGE_START,
+            Box::new(move |_evt: EventContext| {
+                me.on_message_start();
+                Ok(())
+            }),
+        );
+        let me = Arc::clone(self);
         let msg = bus.on(
             wire::WIRE_MESSAGE_UPDATE,
             Box::new(move |evt: EventContext| {
@@ -415,6 +427,7 @@ impl CliTurnRenderer {
             }),
         );
         CliTurnRendererListenerIds {
+            msg_start,
             msg,
             tool_start,
             tool_update,
@@ -423,6 +436,7 @@ impl CliTurnRenderer {
     }
 
     pub fn unregister(bus: &dyn EventBus, ids: &CliTurnRendererListenerIds) {
+        bus.off(ids.msg_start);
         bus.off(ids.msg);
         bus.off(ids.tool_start);
         bus.off(ids.tool_update);
@@ -432,10 +446,27 @@ impl CliTurnRenderer {
 
 /// 由 [`CliTurnRenderer::register`] 返回的 listener id 句柄，回合结束时反注册。
 pub struct CliTurnRendererListenerIds {
+    pub msg_start: EventListenerId,
     pub msg: EventListenerId,
     pub tool_start: EventListenerId,
     pub tool_update: EventListenerId,
     pub tool_end: EventListenerId,
+}
+
+fn parse_thinking_source(event: &Value) -> Option<ThinkingSource> {
+    match event.get("source").and_then(|v| v.as_str()) {
+        Some("summary") => Some(ThinkingSource::Summary),
+        Some("raw") => Some(ThinkingSource::Raw),
+        other => {
+            tracing::debug!(
+                target: "tomcat::cli_turn_renderer",
+                source = ?other,
+                payload = ?event,
+                "ignoring thinking_delta without valid source"
+            );
+            None
+        }
+    }
 }
 
 /// 工具调用单行摘要（`[tool] {name}  {summary}` 中间那段）。

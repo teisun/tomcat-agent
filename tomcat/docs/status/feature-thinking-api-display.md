@@ -10,10 +10,10 @@
 - [✓] **[P0]** 分支侧门禁：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`（826 passed）、`cargo test --test cli_tests -- --test-threads=1`（77 passed）、`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`（全绿）。
 
 ### 🔌 INTERFACE (接口变更)
-- 新增 `StreamEvent::Thinking { delta, signature }` 内部事件（serde 兼容；signature None 时 skip）。
-- `assistantMessageEvent` payload 扩展 `kind: "content_delta" | "thinking_delta"`，老消费者读 `delta` 不破坏行为。
+- 新增 `StreamEvent::Thinking { delta, source, signature }` 内部事件（`source=summary|raw`；signature None 时 skip）。
+- `assistantMessageEvent` payload 扩展 `kind: "content_delta" | "thinking_delta"` + `source: "summary" | "raw"`；老消费者读 `delta` 不破坏正文路径。
 - 新增本地命令 `/thinking on|off|toggle` 与 `PI_CHAT_SHOW_THINKING` 环境变量；`ChatContext.show_thinking: Arc<AtomicBool>` 由 `CliTurnRenderer` 共享。
-- `LlmConfig.thinking: ThinkingConfig` 新增（enabled/level/format/max_tokens/show/persist/strip_on_resend/print_to_stderr）；默认全关，**完全不改变现有用户行为**。
+- `LlmConfig.thinking: ThinkingConfig` 新增（enabled/level/format/max_tokens/show/persist/strip_on_resend/print_to_stderr）；当前默认 `enabled=true, show=false`，即折叠 raw 但仍显示 summary。
 - `OpenAiRequestBody` 新增可选 `reasoning_effort`/`thinking` 字段（None 时不入 wire）；Responses build_request_body 启用时写 `reasoning: {effort: ...}` 对象。
 - 新模块 `core::llm::thinking_policy`：`ThinkingLevel`/`ThinkingFormat`/`resolve_request_fields`/`should_strip_on_resend`/`should_persist_thinking`/`strip_anthropic_thinking_blocks`。
 

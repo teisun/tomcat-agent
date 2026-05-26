@@ -118,7 +118,9 @@ pub(super) fn parse_hashline_edit_args(
         let (start_line, start_hash) =
             HashlineSegment::parse_anchor(pos, i, "pos").map_err(|e| e.to_string())?;
         let (end_line, end_hash) = match seg.get("end").and_then(|v| v.as_str()) {
-            Some(end_s) => HashlineSegment::parse_anchor(end_s, i, "end").map_err(|e| e.to_string())?,
+            Some(end_s) => {
+                HashlineSegment::parse_anchor(end_s, i, "end").map_err(|e| e.to_string())?
+            }
             None => (start_line, start_hash.clone()),
         };
         let lines = seg

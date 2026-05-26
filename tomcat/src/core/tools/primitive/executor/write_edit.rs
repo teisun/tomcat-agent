@@ -34,6 +34,7 @@ use crate::core::tools::primitive::{
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
+use std::sync::OnceLock;
 
 pub(super) async fn write_file_impl(
     executor: &DefaultPrimitiveExecutor,
@@ -175,7 +176,7 @@ pub(super) async fn edit_file_impl(
                 plugin_id: plugin_id.to_string(),
                 user_approved: true,
                 success: false,
-                detail: Some(e.to_string()),
+                detail: Some(render_edit_audit_detail(&e)),
                 permission_scope: Some(permission_scope_str(scope)),
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
@@ -238,7 +239,7 @@ pub(super) async fn edit_file_impl(
             plugin_id: plugin_id.to_string(),
             user_approved: true,
             success: false,
-            detail: Some(e.to_string()),
+            detail: Some(render_edit_audit_detail(&e)),
             permission_scope: Some(permission_scope_str(scope)),
             grant_type: Some(grant_type_str(grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(grant.trigger)),
@@ -351,9 +352,24 @@ fn apply_string_edits(
             .map(|(b, _)| b)
             .collect();
         if n_hits.is_empty() {
+            let old_summary = summarize_escape_debug(&n_old);
+            if let Some(diag) =
+                diagnose_line_prefix_notfound(&n_old, &n_text, &n_to_w_map, &working_lf)
+            {
+                return Err(AppError::Primitive(format!(
+                    "NotFound (line_prefix_suspected): edits[{}] 的 old_content 在文件 `{}` 中未找到；检测到 old_content 像是把 read 的{}一起粘贴进来了，这些前缀只是展示噪音，不属于文件内容。请去掉前缀后重试；剥离前缀后大约在第 {} 行能对上。old_content 摘要(escape_debug)={}",
+                    idx,
+                    user_path,
+                    diag.style.label(),
+                    diag.hit_line,
+                    old_summary
+                )));
+            }
             return Err(AppError::Primitive(format!(
-                "NotFound: edits[{}] 的 old_content 在文件 `{}` 中未找到 (已尝试 BOM/换行/引号/不可见字符归一化; 请检查上下文是否唯一或扩大上下文)",
-                idx, user_path
+                "NotFound: edits[{}] 的 old_content 在文件 `{}` 中未找到 (已尝试 BOM/换行/引号/不可见字符归一化; 请检查上下文是否唯一或扩大上下文)。old_content 摘要(escape_debug)={}",
+                idx,
+                user_path,
+                old_summary
             )));
         }
         if !seg.replace_all && n_hits.len() > 1 {
@@ -407,6 +423,159 @@ fn apply_string_edits(
     // fold_curly_quotes 暴露给上层做诊断，本函数链路通过 build_normalized_byte_map 间接消费。
     let _ = fold_curly_quotes;
     Ok((disk_text, write_back))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadDisplayPrefixStyle {
+    CatN,
+    Hashline,
+}
+
+impl ReadDisplayPrefixStyle {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CatN => " cat -n 行号前缀（`  N\\t...`）",
+            Self::Hashline => " hashline 前缀（`N#XX:...`）",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinePrefixDiagnosis {
+    style: ReadDisplayPrefixStyle,
+    hit_line: usize,
+}
+
+fn diagnose_line_prefix_notfound(
+    n_old: &str,
+    n_text: &str,
+    n_to_w_map: &[usize],
+    working_lf: &str,
+) -> Option<LinePrefixDiagnosis> {
+    let mut detected_style: Option<ReadDisplayPrefixStyle> = None;
+    let mut stripped = String::with_capacity(n_old.len());
+    let mut non_empty_lines = 0usize;
+
+    for line in n_old.split_inclusive('\n') {
+        let (body, had_newline) = match line.strip_suffix('\n') {
+            Some(body) => (body, true),
+            None => (line, false),
+        };
+        if body.trim().is_empty() {
+            stripped.push_str(body);
+            if had_newline {
+                stripped.push('\n');
+            }
+            continue;
+        }
+
+        let style = detect_read_display_prefix_style(body)?;
+        match detected_style {
+            None => detected_style = Some(style),
+            Some(existing) if existing != style => return None,
+            Some(_) => {}
+        }
+
+        let content = strip_read_display_prefix(body, style)?;
+        stripped.push_str(content);
+        if had_newline {
+            stripped.push('\n');
+        }
+        non_empty_lines += 1;
+    }
+
+    if non_empty_lines == 0 || stripped.trim().is_empty() {
+        return None;
+    }
+
+    let n_hit = n_text.match_indices(stripped.as_str()).next()?.0;
+    let w_start = *n_to_w_map.get(n_hit)?;
+    let hit_line = line_number_for_byte_offset(working_lf, w_start);
+
+    Some(LinePrefixDiagnosis {
+        style: detected_style?,
+        hit_line,
+    })
+}
+
+fn detect_read_display_prefix_style(line: &str) -> Option<ReadDisplayPrefixStyle> {
+    if cat_n_prefix_re().find(line).is_some_and(|m| m.start() == 0) {
+        return Some(ReadDisplayPrefixStyle::CatN);
+    }
+    if hashline_prefix_re().find(line).is_some_and(|m| m.start() == 0) {
+        return Some(ReadDisplayPrefixStyle::Hashline);
+    }
+    None
+}
+
+fn strip_read_display_prefix(line: &str, style: ReadDisplayPrefixStyle) -> Option<&str> {
+    let regex = match style {
+        ReadDisplayPrefixStyle::CatN => cat_n_prefix_re(),
+        ReadDisplayPrefixStyle::Hashline => hashline_prefix_re(),
+    };
+    let m = regex.find(line)?;
+    (m.start() == 0).then_some(&line[m.end()..])
+}
+
+fn cat_n_prefix_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"^[ ]*\d+\t").expect("valid cat -n prefix regex"))
+}
+
+fn hashline_prefix_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"^[ ]*\d+#[ZPMQVRWSNKTXJBYH]{2}:")
+            .expect("valid hashline prefix regex")
+    })
+}
+
+fn line_number_for_byte_offset(text: &str, byte_offset: usize) -> usize {
+    text.as_bytes()[..byte_offset]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        + 1
+}
+
+fn summarize_escape_debug(text: &str) -> String {
+    const EDGE: usize = 80;
+    let escaped: String = text.escape_debug().collect();
+    let total = escaped.chars().count();
+    if total <= EDGE * 2 {
+        return format!("\"{}\"", escaped);
+    }
+    let head: String = escaped.chars().take(EDGE).collect();
+    let tail: String = escaped
+        .chars()
+        .rev()
+        .take(EDGE)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("\"{} ... {}\"", head, tail)
+}
+
+fn render_edit_audit_detail(err: &AppError) -> String {
+    if let AppError::Primitive(inner) = err {
+        if inner.starts_with("NotFound (line_prefix_suspected):") {
+            if let Some(edit_idx) = extract_edits_index(inner) {
+                return format!(
+                    "NotFound[line_prefix_suspected] edits[{}]: {}",
+                    edit_idx, inner
+                );
+            }
+            return format!("NotFound[line_prefix_suspected]: {}", inner);
+        }
+    }
+    err.to_string()
+}
+
+fn extract_edits_index(msg: &str) -> Option<usize> {
+    let start = msg.find("edits[")? + "edits[".len();
+    let end = start + msg[start..].find(']')?;
+    msg[start..end].parse().ok()
 }
 
 /// 仅当 `new_content` **新增**了之前不在 `original` 的命中时才触发 confirm。

@@ -35,7 +35,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
     let plan_id = fresh_planning_plan(&rt);
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
@@ -75,7 +75,7 @@ async fn update_plan_reuses_todos_op_engine_single_in_progress_violation() {
     let plan_id = fresh_planning_plan(&rt);
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     write_plan(&path, &plan, 2000).unwrap();
     rt.set_executing_for_test(plan_id.clone());
@@ -142,7 +142,7 @@ async fn update_plan_cross_session_rejected_for_executing() {
     let plan_id = fresh_planning_plan(&rt_a);
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
@@ -177,7 +177,7 @@ async fn update_plan_plan_id_prefers_active_external_path() {
         frontmatter: PlanFileFrontmatter {
             plan_id: "external_plan".into(),
             goal: "g".into(),
-            mode: PlanFileMode::Planning,
+            state: PlanFileState::Planning,
             session_key: Some("session-a".into()),
             session_id: Some("sid-a".into()),
             created_at: "2026-05-24T00:00:00Z".into(),
@@ -213,10 +213,8 @@ async fn update_plan_plan_id_prefers_active_external_path() {
     .await
     .unwrap();
 
-    let normalized_external_path = crate::infra::platform::normalize_path(
-        external_path.to_string_lossy().as_ref(),
-    )
-    .unwrap();
+    let normalized_external_path =
+        crate::infra::platform::normalize_path(external_path.to_string_lossy().as_ref()).unwrap();
     assert_eq!(
         out["path"],
         crate::infra::platform::format_home_path(&normalized_external_path)
@@ -234,7 +232,7 @@ async fn update_plan_in_exec_promotes_completed() {
     let plan_id = fresh_planning_plan(&rt);
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
@@ -262,8 +260,8 @@ async fn update_plan_in_exec_promotes_completed() {
     )
     .await
     .unwrap();
-    assert_eq!(out["plan_mode_before"], "executing");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_before"], "executing");
+    assert_eq!(out["plan_state_after"], "completed");
     match rt.mode() {
         PlanMode::Completed { plan_id: cur } => assert_eq!(cur, plan_id),
         other => panic!("expected Completed, got {other:?}"),

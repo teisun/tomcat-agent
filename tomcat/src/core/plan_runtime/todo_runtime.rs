@@ -149,4 +149,3 @@ pub fn purge_inactive(base_dir: &Path, session_key: &str, keep_id: &str) -> std:
     }
     Ok(removed)
 }
-

@@ -1670,9 +1670,7 @@ struct CliChatRunCapture {
     stderr: String,
 }
 
-fn setup_background_bash_p1_real_llm_fixture(
-    scratch_leaf: &str,
-) -> BackgroundBashP1RealLlmFixture {
+fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBashP1RealLlmFixture {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
@@ -1724,6 +1722,7 @@ fn run_background_bash_p1_real_llm_chat(
 ) -> CliChatRunCapture {
     let mut c = cmd();
     c.arg("chat")
+        .current_dir(&fx.scratch)
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("OPENAI_API_KEY", &fx.api_key)
         .env("TOMCAT__CONFIG_PATH", fx.config_path.to_str().unwrap())
@@ -1741,7 +1740,11 @@ fn run_background_bash_p1_real_llm_chat(
 
 fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixture) -> String {
     let cfg = tomcat::load_config_toml_file(&fx.config_path).expect("load temp cli config");
-    let sessions_dir = fx.work_dir.join("agents").join(&cfg.agent.id).join("sessions");
+    let sessions_dir = fx
+        .work_dir
+        .join("agents")
+        .join(&cfg.agent.id)
+        .join("sessions");
     let session = tomcat::SessionManager::new(sessions_dir);
     let transcript_path = session
         .current_transcript_path()
@@ -1792,7 +1795,8 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
     );
 
     info!("Act: tomcat chat 触发后台 bash auto-feed，timeout 120s");
-    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
+    let run =
+        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
     let stdout = run.stdout;
     let stderr = run.stderr;
     info!("[tomcat chat stdout] {}", trunc(&stdout, 1500));
@@ -1800,13 +1804,21 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2000));
     }
     info!("Assert: exit 0 + stderr 含 [bg] task + 两文件落盘 + stdout 含 AUTOFEED_OK");
-    assert!(run.success, "tomcat chat 应 exit 0；stderr: {}", trunc(&stderr, 1200));
+    assert!(
+        run.success,
+        "tomcat chat 应 exit 0；stderr: {}",
+        trunc(&stderr, 1200)
+    );
     assert!(
         stderr.contains("[bg] task") && stderr.contains("queued for next turn"),
         "stderr 应含后台完成 auto-feed 提示，实际: {}",
         trunc(&stderr, 1200)
     );
-    assert!(bg_done.exists(), "后台任务产物应存在: {}", bg_done.display());
+    assert!(
+        bg_done.exists(),
+        "后台任务产物应存在: {}",
+        bg_done.display()
+    );
     assert!(marker.exists(), "独立工作产物应存在: {}", marker.display());
     let bg_done_text = fs::read_to_string(&bg_done).unwrap_or_default();
     let marker_text = fs::read_to_string(&marker).unwrap_or_default();
@@ -1870,14 +1882,19 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     );
 
     info!("Act: tomcat chat 触发 block=true wait-slice，timeout 120s");
-    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
+    let run =
+        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
     let stdout = run.stdout;
     let stderr = run.stderr;
     info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
     }
-    assert!(run.success, "tomcat chat 应 exit 0；stderr: {}", trunc(&stderr, 1200));
+    assert!(
+        run.success,
+        "tomcat chat 应 exit 0；stderr: {}",
+        trunc(&stderr, 1200)
+    );
     assert!(
         stderr.contains("task_output") && stderr.contains("waiting_for_output"),
         "stderr 应出现 task_output 倒计时 update，实际: {}",
@@ -1944,8 +1961,8 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     common::setup_logging();
     common::load_openai_test_env();
-    let _span = info_span!("test_user_background_bash_multiple_timeout_slices_real_llm_cli")
-        .entered();
+    let _span =
+        info_span!("test_user_background_bash_multiple_timeout_slices_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016e_multi_timeout");
     let done_path = fx.scratch.join("multi_timeout_done.txt");
@@ -1969,14 +1986,19 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     );
 
     info!("Act: tomcat chat 触发多次 timeout slice，timeout 150s");
-    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(150));
+    let run =
+        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(150));
     let stdout = run.stdout;
     let stderr = run.stderr;
     info!("[tomcat chat stdout] {}", trunc(&stdout, 2200));
     if !stderr.is_empty() {
         info!("[tomcat chat stderr] {}", trunc(&stderr, 2600));
     }
-    assert!(run.success, "tomcat chat 应 exit 0；stderr: {}", trunc(&stderr, 1400));
+    assert!(
+        run.success,
+        "tomcat chat 应 exit 0；stderr: {}",
+        trunc(&stderr, 1400)
+    );
     assert!(
         stderr.contains("task_output") && stderr.contains("waiting_for_output"),
         "stderr 应出现 task_output 倒计时 update，实际: {}",
@@ -2038,11 +2060,15 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
                 }
             }
         } else if role == "tool" {
-            let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let content = message
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if content.contains("\"wakeReason\":\"timeout\"") {
                 timeout_results += 1;
             }
-            if content.contains("TOKEN_MULTI_TIMEOUT") && content.contains("\"wakeReason\":\"new_output\"")
+            if content.contains("TOKEN_MULTI_TIMEOUT")
+                && content.contains("\"wakeReason\":\"new_output\"")
             {
                 saw_new_output_token = true;
             }

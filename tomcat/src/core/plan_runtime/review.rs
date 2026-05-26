@@ -210,10 +210,7 @@ pub fn parse_review_block(text: &str) -> Option<ReviewSummary> {
         } else if let Some(rest) = line.strip_prefix("verdict:") {
             in_findings = false;
             let normalized = rest.trim().to_ascii_lowercase();
-            if !matches!(
-                normalized.as_str(),
-                "pass" | "fail" | "partial" | "aborted"
-            ) {
+            if !matches!(normalized.as_str(), "pass" | "fail" | "partial" | "aborted") {
                 return None;
             }
             verdict = Some(normalized);
@@ -476,4 +473,3 @@ pub fn build_code_review_prompt(
         ],
     )
 }
-

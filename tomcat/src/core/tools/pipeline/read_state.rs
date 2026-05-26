@@ -172,4 +172,3 @@ pub fn metadata_mtime_ms(meta: &std::fs::Metadata) -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
-

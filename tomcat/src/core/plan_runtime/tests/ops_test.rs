@@ -39,8 +39,8 @@ fn duplicate_id_returns_err() {
 #[test]
 fn remove_nonexistent_returns_err() {
     let mut v: Vec<TodoItem> = vec![];
-    let err = apply_todos_ops(&mut v, &[TodoOp::RemoveTodo { id: "x".into() }])
-        .expect_err("not found");
+    let err =
+        apply_todos_ops(&mut v, &[TodoOp::RemoveTodo { id: "x".into() }]).expect_err("not found");
     assert_eq!(err, OpError::TodoNotFound("x".into()));
 }
 

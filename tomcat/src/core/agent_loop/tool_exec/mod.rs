@@ -44,16 +44,15 @@ mod guard;
 use std::sync::Arc;
 
 use crate::core::tools::primitive::{BashTaskRegistry, PrimitiveExecutor};
-use crate::infra::event_bus::EventBus;
-use crate::infra::events::ToolDisplay;
 #[cfg(test)]
 use crate::infra::error::AppError;
+use crate::infra::event_bus::EventBus;
+use crate::infra::events::ToolDisplay;
 
 use super::config_backend::SharedConfigBackend;
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
 use guard::{
-    is_reviewer_whitelisted_tool, is_verifier_whitelisted_tool,
-    reviewer_allowed_tools_description,
+    is_reviewer_whitelisted_tool, is_verifier_whitelisted_tool, reviewer_allowed_tools_description,
 };
 
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
@@ -99,8 +98,7 @@ struct ToolExecCtx<'a> {
     config_backend: &'a Option<SharedConfigBackend>,
     bash_task_registry: &'a Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&'a Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
-    openai_files_runtime:
-        Option<&'a Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    openai_files_runtime: Option<&'a Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     plan_runtime: Option<&'a Arc<crate::core::plan_runtime::PlanRuntime>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
     review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,

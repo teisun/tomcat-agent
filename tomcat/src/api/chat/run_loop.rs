@@ -14,17 +14,17 @@ use crate::core::session::read_entries_tail;
 use crate::infra::error::AppError;
 use crate::infra::EventBus;
 use crate::{
-    AgentLoop, AgentLoopConfig, CheckpointKind, CheckpointRecordRequest, compound_turn_id,
-    resolve_workspace_roots_paths,
+    compound_turn_id, resolve_workspace_roots_paths, AgentLoop, AgentLoopConfig, CheckpointKind,
+    CheckpointRecordRequest,
 };
 
 use crate::core::plan_runtime;
 
-use super::commands::{ChatCommandOutcome, dispatch_chat_command, parse_chat_command};
+use super::super::render::MarkdownRenderer;
+use super::commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
 use super::context::ChatContext;
 use super::prompt::{agent_prompt_for_mode, user_prompt_for_mode};
 use super::{cli_turn_renderer, events, preflight};
-use super::super::render::MarkdownRenderer;
 
 fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
     plan_runtime::catalog::visible_tools_for_mode(&ctx.plan_runtime.mode())
@@ -233,9 +233,7 @@ fn spawn_completion_subscriber(ctx: &ChatContext) -> tokio::task::JoinHandle<()>
     })
 }
 
-fn spawn_readline_waker(
-    signal: Arc<tokio::sync::Notify>,
-) -> tokio::task::JoinHandle<()> {
+fn spawn_readline_waker(signal: Arc<tokio::sync::Notify>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         signal.notified().await;
         wake_blocking_readline();
@@ -354,9 +352,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     readline_waker.abort();
                     continue;
                 }
-                Err(rustyline::error::ReadlineError::Signal(
-                    rustyline::error::Signal::Resize,
-                )) => {
+                Err(rustyline::error::ReadlineError::Signal(rustyline::error::Signal::Resize)) => {
                     readline_waker.abort();
                     if !ctx.follow_up_queue.lock().is_empty() {
                         auto_turn_count = 0;
@@ -432,7 +428,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     );
                     return Err(e);
                 }
-                eprintln!("(可重试，请继续输入)\n");
+                eprintln!("(本轮已落盘进度已保留；可直接继续输入新消息)\n");
                 continue;
             }
         }
@@ -494,7 +490,11 @@ pub async fn run_chat_turn(
     let plan_mode = ctx.plan_runtime.mode();
     let system_text_with_reminder = match &plan_mode {
         plan_runtime::PlanMode::Planning => {
-            format!("{}{}", system_text, *plan_runtime::reminders::PLANNER_REMINDER)
+            format!(
+                "{}{}",
+                system_text,
+                *plan_runtime::reminders::PLANNER_REMINDER
+            )
         }
         plan_runtime::PlanMode::Executing { plan_id } => format!(
             "{}{}",
@@ -505,12 +505,20 @@ pub async fn run_chat_turn(
     };
     messages.insert(0, ChatMessage::system(&system_text_with_reminder));
     if !input.is_empty() {
-        messages.push(ChatMessage::user(input));
+        push_turn_message(
+            &mut messages,
+            &ctx.message_append_sink,
+            ChatMessage::user(input),
+        )?;
     }
     {
         let mut q = ctx.follow_up_queue.lock();
         if !q.is_empty() {
-            messages.extend(q.drain(..));
+            let drained: Vec<_> = q.drain(..).collect();
+            drop(q);
+            for msg in drained {
+                push_turn_message(&mut messages, &ctx.message_append_sink, msg)?;
+            }
         }
     }
 
@@ -527,6 +535,7 @@ pub async fn run_chat_turn(
         read_file_state: ctx.read_file_state.clone(),
         openai_files_runtime: ctx.openai_files_runtime.clone(),
         checkpoint_store: ctx.checkpoint_store.clone(),
+        message_append_sink: Some(ctx.message_append_sink.clone()),
         parent_session_id: None,
         spawn_depth: 0,
         subagent_type: crate::core::agent_loop::SubagentType::User,
@@ -652,6 +661,28 @@ fn make_fallback_context_state(
     }
 }
 
+fn append_turn_message_if_needed(
+    sink: &Arc<dyn crate::core::session::manager::MessageAppendSink>,
+    msg: &mut ChatMessage,
+) -> Result<(), AppError> {
+    if msg.msg_id.is_some() {
+        return Ok(());
+    }
+    let row_id = sink.append_message(serde_json::to_value(&*msg)?)?;
+    msg.msg_id = Some(row_id);
+    Ok(())
+}
+
+fn push_turn_message(
+    messages: &mut Vec<ChatMessage>,
+    sink: &Arc<dyn crate::core::session::manager::MessageAppendSink>,
+    mut msg: ChatMessage,
+) -> Result<(), AppError> {
+    append_turn_message_if_needed(sink, &mut msg)?;
+    messages.push(msg);
+    Ok(())
+}
+
 fn is_fatal_error(e: &AppError) -> bool {
     matches!(e, AppError::Config(_))
 }
@@ -677,11 +708,24 @@ pub(crate) fn persist_turn_result(
 ) -> Result<Vec<String>, AppError> {
     let mut appended_row_ids = Vec::new();
     for msg in new_messages {
-        let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
         let mut cm = msg;
-        cm.msg_id = Some(row_id);
-        appended_row_ids.push(cm.msg_id.clone().unwrap_or_default());
-        context_state.messages.push(cm);
+        if cm.msg_id.is_none() {
+            let row_id = ctx.session.append_message(serde_json::to_value(&cm)?)?;
+            cm.msg_id = Some(row_id);
+        }
+        let row_id = cm.msg_id.clone().unwrap_or_default();
+        if !row_id.is_empty() {
+            appended_row_ids.push(row_id.clone());
+        }
+        let already_present = cm.msg_id.as_deref().is_some_and(|msg_id| {
+            context_state
+                .messages
+                .iter()
+                .any(|existing| existing.msg_id.as_deref() == Some(msg_id))
+        });
+        if !already_present {
+            context_state.messages.push(cm);
+        }
     }
     ctx.session.persist_context_observability(context_state)?;
     maybe_record_turn_checkpoint(ctx, kind, &appended_row_ids);
@@ -812,10 +856,7 @@ fn ensure_session(ctx: &ChatContext) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) async fn cleanup_openai_files_on_session_end(
-    ctx: &ChatContext,
-    reason: &str,
-) {
+pub(crate) async fn cleanup_openai_files_on_session_end(ctx: &ChatContext, reason: &str) {
     let Some(runtime) = ctx.openai_files_runtime.as_ref() else {
         return;
     };

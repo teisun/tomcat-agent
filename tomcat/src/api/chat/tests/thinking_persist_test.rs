@@ -37,6 +37,7 @@ fn thinking_deltas_are_persisted_as_single_transcript_entry() {
                 "assistantMessageEvent": {
                     "kind": "thinking_delta",
                     "delta": "step-1 ",
+                    "source": "summary",
                 }
             }),
         ),
@@ -50,6 +51,7 @@ fn thinking_deltas_are_persisted_as_single_transcript_entry() {
                 "assistantMessageEvent": {
                     "kind": "thinking_delta",
                     "delta": "step-2",
+                    "source": "raw",
                     "signature": "sig-xyz",
                 }
             }),

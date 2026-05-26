@@ -520,6 +520,14 @@ pub struct TokenUsage {
     pub total_tokens: Option<u32>,
 }
 
+/// Thinking/Reasoning 增量来源：原始推理链路（raw）或模型给出的摘要（summary）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingSource {
+    Summary,
+    Raw,
+}
+
 /// 非流式聊天响应，与 OpenAI 格式一致（snake_case）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -554,9 +562,11 @@ pub enum StreamEvent {
     ContentDelta {
         delta: String,
     },
-    /// 思考/推理增量；`signature` 仅 Anthropic 类协议会带（用于多轮重发校验）。
+    /// 思考/推理增量；`source` 区分 summary 与 raw，`signature` 仅 Anthropic 类协议会带
+    /// （用于多轮重发校验）。
     Thinking {
         delta: String,
+        source: ThinkingSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },

@@ -5,9 +5,10 @@ use tempfile::TempDir;
 use super::super::append::{
     append_path_rule_to_disk, append_workspace_entry_to_disk, append_workspace_root_to_disk,
 };
-use super::super::load::load_config;
+use super::super::load::load_config_toml_file;
 use super::super::types::WorkspaceEntry;
 use crate::core::permission::{PathRule, PathRuleMode};
+use serial_test::serial;
 
 fn empty_config_file(dir: &TempDir) -> PathBuf {
     let p = dir.path().join("tomcat.config.toml");
@@ -28,7 +29,7 @@ fn append_extra_root_appends_once() {
     let s = extra.to_string_lossy().into_owned();
     append_workspace_root_to_disk(&p, s.clone()).unwrap();
     append_workspace_root_to_disk(&p, s.clone()).unwrap();
-    let cfg = load_config(Some(&p)).unwrap();
+    let cfg = load_config_toml_file(&p).unwrap();
     assert_eq!(cfg.workspace.workspace_roots, vec![s]);
 }
 
@@ -42,7 +43,7 @@ fn append_path_rule_dedupes() {
     };
     append_path_rule_to_disk(&p, rule.clone()).unwrap();
     append_path_rule_to_disk(&p, rule).unwrap();
-    let cfg = load_config(Some(&p)).unwrap();
+    let cfg = load_config_toml_file(&p).unwrap();
     assert_eq!(cfg.primitive.path_rules.len(), 1);
 }
 
@@ -57,6 +58,35 @@ fn append_workspace_entry_dedupes_by_path() {
     };
     append_workspace_entry_to_disk(&p, entry.clone()).unwrap();
     append_workspace_entry_to_disk(&p, entry).unwrap();
-    let cfg = load_config(Some(&p)).unwrap();
+    let cfg = load_config_toml_file(&p).unwrap();
     assert_eq!(cfg.workspace.entries.len(), 1);
+}
+
+#[test]
+#[serial(env_lock)]
+fn append_workspace_root_does_not_persist_env_merged_values() {
+    struct EnvGuard(Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("TOMCAT__LOG__LEVEL", v),
+                None => std::env::remove_var("TOMCAT__LOG__LEVEL"),
+            }
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let p = empty_config_file(&dir);
+    let extra = dir.path().join("extra_env_guard");
+    std::fs::create_dir_all(&extra).unwrap();
+    let _guard = EnvGuard(std::env::var("TOMCAT__LOG__LEVEL").ok());
+    std::env::set_var("TOMCAT__LOG__LEVEL", "trace");
+
+    append_workspace_root_to_disk(&p, extra.to_string_lossy().into_owned()).unwrap();
+
+    let cfg = load_config_toml_file(&p).unwrap();
+    assert_eq!(
+        cfg.log.level, "warn",
+        "append helper should write back disk config instead of env-merged log.level"
+    );
 }

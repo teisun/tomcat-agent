@@ -117,9 +117,7 @@ fn auto_pick_answer_for_test(question: &Question) -> Option<Answer> {
 
 async fn parse_custom_answer(question: &Question, line: &str) -> Option<Answer> {
     let mut chars = line.chars();
-    let Some(first) = chars.next() else {
-        return None;
-    };
+    let first = chars.next()?;
     if !first.eq_ignore_ascii_case(&'c') {
         return None;
     }

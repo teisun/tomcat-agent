@@ -15,14 +15,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::core::plan_runtime::review::resolve_internal_tools;
-use crate::core::plan_runtime::{PlanRuntime, VerifierDispatcher};
 use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
 };
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::plan_runtime::review::resolve_internal_tools;
+use crate::core::plan_runtime::{PlanRuntime, VerifierDispatcher};
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
@@ -297,9 +297,9 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
         let system_text = format!(
-                        "{}\n(max_turns budget: {} reasoning turns)\n",
-                        verifier_system_prompt_text(),
-                        turns_limit
+            "{}\n(max_turns budget: {} reasoning turns)\n",
+            verifier_system_prompt_text(),
+            turns_limit
         );
 
         let (tx, rx) = tokio::sync::oneshot::channel::<VerifySummary>();
@@ -337,6 +337,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         read_file_state,
                         openai_files_runtime,
                         checkpoint_store,
+                        message_append_sink: None,
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Verifier,
@@ -527,4 +528,3 @@ fn append_budget_exhausted_note(summary: &mut String, turns_limit: u32) {
         summary.truncate(600);
     }
 }
-

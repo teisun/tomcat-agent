@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::core::compaction::compact_tool_results;
 use tomcat::core::llm::{ChatMessageRole, MessageKind};
-use tomcat::core::session::estimate_msg_chars;
+use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
 use tomcat::{
     build_context_from_state, compound_turn_id, init_context_state, AgentLoop, AgentLoopConfig,
     AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
@@ -879,6 +879,69 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
         result.new_messages.len()
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_agent_loop_message_append_sink_persists_assistant_immediately(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let dir = temp_sessions_dir("message_append_sink");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None)?;
+
+    let user_row_id = mgr.append_message(serde_json::json!({
+        "role": "user",
+        "content": "hello"
+    }))?;
+    let mut persisted_user = ChatMessage::user("hello");
+    persisted_user.msg_id = Some(user_row_id);
+
+    let llm = Arc::new(MockLlm::new(vec![text_stream("persisted reply")]));
+    let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 100 });
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let sink: Arc<dyn MessageAppendSink> = Arc::new(mgr.clone());
+    let config = AgentLoopConfig {
+        model: "mock-model".to_string(),
+        session_id: "sess-append-sink".to_string(),
+        max_attempts: 1,
+        retry_base_delay_ms: 0,
+        message_append_sink: Some(sink),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+
+    let messages = vec![ChatMessage::system("system"), persisted_user];
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
+        .await
+        .map_err(|_| "run() timeout 5s")?
+        .unwrap();
+
+    let assistant = result
+        .new_messages
+        .iter()
+        .find(|m| m.text_content() == Some("persisted reply"))
+        .expect("assistant reply should exist");
+    assert!(
+        assistant.msg_id.is_some(),
+        "assistant should be persisted immediately and carry msg_id"
+    );
+
+    let transcript_path = mgr.current_transcript_path()?.expect("transcript path");
+    let entries = tomcat::core::session::transcript::read_entries_tail(&transcript_path, 8)?;
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            tomcat::TranscriptEntry::Message(me)
+                if me.message.get("content").and_then(|v| v.as_str()) == Some("persisted reply")
+        )
+    }));
+
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

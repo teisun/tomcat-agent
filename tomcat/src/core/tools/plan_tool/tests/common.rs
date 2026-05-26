@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 pub(crate) use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, validate_frontmatter_invariants, write_plan, PlanFile,
-    PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
+    PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
 pub(crate) use crate::core::plan_runtime::review::{ReviewKind, ReviewSummary};
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
@@ -77,7 +77,7 @@ pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
 pub fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
     let path = plan_path_for_id(plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some(session_key.into());
     plan.frontmatter.session_id = Some(format!("sid-{session_key}"));
     write_plan(&path, &plan, 2000).unwrap();
@@ -265,12 +265,12 @@ pub fn good_args_with_todo() -> create_plan::CreatePlanArgs {
 pub fn write_plan_file_at(
     path: &std::path::Path,
     plan_id: &str,
-    disk_mode: PlanFileMode,
+    disk_state: PlanFileState,
 ) -> std::path::PathBuf {
     let fm = PlanFileFrontmatter {
         plan_id: plan_id.into(),
         goal: "P6 build target".into(),
-        mode: disk_mode,
+        state: disk_state,
         session_key: Some("orig-session-key".into()),
         session_id: Some("orig-uuid".into()),
         created_at: "2026-05-19T00:00:00Z".into(),
@@ -290,7 +290,7 @@ pub fn write_plan_file_at(
     path.to_path_buf()
 }
 
-pub fn write_disk_plan(plan_id: &str, disk_mode: PlanFileMode) -> std::path::PathBuf {
+pub fn write_disk_plan(plan_id: &str, disk_state: PlanFileState) -> std::path::PathBuf {
     let path = plan_path_for_id(plan_id).unwrap();
-    write_plan_file_at(&path, plan_id, disk_mode)
+    write_plan_file_at(&path, plan_id, disk_state)
 }

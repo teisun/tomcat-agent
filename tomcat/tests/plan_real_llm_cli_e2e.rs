@@ -3,9 +3,9 @@
 //! 通过 `assert_cmd::Command::cargo_bin("tomcat")` 真起 `tomcat chat`，让真 LLM
 //! 在两段 stdin 里推进 PLAN→EXEC→Completed 全程：
 //!
-//! - 进程 A：`tomcat chat` + `/plan` + planning prompt；EOF 退出后落盘 mode=planning。
+//! - 进程 A：`tomcat chat` + `/plan` + planning prompt；EOF 退出后落盘 state=planning。
 //! - 测试主程：优先从本次 session transcript 提取 `create_plan` 结果。
-//! - 进程 B：`tomcat chat --resume` + `/plan build {plan_id}` + exec prompt；EOF 退出后落盘 mode=completed。
+//! - 进程 B：`tomcat chat --resume` + `/plan build {plan_id}` + exec prompt；EOF 退出后落盘 state=completed。
 //!   这个真 LLM 用例继续覆盖 `plan_id` 入口；`/plan build <path>` 由 runtime 集成测试单独回归。
 //!
 //! 拆两个进程是因为 stdin 是一次性写完的（rustyline pipe 行为）：测试主程必须能在
@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serial_test::serial;
-use tomcat::core::plan_runtime::file_store::{read_plan, PlanFileMode, TodoStatus};
+use tomcat::core::plan_runtime::file_store::{read_plan, PlanFileState, TodoStatus};
 use tomcat::{
     load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
 };
@@ -169,7 +169,7 @@ fn build_default_exec_prompt(goal: &str, todo_ids: &[String], workdir: &Path) ->
         "- Do NOT call ask_question. Do NOT edit the plan file directly.".to_string(),
         "- Do NOT write outside the current working directory.".to_string(),
         "- When the last todo becomes completed, inspect the `update_plan` tool result.".to_string(),
-        "- If `code_review.verdict != pass` or `plan_mode_after` stays `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo with `update_plan`, fix the work, and complete the plan again.".to_string(),
+        "- If `code_review.verdict != pass` or `plan_state_after` stays `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo with `update_plan`, fix the work, and complete the plan again.".to_string(),
         "- Only stop once the tool result includes verifier output or the plan reaches `completed`.".to_string(),
         "Todo ids to finish:".to_string(),
     ];
@@ -200,7 +200,7 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
         "- Do NOT call ask_question. Do NOT edit the plan file directly.".to_string(),
         "- Do NOT write outside the current working directory.".to_string(),
         "- When the final `update_plan` returns, inspect `code_review` / `verify` in the tool result.".to_string(),
-        "- If `code_review.verdict != pass` or `plan_mode_after` stays `executing`, do NOT stop: reopen or add a fix todo with `update_plan`, repair the file, and drive the plan to completion again.".to_string(),
+        "- If `code_review.verdict != pass` or `plan_state_after` stays `executing`, do NOT stop: reopen or add a fix todo with `update_plan`, repair the file, and drive the plan to completion again.".to_string(),
         "- Only stop once the tool result includes verifier output or the plan reaches `completed`.".to_string(),
         "Todo ids to finish:".to_string(),
     ];
@@ -356,7 +356,7 @@ fn pick_newest_planning_plan_path(home: &Path) -> Option<PathBuf> {
             continue;
         }
         let Ok(plan) = read_plan(&path) else { continue };
-        if plan.frontmatter.mode != PlanFileMode::Planning {
+        if plan.frontmatter.state != PlanFileState::Planning {
             continue;
         }
         let mtime = entry.metadata().ok()?.modified().ok()?;
@@ -954,7 +954,7 @@ fn run_cli_real_llm_case(
     let created_plan = created_plan_from_current_session(&fx).unwrap_or_else(|| {
         let path = pick_newest_planning_plan_path(&fx.home).unwrap_or_else(|| {
             dump_diag("no_planning_plan", &fx, &out_a, None);
-            panic!("进程 A 后未找到 mode=planning 的 plan 文件");
+            panic!("进程 A 后未找到 state=planning 的 plan 文件");
         });
         common::CreatedPlanRef {
             plan_id: read_plan(&path)
@@ -1005,11 +1005,11 @@ fn run_cli_real_llm_case(
     verify_artifact(&fx, &out_a, &out_b);
 
     let final_plan = read_plan(&plan_path).expect("read_plan plan_b");
-    if final_plan.frontmatter.mode != PlanFileMode::Completed {
-        dump_diag("final_mode_not_completed", &fx, &out_a, Some(&out_b));
+    if final_plan.frontmatter.state != PlanFileState::Completed {
+        dump_diag("final_state_not_completed", &fx, &out_a, Some(&out_b));
         panic!(
-            "EOF 后 plan 磁盘 mode 应为 Completed，实际：{:?}",
-            final_plan.frontmatter.mode
+            "EOF 后 plan 磁盘 state 应为 Completed，实际：{:?}",
+            final_plan.frontmatter.state
         );
     }
     let all_done = final_plan
@@ -1041,12 +1041,12 @@ fn run_cli_real_llm_case(
     );
     let stdout_b = String::from_utf8_lossy(&out_b.stdout);
     assert!(
-        stdout_b.contains("u[Exec]> start building "),
+        stdout_b.contains("u[Plan:executing]> start building "),
         "进程 B stdout 应展示自动开跑的 EXEC user prompt；实际前 4000 字符：{}",
         tail_chars(&out_b.stdout, 4000)
     );
     assert!(
-        stdout_b.contains("agent.main[Exec]>"),
+        stdout_b.contains("agent.main[Plan:executing]>"),
         "进程 B stdout 应展示 EXEC agent prompt；实际前 4000 字符：{}",
         tail_chars(&out_b.stdout, 4000)
     );
@@ -1055,12 +1055,17 @@ fn run_cli_real_llm_case(
         std::fs::read_to_string(&fx.transcript_path).expect("read cli real llm transcript");
     let lines: Vec<&str> = transcript.lines().collect();
     let plan_review_idx = lines.iter().position(|l| l.contains("\"plan.review\""));
-    let plan_code_review_idx = lines
-        .iter()
-        .position(|l| l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\""));
+    let plan_code_review_idx = lines.iter().position(|l| {
+        l.contains("\"plan.code_review\"") && !l.contains("\"plan.code_review.warning\"")
+    });
     let plan_verify_idx = lines.iter().position(|l| l.contains("\"plan.verify\""));
     if plan_review_idx.is_none() || plan_code_review_idx.is_none() || plan_verify_idx.is_none() {
-        dump_diag("transcript_missing_review_events", &fx, &out_a, Some(&out_b));
+        dump_diag(
+            "transcript_missing_review_events",
+            &fx,
+            &out_a,
+            Some(&out_b),
+        );
     }
     assert!(
         plan_review_idx.is_some(),

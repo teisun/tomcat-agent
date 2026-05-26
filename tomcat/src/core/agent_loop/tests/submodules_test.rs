@@ -23,6 +23,7 @@ use crate::core::agent_loop::tool_exec::execute_tool;
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
 use crate::core::llm::ChatMessage;
 use crate::core::tools::primitive::PrimitiveExecutor;
+use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
@@ -45,7 +46,8 @@ fn make_agent() -> AgentLoop {
 async fn handle_overflow_retry_skipped_when_not_overflow() {
     let mut agent = make_agent();
     let mut messages = vec![ChatMessage::user("hi")];
-    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, "API 错误 429: rate limit");
+    let err = AppError::Llm("API 错误 429: rate limit".to_string());
+    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
     assert!(
         !stats.applied,
         "non-overflow error must not trigger L3 trim, stats={:?}",
@@ -61,8 +63,9 @@ async fn handle_overflow_retry_skipped_when_not_overflow() {
 async fn handle_overflow_retry_skipped_when_no_context_state() {
     let mut agent = make_agent();
     let mut messages = vec![ChatMessage::user("hi")];
-    let err = r#"API 错误 400: {"error":{"code":"context_length_exceeded"}}"#;
-    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, err);
+    let err =
+        AppError::Llm(r#"API 错误 400: {"error":{"code":"context_length_exceeded"}}"#.to_string());
+    let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
     assert!(
         !stats.applied,
         "overflow without context_state must skip trim, stats={:?}",
@@ -348,7 +351,11 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
             None,
         )
         .await;
-        assert!(!outcome.is_error, "block=true 必须成功：{}", outcome.model_text);
+        assert!(
+            !outcome.is_error,
+            "block=true 必须成功：{}",
+            outcome.model_text
+        );
         let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
         let wr = chunk["wakeReason"].as_str().unwrap_or("");
         let finished = chunk["finished"].as_bool().unwrap_or(false);
@@ -414,7 +421,10 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
     .await;
     assert!(!outcome.is_error);
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-    assert_eq!(chunk["wakeReason"], serde_json::Value::String("timeout".into()));
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("timeout".into())
+    );
     assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
     assert_eq!(chunk["nextOffset"].as_u64(), Some(0));
     assert_eq!(chunk["content"], serde_json::Value::String("".into()));
@@ -561,8 +571,7 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
     let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
-    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let start_tc = ToolCallInfo {
         id: "bg-cr".into(),
@@ -598,7 +607,10 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
     .await;
     assert!(!outcome.is_error);
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-    assert_eq!(chunk["wakeReason"], serde_json::Value::String("finished".into()));
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("finished".into())
+    );
     let g = routes.lock();
     assert!(matches!(g.get(&task_id), Some(CompletionRoute::Delivered)));
 }
@@ -618,8 +630,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
     let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
-    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let start_tc = ToolCallInfo {
         id: "bg-rel".into(),
@@ -654,7 +665,10 @@ async fn task_output_block_true_releases_claim_on_timeout() {
     )
     .await;
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-    assert_eq!(chunk["wakeReason"], serde_json::Value::String("timeout".into()));
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("timeout".into())
+    );
     // routes 不应留 entry：让 lifecycle 后续兜底。
     assert!(routes.lock().get(&task_id).is_none());
 
@@ -677,8 +691,7 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
     let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
-    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let routes: Arc<Mutex<HashMap<String, CompletionRoute>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let start_tc = ToolCallInfo {
         id: "bg-snk".into(),
@@ -691,7 +704,9 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
 
     // 让 task 先 Finish + 模拟 lifecycle subscriber 抢先 Delivered。
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    routes.lock().insert(task_id.clone(), CompletionRoute::Delivered);
+    routes
+        .lock()
+        .insert(task_id.clone(), CompletionRoute::Delivered);
 
     let out_tc = ToolCallInfo {
         id: "to-snk".into(),
@@ -724,7 +739,10 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         started.elapsed()
     );
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-    assert_eq!(chunk["wakeReason"], serde_json::Value::String("finished".into()));
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("finished".into())
+    );
     // routes 仍是 Delivered（终态）。
     assert!(matches!(
         routes.lock().get(&task_id),

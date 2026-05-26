@@ -24,18 +24,18 @@ pub(in super::super) async fn dispatch_plan_tool(
     use crate::core::tools::plan_tool as plan_tools;
 
     let result: Result<serde_json::Value, plan_tools::ToolError> = match name {
-        "create_plan" => match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(
-            args.clone(),
-        ) {
-            Ok(a) => plan_tools::create_plan::execute_with_reviewer(rt, a, true).await,
-            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
-        },
-        "update_plan" => match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(
-            args.clone(),
-        ) {
-            Ok(a) => plan_tools::update_plan::execute(rt, a).await,
-            Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
-        },
+        "create_plan" => {
+            match serde_json::from_value::<plan_tools::create_plan::CreatePlanArgs>(args.clone()) {
+                Ok(a) => plan_tools::create_plan::execute_with_reviewer(rt, a, true).await,
+                Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
+            }
+        }
+        "update_plan" => {
+            match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
+                Ok(a) => plan_tools::update_plan::execute(rt, a).await,
+                Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
+            }
+        }
         "todos" => match serde_json::from_value::<plan_tools::todos::TodosArgs>(args.clone()) {
             Ok(a) => plan_tools::todos::execute(rt, a),
             Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),

@@ -177,6 +177,7 @@ pub struct Message(pub serde_json::Value);
 /// {
 ///   "kind": "content_delta" | "thinking_delta",   // 必有；老消费者可忽略
 ///   "delta": "...",                                 // 必有：增量文本
+///   "source": "summary" | "raw",                   // thinking_delta 必有
 ///   "signature": "..."                              // 可选：仅 thinking_delta + Anthropic
 /// }
 /// ```

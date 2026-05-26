@@ -20,6 +20,7 @@ use tokio_stream::StreamExt;
 use tracing::info;
 
 use crate::core::llm::{ChatRequest, StreamEvent};
+use crate::infra::error::{llm_source_chain, llm_stage, llm_summary};
 use crate::infra::events::{AgentEvent, AssistantMessageEvent, Message};
 
 use super::error_classifier::classify_error;
@@ -73,12 +74,17 @@ pub(super) async fn run_chat_stream(
                 Ok(s) => s,
                 Err(e) => {
                     let snippet: String = e.to_string().chars().take(200).collect();
+                    let summary = llm_summary(&e).unwrap_or_else(|| snippet.clone());
+                    let source_chain = llm_source_chain(&e).join(" <- ");
                     info!(
                         target: "tomcat_chat_diag",
                         phase = "reasoning_chat_stream_connect_err",
+                        stage = ?llm_stage(&e),
+                        summary = %summary,
+                        source_chain = %source_chain,
                         snippet = %snippet
                     );
-                    return Err(classify_error(&e));
+                    return Err(classify_error(e));
                 }
             }
         }
@@ -118,11 +124,19 @@ pub(super) async fn run_chat_stream(
                 });
             }
             // P3：Thinking 透传——单独走 thinking_delta 通道，不写 content_buf，
-            // 不进入 transcript 主体；上层（CLI/TUI/扩展）按 show_thinking 决定是否渲染。
-            Ok(StreamEvent::Thinking { delta, signature }) => {
+            // 不进入 transcript 主体；上层（CLI/TUI/扩展）按 show_thinking/source 决定是否渲染。
+            Ok(StreamEvent::Thinking {
+                delta,
+                source,
+                signature,
+            }) => {
                 let mut payload = serde_json::json!({
                     "kind": "thinking_delta",
                     "delta": delta,
+                    "source": match source {
+                        crate::core::llm::ThinkingSource::Summary => "summary",
+                        crate::core::llm::ThinkingSource::Raw => "raw",
+                    },
                 });
                 if let Some(sig) = signature {
                     payload["signature"] = serde_json::Value::String(sig);
@@ -167,7 +181,17 @@ pub(super) async fn run_chat_stream(
                 agent.emit_event(AgentEvent::MessageEnd {
                     message: Message(serde_json::json!({})),
                 });
-                return Err(classify_error(&e));
+                let summary = llm_summary(&e).unwrap_or_else(|| e.to_string());
+                let source_chain = llm_source_chain(&e).join(" <- ");
+                info!(
+                    target: "tomcat_chat_diag",
+                    phase = "reasoning_chat_stream_item_err",
+                    provider = agent.llm.provider_name(),
+                    stage = ?llm_stage(&e),
+                    summary = %summary,
+                    source_chain = %source_chain,
+                );
+                return Err(classify_error(e));
             }
         }
     }

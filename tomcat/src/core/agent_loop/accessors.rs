@@ -91,10 +91,7 @@ impl AgentLoop {
     /// - 同一 `run_chat_turn` 内 conversation loop 在每个 attempt 成功后 drain
     ///   该 queue 进入下一次 reasoning loop，让后台完成事件能在同一 turn 内被消费；
     /// - 跨 turn 时，host between-turns drain 会接管未消费的纸条。
-    pub fn with_shared_follow_up_queue(
-        mut self,
-        queue: Arc<Mutex<Vec<ChatMessage>>>,
-    ) -> Self {
+    pub fn with_shared_follow_up_queue(mut self, queue: Arc<Mutex<Vec<ChatMessage>>>) -> Self {
         self.follow_up_queue = queue;
         self
     }
@@ -169,6 +166,49 @@ impl AgentLoop {
 
     pub fn take_context_state(&mut self) -> Option<ContextState> {
         self.context_state.take()
+    }
+
+    pub(super) fn persist_message_if_needed(
+        &self,
+        msg: &mut ChatMessage,
+    ) -> Result<(), crate::infra::error::AppError> {
+        let Some(ref sink) = self.config.message_append_sink else {
+            return Ok(());
+        };
+        if msg.msg_id.is_some() {
+            return Ok(());
+        }
+        let row_id = sink.append_message(serde_json::to_value(&*msg)?)?;
+        msg.msg_id = Some(row_id);
+        Ok(())
+    }
+
+    pub(super) fn push_message(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        mut msg: ChatMessage,
+    ) -> Result<(), crate::infra::error::AppError> {
+        self.persist_message_if_needed(&mut msg)?;
+        messages.push(msg);
+        Ok(())
+    }
+
+    pub(super) fn sync_persisted_messages_into_context(&mut self, messages: &[ChatMessage]) {
+        let Some(ref mut ctx_state) = self.context_state else {
+            return;
+        };
+        for msg in messages {
+            let Some(msg_id) = msg.msg_id.as_deref() else {
+                continue;
+            };
+            let exists = ctx_state
+                .messages
+                .iter()
+                .any(|existing| existing.msg_id.as_deref() == Some(msg_id));
+            if !exists {
+                ctx_state.messages.push(msg.clone());
+            }
+        }
     }
 
     /// 刷新实时 token 指标并发射 `ContextMetricsUpdate` 事件（仅当 `context_state`

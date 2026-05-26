@@ -51,8 +51,9 @@ fn parse_review_block_unclosed_returns_none() {
 #[test]
 fn parse_review_block_truncates_summary_to_600() {
     let body = "a".repeat(800);
-    let text =
-        format!("<review>\nsummary: {body}\nchanges_summary: none\napplied_changes: false\n</review>");
+    let text = format!(
+        "<review>\nsummary: {body}\nchanges_summary: none\napplied_changes: false\n</review>"
+    );
     let r = parse_review_block(&text).unwrap();
     assert_eq!(r.summary.len(), 600);
 }
@@ -154,7 +155,9 @@ fn normalize_for_code_review_forces_aborted() {
     summary.verdict = None;
     let warnings = normalize_for_code_review_result(&mut summary);
     assert_eq!(summary.verdict.as_deref(), Some("aborted"));
-    assert!(warnings.iter().any(|w| w.contains("verdict 已规范化为 aborted")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("verdict 已规范化为 aborted")));
 }
 
 #[test]

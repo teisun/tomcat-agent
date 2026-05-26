@@ -17,8 +17,7 @@ use crate::core::compaction::preheat::Preheat;
 use super::types::{estimate_msg_chars, CompactionResult, ContextState, SessionContextObservation};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
-const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
-const HYDRATE_INTERRUPTED_TOOL_CALL_EVENT: &str = "session.hydrate_interrupted_tool_call";
+pub(crate) const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
 
 fn entry_timestamp(entry: &TranscriptEntry) -> &str {
     match entry {
@@ -306,91 +305,64 @@ fn fold_entries_to_messages(
     }
 }
 
-fn find_dangling_tail_tool_call_id(entries: &[TranscriptEntry]) -> Option<String> {
+fn find_dangling_tail_tool_call_ids(entries: &[TranscriptEntry]) -> Option<Vec<String>> {
     let recent = collect_recent_chat_messages_from_tail(entries);
-    let last = recent.last()?;
-    let last_role = last.get("role").and_then(|v| v.as_str())?;
-    match last_role {
-        "assistant" => missing_last_tool_call_id(last, &[]),
-        "tool" => {
-            let mut trailing_tools_rev: Vec<&serde_json::Value> = Vec::new();
-            for msg in recent.iter().rev() {
-                let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                match role {
-                    "tool" => trailing_tools_rev.push(msg),
-                    "assistant" => return missing_last_tool_call_id(msg, &trailing_tools_rev),
-                    _ => return None,
-                }
+    let mut trailing_tool_ids_rev: Vec<&str> = Vec::new();
+    for msg in recent.iter().rev() {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        match role {
+            "tool" => {
+                let tool_call_id = msg.get("tool_call_id").and_then(|v| v.as_str())?;
+                trailing_tool_ids_rev.push(tool_call_id);
             }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn missing_last_tool_call_id(
-    assistant: &serde_json::Value,
-    trailing_tools_rev: &[&serde_json::Value],
-) -> Option<String> {
-    let tool_calls = assistant.get("tool_calls")?.as_array()?;
-    let tool_call_ids: Vec<&str> = tool_calls
-        .iter()
-        .map(|tc| tc.get("id").and_then(|v| v.as_str()))
-        .collect::<Option<Vec<_>>>()?;
-    if tool_call_ids.is_empty() {
-        return None;
-    }
-
-    let trailing_tool_ids: Vec<&str> = trailing_tools_rev
-        .iter()
-        .rev()
-        .map(|msg| msg.get("tool_call_id").and_then(|v| v.as_str()))
-        .collect::<Option<Vec<_>>>()?;
-
-    if trailing_tool_ids.len() + 1 != tool_call_ids.len() {
-        return None;
-    }
-    for (expected, actual) in tool_call_ids
-        .iter()
-        .take(trailing_tool_ids.len())
-        .zip(trailing_tool_ids.iter())
-    {
-        if expected != actual {
-            return None;
+            "assistant" => {
+                let tool_calls = msg.get("tool_calls")?.as_array()?;
+                if tool_calls.is_empty() {
+                    return None;
+                }
+                let tool_call_ids: Vec<&str> = tool_calls
+                    .iter()
+                    .map(|tc| tc.get("id").and_then(|v| v.as_str()))
+                    .collect::<Option<Vec<_>>>()?;
+                let trailing_tool_ids: Vec<&str> =
+                    trailing_tool_ids_rev.iter().rev().copied().collect();
+                for (expected, actual) in tool_call_ids.iter().zip(trailing_tool_ids.iter()) {
+                    if expected != actual {
+                        return None;
+                    }
+                }
+                let missing: Vec<String> = tool_call_ids
+                    .iter()
+                    .skip(trailing_tool_ids.len())
+                    .map(|id| (*id).to_string())
+                    .collect();
+                return (!missing.is_empty()).then_some(missing);
+            }
+            _ => return None,
         }
     }
-    tool_call_ids.last().map(|id| (*id).to_string())
+    None
 }
 
 fn heal_dangling_tail_tool_call(
     session: &SessionManager,
     entries: &[TranscriptEntry],
 ) -> Result<bool, AppError> {
-    let Some(tool_call_id) = find_dangling_tail_tool_call_id(entries) else {
+    let Some(tool_call_ids) = find_dangling_tail_tool_call_ids(entries) else {
         return Ok(false);
     };
 
     tracing::warn!(
-        tool_call_id = %tool_call_id,
-        "hydrate detected dangling tail tool_call; appending synthetic interrupted tool result"
+        tool_call_ids = ?tool_call_ids,
+        "hydrate detected dangling tail tool_call block; appending synthetic interrupted tool results"
     );
 
-    session.append_message(serde_json::json!({
-        "role": "tool",
-        "tool_call_id": tool_call_id.clone(),
-        "content": INTERRUPTED_TOOL_RESULT_TEXT,
-    }))?;
-
-    if let Err(err) = session.append_custom_entry(serde_json::json!({
-        "event": HYDRATE_INTERRUPTED_TOOL_CALL_EVENT,
-        "customType": HYDRATE_INTERRUPTED_TOOL_CALL_EVENT,
-        "toolCallId": tool_call_id,
-        "text": INTERRUPTED_TOOL_RESULT_TEXT,
-    })) {
-        tracing::warn!(
-            error = %err,
-            "hydrate appended synthetic tool result but failed to append interrupted marker"
-        );
+    for tool_call_id in tool_call_ids {
+        session.append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": INTERRUPTED_TOOL_RESULT_TEXT,
+        }))?;
     }
 
     Ok(true)

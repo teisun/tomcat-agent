@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFileMode, TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFileState, TodoStatus,
 };
 use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
@@ -238,7 +238,7 @@ fn build_runtime_with_spies() -> (
 fn promote_to_exec(rt: &PlanRuntime, plan_id: &str) {
     let path = plan_path_for_id(plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.mode = PlanFileMode::Executing;
+    plan.frontmatter.state = PlanFileState::Executing;
     plan.frontmatter.session_key = Some("session-a".into());
     plan.frontmatter.session_id = Some("sid-a".into());
     write_plan(&path, &plan, 2000).unwrap();
@@ -446,7 +446,7 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
 
     let path = plan_path_for_id(&plan_id).unwrap();
     let plan = read_plan(&path).unwrap();
-    assert_eq!(plan.frontmatter.mode, PlanFileMode::Pending);
+    assert_eq!(plan.frontmatter.state, PlanFileState::Pending);
     cleanup_home(&home);
 }
 
@@ -597,7 +597,7 @@ async fn h8_code_review_pass_runs_verifier_in_same_update_plan_turn() {
     let out = complete_all_plan_todos(&rt, &plan_id).await;
     assert_eq!(out["code_review"]["verdict"], "pass");
     assert_eq!(out["verify"]["verdict"], "pass");
-    assert_eq!(out["plan_mode_after"], "completed");
+    assert_eq!(out["plan_state_after"], "completed");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
         reviewer
@@ -652,7 +652,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_re
     let first = complete_all_plan_todos(&rt, &plan_id).await;
     assert_eq!(first["code_review"]["verdict"], "fail");
     assert_eq!(first["verify"], serde_json::Value::Null);
-    assert_eq!(first["plan_mode_after"], "executing");
+    assert_eq!(first["plan_state_after"], "executing");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
         reviewer
@@ -700,7 +700,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_re
     .unwrap();
     assert_eq!(second["code_review"], serde_json::Value::Null);
     assert_eq!(second["verify"]["verdict"], "pass");
-    assert_eq!(second["plan_mode_after"], "completed");
+    assert_eq!(second["plan_state_after"], "completed");
     assert_eq!(
         reviewer
             .call_count

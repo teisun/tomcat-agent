@@ -1,5 +1,5 @@
 use super::super::file_store::{
-    write_plan, PlanFile, PlanFileFrontmatter, PlanFileMode, TodoItem, TodoStatus,
+    write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
 use super::super::{safety, PlanRuntime};
 
@@ -42,7 +42,7 @@ fn resolved_plan_path_prefers_active_external_path() {
             frontmatter: PlanFileFrontmatter {
                 plan_id: "external_path_plan".into(),
                 goal: "goal".into(),
-                mode: PlanFileMode::Planning,
+                state: PlanFileState::Planning,
                 session_key: Some("sess".into()),
                 session_id: Some("uuid".into()),
                 created_at: "2026-05-24T00:00:00Z".into(),

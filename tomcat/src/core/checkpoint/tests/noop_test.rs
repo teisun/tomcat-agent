@@ -1,8 +1,6 @@
 use super::super::noop::NoopStore;
 use super::super::store::CheckpointStore;
-use super::super::types::{
-    CheckpointKind, CheckpointRecordRequest, ListOptions, RetentionPolicy,
-};
+use super::super::types::{CheckpointKind, CheckpointRecordRequest, ListOptions, RetentionPolicy};
 
 #[test]
 fn noop_store_returns_null_and_empty_views() {

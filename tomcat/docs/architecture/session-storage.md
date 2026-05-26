@@ -123,6 +123,18 @@ pub struct BranchSummaryEntry {
 
 **Source of truth**：transcript 内容以 JSONL 文件为准；sessions.json 为元数据与路由的权威，写入时覆盖该文件。
 
+**主 chat 的消息级持久化矩阵（2026-05）**：
+- `user` / 纯文本 `assistant` final / 每条 `tool_result`：形成合法 message 边界后立即 append 到 transcript，并在返回前 `flush + sync_data`。
+- `assistant + tool_calls`：形成合法块后立即 append，但只做 `flush`；紧随其后的首条 `tool_result` 的 `sync_data` 会把该块一并落稳。
+- `thinking_trace` / `event` / `custom` / `branch_summary` / `sessions.json` observability / checkpoint：仍保持原有异步或 turn-end 路径，不承担消息正确性。
+- stream delta / thinking delta / CLI 中间渲染态：不直接写入主 transcript。
+
+**失败与恢复语义（2026-05）**：
+- `Failed` 不再把本轮视为“从未发生”：凡是已经即时落盘的 `user`、完整 `assistant`、`assistant + tool_calls`、已完成 `tool_result` 都会保留在 transcript。
+- 流式中途尚未形成合法 message 边界的半截 delta 仍不写主 transcript；用户下一条输入会作为新的 `user` 继续追加，而不是覆盖上一轮。
+- `chat --resume` hydrate 会扫描 transcript 尾部最后一个 `assistant.tool_calls` block，并按原顺序补齐所有缺失的 `role=tool, content="[interrupted]"` 结果；若尾部工具序列中间穿插了 `user/assistant/system` 等非 `tool` role，则拒绝猜测、不做自愈。
+- background follow-up / synthetic user message 统一在 **drain 时** 走与普通 `user` 相同的即时 append 路径；仅 enqueue 不落盘，避免第二套持久化窗口。
+
 **上下文可观测累计（方案 B）**：`compaction_count` / `compaction_tokens_freed` / `tool_result_chars_persisted` 在进程内由 `ContextState` 更新，**每个 user turn 结束**（成功路径与可恢复错误路径）由 `SessionManager::persist_context_observability` 刷入 `sessions.json`；`init_context_state` 启动时读回填入 `ContextState`，实现重启后累计不无故归零。该累计**不以 transcript 重放重建**；与 transcript 手工编辑可能不一致。
 
 **BranchSummaryEntry（JSONL `type: branch_summary`）可选 token 估算字段**（camelCase，旧行可缺省）：`estimatedCoveredTokensBefore`、`estimatedSummaryTokens`、`estimatedTokensSaved` — L1 预热写入，供 L2 apply 计入 `session_obs.compaction_tokens_freed` 而无需再次用 `estimated_token_count` 前后差计算。

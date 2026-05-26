@@ -156,10 +156,10 @@
 | 写改前一致性（Mini 验证相关） | **有**：edit 前 `read` 指纹陈旧拦截 | [`tools/read.md`](./tools/read.md) §1 `staleness` — 属 **B 层**工具级自检，非 C 层完工验货 |
 
 ```101:115:tomcat/src/api/chat/plan_runtime/tools/update_plan.rs
-    let derived_completed = matches!(plan_mode_before, PlanFileMode::Executing)
+    let derived_completed = matches!(plan_state_before, PlanFileState::Executing)
         && ops::all_completed(&plan.frontmatter.todos);
     if derived_completed {
-        plan.frontmatter.mode = PlanFileMode::Completed;
+        plan.frontmatter.state = PlanFileState::Completed;
     }
     // ...
     if derived_completed {
@@ -342,7 +342,7 @@ Tomcat 拟定   update_plan all_completed → verify.rs dispatch → transcript 
 
 | 优先级 | 来源 | 动作 | 说人话 |
 |--------|------|------|--------|
-| P0 | **本步 / 本 plan 已写明** | `<plan_meta>`、`PlanFile.body` 的 Test plan、用户当轮消息（**注**：本期不引入 `verify_checks[]` frontmatter，命令模板若需固化由 plan body 写明） | 计划或用户说了跑啥，先用。 |
+| P0 | **本步 / 本 plan 已写明** | `PlanFile.body` 的 Test plan、用户当轮消息（**注**：本期不引入 `verify_checks[]` frontmatter，命令模板若需固化由 plan body 写明） | 计划或用户说了跑啥，先用。 |
 | P1 | **已注入的项目上下文** | 若 system 已含 `AGENTS.md`/`CLAUDE.md`/rules 片段，从中取 **Commands / Test / CI** 类条目 | 有注入就用，别假设一定有。 |
 | P2 | **变更目录最近的 manifest** | 从本 todo 改动的路径向上找：`package.json`（`scripts.test`/`scripts.build`）、`Cargo.toml`+`[[workspace]]`、`pyproject.toml`、`Makefile`/`justfile`、`go.mod`、`pom.xml` 等 | monorepo 找**最近**一层，不全仓盲跑。 |
 | P3 | **文档** | 同目录或根 `README*`、`CONTRIBUTING*`、`docs/**/testing*` | 很多仓只有 README 里写了 `make test`。 |

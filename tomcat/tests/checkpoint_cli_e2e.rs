@@ -63,7 +63,10 @@ fn setup_fixture() -> Fixture {
     fs::create_dir_all(&sessions_dir).unwrap();
     let session = SessionManager::new(sessions_dir);
     let session_key = session.current_session_key().to_string();
-    let session_id = session.create_session(&session_key, None).unwrap().session_id;
+    let session_id = session
+        .create_session(&session_key, None)
+        .unwrap()
+        .session_id;
     let store = ShadowGitStore::new(resolve_agent_trail_dir(&cfg).unwrap(), workdir.clone());
 
     Fixture {

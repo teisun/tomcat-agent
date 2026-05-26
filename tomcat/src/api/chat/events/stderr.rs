@@ -1,6 +1,6 @@
 //! CLI 会话级 stderr 事件监听：`readline` 等待期间 Layer1 仍可能 emit，须在整段 `chat_loop` 内保持注册。
 //!
-//! `search_tools` 事件优先走 [`rustyline::ExternalPrinter`]，以便在 `readline("u> ")` 阻塞期间把 `[tools]`
+//! `search_tools` 事件优先走 [`rustyline::ExternalPrinter`]，以便在 `readline("u[Chat]> ")` 阻塞期间把 `[tools]`
 //! 插在输入行上方；无 TTY / 创建失败时回退 `eprintln!`。
 
 use std::io::{self, Write as IoWrite};

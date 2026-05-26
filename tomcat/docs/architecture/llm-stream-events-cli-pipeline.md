@@ -40,7 +40,7 @@
 |------|------|----------|----------|--------|
 | `ContentDelta` | assistant 正文增量 | `StreamEvent::ContentDelta { delta }` | 只进 Markdown 渲染链 | 模型正式回答。 |
 | `ToolCallDelta` | 工具调用增量（拼 JSON） | `StreamEvent::ToolCallDelta { ... }` | **不直接打印**；只累积 | 工具调用的半成品。 |
-| `Thinking` / `ThinkingDelta` | 思考/推理流增量 | `StreamEvent::Thinking { delta, signature }`（定稿命名） | 与正文分通道；可折叠；默认不落 transcript | 脑内草稿。 |
+| `Thinking` / `ThinkingDelta` | 思考/推理流增量 | `StreamEvent::Thinking { delta, source, signature }`（定稿命名） | 与正文分通道；可折叠；默认不落 transcript | 脑内草稿。 |
 | `FinishReason` | 流结束原因 | `StreamEvent::FinishReason { reason }` | 控制收口，不当正文 | 告诉循环何时停。 |
 | `ThinkingLevel` | 用户期望的推理强度档位 | 配置 `llm.thinking.level` + 模型能力元数据 | 映射为各厂商请求字段 | 「要多想一点」的旋钮。 |
 | `thinking_format` | 厂商参数形态分派键 | 配置 `llm.thinking.format` 或自动探测 | 决定发 `reasoning_effort` / `thinking` / `enable_thinking` 等 | 各家 API 长得不一样时的翻译表。 |
@@ -87,10 +87,10 @@
 | 目标 | 观察指标 | 说人话 |
 |------|----------|--------|
 | G1 目标视觉效果 | 单轮输出中可出现 `[thinking]`、`[tool]`、正文三段，且颜色与报告示意一致（灰/绿/红） | 看起来像 Cursor/豆包示例。 |
-| G2 折叠 | `show_thinking=false` 时仅一行 `[thinking] …`，`true` 时流式展开 | 报告方案 D。 |
+| G2 折叠 | `show_thinking=false` 时折叠 raw、仍流式显示 `[thinking]` summary；`true` 时 summary + raw 流式展开 | 报告方案 D。 |
 | G3 协议闭环 | Completions `reasoning_content` + Responses `reasoning_*` 事件均能映射到 `StreamEvent::Thinking` | 不能只有一半。 |
 | G4 ThinkingLevel | 改配置后下一请求 wire 体携带正确字段 | 旋钮真生效。 |
-| G5 默认策略（方案 B） | `ThinkingConfig::default()` 为 `enabled=true`、`show=true`（CLI 默认展开） | 这是破变更，需在 changelog / G5 明示。 |
+| G5 默认策略 | `ThinkingConfig::default()` 为 `enabled=true`、`show=false`（CLI 默认折叠 raw，但仍显示 summary） | 这是破变更，需在 changelog / G5 明示。 |
 | G6 多消费者 | TUI/审计可订阅同一 EventBus payload | 不为 CLI 私有造第二协议。 |
 | G7 三条管线解耦 | 展示（EventBus→CLI）≠ 持久化（persist）≠ 上行（messages） | 关显示不应影响上行，落盘也不应污染正文。 |
 
@@ -128,7 +128,7 @@
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | **P0** | `CliTurnRenderer`：把 `message_update` + `tool_execution_*` 变成报告式输出 + ANSI | `src/api/chat/cli_turn_renderer.rs`（新）+ `src/api/chat/mod.rs` | `cli_turn_renderer_formats_tool_lines` | 先把「长得像报告」做出来。 |
-| **P1** | `StreamEvent::Thinking { delta, signature }` + serde 兼容 | `src/core/llm/types.rs` | `stream_event_thinking_serde` | 内部统一思考事件。 |
+| **P1** | `StreamEvent::Thinking { delta, source, signature }` + serde 兼容 | `src/core/llm/types.rs` | `stream_event_thinking_serde` | 内部统一思考事件。 |
 | **P2a** | Completions：`OpenAiStreamDelta.reasoning_content` + `OpenAiRequestBody` 增加 `reasoning_effort` / `thinking`（按 `thinking_format` 二选一） | `src/core/llm/openai.rs` | `openai_chunk_maps_reasoning_to_thinking` | Chat Completions 线打通。 |
 | **P2b** | Responses：`responses_chunk_to_events` 解析 `response.reasoning_*`（以 OpenAI 官方事件名为准）→ `StreamEvent::Thinking` | `src/core/llm/openai_responses/stream.rs` | `responses_stream_emits_thinking` | 别再 `// 其它 event 暂忽略`。 |
 | **P3** | `stream_handler`：`Thinking` 分支 → `MessageUpdate` payload `kind=thinking_delta` | `src/core/agent_loop/stream_handler.rs` + `src/infra/events/mod.rs`（序列化字段） | `stream_handler_emits_thinking_message_update` | Agent 层透出思考。 |
@@ -201,7 +201,7 @@ P1 StreamEvent::Thinking
 报告示意（逻辑冻结，文案可本地化）：
 
 ```text
-[thinking] ……多行 dim 灰字……
+[thinking] ……dim 灰字；show=false 时只显示 summary……
 
 [tool] read  path=src/main.rs
 [tool] read  ✓ 238 lines (0.3s)
@@ -262,8 +262,8 @@ P1 StreamEvent::Thinking
 
 | `show_thinking` | 流式阶段 | 结束阶段 | 说人话 |
 |-----------------|----------|----------|--------|
-| `true` | 全量打印 thinking delta（dim） | 保留完整缓冲区 | 像报告展开态。 |
-| `false` | **不打印 delta**；若 thinking 非空，仅在第一次收到 thinking 时打印一行 `\x1b[2m[thinking] …\x1b[0m`（可用 `chars` 前缀 + `…`） | 不再补打 | 像 pi-mono `hideThinkingBlock`。 |
+| `true` | 打印 summary + raw thinking delta（dim） | 保留完整缓冲区 | 像报告展开态。 |
+| `false` | **打印 `source=summary`，丢弃 `source=raw`**；`[thinking]` 前缀只出现一次，summary 同行流式增长 | 不额外补打 placeholder | 折叠 raw，但仍给用户摘要。 |
 
 ##### CLI 交互（无 Ctrl+T 的等价物）
 
@@ -286,7 +286,7 @@ P1 StreamEvent::Thinking
 |-------------|------|------|--------|
 | `ContentDelta { delta }` | 是 | 正文增量 | 回答正文。 |
 | `ToolCallDelta { ... }` | 否 | 工具增量 | 只拼装，不展示。 |
-| `Thinking { delta, signature }` | 否 | 思考增量；`signature` 仅 Anthropic | 思考草稿。 |
+| `Thinking { delta, source, signature }` | 否 | 思考增量；`source` 区分 `summary/raw`，`signature` 仅 Anthropic | 思考草稿。 |
 | `FinishReason { reason }` | 否 | 结束原因 | 循环控制。 |
 | `Usage { ... }` | 否 | token 统计 | 计费/压缩。 |
 
@@ -300,6 +300,7 @@ P1 StreamEvent::Thinking
 |------|------|------|------|--------|
 | `kind` | string | 是 | `content_delta` / `thinking_delta` | 区分正文与思考。 |
 | `delta` | string | 条件 | `kind=*_delta` 时必填 | 兼容老字段名。 |
+| `source` | string | `kind=thinking_delta` 时是 | `summary` / `raw` | 区分摘要与原始推理。 |
 | `signature` | string? | 否 | Anthropic 思考签名 | Claude 专供。 |
 | `finishReason` | string? | 否 | 若要在 UI 展示 stop/tool/length | 一般可不填。 |
 
@@ -321,20 +322,20 @@ P1 StreamEvent::Thinking
                 v
   +---------------------------+     POST /v1/responses
   | OpenAiResponsesProvider   | --> reasoning.effort（档位）
-  | build_request_body()      |     reasoning.summary="auto"（仅当需展示或 persist）
+| build_request_body()      |     reasoning.summary="auto"（thinking.enabled 即请求）
   +-------------+-------------+
                 |
                 v   SSE chunks（每条 JSON 带 "type": "..."）
   +---------------------------+
   | stream.rs                 |
-  | responses_chunk_to_events | --> StreamEvent::Thinking { delta, signature }
+| responses_chunk_to_events | --> StreamEvent::Thinking { delta, source, signature }
   |                           | --> StreamEvent::ContentDelta { delta }
   +-------------+-------------+
                 |
                 v
   +---------------------------+
   | stream_handler.rs         |  message_update.assistantMessageEvent:
-  | AgentLoop                 |    kind=thinking_delta | content_delta + delta
+| AgentLoop                 |    kind=thinking_delta + source | content_delta + delta
   +-------------+-------------+
                 |
                 v
@@ -398,7 +399,7 @@ P1 StreamEvent::Thinking
    +---------------+----------------+
                    |
                    v
-        Some(非空字符串) --> StreamEvent::Thinking { delta, signature: None }
+       Some(非空字符串) --> StreamEvent::Thinking { delta, source, signature: None }
         None         --> 不发 Thinking；debug 记录「无可抽取文本」
 ```
 
@@ -423,7 +424,7 @@ P1 StreamEvent::Thinking
 }
 ```
 
-→ 顶层 `delta` 命中 → 发出一条 `StreamEvent::Thinking`，`delta` 与 JSON 中字符串一致（含首尾空白时原样保留）。
+→ 顶层 `delta` 命中 → 发出一条 `StreamEvent::Thinking { source: raw }`，`delta` 与 JSON 中字符串一致（含首尾空白时原样保留）。
 
 **示例 B：`reasoning_summary_text` 字符串增量**
 
@@ -434,7 +435,7 @@ P1 StreamEvent::Thinking
 }
 ```
 
-→ 与 A 相同分支，走 `push_reasoning_delta_event`。
+→ 与 A 相同分支，走 `push_reasoning_delta_event`，并标记 `source=summary`。
 
 **示例 C：`reasoning_summary.delta` 顶层为 `summary` 数组（多段 `summary_text`）**
 
@@ -448,7 +449,7 @@ P1 StreamEvent::Thinking
 }
 ```
 
-→ 顶层 key `summary` → `extract_text` 对数组逐项取 `text` → 用空格拼成一条字符串 → 一条 `Thinking`。
+→ 顶层 key `summary` → `extract_text` 对数组逐项取 `text` → 用空格拼成一条字符串 → 一条 `Thinking { source: summary }`。
 
 **示例 D：`reasoning_summary_part.done`，文本在嵌套 `part` 里**
 
@@ -596,7 +597,7 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
 | `llm.thinking.level` | enum | `high` | `ThinkingLevel` | 默认深度推理档位。 |
 | `llm.thinking.format` | string? | auto | `thinking_format` | 告诉翻译表用哪套键。 |
 | `llm.thinking.max_tokens` | u32? | model default | 仅豆包 / Moonshot `thinking` 对象路径生效 | OpenAI/Responses 走 `reasoning.effort`。 |
-| `llm.thinking.show` | bool | `true` | CLI 是否展开打印 | 方案 B 默认展开。 |
+| `llm.thinking.show` | bool | `false` | CLI 是否展开 raw thinking；`false` 时仍显示 summary | 默认折叠 raw。 |
 | `llm.thinking.persist` | bool | `false` | 是否写入 transcript | 默认别存草稿。 |
 | `llm.thinking.print_to_stderr` | bool | `false` | 与 prompt 冲突时逃生 | 调试用。 |
 | `llm.tool_cli_verbosity` | enum(`off/brief/full`) | `full` | 工具执行行输出档位 | 与 `show_thinking` 解耦。 |
@@ -604,7 +605,7 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
 
 `show_thinking` 初值优先级：`PI_CHAT_SHOW_THINKING`（已设置）> `llm.thinking.show` > 代码默认。  
 `strip_on_resend`：用户侧不再提供 toml 配置项，重放剥留由 provider / 出站层按 API 规则决定。
-`provider=openai-responses` 时：若 `thinking.enabled && (thinking.show || thinking.persist)`，请求体自动附加 `reasoning.summary="auto"`；否则不请求 summary。
+`provider=openai-responses` 时：只要 `thinking.enabled=true`，请求体就自动附加 `reasoning.summary="auto"`；`show` 只控制 CLI 是否展开 raw，不再 gate summary 请求。
 语言策略：已回退 Prompt 层“强制跟随用户语言”的硬规则；当前以模型默认行为为主，后续是否进入 `Accept-Language` 头方案取决于语言行为观测结果。
 
 ---
@@ -616,8 +617,8 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
   -> debug 日志一行（含 event type）
   -> 不中断主链路
 
-thinking 解析成功但 show=false
-  -> 仅维护缓冲，不写屏
+thinking 解析成功且 show=false
+  -> `source=summary` 仍写屏；`source=raw` 仅缓冲/可选 persist，不写屏
 
 reasoning delta 分片包含空白
   -> 原样透传（不 trim），避免单词粘连

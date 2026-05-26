@@ -85,24 +85,24 @@ pub enum PlanError {
 
 // ─── frontmatter / 子结构 ──────────────────────────────────────────────────
 
-/// PlanFile.frontmatter.mode 的枚举形态；与 [`super::PlanMode`] 没有 1:1 映射
+/// PlanFile.frontmatter.state 的枚举形态；与 [`super::PlanMode`] 没有 1:1 映射
 /// （后者是 runtime in-memory 状态机，含 Chat）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PlanFileMode {
+pub enum PlanFileState {
     Planning,
     Executing,
     Completed,
     Pending,
 }
 
-impl PlanFileMode {
+impl PlanFileState {
     pub fn as_str(&self) -> &'static str {
         match self {
-            PlanFileMode::Planning => "planning",
-            PlanFileMode::Executing => "executing",
-            PlanFileMode::Completed => "completed",
-            PlanFileMode::Pending => "pending",
+            PlanFileState::Planning => "planning",
+            PlanFileState::Executing => "executing",
+            PlanFileState::Completed => "completed",
+            PlanFileState::Pending => "pending",
         }
     }
 }
@@ -143,7 +143,7 @@ pub struct TodoItem {
 pub struct PlanFileFrontmatter {
     pub plan_id: String,
     pub goal: String,
-    pub mode: PlanFileMode,
+    pub state: PlanFileState,
     #[serde(default)]
     pub session_key: Option<String>,
     #[serde(default)]
@@ -374,10 +374,8 @@ pub fn update_plan_locked<R, E>(
     with_advisory_lock(&lock_path, lock_timeout_ms, || {
         let mut plan = read_plan_from_disk(path).map_err(LockedPlanMutationError::Plan)?;
         let result = f(&mut plan).map_err(LockedPlanMutationError::Callback)?;
-        let serialized =
-            serialize_plan_file(&plan).map_err(LockedPlanMutationError::Plan)?;
-        write_serialized_plan_atomic(path, &serialized)
-            .map_err(LockedPlanMutationError::Plan)?;
+        let serialized = serialize_plan_file(&plan).map_err(LockedPlanMutationError::Plan)?;
+        write_serialized_plan_atomic(path, &serialized).map_err(LockedPlanMutationError::Plan)?;
         Ok(result)
     })
 }
@@ -394,7 +392,9 @@ where
     E: From<PlanError>,
 {
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(PlanError::Io).map_err(E::from)?;
+        std::fs::create_dir_all(parent)
+            .map_err(PlanError::Io)
+            .map_err(E::from)?;
     }
     let mut lock_file = OpenOptions::new()
         .create(true)
@@ -445,4 +445,3 @@ fn next_tmp_seq() -> u64 {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
-

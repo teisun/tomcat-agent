@@ -100,7 +100,7 @@ pub enum ToolCliVerbosity {
     Full,
 }
 
-/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流与重试。
+/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流、重试与多层超时。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
     #[serde(default = "default_llm_provider")]
@@ -117,9 +117,18 @@ pub struct LlmConfig {
     /// 非流式请求失败时的重试次数（仅对可重试错误如 429/5xx）。
     #[serde(default = "default_llm_retry_count")]
     pub retry_count: u32,
-    /// 流式请求单次读取超时秒数。
+    /// 整次 HTTP 请求总超时（秒）；0 表示不限制。
+    #[serde(default = "default_http_timeout_sec")]
+    pub http_timeout_sec: u64,
+    /// 流式 SSE chunk 空闲超时（秒）；0 表示关闭。
     #[serde(default = "default_stream_timeout_sec")]
     pub stream_timeout_sec: u64,
+    /// 非流式请求无进展 watchdog（秒）；0 表示关闭。
+    #[serde(default = "default_non_stream_stale_timeout_sec")]
+    pub non_stream_stale_timeout_sec: u64,
+    /// socket 级 read 超时（秒）；0 表示关闭。
+    #[serde(default = "default_http_read_timeout_sec")]
+    pub http_read_timeout_sec: u64,
     /// 显式 HTTP 代理 URL（如 `http://127.0.0.1:7890`）。设置后所有 LLM 请求经该代理；未设置时仍使用环境变量 HTTPS_PROXY/HTTP_PROXY（若存在）。
     #[serde(default)]
     pub proxy: Option<String>,
@@ -151,9 +160,9 @@ pub struct LlmFilesConfig {
 
 /// Thinking / Reasoning 协议子配置。
 ///
-/// **产品默认（方案 B）**：`enabled = true`、`show = true`、`level = "high"`。
-/// 库集成方若希望「装好就和旧行为一致」需显式 `enabled = false`。详见 changelog 与
-/// 架构 §3.1 G5。其它字段：
+/// **产品默认**：`enabled = true`、`show = false`、`level = "high"`。
+/// 新默认会折叠 raw thinking、但仍显示 summary；若希望完全静默 thinking，需显式
+/// `enabled = false`。详见 changelog 与架构 §3.1 G5。其它字段：
 ///
 /// - `level`: `off | minimal | low | medium | high | xhigh`，由
 ///   [`crate::core::llm::thinking_policy::ThinkingLevel`] 解析。
@@ -184,7 +193,8 @@ pub struct ThinkingConfig {
     /// OpenAI / openai-responses 路径忽略本字段（用 `reasoning.effort`）。
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// CLI 默认是否展示 thinking。运行时优先级：
+    /// CLI 默认是否展开 raw thinking。`false` 时 raw 折叠，但 summary 仍可显示。
+    /// 运行时优先级：
     /// `PI_CHAT_SHOW_THINKING`（已设置）> 本字段 > 代码默认。
     #[serde(default = "default_thinking_show")]
     pub show: bool,
@@ -210,7 +220,7 @@ fn default_thinking_enabled() -> bool {
 }
 
 fn default_thinking_show() -> bool {
-    true
+    false
 }
 
 impl Default for ThinkingConfig {
@@ -248,8 +258,21 @@ fn default_max_concurrent_requests() -> u32 {
 fn default_llm_retry_count() -> u32 {
     3
 }
+pub const DEFAULT_LLM_HTTP_TIMEOUT_SEC: u64 = 1_800;
+pub const DEFAULT_LLM_STREAM_TIMEOUT_SEC: u64 = 180;
+pub const DEFAULT_LLM_NON_STREAM_STALE_TIMEOUT_SEC: u64 = 300;
+pub const DEFAULT_LLM_HTTP_READ_TIMEOUT_SEC: u64 = 120;
+fn default_http_timeout_sec() -> u64 {
+    DEFAULT_LLM_HTTP_TIMEOUT_SEC
+}
 fn default_stream_timeout_sec() -> u64 {
-    60
+    DEFAULT_LLM_STREAM_TIMEOUT_SEC
+}
+fn default_non_stream_stale_timeout_sec() -> u64 {
+    DEFAULT_LLM_NON_STREAM_STALE_TIMEOUT_SEC
+}
+fn default_http_read_timeout_sec() -> u64 {
+    DEFAULT_LLM_HTTP_READ_TIMEOUT_SEC
 }
 pub const DEFAULT_LLM_FILES_EXPIRES_AFTER_SECONDS: u64 = 86_400;
 fn default_llm_files_expires_after_seconds() -> u64 {
@@ -273,7 +296,10 @@ impl Default for LlmConfig {
             default_model: default_llm_model(),
             max_concurrent_requests: default_max_concurrent_requests(),
             retry_count: default_llm_retry_count(),
+            http_timeout_sec: default_http_timeout_sec(),
             stream_timeout_sec: default_stream_timeout_sec(),
+            non_stream_stale_timeout_sec: default_non_stream_stale_timeout_sec(),
+            http_read_timeout_sec: default_http_read_timeout_sec(),
             proxy: None,
             api_base_fallback: None,
             thinking: ThinkingConfig::default(),

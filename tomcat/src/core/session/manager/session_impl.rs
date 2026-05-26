@@ -1,8 +1,8 @@
 //! SessionManager struct and its implementation.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
@@ -13,19 +13,30 @@ use crate::core::session::store::{
     load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
 };
 use crate::core::session::transcript::{
-    append_entry, get_branch, get_children, get_entry, get_leaf_entry, read_entries_tail,
-    read_header, write_header, BranchSummaryEntry, CustomEntry, LabelEntry, MessageEntry,
-    ModelChangeEntry, SessionHeader, SessionInfoEntry, ThinkingLevelChangeEntry,
-    ThinkingTraceEntry, TranscriptEntry,
+    append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
+    read_entries_tail, read_header, write_header, BranchSummaryEntry, CustomEntry, LabelEntry,
+    MessageEntry, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
+    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
 
 use super::types::ContextState;
+use super::MessageAppendSink;
 
 static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
 const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
+
+struct AppendInFlightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for AppendInFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// 会话管理器：持有 store 路径与写入锁，提供 CRUD 与 transcript 读写。
 pub struct SessionManager {
@@ -34,7 +45,19 @@ pub struct SessionManager {
     /// sessions.json 完整路径
     store_path: PathBuf,
     /// 序列化 store 写入，禁止锁文件
-    write_mutex: Mutex<()>,
+    write_mutex: Arc<Mutex<()>>,
+    append_in_flight: Arc<AtomicUsize>,
+}
+
+impl Clone for SessionManager {
+    fn clone(&self) -> Self {
+        Self {
+            sessions_dir: self.sessions_dir.clone(),
+            store_path: self.store_path.clone(),
+            write_mutex: Arc::clone(&self.write_mutex),
+            append_in_flight: Arc::clone(&self.append_in_flight),
+        }
+    }
 }
 
 impl SessionManager {
@@ -44,7 +67,8 @@ impl SessionManager {
         Self {
             sessions_dir: sessions_dir.clone(),
             store_path,
-            write_mutex: Mutex::new(()),
+            write_mutex: Arc::new(Mutex::new(())),
+            append_in_flight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -60,6 +84,10 @@ impl SessionManager {
 
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
+    }
+
+    pub fn append_in_flight_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.append_in_flight)
     }
 
     /// 加载当前 store；文件不存在或空则返回空 map。
@@ -260,51 +288,67 @@ impl SessionManager {
             .map(|entry| self.transcript_path(&entry.session_id)))
     }
 
-    // TODO: 并发 append 存在 TOCTOU 竞态，当前假设单线程串行调用；后续若引入并发需加文件锁或 Mutex
-    /// 追加 message 到当前会话的 transcript（核心路径：校验失败 panic!）。
-    /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
-    pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
+    fn message_sync_level(message: &serde_json::Value) -> SyncLevel {
+        let role = message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .map(|items| !items.is_empty())
+            .unwrap_or(false);
+        match role {
+            "assistant" if has_tool_calls => SyncLevel::Flush,
+            _ => SyncLevel::SyncData,
+        }
+    }
+
+    fn append_message_internal(
+        &self,
+        message: serde_json::Value,
+        chain_violation_is_invariant: bool,
+    ) -> Result<String, AppError> {
+        self.append_in_flight.fetch_add(1, Ordering::SeqCst);
+        let _guard = AppendInFlightGuard {
+            counter: Arc::clone(&self.append_in_flight),
+        };
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
         let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
         let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
         if let Err(reason) = validate_append_message(&message, &recent_msgs) {
-            panic!("[append_message] chain violation: {reason}");
+            let err = AppError::invariant("append_message_chain", reason);
+            return if chain_violation_is_invariant {
+                Err(err)
+            } else {
+                Err(AppError::Config(err.to_string()))
+            };
         }
         let id = generate_entry_id();
         let now = iso_ts_now()?;
+        let sync = Self::message_sync_level(&message);
         let entry = TranscriptEntry::Message(MessageEntry {
             id: Some(id.clone()),
             parent_id: None,
             timestamp: now,
             message,
         });
-        append_entry(&path, &entry)?;
+        append_entry_with_sync(&path, &entry, sync)?;
         Ok(id)
+    }
+
+    // TODO: 并发 append 存在 TOCTOU 竞态，当前假设单线程串行调用；后续若引入并发需加文件锁或 Mutex
+    /// 追加 message 到当前会话的 transcript；返回新行的 `MessageEntry.id`（§5.7 MessageId）。
+    pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
+        self.append_message_internal(message, true)
     }
 
     /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
     /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn try_append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
-        let path = self
-            .current_transcript_path()?
-            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
-        let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
-        if let Err(reason) = validate_append_message(&message, &recent_msgs) {
-            return Err(AppError::Config(format!("chain violation: {reason}")));
-        }
-        let id = generate_entry_id();
-        let now = iso_ts_now()?;
-        let entry = TranscriptEntry::Message(MessageEntry {
-            id: Some(id.clone()),
-            parent_id: None,
-            timestamp: now,
-            message,
-        });
-        append_entry(&path, &entry)?;
-        Ok(id)
+        self.append_message_internal(message, false)
     }
 
     /// 追加 thinking_level_change。
@@ -512,6 +556,12 @@ impl SessionManager {
             None => return Ok(None),
         };
         read_header(&path).map(Some)
+    }
+}
+
+impl MessageAppendSink for SessionManager {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        SessionManager::append_message(self, value)
     }
 }
 

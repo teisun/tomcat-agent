@@ -19,6 +19,7 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::core::llm::ChatMessage;
+use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
 
 use super::tool_exec;
@@ -93,14 +94,19 @@ pub(super) async fn run_tool_calls(
                 })
             })
             .collect();
-        messages.push(ChatMessage::assistant_with_tool_calls(
-            if assistant_content.is_empty() {
-                None
-            } else {
-                Some(assistant_content)
-            },
-            tc_json,
-        ));
+        agent
+            .push_message(
+                messages,
+                ChatMessage::assistant_with_tool_calls(
+                    if assistant_content.is_empty() {
+                        None
+                    } else {
+                        Some(assistant_content)
+                    },
+                    tc_json,
+                ),
+            )
+            .map_err(LoopError::Fatal)?;
     }
 
     let mut tool_results: Vec<Message> = Vec::new();
@@ -116,7 +122,9 @@ pub(super) async fn run_tool_calls(
             if let Some(ref mut ctx_state) = agent.context_state {
                 ctx_state.on_message_appended(blocked_msg.len());
             }
-            messages.push(ChatMessage::tool(&tc.id, &blocked_msg));
+            agent
+                .push_message(messages, ChatMessage::tool(&tc.id, &blocked_msg))
+                .map_err(LoopError::Fatal)?;
             tool_results.push(Message(serde_json::json!({ "content": blocked_msg })));
         }
         agent.block_tool_calls = false;
@@ -175,7 +183,7 @@ pub(super) async fn run_tool_calls(
                     agent.emit_event(AgentEvent::ToolExecutionEnd {
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
-                        result: ToolOutput(serde_json::json!("[interrupted]")),
+                        result: ToolOutput(serde_json::json!(INTERRUPTED_TOOL_RESULT_TEXT)),
                         display: None,
                         is_error: true,
                     });
@@ -212,7 +220,9 @@ pub(super) async fn run_tool_calls(
             ctx_state.on_message_appended(model_text.len());
         }
 
-        messages.push(ChatMessage::tool(&tc.id, &model_text));
+        agent
+            .push_message(messages, ChatMessage::tool(&tc.id, &model_text))
+            .map_err(LoopError::Fatal)?;
         tool_results.push(Message(
             serde_json::json!({ "content": model_text.clone() }),
         ));
@@ -235,7 +245,9 @@ pub(super) async fn run_tool_calls(
             if let Some(ref mut ctx_state) = agent.context_state {
                 ctx_state.on_message_appended(parts_chars);
             }
-            messages.push(ChatMessage::user_with_parts(follow_up_parts));
+            agent
+                .push_message(messages, ChatMessage::user_with_parts(follow_up_parts))
+                .map_err(LoopError::Fatal)?;
         }
 
         // Steering break：每个 tool 执行后检查 queue；非空则注入 + 跳过剩余。

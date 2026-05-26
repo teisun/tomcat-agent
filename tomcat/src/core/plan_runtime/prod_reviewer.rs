@@ -21,18 +21,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::plan_runtime::review::{
-    build_code_review_prompt, build_review_prompt, code_review_system_prompt_text,
-    parse_review_block, resolve_internal_tools, reviewer_allowed_tools_for,
-    reviewer_system_prompt_text, ReviewKind, ReviewSummary,
-};
-use crate::core::plan_runtime::{PlanRuntime, ReviewerDispatcher};
 use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
 };
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider};
+use crate::core::plan_runtime::review::{
+    build_code_review_prompt, build_review_prompt, code_review_system_prompt_text,
+    parse_review_block, resolve_internal_tools, reviewer_allowed_tools_for,
+    reviewer_system_prompt_text, ReviewKind, ReviewSummary,
+};
+use crate::core::plan_runtime::{PlanRuntime, ReviewerDispatcher};
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::CheckpointStore;
@@ -94,18 +94,15 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
             return ReviewSummary::aborted_with_kind(
                 kind,
                 format!(
-                "[{}] 生产 reviewer 子 Agent 未注入依赖（stub 模式）",
-                self.origin
+                    "[{}] 生产 reviewer 子 Agent 未注入依赖（stub 模式）",
+                    self.origin
                 ),
             );
         };
         let Some(plan_runtime) = deps.plan_runtime.upgrade() else {
             return ReviewSummary::aborted_with_kind(
                 kind,
-                format!(
-                "[{}] PlanRuntime 已被 drop，reviewer 取消派发",
-                self.origin
-                ),
+                format!("[{}] PlanRuntime 已被 drop，reviewer 取消派发", self.origin),
             );
         };
 
@@ -115,9 +112,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
         };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let initial_user_message = match kind {
-            ReviewKind::Plan => {
-                build_review_prompt(plan_id, plan_text, &plan_path, workspace_root)
-            }
+            ReviewKind::Plan => build_review_prompt(plan_id, plan_text, &plan_path, workspace_root),
             ReviewKind::Code => {
                 let (diff_stat, changed_files) =
                     collect_git_diff_context(deps.agent_workspace_dir.as_path());
@@ -193,6 +188,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         read_file_state,
                         openai_files_runtime,
                         checkpoint_store,
+                        message_append_sink: None,
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Reviewer,
@@ -240,8 +236,10 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                 )),
             },
             Err(e) => {
-                let mut s =
-                    ReviewSummary::aborted_with_kind(kind, format!("[{}] reviewer spawn 失败：{e}", self.origin));
+                let mut s = ReviewSummary::aborted_with_kind(
+                    kind,
+                    format!("[{}] reviewer spawn 失败：{e}", self.origin),
+                );
                 s.reviewer_turns_limit = turns_limit;
                 s.reviewer_stop_reason = "spawn_error".into();
                 s
@@ -384,11 +382,7 @@ fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Option<St
     if !output.status.success() {
         return None;
     }
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string(),
-    )
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
@@ -402,4 +396,3 @@ fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String>
         })
         .unwrap_or_default()
 }
-

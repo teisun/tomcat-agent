@@ -12,7 +12,15 @@ api_base = "https://api.openai.com"
 default_model = "gpt-5.2"
 max_concurrent_requests = 4
 retry_count = 3
-stream_timeout_sec = 60
+# 四层超时：
+# - http_timeout_sec: 整次 HTTP 请求总超时（0 = 关闭）
+# - stream_timeout_sec: 流式 chunk 空闲超时，不是整次请求超时（0 = 关闭）
+# - non_stream_stale_timeout_sec: 非流式请求无进展 watchdog（0 = 关闭）
+# - http_read_timeout_sec: socket 级 read 超时（0 = 关闭）
+http_timeout_sec = 1800
+stream_timeout_sec = 180
+non_stream_stale_timeout_sec = 300
+http_read_timeout_sec = 120
 # proxy = "http://127.0.0.1:7890"
 # api_base_fallback = "https://api.chatanywhere.tech"
 tool_cli_verbosity = "full"
@@ -20,7 +28,8 @@ tool_cli_verbosity = "full"
 [llm.thinking]
 enabled = true
 level = "xhigh"
-show = true
+# false = 折叠 raw thinking，但仍显示 summary 摘要
+show = false
 persist = false
 print_to_stderr = false
 

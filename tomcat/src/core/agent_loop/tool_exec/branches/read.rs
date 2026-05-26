@@ -59,7 +59,9 @@ pub(in super::super) async fn handle_read(
                 let stamp = crate::core::tools::pipeline::read_state::ReadStamp {
                     mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta),
                     size: meta.len(),
-                    content_hash: crate::core::tools::pipeline::read_state::hash_content(hash_input),
+                    content_hash: crate::core::tools::pipeline::read_state::hash_content(
+                        hash_input,
+                    ),
                     offset,
                     limit,
                     is_partial_view: offset.is_some() || limit.is_some(),

@@ -1,7 +1,5 @@
 use super::super::file_store::{TodoItem, TodoStatus};
-use super::super::todo_runtime::{
-    list_session_todos_files, persist, purge_inactive, TodoFile,
-};
+use super::super::todo_runtime::{list_session_todos_files, persist, purge_inactive, TodoFile};
 
 fn tmp_base() -> tempfile::TempDir {
     tempfile::TempDir::new().unwrap()

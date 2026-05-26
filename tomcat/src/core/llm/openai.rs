@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
-use std::error::Error;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -13,18 +13,101 @@ use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
+use crate::core::llm::http_client::build_http_client;
 use crate::infra::error::AppError;
+use crate::infra::error::{
+    llm_connect_or_network, llm_error, llm_error_with_source, llm_stage, LlmErrorStage,
+};
 use crate::infra::LlmConfig;
 
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent, TokenUsage,
+    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent, ThinkingSource,
+    TokenUsage,
 };
 
 /// 提供商不匹配的固定文案：Completions 路径不接受多模态附件，必须改用 `openai-responses`。
 /// 单测和上层 UI 都会按字符串子串断言这个文案，请勿改动。
 const COMPLETIONS_REJECT_MULTIMODAL_MSG: &str =
     "provider=openai 不支持多模态附件，请改用 provider=openai-responses";
+const PROVIDER_NAME: &str = "openai";
+
+fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
+    llm_error(
+        PROVIDER_NAME,
+        LlmErrorStage::IdleTimeout,
+        format!("流式空闲超时: stream_timeout_sec={}s", stream_timeout_sec),
+    )
+}
+
+fn request_timeout_summary(http_timeout_sec: u64) -> String {
+    format!("整次 HTTP 请求超时: http_timeout_sec={}s", http_timeout_sec)
+}
+
+fn non_stream_stale_timeout_error(non_stream_stale_timeout_sec: u64) -> AppError {
+    llm_error(
+        PROVIDER_NAME,
+        LlmErrorStage::NonStreamStale,
+        format!(
+            "非流式请求长时间无响应: non_stream_stale_timeout_sec={}s",
+            non_stream_stale_timeout_sec
+        ),
+    )
+}
+
+fn map_send_error(prefix: &str, err: reqwest::Error, http_timeout_sec: u64) -> AppError {
+    if err.is_connect() {
+        return llm_error_with_source(
+            PROVIDER_NAME,
+            LlmErrorStage::Connect,
+            format!("{prefix}连接失败"),
+            err,
+        );
+    }
+    if err.is_timeout() {
+        return llm_error_with_source(
+            PROVIDER_NAME,
+            LlmErrorStage::RequestTimeout,
+            request_timeout_summary(http_timeout_sec),
+            err,
+        );
+    }
+    llm_error_with_source(
+        PROVIDER_NAME,
+        LlmErrorStage::Send,
+        format!("{prefix}发送失败"),
+        err,
+    )
+}
+
+fn map_body_read_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64) -> AppError {
+    if err.is_timeout() {
+        return llm_error_with_source(
+            PROVIDER_NAME,
+            LlmErrorStage::ReadTimeout,
+            format!(
+                "{prefix}超时: http_read_timeout_sec={}s",
+                http_read_timeout_sec
+            ),
+            err,
+        );
+    }
+    llm_error_with_source(
+        PROVIDER_NAME,
+        LlmErrorStage::BodyRead,
+        format!("{prefix}失败"),
+        err,
+    )
+}
+
+fn map_parse_error(prefix: &str, err: impl Into<anyhow::Error>) -> AppError {
+    llm_error_with_source(
+        PROVIDER_NAME,
+        LlmErrorStage::Parse,
+        format!("{prefix}失败"),
+        err,
+    )
+}
 
 /// 扫描 messages 是否含非 `InputText` part；返回 `Err` 即结构化非可重试错误。
 ///
@@ -88,19 +171,15 @@ pub struct OpenAiProvider {
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
     semaphore: Option<Semaphore>,
     retry_count: u32,
+    http_timeout_sec: u64,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
+    non_stream_stale_timeout_sec: u64,
+    http_read_timeout_sec: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
     thinking_cfg: crate::infra::config::ThinkingConfig,
     /// `provider id`，给 ThinkingFormat::Auto 推断使用；`OpenAiProvider` 固定为 `"openai"`。
     thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
-}
-
-fn stream_timeout_error(stream_timeout_sec: u64) -> AppError {
-    AppError::Llm(format!(
-        "流式空闲超时: stream_timeout_sec={}s",
-        stream_timeout_sec
-    ))
 }
 
 fn apply_stream_idle_timeout<S>(
@@ -119,7 +198,7 @@ where
             .timeout(Duration::from_secs(stream_timeout_sec))
             .map(move |item| match item {
                 Ok(chunk) => chunk,
-                Err(_) => Err(stream_timeout_error(stream_timeout_sec)),
+                Err(_) => Err(idle_timeout_error(stream_timeout_sec)),
             }),
     )
 }
@@ -137,16 +216,7 @@ impl OpenAiProvider {
         let api_key = std::env::var(api_key_env)
             .map_err(|_| AppError::Config(format!("环境变量 {} 未设置", api_key_env)))?;
 
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(90));
-        // 若未配置 proxy，不调用 .proxy()，reqwest 会自动使用环境变量 HTTPS_PROXY/HTTP_PROXY（与终端 curl 行为一致）。
-        if let Some(ref proxy_url) = config.proxy {
-            let proxy = reqwest::Proxy::all(proxy_url)
-                .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
-            builder = builder.proxy(proxy);
-        }
-        let client = builder
-            .build()
-            .map_err(|e| AppError::Llm(format!("创建 HTTP 客户端失败: {}", e)))?;
+        let client = build_http_client(config, None)?;
 
         let semaphore = if config.max_concurrent_requests > 0 {
             Some(Semaphore::new(config.max_concurrent_requests as usize))
@@ -171,7 +241,10 @@ impl OpenAiProvider {
             default_model: config.default_model.clone(),
             semaphore,
             retry_count: config.retry_count,
+            http_timeout_sec: config.http_timeout_sec,
             stream_timeout_sec: config.stream_timeout_sec,
+            non_stream_stale_timeout_sec: config.non_stream_stale_timeout_sec,
+            http_read_timeout_sec: config.http_read_timeout_sec,
             thinking_cfg: config.thinking.clone(),
             thinking_format,
         })
@@ -191,6 +264,23 @@ impl OpenAiProvider {
 
     fn auth_header(&self) -> (&str, String) {
         ("Authorization", format!("Bearer {}", self.api_key))
+    }
+
+    async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
+    where
+        F: Future<Output = Result<T, AppError>>,
+    {
+        if self.non_stream_stale_timeout_sec == 0 {
+            return fut.await;
+        }
+        match tokio::time::timeout(Duration::from_secs(self.non_stream_stale_timeout_sec), fut)
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(non_stream_stale_timeout_error(
+                self.non_stream_stale_timeout_sec,
+            )),
+        }
     }
 
     /// 非流式请求，向给定 base_url 发起一次调用（不含重试与 fallback）。
@@ -225,19 +315,13 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                let detail = e
-                    .source()
-                    .map(|s| format!(" 底层: {}", s))
-                    .unwrap_or_default();
-                AppError::Llm(format!("请求失败: {}{}", e, detail))
-            })?;
+            .map_err(|e| map_send_error("请求", e, self.http_timeout_sec))?;
 
         let status = resp.status();
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| AppError::Llm(format!("读取响应失败: {}", e)))?;
+            .map_err(|e| map_body_read_error("读取响应", e, self.http_read_timeout_sec))?;
 
         if !status.is_success() {
             let msg = String::from_utf8_lossy(&bytes);
@@ -248,13 +332,23 @@ impl OpenAiProvider {
             )));
         }
 
-        let response: ChatResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| AppError::Llm(format!("解析响应失败: {}", e)))?;
+        let response: ChatResponse =
+            serde_json::from_slice(&bytes).map_err(|e| map_parse_error("解析响应", e))?;
         Ok(response)
     }
 
     /// 判断是否为可重试错误（429、5xx、超时等）。
     fn is_retriable(err: &AppError) -> bool {
+        if let Some(stage) = llm_stage(err) {
+            return matches!(
+                stage,
+                LlmErrorStage::Connect
+                    | LlmErrorStage::Send
+                    | LlmErrorStage::BodyRead
+                    | LlmErrorStage::IdleTimeout
+                    | LlmErrorStage::ReadTimeout
+            );
+        }
         let s = err.to_string();
         s.contains("429")
             || s.contains("500")
@@ -266,14 +360,7 @@ impl OpenAiProvider {
 
     /// 判断是否为连接/网络层面错误（用于触发 api_base_fallback 降级）。
     fn is_connect_or_network_error(err: &AppError) -> bool {
-        let s = err.to_string();
-        s.contains("请求失败")
-            && (s.contains("Connect")
-                || s.contains("connection")
-                || s.contains("timed out")
-                || s.contains("timeout")
-                || s.contains("dns")
-                || s.contains("connection refused"))
+        llm_connect_or_network(err)
     }
 
     /// 流式请求：向给定 base_url 发起一次 POST，成功时返回 Response 供消费 bytes_stream。
@@ -291,19 +378,13 @@ impl OpenAiProvider {
             .json(body)
             .send()
             .await
-            .map_err(|e| {
-                let detail = e
-                    .source()
-                    .map(|s| format!(" 底层: {}", s))
-                    .unwrap_or_default();
-                AppError::Llm(format!("流式请求失败: {}{}", e, detail))
-            })?;
+            .map_err(|e| map_send_error("流式请求", e, self.http_timeout_sec))?;
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp
                 .bytes()
                 .await
-                .map_err(|e| AppError::Llm(format!("读取错误响应: {}", e)))?;
+                .map_err(|e| map_body_read_error("读取错误响应", e, self.http_read_timeout_sec))?;
             let msg = String::from_utf8_lossy(&bytes);
             return Err(AppError::Llm(format!(
                 "API 错误 {}: {}",
@@ -337,7 +418,10 @@ impl LlmProvider for OpenAiProvider {
         // 先尝试主 base；若为连接/网络错误且配置了 fallback，用 fallback 重试一次。
         let mut last_err = None;
         for attempt in 0..=self.retry_count {
-            match self.chat_inner(&request, &self.base_url).await {
+            match self
+                .run_non_stream_with_stale(self.chat_inner(&request, &self.base_url))
+                .await
+            {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
@@ -363,7 +447,10 @@ impl LlmProvider for OpenAiProvider {
         if Self::is_connect_or_network_error(&err) {
             if let Some(ref fallback) = self.api_base_fallback {
                 warn!("主 API 不可达，尝试 fallback: {}", fallback);
-                if let Ok(r) = self.chat_inner(&request, fallback).await {
+                if let Ok(r) = self
+                    .run_non_stream_with_stale(self.chat_inner(&request, fallback))
+                    .await
+                {
                     return Ok(r);
                 }
             }
@@ -420,10 +507,12 @@ impl LlmProvider for OpenAiProvider {
             Err(e) => return Err(e),
         };
 
+        let http_read_timeout_sec = self.http_read_timeout_sec;
+        let stream_timeout_sec = self.stream_timeout_sec;
         let bytes_stream = resp
             .bytes_stream()
-            .map_err(|e| AppError::Llm(format!("流读取错误: {}", e)));
-        let bytes_stream = apply_stream_idle_timeout(bytes_stream, self.stream_timeout_sec);
+            .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
+        let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
         let event_stream = SseEventStream::new(bytes_stream);
         Ok(Box::new(event_stream))
     }
@@ -471,10 +560,9 @@ impl<S> SseEventStream<S> {
     }
 }
 
-impl<S, E> Stream for SseEventStream<S>
+impl<S> Stream for SseEventStream<S>
 where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: std::fmt::Display,
+    S: Stream<Item = Result<Bytes, AppError>> + Unpin,
 {
     type Item = Result<StreamEvent, AppError>;
 
@@ -502,7 +590,7 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(AppError::Llm(e.to_string()))));
+                    return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
                     if !self.buffer.is_empty() {
@@ -542,7 +630,7 @@ fn parse_sse_buffer(
         }
         None => return Ok(None),
     };
-    let s = std::str::from_utf8(&block).map_err(|e| AppError::Llm(format!("UTF-8 错误: {}", e)))?;
+    let s = std::str::from_utf8(&block).map_err(|e| map_parse_error("SSE UTF-8", e))?;
     let mut events = Vec::new();
     for line in s.lines() {
         let line = line.trim();
@@ -550,8 +638,8 @@ fn parse_sse_buffer(
             if data == "[DONE]" {
                 continue;
             }
-            let parsed: OpenAiStreamChunk = serde_json::from_str(data)
-                .map_err(|e| AppError::Llm(format!("解析 SSE 行失败: {}", e)))?;
+            let parsed: OpenAiStreamChunk =
+                serde_json::from_str(data).map_err(|e| map_parse_error("解析 SSE 行", e))?;
             events.extend(openai_chunk_to_stream_events(parsed));
         }
     }
@@ -577,7 +665,7 @@ struct OpenAiStreamChoice {
 /// - `reasoning`：部分网关 / OpenRouter 派生命名；
 /// - `reasoning_text`：少量历史样本（保守保留兼容性）。
 ///
-/// 三者只要有非空值，就向上发射 `StreamEvent::Thinking`；
+/// 三者只要有非空值，就向上发射 `StreamEvent::Thinking { source: Raw }`；
 /// 同一帧内出现多个字段时按上述顺序优先取一项，避免重复发射。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -618,6 +706,7 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
                 if let Some(rc) = reasoning_delta {
                     events.push(StreamEvent::Thinking {
                         delta: rc,
+                        source: ThinkingSource::Raw,
                         signature: None,
                     });
                 }

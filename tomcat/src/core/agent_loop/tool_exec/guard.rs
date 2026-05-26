@@ -22,9 +22,7 @@ pub(super) fn reviewer_allowed_tools_description(
         crate::core::plan_runtime::review::ReviewKind::Plan => {
             "read/search_files/list_dir/todos/update_plan/edit"
         }
-        crate::core::plan_runtime::review::ReviewKind::Code => {
-            "read/search_files/list_dir/bash"
-        }
+        crate::core::plan_runtime::review::ReviewKind::Code => "read/search_files/list_dir/bash",
     }
 }
 
@@ -51,7 +49,10 @@ pub(super) fn check_mutation_stamp(
         return Ok(());
     };
     if meta.is_dir() {
-        return Err(format!("{}: 目标 `{}` 是目录，不能作为入参", op_label, path));
+        return Err(format!(
+            "{}: 目标 `{}` 是目录，不能作为入参",
+            op_label, path
+        ));
     }
     let cur_mtime = crate::core::tools::pipeline::read_state::metadata_mtime_ms(&meta);
     if stamp.mtime_ms != cur_mtime || stamp.size != meta.len() {

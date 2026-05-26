@@ -13,17 +13,17 @@ use std::path::Path;
 
 use super::lock::with_config_lock;
 use super::types::WorkspaceEntry;
-use super::{load_config, validate_config};
+use super::{load_config_toml_file, validate_config};
 use crate::core::permission::PathRule;
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
 /// 把 `workspace_roots` 单条目追加到 `config_path` 指向的 TOML 文件。
 ///
-/// 调用方应预先做绝对路径化 / 存在性校验。函数本身仅做：load -> push -> validate -> 原子写。
+/// 调用方应预先做绝对路径化 / 存在性校验。函数本身仅做：从磁盘原文 load -> push -> validate -> 原子写。
 pub fn append_workspace_root_to_disk(config_path: &Path, abs_path: String) -> Result<(), AppError> {
     with_config_lock(config_path, || {
-        let mut cfg = load_config(Some(config_path))?;
+        let mut cfg = load_config_toml_file(config_path)?;
         if cfg.workspace.workspace_roots.iter().any(|s| s == &abs_path) {
             return Ok(());
         }
@@ -39,7 +39,7 @@ pub fn append_workspace_root_to_disk(config_path: &Path, abs_path: String) -> Re
 /// 把一条 `path_rule` 追加到 `[primitive]` `path_rules` 数组。
 pub fn append_path_rule_to_disk(config_path: &Path, rule: PathRule) -> Result<(), AppError> {
     with_config_lock(config_path, || {
-        let mut cfg = load_config(Some(config_path))?;
+        let mut cfg = load_config_toml_file(config_path)?;
         if cfg
             .primitive
             .path_rules
@@ -64,7 +64,7 @@ pub fn append_workspace_entry_to_disk(
     entry: WorkspaceEntry,
 ) -> Result<(), AppError> {
     with_config_lock(config_path, || {
-        let mut cfg = load_config(Some(config_path))?;
+        let mut cfg = load_config_toml_file(config_path)?;
         if cfg.workspace.entries.iter().any(|e| e.path == entry.path) {
             return Ok(());
         }
@@ -76,4 +76,3 @@ pub fn append_workspace_entry_to_disk(
         Ok(())
     })
 }
-

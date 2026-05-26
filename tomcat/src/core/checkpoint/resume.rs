@@ -8,4 +8,3 @@ pub enum ResumePlan {
 pub fn compute_resume_plan(_entry: Option<&SessionEntry>, _tail: &[TranscriptEntry]) -> ResumePlan {
     ResumePlan::Continue
 }
-

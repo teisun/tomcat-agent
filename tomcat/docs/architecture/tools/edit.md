@@ -257,6 +257,10 @@ right:
   **强拒** `NoPriorRead`（`is_error: true`），与 **T2-P0-016 write** 子项同一 PR 统一打开门禁，
   避免 edit / write 节奏分叉。模型必须先 `read(path)` 再 `edit` / `hashline_edit` / `write(overwrite=true)`，
   staleness 也仍会继续拦「读过又被外部改了」的情况。
+- **文件编辑工作流（本期新增防呆）**：
+  - 默认路径：`read` -> `edit`。
+  - 重复短串、行级强锚点：`read(hashline=true)` -> `hashline_edit`。
+  - `read` 的 `cat -n` / `hashline` 前缀都只是展示噪音，**不能**原样粘进 `edit.old_content`。
 
 #### 2.4.4 PR-H（T2）：体验
 
@@ -585,6 +589,7 @@ sequenceDiagram
 | 逻辑名 | 触发条件 | 模型侧恢复 | 说人话 |
 | --- | --- | --- | --- |
 | `NotFound` | 某段 `count==0`（T1：`original`；T2：`working`） | 重 `read`；检查空格/引号；T2 依赖 normalize | 文件里压根找不到你要的那段字。 |
+| `NotFound (line_prefix_suspected)` | `old_content` 每个非空行都像 `read` 的 `cat -n` / `hashline` 展示前缀，且剥离前缀后能在文件里命中 | 去掉 `  N\t...` / `N#XX:...` 前缀后重试；必要时继续走 `read(hashline=true)` -> `hashline_edit` | 你大概率把 `read` 的展示壳一起抄进来了，正文其实能对上。 |
 | `Ambiguous` | `count>1 && !replace_all` | 扩大 `old_content` 或设 `replace_all` | 同一句话出现好几次，你没说全换就不敢动。 |
 | `Overlap` | 多段 span 相交或嵌套 | 合并为单段或拆两次 tool_call | 两段改到同一块，逻辑上打架。 |
 | `Stale` | stamp 与 `metadata` 不一致 | **必须**重新 `read` | 磁盘上的文件已经和你脑子里的不一样了。 |
@@ -595,6 +600,8 @@ sequenceDiagram
 | `Io` | 读/写/metadata 失败 | 查权限与路径 | 盘或权限出了问题。 |
 
 **E5 vs E6 边界**：`NotFound`…`Oversized` 属**校验阶段**，不得触碰目标文件；`Io` 在写盘阶段可触发 `.bak` 恢复（见 §2.4.1 不变量第 4 条）。
+
+**`NotFound (line_prefix_suspected)` remediation**：该子码只升级诊断，不做静默修复、不改磁盘。错误文案会带 `escape_debug` 摘要与近似命中行号，目的是把模型明确推回「去掉展示前缀，再按真实文件内容重发 `edit`」这条路。
 
 ### 9.3 与 read 的交叉引用
 
@@ -623,11 +630,13 @@ sequenceDiagram
 | T1 原文多段 | `edit_multiple_edits_apply_against_original` | `suite_test.rs` | ✅ 2026-05-06 |
 | T1 重叠 | `edit_overlap_rejected`、`edit_overlap_adjacent_not_rejected` | `suite_test.rs` | ✅ 2026-05-06 |
 | T1 校验不写盘 | `edit_validation_failure_restores_or_noop` | `suite_test.rs` | ✅ 2026-05-06 |
+| T1 `NotFound (line_prefix_suspected)` 诊断 | `edit_notfound_with_cat_n_prefix_explains_remediation`、`edit_notfound_with_hashline_prefix_explains_remediation`、`edit_notfound_with_partial_prefix_does_not_misfire`、`edit_notfound_plain_missing_stays_plain_notfound` | `suite_test.rs` | ✅ 2026-05-26 |
 | T1 staleness | `edit_rejected_when_read_stamp_stale` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | T1 NoPriorRead（**T2-P0-016 同 PR 强拒**） | `edit_no_prior_read_rejects_after_t2_p0_016` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06（见 §10.2） |
 | T2 normalize / 行尾 / BOM | `edit_curly_quote_matches_disk_straight_quote`、`edit_desanitize_matches_nbsp_and_zwsp`、`edit_preserves_trailing_newline`、`edit_preserves_crlf_line_endings`、`edit_preserves_bom` | `suite_test.rs` | ✅ 2026-05-06 |
 | T2 `.ipynb` | `edit_rejects_ipynb_before_touching_disk` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | T3 `hashline_edit` + read 闭环 | `hashline_edit_replace_matches_read_hashline`、`hashline_edit_rejects_hash_mismatch`；read 侧见 `read.md` §11 `read_with_hashline_*` / `read_tool_tests.rs` | `tool_exec_dedup_test.rs` 等 | ✅ 2026-05-06 |
+| `read` -> `edit` 误用链路 | `read_line_numbers_output_misused_as_edit_old_content_returns_line_prefix_hint`、`read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hint` | `tool_exec_dedup_test.rs` | ✅ 2026-05-26 |
 | T3 secrets | `edit_secrets_hit_denied_reverts_to_no_op`、`edit_secrets_pass_when_no_hit`、`edit_secrets_hit_proceeds_with_allow_all_confirmation` | `suite_test.rs`、`tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | oneOf / 诊断归一 | `edit_oneof_shape_b_edits_array_is_parsed`、`edit_error_codes_normalized` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | 扩展路径（dispatcher 行号 API） | `edit_legacy_line_oriented_path_still_works` | `suite_test.rs` | ✅ 2026-05-06 |

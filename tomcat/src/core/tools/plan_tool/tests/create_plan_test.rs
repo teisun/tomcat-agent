@@ -41,12 +41,18 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
         }],
     };
     let out = create_plan::execute(&rt, args).expect("create_plan OK");
-    let plan_id = out["plan_id"].as_str().expect("plan_id present").to_string();
+    let plan_id = out["plan_id"]
+        .as_str()
+        .expect("plan_id present")
+        .to_string();
     assert!(plan_id.starts_with("plan_"));
-    assert_eq!(out["mode"], "planning");
+    assert_eq!(out["state"], "planning");
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(true));
 
-    assert_eq!(rt.active_planning_plan_id().as_deref(), Some(plan_id.as_str()));
+    assert_eq!(
+        rt.active_planning_plan_id().as_deref(),
+        Some(plan_id.as_str())
+    );
     let path = home
         .join(".tomcat")
         .join("plans")
@@ -78,7 +84,10 @@ fn create_plan_normalizes_legacy_heading_wrapped_draft() {
         }],
     };
     let out = create_plan::execute(&rt, args).expect("create_plan OK");
-    let plan_id = out["plan_id"].as_str().expect("plan_id present").to_string();
+    let plan_id = out["plan_id"]
+        .as_str()
+        .expect("plan_id present")
+        .to_string();
     let path = home
         .join(".tomcat")
         .join("plans")

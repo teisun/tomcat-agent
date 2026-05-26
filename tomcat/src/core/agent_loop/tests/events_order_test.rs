@@ -13,13 +13,15 @@ use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
-use crate::core::llm::{ChatMessage, StreamEvent};
+use crate::core::llm::{ChatMessage, StreamEvent, ThinkingSource};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
 use super::mocks::{MockLlmProvider, MockLlmProviderFatal, MockPrimitiveExecutor};
+
+type MessageUpdateKinds = Vec<(String, Option<String>)>;
 
 /// 事件顺序：纯文本一轮，断言 agent_start -> turn_start -> message_start ->
 /// message_update* -> message_end -> turn_end -> agent_end。
@@ -98,6 +100,7 @@ async fn run_message_update_carries_kind_for_thinking_and_content() {
     let stream1: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::Thinking {
             delta: "let me think".to_string(),
+            source: ThinkingSource::Summary,
             signature: None,
         }),
         Ok(StreamEvent::ContentDelta {
@@ -110,8 +113,8 @@ async fn run_message_update_carries_kind_for_thinking_and_content() {
     let llm = Arc::new(MockLlmProvider::new(vec![stream1]));
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
-    let kinds: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let kinds_cb = Arc::clone(&kinds);
+    let events_seen: Arc<Mutex<MessageUpdateKinds>> = Arc::new(Mutex::new(Vec::new()));
+    let events_seen_cb = Arc::clone(&events_seen);
     event_bus.on(
         wire::WIRE_MESSAGE_UPDATE,
         Box::new(move |ctx: EventContext| {
@@ -122,7 +125,11 @@ async fn run_message_update_carries_kind_for_thinking_and_content() {
                 .and_then(|v| v.as_str())
                 .unwrap_or("<missing>")
                 .to_string();
-            kinds_cb.lock().unwrap().push(kind);
+            let source = p
+                .pointer("/assistantMessageEvent/source")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            events_seen_cb.lock().unwrap().push((kind, source));
             Ok(())
         }),
     );
@@ -135,11 +142,14 @@ async fn run_message_update_carries_kind_for_thinking_and_content() {
     let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
     let messages = vec![ChatMessage::user("hi")];
     let _ = loop_.run(messages).await.unwrap();
-    let observed = kinds.lock().unwrap().clone();
+    let observed = events_seen.lock().unwrap().clone();
     assert_eq!(
         observed,
-        vec!["thinking_delta".to_string(), "content_delta".to_string()],
-        "应分别走 thinking_delta 与 content_delta，且顺序保持流式到达顺序"
+        vec![
+            ("thinking_delta".to_string(), Some("summary".to_string())),
+            ("content_delta".to_string(), None),
+        ],
+        "应分别走 thinking_delta/source=summary 与 content_delta，且顺序保持流式到达顺序"
     );
 }
 
@@ -150,6 +160,7 @@ async fn run_message_update_thinking_signature_propagates() {
     let stream1: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::Thinking {
             delta: "anthropic".to_string(),
+            source: ThinkingSource::Raw,
             signature: Some("sig-xyz".to_string()),
         }),
         Ok(StreamEvent::FinishReason {
@@ -187,6 +198,7 @@ async fn run_message_update_thinking_signature_propagates() {
         payload.get("kind").and_then(|v| v.as_str()),
         Some("thinking_delta")
     );
+    assert_eq!(payload.get("source").and_then(|v| v.as_str()), Some("raw"));
     assert_eq!(
         payload.get("signature").and_then(|v| v.as_str()),
         Some("sig-xyz")

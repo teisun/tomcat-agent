@@ -10,7 +10,10 @@ fn planner_prompt_mentions_create_plan_and_ask_question() {
 
 #[test]
 fn executor_prompt_renders_plan_id() {
-    let rendered = render(PromptKey::ExecutorReminderFmt, &[("plan_id", "plan_demo_aaaa1111")]);
+    let rendered = render(
+        PromptKey::ExecutorReminderFmt,
+        &[("plan_id", "plan_demo_aaaa1111")],
+    );
     assert!(rendered.contains("plan_demo_aaaa1111"));
     assert!(rendered.contains("update_plan"));
     assert!(rendered.contains("off-limits"));

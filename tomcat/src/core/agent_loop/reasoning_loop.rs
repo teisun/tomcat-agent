@@ -109,7 +109,8 @@ pub(super) async fn run_reasoning_loop(
 
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。
-            turn_finalize::finalize_turn_after_text(agent, messages, &content_buf, turn_index);
+            turn_finalize::finalize_turn_after_text(agent, messages, &content_buf, turn_index)
+                .map_err(LoopError::Fatal)?;
             return Ok(final_text);
         }
 

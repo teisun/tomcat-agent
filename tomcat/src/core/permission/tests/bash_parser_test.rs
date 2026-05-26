@@ -95,4 +95,3 @@ fn no_longer_treats_plain_slash_tokens_as_paths() {
     let v = extract_paths("npm i -D @playwright/test && node -e \"console.log('http://x/y')\"");
     assert!(v.is_empty(), "legacy helper 只应识别显式路径前缀: {:?}", v);
 }
-

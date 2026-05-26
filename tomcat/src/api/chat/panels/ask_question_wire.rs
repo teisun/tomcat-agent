@@ -36,7 +36,10 @@ pub fn ask_question_request_event_name() -> &'static str {
 }
 
 pub fn ask_question_response_event_name(request_id: &str) -> String {
-    format!("{}.response.{request_id}", ask_question_request_event_name())
+    format!(
+        "{}.response.{request_id}",
+        ask_question_request_event_name()
+    )
 }
 
 /// 基于 EventBus 的通用 AskQuestion bridge。

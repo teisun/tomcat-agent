@@ -8,6 +8,7 @@ mod session_impl;
 mod tests;
 mod types;
 
+pub(crate) use context::INTERRUPTED_TOOL_RESULT_TEXT;
 pub use context::{build_context_from_state, init_context_state};
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
@@ -16,6 +17,13 @@ pub use types::{
     compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
     ContextLiveMetrics, ContextState,
 };
+
+pub trait MessageAppendSink: Send + Sync {
+    fn append_message(
+        &self,
+        value: serde_json::Value,
+    ) -> Result<String, crate::infra::error::AppError>;
+}
 
 const BRANCH_MAX_ENTRIES: usize = 2000;
 

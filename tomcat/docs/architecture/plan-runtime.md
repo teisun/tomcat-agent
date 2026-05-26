@@ -28,11 +28,11 @@
 | **TodoRuntime** | 单 session 内 `TodoFile` 的内存映射与 IO 入口 | `ChatContext.todo_runtime: TodoRuntime`；详见 §6 | per-session 单实例；管 `active_todos_id` / 内存 items / 节流 panel 推送 / IO | 一个聊天会话一个 todo 大管家。 |
 | **PlanRuntime** | 单 session 内 `PlanFile`、PLAN/EXEC mode、reviewer 派发、TodosPanel 投影、checkpoint hook 的编排层 | `ChatContext.plan_runtime: PlanRuntime`；详见 §6 | per-session 单实例；`mode` / `active_plan_id` / build gate 全在里面 | 一个会话一个计划大管家。 |
 | **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)） | `AgentRegistry::spawn_subagent_internal(...)` | 复用 [`multi-agent.md`](./multi-agent.md) §14 基础设施；不进 catalog；`allowed_tools` 由调用方硬编码 | 内部派子 Agent，模型看不到。 |
-| **`/plan build`** | 进入执行态的唯一入口 | 本地 slash 命令 `/plan build <plan_id/path>` | runtime 写 `session_key/id`、swap reminder（PLANNER → EXECUTOR）、注入 user meta（plan 全文）、swap catalog | 用户拍板开干的开关。 |
+| **`/plan build`** | 进入执行态的唯一入口 | 本地 slash 命令 `/plan build <plan_id/path>` | runtime 写 `session_key/id`、swap reminder（PLANNER → EXECUTOR）、切换可见 prompt 与 catalog | 用户拍板开干的开关。 |
 | **`/plan exit`** | 退出 PLAN 模式回 CHAT | 本地 slash 命令；**仅 PLAN 模式可用** | 不写盘；保留 PlanFile 不动；reminder/catalog 复位为 CHAT | 不想再规划了，先离开 PLAN。 |
-| **cancel_token** | 进程被打断的信号（Ctrl+C / SIGTERM / 父 abort） | tokio cancel token；runtime hook | EXEC 期被截断 → 运行态 mode 设 `pending`，PlanFile frontmatter `mode = pending` | 中途打断当暂停处理。 |
+| **cancel_token** | 进程被打断的信号（Ctrl+C / SIGTERM / 父 abort） | tokio cancel token；runtime hook | EXEC 期被截断 → 运行态 mode 设 `pending`，PlanFile frontmatter `state = pending` | 中途打断当暂停处理。 |
 | **system_reminder（PLANNER / EXECUTOR）** | 进入 PLAN/EXEC 时注入到 transcript 的 `<system_reminder>` | 进程内常量；注入到 **system 区段尾部**；详见 [`tools/planner.md`](./tools/planner.md) §6 | 仅在当前 mode 期间存在；切走自动消失 | 模式提示词，挂 system。 |
-| **user message mode prefix** | PLAN/EXEC 模式下给每条 user message 前缀加 `[mode: PLAN]` / `[mode: EXEC plan_id=...]` | runtime 在 LLM 请求装配阶段注入；详见 §5.5 | CHAT 不加；保证模型每条消息都看到当前 mode | 每条消息都贴个模式标签。 |
+| **CLI prompt helper** | PLAN/EXEC/CHAT 下统一渲染 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>` 及对应 agent prompt | `src/api/chat/prompt.rs`；详见 §5.5 | 调用侧不得手写 prompt；CHAT agent prompt 保持 `agent.<id>>` | prompt 显示一处生成。 |
 
 **时间点钉死**：本文中的"进入执行态"专指 **用户显式 `/plan build <plan_id/path>`** 之后；reviewer 给出 accepted 摘要也只是建议，不会自动 build。
 
@@ -93,12 +93,12 @@
 | **G2 `todos` 一等状态** | 内置 `todos` 工具可读写完整 todo 列表；同一文件最多一个 `in_progress`；tool、panel、文件三者同步；**工具结果返回完整 items snapshot**，LLM 不需要再读 user message 拿状态 | todos 是结构化状态，且 LLM 拿到工具结果就知道全貌。 |
 | **G3 `/plan build` 是 EXEC 唯一入口** | reviewer accepted 不自动 build；用户敲 `/plan build <plan_id/path>` 才进 EXEC；build 前置：当前 session 无 active plan / no active todos | 进执行态由用户拍。 |
 | **G4 review 是辅助不是闸门** | `CreatePlan` 写入后内部同步派发 reviewer；reviewer 摘要落 `transcript.plan.review`；**不**写 PlanFile frontmatter、**不**改 mode | 审稿员只挑刺。 |
-| **G5 计划文件可恢复** | 每次计划变更刷新 `~/.tomcat/plans/<slug>_<hash>.plan.md`；advisory file lock 冲突时有可见错误；`mode == pending` 可被 `/plan build` 续跑；详细协议见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | 重启之后还能接着看，pending 还能续跑。 |
+| **G5 计划文件可恢复** | 每次计划变更刷新 `~/.tomcat/plans/<slug>_<hash>.plan.md`；advisory file lock 冲突时有可见错误；`state == pending` 可被 `/plan build` 续跑；详细协议见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | 重启之后还能接着看，pending 还能续跑。 |
 | **G6 checkpoint 单向依赖** | milestone 完成时调用 `CheckpointStore::record`；checkpoint 语义仍由 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 定义 | 计划会用 checkpoint，但不重新发明 checkpoint。 |
 | **G7 TodosPanel 复用现有 bash 状态** | TodosPanel 显示当前 todo 与 bash 任务摘要，来源于 `BashTaskRegistry`，**不**新增第二套进程管理器 | 面板只看现成任务。 |
 | **G8 PLAN 模式工具收紧** | `mode == Planning` 时 catalog = **全集（含 `create_plan` / `ask_question` / `todos` / `update_plan`）**；`write/edit/hashline_edit/delete` 仅允许 `~/.tomcat/plans/*.plan.md`；EXEC 期 plan 文件全禁写（含正文，仅 `update_plan` 推进）；frontmatter raw 改硬拦截 | 规划阶段写工具只能动 plans/；执行阶段 plan 文件锁死，进度只能走 update_plan。 |
 | **G9 Runtime per-session OOD** | `TodoRuntime` 与 `PlanRuntime` 都是 per-session 单实例，挂在 `ChatContext` 上；多 session 由未来 `ChatContextRegistry` 处理 | 每个会话各自一套大管家，不共享全局 HashMap。 |
-| **G10 user message mode prefix** | PLAN/EXEC 模式下 runtime 在 LLM 请求装配阶段给每条 user message 前缀加 `[mode: PLAN]` / `[mode: EXEC plan_id=...]`；CHAT 不加 | 每条消息都贴模式标签，模型不至于忘 mode。 |
+| **G10 CLI prompt helper** | PLAN/EXEC/CHAT 的 user/agent prompt 统一由 `src/api/chat/prompt.rs` 渲染为 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>` 及对应 agent prompt | prompt 文案统一生成，调用侧不再手写。 |
 
 ### 3.2 非目标
 
@@ -132,7 +132,7 @@
 | **R8 执行面板** | `TodosPanel` 复用 `BashTaskRegistry` 做 bash 摘要；不新增第二套进程管理 | 面板自带 subprocess registry 重复造 | 投影即可。 |
 | **R9 里程碑粒度** | `Milestone[]` 结构化字段 + 派生状态 | flat todo 难挂阶段 checkpoint | 大任务分段。 |
 | **R10 Runtime OOD** | `TodoRuntime` / `PlanRuntime` per-session，挂 `ChatContext`；多 session 由未来 `ChatContextRegistry` 解决 | 全局 HashMap 会让 mode 切换、面板刷新失去会话隔离 | 一会话一套大管家。 |
-| **R11 user message prefix** | PLAN/EXEC 注入 `[mode: PLAN]` / `[mode: EXEC plan_id=...]`；CHAT 不注入 | 仅靠 system reminder 在长对话里会被冲淡 | 每条都打模式 tag。 |
+| **R11 CLI prompt helper** | 所有可见 prompt 都走 `src/api/chat/prompt.rs`；CHAT agent prompt 保持 `agent.<id>>`，其余模式显示 `agent.<id>[Plan:<state>]>` | 避免调用侧硬编码 prompt | prompt 一处生成。 |
 
 ### 4.2 实施点按阶段拆分
 
@@ -140,16 +140,16 @@
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
-| **PR-PLA 命令面与 PLAN/EXEC 模式骨架** | `/plan` / `/plan exit` / `/plan build <plan_id/path>` 本地命令；`PlanMode` / `PlanRuntime` per-session 对象；进入 PLAN/EXEC 时注入对应 `<system_reminder>` 到 system 区段、user message 加模式前缀；help 文案；详见 [`tools/planner.md`](./tools/planner.md) | `src/api/chat/commands/{parse.rs,cmd_help.rs,cmd_plan.rs}`、`src/api/chat/plan_runtime/{mod.rs,mode.rs,session_prefix.rs}`、`src/api/chat/mod.rs` | 见 §11：`parse_plan_commands`、`plan_enter_injects_planner_reminder_into_system`、`exec_user_message_carries_mode_prefix`（PENDING） | 先把命令族、PLAN/EXEC 模式与 prefix 注入搭起来。 |
+| **PR-PLA 命令面与 PLAN/EXEC 模式骨架** | `/plan` / `/plan exit` / `/plan build <plan_id/path>` 本地命令；`PlanMode` / `PlanRuntime` per-session 对象；进入 PLAN/EXEC 时注入对应 `<system_reminder>` 到 system 区段、CLI prompt 统一走 helper；help 文案；详见 [`tools/planner.md`](./tools/planner.md) | `src/api/chat/commands/{parse.rs,cmd_help.rs,cmd_plan.rs}`、`src/api/chat/plan_runtime/{mod.rs,mode.rs}`、`src/api/chat/prompt.rs`、`src/api/chat/mod.rs` | 见 §11：`parse_plan_commands`、`plan_enter_injects_planner_reminder_into_system`、`prompt_helper_renders_plan_modes` | 先把命令族、PLAN/EXEC 模式与 prompt 渲染搭起来。 |
 | **PR-PLB `todos` / `update_plan` / `CreatePlan` / `AskQuestion` 工具与计划文件** | built-in `todos`（任何模式可见，写 TodoFile）；[`update_plan`](./tools/update-plan.md)（任何模式可见，写 PlanFile.frontmatter todos/milestones）；`CreatePlan`（详见 [`tools/create-plan.md`](./tools/create-plan.md)）；`AskQuestion`（详见 [`tools/ask-question.md`](./tools/ask-question.md)）；`TodoRuntime` / `PlanRuntime` 内部状态机 | `src/core/tools/contract/catalog.rs`、`src/core/agent_loop/tool_exec.rs`、`src/api/chat/plan_runtime/{file_store.rs,session_todos_store.rs,plan_todos_store.rs,mod.rs}`、`src/api/chat/plan_runtime/tools/{create_plan.rs,update_plan.rs,ask_question.rs,todos.rs}` | 见 §11：`todos_returns_full_items_snapshot`、`update_plan_visible_in_all_modes`、`plan_file_round_trip_frontmatter`、`create_plan_only_visible_in_planning_mode`（PENDING） | 四个工具落地，状态机串通。 |
 | **PR-PLC reviewer 内部派发 + `/plan build` build gate** | `CreatePlan` 写入后内部派发 reviewer；reviewer 摘要落 transcript `plan.review`（**不**写 frontmatter、**不**做 gate）；`/plan build` 闸门：前置 `当前 session 无 active plan && 无 active todos`；详见 [`tools/reviewer.md`](./tools/reviewer.md) | `src/api/chat/plan_runtime/review.rs`、`src/core/agent_loop/dispatch.rs`、`src/api/chat/plan_runtime/tools/create_plan.rs`、`src/api/chat/commands/cmd_plan.rs` | 见 §11：`create_plan_internally_dispatches_reviewer`、`plan_build_requires_no_active_plan_or_todos`、`reviewer_summary_lands_in_transcript_not_frontmatter`（PENDING） | reviewer 仅辅助；build gate 只看运行态。 |
 | **PR-PLD TodosPanel 与 bash 输出** | 待办面板、bash `task_id` 摘要投影；TodosPanel 协议详见 [`tools/todos.md`](./tools/todos.md) §7 | `src/api/chat/plan_runtime/panel.rs`、`src/api/chat/mod.rs`、复用 `bash_task_registry` | 见 §11：`todos_panel_reflects_bash_task_status`、`todos_tool_updates_panel_and_file`（PENDING） | TodosPanel 只做投影。 |
 | **PR-PLE 里程碑拆分与 checkpoint hook** | `Milestone[]`；milestone 完成自动 `record(Milestone{...})`；mode 派生：全 completed → `mode = completed` | `src/api/chat/plan_runtime/checkpoint.rs`、`src/core/checkpoint/store.rs`（只读） | 见 §11：`milestone_completion_can_record_checkpoint`、`all_todos_completed_promotes_mode_completed`（PENDING） | 里程碑收口才打 checkpoint。 |
-| **PR-PLF raw write/edit 拦截 + cancel_token 续跑** | PLAN 期 `write/edit` 路径白名单；frontmatter diff 硬拒；EXEC 期被 cancel_token 截断 → 写 `mode = pending`，`/plan build` 续跑 | `src/api/chat/plan_runtime/tool_exec.rs`、`src/api/chat/plan_runtime/mod.rs`（cancel hook） | 见 §11：`plan_mode_raw_edit_body_allowed_frontmatter_rejected`、`cancel_token_demotes_executing_to_pending`、`pending_plan_resumable_via_build`（PENDING） | 写盘硬拦截 + cancel 续跑。 |
+| **PR-PLF raw write/edit 拦截 + cancel_token 续跑** | PLAN 期 `write/edit` 路径白名单；frontmatter diff 硬拒；EXEC 期被 cancel_token 截断 → 写 `state = pending`，`/plan build` 续跑 | `src/api/chat/plan_runtime/tool_exec.rs`、`src/api/chat/plan_runtime/mod.rs`（cancel hook） | 见 §11：`plan_mode_raw_edit_body_allowed_frontmatter_rejected`、`cancel_token_demotes_executing_to_pending`、`pending_plan_resumable_via_build`（PENDING） | 写盘硬拦截 + cancel 续跑。 |
 
 #### 4.2.1 PR-PLA：命令面与 PLAN/EXEC 模式骨架
 
-- **交付**：`/plan`、`/plan exit`、`/plan build <plan_id/path>` 全部在 `parse.rs` 内被识别为本地命令并转入 `cmd_plan.rs`；`PlanRuntime` per-session 对象先落地；进入 PLAN/EXEC 时立即注入对应 `<system_reminder>` 到 system 区段尾部；user message 装配阶段加 `[mode: PLAN]` / `[mode: EXEC plan_id=...]` 前缀；`/help` 文案补齐。
+- **交付**：`/plan`、`/plan exit`、`/plan build <plan_id/path>` 全部在 `parse.rs` 内被识别为本地命令并转入 `cmd_plan.rs`；`PlanRuntime` per-session 对象先落地；进入 PLAN/EXEC 时立即注入对应 `<system_reminder>` 到 system 区段尾部；user/agent prompt 统一由 `src/api/chat/prompt.rs` 渲染；`/help` 文案补齐。
 - **入口契约**：`parse_command` 识别 `/plan` 并返回 `ChatCommand::Plan { sub, args }`；`dispatch_chat_command` 在主循环**优先**消费，**绝不**落到 user 文本扔给 LLM。
 - **状态骨架**：`PlanRuntime { mode: PlanMode, goal: Option<String>, active_plan_id: Option<String>, draft, todos, milestones, build_gate_state, … }`；`PlanMode ∈ {Chat, Planning, Executing, Completed, Pending}`；详细 OOD 见 §6。
 - **catalog 动态过滤**：`tool_exec` 在每轮调用前根据 `current_mode()` 计算可见集——
@@ -172,7 +172,7 @@
 ┌──────────────────┐
 │ dispatch loop    │──── 普通 user 文本 ──▶ runtime 装配 + LLM
 └──────┬───────────┘                          ▲
-       ▼                                       │ user message 加 [mode: PLAN/EXEC] 前缀
+       ▼                                       │ CLI prompt 切到当前 PlanMode
 ┌──────────────────┐                          │ system 区段尾部加 PLANNER/EXECUTOR reminder
 │ cmd_plan.rs      │ 调 PlanRuntime API（enter/exit/build）
 └──────┬───────────┘
@@ -216,12 +216,12 @@
 - **派发入口**：reviewer **不**作为 LLM 工具暴露；由 `CreatePlan` 工具内部调用 `internal subagent dispatch` API（`AgentRegistry::spawn_subagent_internal(...)`）。
 - **subagent 隔离**：reviewer 起一个 `AgentLoop` 子任务，注入专属 `SubagentContext { system_prompt, allowed_tools, transcript=fresh, parent_session_id, token_budget }`；`allowed_tools` 由 internal dispatch 路径**硬编码**为 `{read, grep, find, todos}`（默认）或 `{read, grep, find, todos, update_plan, edit}`（当 runtime 配 `allow_review_edit=true`）；**永不**含 `create_plan`（防套娃）；**禁止**调 `bash` / `write` / `dispatch_agent` / `checkpoint`。
 - **reviewer 输出契约**：reviewer 最终消息含 `summary:` 自由文本（≤600 字符），可选用 `update_plan` 修订 frontmatter `todos[]`、或用 `edit` 改 plan 正文；**无 verdict 字段**；runtime 把摘要与修改说明写入 `transcript.plan.review` 事件，**不**回写 `.plan.md` 中的审稿块，也**不**改 `mode`。
-- **`/plan build` 闸门**：仅当 `当前 session 无 active plan && 无 active todos` 且 `指定的 PlanFile.mode ∈ {planning, pending}` 才允许迁移到 `Executing`；按 `[plan] auto_checkpoint_on_build`（默认 false）决定是否 `CheckpointStore::record(Manual{label=format!("plan_build:{plan_id}")})`。
+- **`/plan build` 闸门**：仅当 `当前 session 无 active plan && 无 active todos` 且 `指定的 PlanFile.state ∈ {planning, pending}` 才允许迁移到 `Executing`；按 `[plan] auto_checkpoint_on_build`（默认 false）决定是否 `CheckpointStore::record(Manual{label=format!("plan_build:{plan_id}")})`。
 - **build 时 runtime 动作**（5 件事）：
   1. 写 `PlanFile.frontmatter.session_key = 当前 session_key`、`session_id = 当前 session_id`（pending 续跑覆盖旧值，warning）；
-  2. 写 `PlanFile.frontmatter.mode = executing`；
+  2. 写 `PlanFile.frontmatter.state = executing`；
   3. swap system reminder：移除 PLANNER（若有）/ 注入 EXECUTOR；
-  4. user message 装配阶段切换前缀为 `[mode: EXEC plan_id=... plan_path=~/.tomcat/plans/... ]`；首轮 user meta 携带 plan 全文（详见 §5.5）；
+  4. CLI prompt 切换到 `u[Plan:executing]>` / `agent.<id>[Plan:executing]>`（详见 §5.5）；
   5. catalog swap：PLAN/CHAT 集 → EXEC 集（与 CHAT 相同：全工具集 + `todos` + `update_plan` − `create_plan`）。
 
 ```text
@@ -245,7 +245,7 @@
             ▼                                       ▼
        /plan build <plan_id/path>            /plan exit (回 CHAT)
             │
-            ▼ runtime: 5 件事（写 session_key/id, mode=executing, swap reminder, swap user prefix + meta, swap catalog）
+            ▼ runtime: 5 件事（写 session_key/id, state=executing, swap reminder, swap visible prompt, swap catalog）
             ▼
        Executing
             │
@@ -254,7 +254,7 @@
        runtime: mode = completed
 ```
 
-**说人话**：写计划由 LLM 在 PLAN 模式调 `CreatePlan`，工具内部派 reviewer 审稿；reviewer 给的只是摘要，不会自动让计划进 EXEC。用户敲 `/plan build` 那一下才真的开干，runtime 一气把 session 绑定、reminder、user prefix、catalog 全切了。
+**说人话**：写计划由 LLM 在 PLAN 模式调 `CreatePlan`，工具内部派 reviewer 审稿；reviewer 给的只是摘要，不会自动让计划进 EXEC。用户敲 `/plan build` 那一下才真的开干，runtime 一气把 session 绑定、reminder、可见 prompt、catalog 全切了。
 
 #### 4.2.4 PR-PLD：TodosPanel 与 bash 输出投影
 
@@ -270,7 +270,7 @@
 
 - **交付**：`Milestone[]` 结构进入 `PlanRuntime` 与 frontmatter；milestone 完成自动 `record(Milestone{milestone_id, plan_id})`；**mode 自动派生**：所有 todo `= completed` → `mode = completed`。
 - **触发判定**：在 `apply_todos_op` 完成写入后，重算每个 milestone 状态：若某 milestone 下**全部** todo `= completed` 且**之前**该 milestone 状态非 `completed`，且 `[plan] auto_checkpoint_on_milestone = true` → 调一次 `CheckpointStore::record(Milestone { plan_id, milestone_id, label })`。
-- **完成派生**：所有 todo（含所有 milestone 下）= `completed` → `mode = completed`；同时 reminder swap：移除 EXECUTOR、回 CHAT；catalog 复位 CHAT；user message prefix 复位无前缀。
+- **完成派生**：所有 todo（含所有 milestone 下）= `completed` → `mode = completed`；同时 reminder swap：移除 EXECUTOR、回 CHAT；catalog 复位 CHAT；可见 prompt 回到 `u[Chat]>` / `agent.<id>>`。
 - **失败归一化**：checkpoint 失败 → 仅 warning。
 
 ```text
@@ -289,14 +289,14 @@
                             │
                             ▼
                       swap reminder（EXECUTOR → 无）
-                      swap user message prefix（→ 无）
+                      可见 prompt 回 CHAT
                       swap catalog（EXEC → CHAT）
                             │
                             ▼
                       transcript: plan.complete
 ```
 
-**说人话**：阶段是否完成看下属 todo 是否都勾完；全做完 runtime 自动认为整盘 completed 并复位 catalog/reminder/prefix；打不上 checkpoint 也只是个警告。
+**说人话**：阶段是否完成看下属 todo 是否都勾完；全做完 runtime 自动认为整盘 completed 并复位 catalog/reminder/prompt；打不上 checkpoint 也只是个警告。
 
 #### 4.2.6 PR-PLF：raw write/edit 拦截 + cancel_token 续跑
 
@@ -304,10 +304,10 @@
 - **frontmatter 硬拦截**：任意模式下，对 `~/.tomcat/plans/*.plan.md` 的 raw write/edit，把新旧 frontmatter 做语义 diff；非空 → tool error，usage「frontmatter 由 todos / `/plan` 命令更新」。详见 [`tools/create-plan.md`](./tools/create-plan.md) §8。
 - **cancel_token 续跑**：runtime 注册 cancel hook，收到 cancel_token / SIGTERM / 父 abort → 当前 EXEC 中的 PlanFile：
   1. 把内存态 `mode = pending`；
-  2. 写 `frontmatter.mode = pending`；
-  3. swap reminder：移除 EXECUTOR；catalog 复位 CHAT；user prefix 复位无前缀。
+  2. 写 `frontmatter.state = pending`；
+  3. swap reminder：移除 EXECUTOR；catalog 复位 CHAT；可见 prompt 复位到 CHAT。
   
-  下次 `/plan build <plan_id/path>` 时读到 `mode == pending` → 允许续跑；写新 `session_key/id`（warning 提示旧 session 已覆盖）。
+  下次 `/plan build <plan_id/path>` 时读到 `state == pending` → 允许续跑；写新 `session_key/id`（warning 提示旧 session 已覆盖）。
 
 ```text
   EXEC 中
@@ -317,18 +317,18 @@
       ▼
   runtime hook:
       mode (mem) = pending
-      PlanFile.frontmatter.mode = pending
+      PlanFile.frontmatter.state = pending
       reminder.remove(EXECUTOR)
       catalog → CHAT
-      user prefix → 无
+      prompt → CHAT
       │
       ▼
-  CHAT 状态（mode=pending；plan 文件仍可见）
+  CHAT 状态（state=pending；plan 文件仍可见）
       │
       ▼ 用户：/plan build <plan_id/path>
       │
       ▼
-  build gate: PlanFile.mode == pending ? yes
+  build gate: PlanFile.state == pending ? yes
       │
       ▼ 同 build 5 件事（warning：旧 session 已覆盖）
       │
@@ -348,13 +348,13 @@
 
 | 命令 | 参数 | 行为 | 失败语义 | 说人话 |
 |------|------|------|----------|--------|
-| `/plan` | 无 | **进入 PLAN 模式**；注入 PLANNER `<system_reminder>` 到 system 区段尾部；catalog 切到全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单；user message 装配阶段加 `[mode: PLAN]` 前缀；UI 状态行变为 `[PLAN]` | 已在 PLAN/EXEC → 本地拒绝并提示先 `/plan exit` | 先切到规划模式，再继续讨论目标。 |
-| `/plan exit` | 无 | **仅 PLAN 模式可用**；退出 PLAN 模式回到 `Chat`；保留 `PlanFile` 不动（不写盘、不改 mode）；reminder/catalog/prefix 复位为 CHAT | `mode != Planning` → 友好提示「`/plan exit` 仅在 PLAN 模式可用；如需中止执行请等待 `cancel_token` 或终止进程」 | 中途退出规划，文件留着。 |
-| `/plan build <plan_id/path>` | 必填 plan 目标（plan_id 或 path） | **进入 EXEC 模式**（唯一入口）：前置 `当前 session 无 active plan && 无 active todos` 且指定 PlanFile `mode ∈ {planning, pending}`；执行 5 件事：① 写 frontmatter `session_key/session_id`（pending 续跑覆盖旧值，warning）；② 写 `mode = executing`；③ swap reminder（PLANNER → EXECUTOR，注入 system 区段尾部）；④ user prefix `[mode: EXEC plan_id=...]` + 首轮 user meta 携带 plan 全文；⑤ catalog swap（PLAN/CHAT → EXEC：全工具集 + `todos` + `update_plan` − `create_plan`）；可选 `record(Manual{plan_build:plan_id})` | 当前 session 已有 active plan / active todos → 拒绝；目标 PlanFile mode 不合规 → 拒绝 | 用户拍板开干。 |
+| `/plan` | 无 | **进入 PLAN 模式**；注入 PLANNER `<system_reminder>` 到 system 区段尾部；catalog 切到全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单；CLI prompt 切为 `u[Plan:planning]>` / `agent.<id>[Plan:planning]>` | 已在 PLAN/EXEC → 本地拒绝并提示先 `/plan exit` | 先切到规划模式，再继续讨论目标。 |
+| `/plan exit` | 无 | **仅 PLAN 模式可用**；退出 PLAN 模式回到 `Chat`；保留 `PlanFile` 不动（不写盘、不改 mode）；reminder/catalog/prompt 复位为 CHAT | `mode != Planning` → 友好提示「`/plan exit` 仅在 PLAN 模式可用；如需中止执行请等待 `cancel_token` 或终止进程」 | 中途退出规划，文件留着。 |
+| `/plan build <plan_id/path>` | 必填 plan 目标（plan_id 或 path） | **进入 EXEC 模式**（唯一入口）：前置 `当前 session 无 active plan && 无 active todos` 且指定 PlanFile `state ∈ {planning, pending}`；执行 5 件事：① 写 frontmatter `session_key/session_id`（pending 续跑覆盖旧值，warning）；② 写 `state = executing`；③ swap reminder（PLANNER → EXECUTOR，注入 system 区段尾部）；④ CLI prompt 切到 `u[Plan:executing]>` / `agent.<id>[Plan:executing]>`；⑤ catalog swap（PLAN/CHAT → EXEC：全工具集 + `todos` + `update_plan` − `create_plan`）；可选 `record(Manual{plan_build:plan_id})` | 当前 session 已有 active plan / active todos → 拒绝；目标 PlanFile state 不合规 → 拒绝 | 用户拍板开干。 |
 
 > **历史命令下线**：
 > - `/plan apply` 改名 `/plan build <plan_id/path>`：apply 字面不够直观，且需要承载更多动作。
-> - `/plan close [completed\|cancelled]` 下线：完成由 runtime 派生 `mode = completed`（全 todos completed）；用户不要可以 `/plan exit` 退 PLAN；EXEC 中按 Ctrl+C / 进程退出 → `mode = pending`，可被 `/plan build` 续跑；不再单独提供 close。
+> - `/plan close [completed\|cancelled]` 下线：完成由 runtime 派生 `mode = completed`（全 todos completed）；用户不要可以 `/plan exit` 退 PLAN；EXEC 中按 Ctrl+C / 进程退出 → `state = pending`，可被 `/plan build` 续跑；不再单独提供 close。
 > - `/plan show` 暂不实现：用户直接打开 `~/.tomcat/plans/*.plan.md` 查看；本期不进 §11 验收。
 > - `/goal` 暂不实现：目标在进入 PLAN 后通过自然对话收敛；后续如需显式命令再添加。
 
@@ -404,7 +404,7 @@
 - 文件锁同一份 `advisory file lock` 协议；
 - 提示词、schema、catalog 条目独立。
 
-**返回值**：完整 items + milestones snapshot + `plan_mode_before` / `plan_mode_after`，详见 [`tools/update-plan.md`](./tools/update-plan.md) §5.2。
+**返回值**：完整 items + milestones snapshot + `plan_state_before` / `plan_state_after`，详见 [`tools/update-plan.md`](./tools/update-plan.md) §5.2。
 
 ### 5.4 计划文件（`PlanFile`）
 
@@ -485,41 +485,34 @@ todos:
 
 ### 5.5 user message mode prefix 与首轮 plan body 注入
 
-#### 5.5.1 user message 模式前缀
+#### 5.5.1 CLI prompt（统一 helper）
 
-PLAN/EXEC 模式下，runtime 在 LLM 请求**装配阶段**给每条 user message 前缀加模式标签：
+所有对外可见 prompt 都统一走 `src/api/chat/prompt.rs`：
 
-| mode | 前缀格式 | 例子 |
-|------|---------|------|
-| `Chat` | （无） | `请帮我看看这个 bug` |
-| `Planning` | `[mode: PLAN] ` | `[mode: PLAN] 请帮我设计 retry 策略` |
-| `Executing` | `[mode: EXEC plan_id=<plan_id>] ` | `[mode: EXEC plan_id=chat_plan_runtime_a1b2c3d4] 继续干第三步吧` |
-| `Completed` / `Pending` | （无） | （回到 CHAT 行为） |
+| mode | user prompt | agent prompt |
+|------|-------------|--------------|
+| `Chat` | `u[Chat]>` | `agent.<id>>` |
+| `Planning` | `u[Plan:planning]>` | `agent.<id>[Plan:planning]>` |
+| `Executing` | `u[Plan:executing]>` | `agent.<id>[Plan:executing]>` |
+| `Pending` | `u[Plan:pending]>` | `agent.<id>[Plan:pending]>` |
+| `Completed` | `u[Plan:completed]>` | `agent.<id>[Plan:completed]>` |
 
-- 前缀**只在 runtime 装配 LLM 请求时贴**，**不**改写 transcript JSONL 中的原始 user message。
-- transcript 仍以原始消息为准；resume 时不再加前缀（避免叠加）。
-- 优先级：`current_mode()` 是事实源；UI / catalog / 前缀注入 / reminder 都只读一份。
+- prompt 是显示层文案，不会改写 transcript JSONL 中的原始 user message。
+- `current_mode()` 仍是事实源；UI、catalog 与 prompt helper 都只读这一份状态。
+- `/plan build` 自动开跑时也复用同一 helper，因此日志与 CLI E2E 断言看到的是 `u[Plan:executing]> start building <path>`。
 
-**说人话**：每条消息都贴 `[mode: ...]` 让模型每轮都知道现在在哪个模式；不污染聊天记录。
+**说人话**：用户看到的模式提示现在一处生成，不再靠给每条 user message 塞 `[mode: ...]` 标签。
 
-#### 5.5.2 EXEC 首轮 user meta 注入 plan 全文
+#### 5.5.2 EXEC 首轮上下文
 
-`/plan build` 进入 EXEC 后**第一轮** LLM 请求装配时，runtime 在 system reminder 之后、user message 之前插入一条 **user meta message**：
+`/plan build` 进入 EXEC 后，不再额外注入 `<plan_meta>`。执行阶段上下文由以下来源共同维持：
 
-```
-<plan_meta>
-PlanFile path: ~/.tomcat/plans/<slug>_<hash>.plan.md
-plan_id: <plan_id>
+- EXEC 对应的 `<system_reminder>`
+- 当前 active plan 的磁盘文件
+- `update_plan` / `todos` 返回的完整快照
+- 统一的可见 prompt（`u[Plan:executing]>`、`agent.<id>[Plan:executing]>`）
 
-<完整 PlanFile 正文（frontmatter + body）>
-</plan_meta>
-```
-
-- 仅注入一次（runtime 维护 `exec_first_turn_injected` 标志，build 后第一轮装配即清空 → 设 true → 注入；后续轮次不再注入）。
-- pending 续跑时**也**注入一次（视同 fresh EXEC）。
-- transcript 中的 user 消息不修改；user meta 仅装配阶段插入。
-
-**说人话**：进 EXEC 第一轮把整份 plan 塞给模型，让它一次性看清全貌；之后 todos 工具的 snapshot 就够了。
+**说人话**：进入 EXEC 后不再额外塞一段 plan_meta，计划文件和工具结果本身已经足够支撑后续执行。 
 
 ### 5.6 transcript 自定义事件（观测用，非 source of truth）
 
@@ -607,7 +600,7 @@ pub struct PlanRuntime {
     bash_registry:      Arc<BashTaskRegistry>,
     checkpoint_store:   Arc<dyn CheckpointStore>,
     cancel_token:       tokio_util::sync::CancellationToken,
-    exec_first_turn:    Arc<AtomicBool>,                        // EXEC 首轮 plan body 注入标志
+    exec_first_turn:    Arc<AtomicBool>,                        // 兼容字段；当前仅表示 build 后的首轮执行回合
 }
 
 pub struct PlanRuntimeState {
@@ -644,28 +637,17 @@ impl PlanRuntime {
         // 注册到 cancel_token；触发时把 mode 切 Pending + 写 frontmatter + swap reminder/catalog/prefix
     }
 
-    pub fn user_message_prefix(&self) -> Option<String> {
-        match self.state.read().mode {
-            PlanMode::Planning => Some("[mode: PLAN] ".into()),
-            PlanMode::Executing => Some(format!("[mode: EXEC plan_id={}] ",
-                self.state.read().active_plan_id.as_deref().unwrap_or(""))),
-            _ => None,
-        }
-    }
-
-    pub fn first_turn_user_meta(&self) -> Option<UserMeta> {
-        if self.state.read().mode == PlanMode::Executing
-            && self.exec_first_turn.swap(false, Ordering::AcqRel)
-        {
-            // 读 PlanFile 全文，封装为 <plan_meta>...</plan_meta>
-        } else {
-            None
+    pub fn current_prompt(&self, agent_id: Option<&str>) -> String {
+        let mode = self.current_mode();
+        match agent_id {
+            Some(agent_id) => crate::api::chat::prompt::agent_prompt_for_mode(agent_id, &mode),
+            None => crate::api::chat::prompt::user_prompt_for_mode(&mode),
         }
     }
 }
 ```
 
-**说人话**：`PlanRuntime` 是当前 session 的「PlanFile 大管家」——管 mode 切换、create_plan 编排、reviewer 派发、todos 写 plan、cancel 续跑、user message prefix 注入、首轮 plan body 注入；同样 per-session 单实例，多会话不共享。
+**说人话**：`PlanRuntime` 是当前 session 的「PlanFile 大管家」——管 mode 切换、create_plan 编排、reviewer 派发、todos 写 plan、cancel 续跑和 prompt 状态；同样 per-session 单实例，多会话不共享。
 
 ### 6.4 `ChatContext` 持有关系
 
@@ -719,7 +701,7 @@ impl PlanRuntime {
 > **用途**：TUI 状态说明、commit body、onboarding 一页纸总览。细节拆分见 §7.1–§7.3 与 [`tools/planner.md`](./tools/planner.md) §8。
 
 ```text
-  CHAT mode  (catalog: full + todos + update_plan − create_plan; no mode prefix)
+  CHAT mode  (catalog: full + todos + update_plan − create_plan; prompt = u[Chat]>)
      |
      v
   /plan
@@ -727,7 +709,7 @@ impl PlanRuntime {
      v
   PLAN mode
    - inject PLANNER_SYSTEM_REMINDER (system tail)
-   - user msg prefix: [mode: PLAN]
+   - prompt: u[Plan:planning]> / agent.<id>[Plan:planning]>
    - catalog: full tools + create_plan + ask_question + todos + update_plan
    - write tools (write/edit/delete/str_replace) restricted to ~/.tomcat/plans/*.plan.md
    - read/glob/grep/shell unrestricted
@@ -739,7 +721,7 @@ impl PlanRuntime {
   LLM calls create_plan (goal, draft, todos, milestones)
      |
      v
-  PlanFile written: mode=planning, session_key=null, session_id=null
+  PlanFile written: state=planning, session_key=null, session_id=null
      |
      v
   create_plan dispatches reviewer subagent (internal, no catalog visibility)
@@ -751,7 +733,7 @@ impl PlanRuntime {
      |
      +-- user iterates: tweak todos via update_plan; rewrite via create_plan --+
      |                                                                          |
-     +----------- /plan exit (PlanFile.mode unchanged) ------+                  |
+     +----------- /plan exit (PlanFile.state unchanged) -----+                  |
      |                                                       |                  |
      v                                                       v                  |
   /plan build <plan_id/path>                              CHAT mode <-----------+
@@ -761,14 +743,14 @@ impl PlanRuntime {
   runtime build gate (3 conditions):
      1) session.active_plan_id == None
      2) session has no in_progress todo
-     3) target plan.mode in {planning, pending}
+    3) target plan.state in {planning, pending}
      |
      v
   runtime writes (5 things, see §5.1):
      ① frontmatter.session_key / session_id = current session
-     ② frontmatter.mode = executing
+     ② frontmatter.state = executing
      ③ PLANNER_REMINDER off, EXECUTOR_REMINDER on
-     ④ user msg prefix [mode: EXEC plan_id=...] + first-turn user meta <plan_meta>FULL BODY</plan_meta>
+     ④ prompt = u[Plan:executing]> / agent.<id>[Plan:executing]>
      ⑤ catalog swap: full + todos + update_plan − create_plan − ask_question
      |
      v
@@ -790,16 +772,16 @@ impl PlanRuntime {
     |                                                   - then runs Verifier in the same update_plan turn
     |                                                   - verify_gate=soft (default): verifier fail is advisory, still promote completed
     |                                                   - verify_gate=gate + verifier fail: stay in EXEC, reopen via update_plan
-    |                                                   - on completed: clear runtime.active_plan_id / EXECUTOR_REMINDER / catalog / user prefix → CHAT
+    |                                                   - on completed: clear runtime.active_plan_id / EXECUTOR_REMINDER / catalog / prompt → CHAT
      |
      +-------------- cancel_token --------------------+
                   (Ctrl+C / process exit /          |
                    runtime kill)                    v
                                           runtime auto:
-                                             - frontmatter.mode = pending
+                                             - frontmatter.state = pending
                                              - clear runtime.active_plan_id
                                              - EXECUTOR_REMINDER off
-                                             - catalog / user prefix → CHAT
+                                             - catalog / prompt → CHAT
                                                 |
                                                 v
                                           /plan build <plan_id/path> can resume
@@ -817,7 +799,7 @@ User             parse/cmd_plan        PlanRuntime           LLM (PLAN 模式)  
  │───────────────────>│ 解析/校验           │                        │                       │                              │
  │                    │───────────────────>│ mode = Planning         │                       │                              │
  │                    │                    │  inject PLANNER reminder → system 区段尾部       │                              │
- │                    │                    │  user message prefix = "[mode: PLAN] "          │                              │
+│                    │                    │  prompt = u[Plan:planning]> / agent.<id>[Plan:planning]> │                              │
  │                    │                    │  filter catalog (PLAN 集 + 写盘路径白名单)       │                              │
  │                    │                    │                        │                       │                              │
  │                    │                    │  (LLM 在 PLAN 模式自由探索 / ask_question / create_plan / raw 改正文)        │
@@ -831,8 +813,8 @@ User             parse/cmd_plan        PlanRuntime           LLM (PLAN 模式)  
  │                    │                    │  state.last_review_summary 更新（不改 mode）                                    │
  │                    │                    │                        │                       │                              │
  │ /plan build <id>   │───────────────────>│ build_plan(id) gate ─▶ 5 件事:                                                 │
- │                    │                    │   ① write session_key/id ② mode=executing ③ reminder swap                       │
- │                    │                    │   ④ user prefix [mode: EXEC plan_id=…] + 首轮 user_meta plan body              │
+│                    │                    │   ① write session_key/id ② state=executing ③ reminder swap                     │
+│                    │                    │   ④ prompt = u[Plan:executing]> / agent.<id>[Plan:executing]>                  │
  │                    │                    │   ⑤ catalog swap                                                                │
  │                    │                    │                        │                       │                              │
  │                    │                    │   transcript: plan.build                                                        │
@@ -856,14 +838,14 @@ sequenceDiagram
     T->>P: apply_todos_op(PlanTodoStore, ...)
     P->>F: lock + sync frontmatter.todos[]/milestones[]
     P->>B: read bash task summary
-    P-->>T: ToolResult { items + milestones full snapshot, applied, plan_mode_before/after, panel_snapshot_id }
+    P-->>T: ToolResult { items + milestones full snapshot, applied, plan_state_before/after, panel_snapshot_id }
     alt milestone completed and auto checkpoint enabled
         P->>C: record(Milestone{m_id})
         C-->>P: checkpoint_id
     end
-    alt all todos completed (EXEC + target.mode == executing + same session)
-        P->>P: mode = completed; swap reminder/catalog/user prefix → CHAT
-        P-->>F: write frontmatter.mode = completed
+    alt all todos completed (EXEC + target.state == executing + same session)
+        P->>P: mode = completed; swap reminder/catalog/prompt → CHAT
+        P-->>F: write frontmatter.state = completed
     end
     Note over L,T: todos tool remains available as a session-local scratchpad,<br/>writing only to ~/.tomcat/agents/<id>/todos/*.todo.md (no plan effect).
 ```
@@ -887,10 +869,10 @@ EXEC 中：
   PlanRuntime.on_cancel()
         │
         ├─ state.mode = Pending（内存）
-        ├─ write PlanFile.frontmatter.mode = pending（带文件锁）
+        ├─ write PlanFile.frontmatter.state = pending（带文件锁）
         ├─ reminder.remove(EXECUTOR)
         ├─ catalog → CHAT
-        ├─ user prefix → 无
+        ├─ prompt → CHAT
         └─ transcript: plan.pending { plan_id, reason }
                 │
                 ▼
@@ -898,7 +880,7 @@ EXEC 中：
 
 下次启动：
   /plan build <plan_id/path> ──gate──▶
-  PlanFile.mode == pending ?  yes
+  PlanFile.state == pending ?  yes
         │
         ▼
   build 5 件事（warning：旧 session_key/id 已覆盖）+ exec_first_turn = true
@@ -947,16 +929,16 @@ EXEC 中：
 
 | 当前状态 | 事件 | 目标状态 | 副作用 | 说人话 |
 |----------|------|----------|--------|--------|
-| `Chat` | `/plan` | `Planning` | 注入 PLANNER reminder（system 区段尾部）、user prefix `[mode: PLAN]`、catalog 切 PLAN 集（含写盘路径白名单）、写 `plan.enter` 事件 | 进入 PLAN 模式。 |
+| `Chat` | `/plan` | `Planning` | 注入 PLANNER reminder（system 区段尾部）、prompt 切到 `u[Plan:planning]>` / `agent.<id>[Plan:planning]>`、catalog 切 PLAN 集（含写盘路径白名单）、写 `plan.enter` 事件 | 进入 PLAN 模式。 |
 | `Planning` | LLM 调 `create_plan(...)` | `Planning` | tool 内 advisory lock + 写 `PlanFile` + 内部派 reviewer；mode 不变 | 模型写计划。 |
 | `Planning` | reviewer 返回 summary | `Planning` | 摘要落 transcript `plan.review`、内存 `last_review_summary` 更新；**不**改 mode、**不**改 frontmatter | 审稿员只挑刺。 |
 | `Planning` | `/plan exit` | `Chat` | reminder/catalog/prefix 复位为 CHAT；保留 PlanFile 不动；写 `plan.exit` 事件 | 中途取消规划。 |
-| `Planning` | `/plan build <plan_id/path>`（指向当前 session 创建的 plan） | `Executing` | runtime 5 件事：写 `session_key/id` + `mode=executing` + reminder swap (EXECUTOR) + user prefix + 首轮 user meta plan body + catalog swap；可选 `record(Manual{plan_build:plan_id})` | 现在才算正式开干。 |
+| `Planning` | `/plan build <plan_id/path>`（指向当前 session 创建的 plan） | `Executing` | runtime 5 件事：写 `session_key/id` + `state=executing` + reminder swap (EXECUTOR) + prompt 切到 executing + catalog swap；可选 `record(Manual{plan_build:plan_id})` | 现在才算正式开干。 |
 | `Chat` | `/plan build <plan_id/path>`（续跑 pending） | `Executing` | 同上 5 件事 + warning「旧 session_key/id 已覆盖」 | 续跑被打断的 plan。 |
 | `Executing` | `update_plan` 更新但未完结 | `Executing` | 更新 frontmatter `todos[]` / `milestones[]` + panel；返回 full items + milestones snapshot | 干活中。 |
 | `Executing` | `todos` 调用（任意 ops） | `Executing` | 写当前 session 的 `.todo.md`；**不**触动 PlanFile；返回 session items snapshot | LLM 自己记 scratchpad。 |
-| `Executing` | `update_plan` 提交后所有 todo `= completed`（target 是本 session 的 active plan） | `Completed` | 同一把锁内自动写 frontmatter `mode=completed`；reminder/catalog/prefix 复位 CHAT；写 `plan.complete` 事件；可选 milestone checkpoint | 做完了。 |
-| `Executing` | cancel_token / SIGTERM / parent abort | `Pending` | 写 frontmatter `mode=pending`；reminder/catalog/prefix 复位 CHAT；写 `plan.pending` 事件 | 被打断转 pending。 |
+| `Executing` | `update_plan` 提交后所有 todo `= completed`（target 是本 session 的 active plan） | `Completed` | 同一把锁内自动写 frontmatter `state=completed`；reminder/catalog/prompt 复位 CHAT；写 `plan.complete` 事件；可选 milestone checkpoint | 做完了。 |
+| `Executing` | cancel_token / SIGTERM / parent abort | `Pending` | 写 frontmatter `state=pending`；reminder/catalog/prompt 复位 CHAT；写 `plan.pending` 事件 | 被打断转 pending。 |
 | `Completed` | 用户开新 plan | `Planning` | 与 `Chat → Planning` 同 | 开下一盘。 |
 | `Pending` | `/plan build <plan_id/path>` | `Executing` | 续跑流程 | 续跑。 |
 
@@ -1018,8 +1000,8 @@ EXEC 中：
 | `PlanFile` 落盘失败 | 本地错误 / tool error；此次状态变更不提交 | 文件没写进去，就别假装成功。 |
 | milestone checkpoint 失败 | warning；执行流继续 | 快照打点失败应可见，但不卡 todos。 |
 | 在非 Planning 调 `create_plan` / `ask_question` | catalog 不可见；强行调用 → tool error | 模式不对工具看不见，硬调也拦。 |
-| 在任意模式调 `update_plan` 改 `target.mode=completed` 的 plan | tool error | 已结案 plan 不可改；要重新做请用 `create_plan` 开新 plan。 |
-| 跨 session 调 `update_plan` 改 `target.mode=executing` 的 plan | tool error | 别越界改正在执行中的 plan。 |
+| 在任意模式调 `update_plan` 改 `target.state=completed` 的 plan | tool error | 已结案 plan 不可改；要重新做请用 `create_plan` 开新 plan。 |
+| 跨 session 调 `update_plan` 改 `target.state=executing` 的 plan | tool error | 别越界改正在执行中的 plan。 |
 | 在 Planning raw `write/edit` 改 frontmatter | tool error，usage「frontmatter 由 todos / `/plan` 命令更新」 | YAML 锁死。 |
 | 在 Planning raw `write/edit` 写 `~/.tomcat/plans/` 外路径 | tool error，usage「PLAN 模式仅允许写计划文件正文」 | 路径白名单。 |
 | `recover()` 阶段发现 `mode == executing` 残留 | 强制降级 `mode == pending`、warning 提示用户 `/plan build <plan_id/path>` 续跑 | 重启视为被 cancel。 |
@@ -1033,8 +1015,8 @@ EXEC 中：
 |------|-------------|------|--------|
 | 单元：slash 解析 | `api::chat::commands::tests::parse_test::parse_plan_commands`（待新增） | PENDING | `/plan` 先被本地命令层吃掉。 |
 | 单元：PLAN 模式注入 | `api::chat::plan_runtime::tests::plan_enter_injects_planner_reminder_into_system`（待新增） | PENDING | reminder 进 system 区段尾部。 |
-| 单元：EXEC user message prefix | `exec_user_message_carries_mode_prefix`（待新增） | PENDING | 每条 user 都加 `[mode: EXEC plan_id=...]`。 |
-| 单元：EXEC 首轮 plan meta | `exec_first_turn_injects_plan_meta_only_once`（待新增） | PENDING | 第一轮带 plan 全文，之后不再注入。 |
+| 单元：prompt helper | `prompt_helper_renders_plan_modes` | DONE | `u[Chat]>` / `u[Plan:*]>` 和对应 agent prompt 都由 helper 统一产出。 |
+| 单元：/plan build prompt | `plan_build_emits_executing_prompt` | DONE | 自动开跑时能看到 `u[Plan:executing]> ...`。 |
 | 单元：catalog 动态可见集 | `catalog_visible_set_by_current_mode`（待新增） | PENDING | PLAN 看不到 todos；CHAT/EXEC 看不到 create_plan。 |
 | 单元：todos 返回 full snapshot | `todos_returns_full_items_snapshot`（待新增） | PENDING | tool result 自带完整 items。 |
 | 单元：todos 单进行中约束 | `todos_state_enforces_single_in_progress`（待新增） | PENDING | 两个进行中要被硬拒绝。 |
@@ -1077,7 +1059,7 @@ EXEC 中：
 | `/plan` 与 active 计划并发触发 | 中 | `cmd_plan.rs` 在调 `enter_plan_mode` 前先读 `active_plan_id`；非空直接本地拒绝 | 计划入口要单线。 |
 | LLM 用 raw write 试图改 frontmatter | 高 | §5 `tool_exec` 硬拦截；tool error 附 usage | 写盘前先拦一刀。 |
 | LLM 以为 `reviewer accepted` 就该自己进 executing | 中 | description 明示；catalog 在 PLAN 期没有切 EXEC 的入口 | 文档 + catalog 双保险。 |
-| user message prefix 与 transcript 不一致 | 低 | prefix **只**在装配阶段贴；transcript 保留原始消息 | 不污染聊天记录。 |
+| prompt 文案在多处手写后漂移 | 低 | 统一走 `src/api/chat/prompt.rs`，测试直接断言 helper 输出 | 不让 prompt 在不同调用点慢慢分叉。 |
 | 多 session 串扰 | 中 | `TodoRuntime` / `PlanRuntime` 都是 per-session 单实例；多会话由 `ChatContextRegistry` 路由 | 一会话一份大管家。 |
 
 ---
@@ -1092,7 +1074,7 @@ EXEC 中：
 | ~~`Idle` 模式名~~ | **替代**：改名为 `Chat`，更直观。 | 默认聊天状态。 |
 | ~~`ReadyToApply` 中间态~~ | **下线**：reviewer 仅辅助，不做 gate；直接从 `Planning` 经 `/plan build` 跳 `Executing`。 | 状态机少一档。 |
 | ~~`Cancelled` 状态~~ | **下线**：用户不要 → `/plan exit` 退 PLAN 文件留着；执行中按 Ctrl+C / 进程退出 → `Pending`；不再区分 cancelled vs pending。 | 留可续跑余地，不强收口。 |
-| ~~`/plan apply` 进执行态~~ | **替代**：改名 `/plan build <plan_id/path>`，承载 5 件事（写 session 绑定、mode、reminder swap、user prefix + 首轮 user meta、catalog swap）。 | apply 字面不够，build 涵盖更多动作。 |
+| ~~`/plan apply` 进执行态~~ | **替代**：改名 `/plan build <plan_id/path>`，承载 5 件事（写 session 绑定、state、reminder swap、prompt 切换、catalog swap）。 | apply 字面不够，build 涵盖更多动作。 |
 | ~~`/plan close [completed\|cancelled]`~~ | **下线**：completed 由 runtime 派生（全 todos completed 自动写）；用户不要可以 `/plan exit`；cancel 由 cancel_token 自动转 pending。 | 状态自然演化。 |
 | ~~`/plan show` 命令~~ | **暂缓**：用户直接打开 `.plan.md` 看；本期不进验收。 | 用文件代替命令。 |
 | ~~独立 `/goal` 命令~~ | **暂缓**：目标在进入 PLAN 后通过自然对话收敛；后续如需再加。 | 简化命令族。 |
@@ -1108,13 +1090,13 @@ EXEC 中：
 | ~~`TodoRuntime` / `PlanRuntime` 用全局 `HashMap<session_key, _>`~~ | **替代**：per-session 单实例，挂 `ChatContext`；多会话由未来 `ChatContextRegistry` 路由。 | 一会话一份大管家。 |
 | ~~`todos` 工具走 `active_scope ∈ {session, plan}` 双轨~~ | **下线（D 方案）**：`todos` 永远写 `TodoFile`（session 路径）；plan 内 `todos[]` / `milestones[]` 由新增的 [`update_plan`](./tools/update-plan.md) 工具管理（任何模式可见）；两者代码共享 `apply_todos_op` op 引擎、提示词分裂。 | 工具职责单一，代码继续复用。 |
 | ~~`todos` 仅 EXEC / Chat / Completed / Pending 可见，Planning 剔除~~ | **替代（D 方案）**：`todos` **任何模式都可见**——LLM 在 PLAN 期也能用 `todos` 给自己列调研步骤；工具描述不再分模式叙述，仅保留「3+ 步骤启发」核心。 | 全模式都给个本地小白板。 |
-| ~~mode=completed 自动派生由 `todos` 触发~~ | **替代（D 方案）**：由 [`update_plan`](./tools/update-plan.md) 在 EXEC + target.mode==executing + 全 completed 时触发；`todos` 永远不写 plan，自然不触发 mode 转移。 | 改 plan 的工具负责派生 mode。 |
-| ~~CHAT 模式无法修订 plan.md 的 `todos[]` / `milestones[]`（D 方案前的缺口）~~ | **修复（D 方案）**：[`update_plan`](./tools/update-plan.md) 任何模式可见，可按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随 active plan path；跨 session 修订亦允许（除非 target.mode=executing 由别 session 持有）。 | 修上一版的缺口。 |
+| ~~mode=completed 自动派生由 `todos` 触发~~ | **替代（D 方案）**：由 [`update_plan`](./tools/update-plan.md) 在 EXEC + target.state==executing + 全 completed 时触发；`todos` 永远不写 plan，自然不触发 mode 转移。 | 改 plan 的工具负责派生 mode。 |
+| ~~CHAT 模式无法修订 plan.md 的 `todos[]` / `milestones[]`（D 方案前的缺口）~~ | **修复（D 方案）**：[`update_plan`](./tools/update-plan.md) 任何模式可见，可按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随 active plan path；跨 session 修订亦允许（除非 target.state=executing 由别 session 持有）。 | 修上一版的缺口。 |
 | ~~PLAN 模式下用户要求改 todos 必须再次调 `create_plan` 整盘重写~~ | **替代（D 方案）**：增量改用 [`update_plan`](./tools/update-plan.md)；`create_plan` 仅当结构大改时用（整盘重写）。 | 小修不必整盘重写。 |
 | ~~frontmatter 三方协同（`create_plan` + `todos` + runtime）~~ | **替代为四方（D 方案）**：`create_plan`（整盘初稿）+ [`update_plan`](./tools/update-plan.md)（增量 todos/milestones）+ runtime（mode/session 绑定 via `/plan build`）+ 自动派生（all completed / cancel_token）。 | 四方各管一段。 |
 | ~~reviewer 子 Agent 的 `allowed_tools` = `{read, grep, find}`（默认）+ `{edit_plan_review_section}`（`allow_review_edit=true`）~~ | **演进（D 方案）**：默认 `{read, grep, find, todos}`（todos 是私人记录无副作用）；`allow_review_edit=true` 附加 `{update_plan, edit}`（前者改 frontmatter todos，后者改计划正文任意段，但 frontmatter raw 仍禁止）；**仍**不含 `create_plan`（防递归套娃）。详见 [`reviewer.md`](./tools/reviewer.md) §5.2。 | 让 reviewer 能落地修订建议。 |
-| ~~只靠 system reminder 让模型知道当前 mode~~ | **补充**：PLAN/EXEC 期 user message 装配阶段加 `[mode: PLAN]` / `[mode: EXEC plan_id=...]` 前缀；首轮 EXEC 注入 user meta 携带 plan 全文。 | 每条消息都贴模式 tag。 |
-| ~~所有 `system_reminder` 注入 user message~~ | **否**：所有 reminder 都注入 system 区段尾部；user message 只贴轻量 `[mode: ...]` 前缀。 | reminder 归 reminder，prefix 归 prefix。 |
+| ~~只靠 system reminder 让模型知道当前 mode~~ | **补充**：CLI 统一显示 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>` 及对应 agent prompt。 | 用户和测试都能直接看到当前模式。 |
+| ~~所有 `system_reminder` 注入 user message~~ | **否**：所有 reminder 都注入 system 区段尾部；prompt 显示单独由 helper 渲染。 | reminder 归 reminder，prompt 归 prompt。 |
 
 ### 13.1 未来何时拆出 `todos-list.md`
 
@@ -1149,4 +1131,4 @@ EXEC 中：
 - 任务与计划规范：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)、[PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md)
 - 竞品与工具全景：[agent-tools-comparison.md](../reports/agent-tools-comparison.md)、[plan-mode-and-checkpoint-survey.md](../reports/plan-mode-and-checkpoint-survey.md)
 
-**一句话总结**：Tomcat 的 `PlanRuntime` 采用「**本地 `/plan` slash 切 PLAN/EXEC 模式与 catalog**、**`CreatePlan` LLM 工具创建 PlanFile 并内部派 reviewer**（仅辅助）、**`/plan build <plan_id/path>` 是 EXEC 唯一入口**、**built-in `todos` 改状态并返回完整 snapshot**、**计划文件做 durable source**、**cancel_token 转 pending 可续跑**、**TodoRuntime / PlanRuntime per-session OOD 挂 ChatContext**、**user message 自动贴 `[mode: ...]` 前缀**」的组合路线。本文是运行时主 spec，工具粒度细节散落在 [`tools/`](./tools/) 子目录。
+**一句话总结**：Tomcat 的 `PlanRuntime` 采用「**本地 `/plan` slash 切 PLAN/EXEC 模式与 catalog**、**`CreatePlan` LLM 工具创建 PlanFile 并内部派 reviewer**（仅辅助）、**`/plan build <plan_id/path>` 是 EXEC 唯一入口**、**built-in `todos` 改状态并返回完整 snapshot**、**计划文件做 durable source**、**cancel_token 转 pending 可续跑**、**TodoRuntime / PlanRuntime per-session OOD 挂 ChatContext**、**CLI prompt 统一显示当前模式**」的组合路线。本文是运行时主 spec，工具粒度细节散落在 [`tools/`](./tools/) 子目录。

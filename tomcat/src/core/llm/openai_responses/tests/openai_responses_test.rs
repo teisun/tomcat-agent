@@ -13,8 +13,8 @@
 
 use super::*;
 use crate::core::llm::provider::LlmProvider;
-use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, StreamEvent};
-use crate::infra::error::AppError;
+use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, StreamEvent, ThinkingSource};
+use crate::infra::error::{llm_stage, llm_summary, AppError, LlmErrorStage};
 use crate::infra::LlmConfig;
 
 use bytes::Bytes;
@@ -419,9 +419,9 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         "thinking 启用后应写 reasoning.effort: {}",
         body
     );
-    assert!(
-        body["reasoning"].get("summary").is_none(),
-        "show=false && persist=false 时不应请求 reasoning.summary: {}",
+    assert_eq!(
+        body["reasoning"]["summary"], "auto",
+        "show=false && persist=false 时也应请求 reasoning.summary: {}",
         body
     );
     assert!(
@@ -495,7 +495,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
 }
 
 #[test]
-fn responses_build_request_body_show_and_persist_false_omits_reasoning_summary() {
+fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_summary_auto() {
     unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
         api_key_env: Some(TEST_KEY_ENV.to_string()),
@@ -520,9 +520,9 @@ fn responses_build_request_body_show_and_persist_false_omits_reasoning_summary()
         tools: None,
     };
     let body = p.build_request_body(&req, true);
-    assert!(
-        body["reasoning"].get("summary").is_none(),
-        "show/persist 都为 false 时不应请求 summary: {}",
+    assert_eq!(
+        body["reasoning"]["summary"], "auto",
+        "show/persist 都为 false 时仍应请求 summary: {}",
         body
     );
 }
@@ -535,7 +535,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     let e1 = responses_chunk_to_events(&v1, &mut tracks);
     assert_eq!(e1.len(), 1);
     assert!(
-        matches!(&e1[0], StreamEvent::Thinking { delta, signature: None } if delta == "step a"),
+        matches!(
+            &e1[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                signature: None
+            } if delta == "step a"
+        ),
         "got {:?}",
         e1[0]
     );
@@ -544,7 +551,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     let v2 = json!({"type": "response.reasoning_text.delta", "delta": "step b"});
     let e2 = responses_chunk_to_events(&v2, &mut tracks);
     assert!(
-        matches!(&e2[0], StreamEvent::Thinking { delta, .. } if delta == "step b"),
+        matches!(
+            &e2[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                ..
+            } if delta == "step b"
+        ),
         "got {:?}",
         e2[0]
     );
@@ -553,7 +567,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     let v3 = json!({"type": "response.reasoning_summary_text.delta", "delta": "outline"});
     let e3 = responses_chunk_to_events(&v3, &mut tracks);
     assert!(
-        matches!(&e3[0], StreamEvent::Thinking { delta, .. } if delta == "outline"),
+        matches!(
+            &e3[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Summary,
+                ..
+            } if delta == "outline"
+        ),
         "got {:?}",
         e3[0]
     );
@@ -565,7 +586,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     });
     let e4 = responses_chunk_to_events(&v4, &mut tracks);
     assert!(
-        matches!(&e4[0], StreamEvent::Thinking { delta, .. } if delta == "plan first"),
+        matches!(
+            &e4[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Summary,
+                ..
+            } if delta == "plan first"
+        ),
         "got {:?}",
         e4[0]
     );
@@ -574,7 +602,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     let v5 = json!({"type": "response.reasoning_text.delta", "delta": " step c"});
     let e5 = responses_chunk_to_events(&v5, &mut tracks);
     assert!(
-        matches!(&e5[0], StreamEvent::Thinking { delta, .. } if delta == " step c"),
+        matches!(
+            &e5[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                ..
+            } if delta == " step c"
+        ),
         "got {:?}",
         e5[0]
     );
@@ -583,7 +618,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     let v6 = json!({"type": "response.reasoning_text.delta", "delta": " "});
     let e6 = responses_chunk_to_events(&v6, &mut tracks);
     assert!(
-        matches!(&e6[0], StreamEvent::Thinking { delta, .. } if delta == " "),
+        matches!(
+            &e6[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Raw,
+                ..
+            } if delta == " "
+        ),
         "got {:?}",
         e6[0]
     );
@@ -595,7 +637,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     });
     let e7 = responses_chunk_to_events(&v7, &mut tracks);
     assert!(
-        matches!(&e7[0], StreamEvent::Thinking { delta, .. } if delta == "final summary"),
+        matches!(
+            &e7[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Summary,
+                ..
+            } if delta == "final summary"
+        ),
         "got {:?}",
         e7[0]
     );
@@ -610,7 +659,14 @@ fn responses_chunk_reasoning_delta_emits_thinking() {
     });
     let e8 = responses_chunk_to_events(&v8, &mut tracks);
     assert!(
-        matches!(&e8[0], StreamEvent::Thinking { delta, .. } if delta == "from output item"),
+        matches!(
+            &e8[0],
+            StreamEvent::Thinking {
+                delta,
+                source: ThinkingSource::Summary,
+                ..
+            } if delta == "from output item"
+        ),
         "got {:?}",
         e8[0]
     );
@@ -822,7 +878,9 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
         .expect("join ok")
         .expect("should produce timeout error");
     match item {
-        Err(AppError::Llm(msg)) => {
+        Err(err) => {
+            let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
+            assert_eq!(llm_stage(&err), Some(LlmErrorStage::IdleTimeout));
             assert!(msg.contains("流式空闲超时"), "unexpected msg: {}", msg);
             assert!(
                 msg.contains("stream_timeout_sec=3s"),
@@ -830,7 +888,7 @@ async fn responses_idle_timeout_errors_when_no_bytes_arrive() {
                 msg
             );
         }
-        other => panic!("expected timeout AppError::Llm, got {:?}", other),
+        other => panic!("expected timeout AppError, got {:?}", other),
     }
 }
 

@@ -106,4 +106,3 @@ pub fn all_completed(todos: &[TodoItem]) -> bool {
             .iter()
             .all(|t| matches!(t.status, TodoStatus::Completed))
 }
-

@@ -44,4 +44,3 @@ impl CheckpointStore for NoopStore {
         Ok(0)
     }
 }
-
