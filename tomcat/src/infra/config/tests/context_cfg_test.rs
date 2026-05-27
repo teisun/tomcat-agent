@@ -6,7 +6,7 @@
 //!   compaction_turns / keep_recent_turns / compaction_model /
 //!   layer0_single_result_max_chars / layer0_placeholder_threshold_chars /
 //!   compaction_max_tokens）。
-//! - `compute_context_budget_chars` 在 GPT-5.2 默认配置、`max_output_tokens=0`
+//! - `compute_context_budget_chars` 在 GPT-5.4 默认配置、`max_output_tokens=0`
 //!   与 `context_window<max_output_tokens` 三种边界场景下的输出。
 //! - `[context]` 段的 toml override 能正确传到 `cfg.context` 字段。
 

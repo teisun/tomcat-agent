@@ -6,7 +6,7 @@
 //!
 //! ## 门禁
 //! - `OPENAI_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
-//! - 默认模型来自 `TOMCAT_E2E_LLM_MODEL` env，未设则 `gpt-5.2`。
+//! - 默认模型来自 `TOMCAT_E2E_LLM_MODEL` env，未设则 `gpt-5.4`。
 //!
 //! ## 数据目录
 //! - 使用进程**真实 HOME**（不覆盖 `HOME` env）；plan 落盘到 `~/.tomcat/plans/`。
@@ -71,7 +71,7 @@ fn require_api_key() {
 }
 
 fn default_model() -> String {
-    std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.2".to_string())
+    std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string())
 }
 
 fn real_home() -> PathBuf {

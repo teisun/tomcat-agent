@@ -110,7 +110,7 @@ Layer 3  Reasoning Loop
 | single_tool_result_max_chars | usize | 400,000 | — | Layer 0 单条 tool result 截断阈值（chars） |
 | compaction_model | String | 与主模型相同 | — | Compaction LLM 调用使用的模型 |
 
-预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4 × 0.75`（GPT-5.2 默认 = 816,000 chars）。
+预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4 × 0.75`（GPT-5.4 默认 = 816,000 chars）。
 
 ## 6. 交互流程 (Workflow)
 

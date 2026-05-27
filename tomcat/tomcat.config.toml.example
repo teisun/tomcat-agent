@@ -21,7 +21,7 @@ retention_days = 7
 [llm]
 # "openai-responses"（默认）或 "openai"。
 provider = "openai-responses"
-default_model = "gpt-5.2"
+default_model = "gpt-5.4"
 max_concurrent_requests = 4
 retry_count = 3
 stream_timeout_sec = 60

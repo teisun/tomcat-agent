@@ -234,7 +234,7 @@
 
 ## Story 10 — Plan 模式真 LLM 全路径（reviewer 子 Agent，2 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时用例 fixture **必须** `panic!`（与 INTEGRATION_TEST_SPEC §5.2、reviewer.md §11 对齐）。默认模型来自 `TOMCAT_E2E_LLM_MODEL`，未设 → `gpt-5.2`。
+> 需要 `OPENAI_API_KEY`；无 key 时用例 fixture **必须** `panic!`（与 INTEGRATION_TEST_SPEC §5.2、reviewer.md §11 对齐）。默认模型来自 `TOMCAT_E2E_LLM_MODEL`，未设 → `gpt-5.4`。
 > 这两个用例与 [`plan_e2e_with_mock_llm_tests.rs`](../../../../tests/plan_e2e_with_mock_llm_tests.rs) **互补**：那个测试用 mock 工具路径覆盖事件序，本组用例真起 LLM + 真 reviewer 子 Agent 跑完整链路。
 > 会话模型固定为 `session_key = agent:main:main`；每次真测 run 先创建 fresh `session_id`，CLI 的进程 A/B 共享同一个 `run_session_id`，inprocess 用另一条新的 `run_session_id`。`create_plan` 在 planning 阶段保持 `session_key/session_id == null`，只有 `/plan build` 进入 EXEC 时才绑定真实 session。`<plan>.plan.md.lock` 是 advisory 侧车文件，unlock 后可继续存在，不需要在真测前后批量清理。
 

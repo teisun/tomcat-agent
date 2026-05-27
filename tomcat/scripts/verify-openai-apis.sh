@@ -5,6 +5,8 @@ set -euo pipefail
 # Usage:
 #   ./scripts/verify-openai-apis.sh              # interactive select
 #   ./scripts/verify-openai-apis.sh 1 2 3 4      # non-interactive select
+#
+# Models: POST tests (2–5) use gpt-5.4 unless OPENAI_MODEL is set in .env.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
@@ -34,11 +36,18 @@ key_prefix="${OPENAI_API_KEY:0:6}"
 key_suffix="${OPENAI_API_KEY: -4}"
 echo "OPENAI_API_KEY=${key_prefix}...${key_suffix} (masked)"
 
-MODEL="${OPENAI_MODEL:-gpt-5.2}"
+if [[ -n "${OPENAI_MODEL:-}" ]]; then
+  MODELS=("${OPENAI_MODEL}")
+else
+  MODELS=(gpt-5.4)
+fi
+
 HAS_JQ=0
 if command -v jq >/dev/null 2>&1; then
   HAS_JQ=1
 fi
+
+echo "Models for POST tests: ${MODELS[*]} (set OPENAI_MODEL in .env to use a single model)"
 
 echo
 echo "Available endpoints:"
@@ -124,13 +133,13 @@ run_request() {
     echo "[PASS] ${label} - HTTP ${http_code}"
     if [[ "${HAS_JQ}" -eq 1 ]]; then
       case "${label}" in
-        "GET /v1/models")
+        *"GET /v1/models"*)
           jq -r '.data[0:5][]?.id' "${tmp_body}" | sed 's/^/  - /'
           ;;
-        "POST /v1/responses")
+        *"POST /v1/responses"*)
           jq '{id, model, output_text}' "${tmp_body}"
           ;;
-        "POST /v1/chat/completions")
+        *"POST /v1/chat/completions"*)
           jq '{id, model, first: .choices[0].message.content}' "${tmp_body}"
           ;;
       esac
@@ -245,22 +254,30 @@ for c in "${choices[@]}"; do
       run_request "GET /v1/models" "GET" "https://api.openai.com/v1/models"
       ;;
     2)
-      run_request "POST /v1/responses" "POST" "https://api.openai.com/v1/responses" \
-        "{\"model\":\"${MODEL}\",\"input\":\"Reply with: pong\"}"
+      for model in "${MODELS[@]}"; do
+        run_request "POST /v1/responses [${model}]" "POST" "https://api.openai.com/v1/responses" \
+          "{\"model\":\"${model}\",\"input\":\"Reply with: pong\"}"
+      done
       ;;
     3)
-      run_request "POST /v1/chat/completions" "POST" "https://api.openai.com/v1/chat/completions" \
-        "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with: pong\"}]}"
+      for model in "${MODELS[@]}"; do
+        run_request "POST /v1/chat/completions [${model}]" "POST" "https://api.openai.com/v1/chat/completions" \
+          "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with: pong\"}]}"
+      done
       ;;
     4)
-      run_sse_stream_request "POST /v1/chat/completions (stream)" \
-        "https://api.openai.com/v1/chat/completions" \
-        "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with one word: hi\"}],\"stream\":true}"
+      for model in "${MODELS[@]}"; do
+        run_sse_stream_request "POST /v1/chat/completions (stream) [${model}]" \
+          "https://api.openai.com/v1/chat/completions" \
+          "{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with one word: hi\"}],\"stream\":true}"
+      done
       ;;
     5)
-      run_sse_stream_request "POST /v1/responses (stream)" \
-        "https://api.openai.com/v1/responses" \
-        "{\"model\":\"${MODEL}\",\"input\":\"Reply with one word: hi\",\"stream\":true}"
+      for model in "${MODELS[@]}"; do
+        run_sse_stream_request "POST /v1/responses (stream) [${model}]" \
+          "https://api.openai.com/v1/responses" \
+          "{\"model\":\"${model}\",\"input\":\"Reply with one word: hi\",\"stream\":true}"
+      done
       ;;
     *)
       echo "[SKIP] Unknown choice: ${c}"

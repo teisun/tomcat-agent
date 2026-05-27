@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-26 16:30 | ACTIVE | develop | — |
+| Nibbles | 2026-05-26 19:30 | ACTIVE | develop | — |
+
+### 2026-05-26 | chore(llm): 默认模型 gpt-5.2 → gpt-5.4
+
+- **配置/代码**：`DEFAULT_LLM_MODEL`、`tomcat.config.toml.example`、`compaction_model` 默认值及 E2E/集成测试 fallback 统一为 `gpt-5.4`。
+- **脚本**：`verify-openai-apis.sh` 默认只测 `gpt-5.4`，POST 端点支持 `MODELS` 数组循环。
+- **文档**：user-guide、context-management、E2E 场景库等同步模型引用。
+- **阶段 T（门禁）**：未跑全量；纯配置/文档/测试常量变更，无逻辑改动。
 
 ### 2026-05-26 | feat(chat,llm): 折叠态流式显示思考摘要 + LLM 超时错误分层
 

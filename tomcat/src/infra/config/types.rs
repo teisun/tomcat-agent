@@ -247,7 +247,7 @@ fn default_llm_provider() -> String {
 
 /// 全局默认 LLM 模型 id（`LlmConfig` 默认值、`tomcat init` 首次写入与文档一致）。
 /// 可通过 `tomcat.config.toml` 中 `[llm] default_model` 或环境变量 `TOMCAT__LLM__DEFAULT_MODEL` 覆盖（后者优先级更高，见 [`load_config`]）。
-pub const DEFAULT_LLM_MODEL: &str = "gpt-5.2";
+pub const DEFAULT_LLM_MODEL: &str = "gpt-5.4";
 
 fn default_llm_model() -> String {
     DEFAULT_LLM_MODEL.to_string()
@@ -451,7 +451,7 @@ impl Default for SecurityConfig {
 /// 详见 `docs/architecture/context-management.md`。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContextConfig {
-    /// LLM 上下文窗口大小（token 数），默认 400,000（GPT-5.2）。
+    /// LLM 上下文窗口大小（token 数），默认 400,000（GPT-5.4）。
     #[serde(default = "default_context_window")]
     pub context_window: usize,
     /// LLM 最大输出 token 数，默认 128,000。

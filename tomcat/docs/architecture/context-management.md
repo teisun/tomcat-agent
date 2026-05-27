@@ -58,7 +58,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **TurnId（复合）**      | `start_id + "::" + end_id`，其中 `start_id` / `end_id` 均为 MessageId。标识一段 turn 的首尾 message。`BranchSummaryEntry.id` 表示「预热 snapshot 首条 turn start 的 `msg_id` + 末条消息的 `msg_id`」，见 §5.7。                                |
 | **MessageKind**        | `ChatMessage` 上的 `#[serde(skip)]` 枚举字段，取值 `Normal`（默认）/ `Steering`（用户中途注入指令）/ `CompactionSummary`（摘要）。用于 turn 边界判定与消息分类。                                                                                         |
 | **turn start**         | 满足 `(role == User && kind != Steering) \|\| kind == CompactionSummary` 的 `ChatMessage`。`ContextState.turn_count()` 统计 `messages` 中满足条件的消息数。                                                                            |
-| **context_window**     | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.2 400K）。                                                                                                                                                              |
+| **context_window**     | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.4 400K）。                                                                                                                                                              |
 | **input_budget**       | 输入 token 预算，`context_window - max_output_tokens`。分母，用于计算 ratio。                                                                                                                                                           |
 | **ratio**              | 上下文使用率，`estimated_token_count / input_budget`，取值 0.0 ~ 1.0+。驱动多级水位线触发。                                                                                                                                                    |
 | **compactable zone**   | `messages` 中可被 Layer 0 占位符替换的区间：从开头到 `find_protected_turn_start()` 返回的保护区起始位置之前，排除保护区。保护区为最近 5 个 turn。**仅适用于 Layer 0**。                                                                                                   |
@@ -115,7 +115,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
   ════════════════════ Ratio 与水位线 ════════════════════
 
   input_budget = context_window - max_output_tokens
-               = 400,000 - 128,000 = 272,000 tokens（GPT-5.2）
+               = 400,000 - 128,000 = 272,000 tokens（GPT-5.4）
 
   ratio = estimated_token_count / input_budget
 
@@ -337,11 +337,11 @@ fn usage_ratio(state: &ContextState) -> f64:
 
 | 配置项                                  | 类型       | 默认值         | 说明                                                                                                                                |
 | ------------------------------------ | -------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `context_window`                     | `usize`  | `400_000`   | 默认对齐 **GPT-5.2**（400K）；其他模型请在配置中覆盖                                                                                                |
-| `max_output_tokens`                  | `usize`  | `128_000`   | 默认对齐 **GPT-5.2** 单轮最大输出；对齐 API 的 `max_tokens`                                                                                     |
+| `context_window`                     | `usize`  | `400_000`   | 默认对齐 **GPT-5.4**（400K）；其他模型请在配置中覆盖                                                                                                |
+| `max_output_tokens`                  | `usize`  | `128_000`   | 默认对齐 **GPT-5.4** 单轮最大输出；对齐 API 的 `max_tokens`                                                                                     |
 | `layer0_single_result_max_chars`     | `usize`  | `50_000`    | Layer 0 触发条件 A：单条 tool_result 超过此值则落盘 + preview 占位符                                                                               |
 | `layer0_placeholder_threshold_chars` | `usize`  | `10_000`    | Layer 0 触发条件 B：compactable zone 中 tool_result 超过此值则占位符替换                                                                          |
-| `compaction_model`                   | `String` | `"gpt-5.2"` | Compaction 摘要专用模型 ID（与主对话 `model` 可相同或不同）                                                                                         |
+| `compaction_model`                   | `String` | `"gpt-5.4"` | Compaction 摘要专用模型 ID（与主对话 `model` 可相同或不同）                                                                                         |
 | `compaction_max_tokens`              | `usize`  | `10_000`    | Layer 1 异步预热生成摘要的 token 上限（预留）。当前**不设 API `max_tokens` 硬限制**以保证摘要语义完整性；仅在 prompt 中软引导 LLM 控制在 ~8K tokens 篇幅。未来若摘要频繁超标，可启用 API 硬限制 |
 
 
@@ -353,7 +353,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 | 模型                | context_window | max_output_tokens | input_budget | ratio=0.50 时已用 |
 | ----------------- | -------------- | ----------------- | ------------ | -------------- |
 | GPT-4o            | 128,000        | 16,384            | 111,616      | 55,808         |
-| GPT-5.2           | 400,000        | 128,000           | 272,000      | 136,000        |
+| GPT-5.4           | 400,000        | 128,000           | 272,000      | 136,000        |
 | Claude 3.5 Sonnet | 200,000        | 8,192             | 191,808      | 95,904         |
 | DeepSeek-V3       | 64,000         | 8,192             | 55,808       | 27,904         |
 
@@ -1076,7 +1076,7 @@ Prioritize actionable information over verbose descriptions.
 
 | 策略               | 说明                                                         | 推荐        |
 | ---------------- | ---------------------------------------------------------- | --------- |
-| **默认：`gpt-5.2`** | 与主对话同代模型，摘要质量与长上下文能力一致；`compaction_model` 默认值为 `"gpt-5.2"` | **当前默认**  |
+| **默认：`gpt-5.4`** | 与主对话同代模型，摘要质量与长上下文能力一致；`compaction_model` 默认值为 `"gpt-5.4"` | **当前默认**  |
 | 与主对话对齐           | 将 `compaction_model` 设为与 `model` 相同，行为与「全用主模型」一致           | 可选        |
 | 轻量模型             | 如 `gpt-4o-mini` / DeepSeek-V3，成本低但需自行评估摘要质量                | 成本敏感时可改配置 |
 

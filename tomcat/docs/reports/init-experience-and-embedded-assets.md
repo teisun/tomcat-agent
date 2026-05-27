@@ -244,7 +244,7 @@ tomcat init
 > [1/2] LLM 配置
 >   API Provider [OpenAI]:
 >   API Key: sk-****  (写入 {work_dir}/assets/.env)
->   Model [gpt-5.2]:
+>   Model [gpt-5.4]:
 >
 > [2/2] 资源检查
 >   ✓ wasmedge_quickjs.wasm 已就绪

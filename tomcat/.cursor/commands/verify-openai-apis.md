@@ -49,7 +49,7 @@ set +a
 
 若用户未指定模型，默认：
 
-- `MODEL=gpt-5.2`
+- `MODEL=gpt-5.4`
 
 ---
 
@@ -78,7 +78,7 @@ curl -sS --fail-with-body \
 ### 4.2 验证 2：`POST /v1/responses`
 
 ```bash
-MODEL="${OPENAI_MODEL:-gpt-5.2}"
+MODEL="${OPENAI_MODEL:-gpt-5.4}"
 curl -sS --fail-with-body \
   https://api.openai.com/v1/responses \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
@@ -92,7 +92,7 @@ curl -sS --fail-with-body \
 ### 4.3 验证 3：`POST /v1/chat/completions`
 
 ```bash
-MODEL="${OPENAI_MODEL:-gpt-5.2}"
+MODEL="${OPENAI_MODEL:-gpt-5.4}"
 curl -sS --fail-with-body \
   https://api.openai.com/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" \

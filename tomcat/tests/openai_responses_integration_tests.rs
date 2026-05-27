@@ -276,7 +276,7 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
 
 /// [Responses 多模态 inline image] 真 API roundtrip：发一张小狗 PNG，让模型描述图片内容
 ///
-/// 模型要求：沿用 `LlmConfig.default_model`（当前 `gpt-5.2`，已确认支持 vision）；
+/// 模型要求：沿用 `LlmConfig.default_model`（当前 `gpt-5.4`，已确认支持 vision）；
 /// 若未来默认模型不支持 vision，本测试会以 API 4xx 暴露问题，不静默跳过。
 ///
 /// 验证：HTTP 200 + 响应文本非空 + 至少命中关键词 [dog/puppy/animal/pet/canine]
@@ -299,7 +299,7 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
     ];
     let request = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        // 不显式指定 model，沿用 LlmConfig.default_model（当前 gpt-5.2，支持 vision）
+        // 不显式指定 model，沿用 LlmConfig.default_model（当前 gpt-5.4，支持 vision）
         model: config.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
@@ -359,7 +359,7 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
 /// [Responses 多模态 inline PDF] 真 API roundtrip：发一份 reportlab 生成的 PDF，
 /// 让模型总结其内容。
 ///
-/// 模型要求：沿用 `LlmConfig.default_model`（当前 `gpt-5.2`，已确认支持 input_file）；
+/// 模型要求：沿用 `LlmConfig.default_model`（当前 `gpt-5.4`，已确认支持 input_file）；
 /// 若未来默认模型不支持 input_file，本测试会以 API 4xx 暴露问题，不静默跳过。
 ///
 /// 验证：HTTP 200 + 响应文本非空 + 至少命中关键词 [hello/pdf/summary/summarize/test]
@@ -384,7 +384,7 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
     ];
     let request = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        // 不显式指定 model，沿用 LlmConfig.default_model（当前 gpt-5.2，支持 input_file）
+        // 不显式指定 model，沿用 LlmConfig.default_model（当前 gpt-5.4，支持 input_file）
         model: config.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),

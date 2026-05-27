@@ -203,7 +203,7 @@ async fn compaction_request_carries_no_tools() {
     let (provider, captured) = CapturingMockProvider::new();
     let snapshot = vec![ChatMessage::user("hello"), ChatMessage::assistant("world")];
 
-    let summary = generate_summary(&snapshot, None, &provider, "gpt-5.2")
+    let summary = generate_summary(&snapshot, None, &provider, "gpt-5.4")
         .await
         .expect("mock provider 应返回非空摘要");
     assert!(

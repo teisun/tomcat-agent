@@ -24,7 +24,7 @@
 
 - **四层压缩级联**（[compaction.rs](tomcat/src/core/compaction.rs)）：Layer 0 截断 → Layer 1 占位符替换 → Layer 2 LLM 摘要 → Layer 3 强制删除
 - **字符估算预算**（[config.rs](tomcat/src/infra/config.rs) `compute_context_budget_chars`）：`(context_window - max_output_tokens) * 4 * 0.75`，纯启发式
-- **无 Prompt Cache 意识**：使用 OpenAI 兼容 API (GPT-5.2)，无 Anthropic 缓存原语
+- **无 Prompt Cache 意识**：使用 OpenAI 兼容 API (GPT-5.4)，无 Anthropic 缓存原语
 - **被动触发**：仅在 `is_over_budget()` 或 API 返回 context overflow 时触发压缩
 - **无可观测性**：缺少 token 使用追踪、压缩成功率等指标
 
@@ -71,7 +71,7 @@
 | 模型 | context_window | max_output | input budget | ratio=0.70 时已用 |
 |------|---------------|------------|-------------|-----------------|
 | GPT-4o | 128K | 16K | 112K | 78K |
-| GPT-5.2 | 400K | 128K | 272K | 190K |
+| GPT-5.4 | 400K | 128K | 272K | 190K |
 | DeepSeek-V3 | 64K | 8K | 56K | 39K |
 | Qwen2.5 | 131K | ~8K | ~123K | 86K |
 
@@ -307,7 +307,7 @@ ratio >= 0.98？ ──Yes──► 标记：阻止本轮后续新工具调用
 
 **CC 做法**：精心管理 `cache_control`、`cache_reference`、`cache_edits` 三个 API 原语，按 Global / Org / Ephemeral 三层作用域标记缓存。
 
-**不采纳理由**：这是 **Anthropic API 的专属能力**。tomcat 使用 OpenAI 兼容 API（GPT-5.2），没有对应的缓存原语。OpenAI 的 Predicted Outputs 和 Prompt Caching 是自动的、透明的，不需要客户端显式管理 cache breakpoint。强行模拟这套机制不仅无法获得性能收益，还会增加大量不必要的复杂度。
+**不采纳理由**：这是 **Anthropic API 的专属能力**。tomcat 使用 OpenAI 兼容 API（GPT-5.4），没有对应的缓存原语。OpenAI 的 Predicted Outputs 和 Prompt Caching 是自动的、透明的，不需要客户端显式管理 cache breakpoint。强行模拟这套机制不仅无法获得性能收益，还会增加大量不必要的复杂度。
 
 ### 3.2 Cached Microcompact（服务端缓存编辑）
 

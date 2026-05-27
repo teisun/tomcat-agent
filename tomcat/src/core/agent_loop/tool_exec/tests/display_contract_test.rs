@@ -107,7 +107,7 @@ impl ConfigBackend for DisplayConfigBackend {
     async fn config_set(&self, _key: &str, _value: &str) -> Result<serde_json::Value, AppError> {
         Ok(json!({
             "applied": true,
-            "message": "已设置 llm.default_model = gpt-5.2"
+            "message": "已设置 llm.default_model = gpt-5.4"
         }))
     }
 }
@@ -159,7 +159,7 @@ async fn config_set_success_populates_text_display() {
         name: "config_set".into(),
         arguments: json!({
             "key": "llm.default_model",
-            "value": "gpt-5.2"
+            "value": "gpt-5.4"
         })
         .to_string(),
     };
@@ -182,7 +182,7 @@ async fn config_set_success_populates_text_display() {
     assert_eq!(
         outcome.display,
         Some(ToolDisplay::Text {
-            text: "已设置 llm.default_model = gpt-5.2".to_string(),
+            text: "已设置 llm.default_model = gpt-5.4".to_string(),
         })
     );
 }

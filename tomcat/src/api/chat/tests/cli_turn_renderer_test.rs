@@ -510,16 +510,16 @@ fn update_plan_success_shows_absolute_plan_path() {
 fn config_set_display_prefers_text_message() {
     let payload = json!({
         "applied": true,
-        "message": "已设置 llm.default_model = gpt-5.2",
+        "message": "已设置 llm.default_model = gpt-5.4",
     });
     let summary = result_summary_for_tool(
         &json!(serde_json::to_string(&payload).unwrap()),
         Some(&ToolDisplay::Text {
-            text: "已设置 llm.default_model = gpt-5.2".to_string(),
+            text: "已设置 llm.default_model = gpt-5.4".to_string(),
         }),
         false,
     );
-    assert_eq!(summary, "已设置 llm.default_model = gpt-5.2");
+    assert_eq!(summary, "已设置 llm.default_model = gpt-5.4");
 }
 
 #[test]
