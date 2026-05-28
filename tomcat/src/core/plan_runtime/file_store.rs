@@ -85,7 +85,7 @@ pub enum PlanError {
 
 // ─── frontmatter / 子结构 ──────────────────────────────────────────────────
 
-/// PlanFile.frontmatter.state 的枚举形态；与 [`super::PlanMode`] 没有 1:1 映射
+/// PlanFile.frontmatter.state 的枚举形态；与 [`super::PlanState`] 没有 1:1 映射
 /// （后者是 runtime in-memory 状态机，含 Chat）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

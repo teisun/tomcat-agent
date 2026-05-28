@@ -71,6 +71,77 @@ fn init_context_state_with_messages() {
 }
 
 #[test]
+fn init_context_state_extracts_latest_plan_event() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let older_path = dir.join("older.plan.md");
+    let latest_path = dir.join("latest.plan.md");
+    mgr.append_custom_entry(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_CREATE,
+        "plan_id": "plan_old",
+        "path": older_path.to_string_lossy(),
+        "state": "planning",
+    }))
+    .unwrap();
+    mgr.append_custom_entry(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_BUILD,
+        "plan_id": "plan_latest",
+        "path": latest_path.to_string_lossy(),
+        "state": "executing",
+    }))
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    let event = state
+        .latest_plan_event
+        .expect("should keep latest plan event");
+    assert_eq!(event.kind, PlanEventKind::Build);
+    assert_eq!(event.plan_id, "plan_latest");
+    assert_eq!(event.path, latest_path);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_plan_event_scan_caps_at_max_plan_scan() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let stale_path = dir.join("stale.plan.md");
+    mgr.append_custom_entry(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_BUILD,
+        "plan_id": "stale_plan",
+        "path": stale_path.to_string_lossy(),
+        "state": "executing",
+    }))
+    .unwrap();
+    for idx in 0..5001 {
+        mgr.append_message(serde_json::json!({
+            "role": "user",
+            "content": format!("turn-{idx}"),
+        }))
+        .unwrap();
+    }
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    assert!(
+        state.latest_plan_event.is_none(),
+        "plan event older than MAX_PLAN_SCAN should be ignored"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn init_context_state_with_compaction_entry() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);
@@ -119,6 +190,7 @@ fn build_context_from_state_flattens_turns() {
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: PathBuf::new(),
+        latest_plan_event: None,
         preheat: crate::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

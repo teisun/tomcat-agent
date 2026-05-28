@@ -9,12 +9,12 @@ fn cancel_token_demotes_executing_to_pending() {
     let rt = PlanRuntime::new("session-a");
     write_disk_plan("cancellable", PlanFileState::Planning);
     rt.build_plan("cancellable", None).unwrap();
-    assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+    assert!(matches!(rt.mode(), PlanState::Executing { .. }));
 
     let demoted = rt.demote_to_pending_on_cancel().unwrap();
     assert_eq!(demoted.as_deref(), Some("cancellable"));
     match rt.mode() {
-        PlanMode::Pending { plan_id } => assert_eq!(plan_id, "cancellable"),
+        PlanState::Pending { plan_id } => assert_eq!(plan_id, "cancellable"),
         other => panic!("expected Pending, got {other:?}"),
     }
 
@@ -32,7 +32,7 @@ fn cancel_outside_exec_is_noop() {
 
     rt.enter_planning().unwrap();
     assert!(rt.demote_to_pending_on_cancel().unwrap().is_none());
-    assert!(matches!(rt.mode(), PlanMode::Planning));
+    assert!(matches!(rt.mode(), PlanState::Planning));
     cleanup_home(&home);
 }
 
@@ -127,7 +127,7 @@ fn cancel_token_releases_plan_lock() {
 }
 
 #[test]
-fn finalize_completed_to_chat_clears_active_plan_state() {
+fn finalize_completed_to_chat_keeps_retain_fields() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -136,8 +136,11 @@ fn finalize_completed_to_chat_clears_active_plan_state() {
     rt.set_mode_completed("done_path".into());
     let pid = rt.finalize_completed_to_chat().expect("Some(plan_id)");
     assert_eq!(pid, "done_path");
-    assert!(matches!(rt.mode(), PlanMode::Chat));
-    assert!(rt.active_plan_path().is_none());
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(
+        rt.active_plan_path(),
+        Some(plan_path_for_id("done_path").unwrap())
+    );
     assert!(rt.finalize_completed_to_chat().is_none());
     cleanup_home(&home);
 }
@@ -150,7 +153,7 @@ fn plan_mode_raw_edit_blocked_for_plan_files_in_planning_and_executing() {
     write_disk_plan("guarded", PlanFileState::Planning);
     let plan_path = plan_path_for_id("guarded").unwrap();
 
-    assert!(matches!(rt.mode(), PlanMode::Chat));
+    assert!(matches!(rt.mode(), PlanState::Chat));
     assert!(rt.allow_raw_edit_to_path(&plan_path));
 
     rt.enter_planning().unwrap();
@@ -190,7 +193,7 @@ fn plan_build_atomic_rollback_on_write_failure() {
 
     let rt = PlanRuntime::with_lock_timeout("session-a", 50);
     let err = rt.build_plan("rollback", None).unwrap_err();
-    assert!(matches!(rt.mode(), PlanMode::Chat));
+    assert!(matches!(rt.mode(), PlanState::Chat));
     match err {
         PlanRuntimeError::Io(s) => {
             assert!(s.contains("锁") || s.contains("lock") || s.contains("LockBusy"));
@@ -204,33 +207,47 @@ fn plan_build_atomic_rollback_on_write_failure() {
     let _ok = rt
         .build_plan("rollback", None)
         .expect("放锁后 build 应成功");
-    assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+    assert!(matches!(rt.mode(), PlanState::Executing { .. }));
     cleanup_home(&home);
 }
 
 #[test]
-fn e8_recover_ignores_executing_plan_from_other_session_id() {
+fn attach_from_event_missing_path_falls_back_to_chat() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
-    let plan_id = "orphan-plan";
-    write_disk_plan(plan_id, PlanFileState::Executing);
-    let path = plan_path_for_id(plan_id).unwrap();
-    let mut p = read_plan(&path).unwrap();
-    p.frontmatter.session_key = Some("session-a".into());
-    p.frontmatter.session_id = Some("run-old".into());
-    write_plan(&path, &p, 2000).unwrap();
-
     let rt = PlanRuntime::new_with_session_id("session-a", "run-new");
-    rt.recover().unwrap();
+    rt.attach_from_event(Some(PlanEventRef {
+        kind: PlanEventKind::Build,
+        plan_id: "orphan-plan".into(),
+        path: plan_path_for_id("orphan-plan").unwrap(),
+    }))
+    .unwrap();
 
-    let p2 = read_plan(&path).unwrap();
-    assert_eq!(p2.frontmatter.state, PlanFileState::Executing);
-    assert!(matches!(rt.mode(), PlanMode::Chat));
+    assert!(matches!(rt.mode(), PlanState::Chat));
     cleanup_home(&home);
 }
 
 #[test]
-fn e8_recover_restores_executing_for_current_session() {
+fn attach_from_event_create_restores_active_planning_plan_id() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let path = plan_path_for_id("draft-plan").unwrap();
+    rt.attach_from_event(Some(PlanEventRef {
+        kind: PlanEventKind::Create,
+        plan_id: "draft-plan".into(),
+        path,
+    }))
+    .unwrap();
+
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(rt.active_planning_plan_id().as_deref(), Some("draft-plan"));
+    assert!(rt.active_plan_path().is_none());
+    cleanup_home(&home);
+}
+
+#[test]
+fn attach_from_event_restores_executing_from_latest_plan_event() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let plan_id = "owned-plan";
@@ -242,12 +259,39 @@ fn e8_recover_restores_executing_for_current_session() {
     write_plan(&path, &p, 2000).unwrap();
 
     let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
-    rt.recover().unwrap();
+    rt.attach_from_event(Some(PlanEventRef {
+        kind: PlanEventKind::Build,
+        plan_id: plan_id.into(),
+        path: path.clone(),
+    }))
+    .unwrap();
 
     match rt.mode() {
-        PlanMode::Executing { plan_id: ref pid } => assert_eq!(pid, plan_id),
+        PlanState::Executing { plan_id: ref pid } => assert_eq!(pid, plan_id),
         other => panic!("expected Executing, got {other:?}"),
     }
+    assert_eq!(rt.active_plan_path(), Some(path));
+    cleanup_home(&home);
+}
+
+#[test]
+fn attach_from_event_completed_disk_state_rehydrates_chat_with_retain() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let plan_id = "completed-plan";
+    write_disk_plan(plan_id, PlanFileState::Completed);
+    let path = plan_path_for_id(plan_id).unwrap();
+
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_from_event(Some(PlanEventRef {
+        kind: PlanEventKind::Update,
+        plan_id: plan_id.into(),
+        path: path.clone(),
+    }))
+    .unwrap();
+
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(rt.active_plan_path(), Some(path));
     cleanup_home(&home);
 }
 
@@ -264,10 +308,10 @@ fn e7_reload_active_plan_from_disk_picks_up_session_owned_executing() {
     write_plan(&path, &p, 2000).unwrap();
 
     let rt = PlanRuntime::new_with_session_id("session-a", "run-a");
-    assert!(matches!(rt.mode(), PlanMode::Chat));
+    assert!(matches!(rt.mode(), PlanState::Chat));
 
     let restored = rt.reload_active_plan_from_disk().unwrap();
     assert_eq!(restored.as_deref(), Some(plan_id));
-    assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+    assert!(matches!(rt.mode(), PlanState::Executing { .. }));
     cleanup_home(&home);
 }

@@ -139,6 +139,28 @@ async fn spawn_empty_argv_uses_shell_mode() {
 }
 
 #[tokio::test]
+async fn spawn_shell_launcher_command_merges_with_argv() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let reg = BashTaskRegistry::new(dir.path().join("tool-results"));
+    let ticket = reg
+        .spawn(
+            "sh -c".to_string(),
+            Some(vec!["printf bg-shell-launch-ok".to_string()]),
+            None,
+        )
+        .await
+        .expect("spawn");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let infos = reg.list();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].status, BashTaskStatus::Finished { exit_code: 0 });
+    let chunk = reg.read_output(&ticket.task_id, None).await.expect("read");
+    assert!(chunk.finished);
+    assert_eq!(chunk.exit_code, Some(0));
+    assert!(chunk.content.contains("bg-shell-launch-ok"));
+}
+
+#[tokio::test]
 async fn read_output_unknown_task_id_errors() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = BashTaskRegistry::new(dir.path().join("tool-results"));

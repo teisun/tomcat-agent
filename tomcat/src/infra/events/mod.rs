@@ -126,6 +126,10 @@ pub mod wire {
     // 行；读路径：hydrate / 审计在反序列化时直接以 `extra.event == 这些常量之一` 分流。
     /// `~/.tomcat/plans/<slug>_<hash>.plan.md` 落盘成功。
     pub const WIRE_PLAN_CREATE: &str = "plan.create";
+    /// `/plan build` 成功把 plan 绑定到当前 runtime 并把盘 state 切到 `executing`。
+    pub const WIRE_PLAN_BUILD: &str = "plan.build";
+    /// `update_plan` 成功写盘（普通更新 / reopen / finalize 收口都复用此事件）。
+    pub const WIRE_PLAN_UPDATE: &str = "plan.update";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
     /// verifier 前 code reviewer 子 Agent 返回。
@@ -198,6 +202,17 @@ pub enum ToolDisplay {
     File { file: String },
     Plan { plan: String },
     Text { text: String },
+}
+
+/// transcript `Custom` 行里 plan.* 事件共用的最小 payload。
+///
+/// - `event` 字段由调用方单独附加（如 `plan.create` / `plan.build` / `plan.update`）
+/// - `state` 仅作 fast cache / 审计展示；recover 仍以盘 `frontmatter.state` 为准
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanEventPayload {
+    pub plan_id: String,
+    pub path: String,
+    pub state: String,
 }
 
 /// 占位：AssistantMessage。

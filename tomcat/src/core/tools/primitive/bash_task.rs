@@ -81,6 +81,33 @@ fn grant_trigger_str(s: GrantTrigger) -> String {
     .to_string()
 }
 
+fn normalize_launcher_argv(
+    command: String,
+    argv: Option<Vec<String>>,
+) -> (String, Option<Vec<String>>) {
+    let Some(mut argv) = argv else {
+        return (command, None);
+    };
+    let trimmed = command.trim();
+    let mut parts = trimmed.split_whitespace();
+    let Some(program) = parts.next() else {
+        return (command, Some(argv));
+    };
+    if !matches!(
+        program,
+        "sh" | "bash" | "zsh" | "cmd" | "powershell" | "pwsh"
+    ) {
+        return (command, Some(argv));
+    }
+    let launcher_args: Vec<String> = parts.map(str::to_string).collect();
+    if launcher_args.is_empty() {
+        return (command, Some(argv));
+    }
+    let mut merged = launcher_args;
+    merged.append(&mut argv);
+    (program.to_string(), Some(merged))
+}
+
 fn op_summary(op: PrimitiveOperation) -> &'static str {
     match op {
         PrimitiveOperation::Read => "读取",
@@ -430,6 +457,8 @@ impl BashTaskRegistry {
     ) -> Result<BashTaskTicket, AppError> {
         // 空 argv 与未提供 args 同义，避免 `command="echo hi", args=[]` 被误当成 argv 模式。
         let argv = argv.filter(|args| !args.is_empty());
+        // 兼容真 LLM 把 `sh -c` / `bash -lc` 写进 command、把脚本正文放进 args 的形态。
+        let (command, argv) = normalize_launcher_argv(command, argv);
         std::fs::create_dir_all(&self.persist_dir).map_err(AppError::Io)?;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)

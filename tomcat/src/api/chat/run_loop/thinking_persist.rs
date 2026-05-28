@@ -61,15 +61,16 @@ pub(crate) fn register_thinking_persist_listeners(
                     state_guard.signature.take(),
                 )
             };
-            let entry =
-                crate::core::session::TranscriptEntry::ThinkingTrace(crate::core::session::ThinkingTraceEntry {
+            let entry = crate::core::session::TranscriptEntry::ThinkingTrace(
+                crate::core::session::ThinkingTraceEntry {
                     id: None,
                     parent_id: None,
                     timestamp: chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                     text,
                     signature,
-                });
+                },
+            );
             if let Err(err) = crate::core::session::append_entry(&transcript_path, &entry) {
                 warn!(error = %err, "append thinking_trace entry failed");
             }

@@ -114,8 +114,8 @@ enabled = true
 show = "{raw}"
 "#
         );
-        let cfg: AppConfig =
-            toml::from_str(&toml_src).unwrap_or_else(|e| panic!("show=\"{raw}\" 应可反序列化：{e}"));
+        let cfg: AppConfig = toml::from_str(&toml_src)
+            .unwrap_or_else(|e| panic!("show=\"{raw}\" 应可反序列化：{e}"));
         assert!(
             std::mem::discriminant(&cfg.llm.thinking.show) == std::mem::discriminant(&expected),
             "show=\"{raw}\" 应映射到 {expected:?}，实际：{:?}",

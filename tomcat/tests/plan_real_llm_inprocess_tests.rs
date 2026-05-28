@@ -47,7 +47,7 @@ use tomcat::core::llm::system_prompt::{
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, PlanFileState, TodoStatus,
 };
-use tomcat::core::plan_runtime::mode::PlanMode;
+use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::session::ContextState;
 use tomcat::{
     init_context_state, load_config_toml_file, resolve_sessions_dir, run_chat_turn,
@@ -517,7 +517,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         ctx.plan_runtime
             .enter_planning()
             .expect("enter_planning 失败");
-        assert!(matches!(ctx.plan_runtime.mode(), PlanMode::Planning));
+        assert!(matches!(ctx.plan_runtime.mode(), PlanState::Planning));
 
         // 2) 用真 LLM 跑 PLANNING_PROMPT；期望它调 create_plan
         let planning_prompt = build_counter_planning_prompt(COUNTER_PLAN_GOAL, &workdir);
@@ -568,7 +568,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
             .build_plan(&plan_id, Some(fresh_session.session_id.clone()))
             .expect("build_plan 失败");
         match ctx.plan_runtime.mode() {
-            PlanMode::Executing { plan_id: pid } => assert_eq!(pid, plan_id),
+            PlanState::Executing { plan_id: pid } => assert_eq!(pid, plan_id),
             other => panic!("build_plan 后期望 Executing，实际：{other:?}"),
         }
 
@@ -646,7 +646,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         // 6) finalize_completed_to_chat → Chat
         let finalized = ctx.plan_runtime.finalize_completed_to_chat();
         assert_eq!(finalized.as_deref(), Some(plan_id.as_str()));
-        assert!(matches!(ctx.plan_runtime.mode(), PlanMode::Chat));
+        assert!(matches!(ctx.plan_runtime.mode(), PlanState::Chat));
 
         // 7) transcript 软断言：至少一条 plan.review + plan.code_review + plan.verify，
         //    且 code_review 早于 verify。

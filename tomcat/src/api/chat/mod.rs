@@ -24,9 +24,8 @@ pub use run_loop::{chat_loop, run_chat_turn};
 pub(crate) use context::resolve_initial_thinking_display;
 #[cfg(test)]
 pub(crate) use run_loop::{
-    build_turn_checkpoint_request, cleanup_openai_files_on_session_end, persist_turn_result,
+    build_turn_checkpoint_request, cleanup_openai_files_on_session_end,
+    is_append_message_chain_invariant, is_fatal_error, persist_turn_result,
     register_thinking_persist_listeners, schedule_checkpoint_prune,
-    is_append_message_chain_invariant, is_fatal_error,
-    try_rehydrate_context_state_after_append_invariant,
-    unregister_thinking_persist_listeners,
+    try_rehydrate_context_state_after_append_invariant, unregister_thinking_persist_listeners,
 };

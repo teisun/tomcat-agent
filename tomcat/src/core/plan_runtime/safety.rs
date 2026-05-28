@@ -11,7 +11,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::mode::PlanMode;
+use super::state::PlanState;
 use super::PlanRuntimeError;
 
 /// 校验 `plan_id` 仅含 `a-z 0-9 _ -` 字符，且不为空。
@@ -63,7 +63,7 @@ pub enum WritePathDenied {
     #[error(
         "PLAN 模式下 write/edit/delete 仅允许写入 ~/.tomcat/plans/*.plan.md；目标 {target:?} 不在白名单内"
     )]
-    PlanModeOnlyPlanFiles { target: PathBuf },
+    PlanStateOnlyPlanFiles { target: PathBuf },
     #[error(
         "EXEC 模式下 ~/.tomcat/plans/* 全部禁写（含正文与 frontmatter）；推进任务请使用 update_plan 工具。目标 {target:?}"
     )]
@@ -94,7 +94,7 @@ pub enum SubagentKind {
 /// 这里只做**路径维度**的拒绝；reviewer 的 frontmatter raw-edit 守卫由 edit 分支再做
 /// diff 检查（因为它需要新旧两份内容，无法在路径层判断）。
 pub fn enforce_write_path_policy(
-    mode: &PlanMode,
+    mode: &PlanState,
     subagent: SubagentKind,
     target_path: &Path,
 ) -> Result<(), WritePathDenied> {
@@ -135,10 +135,10 @@ pub fn enforce_write_path_policy(
     }
 
     match mode {
-        PlanMode::Planning if !is_plan_file => Err(WritePathDenied::PlanModeOnlyPlanFiles {
+        PlanState::Planning if !is_plan_file => Err(WritePathDenied::PlanStateOnlyPlanFiles {
             target: canon_target,
         }),
-        PlanMode::Executing { .. } if in_plans_dir => {
+        PlanState::Executing { .. } if in_plans_dir => {
             Err(WritePathDenied::ExecModePlanFilesReadOnly {
                 target: canon_target,
             })

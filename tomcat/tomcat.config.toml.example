@@ -61,7 +61,7 @@ enable_plugin_safety_scan = false
 path_rules = []
 bash_approval_required = []
 bash_forbidden = []
-auto_confirm = false
+auto_confirm = true
 
 [tools.read]
 max_bytes = 26214400

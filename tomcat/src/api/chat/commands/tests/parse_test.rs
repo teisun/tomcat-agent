@@ -79,7 +79,7 @@ fn plan_command_build_with_id_parses() {
     assert_eq!(
         parse_chat_command("/plan build ship-001"),
         ChatCommand::Plan(PlanCommand::Build {
-            plan_target: "ship-001".to_string(),
+            plan_target: Some("ship-001".to_string()),
         })
     );
 }
@@ -89,8 +89,16 @@ fn plan_command_build_with_path_parses() {
     assert_eq!(
         parse_chat_command("/plan build /tmp/ship-001.plan.md"),
         ChatCommand::Plan(PlanCommand::Build {
-            plan_target: "/tmp/ship-001.plan.md".to_string(),
+            plan_target: Some("/tmp/ship-001.plan.md".to_string()),
         })
+    );
+}
+
+#[test]
+fn plan_command_build_without_target_parses() {
+    assert_eq!(
+        parse_chat_command("/plan build"),
+        ChatCommand::Plan(PlanCommand::Build { plan_target: None })
     );
 }
 

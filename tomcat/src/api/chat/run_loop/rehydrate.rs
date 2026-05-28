@@ -25,6 +25,7 @@ pub(super) fn make_fallback_context_state(
             .ok()
             .flatten()
             .unwrap_or_default(),
+        latest_plan_event: None,
         preheat: Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

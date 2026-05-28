@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::super::catalog::visible_tools_for_mode;
-use super::super::mode::PlanMode;
+use super::super::state::PlanState;
 
 fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
     values
@@ -12,7 +12,7 @@ fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
 
 #[test]
 fn chat_mode_excludes_create_plan_only() {
-    let tools = visible_tools_for_mode(&PlanMode::Chat);
+    let tools = visible_tools_for_mode(&PlanState::Chat);
     let n = names(&tools);
     assert!(
         !n.contains("create_plan"),
@@ -25,7 +25,7 @@ fn chat_mode_excludes_create_plan_only() {
 
 #[test]
 fn planning_mode_exposes_full_set_including_writers_and_bash() {
-    let tools = visible_tools_for_mode(&PlanMode::Planning);
+    let tools = visible_tools_for_mode(&PlanState::Planning);
     let n = names(&tools);
     for plan_tool in ["create_plan", "update_plan", "todos", "ask_question"] {
         assert!(
@@ -43,7 +43,7 @@ fn planning_mode_exposes_full_set_including_writers_and_bash() {
 
 #[test]
 fn executing_mode_excludes_create_plan_and_ask_question() {
-    let tools = visible_tools_for_mode(&PlanMode::Executing {
+    let tools = visible_tools_for_mode(&PlanState::Executing {
         plan_id: "demo".into(),
     });
     let n = names(&tools);
@@ -58,18 +58,18 @@ fn executing_mode_excludes_create_plan_and_ask_question() {
 
 #[test]
 fn pending_mode_view_equals_chat_view() {
-    let pending = visible_tools_for_mode(&PlanMode::Pending {
+    let pending = visible_tools_for_mode(&PlanState::Pending {
         plan_id: "demo".into(),
     });
-    let chat = visible_tools_for_mode(&PlanMode::Chat);
+    let chat = visible_tools_for_mode(&PlanState::Chat);
     assert_eq!(names(&pending), names(&chat));
 }
 
 #[test]
 fn completed_mode_view_equals_chat_view() {
-    let done = visible_tools_for_mode(&PlanMode::Completed {
+    let done = visible_tools_for_mode(&PlanState::Completed {
         plan_id: "demo".into(),
     });
-    let chat = visible_tools_for_mode(&PlanMode::Chat);
+    let chat = visible_tools_for_mode(&PlanState::Chat);
     assert_eq!(names(&done), names(&chat));
 }

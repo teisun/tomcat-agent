@@ -114,7 +114,7 @@ fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
         ),
         (
             "auto_confirm_whitelist",
-            "删除该字段；如确需全自动化可使用 primitive.auto_confirm=true（日常不推荐）",
+            "删除该字段；现由 primitive.auto_confirm 控制（默认 true）",
         ),
     ];
     let hits = legacy

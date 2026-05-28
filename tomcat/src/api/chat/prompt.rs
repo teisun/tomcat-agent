@@ -1,30 +1,30 @@
-use crate::core::plan_runtime::mode::PlanMode;
+use crate::core::plan_runtime::state::PlanState;
 
-fn user_prompt_label(mode: &PlanMode) -> &'static str {
+fn user_prompt_label(mode: &PlanState) -> &'static str {
     match mode {
-        PlanMode::Chat => "Chat",
-        PlanMode::Planning => "Plan:planning",
-        PlanMode::Executing { .. } => "Plan:executing",
-        PlanMode::Pending { .. } => "Plan:pending",
-        PlanMode::Completed { .. } => "Plan:completed",
+        PlanState::Chat => "Chat",
+        PlanState::Planning => "Plan:planning",
+        PlanState::Executing { .. } => "Plan:executing",
+        PlanState::Pending { .. } => "Plan:pending",
+        PlanState::Completed { .. } => "Chat",
     }
 }
 
-fn agent_prompt_label(mode: &PlanMode) -> Option<&'static str> {
+fn agent_prompt_label(mode: &PlanState) -> Option<&'static str> {
     match mode {
-        PlanMode::Chat => None,
-        PlanMode::Planning => Some("Plan:planning"),
-        PlanMode::Executing { .. } => Some("Plan:executing"),
-        PlanMode::Pending { .. } => Some("Plan:pending"),
-        PlanMode::Completed { .. } => Some("Plan:completed"),
+        PlanState::Chat => None,
+        PlanState::Planning => Some("Plan:planning"),
+        PlanState::Executing { .. } => Some("Plan:executing"),
+        PlanState::Pending { .. } => Some("Plan:pending"),
+        PlanState::Completed { .. } => None,
     }
 }
 
-pub(crate) fn user_prompt_for_mode(mode: &PlanMode) -> String {
+pub(crate) fn user_prompt_for_mode(mode: &PlanState) -> String {
     format!("u[{}]> ", user_prompt_label(mode))
 }
 
-pub(crate) fn agent_prompt_for_mode(agent_id: &str, mode: &PlanMode) -> String {
+pub(crate) fn agent_prompt_for_mode(agent_id: &str, mode: &PlanState) -> String {
     match agent_prompt_label(mode) {
         Some(label) => format!("agent.{agent_id}[{label}]> "),
         None => format!("agent.{agent_id}> "),

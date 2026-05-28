@@ -43,8 +43,8 @@ fn spawn_single_response_server(
     (format!("http://{}", addr), hits, handle)
 }
 
-// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 PlanMode 过滤。
-// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 PlanMode::Chat 时等价）。
+// T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 PlanState 过滤。
+// 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 PlanState::Chat 时等价）。
 fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
     crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
 }
@@ -572,11 +572,17 @@ fn append_message_chain_rehydrate_reloads_context_from_transcript() {
         &ctx,
         &ctx.config.context,
         "sys",
-        &crate::AppError::invariant("append_message_chain", "tool must follow assistant+tool_calls or tool"),
+        &crate::AppError::invariant(
+            "append_message_chain",
+            "tool must follow assistant+tool_calls or tool",
+        ),
         &mut state,
     );
 
-    assert!(changed, "append_message_chain invariant 应触发一次 context rehydrate");
+    assert!(
+        changed,
+        "append_message_chain invariant 应触发一次 context rehydrate"
+    );
     assert_eq!(
         state.messages.last().and_then(|m| m.text_content()),
         Some("inner done"),
@@ -586,7 +592,8 @@ fn append_message_chain_rehydrate_reloads_context_from_transcript() {
         state
             .messages
             .iter()
-            .any(|m| m.tool_call_id.as_deref() == Some("call_1") && m.text_content() == Some("[interrupted]")),
+            .any(|m| m.tool_call_id.as_deref() == Some("call_1")
+                && m.text_content() == Some("[interrupted]")),
         "rehydrate 后应带回磁盘上已补齐的 interrupted tool result"
     );
 
@@ -614,11 +621,17 @@ fn append_message_chain_rehydrate_falls_back_when_transcript_reload_fails() {
         &ctx,
         &ctx.config.context,
         "sys",
-        &crate::AppError::invariant("append_message_chain", "tool must follow assistant+tool_calls or tool"),
+        &crate::AppError::invariant(
+            "append_message_chain",
+            "tool must follow assistant+tool_calls or tool",
+        ),
         &mut state,
     );
 
-    assert!(changed, "append_message_chain invariant 仍应触发恢复 helper");
+    assert!(
+        changed,
+        "append_message_chain invariant 仍应触发恢复 helper"
+    );
     assert!(
         state.messages.is_empty(),
         "rehydrate 失败时应退回空消息 fallback，避免继续携带坏掉的 dangling tool_calls"
@@ -743,48 +756,48 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
 
 #[test]
 fn user_prompt_for_mode_formats_all_states() {
-    use crate::core::plan_runtime::PlanMode;
+    use crate::core::plan_runtime::PlanState;
 
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanMode::Chat),
+        super::super::prompt::user_prompt_for_mode(&PlanState::Chat),
         "u[Chat]> "
     );
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanMode::Planning),
+        super::super::prompt::user_prompt_for_mode(&PlanState::Planning),
         "u[Plan:planning]> "
     );
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanMode::Executing {
+        super::super::prompt::user_prompt_for_mode(&PlanState::Executing {
             plan_id: "p1".into(),
         }),
         "u[Plan:executing]> "
     );
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanMode::Pending {
+        super::super::prompt::user_prompt_for_mode(&PlanState::Pending {
             plan_id: "p1".into(),
         }),
         "u[Plan:pending]> "
     );
     assert_eq!(
-        super::super::prompt::user_prompt_for_mode(&PlanMode::Completed {
+        super::super::prompt::user_prompt_for_mode(&PlanState::Completed {
             plan_id: "p1".into(),
         }),
-        "u[Plan:completed]> "
+        "u[Chat]> "
     );
 }
 
 #[test]
 fn agent_prompt_for_mode_uses_agent_prefix_and_hides_plan_id() {
-    use crate::core::plan_runtime::PlanMode;
+    use crate::core::plan_runtime::PlanState;
 
     assert_eq!(
-        super::super::prompt::agent_prompt_for_mode("main", &PlanMode::Chat),
+        super::super::prompt::agent_prompt_for_mode("main", &PlanState::Chat),
         "agent.main> "
     );
     assert_eq!(
         super::super::prompt::agent_prompt_for_mode(
             "main",
-            &PlanMode::Executing {
+            &PlanState::Executing {
                 plan_id: "ship-001".into(),
             }
         ),

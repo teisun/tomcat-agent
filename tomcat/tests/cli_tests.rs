@@ -5,20 +5,20 @@
 
 mod common;
 
-use async_trait::async_trait;
 use assert_cmd::Command;
+use async_trait::async_trait;
 use predicates::prelude::*;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tomcat::core::session::DEFAULT_SESSION_KEY;
 use tokio_util::sync::CancellationToken;
+use tomcat::core::session::DEFAULT_SESSION_KEY;
 use tomcat::{
-    AppConfig, AppError, BashResult, ChatContext, ChatMessage, ChatRequest, ChatResponse,
-    DirEntry, EditFileResult, EditOperation, LlmProvider, PrimitiveExecutor, PrimitiveOperation,
-    SessionManager, StreamEvent, WriteFileResult, init_context_state, run_chat_turn,
+    init_context_state, run_chat_turn, AppConfig, AppError, BashResult, ChatContext, ChatMessage,
+    ChatRequest, ChatResponse, DirEntry, EditFileResult, EditOperation, LlmProvider,
+    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -3247,8 +3247,8 @@ fn test_user_chat_resumes_last_session() {
 #[tokio::test]
 async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
     common::setup_logging();
-    let _span = info_span!("test_failed_turn_append_invariant_allows_next_turn_in_same_process")
-        .entered();
+    let _span =
+        info_span!("test_failed_turn_append_invariant_allows_next_turn_in_same_process").entered();
 
     const ENV_KEY: &str = "TOMCAT_APPEND_REHYDRATE_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
@@ -3299,8 +3299,7 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
     );
     assert!(
         state.messages.iter().any(|m| {
-            m.tool_call_id.as_deref() == Some("call_1")
-                && m.text_content() == Some("[interrupted]")
+            m.tool_call_id.as_deref() == Some("call_1") && m.text_content() == Some("[interrupted]")
         }),
         "重建后的 context_state 应保留磁盘上的 interrupted tool result"
     );

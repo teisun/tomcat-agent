@@ -61,6 +61,33 @@ fn resolve_max_output_chars(executor: &DefaultPrimitiveExecutor) -> usize {
     }
 }
 
+fn normalize_launcher_argv(
+    command: &str,
+    argv: Option<Vec<String>>,
+) -> (String, Option<Vec<String>>) {
+    let Some(mut argv) = argv else {
+        return (command.to_string(), None);
+    };
+    let trimmed = command.trim();
+    let mut parts = trimmed.split_whitespace();
+    let Some(program) = parts.next() else {
+        return (command.to_string(), Some(argv));
+    };
+    if !matches!(
+        program,
+        "sh" | "bash" | "zsh" | "cmd" | "powershell" | "pwsh"
+    ) {
+        return (command.to_string(), Some(argv));
+    }
+    let launcher_args: Vec<String> = parts.map(str::to_string).collect();
+    if launcher_args.is_empty() {
+        return (command.to_string(), Some(argv));
+    }
+    let mut merged = launcher_args;
+    merged.append(&mut argv);
+    (program.to_string(), Some(merged))
+}
+
 fn resolve_preflight_path(raw: &str, cwd_path: &std::path::Path) -> PathBuf {
     if raw == "~" {
         return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
@@ -243,8 +270,13 @@ pub(super) async fn execute_bash_impl(
     timeout_ms_override: Option<u64>,
 ) -> Result<BashResult, AppError> {
     // 空 argv 应等价于“未提供 args”，继续走 shell 模式；真 LLM 常会显式传 `args: []`。
-    let argv = argv.filter(|args| !args.is_empty());
-    let audit_cmd = match argv {
+    let argv = argv
+        .filter(|args| !args.is_empty())
+        .map(|args| args.to_vec());
+    // 真 LLM 有时会把 `sh -c` / `bash -lc` 放进 command，再把脚本正文放进 args；
+    // 这里兼容这种 launcher 形态，避免 `Command::new("sh -c")` 直接 ENOENT。
+    let (command, argv) = normalize_launcher_argv(command, argv);
+    let audit_cmd = match argv.as_deref() {
         None => command.to_string(),
         Some(args) => {
             let mut s = command.to_string();
@@ -284,7 +316,7 @@ pub(super) async fn execute_bash_impl(
     let max_output_chars = resolve_max_output_chars(executor);
 
     // 构造命令并强制管道（默认 inherit 会把输出直接打到 agent 进程标准流）。
-    let mut cmd = match argv {
+    let mut cmd = match argv.as_deref() {
         None => {
             #[cfg(unix)]
             let script = {
@@ -306,7 +338,7 @@ pub(super) async fn execute_bash_impl(
             c
         }
         Some(args) => {
-            let mut c = Command::new(command);
+            let mut c = Command::new(&command);
             c.args(args);
             c
         }

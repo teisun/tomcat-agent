@@ -17,9 +17,9 @@ use crate::core::plan_runtime::{
         plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
         TodoStatus, PLAN_FILE_SCHEMA_VERSION,
     },
-    mode::PlanMode,
     ops,
     safety::assert_plan_id_safe,
+    state::PlanState,
     PlanRuntime,
 };
 
@@ -126,7 +126,7 @@ pub fn execute(
     args: CreatePlanArgs,
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    if !matches!(mode, PlanMode::Planning) {
+    if !matches!(mode, PlanState::Planning) {
         return Err(ToolError::InvisibleInMode {
             tool: "create_plan",
             mode: mode.as_str().to_string(),
@@ -181,11 +181,16 @@ pub fn execute(
     write_plan(&path, &plan, runtime.lock_timeout_ms())?;
 
     runtime.set_active_planning_plan(plan_id.clone(), path.clone());
+    let event_payload = crate::infra::events::PlanEventPayload {
+        plan_id: plan_id.clone(),
+        path: crate::infra::platform::format_home_path(&path),
+        state: PlanFileState::Planning.as_str().to_string(),
+    };
     runtime.write_transcript_custom(serde_json::json!({
         "event": crate::infra::wire::WIRE_PLAN_CREATE,
-        "plan_id": plan_id,
-        "path": crate::infra::platform::format_home_path(&path),
-        "state": "planning",
+        "plan_id": event_payload.plan_id,
+        "path": event_payload.path,
+        "state": event_payload.state,
     }));
 
     Ok(serde_json::json!({

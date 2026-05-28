@@ -37,7 +37,11 @@ pub enum ThinkingDisplay {
 
 impl ThinkingDisplay {
     pub fn from_legacy_bool(value: bool) -> Self {
-        if value { Self::Full } else { Self::Summary }
+        if value {
+            Self::Full
+        } else {
+            Self::Summary
+        }
     }
 
     pub fn from_u8(value: u8) -> Self {

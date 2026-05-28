@@ -855,6 +855,7 @@ async fn test_context_metrics_update_event_published() -> Result<(), Box<dyn std
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: std::path::PathBuf::new(),
+        latest_plan_event: None,
         preheat: tomcat::core::compaction::preheat::Preheat::new(),
         session_obs: Default::default(),
         live: Default::default(),

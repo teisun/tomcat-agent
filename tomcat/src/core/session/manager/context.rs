@@ -14,9 +14,12 @@ use super::session_impl::generate_entry_id;
 use super::session_impl::SessionManager;
 use crate::core::compaction::preheat::Preheat;
 
-use super::types::{estimate_msg_chars, CompactionResult, ContextState, SessionContextObservation};
+use super::types::{
+    estimate_msg_chars, CompactionResult, ContextState, PlanEventRef, SessionContextObservation,
+};
 
 const DEFAULT_CONTEXT_CAP: usize = 10;
+const MAX_PLAN_SCAN: usize = 5000;
 pub(crate) const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
 
 fn entry_timestamp(entry: &TranscriptEntry) -> &str {
@@ -250,6 +253,13 @@ fn chat_message_from_entry(
     Some(msg)
 }
 
+fn extract_latest_plan_event(entries: &[TranscriptEntry]) -> Option<PlanEventRef> {
+    entries.iter().rev().find_map(|entry| match entry {
+        TranscriptEntry::Custom(custom) => PlanEventRef::from_custom_event(&custom.extra),
+        _ => None,
+    })
+}
+
 fn fold_entries_to_messages(
     entries: &[TranscriptEntry],
     system_text_len: usize,
@@ -469,17 +479,26 @@ pub fn init_context_state(
                 last_api_usage: None,
                 post_usage_appended_chars: 0,
                 transcript_path: PathBuf::new(),
+                latest_plan_event: None,
                 preheat: Preheat::new(),
                 session_obs,
                 live: super::types::ContextLiveMetrics::default(),
             });
         }
     };
-    // TODO: 这里读取了 transcript 的最后 2000 条 entries，需要优化为只读取当天 entries。
-    let mut entries = read_entries_tail(&path, super::BRANCH_MAX_ENTRIES)?;
+    let read_cap = super::BRANCH_MAX_ENTRIES.max(MAX_PLAN_SCAN);
+    let mut entries = read_entries_tail(&path, read_cap)?;
     if heal_dangling_tail_tool_call(session, &entries)? {
-        entries = read_entries_tail(&path, super::BRANCH_MAX_ENTRIES)?;
+        entries = read_entries_tail(&path, read_cap)?;
     }
+    if entries.len() >= MAX_PLAN_SCAN {
+        tracing::warn!(
+            scanned = entries.len(),
+            max_plan_scan = MAX_PLAN_SCAN,
+            "init_context_state scanned at least MAX_PLAN_SCAN transcript entries"
+        );
+    }
+    let latest_plan_event = extract_latest_plan_event(&entries);
     let today = Utc::now().date_naive();
 
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
@@ -504,6 +523,7 @@ pub fn init_context_state(
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: path,
+        latest_plan_event,
         preheat,
         session_obs,
         live: super::types::ContextLiveMetrics::default(),

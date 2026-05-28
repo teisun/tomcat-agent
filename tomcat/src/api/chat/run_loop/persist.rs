@@ -52,7 +52,9 @@ pub(crate) fn persist_turn_result(
     for message in new_messages {
         let mut chat_message = message;
         if chat_message.msg_id.is_none() {
-            let row_id = ctx.session.append_message(serde_json::to_value(&chat_message)?)?;
+            let row_id = ctx
+                .session
+                .append_message(serde_json::to_value(&chat_message)?)?;
             chat_message.msg_id = Some(row_id);
         }
         let row_id = chat_message.msg_id.clone().unwrap_or_default();

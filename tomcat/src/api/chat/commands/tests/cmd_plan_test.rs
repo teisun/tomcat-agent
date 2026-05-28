@@ -7,7 +7,7 @@ use crate::core::plan_runtime::file_store::{
     self, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
     DEFAULT_LOCK_TIMEOUT_MS, PLAN_FILE_SCHEMA_VERSION,
 };
-use crate::core::plan_runtime::PlanMode;
+use crate::core::plan_runtime::PlanState;
 use crate::AppConfig;
 
 struct EnvGuard {
@@ -56,7 +56,8 @@ fn parse_plan_build_with_id() {
     let cmd = parse_args(vec!["/plan".into(), "build".into(), "ship-001".into()]);
     assert!(matches!(
         cmd,
-        ChatCommand::Plan(PlanCommand::Build { ref plan_target }) if plan_target == "ship-001"
+        ChatCommand::Plan(PlanCommand::Build { ref plan_target })
+            if plan_target.as_deref() == Some("ship-001")
     ));
 }
 
@@ -70,7 +71,7 @@ fn parse_plan_build_with_path() {
     assert!(matches!(
         cmd,
         ChatCommand::Plan(PlanCommand::Build { ref plan_target })
-            if plan_target == "/tmp/ship-001.plan.md"
+            if plan_target.as_deref() == Some("/tmp/ship-001.plan.md")
     ));
 }
 
@@ -87,9 +88,12 @@ fn parse_plan_list() {
 }
 
 #[test]
-fn parse_plan_build_without_id_returns_usage_error() {
+fn parse_plan_build_without_id_uses_default_target() {
     let cmd = parse_args(vec!["/plan".into(), "build".into()]);
-    assert!(matches!(cmd, ChatCommand::UsageError { .. }));
+    assert!(matches!(
+        cmd,
+        ChatCommand::Plan(PlanCommand::Build { plan_target: None })
+    ));
 }
 
 #[test]
@@ -132,7 +136,7 @@ fn run_plan_build_returns_continue_for_existing_plan() {
     let outcome = run(
         &ctx,
         PlanCommand::Build {
-            plan_target: plan_id.to_string(),
+            plan_target: Some(plan_id.to_string()),
         },
     );
 
@@ -149,7 +153,84 @@ fn run_plan_build_returns_continue_for_existing_plan() {
     }
 
     assert!(
-        matches!(ctx.plan_runtime.mode(), PlanMode::Executing { ref plan_id } if plan_id == "ship-001"),
+        matches!(ctx.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-001"),
         "build 成功后 runtime 应切到 Executing"
     );
+}
+
+#[test]
+fn run_plan_build_without_target_uses_runtime_default_source() {
+    const API_ENV: &str = "TOMCAT_CMD_PLAN_BUILD_DEFAULT_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+
+    let plan_id = "ship-default";
+    let plan_path = file_store::plan_path_for_id(plan_id).expect("plan path");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: plan_id.to_string(),
+            goal: "ship the default release".to_string(),
+            state: PlanFileState::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: "2026-05-26T00:00:00Z".to_string(),
+            schema_version: PLAN_FILE_SCHEMA_VERSION,
+            todos: vec![TodoItem {
+                id: "todo-1".to_string(),
+                content: "build the release".to_string(),
+                status: TodoStatus::Pending,
+            }],
+            unknown: serde_yaml::Mapping::new(),
+        },
+        body: "## Draft\n- build the release\n".to_string(),
+    };
+    file_store::write_plan(&plan_path, &plan, DEFAULT_LOCK_TIMEOUT_MS).expect("write plan");
+    ctx.plan_runtime
+        .set_active_planning_plan(plan_id.to_string(), plan_path.clone());
+
+    let outcome = run(&ctx, PlanCommand::Build { plan_target: None });
+
+    match outcome {
+        ChatCommandOutcome::Continue { line, echo_user } => {
+            assert!(echo_user);
+            assert_eq!(
+                line,
+                format!("start building {}", plan_path.to_string_lossy())
+            );
+        }
+        ChatCommandOutcome::Handled => panic!("/plan build 默认源成功时不应被当作 handled"),
+    }
+    assert!(
+        matches!(ctx.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-default")
+    );
+}
+
+#[test]
+fn run_plan_exit_allows_pending_back_to_chat() {
+    const API_ENV: &str = "TOMCAT_CMD_PLAN_EXIT_PENDING_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    ctx.plan_runtime.set_mode_pending("pending-plan".into());
+
+    let outcome = run(&ctx, PlanCommand::Exit);
+    assert!(matches!(outcome, ChatCommandOutcome::Handled));
+    assert!(matches!(ctx.plan_runtime.mode(), PlanState::Chat));
 }

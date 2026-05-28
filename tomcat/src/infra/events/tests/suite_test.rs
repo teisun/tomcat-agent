@@ -75,6 +75,31 @@ fn extension_event_tool_hooks_use_tool_call_tool_result_wire_names() {
 }
 
 #[test]
+fn wire_plan_build_and_update_constants_are_stable() {
+    assert_eq!(wire::WIRE_PLAN_BUILD, "plan.build");
+    assert_eq!(wire::WIRE_PLAN_UPDATE, "plan.update");
+}
+
+#[test]
+fn plan_event_payload_roundtrip() {
+    let payload = PlanEventPayload {
+        plan_id: "plan_user_login_abc".into(),
+        path: "~/.tomcat/plans/plan_user_login_abc.plan.md".into(),
+        state: "executing".into(),
+    };
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["plan_id"].as_str(), Some("plan_user_login_abc"));
+    assert_eq!(
+        json["path"].as_str(),
+        Some("~/.tomcat/plans/plan_user_login_abc.plan.md")
+    );
+    assert_eq!(json["state"].as_str(), Some("executing"));
+
+    let decoded: PlanEventPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded, payload);
+}
+
+#[test]
 fn agent_event_compaction_error_serializes() {
     let e = AgentEvent::CompactionError {
         exhausted_after_retries: true,

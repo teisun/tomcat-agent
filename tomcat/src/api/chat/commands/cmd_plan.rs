@@ -5,7 +5,7 @@
 //! ```text
 //! /plan                      → PlanRuntime::enter_planning  → mode=Planning
 //! /plan exit                 → PlanRuntime::exit_to_chat   → mode=Chat
-//! /plan build <plan_id/path> → PlanRuntime::build_plan     → mode=Executing { plan_id }
+//! /plan build [plan_id/path] → PlanRuntime::build_plan     → mode=Executing { plan_id }
 //! ```
 //!
 //! P1 只闭环 `enter_planning` / `exit_to_chat` 两条；`build` 在 P6 接入
@@ -22,8 +22,8 @@ pub enum PlanCommand {
     Enter,
     /// `/plan exit`，退回 Chat。
     Exit,
-    /// `/plan build <plan_id/path>`，进入 EXEC（P6 才完整闭环）。
-    Build { plan_target: String },
+    /// `/plan build [plan_id/path]`，进入 EXEC（省略参数时走 runtime 默认源）。
+    Build { plan_target: Option<String> },
     /// J2：`/plan list`，列出 `~/.tomcat/plans/` 下所有 plan 文件的 id / state / goal。
     List,
 }
@@ -33,8 +33,11 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
         [_cmd] => ChatCommand::Plan(PlanCommand::Enter),
         [_cmd, sub] if sub == "exit" => ChatCommand::Plan(PlanCommand::Exit),
         [_cmd, sub] if sub == "list" => ChatCommand::Plan(PlanCommand::List),
+        [_cmd, sub] if sub == "build" => {
+            ChatCommand::Plan(PlanCommand::Build { plan_target: None })
+        }
         [_cmd, sub, plan_target] if sub == "build" => ChatCommand::Plan(PlanCommand::Build {
-            plan_target: plan_target.clone(),
+            plan_target: Some(plan_target.clone()),
         }),
         _ => ChatCommand::UsageError {
             message: usage_text(),
@@ -43,7 +46,7 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
 }
 
 fn usage_text() -> String {
-    "用法错误：/plan | /plan exit | /plan build <plan_id/path> | /plan list".to_string()
+    "用法错误：/plan | /plan exit | /plan build [plan_id/path] | /plan list".to_string()
 }
 
 /// `/plan` 子命令分发。`ctx.plan_runtime` 在 P1 起由 `ChatContext::from_config` 注入。
@@ -84,7 +87,17 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                     return ChatCommandOutcome::Handled;
                 }
             };
-            match rt.build_plan(&plan_target, session_id_for_plan) {
+            let build_target = match plan_target {
+                Some(target) => target,
+                None => match rt.default_build_target() {
+                    Ok(target) => target,
+                    Err(e) => {
+                        eprintln!("[plan] /plan build 失败：{}", e);
+                        return ChatCommandOutcome::Handled;
+                    }
+                },
+            };
+            match rt.build_plan(&build_target, session_id_for_plan) {
                 Ok(outcome) => {
                     for w in &outcome.warnings {
                         eprintln!("[plan] warning: {w}");

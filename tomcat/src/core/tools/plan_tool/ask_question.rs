@@ -16,8 +16,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::core::plan_runtime::{
-    mode::PlanMode,
     panels::{AskQuestionPanel, AskQuestionResult, Question, CUSTOM_OPTION_ID},
+    state::PlanState,
     PlanRuntime,
 };
 
@@ -52,7 +52,7 @@ pub async fn execute_with_timeout(
 ) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
     // B11：CHAT / Planning / Pending / Completed 都可见；EXEC 隐藏（防止 agent loop 阻塞）。
-    if matches!(mode, PlanMode::Executing { .. }) {
+    if matches!(mode, PlanState::Executing { .. }) {
         return Err(ToolError::InvisibleInMode {
             tool: "ask_question",
             mode: mode.as_str().to_string(),

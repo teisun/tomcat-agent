@@ -4,6 +4,18 @@
 
 # 上下文管理技术方案
 
+## 2026-05 Plan Recover 增补
+
+`init_context_state()` 现在除了恢复 `messages` / `preheat` 之外，还承担计划恢复所需的 transcript 尾部扫描：
+
+- `ContextState` 新增 `latest_plan_event: Option<PlanEventRef>`。
+- 初始化时会在**同一次** `read_entries_tail(...)` 结果上做反向扫描，只识别最近一条 `plan.create` / `plan.build` / `plan.update`。
+- 扫描上限固定为 `MAX_PLAN_SCAN = 5000`；超过上限会打 warning，但不会阻止上下文初始化。
+- 这里**只**做 transcript 识别与路径归一化，不做 plan 目录扫描，也不直接修改 `PlanRuntime`。
+- `latest_plan_event` 随 `ContextState` 一并返回，后续由 agent/chat 启动路径调用 `PlanRuntime::attach_from_event(...)` 回盘派生 `PlanState` 与 retain 字段。
+
+说人话：上下文初始化现在会顺手把“最近那条 plan 事件”捞出来，计划恢复不再额外扫一遍 `~/.tomcat/plans/`。
+
 ## 1. 概述
 
 ### 1.1 背景

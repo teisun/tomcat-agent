@@ -1,6 +1,32 @@
 use super::common::*;
 
 #[test]
+fn build_plan_writes_plan_build_transcript_event() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            events.lock().push(extra);
+            Ok(())
+        }));
+    }
+    write_disk_plan("eventful", PlanFileState::Planning);
+    rt.build_plan("eventful", Some("sid-a".into())).unwrap();
+
+    let entries = events.lock();
+    let event = entries
+        .iter()
+        .find(|v| v["event"] == crate::infra::wire::WIRE_PLAN_BUILD)
+        .expect("缺少 plan.build 事件");
+    assert_eq!(event["plan_id"], "eventful");
+    assert_eq!(event["state"], "executing");
+    cleanup_home(&home);
+}
+
+#[test]
 fn plan_build_requires_no_active_plan_or_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
@@ -155,7 +181,7 @@ fn plan_build_enters_exec_and_binds_active_plan_path() {
         .expect("build 成功");
 
     match rt.mode() {
-        PlanMode::Executing { plan_id } => assert_eq!(plan_id, "five_things"),
+        PlanState::Executing { plan_id } => assert_eq!(plan_id, "five_things"),
         other => panic!("expected Executing, got {other:?}"),
     }
     assert!(rt.active_planning_plan_id().is_none());
@@ -189,7 +215,7 @@ fn pending_plan_resumable_via_build() {
     assert!(matches!(outcome.prev_disk_state, PlanFileState::Pending));
     assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
     match rt.mode() {
-        PlanMode::Executing { plan_id } => assert_eq!(plan_id, "resumable"),
+        PlanState::Executing { plan_id } => assert_eq!(plan_id, "resumable"),
         other => panic!("expected Executing, got {other:?}"),
     }
     cleanup_home(&home);
@@ -206,5 +232,68 @@ fn pending_plan_session_override_warns() {
     assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
     assert!(outcome.warnings[0].contains("orig-session-key"));
     assert!(outcome.warnings[0].contains("brand-new-session"));
+    cleanup_home(&home);
+}
+
+#[test]
+fn default_build_target_prefers_planning_pending_then_path() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+
+    let rt = PlanRuntime::new("session-a");
+    rt.enter_planning().unwrap();
+    let first = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "first".into(),
+            draft: "draft-1".into(),
+            todos: vec![create_plan::TodoArg {
+                id: "t1".into(),
+                content: "step".into(),
+                status: TodoStatus::Pending,
+            }],
+        },
+    )
+    .unwrap();
+    let second = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "second".into(),
+            draft: "draft-2".into(),
+            todos: vec![create_plan::TodoArg {
+                id: "t1".into(),
+                content: "step".into(),
+                status: TodoStatus::Pending,
+            }],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        rt.default_build_target().unwrap(),
+        second["plan_id"].as_str().unwrap()
+    );
+    assert_ne!(first["plan_id"], second["plan_id"]);
+
+    let rt = PlanRuntime::new("session-a");
+    write_disk_plan("pending-default", PlanFileState::Pending);
+    rt.set_mode_pending("pending-default".into());
+    assert_eq!(rt.default_build_target().unwrap(), "pending-default");
+
+    let rt = PlanRuntime::new("session-a");
+    let external_dir = home.join("external-default");
+    std::fs::create_dir_all(&external_dir).unwrap();
+    let external_path = external_dir.join("external.plan.md");
+    write_plan_file_at(&external_path, "external_default", PlanFileState::Planning);
+    let normalized =
+        crate::infra::platform::normalize_path(&external_path.to_string_lossy()).unwrap();
+    rt.build_plan(&external_path.to_string_lossy(), Some("sid-path".into()))
+        .unwrap();
+    rt.set_mode_completed("external_default".into());
+    let _ = rt.finalize_completed_to_chat();
+    assert_eq!(
+        rt.default_build_target().unwrap(),
+        crate::infra::platform::format_home_path(&normalized)
+    );
+
     cleanup_home(&home);
 }

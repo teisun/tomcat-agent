@@ -17,12 +17,12 @@ use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
     TodoItem, TodoStatus,
 };
-use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::plan_runtime::panels::{
     Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, Question, QuestionOption,
     CUSTOM_OPTION_ID,
 };
 use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
+use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
 use tomcat::core::tools::plan_tool::{ask_question, create_plan, todos, update_plan};
@@ -154,7 +154,7 @@ async fn full_plan_lifecycle_create_build_complete() {
     let body = tokio::time::timeout(DEFAULT_TIMEOUT, async {
         // 1) /plan → Planning
         rt.enter_planning().unwrap();
-        assert!(matches!(rt.mode(), PlanMode::Planning));
+        assert!(matches!(rt.mode(), PlanState::Planning));
 
         // 2) create_plan → PlanFile 落盘 + active_planning_plan_id（G4：runtime 派生 plan_id）
         let out = create_plan::execute(
@@ -189,7 +189,7 @@ async fn full_plan_lifecycle_create_build_complete() {
 
         // 3) /plan build → EXEC + active plan path
         let outcome = rt.build_plan(&plan_id, Some("uuid-1".into())).unwrap();
-        assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+        assert!(matches!(rt.mode(), PlanState::Executing { .. }));
         assert!(matches!(outcome.prev_disk_state, PlanFileState::Planning));
         assert_eq!(
             rt.active_plan_path(),
@@ -228,7 +228,7 @@ async fn full_plan_lifecycle_create_build_complete() {
         )
         .await
         .unwrap();
-        // 6) update_plan：b completed → 全 completed → 内存切 Completed
+        // 6) update_plan：b completed → 全 completed → 瞬时 Completed 后立即回 Chat(retain)
         let out_final = update_plan::execute(
             &rt,
             update_plan::UpdatePlanArgs {
@@ -245,12 +245,11 @@ async fn full_plan_lifecycle_create_build_complete() {
         .await
         .unwrap();
         assert_eq!(out_final["plan_state_after"], "completed");
-        assert!(matches!(rt.mode(), PlanMode::Completed { .. }));
-
-        // 7) finalize → Chat
-        let pid = rt.finalize_completed_to_chat().expect("Some(plan_id)");
-        assert_eq!(pid, plan_id);
-        assert!(matches!(rt.mode(), PlanMode::Chat));
+        assert!(matches!(rt.mode(), PlanState::Chat));
+        assert_eq!(
+            rt.active_plan_path(),
+            Some(plan_path_for_id(&plan_id).unwrap())
+        );
         "ok"
     })
     .await
@@ -286,13 +285,13 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
         rt.build_plan(&plan_id, None).unwrap();
         // 模拟 Ctrl+C
         rt.demote_to_pending_on_cancel().unwrap();
-        assert!(matches!(rt.mode(), PlanMode::Pending { .. }));
+        assert!(matches!(rt.mode(), PlanState::Pending { .. }));
 
         // 续跑（N3 2026-05）：Pending 状态下，本盘 plan_id 直接 build 即可恢复 EXEC，
         // 不再需要 /plan exit 中转。
         let out = rt.build_plan(&plan_id, None).unwrap();
         assert!(matches!(out.prev_disk_state, PlanFileState::Pending));
-        assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+        assert!(matches!(rt.mode(), PlanState::Executing { .. }));
     })
     .await
     .expect("cancel→resume 超时");
@@ -317,7 +316,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
             .unwrap();
         assert_eq!(out.plan_id, "external_path_plan");
         assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
-        assert!(matches!(rt.mode(), PlanMode::Executing { .. }));
+        assert!(matches!(rt.mode(), PlanState::Executing { .. }));
 
         let out_final = update_plan::execute(
             &rt,
@@ -342,7 +341,8 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
             final_plan.frontmatter.state,
             PlanFileState::Completed
         ));
-        assert!(matches!(rt.mode(), PlanMode::Completed { .. }));
+        assert!(matches!(rt.mode(), PlanState::Chat));
+        assert_eq!(rt.active_plan_path(), Some(expected_path.clone()));
     })
     .await
     .expect("build by path 超时");

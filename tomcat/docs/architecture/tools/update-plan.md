@@ -4,6 +4,18 @@
 
 本文档定义 `update_plan` 的入参 / 出参、跨模式门控矩阵、自动派生触发点、跨 session 语义。
 
+## 2026-05 Active Binding 补充
+
+当前实现对 `update_plan` 的运行时契约已更新为：
+
+- completed plan **不再**全拒；允许继续编辑并在需要时 reopen；
+- reopen completed 时，盘 state 从 `completed -> pending`，runtime 同步切到 `Pending { id }`；
+- `update_plan` 始终**不**写 active binding：不设置 `active_plan_path`，也不负责建立 `/plan build` 意义上的绑定；
+- all-completed 路径会先把盘写成 `completed`，再经过瞬时 `Completed { id }`，立即 `finalize_completed_to_chat()` 回到 `Chat(retain)`；
+- transcript 事件固定写为 `event = "plan.update"`，payload 为 `{ plan_id, path, state }`，并继续遵守“先盘、再释锁、后事件”。
+
+以下正文若仍出现 `active_plan_id`、`plan.complete`、`completed plan 不可编辑` 等旧草稿表述，均以上述稳定契约与仓库代码为准。
+
 **说人话**：`update_plan` 是 LLM 推进 `~/.tomcat/plans/<*>.plan.md` 内 `todos[]` 状态的**主力工具**。任何模式都能调；`/plan build` 之后改的是「正在执行的 plan」，CHAT/PLAN 下改的是「指定 plan_id 的待办」。**整盘重写**仍是 `create_plan` 的事（且只 PLAN 模式能用）。
 
 ---
@@ -83,7 +95,7 @@
 |----|------|------------------|--------|
 | G1 | 任何模式都可见、单一入口；不再分裂 `todos.active_scope=plan` 分支 | `update_plan_visible_in_all_modes` | 改 plan 待办随时能改。 |
 | G2 | 复用 `todos` 的 op 引擎与文件锁；不重新实现 op 模型 | `update_plan_reuses_todos_op_engine` | 共享代码，减少漂移。 |
-| G3 | `plan_id` 路由：EXEC 缺省 → `active_plan_id`；其它模式必填 | `update_plan_requires_plan_id_outside_exec` | 改哪份 plan 必须明确。 |
+| G3 | 默认目标解析：`plan_id -> path -> active_plan_path -> (Executing/Pending 的内嵌 plan_id)` | `update_plan_requires_plan_id_outside_exec` | 改哪份 plan 必须明确，但 retain 场景允许继续沿用当前 active path。 |
 | G4 | 只能动 `todos[]`；其它 frontmatter 字段 / markdown 正文均拒 | `update_plan_rejects_non_todo_frontmatter_writes`、`update_plan_rejects_body_writes` | 别越界。 |
 | G5 | EXEC 模式下提交后触发 `state=completed` 自动派生；其它模式只改 frontmatter，不改 mode | `update_plan_in_exec_promotes_completed`、`update_plan_outside_exec_does_not_change_mode` | EXEC 才会自动收口。 |
 | G6 | 跨 session 编辑允许；同 session 不能同时 EXEC 两份 plan（build gate 不变） | `update_plan_cross_session_allowed`、`active_plan_id_unique_per_session` | 任意聊天窗口可改，开干仍受 build gate。 |
@@ -98,8 +110,8 @@
 
 | 当前 mode | `plan_id` 入参 | 默认目标 | 说人话 |
 |-----------|---------------|----------|--------|
-| `Chat` / `Planning` / `Completed` / `Pending` | **必填** | — | 自己说清楚改哪份。 |
-| `Executing` | 可省 | `session.active_plan_id`（runtime） | 默认改正在执行的那份。 |
+| 任意模式 | 可省 | 先看 `active_plan_path` retain；若当前 mode 为 `Executing / Pending`，再回退到内嵌 `plan_id` | retain / 执行态可直接沿用当前 plan。 |
+| `Chat` / `Planning` / `Completed` 且无 retain | 需显式 `plan_id` 或 `path` | — | 没有 retain 时还是要说清楚改哪份。 |
 
 ### 4.2 目标 plan.state 准入
 
@@ -108,19 +120,19 @@
 | `planning` | ✅ | 改 todos[]；不触发 mode 自动派生 |
 | `executing` | ✅（仅当 `target.session_key == 当前 session.session_key`） | 改 todos[]；EXEC 模式下可触发 state=completed 自动派生 |
 | `pending` | ✅ | 改 todos[]；不触发 mode 自动派生（要续跑请用 `/plan build`） |
-| `completed` | ❌ tool error | 已结案的 plan 不让乱改；如需重新规划用 `create_plan` 开新 plan |
+| `completed` | ✅ | 先改 todos[]；若改后不再 all-completed，则盘 `completed -> pending`，runtime 同步切 `Pending { id }` |
 
 > 「`executing` + 跨 session」拒绝原因：避免另一个 session 在你执行中改你手上 todo 造成竞争。CHAT/PLAN 期的 plan（`session_key == null`）跨 session 改无问题。
 
 ### 4.3 op × 目标 plan.state
 
-| op | `planning` | `executing` | `pending` |
-|----|-----------|-------------|-----------|
-| `upsert`（pending） | ✓ | ✓（仅本 session） | ✓ |
-| `upsert`（in_progress） | ✗（plan 还没 build，标 in_progress 没意义） | ✓（仅本 session） | ✗（先 `/plan build` 续跑） |
-| `set_status(in_progress)` | ✗ | ✓ | ✗ |
-| `set_status(completed/cancelled)` | ✓ | ✓（触发自动派生检查） | ✓ |
-| `remove` | ✓ | ✓ | ✓ |
+| op | `planning` | `executing` | `pending` | `completed` |
+|----|-----------|-------------|-----------|-------------|
+| `upsert`（pending） | ✓ | ✓（仅本 session） | ✓ | ✓（reopen 后转 pending） |
+| `upsert`（in_progress） | ✗（plan 还没 build，标 in_progress 没意义） | ✓（仅本 session） | ✗（先 `/plan build` 续跑） | ✗（reopen 仍先回 pending） |
+| `set_status(in_progress)` | ✗ | ✓ | ✗ | ✗ |
+| `set_status(completed/cancelled)` | ✓ | ✓（触发自动派生检查） | ✓ | ✓（若仍全 completed，则盘继续保持 completed） |
+| `remove` | ✓ | ✓ | ✓ | ✓（reopen 后转 pending） |
 
 ---
 
@@ -131,13 +143,13 @@
 ```json
 {
   "name": "update_plan",
-  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Provide `plan_id` to target a specific plan; in EXEC mode you may omit it to default to the session's active plan. Cross-session editing is allowed for plans whose state is planning or pending; an executing plan can only be edited by the session that owns it. Plans whose state is completed cannot be edited.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.state == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
+  "description": "Incrementally update a PlanFile's todos[].\n\nUse this whenever you want to:\n- mark a todo in_progress / completed / cancelled\n- add a new todo\n- rewrite or prune an existing todo list\n\nCallable in ANY mode. Target resolution order is: explicit `plan_id` -> explicit `path` -> retained `active_plan_path` -> current Executing/Pending state. Cross-session editing is allowed for plans whose state is planning, pending, or completed; an executing plan can only be edited by the session that owns it. Completed plans may be reopened: if your edit makes the plan no longer all-completed, disk state changes from completed -> pending.\n\nReturn value: every successful call returns full items snapshot (plus path / warnings / active_in_progress); you do not need to re-read the plan file.\n\nRules: stable id per item; status in pending|in_progress|completed|cancelled; at most one in_progress per PlanFile; in_progress is only allowed when plan.state == executing; replace=true replaces the entire todos[] list with the provided upsert results.",
   "parameters": {
     "type": "object",
     "properties": {
       "plan_id": {
         "type": "string",
-        "description": "Target plan id (e.g. plan_my_goal_a1b2c3d4). Required outside EXEC mode; optional in EXEC (defaults to session.active_plan_id)."
+        "description": "Target plan id (e.g. plan_my_goal_a1b2c3d4). Optional when runtime already retains an active plan path; otherwise required unless `path` is provided."
       },
       "path": {
         "type": "string",
@@ -241,12 +253,11 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
                                                                 ▼
                             ┌──────────────────────────────────────────────────────┐
                             │ runtime hook (EXEC 模式 + target.state==executing 时): │
-                            │    all todos completed? ──▶ PlanRuntime.on_all_todos_completed()  │
+                            │    all todos completed? ──▶ code review / verifier    │
                             │       ① write frontmatter.state = completed           │
-                            │       ② swap reminder (EXECUTOR → 无)                 │
-                            │       ③ user prefix → 无                              │
-                            │       ④ catalog swap (EXEC → CHAT)                    │
-                            │       ⑤ transcript: plan.complete                     │
+                            │       ② 瞬时 set_mode_completed()                     │
+                            │       ③ finalize_completed_to_chat() -> Chat(retain)  │
+                            │       ④ transcript 仍写 plan.update                   │
                             └──────────────────────────────────────────────────────┘
                                                                 │
                                                                 ▼
@@ -275,7 +286,7 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 
 | 目标 `plan.state` | 操作 | 结果 |
 |------------------|------|------|
-| `completed` | 任意 op | ❌ `CrossSessionDenied("plan is completed")` |
+| `completed` | 任意 op | ✅ 允许；若改后不再 all-completed，则 reopen 为 `pending` |
 | `planning` / `pending` | `set_status: in_progress` | ❌ `BadOp("in_progress only allowed in executing")` |
 
 ---
@@ -284,9 +295,9 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 
 | 场景 | 处理 | 说人话 |
 |------|------|--------|
-| 同一 session 同时改两份 plan（CHAT/PLAN 期，target.state=planning） | ✓ 允许（这两份 plan 与 active_plan_id 无关） | 改谁都行，反正没在跑。 |
-| 同一 session 在 EXEC（active_plan_id=P）调 `update_plan(plan_id=P)` | ✓ 默认 op；可省 plan_id | 改自己手上的 plan。 |
-| 同一 session 在 EXEC（active_plan_id=P）调 `update_plan(plan_id=Q)` 改另一份 planning/pending 的 Q | ✓ 允许（只要 Q.mode ∈ {planning, pending}）；warning「正在 EXEC P，建议先稳定本盘」 | 顺手补另一份的 todos OK，但要注意。 |
+| 同一 session 同时改两份 plan（CHAT/PLAN 期，target.state=planning） | ✓ 允许（这两份 plan 与 active binding 无关） | 改谁都行，反正没在跑。 |
+| 同一 session 在 EXEC（active plan=P）调 `update_plan(plan_id=P)` | ✓ 默认 op；可省 plan_id | 改自己手上的 plan。 |
+| 同一 session 在 EXEC（active plan=P）调 `update_plan(plan_id=Q)` 改另一份 planning/pending/completed 的 Q | ✓ 允许（只要 Q 不在别的 session executing） | 顺手补另一份的 todos OK，但要注意。 |
 | 跨 session 改同一份 plan（target.state=planning/pending） | ✓ 允许 | plan 没绑 session 期，任意 session 改。 |
 | 跨 session 改 `target.state=executing` 的 plan | ❌ tool error，提示「该 plan 正由 session X 执行」 | 别越界。 |
 | 同进程并发 `update_plan` 同一份 plan | tokio Mutex 串行化 | 同进程排队写。 |
@@ -296,20 +307,21 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 
 ## 8. 自动派生与 EXEC 收口
 
-仅当**三者同时成立**才触发 `mode = completed` 自动派生：
+仅当**三者同时成立**才触发 completed 收口：
 
 1. 调用方 session.mode == `Executing`；
 2. `target.state == executing` 且 `target.session_key == 当前 session.session_key`；
 3. 本次提交后所有 `todos[*].status == completed`。
 
-满足时，runtime 在**同一把文件锁**内追加：
+满足时，runtime 会在 verifier/code-review 闭环后：
 
 - 写 `frontmatter.state = completed`；
-- swap reminder（EXECUTOR → 无）、user prefix → 无、catalog 复位 CHAT；
-- 清 `runtime.active_plan_id`；
-- transcript：追加 `plan.complete` 自定义事件。
+- 瞬时切到 `Completed { id }`；
+- 立即 `finalize_completed_to_chat()` 回 `Chat(retain)`；
+- 保留 `active_plan_path` / `active_planning_plan_id`；
+- transcript 仍只追加 `plan.update` 自定义事件。
 
-> 其他模式（CHAT/PLAN/Completed/Pending）调 `update_plan` 即使把所有 todo 标 completed，**也只更新 frontmatter，不触发 mode 转移**——因为 plan 根本没在执行。要执行请走 `/plan build`。
+> 其他模式（CHAT/PLAN/Completed/Pending）调 `update_plan` 即使把所有 todo 标 completed，**也只更新 frontmatter，不触发执行态收口**——因为 plan 根本没在执行。要执行请走 `/plan build`。
 
 `cancel_token` 转 `pending` 仍由 runtime 监听处理，与本工具无关。
 
@@ -329,9 +341,8 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 
 | 触发 | 反馈 | 说人话 |
 |------|------|--------|
-| `plan_id` 缺失且非 EXEC | tool error，usage「在 CHAT/PLAN/Completed/Pending 模式必须传 plan_id」 | 改哪个说清楚。 |
+| `plan_id` / `path` 缺失且 runtime 无 retain | tool error，usage「请提供 plan_id/path，或先通过 /plan build 建立 retain」 | 改哪个说清楚。 |
 | `plan_id` 解析不到文件 | tool error | 编错 id。 |
-| `target.state == completed` | tool error，usage「completed plan 已结案；如需重新规划用 `create_plan` 开新 plan」 | 已结案别改。 |
 | 跨 session 改 `executing` plan | tool error，usage「该 plan 正由 session X 执行」 | 跨 session 不许动正在跑的。 |
 | `set_status(in_progress)` 且 `target.state != executing` | tool error | plan 没在 EXEC 标 in_progress 没意义。 |
 | 同 plan 两个 `in_progress` | tool error；整批回滚 | 一个 plan 文件最多一个在干。 |

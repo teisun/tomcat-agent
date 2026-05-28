@@ -22,8 +22,9 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{update_plan_locked, write_plan, PlanFileState, TodoStatus},
-    mode::PlanMode,
-    ops, review, verify, PlanRuntime,
+    ops, review,
+    state::PlanState,
+    verify, PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
@@ -91,13 +92,6 @@ pub async fn execute(
         let target_plan_id = plan.frontmatter.plan_id.clone();
         let plan_state_before = plan.frontmatter.state;
 
-        // N2：completed 全拒。
-        if matches!(plan_state_before, PlanFileState::Completed) {
-            return Err(ToolError::CrossSessionDenied(format!(
-                "plan {target_plan_id} 已 completed，无法再编辑"
-            )));
-        }
-
         enforce_cross_session_policy(runtime, &plan.frontmatter, plan_state_before)?;
 
         // G2 state 矩阵闸门：先做语义校验，再下沉到 ops 引擎。
@@ -106,8 +100,13 @@ pub async fn execute(
         apply_shared_todo_ops(&mut plan.frontmatter.todos, &args.ops, args.replace)?;
 
         let warnings: Vec<String> = Vec::new();
-        let derived_completed = matches!(plan_state_before, PlanFileState::Executing)
-            && ops::all_completed(&plan.frontmatter.todos);
+        let all_completed = ops::all_completed(&plan.frontmatter.todos);
+        let derived_completed =
+            matches!(plan_state_before, PlanFileState::Executing) && all_completed;
+
+        if matches!(plan_state_before, PlanFileState::Completed) && !all_completed {
+            plan.frontmatter.state = PlanFileState::Pending;
+        }
 
         // E2：在 body 的 `## Todos Board` 标记区间内自动重写当前 todos 状态视图。
         rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
@@ -217,6 +216,24 @@ pub async fn execute(
     };
     runtime.refresh_notifier().notify(&snapshot);
 
+    if matches!(plan_state_before, PlanFileState::Completed)
+        && matches!(plan_state_after, PlanFileState::Pending)
+    {
+        runtime.set_mode_pending(target_plan_id.clone());
+    }
+
+    let event_payload = crate::infra::events::PlanEventPayload {
+        plan_id: target_plan_id.clone(),
+        path: crate::infra::platform::format_home_path(&path),
+        state: plan_state_after.as_str().to_string(),
+    };
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_UPDATE,
+        "plan_id": event_payload.plan_id,
+        "path": event_payload.path,
+        "state": event_payload.state,
+    }));
+
     Ok(serde_json::json!({
         "plan_id": target_plan_id,
         "path": crate::infra::platform::format_home_path(&path),
@@ -250,6 +267,7 @@ async fn run_verifier_after_code_review(
         plan.frontmatter.state = PlanFileState::Completed;
         write_plan(path, plan, runtime.lock_timeout_ms())?;
         runtime.set_mode_completed(target_plan_id.to_string());
+        let _ = runtime.finalize_completed_to_chat();
         Ok((PlanFileState::Completed, verify_json))
     } else {
         warnings
@@ -273,7 +291,7 @@ fn resolve_target_plan_path(
     if let Some(path) = runtime.active_plan_path() {
         return Ok(path);
     }
-    if let PlanMode::Executing { plan_id } | PlanMode::Pending { plan_id } = runtime.mode() {
+    if let PlanState::Executing { plan_id } | PlanState::Pending { plan_id } = runtime.mode() {
         return runtime
             .resolved_plan_path(&plan_id)
             .map_err(ToolError::BadArgs);

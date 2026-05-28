@@ -2,6 +2,24 @@
 
 本文为 [Architecture](../Architecture.md) 中第 13 节的详细设计，总览见主文档。
 
+## 2026-05 PlanRuntime 启动挂接补充
+
+agent/chat 进入主循环前，启动顺序新增一条 plan 恢复挂接：
+
+1. 先调用 `init_context_state(...)` 组装上下文；
+2. 从返回的 `ContextState.latest_plan_event` 读取最近的 `plan.create/build/update`；
+3. 调用 `PlanRuntime::attach_from_event(...)` 回盘派生运行时状态。
+
+当前实现约束：
+
+- `attach_from_event(None)` 保持 `Chat`；
+- `plan.create` 只恢复 `active_planning_plan_id`；
+- `plan.build` / `plan.update` 会恢复 `active_plan_path`，并且仅在盘 state 为 `pending / executing` 时显式恢复 `PlanState`；
+- 盘 state 为 `planning / completed` 时，agent loop 仍以 `Chat` 装配 prompt 和 catalog；
+- `Completed` 是瞬时态，不作为稳定 prompt/cursor label 出现在用户面前。
+
+说人话：agent loop 现在在装历史上下文时，顺便把 active plan 的恢复线索也带进来了；后面装 prompt 前再把 runtime 对齐一次。
+
 ---
 
 ## 13.1 概述与设计目标

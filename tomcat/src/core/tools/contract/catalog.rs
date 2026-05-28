@@ -47,7 +47,7 @@ pub struct BuiltinToolCatalogEntry {
     /// 默认 `false`：进入 chat_loop 默认 LLM 工具集；`true` 时：
     /// - 工具仍在 `BUILTIN_TOOL_CATALOG` 中（保持单一事实源、`tool-catalog.md` 文档完整）；
     /// - 不进 `build_function_definitions_for_chat_default()`（chat_loop 默认视图）；
-    /// - 由 `PlanRuntime::visible_tools_for_mode(PlanMode)` 在 PLAN/EXEC 模式时显式合入。
+    /// - 由 `PlanRuntime::visible_tools_for_mode(PlanState)` 在 PLAN/EXEC 模式时显式合入。
     ///   详见 [`plan-runtime.md`](../../../../docs/architecture/plan-runtime.md) §4.1 R6。
     pub plan_only: bool,
     /// 调用本工具是否需要等待用户交互（如 `ask_question` 在 CLI/IDE panel 阻塞 await）。

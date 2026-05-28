@@ -505,6 +505,28 @@ async fn execute_bash_empty_argv_uses_shell_mode() {
 }
 
 #[tokio::test]
+async fn execute_bash_shell_launcher_command_merges_with_argv() {
+    let dir = std::env::temp_dir().join("tomcat_exec_bash_shell_launcher");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let argv = vec!["printf shell-launch-ok".to_string()];
+    let res = exec
+        .execute_bash("sh -c", Some(&path_str), "p1", Some(&argv), None)
+        .await
+        .unwrap();
+    assert_eq!(res.exit_code, 0);
+    assert_eq!(res.stdout.trim(), "shell-launch-ok");
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
 async fn execute_bash_tokens_no_longer_trigger_path_gate() {
     let dir = std::env::temp_dir().join("tomcat_exec_bash_url");
     std::fs::create_dir_all(&dir).unwrap();
@@ -870,8 +892,10 @@ async fn require_user_confirmation_read_returns_true() {
 
 #[tokio::test]
 async fn require_user_confirmation_deny_returns_false() {
+    let mut cfg = PrimitiveConfig::default();
+    cfg.auto_confirm = false;
     let exec = DefaultPrimitiveExecutor::new(
-        PrimitiveConfig::default(),
+        cfg,
         Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
         make_gate(&PathBuf::from("/nonexistent_pi_workspace")),

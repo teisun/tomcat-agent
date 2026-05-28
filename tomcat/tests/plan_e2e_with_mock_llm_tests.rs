@@ -26,9 +26,9 @@ use parking_lot::Mutex;
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFileState, TodoStatus,
 };
-use tomcat::core::plan_runtime::mode::PlanMode;
 use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
 use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
+use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
@@ -336,11 +336,12 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
         .unwrap();
     }
 
-    // 全 completed → 内存 mode 自动 set_mode_completed
-    match rt.mode() {
-        PlanMode::Completed { plan_id: pid } => assert_eq!(pid, plan_id),
-        other => panic!("expected Completed, got {other:?}"),
-    }
+    // 全 completed → 瞬时 Completed 后立即回 Chat(retain)
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(
+        rt.active_plan_path(),
+        Some(plan_path_for_id(&plan_id).unwrap())
+    );
     // 6 次 update_plan → 6 次 panel refresh
     let snaps = panel.snapshots.lock().clone();
     assert_eq!(snaps.len(), 6, "应触发 6 次 panel snapshot");
@@ -440,7 +441,7 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
     let demoted = rt.demote_to_pending_on_cancel().unwrap();
     assert_eq!(demoted.as_deref(), Some(plan_id.as_str()));
     match rt.mode() {
-        PlanMode::Pending { plan_id: pid } => assert_eq!(pid, plan_id),
+        PlanState::Pending { plan_id: pid } => assert_eq!(pid, plan_id),
         other => panic!("expected Pending, got {other:?}"),
     }
 

@@ -1,6 +1,14 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-28 11:15 | ACTIVE | develop | — |
+| Nibbles | 2026-05-29 00:59 | ACTIVE | develop | — |
+
+### 2026-05-29 | plan active-binding v4-g implementation + acceptance
+
+- **范围**：在 `develop` 工作树上完成 PlanRuntime active binding v4-g 收口：`PlanMode -> PlanState` 正名、`mode.rs` 删除并由 `state.rs` 接管、`plan.create/build/update` 事件恢复链路落地、`/plan build` 默认源顺序与 `/plan exit` 语义对齐、`update_plan` completed→pending reopen / auto-finalize→Chat(retain) 收口、架构文档（`plan-runtime.md` / `context-management.md` / `agent-loop.md` / `tools/{create-plan,planner,update-plan}.md`）回写。
+- **评审/补漏**：全量回归首次在 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 暴露真实 LLM bash launcher 兼容缺口: 当模型把 `sh -c` / `bash -lc` 放进 `command`、再把脚本正文放进 `args` 时，后台 bash 会把整串 launcher 当成可执行文件名，出现 `ENOENT`。本轮在同步 bash 与后台 bash 两条路径补 `launcher + args` 归一化兼容，并新增单测 `execute_bash_shell_launcher_command_merges_with_argv`、`spawn_shell_launcher_command_merges_with_argv` 锁住该回归。
+- **阶段 T（针对 plan/binding）**：`cargo test --no-run`、`cargo test --lib -- --test-threads=1`、`cargo test --test plan_runtime_integration_tests -- --nocapture --test-threads=1`、`cargo test --test plan_e2e_with_mock_llm_tests -- --nocapture --test-threads=1`、`cargo test --release --test cli_tests test_user_background_bash_autofeed_real_llm_cli -- --nocapture --test-threads=1` 通过。
+- **阶段 T（全量验收）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all > .integration_test_output.log 2>&1` 二次复跑后 `EXIT_CODE=0`；`release` / `clippy` / `lib` / `integration-parallel` / `integration-serial` 全绿，日志末尾为 `=== 全量测试通过 ===`。
+- **看板**：`TASK_BOARD_002/tasks/` 当前无与本次 `develop` 工作树实现直接对应的 `PENDING_INTEGRATION` 任务卡，因此本轮未改 task board，只更新 `docs/status/develop.md`。
 
 ### 2026-05-28 | post-merge integration: 12-commit batch (4e7e24c..d2a11cd)
 

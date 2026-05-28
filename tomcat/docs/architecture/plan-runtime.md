@@ -1,8 +1,63 @@
 # PlanRuntime：`todos` 工具、PLAN 模式与 `/plan build` 的运行时编排
 
-本文档是 **T2-P1-002 | plan-mode-enhance** 的总览级运行时编排方案，承接 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 提供的 `CheckpointStore`，并把 **PLAN 模式（Planner / AskQuestion / CreatePlan / UpdatePlan / Reviewer）** 与 **执行态（`update_plan` 推进 + `todos` scratchpad + TodosPanel）** 串成一个闭环。各 LLM 工具与 PLAN 模式内部细节见 `tools/` 子目录下的独立 spec：[`tools/planner.md`](./tools/planner.md)、[`tools/create-plan.md`](./tools/create-plan.md)、[`tools/update-plan.md`](./tools/update-plan.md)、[`tools/ask-question.md`](./tools/ask-question.md)、[`tools/todos.md`](./tools/todos.md)、[`tools/reviewer.md`](./tools/reviewer.md)。当前仓库尚未落地 `todos` / `update_plan` / `/plan`；现状 chat 本地命令仍只有 `/path`、`/help`、`/thinking`、`/ckpt`、`/restore`（见 [`src/api/chat/commands/parse.rs`](../../src/api/chat/commands/parse.rs)）。
+本文档是 **T2-P1-002 | plan-mode-enhance** 的总览级运行时编排方案，承接 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 提供的 `CheckpointStore`，并把 **PLAN 模式（Planner / AskQuestion / CreatePlan / UpdatePlan / Reviewer）** 与 **执行态（`update_plan` 推进 + `todos` scratchpad + TodosPanel）** 串成一个闭环。各 LLM 工具与 PLAN 模式内部细节见 `tools/` 子目录下的独立 spec：[`tools/planner.md`](./tools/planner.md)、[`tools/create-plan.md`](./tools/create-plan.md)、[`tools/update-plan.md`](./tools/update-plan.md)、[`tools/ask-question.md`](./tools/ask-question.md)、[`tools/todos.md`](./tools/todos.md)、[`tools/reviewer.md`](./tools/reviewer.md)。仓库当前实现已落地 `/plan`、`create_plan`、`update_plan`、`todos` 与 reviewer / verifier / transcript recover 主链；较早阶段的未实现描述以本文前置的 **v4-g 生效说明** 为准。
 
 本文按 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。
+
+## 2026-05 Active Binding v4-g 生效说明
+
+以下规则已在仓库实现，优先级高于本文较早阶段的草稿描述：
+
+- 运行时字段只有 `active_planning_plan_id` 与 `active_plan_path` 两个；`active_plan_id` 只是 helper，不是第三个持久字段。
+- `PlanState` 是当前实现名；稳定态为 `Chat / Planning / Pending / Executing`，`Completed` 仅是 `update_plan` 收口中的瞬时态。
+- **只有** `/plan build` 会写 active binding；binding 的有效定义是 `active_plan_path + PlanState 内嵌 plan_id`。`create_plan`、`update_plan`、`/plan exit`、recover 都不直接写 binding。
+- transcript 自定义事件统一使用顶层 `event` 字段，计划相关只认 `plan.create` / `plan.build` / `plan.update`；payload 统一为 `{ plan_id, path, state }`。
+- 所有计划事件都遵循“先盘、再释锁、后写事件”：先把 `.plan.md` 写成功，再追加 transcript 自定义事件。
+- recover 不再扫 `~/.tomcat/plans/` 全目录，也不再做 orphan executing demote；启动时由 `init_context_state()` 单次反向扫描 transcript 尾部，提取 `latest_plan_event`，再交给 `PlanRuntime::attach_from_event(...)` 回盘派生。
+- recover 只显式恢复 `pending / executing` 到 `PlanState`；若盘上是 `planning / completed`，则保持 `Chat`，但对 `build/update` 事件保留 `active_plan_path` 作为 retain。
+- `/plan build` 现在允许省略参数，默认源顺序固定为：`active_planning_plan_id -> Pending { id } -> active_plan_path`。
+- `/plan exit` 只做 state 切换：允许 `Planning / Pending -> Chat`；不写事件、不清字段。
+- `update_plan` 已解除 completed 全拒：completed plan 可 reopen；reopen 时盘 `completed -> pending`，runtime 同步切 `Pending { id }`，但依旧**不**写 binding。
+- all-completed 收口路径为：盘 `completed` -> 运行时瞬时 `Completed { id }` -> `finalize_completed_to_chat()` 立即回 `Chat(retain)`；`finalize_completed_to_chat()` 不再清 `active_plan_path` / `active_planning_plan_id`。
+- CLI prompt 不把 `Completed` 当作稳定用户可见模式；retain 后看到的仍是 `u[Chat]>`。
+
+### 字段责任（现行实现）
+
+| 字段 / helper | 所在处 | 谁会写 | 当前职责 |
+|------|------|------|------|
+| `active_planning_plan_id` | `PlanRuntime` | `create_plan`、`attach_from_event(plan.create)` | 记住最近一份 planning 草稿，供 `/plan build` 缺省目标优先命中。 |
+| `active_plan_path` | `PlanRuntime` | `/plan build`、`attach_from_event(plan.build/update)` | 记住当前绑定/retain 的真实 plan 路径，供 `update_plan` 缺省路由与 build retain 续接。 |
+| `active_plan_id()` | `PlanState` helper | 无单独写入 | 从 `Pending / Executing / Completed` 内嵌的 `plan_id` 读值；它不是第三个 runtime 字段。 |
+
+### Transcript 事件 Schema（现行实现）
+
+| 事件 | 写入方 | payload | 备注 |
+|------|--------|---------|------|
+| `plan.create` | `create_plan` | `{ plan_id, path, state: "planning" }` | 只表明草稿已落盘，不建立 binding。 |
+| `plan.build` | `/plan build` | `{ plan_id, path, state }` | 唯一建立 active binding 的动作。 |
+| `plan.update` | `update_plan` | `{ plan_id, path, state }` | 反映 plan 盘状态变更；`state` 仅是 fast cache，recover 仍以盘为准。 |
+
+三类事件都遵循同一铁律：**先盘、再释锁、后事件**。
+
+### Recover 流程（现行实现）
+
+1. `init_context_state()` 读取 transcript 尾部，在 `MAX_PLAN_SCAN = 5000` 上限内反向扫描最近一条 `plan.create/build/update`。
+2. 识别结果以 `latest_plan_event` 放进 `ContextState`，agent loop 启动时调用 `PlanRuntime::attach_from_event(...)`。
+3. `plan.create` 只恢复 `active_planning_plan_id`；`plan.build` / `plan.update` 恢复 `active_plan_path`。
+4. 回盘读取 `frontmatter.state` 后，仅 `pending / executing` 显式恢复 `PlanState`；`planning / completed` 统一回到 `Chat(retain)`；目标文件丢失则降为 `Chat(no retain)`。
+
+### 状态图（现行实现）
+
+```text
+Chat --/plan--> Planning --/plan build--> Executing
+Chat <--/plan exit-- Pending <--cancel/abort-- Executing
+Chat <--finalize-- Completed <--all completed + verify/code-review-- Executing
+Chat <--/plan exit-- Planning
+Pending --/plan build--> Executing
+Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt 标签。
+```
+
+下文若仍出现 `active_plan_id`、`PlanMode`、`plan.enter / plan.exit / plan.complete / plan.pending`、`u[Plan:completed]>` 等历史草稿词汇，均以上述“生效说明 / 字段责任 / event schema / recover 流程”为准。
 
 **说人话**：这篇文档回答四件事。第一，**PLAN 模式不是 LLM 工具**——`/plan` 是本地 slash 命令切换会话状态，进入后系统注入提示词并把 catalog 切到「全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单」。第二，`/plan build <plan_id/path>` 是唯一进入执行态的入口；reviewer 仅辅助，不做 verdict gate。第三，**`todos` 和 [`update_plan`](./tools/update-plan.md) 任何模式都可见**——`todos` 写 `TodoFile`（session 本地 scratchpad），`update_plan` 写 `PlanFile.frontmatter.todos[]` / `milestones[]`（按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随当前 active plan path）；二者共享 `apply_todos_op` op 引擎，提示词分裂。**TodoRuntime / PlanRuntime 都是 per-session OOD 对象，挂在 `ChatContext` 上**。第四，reviewer 是 internal subagent dispatch（与 codex `codex_delegate.rs` 同构），由 `CreatePlan` 工具内部同步阻塞调用，**不**进 catalog。
 
@@ -23,16 +78,16 @@
 | **`update_plan` 工具** | 增量编辑 PlanFile frontmatter 的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "update_plan"`；详见 [`tools/update-plan.md`](./tools/update-plan.md) | 任何模式可见；只能动 `todos[]` / `milestones[]`；EXEC/Pending 缺省取当前 active plan path，其它模式传 `plan_id` 或 `path`；跨 session 修订有边界 | 推进 plan 待办用这个。 |
 | **CreatePlan** | PLAN 模式下创建 / 重写 `PlanFile` 的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "create_plan"`；详尽 schema 见 [`tools/create-plan.md`](./tools/create-plan.md) | 仅 `mode == Planning` 时可见；工具名保留不改 | 计划文件主要创建入口。 |
 | **AskQuestion** | PLAN 模式下结构化向用户提问的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "ask_question"`；schema 见 [`tools/ask-question.md`](./tools/ask-question.md) | 仅 `mode == Planning` 时可见；单次 2-4 题、每题 2-4 选项 | 让模型问问题，而不是自己脑补。 |
-| **PlanMode（运行态阶段）** | 当前会话在计划闭环里的阶段 | `Chat` / `Planning` / `Executing` / `Completed` / `Pending` | `/plan` 命令族只改变本地 chat 运行态；`PlanMode` **不是** LLM 工具名 | 计划阶段是会话状态。 |
+| **PlanState（运行态阶段）** | 当前会话在计划闭环里的阶段 | `Chat` / `Planning` / `Executing` / `Pending` + 瞬时 `Completed` | `/plan` 命令族只改变本地 chat 运行态；`PlanState` **不是** LLM 工具名 | 计划阶段是会话状态。 |
 | **Reviewer** | 由 `CreatePlan` 工具内部派发的子 Agent | `internal subagent dispatch`；不进 catalog；详见 [`tools/reviewer.md`](./tools/reviewer.md) | 同步阻塞；输出 `summary` 自由文本；**不**做 verdict gate；改稿权由 runtime 内部参数 `[reviewer].default_allow_edit` 控制 | 审稿员是子 Agent，只挑刺，不当法官。 |
 | **TodoRuntime** | 单 session 内 `TodoFile` 的内存映射与 IO 入口 | `ChatContext.todo_runtime: TodoRuntime`；详见 §6 | per-session 单实例；管 `active_todos_id` / 内存 items / 节流 panel 推送 / IO | 一个聊天会话一个 todo 大管家。 |
-| **PlanRuntime** | 单 session 内 `PlanFile`、PLAN/EXEC mode、reviewer 派发、TodosPanel 投影、checkpoint hook 的编排层 | `ChatContext.plan_runtime: PlanRuntime`；详见 §6 | per-session 单实例；`mode` / `active_plan_id` / build gate 全在里面 | 一个会话一个计划大管家。 |
+| **PlanRuntime** | 单 session 内 `PlanFile`、PLAN/EXEC mode、reviewer 派发、TodosPanel 投影、checkpoint hook 的编排层 | `ChatContext.plan_runtime: PlanRuntime`；详见 §6 | per-session 单实例；`mode` / `active_planning_plan_id` / `active_plan_path` / build gate 全在里面 | 一个会话一个计划大管家。 |
 | **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)） | `AgentRegistry::spawn_subagent_internal(...)` | 复用 [`multi-agent.md`](./multi-agent.md) §14 基础设施；不进 catalog；`allowed_tools` 由调用方硬编码 | 内部派子 Agent，模型看不到。 |
 | **`/plan build`** | 进入执行态的唯一入口 | 本地 slash 命令 `/plan build <plan_id/path>` | runtime 写 `session_key/id`、swap reminder（PLANNER → EXECUTOR）、切换可见 prompt 与 catalog | 用户拍板开干的开关。 |
-| **`/plan exit`** | 退出 PLAN 模式回 CHAT | 本地 slash 命令；**仅 PLAN 模式可用** | 不写盘；保留 PlanFile 不动；reminder/catalog 复位为 CHAT | 不想再规划了，先离开 PLAN。 |
+| **`/plan exit`** | 退出 plan 交互态回 CHAT | 本地 slash 命令；当前实现允许 `Planning / Pending -> Chat` | 不写盘；不清 `active_planning_plan_id` / `active_plan_path`；reminder/catalog 复位为 CHAT | 只是退出当前模式，不是把 plan 弄没。 |
 | **cancel_token** | 进程被打断的信号（Ctrl+C / SIGTERM / 父 abort） | tokio cancel token；runtime hook | EXEC 期被截断 → 运行态 mode 设 `pending`，PlanFile frontmatter `state = pending` | 中途打断当暂停处理。 |
 | **system_reminder（PLANNER / EXECUTOR）** | 进入 PLAN/EXEC 时注入到 transcript 的 `<system_reminder>` | 进程内常量；注入到 **system 区段尾部**；详见 [`tools/planner.md`](./tools/planner.md) §6 | 仅在当前 mode 期间存在；切走自动消失 | 模式提示词，挂 system。 |
-| **CLI prompt helper** | PLAN/EXEC/CHAT 下统一渲染 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>` 及对应 agent prompt | `src/api/chat/prompt.rs`；详见 §5.5 | 调用侧不得手写 prompt；CHAT agent prompt 保持 `agent.<id>>` | prompt 显示一处生成。 |
+| **CLI prompt helper** | PLAN/EXEC/CHAT 下统一渲染 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` 及对应 agent prompt | `src/api/chat/prompt.rs`；详见 §5.5 | `Completed` 对用户侧折叠显示为 `Chat`；调用侧不得手写 prompt | prompt 显示一处生成。 |
 
 **时间点钉死**：本文中的"进入执行态"专指 **用户显式 `/plan build <plan_id/path>`** 之后；reviewer 给出 accepted 摘要也只是建议，不会自动 build。
 

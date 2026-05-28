@@ -10,8 +10,9 @@ pub(crate) use crate::core::plan_runtime::file_store::{
 pub(crate) use crate::core::plan_runtime::review::{ReviewKind, ReviewSummary};
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
-    mode::PlanMode, PlanRuntime, PlanRuntimeError, ReviewerDispatcher, VerifierDispatcher,
+    state::PlanState, PlanRuntime, PlanRuntimeError, ReviewerDispatcher, VerifierDispatcher,
 };
+pub(crate) use crate::core::session::manager::{PlanEventKind, PlanEventRef};
 pub(crate) use crate::core::tools::plan_tool::{
     ask_question, create_plan, shared_todo_ops, todos, update_plan, ToolError,
 };

@@ -15,7 +15,7 @@ pub use session_impl::generate_entry_id;
 pub use session_impl::SessionManager;
 pub use types::{
     compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
-    ContextLiveMetrics, ContextState,
+    ContextLiveMetrics, ContextState, PlanEventKind, PlanEventRef,
 };
 
 pub trait MessageAppendSink: Send + Sync {

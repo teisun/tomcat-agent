@@ -198,10 +198,11 @@ async fn verify_gate_soft_does_not_block() {
 
     assert_eq!(out["verify"]["verdict"], "fail");
     assert_eq!(out["plan_state_after"], "completed");
-    match rt.mode() {
-        PlanMode::Completed { plan_id: cur } => assert_eq!(cur, plan_id),
-        other => panic!("expected Completed, got {other:?}"),
-    }
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(
+        rt.active_plan_path(),
+        Some(plan_path_for_id(&plan_id).unwrap())
+    );
     cleanup_home(&home);
 }
 
@@ -242,10 +243,11 @@ async fn verify_gate_allows_completed_on_partial() {
 
     assert_eq!(out["verify"]["verdict"], "partial");
     assert_eq!(out["plan_state_after"], "completed");
-    match rt.mode() {
-        PlanMode::Completed { plan_id: cur } => assert_eq!(cur, plan_id),
-        other => panic!("expected Completed, got {other:?}"),
-    }
+    assert!(matches!(rt.mode(), PlanState::Chat));
+    assert_eq!(
+        rt.active_plan_path(),
+        Some(plan_path_for_id(&plan_id).unwrap())
+    );
     cleanup_home(&home);
 }
 
@@ -369,7 +371,7 @@ async fn gate_fail_keeps_mode_executing_but_returns_verify() {
     assert_eq!(out["verify"]["verdict"], "fail");
     assert_eq!(out["plan_state_after"], "executing");
     match rt.mode() {
-        PlanMode::Executing { plan_id: cur } => assert_eq!(cur, plan_id),
+        PlanState::Executing { plan_id: cur } => assert_eq!(cur, plan_id),
         other => panic!("expected Executing, got {other:?}"),
     }
     cleanup_home(&home);

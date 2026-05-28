@@ -7,6 +7,7 @@ use tracing::warn;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
 use crate::infra::error::AppError;
+use crate::infra::wire;
 
 // ---------------------------------------------------------------------------
 // §5.7 message / turn ids
@@ -83,6 +84,46 @@ pub struct ContextLiveMetrics {
     pub preheat_result_pending: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanEventKind {
+    Create,
+    Build,
+    Update,
+}
+
+impl PlanEventKind {
+    pub fn from_event_name(name: &str) -> Option<Self> {
+        match name {
+            wire::WIRE_PLAN_CREATE => Some(Self::Create),
+            wire::WIRE_PLAN_BUILD => Some(Self::Build),
+            wire::WIRE_PLAN_UPDATE => Some(Self::Update),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanEventRef {
+    pub kind: PlanEventKind,
+    pub plan_id: String,
+    pub path: PathBuf,
+}
+
+impl PlanEventRef {
+    pub fn from_custom_event(extra: &serde_json::Value) -> Option<Self> {
+        let obj = extra.as_object()?;
+        let event = obj.get("event")?.as_str()?;
+        let kind = PlanEventKind::from_event_name(event)?;
+        let plan_id = obj.get("plan_id")?.as_str()?.to_string();
+        let path = crate::infra::platform::normalize_path(obj.get("path")?.as_str()?).ok()?;
+        Some(Self {
+            kind,
+            plan_id,
+            path,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ContextState
 // ---------------------------------------------------------------------------
@@ -97,6 +138,8 @@ pub struct ContextState {
     pub post_usage_appended_chars: usize,
     /// 当前 session 的 transcript 文件路径，供异步预热 spawn 闭包 clone。
     pub transcript_path: PathBuf,
+    /// 单次反向扫描识别出的最近一条 `plan.*` transcript 自定义事件。
+    pub latest_plan_event: Option<PlanEventRef>,
     /// 异步预热状态机（替代旧 `Option<CompactionSummary>`）。
     pub preheat: Preheat,
     /// 会话累计（刷盘子集）。

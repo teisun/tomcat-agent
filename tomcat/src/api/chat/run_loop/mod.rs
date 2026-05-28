@@ -80,7 +80,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     #[cfg(not(target_os = "macos"))]
     let search_tools_printer = rl.create_external_printer().ok().map(|printer| {
         Arc::new(std::sync::Mutex::new(
-            Box::new(printer) as Box<dyn rustyline::ExternalPrinter + Send>,
+            Box::new(printer) as Box<dyn rustyline::ExternalPrinter + Send>
         ))
     });
 
@@ -106,8 +106,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
     }
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
-    let session_stderr_ids =
-        events::stderr::register_chat_session_stderr_listeners(&*ctx.event_bus, search_tools_printer);
+    if let Err(err) = ctx
+        .plan_runtime
+        .attach_from_event(context_state.latest_plan_event.clone())
+    {
+        tracing::warn!(error = %err, "plan_runtime attach_from_event failed; continuing with Chat mode");
+    }
+    let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
+        &*ctx.event_bus,
+        search_tools_printer,
+    );
     preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
     preflight::start_git_preflight(
         &ctx.config,
@@ -153,9 +161,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     readline_waker.abort();
                     continue;
                 }
-                Err(rustyline::error::ReadlineError::Signal(
-                    rustyline::error::Signal::Resize,
-                )) => {
+                Err(rustyline::error::ReadlineError::Signal(rustyline::error::Signal::Resize)) => {
                     readline_waker.abort();
                     if !ctx.follow_up_queue.lock().is_empty() {
                         auto_turn_count = 0;
@@ -292,14 +298,14 @@ pub async fn run_chat_turn(
 
     let plan_mode = ctx.plan_runtime.mode();
     let system_text_with_reminder = match &plan_mode {
-        plan_runtime::PlanMode::Planning => {
+        plan_runtime::PlanState::Planning => {
             format!(
                 "{}{}",
                 system_text,
                 *plan_runtime::reminders::PLANNER_REMINDER
             )
         }
-        plan_runtime::PlanMode::Executing { plan_id } => format!(
+        plan_runtime::PlanState::Executing { plan_id } => format!(
             "{}{}",
             system_text,
             plan_runtime::reminders::render_executor_reminder(plan_id)

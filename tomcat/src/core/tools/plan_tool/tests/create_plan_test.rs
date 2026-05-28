@@ -68,6 +68,53 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
 }
 
 #[test]
+fn create_plan_multiple_times_overrides_active_planning_id_without_binding_path() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    rt.enter_planning().unwrap();
+
+    let first = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "first plan".into(),
+            draft: "first draft".into(),
+            todos: vec![create_plan::TodoArg {
+                id: "t1".into(),
+                content: "first".into(),
+                status: TodoStatus::Pending,
+            }],
+        },
+    )
+    .unwrap();
+    let second = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "second plan".into(),
+            draft: "second draft".into(),
+            todos: vec![create_plan::TodoArg {
+                id: "t1".into(),
+                content: "second".into(),
+                status: TodoStatus::Pending,
+            }],
+        },
+    )
+    .unwrap();
+
+    let first_id = first["plan_id"].as_str().unwrap();
+    let second_id = second["plan_id"].as_str().unwrap();
+    assert_ne!(first_id, second_id);
+    assert_eq!(rt.active_planning_plan_id().as_deref(), Some(second_id));
+    assert!(
+        rt.active_plan_path().is_none(),
+        "create_plan 不应写 binding path"
+    );
+    assert!(plan_path_for_id(first_id).unwrap().is_file());
+    assert!(plan_path_for_id(second_id).unwrap().is_file());
+    cleanup_home(&home);
+}
+
+#[test]
 fn create_plan_normalizes_legacy_heading_wrapped_draft() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
