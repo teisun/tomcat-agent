@@ -106,6 +106,7 @@
 
 ## Story 4 — Node.js 兼容层（Wasm E2E）（5 条）
 
+> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`、`tests/js_api_alignment_tests.rs`）。须 `--features wasmedge` 才编译/运行；默认 `./scripts/run-integration-tests.sh all` 跳过 Wasm 组（与 commit `f613708` 之后 no-wasm 默认编译路径一致），显式 Wasm 验收用 `./scripts/run-integration-tests.sh integration-wasm`。
 
 | 编号           | 验收 | 用例名                                              | 用户意图                                           | 操作序列                                                  | 必须断言                                                           |
 | ------------ | -- | ------------------------------------------------ | ---------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
@@ -151,6 +152,7 @@
 | ----------- | -- | -------------------------------------------------- | -------------------- | ------------------------------------ | -------------------------------- |
 | E2E-CLI-041 | 人工 | `test_user_chats_with_llm_gets_streaming_response` | 用户与 LLM 对话，获得流式渲染回复  | `tomcat chat` + stdin 一句话，timeout 60s    | exit 0；stdout 含 AI 回复；有对话 banner |
 | E2E-CLI-042 | 人工 | `test_user_receives_nonempty_llm_response`         | 确认 LLM 回复内容非空（基础连通性） | `tomcat chat` + stdin `说一个字`，timeout 30s | exit 0；stdout 非空                 |
+| E2E-CLI-043 | 自动 | `test_user_toggles_thinking_display_modes` | 用户运行时通过 `/thinking` 切换 CLI thinking 显示档位（minimal/summary/full/toggle） | 构造 `CliTurnRenderer` + mock `thinking_delta` 流 → 顺序应用 `/thinking summary` / `minimal` / `full` / `toggle` → 各档位发出同样的 summary+raw delta | summary 模式：可见 summary、隐藏 raw、`[thinking]` 仅 1 次；minimal 模式：仅 `[thinking] ...` 占位；full 模式：summary+raw 同时可见；toggle 循环 `summary→full→minimal→summary`；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/api/chat/commands/tests/cmd_thinking_test.rs` |
 
 
 ---
@@ -181,7 +183,7 @@
 
 ## Story 8b — 长生命周期 VM 与有状态插件（TASK-15 + TASK-05b/c Tier1–2，8 条）
 
-> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`）。须安装 WasmEdge。
+> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`）。须安装 WasmEdge 且以 `--features wasmedge` 编译；默认 `./scripts/run-integration-tests.sh all` 跳过本组（commit `f613708` 收窄），显式验收走 `./scripts/run-integration-tests.sh integration-wasm`。
 > **验收**：031–035 以 `wasmedge_e2e_tests` 自动化为准；036–038 与 pi-mono 兼容矩阵相关，建议**人工补验**本机 WasmEdge 与真实扩展抽样。
 
 

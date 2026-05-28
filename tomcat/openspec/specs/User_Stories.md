@@ -83,6 +83,9 @@
 - [ ] 支持配置模型的温度、最大Token、上下文窗口等参数，会话级模型配置隔离
 - [ ] 实现流式与非流式LLM调用API，完全对齐pi-mono规范，插件可正常调用
 - [ ] 默认 provider 路径使用 `openai-responses`；当 `thinking.show = "summary"` 或 `thinking.show = "full"` 时，CLI 默认链路可稳定展示 reasoning / thinking 摘要
+- [ ] CLI 内 `/thinking [minimal|summary|full|toggle]` 可在对话期运行时切换 thinking 显示档位；缺省等价 `toggle`，循环 `summary -> full -> minimal -> summary`；兼容历史 `/thinking on|off`（on→full、off→summary）
+- [ ] `PI_CHAT_SHOW_THINKING` 环境变量与配置文件 `[llm.thinking].show` 兼容三档字符串与历史 bool（`true/1/yes/on -> full`、`false/0/no/off/"" -> summary`）；优先级 `PI_CHAT_SHOW_THINKING > config > 代码默认`
+- [ ] Responses reasoning 流按 `(item_id, index)` 分桶去重：同一片摘要被网关以 `summary_text.delta + summary_text.done + summary_part.done + output_item.done` 多次重发时，CLI/listener 仅看到单条 `Thinking` 事件，不出现重复字串
 - [ ] 支持Token消耗统计与记录，每次对话显示Token消耗
 - [ ] API密钥可配置并生效，调用支持限流与指数退避重试（加密存储 TODO 后续考虑）
 
