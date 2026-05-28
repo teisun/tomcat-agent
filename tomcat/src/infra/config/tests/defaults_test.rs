@@ -132,9 +132,7 @@ fn thinking_show_toml_unknown_string_rejected() {
 enabled = true
 show = "verbose"
 "#;
-    let err = toml::from_str::<AppConfig>(toml_src)
-        .err()
-        .expect("非法 show 字段应反序列化失败");
+    let err = toml::from_str::<AppConfig>(toml_src).expect_err("非法 show 字段应反序列化失败");
     let msg = err.to_string();
     assert!(
         msg.contains("verbose") || msg.contains("minimal|summary|full"),

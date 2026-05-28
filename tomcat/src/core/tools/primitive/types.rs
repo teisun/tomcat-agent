@@ -431,7 +431,7 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
     /// - `argv` 为 `Some`：`command` 为可执行文件名，`argv` 为其参数列表（不经 shell，与 pi-mono `exec(cmd, args)` 对齐）。
     /// - `timeout_ms`（T2-P0-016 PR-E）：墙钟超时（毫秒）；`None` 时使用
     ///   `[tools.bash].timeout_ms`（默认 120_000）。`tool_exec` 入口已按
-    ///   [`crate::infra::config::types::MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000 clamp，
+    ///   [`crate::infra::config::MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000 clamp，
     ///   trait 实现侧再做一次防御性 clamp。`DefaultPrimitiveExecutor` 用
     ///   `tokio::time::timeout(..., child.wait())` 包裹等待；超时分支对 `Child` 调用
     ///   `kill` 并 `wait` 收口，避免 `wait_with_output` 反模式（bash.md §2.4.3 / §6.2 / §9.2）。
