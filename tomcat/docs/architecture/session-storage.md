@@ -133,6 +133,7 @@ pub struct BranchSummaryEntry {
 - `Failed` 不再把本轮视为“从未发生”：凡是已经即时落盘的 `user`、完整 `assistant`、`assistant + tool_calls`、已完成 `tool_result` 都会保留在 transcript。
 - 流式中途尚未形成合法 message 边界的半截 delta 仍不写主 transcript；用户下一条输入会作为新的 `user` 继续追加，而不是覆盖上一轮。
 - `chat --resume` hydrate 会扫描 transcript 尾部最后一个 `assistant.tool_calls` block，并按原顺序补齐所有缺失的 `role=tool, content="[interrupted]"` 结果；若尾部工具序列中间穿插了 `user/assistant/system` 等非 `tool` role，则拒绝猜测、不做自愈。
+- 若主 chat 进程在即时落盘阶段命中 `append_message_chain` invariant（例如磁盘 transcript 已被其他写入者改变），当前进程会立即重新 `init_context_state`，以磁盘 JSONL 为准重建内存 `context_state`；若重建失败则退回空 `messages` fallback，避免继续携带 dangling `assistant.tool_calls` 并在下一轮触发 `No tool output found ...` 死循环。
 - background follow-up / synthetic user message 统一在 **drain 时** 走与普通 `user` 相同的即时 append 路径；仅 enqueue 不落盘，避免第二套持久化窗口。
 
 **上下文可观测累计（方案 B）**：`compaction_count` / `compaction_tokens_freed` / `tool_result_chars_persisted` 在进程内由 `ContextState` 更新，**每个 user turn 结束**（成功路径与可恢复错误路径）由 `SessionManager::persist_context_observability` 刷入 `sessions.json`；`init_context_state` 启动时读回填入 `ContextState`，实现重启后累计不无故归零。该累计**不以 transcript 重放重建**；与 transcript 手工编辑可能不一致。

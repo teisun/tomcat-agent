@@ -510,6 +510,155 @@ fn checkpoint_recording_test_context(
 }
 
 #[test]
+fn append_message_chain_invariant_is_nonfatal() {
+    let err = crate::AppError::invariant("append_message_chain", "tool tail broken");
+    assert!(
+        super::super::is_append_message_chain_invariant(&err),
+        "append_message_chain invariant 应命中恢复分支识别"
+    );
+    assert!(
+        !super::super::is_fatal_error(&err),
+        "append_message_chain invariant 不应被视为 chat fatal error"
+    );
+}
+
+#[test]
+fn append_message_chain_rehydrate_reloads_context_from_transcript() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "outer tool call",
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "bash", "arguments": r#"{"command":"echo hi"}"# }
+            }]
+        }))
+        .unwrap();
+    ctx.session
+        .append_message(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "[interrupted]"
+        }))
+        .unwrap();
+    ctx.session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "nested prompt"
+        }))
+        .unwrap();
+    ctx.session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "inner done"
+        }))
+        .unwrap();
+
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    state.messages = vec![crate::ChatMessage::assistant_with_tool_calls(
+        Some("outer tool call"),
+        vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "bash", "arguments": r#"{"command":"echo hi"}"# }
+        })],
+    )];
+
+    let changed = super::super::try_rehydrate_context_state_after_append_invariant(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &crate::AppError::invariant("append_message_chain", "tool must follow assistant+tool_calls or tool"),
+        &mut state,
+    );
+
+    assert!(changed, "append_message_chain invariant 应触发一次 context rehydrate");
+    assert_eq!(
+        state.messages.last().and_then(|m| m.text_content()),
+        Some("inner done"),
+        "rehydrate 后应以磁盘 transcript 的最后一条 assistant 为准"
+    );
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("call_1") && m.text_content() == Some("[interrupted]")),
+        "rehydrate 后应带回磁盘上已补齐的 interrupted tool result"
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn append_message_chain_rehydrate_falls_back_when_transcript_reload_fails() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_FALLBACK_KEY";
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    state.messages = vec![crate::ChatMessage::assistant_with_tool_calls(
+        Some("outer tool call"),
+        vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "bash", "arguments": r#"{"command":"echo hi"}"# }
+        })],
+    )];
+    std::fs::remove_file(&transcript_path).unwrap();
+
+    let changed = super::super::try_rehydrate_context_state_after_append_invariant(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &crate::AppError::invariant("append_message_chain", "tool must follow assistant+tool_calls or tool"),
+        &mut state,
+    );
+
+    assert!(changed, "append_message_chain invariant 仍应触发恢复 helper");
+    assert!(
+        state.messages.is_empty(),
+        "rehydrate 失败时应退回空消息 fallback，避免继续携带坏掉的 dangling tool_calls"
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn non_append_invariant_does_not_rehydrate_context() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_NOOP_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    state.messages = vec![crate::ChatMessage::user("keep me")];
+
+    let changed = super::super::try_rehydrate_context_state_after_append_invariant(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &crate::AppError::Permission("deny".to_string()),
+        &mut state,
+    );
+
+    assert!(
+        !changed,
+        "非 append_message_chain 错误不应进入 rehydrate 恢复路径"
+    );
+    assert_eq!(
+        state.messages.last().and_then(|m| m.text_content()),
+        Some("keep me"),
+        "非目标错误应保持当前 context_state 不变"
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
 fn turn_end_writes_checkpoint() {
     const ENV_KEY: &str = "TOMCAT_CHAT_TURN_END_CKPT_KEY";
 

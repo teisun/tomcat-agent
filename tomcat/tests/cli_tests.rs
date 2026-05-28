@@ -5,11 +5,21 @@
 
 mod common;
 
+use async_trait::async_trait;
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tomcat::core::session::DEFAULT_SESSION_KEY;
+use tokio_util::sync::CancellationToken;
+use tomcat::{
+    AppConfig, AppError, BashResult, ChatContext, ChatMessage, ChatRequest, ChatResponse,
+    DirEntry, EditFileResult, EditOperation, LlmProvider, PrimitiveExecutor, PrimitiveOperation,
+    SessionManager, StreamEvent, WriteFileResult, init_context_state, run_chat_turn,
+};
 use tracing::{info, info_span};
 
 #[allow(deprecated)]
@@ -22,6 +32,195 @@ fn cmd() -> Command {
 
 fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+struct DeterministicMockLlm {
+    streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+}
+
+impl DeterministicMockLlm {
+    fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: Mutex::new(streams.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for DeterministicMockLlm {
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("mock chat not used".to_string()))
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        let mut guard = self.streams.lock().unwrap();
+        let events = guard
+            .pop_front()
+            .ok_or_else(|| AppError::Llm("DeterministicMockLlm: no more streams".to_string()))?;
+        drop(guard);
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+struct DeterministicMockPrimitive;
+
+#[async_trait]
+impl PrimitiveExecutor for DeterministicMockPrimitive {
+    async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
+        Ok(format!("content:{path}"))
+    }
+
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
+        Ok(vec![])
+    }
+
+    async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+        overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        Ok(WriteFileResult {
+            path: path.to_string(),
+            written: overwrite || !content.is_empty(),
+            bytes_written: content.len() as u64,
+            diff_hint: None,
+        })
+    }
+
+    async fn edit_file(
+        &self,
+        path: &str,
+        _edits: Vec<EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        Ok(EditFileResult {
+            path: path.to_string(),
+            applied: true,
+        })
+    }
+
+    async fn execute_bash(
+        &self,
+        command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<BashResult, AppError> {
+        Ok(BashResult {
+            stdout: format!("out:{command}"),
+            stderr: String::new(),
+            exit_code: 0,
+            ..Default::default()
+        })
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _operation: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        Ok(true)
+    }
+}
+
+struct CliInjectAppendInvariantSink {
+    inner: SessionManager,
+    append_calls: AtomicUsize,
+    injected: AtomicBool,
+}
+
+impl CliInjectAppendInvariantSink {
+    fn new(inner: SessionManager) -> Self {
+        Self {
+            inner,
+            append_calls: AtomicUsize::new(0),
+            injected: AtomicBool::new(false),
+        }
+    }
+}
+
+impl tomcat::core::session::MessageAppendSink for CliInjectAppendInvariantSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        let call_idx = self.append_calls.fetch_add(1, Ordering::SeqCst);
+        if call_idx == 2 && !self.injected.swap(true, Ordering::SeqCst) {
+            let tool_call_id = value
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("call_injected")
+                .to_string();
+            self.inner.append_message(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": "[interrupted]"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "user",
+                "content": "nested prompt"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "assistant",
+                "content": "nested done"
+            }))?;
+        }
+        self.inner.append_message(value)
+    }
+}
+
+fn cli_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn cli_tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.to_string()),
+            name: Some(name.to_string()),
+            arguments_delta: Some(args.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ]
+}
+
+fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(env_key.to_string());
+
+    // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
+    unsafe { std::env::set_var(env_key, "stub") };
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx.session.current_session_key().to_string();
+    ctx.session.create_session(&session_key, None).unwrap();
+    (dir, ctx)
 }
 
 // ────────────────────── help & version ──────────────────────
@@ -3042,6 +3241,98 @@ fn test_user_chat_resumes_last_session() {
         !out.trim().is_empty(),
         "--resume 后 AI 应有回复，实际 stdout 为空"
     );
+}
+
+/// append invariant 后，同一 chat 进程应从磁盘重建 context_state 并继续下一轮。
+#[tokio::test]
+async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
+    common::setup_logging();
+    let _span = info_span!("test_failed_turn_append_invariant_allows_next_turn_in_same_process")
+        .entered();
+
+    const ENV_KEY: &str = "TOMCAT_APPEND_REHYDRATE_CLI_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    ctx.llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_1", "bash", r#"{"command":"echo hi","cwd":null}"#),
+        cli_text_stream("RECOVER_OK"),
+    ]));
+    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+    ctx.message_append_sink = Arc::new(CliInjectAppendInvariantSink::new(ctx.session.clone()));
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+
+    info!("Act: 第一轮触发 append_message_chain invariant");
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请执行一次 bash 工具",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("first run_chat_turn timeout 5s")
+    .expect("first run_chat_turn result");
+
+    match &first {
+        tomcat::AgentRunOutcome::Failed(err) => {
+            assert!(
+                matches!(
+                    err,
+                    AppError::Invariant {
+                        stage: "append_message_chain",
+                        ..
+                    }
+                ),
+                "首轮应命中 append_message_chain invariant，实际: {err}"
+            );
+        }
+        other => panic!("首轮应进入 Failed(invariant) 分支，实际: {other:?}"),
+    }
+    assert_eq!(
+        state.messages.last().and_then(|m| m.text_content()),
+        Some("nested done"),
+        "首轮失败后应已从磁盘重建 context_state，而不是保留 dangling tool_calls"
+    );
+    assert!(
+        state.messages.iter().any(|m| {
+            m.tool_call_id.as_deref() == Some("call_1")
+                && m.text_content() == Some("[interrupted]")
+        }),
+        "重建后的 context_state 应保留磁盘上的 interrupted tool result"
+    );
+
+    info!("Act: 第二轮继续同一进程聊天，应恢复为 Completed");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请只回复 RECOVER_OK，不要调用工具",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("second run_chat_turn timeout 5s")
+    .expect("second run_chat_turn result");
+
+    match second {
+        tomcat::AgentRunOutcome::Completed(result) => {
+            assert!(
+                result.final_text.contains("RECOVER_OK"),
+                "第二轮应成功恢复，实际 final_text: {:?}",
+                result.final_text
+            );
+        }
+        other => panic!("第二轮应恢复为 Completed，实际: {other:?}"),
+    }
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
 }
 
 // ────────────────────── TASK-14 AgentLoop E2E 用例 ──────────────────────

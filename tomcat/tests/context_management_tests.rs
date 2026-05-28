@@ -6,17 +6,18 @@ mod common;
 use async_trait::async_trait;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::core::compaction::compact_tool_results;
 use tomcat::core::llm::{ChatMessageRole, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
 use tomcat::{
-    build_context_from_state, compound_turn_id, init_context_state, AgentLoop, AgentLoopConfig,
-    AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
-    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, WriteFileResult,
+    build_context_from_state, compound_turn_id, init_context_state, run_chat_turn, AgentLoop,
+    AgentLoopConfig, AppConfig, AppError, BashResult, ChatContext, ChatMessage, ChatRequest,
+    ChatResponse, ContextConfig, ContextState, DefaultEventBus, DirEntry, EditFileResult,
+    EditOperation, EventBus, EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation,
+    SessionManager, StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -138,6 +139,20 @@ fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
     ]
 }
 
+fn tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some(id.to_string()),
+            name: Some(name.to_string()),
+            arguments_delta: Some(args.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ]
+}
+
 fn temp_sessions_dir(label: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ms = SystemTime::now()
@@ -168,7 +183,153 @@ fn make_msgs_with_tool_result(user_text: &str, tool_content: &str) -> Vec<ChatMe
 
 const PLACEHOLDER: &str = "[Previous tool result replaced to save context space]";
 
+struct InjectAppendInvariantSink {
+    inner: SessionManager,
+    append_calls: AtomicUsize,
+    injected: AtomicBool,
+}
+
+impl InjectAppendInvariantSink {
+    fn new(inner: SessionManager) -> Self {
+        Self {
+            inner,
+            append_calls: AtomicUsize::new(0),
+            injected: AtomicBool::new(false),
+        }
+    }
+}
+
+impl MessageAppendSink for InjectAppendInvariantSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        let call_idx = self.append_calls.fetch_add(1, Ordering::SeqCst);
+        if call_idx == 2 && !self.injected.swap(true, Ordering::SeqCst) {
+            let tool_call_id = value
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("call_injected")
+                .to_string();
+            self.inner.append_message(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": "[interrupted]"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "user",
+                "content": "nested prompt"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "assistant",
+                "content": "nested done"
+            }))?;
+        }
+        self.inner.append_message(value)
+    }
+}
+
+fn chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(env_key.to_string());
+
+    // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
+    unsafe { std::env::set_var(env_key, "stub") };
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx.session.current_session_key().to_string();
+    ctx.session.create_session(&session_key, None).unwrap();
+    (dir, ctx)
+}
+
 // ────────────────────── 测试用例 ──────────────────────────────────────────
+
+#[tokio::test]
+async fn test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn()
+-> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span =
+        info_span!("test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn")
+            .entered();
+
+    const ENV_KEY: &str = "TOMCAT_APPEND_REHYDRATE_INTEGRATION_KEY";
+    let (_dir, mut ctx) = chat_context_fixture(ENV_KEY);
+    ctx.llm = Arc::new(MockLlm::new(vec![
+        tool_call_stream("call_1", "bash", r#"{"command":"echo hi","cwd":null}"#),
+        text_stream("RECOVER_OK"),
+    ]));
+    ctx.primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 16 });
+    ctx.message_append_sink = Arc::new(InjectAppendInvariantSink::new(ctx.session.clone()));
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text)?;
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请执行一次 bash 工具",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .map_err(|_| "first run_chat_turn timeout 5s")??;
+
+    match &first {
+        tomcat::core::agent_loop::AgentRunOutcome::Failed(err) => {
+            assert!(
+                matches!(
+                    err,
+                    AppError::Invariant {
+                        stage: "append_message_chain",
+                        ..
+                    }
+                ),
+                "首轮应命中 append_message_chain invariant，实际: {err}"
+            );
+        }
+        other => panic!("首轮应走 Failed(invariant) 分支，实际: {other:?}"),
+    }
+    assert_eq!(
+        state.messages.last().and_then(|m| m.text_content()),
+        Some("nested done"),
+        "首轮失败后 context_state 应已从磁盘重建，而不是停留在 dangling tool_calls"
+    );
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("call_1") && m.text_content() == Some("[interrupted]")),
+        "重建后的 context_state 应保留磁盘上的 interrupted tool result"
+    );
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请只回复 RECOVER_OK，不要调用工具",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .map_err(|_| "second run_chat_turn timeout 5s")??;
+
+    match second {
+        tomcat::core::agent_loop::AgentRunOutcome::Completed(result) => {
+            assert!(
+                result.final_text.contains("RECOVER_OK"),
+                "第二轮应继续成功完成，实际 final_text: {:?}",
+                result.final_text
+            );
+        }
+        other => panic!("第二轮应恢复为 Completed，实际: {other:?}"),
+    }
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+    Ok(())
+}
 
 /// [Layer 1 + Layer 3 全链路] compact_tool_results 后仍超 ratio 时 force_drop_oldest_to_target 兜底
 #[test]

@@ -2,6 +2,13 @@
 | :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-05-26 19:30 | ACTIVE | develop | — |
 
+### 2026-05-28 | fix(chat): append invariant 后重建内存上下文
+
+- **代码**：`run_chat_turn` 在命中 `append_message_chain` invariant 后会重新 `init_context_state`，用磁盘 transcript 覆盖坏掉的内存 `context_state`；chat loop 对该错误输出“已尝试从磁盘重新对齐上下文”的继续提示；若重建失败则退回空 `messages` fallback，避免 dangling `assistant.tool_calls` 把后续对话拖进 `No tool output found ...` 死循环。
+- **测试**：新增 `suite_test::{append_message_chain_invariant_is_nonfatal, append_message_chain_rehydrate_reloads_context_from_transcript, append_message_chain_rehydrate_falls_back_when_transcript_reload_fails, non_append_invariant_does_not_rehydrate_context}`；新增 `context_management_tests::test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn` 与 `cli_tests::test_failed_turn_append_invariant_allows_next_turn_in_same_process`，覆盖 invariant 识别、rehydrate success/fallback/no-op，以及同一进程下一轮恢复。
+- **文档**：`session-storage.md` 补充“即时落盘命中 `append_message_chain` invariant 时，当前 chat 进程会从磁盘重建内存上下文”的恢复语义；本批次核对后不新增 `User_Stories` / `E2E_SCENARIO_LIBRARY` 条目，因为 Story 8 既有“失败后可继续下一轮”的用户语义未变化。
+- **阶段 T（门禁）**：`cargo test --lib append_message_chain_ -- --nocapture` 通过；`cargo test --test context_management_tests test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn -- --nocapture` 通过；`cargo test -j 1 --test cli_tests test_failed_turn_append_invariant_allows_next_turn_in_same_process -- --nocapture --test-threads=1` 通过；`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 中 `release` / `clippy` / `lib` / `integration-parallel` 全绿，但 `integration-serial` 被既有真实 LLM 用例 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 卡住，`.integration_phase1_append_rehydrate.log` 末尾 `EXIT_CODE=1`（与本批次 append-invariant 修复无直接关联）。
+
 ### 2026-05-26 | chore(llm): 默认模型 gpt-5.2 → gpt-5.4
 
 - **配置/代码**：`DEFAULT_LLM_MODEL`、`tomcat.config.toml.example`、`compaction_model` 默认值及 E2E/集成测试 fallback 统一为 `gpt-5.4`。
@@ -11,7 +18,7 @@
 
 ### 2026-05-26 | feat(chat,llm): 折叠态流式显示思考摘要 + LLM 超时错误分层
 
-- **Thinking**：`StreamEvent::Thinking` / `thinking_delta` 必填 `source=summary|raw`；`show=false`（新默认）时流式渲染 summary、折叠 raw；`thinking.enabled` 时 Responses 始终请求 `reasoning.summary=auto`。
+- **Thinking**：`StreamEvent::Thinking` / `thinking_delta` 必填 `source=summary|raw`；`show="summary"`（新默认）时流式渲染 summary、隐藏 raw；`show="minimal"` 时只显示 `[thinking] ...` 占位；`thinking.enabled` 时 Responses 始终请求 `reasoning.summary=auto`。
 - **LLM**：抽取 `http_client`、新增 `LlmError` 阶段化错误；配置补齐 `http_timeout_sec` / `http_read_timeout_sec` / `non_stream_stale_timeout_sec`。
 - **Plan**：`PlanFileFrontmatter.mode` 重命名为 `state`（`PlanFileState`），文档与单测对齐。
 - **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（2026-05-26 16:24）。

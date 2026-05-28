@@ -428,7 +428,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     );
                     return Err(e);
                 }
-                eprintln!("(本轮已落盘进度已保留；可直接继续输入新消息)\n");
+                eprintln!("{}", nonfatal_error_hint(&e));
                 continue;
             }
         }
@@ -605,10 +605,20 @@ pub async fn run_chat_turn(
         let _ = io::stdout().flush();
     }
 
-    *context_state = agent_loop.take_context_state().unwrap_or_else(|| {
+    let mut next_state = agent_loop.take_context_state().unwrap_or_else(|| {
         init_context_state(&ctx.session, context_config, system_text)
             .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, context_config))
     });
+    if let AgentRunOutcome::Failed(err) = &outcome {
+        let _ = try_rehydrate_context_state_after_append_invariant(
+            ctx,
+            context_config,
+            system_text,
+            err,
+            &mut next_state,
+        );
+    }
+    *context_state = next_state;
 
     match &outcome {
         AgentRunOutcome::Completed(result) => {
@@ -683,8 +693,58 @@ fn push_turn_message(
     Ok(())
 }
 
-fn is_fatal_error(e: &AppError) -> bool {
+pub(crate) fn is_fatal_error(e: &AppError) -> bool {
     matches!(e, AppError::Config(_))
+}
+
+pub(crate) fn is_append_message_chain_invariant(e: &AppError) -> bool {
+    matches!(
+        e,
+        AppError::Invariant {
+            stage: "append_message_chain",
+            ..
+        }
+    )
+}
+
+fn nonfatal_error_hint(e: &AppError) -> &'static str {
+    if is_append_message_chain_invariant(e) {
+        "(已尝试从磁盘重新对齐上下文；可直接继续输入新消息)\n"
+    } else {
+        "(本轮已落盘进度已保留；可直接继续输入新消息)\n"
+    }
+}
+
+pub(crate) fn try_rehydrate_context_state_after_append_invariant(
+    ctx: &ChatContext,
+    context_config: &crate::infra::ContextConfig,
+    system_text: &str,
+    error: &AppError,
+    context_state: &mut crate::core::ContextState,
+) -> bool {
+    if !is_append_message_chain_invariant(error) {
+        return false;
+    }
+
+    let preserved_session_obs = context_state.session_obs.clone();
+    let preserved_live = context_state.live.clone();
+    match init_context_state(&ctx.session, context_config, system_text) {
+        Ok(fresh) => {
+            *context_state = fresh;
+        }
+        Err(rehydrate_err) => {
+            warn!(
+                error = %rehydrate_err,
+                original_error = %error,
+                "append_message_chain recovery rehydrate failed; falling back to empty context state"
+            );
+            let mut fallback = make_fallback_context_state(ctx, system_text, context_config);
+            fallback.session_obs = preserved_session_obs;
+            fallback.live = preserved_live;
+            *context_state = fallback;
+        }
+    }
+    true
 }
 
 pub(crate) fn schedule_checkpoint_prune(ctx: &ChatContext) {
