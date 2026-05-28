@@ -19,8 +19,8 @@
 //!   做格式化，避免多个监听器各自 `print!` 造成乱序。
 //! - **kind 分流**：`message_update.assistantMessageEvent.kind` 来自 P3，
 //!   `content_delta` 走 `MarkdownRenderer`，`thinking_delta` 走折叠/展开逻辑。
-//! - **show_thinking** 用 `AtomicBool`：让 `/thinking` 命令（P4）能跨线程切换；
-//!   `false` 时折叠 raw thinking、仍流式显示 summary，`true` 时 summary + raw 都流式展开。
+//! - **thinking_display** 用 `AtomicU8`：让 `/thinking` 命令（P4）能跨线程切换；
+//!   `minimal` 打一行占位，`summary` 仅显示 summary，`full` 显示 summary + raw。
 //! - **打印通道**：正文 stdout（沿用 `MarkdownRenderer.flush` 路径），thinking 默认
 //!   stdout（`print_to_stderr=true` 切到 stderr 作为 prompt 打架逃生阀），tool 始终
 //!   stderr（与现有 ctx/search_tools 装饰一致）。
@@ -32,7 +32,7 @@
 //! 见父目录 `tests/cli_turn_renderer_test.rs`：以 `Sink` 替换 stdout/stderr，覆盖
 //! folded vs expanded、tool start/end、kind 切换换行等。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use crate::api::render::MarkdownRenderer;
 use crate::core::llm::ThinkingSource;
-use crate::infra::config::ToolCliVerbosity;
+use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::events::ToolDisplay;
 use crate::infra::{wire, EventBus};
@@ -90,7 +90,7 @@ impl CliWriter for StdCliWriter {
 /// `CliTurnRenderer` 自身可被多个 listener 闭包共享，因此用内部 `Mutex` 保护可变态。
 pub struct CliTurnRenderer {
     md: Arc<Mutex<MarkdownRenderer>>,
-    show_thinking: Arc<AtomicBool>,
+    thinking_display: Arc<AtomicU8>,
     print_to_stderr: bool,
     tool_cli_verbosity: ToolCliVerbosity,
     state: Mutex<RendererState>,
@@ -114,13 +114,13 @@ impl CliTurnRenderer {
     /// 见 chat/mod.rs（架构 §3.1 / 计划 §1 已决策「print_to_stderr」）。
     pub fn new(
         md: Arc<Mutex<MarkdownRenderer>>,
-        show_thinking: Arc<AtomicBool>,
+        thinking_display: Arc<AtomicU8>,
         print_to_stderr: bool,
         tool_cli_verbosity: ToolCliVerbosity,
     ) -> Arc<Self> {
         Self::with_writer(
             md,
-            show_thinking,
+            thinking_display,
             Arc::new(StdCliWriter),
             print_to_stderr,
             tool_cli_verbosity,
@@ -130,14 +130,14 @@ impl CliTurnRenderer {
     /// 测试 / 高级路径：可注入自定义 writer 与 `print_to_stderr` 开关。
     pub fn with_writer(
         md: Arc<Mutex<MarkdownRenderer>>,
-        show_thinking: Arc<AtomicBool>,
+        thinking_display: Arc<AtomicU8>,
         writer: Arc<dyn CliWriter>,
         print_to_stderr: bool,
         tool_cli_verbosity: ToolCliVerbosity,
     ) -> Arc<Self> {
         Arc::new(Self {
             md,
-            show_thinking,
+            thinking_display,
             print_to_stderr,
             tool_cli_verbosity,
             state: Mutex::new(RendererState {
@@ -156,10 +156,10 @@ impl CliTurnRenderer {
         }
     }
 
-    /// 单测可读：当前 thinking 是否处于展开态。
+    /// 单测可读：当前 thinking 显示档位。
     #[cfg(test)]
-    pub(crate) fn is_show_thinking(&self) -> bool {
-        self.show_thinking.load(Ordering::Acquire)
+    pub(crate) fn thinking_display(&self) -> ThinkingDisplay {
+        ThinkingDisplay::from_u8(self.thinking_display.load(Ordering::Acquire))
     }
 
     /// 新 assistant message 开始时重置 thinking 前缀状态；若上一条消息恰好停在
@@ -206,8 +206,28 @@ impl CliTurnRenderer {
     }
 
     fn handle_thinking_delta(&self, delta: &str, source: ThinkingSource) {
-        let show = self.show_thinking.load(Ordering::Acquire);
-        if !show && source == ThinkingSource::Raw {
+        let display = ThinkingDisplay::from_u8(self.thinking_display.load(Ordering::Acquire));
+        if matches!(display, ThinkingDisplay::Minimal) {
+            let mut st = self.state.lock();
+            if st.last_kind == LastKind::Content {
+                drop(st); // 释放锁，避免与 md.lock 死锁顺序冲突
+                if let Some(remaining) = self.md.lock().flush() {
+                    self.writer.write_stdout(&remaining);
+                }
+                st = self.state.lock();
+                self.write_thinking("\n");
+            }
+            if !st.thinking_prefix_printed {
+                self.write_thinking("\x1b[2m\x1b[90m[thinking] ...\x1b[0m");
+                st.thinking_prefix_printed = true;
+                st.last_kind = LastKind::Thinking;
+            }
+            return;
+        }
+        if source == ThinkingSource::Summary && !display.shows_summary() {
+            return;
+        }
+        if source == ThinkingSource::Raw && !display.shows_raw() {
             return;
         }
         let mut st = self.state.lock();
@@ -220,7 +240,7 @@ impl CliTurnRenderer {
             st = self.state.lock();
             self.write_thinking("\n");
         }
-        // 可见 thinking（show=true 的 raw/summary，或 show=false 的 summary）统一走单行流式追加。
+        // 可见 thinking（summary/full 模式下的 summary/raw）统一走单行流式追加。
         if !st.thinking_prefix_printed {
             self.write_thinking("\x1b[2m\x1b[90m[thinking]\x1b[0m ");
             st.thinking_prefix_printed = true;

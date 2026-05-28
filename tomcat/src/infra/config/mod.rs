@@ -30,7 +30,8 @@ pub use types::WorkspaceEntry;
 pub use types::{
     compute_context_budget_chars, AgentConfig, AppConfig, CheckpointConfig, ContextConfig,
     LlmConfig, LlmFilesConfig, LogConfig, PreflightConfig, PrimitiveConfig, SecurityConfig,
-    ThinkingConfig, ToolCliVerbosity, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
+    ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WasmConfig, WorkspaceConfig,
+    DEFAULT_LLM_MODEL,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），
 // 这里先 re-export 保证 `tomcat::infra::config::PlanConfig` 可用而不污染默认 import。

@@ -30,7 +30,7 @@ pub enum ChatCommand {
     },
     /// `/help`.
     Help,
-    /// `/thinking on|off|toggle`：切换 CliTurnRenderer 的折叠/展开开关。
+    /// `/thinking minimal|summary|full|toggle`：切换 CliTurnRenderer 的显示档位。
     Thinking {
         action: ThinkingAction,
     },

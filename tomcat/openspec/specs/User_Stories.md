@@ -82,7 +82,7 @@
 - [ ] 实现统一LLM Provider Trait，兼容所有OpenAI API格式的大模型
 - [ ] 支持配置模型的温度、最大Token、上下文窗口等参数，会话级模型配置隔离
 - [ ] 实现流式与非流式LLM调用API，完全对齐pi-mono规范，插件可正常调用
-- [ ] 默认 provider 路径使用 `openai-responses`；当 `thinking.show = true` 时，CLI 默认链路可稳定展示 reasoning / thinking 摘要
+- [ ] 默认 provider 路径使用 `openai-responses`；当 `thinking.show = "summary"` 或 `thinking.show = "full"` 时，CLI 默认链路可稳定展示 reasoning / thinking 摘要
 - [ ] 支持Token消耗统计与记录，每次对话显示Token消耗
 - [ ] API密钥可配置并生效，调用支持限流与指数退避重试（加密存储 TODO 后续考虑）
 

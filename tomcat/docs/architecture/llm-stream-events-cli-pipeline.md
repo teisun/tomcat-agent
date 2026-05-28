@@ -87,10 +87,10 @@
 | 目标 | 观察指标 | 说人话 |
 |------|----------|--------|
 | G1 目标视觉效果 | 单轮输出中可出现 `[thinking]`、`[tool]`、正文三段，且颜色与报告示意一致（灰/绿/红） | 看起来像 Cursor/豆包示例。 |
-| G2 折叠 | `show_thinking=false` 时折叠 raw、仍流式显示 `[thinking]` summary；`true` 时 summary + raw 流式展开 | 报告方案 D。 |
+| G2 折叠 | `show="minimal"` 时仅显示 `[thinking] ...` 占位；`show="summary"` 时仅流式显示 summary；`show="full"` 时 summary + raw 流式展开 | 报告方案 D。 |
 | G3 协议闭环 | Completions `reasoning_content` + Responses `reasoning_*` 事件均能映射到 `StreamEvent::Thinking` | 不能只有一半。 |
 | G4 ThinkingLevel | 改配置后下一请求 wire 体携带正确字段 | 旋钮真生效。 |
-| G5 默认策略 | `ThinkingConfig::default()` 为 `enabled=true`、`show=false`（CLI 默认折叠 raw，但仍显示 summary） | 这是破变更，需在 changelog / G5 明示。 |
+| G5 默认策略 | `ThinkingConfig::default()` 为 `enabled=true`、`show="summary"`（CLI 默认显示 summary、隐藏 raw） | 这是破变更，需在 changelog / G5 明示。 |
 | G6 多消费者 | TUI/审计可订阅同一 EventBus payload | 不为 CLI 私有造第二协议。 |
 | G7 三条管线解耦 | 展示（EventBus→CLI）≠ 持久化（persist）≠ 上行（messages） | 关显示不应影响上行，落盘也不应污染正文。 |
 
@@ -116,7 +116,7 @@
 | R2 Thinking 事件 | 是否与正文同 payload | **采用** `assistantMessageEvent` 增加 `kind` 区分 `content_delta` / `thinking_delta`。 | `pi-mono/packages/ai/src/types.ts`；`pi-mono/packages/coding-agent/src/modes/interactive/components/assistant-message.ts`；`openclaw/src/tui/tui-formatters.ts` | 设计：`assistantMessageEvent` 增加 `kind` 区分 `content_delta` / `thinking_delta`；理由：折叠、过滤、持久化策略都依赖显式类型，避免把 thinking 当正文污染渲染/存储链路。 | 未入选：openclaw `openclaw/src/tui/tui-formatters.ts` 的 `composeThinkingAndContent` 先拼后渲染思路；拒因：CLI 侧难以独立控制折叠与落盘策略。 | 给事件贴「类型标签」。 |
 | R3 协议接入路径 | Completions vs Responses | **采用** Completions 与 Responses 双路径同时接入 thinking。 | `tomcat/src/core/llm/openai.rs`；`tomcat/src/core/llm/openai_responses/stream.rs`；`pi-mono/packages/ai/src/providers/openai-completions.ts`；`pi-mono/packages/ai/src/providers/openai-responses.ts` | 设计：Completions 与 Responses 双路径同时接入 thinking；理由：两条 API 在模型覆盖与能力形态上互补，只做单路径会导致部分模型/部署场景无法显示 thinking。 | 未入选：仅保留 `tomcat/src/core/llm/openai.rs`（Completions-only）或仅保留 `openai_responses/stream.rs`（Responses-only）单路径；拒因：能力覆盖断层，迁移成本与运维复杂度上升。 | 两条路都得通。 |
 | R4 ThinkingLevel | 如何映射到 wire | **采用** `ThinkingLevel` + `thinking_format` 分派表并入 `LlmConfig`。 | `pi-mono/packages/ai/src/types.ts`；`pi-mono/packages/ai/src/providers/openai-completions.ts`；`tomcat/src/infra/config.rs` | 设计：引入 `ThinkingLevel` 与 `thinking_format` 分派表并并入 `LlmConfig`；理由：把“推理强度”从模型特例提升为统一策略，兼顾成本可控与跨厂商可移植。 | 未入选：`openclaw/src/agents/pi-embedded-runner/moonshot-stream-wrappers.ts` 的厂商专用字段直写思路；拒因：扩展新 provider 时重复改代码，缺统一档位抽象。 | 档位要能配，也要能关。 |
-| R5 折叠交互 | CLI 无 Ctrl+T | **采用** `/thinking on/off/toggle` + `PI_CHAT_SHOW_THINKING`。 | `pi-mono/packages/coding-agent/src/modes/interactive/components/assistant-message.ts`；`openclaw/src/tui/tui-event-handlers.ts` | 设计：CLI 用 `/thinking on|off|toggle` + `PI_CHAT_SHOW_THINKING`；理由：兼容 `rustyline` 键位生态，且可脚本化，不依赖全屏 TUI 热键。 | 未入选：直接复用 openclaw 的 TUI 键位入口（`openclaw/src/tui/tui-event-handlers.ts`，Ctrl+T）方案；拒因：纯 CLI 下键位冲突与可发现性差。 | 纯文本先走命令，别抢键位。 |
+| R5 折叠交互 | CLI 无 Ctrl+T | **采用** `/thinking minimal|summary|full|toggle` + `PI_CHAT_SHOW_THINKING`。 | `pi-mono/packages/coding-agent/src/modes/interactive/components/assistant-message.ts`；`openclaw/src/tui/tui-event-handlers.ts` | 设计：CLI 用 `/thinking minimal|summary|full|toggle` + `PI_CHAT_SHOW_THINKING`；理由：兼容 `rustyline` 键位生态，且可脚本化，不依赖全屏 TUI 热键，同时保留显式三档。 | 未入选：直接复用 openclaw 的 TUI 键位入口（`openclaw/src/tui/tui-event-handlers.ts`，Ctrl+T）方案；拒因：纯 CLI 下键位冲突与可发现性差。 | 纯文本先走命令，别抢键位。 |
 | R6 工具行样式 | 与报告示例对齐 | **采用** `CliTurnRenderer` 内置工具 start/end 一行摘要 + 状态色。 | `pi-mono/packages/coding-agent/src/modes/interactive/components/tool-execution.ts`；`openclaw/src/tui/components/tool-execution.ts`；`tomcat/src/core/tool_dispatcher.rs` | 设计：`CliTurnRenderer` 为内置工具输出一行摘要（start/end 配对 + 状态色）；理由：用户一眼可读，且显著降低超长 JSON 对会话可读性的破坏。 | 未入选：沿用通用「完整参数/结果 JSON 直出」样式（参考 openclaw 组件里 full 模式可展开细节）；拒因：CLI 默认视图噪声高，关键状态反而不突出。 | 用户只看一眼能懂。 |
 | R7 ANSI 策略 | italic 兼容性 | **采用** thinking 主样式 `dim + gray`，italic 仅可选。 | `pi-mono/packages/coding-agent/src/modes/interactive/components/assistant-message.ts`；`tomcat/docs/reports/llm-tool-rounds-cli-display-thinking-protocol.md`（终端兼容性结论） | 设计：thinking 主样式用 `dim + gray`，italic 仅可选；理由：dim 在主流终端兼容更稳，避免「有颜色没字形」导致可读性退化。 | 未入选：pi-mono `assistant-message.ts` 的「主要依赖 italic 区分」样式；拒因：跨终端一致性不足。 | 少作妖，兼容性优先。 |
 | R8 持久化 | transcript 是否含 thinking | **采用** 默认 `persist=false`；开启时写结构化字段（非正文拼接）。 | `tomcat/src/core/session/manager.rs`；`tomcat/src/infra/config.rs`；`pi-mono/packages/ai/src/types.ts` | 设计：默认 `persist=false`，若开启则写结构化字段（非正文拼接）；理由：兼顾隐私/合规与回放可控，避免把思考草稿永久混入 assistant 正文。 | 未入选：把 thinking 直接拼进 assistant 正文后持久化（参考 openclaw `src/tui/tui-formatters.ts` 的拼接展示思路外推到存储）；拒因：后续无法按类型裁剪或做权限隔离。 | 默认别把隐私草稿写进历史。 |
@@ -132,7 +132,7 @@
 | **P2a** | Completions：`OpenAiStreamDelta.reasoning_content` + `OpenAiRequestBody` 增加 `reasoning_effort` / `thinking`（按 `thinking_format` 二选一） | `src/core/llm/openai.rs` | `openai_chunk_maps_reasoning_to_thinking` | Chat Completions 线打通。 |
 | **P2b** | Responses：`responses_chunk_to_events` 解析 `response.reasoning_*`（以 OpenAI 官方事件名为准）→ `StreamEvent::Thinking` | `src/core/llm/openai_responses/stream.rs` | `responses_stream_emits_thinking` | 别再 `// 其它 event 暂忽略`。 |
 | **P3** | `stream_handler`：`Thinking` 分支 → `MessageUpdate` payload `kind=thinking_delta` | `src/core/agent_loop/stream_handler.rs` + `src/infra/events/mod.rs`（序列化字段） | `stream_handler_emits_thinking_message_update` | Agent 层透出思考。 |
-| **P4** | 折叠：`show_thinking` 运行时状态 + `/thinking on|off|toggle` | `src/api/chat/commands/*` + `ChatContext` 或 renderer 状态 | `chat_command_toggles_thinking_fold` | CLI 版方案 D。 |
+| **P4** | 折叠：`thinking_display` 运行时状态 + `/thinking minimal|summary|full|toggle` | `src/api/chat/commands/*` + `ChatContext` 或 renderer 状态 | `chat_command_toggles_thinking_fold` | CLI 版方案 D。 |
 | **P5** | `ThinkingLevel` + `thinking_format` + `map_reasoning_effort` | `src/infra/config.rs` + `src/core/llm/thinking_policy.rs`（新） | `thinking_level_maps_to_openai_request` | 旋钮不是摆设。 |
 | **P6** | 多轮：provider / 出站剥留策略表（DeepSeek strip、Anthropic signature 保留策略占位） | `src/core/session/...` 或 `agent_loop` 组装请求前钩子 | `deepseek_rerun_strips_reasoning`（mock） | 别让用户多轮就 400。 |
 | **P7** | 持久化：`llm.thinking.persist` + audit 钩子 | transcript writer + audit | `thinking_not_in_transcript_by_default` | 合规默认值。 |
@@ -201,7 +201,7 @@ P1 StreamEvent::Thinking
 报告示意（逻辑冻结，文案可本地化）：
 
 ```text
-[thinking] ……dim 灰字；show=false 时只显示 summary……
+[thinking] ……dim 灰字；show="summary" 时只显示 summary……
 
 [tool] read  path=src/main.rs
 [tool] read  ✓ 238 lines (0.3s)
@@ -222,9 +222,10 @@ P1 StreamEvent::Thinking
 
 **输入事件（按时间顺序）**：
 
-1. `message_update.kind=thinking_delta` → 追加到 `thinking_buf`；若 `show_thinking`：
-   - 首次进入 thinking：打印前缀行 `\n\x1b[2m\x1b[90m[thinking]\x1b[0m`
-   - 后续只打印 delta（仍包在 dim 区，或每行前缀 `│ ` 二选一）
+1. `message_update.kind=thinking_delta` → 按 `thinking_display` 三档处理：
+   - `minimal`：首次进入 thinking 打固定占位 `\x1b[2m\x1b[90m[thinking] ...\x1b[0m`
+   - `summary`：仅 `source=summary` 可见；首次进入时打印前缀 `\n\x1b[2m\x1b[90m[thinking]\x1b[0m`
+   - `full`：`source=summary|raw` 都可见；后续只打印 delta（仍包在 dim 区）
 2. `message_update.kind=content_delta` → `MarkdownRenderer.push(delta)`（沿用现逻辑）
 3. `tool_execution_start` → 打印 `[tool] {name} {one_line_summary(args)}`（灰）
 4. `tool_execution_end` → 打印 `[tool] {name} ✓/✗ {summary} ({elapsed})`（绿/红）+ 失败时追加 **最多 N 行** stderr/错误摘要
@@ -260,19 +261,21 @@ P1 StreamEvent::Thinking
 
 ##### 行为表
 
-| `show_thinking` | 流式阶段 | 结束阶段 | 说人话 |
-|-----------------|----------|----------|--------|
-| `true` | 打印 summary + raw thinking delta（dim） | 保留完整缓冲区 | 像报告展开态。 |
-| `false` | **打印 `source=summary`，丢弃 `source=raw`**；`[thinking]` 前缀只出现一次，summary 同行流式增长 | 不额外补打 placeholder | 折叠 raw，但仍给用户摘要。 |
+| `thinking_display` | 流式阶段 | 结束阶段 | 说人话 |
+|--------------------|----------|----------|--------|
+| `minimal` | 任意 thinking 首帧只打一行 `[thinking] ...` 固定占位 | 不补打 summary/raw 正文 | 最安静。 |
+| `summary` | **打印 `source=summary`，丢弃 `source=raw`**；`[thinking]` 前缀只出现一次，summary 同行流式增长 | 不额外补打 placeholder | 默认档。 |
+| `full` | 打印 summary + raw thinking delta（dim） | 保留完整流式正文 | 全展开。 |
 
 ##### CLI 交互（无 Ctrl+T 的等价物）
 
 | 触发 | 动作 | 说人话 |
 |------|------|--------|
-| `/thinking on` | `show_thinking=true` | 打开。 |
-| `/thinking off` | `show_thinking=false` | 关掉。 |
-| `/thinking toggle` | 翻转 | 一键切换。 |
-| `PI_CHAT_SHOW_THINKING=0/1` | 进程级默认 | 脚本友好。 |
+| `/thinking minimal` | `thinking_display=minimal` | 只保留占位。 |
+| `/thinking summary` | `thinking_display=summary` | 只看摘要。 |
+| `/thinking full` | `thinking_display=full` | 摘要 + raw 全开。 |
+| `/thinking toggle` | `summary -> full -> minimal -> summary` | 一键循环。 |
+| `PI_CHAT_SHOW_THINKING=minimal|summary|full` | 进程级默认 | 脚本友好；兼容旧 `0/1`。 |
 
 > TUI 阶段再把同一布尔量绑到 **Ctrl+T**（对齐 openclaw）。
 
@@ -316,7 +319,7 @@ P1 StreamEvent::Thinking
            v
   +---------------------------+
   | LlmConfig.thinking        |  enabled / level / show / persist / print_to_stderr
-  | + tool_cli_verbosity      |  （与 show_thinking 解耦，只管 [tool] 行档位）
+  | + tool_cli_verbosity      |  （与 thinking_display 解耦，只管 [tool] 行档位）
   +-------------+-------------+
                 |
                 v
@@ -348,7 +351,7 @@ P1 StreamEvent::Thinking
      v                          +---------------------------+
 +---------------------------+   | persist 监听器（可选）   |
 | CliTurnRenderer           |   | WIRE_MESSAGE_UPDATE/END  |
-| show_thinking 折叠/展开   |   | -> TranscriptEntry       |
+| thinking_display 三档     |   | -> TranscriptEntry       |
 | [thinking] dim 区         |   |    ThinkingTrace         |
 | Markdown 正文 stdout      |   +---------------------------+
 | [tool] stderr             |
@@ -597,15 +600,15 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
 | `llm.thinking.level` | enum | `high` | `ThinkingLevel` | 默认深度推理档位。 |
 | `llm.thinking.format` | string? | auto | `thinking_format` | 告诉翻译表用哪套键。 |
 | `llm.thinking.max_tokens` | u32? | model default | 仅豆包 / Moonshot `thinking` 对象路径生效 | OpenAI/Responses 走 `reasoning.effort`。 |
-| `llm.thinking.show` | bool | `false` | CLI 是否展开 raw thinking；`false` 时仍显示 summary | 默认折叠 raw。 |
+| `llm.thinking.show` | enum(`minimal/summary/full`) | `summary` | CLI thinking 显示档位；兼容旧 bool：`false -> summary`、`true -> full` | 默认显示摘要。 |
 | `llm.thinking.persist` | bool | `false` | 是否写入 transcript | 默认别存草稿。 |
 | `llm.thinking.print_to_stderr` | bool | `false` | 与 prompt 冲突时逃生 | 调试用。 |
-| `llm.tool_cli_verbosity` | enum(`off/brief/full`) | `full` | 工具执行行输出档位 | 与 `show_thinking` 解耦。 |
+| `llm.tool_cli_verbosity` | enum(`off/brief/full`) | `full` | 工具执行行输出档位 | 与 `thinking_display` 解耦。 |
 | `agent.max_tool_rounds` | usize | `20~30`（建议） | 硬上限防死循环 | 最后一道闸。 |
 
-`show_thinking` 初值优先级：`PI_CHAT_SHOW_THINKING`（已设置）> `llm.thinking.show` > 代码默认。  
+`thinking_display` 初值优先级：`PI_CHAT_SHOW_THINKING`（已设置）> `llm.thinking.show` > 代码默认。  
 `strip_on_resend`：用户侧不再提供 toml 配置项，重放剥留由 provider / 出站层按 API 规则决定。
-`provider=openai-responses` 时：只要 `thinking.enabled=true`，请求体就自动附加 `reasoning.summary="auto"`；`show` 只控制 CLI 是否展开 raw，不再 gate summary 请求。
+`provider=openai-responses` 时：只要 `thinking.enabled=true`，请求体就自动附加 `reasoning.summary="auto"`；`show` 只控制 CLI 显示档位，不再 gate summary 请求。
 语言策略：已回退 Prompt 层“强制跟随用户语言”的硬规则；当前以模型默认行为为主，后续是否进入 `Accept-Language` 头方案取决于语言行为观测结果。
 
 ---
@@ -617,8 +620,11 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
   -> debug 日志一行（含 event type）
   -> 不中断主链路
 
-thinking 解析成功且 show=false
+thinking 解析成功且 show=`summary`
   -> `source=summary` 仍写屏；`source=raw` 仅缓冲/可选 persist，不写屏
+
+thinking 解析成功且 show=`minimal`
+  -> 首帧仅打印 `[thinking] ...` 固定占位；不流式输出 summary/raw 正文
 
 reasoning delta 分片包含空白
   -> 原样透传（不 trim），避免单词粘连

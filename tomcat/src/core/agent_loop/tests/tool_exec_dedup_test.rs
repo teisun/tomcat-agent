@@ -621,11 +621,14 @@ async fn read_line_numbers_output_misused_as_edit_old_content_returns_line_prefi
     let primitive = make_executor(&dir_path);
     let state = Arc::new(ReadFileState::new());
 
-    let read_tc = make_tc(&serde_json::json!({
-        "path": f.to_string_lossy().to_string()
-    })
-    .to_string());
-    let (read_out, read_err, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
+    let read_tc = make_tc(
+        &serde_json::json!({
+            "path": f.to_string_lossy().to_string()
+        })
+        .to_string(),
+    );
+    let (read_out, read_err, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!read_err, "带行号 read 必须成功");
     assert!(
         read_out.contains("\talpha"),
@@ -641,9 +644,12 @@ async fn read_line_numbers_output_misused_as_edit_old_content_returns_line_prefi
         })
         .to_string(),
     );
-    let (msg, is_error, _) =
-        execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
-    assert!(is_error, "误把带行号 read 输出喂给 edit 时必须报错：{}", msg);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
+    assert!(
+        is_error,
+        "误把带行号 read 输出喂给 edit 时必须报错：{}",
+        msg
+    );
     assert!(
         msg.contains("NotFound (line_prefix_suspected)"),
         "错误文案应含专用子码：{}",
@@ -654,7 +660,11 @@ async fn read_line_numbers_output_misused_as_edit_old_content_returns_line_prefi
         "错误文案应指出 cat -n 来源：{}",
         msg
     );
-    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert!(
+        msg.contains("第 1 行"),
+        "错误文案应给出命中行号 hint：{}",
+        msg
+    );
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         original,
@@ -672,12 +682,15 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
     let primitive = make_executor(&dir_path);
     let state = Arc::new(ReadFileState::new());
 
-    let read_tc = make_tc(&serde_json::json!({
-        "path": f.to_string_lossy().to_string(),
-        "hashline": true
-    })
-    .to_string());
-    let (read_out, read_err, _) = execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
+    let read_tc = make_tc(
+        &serde_json::json!({
+            "path": f.to_string_lossy().to_string(),
+            "hashline": true
+        })
+        .to_string(),
+    );
+    let (read_out, read_err, _) =
+        execute_tool(&primitive, &None, &None, Some(&state), &read_tc).await;
     assert!(!read_err, "hashline read 必须成功");
     assert!(
         read_out.contains("#") && read_out.contains(":alpha"),
@@ -693,9 +706,12 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
         })
         .to_string(),
     );
-    let (msg, is_error, _) =
-        execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
-    assert!(is_error, "误把 hashline read 输出喂给 edit 时必须报错：{}", msg);
+    let (msg, is_error, _) = execute_tool(&primitive, &None, &None, Some(&state), &edit_tc).await;
+    assert!(
+        is_error,
+        "误把 hashline read 输出喂给 edit 时必须报错：{}",
+        msg
+    );
     assert!(
         msg.contains("NotFound (line_prefix_suspected)"),
         "错误文案应含专用子码：{}",
@@ -706,7 +722,11 @@ async fn read_hashline_output_misused_as_edit_old_content_returns_line_prefix_hi
         "错误文案应指出 hashline 来源：{}",
         msg
     );
-    assert!(msg.contains("第 1 行"), "错误文案应给出命中行号 hint：{}", msg);
+    assert!(
+        msg.contains("第 1 行"),
+        "错误文案应给出命中行号 hint：{}",
+        msg
+    );
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         original,

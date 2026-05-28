@@ -205,6 +205,70 @@ async fn run_message_update_thinking_signature_propagates() {
     );
 }
 
+/// Thinking summary/raw 都必须继续复用 `kind=thinking_delta`，只靠 `source` 区分，
+/// 不引入新的 wire event type。
+#[tokio::test]
+async fn run_message_update_keeps_thinking_wire_shape_for_summary_and_raw() {
+    let stream1: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::Thinking {
+            delta: "summary".to_string(),
+            source: ThinkingSource::Summary,
+            signature: None,
+        }),
+        Ok(StreamEvent::Thinking {
+            delta: "raw".to_string(),
+            source: ThinkingSource::Raw,
+            signature: None,
+        }),
+        Ok(StreamEvent::ContentDelta {
+            delta: "done".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream1]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let events_seen: Arc<Mutex<MessageUpdateKinds>> = Arc::new(Mutex::new(Vec::new()));
+    let events_seen_cb = Arc::clone(&events_seen);
+    event_bus.on(
+        wire::WIRE_MESSAGE_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            let p = &ctx.payload;
+            let kind = p
+                .pointer("/assistantMessageEvent/kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<missing>")
+                .to_string();
+            let source = p
+                .pointer("/assistantMessageEvent/source")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            events_seen_cb.lock().unwrap().push((kind, source));
+            Ok(())
+        }),
+    );
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let messages = vec![ChatMessage::user("hi")];
+    let _ = loop_.run(messages).await.unwrap();
+    let observed = events_seen.lock().unwrap().clone();
+    assert_eq!(
+        observed,
+        vec![
+            ("thinking_delta".to_string(), Some("summary".to_string())),
+            ("thinking_delta".to_string(), Some("raw".to_string())),
+            ("content_delta".to_string(), None),
+        ]
+    );
+}
+
 /// chat_stream 直接返回 Err（非 stream 内 Err）时也被正确分类并终止。
 #[tokio::test]
 async fn run_chat_stream_returns_err_is_classified() {

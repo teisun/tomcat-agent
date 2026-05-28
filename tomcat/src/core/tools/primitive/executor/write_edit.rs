@@ -502,7 +502,10 @@ fn detect_read_display_prefix_style(line: &str) -> Option<ReadDisplayPrefixStyle
     if cat_n_prefix_re().find(line).is_some_and(|m| m.start() == 0) {
         return Some(ReadDisplayPrefixStyle::CatN);
     }
-    if hashline_prefix_re().find(line).is_some_and(|m| m.start() == 0) {
+    if hashline_prefix_re()
+        .find(line)
+        .is_some_and(|m| m.start() == 0)
+    {
         return Some(ReadDisplayPrefixStyle::Hashline);
     }
     None
@@ -525,8 +528,7 @@ fn cat_n_prefix_re() -> &'static regex::Regex {
 fn hashline_prefix_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r"^[ ]*\d+#[ZPMQVRWSNKTXJBYH]{2}:")
-            .expect("valid hashline prefix regex")
+        regex::Regex::new(r"^[ ]*\d+#[ZPMQVRWSNKTXJBYH]{2}:").expect("valid hashline prefix regex")
     })
 }
 

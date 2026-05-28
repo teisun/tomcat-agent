@@ -395,7 +395,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
             level: "high".into(),
-            show: false,
+            show: crate::infra::config::ThinkingDisplay::Summary,
             persist: false,
             ..crate::infra::config::ThinkingConfig::default()
         },
@@ -421,7 +421,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
     );
     assert_eq!(
         body["reasoning"]["summary"], "auto",
-        "show=false && persist=false 时也应请求 reasoning.summary: {}",
+        "show=summary && persist=false 时也应请求 reasoning.summary: {}",
         body
     );
     assert!(
@@ -437,7 +437,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
-            show: true,
+            show: crate::infra::config::ThinkingDisplay::Full,
             persist: false,
             ..crate::infra::config::ThinkingConfig::default()
         },
@@ -458,7 +458,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
     let body = p.build_request_body(&req, true);
     assert_eq!(
         body["reasoning"]["summary"], "auto",
-        "show=true 时应请求 summary"
+        "show=full 时应请求 summary"
     );
 }
 
@@ -469,7 +469,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
-            show: false,
+            show: crate::infra::config::ThinkingDisplay::Summary,
             persist: true,
             ..crate::infra::config::ThinkingConfig::default()
         },
@@ -490,7 +490,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
     let body = p.build_request_body(&req, true);
     assert_eq!(
         body["reasoning"]["summary"], "auto",
-        "persist=true 时应请求 summary，即使 show=false"
+        "persist=true 时应请求 summary，即使 show=summary"
     );
 }
 
@@ -501,7 +501,7 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
-            show: false,
+            show: crate::infra::config::ThinkingDisplay::Summary,
             persist: false,
             ..crate::infra::config::ThinkingConfig::default()
         },
@@ -689,6 +689,102 @@ fn responses_chunk_reasoning_delta_preserves_word_boundaries_between_frames() {
         .collect::<Vec<_>>()
         .join("");
     assert_eq!(joined, "hello world");
+}
+
+#[test]
+fn responses_chunk_reasoning_done_emits_only_missing_suffix() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let mut reasoning = ReasoningState::default();
+    let v1 = json!({
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs1",
+        "summary_index": 0,
+        "delta": "hello"
+    });
+    let v2 = json!({
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs1",
+        "summary_index": 0,
+        "text": "hello world"
+    });
+    let joined = [v1, v2]
+        .into_iter()
+        .flat_map(|v| responses_chunk_to_events_with_state(&v, &mut tracks, &mut reasoning))
+        .filter_map(|ev| match ev {
+            StreamEvent::Thinking { delta, .. } => Some(delta),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(joined, vec!["hello".to_string(), " world".to_string()]);
+}
+
+#[test]
+fn responses_chunk_reasoning_mixed_events_are_deduped() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let mut reasoning = ReasoningState::default();
+    let events = [
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "sum-1",
+            "summary_index": 0,
+            "delta": "plan first"
+        }),
+        json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "sum-1",
+            "summary_index": 0,
+            "text": "plan first"
+        }),
+        json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "sum-1",
+            "summary_index": 0,
+            "part": {"type": "summary_text", "text": "plan first"}
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "id": "sum-1",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "plan first"}]
+            }
+        }),
+        json!({
+            "type": "response.reasoning_text.delta",
+            "item_id": "raw-1",
+            "content_index": 0,
+            "delta": "raw step"
+        }),
+        json!({
+            "type": "response.reasoning_text.done",
+            "item_id": "raw-1",
+            "content_index": 0,
+            "text": "raw step"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "id": "raw-1",
+                "type": "reasoning",
+                "content": [{"type": "reasoning_text", "text": "raw step"}]
+            }
+        }),
+    ];
+    let observed = events
+        .into_iter()
+        .flat_map(|v| responses_chunk_to_events_with_state(&v, &mut tracks, &mut reasoning))
+        .filter_map(|ev| match ev {
+            StreamEvent::Thinking { delta, source, .. } => Some((source, delta)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        vec![
+            (ThinkingSource::Summary, "plan first".to_string()),
+            (ThinkingSource::Raw, "raw step".to_string()),
+        ]
+    );
 }
 
 #[test]

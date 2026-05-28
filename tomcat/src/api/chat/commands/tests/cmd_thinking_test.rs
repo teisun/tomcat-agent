@@ -2,15 +2,17 @@
 //!
 //! 覆盖：
 //! - `parse_chat_command("/thinking")` 解析为 `Toggle`；
-//! - `/thinking on/off/toggle` 各自走到正确的 `ThinkingAction`；
+//! - `/thinking minimal/summary/full/toggle` 各自走到正确的 `ThinkingAction`；
+//! - 历史 `on/off` 作为兼容别名；
 //! - `/thinking xxx` 报 UsageError；
-//! - `apply_action` 在 AtomicBool 上的 on/off/toggle 行为；
+//! - `apply_action` 在 `AtomicU8` 上的三档设置与循环切换；
 //! - `/help` 文案包含 `/thinking`。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::cmd_thinking::{apply_action, ThinkingAction};
 use super::super::{help_text, parse_chat_command, ChatCommand};
+use crate::infra::config::ThinkingDisplay;
 
 #[test]
 fn bare_thinking_defaults_to_toggle() {
@@ -23,23 +25,41 @@ fn bare_thinking_defaults_to_toggle() {
 }
 
 #[test]
-fn thinking_on_off_toggle_parse_correctly() {
+fn thinking_modes_and_aliases_parse_correctly() {
     assert!(matches!(
-        parse_chat_command("/thinking on"),
+        parse_chat_command("/thinking minimal"),
         ChatCommand::Thinking {
-            action: ThinkingAction::On
+            action: ThinkingAction::Minimal
         }
     ));
     assert!(matches!(
-        parse_chat_command("/thinking off"),
+        parse_chat_command("/thinking summary"),
         ChatCommand::Thinking {
-            action: ThinkingAction::Off
+            action: ThinkingAction::Summary
+        }
+    ));
+    assert!(matches!(
+        parse_chat_command("/thinking full"),
+        ChatCommand::Thinking {
+            action: ThinkingAction::Full
         }
     ));
     assert!(matches!(
         parse_chat_command("/thinking toggle"),
         ChatCommand::Thinking {
             action: ThinkingAction::Toggle
+        }
+    ));
+    assert!(matches!(
+        parse_chat_command("/thinking on"),
+        ChatCommand::Thinking {
+            action: ThinkingAction::Full
+        }
+    ));
+    assert!(matches!(
+        parse_chat_command("/thinking off"),
+        ChatCommand::Thinking {
+            action: ThinkingAction::Summary
         }
     ));
 }
@@ -52,7 +72,7 @@ fn thinking_unknown_subcommand_is_usage_error() {
         other => panic!("应为 UsageError，实际：{:?}", other),
     };
     assert!(
-        msg.contains("on/off/toggle"),
+        msg.contains("minimal/summary/full/toggle"),
         "错误文案应说明合法值：{}",
         msg
     );
@@ -62,38 +82,76 @@ fn thinking_unknown_subcommand_is_usage_error() {
 #[test]
 fn thinking_extra_args_is_usage_error() {
     assert!(matches!(
-        parse_chat_command("/thinking on extra"),
+        parse_chat_command("/thinking summary extra"),
         ChatCommand::UsageError { .. }
     ));
 }
 
 #[test]
-fn apply_on_sets_true_regardless_of_prev() {
-    let f = AtomicBool::new(false);
-    assert!(apply_action(&f, ThinkingAction::On));
-    assert!(f.load(Ordering::Acquire));
-    assert!(apply_action(&f, ThinkingAction::On));
-    assert!(f.load(Ordering::Acquire));
+fn apply_explicit_mode_sets_target_regardless_of_prev() {
+    let f = AtomicU8::new(ThinkingDisplay::Minimal.as_u8());
+    assert_eq!(
+        apply_action(&f, ThinkingAction::Summary),
+        ThinkingDisplay::Summary
+    );
+    assert_eq!(
+        ThinkingDisplay::from_u8(f.load(Ordering::Acquire)),
+        ThinkingDisplay::Summary
+    );
+    assert_eq!(
+        apply_action(&f, ThinkingAction::Full),
+        ThinkingDisplay::Full
+    );
+    assert_eq!(
+        ThinkingDisplay::from_u8(f.load(Ordering::Acquire)),
+        ThinkingDisplay::Full
+    );
+    assert_eq!(
+        apply_action(&f, ThinkingAction::Minimal),
+        ThinkingDisplay::Minimal
+    );
+    assert_eq!(
+        ThinkingDisplay::from_u8(f.load(Ordering::Acquire)),
+        ThinkingDisplay::Minimal
+    );
 }
 
 #[test]
-fn apply_off_sets_false_regardless_of_prev() {
-    let f = AtomicBool::new(true);
-    assert!(!apply_action(&f, ThinkingAction::Off));
-    assert!(!f.load(Ordering::Acquire));
-}
-
-#[test]
-fn apply_toggle_flips_strictly() {
-    let f = AtomicBool::new(false);
-    assert!(apply_action(&f, ThinkingAction::Toggle));
-    assert!(f.load(Ordering::Acquire));
-    assert!(!apply_action(&f, ThinkingAction::Toggle));
-    assert!(!f.load(Ordering::Acquire));
+fn apply_toggle_cycles_summary_full_minimal() {
+    let f = AtomicU8::new(ThinkingDisplay::Summary.as_u8());
+    assert_eq!(
+        apply_action(&f, ThinkingAction::Toggle),
+        ThinkingDisplay::Full
+    );
+    assert_eq!(
+        ThinkingDisplay::from_u8(f.load(Ordering::Acquire)),
+        ThinkingDisplay::Full
+    );
+    assert_eq!(
+        apply_action(&f, ThinkingAction::Toggle),
+        ThinkingDisplay::Minimal
+    );
+    assert_eq!(
+        ThinkingDisplay::from_u8(f.load(Ordering::Acquire)),
+        ThinkingDisplay::Minimal
+    );
+    assert_eq!(
+        apply_action(&f, ThinkingAction::Toggle),
+        ThinkingDisplay::Summary
+    );
+    assert_eq!(
+        ThinkingDisplay::from_u8(f.load(Ordering::Acquire)),
+        ThinkingDisplay::Summary
+    );
 }
 
 #[test]
 fn help_text_mentions_thinking_command() {
     let h = help_text();
     assert!(h.contains("/thinking"), "/help 应列出 /thinking：{}", h);
+    assert!(
+        h.contains("minimal|summary|full|toggle"),
+        "帮助文案应展示三档：{}",
+        h
+    );
 }

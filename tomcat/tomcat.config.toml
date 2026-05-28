@@ -28,8 +28,8 @@ tool_cli_verbosity = "full"
 [llm.thinking]
 enabled = true
 level = "xhigh"
-# false = 折叠 raw thinking，但仍显示 summary 摘要
-show = false
+# minimal = 仅显示 `[thinking] ...` 占位；summary = 仅显示摘要；full = 摘要 + raw 全显
+show = "summary"
 persist = false
 print_to_stderr = false
 

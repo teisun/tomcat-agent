@@ -58,11 +58,11 @@ fn checkpoint_config_defaults_are_wired_into_app_config() {
 }
 
 #[test]
-fn thinking_show_default_is_false() {
+fn thinking_show_default_is_summary() {
     let cfg = AppConfig::default();
     assert!(cfg.llm.thinking.enabled, "thinking 默认仍应启用");
     assert!(
-        !cfg.llm.thinking.show,
-        "ThinkingConfig::default().show 应为 false"
+        matches!(cfg.llm.thinking.show, ThinkingDisplay::Summary),
+        "ThinkingConfig::default().show 应为 summary"
     );
 }

@@ -9,6 +9,7 @@
 
 use bytes::Bytes;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
@@ -30,6 +31,7 @@ pub(super) struct ResponsesStream<S> {
     /// 累积 tool_call arguments：`(item_id, output_index, name)` → `(index, accum_args)`；
     /// 用于判定每个分片对应的 `ToolCallDelta.index` 与首帧 `name` 触发时机。
     tool_calls: Vec<ToolCallTrack>,
+    reasoning: ReasoningState,
 }
 
 #[derive(Debug)]
@@ -40,6 +42,92 @@ pub(super) struct ToolCallTrack {
     pub(super) name_emitted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReasoningKey {
+    item_id: String,
+    index: u32,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ReasoningState {
+    summary: HashMap<ReasoningKey, String>,
+    raw: HashMap<ReasoningKey, String>,
+}
+
+impl ReasoningState {
+    fn ensure_started(&mut self, source: ThinkingSource, key: ReasoningKey) {
+        self.buffer_mut(source).entry(key).or_default();
+    }
+
+    fn apply_delta(
+        &mut self,
+        source: ThinkingSource,
+        key: ReasoningKey,
+        delta: &str,
+    ) -> Option<StreamEvent> {
+        if delta.is_empty() {
+            return None;
+        }
+        self.buffer_mut(source)
+            .entry(key)
+            .or_default()
+            .push_str(delta);
+        Some(StreamEvent::Thinking {
+            delta: delta.to_string(),
+            source,
+            signature: None,
+        })
+    }
+
+    fn apply_snapshot(
+        &mut self,
+        source: ThinkingSource,
+        key: ReasoningKey,
+        text: &str,
+    ) -> Option<StreamEvent> {
+        if text.is_empty() {
+            return None;
+        }
+        let buf = self.buffer_mut(source).entry(key.clone()).or_default();
+        if buf == text {
+            return None;
+        }
+        if let Some(suffix) = text.strip_prefix(buf.as_str()) {
+            if suffix.is_empty() {
+                return None;
+            }
+            buf.push_str(suffix);
+            return Some(StreamEvent::Thinking {
+                delta: suffix.to_string(),
+                source,
+                signature: None,
+            });
+        }
+        tracing::warn!(
+            target: "tomcat::llm::openai_responses",
+            item_id = %key.item_id,
+            index = key.index,
+            source = ?source,
+            old_len = buf.len(),
+            new_len = text.len(),
+            "reasoning snapshot does not extend accumulated text; replacing"
+        );
+        *buf = text.to_string();
+        Some(StreamEvent::Thinking {
+            delta: text.to_string(),
+            source,
+            signature: None,
+        })
+    }
+
+    fn buffer_mut(&mut self, source: ThinkingSource) -> &mut HashMap<ReasoningKey, String> {
+        match source {
+            ThinkingSource::Summary => &mut self.summary,
+            ThinkingSource::Raw => &mut self.raw,
+        }
+    }
+}
+
 impl<S> ResponsesStream<S> {
     pub(super) fn new(inner: S, prefer_ndjson: bool) -> Self {
         Self {
@@ -48,6 +136,7 @@ impl<S> ResponsesStream<S> {
             pending: Vec::new().into_iter(),
             mode: if prefer_ndjson { Some(true) } else { None },
             tool_calls: Vec::new(),
+            reasoning: ReasoningState::default(),
         }
     }
 
@@ -60,7 +149,11 @@ impl<S> ResponsesStream<S> {
                 anyhow::anyhow!("{e} | raw={raw}"),
             )
         })?;
-        Ok(responses_chunk_to_events(&value, &mut self.tool_calls))
+        Ok(responses_chunk_to_events_with_state(
+            &value,
+            &mut self.tool_calls,
+            &mut self.reasoning,
+        ))
     }
 }
 
@@ -206,9 +299,19 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
 }
 
 /// 把单条 Responses chunk JSON 翻译为 0..N 个 [`StreamEvent`]。
+#[cfg(test)]
 pub(super) fn responses_chunk_to_events(
     value: &Value,
     tool_calls: &mut Vec<ToolCallTrack>,
+) -> Vec<StreamEvent> {
+    let mut reasoning = ReasoningState::default();
+    responses_chunk_to_events_with_state(value, tool_calls, &mut reasoning)
+}
+
+pub(super) fn responses_chunk_to_events_with_state(
+    value: &Value,
+    tool_calls: &mut Vec<ToolCallTrack>,
+    reasoning: &mut ReasoningState,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -331,30 +434,117 @@ pub(super) fn responses_chunk_to_events(
                 reason: format!("error:{}", msg),
             });
         }
-        // T2-P0-006 P2b：Reasoning / Thinking 流式事件归一映射。
-        //
-        // OpenAI Responses 在不同版本/网关下出现过以下事件名（均包含 reasoning 字段）：
-        // - `response.reasoning.delta`           （旧 reasoning text 流）
-        // - `response.reasoning_text.delta`      （reasoning text 主流命名）
-        // - `response.reasoning_summary_text.delta`（reasoning summary 文本流）
-        // - `response.reasoning_summary.delta`   （部分网关的 summary 事件）
-        // 它们大多按 `delta: string` 形态携带增量，但也可能是对象/数组；
-        // 这里尽量提取可读文本映射为 Thinking，并同时标记 `source=summary|raw`。
-        // `*.done` 事件不携带新增 delta，
-        // 因此本期忽略，避免重复 emit；后续若需要 done 信号可再扩展。
-        "response.reasoning.delta"
-        | "response.reasoning_text.delta"
-        | "response.reasoning_summary_text.delta"
-        | "response.reasoning_summary.delta"
-        | "response.reasoning_summary_part.done"
-        | "response.reasoning_summary_part.added" => {
-            push_reasoning_delta_event(&mut events, value, kind)
+        // T2-P1：Responses reasoning 事件按 (item_id, index) 分桶去重。
+        "response.reasoning.delta" | "response.reasoning_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                let key = raw_reasoning_key(value);
+                if let Some(event) = reasoning.apply_delta(ThinkingSource::Raw, key, delta) {
+                    events.push(event);
+                }
+            }
+        }
+        "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                let key = summary_reasoning_key(value);
+                if let Some(event) = reasoning.apply_delta(ThinkingSource::Summary, key, delta) {
+                    events.push(event);
+                }
+            }
+        }
+        "response.reasoning_summary_part.added" => {
+            reasoning.ensure_started(ThinkingSource::Summary, summary_reasoning_key(value));
+        }
+        "response.content_part.added" => {
+            if value
+                .get("part")
+                .and_then(|part| part.get("type"))
+                .and_then(Value::as_str)
+                == Some("reasoning_text")
+            {
+                reasoning.ensure_started(ThinkingSource::Raw, raw_reasoning_key(value));
+            }
+        }
+        "response.reasoning_summary_text.done" => {
+            if let Some(text) = direct_text_field(value) {
+                let key = summary_reasoning_key(value);
+                if let Some(event) = reasoning.apply_snapshot(ThinkingSource::Summary, key, &text) {
+                    events.push(event);
+                }
+            }
+        }
+        "response.reasoning_text.done" | "response.reasoning.done" => {
+            if let Some(text) = direct_text_field(value) {
+                let key = raw_reasoning_key(value);
+                if let Some(event) = reasoning.apply_snapshot(ThinkingSource::Raw, key, &text) {
+                    events.push(event);
+                }
+            }
+        }
+        "response.reasoning_summary_part.done" => {
+            if let Some(text) = value.get("part").and_then(extract_text) {
+                let key = summary_reasoning_key(value);
+                if let Some(event) = reasoning.apply_snapshot(ThinkingSource::Summary, key, &text) {
+                    events.push(event);
+                }
+            }
+        }
+        "response.reasoning_summary.delta" | "response.reasoning_summary.done" => {
+            for (index, text) in extract_summary_entries(value) {
+                let key = ReasoningKey {
+                    item_id: value
+                        .get("item_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    index,
+                };
+                if let Some(event) = reasoning.apply_snapshot(ThinkingSource::Summary, key, &text) {
+                    events.push(event);
+                }
+            }
         }
         "response.output_item.done" => {
-            // 某些 Responses 样本不会发 `reasoning_*delta`，而是把 reasoning 摘要仅放在
-            // output_item.done.item 里；仅当 item.type=reasoning* 时抽取，避免误把正文当 thinking。
-            if is_reasoning_output_item(value) {
-                push_reasoning_delta_event(&mut events, value, kind);
+            if let Some(item) = value.get("item") {
+                if item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(|t| t.contains("reasoning"))
+                    .unwrap_or(false)
+                {
+                    let item_id = item
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    for (index, text) in extract_item_summary_entries(item) {
+                        let key = ReasoningKey {
+                            item_id: item_id.clone(),
+                            index,
+                        };
+                        if let Some(event) =
+                            reasoning.apply_snapshot(ThinkingSource::Summary, key, &text)
+                        {
+                            events.push(event);
+                        }
+                    }
+                    for (index, text) in extract_item_raw_entries(item) {
+                        let key = ReasoningKey {
+                            item_id: item_id.clone(),
+                            index,
+                        };
+                        if let Some(event) =
+                            reasoning.apply_snapshot(ThinkingSource::Raw, key, &text)
+                        {
+                            events.push(event);
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        target: "tomcat::llm::openai_responses",
+                        event = %kind,
+                        "ignoring unknown Responses SSE event"
+                    );
+                }
             } else {
                 tracing::debug!(
                     target: "tomcat::llm::openai_responses",
@@ -362,13 +552,6 @@ pub(super) fn responses_chunk_to_events(
                     "ignoring unknown Responses SSE event"
                 );
             }
-        }
-        "response.reasoning.done"
-        | "response.reasoning_text.done"
-        | "response.reasoning_summary_text.done"
-        | "response.reasoning_summary.done" => {
-            // 已知的「reasoning 段结束」事件——本期不发额外 StreamEvent，仅静默吃掉，
-            // 避免被下面 `_` 分支的未知事件 trace 误报。
         }
         other => {
             if other.starts_with("response.reasoning") {
@@ -392,51 +575,36 @@ pub(super) fn responses_chunk_to_events(
     events
 }
 
-fn push_reasoning_delta_event(events: &mut Vec<StreamEvent>, value: &Value, kind: &str) {
-    if let Some(delta) = extract_reasoning_delta(value) {
-        let source = classify_reasoning_source(value, kind);
-        events.push(StreamEvent::Thinking {
-            delta,
-            source,
-            signature: None,
-        });
-    } else {
-        tracing::debug!(
-            target: "tomcat::llm::openai_responses",
-            event = %kind,
-            payload = ?value,
-            "reasoning delta event had no extractable text"
-        );
+fn summary_reasoning_key(value: &Value) -> ReasoningKey {
+    ReasoningKey {
+        item_id: value
+            .get("item_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        index: value
+            .get("summary_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
     }
 }
 
-fn classify_reasoning_source(value: &Value, kind: &str) -> ThinkingSource {
-    match kind {
-        "response.reasoning_summary_text.delta"
-        | "response.reasoning_summary.delta"
-        | "response.reasoning_summary_part.done"
-        | "response.reasoning_summary_part.added" => ThinkingSource::Summary,
-        "response.reasoning.delta" | "response.reasoning_text.delta" => ThinkingSource::Raw,
-        "response.output_item.done" => {
-            if output_item_contains_summary(value) {
-                ThinkingSource::Summary
-            } else {
-                ThinkingSource::Raw
-            }
-        }
-        _ => ThinkingSource::Raw,
+fn raw_reasoning_key(value: &Value) -> ReasoningKey {
+    ReasoningKey {
+        item_id: value
+            .get("item_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        index: value
+            .get("content_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32,
     }
 }
 
-fn extract_reasoning_delta(value: &Value) -> Option<String> {
-    for key in ["delta", "summary", "text", "summary_text", "content"] {
-        if let Some(raw) = value.get(key) {
-            if let Some(text) = extract_text(raw) {
-                return Some(text);
-            }
-        }
-    }
-    for key in ["part", "item"] {
+fn direct_text_field(value: &Value) -> Option<String> {
+    for key in ["text", "delta", "summary_text", "summary", "content"] {
         if let Some(raw) = value.get(key) {
             if let Some(text) = extract_text(raw) {
                 return Some(text);
@@ -446,26 +614,66 @@ fn extract_reasoning_delta(value: &Value) -> Option<String> {
     None
 }
 
-fn is_reasoning_output_item(value: &Value) -> bool {
+fn extract_summary_entries(value: &Value) -> Vec<(u32, String)> {
+    let entries = extract_indexed_entries(value.get("summary"), Some("summary_text"));
+    if !entries.is_empty() {
+        return entries;
+    }
     value
-        .get("item")
-        .and_then(|item| item.get("type"))
-        .and_then(Value::as_str)
-        .map(|t| t.contains("reasoning"))
-        .unwrap_or(false)
+        .get("summary")
+        .and_then(extract_text)
+        .map(|text| {
+            vec![(
+                value
+                    .get("summary_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32,
+                text,
+            )]
+        })
+        .unwrap_or_default()
 }
 
-fn output_item_contains_summary(value: &Value) -> bool {
-    let Some(item) = value.get("item") else {
-        return false;
+fn extract_item_summary_entries(item: &Value) -> Vec<(u32, String)> {
+    let entries = extract_indexed_entries(item.get("summary"), Some("summary_text"));
+    if !entries.is_empty() {
+        return entries;
+    }
+    item.get("summary_text")
+        .and_then(extract_text)
+        .map(|text| vec![(0, text)])
+        .unwrap_or_default()
+}
+
+fn extract_item_raw_entries(item: &Value) -> Vec<(u32, String)> {
+    let entries = extract_indexed_entries(item.get("content"), Some("reasoning_text"));
+    if !entries.is_empty() {
+        return entries;
+    }
+    item.get("text")
+        .and_then(extract_text)
+        .map(|text| vec![(0, text)])
+        .unwrap_or_default()
+}
+
+fn extract_indexed_entries(
+    container: Option<&Value>,
+    expected_type: Option<&str>,
+) -> Vec<(u32, String)> {
+    let Some(items) = container.and_then(Value::as_array) else {
+        return Vec::new();
     };
-    item.get("summary").is_some()
-        || item.get("summary_text").is_some()
-        || item
-            .get("part")
-            .and_then(|part| part.get("type"))
-            .and_then(Value::as_str)
-            == Some("summary_text")
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| {
+            let actual_type = item.get("type").and_then(Value::as_str);
+            if expected_type.is_some() && actual_type.is_some() && actual_type != expected_type {
+                return None;
+            }
+            extract_text(item).map(|text| (idx as u32, text))
+        })
+        .collect()
 }
 
 fn extract_text(value: &Value) -> Option<String> {

@@ -5,7 +5,7 @@
 //! - 工具单行摘要的内置类型（read/bash）与回退（未知工具）；
 //! - kind 缺省走 content_delta 的向后兼容性。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -16,7 +16,7 @@ use super::{
     CliWriter,
 };
 use crate::api::render::MarkdownRenderer;
-use crate::infra::config::ToolCliVerbosity;
+use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::events::ToolDisplay;
 
 #[derive(Default)]
@@ -46,17 +46,17 @@ impl CliWriter for CapturedWriter {
     }
 }
 
-fn make_renderer(show_thinking: bool) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
-    make_renderer_with_tool_verbosity(show_thinking, ToolCliVerbosity::Full)
+fn make_renderer(display: ThinkingDisplay) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
+    make_renderer_with_tool_verbosity(display, ToolCliVerbosity::Full)
 }
 
 fn make_renderer_with_tool_verbosity(
-    show_thinking: bool,
+    display: ThinkingDisplay,
     tool_cli_verbosity: ToolCliVerbosity,
 ) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
     let writer = CapturedWriter::new();
     let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
-    let flag = Arc::new(AtomicBool::new(show_thinking));
+    let flag = Arc::new(AtomicU8::new(display.as_u8()));
     let r = CliTurnRenderer::with_writer(
         md,
         flag,
@@ -68,8 +68,8 @@ fn make_renderer_with_tool_verbosity(
 }
 
 #[test]
-fn folded_thinking_shows_summary_but_hides_raw() {
-    let (r, w) = make_renderer(false);
+fn summary_mode_shows_summary_but_hides_raw() {
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step a", "source": "summary"}
     }));
@@ -95,8 +95,8 @@ fn folded_thinking_shows_summary_but_hides_raw() {
 }
 
 #[test]
-fn expanded_thinking_streams_each_delta_with_dim_color() {
-    let (r, w) = make_renderer(true);
+fn full_mode_streams_each_delta_with_dim_color() {
+    let (r, w) = make_renderer(ThinkingDisplay::Full);
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "step a", "source": "raw"}
     }));
@@ -120,8 +120,37 @@ fn expanded_thinking_streams_each_delta_with_dim_color() {
 }
 
 #[test]
+fn minimal_mode_prints_placeholder_only_once() {
+    let (r, w) = make_renderer(ThinkingDisplay::Minimal);
+    r.on_message_update(&json!({
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": "summary a", "source": "summary"}
+    }));
+    r.on_message_update(&json!({
+        "assistantMessageEvent": {"kind": "thinking_delta", "delta": " raw b", "source": "raw"}
+    }));
+    let s = w.stdout();
+    assert_eq!(
+        s.matches("[thinking]").count(),
+        1,
+        "minimal 只应打一行占位: {:?}",
+        s
+    );
+    assert!(
+        s.contains("[thinking] ..."),
+        "minimal 应输出固定占位: {:?}",
+        s
+    );
+    assert!(
+        !s.contains("summary a"),
+        "minimal 不应输出 summary 正文: {:?}",
+        s
+    );
+    assert!(!s.contains("raw b"), "minimal 不应输出 raw 正文: {:?}", s);
+}
+
+#[test]
 fn content_delta_after_thinking_inserts_newline() {
-    let (r, w) = make_renderer(true);
+    let (r, w) = make_renderer(ThinkingDisplay::Full);
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "plan", "source": "summary"}
     }));
@@ -143,7 +172,7 @@ fn content_delta_after_thinking_inserts_newline() {
 
 #[test]
 fn missing_kind_defaults_to_content_for_back_compat() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_message_update(&json!({
         "assistantMessageEvent": {"delta": "legacy"}
     }));
@@ -157,7 +186,7 @@ fn missing_kind_defaults_to_content_for_back_compat() {
 
 #[test]
 fn empty_thinking_delta_is_skipped() {
-    let (r, w) = make_renderer(true);
+    let (r, w) = make_renderer(ThinkingDisplay::Full);
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "", "source": "raw"}
     }));
@@ -169,7 +198,7 @@ fn empty_thinking_delta_is_skipped() {
 
 #[test]
 fn thinking_delta_without_source_is_ignored() {
-    let (r, w) = make_renderer(true);
+    let (r, w) = make_renderer(ThinkingDisplay::Full);
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "secret"}
     }));
@@ -181,7 +210,7 @@ fn thinking_delta_without_source_is_ignored() {
 
 #[test]
 fn tool_start_emits_gray_summary_on_stderr() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     // 先有正文，让 last_kind != None，从而在 tool start 前补换行
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "content_delta", "delta": "hi"}
@@ -210,7 +239,7 @@ fn tool_start_emits_gray_summary_on_stderr() {
 /// `tool_execution_update` 事件 → CLI dim 灰行。
 #[test]
 fn tool_update_emits_dim_countdown_line_on_stderr() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_tool_update(&json!({
         "toolCallId": "blk-1",
         "toolName": "task_output",
@@ -239,7 +268,7 @@ fn tool_update_emits_dim_countdown_line_on_stderr() {
 
 #[test]
 fn tool_end_success_uses_green_check_and_elapsed() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_tool_start(&json!({
         "toolCallId": "c2",
         "toolName": "read",
@@ -264,7 +293,7 @@ fn tool_end_success_uses_green_check_and_elapsed() {
 
 #[test]
 fn tool_end_failure_uses_red_cross_and_extra_lines() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_tool_start(&json!({
         "toolCallId": "c3",
         "toolName": "bash",
@@ -296,7 +325,7 @@ fn tool_end_failure_uses_red_cross_and_extra_lines() {
 
 #[test]
 fn tool_end_failure_with_string_result_shows_real_error_message() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     r.on_tool_start(&json!({
         "toolCallId": "c4",
         "toolName": "read",
@@ -424,7 +453,7 @@ fn create_plan_success_shows_absolute_plan_path() {
 
 #[test]
 fn tool_end_create_plan_prints_clickable_path() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     let home = dirs::home_dir().expect("HOME");
     let plan_path = home.join(".tomcat/plans/plan_cli_e2e__demo.plan.md");
     let result = json!({
@@ -545,7 +574,7 @@ fn write_plaintext_without_display_falls_back_to_ok() {
 
 #[test]
 fn tool_end_write_prints_clickable_path() {
-    let (r, w) = make_renderer(false);
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
     let home = dirs::home_dir().expect("HOME");
     let target = home.join("workspace/demo.txt");
     let result = format!(
@@ -586,10 +615,10 @@ fn error_extra_lines_caps_at_n_and_skips_blank() {
 }
 
 #[test]
-fn show_thinking_flag_can_flip_at_runtime() {
+fn thinking_display_can_flip_at_runtime() {
     let writer = CapturedWriter::new();
     let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
-    let flag = Arc::new(AtomicBool::new(false));
+    let flag = Arc::new(AtomicU8::new(ThinkingDisplay::Summary.as_u8()));
     let r = CliTurnRenderer::with_writer(
         md,
         flag.clone(),
@@ -597,14 +626,14 @@ fn show_thinking_flag_can_flip_at_runtime() {
         false,
         ToolCliVerbosity::Full,
     );
-    // 折叠：raw 不可见
+    // summary：raw 不可见
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "secret", "source": "raw"}
     }));
-    assert!(!r.is_show_thinking());
-    flag.store(true, Ordering::Release);
-    assert!(r.is_show_thinking());
-    // 展开：在同一回合切换后，后续 raw delta 应开始可见。
+    assert_eq!(r.thinking_display(), ThinkingDisplay::Summary);
+    flag.store(ThinkingDisplay::Full.as_u8(), Ordering::Release);
+    assert_eq!(r.thinking_display(), ThinkingDisplay::Full);
+    // 切到 full：后续 raw delta 应开始可见。
     r.on_message_update(&json!({
         "assistantMessageEvent": {"kind": "thinking_delta", "delta": "after", "source": "raw"}
     }));
@@ -617,7 +646,7 @@ fn show_thinking_flag_can_flip_at_runtime() {
 
 #[test]
 fn tool_cli_verbosity_off_hides_start_and_end_lines() {
-    let (r, w) = make_renderer_with_tool_verbosity(false, ToolCliVerbosity::Off);
+    let (r, w) = make_renderer_with_tool_verbosity(ThinkingDisplay::Summary, ToolCliVerbosity::Off);
     r.on_tool_start(&json!({
         "toolCallId": "c-off",
         "toolName": "read",
@@ -638,7 +667,8 @@ fn tool_cli_verbosity_off_hides_start_and_end_lines() {
 
 #[test]
 fn tool_cli_verbosity_brief_prints_end_without_start_and_extra_lines() {
-    let (r, w) = make_renderer_with_tool_verbosity(false, ToolCliVerbosity::Brief);
+    let (r, w) =
+        make_renderer_with_tool_verbosity(ThinkingDisplay::Summary, ToolCliVerbosity::Brief);
     r.on_tool_start(&json!({
         "toolCallId": "c-brief",
         "toolName": "bash",

@@ -1,6 +1,6 @@
 //! 配置类型定义：PermissionLevel 枚举、各 *Config 结构体、Default 实现、默认值辅助函数。
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// 插件或操作的权限等级，用于 4 原语与工具访问控制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -100,6 +100,90 @@ pub enum ToolCliVerbosity {
     Full,
 }
 
+/// Thinking 在 CLI 中的显示档位。
+///
+/// - `minimal`：只打一行 `[thinking] ...` 占位，不流式正文；
+/// - `summary`：流式显示 summary，隐藏 raw；
+/// - `full`：流式显示 summary + raw。
+///
+/// 反序列化兼容历史 bool：
+/// - `false` -> `summary`
+/// - `true` -> `full`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[repr(u8)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    Minimal = 0,
+    #[default]
+    Summary = 1,
+    Full = 2,
+}
+
+impl ThinkingDisplay {
+    pub fn from_legacy_bool(value: bool) -> Self {
+        if value {
+            Self::Full
+        } else {
+            Self::Summary
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Minimal,
+            1 => Self::Summary,
+            2 => Self::Full,
+            _ => Self::Summary,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn next_cycle(self) -> Self {
+        match self {
+            Self::Summary => Self::Full,
+            Self::Full => Self::Minimal,
+            Self::Minimal => Self::Summary,
+        }
+    }
+
+    pub fn shows_summary(self) -> bool {
+        matches!(self, Self::Summary | Self::Full)
+    }
+
+    pub fn shows_raw(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+impl<'de> Deserialize<'de> for ThinkingDisplay {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Bool(bool),
+            String(String),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Bool(v) => Ok(ThinkingDisplay::from_legacy_bool(v)),
+            Repr::String(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "minimal" => Ok(ThinkingDisplay::Minimal),
+                "summary" => Ok(ThinkingDisplay::Summary),
+                "full" => Ok(ThinkingDisplay::Full),
+                other => Err(serde::de::Error::custom(format!(
+                    "unknown thinking display `{other}`; expected minimal|summary|full"
+                ))),
+            },
+        }
+    }
+}
+
 /// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流、重试与多层超时。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
@@ -160,9 +244,10 @@ pub struct LlmFilesConfig {
 
 /// Thinking / Reasoning 协议子配置。
 ///
-/// **产品默认**：`enabled = true`、`show = false`、`level = "high"`。
-/// 新默认会折叠 raw thinking、但仍显示 summary；若希望完全静默 thinking，需显式
-/// `enabled = false`。详见 changelog 与架构 §3.1 G5。其它字段：
+/// **产品默认**：`enabled = true`、`show = "summary"`、`level = "high"`。
+/// 新默认会流式显示 summary、隐藏 raw；若希望更安静的占位模式，设 `show = "minimal"`；
+/// 若希望完全静默 thinking，需显式 `enabled = false`。详见 changelog 与架构 §3.1 G5。
+/// 其它字段：
 ///
 /// - `level`: `off | minimal | low | medium | high | xhigh`，由
 ///   [`crate::core::llm::thinking_policy::ThinkingLevel`] 解析。
@@ -193,11 +278,17 @@ pub struct ThinkingConfig {
     /// OpenAI / openai-responses 路径忽略本字段（用 `reasoning.effort`）。
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// CLI 默认是否展开 raw thinking。`false` 时 raw 折叠，但 summary 仍可显示。
+    /// CLI thinking 显示档位：`minimal | summary | full`。
+    ///
+    /// 历史兼容：
+    /// - `show = false` -> `summary`
+    /// - `show = true` -> `full`
+    ///
     /// 运行时优先级：
-    /// `PI_CHAT_SHOW_THINKING`（已设置）> 本字段 > 代码默认。
+    /// `PI_CHAT_SHOW_THINKING`（已设置，支持 `minimal|summary|full`，也兼容旧 `0/1`） >
+    /// 本字段 > 代码默认。
     #[serde(default = "default_thinking_show")]
-    pub show: bool,
+    pub show: ThinkingDisplay,
     /// 是否把 thinking 以独立结构化条目落 transcript（默认 false：仅展示，不持久化）。
     #[serde(default)]
     pub persist: bool,
@@ -219,8 +310,8 @@ fn default_thinking_enabled() -> bool {
     true
 }
 
-fn default_thinking_show() -> bool {
-    false
+fn default_thinking_show() -> ThinkingDisplay {
+    ThinkingDisplay::Summary
 }
 
 impl Default for ThinkingConfig {

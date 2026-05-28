@@ -124,7 +124,7 @@ pub(super) async fn run_chat_stream(
                 });
             }
             // P3：Thinking 透传——单独走 thinking_delta 通道，不写 content_buf，
-            // 不进入 transcript 主体；上层（CLI/TUI/扩展）按 show_thinking/source 决定是否渲染。
+            // 不进入 transcript 主体；上层（CLI/TUI/扩展）按 thinking display/source 决定如何渲染。
             Ok(StreamEvent::Thinking {
                 delta,
                 source,

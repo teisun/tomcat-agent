@@ -564,7 +564,7 @@ pub async fn run_chat_turn(
 
     let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
         Arc::clone(&renderer),
-        Arc::clone(&ctx.show_thinking),
+        Arc::clone(&ctx.thinking_display),
         ctx.config.llm.thinking.print_to_stderr,
         ctx.config.llm.tool_cli_verbosity,
     );

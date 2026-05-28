@@ -8,6 +8,7 @@ use tracing::warn;
 
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
+use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
@@ -50,7 +51,7 @@ pub struct ChatContext {
     pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
-    pub show_thinking: Arc<std::sync::atomic::AtomicBool>,
+    pub thinking_display: Arc<std::sync::atomic::AtomicU8>,
     pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
     pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
@@ -226,7 +227,7 @@ impl ChatContext {
         let completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
             Arc::new(Mutex::new(None));
 
-        let initial_show_thinking = resolve_initial_show_thinking(&config.llm.thinking);
+        let initial_thinking_display = resolve_initial_thinking_display(&config.llm.thinking);
 
         let plan_runtime = plan_runtime::PlanRuntime::new_with_session_id(
             session.current_session_key(),
@@ -339,7 +340,9 @@ impl ChatContext {
             completion_subscriber_handle,
             gate,
             read_file_state,
-            show_thinking: Arc::new(std::sync::atomic::AtomicBool::new(initial_show_thinking)),
+            thinking_display: Arc::new(std::sync::atomic::AtomicU8::new(
+                initial_thinking_display.as_u8(),
+            )),
             openai_files_runtime,
             plan_runtime,
             agent_registry,
@@ -470,12 +473,32 @@ impl ToolExecutor for NoopToolExecutor {
     }
 }
 
-pub(crate) fn resolve_initial_show_thinking(
+pub(crate) fn resolve_initial_thinking_display(
     thinking: &crate::infra::config::ThinkingConfig,
-) -> bool {
+) -> ThinkingDisplay {
     match std::env::var("PI_CHAT_SHOW_THINKING") {
-        Ok(v) => matches!(v.as_str(), "1" | "true" | "TRUE" | "True" | "yes" | "on"),
+        Ok(v) => parse_thinking_display_override(&v).unwrap_or_else(|| {
+            warn!(
+                target: "tomcat::chat_context",
+                value = %v,
+                fallback = ?thinking.show,
+                "unknown PI_CHAT_SHOW_THINKING override; falling back to config"
+            );
+            thinking.show
+        }),
         Err(_) => thinking.show,
+    }
+}
+
+fn parse_thinking_display_override(raw: &str) -> Option<ThinkingDisplay> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Some(ThinkingDisplay::Minimal),
+        "summary" => Some(ThinkingDisplay::Summary),
+        "full" => Some(ThinkingDisplay::Full),
+        // 兼容历史 bool 环境变量：0/false -> summary；1/true -> full。
+        "0" | "false" | "no" | "off" | "" => Some(ThinkingDisplay::Summary),
+        "1" | "true" | "yes" | "on" => Some(ThinkingDisplay::Full),
+        _ => None,
     }
 }
 

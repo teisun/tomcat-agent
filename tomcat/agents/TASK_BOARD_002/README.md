@@ -36,6 +36,7 @@
 | **T2-P0-008** | TUI 体验强化（合并 TASK-08） | `TODO` | — | `feature/tui-experience` | [tasks/T2-P0-008.md](./tasks/T2-P0-008.md) |
 | **T2-P0-009** | 三套管道重构 | `TODO` | — | `feature/pipeline-unify` | [tasks/T2-P0-009.md](./tasks/T2-P0-009.md) |
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理 | `TODO` | — | `feature/bash-ast-detect-precision` | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
+| **T2-P1-010** | OpenAI Responses 跨 turn 推理续传 | `TODO` | — | `feature/responses-reasoning-continuity` | [tasks/T2-P1-010.md](./tasks/T2-P1-010.md) |
 
 ## 5. 开放任务依赖（概览）
 
@@ -44,10 +45,12 @@ flowchart LR
     P008[T2-P0-008<br/>TUI 强化]
     P009[T2-P0-009<br/>Pipeline 重构]
     P109[T2-P1-009<br/>bash AST 精度]
+    P110[T2-P1-010<br/>Responses 推理续传]
     P008 -.->|TUI 增强后可并行| P109
     P009
+    P110
 ```
 
-> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。
+> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P1-010** 与 thinking CLI 折叠/去重独立，可并行认领。
 
 ---

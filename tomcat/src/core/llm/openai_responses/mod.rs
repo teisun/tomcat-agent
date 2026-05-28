@@ -59,8 +59,13 @@ mod stream;
 use payload::{
     build_responses_input, convert_tools_to_responses, responses_payload_to_chat_response,
 };
+#[cfg(test)]
 #[allow(unused_imports)]
-use stream::{responses_chunk_to_events, ResponsesStream, ToolCallTrack};
+use stream::responses_chunk_to_events;
+#[allow(unused_imports)]
+use stream::{
+    responses_chunk_to_events_with_state, ReasoningState, ResponsesStream, ToolCallTrack,
+};
 const PROVIDER_NAME: &str = "openai-responses";
 
 fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
