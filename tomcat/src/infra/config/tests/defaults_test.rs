@@ -66,3 +66,78 @@ fn thinking_show_default_is_summary() {
         "ThinkingConfig::default().show 应为 summary"
     );
 }
+
+/// 旧版 toml 用 `show = false` 写法的硬契约：保证升级 d2a11cd 后老用户配置不破。
+#[test]
+fn thinking_show_toml_legacy_bool_false_maps_to_summary() {
+    let toml_src = r#"
+[llm.thinking]
+enabled = true
+show = false
+"#;
+    let cfg: AppConfig = toml::from_str(toml_src).expect("legacy show=false 应可反序列化");
+    assert!(
+        matches!(cfg.llm.thinking.show, ThinkingDisplay::Summary),
+        "show=false 应映射到 summary，实际：{:?}",
+        cfg.llm.thinking.show
+    );
+}
+
+/// 旧版 toml 用 `show = true` 写法：映射到 full 档（与历史展开 raw thinking 一致）。
+#[test]
+fn thinking_show_toml_legacy_bool_true_maps_to_full() {
+    let toml_src = r#"
+[llm.thinking]
+enabled = true
+show = true
+"#;
+    let cfg: AppConfig = toml::from_str(toml_src).expect("legacy show=true 应可反序列化");
+    assert!(
+        matches!(cfg.llm.thinking.show, ThinkingDisplay::Full),
+        "show=true 应映射到 full，实际：{:?}",
+        cfg.llm.thinking.show
+    );
+}
+
+/// 三档字符串 toml 直读：minimal / summary / full 均能成功解析为对应枚举。
+#[test]
+fn thinking_show_toml_string_modes_parse_correctly() {
+    for (raw, expected) in [
+        ("minimal", ThinkingDisplay::Minimal),
+        ("summary", ThinkingDisplay::Summary),
+        ("full", ThinkingDisplay::Full),
+    ] {
+        let toml_src = format!(
+            r#"
+[llm.thinking]
+enabled = true
+show = "{raw}"
+"#
+        );
+        let cfg: AppConfig =
+            toml::from_str(&toml_src).unwrap_or_else(|e| panic!("show=\"{raw}\" 应可反序列化：{e}"));
+        assert!(
+            std::mem::discriminant(&cfg.llm.thinking.show) == std::mem::discriminant(&expected),
+            "show=\"{raw}\" 应映射到 {expected:?}，实际：{:?}",
+            cfg.llm.thinking.show
+        );
+    }
+}
+
+/// 拒识别错档位字符串：避免 silent 默认值掩盖配置错别字。
+#[test]
+fn thinking_show_toml_unknown_string_rejected() {
+    let toml_src = r#"
+[llm.thinking]
+enabled = true
+show = "verbose"
+"#;
+    let err = toml::from_str::<AppConfig>(toml_src)
+        .err()
+        .expect("非法 show 字段应反序列化失败");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("verbose") || msg.contains("minimal|summary|full"),
+        "错误信息应说明合法值或回显错误值：{msg}"
+    );
+}
