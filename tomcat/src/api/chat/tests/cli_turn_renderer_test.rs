@@ -614,6 +614,110 @@ fn error_extra_lines_caps_at_n_and_skips_blank() {
     assert_eq!(lines, vec!["line1".to_string(), "line2".to_string()]);
 }
 
+/// E2E-CLI-043（场景库登记名）：模拟用户在 chat 内按顺序 `/thinking summary`、
+/// `/thinking minimal`、`/thinking full`、`/thinking toggle` 切档，每档发送同样的
+/// summary+raw delta，断言三档可见性与 toggle 循环顺序。覆盖 `apply_action` 与
+/// `CliTurnRenderer::handle_thinking_delta` 的运行时切换契约。
+#[test]
+fn test_user_toggles_thinking_display_modes() {
+    let writer = CapturedWriter::new();
+    let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
+    let flag = Arc::new(AtomicU8::new(ThinkingDisplay::Summary.as_u8()));
+    let r = CliTurnRenderer::with_writer(
+        md,
+        flag.clone(),
+        writer.clone() as Arc<dyn CliWriter>,
+        false,
+        ToolCliVerbosity::Full,
+    );
+
+    let set_mode = |mode: ThinkingDisplay| {
+        flag.store(mode.as_u8(), Ordering::Release);
+    };
+
+    let push_delta_pair = |label_summary: &str, label_raw: &str| {
+        r.on_message_start();
+        r.on_message_update(&serde_json::json!({
+            "assistantMessageEvent": {
+                "kind": "thinking_delta",
+                "delta": label_summary,
+                "source": "summary"
+            }
+        }));
+        r.on_message_update(&serde_json::json!({
+            "assistantMessageEvent": {
+                "kind": "thinking_delta",
+                "delta": label_raw,
+                "source": "raw"
+            }
+        }));
+    };
+
+    set_mode(ThinkingDisplay::Summary);
+    let baseline = writer.stdout().len();
+    push_delta_pair("SUM-A", "RAW-A");
+    let after_summary = writer.stdout();
+    let summary_segment = &after_summary[baseline..];
+    assert!(
+        summary_segment.contains("SUM-A"),
+        "summary 模式应输出 summary delta：{:?}",
+        summary_segment
+    );
+    assert!(
+        !summary_segment.contains("RAW-A"),
+        "summary 模式应隐藏 raw delta：{:?}",
+        summary_segment
+    );
+    assert_eq!(
+        summary_segment.matches("[thinking]").count(),
+        1,
+        "summary 模式 `[thinking]` 前缀只应出现一次：{:?}",
+        summary_segment
+    );
+
+    set_mode(ThinkingDisplay::Minimal);
+    let baseline = writer.stdout().len();
+    push_delta_pair("SUM-B", "RAW-B");
+    let minimal_segment = writer.stdout()[baseline..].to_string();
+    assert!(
+        minimal_segment.contains("[thinking] ..."),
+        "minimal 模式应输出占位：{:?}",
+        minimal_segment
+    );
+    assert!(
+        !minimal_segment.contains("SUM-B") && !minimal_segment.contains("RAW-B"),
+        "minimal 模式不应输出任何 delta 正文：{:?}",
+        minimal_segment
+    );
+
+    set_mode(ThinkingDisplay::Full);
+    let baseline = writer.stdout().len();
+    push_delta_pair("SUM-C", "RAW-C");
+    let full_segment = writer.stdout()[baseline..].to_string();
+    assert!(
+        full_segment.contains("SUM-C") && full_segment.contains("RAW-C"),
+        "full 模式应同时输出 summary 与 raw：{:?}",
+        full_segment
+    );
+
+    set_mode(ThinkingDisplay::Summary);
+    let cycle: Vec<ThinkingDisplay> = (0..3)
+        .scan(ThinkingDisplay::Summary, |state, _| {
+            *state = state.next_cycle();
+            Some(*state)
+        })
+        .collect();
+    assert_eq!(
+        cycle,
+        vec![
+            ThinkingDisplay::Full,
+            ThinkingDisplay::Minimal,
+            ThinkingDisplay::Summary
+        ],
+        "toggle 循环顺序应为 summary -> full -> minimal -> summary"
+    );
+}
+
 #[test]
 fn thinking_display_can_flip_at_runtime() {
     let writer = CapturedWriter::new();
