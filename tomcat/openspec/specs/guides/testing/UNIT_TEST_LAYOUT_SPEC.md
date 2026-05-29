@@ -2,7 +2,7 @@
 
 Rust 社区习惯把模块测试写在同文件底部，但这会使**业务逻辑与测试代码混杂在同一文件中**，严重膨胀行数并干扰对主逻辑的阅读。
 
-本规范是单元测试**物理位置与模块挂载**的**单一权威来源**。[UNIT_TEST_SPEC.md](UNIT_TEST_SPEC.md)（编写规范：mock、覆盖率、命名、断言等）、[DEBUG_SPEC.md](../../../../agents/plan/DEBUG_SPEC.md) §9.1、[PLAN_SPEC.md](../../../../agents/plan/PLAN_SPEC.md) §8.1 涉及目录布局时均以本节为准；如出现表述冲突以本节为权威。行数度量与拆分动机见 [RUST_FILE_LINES_SPEC.md](../coding/RUST_FILE_LINES_SPEC.md)。
+本规范是单元测试**物理位置与模块挂载**的**单一权威来源**。[UNIT_TEST_SPEC.md](UNIT_TEST_SPEC.md)（编写规范：mock、覆盖率、命名、断言等）与 [PLAN_SPEC.md](../../../../agents/plan/PLAN_SPEC.md) 中涉及测试布局的计划描述，均以本节为准；如出现表述冲突以本节为权威。行数度量与拆分动机见 [RUST_FILE_LINES_SPEC.md](../coding/RUST_FILE_LINES_SPEC.md)。
 
 ---
 

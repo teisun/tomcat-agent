@@ -34,7 +34,7 @@ Agent 根据自身角色定义读取主项目 [openspec/specs 规范文档](../o
 
 读取完上下文后，**禁止直接编码**，须先制定并输出详细开发计划，**经用户确认后**方可进入开发阶段。
 
-制定计划时须遵循 [plan/PLAN_SPEC.md](./plan/PLAN_SPEC.md) 中的**内容要求** 含全部 **7** 个维度，中小任务可先复制 [plan/PLAN_SKELETON.md](./plan/PLAN_SKELETON.md) 再按规范扩写，并参考 PLAN_SPEC 第四节中的完整案例索引。
+制定计划时须遵循 [plan/PLAN_SPEC.md](./plan/PLAN_SPEC.md) 的**统一 5 章格式**与 `frontmatter` 要求；中小任务可先复制 [plan/PLAN_SKELETON.md](./plan/PLAN_SKELETON.md) 再按规范扩写，历史长计划仅作取材参考，不再作为结构模板。
 
 ## 5、开发
 

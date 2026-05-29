@@ -5,6 +5,8 @@
 > 读者对象：后续承接 [TASK_BOARD_002 看板](../../agents/TASK_BOARD_002/README.md)（单卡 `tasks/T2-*.md`）其它任务的工程师 Agent（Tom / Jerry / Spike），以及希望理解 Cursor PLAN 模式底层约束与最佳实践的研发人员。
 >
 > 案例计划产物：`~/.cursor/plans/agent-loop-modularization_e99e067f.plan.md`
+>
+> **历史说明（2026-05）**：本文中凡提到 `PLAN_SPEC` 的旧章节号、"7 个维度" 等表述，均对应旧版计划规范的当时写法；当前仓库请以最新 `agents/plan/PLAN_SPEC.md` 为准。
 
 ---
 
