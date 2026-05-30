@@ -68,6 +68,9 @@ pub(super) async fn run_tool_calls(
     tool_calls: &[ToolCallInfo],
     assistant_content: &str,
     partial_text_for_abort: &str,
+    finish_reason: Option<String>,
+    error_message: Option<String>,
+    error_code: Option<String>,
 ) -> Result<DispatchOutcome, LoopError> {
     // ── 1. 计费：assistant 消息（含 tool_calls wire payload 估算） ──
     if let Some(ref mut ctx_state) = agent.context_state {
@@ -104,7 +107,8 @@ pub(super) async fn run_tool_calls(
                         Some(assistant_content)
                     },
                     tc_json,
-                ),
+                )
+                .with_completion_metadata(finish_reason, error_message, error_code),
             )
             .map_err(LoopError::Fatal)?;
     }

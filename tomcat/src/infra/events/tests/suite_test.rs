@@ -46,6 +46,29 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
 }
 
 #[test]
+fn agent_event_llm_error_and_notice_use_dedicated_wire_names() {
+    let err = AgentEvent::LlmError {
+        reason: "error:boom".into(),
+        error_code: Some("server_error".into()),
+        error_message: "boom".into(),
+    };
+    let notice = AgentEvent::LlmNotice {
+        finish_reason: "max_output_tokens".into(),
+        message: "达到 max_output_tokens，回答可能未完成".into(),
+    };
+    let err_json = serde_json::to_value(&err).unwrap();
+    let notice_json = serde_json::to_value(&notice).unwrap();
+    assert_eq!(err_json["type"].as_str(), Some(wire::WIRE_LLM_ERROR));
+    assert_eq!(err_json["errorCode"].as_str(), Some("server_error"));
+    assert_eq!(err_json["errorMessage"].as_str(), Some("boom"));
+    assert_eq!(notice_json["type"].as_str(), Some(wire::WIRE_LLM_NOTICE));
+    assert_eq!(
+        notice_json["finishReason"].as_str(),
+        Some("max_output_tokens")
+    );
+}
+
+#[test]
 fn extension_event_tool_hooks_use_tool_call_tool_result_wire_names() {
     let call = ExtensionEvent::ToolCall {
         tool_name: "read".into(),

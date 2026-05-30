@@ -11,6 +11,7 @@
 mod common;
 
 use futures_util::StreamExt;
+use serde_json::json;
 use std::time::Duration;
 use tomcat::{
     resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, LlmConfig, StreamEvent,
@@ -43,6 +44,10 @@ fn env_truthy(key: &str) -> bool {
 fn language_behavior_e2e_opt_in() -> bool {
     // 兼容旧开关名，避免本地脚本断裂。
     env_truthy("TOMCAT_E2E_LANGUAGE_BEHAVIOR") || env_truthy("TOMCAT_E2E_PROMPT_LANGUAGE")
+}
+
+fn responses_terminal_reason_opt_in() -> bool {
+    env_truthy("TOMCAT_E2E_RESPONSES_TERMINAL_REASON")
 }
 
 fn contains_cjk(text: &str) -> bool {
@@ -82,6 +87,74 @@ async fn test_openai_responses_chat_real_request_returns_ok(
     assert!(!resp.choices.is_empty(), "chat 响应应包含 choices");
     assert_eq!(resp.choices[0].index, 0);
 
+    Ok(())
+}
+
+/// [Responses 非流式 finish_reason=stop] 简短回答应映射为 `stop`
+#[tokio::test]
+async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span =
+        tracing::info_span!("test_openai_responses_chat_real_request_maps_stop_finish_reason")
+            .entered();
+    common::load_openai_test_env();
+
+    let config = responses_config();
+    let provider = resolve_llm(&config)
+        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("Answer with exactly one word: ok")],
+        model: config.default_model.clone(),
+        temperature: None,
+        max_tokens: Some(64),
+        stream: Some(false),
+        model_override: None,
+        tools: None,
+    };
+    let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
+        .await
+        .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
+    assert!(!resp.choices.is_empty(), "chat 响应应包含 choices");
+    assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    Ok(())
+}
+
+/// [Responses 非流式 finish_reason=max_output_tokens] 低输出预算应映射为 `max_output_tokens`
+#[tokio::test]
+async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span = tracing::info_span!(
+        "test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason"
+    )
+    .entered();
+    common::load_openai_test_env();
+
+    let config = responses_config();
+    let provider = resolve_llm(&config)
+        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user(
+            "Write the numbers from 1 to 200, one per line, with no summary or explanation.",
+        )],
+        model: config.default_model.clone(),
+        temperature: None,
+        max_tokens: Some(16),
+        stream: Some(false),
+        model_override: None,
+        tools: None,
+    };
+    let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
+        .await
+        .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
+    assert!(!resp.choices.is_empty(), "chat 响应应包含 choices");
+    assert_eq!(
+        resp.choices[0].finish_reason.as_deref(),
+        Some("max_output_tokens"),
+        "低输出预算应稳定映射为 max_output_tokens，实际: {:?}",
+        resp.choices[0].finish_reason
+    );
     Ok(())
 }
 
@@ -203,6 +276,72 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
         "responses 流式在多次尝试后仍未观察到 Thinking；当前按 provider 行为波动记录，不阻断集成门禁"
     );
 
+    Ok(())
+}
+
+/// [Responses tool_calls 终局观察] opt-in 验证真实 API 是否返回 `tool_calls`
+#[tokio::test]
+async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !responses_terminal_reason_opt_in() {
+        tracing::info!(
+            "skip responses terminal-reason tool_calls observation; set TOMCAT_E2E_RESPONSES_TERMINAL_REASON=1 to enable"
+        );
+        return Ok(());
+    }
+
+    common::setup_logging();
+    let _span = tracing::info_span!(
+        "test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in"
+    )
+    .entered();
+    common::load_openai_test_env();
+
+    let config = responses_config();
+    let provider = resolve_llm(&config)
+        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let tools = vec![json!({
+        "type": "function",
+        "function": {
+            "name": "echo_tool",
+            "description": "Echo the provided text once",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"}
+                },
+                "required": ["text"]
+            }
+        }
+    })];
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user(
+            "You must call echo_tool exactly once with text='hi' and do not answer directly.",
+        )],
+        model: config.default_model.clone(),
+        temperature: None,
+        max_tokens: Some(64),
+        stream: Some(false),
+        model_override: None,
+        tools: Some(tools),
+    };
+    let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
+        .await
+        .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
+    assert!(!resp.choices.is_empty(), "chat 响应应包含 choices");
+    assert_eq!(
+        resp.choices[0].finish_reason.as_deref(),
+        Some("tool_calls"),
+        "opt-in 观察：期待真实 API 走 tool_calls，实际: {:?}",
+        resp.choices[0].finish_reason
+    );
+    let tool_calls = resp.choices[0]
+        .message
+        .tool_calls
+        .as_ref()
+        .expect("tool_calls should be present when finish_reason=tool_calls");
+    assert_eq!(tool_calls.len(), 1, "应只调用一次 echo_tool");
+    assert_eq!(tool_calls[0]["function"]["name"], "echo_tool");
     Ok(())
 }
 

@@ -82,6 +82,10 @@ pub struct ContextLiveMetrics {
     pub context_utilization_ratio: f64,
     pub preheat_in_progress: bool,
     pub preheat_result_pending: bool,
+    /// 最近一次 assistant 终局账本；仅内存态，供 CLI / transcript 路径复用。
+    pub finish_reason: Option<String>,
+    pub error_message: Option<String>,
+    pub error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

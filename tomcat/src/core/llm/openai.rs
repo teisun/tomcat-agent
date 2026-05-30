@@ -125,6 +125,13 @@ fn reject_multimodal_parts(messages: &[ChatMessage]) -> Result<(), AppError> {
     Ok(())
 }
 
+fn transport_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .map(ChatMessage::without_completion_metadata)
+        .collect()
+}
+
 /// 发给 OpenAI API 的请求体（不含 model_override，stream 由调用方定）。
 /// 使用 max_completion_tokens 以兼容新模型（部分模型已不再接受 max_tokens）。
 ///
@@ -295,7 +302,7 @@ impl OpenAiProvider {
         );
         let body = OpenAiRequestBody {
             model: self.effective_model(request),
-            messages: request.messages.clone(),
+            messages: transport_messages(&request.messages),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
@@ -481,7 +488,7 @@ impl LlmProvider for OpenAiProvider {
         );
         let body = OpenAiRequestBody {
             model: self.effective_model(&request),
-            messages: request.messages.clone(),
+            messages: transport_messages(&request.messages),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,

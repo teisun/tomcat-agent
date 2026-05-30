@@ -338,8 +338,8 @@ pub enum MessageKind {
 
 /// 单条对话消息（与 OpenAI API 兼容，wire 格式为 snake_case）。
 ///
-/// Three `#[serde(skip)]` metadata fields (`msg_id`, `kind`, `timestamp`) carry
-/// internal bookkeeping that never leaves the process boundary.
+/// `finish_reason/error_message/error_code` 会随 transcript assistant message 一起持久化；
+/// `msg_id/kind/timestamp` 仍是纯本地 bookkeeping，不出进程边界。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ChatMessage {
@@ -352,6 +352,13 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Responses / transcript 终局元数据；仅本地持久化与恢复使用，不参与 wire 语义。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 
     /// Transcript `MessageEntry.id` — set during hydration or after `append_message`.
     #[serde(skip)]
@@ -372,6 +379,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -387,6 +397,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -400,6 +413,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -416,6 +432,9 @@ impl ChatMessage {
             name: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -429,6 +448,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -442,6 +464,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -455,6 +480,9 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::Steering,
             timestamp: None,
@@ -468,10 +496,35 @@ impl ChatMessage {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            finish_reason: None,
+            error_message: None,
+            error_code: None,
             msg_id: None,
             kind: MessageKind::CompactionSummary,
             timestamp: None,
         }
+    }
+
+    /// 为 assistant/tool 回合结果附加终局元数据；用于 transcript 持久化与 reload。
+    pub fn with_completion_metadata(
+        mut self,
+        finish_reason: Option<String>,
+        error_message: Option<String>,
+        error_code: Option<String>,
+    ) -> Self {
+        self.finish_reason = finish_reason;
+        self.error_message = error_message;
+        self.error_code = error_code;
+        self
+    }
+
+    /// 请求发往上游前剥离本地 transcript 元数据，避免污染 API wire payload。
+    pub fn without_completion_metadata(&self) -> Self {
+        let mut cloned = self.clone();
+        cloned.finish_reason = None;
+        cloned.error_message = None;
+        cloned.error_code = None;
+        cloned
     }
 
     /// Replace the text content in-place (used by L0/L1 compaction on tool results).
@@ -579,6 +632,18 @@ pub enum StreamEvent {
     },
     FinishReason {
         reason: String,
+    },
+    /// 结构化 LLM 终局错误，供上层事件总线 / CLI / transcript 账本消费。
+    LlmError {
+        reason: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
+    /// 非错误终局提示（当前主要用于 `max_output_tokens` 截断轻提示）。
+    LlmNotice {
+        finish_reason: String,
+        message: String,
     },
     Usage {
         prompt_tokens: u32,

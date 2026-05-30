@@ -155,6 +155,8 @@
 | E2E-CLI-041 | 人工 | `test_user_chats_with_llm_gets_streaming_response` | 用户与 LLM 对话，获得流式渲染回复  | `tomcat chat` + stdin 一句话，timeout 60s    | exit 0；stdout 含 AI 回复；有对话 banner |
 | E2E-CLI-042 | 人工 | `test_user_receives_nonempty_llm_response`         | 确认 LLM 回复内容非空（基础连通性） | `tomcat chat` + stdin `说一个字`，timeout 30s | exit 0；stdout 非空                 |
 | E2E-CLI-043 | 自动 | `test_user_toggles_thinking_display_modes` | 用户运行时通过 `/thinking` 切换 CLI thinking 显示档位（minimal/summary/full/toggle） | 构造 `CliTurnRenderer` + mock `thinking_delta` 流 → 顺序应用 `/thinking summary` / `minimal` / `full` / `toggle` → 各档位发出同样的 summary+raw delta | summary 模式：可见 summary、隐藏 raw、`[thinking]` 仅 1 次；minimal 模式：仅 `[thinking] ...` 占位；full 模式：summary+raw 同时可见；toggle 循环 `summary→full→minimal→summary`；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/api/chat/commands/tests/cmd_thinking_test.rs` |
+| E2E-CLI-044 | 自动 | `llm_error_renders_red_status_line` | Responses `response.failed` / 顶层 `error` 被映射为结构化 LLM 错误并在 CLI 明确显示 | 构造 `CliTurnRenderer` + `llm_error` payload，模拟正文后收到错误终局 | stderr 含红色 `[llm] <error message>`；不复用 `ExtensionError`；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/core/agent_loop/tests/stream_handler_test.rs` |
+| E2E-CLI-045 | 自动 | `llm_notice_renders_dim_non_error_hint` | Responses `incomplete/max_output_tokens` 走非错误轻提示而非红字报错 | 构造 `CliTurnRenderer` + `llm_notice{finishReason=max_output_tokens}` payload | stderr 含灰色轻提示、包含 `max_output_tokens`，且**不**出现红色错误样式；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/core/agent_loop/tests/stream_handler_test.rs` |
 
 
 ---

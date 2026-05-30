@@ -512,11 +512,13 @@ P1 StreamEvent::Thinking
 
 > 与 openclaw 等「先 `output_item.added` 建块再 delta/done 填」的状态机不同，本仓 **以「每条 SSE 尽量独立抽出 delta」为主**；多条 `Thinking` 事件在 UI 侧顺序拼接即完整思考区。
 
-### 5.4 流尾语义：FinishReason 与 trailing Usage（阶段一）
+### 5.4 流尾语义：Responses terminal state、FinishReason 与 trailing Usage
 
 > 关联：空响应整改阶段一（[`read.md`](tools/read.md) §7.4 整轮交互图）；实现：`agent_loop/stream_handler.rs`、`agent_loop/types.rs`。
 
-Responses 流里 **`FinishReason` 可能早于 trailing `Usage` 到达**。阶段一修正：**收到 `FinishReason` 只记录终局语义，不提前 `break`**，继续消费流尾直到自然结束，保证 `finish_reason` 与 `last_api_usage` 同时保住。
+Responses 官方协议没有 Chat Completions 的 `finish_reason` 字段；Tomcat 的内部终局语义由 `response.status`、`response.incomplete_details.reason`、`response.error` / 顶层 `error`、以及 `output[]` 中是否已收敛 `function_call` 共同推导。实现上仍保留内部四类字符串：`stop`、`tool_calls`、`max_output_tokens`、`error:...`。
+
+与此同时，Responses 流里 **`FinishReason` 可能早于 trailing `Usage` 到达**。当前实现收到 `FinishReason` 只记录终局语义，不提前 `break`，继续消费流尾直到自然结束，保证 `finish_reason`、结构化错误元数据与 `last_api_usage` 同时保住。
 
 #### 5.4.1 典型事件顺序
 
@@ -540,12 +542,15 @@ LLM stream 事件顺序（Responses API 常见）:
 │  ContentDelta    → 累积 + MessageUpdate                               │
 │  ToolCallDelta   → 累积                                               │
 │  FinishReason    → finish_reason = Some(reason)  // 只记，不 break    │
+│  LlmError        → 发 `AgentEvent::LlmError`，保存 error_message/code │
+│  LlmNotice       → 回合结束后发 `AgentEvent::LlmNotice`（轻提示）      │
 │  Usage           → ctx_state.update_api_usage(...)  // 尾巴仍更新     │
 │  stream None     → break                                              │
 │  MessageEnd      → 配对 UI                                            │
 │  return StreamOutcome {                                               │
 │      content_buf, tool_calls_buf,                                     │
 │      finish_reason: Some("stop"|"tool_calls"|...),                    │
+│      error_message/error_code,                                        │
 │      aborted: false                                                   │
 │  }                                                                    │
 └──────────────────────────────────────────────────────────────────────┘
@@ -554,7 +559,8 @@ LLM stream 事件顺序（Responses API 常见）:
   reasoning_loop.rs
   解构 outcome → 若有 tool_calls → tool_dispatcher → tool_exec
   若无 tool_calls → turn_finalize → Ok(final_text)
-  (阶段一 finish_reason 暂存为 _finish_reason，供阶段二消费)
+  并把 `finish_reason/error_message/error_code` 写入 runtime carrier +
+  transcript assistant message
 ```
 
 **说人话**：旧逻辑一看到「结束原因」就提前收工，后面的用量可能漏记；新逻辑是「先记下为什么停，再把尾巴吃完」。
@@ -563,9 +569,9 @@ LLM stream 事件顺序（Responses API 常见）:
 
 | 文件 | 职责 |
 |------|------|
-| `src/core/agent_loop/types.rs` | `StreamOutcome { finish_reason: Option<String>, ... }` |
-| `src/core/agent_loop/stream_handler.rs` | 消费 `StreamEvent`，`FinishReason` 不 break |
-| `src/core/agent_loop/reasoning_loop.rs` | 解构 `StreamOutcome`，调度 tool / 收束 |
+| `src/core/agent_loop/types.rs` | `StreamOutcome { finish_reason, error_message, error_code, ... }` |
+| `src/core/agent_loop/stream_handler.rs` | 消费 `StreamEvent`，`FinishReason` 不 break，并转发 `llm_error/llm_notice` |
+| `src/core/agent_loop/reasoning_loop.rs` | 解构 `StreamOutcome`，调度 tool / 收束，并把终局元数据落到 assistant message |
 | `src/core/agent_loop/tests/stream_handler_test.rs` | mock 流：`FinishReason` 后仍更新 `last_api_usage` |
 
 ---
@@ -589,13 +595,13 @@ LLM stream 事件顺序（Responses API 常见）:
                   ▼
 ┌──────────────────────────────────────┐
 │ agent_loop/types.rs                 │
-│ StreamOutcome { finish_reason, ... } │  ← 阶段一：流尾终局语义载体
+│ StreamOutcome { finish_reason, error_message, error_code, ... } │
 └──────────────────┬───────────────────┘
                    ▼
 ┌──────────────────────────────────────┐
 │ agent_loop/stream_handler.rs        │
 │ 统一消费 StreamEvent → AgentEvent     │
-│ FinishReason 不 break；继续吃 Usage   │  ← 阶段一修正点
+│ FinishReason 不 break；继续吃 Usage；并转发 llm_error / llm_notice │
 └──────────────────┬───────────────────┘
                    │ EventBus
                    ▼

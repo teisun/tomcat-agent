@@ -339,6 +339,8 @@ pub(super) struct DispatchOutcome {
 ///   的条目由调用方 `.filter` 后再构造 `ToolCallInfo`）
 /// - `finish_reason`：流尾返回的终止原因；`stream_handler` 会在消费到
 ///   `StreamEvent::FinishReason` 后继续读取 trailing `Usage`，再把最终原因交给调用方
+/// - `error_message/error_code`：来自 `StreamEvent::LlmError` 的结构化错误元数据；
+///   供 CLI 展示与 transcript assistant 元数据落盘复用
 /// - `aborted == true`：中途被 `cancel_token.cancel()`；此时**已经**发射
 ///   `MessageEnd` 事件，但**尚未** push partial assistant 到 messages 或构造
 ///   `LoopError::Aborted`——调用方（`run_reasoning_loop` Step 5）负责：
@@ -353,6 +355,8 @@ pub(super) struct StreamOutcome {
     pub(super) content_buf: String,
     pub(super) tool_calls_buf: Vec<ToolCallAccumulator>,
     pub(super) finish_reason: Option<String>,
+    pub(super) error_message: Option<String>,
+    pub(super) error_code: Option<String>,
     pub(super) aborted: bool,
 }
 

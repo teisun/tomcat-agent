@@ -3334,6 +3334,87 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
+/// Responses 终局元数据应随 assistant message 一起持久化到 transcript。
+#[tokio::test]
+async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata() {
+    common::setup_logging();
+    let _span = info_span!(
+        "test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata"
+    )
+    .entered();
+
+    const ENV_KEY: &str = "TOMCAT_RESPONSES_FINISH_REASON_CLI_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    ctx.llm = Arc::new(DeterministicMockLlm::new(vec![vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "partial".to_string(),
+        }),
+        Ok(StreamEvent::LlmError {
+            reason: "error:boom".to_string(),
+            message: "boom".to_string(),
+            code: Some("server_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:boom".to_string(),
+        }),
+    ]]));
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请随便回答",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应正常 Completed，实际: {other:?}"),
+    };
+    let assistant = result
+        .new_messages
+        .iter()
+        .rev()
+        .find(|msg| msg.role == tomcat::core::llm::ChatMessageRole::Assistant)
+        .expect("should persist assistant message");
+    assert_eq!(assistant.finish_reason.as_deref(), Some("error:boom"));
+    assert_eq!(assistant.error_message.as_deref(), Some("boom"));
+    assert_eq!(assistant.error_code.as_deref(), Some("server_error"));
+
+    let transcript_path = ctx
+        .session
+        .current_transcript_path()
+        .expect("current_transcript_path")
+        .expect("transcript path should exist");
+    let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
+    assert!(
+        transcript.contains("\"finish_reason\":\"error:boom\""),
+        "transcript 应保留 finish_reason，实际: {}",
+        trunc(&transcript, 800)
+    );
+    assert!(
+        transcript.contains("\"error_message\":\"boom\""),
+        "transcript 应保留 error_message，实际: {}",
+        trunc(&transcript, 800)
+    );
+    assert!(
+        transcript.contains("\"error_code\":\"server_error\""),
+        "transcript 应保留 error_code，实际: {}",
+        trunc(&transcript, 800)
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
 // ────────────────────── TASK-14 AgentLoop E2E 用例 ──────────────────────
 
 /// [用户场景] 用户启动 `tomcat chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复

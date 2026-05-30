@@ -234,6 +234,21 @@ fn chat_message_from_entry(
         .get("tool_call_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let finish_reason = me
+        .message
+        .get("finish_reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let error_message = me
+        .message
+        .get("error_message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let error_code = me
+        .message
+        .get("error_code")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let mut msg = ChatMessage {
         role,
@@ -241,6 +256,9 @@ fn chat_message_from_entry(
         name: None,
         tool_calls,
         tool_call_id,
+        finish_reason,
+        error_message,
+        error_code,
         msg_id: me.id.clone().or_else(|| Some(generate_entry_id())),
         kind: MessageKind::Normal,
         timestamp: Some(me.timestamp.clone()),

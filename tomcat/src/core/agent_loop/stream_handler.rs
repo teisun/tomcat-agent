@@ -68,6 +68,8 @@ pub(super) async fn run_chat_stream(
                     content_buf: String::new(),
                     tool_calls_buf: Vec::new(),
                     finish_reason: None,
+                    error_message: None,
+                    error_code: None,
                     aborted: true,
                 });
             }
@@ -94,6 +96,9 @@ pub(super) async fn run_chat_stream(
     let mut content_buf = String::new();
     let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
     let mut finish_reason: Option<String> = None;
+    let mut error_message: Option<String> = None;
+    let mut error_code: Option<String> = None;
+    let mut pending_notice: Option<(String, String)> = None;
     let mut aborted_during_stream = false;
 
     agent.emit_event(AgentEvent::MessageStart {
@@ -173,6 +178,31 @@ pub(super) async fn run_chat_stream(
                 // 这里只记录终局语义，不提前 break，继续把流尾账目吃完。
                 finish_reason = Some(reason);
             }
+            Ok(StreamEvent::LlmError {
+                reason,
+                message,
+                code,
+            }) => {
+                if finish_reason.is_none() {
+                    finish_reason = Some(reason.clone());
+                }
+                error_message = Some(message.clone());
+                error_code = code.clone();
+                agent.emit_event(AgentEvent::LlmError {
+                    reason,
+                    error_code: code,
+                    error_message: message,
+                });
+            }
+            Ok(StreamEvent::LlmNotice {
+                finish_reason: notice_reason,
+                message,
+            }) => {
+                if finish_reason.is_none() {
+                    finish_reason = Some(notice_reason.clone());
+                }
+                pending_notice = Some((notice_reason, message));
+            }
             Ok(StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
@@ -205,11 +235,19 @@ pub(super) async fn run_chat_stream(
     agent.emit_event(AgentEvent::MessageEnd {
         message: Message(serde_json::json!({})),
     });
+    if let Some((notice_reason, message)) = pending_notice {
+        agent.emit_event(AgentEvent::LlmNotice {
+            finish_reason: notice_reason,
+            message,
+        });
+    }
 
     Ok(StreamOutcome {
         content_buf,
         tool_calls_buf,
         finish_reason,
+        error_message,
+        error_code,
         aborted: aborted_during_stream,
     })
 }

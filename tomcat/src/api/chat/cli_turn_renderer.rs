@@ -205,6 +205,50 @@ impl CliTurnRenderer {
         }
     }
 
+    pub fn on_llm_error(&self, payload: &Value) {
+        let message = payload
+            .get("errorMessage")
+            .or_else(|| payload.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if message.is_empty() {
+            return;
+        }
+        if let Some(remaining) = self.md.lock().flush() {
+            self.writer.write_stdout(&remaining);
+        }
+        let mut st = self.state.lock();
+        if st.last_kind != LastKind::None {
+            self.writer.write_stderr("\n");
+        }
+        self.writer
+            .write_stderr(&format!("\x1b[31m[llm] {message}\x1b[0m\n"));
+        st.last_kind = LastKind::ToolStart;
+    }
+
+    pub fn on_llm_notice(&self, payload: &Value) {
+        let message = payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if message.is_empty() {
+            return;
+        }
+        if let Some(remaining) = self.md.lock().flush() {
+            self.writer.write_stdout(&remaining);
+        }
+        let mut st = self.state.lock();
+        if st.last_kind != LastKind::None {
+            self.writer.write_stderr("\n");
+        }
+        self.writer.write_stderr(&format!(
+            "\x1b[2m\x1b[90m[llm] {message}\x1b[0m\n"
+        ));
+        st.last_kind = LastKind::ToolStart;
+    }
+
     fn handle_thinking_delta(&self, delta: &str, source: ThinkingSource) {
         let display = ThinkingDisplay::from_u8(self.thinking_display.load(Ordering::Acquire));
         if matches!(display, ThinkingDisplay::Minimal) {
@@ -446,12 +490,30 @@ impl CliTurnRenderer {
                 Ok(())
             }),
         );
+        let me = Arc::clone(self);
+        let llm_error = bus.on(
+            wire::WIRE_LLM_ERROR,
+            Box::new(move |evt: EventContext| {
+                me.on_llm_error(&evt.payload);
+                Ok(())
+            }),
+        );
+        let me = Arc::clone(self);
+        let llm_notice = bus.on(
+            wire::WIRE_LLM_NOTICE,
+            Box::new(move |evt: EventContext| {
+                me.on_llm_notice(&evt.payload);
+                Ok(())
+            }),
+        );
         CliTurnRendererListenerIds {
             msg_start,
             msg,
             tool_start,
             tool_update,
             tool_end,
+            llm_error,
+            llm_notice,
         }
     }
 
@@ -461,6 +523,8 @@ impl CliTurnRenderer {
         bus.off(ids.tool_start);
         bus.off(ids.tool_update);
         bus.off(ids.tool_end);
+        bus.off(ids.llm_error);
+        bus.off(ids.llm_notice);
     }
 }
 
@@ -471,6 +535,8 @@ pub struct CliTurnRendererListenerIds {
     pub tool_start: EventListenerId,
     pub tool_update: EventListenerId,
     pub tool_end: EventListenerId,
+    pub llm_error: EventListenerId,
+    pub llm_notice: EventListenerId,
 }
 
 fn parse_thinking_source(event: &Value) -> Option<ThinkingSource> {

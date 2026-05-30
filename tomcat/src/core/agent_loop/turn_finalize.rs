@@ -33,11 +33,21 @@ pub(super) fn finalize_turn_after_text(
     messages: &mut Vec<ChatMessage>,
     content_buf: &str,
     turn_index: usize,
+    finish_reason: Option<String>,
+    error_message: Option<String>,
+    error_code: Option<String>,
 ) -> Result<(), crate::infra::error::AppError> {
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_message_appended(content_buf.len());
     }
-    agent.push_message(messages, ChatMessage::assistant(content_buf))?;
+    agent.push_message(
+        messages,
+        ChatMessage::assistant(content_buf).with_completion_metadata(
+            finish_reason,
+            error_message,
+            error_code,
+        ),
+    )?;
 
     // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
     let mut preheat_started: Option<(usize, f64)> = None;

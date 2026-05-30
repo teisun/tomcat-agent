@@ -239,6 +239,46 @@ fn responses_payload_translates_function_call_to_tool_calls() {
 }
 
 #[test]
+fn responses_payload_completed_function_call_prefers_tool_calls_finish_reason() {
+    let raw = json!({
+        "id": "resp_2b",
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "call_id": "call_x",
+            "name": "lookup",
+            "arguments": "{\"id\":42}"
+        }]
+    });
+    let r = responses_payload_to_chat_response(&raw);
+    assert_eq!(r.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(
+        r.choices[0].message.finish_reason.as_deref(),
+        Some("tool_calls")
+    );
+}
+
+#[test]
+fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
+    let raw = json!({
+        "id": "resp_2c",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "output": []
+    });
+    let r = responses_payload_to_chat_response(&raw);
+    assert_eq!(r.choices[0].finish_reason.as_deref(), Some("error:content_filter"));
+    assert_eq!(
+        r.choices[0].message.error_message.as_deref(),
+        Some("content_filter")
+    );
+    assert_eq!(
+        r.choices[0].message.finish_reason.as_deref(),
+        Some("error:content_filter")
+    );
+}
+
+#[test]
 fn responses_chunk_text_delta_emits_content_delta() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     let value = json!({
@@ -353,6 +393,61 @@ fn responses_chunk_completed_emits_finish_and_usage() {
     } else {
         panic!("expected Usage, got {:?}", events[1]);
     }
+}
+
+#[test]
+fn responses_chunk_completed_with_function_call_emits_tool_calls_finish_reason() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let init = json!({
+        "type": "response.output_item.added",
+        "item": {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "echo",
+            "arguments": ""
+        }
+    });
+    responses_chunk_to_events(&init, &mut tracks);
+    let done = json!({
+        "type": "response.completed",
+        "response": {
+            "status": "completed"
+        }
+    });
+    let events = responses_chunk_to_events(&done, &mut tracks);
+    assert!(
+        matches!(&events[0], StreamEvent::FinishReason { reason } if reason == "tool_calls"),
+        "unexpected {:?}",
+        events
+    );
+}
+
+#[test]
+fn responses_chunk_incomplete_max_output_tokens_emits_notice_finish_and_usage() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let value = json!({
+        "type": "response.incomplete",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11}
+        }
+    });
+    let events = responses_chunk_to_events(&value, &mut tracks);
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::LlmNotice {
+            finish_reason,
+            message
+        } if finish_reason == "max_output_tokens" && message.contains("max_output_tokens")
+    ));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::FinishReason { reason } if reason == "max_output_tokens"
+    ));
+    assert!(matches!(&events[2], StreamEvent::Usage { .. }));
 }
 
 #[test]
@@ -842,19 +937,90 @@ fn responses_chunk_output_item_done_non_reasoning_is_silent() {
 }
 
 #[test]
-fn responses_chunk_failed_event_emits_error_finish_reason() {
+fn responses_chunk_output_item_done_function_call_appends_missing_suffix() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let init = json!({
+        "type": "response.output_item.added",
+        "item": {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "echo",
+            "arguments": "{\"q\":"
+        }
+    });
+    responses_chunk_to_events(&init, &mut tracks);
+    let done = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "echo",
+            "arguments": "{\"q\":\"x\"}"
+        }
+    });
+    let events = responses_chunk_to_events(&done, &mut tracks);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::ToolCallDelta {
+            index,
+            id: None,
+            name: None,
+            arguments_delta: Some(delta)
+        } if *index == 0 && delta == "\"x\"}"
+    ));
+}
+
+#[test]
+fn responses_chunk_failed_event_emits_structured_error_and_finish_reason() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     let value = json!({
         "type": "response.failed",
-        "response": {"error": {"message": "boom"}}
+        "response": {"status": "failed", "error": {"code": "server_error", "message": "boom"}}
     });
     let events = responses_chunk_to_events(&value, &mut tracks);
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::LlmError {
+            reason,
+            message,
+            code: Some(code)
+        } if reason == "error:boom" && message == "boom" && code == "server_error"
+    ));
     assert!(
-        matches!(&events[0], StreamEvent::FinishReason { reason } if reason == "error:boom"),
+        matches!(&events[1], StreamEvent::FinishReason { reason } if reason == "error:boom"),
         "unexpected {:?}",
-        events[0]
+        events
     );
+}
+
+#[test]
+fn responses_chunk_incomplete_content_filter_emits_structured_error_and_finish_reason() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let value = json!({
+        "type": "response.incomplete",
+        "response": {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"}
+        }
+    });
+    let events = responses_chunk_to_events(&value, &mut tracks);
+    assert_eq!(events.len(), 2);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::LlmError {
+            reason,
+            message,
+            code: None
+        } if reason == "error:content_filter" && message == "content_filter"
+    ));
+    assert!(matches!(
+        &events[1],
+        StreamEvent::FinishReason { reason } if reason == "error:content_filter"
+    ));
 }
 
 #[tokio::test]
@@ -938,6 +1104,26 @@ async fn responses_stream_parses_ndjson_fallback() {
         "{:?}",
         events[2]
     );
+}
+
+#[tokio::test]
+async fn responses_stream_early_close_does_not_fabricate_finish_reason() {
+    use tokio_stream::StreamExt;
+
+    let chunks: Vec<Result<Bytes, AppError>> = vec![Ok(Bytes::from(
+        "{\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"partial\"}\n",
+    ))];
+    let stream = tokio_stream::iter(chunks);
+    let mut s = ResponsesStream::new(stream, true);
+    let mut events = Vec::new();
+    while let Some(item) = s.next().await {
+        events.push(item.expect("ok"));
+    }
+    assert_eq!(events.len(), 1);
+    assert!(matches!(
+        &events[0],
+        StreamEvent::ContentDelta { delta } if delta == "partial"
+    ));
 }
 
 #[tokio::test]

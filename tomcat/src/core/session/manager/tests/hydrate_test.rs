@@ -71,6 +71,37 @@ fn init_context_state_with_messages() {
 }
 
 #[test]
+fn init_context_state_preserves_assistant_completion_metadata() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"partial",
+        "finish_reason":"error:boom",
+        "error_message":"boom",
+        "error_code":"server_error"
+    }))
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    assert_eq!(state.messages.len(), 2);
+    let assistant = &state.messages[1];
+    assert_eq!(assistant.role, ChatMessageRole::Assistant);
+    assert_eq!(assistant.finish_reason.as_deref(), Some("error:boom"));
+    assert_eq!(assistant.error_message.as_deref(), Some("boom"));
+    assert_eq!(assistant.error_code.as_deref(), Some("server_error"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn init_context_state_extracts_latest_plan_event() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

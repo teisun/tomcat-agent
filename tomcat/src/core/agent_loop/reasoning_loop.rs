@@ -43,6 +43,12 @@ pub(super) async fn run_reasoning_loop(
             return Err(agent.make_aborted(messages, final_text));
         }
 
+        if let Some(ref mut ctx_state) = agent.context_state {
+            ctx_state.live.finish_reason = None;
+            ctx_state.live.error_message = None;
+            ctx_state.live.error_code = None;
+        }
+
         turn_index += 1;
         agent.emit_event(AgentEvent::TurnStart {
             session_id: agent.config.session_id.clone(),
@@ -82,13 +88,26 @@ pub(super) async fn run_reasoning_loop(
         let super::types::StreamOutcome {
             content_buf,
             tool_calls_buf,
-            finish_reason: _finish_reason,
+            finish_reason,
+            error_message,
+            error_code,
             aborted,
         } = outcome;
+
+        if let Some(ref mut ctx_state) = agent.context_state {
+            ctx_state.live.finish_reason = finish_reason.clone();
+            ctx_state.live.error_message = error_message.clone();
+            ctx_state.live.error_code = error_code.clone();
+        }
 
         // stream 被取消：把 partial content_buf 作为 partial assistant 落到 messages，
         // 让 ctx_state 也把它计入消息预算；再返回 Aborted 携带 partial。
         if aborted {
+            if let Some(ref mut ctx_state) = agent.context_state {
+                ctx_state.live.finish_reason = None;
+                ctx_state.live.error_message = None;
+                ctx_state.live.error_code = None;
+            }
             if !content_buf.is_empty() {
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.on_message_appended(content_buf.len());
@@ -113,8 +132,16 @@ pub(super) async fn run_reasoning_loop(
 
         if tool_calls.is_empty() {
             // 收束分支：text-only 回合的 timing ⑤ 与 TurnEnd 由 turn_finalize 处理。
-            turn_finalize::finalize_turn_after_text(agent, messages, &content_buf, turn_index)
-                .map_err(LoopError::Fatal)?;
+            turn_finalize::finalize_turn_after_text(
+                agent,
+                messages,
+                &content_buf,
+                turn_index,
+                finish_reason.clone(),
+                error_message.clone(),
+                error_code.clone(),
+            )
+            .map_err(LoopError::Fatal)?;
             return Ok(final_text);
         }
 
@@ -129,6 +156,9 @@ pub(super) async fn run_reasoning_loop(
             &tool_calls,
             &content_buf,
             &final_text,
+            finish_reason.clone(),
+            error_message.clone(),
+            error_code.clone(),
         )
         .await?;
 

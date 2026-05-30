@@ -45,6 +45,25 @@ fn chat_message_assistant_with_tool_calls() {
 }
 
 #[test]
+fn chat_message_completion_metadata_roundtrip() {
+    let msg = ChatMessage::assistant("oops").with_completion_metadata(
+        Some("error:boom".to_string()),
+        Some("boom".to_string()),
+        Some("bad_request".to_string()),
+    );
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["finish_reason"], "error:boom");
+    assert_eq!(json["error_message"], "boom");
+    assert_eq!(json["error_code"], "bad_request");
+
+    let stripped = msg.without_completion_metadata();
+    let stripped_json = serde_json::to_value(&stripped).unwrap();
+    assert!(stripped_json.get("finish_reason").is_none());
+    assert!(stripped_json.get("error_message").is_none());
+    assert!(stripped_json.get("error_code").is_none());
+}
+
+#[test]
 fn chat_request_serialize_snake_case() {
     let req = ChatRequest {
         messages: vec![ChatMessage::user("test")],
@@ -170,6 +189,29 @@ fn stream_event_thinking_serde_missing_source_is_rejected() {
         "反序列化错误应指出缺少 source: {}",
         err
     );
+}
+
+#[test]
+fn stream_event_llm_error_and_notice_serde() {
+    let err = StreamEvent::LlmError {
+        reason: "error:boom".to_string(),
+        message: "boom".to_string(),
+        code: Some("server_error".to_string()),
+    };
+    let err_json = serde_json::to_value(&err).unwrap();
+    assert_eq!(err_json["type"], "llm_error");
+    assert_eq!(err_json["reason"], "error:boom");
+    assert_eq!(err_json["message"], "boom");
+    assert_eq!(err_json["code"], "server_error");
+
+    let notice = StreamEvent::LlmNotice {
+        finish_reason: "max_output_tokens".to_string(),
+        message: "达到 max_output_tokens，回答可能未完成".to_string(),
+    };
+    let notice_json = serde_json::to_value(&notice).unwrap();
+    assert_eq!(notice_json["type"], "llm_notice");
+    assert_eq!(notice_json["finish_reason"], "max_output_tokens");
+    assert!(notice_json["message"].as_str().unwrap().contains("max_output_tokens"));
 }
 
 // ============================================================================

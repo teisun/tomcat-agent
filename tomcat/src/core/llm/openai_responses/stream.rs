@@ -14,6 +14,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
+use super::payload::{infer_terminal_metadata, ResponsesTerminalMetadata};
 use crate::core::llm::types::{StreamEvent, ThinkingSource};
 use crate::infra::error::{llm_error_with_source, AppError, LlmErrorStage};
 
@@ -39,6 +40,7 @@ pub(super) struct ToolCallTrack {
     pub(super) item_id: String,
     pub(super) call_id: String,
     pub(super) name: String,
+    pub(super) arguments: String,
     pub(super) name_emitted: bool,
 }
 
@@ -298,6 +300,158 @@ fn drain_buffer(buffer: &mut Vec<u8>, ndjson: bool) -> Result<Vec<String>, AppEr
     Ok(out)
 }
 
+fn push_terminal_events(
+    events: &mut Vec<StreamEvent>,
+    meta: ResponsesTerminalMetadata,
+    usage: Option<&Value>,
+) {
+    if let Some(message) = meta.notice_message.clone() {
+        events.push(StreamEvent::LlmNotice {
+            finish_reason: meta
+                .finish_reason
+                .clone()
+                .unwrap_or_else(|| "notice".to_string()),
+            message,
+        });
+    }
+    if let Some(message) = meta.error_message.clone() {
+        events.push(StreamEvent::LlmError {
+            reason: meta
+                .finish_reason
+                .clone()
+                .unwrap_or_else(|| format!("error:{message}")),
+            message,
+            code: meta.error_code.clone(),
+        });
+    }
+    if let Some(reason) = meta.finish_reason {
+        events.push(StreamEvent::FinishReason { reason });
+    }
+    if let Some(usage) = usage {
+        let prompt = usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let completion = usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let total = usage
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32);
+        events.push(StreamEvent::Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+        });
+    }
+}
+
+fn upsert_tool_call_track(
+    tool_calls: &mut Vec<ToolCallTrack>,
+    item_id: &str,
+    call_id: &str,
+    name: &str,
+) -> usize {
+    if let Some((index, track)) = tool_calls
+        .iter_mut()
+        .enumerate()
+        .find(|(_, track)| track.item_id == item_id)
+    {
+        if !call_id.is_empty() {
+            track.call_id = call_id.to_string();
+        }
+        if !name.is_empty() {
+            track.name = name.to_string();
+        }
+        return index;
+    }
+
+    let index = tool_calls.len();
+    tool_calls.push(ToolCallTrack {
+        item_id: item_id.to_string(),
+        call_id: call_id.to_string(),
+        name: name.to_string(),
+        arguments: String::new(),
+        name_emitted: false,
+    });
+    index
+}
+
+fn tool_call_done_events(item: &Value, tool_calls: &mut Vec<ToolCallTrack>) -> Vec<StreamEvent> {
+    let item_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let name = item
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let final_arguments = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let index = upsert_tool_call_track(tool_calls, &item_id, &call_id, &name);
+    let track = &mut tool_calls[index];
+    let mut id_field = None;
+    let mut name_field = None;
+    if !track.name_emitted && (!track.call_id.is_empty() || !track.name.is_empty()) {
+        if !track.call_id.is_empty() {
+            id_field = Some(track.call_id.clone());
+        }
+        if !track.name.is_empty() {
+            name_field = Some(track.name.clone());
+        }
+        track.name_emitted = true;
+    }
+
+    let arguments_delta = if final_arguments.is_empty() {
+        None
+    } else if track.arguments.is_empty() {
+        track.arguments = final_arguments.clone();
+        Some(final_arguments)
+    } else if let Some(suffix) = final_arguments.strip_prefix(track.arguments.as_str()) {
+        if suffix.is_empty() {
+            None
+        } else {
+            track.arguments.push_str(suffix);
+            Some(suffix.to_string())
+        }
+    } else {
+        tracing::warn!(
+            target: "tomcat::llm::openai_responses",
+            item_id = %track.item_id,
+            call_id = %track.call_id,
+            old_len = track.arguments.len(),
+            new_len = final_arguments.len(),
+            "function_call done arguments do not extend accumulated delta; keeping final snapshot"
+        );
+        track.arguments = final_arguments;
+        None
+    };
+
+    if id_field.is_none() && name_field.is_none() && arguments_delta.is_none() {
+        return Vec::new();
+    }
+
+    vec![StreamEvent::ToolCallDelta {
+        index: index as u32,
+        id: id_field,
+        name: name_field,
+        arguments_delta,
+    }]
+}
+
 /// 把单条 Responses chunk JSON 翻译为 0..N 个 [`StreamEvent`]。
 #[cfg(test)]
 pub(super) fn responses_chunk_to_events(
@@ -343,20 +497,23 @@ pub(super) fn responses_chunk_to_events_with_state(
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    let index = tool_calls.len() as u32;
-                    tool_calls.push(ToolCallTrack {
-                        item_id,
-                        call_id: call_id.clone(),
-                        name: name.clone(),
-                        name_emitted: false,
-                    });
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let index =
+                        upsert_tool_call_track(tool_calls, &item_id, &call_id, &name) as u32;
+                    if let Some(track) = tool_calls.get_mut(index as usize) {
+                        track.arguments = arguments.clone();
+                    }
                     events.push(StreamEvent::ToolCallDelta {
                         index,
-                        id: Some(call_id),
-                        name: Some(name),
-                        arguments_delta: None,
+                        id: (!call_id.is_empty()).then_some(call_id),
+                        name: (!name.is_empty()).then_some(name),
+                        arguments_delta: (!arguments.is_empty()).then_some(arguments),
                     });
-                    if let Some(track) = tool_calls.last_mut() {
+                    if let Some(track) = tool_calls.get_mut(index as usize) {
                         track.name_emitted = true;
                     }
                 }
@@ -365,74 +522,69 @@ pub(super) fn responses_chunk_to_events_with_state(
         "response.function_call_arguments.delta" => {
             let item_id = value.get("item_id").and_then(Value::as_str).unwrap_or("");
             let delta = value.get("delta").and_then(Value::as_str).unwrap_or("");
-            if let Some((idx, track)) = tool_calls
-                .iter_mut()
-                .enumerate()
-                .find(|(_, t)| t.item_id == item_id)
-            {
-                let index = idx as u32;
+            let index = upsert_tool_call_track(tool_calls, item_id, "", "");
+            if let Some(track) = tool_calls.get_mut(index) {
                 let mut id_field = None;
                 let mut name_field = None;
                 if !track.name_emitted {
-                    id_field = Some(track.call_id.clone());
-                    name_field = Some(track.name.clone());
-                    track.name_emitted = true;
+                    if !track.call_id.is_empty() {
+                        id_field = Some(track.call_id.clone());
+                    }
+                    if !track.name.is_empty() {
+                        name_field = Some(track.name.clone());
+                    }
+                    track.name_emitted = id_field.is_some() || name_field.is_some();
+                }
+                if !delta.is_empty() {
+                    track.arguments.push_str(delta);
                 }
                 events.push(StreamEvent::ToolCallDelta {
-                    index,
+                    index: index as u32,
                     id: id_field,
                     name: name_field,
-                    arguments_delta: if delta.is_empty() {
-                        None
-                    } else {
-                        Some(delta.to_string())
-                    },
+                    arguments_delta: (!delta.is_empty()).then(|| delta.to_string()),
                 });
             }
         }
         "response.completed" | "response.done" => {
-            // 优先展开 incomplete reason；否则按 stop / tool_calls 结尾。
             let response = value.get("response");
-            let reason = response
-                .and_then(|r| r.get("incomplete_details"))
-                .and_then(|d| d.get("reason"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| "stop".to_string());
-            events.push(StreamEvent::FinishReason { reason });
-            if let Some(usage) = response.and_then(|r| r.get("usage")) {
-                let prompt = usage
-                    .get("input_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as u32;
-                let completion = usage
-                    .get("output_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as u32;
-                let total = usage
-                    .get("total_tokens")
-                    .and_then(Value::as_u64)
-                    .map(|v| v as u32);
-                events.push(StreamEvent::Usage {
-                    prompt_tokens: prompt,
-                    completion_tokens: completion,
-                    total_tokens: total,
-                });
-            }
+            let meta = infer_terminal_metadata(
+                Some("completed"),
+                response,
+                None,
+                None,
+                !tool_calls.is_empty(),
+            );
+            push_terminal_events(&mut events, meta, response.and_then(|resp| resp.get("usage")));
         }
-        "response.failed" | "error" => {
-            // 错误事件不在此处转 AppError（流向外的 Result Err 由 process_chunk 上游决定）；
-            // 这里映射为一个 `FinishReason { reason: "error" }`，便于上层统一处理。
-            let msg = value
-                .get("response")
-                .and_then(|r| r.get("error"))
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .or_else(|| value.get("message").and_then(Value::as_str))
-                .unwrap_or("unknown");
-            events.push(StreamEvent::FinishReason {
-                reason: format!("error:{}", msg),
-            });
+        "response.incomplete" => {
+            let response = value.get("response");
+            let meta = infer_terminal_metadata(
+                Some("incomplete"),
+                response,
+                None,
+                None,
+                !tool_calls.is_empty(),
+            );
+            push_terminal_events(&mut events, meta, response.and_then(|resp| resp.get("usage")));
+        }
+        "response.failed" => {
+            let response = value.get("response");
+            let meta =
+                infer_terminal_metadata(Some("failed"), response, None, None, !tool_calls.is_empty());
+            push_terminal_events(&mut events, meta, response.and_then(|resp| resp.get("usage")));
+        }
+        "error" => {
+            let top_level_error = value.get("error").or(Some(value));
+            let top_level_message = value.get("message").and_then(Value::as_str);
+            let meta = infer_terminal_metadata(
+                Some("failed"),
+                None,
+                top_level_error,
+                top_level_message,
+                !tool_calls.is_empty(),
+            );
+            push_terminal_events(&mut events, meta, None);
         }
         // T2-P1：Responses reasoning 事件按 (item_id, index) 分桶去重。
         "response.reasoning.delta" | "response.reasoning_text.delta" => {
@@ -538,6 +690,8 @@ pub(super) fn responses_chunk_to_events_with_state(
                             events.push(event);
                         }
                     }
+                } else if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    events.extend(tool_call_done_events(item, tool_calls));
                 } else {
                     tracing::debug!(
                         target: "tomcat::llm::openai_responses",

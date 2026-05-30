@@ -21,6 +21,133 @@ use crate::core::llm::types::{
     ChatResponseChoice,
 };
 
+pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ResponsesTerminalMetadata {
+    pub finish_reason: Option<String>,
+    pub error_message: Option<String>,
+    pub error_code: Option<String>,
+    pub notice_message: Option<String>,
+}
+
+impl ResponsesTerminalMetadata {
+    fn stop() -> Self {
+        Self {
+            finish_reason: Some("stop".to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn tool_calls() -> Self {
+        Self {
+            finish_reason: Some("tool_calls".to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn max_output_tokens() -> Self {
+        Self {
+            finish_reason: Some("max_output_tokens".to_string()),
+            notice_message: Some(MAX_OUTPUT_TOKENS_NOTICE.to_string()),
+            ..Self::default()
+        }
+    }
+
+    fn error(message: impl Into<String>, code: Option<String>) -> Self {
+        let message = message.into();
+        let reason_suffix = if message.is_empty() {
+            code.clone().unwrap_or_else(|| "unknown".to_string())
+        } else {
+            message.clone()
+        };
+        Self {
+            finish_reason: Some(format!("error:{reason_suffix}")),
+            error_message: Some(message),
+            error_code: code,
+            notice_message: None,
+        }
+    }
+}
+
+fn extract_error_details(error: Option<&Value>, fallback_message: Option<&str>) -> Option<(String, Option<String>)> {
+    let code = error
+        .and_then(|err| err.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = error
+        .and_then(|err| err.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            error
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| fallback_message.map(str::to_string))?;
+    Some((message, code))
+}
+
+fn incomplete_metadata(reason: &str, has_tool_calls: bool) -> ResponsesTerminalMetadata {
+    let normalized = reason.trim().to_ascii_lowercase();
+    if normalized.contains("max_output") || normalized.contains("length") {
+        return ResponsesTerminalMetadata::max_output_tokens();
+    }
+    if normalized.contains("content_filter") {
+        return ResponsesTerminalMetadata::error(reason.trim(), None);
+    }
+    if normalized.contains("tool") || has_tool_calls {
+        return ResponsesTerminalMetadata::tool_calls();
+    }
+    ResponsesTerminalMetadata::error(reason.trim(), None)
+}
+
+pub(super) fn infer_terminal_metadata(
+    status_hint: Option<&str>,
+    response: Option<&Value>,
+    top_level_error: Option<&Value>,
+    top_level_message: Option<&str>,
+    has_tool_calls: bool,
+) -> ResponsesTerminalMetadata {
+    if let Some((message, code)) = extract_error_details(
+        top_level_error.or_else(|| response.and_then(|resp| resp.get("error"))),
+        top_level_message,
+    ) {
+        return ResponsesTerminalMetadata::error(message, code);
+    }
+
+    let status = response
+        .and_then(|resp| resp.get("status"))
+        .and_then(Value::as_str)
+        .or(status_hint);
+    let incomplete_reason = response
+        .and_then(|resp| resp.get("incomplete_details"))
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str);
+
+    if matches!(status, Some("failed")) {
+        return ResponsesTerminalMetadata::error(
+            top_level_message.unwrap_or("request failed"),
+            None,
+        );
+    }
+
+    if let Some(reason) = incomplete_reason {
+        return incomplete_metadata(reason, has_tool_calls);
+    }
+
+    if has_tool_calls {
+        return ResponsesTerminalMetadata::tool_calls();
+    }
+
+    match status {
+        Some("completed" | "done") => ResponsesTerminalMetadata::stop(),
+        Some("incomplete") => ResponsesTerminalMetadata::error("incomplete", None),
+        Some(other) if !other.is_empty() => ResponsesTerminalMetadata::error(other, None),
+        _ => ResponsesTerminalMetadata::default(),
+    }
+}
+
 /// 把内部 [`ChatMessage`] 序列翻译为 Responses 的 `(instructions, input items)`。
 ///
 /// 规则（与 plan §5 Phase B 表 + pi_agent_rust 同名实现一致）：
@@ -321,26 +448,7 @@ pub(super) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
         }
     }
 
-    let finish_reason = raw
-        .get("status")
-        .and_then(Value::as_str)
-        .map(|s| match s {
-            "completed" => "stop".to_string(),
-            "incomplete" => raw
-                .get("incomplete_details")
-                .and_then(|d| d.get("reason"))
-                .and_then(Value::as_str)
-                .unwrap_or("incomplete")
-                .to_string(),
-            other => other.to_string(),
-        })
-        .or_else(|| {
-            if !tool_calls.is_empty() {
-                Some("tool_calls".to_string())
-            } else {
-                None
-            }
-        });
+    let terminal = infer_terminal_metadata(None, Some(raw), None, None, !tool_calls.is_empty());
 
     let usage = raw
         .get("usage")
@@ -359,14 +467,19 @@ pub(super) fn responses_payload_to_chat_response(raw: &Value) -> ChatResponse {
         ChatMessage::assistant_with_tool_calls(None, tool_calls)
     } else {
         ChatMessage::assistant_with_tool_calls(Some(&text_buf), tool_calls)
-    };
+    }
+    .with_completion_metadata(
+        terminal.finish_reason.clone(),
+        terminal.error_message.clone(),
+        terminal.error_code.clone(),
+    );
 
     ChatResponse {
         id,
         choices: vec![ChatResponseChoice {
             index: 0,
             message,
-            finish_reason,
+            finish_reason: terminal.finish_reason,
         }],
         usage,
     }

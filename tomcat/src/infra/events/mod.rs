@@ -80,6 +80,8 @@ pub mod wire {
     pub const WIRE_MESSAGE_START: &str = "message_start";
     pub const WIRE_MESSAGE_UPDATE: &str = "message_update";
     pub const WIRE_MESSAGE_END: &str = "message_end";
+    pub const WIRE_LLM_ERROR: &str = "llm_error";
+    pub const WIRE_LLM_NOTICE: &str = "llm_notice";
     /// `AgentEvent::ToolExecutionStart` 的 JSON `type`（pi-mono 观察向）。
     pub const WIRE_TOOL_EXECUTION_START: &str = "tool_execution_start";
     pub const WIRE_TOOL_EXECUTION_UPDATE: &str = "tool_execution_update";
@@ -273,6 +275,20 @@ pub enum AgentEvent {
     },
     MessageEnd {
         message: Message,
+    },
+    /// LLM 终局错误（如 Responses `response.failed` / 顶层 `error` / `content_filter`）。
+    LlmError {
+        reason: String,
+        #[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(rename = "errorMessage")]
+        error_message: String,
+    },
+    /// LLM 非错误终局提示（当前用于 `max_output_tokens` 截断轻提示）。
+    LlmNotice {
+        #[serde(rename = "finishReason")]
+        finish_reason: String,
+        message: String,
     },
     /// 线格式 `tool_execution_start`（观察向）；钩子 `tool_call` 见 `ExtensionEvent::ToolCall`。
     ToolExecutionStart {

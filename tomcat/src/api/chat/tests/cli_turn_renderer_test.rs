@@ -352,6 +352,44 @@ fn tool_end_failure_with_string_result_shows_real_error_message() {
 }
 
 #[test]
+fn llm_error_renders_red_status_line() {
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
+    r.on_message_update(&json!({
+        "assistantMessageEvent": {"kind": "content_delta", "delta": "partial"}
+    }));
+    r.on_llm_error(&json!({
+        "reason": "error:boom",
+        "errorMessage": "boom"
+    }));
+    let stdout = w.stdout();
+    let stderr = w.stderr();
+    assert!(stdout.contains("partial"), "应先冲掉正文残余: {:?}", stdout);
+    assert!(stderr.contains("[llm] boom"), "应展示 llm 错误提示: {:?}", stderr);
+    assert!(stderr.contains("\x1b[31m"), "错误应使用红色: {:?}", stderr);
+}
+
+#[test]
+fn llm_notice_renders_dim_non_error_hint() {
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
+    r.on_llm_notice(&json!({
+        "finishReason": "max_output_tokens",
+        "message": "达到 max_output_tokens，回答可能未完成"
+    }));
+    let stderr = w.stderr();
+    assert!(
+        stderr.contains("max_output_tokens"),
+        "轻提示应说明截断原因: {:?}",
+        stderr
+    );
+    assert!(stderr.contains("\x1b[90m"), "轻提示应使用灰色: {:?}", stderr);
+    assert!(
+        !stderr.contains("\x1b[31m"),
+        "轻提示不应被渲染成红色错误: {:?}",
+        stderr
+    );
+}
+
+#[test]
 fn one_line_summary_handles_known_and_unknown_tools() {
     assert_eq!(
         one_line_summary("read", &json!({"path": "a.rs", "offset": 1, "limit": 10})),
