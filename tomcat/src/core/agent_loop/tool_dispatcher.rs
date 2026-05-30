@@ -62,6 +62,7 @@ use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 /// 每个 tool 执行完毕后检查 `steering_queue`；非空则 `messages.extend(q.drain(..))`
 /// → `steered = true; break;`。**当次** tool 的 result 已入 messages；余下 tool_calls
 /// **不执行**。调用方应 `continue` reasoning loop 让下一次 LLM 请求携带 steering 消息。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tool_calls(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,

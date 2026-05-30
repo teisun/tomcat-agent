@@ -32,7 +32,11 @@ fn l1_turn_boundary_with_steering_messages() {
     let mut state = make_state(total, total, total / 4);
     state.messages = msgs;
 
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 5);
+    let config = ContextConfig {
+        keep_recent_turns: 5,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
 
     // Turns 0-2 are in compactable zone (3 real turns before the protected 5)
     // Their tool results should be replaced
@@ -49,6 +53,42 @@ fn l1_turn_boundary_with_steering_messages() {
         Some("internal steering"),
         "steering content should be unchanged"
     );
+}
+
+#[test]
+fn l1_keep_recent_turns_reads_config_value() {
+    let big = "x".repeat(25_000);
+    let mut msgs = Vec::new();
+    for i in 0..4 {
+        msgs.push(user_msg_with_id(&format!("u{i}"), &format!("q{i}")));
+        msgs.push(tool_msg_with_id(&format!("t{i}"), &format!("tc{i}"), &big));
+        msgs.push(assistant_msg(&format!("a{i}")));
+    }
+
+    let total: usize = msgs.iter().map(estimate_msg_chars).sum();
+    let mut state = make_state(total, total, total / 4);
+    state.messages = msgs;
+
+    let config = ContextConfig {
+        keep_recent_turns: 2,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
+    assert!(
+        reduced > 0,
+        "older turns should become compactable once keep_recent_turns shrinks"
+    );
+
+    let tool_texts: Vec<_> = state
+        .messages
+        .iter()
+        .filter(|msg| msg.role == crate::core::llm::ChatMessageRole::Tool)
+        .map(|msg| msg.text_content())
+        .collect();
+    assert!(tool_texts[0] == Some(crate::core::compaction::TOOL_RESULT_PLACEHOLDER));
+    assert!(tool_texts[1] == Some(crate::core::compaction::TOOL_RESULT_PLACEHOLDER));
+    assert!(tool_texts[2] == Some(&big));
+    assert!(tool_texts[3] == Some(&big));
 }
 
 #[test]

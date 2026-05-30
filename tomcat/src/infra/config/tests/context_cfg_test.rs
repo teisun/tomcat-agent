@@ -3,9 +3,9 @@
 //! 覆盖：
 //!
 //! - `ContextConfig::default` 的全部字段（context_window / max_output_tokens /
-//!   compaction_turns / keep_recent_turns / compaction_model /
-//!   layer0_single_result_max_chars / layer0_placeholder_threshold_chars /
-//!   compaction_max_tokens）。
+//!   keep_recent_turns / compaction_model / layer0_single_result_max_chars /
+//!   layer0_placeholder_threshold_chars / current_tail_compactable_min_chars /
+//!   current_tail_single_result_max_chars / compaction_max_tokens）。
 //! - `compute_context_budget_chars` 在 GPT-5.4 默认配置、`max_output_tokens=0`
 //!   与 `context_window<max_output_tokens` 三种边界场景下的输出。
 //! - `[context]` 段的 toml override 能正确传到 `cfg.context` 字段。
@@ -18,11 +18,12 @@ fn context_config_default_values() {
     let cfg = ContextConfig::default();
     assert_eq!(cfg.context_window, 400_000);
     assert_eq!(cfg.max_output_tokens, 128_000);
-    assert_eq!(cfg.compaction_turns, 10);
-    assert_eq!(cfg.keep_recent_turns, 3);
+    assert_eq!(cfg.keep_recent_turns, 5);
     assert_eq!(cfg.compaction_model, DEFAULT_LLM_MODEL);
     assert_eq!(cfg.layer0_single_result_max_chars, 50_000);
     assert_eq!(cfg.layer0_placeholder_threshold_chars, 10_000);
+    assert_eq!(cfg.current_tail_compactable_min_chars, 1);
+    assert_eq!(cfg.current_tail_single_result_max_chars, 10_000);
     assert_eq!(cfg.compaction_max_tokens, 10_000);
 }
 

@@ -125,6 +125,7 @@
 
 mod accessors;
 pub mod config_backend;
+mod current_tail_guard;
 mod error_classifier;
 mod reasoning_loop;
 mod run;

@@ -62,6 +62,48 @@ impl LlmProvider for MockLlm {
     }
 }
 
+struct RecordingMockLlm {
+    streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+    requests: Mutex<Vec<ChatRequest>>,
+}
+
+impl RecordingMockLlm {
+    fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: Mutex::new(streams.into()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RecordingMockLlm {
+    fn provider_name(&self) -> &str {
+        "recording-mock"
+    }
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("recording mock chat not used".to_string()))
+    }
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.requests.lock().unwrap().push(req);
+        let mut guard = self.streams.lock().unwrap();
+        let events = guard
+            .pop_front()
+            .ok_or_else(|| AppError::Llm("RecordingMockLlm: no more streams".to_string()))?;
+        drop(guard);
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
 struct MockPrimitiveWithLargeFile {
     file_size: usize,
 }
@@ -127,6 +169,7 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
 // ────────────────────── 辅助 ──────────────────────────────────────────────
 
 const TEST_TS: &str = "2026-04-04T12:00:00Z";
+const TOOL_RESULT_PLACEHOLDER_TEXT: &str = "[Previous tool result replaced to save context space]";
 
 fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
     vec![
@@ -151,6 +194,22 @@ fn tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEvent,
             reason: "tool_calls".to_string(),
         }),
     ]
+}
+
+fn multi_tool_call_stream(calls: &[(&str, &str, &str)]) -> Vec<Result<StreamEvent, AppError>> {
+    let mut out = Vec::new();
+    for (idx, (id, name, args)) in calls.iter().enumerate() {
+        out.push(Ok(StreamEvent::ToolCallDelta {
+            index: idx as u32,
+            id: Some((*id).to_string()),
+            name: Some((*name).to_string()),
+            arguments_delta: Some((*args).to_string()),
+        }));
+    }
+    out.push(Ok(StreamEvent::FinishReason {
+        reason: "tool_calls".to_string(),
+    }));
+    out
 }
 
 fn temp_sessions_dir(label: &str) -> PathBuf {
@@ -368,7 +427,11 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         live: Default::default(),
     };
 
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
@@ -658,7 +721,11 @@ fn test_compact_tool_results_replaces_with_placeholder() {
     };
 
     info!("Act: compact_tool_results with keep_recent=1");
-    compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    compact_tool_results(&mut state, &config);
 
     info!("Assert: old turns replaced, recent preserved");
     // Turns: turn 0 = msgs[0..3], turn 1 = msgs[3..6], turn 2 = msgs[6..9] (recent)
@@ -718,7 +785,11 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
     };
 
     info!("Act: compact with m=1, only >threshold in compactable zone get replaced");
-    compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    compact_tool_results(&mut state, &config);
 
     let tool_msgs: Vec<&ChatMessage> = state
         .messages
@@ -776,7 +847,11 @@ fn test_compact_tool_results_estimate_precise() {
         live: Default::default(),
     };
 
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
 
     let expected_reduced = content_len - PLACEHOLDER.len();
     assert_eq!(
@@ -787,6 +862,79 @@ fn test_compact_tool_results_estimate_precise() {
         state.estimate_context_chars,
         total - expected_reduced,
         "estimate should be total - reduced"
+    );
+}
+
+#[tokio::test]
+async fn test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm").entered();
+
+    let llm = Arc::new(RecordingMockLlm::new(vec![
+        multi_tool_call_stream(&[
+            ("tc1", "read", r#"{"path":"a.txt"}"#),
+            ("tc2", "read", r#"{"path":"b.txt"}"#),
+            ("tc3", "read", r#"{"path":"c.txt"}"#),
+            ("tc4", "read", r#"{"path":"d.txt"}"#),
+            ("tc5", "read", r#"{"path":"e.txt"}"#),
+        ]),
+        text_stream("done"),
+    ]));
+    let primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 8_000 });
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let mut agent = AgentLoop::new(
+        llm.clone(),
+        primitive,
+        event_bus,
+        AgentLoopConfig {
+            model: "mock-model".to_string(),
+            session_id: "sess-mid-turn-run".to_string(),
+            context_config: ContextConfig {
+                current_tail_compactable_min_chars: 1,
+                keep_recent_turns: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 0,
+        context_budget_chars: 20_000,
+        context_budget_tokens: 5_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        preheat: tomcat::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let result = agent
+        .run(vec![ChatMessage::user("read five files")])
+        .await
+        .unwrap();
+    assert_eq!(result.final_text, "done");
+
+    let requests = llm.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "should issue second LLM request after tool round"
+    );
+    let second_request = &requests[1];
+    let placeholder_count = second_request
+        .messages
+        .iter()
+        .filter(|msg| msg.role == ChatMessageRole::Tool)
+        .filter(|msg| msg.text_content() == Some(TOOL_RESULT_PLACEHOLDER_TEXT))
+        .count();
+    assert!(
+        placeholder_count >= 1,
+        "mid-turn precheck should rewrite older tool results before second LLM request"
     );
 }
 

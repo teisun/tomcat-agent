@@ -951,7 +951,7 @@ Parameters:
 
 Append to or update an allowed tomcat configuration key. Every call shows the user a unified diff and requires confirmation. CONFIG_WRITE_ALLOWLIST and CONFIG_HARDCODED_WRITE_DENY protect sensitive or self-escalating fields.
 
-Semantics: array fields such as workspace.workspace_roots, workspace.entries, primitive.path_rules, primitive.bash_forbidden, and primitive.bash_approval_required accept value as one JSON element string and append it only. Scalar fields such as llm.default_model, log.level, and context.compaction_turns accept value as the replacement string. Deleting or arbitrary mutation is not supported; return an error that guides the user to tomcat config edit.
+Semantics: array fields such as workspace.workspace_roots, workspace.entries, primitive.path_rules, primitive.bash_forbidden, and primitive.bash_approval_required accept value as one JSON element string and append it only. Scalar fields such as llm.default_model, log.level, context.keep_recent_turns, context.current_tail_compactable_min_chars, context.current_tail_single_result_max_chars, and context.compaction_max_tokens accept value as the replacement string. Deleting or arbitrary mutation is not supported; return an error that guides the user to tomcat config edit.
 
 Forbidden fields include llm.api_key*, security.*, storage.*, agent.id, agent.workspace, and primitive.auto_confirm.
 

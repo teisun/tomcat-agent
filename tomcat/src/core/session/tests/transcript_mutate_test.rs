@@ -368,3 +368,67 @@ fn mark_message_entries_after_anchor_superseded_requires_anchor() {
     let err = mark_message_entries_after_anchor_superseded(&path, "missing");
     assert!(err.is_err());
 }
+
+#[test]
+fn rewrite_message_text_entries_by_id_updates_target_messages_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rewrite_messages.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    for (id, role, content) in [
+        ("m1", "assistant", "old-a"),
+        ("m2", "tool", "old-b"),
+        ("m3", "assistant", "keep"),
+    ] {
+        append_entry(
+            &path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+                message: serde_json::json!({"role": role, "content": content}),
+            }),
+        )
+        .unwrap();
+    }
+
+    let changed = rewrite_message_text_entries_by_id(
+        &path,
+        &[
+            MessageTextRewrite {
+                message_id: "m1".to_string(),
+                new_content: "new-a".to_string(),
+            },
+            MessageTextRewrite {
+                message_id: "m2".to_string(),
+                new_content: "new-b".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(changed, 2);
+
+    let entries = read_entries_tail(&path, 10).unwrap();
+    let contents: Vec<_> = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(me) => me
+                .message
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(contents, vec!["new-a", "new-b", "keep"]);
+}

@@ -65,7 +65,11 @@ fn compact_tool_results_reduces_budget() {
         tool_msg("c1", &"x".repeat(25_000)),
         user_msg("q2"),
     ];
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
     assert!(reduced > 0);
 }
 
@@ -75,7 +79,11 @@ fn compact_tool_results_protects_recent() {
     let mut state = make_state(25_000, 5_000, 1_250);
     // Only one turn (one user message), m=1 → everything protected
     state.messages = vec![user_msg("q"), tool_msg("c1", &tool_content)];
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
     assert_eq!(reduced, 0);
 }
 
@@ -88,7 +96,11 @@ fn compact_tool_results_skips_small() {
         tool_msg("c1", &"x".repeat(1_000)),
         user_msg("q2"),
     ];
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
     assert_eq!(reduced, 0);
 }
 

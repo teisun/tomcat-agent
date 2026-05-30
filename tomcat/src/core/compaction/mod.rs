@@ -21,5 +21,8 @@ pub use truncation::{
     compact_tool_results, layer0_persist_large_results, run_layer0_cleanup, Layer0CleanupOutcome,
     PersistedResult,
 };
+pub(crate) use truncation::{
+    is_persisted_tool_result_text, persist_tool_result_text, TOOL_RESULT_PLACEHOLDER,
+};
 
 pub use cascade::{force_drop_oldest_to_target, is_context_overflow_error};

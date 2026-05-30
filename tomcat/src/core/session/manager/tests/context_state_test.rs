@@ -179,6 +179,31 @@ fn test_usage_ratio_after_invalidate() {
 }
 
 #[test]
+fn rewrite_local_tail_chars_updates_estimate_and_post_usage() {
+    let mut state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 12_000,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: Some(ApiUsage {
+            prompt_tokens: 1_000,
+            completion_tokens: 200,
+        }),
+        post_usage_appended_chars: 1_500,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    };
+
+    state.rewrite_local_tail_chars(1_200, 200);
+
+    assert_eq!(state.estimate_context_chars, 11_000);
+    assert_eq!(state.post_usage_appended_chars, 500);
+}
+
+#[test]
 fn persist_context_observability_writes_sessions_json() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

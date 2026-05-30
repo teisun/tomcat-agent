@@ -73,7 +73,11 @@ fn compact_tool_results_skips_already_persisted() {
         ),
         user_msg("q2"),
     ];
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
     assert_eq!(
         reduced, 0,
         "already persisted results should not be replaced"
@@ -88,7 +92,11 @@ fn compact_tool_results_skips_placeholder() {
         tool_msg("c1", TOOL_RESULT_PLACEHOLDER),
         user_msg("q2"),
     ];
-    let reduced = compact_tool_results(&mut state, &ContextConfig::default(), 1);
+    let config = ContextConfig {
+        keep_recent_turns: 1,
+        ..Default::default()
+    };
+    let reduced = compact_tool_results(&mut state, &config);
     assert_eq!(
         reduced, 0,
         "already replaced results should not be re-replaced"
@@ -101,10 +109,11 @@ fn compact_tool_results_respects_placeholder_threshold_from_config() {
     let mut state = make_state(30_000, 5_000, 1_250);
     state.messages = vec![user_msg("q"), tool_msg("c1", &big), user_msg("q2")];
     let high_threshold = ContextConfig {
+        keep_recent_turns: 1,
         layer0_placeholder_threshold_chars: 30_000,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &high_threshold, 1);
+    let reduced = compact_tool_results(&mut state, &high_threshold);
     assert_eq!(
         reduced, 0,
         "content below custom threshold should not be replaced"

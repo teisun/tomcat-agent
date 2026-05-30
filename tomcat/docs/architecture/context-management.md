@@ -73,9 +73,9 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **context_window**     | 模型固有的最大上下文长度（输入 + 输出），由模型提供商决定（如 GPT-4o 128K, GPT-5.4 400K）。                                                                                                                                                              |
 | **input_budget**       | 输入 token 预算，`context_window - max_output_tokens`。分母，用于计算 ratio。                                                                                                                                                           |
 | **ratio**              | 上下文使用率，`estimated_token_count / input_budget`，取值 0.0 ~ 1.0+。驱动多级水位线触发。                                                                                                                                                    |
-| **compactable zone**   | `messages` 中可被 Layer 0 占位符替换的区间：从开头到 `find_protected_turn_start()` 返回的保护区起始位置之前，排除保护区。保护区为最近 5 个 turn。**仅适用于 Layer 0**。                                                                                                   |
-| **protected zone**     | 最近 5 个 user turns 对应的 `messages` 尾部区间，**不参与 Layer 0 占位符替换**。Layer 1 摘要压缩**整个 `messages`**，不受保护区限制。                                                                                                                       |
-| **m 值**                | 保护区大小，固定为 5（turn 数）。**仅影响 Layer 0** 占位符替换范围。由 `find_protected_turn_start()` 计算边界。                                                                                                                                       |
+| **compactable zone**   | `messages` 中可被历史 placeholder 压缩的区间：从开头到 `find_protected_turn_start()` 返回的保护区起始位置之前，排除保护区。保护区来自 `[context].keep_recent_turns`，默认最近 5 个 turn。                                                                                                   |
+| **protected zone**     | 最近 `keep_recent_turns` 个 user turns 对应的 `messages` 尾部区间，默认最近 5 个 turn。该区间不参与历史 placeholder 压缩。                                                                                                                       |
+| **keep_recent_turns**  | 历史 placeholder 保护区大小（turn 数），来自 `[context].keep_recent_turns`，默认 5。它只影响历史压缩边界；阶段二的 mid-turn current-tail guard 另看 `messages[start_idx..]`。                                                                                                                                       |
 | **preview 占位符**        | Layer 0 落盘后替换 tool_result 的短文本，包含路径 + 工具名 + 前 500 chars 预览。                                                                                                                                                               |
 | **placeholder**        | Layer 0 替换旧 turn 中 tool_result 的常量文本 `[Previous tool result replaced to save context space]`。                                                                                                                             |
 | **CompactionSummary**  | `ChatMessage` 的 `kind == MessageKind::CompactionSummary` 形态，通过 `ChatMessage::compaction_summary(text)` 构造。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 **`BranchSummaryEntry.id`（整串 `S::E`）** 一致），供 Layer 2 取出并应用。任务完成写入 transcript 时，**按 §5.7 插在 `MessageEntry.id == covered_end_id` 的行之后**（`is_boundary=false`），而非仅依赖「文件尾追加」。 |
@@ -222,10 +222,10 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 ```
   messages: Vec<ChatMessage> (内存中维护，扁平存储)：
 
-  m = 5 个 turn（固定，仅用于 Layer 0）:
+  keep_recent_turns = 5 个 turn（默认，可配置）:
   [msg_0] [msg_1] ... [msg_p-1] │ [msg_p] ... [msg_n-1]
   ◄──── compactable zone ──────►│◄──── protected zone (最近 5 turns) ──►
-  （仅 Layer 0 占位符替换适用此分区）
+  （历史 placeholder 压缩适用此分区；mid-turn current-tail guard 另看 messages[start_idx..]）
   p = find_protected_turn_start() 返回的索引
 
   Layer 0 占位符替换：作用于 messages[..p] 中 role==Tool 且内容 >= 10K 的消息
@@ -353,11 +353,16 @@ fn usage_ratio(state: &ContextState) -> f64:
 | `max_output_tokens`                  | `usize`  | `128_000`   | 默认对齐 **GPT-5.4** 单轮最大输出；对齐 API 的 `max_tokens`                                                                                     |
 | `layer0_single_result_max_chars`     | `usize`  | `50_000`    | Layer 0 触发条件 A：单条 tool_result 超过此值则落盘 + preview 占位符                                                                               |
 | `layer0_placeholder_threshold_chars` | `usize`  | `10_000`    | Layer 0 触发条件 B：compactable zone 中 tool_result 超过此值则占位符替换                                                                          |
+| `keep_recent_turns`                  | `usize`  | `5`         | 历史 placeholder 压缩的保护区 turn 数；最近几轮先不动                                                                                               |
+| `current_tail_compactable_min_chars` | `usize`  | `1`         | 阶段二 mid-turn current-tail guard 的候选最小字符数                                                                                                |
+| `current_tail_single_result_max_chars` | `usize` | `10_000`    | 阶段二 mid-turn current-tail guard 的大结果落盘阈值                                                                                                |
 | `compaction_model`                   | `String` | `"gpt-5.4"` | Compaction 摘要专用模型 ID（与主对话 `model` 可相同或不同）                                                                                         |
 | `compaction_max_tokens`              | `usize`  | `10_000`    | Layer 1 异步预热生成摘要的 token 上限（预留）。当前**不设 API `max_tokens` 硬限制**以保证摘要语义完整性；仅在 prompt 中软引导 LLM 控制在 ~8K tokens 篇幅。未来若摘要频繁超标，可启用 API 硬限制 |
 
 
 > 配置位于 `tomcat.config.toml` 的 `[context]` 节，或通过 `PrimitiveConfig` 结构体注入。
+>
+> 阶段二新增的 mid-turn current-tail guard 发生在每次工具轮结束、下一次 `llm.chat_stream(...)` 之前。它优先复用历史摘要与历史 placeholder，再看 `messages[start_idx..]` 的 current tail；不要把它和下一 user turn 的 preheat / timing② 混成一件事。
 
 ### 4.4 典型值
 
@@ -569,7 +574,7 @@ init_context_state 处理流程：
 ```
 
 - `ContextState.turn_count()` 统计 `messages` 中满足 `is_turn_start()` 条件的消息数。
-- `find_protected_turn_start()` 从尾部倒数 5 个 turn start，返回保护区起始索引。
+- `find_protected_turn_start()` 从尾部倒数 `keep_recent_turns` 个 turn start，返回保护区起始索引。
 
 #### 发给 LLM 的完整链路
 
