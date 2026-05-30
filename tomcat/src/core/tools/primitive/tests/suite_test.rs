@@ -892,8 +892,10 @@ async fn require_user_confirmation_read_returns_true() {
 
 #[tokio::test]
 async fn require_user_confirmation_deny_returns_false() {
-    let mut cfg = PrimitiveConfig::default();
-    cfg.auto_confirm = false;
+    let cfg = PrimitiveConfig {
+        auto_confirm: false,
+        ..PrimitiveConfig::default()
+    };
     let exec = DefaultPrimitiveExecutor::new(
         cfg,
         Arc::new(DenyAllConfirmation),
@@ -1518,8 +1520,12 @@ async fn edit_secrets_hit_denied_reverts_to_no_op() {
     let dir = temp_edit_dir("tomcat_edit_secrets_deny");
     let f = dir.join("s.rs");
     std::fs::write(&f, "let x = 1;\n").unwrap();
+    let cfg = PrimitiveConfig {
+        auto_confirm: false,
+        ..temp_primitive_config(&dir)
+    };
     let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
+        cfg,
         // DenyAll：confirm 返回 false → SecretsRejected
         Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
@@ -1685,8 +1691,12 @@ async fn write_secrets_hit_denied_reverts_to_no_op() {
     let dir = temp_edit_dir("tomcat_write_secrets_deny");
     let f = dir.join("k.rs");
     let path_str = f.to_string_lossy().to_string();
+    let cfg = PrimitiveConfig {
+        auto_confirm: false,
+        ..temp_primitive_config(&dir)
+    };
     let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
+        cfg,
         Arc::new(DenyAllConfirmation),
         Arc::new(TracingAuditRecorder),
         make_gate(&dir),

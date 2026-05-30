@@ -110,6 +110,103 @@ async fn read_text_offset_limit_window_with_line_numbers() {
     .await;
 }
 
+#[tokio::test]
+async fn read_large_window_is_cut_at_post_read_budget_with_resume_hint() {
+    common::setup_logging();
+    async {
+        info!(
+            stage = "arrange",
+            "writing 40 oversized text rows to trigger 128KiB post-read budget"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let f = dir_path.join("budget.txt");
+        let body: String = (1..=40)
+            .map(|n| format!("L{:03}:{}\n", n, "a".repeat(4090)))
+            .collect();
+        std::fs::write(&f, &body).expect("write fixture");
+        let exec = make_executor(&dir_path);
+
+        info!(
+            stage = "act",
+            offset = 1u64,
+            limit = 40u64,
+            "invoking read on oversized logical window"
+        );
+        let text = unwrap_text(
+            exec.read(&f.to_string_lossy(), Some(1), Some(40), false, false, "p1")
+                .await
+                .expect("read should truncate instead of failing"),
+        );
+
+        info!(
+            stage = "assert",
+            "verifying budget truncation occurs at line boundary with resume hint"
+        );
+        assert!(
+            text.contains("L032:") && !text.contains("L033:"),
+            "post-read budget should stop before line 33, got tail: {:?}",
+            text.lines().rev().take(3).collect::<Vec<_>>()
+        );
+        let hint = text.lines().last().unwrap_or("");
+        assert!(
+            hint.contains("offset=33") && hint.contains("limit=40"),
+            "resume hint should preserve caller window, got: {:?}",
+            hint
+        );
+        assert!(
+            hint.contains("131072 bytes post-read budget"),
+            "hint should mention the post-read budget, got: {:?}",
+            hint
+        );
+    }
+    .instrument(info_span!(
+        "read_large_window_is_cut_at_post_read_budget_with_resume_hint"
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn read_first_returned_line_over_budget_returns_recoverable_error() {
+    common::setup_logging();
+    async {
+        info!(
+            stage = "arrange",
+            "writing fixture whose first returned line exceeds 128KiB"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().canonicalize().expect("canonicalize");
+        let f = dir_path.join("long-first-line.txt");
+        std::fs::write(&f, format!("{}\nsecond\n", "x".repeat(128 * 1024 + 1)))
+            .expect("write fixture");
+        let exec = make_executor(&dir_path);
+
+        info!(
+            stage = "act",
+            "invoking read expecting structured first-line-too-long error"
+        );
+        let err = exec
+            .read(&f.to_string_lossy(), Some(1), Some(2), false, false, "p1")
+            .await
+            .expect_err("oversized first line should return structured error");
+
+        info!(stage = "assert", err = %err, "checking recovery guidance");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("first returned line")
+                && msg.contains("offset")
+                && msg.contains("limit")
+                && msg.contains("128KiB"),
+            "structured error should explain how to shrink the read window, got: {}",
+            msg
+        );
+    }
+    .instrument(info_span!(
+        "read_first_returned_line_over_budget_returns_recoverable_error"
+    ))
+    .await;
+}
+
 // ─── 2. 二进制结构化提示（未知扩展，含 NUL）─────────────────────────────
 
 #[tokio::test]

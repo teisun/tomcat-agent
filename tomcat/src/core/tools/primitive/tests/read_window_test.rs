@@ -220,6 +220,68 @@ async fn read_with_offset_bypasses_max_bytes_check() {
     assert!(out.starts_with("entry-10\nentry-11\n"), "got: {:?}", out);
 }
 
+#[tokio::test]
+async fn read_applies_post_output_budget_guard_with_resume_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().canonicalize().unwrap();
+    let f = dir_path.join("budget.txt");
+    let body: String = (1..=40)
+        .map(|n| format!("L{:03}:{}\n", n, "a".repeat(4090)))
+        .collect();
+    std::fs::write(&f, &body).unwrap();
+
+    let exec = make_executor(&dir_path);
+    let result = exec
+        .read(&f.to_string_lossy(), Some(1), Some(40), false, false, "p1")
+        .await
+        .unwrap();
+    let (out, meta) = unwrap_text(result);
+
+    assert!(meta.truncated, "post-read budget must truncate oversized window");
+    assert_eq!(meta.num_lines, 32, "4096-byte rows should stop at line 32");
+    assert_eq!(
+        meta.remaining_lines, 0,
+        "budget guard should stop early instead of scanning full remaining window"
+    );
+    assert!(
+        out.contains("L032:") && !out.contains("L033:"),
+        "expected output to stop at line 32, got tail: {:?}",
+        out.lines().rev().take(3).collect::<Vec<_>>()
+    );
+    assert!(
+        out.contains("offset=33") && out.contains("limit=40"),
+        "resume hint should point at next unread line, got: {:?}",
+        out.lines().last()
+    );
+}
+
+#[tokio::test]
+async fn read_first_returned_line_over_budget_returns_structured_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().canonicalize().unwrap();
+    let f = dir_path.join("long-first-line.txt");
+    std::fs::write(&f, format!("{}\nsecond\n", "x".repeat(128 * 1024 + 1))).unwrap();
+
+    let exec = make_executor(&dir_path);
+    let err = exec
+        .read(&f.to_string_lossy(), Some(1), Some(2), false, false, "p1")
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+
+    assert!(matches!(err, AppError::Primitive(_)));
+    assert!(
+        msg.contains("first returned line") && msg.contains("offset") && msg.contains("limit"),
+        "error should explain how to shrink the window, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains("128KiB"),
+        "error should mention the 128KiB post-read budget, got: {}",
+        msg
+    );
+}
+
 // ─── PR-RF（T2-a）行号渲染 ─────────────────────────────────────────────────
 
 #[test]

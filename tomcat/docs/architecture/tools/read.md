@@ -30,10 +30,13 @@
 - [5. 协议（入参 / 出参 / Schema）](#5-协议入参--出参--schema)
 - [6. One-Glance Map（文件职责总览）](#6-one-glance-map文件职责总览)
 - [7. 调度时序（运行时图）](#7-调度时序运行时图)
+  - [7.4 Agent 整轮交互：LLM 调 read 与 128 KiB 护栏](#74-agent-整轮交互llm-调-read-与-128-kib-护栏)
+  - [7.5 read_impl 内部处理时序（后读预算）](#75-read_impl-内部处理时序后读预算)
 - [8. 状态机与会话表](#8-状态机与会话表)
 - [9. 配置与环境变量](#9-配置与环境变量)
 - [10. 错误模型 / 截断 / Stub](#10-错误模型--截断--stub)
 - [11. 测试矩阵（验收）](#11-测试矩阵验收)
+  - [11.1 测试分层（后读预算）](#111-测试分层后读预算)
 - [12. 风险与应对](#12-风险与应对)
 - [13. 历史决策（已被本方案取代）](#13-历史决策已被本方案取代)
 - [14. 关联文档](#14-关联文档)
@@ -106,12 +109,12 @@
 
 **一句话**：让模型在本地读盘时 **可控体量、可读错误、可续读、少重复刷屏**，并在改文件前有机会发现「磁盘已变」——而不是把整份大文件或裸二进制直接倒进上下文。
 
-**说人话（§3 总览）**：下面这张表钉死「读工具要守住的规矩」——对外只叫 `read`、默认分页和大文件门、乱码要说清楚、图走 API 允许的通道、同窗别反复灌全文、指纹留给写改前对表。
+**说人话（§3 总览）**：下面这张表钉死「读工具要守住的规矩」——对外只叫 `read`、默认分页和大文件门、单窗别胖到把上下文打穿、乱码要说清楚、图走 API 允许的通道、同窗别反复灌全文、指纹留给写改前对表。
 
 | 原则（可观察）            | 说明                                                                                                     | 说人话 |
 | ------------------ | ------------------------------------------------------------------------------------------------------ | ------ |
 | **单名对外**           | 内置 catalog 仅注册 `read`；`read_file` 得到与拼错名一致的**未知工具**类错误                                                 | 只认 `read` 这一个工具名。 |
-| **窗口可控**           | `offset`（1-based 行）+ `limit`（1..=10000，默认 2000）；截断时正文尾附带 `resume with offset=<next>, limit=<same>`     | 大文件先读一截，截断告诉你下一窗。 |
+| **窗口可控**           | `offset`（1-based 行）+ `limit`（1..=10000，默认 2000）；读取/格式化过程中累计最终输出体量，达到 **128 KiB 后读预算**后在完整行边界截断；正文尾附带 `resume with offset=<next>, limit=<same>` | 大文件先读一截；这一截自己也不能胖到把上下文顶穿。 |
 | **裸读有上限**          | 未传窗口时 `metadata().len()` 超过文本上限（默认 25 MiB）→ 结构化错误并提示分窗；**已传** `offset` 或 `limit` 时可绕过（允许只读大文件的一小段）     | 没窗别整锅端；有窗可以只窥一角。 |
 | **二进制可诊断**         | 非 UTF-8 文本路径 → `AppError::Tool`，文案含 first-byte 十六进制与可执行建议（如 `bash file`），避免裸 `invalid utf-8`           | 乱码给 hex 和运维 hint，别裸崩。 |
 | **行级可定位**          | 默认 `cat -n`（6 格右对齐行号 + Tab）；`hashline=true` 时为 `行号#双字符哈希:正文`（与 `line_numbers` 互斥，**hashline 优先**）      | 行号跟终端；要 edit 就开 hashline。 |
@@ -126,7 +129,7 @@
 | 目标            | 观察指标（落地后可核对）                                           | 说人话 |
 | ------------- | ------------------------------------------------------ | ------ |
 | G1 工具名统一      | catalog 仅 `read`；`read_file` → 未知工具错误                  | 老名当拼错处理。 |
-| G2 大文件可控      | `offset` + `limit`；截断带续读尾注                             | 分页 + 续读提示。 |
+| G2 大文件可控      | `offset` + `limit`；命中 128 KiB 后读预算时在完整行边界截断并带续读尾注 | 分页 + 续读提示，而且单窗自己也有体重上限。 |
 | G3 裸读有上限      | 无窗口超 `max_bytes` → 结构化错误；有窗口可绕过                        | 无窗挡整文件；有窗放行一角。 |
 | G4 二进制可诊断     | Tool 错误含 hex 与建议                                       | 非 UTF-8 要说人话报错。 |
 | G5 行级可定位      | `cat -n` 或 hashline 二选一渲染                              | 行号或指纹二选一渲染。 |
@@ -210,10 +213,11 @@
 
 **说人话**：模型只能调 `read`；`read_file` 当未知工具报错，避免双轨和审计分叉。
 
-#### 4.2.2 PR-RB（T1）：分页、二进制 hint、流式抽窗与裸读上限
+#### 4.2.2 PR-RB（T1）+ 阶段一加固：分页、二进制 hint、流式抽窗、后读预算与裸读上限
 
 - **`offset` / `limit`**：1-based 行窗口；截断时在正文尾附带续读提示（见 [§5](#5-协议入参--出参--schema)、[§10](#10-错误模型--截断--stub)）。
 - **流式与内存**：分块读盘 + `memchr` 找换行，**单循环**抽出窗口内行，避免先把整文件读进 `String` 再切行（wasm / 大文件友好）。
+- **后读预算护栏**：在读取/格式化过程中累计**最终渲染输出字节数**；达到 **128 KiB** 后就在完整行边界停止，并返回 `offset=<next>`。若首个返回行本身就超过预算，返回结构化错误要求缩小 `offset` / `limit`，而不是把超大单行直接塞进上下文。
 - **`[tools.read] max_bytes`**：默认 25 MiB；**仅当** primitive 入参里 **`offset` / `limit` 均未显式出现**（`has_window = offset.is_some() || limit.is_some()` 为假）时，在 metadata 阶段用 `len()` 拒绝过大文本路径；**显式传 `offset` 或 `limit` 之一**即可绕过，用于「只窥一角」读大文件。
 - **二进制 / 非 UTF-8**：返回结构化 `AppError::Tool`，带首字节 hex 与运维向建议，避免裸 `invalid utf-8` 污染模型上下文。
 
@@ -225,10 +229,13 @@
       │
       ├─ has_window=false 且 len > max_bytes ──▶ Tool Err（提示 offset/limit）
       │
-      └─ 否则 ──▶ 分块读 + memchr ──▶ 窗口内 UTF-8 文本 + 行号/hashline
+      └─ 否则 ──▶ 分块读 + memchr + 渲染字节累计
+                         │
+                         ├─ 首个返回行 > 128 KiB ──▶ Tool Err（提示缩小 offset/limit）
+                         └─ 达 128 KiB 且到完整行边界 ──▶ Ok(Text + offset=<next> 尾注)
 ```
 
-**说人话**：先量文件大小和有没有窗；太大又没窗就拒；否则流式扫行，不把整文件读进内存。
+**说人话**：先量文件大小和有没有窗；太大又没窗就拒；否则流式扫行，但扫到 128 KiB 这条线就得在整行边界停下，别让单个 read 自己长成大块头。
 
 #### 4.2.3 PR-RF（T2）：`cat -n`、会话表与 `FILE_UNCHANGED`
 
@@ -321,8 +328,8 @@ ReadResult
 │     • content      — 已带行号或 hashline、可能带截断尾注的最终字符串
 │     • start_line   — 窗口起始行号（1-based）
 │     • num_lines    — 本响应实际行数
-│     • truncated    — 是否因 limit 截断
-│     • remaining_lines — 截断时后面还剩多少行；未截断为 0
+│     • truncated    — 是否因 limit 或 128 KiB 后读预算被截断
+│     • remaining_lines — 仅 limit 截断时统计剩余行数；预算截断时为 0
 ├── Image(ReadBinaryResult)   — mime + size + path + filename（primitive 不 base64）
 ├── Pdf(ReadBinaryResult)     — 同上，mime 为 application/pdf
 └── FileUnchanged { path }    — 仅 tool_exec dedup 路径构造；primitive **不**产出此变体
@@ -386,6 +393,7 @@ ReadResult
 │  src/core/tools/primitive/executor/read.rs                                 │
 │  • read / read_file_impl：gate → metadata 上限 → 路由 Text|Image|Pdf       │
 │  • 文本：分块读 + memchr 找换行，单循环抽窗；UTF-8 校验；尾注；行号/hashline │
+│  • 后读预算：read_window_blocking 渐进累计 rendered_output_bytes（128 KiB） │
 │  • 二进制拒绝：结构化 Tool 错误                                             │
 └───────────────────────────────┬────────────────────────────────────────────┘
                                 │
@@ -459,6 +467,119 @@ sequenceDiagram
 
 **说人话**：edit 前先对表里指纹；磁盘变了就拦下来让你先 `read`，别按旧内容改。
 
+### 7.4 Agent 整轮交互：LLM 调 read 与 128 KiB 护栏
+
+说人话：用户发一句话后，Agent 先调 LLM；LLM 若决定 `read`，工具层会把结果截在 128 KiB 以内再塞回上下文，然后 LLM 继续生成——不会再出现「一次 read 塞 690KB 把整轮打爆」的旧路径。
+
+```text
+  User                api::chat              AgentLoop                 LLM Provider
+   │                      │                      │                          │
+   │  "帮我读这个大文件"   │                      │                          │
+   ├─────────────────────►│  AgentLoop::run()    │                          │
+   │                      ├─────────────────────►│                          │
+   │                      │                      │  run.rs                  │
+   │                      │                      │  ├─ Conversation Loop    │
+   │                      │                      │  └─ Attempt Loop         │
+   │                      │                      │       │                  │
+   │                      │                      │  reasoning_loop.rs       │
+   │                      │                      │  ├─ TurnStart            │
+   │                      │                      │  ├─ chat_stream ────────►│
+   │                      │                      │  │   stream_handler.rs    │
+   │                      │                      │  │   MessageStart/Update  │
+   │                      │                      │  │◄─ ContentDelta*       │
+   │                      │                      │  │◄─ ToolCallDelta(read) │
+   │                      │                      │  │◄─ FinishReason        │  ← 只记录，不 break
+   │                      │                      │  │◄─ Usage (trailing)     │  ← 继续吃完
+   │                      │                      │  │   MessageEnd             │
+   │                      │                      │  │   → StreamOutcome        │
+   │                      │                      │  │                        │
+   │                      │                      │  tool_dispatcher.rs       │
+   │                      │                      │  └─ run_tool_calls        │
+   │                      │                      │       │                  │
+   │                      │                      │  tool_exec/mod.rs         │
+   │                      │                      │  └─ branches/read.rs     │
+   │                      │                      │       │                  │
+   │                      │                      │  primitive/executor/      │
+   │                      │                      │  └─ read.rs::read_impl   │
+   │                      │                      │       │                  │
+   │                      │                      │       ├─ read_window_     │
+   │                      │                      │       │  blocking()      │
+   │                      │                      │       │  128KiB 边读边算   │
+   │                      │                      │       │  完整行边界截断    │
+   │                      │                      │       └─ ReadTextResult   │
+   │                      │                      │          ≤128KiB + hint    │
+   │                      │                      │                          │
+   │                      │                      │  messages += tool_result │
+   │                      │                      │  (单窗不再原样灌进上下文)  │
+   │                      │                      │                          │
+   │                      │                      │  下一轮 chat_stream ─────►│
+   │                      │                      │◄─ text-only 收束 ────────│
+   │                      │◄─────────────────────┤  turn_finalize.rs        │
+   │◄─────────────────────┤  回复用户             │                          │
+```
+
+**对应 `.rs` 文件地图（阶段一加固）**：
+
+```text
+src/core/agent_loop/
+├── run.rs                    ← 顶层 Conversation + Attempt 两层
+├── reasoning_loop.rs         ← 单 turn：调 stream → 调 tool → 收束
+├── stream_handler.rs         ← 流消费：FinishReason 不 break（见 llm-stream-events-cli-pipeline.md §5.4）
+├── types.rs                  ← StreamOutcome { finish_reason }
+├── tool_dispatcher.rs        ← 批量调度 tool_calls
+├── tool_exec/
+│   ├── mod.rs                ← execute_tool 路由
+│   └── branches/read.rs      ← read 分支 → PrimitiveExecutor
+└── tests/
+    └── stream_handler_test.rs ← finish_reason + trailing Usage 单测
+
+src/core/tools/primitive/
+├── executor/
+│   ├── mod.rs                ← DefaultPrimitiveExecutor::read()
+│   └── read.rs               ← read_impl + read_window_blocking + 128KiB
+├── types.rs                  ← ReadTextResult { truncated, remaining_lines }
+└── tests/
+    └── read_window_test.rs   ← 护栏单测（白盒）
+
+tests/
+└── read_tool_tests.rs        ← 护栏集成测（黑盒）
+```
+
+**说人话**：上面第一张图看「整轮怎么串」；第二张图是「改哪些文件」的索引，流尾细节跳 [`llm-stream-events-cli-pipeline.md`](../llm-stream-events-cli-pipeline.md) §5.4。
+
+### 7.5 read_impl 内部处理时序（后读预算）
+
+说人话：不是「整窗读完再称重」，而是扫每一行时就累加渲染字节，够了就在行边界切页；首行自己就过胖则直接结构化报错。
+
+```text
+read_impl (read.rs)
+  │
+  ├─ metadata 检查 (无 offset/limit 且 > max_bytes → 拒)
+  │
+  ├─ spawn_blocking ──► read_window_blocking()
+  │                         │
+  │    loop: read chunk ──► memchr 找 \n
+  │                         │
+  │    每行: rendered_line_len = 前缀(行号/hashline) + 行字节
+  │                         │
+  │    ┌─ 首行 rendered > 128KiB ──► FirstLineTooLong → Err(结构化)
+  │    │
+  │    ├─ 累计 rendered_output_bytes >= 128KiB
+  │    │     且已在完整行边界 ──► OutputBudget { next_offset }
+  │    │     且行未读完      ──► 先读完当前行再停
+  │    │
+  │    └─ window_lines >= limit ──► Limit { remaining_lines, next_offset }
+  │
+  ├─ 格式化: format_with_line_numbers / format_with_hashlines
+  │
+  └─ 拼尾注:
+       "... [output truncated at 131072 bytes post-read budget;
+            resume with offset=<next>, limit=<原limit>]"
+       或首行超限 Err: "Narrow offset/limit ..."
+```
+
+**说人话**：`read_window_blocking` 在 blocking 线程里边扫边算；`read_impl` 负责格式化与尾注拼装，对外仍是 `ReadResult::Text`。
+
 ---
 
 ## 8. 状态机与会话表
@@ -523,28 +644,57 @@ sequenceDiagram
                         │
         ┌───────────────┴───────────────┐
         ▼                               ▼
-  裸读超 max_bytes                 limit 截断
+  裸读超 max_bytes                 limit / post-read budget 截断
   AppError::Tool（提示 offset/limit）  Ok(Text{truncated=true, 尾注})
+        │
+        ├── 首个返回行 > 128 KiB
+        │    AppError::Tool（提示缩小 offset/limit）
         │
         ▼
   dedup 命中
   Ok(FileUnchanged) — 非错误
 ```
 
-**说人话**：真错误走 `AppError::Tool`（参数、权限、IO、非 UTF-8、裸读超门）；`limit` 截断是 **Ok** 带尾注；dedup 是 **Ok(FileUnchanged)**，别当失败重试。
+**说人话**：真错误走 `AppError::Tool`（参数、权限、IO、非 UTF-8、裸读超门、首个返回行超 128 KiB）；`limit` 和 128 KiB 预算截断都是 **Ok** 带尾注；dedup 是 **Ok(FileUnchanged)**，别当失败重试。
 
 ---
 
 ## 11. 测试矩阵（验收）
 
+### 11.1 测试分层（后读预算）
+
+说人话：流尾语义在 Agent Loop 文档里测；这里只画 `read` 128 KiB 护栏的分层——白盒钉内部字段，黑盒钉对外字符串，场景库做文档对齐。
+
+```text
+计划 §5.2 / 验收场景（read 护栏）
+        │
+        ├─ 大窗口在行边界切页 + offset=<next>
+        │     read_window_test.rs (白盒: meta.num_lines, remaining_lines==0)
+        │           │
+        │           └─ 同 fixture 镜像 ──► read_tool_tests.rs (黑盒: 字符串 + hint)
+        │
+        ├─ 首行 > 128KiB → 结构化可恢复错误
+        │     read_window_test.rs + read_tool_tests.rs
+        │
+        └─ E2E 场景库 E2E-CLI-021f / 021g ──► 映射到 read_tool_tests.rs
+```
+
+| 层级 | 测什么 | 为什么 | 主要文件 |
+|------|--------|--------|----------|
+| 单元（白盒） | `read_window_blocking` 截断语义、`ReadTextResult` 字段 | 快、可断言 `num_lines` / `remaining_lines` | `read_window_test.rs` |
+| 集成（黑盒） | `DefaultPrimitiveExecutor::read()` 对外协议 | 不依赖内部 enum | `tests/read_tool_tests.rs` |
+| E2E 场景库 | 用户故事级描述 | 与 `E2E_SCENARIO_LIBRARY.md` 对齐 | `E2E-CLI-021f` / `021g` |
+
+**已知缺口（阶段一可接受）**：尚无「mock LLM 调 read 大文件 → tool_result 字节数 < 128KiB」的全链路 Agent Loop 回放；`hashline=true` / `line_numbers=true` 下前缀计入预算尚无专项用例（实现已在 `rendered_line_len` 计入前缀）。
 
 | 维度             | 用例（实际函数名）                                                                                                                                                                                                                                                                                                                                                                                    | 状态           | 说人话 |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ------ |
 | 分页 / 尾注        | `read_window_test::read_offset_limit_returns_window`、`read_offset_beyond_eof_returns_empty`、`read_limit_truncates_with_resume_hint`、`read_with_offset_bypasses_max_bytes_check`                                                                                                                                                                                                              | ✅ 2026-05-05 | 窗、截断、续读提示、有窗绕过裸读门都锁住。 |
+| 后读预算护栏        | `read_window_test::read_applies_post_output_budget_guard_with_resume_hint`、`read_first_returned_line_over_budget_returns_structured_error`                                                                                                                                                                                                                                                     | ✅ 2026-05-30 | 单窗过胖会在工具层切页；首行自己就过胖时给可恢复错误。 |
 | 大文件 / 二进制 hint | `read_window_test::read_no_offset_large_file_rejected_with_hint`、`read_binary_returns_structured_hint`                                                                                                                                                                                                                                                                                       | ✅ 2026-05-05 | 巨文件无窗拒、二进制给结构化 hint。 |
 | 行号 / hashline  | `read_window_test::read_default_renders_cat_n_line_numbers`、`read_offset_window_uses_absolute_line_numbers`、`read_with_hashline_renders_hash_prefixed_lines`                                                                                                                                                                                                                                 | ✅ 2026-05-05 | 默认 cat-n、绝对行号、hashline 前缀。 |
 | 路由 Image/Pdf   | `read_window_test::read_routes_png_to_image_variant`、`read_routes_pdf_to_pdf_variant`、`read_unknown_extension_falls_back_to_text`、`read_oversize_image_rejected_at_metadata_stage`                                                                                                                                                                                                           | ✅ 2026-05-05 | 图/PDF 路由与 metadata 拒超大图。 |
-| 集成（黑盒）         | `tests/read_tool_tests.rs`：`read_text_offset_limit_window_with_line_numbers`、`read_binary_returns_structured_hint`、`read_hashline_renders_two_char_hash_prefix`、`read_png_routes_to_image_and_can_build_input_image_part`、`read_pdf_routes_to_pdf_and_can_build_input_file_part`、`read_oversize_image_rejected_before_loading_bytes`                                                         | ✅ 2026-05-05 | 端到端拼起来看整条 read 链。 |
+| 集成（黑盒）         | `tests/read_tool_tests.rs`：`read_text_offset_limit_window_with_line_numbers`、`read_large_window_is_cut_at_post_read_budget_with_resume_hint`、`read_first_returned_line_over_budget_returns_recoverable_error`、`read_binary_returns_structured_hint`、`read_hashline_renders_two_char_hash_prefix`、`read_png_routes_to_image_and_can_build_input_image_part`、`read_pdf_routes_to_pdf_and_can_build_input_file_part`、`read_oversize_image_rejected_before_loading_bytes` | ✅ 2026-05-30 | 端到端看分页、预算护栏、结构化错误和多模态路由都能一起站住。 |
 | tool_exec 参数   | `submodules_test::tool_exec_read_returns_content`、`tool_exec_legacy_read_file_returns_unknown_tool_error`、`tool_exec_read_offset_zero_returns_bound_error`、`tool_exec_read_limit_over_max_returns_bound_error`                                                                                                                                                                               | ✅ 2026-05-05 | 调度层参数与老名未知工具语义。 |
 | dedup / 注入     | `tool_exec_dedup_test::tool_exec_read_second_call_returns_unchanged_stub`、`tool_exec_read_after_mtime_bump_refetches`、`tool_exec_read_partial_then_full_does_not_dedup`、`tool_exec_read_different_window_does_not_dedup`、`tool_exec_read_state_clear_resets_dedup`、`tool_exec_image_result_injects_into_next_user_message_parts`、`tool_exec_pdf_result_injects_into_next_user_message_parts` | ✅ 2026-05-05 | stub、mtime 刷新、窗不等价、清表、图/PDF 注入 user。 |
 | helper 签名      | `src/core/llm/tests/types_test.rs` 中 `image_b64` / `file_b64`                                                                                                                                                                                                                                                                                                                                | ✅ 2026-05-05 | helper 限长与白名单不回归。 |
@@ -586,6 +736,7 @@ sequenceDiagram
 ## 14. 关联文档
 
 - 兄弟工具：[search_files.md](search_files.md) · [bash.md](bash.md)
+- 流尾语义（FinishReason / trailing Usage）：[../llm-stream-events-cli-pipeline.md](../llm-stream-events-cli-pipeline.md) §5.4
 - 权限：[../permission-system.md](../permission-system.md)
 - 派生工具目录：[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)
 - 结构标杆：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13**（本文节号与之对齐）。

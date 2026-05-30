@@ -22,8 +22,10 @@
   - 原独立章 **§6 CLI 显示（报告 §2.2）**、**§7 Thinking 折叠（报告 §2.7）** 已并入 **§4.2.3 / §4.2.4**。
 - [5. 协议（入参 / 出参 / Schema）](#5-协议入参--出参--schema)
   - [5.3 Thinking 端到端与 Responses 字段解析（ASCII）](#53-thinking-端到端与-responses-字段解析ascii)
+  - [5.4 流尾语义：FinishReason 与 trailing Usage（阶段一）](#54-流尾语义finishreason-与-trailing-usage阶段一)
 - [6. One-Glance Map（文件职责总览）](#6-one-glance-map文件职责总览)
 - [7. 调度时序（运行时图）](#7-调度时序运行时图)
+  - [7.1 流消费时序：改前 vs 改后（ASCII）](#71-流消费时序改前-vs-改后ascii)
 - [8. 状态机](#8-状态机)
 - [9. 配置与环境变量](#9-配置与环境变量)
 - [10. 错误模型 / 截断 / 警告](#10-错误模型--截断--警告)
@@ -510,6 +512,62 @@ P1 StreamEvent::Thinking
 
 > 与 openclaw 等「先 `output_item.added` 建块再 delta/done 填」的状态机不同，本仓 **以「每条 SSE 尽量独立抽出 delta」为主**；多条 `Thinking` 事件在 UI 侧顺序拼接即完整思考区。
 
+### 5.4 流尾语义：FinishReason 与 trailing Usage（阶段一）
+
+> 关联：空响应整改阶段一（[`read.md`](tools/read.md) §7.4 整轮交互图）；实现：`agent_loop/stream_handler.rs`、`agent_loop/types.rs`。
+
+Responses 流里 **`FinishReason` 可能早于 trailing `Usage` 到达**。阶段一修正：**收到 `FinishReason` 只记录终局语义，不提前 `break`**，继续消费流尾直到自然结束，保证 `finish_reason` 与 `last_api_usage` 同时保住。
+
+#### 5.4.1 典型事件顺序
+
+```text
+LLM stream 事件顺序（Responses API 常见）:
+  ContentDelta ──► ContentDelta ──► ToolCallDelta ──► FinishReason ──► Usage ──► (stream end)
+```
+
+#### 5.4.2 改前 vs 改后（stream_handler.rs）
+
+```text
+┌─ 改前 stream_handler.rs ─────────────────────────────────────────────┐
+│  ContentDelta  → 累积 content_buf, 发 MessageUpdate                 │
+│  ToolCallDelta   → 累积 tool_calls_buf                               │
+│  FinishReason    → break  ◄── 提前下车                                │
+│  Usage           → ✗ 可能永远读不到                                  │
+│  return StreamOutcome { finish_reason: 无, last_api_usage: 可能 stale }│
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ 改后 stream_handler.rs ─────────────────────────────────────────────┐
+│  ContentDelta    → 累积 + MessageUpdate                               │
+│  ToolCallDelta   → 累积                                               │
+│  FinishReason    → finish_reason = Some(reason)  // 只记，不 break    │
+│  Usage           → ctx_state.update_api_usage(...)  // 尾巴仍更新     │
+│  stream None     → break                                              │
+│  MessageEnd      → 配对 UI                                            │
+│  return StreamOutcome {                                               │
+│      content_buf, tool_calls_buf,                                     │
+│      finish_reason: Some("stop"|"tool_calls"|...),                    │
+│      aborted: false                                                   │
+│  }                                                                    │
+└──────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  reasoning_loop.rs
+  解构 outcome → 若有 tool_calls → tool_dispatcher → tool_exec
+  若无 tool_calls → turn_finalize → Ok(final_text)
+  (阶段一 finish_reason 暂存为 _finish_reason，供阶段二消费)
+```
+
+**说人话**：旧逻辑一看到「结束原因」就提前收工，后面的用量可能漏记；新逻辑是「先记下为什么停，再把尾巴吃完」。
+
+#### 5.4.3 对应 `.rs` 文件
+
+| 文件 | 职责 |
+|------|------|
+| `src/core/agent_loop/types.rs` | `StreamOutcome { finish_reason: Option<String>, ... }` |
+| `src/core/agent_loop/stream_handler.rs` | 消费 `StreamEvent`，`FinishReason` 不 break |
+| `src/core/agent_loop/reasoning_loop.rs` | 解构 `StreamOutcome`，调度 tool / 收束 |
+| `src/core/agent_loop/tests/stream_handler_test.rs` | mock 流：`FinishReason` 后仍更新 `last_api_usage` |
+
 ---
 
 ## 6. One-Glance Map（文件职责总览）
@@ -530,8 +588,14 @@ P1 StreamEvent::Thinking
        └──────────┬─────────────┘
                   ▼
 ┌──────────────────────────────────────┐
+│ agent_loop/types.rs                 │
+│ StreamOutcome { finish_reason, ... } │  ← 阶段一：流尾终局语义载体
+└──────────────────┬───────────────────┘
+                   ▼
+┌──────────────────────────────────────┐
 │ agent_loop/stream_handler.rs        │
 │ 统一消费 StreamEvent → AgentEvent     │
+│ FinishReason 不 break；继续吃 Usage   │  ← 阶段一修正点
 └──────────────────┬───────────────────┘
                    │ EventBus
                    ▼
@@ -549,6 +613,32 @@ P1 StreamEvent::Thinking
 ---
 
 ## 7. 调度时序（运行时图）
+
+### 7.1 流消费时序：改前 vs 改后（ASCII）
+
+说人话：下面这张图是 §5.4 在「一轮 run 里」的时序视角；Mermaid 全链路见本节末尾。
+
+```text
+reasoning_loop.rs                    stream_handler.rs              LLM Provider
+        │                                    │                            │
+        │  run_chat_stream(agent, req)       │                            │
+        ├───────────────────────────────────►│  chat_stream(req) ────────►│
+        │                                    │◄─ ContentDelta* ───────────│
+        │                                    │◄─ ToolCallDelta* ──────────│
+        │                                    │◄─ FinishReason ────────────│  只记 reason
+        │                                    │◄─ Usage (trailing) ────────│  继续消费
+        │                                    │  MessageEnd                │
+        │◄─ StreamOutcome {                  │                            │
+        │      finish_reason,                │                            │
+        │      content_buf,                  │                            │
+        │      tool_calls_buf                │                            │
+        │    }                               │                            │
+        │                                    │                            │
+        ├─ tool_calls 非空 ──► tool_dispatcher / tool_exec                 │
+        └─ tool_calls 空   ──► turn_finalize → Ok(final_text)            │
+```
+
+**说人话**：`reasoning_loop` 只负责「何时调 stream、拿到 outcome 后走 tool 还是收束」；流尾不漏读发生在 `stream_handler` 的 match 循环里。
 
 ```mermaid
 sequenceDiagram
@@ -653,6 +743,7 @@ tool 失败结果为纯字符串
 | 集成 | `openai_responses_integration_tests::test_openai_responses_chat_stream_reasoning_emits_thinking` | ✅ | 真实 `/v1/responses` 回归，防止“有流无 thinking”漏测。 |
 | 集成 | `openai_responses_integration_tests::...latest_user_language_behavior..._opt_in` | opt-in | 语言行为观测开关：`TOMCAT_E2E_LANGUAGE_BEHAVIOR=1`（兼容旧开关）。 |
 | 单元 | `events_order_test` / `stream_handler`：thinking + content 交错顺序 | ✅ | 顺序不能乱。 |
+| 单元 | `stream_handler_test::run_chat_stream_preserves_finish_reason_and_trailing_usage` | ✅ 2026-05-30 | FinishReason 后 trailing Usage 仍更新 last_api_usage。 |
 | 单元 | `cli_turn_renderer/tests`：折叠模式只一行 + tool 样式 | ✅ | 方案 D 与工具行样式已覆盖。 |
 | 单元 | `cli_turn_renderer/tests::tool_end_failure_with_string_result_shows_real_error_message` | ✅ | 工具失败时展示真实错误，不再只显示 `failed`。 |
 | 单元 | `primitive/tests/suite_test::read_file_missing_path_returns_not_found_error` | ✅ | `read` 不存在路径语义有明确断言。 |

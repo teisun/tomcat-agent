@@ -31,10 +31,10 @@ use super::types::{AgentLoop, LoopError, StreamOutcome, ToolCallAccumulator};
 /// ## 事件时序保证
 ///
 /// - 建连**之前**不发 `Message*`；若 `cancel_token` 在建连 await 阶段触发，
-///   返回 `Ok(StreamOutcome { aborted: true, content_buf: "", tool_calls_buf: [] })`，
+///   返回 `Ok(StreamOutcome { aborted: true, content_buf: "", tool_calls_buf: [], finish_reason: None })`，
 ///   **不发** `MessageStart` / `MessageEnd`（因 UI 从未看到消息开始）。
 /// - 建连成功后发 `MessageStart`；以下 3 条 return 路径前**必发** `MessageEnd`：
-///   1. 正常收敛（`FinishReason` 或 stream 返回 `None`）
+///   1. 正常收敛（记录 `FinishReason` 后继续消费 trailing `Usage`，或 stream 返回 `None`）
 ///   2. Stream item `Err(AppError)` → `Err(classify_error(...))`
 ///   3. Cancel 触发（`aborted_during_stream = true` break 后发 `MessageEnd`）
 /// - `MessageUpdate` 仅在 `StreamEvent::ContentDelta` 分支发射，`delta` 字段等于
@@ -67,6 +67,7 @@ pub(super) async fn run_chat_stream(
                 return Ok(StreamOutcome {
                     content_buf: String::new(),
                     tool_calls_buf: Vec::new(),
+                    finish_reason: None,
                     aborted: true,
                 });
             }
@@ -92,6 +93,7 @@ pub(super) async fn run_chat_stream(
 
     let mut content_buf = String::new();
     let mut tool_calls_buf: Vec<ToolCallAccumulator> = Vec::new();
+    let mut finish_reason: Option<String> = None;
     let mut aborted_during_stream = false;
 
     agent.emit_event(AgentEvent::MessageStart {
@@ -166,7 +168,11 @@ pub(super) async fn run_chat_stream(
                     acc.arguments.push_str(&args);
                 }
             }
-            Ok(StreamEvent::FinishReason { .. }) => break,
+            Ok(StreamEvent::FinishReason { reason }) => {
+                // Responses 流里 `FinishReason` 可能早于 trailing `Usage` 到达；
+                // 这里只记录终局语义，不提前 break，继续把流尾账目吃完。
+                finish_reason = Some(reason);
+            }
             Ok(StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
@@ -203,6 +209,7 @@ pub(super) async fn run_chat_stream(
     Ok(StreamOutcome {
         content_buf,
         tool_calls_buf,
+        finish_reason,
         aborted: aborted_during_stream,
     })
 }

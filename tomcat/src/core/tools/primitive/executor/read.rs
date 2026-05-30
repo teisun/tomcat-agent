@@ -28,6 +28,33 @@ const READ_CHUNK_BYTES: usize = 64 * 1024;
 /// PR-RB（T1）默认 limit（行数），与 cc-fork `MAX_LINES_TO_READ` 对齐。
 const READ_DEFAULT_LIMIT_LINES: u64 = 2000;
 
+/// 空响应整改阶段一：`read` 文本路径的后读预算护栏。
+///
+/// 与 metadata 阶段的 `read_max_bytes` 不同，这一条限制的是**最终渲染回模型的文本体量**：
+/// 在分块读 + 行级拼装过程中累计输出字节，达到 128 KiB 后就在完整行边界停下，
+/// 并返回 `offset=<next>` 续读提示，避免单个 `read` 窗口直接把上下文顶爆。
+const READ_POST_OUTPUT_BUDGET_BYTES: usize = 128 * 1024;
+
+fn rendered_prefix_len(line_no: u64, line_numbers: bool, hashline: bool) -> usize {
+    let width = std::cmp::max(6, line_no.to_string().len());
+    if hashline {
+        width + 4 // "#{2-char}:"
+    } else if line_numbers {
+        width + 1 // "\t"
+    } else {
+        0
+    }
+}
+
+fn rendered_line_len(
+    line_no: u64,
+    raw_line_bytes: usize,
+    line_numbers: bool,
+    hashline: bool,
+) -> usize {
+    rendered_prefix_len(line_no, line_numbers, hashline) + raw_line_bytes
+}
+
 /// PR-RJ（T3-b）`read` 工具的 mime 路由：扩展名 + 头几字节 magic 双重校验。
 ///
 /// 仅返回 image / PDF 两类「需要走 inline content part 通道」的 mime；
@@ -181,17 +208,34 @@ enum ReadWindowOutcome {
     Text {
         /// 窗口字节（已包含每行尾部 `\n`，最后一行若无换行也保留原样）。
         window: Vec<u8>,
-        /// 是否因达到 `limit` 行被截断（`true` → 调用方应附续读 hint）。
-        truncated: bool,
-        /// 截断后**剩余的行数**（仅在 `truncated == true` 时有意义）。
-        ///
-        /// 计算方式：在收齐窗口后**继续扫换行符**到 EOF，但**不**缓存内容——
-        /// 仅 `memchr` 计数，零额外字符串分配。
-        remaining_lines: u64,
+        /// 窗口内实际写入的文本行数（不含尾注）。
+        num_lines: u64,
+        /// 截断信息：可能来自 `limit`，也可能来自 128 KiB 后读预算。
+        truncation: Option<ReadWindowTruncation>,
     },
     Binary {
         /// 触发判定的字节十六进制（如 `"89"` 提示 PNG，`"25"` 提示 PDF）。
         first_byte_hex: String,
+    },
+    FirstLineTooLong {
+        /// 触发护栏的首个返回行号（即 `offset` 对应的首行）。
+        line_no: u64,
+        /// 该行渲染后的字节数（已计入行号 / hashline 前缀）。
+        rendered_bytes: usize,
+        /// 允许的后读预算上限。
+        budget_bytes: usize,
+    },
+}
+
+enum ReadWindowTruncation {
+    /// 命中 `limit`：继续扫到 EOF，仅计数剩余行数。
+    Limit {
+        remaining_lines: u64,
+        next_offset: u64,
+    },
+    /// 命中 128 KiB 后读预算：在完整行边界提前停止，不再读完整个请求窗口。
+    OutputBudget {
+        next_offset: u64,
     },
 }
 
@@ -212,6 +256,9 @@ fn read_window_blocking(
     path: &Path,
     start_line: u64,
     limit_lines: u64,
+    line_numbers: bool,
+    hashline: bool,
+    output_budget_bytes: usize,
 ) -> Result<ReadWindowOutcome, AppError> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(AppError::Io)?;
@@ -220,13 +267,25 @@ fn read_window_blocking(
     let mut leftover: Vec<u8> = Vec::new();
     let mut current_line: u64 = 1;
     let mut window_lines: u64 = 0;
+    let mut rendered_output_bytes: usize = 0;
     let end_line_exclusive = start_line.saturating_add(limit_lines);
-    let mut truncated = false;
+    let mut limit_truncated = false;
     let mut remaining_lines: u64 = 0;
+    let mut budget_next_offset: Option<u64> = None;
     let mut first_chunk = true;
 
     loop {
         let n = file.read(&mut buf).map_err(AppError::Io)?;
+        if let Some(next_offset) = budget_next_offset {
+            if n == 0 {
+                break;
+            }
+            return Ok(ReadWindowOutcome::Text {
+                window,
+                num_lines: window_lines,
+                truncation: Some(ReadWindowTruncation::OutputBudget { next_offset }),
+            });
+        }
         if n == 0 {
             break;
         }
@@ -245,52 +304,113 @@ fn read_window_blocking(
             let line_slice = &chunk[last_consumed..=nl];
             last_consumed = nl + 1;
 
-            if truncated {
+            if limit_truncated {
                 remaining_lines = remaining_lines.saturating_add(1);
+                current_line = current_line.saturating_add(1);
                 continue;
             }
 
-            if current_line >= start_line && current_line < end_line_exclusive {
+            let within_window = current_line >= start_line && current_line < end_line_exclusive;
+            if within_window {
+                let raw_line_bytes = leftover.len() + line_slice.len();
+                let rendered_line_bytes =
+                    rendered_line_len(current_line, raw_line_bytes, line_numbers, hashline);
+                if window_lines == 0 && rendered_line_bytes > output_budget_bytes {
+                    return Ok(ReadWindowOutcome::FirstLineTooLong {
+                        line_no: current_line,
+                        rendered_bytes: rendered_line_bytes,
+                        budget_bytes: output_budget_bytes,
+                    });
+                }
                 if !leftover.is_empty() {
                     window.extend_from_slice(&leftover);
                     leftover.clear();
                 }
                 window.extend_from_slice(line_slice);
                 window_lines = window_lines.saturating_add(1);
+                rendered_output_bytes =
+                    rendered_output_bytes.saturating_add(rendered_line_bytes);
             } else if !leftover.is_empty() {
                 leftover.clear();
             }
 
             current_line = current_line.saturating_add(1);
 
-            if window_lines >= limit_lines && !truncated {
-                truncated = true;
+            if within_window && rendered_output_bytes >= output_budget_bytes {
+                if last_consumed < chunk.len() {
+                    return Ok(ReadWindowOutcome::Text {
+                        window,
+                        num_lines: window_lines,
+                        truncation: Some(ReadWindowTruncation::OutputBudget {
+                            next_offset: current_line,
+                        }),
+                    });
+                }
+                budget_next_offset = Some(current_line);
+                break;
+            }
+
+            if window_lines >= limit_lines && !limit_truncated {
+                limit_truncated = true;
             }
         }
 
+        if budget_next_offset.is_some() {
+            continue;
+        }
+
         let tail = &chunk[last_consumed..];
-        if !tail.is_empty() {
-            if truncated {
-            } else if current_line >= start_line && current_line < end_line_exclusive {
-                leftover.extend_from_slice(tail);
+        if !tail.is_empty()
+            && current_line >= start_line
+            && current_line < end_line_exclusive
+            && !limit_truncated
+        {
+            leftover.extend_from_slice(tail);
+            if window_lines == 0 {
+                let rendered_line_bytes =
+                    rendered_line_len(current_line, leftover.len(), line_numbers, hashline);
+                if rendered_line_bytes > output_budget_bytes {
+                    return Ok(ReadWindowOutcome::FirstLineTooLong {
+                        line_no: current_line,
+                        rendered_bytes: rendered_line_bytes,
+                        budget_bytes: output_budget_bytes,
+                    });
+                }
             }
         }
     }
 
     if !leftover.is_empty()
-        && !truncated
+        && !limit_truncated
         && current_line >= start_line
         && current_line < end_line_exclusive
     {
+        let rendered_line_bytes =
+            rendered_line_len(current_line, leftover.len(), line_numbers, hashline);
+        if window_lines == 0 && rendered_line_bytes > output_budget_bytes {
+            return Ok(ReadWindowOutcome::FirstLineTooLong {
+                line_no: current_line,
+                rendered_bytes: rendered_line_bytes,
+                budget_bytes: output_budget_bytes,
+            });
+        }
         window.extend_from_slice(&leftover);
-        // Trailing line without `\n` is preserved as-is in `window`; we don't
-        // bump `window_lines` here because no further branch reads it after EOF.
+        window_lines = window_lines.saturating_add(1);
     }
+
+    let truncation = if limit_truncated {
+        Some(ReadWindowTruncation::Limit {
+            remaining_lines,
+            next_offset: start_line.saturating_add(limit_lines),
+        })
+    } else {
+        None
+    };
 
     Ok(ReadWindowOutcome::Text {
         window,
-        truncated,
-        remaining_lines,
+        num_lines: window_lines,
+        truncation,
     })
 }
 
@@ -432,7 +552,14 @@ pub(super) async fn read_impl(
 
     let path_clone = path_buf.clone();
     let read_outcome = tokio::task::spawn_blocking(move || {
-        read_window_blocking(&path_clone, start_line, limit_lines)
+        read_window_blocking(
+            &path_clone,
+            start_line,
+            limit_lines,
+            line_numbers,
+            hashline,
+            READ_POST_OUTPUT_BUDGET_BYTES,
+        )
     })
     .await
     .map_err(|e| AppError::Primitive(format!("read join error: {}", e)))??;
@@ -440,8 +567,8 @@ pub(super) async fn read_impl(
     let text = match read_outcome {
         ReadWindowOutcome::Text {
             window,
-            truncated,
-            remaining_lines,
+            num_lines,
+            truncation,
         } => {
             let body = String::from_utf8(window).map_err(|e| {
                 AppError::Primitive(format!(
@@ -458,24 +585,39 @@ pub(super) async fn read_impl(
             } else {
                 body
             };
-            let num_lines = s.lines().count() as u64;
-            if truncated {
-                if !s.ends_with('\n') {
-                    s.push('\n');
+            let (truncated, remaining_lines) = match truncation {
+                Some(ReadWindowTruncation::Limit {
+                    remaining_lines,
+                    next_offset,
+                }) => {
+                    if !s.ends_with('\n') {
+                        s.push('\n');
+                    }
+                    if remaining_lines > 0 {
+                        s.push_str(&format!(
+                            "... [{} more lines truncated; resume with offset={}, limit={}]\n",
+                            remaining_lines, next_offset, limit_lines
+                        ));
+                    } else {
+                        s.push_str(&format!(
+                            "... [more lines truncated; resume with offset={}, limit={}]\n",
+                            next_offset, limit_lines
+                        ));
+                    }
+                    (true, remaining_lines)
                 }
-                let next_offset = start_line.saturating_add(limit_lines);
-                if remaining_lines > 0 {
+                Some(ReadWindowTruncation::OutputBudget { next_offset }) => {
+                    if !s.ends_with('\n') {
+                        s.push('\n');
+                    }
                     s.push_str(&format!(
-                        "... [{} more lines truncated; resume with offset={}, limit={}]\n",
-                        remaining_lines, next_offset, limit_lines
+                        "... [output truncated at {} bytes post-read budget; resume with offset={}, limit={}]\n",
+                        READ_POST_OUTPUT_BUDGET_BYTES, next_offset, limit_lines
                     ));
-                } else {
-                    s.push_str(&format!(
-                        "... [more lines truncated; resume with offset={}, limit={}]\n",
-                        next_offset, limit_lines
-                    ));
+                    (true, 0)
                 }
-            }
+                None => (false, 0),
+            };
             ReadTextResult {
                 content: s,
                 start_line,
@@ -488,6 +630,16 @@ pub(super) async fn read_impl(
             return Err(AppError::Primitive(format!(
                 "File is binary or non-UTF-8 (detected: 0x{first}). • try `bash file <path>` to inspect the type; • multimodal image/PDF will be supported in a later read upgrade (T3, docs/architecture/tools/read.md §4.1).",
                 first = first_byte_hex
+            )));
+        }
+        ReadWindowOutcome::FirstLineTooLong {
+            line_no,
+            rendered_bytes,
+            budget_bytes,
+        } => {
+            return Err(AppError::Primitive(format!(
+                "The first returned line (line {}) exceeds the post-read budget ({} bytes > {} bytes = 128KiB). Narrow the window with a smaller `offset`/`limit` so the first returned line is shorter.",
+                line_no, rendered_bytes, budget_bytes
             )));
         }
     };

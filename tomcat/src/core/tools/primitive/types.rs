@@ -283,9 +283,10 @@ pub struct ReadTextResult {
     pub start_line: u64,
     /// 实际返回的行数（≤ `limit`）。
     pub num_lines: u64,
-    /// 是否做了截断（达到 `limit` 但文件还有剩余行）。
+    /// 是否做了截断（达到 `limit`，或命中后读预算护栏）。
     pub truncated: bool,
     /// 截断时的剩余行数（`!truncated` 时为 0）。
+    /// 命中后读预算护栏时，执行器会提前停止，不再扫完整个请求窗口，因此这里为 0。
     pub remaining_lines: u64,
 }
 

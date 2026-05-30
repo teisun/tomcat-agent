@@ -79,11 +79,16 @@ pub(super) async fn run_reasoning_loop(
         // 整块委托给 stream_handler::run_chat_stream；aborted / Err 路径均已
         // 先发 MessageEnd，调用方仅需补 partial assistant 落盘与 make_aborted。
         let outcome = stream_handler::run_chat_stream(agent, req).await?;
-        let content_buf = outcome.content_buf;
+        let super::types::StreamOutcome {
+            content_buf,
+            tool_calls_buf,
+            finish_reason: _finish_reason,
+            aborted,
+        } = outcome;
 
         // stream 被取消：把 partial content_buf 作为 partial assistant 落到 messages，
         // 让 ctx_state 也把它计入消息预算；再返回 Aborted 携带 partial。
-        if outcome.aborted {
+        if aborted {
             if !content_buf.is_empty() {
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.on_message_appended(content_buf.len());
@@ -96,8 +101,7 @@ pub(super) async fn run_reasoning_loop(
 
         final_text.push_str(&content_buf);
 
-        let tool_calls: Vec<ToolCallInfo> = outcome
-            .tool_calls_buf
+        let tool_calls: Vec<ToolCallInfo> = tool_calls_buf
             .into_iter()
             .filter(|tc| !tc.name.is_empty())
             .map(|tc| ToolCallInfo {
