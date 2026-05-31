@@ -19,8 +19,8 @@ use tomcat::core::plan_runtime::file_store::{
 };
 use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::PlanRuntime;
-use tomcat::core::session::{PlanEventKind, PlanEventRef};
 use tomcat::core::session::transcript::append_entry;
+use tomcat::core::session::{PlanEventKind, PlanEventRef};
 use tomcat::core::tools::contract::catalog::builtin_tool_by_name;
 use tomcat::core::tools::plan_tool::update_plan::{self, UpdatePlanArgs};
 use tomcat::{
@@ -56,8 +56,7 @@ fn real_llm_config() -> LlmConfig {
 }
 
 fn real_llm() -> Arc<dyn tomcat::LlmProvider> {
-    resolve_llm(&real_llm_config())
-        .expect("resolve_llm 失败：请检查 OPENAI_API_KEY / OpenAI 配置")
+    resolve_llm(&real_llm_config()).expect("resolve_llm 失败：请检查 OPENAI_API_KEY / OpenAI 配置")
 }
 
 struct HomeGuard {
@@ -307,7 +306,9 @@ fn parse_update_plan_args_from_message(assistant: &ChatMessage) -> Result<Update
         .iter()
         .find(|call| call["function"]["name"].as_str() == Some("update_plan"))
     else {
-        return Err(format!("missing update_plan tool call; tool_calls={tool_calls:?}"));
+        return Err(format!(
+            "missing update_plan tool call; tool_calls={tool_calls:?}"
+        ));
     };
     let Some(raw_args) = tool_call["function"]["arguments"].as_str() else {
         return Err(format!("missing arguments string; tool_call={tool_call:?}"));
@@ -341,7 +342,8 @@ fn assert_update_plan_targets_current_and_next(args: &UpdatePlanArgs, fixture: &
         args.ops
     );
     assert!(
-        args.plan_id.as_deref().is_none() || args.plan_id.as_deref() == Some(fixture.plan_id.as_str()),
+        args.plan_id.as_deref().is_none()
+            || args.plan_id.as_deref() == Some(fixture.plan_id.as_str()),
         "plan_id 应为空（走 active plan）或显式指向当前 plan，实际={:?}",
         args.plan_id
     );
@@ -410,18 +412,24 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
     .await
     .expect("构建 collapse summary artifacts 失败");
 
-    assert_eq!(artifacts.summary_message.kind, MessageKind::CompactionSummary);
-    assert!(artifacts.summary_text.starts_with("## Structured Summary\n"));
-    assert!(artifacts.summary_text.contains("\n\n## Execution Keepalive\n"));
+    assert_eq!(
+        artifacts.summary_message.kind,
+        MessageKind::CompactionSummary
+    );
+    assert!(artifacts
+        .summary_text
+        .starts_with("## Structured Summary\n"));
+    assert!(artifacts
+        .summary_text
+        .contains("\n\n## Execution Keepalive\n"));
     assert!(artifacts.summary_text.contains("- mode: executing"));
     assert!(artifacts.summary_text.contains(&format!(
         "- active_plan_path: {}",
         fixture.plan_path.display()
     )));
-    assert!(artifacts.summary_text.contains(&format!(
-        "- current_step: {}",
-        fixture.active_content
-    )));
+    assert!(artifacts
+        .summary_text
+        .contains(&format!("- current_step: {}", fixture.active_content)));
     assert!(artifacts.summary_text.contains(&fixture.next_content));
     assert!(artifacts.summary_text.contains(&format!(
         "latest_plan_event: build:{}:{}",
@@ -432,7 +440,10 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
         tomcat::TranscriptEntry::BranchSummary(entry) => {
             assert_eq!(entry.covered_start_id.as_deref(), Some("m1"));
             assert_eq!(entry.covered_end_id.as_deref(), Some("m2"));
-            assert_eq!(entry.summary.as_deref(), Some(artifacts.summary_text.as_str()));
+            assert_eq!(
+                entry.summary.as_deref(),
+                Some(artifacts.summary_text.as_str())
+            );
         }
         other => panic!("期望 branch_summary entry，实际={other:?}"),
     }
@@ -456,7 +467,8 @@ async fn real_llm_reads_keepalive_and_calls_update_plan() {
     .await
     .expect("A 产物构建失败");
 
-    let args = request_update_plan_args(&llm, vec![artifacts.summary_message.clone()], &fixture).await;
+    let args =
+        request_update_plan_args(&llm, vec![artifacts.summary_message.clone()], &fixture).await;
     assert_update_plan_targets_current_and_next(&args, &fixture);
     let result = execute_update_plan_and_assert(&fixture, args).await;
     assert_eq!(result["plan_id"].as_str(), Some(fixture.plan_id.as_str()));
@@ -477,9 +489,9 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
 
     let mut working = make_working_messages(&fixture);
     for msg in &mut working {
-        let row_id =
-            mgr.append_message(serde_json::to_value(&*msg).expect("序列化 transcript message 失败"))
-                .expect("append_message 失败");
+        let row_id = mgr
+            .append_message(serde_json::to_value(&*msg).expect("序列化 transcript message 失败"))
+            .expect("append_message 失败");
         msg.msg_id = Some(row_id);
     }
     mgr.append_custom_entry(serde_json::json!({
@@ -503,7 +515,8 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
         .current_transcript_path()
         .expect("读取当前 transcript path 失败")
         .expect("当前 transcript path 不存在");
-    append_entry(&transcript_path, &artifacts.transcript_entry).expect("append branch_summary 失败");
+    append_entry(&transcript_path, &artifacts.transcript_entry)
+        .expect("append branch_summary 失败");
 
     let state = init_context_state(&mgr, &ContextConfig::default(), "keepalive reload sys")
         .expect("init_context_state(reload) 失败");

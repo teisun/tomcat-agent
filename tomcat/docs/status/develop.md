@@ -1,6 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-31 18:00 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-05-31 18:30 +0800 | ACTIVE | develop | — |
+
+### 2026-05-31 | style(agent): current-tail guard fmt 残留收口
+
+- **动机**：`fix(plan)` 提交时 `current_tail_guard.rs`、`agent_loop/mod.rs`、`current_tail_guard_real_llm_tests.rs` 的 `cargo fmt` 差异刻意未纳入；本 commit 单独收口，避免 develop 工作树长期带 fmt 噪音。
+- **范围**：仅 import 排序与断行格式化，无行为变更；`cc-fork-01` 子模块 dirty 与无关 untracked 目录不纳入。
 
 ### 2026-05-31 | fix(plan): 放宽 `/plan build` 运行态闸门
 

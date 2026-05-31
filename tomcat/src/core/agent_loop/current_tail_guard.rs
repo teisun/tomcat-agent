@@ -11,8 +11,8 @@ use crate::core::compaction::{
     TOOL_RESULT_PLACEHOLDER,
 };
 use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, MessageKind};
-use crate::core::plan_runtime::PlanRuntime;
 use crate::core::plan_runtime::file_store::{read_plan, TodoItem, TodoStatus};
+use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
     generate_entry_id, CompactionResult, ContextState, PlanEventRef,
@@ -589,13 +589,11 @@ async fn collapse_to_branch_summary(
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(());
     };
-    if let Err(err) =
-        maybe_write_collapse_entry(
-            &ctx_state.transcript_path,
-            &artifacts.covered_end_id,
-            &artifacts.transcript_entry,
-        )
-    {
+    if let Err(err) = maybe_write_collapse_entry(
+        &ctx_state.transcript_path,
+        &artifacts.covered_end_id,
+        &artifacts.transcript_entry,
+    ) {
         warn!(error = %err, "collapse branch_summary transcript write failed");
     }
 
