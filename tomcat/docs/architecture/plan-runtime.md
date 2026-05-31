@@ -173,7 +173,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 |------|--------------------------|--------|
 | **G1 本地 `/plan` 命令族闭环** | `tomcat chat` 识别 `/plan`、`/plan exit`、`/plan build <plan_id/path>`；这些命令**不**进入 LLM transcript 作为普通 user 文本；进入 PLAN/EXEC 模式后注入对应 `<system_reminder>` 与 catalog 切换 | `/plan` 像 `/restore` 一样先在 chat 层吃掉。 |
 | **G2 `todos` 一等状态** | 内置 `todos` 工具可读写完整 todo 列表；同一文件最多一个 `in_progress`；tool、panel、文件三者同步；**工具结果返回完整 items snapshot**，LLM 不需要再读 user message 拿状态 | todos 是结构化状态，且 LLM 拿到工具结果就知道全貌。 |
-| **G3 `/plan build` 是 EXEC 唯一入口** | reviewer accepted 不自动 build；用户敲 `/plan build <plan_id/path>` 才进 EXEC；build 前置：当前 session 无 active plan / no active todos | 进执行态由用户拍。 |
+| **G3 `/plan build` 是 EXEC 唯一入口** | reviewer accepted 不自动 build；用户敲 `/plan build <plan_id/path>` 才进 EXEC；build 前置：当前 session 不能处于 `Executing`；若是 `Pending`，默认续跑当前盘，但也允许显式切到另一份 `planning/pending` plan；若仅有 session scratchpad todos 未收口则 warning 后继续 | 进执行态由用户拍。 |
 | **G4 review 是辅助不是闸门** | `CreatePlan` 写入后内部同步派发 reviewer；reviewer 摘要落 `transcript.plan.review`；**不**写 PlanFile frontmatter、**不**改 mode | 审稿员只挑刺。 |
 | **G5 计划文件可恢复** | 每次计划变更刷新 `~/.tomcat/plans/<slug>_<hash>.plan.md`；advisory file lock 冲突时有可见错误；`state == pending` 可被 `/plan build` 续跑；详细协议见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | 重启之后还能接着看，pending 还能续跑。 |
 | **G6 checkpoint 单向依赖** | milestone 完成时调用 `CheckpointStore::record`；checkpoint 语义仍由 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 定义 | 计划会用 checkpoint，但不重新发明 checkpoint。 |
@@ -224,7 +224,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 |--------|----------------------|--------------------------|------------------|--------|
 | **PR-PLA 命令面与 PLAN/EXEC 模式骨架** | `/plan` / `/plan exit` / `/plan build <plan_id/path>` 本地命令；`PlanMode` / `PlanRuntime` per-session 对象；进入 PLAN/EXEC 时注入对应 `<system_reminder>` 到 system 区段、CLI prompt 统一走 helper；help 文案；详见 [`tools/planner.md`](./tools/planner.md) | `src/api/chat/commands/{parse.rs,cmd_help.rs,cmd_plan.rs}`、`src/api/chat/plan_runtime/{mod.rs,mode.rs}`、`src/api/chat/prompt.rs`、`src/api/chat/mod.rs` | 见 §11：`parse_plan_commands`、`plan_enter_injects_planner_reminder_into_system`、`prompt_helper_renders_plan_modes` | 先把命令族、PLAN/EXEC 模式与 prompt 渲染搭起来。 |
 | **PR-PLB `todos` / `update_plan` / `CreatePlan` / `AskQuestion` 工具与计划文件** | built-in `todos`（任何模式可见，写 TodoFile）；[`update_plan`](./tools/update-plan.md)（任何模式可见，写 PlanFile.frontmatter todos/milestones）；`CreatePlan`（详见 [`tools/create-plan.md`](./tools/create-plan.md)）；`AskQuestion`（详见 [`tools/ask-question.md`](./tools/ask-question.md)）；`TodoRuntime` / `PlanRuntime` 内部状态机 | `src/core/tools/contract/catalog.rs`、`src/core/agent_loop/tool_exec.rs`、`src/api/chat/plan_runtime/{file_store.rs,session_todos_store.rs,plan_todos_store.rs,mod.rs}`、`src/api/chat/plan_runtime/tools/{create_plan.rs,update_plan.rs,ask_question.rs,todos.rs}` | 见 §11：`todos_returns_full_items_snapshot`、`update_plan_visible_in_all_modes`、`plan_file_round_trip_frontmatter`、`create_plan_only_visible_in_planning_mode`（PENDING） | 四个工具落地，状态机串通。 |
-| **PR-PLC reviewer 内部派发 + `/plan build` build gate** | `CreatePlan` 写入后内部派发 reviewer；reviewer 摘要落 transcript `plan.review`（**不**写 frontmatter、**不**做 gate）；`/plan build` 闸门：前置 `当前 session 无 active plan && 无 active todos`；详见 [`tools/reviewer.md`](./tools/reviewer.md) | `src/api/chat/plan_runtime/review.rs`、`src/core/agent_loop/dispatch.rs`、`src/api/chat/plan_runtime/tools/create_plan.rs`、`src/api/chat/commands/cmd_plan.rs` | 见 §11：`create_plan_internally_dispatches_reviewer`、`plan_build_requires_no_active_plan_or_todos`、`reviewer_summary_lands_in_transcript_not_frontmatter`（PENDING） | reviewer 仅辅助；build gate 只看运行态。 |
+| **PR-PLC reviewer 内部派发 + `/plan build` build gate** | `CreatePlan` 写入后内部派发 reviewer；reviewer 摘要落 transcript `plan.review`（**不**写 frontmatter、**不**做 gate）；`/plan build` 闸门：前置 `当前 session` 不能处于 `Executing`，`Pending` 默认续跑当前盘但允许显式切别盘，active scratchpad todos 仅 warning；详见 [`tools/reviewer.md`](./tools/reviewer.md) | `src/api/chat/plan_runtime/review.rs`、`src/core/agent_loop/dispatch.rs`、`src/api/chat/plan_runtime/tools/create_plan.rs`、`src/api/chat/commands/cmd_plan.rs` | 见 §11：`create_plan_internally_dispatches_reviewer`、`plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan`、`pending_session_can_build_another_explicit_plan`、`reviewer_summary_lands_in_transcript_not_frontmatter`（PENDING） | reviewer 仅辅助；build gate 只看运行态。 |
 | **PR-PLD TodosPanel 与 bash 输出** | 待办面板、bash `task_id` 摘要投影；TodosPanel 协议详见 [`tools/todos.md`](./tools/todos.md) §7 | `src/api/chat/plan_runtime/panel.rs`、`src/api/chat/mod.rs`、复用 `bash_task_registry` | 见 §11：`todos_panel_reflects_bash_task_status`、`todos_tool_updates_panel_and_file`（PENDING） | TodosPanel 只做投影。 |
 | **PR-PLE 里程碑拆分与 checkpoint hook** | `Milestone[]`；milestone 完成自动 `record(Milestone{...})`；mode 派生：全 completed → `mode = completed` | `src/api/chat/plan_runtime/checkpoint.rs`、`src/core/checkpoint/store.rs`（只读） | 见 §11：`milestone_completion_can_record_checkpoint`、`all_todos_completed_promotes_mode_completed`（PENDING） | 里程碑收口才打 checkpoint。 |
 | **PR-PLF raw write/edit 拦截 + cancel_token 续跑** | PLAN 期 `write/edit` 路径白名单；frontmatter diff 硬拒；EXEC 期被 cancel_token 截断 → 写 `state = pending`，`/plan build` 续跑 | `src/api/chat/plan_runtime/tool_exec.rs`、`src/api/chat/plan_runtime/mod.rs`（cancel hook） | 见 §11：`plan_mode_raw_edit_body_allowed_frontmatter_rejected`、`cancel_token_demotes_executing_to_pending`、`pending_plan_resumable_via_build`（PENDING） | 写盘硬拦截 + cancel 续跑。 |
@@ -298,7 +298,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 - **派发入口**：reviewer **不**作为 LLM 工具暴露；由 `CreatePlan` 工具内部调用 `internal subagent dispatch` API（`AgentRegistry::spawn_subagent_internal(...)`）。
 - **subagent 隔离**：reviewer 起一个 `AgentLoop` 子任务，注入专属 `SubagentContext { system_prompt, allowed_tools, transcript=fresh, parent_session_id, token_budget }`；`allowed_tools` 由 internal dispatch 路径**硬编码**为 `{read, grep, find, todos}`（默认）或 `{read, grep, find, todos, update_plan, edit}`（当 runtime 配 `allow_review_edit=true`）；**永不**含 `create_plan`（防套娃）；**禁止**调 `bash` / `write` / `dispatch_agent` / `checkpoint`。
 - **reviewer 输出契约**：reviewer 最终消息含 `summary:` 自由文本（≤600 字符），可选用 `update_plan` 修订 frontmatter `todos[]`、或用 `edit` 改 plan 正文；**无 verdict 字段**；runtime 把摘要与修改说明写入 `transcript.plan.review` 事件，**不**回写 `.plan.md` 中的审稿块，也**不**改 `mode`。
-- **`/plan build` 闸门**：仅当 `当前 session 无 active plan && 无 active todos` 且 `指定的 PlanFile.state ∈ {planning, pending}` 才允许迁移到 `Executing`；按 `[plan] auto_checkpoint_on_build`（默认 false）决定是否 `CheckpointStore::record(Manual{label=format!("plan_build:{plan_id}")})`。
+- **`/plan build` 闸门**：仅当 `当前 session` 不处于 `Executing`，且 `指定的 PlanFile.state ∈ {planning, pending}` 时才允许迁移到 `Executing`；若当前 session 仍有 scratchpad todos（`session_todos` 中 pending/in_progress），则打印 warning 但不阻塞 build。`Pending` 默认续跑当前盘，但用户显式给 target 时可切到另一份 plan；`Completed` 也不再阻止显式切到另一份 plan。按 `[plan] auto_checkpoint_on_build`（默认 false）决定是否 `CheckpointStore::record(Manual{label=format!("plan_build:{plan_id}")})`。
 - **build 时 runtime 动作**（5 件事）：
   1. 写 `PlanFile.frontmatter.session_key = 当前 session_key`、`session_id = 当前 session_id`（pending 续跑覆盖旧值，warning）；
   2. 写 `PlanFile.frontmatter.state = executing`；
@@ -432,7 +432,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 |------|------|------|----------|--------|
 | `/plan` | 无 | **进入 PLAN 模式**；注入 PLANNER `<system_reminder>` 到 system 区段尾部；catalog 切到全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单；CLI prompt 切为 `u[Plan:planning]>` / `agent.<id>[Plan:planning]>` | 已在 PLAN/EXEC → 本地拒绝并提示先 `/plan exit` | 先切到规划模式，再继续讨论目标。 |
 | `/plan exit` | 无 | **仅 PLAN 模式可用**；退出 PLAN 模式回到 `Chat`；保留 `PlanFile` 不动（不写盘、不改 mode）；reminder/catalog/prompt 复位为 CHAT | `mode != Planning` → 友好提示「`/plan exit` 仅在 PLAN 模式可用；如需中止执行请等待 `cancel_token` 或终止进程」 | 中途退出规划，文件留着。 |
-| `/plan build <plan_id/path>` | 必填 plan 目标（plan_id 或 path） | **进入 EXEC 模式**（唯一入口）：前置 `当前 session 无 active plan && 无 active todos` 且指定 PlanFile `state ∈ {planning, pending}`；执行 5 件事：① 写 frontmatter `session_key/session_id`（pending 续跑覆盖旧值，warning）；② 写 `state = executing`；③ swap reminder（PLANNER → EXECUTOR，注入 system 区段尾部）；④ CLI prompt 切到 `u[Plan:executing]>` / `agent.<id>[Plan:executing]>`；⑤ catalog swap（PLAN/CHAT → EXEC：全工具集 + `todos` + `update_plan` − `create_plan`）；可选 `record(Manual{plan_build:plan_id})` | 当前 session 已有 active plan / active todos → 拒绝；目标 PlanFile state 不合规 → 拒绝 | 用户拍板开干。 |
+| `/plan build <plan_id/path>` | 必填 plan 目标（plan_id 或 path） | **进入 EXEC 模式**（唯一入口）：前置 `当前 session` 不能处于 `Executing`，且指定 PlanFile `state ∈ {planning, pending}`；若当前 session 仍有 scratchpad todos，则 warning 后继续；若当前 session 是 `Pending`，无参默认仍续跑当前盘，显式 target 则可切到另一份 plan；执行 5 件事：① 写 frontmatter `session_key/session_id`（pending 续跑覆盖旧值，warning）；② 写 `state = executing`；③ swap reminder（PLANNER → EXECUTOR，注入 system 区段尾部）；④ CLI prompt 切到 `u[Plan:executing]>` / `agent.<id>[Plan:executing]>`；⑤ catalog swap（PLAN/CHAT → EXEC：全工具集 + `todos` + `update_plan` − `create_plan`）；可选 `record(Manual{plan_build:plan_id})` | 当前 session 已在 `Executing` → 拒绝；目标 PlanFile state 不合规 → 拒绝 | 用户拍板开干。 |
 
 > **历史命令下线**：
 > - `/plan apply` 改名 `/plan build <plan_id/path>`：apply 字面不够直观，且需要承载更多动作。
@@ -1022,9 +1022,11 @@ EXEC 中：
 | `Executing` | `update_plan` 提交后所有 todo `= completed`（target 是本 session 的 active plan） | `Completed` | 同一把锁内自动写 frontmatter `state=completed`；reminder/catalog/prompt 复位 CHAT；写 `plan.complete` 事件；可选 milestone checkpoint | 做完了。 |
 | `Executing` | cancel_token / SIGTERM / parent abort | `Pending` | 写 frontmatter `state=pending`；reminder/catalog/prompt 复位 CHAT；写 `plan.pending` 事件 | 被打断转 pending。 |
 | `Completed` | 用户开新 plan | `Planning` | 与 `Chat → Planning` 同 | 开下一盘。 |
-| `Pending` | `/plan build <plan_id/path>` | `Executing` | 续跑流程 | 续跑。 |
+| `Completed` | `/plan build <other_plan_id/path>` | `Executing` | 允许显式切到另一份 `planning/pending` plan；沿用 build 的 5 件事；不改变无参默认目标解析 | 从刚完成的一盘直接切到另一盘。 |
+| `Pending` | `/plan build`（无参或显式指向当前 pending plan） | `Executing` | 续跑流程 | 续跑。 |
+| `Pending` | `/plan build <other_plan_id/path>` | `Executing` | 允许显式切到另一份 `planning/pending` plan；不改变无参默认目标解析；旧 plan 保持磁盘 `pending` | 从被打断的一盘直接切到另一盘。 |
 
-**说人话**：状态机只有 5 档，没有 ready_to_apply、cancelled。`Completed` / `Pending` 都是终态/暂存态，不会自动再变；要继续干，要么 `/plan build` 续跑（pending），要么开新 plan（completed）。
+**说人话**：状态机只有 5 档，没有 ready_to_apply、cancelled。`Pending` 默认还是靠 `/plan build` 续跑当前盘，但用户也可以显式 `/plan build <other_plan_id/path>` 切到另一份 plan；`Completed` 平时会立即收口回 Chat(retain)，也允许显式切到另一份 planning/pending plan。
 
 ---
 
@@ -1074,7 +1076,8 @@ EXEC 中：
 |------|------------|--------|
 | `/plan` 参数不合法 | 本地 `UsageError`，不进入 LLM | 命令写错就当场报。 |
 | `/plan exit` 在 `mode != Planning` 触发 | 本地友好提示「`/plan exit` 仅在 PLAN 模式可用；如需中止执行请等待 cancel_token 或终止进程」 | exit 不当 close 用。 |
-| `/plan build` 当前 session 有 active plan / active todos | 本地 UsageError | 不允许两份计划同时跑。 |
+| `/plan build` 当前 session 已在 `Executing` | 本地 UsageError | 不允许两份计划同时跑。 |
+| `/plan build` 当前 session 仍有 scratchpad todos | warning 后继续 build | 提醒收口个人 scratchpad，但不拦目标 plan。 |
 | `/plan build` 目标 PlanFile `mode ∉ {planning, pending}` | 本地 UsageError | 已 executing / completed 不能再 build。 |
 | 计划文件锁冲突 | 本地错误；保持旧状态不变 | 有人正在写，就别偷偷覆盖。 |
 | reviewer 异常退出 | tool error 携带 reviewer stderr 摘要；`PlanFile` 保留；mode 仍 planning | 审稿员挂了不影响计划文件。 |
@@ -1104,7 +1107,7 @@ EXEC 中：
 | 单元：todos 单进行中约束 | `todos_state_enforces_single_in_progress`（待新增） | PENDING | 两个进行中要被硬拒绝。 |
 | 单元：计划文件 round-trip | `plan_file_round_trip_frontmatter`（待新增） | PENDING | 字段不能丢。 |
 | 单元：文件锁 | `plan_file_lock_is_exclusive`（待新增） | PENDING | 并发写必须能挡住。 |
-| 单元：build gate | `plan_build_requires_no_active_plan_or_todos`（待新增） | PENDING | 当前 session 有占用就拒。 |
+| 单元：build gate | `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan` | DONE | 冲突运行态继续拒绝；scratchpad todos 仅 warning；`Completed` 可显式切新盘。 |
 | 单元：reviewer 摘要不写 frontmatter | `reviewer_summary_lands_in_transcript_not_frontmatter`（待新增） | PENDING | review 落 transcript 不入 YAML。 |
 | 单元：reviewer 不做 verdict gate | `create_plan_does_not_mutate_mode`（待新增） | PENDING | create_plan 不改 mode。 |
 | 单元：recover executing 降级 | `recover_executing_demotes_to_pending`（待新增） | PENDING | 重启视为 cancel。 |

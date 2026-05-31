@@ -913,10 +913,12 @@ impl PlanRuntime {
     /// `/plan build <plan_id/path>` 入口；执行 plan-runtime §5.1 的 5 件事 + 原子回滚。
     ///
     /// **闸门**（任一不通过 → `BuildBlocked`）：
-    /// - 当前内存 mode ∈ `{Chat, Planning}`（已 Executing/Pending/Completed 拒）
-    /// - 当前 session 无 active todos（`session_todos` 全 completed/cancelled 或空）
-    /// - 当前 session 无 active plan_id 占用（mode 不是 Executing/Pending 即可，
-    ///   Planning 期 active_planning_plan_id 与目标 plan_id 相同时不算冲突）
+    /// - 当前内存 mode 不能是 `Executing`；`Chat` / `Planning` / `Pending` / `Completed`
+    ///   允许继续检查目标盘
+    /// - 当前 session 的 active scratchpad todos（`session_todos` 中 pending/in_progress）
+    ///   仅 warning，不阻塞 build
+    /// - `/plan build` 无参时仍由 `default_build_target()` 优先命中当前 `Pending { id }`；
+    ///   显式 target 则可切到另一份 `planning/pending` plan
     /// - 目标 PlanFile 必须存在（不存在 → `BuildPlanNotFound` / `BuildPlanPathNotFound`，附友好提示）
     /// - PlanFile.frontmatter.state ∈ `{planning, pending}`（executing/completed 拒）
     ///
@@ -937,22 +939,16 @@ impl PlanRuntime {
         session_id: Option<String>,
     ) -> Result<BuildPlanOutcome, PlanRuntimeError> {
         let (path, requested_plan_id) = self.resolve_build_target(plan_id_or_path)?;
-        // ─── 闸门 2：active todos ──────────────────────────────────────
-        {
+        // ─── 预检：active scratchpad todos（仅 warning，不阻塞 build） ───────
+        let has_active_session_todos = {
             let session_todos = self.session_todos.lock();
-            let has_active = session_todos.iter().any(|t| {
+            session_todos.iter().any(|t| {
                 matches!(
                     t.status,
                     file_store::TodoStatus::Pending | file_store::TodoStatus::InProgress
                 )
-            });
-            if has_active {
-                return Err(PlanRuntimeError::BuildBlocked(
-                    "当前 session 有未完成 todos；先收口（todos remove / set completed）后再 build"
-                        .into(),
-                ));
-            }
-        }
+            })
+        };
 
         struct BuildCommit {
             plan_id: String,
@@ -969,23 +965,13 @@ impl PlanRuntime {
             {
                 let mode = self.mode.read();
                 match &*mode {
-                    PlanState::Chat | PlanState::Planning => { /* 允许 */ }
-                    PlanState::Pending { plan_id: cur } if cur == &plan_id => {
-                        // N3（2026-05）：Pending 的本盘可直接续跑 build。
-                    }
+                    PlanState::Chat
+                    | PlanState::Planning
+                    | PlanState::Pending { .. }
+                    | PlanState::Completed { .. } => { /* 允许 */ }
                     PlanState::Executing { plan_id: cur } => {
                         return Err(PlanRuntimeError::BuildBlocked(format!(
                             "当前 session 已在 EXEC（plan_id={cur}）；先等结束或 cancel→pending"
-                        )));
-                    }
-                    PlanState::Pending { plan_id: cur } => {
-                        return Err(PlanRuntimeError::BuildBlocked(format!(
-                            "当前 session 有 pending plan {cur}；先续跑本盘或 /restore 切别盘"
-                        )));
-                    }
-                    PlanState::Completed { plan_id: cur } => {
-                        return Err(PlanRuntimeError::BuildBlocked(format!(
-                            "当前 session 已 completed plan {cur}；新计划请先 /restore 或 /plan"
                         )));
                     }
                 }
@@ -1054,6 +1040,12 @@ impl PlanRuntime {
 
         let plan_id = build.plan_id.clone();
         let mut warnings = build.warnings;
+        if has_active_session_todos {
+            warnings.push(
+                "当前 session 仍有未完成 scratchpad todos；本次继续 build，不影响目标 PlanFile，建议稍后收口"
+                    .into(),
+            );
+        }
         let prev_disk_state = build.prev_disk_state;
         // 4: 切内存（写盘成功后才动）
         *self.mode.write() = PlanState::Executing {
@@ -1269,7 +1261,7 @@ pub enum PlanRuntimeError {
     /// PlanFile 文件 IO / serde 错误（P2 起细化）。
     #[error("plan io: {0}")]
     Io(String),
-    /// `/plan build` 闸门未通过（active todos / active plan / disk mode 不合规等）。
+    /// `/plan build` 闸门未通过（运行态冲突 / disk mode 不合规等）。
     #[error("/plan build 闸门未通过：{0}")]
     BuildBlocked(String),
     /// `/plan build` 指定 plan_id 不存在；`hint` 给出友好引导（"先 create_plan"）。

@@ -125,7 +125,7 @@
 | G2 | 进入即注入对应 `<system_reminder>` 到 **system 区段尾部**，且 catalog 切到对应集合 | `plan_enter_injects_planner_reminder_into_system`、`exec_enter_injects_executor_reminder` | 进模式就注提示词、收紧工具。 |
 | G3 | `current_mode()` 是单一事实源，UI / catalog / tool_exec / prompt helper / reminder 一致引用 | `current_mode_is_single_source_of_truth` | 模式只问 runtime 一处。 |
 | G4 | `/plan exit` 只负责 `Planning / Pending -> Chat`，立即解除当前交互态回 CHAT，下一轮装配不再含对应 reminder/prefix | `plan_exit_restores_chat_only_from_planning` | exit 不当 close 用。 |
-| G5 | `/plan build` 是 EXEC 唯一入口；前置 `当前 session 无 active plan && 无 active todos`；目标 PlanFile `mode ∈ {planning, pending}` | `plan_build_gate_checks_no_active_and_plan_mode` | 用户拍板，工具不替。 |
+| G5 | `/plan build` 是 EXEC 唯一入口；前置 `当前 session` 不能处于 `Executing`；若是 `Pending`，默认续跑当前盘，但也允许显式切到另一份 `planning/pending` plan；若仅有 scratchpad todos 未收口则 warning 后继续；目标 PlanFile `mode ∈ {planning, pending}` | `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan`、`pending_session_can_build_another_explicit_plan` | 用户拍板，工具不替。 |
 | G6 | mode 自动派生：全 todos completed → `Completed`；cancel_token → `Pending` | `all_completed_promotes_completed`、`cancel_token_demotes_pending` | 不靠 close 命令，状态自然演化。 |
 | G7 | UI 状态行反映 mode：`[CHAT]` / `[PLAN]` / `[EXEC plan_id=…]` / `[DONE plan_id=…]` / `[PENDING plan_id=…]` | `ui_shows_correct_mode_indicator` | 状态行要能看出在哪个模式。 |
 | G8 | PLAN/EXEC 模式下 user message 装配阶段加模式前缀；不污染 transcript | `user_message_prefix_only_in_assembly`、`transcript_unchanged_by_prefix` | 每条贴 tag，但不动聊天记录。 |
@@ -164,7 +164,7 @@
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | **PM-A** | `/plan` 本地命令族 + `cmd_plan.rs`；`parse.rs` 识别；**交付**：`ChatCommand::Plan` | `src/api/chat/commands/{parse.rs,cmd_plan.rs}`、`cmd_help.rs` | 见 §12：`parse_plan_commands`、`plan_enter_rejects_while_active` | slash 不进 LLM，本地先吃掉。 |
-| **PM-B** | `PlanRuntime` API + per-session 实例（详见 [`plan-runtime.md`](../plan-runtime.md) §6）；`enter/exit/build` API；**交付**：`PlanState` / `PlanRuntime` | `src/api/chat/plan_runtime/{mod.rs,state.rs}` | 见 §12：`current_mode_is_single_source_of_truth`、`plan_build_gate_checks_no_active_and_plan_mode` | 模式状态一处存。 |
+| **PM-B** | `PlanRuntime` API + per-session 实例（详见 [`plan-runtime.md`](../plan-runtime.md) §6）；`enter/exit/build` API；**交付**：`PlanState` / `PlanRuntime` | `src/api/chat/plan_runtime/{mod.rs,state.rs}` | 见 §12：`current_mode_is_single_source_of_truth`、`plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan` | 模式状态一处存。 |
 | **PM-C** | `PLANNER_SYSTEM_REMINDER` / `EXECUTOR_SYSTEM_REMINDER` 注入 system 区段尾部 + 退出时移除；稳定 transcript 恢复链路只依赖 `plan.build` 与 plan 工具事件；**交付**：常量 + transcript 挂接 | `src/api/chat/plan_runtime/catalog.rs`（拟定）、`src/infra/transcript/...` | 见 §12：`plan_enter_injects_planner_reminder_into_system`、`exec_enter_injects_executor_reminder` | reminder 上线/下线挂在 mode。 |
 | **PM-D** | `visible_tools_for_mode` + `tool_exec` 二次校验；PLAN 模式 `write/edit` 路径白名单；frontmatter raw 改硬拦截（详见 [`create-plan.md`](./create-plan.md) §8）；**交付**：白名单常量 | `src/api/chat/plan_runtime/catalog.rs`、`src/core/agent_loop/tool_exec.rs` | 见 §12：`catalog_visible_set_by_current_mode`、`plan_mode_raw_edit_body_allowed_frontmatter_rejected` | catalog 裁一遍，调工具再拦一遍，写盘再拦一遍。 |
 | **PM-E** | UI 模式指示器 + `current_mode()` 公开；prompt 统一 helper 渲染；**交付**：状态行文案 + prompt helper | UI 层 + `src/api/chat/prompt.rs` | 见 §12：`ui_shows_correct_mode_indicator`、`prompt_helper_renders_plan_modes` | 状态行 / prompt 收口合一。 |
@@ -174,7 +174,7 @@
 #### 4.2.1 PM-A：slash 命令面
 
 - **交付**：`parse_command` 匹配 `/plan` 子命令（`/plan` / `exit` / `build <plan_id>`）；`dispatch_chat_command` **优先**消费，不进入 LLM user 文本（对齐 `/ckpt`）。
-- **重入**：`enter_plan_mode` 前检查 `mode ∈ {Planning, Executing}` → `UsageError`；`build_plan` 前检查 `当前 session 无 active plan / active todos` → `UsageError`。
+- **重入**：`enter_plan_mode` 前检查 `mode ∈ {Planning, Executing}` → `UsageError`；`build_plan` 前检查 `当前 session` 不得处于 `Executing`；若当前是 `Pending`，无参默认续跑当前盘，显式 target 则允许切到别盘；scratchpad todos 仅 warning。
 
 ```text
   user input
@@ -233,7 +233,7 @@
 |------|--------|--------|----------|--------|
 | `/plan` | 本地 chat 命令解析（不入 LLM） | `mode = Planning`，注入 PLANNER reminder 到 system 区段尾部，catalog 切到 PLAN 集（含写盘路径白名单 `~/.tomcat/plans/*.plan.md`），prompt 切 `u[Plan:planning]>` | 当前 session 不在 `Planning / Executing` | 进 PLAN 模式。 |
 | `/plan exit` | 本地 | `mode = Chat`；保留 PlanFile 不动（不写盘、不改 frontmatter）；reminder/catalog/prompt 复位 CHAT；**不写事件** | `mode ∈ {Planning, Pending}` 可用；其他状态友好提示 | 不要这次规划了，回到 CHAT。 |
-| `/plan build <plan_id/path>` | 本地 | runtime 5 件事（详见 [`plan-runtime.md`](../plan-runtime.md) §5.1）：① 写 `frontmatter.session_key/session_id`；② `frontmatter.state = executing`；③ swap reminder PLANNER→EXECUTOR；④ prompt 切 `u[Plan:executing]>` / `agent.<id>[Plan:executing]>`；⑤ catalog 切 EXEC 集 | `当前 session 无 active plan && 无 active todos`；指定的 PlanFile `state ∈ {planning, pending}` | 把审过 / 续跑的计划推到执行态。 |
+| `/plan build <plan_id/path>` | 本地 | runtime 5 件事（详见 [`plan-runtime.md`](../plan-runtime.md) §5.1）：① 写 `frontmatter.session_key/session_id`；② `frontmatter.state = executing`；③ swap reminder PLANNER→EXECUTOR；④ prompt 切 `u[Plan:executing]>` / `agent.<id>[Plan:executing]>`；⑤ catalog 切 EXEC 集 | `当前 session` 不得处于 `Executing`；若当前是 `Pending`，无参默认续跑当前盘，显式 target 允许切别盘；scratchpad todos 仅 warning；指定的 PlanFile `state ∈ {planning, pending}` | 把审过 / 续跑的计划推到执行态。 |
 
 > **历史命令下线**（详见 §14）：
 > - `/plan apply` → `/plan build <plan_id/path>`
@@ -592,7 +592,7 @@ impl PlanRuntime {
 ```text
 用户 ──/plan build <id|path>──▶ build_plan()
                                      │
-                       gate: 当前 session 无 active plan && 无 active todos?
+                       gate: 当前 session 不得处于 Executing；Pending 默认续跑当前盘但允许显式切别盘；scratchpad todos 仅 warning?
                                      │ no → 拒绝
                                      │ yes
                                      ▼
@@ -689,7 +689,9 @@ EXEC 中：
 | `Executing` | 所有 todo `= completed` | `Completed -> Chat` | 自动写 frontmatter `state=completed`；经瞬时 `Completed` 立即回 `Chat(retain)`；事件仍记为 `plan.update` | 做完了。 |
 | `Executing` | cancel_token / SIGTERM / parent abort | `Pending` | 写 frontmatter `state=pending`；reminder/catalog/prompt 复位 CHAT；不追加独立 `plan.pending` 事件 | 被打断转 pending。 |
 | `Completed` | 用户开新 plan（`/plan`） | `Planning` | 与 `Chat → Planning` 同 | 开下一盘。 |
-| `Pending` | `/plan build <plan_id/path>` | `Executing` | 续跑流程 | 续跑。 |
+| `Completed` | `/plan build <other_plan_id/path>` | `Executing` | 允许显式切到另一份 `planning/pending` plan；不改变无参默认目标 | 从刚完成的一盘直接切到另一盘。 |
+| `Pending` | `/plan build`（无参或显式指向当前 pending plan） | `Executing` | 续跑流程 | 续跑。 |
+| `Pending` | `/plan build <other_plan_id/path>` | `Executing` | 允许显式切到另一份 `planning/pending` plan；不改变无参默认目标 | 从被打断的一盘直接切到另一盘。 |
 
 完整运行时编排见 [`plan-runtime.md`](../plan-runtime.md) §8。
 
@@ -714,7 +716,8 @@ EXEC 中：
 |------|------|--------|
 | `/plan` 时已存在 active 计划 / EXEC | 本地 UsageError，提示 `/plan exit` 或等待执行结束 | 一份 active 计划不能叠两份。 |
 | `/plan exit` 时 `mode != Planning` | 本地友好提示「`/plan exit` 仅在 PLAN 模式可用；如需中止执行请等待 cancel_token 或终止进程」 | exit 不当 close 用。 |
-| `/plan build` 当前 session 有 active plan / active todos | 本地 UsageError | 不允许两份计划同时跑。 |
+| `/plan build` 当前 session 已在 `Executing` | 本地 UsageError | 不允许两份计划同时跑。 |
+| `/plan build` 当前 session 仍有 scratchpad todos | warning 后继续 build | 提醒先收口个人 scratchpad，但不拦目标 plan。 |
 | `/plan build` 目标 PlanFile `mode ∉ {planning, pending}` | 本地 UsageError | 已 executing / completed 不能再 build。 |
 | `/plan build` 目标 PlanFile 找不到 / frontmatter 不可解析 | 本地 UsageError | 文件没问题再 build。 |
 | LLM 在非 Planning 模式调用 `create_plan` / `ask_question` | catalog 已不可见；`tool_exec` 兜底返回 tool error | 模式不对工具看不见，硬调也拦。 |
@@ -738,7 +741,7 @@ EXEC 中：
 | 单元：PLAN 写盘路径白名单 | `plan_mode_write_path_whitelist`（待新增） | PENDING | 非 plan 文件路径 → tool error。 |
 | 单元：frontmatter raw 改硬拒 | `plan_mode_raw_edit_body_allowed_frontmatter_rejected`（待新增） | PENDING | 正文放、YAML 拦。 |
 | 单元：exit 仅 PLAN | `plan_exit_restores_chat_only_from_planning`（待新增） | PENDING | EXEC/其他状态 exit 拒。 |
-| 单元：build gate | `plan_build_gate_checks_no_active_and_plan_mode`（待新增） | PENDING | 前置检查严格。 |
+| 单元：build gate | `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan` | DONE | 前置检查仍严格，但不再误伤 scratchpad todos，且 `Completed` 可显式切新盘。 |
 | 单元：全 completed 派生 | `all_completed_promotes_completed`（待新增） | PENDING | 自动 completed。 |
 | 单元：cancel_token 派生 | `cancel_token_demotes_pending`（待新增） | PENDING | 自动 pending。 |
 | 单元：UI 指示器 | `ui_shows_correct_mode_indicator`（待新增） | PENDING | 状态行要变。 |
@@ -759,7 +762,7 @@ EXEC 中：
 | UI 指示器与 runtime 状态不同步 | 低 | UI 仅查 `current_mode()`，不缓存 | 状态行只问 runtime。 |
 | prompt 渲染污染 transcript | 中 | prompt 只作用于 CLI 显示；transcript 保留原始消息 | 不污染。 |
 | 模型在 EXEC 后续轮缺少额外 plan_meta | 低 | 依赖 active plan 文件 + `update_plan`/`todos` 快照 + executing prompt 持续收口 | 不靠一次性 plan_meta。 |
-| `/plan build` 时旧 session 仍在工作 | 中 | 前置检查 `当前 session 无 active plan / active todos`；pending 续跑时覆盖旧 session 并 warning | gate 严格。 |
+| `/plan build` 时旧 session 仍在工作 | 中 | 前置检查 `当前 session` 不得处于 `Executing`；pending 续跑时覆盖旧 session 并 warning；用户若显式切到其他 plan，旧 pending plan 保持磁盘 `pending`；scratchpad todos 仅 advisory warning | gate 仍然严格，但不再误伤 session scratchpad。 |
 | 测试中频繁手动构造 mode | 低 | 暴露 `cfg(test)` 的 `__test_set_mode` | 单测可直接设 mode。 |
 
 ---

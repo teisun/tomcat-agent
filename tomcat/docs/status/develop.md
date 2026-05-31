@@ -1,6 +1,14 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-31 14:30 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-05-31 18:00 +0800 | ACTIVE | develop | — |
+
+### 2026-05-31 | fix(plan): 放宽 `/plan build` 运行态闸门
+
+- **动机**：`tomcat chat` 在 session 仍有 scratchpad todos 或盘内 `Pending`/`Completed` 时，无参或显式 `/plan build <other>` 会被 `BuildBlocked` 误伤；典型场景是 reviewer 把已完成 plan 的 frontmatter 写成 `pending` 且 todos 全 completed，用户无法显式切到另一份 plan。
+- **代码**：`PlanRuntime::build_plan()` — scratchpad `session_todos`（pending/in_progress）改为 warning 不阻塞；内存 `Pending`/`Completed` 允许显式 build 另一份 `planning/pending` plan；仍拒绝 `Executing` 与磁盘 state 不合规；无参 `default_build_target()` 不变（Pending 仍优先续跑当前盘）。
+- **测试**：`build_plan_test` 拆分/新增 `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan`、`pending_session_can_build_another_explicit_plan`；`cargo test -p tomcat plan_build_ --lib` 17 passed。
+- **文档**：`plan-runtime.md`、`tools/planner.md` 同步 G3/G5 闸门与状态转移表。
+- **范围外**：未改 plan 文件自愈合（`pending` + 全 completed todos 仍保持 dirty）；`current_tail_guard` 工作树仅 fmt 残留未纳入本 commit。
 
 ### 2026-05-31 | merge `feature/current-tail-aggregate-guard` → develop（T2-P1-011 集成验收）
 
