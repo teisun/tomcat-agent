@@ -153,7 +153,7 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
     assert!(texts
         .iter()
         .any(|text| text.starts_with("[Tool result persisted:")));
-    assert!(texts.iter().any(|text| *text == TOOL_RESULT_PLACEHOLDER));
+    assert!(texts.contains(&TOOL_RESULT_PLACEHOLDER));
     assert!(
         !texts.iter().any(|text| text == &"x".repeat(12_000)),
         "reload should keep the rewritten preview instead of reviving the original tail"

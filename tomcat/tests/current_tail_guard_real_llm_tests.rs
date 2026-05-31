@@ -60,11 +60,6 @@ fn real_llm() -> Arc<dyn tomcat::LlmProvider> {
         .expect("resolve_llm 失败：请检查 OPENAI_API_KEY / OpenAI 配置")
 }
 
-fn home_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 struct HomeGuard {
     _temp: TempDir,
     old_home: Option<OsString>,
@@ -471,7 +466,6 @@ async fn real_llm_reads_keepalive_and_calls_update_plan() {
 #[serial]
 async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
     require_api_key();
-    let _home_env_guard = home_lock().lock().unwrap();
     let _home_guard = HomeGuard::new();
     let fixture = build_plan_fixture("case-c");
     let llm = real_llm();
