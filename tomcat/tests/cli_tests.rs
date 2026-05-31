@@ -3338,10 +3338,9 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
 #[tokio::test]
 async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata() {
     common::setup_logging();
-    let _span = info_span!(
-        "test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata"
-    )
-    .entered();
+    let _span =
+        info_span!("test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata")
+            .entered();
 
     const ENV_KEY: &str = "TOMCAT_RESPONSES_FINISH_REASON_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);

@@ -243,9 +243,8 @@ impl CliTurnRenderer {
         if st.last_kind != LastKind::None {
             self.writer.write_stderr("\n");
         }
-        self.writer.write_stderr(&format!(
-            "\x1b[2m\x1b[90m[llm] {message}\x1b[0m\n"
-        ));
+        self.writer
+            .write_stderr(&format!("\x1b[2m\x1b[90m[llm] {message}\x1b[0m\n"));
         st.last_kind = LastKind::ToolStart;
     }
 

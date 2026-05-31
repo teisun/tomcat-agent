@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Spike | 2026-05-31 01:56 +0800 | PENDING_INTEGRATION | feature/current-tail-aggregate-guard | - |
+| @Spike | 2026-05-31 02:08 +0800 | PENDING_INTEGRATION | feature/current-tail-aggregate-guard | - |
 
 ### DONE
 - [x] [P1] 认领 `T2-P1-011`，确认任务卡为 `DOING` / `Spike`
@@ -31,3 +31,4 @@
 - 已跑：`cargo test --test context_management_tests`
 - 已跑：`cargo test --test context_management_tests test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm -- --nocapture`
 - 已核对：`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 已补阶段二 current-tail guard 场景，并登记 `AgentLoop::run()` 集成链路；本轮复用既有 integration crate，`scripts/test-groups.sh` 无需改动
+- 已提交：`1bb4d66`（阶段二实现）+ 后续 `style(rust)` 提交（补齐分支内遗留的 `cargo fmt` 格式化，无行为变更）

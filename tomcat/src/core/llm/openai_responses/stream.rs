@@ -555,7 +555,11 @@ pub(super) fn responses_chunk_to_events_with_state(
                 None,
                 !tool_calls.is_empty(),
             );
-            push_terminal_events(&mut events, meta, response.and_then(|resp| resp.get("usage")));
+            push_terminal_events(
+                &mut events,
+                meta,
+                response.and_then(|resp| resp.get("usage")),
+            );
         }
         "response.incomplete" => {
             let response = value.get("response");
@@ -566,13 +570,26 @@ pub(super) fn responses_chunk_to_events_with_state(
                 None,
                 !tool_calls.is_empty(),
             );
-            push_terminal_events(&mut events, meta, response.and_then(|resp| resp.get("usage")));
+            push_terminal_events(
+                &mut events,
+                meta,
+                response.and_then(|resp| resp.get("usage")),
+            );
         }
         "response.failed" => {
             let response = value.get("response");
-            let meta =
-                infer_terminal_metadata(Some("failed"), response, None, None, !tool_calls.is_empty());
-            push_terminal_events(&mut events, meta, response.and_then(|resp| resp.get("usage")));
+            let meta = infer_terminal_metadata(
+                Some("failed"),
+                response,
+                None,
+                None,
+                !tool_calls.is_empty(),
+            );
+            push_terminal_events(
+                &mut events,
+                meta,
+                response.and_then(|resp| resp.get("usage")),
+            );
         }
         "error" => {
             let top_level_error = value.get("error").or(Some(value));

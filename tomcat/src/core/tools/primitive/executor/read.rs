@@ -234,9 +234,7 @@ enum ReadWindowTruncation {
         next_offset: u64,
     },
     /// 命中 128 KiB 后读预算：在完整行边界提前停止，不再读完整个请求窗口。
-    OutputBudget {
-        next_offset: u64,
-    },
+    OutputBudget { next_offset: u64 },
 }
 
 /// PR-RB（T1）阻塞式分块读 + memchr 单循环抽窗。
@@ -328,8 +326,7 @@ fn read_window_blocking(
                 }
                 window.extend_from_slice(line_slice);
                 window_lines = window_lines.saturating_add(1);
-                rendered_output_bytes =
-                    rendered_output_bytes.saturating_add(rendered_line_bytes);
+                rendered_output_bytes = rendered_output_bytes.saturating_add(rendered_line_bytes);
             } else if !leftover.is_empty() {
                 leftover.clear();
             }
