@@ -22,7 +22,14 @@ pub(in super::super) async fn handle_bash(
         .unwrap_or(false);
 
     if run_in_background {
-        super::handle_bash_background(ctx.bash_task_registry, command, cwd, argv_store).await
+        super::handle_bash_background(
+            ctx.bash_task_registry,
+            ctx.subagent_type,
+            command,
+            cwd,
+            argv_store,
+        )
+        .await
     } else {
         ctx.primitive
             .execute_bash(command, cwd, AGENT_PLUGIN_ID, argv_ref, timeout_ms_override)

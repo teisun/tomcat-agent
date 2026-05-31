@@ -1,16 +1,21 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::core::agent_loop::types::SubagentType;
 use crate::core::tools::primitive::BashTaskRegistry;
 
 pub(in super::super) async fn handle_bash_background(
     registry: &Option<Arc<BashTaskRegistry>>,
+    subagent_type: SubagentType,
     command: &str,
     cwd: Option<&str>,
     argv: Option<Vec<String>>,
 ) -> Result<String, String> {
     let Some(registry) = registry.as_ref() else {
-        return Err("bash 后台任务未启用：未注入 BashTaskRegistry".to_string());
+        return Err(super::background_unavailable::bash_background_unavailable(
+            "bash",
+            subagent_type,
+        ));
     };
     let cwd_pb = cwd.map(PathBuf::from);
     registry

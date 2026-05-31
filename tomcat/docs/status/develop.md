@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-31 18:30 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-05-31 18:45 +0800 | ACTIVE | develop | — |
+
+### 2026-05-31 | fix(agent): 后台 bash 未注入时报 LLM 可执行英文指引
+
+- **动机**：verifier/reviewer 等未注入 `BashTaskRegistry` 的子 Agent 调用 `bash(run_in_background=true)` 或 `task_*` 时，工具结果只返回「未注入 BashTaskRegistry」，CLI 与模型都无法判断应改走前台 bash。
+- **代码**：新增 `background_unavailable` helper，按 `SubagentType` 区分子 Agent（`currently unsupported in this subagent`）与未接线兜底（`Background bash is not enabled in this AgentLoop`）；`bash`/`task_output`/`task_stop`/`task_list` 四分支统一走 helper；`cli_turn_renderer` bash 起始摘要附带 `run_in_background=true` 标记。
+- **测试**：`submodules_test` 更新 no-registry 断言并新增 `tool_exec_verifier_background_bash_without_registry_mentions_subagent`；`cargo test -p tomcat tool_exec_ --lib` 36 passed。
+- **范围外**：未改 `with_bash_task_registry` 主 chat 注入与子 Agent wiring；`cc-fork-01` 子模块 dirty 不纳入。
 
 ### 2026-05-31 | style(agent): current-tail guard fmt 残留收口
 

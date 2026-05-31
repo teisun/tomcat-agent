@@ -184,7 +184,21 @@ async fn tool_exec_bash_background_without_registry_returns_friendly_error() {
         is_error,
         "未注入 registry 时 background bash 必须 is_error=true"
     );
-    assert!(msg.contains("未启用"), "错误文案应提示「未启用」：{}", msg);
+    assert!(
+        msg.contains("Background bash is not enabled in this AgentLoop."),
+        "错误文案应说明后台 bash 未启用：{}",
+        msg
+    );
+    assert!(
+        msg.contains("foreground `bash`"),
+        "错误文案应提示改用前台 bash：{}",
+        msg
+    );
+    assert!(
+        !msg.contains("BashTaskRegistry"),
+        "错误文案不应泄漏内部 registry 术语：{}",
+        msg
+    );
 }
 
 #[tokio::test]
@@ -197,7 +211,8 @@ async fn tool_exec_task_output_without_registry_returns_friendly_error() {
     };
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(is_error);
-    assert!(msg.contains("未启用"));
+    assert!(msg.contains("Background bash is not enabled in this AgentLoop."));
+    assert!(!msg.contains("BashTaskRegistry"));
 }
 
 #[tokio::test]
@@ -210,7 +225,54 @@ async fn tool_exec_task_list_without_registry_returns_friendly_error() {
     };
     let (msg, is_error, _) = execute_tool(&primitive, &None, &None, None, &tc).await;
     assert!(is_error);
-    assert!(msg.contains("未启用"));
+    assert!(msg.contains("Background bash is not enabled in this AgentLoop."));
+    assert!(!msg.contains("BashTaskRegistry"));
+}
+
+#[tokio::test]
+async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "bgv1".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"sleep 1","run_in_background":true}"#.to_string(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(outcome.is_error);
+    assert!(
+        outcome
+            .model_text
+            .contains("currently unsupported in this subagent"),
+        "verifier 子 Agent 文案应说明当前子 Agent 不支持 background bash：{}",
+        outcome.model_text
+    );
+    assert!(
+        outcome.model_text.contains("foreground `bash`"),
+        "verifier 子 Agent 文案应提示改用前台 bash：{}",
+        outcome.model_text
+    );
+    assert!(
+        !outcome.model_text.contains("BashTaskRegistry"),
+        "verifier 子 Agent 文案不应泄漏内部 registry 术语：{}",
+        outcome.model_text
+    );
 }
 
 /// 起后台 → 拉输出 → stop → list：bash.md §2.4.4 验收的端到端路径，

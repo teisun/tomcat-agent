@@ -1,3 +1,4 @@
+pub(super) mod background_unavailable;
 pub(super) mod bash;
 pub(super) mod bash_background;
 pub(super) mod config;

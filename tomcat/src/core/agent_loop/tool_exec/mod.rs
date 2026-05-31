@@ -308,8 +308,10 @@ async fn execute_tool_tuple_full(
         "edit" => branches::handle_edit(ctx, &args, display_out).await,
         "bash" => branches::handle_bash(ctx, &args).await,
         "task_output" => branches::handle_task_output(ctx, tc, &args).await,
-        "task_stop" => branches::handle_task_stop(ctx.bash_task_registry, &args).await,
-        "task_list" => branches::handle_task_list(ctx.bash_task_registry).await,
+        "task_stop" => {
+            branches::handle_task_stop(ctx.bash_task_registry, ctx.subagent_type, &args).await
+        }
+        "task_list" => branches::handle_task_list(ctx.bash_task_registry, ctx.subagent_type).await,
         "list_dir" => branches::handle_list_dir(ctx, &args).await,
         "hashline_edit" => branches::handle_hashline_edit(ctx, &args, display_out).await,
         "search_files" => branches::handle_search_files(ctx, &args).await,

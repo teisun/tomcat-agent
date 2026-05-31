@@ -581,7 +581,15 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
             format!("path={} (replace)", path)
         }
         "bash" | "shell" | "execute_command" => {
-            format!("command={}", shell_command_preview(args))
+            let mut out = format!("command={}", shell_command_preview(args));
+            if args
+                .get("run_in_background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                out.push_str(" run_in_background=true");
+            }
+            out
         }
         _ => {
             // 通用回退：JSON 化后压成一行

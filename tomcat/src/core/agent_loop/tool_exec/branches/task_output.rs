@@ -17,7 +17,10 @@ pub(in super::super) async fn handle_task_output(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let Some(registry) = ctx.bash_task_registry.as_ref() else {
-        return Err("task_output 未启用：未注入 BashTaskRegistry".to_string());
+        return Err(super::background_unavailable::bash_background_unavailable(
+            "task_output",
+            ctx.subagent_type,
+        ));
     };
     let task_id = args
         .get("task_id")
