@@ -45,8 +45,10 @@ const CUSTOM_PLAN_GOAL_ENV: &str = "TOMCAT_E2E_PLAN_GOAL";
 const CUSTOM_WORKDIR_ENV: &str = "TOMCAT_E2E_WORKDIR";
 const ASK_QUESTION_AUTO_PICK_ENV: &str = "TOMCAT_ASK_QUESTION_TEST_AUTO_PICK";
 
-const PLANNING_TIMEOUT: Duration = Duration::from_secs(180);
-const EXEC_TIMEOUT: Duration = Duration::from_secs(240);
+// 真 LLM 端到端路径受上游时延波动影响较大；门限保留硬超时，但给 gpt-5.4
+// 的 planning/review/verify 多轮链路留出更现实的缓冲。
+const PLANNING_TIMEOUT: Duration = Duration::from_secs(240);
+const EXEC_TIMEOUT: Duration = Duration::from_secs(420);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 type ExecPromptOverride = fn(&[String], &Path) -> String;

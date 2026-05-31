@@ -56,9 +56,12 @@ use tomcat::{
 
 const COUNTER_PLAN_GOAL: &str = "inprocess e2e: write counter.py that prints 0";
 
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(420);
-const PLANNING_TIMEOUT: Duration = Duration::from_secs(180);
-const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(180);
+// 真 LLM 进程内全路径会串起 planning + reviewer/verifier + 执行轮次；
+// 在 gpt-5.4 下 180s exec round 已被实测打满，因此把总时限与阶段时限
+// 上调到更符合当前上游时延的窗口，同时保留硬超时兜底。
+const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+const PLANNING_TIMEOUT: Duration = Duration::from_secs(240);
+const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 fn require_api_key() {
@@ -687,7 +690,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
     if let Err(_e) = result {
         // 兜底诊断输出（timeout 时也写一遍）
         if let Ok(ctx) = ChatContext::from_config(load_user_config()) {
-            dump_diagnostic(&home, &ctx, "timeout_600s", None, None, true);
+            let timeout_label = format!("timeout_{}s", TOTAL_TIMEOUT.as_secs());
+            dump_diagnostic(&home, &ctx, &timeout_label, None, None, true);
         }
         panic!(
             "inprocess_full_plan_path_with_real_llm 在 {}s 内未完成",
