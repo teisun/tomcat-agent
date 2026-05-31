@@ -10,14 +10,13 @@ use crate::infra::config::ContextConfig;
 // Constants
 // ---------------------------------------------------------------------------
 
-pub(super) const TOOL_RESULT_PLACEHOLDER: &str =
+pub(crate) const TOOL_RESULT_PLACEHOLDER: &str =
     "[Previous tool result replaced to save context space]";
 
 const LAYER0_PREVIEW_CHARS: usize = 500;
+const TOOL_RESULT_PERSISTED_PREFIX: &str = "[Tool result persisted:";
 
-const M_PROTECTED_TURNS: usize = 5;
-
-pub(super) fn floor_char_boundary(s: &str, pos: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
         return s.len();
     }
@@ -38,6 +37,56 @@ pub struct PersistedResult {
     pub tool_name: String,
     pub original_chars: usize,
     pub persisted_path: String,
+}
+
+pub(crate) fn is_persisted_tool_result_text(text: &str) -> bool {
+    text.starts_with(TOOL_RESULT_PERSISTED_PREFIX)
+}
+
+pub(crate) fn persist_tool_result_text(
+    content: &mut String,
+    tool_call_id: &str,
+    work_dir: &Path,
+    session_id: &str,
+    single_max: usize,
+) -> Option<(PersistedResult, usize)> {
+    if work_dir.as_os_str().is_empty()
+        || content.len() < single_max
+        || is_persisted_tool_result_text(content)
+    {
+        return None;
+    }
+
+    let persist_dir = work_dir.join("tool-results").join(session_id);
+    if std::fs::create_dir_all(&persist_dir).is_err() {
+        return None;
+    }
+
+    let file_path = persist_dir.join(format!("{}.txt", tool_call_id));
+    if std::fs::write(&file_path, content.as_bytes()).is_err() {
+        return None;
+    }
+
+    let original_len = content.len();
+    let path_str = file_path.to_string_lossy().to_string();
+    let preview_end = floor_char_boundary(content, LAYER0_PREVIEW_CHARS);
+    let preview = &content[..preview_end];
+    let replacement = format!(
+        "[Tool result persisted: {} ({} chars)]\nPreview: {}...",
+        path_str, original_len, preview
+    );
+    let chars_freed = original_len.saturating_sub(replacement.len());
+    *content = replacement;
+
+    Some((
+        PersistedResult {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: String::new(),
+            original_chars: original_len,
+            persisted_path: path_str,
+        },
+        chars_freed,
+    ))
 }
 
 /// L0 步骤 A+B 的汇总（timing ⑤）。
@@ -62,13 +111,6 @@ pub fn layer0_persist_large_results(
     let mut persist_chars_freed = 0usize;
     let single_max = config.layer0_single_result_max_chars;
 
-    // `AgentLoopConfig::agent_trail_dir` 为空时表示「不做 Layer0 文件落盘」（见 types.rs 注释）。
-    // 若不短路，`Path::new("")` 与 `tool-results` 拼接会变成**相对路径**，在 `cargo test`
-    // 下落到进程 cwd（常为仓库根 `tomcat/tool-results/`，污染 git 工作区）。
-    if work_dir.as_os_str().is_empty() {
-        return (results, persist_chars_freed);
-    }
-
     // Find the start of the last turn (last user/compaction boundary).
     let last_turn_start = state
         .messages
@@ -92,49 +134,14 @@ pub fn layer0_persist_large_results(
             _ => continue,
         };
 
-        if content.len() < single_max {
-            continue;
-        }
-        if content.starts_with("[Tool result persisted:") {
-            continue;
-        }
-
         let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
-
-        let persist_dir = work_dir.join("tool-results").join(session_id);
-
-        if std::fs::create_dir_all(&persist_dir).is_err() {
-            continue;
+        if let Some((result, freed)) =
+            persist_tool_result_text(content, &tool_call_id, work_dir, session_id, single_max)
+        {
+            persist_chars_freed += freed;
+            state.estimate_context_chars = state.estimate_context_chars.saturating_sub(freed);
+            results.push(result);
         }
-
-        let file_path = persist_dir.join(format!("{}.txt", tool_call_id));
-        if std::fs::write(&file_path, content.as_bytes()).is_err() {
-            continue;
-        }
-
-        let original_len = content.len();
-        let path_str = file_path.to_string_lossy().to_string();
-
-        let preview_end = floor_char_boundary(content, LAYER0_PREVIEW_CHARS);
-        let preview = &content[..preview_end];
-        let replacement = format!(
-            "[Tool result persisted: {} ({} chars)]\nPreview: {}...",
-            path_str, original_len, preview
-        );
-
-        let new_len = replacement.len();
-        *content = replacement;
-
-        let freed = original_len.saturating_sub(new_len);
-        persist_chars_freed += freed;
-        state.estimate_context_chars = state.estimate_context_chars.saturating_sub(freed);
-
-        results.push(PersistedResult {
-            tool_call_id,
-            tool_name: String::new(),
-            original_chars: original_len,
-            persisted_path: path_str,
-        });
     }
     (results, persist_chars_freed)
 }
@@ -143,13 +150,14 @@ pub fn layer0_persist_large_results(
 // Layer 1: Tool result placeholder replacement
 // ---------------------------------------------------------------------------
 
-/// Layer 1：从 compactable zone（排除最近 `m` 个 turns）中，
+/// Layer 1：从 compactable zone（排除最近 `config.keep_recent_turns` 个 turns）中，
 /// 将长度 **大于** `ContextConfig::layer0_placeholder_threshold_chars`（默认 10_000）的 tool result 替换为占位符。
-pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig, m: usize) -> usize {
+pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig) -> usize {
     let threshold = config.layer0_placeholder_threshold_chars;
+    let protected_turns = config.keep_recent_turns;
 
-    // Find the start of the last M turns.
-    let protected_start = find_protected_turn_start(&state.messages, m);
+    // Find the start of the protected tail turns.
+    let protected_start = find_protected_turn_start(&state.messages, protected_turns);
     if protected_start == 0 {
         return 0;
     }
@@ -169,7 +177,7 @@ pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig, m:
         if content.len() <= threshold {
             continue;
         }
-        if content.starts_with("[Tool result persisted:") || content == TOOL_RESULT_PLACEHOLDER {
+        if is_persisted_tool_result_text(content) || content == TOOL_RESULT_PLACEHOLDER {
             continue;
         }
 
@@ -182,9 +190,13 @@ pub fn compact_tool_results(state: &mut ContextState, config: &ContextConfig, m:
     total_reduced
 }
 
-/// 返回「最后 m 个 turns」的起始消息索引（即第 (total_turns - m) 个 turn-start 的位置）。
-/// 若 turns <= m，返回 0（整个 messages 列表均受保护）。
+/// 返回「最后 m 个 turns」的起始消息索引（即第 `(total_turns - m)` 个 turn-start 的位置）。
+/// `m == 0` 时表示不保护任何 turn，返回 `messages.len()`；若 `turns <= m`，返回 0（整个列表均受保护）。
 fn find_protected_turn_start(messages: &[crate::core::llm::ChatMessage], m: usize) -> usize {
+    if m == 0 {
+        return messages.len();
+    }
+
     // Collect all turn-start indices in order.
     let turn_starts: Vec<usize> = messages
         .iter()
@@ -218,7 +230,7 @@ pub fn run_layer0_cleanup(
 ) -> Layer0CleanupOutcome {
     let (persisted, persist_chars_freed) =
         layer0_persist_large_results(state, config, work_dir, session_id);
-    let placeholder_chars_freed = compact_tool_results(state, config, M_PROTECTED_TURNS);
+    let placeholder_chars_freed = compact_tool_results(state, config);
     Layer0CleanupOutcome {
         persisted,
         persist_chars_freed,

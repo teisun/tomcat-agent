@@ -11,10 +11,15 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use super::super::steering_injection::inject_steering_messages;
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
-use crate::core::llm::{ChatMessage, StreamEvent};
+use crate::core::compaction::preheat::Preheat;
+use crate::core::llm::{ChatMessage, MessageKind, StreamEvent};
+use crate::core::session::manager::{estimate_msg_chars, ContextState};
+use crate::core::session::transcript::{read_entries_tail, TranscriptEntry};
 use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
+use crate::SessionManager;
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor, SteerableMockPrimitive};
 
@@ -107,4 +112,75 @@ async fn run_follow_up_continues_in_same_context() {
     let messages = vec![ChatMessage::user("first")];
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("B"));
+}
+
+#[tokio::test]
+async fn inject_steering_messages_records_context_and_persists_msg_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+
+    let llm = Arc::new(MockLlmProvider::new(vec![]));
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let steering_queue = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::steering(
+        "stop now",
+    )]));
+    let mut loop_ = AgentLoop::new_with_steering_queue(
+        llm,
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            model: "gpt-4".to_string(),
+            session_id: "s-steering".to_string(),
+            message_append_sink: Some(Arc::new(mgr.clone())),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+        steering_queue,
+    );
+    loop_.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 10,
+        context_budget_chars: 1_000,
+        context_budget_tokens: 250,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: transcript.clone(),
+        latest_plan_event: None,
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let mut messages = vec![ChatMessage::user("hello")];
+    let appended = inject_steering_messages(&mut loop_, &mut messages).unwrap();
+    assert!(appended);
+    let steering = messages.last().expect("steering should be appended");
+    assert_eq!(steering.kind, MessageKind::Steering);
+    assert_eq!(steering.text_content(), Some("stop now"));
+    assert!(
+        steering.msg_id.is_some(),
+        "steering should be persisted and get msg_id"
+    );
+
+    let state = loop_.context_state.as_ref().unwrap();
+    assert_eq!(
+        state.estimate_context_chars,
+        10 + estimate_msg_chars(steering)
+    );
+    assert_eq!(
+        state.post_usage_appended_chars,
+        estimate_msg_chars(steering)
+    );
+
+    let entries = read_entries_tail(&transcript, 10).unwrap();
+    assert!(entries.into_iter().any(|entry| match entry {
+        TranscriptEntry::Message(me) => {
+            me.id == steering.msg_id
+                && me.message.get("content").and_then(|v| v.as_str()) == Some("stop now")
+        }
+        _ => false,
+    }));
 }

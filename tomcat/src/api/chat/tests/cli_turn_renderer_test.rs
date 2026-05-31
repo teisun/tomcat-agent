@@ -364,7 +364,11 @@ fn llm_error_renders_red_status_line() {
     let stdout = w.stdout();
     let stderr = w.stderr();
     assert!(stdout.contains("partial"), "应先冲掉正文残余: {:?}", stdout);
-    assert!(stderr.contains("[llm] boom"), "应展示 llm 错误提示: {:?}", stderr);
+    assert!(
+        stderr.contains("[llm] boom"),
+        "应展示 llm 错误提示: {:?}",
+        stderr
+    );
     assert!(stderr.contains("\x1b[31m"), "错误应使用红色: {:?}", stderr);
 }
 
@@ -381,7 +385,11 @@ fn llm_notice_renders_dim_non_error_hint() {
         "轻提示应说明截断原因: {:?}",
         stderr
     );
-    assert!(stderr.contains("\x1b[90m"), "轻提示应使用灰色: {:?}", stderr);
+    assert!(
+        stderr.contains("\x1b[90m"),
+        "轻提示应使用灰色: {:?}",
+        stderr
+    );
     assert!(
         !stderr.contains("\x1b[31m"),
         "轻提示不应被渲染成红色错误: {:?}",

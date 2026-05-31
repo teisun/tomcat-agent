@@ -70,7 +70,10 @@ impl ResponsesTerminalMetadata {
     }
 }
 
-fn extract_error_details(error: Option<&Value>, fallback_message: Option<&str>) -> Option<(String, Option<String>)> {
+fn extract_error_details(
+    error: Option<&Value>,
+    fallback_message: Option<&str>,
+) -> Option<(String, Option<String>)> {
     let code = error
         .and_then(|err| err.get("code"))
         .and_then(Value::as_str)
@@ -79,11 +82,7 @@ fn extract_error_details(error: Option<&Value>, fallback_message: Option<&str>) 
         .and_then(|err| err.get("message"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| {
-            error
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .or_else(|| error.and_then(Value::as_str).map(str::to_string))
         .or_else(|| fallback_message.map(str::to_string))?;
     Some((message, code))
 }

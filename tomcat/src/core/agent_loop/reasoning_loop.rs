@@ -29,7 +29,7 @@ use crate::core::llm::{ChatMessage, ChatRequest};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
-use super::{stream_handler, tool_dispatcher, turn_finalize};
+use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize};
 
 pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
@@ -171,6 +171,9 @@ pub(super) async fn run_reasoning_loop(
         });
 
         if dispatch.steered {
+            current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
+                .await
+                .map_err(LoopError::Fatal)?;
             continue;
         }
 
@@ -178,5 +181,9 @@ pub(super) async fn run_reasoning_loop(
             agent.emit_context_metrics();
             return Ok(final_text);
         }
+
+        current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
+            .await
+            .map_err(LoopError::Fatal)?;
     }
 }

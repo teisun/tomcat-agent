@@ -22,6 +22,7 @@ use crate::core::llm::ChatMessage;
 use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
 
+use super::steering_injection::inject_steering_messages;
 use super::tool_exec;
 use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 
@@ -59,9 +60,12 @@ use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 ///
 /// ## Steering break
 ///
-/// 每个 tool 执行完毕后检查 `steering_queue`；非空则 `messages.extend(q.drain(..))`
-/// → `steered = true; break;`。**当次** tool 的 result 已入 messages；余下 tool_calls
-/// **不执行**。调用方应 `continue` reasoning loop 让下一次 LLM 请求携带 steering 消息。
+/// 每个 tool 执行完毕后检查 `steering_queue`；非空则通过
+/// `inject_steering_messages(...)` 统一走「记账 + append/persist + push」通道，
+/// 然后 `steered = true; break;`。**当次** tool 的 result 已入 messages；余下
+/// tool_calls **不执行**。调用方应 `continue` reasoning loop 让下一次 LLM 请求
+/// 携带 steering 消息。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_tool_calls(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
@@ -255,9 +259,7 @@ pub(super) async fn run_tool_calls(
         }
 
         // Steering break：每个 tool 执行后检查 queue；非空则注入 + 跳过剩余。
-        let mut q = agent.steering_queue.lock();
-        if !q.is_empty() {
-            messages.extend(q.drain(..));
+        if inject_steering_messages(agent, messages).map_err(LoopError::Fatal)? {
             steered = true;
             break;
         }

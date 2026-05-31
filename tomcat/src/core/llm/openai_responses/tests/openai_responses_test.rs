@@ -267,7 +267,10 @@ fn responses_payload_incomplete_content_filter_maps_to_error_metadata() {
         "output": []
     });
     let r = responses_payload_to_chat_response(&raw);
-    assert_eq!(r.choices[0].finish_reason.as_deref(), Some("error:content_filter"));
+    assert_eq!(
+        r.choices[0].finish_reason.as_deref(),
+        Some("error:content_filter")
+    );
     assert_eq!(
         r.choices[0].message.error_message.as_deref(),
         Some("content_filter")

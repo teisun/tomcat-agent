@@ -41,6 +41,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
 # 必须读到进程 A 留下的 sessions.json。run-integration-tests.sh 显式跳过本组，
 # 用户/CI 需要时按需 `cargo test --test plan_real_llm_*` 单独触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
+  current_tail_guard_real_llm_tests
   plan_real_llm_inprocess_tests
   plan_real_llm_cli_e2e
 )

@@ -165,6 +165,7 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests -- --nocapture --tes
 1. **构建与静态检查（§7.3 第 1–2 项）**：`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`RUST_LOG=tomcat=debug,info cargo test --lib -- --nocapture` 通过。
 2. **CLI 子命令**：`tomcat init`、`tomcat doctor`、`tomcat config`、`tomcat session`、`tomcat plugin`、`tomcat audit` 可执行且帮助完整。
 3. **集成测试（§7.1/§7.2 分类执行 + §9/§10 门禁）**：首选 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`（脚本内并发组 cargo 默认并发、串行组 `-j 1 --test-threads=1`，覆盖日志门禁与鲁棒性集成测试）；脚本不可用时回退「测试执行策略」中的模板 B 走全量串行。**禁止**用 `cargo test --test '<某 binary>'` 序列拼凑全量集成验证。
+   - 若本次变更新增了 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 里的 target（例如 keepalive A/B/C 这类真 key 用例），还必须显式执行 `set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`；该分组**不进入**普通 `integration` / `all`，避免默认门禁误耗真实 key 与配额。
 4. **E2E**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；WasmEdge 已就绪时 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` 通过（二者均位于 §7.2 串行组，必须 `-j 1 --test-threads=1`）；须符合 E2E_TEST_SPEC §6。
 5. **Wasm 真实运行时（若任务涉及插件/Wasm）**：按 INTEGRATION_TEST_SPEC 5.4 + §7.2 串行组要求执行。
 

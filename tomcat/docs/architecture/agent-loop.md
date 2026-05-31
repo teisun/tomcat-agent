@@ -142,8 +142,7 @@ fn agent_run(session, user_message):
 
     # === 第一层：对话管理循环 ===
     loop:
-        while steering_queue.has_pending():
-            messages.append(steering_queue.drain())
+        inject_steering_messages(messages)
 
         # === 第二层：容错重试循环 ===
         attempt_count = 0
@@ -237,10 +236,13 @@ fn run_reasoning_loop(session, messages) -> Result:
             }
             emit(ToolExecutionEnd { ... })
             messages.append(ToolResultMessage { tc.id, result })
+            if tool_returns_follow_up_parts:
+                messages.append(ChatMessage::user_with_parts(parts))
             if steering_queue.has_pending():
-                messages.append(steering_queue.drain())
+                inject_steering_messages(messages)
                 break
         emit(TurnEnd { turn_index })
+        maybe_reduce_before_next_llm(messages)
         continue
 ```
 
@@ -270,6 +272,7 @@ ChatMessage（统一表示，直接发给 LLM）
 
 - **Steering**（`kind: MessageKind::Steering`）：标记内部指令，role 为 user 但不计入 turn 边界。
 - **CompactionSummary**（`kind: MessageKind::CompactionSummary`）：压缩后的历史摘要，替换被压缩的消息段。
+- **`ChatMessage::user_with_parts(parts)`**：仍然是普通 `role=user, kind=Normal`，只是 `content` 不是纯文本而是 `Parts` 数组。当前主要用于 `read` 命中图片 / PDF 后，把真正的 `InputImage` / `InputFile` 作为**紧跟 tool_result 的下一条 user 消息**注入；它不是 `follow_up_queue`，也不是 `steering_queue`。
 - 由于内存表示与 wire format 统一，更换 LLM Provider 无需修改转换逻辑。
 
 ---
@@ -320,26 +323,83 @@ agent_start              ← 第一层开始，用户消息进入
 
 ## 13.7 Steering、FollowUp 与 Abort
 
-|          | Steering（转向） | FollowUp（追加） | Abort（中止） |
-|----------|------------------|------------------|----------------|
-| 触发时机 | Agent 工作中     | Agent 刚结束     | 任何时候       |
-| 用户意图 | 改方向           | 加任务           | 全停           |
-| 系统行为 | 完成当前工具，跳过剩余工具，注入新消息，重新调用 LLM | 不重新初始化，在现有上下文中继续 | 所有 stream/tool await 立即 cancel，返回 `AgentRunOutcome::Interrupted`（含 partial） |
-| 触发方式 | steer(msg)       | follow_up(msg)   | `CancellationToken::cancel()`（Ctrl+C 软中断）|
-| 对应事件 | （无独立事件）   | 新 agent_start   | `AgentEvent::Interrupted` + `AgentEnd { error: "interrupted" }` |
-| 实现方式 | 线程安全队列，每工具完成后检查 | 线程安全队列，第一层循环尾部检查 | `tokio_util::sync::CancellationToken` + `tokio::select!` 竞速 await |
+### 13.7.1 先看总图
 
-队列与信号设计建议：
+```text
+真实用户输入
+  │
+  ├─► ChatMessage::user("...")
+  │    └─► 作为 initial_messages 进入 AgentLoop::run()
+  │
+  ├─► AgentLoop::follow_up("...")
+  │    └─► follow_up_queue.push(ChatMessage::user(...))
+  │         └─► 第一层 Conversation Loop 在 between-turns drain
+  │              └─► 追加到 messages，开启同上下文下一轮
+  │
+  ├─► AgentLoop::steer("...")
+  │    └─► steering_queue.push(ChatMessage::steering(...))
+  │         ├─► run() 开头先用 inject_steering_messages(...) 注一次
+  │         └─► 每个单独 tool 执行完后再检查一次
+  │              └─► 若非空：记账 + append/persist + push，然后 break
+  │                   跳过本轮剩余 tool_calls，直接进入下一轮 LLM
+  │
+  └─► read 图片 / PDF
+       └─► tool_exec 返回 follow_up_parts
+            └─► tool_dispatcher 先 push tool_result
+                 再立刻 push ChatMessage::user_with_parts(parts)
+                 （同一轮、同一条工具结果后面，不走 follow_up_queue）
+```
 
-- `steering_queue`：`Arc<Mutex<Vec<AgentMessage>>>`，UI 写、Loop 读。
-- `follow_up_queue`：同上。**P1（bash background monitor）补充**：单 turn AgentLoop 私有的 `follow_up_queue` 仍保留旧语义；`ChatContext` 额外持有一份 **session 级共享 follow_up_queue**，通过 `AgentLoop::with_shared_follow_up_queue(...)` builder 注入。后台 shell 自然完成时由 `chat_loop` 中 spawn 的 lifecycle subscriber 守护 task 推入一条 `<background-task-finished ...>tail</background-task-finished>` synthetic notification（`ChatMessage::user`）。`run_chat_turn` 在装配 messages 后会 drain 一次该 queue（让首轮 reasoning 之前就能看到 synthetic）；AgentLoop 一层 conv loop 仍按旧契约在 attempt 成功后 drain（覆盖"turn 内新到达"的 synthetic）。auto-feed 与 dispatcher `task_output(block=true)` 路径之间的去重由 session 级 `completion_routes` 状态机（`ToolWillDeliver | Delivered`）保证，详见 [`tools/bash.md`](tools/bash.md#claim-on-entry-状态机)。chat_loop 主循环在每个真实用户输入之间最多连续触发 `AUTO_TURN_BUDGET=K=8` 次 auto-turn，超过后强制回 readline，避免 synthetic 风暴。
-- `cancel_token`：`tokio_util::sync::CancellationToken`，可克隆、可 await、支持广播；每个 user turn 在 `readline` 读到非空输入后**重建一个全新 token**（避免上一轮残留 cancel 污染新轮），见 [interrupt-and-cancellation.md](interrupt-and-cancellation.md) §3、§4。
-- Ctrl+C 双击语义：2 秒内两次 SIGINT 触发 `exit(130)`（hard interrupt，进程退出）；首击仅 cancel 当前 turn（soft interrupt，保留 partial）。
+**说人话**：这里其实有三条完全不同的“加消息”路径。`follow_up_queue` 是**回合与回合之间**加一条普通 user 消息；`steering_queue` 是**本轮工具列表中途插话并打断剩余工具**；`user_with_parts` 则是某些工具（现在主要是 `read` 图片 / PDF）为了把“真正的附件内容”补回对话，在**tool_result 后面立刻补一条普通 user 多模态消息**。
 
-注入模式（与 pi-mono 对齐）：
+### 13.7.2 三类入口对照
 
-- **one-at-a-time**（默认）：每轮只注入一条 steering 消息。
-- **all**：一次性注入当前排队的所有 steering 消息。
+| 入口 | 触发时机 | 写入载体 | 谁消费 | 会不会打断当前 tool list | 典型来源 |
+|------|----------|----------|--------|---------------------------|----------|
+| `steer(msg)` | Agent 工作中 | `steering_queue.push(ChatMessage::steering(msg))` | `inject_steering_messages(...)` | **会**。当前单个 tool 做完后就 break，剩余 tool_calls 不再执行 | 用户中途改方向、宿主主动插话 |
+| `follow_up(msg)` | 一个 attempt/turn 收口后 | `follow_up_queue.push(ChatMessage::user(msg))` | 第一层 Conversation Loop 尾部 drain | **不会**。它只影响下一轮，不改当前这拨 tool_calls | 用户追加一句话、后台任务完成的 synthetic 通知 |
+| `user_with_parts(parts)` | 单个 tool_result 已生成之后 | 直接 `push_message(..., ChatMessage::user_with_parts(parts))` | 同一轮 `messages` | **不会单独打断**；但它必须出现在 tool_result 之后、steering break 之前 | `read` 命中图片 / PDF 后的 `follow_up_parts` |
+| `abort()` / Ctrl+C | 任何 await 点 | `cancel_token.cancel()` | stream / tool await 的 `tokio::select!` | 相当于整个 turn 终止，不只是跳过剩余工具 | 用户中止 |
+
+### 13.7.3 `user_with_parts` / `follow_up_parts` 是什么
+
+- `ChatMessage::user_with_parts(parts)` 是一个构造函数：生成 **`role=user, kind=Normal`** 的多模态 user 消息，`content` 不是纯文本，而是 `Parts` 数组。
+- `follow_up_parts` 不是队列，它只是工具执行返回值里带出来的一组 `ChatMessageContentPart`。当前主要由 `read` 工具在读到图片 / PDF 时产出：
+  - 图片：生成 `InputImage`（可能是 file_id，也可能是 inline base64）。
+  - PDF：生成 `InputFile`（可能是 file_id，也可能是 inline base64）。
+- `tool_dispatcher` 的时序是固定的：**先 tool_result，占位说明先入消息；再 user_with_parts，把真正的图片 / PDF 实物补进去；最后才检查 steering_queue**。这样即使这次 tool round 被 steering 提前打断，下一轮 LLM 也仍能看到完整的“tool 占位句 + 实物附件”。
+
+```text
+execute_tool(read image/pdf)
+  │
+  ├─► ToolResultMessage("已读取附件，详见后续 parts")
+  ├─► ChatMessage::user_with_parts([InputImage/InputFile ...])
+  └─► steering_queue?
+       ├─ yes -> inject steering + break
+       └─ no  -> 继续执行剩余工具
+```
+
+### 13.7.4 队列与信号的当前实现口径
+
+- `steering_queue`：`Arc<Mutex<Vec<ChatMessage>>>`。入口是 `AgentLoop::steer(&self, msg)`；消费口径统一走 `inject_steering_messages(...)`，也就是**先做 `ctx_state.on_message_appended(...)` 记账，再走 `push_message(...)` 分配 / 持久化 `msg_id`**，不再直接 `extend(q.drain(..))`。
+- `follow_up_queue`：同样是 `Arc<Mutex<Vec<ChatMessage>>>`。`AgentLoop` 自带一份局部队列；`ChatContext` 还能通过 `with_shared_follow_up_queue(...)` 注入一份 session 级共享队列，用于后台 shell 完成通知等 auto-feed 场景。它只在 between-turns drain，不会中途打断当前工具列表。
+- `cancel_token`：`tokio_util::sync::CancellationToken`。每个 user turn 都会重建，避免上一轮的 cancel 污染下一轮。
+
+### 13.7.5 与 current-tail guard 的关系
+
+Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发给 LLM 的 messages”。阶段二 current-tail guard 的观察点正好就在这里：
+
+```text
+单个 tool 执行完成
+  -> push tool_result
+  -> (可选) push user_with_parts
+  -> (可选) inject steering 并 break
+  -> emit TurnEnd
+  -> maybe_reduce_before_next_llm(...)
+  -> 下一次 llm.chat_stream(...)
+```
+
+也就是说，guard 看到的是**已经把 tool_result、附件 follow-up、steering 注入结果都算进去之后**的真实工作集。
 
 ---
 
@@ -373,7 +433,11 @@ agent_start              ← 第一层开始，用户消息进入
 
 详见 [上下文管理技术方案](context-management.md)。以下为与 Agent Loop 交互的概要：
 
-上下文管理采用四层防护（L0 tool_result 清理 → L1 异步预热 → L2 检查与应用 → L3 物理截断），由 ratio 水位线驱动。与 Agent Loop 的三个交互时机：
+上下文管理采用四层防护（L0 tool_result 清理 → L1 异步预热 → L2 检查与应用 → L3 物理截断），由 ratio 水位线驱动。除既有三处交互外，阶段二还新增了一条 **mid-turn current-tail guard** 钩子，位置固定在 `tool_dispatcher` 返回、`TurnEnd` 发完、下一次 `llm.chat_stream(...)` 之前：
+
+- **本轮 tool round 刚结束时（阶段二新增）**：`current_tail_guard::maybe_reduce_before_next_llm(...)`。顺序是 **precheck → apply 已完成历史 → history recompact → tail reduction waves → 必要时 single branch_summary collapse**；collapse 后会记录 `afterCollapse` 诊断，但**不会**在这里二次 fail-closed。详见 [`current-tail-aggregate-guard.md`](./current-tail-aggregate-guard.md)。
+
+既有三处交互时机保持不变：
 
 - **⑤ LLM 回复后**（user turn 完成，绝不阻塞 UI），顺序为：`run_layer0_cleanup` → `preheat.try_restart_if_pending(...)`（ExhaustedPending → Running）→ `check_after_reply`（ratio >= 0.85，非阻塞 poll + apply boundary）→ `preheat.try_start()`（Idle → Running，条件满足时）→ `emit_context_metrics`
 - **② 发起下一次 LLM 请求前**（下一个 user turn 进入时）：`preheat.try_restart_if_pending(...)` → `check_before_request`：`L2` 检查 CompactionSummary → 完成则 Boundary 切换（ratio >= 0.98 时可化异步为同步等待）→ `messages` 从更新后的 `userTurnsList` 重建

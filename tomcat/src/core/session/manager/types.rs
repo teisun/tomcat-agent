@@ -200,6 +200,21 @@ impl ContextState {
         self.post_usage_appended_chars = 0;
     }
 
+    /// mid-turn 改写 current tail 文本后，同步修正内存估算与 appended delta。
+    /// 仅适用于「发生在最后一次 Usage 之后」的本轮局部消息改写。
+    pub fn rewrite_local_tail_chars(&mut self, old_chars: usize, new_chars: usize) {
+        if new_chars >= old_chars {
+            let delta = new_chars - old_chars;
+            self.estimate_context_chars += delta;
+            self.post_usage_appended_chars += delta;
+            return;
+        }
+
+        let delta = old_chars - new_chars;
+        self.estimate_context_chars = self.estimate_context_chars.saturating_sub(delta);
+        self.post_usage_appended_chars = self.post_usage_appended_chars.saturating_sub(delta);
+    }
+
     /// 当前上下文是否超预算（token 维度）。
     pub fn is_over_budget(&self) -> bool {
         self.estimated_token_count() > self.context_budget_tokens

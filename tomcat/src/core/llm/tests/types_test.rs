@@ -211,7 +211,10 @@ fn stream_event_llm_error_and_notice_serde() {
     let notice_json = serde_json::to_value(&notice).unwrap();
     assert_eq!(notice_json["type"], "llm_notice");
     assert_eq!(notice_json["finish_reason"], "max_output_tokens");
-    assert!(notice_json["message"].as_str().unwrap().contains("max_output_tokens"));
+    assert!(notice_json["message"]
+        .as_str()
+        .unwrap()
+        .contains("max_output_tokens"));
 }
 
 // ============================================================================

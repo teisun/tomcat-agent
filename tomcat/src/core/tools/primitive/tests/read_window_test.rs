@@ -237,7 +237,10 @@ async fn read_applies_post_output_budget_guard_with_resume_hint() {
         .unwrap();
     let (out, meta) = unwrap_text(result);
 
-    assert!(meta.truncated, "post-read budget must truncate oversized window");
+    assert!(
+        meta.truncated,
+        "post-read budget must truncate oversized window"
+    );
     assert_eq!(meta.num_lines, 32, "4096-byte rows should stop at line 32");
     assert_eq!(
         meta.remaining_lines, 0,

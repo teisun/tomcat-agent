@@ -20,7 +20,9 @@ fn make_agent(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> AgentLoop {
     make_agent_with_bus(streams).0
 }
 
-fn make_agent_with_bus(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> (AgentLoop, Arc<DefaultEventBus>) {
+fn make_agent_with_bus(
+    streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+) -> (AgentLoop, Arc<DefaultEventBus>) {
     let llm = Arc::new(MockLlmProvider::new(streams));
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
@@ -30,7 +32,13 @@ fn make_agent_with_bus(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> (Age
         ..Default::default()
     };
     (
-        AgentLoop::new(llm, primitive, event_bus.clone(), config, CancellationToken::new()),
+        AgentLoop::new(
+            llm,
+            primitive,
+            event_bus.clone(),
+            config,
+            CancellationToken::new(),
+        ),
         event_bus,
     )
 }
@@ -175,6 +183,9 @@ async fn run_chat_stream_emits_llm_notice_after_message_end() {
     let observed = observed.lock().unwrap().clone();
     assert_eq!(
         observed,
-        vec![wire::WIRE_MESSAGE_END.to_string(), wire::WIRE_LLM_NOTICE.to_string()]
+        vec![
+            wire::WIRE_MESSAGE_END.to_string(),
+            wire::WIRE_LLM_NOTICE.to_string()
+        ]
     );
 }

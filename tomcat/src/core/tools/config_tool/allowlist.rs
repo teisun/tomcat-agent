@@ -16,9 +16,10 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "llm.provider",
     "context.context_window",
     "context.max_output_tokens",
-    "context.compaction_turns",
     "context.keep_recent_turns",
     "context.compaction_model",
+    "context.current_tail_compactable_min_chars",
+    "context.current_tail_single_result_max_chars",
     "context.compaction_max_tokens",
     "log.level",
     "preflight.auto_install_search_tools",
@@ -45,8 +46,9 @@ const CONFIG_WRITE_ALLOWLIST: &[&str] = &[
     "llm.default_model",
     "log.level",
     "preflight.auto_install_search_tools",
-    "context.compaction_turns",
     "context.keep_recent_turns",
+    "context.current_tail_compactable_min_chars",
+    "context.current_tail_single_result_max_chars",
     "context.compaction_max_tokens",
 ];
 

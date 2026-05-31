@@ -21,7 +21,7 @@
 3. **Agent Loop 模块化**：`src/core/agent_loop/run.rs`（832 行）拆为 dispatcher / tool_exec / stream_handler / error_classifier 子模块；三套管道（`src/ext/`）语义统一；
 4. **Thinking API + 展示**：`src/core/llm/` 接入 Claude/GPT/Qwen 的 thinking 协议，TUI 支持可折叠展示；
 5. **状态管理**：Checkpoint 机制 + 断点续跑、PLAN 模式增强、提问/应答机制、结果验证 review 子流程、集成测试规范达标；**Feedback 回路（T2-P1-005）002 迭代内取消**；
-6. **交付口径**：19 个 T2-P0/P1 任务全部 DONE；macOS/Linux 上单 Agent 可连续运行 ≥ 4 小时不退化；compaction 触发不产生死循环。
+6. **交付口径**：20 个 T2-P0/P1 任务全部 DONE；macOS/Linux 上单 Agent 可连续运行 ≥ 4 小时不退化；compaction 触发不产生死循环。
 
 ### 1.2 不做的范围
 
@@ -38,7 +38,7 @@
 
 ### 1.3 验收口径
 
-1. 19 个 T2-P0/P1 任务全部标记 `DONE` 并通过 Nibbles 复核；
+1. 20 个 T2-P0/P1 任务全部标记 `DONE` 并通过 Nibbles 复核；
 2. 单元测试覆盖率 ≥ 80%，集成测试（compaction、agent loop、权限、中断恢复）全部绿灯；
 3. `openspec/specs/Product_Brief.md` 与本看板在档位与任务 ID 映射上内部一致（归档回归检查以 Git 历史为准）。
 

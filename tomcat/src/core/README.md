@@ -58,7 +58,7 @@ Layer 3  Reasoning Loop
 - **ContextState**：运行时上下文状态，包含 `messages: Vec<ChatMessage>`、`estimate_context_chars: usize`、`context_budget_chars: usize`。在 `chat_loop` 外层初始化一次、跨迭代复用。Turn 边界从消息序列隐式推导（`role: user` = turn start）。
 - **init_context_state(session, config, system_text) -> ContextState**：从 transcript 加载历史，解析为 ChatMessage 列表，识别已有 Compaction entry 标记为 `kind: CompactionSummary`。
 - **build_context_from_state(state) -> Vec<ChatMessage>**：`state.messages.clone()`（trivial clone，内存表示 = LLM wire format）。
-- **ContextConfig**：上下文管理配置，含 `context_window`、`max_output_tokens`、`compaction_turns`、`keep_recent_turns`、`single_tool_result_max_chars`、`compaction_model`。
+- **ContextConfig**：上下文管理配置，含 `context_window`、`max_output_tokens`、`keep_recent_turns`、`layer0_single_result_max_chars`、`layer0_placeholder_threshold_chars`、`current_tail_compactable_min_chars`、`current_tail_single_result_max_chars`、`compaction_model`、`compaction_max_tokens`。
 
 ### 3.3 四层防护算法（`compaction/`）
 
@@ -105,12 +105,15 @@ Layer 3  Reasoning Loop
 |------|------|--------|----------|------|
 | context_window | usize | 400,000 | `PI_CONTEXT_WINDOW` | 模型 context window（tokens） |
 | max_output_tokens | usize | 128,000 | `PI_MAX_OUTPUT_TOKENS` | 模型最大输出（tokens） |
-| compaction_turns | usize | 10 | — | 每批 Compaction 的 turn 数上限 |
-| keep_recent_turns | usize | 3 | — | 保护区 turn 数（不参与压缩） |
-| single_tool_result_max_chars | usize | 400,000 | — | Layer 0 单条 tool result 截断阈值（chars） |
-| compaction_model | String | 与主模型相同 | — | Compaction LLM 调用使用的模型 |
+| keep_recent_turns | usize | 5 | — | Layer 1 历史 placeholder 保护区 turn 数（最近几轮不动） |
+| layer0_single_result_max_chars | usize | 50,000 | — | Layer 0 单条超大 tool result 落盘 + preview 阈值（chars） |
+| layer0_placeholder_threshold_chars | usize | 10,000 | — | Layer 0/L1 历史 tool result placeholder 阈值（chars） |
+| current_tail_compactable_min_chars | usize | 1 | — | mid-turn current-tail guard 的候选最小字符数 |
+| current_tail_single_result_max_chars | usize | 10,000 | — | mid-turn current-tail guard 的大结果落盘阈值（chars） |
+| compaction_model | String | gpt-5.2 | — | Compaction LLM 调用使用的模型 |
+| compaction_max_tokens | usize | 10,000 | — | Compaction 摘要路径的 max tokens 配置 |
 
-预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4 × 0.75`（GPT-5.4 默认 = 816,000 chars）。
+预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4`（GPT-5.4 默认 = 1,088,000 chars）。
 
 ## 6. 交互流程 (Workflow)
 

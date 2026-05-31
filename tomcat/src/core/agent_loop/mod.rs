@@ -125,9 +125,11 @@
 
 mod accessors;
 pub mod config_backend;
+mod current_tail_guard;
 mod error_classifier;
 mod reasoning_loop;
 mod run;
+mod steering_injection;
 mod stream_handler;
 mod tool_dispatcher;
 mod tool_exec;
@@ -138,6 +140,9 @@ mod types;
 mod tests;
 
 pub use config_backend::{ConfigBackend, SharedConfigBackend};
+pub use current_tail_guard::{
+    build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts,
+};
 pub use types::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, BackgroundCompletionRoutes,
     CompletionRoute, LoopError, SubagentType, ToolCallInfo,
