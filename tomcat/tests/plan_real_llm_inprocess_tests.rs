@@ -19,7 +19,7 @@
 //! 2. 所有 `frontmatter.todos[].status == Completed`
 //! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
 //! 4. 内存 `PlanRuntime::mode()` 与磁盘同步
-//! 5. `finalize_completed_to_chat()` 返回 `Some(plan_id)`；之后 mode = Chat
+//! 5. verifier 通过后 `update_plan` 会自动 `finalize_completed_to_chat()`；最终 mode = Chat
 //! 6. transcript 至少有一条 `plan.review` 自定义事件
 //! 7. transcript 至少有一条 `plan.code_review` 自定义事件，且顺序早于 `plan.verify`
 //! 8. transcript 至少有一条 `plan.verify` 自定义事件
@@ -643,9 +643,12 @@ async fn inprocess_full_plan_path_with_real_llm() {
         );
         assert_counter_artifact(&workdir);
 
-        // 6) finalize_completed_to_chat → Chat
+        // 6) update_plan 已在 verifier 通过后自动 finalize_completed_to_chat → Chat
         let finalized = ctx.plan_runtime.finalize_completed_to_chat();
-        assert_eq!(finalized.as_deref(), Some(plan_id.as_str()));
+        assert!(
+            finalized.is_none(),
+            "completed 已在 update_plan 收口时自动 finalize；此处不应再次拿到 plan_id"
+        );
         assert!(matches!(ctx.plan_runtime.mode(), PlanState::Chat));
 
         // 7) transcript 软断言：至少一条 plan.review + plan.code_review + plan.verify，

@@ -10,11 +10,12 @@ use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
     TOOL_RESULT_PLACEHOLDER,
 };
-use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessage, ChatMessageRole, LlmProvider, MessageKind};
+use crate::core::plan_runtime::PlanRuntime;
 use crate::core::plan_runtime::file_store::{read_plan, TodoItem, TodoStatus};
 use crate::core::session::manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
-    generate_entry_id, CompactionResult, ContextState,
+    generate_entry_id, CompactionResult, ContextState, PlanEventRef,
 };
 use crate::core::session::transcript::{
     insert_entry_after_message_id, rewrite_message_text_entries_by_id, BranchSummaryEntry,
@@ -94,6 +95,17 @@ struct ReductionResult {
 struct TailReductionResult {
     freed_chars: usize,
     after_each_wave: Vec<usize>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct CollapseSummaryArtifacts {
+    pub summary_text: String,
+    pub summary_message: ChatMessage,
+    pub transcript_entry: TranscriptEntry,
+    pub covered_start_id: String,
+    pub covered_end_id: String,
+    pub entry_id: String,
 }
 
 pub(super) async fn maybe_reduce_before_next_llm(
@@ -566,57 +578,28 @@ async fn collapse_to_branch_summary(
         .cloned()
         .collect();
     ensure_working_message_ids(agent, &mut working)?;
-    let (covered_start_id, covered_end_id) = collapse_bounds(&working)
-        .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
-    let summary = generate_summary(
+    let artifacts = build_collapse_summary_artifacts_for_test(
         &working,
-        None,
         &*agent.llm,
         &agent.config.context_config.compaction_model,
+        plan_runtime.as_deref(),
+        latest_plan_event.as_ref(),
     )
     .await?;
-    let summary_text = format!(
-        "## Structured Summary\n{}\n\n## Execution Keepalive\n{}",
-        summary.trim(),
-        build_keepalive_snapshot(plan_runtime.as_ref(), latest_plan_event.as_ref())
-    );
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(());
     };
-    let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
-    let covered_count = working
-        .iter()
-        .filter(|msg| msg.kind != MessageKind::CompactionSummary)
-        .count();
-    let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-        id: Some(entry_id.clone()),
-        parent_id: None,
-        timestamp: Utc::now().to_rfc3339(),
-        summary: Some(summary_text.clone()),
-        covered_start_id: Some(covered_start_id.clone()),
-        covered_end_id: Some(covered_end_id.clone()),
-        covered_count: Some(covered_count),
-        is_boundary: Some(true),
-        preheat_compaction_id: None,
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        error: None,
-        attempts: None,
-    });
     if let Err(err) =
-        maybe_write_collapse_entry(&ctx_state.transcript_path, &covered_end_id, &entry)
+        maybe_write_collapse_entry(
+            &ctx_state.transcript_path,
+            &artifacts.covered_end_id,
+            &artifacts.transcript_entry,
+        )
     {
         warn!(error = %err, "collapse branch_summary transcript write failed");
     }
 
-    let summary_msg = apply_collapse_summary(
-        &working,
-        &summary_text,
-        &covered_start_id,
-        &covered_end_id,
-        &entry_id,
-    )?;
+    let summary_msg = artifacts.summary_message;
     let new_chars = estimate_msg_chars(&summary_msg);
     let saved_chars = ctx_state.estimate_context_chars.saturating_sub(new_chars);
     ctx_state.messages = vec![summary_msg.clone()];
@@ -639,6 +622,65 @@ async fn collapse_to_branch_summary(
     agent.start_idx = messages.len().saturating_sub(1);
     agent.context_tail_start = agent.start_idx;
     Ok(())
+}
+
+#[doc(hidden)]
+pub async fn build_collapse_summary_artifacts_for_test(
+    messages: &[ChatMessage],
+    llm: &dyn LlmProvider,
+    compaction_model: &str,
+    plan_runtime: Option<&PlanRuntime>,
+    latest_plan_event: Option<&PlanEventRef>,
+) -> Result<CollapseSummaryArtifacts, AppError> {
+    let working: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|msg| msg.role != ChatMessageRole::System)
+        .cloned()
+        .collect();
+    let (covered_start_id, covered_end_id) = collapse_bounds(&working)
+        .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
+    let summary = generate_summary(&working, None, llm, compaction_model).await?;
+    let summary_text = format!(
+        "## Structured Summary\n{}\n\n## Execution Keepalive\n{}",
+        summary.trim(),
+        build_keepalive_snapshot(plan_runtime, latest_plan_event)
+    );
+    let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
+    let covered_count = working
+        .iter()
+        .filter(|msg| msg.kind != MessageKind::CompactionSummary)
+        .count();
+    let transcript_entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some(entry_id.clone()),
+        parent_id: None,
+        timestamp: Utc::now().to_rfc3339(),
+        summary: Some(summary_text.clone()),
+        covered_start_id: Some(covered_start_id.clone()),
+        covered_end_id: Some(covered_end_id.clone()),
+        covered_count: Some(covered_count),
+        is_boundary: Some(true),
+        preheat_compaction_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
+    });
+    let summary_message = apply_collapse_summary(
+        &working,
+        &summary_text,
+        &covered_start_id,
+        &covered_end_id,
+        &entry_id,
+    )?;
+    Ok(CollapseSummaryArtifacts {
+        summary_text,
+        summary_message,
+        transcript_entry,
+        covered_start_id,
+        covered_end_id,
+        entry_id,
+    })
 }
 
 fn maybe_write_collapse_entry(
@@ -776,8 +818,8 @@ fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
 }
 
 fn build_keepalive_snapshot(
-    plan_runtime: Option<&std::sync::Arc<crate::core::plan_runtime::PlanRuntime>>,
-    latest_plan_event: Option<&crate::core::session::manager::PlanEventRef>,
+    plan_runtime: Option<&PlanRuntime>,
+    latest_plan_event: Option<&PlanEventRef>,
 ) -> String {
     let Some(plan_runtime) = plan_runtime else {
         return format!(

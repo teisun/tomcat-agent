@@ -356,7 +356,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 | `keep_recent_turns`                  | `usize`  | `5`         | 历史 placeholder 压缩的保护区 turn 数；最近几轮先不动                                                                                               |
 | `current_tail_compactable_min_chars` | `usize`  | `1`         | 阶段二 mid-turn current-tail guard 的候选最小字符数                                                                                                |
 | `current_tail_single_result_max_chars` | `usize` | `10_000`    | 阶段二 mid-turn current-tail guard 的大结果落盘阈值                                                                                                |
-| `compaction_model`                   | `String` | `"gpt-5.4"` | Compaction 摘要专用模型 ID（与主对话 `model` 可相同或不同）                                                                                         |
+| `compaction_model`                   | `String` | `"gpt-5.2"` | Compaction 摘要专用模型 ID（与主对话 `model` 可相同或不同）                                                                                         |
 | `compaction_max_tokens`              | `usize`  | `10_000`    | Layer 1 异步预热生成摘要的 token 上限（预留）。当前**不设 API `max_tokens` 硬限制**以保证摘要语义完整性；仅在 prompt 中软引导 LLM 控制在 ~8K tokens 篇幅。未来若摘要频繁超标，可启用 API 硬限制 |
 
 
@@ -1093,7 +1093,7 @@ Prioritize actionable information over verbose descriptions.
 
 | 策略               | 说明                                                         | 推荐        |
 | ---------------- | ---------------------------------------------------------- | --------- |
-| **默认：`gpt-5.4`** | 与主对话同代模型，摘要质量与长上下文能力一致；`compaction_model` 默认值为 `"gpt-5.4"` | **当前默认**  |
+| **默认：`gpt-5.2`** | 作为默认压缩模型，固定给摘要/keepalive 路径使用；若想与主对话同模，可显式把 `compaction_model` 改成当前 `model` | **当前默认**  |
 | 与主对话对齐           | 将 `compaction_model` 设为与 `model` 相同，行为与「全用主模型」一致           | 可选        |
 | 轻量模型             | 如 `gpt-4o-mini` / DeepSeek-V3，成本低但需自行评估摘要质量                | 成本敏感时可改配置 |
 

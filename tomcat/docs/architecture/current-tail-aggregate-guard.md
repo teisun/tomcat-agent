@@ -416,6 +416,14 @@ C 不新增 `CustomEntry`；它直接复用 [`context-management.md`](./context-
 - `Execution Keepalive` 可沿 `Execution_Keepalive_SUMMARIZATION_PROMPT` 的格式口径渲染，但**数据真相只来自本地状态**；
 - 任何 C 成功路径都要调用 `ctx_state.invalidate_api_usage()`。
 
+测试口径补充：
+
+- `build_collapse_summary_artifacts_for_test(...)` 是当前暴露给 integration test 的最小 seam：它复用生产代码里的真实 `generate_summary(...)`、同一份 keepalive 拼接逻辑，以及同一份 `BranchSummaryEntry` / `ChatMessage::compaction_summary(...)` 产物组装；
+- real-LLM A/B/C 的边界拆分固定为：
+  - **A**：只验证“真实摘要生成 + 程序 keepalive 拼接 + branch_summary/compaction_summary 产物形状”；
+  - **B**：直接把 `branch_summary + keepalive` 喂给真实 LLM，再真实执行 `update_plan`，验证模型能依据 keepalive 抓到当前 step 并推进下一条 pending；
+  - **C**：先把 A 产物落到 transcript，再经 `init_context_state()` + `attach_from_event(...)` 恢复 `PlanRuntime`，最后再喂给真实 LLM，验证 reload 后仍能续跑。
+
 ---
 
 ## 6. One-Glance Map（文件职责总览）
@@ -721,6 +729,9 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | 单元 | `src/core/agent_loop/tests/steering_followup_test.rs::inject_steering_messages_records_context_and_persists_msg_id` | DONE | steering 注入统一走记账 + append/persist + push。 |
 | 单元 | `src/core/session/manager/tests/context_state_test.rs::rewrite_local_tail_chars_updates_estimate_and_post_usage` | DONE | 改短了消息，称重底账也一起变。 |
 | 集成 | `tests/context_management_tests.rs::test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm` | DONE | 真正的 `AgentLoop::run()` 链路上，先减负再发下一次 LLM。 |
+| 集成(real-LLM) | `tests/current_tail_guard_real_llm_tests.rs::real_llm_collapse_summary_includes_programmatic_keepalive` | DONE | A：真实摘要 + 程序 keepalive 拼接的最终文本与 entry/message 形状都锁死。 |
+| 集成(real-LLM) | `tests/current_tail_guard_real_llm_tests.rs::real_llm_reads_keepalive_and_calls_update_plan` | DONE | B：直接喂 `branch_summary + keepalive` 后，真实模型会继续调用 `update_plan`。 |
+| 集成(real-LLM) | `tests/current_tail_guard_real_llm_tests.rs::real_llm_after_reload_reads_keepalive_and_calls_update_plan` | DONE | C：reload transcript + 恢复 `PlanRuntime` 后，真实模型仍能续跑。 |
 | 文档 | `docs/architecture/current-tail-aggregate-guard.md` 本文同步 | DONE | 主方案文档改成当前事实。 |
 | 文档 | `docs/architecture/agent-loop.md` / `docs/architecture/plan-runtime.md` 交叉引用同步 | DONE | 相邻文档不再讲旧世界。 |
 
@@ -732,7 +743,7 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | G2 | `build_precheck_decision_covers_fit_reduce_and_collapse_routes` + `mid_turn_guard_fits_is_noop` | DONE | 看整车，不看单箱。 |
 | G3 | `mid_turn_guard_stops_after_history_compaction_without_touching_tail` + `mid_turn_guard_runs_first_tail_wave_before_recheck` + `mid_turn_guard_collapses_when_two_candidates_remain` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | 历史和 tail 的顺序、停点与刀法都锁死。 |
 | G4 | `mid_turn_guard_reduced_tail_survives_reload` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | helper 写盘成功时，关掉再开也还是同一份减负结果。 |
-| G5 | `collapse_to_branch_summary_keeps_planning_snapshot` + `collapse_to_branch_summary_keeps_executing_snapshot` + `collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists` | DONE | 压完 token 不能把 plan 压没。 |
+| G5 | `collapse_to_branch_summary_keeps_planning_snapshot` + `collapse_to_branch_summary_keeps_executing_snapshot` + `collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists` + real-LLM A/B/C | DONE | deterministic snapshot 与真实续跑两条线都证明“压完 token 不能把 plan 压没”。 |
 | G6 | `inject_steering_messages_records_context_and_persists_msg_id` + `collapse_handles_missing_msg_ids_without_sink` | DONE | `msg_id` 边界和 steering 正规通道都锁死。 |
 | G7 | 本文 + `agent-loop.md` / `plan-runtime.md` 同步 | DONE | 阶段边界、消息生命周期与 keepalive 口径都讲同一种话。 |
 

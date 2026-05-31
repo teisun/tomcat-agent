@@ -110,7 +110,7 @@ Layer 3  Reasoning Loop
 | layer0_placeholder_threshold_chars | usize | 10,000 | — | Layer 0/L1 历史 tool result placeholder 阈值（chars） |
 | current_tail_compactable_min_chars | usize | 1 | — | mid-turn current-tail guard 的候选最小字符数 |
 | current_tail_single_result_max_chars | usize | 10,000 | — | mid-turn current-tail guard 的大结果落盘阈值（chars） |
-| compaction_model | String | 与主模型相同 | — | Compaction LLM 调用使用的模型 |
+| compaction_model | String | gpt-5.2 | — | Compaction LLM 调用使用的模型 |
 | compaction_max_tokens | usize | 10,000 | — | Compaction 摘要路径的 max tokens 配置 |
 
 预算公式：`contextBudgetChars = (context_window - max_output_tokens) × 4`（GPT-5.4 默认 = 1,088,000 chars）。
