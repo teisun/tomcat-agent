@@ -37,7 +37,7 @@
 | **T2-P0-009** | 三套管道重构 | `TODO` | — | `feature/pipeline-unify` | [tasks/T2-P0-009.md](./tasks/T2-P0-009.md) |
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理 | `TODO` | — | `feature/bash-ast-detect-precision` | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 | **T2-P1-010** | OpenAI Responses 跨 turn 推理续传 | `TODO` | — | `feature/responses-reasoning-continuity` | [tasks/T2-P1-010.md](./tasks/T2-P1-010.md) |
-| **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `PENDING_INTEGRATION` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
+| **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `DONE` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
 
 ## 5. 开放任务依赖（概览）
 

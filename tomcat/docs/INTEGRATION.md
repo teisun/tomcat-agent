@@ -7,6 +7,30 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
+| Nibbles | 2026-05-31 14:30 +0800 | INTEGRATION | develop | - |
+
+### 集成测试报告（merge `feature/current-tail-aggregate-guard` → develop，T2-P1-011）
+
+**合并分支**：`feature/current-tail-aggregate-guard` → `develop`（`git merge --no-ff`，无冲突，4 commit）。current-tail aggregate guard 阶段二预防型上下文减负。
+
+**全量验收门禁（`run-integration-tests.sh all`，develop 侧复跑）**：`release` / `clippy(--all-targets -D warnings)` / `lib`（1267 passed）/ `integration-parallel` / `integration-serial`（含 `cli_tests` 83 passed）**全绿**。首轮 clippy 暴露 2 条测试侧红线（`manual_contains`、`await_holding_lock`），已在本流程直接修复并复验通过（未弱化断言）。
+
+**real-LLM 分组（出 gate，需 OPENAI_API_KEY）**：本卡新增 `current_tail_guard_real_llm_tests` A/B/C **3 passed**；`plan_real_llm_inprocess_tests` 首轮临界超时、重跑通过（254.5s, flake）。
+
+### ⚠️ 反馈 owner（Spike）：real-LLM CLI E2E 时延超时（与本合并无关）
+
+| 失败项 | 现象 | 期望/实际 | 建议负责人 |
+| :--- | :--- | :--- | :--- |
+| `plan_real_llm_cli_e2e::cli_full_plan_path_with_real_llm` | 两次复跑均 `EXEC_TIMEOUT`(240s) 子进程超时；真实 gpt-5.4 全链路任务实际完成正确，仅墙钟超限；guard 全程 `route="fits"` 未介入 | 期望 240s 内完成；实际多轮真 LLM 执行 > 240s | Spike：复核 `plan_real_llm_cli_e2e.rs` `EXEC_TIMEOUT`/`PLANNING_TIMEOUT` 与 `plan_real_llm_inprocess_tests.rs` exec_round 超时是否按当前 gpt-5.4 时延上调（liveness 守卫，非断言）；该文件本合并未改动 |
+
+### 🔌 INTERFACE (接口变更)
+- `context.compaction_turns` 移除；新增 `context.current_tail_compactable_min_chars`(默认 1) / `context.current_tail_single_result_max_chars`(默认 10_000)；`context.keep_recent_turns` 真实驱动 L1 保护区（默认 5）；`context.compaction_model` 默认改为 `gpt-5.2`。
+- `agent_loop` 新增 `current_tail_guard`（mid-turn precheck + reduce/collapse）与 `steering_injection`；`compaction` 导出 `persist_tool_result_text`/`is_persisted_tool_result_text`/`TOOL_RESULT_PLACEHOLDER`(crate)；`session::transcript` 新增 `rewrite_message_text_entries_by_id`/`MessageTextRewrite`；`ContextState::rewrite_local_tail_chars`。
+
+---
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-03-10 11:00 | INTEGRATION | develop | 65.6 |
 
 ### 集成测试报告（TASK-02 feature/cli-commands 合并）

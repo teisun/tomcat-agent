@@ -1,6 +1,20 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-29 00:59 | ACTIVE | develop | — |
+| Nibbles | 2026-05-31 14:30 +0800 | ACTIVE | develop | — |
+
+### 2026-05-31 | merge `feature/current-tail-aggregate-guard` → develop（T2-P1-011 集成验收）
+
+- **合并范围**：用户指定合并当前分支 `feature/current-tail-aggregate-guard`（4 commit：`1bb4d66` 阶段二实现 / `08f4966` fmt / `42f4ee4` 称重点+steering+测试矩阵收口 / `8085c40` keepalive A/B/C 真 LLM 验证 + 默认压缩模型 gpt-5.2）→ `develop`，`git merge --no-ff`，无冲突。对应 T2-P1-011（current-tail aggregate guard 阶段二预防型上下文减负）。
+- **全量 review（编码规范 4 件套）**：mid-turn precheck/route 决策、`reduce → 先 apply 历史 → 历史再压 → tail 波次 placeholder → 单条 branch_summary collapse + keepalive`、`steering_injection` 统一记账通道、`truncation.rs` 抽出 `persist_tool_result_text`/`is_persisted_tool_result_text` 复用、`session/transcript.rs::rewrite_message_text_entries_by_id` 原子重写、`ContextState::rewrite_local_tail_chars` 计数同步、config 移除 `compaction_turns` 并新增 `current_tail_*` 两字段——分层/依赖方向/错误处理/可测试性/注释覆盖均合规，无设计缺陷。advisory（非阻塞）：`current_tail_guard.rs` ~900 行落入 RUST_FILE_LINES L-3「建议拆分」区间（规范明确非 CI 门禁）；`build_collapse_summary_artifacts_for_test` 命名带 `_for_test` 但被生产路径 `collapse_to_branch_summary` 复用，命名易误导，建议后续重命名。
+- **§1 规格/场景库**：核对 `User_Stories.md` 与 `E2E_SCENARIO_LIBRARY.md`（新增 E2E-CLI-094/095）与当前实现一致，无遗漏。
+- **§4 全量验收门禁（develop 侧复跑，`run-integration-tests.sh all`）**：`release`（4m26s）/ `clippy`（`--all-targets -D warnings`）/ `lib`（1267 passed, 0 failed, 1 ignored）/ `integration-parallel`（全绿）/ `integration-serial`（全绿，含 `cli_tests` 83 passed）全部通过。
+  - **首轮 clippy 红（已直接修复）**：`--all-targets` 暴露两条测试侧 clippy 红线：①`src/core/agent_loop/tests/current_tail_guard_runtime_test.rs:156` `manual_contains`（`iter().any(|t| *t==X)` → `contains(&X)`）；②`tests/current_tail_guard_real_llm_tests.rs:474` `await_holding_lock`（`home_lock()` std Mutex 跨 await 持有）。修复：①改 `contains`；②删除冗余 `home_lock()` 手动锁与随之死代码的 `home_lock` 函数——该用例已由 `#[serial]` + `HomeGuard` 串行化，与同文件 A/B 用例一致，未弱化任何断言。重跑 `clippy` 通过，重跑被改的 `current_tail_guard_runtime_test`（3 passed）通过。
+- **real-LLM 分组（新增 target 须显式跑 `integration-real-llm`，需 OPENAI_API_KEY）**：
+  - `current_tail_guard_real_llm_tests`（本卡新增、并因 clippy 修复被改动）：**A/B/C 3 passed**（两次运行均绿）。
+  - `plan_real_llm_inprocess_tests`（本卡仅改 finalize 断言语义+注释）：首轮 `exec_round_1` 180s 超时红，**重跑通过（254.5s）**——临界超时 flake；超时点在 line 471，早于本卡改动处（~643），与本卡无关。
+  - `plan_real_llm_cli_e2e::cli_full_plan_path_with_real_llm`（本卡**未改动**该文件）：**两次复跑均 240s `EXEC_TIMEOUT` 子进程超时红**。日志显示真实 gpt-5.4 全链路（build→exec 多工具轮→verify→code_review→finalize）确实完成了任务（counter.py 打印 0、plan 完成），仅墙钟超过测试硬超时；全程 `mid_turn_precheck route="fits"`（working≈13k ≪ budget 272k），本次合并的 current-tail guard 未介入、不增加 LLM 调用，**判定为与本合并无关的真实 LLM 时延导致的 liveness 超时**，属出 gate（real-llm 不进 `all`/CI）项。**反馈 owner（Spike）**：建议复核 `tests/plan_real_llm_cli_e2e.rs` 的 `EXEC_TIMEOUT`(240s)/`PLANNING_TIMEOUT`(180s) 与 `plan_real_llm_inprocess_tests.rs` exec_round(180s) 是否需按当前 gpt-5.4 时延上调（liveness 守卫，非断言），见 docs/INTEGRATION.md。
+- **结论**：T2-P1-011 功能已正确集成；强制门禁（release/clippy/lib/integration 含 cli_tests E2E）全绿，本卡自身 real-LLM target 全绿；唯一红项为与本合并无关、出 gate 的 `plan_real_llm_cli_e2e` 真 LLM 时延超时（已记录并反馈 owner）。据此将 T2-P1-011 置 `DONE`。
+- **本流程提交**：`fix(test)` clippy 红线修复 + 本 status/看板/INTEGRATION 文档更新；merge commit 已生成，未推送远端（待用户确认）。
 
 ### 2026-05-29 | plan active-binding v4-g implementation + acceptance
 
