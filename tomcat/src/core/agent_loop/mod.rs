@@ -129,6 +129,7 @@ mod current_tail_guard;
 mod error_classifier;
 mod reasoning_loop;
 mod run;
+mod steering_injection;
 mod stream_handler;
 mod tool_dispatcher;
 mod tool_exec;

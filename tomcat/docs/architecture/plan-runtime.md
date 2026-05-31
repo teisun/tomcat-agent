@@ -29,6 +29,33 @@
 | `active_plan_path` | `PlanRuntime` | `/plan build`、`attach_from_event(plan.build/update)` | 记住当前绑定/retain 的真实 plan 路径，供 `update_plan` 缺省路由与 build retain 续接。 |
 | `active_plan_id()` | `PlanState` helper | 无单独写入 | 从 `Pending / Executing / Completed` 内嵌的 `plan_id` 读值；它不是第三个 runtime 字段。 |
 
+## 2026-05 Current-Tail Collapse Keepalive 补充
+
+阶段二 `current-tail aggregate guard` 在 reasoning loop 的 mid-turn 路径里，如果局部减负仍不够，会把整份 working set 折成单条 `branch_summary`。这一步不会让 LLM 自己“顺手记住当前在做什么”，而是同步读取 `PlanRuntime` 生成一个固定格式的 `Execution Keepalive` 片段，直接拼进 collapse summary。
+
+当前实现的 keepalive 数据来源固定如下：
+
+- `PlanRuntime.mode()`：写入 `mode`。
+- `PlanRuntime.active_plan_path()`：写入 `active_plan_path`。
+- `PlanState::active_plan_id()`，若取不到则回退 `active_planning_plan_id()`：写入 `active_plan_id`。
+- `Planning` 模式：读取 `snapshot_session_todos()`。
+- `Executing / Pending` 模式：读取 `active_plan_path` 对应 plan file 的 `frontmatter.todos`。
+- `ContextState.latest_plan_event`：写入 `latest_plan_event`。
+
+```text
+mid-turn collapse
+  -> build_keepalive_snapshot(plan_runtime, latest_plan_event)
+  -> "## Structured Summary" + "## Execution Keepalive"
+  -> apply_boundary
+  -> 下一次 LLM / 后续 reload 都只看这条 summary
+```
+
+约束口径：
+
+- keepalive 是 **runtime 生成的结构化真相**，不是模型自由概括。
+- collapse 后 transcript 里的 `branch_summary` 插入若失败，只记 `warn`；内存里的 collapse 结果仍继续生效。
+- 对应回归测试见 `current_tail_guard_test.rs::collapse_to_branch_summary_keeps_planning_snapshot`、`current_tail_guard_runtime_test.rs::collapse_to_branch_summary_keeps_executing_snapshot`、`current_tail_guard_runtime_test.rs::collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists`。
+
 ### Transcript 事件 Schema（现行实现）
 
 | 事件 | 写入方 | payload | 备注 |

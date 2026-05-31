@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| @Spike | 2026-05-31 02:08 +0800 | PENDING_INTEGRATION | feature/current-tail-aggregate-guard | - |
+| @Spike | 2026-05-31 11:47 +0800 | PENDING_INTEGRATION | feature/current-tail-aggregate-guard | - |
 
 ### DONE
 - [x] [P1] 认领 `T2-P1-011`，确认任务卡为 `DOING` / `Spike`
@@ -26,9 +26,13 @@
 - 已跑：`cargo test --lib context_config_default_values`
 - 已跑：`cargo test --lib l1_keep_recent_turns_reads_config_value`
 - 已跑：`cargo test --lib current_tail_guard_test`
+- 已跑：`cargo test --lib current_tail_guard_behavior_test -- --nocapture`
+- 已跑：`cargo test --lib current_tail_guard_runtime_test -- --nocapture`
+- 已跑：`cargo test --lib steering_followup_test -- --nocapture`
 - 已跑：`cargo test --lib rewrite_message_text_entries_by_id_updates_target_messages_only`
 - 已跑：`cargo test --lib rewrite_local_tail_chars_updates_estimate_and_post_usage`
 - 已跑：`cargo test --test context_management_tests`
 - 已跑：`cargo test --test context_management_tests test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm -- --nocapture`
-- 已核对：`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 已补阶段二 current-tail guard 场景，并登记 `AgentLoop::run()` 集成链路；本轮复用既有 integration crate，`scripts/test-groups.sh` 无需改动
+- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致，无需额外补充用户面场景
+- 已核对：本轮复用既有 integration crate，`scripts/test-groups.sh` 无需改动；全量门禁仍按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 规定的后台日志 + 分类分组顺序执行
 - 已提交：`1bb4d66`（阶段二实现）+ 后续 `style(rust)` 提交（补齐分支内遗留的 `cargo fmt` 格式化，无行为变更）

@@ -14,7 +14,7 @@ use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use crate::core::plan_runtime::file_store::{read_plan, TodoItem, TodoStatus};
 use crate::core::session::manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
-    CompactionResult, ContextState,
+    generate_entry_id, CompactionResult, ContextState,
 };
 use crate::core::session::transcript::{
     insert_entry_after_message_id, rewrite_message_text_entries_by_id, BranchSummaryEntry,
@@ -26,10 +26,56 @@ use super::types::AgentLoop;
 
 const COMPACTABLE_TOOLS: &[&str] = &["read", "search_files", "bash", "task_output"];
 
-enum GuardRoute {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardRoute {
     Fits,
     Reduce,
     Collapse,
+}
+
+impl GuardRoute {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fits => "fits",
+            Self::Reduce => "reduce",
+            Self::Collapse => "collapse",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardRouteReason {
+    Fits,
+    PreheatShortcut,
+    ReducibleEnough,
+    NotEnoughReducible,
+    MissingContextState,
+}
+
+impl GuardRouteReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fits => "fits",
+            Self::PreheatShortcut => "preheat_shortcut",
+            Self::ReducibleEnough => "reducible_enough",
+            Self::NotEnoughReducible => "not_enough_reducible",
+            Self::MissingContextState => "missing_context_state",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AggregatePrecheckDecision {
+    pub route: GuardRoute,
+    pub route_reason: GuardRouteReason,
+    pub working_tokens: usize,
+    pub budget_tokens: usize,
+    pub overflow_tokens: usize,
+    pub max_reducible: usize,
+    pub candidate_count: usize,
+    pub yellow_lamp_only: bool,
+    pub after_each_wave: Vec<usize>,
+    pub after_collapse: Option<usize>,
 }
 
 struct TailCandidate {
@@ -37,114 +83,199 @@ struct TailCandidate {
     message_id: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct ReductionResult {
+    mutated: bool,
+    freed_chars: usize,
+    after_each_wave: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct TailReductionResult {
+    freed_chars: usize,
+    after_each_wave: Vec<usize>,
+}
+
 pub(super) async fn maybe_reduce_before_next_llm(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<(), AppError> {
+    let _ = maybe_reduce_before_next_llm_inner(agent, messages).await?;
+    Ok(())
+}
+
+async fn maybe_reduce_before_next_llm_inner(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+) -> Result<Option<AggregatePrecheckDecision>, AppError> {
     let Some(ctx_state) = agent.context_state.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
     let working_tokens = ctx_state.estimated_token_count();
     let budget_tokens = ctx_state.context_budget_tokens;
     if budget_tokens == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
-    let ratio = ctx_state.usage_ratio();
-    if ratio >= 0.90 {
+    let mut decision = build_precheck_decision(agent, messages, working_tokens, budget_tokens);
+    if decision.yellow_lamp_only {
         info!(
             target: "tomcat_chat_diag",
             phase = "mid_turn_precheck_yellow",
-            ratio,
-            working_tokens,
-            budget_tokens
+            ratio = ctx_state.usage_ratio(),
+            working_tokens = decision.working_tokens,
+            budget_tokens = decision.budget_tokens
         );
     }
-
-    let route = decide_guard_route(agent, messages, working_tokens, budget_tokens);
-    if matches!(route, GuardRoute::Fits) {
-        return Ok(());
+    if matches!(decision.route, GuardRoute::Fits) {
+        log_aggregate_precheck_decision(&decision);
+        return Ok(Some(decision));
     }
 
-    let mut mutated = false;
-    if matches!(route, GuardRoute::Reduce) {
-        mutated = reduce_before_next_llm(agent, messages)?;
-    }
+    let reduction = if matches!(decision.route, GuardRoute::Reduce) {
+        reduce_before_next_llm(agent, messages)?
+    } else {
+        ReductionResult::default()
+    };
+    decision.after_each_wave = reduction.after_each_wave;
 
+    let mut mutated = reduction.mutated;
     let still_over_budget = agent
         .context_state
         .as_ref()
         .is_some_and(ContextState::is_over_budget);
-    if matches!(route, GuardRoute::Collapse) || still_over_budget {
+    if matches!(decision.route, GuardRoute::Collapse) || still_over_budget {
         collapse_to_branch_summary(agent, messages).await?;
+        decision.after_collapse = agent
+            .context_state
+            .as_ref()
+            .map(ContextState::estimated_token_count);
         mutated = true;
     }
+
+    log_aggregate_precheck_decision(&decision);
 
     if mutated {
         agent.emit_context_metrics();
     }
-    Ok(())
+    Ok(Some(decision))
 }
 
-fn decide_guard_route(
+#[cfg(test)]
+pub(super) async fn maybe_reduce_before_next_llm_capture_decision(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+) -> Result<Option<AggregatePrecheckDecision>, AppError> {
+    maybe_reduce_before_next_llm_inner(agent, messages).await
+}
+
+pub(super) fn build_precheck_decision(
     agent: &AgentLoop,
     messages: &[ChatMessage],
     working_tokens: usize,
     budget_tokens: usize,
-) -> GuardRoute {
+) -> AggregatePrecheckDecision {
+    let yellow_lamp_only = budget_tokens > 0
+        && working_tokens <= budget_tokens
+        && ctx_ratio(working_tokens, budget_tokens) >= 0.90;
+    let overflow_tokens = working_tokens.saturating_sub(budget_tokens);
     if working_tokens <= budget_tokens {
-        return GuardRoute::Fits;
+        return AggregatePrecheckDecision {
+            route: GuardRoute::Fits,
+            route_reason: GuardRouteReason::Fits,
+            working_tokens,
+            budget_tokens,
+            overflow_tokens,
+            max_reducible: 0,
+            candidate_count: 0,
+            yellow_lamp_only,
+            after_each_wave: Vec::new(),
+            after_collapse: None,
+        };
     }
 
-    let overflow_tokens = working_tokens.saturating_sub(budget_tokens);
     let needed_tokens = overflow_tokens
         .saturating_add(256)
         .max(((overflow_tokens as f64) * 1.2).ceil() as usize);
     let Some(ctx_state) = agent.context_state.as_ref() else {
-        return GuardRoute::Collapse;
+        return AggregatePrecheckDecision {
+            route: GuardRoute::Collapse,
+            route_reason: GuardRouteReason::MissingContextState,
+            working_tokens,
+            budget_tokens,
+            overflow_tokens,
+            max_reducible: 0,
+            candidate_count: 0,
+            yellow_lamp_only,
+            after_each_wave: Vec::new(),
+            after_collapse: None,
+        };
     };
-    if ctx_state.preheat.is_finished() {
-        return GuardRoute::Reduce;
-    }
-
-    let reducible_tokens =
-        estimate_history_reduction_tokens(ctx_state, &agent.config.context_config)
-            + estimate_tail_reduction_tokens(
-                messages,
-                agent.start_idx.min(messages.len()),
-                agent
-                    .config
-                    .context_config
-                    .current_tail_compactable_min_chars,
-            );
-    if reducible_tokens >= needed_tokens {
-        GuardRoute::Reduce
+    let candidate_count = collect_tail_candidates(
+        messages,
+        agent.start_idx.min(messages.len()),
+        agent
+            .config
+            .context_config
+            .current_tail_compactable_min_chars,
+    )
+    .len();
+    let max_reducible = estimate_history_reduction_tokens(ctx_state, &agent.config.context_config)
+        + estimate_tail_reduction_tokens(
+            messages,
+            agent.start_idx.min(messages.len()),
+            agent
+                .config
+                .context_config
+                .current_tail_compactable_min_chars,
+        );
+    let (route, route_reason) = if ctx_state.preheat.is_finished() {
+        // D3：预热收益一旦就绪，就优先尝试整条 Reduce 链路
+        // （apply 历史 -> 历史再压 -> tail reduction），而不是先用纯理论
+        // `max_reducible >= needed` 再做一次严格裁决。
+        (GuardRoute::Reduce, GuardRouteReason::PreheatShortcut)
+    } else if max_reducible >= needed_tokens {
+        (GuardRoute::Reduce, GuardRouteReason::ReducibleEnough)
     } else {
-        GuardRoute::Collapse
+        (GuardRoute::Collapse, GuardRouteReason::NotEnoughReducible)
+    };
+    AggregatePrecheckDecision {
+        route,
+        route_reason,
+        working_tokens,
+        budget_tokens,
+        overflow_tokens,
+        max_reducible,
+        candidate_count,
+        yellow_lamp_only,
+        after_each_wave: Vec::new(),
+        after_collapse: None,
     }
 }
 
 fn reduce_before_next_llm(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
-) -> Result<bool, AppError> {
-    let mut mutated = false;
-    let mut freed_chars = 0usize;
+) -> Result<ReductionResult, AppError> {
+    let mut result = ReductionResult::default();
 
     let applied_history = {
         let Some(ctx_state) = agent.context_state.as_mut() else {
-            return Ok(false);
+            return Ok(result);
         };
         check_after_reply(ctx_state, &*agent.event_bus)
     };
     if applied_history {
         rebuild_messages_from_context(agent, messages);
-        mutated = true;
+        result.mutated = true;
+        if !context_is_over_budget(agent) {
+            return Ok(result);
+        }
     }
 
     let history_reduced = {
         let Some(ctx_state) = agent.context_state.as_mut() else {
-            return Ok(mutated);
+            return Ok(result);
         };
         let reduced = compact_tool_results(ctx_state, &agent.config.context_config);
         if reduced > 0 {
@@ -153,41 +284,46 @@ fn reduce_before_next_llm(
         reduced
     };
     if history_reduced > 0 {
-        freed_chars += history_reduced;
+        result.freed_chars += history_reduced;
         rebuild_messages_from_context(agent, messages);
-        mutated = true;
+        result.mutated = true;
+        if !context_is_over_budget(agent) {
+            return Ok(result);
+        }
     }
 
-    let tail_freed = reduce_current_tail_messages(agent, messages)?;
-    if tail_freed > 0 {
-        freed_chars += tail_freed;
-        mutated = true;
+    let tail_result = reduce_current_tail_messages(agent, messages)?;
+    if tail_result.freed_chars > 0 {
+        result.freed_chars += tail_result.freed_chars;
+        result.after_each_wave = tail_result.after_each_wave;
+        result.mutated = true;
     }
 
-    if freed_chars > 0 {
+    if result.freed_chars > 0 {
         if let Some(ctx_state) = agent.context_state.as_mut() {
             ctx_state.session_obs.compaction_count =
                 ctx_state.session_obs.compaction_count.saturating_add(1);
             ctx_state.session_obs.compaction_tokens_freed +=
-                estimated_tokens_from_chars(freed_chars);
+                estimated_tokens_from_chars(result.freed_chars);
         }
     }
 
-    Ok(mutated)
+    Ok(result)
 }
 
 fn reduce_current_tail_messages(
     agent: &mut AgentLoop,
     messages: &mut [ChatMessage],
-) -> Result<usize, AppError> {
+) -> Result<TailReductionResult, AppError> {
     let Some(ctx_state) = agent.context_state.as_mut() else {
-        return Ok(0);
+        return Ok(TailReductionResult::default());
     };
     let tail_start = agent.start_idx.min(messages.len());
     let config = &agent.config.context_config;
     let work_dir = Path::new(&agent.config.agent_trail_dir);
     let mut transcript_rewrites = Vec::new();
-    let mut freed_chars = 0usize;
+    let mut result = TailReductionResult::default();
+    let mut step0_reduced = false;
 
     let initial_candidates = collect_tail_candidates(
         messages,
@@ -215,7 +351,8 @@ fn reduce_current_tail_messages(
                 &agent.config.session_id,
                 config.current_tail_single_result_max_chars,
             ) {
-                freed_chars += freed;
+                result.freed_chars += freed;
+                step0_reduced = true;
                 ctx_state.rewrite_local_tail_chars(content.len(), text.len());
                 ctx_state.session_obs.tool_result_chars_persisted += persisted.original_chars;
                 if let Some(message_id) = &candidate.message_id {
@@ -226,6 +363,28 @@ fn reduce_current_tail_messages(
                 }
             }
         }
+    }
+
+    let candidates_after_step0 = collect_tail_candidates(
+        messages,
+        tail_start,
+        config.current_tail_compactable_min_chars,
+    );
+    if candidates_after_step0.len() > 2 {
+        apply_placeholder_wave(
+            ctx_state,
+            messages,
+            candidates_after_step0,
+            &mut transcript_rewrites,
+            &mut result.freed_chars,
+        );
+        result
+            .after_each_wave
+            .push(ctx_state.estimated_token_count());
+    } else if step0_reduced {
+        result
+            .after_each_wave
+            .push(ctx_state.estimated_token_count());
     }
 
     loop {
@@ -240,26 +399,20 @@ fn reduce_current_tail_messages(
         if candidates.is_empty() || candidates.len() <= 2 {
             break;
         }
-        let wave = std::cmp::max(1, candidates.len() / 2);
-        for candidate in candidates.into_iter().take(wave) {
-            let Some(text) = text_content_mut(&mut messages[candidate.msg_idx]) else {
-                continue;
-            };
-            let old_len = text.len();
-            *text = TOOL_RESULT_PLACEHOLDER.to_string();
-            freed_chars += old_len.saturating_sub(text.len());
-            ctx_state.rewrite_local_tail_chars(old_len, text.len());
-            if let Some(message_id) = candidate.message_id {
-                transcript_rewrites.push(MessageTextRewrite {
-                    message_id,
-                    new_content: text.clone(),
-                });
-            }
-        }
+        apply_placeholder_wave(
+            ctx_state,
+            messages,
+            candidates,
+            &mut transcript_rewrites,
+            &mut result.freed_chars,
+        );
+        result
+            .after_each_wave
+            .push(ctx_state.estimated_token_count());
     }
 
     rewrite_transcript_best_effort(&ctx_state.transcript_path, transcript_rewrites);
-    Ok(freed_chars)
+    Ok(result)
 }
 
 fn collect_tail_candidates(
@@ -407,11 +560,12 @@ async fn collapse_to_branch_summary(
         .context_state
         .as_ref()
         .and_then(|state| state.latest_plan_event.clone());
-    let working: Vec<ChatMessage> = messages
+    let mut working: Vec<ChatMessage> = messages
         .iter()
         .filter(|msg| msg.role != ChatMessageRole::System)
         .cloned()
         .collect();
+    ensure_working_message_ids(agent, &mut working)?;
     let (covered_start_id, covered_end_id) = collapse_bounds(&working)
         .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
     let summary = generate_summary(
@@ -547,6 +701,78 @@ fn collapse_bounds(working: &[ChatMessage]) -> Option<(String, String)> {
         .find(|msg| msg.kind != MessageKind::CompactionSummary)
         .and_then(|msg| msg.msg_id.clone())?;
     Some((start, end))
+}
+
+fn ensure_working_message_ids(
+    agent: &AgentLoop,
+    working: &mut [ChatMessage],
+) -> Result<(), AppError> {
+    for msg in working {
+        if msg.msg_id.is_some() {
+            continue;
+        }
+        agent.persist_message_if_needed(msg)?;
+        if msg.msg_id.is_none() {
+            msg.msg_id = Some(generate_entry_id());
+        }
+    }
+    Ok(())
+}
+
+fn apply_placeholder_wave(
+    ctx_state: &mut ContextState,
+    messages: &mut [ChatMessage],
+    candidates: Vec<TailCandidate>,
+    transcript_rewrites: &mut Vec<MessageTextRewrite>,
+    freed_chars: &mut usize,
+) {
+    let wave = std::cmp::max(1, candidates.len() / 2);
+    for candidate in candidates.into_iter().take(wave) {
+        let Some(text) = text_content_mut(&mut messages[candidate.msg_idx]) else {
+            continue;
+        };
+        let old_len = text.len();
+        *text = TOOL_RESULT_PLACEHOLDER.to_string();
+        *freed_chars += old_len.saturating_sub(text.len());
+        ctx_state.rewrite_local_tail_chars(old_len, text.len());
+        if let Some(message_id) = candidate.message_id {
+            transcript_rewrites.push(MessageTextRewrite {
+                message_id,
+                new_content: text.clone(),
+            });
+        }
+    }
+}
+
+fn context_is_over_budget(agent: &AgentLoop) -> bool {
+    agent
+        .context_state
+        .as_ref()
+        .is_some_and(ContextState::is_over_budget)
+}
+
+fn ctx_ratio(working_tokens: usize, budget_tokens: usize) -> f64 {
+    if budget_tokens == 0 {
+        return f64::MAX;
+    }
+    working_tokens as f64 / budget_tokens as f64
+}
+
+fn log_aggregate_precheck_decision(decision: &AggregatePrecheckDecision) {
+    info!(
+        target: "tomcat_chat_diag",
+        phase = "mid_turn_precheck",
+        route = decision.route.as_str(),
+        route_reason = decision.route_reason.as_str(),
+        working_tokens = decision.working_tokens,
+        budget_tokens = decision.budget_tokens,
+        overflow = decision.overflow_tokens,
+        max_reducible = decision.max_reducible,
+        candidate_count = decision.candidate_count,
+        yellow_lamp_only = decision.yellow_lamp_only,
+        after_each_wave = ?decision.after_each_wave,
+        after_collapse = ?decision.after_collapse
+    );
 }
 
 fn build_keepalive_snapshot(

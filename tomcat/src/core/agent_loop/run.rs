@@ -63,6 +63,7 @@ use crate::infra::events::AgentEvent;
 
 use super::error_classifier::handle_overflow_retry;
 use super::reasoning_loop::run_reasoning_loop;
+use super::steering_injection::inject_steering_messages;
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
 
 impl AgentLoop {
@@ -95,11 +96,13 @@ impl AgentLoop {
 
         let mut messages = initial_messages;
 
-        {
-            let mut q = self.steering_queue.lock();
-            if !q.is_empty() {
-                messages.extend(q.drain(..));
-            }
+        if let Err(err) = inject_steering_messages(self, &mut messages) {
+            self.emit_event(AgentEvent::AgentEnd {
+                session_id: self.config.session_id.clone(),
+                messages: vec![],
+                error: Some(err.to_string()),
+            });
+            return AgentRunOutcome::Failed(err);
         }
 
         self.context_tail_start = match messages.last() {
