@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use crate::core::compaction::run_layer0_cleanup;
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation};
 use crate::core::session::manager::estimated_tokens_from_chars;
 use crate::infra::events::{AgentEvent, Message};
 
@@ -28,6 +28,7 @@ use super::types::AgentLoop;
 /// `on_message_appended` 计费、重复发 `TurnEnd`。
 ///
 /// `content_buf`：本轮 delta 累积。`turn_index`：作为 `TurnEnd` 的 turn 序号。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_turn_after_text(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
@@ -36,17 +37,18 @@ pub(super) fn finalize_turn_after_text(
     finish_reason: Option<String>,
     error_message: Option<String>,
     error_code: Option<String>,
+    thinking_text: Option<String>,
+    reasoning_continuation: Option<ReasoningContinuation>,
+    continuity: Option<ContinuityMetadata>,
 ) -> Result<(), crate::infra::error::AppError> {
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_message_appended(content_buf.len());
     }
     agent.push_message(
         messages,
-        ChatMessage::assistant(content_buf).with_completion_metadata(
-            finish_reason,
-            error_message,
-            error_code,
-        ),
+        ChatMessage::assistant(content_buf)
+            .with_completion_metadata(finish_reason, error_message, error_code)
+            .with_reasoning_state(thinking_text, reasoning_continuation, continuity),
     )?;
 
     // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics

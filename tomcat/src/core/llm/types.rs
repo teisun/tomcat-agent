@@ -336,6 +336,57 @@ pub enum MessageKind {
     CompactionSummary,
 }
 
+/// Assistant turn 中 opaque continuity blob 的格式标签。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningFormat {
+    OpenaiResponsesReasoningItems,
+    DeepseekReasoningContent,
+}
+
+/// 同一条 continuity 材料在下一轮 replay 时的强弱要求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRequirement {
+    #[default]
+    Never,
+    SameProfileOptional,
+    SameProfileRequired,
+}
+
+/// provider 私有的附加引用，仅供同类 wire 优化分支使用。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderRefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_response_id: Option<String>,
+}
+
+/// 可供下一轮继续推理的 opaque continuity 材料。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReasoningContinuation {
+    pub source_provider: String,
+    pub source_api: String,
+    pub source_model: String,
+    pub format: ReasoningFormat,
+    pub opaque_payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_refs: Option<ProviderRefs>,
+}
+
+/// transcript assistant turn 的 replay 元数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContinuityMetadata {
+    #[serde(default)]
+    pub had_tool_call: bool,
+    #[serde(default)]
+    pub replay_requirement: ReplayRequirement,
+}
+
 /// 单条对话消息（与 OpenAI API 兼容，wire 格式为 snake_case）。
 ///
 /// `finish_reason/error_message/error_code` 会随 transcript assistant message 一起持久化；
@@ -359,6 +410,15 @@ pub struct ChatMessage {
     pub error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// 可读 thinking 摘要 / 文本；用于展示、审计与跨 provider downgrade。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_text: Option<String>,
+    /// 机器可读的 continuity blob；同类 provider/wire 可高保真 replay。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_continuation: Option<ReasoningContinuation>,
+    /// replay 所需的 turn 级元数据；旧 transcript 缺失时按 None 兼容。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity: Option<ContinuityMetadata>,
 
     /// Transcript `MessageEntry.id` — set during hydration or after `append_message`.
     #[serde(skip)]
@@ -382,6 +442,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -400,6 +463,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -416,6 +482,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -435,6 +504,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -451,6 +523,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -467,6 +542,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Normal,
             timestamp: None,
@@ -483,6 +561,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::Steering,
             timestamp: None,
@@ -499,6 +580,9 @@ impl ChatMessage {
             finish_reason: None,
             error_message: None,
             error_code: None,
+            thinking_text: None,
+            reasoning_continuation: None,
+            continuity: None,
             msg_id: None,
             kind: MessageKind::CompactionSummary,
             timestamp: None,
@@ -518,12 +602,28 @@ impl ChatMessage {
         self
     }
 
+    /// 为 assistant turn 附加 continuity 主账本字段；仅影响 transcript 持久化与 replay。
+    pub fn with_reasoning_state(
+        mut self,
+        thinking_text: Option<String>,
+        reasoning_continuation: Option<ReasoningContinuation>,
+        continuity: Option<ContinuityMetadata>,
+    ) -> Self {
+        self.thinking_text = thinking_text;
+        self.reasoning_continuation = reasoning_continuation;
+        self.continuity = continuity;
+        self
+    }
+
     /// 请求发往上游前剥离本地 transcript 元数据，避免污染 API wire payload。
     pub fn without_completion_metadata(&self) -> Self {
         let mut cloned = self.clone();
         cloned.finish_reason = None;
         cloned.error_message = None;
         cloned.error_code = None;
+        cloned.thinking_text = None;
+        cloned.reasoning_continuation = None;
+        cloned.continuity = None;
         cloned
     }
 
@@ -622,6 +722,15 @@ pub enum StreamEvent {
         source: ThinkingSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+    },
+    /// provider 在流结束前上报的 reasoning continuity 快照；仅供 transcript/replay 主链消费。
+    ReasoningSnapshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_continuation: Option<ReasoningContinuation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuity: Option<ContinuityMetadata>,
     },
     /// Tool call 增量（OpenAI streaming 格式）。
     ToolCallDelta {

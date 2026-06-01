@@ -169,6 +169,8 @@ pub struct OpenAiResponsesProvider {
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
     thinking_cfg: crate::infra::config::ThinkingConfig,
     thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
+    continuity_enabled: bool,
+    use_previous_response_id: bool,
 }
 
 fn apply_stream_idle_timeout<S>(
@@ -190,6 +192,29 @@ where
                 Err(_) => Err(idle_timeout_error(stream_timeout_sec)),
             }),
     )
+}
+
+fn latest_openai_response_id(messages: &[ChatMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|msg| {
+        msg.reasoning_continuation
+            .as_ref()
+            .and_then(|continuation| continuation.provider_refs.as_ref())
+            .and_then(|refs| refs.openai_response_id.clone())
+            .filter(|id| !id.is_empty())
+    })
+}
+
+fn request_uses_previous_response_id(body: &Value) -> bool {
+    body.get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some()
+}
+
+fn is_previous_response_id_error(err: &AppError) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("previous_response_id")
+        || text.contains("previous response id")
+        || text.contains("previous_response")
 }
 
 impl OpenAiResponsesProvider {
@@ -239,6 +264,8 @@ impl OpenAiResponsesProvider {
             files_expires_after_seconds: config.files.expires_after_seconds,
             thinking_cfg: config.thinking.clone(),
             thinking_format,
+            continuity_enabled: config.reasoning_continuity.enabled,
+            use_previous_response_id: config.openai_responses.use_previous_response_id,
         })
     }
 
@@ -275,8 +302,31 @@ impl OpenAiResponsesProvider {
         }
     }
 
-    fn build_request_body(&self, request: &ChatRequest, stream: bool) -> Value {
-        let (instructions, input) = payload::build_responses_input(&request.messages);
+    fn build_request_body_with_hint(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+        allow_response_id_hint: bool,
+    ) -> Value {
+        let model = self.effective_model(request);
+        let target_profile =
+            crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
+        let previous_response_id = if self.continuity_enabled
+            && self.use_previous_response_id
+            && allow_response_id_hint
+            && target_profile.supports_response_id_hint
+        {
+            latest_openai_response_id(&request.messages)
+        } else {
+            None
+        };
+        let explicit_replay = self.continuity_enabled && previous_response_id.is_none();
+        let (instructions, input) = payload::build_responses_input(
+            &request.messages,
+            &target_profile,
+            self.continuity_enabled,
+            explicit_replay,
+        );
         let tools_payload = request
             .tools
             .as_deref()
@@ -284,11 +334,18 @@ impl OpenAiResponsesProvider {
             .filter(|v| !v.is_empty());
 
         let mut body = json!({
-            "model": self.effective_model(request),
+            "model": model,
             "input": input,
             "stream": stream,
             "store": false,
         });
+        if explicit_replay {
+            body["include"] = json!(["reasoning.encrypted_content"]);
+        }
+        if let Some(previous_response_id) = previous_response_id {
+            body["store"] = json!(true);
+            body["previous_response_id"] = Value::String(previous_response_id);
+        }
         if let Some(ins) = instructions {
             body["instructions"] = Value::String(ins);
         }
@@ -327,13 +384,16 @@ impl OpenAiResponsesProvider {
         body
     }
 
+    fn build_request_body(&self, request: &ChatRequest, stream: bool) -> Value {
+        self.build_request_body_with_hint(request, stream, true)
+    }
+
     /// 非流式：向给定 base_url 发起一次 `POST /v1/responses`；不含重试与 fallback。
-    async fn chat_inner(
+    async fn chat_inner_with_body(
         &self,
-        request: &ChatRequest,
+        body: &Value,
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
-        let body = self.build_request_body(request, false);
         let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
         let (key, value) = self.auth_header();
 
@@ -364,6 +424,52 @@ impl OpenAiResponsesProvider {
         let raw: Value =
             serde_json::from_slice(&bytes).map_err(|e| map_parse_error("解析响应", e))?;
         Ok(payload::responses_payload_to_chat_response(&raw))
+    }
+
+    async fn chat_with_retry(
+        &self,
+        body: &Value,
+        base_url: &str,
+    ) -> Result<ChatResponse, AppError> {
+        let mut last_err = None;
+        for attempt in 0..=self.retry_count {
+            match self
+                .run_non_stream_with_stale(self.chat_inner_with_body(body, base_url))
+                .await
+            {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    if Self::is_retriable(&e) && attempt < self.retry_count {
+                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                        warn!(
+                            "Responses 请求失败，{}ms 后重试 ({}/{}): {}",
+                            delay.as_millis(),
+                            attempt + 1,
+                            self.retry_count,
+                            e
+                        );
+                        tokio::time::sleep(delay).await;
+                        last_err = Some(e);
+                    } else {
+                        last_err = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+        let err = last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
+        if Self::is_connect_or_network_error(&err) {
+            if let Some(ref fallback) = self.api_base_fallback {
+                warn!("主 API 不可达，尝试 fallback: {}", fallback);
+                if let Ok(r) = self
+                    .run_non_stream_with_stale(self.chat_inner_with_body(body, fallback))
+                    .await
+                {
+                    return Ok(r);
+                }
+            }
+        }
+        Err(err)
     }
 
     fn is_retriable(err: &AppError) -> bool {
@@ -424,6 +530,25 @@ impl OpenAiResponsesProvider {
         }
         Ok(resp)
     }
+
+    async fn stream_post_with_base_fallback(
+        &self,
+        body: &Value,
+    ) -> Result<reqwest::Response, AppError> {
+        let resp = self.stream_post_once(&self.base_url, body).await;
+        match resp {
+            Ok(r) => Ok(r),
+            Err(e) if Self::is_connect_or_network_error(&e) && self.api_base_fallback.is_some() => {
+                warn!(
+                    "流式主 API 不可达，尝试 fallback: {:?}",
+                    self.api_base_fallback
+                );
+                self.stream_post_once(self.api_base_fallback.as_deref().unwrap(), body)
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[async_trait]
@@ -443,45 +568,22 @@ impl LlmProvider for OpenAiResponsesProvider {
             None
         };
 
-        let mut last_err = None;
-        for attempt in 0..=self.retry_count {
-            match self
-                .run_non_stream_with_stale(self.chat_inner(&request, &self.base_url))
-                .await
+        let body = self.build_request_body(&request, false);
+        match self.chat_with_retry(&body, &self.base_url).await {
+            Ok(r) => Ok(r),
+            Err(err)
+                if request_uses_previous_response_id(&body)
+                    && is_previous_response_id_error(&err) =>
             {
-                Ok(r) => return Ok(r),
-                Err(e) => {
-                    if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
-                        warn!(
-                            "Responses 请求失败，{}ms 后重试 ({}/{}): {}",
-                            delay.as_millis(),
-                            attempt + 1,
-                            self.retry_count,
-                            e
-                        );
-                        tokio::time::sleep(delay).await;
-                        last_err = Some(e);
-                    } else {
-                        last_err = Some(e);
-                        break;
-                    }
-                }
+                warn!(
+                    error = %err,
+                    "previous_response_id 被上游拒绝，退回 store=false + 显式 replay 重试一次"
+                );
+                let fallback_body = self.build_request_body_with_hint(&request, false, false);
+                self.chat_with_retry(&fallback_body, &self.base_url).await
             }
+            Err(err) => Err(err),
         }
-        let err = last_err.unwrap_or_else(|| AppError::Llm("重试耗尽".to_string()));
-        if Self::is_connect_or_network_error(&err) {
-            if let Some(ref fallback) = self.api_base_fallback {
-                warn!("主 API 不可达，尝试 fallback: {}", fallback);
-                if let Ok(r) = self
-                    .run_non_stream_with_stale(self.chat_inner(&request, fallback))
-                    .await
-                {
-                    return Ok(r);
-                }
-            }
-        }
-        Err(err)
     }
 
     async fn chat_stream(
@@ -499,19 +601,24 @@ impl LlmProvider for OpenAiResponsesProvider {
             None
         };
 
+        let model = self.effective_model(&request);
+        let source_profile =
+            crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
         let body = self.build_request_body(&request, true);
-        let resp = self.stream_post_once(&self.base_url, &body).await;
-        let resp = match resp {
+        let resp = match self.stream_post_with_base_fallback(&body).await {
             Ok(r) => r,
-            Err(e) if Self::is_connect_or_network_error(&e) && self.api_base_fallback.is_some() => {
+            Err(err)
+                if request_uses_previous_response_id(&body)
+                    && is_previous_response_id_error(&err) =>
+            {
                 warn!(
-                    "流式主 API 不可达，尝试 fallback: {:?}",
-                    self.api_base_fallback
+                    error = %err,
+                    "previous_response_id 流式请求被上游拒绝，退回 store=false + 显式 replay 重试一次"
                 );
-                self.stream_post_once(self.api_base_fallback.as_deref().unwrap(), &body)
-                    .await?
+                let fallback_body = self.build_request_body_with_hint(&request, true, false);
+                self.stream_post_with_base_fallback(&fallback_body).await?
             }
-            Err(e) => return Err(e),
+            Err(err) => return Err(err),
         };
 
         // Content-Type 决定走 SSE 还是 NDJSON；优先 header，否则首帧探测兜底。
@@ -531,7 +638,12 @@ impl LlmProvider for OpenAiResponsesProvider {
             .bytes_stream()
             .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
         let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
-        let event_stream = stream::ResponsesStream::new(bytes_stream, prefer_ndjson);
+        let event_stream = stream::ResponsesStream::new(
+            bytes_stream,
+            prefer_ndjson,
+            source_profile,
+            self.continuity_enabled,
+        );
         Ok(Box::new(event_stream))
     }
 

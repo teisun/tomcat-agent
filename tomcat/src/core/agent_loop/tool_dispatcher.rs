@@ -18,7 +18,7 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, ContinuityMetadata, ReasoningContinuation};
 use crate::core::session::manager::INTERRUPTED_TOOL_RESULT_TEXT;
 use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, ToolOutput};
 
@@ -75,6 +75,9 @@ pub(super) async fn run_tool_calls(
     finish_reason: Option<String>,
     error_message: Option<String>,
     error_code: Option<String>,
+    thinking_text: Option<String>,
+    reasoning_continuation: Option<ReasoningContinuation>,
+    continuity: Option<ContinuityMetadata>,
 ) -> Result<DispatchOutcome, LoopError> {
     // ── 1. 计费：assistant 消息（含 tool_calls wire payload 估算） ──
     if let Some(ref mut ctx_state) = agent.context_state {
@@ -112,7 +115,12 @@ pub(super) async fn run_tool_calls(
                     },
                     tc_json,
                 )
-                .with_completion_metadata(finish_reason, error_message, error_code),
+                .with_completion_metadata(finish_reason, error_message, error_code)
+                .with_reasoning_state(
+                    thinking_text,
+                    reasoning_continuation,
+                    continuity,
+                ),
             )
             .map_err(LoopError::Fatal)?;
     }

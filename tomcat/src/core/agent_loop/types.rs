@@ -357,6 +357,9 @@ pub(super) struct StreamOutcome {
     pub(super) finish_reason: Option<String>,
     pub(super) error_message: Option<String>,
     pub(super) error_code: Option<String>,
+    pub(super) thinking_text: Option<String>,
+    pub(super) reasoning_continuation: Option<crate::core::llm::ReasoningContinuation>,
+    pub(super) continuity: Option<crate::core::llm::ContinuityMetadata>,
     pub(super) aborted: bool,
 }
 

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use chrono::{NaiveDate, Utc};
 
-use crate::core::llm::{ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind};
+use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use crate::core::session::append_message_chain::collect_recent_chat_messages_from_tail;
 use crate::core::session::transcript::{read_entries_tail, BranchSummaryEntry, TranscriptEntry};
 use crate::infra::config::{compute_context_budget_chars, ContextConfig};
@@ -204,70 +204,18 @@ fn chat_message_from_entry(
     {
         return None;
     }
-    let role_str = me.message.get("role").and_then(|r| r.as_str())?;
-    let role = match role_str {
-        "user" => ChatMessageRole::User,
-        "assistant" => ChatMessageRole::Assistant,
-        "tool" => ChatMessageRole::Tool,
-        "system" => ChatMessageRole::System,
-        _ => return None,
-    };
+    let mut msg: ChatMessage = serde_json::from_value(me.message.clone()).ok()?;
 
-    let content = me
-        .message
-        .get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| ChatMessageContent::Text(s.to_string()));
-
-    let tool_calls = me
-        .message
-        .get("tool_calls")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.to_vec());
-
-    if let Some(ref arr) = tool_calls {
+    if let Some(ref arr) = msg.tool_calls {
         warn_if_legacy_tool_name(arr);
     }
-
-    let tool_call_id = me
-        .message
-        .get("tool_call_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let finish_reason = me
-        .message
-        .get("finish_reason")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let error_message = me
-        .message
-        .get("error_message")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let error_code = me
-        .message
-        .get("error_code")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let mut msg = ChatMessage {
-        role,
-        content,
-        name: None,
-        tool_calls,
-        tool_call_id,
-        finish_reason,
-        error_message,
-        error_code,
-        msg_id: me.id.clone().or_else(|| Some(generate_entry_id())),
-        kind: MessageKind::Normal,
-        timestamp: Some(me.timestamp.clone()),
-    };
 
     // Detect compaction summary injected as user message (via older paths)
     // These are plain user messages from transcript — no special marking needed here.
     // The CompactionSummary kind is only set for BranchSummary entries below.
-    let _ = &mut msg;
+    msg.msg_id = me.id.clone().or_else(|| Some(generate_entry_id()));
+    msg.kind = MessageKind::Normal;
+    msg.timestamp = Some(me.timestamp.clone());
     Some(msg)
 }
 

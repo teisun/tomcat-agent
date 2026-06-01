@@ -19,6 +19,7 @@
 // 不再隶属 `tests` 父模块的兄弟链），故提升到 `pub(crate)`。
 pub(crate) mod mocks;
 mod registry_test;
+mod replay_policy_test;
 mod system_prompt_test;
 mod thinking_policy_test;
 mod token_usage_test;

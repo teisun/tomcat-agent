@@ -70,6 +70,9 @@ pub(super) async fn run_chat_stream(
                     finish_reason: None,
                     error_message: None,
                     error_code: None,
+                    thinking_text: None,
+                    reasoning_continuation: None,
+                    continuity: None,
                     aborted: true,
                 });
             }
@@ -98,6 +101,9 @@ pub(super) async fn run_chat_stream(
     let mut finish_reason: Option<String> = None;
     let mut error_message: Option<String> = None;
     let mut error_code: Option<String> = None;
+    let mut thinking_text: Option<String> = None;
+    let mut reasoning_continuation: Option<crate::core::llm::ReasoningContinuation> = None;
+    let mut continuity: Option<crate::core::llm::ContinuityMetadata> = None;
     let mut pending_notice: Option<(String, String)> = None;
     let mut aborted_during_stream = false;
 
@@ -203,6 +209,21 @@ pub(super) async fn run_chat_stream(
                 }
                 pending_notice = Some((notice_reason, message));
             }
+            Ok(StreamEvent::ReasoningSnapshot {
+                thinking_text: snapshot_thinking_text,
+                reasoning_continuation: snapshot_reasoning_continuation,
+                continuity: snapshot_continuity,
+            }) => {
+                if snapshot_thinking_text.is_some() {
+                    thinking_text = snapshot_thinking_text;
+                }
+                if snapshot_reasoning_continuation.is_some() {
+                    reasoning_continuation = snapshot_reasoning_continuation;
+                }
+                if snapshot_continuity.is_some() {
+                    continuity = snapshot_continuity;
+                }
+            }
             Ok(StreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
@@ -248,6 +269,9 @@ pub(super) async fn run_chat_stream(
         finish_reason,
         error_message,
         error_code,
+        thinking_text,
+        reasoning_continuation,
+        continuity,
         aborted: aborted_during_stream,
     })
 }

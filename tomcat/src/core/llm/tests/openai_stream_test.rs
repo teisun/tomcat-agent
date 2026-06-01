@@ -8,7 +8,10 @@
 //!   `FinishReason` 等事件序列。
 
 use super::*;
-use crate::core::llm::types::{StreamEvent, ThinkingSource};
+use crate::core::llm::types::{
+    ChatMessage, ContinuityMetadata, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
+    StreamEvent, ThinkingSource,
+};
 use crate::infra::error::{llm_stage, llm_summary, AppError, LlmErrorStage};
 use bytes::Bytes;
 use std::time::Duration;
@@ -243,7 +246,11 @@ async fn sse_stream_parses_and_yields_events() {
         )),
     ];
     let stream = tokio_stream::iter(chunks);
-    let mut event_stream = SseEventStream::new(stream);
+    let mut event_stream = SseEventStream::new(
+        stream,
+        ProviderCompatProfile::chat_completions("gpt-5"),
+        true,
+    );
     let mut events = Vec::new();
     while let Some(item) = event_stream.next().await {
         events.push(item);
@@ -252,6 +259,142 @@ async fn sse_stream_parses_and_yields_events() {
     assert!(matches!(&events[0], Ok(StreamEvent::ContentDelta { delta } ) if delta == "Hello"));
     assert!(matches!(&events[1], Ok(StreamEvent::ContentDelta { delta } ) if delta == " world"));
     assert!(matches!(&events[2], Ok(StreamEvent::FinishReason { reason } ) if reason == "stop"));
+}
+
+#[test]
+fn test_openai_chunk_deepseek_finish_emits_reasoning_snapshot() {
+    let mut state = OpenAiReasoningState {
+        source_profile: ProviderCompatProfile::chat_completions("deepseek-chat"),
+        continuity_enabled: true,
+        ..OpenAiReasoningState::default()
+    };
+    let chunk: OpenAiStreamChunk = serde_json::from_str(
+        r#"{"choices":[{"delta":{"reasoning_content":"step 1","tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+    )
+    .expect("parse deepseek chunk");
+    let events = openai_chunk_to_stream_events_with_state(chunk, &mut state);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ReasoningSnapshot {
+            thinking_text: Some(text),
+            reasoning_continuation: Some(continuation),
+            continuity: Some(continuity)
+        } if text == "step 1"
+            && continuity.had_tool_call
+            && continuity.replay_requirement == ReplayRequirement::SameProfileRequired
+            && continuation.opaque_payload["reasoning_content"] == serde_json::json!("step 1")
+    )));
+}
+
+#[test]
+fn deepseek_tool_turn_replays_reasoning_content() {
+    let message = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id":"call_1",
+            "type":"function",
+            "function":{"name":"read","arguments":"{}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-chat".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"internal plan"}),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    );
+    let wire = transport_messages(&[message], "deepseek-chat", true);
+    assert_eq!(wire[0]["reasoning_content"], "internal plan");
+}
+
+#[test]
+fn test_transport_messages_deepseek_non_tool_turn_omits_reasoning_content() {
+    let message = ChatMessage::assistant("answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-chat".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"internal plan"}),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let wire = transport_messages(&[message], "deepseek-chat", true);
+    assert!(wire[0].get("reasoning_content").is_none());
+}
+
+#[tokio::test]
+async fn streaming_think_scrubber_hides_split_tags() {
+    use tokio_stream::StreamExt;
+
+    let chunks: Vec<Result<Bytes, AppError>> = vec![
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"<th\"}}]}\n\n",
+        )),
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ink>pla\"}}]}\n\n",
+        )),
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"n</thi\"}}]}\n\n",
+        )),
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"nk>Final answer\"}}]}\n\n",
+        )),
+        Ok(Bytes::from(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        )),
+    ];
+    let stream = tokio_stream::iter(chunks);
+    let mut event_stream = SseEventStream::new(
+        stream,
+        ProviderCompatProfile::chat_completions("deepseek-chat"),
+        true,
+    );
+    let mut visible = String::new();
+    let mut thinking = String::new();
+    let mut events = Vec::new();
+
+    while let Some(item) = event_stream.next().await {
+        let event = item.expect("stream event");
+        match &event {
+            StreamEvent::ContentDelta { delta } => visible.push_str(delta),
+            StreamEvent::Thinking { delta, .. } => thinking.push_str(delta),
+            _ => {}
+        }
+        events.push(event);
+    }
+
+    assert_eq!(visible, "Final answer");
+    assert_eq!(thinking, "plan");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ReasoningSnapshot {
+            thinking_text: Some(text),
+            ..
+        } if text == "plan"
+    )));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        StreamEvent::ContentDelta { delta }
+            if delta.contains("<think")
+                || delta.contains("</think")
+                || delta.contains("plan")
+    )));
 }
 
 #[tokio::test(start_paused = true)]

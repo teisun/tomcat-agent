@@ -13,7 +13,7 @@
 #   ./scripts/run-integration-tests.sh integration-parallel # 仅可并发的 integration crate
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅必须串行的 integration crate
 #   ./scripts/run-integration-tests.sh integration-wasm     # 仅真实 Wasm 集成测试（显式开启 WasmEdge 环境准备）
-#   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需 OPENAI_API_KEY）
+#   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）
 #
 # 未知子命令：打印用法并 exit 2。
 set -e
@@ -148,14 +148,14 @@ run_integration() {
 
 run_integration_real_llm() {
   if [ -z "$OPENAI_API_KEY" ]; then
-    echo "跳过 integration-real-llm：未设置 OPENAI_API_KEY" >&2
+    echo "跳过 integration-real-llm：未设置 OPENAI_API_KEY（新增 DeepSeek target 时还需 DEEPSEEK_API_KEY）" >&2
     return 0
   fi
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
   done < <(build_test_args 0 "${TOMCAT_INTEGRATION_REAL_LLM_TESTS[@]}")
-  log_phase "开始 integration-real-llm（真 LLM E2E；串行，需 OPENAI_API_KEY）"
+  log_phase "开始 integration-real-llm（真 LLM E2E；串行，需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）"
   cargo test -j 1 --no-fail-fast "${args[@]}" -- --nocapture --test-threads=1
   local status=$?
   log_phase "结束 integration-real-llm"
@@ -236,7 +236,7 @@ case "$CMD" in
     echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-wasm|integration-real-llm|all|-h]" >&2
     echo "  默认与 all：release → clippy → lib → integration-parallel → integration-serial（不含 Wasm）" >&2
     echo "  integration-wasm 显式启用 WasmEdge 环境准备并运行真实 Wasm 组" >&2
-    echo "  integration-real-llm 需 OPENAI_API_KEY；不进 all，须显式触发" >&2
+    echo "  integration-real-llm 需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY；不进 all，须显式触发" >&2
     exit 2
     ;;
 esac

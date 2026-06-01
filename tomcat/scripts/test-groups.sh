@@ -44,6 +44,7 @@ TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   current_tail_guard_real_llm_tests
   plan_real_llm_inprocess_tests
   plan_real_llm_cli_e2e
+  reasoning_continuity_real_llm_tests
 )
 
 TOMCAT_WASMEDGE_TESTS=(

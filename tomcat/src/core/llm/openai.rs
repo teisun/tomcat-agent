@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
+use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -14,6 +15,10 @@ use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
 use crate::core::llm::http_client::build_http_client;
+use crate::core::llm::replay_policy::{
+    apply_text_downgrade, plan as plan_replay, replay_requirement_for_profile,
+    warn_replay_downgrade_once, CaptureMode, ProviderCompatProfile, ReplayAction,
+};
 use crate::infra::error::AppError;
 use crate::infra::error::{
     llm_connect_or_network, llm_error, llm_error_with_source, llm_stage, LlmErrorStage,
@@ -22,8 +27,8 @@ use crate::infra::LlmConfig;
 
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent, ThinkingSource,
-    TokenUsage,
+    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, ContinuityMetadata,
+    ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
 };
 
 /// 提供商不匹配的固定文案：Completions 路径不接受多模态附件，必须改用 `openai-responses`。
@@ -125,11 +130,203 @@ fn reject_multimodal_parts(messages: &[ChatMessage]) -> Result<(), AppError> {
     Ok(())
 }
 
-fn transport_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+fn deepseek_reasoning_content(message: &ChatMessage) -> Option<String> {
+    let continuation = message.reasoning_continuation.as_ref()?;
+    if !matches!(
+        continuation.format,
+        ReasoningFormat::DeepseekReasoningContent
+    ) {
+        return None;
+    }
+    continuation
+        .opaque_payload
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .filter(|text| !text.is_empty())
+}
+
+fn inject_reasoning_content(message: ChatMessage, reasoning_content: &str) -> Value {
+    let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
+    if let Value::Object(ref mut obj) = value {
+        obj.insert(
+            "reasoning_content".to_string(),
+            Value::String(reasoning_content.to_string()),
+        );
+    }
+    value
+}
+
+fn transport_messages(
+    messages: &[ChatMessage],
+    model: &str,
+    continuity_enabled: bool,
+) -> Vec<Value> {
+    let target = ProviderCompatProfile::chat_completions(model);
     messages
         .iter()
-        .map(ChatMessage::without_completion_metadata)
+        .map(|original| {
+            let action = if continuity_enabled {
+                plan_replay(&target, original)
+            } else {
+                ReplayAction::StripOpaque
+            };
+            if continuity_enabled {
+                warn_replay_downgrade_once(&target, original, &action);
+            }
+            match action {
+                ReplayAction::KeepOpaque => {
+                    let message = original.without_completion_metadata();
+                    if let Some(reasoning_content) = deepseek_reasoning_content(original) {
+                        inject_reasoning_content(message, &reasoning_content)
+                    } else {
+                        if continuity_enabled
+                            && original.reasoning_continuation.is_some()
+                            && target.provider == "deepseek"
+                        {
+                            warn!(
+                                target_profile = %target.profile_id,
+                                source_model = %target.model_family,
+                                had_tool_call = original
+                                    .continuity
+                                    .as_ref()
+                                    .map(|meta| meta.had_tool_call)
+                                    .unwrap_or(false),
+                                "deepseek continuity marked KeepOpaque but reasoning_content missing; sending request without local hard intercept"
+                            );
+                        }
+                        serde_json::to_value(message).unwrap_or_else(|_| json!({}))
+                    }
+                }
+                ReplayAction::ConvertToText(text) => {
+                    serde_json::to_value(apply_text_downgrade(original, &text))
+                        .unwrap_or_else(|_| json!({}))
+                }
+                ReplayAction::StripOpaque => {
+                    serde_json::to_value(original.without_completion_metadata())
+                        .unwrap_or_else(|_| json!({}))
+                }
+            }
+        })
         .collect()
+}
+
+const THINK_OPEN_MARKERS: [&str; 2] = ["<think>", "<reasoning>"];
+const THINK_CLOSE_MARKERS: [&str; 2] = ["</think>", "</reasoning>"];
+
+#[derive(Debug, Default)]
+struct ThinkScrubber {
+    pending: String,
+    inside_hidden_block: bool,
+}
+
+#[derive(Debug, Default)]
+struct ScrubbedDelta {
+    visible: Option<String>,
+    hidden: Option<String>,
+}
+
+impl ThinkScrubber {
+    fn push(&mut self, delta: &str) -> ScrubbedDelta {
+        self.pending.push_str(delta);
+        self.drain(false)
+    }
+
+    fn finish(&mut self) -> ScrubbedDelta {
+        self.drain(true)
+    }
+
+    fn drain(&mut self, flush: bool) -> ScrubbedDelta {
+        let mut visible = String::new();
+        let mut hidden = String::new();
+
+        loop {
+            if self.pending.is_empty() {
+                break;
+            }
+
+            if self.inside_hidden_block {
+                if let Some((idx, marker_len)) =
+                    earliest_marker(&self.pending, &THINK_CLOSE_MARKERS)
+                {
+                    hidden.push_str(&self.pending[..idx]);
+                    self.pending.drain(..idx + marker_len);
+                    self.inside_hidden_block = false;
+                    continue;
+                }
+
+                let keep = if flush {
+                    0
+                } else {
+                    longest_partial_marker_suffix(&self.pending, &THINK_CLOSE_MARKERS)
+                };
+                let emit_len = self.pending.len().saturating_sub(keep);
+                if emit_len == 0 {
+                    break;
+                }
+                hidden.push_str(&self.pending[..emit_len]);
+                self.pending.drain(..emit_len);
+                if !flush {
+                    break;
+                }
+                continue;
+            }
+
+            if let Some((idx, marker_len)) = earliest_marker(&self.pending, &THINK_OPEN_MARKERS) {
+                visible.push_str(&self.pending[..idx]);
+                self.pending.drain(..idx + marker_len);
+                self.inside_hidden_block = true;
+                continue;
+            }
+
+            let keep = if flush {
+                0
+            } else {
+                longest_partial_marker_suffix(&self.pending, &THINK_OPEN_MARKERS)
+            };
+            let emit_len = self.pending.len().saturating_sub(keep);
+            if emit_len == 0 {
+                break;
+            }
+            visible.push_str(&self.pending[..emit_len]);
+            self.pending.drain(..emit_len);
+            if !flush {
+                break;
+            }
+        }
+
+        ScrubbedDelta {
+            visible: (!visible.is_empty()).then_some(visible),
+            hidden: (!hidden.is_empty()).then_some(hidden),
+        }
+    }
+}
+
+fn earliest_marker(buffer: &str, markers: &[&str]) -> Option<(usize, usize)> {
+    markers
+        .iter()
+        .filter_map(|marker| buffer.find(marker).map(|idx| (idx, marker.len())))
+        .min_by_key(|(idx, _)| *idx)
+}
+
+fn longest_partial_marker_suffix(buffer: &str, markers: &[&str]) -> usize {
+    let max_len = markers
+        .iter()
+        .map(|marker| marker.len().saturating_sub(1))
+        .max()
+        .unwrap_or(0)
+        .min(buffer.len());
+    for suffix_len in (1..=max_len).rev() {
+        let suffix_start = buffer.len() - suffix_len;
+        if !buffer.is_char_boundary(suffix_start) {
+            continue;
+        }
+        let suffix = &buffer[suffix_start..];
+        if markers.iter().any(|marker| marker.starts_with(suffix)) {
+            return suffix_len;
+        }
+    }
+    0
 }
 
 /// 发给 OpenAI API 的请求体（不含 model_override，stream 由调用方定）。
@@ -146,7 +343,7 @@ fn transport_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 #[serde(rename_all = "snake_case")]
 struct OpenAiRequestBody {
     model: String,
-    messages: Vec<ChatMessage>,
+    messages: Vec<Value>,
     temperature: Option<f32>,
     #[serde(rename = "max_completion_tokens")]
     max_tokens: Option<u32>,
@@ -187,6 +384,7 @@ pub struct OpenAiProvider {
     thinking_cfg: crate::infra::config::ThinkingConfig,
     /// `provider id`，给 ThinkingFormat::Auto 推断使用；`OpenAiProvider` 固定为 `"openai"`。
     thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
+    continuity_enabled: bool,
 }
 
 fn apply_stream_idle_timeout<S>(
@@ -254,6 +452,7 @@ impl OpenAiProvider {
             http_read_timeout_sec: config.http_read_timeout_sec,
             thinking_cfg: config.thinking.clone(),
             thinking_format,
+            continuity_enabled: config.reasoning_continuity.enabled,
         })
     }
 
@@ -296,13 +495,14 @@ impl OpenAiProvider {
         request: &ChatRequest,
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
+        let model = self.effective_model(request);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
             &self.thinking_cfg,
             self.thinking_format,
         );
         let body = OpenAiRequestBody {
-            model: self.effective_model(request),
-            messages: transport_messages(&request.messages),
+            model: model.clone(),
+            messages: transport_messages(&request.messages, &model, self.continuity_enabled),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
@@ -486,9 +686,10 @@ impl LlmProvider for OpenAiProvider {
             &self.thinking_cfg,
             self.thinking_format,
         );
+        let model = self.effective_model(&request);
         let body = OpenAiRequestBody {
-            model: self.effective_model(&request),
-            messages: transport_messages(&request.messages),
+            model: model.clone(),
+            messages: transport_messages(&request.messages, &model, self.continuity_enabled),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,
@@ -520,7 +721,11 @@ impl LlmProvider for OpenAiProvider {
             .bytes_stream()
             .map_err(move |e| map_body_read_error("流读取", e, http_read_timeout_sec));
         let bytes_stream = apply_stream_idle_timeout(bytes_stream, stream_timeout_sec);
-        let event_stream = SseEventStream::new(bytes_stream);
+        let event_stream = SseEventStream::new(
+            bytes_stream,
+            ProviderCompatProfile::chat_completions(&model),
+            self.continuity_enabled,
+        );
         Ok(Box::new(event_stream))
     }
 
@@ -555,14 +760,132 @@ struct SseEventStream<S> {
     buffer: Vec<u8>,
     /// 已解析待输出的事件队列（同一 chunk 可能解析出多个事件）。
     pending: std::vec::IntoIter<StreamEvent>,
+    reasoning: OpenAiReasoningState,
+}
+
+#[derive(Debug)]
+struct OpenAiReasoningState {
+    text: String,
+    had_tool_call: bool,
+    source_profile: ProviderCompatProfile,
+    continuity_enabled: bool,
+    snapshot_emitted: bool,
+    scrubber: ThinkScrubber,
+}
+
+impl Default for OpenAiReasoningState {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            had_tool_call: false,
+            source_profile: ProviderCompatProfile::chat_completions("gpt-5"),
+            continuity_enabled: false,
+            snapshot_emitted: false,
+            scrubber: ThinkScrubber::default(),
+        }
+    }
+}
+
+impl OpenAiReasoningState {
+    fn thinking_event(&mut self, delta: String) -> Option<StreamEvent> {
+        if delta.is_empty() {
+            return None;
+        }
+        self.text.push_str(&delta);
+        Some(StreamEvent::Thinking {
+            delta,
+            source: ThinkingSource::Raw,
+            signature: None,
+        })
+    }
+
+    fn scrub_content_delta(&mut self, delta: &str) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        let scrubbed = self.scrubber.push(delta);
+        if let Some(hidden) = scrubbed.hidden {
+            if let Some(event) = self.thinking_event(hidden) {
+                events.push(event);
+            }
+        }
+        if let Some(visible) = scrubbed.visible {
+            if !visible.is_empty() {
+                events.push(StreamEvent::ContentDelta { delta: visible });
+            }
+        }
+        events
+    }
+
+    fn flush_scrubber(&mut self) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
+        let scrubbed = self.scrubber.finish();
+        if let Some(hidden) = scrubbed.hidden {
+            if let Some(event) = self.thinking_event(hidden) {
+                events.push(event);
+            }
+        }
+        if let Some(visible) = scrubbed.visible {
+            if !visible.is_empty() {
+                events.push(StreamEvent::ContentDelta { delta: visible });
+            }
+        }
+        events
+    }
+
+    fn maybe_snapshot(&mut self) -> Option<StreamEvent> {
+        if self.snapshot_emitted
+            || !self.continuity_enabled
+            || !matches!(
+                self.source_profile.capture_mode,
+                CaptureMode::ReasoningContent
+            )
+        {
+            return None;
+        }
+        let trimmed = self.text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if self.source_profile.provider != "deepseek"
+            || self.source_profile.api_family != "chat_completions"
+        {
+            return None;
+        }
+        self.snapshot_emitted = true;
+        Some(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some(trimmed.to_string()),
+            reasoning_continuation: Some(ReasoningContinuation {
+                source_provider: self.source_profile.provider.clone(),
+                source_api: self.source_profile.api_family.clone(),
+                source_model: self.source_profile.model_family.clone(),
+                format: ReasoningFormat::DeepseekReasoningContent,
+                opaque_payload: json!({
+                    "reasoning_content": trimmed,
+                }),
+                fallback_text: Some(trimmed.to_string()),
+                provider_refs: None,
+            }),
+            continuity: Some(ContinuityMetadata {
+                had_tool_call: self.had_tool_call,
+                replay_requirement: replay_requirement_for_profile(
+                    &self.source_profile,
+                    self.had_tool_call,
+                ),
+            }),
+        })
+    }
 }
 
 impl<S> SseEventStream<S> {
-    fn new(inner: S) -> Self {
+    fn new(inner: S, source_profile: ProviderCompatProfile, continuity_enabled: bool) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
             pending: Vec::new().into_iter(),
+            reasoning: OpenAiReasoningState {
+                source_profile,
+                continuity_enabled,
+                ..OpenAiReasoningState::default()
+            },
         }
     }
 }
@@ -575,20 +898,21 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         use std::task::Poll;
+        let this = self.as_mut().get_mut();
 
         // 先输出已解析的事件
-        if let Some(evt) = self.pending.next() {
+        if let Some(evt) = this.pending.next() {
             return Poll::Ready(Some(Ok(evt)));
         }
 
         loop {
-            match Pin::new(&mut self.inner).poll_next(cx) {
+            match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.extend_from_slice(&bytes);
-                    match parse_sse_buffer(&mut self.buffer) {
+                    this.buffer.extend_from_slice(&bytes);
+                    match parse_sse_buffer(&mut this.buffer, &mut this.reasoning) {
                         Ok(Some(mut iter)) => {
                             if let Some(evt) = iter.next() {
-                                self.pending = iter;
+                                this.pending = iter;
                                 return Poll::Ready(Some(Ok(evt)));
                             }
                         }
@@ -600,20 +924,30 @@ where
                     return Poll::Ready(Some(Err(e)));
                 }
                 Poll::Ready(None) => {
-                    if !self.buffer.is_empty() {
-                        match parse_sse_buffer(&mut self.buffer) {
+                    if !this.buffer.is_empty() {
+                        match parse_sse_buffer(&mut this.buffer, &mut this.reasoning) {
                             Ok(Some(iter)) => {
                                 let vec: Vec<_> = iter.collect();
                                 if let Some((first, rest)) = vec.split_first() {
                                     #[allow(clippy::unnecessary_to_owned)]
                                     let pending_vec = rest.to_vec();
-                                    self.pending = pending_vec.into_iter();
+                                    this.pending = pending_vec.into_iter();
                                     return Poll::Ready(Some(Ok(first.clone())));
                                 }
                             }
                             Ok(None) => {}
                             Err(e) => return Poll::Ready(Some(Err(e))),
                         }
+                    }
+                    let flushed = this.reasoning.flush_scrubber();
+                    if let Some((first, rest)) = flushed.split_first() {
+                        #[allow(clippy::unnecessary_to_owned)]
+                        let pending_vec = rest.to_vec();
+                        this.pending = pending_vec.into_iter();
+                        return Poll::Ready(Some(Ok(first.clone())));
+                    }
+                    if let Some(snapshot) = this.reasoning.maybe_snapshot() {
+                        return Poll::Ready(Some(Ok(snapshot)));
                     }
                     return Poll::Ready(None);
                 }
@@ -626,6 +960,7 @@ where
 /// 从 buffer 中解析出完整的 SSE 块（以 \n\n 分隔），返回解析到的事件序列；已消费的数据从 buffer 移除。
 fn parse_sse_buffer(
     buffer: &mut Vec<u8>,
+    reasoning: &mut OpenAiReasoningState,
 ) -> Result<Option<std::vec::IntoIter<StreamEvent>>, AppError> {
     let sep = b"\n\n";
     let pos = buffer.windows(sep.len()).position(|w| w == sep);
@@ -647,7 +982,7 @@ fn parse_sse_buffer(
             }
             let parsed: OpenAiStreamChunk =
                 serde_json::from_str(data).map_err(|e| map_parse_error("解析 SSE 行", e))?;
-            events.extend(openai_chunk_to_stream_events(parsed));
+            events.extend(openai_chunk_to_stream_events_with_state(parsed, reasoning));
         }
     }
     Ok(Some(events.into_iter()))
@@ -699,7 +1034,20 @@ struct OpenAiStreamFunctionDelta {
     arguments: Option<String>,
 }
 
+#[cfg(test)]
 fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
+    let mut reasoning = OpenAiReasoningState {
+        source_profile: ProviderCompatProfile::chat_completions("gpt-5"),
+        continuity_enabled: true,
+        ..OpenAiReasoningState::default()
+    };
+    openai_chunk_to_stream_events_with_state(chunk, &mut reasoning)
+}
+
+fn openai_chunk_to_stream_events_with_state(
+    chunk: OpenAiStreamChunk,
+    reasoning_state: &mut OpenAiReasoningState,
+) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
     if let Some(choices) = chunk.choices {
@@ -711,18 +1059,17 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
                     .or(delta.reasoning_text)
                     .filter(|s| !s.is_empty());
                 if let Some(rc) = reasoning_delta {
-                    events.push(StreamEvent::Thinking {
-                        delta: rc,
-                        source: ThinkingSource::Raw,
-                        signature: None,
-                    });
-                }
-                if let Some(content) = delta.content {
-                    if !content.is_empty() {
-                        events.push(StreamEvent::ContentDelta { delta: content });
+                    if let Some(event) = reasoning_state.thinking_event(rc) {
+                        events.push(event);
                     }
                 }
+                if let Some(content) = delta.content {
+                    events.extend(reasoning_state.scrub_content_delta(&content));
+                }
                 if let Some(tool_calls) = delta.tool_calls {
+                    if !tool_calls.is_empty() {
+                        reasoning_state.had_tool_call = true;
+                    }
                     for tc in tool_calls {
                         events.push(StreamEvent::ToolCallDelta {
                             index: tc.index.unwrap_or(0),
@@ -735,7 +1082,11 @@ fn openai_chunk_to_stream_events(chunk: OpenAiStreamChunk) -> Vec<StreamEvent> {
             }
             if let Some(reason) = choice.finish_reason {
                 if !reason.is_empty() {
+                    events.extend(reasoning_state.flush_scrubber());
                     events.push(StreamEvent::FinishReason { reason });
+                    if let Some(snapshot) = reasoning_state.maybe_snapshot() {
+                        events.push(snapshot);
+                    }
                 }
             }
         }

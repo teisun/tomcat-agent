@@ -13,7 +13,10 @@ use std::path::PathBuf;
 
 use super::super::*;
 use super::mocks::temp_sessions_dir;
-use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
+use crate::core::llm::{
+    ChatMessage, ChatMessageRole, ContinuityMetadata, MessageKind, ReasoningContinuation,
+    ReasoningFormat, ReplayRequirement,
+};
 
 fn tool_call_json(id: &str) -> serde_json::Value {
     serde_json::json!({
@@ -97,6 +100,89 @@ fn init_context_state_preserves_assistant_completion_metadata() {
     assert_eq!(assistant.finish_reason.as_deref(), Some("error:boom"));
     assert_eq!(assistant.error_message.as_deref(), Some("boom"));
     assert_eq!(assistant.error_code.as_deref(), Some("server_error"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn transcript_roundtrip_preserves_reasoning_continuation() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let assistant = ChatMessage::assistant("done").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "openai".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: serde_json::json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    mgr.append_message(serde_json::to_value(&assistant).unwrap())
+        .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    let assistant = state.messages.last().expect("assistant message");
+    assert_eq!(assistant.text_content(), Some("done"));
+    assert_eq!(assistant.thinking_text.as_deref(), Some("safe summary"));
+    let continuation = assistant
+        .reasoning_continuation
+        .as_ref()
+        .expect("reasoning_continuation");
+    assert_eq!(continuation.source_provider, "openai");
+    assert_eq!(
+        continuation.opaque_payload[0]["encrypted_content"],
+        serde_json::json!("enc_123")
+    );
+    let continuity = assistant.continuity.as_ref().expect("continuity");
+    assert!(!continuity.had_tool_call);
+    assert_eq!(
+        continuity.replay_requirement,
+        ReplayRequirement::SameProfileOptional
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_transcript_without_continuity_fields_still_hydrates() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"assistant",
+        "content":"legacy answer",
+        "finish_reason":"stop"
+    }))
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    assert_eq!(state.messages.len(), 2);
+    let assistant = state.messages.last().expect("assistant");
+    assert_eq!(assistant.text_content(), Some("legacy answer"));
+    assert!(assistant.thinking_text.is_none());
+    assert!(assistant.reasoning_continuation.is_none());
+    assert!(assistant.continuity.is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
