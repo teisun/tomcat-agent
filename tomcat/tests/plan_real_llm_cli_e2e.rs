@@ -1,15 +1,18 @@
-//! E2E-PLAN-RL-001：CLI 子进程黑盒真 LLM 全路径测试。
+//! E2E-PLAN-RL-001：CLI 子进程黑盒真 LLM smoke。
 //!
 //! 通过 `assert_cmd::Command::cargo_bin("tomcat")` 真起 `tomcat chat`，让真 LLM
-//! 在两段 stdin 里推进 PLAN→EXEC→Completed 全程：
+//! 在真实 CLI 上分别覆盖 planning-only 与 exec-only 两条窄路径：
 //!
 //! - 进程 A：`tomcat chat` + `/plan` + planning prompt；EOF 退出后落盘 state=planning。
-//! - 测试主程：优先从本次 session transcript 提取 `create_plan` 结果。
-//! - 进程 B：`tomcat chat --resume` + `/plan build {plan_id}` + exec prompt；EOF 退出后落盘 state=completed。
-//!   这个真 LLM 用例继续覆盖 `plan_id` 入口；`/plan build <path>` 由 runtime 集成测试单独回归。
+//! - 进程 B：预置 planning plan 后，`tomcat chat --resume` + `/plan build {plan_id}` + exec
+//!   prompt；EOF 只负责结束输入并退出。这个真 LLM smoke 继续覆盖 `--resume` +
+//!   `plan_id` 入口、EXEC prompt 可见性与 session 绑定；full completion / artifact /
+//!   transcript 顺序由 inprocess/runtime 测试单独回归。
+//! - 需要手动观察整条 PLAN→EXEC→Completed 全链路时，保留 ignored 的
+//!   `cli_plan_path_with_real_llm_custom_goal` 入口。
 //!
-//! 拆两个进程是因为 stdin 是一次性写完的（rustyline pipe 行为）：测试主程必须能在
-//! 进程 A 结束后拿到真实派生的 `plan_id`，再写进程 B 的 stdin。
+//! 之所以仍保留两个子进程，是因为 stdin 是一次性写完的（rustyline pipe 行为），且
+//! `--resume` 路径必须真读取 session/transcript 与盘上的 active plan。
 //!
 //! ## 门禁
 //! - `OPENAI_API_KEY` 必须存在；缺失 → panic（E2E-PLAN-RL-001 / E2E_TEST_SPEC §4）。
@@ -35,7 +38,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serial_test::serial;
-use tomcat::core::plan_runtime::file_store::{read_plan, PlanFileState, TodoStatus};
+use tomcat::core::plan_runtime::file_store::{
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
+    TodoItem, TodoStatus,
+};
 use tomcat::{
     load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
 };
@@ -53,8 +59,6 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 type ExecPromptOverride = fn(&[String], &Path) -> String;
 type PlanningPromptOverride = fn(&str, &Path) -> String;
-type ArtifactAssert = fn(&CliFixture, &Output, &Output);
-
 #[derive(Default)]
 struct CliRunDiagState {
     transcript_offset: usize,
@@ -216,8 +220,6 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
     lines.join(" ")
 }
 
-fn noop_artifact_assert(_: &CliFixture, _: &Output, _: &Output) {}
-
 fn build_counter_planning_prompt(goal: &str, workdir: &Path) -> String {
     format!(
         concat!(
@@ -284,7 +286,11 @@ fn resolve_case_workdir(
     );
 }
 
-fn setup_fixture(log_slug: &str, workdir_override: Option<&Path>) -> CliFixture {
+fn setup_fixture(
+    log_slug: &str,
+    workdir_override: Option<&Path>,
+    max_code_review_rounds: u32,
+) -> CliFixture {
     let api_key = require_api_key();
     let model = default_model();
     let home = dirs::home_dir().expect("无法定位 HOME 目录");
@@ -298,7 +304,7 @@ fn setup_fixture(log_slug: &str, workdir_override: Option<&Path>) -> CliFixture 
         }
     };
     let mut cfg = load_user_config(user_config_path.as_deref());
-    cfg.plan.max_code_review_rounds = 1;
+    cfg.plan.max_code_review_rounds = max_code_review_rounds;
     let generated_config_dir = common::repo_workspace_temp_dir().join("generated-configs");
     std::fs::create_dir_all(&generated_config_dir).expect("create generated-configs for cli e2e");
     let effective_config_path = generated_config_dir.join(format!(
@@ -404,6 +410,143 @@ fn run_tomcat_chat(
     stdin.write_all(stdin_text.as_bytes()).unwrap();
     drop(stdin); // EOF
     wait_for_child_output(child, fx, phase, timeout)
+}
+
+struct PlanningPhaseResult {
+    output: Output,
+    created_plan: common::CreatedPlanRef,
+}
+
+fn resolve_created_plan_after_planning(fx: &CliFixture, out_a: &Output) -> common::CreatedPlanRef {
+    created_plan_from_current_session(fx).unwrap_or_else(|| {
+        let path = pick_newest_planning_plan_path(&fx.home).unwrap_or_else(|| {
+            dump_diag("no_planning_plan", fx, Some(out_a), None);
+            panic!("进程 A 后未找到 state=planning 的 plan 文件");
+        });
+        common::CreatedPlanRef {
+            plan_id: read_plan(&path)
+                .expect("read_plan planning fallback")
+                .frontmatter
+                .plan_id
+                .clone(),
+            path,
+        }
+    })
+}
+
+fn run_planning_phase(
+    fx: &CliFixture,
+    goal: &str,
+    planning_prompt_override: Option<PlanningPromptOverride>,
+    planning_timeout: Option<Duration>,
+) -> PlanningPhaseResult {
+    let planning_prompt = if let Some(builder) = planning_prompt_override {
+        builder(goal, &fx.workdir)
+    } else {
+        default_planning_prompt(goal, &fx.workdir)
+    };
+
+    let stdin_a = format!("/plan\n{prompt}\n", prompt = planning_prompt);
+    let out_a = run_tomcat_chat(fx, "planning_proc", &[], &stdin_a, planning_timeout);
+    if !out_a.status.success() {
+        dump_diag("proc_a_failed", fx, Some(&out_a), None);
+        panic!("进程 A 退出码非 0: {:?}", out_a.status);
+    }
+
+    let created_plan = resolve_created_plan_after_planning(fx, &out_a);
+    set_current_plan_path(fx, created_plan.path.clone());
+    emit_plan_resolved_block("planning_plan_resolved", fx);
+    if !created_plan.path.exists() {
+        dump_diag("no_planning_plan", fx, Some(&out_a), None);
+        panic!("进程 A 后未找到 create_plan 生成的盘文件");
+    }
+
+    PlanningPhaseResult {
+        output: out_a,
+        created_plan,
+    }
+}
+
+fn seeded_exec_plan_id(log_slug: &str) -> String {
+    format!(
+        "plan_cli_exec_seed_{}",
+        common::slugify_filename(
+            &format!("{}-{}", common::filename_timestamp(), log_slug),
+            "seed",
+            48
+        )
+    )
+}
+
+fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPlanRef {
+    let plan_id = seeded_exec_plan_id(goal);
+    let path = plan_path_for_id(&plan_id).expect("plan_path_for_id 失败");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: plan_id.clone(),
+            goal: goal.to_string(),
+            state: PlanFileState::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: chrono::Local::now().to_rfc3339(),
+            schema_version: 1,
+            todos: vec![
+                TodoItem {
+                    id: "t1".into(),
+                    content: format!(
+                        "Create `counter.py` in `{}` so it prints exactly `0` with a trailing newline.",
+                        fx.workdir.display()
+                    ),
+                    status: TodoStatus::Pending,
+                },
+                TodoItem {
+                    id: "t2".into(),
+                    content: format!(
+                        "Run `python3 counter.py` in `{}`, verify exit code 0 with stdout exactly `0\\n` and empty stderr, then finish the plan.",
+                        fx.workdir.display()
+                    ),
+                    status: TodoStatus::Pending,
+                },
+            ],
+            unknown: Default::default(),
+        },
+        body: format!(
+            "## Goal\n\n{goal}\n\n## Plan\n\n- Create `counter.py` in `{}`.\n- Verify it prints exactly `0\\n`.\n",
+            fx.workdir.display()
+        ),
+    };
+    write_plan(&path, &plan, 2_000).expect("write exec seed plan 失败");
+    set_current_plan_path(fx, path.clone());
+    emit_plan_resolved_block("exec_seed_plan_resolved", fx);
+    common::CreatedPlanRef { plan_id, path }
+}
+
+fn run_exec_phase(
+    fx: &CliFixture,
+    goal: &str,
+    plan_id: &str,
+    exec_prompt_override: Option<ExecPromptOverride>,
+    exec_timeout: Option<Duration>,
+) -> Output {
+    let plan_path = current_plan_path(fx).expect("exec 阶段应已有 active plan path");
+    let current_plan = read_plan(&plan_path).expect("read current exec plan 失败");
+    let todo_ids: Vec<String> = current_plan
+        .frontmatter
+        .todos
+        .iter()
+        .map(|todo| todo.id.clone())
+        .collect();
+    let exec_prompt = if let Some(builder) = exec_prompt_override {
+        builder(&todo_ids, &fx.workdir)
+    } else {
+        build_default_exec_prompt(goal, &todo_ids, &fx.workdir)
+    };
+    let stdin_b = format!(
+        "/plan build {plan_id}\n{prompt}\n",
+        plan_id = plan_id,
+        prompt = exec_prompt
+    );
+    run_tomcat_chat(fx, "exec_proc", &["--resume"], &stdin_b, exec_timeout)
 }
 
 fn counter_path(fx: &CliFixture) -> PathBuf {
@@ -839,7 +982,7 @@ fn wait_for_child_output(
     }
 }
 
-fn dump_diag(label: &str, fx: &CliFixture, out_a: &Output, out_b: Option<&Output>) {
+fn dump_diag(label: &str, fx: &CliFixture, out_a: Option<&Output>, out_b: Option<&Output>) {
     let mut out = String::new();
     let _ = writeln!(
         &mut out,
@@ -856,24 +999,26 @@ fn dump_diag(label: &str, fx: &CliFixture, out_a: &Output, out_b: Option<&Output
         let _ = writeln!(&mut out, "{tail}");
     }
     out.push_str(&format_workdir_snapshot(fx));
-    let _ = writeln!(&mut out, "==== proc A stdout (前 4000) ====");
-    let _ = writeln!(
-        &mut out,
-        "{}",
-        String::from_utf8_lossy(&out_a.stdout)
-            .chars()
-            .take(4000)
-            .collect::<String>()
-    );
-    let _ = writeln!(&mut out, "==== proc A stderr (前 2000) ====");
-    let _ = writeln!(
-        &mut out,
-        "{}",
-        String::from_utf8_lossy(&out_a.stderr)
-            .chars()
-            .take(2000)
-            .collect::<String>()
-    );
+    if let Some(a) = out_a {
+        let _ = writeln!(&mut out, "==== proc A stdout (前 4000) ====");
+        let _ = writeln!(
+            &mut out,
+            "{}",
+            String::from_utf8_lossy(&a.stdout)
+                .chars()
+                .take(4000)
+                .collect::<String>()
+        );
+        let _ = writeln!(&mut out, "==== proc A stderr (前 2000) ====");
+        let _ = writeln!(
+            &mut out,
+            "{}",
+            String::from_utf8_lossy(&a.stderr)
+                .chars()
+                .take(2000)
+                .collect::<String>()
+        );
+    }
     if let Some(b) = out_b {
         let _ = writeln!(&mut out, "==== proc B stdout (前 4000) ====");
         let _ = writeln!(
@@ -897,35 +1042,114 @@ fn dump_diag(label: &str, fx: &CliFixture, out_a: &Output, out_b: Option<&Output
     emit_diag(fx, &out);
 }
 
-fn assert_counter_artifact(fx: &CliFixture, out_a: &Output, out_b: &Output) {
-    let counter = counter_path(fx);
-    if !counter.exists() {
-        dump_diag("counter_missing", fx, out_a, Some(out_b));
-        panic!("进程 B 结束后应生成产物文件: {}", counter.display());
-    }
-    let run = StdCommand::new("python3")
-        .current_dir(&fx.workdir)
-        .arg("counter.py")
-        .output()
-        .unwrap_or_else(|e| panic!("运行 counter.py 失败: {e}"));
-    if !run.status.success() {
-        dump_diag("counter_run_failed", fx, out_a, Some(out_b));
-        panic!("counter.py 退出码应为 0，实际：{:?}", run.status);
-    }
-    if run.stdout != b"0\n" {
-        dump_diag("counter_stdout_mismatch", fx, out_a, Some(out_b));
+fn assert_planning_phase_smoke(
+    fx: &CliFixture,
+    out_a: &Output,
+    created_plan: &common::CreatedPlanRef,
+) {
+    let plan = read_plan(&created_plan.path).expect("read_plan planning smoke");
+    if plan.frontmatter.state != PlanFileState::Planning {
+        dump_diag("planning_state_not_planning", fx, Some(out_a), None);
         panic!(
-            "counter.py stdout 应恰好为 `0\\n`，实际：{:?}",
-            String::from_utf8_lossy(&run.stdout)
+            "planning-only 用例结束后 plan 应保持 Planning，实际：{:?}",
+            plan.frontmatter.state
         );
     }
-    if !run.stderr.is_empty() {
-        dump_diag("counter_stderr_not_empty", fx, out_a, Some(out_b));
+    assert!(
+        created_plan.plan_id.starts_with("plan_"),
+        "plan_id 形态异常: {}",
+        created_plan.plan_id
+    );
+    assert!(
+        !plan.frontmatter.todos.is_empty(),
+        "planning-only 用例结束后 todos 不应为空"
+    );
+    let stdout_a = String::from_utf8_lossy(&out_a.stdout);
+    assert!(
+        stdout_a.contains("u[Plan:planning]>"),
+        "进程 A stdout 应展示 planning user prompt；实际前 4000 字符：{}",
+        tail_chars(&out_a.stdout, 4000)
+    );
+    assert!(
+        stdout_a.contains("agent.main[Plan:planning]>"),
+        "进程 A stdout 应展示 planning agent prompt；实际前 4000 字符：{}",
+        tail_chars(&out_a.stdout, 4000)
+    );
+}
+
+fn assert_exec_phase_smoke(fx: &CliFixture, out_b: &Output, plan_path: &Path) {
+    if !out_b.status.success() {
+        dump_diag("proc_b_failed", fx, None, Some(out_b));
+        panic!("进程 B 退出码非 0: {:?}", out_b.status);
+    }
+
+    let final_plan = read_plan(plan_path).expect("read exec smoke final plan");
+    if matches!(final_plan.frontmatter.state, PlanFileState::Planning) {
+        dump_diag("exec_smoke_still_planning", fx, None, Some(out_b));
         panic!(
-            "counter.py stderr 应为空，实际：{:?}",
-            String::from_utf8_lossy(&run.stderr)
+            "exec-only 用例结束后 plan 至少应离开 Planning，实际：{:?}",
+            final_plan.frontmatter.state
         );
     }
+    assert_eq!(
+        final_plan.frontmatter.session_key.as_deref(),
+        Some(tomcat::DEFAULT_SESSION_KEY),
+        "exec-only 用例应把 active plan 绑定到固定 DEFAULT_SESSION_KEY"
+    );
+    assert_eq!(
+        final_plan.frontmatter.session_id.as_deref(),
+        Some(fx.run_session_id.as_str()),
+        "exec-only 用例应把 active plan 绑定到本次 CLI run 的真实 session_id"
+    );
+    assert!(
+        !out_b.stdout.is_empty(),
+        "进程 B 应有用户可见 stdout 输出；日志文件：{}",
+        fx.diag_log.path.display()
+    );
+    let stdout_b = String::from_utf8_lossy(&out_b.stdout);
+    assert!(
+        stdout_b.contains("u[Plan:executing]> start building "),
+        "进程 B stdout 应展示自动开跑的 EXEC user prompt；实际前 4000 字符：{}",
+        tail_chars(&out_b.stdout, 4000)
+    );
+    assert!(
+        stdout_b.contains("agent.main[Plan:executing]>"),
+        "进程 B stdout 应展示 EXEC agent prompt；实际前 4000 字符：{}",
+        tail_chars(&out_b.stdout, 4000)
+    );
+}
+
+fn run_cli_planning_smoke_case(
+    goal: &str,
+    workdir_override: Option<&Path>,
+    planning_prompt_override: Option<PlanningPromptOverride>,
+    planning_timeout: Option<Duration>,
+) {
+    common::setup_logging();
+    let slug = common::slugify_filename(goal, "goal", 40);
+    let fx = setup_fixture(&slug, workdir_override, 0);
+    let planning = run_planning_phase(&fx, goal, planning_prompt_override, planning_timeout);
+    assert_planning_phase_smoke(&fx, &planning.output, &planning.created_plan);
+}
+
+fn run_cli_exec_smoke_case(
+    goal: &str,
+    workdir_override: Option<&Path>,
+    exec_prompt_override: Option<ExecPromptOverride>,
+    exec_timeout: Option<Duration>,
+) {
+    common::setup_logging();
+    let slug = format!("exec-{}", common::slugify_filename(goal, "goal", 36));
+    let fx = setup_fixture(&slug, workdir_override, 0);
+    let created_plan = seed_counter_planning_plan(&fx, goal);
+    let out_b = run_exec_phase(
+        &fx,
+        goal,
+        &created_plan.plan_id,
+        exec_prompt_override,
+        exec_timeout,
+    );
+    assert_exec_phase_smoke(&fx, &out_b, &created_plan.path);
 }
 
 fn run_cli_real_llm_case(
@@ -935,45 +1159,14 @@ fn run_cli_real_llm_case(
     exec_prompt_override: Option<ExecPromptOverride>,
     planning_timeout: Option<Duration>,
     exec_timeout: Option<Duration>,
-    verify_artifact: ArtifactAssert,
 ) {
     common::setup_logging();
     let slug = common::slugify_filename(goal, "goal", 40);
-    let fx = setup_fixture(&slug, workdir_override);
-    let planning_prompt = if let Some(builder) = planning_prompt_override {
-        builder(goal, &fx.workdir)
-    } else {
-        default_planning_prompt(goal, &fx.workdir)
-    };
-
-    let stdin_a = format!("/plan\n{prompt}\n", prompt = planning_prompt);
-    let out_a = run_tomcat_chat(&fx, "planning_proc", &[], &stdin_a, planning_timeout);
-    if !out_a.status.success() {
-        dump_diag("proc_a_failed", &fx, &out_a, None);
-        panic!("进程 A 退出码非 0: {:?}", out_a.status);
-    }
-
-    let created_plan = created_plan_from_current_session(&fx).unwrap_or_else(|| {
-        let path = pick_newest_planning_plan_path(&fx.home).unwrap_or_else(|| {
-            dump_diag("no_planning_plan", &fx, &out_a, None);
-            panic!("进程 A 后未找到 state=planning 的 plan 文件");
-        });
-        common::CreatedPlanRef {
-            plan_id: read_plan(&path)
-                .expect("read_plan planning fallback")
-                .frontmatter
-                .plan_id
-                .clone(),
-            path,
-        }
-    });
+    let fx = setup_fixture(&slug, workdir_override, 1);
+    let planning = run_planning_phase(&fx, goal, planning_prompt_override, planning_timeout);
+    let out_a = planning.output;
+    let created_plan = planning.created_plan;
     let plan_path = created_plan.path.clone();
-    set_current_plan_path(&fx, plan_path.clone());
-    emit_plan_resolved_block("planning_plan_resolved", &fx);
-    if !plan_path.exists() {
-        dump_diag("no_planning_plan", &fx, &out_a, None);
-        panic!("进程 A 后未找到 create_plan 生成的盘文件");
-    }
     let plan = read_plan(&plan_path).expect("read_plan plan_a");
     let plan_id = created_plan.plan_id;
     assert!(plan_id.starts_with("plan_"), "plan_id 形态异常: {plan_id}");
@@ -989,26 +1182,15 @@ fn run_cli_real_llm_case(
         .collect();
     assert!(!todo_ids.is_empty(), "进程 A 结束后 todos 不应为空");
 
-    let exec_prompt = if let Some(builder) = exec_prompt_override {
-        builder(&todo_ids, &fx.workdir)
-    } else {
-        build_default_exec_prompt(goal, &todo_ids, &fx.workdir)
-    };
-    let stdin_b = format!(
-        "/plan build {plan_id}\n{prompt}\n",
-        plan_id = plan_id,
-        prompt = exec_prompt
-    );
-    let out_b = run_tomcat_chat(&fx, "exec_proc", &["--resume"], &stdin_b, exec_timeout);
+    let out_b = run_exec_phase(&fx, goal, &plan_id, exec_prompt_override, exec_timeout);
     if !out_b.status.success() {
-        dump_diag("proc_b_failed", &fx, &out_a, Some(&out_b));
+        dump_diag("proc_b_failed", &fx, Some(&out_a), Some(&out_b));
         panic!("进程 B 退出码非 0: {:?}", out_b.status);
     }
-    verify_artifact(&fx, &out_a, &out_b);
 
     let final_plan = read_plan(&plan_path).expect("read_plan plan_b");
     if final_plan.frontmatter.state != PlanFileState::Completed {
-        dump_diag("final_state_not_completed", &fx, &out_a, Some(&out_b));
+        dump_diag("final_state_not_completed", &fx, Some(&out_a), Some(&out_b));
         panic!(
             "EOF 后 plan 磁盘 state 应为 Completed，实际：{:?}",
             final_plan.frontmatter.state
@@ -1020,7 +1202,7 @@ fn run_cli_real_llm_case(
         .iter()
         .all(|t| matches!(t.status, TodoStatus::Completed));
     if !all_done {
-        dump_diag("todos_not_all_completed", &fx, &out_a, Some(&out_b));
+        dump_diag("todos_not_all_completed", &fx, Some(&out_a), Some(&out_b));
         panic!(
             "所有 todos 应 Completed，实际：{:#?}",
             final_plan.frontmatter.todos
@@ -1065,7 +1247,7 @@ fn run_cli_real_llm_case(
         dump_diag(
             "transcript_missing_review_events",
             &fx,
-            &out_a,
+            Some(&out_a),
             Some(&out_b),
         );
     }
@@ -1089,15 +1271,23 @@ fn run_cli_real_llm_case(
 
 #[test]
 #[serial]
-fn cli_full_plan_path_with_real_llm() {
-    run_cli_real_llm_case(
+fn cli_planning_path_with_real_llm() {
+    run_cli_planning_smoke_case(
         COUNTER_PLAN_GOAL,
         None,
         Some(build_counter_planning_prompt),
-        Some(build_counter_exec_prompt),
         Some(PLANNING_TIMEOUT),
+    );
+}
+
+#[test]
+#[serial]
+fn cli_exec_resume_path_with_real_llm() {
+    run_cli_exec_smoke_case(
+        COUNTER_PLAN_GOAL,
+        None,
+        Some(build_counter_exec_prompt),
         Some(EXEC_TIMEOUT),
-        assert_counter_artifact,
     );
 }
 
@@ -1129,13 +1319,5 @@ fn cli_plan_path_with_real_llm_custom_goal() {
         )
     });
     let workdir_buf = std::env::var(CUSTOM_WORKDIR_ENV).ok().map(PathBuf::from);
-    run_cli_real_llm_case(
-        &goal,
-        workdir_buf.as_deref(),
-        None,
-        None,
-        None,
-        None,
-        noop_artifact_assert,
-    );
+    run_cli_real_llm_case(&goal, workdir_buf.as_deref(), None, None, None, None);
 }
