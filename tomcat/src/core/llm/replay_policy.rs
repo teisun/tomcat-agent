@@ -98,6 +98,17 @@ impl ProviderCompatProfile {
                 supports_response_id_hint: false,
                 downgrade_mode: DowngradeMode::VisibleHistoryOnly,
             },
+            "deepseek-v4" => Self {
+                profile_id: "deepseek.v4.tool_sensitive".to_string(),
+                provider: "deepseek".to_string(),
+                api_family: "chat_completions".to_string(),
+                model_family: family,
+                capture_mode: CaptureMode::ReasoningContent,
+                replay_acceptance: ReplayAcceptance::SameProfileOnly,
+                requires_tool_turn_replay: true,
+                supports_response_id_hint: false,
+                downgrade_mode: DowngradeMode::VisibleHistoryOnly,
+            },
             _ => Self {
                 profile_id: "openai.chat_completions.default".to_string(),
                 provider: "openai".to_string(),
@@ -278,6 +289,8 @@ pub fn model_family(model: &str) -> String {
     let lower = model.trim().to_ascii_lowercase();
     if lower.starts_with("deepseek-reasoner") {
         "deepseek-reasoner".to_string()
+    } else if lower.starts_with("deepseek-v4-pro") || lower.starts_with("deepseek-v4-flash") {
+        "deepseek-v4".to_string()
     } else if lower.starts_with("deepseek-chat") {
         "deepseek-chat".to_string()
     } else if lower.starts_with("gpt-5") {

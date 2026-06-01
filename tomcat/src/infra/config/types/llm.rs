@@ -144,7 +144,7 @@ pub struct LlmConfig {
     /// OpenAI Files 上传子配置（T2-P0-015）。
     #[serde(default)]
     pub files: LlmFilesConfig,
-    /// transcript-first reasoning continuity 总开关（默认 false，保持现网行为）。
+    /// transcript-first reasoning continuity 总开关（默认 true；可按需显式关闭）。
     #[serde(default)]
     pub reasoning_continuity: ReasoningContinuityConfig,
     /// OpenAI Responses 专属子配置。
@@ -165,9 +165,9 @@ pub struct LlmFilesConfig {
 }
 
 /// transcript-first reasoning continuity 子配置。
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReasoningContinuityConfig {
-    #[serde(default)]
+    #[serde(default = "default_reasoning_continuity_enabled")]
     pub enabled: bool,
 }
 
@@ -251,6 +251,10 @@ fn default_thinking_show() -> ThinkingDisplay {
     ThinkingDisplay::Summary
 }
 
+fn default_reasoning_continuity_enabled() -> bool {
+    true
+}
+
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
@@ -262,6 +266,14 @@ impl Default for ThinkingConfig {
             persist: false,
             strip_on_resend: true,
             print_to_stderr: false,
+        }
+    }
+}
+
+impl Default for ReasoningContinuityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_reasoning_continuity_enabled(),
         }
     }
 }

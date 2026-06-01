@@ -382,8 +382,8 @@ pub struct OpenAiProvider {
     http_read_timeout_sec: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
     thinking_cfg: crate::infra::config::ThinkingConfig,
-    /// `provider id`，给 ThinkingFormat::Auto 推断使用；`OpenAiProvider` 固定为 `"openai"`。
-    thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
+    /// 用户显式配置的 thinking format；`Auto` 时按请求实际 model 决定。
+    configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
 }
 
@@ -434,10 +434,10 @@ impl OpenAiProvider {
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
-        let thinking_format = crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
-            config.thinking.format.as_deref(),
-        )
-        .resolve("openai");
+        let configured_thinking_format =
+            crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
+                config.thinking.format.as_deref(),
+            );
         Ok(Self {
             client,
             base_url,
@@ -451,7 +451,7 @@ impl OpenAiProvider {
             non_stream_stale_timeout_sec: config.non_stream_stale_timeout_sec,
             http_read_timeout_sec: config.http_read_timeout_sec,
             thinking_cfg: config.thinking.clone(),
-            thinking_format,
+            configured_thinking_format,
             continuity_enabled: config.reasoning_continuity.enabled,
         })
     }
@@ -466,6 +466,13 @@ impl OpenAiProvider {
                 &request.model
             })
             .to_string()
+    }
+
+    fn thinking_format_for_model(
+        &self,
+        model: &str,
+    ) -> crate::core::llm::thinking_policy::ThinkingFormat {
+        self.configured_thinking_format.resolve_for_model(model)
     }
 
     fn auth_header(&self) -> (&str, String) {
@@ -496,9 +503,10 @@ impl OpenAiProvider {
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
         let model = self.effective_model(request);
+        let thinking_format = self.thinking_format_for_model(&model);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
             &self.thinking_cfg,
-            self.thinking_format,
+            thinking_format,
         );
         let body = OpenAiRequestBody {
             model: model.clone(),
@@ -682,11 +690,12 @@ impl LlmProvider for OpenAiProvider {
             None
         };
 
+        let model = self.effective_model(&request);
+        let thinking_format = self.thinking_format_for_model(&model);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
             &self.thinking_cfg,
-            self.thinking_format,
+            thinking_format,
         );
-        let model = self.effective_model(&request);
         let body = OpenAiRequestBody {
             model: model.clone(),
             messages: transport_messages(&request.messages, &model, self.continuity_enabled),

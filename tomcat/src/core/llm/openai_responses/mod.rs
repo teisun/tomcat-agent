@@ -168,7 +168,8 @@ pub struct OpenAiResponsesProvider {
     files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
     thinking_cfg: crate::infra::config::ThinkingConfig,
-    thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
+    /// 用户显式配置的 thinking format；`Auto` 时按请求实际 model 决定。
+    configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
     use_previous_response_id: bool,
 }
@@ -244,10 +245,10 @@ impl OpenAiResponsesProvider {
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
-        let thinking_format = crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
-            config.thinking.format.as_deref(),
-        )
-        .resolve("openai-responses");
+        let configured_thinking_format =
+            crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
+                config.thinking.format.as_deref(),
+            );
         Ok(Self {
             client,
             base_url,
@@ -263,7 +264,7 @@ impl OpenAiResponsesProvider {
             files_client: std::sync::OnceLock::new(),
             files_expires_after_seconds: config.files.expires_after_seconds,
             thinking_cfg: config.thinking.clone(),
-            thinking_format,
+            configured_thinking_format,
             continuity_enabled: config.reasoning_continuity.enabled,
             use_previous_response_id: config.openai_responses.use_previous_response_id,
         })
@@ -279,6 +280,13 @@ impl OpenAiResponsesProvider {
                 &request.model
             })
             .to_string()
+    }
+
+    fn thinking_format_for_model(
+        &self,
+        model: &str,
+    ) -> crate::core::llm::thinking_policy::ThinkingFormat {
+        self.configured_thinking_format.resolve_for_model(model)
     }
 
     fn auth_header(&self) -> (&str, String) {
@@ -311,6 +319,7 @@ impl OpenAiResponsesProvider {
         let model = self.effective_model(request);
         let target_profile =
             crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
+        let thinking_format = self.thinking_format_for_model(&model);
         let previous_response_id = if self.continuity_enabled
             && self.use_previous_response_id
             && allow_response_id_hint
@@ -365,7 +374,7 @@ impl OpenAiResponsesProvider {
         // 与 Completions 的 `reasoning_effort` 字段不同：Responses 走 `{reasoning: {effort: "low|medium|high"}}`。
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
             &self.thinking_cfg,
-            self.thinking_format,
+            thinking_format,
         );
         let include_reasoning_summary = self.thinking_cfg.enabled;
         let mut reasoning = serde_json::Map::new();

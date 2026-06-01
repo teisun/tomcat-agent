@@ -44,10 +44,10 @@ impl ThinkingLevel {
     }
 }
 
-/// 厂商请求格式。`Auto` 表示按 provider 名推断；其它显式指定。
+/// 厂商请求格式。`Auto` 表示按 model 名推断；其它显式指定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingFormat {
-    /// 按 provider 名推断（OpenAI Completions/Responses → `Openai`，DeepSeek/网关 → `Openrouter` 等）。
+    /// 按 model 名推断；未知 model 保守回落到 `Openai`。
     #[default]
     Auto,
     /// OpenAI Chat Completions / Responses：`reasoning_effort` 字符串档位。
@@ -81,6 +81,7 @@ impl ThinkingFormat {
     }
 
     /// 当 format=Auto 时按 provider id（与 [`crate::core::llm::registry`] 注册名）推断。
+    /// 仅保留给旧路径/文档描述；新路径优先走 [`resolve_for_model`]。
     pub fn resolve(&self, provider_id: &str) -> Self {
         if !matches!(self, Self::Auto) {
             return *self;
@@ -93,6 +94,36 @@ impl ThinkingFormat {
             "doubao" | "moonshot" => Self::Doubao,
             _ => Self::Openai,
         }
+    }
+
+    /// 按 model 选择请求格式；显式指定的 format 原样返回，`Auto` 才走 model 推断。
+    pub fn resolve_for_model(&self, model: &str) -> Self {
+        if !matches!(self, Self::Auto) {
+            return *self;
+        }
+        thinking_format_for_model(model)
+    }
+}
+
+/// 按 model 归一到 thinking 请求格式。
+///
+/// 设计目标：
+/// - 单输入（model 字符串）即可决定默认格式；
+/// - 同厂商多个 model 可以复用同一种 format；
+/// - 未来某个特殊 model 也可以单独映射到独立 format。
+pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.starts_with("deepseek-") {
+        ThinkingFormat::Deepseek
+    } else if lower.starts_with("qwen") {
+        ThinkingFormat::Qwen
+    } else if lower.starts_with("doubao")
+        || lower.starts_with("moonshot")
+        || lower.starts_with("kimi")
+    {
+        ThinkingFormat::Doubao
+    } else {
+        ThinkingFormat::Openai
     }
 }
 
