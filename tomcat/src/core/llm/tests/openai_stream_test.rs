@@ -202,6 +202,27 @@ fn test_openai_request_body_serializes_thinking_object() {
 }
 
 #[test]
+fn test_openai_request_body_serializes_deepseek_thinking_fields_together() {
+    let body = OpenAiRequestBody {
+        model: "deepseek-chat".into(),
+        messages: vec![],
+        temperature: None,
+        max_tokens: None,
+        stream: true,
+        tools: None,
+        stream_options: None,
+        reasoning_effort: Some("high".into()),
+        thinking: Some(serde_json::json!({"type":"enabled"})),
+    };
+    let j = serde_json::to_value(&body).unwrap();
+    assert_eq!(
+        j.get("reasoning_effort").and_then(|v| v.as_str()),
+        Some("high")
+    );
+    assert_eq!(j["thinking"]["type"], "enabled");
+}
+
+#[test]
 fn test_openai_provider_disabled_thinking_has_no_reasoning_fields_in_request() {
     use crate::core::llm::thinking_policy::{resolve_request_fields, ThinkingFormat};
     use crate::infra::config::ThinkingConfig;
@@ -287,6 +308,35 @@ fn test_openai_chunk_deepseek_finish_emits_reasoning_snapshot() {
 }
 
 #[test]
+fn test_openai_chunk_deepseek_tool_turn_without_reasoning_does_not_emit_snapshot() {
+    let mut state = OpenAiReasoningState {
+        source_profile: ProviderCompatProfile::chat_completions("deepseek-chat"),
+        continuity_enabled: true,
+        ..OpenAiReasoningState::default()
+    };
+    let chunk: OpenAiStreamChunk = serde_json::from_str(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+    )
+    .expect("parse deepseek chunk without reasoning");
+    let events = openai_chunk_to_stream_events_with_state(chunk, &mut state);
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, StreamEvent::ReasoningSnapshot { .. })),
+        "非思考模式或无 reasoning_content 的 tool turn 不应伪造 continuity snapshot: {:?}",
+        events
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ToolCallDelta {
+            index: 0,
+            name: Some(name),
+            ..
+        } if name == "read"
+    )));
+}
+
+#[test]
 fn deepseek_tool_turn_replays_reasoning_content() {
     let message = ChatMessage::assistant_with_tool_calls(
         None,
@@ -335,6 +385,22 @@ fn test_transport_messages_deepseek_non_tool_turn_omits_reasoning_content() {
         }),
     );
     let wire = transport_messages(&[message], "deepseek-chat", true);
+    assert!(wire[0].get("reasoning_content").is_none());
+}
+
+#[test]
+fn test_transport_messages_deepseek_tool_turn_without_reasoning_state_keeps_plain_tool_call() {
+    let message = ChatMessage::assistant_with_tool_calls(
+        Some("calling tool"),
+        vec![serde_json::json!({
+            "id":"call_1",
+            "type":"function",
+            "function":{"name":"read","arguments":"{}"}
+        })],
+    );
+    let wire = transport_messages(&[message], "deepseek-chat", true);
+    assert_eq!(wire[0]["content"], "calling tool");
+    assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
     assert!(wire[0].get("reasoning_content").is_none());
 }
 

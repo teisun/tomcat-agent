@@ -69,6 +69,8 @@ fn deepseek_continuity_config() -> LlmConfig {
         ..LlmConfig::default()
     };
     cfg.reasoning_continuity.enabled = true;
+    cfg.thinking.enabled = true;
+    cfg.thinking.level = "high".to_string();
     cfg.thinking.format = Some("deepseek".to_string());
     cfg
 }

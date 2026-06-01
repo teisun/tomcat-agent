@@ -115,11 +115,23 @@ fn doubao_max_tokens_propagates_when_set() {
 }
 
 #[test]
-fn deepseek_qwen_have_no_request_field() {
-    assert_eq!(
-        resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Deepseek),
-        ThinkingRequestFields::default()
-    );
+fn deepseek_writes_effort_and_thinking_enable_flag() {
+    let r = resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Deepseek);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(r.thinking.as_ref().unwrap()["type"], "enabled");
+}
+
+#[test]
+fn deepseek_maps_lower_levels_to_high_and_xhigh_to_max() {
+    let medium = resolve_request_fields(&cfg_with(true, "medium"), ThinkingFormat::Deepseek);
+    assert_eq!(medium.reasoning_effort.as_deref(), Some("high"));
+
+    let xhigh = resolve_request_fields(&cfg_with(true, "xhigh"), ThinkingFormat::Deepseek);
+    assert_eq!(xhigh.reasoning_effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn qwen_has_no_request_field() {
     assert_eq!(
         resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Qwen),
         ThinkingRequestFields::default()

@@ -333,9 +333,9 @@ fn longest_partial_marker_suffix(buffer: &str, markers: &[&str]) -> usize {
 /// 使用 max_completion_tokens 以兼容新模型（部分模型已不再接受 max_tokens）。
 ///
 /// `reasoning_effort` / `thinking` 是 T2-P0-006 P2a 阶段引入的可选字段：
-/// - `reasoning_effort`：OpenAI 系（gpt-5.x 等）走 `low/medium/high/...` 字符串档位；
-/// - `thinking`：豆包 / Moonshot / 部分网关使用 `{"type": "enabled", ...}` 对象；
-/// - 两者**互斥**，由 P5 阶段的 `thinking_policy` 映射决定使用哪一个；
+/// - `reasoning_effort`：OpenAI 系（gpt-5.x 等）与 DeepSeek thinking mode 使用；
+/// - `thinking`：DeepSeek、豆包 / Moonshot / 部分网关使用 `{"type": "enabled", ...}` 对象；
+/// - 大多数 provider 二选一；DeepSeek OpenAI 兼容格式会同时写这两个字段；
 /// - 本期均默认 `None`，与 LlmConfig 默认行为一致（不改变现网请求体）。
 ///
 /// 详见 `docs/architecture/llm-stream-events-cli-pipeline.md` §4.2.1 / §4.2.2。
