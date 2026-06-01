@@ -27,11 +27,12 @@ pub use load::{
 pub use lock::with_config_lock;
 #[allow(unused_imports)]
 pub use types::WorkspaceEntry;
+#[allow(unused_imports)]
 pub use types::{
     compute_context_budget_chars, AgentConfig, AppConfig, CheckpointConfig, ContextConfig,
-    LlmConfig, LlmFilesConfig, LogConfig, PreflightConfig, PrimitiveConfig, SecurityConfig,
-    ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WasmConfig, WorkspaceConfig,
-    DEFAULT_LLM_MODEL,
+    LlmConfig, LlmFilesConfig, LogConfig, OpenAiResponsesConfig, PreflightConfig, PrimitiveConfig,
+    ReasoningContinuityConfig, SecurityConfig, ThinkingConfig, ThinkingDisplay, ToolCliVerbosity,
+    WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），
 // 这里先 re-export 保证 `tomcat::infra::config::PlanConfig` 可用而不污染默认 import。

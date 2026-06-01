@@ -9,7 +9,8 @@
 
 use super::super::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ContinuityMetadata, ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent,
+    ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
 
@@ -46,21 +47,46 @@ fn chat_message_assistant_with_tool_calls() {
 
 #[test]
 fn chat_message_completion_metadata_roundtrip() {
-    let msg = ChatMessage::assistant("oops").with_completion_metadata(
-        Some("error:boom".to_string()),
-        Some("boom".to_string()),
-        Some("bad_request".to_string()),
-    );
+    let msg = ChatMessage::assistant("oops")
+        .with_completion_metadata(
+            Some("error:boom".to_string()),
+            Some("boom".to_string()),
+            Some("bad_request".to_string()),
+        )
+        .with_reasoning_state(
+            Some("safe summary".to_string()),
+            Some(ReasoningContinuation {
+                source_provider: "openai".to_string(),
+                source_api: "responses".to_string(),
+                source_model: "gpt-5".to_string(),
+                format: ReasoningFormat::OpenaiResponsesReasoningItems,
+                opaque_payload: serde_json::json!([{"encrypted_content":"enc"}]),
+                fallback_text: Some("safe summary".to_string()),
+                provider_refs: None,
+            }),
+            Some(ContinuityMetadata {
+                had_tool_call: false,
+                replay_requirement: ReplayRequirement::SameProfileOptional,
+            }),
+        );
     let json = serde_json::to_value(&msg).unwrap();
     assert_eq!(json["finish_reason"], "error:boom");
     assert_eq!(json["error_message"], "boom");
     assert_eq!(json["error_code"], "bad_request");
+    assert_eq!(json["thinking_text"], "safe summary");
+    assert_eq!(
+        json["reasoning_continuation"]["format"],
+        "openai_responses_reasoning_items"
+    );
 
     let stripped = msg.without_completion_metadata();
     let stripped_json = serde_json::to_value(&stripped).unwrap();
     assert!(stripped_json.get("finish_reason").is_none());
     assert!(stripped_json.get("error_message").is_none());
     assert!(stripped_json.get("error_code").is_none());
+    assert!(stripped_json.get("thinking_text").is_none());
+    assert!(stripped_json.get("reasoning_continuation").is_none());
+    assert!(stripped_json.get("continuity").is_none());
 }
 
 #[test]

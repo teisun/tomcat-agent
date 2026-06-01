@@ -269,3 +269,32 @@ fn update_session_modifies_store() {
     assert_eq!(after.cwd.as_deref(), Some("/updated"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn switch_current_model_updates_override_and_appends_event() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.switch_current_model(Some("openai"), Some("deepseek-v4-flash"))
+        .unwrap();
+
+    let entry = mgr.get_session(key).unwrap().unwrap();
+    assert_eq!(entry.model_override.as_deref(), Some("deepseek-v4-flash"));
+
+    let entries = mgr.get_entries(8).unwrap();
+    let model_change = entries
+        .into_iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::ModelChange(change) => Some(change),
+            _ => None,
+        })
+        .expect("应追加 model_change 事件");
+    assert_eq!(model_change.provider.as_deref(), Some("openai"));
+    assert_eq!(model_change.model_id.as_deref(), Some("deepseek-v4-flash"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

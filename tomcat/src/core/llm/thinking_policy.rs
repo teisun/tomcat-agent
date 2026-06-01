@@ -7,7 +7,8 @@
 //!
 //! - **集中策略**：provider 层只调用 [`resolve_request_fields`]，不再各自写 if/else，
 //!   避免后续厂商分化扩散到 N 个文件。
-//! - **互斥**：返回 `(reasoning_effort, thinking)`，只会有一个为 `Some`，由 format 决定。
+//! - **集中策略**：优先在这里吸收厂商差异；大多数 format 只会写一个字段，DeepSeek
+//!   OpenAI 兼容格式例外，会同时写 `reasoning_effort` 与 `thinking`。
 //! - **向后兼容**：`ThinkingLevel::Off` 总是返回 `(None, None)`，`enabled=false` 时
 //!   provider 应直接跳过本函数，请求体保持与历史一致。
 
@@ -43,17 +44,17 @@ impl ThinkingLevel {
     }
 }
 
-/// 厂商请求格式。`Auto` 表示按 provider 名推断；其它显式指定。
+/// 厂商请求格式。`Auto` 表示按 model 名推断；其它显式指定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingFormat {
-    /// 按 provider 名推断（OpenAI Completions/Responses → `Openai`，DeepSeek/网关 → `Openrouter` 等）。
+    /// 按 model 名推断；未知 model 保守回落到 `Openai`。
     #[default]
     Auto,
     /// OpenAI Chat Completions / Responses：`reasoning_effort` 字符串档位。
     Openai,
     /// OpenRouter / 兼容 OpenAI 网关：与 `Openai` 同形态，单独枚举便于扩展。
     Openrouter,
-    /// DeepSeek：`reasoning_content` 仅在响应侧出现，请求侧无显式开关。
+    /// DeepSeek：OpenAI 兼容格式下，请求侧同时带 `reasoning_effort` + `thinking.enabled`。
     Deepseek,
     /// 智谱 / Z.AI：与 OpenAI Responses 同形态；占位。
     Zai,
@@ -80,6 +81,7 @@ impl ThinkingFormat {
     }
 
     /// 当 format=Auto 时按 provider id（与 [`crate::core::llm::registry`] 注册名）推断。
+    /// 仅保留给旧路径/文档描述；新路径优先走 [`resolve_for_model`]。
     pub fn resolve(&self, provider_id: &str) -> Self {
         if !matches!(self, Self::Auto) {
             return *self;
@@ -93,14 +95,44 @@ impl ThinkingFormat {
             _ => Self::Openai,
         }
     }
+
+    /// 按 model 选择请求格式；显式指定的 format 原样返回，`Auto` 才走 model 推断。
+    pub fn resolve_for_model(&self, model: &str) -> Self {
+        if !matches!(self, Self::Auto) {
+            return *self;
+        }
+        thinking_format_for_model(model)
+    }
 }
 
-/// `resolve_request_fields` 的输出：互斥的两个字段，最多一个 `Some`。
+/// 按 model 归一到 thinking 请求格式。
+///
+/// 设计目标：
+/// - 单输入（model 字符串）即可决定默认格式；
+/// - 同厂商多个 model 可以复用同一种 format；
+/// - 未来某个特殊 model 也可以单独映射到独立 format。
+pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.starts_with("deepseek-") {
+        ThinkingFormat::Deepseek
+    } else if lower.starts_with("qwen") {
+        ThinkingFormat::Qwen
+    } else if lower.starts_with("doubao")
+        || lower.starts_with("moonshot")
+        || lower.starts_with("kimi")
+    {
+        ThinkingFormat::Doubao
+    } else {
+        ThinkingFormat::Openai
+    }
+}
+
+/// `resolve_request_fields` 的输出：大多数 format 最多只写一个字段；DeepSeek 例外。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ThinkingRequestFields {
-    /// OpenAI 系：`reasoning_effort: "low"|"medium"|"high"|...`
+    /// OpenAI / DeepSeek：`reasoning_effort: "low"|"medium"|"high"|...`
     pub reasoning_effort: Option<String>,
-    /// 豆包/Moonshot：`thinking: {"type":"enabled", "max_tokens": ...}`
+    /// DeepSeek / 豆包 / Moonshot：`thinking: {"type":"enabled", ...}`
     pub thinking: Option<serde_json::Value>,
 }
 
@@ -109,8 +141,10 @@ pub struct ThinkingRequestFields {
 /// 行为：
 /// - `enabled=false` 或 `level=off` → 全 None；
 /// - OpenAI 系：`reasoning_effort` 为 level 字符串；`xhigh` 不在白名单（外部决定）时 caller 应降级为 `high`；
+/// - DeepSeek：按官方 thinking mode，同时写 `reasoning_effort + thinking={"type":"enabled"}`；
+///   其中 `minimal/low/medium/high` 统一映射为 `high`，`xhigh` 映射为 `max`；
 /// - 豆包/Moonshot：`thinking={"type":"enabled"}`，带 `max_tokens` 时附带；
-/// - DeepSeek/Qwen 等无显式请求字段：返回 None（响应解析仍走 reasoning_content 三路兜底）。
+/// - Qwen：当前无显式请求字段；响应解析仍走 reasoning_content 三路兜底。
 pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> ThinkingRequestFields {
     if !cfg.enabled {
         return ThinkingRequestFields::default();
@@ -121,19 +155,23 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
     }
     match fmt {
         ThinkingFormat::Openai | ThinkingFormat::Openrouter | ThinkingFormat::Zai => {
-            let v = match level {
-                ThinkingLevel::Off => return ThinkingRequestFields::default(),
-                ThinkingLevel::Minimal => "low",
-                ThinkingLevel::Low => "low",
-                ThinkingLevel::Medium => "medium",
-                ThinkingLevel::High => "high",
-                ThinkingLevel::Xhigh => "high",
-            };
+            let v = openai_reasoning_effort(level)
+                .expect("ThinkingLevel::Off should have returned early");
             ThinkingRequestFields {
                 reasoning_effort: Some(v.to_string()),
                 thinking: None,
             }
         }
+        ThinkingFormat::Deepseek => ThinkingRequestFields {
+            reasoning_effort: Some(
+                deepseek_reasoning_effort(level)
+                    .expect("ThinkingLevel::Off should have returned early")
+                    .to_string(),
+            ),
+            thinking: Some(serde_json::json!({
+                "type": "enabled"
+            })),
+        },
         ThinkingFormat::Doubao => {
             let mut obj = serde_json::Map::new();
             obj.insert(
@@ -151,10 +189,32 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
                 thinking: Some(serde_json::Value::Object(obj)),
             }
         }
-        // DeepSeek / Qwen：请求侧无显式 reasoning 参数；仅靠响应侧 reasoning_content 解析。
-        ThinkingFormat::Deepseek | ThinkingFormat::Qwen => ThinkingRequestFields::default(),
+        // Qwen：请求侧暂未接显式 reasoning 参数；仅靠响应侧 reasoning_content 解析。
+        ThinkingFormat::Qwen => ThinkingRequestFields::default(),
         // Auto 应该已经被 caller resolve 掉；保险起见兜底。
         ThinkingFormat::Auto => ThinkingRequestFields::default(),
+    }
+}
+
+fn openai_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal => Some("low"),
+        ThinkingLevel::Low => Some("low"),
+        ThinkingLevel::Medium => Some("medium"),
+        ThinkingLevel::High => Some("high"),
+        ThinkingLevel::Xhigh => Some("high"),
+    }
+}
+
+fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal
+        | ThinkingLevel::Low
+        | ThinkingLevel::Medium
+        | ThinkingLevel::High => Some("high"),
+        ThinkingLevel::Xhigh => Some("max"),
     }
 }
 

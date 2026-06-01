@@ -2,7 +2,8 @@
 
 use super::super::thinking_policy::{
     resolve_request_fields, should_persist_thinking, should_strip_on_resend,
-    strip_anthropic_thinking_blocks, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+    strip_anthropic_thinking_blocks, thinking_format_for_model, ThinkingFormat, ThinkingLevel,
+    ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -72,6 +73,39 @@ fn format_resolve_auto_by_provider_id() {
 }
 
 #[test]
+fn format_resolve_auto_by_model_name() {
+    assert_eq!(
+        thinking_format_for_model("deepseek-chat"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        thinking_format_for_model("deepseek-reasoner"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        thinking_format_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        thinking_format_for_model("deepseek-v4-flash"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(thinking_format_for_model("gpt-5"), ThinkingFormat::Openai);
+}
+
+#[test]
+fn explicit_format_wins_over_model_auto_detection() {
+    assert_eq!(
+        ThinkingFormat::Openai.resolve_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Openai
+    );
+    assert_eq!(
+        ThinkingFormat::Auto.resolve_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Deepseek
+    );
+}
+
+#[test]
 fn disabled_or_off_yields_no_fields() {
     let off = resolve_request_fields(&cfg_with(false, "high"), ThinkingFormat::Openai);
     assert_eq!(off, ThinkingRequestFields::default());
@@ -115,11 +149,23 @@ fn doubao_max_tokens_propagates_when_set() {
 }
 
 #[test]
-fn deepseek_qwen_have_no_request_field() {
-    assert_eq!(
-        resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Deepseek),
-        ThinkingRequestFields::default()
-    );
+fn deepseek_writes_effort_and_thinking_enable_flag() {
+    let r = resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Deepseek);
+    assert_eq!(r.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(r.thinking.as_ref().unwrap()["type"], "enabled");
+}
+
+#[test]
+fn deepseek_maps_lower_levels_to_high_and_xhigh_to_max() {
+    let medium = resolve_request_fields(&cfg_with(true, "medium"), ThinkingFormat::Deepseek);
+    assert_eq!(medium.reasoning_effort.as_deref(), Some("high"));
+
+    let xhigh = resolve_request_fields(&cfg_with(true, "xhigh"), ThinkingFormat::Deepseek);
+    assert_eq!(xhigh.reasoning_effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn qwen_has_no_request_field() {
     assert_eq!(
         resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Qwen),
         ThinkingRequestFields::default()

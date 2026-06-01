@@ -3,6 +3,8 @@
 //! 与 [`plan_e2e_with_mock_llm_tests.rs`](./plan_e2e_with_mock_llm_tests.rs) 互补：那个
 //! 测试把 "LLM 决策一次 tool_call" 用直接调 `tools::execute` 代替，本测试不做任何 mock，
 //! 真的让主 LLM 调 `create_plan` / `update_plan`、真的让 reviewer 子 Agent 跑一轮。
+//! 对 Plan 模式真 LLM 验收来说，这里是 full completion / artifact / review / verify /
+//! transcript 顺序的主验收锚点；CLI smoke 只保留 resume/build wiring。
 //!
 //! ## 门禁
 //! - `OPENAI_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
@@ -12,7 +14,8 @@
 //! - 使用进程**真实 HOME**（不覆盖 `HOME` env）；plan 落盘到 `~/.tomcat/plans/`。
 //! - 读取 `~/.tomcat/tomcat.config.toml`（存在时），与日常 `tomcat chat` 一致。
 //! - cwd 切到 `~/.tomcat/temp/<run>/`（内置 workspace_roots），避免 `cargo test` 目录触发路径授权。
-//! - 与 `cli_full_plan_path_with_real_llm` 共用盘目录，故标记 `#[serial]` 串行执行。
+//! - 与 `cli_planning_path_with_real_llm` / `cli_exec_resume_path_with_real_llm` 共用盘目录，
+//!   故标记 `#[serial]` 串行执行。
 //!
 //! ## 业务断言（硬门禁）
 //! 1. `~/.tomcat/plans/<plan_id>.plan.md` 存在且 `frontmatter.state == Completed`

@@ -15,7 +15,13 @@ use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
 use super::payload::{infer_terminal_metadata, ResponsesTerminalMetadata};
-use crate::core::llm::types::{StreamEvent, ThinkingSource};
+use crate::core::llm::replay_policy::{
+    replay_requirement_for_profile, CaptureMode, ProviderCompatProfile,
+};
+use crate::core::llm::types::{
+    ContinuityMetadata, ProviderRefs, ReasoningContinuation, ReasoningFormat, StreamEvent,
+    ThinkingSource,
+};
 use crate::infra::error::{llm_error_with_source, AppError, LlmErrorStage};
 
 const PROVIDER_NAME: &str = "openai-responses";
@@ -33,6 +39,8 @@ pub(super) struct ResponsesStream<S> {
     /// 用于判定每个分片对应的 `ToolCallDelta.index` 与首帧 `name` 触发时机。
     tool_calls: Vec<ToolCallTrack>,
     reasoning: ReasoningState,
+    source_profile: ProviderCompatProfile,
+    continuity_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -44,7 +52,7 @@ pub(super) struct ToolCallTrack {
     pub(super) name_emitted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ReasoningKey {
     item_id: String,
     index: u32,
@@ -54,6 +62,8 @@ struct ReasoningKey {
 pub(super) struct ReasoningState {
     summary: HashMap<ReasoningKey, String>,
     raw: HashMap<ReasoningKey, String>,
+    items: Vec<Value>,
+    response_id: Option<String>,
 }
 
 impl ReasoningState {
@@ -128,10 +138,104 @@ impl ReasoningState {
             ThinkingSource::Raw => &mut self.raw,
         }
     }
+
+    fn record_reasoning_item(&mut self, item: &Value) {
+        self.items.push(item.clone());
+    }
+
+    fn record_response_id(&mut self, response: Option<&Value>) {
+        if let Some(id) = response
+            .and_then(|resp| resp.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            self.response_id = Some(id.to_string());
+        }
+    }
+
+    fn thinking_text(&self) -> Option<String> {
+        let mut summary_entries: Vec<_> = self.summary.iter().collect();
+        summary_entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+        let summary_text = summary_entries
+            .into_iter()
+            .filter_map(|(_, text)| {
+                let trimmed = text.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .collect::<Vec<_>>();
+        if !summary_text.is_empty() {
+            return Some(summary_text.join("\n\n"));
+        }
+
+        let mut raw_entries: Vec<_> = self.raw.iter().collect();
+        raw_entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+        let raw_text = raw_entries
+            .into_iter()
+            .filter_map(|(_, text)| {
+                let trimmed = text.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .collect::<Vec<_>>();
+        if raw_text.is_empty() {
+            None
+        } else {
+            Some(raw_text.join("\n\n"))
+        }
+    }
+
+    fn build_snapshot(
+        &self,
+        source_profile: &ProviderCompatProfile,
+        had_tool_call: bool,
+        continuity_enabled: bool,
+    ) -> Option<StreamEvent> {
+        if !continuity_enabled || !matches!(source_profile.capture_mode, CaptureMode::OpaqueItems) {
+            return None;
+        }
+        let thinking_text = self.thinking_text();
+        let reasoning_continuation = if !self.items.is_empty()
+            && source_profile.provider == "openai"
+            && source_profile.api_family == "responses"
+        {
+            Some(ReasoningContinuation {
+                source_provider: source_profile.provider.clone(),
+                source_api: source_profile.api_family.clone(),
+                source_model: source_profile.model_family.clone(),
+                format: ReasoningFormat::OpenaiResponsesReasoningItems,
+                opaque_payload: Value::Array(self.items.clone()),
+                fallback_text: thinking_text.clone(),
+                provider_refs: if source_profile.supports_response_id_hint {
+                    self.response_id.clone().map(|id| ProviderRefs {
+                        openai_response_id: Some(id),
+                    })
+                } else {
+                    None
+                },
+            })
+        } else {
+            None
+        };
+        if thinking_text.is_none() && reasoning_continuation.is_none() {
+            return None;
+        }
+        Some(StreamEvent::ReasoningSnapshot {
+            thinking_text,
+            continuity: reasoning_continuation.as_ref().map(|_| ContinuityMetadata {
+                had_tool_call,
+                replay_requirement: replay_requirement_for_profile(source_profile, had_tool_call),
+            }),
+            reasoning_continuation,
+        })
+    }
 }
 
 impl<S> ResponsesStream<S> {
-    pub(super) fn new(inner: S, prefer_ndjson: bool) -> Self {
+    pub(super) fn new(
+        inner: S,
+        prefer_ndjson: bool,
+        source_profile: ProviderCompatProfile,
+        continuity_enabled: bool,
+    ) -> Self {
         Self {
             inner,
             buffer: Vec::new(),
@@ -139,6 +243,8 @@ impl<S> ResponsesStream<S> {
             mode: if prefer_ndjson { Some(true) } else { None },
             tool_calls: Vec::new(),
             reasoning: ReasoningState::default(),
+            source_profile,
+            continuity_enabled,
         }
     }
 
@@ -155,6 +261,8 @@ impl<S> ResponsesStream<S> {
             &value,
             &mut self.tool_calls,
             &mut self.reasoning,
+            &self.source_profile,
+            self.continuity_enabled,
         ))
     }
 }
@@ -459,13 +567,16 @@ pub(super) fn responses_chunk_to_events(
     tool_calls: &mut Vec<ToolCallTrack>,
 ) -> Vec<StreamEvent> {
     let mut reasoning = ReasoningState::default();
-    responses_chunk_to_events_with_state(value, tool_calls, &mut reasoning)
+    let profile = ProviderCompatProfile::openai_responses("gpt-5");
+    responses_chunk_to_events_with_state(value, tool_calls, &mut reasoning, &profile, true)
 }
 
 pub(super) fn responses_chunk_to_events_with_state(
     value: &Value,
     tool_calls: &mut Vec<ToolCallTrack>,
     reasoning: &mut ReasoningState,
+    source_profile: &ProviderCompatProfile,
+    continuity_enabled: bool,
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
@@ -548,6 +659,7 @@ pub(super) fn responses_chunk_to_events_with_state(
         }
         "response.completed" | "response.done" => {
             let response = value.get("response");
+            reasoning.record_response_id(response);
             let meta = infer_terminal_metadata(
                 Some("completed"),
                 response,
@@ -560,9 +672,15 @@ pub(super) fn responses_chunk_to_events_with_state(
                 meta,
                 response.and_then(|resp| resp.get("usage")),
             );
+            if let Some(snapshot) =
+                reasoning.build_snapshot(source_profile, !tool_calls.is_empty(), continuity_enabled)
+            {
+                events.push(snapshot);
+            }
         }
         "response.incomplete" => {
             let response = value.get("response");
+            reasoning.record_response_id(response);
             let meta = infer_terminal_metadata(
                 Some("incomplete"),
                 response,
@@ -575,9 +693,15 @@ pub(super) fn responses_chunk_to_events_with_state(
                 meta,
                 response.and_then(|resp| resp.get("usage")),
             );
+            if let Some(snapshot) =
+                reasoning.build_snapshot(source_profile, !tool_calls.is_empty(), continuity_enabled)
+            {
+                events.push(snapshot);
+            }
         }
         "response.failed" => {
             let response = value.get("response");
+            reasoning.record_response_id(response);
             let meta = infer_terminal_metadata(
                 Some("failed"),
                 response,
@@ -590,6 +714,11 @@ pub(super) fn responses_chunk_to_events_with_state(
                 meta,
                 response.and_then(|resp| resp.get("usage")),
             );
+            if let Some(snapshot) =
+                reasoning.build_snapshot(source_profile, !tool_calls.is_empty(), continuity_enabled)
+            {
+                events.push(snapshot);
+            }
         }
         "error" => {
             let top_level_error = value.get("error").or(Some(value));
@@ -602,6 +731,11 @@ pub(super) fn responses_chunk_to_events_with_state(
                 !tool_calls.is_empty(),
             );
             push_terminal_events(&mut events, meta, None);
+            if let Some(snapshot) =
+                reasoning.build_snapshot(source_profile, !tool_calls.is_empty(), continuity_enabled)
+            {
+                events.push(snapshot);
+            }
         }
         // T2-P1：Responses reasoning 事件按 (item_id, index) 分桶去重。
         "response.reasoning.delta" | "response.reasoning_text.delta" => {
@@ -680,6 +814,7 @@ pub(super) fn responses_chunk_to_events_with_state(
                     .map(|t| t.contains("reasoning"))
                     .unwrap_or(false)
                 {
+                    reasoning.record_reasoning_item(item);
                     let item_id = item
                         .get("id")
                         .and_then(Value::as_str)

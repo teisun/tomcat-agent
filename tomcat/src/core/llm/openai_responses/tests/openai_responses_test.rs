@@ -36,6 +36,21 @@ fn provider_with_stub_key() -> OpenAiResponsesProvider {
     p
 }
 
+fn test_profile() -> crate::core::llm::ProviderCompatProfile {
+    crate::core::llm::ProviderCompatProfile::openai_responses("gpt-5")
+}
+
+fn build_responses_input_test(
+    messages: &[ChatMessage],
+) -> (Option<String>, Vec<serde_json::Value>) {
+    let profile = test_profile();
+    build_responses_input(messages, &profile, true, true)
+}
+
+fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S> {
+    ResponsesStream::new(stream, prefer_ndjson, test_profile(), true)
+}
+
 #[test]
 fn openai_files_client_is_lazy_once_per_provider() {
     // SAFETY: 单测串行，临时注入 stub key。
@@ -64,7 +79,7 @@ fn openai_files_client_is_lazy_once_per_provider() {
 #[test]
 fn build_responses_input_extracts_first_system_to_instructions() {
     let msgs = vec![ChatMessage::system("be helpful"), ChatMessage::user("hi")];
-    let (ins, input) = build_responses_input(&msgs);
+    let (ins, input) = build_responses_input_test(&msgs);
     assert_eq!(ins.as_deref(), Some("be helpful"));
     assert_eq!(input.len(), 1);
     assert_eq!(input[0]["role"], "user");
@@ -79,7 +94,7 @@ fn build_responses_input_second_system_falls_back_to_input_message() {
         ChatMessage::system("secondary"),
         ChatMessage::user("ping"),
     ];
-    let (ins, input) = build_responses_input(&msgs);
+    let (ins, input) = build_responses_input_test(&msgs);
     assert_eq!(ins.as_deref(), Some("primary"));
     assert_eq!(input.len(), 2);
     assert_eq!(input[0]["role"], "system");
@@ -95,7 +110,7 @@ fn build_responses_input_keeps_user_assistant_order() {
         ChatMessage::assistant("a1"),
         ChatMessage::user("q2"),
     ];
-    let (_ins, input) = build_responses_input(&msgs);
+    let (_ins, input) = build_responses_input_test(&msgs);
     assert_eq!(input.len(), 3);
     assert_eq!(input[0]["role"], "user");
     assert_eq!(input[1]["role"], "assistant");
@@ -116,7 +131,7 @@ fn build_responses_input_translates_tool_call_pair() {
     );
     let tool_msg = ChatMessage::tool("call_1", "found 3 items");
     let msgs = vec![ChatMessage::user("please search"), assistant, tool_msg];
-    let (_ins, input) = build_responses_input(&msgs);
+    let (_ins, input) = build_responses_input_test(&msgs);
     assert_eq!(input.len(), 4);
     assert_eq!(input[1]["role"], "assistant");
     assert_eq!(input[1]["content"][0]["text"], "calling tool");
@@ -144,7 +159,7 @@ fn build_responses_input_translates_hydrate_recovered_interrupted_tool_result() 
         assistant,
         ChatMessage::tool("call_1", "[interrupted]"),
     ];
-    let (_ins, input) = build_responses_input(&msgs);
+    let (_ins, input) = build_responses_input_test(&msgs);
     assert_eq!(input[2]["type"], "function_call");
     assert_eq!(input[2]["call_id"], "call_1");
     assert_eq!(input[3]["type"], "function_call_output");
@@ -399,6 +414,93 @@ fn responses_chunk_completed_emits_finish_and_usage() {
 }
 
 #[test]
+fn responses_chunk_completed_emits_reasoning_snapshot_with_response_id() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let mut reasoning = ReasoningState::default();
+    let item_done = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "id": "rs_1",
+            "type": "reasoning",
+            "encrypted_content": "enc_123",
+            "summary": [{"type": "summary_text", "text": "safe summary"}]
+        }
+    });
+    let completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_123",
+            "status": "completed"
+        }
+    });
+    let events = [item_done, completed]
+        .into_iter()
+        .flat_map(|value| {
+            let profile = test_profile();
+            responses_chunk_to_events_with_state(
+                &value,
+                &mut tracks,
+                &mut reasoning,
+                &profile,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ReasoningSnapshot {
+            thinking_text: Some(text),
+            reasoning_continuation: Some(continuation),
+            continuity: Some(continuity)
+        } if text == "safe summary"
+            && continuity.replay_requirement == crate::core::llm::ReplayRequirement::SameProfileOptional
+            && continuation.provider_refs.as_ref().and_then(|refs| refs.openai_response_id.as_deref()) == Some("resp_123")
+            && continuation.opaque_payload[0]["encrypted_content"] == json!("enc_123")
+    )));
+}
+
+#[test]
+fn responses_chunk_completed_skips_snapshot_when_profile_capture_mode_is_none() {
+    let mut tracks: Vec<ToolCallTrack> = Vec::new();
+    let mut reasoning = ReasoningState::default();
+    let profile = crate::core::llm::ProviderCompatProfile::chat_completions("gpt-5");
+    let item_done = json!({
+        "type": "response.output_item.done",
+        "item": {
+            "id": "rs_1",
+            "type": "reasoning",
+            "encrypted_content": "enc_123",
+            "summary": [{"type": "summary_text", "text": "safe summary"}]
+        }
+    });
+    let completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_123",
+            "status": "completed"
+        }
+    });
+    let events = [item_done, completed]
+        .into_iter()
+        .flat_map(|value| {
+            responses_chunk_to_events_with_state(
+                &value,
+                &mut tracks,
+                &mut reasoning,
+                &profile,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, StreamEvent::ReasoningSnapshot { .. })),
+        "capture_mode=None 时不应产生 continuity snapshot: {events:?}"
+    );
+}
+
+#[test]
 fn responses_chunk_completed_with_function_call_emits_tool_calls_finish_reason() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     let init = json!({
@@ -626,6 +728,197 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
 }
 
 #[test]
+fn responses_build_request_body_continuity_enabled_requests_encrypted_content() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(body["store"], false);
+    assert_eq!(body["include"][0], "reasoning.encrypted_content");
+}
+
+#[test]
+fn openai_responses_roundtrip_replays_reasoning_items() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "openai".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi"), assistant],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(body["input"][1]["type"], "reasoning");
+    assert_eq!(body["input"][1]["encrypted_content"], "enc_123");
+}
+
+#[test]
+fn responses_build_request_body_previous_response_id_switches_to_store_true() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "openai".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi"), assistant],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert_eq!(body["store"], true);
+    assert_eq!(body["previous_response_id"], "resp_123");
+    assert!(
+        body.get("include").is_none(),
+        "previous_response_id 分支不应再请求 encrypted_content"
+    );
+    let input = body["input"].as_array().expect("input array");
+    assert!(
+        input
+            .iter()
+            .all(|item| item.get("type") != Some(&json!("reasoning"))),
+        "previous_response_id 分支不应显式 replay reasoning items"
+    );
+}
+
+#[test]
+fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
+    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
+    let cfg = LlmConfig {
+        api_key_env: Some(TEST_KEY_ENV.to_string()),
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
+    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+
+    let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "openai".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi"), assistant],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = p.build_request_body_with_hint(&req, true, false);
+    assert_eq!(body["store"], false);
+    assert_eq!(body["include"][0], "reasoning.encrypted_content");
+    assert!(body.get("previous_response_id").is_none());
+    assert_eq!(body["input"][1]["type"], "reasoning");
+}
+
+#[test]
+fn previous_response_id_error_detection_matches_api_error_body() {
+    let err = AppError::Llm(
+        "API 错误 400: {\"error\":{\"message\":\"invalid previous_response_id\"}}".to_string(),
+    );
+    assert!(is_previous_response_id_error(&err));
+    assert!(request_uses_previous_response_id(&json!({
+        "previous_response_id": "resp_123"
+    })));
+}
+
+#[test]
 fn responses_chunk_reasoning_delta_emits_thinking() {
     let mut tracks: Vec<ToolCallTrack> = Vec::new();
     // 旧命名：response.reasoning.delta
@@ -807,7 +1100,10 @@ fn responses_chunk_reasoning_done_emits_only_missing_suffix() {
     });
     let joined = [v1, v2]
         .into_iter()
-        .flat_map(|v| responses_chunk_to_events_with_state(&v, &mut tracks, &mut reasoning))
+        .flat_map(|v| {
+            let profile = test_profile();
+            responses_chunk_to_events_with_state(&v, &mut tracks, &mut reasoning, &profile, true)
+        })
         .filter_map(|ev| match ev {
             StreamEvent::Thinking { delta, .. } => Some(delta),
             _ => None,
@@ -870,7 +1166,10 @@ fn responses_chunk_reasoning_mixed_events_are_deduped() {
     ];
     let observed = events
         .into_iter()
-        .flat_map(|v| responses_chunk_to_events_with_state(&v, &mut tracks, &mut reasoning))
+        .flat_map(|v| {
+            let profile = test_profile();
+            responses_chunk_to_events_with_state(&v, &mut tracks, &mut reasoning, &profile, true)
+        })
         .filter_map(|ev| match ev {
             StreamEvent::Thinking { delta, source, .. } => Some((source, delta)),
             _ => None,
@@ -1042,7 +1341,7 @@ async fn responses_stream_parses_sse_chunks() {
         )),
     ];
     let stream = tokio_stream::iter(chunks);
-    let mut s = ResponsesStream::new(stream, false);
+    let mut s = new_responses_stream(stream, false);
     let mut events = Vec::new();
     while let Some(item) = s.next().await {
         events.push(item.expect("ok"));
@@ -1086,7 +1385,7 @@ async fn responses_stream_parses_ndjson_fallback() {
         )),
     ];
     let stream = tokio_stream::iter(chunks);
-    let mut s = ResponsesStream::new(stream, true);
+    let mut s = new_responses_stream(stream, true);
     let mut events = Vec::new();
     while let Some(item) = s.next().await {
         events.push(item.expect("ok"));
@@ -1117,7 +1416,7 @@ async fn responses_stream_early_close_does_not_fabricate_finish_reason() {
         "{\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"partial\"}\n",
     ))];
     let stream = tokio_stream::iter(chunks);
-    let mut s = ResponsesStream::new(stream, true);
+    let mut s = new_responses_stream(stream, true);
     let mut events = Vec::new();
     while let Some(item) = s.next().await {
         events.push(item.expect("ok"));
@@ -1138,7 +1437,7 @@ async fn responses_stream_auto_detects_ndjson_when_no_data_prefix() {
         "{\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"x\"}\n",
     ))];
     let stream = tokio_stream::iter(chunks);
-    let mut s = ResponsesStream::new(stream, false);
+    let mut s = new_responses_stream(stream, false);
     let evt = s.next().await.expect("event").expect("ok");
     assert!(
         matches!(&evt, StreamEvent::ContentDelta { delta } if delta == "x"),
@@ -1242,7 +1541,7 @@ fn user_image_b64_renders_input_image_data_url() {
     let part = ChatMessageContentPart::image_b64("image/png", f.path())
         .expect("image_b64 should accept valid input");
     let msg = ChatMessage::user_with_parts(vec![ChatMessageContentPart::text("see this:"), part]);
-    let (_ins, input) = build_responses_input(&[msg]);
+    let (_ins, input) = build_responses_input_test(&[msg]);
     assert_eq!(input.len(), 1);
     let content = &input[0]["content"];
     assert_eq!(content[0]["type"], "input_text");
@@ -1265,7 +1564,7 @@ fn user_file_b64_renders_input_file_data_url() {
     let part = ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", f.path())
         .expect("file_b64 should accept valid input");
     let msg = ChatMessage::user_with_parts(vec![part]);
-    let (_ins, input) = build_responses_input(&[msg]);
+    let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
     assert_eq!(content[0]["type"], "input_file");
     assert_eq!(content[0]["filename"], "sample.pdf");
@@ -1279,7 +1578,7 @@ fn user_image_file_id_renders_file_id_field() {
     let part = ChatMessageContentPart::image_file_id("file-abc")
         .expect("image_file_id should accept non-empty id");
     let msg = ChatMessage::user_with_parts(vec![part]);
-    let (_ins, input) = build_responses_input(&[msg]);
+    let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
     assert_eq!(content[0]["type"], "input_image");
     assert_eq!(content[0]["file_id"], "file-abc");
@@ -1291,7 +1590,7 @@ fn user_file_file_id_renders_file_id_field() {
     let part = ChatMessageContentPart::file_file_id("file-xyz", Some("notes.pdf".to_string()))
         .expect("file_file_id should accept non-empty id");
     let msg = ChatMessage::user_with_parts(vec![part]);
-    let (_ins, input) = build_responses_input(&[msg]);
+    let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
     assert_eq!(content[0]["type"], "input_file");
     assert_eq!(content[0]["filename"], "notes.pdf");
@@ -1309,7 +1608,7 @@ fn system_with_image_part_silently_drops_non_text() {
         ChatMessageContentPart::image_b64("image/png", f.path()).expect("image_b64 ok"),
     ]));
     let user = ChatMessage::user("ping");
-    let (ins, input) = build_responses_input(&[sys, user]);
+    let (ins, input) = build_responses_input_test(&[sys, user]);
     assert_eq!(ins.as_deref(), Some("system rules"));
     assert_eq!(input.len(), 1);
     assert_eq!(input[0]["role"], "user");

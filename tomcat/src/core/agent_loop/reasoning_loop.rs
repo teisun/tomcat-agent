@@ -91,6 +91,9 @@ pub(super) async fn run_reasoning_loop(
             finish_reason,
             error_message,
             error_code,
+            thinking_text,
+            reasoning_continuation,
+            continuity,
             aborted,
         } = outcome;
 
@@ -140,6 +143,9 @@ pub(super) async fn run_reasoning_loop(
                 finish_reason.clone(),
                 error_message.clone(),
                 error_code.clone(),
+                thinking_text.clone(),
+                reasoning_continuation.clone(),
+                continuity.clone(),
             )
             .map_err(LoopError::Fatal)?;
             return Ok(final_text);
@@ -159,6 +165,9 @@ pub(super) async fn run_reasoning_loop(
             finish_reason.clone(),
             error_message.clone(),
             error_code.clone(),
+            thinking_text.clone(),
+            reasoning_continuation.clone(),
+            continuity.clone(),
         )
         .await?;
 

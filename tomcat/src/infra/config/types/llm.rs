@@ -144,6 +144,12 @@ pub struct LlmConfig {
     /// OpenAI Files 上传子配置（T2-P0-015）。
     #[serde(default)]
     pub files: LlmFilesConfig,
+    /// transcript-first reasoning continuity 总开关（默认 true；可按需显式关闭）。
+    #[serde(default)]
+    pub reasoning_continuity: ReasoningContinuityConfig,
+    /// OpenAI Responses 专属子配置。
+    #[serde(default)]
+    pub openai_responses: OpenAiResponsesConfig,
 }
 
 /// OpenAI Files 子配置（T2-P0-015）。
@@ -156,6 +162,21 @@ pub struct LlmFilesConfig {
     /// - `0` = 不传 `expires_after` 字段，回退 OpenAI 默认策略。
     #[serde(default = "default_llm_files_expires_after_seconds")]
     pub expires_after_seconds: u64,
+}
+
+/// transcript-first reasoning continuity 子配置。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReasoningContinuityConfig {
+    #[serde(default = "default_reasoning_continuity_enabled")]
+    pub enabled: bool,
+}
+
+/// OpenAI Responses continuity 专属开关。
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct OpenAiResponsesConfig {
+    /// 是否启用 `previous_response_id` 快车道；开启后切到 `store=true` 分支。
+    #[serde(default)]
+    pub use_previous_response_id: bool,
 }
 
 /// Thinking / Reasoning 协议子配置。
@@ -230,6 +251,10 @@ fn default_thinking_show() -> ThinkingDisplay {
     ThinkingDisplay::Summary
 }
 
+fn default_reasoning_continuity_enabled() -> bool {
+    true
+}
+
 impl Default for ThinkingConfig {
     fn default() -> Self {
         Self {
@@ -241,6 +266,14 @@ impl Default for ThinkingConfig {
             persist: false,
             strip_on_resend: true,
             print_to_stderr: false,
+        }
+    }
+}
+
+impl Default for ReasoningContinuityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_reasoning_continuity_enabled(),
         }
     }
 }
@@ -321,6 +354,8 @@ impl Default for LlmConfig {
             thinking: ThinkingConfig::default(),
             tool_cli_verbosity: ToolCliVerbosity::default(),
             files: LlmFilesConfig::default(),
+            reasoning_continuity: ReasoningContinuityConfig::default(),
+            openai_responses: OpenAiResponsesConfig::default(),
         }
     }
 }

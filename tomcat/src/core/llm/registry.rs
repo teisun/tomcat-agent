@@ -1,10 +1,16 @@
 //! # Provider 注册表（同时负责 Provider 文件的 mod 声明）
 //!
-//! 按 [`LlmConfig::provider`] 字符串选实现：`"openai"` → [`OpenAiProvider`]（Chat Completions，
-//! `POST /v1/chat/completions`），`"openai-responses"` → [`OpenAiResponsesProvider`]（Responses API，
-//! `POST /v1/responses`）。详见 [`docs/architecture/llm-multiprovider-integration.md`] §6.5。
+//! 按 [`LlmConfig::provider`] 字符串选实现：`"openai"` → [`OpenAiProvider`]（**OpenAI-compatible**
+//! Chat Completions adapter，`POST /v1/chat/completions`），`"openai-responses"` →
+//! [`OpenAiResponsesProvider`]（Responses API，`POST /v1/responses`）。详见
+//! [`docs/architecture/llm-multiprovider-integration.md`] §6.5。
 //!
 //! ## 新增后端的标准动作（仅 2 步，集中在本文件 + 新文件）
+//!
+//! 先补一句总原则：**不是每接一家 OpenAI-compatible 厂商都要立刻加新 provider。**
+//! 如果目标仍兼容 OpenAI Chat Completions，优先复用现有 `provider="openai"`，通过
+//! `api_base` / `api_key_env` / `default_model`（必要时再配 `thinking.format`）接入；只有当
+//! 协议、流式事件、错误模型或产品语义明显分叉时，再考虑拆独立 provider。
 //!
 //! 1. 在 `core/llm/` 下新建 `<new>.rs`：`impl LlmProvider`，文件末尾按
 //!    [RUST_FILE_LINES_SPEC §A 第 9 条] 自带

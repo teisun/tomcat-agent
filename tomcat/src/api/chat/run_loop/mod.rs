@@ -131,12 +131,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let mut auto_turn_count: u32 = 0;
 
     loop {
-        let auto_drain = {
-            let queue_len = ctx.follow_up_queue.lock().len();
-            queue_len > 0 && auto_turn_count < AUTO_TURN_BUDGET
-        };
+        let queued_follow_ups = !ctx.follow_up_queue.lock().is_empty();
+        let auto_drain = queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET;
         if !auto_drain {
-            if auto_turn_count >= AUTO_TURN_BUDGET && !ctx.follow_up_queue.lock().is_empty() {
+            if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
                 eprintln!(
                     "\n[bg] auto-turn budget exhausted ({}); falling back to user input.",
                     AUTO_TURN_BUDGET

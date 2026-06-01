@@ -16,9 +16,13 @@
 use serde_json::{json, Value};
 use tracing::warn;
 
+use crate::core::llm::replay_policy::{
+    apply_text_downgrade, plan as plan_replay, warn_replay_downgrade_once, ProviderCompatProfile,
+    ReplayAction,
+};
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
-    ChatResponseChoice,
+    ChatResponseChoice, ReasoningContinuation, ReasoningFormat,
 };
 
 pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
@@ -158,12 +162,32 @@ pub(super) fn infer_terminal_metadata(
 /// - `Assistant` 带 `tool_calls` → 文本部分单独发一条 message item，每个 tool_call 翻成
 ///   `{ type: "function_call", call_id, name, arguments }`；
 /// - `Tool` → `{ type: "function_call_output", call_id: tool_call_id, output: text }`。
-pub(super) fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
+pub(super) fn build_responses_input(
+    messages: &[ChatMessage],
+    target: &ProviderCompatProfile,
+    continuity_enabled: bool,
+    explicit_replay: bool,
+) -> (Option<String>, Vec<Value>) {
     let mut instructions: Option<String> = None;
     let mut input: Vec<Value> = Vec::with_capacity(messages.len());
     let mut first_seen = false;
 
-    for msg in messages {
+    for original in messages {
+        let action = if continuity_enabled {
+            plan_replay(target, original)
+        } else {
+            ReplayAction::StripOpaque
+        };
+        if continuity_enabled {
+            warn_replay_downgrade_once(target, original, &action);
+        }
+        let explicit_keep = matches!(action, ReplayAction::KeepOpaque);
+        let msg = match action.clone() {
+            ReplayAction::KeepOpaque | ReplayAction::StripOpaque => {
+                original.without_completion_metadata()
+            }
+            ReplayAction::ConvertToText(text) => apply_text_downgrade(original, &text),
+        };
         // System / Assistant / Tool 角色出现非 text part 时 warn 一次并丢弃非文本部分
         // （仅 User 角色透传多模态 part；见 §3.3 角色规则）。
         if !matches!(msg.role, ChatMessageRole::User) {
@@ -197,6 +221,11 @@ pub(super) fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>
             }
             ChatMessageRole::Assistant => {
                 first_seen = true;
+                if continuity_enabled && explicit_replay && explicit_keep {
+                    if let Some(continuation) = original.reasoning_continuation.as_ref() {
+                        input.extend(responses_reasoning_items(continuation));
+                    }
+                }
                 let text = extract_text(&msg.content).unwrap_or_default();
                 let tool_calls = msg.tool_calls.as_deref().unwrap_or(&[]);
                 if tool_calls.is_empty() {
@@ -255,6 +284,30 @@ pub(super) fn build_responses_input(messages: &[ChatMessage]) -> (Option<String>
     }
 
     (instructions, input)
+}
+
+fn responses_reasoning_items(continuation: &ReasoningContinuation) -> Vec<Value> {
+    if !matches!(
+        continuation.format,
+        ReasoningFormat::OpenaiResponsesReasoningItems
+    ) {
+        return Vec::new();
+    }
+    match &continuation.opaque_payload {
+        Value::Array(items) => items
+            .iter()
+            .filter(|item| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .map(|kind| kind.contains("reasoning"))
+                    .unwrap_or(false)
+                    || item.get("encrypted_content").is_some()
+            })
+            .cloned()
+            .collect(),
+        Value::Object(_) => vec![continuation.opaque_payload.clone()],
+        _ => Vec::new(),
+    }
 }
 
 /// Chat Completions 的 function tool（`{"type":"function","function":{name,description,parameters}}`）

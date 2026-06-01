@@ -562,7 +562,7 @@ impl PlanRuntime {
 | 类型 | 测试 | 状态 | 说人话 |
 |------|------|------|--------|
 | 单元：catalog 排除 | `reviewer_not_in_catalog`（[`prod_reviewer.rs`](../../../src/api/chat/plan_runtime/prod_reviewer.rs)） | DONE | reviewer 必须不出现在任何 LLM schema。 |
-| 单元：复用 §14 基础设施 | `reviewer_uses_internal_dispatch_via_agent_registry` | 由真 LLM E2E `inprocess_full_plan_path_with_real_llm` / `cli_full_plan_path_with_real_llm` 间接覆盖 | 走 AgentRegistry，不走 dispatch_agent。 |
+| 单元：复用 §14 基础设施 | `reviewer_uses_internal_dispatch_via_agent_registry` | 由真 LLM E2E `inprocess_full_plan_path_with_real_llm` 间接覆盖；CLI 黑盒已收缩为 planning-only / exec-only smoke | 走 AgentRegistry，不走 dispatch_agent。 |
 | 单元：allowed_tools 收紧 | `reviewer_default_allowed_tools_no_create_plan`、`resolve_internal_tools_filters_to_allowed`、`reviewer_blocks_non_whitelisted_tool`、`reviewer_blocks_create_plan_subagent` | DONE | reviewer 不许碰危险工具，永不含 create_plan，默认含 todos。 |
 | 单元：摘要落点 | `reviewer_summary_lands_in_transcript_plan_review`、`reviewer_writes_warning_event_on_second_round` | DONE | 摘要进 transcript，含 `reviewer_turns_used` / `reviewer_turns_limit` / `reviewer_stop_reason`。 |
 | 单元：改稿守卫 | `reviewer_body_diff_guard_allows_body_change`、`reviewer_body_diff_guard_rejects_frontmatter_change`、`reviewer_subagent_must_target_plan_files` | DONE | 改稿可动正文任意段；路径外或 frontmatter 越界直接拒。 |
@@ -572,7 +572,7 @@ impl PlanRuntime {
 | 单元：max_turns 默认 64 | `reviewer_max_turns_default_is_64` | DONE | 默认 64，transcript 落实际 turns。 |
 | 单元：输出契约非 gate | `create_plan_succeeds_even_when_reviewer_aborts` | DONE | reviewer aborted 不挡 `create_plan` 落盘 / `/plan build`。 |
 | 集成：真 LLM | `inprocess_full_plan_path_with_real_llm`（[`tests/plan_real_llm_inprocess_tests.rs`](../../../tests/plan_real_llm_inprocess_tests.rs)） | DONE（需 `OPENAI_API_KEY`） | 主 LLM + 真 reviewer 子 LLM 跑完 PLAN→EXEC→Completed。 |
-| 集成：CLI 黑盒 | `cli_full_plan_path_with_real_llm`（[`tests/plan_real_llm_cli_e2e.rs`](../../../tests/plan_real_llm_cli_e2e.rs)） | DONE（需 `OPENAI_API_KEY`） | 双进程 `chat` / `chat --resume`，EOF 后读盘断言。 |
+| 集成：CLI 黑盒 | `cli_planning_path_with_real_llm` / `cli_exec_resume_path_with_real_llm`（[`tests/plan_real_llm_cli_e2e.rs`](../../../tests/plan_real_llm_cli_e2e.rs)） | DONE（需 `OPENAI_API_KEY`） | 两条窄 smoke：一条真 `create_plan`，一条 seeded `/plan build` wiring smoke（`--resume` + EXEC prompt + session 绑定）；full completion 交给 inprocess。 |
 
 ---
 

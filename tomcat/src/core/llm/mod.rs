@@ -14,6 +14,7 @@ pub(crate) mod http_client;
 pub mod openai_files;
 mod provider;
 mod registry;
+pub mod replay_policy;
 pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;
@@ -21,12 +22,18 @@ mod types;
 
 pub use provider::LlmProvider;
 pub use registry::{registered_provider_ids, resolve_llm};
+#[allow(unused_imports)]
+pub use replay_policy::{
+    apply_text_downgrade, model_family, plan as plan_replay, CaptureMode, DowngradeMode,
+    ProviderCompatProfile, ReplayAcceptance, ReplayAction,
+};
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, MessageKind, StreamEvent, ThinkingSource, TokenUsage,
-    FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ChatResponse, ChatResponseChoice, ContinuityMetadata, MessageKind, ProviderRefs,
+    ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
+    TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 
 #[cfg(test)]
