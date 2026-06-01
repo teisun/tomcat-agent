@@ -150,7 +150,42 @@ fn apply_text_downgrade_appends_safe_continuity_text() {
 fn model_family_normalizes_known_models() {
     assert_eq!(model_family("deepseek-chat"), "deepseek-chat");
     assert_eq!(model_family("deepseek-reasoner"), "deepseek-reasoner");
+    assert_eq!(model_family("deepseek-v4-pro"), "deepseek-v4");
+    assert_eq!(model_family("deepseek-v4-flash"), "deepseek-v4");
     assert_eq!(model_family("gpt-5-mini"), "gpt-5");
+}
+
+#[test]
+fn replay_policy_deepseek_v4_cross_model_reuses_same_profile() {
+    let msg = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id":"call_1",
+            "type":"function",
+            "function":{"name":"read","arguments":"{}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("tool summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
+            fallback_text: Some("tool summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    );
+    let profile = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
+    assert_eq!(profile.provider, "deepseek");
+    assert_eq!(profile.model_family, "deepseek-v4");
+    assert!(profile.requires_tool_turn_replay);
+    assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
 }
 
 #[test]

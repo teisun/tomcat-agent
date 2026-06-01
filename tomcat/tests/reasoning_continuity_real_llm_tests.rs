@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tomcat::core::llm::{ContinuityMetadata, ReasoningContinuation};
 use tomcat::{
-    resolve_llm, AppError, ChatMessage, ChatRequest, LlmConfig, LlmProvider, StreamEvent,
+    build_context_from_state, init_context_state, resolve_llm, AppError, ChatMessage, ChatRequest,
+    ContextConfig, LlmConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
 };
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -47,7 +48,12 @@ fn openai_model() -> String {
 }
 
 fn deepseek_model() -> String {
-    std::env::var("TOMCAT_E2E_DEEPSEEK_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string())
+    std::env::var("TOMCAT_E2E_DEEPSEEK_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string())
+}
+
+fn deepseek_alt_model() -> String {
+    std::env::var("TOMCAT_E2E_DEEPSEEK_ALT_MODEL")
+        .unwrap_or_else(|_| "deepseek-v4-flash".to_string())
 }
 
 fn openai_responses_continuity_config() -> LlmConfig {
@@ -71,8 +77,14 @@ fn deepseek_continuity_config() -> LlmConfig {
     cfg.reasoning_continuity.enabled = true;
     cfg.thinking.enabled = true;
     cfg.thinking.level = "high".to_string();
-    cfg.thinking.format = Some("deepseek".to_string());
     cfg
+}
+
+fn append_chat_message(session: &SessionManager, message: &ChatMessage) -> Result<(), AppError> {
+    let value = serde_json::to_value(message)
+        .map_err(|err| AppError::Config(format!("序列化 ChatMessage 失败: {err}")))?;
+    session.append_message(value)?;
+    Ok(())
 }
 
 fn weather_tool_definitions() -> Vec<Value> {
@@ -379,6 +391,139 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
 
     Err(
         std::io::Error::other("DeepSeek 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot")
+            .into(),
+    )
+}
+
+#[tokio::test]
+async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
+    require_api_key("DEEPSEEK_API_KEY");
+
+    let config = deepseek_continuity_config();
+    let switched_model = deepseek_alt_model();
+    assert_ne!(
+        config.default_model, switched_model,
+        "切 model replay 用例需要两个不同的 DeepSeek model；可通过 TOMCAT_E2E_DEEPSEEK_ALT_MODEL 覆盖"
+    );
+
+    let provider = resolve_llm(&config).expect(
+        "resolve_llm(deepseek via provider=openai) 失败：请检查 DEEPSEEK_API_KEY / api_base 配置",
+    );
+    let prompt =
+        "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
+    let followup =
+        "We switched to another model in the same session. Do not call more tools. Answer directly in one short sentence.";
+
+    for attempt in 1..=DEEPSEEK_CAPTURE_ATTEMPTS {
+        let first_turn = capture_stream_turn(
+            provider.clone(),
+            ChatRequest {
+                messages: vec![ChatMessage::user(prompt)],
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(512),
+                stream: Some(true),
+                model_override: None,
+                tools: Some(weather_tool_definitions()),
+            },
+        )
+        .await?;
+
+        let Some(reasoning_continuation) = first_turn.reasoning_continuation.clone() else {
+            tracing::warn!(
+                attempt,
+                "DeepSeek cross-model 用例未返回 continuity snapshot，重试捕获"
+            );
+            continue;
+        };
+        let Some(continuity) = first_turn.continuity.clone() else {
+            tracing::warn!(
+                attempt,
+                "DeepSeek cross-model 用例未返回 continuity metadata，重试捕获"
+            );
+            continue;
+        };
+        if first_turn.tool_calls.is_empty() {
+            tracing::warn!(
+                attempt,
+                "DeepSeek cross-model 首轮未触发 tool call，重试捕获"
+            );
+            continue;
+        }
+
+        let tool_call_id = first_turn.tool_calls[0]["id"]
+            .as_str()
+            .expect("tool_call id missing")
+            .to_string();
+        let assistant = ChatMessage::assistant_with_tool_calls(
+            (!first_turn.assistant_text.trim().is_empty())
+                .then_some(first_turn.assistant_text.as_str()),
+            first_turn.tool_calls.clone(),
+        )
+        .with_reasoning_state(
+            first_turn.thinking_text.clone(),
+            Some(reasoning_continuation),
+            Some(continuity),
+        );
+
+        let temp_dir = tempfile::tempdir()?;
+        let session = SessionManager::new(temp_dir.path().to_path_buf());
+        let key = session.current_session_key();
+        session.create_session(key, None)?;
+        append_chat_message(&session, &ChatMessage::user(prompt))?;
+        append_chat_message(&session, &assistant)?;
+        append_chat_message(
+            &session,
+            &ChatMessage::tool(
+                &tool_call_id,
+                r#"{"city":"Hangzhou","day":"tomorrow","forecast":"sunny 25C"}"#,
+            ),
+        )?;
+
+        session.switch_current_model(Some(config.provider.as_str()), Some(&switched_model))?;
+        let entry = session
+            .current_session_entry()?
+            .expect("切 model 后当前 session 应存在");
+        assert_eq!(
+            entry.model_override.as_deref(),
+            Some(switched_model.as_str())
+        );
+        let entries = session.get_entries(16)?;
+        assert!(
+            entries.iter().any(|entry| matches!(
+                entry,
+                TranscriptEntry::ModelChange(change)
+                    if change.provider.as_deref() == Some("openai")
+                        && change.model_id.as_deref() == Some(switched_model.as_str())
+            )),
+            "切 model 应写入 model_change transcript 事件"
+        );
+
+        append_chat_message(&session, &ChatMessage::user(followup))?;
+        let state = init_context_state(&session, &ContextConfig::default(), "system")?;
+        let second = run_chat(
+            provider.clone(),
+            ChatRequest {
+                messages: build_context_from_state(&state),
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(256),
+                stream: Some(false),
+                model_override: entry.model_override.clone(),
+                tools: None,
+            },
+        )
+        .await?;
+        assert!(
+            !second.choices.is_empty(),
+            "切 model 后 replay 第二轮应返回 choices"
+        );
+        return Ok(());
+    }
+
+    Err(
+        std::io::Error::other("DeepSeek 在多次尝试后仍未完成“切 model 后 replay” continuity 验证")
             .into(),
     )
 }

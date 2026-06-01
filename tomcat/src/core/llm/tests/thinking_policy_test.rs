@@ -2,7 +2,8 @@
 
 use super::super::thinking_policy::{
     resolve_request_fields, should_persist_thinking, should_strip_on_resend,
-    strip_anthropic_thinking_blocks, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+    strip_anthropic_thinking_blocks, thinking_format_for_model, ThinkingFormat, ThinkingLevel,
+    ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -68,6 +69,39 @@ fn format_resolve_auto_by_provider_id() {
     assert_eq!(
         ThinkingFormat::Doubao.resolve("openai"),
         ThinkingFormat::Doubao
+    );
+}
+
+#[test]
+fn format_resolve_auto_by_model_name() {
+    assert_eq!(
+        thinking_format_for_model("deepseek-chat"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        thinking_format_for_model("deepseek-reasoner"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        thinking_format_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(
+        thinking_format_for_model("deepseek-v4-flash"),
+        ThinkingFormat::Deepseek
+    );
+    assert_eq!(thinking_format_for_model("gpt-5"), ThinkingFormat::Openai);
+}
+
+#[test]
+fn explicit_format_wins_over_model_auto_detection() {
+    assert_eq!(
+        ThinkingFormat::Openai.resolve_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Openai
+    );
+    assert_eq!(
+        ThinkingFormat::Auto.resolve_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Deepseek
     );
 }
 

@@ -204,7 +204,7 @@ fn test_openai_request_body_serializes_thinking_object() {
 #[test]
 fn test_openai_request_body_serializes_deepseek_thinking_fields_together() {
     let body = OpenAiRequestBody {
-        model: "deepseek-chat".into(),
+        model: "deepseek-v4-pro".into(),
         messages: vec![],
         temperature: None,
         max_tokens: None,
@@ -285,7 +285,7 @@ async fn sse_stream_parses_and_yields_events() {
 #[test]
 fn test_openai_chunk_deepseek_finish_emits_reasoning_snapshot() {
     let mut state = OpenAiReasoningState {
-        source_profile: ProviderCompatProfile::chat_completions("deepseek-chat"),
+        source_profile: ProviderCompatProfile::chat_completions("deepseek-v4-pro"),
         continuity_enabled: true,
         ..OpenAiReasoningState::default()
     };
@@ -310,7 +310,7 @@ fn test_openai_chunk_deepseek_finish_emits_reasoning_snapshot() {
 #[test]
 fn test_openai_chunk_deepseek_tool_turn_without_reasoning_does_not_emit_snapshot() {
     let mut state = OpenAiReasoningState {
-        source_profile: ProviderCompatProfile::chat_completions("deepseek-chat"),
+        source_profile: ProviderCompatProfile::chat_completions("deepseek-v4-pro"),
         continuity_enabled: true,
         ..OpenAiReasoningState::default()
     };
@@ -351,7 +351,7 @@ fn deepseek_tool_turn_replays_reasoning_content() {
         Some(ReasoningContinuation {
             source_provider: "deepseek".to_string(),
             source_api: "chat_completions".to_string(),
-            source_model: "deepseek-chat".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
             opaque_payload: serde_json::json!({"reasoning_content":"internal plan"}),
             fallback_text: Some("safe summary".to_string()),
@@ -362,7 +362,7 @@ fn deepseek_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileRequired,
         }),
     );
-    let wire = transport_messages(&[message], "deepseek-chat", true);
+    let wire = transport_messages(&[message], "deepseek-v4-flash", true);
     assert_eq!(wire[0]["reasoning_content"], "internal plan");
 }
 
@@ -373,7 +373,7 @@ fn test_transport_messages_deepseek_non_tool_turn_omits_reasoning_content() {
         Some(ReasoningContinuation {
             source_provider: "deepseek".to_string(),
             source_api: "chat_completions".to_string(),
-            source_model: "deepseek-chat".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
             opaque_payload: serde_json::json!({"reasoning_content":"internal plan"}),
             fallback_text: Some("safe summary".to_string()),
@@ -384,7 +384,7 @@ fn test_transport_messages_deepseek_non_tool_turn_omits_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
-    let wire = transport_messages(&[message], "deepseek-chat", true);
+    let wire = transport_messages(&[message], "deepseek-v4-pro", true);
     assert!(wire[0].get("reasoning_content").is_none());
 }
 
@@ -398,7 +398,7 @@ fn test_transport_messages_deepseek_tool_turn_without_reasoning_state_keeps_plai
             "function":{"name":"read","arguments":"{}"}
         })],
     );
-    let wire = transport_messages(&[message], "deepseek-chat", true);
+    let wire = transport_messages(&[message], "deepseek-v4-pro", true);
     assert_eq!(wire[0]["content"], "calling tool");
     assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
     assert!(wire[0].get("reasoning_content").is_none());

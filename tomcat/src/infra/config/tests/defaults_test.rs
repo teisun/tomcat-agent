@@ -62,8 +62,26 @@ fn thinking_show_default_is_summary() {
     let cfg = AppConfig::default();
     assert!(cfg.llm.thinking.enabled, "thinking 默认仍应启用");
     assert!(
+        cfg.llm.reasoning_continuity.enabled,
+        "reasoning continuity 默认应启用"
+    );
+    assert!(
         matches!(cfg.llm.thinking.show, ThinkingDisplay::Summary),
         "ThinkingConfig::default().show 应为 summary"
+    );
+}
+
+#[test]
+fn reasoning_continuity_toml_false_overrides_default() {
+    let toml_src = r#"
+[llm.reasoning_continuity]
+enabled = false
+"#;
+    let cfg: AppConfig =
+        toml::from_str(toml_src).expect("reasoning_continuity.enabled=false 应可反序列化");
+    assert!(
+        !cfg.llm.reasoning_continuity.enabled,
+        "显式配置 false 应覆盖默认开启"
     );
 }
 
