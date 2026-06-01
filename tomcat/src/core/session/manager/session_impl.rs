@@ -251,6 +251,26 @@ impl SessionManager {
         self.save_store(&store)
     }
 
+    /// 更新当前会话的 model_override，并落一条可审计的 model_change transcript 事件。
+    pub fn switch_current_model(
+        &self,
+        provider: Option<&str>,
+        model_id: Option<&str>,
+    ) -> Result<(), AppError> {
+        let key = self.current_session_key();
+        if self.get_session(key)?.is_none() {
+            return Err(AppError::Config("无当前会话".to_string()));
+        }
+        let normalized_model = model_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
+        self.update_session(key, |entry| {
+            entry.model_override = normalized_model.clone();
+        })?;
+        self.append_model_change(provider, normalized_model.as_deref())
+    }
+
     /// 将 `ContextState` 中会话级可观测累计写入 `sessions.json`（user turn 末节流刷盘）。
     pub fn persist_context_observability(&self, state: &ContextState) -> Result<(), AppError> {
         let key = self.current_session_key();
