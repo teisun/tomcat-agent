@@ -25,7 +25,7 @@
 
 装配入口：**`crate::core::llm::resolve_llm(&config.llm)`**（例如 `ChatContext::from_config`）。未知 id 返回 **`AppError::Config`** 并列出已注册 id。
 
-当前规划补一句：**并不是每接一家“类 OpenAI”后端都立刻新建 provider。** 只要目标接口仍兼容 OpenAI Chat Completions，就优先复用 `provider="openai"` 这条 adapter，通过 `api_base` / `api_key_env` / `default_model`（必要时再加 `thinking.format`）接入；例如 DeepSeek 当前就走这条路线。只有当协议、流式事件、错误模型、重试策略或产品语义明显分叉时，才考虑新增独立 provider id / 实现。
+当前规划补一句：**并不是每接一家“类 OpenAI”后端都立刻新建 provider。** 只要目标接口仍兼容 OpenAI Chat Completions，就优先复用 `provider="openai"` 这条 adapter，通过 `api_base` / `api_key_env` / `default_model` 接入；例如 DeepSeek 当前就走这条路线。`ThinkingFormat::Auto` 现在按 `model` 自动分派，`deepseek-chat` / `deepseek-reasoner` / `deepseek-v4-pro` / `deepseek-v4-flash` 都会自动走 DeepSeek thinking wire，通常不必再手配 `thinking.format`。只有当协议、流式事件、错误模型、重试策略或产品语义明显分叉时，才考虑新增独立 provider id / 实现。
 
 详见 openspec **[`architecture/llm-multiprovider-integration.md`](../../../docs/architecture/llm-multiprovider-integration.md)**。
 
@@ -55,6 +55,7 @@
 - **选型**：在聊天入口使用 **`resolve_llm(&app_config.llm)?`** 得到 **`Arc<dyn LlmProvider>`**，不要手写 `OpenAiProvider::new` / `OpenAiResponsesProvider::new`（除非是测试或直接构造单一后端）。
 - **构造具体实现（测试 / 工具）**：`OpenAiProvider::new(&config)` 或 `OpenAiResponsesProvider::new(&config)`，其中 `config` 为 `LlmConfig`（含 api_base、api_key_env、default_model、max_concurrent_requests、retry_count、stream_timeout_sec；可选 **proxy** 显式代理、**api_base_fallback** 自动降级用备用 base）。api_key 从 `api_key_env` 指定环境变量读取，未设置则返回错误。若配置 `proxy`，所有 LLM 请求经该代理；未配置时 reqwest 仍尊重环境变量 `HTTPS_PROXY`/`HTTP_PROXY`。代理与降级 URL 可通过配置文件（见项目根 **tomcat.config.toml.example**）或环境变量 `TOMCAT__LLM__PROXY`、`TOMCAT__LLM__API_BASE_FALLBACK` 配置，详见 [infra/README.md](../../infra/README.md) 中「代理与降级 URL 的配置方式」。对 DeepSeek 一类 OpenAI-compatible 后端，通常也是复用 `OpenAiProvider::new(&config)`，只改 `api_base` / `api_key_env` / `default_model`。
 - **Files 上传配置**：`[llm.files] expires_after_seconds` 控制上传时 `expires_after.seconds`（默认 `86400`，`0` 表示不传该字段）；环境变量覆盖键为 `TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS`。
+- **Continuity 默认值**：`[llm.reasoning_continuity] enabled` 默认就是 `true`；只有想显式退回“只带可见历史、不做 opaque replay”的旧行为时才需要关。
 - **非流式调用**：`provider.chat(request).await`，请求中 `model_override` 优先于 `request.model` 选模型；支持限流（Semaphore）与可重试错误的指数退避重试；当对主 api_base 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
 - **流式调用**：`provider.chat_stream(request).await` 返回 `Box<dyn Stream<Item = Result<StreamEvent, AppError>>>`，消费端可通过 drop 提前结束以释放连接；同样支持主 base 不通时自动用 `api_base_fallback` 重试。
 - **Token 统计**：`ChatResponse.usage` / `StreamEvent::Usage` 提供单次 usage；会话级汇总由调用方使用 `SessionTokenUsage` 累加，并写入 SessionEntry（当 003 可用时）。
@@ -62,6 +63,7 @@
 ## 3. 会话级模型配置
 
 - `ChatRequest.model_override: Option<String>` 与 SessionEntry.model_override 约定一致；为 None 时使用请求的 model 字段（通常由上层从 LlmConfig.default_model 或 SessionEntry 填入）。
+- `SessionManager::switch_current_model(provider, model_id)` 会同时更新当前 session 的 `model_override`，并落一条 `model_change` transcript 事件；当前仅作为最小切换链路与测试/会话审计入口，**不是**完整多 LLM 产品化方案。
 
 ## 3.5 多模态 parts（图片 / PDF 附件）
 
