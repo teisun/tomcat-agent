@@ -421,14 +421,32 @@ fn test_hangup_during_run_leaves_interrupt_ckpt() {
     let fx = setup_fixture();
     let (base_url, stage, handle) = spawn_slow_openai_stream_server();
 
+    // T2-P0-010 后路由改为 model-first：catalog 命中的 model 用 entry.base_url，
+    // 旧的 `[llm].api_base` 覆盖对内置 model 不再生效（见 llm-multi-llm-productization §4.2.0
+    // 与 resolver::tests::catalog_route_ignores_legacy_api_base_override）。因此把 mock
+    // endpoint 通过 `models.toml` 自定义 model 声明出来，再用 default_model 选中它。
+    let models_toml = fx.home_path.join(".tomcat").join("models.toml");
+    fs::write(
+        &models_toml,
+        format!(
+            r#"[[models]]
+id = "mock-local"
+api = "openai"
+provider = "openai"
+base_url = "{base_url}"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
+"#
+        ),
+    )
+    .unwrap();
+
     let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"))
         .current_dir(&fx.workdir)
         .arg("chat")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", &base_url)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::piped())
