@@ -19,6 +19,7 @@ use crate::{
     LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
 };
 
+use crate::core::llm::LlmScene;
 use crate::core::plan_runtime;
 
 use super::{panels, permission};
@@ -27,6 +28,8 @@ pub struct ChatContext {
     pub session: SessionManager,
     pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
     pub llm: Arc<dyn LlmProvider>,
+    pub model_catalog: Arc<crate::core::llm::ModelCatalog>,
+    pub llm_resolver: Arc<dyn crate::core::llm::LlmResolver>,
     pub config: AppConfig,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
@@ -111,6 +114,10 @@ impl ChatContext {
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
+        let model_catalog = Arc::new(crate::core::llm::ModelCatalog::load(&config)?);
+        let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> = Arc::new(
+            crate::core::llm::DefaultLlmResolver::new(config.clone(), model_catalog.clone()),
+        );
         let llm: Arc<dyn LlmProvider> = crate::core::llm::resolve_llm(&config.llm)?;
         let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
             llm.as_ref(),
@@ -317,6 +324,8 @@ impl ChatContext {
             session,
             message_append_sink,
             llm,
+            model_catalog,
+            llm_resolver,
             config,
             primitive,
             tool_registry,
@@ -356,6 +365,36 @@ impl ChatContext {
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.config.llm.default_model)
             .to_string()
+    }
+
+    pub(crate) fn resolve_call(
+        &self,
+        scene: LlmScene,
+        entry: Option<&SessionEntry>,
+    ) -> Result<crate::core::llm::ResolvedCall, AppError> {
+        let session_override = entry
+            .and_then(|e| e.model_override.as_deref())
+            .filter(|model| !model.trim().is_empty());
+        self.llm_resolver.resolve(scene, session_override)
+    }
+
+    pub(crate) fn openai_files_runtime_for(
+        &self,
+        provider: &dyn LlmProvider,
+    ) -> Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>> {
+        crate::core::llm::openai_files::build_runtime_for_provider(
+            provider,
+            &self.config.llm.files,
+            self.session.sessions_dir(),
+            self.session.current_session_key(),
+        )
+        .map(Arc::new)
+    }
+
+    pub(crate) fn uses_runtime_llm_override(&self) -> bool {
+        !crate::core::llm::registered_provider_ids()
+            .into_iter()
+            .any(|provider_id| provider_id == self.llm.provider_name())
     }
 
     pub(crate) fn shutdown_completion_subscriber(&self) {

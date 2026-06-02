@@ -10,7 +10,7 @@
 **作为用户**，我希望能快速安装、初始化tomcat引擎，完成基础LLM配置，正常启动运行。
 **验收标准**：
 - [ ] 支持单文件二进制安装，无需额外依赖配置
-- [ ] `tomcat init`命令可完成初始化配置，引导用户配置LLM API密钥、基础安全策略
+- [ ] `tomcat init`命令可完成初始化配置，以 model-first 方式选择默认模型，并自动推导匹配的 `provider` / `api_base` / `api_key_env`
 - [ ] 首次生成的 `tomcat.config.toml` 默认 `[llm] provider = "openai-responses"`；`provider = "openai"` 仍可手动配置但不再作为 init 默认路径
 - [ ] 配置文件可正确加载并生效（敏感信息加密存储 TODO 后续考虑）
 - [ ] `tomcat doctor`命令可检测运行环境、WasmEdge依赖、配置合法性，给出修复建议
@@ -107,9 +107,10 @@
 **验收标准**：
 - [ ] `tomcat chat` 命令启动对话模式，支持自然语言对话，流式响应渲染
 - [ ] `tomcat chat --resume` 可恢复上次会话，历史上下文从持久化 JSONL 文件加载并注入 LLM
+- [ ] `/model current|list|use <id>` 可查看当前模型、列出 catalog，并把当前会话模型选择持久化到 session；程序重启或 `--resume` 后仍生效，且不覆盖全局 `default_model`
 - [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] 实现会话管理功能，支持创建、切换、归档、删除、搜索会话，历史持久化不丢失
-- [ ] CLI prompt 与实际模式一致：user 端显示 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>`，agent 端显示 `agent.<id>[Plan:planning]>` / `agent.<id>[Plan:executing]>` / `agent.<id>[Plan:pending]>` / `agent.<id>[Plan:completed]>`；普通聊天维持 `agent.<id>>`
+- [ ] CLI prompt 与实际模式一致：user 端显示 `u[Chat|<model>]>` / `u[Plan:planning|<model>]>` / `u[Plan:executing|<model>]>` / `u[Plan:pending|<model>]>` / `u[Plan:completed|<model>]>`，agent 端显示 `agent.<id>[Plan:planning]>` / `agent.<id>[Plan:executing]>` / `agent.<id>[Plan:pending]>` / `agent.<id>[Plan:completed]>`；普通聊天维持 `agent.<id>>`
 - [ ] `/plan build <plan_id/path>` 成功后立即自动进入首个 EXEC 回合，CLI 可见 `u[Plan:executing]> start building <path>`，无需用户再手动补一句触发执行
 - [ ] 非 EXEC 状态下 `ask_question` 交互为单选 + 自定义 + `skip` 当前题：非法输入只重试当前题，`c` 与 `c <文本>` 都可录入自定义答案，返回结果显式携带 `skipped: true`
 - [ ] 对话中Agent调用4原语/工具时，清晰展示操作内容，等待用户确认后执行

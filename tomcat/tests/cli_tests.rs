@@ -8,6 +8,7 @@ mod common;
 use assert_cmd::Command;
 use async_trait::async_trait;
 use predicates::prelude::*;
+use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -1412,6 +1413,14 @@ fn test_init_creates_env_file() {
     assert!(
         cfg_content.contains("provider = \"openai-responses\""),
         "config should default to openai-responses"
+    );
+    assert!(
+        cfg_content.contains("default_model = \"gpt-5.4\""),
+        "config should persist the selected default model"
+    );
+    assert!(
+        cfg_content.contains("api_key_env = \"OPENAI_API_KEY\""),
+        "config should persist the provider-derived api_key_env"
     );
 }
 
@@ -3412,6 +3421,42 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+#[serial(env_lock)]
+fn test_session_model_override_persists_across_chat_context_restart() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_session_model_override_persists_across_chat_context_restart").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
+
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "openai-stub");
+        std::env::set_var("DEEPSEEK_API_KEY", "deepseek-stub");
+    }
+
+    let ctx = ChatContext::from_config(cfg.clone()).expect("chat context should be created");
+    ctx.session
+        .switch_current_model(Some("deepseek"), Some("deepseek-reasoner"))
+        .expect("session model override should persist");
+
+    let reopened = ChatContext::from_config(cfg).expect("reopened chat context");
+    let entry = reopened
+        .session
+        .get_session(reopened.session.current_session_key())
+        .expect("session store read")
+        .expect("session entry should exist");
+    assert_eq!(entry.model_override.as_deref(), Some("deepseek-reasoner"));
+
+    unsafe {
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+    }
 }
 
 // ────────────────────── TASK-14 AgentLoop E2E 用例 ──────────────────────

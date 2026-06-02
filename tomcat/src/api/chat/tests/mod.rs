@@ -6,6 +6,7 @@
 //! `cwd_lazy_prompt_test.rs` 已收回到 `permission/tests/`，此处**不得**再声明对应 `mod`。
 
 mod context_overrides_test;
+mod prompt_model_test;
 mod show_thinking_resolve_test;
 mod suite_test;
 mod thinking_persist_test;

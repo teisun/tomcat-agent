@@ -112,3 +112,22 @@ fn load_config_env_overrides_llm_files_expires_after_seconds() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }
+
+#[test]
+fn load_config_toml_overrides_scene_models() {
+    let dir = std::env::temp_dir().join("tomcat_scene_model_override_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        "[llm]\nvision_model = \"gpt-4o\"\ntitle_model = \"gpt-4o-mini\"\n",
+    )
+    .unwrap();
+
+    let cfg = load_config(Some(path.as_path())).unwrap();
+    assert_eq!(cfg.llm.vision_model.as_deref(), Some("gpt-4o"));
+    assert_eq!(cfg.llm.title_model.as_deref(), Some("gpt-4o-mini"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}

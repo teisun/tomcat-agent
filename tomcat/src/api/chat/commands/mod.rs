@@ -2,6 +2,7 @@
 
 mod cmd_ckpt;
 mod cmd_help;
+mod cmd_model;
 mod cmd_path;
 mod cmd_plan;
 mod cmd_restore;
@@ -15,7 +16,7 @@ mod tests;
 
 pub use cmd_path::render_path_menu;
 pub(super) use parse::{dispatch_chat_command, ChatCommandOutcome};
-pub use parse::{parse_chat_command, ChatCommand};
+pub use parse::{parse_chat_command, ChatCommand, ModelCommand};
 
 /// Public façade returning the local-command help banner shown by `/help`.
 ///

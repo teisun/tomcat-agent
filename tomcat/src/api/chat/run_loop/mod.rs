@@ -8,6 +8,7 @@ use tracing::info;
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::llm::ChatMessage;
+use crate::core::llm::LlmScene;
 use crate::core::session::manager::{build_context_from_state, init_context_state};
 use crate::core::session::read_entries_tail;
 use crate::infra::error::AppError;
@@ -18,7 +19,7 @@ use crate::core::plan_runtime;
 use super::super::render::MarkdownRenderer;
 use super::commands::{dispatch_chat_command, parse_chat_command, ChatCommandOutcome};
 use super::context::ChatContext;
-use super::prompt::{agent_prompt_for_mode, user_prompt_for_mode};
+use super::prompt::{agent_prompt_for_mode, user_prompt_for_mode_with_model};
 use super::{cli_turn_renderer, events, preflight};
 
 mod background;
@@ -55,6 +56,18 @@ fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
 }
 
 const AUTO_TURN_BUDGET: u32 = 8;
+
+fn current_user_prompt(ctx: &ChatContext) -> String {
+    let entry = ctx
+        .session
+        .get_session(ctx.session.current_session_key())
+        .ok()
+        .flatten();
+    user_prompt_for_mode_with_model(
+        &ctx.plan_runtime.mode(),
+        &ctx.effective_model(entry.as_ref()),
+    )
+}
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
     ensure_session(ctx)?;
@@ -147,7 +160,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             String::new()
         } else {
             let readline_waker = spawn_readline_waker(ctx.follow_up_signal.clone());
-            let raw = match rl.readline(&user_prompt_for_mode(&ctx.plan_runtime.mode())) {
+            let raw = match rl.readline(&current_user_prompt(ctx)) {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {
                     readline_waker.abort();
@@ -189,7 +202,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 {
                     ChatCommandOutcome::Continue { line, echo_user } => {
                         if echo_user {
-                            print!("{}{}", user_prompt_for_mode(&ctx.plan_runtime.mode()), line);
+                            print!("{}{}", current_user_prompt(ctx), line);
                             println!();
                             io::stdout().flush().map_err(AppError::Io)?;
                         }
@@ -258,12 +271,26 @@ pub async fn run_chat_turn(
     ctx.plan_runtime.attach_cancel_hook(turn_token.clone());
 
     let entry = ctx.session.get_session(ctx.session.current_session_key())?;
-    let model = ctx.effective_model(entry.as_ref());
+    let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
+    let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
+    let use_llm_override = ctx.uses_runtime_llm_override();
+    let main_provider = if use_llm_override {
+        ctx.llm.clone()
+    } else {
+        main_call.provider_impl.clone()
+    };
+    let compaction_provider = if use_llm_override {
+        ctx.llm.clone()
+    } else {
+        compaction_call.provider_impl.clone()
+    };
+    let model = main_call.model.clone();
     let session_id = ctx
         .session
         .current_session_id()?
         .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-    let context_config = &ctx.config.context;
+    let mut context_config = ctx.config.context.clone();
+    context_config.compaction_model = compaction_call.model.clone();
 
     context_state.on_message_appended(input.len());
     info!(
@@ -278,8 +305,8 @@ pub async fn run_chat_turn(
         context_state.usage_ratio(),
         &context_state.messages,
         &context_state.transcript_path,
-        ctx.llm.clone(),
-        context_config,
+        compaction_provider.clone(),
+        &context_config,
         ctx.event_bus.clone(),
     );
     check_before_request(context_state, &*ctx.event_bus).await;
@@ -338,9 +365,10 @@ pub async fn run_chat_turn(
         session_id,
         tool_definitions: build_tool_definitions(ctx),
         context_config: context_config.clone(),
+        compaction_llm: Some(compaction_provider.clone()),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
         read_file_state: ctx.read_file_state.clone(),
-        openai_files_runtime: ctx.openai_files_runtime.clone(),
+        openai_files_runtime: ctx.openai_files_runtime_for(main_provider.as_ref()),
         checkpoint_store: ctx.checkpoint_store.clone(),
         message_append_sink: Some(ctx.message_append_sink.clone()),
         parent_session_id: None,
@@ -350,7 +378,7 @@ pub async fn run_chat_turn(
         plan_runtime: Some(ctx.plan_runtime.clone()),
     };
     let mut agent_loop = AgentLoop::new(
-        ctx.llm.clone(),
+        main_provider,
         ctx.primitive.clone(),
         ctx.event_bus.clone(),
         config,
@@ -365,7 +393,7 @@ pub async fn run_chat_turn(
 
     let previous_state = std::mem::replace(
         context_state,
-        make_fallback_context_state(ctx, system_text, context_config),
+        make_fallback_context_state(ctx, system_text, &context_config),
     );
     agent_loop.set_context_state(Some(previous_state));
 
@@ -413,13 +441,13 @@ pub async fn run_chat_turn(
     }
 
     let mut next_state = agent_loop.take_context_state().unwrap_or_else(|| {
-        init_context_state(&ctx.session, context_config, system_text)
-            .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, context_config))
+        init_context_state(&ctx.session, &context_config, system_text)
+            .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, &context_config))
     });
     if let AgentRunOutcome::Failed(error) = &outcome {
         let _ = rehydrate::try_rehydrate_context_state_after_append_invariant(
             ctx,
-            context_config,
+            &context_config,
             system_text,
             error,
             &mut next_state,

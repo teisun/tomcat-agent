@@ -17,14 +17,17 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     // --- [1/3] 环境初始化（标题先于配置写入，便于失败时仍可见步骤）---
     println!("\n[1/3] 环境初始化");
 
-    // --- 幂等性：配置文件已存在则默认不覆盖 ---
-    let mut write_config = true;
-    if config_file.exists() {
-        write_config = false;
-        println!("  已存在配置文件，保留现有内容：{}", config_file.display());
+    let config_existed = config_file.exists();
+    if config_existed {
+        println!(
+            "  已存在配置文件，将以现有内容为基线更新：{}",
+            config_file.display()
+        );
     }
 
-    let cfg = if write_config {
+    let mut cfg = if config_existed {
+        crate::load_config(Some(&config_file)).unwrap_or_default()
+    } else {
         let llm = crate::LlmConfig {
             provider: "openai-responses".to_string(),
             default_model: DEFAULT_LLM_MODEL.to_string(),
@@ -35,25 +38,26 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             llm,
             ..Default::default()
         }
-    } else {
-        crate::load_config(Some(&config_file)).unwrap_or_default()
     };
+    let model_catalog = crate::core::llm::ModelCatalog::load(&cfg)?;
+    let model_choice =
+        crate::api::cli::init_model_wizard::run_model_wizard(&mut cfg, &model_catalog)?;
 
-    if write_config {
-        if let Some(parent) = config_file.parent() {
-            std::fs::create_dir_all(parent).map_err(AppError::Io)?;
-        }
-        let toml_str = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
-        std::fs::write(&config_file, toml_str).map_err(AppError::Io)?;
+    if let Some(parent) = config_file.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
+    let toml_str = toml::to_string_pretty(&cfg).map_err(|e| AppError::Config(e.to_string()))?;
+    std::fs::write(&config_file, toml_str).map_err(AppError::Io)?;
 
-    if write_config {
-        println!("  ✓ 配置文件已写入: {}", config_file.display());
+    if config_existed {
+        println!("  ✓ 配置文件已更新: {}", config_file.display());
     } else {
-        println!("  ✓ 使用已有配置文件: {}", config_file.display());
+        println!("  ✓ 配置文件已写入: {}", config_file.display());
     }
     println!("  ✓ 默认 LLM Provider: {}", cfg.llm.provider);
     println!("  ✓ 默认模型: {}", cfg.llm.default_model);
+    println!("  ✓ 模型逻辑厂商: {}", model_choice.entry.provider);
+    println!("  ✓ 当前模型凭证变量: {}", model_choice.env_name);
 
     ensure_work_dir_structure(&cfg)?;
     println!("  ✓ 目录结构就绪");
@@ -85,52 +89,22 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     println!("\n[3/3] API Key 配置");
     let work_dir = get_work_dir(&cfg)?;
     let env_path = work_dir.join("assets").join(".env");
-    let existing_key = env_path
-        .exists()
-        .then(|| {
-            dotenvy::from_path_iter(&env_path)
-                .ok()
-                .and_then(|iter| {
-                    iter.filter_map(|r| r.ok())
-                        .find(|(k, _)| k == "OPENAI_API_KEY")
-                        .map(|(_, v)| v)
-                })
-                .filter(|v| !v.is_empty())
-        })
-        .flatten();
-
-    if existing_key.is_some() {
-        println!("  ✓ API Key 已配置");
-    } else {
-        let api_key: String = dialoguer::Password::new()
-            .with_prompt("  输入 OPENAI_API_KEY（回车跳过）")
-            .allow_empty_password(true)
-            .interact()
-            .unwrap_or_default();
-
-        if api_key.is_empty() {
+    match crate::api::cli::init_model_wizard::prompt_and_store_provider_key(
+        &env_path,
+        &model_choice.env_name,
+    )? {
+        crate::api::cli::init_model_wizard::KeyConfigStatus::AlreadyConfigured => {
+            println!("  ✓ API Key 已配置 ({})", model_choice.env_name);
+        }
+        crate::api::cli::init_model_wizard::KeyConfigStatus::Written => {
+            println!("  ✓ {} 已写入 .env", model_choice.env_name);
+        }
+        crate::api::cli::init_model_wizard::KeyConfigStatus::Skipped => {
             println!(
-                "  ⚠ API Key 未设置，后续可运行 `tomcat init` 重新配置，或编辑 {}",
+                "  ⚠ {} 未设置，后续可运行 `tomcat init` 重新配置，或编辑 {}",
+                model_choice.env_name,
                 env_path.display()
             );
-        } else {
-            let env_content = format!(
-                "# tomcat runtime credentials — 此文件由 tomcat init 生成，权限 0600\n\
-                 OPENAI_API_KEY={api_key}\n\
-                 \n\
-                 # 如需通过代理访问 OpenAI，取消以下注释并填入代理地址：\n\
-                 # HTTPS_PROXY=http://127.0.0.1:7890\n\
-                 # HTTP_PROXY=http://127.0.0.1:7890\n\
-                 # ALL_PROXY=socks5://127.0.0.1:7890\n"
-            );
-            std::fs::write(&env_path, env_content).map_err(AppError::Io)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o600);
-                std::fs::set_permissions(&env_path, perms).map_err(AppError::Io)?;
-            }
-            println!("  ✓ API Key 已写入 .env");
         }
     }
 
@@ -273,11 +247,17 @@ pub(crate) fn run_doctor_checks(
             println!("  → 运行 tomcat init 配置 API Key");
         }
 
-        // --- OPENAI_API_KEY ---
-        match std::env::var("OPENAI_API_KEY") {
-            Ok(k) if !k.is_empty() => println!("✓ OPENAI_API_KEY 已设置"),
+        // --- 当前默认模型所需 API Key ---
+        let key_env = cfg
+            .llm
+            .api_key_env
+            .clone()
+            .filter(|env| !env.trim().is_empty())
+            .unwrap_or_else(|| "OPENAI_API_KEY".to_string());
+        match std::env::var(&key_env) {
+            Ok(k) if !k.is_empty() => println!("✓ {} 已设置", key_env),
             _ => {
-                println!("⚠ OPENAI_API_KEY 未设置");
+                println!("⚠ {} 未设置", key_env);
                 println!("  → 运行 tomcat init 或编辑 {}", env_path.display());
             }
         }

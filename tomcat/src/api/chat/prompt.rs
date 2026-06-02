@@ -24,6 +24,14 @@ pub(crate) fn user_prompt_for_mode(mode: &PlanState) -> String {
     format!("u[{}]> ", user_prompt_label(mode))
 }
 
+pub(crate) fn user_prompt_for_mode_with_model(mode: &PlanState, model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        return user_prompt_for_mode(mode);
+    }
+    format!("u[{}|{}]> ", user_prompt_label(mode), model)
+}
+
 pub(crate) fn agent_prompt_for_mode(agent_id: &str, mode: &PlanState) -> String {
     match agent_prompt_label(mode) {
         Some(label) => format!("agent.{agent_id}[{label}]> "),

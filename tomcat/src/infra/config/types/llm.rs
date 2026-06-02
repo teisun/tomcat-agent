@@ -111,6 +111,12 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     #[serde(default = "default_llm_model")]
     pub default_model: String,
+    /// Vision 场景模型；未设置时回落主模型，由 resolver 负责 capability guard。
+    #[serde(default)]
+    pub vision_model: Option<String>,
+    /// 标题生成场景模型；未设置时回落 compaction_model / default_model。
+    #[serde(default)]
+    pub title_model: Option<String>,
     /// 最大并发 LLM 请求数，0 表示不限制（不推荐）。
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: u32,
@@ -343,6 +349,8 @@ impl Default for LlmConfig {
             api_base: None,
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             default_model: default_llm_model(),
+            vision_model: None,
+            title_model: None,
             max_concurrent_requests: default_max_concurrent_requests(),
             retry_count: default_llm_retry_count(),
             http_timeout_sec: default_http_timeout_sec(),
