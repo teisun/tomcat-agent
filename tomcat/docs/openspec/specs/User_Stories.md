@@ -19,7 +19,7 @@
 ### Story 2: 4原语核心能力与安全管控
 **作为用户**，我希望Agent能通过4原语安全地操作文件、执行命令，所有操作可控、可追溯。
 **验收标准**：
-- [ ] 完全对齐pi-mono的read/write/edit/bash API规范，功能完整
+- [ ] 内置 `read` / `write` / `edit` / `bash` 原语 API 规范完整、行为稳定
 - [ ] 实现路径授权根机制：`agent_definition_dir` 为默认允许根，`workspace.workspace_roots` / 会话授权用于扩大外部目录访问，`primitive.path_rules` 提供 deny / readonly 规则；`agent_workspace_dir` 只作为当前目录语义来源，不自动授权
 - [ ] 实现bash命令管控：`bash_forbidden` 直接拦截，`bash_approval_required` 需用户确认，路径 token 与 `NAME=/path` assignment RHS 都必须进入同一套路径权限预检
 - [ ] `search_files` 收到空 `type` / 空 `glob` 时按“未传”处理，不得把空字符串继续透传到 `rg` / fallback，也不得再出现 `rg: unrecognized file type:` 这类占位空串导致的伪错误
@@ -38,20 +38,20 @@
 - [ ] 单条大工具结果按 Layer 0 落盘到 `agent_trail_dir/tool-results/{session_id}/` 并在上下文中留下 preview；`agent_definition_dir` 仅是 agent 行为定义工作区，不承载运行态 tool-results
 
 ### Story 3: WasmEdge+QuickJS沙箱插件系统
-**作为用户**，我希望能加载、运行pi-mono插件，插件在隔离沙箱内运行，不影响宿主系统安全。
+**作为用户**，我希望能加载、运行 Wasm 沙箱插件，插件在隔离环境中运行，不影响宿主系统安全。
 **验收标准**：
 - [ ] 基于WasmEdge实现插件沙箱运行时，每个插件独立Wasm实例隔离
 - [ ] 内置WasmEdge官方QuickJS运行时，支持原生JS/TS插件执行，无需手动编译
 - [ ] 实现插件全生命周期管理：加载、初始化、启用、禁用、卸载，资源完全释放
-- [ ] 100%兼容pi-mono ExtensionAPI，社区标准插件零修改即可正常加载运行
+- [ ] ExtensionAPI 契约稳定，符合规范的插件可正常加载运行
 - [ ] 插件级权限管控，加载插件时需用户确认授权的权限范围，未授权API无法调用
 - [ ] 插件执行错误完全隔离，单个插件崩溃不会影响宿主引擎与其他插件运行
 - [ ] `tomcat plugin`系列命令可实现插件的加载、卸载、列表查看、启用/禁用
 
-### Story 4: Node.js兼容层与pi生态适配
-**作为用户**，我希望使用的pi-mono插件能正常调用Node.js API，无需修改代码。
+### Story 4: Node.js 兼容层
+**作为用户**，我希望沙箱内插件能正常调用 Node.js API，无需为 tomcat 单独改写法。
 **验收标准**：
-- [ ] 基于WasmEdge原生实现Node.js核心兼容层，覆盖pi插件高频使用的fs/path/process/console等全局对象与内置模块
+- [ ] 基于 WasmEdge 原生实现 Node.js 核心兼容层，覆盖沙箱插件高频使用的 fs / path / process / console 等全局对象与内置模块
 - [ ] 支持CommonJS模块规范，require/import正常工作，插件内相对路径模块加载正常
 - [ ] 实现事件循环机制，基于WASI Preview2异步IO，setTimeout/setInterval/Promise异步行为与Node.js完全对齐
 - [ ] 支持http/https模块，网络请求受插件权限管控，可正常调用第三方API
@@ -60,7 +60,7 @@
 ### Story 5: 宿主核心API与工具注册
 **作为插件开发者**，我希望能通过宿主API注册自定义工具，扩展Agent能力，被对话与其他插件调用。
 **验收标准**：
-- [ ] 实现完整的工具注册API，支持registerTool/unregisterTool/getToolList，完全对齐pi-mono规范
+- [ ] 实现完整的工具注册 API，支持 registerTool / unregisterTool / getToolList，符合宿主工具注册规范
 - [ ] 注册的工具可在对话中被Agent自动调用，也可被其他插件调用
 - [ ] 工具调用经过权限校验、审计日志记录，调用参数与结果完整可追溯
 - [ ] 支持工具的描述、输入Schema定义，符合LLM函数调用规范
@@ -69,7 +69,7 @@
 ### Story 6: 事件系统完整实现
 **作为插件开发者**，我希望能监听宿主核心事件，在关键节点执行自定义逻辑，扩展Agent行为。
 **验收标准**：
-- [ ] 实现全局事件总线，完全对齐pi-mono的事件API，支持on/emit/off/once方法
+- [ ] 实现全局事件总线，事件 API 支持 on / emit / off / once 方法
 - [ ] 覆盖会话、对话、4原语、插件、工具全生命周期核心内置事件
 - [ ] 支持插件监听事件，注册同步/异步回调函数，事件触发时正常执行
 - [ ] 单个回调函数执行错误被完整捕获，不影响其他回调与宿主主流程
@@ -81,7 +81,7 @@
 **验收标准**：
 - [ ] 实现统一LLM Provider Trait，兼容所有OpenAI API格式的大模型
 - [ ] 支持配置模型的温度、最大Token、上下文窗口等参数，会话级模型配置隔离
-- [ ] 实现流式与非流式LLM调用API，完全对齐pi-mono规范，插件可正常调用
+- [ ] 实现流式与非流式 LLM 调用 API，插件经 Hostcall 可正常调用
 - [ ] 默认 provider 路径使用 `openai-responses`；当 `thinking.show = "summary"` 或 `thinking.show = "full"` 时，CLI 默认链路可稳定展示 reasoning / thinking 摘要
 - [ ] CLI 内 `/thinking [minimal|summary|full|toggle]` 可在对话期运行时切换 thinking 显示档位；缺省等价 `toggle`，循环 `summary -> full -> minimal -> summary`；兼容历史 `/thinking on|off`（on→full、off→summary）
 - [ ] `PI_CHAT_SHOW_THINKING` 环境变量与配置文件 `[llm.thinking].show` 兼容三档字符串与历史 bool（`true/1/yes/on -> full`、`false/0/no/off/"" -> summary`）；优先级 `PI_CHAT_SHOW_THINKING > config > 代码默认`
@@ -90,11 +90,11 @@
 - [ ] API密钥可配置并生效，调用支持限流与指数退避重试（加密存储 TODO 后续考虑）
 
 ### Story 8a: 异步 Hostcall 与 JS API 对齐
-**作为插件开发者**，我希望在插件中使用 `async/await` 调用宿主 API（如 `await pi.exec("ls")`），耗时操作不阻塞插件执行，与 pi-mono 的异步编程模型一致。
+**作为插件开发者**，我希望在插件中使用 `async/await` 调用宿主 API（如 `await pi.exec("ls")`），耗时操作不阻塞插件执行，与宿主异步 Hostcall 模型一致。
 **验收标准**：
 - [ ] `pi.exec()`、`pi.createChatCompletion()` 等耗时 API 返回 Promise，插件可用 `await` 消费
 - [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞 Wasm 实例，宿主后台异步处理
-- [ ] 返回值格式与 pi-mono 一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
+- [ ] 返回值格式与 ExtensionAPI 约定一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
 - [ ] `pi.on`/`pi.off`/`pi.emit` 无重复定义 bug，`pi.once` 可用，注册一次后多次 emit 仅触发 1 次
 - [ ] 插件内多个并发异步调用（如同时 `await pi.exec()` + `await pi.createChatCompletion()`）可正确运行
 - [ ] 异步操作超时后返回清晰错误，插件可通过 `try/catch` 捕获
@@ -134,19 +134,19 @@
 
 ## P1 二期核心用户故事
 ### Story 8b: 长生命周期 VM 与有状态插件支持
-**作为插件开发者**，我希望插件的全局变量、事件监听器、定时器能在整个会话期间保持，不因事件触发而重置，与 pi-mono 的插件运行模型一致。
+**作为插件开发者**，我希望插件的全局变量、事件监听器、定时器能在整个会话期间保持，不因事件触发而重置，与长生命周期 VM 运行模型一致。
 **验收标准**：
 - [ ] 插件的全局变量跨多次事件调用保持（如 `let counter = 0` 在多次 `tool_call` 事件间累加）
 - [ ] `pi.on()` 注册的 handler 只需注册一次，后续事件直接触发，无需每次重新执行插件脚本
 - [ ] 周期性定时器在会话期间持续运行（`setInterval` 或等价的 `setTimeout` 链；后者为 wasmedge_quickjs 兼容实现，见 E2E-WASM-033）
 - [ ] `session_start` 初始化的数据可在后续 `before_agent_start`、`tool_call` 等事件中读取
 - [ ] 会话结束时（`session_shutdown` 或用户退出）VM 正常关闭，资源完全释放
-- [ ] pi-mono 核心有状态插件（git-checkpoint、todo、plan-mode、ssh 等）可零修改正确运行
+- [ ] 典型有状态插件场景（git-checkpoint、todo、plan-mode、ssh 等）在长生命周期 VM 下可正确运行
 
 ### Story 9: 插件自举全闭环
 **作为用户**，我希望Agent能根据我的自然语言需求，自主生成、编译、加载插件，无需人工干预。
 **验收标准**：
-- [ ] Agent可从自然语言需求中提取插件功能点，生成符合pi-mono规范的JS/TS插件代码
+- [ ] Agent 可从自然语言需求中提取插件功能点，生成符合宿主插件规范的 JS/TS 代码
 - [ ] 支持运行时动态加载生成的插件代码到WasmEdge沙箱中，无需重启引擎
 - [ ] 插件加载/运行失败时，自动提取错误信息，反馈给LLM自动修复代码，形成闭环
 - [ ] 插件生成前清晰告知用户功能、权限需求，获得用户确认后方可生成加载

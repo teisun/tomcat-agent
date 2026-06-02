@@ -108,16 +108,7 @@ WasmEdge 运行时 + 沙箱执行层（可选，插件 JS/TS）
 
 - [tomcat/docs/README.md](tomcat/docs/README.md) — 文档地图
 - [tomcat/src/README.md](tomcat/src/README.md) — `src/` 模块索引与分层图
-- [tomcat/docs/INTEGRATION.md](tomcat/docs/INTEGRATION.md) — 集成进度看板
 - [tomcat/docs/user-guide.md](tomcat/docs/user-guide.md) — 使用说明
-
-## 规范文档
-
-- [Constitution.md](tomcat/docs/openspec/specs/Constitution.md) — 项目宪法
-- [Product_Brief.md](tomcat/docs/openspec/specs/Product_Brief.md) — 定位与路线图（P0–P9）
-- [编码与架构规范](tomcat/docs/openspec/specs/guides/coding/Codeing&Architecture_Spec.md)
-- [单元测试规范](tomcat/docs/openspec/specs/guides/testing/UNIT_TEST_SPEC.md)
-- [集成测试规范](tomcat/docs/openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
 
 ## 许可
 
