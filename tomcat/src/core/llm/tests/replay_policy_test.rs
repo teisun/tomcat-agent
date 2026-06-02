@@ -1,7 +1,8 @@
 //! `core::llm::replay_policy` 焦小测。
 
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, model_family, plan, ProviderCompatProfile, ReplayAction,
+    apply_text_downgrade, classify_replay_downgrade, model_family, plan, ProviderCompatProfile,
+    ReplayAction, ReplayDowngradeKind,
 };
 use crate::core::llm::types::{
     ChatMessage, ContinuityMetadata, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
@@ -37,7 +38,7 @@ fn replay_policy_openai_responses_keeps_encrypted_reasoning() {
 }
 
 #[test]
-fn replay_policy_deepseek_v4_tool_turn_requires_reasoning_content() {
+fn replay_policy_deepseek_v4_tool_turn_keeps_reasoning_content() {
     let msg = ChatMessage::assistant_with_tool_calls(
         None,
         vec![serde_json::json!({
@@ -67,7 +68,7 @@ fn replay_policy_deepseek_v4_tool_turn_requires_reasoning_content() {
 }
 
 #[test]
-fn replay_policy_deepseek_v4_non_tool_turn_strips_reasoning_content() {
+fn replay_policy_deepseek_v4_non_tool_turn_keeps_reasoning_content() {
     let msg = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
@@ -81,11 +82,11 @@ fn replay_policy_deepseek_v4_non_tool_turn_strips_reasoning_content() {
         }),
         Some(ContinuityMetadata {
             had_tool_call: false,
-            replay_requirement: ReplayRequirement::SameProfileRequired,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
     let profile = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
-    assert_eq!(plan(&profile, &msg), ReplayAction::StripOpaque);
+    assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
 }
 
 #[test]
@@ -110,6 +111,17 @@ fn cross_provider_downgrade_prefers_fallback_text() {
     assert_eq!(
         plan(&target, &msg),
         ReplayAction::ConvertToText("safe summary".to_string())
+    );
+}
+
+#[test]
+fn classify_replay_downgrade_reports_cross_profile_incompatibility() {
+    let msg = openai_reasoning_message();
+    let target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
+    let action = plan(&target, &msg);
+    assert_eq!(
+        classify_replay_downgrade(&target, &msg, &action),
+        Some(ReplayDowngradeKind::CrossProfile)
     );
 }
 
@@ -163,6 +175,36 @@ fn replay_policy_deepseek_v4_cross_model_reuses_same_profile() {
     assert_eq!(profile.model_family, "deepseek-v4");
     assert!(profile.requires_tool_turn_replay);
     assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
+}
+
+#[test]
+fn classify_replay_downgrade_reports_same_profile_shape_mismatch() {
+    let msg = ChatMessage::assistant("answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: serde_json::json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let target = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
+    let action = plan(&target, &msg);
+    assert_eq!(action, ReplayAction::StripOpaque);
+    assert_eq!(
+        classify_replay_downgrade(&target, &msg, &action),
+        Some(ReplayDowngradeKind::SameProfileIncompatible)
+    );
 }
 
 #[test]

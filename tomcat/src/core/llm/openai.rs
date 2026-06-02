@@ -17,7 +17,7 @@ use tracing::warn;
 use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{
     apply_text_downgrade, plan as plan_replay, replay_requirement_for_profile,
-    warn_replay_downgrade_once, CaptureMode, ProviderCompatProfile, ReplayAction,
+    warn_replay_downgrade, CaptureMode, ProviderCompatProfile, ReplayAction,
 };
 use crate::infra::error::AppError;
 use crate::infra::error::{
@@ -172,7 +172,7 @@ fn transport_messages(
                 ReplayAction::StripOpaque
             };
             if continuity_enabled {
-                warn_replay_downgrade_once(&target, original, &action);
+                warn_replay_downgrade(&target, original, &action);
             }
             match action {
                 ReplayAction::KeepOpaque => {

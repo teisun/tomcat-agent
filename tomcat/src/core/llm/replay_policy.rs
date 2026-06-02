@@ -4,11 +4,8 @@
 //! `keep / convert / strip` 规则散落到各个 provider wire 适配器中。
 
 use super::types::{
-    ChatMessage, ChatMessageContent, ContinuityMetadata, ReasoningContinuation, ReasoningFormat,
-    ReplayRequirement,
+    ChatMessage, ChatMessageContent, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
 };
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
 use tracing::warn;
 
 /// provider 对 continuity 的抓取形态。
@@ -56,7 +53,32 @@ pub enum ReplayAction {
     StripOpaque,
 }
 
-static REPLAY_DOWNGRADE_WARNINGS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// 降级日志的根因分类；用于区分真正的跨 profile 退化与同 profile 下的异常不兼容。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDowngradeKind {
+    CrossProfile,
+    SameProfileIncompatible,
+}
+
+impl ReplayDowngradeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReplayDowngradeKind::CrossProfile => "cross_profile",
+            ReplayDowngradeKind::SameProfileIncompatible => "same_profile_incompatible",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            ReplayDowngradeKind::CrossProfile => {
+                "reasoning continuity downgraded for incompatible target profile"
+            }
+            ReplayDowngradeKind::SameProfileIncompatible => {
+                "reasoning continuity could not be replayed within target profile"
+            }
+        }
+    }
+}
 
 impl ProviderCompatProfile {
     pub fn openai_responses(model: &str) -> Self {
@@ -77,7 +99,7 @@ impl ProviderCompatProfile {
         let family = model_family(model);
         match family.as_str() {
             "deepseek-v4" => Self {
-                profile_id: "deepseek.v4.tool_sensitive".to_string(),
+                profile_id: "deepseek.v4.reasoning_content".to_string(),
                 provider: "deepseek".to_string(),
                 api_family: "chat_completions".to_string(),
                 model_family: family,
@@ -107,7 +129,7 @@ pub fn plan(target: &ProviderCompatProfile, message: &ChatMessage) -> ReplayActi
     let Some(continuation) = message.reasoning_continuation.as_ref() else {
         return ReplayAction::StripOpaque;
     };
-    if is_compatible(target, continuation, message.continuity.as_ref()) {
+    if is_compatible(target, continuation) {
         return ReplayAction::KeepOpaque;
     }
     if matches!(target.downgrade_mode, DowngradeMode::FallbackText) {
@@ -118,8 +140,29 @@ pub fn plan(target: &ProviderCompatProfile, message: &ChatMessage) -> ReplayActi
     ReplayAction::StripOpaque
 }
 
-/// 对跨 profile 的 continuity 降级做低噪音告警；不记录 opaque payload。
-pub fn warn_replay_downgrade_once(
+/// 将 continuity 的降级根因转成稳定分类，便于日志与测试复用。
+pub fn classify_replay_downgrade(
+    target: &ProviderCompatProfile,
+    message: &ChatMessage,
+    action: &ReplayAction,
+) -> Option<ReplayDowngradeKind> {
+    let Some(continuation) = message.reasoning_continuation.as_ref() else {
+        return None;
+    };
+    match action {
+        ReplayAction::KeepOpaque => None,
+        ReplayAction::ConvertToText(_) | ReplayAction::StripOpaque => {
+            Some(if same_profile(target, continuation) {
+                ReplayDowngradeKind::SameProfileIncompatible
+            } else {
+                ReplayDowngradeKind::CrossProfile
+            })
+        }
+    }
+}
+
+/// 对 continuity 的降级做结构化告警；不记录 opaque payload。
+pub fn warn_replay_downgrade(
     target: &ProviderCompatProfile,
     message: &ChatMessage,
     action: &ReplayAction,
@@ -127,40 +170,28 @@ pub fn warn_replay_downgrade_once(
     let Some(continuation) = message.reasoning_continuation.as_ref() else {
         return;
     };
+    let Some(kind) = classify_replay_downgrade(target, message, action) else {
+        return;
+    };
     let action_label = match action {
         ReplayAction::KeepOpaque => return,
         ReplayAction::ConvertToText(_) => "convert_to_text",
         ReplayAction::StripOpaque => "strip_opaque",
     };
-    let cache_key = format!(
-        "{}|{}|{}|{}|{}",
-        target.profile_id,
-        continuation.source_provider,
-        continuation.source_api,
-        model_family(&continuation.source_model),
-        action_label
-    );
-    let cache = REPLAY_DOWNGRADE_WARNINGS.get_or_init(|| Mutex::new(HashSet::new()));
-    let Ok(mut seen) = cache.lock() else {
-        return;
-    };
-    if !seen.insert(cache_key) {
-        return;
-    }
-    drop(seen);
-
     warn!(
         target_profile = %target.profile_id,
         source_provider = %continuation.source_provider,
         source_api = %continuation.source_api,
         source_model = %model_family(&continuation.source_model),
         action = action_label,
+        downgrade_kind = kind.as_str(),
         had_tool_call = message
             .continuity
             .as_ref()
             .map(|meta| meta.had_tool_call)
             .unwrap_or(false),
-        "reasoning continuity downgraded for target profile"
+        "{}",
+        kind.message()
     );
 }
 
@@ -216,11 +247,7 @@ pub fn apply_text_downgrade(message: &ChatMessage, continuity_text: &str) -> Cha
     downgraded
 }
 
-fn is_compatible(
-    target: &ProviderCompatProfile,
-    continuation: &ReasoningContinuation,
-    continuity: Option<&ContinuityMetadata>,
-) -> bool {
+fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinuation) -> bool {
     match target.replay_acceptance {
         ReplayAcceptance::Never => return false,
         ReplayAcceptance::SameApiFamily if continuation.source_api != target.api_family => {
@@ -247,11 +274,7 @@ fn is_compatible(
             {
                 return false;
             }
-            if target.requires_tool_turn_replay {
-                continuity.map(|meta| meta.had_tool_call).unwrap_or(false)
-            } else {
-                true
-            }
+            true
         }
     }
 }

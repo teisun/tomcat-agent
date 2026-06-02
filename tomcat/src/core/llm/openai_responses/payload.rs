@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan as plan_replay, warn_replay_downgrade_once, ProviderCompatProfile,
+    apply_text_downgrade, plan as plan_replay, warn_replay_downgrade, ProviderCompatProfile,
     ReplayAction,
 };
 use crate::core::llm::types::{
@@ -179,7 +179,7 @@ pub(super) fn build_responses_input(
             ReplayAction::StripOpaque
         };
         if continuity_enabled {
-            warn_replay_downgrade_once(target, original, &action);
+            warn_replay_downgrade(target, original, &action);
         }
         let explicit_keep = matches!(action, ReplayAction::KeepOpaque);
         let msg = match action.clone() {

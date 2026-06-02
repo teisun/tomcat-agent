@@ -367,7 +367,7 @@ fn deepseek_tool_turn_replays_reasoning_content() {
 }
 
 #[test]
-fn test_transport_messages_deepseek_non_tool_turn_omits_reasoning_content() {
+fn test_transport_messages_deepseek_non_tool_turn_replays_reasoning_content() {
     let message = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
@@ -385,7 +385,7 @@ fn test_transport_messages_deepseek_non_tool_turn_omits_reasoning_content() {
         }),
     );
     let wire = transport_messages(&[message], "deepseek-v4-pro", true);
-    assert!(wire[0].get("reasoning_content").is_none());
+    assert_eq!(wire[0]["reasoning_content"], "internal plan");
 }
 
 #[test]
@@ -402,6 +402,65 @@ fn test_transport_messages_deepseek_tool_turn_without_reasoning_state_keeps_plai
     assert_eq!(wire[0]["content"], "calling tool");
     assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
     assert!(wire[0].get("reasoning_content").is_none());
+}
+
+#[test]
+fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_content() {
+    let tool_turn = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id":"call_1",
+            "type":"function",
+            "function":{"name":"read","arguments":"{}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("tool summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"tool plan"}),
+            fallback_text: Some("tool summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    );
+    let final_assistant = ChatMessage::assistant("done").with_reasoning_state(
+        Some("final summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"final plan"}),
+            fallback_text: Some("final summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+
+    let wire = transport_messages(
+        &[
+            ChatMessage::user("lookup weather"),
+            tool_turn,
+            ChatMessage::tool("call_1", r#"{"forecast":"sunny"}"#),
+            ChatMessage::user("answer directly"),
+            final_assistant,
+        ],
+        "deepseek-v4-flash",
+        true,
+    );
+
+    assert_eq!(wire[1]["reasoning_content"], "tool plan");
+    assert_eq!(wire[4]["reasoning_content"], "final plan");
 }
 
 #[tokio::test]

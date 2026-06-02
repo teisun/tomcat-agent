@@ -527,3 +527,160 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
             .into(),
     )
 }
+
+#[tokio::test]
+async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
+    require_api_key("DEEPSEEK_API_KEY");
+
+    let config = deepseek_continuity_config();
+    let provider = resolve_llm(&config).expect(
+        "resolve_llm(deepseek via provider=openai) 失败：请检查 DEEPSEEK_API_KEY / api_base 配置",
+    );
+    let prompt =
+        "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
+    let followup =
+        "Do not call any more tools. Answer directly in one short sentence about the forecast.";
+    let third_prompt = "Continue the same thread in one short sentence without using any tools.";
+
+    for attempt in 1..=DEEPSEEK_CAPTURE_ATTEMPTS {
+        let first_turn = capture_stream_turn(
+            provider.clone(),
+            ChatRequest {
+                messages: vec![ChatMessage::user(prompt)],
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(512),
+                stream: Some(true),
+                model_override: None,
+                tools: Some(weather_tool_definitions()),
+            },
+        )
+        .await?;
+
+        let Some(first_reasoning) = first_turn.reasoning_continuation.clone() else {
+            tracing::warn!(
+                attempt,
+                "DeepSeek 非 tool turn roundtrip：首轮未返回 continuity snapshot，重试捕获"
+            );
+            continue;
+        };
+        let Some(first_continuity) = first_turn.continuity.clone() else {
+            tracing::warn!(
+                attempt,
+                "DeepSeek 非 tool turn roundtrip：首轮未返回 continuity metadata，重试捕获"
+            );
+            continue;
+        };
+        if first_turn.tool_calls.is_empty() {
+            tracing::warn!(
+                attempt,
+                "DeepSeek 非 tool turn roundtrip：首轮未触发 tool call，重试捕获"
+            );
+            continue;
+        }
+
+        let tool_call_id = first_turn.tool_calls[0]["id"]
+            .as_str()
+            .expect("tool_call id missing")
+            .to_string();
+        let first_assistant = ChatMessage::assistant_with_tool_calls(
+            (!first_turn.assistant_text.trim().is_empty())
+                .then_some(first_turn.assistant_text.as_str()),
+            first_turn.tool_calls.clone(),
+        )
+        .with_reasoning_state(
+            first_turn.thinking_text.clone(),
+            Some(first_reasoning),
+            Some(first_continuity),
+        );
+        let tool_output = ChatMessage::tool(
+            &tool_call_id,
+            r#"{"city":"Hangzhou","day":"tomorrow","forecast":"sunny 25C"}"#,
+        );
+        let second_turn = capture_stream_turn(
+            provider.clone(),
+            ChatRequest {
+                messages: vec![
+                    ChatMessage::user(prompt),
+                    first_assistant.clone(),
+                    tool_output.clone(),
+                    ChatMessage::user(followup),
+                ],
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(256),
+                stream: Some(true),
+                model_override: None,
+                tools: None,
+            },
+        )
+        .await?;
+
+        let Some(second_reasoning) = second_turn.reasoning_continuation.clone() else {
+            tracing::warn!(
+                attempt,
+                "DeepSeek 非 tool turn roundtrip：第二轮未返回 continuity snapshot，重试捕获"
+            );
+            continue;
+        };
+        let Some(second_continuity) = second_turn.continuity.clone() else {
+            tracing::warn!(
+                attempt,
+                "DeepSeek 非 tool turn roundtrip：第二轮未返回 continuity metadata，重试捕获"
+            );
+            continue;
+        };
+        assert!(
+            second_turn.tool_calls.is_empty(),
+            "第二轮 followup 已禁用 tools，不应再触发 tool call"
+        );
+        assert!(
+            !second_continuity.had_tool_call,
+            "第二轮应是非 tool turn continuity"
+        );
+        assert!(
+            second_reasoning.opaque_payload["reasoning_content"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty()),
+            "非 tool turn continuity snapshot 应携带 reasoning_content"
+        );
+
+        let second_assistant = ChatMessage::assistant(second_turn.assistant_text.clone())
+            .with_reasoning_state(
+                second_turn.thinking_text.clone(),
+                Some(second_reasoning),
+                Some(second_continuity),
+            );
+        let third = run_chat(
+            provider.clone(),
+            ChatRequest {
+                messages: vec![
+                    ChatMessage::user(prompt),
+                    first_assistant,
+                    tool_output,
+                    ChatMessage::user(followup),
+                    second_assistant,
+                    ChatMessage::user(third_prompt),
+                ],
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(256),
+                stream: Some(false),
+                model_override: None,
+                tools: None,
+            },
+        )
+        .await?;
+        assert!(
+            !third.choices.is_empty(),
+            "DeepSeek 非 tool turn continuity replay 第三轮应返回 choices"
+        );
+        return Ok(());
+    }
+
+    Err(std::io::Error::other(
+        "DeepSeek 在多次尝试后仍未完成“非 tool turn reasoning_content replay”验证",
+    )
+    .into())
+}
