@@ -71,7 +71,7 @@ impl ModelCatalog {
     }
 
     pub fn load_from_path(config: &AppConfig, user_path: PathBuf) -> Result<Self, AppError> {
-        let mut by_id = builtin_models(&config.llm, &config.context);
+        let mut by_id = builtin_models(&config.context);
         if user_path.exists() {
             let content = std::fs::read_to_string(&user_path).map_err(AppError::Io)?;
             let file: UserModelsFile = toml::from_str(&content).map_err(|e| {
@@ -107,18 +107,6 @@ impl ModelCatalog {
         self.lookup(model_id)
             .cloned()
             .ok_or_else(|| missing_model_error(model_id, &self.user_path))
-    }
-
-    pub fn lookup_or_legacy(
-        &self,
-        model_id: &str,
-        llm: &LlmConfig,
-        context: &ContextConfig,
-    ) -> Result<ModelEntry, AppError> {
-        Ok(self
-            .lookup(model_id)
-            .cloned()
-            .unwrap_or_else(|| legacy_entry_for(model_id, llm, context)))
     }
 
     pub fn entries(&self) -> Vec<ModelEntry> {
@@ -165,7 +153,7 @@ struct PartialCapabilities {
     reasoning: Option<bool>,
 }
 
-fn builtin_models(llm: &LlmConfig, context: &ContextConfig) -> HashMap<String, ModelEntry> {
+fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
     let mut by_id = HashMap::new();
     let builtins = vec![
         ModelEntry {
@@ -292,10 +280,6 @@ fn builtin_models(llm: &LlmConfig, context: &ContextConfig) -> HashMap<String, M
     for entry in builtins {
         by_id.insert(entry.id.clone(), entry);
     }
-    // 默认模型至少总能命中 catalog，避免刚启用 Wave 1 时打破老配置。
-    by_id
-        .entry(llm.default_model.clone())
-        .or_insert_with(|| legacy_entry_for(&llm.default_model, llm, context));
     by_id
 }
 
@@ -368,27 +352,6 @@ fn missing_model_error(model_id: &str, user_path: &Path) -> AppError {
         model_id.trim(),
         user_path.display()
     ))
-}
-
-pub(crate) fn legacy_entry_for(
-    model_id: &str,
-    llm: &LlmConfig,
-    context: &ContextConfig,
-) -> ModelEntry {
-    let model_id = model_id.trim();
-    let provider = infer_provider_from_env(llm.api_key_env.as_deref())
-        .or_else(|| infer_provider_from_model_id(model_id))
-        .unwrap_or_else(|| llm.provider.clone());
-    ModelEntry {
-        id: model_id.to_string(),
-        api: llm.provider.clone(),
-        provider,
-        base_url: llm.api_base.clone(),
-        capabilities: infer_capabilities_from_model_id(model_id),
-        context_window: Some(context.context_window as u32),
-        cost: None,
-        thinking_format: None,
-    }
 }
 
 pub(crate) fn infer_provider_from_env(env_name: Option<&str>) -> Option<String> {

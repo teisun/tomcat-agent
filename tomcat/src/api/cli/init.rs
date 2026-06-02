@@ -107,6 +107,26 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             );
         }
     }
+    let additional_envs = crate::api::cli::init_model_wizard::additional_provider_env_names(
+        &model_catalog,
+        &model_choice.entry.provider,
+    );
+    for (env_name, status) in crate::api::cli::init_model_wizard::prompt_additional_provider_keys(
+        &env_path,
+        &additional_envs,
+    )? {
+        match status {
+            crate::api::cli::init_model_wizard::KeyConfigStatus::AlreadyConfigured => {
+                println!("  ✓ API Key 已配置 ({})", env_name);
+            }
+            crate::api::cli::init_model_wizard::KeyConfigStatus::Written => {
+                println!("  ✓ {} 已写入 .env", env_name);
+            }
+            crate::api::cli::init_model_wizard::KeyConfigStatus::Skipped => {
+                println!("  ⚠ {} 未设置，已跳过", env_name);
+            }
+        }
+    }
 
     println!("\n初始化完成！运行 `tomcat chat` 开始对话。");
 

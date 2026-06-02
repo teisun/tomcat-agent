@@ -428,7 +428,13 @@
 
 ## 九、LLM 接入与 Thinking
 
-> T-071（Thinking API + TUI 展示）已随 **T2-P0-006** 落地（`develop.md` 2026-05-08）；本区暂无开放条目。
+> T-071（Thinking API + TUI 展示）已随 **T2-P0-006** 落地（`develop.md` 2026-05-08）；本区新增一个多 LLM 产品化收尾条目。
+
+- [ ] **[P8] `[REF]`** `#T-154` 多 LLM 产品化收尾：切 model 不重置 CLI `[ctx]` 统计
+  - `/model use` 后，当前 session 的 `[ctx]` token / 占用 / 压缩水位应继续沿用同一份 `ContextState`，不因 provider/model 切换被清零。
+  - W2-3 可观测/计量（`scene/provider/api/model/latency/retry` tracing + 按 model 聚合 usage）只允许做“旁路新增”，不得替换 `ContextMetricsUpdate` 或 CLI `stderr` 的 `[ctx]` 现有口径。
+  - 若未来要引入按 model 的 tokenizer / context-window 差异，需单独设计 UI 与迁移说明，不能在观测补齐时静默改变当前统计语义。
+  - 测试与集成验收参考 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md)；尤其遵循脚本入口、日志留存、后台执行与轮询诊断要求。
 
 ---
 

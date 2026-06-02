@@ -17,9 +17,10 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::core::session::DEFAULT_SESSION_KEY;
 use tomcat::{
-    init_context_state, run_chat_turn, AppConfig, AppError, BashResult, ChatContext, ChatMessage,
-    ChatRequest, ChatResponse, DirEntry, EditFileResult, EditOperation, LlmProvider,
-    PrimitiveExecutor, PrimitiveOperation, SessionManager, StreamEvent, WriteFileResult,
+    init_context_state, run_chat_turn, AppConfig, AppError, BashResult, Capabilities, ChatContext,
+    ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult, EditOperation, LlmProvider,
+    LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager,
+    StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -75,6 +76,77 @@ impl LlmProvider for DeterministicMockLlm {
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
         Ok(0)
     }
+}
+
+struct FixedResolver {
+    provider: Arc<dyn LlmProvider>,
+    default_model: String,
+}
+
+impl FixedResolver {
+    fn new(provider: Arc<dyn LlmProvider>, default_model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            default_model: default_model.into(),
+        }
+    }
+
+    fn resolved_call(&self, model: &str) -> ResolvedCall {
+        let lower = model.trim().to_ascii_lowercase();
+        let (api, provider, base_url) = if lower.starts_with("deepseek-") {
+            ("openai", "deepseek", "https://api.deepseek.com")
+        } else {
+            ("openai-responses", "openai", "https://api.openai.com")
+        };
+        let capabilities = Capabilities {
+            vision: lower.starts_with("gpt-"),
+            files: lower.starts_with("gpt-"),
+            tools: true,
+            reasoning: lower.starts_with("deepseek-reasoner")
+                || lower.starts_with("deepseek-v4-")
+                || lower.starts_with("gpt-5."),
+        };
+        ResolvedCall {
+            provider_impl: self.provider.clone(),
+            model: model.to_string(),
+            api: api.to_string(),
+            provider: provider.to_string(),
+            base_url: Some(base_url.to_string()),
+            key_source: if provider == "deepseek" {
+                "DEEPSEEK_API_KEY".to_string()
+            } else {
+                "OPENAI_API_KEY".to_string()
+            },
+            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
+            capabilities,
+        }
+    }
+}
+
+impl LlmResolver for FixedResolver {
+    fn resolve(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let model = match scene {
+            LlmScene::Main | LlmScene::Vision => session_override
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .unwrap_or(&self.default_model),
+            LlmScene::Compaction | LlmScene::Title => &self.default_model,
+        };
+        Ok(self.resolved_call(model))
+    }
+}
+
+fn install_fixed_resolver(
+    ctx: &mut ChatContext,
+    provider: Arc<dyn LlmProvider>,
+    default_model: &str,
+) {
+    ctx.llm = provider.clone();
+    ctx.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
 struct DeterministicMockPrimitive;
@@ -192,6 +264,26 @@ fn cli_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
         }),
         Ok(StreamEvent::FinishReason {
             reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn cli_text_stream_with_usage(
+    text: &str,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: Some(prompt_tokens + completion_tokens),
         }),
     ]
 }
@@ -3261,10 +3353,11 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
 
     const ENV_KEY: &str = "TOMCAT_APPEND_REHYDRATE_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
-    ctx.llm = Arc::new(DeterministicMockLlm::new(vec![
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
         cli_tool_call_stream("call_1", "bash", r#"{"command":"echo hi","cwd":null}"#),
         cli_text_stream("RECOVER_OK"),
     ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.primitive = Arc::new(DeterministicMockPrimitive);
     ctx.message_append_sink = Arc::new(CliInjectAppendInvariantSink::new(ctx.session.clone()));
 
@@ -3353,7 +3446,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
 
     const ENV_KEY: &str = "TOMCAT_RESPONSES_FINISH_REASON_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
-    ctx.llm = Arc::new(DeterministicMockLlm::new(vec![vec![
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![vec![
         Ok(StreamEvent::ContentDelta {
             delta: "partial".to_string(),
         }),
@@ -3366,6 +3459,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
             reason: "error:boom".to_string(),
         }),
     ]]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
     let system_text = "system prompt";
     let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
@@ -3420,6 +3514,185 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
     );
 
     // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_provider_call() {
+    common::setup_logging();
+    let _span = info_span!(
+        "test_run_chat_turn_rejects_multimodal_message_on_text_model_before_provider_call"
+    )
+    .entered();
+
+    const ENV_KEY: &str = "TOMCAT_MULTIMODAL_PRECHECK_CLI_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![]));
+    install_fixed_resolver(&mut ctx, mock_llm, "deepseek-reasoner");
+    ctx.follow_up_queue
+        .lock()
+        .push(ChatMessage::user_with_parts(vec![
+            tomcat::ChatMessageContentPart::text("请分析这张图"),
+            tomcat::ChatMessageContentPart::image_file_id("file-vision").unwrap(),
+        ]));
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(&ctx, "", system_text, &mut state, CancellationToken::new()),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    match outcome {
+        tomcat::AgentRunOutcome::Failed(err) => {
+            assert!(matches!(err, AppError::Llm(_)));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("vision"),
+                "should mention missing vision: {msg}"
+            );
+            assert!(
+                msg.contains("gpt"),
+                "should suggest a catalog vision-capable model: {msg}"
+            );
+        }
+        other => panic!("应在调用前结构化拦截多模态主路径，实际: {other:?}"),
+    }
+
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
+    common::setup_logging();
+    let _span = info_span!("test_model_switch_keeps_ctx_metrics_continuous_across_turns").entered();
+
+    const ENV_KEY: &str = "TOMCAT_MODEL_SWITCH_CTX_CONTINUITY_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_text_stream_with_usage("FIRST_OK", 120, 20),
+        cli_text_stream_with_usage("SECOND_OK", 140, 24),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let metrics_payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let payloads_for_listener = Arc::clone(&metrics_payloads);
+    ctx.event_bus.on(
+        tomcat::wire::WIRE_CONTEXT_METRICS_UPDATE,
+        Box::new(move |event| {
+            payloads_for_listener
+                .lock()
+                .unwrap()
+                .push(event.payload.clone());
+            Ok(())
+        }),
+    );
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "first request keeps context warm",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("first run_chat_turn timeout 5s")
+    .expect("first run_chat_turn result");
+    assert!(
+        matches!(first, tomcat::AgentRunOutcome::Completed(_)),
+        "第一轮应正常完成"
+    );
+    assert_eq!(
+        state
+            .last_api_usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens),
+        Some(120),
+        "第一轮后应保留 usage，供下一轮 [ctx] 继续沿用"
+    );
+    let first_live_tokens = state.live.input_tokens_used;
+    let first_live_ratio = state.live.context_utilization_ratio;
+    assert!(first_live_tokens > 0);
+    assert!(first_live_ratio > 0.0);
+    let payload_count_after_first = metrics_payloads.lock().unwrap().len();
+    assert!(
+        payload_count_after_first > 0,
+        "第一轮应至少发出一次 ContextMetricsUpdate"
+    );
+
+    ctx.session
+        .switch_current_model(Some("openai"), Some("gpt-4o"))
+        .expect("model switch should succeed");
+    assert_eq!(
+        ctx.session
+            .get_session(ctx.session.current_session_key())
+            .expect("session read")
+            .and_then(|entry| entry.model_override),
+        Some("gpt-4o".to_string())
+    );
+    assert_eq!(
+        state
+            .last_api_usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens),
+        Some(120),
+        "切 model 不应重置同一份 ContextState"
+    );
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "second request after model switch",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("second run_chat_turn timeout 5s")
+    .expect("second run_chat_turn result");
+    assert!(
+        matches!(second, tomcat::AgentRunOutcome::Completed(_)),
+        "第二轮应正常完成"
+    );
+
+    let payloads = metrics_payloads.lock().unwrap().clone();
+    let second_turn_payloads = &payloads[payload_count_after_first..];
+    assert!(
+        !second_turn_payloads.is_empty(),
+        "切 model 后应继续发出 ContextMetricsUpdate"
+    );
+    let first_payload_after_switch = &second_turn_payloads[0];
+    let first_tokens_after_switch = first_payload_after_switch["inputTokensUsed"]
+        .as_u64()
+        .expect("inputTokensUsed should be u64");
+    let first_ratio_after_switch = first_payload_after_switch["contextUtilizationRatio"]
+        .as_f64()
+        .expect("contextUtilizationRatio should be f64");
+    assert!(
+        first_tokens_after_switch >= first_live_tokens as u64,
+        "切 model 后首个 [ctx] token 统计应延续上一轮，而不是归零: {:?}",
+        first_payload_after_switch
+    );
+    assert!(
+        first_ratio_after_switch >= first_live_ratio,
+        "切 model 后首个 [ctx] ratio 应延续上一轮，而不是归零: {:?}",
+        first_payload_after_switch
+    );
+    assert!(
+        state.live.input_tokens_used > 0 && state.live.context_utilization_ratio > 0.0,
+        "第二轮结束后 [ctx] 统计仍应保持非零"
+    );
+
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 

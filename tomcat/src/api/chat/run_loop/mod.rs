@@ -7,9 +7,12 @@ use tracing::info;
 
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
+use crate::core::llm::resolver::validate_capabilities;
 use crate::core::llm::ChatMessage;
 use crate::core::llm::LlmScene;
-use crate::core::session::manager::{build_context_from_state, init_context_state};
+use crate::core::session::manager::{
+    build_context_from_state, estimate_msg_chars, init_context_state,
+};
 use crate::core::session::read_entries_tail;
 use crate::infra::error::AppError;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
@@ -67,6 +70,17 @@ fn current_user_prompt(ctx: &ChatContext) -> String {
         &ctx.plan_runtime.mode(),
         &ctx.effective_model(entry.as_ref()),
     )
+}
+
+fn append_failed_turn_message(
+    context_state: &mut crate::core::ContextState,
+    message: ChatMessage,
+    account_chars: bool,
+) {
+    if account_chars {
+        context_state.on_message_appended(estimate_msg_chars(&message));
+    }
+    context_state.messages.push(message);
 }
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
@@ -273,17 +287,8 @@ pub async fn run_chat_turn(
     let entry = ctx.session.get_session(ctx.session.current_session_key())?;
     let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
-    let use_llm_override = ctx.uses_runtime_llm_override();
-    let main_provider = if use_llm_override {
-        ctx.llm.clone()
-    } else {
-        main_call.provider_impl.clone()
-    };
-    let compaction_provider = if use_llm_override {
-        ctx.llm.clone()
-    } else {
-        compaction_call.provider_impl.clone()
-    };
+    let main_provider = main_call.provider_impl.clone();
+    let compaction_provider = compaction_call.provider_impl.clone();
     let model = main_call.model.clone();
     let session_id = ctx
         .session
@@ -320,6 +325,7 @@ pub async fn run_chat_turn(
     );
 
     let mut messages = build_context_from_state(context_state);
+    let mut appended_messages: Vec<(ChatMessage, bool)> = Vec::new();
 
     let plan_mode = ctx.plan_runtime.mode();
     let system_text_with_reminder = match &plan_mode {
@@ -339,11 +345,13 @@ pub async fn run_chat_turn(
     };
     messages.insert(0, ChatMessage::system(&system_text_with_reminder));
     if !input.is_empty() {
+        let user_message = ChatMessage::user(input);
         push_turn_message(
             &mut messages,
             &ctx.message_append_sink,
-            ChatMessage::user(input),
+            user_message.clone(),
         )?;
+        appended_messages.push((user_message, false));
     }
     {
         let mut queue = ctx.follow_up_queue.lock();
@@ -351,9 +359,24 @@ pub async fn run_chat_turn(
             let drained: Vec<_> = queue.drain(..).collect();
             drop(queue);
             for message in drained {
-                push_turn_message(&mut messages, &ctx.message_append_sink, message)?;
+                push_turn_message(&mut messages, &ctx.message_append_sink, message.clone())?;
+                appended_messages.push((message, true));
             }
         }
+    }
+    if let Err(error) = validate_capabilities(
+        &ctx.model_catalog,
+        &ctx.config.llm.default_model,
+        LlmScene::Main,
+        &main_call.model,
+        &main_call.capabilities,
+        &messages,
+    ) {
+        for (message, account_chars) in appended_messages {
+            append_failed_turn_message(context_state, message, account_chars);
+        }
+        let _ = ctx.session.persist_context_observability(context_state);
+        return Ok(AgentRunOutcome::Failed(error));
     }
 
     let renderer = Arc::new(Mutex::new(MarkdownRenderer::new()));

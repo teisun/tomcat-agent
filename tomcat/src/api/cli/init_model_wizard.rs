@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use dialoguer::{Password, Select};
+use dialoguer::{Confirm, Password, Select};
 
 use crate::core::llm::{env_name_for_provider, ModelCatalog, ModelEntry};
 use crate::{AppConfig, AppError};
@@ -70,6 +70,53 @@ fn persisted_api_base(entry: &ModelEntry) -> Option<String> {
         | ("openai-responses", Some("https://api.openai.com")) => None,
         _ => entry.base_url.clone(),
     }
+}
+
+pub(crate) fn additional_provider_env_names(
+    catalog: &ModelCatalog,
+    selected_provider: &str,
+) -> Vec<String> {
+    let selected_env = env_name_for_provider(selected_provider);
+    catalog
+        .entries()
+        .into_iter()
+        .map(|entry| env_name_for_provider(&entry.provider))
+        .filter(|env_name| env_name != &selected_env)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(crate) fn prompt_additional_provider_keys(
+    env_path: &Path,
+    env_names: &[String],
+) -> Result<Vec<(String, KeyConfigStatus)>, AppError> {
+    let env_names: Vec<String> = env_names
+        .iter()
+        .map(|env_name| env_name.trim())
+        .filter(|env_name| !env_name.is_empty())
+        .map(str::to_string)
+        .collect();
+    if env_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let should_prompt = Confirm::new()
+        .with_prompt("  是否顺手补充其它 provider 的 API Key（便于后续 /model use）")
+        .default(false)
+        .interact_opt()
+        .unwrap_or(None)
+        .unwrap_or(false);
+    if !should_prompt {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    for env_name in env_names {
+        let status = prompt_and_store_provider_key(env_path, &env_name)?;
+        results.push((env_name, status));
+    }
+    Ok(results)
 }
 
 pub(crate) fn prompt_and_store_provider_key(

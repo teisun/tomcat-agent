@@ -201,6 +201,24 @@ fn write_env_entries_writes_provider_keys() {
 }
 
 #[test]
+fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
+    let cfg = AppConfig::default();
+    let catalog = crate::core::llm::ModelCatalog::load_from_path(
+        &cfg,
+        tempfile::tempdir().unwrap().path().join("models.toml"),
+    )
+    .expect("load catalog");
+
+    let extra_for_openai =
+        super::super::init_model_wizard::additional_provider_env_names(&catalog, "openai");
+    let extra_for_deepseek =
+        super::super::init_model_wizard::additional_provider_env_names(&catalog, "deepseek");
+
+    assert_eq!(extra_for_openai, vec!["DEEPSEEK_API_KEY".to_string()]);
+    assert_eq!(extra_for_deepseek, vec!["OPENAI_API_KEY".to_string()]);
+}
+
+#[test]
 fn apply_model_choice_skips_default_openai_base_url() {
     let mut cfg = AppConfig::default();
     let entry = crate::core::llm::ModelEntry {

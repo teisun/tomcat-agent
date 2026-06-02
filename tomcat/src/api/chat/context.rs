@@ -391,12 +391,6 @@ impl ChatContext {
         .map(Arc::new)
     }
 
-    pub(crate) fn uses_runtime_llm_override(&self) -> bool {
-        !crate::core::llm::registered_provider_ids()
-            .into_iter()
-            .any(|provider_id| provider_id == self.llm.provider_name())
-    }
-
     pub(crate) fn shutdown_completion_subscriber(&self) {
         if let Some(handle) = self.completion_subscriber_handle.lock().take() {
             handle.abort();

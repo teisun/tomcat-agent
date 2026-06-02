@@ -60,20 +60,14 @@ fn missing_explicit_model_errors() {
 }
 
 #[test]
-fn legacy_fallback_entry() {
+fn missing_model_requires_explicit_catalog_entry() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     let mut cfg = AppConfig::default();
-    cfg.llm.provider = "openai".to_string();
-    cfg.llm.api_base = Some("https://legacy.gateway".to_string());
-    cfg.llm.api_key_env = Some("DEEPSEEK_API_KEY".to_string());
+    cfg.llm.default_model = "custom-deepseek".to_string();
 
     let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load catalog");
-    let entry = catalog
-        .lookup_or_legacy("custom-deepseek", &cfg.llm, &cfg.context)
-        .expect("legacy fallback");
-    assert_eq!(entry.id, "custom-deepseek");
-    assert_eq!(entry.api, "openai");
-    assert_eq!(entry.provider, "deepseek");
-    assert_eq!(entry.base_url.as_deref(), Some("https://legacy.gateway"));
+    assert!(catalog.lookup("custom-deepseek").is_none());
+    let err = catalog.lookup_explicit("custom-deepseek").unwrap_err();
+    assert!(err.to_string().contains("custom-deepseek"));
 }
