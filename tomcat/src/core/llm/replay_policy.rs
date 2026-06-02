@@ -232,9 +232,7 @@ pub fn classify_replay_downgrade(
     message: &ChatMessage,
     action: &ReplayAction,
 ) -> Option<ReplayDowngradeKind> {
-    let Some(continuation) = message.reasoning_continuation.as_ref() else {
-        return None;
-    };
+    let continuation = message.reasoning_continuation.as_ref()?;
     match action {
         ReplayAction::KeepOpaque => None,
         ReplayAction::ConvertToText(_) | ReplayAction::StripOpaque => {
