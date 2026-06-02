@@ -39,12 +39,14 @@ fn load_config_accepts_preflight_section() {
     let path = dir.join("config.toml");
     std::fs::write(
         &path,
-        "[preflight]\nauto_install_search_tools = false\nauto_install_git = false\n[log]\nlevel = \"info\"\n",
+        "[preflight]\nauto_install_search_tools = false\nauto_install_git = false\nshow_search_tools_ui = true\nshow_git_ui = true\n[log]\nlevel = \"info\"\n",
     )
     .unwrap();
     let cfg = load_config(Some(path.as_path())).unwrap();
     assert!(!cfg.preflight.auto_install_search_tools);
     assert!(!cfg.preflight.auto_install_git);
+    assert!(cfg.preflight.show_search_tools_ui);
+    assert!(cfg.preflight.show_git_ui);
     assert!(validate_config(&cfg).is_ok());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
@@ -109,6 +111,25 @@ fn load_config_env_overrides_llm_files_expires_after_seconds() {
     assert_eq!(cfg.llm.files.expires_after_seconds, 7200);
     // SAFETY: 清理测试环境变量，避免污染后续用例。
     unsafe { std::env::remove_var("TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS") };
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn load_config_toml_overrides_scene_models() {
+    let dir = std::env::temp_dir().join("tomcat_scene_model_override_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(
+        &path,
+        "[llm]\nvision_model = \"gpt-5.4\"\ntitle_model = \"gpt-5.2\"\n",
+    )
+    .unwrap();
+
+    let cfg = load_config(Some(path.as_path())).unwrap();
+    assert_eq!(cfg.llm.vision_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(cfg.llm.title_model.as_deref(), Some("gpt-5.2"));
+
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }

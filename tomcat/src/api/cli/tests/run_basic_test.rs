@@ -8,6 +8,7 @@
 use super::super::*;
 use super::mocks::{test_config, with_temp_home, with_tomcat_config_in_home};
 use serial_test::serial;
+use std::collections::BTreeMap;
 
 #[test]
 #[serial(env_lock)]
@@ -154,6 +155,87 @@ fn run_audit_show_and_export_returns_ok() {
         &cfg,
     );
     assert!(r2.is_ok());
+}
+
+#[test]
+fn apply_model_choice_updates_provider_and_key_env() {
+    let mut cfg = AppConfig::default();
+    let entry = crate::core::llm::ModelEntry {
+        id: "deepseek-v4-pro".to_string(),
+        api: "openai".to_string(),
+        provider: "deepseek".to_string(),
+        base_url: Some("https://api.deepseek.com".to_string()),
+        capabilities: crate::core::llm::Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: Some("deepseek".to_string()),
+    };
+
+    let choice = apply_model_choice(&mut cfg, &entry);
+    assert_eq!(cfg.llm.default_model, "deepseek-v4-pro");
+    assert_eq!(cfg.llm.provider, "openai");
+    assert_eq!(
+        cfg.llm.api_base.as_deref(),
+        Some("https://api.deepseek.com")
+    );
+    assert_eq!(cfg.llm.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+    assert_eq!(choice.env_name, "DEEPSEEK_API_KEY");
+}
+
+#[test]
+fn write_env_entries_writes_provider_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let env_path = dir.path().join(".env");
+    let mut vars = BTreeMap::new();
+    vars.insert(
+        "DEEPSEEK_API_KEY".to_string(),
+        "deepseek-secret".to_string(),
+    );
+    vars.insert("OPENAI_API_KEY".to_string(), "openai-secret".to_string());
+
+    write_env_entries(&env_path, &vars).expect("write env entries");
+    let content = std::fs::read_to_string(&env_path).expect("read env");
+    assert!(content.contains("DEEPSEEK_API_KEY=deepseek-secret"));
+    assert!(content.contains("OPENAI_API_KEY=openai-secret"));
+    assert!(content.contains("HTTPS_PROXY"));
+}
+
+#[test]
+fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
+    let cfg = AppConfig::default();
+    let catalog = crate::core::llm::ModelCatalog::load_from_path(
+        &cfg,
+        tempfile::tempdir().unwrap().path().join("models.toml"),
+    )
+    .expect("load catalog");
+
+    let extra_for_openai =
+        super::super::init_model_wizard::additional_provider_env_names(&catalog, "openai");
+    let extra_for_deepseek =
+        super::super::init_model_wizard::additional_provider_env_names(&catalog, "deepseek");
+
+    assert_eq!(extra_for_openai, vec!["DEEPSEEK_API_KEY".to_string()]);
+    assert_eq!(extra_for_deepseek, vec!["OPENAI_API_KEY".to_string()]);
+}
+
+#[test]
+fn apply_model_choice_skips_default_openai_base_url() {
+    let mut cfg = AppConfig::default();
+    let entry = crate::core::llm::ModelEntry {
+        id: "gpt-5.4".to_string(),
+        api: "openai-responses".to_string(),
+        provider: "openai".to_string(),
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: crate::core::llm::Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: None,
+    };
+
+    apply_model_choice(&mut cfg, &entry);
+    assert_eq!(cfg.llm.provider, "openai-responses");
+    assert_eq!(cfg.llm.api_base, None);
+    assert_eq!(cfg.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
 }
 
 #[test]

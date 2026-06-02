@@ -14,8 +14,9 @@ use std::path::PathBuf;
 
 use crate::api::chat::ChatContext;
 
-use super::{cmd_ckpt, cmd_help, cmd_path, cmd_plan, cmd_restore, cmd_thinking};
+use super::{cmd_ckpt, cmd_help, cmd_model, cmd_path, cmd_plan, cmd_restore, cmd_thinking};
 
+pub use cmd_model::ModelCommand;
 pub use cmd_plan::PlanCommand;
 pub use cmd_thinking::ThinkingAction;
 
@@ -34,6 +35,8 @@ pub enum ChatCommand {
     Thinking {
         action: ThinkingAction,
     },
+    /// `/model current|list|use <id>`：查看/切换当前会话模型。
+    Model(ModelCommand),
     /// `/ckpt list|show|diff`.
     CkptList {
         limit: Option<usize>,
@@ -74,7 +77,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
     let first_token = trimmed.split_whitespace().next().unwrap_or_default();
     if !matches!(
         first_token,
-        "/path" | "/help" | "/thinking" | "/ckpt" | "/restore" | "/plan"
+        "/path" | "/help" | "/thinking" | "/model" | "/ckpt" | "/restore" | "/plan"
     ) {
         return ChatCommand::NotACommand(line.to_string());
     }
@@ -92,6 +95,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/path" => cmd_path::parse_args(tokens, trimmed),
         "/help" => cmd_help::parse_args(tokens),
         "/thinking" => cmd_thinking::parse_args(tokens),
+        "/model" => cmd_model::parse_args(tokens),
         "/ckpt" => parse_ckpt_args(tokens),
         "/restore" => parse_restore_args(tokens),
         "/plan" => cmd_plan::parse_args(tokens),
@@ -119,6 +123,7 @@ pub(crate) fn dispatch_chat_command(
             original_line,
         } => cmd_path::run(ctx, path, original_line, rl),
         ChatCommand::Thinking { action } => cmd_thinking::run(ctx, action),
+        ChatCommand::Model(model_cmd) => cmd_model::run(ctx, model_cmd),
         ChatCommand::CkptList { limit } => cmd_ckpt::run_list(ctx, limit),
         ChatCommand::CkptShow { checkpoint_id } => cmd_ckpt::run_show(ctx, checkpoint_id),
         ChatCommand::CkptDiff { checkpoint_id } => cmd_ckpt::run_diff(ctx, checkpoint_id),

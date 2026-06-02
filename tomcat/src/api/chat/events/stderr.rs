@@ -25,9 +25,15 @@ pub(crate) struct ChatSessionStderrListenerIds {
     l0: EventListenerId,
 }
 
+fn should_render_preflight_ui(show_ui: bool, _status: &str) -> bool {
+    show_ui
+}
+
 pub(crate) fn register_chat_session_stderr_listeners(
     bus: &dyn EventBus,
     search_tools_printer: Option<Arc<Mutex<Box<dyn ExternalPrinter + Send>>>>,
+    show_search_tools_ui: bool,
+    show_git_ui: bool,
 ) -> ChatSessionStderrListenerIds {
     let metrics = bus.on(
         wire::WIRE_CONTEXT_METRICS_UPDATE,
@@ -102,6 +108,9 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("update");
+            if !should_render_preflight_ui(show_search_tools_ui, status) {
+                return Ok(());
+            }
             let message = evt
                 .payload
                 .get("message")
@@ -189,6 +198,9 @@ pub(crate) fn register_chat_session_stderr_listeners(
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("update");
+            if !should_render_preflight_ui(show_git_ui, status) {
+                return Ok(());
+            }
             let message = evt
                 .payload
                 .get("message")
@@ -440,4 +452,33 @@ pub(crate) fn unregister_chat_session_stderr_listeners(
     bus.off(ids.l3_start);
     bus.off(ids.l3_end);
     bus.off(ids.l0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_render_preflight_ui;
+
+    #[test]
+    fn search_tools_preflight_ui_is_hidden_when_disabled() {
+        assert!(!should_render_preflight_ui(false, "ready"));
+        assert!(!should_render_preflight_ui(false, "failed"));
+    }
+
+    #[test]
+    fn search_tools_preflight_ui_is_shown_when_enabled() {
+        assert!(should_render_preflight_ui(true, "ready"));
+        assert!(should_render_preflight_ui(true, "failed"));
+    }
+
+    #[test]
+    fn git_preflight_ui_is_hidden_when_disabled() {
+        assert!(!should_render_preflight_ui(false, "start"));
+        assert!(!should_render_preflight_ui(false, "already_installing"));
+    }
+
+    #[test]
+    fn git_preflight_ui_is_shown_when_enabled() {
+        assert!(should_render_preflight_ui(true, "start"));
+        assert!(should_render_preflight_ui(true, "already_installing"));
+    }
 }

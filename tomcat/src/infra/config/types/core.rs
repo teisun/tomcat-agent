@@ -47,6 +47,12 @@ pub struct PreflightConfig {
     /// 是否在 `tomcat chat` 入口后台探测并尝试安装 git。
     #[serde(default = "default_true")]
     pub auto_install_git: bool,
+    /// 是否在 chat CLI 中显示 search_tools preflight 的 `[tools]` 提示。
+    #[serde(default)]
+    pub show_search_tools_ui: bool,
+    /// 是否在 chat CLI 中显示 git preflight 的 `[git]` 提示。
+    #[serde(default)]
+    pub show_git_ui: bool,
 }
 
 impl Default for PreflightConfig {
@@ -54,6 +60,8 @@ impl Default for PreflightConfig {
         Self {
             auto_install_search_tools: true,
             auto_install_git: true,
+            show_search_tools_ui: false,
+            show_git_ui: false,
         }
     }
 }

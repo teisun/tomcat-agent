@@ -34,7 +34,7 @@
 - 缺 `rg`/`fd` 时**不抛错**：自动切到进程内的纯 Rust 实现，让"没装 / 装不上 / 没网"的用户依然能搜索。
 - 进入 `tomcat chat` 时**后台**探测并尝试安装 `rg` / `fd`，**全程非阻塞**会话；不做 LLM/全网连通性探测。
 - 普通 Android App（非 Termux）**不自动装**外部二进制，全部走 Tier2。
-- 预检由 `[preflight] auto_install_search_tools` + `PI_SKIP_SEARCH_TOOLS_PREFLIGHT` 双开关控制（**env > config > 默认 true**）。
+- 预检功能由 `[preflight] auto_install_search_tools` + `PI_SKIP_SEARCH_TOOLS_PREFLIGHT` 双开关控制（**env > config > 默认 true**）；终端 `[tools]` 提示单独由 `[preflight] show_search_tools_ui` 控制，默认 `false`。
 - 输入/输出 Schema **跨 Tier 一致**；实现差异通过 `warnings` 表达，不在协议层分裂。
 
 ---
@@ -415,7 +415,8 @@ SearchFilesStats
 | 竞态 | 装完前用户调用 `search_files`：行为不变（缺一策略回落 Tier2） |
 | sudo / 权限 | Linux 不抢 root；失败发事件，不静默 |
 | Windows UAC | 系统行为不可绕过；用户取消归类 `failed`，不影响进程 |
-| 关闭方式 | `[preflight] auto_install_search_tools = false` 或 `PI_SKIP_SEARCH_TOOLS_PREFLIGHT=1`（env > config > 默认 true） |
+| 功能关闭方式 | `[preflight] auto_install_search_tools = false` 或 `PI_SKIP_SEARCH_TOOLS_PREFLIGHT=1`（env > config > 默认 true） |
+| UI 提示显示 | `[preflight] show_search_tools_ui = true` 时才打印 `[tools]` 预检提示；默认 `false`（严格静默） |
 
 ---
 
@@ -520,12 +521,15 @@ SearchFilesStats
 [preflight]
 # 默认 true：进入 tomcat chat 时缺 rg/fd 后台尝试安装
 auto_install_search_tools = true
+# 默认 false：是否显示 `[tools]` 预检提示
+show_search_tools_ui = false
 ```
 
 | 变量 | 取值 | 含义 | 优先级 |
 |------|------|------|--------|
 | `PI_SKIP_SEARCH_TOOLS_PREFLIGHT` | `1` / `true` | 跳过后台**安装**（探测仍发生） | env（最高） |
 | `[preflight] auto_install_search_tools` | `bool` | 开/关后台安装 | config |
+| `[preflight] show_search_tools_ui` | `bool` | 开/关 `[tools]` 预检终端提示（不影响功能） | config |
 | `PI_SEARCH_TIER2_DEADLINE_MS` | 整数毫秒 | Tier2 单查询墙钟覆盖（默认 10000） | env |
 
 > 优先级总则：**env > config > 默认**。CI 镜像建议显式设置 `PI_SKIP_SEARCH_TOOLS_PREFLIGHT=1`，避免拉包卡住流水线（即便不设也不会阻塞，最多多发几条事件）。

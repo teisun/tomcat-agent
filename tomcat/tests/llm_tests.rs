@@ -8,8 +8,13 @@
 mod common;
 
 use futures_util::StreamExt;
+use serial_test::serial;
+use std::sync::Arc;
 use std::time::Duration;
-use tomcat::{resolve_llm, ChatMessage, ChatRequest, LlmConfig};
+use tomcat::{
+    resolve_llm, AppConfig, ChatMessage, ChatRequest, DefaultLlmResolver, LlmConfig, LlmResolver,
+    LlmScene, ModelCatalog,
+};
 
 fn completions_config() -> LlmConfig {
     LlmConfig {
@@ -94,4 +99,46 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     assert!(!events.is_empty(), "chat_stream 应至少产生一个 StreamEvent");
 
     Ok(())
+}
+
+#[test]
+#[serial(env_lock)]
+fn test_llm_resolver_session_override_uses_provider_specific_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let models_path = dir.path().join("models.toml");
+    let cfg = AppConfig::default();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, models_path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("DEEPSEEK_API_KEY", "deepseek-stub");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, Some("deepseek-v4-pro"))
+        .expect("resolver should resolve session override");
+    assert_eq!(resolved.model, "deepseek-v4-pro");
+    assert_eq!(resolved.api, "openai");
+    assert_eq!(resolved.provider, "deepseek");
+    assert_eq!(resolved.key_source, "DEEPSEEK_API_KEY");
+
+    unsafe {
+        std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+}
+
+#[test]
+fn test_llm_resolver_missing_explicit_model_reports_models_toml_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let models_path = dir.path().join("models.toml");
+    let cfg = AppConfig::default();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, models_path.clone()).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    let err = resolver
+        .resolve(LlmScene::Main, Some("missing-explicit-model"))
+        .expect_err("explicit model miss should error");
+    let msg = err.to_string();
+    assert!(msg.contains("missing-explicit-model"));
+    assert!(msg.contains(&models_path.display().to_string()));
 }

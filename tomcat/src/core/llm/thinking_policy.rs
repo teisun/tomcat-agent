@@ -120,6 +120,7 @@ pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
     } else if lower.starts_with("doubao")
         || lower.starts_with("moonshot")
         || lower.starts_with("kimi")
+        || lower.starts_with("mimo-")
     {
         ThinkingFormat::Doubao
     } else {

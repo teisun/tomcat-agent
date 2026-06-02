@@ -150,7 +150,7 @@ fn effective_model_uses_session_override() {
         session_file: None,
         cwd: None,
         thinking_level: None,
-        model_override: Some("gpt-4o".to_string()),
+        model_override: Some("gpt-5.2".to_string()),
         input_tokens: None,
         output_tokens: None,
         compaction_count: None,
@@ -164,7 +164,7 @@ fn effective_model_uses_session_override() {
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or(&config.llm.default_model);
-    assert_eq!(model, "gpt-4o");
+    assert_eq!(model, "gpt-5.2");
 }
 
 #[test]

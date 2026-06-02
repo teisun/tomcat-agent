@@ -14,10 +14,11 @@ use tomcat::core::llm::{ChatMessageRole, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
 use tomcat::{
     build_context_from_state, compound_turn_id, init_context_state, run_chat_turn, AgentLoop,
-    AgentLoopConfig, AppConfig, AppError, BashResult, ChatContext, ChatMessage, ChatRequest,
-    ChatResponse, ContextConfig, ContextState, DefaultEventBus, DirEntry, EditFileResult,
-    EditOperation, EventBus, EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation,
-    SessionManager, StreamEvent, WriteFileResult,
+    AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage,
+    ChatRequest, ChatResponse, ContextConfig, ContextState, DefaultEventBus, DirEntry,
+    EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, LlmResolver, LlmScene,
+    PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
+    WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -60,6 +61,75 @@ impl LlmProvider for MockLlm {
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
         Ok(0)
     }
+}
+
+struct FixedResolver {
+    provider: Arc<dyn LlmProvider>,
+    default_model: String,
+}
+
+impl FixedResolver {
+    fn new(provider: Arc<dyn LlmProvider>, default_model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            default_model: default_model.into(),
+        }
+    }
+
+    fn resolved_call(&self, model: &str) -> ResolvedCall {
+        let lower = model.trim().to_ascii_lowercase();
+        let (api, provider, base_url) = if lower.starts_with("deepseek-") {
+            ("openai", "deepseek", "https://api.deepseek.com")
+        } else {
+            ("openai-responses", "openai", "https://api.openai.com")
+        };
+        let capabilities = Capabilities {
+            vision: lower.starts_with("gpt-"),
+            files: lower.starts_with("gpt-"),
+            tools: true,
+            reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
+        };
+        ResolvedCall {
+            provider_impl: self.provider.clone(),
+            model: model.to_string(),
+            api: api.to_string(),
+            provider: provider.to_string(),
+            base_url: Some(base_url.to_string()),
+            key_source: if provider == "deepseek" {
+                "DEEPSEEK_API_KEY".to_string()
+            } else {
+                "OPENAI_API_KEY".to_string()
+            },
+            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
+            capabilities,
+        }
+    }
+}
+
+impl LlmResolver for FixedResolver {
+    fn resolve(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let model = match scene {
+            LlmScene::Main | LlmScene::Vision => session_override
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .unwrap_or(&self.default_model),
+            LlmScene::Compaction | LlmScene::Title => &self.default_model,
+        };
+        Ok(self.resolved_call(model))
+    }
+}
+
+fn install_fixed_resolver(
+    ctx: &mut ChatContext,
+    provider: Arc<dyn LlmProvider>,
+    default_model: &str,
+) {
+    ctx.llm = provider.clone();
+    ctx.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
 struct RecordingMockLlm {
@@ -311,10 +381,11 @@ async fn test_failed_turn_append_invariant_rehydrates_context_and_allows_next_tu
 
     const ENV_KEY: &str = "TOMCAT_APPEND_REHYDRATE_INTEGRATION_KEY";
     let (_dir, mut ctx) = chat_context_fixture(ENV_KEY);
-    ctx.llm = Arc::new(MockLlm::new(vec![
+    let mock_llm = Arc::new(MockLlm::new(vec![
         tool_call_stream("call_1", "bash", r#"{"command":"echo hi","cwd":null}"#),
         text_stream("RECOVER_OK"),
     ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 16 });
     ctx.message_append_sink = Arc::new(InjectAppendInvariantSink::new(ctx.session.clone()));
 

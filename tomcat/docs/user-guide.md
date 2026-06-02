@@ -60,6 +60,7 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 ```
 ~/.tomcat/
 ├── tomcat.config.toml                 # 主配置文件（tomcat init 生成）
+├── models.toml                        # 模型清单（tomcat init 生成；增删模型只改这里）
 ├── agents/
 │   └── main/
 │       ├── agent/                 # 身份与凭据
@@ -119,7 +120,7 @@ tomcat init
 
 `tomcat init` 为**非交互式**三步流程（不再选择 Provider / 模型 / API Base URL；首次写入默认 `openai-responses` + `gpt-5.4`，与 `tomcat.config.toml.example` 及代码中 `DEFAULT_LLM_MODEL` 一致）：
 
-1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（wasm + modules）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
+1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、生成模型清单 `~/.tomcat/models.toml`（含一条可用的 `mimo-v2.5-pro` 样板，见下）、释放内嵌资源（wasm + modules）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、QuickJS wasm、WasmEdge、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
 3. **[3/3] API Key 配置**：若 `~/.tomcat/assets/.env` 中尚无有效 `OPENAI_API_KEY`，提示输入（可回车跳过）。**回车跳过不会创建或写入 `.env`**（避免留下空 Key 文件）；可稍后再次运行 `tomcat init` 输入 Key，或自行创建/编辑 `~/.tomcat/assets/.env`
 
@@ -131,6 +132,7 @@ tomcat init
   ✓ 默认 LLM Provider: openai-responses
   ✓ 默认模型: gpt-5.4
   ✓ 目录结构就绪
+  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro）
   ✓ 内嵌资源已释放（wasm + modules）
   ✓ 已加入 PATH 环境变量
 
@@ -153,6 +155,32 @@ tomcat init
 **幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，默认**不覆盖**，仅打印保留说明并继续执行目录/资源/PATH/检查/API Key 步骤；第二次起可看到「使用已有配置文件」类提示。若要换新默认模型等，请用 `tomcat config set` 或自行编辑配置后重跑。
 
 **与 `tomcat doctor`**：`init` 第二步与 `doctor` 共用同一套检查逻辑；配置与资源有疑义时可再运行 `tomcat doctor` 查看含 API Key / `.env` 的完整诊断。
+
+### models.toml — 增删模型与 MiMo Token Plan
+
+`tomcat init` 会生成 `~/.tomcat/models.toml`（**模型清单**）。这是「增删模型」的唯一入口：
+
+- **启动自动加载**：`tomcat chat` 等启动路径会合并「内置模型表（gpt / deepseek）+ `models.toml`」，**同 id 覆盖内置、新 id 新增**，无需改代码、无需重新编译。
+- **幂等生成**：`models.toml` 不存在则创建；已存在但缺 `mimo-v2.5-pro` 则**仅追加**；已含则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
+- **再加一个模型**：复制现有 `[[models]]` 段，改 `id` / `provider` / `base_url` 即可。
+
+**MiMo Token Plan 最小配置**（init 默认就帮你写好一条）：
+
+```toml
+[[models]]
+id = "mimo-v2.5-pro"
+api = "openai"                                  # 走 OpenAI-compatible /v1/chat/completions
+provider = "mimo"                               # 决定取 MIMO_API_KEY
+base_url = "https://token-plan-cn.xiaomimimo.com"  # 只填 host，后缀程序拼接
+thinking_format = "doubao"
+context_window = 1000000
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
+```
+
+- **Key**：设置环境变量 `MIMO_API_KEY=tp-xxxxx`（写入 `~/.tomcat/assets/.env` 或当前 shell）。`tp-xxxxx`（Token Plan）不能与按量 `sk-xxxxx` 混用。
+- **base_url**：只填 **host**，`/v1/chat/completions` 由程序拼接，**不要**写成完整 endpoint。host 以你订阅页显示的为准（CN / SGP / AMS 区域代号对应中国 / 新加坡 / 欧洲）。
+- **使用**：`tomcat chat` 里 `/model mimo-v2.5-pro` 切换，或把 `[llm] default_model` 设成它。
+- **能力边界**：`mimo-v2.5-pro` 官方仅文本（无图片/文件），故 `vision/files=false`；thinking 服务端默认开，本集成走豆包系 `thinking` 线格式。
 
 ### tomcat doctor — 环境诊断
 
@@ -240,7 +268,7 @@ tomcat config set log.file_enabled true
 
 ### 启动预检与搜索工具安装
 
-进入 `tomcat chat` 后，tomcat 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装并通过 CLI/TUI 事件提示开始、成功或失败；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。
+进入 `tomcat chat` 后，tomcat 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。默认情况下这些预检仍会执行，但 `[tools]` / `[git]` 终端提示默认**关闭**，避免打扰输入。
 
 如需关闭后台安装尝试，可在配置中设置：
 
@@ -253,6 +281,21 @@ auto_install_search_tools = false
 
 ```bash
 tomcat config set preflight.auto_install_search_tools false
+```
+
+如果想单独打开终端提示而不影响后台预检功能，可设置：
+
+```toml
+[preflight]
+show_search_tools_ui = true
+show_git_ui = true
+```
+
+对应配置命令：
+
+```bash
+tomcat config set preflight.show_search_tools_ui true
+tomcat config set preflight.show_git_ui true
 ```
 
 CI 或一次性运行可用环境变量覆盖：

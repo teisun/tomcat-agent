@@ -307,14 +307,23 @@ fn set_toml_scalar(val: &mut toml::Value, key: &str, raw_value: &str) -> Result<
             let new_val = if let Some(existing) = table.get(*seg) {
                 coerce_scalar(existing, raw_value)?
             } else {
-                toml::Value::String(raw_value.to_string())
+                infer_scalar_from_raw(raw_value)
             };
             table.insert((*seg).to_string(), new_val);
             return Ok(());
         }
-        cur = cur
+        let table = cur
+            .as_table_mut()
+            .ok_or_else(|| AppError::Config(format!("配置路径无效: {} 不是表", seg)))?;
+        if !table.contains_key(*seg) {
+            table.insert((*seg).to_string(), toml::Value::Table(Default::default()));
+        }
+        cur = table
             .get_mut(*seg)
             .ok_or_else(|| AppError::Config(format!("配置路径无效: 缺中间节点 {}", seg)))?;
+        if !cur.is_table() {
+            return Err(AppError::Config(format!("配置路径无效: {} 不是表", seg)));
+        }
     }
     Ok(())
 }
@@ -333,5 +342,17 @@ fn coerce_scalar(existing: &toml::Value, raw: &str) -> Result<toml::Value, AppEr
             .map(toml::Value::Float)
             .map_err(|_| AppError::Config(format!("无法将 '{}' 转换为浮点", raw))),
         _ => Ok(toml::Value::String(raw.to_string())),
+    }
+}
+
+fn infer_scalar_from_raw(raw: &str) -> toml::Value {
+    if let Ok(v) = raw.parse::<bool>() {
+        toml::Value::Boolean(v)
+    } else if let Ok(v) = raw.parse::<i64>() {
+        toml::Value::Integer(v)
+    } else if let Ok(v) = raw.parse::<f64>() {
+        toml::Value::Float(v)
+    } else {
+        toml::Value::String(raw.to_string())
     }
 }

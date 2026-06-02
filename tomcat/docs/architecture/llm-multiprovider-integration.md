@@ -118,6 +118,24 @@ Anthropic…                                                           Completio
 
 **场景化扩展惯例（建议）**：未来 **vision / PDF 专用路径** 可新增 **`vision_model` / `pdf_model`** 等键，在**该路径**组 `ChatRequest` 时读取——仍由 **当前选中的 `LlmProvider` impl** 负责 wire（Completions 或 Responses）。详见报告 §9.3。
 
+#### 2.4.1 复用 OpenAI adapter 的 vendor 案例：DeepSeek 与 Xiaomi MiMo
+
+DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `provider="openai"` Chat Completions adapter，不新增 provider」的范例——区别只是凭证 + base URL + thinking wire + continuity：
+
+| 维度 | DeepSeek | MiMo (`mimo-v2.5-pro`) |
+|------|----------|------------------------|
+| 注册表 id（`api`） | `openai` | `openai` |
+| 逻辑 `provider` | `deepseek` | `mimo` |
+| 凭证 env | `DEEPSEEK_API_KEY` | `MIMO_API_KEY`（`auth.rs::env_name_for_provider` 通用推导，`tp-xxxxx` 不与 `sk-xxxxx` 混用） |
+| `base_url`（只填 host） | `https://api.deepseek.com` | `https://token-plan-cn.xiaomimimo.com` |
+| endpoint 后缀 | `/v1/chat/completions`（由 `openai.rs` 拼接，不可配） | 同左 |
+| thinking 线格式 | `deepseek` | `doubao`（`thinking: {"type":"enabled"}`） |
+| 能力 | text/tools/reasoning | text/tools/reasoning（**无 vision/files**，官方文档定死） |
+| `reasoning_content` continuity | 数据表行 `deepseek-v4` | 数据表行 `mimo-v2.5-pro`（同一条逻辑，见续传文档 §4.2.3.1） |
+| 事实源 | `builtin_models()` | **`tomcat init` 生成的 `~/.tomcat/models.toml`**（不进 builtin） |
+
+要点：**MiMo 全程零新增 provider / 零改 transport / 零改 continuity 5 道门**，只靠一条 `models.toml` 数据 + `MIMO_API_KEY` 即可上线，是「数据驱动接入同类 LLM」的活样板。`tomcat init` 会幂等生成这条 `models.toml`（缺则补、不覆盖用户内容）。
+
 ---
 
 ## 3. 进程内协议与 wire 形状

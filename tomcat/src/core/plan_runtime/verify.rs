@@ -333,6 +333,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
+                        compaction_llm: None,
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,

@@ -580,7 +580,11 @@ async fn collapse_to_branch_summary(
     ensure_working_message_ids(agent, &mut working)?;
     let artifacts = build_collapse_summary_artifacts_for_test(
         &working,
-        &*agent.llm,
+        agent
+            .config
+            .compaction_llm
+            .as_deref()
+            .unwrap_or(&*agent.llm),
         &agent.config.context_config.compaction_model,
         plan_runtime.as_deref(),
         latest_plan_event.as_ref(),

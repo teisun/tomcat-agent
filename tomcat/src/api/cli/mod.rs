@@ -4,6 +4,8 @@ mod audit_cmd;
 mod chat_cmd;
 mod config_cmd;
 mod init;
+mod init_model_wizard;
+mod models_toml;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod session_cmd;
@@ -36,6 +38,8 @@ use crate::AppConfig;
 pub(crate) use audit_cmd::{parse_audit_line, read_audit_entries};
 #[cfg(test)]
 pub(crate) use config_cmd::{resolve_toml_key, set_toml_key};
+#[cfg(test)]
+pub(crate) use init_model_wizard::{apply_model_choice, write_env_entries};
 #[cfg(test)]
 pub(crate) use plugin_cmd::{
     load_plugin_registry, save_plugin_registry, PluginRegistryEntry, PluginRegistryFile,

@@ -382,3 +382,118 @@ async fn context_metrics_update_emitted_on_text_only_response() {
         observed
     );
 }
+
+#[tokio::test]
+async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_context_state() {
+    let first_stream: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "first".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 120,
+            completion_tokens: 20,
+            total_tokens: Some(140),
+        }),
+    ];
+    let llm_first = Arc::new(MockLlmProvider::new(vec![first_stream]));
+    let primitive_first = Arc::new(MockPrimitiveExecutor);
+    let event_bus_first = Arc::new(DefaultEventBus::new());
+    let mut first_loop = AgentLoop::new(
+        llm_first,
+        primitive_first,
+        event_bus_first,
+        AgentLoopConfig {
+            model: "gpt-5.4".to_string(),
+            session_id: "s-model-a".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    first_loop.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 400,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        latest_plan_event: None,
+        preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let _ = first_loop
+        .run(vec![ChatMessage::user("first round keeps usage")])
+        .await
+        .unwrap();
+    let carried_state = first_loop.take_context_state().expect("carried state");
+    assert!(
+        carried_state.live.input_tokens_used > 0,
+        "first loop should materialize non-zero metrics before model switch"
+    );
+
+    let second_stream: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "second".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 140,
+            completion_tokens: 24,
+            total_tokens: Some(164),
+        }),
+    ];
+    let llm_second = Arc::new(MockLlmProvider::new(vec![second_stream]));
+    let primitive_second = Arc::new(MockPrimitiveExecutor);
+    let event_bus_second = Arc::new(DefaultEventBus::new());
+    let payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let payloads_for_listener = Arc::clone(&payloads);
+    event_bus_second.on(
+        wire::WIRE_CONTEXT_METRICS_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            payloads_for_listener
+                .lock()
+                .unwrap()
+                .push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let mut second_loop = AgentLoop::new(
+        llm_second,
+        primitive_second,
+        event_bus_second,
+        AgentLoopConfig {
+            model: "gpt-5.2".to_string(),
+            session_id: "s-model-b".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    second_loop.set_context_state(Some(carried_state));
+    let _ = second_loop
+        .run(vec![ChatMessage::user("second round after model switch")])
+        .await
+        .unwrap();
+
+    let captured = payloads.lock().unwrap().clone();
+    assert!(
+        !captured.is_empty(),
+        "second loop should emit ContextMetricsUpdate even after model switch"
+    );
+    let first_payload = &captured[0];
+    assert!(
+        first_payload["inputTokensUsed"].as_u64().unwrap() > 0,
+        "inputTokensUsed should stay non-zero when reusing the same ContextState: {:?}",
+        first_payload
+    );
+    assert!(
+        first_payload["contextUtilizationRatio"].as_f64().unwrap() > 0.0,
+        "contextUtilizationRatio should stay non-zero when reusing the same ContextState: {:?}",
+        first_payload
+    );
+}

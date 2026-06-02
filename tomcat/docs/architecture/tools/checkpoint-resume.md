@@ -161,7 +161,7 @@
 | **平台矩阵（拟定）** | 与 rg 分支同形：`brew install git`（macOS + `HOMEBREW_NO_BUILD_FROM_SOURCE=1` 前缀）、`apt-get install -y git` / `dnf` / `pacman`、`pkg install -y git`（Termux）；**Android 非 Termux** → 不自动装，仅事件 `failed`。**Windows v1**：与 rg 一致可仍为阻塞 `winget` 或单独 TODO（[`preflight.rs:419`](../../../src/api/chat/preflight.rs) 已有 Windows detached 注释）。 |
 | **并发** | Homebrew 等：复用「进程表窄匹配 / `already_installing`」思路，避免叠两套 nohup（与 rg 预检 §7 一致）。 |
 | **运行期行为** | 探测失败或安装未完成：`CheckpointStore` 仍为 **`NoopStore`**（与现行 §4.2.1 一致）。`git` 首次可用后 **惰性切换** 为 `ShadowGitStore`（**拟定**：`RwLock` 持 store、`record` 前 `try_upgrade`、或 `ArcSwap` 原子替换；PR 定稿）。**禁止**：在 `git` 未就绪时阻塞 tool 执行去等安装。 |
-| **事件 / stderr** | **拟定** `WIRE_GIT_PREFLIGHT`（**完整镜像** `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `progress` / `success` / `failed` / `detached` / `already_installing`；Unix detached 路径主要走 `start` / `detached` / `already_installing` / `failed`，Windows 阻塞路径走 `start` / `progress` / `success` / `failed`）；[`events/stderr.rs`](../../../src/api/chat/events/stderr.rs) 对称挂监听，灰字 + `tail -f` 提示。 |
+| **事件 / stderr** | **拟定** `WIRE_GIT_PREFLIGHT`（**完整镜像** `WIRE_SEARCH_TOOLS_PREFLIGHT`：`ready` / `start` / `progress` / `success` / `failed` / `detached` / `already_installing`；Unix detached 路径主要走 `start` / `detached` / `already_installing` / `failed`，Windows 阻塞路径走 `start` / `progress` / `success` / `failed`）；[`events/stderr.rs`](../../../src/api/chat/events/stderr.rs) 对称挂监听，终端 `[git]` 提示由 `[preflight] show_git_ui` 单独控制，默认 `false`。 |
 | **安装开关** | **仅** `[preflight] auto_install_git`（bool；默认以落地 PR 为准）。`false` 时不 spawn 后台安装（仍可探测 `git --version`）；CI / 沙箱无 sudo 时置 `false` 即可，**无**单独 env 跳过开关。 |
 
 ### 2.2.3 演进 TODO：IDE 产品形态（窄快照 / 时间线）
@@ -732,6 +732,7 @@ sequenceDiagram
 | `[checkpoint] retention_max` | u32 | 50 | `CheckpointStore` 元数据清单 + `/ckpt list` **最多保留最近 N 条**；更老条目从清单与列表视图中淘汰。 |
 | `[checkpoint] retention_days` | u32 | 7 | **天数**阈值：与 `retention_max` 一起参与 **启动期** `prune(retention)` 策略（orphan / 老 ckpt；具体算法 PR 定稿）。 |
 | `[preflight] auto_install_git` | bool | 建议与 `auto_install_search_tools` 对齐 | 缺 `git` 时是否在 `tomcat chat` 入口 **后台**尝试安装；`false` 则不 spawn 安装（仍可探测；`NoopStore` 直至有 git）。 |
+| `[preflight] show_git_ui` | bool | false | 是否显示 `[git]` 预检终端提示；只影响 CLI 输出，不影响后台探测/安装。 |
 
 **`retention_max` 说人话**：
 

@@ -10,16 +10,21 @@
 //! `SessionEntry` 约定一致。本模块不直接依赖 `SessionEntry`，仅消费已解析的
 //! [`ChatRequest`]。
 
+pub mod auth;
+pub mod catalog;
 pub(crate) mod http_client;
 pub mod openai_files;
 mod provider;
 mod registry;
 pub mod replay_policy;
+pub mod resolver;
 pub mod system_prompt;
 pub mod thinking_policy;
 mod token_usage;
 mod types;
 
+pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
+pub use catalog::{Capabilities, Cost, ModelCatalog, ModelEntry};
 pub use provider::LlmProvider;
 pub use registry::{registered_provider_ids, resolve_llm};
 #[allow(unused_imports)]
@@ -27,6 +32,7 @@ pub use replay_policy::{
     apply_text_downgrade, model_family, plan as plan_replay, CaptureMode, DowngradeMode,
     ProviderCompatProfile, ReplayAcceptance, ReplayAction,
 };
+pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
