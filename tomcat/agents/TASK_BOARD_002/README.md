@@ -38,6 +38,7 @@
 | ------------- | ----------------------------------------- | ------ | ----- | -------------------------------------- | ------------------------------------------ |
 | **T2-P0-008** | TUI 体验强化（合并 TASK-08）                      | `TODO` | —     | `feature/tui-experience`               | [tasks/T2-P0-008.md](./tasks/T2-P0-008.md) |
 | **T2-P0-009** | 三套管道重构                                    | `TODO` | —     | `feature/pipeline-unify`               | [tasks/T2-P0-009.md](./tasks/T2-P0-009.md) |
+| **T2-P0-010** | 多 LLM 产品化（Wave 1 基线）                     | `TODO` | —     | `feature/multi-llm-productization-wave1` | [tasks/T2-P0-010.md](./tasks/T2-P0-010.md) |
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理     | `TODO` | —     | `feature/bash-ast-detect-precision`    | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 | **T2-P1-010** | OpenAI / DeepSeek 推理续传                    | `DONE` | Jerry | `feature/reasoning-continuity`         | [tasks/T2-P1-010.md](./tasks/T2-P1-010.md) |
 | **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `DONE` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
@@ -49,10 +50,12 @@
 flowchart LR
     P008[T2-P0-008<br/>TUI 强化]
     P009[T2-P0-009<br/>Pipeline 重构]
+    P010[T2-P0-010<br/>多 LLM 产品化]
     P109[T2-P1-009<br/>bash AST 精度]
     P110[T2-P1-010<br/>Responses 推理续传]
     P111[T2-P1-011<br/>Current-Tail Guard]
     P008 -.->|TUI 增强后可并行| P109
+    P110 -.->|continuity 基础已具备| P010
     P009
     P110
     P111
@@ -60,7 +63,7 @@ flowchart LR
 
 
 
-> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P1-010** 与 thinking CLI 折叠/去重独立，可并行认领。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。
+> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。
 
 ---
 
