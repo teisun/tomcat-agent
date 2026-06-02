@@ -1,6 +1,21 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-01 18:13 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-03 00:35 +0800 | ACTIVE | develop | — |
+
+### 2026-06-03 | merge `feature/t2-p0-010-multi-llm-productization` → develop（T2-P0-010 集成验收）
+
+- **合并范围**：用户指定合并当前分支 `feature/t2-p0-010-multi-llm-productization`（9 commit：Wave1 catalog/resolver/chat/init + remediation + MiMo Token Plan 数据表 + cross-profile downgrade + preflight UI 开关 + docs）→ `develop`，`git merge --no-ff` → `d134372`，无冲突。对应 **T2-P0-010**（多 LLM 产品化 Wave 1 基线）。
+- **全量 review（编码规范 4 件套）**：`catalog.rs`（内置表 + `models.toml` 合并、显式 miss 报错、partial 覆盖）、`resolver.rs`（`LlmScene` per-call 解析、catalog 命中按 `entry.base_url` 重定向、能力校验前移给结构化引导错误、`(api,base_url,key_source)` provider 缓存复用）、`auth.rs`（provider→`<PROVIDER>_API_KEY` + 兜底 + 可读错误）、`cmd_model.rs`/`init_model_wizard.rs`/`models_toml.rs`（`/model` 命令族、model-first init、`models.toml` 幂等生成、`.env` 0600）均合规：分层/依赖方向/错误处理/可测试性/注释覆盖到位，文件行数在 L-1/L-2 区间（context.rs 559 / run_loop 506 / stderr 484，advisory 非门禁）。
+- **§4.2.0 行为确认**：model-first 路由按 catalog 命中模型的 `entry.base_url` 取端点，旧 `[llm].api_base` 对内置模型不再生效（`resolver::tests::catalog_route_ignores_legacy_api_base_override`），与架构文档一致。
+- **§4 全量门禁（develop 复跑）**：`cargo build --release`（4m34s）/ `cargo clippy --all-targets -D warnings` / `cargo test --lib` **1347 passed, 1 ignored** / `run-integration-tests.sh integration` **26 bin / 245 test 全绿**（含 `cli_tests` 86、`checkpoint_cli_e2e` 5、`context_management_tests` / `openai_responses_integration_tests` 等）。
+- **real-LLM（OPENAI/DEEPSEEK/MIMO key 均具备）**：`reasoning_continuity_real_llm_tests` **5 passed**（真实跨 provider continuity / downgrade 验证）。
+- **集成期修复（develop 侧，均非弱化断言）**：
+  1. `c26a259` clippy `question_mark`：`replay_policy.rs::classify_replay_downgrade` 冗余 `let...else` 改 `?`。
+  2. `4a70d99` 失败 lib 用例 `test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_content`：分支早期提交加入、窗口特性（§4.2.6）落地后未同步——历史 tool turn 落窗口外应静默 `StripOpaque`，改断言为 wire[1] 无 `reasoning_content` 且保留 tool_call、wire[4] 仍回放（补强）。
+  3. `a8e58de` 失败 E2E `checkpoint_cli_e2e::test_hangup_during_run_leaves_interrupt_ckpt`：旧用例靠 `TOMCAT__LLM__API_BASE` 指向 mock，新路由对内置模型忽略 api_base；改用 `models.toml` 自定义 model 指向 mock endpoint，partial/Interrupt 断言不变。
+- **wasmedge_e2e**：本合并无 Wasm 相关变更，未单独跑 `integration-wasm`（需 `--features wasmedge` 单独入口；与既有集成实践一致）。
+- **反馈 owner（Spike）**：分支标 `PENDING_INTEGRATION` 时全量 `cargo test --lib` 与 `integration` 实际存在上述 2 个红用例（窗口断言漂移 + checkpoint mock 路由），属交付前自检遗漏；已在 develop 修复并复跑全绿，记录于 docs/INTEGRATION.md 供后续注意。
+- **结论**：T2-P0-010 已正确集成；强制门禁与 real-LLM 全绿；看板与任务卡 `PENDING_INTEGRATION → DONE`。未推送远端（待用户确认）。
 
 ### 2026-06-01 | merge `feature/reasoning-continuity` → develop（T2-P1-010 集成验收）
 

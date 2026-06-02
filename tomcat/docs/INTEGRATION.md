@@ -7,25 +7,30 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-05-31 14:30 +0800 | INTEGRATION | develop | - |
+| Nibbles | 2026-06-03 00:35 +0800 | INTEGRATION | develop | - |
 
-### 集成测试报告（merge `feature/current-tail-aggregate-guard` → develop，T2-P1-011）
+### 集成测试报告（merge `feature/t2-p0-010-multi-llm-productization` → develop，T2-P0-010）
 
-**合并分支**：`feature/current-tail-aggregate-guard` → `develop`（`git merge --no-ff`，无冲突，4 commit）。current-tail aggregate guard 阶段二预防型上下文减负。
+**合并分支**：`feature/t2-p0-010-multi-llm-productization` → `develop`（`git merge --no-ff` → `d134372`，无冲突，9 commit）。多 LLM 产品化 Wave 1 基线（ModelCatalog + LlmResolver + AuthStore 最小闭环、`/model` 命令族、model-first `tomcat init` 向导，及随附 preflight UI 开关）。
 
-**全量验收门禁（`run-integration-tests.sh all`，develop 侧复跑）**：`release` / `clippy(--all-targets -D warnings)` / `lib`（1267 passed）/ `integration-parallel` / `integration-serial`（含 `cli_tests` 83 passed）**全绿**。首轮 clippy 暴露 2 条测试侧红线（`manual_contains`、`await_holding_lock`），已在本流程直接修复并复验通过（未弱化断言）。
+**全量验收门禁（develop 侧复跑）**：`cargo build --release`（4m34s）/ `clippy --all-targets -D warnings` / `cargo test --lib`（**1347 passed, 1 ignored**）/ `run-integration-tests.sh integration`（**26 bin / 245 test 全绿**，含 `cli_tests` 86、`checkpoint_cli_e2e` 5）**全绿**。
 
-**real-LLM 分组（出 gate，需 OPENAI_API_KEY）**：本卡新增 `current_tail_guard_real_llm_tests` A/B/C **3 passed**；`plan_real_llm_inprocess_tests` 首轮临界超时、重跑通过（254.5s, flake）。
+**real-LLM（OPENAI/DEEPSEEK/MIMO key 均具备）**：`reasoning_continuity_real_llm_tests` **5 passed**（真实跨 provider continuity/downgrade）。`wasmedge_e2e_tests` 因本合并无 Wasm 变更未单独跑 `integration-wasm`。
 
-### ⚠️ 反馈 owner（Spike）：real-LLM CLI E2E 时延超时（与本合并无关）
+**集成期修复（develop 侧，均非弱化断言）**：`c26a259` clippy `question_mark`（`replay_policy.rs`）；`4a70d99` lib 用例对齐可 replay 窗口（§4.2.6 历史 tool turn 静默 strip）；`a8e58de` `checkpoint_cli_e2e` hangup E2E 改用 `models.toml` 自定义 model 指向 mock（新路由对内置模型忽略 `api_base`）。
 
-| 失败项 | 现象 | 期望/实际 | 建议负责人 |
+### ⚠️ 反馈 owner（Spike）：分支自测遗漏 2 个红用例（已在 develop 修复）
+
+| 失败项 | 现象 | 根因 | 建议 |
 | :--- | :--- | :--- | :--- |
-| `plan_real_llm_cli_e2e::cli_full_plan_path_with_real_llm` | 两次复跑均 `EXEC_TIMEOUT`(240s) 子进程超时；真实 gpt-5.4 全链路任务实际完成正确，仅墙钟超限；guard 全程 `route="fits"` 未介入 | 期望 240s 内完成；实际多轮真 LLM 执行 > 240s | Spike：复核 `plan_real_llm_cli_e2e.rs` `EXEC_TIMEOUT`/`PLANNING_TIMEOUT` 与 `plan_real_llm_inprocess_tests.rs` exec_round 超时是否按当前 gpt-5.4 时延上调（liveness 守卫，非断言）；该文件本合并未改动 |
+| `core::llm::...::test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_content` | 合并后 `cargo test --lib` 红：`left: Null, right: "tool plan"` | 该用例由分支早期 `0436b1b` 加入；窗口特性 `8efde73`（§4.2.6）落地后未同步更新——历史 tool turn 落窗口外应静默 `StripOpaque` | Spike：交付前须跑全量 `cargo test --lib`；新特性改变既有用例预期时同步修订断言 |
+| `checkpoint_cli_e2e::test_hangup_during_run_leaves_interrupt_ckpt` | 合并后 `integration` 稳定红：`server stage did not reach 2 within 3s` | model-first 路由按 catalog `entry.base_url` 取端点，旧 `TOMCAT__LLM__API_BASE` 对内置模型不再生效，mock server 收不到请求 | Spike：交付前须跑全量 `integration`；引入路由破坏性变更时排查依赖 `api_base` 覆盖的既有 E2E（已改用 `models.toml` 机制） |
 
 ### 🔌 INTERFACE (接口变更)
-- `context.compaction_turns` 移除；新增 `context.current_tail_compactable_min_chars`(默认 1) / `context.current_tail_single_result_max_chars`(默认 10_000)；`context.keep_recent_turns` 真实驱动 L1 保护区（默认 5）；`context.compaction_model` 默认改为 `gpt-5.2`。
-- `agent_loop` 新增 `current_tail_guard`（mid-turn precheck + reduce/collapse）与 `steering_injection`；`compaction` 导出 `persist_tool_result_text`/`is_persisted_tool_result_text`/`TOOL_RESULT_PLACEHOLDER`(crate)；`session::transcript` 新增 `rewrite_message_text_entries_by_id`/`MessageTextRewrite`；`ContextState::rewrite_local_tail_chars`。
+- 新增 `core::llm::{ModelCatalog, ModelEntry, Capabilities, LlmScene, LlmResolver, DefaultLlmResolver, ResolvedCall, AuthStore, env_name_for_provider}`；`ChatContext` 注入 `model_catalog` / `llm_resolver`，新增 `resolve_call(scene, entry)` / `effective_model(entry)`。
+- chat 新增 `/model current|list|use <id>`；CLI prompt 横幅显示当前会话模型（`u[Chat|<model>]>`）。
+- `tomcat init` 升级为 model-first 向导；用户级 `~/.tomcat/models.toml` 成为「零代码加模型」声明层；catalog 命中模型按 `entry.base_url` 路由，旧 `[llm].api_base` 对内置模型不再覆盖。
+- 新增 `preflight.show_search_tools_ui` / `preflight.show_git_ui`（默认 false）配置项。
 
 ---
 
