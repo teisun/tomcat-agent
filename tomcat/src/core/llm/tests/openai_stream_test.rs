@@ -459,7 +459,12 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
         true,
     );
 
-    assert_eq!(wire[1]["reasoning_content"], "tool plan");
+    // 历史 tool turn（wire[1]）在「answer directly」这条真实 user 之前，落在可 replay 窗口外，
+    // 按续传文档 §4.2.6 与 replay_window_strips_older_history_but_keeps_latest_assistant 一致：
+    // 一律静默 StripOpaque——丢弃隐藏 reasoning_content，只保留可见 tool_call。
+    assert!(wire[1].get("reasoning_content").is_none());
+    assert_eq!(wire[1]["tool_calls"][0]["id"], "call_1");
+    // 最新 assistant turn（wire[4]）在窗口内，同 profile → 高保真回放 reasoning_content。
     assert_eq!(wire[4]["reasoning_content"], "final plan");
 }
 
