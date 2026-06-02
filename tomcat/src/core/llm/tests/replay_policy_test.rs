@@ -2,7 +2,8 @@
 
 use crate::core::llm::replay_policy::{
     apply_text_downgrade, classify_replay_downgrade, model_family, plan, plan_scoped,
-    warn_worthy_downgrade, ProviderCompatProfile, ReplayAction, ReplayDowngradeKind, ReplayWindow,
+    warn_worthy_downgrade, ProviderCompatProfile, ReplayAction, ReplayDowngradeKind,
+    ReplayDowngradeReport, ReplayWindow,
 };
 use crate::core::llm::types::{
     ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation, ReasoningFormat,
@@ -213,15 +214,22 @@ fn chat_completions_profile_is_data_driven_for_mimo() {
 
 #[test]
 fn mimo_and_deepseek_do_not_cross_replay() {
-    // 数据驱动后两族共用一条代码逻辑，但 same_profile 比对保证互不串档。
+    // 数据驱动后两族共用一条代码逻辑，但 same_profile 比对保证不会 KeepOpaque 互串 blob；
+    // 跨 profile 且有 fallback_text 时优雅降级为 ConvertToText（不再 StripOpaque）。
     let mimo_msg = mimo_reasoning_message();
     let deepseek_target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
-    // mimo continuity 落到 deepseek target：非同 profile，downgrade=VisibleHistoryOnly → strip。
-    assert_eq!(plan(&deepseek_target, &mimo_msg), ReplayAction::StripOpaque);
+    // mimo continuity 落到 deepseek target：非同 profile，不吃 opaque blob，转文本续传。
+    assert_eq!(
+        plan(&deepseek_target, &mimo_msg),
+        ReplayAction::ConvertToText("mimo summary".to_string())
+    );
 
     let deepseek_msg = deepseek_v4_compatible_message();
     let mimo_target = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
-    assert_eq!(plan(&mimo_target, &deepseek_msg), ReplayAction::StripOpaque);
+    assert_eq!(
+        plan(&mimo_target, &deepseek_msg),
+        ReplayAction::ConvertToText("safe summary".to_string())
+    );
 }
 
 #[test]
@@ -247,7 +255,12 @@ fn classify_replay_downgrade_reports_same_profile_shape_mismatch() {
     );
     let target = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
     let action = plan(&target, &msg);
-    assert_eq!(action, ReplayAction::StripOpaque);
+    // 同 profile 但 format 不匹配：落不到 KeepOpaque，有 fallback_text → 转文本（仍按
+    // SameProfileIncompatible 归类，始终告警）。
+    assert_eq!(
+        action,
+        ReplayAction::ConvertToText("safe summary".to_string())
+    );
     assert_eq!(
         classify_replay_downgrade(&target, &msg, &action),
         Some(ReplayDowngradeKind::SameProfileIncompatible)
@@ -353,6 +366,36 @@ fn warn_worthy_skips_graceful_text_but_flags_total_loss() {
 }
 
 #[test]
+fn deepseek_to_mimo_window_converts_to_text_without_warn() {
+    // 回归：终端里观察到的现象——deepseek-v4-pro 续传切到 mimo-v2.5-pro。
+    // 两者同为 chat_completions/reasoning_content profile，但 provider 不同（跨 profile）。
+    // 期望：窗口内有 fallback_text → 优雅转文本续传，且不触发 cross_profile_lost 误报 warn。
+    let deepseek_source = deepseek_v4_compatible_message();
+    let mimo_target = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
+
+    let action = plan_scoped(&mimo_target, &deepseek_source, true);
+    assert_eq!(
+        action,
+        ReplayAction::ConvertToText("safe summary".to_string())
+    );
+
+    // 仍被归类为跨 profile 降级（确实没有 KeepOpaque 互吃 blob），但不 warn-worthy。
+    assert_eq!(
+        classify_replay_downgrade(&mimo_target, &deepseek_source, &action),
+        Some(ReplayDowngradeKind::CrossProfile)
+    );
+    assert_eq!(
+        warn_worthy_downgrade(&mimo_target, &deepseek_source, &action),
+        None
+    );
+
+    // 走一遍请求级聚合器：窗口内这条按 graceful_text 计入，emit 时无 sample → 完全静默。
+    let mut report = ReplayDowngradeReport::default();
+    report.record_in_window(&mimo_target, &deepseek_source, &action);
+    report.emit(&mimo_target);
+}
+
+#[test]
 fn warn_worthy_flags_same_profile_incompatible_but_not_keep() {
     // 同 profile（deepseek/chat_completions/deepseek-v4）但 format 与 capture_mode 不匹配，
     // 落不到 KeepOpaque → 任何非 keep 动作都算异常，必告警。
@@ -374,7 +417,11 @@ fn warn_worthy_flags_same_profile_incompatible_but_not_keep() {
     );
     let target = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
     let action = plan_scoped(&target, &mismatched, true);
-    assert_eq!(action, ReplayAction::StripOpaque);
+    // 同 profile 不匹配且有 fallback_text → 转文本，但 SameProfileIncompatible 始终告警。
+    assert_eq!(
+        action,
+        ReplayAction::ConvertToText("safe summary".to_string())
+    );
     assert_eq!(
         warn_worthy_downgrade(&target, &mismatched, &action),
         Some(ReplayDowngradeKind::SameProfileIncompatible)

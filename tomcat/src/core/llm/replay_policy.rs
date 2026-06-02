@@ -139,7 +139,10 @@ impl ProviderCompatProfile {
                 replay_acceptance: ReplayAcceptance::SameProfileOnly,
                 requires_tool_turn_replay: true,
                 supports_response_id_hint: false,
-                downgrade_mode: DowngradeMode::VisibleHistoryOnly,
+                // 跨 profile（如 deepseek↔mimo）切换时，若有 fallback_text/thinking_text 则优雅
+                // 降级为 ConvertToText（不告警），仅在无文本可救时才 StripOpaque——与续传文档
+                // §4.2.4/§4.2.6 的降级阶梯一致。
+                downgrade_mode: DowngradeMode::FallbackText,
             },
             None => Self {
                 profile_id: "openai.chat_completions.default".to_string(),

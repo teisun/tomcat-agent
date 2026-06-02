@@ -408,7 +408,7 @@ OpenAI Responses 实际是**两条互斥**的 continuity 路径，**不能叠加
 
 - **单一事实源**：`src/core/llm/replay_policy.rs` 的 `CHAT_COMPLETIONS_CONTINUITY_RULES`（每行 = `{family, provider, profile_id}`）。当前两行：`deepseek-v4` / `mimo-v2.5-pro`。`ProviderCompatProfile::chat_completions(model)` 按 `model_family(model)` 查表命中即得 `capture_mode = ReasoningContent` 的 profile，否则默认 `None`（不续传）。
 - **5 道门统一读 profile**：`model_family()`（family 归一）、`chat_completions()`（查表选 profile）、`OpenAiReasoningState::maybe_snapshot()`（按 `capture_mode==ReasoningContent` + `api_family=="chat_completions"` 抓取，不再判 `provider=="deepseek"`）、`is_compatible()`（按 `capture_mode` + `same_profile(provider+model_family)` 比对，不再硬判厂商名）、`transport_messages()`（`chat_completions_reasoning_content` 注回，warn 条件改读 `capture_mode`）。新增同类模型 = **加一行数据**，不动这 5 道门。
-- **互不串档**：`same_profile` 要求 `source_provider == target.provider` 且 `model_family` 一致，因此 MiMo 的 snapshot（`source_provider="mimo"`）不会被 DeepSeek target 接受，反之亦然——跨 profile 落 `StripOpaque`（或有 `thinking_text` 时按 downgrade 规则转文本）。
+- **互不串档**：`same_profile` 要求 `source_provider == target.provider` 且 `model_family` 一致，因此 MiMo 的 snapshot（`source_provider="mimo"`）不会被 DeepSeek target 接受，反之亦然。跨 profile 不会 `KeepOpaque` 互吃 blob，但**默认走 `ConvertToText`**：`reasoning_content` profile 的 `downgrade_mode = FallbackText`，窗口内有 `fallback_text` / `thinking_text` 时优雅转文本续传（**不告警**），仅在无任何文本可救时才 `StripOpaque` 并计入汇总告警（与 §4.2.6 动作矩阵一致）。
 - **MiMo 边界**：`mimo-v2.5-pro` 初版按 **exact-profile**（`model_family` 即模型名本身，仅自家可 replay）；是否与其它 MiMo 并族由数据表显式声明，不靠代码猜。
 - **架构约束**：provider 由 `LlmConfig` 装配（registry §6.5.2「稳定 schema」），运行期只拿到 model 字符串、拿不到 catalog 条目，故 continuity 的运行期事实源是这张按 `model family` 索引的数据表；`models.toml` 是面向用户的声明层，对内置厂商（deepseek / mimo）与数据表保持一致。
 
