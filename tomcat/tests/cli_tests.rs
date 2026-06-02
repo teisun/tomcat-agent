@@ -102,9 +102,7 @@ impl FixedResolver {
             vision: lower.starts_with("gpt-"),
             files: lower.starts_with("gpt-"),
             tools: true,
-            reasoning: lower.starts_with("deepseek-reasoner")
-                || lower.starts_with("deepseek-v4-")
-                || lower.starts_with("gpt-5."),
+            reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
         };
         ResolvedCall {
             provider_impl: self.provider.clone(),
@@ -3528,7 +3526,7 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
     const ENV_KEY: &str = "TOMCAT_MULTIMODAL_PRECHECK_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![]));
-    install_fixed_resolver(&mut ctx, mock_llm, "deepseek-reasoner");
+    install_fixed_resolver(&mut ctx, mock_llm, "deepseek-v4-pro");
     ctx.follow_up_queue
         .lock()
         .push(ChatMessage::user_with_parts(vec![
@@ -3629,14 +3627,14 @@ async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
     );
 
     ctx.session
-        .switch_current_model(Some("openai"), Some("gpt-4o"))
+        .switch_current_model(Some("openai"), Some("gpt-5.2"))
         .expect("model switch should succeed");
     assert_eq!(
         ctx.session
             .get_session(ctx.session.current_session_key())
             .expect("session read")
             .and_then(|entry| entry.model_override),
-        Some("gpt-4o".to_string())
+        Some("gpt-5.2".to_string())
     );
     assert_eq!(
         state
@@ -3715,7 +3713,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 
     let ctx = ChatContext::from_config(cfg.clone()).expect("chat context should be created");
     ctx.session
-        .switch_current_model(Some("deepseek"), Some("deepseek-reasoner"))
+        .switch_current_model(Some("deepseek"), Some("deepseek-v4-pro"))
         .expect("session model override should persist");
 
     let reopened = ChatContext::from_config(cfg).expect("reopened chat context");
@@ -3724,7 +3722,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
         .get_session(reopened.session.current_session_key())
         .expect("session store read")
         .expect("session entry should exist");
-    assert_eq!(entry.model_override.as_deref(), Some("deepseek-reasoner"));
+    assert_eq!(entry.model_override.as_deref(), Some("deepseek-v4-pro"));
 
     unsafe {
         std::env::remove_var("OPENAI_API_KEY");

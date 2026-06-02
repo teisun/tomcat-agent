@@ -468,7 +468,7 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         primitive_second,
         event_bus_second,
         AgentLoopConfig {
-            model: "gpt-4o".to_string(),
+            model: "gpt-5.2".to_string(),
             session_id: "s-model-b".to_string(),
             ..Default::default()
         },

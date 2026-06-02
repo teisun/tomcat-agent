@@ -44,9 +44,9 @@ fn override_priority() {
     }
 
     let resolved = resolver
-        .resolve(LlmScene::Main, Some("deepseek-reasoner"))
+        .resolve(LlmScene::Main, Some("deepseek-v4-pro"))
         .expect("session override should win");
-    assert_eq!(resolved.model, "deepseek-reasoner");
+    assert_eq!(resolved.model, "deepseek-v4-pro");
     assert_eq!(resolved.provider, "deepseek");
     assert_eq!(resolved.key_source, "DEEPSEEK_API_KEY");
 
@@ -70,7 +70,7 @@ fn provider_cache_reuses_arc_for_same_route() {
     }
 
     let default_call = resolver.resolve(LlmScene::Main, None).unwrap();
-    let switched_call = resolver.resolve(LlmScene::Main, Some("gpt-4o")).unwrap();
+    let switched_call = resolver.resolve(LlmScene::Main, Some("gpt-5.2")).unwrap();
     assert!(
         Arc::ptr_eq(&default_call.provider_impl, &switched_call.provider_impl),
         "same (api, base_url, key_source) should reuse provider instance"

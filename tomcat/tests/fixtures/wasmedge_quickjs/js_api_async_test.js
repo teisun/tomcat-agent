@@ -99,7 +99,7 @@ async function testGetModelSync() {
 }
 
 async function testSetModelReturnsPromise() {
-  var p = pi.setModel('gpt-4o');
+  var p = pi.setModel('gpt-5.4');
   assert(p && typeof p.then === 'function', 'setModel should return a Promise');
   await p.catch(function () {}); // MVP stub may resolve or reject; either is fine.
   print('js_api_async_test: testSetModelReturnsPromise PASSED');

@@ -25,7 +25,7 @@
 
 装配入口：**`crate::core::llm::resolve_llm(&config.llm)`**（例如 `ChatContext::from_config`）。未知 id 返回 **`AppError::Config`** 并列出已注册 id。
 
-当前规划补一句：**并不是每接一家“类 OpenAI”后端都立刻新建 provider。** 只要目标接口仍兼容 OpenAI Chat Completions，就优先复用 `provider="openai"` 这条 adapter，通过 `api_base` / `api_key_env` / `default_model` 接入；例如 DeepSeek 当前就走这条路线。`ThinkingFormat::Auto` 现在按 `model` 自动分派，`deepseek-chat` / `deepseek-reasoner` / `deepseek-v4-pro` / `deepseek-v4-flash` 都会自动走 DeepSeek thinking wire，通常不必再手配 `thinking.format`。只有当协议、流式事件、错误模型、重试策略或产品语义明显分叉时，才考虑新增独立 provider id / 实现。
+当前规划补一句：**并不是每接一家“类 OpenAI”后端都立刻新建 provider。** 只要目标接口仍兼容 OpenAI Chat Completions，就优先复用 `provider="openai"` 这条 adapter，通过 `api_base` / `api_key_env` / `default_model` 接入；例如 DeepSeek 当前就走这条路线。`ThinkingFormat::Auto` 现在按 `model` 自动分派，`deepseek-v4-pro` / `deepseek-v4-flash` 都会自动走 DeepSeek thinking wire，通常不必再手配 `thinking.format`。只有当协议、流式事件、错误模型、重试策略或产品语义明显分叉时，才考虑新增独立 provider id / 实现。
 
 详见 openspec **[`architecture/llm-multiprovider-integration.md`](../../../docs/architecture/llm-multiprovider-integration.md)**。
 

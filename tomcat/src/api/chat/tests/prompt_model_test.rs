@@ -17,8 +17,8 @@ fn prompt_without_model_falls_back_to_original_format() {
 #[test]
 fn prompt_updates_model_label_without_changing_chat_prompt_shape() {
     let before = user_prompt_for_mode_with_model(&PlanState::Chat, "gpt-5.4");
-    let after = user_prompt_for_mode_with_model(&PlanState::Chat, "gpt-4o");
+    let after = user_prompt_for_mode_with_model(&PlanState::Chat, "gpt-5.2");
     assert_eq!(before, "u[Chat|gpt-5.4]> ");
-    assert_eq!(after, "u[Chat|gpt-4o]> ");
+    assert_eq!(after, "u[Chat|gpt-5.2]> ");
     assert_ne!(before, after);
 }

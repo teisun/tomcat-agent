@@ -42,7 +42,7 @@ fn write_minimal_config(cfg_path: &std::path::Path) {
 id = "main"
 
 [llm]
-default_model = "gpt-4o-mini"
+default_model = "gpt-5.2"
 
 [workspace]
 workspace_roots = []

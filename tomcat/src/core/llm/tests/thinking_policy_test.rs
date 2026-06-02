@@ -75,14 +75,6 @@ fn format_resolve_auto_by_provider_id() {
 #[test]
 fn format_resolve_auto_by_model_name() {
     assert_eq!(
-        thinking_format_for_model("deepseek-chat"),
-        ThinkingFormat::Deepseek
-    );
-    assert_eq!(
-        thinking_format_for_model("deepseek-reasoner"),
-        ThinkingFormat::Deepseek
-    );
-    assert_eq!(
         thinking_format_for_model("deepseek-v4-pro"),
         ThinkingFormat::Deepseek
     );

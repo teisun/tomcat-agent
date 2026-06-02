@@ -37,7 +37,7 @@ fn replay_policy_openai_responses_keeps_encrypted_reasoning() {
 }
 
 #[test]
-fn replay_policy_deepseek_tool_turn_requires_reasoning_content() {
+fn replay_policy_deepseek_v4_tool_turn_requires_reasoning_content() {
     let msg = ChatMessage::assistant_with_tool_calls(
         None,
         vec![serde_json::json!({
@@ -51,7 +51,7 @@ fn replay_policy_deepseek_tool_turn_requires_reasoning_content() {
         Some(ReasoningContinuation {
             source_provider: "deepseek".to_string(),
             source_api: "chat_completions".to_string(),
-            source_model: "deepseek-chat".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
             opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
             fallback_text: Some("tool summary".to_string()),
@@ -62,18 +62,18 @@ fn replay_policy_deepseek_tool_turn_requires_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
-    let profile = ProviderCompatProfile::chat_completions("deepseek-chat");
+    let profile = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
     assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
 }
 
 #[test]
-fn replay_policy_deepseek_non_tool_turn_strips_reasoning_content() {
+fn replay_policy_deepseek_v4_non_tool_turn_strips_reasoning_content() {
     let msg = ChatMessage::assistant("answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(ReasoningContinuation {
             source_provider: "deepseek".to_string(),
             source_api: "chat_completions".to_string(),
-            source_model: "deepseek-chat".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
             opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
             fallback_text: Some("safe summary".to_string()),
@@ -84,7 +84,7 @@ fn replay_policy_deepseek_non_tool_turn_strips_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileRequired,
         }),
     );
-    let profile = ProviderCompatProfile::chat_completions("deepseek-chat");
+    let profile = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
     assert_eq!(plan(&profile, &msg), ReplayAction::StripOpaque);
 }
 
@@ -95,7 +95,7 @@ fn cross_provider_downgrade_prefers_fallback_text() {
         Some(ReasoningContinuation {
             source_provider: "deepseek".to_string(),
             source_api: "chat_completions".to_string(),
-            source_model: "deepseek-chat".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
             format: ReasoningFormat::DeepseekReasoningContent,
             opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
             fallback_text: Some("safe summary".to_string()),
@@ -114,28 +114,6 @@ fn cross_provider_downgrade_prefers_fallback_text() {
 }
 
 #[test]
-fn replay_policy_deepseek_reasoner_strips_reasoning_content() {
-    let msg = ChatMessage::assistant("answer").with_reasoning_state(
-        Some("safe summary".to_string()),
-        Some(ReasoningContinuation {
-            source_provider: "deepseek".to_string(),
-            source_api: "chat_completions".to_string(),
-            source_model: "deepseek-reasoner".to_string(),
-            format: ReasoningFormat::DeepseekReasoningContent,
-            opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
-            fallback_text: Some("safe summary".to_string()),
-            provider_refs: None,
-        }),
-        Some(ContinuityMetadata {
-            had_tool_call: false,
-            replay_requirement: ReplayRequirement::Never,
-        }),
-    );
-    let target = ProviderCompatProfile::chat_completions("deepseek-reasoner");
-    assert_eq!(plan(&target, &msg), ReplayAction::StripOpaque);
-}
-
-#[test]
 fn apply_text_downgrade_appends_safe_continuity_text() {
     let msg = ChatMessage::assistant("visible answer");
     let downgraded = apply_text_downgrade(&msg, "safe summary");
@@ -148,10 +126,9 @@ fn apply_text_downgrade_appends_safe_continuity_text() {
 
 #[test]
 fn model_family_normalizes_known_models() {
-    assert_eq!(model_family("deepseek-chat"), "deepseek-chat");
-    assert_eq!(model_family("deepseek-reasoner"), "deepseek-reasoner");
     assert_eq!(model_family("deepseek-v4-pro"), "deepseek-v4");
     assert_eq!(model_family("deepseek-v4-flash"), "deepseek-v4");
+    assert_eq!(model_family("deepseek-v3"), "deepseek-v3");
     assert_eq!(model_family("gpt-5-mini"), "gpt-5");
 }
 
@@ -209,7 +186,7 @@ fn cross_provider_downgrade_keeps_semantic_history() {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
-    let target = ProviderCompatProfile::chat_completions("deepseek-reasoner");
+    let target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
     assert_eq!(plan(&target, &msg), ReplayAction::StripOpaque);
     let stripped = msg.without_completion_metadata();
     assert_eq!(stripped.text_content(), Some("visible answer"));

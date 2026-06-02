@@ -120,13 +120,13 @@ fn load_config_toml_overrides_scene_models() {
     let path = dir.join("config.toml");
     std::fs::write(
         &path,
-        "[llm]\nvision_model = \"gpt-4o\"\ntitle_model = \"gpt-4o-mini\"\n",
+        "[llm]\nvision_model = \"gpt-5.4\"\ntitle_model = \"gpt-5.2\"\n",
     )
     .unwrap();
 
     let cfg = load_config(Some(path.as_path())).unwrap();
-    assert_eq!(cfg.llm.vision_model.as_deref(), Some("gpt-4o"));
-    assert_eq!(cfg.llm.title_model.as_deref(), Some("gpt-4o-mini"));
+    assert_eq!(cfg.llm.vision_model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(cfg.llm.title_model.as_deref(), Some("gpt-5.2"));
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);

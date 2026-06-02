@@ -428,7 +428,7 @@ async fn streaming_think_scrubber_hides_split_tags() {
     let stream = tokio_stream::iter(chunks);
     let mut event_stream = SseEventStream::new(
         stream,
-        ProviderCompatProfile::chat_completions("deepseek-chat"),
+        ProviderCompatProfile::chat_completions("deepseek-v4-pro"),
         true,
     );
     let mut visible = String::new();

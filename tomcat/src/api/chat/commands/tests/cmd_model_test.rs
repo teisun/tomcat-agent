@@ -16,9 +16,9 @@ fn model_command_parses_current_list_and_use() {
         ChatCommand::Model(ModelCommand::List)
     );
     assert_eq!(
-        parse_chat_command("/model use deepseek-reasoner"),
+        parse_chat_command("/model use deepseek-v4-pro"),
         ChatCommand::Model(ModelCommand::Use {
-            model_id: "deepseek-reasoner".to_string(),
+            model_id: "deepseek-v4-pro".to_string(),
         })
     );
 }

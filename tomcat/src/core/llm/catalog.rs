@@ -187,66 +187,6 @@ fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
             thinking_format: None,
         },
         ModelEntry {
-            id: "gpt-4o".to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            base_url: Some("https://api.openai.com".to_string()),
-            capabilities: Capabilities {
-                vision: true,
-                files: true,
-                tools: true,
-                reasoning: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: None,
-        },
-        ModelEntry {
-            id: "gpt-4o-mini".to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            base_url: Some("https://api.openai.com".to_string()),
-            capabilities: Capabilities {
-                vision: true,
-                files: true,
-                tools: true,
-                reasoning: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: None,
-        },
-        ModelEntry {
-            id: "deepseek-reasoner".to_string(),
-            api: "openai".to_string(),
-            provider: "deepseek".to_string(),
-            base_url: Some("https://api.deepseek.com".to_string()),
-            capabilities: Capabilities {
-                vision: false,
-                files: false,
-                tools: true,
-                reasoning: true,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: Some("deepseek".to_string()),
-        },
-        ModelEntry {
-            id: "deepseek-chat".to_string(),
-            api: "openai".to_string(),
-            provider: "deepseek".to_string(),
-            base_url: Some("https://api.deepseek.com".to_string()),
-            capabilities: Capabilities {
-                vision: false,
-                files: false,
-                tools: true,
-                reasoning: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: Some("deepseek".to_string()),
-        },
-        ModelEntry {
             id: "deepseek-v4-pro".to_string(),
             api: "openai".to_string(),
             provider: "deepseek".to_string(),
@@ -395,22 +335,12 @@ pub(crate) fn infer_default_base_url(provider: Option<&str>) -> Option<String> {
 
 pub(crate) fn infer_capabilities_from_model_id(model_id: &str) -> Capabilities {
     let lower = model_id.trim().to_ascii_lowercase();
-    if lower.starts_with("deepseek-reasoner")
-        || lower.starts_with("deepseek-v4-")
-        || lower.starts_with("gpt-5.")
-    {
+    if lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5.") {
         Capabilities {
             vision: lower.starts_with("gpt-"),
             files: lower.starts_with("gpt-"),
             tools: true,
             reasoning: true,
-        }
-    } else if lower.starts_with("gpt-4o") {
-        Capabilities {
-            vision: true,
-            files: true,
-            tools: true,
-            reasoning: false,
         }
     } else {
         Capabilities::default()

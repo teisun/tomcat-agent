@@ -81,7 +81,7 @@ fn empty_config(dir: &TempDir) -> std::path::PathBuf {
     let p = dir.path().join("tomcat.config.toml");
     std::fs::write(
         &p,
-        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai'\ndefault_model='gpt-4o'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai-responses'\ndefault_model='gpt-5.4'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
     )
     .unwrap();
     p
@@ -93,7 +93,7 @@ async fn config_get_returns_value_for_allowlisted_key() {
     let p = empty_config(&dir);
     let cfg = load_config(Some(&p)).unwrap();
     let v = config_get_impl("llm.default_model", &cfg).unwrap();
-    assert_eq!(v.as_str(), Some("gpt-4o"));
+    assert_eq!(v.as_str(), Some("gpt-5.4"));
 }
 
 #[tokio::test]

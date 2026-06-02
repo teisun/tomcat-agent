@@ -15,8 +15,8 @@ fn resolve_known_model() {
     assert_eq!(gpt.provider, "openai");
 
     let deepseek = catalog
-        .lookup("deepseek-reasoner")
-        .expect("builtin deepseek-reasoner");
+        .lookup("deepseek-v4-pro")
+        .expect("builtin deepseek-v4-pro");
     assert_eq!(deepseek.api, "openai");
     assert_eq!(deepseek.provider, "deepseek");
 }

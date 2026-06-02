@@ -161,7 +161,7 @@ fn run_audit_show_and_export_returns_ok() {
 fn apply_model_choice_updates_provider_and_key_env() {
     let mut cfg = AppConfig::default();
     let entry = crate::core::llm::ModelEntry {
-        id: "deepseek-reasoner".to_string(),
+        id: "deepseek-v4-pro".to_string(),
         api: "openai".to_string(),
         provider: "deepseek".to_string(),
         base_url: Some("https://api.deepseek.com".to_string()),
@@ -172,7 +172,7 @@ fn apply_model_choice_updates_provider_and_key_env() {
     };
 
     let choice = apply_model_choice(&mut cfg, &entry);
-    assert_eq!(cfg.llm.default_model, "deepseek-reasoner");
+    assert_eq!(cfg.llm.default_model, "deepseek-v4-pro");
     assert_eq!(cfg.llm.provider, "openai");
     assert_eq!(
         cfg.llm.api_base.as_deref(),

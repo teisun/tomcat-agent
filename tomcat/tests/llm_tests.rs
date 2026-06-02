@@ -115,9 +115,9 @@ fn test_llm_resolver_session_override_uses_provider_specific_key() {
     }
 
     let resolved = resolver
-        .resolve(LlmScene::Main, Some("deepseek-reasoner"))
+        .resolve(LlmScene::Main, Some("deepseek-v4-pro"))
         .expect("resolver should resolve session override");
-    assert_eq!(resolved.model, "deepseek-reasoner");
+    assert_eq!(resolved.model, "deepseek-v4-pro");
     assert_eq!(resolved.api, "openai");
     assert_eq!(resolved.provider, "deepseek");
     assert_eq!(resolved.key_source, "DEEPSEEK_API_KEY");

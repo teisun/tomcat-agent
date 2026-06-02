@@ -66,14 +66,14 @@ fn context_config_toml_override() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
     let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(b"[context]\ncontext_window = 200000\nmax_output_tokens = 64000\ncompaction_model = \"gpt-4o-mini\"\n").unwrap();
+    f.write_all(b"[context]\ncontext_window = 200000\nmax_output_tokens = 64000\ncompaction_model = \"gpt-5.4\"\n").unwrap();
     drop(f);
     let r = load_config(Some(path.as_path()));
     assert!(r.is_ok());
     let cfg = r.unwrap();
     assert_eq!(cfg.context.context_window, 200_000);
     assert_eq!(cfg.context.max_output_tokens, 64_000);
-    assert_eq!(cfg.context.compaction_model, "gpt-4o-mini");
+    assert_eq!(cfg.context.compaction_model, "gpt-5.4");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }

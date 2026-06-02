@@ -245,7 +245,7 @@ async fn compaction_request_uses_update_prompt_when_existing_summary_present() {
     let snapshot = vec![ChatMessage::user("next user msg")];
     let previous = "## Goal\nold goal\n## Next Steps\n1. old step";
 
-    let _ = generate_summary(&snapshot, Some(previous), &provider, "gpt-4o-mini")
+    let _ = generate_summary(&snapshot, Some(previous), &provider, "gpt-5.2")
         .await
         .expect("mock provider 应返回非空摘要");
 
