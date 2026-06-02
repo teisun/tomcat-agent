@@ -1,20 +1,14 @@
 # tomcat 整体技术架构
 
+本文是架构总索引：各子系统细节在 `docs/architecture/` 与下文链接中展开。**当前阶段**以单 Agent 体验完善为主（内置工具、会话、Agent Loop、Checkpoint、PLAN 模式等），Wasm 插件能力保留维护、默认构建可不启用；路线图见 [Product_Brief.md](Product_Brief.md)。
+
 ## 设计原则
 
-1. **pi-mono 生态全兼容**：以 pi-mono 为兼容性契约，API、事件机制、插件规范与社区插件零修改运行为目标。
-2. **安全隔离优先**：所有插件代码运行在 WasmEdge 独立沙箱内，宿主可信逻辑与插件不可信逻辑完全分离，仅通过显式注册的 API 通信。
-3. **极简分层**：严格遵循单向依赖、无循环依赖原则，核心层仅保留可信基础能力，所有扩展能力均通过插件实现。
-4. **原生性能**：Rust 宿主层负责核心调度与可信逻辑，WasmEdge 负责沙箱内 JS/TS 代码执行，兼顾生态兼容性与原生性能。
-5. **可插拔设计**：所有非核心能力均通过插件化实现，不耦合主程序核心逻辑，支持按需启用/禁用。
-
-### pi-mono 生态参考原则（双仓对照）
-
-所有影响「兼容 **pi-mono** 插件与协议生态」的技术设计，**必须同时参考 [pi-mono](../../../pi-mono/) 与 [pi-agent-rust](../../../pi_agent_rust/) 两个仓库**，并遵循以下分工：
-
-- **pi-mono**：作为**兼容性契约与行为基准**。扩展作者面向的是 TypeScript/JS 的 API、事件名、会话与 RPC 协议；「与 pi-mono 生态兼容」的最终标准是**与 pi-mono 的对外行为与接口一致**。事件名、API 形态、payload 结构、协议语义等以 **pi-mono 为权威**。
-- **pi-agent-rust**：作为 **Rust 侧的主要实现参考**。事件拆分（AgentEvent / ExtensionEvent）、hostcall 设计、扩展加载与 QuickJS 集成、会话/工具/权限等实现可优先参考 pi-agent-rust；其已与 pi-mono 对齐的部分可直接沿用。
-- **二者不一致时**：以 **pi-mono 的语义为准**，在 tomcat 中按 pi-mono 实现，再在 tomcat 里用 Rust 实现出来, 不把 pi-agent-rust 的当前行为当作最终标准（pi-agent-rust 的 drop-in 认证当前为 NOT_CERTIFIED，存在已知差距）。
+1. **稳定插件契约**：启用 Wasm 插件时，宿主对沙箱暴露的 API、事件机制与 Hostcall 协议保持版本内一致，便于扩展与回归验证。
+2. **安全隔离优先**：不可信代码仅在 WasmEdge 独立沙箱内运行（`wasmedge` / `standalone` feature）；宿主可信逻辑与插件逻辑分离，仅通过显式注册的 API 通信。默认 no-wasm 构建无插件沙箱，核心能力仍在 Rust 宿主内。
+3. **极简分层**：严格遵循单向依赖、无循环依赖；对话、LLM、内置工具、权限与审计等**核心能力在宿主层实现**，不依赖插件加载即可运行 `tomcat chat`。
+4. **原生性能**：Rust 宿主负责调度与可信逻辑；可选 WasmEdge + QuickJS 执行沙箱内 JS/TS 插件。
+5. **可插拔扩展**：非核心或第三方能力可通过 Wasm 插件扩展；宿主侧通过工具 catalog 统一注册内置工具与插件工具，支持按需启用/禁用。
 
 ## 整体分层架构
 
@@ -37,13 +31,22 @@
 
 ### 2. 宿主核心能力层
 
-项目的可信核心引擎，所有业务逻辑的底层支撑，仅在宿主层运行，不向插件开放直接访问权限；包含会话管理（含 Transcript 约定）、LLM 接入、4 原语执行引擎、工具注册中心、插件生命周期管理、权限管控。
+项目的可信核心引擎，所有业务逻辑的底层支撑，仅在宿主层运行，不向插件开放直接访问权限。主要模块：
+
+- **会话与 transcript**：`SessionManager`、JSONL transcript、`sessions.json` 索引
+- **LLM**：多 Provider（Completions / Responses 等）、`models.toml` 目录、流式与 replay 策略
+- **Agent Loop**：三层循环、工具分发、Steering / Abort、Compaction 与退避
+- **内置工具**：原语 `read` / `write` / `edit` / `bash` 及 `search_files`、plan、todos、web 等（见 [tool-catalog.md](../../tool-catalog.md)）
+- **状态与规划**：`CheckpointStore`（影子 Git）、`PlanRuntime`（PLAN / EXEC 模式）
+- **权限**：`PermissionGate`、工作区与 `path_rules`
+
+插件生命周期在启用 Wasm 时由 `ext/` 与核心协同；详见宿主核心层文档。
 
 详见 [2. 宿主核心能力层（详细）](../../docs/architecture/host-core-layer.md)。
 
 ### 3. 宿主API层
 
-宿主向插件开放的唯一可信接口，完全对齐 pi-mono ExtensionAPI 规范；包含核心 Agent API 表、Node.js 兼容层、统一 Hostcall 通信协议（含高并发分发、异步 Hostcall、细粒度锁定及 AI 实现指导）。
+宿主向插件开放的唯一可信接口，基于 ExtensionAPI 与统一 Hostcall 协议；包含核心 Agent API 表、Node.js 兼容层、Hostcall 通信（含高并发分发、异步 Hostcall、细粒度锁定及实现指导）。
 
 ### 4. 插件系统（统一入口）
 
@@ -73,15 +76,15 @@
 
 详见 [异步 Hostcall 与事件循环设计（详细）](../../docs/architecture/plugin-system/async-hostcall-event-loop.md)、[事件系统设计（详细）](../../docs/architecture/plugin-system/events.md)。
 
-#### 4.5 JS API 对齐
+#### 4.5 JS API 与桥接
 
-`pi_bridge.js` 暴露的 `globalThis.pi` 与 pi-mono `ExtensionAPI` 保持语义对齐；耗时 API 统一 Promise 化，修复历史接口重复定义并补齐缺失 API，确保生态插件兼容。
+`pi_bridge.js` 在沙箱内暴露 `globalThis.pi` 与 ExtensionAPI 语义；耗时 API 统一 Promise 化，接口定义与宿主 Hostcall 路由保持一致。
 
-详见 [JS API 与 pi-mono 对齐设计（详细）](../../docs/architecture/plugin-system/js-api-alignment.md)。
+详见 [JS API 对齐设计（详细）](../../docs/architecture/plugin-system/js-api-alignment.md)。
 
-#### 4.6 对齐与演进
+#### 4.6 演进
 
-描述与 pi-mono 的 JS API 对齐方案以及长生命周期 VM 演进方向，确保兼容性与后续扩展能力。
+长生命周期 VM 等插件运行时演进方向，确保性能与状态保持能力可迭代扩展。
 
 详见 [插件系统全貌（详细）](../../docs/architecture/plugin-system-overview.md)、[Phase 2 长生命周期 VM 方案设计（详细）](../../docs/architecture/plugin-system/phase2-long-lived-vm.md)。
 
@@ -99,7 +102,7 @@
 
 ### 7. 会话存储数据结构设计
 
-会话采用元数据 store（sessions.json，sessionKey → SessionEntry）与对话 transcript（**pi-mono 相容** JSONL）两层；列表与路由由 sessions.json 提供，transcript 按需流式读取、最近 N 条、零拷贝解析；SessionEntry、SessionHeader、EntryBase 及会话路径与 sessionKey/sessionId 约定见详细文档。
+会话采用元数据 store（sessions.json，sessionKey → SessionEntry）与对话 transcript（JSONL）两层；列表与路由由 sessions.json 提供，transcript 按需流式读取、最近 N 条、零拷贝解析；SessionEntry、SessionHeader、EntryBase 及会话路径与 sessionKey/sessionId 约定见详细文档。
 
 详见 [会话存储数据结构设计（详细）](../../docs/architecture/session-storage.md)。
 
@@ -117,11 +120,19 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 
 > Agent Loop 容错重试循环中的 ContextOverflow 路径、以及 `build_context_messages` 前的上下文预算检查，由 **上下文管理模块** 负责处理，详见 [上下文管理技术方案](../../docs/architecture/context-management.md)。
 
-### 10. 多 Agent 架构设计
+### 10. 计划运行态、Checkpoint 与中断
 
-系统支持两个维度的多 Agent 能力：**多会话并发**（不同 session 各对应一个独立 AgentLoop 实例，共享基础设施、上下文完全隔离，通过 AgentRegistry 管理全局实例）与**主-子 Agent 编排**（主 Agent 通过 `dispatch_agent` 工具调用创建子 AgentLoop，子任务独立执行后将最终回答回注为 ToolResult，支持嵌套深度限制与级联 Abort）。设计综合参考了 openclaw（SubagentRegistry + spawnDepth）、claude-code（强上下文隔离 + 两层硬限制）、AutoGen（CancellationToken 级联取消）、LangGraph（recursion_limit 软限）的最优实践，与第 4、7、8、9 节共同构成完整的多 Agent 运行基础。
+单 Agent 完善期的状态管理横切能力：
 
-详见 [10. 多 Agent 架构设计（详细）](../../docs/architecture/multi-agent.md)。
+- **PLAN / EXEC**：计划文件落盘 `~/.tomcat/plans/`，`PlanRuntime` 与 chat 斜杠命令 `/plan` 联动；详见 [plan-runtime.md](../../docs/architecture/plan-runtime.md)、[plan-exec-code-verification.md](../../docs/architecture/plan-exec-code-verification.md)
+- **Checkpoint**：影子 Git 快照、`/ckpt` / `/restore` 与 `CheckpointStore`；详见 [checkpoint-resume.md](../../docs/architecture/tools/checkpoint-resume.md)
+- **中断与取消**：Steering / FollowUp / Abort、transcript 完整性；详见 [interrupt-and-cancellation.md](../../docs/architecture/interrupt-and-cancellation.md)
+
+### 11. 多 Agent 架构设计
+
+两个维度：**多会话并发**（已落地：每 session 独立 `AgentLoop`，`AgentRegistry` 管理实例）与**主-子编排**（`dispatch_agent` 等，设计见 multi-agent.md，全量产品与 P5 路线图对齐后再扩展）。竞品调研与 spawn 深度、级联取消等约束见详细文档。
+
+详见 [11. 多 Agent 架构设计（详细）](../../docs/architecture/multi-agent.md)。
 
 ---
 
@@ -144,7 +155,7 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [docs/architecture/plugin-system/sandbox-layer.md](../../docs/architecture/plugin-system/sandbox-layer.md)                         | 沙箱执行层                                     |
 | [docs/architecture/plugin-system/async-hostcall-event-loop.md](../../docs/architecture/plugin-system/async-hostcall-event-loop.md) | 异步 Hostcall 与事件循环设计                       |
 | [docs/architecture/plugin-system/events.md](../../docs/architecture/plugin-system/events.md)                                       | 事件系统设计                                    |
-| [docs/architecture/plugin-system/js-api-alignment.md](../../docs/architecture/plugin-system/js-api-alignment.md)                   | JS API 与 pi-mono 对齐设计                     |
+| [docs/architecture/plugin-system/js-api-alignment.md](../../docs/architecture/plugin-system/js-api-alignment.md)                   | JS API 与桥接对齐设计                            |
 | [docs/architecture/plugin-system/phase2-long-lived-vm.md](../../docs/architecture/plugin-system/phase2-long-lived-vm.md)           | Phase 2 长生命周期 VM 方案设计（方案 A/B 对比）          |
 | [docs/architecture/interaction-layer.md](../../docs/architecture/interaction-layer.md)                                             | 交互层                                       |
 | [docs/architecture/security.md](../../docs/architecture/security.md)                                                               | 安全设计核心原则                                  |
@@ -154,9 +165,13 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [docs/architecture/agent-loop.md](../../docs/architecture/agent-loop.md)                                                           | Agent Loop 设计                             |
 | [docs/architecture/multi-agent.md](../../docs/architecture/multi-agent.md)                                                         | 多 Agent 架构设计                              |
 | [docs/architecture/context-management.md](../../docs/architecture/context-management.md)                                           | 上下文管理技术方案                                 |
+| [docs/architecture/plan-runtime.md](../../docs/architecture/plan-runtime.md)                                                       | PLAN / EXEC 模式与 plan 文件、Todos 面板          |
+| [docs/architecture/tools/checkpoint-resume.md](../../docs/architecture/tools/checkpoint-resume.md)                                 | Checkpoint 数据模型、`/restore`、续跑              |
+| [docs/architecture/interrupt-and-cancellation.md](../../docs/architecture/interrupt-and-cancellation.md)                           | 中断、取消与 transcript 完整性                      |
+| [docs/tool-catalog.md](../../tool-catalog.md)                                                                                    | 内置工具 catalog（由 `catalog.rs` 生成）            |
 | [docs/architecture/llm-multiprovider-integration.md](../../docs/architecture/llm-multiprovider-integration.md)                   | 多 LLM / OpenAI 对接（`LlmProvider`、Completions/Responses 边界、配置与演进） |
-| [docs/architecture/llm-files-upload-manager.md](../../docs/architecture/llm-files-upload-manager.md)                             | OpenAI Files 上传管理（`POST /v1/files`、reuse cache、生命周期、T2-P0-015；与上条 §6.5.4 互链） |
+| [docs/architecture/llm-openai-deepseek-reasoning-continuity.md](../../docs/architecture/llm-openai-deepseek-reasoning-continuity.md) | OpenAI / DeepSeek 跨 turn reasoning 续传         |
+| [docs/architecture/llm-files-upload-manager.md](../../docs/architecture/llm-files-upload-manager.md)                             | OpenAI Files 上传管理（`POST /v1/files`、reuse cache、生命周期） |
+| [docs/architecture/current-tail-aggregate-guard.md](../../docs/architecture/current-tail-aggregate-guard.md)                       | 当前轮 tool 结果聚合与 preemptive 减重（context 相关）   |
 
 > **新增技术方案文档须知**：任何新增到 `docs/architecture/` 的 `*.md` 均属"技术方案文档（Architecture Spec）"，必须遵循 [`guides/workflow/ARCHITECTURE_SPEC.md`](guides/workflow/ARCHITECTURE_SPEC.md) 的章节骨架；其中 **「文件职责总览图（One-Glance Map）」为 MUST**——必须有一张 ASCII 图把方案涉及的所有业务 `*.rs` 与独立 `tests.rs` 按调用层次串起来，每节点内要点说明该文件做了什么。标杆案例：**One-Glance** 见 [`docs/architecture/tools/search_files.md` §4](../../docs/architecture/tools/search_files.md)；设有 **§4 落地选型与实施** 时 **§4.1 + §4.2** 为 MUST，见 [`guides/workflow/ARCHITECTURE_SPEC.md`](guides/workflow/ARCHITECTURE_SPEC.md) §4.1 / §4.2 与 [`docs/architecture/tools/read.md` §4.1–§4.2](../../docs/architecture/tools/read.md)；**取消 / 生命周期** 见 [`docs/architecture/interrupt-and-cancellation.md` §9.0](../../docs/architecture/interrupt-and-cancellation.md)。
-
-
