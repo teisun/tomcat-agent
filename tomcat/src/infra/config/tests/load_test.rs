@@ -39,12 +39,14 @@ fn load_config_accepts_preflight_section() {
     let path = dir.join("config.toml");
     std::fs::write(
         &path,
-        "[preflight]\nauto_install_search_tools = false\nauto_install_git = false\n[log]\nlevel = \"info\"\n",
+        "[preflight]\nauto_install_search_tools = false\nauto_install_git = false\nshow_search_tools_ui = true\nshow_git_ui = true\n[log]\nlevel = \"info\"\n",
     )
     .unwrap();
     let cfg = load_config(Some(path.as_path())).unwrap();
     assert!(!cfg.preflight.auto_install_search_tools);
     assert!(!cfg.preflight.auto_install_git);
+    assert!(cfg.preflight.show_search_tools_ui);
+    assert!(cfg.preflight.show_git_ui);
     assert!(validate_config(&cfg).is_ok());
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);

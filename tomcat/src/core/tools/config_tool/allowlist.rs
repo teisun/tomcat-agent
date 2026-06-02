@@ -23,6 +23,8 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "context.compaction_max_tokens",
     "log.level",
     "preflight.auto_install_search_tools",
+    "preflight.show_search_tools_ui",
+    "preflight.show_git_ui",
 ];
 
 /// 读硬黑名单：通配前缀，优先级高于 [`CONFIG_READ_ALLOWLIST`]，即使误列也会被拦。
@@ -46,6 +48,8 @@ const CONFIG_WRITE_ALLOWLIST: &[&str] = &[
     "llm.default_model",
     "log.level",
     "preflight.auto_install_search_tools",
+    "preflight.show_search_tools_ui",
+    "preflight.show_git_ui",
     "context.keep_recent_turns",
     "context.current_tail_compactable_min_chars",
     "context.current_tail_single_result_max_chars",

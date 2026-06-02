@@ -12,6 +12,10 @@ file_enabled = false
 auto_install_search_tools = true
 # 进入 `tomcat chat` 后后台探测 git，可在后续 turn 中启用 checkpoint。
 auto_install_git = true
+# 是否显示 search_tools 预检的 [tools] 提示；默认后台执行但不打扰终端。
+show_search_tools_ui = false
+# 是否显示 git 预检的 [git] 提示；默认后台执行但不打扰终端。
+show_git_ui = false
 
 [checkpoint]
 # 影子 git checkpoint 保留策略：最多保留最近 50 个、且不超过 7 天。

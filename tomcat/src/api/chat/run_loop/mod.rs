@@ -142,6 +142,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
         &*ctx.event_bus,
         search_tools_printer,
+        ctx.config.preflight.show_search_tools_ui,
+        ctx.config.preflight.show_git_ui,
     );
     preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
     preflight::start_git_preflight(

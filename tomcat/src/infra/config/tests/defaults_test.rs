@@ -56,7 +56,10 @@ fn checkpoint_config_defaults_are_wired_into_app_config() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.checkpoint.retention_max, 50);
     assert_eq!(cfg.checkpoint.retention_days, 7);
+    assert!(cfg.preflight.auto_install_search_tools);
     assert!(cfg.preflight.auto_install_git);
+    assert!(!cfg.preflight.show_search_tools_ui);
+    assert!(!cfg.preflight.show_git_ui);
 }
 
 #[test]

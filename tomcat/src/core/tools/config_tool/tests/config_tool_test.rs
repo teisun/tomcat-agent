@@ -23,6 +23,8 @@ fn read_allowlist_covers_documented_keys() {
         "primitive.path_rules",
         "agent.id",
         "log.level",
+        "preflight.show_search_tools_ui",
+        "preflight.show_git_ui",
     ] {
         assert!(is_readable(k), "{k} should be readable");
     }
@@ -47,6 +49,8 @@ fn write_allowlist_subset() {
         "primitive.path_rules",
         "primitive.bash_forbidden",
         "log.level",
+        "preflight.show_search_tools_ui",
+        "preflight.show_git_ui",
     ] {
         assert!(is_writable(k), "{k} should be writable");
     }
@@ -94,6 +98,20 @@ async fn config_get_returns_value_for_allowlisted_key() {
     let cfg = load_config(Some(&p)).unwrap();
     let v = config_get_impl("llm.default_model", &cfg).unwrap();
     assert_eq!(v.as_str(), Some("gpt-5.4"));
+}
+
+#[tokio::test]
+async fn config_get_returns_preflight_ui_value_for_allowlisted_key() {
+    let dir = TempDir::new().unwrap();
+    let p = empty_config(&dir);
+    std::fs::write(
+        &p,
+        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai-responses'\ndefault_model='gpt-5.4'\n\n[preflight]\nshow_git_ui=true\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+    )
+    .unwrap();
+    let cfg = load_config(Some(&p)).unwrap();
+    let v = config_get_impl("preflight.show_git_ui", &cfg).unwrap();
+    assert_eq!(v.as_bool(), Some(true));
 }
 
 #[tokio::test]
@@ -192,6 +210,21 @@ async fn config_set_user_denied_returns_applied_false() {
     assert_eq!(outcome.message, "user_denied");
     let cfg = load_config(Some(&p)).unwrap();
     assert!(cfg.workspace.workspace_roots.is_empty());
+}
+
+#[tokio::test]
+async fn config_set_updates_preflight_ui_scalar_bool() {
+    let dir = TempDir::new().unwrap();
+    let p = empty_config(&dir);
+    let confirm: Arc<dyn UserConfirmationProvider> = Arc::new(AllowAllConfirmation);
+    let ctx = ConfigToolContext::new(p.clone(), confirm);
+    let outcome = config_set_impl("preflight.show_search_tools_ui", "true", &ctx)
+        .await
+        .unwrap();
+    assert!(outcome.applied);
+    let cfg = load_config(Some(&p)).unwrap();
+    assert!(cfg.preflight.show_search_tools_ui);
+    assert!(!cfg.preflight.show_git_ui);
 }
 
 #[tokio::test]
