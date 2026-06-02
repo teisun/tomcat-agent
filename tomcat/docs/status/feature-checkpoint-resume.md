@@ -10,7 +10,7 @@
   - §11 测试矩阵：`checkpoint_integration_tests`、`checkpoint_cli_e2e`、`chat_git_preflight_tests`、`init_context_state_skips_superseded_messages`、`resume_plan_always_continue`、`turn_end_writes_checkpoint`、`interrupt_writes_checkpoint_after_partial_persist` 均落地并通过。
   - 结论：**未发现规范偏差**，本卡边界内无须修复。
 - [✓] **[P1]** 合并 `feature/checkpoint-resume` → `develop` @ `78d7518`（`--no-ff`，保留 PR-CKA..F 历史）。
-- [✓] **[P1]** 按 [`INTEGRATION_MERGE_AND_ACCEPTANCE.md §4`](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 在 `develop` 上复跑全量门禁：
+- [✓] **[P1]** 按 [`INTEGRATION_MERGE_AND_ACCEPTANCE.md §4`](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 在 `develop` 上复跑全量门禁：
   - §4-1 `cargo build --release` + `cargo clippy --all-targets -- -D warnings` + `cargo test --lib`：**lib 890/0 passed**，clippy 无 warning。
   - §4-3 `scripts/run-integration-tests.sh integration`（并发组 + 串行组）：
     - parallel：`agent_loop_tests` 11、`audit_tests` 1、`bash_assignment_deny` 1、`chat_git_preflight_tests` 3、`checkpoint_integration_tests` 4、`context_management_tests` 19、`cwd_lazy_prompt_e2e` 6、`event_tests` 4、`llm_tests` 2、`openai_responses_integration_tests` 7、`path_command_e2e` 4、`plugin_tests` 3、`read_tool_tests` 6、`robustness_tests` 5、`search_files_tests` 10、`session_tests` 4、`system_prompt_cwd_priority` 1 — **全绿**。

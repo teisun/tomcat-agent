@@ -2,7 +2,7 @@
 
 本文档是内置工具 **`ask_question`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。承接 [`plan-runtime.md`](../plan-runtime.md) 与 [`planner.md`](./planner.md)：**在 PLAN 与 CHAT/Pending/Completed 模式均可见**（EXEC 模式不可见，避免 agent loop 阻塞在用户输入上），让模型以「单选」结构化方式向用户索要明确决策，避免 prompt 里塞自然语言提问后模型自己脑补答案。**实现以仓库代码为准**；本文只保留**已定稿的行为与契约**。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
+末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
 **说人话**：让模型在规划或日常对话时能「弹个选择题」给用户，而不是自己猜。CHAT 与 PLAN 都可见；EXEC 隐藏（执行态由 agent loop 自动推进，不应阻塞）。
 
@@ -433,7 +433,7 @@ LLM ──tool_call("ask_question", { questions: [...] })──▶ tool_exec
 - 写计划文件：[create-plan.md](./create-plan.md)
 - 标杆写法：[read.md](./read.md)
 - transcript 自定义事件：[session-storage.md](../session-storage.md)
-- 任务卡：[T2-P1-002.md](../../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
-- 文档规范：[ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 任务卡：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
+- 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 
 **说人话**：规划时要问清楚用本文；写计划用 `create-plan.md`；模式切换看 `planner.md`。

@@ -4,7 +4,7 @@
 
 **兄弟 spec**：[read.md](read.md)（`ReadFileState`、`ReadStamp`、`FILE_UNCHANGED`、dedup）；[edit.md](edit.md)（同表 staleness、`NoPriorRead` 与 write 同 PR 节奏、secrets T3-K）；[search_files.md](search_files.md)（先定位再写的工作流）。
 
-**表格末列**（对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1**）：**§3.3** 落地选型决策表 **`决策`** 列（每行一句裁决结论）；其他高密度表末列 **`说人话`**。图、状态机后附 **2–5 句**口语串链路。**禁止**用口语或裁决句替代技术定义正文列。
+**表格末列**（对齐 [ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1**）：**§3.3** 落地选型决策表 **`决策`** 列（每行一句裁决结论）；其他高密度表末列 **`说人话`**。图、状态机后附 **2–5 句**口语串链路。**禁止**用口语或裁决句替代技术定义正文列。
 
 ---
 
@@ -78,7 +78,7 @@
 
 ## 2. 术语统一
 
-对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1 术语统一（MUST）**：先钉死用词，再读 **§4** 已定稿选型与 **§5** 协议，避免「overwrite / stamp / invalidate」与兄弟工具文档各说各话。
+对齐 [ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1 术语统一（MUST）**：先钉死用词，再读 **§4** 已定稿选型与 **§5** 协议，避免「overwrite / stamp / invalidate」与兄弟工具文档各说各话。
 
 | 术语 | 语义 | 数据载体 / 约束 | 说人话 |
 | --- | --- | --- | --- |
@@ -126,7 +126,7 @@
 
 ### 3.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§3.4](#34-实施点排期与状态)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
+**代码落点、交付物、阶段**见 **[§3.4](#34-实施点排期与状态)**，与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -146,7 +146,7 @@
 | **PR-G（T2）** | **交付物**：可选 CRLF→LF；字节数 + 可选 diff 摘要。**落地点**：normalize 小函数 + `[tools.write]` | `write_edit.rs` 或独立 normalize 小函数、`infra/config` `[tools.write]` | `write_normalizes_crlf_when_enabled`、`write_result_includes_byte_count_and_diff_hint` | ⏳ 待 PR-G | **第二刀**：行尾好读一点，回执让模型心里有数。 |
 | **T3-K（write 侧）** | **交付物**：`content` 过 `secrets::scan` + confirm。**落地点**：`tool_exec` 或 `write_file_impl` 前编排 | `tool_exec.rs` 或 `write_file_impl` 前编排 | `write_secrets_hit_denied_*`、`write_secrets_pass_when_no_hit`（命名对齐 edit 现有用例风格） | ⏳ 待 write 编排接入（`edit` 已部分落地） | **第三刀**：整文件内容也要过密钥扫描，和 `edit` 一条绳。 |
 
-下文按实施点展开**技术要点**与**数据流示意**；**交付边界与代码落点仍以上表为准**，避免与表冲突。写法对齐 [ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.2** 硬约束 1（表后拆小节；范例 [`read.md`](read.md) **§4.2.1** 起；本文件对应 **§3.4.1** 起）。**端到端泳道**见图：**§6**；**分支组合**见：**§7**。
+下文按实施点展开**技术要点**与**数据流示意**；**交付边界与代码落点仍以上表为准**，避免与表冲突。写法对齐 [ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.2** 硬约束 1（表后拆小节；范例 [`read.md`](read.md) **§4.2.1** 起；本文件对应 **§3.4.1** 起）。**端到端泳道**见图：**§6**；**分支组合**见：**§7**。
 
 #### 3.4.1 PR-命名：短名 `write`
 

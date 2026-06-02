@@ -31,4 +31,4 @@
 - 已跑：`set -a && source .env && set +a && RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`（`EXIT_CODE=0`）
 - 已跑：`cargo fmt --check`；`cargo test replay_policy_deepseek_v4 --lib`；`cargo test classify_replay_downgrade --lib`；`cargo test transport_messages_deepseek --lib`
 - 已跑：`cargo test --test reasoning_continuity_real_llm_tests deepseek_`（3 passed，含 `deepseek_non_tool_turn_roundtrip_replays_reasoning_content`）
-- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致
+- 已核对：`docs/openspec/specs/User_Stories.md`、`docs/openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致

@@ -7,7 +7,7 @@
 - **§3–§6、§8–§9 前半**：描述**当前仓库**已落地的行为与代码锚点；与实现不一致处以 **`src/` 代码为准**。
 - **§1 观察指标表、§2.3–§2.4、§9 后半、§10 中 PENDING 行**：描述**契约草案与路线图**（与 strengthen 计划一致）；合入后以 PR 更新本文状态列。
 
-写作约定见 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语 → 调研 → 目标 → **§4.1/§4.2** 已定稿选型与实施、One-Glance、测试、风险）。
+写作约定见 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语 → 调研 → 目标 → **§4.1/§4.2** 已定稿选型与实施、One-Glance、测试、风险）。
 
 ---
 
@@ -93,7 +93,7 @@
 
 ### 2.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§2.4](#24-实施点现状与路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点现状与路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -118,7 +118,7 @@
 
 集成测试登记见 **§10**；门禁脚本若扩展 bash 专组，在 PR 合入后于此处补一行路径。
 
-下文按 **实施顺序** 展开技术要点（**2.4.1 = PR-A** 优先，**2.4.2 = PR-现状** 基线，再 **PR-E / I / L**）；**交付边界与代码落点仍以表为准**。写法对齐 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.2** 硬约束 1（表后拆小节 + ASCII）。
+下文按 **实施顺序** 展开技术要点（**2.4.1 = PR-A** 优先，**2.4.2 = PR-现状** 基线，再 **PR-E / I / L**）；**交付边界与代码落点仍以表为准**。写法对齐 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.2** 硬约束 1（表后拆小节 + ASCII）。
 
 #### 2.4.1 PR-A：对外短名 `bash`（优先）
 
@@ -724,7 +724,7 @@ LLM          tool_exec              bash::execute_bash_impl        gate / spawn
 - 总计划：[strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)
 - 五仓对比：[agent-tools-comparison.md](../../reports/agent-tools-comparison.md)
 - 派生工具目录：[tool-catalog.md](../../tool-catalog.md)
-- 看板目录（长任务叙事）：[`agents/TASK_BOARD_002/README.md`](../../../agents/TASK_BOARD_002/README.md)
+- 看板目录（长任务叙事）：[`docs/agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)
 
 ---
 

@@ -1,7 +1,7 @@
 //! # Agent Loop 顶层骨架（Conversation + Attempt 两层）
 //!
 //! 本文件只承载两层调度骨架；Reasoning Loop（第三层）抽到 `reasoning_loop.rs`，
-//! 让 `run.rs` 满足 [RUST_FILE_LINES_SPEC §A](../../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
+//! 让 `run.rs` 满足 [RUST_FILE_LINES_SPEC §A](../../../docs/openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
 //! 的 300 行硬上限。`mod.rs` 已有三层全景大图，本图只画 **本文件持有的两层** + 与
 //! 同族子模块的协作箭头，避免与上层 doc 重复。
 //!

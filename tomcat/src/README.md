@@ -47,7 +47,7 @@
 ```
 
 - **依赖方向**：自上而下依赖 `infra`；`ext` 与 `core` 内各模块通过 Trait / 注入协作，避免环依赖。
-- **延伸阅读**：[Architecture.md](../openspec/specs/Architecture.md) 分层说明与资源模式。
+- **延伸阅读**：[Architecture.md](../docs/openspec/specs/Architecture.md) 分层说明与资源模式。
 
 ---
 

@@ -422,7 +422,7 @@
 | @integration_test | 2026-03-08 | DONE | develop | - |
 
 ### 本次执行说明
-- **引用路径修复**：全项目 .md 链接按「相对当前文件」修正。.cursor/commands/commit-with-status.md、.cursor/rules/commit-guard.mdc 使用 `../../openspec/...`；INTEGRATION.md、status/feature-wasm-plugin.md 去掉 `tomcat/` 前缀，保证单仓内链接可解析。
+- **引用路径修复**：全项目 .md 链接按「相对当前文件」修正。.cursor/commands/commit-with-status.md、.cursor/rules/commit-guard.mdc 使用 `openspec/...`；INTEGRATION.md、status/feature-wasm-plugin.md 去掉 `tomcat/` 前缀，保证单仓内链接可解析。
 
 ---
 

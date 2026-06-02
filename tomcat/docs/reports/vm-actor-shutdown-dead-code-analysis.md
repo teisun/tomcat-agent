@@ -140,7 +140,7 @@ join_handle              确认 actor 线程退出（可选超时）
 ## 风险与注意事项
 
 - **`cleanup_instance` 的 `try_send` 可能因通道满而失败**：后续 `event_senders.remove()` 会断开通道，`rx.recv()` 返回 `Disconnected`，JS 侧 `waitForEvent` 将映射为 `__shutdown`，属于兜底路径。
-- **WasmEdge 收尾阶段的 `Code: 0x8d` 错误**：通道关闭后 JS 再调宿主函数会报此错，不影响测试结果（以 harness 的 `ok`/`FAILED` 为准）。参见 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) "WasmEdge stderr 说明"。
+- **WasmEdge 收尾阶段的 `Code: 0x8d` 错误**：通道关闭后 JS 再调宿主函数会报此错，不影响测试结果（以 harness 的 `ok`/`FAILED` 为准）。参见 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) "WasmEdge stderr 说明"。
 - **先 `cleanup_instance` 再等 join**：需确认 `cleanup_instance` 对尚未进入 `waitForEvent` 的 VM 也能正确退出（当前 `do_wait_for_event` 找不到已移除的 channel 会返回错误，JS 侧 `catch(hostErr)` 同样走退出路径）。
 
 ## 相关文件

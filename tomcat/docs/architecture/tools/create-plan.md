@@ -14,7 +14,7 @@
 
 下文若仍出现 `active_plan_id`、`mode=planning` 作为运行态字段、或 `create_plan` 建立 active binding 等历史草稿描述，均以上述稳定契约与仓库代码为准。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
+末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
 **说人话**：这是 PLAN 模式里唯一会主动**创建**计划文件的工具——把 LLM 写的草案落到 `~/.tomcat/plans/<slug>_<hash>.plan.md`，加文件锁，然后立刻派一个 reviewer 子 Agent 来挑刺，审稿摘要一起返回。reviewer 只是辅助：是否进入执行态由用户敲 `/plan build <plan_id/path>` 决定。**`create_plan` 名字保留**，职责也不变；执行态推进 `todos[]` / `mode` 字段走 [`update_plan`](./update-plan.md) 工具，整盘 mode 切换走 [`/plan`](../plan-runtime.md#51-本地-slash-命令) 命令族与 runtime 自动转移，**三者协同**改动 `PlanFile` frontmatter，互不重叠。
 
@@ -130,7 +130,7 @@
 
 | 维度 | 取舍 | 拒因 | 说人话 |
 |------|------|------|--------|
-| C1 落盘路径 | 固定 `~/.tomcat/plans/<slug>_<hash>.plan.md` | 写到 `agent_trail_dir` 与运行轨迹混；写到 `agents/plan/` 与工程模板混。 | 计划单独放 `~/.tomcat/plans/`。 |
+| C1 落盘路径 | 固定 `~/.tomcat/plans/<slug>_<hash>.plan.md` | 写到 `agent_trail_dir` 与运行轨迹混；写到 `docs/agents/plan/` 与工程模板混。 | 计划单独放 `~/.tomcat/plans/`。 |
 | C2 文件锁 | advisory lock + `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS`（默认 2000ms） | mandatory lock 跨 OS 不一致；无锁会被并发写漂移。 | 写前抢 advisory 锁。 |
 | C3 schema | frontmatter 必填 `plan_id` / `goal` / `mode` / `todos` / `created_at` / `schema_version`；`session_key` / `session_id` 在 `/plan build` 时写入；删除 `review_status` / `last_review` / `active` / `last_checkpoint_id` / `updated_at` | 字段越多机器越累，且 review 结果走 transcript 不需要 frontmatter 保存 | 字段精简，机读必备项齐就行。 |
 | C4 审稿时机 | 写完立刻同步 await reviewer，摘要同条 ToolResult 返回 | 异步派会让 LLM 在没有 verdict 的情况下盲改；显式触发会要求 LLM 多一个 tool_call。 | 写完马上审，别分两轮。 |
@@ -742,7 +742,7 @@ LLM ──tool_call("create_plan", { goal, draft, todos })──▶ tool_exec
 - 结构化提问：[ask-question.md](./ask-question.md)
 - checkpoint 底座：[checkpoint-resume.md](./checkpoint-resume.md)
 - 标杆写法：[read.md](./read.md)
-- 任务卡：[T2-P1-002.md](../../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
-- 文档规范：[ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 任务卡：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
+- 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 
 **说人话**：写计划文件看本文 §5+§6+§8；审稿细节看 `reviewer.md`；整条流程看 `plan-runtime.md`。

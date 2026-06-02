@@ -1,6 +1,6 @@
 # Story 8 上下文 / JSONL / 压缩 — 可追溯性对照表
 
-本文档将 [User_Stories.md](../../openspec/specs/User_Stories.md) **Story 8** 中与对话、会话、上下文压缩相关的验收项，与 [E2E_SCENARIO_LIBRARY.md](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 及仓库内 **Rust 测试符号** 对齐，便于审查与回归。
+本文档将 [User_Stories.md](openspec/specs/User_Stories.md) **Story 8** 中与对话、会话、上下文压缩相关的验收项，与 [E2E_SCENARIO_LIBRARY.md](openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 及仓库内 **Rust 测试符号** 对齐，便于审查与回归。
 
 **产品前提（开发阶段）**：JSONL 摘要行正式类型为 **`type: branch_summary`**；**不**读盘兼容历史 `type: compaction`；无法反序列化的行由 `read_entries_tail` **warn + skip**（见 `src/core/session/transcript.rs`）。
 

@@ -19,7 +19,7 @@
 //! ## 为什么是自由函数而非 `impl AgentLoop`
 //!
 //! Phase 3 抽 `run.rs` 瘦身时，`run.rs` 已含 Conversation/Attempt 两层共 ~200 行。
-//! 把第三层留在 `run.rs` 会撞 [RUST_FILE_LINES_SPEC §A](../../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
+//! 把第三层留在 `run.rs` 会撞 [RUST_FILE_LINES_SPEC §A](../../../docs/openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
 //! 的 300 行红线。抽为本文件的 `pub(super)` 自由函数，签名 `&mut AgentLoop`，
 //! 与 `stream_handler` / `tool_dispatcher` / `turn_finalize` 协议一致。
 

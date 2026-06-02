@@ -2,7 +2,7 @@
 
 本文档用于说明阶段二 `current-tail aggregate guard` 的**现行实现**与交付边界，对齐 [`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md) 之间的 mid-turn current-tail guard 主链。仓库当前已落地 `current_tail_guard.rs`、mid-turn history apply/recompact orchestration、single-branch-summary collapse + keepalive、steering 正规注入与对应测试矩阵；本文保留行为边界、协议与交付口径，避免再回到“开发前目标态”的旧描述。
 
-本文按 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。上位与相邻方案：[`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md)、[`tools/read.md`](./tools/read.md)。
+本文按 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。上位与相邻方案：[`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md)、[`tools/read.md`](./tools/read.md)。
 
 **时间点钉死**：
 

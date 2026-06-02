@@ -2,7 +2,7 @@
 
 本文档是内置工具 **`read`** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接迭代子项 **T2-P0-tools-read** 与计划 [`strengthen-read-tool_92f396c7.plan.md`](../../../../../.cursor/plans/strengthen-read-tool_92f396c7.plan.md)、[`tools-read-spec-migration_cb4d7b57.plan.md`](../../../../../.cursor/plans/tools-read-spec-migration_cb4d7b57.plan.md)。**实现以仓库代码为准**；计划文档保留讨论过程与 PR 治理顺序，本文只保留**已定稿的行为与契约**。
 
-§4.1 落地选型决策表 **「决策」** 列（每行一句裁决结论，见 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1**）。其他高密度表末列 **「说人话」** 与 **§14.1** 对齐：在已写清技术列的前提下，每行一句口语扫读；与 §1「语义（人话）」并存时，**语义列钉定义，说人话列作速记**（不替代技术表述）。
+§4.1 落地选型决策表 **「决策」** 列（每行一句裁决结论，见 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1**）。其他高密度表末列 **「说人话」** 与 **§14.1** 对齐：在已写清技术列的前提下，每行一句口语扫读；与 §1「语义（人话）」并存时，**语义列钉定义，说人话列作速记**（不替代技术表述）。
 
 **说人话**：这是一份「读文件工具」的定稿 spec——怎么分页、怎么报错、怎么 dedup、图往哪塞，都按下面表格和协议来。
 
@@ -156,7 +156,7 @@
 
 ### 4.1 落地选型决策表（维度取舍）
 
-**核对**：每个可辩驳分叉独占一行；读者能回答「若不采纳本行**入选理由**，代价是什么」。**落地点、交付物、阶段**见 **[§4.2](#42-实施点已闭环)**（[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工）。第三列 **「决策」** 钉专业裁决结论；末列 **「说人话」** 为口语扫读（**SHOULD**，与 **§14.1** 同向）。
+**核对**：每个可辩驳分叉独占一行；读者能回答「若不采纳本行**入选理由**，代价是什么」。**落地点、交付物、阶段**见 **[§4.2](#42-实施点已闭环)**（[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工）。第三列 **「决策」** 钉专业裁决结论；末列 **「说人话」** 为口语扫读（**SHOULD**，与 **§14.1** 同向）。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -721,7 +721,7 @@ read_impl (read.rs)
 
 ## 13. 历史决策（已被本方案取代）
 
-与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§13** 同构：删除线表示旧案，**结论**列钉死取舍，末列口语扫读。
+与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§13** 同构：删除线表示旧案，**结论**列钉死取舍，末列口语扫读。
 
 | 旧方案 | 结论 | 说人话 |
 |--------|------|--------|
@@ -739,7 +739,7 @@ read_impl (read.rs)
 - 流尾语义（FinishReason / trailing Usage）：[../llm-stream-events-cli-pipeline.md](../llm-stream-events-cli-pipeline.md) §5.4
 - 权限：[../permission-system.md](../permission-system.md)
 - 派生工具目录：[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)
-- 结构标杆：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13**（本文节号与之对齐）。
+- 结构标杆：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13**（本文节号与之对齐）。
 
 **说人话**：想跳别的工具 spec、权限、catalog，从上面链走；章节骨架以规范为准。
 
@@ -751,7 +751,7 @@ read_impl (read.rs)
 
 ## 附录：旧节号 → 本版对照
 
-仓库里部分 `//!` / 错误文案仍写「`read.md` §2.x / §3.x」（计划期编号）。本版章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§5** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议），按下表跳转即可。
+仓库里部分 `//!` / 错误文案仍写「`read.md` §2.x / §3.x」（计划期编号）。本版章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§5** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议），按下表跳转即可。
 
 | 旧锚点 / 说法 | 本版位置 |
 | ------------- | -------- |

@@ -9,7 +9,7 @@
 
 ### 2026-05-08 | 移除多余 plan 文件、修 TODOS 死链
 
-- **范围**：删除误建的 `agents/plan/large-file-edit-strategy.md`；`TODOS.md` 中 T-043 已实现表与 §三 条目内对该路径的引用改为 **edit.md / write.md**；`#T-043` 关联路径补全 `llm/system_prompt.rs`。
+- **范围**：删除误建的 `docs/agents/plan/large-file-edit-strategy.md`；`TODOS.md` 中 T-043 已实现表与 §三 条目内对该路径的引用改为 **edit.md / write.md**；`#T-043` 关联路径补全 `llm/system_prompt.rs`。
 - **阶段 T**：文档-only。
 
 ### 2026-05-08 | 宿主叙事对齐 tomcat + pi-mono 术语收敛

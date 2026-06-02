@@ -69,7 +69,7 @@ pub struct NoopSandboxBackend;     // 直接 cmd.spawn()
 ## 4. 兼容性与回归门禁
 
 - 新 AST 路径**不替换**现有 `gate_check_bash` / `extract_paths`，仅在其前叠加；现有 `gate_suite_*` 与 `bash_assignment_deny` 集成测必须继续 100% 绿。
-- 配置默认值（**2026-05-06 决策**）：`[tools.bash.allowlist] = []` + `[tools.bash.denylist] = []` + **`[tools.bash.ast].enabled = false`**（与 `DefaultPrimitiveExecutor` 缺省一致，避免 `detect_unsupported` 粗匹配误伤）。**当**用户显式 `enabled=true` 且列表仍空时，AST 才做切段 + `detect_unsupported`、不做 allow/deny 命中；详见任务卡 [T2-P1-009](../../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)。
+- 配置默认值（**2026-05-06 决策**）：`[tools.bash.allowlist] = []` + `[tools.bash.denylist] = []` + **`[tools.bash.ast].enabled = false`**（与 `DefaultPrimitiveExecutor` 缺省一致，避免 `detect_unsupported` 粗匹配误伤）。**当**用户显式 `enabled=true` 且列表仍空时，AST 才做切段 + `detect_unsupported`、不做 allow/deny 命中；详见任务卡 [T2-P1-009](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)。
 - bash.md §10 T3 的 `bash_ast_allowlist_*` 集成测随 PR-L 交付，并把 §10 PENDING 行的状态列翻成 ✅(date)。
 
 ## 5. 关联

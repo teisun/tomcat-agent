@@ -5,9 +5,9 @@
 **文首声明（与 `read.md` 全篇闭环口吻不同）**：
 
 - **§3、§5**：描述本期 PR-WS-A/S/O/W 合入后的**目标态行为**与代码锚点；与实现不一致处以 **`src/` 代码为准**。
-- **§1 观察指标表、§2.3–§2.4、§9、§10、§11**：描述**契约草案与路线图**（与 002 看板 [T2-P1-009](../../../agents/TASK_BOARD_002/tasks/T2-P1-009.md) 一致）；合入后以 PR 更新本文状态列。
+- **§1 观察指标表、§2.3–§2.4、§9、§10、§11**：描述**契约草案与路线图**（与 002 看板 [T2-P1-009](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md) 一致）；合入后以 PR 更新本文状态列。
 
-写作约定见 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语、调研、目标、**§4.1/§4.2**、One-Glance、测试、风险）。
+写作约定见 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语、调研、目标、**§4.1/§4.2**、One-Glance、测试、风险）。
 
 ---
 
@@ -99,7 +99,7 @@
 
 ### 2.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -686,7 +686,7 @@ openai-responses  其它 id   │              是           否
 ## 12. 历史决策（已被本方案取代或待定）
 
 - ~~合并 `web` 工具单 schema：参数二选一（`query` 或 `url`）~~ → **否**：schema 双口（必填字段不同）会让模型频繁参数错；权限粒度（fetch 按 domain）对不上；缓存键不同（query vs url）。**`web_search` 与 `web_fetch` 拆两个工具**（与 cc/hermes/openclaw 三家一致）。
-- ~~`web_search` 与 `web_fetch` 写在同一份 `web.md` 文档~~ → **否**：长文双口吻冲突（[ARCHITECTURE_SPEC §14 No-Stale](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）；与 read/write/edit/bash/search_files **一文件一工具**习惯不一致。**拆为两份独立满额文档**（本文 + [`web_fetch.md`](web_fetch.md)）；共享术语与风险在两篇各自完整书写；**各文仍须具备完整 §4.1 / §4.2**，**不**合并为单稿后省略。
+- ~~`web_search` 与 `web_fetch` 写在同一份 `web.md` 文档~~ → **否**：长文双口吻冲突（[ARCHITECTURE_SPEC §14 No-Stale](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）；与 read/write/edit/bash/search_files **一文件一工具**习惯不一致。**拆为两份独立满额文档**（本文 + [`web_fetch.md`](web_fetch.md)）；共享术语与风险在两篇各自完整书写；**各文仍须具备完整 §4.1 / §4.2**，**不**合并为单稿后省略。
 - ~~默认 backend 单一硬编码（如永远 Tavily）~~ → **否**：用户切到 **`openai-responses`** 时 server-side 更省事；切到 **`openai`（Completions）/ Anthropic / 其它** 时 **无**原生 `type:web_search`。**默认 `auto`** 跟着 **`[llm] provider` 字符串**走（见 [`registry.rs`](../../../src/core/llm/registry.rs)），不是跟着「OpenAI 品牌」走。
 - ~~持久化 search 缓存（落盘）~~ → **否**：检索结果有时效性，跨进程命中反而坑；进程内 LRU + TTL 即可。
 - ~~server-side 默认 + 由 server 代取 fetch~~ → **否**：cc-fork-01 的 server-side 抓取（Anthropic native）只能在 Anthropic 系生效；fetch 单独走自家 reqwest（[`web_fetch.md`](web_fetch.md)），统一行为。
@@ -704,11 +704,11 @@ openai-responses  其它 id   │              是           否
 - **HTTP 字段实现对照**：本文 **[§2.4.2.1](#2421-http-上游字段速查实现必读)**；Tavily 参考实现 [openclaw `tavily-client.ts`](../../../../openclaw/extensions/tavily/src/tavily-client.ts)、[hermes `web_tools.py`](../../../../hermes-agent/tools/web_tools.py)（`_tavily_request`）；openclaw 工具侧 schema [`web-search.ts`](../../../../openclaw/src/agents/tools/web-search.ts)；Tavily 插件参数表 [openclaw `docs/tools/tavily.md`](../../../../openclaw/docs/tools/tavily.md)。
 - 兄弟工具：[`web_fetch.md`](web_fetch.md) · [`read.md`](read.md) · [`bash.md`](bash.md) · [`search_files.md`](search_files.md) · [`write.md`](write.md) · [`edit.md`](edit.md)
 - 权限总览：[`../permission-system.md`](../permission-system.md)
-- 看板叙事：[`agents/TASK_BOARD_002/README.md`](../../../agents/TASK_BOARD_002/README.md)、[`T2-P1-009.md`](../../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)
+- 看板叙事：[`docs/agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)、[`T2-P1-009.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)
 - 五仓对比：[`agent-tools-comparison.md`](../../reports/agent-tools-comparison.md)
 - Cursor 内置工具参考：[`cursor-builtin-tools-reference.md`](../../reports/cursor-builtin-tools-reference.md)
 - 派生工具目录：[`tool-catalog.md`](../../tool-catalog.md)
-- 规范：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 规范：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 
 ---
 

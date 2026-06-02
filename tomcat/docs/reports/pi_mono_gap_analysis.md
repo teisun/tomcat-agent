@@ -481,8 +481,8 @@ TASK-05a~05e 完成 15/15 pi-mono 社区插件端到端验收。`globalThis.pi` 
 | tomcat 源码 | `src/`、`assets/js/`、`tests/` |
 | 已有差距分析 | `docs/reports/extension_api_gap_analysis.md` |
 | 兼容矩阵 | `docs/reports/extension_compat_matrix.md` |
-| 任务看板 | `agents/TASK_BOARD.md` |
-| 架构文档 | `openspec/specs/Architecture.md` |
+| 任务看板 | `docs/agents/TASK_BOARD.md` |
+| 架构文档 | `docs/openspec/specs/Architecture.md` |
 | 兼容策略 | `docs/architecture/plugin-system/pi-mono-compat-strategy.md` |
 
 ---

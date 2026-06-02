@@ -4,7 +4,7 @@
 
 ### ✅ DONE (已完成)
 - [✓] **[P0]** 架构方案落稿：`docs/architecture/llm-stream-events-cli-pipeline.md`，与 `ARCHITECTURE_SPEC §4.1/§4.2` 对齐。
-- [✓] **[P0]** 任务卡 `agents/TASK_BOARD_002/tasks/T2-P0-006.md` 改 DOING/Tom，链接架构方案与 P0–P7 实施顺序。
+- [✓] **[P0]** 任务卡 `docs/agents/TASK_BOARD_002/tasks/T2-P0-006.md` 改 DOING/Tom，链接架构方案与 P0–P7 实施顺序。
 - [✓] **[P0]** Phase 1：`StreamEvent::Thinking`（types + serde）→ Completions reasoning 三路解析 + 请求体 reasoning_effort/thinking → stream_handler `kind=thinking_delta` 透传 → `CliTurnRenderer` 单订阅者 + `minimal/summary/full` 三档 → `/thinking` 循环切档与 `PI_CHAT_SHOW_THINKING`。
 - [✓] **[P0]** Phase 2：Responses reasoning 三事件显式映射 + 未知事件 trace；`thinking_policy` 引入 `ThinkingLevel`/`ThinkingFormat`/`resolve_request_fields`；`should_strip_on_resend` / `should_persist_thinking` / `strip_anthropic_thinking_blocks` helpers。
 - [✓] **[P0]** 分支侧门禁：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`（826 passed）、`cargo test --test cli_tests -- --test-threads=1`（77 passed）、`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`（全绿）。

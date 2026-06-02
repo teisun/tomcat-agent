@@ -3,7 +3,7 @@
 **范围**：`feature/plugin-compat-tier2` 上为 TASK-05c（T1-P1-002c）落地的宿主/桥接/测试改动。  
 **目的**：说明每一处主要改动的**用意、作用、意义**，辅以术语与 ASCII 示意图，便于对照源码阅读。
 
-**相关看板**：[agents/TASK_BOARD.md](../../agents/TASK_BOARD.md) TASK-05c；**状态文档**：[docs/status/feature-plugin-compat-tier2.md](../status/feature-plugin-compat-tier2.md)。**常见概念问答**见文末 **§7 附录：FAQ**。
+**相关看板**：[docs/agents/TASK_BOARD.md](docs/agents/TASK_BOARD.md) TASK-05c；**状态文档**：[docs/status/feature-plugin-compat-tier2.md](../status/feature-plugin-compat-tier2.md)。**常见概念问答**见文末 **§7 附录：FAQ**。
 
 ---
 
@@ -189,7 +189,7 @@
 | [tests/fixtures/wasmedge_quickjs/tier2_compat_test.js](../../tests/fixtures/wasmedge_quickjs/tier2_compat_test.js) | 单脚本覆盖多 host 路径 | registerTool/UI/argv/bash/invoke | 契约回归，不绑本地 pi-mono |
 | [tests/wasmedge_e2e_tests.rs](../../tests/wasmedge_e2e_tests.rs) | 自动化门禁 | Tier2 用例 + 转译 TS 片段 | 与 SWC/组合脚本路径一致 |
 
-### 4.8 [openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)
+### 4.8 [E2E_SCENARIO_LIBRARY.md](openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)
 
 | 改动 | 用意 | 作用 | 意义 |
 |------|------|------|------|
@@ -199,9 +199,9 @@
 
 | 文件 | 改动要点 |
 |------|----------|
-| [agents/TASK_BOARD.md](../../agents/TASK_BOARD.md) | TASK-05c 子项勾选、状态 `PENDING_INTEGRATION` |
+| [docs/agents/TASK_BOARD.md](docs/agents/TASK_BOARD.md) | TASK-05c 子项勾选、状态 `PENDING_INTEGRATION` |
 | [docs/status/feature-plugin-compat-tier2.md](../status/feature-plugin-compat-tier2.md) | 分支元数据与接口摘要 |
-| [agents/TASK_BOARD.md](../../agents/TASK_BOARD.md) + [`extension_compat_matrix.md`](../reports/extension_compat_matrix.md) | TASK-05 系列范围与矩阵验收（已无独立 `PLAN_TASK05_*.md`） |
+| [docs/agents/TASK_BOARD.md](docs/agents/TASK_BOARD.md) + [`extension_compat_matrix.md`](../reports/extension_compat_matrix.md) | TASK-05 系列范围与矩阵验收（已无独立 `PLAN_TASK05_*.md`） |
 
 ---
 

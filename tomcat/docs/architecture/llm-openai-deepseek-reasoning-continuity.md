@@ -1,7 +1,7 @@
 # OpenAI / DeepSeek 推理续传架构方案（架构 spec）
 
 > 适用范围：Tomcat 的 cross-turn reasoning continuity（跨 turn 推理续传）。
-> 关联任务：[T2-P1-010.md](../../agents/TASK_BOARD_002/tasks/T2-P1-010.md)。
+> 关联任务：[T2-P1-010.md](../agents/TASK_BOARD_002/tasks/T2-P1-010.md)。
 > 关联文档：[多 LLM / OpenAI 对接技术方案](llm-multiprovider-integration.md) 讲 provider 主骨架；[LLM StreamEvent → CLI/TUI 展示与 Thinking/Reasoning 协议方案](llm-stream-events-cli-pipeline.md) 讲 thinking stream / 展示 / 请求侧 thinking 参数；**本文只讲上一轮 reasoning 如何被下一轮续上**。
 
 本文冻结三件事：

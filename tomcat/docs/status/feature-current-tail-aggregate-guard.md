@@ -39,6 +39,6 @@
 - 已跑：`cargo test --test current_tail_guard_real_llm_tests -- --nocapture --test-threads=1`
 - 已跑：`set -a && source .env && set +a && cargo test --test plan_real_llm_inprocess_tests -- --nocapture --test-threads=1`
 - 已跑：`set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`
-- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致，无需额外补充用户面场景
+- 已核对：`docs/openspec/specs/User_Stories.md`、`docs/openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致，无需额外补充用户面场景
 - 已核对：新 real-LLM target 已接入 `scripts/test-groups.sh`；普通 `integration` / `all` 仍不跑 keepalive A/B/C，需显式执行 `integration-real-llm`
 - 已提交：`1bb4d66`（阶段二实现）+ 后续 `style(rust)` 提交（补齐分支内遗留的 `cargo fmt` 格式化，无行为变更）

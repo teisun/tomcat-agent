@@ -13,7 +13,7 @@
 //! - `audit_test`：审计日志解析与导出工具函数。
 //!
 //! `chat_cmd_test.rs` 与 `pathrules_cmd_test.rs` 需要测私有项，按
-//! [UNIT_TEST_LAYOUT_SPEC §9](../../../../../openspec/specs/guides/testing/UNIT_TEST_LAYOUT_SPEC.md)
+//! [UNIT_TEST_LAYOUT_SPEC §9](../../../../../docs/openspec/specs/guides/testing/UNIT_TEST_LAYOUT_SPEC.md)
 //! 走 `#[cfg(test)] #[path] mod tests;` 挂载（测试文件物理位置仍在本目录，但模块挂在
 //! 被测源文件下，故此处**不**声明对应 `mod`）。
 

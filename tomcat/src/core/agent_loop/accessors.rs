@@ -8,7 +8,7 @@
 //!
 //! ## 为什么独立成文件（而非合入 `types.rs`）
 //!
-//! [PLAN_SPEC §A](../../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
+//! [PLAN_SPEC §A](../../../docs/openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
 //! 要求每个 `.rs` 业务文件 ≤ 300 行。`types.rs` 已含枚举 / 结构体定义 + Outcome
 //! 三件套（`OverflowTrimStats` / `StreamOutcome` / `DispatchOutcome`）241 行；
 //! 再追加访问器与 emit 辅助（合计 ~120 行）会超阈值。计划风险表的备选方案即

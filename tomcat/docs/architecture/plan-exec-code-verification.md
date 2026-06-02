@@ -1,6 +1,6 @@
 # Plan / Todo 执行完成后的代码验证（Verifier）技术方案
 
-本文档是 **T2-P1-002 | plan-mode-enhance** 的横向调研 + 落地选型方案，承接 [`plan-runtime.md`](./plan-runtime.md)、[`tools/reviewer.md`](./tools/reviewer.md)、[`tools/read.md`](./tools/read.md) 与 [`openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。**实现以仓库代码为准**；文中 **PENDING / PARTIAL** 验收项表示仍有缺口待补。
+本文档是 **T2-P1-002 | plan-mode-enhance** 的横向调研 + 落地选型方案，承接 [`plan-runtime.md`](./plan-runtime.md)、[`tools/reviewer.md`](./tools/reviewer.md)、[`tools/read.md`](./tools/read.md) 与 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。**实现以仓库代码为准**；文中 **PENDING / PARTIAL** 验收项表示仍有缺口待补。
 
 §4.1 **「决策」**列（裁决结论）；其他表末列 **「说人话」** 与 ARCHITECTURE_SPEC **§14.1** 对齐。
 
@@ -668,7 +668,7 @@ sequenceDiagram
 - 读工具与陈旧检测：[tools/read.md](./tools/read.md)
 - 子 Agent 基础设施：[multi-agent.md](./multi-agent.md)
 - 文档规范：[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
-- 任务卡：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)（本卡 **PR-V0～V3** 子项）
+- 任务卡：[T2-P1-002.md](../agents/TASK_BOARD_002/tasks/T2-P1-002.md)（本卡 **PR-V0～V3** 子项）
 - 竞品质量机制原文：`cc-fork-01/docs/QUALITY_MECHANISMS.md`
 - cc-fork 验证 Agent 源码：`cc-fork-01/src/tools/AgentTool/built-in/verificationAgent.ts`
 - GenericAgent 验证 SOP：`GenericAgent/memory/plan_sop.md` §四、`GenericAgent/memory/verify_sop.md`

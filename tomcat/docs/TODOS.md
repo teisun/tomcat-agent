@@ -1,6 +1,6 @@
 # PI Agent TODOS
 
-> 个人灵感 / 想法 / 待办收集池。成熟条目可晋升为 [TASK_BOARD_002 索引](../agents/TASK_BOARD_002/README.md) 正式任务。
+> 个人灵感 / 想法 / 待办收集池。成熟条目可晋升为 [TASK_BOARD_002 索引](docs/agents/TASK_BOARD_002/README.md) 正式任务。
 >
 > 组织方式：**先按领域分类，再在每条上标注档位（P0-P9）**；同档位内用「紧急度标签」`[BUG]/[UX]/[REF]/[DOC]` 做二次排序。
 >
@@ -377,8 +377,8 @@
 - [ ] **[P5]** `#T-052` 提示注入攻击检测
 - [ ] **[P5]** `#T-053` 行为意图审查策略系统
 - [ ] **[P5]** `#T-054` 数据加密（规格中多处 TODO）
-  - `openspec/specs/Constitution.md:16` — 敏感数据加密
-  - `openspec/specs/User_Stories.md:14,75,179` — 加密存储相关
+  - `docs/openspec/specs/Constitution.md:16` — 敏感数据加密
+  - `docs/openspec/specs/User_Stories.md:14,75,179` — 加密存储相关
   - `docs/user-guide.md:586` — 审计日志加密
 - [ ] **[P5]** `#T-055` 仅在网络请求边界注入凭证
 - [ ] **[P5]** `#T-056` CLI 访问依赖系统钥匙串解密
@@ -434,7 +434,7 @@
   - `/model use` 后，当前 session 的 `[ctx]` token / 占用 / 压缩水位应继续沿用同一份 `ContextState`，不因 provider/model 切换被清零。
   - W2-3 可观测/计量（`scene/provider/api/model/latency/retry` tracing + 按 model 聚合 usage）只允许做“旁路新增”，不得替换 `ContextMetricsUpdate` 或 CLI `stderr` 的 `[ctx]` 现有口径。
   - 若未来要引入按 model 的 tokenizer / context-window 差异，需单独设计 UI 与迁移说明，不能在观测补齐时静默改变当前统计语义。
-  - 测试与集成验收参考 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md)；尤其遵循脚本入口、日志留存、后台执行与轮询诊断要求。
+  - 测试与集成验收参考 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md)；尤其遵循脚本入口、日志留存、后台执行与轮询诊断要求。
 
 ---
 
@@ -601,9 +601,9 @@
 
 ### 同步变更（本次改造一并完成）
 
-- ~~建 `openspec/specs/archive/`~~（目录已删除；历史见 Git）
-- 建 `agents/TASK_BOARD_002/` 目录化看板（吸收迭代立项；索引 `README.md` + `tasks/`）
-- `openspec/specs/Product_Brief.md` 重写为 P0-P9 路线图
+- ~~建 `docs/openspec/specs/archive/`~~（目录已删除；历史见 Git）
+- 建 `docs/agents/TASK_BOARD_002/` 目录化看板（吸收迭代立项；索引 `README.md` + `tasks/`）
+- `docs/openspec/specs/Product_Brief.md` 重写为 P0-P9 路线图
 - T-135（Product_Brief 产品级 TODO）关闭
 
 ---

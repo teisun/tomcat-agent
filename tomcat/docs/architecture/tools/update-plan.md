@@ -404,5 +404,5 @@ LLM ──tool_call("update_plan", { plan_id, ops, ... })──▶ tool_exec::up
 - 运行时编排：[`plan-runtime.md`](../plan-runtime.md) §5.3 / §6.2 / §7
 - PLAN 模式整体规范：[`planner.md`](./planner.md)
 - reviewer 子 Agent：[`reviewer.md`](./reviewer.md)
-- 文档规范：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 文档规范：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 - transcript 自定义事件：[`session-storage.md`](../session-storage.md)

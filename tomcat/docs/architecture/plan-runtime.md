@@ -2,7 +2,7 @@
 
 本文档是 **T2-P1-002 | plan-mode-enhance** 的总览级运行时编排方案，承接 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 提供的 `CheckpointStore`，并把 **PLAN 模式（Planner / AskQuestion / CreatePlan / UpdatePlan / Reviewer）** 与 **执行态（`update_plan` 推进 + `todos` scratchpad + TodosPanel）** 串成一个闭环。各 LLM 工具与 PLAN 模式内部细节见 `tools/` 子目录下的独立 spec：[`tools/planner.md`](./tools/planner.md)、[`tools/create-plan.md`](./tools/create-plan.md)、[`tools/update-plan.md`](./tools/update-plan.md)、[`tools/ask-question.md`](./tools/ask-question.md)、[`tools/todos.md`](./tools/todos.md)、[`tools/reviewer.md`](./tools/reviewer.md)。仓库当前实现已落地 `/plan`、`create_plan`、`update_plan`、`todos` 与 reviewer / verifier / transcript recover 主链；较早阶段的未实现描述以本文前置的 **v4-g 生效说明** 为准。
 
-本文按 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。
+本文按 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。
 
 ## 2026-05 Active Binding v4-g 生效说明
 
@@ -218,7 +218,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 
 ### 4.2 实施点按阶段拆分
 
-> 对齐任务卡 [`T2-P1-002.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)；当前代码尚未落地，验收锚点大多为 **PENDING**。
+> 对齐任务卡 [`T2-P1-002.md`](../agents/TASK_BOARD_002/tasks/T2-P1-002.md)；当前代码尚未落地，验收锚点大多为 **PENDING**。
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
@@ -1199,7 +1199,7 @@ EXEC 中：
 - [`tools/planner.md`](./tools/planner.md) / [`tools/create-plan.md`](./tools/create-plan.md) / [`tools/ask-question.md`](./tools/ask-question.md) / [`tools/todos.md`](./tools/todos.md) / [`tools/reviewer.md`](./tools/reviewer.md)：定义各 LLM 工具与 PLAN 模式 / reviewer 子 Agent 的逐条 schema 与契约；本文定义运行时如何把它们串起来。
 - [`multi-agent.md`](./multi-agent.md)：定义 `dispatch_agent` LLM 工具与 `AgentRegistry` / `spawn_depth` / `CascadeAbort` 基础设施；本文中 reviewer 通过 `internal subagent dispatch` 复用同一套 §14 基础设施，**不**走 `dispatch_agent` schema。
 - [`checkpoint-resume.md`](./tools/checkpoint-resume.md)：定义 checkpoint 语义、命令面和 store；本文只定义 **PlanRuntime 如何消费它**。
-- [`PLAN_SPEC.md`](../../agents/plan/PLAN_SPEC.md)：定义工程师写开发计划的规范；本文定义的是**运行时** plan file 与 TodosPanel。
+- [`PLAN_SPEC.md`](../agents/plan/PLAN_SPEC.md)：定义工程师写开发计划的规范；本文定义的是**运行时** plan file 与 TodosPanel。
 - [`session-storage.md`](./session-storage.md)：transcript 自定义事件与 `sessions.json` 扩展字段（`activeTodosId` 等）。
 
 ---
@@ -1213,7 +1213,7 @@ EXEC 中：
 - 标杆写法：[tools/read.md](./tools/read.md)
 - 目录与权限边界：[work-dir-and-data-layout.md](./work-dir-and-data-layout.md)、[permission-system.md](./permission-system.md)
 - transcript / custom entry 语义：[session-storage.md](./session-storage.md)
-- 任务与计划规范：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)、[PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md)
+- 任务与计划规范：[T2-P1-002.md](../agents/TASK_BOARD_002/tasks/T2-P1-002.md)、[PLAN_SPEC.md](../agents/plan/PLAN_SPEC.md)
 - 竞品与工具全景：[agent-tools-comparison.md](../reports/agent-tools-comparison.md)、[plan-mode-and-checkpoint-survey.md](../reports/plan-mode-and-checkpoint-survey.md)
 
 **一句话总结**：Tomcat 的 `PlanRuntime` 采用「**本地 `/plan` slash 切 PLAN/EXEC 模式与 catalog**、**`CreatePlan` LLM 工具创建 PlanFile 并内部派 reviewer**（仅辅助）、**`/plan build <plan_id/path>` 是 EXEC 唯一入口**、**built-in `todos` 改状态并返回完整 snapshot**、**计划文件做 durable source**、**cancel_token 转 pending 可续跑**、**TodoRuntime / PlanRuntime per-session OOD 挂 ChatContext**、**CLI prompt 统一显示当前模式**」的组合路线。本文是运行时主 spec，工具粒度细节散落在 [`tools/`](./tools/) 子目录。

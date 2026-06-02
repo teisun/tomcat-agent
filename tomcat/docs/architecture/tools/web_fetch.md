@@ -5,10 +5,10 @@
 **文首声明（与 `read.md` 全篇闭环口吻不同）**：
 
 - **§3、§5**：描述本期 PR-WF-A/S/D/B 合入后的**目标态行为**与代码锚点；与实现不一致处以 **`src/` 代码为准**。
-- **§1 观察指标表、§2.3–§2.4、§9、§10、§11**：描述**契约草案与路线图**（与 002 看板 [T2-P1-009](../../../agents/TASK_BOARD_002/tasks/T2-P1-009.md) 一致）；合入后以 PR 更新本文状态列。
+- **§1 观察指标表、§2.3–§2.4、§9、§10、§11**：描述**契约草案与路线图**（与 002 看板 [T2-P1-009](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md) 一致）；合入后以 PR 更新本文状态列。
 - **§2.4.5 PR-WF-P**：路线图条目（可选 LLM 摘要），**本期不实现**——仅占位字段并预留接口。
 
-写作约定见 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语、调研、目标、**§4.1/§4.2**、One-Glance、测试、风险）。
+写作约定见 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语、调研、目标、**§4.1/§4.2**、One-Glance、测试、风险）。
 
 ---
 
@@ -99,7 +99,7 @@
 
 ### 2.3 落地选型决策表（维度取舍）
 
-**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
+**代码落点、交付物、阶段**见 **[§2.4](#24-实施点路线图)**，与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工一致。**`决策`** 列钉本行裁决结论（**SHOULD**）。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -834,7 +834,7 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 ## 12. 历史决策（已被本方案取代或待定）
 
 - ~~合并 `web` 工具单 schema：参数二选一（`query` 或 `url`）~~ → **否**：schema 双口（必填字段不同）会让模型频繁参数错；权限粒度（fetch 按 domain）对不上；缓存键不同（query vs url）。**`web_fetch` 与 `web_search` 拆两个工具**（与 cc/hermes/openclaw 三家一致）。
-- ~~`web_search` 与 `web_fetch` 写在同一份 `web.md` 文档~~ → **否**：长文双口吻冲突（[ARCHITECTURE_SPEC §14 No-Stale](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）；与 read/write/edit/bash/search_files **一文件一工具**习惯不一致。**拆为两份独立满额文档**（[`web_search.md`](web_search.md) + 本文）；共享术语与风险在两篇各自完整书写；**各文仍须具备完整 §4.1 / §4.2**，**不**合并为单稿后省略。
+- ~~`web_search` 与 `web_fetch` 写在同一份 `web.md` 文档~~ → **否**：长文双口吻冲突（[ARCHITECTURE_SPEC §14 No-Stale](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)）；与 read/write/edit/bash/search_files **一文件一工具**习惯不一致。**拆为两份独立满额文档**（[`web_search.md`](web_search.md) + 本文）；共享术语与风险在两篇各自完整书写；**各文仍须具备完整 §4.1 / §4.2**，**不**合并为单稿后省略。
 - ~~沿用 `PermissionScope::Read` 维度做 fetch 域名权限~~ → **否**：fetch 是「访问外网」语义，Read 是「读本地文件」语义，复用会让权限规则纠缠；session_grants 表的 grant 类型也对不上。**新增 `PermissionScope::Domain` 第六值**，并行于 Read/Write/Bash/BashApproval/Forbidden。
 - ~~默认 `reqwest::redirect::Policy::limited(10)` follow-all~~ → **否**：reqwest 默认 policy 不区分同源跳转，open-redirect 风险大；改 **`Policy::none()`** + 自家 `isPermittedRedirect` 循环，仅同源 / `www.` 切换 follow，跨域返 `redirect_off_host`。
 - ~~PDF / 图片直接 base64 inline 进 tool result~~ → **否**：1 MB PDF → 4 MiB token；与 [`read.md` PR-RJ T3-c](read.md) 的多模态注入策略也不同（fetch 是从外部抓的，多了一道间接审批）。**改为落盘 + `persisted_output_path`**，模型自行决定是否调 `read` 读出来。
@@ -853,11 +853,11 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 
 - 兄弟工具：[`web_search.md`](web_search.md) · [`read.md`](read.md) · [`bash.md`](bash.md) · [`search_files.md`](search_files.md) · [`write.md`](write.md) · [`edit.md`](edit.md)
 - 权限总览：[`../permission-system.md`](../permission-system.md)（本文新增 `PermissionScope::Domain`，§12 已登记修订意图）
-- 看板叙事：[`agents/TASK_BOARD_002/README.md`](../../../agents/TASK_BOARD_002/README.md)、[`T2-P1-009.md`](../../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)
+- 看板叙事：[`docs/agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)、[`T2-P1-009.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)
 - 五仓对比：[`agent-tools-comparison.md`](../../reports/agent-tools-comparison.md)
 - Cursor 内置工具参考：[`cursor-builtin-tools-reference.md`](../../reports/cursor-builtin-tools-reference.md)
 - 派生工具目录：[`tool-catalog.md`](../../tool-catalog.md)
-- 规范：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 规范：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 
 ---
 

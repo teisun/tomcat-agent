@@ -4,7 +4,7 @@
 
 本文档是 **B 类**：`docs/architecture/tools/`，承接 [`plan-runtime.md`](../plan-runtime.md)、[`multi-agent.md`](../multi-agent.md) §14（基础设施）、[`create-plan.md`](./create-plan.md)（派发入口）。**实现以仓库代码为准**。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
+末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
 **说人话**：reviewer 是一个内部子 Agent，模型看不到也不能调。`ReviewKind::Plan` 负责 `create_plan` 之后的计划审稿，结论落到 `plan.review` + `create_plan.review`，仍由用户决定何时 `/plan build`；`ReviewKind::Code` 负责 EXEC 收口时的只读代码审查，结论落到 `plan.code_review` + `update_plan.code_review`，`verdict=pass` 时同回合直连 verifier，非 `pass` 时把问题交回主 Agent 修。只有 Plan kind 会使用 `allow_review_edit`：它可通过 [`update_plan`](./update-plan.md) 调整 plan todos，或通过 `edit` 改 `PlanFile.body` 正文；**唯一硬边界是不能 raw 改 frontmatter**。Code kind 则**完全只读**：不能改 plan、不能改代码、不能改 todos，只能返回结构化结论。**任何 kind 下 reviewer 都不能调 `create_plan`**（防递归套娃 + 职责单一）。
 
@@ -627,8 +627,8 @@ impl PlanRuntime {
 - 会话级待办：[todos.md](./todos.md)
 - 结构化提问：[ask-question.md](./ask-question.md)
 - 标杆写法：[read.md](./read.md)
-- 任务卡：[T2-P1-002.md](../../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
-- 文档规范：[ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 任务卡：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
+- 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 - transcript 自定义事件：[session-storage.md](../session-storage.md)
 - 完成后代码验证（verifier，与 reviewer 分拆）：[plan-exec-code-verification.md](../plan-exec-code-verification.md)（索引：[plan-todo-post-completion-verification-survey.md](../plan-todo-post-completion-verification-survey.md)）
 

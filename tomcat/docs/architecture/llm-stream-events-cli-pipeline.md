@@ -1,7 +1,7 @@
 # LLM StreamEvent → CLI/TUI 展示与 Thinking/Reasoning 协议方案
 
 > 适用范围：`tomcat` 的 `chat` 交互链路（当前 CLI，后续 TUI 复用）。
-> 关联任务：[T2-P0-006.md](../../agents/TASK_BOARD_002/tasks/T2-P0-006.md)。
+> 关联任务：[T2-P0-006.md](../agents/TASK_BOARD_002/tasks/T2-P0-006.md)。
 > 关联调研：[llm-tool-rounds-cli-display-thinking-protocol.md](../reports/llm-tool-rounds-cli-display-thinking-protocol.md)（下文简称「报告」）。
 >
 > 本文回答五件事：
@@ -110,7 +110,7 @@
 
 ### 4.1 落地选型决策表（维度取舍）
 
-**`决策`** 列钉本行裁决结论（**SHOULD**），与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1** 同向。
+**`决策`** 列钉本行裁决结论（**SHOULD**），与 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §14.1** 同向。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |

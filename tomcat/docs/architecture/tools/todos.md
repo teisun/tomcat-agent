@@ -4,7 +4,7 @@
 
 > **重要**：`todos` **仅**写 `~/.tomcat/agents/<agentId>/sessions/<session_key>/todos/<todos_id>.todo.md`。要改 plan 文件 frontmatter 里的 `todos[]`，请用 [`update_plan`](./update-plan.md)；要整盘重写计划，请用 [`create_plan`](./create-plan.md)。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
+末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
 **说人话**：`todos` 是给当前会话用的本地小白板。任何模式都能用，适合模型把多步工作拆成一份 scratchpad 清单；它不会碰 `plan.md`，也不会影响 `/plan build` 的状态机。
 
@@ -328,6 +328,6 @@ CLI 默认渲染形态：
 - PLAN / EXEC 运行时编排：[plan-runtime.md](../plan-runtime.md)
 - reviewer 子 Agent：[reviewer.md](./reviewer.md)
 - transcript / session 存储：[session-storage.md](../session-storage.md)
-- 文档规范：[ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 
 **说人话**：会话本地 scratchpad 看本文；改 `plan.md` 里的待办看 [`update-plan.md`](./update-plan.md)；整盘重写计划看 [`create-plan.md`](./create-plan.md)。

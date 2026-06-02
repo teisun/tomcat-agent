@@ -56,7 +56,7 @@ src/
 3. **宿主 API 层 (ext)** — Hostcall 协议、HostApiDispatcher、Wasm 引擎与插件管理
 4. **交互层 (api)** — CLI
 
-详见 [Architecture.md](openspec/specs/Architecture.md)。
+详见 [Architecture.md](docs/openspec/specs/Architecture.md)。
 
 ## 文档入口
 
@@ -66,10 +66,10 @@ src/
 
 ## 规范文档
 
-- [Constitution.md](openspec/specs/Constitution.md) — 项目宪法（不可违反的核心规则）
-- [编码与架构规范](openspec/specs/guides/coding/Codeing&Architecture_Spec.md)
-- [单元测试规范](openspec/specs/guides/testing/UNIT_TEST_SPEC.md)
-- [集成测试规范](openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
+- [Constitution.md](docs/openspec/specs/Constitution.md) — 项目宪法（不可违反的核心规则）
+- [编码与架构规范](docs/openspec/specs/guides/coding/Codeing&Architecture_Spec.md)
+- [单元测试规范](docs/openspec/specs/guides/testing/UNIT_TEST_SPEC.md)
+- [集成测试规范](docs/openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
 
 ## 许可
 

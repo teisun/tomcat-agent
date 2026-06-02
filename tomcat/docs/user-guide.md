@@ -834,11 +834,11 @@ cargo build --release --features standalone
 | 文档 | 内容 |
 |------|------|
 | [README.md](../README.md) | 项目简介、快速开始 |
-| [Architecture.md](../openspec/specs/Architecture.md) | 系统架构与分层设计 |
+| [Architecture.md](openspec/specs/Architecture.md) | 系统架构与分层设计 |
 | [src/infra/README.md](../src/infra/README.md) | 基础设施层（配置/日志/审计/事件总线）|
 | [src/core/llm/README.md](../src/core/llm/README.md) | LLM 模块（OpenAI 适配器、流式输出）|
 | [src/core/session/README.md](../src/core/session/README.md) | 会话管理与 CLI 设计 |
 | [src/ext/README.md](../src/ext/README.md) | Wasm 运行时与插件系统 |
 | [src/core/README.md](../src/core/README.md) | Agent 循环（多轮对话、工具调用、重试）|
 | [src/api/README.md](../src/api/README.md) | CLI / chat / render 入口层 |
-| [openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md](../openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | 集成测试日志查看方法 |
+| [INTEGRATION_TEST_LOGGING.md](openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | 集成测试日志查看方法 |

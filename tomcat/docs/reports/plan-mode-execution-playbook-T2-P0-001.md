@@ -2,11 +2,11 @@
 
 > 本报告复盘 2026-04-24 在 Cursor PLAN 模式下为 `T2-P0-001 | agent-loop-modularization` 制定开发计划的真实执行流程，提炼为可复用的执行手册。
 >
-> 读者对象：后续承接 [TASK_BOARD_002 看板](../../agents/TASK_BOARD_002/README.md)（单卡 `tasks/T2-*.md`）其它任务的工程师 Agent（Tom / Jerry / Spike），以及希望理解 Cursor PLAN 模式底层约束与最佳实践的研发人员。
+> 读者对象：后续承接 [TASK_BOARD_002 看板](docs/agents/TASK_BOARD_002/README.md)（单卡 `tasks/T2-*.md`）其它任务的工程师 Agent（Tom / Jerry / Spike），以及希望理解 Cursor PLAN 模式底层约束与最佳实践的研发人员。
 >
 > 案例计划产物：`~/.cursor/plans/agent-loop-modularization_e99e067f.plan.md`
 >
-> **历史说明（2026-05）**：本文中凡提到 `PLAN_SPEC` 的旧章节号、"7 个维度" 等表述，均对应旧版计划规范的当时写法；当前仓库请以最新 `agents/plan/PLAN_SPEC.md` 为准。
+> **历史说明（2026-05）**：本文中凡提到 `PLAN_SPEC` 的旧章节号、"7 个维度" 等表述，均对应旧版计划规范的当时写法；当前仓库请以最新 `docs/agents/plan/PLAN_SPEC.md` 为准。
 
 ---
 
@@ -25,8 +25,8 @@
 | 只读工具集 | PLAN 模式的系统提示词 | 任何 `StrReplace` / `Write` / `git commit` 等写动作都会被拒绝；只有 `Read` / `Grep` / `Glob` / `Shell`（只读命令）/ `AskQuestion` / `CreatePlan` 可用 |
 | 歧义必问 | 系统提示第 2-5 条 | 遇到"多种合理实现改动范围差很多"时**必须**用 `AskQuestion` 确认；不能自行选择 |
 | 小范围预读 | 系统提示第 5 条 | 回答问题前允许 ≤ 5 个文件 / ~20 秒的小预读，但不能做大规模探索 |
-| 计划必须经用户确认 | [Dispatcher.md § 4](../../agents/Dispatcher.md) + PLAN 模式第 6 条 | `CreatePlan` 后用户需显式 confirm，才能切到 Agent 模式进入编码 |
-| 计划须满足 7 个维度 | [PLAN_SPEC.md § 1](../../agents/plan/PLAN_SPEC.md) | 子项清单 / 目标验收 / 文件思路接口测试 / 实施顺序 / 风险 / 集成 E2E / Todo 总表；缺一不可 |
+| 计划必须经用户确认 | [Dispatcher.md § 4](agents/Dispatcher.md) + PLAN 模式第 6 条 | `CreatePlan` 后用户需显式 confirm，才能切到 Agent 模式进入编码 |
+| 计划须满足 7 个维度 | [PLAN_SPEC.md § 1](docs/agents/plan/PLAN_SPEC.md) | 子项清单 / 目标验收 / 文件思路接口测试 / 实施顺序 / 风险 / 集成 E2E / Todo 总表；缺一不可 |
 
 **后果**：如果跳过预读直接问问题，问出来的问题通常问不到点子上；如果跳过问问题直接写计划，经常会把改动范围猜错（本案例就差点把 ext/dispatcher 也强拆）。
 
@@ -38,9 +38,9 @@
 
 **动作**：一次性并行读 3 份文档：
 
-- [agents/Jerry.md](../../agents/Jerry.md) — 角色能力边界
-- [agents/Dispatcher.md](../../agents/Dispatcher.md) — 领任务 → 读上下文 → 制定计划 → 开发 → 完成的 6 步流程
-- [agents/TASK_BOARD_002/README.md](../../agents/TASK_BOARD_002/README.md) + [tasks/T2-P0-001.md](../../agents/TASK_BOARD_002/tasks/T2-P0-001.md) — 迭代索引与 T2-P0-001 任务细节
+- [agents/Jerry.md](agents/Jerry.md) — 角色能力边界
+- [agents/Dispatcher.md](agents/Dispatcher.md) — 领任务 → 读上下文 → 制定计划 → 开发 → 完成的 6 步流程
+- [docs/agents/TASK_BOARD_002/README.md](docs/agents/TASK_BOARD_002/README.md) + [tasks/T2-P0-001.md](docs/agents/TASK_BOARD_002/tasks/T2-P0-001.md) — 迭代索引与 T2-P0-001 任务细节
 
 **产出**：确认任务 ID `T2-P0-001`、优先级 P0、分支名 `feature/agent-loop-split`、看板列出的 **7 条子项** 与 **4 条验收标准**。
 
@@ -53,7 +53,7 @@
 1. `ls src/core/agent_loop/` + `ls src/ext/` + `git status` + `git branch --show-current` + `git log --oneline -5`
 2. `wc -l src/core/agent_loop/*.rs` + `wc -l src/ext/**/*.rs`
 
-**关键发现**（看板字面值 vs 真实值的**量化偏差**，参考 [PLAN_SPEC § 7.1](../../agents/plan/PLAN_SPEC.md) 问题描述要素）：
+**关键发现**（看板字面值 vs 真实值的**量化偏差**，参考 [PLAN_SPEC § 7.1](docs/agents/plan/PLAN_SPEC.md) 问题描述要素）：
 
 | 项 | 看板写 | 真实值 | 偏差含义 |
 |---|---|---|---|
@@ -107,9 +107,9 @@
 
 **动作**：得到用户回答后，**再**并行读 3 份规范：
 
-- [PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md) — 计划必须包含的 7 维度 +「说人话」辅助（先专业后口语）+ 自检清单
-- [PLAN_SKELETON.md](../../agents/plan/PLAN_SKELETON.md) — 一屏骨架模板
-- [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) — § 4 全量门禁的"写日志 + 后台 + 轮询"执行模式
+- [PLAN_SPEC.md](docs/agents/plan/PLAN_SPEC.md) — 计划必须包含的 7 维度 +「说人话」辅助（先专业后口语）+ 自检清单
+- [PLAN_SKELETON.md](docs/agents/plan/PLAN_SKELETON.md) — 一屏骨架模板
+- [INTEGRATION_MERGE_AND_ACCEPTANCE.md](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) — § 4 全量门禁的"写日志 + 后台 + 轮询"执行模式
 
 **为什么最后才读**：
 - 规范文档**是写计划的格式约束**，不是内容来源。先把内容确定了，再套格式。
@@ -188,7 +188,7 @@ flowchart TD
 - **问题轮次**：1 次 `AskQuestion`（2 问并列）
 - **计划产出**：1 次 `CreatePlan`，约 550 行 markdown + 11 条 YAML todos
 - **从"领任务"到"计划落盘"耗时**：约 5-8 分钟（取决于 IO 速度）
-- **最终计划对齐度**：PLAN_SPEC 七维度全满足，[自检清单](../../agents/plan/PLAN_SPEC.md) 13 条全勾选
+- **最终计划对齐度**：PLAN_SPEC 七维度全满足，[自检清单](docs/agents/plan/PLAN_SPEC.md) 13 条全勾选
 
 ---
 
@@ -356,7 +356,7 @@ When writing mermaid diagrams:
 
 ### 8.6 与 Dispatcher.md / PLAN_SPEC.md 的关系
 
-**项目侧约束**（本仓库 `agents/Dispatcher.md` § 4 + `agents/plan/PLAN_SPEC.md`）与 **Cursor 侧约束**（8.2 系统提示词）是**两层叠加**的：
+**项目侧约束**（本仓库 `docs/agents/Dispatcher.md` § 4 + `docs/agents/plan/PLAN_SPEC.md`）与 **Cursor 侧约束**（8.2 系统提示词）是**两层叠加**的：
 
 | 层 | 约束方 | 内容 |
 |---|---|---|
@@ -391,12 +391,12 @@ L1 决定 **"怎么走"**（流程与工具），L2 决定 **"走完要交什么
 
 ## 九、引用
 
-- [Dispatcher.md § 4 制定开发计划](../../agents/Dispatcher.md)
-- [PLAN_SPEC.md 全文](../../agents/plan/PLAN_SPEC.md)
-- [PLAN_SKELETON.md 一屏骨架](../../agents/plan/PLAN_SKELETON.md)
-- [INTEGRATION_MERGE_AND_ACCEPTANCE.md § 4 全量门禁](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md)
-- [tasks/T2-P0-001.md](../../agents/TASK_BOARD_002/tasks/T2-P0-001.md)
-- [RUST_FILE_LINES_SPEC.md § A 测试分离](../../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
-- 历史计划范例：[PLAN_EXAMPLE_TASK21.md](../../agents/plan/PLAN_EXAMPLE_TASK21.md)
+- [Dispatcher.md § 4 制定开发计划](agents/Dispatcher.md)
+- [PLAN_SPEC.md 全文](docs/agents/plan/PLAN_SPEC.md)
+- [PLAN_SKELETON.md 一屏骨架](docs/agents/plan/PLAN_SKELETON.md)
+- [INTEGRATION_MERGE_AND_ACCEPTANCE.md § 4 全量门禁](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md)
+- [tasks/T2-P0-001.md](docs/agents/TASK_BOARD_002/tasks/T2-P0-001.md)
+- [RUST_FILE_LINES_SPEC.md § A 测试分离](openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md)
+- 历史计划范例：[PLAN_EXAMPLE_TASK21.md](docs/agents/plan/PLAN_EXAMPLE_TASK21.md)
 - 本案例计划产物：`~/.cursor/plans/agent-loop-modularization_e99e067f.plan.md`（用户环境本地）
 - Cursor PLAN 模式系统提示词原文：见 § 8.2（本报告直接披露）

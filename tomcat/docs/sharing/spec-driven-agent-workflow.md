@@ -3,8 +3,8 @@
 > 组内技术分享 · 2026-03
 >
 > **更新（2026-04-22）**：文内「TASK_BOARD.md」与「changes/001-mvp/」属于当时的工作流示意。实际工程位置已调整：
-> - 当前迭代看板 → [`agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)
-> - 路线图 → [`openspec/specs/Product_Brief.md`](../../openspec/specs/Product_Brief.md)（P0-P9）
+> - 当前迭代看板 → [`docs/agents/TASK_BOARD_002/README.md`](docs/agents/TASK_BOARD_002/README.md)
+> - 路线图 → [`Product_Brief.md`](openspec/specs/Product_Brief.md)（P0-P9）
 > - 新迭代不再创建 `changes/` 四件套，立项信息直接写入 Board。
 
 ---
@@ -151,8 +151,8 @@
 
 | 角色 | 数量 | 职责 | 关键约束 |
 |------|------|------|---------|
-| **Tom / Jerry / Spike** | 3 | 从看板领任务、读规范、写计划、编码、自测；标 `PENDING` 前须按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成分支侧集成与 E2E | 一次只领一个任务；计划须经人类确认 |
-| **Nibbles** | 1 | 合并到 develop；按同一交付文档复跑命令；全量 review 与补漏；全量验收后更新 DONE | 合并前须人类选择范围；develop 侧独有要求见 [Nibbles.md](../../agents/Nibbles.md) §4（合并后文档与测试） |
+| **Tom / Jerry / Spike** | 3 | 从看板领任务、读规范、写计划、编码、自测；标 `PENDING` 前须按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成分支侧集成与 E2E | 一次只领一个任务；计划须经人类确认 |
+| **Nibbles** | 1 | 合并到 develop；按同一交付文档复跑命令；全量 review 与补漏；全量验收后更新 DONE | 合并前须人类选择范围；develop 侧独有要求见 [Nibbles.md](agents/Nibbles.md) §4（合并后文档与测试） |
 | **人类** | 1+ | 写规范、拆任务、审批计划、处理阻塞决策 | 不直接编码，把控关键节点 |
 
 **为什么 Agent 角色相同但要多个？** 并行开发——Tom 做插件系统的同时，Jerry 在做 CLI，Spike 在做 Agent Loop。互不阻塞，各自分支。
@@ -304,8 +304,8 @@
 
 **集成与 E2E 谁写、何时写？**
 
-- **工程师**在功能分支按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 编写/补齐集成与 E2E（黑盒、`pub` API），标 `PENDING_INTEGRATION` 前须通过交付文档 **§4**（全量验收）。
-- **Nibbles** 合并后**复跑同一文档**中的命令与顺序，并依 [Nibbles.md](../../agents/Nibbles.md) **§4**（合并后文档与测试）做全量 review 与补漏，**不得**因分支已测而省略复跑。
+- **工程师**在功能分支按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 编写/补齐集成与 E2E（黑盒、`pub` API），标 `PENDING_INTEGRATION` 前须通过交付文档 **§4**（全量验收）。
+- **Nibbles** 合并后**复跑同一文档**中的命令与顺序，并依 [Nibbles.md](agents/Nibbles.md) **§4**（合并后文档与测试）做全量 review 与补漏，**不得**因分支已测而省略复跑。
 - 单元测试仍以工程师在开发时维护为主；**行为验收**以交付文档中的集成与 E2E 为准。
 
 ---
@@ -417,8 +417,8 @@ docs/status/
 
 **参考资料**
 
-- [Dispatcher.md](../../agents/Dispatcher.md) — 七步工作流
-- [TASK_BOARD_002/README.md](../../agents/TASK_BOARD_002/README.md) — 当前迭代任务索引（单卡见 `agents/TASK_BOARD_002/tasks/`）
-- [Constitution.md](../../openspec/specs/Constitution.md) — 行为宪法
-- [PLAN_SPEC.md](../../agents/plan/PLAN_SPEC.md) — 计划规范
-- [Nibbles.md](../../agents/Nibbles.md) — 集成测试 Agent 流程
+- [Dispatcher.md](agents/Dispatcher.md) — 七步工作流
+- [TASK_BOARD_002/README.md](docs/agents/TASK_BOARD_002/README.md) — 当前迭代任务索引（单卡见 `docs/agents/TASK_BOARD_002/tasks/`）
+- [Constitution.md](openspec/specs/Constitution.md) — 行为宪法
+- [PLAN_SPEC.md](docs/agents/plan/PLAN_SPEC.md) — 计划规范
+- [Nibbles.md](agents/Nibbles.md) — 集成测试 Agent 流程

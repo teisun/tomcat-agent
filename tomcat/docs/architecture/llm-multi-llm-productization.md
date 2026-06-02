@@ -4,7 +4,7 @@
 >
 > **承接**：本文聚焦「**多模型/多后端如何变成用户可选、可降级、可计量的产品能力**」；provider 主骨架与 wire 接线见 [`llm-multiprovider-integration.md`](llm-multiprovider-integration.md)，跨 turn 推理续传见 [`llm-openai-deepseek-reasoning-continuity.md`](llm-openai-deepseek-reasoning-continuity.md)，stream 事件管线见 [`llm-stream-events-cli-pipeline.md`](llm-stream-events-cli-pipeline.md)。三者是本方案的**前置事实**，本文不重复其 wire 细则。
 >
-> **写法**：遵循 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)：文首总图 → §1 术语 → §2 竞品调研 → §3 目标 → §4 已定稿选型与实施 → §5 协议 → §6 One-Glance → §7 时序 → §8 状态机 → §9 配置 → §10 错误模型 → §11 测试矩阵 → §12 风险 → §13 历史决策。
+> **写法**：遵循 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)：文首总图 → §1 术语 → §2 竞品调研 → §3 目标 → §4 已定稿选型与实施 → §5 协议 → §6 One-Glance → §7 时序 → §8 状态机 → §9 配置 → §10 错误模型 → §11 测试矩阵 → §12 风险 → §13 历史决策。
 >
 > **调研对象（本工作区磁盘可稽核）**：`pi_agent_rust/`、`hermes-agent/`、`openclaw/`、`pi-mono/`、`codex/`。所有外部证据均落到具体仓库文件路径。
 

@@ -1,6 +1,6 @@
 # 初始化体验与资源内嵌方案
 
-本文为 [Architecture](../../openspec/specs/Architecture.md) 的补充设计，描述如何将初始化流程从 6+ 步手工操作简化为「下载二进制 + `tomcat init`」两步完成。
+本文为 [Architecture](openspec/specs/Architecture.md) 的补充设计，描述如何将初始化流程从 6+ 步手工操作简化为「下载二进制 + `tomcat init`」两步完成。
 
 涉及三个关键改造：资源内嵌与自动释放、WasmEdge 静态链接、增强 `tomcat init` 交互式向导。
 
@@ -75,7 +75,7 @@
         └── (80+ Node.js 兼容 shim) # 内嵌资源自动释放目标
 ```
 
-各 agent 还可具备 `agents/<agentId>/plugins/`（agent 专属插件）；根级 `plugins/` 为全局共享，与 [directory-structure](../../docs/architecture/directory-structure.md) 一致。
+各 agent 还可具备 `agents/<agentId>/plugins/`（agent 专属插件）；根级 `plugins/` 为全局共享，与 [directory-structure](../architecture/directory-structure.md) 一致。
 
 ### 与现有代码的映射
 
@@ -371,7 +371,7 @@ tomcat chat            # 开始使用
 
 ## 9. 引用
 
-- [directory-structure](../../docs/architecture/directory-structure.md) — 工作目录结构（权威树形说明）
+- [directory-structure](../architecture/directory-structure.md) — 工作目录结构（权威树形说明）
 - [work-dir-and-data-layout](../../docs/architecture/work-dir-and-data-layout.md) — 工作目录与数据布局
 - [infrastructure-layer](../../docs/architecture/infrastructure-layer.md) — 基础设施层
 - [host-core-layer](../../docs/architecture/host-core-layer.md) — 宿主核心层

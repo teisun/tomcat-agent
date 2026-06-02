@@ -1,8 +1,8 @@
 # `checkpoint-resume`：Checkpoint 快照、回滚命令与断点续跑
 
-本文档是 **T2-P1-001 | checkpoint-resume** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。落地依赖 **T2-P0-007**「中断/恢复 + transcript 完整性」（见 [`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md) **§14.1**「T-007 最小版 vs 完整版」），并被 **T2-P1-002**「PLAN 模式增强」消费（提供 `CheckpointStore`，见 [README §4](../../../agents/TASK_BOARD_002/README.md)）。**实现以仓库代码为准**；本节只保留**已定稿的契约与行为**。
+本文档是 **T2-P1-001 | checkpoint-resume** 的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`）。落地依赖 **T2-P0-007**「中断/恢复 + transcript 完整性」（见 [`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md) **§14.1**「T-007 最小版 vs 完整版」），并被 **T2-P1-002**「PLAN 模式增强」消费（提供 `CheckpointStore`，见 [README §4](../../agents/TASK_BOARD_002/README.md)）。**实现以仓库代码为准**；本节只保留**已定稿的契约与行为**。
 
-> 章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议 → One-Glance → …）。本方案承接调研报告 [`plan-mode-and-checkpoint-survey.md`](../reports/plan-mode-and-checkpoint-survey.md)（**§3 / §4 / §8**）的「**Plan 与 Checkpoint 模块边界清晰、按里程碑分阶段交付**」结论。
+> 章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议 → One-Glance → …）。本方案承接调研报告 [`plan-mode-and-checkpoint-survey.md`](../reports/plan-mode-and-checkpoint-survey.md)（**§3 / §4 / §8**）的「**Plan 与 Checkpoint 模块边界清晰、按里程碑分阶段交付**」结论。
 
 **说人话**：本文按架构规范把「词怎么叫、别人怎么做的、我们定啥、协议长啥样、文件谁管谁、咋测、有啥坑」一次写全；Plan 面板与 `todo` / `/plan` / `/goal` 的上层编排另见 [`plan-runtime.md`](../plan-runtime.md)，不在这里糊成一团。
 
@@ -239,7 +239,7 @@
 | 非目标 | 推给 / 理由 | 说人话 |
 |--------|-------------|--------|
 | **跨 session 检查点（"把 A 会话的 ckpt 应用到 B 会话"）** | 需要重写 transcript 重放语义，本期不开 | A 不能借 B 的衣服。 |
-| **PLAN 模式 / `agents/plan/<timestamp>.md` 文件锁与执行面板** | T2-P1-002 | 那是 PlanRuntime 的活儿。 |
+| **PLAN 模式 / `docs/agents/plan/<timestamp>.md` 文件锁与执行面板** | T2-P1-002 | 那是 PlanRuntime 的活儿。 |
 | **里程碑自动命名 ckpt 的 PlanRuntime 策略** | 实现 hook 留好（`Manual{label}`、`Milestone{m_id}`），但**何时调**由 T2-P1-002 决定 | 钩子先拉好，挂什么由计划侧决定。 |
 | **TUI `/restore` 子菜单 + 时间线 UI**（**Cursor 形态**：聊天面板里点时间线 ckpt 直接预览 / Restore） | T2-P0-008 TUI 强化；当期 CLI 用 `--dry-run` + `ckpt diff` 充当「预览」 | 终端可视化交给 TUI；Cursor 那种聊天里点时间线本期不做。 |
 | **撤销终端 / 进程副作用**（**Cursor 同款边界**：DB 迁移、`pnpm install`、`docker run` 等不可撤） | 物理不可逆；rollback 仅还原 `agent_workspace_dir` 文件树 | 能回文件，回不了外部世界。 |
@@ -254,7 +254,7 @@
 
 ### 4.1 落地选型决策表（维度取舍）
 
-**核对**：每个可辩驳分叉独占一行；读者能回答「若不采纳本行**入选理由**，代价是什么」。**落地点、交付物、阶段**见 **[§4.2](#42-实施点按-pr-拆分)**（[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工）。「决策」列钉本行裁决结论，**SHOULD**，与 **§14.1** 同向。
+**核对**：每个可辩驳分叉独占一行；读者能回答「若不采纳本行**入选理由**，代价是什么」。**落地点、交付物、阶段**见 **[§4.2](#42-实施点按-pr-拆分)**（[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§4.1 / §4.2** 分工）。「决策」列钉本行裁决结论，**SHOULD**，与 **§14.1** 同向。
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -275,7 +275,7 @@
 
 ### 4.2 实施点（按 PR 拆分）
 
-> 顺序与看板 [`T2-P1-001.md`](../../../agents/TASK_BOARD_002/tasks/T2-P1-001.md)「**Checkpoint 数据模型 → 写入时机 → `/restore` CLI → 续跑**」一一对应。**T2-P1-002 PlanRuntime 只能消费 §4.2 给出的稳定 API**（[`plan-mode-and-checkpoint-survey.md §8.3`](../reports/plan-mode-and-checkpoint-survey.md)）。
+> 顺序与看板 [`T2-P1-001.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-001.md)「**Checkpoint 数据模型 → 写入时机 → `/restore` CLI → 续跑**」一一对应。**T2-P1-002 PlanRuntime 只能消费 §4.2 给出的稳定 API**（[`plan-mode-and-checkpoint-survey.md §8.3`](../reports/plan-mode-and-checkpoint-survey.md)）。
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
@@ -283,7 +283,7 @@
 | **PR-CKB** | **`TurnEnd` + `Interrupt`**（+ Manual / Milestone API）；**dedup** `(session_id, turn_id, kind)`；**无 ToolPre**；消费 **C15** 软中断收尾后的 `record(Interrupt)` | `src/api/chat/mod.rs`（TurnEnd）、`src/core/agent_loop/run.rs`（Interrupt）、`src/core/checkpoint/store.rs` | `turn_end_writes_checkpoint`、`interrupt_writes_checkpoint_after_partial_persist`；**C15/G9**：`hangup_during_agent_run_writes_interrupt_ckpt_after_partial`（**拟定**；信号/mock cancel 归 T-007） | 只钉回合末与中断；跑一半关窗走同一条 Interrupt 拍照链。 |
 | **PR-CKC** | **`/restore [--path …]`** + `/ckpt …`；`restore` 实现 pathspec checkout；**TurnEnd** pre-rollback；**条件 superseded**（§5.4）；**无** `/ckpt prune` | `parse.rs`、`dispatch.rs`、`shadow_git.rs` | `restore_path_checkout_*`、`restore_turn_end_supersedes_transcript`、`restore_manual_ckpt_no_superseded`、`pre_rollback_only_for_turn_end` | restore 主入口。 |
 | **PR-CKD** | `compute_resume_plan`（**恒 `Continue`**）+ **启动期默认 `prune`**（**后台、不阻塞主线程**，见 §9）+ `init_context_state` / hydrate（**跳过 `superseded`**）；`SessionEntry.last_checkpoint_id`；与 `--resume` 合流 | `src/api/chat/mod.rs`、`src/core/session/store.rs`、`src/core/checkpoint/resume.rs`（**拟定**） | `resume_plan_always_continue`、`startup_prune_scheduled_without_blocking_readline`、`hydrate_skips_superseded_messages` | 重启接上次；清盘只在启动。 |
-| **PR-CKE** | 本文件冻结合入；与 [README §4](../../../agents/TASK_BOARD_002/README.md)、[`tool-catalog.md`](../../tool-catalog.md)（说明 ckpt 不入 catalog）、[`work-dir-and-data-layout.md §2`](../work-dir-and-data-layout.md)（新增 `checkpoints/` 子目录）、[`audit-log.md`](../audit-log.md)（rollback 写一条 hostcall 审计）、[`interrupt-and-cancellation.md §14.1`](../interrupt-and-cancellation.md) 交叉引用；**门禁**：分组测试登记 | `docs/architecture/tools/checkpoint-resume.md`、`docs/architecture/work-dir-and-data-layout.md`、`docs/tool-catalog.md`、`scripts/test-groups.sh` | 不计代码 PR；门禁组登记 | 字和门禁对齐。 |
+| **PR-CKE** | 本文件冻结合入；与 [README §4](../../agents/TASK_BOARD_002/README.md)、[`tool-catalog.md`](../../tool-catalog.md)（说明 ckpt 不入 catalog）、[`work-dir-and-data-layout.md §2`](../work-dir-and-data-layout.md)（新增 `checkpoints/` 子目录）、[`audit-log.md`](../audit-log.md)（rollback 写一条 hostcall 审计）、[`interrupt-and-cancellation.md §14.1`](../interrupt-and-cancellation.md) 交叉引用；**门禁**：分组测试登记 | `docs/architecture/tools/checkpoint-resume.md`、`docs/architecture/work-dir-and-data-layout.md`、`docs/tool-catalog.md`、`scripts/test-groups.sh` | 不计代码 PR；门禁组登记 | 字和门禁对齐。 |
 | **PR-CKF（拟定）** | **`start_git_preflight`**：与 `start_search_tools_preflight` 并列；Unix detached 安装 git；`WIRE_GIT_PREFLIGHT` + stderr；**仅** `[preflight] auto_install_git`；`NoopStore → ShadowGitStore` 惰性切换 | `src/api/chat/preflight.rs`、`src/api/chat/mod.rs`、`src/api/chat/events/stderr.rs`、`src/infra/config/types.rs`、`AgentLoopConfig` 装配 | `preflight_test.rs` 扩展、`tests/chat_git_preflight_tests.rs`（**拟定**） | 没 git 后台补，不挡聊天。 |
 
 集成与并发组登记见 `tests/checkpoint_resume_tests.rs`、`scripts/test-groups.sh`。下文按实施点展开**技术要点 + ASCII**；**交付边界与代码落点仍以表为准**，避免与表冲突。
@@ -421,12 +421,12 @@
 #### 4.2.5 PR-CKE：文档与门禁
 
 - 本文件冻结合入；与下列方案交叉引用：
-  - [README §4](../../../agents/TASK_BOARD_002/README.md)：T2-P1-001 链接到本文件 §4.2 PR 表。
+  - [README §4](../../agents/TASK_BOARD_002/README.md)：T2-P1-001 链接到本文件 §4.2 PR 表。
   - [`tool-catalog.md`](../../tool-catalog.md)：补一段「checkpoint **不**注册为 LLM 工具」的备注，避免后续 reviewer 误以为遗漏。
   - [`work-dir-and-data-layout.md §2`](../work-dir-and-data-layout.md)：新增 `agents/<id>/checkpoints/` 行。
   - [`audit-log.md`](../audit-log.md)：列出 `session.restore` hostcall 审计记录。
   - [`interrupt-and-cancellation.md §14.1`](../interrupt-and-cancellation.md)：在「T-007 完整版」附注里回链本文件 §4.2.4。
-- **门禁**：在 `scripts/test-groups.sh` 新增 `checkpoint` 分组（包含 `tests/checkpoint_resume_tests.rs` / `tests/checkpoint_chat_slash_tests.rs`（**拟定**））；交付前按 [INTEGRATION_TEST_SPEC §7](../../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 执行。
+- **门禁**：在 `scripts/test-groups.sh` 新增 `checkpoint` 分组（包含 `tests/checkpoint_resume_tests.rs` / `tests/checkpoint_chat_slash_tests.rs`（**拟定**））；交付前按 [INTEGRATION_TEST_SPEC §7](../../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 执行。
 
 **说人话**：代码合进主线时，看板、工具目录、数据布局、审计、中断文档和测试分组都要指到同一份契约，避免「文档写了、CI 没跑」。
 
@@ -454,7 +454,7 @@
 
 | 问题 | 答案 |
 |------|------|
-| **`ResumePlan` vs PLAN 模式** | **`ResumePlan` / `compute_resume_plan`** 指 **chat 进程启动**时是否接着 hydrate transcript（本版 **恒 `Continue`**）；**与** T2-P1-002 **PLAN 模式**（`agents/plan/*.md`、执行面板）**无关**。 |
+| **`ResumePlan` vs PLAN 模式** | **`ResumePlan` / `compute_resume_plan`** 指 **chat 进程启动**时是否接着 hydrate transcript（本版 **恒 `Continue`**）；**与** T2-P1-002 **PLAN 模式**（`docs/agents/plan/*.md`、执行面板）**无关**。 |
 | **断电 / torn** | transcript、工作区、影子 git **三条事实源**可能不一致；本版 **不**在启动自动 `git checkout` 对齐；由 **LLM 后续 turn** 与 **显式 `/restore`** 处理。 |
 | **Ctrl+D（EOF）在 `u>` 等输入时** | 当前实现多为 **直接退出**、**不** `cancel_token`；与 **「`AgentLoop::run` 运行中关终端 ≈ interrupt」** 分离；后者须在 PR 与测试写明。 |
 | **`retention_max=50` 限什么** | 限 **`CheckpointStore` 元数据清单**（及 `/ckpt list` 可见窗口）长度，**不是**「git 只能 commit 50 次」；详见 [§9](#9-配置与环境变量极简)。 |
@@ -866,10 +866,10 @@ sequenceDiagram
 - 同族架构方案：[`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md)（T2-P0-007 的 T-007 完整版收口）
 - 数据布局：[`work-dir-and-data-layout.md`](../work-dir-and-data-layout.md)、[`session-storage.md`](../session-storage.md)
 - 审计：[`audit-log.md`](../audit-log.md)（restore 走一条 hostcall 审计）
-- 后置依赖：[`agents/TASK_BOARD_002/tasks/T2-P1-002.md`](../../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)（PlanRuntime 消费 `CheckpointStore`）
+- 后置依赖：[`docs/agents/TASK_BOARD_002/tasks/T2-P1-002.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)（PlanRuntime 消费 `CheckpointStore`）
 - 上层运行时编排：[`plan-runtime.md`](../plan-runtime.md)（定义 PLAN 模式 / `todos` / `/plan` / `/goal` / reviewer / TodosPanel 如何消费本方案）
 - 上层 LLM 工具与子 Agent 契约：[`planner.md`](./planner.md)（PLAN 模式整体规范）、[`create-plan.md`](./create-plan.md)（`PlanRecord` 写入器 + 内联 reviewer 派发；milestone checkpoint hook 在此挂接）、[`ask-question.md`](./ask-question.md)（PLAN 模式结构化提问）、[`todos.md`](./todos.md)（执行态待办 + TodosPanel；里程碑完成回调触发 milestone checkpoint）、[`reviewer.md`](./reviewer.md)（审稿子 Agent 派生契约）
-- 工具规范：[`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（本文遵循 §1→§13 骨架）
+- 工具规范：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（本文遵循 §1→§13 骨架）
 - 标杆参考：[`tools/read.md`](./read.md)（§1 / §4.1 / §4.2 写法）
 
 **说人话**：想深挖某一块就顺着上面链接跳；写代码时以 `types.rs` / `store.rs` 和本文件 §5 为准。

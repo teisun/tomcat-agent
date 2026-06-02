@@ -27,7 +27,7 @@
 
 对用户与 agent 装配来说，稳定态只有 `Chat / Planning / Pending / Executing`；`Completed` 只在 `update_plan` 收口到 `finalize_completed_to_chat()` 之间瞬时存在。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
+末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
 **说人话**：PLAN 模式是会话开关，EXEC 模式是 PLAN 结束后用户拍板开干的状态——`/plan` 进 PLAN、`/plan exit` 退出回 CHAT、`/plan build <plan_id/path>` 进 EXEC；完成由 runtime 自动派生（全 todos completed），中断由 cancel_token 自动转 pending。进 PLAN/EXEC 模式后，runtime 给 LLM **在 system 区段尾部**注一段 reminder、把 catalog 切到模式集，并通过统一 prompt helper 对外显示 `u[Plan:planning]>` / `u[Plan:executing]>` 等 CLI prompt。
 
@@ -804,8 +804,8 @@ EXEC 中：
 - 审稿子 Agent 契约：[reviewer.md](./reviewer.md)
 - 子 Agent 基础设施：[multi-agent.md](../multi-agent.md)
 - 标杆写法：[read.md](./read.md)
-- 任务卡：[T2-P1-002.md](../../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
-- 文档规范：[ARCHITECTURE_SPEC.md](../../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
+- 任务卡：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
+- 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 - transcript 自定义事件：[session-storage.md](../session-storage.md)
 - PLAN 模式行为契约参考：[plan-mode-execution-playbook-T2-P0-001.md](../../reports/plan-mode-execution-playbook-T2-P0-001.md)
 

@@ -58,7 +58,7 @@
 
 ### 2.7 Tomcat（规划态）
 
-- **当前**：无内建 PlanRuntime；任务 **T2-P1-002** 描述目标闭环（执行面板、子 Agent review、文件锁、`agents/plan/<timestamp>.md`、里程碑拆分等）。  
+- **当前**：无内建 PlanRuntime；任务 **T2-P1-002** 描述目标闭环（执行面板、子 Agent review、文件锁、`docs/agents/plan/<timestamp>.md`、里程碑拆分等）。  
 - **Cursor 侧**：仓库内 [`plan-mode-execution-playbook-T2-P0-001.md`](./plan-mode-execution-playbook-T2-P0-001.md) 描述的是 **IDE PLAN 工作流**，与 Tomcat 运行时分离。
 
 ---
@@ -104,7 +104,7 @@
 
 ### 3.8 Tomcat — **规划中（T2-P1-001）**
 
-- **目标**（`tomcat/agents/TASK_BOARD_002/tasks/T2-P1-001.md`）：`CheckpointStore`、写入时机、**`tomcat session rollback <id>`**、基于 transcript + checkpoint 的 **resume**。  
+- **目标**（`docs/agents/TASK_BOARD_002/tasks/T2-P1-001.md`）：`CheckpointStore`、写入时机、**`tomcat session rollback <id>`**、基于 transcript + checkpoint 的 **resume**。  
 - **与上下文文档**：[`interrupt-and-cancellation.md`](../architecture/interrupt-and-cancellation.md) 将跨 session resume / Checkpoint 标为 **T2-P1-001** 范围。
 
 ---
@@ -143,13 +143,13 @@
 1. **若目标是 Hermes 级「改码可撤销」**：应对齐 **Checkpoint-A**（工具前钩子 + 用户命令回滚），与是否实现 **PlanRuntime** 无关。  
 2. **若目标是 cc-fork 级「先读后写」**：应对齐 **权限 mode + Exit 审批**，可与 **CheckpointStore** 分阶段交付。  
 3. **若目标是 OpenClaw 级「轻量计划表」**：可先上 **结构化 `update_plan` 等价物**（面板消费），再决定是否把 **里程碑** 持久化进 checkpoint 元数据。  
-4. **T2-P1-002 依赖 T2-P1-001** 合理：**文件锁 / 多进程写 `agents/plan/*.md`** 需要稳定快照或版本向量；但 **语义上**仍建议保持 **「会话快照」与「计划工具」模块边界清晰**，避免把「压缩摘要」与「工作区回滚」混名。
+4. **T2-P1-002 依赖 T2-P1-001** 合理：**文件锁 / 多进程写 `docs/agents/plan/*.md`** 需要稳定快照或版本向量；但 **语义上**仍建议保持 **「会话快照」与「计划工具」模块边界清晰**，避免把「压缩摘要」与「工作区回滚」混名。
 
 ---
 
 ## 7. 参考路径（仓库内）
 
-- Tomcat 任务：`tomcat/agents/TASK_BOARD_002/tasks/T2-P1-001.md`、`T2-P1-002.md`  
+- Tomcat 任务：`docs/agents/TASK_BOARD_002/tasks/T2-P1-001.md`、`T2-P1-002.md`  
 - 工具对比总表：`tomcat/docs/reports/agent-tools-comparison.md`  
 - cc-fork-01：`src/tools/EnterPlanModeTool/EnterPlanModeTool.ts`、`src/tools/ExitPlanModeTool/ExitPlanModeV2Tool.ts`  
 - openclaw：`src/agents/tools/update-plan-tool.ts`、`src/agents/openclaw-tools.update-plan.test.ts`  
@@ -167,7 +167,7 @@
 
 ### 8.1 为什么适合先分开
 
-1. **问题域不同**：`CheckpointStore` 管 **可恢复状态 / rollback / resume**（偏基础设施）；`PlanRuntime` 管 **计划拆解、review、执行面板、`agents/plan/*.md`、文件锁**（偏产品编排）。边界清晰后，单测与回滚验收不依赖计划面板是否已存在。  
+1. **问题域不同**：`CheckpointStore` 管 **可恢复状态 / rollback / resume**（偏基础设施）；`PlanRuntime` 管 **计划拆解、review、执行面板、`docs/agents/plan/*.md`、文件锁**（偏产品编排）。边界清晰后，单测与回滚验收不依赖计划面板是否已存在。  
 2. **依赖方向保持单向**：与看板 **T2-P1-002 依赖 T2-P1-001** 一致——**Plan 消费 CheckpointStore（或其稳定子集）**，而不是「没有 PLAN 就不能做 checkpoint」。Hermes 式「只开回滚、不用 todo」在 Tomcat 仍应可行。  
 3. **验收可拆分**：先完成 **中断 → 重启 → resume** 与 **`session rollback`**，再叠 **计划 / review / 锁**；避免一个 PR 同时扛存储语义与交互状态机。
 

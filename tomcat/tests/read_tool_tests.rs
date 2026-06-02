@@ -10,7 +10,7 @@
 //!   `ChatMessageContentPart::image_b64` / `file_b64` helper（PR-RJ-0
 //!   重构后签名 `(mime, &Path)`），完成多模态注入下一条 user message。
 //!
-//! 全部用例满足 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
+//! 全部用例满足 [INTEGRATION_TEST_SPEC.md](../docs/openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)
 //! §9.0 强制门禁：入口调用 `common::setup_logging()`，每个用例独立 `info_span!`，
 //! 在 Arrange / Act / Assert 三阶段各至少落一条 `tracing::info!`。
 

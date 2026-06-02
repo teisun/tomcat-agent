@@ -4,14 +4,14 @@
 
 ### 2026-05-07 | 四工具与中断文档及 openspec 工作流同步
 
-- **文档**：`docs/architecture/tools/{read,write,edit,bash,search_files}.md`、`interrupt-and-cancellation.md`；`agents/plan/{PLAN_SPEC,PLAN_SKELETON,DEBUG_SPEC}.md`；openspec 中 Architecture、Constitution 与 `ARCHITECTURE_SPEC` / `DOCUMENTATION_GUIDE` / `MODULE_README_SPEC`。
+- **文档**：`docs/architecture/tools/{read,write,edit,bash,search_files}.md`、`interrupt-and-cancellation.md`；`docs/agents/plan/{PLAN_SPEC,PLAN_SKELETON,DEBUG_SPEC}.md`；openspec 中 Architecture、Constitution 与 `ARCHITECTURE_SPEC` / `DOCUMENTATION_GUIDE` / `MODULE_README_SPEC`。
 - **动机**：与已落地 T2 工具契约及中断语义对齐，收紧宪法与工作流指南表述，降低实现与 spec 漂移。
 
 ### 2026-05-07 | bash AST 默认 `enabled=false` + P1 任务 T2-P1-009
 
 - **动机**：`detect_unsupported` 手写粗匹配易误伤（意图/对标见本机 Cursor 计划 `~/.cursor/plans/bash_detect_unsupported_对比_ac5d829c.plan.md`）。
 - **代码**：`DefaultPrimitiveExecutor::new` 默认 `BashAstChecker::new(false, [], [])`；`ToolsBashAstConfig::default().enabled = false`；[bash-pr-l-scope.md §4](../architecture/tools/bash-pr-l-scope.md) 默认值与任务卡同步。
-- **看板**：新建 [T2-P1-009.md](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)（简卡 + 计划外链）；[README.md](../../agents/TASK_BOARD_002/README.md) 索引；[T2-P0-016.md](../../agents/TASK_BOARD_002/tasks/T2-P0-016.md) bash 子项链至 T2-P1-009。
+- **看板**：新建 [T2-P1-009.md](docs/agents/TASK_BOARD_002/tasks/T2-P1-009.md)（简卡 + 计划外链）；[README.md](docs/agents/TASK_BOARD_002/README.md) 索引；[T2-P0-016.md](docs/agents/TASK_BOARD_002/tasks/T2-P0-016.md) bash 子项链至 T2-P1-009。
 - **测试**：`suite_test` 三条 `bash_ast_*` 仍显式 `.with_bash_ast(BashAstChecker::new(true, …))`，行为不变。
 
 ### 2026-05-07 | T2-P0-016 子项 `bash` PR-L（T3 AST allowlist + SandboxBackend 骨架）落地
@@ -98,7 +98,7 @@
 - **T3-K secrets**：`write_file_impl` 在 LF 规范化后、`.bak` / 落盘之前调 `scan_new_content_for_secrets(original_or_empty, final_text)`（与 edit 共用函数，仅扫**新引入**的命中，避免 false-positive）；命中走 `require_user_confirmation(PrimitiveOperation::Write, …)`，拒 → `AppError::Primitive("SecretsRejected: …")` + 审计 `success=false / user_approved=false` + 磁盘字节级未变（新建场景文件根本不会被创建）。
 - **测试**：`cargo test --lib` 730 通过（674 → 704 → 714 → 730，本卡 +16：5 PR-C/PR-命名 + 3 PR-G + 3 T3-K + 5 config）；`cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` 全绿。
 - **不变量**：`PrimitiveExecutor::write_file` trait 方法名 / dispatcher `("fs"|"primitive","writeFile")` / 所有 mock / `wasmedge_e2e_tests` 中的 `writeFile` host_call 名 全部未动；`tests/context_management_tests.rs::test_build_context_preserves_order_with_mixed_turns` fixture 故意保留 `write_file` 旧名以验证 transcript 历史回放。
-- **L313 / PR-A 四工具短名**：`read`/`write`/`edit`/`bash` 在 `catalog` / `tool_exec` / `system_prompt` / 测试与 transcript 单迭代内一致；旧名拒识 + `warn_if_legacy_tool_name` 节流；**PR-B～E** bash 余量仍见 `agents/TASK_BOARD_002/tasks/T2-P0-016.md`。
+- **L313 / PR-A 四工具短名**：`read`/`write`/`edit`/`bash` 在 `catalog` / `tool_exec` / `system_prompt` / 测试与 transcript 单迭代内一致；旧名拒识 + `warn_if_legacy_tool_name` 节流；**PR-B～E** bash 余量仍见 `docs/agents/TASK_BOARD_002/tasks/T2-P0-016.md`。
 
 ### 🔌 INTERFACE (接口变更，T2-P0-016 write 子项)
 
@@ -112,7 +112,7 @@
 
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无（write + PR-A） | **L313 / PR-A 四工具短名** 已交付（与 write 子项同分支）；**PR-B～E** bash 余量仍见 `agents/TASK_BOARD_002/tasks/T2-P0-016.md`，不阻塞当前 PR-A 结论 | - |
+| 无（write + PR-A） | **L313 / PR-A 四工具短名** 已交付（与 write 子项同分支）；**PR-B～E** bash 余量仍见 `docs/agents/TASK_BOARD_002/tasks/T2-P0-016.md`，不阻塞当前 PR-A 结论 | - |
 
 ---
 
@@ -174,7 +174,7 @@
 
 ### 2026-05-05 | 认领 T2-P0-017，建分支
 
-- 看板状态：`agents/TASK_BOARD_002/tasks/T2-P0-017.md`：`TODO → DOING`，负责人 Tom。
+- 看板状态：`docs/agents/TASK_BOARD_002/tasks/T2-P0-017.md`：`TODO → DOING`，负责人 Tom。
 - 分支：`feature/strengthen-four-core-tools`（与计划/看板一致），从 `develop@f9f9409` 切出。
 
 ### 🔌 INTERFACE (接口变更)
