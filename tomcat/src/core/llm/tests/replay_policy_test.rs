@@ -1,11 +1,12 @@
 //! `core::llm::replay_policy` 焦小测。
 
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, classify_replay_downgrade, model_family, plan, ProviderCompatProfile,
-    ReplayAction, ReplayDowngradeKind,
+    apply_text_downgrade, classify_replay_downgrade, model_family, plan, plan_scoped,
+    warn_worthy_downgrade, ProviderCompatProfile, ReplayAction, ReplayDowngradeKind, ReplayWindow,
 };
 use crate::core::llm::types::{
-    ChatMessage, ContinuityMetadata, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
+    ChatMessage, ContinuityMetadata, MessageKind, ReasoningContinuation, ReasoningFormat,
+    ReplayRequirement,
 };
 
 fn openai_reasoning_message() -> ChatMessage {
@@ -205,6 +206,139 @@ fn classify_replay_downgrade_reports_same_profile_shape_mismatch() {
         classify_replay_downgrade(&target, &msg, &action),
         Some(ReplayDowngradeKind::SameProfileIncompatible)
     );
+}
+
+fn deepseek_v4_compatible_message() -> ChatMessage {
+    ChatMessage::assistant("answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    )
+}
+
+#[test]
+fn replay_window_strips_older_history_but_keeps_latest_assistant() {
+    let target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
+    let messages = vec![
+        ChatMessage::user("q1"),
+        deepseek_v4_compatible_message(), // idx 1: older assistant turn
+        ChatMessage::user("q2"),          // idx 2: latest real user turn-start
+        deepseek_v4_compatible_message(), // idx 3: latest assistant turn
+    ];
+    let window = ReplayWindow::compute(&messages);
+
+    // 窗口外的旧轮次即使同 profile 兼容也必须 strip（不转文本、静默）。
+    assert!(!window.contains(1));
+    assert_eq!(
+        plan_scoped(&target, &messages[1], window.contains(1)),
+        ReplayAction::StripOpaque
+    );
+
+    // 最新 assistant turn 始终在窗口内，同 profile → KeepOpaque。
+    assert!(window.contains(3));
+    assert_eq!(
+        plan_scoped(&target, &messages[3], window.contains(3)),
+        ReplayAction::KeepOpaque
+    );
+}
+
+#[test]
+fn replay_window_ignores_steering_as_turn_start() {
+    let mut steering = ChatMessage::user("steer mid-turn");
+    steering.kind = MessageKind::Steering;
+    let messages = vec![
+        ChatMessage::user("q1"),          // idx 0: real user turn-start
+        deepseek_v4_compatible_message(), // idx 1: current tool turn assistant
+        steering,                         // idx 2: steering (role=user, kind=Steering)
+    ];
+    let window = ReplayWindow::compute(&messages);
+
+    // steering 不应把窗口起点推到它之后，否则会误伤当前轮的 assistant。
+    assert!(window.contains(1));
+}
+
+#[test]
+fn warn_worthy_skips_graceful_text_but_flags_total_loss() {
+    let target = ProviderCompatProfile::openai_responses("gpt-5");
+
+    // 跨 profile + 有 fallback_text → ConvertToText：设计内优雅降级，不告警。
+    let with_text = deepseek_v4_compatible_message();
+    let action = plan_scoped(&target, &with_text, true);
+    assert_eq!(
+        action,
+        ReplayAction::ConvertToText("safe summary".to_string())
+    );
+    assert_eq!(warn_worthy_downgrade(&target, &with_text, &action), None);
+
+    // 跨 profile + 无任何文本可救 → StripOpaque：continuity 彻底丢失，告警。
+    let no_text = ChatMessage::assistant("answer").with_reasoning_state(
+        None,
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"internal"}),
+            fallback_text: None,
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    );
+    let action = plan_scoped(&target, &no_text, true);
+    assert_eq!(action, ReplayAction::StripOpaque);
+    assert_eq!(
+        warn_worthy_downgrade(&target, &no_text, &action),
+        Some(ReplayDowngradeKind::CrossProfile)
+    );
+}
+
+#[test]
+fn warn_worthy_flags_same_profile_incompatible_but_not_keep() {
+    // 同 profile（deepseek/chat_completions/deepseek-v4）但 format 与 capture_mode 不匹配，
+    // 落不到 KeepOpaque → 任何非 keep 动作都算异常，必告警。
+    let mismatched = ChatMessage::assistant("answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: serde_json::json!([{ "type": "reasoning" }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let target = ProviderCompatProfile::chat_completions("deepseek-v4-flash");
+    let action = plan_scoped(&target, &mismatched, true);
+    assert_eq!(action, ReplayAction::StripOpaque);
+    assert_eq!(
+        warn_worthy_downgrade(&target, &mismatched, &action),
+        Some(ReplayDowngradeKind::SameProfileIncompatible)
+    );
+
+    // KeepOpaque（窗口内同 profile 兼容）永远不告警。
+    let compatible = deepseek_v4_compatible_message();
+    let keep = plan_scoped(&target, &compatible, true);
+    assert_eq!(keep, ReplayAction::KeepOpaque);
+    assert_eq!(warn_worthy_downgrade(&target, &compatible, &keep), None);
 }
 
 #[test]

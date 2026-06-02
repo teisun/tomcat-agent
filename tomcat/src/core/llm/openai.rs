@@ -16,8 +16,8 @@ use tracing::warn;
 
 use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::replay_policy::{
-    apply_text_downgrade, plan as plan_replay, replay_requirement_for_profile,
-    warn_replay_downgrade, CaptureMode, ProviderCompatProfile, ReplayAction,
+    apply_text_downgrade, plan_scoped, replay_requirement_for_profile, CaptureMode,
+    ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
 };
 use crate::infra::error::AppError;
 use crate::infra::error::{
@@ -163,52 +163,60 @@ fn transport_messages(
     continuity_enabled: bool,
 ) -> Vec<Value> {
     let target = ProviderCompatProfile::chat_completions(model);
-    messages
-        .iter()
-        .map(|original| {
-            let action = if continuity_enabled {
-                plan_replay(&target, original)
+    let window = ReplayWindow::compute(messages);
+    let mut report = ReplayDowngradeReport::default();
+    let mut out = Vec::with_capacity(messages.len());
+    for (idx, original) in messages.iter().enumerate() {
+        let in_window = window.contains(idx);
+        let action = if continuity_enabled {
+            plan_scoped(&target, original, in_window)
+        } else {
+            ReplayAction::StripOpaque
+        };
+        if continuity_enabled {
+            if in_window {
+                report.record_in_window(&target, original, &action);
             } else {
-                ReplayAction::StripOpaque
-            };
-            if continuity_enabled {
-                warn_replay_downgrade(&target, original, &action);
+                report.record_stripped_old_history(original);
             }
-            match action {
-                ReplayAction::KeepOpaque => {
-                    let message = original.without_completion_metadata();
-                    if let Some(reasoning_content) = deepseek_reasoning_content(original) {
-                        inject_reasoning_content(message, &reasoning_content)
-                    } else {
-                        if continuity_enabled
-                            && original.reasoning_continuation.is_some()
-                            && target.provider == "deepseek"
-                        {
-                            warn!(
-                                target_profile = %target.profile_id,
-                                source_model = %target.model_family,
-                                had_tool_call = original
-                                    .continuity
-                                    .as_ref()
-                                    .map(|meta| meta.had_tool_call)
-                                    .unwrap_or(false),
-                                "deepseek continuity marked KeepOpaque but reasoning_content missing; sending request without local hard intercept"
-                            );
-                        }
-                        serde_json::to_value(message).unwrap_or_else(|_| json!({}))
+        }
+        let value = match action {
+            ReplayAction::KeepOpaque => {
+                let message = original.without_completion_metadata();
+                if let Some(reasoning_content) = deepseek_reasoning_content(original) {
+                    inject_reasoning_content(message, &reasoning_content)
+                } else {
+                    if continuity_enabled
+                        && original.reasoning_continuation.is_some()
+                        && target.provider == "deepseek"
+                    {
+                        warn!(
+                            target_profile = %target.profile_id,
+                            source_model = %target.model_family,
+                            had_tool_call = original
+                                .continuity
+                                .as_ref()
+                                .map(|meta| meta.had_tool_call)
+                                .unwrap_or(false),
+                            "deepseek continuity marked KeepOpaque but reasoning_content missing; sending request without local hard intercept"
+                        );
                     }
-                }
-                ReplayAction::ConvertToText(text) => {
-                    serde_json::to_value(apply_text_downgrade(original, &text))
-                        .unwrap_or_else(|_| json!({}))
-                }
-                ReplayAction::StripOpaque => {
-                    serde_json::to_value(original.without_completion_metadata())
-                        .unwrap_or_else(|_| json!({}))
+                    serde_json::to_value(message).unwrap_or_else(|_| json!({}))
                 }
             }
-        })
-        .collect()
+            ReplayAction::ConvertToText(text) => {
+                serde_json::to_value(apply_text_downgrade(original, &text))
+                    .unwrap_or_else(|_| json!({}))
+            }
+            ReplayAction::StripOpaque => serde_json::to_value(original.without_completion_metadata())
+                .unwrap_or_else(|_| json!({})),
+        };
+        out.push(value);
+    }
+    if continuity_enabled {
+        report.emit(&target);
+    }
+    out
 }
 
 const THINK_OPEN_MARKERS: [&str; 2] = ["<think>", "<reasoning>"];

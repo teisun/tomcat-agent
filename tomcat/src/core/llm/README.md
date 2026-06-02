@@ -57,7 +57,9 @@
 - **Files 上传配置**：`[llm.files] expires_after_seconds` 控制上传时 `expires_after.seconds`（默认 `86400`，`0` 表示不传该字段）；环境变量覆盖键为 `TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS`。
 - **Continuity 默认值**：`[llm.reasoning_continuity] enabled` 默认就是 `true`；只有想显式退回“只带可见历史、不做 opaque replay”的旧行为时才需要关。
 - **DeepSeek continuity 语义**：DeepSeek `reasoning_content` 的 **capture** 与 **replay** 现在明确解耦。只要响应里抓到了 continuity snapshot，就会照常写进 transcript；后续同 family DeepSeek 请求会优先回放兼容的 `reasoning_content`，不再把 `had_tool_call` 当成唯一 replay gate。`had_tool_call` / `replay_requirement` 仍会保留在 transcript metadata 里，用于审计和表达“tool turn 的 replay 强约束”。
-- **Replay warning 语义**：replay warning 只在真正发生 continuity 降级或同 profile 异常不兼容时触发；不再使用进程内“问题指纹”缓存压掉重复 warning。因此 warning 是否出现，应该理解为**这次请求有没有实际发生 downgrade / incompatible replay**，而不是“之前报过所以这次静音了”。
+- **账本全量 vs 出站精简**：transcript 是 continuity 的**全量账本**——hydrate（`chat_message_from_entry` 整条反序列化）与 `/model` 切换（`switch_current_model` 只改 `model_override` + 落 `model_change` 事件）都**不会**清洗历史里的 `reasoning_continuation` / `continuity`。真正的“精简”只发生在**出站 wire 克隆**上，绝不回写主账本。
+- **可 replay 窗口（出站收敛）**：wire builder 出站时按 `ReplayWindow` 收敛——只有**最新 assistant turn** 与**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque/文本 replay；更早的历史轮次一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**不转文本**、**不告警**）。这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
+- **Replay warning 语义**：逐消息 warn 已改为**每请求至多一条汇总告警**（`ReplayDowngradeReport::emit`），且只在窗口内出现「真正降级失败」时触发：**A** 同 profile 却没能 `KeepOpaque`（任何非 keep 动作都算异常 → `SameProfileIncompatible`）；**B** 跨 profile 且连 fallback 文本都救不回、落到 `StripOpaque`（continuity 彻底丢失）。跨 profile 的 `ConvertToText` 属设计内的优雅降级，**不告警**；窗口外老历史的静默 strip 仅计数、**从不告警**。不再使用进程内“问题指纹”缓存压重复 warning。
 - **非流式调用**：`provider.chat(request).await`，请求中 `model_override` 优先于 `request.model` 选模型；支持限流（Semaphore）与可重试错误的指数退避重试；当对主 api_base 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
 - **流式调用**：`provider.chat_stream(request).await` 返回 `Box<dyn Stream<Item = Result<StreamEvent, AppError>>>`，消费端可通过 drop 提前结束以释放连接；同样支持主 base 不通时自动用 `api_base_fallback` 重试。
 - **Token 统计**：`ChatResponse.usage` / `StreamEvent::Usage` 提供单次 usage；会话级汇总由调用方使用 `SessionTokenUsage` 累加，并写入 SessionEntry（当 003 可用时）。

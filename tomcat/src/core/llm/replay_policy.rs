@@ -4,7 +4,8 @@
 //! `keep / convert / strip` 规则散落到各个 provider wire 适配器中。
 
 use super::types::{
-    ChatMessage, ChatMessageContent, ReasoningContinuation, ReasoningFormat, ReplayRequirement,
+    ChatMessage, ChatMessageContent, ChatMessageRole, MessageKind, ReasoningContinuation,
+    ReasoningFormat, ReplayRequirement,
 };
 use tracing::warn;
 
@@ -140,6 +141,57 @@ pub fn plan(target: &ProviderCompatProfile, message: &ChatMessage) -> ReplayActi
     ReplayAction::StripOpaque
 }
 
+/// 带「可 replay 窗口」约束的出站决策：窗口外的历史 turn 一律 `StripOpaque`
+/// （只保留消息原有可见内容，丢弃隐藏 continuity blob，不转文本）；窗口内沿用 [`plan`]。
+pub fn plan_scoped(
+    target: &ProviderCompatProfile,
+    message: &ChatMessage,
+    in_window: bool,
+) -> ReplayAction {
+    if !in_window {
+        return ReplayAction::StripOpaque;
+    }
+    plan(target, message)
+}
+
+/// 「可 replay 窗口」：只有最新 assistant turn 与「当前 turn」（最后一条真实 user 之后的
+/// 消息）内的 continuity 参与 opaque/文本 replay；更早的历史轮次出站时一律 strip。
+///
+/// 这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayWindow {
+    current_turn_start: usize,
+    last_assistant_idx: Option<usize>,
+}
+
+impl ReplayWindow {
+    /// 基于整段 `messages` 计算窗口边界。
+    /// - `current_turn_start`：最后一条「真实 user 问句」（`role=user` 且 `kind=Normal`，
+    ///   排除 steering 与 compaction summary）之后的位置；无则为 0。
+    /// - `last_assistant_idx`：最后一条 assistant 消息下标，保证最新 assistant turn 始终在窗口内。
+    pub fn compute(messages: &[ChatMessage]) -> Self {
+        let current_turn_start = messages
+            .iter()
+            .rposition(|m| {
+                matches!(m.role, ChatMessageRole::User) && matches!(m.kind, MessageKind::Normal)
+            })
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let last_assistant_idx = messages
+            .iter()
+            .rposition(|m| matches!(m.role, ChatMessageRole::Assistant));
+        Self {
+            current_turn_start,
+            last_assistant_idx,
+        }
+    }
+
+    /// 该下标的消息是否落在可 replay 窗口内。
+    pub fn contains(&self, idx: usize) -> bool {
+        idx >= self.current_turn_start || Some(idx) == self.last_assistant_idx
+    }
+}
+
 /// 将 continuity 的降级根因转成稳定分类，便于日志与测试复用。
 pub fn classify_replay_downgrade(
     target: &ProviderCompatProfile,
@@ -161,38 +213,128 @@ pub fn classify_replay_downgrade(
     }
 }
 
-/// 对 continuity 的降级做结构化告警；不记录 opaque payload。
-pub fn warn_replay_downgrade(
+/// 判断某个**窗口内** turn 的降级是否值得告警，并返回根因分类。
+///
+/// 返回 `None` = 静默：要么是 `KeepOpaque`（成功），要么是跨 profile 的 `ConvertToText`
+/// （设计内的优雅降级，推理已保成文本，预期行为，不刷屏）。
+/// 返回 `Some(kind)` = 告警：
+/// - **A. SameProfileIncompatible**：同 profile 却没能 `KeepOpaque`（任何非 keep 动作都算异常）；
+/// - **B. CrossProfile + `StripOpaque`**：跨 profile 且连文本都救不回 → continuity 彻底丢失。
+pub fn warn_worthy_downgrade(
     target: &ProviderCompatProfile,
     message: &ChatMessage,
     action: &ReplayAction,
-) {
-    let Some(continuation) = message.reasoning_continuation.as_ref() else {
-        return;
-    };
-    let Some(kind) = classify_replay_downgrade(target, message, action) else {
-        return;
-    };
-    let action_label = match action {
-        ReplayAction::KeepOpaque => return,
+) -> Option<ReplayDowngradeKind> {
+    let kind = classify_replay_downgrade(target, message, action)?;
+    match kind {
+        ReplayDowngradeKind::SameProfileIncompatible => Some(kind),
+        ReplayDowngradeKind::CrossProfile => match action {
+            ReplayAction::StripOpaque => Some(kind),
+            _ => None,
+        },
+    }
+}
+
+fn action_label(action: &ReplayAction) -> &'static str {
+    match action {
+        ReplayAction::KeepOpaque => "keep_opaque",
         ReplayAction::ConvertToText(_) => "convert_to_text",
         ReplayAction::StripOpaque => "strip_opaque",
-    };
-    warn!(
-        target_profile = %target.profile_id,
-        source_provider = %continuation.source_provider,
-        source_api = %continuation.source_api,
-        source_model = %model_family(&continuation.source_model),
-        action = action_label,
-        downgrade_kind = kind.as_str(),
-        had_tool_call = message
-            .continuity
-            .as_ref()
-            .map(|meta| meta.had_tool_call)
-            .unwrap_or(false),
-        "{}",
-        kind.message()
-    );
+    }
+}
+
+#[derive(Debug)]
+struct ReplayDowngradeSample {
+    kind: ReplayDowngradeKind,
+    action_label: &'static str,
+    source_provider: String,
+    source_api: String,
+    source_model: String,
+    had_tool_call: bool,
+}
+
+/// 按请求聚合的 replay 降级告警收集器：把「逐消息 warn」换成「每请求至多一条汇总」。
+///
+/// 不记录 opaque payload；窗口外老历史的静默 strip 仅计数、从不告警。
+#[derive(Debug, Default)]
+pub struct ReplayDowngradeReport {
+    warn_worthy: usize,
+    same_profile_incompatible: usize,
+    cross_profile_lost: usize,
+    graceful_text: usize,
+    stripped_old_history: usize,
+    sample: Option<ReplayDowngradeSample>,
+}
+
+impl ReplayDowngradeReport {
+    /// 记录窗口内一条 turn 的出站结果（`KeepOpaque` / 无 continuation 不计入）。
+    pub fn record_in_window(
+        &mut self,
+        target: &ProviderCompatProfile,
+        message: &ChatMessage,
+        action: &ReplayAction,
+    ) {
+        if classify_replay_downgrade(target, message, action).is_none() {
+            return;
+        }
+        if matches!(action, ReplayAction::ConvertToText(_)) {
+            self.graceful_text += 1;
+        }
+        let Some(warn_kind) = warn_worthy_downgrade(target, message, action) else {
+            return;
+        };
+        self.warn_worthy += 1;
+        match warn_kind {
+            ReplayDowngradeKind::SameProfileIncompatible => self.same_profile_incompatible += 1,
+            ReplayDowngradeKind::CrossProfile => self.cross_profile_lost += 1,
+        }
+        if self.sample.is_none() {
+            if let Some(continuation) = message.reasoning_continuation.as_ref() {
+                self.sample = Some(ReplayDowngradeSample {
+                    kind: warn_kind,
+                    action_label: action_label(action),
+                    source_provider: continuation.source_provider.clone(),
+                    source_api: continuation.source_api.clone(),
+                    source_model: model_family(&continuation.source_model),
+                    had_tool_call: message
+                        .continuity
+                        .as_ref()
+                        .map(|meta| meta.had_tool_call)
+                        .unwrap_or(false),
+                });
+            }
+        }
+    }
+
+    /// 记录窗口外被静默 strip 的历史 continuity（仅统计，不告警）。
+    pub fn record_stripped_old_history(&mut self, message: &ChatMessage) {
+        if message.reasoning_continuation.is_some() {
+            self.stripped_old_history += 1;
+        }
+    }
+
+    /// 每请求至多一条汇总告警；无 warn-worthy 项时完全静默。
+    pub fn emit(&self, target: &ProviderCompatProfile) {
+        let Some(sample) = self.sample.as_ref() else {
+            return;
+        };
+        warn!(
+            target_profile = %target.profile_id,
+            downgrade_kind = sample.kind.as_str(),
+            warn_worthy = self.warn_worthy,
+            same_profile_incompatible = self.same_profile_incompatible,
+            cross_profile_lost = self.cross_profile_lost,
+            graceful_text = self.graceful_text,
+            stripped_old_history = self.stripped_old_history,
+            source_provider = %sample.source_provider,
+            source_api = %sample.source_api,
+            source_model = %sample.source_model,
+            action = sample.action_label,
+            had_tool_call = sample.had_tool_call,
+            "{}（历史老 turn 已按窗口策略静默 strip）",
+            sample.kind.message()
+        );
+    }
 }
 
 /// 当 opaque blob 无法原样回放时，取最佳 effort 的安全文本 continuity。
