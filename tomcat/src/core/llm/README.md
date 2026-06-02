@@ -29,6 +29,15 @@
 
 详见 openspec **[`architecture/llm-multiprovider-integration.md`](../../../docs/architecture/llm-multiprovider-integration.md)**。
 
+### 1.1.1 models.toml 与「零代码加模型」（含 MiMo 案例）
+
+- **模型清单事实源**：`builtin_models()`（仅 gpt / deepseek）+ 用户级 `~/.tomcat/models.toml`（同 id 覆盖内置、新 id 新增），由 `ModelCatalog::load` 在启动时自动合并。
+- **`tomcat init` 自动生成**：init 会在 `[1/3] 环境初始化` 阶段调用 `api/cli/models_toml.rs::ensure_mimo_models_toml`，生成含一条可用 `mimo-v2.5-pro` 的 `models.toml`。**幂等**：文件不存在则创建；已存在但缺 MiMo 则仅追加；已含 MiMo 则不动——绝不覆盖用户已有条目/注释。
+- **MiMo 事实源在生成的 `models.toml`，不在 `builtin_models()`**：MiMo 走 `api = "openai"`（OpenAI-compatible Chat Completions）、`provider = "mimo"`、`base_url = "https://token-plan-cn.xiaomimimo.com"`（**只填 host**，`/v1/chat/completions` 由 `openai.rs` 拼接）、`thinking_format = "doubao"`、能力按官方文档定死（`vision/files=false`、`tools/reasoning=true`）。因此 MiMo 本身就是「零代码加模型」的活样板。
+- **鉴权**：`provider="mimo"` 经通用 `auth.rs::env_name_for_provider` 直接得到 `MIMO_API_KEY`，无需为它写专门分支。Token Plan 的 `tp-xxxxx` key 不能与按量 `sk-xxxxx` 混用。
+- **裸 id 兜底**：即便 `models.toml` 只写 `id = "mimo-v2.5-pro"`，`catalog.rs` 的 `infer_*`（provider/api/base_url/capabilities）与 `thinking_policy.rs::thinking_format_for_model` 也会推断出正确路由与 Doubao thinking 线格式。
+- **再加一个「同类」LLM（协议属 OpenAI chat-completions / responses、thinking 属已支持格式、续传是 `reasoning_content` 或 responses items）**：只需 (1) 设置 `<PROVIDER>_API_KEY`；(2) 在 `models.toml` 加一条 `[[models]]`。无需改代码。只有引入「新协议 / 新 thinking 线格式 / 新 continuity 捕获形态 / 新能力维度」时才需要加对应实现。
+
 ### 1.2 LLM 调用路径（ASCII）
 
 ```text
@@ -56,7 +65,8 @@
 - **构造具体实现（测试 / 工具）**：`OpenAiProvider::new(&config)` 或 `OpenAiResponsesProvider::new(&config)`，其中 `config` 为 `LlmConfig`（含 api_base、api_key_env、default_model、max_concurrent_requests、retry_count、stream_timeout_sec；可选 **proxy** 显式代理、**api_base_fallback** 自动降级用备用 base）。api_key 从 `api_key_env` 指定环境变量读取，未设置则返回错误。若配置 `proxy`，所有 LLM 请求经该代理；未配置时 reqwest 仍尊重环境变量 `HTTPS_PROXY`/`HTTP_PROXY`。代理与降级 URL 可通过配置文件（见项目根 **tomcat.config.toml.example**）或环境变量 `TOMCAT__LLM__PROXY`、`TOMCAT__LLM__API_BASE_FALLBACK` 配置，详见 [infra/README.md](../../infra/README.md) 中「代理与降级 URL 的配置方式」。对 DeepSeek 一类 OpenAI-compatible 后端，通常也是复用 `OpenAiProvider::new(&config)`，只改 `api_base` / `api_key_env` / `default_model`。
 - **Files 上传配置**：`[llm.files] expires_after_seconds` 控制上传时 `expires_after.seconds`（默认 `86400`，`0` 表示不传该字段）；环境变量覆盖键为 `TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS`。
 - **Continuity 默认值**：`[llm.reasoning_continuity] enabled` 默认就是 `true`；只有想显式退回“只带可见历史、不做 opaque replay”的旧行为时才需要关。
-- **DeepSeek continuity 语义**：DeepSeek `reasoning_content` 的 **capture** 与 **replay** 现在明确解耦。只要响应里抓到了 continuity snapshot，就会照常写进 transcript；后续同 family DeepSeek 请求会优先回放兼容的 `reasoning_content`，不再把 `had_tool_call` 当成唯一 replay gate。`had_tool_call` / `replay_requirement` 仍会保留在 transcript metadata 里，用于审计和表达“tool turn 的 replay 强约束”。
+- **chat-completions `reasoning_content` continuity 语义（数据驱动）**：`reasoning_content` 的 **capture** 与 **replay** 明确解耦，且**不再按厂商名硬编码**。「哪个模型走 `reasoning_content` 续传」由 `replay_policy.rs` 的数据表 `CHAT_COMPLETIONS_CONTINUITY_RULES` 决定（当前含 `deepseek-v4` 与 `mimo-v2.5-pro` 两行，共用同一条逻辑）；新增同类模型 = 加一行数据，`maybe_snapshot` / `is_compatible` / `transport_messages` 等 continuity 各道门只读 `ProviderCompatProfile` 字段（`capture_mode` / `api_family` / `provider`+`model_family`），无需修改。只要响应里抓到 snapshot 就照常写进 transcript；后续**同 profile**（provider + model_family 一致）请求会优先回放兼容的 `reasoning_content`，`same_profile` 比对保证 DeepSeek / MiMo 互不串档。`had_tool_call` / `replay_requirement` 仍保留在 transcript metadata 里，用于审计和表达 tool turn 的 replay 强约束。
+  > 架构约束说明：provider 由 `LlmConfig` 装配（registry §6.5.2「稳定 schema」），运行期只拿到 model 字符串、拿不到 catalog 条目，故 continuity 的运行期事实源是上面这张按 model family 索引的数据表；`models.toml` 是面向用户的声明层。两者对内置厂商（deepseek/mimo）保持一致。
 - **账本全量 vs 出站精简**：transcript 是 continuity 的**全量账本**——hydrate（`chat_message_from_entry` 整条反序列化）与 `/model` 切换（`switch_current_model` 只改 `model_override` + 落 `model_change` 事件）都**不会**清洗历史里的 `reasoning_continuation` / `continuity`。真正的“精简”只发生在**出站 wire 克隆**上，绝不回写主账本。
 - **可 replay 窗口（出站收敛）**：wire builder 出站时按 `ReplayWindow` 收敛——只有**最新 assistant turn** 与**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque/文本 replay；更早的历史轮次一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**不转文本**、**不告警**）。这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
 - **Replay warning 语义**：逐消息 warn 已改为**每请求至多一条汇总告警**（`ReplayDowngradeReport::emit`），且只在窗口内出现「真正降级失败」时触发：**A** 同 profile 却没能 `KeepOpaque`（任何非 keep 动作都算异常 → `SameProfileIncompatible`）；**B** 跨 profile 且连 fallback 文本都救不回、落到 `StripOpaque`（continuity 彻底丢失）。跨 profile 的 `ConvertToText` 属设计内的优雅降级，**不告警**；窗口外老历史的静默 strip 仅计数、**从不告警**。不再使用进程内“问题指纹”缓存压重复 warning。

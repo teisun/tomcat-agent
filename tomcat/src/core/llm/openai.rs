@@ -130,7 +130,10 @@ fn reject_multimodal_parts(messages: &[ChatMessage]) -> Result<(), AppError> {
     Ok(())
 }
 
-fn deepseek_reasoning_content(message: &ChatMessage) -> Option<String> {
+/// 提取 chat-completions `reasoning_content` continuity blob（deepseek / mimo / 未来同类共用）。
+///
+/// 只看 continuity 的 `format` 标签，不按厂商名硬编码——这样新增同类模型无需改本函数。
+fn chat_completions_reasoning_content(message: &ChatMessage) -> Option<String> {
     let continuation = message.reasoning_continuation.as_ref()?;
     if !matches!(
         continuation.format,
@@ -183,12 +186,12 @@ fn transport_messages(
         let value = match action {
             ReplayAction::KeepOpaque => {
                 let message = original.without_completion_metadata();
-                if let Some(reasoning_content) = deepseek_reasoning_content(original) {
+                if let Some(reasoning_content) = chat_completions_reasoning_content(original) {
                     inject_reasoning_content(message, &reasoning_content)
                 } else {
                     if continuity_enabled
                         && original.reasoning_continuation.is_some()
-                        && target.provider == "deepseek"
+                        && matches!(target.capture_mode, CaptureMode::ReasoningContent)
                     {
                         warn!(
                             target_profile = %target.profile_id,
@@ -198,7 +201,7 @@ fn transport_messages(
                                 .as_ref()
                                 .map(|meta| meta.had_tool_call)
                                 .unwrap_or(false),
-                            "deepseek continuity marked KeepOpaque but reasoning_content missing; sending request without local hard intercept"
+                            "reasoning_content continuity marked KeepOpaque but payload missing; sending request without local hard intercept"
                         );
                     }
                     serde_json::to_value(message).unwrap_or_else(|_| json!({}))
@@ -862,9 +865,9 @@ impl OpenAiReasoningState {
         if trimmed.is_empty() {
             return None;
         }
-        if self.source_profile.provider != "deepseek"
-            || self.source_profile.api_family != "chat_completions"
-        {
+        // 不按厂商名硬编码：只要 profile 标记为 chat-completions 的 ReasoningContent 即抓取
+        // （capture_mode 已在上方校验）。deepseek / mimo / 未来同类共用这一条路径。
+        if self.source_profile.api_family != "chat_completions" {
             return None;
         }
         self.snapshot_emitted = true;

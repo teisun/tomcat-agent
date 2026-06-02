@@ -58,6 +58,51 @@ fn override_priority() {
 
 #[test]
 #[serial(env_lock)]
+fn resolves_mimo_via_models_toml_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "mimo-v2.5-pro"
+api = "openai"
+provider = "mimo"
+base_url = "https://token-plan-cn.xiaomimimo.com"
+thinking_format = "doubao"
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
+"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::default();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("MIMO_API_KEY", "tp-stub");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, Some("mimo-v2.5-pro"))
+        .expect("mimo route should resolve");
+    assert_eq!(resolved.model, "mimo-v2.5-pro");
+    assert_eq!(resolved.api, "openai");
+    assert_eq!(resolved.provider, "mimo");
+    assert_eq!(
+        resolved.base_url.as_deref(),
+        Some("https://token-plan-cn.xiaomimimo.com")
+    );
+    assert_eq!(resolved.key_source, "MIMO_API_KEY");
+
+    unsafe {
+        std::env::remove_var("MIMO_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
 fn provider_cache_reuses_arc_for_same_route() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");

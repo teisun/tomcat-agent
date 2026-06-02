@@ -463,6 +463,63 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
     assert_eq!(wire[4]["reasoning_content"], "final plan");
 }
 
+#[test]
+fn test_openai_chunk_mimo_finish_emits_reasoning_snapshot() {
+    // MiMo 复用同一条 reasoning_content 抓取路径：profile 标了 ReasoningContent 即抓 snapshot，
+    // 不再按厂商名硬编码（snapshot 的 source_provider 来自 profile = mimo）。
+    let mut state = OpenAiReasoningState {
+        source_profile: ProviderCompatProfile::chat_completions("mimo-v2.5-pro"),
+        continuity_enabled: true,
+        ..OpenAiReasoningState::default()
+    };
+    let chunk: OpenAiStreamChunk = serde_json::from_str(
+        r#"{"choices":[{"delta":{"reasoning_content":"mimo step","tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
+    )
+    .expect("parse mimo chunk");
+    let events = openai_chunk_to_stream_events_with_state(chunk, &mut state);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::ReasoningSnapshot {
+            thinking_text: Some(text),
+            reasoning_continuation: Some(continuation),
+            continuity: Some(continuity)
+        } if text == "mimo step"
+            && continuity.had_tool_call
+            && continuation.source_provider == "mimo"
+            && continuation.opaque_payload["reasoning_content"] == serde_json::json!("mimo step")
+    )));
+}
+
+#[test]
+fn mimo_tool_turn_replays_reasoning_content() {
+    let message = ChatMessage::assistant_with_tool_calls(
+        None,
+        vec![serde_json::json!({
+            "id":"call_1",
+            "type":"function",
+            "function":{"name":"read","arguments":"{}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("mimo summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "mimo".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "mimo-v2.5-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"mimo plan"}),
+            fallback_text: Some("mimo summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: ReplayRequirement::SameProfileRequired,
+        }),
+    );
+    let wire = transport_messages(&[message], "mimo-v2.5-pro", true);
+    assert_eq!(wire[0]["reasoning_content"], "mimo plan");
+}
+
 #[tokio::test]
 async fn streaming_think_scrubber_hides_split_tags() {
     use tokio_stream::StreamExt;

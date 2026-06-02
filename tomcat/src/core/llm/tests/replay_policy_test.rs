@@ -143,6 +143,8 @@ fn model_family_normalizes_known_models() {
     assert_eq!(model_family("deepseek-v4-flash"), "deepseek-v4");
     assert_eq!(model_family("deepseek-v3"), "deepseek-v3");
     assert_eq!(model_family("gpt-5-mini"), "gpt-5");
+    // MiMo 初版按 exact-profile：family 即模型名本身（仅自家可 replay）。
+    assert_eq!(model_family("mimo-v2.5-pro"), "mimo-v2.5-pro");
 }
 
 #[test]
@@ -176,6 +178,50 @@ fn replay_policy_deepseek_v4_cross_model_reuses_same_profile() {
     assert_eq!(profile.model_family, "deepseek-v4");
     assert!(profile.requires_tool_turn_replay);
     assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
+}
+
+fn mimo_reasoning_message() -> ChatMessage {
+    ChatMessage::assistant("answer").with_reasoning_state(
+        Some("mimo summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "mimo".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "mimo-v2.5-pro".to_string(),
+            format: ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: serde_json::json!({"reasoning_content":"mimo internal"}),
+            fallback_text: Some("mimo summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    )
+}
+
+#[test]
+fn chat_completions_profile_is_data_driven_for_mimo() {
+    // MiMo 仅靠 catalog/数据表一条数据即得到 ReasoningContent profile（与 deepseek 同一条逻辑）。
+    let profile = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
+    assert_eq!(profile.provider, "mimo");
+    assert_eq!(profile.model_family, "mimo-v2.5-pro");
+    assert!(profile.requires_tool_turn_replay);
+    assert_eq!(profile.api_family, "chat_completions");
+    // 标了 reasoning_content → 走 KeepOpaque 续传。
+    assert_eq!(plan(&profile, &mimo_reasoning_message()), ReplayAction::KeepOpaque);
+}
+
+#[test]
+fn mimo_and_deepseek_do_not_cross_replay() {
+    // 数据驱动后两族共用一条代码逻辑，但 same_profile 比对保证互不串档。
+    let mimo_msg = mimo_reasoning_message();
+    let deepseek_target = ProviderCompatProfile::chat_completions("deepseek-v4-pro");
+    // mimo continuity 落到 deepseek target：非同 profile，downgrade=VisibleHistoryOnly → strip。
+    assert_eq!(plan(&deepseek_target, &mimo_msg), ReplayAction::StripOpaque);
+
+    let deepseek_msg = deepseek_v4_compatible_message();
+    let mimo_target = ProviderCompatProfile::chat_completions("mimo-v2.5-pro");
+    assert_eq!(plan(&mimo_target, &deepseek_msg), ReplayAction::StripOpaque);
 }
 
 #[test]

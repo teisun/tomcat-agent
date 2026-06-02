@@ -402,6 +402,16 @@ OpenAI Responses 实际是**两条互斥**的 continuity 路径，**不能叠加
 - 本轮只补了“通过函数把当前 session 的 `model_override` 切到另一个 model，并追加 `model_change` transcript 事件”的最小链路，服务于 integration test；**不**在这版展开完整多 LLM 配置结构与会话内产品化切换能力。
 - 只有当某家 OpenAI-compatible 后端在请求/响应字段、流式事件、错误模型、重试策略、专属能力或用户配置语义上明显分叉时，才考虑拆出新的 provider id / 独立 provider 实现。
 
+#### 4.2.3.1 数据驱动的 chat-completions `reasoning_content`（DeepSeek / MiMo 同一条逻辑）
+
+落地后，「哪个模型走 `reasoning_content` continuity」已从代码里的 `match "deepseek"` 改为**一张数据表**，DeepSeek 与 Xiaomi MiMo（`mimo-v2.5-pro`）共用同一条代码逻辑：
+
+- **单一事实源**：`src/core/llm/replay_policy.rs` 的 `CHAT_COMPLETIONS_CONTINUITY_RULES`（每行 = `{family, provider, profile_id}`）。当前两行：`deepseek-v4` / `mimo-v2.5-pro`。`ProviderCompatProfile::chat_completions(model)` 按 `model_family(model)` 查表命中即得 `capture_mode = ReasoningContent` 的 profile，否则默认 `None`（不续传）。
+- **5 道门统一读 profile**：`model_family()`（family 归一）、`chat_completions()`（查表选 profile）、`OpenAiReasoningState::maybe_snapshot()`（按 `capture_mode==ReasoningContent` + `api_family=="chat_completions"` 抓取，不再判 `provider=="deepseek"`）、`is_compatible()`（按 `capture_mode` + `same_profile(provider+model_family)` 比对，不再硬判厂商名）、`transport_messages()`（`chat_completions_reasoning_content` 注回，warn 条件改读 `capture_mode`）。新增同类模型 = **加一行数据**，不动这 5 道门。
+- **互不串档**：`same_profile` 要求 `source_provider == target.provider` 且 `model_family` 一致，因此 MiMo 的 snapshot（`source_provider="mimo"`）不会被 DeepSeek target 接受，反之亦然——跨 profile 落 `StripOpaque`（或有 `thinking_text` 时按 downgrade 规则转文本）。
+- **MiMo 边界**：`mimo-v2.5-pro` 初版按 **exact-profile**（`model_family` 即模型名本身，仅自家可 replay）；是否与其它 MiMo 并族由数据表显式声明，不靠代码猜。
+- **架构约束**：provider 由 `LlmConfig` 装配（registry §6.5.2「稳定 schema」），运行期只拿到 model 字符串、拿不到 catalog 条目，故 continuity 的运行期事实源是这张按 `model family` 索引的数据表；`models.toml` 是面向用户的声明层，对内置厂商（deepseek / mimo）与数据表保持一致。
+
 #### 4.2.4 跨 provider graceful downgrade
 
 - 优先级 1：目标 profile 兼容来源 blob，`keep opaque`。

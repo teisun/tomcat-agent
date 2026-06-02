@@ -5,6 +5,7 @@ mod chat_cmd;
 mod config_cmd;
 mod init;
 mod init_model_wizard;
+mod models_toml;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod session_cmd;

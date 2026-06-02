@@ -83,6 +83,11 @@ fn format_resolve_auto_by_model_name() {
         ThinkingFormat::Deepseek
     );
     assert_eq!(thinking_format_for_model("gpt-5"), ThinkingFormat::Openai);
+    // MiMo 走豆包系 thinking 线格式（thinking: {"type":"enabled"}）。
+    assert_eq!(
+        thinking_format_for_model("mimo-v2.5-pro"),
+        ThinkingFormat::Doubao
+    );
 }
 
 #[test]

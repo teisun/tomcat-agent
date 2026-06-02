@@ -47,6 +47,35 @@ vision = false
 }
 
 #[test]
+fn infer_mimo_v25_pro_from_bare_models_toml_entry() {
+    // 仅写裸 id 也应推断出 MiMo 的 provider/api/base_url/能力（catalog 推断兜底）。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "mimo-v2.5-pro"
+"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::default();
+    let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load mimo catalog");
+    let entry = catalog.lookup("mimo-v2.5-pro").expect("inferred mimo entry");
+    assert_eq!(entry.api, "openai");
+    assert_eq!(entry.provider, "mimo");
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://token-plan-cn.xiaomimimo.com")
+    );
+    assert!(!entry.capabilities.vision, "mimo-v2.5-pro 仅文本，无 vision");
+    assert!(!entry.capabilities.files);
+    assert!(entry.capabilities.tools);
+    assert!(entry.capabilities.reasoning);
+}
+
+#[test]
 fn missing_explicit_model_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");

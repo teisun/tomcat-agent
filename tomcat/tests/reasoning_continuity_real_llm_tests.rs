@@ -56,6 +56,15 @@ fn deepseek_alt_model() -> String {
         .unwrap_or_else(|_| "deepseek-v4-flash".to_string())
 }
 
+fn mimo_model() -> String {
+    std::env::var("TOMCAT_E2E_MIMO_MODEL").unwrap_or_else(|_| "mimo-v2.5-pro".to_string())
+}
+
+fn mimo_base_url() -> String {
+    std::env::var("TOMCAT_E2E_MIMO_BASE_URL")
+        .unwrap_or_else(|_| "https://token-plan-cn.xiaomimimo.com".to_string())
+}
+
 fn openai_responses_continuity_config() -> LlmConfig {
     let mut cfg = LlmConfig {
         provider: "openai-responses".to_string(),
@@ -77,6 +86,21 @@ fn deepseek_continuity_config() -> LlmConfig {
     cfg.reasoning_continuity.enabled = true;
     cfg.thinking.enabled = true;
     cfg.thinking.level = "high".to_string();
+    cfg
+}
+
+fn mimo_continuity_config() -> LlmConfig {
+    let mut cfg = LlmConfig {
+        provider: "openai".to_string(),
+        api_base: Some(mimo_base_url()),
+        api_key_env: Some("MIMO_API_KEY".to_string()),
+        default_model: mimo_model(),
+        ..LlmConfig::default()
+    };
+    cfg.reasoning_continuity.enabled = true;
+    cfg.thinking.enabled = true;
+    cfg.thinking.level = "high".to_string();
+    cfg.thinking.format = Some("doubao".to_string());
     cfg
 }
 
@@ -392,6 +416,108 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
     Err(
         std::io::Error::other("DeepSeek 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot")
             .into(),
+    )
+}
+
+#[tokio::test]
+async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
+    require_api_key("MIMO_API_KEY");
+
+    let config = mimo_continuity_config();
+    let provider = resolve_llm(&config).expect(
+        "resolve_llm(mimo via provider=openai) 失败：请检查 MIMO_API_KEY / TOMCAT_E2E_MIMO_BASE_URL 配置",
+    );
+    let prompt =
+        "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
+
+    for attempt in 1..=DEEPSEEK_CAPTURE_ATTEMPTS {
+        let first_turn = capture_stream_turn(
+            provider.clone(),
+            ChatRequest {
+                messages: vec![ChatMessage::user(prompt)],
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(512),
+                stream: Some(true),
+                model_override: None,
+                tools: Some(weather_tool_definitions()),
+            },
+        )
+        .await?;
+
+        let Some(reasoning_continuation) = first_turn.reasoning_continuation.clone() else {
+            tracing::warn!(attempt, "MiMo tool turn 未返回 continuity snapshot，重试捕获");
+            continue;
+        };
+        let Some(continuity) = first_turn.continuity.clone() else {
+            tracing::warn!(attempt, "MiMo tool turn 未返回 continuity metadata，重试捕获");
+            continue;
+        };
+        if first_turn.tool_calls.is_empty() {
+            tracing::warn!(attempt, "MiMo 首轮未触发 tool call，重试捕获");
+            continue;
+        }
+
+        assert!(
+            continuity.had_tool_call,
+            "MiMo tool turn continuity 应标记 had_tool_call=true"
+        );
+        assert_eq!(reasoning_continuation.source_provider, "mimo");
+        assert_eq!(reasoning_continuation.source_api, "chat_completions");
+        assert!(
+            reasoning_continuation.opaque_payload["reasoning_content"]
+                .as_str()
+                .is_some_and(|text| !text.trim().is_empty()),
+            "MiMo continuity snapshot 应携带 reasoning_content"
+        );
+
+        let tool_call_id = first_turn.tool_calls[0]["id"]
+            .as_str()
+            .expect("tool_call id missing")
+            .to_string();
+        let assistant = ChatMessage::assistant_with_tool_calls(
+            (!first_turn.assistant_text.trim().is_empty())
+                .then_some(first_turn.assistant_text.as_str()),
+            first_turn.tool_calls.clone(),
+        )
+        .with_reasoning_state(
+            first_turn.thinking_text.clone(),
+            Some(reasoning_continuation),
+            Some(continuity),
+        );
+        let second = run_chat(
+            provider.clone(),
+            ChatRequest {
+                messages: vec![
+                    ChatMessage::user(prompt),
+                    assistant,
+                    ChatMessage::tool(
+                        &tool_call_id,
+                        r#"{"city":"Hangzhou","day":"tomorrow","forecast":"sunny 25C"}"#,
+                    ),
+                    ChatMessage::user(
+                        "Do not call any more tools. Answer directly in one short sentence.",
+                    ),
+                ],
+                model: config.default_model.clone(),
+                temperature: None,
+                max_tokens: Some(256),
+                stream: Some(false),
+                model_override: None,
+                tools: None,
+            },
+        )
+        .await?;
+        assert!(
+            !second.choices.is_empty(),
+            "MiMo tool-turn continuity replay 第二轮应返回 choices"
+        );
+        return Ok(());
+    }
+
+    Err(
+        std::io::Error::other("MiMo 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot").into(),
     )
 }
 

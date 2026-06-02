@@ -62,6 +62,18 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     println!("  ✓ 目录结构就绪");
 
+    match crate::api::cli::models_toml::ensure_mimo_models_toml(&cfg)? {
+        crate::api::cli::models_toml::ModelsTomlStatus::Created => {
+            println!("  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro）")
+        }
+        crate::api::cli::models_toml::ModelsTomlStatus::AppendedMimo => {
+            println!("  ✓ 已向现有 models.toml 追加 mimo-v2.5-pro")
+        }
+        crate::api::cli::models_toml::ModelsTomlStatus::AlreadyPresent => {
+            println!("  ✓ models.toml 已就绪（已含 mimo-v2.5-pro）")
+        }
+    }
+
     ensure_embedded_assets(&cfg)?;
     println!("  ✓ 内嵌资源已释放（wasm + modules）");
 

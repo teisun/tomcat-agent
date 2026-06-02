@@ -309,6 +309,8 @@ pub(crate) fn infer_provider_from_model_id(model_id: &str) -> Option<String> {
         Some("openai".to_string())
     } else if lower.starts_with("claude-") {
         Some("anthropic".to_string())
+    } else if lower.starts_with("mimo-") {
+        Some("mimo".to_string())
     } else {
         None
     }
@@ -316,7 +318,7 @@ pub(crate) fn infer_provider_from_model_id(model_id: &str) -> Option<String> {
 
 pub(crate) fn infer_api_from_model_id(model_id: &str) -> Option<String> {
     let lower = model_id.trim().to_ascii_lowercase();
-    if lower.starts_with("deepseek-") {
+    if lower.starts_with("deepseek-") || lower.starts_with("mimo-") {
         Some("openai".to_string())
     } else if lower.starts_with("gpt-") || lower.starts_with("o1") || lower.starts_with("o3") {
         Some("openai-responses".to_string())
@@ -329,6 +331,7 @@ pub(crate) fn infer_default_base_url(provider: Option<&str>) -> Option<String> {
     match provider.unwrap_or_default() {
         "openai" | "openai-responses" => Some("https://api.openai.com".to_string()),
         "deepseek" => Some("https://api.deepseek.com".to_string()),
+        "mimo" => Some("https://token-plan-cn.xiaomimimo.com".to_string()),
         _ => None,
     }
 }
@@ -339,6 +342,14 @@ pub(crate) fn infer_capabilities_from_model_id(model_id: &str) -> Capabilities {
         Capabilities {
             vision: lower.starts_with("gpt-"),
             files: lower.starts_with("gpt-"),
+            tools: true,
+            reasoning: true,
+        }
+    } else if lower.starts_with("mimo-") {
+        // 官方文档：mimo-v2.5-pro 仅文本（图片/音视频只在 mimo-v2.5 / mimo-v2-omni）。
+        Capabilities {
+            vision: false,
+            files: false,
             tools: true,
             reasoning: true,
         }

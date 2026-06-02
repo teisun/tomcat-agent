@@ -81,6 +81,34 @@ impl ReplayDowngradeKind {
     }
 }
 
+/// chat-completions `reasoning_content` continuity 的**数据表（单一事实源）**。
+///
+/// 设计目标：把「哪个模型走 reasoning_content 续传」从代码里的 `match "deepseek"`
+/// 改成一张数据表。新增同类模型 = 加一行；continuity 链路的各道门只读
+/// [`ProviderCompatProfile`] 字段（`capture_mode` / `api_family` / `provider`+`model_family`），
+/// 不再按厂商名硬编码。DeepSeek 与 MiMo 现在都只是表里的一行，共用同一条逻辑。
+struct ChatCompletionsContinuityRule {
+    /// [`model_family`] 归一后的家族名。
+    family: &'static str,
+    /// 逻辑厂商（用于 same-profile 比对与日志）。
+    provider: &'static str,
+    profile_id: &'static str,
+}
+
+/// 走 `reasoning_content` 续传的模型家族；不在表内的 chat-completions 模型默认不续传。
+const CHAT_COMPLETIONS_CONTINUITY_RULES: &[ChatCompletionsContinuityRule] = &[
+    ChatCompletionsContinuityRule {
+        family: "deepseek-v4",
+        provider: "deepseek",
+        profile_id: "deepseek.v4.reasoning_content",
+    },
+    ChatCompletionsContinuityRule {
+        family: "mimo-v2.5-pro",
+        provider: "mimo",
+        profile_id: "mimo.v2_5_pro.reasoning_content",
+    },
+];
+
 impl ProviderCompatProfile {
     pub fn openai_responses(model: &str) -> Self {
         Self {
@@ -98,10 +126,13 @@ impl ProviderCompatProfile {
 
     pub fn chat_completions(model: &str) -> Self {
         let family = model_family(model);
-        match family.as_str() {
-            "deepseek-v4" => Self {
-                profile_id: "deepseek.v4.reasoning_content".to_string(),
-                provider: "deepseek".to_string(),
+        match CHAT_COMPLETIONS_CONTINUITY_RULES
+            .iter()
+            .find(|rule| rule.family == family)
+        {
+            Some(rule) => Self {
+                profile_id: rule.profile_id.to_string(),
+                provider: rule.provider.to_string(),
                 api_family: "chat_completions".to_string(),
                 model_family: family,
                 capture_mode: CaptureMode::ReasoningContent,
@@ -110,7 +141,7 @@ impl ProviderCompatProfile {
                 supports_response_id_hint: false,
                 downgrade_mode: DowngradeMode::VisibleHistoryOnly,
             },
-            _ => Self {
+            None => Self {
                 profile_id: "openai.chat_completions.default".to_string(),
                 provider: "openai".to_string(),
                 api_family: "chat_completions".to_string(),
@@ -406,17 +437,14 @@ fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinu
                 && continuation.source_api == "responses"
                 && same_profile(target, continuation)
         }
+        // chat-completions reasoning_content：不再按厂商名硬编码，改为按 profile 数据判定。
+        // 任意标记为 ReasoningContent 的 chat-completions 模型（deepseek / mimo / 未来同类）
+        // 只要 source 与 target 是同一 profile（provider + model_family 一致）即可 replay。
         ReasoningFormat::DeepseekReasoningContent => {
-            if continuation.source_provider != "deepseek"
-                || continuation.source_api != "chat_completions"
-                || target.provider != "deepseek"
-                || target.api_family != "chat_completions"
-                || model_family(&continuation.source_model) != target.model_family
-                || !matches!(target.capture_mode, CaptureMode::ReasoningContent)
-            {
-                return false;
-            }
-            true
+            continuation.source_api == "chat_completions"
+                && target.api_family == "chat_completions"
+                && matches!(target.capture_mode, CaptureMode::ReasoningContent)
+                && same_profile(target, continuation)
         }
     }
 }
