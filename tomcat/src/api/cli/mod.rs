@@ -9,6 +9,7 @@ mod models_toml;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod session_cmd;
+pub(crate) mod splash;
 mod workspace_cmd;
 
 #[cfg(test)]

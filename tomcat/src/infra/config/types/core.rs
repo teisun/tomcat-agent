@@ -204,3 +204,35 @@ impl Default for SecurityConfig {
 /// quickjs wasm 路径由 [`resolve_quickjs_path`] 从 work_dir 推导，回退到环境变量。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WasmConfig {}
+
+/// `tomcat chat` 启动时的像素风吉祥物 Splash 配置。
+///
+/// Splash 仅在 stdout 为真实终端（TTY）时绘制；管道 / 重定向 / CI 一律降级为不绘制，
+/// 由 `chat_loop` 照常打印文本 banner，保证脚本与测试行为零回归。
+/// 环境变量 `TOMCAT_SPLASH=0` 可强制关闭；`NO_COLOR` 可去除颜色转义但保留字符帧。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SplashConfig {
+    /// 是否启用 Splash 吉祥物（默认 true）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 是否播放 4 帧 idle 动画（默认 true）；false 时只打静态首帧。
+    #[serde(default = "default_true")]
+    pub animations: bool,
+    /// 居中参考宽度上限（默认 56 列）。
+    #[serde(default = "default_splash_max_width")]
+    pub max_width: usize,
+}
+
+fn default_splash_max_width() -> usize {
+    56
+}
+
+impl Default for SplashConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            animations: true,
+            max_width: default_splash_max_width(),
+        }
+    }
+}

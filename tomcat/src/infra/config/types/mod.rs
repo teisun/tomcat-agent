@@ -57,4 +57,7 @@ pub struct AppConfig {
     /// session-local todos 工具参数（GAP-N12 / G3）。
     #[serde(default)]
     pub todos: TodosConfig,
+    /// `tomcat chat` 启动像素风吉祥物 Splash 配置。
+    #[serde(default)]
+    pub splash: SplashConfig,
 }

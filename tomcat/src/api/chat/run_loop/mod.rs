@@ -86,6 +86,9 @@ fn append_failed_turn_message(
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
     ensure_session(ctx)?;
 
+    // 启动像素风吉祥物 Splash（仅 TTY 时绘制；文本 banner 仍由下方 println 负责）。
+    crate::api::cli::splash::render_mascot(&ctx.config.splash);
+
     let entry = ctx.session.get_session(ctx.session.current_session_key())?;
     let model = ctx.effective_model(entry.as_ref());
 

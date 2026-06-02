@@ -456,6 +456,20 @@ tomcat 对话模式 (模型: gpt-5.4)
 > 
 ```
 
+### 启动画面（Splash 吉祥物）
+
+在**交互式终端**下启动 `tomcat chat` 时，banner 上方会先绘制像素风吉祥物「Tommy」（4 帧 idle 动画，播放一次后定格），随后照常打印上面的文本 banner。管道 / 重定向 / CI 等**非 TTY** 场景自动跳过绘制。
+
+```toml
+# ~/.tomcat/tomcat.config.toml
+[splash]
+enabled = true       # 关闭吉祥物：false
+animations = true    # 只显示静态首帧：false
+max_width = 56       # 居中参考宽度上限
+```
+
+环境变量 `TOMCAT_SPLASH=0` 可临时关闭；`NO_COLOR` 去除颜色转义。读屏器用户建议设 `animations = false` 或 `enabled = false`。
+
 逐字流式输出 AI 回复：
 
 ```

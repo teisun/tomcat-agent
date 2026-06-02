@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-03 00:35 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-03 07:20 +0800 | ACTIVE | develop | — |
+
+### 2026-06-03 | feat(cli): chat 启动像素风吉祥物 Splash（Tommy）
+
+- **动机**：为 `tomcat chat` 增加轻量品牌感与进门问候，参考 Claude Code / Codex 的启动 Splash，但不改现有 banner 文案、不阻塞 CI/管道输出。
+- **实现**：`assets/splash/tommy_braille/` 4 帧 idle（眨眼/摇尾）；`splash.rs` 编译期嵌入、`[splash]` 配置（`enabled`/`animations`/`max_width`）、`TOMCAT_SPLASH=0`、TTY 守卫（非终端不绘制）、`NO_COLOR` 去色；`chat_loop` 开头调用 `render_mascot` 后照旧打印三行 banner。
+- **测试**：`splash_test` 仅断言帧文件已嵌入（4 帧非空）；`cargo test --lib splash` 1 passed。
+- **文档**：`user-guide.md` §6 补充启动画面说明。
 
 ### 2026-06-03 | merge `feature/t2-p0-010-multi-llm-productization` → develop（T2-P0-010 集成验收）
 
