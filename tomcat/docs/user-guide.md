@@ -1,13 +1,13 @@
 # tomcat 操作说明
 
-本文档面向第一次使用 tomcat 的用户，按"前置准备 → 构建 → 逐功能体验"顺序，覆盖 tomcat 的全部可用功能。
+本文档面向第一次使用 tomcat 的用户，按"获取程序 → 初始化 → 逐功能体验"顺序，覆盖 tomcat 的主要使用方式与可用功能。
 
 ---
 
 ## 目录
 
-- [0. 前置准备](#0-前置准备)
-- [1. 构建](#1-构建)
+- [0. 下载 Release 二进制直接使用](#0-下载-release-二进制直接使用)
+- [1. 下载源码并编译构建](#1-下载源码并编译构建)
 - [2. 初始化与环境检测](#2-初始化与环境检测)
 - [3. 配置管理](#3-配置管理)
 - [4. 会话管理](#4-会话管理)
@@ -19,31 +19,57 @@
 
 ---
 
-## 0. 前置准备
+## 0. 下载 Release 二进制直接使用
 
-### 用户安装（预编译二进制）
-
-预编译二进制下载后只需两步：
+适合只想尽快运行 CLI 的用户。下载当前平台的 release 二进制后，放入 `PATH` 并执行初始化即可。
 
 ```bash
-# 1. 下载并放入 PATH
+# 1. 给二进制加执行权限并放入 PATH
 chmod +x tomcat && mv tomcat /usr/local/bin/
 
 # 2. 初始化
-./tomcat init
+tomcat init
+
+# 3. 验证
+tomcat --help
 ```
 
-`tomcat init` 会通过交互式向导完成 LLM 配置、API Key 输入和资源部署。
+`tomcat init` 会完成默认配置写入、工作目录创建、资源部署与 API Key 配置。初始化完成后，可继续阅读 [第 2 节](#2-初始化与环境检测) 与 [第 6 节](#6-对话模式chat)。
 
-### 开发者编译
+---
+
+## 1. 下载源码并编译构建
+
+适合需要从源码运行、调试或参与开发的用户。
+
+### 前置依赖
 
 | 依赖 | 版本要求 | 用途 |
 |------|----------|------|
 | Rust | stable 1.70+ | 编译 |
 
+### 构建
+
+先获取仓库源码，再进入仓库中的 `tomcat/` 目录执行构建：
+
 ```bash
+# 拉取源码后进入仓库中的 tomcat/ 目录
 cd tomcat
 cargo build --release
+```
+
+```bash
+./target/release/tomcat --help
+# 或直接加到 PATH：
+export PATH="$PWD/target/release:$PATH"
+tomcat --help
+```
+
+查看版本：
+
+```bash
+tomcat --version
+# tomcat 0.1.1
 ```
 
 ### 工作目录
@@ -75,31 +101,6 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 详见 [directory-structure.md](architecture/directory-structure.md)。
 
 目录概念速记：`agent_workspace_dir` 是用户启动 `tomcat chat` 时的 shell 当前目录，是“当前目录 / 这个项目 / 相对路径”的语义来源，但不自动授权文件访问；`agent_definition_dir` 是 `workspace-<agentId>/` 设计态目录，也是默认可写根；`agent_trail_dir` 是 `agents/<agentId>/` 运行态目录。
-
----
-
-## 1. 构建
-
-```bash
-cd tomcat
-cargo build --release
-```
-
-编译成功后，可执行文件位于 `./target/release/tomcat`。
-
-```bash
-./target/release/tomcat --help
-# 或直接加到 PATH：
-export PATH="$PWD/target/release:$PATH"
-tomcat --help
-```
-
-查看版本：
-
-```bash
-tomcat --version
-# tomcat 0.1.1
-```
 
 ---
 
