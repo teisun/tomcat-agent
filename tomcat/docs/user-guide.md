@@ -13,9 +13,9 @@
 - [4. 会话管理](#4-会话管理)
 - [5. 工作区管理](#5-工作区管理)
 - [6. 对话模式（chat）](#6-对话模式chat)
-- [7. 插件管理](#7-插件管理)
-- [8. 审计日志](#8-审计日志)
-- [9. 附录](#9-附录)
+- [7. 审计日志](#7-审计日志)
+- [8. 附录](#8-附录)
+- [9. Wasm / WasmEdge 与插件（建设中）](#9-wasm--wasmedge-与插件建设中)
 
 ---
 
@@ -23,7 +23,7 @@
 
 ### 用户安装（预编译二进制）
 
-预编译二进制已内嵌 WasmEdge 运行时、QuickJS wasm 和 Node.js 兼容模块。下载后只需两步：
+预编译二进制下载后只需两步：
 
 ```bash
 # 1. 下载并放入 PATH
@@ -40,16 +40,10 @@ chmod +x tomcat && mv tomcat /usr/local/bin/
 | 依赖 | 版本要求 | 用途 |
 |------|----------|------|
 | Rust | stable 1.70+ | 编译 |
-| WasmEdge C 库 | 0.13.5 | 仅 `--features wasmedge` 模式需要（通过 `install-wasmedge.sh` 安装） |
-| CMake + C 编译器 | 任意 | 仅 `--features standalone` 模式需要（自动下载并链接 WasmEdge） |
 
 ```bash
 cd tomcat
-cargo build --release                     # 默认 no-wasm：不依赖 WasmEdge，插件能力关闭
-# 显式启用真实 WasmEdge（需已安装 WasmEdge C 库）：
-# cargo build --release --features wasmedge
-# 或自动下载并链接 WasmEdge（无需预装，但首次编译慢）：
-# cargo build --release --features standalone
+cargo build --release
 ```
 
 ### 工作目录
@@ -73,10 +67,8 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 │   ├── .env                       # API Key 等敏感配置（0600 权限）
 │   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
 │   ├── .lock                      # 并发写入保护锁
-│   ├── wasm/
-│   │   └── wasmedge_quickjs.wasm  # 内嵌资源自动释放
-│   └── modules/                   # Node.js 兼容模块（内嵌资源自动释放）
-├── plugins/                       # 全局共享插件
+│   └── modules/                   # 内嵌资源自动释放（预留）
+├── plugins/                       # 插件目录（Wasm 能力建设中，见第 9 节）
 └── memory/                        # 向量检索索引
 ```
 
@@ -121,8 +113,8 @@ tomcat init
 
 `tomcat init` 为**非交互式**三步流程（不再选择 Provider / 模型 / API Base URL；首次写入默认 `openai-responses` + `gpt-5.4`，与 `tomcat.config.toml.example` 及代码中 `DEFAULT_LLM_MODEL` 一致）：
 
-1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、生成模型清单 `~/.tomcat/models.toml`（含一条可用的 `mimo-v2.5-pro` 样板，见下）、释放内嵌资源（wasm + modules）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
-2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、QuickJS wasm、WasmEdge、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
+1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、生成模型清单 `~/.tomcat/models.toml`（含一条可用的 `mimo-v2.5-pro` 样板，见下）、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
+2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
 3. **[3/3] API Key 配置**：若 `~/.tomcat/assets/.env` 中尚无有效 `OPENAI_API_KEY`，提示输入（可回车跳过）。**回车跳过不会创建或写入 `.env`**（避免留下空 Key 文件）；可稍后再次运行 `tomcat init` 输入 Key，或自行创建/编辑 `~/.tomcat/assets/.env`
 
 预期输出（节选）：
@@ -134,15 +126,13 @@ tomcat init
   ✓ 默认模型: gpt-5.4
   ✓ 目录结构就绪
   ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro）
-  ✓ 内嵌资源已释放（wasm + modules）
+  ✓ 内嵌资源已释放
   ✓ 已加入 PATH 环境变量
 
 [2/3] 资源检查
 ✓ 配置合法 (~/.tomcat/tomcat.config.toml)
 ✓ 内嵌资源已就绪
-✓ QuickJS wasm：...
-✓ WasmEdge 运行时：可用
-  资源版本: wasm=... modules=...
+  资源版本: modules=...
 
 [3/3] API Key 配置
   ✓ API Key 已配置
@@ -195,14 +185,11 @@ doctor 逐项检查环境并给出可执行的修复建议：
 |--------|---------|---------|
 | 配置文件 | `✓ 配置合法 (~/.tomcat/tomcat.config.toml)` | `✗ 未找到配置文件` |
 | 内嵌资源 | `✓ 内嵌资源已就绪` | `✗ 资源释放失败` |
-| QuickJS wasm | `✓ QuickJS wasm：~/.tomcat/assets/wasm/...` | `✗ QuickJS wasm 未找到` |
-| WasmEdge 运行时 | `✓ WasmEdge 运行时：可用` | `✗ WasmEdge 运行时：不可用` 或“当前构建未启用 Wasm/插件能力” |
-| 资源版本 | `资源版本: wasm=abc123... modules=def456...` | — |
+| 资源版本 | `资源版本: modules=def456...` | — |
 | .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
 | API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
-每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。
-若当前二进制未启用 `--features wasmedge` / `standalone`，`doctor` 会明确提示“当前构建未启用 Wasm/插件能力”，这属于预期。
+每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。Wasm / 插件相关检查见 [第 9 节](#9-wasm--wasmedge-与插件建设中)（能力建设中）。
 
 ---
 
@@ -563,147 +550,9 @@ tomcat chat
 
 ---
 
-## 7. 插件管理
+## 7. 审计日志
 
-tomcat 支持加载 Wasm 沙箱插件（`plugin.json` + `main.js`），在隔离环境中运行。注册信息持久化到 `{work_dir}/plugins/registry.json`；**当前进程**内需 `plugin load` 才会真正载入 VM，退出后需重新 load（`plugin list` 可查看 registry 中的历史记录）。
-
-> 依赖：插件的 JS 执行依赖 `wasmedge_quickjs.wasm`，请参考 [第 2 节](#2-初始化与环境检测) 完成配置。不配置 QuickJS wasm 时，`plugin load` 会报错。
-
-### 构造最小插件
-
-创建一个目录，包含以下两个文件：
-
-**plugin.json**
-
-```json
-{
-  "id": "my-plugin",
-  "name": "My Plugin",
-  "version": "0.1.0",
-  "description": "体验用最小插件",
-  "author": "me",
-  "main": "main.js",
-  "requiredPermissions": [],
-  "requiredApiVersion": "1.0",
-  "tags": []
-}
-```
-
-**main.js**
-
-```js
-// 插件初始化脚本
-pi.log("my-plugin: 已加载");
-1 + 1;  // 合法的 JS，返回值无要求
-```
-
-```bash
-mkdir ~/tomcat-plugins/my-plugin
-# 写入上述两个文件到该目录
-```
-
-### 加载插件
-
-```bash
-tomcat plugin load ~/tomcat-plugins/my-plugin
-```
-
-加载时会弹出权限授权提示（`requiredPermissions` 为空时提示如下）：
-
-```
-插件 My Plugin my-plugin (v0.1.0) 请求以下权限: []
-是否授权？[y/N]
-```
-
-输入 `y` 授权后：
-
-```
-插件加载成功: my-plugin
-ID:      my-plugin
-名称:    My Plugin
-版本:    0.1.0
-描述:    体验用最小插件
-作者:    me
-状态:    enabled
-权限:    []
-```
-
-输入 `N` 或回车拒绝时：
-
-```
-插件加载失败: 权限错误: 用户拒绝插件授权
-```
-
-> `registry.json` 记录已注册插件路径与 enable 状态；Wasm 实例仅在当前 tomcat 进程内有效，重启后请对已注册条目再次 `plugin load`。
-
-### 查看已加载插件列表
-
-```bash
-tomcat plugin list
-```
-
-有插件时：
-
-```
-ID             名称         版本    状态
-my-plugin      My Plugin    0.1.0   enabled
-```
-
-无插件时：
-
-```
-当前无已加载插件。
-```
-
-### 查看插件详情
-
-```bash
-tomcat plugin info my-plugin
-```
-
-```
-ID:              my-plugin
-名称:            My Plugin
-版本:            0.1.0
-描述:            体验用最小插件
-作者:            me
-状态:            enabled
-所需权限:        []
-API 版本要求:    1.0
-注册工具:        []
-加载时间:        2026-03-10T...
-```
-
-未找到时：
-
-```
-插件未找到: my-plugin
-```
-
-### 禁用与启用插件
-
-```bash
-tomcat plugin disable my-plugin
-# 已禁用插件: my-plugin
-
-tomcat plugin enable my-plugin
-# 已启用插件: my-plugin
-```
-
-### 卸载插件
-
-```bash
-tomcat plugin unload my-plugin
-# 已卸载插件: my-plugin
-```
-
-卸载后 `tomcat plugin list` 中不再出现该插件。
-
----
-
-## 8. 审计日志
-
-tomcat 将所有 4 原语操作、工具调用、插件 hostcall 与插件生命周期（加载/启用/禁用/卸载）记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。
+tomcat 将 4 原语操作、工具调用等记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。（插件相关审计类型见 [第 9 节](#9-wasm--wasmedge-与插件建设中)，能力建设中。）
 
 **说明**：当前审计日志为明文存储；加密存储为后续 TODO。
 
@@ -777,7 +626,7 @@ jq '.[0]' /tmp/audit_backup.json
 
 ---
 
-## 9. 附录
+## 8. 附录
 
 ### 环境变量速查
 
@@ -831,43 +680,6 @@ tomcat chat
 
 ---
 
-**Q: `tomcat doctor` 显示 QuickJS wasm 未找到**
-
-预编译二进制已内嵌 QuickJS wasm，正常情况下 `tomcat init` 会自动释放。若仍缺失：
-
-```bash
-tomcat init   # 重新运行 init 触发资源释放
-```
-
----
-
-**Q: WasmEdge 运行时不可用**
-
-先区分两种情况：
-
-1. **当前构建没开 Wasm 功能**：`tomcat doctor` 会提示“当前构建未启用 Wasm/插件能力”。  
-   这时不是环境坏了，而是你当前编出来的就是 no-wasm 版本。如需插件能力，请重新编译：
-
-```bash
-cargo build --release --features wasmedge
-```
-
-2. **已经开了 `--features wasmedge`，但运行时仍不可用**：说明本机缺 WasmEdge C 库，先安装：
-
-```bash
-bash scripts/install-wasmedge.sh -y
-source $HOME/.wasmedge/env
-tomcat doctor  # 应显示 ✓ WasmEdge 运行时：可用
-```
-
-如需自动下载并链接 WasmEdge（无需预装），可使用 `--features standalone` 编译：
-
-```bash
-cargo build --release --features standalone
-```
-
----
-
 ### 相关文档
 
 | 文档 | 内容 |
@@ -877,7 +689,68 @@ cargo build --release --features standalone
 | [src/infra/README.md](../src/infra/README.md) | 基础设施层（配置/日志/审计/事件总线）|
 | [src/core/llm/README.md](../src/core/llm/README.md) | LLM 模块（OpenAI 适配器、流式输出）|
 | [src/core/session/README.md](../src/core/session/README.md) | 会话管理与 CLI 设计 |
-| [src/ext/README.md](../src/ext/README.md) | Wasm 运行时与插件系统 |
 | [src/core/README.md](../src/core/README.md) | Agent 循环（多轮对话、工具调用、重试）|
 | [src/api/README.md](../src/api/README.md) | CLI / chat / render 入口层 |
 | [INTEGRATION_TEST_LOGGING.md](openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | 集成测试日志查看方法 |
+
+---
+
+## 9. Wasm / WasmEdge 与插件（建设中）
+
+> **状态**：Wasm 沙箱插件与 WasmEdge 运行时集成**尚未完成产品化建设**。默认 `cargo build --release` 为 no-wasm 构建，`tomcat plugin *` 与 `doctor` 中的 WasmEdge / QuickJS 检查仅在与 `--features wasmedge` 或 `standalone` 编译时才有意义。下文为规划中的操作预览，供后续验收参考。
+
+### 构建与依赖（预览）
+
+| 依赖 | 版本要求 | 用途 |
+|------|----------|------|
+| WasmEdge C 库 | 0.13.5 | `--features wasmedge`（`scripts/install-wasmedge.sh`） |
+| CMake + C 编译器 | 任意 | `--features standalone`（构建时自动链接 WasmEdge） |
+
+```bash
+cd tomcat
+# cargo build --release --features wasmedge
+# cargo build --release --features standalone
+bash scripts/install-wasmedge.sh -y
+source $HOME/.wasmedge/env
+```
+
+`tomcat doctor` 在启用 Wasm feature 时会检查 QuickJS wasm（`~/.tomcat/assets/wasm/wasmedge_quickjs.wasm`）与 WasmEdge 运行时；默认构建会提示「当前构建未启用 Wasm/插件能力」，属预期。
+
+### 插件 CLI（预览）
+
+tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信息写入 `{work_dir}/plugins/registry.json`；进程内需 `plugin load` 载入 VM。
+
+**最小插件示例**
+
+`plugin.json`：
+
+```json
+{
+  "id": "my-plugin",
+  "name": "My Plugin",
+  "version": "0.1.0",
+  "description": "体验用最小插件",
+  "author": "me",
+  "main": "main.js",
+  "requiredPermissions": [],
+  "requiredApiVersion": "1.0",
+  "tags": []
+}
+```
+
+`main.js`：
+
+```js
+pi.log("my-plugin: 已加载");
+```
+
+```bash
+tomcat plugin load ~/tomcat-plugins/my-plugin
+tomcat plugin list
+tomcat plugin info my-plugin
+tomcat plugin disable my-plugin
+tomcat plugin enable my-plugin
+tomcat plugin unload my-plugin
+```
+
+实现细节见 [src/ext/README.md](../src/ext/README.md)。

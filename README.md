@@ -12,45 +12,9 @@
 
 ## 快速开始
 
-### 前置依赖
+**[用户使用说明](tomcat/docs/user-guide.md)** — 前置依赖、构建、`init` / `doctor` / `chat`、会话与工作区、配置、审计及集成测试等完整步骤与示例输出。
 
-- Rust 1.70+（推荐 stable）
-- OpenAI 兼容 API 密钥（复制 `tomcat/.env.example` 为 `tomcat/.env` 并填写 `OPENAI_API_KEY`）
-
-### 构建与运行
-
-```bash
-cd tomcat
-cargo build --release
-
-./target/release/tomcat init                     # 初始化配置与工作目录
-./target/release/tomcat doctor                   # 环境自检
-./target/release/tomcat chat                     # 交互对话（无子命令时同此）
-./target/release/tomcat session list             # 会话列表
-```
-
-工作区与运行态数据默认落在 `~/.tomcat/`（会话、日志、审计、插件等），见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
-
-### 运行测试
-
-```bash
-cd tomcat
-# 需已配置 .env
-RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration
-```
-
-## CLI 子命令
-
-| 命令 | 说明 |
-|------|------|
-| `chat` | 交互式对话（默认入口） |
-| `init` | 生成配置、引导模型与安全策略 |
-| `doctor` | 环境与配置检查 |
-| `config` | `get` / `set` / `edit` 配置项 |
-| `session` | `list` / `new` / `switch` / `delete` / `archive` / `search` |
-| `workspace` | 授权工作区 `add` / `list` / `remove` |
-| `pathrules` | 路径规则 `add` / `list` |
-| `audit` | 审计 `list` / `show` / `export` |
+简要前提：Rust stable 1.70+；OpenAI 兼容 API 密钥（`tomcat/.env.example` → `tomcat/.env` 中的 `OPENAI_API_KEY`）。运行态数据默认在 `~/.tomcat/`，目录布局见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
 
 ## 项目结构
 
@@ -87,7 +51,6 @@ tomcat/
 
 - [tomcat/docs/README.md](tomcat/docs/README.md) — 文档地图
 - [tomcat/src/README.md](tomcat/src/README.md) — `src/` 模块索引与分层图
-- [tomcat/docs/user-guide.md](tomcat/docs/user-guide.md) — 使用说明
 
 ## 许可
 
