@@ -62,14 +62,19 @@ id = "mimo-v2.5-pro"
 
     let cfg = AppConfig::default();
     let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load mimo catalog");
-    let entry = catalog.lookup("mimo-v2.5-pro").expect("inferred mimo entry");
+    let entry = catalog
+        .lookup("mimo-v2.5-pro")
+        .expect("inferred mimo entry");
     assert_eq!(entry.api, "openai");
     assert_eq!(entry.provider, "mimo");
     assert_eq!(
         entry.base_url.as_deref(),
         Some("https://token-plan-cn.xiaomimimo.com")
     );
-    assert!(!entry.capabilities.vision, "mimo-v2.5-pro 仅文本，无 vision");
+    assert!(
+        !entry.capabilities.vision,
+        "mimo-v2.5-pro 仅文本，无 vision"
+    );
     assert!(!entry.capabilities.files);
     assert!(entry.capabilities.tools);
     assert!(entry.capabilities.reasoning);

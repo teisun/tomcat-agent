@@ -1,6 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-03 07:20 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-03 08:40 +0800 | ACTIVE | develop | — |
+
+### 2026-06-03 | fix(llm): 压缩模型缺钥回退默认模型 + init 对齐 compaction_model
+
+- **动机**：`context.compaction_model` 与主对话模型 provider 不一致时，压缩场景常因缺对应 API Key 失败；init 选模后未同步 `compaction_model`，与默认模型脱节。
+- **实现**：`DefaultLlmResolver::resolve_compaction_call` 在压缩模型不可用时 warn 并回退 `llm.default_model`（同模型路径保留原错）；Compaction 场景按 provider 兼容策略选用 `llm.api_key_env` 作 credential fallback；`apply_model_choice` 写入 `context.compaction_model`。
+- **测试**：`resolver_test` 新增 3 例（回退 / 同模型原错 / Main 不受影响）；`run_basic_test` / `init_model_wizard` 断言 compaction_model 与 init 默认模型一致。
 
 ### 2026-06-03 | feat(cli): chat 启动像素风吉祥物 Splash（Tommy）
 

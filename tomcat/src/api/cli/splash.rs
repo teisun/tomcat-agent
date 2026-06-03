@@ -59,7 +59,11 @@ fn frame_lines(frame: &str) -> Vec<&str> {
 
 /// 一组帧统一的绘制高度（取各帧最大行数，保证动画期间垂直不抖动）。
 fn block_height(frames: &[&str]) -> usize {
-    frames.iter().map(|f| frame_lines(f).len()).max().unwrap_or(0)
+    frames
+        .iter()
+        .map(|f| frame_lines(f).len())
+        .max()
+        .unwrap_or(0)
 }
 
 /// 一组帧统一的绘制宽度（取各帧各行最大字符数，保证动画期间水平不抖动）。

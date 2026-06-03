@@ -209,7 +209,10 @@ fn chat_completions_profile_is_data_driven_for_mimo() {
     assert!(profile.requires_tool_turn_replay);
     assert_eq!(profile.api_family, "chat_completions");
     // 标了 reasoning_content → 走 KeepOpaque 续传。
-    assert_eq!(plan(&profile, &mimo_reasoning_message()), ReplayAction::KeepOpaque);
+    assert_eq!(
+        plan(&profile, &mimo_reasoning_message()),
+        ReplayAction::KeepOpaque
+    );
 }
 
 #[test]

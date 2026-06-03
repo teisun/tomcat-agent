@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tracing::warn;
 
 use crate::infra::config::{AppConfig, LlmConfig};
 use crate::infra::error::AppError;
@@ -231,9 +232,39 @@ impl DefaultLlmResolver {
         )
     }
 
-    fn credential_for(&self, entry: &ModelEntry) -> Result<Credential, AppError> {
-        self.auth
-            .get(&entry.provider, self.config.llm.api_key_env.as_deref())
+    fn credential_for(
+        &self,
+        entry: &ModelEntry,
+        compatible_fallback_env: Option<&str>,
+    ) -> Result<Credential, AppError> {
+        self.auth.get(&entry.provider, compatible_fallback_env)
+    }
+
+    fn compatible_fallback_env<'a>(
+        &'a self,
+        scene: LlmScene,
+        entry: &ModelEntry,
+    ) -> Option<&'a str> {
+        match scene {
+            LlmScene::Compaction => self.compaction_fallback_env(entry),
+            _ => self.config.llm.api_key_env.as_deref(),
+        }
+    }
+
+    fn compaction_fallback_env<'a>(&'a self, entry: &ModelEntry) -> Option<&'a str> {
+        let fallback_env = self.config.llm.api_key_env.as_deref();
+        let default_model = self.config.llm.default_model.trim();
+        if default_model.is_empty() || entry.id == default_model {
+            return fallback_env;
+        }
+        let Ok(default_entry) = self.lookup_entry(default_model) else {
+            return None;
+        };
+        if default_entry.provider == entry.provider {
+            fallback_env
+        } else {
+            None
+        }
     }
 
     fn effective_base_url(&self, entry: &ModelEntry) -> Option<String> {
@@ -299,18 +330,16 @@ impl DefaultLlmResolver {
             .or_insert_with(|| provider.clone())
             .clone())
     }
-}
 
-impl LlmResolver for DefaultLlmResolver {
-    fn resolve(
+    fn resolve_model_call(
         &self,
         scene: LlmScene,
-        session_override: Option<&str>,
+        model_id: &str,
     ) -> Result<ResolvedCall, AppError> {
-        let model_id = self.select_model_id(scene, session_override);
-        let entry = self.lookup_entry(&model_id)?;
+        let entry = self.lookup_entry(model_id)?;
         self.guard_scene(scene, &entry)?;
-        let credential = self.credential_for(&entry)?;
+        let compatible_fallback_env = self.compatible_fallback_env(scene, &entry);
+        let credential = self.credential_for(&entry, compatible_fallback_env)?;
         let provider_cfg = self.build_provider_config(&entry, &credential);
         let provider_impl = self.resolve_cached_provider(&provider_cfg, &credential)?;
         Ok(ResolvedCall {
@@ -323,5 +352,43 @@ impl LlmResolver for DefaultLlmResolver {
             thinking_format: self.resolved_thinking_format(&entry),
             capabilities: entry.capabilities.clone(),
         })
+    }
+
+    fn resolve_compaction_call(&self, model_id: &str) -> Result<ResolvedCall, AppError> {
+        let selected_model = model_id.trim();
+        let default_model = self.config.llm.default_model.trim();
+        match self.resolve_model_call(LlmScene::Compaction, selected_model) {
+            Ok(resolved) => Ok(resolved),
+            Err(original_err) if !default_model.is_empty() && selected_model != default_model => {
+                warn!(
+                    compaction_model = selected_model,
+                    fallback_model = default_model,
+                    error = %original_err,
+                    "compaction model unavailable, falling back to default model"
+                );
+                match self.resolve_model_call(LlmScene::Compaction, default_model) {
+                    Ok(resolved) => Ok(resolved),
+                    Err(fallback_err) => Err(AppError::Config(format!(
+                        "压缩模型 `{}` 不可用，回退默认模型 `{}` 也失败。原始错误：{}；回退错误：{}",
+                        selected_model, default_model, original_err, fallback_err
+                    ))),
+                }
+            }
+            Err(original_err) => Err(original_err),
+        }
+    }
+}
+
+impl LlmResolver for DefaultLlmResolver {
+    fn resolve(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let model_id = self.select_model_id(scene, session_override);
+        match scene {
+            LlmScene::Compaction => self.resolve_compaction_call(&model_id),
+            _ => self.resolve_model_call(scene, &model_id),
+        }
     }
 }

@@ -31,15 +31,24 @@ fn creates_models_toml_with_mimo_when_absent() {
     assert_eq!(status, ModelsTomlStatus::Created);
 
     let text = models_toml_text(&cfg);
-    assert!(text.contains("id = \"mimo-v2.5-pro\""), "missing mimo entry:\n{text}");
-    assert!(text.contains("# Tomcat 模型清单"), "missing header comment:\n{text}");
+    assert!(
+        text.contains("id = \"mimo-v2.5-pro\""),
+        "missing mimo entry:\n{text}"
+    );
+    assert!(
+        text.contains("# Tomcat 模型清单"),
+        "missing header comment:\n{text}"
+    );
 
     // 生成的条目必须能被 catalog 正确解析。
     let catalog = ModelCatalog::load(&cfg).expect("catalog load");
     let entry = catalog.lookup("mimo-v2.5-pro").expect("mimo entry");
     assert_eq!(entry.api, "openai");
     assert_eq!(entry.provider, "mimo");
-    assert_eq!(entry.base_url.as_deref(), Some("https://token-plan-cn.xiaomimimo.com"));
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://token-plan-cn.xiaomimimo.com")
+    );
     assert_eq!(entry.thinking_format.as_deref(), Some("doubao"));
     assert!(!entry.capabilities.vision);
     assert!(!entry.capabilities.files);
@@ -52,7 +61,10 @@ fn second_run_is_idempotent_no_duplicate() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_with_work_dir(dir.path());
 
-    assert_eq!(ensure_mimo_models_toml(&cfg).unwrap(), ModelsTomlStatus::Created);
+    assert_eq!(
+        ensure_mimo_models_toml(&cfg).unwrap(),
+        ModelsTomlStatus::Created
+    );
     assert_eq!(
         ensure_mimo_models_toml(&cfg).unwrap(),
         ModelsTomlStatus::AlreadyPresent
@@ -93,9 +105,18 @@ base_url = \"https://api.acme.example\"
     assert_eq!(status, ModelsTomlStatus::AppendedMimo);
 
     let text = models_toml_text(&cfg);
-    assert!(text.contains("# my own notes"), "user comment lost:\n{text}");
-    assert!(text.contains("id = \"my-custom-model\""), "user entry lost:\n{text}");
-    assert!(text.contains("id = \"mimo-v2.5-pro\""), "mimo not appended:\n{text}");
+    assert!(
+        text.contains("# my own notes"),
+        "user comment lost:\n{text}"
+    );
+    assert!(
+        text.contains("id = \"my-custom-model\""),
+        "user entry lost:\n{text}"
+    );
+    assert!(
+        text.contains("id = \"mimo-v2.5-pro\""),
+        "mimo not appended:\n{text}"
+    );
 
     // 两个条目都应能解析。
     let catalog = ModelCatalog::load(&cfg).expect("catalog load");

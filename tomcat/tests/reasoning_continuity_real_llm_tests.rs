@@ -447,11 +447,17 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
         .await?;
 
         let Some(reasoning_continuation) = first_turn.reasoning_continuation.clone() else {
-            tracing::warn!(attempt, "MiMo tool turn 未返回 continuity snapshot，重试捕获");
+            tracing::warn!(
+                attempt,
+                "MiMo tool turn 未返回 continuity snapshot，重试捕获"
+            );
             continue;
         };
         let Some(continuity) = first_turn.continuity.clone() else {
-            tracing::warn!(attempt, "MiMo tool turn 未返回 continuity metadata，重试捕获");
+            tracing::warn!(
+                attempt,
+                "MiMo tool turn 未返回 continuity metadata，重试捕获"
+            );
             continue;
         };
         if first_turn.tool_calls.is_empty() {
@@ -517,7 +523,8 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
     }
 
     Err(
-        std::io::Error::other("MiMo 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot").into(),
+        std::io::Error::other("MiMo 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot")
+            .into(),
     )
 }
 

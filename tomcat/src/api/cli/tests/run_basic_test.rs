@@ -31,6 +31,14 @@ fn run_init_writes_openai_responses_as_default_provider() {
             config_text.contains("provider = \"openai-responses\""),
             "generated config should default to openai-responses, got:\n{config_text}"
         );
+        assert!(
+            config_text.contains("[context]"),
+            "generated config should persist context overrides, got:\n{config_text}"
+        );
+        assert!(
+            config_text.contains("compaction_model = \"gpt-5.4\""),
+            "generated config should align compaction model with init default model, got:\n{config_text}"
+        );
     });
 }
 
@@ -173,6 +181,7 @@ fn apply_model_choice_updates_provider_and_key_env() {
 
     let choice = apply_model_choice(&mut cfg, &entry);
     assert_eq!(cfg.llm.default_model, "deepseek-v4-pro");
+    assert_eq!(cfg.context.compaction_model, "deepseek-v4-pro");
     assert_eq!(cfg.llm.provider, "openai");
     assert_eq!(
         cfg.llm.api_base.as_deref(),
@@ -233,6 +242,7 @@ fn apply_model_choice_skips_default_openai_base_url() {
     };
 
     apply_model_choice(&mut cfg, &entry);
+    assert_eq!(cfg.context.compaction_model, "gpt-5.4");
     assert_eq!(cfg.llm.provider, "openai-responses");
     assert_eq!(cfg.llm.api_base, None);
     assert_eq!(cfg.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));

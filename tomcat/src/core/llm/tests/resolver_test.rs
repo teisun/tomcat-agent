@@ -154,3 +154,85 @@ fn catalog_route_ignores_legacy_api_base_override() {
         std::env::remove_var("OPENAI_API_KEY");
     }
 }
+
+#[test]
+#[serial(env_lock)]
+fn compaction_falls_back_to_default_model_when_selected_provider_key_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "deepseek-v4-pro".to_string();
+    cfg.context.compaction_model = "gpt-5.4".to_string();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("DEEPSEEK_API_KEY", "stub");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Compaction, None)
+        .expect("compaction should fall back to default model");
+    assert_eq!(resolved.model, "deepseek-v4-pro");
+    assert_eq!(resolved.provider, "deepseek");
+    assert_eq!(resolved.key_source, "DEEPSEEK_API_KEY");
+
+    unsafe {
+        std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn compaction_keeps_original_error_when_already_on_default_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "deepseek-v4-pro".to_string();
+    cfg.context.compaction_model = "deepseek-v4-pro".to_string();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    let err = resolver
+        .resolve(LlmScene::Compaction, None)
+        .expect_err("missing default-model credential should surface original error");
+    let msg = err.to_string();
+    assert!(msg.contains("DEEPSEEK_API_KEY"));
+    assert!(
+        !msg.contains("压缩模型 `deepseek-v4-pro` 不可用"),
+        "same-model path should not wrap the error as a fallback failure: {msg}"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn main_scene_is_unchanged_by_compaction_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    let mut cfg = AppConfig::default();
+    cfg.context.compaction_model = "deepseek-v4-pro".to_string();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("OPENAI_API_KEY", "stub");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, None)
+        .expect("main scene should keep using the configured default model");
+    assert_eq!(resolved.model, "gpt-5.4");
+    assert_eq!(resolved.provider, "openai");
+    assert_eq!(resolved.key_source, "OPENAI_API_KEY");
+
+    unsafe {
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+}

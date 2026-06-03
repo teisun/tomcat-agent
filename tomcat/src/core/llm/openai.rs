@@ -211,8 +211,10 @@ fn transport_messages(
                 serde_json::to_value(apply_text_downgrade(original, &text))
                     .unwrap_or_else(|_| json!({}))
             }
-            ReplayAction::StripOpaque => serde_json::to_value(original.without_completion_metadata())
-                .unwrap_or_else(|_| json!({})),
+            ReplayAction::StripOpaque => {
+                serde_json::to_value(original.without_completion_metadata())
+                    .unwrap_or_else(|_| json!({}))
+            }
         };
         out.push(value);
     }
