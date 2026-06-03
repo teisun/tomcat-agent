@@ -814,9 +814,14 @@ impl OpenAiReasoningState {
             return None;
         }
         self.text.push_str(&delta);
+        // chat-completions 类 provider（deepseek/mimo/doubao 等）只有单一 reasoning 流
+        // （reasoning_content / reasoning / reasoning_text 或 `<think>` 标签），不存在
+        // OpenAI Responses 那种独立 summary/raw 双流。该单流就是这些模型唯一对用户可见的
+        // 思考面，故归类为 Summary，使默认 `show="summary"` 档位即可显示；否则会被
+        // CliTurnRenderer 的 raw 过滤吞掉导致 thinking UI 空白。
         Some(StreamEvent::Thinking {
             delta,
-            source: ThinkingSource::Raw,
+            source: ThinkingSource::Summary,
             signature: None,
         })
     }

@@ -39,11 +39,13 @@ fn frames() -> &'static [&'static str; FRAME_COUNT] {
 }
 
 /// idle 动画帧数（编译期 `include_str!` 嵌入）。
+#[cfg(test)]
 pub(crate) fn splash_frame_count() -> usize {
     frames().len()
 }
 
 /// 是否已加载全部非空帧素材。
+#[cfg(test)]
 pub(crate) fn splash_frames_loaded() -> bool {
     frames().iter().all(|f| !f.trim().is_empty())
 }

@@ -22,6 +22,11 @@ pub enum ToolCliVerbosity {
 /// - `summary`：流式显示 summary，隐藏 raw；
 /// - `full`：流式显示 summary + raw。
 ///
+/// 关于 source 分类：只有 OpenAI Responses 才有独立的 summary / raw 双流；
+/// chat-completions 类 provider（deepseek/mimo/doubao 等）只有单一 reasoning 流，
+/// 统一标记为 `summary`，因此在默认 `summary` 档位即可显示其思考——它们没有
+/// 任何会被 `raw` 过滤吞掉的内容。
+///
 /// 反序列化兼容历史 bool：
 /// - `false` -> `summary`
 /// - `true` -> `full`
@@ -190,6 +195,8 @@ pub struct OpenAiResponsesConfig {
 /// **产品默认**：`enabled = true`、`show = "summary"`、`level = "high"`。
 /// 新默认会流式显示 summary、隐藏 raw；若希望更安静的占位模式，设 `show = "minimal"`；
 /// 若希望完全静默 thinking，需显式 `enabled = false`。详见 changelog 与架构 §3.1 G5。
+/// 注意 `summary`/`raw` 双流仅 OpenAI Responses 有；chat-completions 类模型
+/// （deepseek/mimo/doubao 等）单流统一归 `summary`，默认档即可见其思考。
 /// 其它字段：
 ///
 /// - `level`: `off | minimal | low | medium | high | xhigh`，由

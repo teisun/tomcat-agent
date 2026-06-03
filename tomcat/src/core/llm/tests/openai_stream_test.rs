@@ -61,12 +61,14 @@ fn test_openai_chunk_reasoning_content_emits_thinking() {
             .expect("should parse chunk with reasoning_content");
     let events = openai_chunk_to_stream_events(chunk);
     assert_eq!(events.len(), 1);
+    // chat-completions 单一 reasoning 流归类为 Summary（无独立 summary/raw 双流），
+    // 以便默认 `show="summary"` 档位可显示。
     assert!(
         matches!(
             &events[0],
             StreamEvent::Thinking {
                 delta,
-                source: ThinkingSource::Raw,
+                source: ThinkingSource::Summary,
                 signature: None
             } if delta == "step 1"
         ),
@@ -87,7 +89,7 @@ fn test_openai_chunk_reasoning_alias_falls_back() {
             &events[0],
             StreamEvent::Thinking {
                 delta,
-                source: ThinkingSource::Raw,
+                source: ThinkingSource::Summary,
                 ..
             } if delta == "alt-name"
         ),
@@ -109,7 +111,7 @@ fn test_openai_chunk_thinking_and_content_order() {
             &events[0],
             StreamEvent::Thinking {
                 delta,
-                source: ThinkingSource::Raw,
+                source: ThinkingSource::Summary,
                 ..
             } if delta == "plan"
         ),
@@ -134,6 +136,33 @@ fn test_openai_chunk_empty_reasoning_is_ignored() {
         "empty reasoning should not emit Thinking, got {:?}",
         events
     );
+}
+
+/// 回归：chat-completions 类 provider 的 reasoning 单流必须发成 `ThinkingSource::Summary`。
+///
+/// 这些模型（deepseek/mimo/doubao 等）没有 OpenAI Responses 的独立 summary/raw 双流，
+/// 其唯一 reasoning 面应在默认 `show="summary"` 档位可见；若退回 `Raw` 会被
+/// `CliTurnRenderer` 的 raw 过滤吞掉、导致 thinking UI 空白（本次修复锁死的契约）。
+#[test]
+fn test_chat_completions_reasoning_classified_as_summary_source() {
+    for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+        let chunk: OpenAiStreamChunk = serde_json::from_str(&format!(
+            r#"{{"choices":[{{"delta":{{"{field}":"thinking"}}}}]}}"#
+        ))
+        .expect("should parse reasoning chunk");
+        let events = openai_chunk_to_stream_events(chunk);
+        assert!(
+            matches!(
+                events.first(),
+                Some(StreamEvent::Thinking {
+                    source: ThinkingSource::Summary,
+                    ..
+                })
+            ),
+            "字段 {field} 的 reasoning 应归类为 Summary，实际: {:?}",
+            events
+        );
+    }
 }
 
 #[test]

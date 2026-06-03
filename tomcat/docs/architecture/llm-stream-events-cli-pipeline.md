@@ -152,7 +152,7 @@
    - Qwen：`enable_thinking` / `chat_template_kwargs`（占位）
 
 2. **响应表（Inbound）**：`(provider, stream_chunk_shape) -> Vec<StreamEvent>`  
-   - Chat Completions：`delta.reasoning_content` / `delta.reasoning` / `delta.reasoning_text`（报告 §3.5：三路检测）  
+   - Chat Completions：`delta.reasoning_content` / `delta.reasoning` / `delta.reasoning_text`（报告 §3.5：三路检测）。**该类 provider（deepseek/mimo/doubao 等）只有单一 reasoning 流，不存在 Responses 那种独立 summary/raw 双流，故统一发成 `source=summary`**——这是该类模型唯一对用户可见的思考面，使默认 `show="summary"` 档位即可显示（若退回 `raw` 会被渲染器过滤、导致 thinking UI 空白）。  
   - Responses：`response.output_text.delta`（正文）+ `response.reasoning_summary_text.delta`（**以实际 SSE 事件名为准：实现时以官方文档 + 线上抓包锁定**，当前 `stream.rs` 的 `_ => ignore` 必须替换为显式映射 + 未知事件 debug 日志）  
    - Anthropic：`thinking_delta` + `signature`（后续）
 
@@ -291,7 +291,7 @@ P1 StreamEvent::Thinking
 |-------------|------|------|--------|
 | `ContentDelta { delta }` | 是 | 正文增量 | 回答正文。 |
 | `ToolCallDelta { ... }` | 否 | 工具增量 | 只拼装，不展示。 |
-| `Thinking { delta, source, signature }` | 否 | 思考增量；`source` 区分 `summary/raw`，`signature` 仅 Anthropic | 思考草稿。 |
+| `Thinking { delta, source, signature }` | 否 | 思考增量；`source` 区分 `summary/raw`（chat-completions 单流恒为 `summary`，仅 Responses 才有 `raw`），`signature` 仅 Anthropic | 思考草稿。 |
 | `FinishReason { reason }` | 否 | 结束原因 | 循环控制。 |
 | `Usage { ... }` | 否 | token 统计 | 计费/压缩。 |
 
@@ -696,7 +696,7 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
 | `llm.thinking.level` | enum | `high` | `ThinkingLevel` | 默认深度推理档位。 |
 | `llm.thinking.format` | string? | auto | `thinking_format` | 告诉翻译表用哪套键。 |
 | `llm.thinking.max_tokens` | u32? | model default | 仅豆包 / Moonshot `thinking` 对象路径生效 | OpenAI/Responses 走 `reasoning.effort`。 |
-| `llm.thinking.show` | enum(`minimal/summary/full`) | `summary` | CLI thinking 显示档位；兼容旧 bool：`false -> summary`、`true -> full` | 默认显示摘要。 |
+| `llm.thinking.show` | enum(`minimal/summary/full`) | `summary` | CLI thinking 显示档位；兼容旧 bool：`false -> summary`、`true -> full`。chat-completions 类模型单流恒为 `source=summary`，默认档即可见；`raw` 仅 Responses 有，须 `full` 才显示 | 默认显示摘要。 |
 | `llm.thinking.persist` | bool | `false` | 是否写入 transcript | 默认别存草稿。 |
 | `llm.thinking.print_to_stderr` | bool | `false` | 与 prompt 冲突时逃生 | 调试用。 |
 | `llm.tool_cli_verbosity` | enum(`off/brief/full`) | `full` | 工具执行行输出档位 | 与 `thinking_display` 解耦。 |
