@@ -11,7 +11,7 @@
 | 前缀 | 含义 | 文档 |
 |------|------|------|
 | `01-` | 最底层：基础设施 | [infra/README.md](./infra/README.md) |
-| `02-*` | **同层并列**的宿主核心 / 扩展能力（无先后顺序） | [core/llm/README.md](./core/llm/README.md)、[core/session/README.md](./core/session/README.md)、[ext/README.md](./ext/README.md) |
+| `02-*` | **同层并列**的宿主核心子模块（无先后顺序） | [core/llm/README.md](./core/llm/README.md)、[core/session/README.md](./core/session/README.md) |
 | `03-` | 更上层编排（依赖下层能力） | [core/README.md](./core/README.md) |
 | — | 交互入口（CLI / chat） | [api/README.md](./api/README.md) |
 
@@ -31,11 +31,11 @@
                                   |
          +------------------------+------------------------+
          |                        |                        |
-+--------v---------+    +---------v---------+    +---------v------------------+
-| core/llm         |    | core/session      |    | ext/ (WasmEngine,          |
-| LlmProvider      |    | SessionManager    |    |  Dispatcher, PluginMgr)     |
-| ◄── core/llm     |    | ◄── core/session  |    | ◄── ext/README              |
-+--------+---------+    +---------+---------+    +---------+-------------------+
++--------v---------+    +---------v---------+
+| core/llm         |    | core/session      |
+| LlmProvider      |    | SessionManager    |
+| ◄── core/llm     |    | ◄── core/session  |
++--------+---------+    +---------+---------+
          \___________________|_______________________/
                                |
                     +----------v-----------+
@@ -59,7 +59,6 @@
 | [infra/README.md](./infra/README.md) | 错误、配置、日志、平台 IO、事件总线、审计 |
 | [core/llm/README.md](./core/llm/README.md) | LLM 统一接入、流式、限流与重试 |
 | [core/session/README.md](./core/session/README.md) | 会话存储、JSONL transcript |
-| [ext/README.md](./ext/README.md) | WasmEdge、Hostcall、插件生命周期 |
 | [core/README.md](./core/README.md) | Agent 循环、Compaction、core 层其它子模块索引 |
 
 运行时工作区目录树（非 `src` 模块）见 [docs/architecture/directory-structure.md](../docs/architecture/directory-structure.md)。
