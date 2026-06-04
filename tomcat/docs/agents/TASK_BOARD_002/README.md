@@ -42,6 +42,8 @@
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理     | `TODO` | —     | `feature/bash-ast-detect-precision`    | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 | **T2-P1-010** | OpenAI / DeepSeek 推理续传                    | `DONE` | Jerry | `feature/reasoning-continuity`         | [tasks/T2-P1-010.md](./tasks/T2-P1-010.md) |
 | **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `DONE` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
+| **T2-P1-012** | `web_search` 工具                              | `TODO` | —     | `feature/web-search`                   | [tasks/T2-P1-012.md](./tasks/T2-P1-012.md) |
+| **T2-P1-013** | `web_fetch` 工具                               | `TODO` | —     | `feature/web-fetch`                    | [tasks/T2-P1-013.md](./tasks/T2-P1-013.md) |
 
 
 ## 5. 开放任务依赖（概览）
@@ -54,7 +56,10 @@ flowchart LR
     P109[T2-P1-009<br/>bash AST 精度]
     P110[T2-P1-010<br/>Responses 推理续传]
     P111[T2-P1-011<br/>Current-Tail Guard]
+    P112[T2-P1-012<br/>web_search]
+    P113[T2-P1-013<br/>web_fetch]
     P008 -.->|TUI 增强后可并行| P109
+    P112 -.->|共享 tool_exec 热区| P113
     P110 -.->|continuity 基础已具备| P010
     P009
     P110
@@ -63,7 +68,7 @@ flowchart LR
 
 
 
-> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。
+> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。**T2-P1-012 / T2-P1-013** 以各自架构文档为 SSoT，共享 `tool_exec/` 热区，可并行认领 PR-A 之后分 PR 推进；**T2-P1-012** 的 PR-WS-O 依赖 `openai_responses/*`（T2-P1-010 已合入）。
 
 ---
 

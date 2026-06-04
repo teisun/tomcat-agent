@@ -5,10 +5,18 @@
 **文首声明（与 `read.md` 全篇闭环口吻不同）**：
 
 - **§3、§5**：描述本期 PR-WF-A/S/D/B 合入后的**目标态行为**与代码锚点；与实现不一致处以 **`src/` 代码为准**。
-- **§1 观察指标表、§2.3–§2.4、§9、§10、§11**：描述**契约草案与路线图**（与 002 看板 [T2-P1-009](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md) 一致）；合入后以 PR 更新本文状态列。
+- **§1 观察指标表、§2.3–§2.4、§9、§10、§11**：描述**契约草案与路线图**（与 002 看板 [T2-P1-013](../../agents/TASK_BOARD_002/tasks/T2-P1-013.md) 一致）；合入后以 PR 更新本文状态列。
 - **§2.4.5 PR-WF-P**：路线图条目（可选 LLM 摘要），**本期不实现**——仅占位字段并预留接口。
 
 写作约定见 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（B 类：术语、调研、目标、**§4.1/§4.2**、One-Glance、测试、风险）。
+
+> **实现锚点校准（2026-06 重构后核对，落地时以此为准）**：本文起草后 `src/` 有重构，以下锚点已漂移——
+>
+> 1. **`tool_exec` 已从单文件升为目录模块**：`src/core/agent_loop/tool_exec/`。中央分发在 [`tool_exec/mod.rs::execute_tool_tuple_full`](../../../src/core/agent_loop/tool_exec/mod.rs) 的 `match tc.name.as_str()`；每个工具的处理函数放在 `tool_exec/branches/<tool>.rs`（形如 `handle_read`），并在 [`tool_exec/branches/mod.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs) 注册。**本文凡提「`tool_exec.rs` 加 `match "web_fetch"`」均指**：新增 `tool_exec/branches/web_fetch.rs`（`handle_web_fetch`）→ 在 `branches/mod.rs` 导出 → 在 `tool_exec/mod.rs` 的 match 增一臂。
+> 2. **工具配置类型已移位**：`src/infra/config/types.rs` → [`src/infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs)；聚合结构为 `ToolsConfig { read, write, bash }`。`ToolsWebFetchConfig` 应作为新子表加进 `ToolsConfig`。
+> 3. **权限锚点仍有效**：[`permission/types.rs::PermissionScope`](../../../src/core/permission/types.rs) 当前仍为五值（`Read/Write/Bash/BashApproval/Forbidden`）、[`primitive/types.rs::PrimitiveOperation`](../../../src/core/tools/primitive/types.rs) 仍为四值（`Read/Write/Edit/Bash`）、[`gate.rs::PermissionGate`](../../../src/core/permission/gate.rs) 仍是 `check` + `check_bash` 两法——PR-WF-D 的「新增第六值 `Domain` + `check_domain`」方案**与当前代码一致，可照常落地**。新增的 [`permission/url_like.rs`](../../../src/core/permission/url_like.rs)（`is_url_like` http/https 判定）可供 `validate.rs` 复用。
+> 4. **新依赖**：`Cargo.toml` 当前**无** `moka`（无 LRU 工具）与 `html2md`——PR-WF-S 的缓存与 HTML→Markdown 须各自新增依赖；`reqwest 0.12` / `xxhash-rust(xxh32)` 已在。
+> 5. **新增的子 Agent 工具白名单门闩**（重构引入）：[`tool_exec/guard.rs`](../../../src/core/agent_loop/tool_exec/guard.rs) 的 `is_reviewer_whitelisted_tool` / `is_verifier_whitelisted_tool` 会**拒绝**白名单外的任何工具。`web_fetch` 默认**不在**白名单内——PR-WF-A 须显式决定：reviewer/verifier 子 Agent 是否允许抓取外部 URL（多数审查场景应**保持禁止**，则无需改 guard；若放开则在此二函数补名）。
 
 ---
 
@@ -114,8 +122,8 @@
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 | --- | --- | --- | --- | --- |
-| **PR-WF-A**（命名 + catalog） | **交付物**：3 字段 schema；占位 err；system_prompt 与 cc-fork 同档文案。**落地点**：catalog / `tool_exec` / system_prompt | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)、[`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)、[`system_prompt.rs`](../../../src/core/llm/system_prompt.rs) | `catalog_test::web_fetch_registered`、`tool_exec_unknown_tool_for_web_fetch_without_backend`（**PENDING**） | 先把名字 / schema / 占位放好。 |
-| **PR-WF-S**（HTTP + Markdownify + 缓存 + 重定向） | **交付物**：GET+UA+Accept；`Policy::none()` + 手写 redirect 循环；URL 校验；HTML→Markdown；LRU/TTL；体积/超时/截断常量。**落地点**：`core/tools/web_fetch/*`、`ToolsWebFetchConfig` | 新模块 `core/tools/web_fetch/{mod,types,fetcher,markdownify,cache,validate,redirect}.rs`、[`infra/config/types.rs`](../../../src/infra/config/types.rs) `ToolsWebFetchConfig` | `web_fetch_url_to_markdown`、`web_fetch_cache_hit_skips_http`、`web_fetch_redirect_same_host_followed`、`web_fetch_redirect_off_host_returns_structured`、`web_fetch_oversize_truncated`、`web_fetch_url_with_credentials_rejected`（**PENDING**） | 抓 + 转 + 缓存 + 跳转策略一并接好。 |
+| **PR-WF-A**（命名 + catalog） | **交付物**：3 字段 schema；占位 err；system_prompt 与 cc-fork 同档文案。**落地点**：catalog / `tool_exec` / system_prompt | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)、[`tool_exec/mod.rs`](../../../src/core/agent_loop/tool_exec/mod.rs)（match 增臂）+ 新 [`tool_exec/branches/web_fetch.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs)、[`system_prompt.rs`](../../../src/core/llm/system_prompt.rs) | `catalog_test::web_fetch_registered`、`tool_exec_unknown_tool_for_web_fetch_without_backend`（**PENDING**） | 先把名字 / schema / 占位放好。 |
+| **PR-WF-S**（HTTP + Markdownify + 缓存 + 重定向） | **交付物**：GET+UA+Accept；`Policy::none()` + 手写 redirect 循环；URL 校验；HTML→Markdown；LRU/TTL；体积/超时/截断常量。**落地点**：`core/tools/web_fetch/*`、`ToolsWebFetchConfig` | 新模块 `core/tools/web_fetch/{mod,types,fetcher,markdownify,cache,validate,redirect}.rs`、[`infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs) 的 `ToolsConfig` 加 `ToolsWebFetchConfig`；新增 `moka` + `html2md` 依赖 | `web_fetch_url_to_markdown`、`web_fetch_cache_hit_skips_http`、`web_fetch_redirect_same_host_followed`、`web_fetch_redirect_off_host_returns_structured`、`web_fetch_oversize_truncated`、`web_fetch_url_with_credentials_rejected`（**PENDING**） | 抓 + 转 + 缓存 + 跳转策略一并接好。 |
 | **PR-WF-D**（域名权限） | **交付物**：新增 `check_domain` trait 方法 + `PermissionScope::Domain` 第六值；三档域名配置；审计 scope 串。**落地点**：`core/permission/*`、`web_fetch/fetcher.rs`、`infra/audit/mod.rs` | [`core/permission/`](../../../src/core/permission/)（新增第六值到 [`types.rs::PermissionScope`](../../../src/core/permission/types.rs) + 新增 `check_domain` 方法到 [`gate.rs::PermissionGate`](../../../src/core/permission/gate.rs) trait）、`web_fetch/fetcher.rs`（gate 调用）、[`infra/audit/mod.rs`](../../../src/infra/audit/mod.rs)（`PrimitiveAuditEntry::permission_scope` 映射新增 `"domain"` 串） | `web_fetch_blocked_domain_rejects`、`web_fetch_preapproved_host_skips_confirm`、`web_fetch_ask_then_allow_persists`、`web_fetch_audit_includes_domain_scope`（**PENDING**） | 抓任何域名前先过闸；可配置可点确认。 |
 | **PR-WF-B**（二进制 / PDF 持久化） | **交付物**：content-type 分流；`persisted_output_path`。**落地点**：`fetcher.rs`、`persist.rs`、`resolve_agent_trail_dir` | `web_fetch/fetcher.rs`、`web_fetch/persist.rs`、复用 `infra::resolve_agent_trail_dir` | `web_fetch_pdf_persisted_to_tool_results`、`web_fetch_html_inline_not_persisted`、`web_fetch_persist_path_in_response`、`web_fetch_image_persists_with_correct_ext`（**PENDING**） | PDF 直接给路径，别灌 base64 进上下文。 |
 | **PR-WF-P（路线图）** | **交付物**：`use_llm_processing` + small model 摘要。**落地点**：`web_fetch/summarize.rs` + LLM 客户端 | `web_fetch/summarize.rs`（新增）、复用 LLM 客户端 small model 路径 | 留待该 PR 单独写 §10 行（**本期不实现**） | 嫌截断 markdown 还是大就让 small model 摘一下；本期先占位。 |
@@ -543,8 +551,9 @@ RedirectInfo {
         │
         ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│  src/core/agent_loop/tool_exec.rs                                          │
-│  • match "web_fetch": parse args → executor.web_fetch.fetch(args)           │
+│  src/core/agent_loop/tool_exec/  (目录模块)                                 │
+│  • mod.rs::execute_tool_tuple_full → match "web_fetch"                       │
+│  • branches/web_fetch.rs::handle_web_fetch → executor.web_fetch.fetch()      │
 │  • 序列化 WebFetchOutput 为 JSON 字符串作为 tool 消息文本                    │
 └───────────────────────────────┬────────────────────────────────────────────┘
                                 │
@@ -579,8 +588,8 @@ RedirectInfo {
                 │
                 ▼
 ┌────────────────────────────────────────────────────────────────────────────┐
-│  src/infra/config/types.rs                                                 │
-│  • ToolsWebFetchConfig                                                      │
+│  src/infra/config/types/tools.rs                                           │
+│  • ToolsConfig 加 ToolsWebFetchConfig                                       │
 │    { allowed_domains, blocked_domains, preapproved_hosts,                  │
 │      max_redirects, fetch_timeout_ms, max_http_content_bytes,              │
 │      max_markdown_chars, cache_ttl_secs, cache_capacity_bytes,             │
@@ -853,7 +862,7 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 
 - 兄弟工具：[`web_search.md`](web_search.md) · [`read.md`](read.md) · [`bash.md`](bash.md) · [`search_files.md`](search_files.md) · [`write.md`](write.md) · [`edit.md`](edit.md)
 - 权限总览：[`../permission-system.md`](../permission-system.md)（本文新增 `PermissionScope::Domain`，§12 已登记修订意图）
-- 看板叙事：[`docs/agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)、[`T2-P1-009.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-009.md)
+- 看板叙事：[`docs/agents/TASK_BOARD_002/README.md`](../../agents/TASK_BOARD_002/README.md)、[`T2-P1-013.md`](../../agents/TASK_BOARD_002/tasks/T2-P1-013.md)
 - 五仓对比：[`agent-tools-comparison.md`](../../reports/agent-tools-comparison.md)
 - Cursor 内置工具参考：[`cursor-builtin-tools-reference.md`](../../reports/cursor-builtin-tools-reference.md)
 - 派生工具目录：[`tool-catalog.md`](../../tool-catalog.md)

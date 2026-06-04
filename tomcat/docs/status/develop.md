@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-03 08:40 +0800 | ACTIVE | develop | — |
+| Jerry | 2026-06-04 18:40 +0800 | ACTIVE | develop | — |
+
+### 2026-06-04 | docs(tools): web_search 项目级 hosted 候选 + 看板/计划规范
+
+- **动机**：`web_search` 的 `auto` 不应绑在当前对话模型 wire 上；只要项目 catalog 里配置了 `capabilities.web_search == true` 的模型，就应作为 hosted 首选，再按 `openai(hosted) → tavily → brave → serper` 降级。同时补齐 Tavily/Brave/Serper 官方契约与 `.env` 密钥位，并把 PLAN 规范要求「todos 覆盖研发流程 + 决策表全部项」写死。
+- **文档**：`web_search.md` 重写 hosted 资格（project-level `hostedCandidateModel`）、决策表、状态机、测试矩阵与配置说明；`web_fetch.md` 对齐 T2-P1-013 任务锚点与 `tool_exec` 目录结构校准块；`PLAN_SPEC.md` 强化 frontmatter/todos/自检清单；`.env.example` 增加三家 HTTP key 样板。
+- **看板**：`TASK_BOARD_002/README.md` 登记 T2-P1-012 / T2-P1-013 及依赖示意；新增任务卡 `tasks/T2-P1-012.md`、`tasks/T2-P1-013.md`。
+- **范围**：仅文档与配置样板，无 `src/` 变更。
 
 ### 2026-06-03 | fix(llm): 压缩模型缺钥回退默认模型 + init 对齐 compaction_model
 
