@@ -34,6 +34,7 @@ impl WebSearchBackend for BraveBackend {
         request: &WebSearchRequest,
     ) -> Result<BackendSearchResponse, BackendFailure> {
         let api_key = self.api_key()?;
+        let rewrote_domain_filter = !request.domain_filter.is_empty();
         let mut params = vec![
             (
                 "q".to_string(),
@@ -78,7 +79,11 @@ impl WebSearchBackend for BraveBackend {
                     })
                 })
                 .collect(),
-            warnings: Vec::new(),
+            warnings: if rewrote_domain_filter {
+                vec!["brave_domain_filter_via_query_rewrite".to_string()]
+            } else {
+                Vec::new()
+            },
         })
     }
 }

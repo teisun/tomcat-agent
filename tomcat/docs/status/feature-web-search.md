@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-04 20:22 +0800 | PENDING_INTEGRATION | feature/web-search | — |
+| Jerry | 2026-06-04 22:20 +0800 | PENDING_INTEGRATION | feature/web-search | — |
 
 ### ✅ DONE
 - [✓] **[P1]** 认领 `T2-P1-012`，任务卡与看板索引已切到 `DOING / Jerry`
@@ -10,6 +10,7 @@
 - [✓] **[P1]** 完成 `PR-WS-W`：在 `normalize_hits` 落 SSRF / 私网 / loopback / 单段 host 拦截，以及 `allowed_domains` / `blocked_domains` 过滤
 - [✓] **[P1]** 已补 `tests/web_search_tool_tests.rs` 并登记 `scripts/test-groups.sh`
 - [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`./scripts/run-integration-tests.sh lib`、`./scripts/run-integration-tests.sh integration`、`PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`
+- [✓] **[P1]** 方案复核整改：修正 catalog / tool-catalog 过期占位说明；`web_search.md` 对齐 hosted sidecar 落点；Brave/Serper 域名改写 warning、Tavily warning 命名统一；相关单测 / 集成测复绿
 
 ### 🔌 INTERFACE
 - `web_search` 现为真实可执行工具，schema 固定为 `query / count / freshness / country / language / domain_filter`

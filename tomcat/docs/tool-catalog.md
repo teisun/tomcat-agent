@@ -921,7 +921,7 @@ Parameters:
 
 Search the web and return normalized search hits. Use this to discover candidate URLs and snippets for a query; use `web_fetch` when you need to fetch one URL body afterward. Input fields align with the architecture doc: required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`.
 
-Current PR-WS-A status: the tool is registered in the catalog / default tool definitions / system prompt, but backend execution is not wired yet. Calls therefore return a friendly placeholder error until PR-WS-S / PR-WS-O land.
+Results are normalized across hosted OpenAI search plus Tavily / Brave / Serper backends, with automatic fallback in `auto` mode. Preserve source attribution when citing results, and pay attention to the current date for time-sensitive queries.
 
 Parameters:
 

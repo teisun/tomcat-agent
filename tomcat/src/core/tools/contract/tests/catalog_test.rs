@@ -127,7 +127,8 @@ fn web_search_registered() {
     assert!(entry.read_only);
     assert!(!entry.destructive);
     assert!(entry.description.contains("web_fetch"));
-    assert!(entry.description.contains("PR-WS-A"));
+    assert!(entry.description.contains("automatic fallback"));
+    assert!(entry.description.contains("source attribution"));
 
     let schema = (entry.parameters)();
     let properties = schema["properties"].as_object().expect("properties");

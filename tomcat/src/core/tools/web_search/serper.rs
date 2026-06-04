@@ -34,6 +34,7 @@ impl WebSearchBackend for SerperBackend {
         request: &WebSearchRequest,
     ) -> Result<BackendSearchResponse, BackendFailure> {
         let api_key = self.api_key()?;
+        let rewrote_domain_filter = !request.domain_filter.is_empty();
         let mut body = serde_json::json!({
             "q": rewrite_query_with_domain_filter(&request.query, &request.domain_filter),
             "num": request.count,
@@ -71,7 +72,11 @@ impl WebSearchBackend for SerperBackend {
                     })
                 })
                 .collect(),
-            warnings: Vec::new(),
+            warnings: if rewrote_domain_filter {
+                vec!["serper_domain_filter_via_query_rewrite".to_string()]
+            } else {
+                Vec::new()
+            },
         })
     }
 }

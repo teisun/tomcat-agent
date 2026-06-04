@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 use serde::{Deserialize, Serialize};
 
@@ -436,9 +436,4 @@ fn is_private_v4(addr: Ipv4Addr) -> bool {
         || addr.octets()[0] == 10
         || (addr.octets()[0] == 172 && (16..=31).contains(&addr.octets()[1]))
         || (addr.octets()[0] == 192 && addr.octets()[1] == 168)
-}
-
-#[allow(dead_code)]
-fn _is_private_v6(addr: Ipv6Addr) -> bool {
-    addr.is_loopback() || (addr.segments()[0] & 0xfe00) == 0xfc00
 }

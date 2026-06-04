@@ -217,11 +217,7 @@ async fn tavily_runtime_maps_request_and_normalizes_hits() {
     assert!(output
         .warnings
         .iter()
-        .any(|w| w == "country_ignored:backend=tavily"));
-    assert!(output
-        .warnings
-        .iter()
-        .any(|w| w == "language_ignored:backend=tavily"));
+        .any(|w| w == "tavily_ignores_country_language"));
 
     let requests = server.received_requests().await.expect("requests");
     let request = requests.last().expect("single request");
@@ -281,7 +277,7 @@ async fn auto_backend_falls_back_to_brave_and_then_hits_cache() {
             freshness: None,
             country: None,
             language: None,
-            domain_filter: Vec::new(),
+            domain_filter: vec!["docs.rs".into()],
         })
         .await
         .expect("first auto search");
@@ -291,6 +287,10 @@ async fn auto_backend_falls_back_to_brave_and_then_hits_cache() {
         .warnings
         .iter()
         .any(|w| w == "backend_unavailable:tavily, fallback=brave"));
+    assert!(first
+        .warnings
+        .iter()
+        .any(|w| w == "brave_domain_filter_via_query_rewrite"));
 
     let second = runtime
         .search(WebSearchArgs {
@@ -299,7 +299,7 @@ async fn auto_backend_falls_back_to_brave_and_then_hits_cache() {
             freshness: None,
             country: None,
             language: None,
-            domain_filter: Vec::new(),
+            domain_filter: vec!["docs.rs".into()],
         })
         .await
         .expect("second auto search");

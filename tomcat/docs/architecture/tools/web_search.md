@@ -13,7 +13,7 @@
 >
 > 1. **`tool_exec` 已从单文件升为目录模块**：`src/core/agent_loop/tool_exec/`。中央分发在 [`tool_exec/mod.rs::execute_tool_tuple_full`](../../../src/core/agent_loop/tool_exec/mod.rs) 的 `match tc.name.as_str()`；每个工具的处理函数放在 `tool_exec/branches/<tool>.rs`（形如 `handle_read` / `handle_bash`），并在 [`tool_exec/branches/mod.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs) 注册。**本文凡提「`tool_exec.rs` 加 `match "web_search"`」均指**：新增 `tool_exec/branches/web_search.rs`（`handle_web_search`）→ 在 `branches/mod.rs` 导出 → 在 `tool_exec/mod.rs` 的 match 增一臂。
 > 2. **工具配置类型已移位**：`src/infra/config/types.rs` → [`src/infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs)；聚合结构为 `ToolsConfig { read, write, bash }`（各 `Tools*Config` 子表）。`ToolsWebSearchConfig` 应作为新子表加进 `ToolsConfig`。
-> 3. **OpenAI Responses 注入点**：`tools[]` 由 [`openai_responses/mod.rs::build_request_body_with_hint`](../../../src/core/llm/openai_responses/mod.rs)（设置 `body["tools"]`）+ [`openai_responses/payload.rs::convert_tools_to_responses`](../../../src/core/llm/openai_responses/payload.rs)（逐工具转换）共同负责；**无** `build_payload` 函数。PR-WS-O 的 `web_search` 块应在此二处注入/识别。
+> 3. **PR-WS-O 已落为 sidecar 路径**：hosted 请求不再通过 [`openai_responses/mod.rs`](../../../src/core/llm/openai_responses/mod.rs) / [`openai_responses/payload.rs`](../../../src/core/llm/openai_responses/payload.rs) 注入当前对话请求；实际落点是 [`web_search/mod.rs::execute_openai_hosted`](../../../src/core/tools/web_search/mod.rs) 负责选 hostedCandidateModel 与凭证，再委托 [`web_search/openai_server.rs::search_openai_hosted`](../../../src/core/tools/web_search/openai_server.rs) 构造并发送独立 `POST /v1/responses`，随后由 `parse_server_tool_blocks` 归一化结果。
 > 4. **`registry.rs` 行号**：`PROVIDERS` 常量现位于 [`registry.rs` L53-56](../../../src/core/llm/registry.rs)（原文 L47-50 已失效）；`("openai", …)` / `("openai-responses", …)` 两条不变。
 > 5. **新依赖**：`Cargo.toml` 当前**无** `moka`（无任何 LRU 工具）——PR-WS-S 的缓存须新增该依赖；`reqwest 0.12` / `xxhash-rust(xxh32)` 已在。
 > 6. **openclaw 门闩已变更**（见 §2.2 / §2.4.3 已就地更新）：`isCodexNativeSearchEligibleModel` 现仅判 `modelApi === "openai-chatgpt-responses"`。
@@ -140,7 +140,7 @@
 | --- | --- | --- | --- | --- |
 | **PR-WS-A**（命名 + catalog） | **交付物**：6 字段 schema；占位 friendly err。**落地点**：catalog / `tool_exec` / system_prompt | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)、[`tool_exec/mod.rs`](../../../src/core/agent_loop/tool_exec/mod.rs)（match 增臂）+ 新 [`tool_exec/branches/web_search.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs)、[`system_prompt.rs`](../../../src/core/llm/system_prompt.rs) | `core::tools::contract::catalog::tests::web_search_registered`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection`（**PASS, 2026-06-04**） | 先把名字 / schema / 占位放好，后面 PR 接 backend 不改字面量。 |
 | **PR-WS-S**（自家 HTTP backends） | **交付物**：trait + 三 HTTP adapter；LRU/TTL；归一化 hits。**落地点**：`core/tools/web_search/*`、`ToolsWebSearchConfig` | 新模块 `core/tools/web_search/{mod,types,backend,tavily,brave,serper,cache}.rs`、[`infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs) 的 `ToolsConfig` 加 `ToolsWebSearchConfig` 子表；缓存需新增 `moka` 依赖 | `tavily_runtime_maps_request_and_normalizes_hits`、`auto_backend_falls_back_to_brave_and_then_hits_cache`、`auto_backend_falls_back_after_brave_timeout`、`explicit_tavily_rate_limit_returns_degraded_output`、`runtime_explicit_tavily_works_from_public_api`、`runtime_explicit_serper_works_from_public_api`（**PASS, 2026-06-04**） | 三个 provider 接进来，模型不知道里面跑哪家；`auto` 先看项目里有没有 hosted 候选。 |
-| **PR-WS-O**（OpenAI hosted backend 调度与归一化） | **交付物**：project-level hosted 候选模型请求；server_tool 结果→统一 hits。**落地点**：`openai_responses` + `openai_server.rs` | [`openai_responses/mod.rs::build_request_body_with_hint`](../../../src/core/llm/openai_responses/mod.rs) + [`payload.rs::convert_tools_to_responses`](../../../src/core/llm/openai_responses/payload.rs)（构造 hosted 请求）、`core/tools/web_search/openai_server.rs`（归一化） | `discover_hosted_candidate_uses_merged_catalog_order`、`auto_backend_uses_project_hosted_candidate`、`explicit_openai_requires_project_candidate`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate`（**PASS, 2026-06-04**） | `auto` 只要项目里有 hosted 候选就优先用它；当前对话模型是不是 Responses 不重要。 |
+| **PR-WS-O**（OpenAI hosted backend 调度与归一化） | **交付物**：project-level hosted 候选模型请求；server_tool 结果→统一 hits。**落地点**：`core/tools/web_search/{mod,openai_server}.rs` | [`web_search/mod.rs::execute_openai_hosted`](../../../src/core/tools/web_search/mod.rs)（解析 hosted 候选模型、凭证与 fallback）+ [`openai_server.rs`](../../../src/core/tools/web_search/openai_server.rs)（构造 sidecar hosted 请求 + 归一化） | `discover_hosted_candidate_uses_merged_catalog_order`、`auto_backend_uses_project_hosted_candidate`、`explicit_openai_requires_project_candidate`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate`（**PASS, 2026-06-04**） | `auto` 只要项目里有 hosted 候选就优先用它；当前对话模型是不是 Responses 不重要。 |
 | **PR-WS-W**（域名守卫 + SSRF） | **交付物**：hits 阶段 URL 守卫与域过滤。**落地点**：`web_search/cache.rs`、`types.rs` | `web_search/cache.rs`、`web_search/types.rs` | `normalize_hits_filters_private_hosts_and_domain_rules`（**PASS, 2026-06-04**） | 别让搜出来的 URL 指向 127.0.0.1。 |
 
 下文按实施点展开**技术要点与示意图**；**交付边界与代码落点仍以表为准**。
@@ -271,7 +271,7 @@
 
 #### 2.4.3 PR-WS-O：OpenAI hosted backend 调度与归一化
 
-- **交付**：[`openai_responses/mod.rs::build_request_body_with_hint`](../../../src/core/llm/openai_responses/mod.rs)（配合 [`payload.rs::convert_tools_to_responses`](../../../src/core/llm/openai_responses/payload.rs)）不再看**当前对话模型**，而是先解析 **hostedCandidateModel**（合并后的 model catalog 中首个 `capabilities.web_search == true` 的模型）。当 `backend ∈ {auto, openai}` 且候选存在时，发起一笔**专用** hosted 请求：`model = hostedCandidateModel.id`，`tools[]` 末尾追加 `{ "type": "web_search", "filters": {...}, "search_context_size": "medium", "user_location": ... }` 块（字段形状参考 [openclaw `buildCodexNativeWebSearchTool`:160-200](../../../../openclaw/src/agents/codex-native-web-search-core.ts)）；响应回包含 `server_tool_use` + `web_search_tool_result` 块时，由本 PR 新增的 `core/tools/web_search/openai_server.rs::parse_server_tool_blocks` 归一化为 `WebSearchOutput { hits, query, backend: "openai", stats: { elapsed_ms, cached:false }, warnings, truncated }`（块遍历与错误分支参考 [cc-fork-01 `WebSearchTool.ts`:86-150](../../../../cc-fork-01/src/tools/WebSearchTool/WebSearchTool.ts)）。`WebSearchOutput` 类型在 PR-WS-S 已定义，本 PR 仅新增 `openai_server.rs` 模块复用之。
+- **交付**：[`web_search/mod.rs::execute_openai_hosted`](../../../src/core/tools/web_search/mod.rs) 不再看**当前对话模型**，而是先解析 **hostedCandidateModel**（合并后的 model catalog 中首个 `capabilities.web_search == true` 的模型），再结合候选模型对应凭证与 base URL，委托 [`core/tools/web_search/openai_server.rs::search_openai_hosted`](../../../src/core/tools/web_search/openai_server.rs) 发起一笔**专用** hosted sidecar 请求：`model = hostedCandidateModel.id`，请求体中的 `tools = [{ "type": "web_search", "filters": {...}, "search_context_size": "medium", "user_location": ... }]`（字段形状参考 [openclaw `buildCodexNativeWebSearchTool`:160-200](../../../../openclaw/src/agents/codex-native-web-search-core.ts)）。响应回包含 `server_tool_use` + `web_search_tool_result` 块时，由 `openai_server.rs::parse_server_tool_blocks` 归一化为 `WebSearchOutput { hits, query, backend: "openai", stats: { elapsed_ms, cached:false }, warnings, truncated }`（块遍历与错误分支参考 [cc-fork-01 `WebSearchTool.ts`:86-150](../../../../cc-fork-01/src/tools/WebSearchTool/WebSearchTool.ts)）。`WebSearchOutput` 类型在 PR-WS-S 已定义，本 PR 复用该类型，不修改正常对话的 `openai_responses` 工具注入路径。
 - **关键差异**：自家 HTTP backend 走 `tool_exec` → backend.search → 返回；hosted 路径则在 tool 内部先**选项目级 hosted 候选模型**，再发一笔 sidecar Responses 请求，由该模型代搜，然后解析 `server_tool_use`/`web_search_tool_result` 块。**两条路径在 `tool_exec` 出口处汇合到统一 `WebSearchOutput`**——模型读不到差异。
 - **降级 / 致命错误**：
   - **候选存在门**：项目里**不存在** hostedCandidateModel → `auto` 直接进入 HTTP 链；显式 `openai` 时 `Err(AppError::Tool("no hosted web_search model configured; set capabilities.web_search=true on one models.toml entry"))`。
@@ -293,25 +293,26 @@
   ┌──────────────────────────────────────────────────────────────────┐
   │ OpenAI hosted 路径（PR-WS-O）                                      │
   └──────────────────────────────────────────────────────────────────┘
-   backend.discover_hosted_candidate  ┐
-        -> hostedCandidateModel.id    │
-                                      ▼
-                     openai_responses.build_request_body
-                          + tools[] += {type:"web_search", ...}
-                                      │
-                                      ▼
-                            OpenAI Responses API
-                                      │
-                                      ▼
-                    blocks: [server_tool_use, web_search_tool_result, ...]
-                                      │
-                                      ▼
-                          openai_server.parse_blocks
-                                      │
-                                      ▼
-                           WebSearchOutput { hits, ... }
-                                      │
-     tool_exec ◀─── 同一形状汇合 ─────┘
+  backend.discover_hosted_candidate  ┐
+       -> hostedCandidateModel.id    │
+                                     ▼
+              web_search.mod.execute_openai_hosted
+                   + resolve auth/base_url
+                                     │
+                                     ▼
+                openai_server.search_openai_hosted
+                 POST /v1/responses (sidecar)
+                                     │
+                                     ▼
+                   blocks: [server_tool_use, web_search_tool_result, ...]
+                                     │
+                                     ▼
+               openai_server.parse_server_tool_blocks
+                                     │
+                                     ▼
+                          WebSearchOutput { hits, ... }
+                                     │
+    tool_exec ◀─── 同一形状汇合 ─────┘
 ```
 
 **说人话**：OpenAI 这条路不再绑在当前聊天模型上，而是先找项目里那台被声明为 `capabilities.web_search=true` 的 hosted 候选模型，再用它发一笔专用搜索请求；回来我们把结果捏成跟自家 HTTP 一样的输出。
@@ -497,21 +498,21 @@ Hit {
 │  ├ tavily.rs         • POST /search → normalize                             │
 │  ├ brave.rs          • GET api.search.brave.com/res/v1/web/search → normalize │
 │  ├ serper.rs         • POST google.serper.dev/search → normalize             │
-│  ├ openai_server.rs  • parse_server_tool_blocks → normalize（PR-WS-O）       │
+│  ├ openai_server.rs  • build/request/parse hosted sidecar（PR-WS-O）         │
 │  └ cache.rs          • Moka LRU + TTL；CacheKey 元组                         │
 └───────────────────────────────┬────────────────────────────────────────────┘
                                 │
                 ┌───────────────┴───────────────┐
                 ▼                               ▼
 ┌──────────────────────────────────┐  ┌──────────────────────────────────────┐
-│  src/core/llm/openai_responses/  │  │  src/infra/config/types/tools.rs     │
-│  mod.rs::build_request_body_…     │  │  • ToolsConfig 加 ToolsWebSearchConfig│
-│  + payload.rs::convert_tools_…    │  │    { backend, count, freshness,      │
-│  • 追加 {type:"web_search"} 块     │  │      country, language, domain_filter,│
-│    （PR-WS-O 新增）              │  │      blocked_domains, allowed_domains,│
-│  • parse server_tool_use blocks   │  │      cache_ttl_secs, cache_capacity, │
-│    （委托 web_search/openai_server）│  │      timeout_ms, *_base_url }        │
-└──────────────────────────────────┘  └──────────────────────────────────────┘
+│ src/core/tools/web_search/       │  │  src/infra/config/types/tools.rs     │
+│ {mod,openai_server}.rs           │  │  • ToolsConfig 加 ToolsWebSearchConfig│
+│ • execute_openai_hosted          │  │    { backend, count, freshness,      │
+│ • search_openai_hosted: sidecar  │  │      country, language, domain_filter,│
+│ • parse_server_tool_blocks       │  │      blocked_domains, allowed_domains,│
+│   （不修改正常对话 openai wire）  │  │      cache_ttl_secs, cache_capacity, │
+└──────────────────────────────────┘  │      timeout_ms, *_base_url }        │
+                                      └──────────────────────────────────────┘
 
   + tests:
     src/core/tools/web_search/tests/                  (per-adapter 单元)
@@ -552,21 +553,18 @@ LLM           tool_exec           web_search/mod        backend(adapter)        
 ### 6.2 OpenAI hosted 路径（项目级候选模型）
 
 ```text
-tool_exec/web_search.mod   backend.rs             openai_responses/mod         web_search/openai_server
- │                              │                           │                              │
- │ auto/openai                   │ discover hostedCandidate │                              │
- │─────────────────────────────▶│──────────────────────────▶│ build dedicated request      │
- │                              │                           │ model=hostedCandidate.id     │
- │                              │                           │ tools[] += {type:web_search} │
- │                              │                           │──────────────┐               │
- │                              │                           ▼              │               │
- │                              │                    OpenAI Responses API   │               │
- │                              │                           │              │               │
- │                              │                           ▼              │               │
- │                              │                  extract server blocks    │──────────────▶│ parse + normalize
- │                              │                           │                              │ → WebSearchOutput
- │                              │                           │◀─────────────────────────────│
- │◀─────────────────────────────│ inject as tool 消息（与自家 HTTP 路径同形）             │
+tool_exec/web_search.mod   backend.rs          web_search/mod         web_search/openai_server
+│                              │                        │                           │
+│ auto/openai                   │ discover hostedCandidate                     │
+│─────────────────────────────▶│───────────────────────▶│ resolve auth/base_url   │
+│                              │                        │ build sidecar request    │
+│                              │                        │──────────────────────────▶│ POST /v1/responses
+│                              │                        │                           │
+│                              │                        │                           ▼
+│                              │                        │                OpenAI Responses API
+│                              │                        │                           │
+│                              │                        │◀──────────────────────────│ parse + normalize
+│◀─────────────────────────────│ return WebSearchOutput（与自家 HTTP 路径同形）          │
 ```
 
 **两条路径在 `tool_exec` 出口处汇合到同一 `WebSearchOutput`**——下游 LLM 看到的字段一致。

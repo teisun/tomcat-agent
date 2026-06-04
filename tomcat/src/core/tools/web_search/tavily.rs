@@ -53,13 +53,11 @@ impl WebSearchBackend for TavilyBackend {
         )
         .await?;
 
-        let mut warnings = Vec::new();
-        if request.country.is_some() {
-            warnings.push("country_ignored:backend=tavily".to_string());
-        }
-        if request.language.is_some() {
-            warnings.push("language_ignored:backend=tavily".to_string());
-        }
+        let warnings = if request.country.is_some() || request.language.is_some() {
+            vec!["tavily_ignores_country_language".to_string()]
+        } else {
+            Vec::new()
+        };
 
         Ok(BackendSearchResponse {
             raw_hits: response

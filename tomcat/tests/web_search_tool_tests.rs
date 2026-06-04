@@ -98,7 +98,7 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
             freshness: None,
             country: None,
             language: None,
-            domain_filter: Vec::new(),
+            domain_filter: vec!["docs.rs".into()],
         })
         .await
         .expect("auto search");
@@ -109,6 +109,10 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
         .warnings
         .iter()
         .any(|warning| warning == "backend_unavailable:tavily, fallback=brave"));
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
 }
 
 #[tokio::test]
@@ -157,6 +161,10 @@ async fn runtime_explicit_serper_works_from_public_api() {
     assert_eq!(output.backend, "serper");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://doc.rust-lang.org/book/");
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "serper_domain_filter_via_query_rewrite"));
 }
 
 #[tokio::test]
