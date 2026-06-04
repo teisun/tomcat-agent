@@ -404,6 +404,7 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
         Some(&state),
         Some(&runtime),
         None,
+        None,
         &tc,
     )
     .await;

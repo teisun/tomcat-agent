@@ -17,6 +17,8 @@ pub struct ToolsConfig {
     pub bash: ToolsBashConfig,
     #[serde(default)]
     pub web_search: ToolsWebSearchConfig,
+    #[serde(default)]
+    pub web_fetch: ToolsWebFetchConfig,
 }
 
 /// `[tools.read]` 子表：当前仅含 `max_bytes`。
@@ -241,6 +243,78 @@ impl Default for ToolsWebSearchConfig {
             tavily_base_url: default_tools_web_search_tavily_base_url(),
             brave_base_url: default_tools_web_search_brave_base_url(),
             serper_base_url: default_tools_web_search_serper_base_url(),
+        }
+    }
+}
+
+/// `[tools.web_fetch]` 子表（T2-P1-013 PR-WF-A/S/B）。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolsWebFetchConfig {
+    #[serde(default = "default_tools_web_fetch_max_redirects")]
+    pub max_redirects: usize,
+    #[serde(default = "default_tools_web_fetch_timeout_ms")]
+    pub fetch_timeout_ms: u64,
+    #[serde(default = "default_tools_web_fetch_max_http_content_bytes")]
+    pub max_http_content_bytes: usize,
+    #[serde(default = "default_tools_web_fetch_max_markdown_chars")]
+    pub max_markdown_chars: usize,
+    #[serde(default = "default_tools_web_fetch_markdown_head_chars")]
+    pub markdown_head_chars: usize,
+    #[serde(default = "default_tools_web_fetch_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+    #[serde(default = "default_tools_web_fetch_cache_capacity_bytes")]
+    pub cache_capacity_bytes: u64,
+    #[serde(default)]
+    pub use_llm_processing: bool,
+}
+
+pub const DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS: usize = 10;
+pub const DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS: u64 = 60_000;
+pub const DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES: usize = 10 * 1024 * 1024;
+pub const DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS: usize = 100_000;
+pub const DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS: usize = 2_000;
+pub const DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS: u64 = 900;
+pub const DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES: u64 = 50 * 1024 * 1024;
+
+fn default_tools_web_fetch_max_redirects() -> usize {
+    DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS
+}
+
+fn default_tools_web_fetch_timeout_ms() -> u64 {
+    DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS
+}
+
+fn default_tools_web_fetch_max_http_content_bytes() -> usize {
+    DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES
+}
+
+fn default_tools_web_fetch_max_markdown_chars() -> usize {
+    DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS
+}
+
+fn default_tools_web_fetch_markdown_head_chars() -> usize {
+    DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS
+}
+
+fn default_tools_web_fetch_cache_ttl_secs() -> u64 {
+    DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS
+}
+
+fn default_tools_web_fetch_cache_capacity_bytes() -> u64 {
+    DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES
+}
+
+impl Default for ToolsWebFetchConfig {
+    fn default() -> Self {
+        Self {
+            max_redirects: default_tools_web_fetch_max_redirects(),
+            fetch_timeout_ms: default_tools_web_fetch_timeout_ms(),
+            max_http_content_bytes: default_tools_web_fetch_max_http_content_bytes(),
+            max_markdown_chars: default_tools_web_fetch_max_markdown_chars(),
+            markdown_head_chars: default_tools_web_fetch_markdown_head_chars(),
+            cache_ttl_secs: default_tools_web_fetch_cache_ttl_secs(),
+            cache_capacity_bytes: default_tools_web_fetch_cache_capacity_bytes(),
+            use_llm_processing: false,
         }
     }
 }

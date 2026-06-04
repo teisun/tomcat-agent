@@ -24,6 +24,21 @@ fn validate_config_rejects_invalid_web_search_backend() {
 }
 
 #[test]
+fn validate_config_rejects_invalid_web_fetch_limits() {
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_fetch.fetch_timeout_ms = 0;
+    assert!(validate_config(&cfg).is_err());
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_fetch.max_redirects = 0;
+    assert!(validate_config(&cfg).is_err());
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_fetch.cache_capacity_bytes = 0;
+    assert!(validate_config(&cfg).is_err());
+}
+
+#[test]
 fn validate_config_rejects_invalid_log_level() {
     let mut cfg = AppConfig::default();
     cfg.log.level = "invalid".to_string();

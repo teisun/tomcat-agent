@@ -151,6 +151,37 @@ fn web_search_registered() {
     );
 }
 
+#[test]
+fn web_fetch_registered() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "web_fetch")
+        .expect("web_fetch catalog entry");
+
+    assert_eq!(entry.scope, PermissionScope::Read);
+    assert_eq!(entry.category, Some(ToolCategory::Exec));
+    assert!(entry.read_only);
+    assert!(!entry.destructive);
+    assert!(entry.description.contains("web_search"));
+    assert!(entry.description.contains("redirect"));
+    assert!(entry.description.contains("persisted_output_path"));
+
+    let schema = (entry.parameters)();
+    let properties = schema["properties"].as_object().expect("properties");
+    assert_eq!(properties.len(), 3, "web_fetch should expose 3 fields");
+    assert_eq!(
+        schema["required"].as_array().expect("required"),
+        &vec![Value::String("url".to_string())]
+    );
+    assert_eq!(
+        properties["format"]["enum"]
+            .as_array()
+            .expect("format enum")
+            .len(),
+        2
+    );
+}
+
 fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
     assert_eq!(
         schema["type"].as_str(),

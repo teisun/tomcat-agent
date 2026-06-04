@@ -477,6 +477,41 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             )));
         }
     }
+    if cfg.tools.web_fetch.max_redirects == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.max_redirects 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_fetch.fetch_timeout_ms == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.fetch_timeout_ms 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_fetch.max_http_content_bytes == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.max_http_content_bytes 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_fetch.max_markdown_chars == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.max_markdown_chars 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_fetch.markdown_head_chars == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.markdown_head_chars 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_fetch.cache_ttl_secs == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.cache_ttl_secs 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_fetch.cache_capacity_bytes == 0 {
+        return Err(AppError::Config(
+            "tools.web_fetch.cache_capacity_bytes 必须大于 0".to_string(),
+        ));
+    }
     resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }

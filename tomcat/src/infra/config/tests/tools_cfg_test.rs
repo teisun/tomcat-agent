@@ -181,3 +181,76 @@ serper_base_url = "http://127.0.0.1:3003"
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }
+
+// ── T2-P1-013：[tools.web_fetch] defaults / TOML override ────────────────────
+
+#[test]
+fn tools_web_fetch_config_default_value() {
+    let cfg = ToolsWebFetchConfig::default();
+    assert_eq!(cfg.max_redirects, DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS);
+    assert_eq!(cfg.fetch_timeout_ms, DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS);
+    assert_eq!(
+        cfg.max_http_content_bytes,
+        DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES
+    );
+    assert_eq!(
+        cfg.max_markdown_chars,
+        DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS
+    );
+    assert_eq!(
+        cfg.markdown_head_chars,
+        DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS
+    );
+    assert_eq!(cfg.cache_ttl_secs, DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS);
+    assert_eq!(
+        cfg.cache_capacity_bytes,
+        DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES
+    );
+    assert!(!cfg.use_llm_processing);
+}
+
+#[test]
+fn app_config_includes_tools_web_fetch_default() {
+    let cfg = AppConfig::default();
+    assert_eq!(
+        cfg.tools.web_fetch.max_redirects,
+        DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS
+    );
+    assert_eq!(
+        cfg.tools.web_fetch.fetch_timeout_ms,
+        DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS
+    );
+}
+
+#[test]
+fn tools_web_fetch_toml_override() {
+    let dir = std::env::temp_dir().join("tomcat_tools_web_fetch_cfg_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(
+        br#"[tools.web_fetch]
+max_redirects = 4
+fetch_timeout_ms = 3210
+max_http_content_bytes = 4096
+max_markdown_chars = 2048
+markdown_head_chars = 256
+cache_ttl_secs = 33
+cache_capacity_bytes = 8192
+use_llm_processing = true
+"#,
+    )
+    .unwrap();
+    drop(f);
+    let cfg = load_config(Some(path.as_path())).expect("load_config");
+    assert_eq!(cfg.tools.web_fetch.max_redirects, 4);
+    assert_eq!(cfg.tools.web_fetch.fetch_timeout_ms, 3210);
+    assert_eq!(cfg.tools.web_fetch.max_http_content_bytes, 4096);
+    assert_eq!(cfg.tools.web_fetch.max_markdown_chars, 2048);
+    assert_eq!(cfg.tools.web_fetch.markdown_head_chars, 256);
+    assert_eq!(cfg.tools.web_fetch.cache_ttl_secs, 33);
+    assert_eq!(cfg.tools.web_fetch.cache_capacity_bytes, 8192);
+    assert!(cfg.tools.web_fetch.use_llm_processing);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}

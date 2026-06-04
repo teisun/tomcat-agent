@@ -62,6 +62,7 @@ base64 = "0.22"
 memchr = "2"
 xxhash-rust = { version = "0.8.15", features = ["xxh32"] }
 moka = { version = "0.12.15", default-features = false, features = ["sync"] }
+html2md = "0.2.15"
 
 # Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
 # （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。

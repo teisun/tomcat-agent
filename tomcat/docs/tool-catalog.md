@@ -982,6 +982,51 @@ Parameters:
 }
 ```
 
+### `web_fetch`
+
+- Label: Web Fetch
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `web fetch url markdown html pdf redirect`
+
+Fetch one specific URL and return cleaned page content. Use this after `web_search` when you already have a candidate URL and need the actual page body. Private/authenticated URLs, URLs with embedded credentials, single-label hosts, IP literal hosts, and private/loopback targets are rejected before any request; off-host redirects are not auto-followed and instead return structured redirect info so the model can decide whether to refetch with the new URL.
+
+Small text/html pages are returned inline as markdown or plain text. Large text responses are persisted to `tool-results` and return a head preview plus `persisted_output_path`; PDF/images and other binary payloads are persisted instead of being inlined. Input fields align with the architecture doc: required `url`, plus optional `prompt` (MVP warning-only hint) and `format` (`markdown` or `text`).
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "format": {
+      "description": "Optional output format for textual pages. Defaults to `markdown`; use `text` when you want plain text without markdown syntax.",
+      "enum": [
+        "markdown",
+        "text"
+      ],
+      "type": "string"
+    },
+    "prompt": {
+      "description": "Optional extraction intent. In the current MVP this is recorded as a warning only and does not change the fetched content.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "url": {
+      "description": "Target URL to fetch. Required; must be an http(s) URL without embedded credentials, localhost-style hosts, or private/IP-literal targets.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "url"
+  ],
+  "type": "object"
+}
+```
+
 ## Config
 
 ### `config_get`

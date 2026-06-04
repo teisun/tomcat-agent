@@ -99,6 +99,7 @@ struct ToolExecCtx<'a> {
     bash_task_registry: &'a Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&'a Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     openai_files_runtime: Option<&'a Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    web_fetch_runtime: Option<&'a Arc<crate::core::tools::web_fetch::WebFetchRuntime>>,
     web_search_runtime: Option<&'a Arc<crate::core::tools::web_search::WebSearchRuntime>>,
     plan_runtime: Option<&'a Arc<crate::core::plan_runtime::PlanRuntime>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
@@ -130,18 +131,20 @@ pub(super) async fn execute_tool(
         read_file_state,
         None,
         None,
+        None,
         tc,
     )
     .await
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(super) async fn execute_tool_with_openai_files(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
     bash_task_registry: &Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    web_fetch_runtime: Option<&Arc<crate::core::tools::web_fetch::WebFetchRuntime>>,
     web_search_runtime: Option<&Arc<crate::core::tools::web_search::WebSearchRuntime>>,
     tc: &ToolCallInfo,
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
@@ -151,6 +154,7 @@ pub(super) async fn execute_tool_with_openai_files(
         bash_task_registry,
         read_file_state,
         openai_files_runtime,
+        web_fetch_runtime,
         web_search_runtime,
         None,
         crate::core::agent_loop::types::SubagentType::User,
@@ -178,6 +182,7 @@ pub(super) async fn execute_tool_full(
     bash_task_registry: &Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    web_fetch_runtime: Option<&Arc<crate::core::tools::web_fetch::WebFetchRuntime>>,
     web_search_runtime: Option<&Arc<crate::core::tools::web_search::WebSearchRuntime>>,
     plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
@@ -197,6 +202,7 @@ pub(super) async fn execute_tool_full(
         bash_task_registry,
         read_file_state,
         openai_files_runtime,
+        web_fetch_runtime,
         web_search_runtime,
         plan_runtime,
         subagent_type,
@@ -321,6 +327,7 @@ async fn execute_tool_tuple_full(
         "list_dir" => branches::handle_list_dir(ctx, &args).await,
         "hashline_edit" => branches::handle_hashline_edit(ctx, &args, display_out).await,
         "search_files" => branches::handle_search_files(ctx, &args).await,
+        "web_fetch" => branches::handle_web_fetch(ctx, &args).await,
         "web_search" => branches::handle_web_search(ctx, &args).await,
         "config_get" => branches::handle_config_get(ctx, &args).await,
         "config_set" => branches::handle_config_set(ctx, &args, display_out).await,
