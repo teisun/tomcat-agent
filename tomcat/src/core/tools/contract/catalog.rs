@@ -230,6 +230,20 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
+        name: "web_search",
+        label: "Web Search",
+        description: "Search the web and return normalized search hits. Use this to discover candidate URLs and snippets for a query; use `web_fetch` when you need to fetch one URL body afterward. Input fields align with the architecture doc: required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`.\n\nCurrent PR-WS-A status: the tool is registered in the catalog / default tool definitions / system prompt, but backend execution is not wired yet. Calls therefore return a friendly placeholder error until PR-WS-S / PR-WS-O land.\n",
+        display_summary: Some("Search the web for normalized hits (backend wiring pending)."),
+        parameters: web_search_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("web search internet tavily brave serper query"),
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
         name: "config_get",
         label: "Config Get",
         description: "Read the current value of an allowed tomcat configuration key. The tool is constrained by CONFIG_READ_ALLOWLIST and CONFIG_HARDCODED_READ_DENY: workspace.*, agent.id, primitive.path_rules, primitive.bash_*, llm.default_model and similar non-sensitive fields are readable; llm.api_key*, llm.api_base, security.*, storage.* and other sensitive fields are denied. Missing dot-path keys return not_set.\n",
@@ -766,6 +780,45 @@ fn search_files_parameters() -> Value {
             }
         }),
         &["pattern"],
+    )
+}
+
+fn web_search_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "query": {
+                "type": "string",
+                "description": "Search query text. Required; prefer natural-language keywords that describe what the user wants to find."
+            },
+            "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "Optional number of hits to request. Defaults to 5 and is capped at 20."
+            },
+            "freshness": {
+                "type": ["string", "null"],
+                "enum": ["day", "week", "month", "year", null],
+                "description": "Optional recency filter. Use `day`, `week`, `month`, or `year`; omit / pass null when no freshness constraint is needed."
+            },
+            "country": {
+                "type": ["string", "null"],
+                "description": "Optional ISO 3166-1 alpha-2 country hint such as `us` or `cn`."
+            },
+            "language": {
+                "type": ["string", "null"],
+                "description": "Optional ISO 639-1 language hint such as `en` or `zh`."
+            },
+            "domain_filter": {
+                "type": "array",
+                "description": "Optional allowlist of domains to constrain results to. Each item should be a bare host like `github.com`.",
+                "items": {
+                    "type": "string",
+                    "description": "One allowed domain suffix."
+                }
+            }
+        }),
+        &["query"],
     )
 }
 

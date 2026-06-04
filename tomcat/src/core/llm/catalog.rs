@@ -20,6 +20,8 @@ pub struct Capabilities {
     pub tools: bool,
     #[serde(default)]
     pub reasoning: bool,
+    #[serde(default)]
+    pub web_search: bool,
 }
 
 impl Default for Capabilities {
@@ -29,6 +31,7 @@ impl Default for Capabilities {
             files: false,
             tools: true,
             reasoning: false,
+            web_search: false,
         }
     }
 }
@@ -62,6 +65,7 @@ pub struct ModelEntry {
 pub struct ModelCatalog {
     by_id: HashMap<String, ModelEntry>,
     user_path: PathBuf,
+    ordered_ids: Vec<String>,
 }
 
 impl ModelCatalog {
@@ -71,7 +75,12 @@ impl ModelCatalog {
     }
 
     pub fn load_from_path(config: &AppConfig, user_path: PathBuf) -> Result<Self, AppError> {
-        let mut by_id = builtin_models(&config.context);
+        let mut by_id = HashMap::new();
+        let mut ordered_ids = Vec::new();
+        for entry in builtin_models(&config.context) {
+            ordered_ids.push(entry.id.clone());
+            by_id.insert(entry.id.clone(), entry);
+        }
         if user_path.exists() {
             let content = std::fs::read_to_string(&user_path).map_err(AppError::Io)?;
             let file: UserModelsFile = toml::from_str(&content).map_err(|e| {
@@ -85,10 +94,17 @@ impl ModelCatalog {
                 let model_id = raw.id.clone();
                 let merged =
                     merge_user_model(raw, by_id.remove(&model_id), &config.llm, &config.context);
+                if !ordered_ids.iter().any(|existing| existing == &merged.id) {
+                    ordered_ids.push(merged.id.clone());
+                }
                 by_id.insert(merged.id.clone(), merged);
             }
         }
-        Ok(Self { by_id, user_path })
+        Ok(Self {
+            by_id,
+            user_path,
+            ordered_ids,
+        })
     }
 
     pub fn default_user_path(config: &AppConfig) -> Result<PathBuf, AppError> {
@@ -113,6 +129,13 @@ impl ModelCatalog {
         let mut entries: Vec<_> = self.by_id.values().cloned().collect();
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         entries
+    }
+
+    pub fn entries_in_merge_order(&self) -> Vec<ModelEntry> {
+        self.ordered_ids
+            .iter()
+            .filter_map(|id| self.by_id.get(id).cloned())
+            .collect()
     }
 }
 
@@ -151,11 +174,12 @@ struct PartialCapabilities {
     tools: Option<bool>,
     #[serde(default)]
     reasoning: Option<bool>,
+    #[serde(default)]
+    web_search: Option<bool>,
 }
 
-fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
-    let mut by_id = HashMap::new();
-    let builtins = vec![
+fn builtin_models(context: &ContextConfig) -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
             id: "gpt-5.4".to_string(),
             api: "openai-responses".to_string(),
@@ -166,6 +190,7 @@ fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
                 files: true,
                 tools: true,
                 reasoning: true,
+                web_search: false,
             },
             context_window: Some(context.context_window as u32),
             cost: None,
@@ -181,6 +206,7 @@ fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
                 files: true,
                 tools: true,
                 reasoning: true,
+                web_search: false,
             },
             context_window: Some(context.context_window as u32),
             cost: None,
@@ -196,6 +222,7 @@ fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
                 files: false,
                 tools: true,
                 reasoning: true,
+                web_search: false,
             },
             context_window: Some(context.context_window as u32),
             cost: None,
@@ -211,16 +238,13 @@ fn builtin_models(context: &ContextConfig) -> HashMap<String, ModelEntry> {
                 files: false,
                 tools: true,
                 reasoning: true,
+                web_search: false,
             },
             context_window: Some(context.context_window as u32),
             cost: None,
             thinking_format: Some("deepseek".to_string()),
         },
-    ];
-    for entry in builtins {
-        by_id.insert(entry.id.clone(), entry);
-    }
-    by_id
+    ]
 }
 
 fn merge_user_model(
@@ -284,6 +308,9 @@ fn apply_partial_capabilities(target: &mut Capabilities, partial: PartialCapabil
     if let Some(reasoning) = partial.reasoning {
         target.reasoning = reasoning;
     }
+    if let Some(web_search) = partial.web_search {
+        target.web_search = web_search;
+    }
 }
 
 fn missing_model_error(model_id: &str, user_path: &Path) -> AppError {
@@ -344,6 +371,7 @@ pub(crate) fn infer_capabilities_from_model_id(model_id: &str) -> Capabilities {
             files: lower.starts_with("gpt-"),
             tools: true,
             reasoning: true,
+            web_search: false,
         }
     } else if lower.starts_with("mimo-") {
         // 官方文档：mimo-v2.5-pro 仅文本（图片/音视频只在 mimo-v2.5 / mimo-v2-omni）。
@@ -352,6 +380,7 @@ pub(crate) fn infer_capabilities_from_model_id(model_id: &str) -> Capabilities {
             files: false,
             tools: true,
             reasoning: true,
+            web_search: false,
         }
     } else {
         Capabilities::default()

@@ -32,9 +32,13 @@ pub use config::{
     resolve_workspace_dir, resolve_workspace_roots_paths, validate_config, AgentConfig, AppConfig,
     CheckpointConfig, ContextConfig, LlmConfig, LogConfig, PreflightConfig, PrimitiveConfig,
     SecurityConfig, ToolCliVerbosity, ToolsBashConfig, ToolsConfig, ToolsReadConfig,
-    ToolsWriteConfig, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
+    ToolsWebSearchConfig, ToolsWriteConfig, WasmConfig, WorkspaceConfig, DEFAULT_LLM_MODEL,
     DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_BASH_TIMEOUT_MS,
-    DEFAULT_TOOLS_READ_MAX_BYTES, DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
+    DEFAULT_TOOLS_READ_MAX_BYTES, DEFAULT_TOOLS_WEB_SEARCH_BACKEND,
+    DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY,
+    DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS, DEFAULT_TOOLS_WEB_SEARCH_COUNT,
+    DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL, DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL,
+    DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS, DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
     MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
 };
 pub use error::AppError;

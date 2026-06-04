@@ -17,6 +17,13 @@ fn validate_config_accepts_valid() {
 }
 
 #[test]
+fn validate_config_rejects_invalid_web_search_backend() {
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "bing".to_string();
+    assert!(validate_config(&cfg).is_err());
+}
+
+#[test]
 fn validate_config_rejects_invalid_log_level() {
     let mut cfg = AppConfig::default();
     cfg.log.level = "invalid".to_string();

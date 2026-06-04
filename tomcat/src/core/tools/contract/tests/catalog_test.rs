@@ -115,6 +115,41 @@ fn search_files_catalog_contract_matches_plan() {
     );
 }
 
+#[test]
+fn web_search_registered() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "web_search")
+        .expect("web_search catalog entry");
+
+    assert_eq!(entry.scope, PermissionScope::Read);
+    assert_eq!(entry.category, Some(ToolCategory::Exec));
+    assert!(entry.read_only);
+    assert!(!entry.destructive);
+    assert!(entry.description.contains("web_fetch"));
+    assert!(entry.description.contains("PR-WS-A"));
+
+    let schema = (entry.parameters)();
+    let properties = schema["properties"].as_object().expect("properties");
+    assert_eq!(properties.len(), 6, "web_search should expose 6 fields");
+    assert_eq!(
+        schema["required"].as_array().expect("required"),
+        &vec![Value::String("query".to_string())]
+    );
+    assert_eq!(
+        properties["count"]["maximum"].as_i64(),
+        Some(20),
+        "count should be capped at 20"
+    );
+    assert_eq!(
+        properties["freshness"]["enum"]
+            .as_array()
+            .expect("freshness enum")
+            .len(),
+        5
+    );
+}
+
 fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
     assert_eq!(
         schema["type"].as_str(),

@@ -131,6 +131,27 @@ async fn tool_exec_legacy_read_file_returns_unknown_tool_error() {
     );
 }
 
+/// `web_search` 需要会话级 runtime；未注入时应返回结构化错误而非误判 unknown tool。
+#[tokio::test]
+async fn tool_exec_web_search_requires_runtime_injection() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "ws_placeholder".to_string(),
+        name: "web_search".to_string(),
+        arguments: r#"{"query":"rust async runtime"}"#.to_string(),
+    };
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
+    assert!(
+        is_error,
+        "web_search without runtime should report is_error=true"
+    );
+    assert!(
+        msg.contains("web_search runtime 未注入"),
+        "missing-runtime error should be explicit, got: {}",
+        msg
+    );
+}
+
 /// PR-RB §2.6：`read.offset = 0` 触发 horizontal gate，返回结构化错误。
 #[tokio::test]
 async fn tool_exec_read_offset_zero_returns_bound_error() {
@@ -244,6 +265,7 @@ async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent()
         &primitive,
         &None,
         &None,
+        None,
         None,
         None,
         None,
@@ -405,6 +427,7 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
             None,
             None,
             None,
+            None,
             SubagentType::User,
             None,
             &tokio_util::sync::CancellationToken::new(),
@@ -473,6 +496,7 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
         None,
         None,
         None,
+        None,
         SubagentType::User,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -528,6 +552,7 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
         &primitive,
         &None,
         &registry_opt,
+        None,
         None,
         None,
         None,
@@ -598,6 +623,7 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         None,
         None,
         None,
+        None,
         SubagentType::User,
         None,
         &cancel,
@@ -659,6 +685,7 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
         None,
         None,
         None,
+        None,
         SubagentType::User,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -715,6 +742,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
         &primitive,
         &None,
         &registry_opt,
+        None,
         None,
         None,
         None,
@@ -784,6 +812,7 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         &primitive,
         &None,
         &registry_opt,
+        None,
         None,
         None,
         None,

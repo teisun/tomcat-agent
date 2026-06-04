@@ -138,10 +138,10 @@
 
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 | --- | --- | --- | --- | --- |
-| **PR-WS-A**（命名 + catalog） | **交付物**：6 字段 schema；占位 friendly err。**落地点**：catalog / `tool_exec` / system_prompt | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)、[`tool_exec/mod.rs`](../../../src/core/agent_loop/tool_exec/mod.rs)（match 增臂）+ 新 [`tool_exec/branches/web_search.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs)、[`system_prompt.rs`](../../../src/core/llm/system_prompt.rs) | `catalog_test::web_search_registered`、`tool_exec_unknown_tool_for_web_search_without_backend`（**PENDING**） | 先把名字 / schema / 占位放好，后面 PR 接 backend 不改字面量。 |
-| **PR-WS-S**（自家 HTTP backends） | **交付物**：trait + 三 HTTP adapter；LRU/TTL；归一化 hits。**落地点**：`core/tools/web_search/*`、`ToolsWebSearchConfig` | 新模块 `core/tools/web_search/{mod,types,backend,tavily,brave,serper,cache}.rs`、[`infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs) 的 `ToolsConfig` 加 `ToolsWebSearchConfig` 子表；缓存需新增 `moka` 依赖 | `tavily_adapter_normalizes_hits`、`backend_auto_picks_openai_server_side_when_project_has_capable_model`、`cache_hit_skips_http`、`web_search_timeout_returns_truncated_warning`（**PENDING**） | 三个 provider 接进来，模型不知道里面跑哪家；`auto` 先看项目里有没有 hosted 候选。 |
-| **PR-WS-O**（OpenAI hosted backend 调度与归一化） | **交付物**：project-level hosted 候选模型请求；server_tool 结果→统一 hits。**落地点**：`openai_responses` + `openai_server.rs` | [`openai_responses/mod.rs::build_request_body_with_hint`](../../../src/core/llm/openai_responses/mod.rs) + [`payload.rs::convert_tools_to_responses`](../../../src/core/llm/openai_responses/payload.rs)（构造 hosted 请求）、`core/tools/web_search/openai_server.rs`（归一化） | `openai_server_tool_uses_project_capable_model`、`backend_auto_ignores_current_model_wire_when_project_has_capable_model`、`backend_explicit_openai_errs_when_no_project_capable_model`、`server_tool_result_normalized_to_hits`（**PENDING**） | `auto` 只要项目里有 hosted 候选就优先用它；当前对话模型是不是 Responses 不重要。 |
-| **PR-WS-W**（域名守卫 + SSRF） | **交付物**：hits 阶段 URL 守卫与域过滤。**落地点**：`web_search/cache.rs`、`types.rs` | `web_search/cache.rs`、`web_search/types.rs` | `blocked_domain_filtered_out`、`allowed_domain_only_keeps_listed`、`ssrf_loopback_rejected_in_hits`（**PENDING**） | 别让搜出来的 URL 指向 127.0.0.1。 |
+| **PR-WS-A**（命名 + catalog） | **交付物**：6 字段 schema；占位 friendly err。**落地点**：catalog / `tool_exec` / system_prompt | [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)、[`tool_exec/mod.rs`](../../../src/core/agent_loop/tool_exec/mod.rs)（match 增臂）+ 新 [`tool_exec/branches/web_search.rs`](../../../src/core/agent_loop/tool_exec/branches/mod.rs)、[`system_prompt.rs`](../../../src/core/llm/system_prompt.rs) | `core::tools::contract::catalog::tests::web_search_registered`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection`（**PASS, 2026-06-04**） | 先把名字 / schema / 占位放好，后面 PR 接 backend 不改字面量。 |
+| **PR-WS-S**（自家 HTTP backends） | **交付物**：trait + 三 HTTP adapter；LRU/TTL；归一化 hits。**落地点**：`core/tools/web_search/*`、`ToolsWebSearchConfig` | 新模块 `core/tools/web_search/{mod,types,backend,tavily,brave,serper,cache}.rs`、[`infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs) 的 `ToolsConfig` 加 `ToolsWebSearchConfig` 子表；缓存需新增 `moka` 依赖 | `tavily_runtime_maps_request_and_normalizes_hits`、`auto_backend_falls_back_to_brave_and_then_hits_cache`、`auto_backend_falls_back_after_brave_timeout`、`explicit_tavily_rate_limit_returns_degraded_output`、`runtime_explicit_tavily_works_from_public_api`、`runtime_explicit_serper_works_from_public_api`（**PASS, 2026-06-04**） | 三个 provider 接进来，模型不知道里面跑哪家；`auto` 先看项目里有没有 hosted 候选。 |
+| **PR-WS-O**（OpenAI hosted backend 调度与归一化） | **交付物**：project-level hosted 候选模型请求；server_tool 结果→统一 hits。**落地点**：`openai_responses` + `openai_server.rs` | [`openai_responses/mod.rs::build_request_body_with_hint`](../../../src/core/llm/openai_responses/mod.rs) + [`payload.rs::convert_tools_to_responses`](../../../src/core/llm/openai_responses/payload.rs)（构造 hosted 请求）、`core/tools/web_search/openai_server.rs`（归一化） | `discover_hosted_candidate_uses_merged_catalog_order`、`auto_backend_uses_project_hosted_candidate`、`explicit_openai_requires_project_candidate`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate`（**PASS, 2026-06-04**） | `auto` 只要项目里有 hosted 候选就优先用它；当前对话模型是不是 Responses 不重要。 |
+| **PR-WS-W**（域名守卫 + SSRF） | **交付物**：hits 阶段 URL 守卫与域过滤。**落地点**：`web_search/cache.rs`、`types.rs` | `web_search/cache.rs`、`web_search/types.rs` | `normalize_hits_filters_private_hosts_and_domain_rules`（**PASS, 2026-06-04**） | 别让搜出来的 URL 指向 127.0.0.1。 |
 
 下文按实施点展开**技术要点与示意图**；**交付边界与代码落点仍以表为准**。
 
@@ -697,24 +697,26 @@ tool_exec/web_search.mod   backend.rs             openai_responses/mod         w
 
 ## 10. 测试矩阵（验收）
 
+**当前状态（2026-06-04）**：PR-WS-A / S / O / W 的本地实现已完成，并已通过 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`./scripts/run-integration-tests.sh lib`、`./scripts/run-integration-tests.sh integration`，以及 `PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`。
+
 | 维度 | 用例（实际函数名） | 状态 | 说人话 |
 |------|---------------------|------|--------|
-| catalog 注册 | `catalog_test::web_search_registered`、`tool_exec_unknown_tool_for_web_search_without_backend` | PENDING（PR-WS-A） | 名字注册了、占位返回 friendly err。 |
-| Tavily 解析 | `web_search::tests::tavily_adapter_normalizes_hits`、`tavily_returns_empty_when_no_results` | PENDING（PR-WS-S） | Tavily JSON 揉成 Hit。 |
-| Brave 解析 | `web_search::tests::brave_adapter_normalizes_hits` | PENDING（PR-WS-S） | 同上 Brave。 |
-| Serper 解析 | `web_search::tests::serper_adapter_normalizes_hits` | PENDING（PR-WS-S） | 同上 Serper。 |
-| backend.auto（project hosted 候选） | `backend_auto_picks_openai_server_side_when_project_has_capable_model`、`backend_auto_ignores_current_model_wire_when_project_has_capable_model`、`backend_auto_falls_back_tavily_when_no_project_capable_model` | PENDING（PR-WS-S/O） | auto 先看项目里有没有 hosted 候选，不看当前模型 wire。 |
-| hosted 候选选择 | `backend_auto_picks_first_project_capable_model`、`backend_explicit_openai_errs_when_no_project_capable_model` | PENDING（PR-WS-O） | 多个候选时顺序稳定；没有候选时显式报错。 |
-| 缓存 | `web_search::tests::cache_hit_skips_http`、`cache_miss_after_ttl`、`cache_key_includes_backend` | PENDING（PR-WS-S） | 命中、过期、不串号。 |
-| 超时 | `web_search::tests::web_search_timeout_returns_truncated_warning` | PENDING（PR-WS-S） | 超时不抛错，warning 在。 |
-| 限速归一化 | `web_search::tests::rate_limited_returns_warning_not_err` | PENDING（PR-WS-S） | 429/5xx 归 warning。 |
-| OpenAI hosted | `openai_responses::tests::openai_server_tool_uses_project_capable_model`、`web_search::tests::server_tool_result_normalized_to_hits` | PENDING（PR-WS-O） | 用项目级候选模型发请求，block 解析也对。 |
-| SSRF 守卫 | `web_search::tests::ssrf_loopback_rejected_in_hits`、`single_segment_hostname_rejected`、`private_ip_range_rejected` | PENDING（PR-WS-W） | 黑 IP 段全过滤。 |
-| 域名过滤 | `web_search::tests::blocked_domain_filtered_out`、`allowed_domain_only_keeps_listed`、`subdomain_suffix_match` | PENDING（PR-WS-W） | 黑/白名单都按子域 suffix。 |
-| 集成（mock HTTP） | `tests/web_search_tool_tests.rs::e2e_with_mock_tavily`、`e2e_with_mock_brave`、`e2e_with_mock_serper` | PENDING（PR-WS-S） | 拼起来跑端到端。 |
-| 集成 catalog | `tests/web_search_tool_tests.rs::tool_exec_routes_to_web_search` | PENDING（PR-WS-A） | tool_exec 路由对。 |
-| 配置解析 | `infra/config/tests/tools_cfg_test.rs`（`[tools.web_search]` 全字段覆盖） | PENDING（PR-WS-S） | TOML 反序列化无字段丢。 |
-| E2E（live） | `E2E-WEB-SEARCH-001`：真 Tavily 调一次（`PI_LIVE_WEB_SEARCH=1` gate；CI 默认跳） | PENDING（PR-WS-S） | 上线前真跑一次。 |
+| catalog 注册 | `core::tools::contract::catalog::tests::web_search_registered`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection` | PASS（2026-06-04） | 名字注册了、runtime 注入缺失时会给出明确错误。 |
+| Tavily 解析 | `tavily_runtime_maps_request_and_normalizes_hits`、`runtime_explicit_tavily_works_from_public_api` | PASS（2026-06-04） | Tavily header/body 映射和公开 API 路径都已跑通。 |
+| Brave 解析 | `auto_backend_falls_back_to_brave_and_then_hits_cache`、`runtime_auto_routes_to_http_fallback_chain` | PASS（2026-06-04） | Brave 既覆盖 auto fallback，也覆盖集成层公共 runtime。 |
+| Serper 解析 | `runtime_explicit_serper_works_from_public_api` | PASS（2026-06-04） | Serper 请求映射与结果归一化已通过 mock HTTP。 |
+| backend.auto（project hosted 候选） | `auto_backend_uses_project_hosted_candidate`、`incompatible_hosted_candidate_falls_back_to_tavily` | PASS（2026-06-04） | auto 先看项目里的 hosted 候选，候选不可用时再回 HTTP 链。 |
+| hosted 候选选择 | `discover_hosted_candidate_uses_merged_catalog_order`、`merged_catalog_preserves_override_slot_and_web_search_capability`、`explicit_openai_requires_project_candidate` | PASS（2026-06-04） | 多个候选按合并后顺序取首个，没有候选时显式 `openai` 会报错。 |
+| 缓存 | `auto_backend_falls_back_to_brave_and_then_hits_cache` | PASS（2026-06-04） | 同 query 二次命中 cache，不再重复发起上游请求。 |
+| 超时 | `auto_backend_falls_back_after_brave_timeout` | PASS（2026-06-04） | 超时会记 warning，并在 `auto` 链里继续尝试下一个 backend。 |
+| 限速归一化 | `explicit_tavily_rate_limit_returns_degraded_output` | PASS（2026-06-04） | 显式 backend 遇到 429 会返回 degraded output，不会把整轮工具直接打崩。 |
+| OpenAI hosted | `build_hosted_request_body_includes_filters_and_location`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate` | PASS（2026-06-04） | 项目级 hosted 候选模型请求与 server-side block 归一化都已落地。 |
+| SSRF 守卫 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-04） | loopback / 私网 / 无效 host 会在 hits 归一化时被剔除。 |
+| 域名过滤 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-04） | `allowed_domains` / `blocked_domains` 已按 host / subdomain 规则过滤。 |
+| 集成（mock HTTP） | `runtime_explicit_tavily_works_from_public_api`、`runtime_auto_routes_to_http_fallback_chain`、`runtime_explicit_serper_works_from_public_api` | PASS（2026-06-04） | mock Tavily / Brave(auto) / Serper 的 public runtime 集成路径都跑通了。 |
+| 集成 catalog | `core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection` | PASS（2026-06-04） | `tool_exec` 已真实接入 `web_search` 分支，缺 runtime 时错误也符合预期。 |
+| 配置解析 | `infra::config::tests::tools_cfg_test::tools_web_search_toml_override`、`infra::config::tests::validate_test::validate_config_rejects_invalid_web_search_backend` | PASS（2026-06-04） | `[tools.web_search]` 的默认值、覆写和非法 backend 校验都已覆盖。 |
+| E2E（live） | `live_tavily_search_smoke`（`PI_LIVE_WEB_SEARCH=1` gate） | PASS（2026-06-04） | 已在本机载入真实 Tavily key 后跑过一次 live smoke。 |
 
 §1 观察指标 **G1–G6** 与本表逐行对应：G1↔catalog/Tavily/Brave/Serper/集成；G2↔backend.auto/openai server-side；G3↔三家解析；G4↔缓存；G5↔SSRF/域名过滤；G6↔超时/限速/集成。
 
@@ -767,4 +769,4 @@ tool_exec/web_search.mod   backend.rs             openai_responses/mod         w
 
 ---
 
-**一句话总结**：`web_search` 在 **`tool_exec`** 解参数与序列化、在 **`web_search/mod`** 查缓存与挑 backend、在 4 个 adapter 里跑 reqwest 或注入 OpenAI server-side、在 **`types::normalize_hits`** 做 SSRF + 域名过滤；协议以 **`catalog.rs` + `web_search/types.rs`** 为单一事实源，配置走 `[tools.web_search]` 子表，限速 / 超时归 `warnings`，**`auto`** 跟着模型走，跟兄弟工具 [`web_fetch.md`](web_fetch.md) 拆开各自负责一件事。
+**一句话总结**：`web_search` 在 **`tool_exec`** 解参数与序列化、在 **`web_search/mod`** 查缓存与挑 backend、在 4 个 adapter 里跑 reqwest 或注入 OpenAI server-side、在 **`types::normalize_hits`** 做 SSRF + 域名过滤；协议以 **`catalog.rs` + `web_search/types.rs`** 为单一事实源，配置走 `[tools.web_search]` 子表，限速 / 超时归 `warnings`，**`auto`** 跟着**项目级 hosted 候选 + HTTP 降级链**走，跟兄弟工具 [`web_fetch.md`](web_fetch.md) 拆开各自负责一件事。

@@ -397,9 +397,16 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
     let state = Arc::new(ReadFileState::new());
     let tc = make_tc(&format!(r#"{{"path":{:?}}}"#, pdf.to_string_lossy()));
 
-    let (msg, is_error, follow_ups) =
-        execute_tool_with_openai_files(&primitive, &None, &None, Some(&state), Some(&runtime), &tc)
-            .await;
+    let (msg, is_error, follow_ups) = execute_tool_with_openai_files(
+        &primitive,
+        &None,
+        &None,
+        Some(&state),
+        Some(&runtime),
+        None,
+        &tc,
+    )
+    .await;
     assert!(
         !is_error,
         "with runtime + cached file_id, oversize should succeed; msg={:?}",

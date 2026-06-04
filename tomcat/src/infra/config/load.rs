@@ -429,6 +429,54 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             expires
         )));
     }
+    let web_search_backend = cfg.tools.web_search.backend.trim().to_ascii_lowercase();
+    if !["auto", "openai", "tavily", "brave", "serper"].contains(&web_search_backend.as_str()) {
+        return Err(AppError::Config(format!(
+            "tools.web_search.backend 非法: {}",
+            cfg.tools.web_search.backend
+        )));
+    }
+    if !(1..=20).contains(&cfg.tools.web_search.count) {
+        return Err(AppError::Config(format!(
+            "tools.web_search.count 非法: {}（允许 [1, 20]）",
+            cfg.tools.web_search.count
+        )));
+    }
+    if cfg.tools.web_search.cache_capacity == 0 {
+        return Err(AppError::Config(
+            "tools.web_search.cache_capacity 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_search.cache_ttl_secs == 0 {
+        return Err(AppError::Config(
+            "tools.web_search.cache_ttl_secs 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.tools.web_search.timeout_ms == 0 {
+        return Err(AppError::Config(
+            "tools.web_search.timeout_ms 必须大于 0".to_string(),
+        ));
+    }
+    for (label, value) in [
+        (
+            "tools.web_search.tavily_base_url",
+            cfg.tools.web_search.tavily_base_url.trim(),
+        ),
+        (
+            "tools.web_search.brave_base_url",
+            cfg.tools.web_search.brave_base_url.trim(),
+        ),
+        (
+            "tools.web_search.serper_base_url",
+            cfg.tools.web_search.serper_base_url.trim(),
+        ),
+    ] {
+        if !value.starts_with("http://") && !value.starts_with("https://") {
+            return Err(AppError::Config(format!(
+                "{label} 须以 http:// 或 https:// 开头"
+            )));
+        }
+    }
     resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }

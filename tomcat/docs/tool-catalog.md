@@ -910,6 +910,78 @@ Parameters:
 }
 ```
 
+### `web_search`
+
+- Label: Web Search
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `web search internet tavily brave serper query`
+
+Search the web and return normalized search hits. Use this to discover candidate URLs and snippets for a query; use `web_fetch` when you need to fetch one URL body afterward. Input fields align with the architecture doc: required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`.
+
+Current PR-WS-A status: the tool is registered in the catalog / default tool definitions / system prompt, but backend execution is not wired yet. Calls therefore return a friendly placeholder error until PR-WS-S / PR-WS-O land.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "count": {
+      "description": "Optional number of hits to request. Defaults to 5 and is capped at 20.",
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "country": {
+      "description": "Optional ISO 3166-1 alpha-2 country hint such as `us` or `cn`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "domain_filter": {
+      "description": "Optional allowlist of domains to constrain results to. Each item should be a bare host like `github.com`.",
+      "items": {
+        "description": "One allowed domain suffix.",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "freshness": {
+      "description": "Optional recency filter. Use `day`, `week`, `month`, or `year`; omit / pass null when no freshness constraint is needed.",
+      "enum": [
+        "day",
+        "week",
+        "month",
+        "year",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "language": {
+      "description": "Optional ISO 639-1 language hint such as `en` or `zh`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "query": {
+      "description": "Search query text. Required; prefer natural-language keywords that describe what the user wants to find.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "type": "object"
+}
+```
+
 ## Config
 
 ### `config_get`

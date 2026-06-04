@@ -273,6 +273,9 @@ pub struct AgentLoop {
     /// `bash run_in_background=true` / `task_*` 命中时返回「未启用」错误，
     /// 同步 `bash` 路径不受影响。
     pub(super) bash_task_registry: Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
+    /// T2-P1-012：`web_search` 会话级 runtime（HTTP client + cache + model catalog）。
+    /// 不注入时 `web_search` 命中返回「未启用」错误，便于独立单测保持最小装配。
+    pub(super) web_search_runtime: Option<Arc<crate::core::tools::web_search::WebSearchRuntime>>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]

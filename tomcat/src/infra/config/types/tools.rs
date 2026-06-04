@@ -15,6 +15,8 @@ pub struct ToolsConfig {
     pub write: ToolsWriteConfig,
     #[serde(default)]
     pub bash: ToolsBashConfig,
+    #[serde(default)]
+    pub web_search: ToolsWebSearchConfig,
 }
 
 /// `[tools.read]` 子表：当前仅含 `max_bytes`。
@@ -140,6 +142,105 @@ impl Default for ToolsBashConfig {
         Self {
             timeout_ms: default_tools_bash_timeout_ms(),
             max_output_chars: default_tools_bash_max_output_chars(),
+        }
+    }
+}
+
+/// `[tools.web_search]` 子表（T2-P1-012 PR-WS-S）。
+///
+/// 仅承载 `web_search` runtime 的**默认 backend / filter / cache / timeout / base URL**
+/// 配置；provider credentials 继续通过 `TAVILY_API_KEY` / `BRAVE_API_KEY` /
+/// `SERPER_API_KEY` 等环境变量读取，不进 TOML。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolsWebSearchConfig {
+    #[serde(default = "default_tools_web_search_backend")]
+    pub backend: String,
+    #[serde(default = "default_tools_web_search_count")]
+    pub count: u32,
+    #[serde(default)]
+    pub freshness: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub domain_filter: Vec<String>,
+    #[serde(default)]
+    pub blocked_domains: Vec<String>,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default = "default_tools_web_search_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+    #[serde(default = "default_tools_web_search_cache_capacity")]
+    pub cache_capacity: u64,
+    #[serde(default = "default_tools_web_search_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_tools_web_search_tavily_base_url")]
+    pub tavily_base_url: String,
+    #[serde(default = "default_tools_web_search_brave_base_url")]
+    pub brave_base_url: String,
+    #[serde(default = "default_tools_web_search_serper_base_url")]
+    pub serper_base_url: String,
+}
+
+pub const DEFAULT_TOOLS_WEB_SEARCH_BACKEND: &str = "auto";
+pub const DEFAULT_TOOLS_WEB_SEARCH_COUNT: u32 = 5;
+pub const DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS: u64 = 300;
+pub const DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY: u64 = 50;
+pub const DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS: u64 = 12_000;
+pub const DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL: &str = "https://api.tavily.com";
+pub const DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL: &str = "https://api.search.brave.com";
+pub const DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL: &str = "https://google.serper.dev";
+
+fn default_tools_web_search_backend() -> String {
+    DEFAULT_TOOLS_WEB_SEARCH_BACKEND.to_string()
+}
+
+fn default_tools_web_search_count() -> u32 {
+    DEFAULT_TOOLS_WEB_SEARCH_COUNT
+}
+
+fn default_tools_web_search_cache_ttl_secs() -> u64 {
+    DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS
+}
+
+fn default_tools_web_search_cache_capacity() -> u64 {
+    DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY
+}
+
+fn default_tools_web_search_timeout_ms() -> u64 {
+    DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS
+}
+
+fn default_tools_web_search_tavily_base_url() -> String {
+    DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL.to_string()
+}
+
+fn default_tools_web_search_brave_base_url() -> String {
+    DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL.to_string()
+}
+
+fn default_tools_web_search_serper_base_url() -> String {
+    DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL.to_string()
+}
+
+impl Default for ToolsWebSearchConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_tools_web_search_backend(),
+            count: default_tools_web_search_count(),
+            freshness: None,
+            country: None,
+            language: None,
+            domain_filter: Vec::new(),
+            blocked_domains: Vec::new(),
+            allowed_domains: Vec::new(),
+            cache_ttl_secs: default_tools_web_search_cache_ttl_secs(),
+            cache_capacity: default_tools_web_search_cache_capacity(),
+            timeout_ms: default_tools_web_search_timeout_ms(),
+            tavily_base_url: default_tools_web_search_tavily_base_url(),
+            brave_base_url: default_tools_web_search_brave_base_url(),
+            serper_base_url: default_tools_web_search_serper_base_url(),
         }
     }
 }

@@ -184,6 +184,7 @@ pub(super) async fn run_tool_calls(
                 &agent.bash_task_registry,
                 Some(&agent.config.read_file_state),
                 agent.config.openai_files_runtime.as_ref(),
+                agent.web_search_runtime.as_ref(),
                 agent.config.plan_runtime.as_ref(),
                 agent.config.subagent_type,
                 agent.config.review_kind,
