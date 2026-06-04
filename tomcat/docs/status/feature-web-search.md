@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-05 07:01 +0800 | PENDING_INTEGRATION | feature/web-search | — |
+| Jerry | 2026-06-05 07:12 +0800 | PENDING_INTEGRATION | feature/web-search | — |
 
 ### ✅ DONE
 - [✓] **[P1]** 认领 `T2-P1-012`，任务卡与看板索引已切到 `DOING / Jerry`
@@ -16,6 +16,7 @@
 - [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test web_fetch --lib`、`cargo test --test web_fetch_tool_tests`、`cargo test --test tool_catalog_doc`
 - [✓] **[P1]** 已完成 `web_fetch` 收口整改：`markdownify.rs` 正则改 `LazyLock`，`validate.rs` 的 secret-prefix 误报收紧为边界匹配，`application/json` / `*xml` 改为 verbatim 返回，`prompt_ignored_mvp` 改为按本次请求现算且不再污染缓存，off-host redirect 结果不进缓存
 - [✓] **[P1]** 文档 / 验收已对齐：`web_fetch.md` 改为显式说明工具描述来自 `catalog.description`、`validate.rs` 当前拒绝所有 IP literal，并登记 DNS 解析型 SSRF 残留；补 `tool_exec` 成功路由到 `web_fetch` 的回归测试并复绿
+- [✓] **[P2]** `PLAN_SPEC.md` 收紧决策表与 todos 映射：已拍板决策须逐项对应 todo，不再允许多项决策合并为一个 todo 而不落点
 
 ### 🔌 INTERFACE
 - `web_search` 现为真实可执行工具，schema 固定为 `query / count / freshness / country / language / domain_filter`
