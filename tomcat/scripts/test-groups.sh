@@ -11,6 +11,8 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   path_command_e2e
   cwd_lazy_prompt_e2e
   search_files_tests
+  web_search_tool_tests
+  web_fetch_tool_tests
   checkpoint_integration_tests
   chat_git_preflight_tests
   session_tests

@@ -26,8 +26,7 @@ docs/
 │   ├── claw-agent-design.md               CLAW 核心设计理念 & 生产级 AI Agent
 │   └── spec-driven-agent-workflow.md      规范驱动的 AI Agent 自动化工作流
 │
-├── reports/                           ◄── 测试与验收报告
-│   └── nibbles_4.3_e2e_recap_report.md
+├── reports/                           ◄── 调研归档（背景调查，日常开发可忽略，见 reports/README.md）
 │
 └── user-guide.md
 ```

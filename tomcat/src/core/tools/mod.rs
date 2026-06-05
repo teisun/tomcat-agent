@@ -11,6 +11,8 @@ pub mod contract;
 pub mod pipeline;
 pub mod plan_tool;
 pub mod primitive;
+pub mod web_fetch;
+pub mod web_search;
 
 #[cfg(test)]
 mod tests;

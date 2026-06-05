@@ -111,3 +111,146 @@ fn app_config_default_roundtrip_preserves_tools_write() {
     let back: AppConfig = serde_json::from_str(&j).unwrap();
     assert!(back.tools.write.normalize_crlf);
 }
+
+// ── T2-P1-012：[tools.web_search] defaults / TOML override ───────────────────
+
+#[test]
+fn tools_web_search_config_default_value() {
+    let cfg = ToolsWebSearchConfig::default();
+    assert_eq!(cfg.backend, DEFAULT_TOOLS_WEB_SEARCH_BACKEND);
+    assert_eq!(cfg.count, DEFAULT_TOOLS_WEB_SEARCH_COUNT);
+    assert_eq!(cfg.cache_ttl_secs, DEFAULT_TOOLS_WEB_SEARCH_CACHE_TTL_SECS);
+    assert_eq!(cfg.cache_capacity, DEFAULT_TOOLS_WEB_SEARCH_CACHE_CAPACITY);
+    assert_eq!(cfg.timeout_ms, DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS);
+    assert_eq!(
+        cfg.tavily_base_url,
+        DEFAULT_TOOLS_WEB_SEARCH_TAVILY_BASE_URL
+    );
+    assert_eq!(cfg.brave_base_url, DEFAULT_TOOLS_WEB_SEARCH_BRAVE_BASE_URL);
+    assert_eq!(
+        cfg.serper_base_url,
+        DEFAULT_TOOLS_WEB_SEARCH_SERPER_BASE_URL
+    );
+}
+
+#[test]
+fn app_config_includes_tools_web_search_default() {
+    let cfg = AppConfig::default();
+    assert_eq!(
+        cfg.tools.web_search.backend,
+        DEFAULT_TOOLS_WEB_SEARCH_BACKEND
+    );
+    assert_eq!(cfg.tools.web_search.count, DEFAULT_TOOLS_WEB_SEARCH_COUNT);
+}
+
+#[test]
+fn tools_web_search_toml_override() {
+    let dir = std::env::temp_dir().join("tomcat_tools_web_search_cfg_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(
+        br#"[tools.web_search]
+backend = "brave"
+count = 7
+cache_ttl_secs = 42
+cache_capacity = 9
+timeout_ms = 3456
+tavily_base_url = "http://127.0.0.1:3001"
+brave_base_url = "http://127.0.0.1:3002"
+serper_base_url = "http://127.0.0.1:3003"
+"#,
+    )
+    .unwrap();
+    drop(f);
+    let cfg = load_config(Some(path.as_path())).expect("load_config");
+    assert_eq!(cfg.tools.web_search.backend, "brave");
+    assert_eq!(cfg.tools.web_search.count, 7);
+    assert_eq!(cfg.tools.web_search.cache_ttl_secs, 42);
+    assert_eq!(cfg.tools.web_search.cache_capacity, 9);
+    assert_eq!(cfg.tools.web_search.timeout_ms, 3456);
+    assert_eq!(
+        cfg.tools.web_search.tavily_base_url,
+        "http://127.0.0.1:3001"
+    );
+    assert_eq!(cfg.tools.web_search.brave_base_url, "http://127.0.0.1:3002");
+    assert_eq!(
+        cfg.tools.web_search.serper_base_url,
+        "http://127.0.0.1:3003"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+// ── T2-P1-013：[tools.web_fetch] defaults / TOML override ────────────────────
+
+#[test]
+fn tools_web_fetch_config_default_value() {
+    let cfg = ToolsWebFetchConfig::default();
+    assert_eq!(cfg.max_redirects, DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS);
+    assert_eq!(cfg.fetch_timeout_ms, DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS);
+    assert_eq!(
+        cfg.max_http_content_bytes,
+        DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES
+    );
+    assert_eq!(
+        cfg.max_markdown_chars,
+        DEFAULT_TOOLS_WEB_FETCH_MAX_MARKDOWN_CHARS
+    );
+    assert_eq!(
+        cfg.markdown_head_chars,
+        DEFAULT_TOOLS_WEB_FETCH_MARKDOWN_HEAD_CHARS
+    );
+    assert_eq!(cfg.cache_ttl_secs, DEFAULT_TOOLS_WEB_FETCH_CACHE_TTL_SECS);
+    assert_eq!(
+        cfg.cache_capacity_bytes,
+        DEFAULT_TOOLS_WEB_FETCH_CACHE_CAPACITY_BYTES
+    );
+    assert!(!cfg.use_llm_processing);
+}
+
+#[test]
+fn app_config_includes_tools_web_fetch_default() {
+    let cfg = AppConfig::default();
+    assert_eq!(
+        cfg.tools.web_fetch.max_redirects,
+        DEFAULT_TOOLS_WEB_FETCH_MAX_REDIRECTS
+    );
+    assert_eq!(
+        cfg.tools.web_fetch.fetch_timeout_ms,
+        DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS
+    );
+}
+
+#[test]
+fn tools_web_fetch_toml_override() {
+    let dir = std::env::temp_dir().join("tomcat_tools_web_fetch_cfg_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(
+        br#"[tools.web_fetch]
+max_redirects = 4
+fetch_timeout_ms = 3210
+max_http_content_bytes = 4096
+max_markdown_chars = 2048
+markdown_head_chars = 256
+cache_ttl_secs = 33
+cache_capacity_bytes = 8192
+use_llm_processing = true
+"#,
+    )
+    .unwrap();
+    drop(f);
+    let cfg = load_config(Some(path.as_path())).expect("load_config");
+    assert_eq!(cfg.tools.web_fetch.max_redirects, 4);
+    assert_eq!(cfg.tools.web_fetch.fetch_timeout_ms, 3210);
+    assert_eq!(cfg.tools.web_fetch.max_http_content_bytes, 4096);
+    assert_eq!(cfg.tools.web_fetch.max_markdown_chars, 2048);
+    assert_eq!(cfg.tools.web_fetch.markdown_head_chars, 256);
+    assert_eq!(cfg.tools.web_fetch.cache_ttl_secs, 33);
+    assert_eq!(cfg.tools.web_fetch.cache_capacity_bytes, 8192);
+    assert!(cfg.tools.web_fetch.use_llm_processing);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}

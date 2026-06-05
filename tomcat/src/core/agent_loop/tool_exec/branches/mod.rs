@@ -11,6 +11,8 @@ pub(super) mod search_files;
 pub(super) mod task_list;
 pub(super) mod task_output;
 pub(super) mod task_stop;
+pub(super) mod web_fetch;
+pub(super) mod web_search;
 pub(super) mod write;
 
 pub(super) use bash::handle_bash;
@@ -25,4 +27,6 @@ pub(super) use search_files::handle_search_files;
 pub(super) use task_list::handle_task_list;
 pub(super) use task_output::handle_task_output;
 pub(super) use task_stop::handle_task_stop;
+pub(super) use web_fetch::handle_web_fetch;
+pub(super) use web_search::handle_web_search;
 pub(super) use write::handle_write;

@@ -179,6 +179,8 @@ async fn reviewer_blocks_non_whitelisted_tool() {
         None,
         None,
         None,
+        None,
+        None,
         SubagentType::Reviewer,
         Some(crate::core::plan_runtime::review::ReviewKind::Plan),
         &tokio_util::sync::CancellationToken::new(),
@@ -194,6 +196,37 @@ async fn reviewer_blocks_non_whitelisted_tool() {
 }
 
 #[tokio::test]
+async fn reviewer_blocks_web_search_tool() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let tc = ToolCallInfo {
+        id: "tc_web_search".into(),
+        name: "web_search".into(),
+        arguments: r#"{"query":"rust tokio tutorial"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::Reviewer,
+        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(outcome.is_error);
+    assert!(outcome
+        .model_text
+        .contains("reviewer 子 Agent 禁止调用工具 `web_search`"));
+}
+
+#[tokio::test]
 async fn code_reviewer_blocks_write_capable_tools() {
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
     let tc = ToolCallInfo {
@@ -206,6 +239,8 @@ async fn code_reviewer_blocks_write_capable_tools() {
         &primitive,
         &None,
         &None,
+        None,
+        None,
         None,
         None,
         None,
@@ -238,6 +273,8 @@ async fn reviewer_blocks_create_plan_subagent() {
         None,
         None,
         None,
+        None,
+        None,
         SubagentType::Reviewer,
         Some(crate::core::plan_runtime::review::ReviewKind::Plan),
         &tokio_util::sync::CancellationToken::new(),
@@ -257,6 +294,8 @@ async fn verifier_blocks_non_whitelisted_tools() {
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
     for (name, arguments) in [
         ("update_plan", "{}"),
+        ("web_search", r#"{"query":"rust async"}"#),
+        ("web_fetch", r#"{"url":"https://example.com"}"#),
         ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
         (
             "edit",
@@ -272,6 +311,8 @@ async fn verifier_blocks_non_whitelisted_tools() {
             &primitive,
             &None,
             &None,
+            None,
+            None,
             None,
             None,
             None,
@@ -337,6 +378,8 @@ async fn reviewer_edit_precheck_accepts_tilde_plan_path() {
         &primitive,
         &None,
         &None,
+        None,
+        None,
         None,
         None,
         None,

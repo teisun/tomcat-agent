@@ -1,6 +1,6 @@
 # tomcat
 
-基于 Rust 的轻量 AI Agent 运行时。源码与构建在 [`tomcat/`](tomcat/) 目录。
+基于 Rust 的轻量 AI Agent 运行时，为作者学习 Agent 开发而作的实践项目。源码与构建在 [`tomcat/`](tomcat/) 目录。
 
 ## 特性
 

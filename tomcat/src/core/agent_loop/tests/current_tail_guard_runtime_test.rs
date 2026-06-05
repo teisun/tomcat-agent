@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use super::super::current_tail_guard;
@@ -161,6 +162,7 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
 }
 
 #[tokio::test]
+#[serial(env_lock)]
 async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     let plan_id = unique_plan_id("exec_keepalive");
     let plan_path = write_plan_file(
@@ -256,6 +258,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
 }
 
 #[tokio::test]
+#[serial(env_lock)]
 async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists() {
     let plan_id = unique_plan_id("pending_keepalive");
     let plan_path = write_plan_file(
@@ -383,6 +386,9 @@ fn unique_plan_id(prefix: &str) -> String {
 
 fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) -> PathBuf {
     let path = plan_path_for_id(plan_id).unwrap();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
     let plan = PlanFile {
         frontmatter: PlanFileFrontmatter {
             plan_id: plan_id.to_string(),

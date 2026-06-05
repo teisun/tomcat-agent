@@ -88,6 +88,7 @@ impl FixedResolver {
             files: lower.starts_with("gpt-"),
             tools: true,
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
+            web_search: false,
         };
         ResolvedCall {
             provider_impl: self.provider.clone(),

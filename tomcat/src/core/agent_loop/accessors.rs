@@ -50,6 +50,8 @@ impl AgentLoop {
             event_bus,
             config_backend: None,
             bash_task_registry: None,
+            web_fetch_runtime: None,
+            web_search_runtime: None,
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
@@ -80,6 +82,24 @@ impl AgentLoop {
         registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     ) -> Self {
         self.bash_task_registry = Some(registry);
+        self
+    }
+
+    /// T2-P1-013：注入 `web_fetch` 会话级 runtime。
+    pub fn with_web_fetch_runtime(
+        mut self,
+        runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
+    ) -> Self {
+        self.web_fetch_runtime = Some(runtime);
+        self
+    }
+
+    /// T2-P1-012：注入 `web_search` 会话级 runtime。
+    pub fn with_web_search_runtime(
+        mut self,
+        runtime: Arc<crate::core::tools::web_search::WebSearchRuntime>,
+    ) -> Self {
+        self.web_search_runtime = Some(runtime);
         self
     }
 
@@ -130,6 +150,8 @@ impl AgentLoop {
             event_bus,
             config_backend: None,
             bash_task_registry: None,
+            web_fetch_runtime: None,
+            web_search_runtime: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,

@@ -910,6 +910,123 @@ Parameters:
 }
 ```
 
+### `web_search`
+
+- Label: Web Search
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `web search internet tavily brave serper query`
+
+Search the web and return normalized search hits. Use this to discover candidate URLs and snippets for a query; use `web_fetch` when you need to fetch one URL body afterward. Input fields align with the architecture doc: required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`.
+
+Results are normalized across hosted OpenAI search plus Tavily / Brave / Serper backends, with automatic fallback in `auto` mode. Preserve source attribution when citing results, and pay attention to the current date for time-sensitive queries.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "count": {
+      "description": "Optional number of hits to request. Defaults to 5 and is capped at 20.",
+      "maximum": 20,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "country": {
+      "description": "Optional ISO 3166-1 alpha-2 country hint such as `us` or `cn`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "domain_filter": {
+      "description": "Optional allowlist of domains to constrain results to. Each item should be a bare host like `github.com`.",
+      "items": {
+        "description": "One allowed domain suffix.",
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "freshness": {
+      "description": "Optional recency filter. Use `day`, `week`, `month`, or `year`; omit / pass null when no freshness constraint is needed.",
+      "enum": [
+        "day",
+        "week",
+        "month",
+        "year",
+        null
+      ],
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "language": {
+      "description": "Optional ISO 639-1 language hint such as `en` or `zh`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "query": {
+      "description": "Search query text. Required; prefer natural-language keywords that describe what the user wants to find.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "type": "object"
+}
+```
+
+### `web_fetch`
+
+- Label: Web Fetch
+- Category: `exec`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `web fetch url markdown html pdf redirect`
+
+Fetch one specific URL and return cleaned page content. Use this after `web_search` when you already have a candidate URL and need the actual page body. Private/authenticated URLs, URLs with embedded credentials, single-label hosts, IP literal hosts, and private/loopback targets are rejected before any request; off-host redirects are not auto-followed and instead return structured redirect info so the model can decide whether to refetch with the new URL.
+
+Small text/html pages are returned inline as markdown or plain text. Large text responses are persisted to `tool-results` and return a head preview plus `persisted_output_path`; PDF/images and other binary payloads are persisted instead of being inlined. Input fields align with the architecture doc: required `url`, plus optional `prompt` (MVP warning-only hint) and `format` (`markdown` or `text`).
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "format": {
+      "description": "Optional output format for textual pages. Defaults to `markdown`; use `text` when you want plain text without markdown syntax.",
+      "enum": [
+        "markdown",
+        "text"
+      ],
+      "type": "string"
+    },
+    "prompt": {
+      "description": "Optional extraction intent. In the current MVP this is recorded as a warning only and does not change the fetched content.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "url": {
+      "description": "Target URL to fetch. Required; must be an http(s) URL without embedded credentials, localhost-style hosts, or private/IP-literal targets.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "url"
+  ],
+  "type": "object"
+}
+```
+
 ## Config
 
 ### `config_get`

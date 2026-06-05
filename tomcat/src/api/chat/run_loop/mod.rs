@@ -416,6 +416,8 @@ pub async fn run_chat_turn(
         agent_loop = agent_loop.with_config_backend(backend);
     }
     agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
+    agent_loop = agent_loop.with_web_fetch_runtime(ctx.web_fetch_runtime.clone());
+    agent_loop = agent_loop.with_web_search_runtime(ctx.web_search_runtime.clone());
     agent_loop = agent_loop.with_shared_follow_up_queue(ctx.follow_up_queue.clone());
     agent_loop = agent_loop.with_completion_routes(ctx.completion_routes.clone());
 

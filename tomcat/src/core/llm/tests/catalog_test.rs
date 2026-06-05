@@ -105,3 +105,50 @@ fn missing_model_requires_explicit_catalog_entry() {
     let err = catalog.lookup_explicit("custom-deepseek").unwrap_err();
     assert!(err.to_string().contains("custom-deepseek"));
 }
+
+#[test]
+fn merged_catalog_preserves_override_slot_and_web_search_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "custom-hosted"
+api = "openai-responses"
+provider = "openai"
+
+[models.capabilities]
+web_search = true
+
+[[models]]
+id = "gpt-5.4"
+
+[models.capabilities]
+web_search = true
+"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::default();
+    let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load catalog");
+    let ordered = catalog.entries_in_merge_order();
+    assert_eq!(
+        ordered.first().map(|entry| entry.id.as_str()),
+        Some("gpt-5.4")
+    );
+    assert_eq!(
+        ordered
+            .iter()
+            .find(|entry| entry.id == "custom-hosted")
+            .map(|entry| entry.capabilities.web_search),
+        Some(true)
+    );
+    assert!(
+        catalog
+            .lookup("gpt-5.4")
+            .expect("builtin override")
+            .capabilities
+            .web_search
+    );
+}

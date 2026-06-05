@@ -42,7 +42,7 @@
 | **T2-P1-009** | bash AST `detect_unsupported` 精度与误伤治理     | `TODO` | —     | `feature/bash-ast-detect-precision`    | [tasks/T2-P1-009.md](./tasks/T2-P1-009.md) |
 | **T2-P1-010** | OpenAI / DeepSeek 推理续传                    | `DONE` | Jerry | `feature/reasoning-continuity`         | [tasks/T2-P1-010.md](./tasks/T2-P1-010.md) |
 | **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `DONE` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
-| **T2-P1-012** | `web_search` 工具                              | `TODO` | —     | `feature/web-search`                   | [tasks/T2-P1-012.md](./tasks/T2-P1-012.md) |
+| **T2-P1-012** | `web_search` 工具                              | `PENDING_INTEGRATION` | Jerry | `feature/web-search`                   | [tasks/T2-P1-012.md](./tasks/T2-P1-012.md) |
 | **T2-P1-013** | `web_fetch` 工具                               | `TODO` | —     | `feature/web-fetch`                    | [tasks/T2-P1-013.md](./tasks/T2-P1-013.md) |
 
 

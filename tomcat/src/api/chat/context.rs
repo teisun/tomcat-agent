@@ -56,6 +56,8 @@ pub struct ChatContext {
     pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
     pub thinking_display: Arc<std::sync::atomic::AtomicU8>,
     pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
+    pub web_search_runtime: Arc<crate::core::tools::web_search::WebSearchRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
     pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
     _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
@@ -115,6 +117,14 @@ impl ChatContext {
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
         let model_catalog = Arc::new(crate::core::llm::ModelCatalog::load(&config)?);
+        let web_search_runtime = Arc::new(crate::core::tools::web_search::WebSearchRuntime::new(
+            &config,
+            model_catalog.clone(),
+        )?);
+        let web_fetch_runtime = Arc::new(crate::core::tools::web_fetch::WebFetchRuntime::new(
+            &config,
+            agent_trail_dir.join("tool-results"),
+        )?);
         let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> = Arc::new(
             crate::core::llm::DefaultLlmResolver::new(config.clone(), model_catalog.clone()),
         );
@@ -353,6 +363,8 @@ impl ChatContext {
                 initial_thinking_display.as_u8(),
             )),
             openai_files_runtime,
+            web_fetch_runtime,
+            web_search_runtime,
             plan_runtime,
             agent_registry,
             _root_agent_guard: root_agent_guard,

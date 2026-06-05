@@ -8,6 +8,7 @@ mod common;
 use assert_cmd::Command;
 use async_trait::async_trait;
 use predicates::prelude::*;
+use serde_json::json;
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
@@ -23,6 +24,8 @@ use tomcat::{
     StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[allow(deprecated)]
 fn cmd() -> Command {
@@ -103,6 +106,7 @@ impl FixedResolver {
             files: lower.starts_with("gpt-"),
             tools: true,
             reasoning: lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5."),
+            web_search: false,
         };
         ResolvedCall {
             provider_impl: self.provider.clone(),
@@ -301,8 +305,14 @@ fn cli_tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEv
 }
 
 fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
+    deterministic_chat_context_fixture_with_config(AppConfig::default(), env_key)
+}
+
+fn deterministic_chat_context_fixture_with_config(
+    mut cfg: AppConfig,
+    env_key: &str,
+) -> (tempfile::TempDir, ChatContext) {
     let dir = tempfile::tempdir().unwrap();
-    let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(env_key.to_string());
 
@@ -312,6 +322,47 @@ fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, Chat
     let session_key = ctx.session.current_session_key().to_string();
     ctx.session.create_session(&session_key, None).unwrap();
     (dir, ctx)
+}
+
+struct EnvGuard {
+    saved: Vec<(String, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn set_many(entries: &[(&str, Option<&str>)]) -> Self {
+        let mut saved = Vec::new();
+        for (key, value) in entries {
+            saved.push(((*key).to_string(), std::env::var(key).ok()));
+            match value {
+                Some(value) => {
+                    // SAFETY: 测试阶段串行写入独立环境变量，作用域结束由 guard 还原。
+                    unsafe { std::env::set_var(key, value) };
+                }
+                None => {
+                    // SAFETY: 测试阶段串行移除独立环境变量，作用域结束由 guard 还原。
+                    unsafe { std::env::remove_var(key) };
+                }
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => {
+                    // SAFETY: 还原测试前的环境变量快照。
+                    unsafe { std::env::set_var(&key, value) };
+                }
+                None => {
+                    // SAFETY: 还原测试前的环境变量快照。
+                    unsafe { std::env::remove_var(&key) };
+                }
+            }
+        }
+    }
 }
 
 // ────────────────────── help & version ──────────────────────
@@ -3513,6 +3564,98 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_executes_web_search_tool_with_mock_server() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_path_executes_web_search_tool_with_mock_server").entered();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                {
+                    "title": "reqwest",
+                    "url": "https://docs.rs/reqwest",
+                    "content": "HTTP client",
+                    "published_date": "2026-06-01"
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("OPENAI_API_KEY", None),
+    ]);
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".to_string();
+    cfg.tools.web_search.tavily_base_url = server.uri();
+    let (_dir, mut ctx) = deterministic_chat_context_fixture_with_config(cfg, ENV_KEY);
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream(
+            "call_ws",
+            "web_search",
+            r#"{"query":"reqwest rust","domain_filter":["docs.rs"]}"#,
+        ),
+        cli_text_stream("SEARCH_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应正常完成 web_search chat 路径，实际: {other:?}"),
+    };
+    assert!(
+        result.final_text.contains("SEARCH_OK"),
+        "第二轮 assistant 应完成收尾，实际 final_text: {:?}",
+        result.final_text
+    );
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist web_search tool result");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    assert!(
+        tool_text.contains("\"backend\":\"tavily\"")
+            || tool_text.contains("\"backend\": \"tavily\""),
+        "tool result 应包含 backend=tavily，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("https://docs.rs/reqwest"),
+        "tool result 应包含搜索命中 URL，实际: {}",
+        trunc(tool_text, 400)
+    );
 }
 
 #[tokio::test]

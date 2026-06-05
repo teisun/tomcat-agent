@@ -19,12 +19,16 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::error_classifier::handle_overflow_retry;
-use crate::core::agent_loop::tool_exec::execute_tool;
+use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, ModelCatalog};
 use crate::core::tools::primitive::PrimitiveExecutor;
+use crate::core::tools::web_fetch::{types::WebFetchOutput, WebFetchFormat, WebFetchRuntime};
+use crate::core::tools::web_search::types::{Hit, Stats, WebSearchArgs, WebSearchOutput};
+use crate::core::tools::web_search::WebSearchRuntime;
 use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
+use crate::AppConfig;
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
 
@@ -129,6 +133,166 @@ async fn tool_exec_legacy_read_file_returns_unknown_tool_error() {
         "msg should mention the unknown tool name: {}",
         msg
     );
+}
+
+/// `web_search` 需要会话级 runtime；未注入时应返回结构化错误而非误判 unknown tool。
+#[tokio::test]
+async fn tool_exec_web_search_requires_runtime_injection() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "ws_placeholder".to_string(),
+        name: "web_search".to_string(),
+        arguments: r#"{"query":"rust async runtime"}"#.to_string(),
+    };
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
+    assert!(
+        is_error,
+        "web_search without runtime should report is_error=true"
+    );
+    assert!(
+        msg.contains("web_search runtime 未注入"),
+        "missing-runtime error should be explicit, got: {}",
+        msg
+    );
+}
+
+/// `web_fetch` 需要会话级 runtime；未注入时应返回结构化错误而非误判 unknown tool。
+#[tokio::test]
+async fn tool_exec_web_fetch_requires_runtime_injection() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let tc = ToolCallInfo {
+        id: "wf_placeholder".to_string(),
+        name: "web_fetch".to_string(),
+        arguments: r#"{"url":"https://example.com"}"#.to_string(),
+    };
+    let (msg, is_error, _follow_ups) = execute_tool(&primitive, &None, &None, None, &tc).await;
+    assert!(
+        is_error,
+        "web_fetch without runtime should report is_error=true"
+    );
+    assert!(
+        msg.contains("web_fetch runtime 未注入"),
+        "missing-runtime error should be explicit, got: {}",
+        msg
+    );
+}
+
+/// `web_fetch` 注入 runtime 后应走到真实分支并返回 JSON，而不是落回 unknown tool。
+#[tokio::test]
+async fn tool_exec_web_fetch_routes_to_runtime() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime = Arc::new(
+        WebFetchRuntime::new(&AppConfig::default(), dir.path().join("tool-results"))
+            .expect("build web_fetch runtime"),
+    );
+    runtime.insert_cached_output_for_test(
+        "https://example.com/cached",
+        WebFetchFormat::Markdown,
+        WebFetchOutput::new(
+            "https://example.com/cached".to_string(),
+            200,
+            "OK".to_string(),
+            "text/html; charset=utf-8".to_string(),
+            8,
+            "# Cached".to_string(),
+            8,
+            3,
+            None,
+            None,
+            false,
+            Vec::new(),
+        ),
+    );
+    let tc = ToolCallInfo {
+        id: "wf_cached_hit".to_string(),
+        name: "web_fetch".to_string(),
+        arguments: r#"{"url":"https://example.com/cached"}"#.to_string(),
+    };
+
+    let (msg, is_error, _follow_ups) = execute_tool_with_openai_files(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        Some(&runtime),
+        None,
+        &tc,
+    )
+    .await;
+
+    assert!(!is_error, "web_fetch with runtime should succeed: {}", msg);
+    let value: serde_json::Value = serde_json::from_str(&msg).expect("valid web_fetch json");
+    assert_eq!(value["url"], "https://example.com/cached");
+    assert_eq!(value["result"], "# Cached");
+    assert_eq!(value["cached"], true);
+}
+
+/// `web_search` 注入 runtime 后应走到真实分支并返回 JSON，而不是落回 unknown tool。
+#[tokio::test]
+async fn tool_exec_web_search_routes_to_runtime() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let cfg = AppConfig::default();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = Arc::new(
+        ModelCatalog::load_from_path(&cfg, dir.path().join("models.toml")).expect("catalog"),
+    );
+    let runtime = Arc::new(WebSearchRuntime::new(&cfg, catalog).expect("build web_search runtime"));
+    runtime
+        .insert_cached_output_for_test(
+            WebSearchArgs {
+                query: "rust async".to_string(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["docs.rs".to_string()],
+            },
+            WebSearchOutput {
+                query: "rust async".to_string(),
+                hits: vec![Hit {
+                    title: "reqwest".to_string(),
+                    url: "https://docs.rs/reqwest".to_string(),
+                    snippet: "HTTP client".to_string(),
+                    position: 1,
+                    published_at: None,
+                }],
+                backend: "tavily".to_string(),
+                stats: Stats {
+                    elapsed_ms: 5,
+                    cached: false,
+                    total_before_filter: Some(1),
+                },
+                truncated: false,
+                warnings: Vec::new(),
+            },
+        )
+        .expect("prime web_search cache");
+    let tc = ToolCallInfo {
+        id: "ws_cached_hit".to_string(),
+        name: "web_search".to_string(),
+        arguments: r#"{"query":"rust async","domain_filter":["docs.rs"]}"#.to_string(),
+    };
+
+    let (msg, is_error, _follow_ups) = execute_tool_with_openai_files(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        Some(&runtime),
+        &tc,
+    )
+    .await;
+
+    assert!(!is_error, "web_search with runtime should succeed: {}", msg);
+    let value: serde_json::Value = serde_json::from_str(&msg).expect("valid web_search json");
+    assert_eq!(value["query"], "rust async");
+    assert_eq!(value["backend"], "tavily");
+    assert_eq!(value["hits"][0]["url"], "https://docs.rs/reqwest");
+    assert_eq!(value["stats"]["cached"], true);
 }
 
 /// PR-RB §2.6：`read.offset = 0` 触发 horizontal gate，返回结构化错误。
@@ -244,6 +408,8 @@ async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent()
         &primitive,
         &None,
         &None,
+        None,
+        None,
         None,
         None,
         None,
@@ -405,6 +571,8 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
             None,
             None,
             None,
+            None,
+            None,
             SubagentType::User,
             None,
             &tokio_util::sync::CancellationToken::new(),
@@ -473,6 +641,8 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
         None,
         None,
         None,
+        None,
+        None,
         SubagentType::User,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -528,6 +698,8 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
         &primitive,
         &None,
         &registry_opt,
+        None,
+        None,
         None,
         None,
         None,
@@ -598,6 +770,8 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         None,
         None,
         None,
+        None,
+        None,
         SubagentType::User,
         None,
         &cancel,
@@ -659,6 +833,8 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
         None,
         None,
         None,
+        None,
+        None,
         SubagentType::User,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -715,6 +891,8 @@ async fn task_output_block_true_releases_claim_on_timeout() {
         &primitive,
         &None,
         &registry_opt,
+        None,
+        None,
         None,
         None,
         None,
@@ -784,6 +962,8 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         &primitive,
         &None,
         &registry_opt,
+        None,
+        None,
         None,
         None,
         None,

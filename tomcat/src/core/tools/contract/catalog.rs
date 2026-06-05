@@ -230,6 +230,34 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
+        name: "web_search",
+        label: "Web Search",
+        description: "Search the web and return normalized search hits. Use this to discover candidate URLs and snippets for a query; use `web_fetch` when you need to fetch one URL body afterward. Input fields align with the architecture doc: required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`.\n\nResults are normalized across hosted OpenAI search plus Tavily / Brave / Serper backends, with automatic fallback in `auto` mode. Preserve source attribution when citing results, and pay attention to the current date for time-sensitive queries.\n",
+        display_summary: Some("Search the web for normalized hits with backend fallback."),
+        parameters: web_search_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("web search internet tavily brave serper query"),
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
+        name: "web_fetch",
+        label: "Web Fetch",
+        description: "Fetch one specific URL and return cleaned page content. Use this after `web_search` when you already have a candidate URL and need the actual page body. Private/authenticated URLs, URLs with embedded credentials, single-label hosts, IP literal hosts, and private/loopback targets are rejected before any request; off-host redirects are not auto-followed and instead return structured redirect info so the model can decide whether to refetch with the new URL.\n\nSmall text/html pages are returned inline as markdown or plain text. Large text responses are persisted to `tool-results` and return a head preview plus `persisted_output_path`; PDF/images and other binary payloads are persisted instead of being inlined. Input fields align with the architecture doc: required `url`, plus optional `prompt` (MVP warning-only hint) and `format` (`markdown` or `text`).\n",
+        display_summary: Some("Fetch one URL body with safe redirects and persistence."),
+        parameters: web_fetch_parameters,
+        scope: PermissionScope::Read,
+        category: Some(ToolCategory::Exec),
+        read_only: true,
+        destructive: false,
+        search_hint: Some("web fetch url markdown html pdf redirect"),
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
         name: "config_get",
         label: "Config Get",
         description: "Read the current value of an allowed tomcat configuration key. The tool is constrained by CONFIG_READ_ALLOWLIST and CONFIG_HARDCODED_READ_DENY: workspace.*, agent.id, primitive.path_rules, primitive.bash_*, llm.default_model and similar non-sensitive fields are readable; llm.api_key*, llm.api_base, security.*, storage.* and other sensitive fields are denied. Missing dot-path keys return not_set.\n",
@@ -766,6 +794,66 @@ fn search_files_parameters() -> Value {
             }
         }),
         &["pattern"],
+    )
+}
+
+fn web_search_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "query": {
+                "type": "string",
+                "description": "Search query text. Required; prefer natural-language keywords that describe what the user wants to find."
+            },
+            "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "description": "Optional number of hits to request. Defaults to 5 and is capped at 20."
+            },
+            "freshness": {
+                "type": ["string", "null"],
+                "enum": ["day", "week", "month", "year", null],
+                "description": "Optional recency filter. Use `day`, `week`, `month`, or `year`; omit / pass null when no freshness constraint is needed."
+            },
+            "country": {
+                "type": ["string", "null"],
+                "description": "Optional ISO 3166-1 alpha-2 country hint such as `us` or `cn`."
+            },
+            "language": {
+                "type": ["string", "null"],
+                "description": "Optional ISO 639-1 language hint such as `en` or `zh`."
+            },
+            "domain_filter": {
+                "type": "array",
+                "description": "Optional allowlist of domains to constrain results to. Each item should be a bare host like `github.com`.",
+                "items": {
+                    "type": "string",
+                    "description": "One allowed domain suffix."
+                }
+            }
+        }),
+        &["query"],
+    )
+}
+
+fn web_fetch_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "url": {
+                "type": "string",
+                "description": "Target URL to fetch. Required; must be an http(s) URL without embedded credentials, localhost-style hosts, or private/IP-literal targets."
+            },
+            "prompt": {
+                "type": ["string", "null"],
+                "description": "Optional extraction intent. In the current MVP this is recorded as a warning only and does not change the fetched content."
+            },
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "text"],
+                "description": "Optional output format for textual pages. Defaults to `markdown`; use `text` when you want plain text without markdown syntax."
+            }
+        }),
+        &["url"],
     )
 }
 
