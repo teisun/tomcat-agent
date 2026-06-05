@@ -1,6 +1,14 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-04 18:40 +0800 | ACTIVE | develop | — |
+| Jerry | 2026-06-05 08:40 +0800 | ACTIVE | develop | — |
+
+### 2026-06-05 | merge `feature/web-search` → develop（T2-P1-012 / T2-P1-013 集成验收）
+
+- **合并范围**：用户指定合并 `feature/web-search` → `develop`；先在功能分支补 `web_search` merge-gap 修复（cache key 纳入 `allowed_domains` / `blocked_domains`、命中过滤拒任意 IP literal / 保留内网 hostname、`tool_exec` 成功路由与 chat-path E2E），并把 `web_fetch` / OpenSpec / 场景库对齐当前实现；随后 `git merge --no-ff` → `748683c`。对应 **T2-P1-012** / **T2-P1-013**。
+- **全量 review（编码规范 4 件套）**：`web_search/{cache,types,mod,tests}.rs`、`submodules_test.rs`、`cli_tests.rs`、`web_search.md`、`web_fetch.md`、`User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`E2E_TEST_SPEC.md`、`INTEGRATION_TEST_SPEC.md` 全量复核：`web_search` 缓存命中现与配置域约束同键；hits 过滤现拒任意 IP literal 与保留内网 hostname；`web_fetch` 的 domain gate / DNS 解析型 SSRF 继续显式登记为后置残余风险；缺失的 `tool_exec` 成功路径与 chat 用户路径覆盖已补齐。
+- **门禁修复（非功能回归）**：首轮 `run-integration-tests.sh all` 暴露两条与 web 工具无关的 `current_tail_guard_runtime_test` HOME/env 竞争型 flaky；已在 `current_tail_guard_runtime_test.rs` 为两条 plan-path 用例补 `#[serial(env_lock)]`，并在 helper 中显式 `create_dir_all(parent)`，复跑后稳定通过。
+- **§4 全量验收（develop 侧复跑）**：`cargo build --release` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib` **1421 passed, 1 ignored** / `run-integration-tests.sh integration` 全绿（含 `cli_tests` **87 passed**、`web_search_tool_tests` **5 passed**、`web_fetch_tool_tests` **2 passed**）；显式 live smoke：`PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture` 与 `PI_LIVE_WEB_FETCH=1 cargo test --test web_fetch_tool_tests live_example_fetch_smoke -- --nocapture` 均通过。
+- **结论**：`feature/web-search` 已合入 `develop`；`T2-P1-012` / `T2-P1-013` 自任务索引移除并置为 `DONE`。`web_fetch` 的 `PermissionGate::Domain` / DNS 解析型 SSRF 仍按文档记录为后置风险，不再与“已实现”口径混淆。未推送远端。
 
 ### 2026-06-04 | docs(tools): web_search 项目级 hosted 候选 + 看板/计划规范
 
