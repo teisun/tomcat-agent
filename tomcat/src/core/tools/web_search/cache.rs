@@ -15,6 +15,8 @@ pub struct CacheKey {
     country: Option<String>,
     language: Option<String>,
     domain_filter: Vec<String>,
+    allowed_domains: Vec<String>,
+    blocked_domains: Vec<String>,
 }
 
 impl CacheKey {
@@ -30,6 +32,8 @@ impl CacheKey {
             country: request.country.clone(),
             language: request.language.clone(),
             domain_filter: request.domain_filter.clone(),
+            allowed_domains: request.allowed_domains.clone(),
+            blocked_domains: request.blocked_domains.clone(),
         }
     }
 }

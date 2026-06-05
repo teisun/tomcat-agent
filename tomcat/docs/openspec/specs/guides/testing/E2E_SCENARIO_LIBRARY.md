@@ -161,7 +161,7 @@
 
 ---
 
-## Story 8 — CLI 对话与会话管理（13 条）
+## Story 8 — CLI 对话与会话管理（15 条）
 
 > **验收**：会话与审计子命令以自动化为主；058 涉及 chat 失败路径，可与 §4「对话模式」人工清单一并 spot-check；062/063（Ctrl+C 软/硬中断）数据契约由 `src/core/agent_loop/tests/interrupt.rs`（中断路径，T2-P0-001 后由原单文件 `tests.rs` 拆分目录化）+ `src/api/chat/tests.rs::interrupt_persists_transcript_hard_ack`（T-017 partial 落盘）+ `src/api/cli/chat_cmd::check_double_tap` 单测锁定，终端观感由 §4 人工清单补验。
 
@@ -181,6 +181,10 @@
 | E2E-CLI-061 | 自动 | `test_user_views_audit_show_invalid_id`                 | 用户查看不存在的审计条目时友好提示         | `tomcat audit show 9999999`                                    | exit 0；不 panic                  |
 | E2E-CLI-062 | 人工 | `test_user_interrupt_during_bash`                       | 用户在 chat 中触发 `execute_bash` 长命令后 Ctrl+C 软中断；partial assistant + 已完成 tool_result 落 transcript，`^C 已中断（partial 已保存）` 提示出现，prompt 返回，可继续输入 | `tomcat chat` → stdin 触发 `execute_bash "sleep 30"` → 观察 tool_execution_start → `SIGINT` → 观察 prompt 回归 → `exit`（Ctrl+D） | 进程继续存活；transcript JSONL 末尾有 partial assistant（role=assistant、含 tool_calls） 及 / 或 tool_result（role=tool、tool_call_id 匹配）；无 panic；自动化层由 `run_interrupt_between_tools_retains_completed_tool_result` / `interrupt_persists_transcript_hard_ack` 锁死数据契约 |
 | E2E-CLI-063 | 人工 | `test_user_double_ctrlc_exits`                          | 用户 2 秒内双击 Ctrl+C，chat 进程以 exit code 130 终止；首击已 cancel 的 partial 仍完整落盘 | `tomcat chat` → 发送任意触发 LLM 流式回复的 prompt → 第一次 `SIGINT` 后 1 秒内再发一次 `SIGINT` | 子进程 exit code == 130（128 + SIGINT）；transcript 含首击 cancel 的 partial assistant；双击阈值（2s）行为由单测 `check_double_tap` 四用例锁定（`api::cli::chat_cmd::tests`） |
+| E2E-CLI-064 | 自动 | `test_chat_path_executes_web_search_tool_with_mock_server` | 用户在 chat 中触发 `web_search`，收到结构化联网搜索结果 | `run_chat_turn` + deterministic mock LLM 发 `web_search {"query":"reqwest rust","domain_filter":["docs.rs"]}`；Tavily mock server 返回 docs.rs 命中 | `final_text` 含收尾文本；tool result JSON 含 `backend=tavily` 与 `https://docs.rs/reqwest` |
+| E2E-CLI-065 | 自动 | `live_example_fetch_smoke` | 用户抓取公开网页并获得正文或 `tool-results` 落盘路径 | 设 `PI_LIVE_WEB_FETCH=1` 后执行 `cargo test --test web_fetch_tool_tests live_example_fetch_smoke -- --nocapture` | `code == 200` 且 `result` 非空或 `persisted_output_path` 存在；离线 contract 另由 `submodules_test::tool_exec_web_fetch_routes_to_runtime` + `src/core/tools/web_fetch/tests/fetcher_test.rs` 锁定 |
+
+> 说明：`web_fetch` 当前只接受公网 `http/https` URL，默认拒绝 localhost / IP literal，并把更完整的 domain approval 留到 PR-WF-D；因此仓内默认的用户路径 smoke 仍保留为 env-gated live example，而不是伪造一个会绕过安全边界的本地 mock chat 用例。
 
 
 ---

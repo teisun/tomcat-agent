@@ -50,7 +50,7 @@
 
 ## 1. 目标与设计原则
 
-**一句话**：让模型一句 `url` 拿到该网页的 **干净 Markdown**——重定向只允许同源/`www.` 切换、域名先过权限网关、二进制不污染上下文（PDF/图直接落盘返路径）；**不**做查询（查询走 [`web_search.md`](web_search.md)）。
+**一句话**：让模型一句 `url` 拿到该网页的 **干净 Markdown**——当前实现先做 URL 校验 + 同源/`www.` 重定向守卫 + 正文/落盘分流；域名权限网关仍是后置路线图；二进制不污染上下文（PDF/图直接落盘返路径）；**不**做查询（查询走 [`web_search.md`](web_search.md)）。
 
 ### 1.1 观察指标表（与 §10 验收一一对应）
 
@@ -58,7 +58,7 @@
 |------|--------------------------|--------|
 | G1 url→markdown 闭环 | catalog 注册 `web_fetch`；HTTP `text/html` / `text/markdown` 200 → 返回 `result` 字段为干净 markdown（已脱 `<script>` / `<style>` / `<nav>` 噪声） | 给个网址，回个 markdown。 |
 | G2 重定向安全 | 仅同源 / `www.` 切换的 redirect 自动 follow（≤10 跳）；其它 → 不 follow，返回结构化 `redirect` 字段让模型显式重发；**不**走 reqwest 默认 redirect policy | 跨域跳转不悄悄跟，让模型自己选。 |
-| G3 域名权限 | `PermissionGate` 新增 `Domain` op；配置 `[tools.web_fetch] allowed_domains / blocked_domains / preapproved_hosts` + 运行时 ask 三态决策；审计带 `permission_scope=Domain` | 抓任何域名前都要过一道闸；可配置可临时点确认。 |
+| G3 域名权限（路线图后置） | `PermissionGate` 新增 `Domain` op；配置 `[tools.web_fetch] allowed_domains / blocked_domains / preapproved_hosts` + 运行时 ask 三态决策；审计带 `permission_scope=Domain` | 这是 PR-WF-D 的目标态，不是当前批次已交付行为。 |
 | G4 二进制不进上下文 | `Content-Type` 非 `text/*` / `application/json` / `application/xml` → 落盘到 `~/.tomcat/agents/<id>/tool-results/web-fetch-<hash>.<ext>`；返回体仅 `persisted_output_path` + 元数据；**不**把 base64 塞进 tool 消息 | PDF 落地、给路径，不灌进上下文撑爆 token。 |
 
 ### 1.2 非目标
@@ -621,13 +621,13 @@ RedirectInfo {
 └────────────────────────────────────────────────────────────────────────────┘
 
   + tests:
-    src/core/tools/web_fetch/tests/                  (validate / redirect / markdownify / persist 单元)
-    tests/web_fetch_tool_tests.rs                    (集成 mock 服务器)
-    src/core/permission/tests/                       (Domain op gate 单元)
+    src/core/tools/web_fetch/tests/                  (validate / redirect / markdownify / persist / fetcher mock 服务器)
+    tests/web_fetch_tool_tests.rs                    (public roundtrip + env-gated live smoke)
+    src/core/permission/tests/                       (Domain op gate 单元，PR-WF-D 后置)
     E2E-WEB-FETCH-001                                (真 https://example.com/, PI_LIVE_WEB_FETCH=1)
 ```
 
-**阅读顺序（说人话）**：模型先看到 **catalog** 里 `web_fetch` 与 3 字段；调起后 **`tool_exec`** 把 args 解出来；**`web_fetch/mod`** 先调 `validate` 过 6 道闸（长度 / 凭证 / scheme / 私网 / 单段 host），再让 `permission_gate.check_domain(host)` 决定是否问用户；过闸后 **`fetcher`** 起 reqwest GET、`redirect` 模块按同源策略循环跳转、**`markdownify`** 或 **`persist`** 按 content-type 分流；**`cache`** 命中早返；最后 `tool_exec` 把 `WebFetchOutput` 序列化回 LLM。
+**阅读顺序（说人话）**：模型先看到 **catalog** 里 `web_fetch` 与 3 字段；调起后 **`tool_exec`** 把 args 解出来；**`web_fetch/mod`** 先调 `validate` 过 URL 闸（长度 / 凭证 / scheme / 私网 / 单段 host / secret-prefix warning），命中缓存则早返；未命中时 **`fetcher`** 起 reqwest GET、`redirect` 模块按同源策略循环跳转、**`markdownify`** 或 **`persist`** 按 content-type 分流；最后 `tool_exec` 把 `WebFetchOutput` 序列化回 LLM。**`PermissionGate::Domain` / `check_domain` 仍后置到 PR-WF-D，本批次尚未接入运行时链路。**
 
 ---
 
@@ -745,10 +745,6 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 
 | 来源 | 键 | 含义 | 默认 | 说人话 |
 |------|-----|------|------|--------|
-| `tomcat.config.toml` | `[tools.web_fetch] allowed_domains` | 域名白名单（子域 suffix 匹配）；非空时不在表中的 host 拒 | `[]` | 「只让抓这几个站」。 |
-| `tomcat.config.toml` | `[tools.web_fetch] blocked_domains` | 域名黑名单（最高优先级） | `[]` | 「这几个站永远不抓」。 |
-| `tomcat.config.toml` | `[tools.web_fetch] preapproved_hosts` | 启动即放行、不弹 ask | `[]` | 「这几个站不用问」。 |
-| `tomcat.config.toml` | `[tools.web_fetch] require_confirm` | 未见过的 host 是否弹 ask | `true` | 默认问；CI 环境可关。 |
 | `tomcat.config.toml` | `[tools.web_fetch] max_redirects` | 重定向跳数上限 | 10 | 转太多次就放弃。 |
 | `tomcat.config.toml` | `[tools.web_fetch] fetch_timeout_ms` | 单次抓取墙钟超时 | 60_000 | 1 分钟还没回来就算超时。 |
 | `tomcat.config.toml` | `[tools.web_fetch] max_http_content_bytes` | HTTP 响应字节上限 | 10 * 1024 * 1024 | 10 MiB 以上不再读。 |
@@ -757,10 +753,12 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 | `tomcat.config.toml` | `[tools.web_fetch] cache_ttl_secs` | LRU TTL | 900 (15 min) | 缓存活多久。 |
 | `tomcat.config.toml` | `[tools.web_fetch] cache_capacity_bytes` | LRU total weight 上限 | 50 * 1024 * 1024 | 缓存一共占多少内存。 |
 | `tomcat.config.toml` | `[tools.web_fetch] use_llm_processing` | 是否启用 PR-WF-P 摘要（**本期 false**） | false | 路线图：将来可开。 |
-| env | `TOMCAT__TOOLS__WEB_FETCH__REQUIRE_CONFIRM` | 同 `require_confirm` 运行时覆盖 | — | CI 设 `false` 跳问。 |
-| env | `TOMCAT__TOOLS__WEB_FETCH__MAX_HTTP_CONTENT_BYTES` 等 | 各 cap 运行时覆盖 | — | 容器里临时调阈值。 |
+| `tomcat.config.toml` | `[llm] proxy` | 共享 outbound HTTP(S) 代理；当前 `web_fetch` / `web_search` 共用这条出网链路 | `None` | 需要统一走企业代理时在这里配。 |
+| env | `TOMCAT__TOOLS__WEB_FETCH__MAX_HTTP_CONTENT_BYTES` 等 | 上述 cap / timeout / cache 字段的运行时覆盖 | — | 容器里临时调阈值。 |
 
-**用户在入参里没有可覆盖的字段**——除了 `format`，其它都是「网关 / 阈值」类配置，模型不应能动。
+**用户在入参里没有可覆盖的字段**——除了 `format`，其它都是阈值 / 路由类配置，模型不应能动。
+
+> 说明：旧设计草案里提到的 `[tools.web_fetch] allowed_domains` / `blocked_domains` / `preapproved_hosts` / `require_confirm` 以及 `permission_gate.check_domain(host)` 仍属于 **PR-WF-D 后置设计**，当前批次的真实实现只有 URL 校验、同源重定向守卫、正文/落盘分流与缓存。
 
 ---
 
@@ -828,24 +826,24 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 
 | 维度 | 用例（实际函数名） | 状态 | 说人话 |
 |------|---------------------|------|--------|
-| catalog 注册 | `catalog_test::web_fetch_registered`、`submodules_test::tool_exec_web_fetch_requires_runtime_injection` | DONE（当前批次已落） | 名字注册了、未注入 runtime 时会给显式错误。 |
-| URL 校验 | `web_fetch::tests::url_too_long_rejected`、`url_with_credentials_rejected`、`url_invalid_scheme_rejected`、`url_single_segment_host_rejected`、`url_private_ip_rejected` | PENDING（PR-WF-S） | 6 道闸全过。 |
-| 重定向同源 follow | `web_fetch::tests::redirect_same_host_followed`、`redirect_apex_to_www_followed`、`redirect_www_to_apex_followed`、`http_url_upgraded_to_https_before_first_get` | PENDING（PR-WF-S） | 同源 / `www.` 切换跟着跳；**http→https 是入参侧升级**，不是 `Location` 跨协议 follow。 |
-| 重定向 off-host 拒 | `web_fetch::tests::redirect_off_host_returns_structured`、`redirect_to_subdomain_returns_structured`、`redirect_to_evil_host_returns_structured` | PENDING（PR-WF-S） | 跨域跳停下来给 RedirectInfo。 |
-| 重定向循环 | `web_fetch::tests::redirect_loop_over_10_returns_err` | PENDING（PR-WF-S） | 转太多次报错。 |
-| Markdownify | `web_fetch::tests::html_with_script_stripped`、`html_with_style_stripped`、`html_with_nav_stripped`、`html_with_table_kept` | PENDING（PR-WF-S） | 噪声节点剥干净。 |
-| 正文体积分流 | `web_fetch::tests::markdown_under_threshold_inlined`、`markdown_over_threshold_persisted_with_head`、`persisted_md_total_chars_is_full_length`、`http_body_over_10mib_truncated` | PENDING（PR-WF-S） | 小页 inline；超大页落盘 + head + total_chars；HTTP 字节超限才算 truncated。 |
-| Persist 二进制 | `web_fetch::tests::pdf_persisted_to_tool_results`、`png_persisted_to_tool_results`、`html_inline_not_persisted`、`persist_path_in_response` | PENDING（PR-WF-B） | PDF / PNG 落盘、HTML 不落盘。 |
-| Magic 路由 | `web_fetch::tests::magic_overrides_content_type_when_mismatch` | PENDING（PR-WF-B） | content-type 不可信时按魔数。 |
-| 缓存 | `web_fetch::tests::cache_hit_skips_http`、`cache_miss_after_ttl`、`cache_key_includes_format`、`cache_capacity_evicts_oldest` | PENDING（PR-WF-S） | 命中、过期、容量。 |
-| 超时 | `web_fetch::tests::fetch_timeout_returns_truncated_warning` | PENDING（PR-WF-S） | 超时不抛错。 |
-| 限速归一化 | `web_fetch::tests::http_429_returns_warning_not_err`、`http_5xx_returns_warning_not_err` | PENDING（PR-WF-S） | 429/5xx 归 warning。 |
+| catalog 注册 | `catalog_test::web_fetch_registered`、`submodules_test::tool_exec_web_fetch_requires_runtime_injection`、`submodules_test::tool_exec_web_fetch_routes_to_runtime` | PASS（2026-06-05） | 名字注册了、未注入 runtime 时会给显式错误，注入后成功路径会真实路由到 runtime。 |
+| URL 校验 | `validate_test::{url_too_long_rejected,url_with_credentials_rejected,url_invalid_scheme_rejected,url_single_segment_host_rejected,url_private_ip_rejected,url_public_ip_literal_rejected,http_url_upgraded_to_https_before_first_get}` | PASS（2026-06-05） | 当前 URL 闸与 http→https 首跳升级都有自动化覆盖。 |
+| 重定向同源 follow | `fetcher_test::{redirect_same_host_followed,redirect_apex_to_www_followed,redirect_www_to_apex_followed}`、`redirect_test::{redirect_same_host_followed,redirect_apex_to_www_followed,redirect_www_to_apex_followed}` | PASS（2026-06-05） | 同源 / `www.` 切换跟着跳；**http→https 是入参侧升级**，不是 `Location` 跨协议 follow。 |
+| 重定向 off-host 拒 | `fetcher_test::redirect_off_host_returns_structured`、`redirect_test::{redirect_to_subdomain_returns_structured,redirect_cross_scheme_rejected}` | PASS（2026-06-05） | 跨域跳停下来给 `RedirectInfo`。 |
+| 重定向循环 | `fetcher_test::redirect_loop_over_10_returns_err` | PASS（2026-06-05） | 转太多次报错。 |
+| Markdownify | `markdownify_test::{html_with_script_style_and_nav_stripped,html_with_table_kept,markdown_format_text_mode_strips_basic_markup,json_content_is_returned_verbatim,xml_content_is_returned_verbatim_for_plus_xml_types}` | PASS（2026-06-05） | HTML 噪声节点会被剥离，文本 / JSON / XML 路由也都有回归。 |
+| 正文体积分流 | `fetcher_test::{markdown_under_threshold_inlined,markdown_over_threshold_persisted_with_head}` | PASS（2026-06-05） | 小页 inline；超阈值落盘 + head 预览。 |
+| Persist 二进制 | `fetcher_test::pdf_persisted_to_tool_results`、`persist_test::{pdf_persisted_to_tool_results,png_persisted_to_tool_results,markdown_text_persist_uses_requested_extension}` | PASS（2026-06-05） | PDF / PNG 落盘，Markdown 文本持久化扩展名也有覆盖。 |
+| Magic 路由 | `fetcher_test::magic_overrides_content_type_when_mismatch`、`persist_test::magic_overrides_content_type_when_mismatch` | PASS（2026-06-05） | content-type 不可信时按魔数。 |
+| 缓存 | `cache_test::{cache_hit_skips_http,cache_miss_after_ttl,cache_key_includes_format,cache_capacity_evicts_oldest,cache_hit_without_prompt_drops_cached_prompt_warning,redirect_output_is_not_cacheable}` | PASS（2026-06-05） | 命中、过期、容量、warning 清洗与 redirect 不缓存都有覆盖。 |
+| 超时 | `fetcher_test::fetch_timeout_returns_truncated_warning` | PASS（2026-06-05） | 超时不抛错。 |
+| 限速归一化 | `fetcher_test::{http_429_returns_warning_not_err,http_5xx_returns_warning_not_err}` | PASS（2026-06-05） | 429/5xx 归 warning。 |
 | Permission Domain | `permission/tests/gate_test::check_domain_blocked`、`check_domain_preapproved_skips_ask`、`check_domain_session_grants_persist`、`check_domain_allowed_only`、`check_domain_unknown_returns_need_confirm` | 后置（PR-WF-D，本期不验收） | 5 条 domain rule 决策链全覆盖。 |
-| 集成 fetcher + gate | `tests/web_fetch_tool_tests.rs::e2e_html_with_mock_server`、`e2e_redirect_off_host_with_mock_server`、`e2e_pdf_persisted_with_mock_server`（本期）；`e2e_blocked_domain_rejected`、`e2e_ask_then_allow_persists`（后置到 PR-WF-D） | PENDING（PR-WF-S/B；gate 用例后置） | 起 mock 服务器跑端到端；本期不验收 domain gate。 |
-| 集成 catalog | `submodules_test::tool_exec_web_fetch_routes_to_runtime` | DONE（当前批次已落） | `tool_exec` 已能把 `web_fetch` 正确路由到 runtime。 |
-| 配置解析 | `infra/config/tests/tools_cfg_test.rs`（`[tools.web_fetch]` 全字段覆盖） | PENDING（PR-WF-S） | TOML 反序列化无字段丢。 |
+| Public runtime / live smoke | `tests/web_fetch_tool_tests::{public_output_roundtrip_preserves_fields,live_example_fetch_smoke}` | READY（env-gated） | 当前仓内 public API 回归以 roundtrip + `PI_LIVE_WEB_FETCH=1` live smoke 为准；离线 mock HTTP 集成主锚点仍在 `fetcher_test.rs`。 |
+| 集成 catalog | `submodules_test::tool_exec_web_fetch_routes_to_runtime` | PASS（2026-06-05） | `tool_exec` 已能把 `web_fetch` 正确路由到 runtime。 |
+| 配置解析 | `infra/config/tests/tools_cfg_test.rs`（`[tools.web_fetch]` 现有字段覆盖） | PASS（2026-06-05） | 当前 TOML 字段反序列化无字段丢失。 |
 | 审计 scope=Domain | `infra/audit::tests::audit_includes_domain_scope_for_web_fetch` | 后置（PR-WF-D，本期不验收） | 审计字段对。 |
-| E2E（live） | `E2E-WEB-FETCH-001`：真 `https://example.com/` 抓 markdown（`PI_LIVE_WEB_FETCH=1` gate；CI 默认跳） | PENDING（PR-WF-S） | 上线前真跑一次。 |
+| E2E（live） | `E2E-WEB-FETCH-001`：真 `https://example.com/` 抓 markdown（`PI_LIVE_WEB_FETCH=1` gate；CI 默认跳） | READY（env-gated） | 上线前真跑一次；默认仓内用例不假装离线 mock 已覆盖这条公网抓取路径。 |
 
 §1 观察指标 **G1–G4** 与本表逐行对应：G1↔URL 校验/Markdownify/集成；G2↔重定向同源 follow/off-host 拒/循环；G3↔Permission Domain/审计；G4↔Persist/Magic/集成 PDF。
 
@@ -898,4 +896,4 @@ LLM        tool_exec      web_fetch/mod   validate   gate      fetcher    redire
 
 ---
 
-**一句话总结**：`web_fetch` 在 **`tool_exec`** 解参数与序列化、在 **`web_fetch/mod`** 串起 **validate → permission_gate.check_domain → fetcher (含 redirect 循环) → markdownify / persist → cache**；协议以 **`catalog.rs` + `web_fetch/types.rs`** 为单一事实源，配置走 `[tools.web_fetch]` 子表，重定向只跟同源 / `www.` 切换、跨域返结构化 `RedirectInfo`，二进制走 `tool-results/` 落盘**不进**上下文，新增 **`PermissionScope::Domain`** 与 Read/Bash 并列；跟兄弟工具 [`web_search.md`](web_search.md) 拆开各自负责一件事。
+**一句话总结**：`web_fetch` 在 **`tool_exec`** 解参数与序列化、在 **`web_fetch/mod`** 串起 **validate → cache → fetcher (含 redirect 循环) → markdownify / persist**；协议以 **`catalog.rs` + `web_fetch/types.rs`** 为单一事实源，配置走当前已落地的 `[tools.web_fetch]` 阈值字段，出网代理暂与 `[llm].proxy` 共用，重定向只跟同源 / `www.` 切换、跨域返结构化 `RedirectInfo`，二进制走 `tool-results/` 落盘**不进**上下文。**`PermissionGate::Domain` / `PermissionScope::Domain` 仍属 PR-WF-D 后置设计，当前文档不再把它写成已交付行为。**

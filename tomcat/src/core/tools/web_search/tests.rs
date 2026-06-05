@@ -10,6 +10,7 @@ use crate::core::llm::ModelCatalog;
 use crate::infra::AppConfig;
 
 use super::backend::discover_hosted_candidate;
+use super::cache::CacheKey;
 use super::openai_server::{build_hosted_request_body, parse_server_tool_blocks};
 use super::types::{normalize_hits, RawHit, WebSearchArgs};
 use super::WebSearchRuntime;
@@ -72,6 +73,18 @@ fn normalize_hits_filters_private_hosts_and_domain_rules() {
                 snippet: Some("filtered".into()),
                 published_at: None,
             },
+            RawHit {
+                title: Some("PublicIp".into()),
+                url: "https://8.8.8.8/dns".into(),
+                snippet: Some("ip literal".into()),
+                published_at: None,
+            },
+            RawHit {
+                title: Some("InternalDns".into()),
+                url: "https://metadata.google.internal".into(),
+                snippet: Some("internal".into()),
+                published_at: None,
+            },
         ],
         10,
         &["docs.rs".to_string()],
@@ -89,6 +102,43 @@ fn normalize_hits_filters_private_hosts_and_domain_rules() {
         .warnings
         .iter()
         .any(|w| w == "domain_filtered:example.org"));
+}
+
+#[test]
+fn cache_key_tracks_allowed_and_blocked_domains() {
+    let cfg = AppConfig::default();
+    let req_a = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "rust async".into(),
+            count: Some(5),
+            freshness: None,
+            country: None,
+            language: None,
+            domain_filter: vec!["docs.rs".into()],
+        },
+        &cfg.tools.web_search,
+    )
+    .expect("request a");
+    let mut cfg_b = cfg.clone();
+    cfg_b.tools.web_search.blocked_domains = vec!["docs.rs".into()];
+    let req_b = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "rust async".into(),
+            count: Some(5),
+            freshness: None,
+            country: None,
+            language: None,
+            domain_filter: vec!["docs.rs".into()],
+        },
+        &cfg_b.tools.web_search,
+    )
+    .expect("request b");
+
+    assert_ne!(
+        CacheKey::from_request(&req_a),
+        CacheKey::from_request(&req_b),
+        "cache key must change when config-level allow/block filters change"
+    );
 }
 
 #[test]
@@ -318,7 +368,7 @@ async fn auto_backend_falls_back_after_brave_timeout() {
         .and(path("/res/v1/web/search"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(50))
+                .set_delay(Duration::from_millis(750))
                 .set_body_json(json!({
                     "web": {
                         "results": [
@@ -360,7 +410,7 @@ async fn auto_backend_falls_back_after_brave_timeout() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "auto".into();
-    cfg.tools.web_search.timeout_ms = 5;
+    cfg.tools.web_search.timeout_ms = 200;
     cfg.tools.web_search.brave_base_url = brave.uri();
     cfg.tools.web_search.serper_base_url = serper.uri();
     let runtime = runtime_with_catalog(cfg, None);

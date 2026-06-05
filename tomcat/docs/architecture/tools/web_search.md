@@ -67,8 +67,8 @@
 | G1 query→hits 闭环 | catalog 注册 `web_search`；同一 `query` 经任一 backend 都返回相同形状的 `hits[]`（含 `title/url/snippet/position`，可选 `published_at`） | 不管换哪个 backend，模型读到的都是同一份字段。 |
 | G2 多 backend 透明切换 | `backend=auto`：若项目里存在 `capabilities.web_search == true` 的 hosted 候选模型 → `openai(hosted)` 为首选；否则进入 HTTP 链 `tavily → brave → serper`；若 hosted / HTTP 当前候选缺 key、401/403、429/5xx、timeout、transport fail 则继续下一家；显式 `backend=…` 不降级；切换记 `warnings[]` | hosted 首选看项目里有没有可联网模型，不看当前聊天模型；自动模式会继续找能用的 backend。 |
 | G3 hits 归一化 | 输出 `{ hits, query, backend, stats, truncated, warnings }` 单一 schema；上游各 provider 的特异字段在 adapter 内吃掉 | 模型不需读三套 JSON，调用方一份解析即可。 |
-| G4 缓存命中 | 进程内 LRU + TTL（默认 5 min / 50 条）；key=`(backend, query, count, freshness, country, language, domain_filter)`；命中 → `stats.cached=true` 不再发 HTTP | 同会话短时间内重复检索免账单、免速率限制。 |
-| G5 SSRF 守卫 | hits.url 归一化阶段解析 + 拒 loopback / 私网 / 无 host；`allowed_domains` / `blocked_domains` 在结果集级别过滤 | 别让模型以为 `http://127.0.0.1` 是合法搜索结果。 |
+| G4 缓存命中 | 进程内 LRU + TTL（默认 5 min / 50 条）；key=`(backend, query, count, freshness, country, language, domain_filter, allowed_domains, blocked_domains)`；命中 → `stats.cached=true` 不再发 HTTP | 同会话短时间内重复检索免账单、免速率限制；配置域约束变化不复用旧缓存。 |
+| G5 SSRF 守卫 | hits.url 归一化阶段解析 + 拒任意 IP literal / loopback / 私网 / 内网保留 hostname / 无 host；`allowed_domains` / `blocked_domains` 在结果集级别过滤 | 别让模型以为 `http://127.0.0.1` 或 `https://metadata.google.internal` 是合法搜索结果。 |
 | G6 cost 与限速归一化 | `count` 默认 5、上限 20；429 / 5xx → `truncated=true + warning`，不抛 `Err`；超 `max_result_size_chars` 软上限做 snippet 截断 + warning | 别让一次检索扛上整轮上下文，也别一报错就整轮 fail。 |
 
 ### 1.2 非目标
@@ -321,12 +321,12 @@
 
 - **交付**：归一化层（`web_search/types.rs::normalize_hits`）增加 URL 解析步骤——
   1. `Url::parse` 失败 → `warnings += "skipped_invalid_url"`，丢弃该 hit；
-  2. 解析 `host` → 命中 `127.0.0.0/8` / `10.0.0.0/8` / `172.16.0.0/12` / `192.168.0.0/16` / `::1` / `fc00::/7` → `warnings += "ssrf_filtered"`，丢弃；
-  3. 单段 hostname（如 `localhost`、`server`，不含 `.`）→ 同上拒；
+  2. 解析 `host` → 命中任意 IP literal（含公网 / 私网 / loopback）→ `warnings += "ssrf_filtered"`，丢弃；
+  3. 单段 hostname（如 `localhost`、`server`，不含 `.`）或保留内网后缀（`.localhost` / `.local` / `.internal` / `.localdomain` / `.home.arpa`）→ 同上拒；
   4. 配置 `[tools.web_search] blocked_domains` 命中（按子域 suffix） → `warnings += "domain_blocked:<host>"`，丢弃；
   5. 配置 `[tools.web_search] allowed_domains` 非空时仅保留命中的 hits，其它 → `warnings += "domain_filtered:<host>"` 丢弃。
 - **与 `web_fetch` 的关系**：`web_search` 的 `allowed/blocked_domains` 是**结果集级别后过滤**（HTTP 已经发出去，只是不把结果给模型）；[`web_fetch.md`](web_fetch.md) 的 `PermissionGate::Domain` 是**请求前权限**（请求都不发出去）。两者都需要、不互斥、配置项**独立**。
-- **测试覆盖**：`blocked_domain_filtered_out`（loopback URL 被丢且 warning 在）/ `allowed_domain_only_keeps_listed`（非白名单全丢）/ `ssrf_loopback_rejected_in_hits`（`http://10.0.0.1` 被丢）/ `single_segment_hostname_rejected`（`http://server/` 被丢）。
+- **测试覆盖**：`normalize_hits_filters_private_hosts_and_domain_rules`（loopback / 公网 IP literal / `.internal` / allow+block 规则都被过滤）/ `cache_key_tracks_allowed_and_blocked_domains`（配置域约束变化不会误命中旧缓存）。
 
 ```text
   hits[] 原始（adapter 出口）
@@ -362,8 +362,8 @@
 | **`snippet`** | 结果内的文字摘要 | `Hit.snippet: String` | 上游不一定给（Brave 偶尔无）→ 空串；不抓正文 | 搜索结果页那段灰色小字。 |
 | **`backend`** | 实际跑这次检索的 provider | `WebSearchOutput.backend: String`；`auto/tavily/brave/serper/openai` 五值 | `auto` **不**出现在 output（必落到具体 provider），仅出现在 input/config；`openai` 表示项目级 hosted 候选模型路径 | 这条结果是哪家给的；审计里能看到。 |
 | **hostedCandidateModel** | 项目级 hosted 搜索候选模型 | 合并后的 model catalog 中首个 `capabilities.web_search == true` 的 model entry | `auto` 先看它是否存在；若有多个按合并顺序取首个；当前对话模型不参与资格判断 | 项目里只要配了可联网 hosted 模型，auto 就先用它。 |
-| **server-side 注入** | 把 `{type:"web_search",...}` 写进**项目级 hosted 候选模型**的专用 Responses 请求，由该模型代搜 | [`openai_responses/mod.rs`](../../../src/core/llm/openai_responses/mod.rs) | 仅当项目里存在 `hostedCandidateModel` 且 `backend ∈ {auto, openai}` 时启用；返回块由 `web_search/openai_server.rs` 解析 | 当前聊天模型是不是 Responses 不重要；hosted 搜索走的是一笔独立请求。 |
-| **`cache key`** | 缓存命中判定键 | `(backend, query, count, freshness, country, language, domain_filter)` 元组 hash | key 含 backend → 切换 backend 不会误命中旧缓存；TTL 默认 5 min | 「同样的 backend + 同样的 query + 同样的过滤」才算同一次。 |
+| **server-side 注入** | 把 `{type:"web_search",...}` 写进**项目级 hosted 候选模型**的专用 Responses 请求，由该模型代搜 | [`web_search/openai_server.rs`](../../../src/core/tools/web_search/openai_server.rs) | 仅当项目里存在 `hostedCandidateModel` 且 `backend ∈ {auto, openai}` 时启用；返回块由 `parse_server_tool_blocks` 解析 | 当前聊天模型是不是 Responses 不重要；hosted 搜索走的是一笔独立请求。 |
+| **`cache key`** | 缓存命中判定键 | `(backend, query, count, freshness, country, language, domain_filter, allowed_domains, blocked_domains)` 元组 hash | key 含 backend 与配置域约束 → 切换 backend 或调整 allow/block 不会误命中旧缓存；TTL 默认 5 min | 「同样的 backend + 同样的 query + 同样的过滤 / 域约束」才算同一次。 |
 | **SSRF（Server-Side Request Forgery）** | 模型让工具去连内网 / loopback 的攻击形态 | `web_search/types.rs::normalize_hits` 里的 host 黑名单 | **hits**：归一化阶段拒（loopback / 私网 / 单段 hostname）。**fetch**：`validate.rs` 增补 IP 段拒（cc-fork `validateURL` 客户端无此项，见 [`utils.ts:139-168`](../../../../cc-fork-01/src/tools/WebFetchTool/utils.ts)） | 别让搜来的 URL 指内网。 |
 | **`warnings`** | 一组「不致命但模型应当知道」的标签 | `WebSearchOutput.warnings: Vec<String>` | backend 切换 / 截断 / 限速 / SSRF 过滤 / domain 过滤 都进 | 「这次搜索发生了点小事，但还是给你结果」。 |
 
@@ -520,7 +520,7 @@ Hit {
     E2E-WEB-SEARCH-001                                (真 Tavily, PI_LIVE_WEB_SEARCH=1)
 ```
 
-**阅读顺序（说人话）**：模型先看到 **catalog** 里 `web_search` 名字与 6 字段；调起后 **`tool_exec`** 把 args 解出来，转给 **`web_search/mod`** 的 `search`；`mod` 先查 cache、再让 `backend.rs::pick_backend` 选具体 provider；adapter 起 reqwest 拿原始 JSON、各自 normalize 进 `Hit`；`types.rs::normalize_hits` 跑一遍 SSRF + 域名过滤；最后 `tool_exec` 把 `WebSearchOutput` 序列化回 LLM。**OpenAI server-side 路径**则不走 adapter——`openai_responses/mod` 直接在 payload 注入 `type:web_search`，结果回包后解 `server_tool_use` 块，归一化到同一份 `WebSearchOutput`。
+**阅读顺序（说人话）**：模型先看到 **catalog** 里 `web_search` 名字与 6 字段；调起后 **`tool_exec`** 把 args 解出来，转给 **`web_search/mod`** 的 `search`；`mod` 先查 cache、再让 `backend.rs::pick_backend` 选具体 provider；HTTP adapter 起 reqwest 拿原始 JSON、各自 normalize 进 `Hit`；`types.rs::normalize_hits` 跑一遍 SSRF + 域名过滤；最后 `tool_exec` 把 `WebSearchOutput` 序列化回 LLM。**OpenAI hosted 路径**则由 `openai_server.rs` 走一笔独立 sidecar 请求：挑项目级 hosted 候选模型、把 `type:web_search` 工具挂到该请求上，再把返回的 `web_search_call` / `web_search_tool_result` 归一化到同一份 `WebSearchOutput`。
 
 ---
 
@@ -699,20 +699,20 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 | 维度 | 用例（实际函数名） | 状态 | 说人话 |
 |------|---------------------|------|--------|
-| catalog 注册 | `core::tools::contract::catalog::tests::web_search_registered`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection` | PASS（2026-06-04） | 名字注册了、runtime 注入缺失时会给出明确错误。 |
+| catalog 注册 | `core::tools::contract::catalog::tests::web_search_registered`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_routes_to_runtime` | PASS（2026-06-05） | 名字注册了；runtime 缺失时报明确错误，注入后会真实路由到 `web_search` runtime。 |
 | Tavily 解析 | `tavily_runtime_maps_request_and_normalizes_hits`、`runtime_explicit_tavily_works_from_public_api` | PASS（2026-06-04） | Tavily header/body 映射和公开 API 路径都已跑通。 |
 | Brave 解析 | `auto_backend_falls_back_to_brave_and_then_hits_cache`、`runtime_auto_routes_to_http_fallback_chain` | PASS（2026-06-04） | Brave 既覆盖 auto fallback，也覆盖集成层公共 runtime。 |
 | Serper 解析 | `runtime_explicit_serper_works_from_public_api` | PASS（2026-06-04） | Serper 请求映射与结果归一化已通过 mock HTTP。 |
 | backend.auto（project hosted 候选） | `auto_backend_uses_project_hosted_candidate`、`incompatible_hosted_candidate_falls_back_to_tavily` | PASS（2026-06-04） | auto 先看项目里的 hosted 候选，候选不可用时再回 HTTP 链。 |
 | hosted 候选选择 | `discover_hosted_candidate_uses_merged_catalog_order`、`merged_catalog_preserves_override_slot_and_web_search_capability`、`explicit_openai_requires_project_candidate` | PASS（2026-06-04） | 多个候选按合并后顺序取首个，没有候选时显式 `openai` 会报错。 |
-| 缓存 | `auto_backend_falls_back_to_brave_and_then_hits_cache` | PASS（2026-06-04） | 同 query 二次命中 cache，不再重复发起上游请求。 |
+| 缓存 | `auto_backend_falls_back_to_brave_and_then_hits_cache`、`cache_key_tracks_allowed_and_blocked_domains` | PASS（2026-06-05） | 同 query 二次命中 cache，不再重复发起上游请求；配置域约束变化不会误复用旧缓存。 |
 | 超时 | `auto_backend_falls_back_after_brave_timeout` | PASS（2026-06-04） | 超时会记 warning，并在 `auto` 链里继续尝试下一个 backend。 |
 | 限速归一化 | `explicit_tavily_rate_limit_returns_degraded_output` | PASS（2026-06-04） | 显式 backend 遇到 429 会返回 degraded output，不会把整轮工具直接打崩。 |
 | OpenAI hosted | `build_hosted_request_body_includes_filters_and_location`、`parse_server_tool_blocks_handles_openai_and_server_tool_shapes`、`runtime_explicit_openai_uses_project_hosted_candidate` | PASS（2026-06-04） | 项目级 hosted 候选模型请求与 server-side block 归一化都已落地。 |
-| SSRF 守卫 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-04） | loopback / 私网 / 无效 host 会在 hits 归一化时被剔除。 |
-| 域名过滤 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-04） | `allowed_domains` / `blocked_domains` 已按 host / subdomain 规则过滤。 |
+| SSRF 守卫 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-05） | 任意 IP literal、内网保留 hostname、单段 host 会在 hits 归一化时被剔除。 |
+| 域名过滤 | `normalize_hits_filters_private_hosts_and_domain_rules` | PASS（2026-06-05） | `allowed_domains` / `blocked_domains` 已按 host / subdomain 规则过滤。 |
 | 集成（mock HTTP） | `runtime_explicit_tavily_works_from_public_api`、`runtime_auto_routes_to_http_fallback_chain`、`runtime_explicit_serper_works_from_public_api` | PASS（2026-06-04） | mock Tavily / Brave(auto) / Serper 的 public runtime 集成路径都跑通了。 |
-| 集成 catalog | `core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection` | PASS（2026-06-04） | `tool_exec` 已真实接入 `web_search` 分支，缺 runtime 时错误也符合预期。 |
+| 集成 catalog | `core::agent_loop::tests::submodules_test::tool_exec_web_search_requires_runtime_injection`、`core::agent_loop::tests::submodules_test::tool_exec_web_search_routes_to_runtime` | PASS（2026-06-05） | `tool_exec` 已真实接入 `web_search` 分支，缺 runtime 时错误友好，注入后成功路径也有对称回归。 |
 | 配置解析 | `infra::config::tests::tools_cfg_test::tools_web_search_toml_override`、`infra::config::tests::validate_test::validate_config_rejects_invalid_web_search_backend` | PASS（2026-06-04） | `[tools.web_search]` 的默认值、覆写和非法 backend 校验都已覆盖。 |
 | E2E（live） | `live_tavily_search_smoke`（`PI_LIVE_WEB_SEARCH=1` gate） | PASS（2026-06-04） | 已在本机载入真实 Tavily key 后跑过一次 live smoke。 |
 

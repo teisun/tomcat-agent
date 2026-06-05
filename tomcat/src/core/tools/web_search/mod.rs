@@ -88,6 +88,17 @@ impl WebSearchRuntime {
         Ok(output)
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_cached_output_for_test(
+        &self,
+        args: WebSearchArgs,
+        value: WebSearchOutput,
+    ) -> Result<(), AppError> {
+        let request = WebSearchRequest::from_tool_args(args, &self.config)?;
+        self.cache.insert(CacheKey::from_request(&request), value);
+        Ok(())
+    }
+
     async fn execute_auto(
         &self,
         request: &WebSearchRequest,

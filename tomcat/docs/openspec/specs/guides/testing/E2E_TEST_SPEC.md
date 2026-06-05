@@ -29,7 +29,7 @@ E2E 测试 = **进程边界黑盒 + 用户操作模拟**：
 
 ## §2 用户操作模拟场景库
 
-完整场景库见 **[E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)**，共 39 条，覆盖 P0 全部 User Stories。
+完整场景库见 **[E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)**，共 41 条；在覆盖 P0 全部 User Stories的基础上，补充了 `web_search` / `web_fetch` 的用户可见场景。
 
 新增用例须同步更新 `E2E_SCENARIO_LIBRARY.md`，并遵循编号规则（`E2E-CLI-NNN` / `E2E-WASM-NNN`）。
 
