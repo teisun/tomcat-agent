@@ -13,6 +13,11 @@ docs/
 ├── TODOS.md                           ◄── 灵感/想法/待办收集池（按领域分类 + P0-P5 优先级）
 │
 ├── openspec/                          ◄── 法律与蓝图（Constitution、Architecture、规范）
+├── architecture/                      ◄── 模块级技术方案（AgentLoop、上下文、Plan、工具、插件、权限等）
+│   ├── project-overview-panorama.md       全景与分层
+│   ├── agent-loop.md / context-management.md / plan-runtime.md …
+│   ├── tools/                             内置工具冻结方案（read/write/bash/plan …）
+│   └── plugin-system/                   插件 / Wasm / hostcall 等
 ├── agents/                            ◄── Agent 角色卡、看板、计划模板（Dispatcher、TASK_BOARD）
 │
 ├── status/                            ◄── 各分支进度碎片
@@ -22,11 +27,6 @@ docs/
 │   ├── feature-js-api-alignment.md
 │   └── feature-long-lived-vm.md
 │
-├── sharing/                           ◄── 组内技术分享
-│   ├── claw-agent-design.md               CLAW 核心设计理念 & 生产级 AI Agent
-│   └── spec-driven-agent-workflow.md      规范驱动的 AI Agent 自动化工作流
-│
-├── reports/                           ◄── 调研归档（背景调查，日常开发可忽略，见 reports/README.md）
 │
 └── user-guide.md
 ```
@@ -49,8 +49,9 @@ docs/
 ## 与其他目录的关系
 
 ```text
-docs/openspec/  ──► 法律与蓝图（Constitution、Architecture、规范、变更）
-docs/agents/    ──► 谁按什么剧本干活（Dispatcher、角色卡、TASK_BOARD）
-docs/           ──► 给人读的说明、进度、分享、报告（本目录，含 architecture/、reports/ 等）
-.cursor/        ──► 编辑器命令与规则（仓库根，与 docs/ 并列）
+docs/openspec/      ──► 法律与蓝图（Constitution、Architecture、规范、变更）
+docs/architecture/  ──► 模块级技术方案（与 openspec 配套，偏实现与冻结设计）
+docs/agents/        ──► 谁按什么剧本干活（Dispatcher、角色卡、TASK_BOARD）
+docs/               ──► 给人读的说明、进度、架构文档（本目录）
+.cursor/            ──► 编辑器命令与规则（仓库根，与 docs/ 并列）
 ```

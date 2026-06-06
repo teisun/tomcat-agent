@@ -52,31 +52,42 @@ flowchart TB
     Dispatcher[HostApiDispatcher]
   end
   subgraph hostCore [宿主核心能力层]
+    Loop[AgentLoop 编排]
     Session[会话管理]
+    Plan[PlanRuntime / 任务编排]
     LLM[LLM 接入]
     Primitive[4 原语执行]
     Tools[工具注册中心]
+    Permission[权限 / 审计门禁]
   end
   subgraph infra [基础设施层]
     EventBus[事件总线]
-    Config[配置与审计]
+    Config[配置 / 日志 / 审计存储]
   end
-  CLI --> Dispatcher
-  CLI --> hostCore
+  CLI --> Loop
   PluginCode --> QuickJS
   QuickJS --> Dispatcher
-  Dispatcher --> hostCore
+  Dispatcher --> Session
+  Dispatcher --> LLM
+  Dispatcher --> Primitive
+  Dispatcher --> Tools
   Dispatcher --> EventBus
-  hostCore --> EventBus
-  hostCore --> Config
+  Loop --> Session
+  Loop --> Plan
+  Loop --> LLM
+  Loop --> Tools
+  Loop --> Primitive
+  Loop --> Permission
+  Loop --> EventBus
+  Permission --> Config
 ```
 
 - **基础设施层**：事件总线、配置、审计、日志；无业务逻辑，全项目共用。
-- **宿主核心能力层**：会话、LLM、4 原语、工具注册、插件生命周期、权限；只跑在宿主侧，不暴露实现给插件。
-- **宿主 API 层**：插件能调到的唯一入口（Hostcall）；单入口多路复用，按 module/method 路由。
+- **宿主核心能力层**：`AgentLoop` 是编排中心，负责把 `CLI` 输入驱动成「问 LLM → 执行工具 → 回流结果 → 下一轮推理」的闭环；同时依赖会话、`PlanRuntime`、LLM、4 原语、工具注册与权限门禁。
+- **宿主 API 层**：插件能调到的唯一入口（Hostcall）；单入口多路复用，按 `module/method` 路由到会话、LLM、4 原语、工具或事件系统。
 - **WasmEdge 运行时层**：跑 Wasm/QuickJS，每插件独立实例，内存隔离。
 - **沙箱执行层**：插件代码的真实执行环境；只能通过宿主 API 与外界通信。
-- **交互层**：CLI 等入口，驱动会话与 Agent 运行。
+- **交互层**：CLI 等入口，通常直接驱动 `AgentLoop` 启动一次 Agent 运行。
 
 ---
 
