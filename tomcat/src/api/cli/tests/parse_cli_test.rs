@@ -74,6 +74,25 @@ fn cli_parse_audit_list() {
 }
 
 #[test]
+fn skill_subcommand_parsed() {
+    let list = Cli::try_parse_from(["tomcat", "skill", "list"]).unwrap();
+    assert!(matches!(
+        list.command,
+        Some(Commands::Skill {
+            sub: SkillSub::List
+        })
+    ));
+
+    let reload = Cli::try_parse_from(["tomcat", "skill", "reload"]).unwrap();
+    assert!(matches!(
+        reload.command,
+        Some(Commands::Skill {
+            sub: SkillSub::Reload
+        })
+    ));
+}
+
+#[test]
 fn cli_parse_default_chat() {
     let cli = Cli::try_parse_from(["tomcat"]).unwrap();
     assert!(cli.command.is_none());

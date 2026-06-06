@@ -25,4 +25,5 @@ mod pathrules_cmd_run_test;
 mod plugin_cmd_test;
 mod run_basic_test;
 mod session_cmd_test;
+mod skill_cmd_test;
 mod workspace_cmd_test;

@@ -1,6 +1,6 @@
 //! Tests for `commands::parse` — slash-command recognition contract.
 
-use super::super::{parse_chat_command, ChatCommand, PlanCommand};
+use super::super::{parse_chat_command, ChatCommand, PlanCommand, SkillCommand};
 
 fn assert_not_command(input: &str) {
     assert!(matches!(
@@ -117,4 +117,23 @@ fn plan_command_in_chat_text_does_not_match() {
         parse_chat_command("帮我 /plan exit"),
         ChatCommand::NotACommand(_)
     ));
+}
+
+#[test]
+fn skill_use_list_reload_parsed() {
+    assert_eq!(
+        parse_chat_command("/skill list"),
+        ChatCommand::Skill(SkillCommand::List)
+    );
+    assert_eq!(
+        parse_chat_command("/skill reload"),
+        ChatCommand::Skill(SkillCommand::Reload)
+    );
+    assert_eq!(
+        parse_chat_command("/skill use commit \"ship release\""),
+        ChatCommand::Skill(SkillCommand::Use {
+            name: "commit".to_string(),
+            intent: "ship release".to_string(),
+        })
+    );
 }

@@ -2,7 +2,7 @@ use std::io::{self, Write as IoWrite};
 use std::sync::Arc;
 use std::time::Instant;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -59,6 +59,9 @@ pub struct ChatContext {
     pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
     pub web_search_runtime: Arc<crate::core::tools::web_search::WebSearchRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
+    pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
+    pub skill_discovery_handle:
+        Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<crate::core::skill::SkillSet>>>>,
     pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
     _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
 }
@@ -267,6 +270,8 @@ impl ChatContext {
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
             .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
+        let skill_set = Arc::new(RwLock::new(crate::core::skill::SkillSet::default()));
+        let skill_discovery_handle = Arc::new(tokio::sync::Mutex::new(None));
 
         let reviewer_max_turns = std::env::var("TOMCAT_REVIEWER_MAX_TURNS")
             .ok()
@@ -366,6 +371,8 @@ impl ChatContext {
             web_fetch_runtime,
             web_search_runtime,
             plan_runtime,
+            skill_set,
+            skill_discovery_handle,
             agent_registry,
             _root_agent_guard: root_agent_guard,
         })
@@ -407,6 +414,58 @@ impl ChatContext {
         if let Some(handle) = self.completion_subscriber_handle.lock().take() {
             handle.abort();
         }
+    }
+
+    pub(crate) fn skill_set_snapshot(&self) -> crate::core::skill::SkillSet {
+        self.skill_set.read().clone()
+    }
+
+    pub(crate) async fn spawn_skill_discovery_if_needed(&self) {
+        if !self.config.skills.enabled || !self.skill_set.read().is_empty() {
+            return;
+        }
+        let mut handle = self.skill_discovery_handle.lock().await;
+        if handle.is_none() {
+            *handle = Some(crate::core::skill::spawn_discovery_task(
+                self.config.clone(),
+                self.agent_workspace_dir.clone(),
+            ));
+        }
+    }
+
+    pub(crate) async fn await_skill_discovery(&self) -> crate::core::skill::SkillSet {
+        let handle = self.skill_discovery_handle.lock().await.take();
+        if let Some(handle) = handle {
+            match handle.await {
+                Ok(skill_set) => {
+                    *self.skill_set.write() = skill_set.clone();
+                    skill_set
+                }
+                Err(error) => {
+                    let mut failed = crate::core::skill::SkillSet::default();
+                    failed
+                        .warnings
+                        .push(format!("skills_discovery_join_failed:{error}"));
+                    *self.skill_set.write() = failed.clone();
+                    failed
+                }
+            }
+        } else {
+            self.skill_set_snapshot()
+        }
+    }
+
+    pub(crate) async fn reload_skill_set(&self) -> crate::core::skill::SkillSet {
+        if let Some(handle) = self.skill_discovery_handle.lock().await.take() {
+            handle.abort();
+        }
+        let skill_set = if self.config.skills.enabled {
+            crate::core::skill::discover(&self.config, &self.agent_workspace_dir)
+        } else {
+            crate::core::skill::SkillSet::default()
+        };
+        *self.skill_set.write() = skill_set.clone();
+        skill_set
     }
 }
 

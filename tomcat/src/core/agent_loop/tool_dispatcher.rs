@@ -187,6 +187,7 @@ pub(super) async fn run_tool_calls(
                 agent.web_fetch_runtime.as_ref(),
                 agent.web_search_runtime.as_ref(),
                 agent.config.plan_runtime.as_ref(),
+                agent.config.skill_set.as_ref(),
                 agent.config.subagent_type,
                 agent.config.review_kind,
                 &cancel,

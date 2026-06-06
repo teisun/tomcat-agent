@@ -12,6 +12,7 @@ pub mod plan_runtime;
 pub mod prompts;
 pub mod security;
 pub mod session;
+pub mod skill;
 pub mod tools;
 
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentRunResult, ToolCallInfo};

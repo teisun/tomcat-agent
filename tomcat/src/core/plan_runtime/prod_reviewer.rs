@@ -195,6 +195,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         subagent_type: SubagentType::Reviewer,
                         review_kind: Some(kind),
                         plan_runtime: Some(plan_runtime_for_loop),
+                        skill_set: None,
                     };
                     let mut agent_loop =
                         AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());

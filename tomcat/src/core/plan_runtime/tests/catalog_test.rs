@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::super::catalog::visible_tools_for_mode;
+use super::super::catalog::{visible_tools_for_mode, visible_tools_for_mode_with_policy};
 use super::super::state::PlanState;
 
 fn names(values: &[Value]) -> std::collections::BTreeSet<String> {
@@ -72,4 +72,12 @@ fn completed_mode_view_equals_chat_view() {
     });
     let chat = visible_tools_for_mode(&PlanState::Chat);
     assert_eq!(names(&done), names(&chat));
+}
+
+#[test]
+fn load_skill_can_be_hidden_by_policy() {
+    let with_skill = names(&visible_tools_for_mode_with_policy(&PlanState::Chat, true));
+    let without_skill = names(&visible_tools_for_mode_with_policy(&PlanState::Chat, false));
+    assert!(with_skill.contains("load_skill"));
+    assert!(!without_skill.contains("load_skill"));
 }

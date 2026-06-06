@@ -23,6 +23,17 @@ fn help_command_is_lowercase_only() {
 #[test]
 fn help_text_mentions_checkpoint_commands() {
     let h = help_text();
+    assert!(h.contains("/skill list"), "/help 应列出 /skill list：{}", h);
+    assert!(
+        h.contains("/skill reload"),
+        "/help 应列出 /skill reload：{}",
+        h
+    );
+    assert!(
+        h.contains("/skill use <name>"),
+        "/help 应列出 /skill use：{}",
+        h
+    );
     assert!(h.contains("/ckpt"), "/help 应列出 /ckpt：{}", h);
     assert!(h.contains("/restore"), "/help 应列出 /restore：{}", h);
 }

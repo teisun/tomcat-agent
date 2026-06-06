@@ -182,6 +182,28 @@ fn web_fetch_registered() {
     );
 }
 
+#[test]
+fn load_skill_registered() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "load_skill")
+        .expect("load_skill catalog entry");
+
+    assert_eq!(entry.scope, PermissionScope::Read);
+    assert!(entry.read_only);
+    assert!(!entry.destructive);
+    assert!(entry.description.contains("skill body"));
+    assert!(entry.description.contains("permission gate"));
+
+    let schema = (entry.parameters)();
+    let properties = schema["properties"].as_object().expect("properties");
+    assert_eq!(
+        schema["required"].as_array().expect("required"),
+        &vec![Value::String("name".to_string())]
+    );
+    assert!(properties.contains_key("file"));
+}
+
 fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
     assert_eq!(
         schema["type"].as_str(),

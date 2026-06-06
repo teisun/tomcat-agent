@@ -55,7 +55,56 @@ pub(crate) use self::thinking_persist::{
 };
 
 fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
-    plan_runtime::catalog::visible_tools_for_mode(&ctx.plan_runtime.mode())
+    let skill_set = ctx.skill_set_snapshot();
+    let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
+    plan_runtime::catalog::visible_tools_for_mode_with_policy(
+        &ctx.plan_runtime.mode(),
+        allow_load_skill,
+    )
+}
+
+fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
+    let skill_set = ctx.skill_set_snapshot();
+    let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
+    let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
+        agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
+        agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
+        agent_plans_dir: plan_runtime::file_store::plans_dir()
+            .map(|path| crate::infra::platform::format_home_path(path.as_path()))
+            .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
+        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+        tool_lines: Some(
+            crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
+                allow_load_skill,
+            ),
+        ),
+    };
+    let workspace_state = compute_workspace_state(ctx);
+    crate::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
+        workspace_context,
+        workspace_state,
+        Some(&skill_set),
+        Some(&ctx.config.skills),
+        context_budget_chars,
+    )
+}
+
+fn sync_context_state_system_prompt_len(
+    context_state: &mut crate::core::ContextState,
+    old_len: usize,
+    new_len: usize,
+) {
+    if old_len == new_len {
+        return;
+    }
+    if new_len >= old_len {
+        context_state.estimate_context_chars += new_len - old_len;
+    } else {
+        context_state.estimate_context_chars = context_state
+            .estimate_context_chars
+            .saturating_sub(old_len - new_len);
+    }
+    context_state.invalidate_api_usage();
 }
 
 const AUTO_TURN_BUDGET: u32 = 8;
@@ -115,19 +164,12 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     });
 
     let context_config = &ctx.config.context;
-    let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
-        agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
-        agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
-        agent_plans_dir: plan_runtime::file_store::plans_dir()
-            .map(|path| crate::infra::platform::format_home_path(path.as_path()))
-            .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
-        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
-    };
-    let workspace_state = compute_workspace_state(ctx);
-    let system_text = crate::core::llm::system_prompt::build_system_prompt_with_state(
-        workspace_context,
-        workspace_state,
-    );
+    if ctx.config.skills.enabled {
+        ctx.spawn_skill_discovery_if_needed().await;
+        let _ = ctx.await_skill_discovery().await;
+    }
+    let context_budget_chars = crate::infra::config::compute_context_budget_chars(context_config);
+    let mut system_text = build_system_text(ctx, context_budget_chars);
     persist::schedule_checkpoint_prune(ctx);
     if let Some(path) = ctx.session.current_transcript_path()? {
         let tail = read_entries_tail(&path, 64).unwrap_or_default();
@@ -217,19 +259,24 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 }
                 String::new()
             } else {
-                let parsed = match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl)
-                {
-                    ChatCommandOutcome::Continue { line, echo_user } => {
-                        if echo_user {
-                            print!("{}{}", current_user_prompt(ctx), line);
-                            println!();
-                            io::stdout().flush().map_err(AppError::Io)?;
+                let (parsed, history_line) =
+                    match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl).await {
+                        ChatCommandOutcome::Continue {
+                            line,
+                            echo_user,
+                            history_line,
+                        } => {
+                            if echo_user {
+                                print!("{}{}", current_user_prompt(ctx), line);
+                                println!();
+                                io::stdout().flush().map_err(AppError::Io)?;
+                            }
+                            (line, history_line)
                         }
-                        line
-                    }
-                    ChatCommandOutcome::Handled => continue,
-                };
-                let _ = rl.add_history_entry(&parsed);
+                        ChatCommandOutcome::Handled => continue,
+                    };
+                let history_line = history_line.unwrap_or_else(|| parsed.clone());
+                let _ = rl.add_history_entry(&history_line);
                 parsed
             }
         };
@@ -245,6 +292,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             *guard = CancellationToken::new();
             guard.clone()
         };
+
+        let next_system_text = build_system_text(ctx, context_budget_chars);
+        sync_context_state_system_prompt_len(
+            &mut context_state,
+            system_text.len(),
+            next_system_text.len(),
+        );
+        system_text = next_system_text;
 
         let outcome =
             run_chat_turn(ctx, &input, &system_text, &mut context_state, turn_token).await?;
@@ -404,6 +459,7 @@ pub async fn run_chat_turn(
         subagent_type: crate::core::agent_loop::SubagentType::User,
         review_kind: None,
         plan_runtime: Some(ctx.plan_runtime.clone()),
+        skill_set: Some(ctx.skill_set.clone()),
     };
     let mut agent_loop = AgentLoop::new(
         main_provider,

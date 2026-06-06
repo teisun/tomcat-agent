@@ -8,6 +8,29 @@ pub(super) fn parse_optional_u64(args: &serde_json::Value, key: &str) -> Option<
     v.as_u64()
 }
 
+pub(super) fn parse_load_skill_args(
+    args: &serde_json::Value,
+) -> Result<(&str, Option<&str>), String> {
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "load_skill: 缺少必填字段 `name`".to_string())?;
+    let file = match args.get("file") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "load_skill: `file` 必须是字符串或 null".to_string())?,
+        ),
+    };
+    Ok((name, file))
+}
+
 pub(super) fn parse_edit_args(
     args: &serde_json::Value,
 ) -> Result<(&str, Vec<EditOperation>), String> {

@@ -12,7 +12,7 @@ use serde_json::json;
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +37,50 @@ fn cmd() -> Command {
 
 fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
+    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    fs::create_dir_all(&skill_dir).expect("create skill dir");
+    let mut content = format!("---\nname: {name}\ndescription: {description}\n");
+    if user_only {
+        content.push_str("disable-model-invocation: true\n");
+    }
+    content.push_str("---\n# Skill Body\n1. Do the thing.\n");
+    fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
+}
+
+fn load_current_transcript_for_work_dir(work_dir: &Path) -> String {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
+    let sessions_dir = tomcat::resolve_sessions_dir(&cfg).expect("resolve sessions dir");
+    let session = SessionManager::new(sessions_dir);
+    let transcript_path = session
+        .current_transcript_path()
+        .expect("current_transcript_path")
+        .expect("transcript path should exist");
+    fs::read_to_string(&transcript_path).expect("read transcript")
+}
+
+fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 8192];
+        let _ = stream.read(&mut buf);
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+        let first =
+            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n");
+        let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
+        stream.write_all(headers.as_bytes()).expect("write headers");
+        stream.write_all(first.as_bytes()).expect("write delta");
+        stream.write_all(finish.as_bytes()).expect("write finish");
+        stream.flush().expect("flush");
+    });
+    (format!("http://{addr}"), handle)
 }
 
 struct DeterministicMockLlm {
@@ -3178,6 +3222,177 @@ fn test_user_chat_without_api_key_fails_gracefully() {
         "chat 无 API Key 时应含错误提示，实际 combined: {}",
         trunc(&combined, 300)
     );
+}
+
+/// [E2E-CLI-067] 用户在聊天内执行 /skill list|reload|use
+///
+/// 用户意图：查看当前 skills、重载目录，并把 user-only skill 注入当前轮。
+/// 验证：本地命令输出可见；`/skill use` 会把 skill 正文与 intent 注入 transcript。
+#[test]
+fn test_user_chat_skill_list_reload_use() {
+    common::setup_logging();
+    let _span = info_span!("test_user_chat_skill_list_reload_use").entered();
+
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    fs::create_dir_all(&work_dir).unwrap();
+    let (base_url, server_handle) = spawn_quick_openai_stream_server("SKILL_CLI_OK");
+
+    info!("Arrange: init temp HOME + workspace skills");
+    cmd()
+        .args(["init"])
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
+    fs::write(
+        work_dir.join("models.toml"),
+        format!(
+            r#"[[models]]
+id = "mock-local"
+api = "openai"
+provider = "openai"
+base_url = "{base_url}"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
+"#
+        ),
+    )
+    .unwrap();
+    write_skill_fixture(workspace.path(), "commit", "Create a git commit", false);
+    write_skill_fixture(
+        workspace.path(),
+        "secret",
+        "Manual reviewer checklist",
+        true,
+    );
+    write_skill_fixture(workspace.path(), "lint", "Run repo lint checks", false);
+
+    info!("Act: tomcat chat with /skill list, /skill reload, /skill use");
+    let mut c = cmd();
+    c.arg("chat")
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .env("OPENAI_API_KEY", "dummy-key")
+        .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .current_dir(workspace.path())
+        .write_stdin("/skill list\n/skill reload\n/skill use secret summarize current diff\n")
+        .timeout(std::time::Duration::from_secs(10));
+    let output = c.output().expect("chat should exit");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{stdout}{stderr}");
+    info!(
+        "Assert: list/reload output visible and transcript contains injected skill; combined: {}",
+        trunc(&combined, 400)
+    );
+    assert!(
+        combined.contains("commit")
+            && combined.contains("secret")
+            && combined.contains("user-only"),
+        "chat output should list discovered skills, actual: {}",
+        trunc(&combined, 400)
+    );
+    assert!(
+        combined.contains("已重载") || combined.contains("reload") || combined.contains("reloaded"),
+        "chat output should mention reload, actual: {}",
+        trunc(&combined, 400)
+    );
+    assert!(
+        output.status.success(),
+        "chat should exit successfully once mock LLM replies, stderr: {}",
+        trunc(&stderr, 400)
+    );
+
+    let transcript = load_current_transcript_for_work_dir(&work_dir);
+    assert!(
+        transcript.contains("<skill name=\\\"secret\\\""),
+        "transcript should contain injected skill body, actual: {}",
+        trunc(&transcript, 800)
+    );
+    assert!(
+        transcript.contains("Current user intent:\\nsummarize current diff"),
+        "transcript should preserve /skill use intent, actual: {}",
+        trunc(&transcript, 800)
+    );
+    server_handle.join().expect("mock llm server should exit");
+}
+
+/// [E2E-CLI-068] 用户执行 tomcat skill list|reload
+///
+/// 用户意图：在 chat 外查看当前技能清单并显式触发 rediscovery。
+/// 验证：`list`/`reload` 均 exit 0；输出含 skill、user-only 标记与 diagnostics。
+#[test]
+fn test_user_skill_cli_list_reload_e2e() {
+    common::setup_logging();
+    let _span = info_span!("test_user_skill_cli_list_reload_e2e").entered();
+
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    fs::create_dir_all(&work_dir).unwrap();
+
+    info!("Arrange: init temp HOME + workspace skills");
+    cmd()
+        .args(["init"])
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success();
+    write_skill_fixture(workspace.path(), "commit", "Create a git commit", false);
+    write_skill_fixture(
+        workspace.path(),
+        "secret",
+        "Manual reviewer checklist",
+        true,
+    );
+
+    info!("Act: tomcat skill list");
+    let assert = cmd()
+        .args(["skill", "list"])
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .current_dir(workspace.path())
+        .assert();
+    let list_out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: list output includes visible skills; actual: {}",
+        trunc(&list_out, 300)
+    );
+    assert
+        .success()
+        .stdout(predicate::str::contains("commit"))
+        .stdout(predicate::str::contains("secret"))
+        .stdout(predicate::str::contains("user-only"));
+
+    info!("Arrange: add a malformed skill and a new valid skill before reload");
+    let broken_dir = workspace
+        .path()
+        .join(".tomcat")
+        .join("skills")
+        .join("broken");
+    fs::create_dir_all(&broken_dir).unwrap();
+    fs::write(broken_dir.join("SKILL.md"), "# missing frontmatter\n").unwrap();
+    write_skill_fixture(workspace.path(), "lint", "Run repo lint checks", false);
+
+    info!("Act: tomcat skill reload");
+    let reload = cmd()
+        .args(["skill", "reload"])
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .current_dir(workspace.path())
+        .assert();
+    let reload_out = String::from_utf8_lossy(&reload.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert: reload output includes new skill + diagnostics; actual: {}",
+        trunc(&reload_out, 400)
+    );
+    reload
+        .success()
+        .stdout(predicate::str::contains("lint"))
+        .stdout(predicate::str::contains("diagnostic").or(predicate::str::contains("诊断")));
 }
 
 /// [E2E-CLI-059] 用户查看操作审计记录列表

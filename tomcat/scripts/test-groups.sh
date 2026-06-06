@@ -24,6 +24,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   plan_e2e_with_mock_llm_tests
   robustness_tests
   read_tool_tests
+  skill_tool_tests
 )
 
 TOMCAT_INTEGRATION_SERIAL_TESTS=(

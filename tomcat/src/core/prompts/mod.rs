@@ -10,6 +10,7 @@ pub enum PromptKey {
     SystemToolInstructions,
     SystemPagedReading,
     SystemBackgroundShellMonitor,
+    SystemAvailableSkills,
     SystemWorkspaceContext,
     SystemWorkspaceState,
     PlannerReminder,
@@ -31,6 +32,7 @@ pub fn load(key: PromptKey) -> &'static str {
         PromptKey::SystemBackgroundShellMonitor => {
             include_str!("templates/system/background_shell_monitor.txt")
         }
+        PromptKey::SystemAvailableSkills => include_str!("templates/system/available_skills.txt"),
         PromptKey::SystemWorkspaceContext => include_str!("templates/system/workspace_context.txt"),
         PromptKey::SystemWorkspaceState => include_str!("templates/system/workspace_state.txt"),
         PromptKey::PlannerReminder => include_str!("templates/plan/planner.txt"),

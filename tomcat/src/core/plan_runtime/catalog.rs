@@ -32,9 +32,16 @@ const HIDDEN_IN_CHAT_VIEW: &[&str] = &["create_plan"];
 /// [{ "type": "function", "function": { "name": ..., "description": ..., "parameters": {...} } }]
 /// ```
 pub fn visible_tools_for_mode(mode: &PlanState) -> Vec<Value> {
+    visible_tools_for_mode_with_policy(mode, true)
+}
+
+pub fn visible_tools_for_mode_with_policy(mode: &PlanState, allow_load_skill: bool) -> Vec<Value> {
     BUILTIN_TOOL_CATALOG
         .iter()
-        .filter(|entry| filter_for_mode(entry.name, entry.plan_only, mode))
+        .filter(|entry| {
+            filter_for_mode(entry.name, entry.plan_only, mode)
+                && (allow_load_skill || entry.name != "load_skill")
+        })
         .map(|entry| {
             serde_json::json!({
                 "type": "function",

@@ -24,6 +24,7 @@ fn system_prompt_names_three_directories_and_keeps_state_as_permission_list() {
             .to_string_lossy()
             .to_string(),
         agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+        tool_lines: None,
     };
     let state = WorkspaceState {
         read_write: vec![WorkspaceRootDescriptor {

@@ -1,0 +1,6 @@
+<available_skills>
+{skills_block}
+</available_skills>
+
+The block above contains only skill names and short descriptions, not full instructions or paths.
+When a task needs the full body of a skill, call `load_skill` with the skill name instead of guessing.

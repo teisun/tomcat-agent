@@ -34,6 +34,7 @@ pub struct WorkspaceContext {
     pub agent_definition_dir: String,
     pub agent_plans_dir: String,
     pub agent_trail_dir: String,
+    pub tool_lines: Option<String>,
 }
 
 pub struct SystemPromptBuilder {
@@ -85,7 +86,11 @@ impl SystemPromptSection for CoreIdentitySection {
         "core_identity"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        let tool_lines = crate::core::tools::contract::catalog::render_core_identity_tool_lines();
+        let tool_lines = _context.tool_lines.clone().unwrap_or_else(|| {
+            crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
+                false,
+            )
+        });
         render_prompt(
             PromptKey::SystemCoreIdentity,
             &[("tool_lines", &tool_lines)],
@@ -138,6 +143,52 @@ impl SystemPromptSection for BackgroundShellMonitorSection {
     }
     fn priority(&self) -> u32 {
         30
+    }
+}
+
+pub struct AvailableSkillsSection {
+    rendered: String,
+}
+
+impl AvailableSkillsSection {
+    pub fn from_skill_set(
+        skill_set: &crate::core::skill::SkillSet,
+        context_budget_chars: usize,
+        cfg: &crate::infra::config::SkillsConfig,
+    ) -> Option<Self> {
+        let total_budget =
+            crate::core::skill::compute_skill_prompt_budget_chars(context_budget_chars, cfg);
+        let overhead =
+            render_prompt(PromptKey::SystemAvailableSkills, &[("skills_block", "")]).len();
+        let block_budget = total_budget.saturating_sub(overhead);
+        let rendered = crate::core::skill::render_available_skills_block(
+            skill_set,
+            block_budget,
+            cfg.max_description_chars,
+        );
+        if rendered.block.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            rendered: render_prompt(
+                PromptKey::SystemAvailableSkills,
+                &[("skills_block", &rendered.block)],
+            ),
+        })
+    }
+}
+
+impl SystemPromptSection for AvailableSkillsSection {
+    fn section_name(&self) -> &str {
+        "available_skills"
+    }
+
+    fn render(&self, _context: &WorkspaceContext) -> String {
+        self.rendered.clone()
+    }
+
+    fn priority(&self) -> u32 {
+        35
     }
 }
 
@@ -340,6 +391,7 @@ pub fn build_system_prompt(workspace_dir: &str) -> String {
         agent_definition_dir: workspace_dir.to_string(),
         agent_plans_dir: workspace_dir.to_string(),
         agent_trail_dir: workspace_dir.to_string(),
+        tool_lines: None,
     };
     SystemPromptBuilder::default().build(&context)
 }
@@ -347,7 +399,24 @@ pub fn build_system_prompt(workspace_dir: &str) -> String {
 /// 携带工作区状态的便捷 wrapper（plan §8）：
 /// 在默认 section 之上注册 [`WorkspaceStateSection`]，给 Agent 提供权限边界感知。
 pub fn build_system_prompt_with_state(context: WorkspaceContext, state: WorkspaceState) -> String {
+    build_system_prompt_with_state_and_skills(context, state, None, None, 0)
+}
+
+pub fn build_system_prompt_with_state_and_skills(
+    context: WorkspaceContext,
+    state: WorkspaceState,
+    skill_set: Option<&crate::core::skill::SkillSet>,
+    skill_cfg: Option<&crate::infra::config::SkillsConfig>,
+    context_budget_chars: usize,
+) -> String {
     let mut builder = SystemPromptBuilder::default();
     builder.register(Box::new(WorkspaceStateSection::new(state)));
+    if let (Some(skill_set), Some(skill_cfg)) = (skill_set, skill_cfg) {
+        if let Some(section) =
+            AvailableSkillsSection::from_skill_set(skill_set, context_budget_chars, skill_cfg)
+        {
+            builder.register(Box::new(section));
+        }
+    }
     builder.build(&context)
 }

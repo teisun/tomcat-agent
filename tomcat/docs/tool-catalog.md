@@ -53,6 +53,41 @@ Parameters:
 }
 ```
 
+### `load_skill`
+
+- Label: Load Skill
+- Category: `filesystem`
+- Permission scope: `Read`
+- Read only: `true`
+- Destructive: `false`
+- Search hint: `load skill body attachment by name`
+
+Load one skill body by its declared name instead of guessing a file path. Use this after reading `<available_skills>` when a skill's full instructions are needed. Required `name` selects the skill; optional `file` reads a relative attachment inside the same skill directory (for example `references/COMMIT_CONVENTION.md`). The read still goes through the existing permission gate, and reviewer/verifier contexts may reject this tool.
+
+Parameters:
+
+```json
+{
+  "properties": {
+    "file": {
+      "description": "技能目录下的相对附件路径；省略或 null 表示读取主 SKILL.md 正文。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "Skill 名称（来自 <available_skills> 的 name 字段）。",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "type": "object"
+}
+```
+
 ### `write`
 
 - Label: Write File

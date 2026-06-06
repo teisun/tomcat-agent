@@ -210,6 +210,7 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
             .map(|path| format_home_path(&path))
             .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
         agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+        tool_lines: None,
     };
     build_system_prompt_with_state(
         workspace_context,

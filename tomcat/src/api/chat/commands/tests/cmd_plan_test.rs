@@ -9,6 +9,7 @@ use crate::core::plan_runtime::file_store::{
 };
 use crate::core::plan_runtime::PlanState;
 use crate::AppConfig;
+use serial_test::serial;
 
 struct EnvGuard {
     key: &'static str,
@@ -37,6 +38,11 @@ impl Drop for EnvGuard {
             }
         }
     }
+}
+
+fn ensure_plans_dir_exists() {
+    let plans_dir = file_store::plans_dir().expect("plans dir");
+    std::fs::create_dir_all(&plans_dir).expect("create plans dir");
 }
 
 #[test]
@@ -97,6 +103,7 @@ fn parse_plan_build_without_id_uses_default_target() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_plan_build_returns_continue_for_existing_plan() {
     const API_ENV: &str = "TOMCAT_CMD_PLAN_BUILD_TEST_KEY";
 
@@ -111,6 +118,7 @@ fn run_plan_build_returns_continue_for_existing_plan() {
     cfg.llm.api_key_env = Some(API_ENV.to_string());
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
+    ensure_plans_dir_exists();
     let plan_id = "ship-001";
     let plan_path = file_store::plan_path_for_id(plan_id).expect("plan path");
     let plan = PlanFile {
@@ -136,12 +144,14 @@ fn run_plan_build_returns_continue_for_existing_plan() {
     let outcome = run(
         &ctx,
         PlanCommand::Build {
-            plan_target: Some(plan_id.to_string()),
+            plan_target: Some(plan_path.to_string_lossy().to_string()),
         },
     );
 
     match outcome {
-        ChatCommandOutcome::Continue { line, echo_user } => {
+        ChatCommandOutcome::Continue {
+            line, echo_user, ..
+        } => {
             assert!(echo_user, "/plan build 自动开跑时应回显 user line");
             assert_eq!(
                 line,
@@ -159,6 +169,7 @@ fn run_plan_build_returns_continue_for_existing_plan() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_plan_build_without_target_uses_runtime_default_source() {
     const API_ENV: &str = "TOMCAT_CMD_PLAN_BUILD_DEFAULT_TEST_KEY";
 
@@ -173,6 +184,7 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
     cfg.llm.api_key_env = Some(API_ENV.to_string());
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
+    ensure_plans_dir_exists();
     let plan_id = "ship-default";
     let plan_path = file_store::plan_path_for_id(plan_id).expect("plan path");
     let plan = PlanFile {
@@ -200,7 +212,9 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
     let outcome = run(&ctx, PlanCommand::Build { plan_target: None });
 
     match outcome {
-        ChatCommandOutcome::Continue { line, echo_user } => {
+        ChatCommandOutcome::Continue {
+            line, echo_user, ..
+        } => {
             assert!(echo_user);
             assert_eq!(
                 line,
@@ -215,6 +229,7 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn run_plan_exit_allows_pending_back_to_chat() {
     const API_ENV: &str = "TOMCAT_CMD_PLAN_EXIT_PENDING_TEST_KEY";
 

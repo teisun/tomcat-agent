@@ -104,6 +104,20 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
+        name: "load_skill",
+        label: "Load Skill",
+        description: "Load one skill body by its declared name instead of guessing a file path. Use this after reading `<available_skills>` when a skill's full instructions are needed. Required `name` selects the skill; optional `file` reads a relative attachment inside the same skill directory (for example `references/COMMIT_CONVENTION.md`). The read still goes through the existing permission gate, and reviewer/verifier contexts may reject this tool.\n",
+        display_summary: Some("Load one skill body or attachment by skill name."),
+        parameters: load_skill_parameters,
+        scope: PermissionScope::Read,
+        category: None,
+        read_only: true,
+        destructive: false,
+        search_hint: Some("load skill body attachment by name"),
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
         name: "write",
         label: "Write File",
         description: "Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit for small surgical changes to existing files. Writes may require user confirmation and are audited.\n",
@@ -376,7 +390,7 @@ pub fn build_function_definitions() -> Vec<Value> {
 pub fn build_function_definitions_for_chat_default() -> Vec<Value> {
     BUILTIN_TOOL_CATALOG
         .iter()
-        .filter(|entry| !entry.plan_only)
+        .filter(|entry| !entry.plan_only && entry.name != "load_skill")
         .map(|entry| {
             serde_json::json!({
                 "type": "function",
@@ -391,8 +405,13 @@ pub fn build_function_definitions_for_chat_default() -> Vec<Value> {
 }
 
 pub fn render_core_identity_tool_lines() -> String {
+    render_core_identity_tool_lines_with_policy(true)
+}
+
+pub fn render_core_identity_tool_lines_with_policy(allow_load_skill: bool) -> String {
     BUILTIN_TOOL_CATALOG
         .iter()
+        .filter(|entry| allow_load_skill || entry.name != "load_skill")
         .map(|entry| format!("- {}: {}", entry.name, entry.display_summary()))
         .collect::<Vec<_>>()
         .join("\n")
@@ -548,6 +567,22 @@ fn read_parameters() -> Value {
             }
         }),
         &["path"],
+    )
+}
+
+fn load_skill_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "name": {
+                "type": "string",
+                "description": "Skill 名称（来自 <available_skills> 的 name 字段）。"
+            },
+            "file": {
+                "type": ["string", "null"],
+                "description": "技能目录下的相对附件路径；省略或 null 表示读取主 SKILL.md 正文。"
+            }
+        }),
+        &["name"],
     )
 }
 

@@ -1,4 +1,8 @@
 use super::super::system_prompt::*;
+use crate::core::skill::{Skill, SkillSet, SkillSource};
+use crate::infra::config::SkillsConfig;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[test]
 fn build_system_prompt_contains_tools_and_workspace() {
@@ -176,6 +180,7 @@ fn fixture_context() -> WorkspaceContext {
         agent_definition_dir: "/Users/yan/.tomcat/workspace-main".into(),
         agent_plans_dir: "~/.tomcat/plans".into(),
         agent_trail_dir: "/Users/yan/.tomcat/agents/main".into(),
+        tool_lines: None,
     }
 }
 
@@ -285,4 +290,121 @@ fn workspace_context_section_describes_three_directories() {
     assert!(prompt.contains("Agent trail directory (agent_trail_dir):"));
     assert!(prompt.contains("Permission: read-only"));
     assert!(prompt.contains("Do NOT treat it as the user's current directory"));
+}
+
+#[test]
+fn build_system_prompt_with_state_and_skills_includes_available_skills_block() {
+    let prompt = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&fixture_skill_set()),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert!(prompt.contains("<available_skills>"));
+    assert!(prompt.contains("<skill name=\"commit\">"));
+    assert!(prompt.contains("Create a git commit"));
+    assert!(!prompt.contains("hidden-review"));
+}
+
+#[test]
+fn available_skills_section_renders_metadata_only() {
+    let prompt = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&fixture_skill_set()),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert!(prompt.contains("<skill name=\"commit\">Create a git commit</skill>"));
+    assert!(!prompt.contains("/tmp/commit/SKILL.md"));
+    assert!(!prompt.contains("# Commit"));
+}
+
+#[test]
+fn skills_prompt_truncates_at_budget() {
+    let overhead = crate::core::prompts::render(
+        crate::core::prompts::PromptKey::SystemAvailableSkills,
+        &[("skills_block", "")],
+    )
+    .len();
+    let cfg = SkillsConfig {
+        prompt_budget_pct: 0,
+        prompt_budget_floor_chars: overhead + 30,
+        ..SkillsConfig::default()
+    };
+    let prompt = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&fixture_skill_set()),
+        Some(&cfg),
+        overhead + 30,
+    );
+    assert!(prompt.contains("<available_skills>"));
+    assert!(prompt.contains("<skill name=\"commit\" />"));
+    assert!(!prompt.contains("Create a git commit"));
+}
+
+#[test]
+fn disabled_skill_absent_from_prompt() {
+    let prompt = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&fixture_skill_set()),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert!(prompt.contains("commit"));
+    assert!(!prompt.contains("hidden-review"));
+    assert!(!prompt.contains("Only for manual reviewer usage"));
+}
+
+#[test]
+fn available_skills_section_sits_before_workspace_state() {
+    let prompt = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&fixture_skill_set()),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let skills_pos = prompt
+        .find("<available_skills>")
+        .expect("available skills section");
+    let state_pos = prompt.find("Workspace State").expect("workspace state");
+    assert!(
+        skills_pos < state_pos,
+        "skills section should come before workspace state"
+    );
+}
+
+fn fixture_skill_set() -> SkillSet {
+    let mut by_name = BTreeMap::new();
+    by_name.insert(
+        "commit".into(),
+        Skill {
+            name: "commit".into(),
+            description: "Create a git commit".into(),
+            file_path: PathBuf::from("/tmp/commit/SKILL.md"),
+            base_dir: PathBuf::from("/tmp/commit"),
+            source: SkillSource::Project,
+            disable_model_invocation: false,
+        },
+    );
+    by_name.insert(
+        "hidden-review".into(),
+        Skill {
+            name: "hidden-review".into(),
+            description: "Only for manual reviewer usage".into(),
+            file_path: PathBuf::from("/tmp/hidden-review/SKILL.md"),
+            base_dir: PathBuf::from("/tmp/hidden-review"),
+            source: SkillSource::Project,
+            disable_model_invocation: true,
+        },
+    );
+    SkillSet {
+        by_name,
+        diagnostics: Vec::new(),
+        warnings: Vec::new(),
+    }
 }

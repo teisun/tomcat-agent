@@ -327,6 +327,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
         "logs",
         "audit",
         "tmp",
+        "skills",
         "tool-results",
         "checkpoints",
     ] {
@@ -336,7 +337,14 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let ws = resolve_agent_definition_dir(cfg)?;
     std::fs::create_dir_all(&ws).map_err(AppError::Io)?;
 
-    for dir in ["memory", "credentials", "media", "subagents", "plugins"] {
+    for dir in [
+        "memory",
+        "credentials",
+        "media",
+        "subagents",
+        "plugins",
+        "skills",
+    ] {
         std::fs::create_dir_all(work.join(dir)).map_err(AppError::Io)?;
     }
 
@@ -428,6 +436,25 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             "llm.files.expires_after_seconds 非法: {}（允许 0 或 [3600, 2592000]）",
             expires
         )));
+    }
+    if cfg.skills.prompt_budget_pct > 100 {
+        return Err(AppError::Config(format!(
+            "skills.prompt_budget_pct 非法: {}（允许 [0, 100]）",
+            cfg.skills.prompt_budget_pct
+        )));
+    }
+    if cfg.skills.prompt_budget_floor_chars == 0 {
+        return Err(AppError::Config(
+            "skills.prompt_budget_floor_chars 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.skills.max_description_chars == 0 {
+        return Err(AppError::Config(
+            "skills.max_description_chars 必须大于 0".to_string(),
+        ));
+    }
+    if cfg.skills.max_skills == 0 {
+        return Err(AppError::Config("skills.max_skills 必须大于 0".to_string()));
     }
     let web_search_backend = cfg.tools.web_search.backend.trim().to_ascii_lowercase();
     if !["auto", "openai", "tavily", "brave", "serper"].contains(&web_search_backend.as_str()) {

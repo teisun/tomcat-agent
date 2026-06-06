@@ -44,6 +44,7 @@
 | **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `DONE` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
 | **T2-P1-012** | `web_search` 工具                              | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-012.md](./tasks/T2-P1-012.md) |
 | **T2-P1-013** | `web_fetch` 工具                               | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-013.md](./tasks/T2-P1-013.md) |
+| **T2-P1-014** | Skill 系统                                     | `PENDING_INTEGRATION` | Spike | `feature/skill-system`                 | [tasks/T2-P1-014.md](./tasks/T2-P1-014.md) |
 
 
 ## 5. 开放任务依赖（概览）
@@ -58,19 +59,22 @@ flowchart LR
     P111[T2-P1-011<br/>Current-Tail Guard]
     P112[T2-P1-012<br/>web_search]
     P113[T2-P1-013<br/>web_fetch]
+    P114[T2-P1-014<br/>Skill 系统]
     P008 -.->|TUI 增强后可并行| P109
     P112 -.->|共享 tool_exec 热区| P113
+    P113 -.->|共享 tool_exec 热区| P114
     P110 -.->|continuity 基础已具备| P010
     P009
     P110
     P111
     P112
     P113
+    P114
 ```
 
 
 
-> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。**T2-P1-012 / T2-P1-013** 已于 2026-06-05 合入 `develop`；其实现以各自架构文档为 SSoT，共享 `tool_exec/` 热区，后续问题追踪仍回到对应任务卡。
+> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。**T2-P1-012 / T2-P1-013** 已于 2026-06-05 合入 `develop`；其实现以各自架构文档为 SSoT，共享 `tool_exec/` 热区，后续问题追踪仍回到对应任务卡。**T2-P1-014** 以 `docs/architecture/skill-system.md` 为 SSoT，本期按 §4.2 做 PR-SK-A→C，PR-SK-B（官方资产 + init）下期；与 T2-P1-012/013 共享 `tool_exec/`、`system_prompt/` 热区。
 
 ---
 

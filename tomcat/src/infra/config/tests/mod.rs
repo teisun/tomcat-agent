@@ -15,5 +15,6 @@ mod context_cfg_test;
 mod defaults_test;
 mod load_test;
 mod mocks;
+mod skills_cfg_test;
 mod tools_cfg_test;
 mod validate_test;

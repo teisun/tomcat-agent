@@ -130,6 +130,9 @@ pub struct AgentLoopConfig {
     /// 顶层 chat_loop 必填；reviewer 子 Agent 与脱离 PlanRuntime 的单测/独立 AgentLoop 可为 `None`，
     /// 此时 tool_exec 收到这四个工具的调用会返回 `ToolError::PlanRuntimeUnavailable` 文案。
     pub plan_runtime: Option<Arc<crate::core::plan_runtime::PlanRuntime>>,
+    /// Skill 目录账本：root chat 透传共享 `SkillSet`，`load_skill` 按名解析用；
+    /// reviewer/verifier 或无 Skill 上下文的独立 loop 可为 `None`。
+    pub skill_set: Option<Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -153,6 +156,7 @@ impl Default for AgentLoopConfig {
             subagent_type: SubagentType::User,
             review_kind: None,
             plan_runtime: None,
+            skill_set: None,
         }
     }
 }

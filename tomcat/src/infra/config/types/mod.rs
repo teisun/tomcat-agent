@@ -5,6 +5,7 @@ mod core;
 mod llm;
 mod primitive;
 mod runtime;
+mod skills;
 mod tools;
 
 pub use context::*;
@@ -12,6 +13,7 @@ pub use core::*;
 pub use llm::*;
 pub use primitive::*;
 pub use runtime::*;
+pub use skills::*;
 pub use tools::*;
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,8 @@ pub struct AppConfig {
     pub context: ContextConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub skills: SkillsConfig,
     #[serde(default)]
     pub wasm: WasmConfig,
     /// PLAN 模式运行时全局参数（T2-P1-002 PR-PLA/PLB）。

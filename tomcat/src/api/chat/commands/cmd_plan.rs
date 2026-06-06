@@ -105,6 +105,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
                     return ChatCommandOutcome::Continue {
                         line: format!("start building {}", outcome.plan_path.to_string_lossy()),
                         echo_user: true,
+                        history_line: None,
                     };
                 }
                 Err(e) => eprintln!("[plan] /plan build 拒绝：{}", e),

@@ -9,6 +9,7 @@ mod models_toml;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod session_cmd;
+mod skill_cmd;
 pub(crate) mod splash;
 mod workspace_cmd;
 
@@ -29,6 +30,7 @@ pub(crate) use init::{run_doctor, run_init};
 pub(crate) use pathrules_cmd::run_pathrules;
 pub(crate) use plugin_cmd::run_plugin;
 pub(crate) use session_cmd::run_session;
+pub(crate) use skill_cmd::run_skill;
 pub(crate) use workspace_cmd::run_workspace;
 
 use chat_cmd::run_chat;
@@ -84,6 +86,11 @@ pub enum Commands {
     Audit {
         #[command(subcommand)]
         sub: AuditSub,
+    },
+    /// Skill 管理：list/reload
+    Skill {
+        #[command(subcommand)]
+        sub: SkillSub,
     },
     /// 工作区管理：add/list/remove
     Workspace {
@@ -221,6 +228,14 @@ pub enum AuditSub {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum SkillSub {
+    /// 列出当前发现到的 skill 与诊断
+    List,
+    /// 重扫技能目录并打印新的发现结果
+    Reload,
+}
+
 /// 解析参数并执行对应子命令；无子命令时默认执行 chat。
 pub fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
@@ -264,6 +279,7 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Pathrules { sub } => run_pathrules(sub, &cfg),
         Commands::Plugin { sub } => run_plugin(sub, &cfg),
         Commands::Audit { sub } => run_audit(sub, &cfg),
+        Commands::Skill { sub } => run_skill(sub, &cfg),
         Commands::Chat { resume } => run_chat(resume, &cfg),
         _ => unreachable!(),
     }

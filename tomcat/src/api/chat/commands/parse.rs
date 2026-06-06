@@ -1,10 +1,11 @@
 //! # Chat command parsing and dispatch
 //!
-//! `tomcat chat` currently supports two local commands before a line is sent to the
+//! `tomcat chat` supports a small set of local commands before a line is sent to the
 //! LLM:
 //!
-//! - `/path <path>` asks for access to one path through the existing permission
-//!   menu.
+//! - `/path <path>` asks for access to one path through the existing permission menu.
+//! - `/model ...`, `/plan ...`, `/skill ...`, `/ckpt ...`, `/restore ...` manage
+//!   session-local runtime state.
 //! - `/help` prints the command list.
 //!
 //! Command names are intentionally case-sensitive and lowercase-only. Unknown
@@ -14,10 +15,13 @@ use std::path::PathBuf;
 
 use crate::api::chat::ChatContext;
 
-use super::{cmd_ckpt, cmd_help, cmd_model, cmd_path, cmd_plan, cmd_restore, cmd_thinking};
+use super::{
+    cmd_ckpt, cmd_help, cmd_model, cmd_path, cmd_plan, cmd_restore, cmd_skill, cmd_thinking,
+};
 
 pub use cmd_model::ModelCommand;
 pub use cmd_plan::PlanCommand;
+pub use cmd_skill::SkillCommand;
 pub use cmd_thinking::ThinkingAction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +59,8 @@ pub enum ChatCommand {
     },
     /// `/plan` 子命令族（plan-runtime.md §4.1 R1）。
     Plan(PlanCommand),
+    /// `/skill` 子命令族：列出 / 重载 / 显式注入技能正文。
+    Skill(SkillCommand),
     /// Recognized command with invalid arguments.
     UsageError {
         message: String,
@@ -63,7 +69,11 @@ pub enum ChatCommand {
 
 pub(crate) enum ChatCommandOutcome {
     /// Send `line` to the LLM as the current user turn.
-    Continue { line: String, echo_user: bool },
+    Continue {
+        line: String,
+        echo_user: bool,
+        history_line: Option<String>,
+    },
     /// Command was fully handled locally; skip the current turn.
     Handled,
 }
@@ -77,7 +87,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
     let first_token = trimmed.split_whitespace().next().unwrap_or_default();
     if !matches!(
         first_token,
-        "/path" | "/help" | "/thinking" | "/model" | "/ckpt" | "/restore" | "/plan"
+        "/path" | "/help" | "/thinking" | "/model" | "/ckpt" | "/restore" | "/plan" | "/skill"
     ) {
         return ChatCommand::NotACommand(line.to_string());
     }
@@ -99,11 +109,12 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/ckpt" => parse_ckpt_args(tokens),
         "/restore" => parse_restore_args(tokens),
         "/plan" => cmd_plan::parse_args(tokens),
+        "/skill" => cmd_skill::parse_args(tokens),
         _ => ChatCommand::NotACommand(line.to_string()),
     }
 }
 
-pub(crate) fn dispatch_chat_command(
+pub(crate) async fn dispatch_chat_command(
     ctx: &ChatContext,
     command: ChatCommand,
     rl: &mut rustyline::DefaultEditor,
@@ -112,6 +123,7 @@ pub(crate) fn dispatch_chat_command(
         ChatCommand::NotACommand(line) => ChatCommandOutcome::Continue {
             line,
             echo_user: false,
+            history_line: None,
         },
         ChatCommand::Help => cmd_help::run(),
         ChatCommand::UsageError { message } => {
@@ -133,6 +145,7 @@ pub(crate) fn dispatch_chat_command(
             dry_run,
         } => cmd_restore::run(ctx, checkpoint_id, paths, dry_run),
         ChatCommand::Plan(plan_cmd) => cmd_plan::run(ctx, plan_cmd),
+        ChatCommand::Skill(skill_cmd) => cmd_skill::run(ctx, skill_cmd).await,
     }
 }
 

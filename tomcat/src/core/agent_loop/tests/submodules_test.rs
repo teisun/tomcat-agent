@@ -22,6 +22,7 @@ use crate::core::agent_loop::error_classifier::handle_overflow_retry;
 use crate::core::agent_loop::tool_exec::{execute_tool, execute_tool_with_openai_files};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
 use crate::core::llm::{ChatMessage, ModelCatalog};
+use crate::core::skill::{Skill, SkillSet, SkillSource};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::web_fetch::{types::WebFetchOutput, WebFetchFormat, WebFetchRuntime};
 use crate::core::tools::web_search::types::{Hit, Stats, WebSearchArgs, WebSearchOutput};
@@ -29,6 +30,7 @@ use crate::core::tools::web_search::WebSearchRuntime;
 use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
 use crate::AppConfig;
+use parking_lot::{Mutex, RwLock};
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
 
@@ -42,6 +44,123 @@ fn make_agent() -> AgentLoop {
         ..Default::default()
     };
     AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new())
+}
+
+struct SkillFilePrimitive;
+
+#[async_trait::async_trait]
+impl PrimitiveExecutor for SkillFilePrimitive {
+    async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
+        std::fs::read_to_string(path).map_err(AppError::Io)
+    }
+
+    async fn list_dir(
+        &self,
+        _path: &str,
+        _plugin_id: &str,
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+        Ok(vec![])
+    }
+
+    async fn write_file(
+        &self,
+        _path: &str,
+        _content: &str,
+        _overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        unreachable!()
+    }
+
+    async fn edit_file(
+        &self,
+        _path: &str,
+        _edits: Vec<crate::core::tools::primitive::EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        unreachable!()
+    }
+
+    async fn execute_bash(
+        &self,
+        _command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        unreachable!()
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _operation: crate::core::tools::primitive::PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        unreachable!()
+    }
+}
+
+struct RecordingSkillPrimitive {
+    reads: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl PrimitiveExecutor for RecordingSkillPrimitive {
+    async fn read_file(&self, path: &str, plugin_id: &str) -> Result<String, AppError> {
+        self.reads
+            .lock()
+            .push((path.to_string(), plugin_id.to_string()));
+        std::fs::read_to_string(path).map_err(AppError::Io)
+    }
+
+    async fn list_dir(
+        &self,
+        _path: &str,
+        _plugin_id: &str,
+    ) -> Result<Vec<crate::core::tools::primitive::DirEntry>, AppError> {
+        Ok(vec![])
+    }
+
+    async fn write_file(
+        &self,
+        _path: &str,
+        _content: &str,
+        _overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<crate::core::tools::primitive::WriteFileResult, AppError> {
+        unreachable!()
+    }
+
+    async fn edit_file(
+        &self,
+        _path: &str,
+        _edits: Vec<crate::core::tools::primitive::EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
+        unreachable!()
+    }
+
+    async fn execute_bash(
+        &self,
+        _command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
+        unreachable!()
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _operation: crate::core::tools::primitive::PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        unreachable!()
+    }
 }
 
 /// 非 context overflow 错误（429 限流）：handle_overflow_retry 应当跳过 trim，
@@ -133,6 +252,359 @@ async fn tool_exec_legacy_read_file_returns_unknown_tool_error() {
         "msg should mention the unknown tool name: {}",
         msg
     );
+}
+
+#[tokio::test]
+async fn tool_exec_load_skill_resolves_by_name() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n1. Run git status.\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-1".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit"}"#.into(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(
+        !outcome.is_error,
+        "load_skill should succeed: {}",
+        outcome.model_text
+    );
+    assert!(outcome.model_text.contains("<skill name=\"commit\""));
+    assert!(outcome.model_text.contains("# Commit"));
+    assert!(!outcome
+        .model_text
+        .contains("description: Create a git commit."));
+}
+
+#[tokio::test]
+async fn tool_exec_load_skill_rejected_for_reviewer() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-reviewer".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit"}"#.into(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::Reviewer,
+        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome
+        .model_text
+        .contains("reviewer 子 Agent 禁止调用工具 `load_skill`"));
+}
+
+#[tokio::test]
+async fn tool_exec_load_skill_rejected_for_verifier() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-verifier".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit"}"#.into(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::Verifier,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome
+        .model_text
+        .contains("verifier 子 Agent 禁止调用工具 `load_skill`"));
+}
+
+#[tokio::test]
+async fn tool_exec_load_skill_unknown_name_errors() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-unknown".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"missing-skill"}"#.into(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome.model_text.contains("未知 skill `missing-skill`"));
+    assert!(outcome.model_text.contains("commit"));
+}
+
+#[tokio::test]
+async fn tool_exec_load_skill_file_escape_denied() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outside = dir.path().join("outside.md");
+    std::fs::write(&outside, "secret").unwrap();
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-escape".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit","file":"../outside.md"}"#.into(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome.model_text.contains("越出技能目录"));
+}
+
+#[tokio::test]
+async fn load_skill_body_load_passes_gate() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_path = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_path,
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_path.clone(),
+        skill_dir.clone(),
+        false,
+    )));
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(RecordingSkillPrimitive {
+        reads: reads.clone(),
+    });
+    let tc = ToolCallInfo {
+        id: "load-skill-gate".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit"}"#.into(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!outcome.is_error);
+    let reads = reads.lock();
+    assert_eq!(
+        reads.len(),
+        1,
+        "load_skill should route through primitive.read_file"
+    );
+    assert!(std::path::Path::new(&reads[0].0)
+        .ends_with(std::path::Path::new("commit").join("SKILL.md")));
+    assert_eq!(reads[0].1, "__agent__");
+}
+
+fn skill_set_with_single_skill(
+    name: &str,
+    description: &str,
+    file_path: std::path::PathBuf,
+    base_dir: std::path::PathBuf,
+    disable_model_invocation: bool,
+) -> SkillSet {
+    let mut by_name = std::collections::BTreeMap::new();
+    by_name.insert(
+        name.to_string(),
+        Skill {
+            name: name.to_string(),
+            description: description.to_string(),
+            file_path,
+            base_dir,
+            source: SkillSource::Project,
+            disable_model_invocation,
+        },
+    );
+    SkillSet {
+        by_name,
+        diagnostics: Vec::new(),
+        warnings: Vec::new(),
+    }
 }
 
 /// `web_search` 需要会话级 runtime；未注入时应返回结构化错误而非误判 unknown tool。
@@ -413,6 +885,7 @@ async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent()
         None,
         None,
         None,
+        None,
         SubagentType::Verifier,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -573,6 +1046,7 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
             None,
             None,
             None,
+            None,
             SubagentType::User,
             None,
             &tokio_util::sync::CancellationToken::new(),
@@ -643,6 +1117,7 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
         None,
         None,
         None,
+        None,
         SubagentType::User,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -698,6 +1173,7 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
         &primitive,
         &None,
         &registry_opt,
+        None,
         None,
         None,
         None,
@@ -772,6 +1248,7 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         None,
         None,
         None,
+        None,
         SubagentType::User,
         None,
         &cancel,
@@ -835,6 +1312,7 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
         None,
         None,
         None,
+        None,
         SubagentType::User,
         None,
         &tokio_util::sync::CancellationToken::new(),
@@ -891,6 +1369,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
         &primitive,
         &None,
         &registry_opt,
+        None,
         None,
         None,
         None,
@@ -962,6 +1441,7 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         &primitive,
         &None,
         &registry_opt,
+        None,
         None,
         None,
         None,
