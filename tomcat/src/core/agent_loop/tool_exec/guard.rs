@@ -3,31 +3,56 @@ use std::sync::Arc;
 pub(super) fn is_reviewer_whitelisted_tool(
     name: &str,
     review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
+    expose_skills: bool,
 ) -> bool {
     match review_kind.unwrap_or(crate::core::plan_runtime::review::ReviewKind::Plan) {
-        crate::core::plan_runtime::review::ReviewKind::Plan => matches!(
-            name,
-            "read" | "search_files" | "list_dir" | "todos" | "update_plan" | "edit"
-        ),
+        crate::core::plan_runtime::review::ReviewKind::Plan => {
+            matches!(
+                name,
+                "read" | "search_files" | "list_dir" | "todos" | "update_plan" | "edit"
+            ) || (expose_skills && name == "load_skill")
+        }
         crate::core::plan_runtime::review::ReviewKind::Code => {
             matches!(name, "read" | "search_files" | "list_dir" | "bash")
+                || (expose_skills && name == "load_skill")
         }
     }
 }
 
 pub(super) fn reviewer_allowed_tools_description(
     review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
-) -> &'static str {
-    match review_kind.unwrap_or(crate::core::plan_runtime::review::ReviewKind::Plan) {
+) -> String {
+    let base = match review_kind.unwrap_or(crate::core::plan_runtime::review::ReviewKind::Plan) {
         crate::core::plan_runtime::review::ReviewKind::Plan => {
             "read/search_files/list_dir/todos/update_plan/edit"
         }
         crate::core::plan_runtime::review::ReviewKind::Code => "read/search_files/list_dir/bash",
-    }
+    };
+    base.to_string()
 }
 
-pub(super) fn is_verifier_whitelisted_tool(name: &str) -> bool {
+pub(super) fn reviewer_allowed_tools_description_with_policy(
+    review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
+    expose_skills: bool,
+) -> String {
+    let mut desc = reviewer_allowed_tools_description(review_kind);
+    if expose_skills {
+        desc.push_str("/load_skill");
+    }
+    desc
+}
+
+pub(super) fn is_verifier_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
     matches!(name, "read" | "search_files" | "list_dir" | "bash")
+        || (expose_skills && name == "load_skill")
+}
+
+pub(super) fn verifier_allowed_tools_description(expose_skills: bool) -> String {
+    let mut desc = "read/search_files/list_dir/bash".to_string();
+    if expose_skills {
+        desc.push_str("/load_skill");
+    }
+    desc
 }
 
 pub(super) fn check_mutation_stamp(

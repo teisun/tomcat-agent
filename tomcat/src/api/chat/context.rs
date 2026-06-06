@@ -261,6 +261,7 @@ impl ChatContext {
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
+        plan_runtime.set_expose_skills_to_reviewer(config.skills.expose_to_reviewer);
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));
         plan_runtime.attach_ask_question_panel(ask_question_panel);
@@ -298,6 +299,8 @@ impl ChatContext {
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
+                skill_set: skill_set.clone(),
+                skills_config: config.skills.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
                 model: reviewer_model,
                 max_turns: reviewer_max_turns,
@@ -318,6 +321,8 @@ impl ChatContext {
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
+                skill_set: skill_set.clone(),
+                skills_config: config.skills.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
                 model: config.llm.default_model.clone(),
             },

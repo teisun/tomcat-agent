@@ -68,6 +68,17 @@ pub fn reviewer_allowed_tools_for(kind: ReviewKind) -> &'static [&'static str] {
     }
 }
 
+pub fn reviewer_allowed_tools_with_policy(
+    kind: ReviewKind,
+    expose_skills: bool,
+) -> Vec<&'static str> {
+    let mut tools = reviewer_allowed_tools_for(kind).to_vec();
+    if expose_skills {
+        tools.push("load_skill");
+    }
+    tools
+}
+
 pub fn reviewer_system_prompt_text() -> &'static str {
     load_prompt(PromptKey::ReviewerPlan)
 }

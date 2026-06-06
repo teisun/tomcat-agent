@@ -1,3 +1,5 @@
+mod common;
+
 use async_trait::async_trait;
 use serial_test::serial;
 use std::collections::VecDeque;
@@ -239,6 +241,15 @@ fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_onl
     std::fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
 }
 
+fn write_live_skill_fixture(workspace: &Path, name: &str, description: &str, secret_token: &str) {
+    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    std::fs::create_dir_all(&skill_dir).expect("create live skill dir");
+    let content = format!(
+        "---\nname: {name}\ndescription: {description}\n---\n# Live Commit Skill\nsecret-token: {secret_token}\n1. Run git status.\n"
+    );
+    std::fs::write(skill_dir.join("SKILL.md"), content).expect("write live skill");
+}
+
 fn build_system_text(ctx: &ChatContext, skill_set: &tomcat::core::skill::SkillSet) -> String {
     let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
     tomcat::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
@@ -340,4 +351,91 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
     assert!(tool_text.contains("<skill name=\"commit\""));
     assert!(tool_text.contains("# Commit"));
     assert!(!tool_text.contains("description: Create a git commit"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn live_skill_load_roundtrip_with_real_llm() {
+    if std::env::var("PI_LIVE_SKILL").ok().as_deref() != Some("1") {
+        return;
+    }
+    common::load_openai_test_env();
+    let _api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
+        panic!("live_skill_load_roundtrip_with_real_llm 要求设置 OPENAI_API_KEY（环境变量或 tomcat/.env）")
+    });
+
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    const SECRET_TOKEN: &str = "LIVE_SKILL_TOKEN_42";
+    write_live_skill_fixture(
+        workspace.path(),
+        "commit",
+        "Use when the task is to create a git commit.",
+        SECRET_TOKEN,
+    );
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
+    cfg.llm.default_model =
+        std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
+    cfg.workspace.workspace_roots = vec![workspace.path().to_string_lossy().to_string()];
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+
+    let skill_set = tomcat::core::skill::discover(&ctx.config, &ctx.agent_workspace_dir);
+    *ctx.skill_set.write() = skill_set.clone();
+    let system_text = build_system_text(&ctx, &skill_set);
+
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, &system_text).unwrap();
+    let prompt = format!(
+        "Choose the available skill whose description matches creating a git commit. \
+Before answering, you MUST load that skill via the load_skill tool and read its full body. \
+After the tool returns, reply with exactly two lines: first the secret token from the loaded skill body, then `SKILL_LIVE_OK`. \
+Do not use any tool other than load_skill."
+    );
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        run_chat_turn(
+            &ctx,
+            &prompt,
+            &system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 180s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("live skill path should complete, got: {other:?}"),
+    };
+    assert!(
+        result.final_text.contains(SECRET_TOKEN),
+        "assistant should surface the body-only token after load_skill, got: {:?}",
+        result.final_text
+    );
+    assert!(
+        result.final_text.contains("SKILL_LIVE_OK"),
+        "assistant should confirm live skill completion, got: {:?}",
+        result.final_text
+    );
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg
+                    .text_content()
+                    .is_some_and(|text| text.contains("<skill name=\"commit\""))
+        })
+        .expect("tool result should exist");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    assert!(tool_text.contains("<skill name=\"commit\""));
+    assert!(tool_text.contains(SECRET_TOKEN));
 }

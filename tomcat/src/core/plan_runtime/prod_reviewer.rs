@@ -29,7 +29,7 @@ use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::plan_runtime::review::{
     build_code_review_prompt, build_review_prompt, code_review_system_prompt_text,
-    parse_review_block, resolve_internal_tools, reviewer_allowed_tools_for,
+    parse_review_block, resolve_internal_tools, reviewer_allowed_tools_with_policy,
     reviewer_system_prompt_text, ReviewKind, ReviewSummary,
 };
 use crate::core::plan_runtime::{PlanRuntime, ReviewerDispatcher};
@@ -58,6 +58,8 @@ pub struct ProdReviewerDeps {
     pub read_file_state: Arc<ReadFileState>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
     pub agent_workspace_dir: std::path::PathBuf,
+    pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
+    pub skills_config: crate::infra::config::SkillsConfig,
     /// Weak 引用避免与 `PlanRuntime::reviewer: Arc<dyn ReviewerDispatcher>` 形成 cycle。
     pub plan_runtime: Weak<PlanRuntime>,
     pub model: String,
@@ -126,7 +128,6 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                 )
             }
         };
-        let tool_defs = resolve_internal_tools(reviewer_allowed_tools_for(kind));
         let turns_limit = deps.max_turns.max(1);
 
         // spawn 闭包需要 'static + Send，所有依赖一次性 clone。
@@ -136,8 +137,25 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
         let context_config = deps.context_config.clone();
+        let context_budget_chars =
+            crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
         let openai_files_runtime = deps.openai_files_runtime.clone();
+        let shared_skill_set = Arc::clone(&deps.skill_set);
+        let skill_set = deps.skill_set.read().clone();
+        let expose_skills =
+            plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
+        let tool_defs =
+            resolve_internal_tools(&reviewer_allowed_tools_with_policy(kind, expose_skills));
+        let skill_prompt = if expose_skills {
+            crate::core::llm::system_prompt::render_available_skills_prompt(
+                &skill_set,
+                context_budget_chars,
+                &deps.skills_config,
+            )
+        } else {
+            None
+        };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
         let model = deps.model.clone();
         let parent_session_id = deps.parent_session_id.clone();
@@ -171,11 +189,15 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         }
                     });
 
-                    let system_text = format!(
+                    let mut system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
                         reviewer_system_prompt(kind),
                         turns_limit
                     );
+                    if let Some(skill_prompt) = skill_prompt.as_ref() {
+                        system_text.push('\n');
+                        system_text.push_str(skill_prompt);
+                    }
                     let cfg = AgentLoopConfig {
                         max_attempts: 3,
                         max_tool_rounds: turns_limit as usize,
@@ -195,7 +217,11 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         subagent_type: SubagentType::Reviewer,
                         review_kind: Some(kind),
                         plan_runtime: Some(plan_runtime_for_loop),
-                        skill_set: None,
+                        skill_set: if expose_skills {
+                            Some(Arc::clone(&shared_skill_set))
+                        } else {
+                            None
+                        },
                     };
                     let mut agent_loop =
                         AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());

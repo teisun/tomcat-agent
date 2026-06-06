@@ -150,31 +150,38 @@ pub struct AvailableSkillsSection {
     rendered: String,
 }
 
+pub fn render_available_skills_prompt(
+    skill_set: &crate::core::skill::SkillSet,
+    context_budget_chars: usize,
+    cfg: &crate::infra::config::SkillsConfig,
+) -> Option<String> {
+    let total_budget =
+        crate::core::skill::compute_skill_prompt_budget_chars(context_budget_chars, cfg);
+    let overhead = render_prompt(PromptKey::SystemAvailableSkills, &[("skills_block", "")]).len();
+    let block_budget = total_budget.saturating_sub(overhead);
+    let rendered = crate::core::skill::render_available_skills_block(
+        skill_set,
+        block_budget,
+        cfg.max_description_chars,
+    );
+    if rendered.block.trim().is_empty() {
+        None
+    } else {
+        Some(render_prompt(
+            PromptKey::SystemAvailableSkills,
+            &[("skills_block", &rendered.block)],
+        ))
+    }
+}
+
 impl AvailableSkillsSection {
     pub fn from_skill_set(
         skill_set: &crate::core::skill::SkillSet,
         context_budget_chars: usize,
         cfg: &crate::infra::config::SkillsConfig,
     ) -> Option<Self> {
-        let total_budget =
-            crate::core::skill::compute_skill_prompt_budget_chars(context_budget_chars, cfg);
-        let overhead =
-            render_prompt(PromptKey::SystemAvailableSkills, &[("skills_block", "")]).len();
-        let block_budget = total_budget.saturating_sub(overhead);
-        let rendered = crate::core::skill::render_available_skills_block(
-            skill_set,
-            block_budget,
-            cfg.max_description_chars,
-        );
-        if rendered.block.trim().is_empty() {
-            return None;
-        }
-        Some(Self {
-            rendered: render_prompt(
-                PromptKey::SystemAvailableSkills,
-                &[("skills_block", &rendered.block)],
-            ),
-        })
+        render_available_skills_prompt(skill_set, context_budget_chars, cfg)
+            .map(|rendered| Self { rendered })
     }
 }
 

@@ -178,7 +178,17 @@ pub(super) async fn run_tool_calls(
         // **下一条 user 消息** 注入 `Parts` 的场景由本调度器在 push tool 之后立刻
         // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
         let outcome = {
-            let exec = tool_exec::execute_tool_full(
+            let expose_skills_to_reviewer = agent
+                .config
+                .plan_runtime
+                .as_ref()
+                .is_some_and(|rt| rt.expose_skills_to_reviewer())
+                && agent
+                    .config
+                    .skill_set
+                    .as_ref()
+                    .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
+            let exec = tool_exec::execute_tool_full_with_policy(
                 &agent.primitive,
                 &agent.config_backend,
                 &agent.bash_task_registry,
@@ -190,6 +200,7 @@ pub(super) async fn run_tool_calls(
                 agent.config.skill_set.as_ref(),
                 agent.config.subagent_type,
                 agent.config.review_kind,
+                expose_skills_to_reviewer,
                 &cancel,
                 tc,
                 Some(&agent.event_bus),

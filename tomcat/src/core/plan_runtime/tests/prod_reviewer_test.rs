@@ -5,7 +5,10 @@ use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
 use super::super::prod_reviewer::ProdReviewerDispatcher;
-use super::super::review::{resolve_internal_tools, reviewer_allowed_tools_for, ReviewKind};
+use super::super::review::{
+    resolve_internal_tools, reviewer_allowed_tools_for, reviewer_allowed_tools_with_policy,
+    ReviewKind,
+};
 use super::super::{PlanRuntime, ReviewerDispatcher};
 use crate::core::plan_runtime::review::build_review_prompt;
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
@@ -63,6 +66,16 @@ fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
     assert!(!names.contains("todos"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("edit"));
+}
+
+#[test]
+fn reviewer_can_expose_load_skill_when_config_enabled() {
+    let tools = resolve_internal_tools(&reviewer_allowed_tools_with_policy(ReviewKind::Plan, true));
+    let names: std::collections::BTreeSet<String> = tools
+        .iter()
+        .map(|v| v["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.contains("load_skill"));
 }
 
 #[test]

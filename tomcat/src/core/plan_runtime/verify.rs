@@ -35,6 +35,14 @@ pub const VERIFIER_MAX_TURNS: u32 = 64;
 /// verifier 子 Agent allowed tools 硬白名单。
 pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
 
+pub(crate) fn verifier_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
+    let mut tools = VERIFIER_ALLOWED_TOOLS.to_vec();
+    if expose_skills {
+        tools.push("load_skill");
+    }
+    tools
+}
+
 pub fn verifier_system_prompt_text() -> &'static str {
     load_prompt(PromptKey::Verifier)
 }
@@ -235,6 +243,8 @@ pub struct ProdVerifierDeps {
     pub read_file_state: Arc<ReadFileState>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
     pub agent_workspace_dir: std::path::PathBuf,
+    pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
+    pub skills_config: crate::infra::config::SkillsConfig,
     pub plan_runtime: Weak<PlanRuntime>,
     pub model: String,
 }
@@ -280,7 +290,6 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let initial_user_message =
             build_verify_prompt(plan_id, plan_text, &plan_path, workspace_root);
-        let tool_defs = resolve_internal_tools(VERIFIER_ALLOWED_TOOLS);
         let turns_limit = VERIFIER_MAX_TURNS;
 
         let llm = Arc::clone(&deps.llm);
@@ -289,18 +298,38 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
         let context_config = deps.context_config.clone();
+        let context_budget_chars =
+            crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
         let openai_files_runtime = deps.openai_files_runtime.clone();
+        let shared_skill_set = Arc::clone(&deps.skill_set);
+        let skill_set = deps.skill_set.read().clone();
+        let expose_skills =
+            plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
+        let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
+        let skill_prompt = if expose_skills {
+            crate::core::llm::system_prompt::render_available_skills_prompt(
+                &skill_set,
+                context_budget_chars,
+                &deps.skills_config,
+            )
+        } else {
+            None
+        };
         let plan_runtime_for_loop = Arc::clone(&plan_runtime);
         let model = deps.model.clone();
         let parent_session_id = deps.parent_session_id.clone();
         let parent_session_id_for_closure = parent_session_id.clone();
         let origin = self.origin;
-        let system_text = format!(
+        let mut system_text = format!(
             "{}\n(max_turns budget: {} reasoning turns)\n",
             verifier_system_prompt_text(),
             turns_limit
         );
+        if let Some(skill_prompt) = skill_prompt.as_ref() {
+            system_text.push('\n');
+            system_text.push_str(skill_prompt);
+        }
 
         let (tx, rx) = tokio::sync::oneshot::channel::<VerifySummary>();
 
@@ -344,7 +373,11 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         subagent_type: SubagentType::Verifier,
                         review_kind: None,
                         plan_runtime: Some(plan_runtime_for_loop),
-                        skill_set: None,
+                        skill_set: if expose_skills {
+                            Some(Arc::clone(&shared_skill_set))
+                        } else {
+                            None
+                        },
                     };
                     let mut agent_loop =
                         AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());

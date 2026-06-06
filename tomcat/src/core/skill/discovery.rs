@@ -125,14 +125,6 @@ fn scan_root(
         let candidate = if file_type.is_dir() {
             let skill_file = path.join("SKILL.md");
             skill_file.is_file().then_some((skill_file, path.clone()))
-        } else if matches!(source, SkillSource::Project)
-            && file_type.is_file()
-            && path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-        {
-            Some((path.clone(), root.to_path_buf()))
         } else {
             None
         };

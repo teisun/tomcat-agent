@@ -13,7 +13,6 @@ use crate::core::llm::LlmScene;
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
-use crate::core::session::read_entries_tail;
 use crate::infra::error::AppError;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
 
@@ -134,6 +133,9 @@ fn append_failed_turn_message(
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
     ensure_session(ctx)?;
+    if ctx.config.skills.enabled {
+        ctx.spawn_skill_discovery_if_needed().await;
+    }
 
     // 启动像素风吉祥物 Splash（仅 TTY 时绘制；文本 banner 仍由下方 println 负责）。
     crate::api::cli::splash::render_mascot(&ctx.config.splash);
@@ -165,18 +167,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
 
     let context_config = &ctx.config.context;
     if ctx.config.skills.enabled {
-        ctx.spawn_skill_discovery_if_needed().await;
         let _ = ctx.await_skill_discovery().await;
     }
     let context_budget_chars = crate::infra::config::compute_context_budget_chars(context_config);
     let mut system_text = build_system_text(ctx, context_budget_chars);
     persist::schedule_checkpoint_prune(ctx);
-    if let Some(path) = ctx.session.current_transcript_path()? {
-        let tail = read_entries_tail(&path, 64).unwrap_or_default();
-        let _ = crate::core::compute_resume_plan(entry.as_ref(), &tail);
-    } else {
-        let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
-    }
+    // ResumePlan 目前恒为 Continue；保留 hook，未来若恢复逻辑需要 tail，可在这里恢复
+    // `read_entries_tail(..., 64)` 预读。
+    let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
     let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
     if let Err(err) = ctx
         .plan_runtime

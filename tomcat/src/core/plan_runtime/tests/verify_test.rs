@@ -6,8 +6,8 @@ use super::super::file_store::{
 use super::super::review::resolve_internal_tools;
 use super::super::verify::{
     build_summary_from_outcome, build_verify_prompt, normalize_for_gate, parse_verify_block,
-    verifier_system_prompt_text, VerifyCheck, VerifySummary, VERIFIER_ALLOWED_TOOLS,
-    VERIFIER_MAX_TURNS,
+    verifier_allowed_tools_with_policy, verifier_system_prompt_text, VerifyCheck, VerifySummary,
+    VERIFIER_ALLOWED_TOOLS, VERIFIER_MAX_TURNS,
 };
 use super::super::PlanRuntime;
 use crate::core::agent_registry::SubagentOutcomeLabel;
@@ -240,6 +240,16 @@ fn verifier_allowed_tools_do_not_include_write_paths() {
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("write"));
     assert!(!names.contains("edit"));
+}
+
+#[test]
+fn verifier_can_expose_load_skill_when_config_enabled() {
+    let tools = resolve_internal_tools(&verifier_allowed_tools_with_policy(true));
+    let names: std::collections::BTreeSet<String> = tools
+        .iter()
+        .map(|v| v["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(names.contains("load_skill"));
 }
 
 #[test]

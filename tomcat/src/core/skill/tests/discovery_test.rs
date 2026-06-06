@@ -109,6 +109,35 @@ fn discover_keeps_diagnostics_for_bad_skill_without_blocking_good_ones() {
     let _ = std::fs::remove_dir_all(&temp);
 }
 
+#[test]
+fn discover_ignores_loose_markdown_files_in_project_root() {
+    let temp = temp_dir("ignore_loose_markdown");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+
+    write_skill(
+        &project.join(".tomcat").join("skills").join("commit.md"),
+        "commit",
+        "loose markdown should be ignored",
+    );
+    write_skill(
+        &project
+            .join(".tomcat")
+            .join("skills")
+            .join("lint")
+            .join("SKILL.md"),
+        "lint",
+        "directory skill",
+    );
+
+    let set = discover(&cfg, &project);
+    assert!(!set.by_name.contains_key("commit"));
+    assert!(set.by_name.contains_key("lint"));
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
 fn base_config(work_dir: &Path) -> AppConfig {
     let mut cfg = AppConfig::default();
     cfg.agent.id = "spike".to_string();

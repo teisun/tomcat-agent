@@ -30,14 +30,14 @@
 │   ├── memory.md                      # 长期记忆（备选名）
 │   ├── memory/                        # 记忆子目录
 │   │   └── YYYY-MM-DD.md             # 按日记忆
-│   ├── skills/                        # 工作区技能（优先级最高）
+│   ├── skills/                        # 工作区技能（优先级最高；详见 skill-system.md）
 │   │   └── <skillName>/SKILL.md      # 各技能定义文件
 │   └── .tomcat/
 │       └── workspace-state.json       # 工作区状态（若启用；与 pi-mono `.pi/` 命名空间区分）
 ├── workspace-<agentId>/               # 非默认 agent 的工作区（结构同上）
 ├── memory/                            # 向量检索索引
 │   └── <agentId>.sqlite               # 按 agent 分文件的 SQLite 索引
-├── skills/                            # 托管技能（managed skills）
+├── skills/                            # 托管技能（managed skills；详见 skill-system.md）
 │   └── <skillName>/SKILL.md           # 通过 Gateway RPC 安装/管理的
 ├── credentials/                       # OAuth 凭据
 ├── media/                             # 媒体文件

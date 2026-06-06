@@ -10,6 +10,7 @@
 - **默认可写根是 `agent_definition_dir`**：即 `~/.tomcat/workspace-main/` 或 `workspace-<agentId>/`，承载 Agent 设计态文件。
 - **启动 cwd 不是默认授权根**：`agent_workspace_dir` 只用于 prompt 中解释“当前目录 / 这个项目 / 相对路径”。访问该目录仍需 `workspace.workspace_roots`、会话授权或 cwd lazy prompt 授权。
 - **executor 必须带 gate**：`DefaultPrimitiveExecutor` 构造时强制传入 `Arc<dyn PermissionGate>`，不存在 no-gate legacy 分支。
+- **Skill 正文不放大权限**：`load_skill` 只是按名定位后再走 `PermissionGate(Read)` 读 `SKILL.md` / 附件；详细链路见 `skill-system.md`。
 
 ## 2. 目录语义
 

@@ -146,6 +146,9 @@ pub struct PlanRuntime {
     checkpoint_store: Mutex<Option<Arc<dyn crate::core::CheckpointStore>>>,
     /// `[plan].auto_checkpoint_on_build`：build_plan 时是否自动 record。默认 false。
     auto_checkpoint_on_build: AtomicBool,
+    /// `[skills].expose_to_reviewer`：是否允许 reviewer/verifier 子 Agent 暴露技能目录与
+    /// `load_skill` 工具。默认 false，由 `ChatContext::from_config` 装配。
+    expose_skills_to_reviewer: AtomicBool,
     /// transcript 自定义事件 appender；由 `ChatContext::from_config` 装配
     /// `SessionManager::append_custom_entry` 的闭包。`None` 时 dispatch_reviewer 等不写
     /// transcript（单元测试 / 早期阶段）。
@@ -213,6 +216,7 @@ impl PlanRuntime {
             refresh_notifier: Arc::new(RefreshNotifier::new()),
             checkpoint_store: Mutex::new(None),
             auto_checkpoint_on_build: AtomicBool::new(false),
+            expose_skills_to_reviewer: AtomicBool::new(false),
             transcript_appender: Mutex::new(None),
         })
     }
@@ -573,6 +577,18 @@ impl PlanRuntime {
 
     pub fn max_code_review_rounds(&self) -> u32 {
         self.max_code_review_rounds.load(Ordering::Acquire)
+    }
+
+    /// `[skills].expose_to_reviewer` 当前值：为 true 时 reviewer/verifier 可见技能目录并允许
+    /// `load_skill`，否则保持默认禁用。
+    pub fn expose_skills_to_reviewer(&self) -> bool {
+        self.expose_skills_to_reviewer.load(Ordering::Acquire)
+    }
+
+    /// 由 `ChatContext::from_config` 在装配阶段写入。
+    pub fn set_expose_skills_to_reviewer(&self, value: bool) {
+        self.expose_skills_to_reviewer
+            .store(value, Ordering::Release);
     }
 
     /// 同步派发 reviewer（plan-runtime.md §P4 RV14）。语义：

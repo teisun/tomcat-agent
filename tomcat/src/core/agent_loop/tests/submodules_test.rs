@@ -365,6 +365,57 @@ async fn tool_exec_load_skill_rejected_for_reviewer() {
 }
 
 #[tokio::test]
+async fn tool_exec_load_skill_allowed_for_reviewer_when_exposed() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full_with_policy;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-reviewer-allowed".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit"}"#.into(),
+    };
+
+    let outcome = execute_tool_full_with_policy(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::Reviewer,
+        Some(crate::core::plan_runtime::review::ReviewKind::Plan),
+        true,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!outcome.is_error);
+    assert!(outcome.model_text.contains("<skill name=\"commit\""));
+}
+
+#[tokio::test]
 async fn tool_exec_load_skill_rejected_for_verifier() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
@@ -414,6 +465,57 @@ async fn tool_exec_load_skill_rejected_for_verifier() {
     assert!(outcome
         .model_text
         .contains("verifier 子 Agent 禁止调用工具 `load_skill`"));
+}
+
+#[tokio::test]
+async fn tool_exec_load_skill_allowed_for_verifier_when_exposed() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full_with_policy;
+    use crate::core::agent_loop::types::SubagentType;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("commit");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: commit\ndescription: Create a git commit.\n---\n# Commit\n",
+    )
+    .unwrap();
+    let skill_set = Arc::new(RwLock::new(skill_set_with_single_skill(
+        "commit",
+        "Create a git commit.",
+        skill_dir.join("SKILL.md"),
+        skill_dir.clone(),
+        false,
+    )));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(SkillFilePrimitive);
+    let tc = ToolCallInfo {
+        id: "load-skill-verifier-allowed".into(),
+        name: "load_skill".into(),
+        arguments: r#"{"name":"commit"}"#.into(),
+    };
+
+    let outcome = execute_tool_full_with_policy(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&skill_set),
+        SubagentType::Verifier,
+        None,
+        true,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!outcome.is_error);
+    assert!(outcome.model_text.contains("<skill name=\"commit\""));
 }
 
 #[tokio::test]

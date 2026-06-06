@@ -52,7 +52,8 @@ use crate::infra::events::ToolDisplay;
 use super::config_backend::SharedConfigBackend;
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
 use guard::{
-    is_reviewer_whitelisted_tool, is_verifier_whitelisted_tool, reviewer_allowed_tools_description,
+    is_reviewer_whitelisted_tool, is_verifier_whitelisted_tool,
+    reviewer_allowed_tools_description_with_policy, verifier_allowed_tools_description,
 };
 
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
@@ -105,6 +106,7 @@ struct ToolExecCtx<'a> {
     skill_set: Option<&'a Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
     review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
+    expose_skills_to_reviewer: bool,
     cancel: &'a tokio_util::sync::CancellationToken,
     event_bus: Option<&'a Arc<dyn EventBus>>,
     completion_routes: Option<&'a BackgroundCompletionRoutes>,
@@ -198,6 +200,46 @@ pub(super) async fn execute_tool_full(
     event_bus: Option<&Arc<dyn EventBus>>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
+    execute_tool_full_with_policy(
+        primitive,
+        config_backend,
+        bash_task_registry,
+        read_file_state,
+        openai_files_runtime,
+        web_fetch_runtime,
+        web_search_runtime,
+        plan_runtime,
+        skill_set,
+        subagent_type,
+        review_kind,
+        false,
+        cancel,
+        tc,
+        event_bus,
+        completion_routes,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn execute_tool_full_with_policy(
+    primitive: &Arc<dyn PrimitiveExecutor>,
+    config_backend: &Option<SharedConfigBackend>,
+    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
+    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
+    openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
+    web_fetch_runtime: Option<&Arc<crate::core::tools::web_fetch::WebFetchRuntime>>,
+    web_search_runtime: Option<&Arc<crate::core::tools::web_search::WebSearchRuntime>>,
+    plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
+    skill_set: Option<&Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
+    subagent_type: crate::core::agent_loop::types::SubagentType,
+    review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
+    expose_skills_to_reviewer: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+    tc: &ToolCallInfo,
+    event_bus: Option<&Arc<dyn EventBus>>,
+    completion_routes: Option<&BackgroundCompletionRoutes>,
+) -> ToolExecOutcome {
     let mut display = None;
     let ctx = ToolExecCtx {
         primitive,
@@ -211,6 +253,7 @@ pub(super) async fn execute_tool_full(
         skill_set,
         subagent_type,
         review_kind,
+        expose_skills_to_reviewer,
         cancel,
         event_bus,
         completion_routes,
@@ -241,25 +284,33 @@ async fn execute_tool_tuple_full(
     // catalog 已被 `resolve_internal_tools` 过滤过，这里再拦一道，防 dispatcher 直调或
     // catalog 漂移；与 reviewer.md §5.2 / §5.5 一致）。
     if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
-        && !is_reviewer_whitelisted_tool(tc.name.as_str(), ctx.review_kind)
+        && !is_reviewer_whitelisted_tool(
+            tc.name.as_str(),
+            ctx.review_kind,
+            ctx.expose_skills_to_reviewer,
+        )
     {
         return (
             format!(
                 "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 {}；create_plan 防套娃；write/dispatch_agent/checkpoint 永不可用）",
                 tc.name,
-                reviewer_allowed_tools_description(ctx.review_kind),
+                reviewer_allowed_tools_description_with_policy(
+                    ctx.review_kind,
+                    ctx.expose_skills_to_reviewer,
+                ),
             ),
             true,
             Vec::new(),
         );
     }
     if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Verifier
-        && !is_verifier_whitelisted_tool(tc.name.as_str())
+        && !is_verifier_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
     {
         return (
             format!(
-                "verifier 子 Agent 禁止调用工具 `{}`（仅允许 read/search_files/list_dir/bash；create_plan/update_plan/todos/ask_question/edit/write/dispatch_agent/checkpoint 永不可用）",
-                tc.name
+                "verifier 子 Agent 禁止调用工具 `{}`（仅允许 {}；create_plan/update_plan/todos/ask_question/edit/write/dispatch_agent/checkpoint 永不可用）",
+                tc.name,
+                verifier_allowed_tools_description(ctx.expose_skills_to_reviewer),
             ),
             true,
             Vec::new(),
