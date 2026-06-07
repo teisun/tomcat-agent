@@ -32,6 +32,8 @@ fn deserialize_security_config_uses_default_helpers() {
 fn app_config_includes_context() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.context.context_window, 400_000);
+    assert_eq!(cfg.context.resume_hydration_mode, ResumeHydrationMode::Auto);
+    assert_eq!(cfg.context.resume_lazy_threshold, 2_000);
 }
 
 #[test]

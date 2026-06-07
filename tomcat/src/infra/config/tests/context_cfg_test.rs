@@ -5,7 +5,8 @@
 //! - `ContextConfig::default` 的全部字段（context_window / max_output_tokens /
 //!   keep_recent_turns / compaction_model / layer0_single_result_max_chars /
 //!   layer0_placeholder_threshold_chars / current_tail_compactable_min_chars /
-//!   current_tail_single_result_max_chars / compaction_max_tokens）。
+//!   current_tail_single_result_max_chars / compaction_max_tokens /
+//!   resume_hydration_mode / resume_lazy_threshold）。
 //! - `compute_context_budget_chars` 在 GPT-5.4 上下文默认配置、`max_output_tokens=0`
 //!   与 `context_window<max_output_tokens` 三种边界场景下的输出。
 //! - `[context]` 段的 toml override 能正确传到 `cfg.context` 字段。
@@ -25,6 +26,8 @@ fn context_config_default_values() {
     assert_eq!(cfg.current_tail_compactable_min_chars, 1);
     assert_eq!(cfg.current_tail_single_result_max_chars, 10_000);
     assert_eq!(cfg.compaction_max_tokens, 10_000);
+    assert_eq!(cfg.resume_hydration_mode, ResumeHydrationMode::Auto);
+    assert_eq!(cfg.resume_lazy_threshold, 2_000);
 }
 
 #[test]
@@ -66,7 +69,7 @@ fn context_config_toml_override() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
     let mut f = std::fs::File::create(&path).unwrap();
-    f.write_all(b"[context]\ncontext_window = 200000\nmax_output_tokens = 64000\ncompaction_model = \"gpt-5.4\"\n").unwrap();
+    f.write_all(b"[context]\ncontext_window = 200000\nmax_output_tokens = 64000\ncompaction_model = \"gpt-5.4\"\nresume_hydration_mode = \"full\"\nresume_lazy_threshold = 4096\n").unwrap();
     drop(f);
     let r = load_config(Some(path.as_path()));
     assert!(r.is_ok());
@@ -74,6 +77,8 @@ fn context_config_toml_override() {
     assert_eq!(cfg.context.context_window, 200_000);
     assert_eq!(cfg.context.max_output_tokens, 64_000);
     assert_eq!(cfg.context.compaction_model, "gpt-5.4");
+    assert_eq!(cfg.context.resume_hydration_mode, ResumeHydrationMode::Full);
+    assert_eq!(cfg.context.resume_lazy_threshold, 4_096);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }

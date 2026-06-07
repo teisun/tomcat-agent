@@ -93,14 +93,25 @@
 //! - **`#[serde(rename_all = "camelCase")]`**：与 pi-mono `transcript.ts` 字段名
 //!   完全对齐，跨语言会话可互操作。
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::core::session::resume_index::{
+    rebuild_resume_index_from_lines, update_resume_index_after_append,
+};
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
+
+const REVERSE_CHUNK_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TranscriptReadStats {
+    pub bytes_scanned: u64,
+    pub entries_scanned: usize,
+}
 
 /// 首行：session header，与 pi-mono 格式一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,40 +292,149 @@ pub fn read_header(path: &Path) -> Result<SessionHeader, AppError> {
     Ok(header)
 }
 
+fn parse_entry_line(line: &str, stats: &mut TranscriptReadStats) -> Option<TranscriptEntry> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<TranscriptEntry>(trimmed) {
+        Ok(entry) => {
+            stats.entries_scanned += 1;
+            Some(entry)
+        }
+        Err(e) => {
+            warn!(line = trimmed, error = %e, "skipping unparseable JSONL entry");
+            None
+        }
+    }
+}
+
+/// 真 tail reader：从文件末尾反向分块读取最近 `cap` 条 entry。
+/// 返回的 Vec 顺序为从旧到新（与文件顺序一致）。
+pub(crate) fn read_entries_tail_with_stats(
+    path: &Path,
+    cap: usize,
+) -> Result<(Vec<TranscriptEntry>, TranscriptReadStats), AppError> {
+    if cap == 0 {
+        return Ok((Vec::new(), TranscriptReadStats::default()));
+    }
+
+    let mut f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let file_len = f.metadata().map_err(AppError::Io)?.len();
+    if file_len == 0 {
+        return Ok((Vec::new(), TranscriptReadStats::default()));
+    }
+
+    let mut stats = TranscriptReadStats::default();
+    let mut pos = file_len;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut entries_rev = Vec::with_capacity(cap);
+
+    while pos > 0 && entries_rev.len() < cap {
+        let read_len = REVERSE_CHUNK_BYTES.min(pos as usize);
+        pos -= read_len as u64;
+        f.seek(SeekFrom::Start(pos)).map_err(AppError::Io)?;
+        let mut chunk = vec![0u8; read_len];
+        f.read_exact(&mut chunk).map_err(AppError::Io)?;
+        stats.bytes_scanned += read_len as u64;
+
+        if !carry.is_empty() {
+            chunk.extend_from_slice(&carry);
+            carry.clear();
+        }
+
+        let mut end = chunk.len();
+        for idx in (0..chunk.len()).rev() {
+            if chunk[idx] != b'\n' {
+                continue;
+            }
+            let segment = &chunk[idx + 1..end];
+            end = idx;
+            if segment.is_empty() {
+                continue;
+            }
+            match std::str::from_utf8(segment) {
+                Ok(line) => {
+                    if let Some(entry) = parse_entry_line(line, &mut stats) {
+                        entries_rev.push(entry);
+                        if entries_rev.len() >= cap {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(error = %error, "skipping non-utf8 JSONL entry while tail reading");
+                }
+            }
+        }
+
+        if entries_rev.len() >= cap {
+            break;
+        }
+
+        carry = chunk[..end].to_vec();
+    }
+
+    entries_rev.reverse();
+    Ok((entries_rev, stats))
+}
+
 /// 逐行读取 transcript，仅解析最近 `cap` 条 entry（避免全量加载）；从文件末尾往前取。
 /// 返回的 Vec 顺序为从旧到新（与文件顺序一致）。
 pub fn read_entries_tail(path: &Path, cap: usize) -> Result<Vec<TranscriptEntry>, AppError> {
-    let f = std::fs::File::open(path).map_err(AppError::Io)?;
-    let reader = BufReader::new(f);
-    let mut lines: Vec<String> = reader
-        .lines()
-        .map(|r| r.map_err(AppError::Io))
-        .collect::<Result<Vec<_>, _>>()?;
-    // 首行是 header，跳过
-    if lines.is_empty() {
-        return Ok(Vec::new());
+    read_entries_tail_with_stats(path, cap).map(|(entries, _)| entries)
+}
+
+/// 正向流式读取 `[start_ordinal, end_ordinal)` 区间内的 entry。
+///
+/// 仅供测试与未来扩展预留；当前生产恢复路径仍使用 reverse-chunk `Tail(K)`。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn read_entries_range_by_ordinal_with_stats(
+    path: &Path,
+    start_ordinal: usize,
+    end_ordinal: usize,
+) -> Result<(Vec<TranscriptEntry>, TranscriptReadStats), AppError> {
+    if start_ordinal >= end_ordinal {
+        return Ok((Vec::new(), TranscriptReadStats::default()));
     }
-    lines.remove(0);
-    let mut entries = Vec::with_capacity(cap.min(lines.len()));
-    let start = if lines.len() <= cap {
-        0
-    } else {
-        lines.len() - cap
-    };
-    for line in lines.drain(start..) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let mut reader = BufReader::new(f);
+    let mut stats = TranscriptReadStats::default();
+    let mut header = String::new();
+    stats.bytes_scanned += reader.read_line(&mut header).map_err(AppError::Io)? as u64;
+
+    let mut ordinal = 0usize;
+    let mut entries = Vec::with_capacity(end_ordinal.saturating_sub(start_ordinal).min(256));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes = reader.read_line(&mut line).map_err(AppError::Io)?;
+        if bytes == 0 {
+            break;
         }
-        match serde_json::from_str::<TranscriptEntry>(trimmed) {
-            Ok(entry) => entries.push(entry),
-            Err(e) => {
-                warn!(line = trimmed, error = %e, "skipping unparseable JSONL entry");
-                continue;
+        stats.bytes_scanned += bytes as u64;
+        if let Some(entry) = parse_entry_line(&line, &mut stats) {
+            if ordinal >= start_ordinal && ordinal < end_ordinal {
+                entries.push(entry);
+            }
+            ordinal += 1;
+            if ordinal >= end_ordinal {
+                break;
             }
         }
     }
-    Ok(entries)
+    Ok((entries, stats))
+}
+
+#[allow(dead_code)]
+pub(crate) fn read_entries_range_by_ordinal(
+    path: &Path,
+    start_ordinal: usize,
+    end_ordinal: usize,
+) -> Result<Vec<TranscriptEntry>, AppError> {
+    read_entries_range_by_ordinal_with_stats(path, start_ordinal, end_ordinal)
+        .map(|(entries, _)| entries)
 }
 
 /// 追加一行 JSON 到 transcript 文件末尾（append-only）。
@@ -348,7 +468,10 @@ pub fn append_entry_with_sync(
     sync: SyncLevel,
 ) -> Result<(), AppError> {
     let json = serde_json::to_string(entry)?;
-    append_line_with_sync(path, &json, sync)
+    append_line_with_sync(path, &json, sync)?;
+    // TODO(chat-resume): if dense append bursts show visible IO jitter, batch/debounce
+    // sidecar rewrites instead of flushing the sibling resume index on every append.
+    update_resume_index_after_append(path, entry)
 }
 
 /// 在首条 `type=message` 且 `id == anchor_message_id` 的 JSONL 行**之后**插入 `entry`（整文件原子写）。
@@ -402,6 +525,7 @@ pub fn insert_entry_after_message_id(
     let mut content = out.join("\n");
     content.push('\n');
     write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(())
 }
 
@@ -463,6 +587,7 @@ pub fn mark_message_entries_after_anchor_superseded(
     let mut content = out.join("\n");
     content.push('\n');
     write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(changed)
 }
 
@@ -541,6 +666,7 @@ pub fn rewrite_message_text_entries_by_id(
     let mut content = out.join("\n");
     content.push('\n');
     write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(changed)
 }
 
@@ -599,6 +725,7 @@ pub fn set_branch_summary_entry_is_boundary_true(
     let mut content = out.join("\n");
     content.push('\n');
     write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(())
 }
 
@@ -646,6 +773,7 @@ pub fn remove_branch_summary_entry_by_id(path: &Path, entry_id: &str) -> Result<
     let mut content = out.join("\n");
     content.push('\n');
     write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
     Ok(())
 }
 

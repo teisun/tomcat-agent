@@ -394,7 +394,7 @@ fn resolve_quickjs_modules_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_dir())
         .or_else(|| {
-            let p = dirs::home_dir()?
+            let p = crate::infra::platform::home_dir()?
                 .join(".tomcat")
                 .join("assets")
                 .join("modules");

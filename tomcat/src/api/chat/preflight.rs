@@ -684,7 +684,7 @@ fn find_binary(candidates: &[&str]) -> Option<PathBuf> {
 }
 
 fn preflight_log_dir() -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = crate::infra::platform::home_dir()?;
     Some(
         home.join(".tomcat")
             .join("agents")

@@ -326,7 +326,7 @@ async fn pr9_executor_credentials_glob_denies_write() {
     let ws = workspace_dir("pr9_creds_ws");
     // builtin path_rules 自动加载 → 不需要 user_path_rules。
     let exec = make_executor(ws.clone(), vec![], Arc::new(AllowAllConfirmation));
-    let home = dirs::home_dir().expect("home");
+    let home = crate::infra::platform::home_dir().expect("home");
     let target = home.join(".tomcat/agents/main/agent/auth-profiles.json");
     let r = exec
         .write_file(&target.to_string_lossy(), "secret", false, "p1")
@@ -344,7 +344,7 @@ async fn pr9_executor_sessions_glob_denies_write() {
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = workspace_dir("pr9_sess_ws");
     let exec = make_executor(ws.clone(), vec![], Arc::new(AllowAllConfirmation));
-    let home = dirs::home_dir().expect("home");
+    let home = crate::infra::platform::home_dir().expect("home");
     let target = home.join(".tomcat/agents/main/sessions/anything.jsonl");
     let r = exec
         .write_file(&target.to_string_lossy(), "x", false, "p1")

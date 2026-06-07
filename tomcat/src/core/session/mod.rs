@@ -3,6 +3,7 @@
 mod append_message_chain;
 pub mod context_metrics;
 pub(crate) mod manager;
+pub(crate) mod resume_index;
 pub(crate) mod store;
 pub mod transcript;
 

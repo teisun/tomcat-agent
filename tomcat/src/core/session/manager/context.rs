@@ -1,13 +1,20 @@
 //! init_context_state helpers and context assembly functions.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use chrono::{NaiveDate, Utc};
 
 use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
 use crate::core::session::append_message_chain::collect_recent_chat_messages_from_tail;
-use crate::core::session::transcript::{read_entries_tail, BranchSummaryEntry, TranscriptEntry};
-use crate::infra::config::{compute_context_budget_chars, ContextConfig};
+use crate::core::session::resume_index::{
+    load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
+    ResumeIndexIoStats, ResumeIndexSource,
+};
+use crate::core::session::transcript::{
+    read_entries_tail_with_stats, BranchSummaryEntry, TranscriptEntry, TranscriptReadStats,
+};
+use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
 use crate::infra::error::AppError;
 
 use super::session_impl::generate_entry_id;
@@ -21,6 +28,266 @@ use super::types::{
 const DEFAULT_CONTEXT_CAP: usize = 10;
 const MAX_PLAN_SCAN: usize = 5000;
 pub(crate) const INTERRUPTED_TOOL_RESULT_TEXT: &str = "[interrupted]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HydrateTraceMode {
+    Full,
+    Tail,
+}
+
+impl HydrateTraceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "Full",
+            Self::Tail => "Tail",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HydrateLoadOutcome {
+    entries: Vec<TranscriptEntry>,
+    latest_plan_event: Option<PlanEventRef>,
+    io_stats: ResumeIndexIoStats,
+    trace_mode: HydrateTraceMode,
+    plan_source: &'static str,
+    fallback: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct ResumeTrace {
+    mode: HydrateTraceMode,
+    entries_scanned: usize,
+    bytes_scanned: u64,
+    boundary_hit: bool,
+    plan_source: &'static str,
+    fallback: &'static str,
+    elapsed_ms: u128,
+}
+
+impl ResumeTrace {
+    fn emit_if_enabled(&self) {
+        let enabled = std::env::var("TOMCAT_RESUME_TRACE")
+            .map(|raw| raw != "0" && !raw.is_empty())
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        eprintln!(
+            "TOMCAT_RESUME_TRACE mode={} entries_scanned={} bytes_scanned={} boundary_hit={} plan_source={} fallback={} elapsed_ms={}",
+            self.mode.as_str(),
+            self.entries_scanned,
+            self.bytes_scanned,
+            self.boundary_hit,
+            self.plan_source,
+            self.fallback,
+            self.elapsed_ms
+        );
+    }
+}
+
+fn add_transcript_stats(io_stats: &mut ResumeIndexIoStats, read_stats: TranscriptReadStats) {
+    io_stats.add_read_stats(read_stats);
+}
+
+fn legacy_read_cap() -> usize {
+    super::BRANCH_MAX_ENTRIES.max(MAX_PLAN_SCAN)
+}
+
+fn boundary_exists(entries: &[TranscriptEntry]) -> bool {
+    entries.iter().any(
+        |entry| matches!(entry, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true)),
+    )
+}
+
+fn choose_recent_turn_anchor(index: &ResumeIndex) -> Option<ResumeAnchor> {
+    if index.recent_turn_starts.is_empty() {
+        return None;
+    }
+    if index.recent_turn_starts.len() >= DEFAULT_CONTEXT_CAP {
+        return index
+            .recent_turn_starts
+            .get(index.recent_turn_starts.len() - DEFAULT_CONTEXT_CAP)
+            .cloned();
+    }
+    index.recent_turn_starts.first().cloned()
+}
+
+fn choose_today_anchor(index: &ResumeIndex, today: NaiveDate) -> Option<ResumeAnchor> {
+    index
+        .latest_day_first_entry
+        .as_ref()
+        .and_then(|anchor| (anchor.date == today.to_string()).then(|| anchor.first_entry.clone()))
+}
+
+fn earlier_anchor(lhs: Option<ResumeAnchor>, rhs: Option<ResumeAnchor>) -> Option<ResumeAnchor> {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => {
+            if left.ordinal <= right.ordinal {
+                Some(left)
+            } else {
+                Some(right)
+            }
+        }
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn later_anchor(lhs: Option<ResumeAnchor>, rhs: Option<ResumeAnchor>) -> Option<ResumeAnchor> {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => {
+            if left.ordinal >= right.ordinal {
+                Some(left)
+            } else {
+                Some(right)
+            }
+        }
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+pub(super) fn compute_turn_window_start(
+    index: &ResumeIndex,
+    today: NaiveDate,
+) -> Option<ResumeAnchor> {
+    let today_anchor = choose_today_anchor(index, today);
+    let recent_turn_anchor = choose_recent_turn_anchor(index);
+    earlier_anchor(today_anchor, recent_turn_anchor)
+}
+
+pub(super) fn compute_slice_start_anchor(
+    index: &ResumeIndex,
+    today: NaiveDate,
+) -> Option<ResumeAnchor> {
+    later_anchor(
+        index.latest_boundary.clone(),
+        compute_turn_window_start(index, today),
+    )
+}
+
+pub(super) fn compute_tail_count(total_entries: usize, slice_start_ordinal: usize) -> usize {
+    total_entries.saturating_sub(slice_start_ordinal)
+}
+
+fn full_hydration_entries(
+    session: &SessionManager,
+    path: &std::path::Path,
+) -> Result<HydrateLoadOutcome, AppError> {
+    let read_cap = legacy_read_cap();
+    let (mut entries, read_stats) = read_entries_tail_with_stats(path, read_cap)?;
+    let mut io_stats = ResumeIndexIoStats::default();
+    add_transcript_stats(&mut io_stats, read_stats);
+    if heal_dangling_tail_tool_call(session, &entries)? {
+        let (reloaded, reloaded_stats) = read_entries_tail_with_stats(path, read_cap)?;
+        entries = reloaded;
+        add_transcript_stats(&mut io_stats, reloaded_stats);
+    }
+    let latest_plan_event = extract_latest_plan_event(&entries);
+    if entries.len() >= MAX_PLAN_SCAN {
+        tracing::warn!(
+            scanned = entries.len(),
+            max_plan_scan = MAX_PLAN_SCAN,
+            "init_context_state scanned at least MAX_PLAN_SCAN transcript entries"
+        );
+    }
+    Ok(HydrateLoadOutcome {
+        entries,
+        latest_plan_event: latest_plan_event.clone(),
+        io_stats,
+        trace_mode: HydrateTraceMode::Full,
+        plan_source: if latest_plan_event.is_some() {
+            "scan"
+        } else {
+            "none"
+        },
+        fallback: "none",
+    })
+}
+
+fn targeted_hydration_entries_with_load(
+    session: &SessionManager,
+    path: &std::path::Path,
+    today: NaiveDate,
+    load: crate::core::session::resume_index::ResumeIndexLoad,
+) -> Result<HydrateLoadOutcome, AppError> {
+    let index = load.index.clone();
+    let latest_plan_event = index.latest_plan_event_ref();
+    let slice_start_anchor = compute_slice_start_anchor(&index, today);
+    let slice_start_ordinal = slice_start_anchor
+        .as_ref()
+        .map(|anchor| anchor.ordinal)
+        .unwrap_or(0);
+    if slice_start_ordinal > index.total_entries {
+        let (_, rebuild_stats) = rebuild_resume_index(path)?;
+        let mut io_stats = load.stats;
+        io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
+        io_stats.entries_scanned += rebuild_stats.entries_scanned;
+        let mut fallback = full_hydration_entries(session, path)?;
+        fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
+        fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+        fallback.fallback = "full+rebuild";
+        return Ok(fallback);
+    }
+    let k = compute_tail_count(index.total_entries, slice_start_ordinal);
+    let (mut entries, tail_stats) = read_entries_tail_with_stats(path, k.max(1))?;
+    let mut io_stats = load.stats;
+    add_transcript_stats(&mut io_stats, tail_stats);
+
+    if let Some(anchor) = slice_start_anchor.as_ref() {
+        let edge_matches = entries
+            .first()
+            .is_some_and(|entry| anchor.matches_entry(entry));
+        if !edge_matches {
+            let (_, rebuild_stats) = rebuild_resume_index(path)?;
+            io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
+            io_stats.entries_scanned += rebuild_stats.entries_scanned;
+
+            let mut fallback = full_hydration_entries(session, path)?;
+            fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
+            fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+            fallback.fallback = "full+rebuild";
+            return Ok(fallback);
+        }
+    }
+
+    if heal_dangling_tail_tool_call(session, &entries)? {
+        let reloaded = targeted_hydration_entries(session, path, today)?;
+        let mut reloaded = reloaded;
+        reloaded.io_stats.bytes_scanned += io_stats.bytes_scanned;
+        reloaded.io_stats.entries_scanned += io_stats.entries_scanned;
+        return Ok(reloaded);
+    }
+
+    Ok(HydrateLoadOutcome {
+        entries: std::mem::take(&mut entries),
+        latest_plan_event: latest_plan_event.clone(),
+        io_stats,
+        trace_mode: HydrateTraceMode::Tail,
+        plan_source: if latest_plan_event.is_some() {
+            "sidecar"
+        } else {
+            "none"
+        },
+        fallback: if load.source == ResumeIndexSource::Rebuilt {
+            "rebuild"
+        } else {
+            "none"
+        },
+    })
+}
+
+fn targeted_hydration_entries(
+    session: &SessionManager,
+    path: &std::path::Path,
+    today: NaiveDate,
+) -> Result<HydrateLoadOutcome, AppError> {
+    let load = load_or_rebuild_resume_index(path)?;
+    targeted_hydration_entries_with_load(session, path, today, load)
+}
 
 fn entry_timestamp(entry: &TranscriptEntry) -> &str {
     match entry {
@@ -415,6 +682,27 @@ fn observability_from_session(session: &SessionManager) -> Result<(u32, usize, u
         .unwrap_or((0, 0, 0)))
 }
 
+fn empty_context_state(
+    system_text: &str,
+    budget: usize,
+    token_budget: usize,
+    session_obs: SessionContextObservation,
+) -> ContextState {
+    ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: system_text.len(),
+        context_budget_chars: budget,
+        context_budget_tokens: token_budget,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        preheat: Preheat::new(),
+        session_obs,
+        live: super::types::ContextLiveMetrics::default(),
+    }
+}
+
 /// 从 transcript 加载历史，以 ChatMessage 列表初始化 ContextState。
 /// 识别已有 Compaction entry 折叠为 CompactionSummary 消息，避免重复压缩。
 /// 按天筛选：优先取当天所有 turns，不足 DEFAULT_CONTEXT_CAP 则向前补齐。
@@ -423,6 +711,7 @@ pub fn init_context_state(
     config: &ContextConfig,
     system_text: &str,
 ) -> Result<ContextState, AppError> {
+    let started = Instant::now();
     let budget = compute_context_budget_chars(config);
     let token_budget = config
         .context_window
@@ -437,36 +726,46 @@ pub fn init_context_state(
     let path = match session.current_transcript_path()? {
         Some(p) => p,
         None => {
-            return Ok(ContextState {
-                messages: Vec::new(),
-                estimate_context_chars: system_text.len(),
-                context_budget_chars: budget,
-                context_budget_tokens: token_budget,
-                last_api_usage: None,
-                post_usage_appended_chars: 0,
-                transcript_path: PathBuf::new(),
-                latest_plan_event: None,
-                preheat: Preheat::new(),
+            return Ok(empty_context_state(
+                system_text,
+                budget,
+                token_budget,
                 session_obs,
-                live: super::types::ContextLiveMetrics::default(),
-            });
+            ))
         }
     };
-    let read_cap = super::BRANCH_MAX_ENTRIES.max(MAX_PLAN_SCAN);
-    let mut entries = read_entries_tail(&path, read_cap)?;
-    if heal_dangling_tail_tool_call(session, &entries)? {
-        entries = read_entries_tail(&path, read_cap)?;
-    }
-    if entries.len() >= MAX_PLAN_SCAN {
-        tracing::warn!(
-            scanned = entries.len(),
-            max_plan_scan = MAX_PLAN_SCAN,
-            "init_context_state scanned at least MAX_PLAN_SCAN transcript entries"
-        );
-    }
-    let latest_plan_event = extract_latest_plan_event(&entries);
     let today = Utc::now().date_naive();
+    let metadata = std::fs::metadata(&path).map_err(AppError::Io)?;
 
+    let load_outcome = match config.resume_hydration_mode {
+        ResumeHydrationMode::Full => {
+            let mut outcome = full_hydration_entries(session, &path)?;
+            outcome.fallback = "config_full";
+            outcome
+        }
+        ResumeHydrationMode::Tail => targeted_hydration_entries(session, &path, today)?,
+        ResumeHydrationMode::Auto => {
+            let threshold = config.resume_lazy_threshold.max(1);
+            match load_or_rebuild_resume_index(&path) {
+                Ok(load) if load.index.total_entries >= threshold || metadata.len() == 0 => {
+                    targeted_hydration_entries_with_load(session, &path, today, load)?
+                }
+                Ok(load) => {
+                    let mut outcome = full_hydration_entries(session, &path)?;
+                    if load.source == ResumeIndexSource::Rebuilt {
+                        outcome.fallback = "rebuild";
+                    } else {
+                        outcome.fallback = "threshold_full";
+                    }
+                    outcome
+                }
+                Err(_) => full_hydration_entries(session, &path)?,
+            }
+        }
+    };
+
+    let entries = load_outcome.entries;
+    let latest_plan_event = load_outcome.latest_plan_event;
     let fold_start = compute_fold_start(&entries, today, DEFAULT_CONTEXT_CAP);
     let fold_out = fold_entries_to_messages(&entries[fold_start..], system_text.len());
     let selected = filter_messages_by_day(fold_out.messages, today, DEFAULT_CONTEXT_CAP);
@@ -480,6 +779,17 @@ pub fn init_context_state(
             preheat.restore_completed(p);
         }
     }
+
+    ResumeTrace {
+        mode: load_outcome.trace_mode,
+        entries_scanned: load_outcome.io_stats.entries_scanned,
+        bytes_scanned: load_outcome.io_stats.bytes_scanned,
+        boundary_hit: boundary_exists(&entries),
+        plan_source: load_outcome.plan_source,
+        fallback: load_outcome.fallback,
+        elapsed_ms: started.elapsed().as_millis(),
+    }
+    .emit_if_enabled();
 
     Ok(ContextState {
         messages: selected,

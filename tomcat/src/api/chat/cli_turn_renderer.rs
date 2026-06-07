@@ -661,12 +661,12 @@ fn parse_tool_display(value: &Value) -> Option<ToolDisplay> {
 /// 把 `~/.tomcat/...` 展开成绝对路径，便于终端识别为可点击 file link。
 fn expand_path_for_terminal(path: &str) -> String {
     if path == "~" {
-        return dirs::home_dir()
+        return crate::infra::platform::home_dir()
             .map(|h| h.display().to_string())
             .unwrap_or_else(|| path.to_string());
     }
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::infra::platform::home_dir() {
             return home.join(rest).display().to_string();
         }
     }

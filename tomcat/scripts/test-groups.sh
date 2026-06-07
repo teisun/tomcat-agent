@@ -24,6 +24,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   plan_e2e_with_mock_llm_tests
   robustness_tests
   read_tool_tests
+  resume_hydration_tests
   skill_tool_tests
 )
 
@@ -31,6 +32,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   cli_tests
   checkpoint_cli_e2e
   openai_files_integration_tests
+  resume_hydration_cli_e2e
   wasmedge_e2e_tests
   long_lived_vm_tests
   js_api_alignment_tests

@@ -6,15 +6,11 @@
 
 ## 2026-05 Plan Recover 增补
 
-`init_context_state()` 现在除了恢复 `messages` / `preheat` 之外，还承担计划恢复所需的 transcript 尾部扫描：
+chat 启动期的 transcript 物理读取、sidecar schema、`latest_plan_event` 快路径、`MAX_PLAN_SCAN` 脱钩、`reverse-chunk` / cold rebuild / kill switch / trace 现在统一收口到 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。
 
-- `ContextState` 新增 `latest_plan_event: Option<PlanEventRef>`。
-- 初始化时会在**同一次** `read_entries_tail(...)` 结果上做反向扫描，只识别最近一条 `plan.create` / `plan.build` / `plan.update`。
-- 扫描上限固定为 `MAX_PLAN_SCAN = 5000`；超过上限会打 warning，但不会阻止上下文初始化。
-- 这里**只**做 transcript 识别与路径归一化，不做 plan 目录扫描，也不直接修改 `PlanRuntime`。
-- `latest_plan_event` 随 `ContextState` 一并返回，后续由 agent/chat 启动路径调用 `PlanRuntime::attach_from_event(...)` 回盘派生 `PlanState` 与 retain 字段。
+这里仍保留 `init_context_state()` 的**逻辑语义**（fold/filter/boundary/preheat），但不再作为启动期读取算法的事实源。
 
-说人话：上下文初始化现在会顺手把“最近那条 plan 事件”捞出来，计划恢复不再额外扫一遍 `~/.tomcat/plans/`。
+说人话：`init_context_state()` 现在不一定靠“扫 5000 条尾巴”来找 plan event；启动恢复怎么少读盘，请直接看 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。
 
 ## 1. 概述
 
@@ -384,6 +380,8 @@ fn usage_ratio(state: &ContextState) -> f64:
 ## 5. 初始化与动态维护
 
 ### 5.1 会话启动时初始化
+
+> 这里的伪代码描述的是“恢复后如何 fold/filter 出上下文”的逻辑语义，不再描述 transcript 的物理读取方式。真实启动路径的 `Full / Tail / Auto`、sidecar、count-based 锚点匹配、cold rebuild 等细节见 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。
 
 ```
 fn init_context_state(session: &Session, config: &ContextConfig) -> ContextState:

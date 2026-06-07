@@ -43,12 +43,12 @@ impl PathRule {
         if self.has_glob() {
             // glob 用字符串匹配：仅展开 `~`。
             if let Some(rest) = self.path.strip_prefix("~/") {
-                let home = dirs::home_dir().ok_or_else(|| {
+                let home = crate::infra::platform::home_dir().ok_or_else(|| {
                     AppError::Config("无法解析 home 目录用于 path_rule".to_string())
                 })?;
                 Ok(home.join(rest).to_string_lossy().into_owned())
             } else if self.path == "~" {
-                let home = dirs::home_dir().ok_or_else(|| {
+                let home = crate::infra::platform::home_dir().ok_or_else(|| {
                     AppError::Config("无法解析 home 目录用于 path_rule".to_string())
                 })?;
                 Ok(home.to_string_lossy().into_owned())

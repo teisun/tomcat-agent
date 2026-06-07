@@ -11,11 +11,18 @@
 
 use std::path::PathBuf;
 
+use chrono::{Duration, Utc};
+
+use super::super::context::{compute_slice_start_anchor, compute_tail_count};
 use super::super::*;
 use super::mocks::temp_sessions_dir;
 use crate::core::llm::{
     ChatMessage, ChatMessageRole, ContinuityMetadata, MessageKind, ReasoningContinuation,
     ReasoningFormat, ReplayRequirement,
+};
+use crate::core::session::resume_index::{
+    load_or_rebuild_resume_index, resume_index_path, ResumeAnchor, ResumeDayAnchor,
+    ResumeEntryKind, ResumeIndex,
 };
 
 fn tool_call_json(id: &str) -> serde_json::Value {
@@ -27,6 +34,94 @@ fn tool_call_json(id: &str) -> serde_json::Value {
             "arguments": "{}"
         }
     })
+}
+
+fn append_json_line(path: &std::path::Path, value: serde_json::Value) {
+    crate::core::session::transcript::append_line(path, &value.to_string()).unwrap();
+}
+
+fn chat_message_snapshot(message: &ChatMessage) -> serde_json::Value {
+    serde_json::json!({
+        "role": format!("{:?}", message.role),
+        "content": message.content.clone(),
+        "name": message.name.clone(),
+        "tool_calls": message.tool_calls.clone(),
+        "tool_call_id": message.tool_call_id.clone(),
+        "finish_reason": message.finish_reason.clone(),
+        "error_message": message.error_message.clone(),
+        "error_code": message.error_code.clone(),
+        "thinking_text": message.thinking_text.clone(),
+        "reasoning_continuation": message.reasoning_continuation.clone(),
+        "continuity": message.continuity.clone(),
+        "msg_id": message.msg_id.clone(),
+        "kind": format!("{:?}", message.kind),
+        "timestamp": message.timestamp.clone(),
+    })
+}
+
+fn plan_event_snapshot(event: &Option<PlanEventRef>) -> serde_json::Value {
+    match event {
+        Some(event) => serde_json::json!({
+            "kind": format!("{:?}", event.kind),
+            "plan_id": event.plan_id,
+            "path": event.path.to_string_lossy(),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn preheat_snapshot(preheat: &crate::core::compaction::preheat::Preheat) -> serde_json::Value {
+    serde_json::json!({
+        "idle": preheat.is_idle(),
+        "running": preheat.is_running(),
+        "finished": preheat.is_finished(),
+        "pending": preheat.preheat_result_pending(),
+        "exhausted": preheat.is_exhausted_pending(),
+    })
+}
+
+fn assert_context_parity(actual: &ContextState, expected: &ContextState) {
+    let actual_messages: Vec<_> = actual.messages.iter().map(chat_message_snapshot).collect();
+    let expected_messages: Vec<_> = expected
+        .messages
+        .iter()
+        .map(chat_message_snapshot)
+        .collect();
+    assert_eq!(
+        actual_messages, expected_messages,
+        "messages should match full hydration"
+    );
+    assert_eq!(
+        plan_event_snapshot(&actual.latest_plan_event),
+        plan_event_snapshot(&expected.latest_plan_event)
+    );
+    assert_eq!(
+        preheat_snapshot(&actual.preheat),
+        preheat_snapshot(&expected.preheat)
+    );
+}
+
+fn make_anchor(id: &str, ordinal: usize) -> ResumeAnchor {
+    ResumeAnchor {
+        entry_id: Some(id.to_string()),
+        ordinal,
+        timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+        entry_kind: ResumeEntryKind::Message,
+    }
+}
+
+fn base_resume_index(total_entries: usize) -> ResumeIndex {
+    ResumeIndex {
+        schema_version: 1,
+        transcript_size: 0,
+        transcript_mtime_ms: 0,
+        total_entries,
+        last_entry_id: None,
+        latest_boundary: None,
+        recent_turn_starts: Vec::new(),
+        latest_day_first_entry: None,
+        latest_plan_event: None,
+    }
 }
 
 #[test]
@@ -225,7 +320,7 @@ fn init_context_state_extracts_latest_plan_event() {
 }
 
 #[test]
-fn init_context_state_plan_event_scan_caps_at_max_plan_scan() {
+fn init_context_state_restores_plan_event_via_sidecar_outside_legacy_cap() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -233,27 +328,506 @@ fn init_context_state_plan_event_scan_caps_at_max_plan_scan() {
     let key = mgr.current_session_key();
     mgr.create_session(key, None).unwrap();
 
-    let stale_path = dir.join("stale.plan.md");
-    mgr.append_custom_entry(serde_json::json!({
-        "event": crate::infra::wire::WIRE_PLAN_BUILD,
-        "plan_id": "stale_plan",
-        "path": stale_path.to_string_lossy(),
-        "state": "executing",
-    }))
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let plan_path = dir.join("latest.plan.md");
+    crate::core::session::transcript::append_line(
+        &transcript_path,
+        &serde_json::json!({
+            "type": "custom",
+            "id": "plan_evt_1",
+            "timestamp": "2025-01-01T00:00:00.000Z",
+            "event": crate::infra::wire::WIRE_PLAN_BUILD,
+            "plan_id": "plan_latest",
+            "path": plan_path.to_string_lossy(),
+            "state": "executing",
+        })
+        .to_string(),
+    )
     .unwrap();
-    for idx in 0..5001 {
-        mgr.append_message(serde_json::json!({
-            "role": "user",
-            "content": format!("turn-{idx}"),
-        }))
+    for idx in 0..5001usize {
+        crate::core::session::transcript::append_line(
+            &transcript_path,
+            &serde_json::json!({
+                "type": "message",
+                "id": format!("m_{idx}"),
+                "timestamp": "2025-01-01T00:00:01.000Z",
+                "message": {
+                    "role": "user",
+                    "content": format!("turn-{idx}"),
+                }
+            })
+            .to_string(),
+        )
         .unwrap();
     }
 
     let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
-    assert!(
-        state.latest_plan_event.is_none(),
-        "plan event older than MAX_PLAN_SCAN should be ignored"
+    let latest = state
+        .latest_plan_event
+        .expect("plan event should be restored");
+    assert_eq!(latest.kind, PlanEventKind::Build);
+    assert_eq!(latest.plan_id, "plan_latest");
+    assert_eq!(latest.path, plan_path);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compute_k_from_anchor_ordinal_and_total() {
+    assert_eq!(compute_tail_count(100, 72), 28);
+    assert_eq!(compute_tail_count(10, 0), 10);
+    assert_eq!(compute_tail_count(10, 10), 0);
+    assert_eq!(compute_tail_count(10, 12), 0);
+}
+
+#[test]
+fn slice_lower_bound_is_min_of_boundary_today_and_nth_turn() {
+    let today = chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+    let mut index = base_resume_index(100);
+    index.latest_boundary = Some(make_anchor("boundary", 40));
+    index.recent_turn_starts = vec![
+        make_anchor("turn_earlier", 28),
+        make_anchor("turn_later", 64),
+    ];
+    index.latest_day_first_entry = Some(ResumeDayAnchor {
+        date: today.to_string(),
+        first_entry: make_anchor("today_first", 32),
+    });
+
+    let slice_start = compute_slice_start_anchor(&index, today).expect("slice start");
+    assert_eq!(slice_start.entry_id.as_deref(), Some("boundary"));
+
+    index.latest_boundary = None;
+    let slice_start =
+        compute_slice_start_anchor(&index, today).expect("slice start without boundary");
+    assert_eq!(slice_start.entry_id.as_deref(), Some("turn_earlier"));
+}
+
+#[test]
+fn targeted_hydration_edge_anchor_mismatch_falls_back_to_full() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    for idx in 0..12usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("old_u_{idx}"),
+                "timestamp": "2025-01-01T00:00:01.000Z",
+                "message": { "role": "user", "content": format!("old-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("old_a_{idx}"),
+                "timestamp": "2025-01-01T00:00:02.000Z",
+                "message": { "role": "assistant", "content": format!("old-a-{idx}") }
+            }),
+        );
+    }
+    append_json_line(
+        &transcript_path,
+        serde_json::json!({
+            "type": "branch_summary",
+            "id": "boundary_edge",
+            "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "summary": "boundary summary",
+            "coveredCount": 24,
+            "isBoundary": true,
+        }),
     );
+    for idx in 0..4usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("recent_u_{idx}"),
+                "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "message": { "role": "user", "content": format!("recent-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("recent_a_{idx}"),
+                "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "message": { "role": "assistant", "content": format!("recent-a-{idx}") }
+            }),
+        );
+    }
+
+    let _ = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    let sidecar_path = resume_index_path(&transcript_path);
+    let mut sidecar_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    sidecar_json["latest_boundary"]["entry_id"] = serde_json::json!("stale-boundary");
+    std::fs::write(
+        &sidecar_path,
+        serde_json::to_vec_pretty(&sidecar_json).unwrap(),
+    )
+    .unwrap();
+
+    let tail = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Tail,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    let full = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Full,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    assert_context_parity(&tail, &full);
+
+    let repaired: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(
+        repaired["latest_boundary"]["entry_id"],
+        serde_json::json!("boundary_edge")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn targeted_hydration_backfills_min_turns_across_midnight() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let yesterday =
+        (Utc::now() - Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let today = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    for idx in 0..8usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("y_u_{idx}"),
+                "timestamp": yesterday,
+                "message": { "role": "user", "content": format!("yesterday-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("y_a_{idx}"),
+                "timestamp": yesterday,
+                "message": { "role": "assistant", "content": format!("yesterday-a-{idx}") }
+            }),
+        );
+    }
+    for idx in 0..3usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("t_u_{idx}"),
+                "timestamp": today,
+                "message": { "role": "user", "content": format!("today-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("t_a_{idx}"),
+                "timestamp": today,
+                "message": { "role": "assistant", "content": format!("today-a-{idx}") }
+            }),
+        );
+    }
+
+    let tail = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Tail,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    let full = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Full,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    assert_context_parity(&tail, &full);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn targeted_hydration_today_priority_matches_full_scan() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let yesterday =
+        (Utc::now() - Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let today = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    for idx in 0..12usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("y_u_{idx}"),
+                "timestamp": yesterday,
+                "message": { "role": "user", "content": format!("yesterday-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("y_a_{idx}"),
+                "timestamp": yesterday,
+                "message": { "role": "assistant", "content": format!("yesterday-a-{idx}") }
+            }),
+        );
+    }
+    for idx in 0..12usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("t_u_{idx}"),
+                "timestamp": today,
+                "message": { "role": "user", "content": format!("today-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("t_a_{idx}"),
+                "timestamp": today,
+                "message": { "role": "assistant", "content": format!("today-a-{idx}") }
+            }),
+        );
+    }
+
+    let tail = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Tail,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    let full = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Full,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    assert_context_parity(&tail, &full);
+    assert!(
+        tail.messages
+            .iter()
+            .filter_map(|message| message.text_content())
+            .all(|text| !text.contains("yesterday-")),
+        "today-priority path should not reintroduce pre-today turns"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn targeted_hydration_no_boundary_loads_min_10_turns() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let yesterday =
+        (Utc::now() - Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    for idx in 0..15usize {
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("y_u_{idx}"),
+                "timestamp": yesterday,
+                "message": { "role": "user", "content": format!("yesterday-q-{idx}") }
+            }),
+        );
+        append_json_line(
+            &transcript_path,
+            serde_json::json!({
+                "type": "message",
+                "id": format!("y_a_{idx}"),
+                "timestamp": yesterday,
+                "message": { "role": "assistant", "content": format!("yesterday-a-{idx}") }
+            }),
+        );
+    }
+
+    let tail = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Tail,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    let full = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Full,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    assert_context_parity(&tail, &full);
+    let texts: Vec<_> = tail
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .collect();
+    assert!(texts.iter().any(|text| text.contains("yesterday-q-5")));
+    assert!(!texts.iter().any(|text| text.contains("yesterday-q-0")));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn init_context_state_auto_matches_full_for_large_boundary_session() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    for idx in 0..1_100usize {
+        crate::core::session::transcript::append_line(
+            &transcript_path,
+            &serde_json::json!({
+                "type": "message",
+                "id": format!("u_old_{idx}"),
+                "timestamp": "2025-01-01T00:00:01.000Z",
+                "message": {
+                    "role": "user",
+                    "content": format!("old-q-{idx}"),
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        crate::core::session::transcript::append_line(
+            &transcript_path,
+            &serde_json::json!({
+                "type": "message",
+                "id": format!("a_old_{idx}"),
+                "timestamp": "2025-01-01T00:00:02.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": format!("old-a-{idx}"),
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    crate::core::session::transcript::append_line(
+        &transcript_path,
+        &serde_json::json!({
+            "type": "branch_summary",
+            "id": "boundary_keep",
+            "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "summary": "boundary summary",
+            "coveredCount": 2200,
+            "isBoundary": true,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for idx in 0..12usize {
+        crate::core::session::transcript::append_line(
+            &transcript_path,
+            &serde_json::json!({
+                "type": "message",
+                "id": format!("u_new_{idx}"),
+                "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "message": {
+                    "role": "user",
+                    "content": format!("new-q-{idx}"),
+                    "superseded": idx == 3,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        crate::core::session::transcript::append_line(
+            &transcript_path,
+            &serde_json::json!({
+                "type": "message",
+                "id": format!("a_new_{idx}"),
+                "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "message": {
+                    "role": "assistant",
+                    "content": format!("new-a-{idx}"),
+                    "superseded": idx == 3,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    let auto = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    let full = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Full,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+
+    assert_context_parity(&auto, &full);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

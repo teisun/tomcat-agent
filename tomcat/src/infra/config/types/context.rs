@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeHydrationMode {
+    #[default]
+    Auto,
+    Full,
+    Tail,
+}
+
 /// 上下文管理配置：token-aware 滑窗与 Compaction 参数。
 /// 详见 `docs/architecture/context-management.md`。
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -31,6 +40,13 @@ pub struct ContextConfig {
     /// Compaction 摘要最大 token 数（LLM max_tokens 参数），默认 10,000。
     #[serde(default = "default_compaction_max_tokens")]
     pub compaction_max_tokens: usize,
+    /// chat/resume 恢复路径：`auto` 按 transcript 大小切换，`full` 强制旧路径，`tail`
+    /// 强制 metadata-first + targeted hydrate。
+    #[serde(default)]
+    pub resume_hydration_mode: ResumeHydrationMode,
+    /// `resume_hydration_mode=auto` 时，entry 数达到该阈值才启用 targeted hydrate。
+    #[serde(default = "default_resume_lazy_threshold")]
+    pub resume_lazy_threshold: usize,
 }
 
 fn default_context_window() -> usize {
@@ -69,6 +85,10 @@ fn default_compaction_max_tokens() -> usize {
     10_000
 }
 
+fn default_resume_lazy_threshold() -> usize {
+    2_000
+}
+
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
@@ -81,6 +101,8 @@ impl Default for ContextConfig {
             current_tail_compactable_min_chars: default_current_tail_compactable_min_chars(),
             current_tail_single_result_max_chars: default_current_tail_single_result_max_chars(),
             compaction_max_tokens: default_compaction_max_tokens(),
+            resume_hydration_mode: ResumeHydrationMode::default(),
+            resume_lazy_threshold: default_resume_lazy_threshold(),
         }
     }
 }

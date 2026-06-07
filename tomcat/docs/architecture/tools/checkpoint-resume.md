@@ -6,6 +6,8 @@
 
 **说人话**：本文按架构规范把「词怎么叫、别人怎么做的、我们定啥、协议长啥样、文件谁管谁、咋测、有啥坑」一次写全；Plan 面板与 `todo` / `/plan` / `/goal` 的上层编排另见 [`plan-runtime.md`](../plan-runtime.md)，不在这里糊成一团。
 
+> 启动期 transcript hydrate 的物理读路径、resume sidecar、`reverse-chunk`、plan fast path、`TOMCAT_RESUME_TRACE` 与 kill switch 现在由 [`../chat-resume-hydration.md`](../chat-resume-hydration.md) 单独维护。本文只保留 checkpoint 产品语义，以及它与“启动恒 `Continue`”之间的关系。
+
 ---
 
 ## 目录
@@ -390,6 +392,8 @@
 - **`compute_resume_plan`**（**拟定**；可为 no-op）：签名可保留 `compute_resume_plan(entry, tail) -> ResumePlan`，但 **MVP 恒返回 `Continue`**——**无** `Fresh`、**无** `RewindTo`。可选读 `tail` **仅**用于日志 / 遥测，**不**改变启动分支。transcript 与磁盘错位 **不**在开机自动修复，由后续对话与 **显式** `/restore` 处理。
 - **`chat_loop` 启动顺序**（目标；与当前仓库可能不一致，见 §3.0）：`load session`（含 transcript 路径）→ **`spawn` / `schedule` `prune(retention)` 一次**（**默认必跑**；**不**在主线程 `join`；**无**其它 prune 入口）→（可选）`read_entries_tail` → `compute_resume_plan`（恒 `Continue`）→ `init_context_state` / hydrate（**构造送入模型的 `messages` 时省略 `superseded` 行**）→ `readline`。**并发**：`CheckpointStore` 实现须 **Mutex（或等价）** 串行化 `prune` 与 `record` / `list` / `show` / `restore`，避免后台裁剪与用户操作交错损坏元数据。
 - **与 [`interrupt-and-cancellation.md §14.1`](../interrupt-and-cancellation.md) 收口**：T-007 完整版中长期项（跨 session ckpt 等）仍非目标（见 §3.2）；本期以 **hydrate + 恒 Continue** 与 T-004/T-017 **Interrupted** 路径对齐。
+
+> 这里的 `(可选) read_entries_tail` 只表示“启动期可能会读 transcript metadata / tail”，不再表示具体实现固定为旧的 5000 条尾扫。`Full / Auto / Tail` 三条实际读路径、sidecar 冷热分流和 trace 字段，以 [`../chat-resume-hydration.md`](../chat-resume-hydration.md) 为准。
 
 ```text
    tomcat chat [无 --resume]

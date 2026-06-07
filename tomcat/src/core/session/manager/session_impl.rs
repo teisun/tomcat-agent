@@ -9,6 +9,7 @@ use chrono::Utc;
 use crate::core::session::append_message_chain::{
     collect_recent_chat_messages_from_tail, validate_append_message,
 };
+use crate::core::session::resume_index::remove_resume_index;
 use crate::core::session::store::{
     load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
 };
@@ -290,6 +291,7 @@ impl SessionManager {
         if let Some(e) = entry {
             let path = self.transcript_path(&e.session_id);
             let _ = std::fs::remove_file(&path);
+            let _ = remove_resume_index(&path);
         }
         Ok(())
     }

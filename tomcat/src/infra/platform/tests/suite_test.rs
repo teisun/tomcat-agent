@@ -42,7 +42,7 @@ fn normalize_path_without_tilde() {
 
 #[test]
 fn normalize_path_with_tilde() {
-    if dirs::home_dir().is_some() {
+    if crate::infra::platform::home_dir().is_some() {
         let r = normalize_path("~");
         assert!(r.is_ok());
     }

@@ -119,10 +119,10 @@ fn op_summary(op: PrimitiveOperation) -> &'static str {
 
 fn resolve_preflight_path(raw: &str, cwd_path: &Path) -> PathBuf {
     if raw == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+        return crate::infra::platform::home_dir().unwrap_or_else(|| PathBuf::from(raw));
     }
     if let Some(rest) = raw.strip_prefix("~/") {
-        return dirs::home_dir()
+        return crate::infra::platform::home_dir()
             .map(|home| home.join(rest))
             .unwrap_or_else(|| PathBuf::from(raw));
     }

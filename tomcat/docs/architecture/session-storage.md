@@ -50,6 +50,8 @@ pub struct SessionEntry {
 
 每会话一个 `.jsonl` 文件：**每行一个 JSON 对象**（非管道分隔）；首行 session header，后续每行一条 entry，树形 id/parentId。内存中为结构化类型（pi-mono 为 `SessionEntry` 联合类型），落盘时每行 `JSON.stringify(entry)`。与 pi-mono 格式兼容。
 
+> 启动恢复的物理读取方案已经从“单靠 transcript 尾扫”升级为“transcript + sibling resume sidecar”。sidecar 的字段、更新时机、冷热路径与 trace 见 [`chat-resume-hydration.md`](./chat-resume-hydration.md)；本文件只保留存储布局与数据结构本身。
+
 ```rust
 /// 首行：session header
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +122,7 @@ pub struct BranchSummaryEntry {
 - **会话根目录** `~/.tomcat/agents/<agentId>/sessions/`；MVP 阶段 agentId 固定为 `main`。
 - **sessionKey** (路由键，预留多channel)：`agent:<agentId>:<channelKey>`，MVP 用 `agent:main:main`，后续 channelKey 可扩展如: `agent:mybot:telegram:group:123`
 - **sessionId** 当前对话对应的 transcript 唯一 id(sessionId=<timestamp>_<uuid>)，对应文件名'<sessionId>.jsonl'; SessionEntry中'sessionId'指向改文件
+- **resume sidecar**：同目录 sibling 文件 `<sessionId>.resume-index.json`，仅保存启动恢复定位所需的 metadata，不保存完整消息正文；缺失/损坏可重建，详见 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。
 
 **Source of truth**：transcript 内容以 JSONL 文件为准；sessions.json 为元数据与路由的权威，写入时覆盖该文件。
 

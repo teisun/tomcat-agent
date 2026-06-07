@@ -479,7 +479,7 @@ fn result_summary_picks_best_field_for_success_and_error() {
 
 #[test]
 fn create_plan_success_shows_absolute_plan_path() {
-    let home = dirs::home_dir().expect("HOME");
+    let home = crate::infra::platform::home_dir().expect("HOME");
     let plan_path = home.join(".tomcat/plans/plan_demo_abcd1234.plan.md");
     let payload = json!({
         "plan_id": "plan_demo_abcd1234",
@@ -500,7 +500,7 @@ fn create_plan_success_shows_absolute_plan_path() {
 #[test]
 fn tool_end_create_plan_prints_clickable_path() {
     let (r, w) = make_renderer(ThinkingDisplay::Summary);
-    let home = dirs::home_dir().expect("HOME");
+    let home = crate::infra::platform::home_dir().expect("HOME");
     let plan_path = home.join(".tomcat/plans/plan_cli_e2e__demo.plan.md");
     let result = json!({
         "plan_id": "plan_cli_e2e__demo",
@@ -533,7 +533,7 @@ fn tool_end_create_plan_prints_clickable_path() {
 
 #[test]
 fn path_display_shows_absolute_path() {
-    let home = dirs::home_dir().expect("HOME");
+    let home = crate::infra::platform::home_dir().expect("HOME");
     let target = home.join("workspace/demo.rs");
     let summary = result_summary_for_tool(
         &json!("已写入: ~/workspace/demo.rs (2 bytes)"),
@@ -564,7 +564,7 @@ fn result_summary_keeps_long_permission_error_path() {
 
 #[test]
 fn update_plan_success_shows_absolute_plan_path() {
-    let home = dirs::home_dir().expect("HOME");
+    let home = crate::infra::platform::home_dir().expect("HOME");
     let plan_path = home.join(".tomcat/plans/plan_demo_update.plan.md");
     let payload = json!({
         "plan_id": "plan_demo_update",
@@ -621,7 +621,7 @@ fn write_plaintext_without_display_falls_back_to_ok() {
 #[test]
 fn tool_end_write_prints_clickable_path() {
     let (r, w) = make_renderer(ThinkingDisplay::Summary);
-    let home = dirs::home_dir().expect("HOME");
+    let home = crate::infra::platform::home_dir().expect("HOME");
     let target = home.join("workspace/demo.txt");
     let result = format!(
         "已写入: ~/{} (2 bytes)",

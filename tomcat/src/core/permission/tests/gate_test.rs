@@ -414,7 +414,7 @@ fn pr9_credentials_glob_denies_write() {
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_cred");
     let gate = gate_with(ws, vec![], vec![]);
-    let home = dirs::home_dir().expect("home dir");
+    let home = crate::infra::platform::home_dir().expect("home dir");
     let target = home.join(".tomcat/agents/main/agent/auth-profiles.json");
     let dec = gate
         .check(PrimitiveOperation::Write, target.to_str().unwrap())
@@ -433,7 +433,7 @@ fn pr9_credentials_glob_denies_write() {
 fn pr9_credentials_glob_denies_read_too() {
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_cred_read");
-    let home = dirs::home_dir().expect("home dir");
+    let home = crate::infra::platform::home_dir().expect("home dir");
     let agent_root = home.join(".tomcat/agents/main/agent");
     let gate = gate_with(ws, vec![], vec![agent_root.clone()]);
     let target = agent_root.join("auth-profiles.json");
@@ -454,7 +454,7 @@ fn pr9_sessions_glob_blocks_write() {
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_sess");
     let gate = gate_with(ws, vec![], vec![]);
-    let home = dirs::home_dir().expect("home dir");
+    let home = crate::infra::platform::home_dir().expect("home dir");
     let target = home.join(".tomcat/agents/main/sessions/anything.jsonl");
     let dec = gate
         .check(PrimitiveOperation::Write, target.to_str().unwrap())
@@ -474,7 +474,7 @@ fn pr9_sessions_glob_allows_read_with_path_rule_source() {
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let ws = tmpdir("ws_pr9_sess_read");
     let gate = gate_with(ws, vec![], vec![]);
-    let home = dirs::home_dir().expect("home dir");
+    let home = crate::infra::platform::home_dir().expect("home dir");
     let target = home.join(".tomcat/agents/main/sessions/foo.jsonl");
     let dec = gate
         .check(PrimitiveOperation::Read, target.to_str().unwrap())

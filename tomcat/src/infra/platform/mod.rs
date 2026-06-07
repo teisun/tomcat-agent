@@ -4,6 +4,17 @@ use std::path::{Path, PathBuf};
 
 use super::error::AppError;
 
+/// 返回当前进程应使用的 HOME 目录。
+///
+/// 测试会临时覆写 `HOME` 指向隔离目录；这里优先读取进程环境变量，
+/// 再回退到平台默认的 home 目录解析。
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
+
 /// 规范化路径：展开 `~` 为当前用户 home、解析 `.`/`..`，失败时返回未 canonicalize 的路径。
 ///
 /// # Arguments
@@ -14,7 +25,7 @@ use super::error::AppError;
 pub fn normalize_path(path: &str) -> Result<PathBuf, AppError> {
     let expanded = if path.starts_with("~") {
         let rest = path.trim_start_matches('~').trim_start_matches('/');
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             home.join(rest)
         } else {
             PathBuf::from(path)
@@ -30,7 +41,7 @@ pub fn normalize_path(path: &str) -> Result<PathBuf, AppError> {
 /// - 恰好等于 HOME → `~`
 /// - 其它路径 → 原样 `display()`
 pub fn format_home_path(path: &Path) -> String {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = home_dir() else {
         return path.display().to_string();
     };
     if path == home {

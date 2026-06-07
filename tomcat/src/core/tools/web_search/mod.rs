@@ -326,6 +326,10 @@ fn build_web_search_http_client(
         let proxy = reqwest::Proxy::all(proxy_url)
             .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
         builder = builder.proxy(proxy);
+    } else {
+        // Keep local mock backends and loopback requests deterministic unless the
+        // user explicitly configured a proxy in tomcat config.
+        builder = builder.no_proxy();
     }
     builder
         .build()

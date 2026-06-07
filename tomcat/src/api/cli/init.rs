@@ -148,7 +148,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
 /// 将 `tomcat` 可执行文件所在目录追加到 shell 启动脚本中的 PATH；已存在同序 export 则跳过。
 fn auto_add_to_path(bin_dir: &Path) -> bool {
     let shell = std::env::var("SHELL").unwrap_or_default();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::infra::platform::home_dir() else {
         return false;
     };
     let profile = if shell.contains("zsh") {

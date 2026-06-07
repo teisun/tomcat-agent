@@ -167,9 +167,9 @@ pub fn expand_extracted(paths: &[String]) -> Vec<PathBuf> {
         .iter()
         .filter_map(|p| {
             if let Some(rest) = p.strip_prefix("~/") {
-                dirs::home_dir().map(|h| h.join(rest))
+                crate::infra::platform::home_dir().map(|h| h.join(rest))
             } else if p == "~" {
-                dirs::home_dir()
+                crate::infra::platform::home_dir()
             } else {
                 Some(PathBuf::from(p))
             }
