@@ -6,6 +6,7 @@ use crate::{
     CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
     RetentionPolicy, SessionManager,
 };
+use serial_test::serial;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +48,54 @@ fn spawn_single_response_server(
 // 这三个测试改为直接读 catalog 默认视图（与 build_tool_definitions 在 PlanState::Chat 时等价）。
 fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
     crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn drain_pending_stdin_bytes_clears_tty_backlog_before_readline() {
+    use std::fs::File;
+    use std::io::Write as _;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    unsafe {
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        assert_eq!(
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            0,
+            "openpty should succeed"
+        );
+
+        let stdin_fd = std::io::stdin().as_raw_fd();
+        let saved_stdin = libc::dup(stdin_fd);
+        assert!(saved_stdin >= 0, "dup(stdin) should succeed");
+        assert_eq!(libc::dup2(slave_fd, stdin_fd), stdin_fd, "dup2 stdin");
+        libc::close(slave_fd);
+
+        let mut master = File::from_raw_fd(master_fd);
+        let payload = b"waiting_for_output task=t-1 remaining=24s/30s\nYAN:tomcat yankeben$ tomcat chat\n";
+        master.write_all(payload).expect("write payload into pty");
+        master.flush().expect("flush payload into pty");
+
+        let drained = super::super::drain_pending_stdin_bytes();
+        assert!(
+            drained >= payload.len(),
+            "应清掉整段积压输入，实际 drained={drained}, payload_len={}",
+            payload.len()
+        );
+        let drained_second = super::super::drain_pending_stdin_bytes();
+        assert_eq!(drained_second, 0, "第二次应无残留 backlog");
+
+        assert_eq!(libc::dup2(saved_stdin, stdin_fd), stdin_fd, "restore stdin");
+        libc::close(saved_stdin);
+    }
 }
 
 #[test]

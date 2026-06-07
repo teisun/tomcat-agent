@@ -1180,8 +1180,9 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
     assert!(got_finished, "应当在多次 wait slice 后命中 finished");
 }
 
-/// timeout 是非终态：`wakeReason="timeout" && finished=false`，且
-/// `next_offset == since`（content 为空），允许下次 since 不变继续等。
+/// timeout 是非终态：`wakeReason="timeout" && finished=false`。若自 `since` 之后
+/// 仍无新输出，则允许 `next_offset == since`；若此前已有输出，则返回最近 tail 快照
+/// 供模型判断是否继续等待。
 #[tokio::test]
 async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
@@ -1240,6 +1241,81 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
     assert_eq!(chunk["content"], serde_json::Value::String("".into()));
 
     // 收尾：stop。
+    let _ = registry.stop(&task_id).await;
+}
+
+#[tokio::test]
+async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still_running() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+
+    let start_tc = ToolCallInfo {
+        id: "bg-tail".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 5","run_in_background":true}"#
+            .into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let initial = registry
+        .read_output(&task_id, Some(0))
+        .await
+        .expect("read initial output");
+    assert!(
+        initial.content.contains("SNAPSHOT_FROM_TIMEOUT"),
+        "首次输出应包含 token，实际 {:?}",
+        initial.content
+    );
+
+    let out_tc = ToolCallInfo {
+        id: "to-tail".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":250}}"#,
+            task_id, initial.next_offset
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(!outcome.is_error);
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("timeout".into())
+    );
+    assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
+    let content = chunk["content"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("SNAPSHOT_FROM_TIMEOUT"),
+        "timeout 应返回最近 tail 快照，实际 {:?}",
+        content
+    );
+
     let _ = registry.stop(&task_id).await;
 }
 

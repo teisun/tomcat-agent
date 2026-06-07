@@ -14,10 +14,18 @@ There are exactly three correct usage patterns — pick one:
    - Default `timeout_ms` is 5000, max is 30000 (values above are capped),
      and `0` is equivalent to `block=false`.
    - **`timeout` is NOT a failure.** When `wakeReason="timeout" && finished=false`
-     the response is just a wait slice (`content=""`, `next_offset == since`).
-     Call `task_output(block=true)` again with the same `since` to keep waiting.
-   - Loop on this until you see `wakeReason="finished"`, then act on `exit_code`
-     and the tail bytes.
+     the response may still include either:
+     - new bytes since `since`, or
+     - a recent tail snapshot when there was no fresh increment yet.
+   - Read `content`, `finished`, `exit_code`, and `wakeReason` together:
+     - `finished=true` → task is done; act on `exit_code` and the returned output.
+     - `wakeReason="new_output"` → use the returned bytes to decide what to do next.
+     - `wakeReason="timeout" && finished=false` → this is a progress check, **not**
+       a failure. Inspect the returned output first; only call `task_output(block=true)`
+       again if you still truly need to wait.
+   - **Do not mindlessly loop forever.** If repeated timeout slices show no meaningful
+     progress, stop polling, do other independent work first, or report the current
+     status to the user.
 
 2. **The current todo can do other independent work first** → spawn the
    background task and **immediately** continue with other tools (read / edit /
@@ -41,6 +49,7 @@ There are exactly three correct usage patterns — pick one:
 
 Avoid these mistakes:
 - Treating a `block=true` `timeout` as a failure — it's just a wait slice ending.
+- Repeating `task_output(block=true)` forever without reading the returned output.
 - Repeated `task_output(block=false)` with no other work in between.
 - Returning a final answer to the user before the shell completes (unless the
   user explicitly asked for fire-and-forget).

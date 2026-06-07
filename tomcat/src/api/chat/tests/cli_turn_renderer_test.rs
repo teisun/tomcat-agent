@@ -23,11 +23,18 @@ use crate::infra::events::ToolDisplay;
 struct CapturedWriter {
     stdout: Mutex<String>,
     stderr: Mutex<String>,
+    stderr_is_terminal: bool,
 }
 
 impl CapturedWriter {
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+    fn new_tty() -> Arc<Self> {
+        Arc::new(Self {
+            stderr_is_terminal: true,
+            ..Self::default()
+        })
     }
     fn stdout(&self) -> String {
         self.stdout.lock().clone()
@@ -44,10 +51,17 @@ impl CliWriter for CapturedWriter {
     fn write_stderr(&self, s: &str) {
         self.stderr.lock().push_str(s);
     }
+    fn stderr_is_terminal(&self) -> bool {
+        self.stderr_is_terminal
+    }
 }
 
 fn make_renderer(display: ThinkingDisplay) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
     make_renderer_with_tool_verbosity(display, ToolCliVerbosity::Full)
+}
+
+fn make_tty_renderer(display: ThinkingDisplay) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
+    make_tty_renderer_with_tool_verbosity(display, ToolCliVerbosity::Full)
 }
 
 fn make_renderer_with_tool_verbosity(
@@ -55,6 +69,23 @@ fn make_renderer_with_tool_verbosity(
     tool_cli_verbosity: ToolCliVerbosity,
 ) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
     let writer = CapturedWriter::new();
+    let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
+    let flag = Arc::new(AtomicU8::new(display.as_u8()));
+    let r = CliTurnRenderer::with_writer(
+        md,
+        flag,
+        writer.clone() as Arc<dyn CliWriter>,
+        false,
+        tool_cli_verbosity,
+    );
+    (r, writer)
+}
+
+fn make_tty_renderer_with_tool_verbosity(
+    display: ThinkingDisplay,
+    tool_cli_verbosity: ToolCliVerbosity,
+) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
+    let writer = CapturedWriter::new_tty();
     let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
     let flag = Arc::new(AtomicU8::new(display.as_u8()));
     let r = CliTurnRenderer::with_writer(
@@ -235,11 +266,10 @@ fn tool_start_emits_gray_summary_on_stderr() {
     assert!(err.contains("\x1b[90m"), "应使用 gray ANSI: {:?}", err);
 }
 
-/// P1（bash background monitor）：`task_output(block=true)` 倒计时
-/// `tool_execution_update` 事件 → CLI dim 灰行。
+/// P1（bash background monitor）：真实终端 TTY 下倒计时走单行原地刷新，单位为秒。
 #[test]
-fn tool_update_emits_dim_countdown_line_on_stderr() {
-    let (r, w) = make_renderer(ThinkingDisplay::Summary);
+fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
+    let (r, w) = make_tty_renderer(ThinkingDisplay::Summary);
     r.on_tool_update(&json!({
         "toolCallId": "blk-1",
         "toolName": "task_output",
@@ -259,11 +289,43 @@ fn tool_update_emits_dim_countdown_line_on_stderr() {
         err
     );
     assert!(
-        err.contains("task=t-1") && err.contains("remaining=1500/3000ms"),
-        "应展示倒计时: {:?}",
+        err.contains("task=t-1") && err.contains("remaining=2s/3s"),
+        "应展示秒级倒计时: {:?}",
+        err
+    );
+    assert!(
+        err.contains("\r\x1b[2K"),
+        "TTY 倒计时应使用回车覆盖同一行: {:?}",
+        err
+    );
+    assert!(
+        !err.contains('\n'),
+        "TTY 倒计时不应每次追加换行: {:?}",
         err
     );
     assert!(err.contains("\x1b[90m"), "倒计时应使用 dim 灰: {:?}", err);
+}
+
+#[test]
+fn tool_update_is_suppressed_on_non_tty_stderr() {
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
+    r.on_tool_update(&json!({
+        "toolCallId": "blk-1",
+        "toolName": "task_output",
+        "args": {"task_id": "t-1", "block": true, "timeout_ms": 3000},
+        "partialResult": {
+            "phase": "waiting_for_output",
+            "taskId": "t-1",
+            "since": 0,
+            "timeoutMs": 3000,
+            "remainingMs": 1500
+        },
+    }));
+    assert!(
+        w.stderr().is_empty(),
+        "非 TTY stderr 不应绘制倒计时动画，实际: {:?}",
+        w.stderr()
+    );
 }
 
 #[test]

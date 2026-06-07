@@ -65,6 +65,10 @@ pub trait CliWriter: Send + Sync {
     fn write_stdout(&self, s: &str);
     /// 写一段已经包含 ANSI 的内容到 stderr 通道。
     fn write_stderr(&self, s: &str);
+    /// stderr 是否连接到真实交互终端（TTY）。默认 false，测试 writer 可按需覆盖。
+    fn stderr_is_terminal(&self) -> bool {
+        false
+    }
 }
 
 /// 真·终端实现。
@@ -84,6 +88,10 @@ impl CliWriter for StdCliWriter {
         let mut h = stderr.lock();
         let _ = h.write_all(s.as_bytes());
         let _ = h.flush();
+    }
+    fn stderr_is_terminal(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
     }
 }
 
@@ -106,6 +114,9 @@ struct RendererState {
     /// 不区分 summary/raw：当前 assistant message 第一次出现可见 thinking 时打前缀，
     /// 后续 delta 都在同一条 thinking 行追加。
     thinking_prefix_printed: bool,
+    /// `task_output(block=true)` 倒计时在真实终端走单行原地刷新；该标记表示当前
+    /// stderr 上存在一条待覆盖的内联倒计时行，切换到其它输出前需先清掉。
+    inline_tool_update_active: bool,
 }
 
 impl CliTurnRenderer {
@@ -143,6 +154,7 @@ impl CliTurnRenderer {
             state: Mutex::new(RendererState {
                 last_kind: LastKind::None,
                 thinking_prefix_printed: false,
+                inline_tool_update_active: false,
             }),
             writer,
             tool_starts: Mutex::new(std::collections::HashMap::new()),
@@ -166,6 +178,10 @@ impl CliTurnRenderer {
     /// thinking 行末尾，则先补一个换行，避免下一条消息的 `[thinking]` 接在上一条后面。
     pub fn on_message_start(&self) {
         let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            st.inline_tool_update_active = false;
+        }
         if st.last_kind == LastKind::Thinking {
             self.write_thinking("\n");
         }
@@ -219,6 +235,10 @@ impl CliTurnRenderer {
             self.writer.write_stdout(&remaining);
         }
         let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            st.inline_tool_update_active = false;
+        }
         if st.last_kind != LastKind::None {
             self.writer.write_stderr("\n");
         }
@@ -240,6 +260,10 @@ impl CliTurnRenderer {
             self.writer.write_stdout(&remaining);
         }
         let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            st.inline_tool_update_active = false;
+        }
         if st.last_kind != LastKind::None {
             self.writer.write_stderr("\n");
         }
@@ -252,6 +276,11 @@ impl CliTurnRenderer {
         let display = ThinkingDisplay::from_u8(self.thinking_display.load(Ordering::Acquire));
         if matches!(display, ThinkingDisplay::Minimal) {
             let mut st = self.state.lock();
+            if st.inline_tool_update_active {
+                self.writer.write_stderr("\r\x1b[2K");
+                self.write_thinking("\n");
+                st.inline_tool_update_active = false;
+            }
             if st.last_kind == LastKind::Content {
                 drop(st); // 释放锁，避免与 md.lock 死锁顺序冲突
                 if let Some(remaining) = self.md.lock().flush() {
@@ -274,6 +303,11 @@ impl CliTurnRenderer {
             return;
         }
         let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            self.write_thinking("\n");
+            st.inline_tool_update_active = false;
+        }
         // 思考通道与正文/工具切换时，先冲走 markdown 残余 + 换行，避免「正文 ... [thinking]」黏一行。
         if st.last_kind == LastKind::Content {
             drop(st); // 释放锁，避免与 md.lock 死锁顺序冲突
@@ -294,6 +328,11 @@ impl CliTurnRenderer {
 
     fn handle_content_delta(&self, delta: &str) {
         let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            self.writer.write_stdout("\n");
+            st.inline_tool_update_active = false;
+        }
         // 通道切换：上一行如果是 thinking 或 tool start，需要 \n 隔开正文。
         if matches!(st.last_kind, LastKind::Thinking | LastKind::ToolStart) {
             self.writer.write_stdout("\n");
@@ -330,6 +369,10 @@ impl CliTurnRenderer {
             self.writer.write_stdout(&remaining);
         }
         let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            st.inline_tool_update_active = false;
+        }
         // tool 装饰前总是补一个换行，让它独占行（与 thinking 区块分隔）。
         if st.last_kind != LastKind::None {
             self.writer.write_stderr("\n");
@@ -345,6 +388,9 @@ impl CliTurnRenderer {
     /// 写到 stderr，**不**改 `last_kind`，避免影响后续正文分隔。
     pub fn on_tool_update(&self, payload: &Value) {
         if self.tool_cli_verbosity != ToolCliVerbosity::Full {
+            return;
+        }
+        if !self.writer.stderr_is_terminal() {
             return;
         }
         let tool_name = payload
@@ -368,15 +414,19 @@ impl CliTurnRenderer {
             .get("timeoutMs")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let remaining_secs = remaining.saturating_add(999) / 1000;
+        let timeout_secs = timeout.saturating_add(999) / 1000;
         let line = format!(
-            "\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}/{timeout}ms\x1b[0m\n",
+            "\r\x1b[2K\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}s/{timeout}s\x1b[0m",
             name = tool_name,
             phase = phase,
             task = task_id,
-            remaining = remaining,
-            timeout = timeout,
+            remaining = remaining_secs,
+            timeout = timeout_secs,
         );
+        let mut st = self.state.lock();
         self.writer.write_stderr(&line);
+        st.inline_tool_update_active = true;
     }
 
     /// 处理 `tool_execution_end` 事件。
@@ -412,6 +462,11 @@ impl CliTurnRenderer {
                 }
             })
             .unwrap_or_else(|| "?".to_string());
+        let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            st.inline_tool_update_active = false;
+        }
         let summary = result_summary_for_tool(&result, display.as_ref(), is_error);
         let (icon, color) = if is_error {
             ("✗", "\x1b[31m")

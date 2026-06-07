@@ -20,6 +20,7 @@
 //! - `submodules_test`：直接调用 `pub(super)` 子模块函数的焦小测
 //!   （handle_overflow_retry / execute_tool）。
 
+mod background_monitor_test;
 mod classify_test;
 mod current_tail_guard_behavior_test;
 mod current_tail_guard_runtime_test;

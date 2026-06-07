@@ -2033,18 +2033,21 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     );
 }
 
-// ──────────────────── Story 2.5: Bash 后台监控 P1 真 LLM 黑盒（E2E-CLI-016C~016F） ────────────────────
+// ──────────────────── Story 2.5: Bash 后台监控 P1 真 LLM 黑盒（E2E-CLI-016C~016G） ────────────────────
 //
-// 这 3 条真测分别锁三条 P1 门禁：
+// 这组真测分别锁几条关键门禁：
 // - `016C`：finish-only auto-feed。模型起后台 bash 后先做独立工作，不主动 poll，
 //   必须依赖 `<background-task-finished ...>` synthetic user message 继续推进。
 // - `016D`：`task_output(block=true)` 单次 wait-slice。模型必须走阻塞等待路径，
-//   stderr 要出现倒计时 update，transcript 要出现真实 `task_output` / `task_stop`。
+//   transcript 要出现真实 `task_output` / `task_stop`；非 TTY 抓取 stderr 不应再堆
+//   `waiting_for_output` 动画。
 // - `016E`：真实多次 timeout slice 重试。模型必须至少经历两次
 //   `wakeReason="timeout" && finished=false`，然后继续等到 `new_output` 再收尾。
 // - `016F`：midturn batch boundary auto-feed。模型先起后台 bash，再跑一个耗时 foreground
 //   bash；只有在 foreground batch 结束后的**下一次请求**里看到
 //   `<background-task-finished ...>` 才允许继续，否则必须输出失败哨兵词。
+// - `016G`：永不结束任务 + timeout tail snapshot。模型先吃掉首个 `new_output`，
+//   再在 EOF 处命中一次 timeout 快照，随后必须停止继续 poll。
 //
 // 这组 helper 只做四件事：
 // 1. 起临时 HOME + `tomcat init`
@@ -2243,13 +2246,13 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 ///
 /// 验证：
 /// - exit 0；
-/// - stderr 含 `task_output` 且含 `waiting_for_output` 倒计时 update；
+/// - 非 TTY 抓取 stderr **不**含 `waiting_for_output` 倒计时动画；
 /// - transcript 中至少有 1 次 `task_output` tool call，且参数包含
 ///   `block=true` 与 `timeout_ms=300`；
 /// - 后台任务真实产出 `blockwait_done.txt`；
 /// - stdout 最终包含约定完成词 `BLOCKWAIT_OK`。
 ///
-/// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、CLI 倒计时 update、
+/// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、
 /// transcript 中的真实 tool_call，以及 `new_output` 唤醒后的收尾。
 #[test]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
@@ -2292,8 +2295,8 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
         trunc(&stderr, 1200)
     );
     assert!(
-        stderr.contains("task_output") && stderr.contains("waiting_for_output"),
-        "stderr 应出现 task_output 倒计时 update，实际: {}",
+        !stderr.contains("waiting_for_output"),
+        "非 TTY stderr 不应出现倒计时动画，实际: {}",
         trunc(&stderr, 1200)
     );
     assert!(
@@ -2347,7 +2350,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 ///
 /// 验证：
 /// - exit 0；
-/// - stderr 含 `task_output` 与 `waiting_for_output`；
+/// - 非 TTY 抓取 stderr **不**含 `waiting_for_output`；
 /// - transcript 中 `task_output` tool call 至少 3 次；
 /// - transcript 中 `role=tool` 的结果里，`wakeReason="timeout"` 至少 2 次；
 /// - transcript 中最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；
@@ -2396,8 +2399,8 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
         trunc(&stderr, 1400)
     );
     assert!(
-        stderr.contains("task_output") && stderr.contains("waiting_for_output"),
-        "stderr 应出现 task_output 倒计时 update，实际: {}",
+        !stderr.contains("waiting_for_output"),
+        "非 TTY stderr 不应出现倒计时动画，实际: {}",
         trunc(&stderr, 1400)
     );
     assert!(
@@ -2633,6 +2636,144 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
     assert!(
         success_pos > follow_up_pos,
         "成功词应位于 synthetic follow-up 之后；follow_up_pos={follow_up_pos}, success_pos={success_pos}"
+    );
+}
+
+/// [E2E-CLI-016G] 永不结束后台 bash + timeout 快照后停止轮询
+///
+/// 用户意图：模型先启动一个会长时间挂起的后台 bash，先用一次 `task_output(block=true)`
+/// 吃掉首个 `new_output`，再用第二次 `task_output(block=true)` 在 EOF 处命中
+/// `wakeReason="timeout"`。拿到 timeout 返回的 tail 快照后，必须立即停止轮询，
+/// 不允许继续 `task_output` busy loop。
+///
+/// 验证：
+/// - exit 0；
+/// - stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；
+/// - 非 TTY 抓取 stderr 不含 `waiting_for_output`；
+/// - transcript 中 `task_output` 调用次数有上界（<= 3）且至少 2 次；
+/// - transcript 中存在 `wakeReason="timeout"` 且内容含 `HUNG_TIMEOUT_BOOT` 的工具结果；
+/// - transcript 的 `role=user` 消息不含 `waiting_for_output`；
+/// - transcript 中不出现 `task_stop` / `task_list`。
+#[test]
+fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    let _span =
+        info_span!("test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli")
+            .entered();
+
+    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016g_timeout_snapshot");
+    let prompt = concat!(
+        "以下内容就是完整指令；不要要求我重复，不要反问，不要 ask_question。 ",
+        "请严格执行，并只在最后回复一行 HUNG_TIMEOUT_BOUNDED_OK： ",
+        "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+        "2. 该后台 bash 的 command 必须精确执行：printf HUNG_TIMEOUT_BOOT; sleep 60。 ",
+        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、timeout_ms=300、since=0。 ",
+        "4. 当第一次 task_output 的返回内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, timeout_ms=300)。 ",
+        "5. 如果第二次 task_output 返回 wakeReason=timeout 且 finished=false，你必须阅读它返回的 content，并把它当作近期 tail 快照而不是失败。由于这里只有同一份 HUNG_TIMEOUT_BOOT、没有新的实质进展，你必须立刻停止继续轮询。 ",
+        "6. 从这一步开始，禁止再次调用 task_output，禁止调用 task_stop、task_list，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash。 ",
+        "7. 满足上述条件后，只回复一行 HUNG_TIMEOUT_BOUNDED_OK 并停止。"
+    )
+    .to_string();
+
+    info!("Act: tomcat chat 触发 timeout tail snapshot bounded case，timeout 90s");
+    let run =
+        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(90));
+    let stdout = run.stdout;
+    let stderr = run.stderr;
+    info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
+    if !stderr.is_empty() {
+        info!("[tomcat chat stderr] {}", trunc(&stderr, 2200));
+    }
+    assert!(
+        run.success,
+        "tomcat chat 应 exit 0；stderr: {}",
+        trunc(&stderr, 1400)
+    );
+    assert!(
+        stdout.contains("HUNG_TIMEOUT_BOUNDED_OK"),
+        "stdout 应含 HUNG_TIMEOUT_BOUNDED_OK，实际: {}",
+        trunc(&stdout, 900)
+    );
+    assert!(
+        !stderr.contains("waiting_for_output"),
+        "非 TTY stderr 不应出现倒计时动画，实际: {}",
+        trunc(&stderr, 1400)
+    );
+
+    let transcript = load_background_bash_p1_real_llm_transcript(&fx);
+    let mut task_output_calls = 0usize;
+    let mut saw_timeout_snapshot = false;
+    let mut saw_waiting_for_output_user = false;
+    let mut saw_task_stop = false;
+    let mut saw_task_list = false;
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "assistant" {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                for tc in tool_calls {
+                    let name = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if name == "task_output" {
+                        task_output_calls += 1;
+                    } else if name == "task_stop" {
+                        saw_task_stop = true;
+                    } else if name == "task_list" {
+                        saw_task_list = true;
+                    }
+                }
+            }
+        } else if role == "tool" {
+            let content = message
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if content.contains("\"wakeReason\":\"timeout\"")
+                && content.contains("HUNG_TIMEOUT_BOOT")
+                && content.contains("\"finished\":false")
+            {
+                saw_timeout_snapshot = true;
+            }
+        } else if role == "user" {
+            let content = message
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if content.contains("waiting_for_output") {
+                saw_waiting_for_output_user = true;
+            }
+        }
+    }
+
+    assert!(
+        (2..=3).contains(&task_output_calls),
+        "task_output 调用次数应有界（2~3 次），实际 {}；transcript: {}",
+        task_output_calls,
+        trunc(&transcript, 2200)
+    );
+    assert!(
+        saw_timeout_snapshot,
+        "transcript 中应看到带 HUNG_TIMEOUT_BOOT 的 timeout 快照；actual: {}",
+        trunc(&transcript, 2200)
+    );
+    assert!(
+        !saw_waiting_for_output_user,
+        "waiting_for_output 不应从 readline 路径回灌为 role:user；actual: {}",
+        trunc(&transcript, 2200)
+    );
+    assert!(
+        !saw_task_stop && !saw_task_list,
+        "bounded timeout 场景不应调用 task_stop/task_list；actual: {}",
+        trunc(&transcript, 2200)
     );
 }
 

@@ -26,6 +26,7 @@ use super::{cli_turn_renderer, events, preflight};
 
 mod background;
 mod cleanup;
+mod input;
 mod persist;
 mod rehydrate;
 mod thinking_persist;
@@ -39,6 +40,8 @@ use self::workspace_state::compute_workspace_state;
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_openai_files_on_session_end;
+#[cfg(test)]
+pub(crate) use self::input::drain_pending_stdin_bytes;
 #[cfg(test)]
 pub(crate) use self::persist::{
     build_turn_checkpoint_request, persist_turn_result, schedule_checkpoint_prune,
@@ -150,8 +153,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
     println!("输入 /help 查看命令列表。\n");
 
-    let mut rl = rustyline::DefaultEditor::new()
-        .map_err(|e| AppError::Config(format!("初始化行编辑器失败: {}", e)))?;
+    let mut rl = input::make_readline_editor()?;
 
     #[cfg(target_os = "macos")]
     // macOS 中文输入法在 `ExternalPrinter` 激活的输入路径下更容易出现回显异常。
@@ -218,6 +220,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let input = if auto_drain {
             String::new()
         } else {
+            let discarded = input::drain_pending_stdin_bytes();
+            if discarded > 0 {
+                info!(
+                    target: "tomcat_chat_diag",
+                    phase = "readline_discard_pending_stdin",
+                    discarded_bytes = discarded
+                );
+            }
             let readline_waker = spawn_readline_waker(ctx.follow_up_signal.clone());
             let raw = match rl.readline(&current_user_prompt(ctx)) {
                 Ok(line) => line,

@@ -820,6 +820,48 @@ impl BashTaskRegistry {
         String::from_utf8_lossy(&buf).into_owned()
     }
 
+    /// 取最近 `max_bytes` 字节的结构化 chunk，便于 `task_output(block=true)` 在 timeout
+    /// 时回一份最近输出快照，而不是空切片。`start_offset/next_offset` 始终与返回内容一致，
+    /// 可直接把 `next_offset` 作为后续续传游标。
+    pub async fn tail_output_chunk(
+        &self,
+        task_id: &str,
+        max_bytes: u64,
+    ) -> Result<BashTaskOutputChunk, AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+        let info_snap = task.info.read().clone();
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&info_snap.log_path)
+            .await
+            .map_err(AppError::Io)?;
+        let len = file.metadata().await.map_err(AppError::Io)?.len();
+        let start = len.saturating_sub(max_bytes);
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(AppError::Io)?;
+        let mut buf = Vec::with_capacity(max_bytes as usize);
+        file.read_to_end(&mut buf).await.map_err(AppError::Io)?;
+        let (finished, exit_code) = match info_snap.status {
+            BashTaskStatus::Finished { exit_code } => (true, Some(exit_code)),
+            BashTaskStatus::Stopped => (true, Some(-1)),
+            BashTaskStatus::Running => (false, None),
+        };
+        Ok(BashTaskOutputChunk {
+            task_id: task_id.to_string(),
+            content: String::from_utf8_lossy(&buf).into_owned(),
+            start_offset: start,
+            next_offset: start + buf.len() as u64,
+            finished,
+            exit_code,
+        })
+    }
+
     /// P1：枚举单个 task 的元信息快照。给 host lifecycle subscriber 取
     /// command / log_path 用，避免重复 broadcast 大字段。
     pub fn get_info(&self, task_id: &str) -> Option<BashTaskInfo> {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::core::agent_loop::types::{BackgroundCompletionRoutes, CompletionRoute, ToolCallInfo};
-use crate::core::tools::primitive::{BashTaskOutputChunk, BashTaskRegistry, WakeReason};
+use crate::core::tools::primitive::{BashTaskRegistry, WakeReason};
 use crate::infra::event_bus::EventBus;
 use crate::infra::events::{AgentEvent, ToolOutput};
 
@@ -10,6 +10,7 @@ use super::super::ToolExecCtx;
 const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS: u64 = 30_000;
 const TASK_OUTPUT_TICK_MS: u64 = 500;
+const TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES: u64 = 4_096;
 
 pub(in super::super) async fn handle_task_output(
     ctx: &ToolExecCtx<'_>,
@@ -158,7 +159,11 @@ async fn handle_task_output_blocking(
                 g.insert(task_id.to_string(), CompletionRoute::Delivered);
             }
             BlockingWakeKind::Timeout => {
-                g.remove(task_id);
+                if delivered {
+                    g.insert(task_id.to_string(), CompletionRoute::Delivered);
+                } else {
+                    g.remove(task_id);
+                }
             }
             BlockingWakeKind::NewOutput => {
                 if delivered {
@@ -184,20 +189,24 @@ async fn finish_blocking_with(
     since_value: u64,
     wake: BlockingWakeKind,
 ) -> Result<(String, bool), String> {
-    let chunk = match wake {
-        BlockingWakeKind::Finished | BlockingWakeKind::NewOutput => registry
-            .read_output(task_id, Some(since_value))
-            .await
-            .map_err(|e| e.to_string())?,
-        BlockingWakeKind::Timeout => BashTaskOutputChunk {
-            task_id: task_id.to_string(),
-            content: String::new(),
-            start_offset: since_value,
-            next_offset: since_value,
-            finished: false,
-            exit_code: None,
-        },
+    let mut chunk = match wake {
+        BlockingWakeKind::Finished | BlockingWakeKind::NewOutput | BlockingWakeKind::Timeout => {
+            registry
+                .read_output(task_id, Some(since_value))
+                .await
+                .map_err(|e| e.to_string())?
+        }
     };
+    if matches!(wake, BlockingWakeKind::Timeout) && chunk.content.is_empty() {
+        if let Ok(snapshot) = registry
+            .tail_output_chunk(task_id, TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES)
+            .await
+        {
+            if !snapshot.content.is_empty() {
+                chunk = snapshot;
+            }
+        }
+    }
     let wake_reason = match wake {
         BlockingWakeKind::Finished => "finished",
         BlockingWakeKind::NewOutput => {
@@ -207,7 +216,13 @@ async fn finish_blocking_with(
                 "new_output"
             }
         }
-        BlockingWakeKind::Timeout => "timeout",
+        BlockingWakeKind::Timeout => {
+            if chunk.finished {
+                "finished"
+            } else {
+                "timeout"
+            }
+        }
     };
     let mut value = serde_json::to_value(&chunk).unwrap_or(serde_json::Value::Null);
     if let serde_json::Value::Object(ref mut map) = value {
@@ -217,7 +232,7 @@ async fn finish_blocking_with(
         );
     }
     let delivered = matches!(wake, BlockingWakeKind::Finished)
-        || matches!(wake, BlockingWakeKind::NewOutput) && chunk.finished;
+        || matches!(wake, BlockingWakeKind::NewOutput | BlockingWakeKind::Timeout) && chunk.finished;
     Ok((value.to_string(), delivered))
 }
 
@@ -311,5 +326,73 @@ mod tests {
         );
         assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
         assert!(delivered, "NewOutput + finished must claim Delivered");
+    }
+
+    #[tokio::test]
+    async fn finish_blocking_with_timeout_returns_tail_snapshot_when_no_new_output() {
+        use crate::core::tools::primitive::BashTaskRegistry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+        let ticket = registry
+            .spawn("printf SNAPSHOT_TIMEOUT; sleep 3".to_string(), None, None)
+            .await
+            .expect("spawn");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let first = registry
+            .read_output(&ticket.task_id, Some(0))
+            .await
+            .expect("read_output");
+        assert!(
+            first.content.contains("SNAPSHOT_TIMEOUT"),
+            "首个增量应包含 token，实际 {:?}",
+            first.content
+        );
+
+        let (text, delivered) =
+            finish_blocking_with(&registry, &ticket.task_id, first.next_offset, BlockingWakeKind::Timeout)
+                .await
+                .expect("finish_blocking_with");
+        let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+
+        assert_eq!(
+            chunk["wakeReason"],
+            serde_json::Value::String("timeout".into())
+        );
+        assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
+        let content = chunk["content"].as_str().unwrap_or_default();
+        assert!(
+            content.contains("SNAPSHOT_TIMEOUT"),
+            "timeout 应回最近输出快照，实际 {:?}",
+            content
+        );
+        assert_eq!(delivered, false, "running timeout 不应 claim Delivered");
+    }
+
+    #[tokio::test]
+    async fn finish_blocking_with_timeout_promotes_finished_race() {
+        use crate::core::tools::primitive::BashTaskRegistry;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+        let ticket = registry
+            .spawn("printf FINISHED_TIMEOUT".to_string(), None, None)
+            .await
+            .expect("spawn");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (text, delivered) =
+            finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::Timeout)
+                .await
+                .expect("finish_blocking_with");
+        let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+
+        assert_eq!(
+            chunk["wakeReason"],
+            serde_json::Value::String("finished".into())
+        );
+        assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
+        assert!(delivered, "timeout 命中已 finished 应 claim Delivered");
     }
 }
