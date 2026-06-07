@@ -392,6 +392,36 @@ sidecar 并不脆弱到“没意义”：
 
 所以 sidecar 不是“永远正确的真相”，而是“有验证和回退保护的加速器”。
 
+### 12.1 损坏或漂移时的恢复原则（2026-06 补充）
+
+这次修正专门把一个边界讲清楚：**transcript 才是 source of truth，sidecar 只是缓存/索引**。因此恢复策略必须偏向“宁可丢缓存，也不要拿错缓存继续增量写”。
+
+- `read_sidecar_raw(...)` 若发现 sidecar JSON 已损坏，不会把整个 `--resume` 直接搞死；它会记一条 warning，然后把 sidecar 当成“缺失”，走 rebuild。
+- `update_resume_index_after_append(...)` 在做 O(1) 增量更新前，会先验证 sidecar 的 `last_entry_id` 是否还对得上 transcript 里“追加前最后一条 entry”。如果对不上，说明 transcript 发生了带外追加、sidecar 已经漂移，这时就**放弃增量**，改走 rebuild。
+- `append_entry_with_sync(...)` 里如果 transcript 追加已经成功，但 sidecar 更新在后半段失败，也**不会**回滚 transcript；它会 warning 并尝试删除 sidecar，让下一次启动从 transcript 重新构建。
+
+```text
+安全路径
+append transcript entry   (source of truth)
+        │
+        ├─ validate sidecar tail == previous transcript tail ?
+        │      ├─ yes -> incremental update sidecar
+        │      └─ no  -> rebuild sidecar from transcript
+        │
+        └─ any sidecar write/parse failure
+               └─ remove sidecar
+                    next resume -> rebuild from transcript
+
+不安全路径（现在显式避免）
+stale / malformed sidecar
+        │
+        └─ 继续做 incremental append
+             └─ 把错误缓存当真相越写越歪
+                  -> 下一次 targeted hydrate 可能读错 slice
+```
+
+**说人话**：resume sidecar 的职责是“帮你少读盘”，不是“替 transcript 做决定”。它一旦损坏或落后，就该立刻失效重建；最怕的不是“缓存没了”，最怕的是“缓存错了还继续被当真”。
+
 ---
 
 ## 13. 验证与基线

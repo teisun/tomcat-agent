@@ -334,6 +334,33 @@
 - **P2（待办）**：
   - 运行中只要出现**非完成态的新输出**，也能通过 `BackgroundTaskOutputReady` / `BackgroundTasksUpdate` 之类事件提前唤醒；
   - CLI 侧显示倒计时、running 数量、任务摘要，而不是只在 `tool_execution_end` 时一次性吐出结果。
+- **为什么 2026-06 又删掉了 `readline()` 前的 `stdin` drain**：
+  - `b180ce4` 那次修复里，CLI 为了处理 `task_output(block=true)` 倒计时/空回车导致的 busy-loop，确实一度在回到 `rustyline.readline()` 前清理过 pending stdin。那不是“拍脑袋加的奇怪代码”，而是为了止住一个真实 bug。
+  - 但后续 `f322d3b` 已经移除了 idle-at-prompt wake（`follow_up_signal` / `SIGWINCH` / empty-enter drain）这一整套脆弱唤醒链路。继续保留“先清 stdin 再 readline”就开始伤害另一边：用户在模型还没完全收口前提前敲好的 type-ahead，会被当成 backlog 吞掉。
+  - `45d8452` 的最终修正因此不再碰 TTY 缓冲，而是把问题收口到**消息排序**：background completion 仍然先进 `follow_up_queue`，但只要同时存在“排队中的 synthetic follow-up”和“本次真实读到的用户输入”，组装下一次请求时必须把**真实用户输入放最后**，让它成为模型眼里最新的一条 user 消息。
+
+```text
+旧方案：清 stdin backlog
+background completion -> queue synthetic follow-up
+用户提前键入 "继续刚才的话题"
+        │
+        ├─ 回到 readline 前先 drain_pending_stdin_bytes()
+        │      └─ 合法 type-ahead 也可能被一起清掉
+        └─ 下一轮只剩 synthetic follow-up
+              -> 模型误以为“最新需求”就是后台通知
+
+新方案：不碰 stdin，只修消息顺序
+background completion -> queue synthetic follow-up
+用户提前键入 "继续刚才的话题"
+        │
+        ├─ readline 正常读到真实输入
+        └─ compose_planned_turn_messages(...)
+              = [queued follow-up..., real user input]
+                                       ↑
+                             真实输入永远放最后
+```
+
+**说人话**：后台通知只是“补充上下文”，不是“覆盖用户意图”。真正刚敲出来的话，必须压轴。
 - **为什么不是新开 `task_wait`**：
   - 复用现有 `task_id + since + next_offset` 契约；
   - 和 `cc-fork-01` 已落地的 `task_output(block, timeout)` 更接近；

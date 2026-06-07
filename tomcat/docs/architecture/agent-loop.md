@@ -177,7 +177,7 @@ fn agent_run(session, user_message):
         session.append_message(response)
         emit(AgentEnd { success })
 
-        if follow_up_queue.is_empty():
+        if reasoning_turn_budget_exhausted or follow_up_queue.is_empty():
             break
         else:
             messages.append(follow_up_queue.drain())
@@ -188,9 +188,11 @@ fn run_reasoning_loop(session, messages) -> Result:
     tool_loop_guard = ToolLoopGuard::new()
     turn_index = 0
     loop:
-        # MAX_TOOL_ROUNDS 已设为 usize::MAX（不限制）；
-        # 工具轮次由上下文预算自然约束，详见 context-management.md §6.7。
+        # reasoning loop 仍受 max_tool_rounds 硬上限约束；
+        # 若因预算触顶退出，必须把该事实回传给外层 conversation loop，
+        # 禁止外层再 drain follow_up_queue 开一个新的 attempt。
         if turn_index >= MAX_TOOL_ROUNDS:
+            reasoning_turn_budget_exhausted = true
             return Ok(last_response)
         emit(TurnStart { turn_index })
         turn_index += 1
@@ -333,8 +335,8 @@ agent_start              ← 第一层开始，用户消息进入
   │
   ├─► AgentLoop::follow_up("...")
   │    └─► follow_up_queue.push(ChatMessage::user(...))
-  │         └─► 第一层 Conversation Loop 在 between-turns drain
-  │              └─► 追加到 messages，开启同上下文下一轮
+  │         └─► turn 入口 / reasoning batch boundary 会 drain
+  │              └─► 作为下一次 LLM 请求前的补充 user 消息
   │
   ├─► AgentLoop::steer("...")
   │    └─► steering_queue.push(ChatMessage::steering(...))
@@ -357,7 +359,7 @@ agent_start              ← 第一层开始，用户消息进入
 | 入口 | 触发时机 | 写入载体 | 谁消费 | 会不会打断当前 tool list | 典型来源 |
 |------|----------|----------|--------|---------------------------|----------|
 | `steer(msg)` | Agent 工作中 | `steering_queue.push(ChatMessage::steering(msg))` | `inject_steering_messages(...)` | **会**。当前单个 tool 做完后就 break，剩余 tool_calls 不再执行 | 用户中途改方向、宿主主动插话 |
-| `follow_up(msg)` | 一个 attempt/turn 收口后 | `follow_up_queue.push(ChatMessage::user(msg))` | 第一层 Conversation Loop 尾部 drain | **不会**。它只影响下一轮，不改当前这拨 tool_calls | 用户追加一句话、后台任务完成的 synthetic 通知 |
+| `follow_up(msg)` | 一个 attempt/turn 收口后，或宿主补进新事实时 | `follow_up_queue.push(ChatMessage::user(msg))` | turn 入口 / reasoning batch boundary drain | **不会直接打断当前单个 tool**。它只影响“下一次发给 LLM 的消息集”，不回头改已执行完的 tool_calls | 用户追加一句话、后台任务完成的 synthetic 通知 |
 | `user_with_parts(parts)` | 单个 tool_result 已生成之后 | 直接 `push_message(..., ChatMessage::user_with_parts(parts))` | 同一轮 `messages` | **不会单独打断**；但它必须出现在 tool_result 之后、steering break 之前 | `read` 命中图片 / PDF 后的 `follow_up_parts` |
 | `abort()` / Ctrl+C | 任何 await 点 | `cancel_token.cancel()` | stream / tool await 的 `tokio::select!` | 相当于整个 turn 终止，不只是跳过剩余工具 | 用户中止 |
 
@@ -382,10 +384,63 @@ execute_tool(read image/pdf)
 ### 13.7.4 队列与信号的当前实现口径
 
 - `steering_queue`：`Arc<Mutex<Vec<ChatMessage>>>`。入口是 `AgentLoop::steer(&self, msg)`；消费口径统一走 `inject_steering_messages(...)`，也就是**先做 `ctx_state.on_message_appended(...)` 记账，再走 `push_message(...)` 分配 / 持久化 `msg_id`**，不再直接 `extend(q.drain(..))`。
-- `follow_up_queue`：同样是 `Arc<Mutex<Vec<ChatMessage>>>`。`AgentLoop` 自带一份局部队列；`ChatContext` 还能通过 `with_shared_follow_up_queue(...)` 注入一份 session 级共享队列，用于后台 shell 完成通知等 auto-feed 场景。它只在 between-turns drain，不会中途打断当前工具列表。
+- `follow_up_queue`：同样是 `Arc<Mutex<Vec<ChatMessage>>>`。`AgentLoop` 自带一份局部队列；`ChatContext` 还能通过 `with_shared_follow_up_queue(...)` 注入一份 session 级共享队列，用于后台 shell 完成通知等 auto-feed 场景。当前有两个消费点：**between-turns drain**，以及**非 steered 的 tool batch 收口后、下一次发起 LLM 请求前**的 reasoning batch-boundary drain。它仍不会打断正在执行的单个 tool，也不会回头改写已写入历史的 tool_result。
 - `cancel_token`：`tokio_util::sync::CancellationToken`。每个 user turn 都会重建，避免上一轮的 cancel 污染下一轮。
 
-### 13.7.5 与 current-tail guard 的关系
+### 13.7.5 真实输入优先于 queued follow-up
+
+`follow_up_queue` 里的消息常常是 runtime 自己补进来的“后来发生的新事实”，典型例子就是后台 shell 完成通知。它们应该被模型看到，但**不应该压过用户刚刚真正输入的新 prompt**。
+
+chat host 在同一轮里可能同时拿到两样东西：
+
+- `readline()` 刚读到的真实用户输入
+- 前面排队但还没消费的 synthetic follow-up
+
+这时组装下一次请求的顺序必须是：**先 drain queued follow-up，再把真实用户输入放最后**。
+
+```text
+错误顺序
+[real user input, queued follow-up]
+                    │
+                    └─ LLM 看到“最后一条 user 消息”成了后台通知
+                       容易把“任务刚跑完”误当成当前主问题
+
+正确顺序
+[queued follow-up, real user input]
+                  │
+                  └─ LLM 先知道后台发生了什么，
+                     但最后落点仍是用户刚刚真正想问的话
+```
+
+**说人话**：后台通知只是补充上下文，不是抢方向盘。它可以插进下一次请求里，但不能盖过用户刚刚敲下来的那句话。
+
+### 13.7.6 `max_tool_rounds` 不能被 follow-up 绕过
+
+一个很隐蔽的边界是：`max_tool_rounds` 限的是**单次 reasoning loop 内部**还能再做几轮 LLM/tool 往返，而 `follow_up_queue` 的消费点在**外层 conversation loop**。如果不把“这次是因为预算触顶才结束”的原因显式传出去，外层会把一次“预算耗尽返回”误判成“正常收尾”，随后又因为队列非空而再开一个 attempt。
+
+```text
+错误路径
+reasoning loop 达到 max_tool_rounds
+        │
+        └─ return Ok(...)
+             │
+             └─ conversation loop 看到 follow_up_queue 非空
+                  └─ 再开一个 attempt
+                       -> 预算名义上结束，实际上继续跑
+
+修正后
+reasoning loop 达到 max_tool_rounds
+        │
+        └─ 标记 reasoning_turn_budget_exhausted = true
+             │
+             └─ conversation loop 先检查这个标记
+                  ├─ true  -> 直接 Completed，不 drain follow_up_queue
+                  └─ false -> 按正常 follow-up 逻辑续跑
+```
+
+**说人话**：`follow_up_queue` 只能帮 agent 接上“同一次预算里还没来得及看的新事实”，不能当成“再送一条免费命”的后门。否则 reviewer/verifier 这类本来该停下来的流程，会因为一条 follow-up 又偷偷多跑一轮。
+
+### 13.7.7 与 current-tail guard 的关系
 
 Steering / FollowUp / `user_with_parts` 都会改变第三层里“下一次发给 LLM 的 messages”。阶段二 current-tail guard 的观察点正好就在这里：
 
