@@ -134,6 +134,71 @@ fn append_failed_turn_message(
     context_state.messages.push(message);
 }
 
+fn drain_planned_turn_messages(ctx: &ChatContext, input: &str) -> Vec<ChatMessage> {
+    let mut planned = Vec::new();
+    if !input.is_empty() {
+        planned.push(ChatMessage::user(input));
+    }
+    let drained = {
+        let mut queue = ctx.follow_up_queue.lock();
+        if queue.is_empty() {
+            Vec::new()
+        } else {
+            queue.drain(..).collect::<Vec<_>>()
+        }
+    };
+    planned.extend(drained);
+    planned
+}
+
+fn append_planned_messages_with_rehydrate_retry(
+    ctx: &ChatContext,
+    system_text: &str,
+    system_text_with_reminder: &str,
+    context_config: &crate::infra::ContextConfig,
+    planned_messages: &[ChatMessage],
+    context_state: &mut crate::core::ContextState,
+) -> Result<(Vec<ChatMessage>, Vec<(ChatMessage, bool)>), AppError> {
+    let mut next_pending_idx = 0usize;
+    let mut retried_after_rehydrate = false;
+    loop {
+        let mut messages = build_context_from_state(context_state);
+        let mut appended_messages = Vec::new();
+        messages.insert(0, ChatMessage::system(system_text_with_reminder));
+
+        let mut append_error = None;
+        for message in planned_messages.iter().skip(next_pending_idx) {
+            if let Err(err) =
+                push_turn_message(&mut messages, &ctx.message_append_sink, message.clone())
+            {
+                append_error = Some(err);
+                break;
+            }
+            context_state.on_message_appended(estimate_msg_chars(message));
+            appended_messages.push((message.clone(), false));
+        }
+
+        if let Some(err) = append_error {
+            if !retried_after_rehydrate
+                && rehydrate::try_rehydrate_context_state_after_append_invariant(
+                    ctx,
+                    context_config,
+                    system_text,
+                    &err,
+                    context_state,
+                )
+            {
+                next_pending_idx += appended_messages.len();
+                retried_after_rehydrate = true;
+                continue;
+            }
+            return Err(err);
+        }
+
+        return Ok((messages, appended_messages));
+    }
+}
+
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
     ensure_session(ctx)?;
     if ctx.config.skills.enabled {
@@ -365,7 +430,31 @@ pub async fn run_chat_turn(
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
-    context_state.on_message_appended(input.len());
+    let plan_mode = ctx.plan_runtime.mode();
+    let system_text_with_reminder = match &plan_mode {
+        plan_runtime::PlanState::Planning => {
+            format!(
+                "{}{}",
+                system_text,
+                *plan_runtime::reminders::PLANNER_REMINDER
+            )
+        }
+        plan_runtime::PlanState::Executing { plan_id } => format!(
+            "{}{}",
+            system_text,
+            plan_runtime::reminders::render_executor_reminder(plan_id)
+        ),
+        _ => system_text.to_string(),
+    };
+    let planned_messages = drain_planned_turn_messages(ctx, input);
+    let (messages, appended_messages) = append_planned_messages_with_rehydrate_retry(
+        ctx,
+        system_text,
+        &system_text_with_reminder,
+        &context_config,
+        &planned_messages,
+        context_state,
+    )?;
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_user_append",
@@ -391,47 +480,6 @@ pub async fn run_chat_turn(
         ratio = context_state.usage_ratio(),
         compaction_count = context_state.session_obs.compaction_count
     );
-
-    let mut messages = build_context_from_state(context_state);
-    let mut appended_messages: Vec<(ChatMessage, bool)> = Vec::new();
-
-    let plan_mode = ctx.plan_runtime.mode();
-    let system_text_with_reminder = match &plan_mode {
-        plan_runtime::PlanState::Planning => {
-            format!(
-                "{}{}",
-                system_text,
-                *plan_runtime::reminders::PLANNER_REMINDER
-            )
-        }
-        plan_runtime::PlanState::Executing { plan_id } => format!(
-            "{}{}",
-            system_text,
-            plan_runtime::reminders::render_executor_reminder(plan_id)
-        ),
-        _ => system_text.to_string(),
-    };
-    messages.insert(0, ChatMessage::system(&system_text_with_reminder));
-    if !input.is_empty() {
-        let user_message = ChatMessage::user(input);
-        push_turn_message(
-            &mut messages,
-            &ctx.message_append_sink,
-            user_message.clone(),
-        )?;
-        appended_messages.push((user_message, false));
-    }
-    {
-        let mut queue = ctx.follow_up_queue.lock();
-        if !queue.is_empty() {
-            let drained: Vec<_> = queue.drain(..).collect();
-            drop(queue);
-            for message in drained {
-                push_turn_message(&mut messages, &ctx.message_append_sink, message.clone())?;
-                appended_messages.push((message, true));
-            }
-        }
-    }
     if let Err(error) = validate_capabilities(
         &ctx.model_catalog,
         &ctx.config.llm.default_model,

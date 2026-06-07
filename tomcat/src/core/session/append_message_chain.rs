@@ -21,6 +21,50 @@ pub(crate) fn collect_recent_chat_messages_from_tail(entries: &[TranscriptEntry]
     msgs
 }
 
+/// 从尾部消息序列中找出尚未闭合的 tool_call_ids（若尾巴合法或无法安全判断则返回 None）。
+///
+/// 语义约束与 hydrate 自愈保持一致：
+/// - 只在尾部是 `assistant.tool_calls` / `tool*` 连续块时返回缺失 ids；
+/// - 若尾部中间夹杂 `user/assistant(without tool_calls)/system` 等非 tool 序列，返回 None；
+/// - 返回顺序与 owning assistant 的 `tool_calls` 顺序一致。
+pub(crate) fn find_dangling_tail_tool_call_ids(recent: &[Value]) -> Option<Vec<String>> {
+    let mut trailing_tool_ids_rev: Vec<&str> = Vec::new();
+    for msg in recent.iter().rev() {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        match role {
+            "tool" => {
+                let tool_call_id = msg.get("tool_call_id").and_then(|v| v.as_str())?;
+                trailing_tool_ids_rev.push(tool_call_id);
+            }
+            "assistant" => {
+                let tool_calls = msg.get("tool_calls")?.as_array()?;
+                if tool_calls.is_empty() {
+                    return None;
+                }
+                let tool_call_ids: Vec<&str> = tool_calls
+                    .iter()
+                    .map(|tc| tc.get("id").and_then(|v| v.as_str()))
+                    .collect::<Option<Vec<_>>>()?;
+                let trailing_tool_ids: Vec<&str> =
+                    trailing_tool_ids_rev.iter().rev().copied().collect();
+                for (expected, actual) in tool_call_ids.iter().zip(trailing_tool_ids.iter()) {
+                    if expected != actual {
+                        return None;
+                    }
+                }
+                let missing: Vec<String> = tool_call_ids
+                    .iter()
+                    .skip(trailing_tool_ids.len())
+                    .map(|id| (*id).to_string())
+                    .collect();
+                return (!missing.is_empty()).then_some(missing);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// 校验即将追加的消息是否满足 OpenAI 消息链约束（规则 A–E）。
 /// 返回 Ok(()) 表示合法，Err(reason) 表示违规。
 pub(crate) fn validate_append_message(

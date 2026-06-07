@@ -368,6 +368,23 @@ fn deterministic_chat_context_fixture_with_config(
     (dir, ctx)
 }
 
+fn seed_dangling_tool_round(session: &SessionManager, tool_call_id: &str) {
+    session
+        .append_message(json!({
+            "role": "assistant",
+            "content": "dangling tool call",
+            "tool_calls": [{
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": r#"{"command":"echo hi","cwd":null}"#
+                }
+            }]
+        }))
+        .expect("seed dangling assistant.tool_calls");
+}
+
 struct EnvGuard {
     saved: Vec<(String, Option<String>)>,
 }
@@ -3982,6 +3999,153 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
     }
 
     // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn test_preturn_append_invariant_heals_and_continues_same_input() {
+    common::setup_logging();
+    let _span = info_span!("test_preturn_append_invariant_heals_and_continues_same_input").entered();
+
+    const ENV_KEY: &str = "TOMCAT_PRETURN_APPEND_RETRY_CLI_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream("CONTINUE_OK")]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    seed_dangling_tool_round(&ctx.session, "call_tail");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "继续",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("自愈后应直接 Completed，实际: {other:?}"),
+    };
+    assert!(
+        result.final_text.contains("CONTINUE_OK"),
+        "应使用原输入自动续跑完成，实际 final_text: {:?}",
+        result.final_text
+    );
+    assert!(
+        result.new_messages.iter().any(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::User
+                && msg.text_content() == Some("继续")
+        }),
+        "原输入应作为本轮 user 消息进入续跑结果"
+    );
+    assert!(
+        state.messages.iter().any(|m| {
+            m.tool_call_id.as_deref() == Some("call_tail")
+                && m.text_content() == Some("[interrupted]")
+        }),
+        "自愈后 state 应包含补齐的 `[interrupted]` tool 结果"
+    );
+
+    let transcript_path = ctx
+        .session
+        .current_transcript_path()
+        .expect("current_transcript_path")
+        .expect("transcript path should exist");
+    let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
+    let mut interrupted_idx = None;
+    let mut continued_idx = None;
+    for (idx, line) in transcript.lines().enumerate() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let role = message.get("role").and_then(|v| v.as_str());
+        let content = message.get("content").and_then(|v| v.as_str());
+        if role == Some("tool")
+            && message.get("tool_call_id").and_then(|v| v.as_str()) == Some("call_tail")
+            && content == Some("[interrupted]")
+        {
+            interrupted_idx = Some(idx);
+        }
+        if role == Some("user") && content == Some("继续") {
+            continued_idx = Some(idx);
+        }
+    }
+    let interrupted_idx = interrupted_idx.expect("transcript should contain healed interrupted tool result");
+    let continued_idx = continued_idx.expect("transcript should contain continued user input");
+    assert!(
+        interrupted_idx < continued_idx,
+        "补齐的 `[interrupted]` 应先于用户输入落盘，actual transcript: {}",
+        trunc(&transcript, 800)
+    );
+
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn test_preturn_append_invariant_recovers_without_user_reinput() {
+    common::setup_logging();
+    let _span = info_span!("test_preturn_append_invariant_recovers_without_user_reinput").entered();
+
+    const ENV_KEY: &str = "TOMCAT_PRETURN_APPEND_SINGLE_INPUT_CLI_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream("CONTINUE_ONCE")]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    seed_dangling_tool_round(&ctx.session, "call_once");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "继续一次",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => {
+            assert!(
+                result.final_text.contains("CONTINUE_ONCE"),
+                "自愈后应直接完成，实际: {:?}",
+                result.final_text
+            );
+        }
+        other => panic!("自愈后应 Completed，实际: {other:?}"),
+    }
+
+    let transcript_path = ctx
+        .session
+        .current_transcript_path()
+        .expect("current_transcript_path")
+        .expect("transcript path should exist");
+    let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
+    assert_eq!(
+        transcript.matches("\"content\":\"继续一次\"").count(),
+        1,
+        "原输入只应被消费一次，不应要求用户重输或重复 append；actual transcript: {}",
+        trunc(&transcript, 800)
+    );
+
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 

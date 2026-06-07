@@ -18,12 +18,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
+use crate::core::session::find_dangling_tail_tool_call_ids;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor, SleepyMockPrimitive};
+
+fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
+    let recent = messages
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("chat messages should serialize");
+    find_dangling_tail_tool_call_ids(&recent)
+}
 
 /// Abort：工具执行前/中设置 abort_signal，run 返回 Err，agent_end 含 interrupted。
 #[tokio::test]
@@ -162,10 +172,19 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
         .collect();
     assert_eq!(
         tool_msgs.len(),
-        1,
-        "应恰好有 1 个已完成的 tool_result（c1），实际 {} 个：{:?}",
+        2,
+        "应保留已完成结果并为缺失尾巴补 `[interrupted]`，实际 {} 个：{:?}",
         tool_msgs.len(),
         roles
+    );
+    assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(tool_msgs[0].text_content(), Some("content:/a"));
+    assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("c2"));
+    assert_eq!(tool_msgs[1].text_content(), Some("[interrupted]"));
+    assert_eq!(
+        dangling_tool_call_ids(&result.new_messages),
+        None,
+        "Interrupted 收尾后尾部 tool round 应已闭合"
     );
 
     let emitted = interrupted_payloads.lock().unwrap();
@@ -175,7 +194,125 @@ async fn run_interrupt_between_tools_retains_completed_tool_result() {
         p.get("sessionId").and_then(|v| v.as_str()),
         Some("s-int-tools")
     );
-    assert_eq!(p.get("toolResultsCount").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(p.get("toolResultsCount").and_then(|v| v.as_u64()), Some(2));
+}
+
+#[tokio::test]
+async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream_tools]));
+    let primitive = Arc::new(SleepyMockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-int-active-tool".to_string(),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        cancel_bg.cancel();
+    });
+
+    let outcome = agent.run(vec![ChatMessage::user("read one file")]).await;
+    let result = match outcome {
+        AgentRunOutcome::Interrupted(r) => r,
+        other => panic!("期望 Interrupted，实际 {:?}", other),
+    };
+
+    let tool_msgs: Vec<&ChatMessage> = result
+        .new_messages
+        .iter()
+        .filter(|m| format!("{:?}", m.role).contains("Tool"))
+        .collect();
+    assert_eq!(tool_msgs.len(), 1, "中断中的单工具调用应补一条 `[interrupted]`");
+    assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(tool_msgs[0].text_content(), Some("[interrupted]"));
+    assert_eq!(
+        dangling_tool_call_ids(&result.new_messages),
+        None,
+        "单工具调用中断后尾部应已闭合"
+    );
+}
+
+#[tokio::test]
+async fn run_interrupt_during_parallel_tools_heals_all_remaining() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: Some("c2".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/b"}"#.to_string()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 2,
+            id: Some("c3".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/c"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream_tools]));
+    let primitive = Arc::new(SleepyMockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-int-three-tools".to_string(),
+        ..Default::default()
+    };
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, cancel.clone());
+
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(130)).await;
+        cancel_bg.cancel();
+    });
+
+    let outcome = agent.run(vec![ChatMessage::user("read three files")]).await;
+    let result = match outcome {
+        AgentRunOutcome::Interrupted(r) => r,
+        other => panic!("期望 Interrupted，实际 {:?}", other),
+    };
+
+    let tool_msgs: Vec<&ChatMessage> = result
+        .new_messages
+        .iter()
+        .filter(|m| format!("{:?}", m.role).contains("Tool"))
+        .collect();
+    assert_eq!(tool_msgs.len(), 3, "三工具调用中断后应保留 c1 并补齐 c2/c3");
+    assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(tool_msgs[0].text_content(), Some("content:/a"));
+    assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("c2"));
+    assert_eq!(tool_msgs[1].text_content(), Some("[interrupted]"));
+    assert_eq!(tool_msgs[2].tool_call_id.as_deref(), Some("c3"));
+    assert_eq!(tool_msgs[2].text_content(), Some("[interrupted]"));
+    assert_eq!(
+        dangling_tool_call_ids(&result.new_messages),
+        None,
+        "多工具调用中断后尾部应已闭合，不能漏掉剩余 tool_call"
+    );
 }
 
 /// 在 LLM 流式输出 delta 期间取消：partial_text 非空、assistant partial 入 messages、

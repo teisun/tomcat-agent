@@ -58,6 +58,7 @@
 //!   分别负责流消费 / 工具调度 / 工具执行 / text-only 收束。
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
+use crate::core::session::{find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT};
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
 
@@ -65,6 +66,24 @@ use super::error_classifier::handle_overflow_retry;
 use super::reasoning_loop::run_reasoning_loop;
 use super::steering_injection::inject_steering_messages;
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
+
+fn append_missing_interrupted_tool_results(partial_messages: &mut Vec<ChatMessage>) -> usize {
+    let Ok(recent) = partial_messages
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return 0;
+    };
+    let Some(tool_call_ids) = find_dangling_tail_tool_call_ids(&recent) else {
+        return 0;
+    };
+    let added = tool_call_ids.len();
+    for tool_call_id in tool_call_ids {
+        partial_messages.push(ChatMessage::tool(&tool_call_id, INTERRUPTED_TOOL_RESULT_TEXT));
+    }
+    added
+}
 
 impl AgentLoop {
     /// 第一层：Conversation loop，处理 FollowUp。
@@ -168,8 +187,16 @@ impl AgentLoop {
     fn terminate_interrupted(
         &mut self,
         partial_text: String,
-        partial_messages: Vec<ChatMessage>,
+        mut partial_messages: Vec<ChatMessage>,
     ) -> AgentRunOutcome {
+        let added_tool_results = append_missing_interrupted_tool_results(&mut partial_messages);
+        if added_tool_results > 0 {
+            if let Some(ref mut ctx_state) = self.context_state {
+                for _ in 0..added_tool_results {
+                    ctx_state.on_message_appended(INTERRUPTED_TOOL_RESULT_TEXT.len());
+                }
+            }
+        }
         self.sync_persisted_messages_into_context(&partial_messages);
         let session_id = self.config.session_id.clone();
         let tool_results_count = partial_messages

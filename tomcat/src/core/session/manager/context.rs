@@ -6,7 +6,10 @@ use std::time::Instant;
 use chrono::{NaiveDate, Utc};
 
 use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
-use crate::core::session::append_message_chain::collect_recent_chat_messages_from_tail;
+use crate::core::session::{
+    append_message_chain::collect_recent_chat_messages_from_tail,
+    find_dangling_tail_tool_call_ids,
+};
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
     ResumeIndexIoStats, ResumeIndexSource,
@@ -548,50 +551,12 @@ fn fold_entries_to_messages(
     }
 }
 
-fn find_dangling_tail_tool_call_ids(entries: &[TranscriptEntry]) -> Option<Vec<String>> {
-    let recent = collect_recent_chat_messages_from_tail(entries);
-    let mut trailing_tool_ids_rev: Vec<&str> = Vec::new();
-    for msg in recent.iter().rev() {
-        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        match role {
-            "tool" => {
-                let tool_call_id = msg.get("tool_call_id").and_then(|v| v.as_str())?;
-                trailing_tool_ids_rev.push(tool_call_id);
-            }
-            "assistant" => {
-                let tool_calls = msg.get("tool_calls")?.as_array()?;
-                if tool_calls.is_empty() {
-                    return None;
-                }
-                let tool_call_ids: Vec<&str> = tool_calls
-                    .iter()
-                    .map(|tc| tc.get("id").and_then(|v| v.as_str()))
-                    .collect::<Option<Vec<_>>>()?;
-                let trailing_tool_ids: Vec<&str> =
-                    trailing_tool_ids_rev.iter().rev().copied().collect();
-                for (expected, actual) in tool_call_ids.iter().zip(trailing_tool_ids.iter()) {
-                    if expected != actual {
-                        return None;
-                    }
-                }
-                let missing: Vec<String> = tool_call_ids
-                    .iter()
-                    .skip(trailing_tool_ids.len())
-                    .map(|id| (*id).to_string())
-                    .collect();
-                return (!missing.is_empty()).then_some(missing);
-            }
-            _ => return None,
-        }
-    }
-    None
-}
-
 fn heal_dangling_tail_tool_call(
     session: &SessionManager,
     entries: &[TranscriptEntry],
 ) -> Result<bool, AppError> {
-    let Some(tool_call_ids) = find_dangling_tail_tool_call_ids(entries) else {
+    let recent = collect_recent_chat_messages_from_tail(entries);
+    let Some(tool_call_ids) = find_dangling_tail_tool_call_ids(&recent) else {
         return Ok(false);
     };
 
