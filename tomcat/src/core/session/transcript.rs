@@ -100,7 +100,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::core::session::resume_index::{
-    rebuild_resume_index_from_lines, update_resume_index_after_append,
+    rebuild_resume_index_from_lines, remove_resume_index, update_resume_index_after_append,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
@@ -471,7 +471,21 @@ pub fn append_entry_with_sync(
     append_line_with_sync(path, &json, sync)?;
     // TODO(chat-resume): if dense append bursts show visible IO jitter, batch/debounce
     // sidecar rewrites instead of flushing the sibling resume index on every append.
-    update_resume_index_after_append(path, entry)
+    if let Err(error) = update_resume_index_after_append(path, entry) {
+        warn!(
+            path = %path.display(),
+            error = %error,
+            "resume index update failed after transcript append; keeping transcript and invalidating sidecar"
+        );
+        if let Err(remove_error) = remove_resume_index(path) {
+            warn!(
+                path = %path.display(),
+                error = %remove_error,
+                "failed to invalidate stale resume index after append-sidecar error"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 在首条 `type=message` 且 `id == anchor_message_id` 的 JSONL 行**之后**插入 `entry`（整文件原子写）。

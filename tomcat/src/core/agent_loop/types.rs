@@ -302,6 +302,9 @@ pub struct AgentLoop {
     pub(super) cancel_token: CancellationToken,
     pub(super) context_state: Option<ContextState>,
     pub(super) block_tool_calls: bool,
+    /// 本次 reasoning loop 是否因为 `max_tool_rounds` 触顶而结束；用于阻止外层
+    /// conversation loop 再把共享 `follow_up_queue` 续进一个新 attempt，绕过硬预算。
+    pub(super) reasoning_turn_budget_exhausted: bool,
     pub(super) start_idx: usize,
     /// 首次进入 `run()` 时 `messages` 中自该下标起（含）为**不得被 L3 rebuild 覆盖**的尾部
     ///（当前用户句 / steering + 后续 assistant/tool）。用于 overflow 后只替换 transcript 段。

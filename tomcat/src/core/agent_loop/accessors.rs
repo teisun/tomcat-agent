@@ -59,6 +59,7 @@ impl AgentLoop {
             cancel_token,
             context_state: None,
             block_tool_calls: false,
+            reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             context_tail_start: 0,
         }
@@ -159,6 +160,7 @@ impl AgentLoop {
             cancel_token,
             context_state: None,
             block_tool_calls: false,
+            reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             context_tail_start: 0,
         }

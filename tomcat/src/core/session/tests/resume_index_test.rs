@@ -166,6 +166,43 @@ fn sidecar_fingerprint_mismatch_on_size_or_last_id_rebuilds() {
 }
 
 #[test]
+fn sidecar_incremental_append_rebuilds_when_cache_skips_out_of_band_entry() {
+    let (_dir, mgr) = setup_mgr();
+    let first_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"first"}))
+        .unwrap();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let _ = load_or_rebuild_resume_index(&transcript_path).unwrap();
+
+    append_json_line(
+        &transcript_path,
+        serde_json::json!({
+            "type": "message",
+            "id": "external_second",
+            "timestamp": "2025-01-02T00:00:00.000Z",
+            "message": { "role": "user", "content": "second" }
+        }),
+    );
+
+    let third_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"third"}))
+        .unwrap();
+
+    let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    assert_eq!(rebuilt.index.total_entries, 3);
+    assert_eq!(rebuilt.index.last_entry_id.as_deref(), Some(third_id.as_str()));
+    assert_eq!(rebuilt.index.recent_turn_starts.len(), 2);
+    assert_eq!(
+        rebuilt.index.recent_turn_starts[0].entry_id.as_deref(),
+        Some(first_id.as_str())
+    );
+    assert_eq!(
+        rebuilt.index.recent_turn_starts[1].entry_id.as_deref(),
+        Some("external_second")
+    );
+}
+
+#[test]
 fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
     let (_dir, mgr) = setup_mgr();
     let anchor_id = mgr

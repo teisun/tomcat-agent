@@ -5,6 +5,7 @@ use std::time::UNIX_EPOCH;
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::core::session::manager::{PlanEventKind, PlanEventRef};
 use crate::core::session::transcript::{
@@ -291,7 +292,17 @@ pub(crate) fn resume_index_path(transcript_path: &Path) -> PathBuf {
 fn read_sidecar_raw(transcript_path: &Path) -> Result<Option<ResumeIndex>, AppError> {
     let path = resume_index_path(transcript_path);
     match fs::read_to_string(&path) {
-        Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(index) => Ok(Some(index)),
+            Err(error) => {
+                warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "resume index sidecar parse failed; rebuilding from transcript"
+                );
+                Ok(None)
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(AppError::Io(error)),
     }
@@ -451,6 +462,22 @@ fn validate_sidecar(
     Ok((last_entry_id == index.last_entry_id, stats))
 }
 
+fn matches_previous_transcript_tail(
+    index: &ResumeIndex,
+    transcript_path: &Path,
+    appended_entry: &TranscriptEntry,
+) -> Result<bool, AppError> {
+    let (tail, _) = read_entries_tail_with_stats(transcript_path, 2)?;
+    let Some(current_tail) = tail.last() else {
+        return Ok(false);
+    };
+    if parse_entry_id(current_tail) != parse_entry_id(appended_entry) {
+        return Ok(false);
+    }
+    let previous_tail_id = tail.iter().rev().nth(1).and_then(parse_entry_id);
+    Ok(index.last_entry_id == previous_tail_id)
+}
+
 pub(crate) fn load_or_rebuild_resume_index(
     transcript_path: &Path,
 ) -> Result<ResumeIndexLoad, AppError> {
@@ -478,7 +505,12 @@ pub(crate) fn update_resume_index_after_append(
     entry: &TranscriptEntry,
 ) -> Result<(), AppError> {
     let mut index = match read_sidecar_raw(transcript_path)? {
-        Some(index) if index.schema_version == RESUME_INDEX_SCHEMA_VERSION => index,
+        Some(index)
+            if index.schema_version == RESUME_INDEX_SCHEMA_VERSION
+                && matches_previous_transcript_tail(&index, transcript_path, entry)? =>
+        {
+            index
+        }
         _ => {
             let _ = rebuild_resume_index(transcript_path)?;
             return Ok(());

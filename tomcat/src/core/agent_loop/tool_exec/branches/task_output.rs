@@ -367,7 +367,7 @@ mod tests {
             "timeout 应回最近输出快照，实际 {:?}",
             content
         );
-        assert_eq!(delivered, false, "running timeout 不应 claim Delivered");
+        assert!(!delivered, "running timeout 不应 claim Delivered");
     }
 
     #[tokio::test]

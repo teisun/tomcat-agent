@@ -37,6 +37,7 @@ pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<String, LoopError> {
+    agent.reasoning_turn_budget_exhausted = false;
     let mut final_text = String::new();
     let mut turn_index: usize = 0;
 
@@ -189,6 +190,7 @@ pub(super) async fn run_reasoning_loop(
         }
 
         if turn_index >= agent.config.max_tool_rounds {
+            agent.reasoning_turn_budget_exhausted = true;
             agent.emit_context_metrics();
             return Ok(final_text);
         }

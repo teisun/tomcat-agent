@@ -849,14 +849,17 @@ Parameters:
 - Destructive: `false`
 - Search hint: `bash background task output tail log`
 
-Read incremental output from a background `bash` task started with `run_in_background: true`. Returns a UTF-8 lossy chunk of `[since, next_offset)` bytes from the task's log file plus a `finished` flag. Use the previous response's `next_offset` as the next `since` to tail the task across turns; first call may omit `since` to read from byte 0. When the task has finished or been stopped, `finished=true` and `exit_code` is populated.
+Read incremental output from a background `bash` task started with `run_in_background: true`. Returns a UTF-8 lossy chunk of `[start_offset, next_offset)` bytes from the task's log file plus a `finished` flag. Use the previous response's `next_offset` as the next `since` to tail the task across turns; first call may omit `since` to read from byte 0. When the task has finished or been stopped, `finished=true` and `exit_code` is populated.
 
 Waiting modes:
 - `block=false` (default): non-blocking; returns immediately with whatever bytes are already on disk. Good for an occasional progress glance — but **do not busy-poll**.
-- `block=true`: blocks until any of {new output appears | the task finishes | `timeout_ms` elapses}. Returns an extra `wakeReason` field with one of `"new_output" | "finished" | "timeout"`. **`timeout` is NOT a failure** — when `wakeReason="timeout" && finished=false` the response is just an empty wait slice (`content=""`, `next_offset == since`); call `task_output(block=true)` again to keep waiting.
+- `block=true`: blocks until any of {new output appears | the task finishes | `timeout_ms` elapses}. Returns an extra `wakeReason` field with one of `"new_output" | "finished" | "timeout"`.
+  - `wakeReason="timeout"` is **not** a failure. The response may still contain either new bytes since `since`, or a recent tail snapshot when there was no fresh increment yet.
+  - Always inspect `content`, `finished`, and `exit_code` together before deciding whether to wait again.
+  - If repeated timeout slices show no meaningful progress, stop polling, do other work first, or report status instead of looping forever.
 
 When to use which:
-1. The current todo cannot proceed without the shell result → `task_output(block=true, timeout_ms=...)`. Loop on `wakeReason="timeout"`.
+1. The current todo cannot proceed without the shell result → `task_output(block=true, timeout_ms=...)`. Read the returned output each slice and decide whether to continue waiting.
 2. The current todo can do other independent work first → spawn `bash(run_in_background=true)` and immediately do other tools/edits/reads. The runtime will inject a synthetic `<background-task-finished task_id="..." exit_code="..." log_path="...">tail</background-task-finished>` user message **automatically** when the shell finishes; you do not need to poll.
 3. Just want a peek at progress → one-shot `task_output(block=false)`.
 
@@ -883,7 +886,7 @@ Parameters:
       "type": "string"
     },
     "timeout_ms": {
-      "description": "Wait slice in milliseconds for `block=true`. Default 5000, max 30000 (values above are capped). `0` is equivalent to `block=false`. Timeout is NOT a failure: when `wakeReason=\"timeout\" && finished=false`, you may call `task_output(block=true)` again to continue waiting.",
+      "description": "Wait slice in milliseconds for `block=true`. Default 5000, max 30000 (values above are capped). `0` is equivalent to `block=false`. Timeout is NOT a failure: inspect the returned `content`/`finished` state first, and only call `task_output(block=true)` again when you truly still need to wait.",
       "maximum": 30000,
       "minimum": 0,
       "type": "integer"

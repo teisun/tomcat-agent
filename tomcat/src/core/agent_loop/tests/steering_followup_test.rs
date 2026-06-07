@@ -235,6 +235,53 @@ async fn run_follow_up_drains_at_tool_batch_boundary_before_next_llm_request() {
 }
 
 #[tokio::test]
+async fn run_follow_up_does_not_bypass_max_tool_rounds() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/demo"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let llm = Arc::new(RecordingMockLlmProvider::new(vec![stream_tools]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let synthetic =
+        "<background-task-finished task_id=\"t-budget\" exit_code=\"0\">done</background-task-finished>";
+    let follow_up_queue = Arc::new(parking_lot::Mutex::new(vec![ChatMessage::user(synthetic)]));
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-followup-budget".to_string(),
+        max_tool_rounds: 1,
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm.clone(), primitive, event_bus, config, abort)
+        .with_shared_follow_up_queue(follow_up_queue.clone());
+
+    let result = loop_.run(vec![ChatMessage::user("start")]).await.unwrap();
+    assert!(
+        result.final_text.is_empty(),
+        "触顶时不应偷偷继续第二轮，实际 final_text={:?}",
+        result.final_text
+    );
+    assert_eq!(
+        llm.requests.lock().unwrap().len(),
+        1,
+        "follow-up 不应绕过 max_tool_rounds 开启额外 LLM 请求"
+    );
+    assert_eq!(
+        follow_up_queue.lock().len(),
+        1,
+        "预算触顶时 follow-up 应保留给下一次独立 run 处理"
+    );
+}
+
+#[tokio::test]
 async fn inject_steering_messages_records_context_and_persists_msg_id() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(dir.path().to_path_buf());

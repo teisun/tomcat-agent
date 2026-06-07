@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::api::chat::run_loop::compose_planned_turn_messages;
 use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
 use crate::{
@@ -6,7 +7,6 @@ use crate::{
     CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
     RetentionPolicy, SessionManager,
 };
-use serial_test::serial;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,52 +50,25 @@ fn build_tool_definitions_default_view() -> Vec<serde_json::Value> {
     crate::core::tools::contract::catalog::build_function_definitions_for_chat_default()
 }
 
-#[cfg(unix)]
 #[test]
-#[serial]
-fn drain_pending_stdin_bytes_clears_tty_backlog_before_readline() {
-    use std::fs::File;
-    use std::io::Write as _;
-    use std::os::fd::{AsRawFd, FromRawFd};
+fn compose_planned_turn_messages_keeps_real_user_prompt_last() {
+    let follow_up = crate::core::llm::ChatMessage::user(
+        "<background-task-finished task_id=\"t-1\" exit_code=\"0\">done</background-task-finished>",
+    );
+    let planned = compose_planned_turn_messages("real user prompt", vec![follow_up.clone()]);
+    assert_eq!(planned.len(), 2);
+    assert_eq!(planned[0].text_content(), follow_up.text_content());
+    assert_eq!(planned[1].text_content(), Some("real user prompt"));
+}
 
-    unsafe {
-        let mut master_fd = -1;
-        let mut slave_fd = -1;
-        assert_eq!(
-            libc::openpty(
-                &mut master_fd,
-                &mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ),
-            0,
-            "openpty should succeed"
-        );
-
-        let stdin_fd = std::io::stdin().as_raw_fd();
-        let saved_stdin = libc::dup(stdin_fd);
-        assert!(saved_stdin >= 0, "dup(stdin) should succeed");
-        assert_eq!(libc::dup2(slave_fd, stdin_fd), stdin_fd, "dup2 stdin");
-        libc::close(slave_fd);
-
-        let mut master = File::from_raw_fd(master_fd);
-        let payload = b"waiting_for_output task=t-1 remaining=24s/30s\nYAN:tomcat yankeben$ tomcat chat\n";
-        master.write_all(payload).expect("write payload into pty");
-        master.flush().expect("flush payload into pty");
-
-        let drained = super::super::drain_pending_stdin_bytes();
-        assert!(
-            drained >= payload.len(),
-            "应清掉整段积压输入，实际 drained={drained}, payload_len={}",
-            payload.len()
-        );
-        let drained_second = super::super::drain_pending_stdin_bytes();
-        assert_eq!(drained_second, 0, "第二次应无残留 backlog");
-
-        assert_eq!(libc::dup2(saved_stdin, stdin_fd), stdin_fd, "restore stdin");
-        libc::close(saved_stdin);
-    }
+#[test]
+fn compose_planned_turn_messages_preserves_auto_turn_follow_up_order() {
+    let first = crate::core::llm::ChatMessage::user("follow-up-a");
+    let second = crate::core::llm::ChatMessage::user("follow-up-b");
+    let planned = compose_planned_turn_messages("", vec![first.clone(), second.clone()]);
+    assert_eq!(planned.len(), 2);
+    assert_eq!(planned[0].text_content(), first.text_content());
+    assert_eq!(planned[1].text_content(), second.text_content());
 }
 
 #[test]

@@ -507,6 +507,49 @@ fn targeted_hydration_edge_anchor_mismatch_falls_back_to_full() {
 }
 
 #[test]
+fn targeted_hydration_recovers_from_malformed_sidecar() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    for idx in 0..6usize {
+        mgr.append_message(serde_json::json!({"role":"user","content": format!("q-{idx}")}))
+            .unwrap();
+        mgr.append_message(serde_json::json!({"role":"assistant","content": format!("a-{idx}")}))
+            .unwrap();
+    }
+
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    let _ = load_or_rebuild_resume_index(&transcript_path).unwrap();
+    std::fs::write(resume_index_path(&transcript_path), b"{not-valid-json").unwrap();
+
+    let tail = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Tail,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    let full = init_context_state(
+        &mgr,
+        &ContextConfig {
+            resume_hydration_mode: crate::infra::config::ResumeHydrationMode::Full,
+            ..ContextConfig::default()
+        },
+        "sys",
+    )
+    .unwrap();
+    assert_context_parity(&tail, &full);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn targeted_hydration_backfills_min_turns_across_midnight() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

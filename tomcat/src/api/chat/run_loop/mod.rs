@@ -41,8 +41,6 @@ use self::workspace_state::compute_workspace_state;
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_openai_files_on_session_end;
 #[cfg(test)]
-pub(crate) use self::input::drain_pending_stdin_bytes;
-#[cfg(test)]
 pub(crate) use self::persist::{
     build_turn_checkpoint_request, persist_turn_result, schedule_checkpoint_prune,
 };
@@ -134,22 +132,35 @@ fn append_failed_turn_message(
     context_state.messages.push(message);
 }
 
-fn drain_planned_turn_messages(ctx: &ChatContext, input: &str) -> Vec<ChatMessage> {
-    let mut planned = Vec::new();
-    if !input.is_empty() {
-        planned.push(ChatMessage::user(input));
-    }
-    let drained = {
+fn drain_follow_up_messages(ctx: &ChatContext) -> Vec<ChatMessage> {
+    {
         let mut queue = ctx.follow_up_queue.lock();
         if queue.is_empty() {
             Vec::new()
         } else {
             queue.drain(..).collect::<Vec<_>>()
         }
-    };
-    planned.extend(drained);
+    }
+}
+
+pub(crate) fn compose_planned_turn_messages(
+    input: &str,
+    drained_follow_ups: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    // Synthetic background completions are runtime signals, not a fresher user ask.
+    // Keep any real typed prompt last so the next request preserves user intent.
+    let mut planned = drained_follow_ups;
+    if !input.is_empty() {
+        planned.push(ChatMessage::user(input));
+    }
     planned
 }
+
+fn drain_planned_turn_messages(ctx: &ChatContext, input: &str) -> Vec<ChatMessage> {
+    compose_planned_turn_messages(input, drain_follow_up_messages(ctx))
+}
+
+type PlannedAppendOutcome = (Vec<ChatMessage>, Vec<(ChatMessage, bool)>);
 
 fn append_planned_messages_with_rehydrate_retry(
     ctx: &ChatContext,
@@ -158,7 +169,7 @@ fn append_planned_messages_with_rehydrate_retry(
     context_config: &crate::infra::ContextConfig,
     planned_messages: &[ChatMessage],
     context_state: &mut crate::core::ContextState,
-) -> Result<(Vec<ChatMessage>, Vec<(ChatMessage, bool)>), AppError> {
+) -> Result<PlannedAppendOutcome, AppError> {
     let mut next_pending_idx = 0usize;
     let mut retried_after_rehydrate = false;
     loop {
@@ -285,14 +296,6 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let input = if auto_drain {
             String::new()
         } else {
-            let discarded = input::drain_pending_stdin_bytes();
-            if discarded > 0 {
-                info!(
-                    target: "tomcat_chat_diag",
-                    phase = "readline_discard_pending_stdin",
-                    discarded_bytes = discarded
-                );
-            }
             let raw = match rl.readline(&current_user_prompt(ctx)) {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {

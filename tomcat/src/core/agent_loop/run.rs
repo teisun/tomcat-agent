@@ -145,6 +145,11 @@ impl AgentLoop {
                         error: None,
                     });
 
+                    if self.reasoning_turn_budget_exhausted {
+                        self.sync_persisted_messages_into_context(&result.new_messages);
+                        return AgentRunOutcome::Completed(result);
+                    }
+
                     let mut q = self.follow_up_queue.lock();
                     if q.is_empty() {
                         drop(q);
