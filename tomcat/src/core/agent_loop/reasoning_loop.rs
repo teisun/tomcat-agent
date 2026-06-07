@@ -13,8 +13,9 @@
 //! 7. **tool_calls 调度**：`tool_dispatcher::run_tool_calls`（统一 push assistant +
 //!    block 检查 + 事件配对 + cancel 抢占）
 //! 8. **TurnEnd 发射**（携带 dispatch.tool_results）
-//! 9. **Steering**：`dispatch.steered == true` 立即 `continue`，跳过 max_tool_rounds 检查
-//! 10. **轮次上限**：`turn_index >= max_tool_rounds` 时 `emit_context_metrics` + `Ok`
+//! 9. **Steering**：`dispatch.steered == true` 立即 `continue`，跳过 follow-up / max_tool_rounds
+//! 10. **FollowUp**：非 steered 且后续仍要继续请求时，先 drain `follow_up_queue`
+//! 11. **轮次上限**：`turn_index >= max_tool_rounds` 时 `emit_context_metrics` + `Ok`
 //!
 //! ## 为什么是自由函数而非 `impl AgentLoop`
 //!
@@ -28,6 +29,7 @@ use tracing::info;
 use crate::core::llm::{ChatMessage, ChatRequest};
 use crate::infra::events::{AgentEvent, Message};
 
+use super::steering_injection::inject_follow_up_messages;
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
 use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize};
 
@@ -190,6 +192,8 @@ pub(super) async fn run_reasoning_loop(
             agent.emit_context_metrics();
             return Ok(final_text);
         }
+
+        inject_follow_up_messages(agent, messages).map_err(LoopError::Fatal)?;
 
         current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
             .await

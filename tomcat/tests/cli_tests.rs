@@ -2033,7 +2033,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     );
 }
 
-// ──────────────────── Story 2.5: Bash 后台监控 P1 真 LLM 黑盒（E2E-CLI-016C~016E） ────────────────────
+// ──────────────────── Story 2.5: Bash 后台监控 P1 真 LLM 黑盒（E2E-CLI-016C~016F） ────────────────────
 //
 // 这 3 条真测分别锁三条 P1 门禁：
 // - `016C`：finish-only auto-feed。模型起后台 bash 后先做独立工作，不主动 poll，
@@ -2042,6 +2042,9 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
 //   stderr 要出现倒计时 update，transcript 要出现真实 `task_output` / `task_stop`。
 // - `016E`：真实多次 timeout slice 重试。模型必须至少经历两次
 //   `wakeReason="timeout" && finished=false`，然后继续等到 `new_output` 再收尾。
+// - `016F`：midturn batch boundary auto-feed。模型先起后台 bash，再跑一个耗时 foreground
+//   bash；只有在 foreground batch 结束后的**下一次请求**里看到
+//   `<background-task-finished ...>` 才允许继续，否则必须输出失败哨兵词。
 //
 // 这组 helper 只做四件事：
 // 1. 起临时 HOME + `tomcat init`
@@ -2489,6 +2492,147 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
         saw_task_stop || transcript.contains("\"name\":\"task_stop\""),
         "transcript 应含 task_stop（收尾后台任务），actual: {}",
         trunc(&transcript, 1800)
+    );
+}
+
+/// [E2E-CLI-016F] midturn batch boundary auto-feed 真 LLM 黑盒回归
+///
+/// 用户意图：模型先起一个后台 bash，再立刻执行一个耗时 foreground bash。
+/// 只有在 foreground batch 结束后的**下一次请求**里看到了 runtime 注入的
+/// `<background-task-finished ...>`，才允许继续读取并确认文件；否则必须立即输出
+/// `MIDTURN_MISSED_FOLLOWUP` 并停止。
+///
+/// 验证：
+/// - exit 0；
+/// - stdout 含 `MIDTURN_FOLLOWUP_OK` 且**不含** `MIDTURN_MISSED_FOLLOWUP`；
+/// - 后台与前台两份产物真实落盘；
+/// - transcript 中 `<background-task-finished ...>` 位于 `FG_BATCH_START` 之后、成功词之前；
+/// - transcript 中不应出现 `task_output` / `task_list` / `task_stop`。
+///
+/// 意义：锁定“批次边界 midturn drain”本身，而不是沿用既有 finish-only between-turns auto-feed。
+#[test]
+fn test_user_background_bash_midturn_followup_real_llm_cli() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    let _span = info_span!("test_user_background_bash_midturn_followup_real_llm_cli").entered();
+
+    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016f_midturn_followup");
+    let bg_done = fx.scratch.join("midturn_bg_done.txt");
+    let fg_done = fx.scratch.join("midturn_fg_done.txt");
+    let _ = fs::remove_file(&bg_done);
+    let _ = fs::remove_file(&fg_done);
+
+    let prompt = format!(
+        concat!(
+            "以下内容就是完整步骤；不要要求我重复步骤，不要反问，不要 ask_question。 ",
+            "请严格按下面步骤执行，不要偏离，不要解释策略： ",
+            "1. 只启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+            "2. 这个后台 bash 的 command 必须精确执行：sleep 1; echo BG_SIGNAL; printf BG_DONE > \"{bg_done}\"。 ",
+            "3. 启动后台任务后，立刻再执行一个**前台** bash（不要设置 run_in_background），其 command 必须精确执行：echo FG_BATCH_START; sleep 2; printf FG_DONE > \"{fg_done}\"。 ",
+            "4. 从这一步开始，禁止调用 task_output、task_list、task_stop，也不要再启动新的 bash。 ",
+            "5. 当前台 bash 结束时，如果你**还没有**看到 runtime 自动注入的 <background-task-finished ...> 系统消息，你必须只回复一行 MIDTURN_MISSED_FOLLOWUP 并立刻停止。 ",
+            "6. 只有在 foreground bash 结束后的后续请求里已经看到了该系统消息时，才允许读取并确认 \"{bg_done}\" 和 \"{fg_done}\" 两个文件内容分别精确为 BG_DONE 和 FG_DONE。 ",
+            "7. 全部确认后，只回复一行 MIDTURN_FOLLOWUP_OK 并停止；不要输出别的结尾。"
+        ),
+        bg_done = bg_done.display(),
+        fg_done = fg_done.display(),
+    );
+
+    info!("Act: tomcat chat 触发 midturn follow-up auto-feed，timeout 150s");
+    let run =
+        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(150));
+    let stdout = run.stdout;
+    let stderr = run.stderr;
+    info!("[tomcat chat stdout] {}", trunc(&stdout, 2000));
+    if !stderr.is_empty() {
+        info!("[tomcat chat stderr] {}", trunc(&stderr, 2400));
+    }
+    assert!(
+        run.success,
+        "tomcat chat 应 exit 0；stderr: {}",
+        trunc(&stderr, 1400)
+    );
+    assert!(
+        stdout.contains("MIDTURN_FOLLOWUP_OK"),
+        "stdout 应含 MIDTURN_FOLLOWUP_OK，实际: {}",
+        trunc(&stdout, 800)
+    );
+    assert!(
+        !stdout.contains("MIDTURN_MISSED_FOLLOWUP"),
+        "stdout 不应含失败哨兵词 MIDTURN_MISSED_FOLLOWUP，实际: {}",
+        trunc(&stdout, 1200)
+    );
+    assert!(
+        bg_done.exists(),
+        "后台任务产物应存在: {}",
+        bg_done.display()
+    );
+    assert!(
+        fg_done.exists(),
+        "前台任务产物应存在: {}",
+        fg_done.display()
+    );
+    assert_eq!(
+        fs::read_to_string(&bg_done).unwrap_or_default(),
+        "BG_DONE",
+        "midturn_bg_done.txt 内容应精确为 BG_DONE"
+    );
+    assert_eq!(
+        fs::read_to_string(&fg_done).unwrap_or_default(),
+        "FG_DONE",
+        "midturn_fg_done.txt 内容应精确为 FG_DONE"
+    );
+
+    let transcript = load_background_bash_p1_real_llm_transcript(&fx);
+    let mut assistant_emitted_failure = false;
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "assistant" {
+            continue;
+        }
+        let content = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if content.contains("MIDTURN_MISSED_FOLLOWUP") {
+            assistant_emitted_failure = true;
+            break;
+        }
+    }
+    assert!(
+        !transcript.contains("\"name\":\"task_output\"")
+            && !transcript.contains("\"name\":\"task_list\"")
+            && !transcript.contains("\"name\":\"task_stop\""),
+        "transcript 不应含 task_output/task_list/task_stop，actual: {}",
+        trunc(&transcript, 1800)
+    );
+    assert!(
+        !assistant_emitted_failure,
+        "assistant 不应在 transcript 中发出失败哨兵词，actual: {}",
+        trunc(&transcript, 1800)
+    );
+    let fg_batch_pos = transcript
+        .find("FG_BATCH_START")
+        .expect("transcript 应含 foreground bash 的 FG_BATCH_START");
+    let follow_up_pos = transcript
+        .find("<background-task-finished")
+        .expect("transcript 应含 synthetic follow-up");
+    let success_pos = transcript
+        .rfind("MIDTURN_FOLLOWUP_OK")
+        .expect("transcript 应含成功词 MIDTURN_FOLLOWUP_OK");
+    assert!(
+        follow_up_pos > fg_batch_pos,
+        "synthetic follow-up 应位于 foreground batch 结果之后；fg_batch_pos={fg_batch_pos}, follow_up_pos={follow_up_pos}"
+    );
+    assert!(
+        success_pos > follow_up_pos,
+        "成功词应位于 synthetic follow-up 之后；follow_up_pos={follow_up_pos}, success_pos={success_pos}"
     );
 }
 

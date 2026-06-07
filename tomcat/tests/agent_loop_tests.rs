@@ -6,13 +6,15 @@ mod common;
 
 use async_trait::async_trait;
 use std::collections::VecDeque;
+use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::{
-    wire, AgentLoop, AgentLoopConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
-    PrimitiveExecutor, PrimitiveOperation, StreamEvent, WriteFileResult,
+    init_context_state, run_chat_turn, wire, AgentLoop, AgentLoopConfig, AppConfig, AppError,
+    BashResult, Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DefaultEventBus,
+    DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, LlmResolver,
+    LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -50,6 +52,50 @@ impl LlmProvider for MockLlm {
         let events = guard
             .pop_front()
             .ok_or_else(|| AppError::Llm("MockLlm: no more streams".to_string()))?;
+        drop(guard);
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+/// 记录每次 `ChatRequest` 的 LLM Mock，用于断言某一轮请求里已经带上了
+/// synthetic follow-up。
+struct RecordingMockLlm {
+    streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+    requests: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
+impl RecordingMockLlm {
+    fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: Mutex::new(streams.into()),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RecordingMockLlm {
+    fn provider_name(&self) -> &str {
+        "recording_mock"
+    }
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("mock chat not used".to_string()))
+    }
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.requests.lock().unwrap().push(req);
+        let mut guard = self.streams.lock().unwrap();
+        let events = guard
+            .pop_front()
+            .ok_or_else(|| AppError::Llm("RecordingMockLlm: no more streams".to_string()))?;
         drop(guard);
         Ok(Box::new(tokio_stream::iter(events)))
     }
@@ -277,6 +323,68 @@ impl PrimitiveExecutor for SlowMockPrimitive {
     }
 }
 
+/// `read_file` 人工延迟，确保后台 bash 能在前台工具批次执行期间自然完成。
+struct MidturnDelayPrimitive;
+
+#[async_trait]
+impl PrimitiveExecutor for MidturnDelayPrimitive {
+    async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        Ok(format!("content:{}", path))
+    }
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
+        Ok(vec![])
+    }
+    async fn write_file(
+        &self,
+        path: &str,
+        content: &str,
+        overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        Ok(WriteFileResult {
+            path: path.to_string(),
+            written: overwrite || !content.is_empty(),
+            bytes_written: 0,
+            diff_hint: None,
+        })
+    }
+    async fn edit_file(
+        &self,
+        path: &str,
+        _edits: Vec<EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        Ok(EditFileResult {
+            path: path.to_string(),
+            applied: true,
+        })
+    }
+    async fn execute_bash(
+        &self,
+        command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<BashResult, AppError> {
+        Ok(BashResult {
+            stdout: format!("out:{}", command),
+            stderr: String::new(),
+            exit_code: 0,
+            ..Default::default()
+        })
+    }
+    async fn require_user_confirmation(
+        &self,
+        _operation: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        Ok(true)
+    }
+}
+
 // ────────────────────── 辅助构建 ───────────────────────────────────────────
 
 fn default_config(session_id: &str) -> AgentLoopConfig {
@@ -312,6 +420,139 @@ fn tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEvent,
             reason: "tool_calls".to_string(),
         }),
     ]
+}
+
+struct FixedResolver {
+    provider: Arc<dyn LlmProvider>,
+    default_model: String,
+}
+
+impl FixedResolver {
+    fn new(provider: Arc<dyn LlmProvider>, default_model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            default_model: default_model.into(),
+        }
+    }
+
+    fn resolved_call(&self, model: &str) -> ResolvedCall {
+        let lower = model.trim().to_ascii_lowercase();
+        let capabilities = Capabilities {
+            vision: lower.starts_with("gpt-"),
+            files: lower.starts_with("gpt-"),
+            tools: true,
+            reasoning: lower.starts_with("gpt-5."),
+            web_search: false,
+        };
+        ResolvedCall {
+            provider_impl: self.provider.clone(),
+            model: model.to_string(),
+            api: "openai-responses".to_string(),
+            provider: "openai".to_string(),
+            base_url: Some("https://api.openai.com".to_string()),
+            key_source: "OPENAI_API_KEY".to_string(),
+            thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
+            capabilities,
+        }
+    }
+}
+
+impl LlmResolver for FixedResolver {
+    fn resolve(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let model = match scene {
+            LlmScene::Main | LlmScene::Vision => session_override
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .unwrap_or(&self.default_model),
+            LlmScene::Compaction | LlmScene::Title => &self.default_model,
+        };
+        Ok(self.resolved_call(model))
+    }
+}
+
+fn install_fixed_resolver(
+    ctx: &mut ChatContext,
+    provider: Arc<dyn LlmProvider>,
+    default_model: &str,
+) {
+    ctx.llm = provider.clone();
+    ctx.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
+}
+
+fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(env_key.to_string());
+    // SAFETY: 测试使用独立 env key，作用域结束后显式清理。
+    unsafe { std::env::set_var(env_key, "stub") };
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx.session.current_session_key().to_string();
+    ctx.session.create_session(&session_key, None).unwrap();
+    (dir, ctx)
+}
+
+fn spawn_test_completion_subscriber(ctx: &ChatContext) -> tokio::task::JoinHandle<()> {
+    use tomcat::core::agent_loop::CompletionRoute;
+    use tomcat::core::tools::primitive::{BackgroundTaskLifecycleEvent, BashTaskStatus};
+
+    let registry = ctx.bash_task_registry.clone();
+    let routes = ctx.completion_routes.clone();
+    let queue = ctx.follow_up_queue.clone();
+    let delivered = ctx.delivered_completion.clone();
+
+    let mut rx = registry.subscribe_lifecycle();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(BackgroundTaskLifecycleEvent {
+                    task_id,
+                    final_status,
+                    log_path,
+                    command,
+                }) => {
+                    {
+                        let mut delivered_guard = delivered.lock();
+                        if delivered_guard.contains(&task_id) {
+                            continue;
+                        }
+                        delivered_guard.insert(task_id.clone());
+                    }
+                    let should_push = {
+                        let mut routes_guard = routes.lock();
+                        match routes_guard.get(&task_id).copied() {
+                            Some(CompletionRoute::ToolWillDeliver)
+                            | Some(CompletionRoute::Delivered) => false,
+                            _ => {
+                                routes_guard.insert(task_id.clone(), CompletionRoute::Delivered);
+                                true
+                            }
+                        }
+                    };
+                    if !should_push {
+                        continue;
+                    }
+                    let exit_code = match final_status {
+                        BashTaskStatus::Finished { exit_code } => exit_code,
+                        BashTaskStatus::Stopped => -1,
+                        BashTaskStatus::Running => continue,
+                    };
+                    let tail = registry.tail_log(&task_id, 4096).await;
+                    let text = format!(
+                        "<background-task-finished task_id=\"{task_id}\" exit_code=\"{exit_code}\" log_path=\"{log_path}\" command=\"{cmd}\">\n{tail}\n</background-task-finished>",
+                        cmd = command.replace('"', "\\\""),
+                    );
+                    queue.lock().push(ChatMessage::user(text));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 // ────────────────────── 集成测试用例 ───────────────────────────────────────
@@ -463,6 +704,130 @@ async fn test_agent_loop_follow_up_continues_in_same_session(
         result.final_text.contains('B'),
         "FollowUp 后 final_text 应包含第二轮回复 'B'，实际: {:?}",
         result.final_text
+    );
+
+    Ok(())
+}
+
+/// [run_chat_turn midturn follow-up] 同一 `run_chat_turn` 内，foreground tool 批次结束后，
+/// 背景 bash 完成产生的 synthetic user 应已进入**下一次** LLM 请求，而不是等函数返回后
+/// 再由 host between-turns drain。
+#[tokio::test]
+async fn test_run_chat_turn_drains_background_followup_within_same_turn(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span =
+        info_span!("test_run_chat_turn_drains_background_followup_within_same_turn").entered();
+
+    const ENV_KEY: &str = "TOMCAT_MIDTURN_FOLLOWUP_INTEGRATION_KEY";
+    let (dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let background_done = dir.path().join("background_done.txt");
+    let background_command = format!(
+        "sleep 1; printf BG_DONE > \"{}\"",
+        background_done.display()
+    );
+    let background_args = serde_json::json!({
+        "command": background_command,
+        "run_in_background": true,
+    })
+    .to_string();
+    let read_args = serde_json::json!({
+        "path": "/tmp/delayed-read",
+    })
+    .to_string();
+    let llm = Arc::new(RecordingMockLlm::new(vec![
+        tool_call_stream("bg_call", "bash", &background_args),
+        tool_call_stream("read_call", "read", &read_args),
+        text_stream("MIDTURN_RUN_CHAT_TURN_OK"),
+    ]));
+    let recorded_requests = llm.requests.clone();
+    install_fixed_resolver(&mut ctx, llm, "gpt-5.4");
+    ctx.primitive = Arc::new(MidturnDelayPrimitive);
+    let subscriber = spawn_test_completion_subscriber(&ctx);
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text)?;
+
+    info!("Act: 单次 run_chat_turn 内先起后台 bash，再跑一个延时 read 批次");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_chat_turn(
+            &ctx,
+            "请按工具流执行",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .map_err(|_| "run_chat_turn timeout 10s")??;
+
+    subscriber.abort();
+    // SAFETY: 测试作用域结束后清理独立 env key。
+    unsafe { std::env::remove_var(ENV_KEY) };
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("run_chat_turn 应 Completed，实际: {other:?}"),
+    };
+    assert!(
+        result.final_text.contains("MIDTURN_RUN_CHAT_TURN_OK"),
+        "final_text 应含收尾文本，实际: {:?}",
+        result.final_text
+    );
+    assert!(
+        background_done.exists(),
+        "后台任务产物应存在: {}",
+        background_done.display()
+    );
+    assert_eq!(
+        fs::read_to_string(&background_done).unwrap_or_default(),
+        "BG_DONE",
+        "后台任务应真实完成并写入 BG_DONE"
+    );
+
+    let requests = recorded_requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "应正好发起三次 LLM 请求");
+    let second_has_follow_up = requests[1].messages.iter().any(|msg| {
+        msg.text_content()
+            .is_some_and(|text| text.contains("<background-task-finished"))
+    });
+    let third_follow_up_idx = requests[2]
+        .messages
+        .iter()
+        .position(|msg| {
+            msg.text_content()
+                .is_some_and(|text| text.contains("<background-task-finished"))
+        })
+        .expect("第 3 次请求应已携带 synthetic follow-up");
+    let third_tool_idx = requests[2]
+        .messages
+        .iter()
+        .rposition(|msg| msg.role == tomcat::core::llm::ChatMessageRole::Tool)
+        .expect("第 3 次请求前应已有 foreground tool_result");
+    assert!(
+        !second_has_follow_up,
+        "第 2 次请求不应已携带 synthetic follow-up，否则无法证明它发生在 foreground batch 之后"
+    );
+    assert!(
+        third_follow_up_idx > third_tool_idx,
+        "synthetic follow-up 必须位于 foreground tool_result 之后；tool_idx={third_tool_idx}, follow_up_idx={third_follow_up_idx}"
+    );
+
+    let transcript = fs::read_to_string(
+        ctx.session
+            .current_transcript_path()?
+            .ok_or("transcript path should exist")?,
+    )?;
+    let tool_pos = transcript
+        .find("content:/tmp/delayed-read")
+        .expect("transcript 应含 foreground read tool_result");
+    let follow_up_pos = transcript
+        .find("<background-task-finished")
+        .expect("transcript 应含 synthetic follow-up");
+    assert!(
+        follow_up_pos > tool_pos,
+        "transcript 中 synthetic follow-up 应位于 foreground tool_result 之后；tool_pos={tool_pos}, follow_up_pos={follow_up_pos}"
     );
 
     Ok(())
