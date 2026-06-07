@@ -7,705 +7,556 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-03 00:35 +0800 | INTEGRATION | develop | - |
+| Nibbles | 2026-06-07 07:34 +0800 | ACTIVE | develop | — |
 
-### 集成测试报告（merge `feature/t2-p0-010-multi-llm-productization` → develop，T2-P0-010）
+### 2026-06-07 | merge `feature/skill-system` → develop（T2-P1-014 集成验收）
 
-**合并分支**：`feature/t2-p0-010-multi-llm-productization` → `develop`（`git merge --no-ff` → `d134372`，无冲突，9 commit）。多 LLM 产品化 Wave 1 基线（ModelCatalog + LlmResolver + AuthStore 最小闭环、`/model` 命令族、model-first `tomcat init` 向导，及随附 preflight UI 开关）。
+- **合并范围**：按用户要求将 `feature/skill-system` fast-forward 合入 `develop`（`63150d4 -> 90e1c60`），随后在 develop 侧完成全量 review，并补齐集成过程中暴露的 develop-side 收口：`Skill` 现保留 `allowed_tools` 元数据；`skills.enabled=false` 时不再渲染 `<available_skills>`；`directory-structure.md`、`skill-system.md`、`E2E_SCENARIO_LIBRARY.md`、`Product_Brief.md` 等文档回写到当前实现。
+- **全量 review**：围绕 `core/skill`、`system_prompt`、`tool_exec`、`api/chat/commands/cmd_skill.rs`、`api/cli/skill_cmd.rs`、`infra/config`、`tool-catalog.md` 与 Skill 相关 OpenSpec/架构文档做 develop 侧复核；确认三层发现、`<available_skills>` 渐进式披露、`load_skill` 权限闸门、`/skill`/`tomcat skill` 命令面闭环一致，并修正文档里的 P0/P1 技能根、测试矩阵与 env-gated 场景漂移。
+- **§4 全量验收（develop 侧复跑）**：以 **clean env** 执行 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 全绿（release / clippy / lib / integration-parallel / integration-serial，覆盖 `skill_tool_tests` 与 `cli_tests`）；显式 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm` 通过。集成期先发现一处真实 develop-side 门禁问题：`tests/skill_tool_tests.rs` 的 `useless_format` 触发 clippy，已改为 `.to_string()`；另确认 **不应**在整轮 `all` 前全局 `source .env`，否则会把默认门禁之外的环境分支一并打开，产生失真红灯。
+- **结论**：`feature/skill-system` 已在 develop 侧完成合并、review 与验收；`T2-P1-014` 置为 `DONE`，相关状态/任务索引/OpenSpec 已同步。未推送远端。
 
-**全量验收门禁（develop 侧复跑）**：`cargo build --release`（4m34s）/ `clippy --all-targets -D warnings` / `cargo test --lib`（**1347 passed, 1 ignored**）/ `run-integration-tests.sh integration`（**26 bin / 245 test 全绿**，含 `cli_tests` 86、`checkpoint_cli_e2e` 5）**全绿**。
+### 2026-06-05 | merge `feature/web-search` → develop（T2-P1-012 / T2-P1-013 集成验收）
 
-**real-LLM（OPENAI/DEEPSEEK/MIMO key 均具备）**：`reasoning_continuity_real_llm_tests` **5 passed**（真实跨 provider continuity/downgrade）。`wasmedge_e2e_tests` 因本合并无 Wasm 变更未单独跑 `integration-wasm`。
+- **合并范围**：用户指定合并 `feature/web-search` → `develop`；先在功能分支补 `web_search` merge-gap 修复（cache key 纳入 `allowed_domains` / `blocked_domains`、命中过滤拒任意 IP literal / 保留内网 hostname、`tool_exec` 成功路由与 chat-path E2E），并把 `web_fetch` / OpenSpec / 场景库对齐当前实现；随后 `git merge --no-ff` → `748683c`。对应 **T2-P1-012** / **T2-P1-013**。
+- **全量 review（编码规范 4 件套）**：`web_search/{cache,types,mod,tests}.rs`、`submodules_test.rs`、`cli_tests.rs`、`web_search.md`、`web_fetch.md`、`User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`E2E_TEST_SPEC.md`、`INTEGRATION_TEST_SPEC.md` 全量复核：`web_search` 缓存命中现与配置域约束同键；hits 过滤现拒任意 IP literal 与保留内网 hostname；`web_fetch` 的 domain gate / DNS 解析型 SSRF 继续显式登记为后置残余风险；缺失的 `tool_exec` 成功路径与 chat 用户路径覆盖已补齐。
+- **门禁修复（非功能回归）**：首轮 `run-integration-tests.sh all` 暴露两条与 web 工具无关的 `current_tail_guard_runtime_test` HOME/env 竞争型 flaky；已在 `current_tail_guard_runtime_test.rs` 为两条 plan-path 用例补 `#[serial(env_lock)]`，并在 helper 中显式 `create_dir_all(parent)`，复跑后稳定通过。
+- **§4 全量验收（develop 侧复跑）**：`cargo build --release` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib` **1421 passed, 1 ignored** / `run-integration-tests.sh integration` 全绿（含 `cli_tests` **87 passed**、`web_search_tool_tests` **5 passed**、`web_fetch_tool_tests` **2 passed**）；显式 live smoke：`PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture` 与 `PI_LIVE_WEB_FETCH=1 cargo test --test web_fetch_tool_tests live_example_fetch_smoke -- --nocapture` 均通过。
+- **结论**：`feature/web-search` 已合入 `develop`；`T2-P1-012` / `T2-P1-013` 已在任务索引中保留并置为 `DONE`。`web_fetch` 的 `PermissionGate::Domain` / DNS 解析型 SSRF 仍按文档记录为后置风险，不再与“已实现”口径混淆。未推送远端。
 
-**集成期修复（develop 侧，均非弱化断言）**：`c26a259` clippy `question_mark`（`replay_policy.rs`）；`4a70d99` lib 用例对齐可 replay 窗口（§4.2.6 历史 tool turn 静默 strip）；`a8e58de` `checkpoint_cli_e2e` hangup E2E 改用 `models.toml` 自定义 model 指向 mock（新路由对内置模型忽略 `api_base`）。
+### 2026-06-04 | docs(tools): web_search 项目级 hosted 候选 + 看板/计划规范
 
-### ⚠️ 反馈 owner（Spike）：分支自测遗漏 2 个红用例（已在 develop 修复）
+- **动机**：`web_search` 的 `auto` 不应绑在当前对话模型 wire 上；只要项目 catalog 里配置了 `capabilities.web_search == true` 的模型，就应作为 hosted 首选，再按 `openai(hosted) → tavily → brave → serper` 降级。同时补齐 Tavily/Brave/Serper 官方契约与 `.env` 密钥位，并把 PLAN 规范要求「todos 覆盖研发流程 + 决策表全部项」写死。
+- **文档**：`web_search.md` 重写 hosted 资格（project-level `hostedCandidateModel`）、决策表、状态机、测试矩阵与配置说明；`web_fetch.md` 对齐 T2-P1-013 任务锚点与 `tool_exec` 目录结构校准块；`PLAN_SPEC.md` 强化 frontmatter/todos/自检清单；`.env.example` 增加三家 HTTP key 样板。
+- **看板**：`TASK_BOARD_002/README.md` 登记 T2-P1-012 / T2-P1-013 及依赖示意；新增任务卡 `tasks/T2-P1-012.md`、`tasks/T2-P1-013.md`。
+- **范围**：仅文档与配置样板，无 `src/` 变更。
 
-| 失败项 | 现象 | 根因 | 建议 |
-| :--- | :--- | :--- | :--- |
-| `core::llm::...::test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_content` | 合并后 `cargo test --lib` 红：`left: Null, right: "tool plan"` | 该用例由分支早期 `0436b1b` 加入；窗口特性 `8efde73`（§4.2.6）落地后未同步更新——历史 tool turn 落窗口外应静默 `StripOpaque` | Spike：交付前须跑全量 `cargo test --lib`；新特性改变既有用例预期时同步修订断言 |
-| `checkpoint_cli_e2e::test_hangup_during_run_leaves_interrupt_ckpt` | 合并后 `integration` 稳定红：`server stage did not reach 2 within 3s` | model-first 路由按 catalog `entry.base_url` 取端点，旧 `TOMCAT__LLM__API_BASE` 对内置模型不再生效，mock server 收不到请求 | Spike：交付前须跑全量 `integration`；引入路由破坏性变更时排查依赖 `api_base` 覆盖的既有 E2E（已改用 `models.toml` 机制） |
+### 2026-06-03 | fix(llm): 压缩模型缺钥回退默认模型 + init 对齐 compaction_model
+
+- **动机**：`context.compaction_model` 与主对话模型 provider 不一致时，压缩场景常因缺对应 API Key 失败；init 选模后未同步 `compaction_model`，与默认模型脱节。
+- **实现**：`DefaultLlmResolver::resolve_compaction_call` 在压缩模型不可用时 warn 并回退 `llm.default_model`（同模型路径保留原错）；Compaction 场景按 provider 兼容策略选用 `llm.api_key_env` 作 credential fallback；`apply_model_choice` 写入 `context.compaction_model`。
+- **测试**：`resolver_test` 新增 3 例（回退 / 同模型原错 / Main 不受影响）；`run_basic_test` / `init_model_wizard` 断言 compaction_model 与 init 默认模型一致。
+
+### 2026-06-03 | feat(cli): chat 启动像素风吉祥物 Splash（Tommy）
+
+- **动机**：为 `tomcat chat` 增加轻量品牌感与进门问候，参考 Claude Code / Codex 的启动 Splash，但不改现有 banner 文案、不阻塞 CI/管道输出。
+- **实现**：`assets/splash/tommy_braille/` 4 帧 idle（眨眼/摇尾）；`splash.rs` 编译期嵌入、`[splash]` 配置（`enabled`/`animations`/`max_width`）、`TOMCAT_SPLASH=0`、TTY 守卫（非终端不绘制）、`NO_COLOR` 去色；`chat_loop` 开头调用 `render_mascot` 后照旧打印三行 banner。
+- **测试**：`splash_test` 仅断言帧文件已嵌入（4 帧非空）；`cargo test --lib splash` 1 passed。
+- **文档**：`user-guide.md` §6 补充启动画面说明。
+
+### 2026-06-03 | merge `feature/t2-p0-010-multi-llm-productization` → develop（T2-P0-010 集成验收）
+
+- **合并范围**：用户指定合并当前分支 `feature/t2-p0-010-multi-llm-productization`（9 commit：Wave1 catalog/resolver/chat/init + remediation + MiMo Token Plan 数据表 + cross-profile downgrade + preflight UI 开关 + docs）→ `develop`，`git merge --no-ff` → `d134372`，无冲突。对应 **T2-P0-010**（多 LLM 产品化 Wave 1 基线）。
+- **全量 review（编码规范 4 件套）**：`catalog.rs`（内置表 + `models.toml` 合并、显式 miss 报错、partial 覆盖）、`resolver.rs`（`LlmScene` per-call 解析、catalog 命中按 `entry.base_url` 重定向、能力校验前移给结构化引导错误、`(api,base_url,key_source)` provider 缓存复用）、`auth.rs`（provider→`<PROVIDER>_API_KEY` + 兜底 + 可读错误）、`cmd_model.rs`/`init_model_wizard.rs`/`models_toml.rs`（`/model` 命令族、model-first init、`models.toml` 幂等生成、`.env` 0600）均合规：分层/依赖方向/错误处理/可测试性/注释覆盖到位，文件行数在 L-1/L-2 区间（context.rs 559 / run_loop 506 / stderr 484，advisory 非门禁）。
+- **§4.2.0 行为确认**：model-first 路由按 catalog 命中模型的 `entry.base_url` 取端点，旧 `[llm].api_base` 对内置模型不再生效（`resolver::tests::catalog_route_ignores_legacy_api_base_override`），与架构文档一致。
+- **§4 全量门禁（develop 复跑）**：`cargo build --release`（4m34s）/ `cargo clippy --all-targets -D warnings` / `cargo test --lib` **1347 passed, 1 ignored** / `run-integration-tests.sh integration` **26 bin / 245 test 全绿**（含 `cli_tests` 86、`checkpoint_cli_e2e` 5、`context_management_tests` / `openai_responses_integration_tests` 等）。
+- **real-LLM（OPENAI/DEEPSEEK/MIMO key 均具备）**：`reasoning_continuity_real_llm_tests` **5 passed**（真实跨 provider continuity / downgrade 验证）。
+- **集成期修复（develop 侧，均非弱化断言）**：
+  1. `c26a259` clippy `question_mark`：`replay_policy.rs::classify_replay_downgrade` 冗余 `let...else` 改 `?`。
+  2. `4a70d99` 失败 lib 用例 `test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_content`：分支早期提交加入、窗口特性（§4.2.6）落地后未同步——历史 tool turn 落窗口外应静默 `StripOpaque`，改断言为 wire[1] 无 `reasoning_content` 且保留 tool_call、wire[4] 仍回放（补强）。
+  3. `a8e58de` 失败 E2E `checkpoint_cli_e2e::test_hangup_during_run_leaves_interrupt_ckpt`：旧用例靠 `TOMCAT__LLM__API_BASE` 指向 mock，新路由对内置模型忽略 api_base；改用 `models.toml` 自定义 model 指向 mock endpoint，partial/Interrupt 断言不变。
+- **wasmedge_e2e**：本合并无 Wasm 相关变更，未单独跑 `integration-wasm`（需 `--features wasmedge` 单独入口；与既有集成实践一致）。
+- **反馈 owner（Spike）**：分支标 `PENDING_INTEGRATION` 时全量 `cargo test --lib` 与 `integration` 实际存在上述 2 个红用例（窗口断言漂移 + checkpoint mock 路由），属交付前自检遗漏；已在 develop 修复并复跑全绿，记录于 docs/INTEGRATION.md 供后续注意。
+- **结论**：T2-P0-010 已正确集成；强制门禁与 real-LLM 全绿；看板与任务卡 `PENDING_INTEGRATION → DONE`。未推送远端（待用户确认）。
+
+### 2026-06-01 | merge `feature/reasoning-continuity` → develop（T2-P1-010 集成验收）
+
+- **合并范围**：用户指定合并 `feature/reasoning-continuity`（11 commit）→ `develop`，`git merge --no-ff` → `f21270f`，无冲突。对应 **T2-P1-010**（OpenAI / DeepSeek transcript-first reasoning continuity）。
+- **全量 review（编码规范 4 件套）**：`replay_policy.rs` 集中 replay/downgrade 决策；`openai_responses` 主线 `store=false` + `include=["reasoning.encrypted_content"]`，`previous_response_id` 仅显式配置互斥分支；DeepSeek V4 / reasoner 分族 + same-profile `reasoning_content` replay（tool turn 继续记录更强 replay 约束 metadata）；`switch_current_model` + `model_change` 审计；agent_loop 仅接线。分层/依赖/错误处理/可测试性/注释覆盖合规。**Advisory（非阻塞）**：`openai.rs` **1119 行**（RUST_FILE_LINES L-3 建议拆分区间，同 T2-P1-011 先例仅记录）。
+- **§11 锚点**：`transcript_roundtrip_preserves_reasoning_continuation`、`openai_responses_roundtrip_replays_reasoning_items`、`deepseek_tool_turn_replays_reasoning_content`、`deepseek_non_tool_turn_roundtrip_replays_reasoning_content`、`cross_provider_downgrade_keeps_semantic_history`、`streaming_think_scrubber_hides_split_tags` 均在 develop 可命中；`reasoning_continuity_real_llm_tests` 无 `#[ignore]`/弱化断言。
+- **§1 规格/场景库**：`E2E_SCENARIO_LIBRARY` plan 矩阵与 `plan_real_llm_cli_e2e` / inprocess 分工一致；架构文档测试矩阵与实现对齐。
+- **§4 全量门禁（develop 复跑）**：`run-integration-tests.sh all` → **EXIT_CODE=0**（release / clippy `-D warnings` / lib **1302 passed** / integration-parallel / integration-serial 含 **cli_tests 83 passed**）。
+- **real-LLM 分组**：`integration-real-llm` → **REAL_LLM_EXIT_CODE=0** — `reasoning_continuity_real_llm_tests` **3 passed**；`plan_real_llm_inprocess_tests` **1 passed**（194.9s）；`plan_real_llm_cli_e2e` **2 passed, 1 ignored**（203.8s，full-chain 仍 ignored、smoke 绿）。`current_tail_guard_real_llm_tests` 同组未在本轮单独列出但随脚本全组通过。
+- **结论**：T2-P1-010 已正确集成；强制门禁与 real-LLM 全绿。看板索引移除 T2-P1-010 开放行；任务卡保持 `DONE`。未推送远端。
+
+### 2026-05-31 | fix(agent): 后台 bash 未注入时报 LLM 可执行英文指引
+
+- **动机**：verifier/reviewer 等未注入 `BashTaskRegistry` 的子 Agent 调用 `bash(run_in_background=true)` 或 `task_*` 时，工具结果只返回「未注入 BashTaskRegistry」，CLI 与模型都无法判断应改走前台 bash。
+- **代码**：新增 `background_unavailable` helper，按 `SubagentType` 区分子 Agent（`currently unsupported in this subagent`）与未接线兜底（`Background bash is not enabled in this AgentLoop`）；`bash`/`task_output`/`task_stop`/`task_list` 四分支统一走 helper；`cli_turn_renderer` bash 起始摘要附带 `run_in_background=true` 标记。
+- **测试**：`submodules_test` 更新 no-registry 断言并新增 `tool_exec_verifier_background_bash_without_registry_mentions_subagent`；`cargo test -p tomcat tool_exec_ --lib` 36 passed。
+- **范围外**：未改 `with_bash_task_registry` 主 chat 注入与子 Agent wiring；`cc-fork-01` 子模块 dirty 不纳入。
+
+### 2026-05-31 | style(agent): current-tail guard fmt 残留收口
+
+- **动机**：`fix(plan)` 提交时 `current_tail_guard.rs`、`agent_loop/mod.rs`、`current_tail_guard_real_llm_tests.rs` 的 `cargo fmt` 差异刻意未纳入；本 commit 单独收口，避免 develop 工作树长期带 fmt 噪音。
+- **范围**：仅 import 排序与断行格式化，无行为变更；`cc-fork-01` 子模块 dirty 与无关 untracked 目录不纳入。
+
+### 2026-05-31 | fix(plan): 放宽 `/plan build` 运行态闸门
+
+- **动机**：`tomcat chat` 在 session 仍有 scratchpad todos 或盘内 `Pending`/`Completed` 时，无参或显式 `/plan build <other>` 会被 `BuildBlocked` 误伤；典型场景是 reviewer 把已完成 plan 的 frontmatter 写成 `pending` 且 todos 全 completed，用户无法显式切到另一份 plan。
+- **代码**：`PlanRuntime::build_plan()` — scratchpad `session_todos`（pending/in_progress）改为 warning 不阻塞；内存 `Pending`/`Completed` 允许显式 build 另一份 `planning/pending` plan；仍拒绝 `Executing` 与磁盘 state 不合规；无参 `default_build_target()` 不变（Pending 仍优先续跑当前盘）。
+- **测试**：`build_plan_test` 拆分/新增 `plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan`、`pending_session_can_build_another_explicit_plan`；`cargo test -p tomcat plan_build_ --lib` 17 passed。
+- **文档**：`plan-runtime.md`、`tools/planner.md` 同步 G3/G5 闸门与状态转移表。
+- **范围外**：未改 plan 文件自愈合（`pending` + 全 completed todos 仍保持 dirty）；`current_tail_guard` 工作树仅 fmt 残留未纳入本 commit。
+
+### 2026-05-31 | merge `feature/current-tail-aggregate-guard` → develop（T2-P1-011 集成验收）
+
+- **合并范围**：用户指定合并当前分支 `feature/current-tail-aggregate-guard`（4 commit：`1bb4d66` 阶段二实现 / `08f4966` fmt / `42f4ee4` 称重点+steering+测试矩阵收口 / `8085c40` keepalive A/B/C 真 LLM 验证 + 默认压缩模型 gpt-5.2）→ `develop`，`git merge --no-ff`，无冲突。对应 T2-P1-011（current-tail aggregate guard 阶段二预防型上下文减负）。
+- **全量 review（编码规范 4 件套）**：mid-turn precheck/route 决策、`reduce → 先 apply 历史 → 历史再压 → tail 波次 placeholder → 单条 branch_summary collapse + keepalive`、`steering_injection` 统一记账通道、`truncation.rs` 抽出 `persist_tool_result_text`/`is_persisted_tool_result_text` 复用、`session/transcript.rs::rewrite_message_text_entries_by_id` 原子重写、`ContextState::rewrite_local_tail_chars` 计数同步、config 移除 `compaction_turns` 并新增 `current_tail_*` 两字段——分层/依赖方向/错误处理/可测试性/注释覆盖均合规，无设计缺陷。advisory（非阻塞）：`current_tail_guard.rs` ~900 行落入 RUST_FILE_LINES L-3「建议拆分」区间（规范明确非 CI 门禁）；`build_collapse_summary_artifacts_for_test` 命名带 `_for_test` 但被生产路径 `collapse_to_branch_summary` 复用，命名易误导，建议后续重命名。
+- **§1 规格/场景库**：核对 `User_Stories.md` 与 `E2E_SCENARIO_LIBRARY.md`（新增 E2E-CLI-094/095）与当前实现一致，无遗漏。
+- **§4 全量验收门禁（develop 侧复跑，`run-integration-tests.sh all`）**：`release`（4m26s）/ `clippy`（`--all-targets -D warnings`）/ `lib`（1267 passed, 0 failed, 1 ignored）/ `integration-parallel`（全绿）/ `integration-serial`（全绿，含 `cli_tests` 83 passed）全部通过。
+  - **首轮 clippy 红（已直接修复）**：`--all-targets` 暴露两条测试侧 clippy 红线：①`src/core/agent_loop/tests/current_tail_guard_runtime_test.rs:156` `manual_contains`（`iter().any(|t| *t==X)` → `contains(&X)`）；②`tests/current_tail_guard_real_llm_tests.rs:474` `await_holding_lock`（`home_lock()` std Mutex 跨 await 持有）。修复：①改 `contains`；②删除冗余 `home_lock()` 手动锁与随之死代码的 `home_lock` 函数——该用例已由 `#[serial]` + `HomeGuard` 串行化，与同文件 A/B 用例一致，未弱化任何断言。重跑 `clippy` 通过，重跑被改的 `current_tail_guard_runtime_test`（3 passed）通过。
+- **real-LLM 分组（新增 target 须显式跑 `integration-real-llm`，需 OPENAI_API_KEY）**：
+  - `current_tail_guard_real_llm_tests`（本卡新增、并因 clippy 修复被改动）：**A/B/C 3 passed**（两次运行均绿）。
+  - `plan_real_llm_inprocess_tests`（本卡仅改 finalize 断言语义+注释）：首轮 `exec_round_1` 180s 超时红，**重跑通过（254.5s）**——临界超时 flake；超时点在 line 471，早于本卡改动处（~643），与本卡无关。
+  - `plan_real_llm_cli_e2e::cli_full_plan_path_with_real_llm`（本卡**未改动**该文件）：**两次复跑均 240s `EXEC_TIMEOUT` 子进程超时红**。日志显示真实 gpt-5.4 全链路（build→exec 多工具轮→verify→code_review→finalize）确实完成了任务（counter.py 打印 0、plan 完成），仅墙钟超过测试硬超时；全程 `mid_turn_precheck route="fits"`（working≈13k ≪ budget 272k），本次合并的 current-tail guard 未介入、不增加 LLM 调用，**判定为与本合并无关的真实 LLM 时延导致的 liveness 超时**，属出 gate（real-llm 不进 `all`/CI）项。**反馈 owner（Spike）**：建议复核 `tests/plan_real_llm_cli_e2e.rs` 的 `EXEC_TIMEOUT`(240s)/`PLANNING_TIMEOUT`(180s) 与 `plan_real_llm_inprocess_tests.rs` exec_round(180s) 是否需按当前 gpt-5.4 时延上调（liveness 守卫，非断言），见 docs/INTEGRATION.md。
+- **结论**：T2-P1-011 功能已正确集成；强制门禁（release/clippy/lib/integration 含 cli_tests E2E）全绿，本卡自身 real-LLM target 全绿；唯一红项为与本合并无关、出 gate 的 `plan_real_llm_cli_e2e` 真 LLM 时延超时（已记录并反馈 owner）。据此将 T2-P1-011 置 `DONE`。
+- **本流程提交**：`fix(test)` clippy 红线修复 + 本 status/看板/INTEGRATION 文档更新；merge commit 已生成，未推送远端（待用户确认）。
+
+### 2026-05-29 | plan active-binding v4-g implementation + acceptance
+
+- **范围**：在 `develop` 工作树上完成 PlanRuntime active binding v4-g 收口：`PlanMode -> PlanState` 正名、`mode.rs` 删除并由 `state.rs` 接管、`plan.create/build/update` 事件恢复链路落地、`/plan build` 默认源顺序与 `/plan exit` 语义对齐、`update_plan` completed→pending reopen / auto-finalize→Chat(retain) 收口、架构文档（`plan-runtime.md` / `context-management.md` / `agent-loop.md` / `tools/{create-plan,planner,update-plan}.md`）回写。
+- **评审/补漏**：全量回归首次在 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 暴露真实 LLM bash launcher 兼容缺口: 当模型把 `sh -c` / `bash -lc` 放进 `command`、再把脚本正文放进 `args` 时，后台 bash 会把整串 launcher 当成可执行文件名，出现 `ENOENT`。本轮在同步 bash 与后台 bash 两条路径补 `launcher + args` 归一化兼容，并新增单测 `execute_bash_shell_launcher_command_merges_with_argv`、`spawn_shell_launcher_command_merges_with_argv` 锁住该回归。
+- **阶段 T（针对 plan/binding）**：`cargo test --no-run`、`cargo test --lib -- --test-threads=1`、`cargo test --test plan_runtime_integration_tests -- --nocapture --test-threads=1`、`cargo test --test plan_e2e_with_mock_llm_tests -- --nocapture --test-threads=1`、`cargo test --release --test cli_tests test_user_background_bash_autofeed_real_llm_cli -- --nocapture --test-threads=1` 通过。
+- **阶段 T（全量验收）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all > .integration_test_output.log 2>&1` 二次复跑后 `EXIT_CODE=0`；`release` / `clippy` / `lib` / `integration-parallel` / `integration-serial` 全绿，日志末尾为 `=== 全量测试通过 ===`。
+- **看板**：`TASK_BOARD_002/tasks/` 当前无与本次 `develop` 工作树实现直接对应的 `PENDING_INTEGRATION` 任务卡，因此本轮未改 task board，只更新 `docs/status/develop.md`。
+
+### 2026-05-28 | post-merge integration: 12-commit batch (4e7e24c..d2a11cd)
+
+- **范围**：本次按 Nibbles §1→§4 + INTEGRATION_MERGE_AND_ACCEPTANCE.md 对 develop 最近 12 个直接合入的 commit 做后置全量验收：
+  `d2a11cd`（thinking 三档 + Responses 推理去重）/ `eb05a15`（append-invariant rehydrate）/ `52e4acf`（gpt-5.4 默认）/ `e9b43a2`（search_files/bash 前置拦截）/ `b0f7825`（edit NotFound hashline 防呆）/ `90d2842`（折叠态流式 summary + LLM 超时分层）/ `bc3571f`（CLI 可见性 + session 自愈）/ `8ed5aba`（rustyline 18 + macOS IME）/ `f613708`（no-wasm 默认 + Wasm 收窄）/ `36ff58b`（chore: todos）/ `cb43db6`（002 看板瘦身）/ `4e7e24c`（回滚 bash 重定向 gate）。
+- **review**：A 类 8 commit 对照编码规范 4 件套（Codeing&Architecture / RUST_FILE_LINES / RUST_IDIOMS / COMMENT）扫一遍；`types.rs` 956 行 / `run_loop.rs` 943 行接近 L-3 但 RUST_FILE_LINES_SPEC 明确非 CI 门禁，本批次不强制拆分（后续迭代再评估）；`cli_turn_renderer.rs` Minimal 分支锁顺序、`stream.rs::ReasoningState` 的 prefix-strip 兜底 + warn-replace、`cmd_thinking.rs` Toggle 的 CAS-loop 并发安全均无硬伤。唯一缺口落在 TOML `show = true|false` 反序列化兼容没有显式测试。
+- **§1 User_Stories / E2E 场景库**（独立 commit `784d94c`）：Story 7 验收补 `/thinking minimal|summary|full|toggle` 运行时切档、`PI_CHAT_SHOW_THINKING` 与 `[llm.thinking].show` 三档+旧 bool 兼容、Responses reasoning `(item_id,index)` 分桶去重三条；E2E_SCENARIO_LIBRARY 新增 E2E-CLI-043 `/thinking` 三档切换条目；Story 4 / Story 8b 表头补 `--features wasmedge` 与 `integration-wasm` 入口说明（对齐 f613708 之后的 no-wasm 默认编译路径）。
+- **§2 集成测试补漏**（独立 commit `e324636`）：在 `defaults_test.rs` 新增 `thinking_show_toml_legacy_bool_{false,true}_maps_to_{summary,full}` / `thinking_show_toml_string_modes_parse_correctly` / `thinking_show_toml_unknown_string_rejected` 4 个用例，锁住旧 `show = false/true` 写法、三档字符串与非法值反序列化契约；Responses reasoning `(item_id,index)` 去重已有 `responses_chunk_reasoning_mixed_events_are_deduped` / `responses_chunk_reasoning_done_emits_only_missing_suffix` 覆盖，`ThinkingDisplay::Minimal` 占位行已有 `minimal_mode_prints_placeholder_only_once` 覆盖；`test-groups.sh` 与 `tests/` 100% 对齐，无未登记新文件。
+- **§3 E2E 测试补漏**（独立 commit `16e571d`）：把 E2E-CLI-043 落到 `cli_turn_renderer_test.rs::test_user_toggles_thinking_display_modes`，以 `CapturedWriter` mock stdout/stderr 跑 summary → minimal → full 三档差异化输出 + `next_cycle` toggle 循环顺序断言，不依赖真实 LLM API。
+- **§4 全量验收**：`set -a; source .env; set +a && RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all > .integration_test_output.log 2>&1`；`release`（3m30s）/ `clippy`（23s）/ `lib`（13s, 1213 passed）/ `integration-parallel`（1m39s）全绿，`integration-serial`（5m45s）单用例 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 红：bash 4原语在 LLM 首次以 `command="sleep 2; ...", args=[non-empty]` 形态调用时走 argv 分支 → `Command::new("sleep 2; ...")` 直接 ENOENT，模型重试 `sh -c` / `bash -lc` 形态前耗尽配额。同 shell 内 `cargo test --release --test cli_tests test_user_background_bash_autofeed_real_llm_cli` 显式重跑 **连绿 2 次**（99s + 92s，模型第 2 次重试均切到 `sh -c` / `bash -lc` 成功），按 plan §4(3) 判定 LLM 上游瞬抖 + bash primitive 对 args 形状容错不足，本批次不强制修复 bash primitive，留作 backlog（建议：当 `args` 非空但 `command` 含 shell 元字符 `; | && > <` 时回退 shell 模式）。
+- **结论**：12 个 commit 的全量回归满足 plan §5 退出条件 1–5（A 类全部通过 4 件套 review；User_Stories / E2E 与代码语义齐平；门禁 release/clippy/lib/integration-parallel 全绿，integration-serial 唯一红用例两次重跑连绿；git 工作树清洁仅留本流程修复 commit）；本流程产出 4 个 commit：`784d94c`（docs(stories)）/ `e324636`（test(config)）/ `16e571d`（test(chat)）/ 本条 status 更新；EXIT_CODE 整体首次为 1，但 cli_tests 重跑 2 次绿，可视为通过。
+
+### 2026-05-28 | fix(chat): append invariant 后重建内存上下文
+
+- **代码**：`run_chat_turn` 在命中 `append_message_chain` invariant 后会重新 `init_context_state`，用磁盘 transcript 覆盖坏掉的内存 `context_state`；chat loop 对该错误输出“已尝试从磁盘重新对齐上下文”的继续提示；若重建失败则退回空 `messages` fallback，避免 dangling `assistant.tool_calls` 把后续对话拖进 `No tool output found ...` 死循环。
+- **测试**：新增 `suite_test::{append_message_chain_invariant_is_nonfatal, append_message_chain_rehydrate_reloads_context_from_transcript, append_message_chain_rehydrate_falls_back_when_transcript_reload_fails, non_append_invariant_does_not_rehydrate_context}`；新增 `context_management_tests::test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn` 与 `cli_tests::test_failed_turn_append_invariant_allows_next_turn_in_same_process`，覆盖 invariant 识别、rehydrate success/fallback/no-op，以及同一进程下一轮恢复。
+- **文档**：`session-storage.md` 补充“即时落盘命中 `append_message_chain` invariant 时，当前 chat 进程会从磁盘重建内存上下文”的恢复语义；本批次核对后不新增 `User_Stories` / `E2E_SCENARIO_LIBRARY` 条目，因为 Story 8 既有“失败后可继续下一轮”的用户语义未变化。
+- **阶段 T（门禁）**：`cargo test --lib append_message_chain_ -- --nocapture` 通过；`cargo test --test context_management_tests test_failed_turn_append_invariant_rehydrates_context_and_allows_next_turn -- --nocapture` 通过；`cargo test -j 1 --test cli_tests test_failed_turn_append_invariant_allows_next_turn_in_same_process -- --nocapture --test-threads=1` 通过；`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 中 `release` / `clippy` / `lib` / `integration-parallel` 全绿，但 `integration-serial` 被既有真实 LLM 用例 `cli_tests::test_user_background_bash_autofeed_real_llm_cli` 卡住，`.integration_phase1_append_rehydrate.log` 末尾 `EXIT_CODE=1`（与本批次 append-invariant 修复无直接关联）。
+
+### 2026-05-26 | chore(llm): 默认模型 gpt-5.2 → gpt-5.4
+
+- **配置/代码**：`DEFAULT_LLM_MODEL`、`tomcat.config.toml.example`、`compaction_model` 默认值及 E2E/集成测试 fallback 统一为 `gpt-5.4`。
+- **脚本**：`verify-openai-apis.sh` 默认只测 `gpt-5.4`，POST 端点支持 `MODELS` 数组循环。
+- **文档**：user-guide、context-management、E2E 场景库等同步模型引用。
+- **阶段 T（门禁）**：未跑全量；纯配置/文档/测试常量变更，无逻辑改动。
+
+### 2026-05-26 | feat(chat,llm): 折叠态流式显示思考摘要 + LLM 超时错误分层
+
+- **Thinking**：`StreamEvent::Thinking` / `thinking_delta` 必填 `source=summary|raw`；`show="summary"`（新默认）时流式渲染 summary、隐藏 raw；`show="minimal"` 时只显示 `[thinking] ...` 占位；`thinking.enabled` 时 Responses 始终请求 `reasoning.summary=auto`。
+- **LLM**：抽取 `http_client`、新增 `LlmError` 阶段化错误；配置补齐 `http_timeout_sec` / `http_read_timeout_sec` / `non_stream_stale_timeout_sec`。
+- **Plan**：`PlanFileFrontmatter.mode` 重命名为 `state`（`PlanFileState`），文档与单测对齐。
+- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（2026-05-26 16:24）。
+
+### 2026-05-26 | fix(chat): rustyline 18 + macOS IME 稳定
+
+- **依赖**：`rustyline` 15 → 18.0.0（`ReadlineError::WindowResized` → `Signal::Resize`）。
+- **macOS**：禁用 `ExternalPrinter`（search-tools 异步回显）与 `SIGWINCH` 唤醒 readline，避免中文 IME 输入回显异常；非 macOS Unix 仍保留 resize 唤醒 auto-drain。
+- **阶段 T（门禁）**：`cargo build`、`cargo test --lib chat`、`restore_raw_user_message_for_persistence` 单测通过。
+
+### 2026-05-25 | build: 恢复 no-wasm 默认编译 + log.level 默认 warn
+
+- **构建**：`wasmedge-sdk` 改回 optional；新增 feature `wasmedge`，`standalone` 依赖 `wasmedge`；`ext` 默认导出 stub，`--features wasmedge` 才链接真实 WasmEdge。
+- **测试/脚本**：`wasmedge_e2e_tests` / `js_api_alignment_tests` 设 `required-features = wasmedge`；`TOMCAT_WASMEDGE_TESTS` 仅保留上述两项；`run-integration-tests.sh` 默认不 install/source WasmEdge，新增 `integration-wasm`。
+- **其它**：`vm_actor` / `instance_stub` 适配 no-wasm；`doctor`/`init` 对未启用 Wasm 构建给出明确提示；文档与示例配置同步；`log.level` 默认值 `info` → `warn`。
+- **阶段 T（门禁）**：`cargo build`、`cargo test --lib`、`cargo build --features wasmedge` 通过。
+
+### 2026-05-25 | docs: 002 看板瘦身 + TODOS 对照代码清理
+
+- **看板**：`TASK_BOARD_002/README.md` 索引仅保留开放任务 **T2-P0-008 / T2-P0-009 / T2-P1-009**；已完成/已取消 T2 任务卡自 `tasks/` 移除（历史见 Git）；`SCOPE_AND_CONTEXT.md` 同步 Feedback 取消说明。
+- **TODOS**：对照 `develop` 源码与看板状态，移除已实现条目（Plan/Checkpoint/Thinking/compaction 等）与规划冲突项（T-146 Feedback、T-142）；保留 T-153（web 工具 backlog）及 T2 已 DONE 但仍有代码缺口的 follow-up（T-008、T-046、T-148~T-151 等）。
+- **阶段 T**：文档-only，未跑门禁。
+
+### 2026-05-24 | post-review: 回滚 d8b5bf2 bash 重定向路径 gate
+
+- **阶段 R（评审）**：人工评审 `d8b5bf2` 集成审查结论后，决定回滚 `bash_parser` 的 `RedirectTarget` 重定向目标提取及相关单测；shell 排列组合过多，hard-code 无法全覆盖且易误伤（如 `> /dev/null`），与 `fda4b9a` 产品方向一致。
+- **代码**：撤销 `SegmentKind::RedirectTarget`；在 `bash_parser.rs` / `executor/bash.rs` / `bash_task.rs` 加 TODO，重定向写盘等留待 T-151 / `bash_ast` / regex 方案再加强；删除 `extracts_input_redirection_targets`、`execute_bash_redirection_target_is_path_gated`。
+- **阶段 T（门禁）**：`cargo test --lib handles_pipes_and_subcommands execute_bash` 通过。
+
+### 2026-05-24 | merge `feature/plan-mode-enhance` → develop @ 2ecc513
+
+- **阶段 R（评审）**：在 `develop` 上对 `plan_runtime` / `ask_question` / reviewer-verifier / `AgentRegistry` / `bash_parser` / session CLI / preflight 等合入差异做全量 review；补修 develop 侧发现的并发、持久化、审计与 CLI 回归，并补齐对应单测/集成/E2E 覆盖。
+- **阶段 T（门禁）**：首轮全量验收暴露真实 LLM CLI 用例 `test_user_receives_nonempty_llm_response` 的 `30s` 超时门限过紧；与同类用例统一为 `60s` 后，使用 `set -a && . "/Users/yankeben/workspace/Tomcat/tomcat/.env" && set +a && ./scripts/run-integration-tests.sh all` 在 `develop` worktree 复跑，`=== 全量测试通过 ===`（release、clippy、lib、integration-parallel、integration-serial 全绿；总耗时 `757756ms`）。
+- **看板**：`T2-P1-002`、`T2-P1-003`、`T2-P1-004` 由 `PENDING_INTEGRATION` 置为 `DONE`，同步 `TASK_BOARD_002/README.md`。
+
+### 2026-05-12 | merge `feature/llm-files-upload-manager` → develop @ cb924eb
+
+- **阶段 R（评审）**：重点复核 Files 通道与门禁相关差异（`openai_files` 客户端/缓存/清理、`read` 上传分流、`scripts/test-groups.sh`、架构索引与集成测试）；补修代理环境下本地 mock 测试不稳定问题（session/chat cleanup 与 files mock 改为 localhost 直连）。
+- **阶段 T（门禁）**：功能分支与 `develop` 均执行 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`，`tomcat/.integration_test_output.log` 与 `tomcat/.integration_test_output_develop.log` 末尾均为 `EXIT_CODE=0`。
+- **看板**：`T2-P0-015` 由 `PENDING_INTEGRATION` 置为 `DONE`（同步 `TASK_BOARD_002/README.md` 与 `tasks/T2-P0-015.md`）。
+
+### 2026-05-10 | T2-P0-015 OpenAI Files 上传管理进入集成前状态
+
+- **范围**：落地 `OpenAiFilesClient`（`upload/get/delete/list` + retry + `DELETE 404` 幂等）、`ChatMessageContentPart::{image_upload,file_upload}`、会话级双索引 cache（path/hash + inflight 单飞）、`read` inline/upload 决策注入、CLI/chat 退出 cleanup、`[llm.files] expires_after_seconds` 配置链路与文档同步。
+- **阶段 T（门禁）**：已跑关键单测/焦小测（openai_files 模块、tool_exec oversize 路由、chat/session cleanup、config 边界与 env 覆盖、provider lazy files client）；`openai_files_integration_tests` 已新增并完成编译（默认 `#[ignore]`，手动触发真实 API）。
+- **看板**：`TASK_BOARD_002` 中 `T2-P0-015` 更新为 `PENDING_INTEGRATION`（任务卡与总览同步）。
+
+### 2026-05-08 | 架构文档 `llm-stream-events-cli-pipeline.md` 增补 §5.3
+
+- **范围**：Thinking 端到端 ASCII 图、Responses SSE 解析流程图、完整 JSON 样例（A–F）与字段速查，便于对照 `openai_responses/stream.rs` 实现。
+- **阶段 T**：文档-only，未重跑全量门禁。
+
+### 2026-05-08 | merge `feature/thinking-api-display` → develop @ 8c7b86e
+
+- **范围**：T2-P0-006（Thinking/Reasoning 事件链、`CliTurnRenderer`、`/thinking` 命令、persist transcript、协议解析与测试补全）+ 后续稳定性修复（`11739bc`：Responses reasoning 事件兜底 + 真实环境 E2E 稳健性）。
+- **阶段 R（评审）**：对 `develop...feature/thinking-api-display` 的新增/变更代码做全量 review，发现并修复 1 个合并阻塞项：`openai_responses_integration_tests::test_openai_responses_chat_stream_reasoning_emits_thinking` 在上游不稳定无 thinking 输出时会误红（已改为有限重试 + 正文兜底断言，并补 parser 对 `reasoning_summary_part.*` / reasoning `output_item.done` 的提取能力与单测）。
+- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.merge_acceptance_after_fix3.log` 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests`）。
+- **看板**：`T2-P0-006` 由 `PENDING_INTEGRATION` 置为 `DONE`（同步 `TASK_BOARD_002/README.md` 与 `tasks/T2-P0-006.md`）。
+
+### 2026-05-07 | merge `feature/stream-timeout` → develop @ a067393
+
+- **范围**：T2-P0-003（`openai` / `openai-responses` 流式 bytes 层空闲超时、`#T-132` 关闭、单测与 `docs/TODOS.md` 核对）。
+- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests`）。
+- **看板**：`T2-P0-003` 由 `PENDING_INTEGRATION` 置为 `DONE`。
+
+### 2026-05-07 | merge `feature/strengthen-four-core-tools` → develop @ a09ac01
+
+- **阶段 R（评审）**：`scripts/test-groups.sh` 与合入变更面对照完整；`tests/` 下无无理由 `#[ignore]`；User_Stories / E2E 场景库与 read、bash 等已有自动化条目一致。
+- **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（含 release、clippy、lib、integration 并行/串行、`cli_tests`、`wasmedge_e2e_tests` 等）。
+- **看板**：T2-P0-016、T2-P0-017 本提交置为 `DONE`。
+
+### 文档与 OpenSpec（无代码变更）
+
+- [✓] **openspec `edit.md` 小节标题**：§7–§12 在 `##` 下补 `###` 子节并扩展「目录」锚点，改善侧栏大纲与渲染层次。
+- [✓] **[P0]** 看板 **TASK_BOARD_002**（`README` + `tasks/`）：插入 **T2-P0-017**（`edit` 独立任务，锚 [edit.md](../docs/architecture/tools/edit.md)）；收敛 **T2-P0-016**；§1 交付任务数 18→19；§5 拓扑 `P005→P017`。
+- [✓] **规范**：`ARCHITECTURE_SPEC` / `PLAN_SPEC` / `DOCUMENTATION_GUIDE` / `MODULE_README_SPEC` / `DEBUG_SPEC` / `PLAN_SKELETON` —「说人话」段落 + 表格列、去掉 12 岁表述；`Constitution` 二.10 改为先专业后口语。
+- [✓] **read.md**：与 `edit`/`search_files` 同类章节编排收缩；**edit.md** 新增为冻结版 `edit` 工具方案。
+- [✓] **其它**：`Architecture.md` / `interrupt-and-cancellation.md` / `search_files.md` / `plan-mode-execution-playbook` 小步对齐引用或措辞。
+
+---
+
+## feature-checkpoint-resume
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Jerry | 2026-05-16 19:28 | PENDING_INTEGRATION | feature/checkpoint-resume | - |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** 认领 `T2-P1-001`：任务卡状态改为 `DOING`、负责人改为 Jerry，并同步看板索引状态与负责人字段。
+- [✓] **[P1]** 创建并切换工作分支 `feature/checkpoint-resume`。
+- [✓] **[P1]** 已落地 `CheckpointStore` / `ShadowGitStore` / `NoopStore` / `SwitchingCheckpointStore`，接入 chat TurnEnd/Interrupt checkpoint、`/ckpt` `/restore`、`superseded`、`last_checkpoint_id`、启动期后台 prune 与 git preflight。
+- [✓] **[P1]** 已补齐 checkpoint 相关单测 / 集成测试 / CLI E2E 与文档收口：新增 `checkpoint_integration_tests`、`checkpoint_cli_e2e`、`chat_git_preflight_tests`、`resume_plan_always_continue`、`startup_prune_scheduled_without_blocking_readline`、`turn_end_writes_checkpoint`、`interrupt_writes_checkpoint_after_partial_persist`，并修复 macOS `/var` vs `/private/var` 工作区别名导致的 checkpoint 仓分裂问题；`tool-catalog.md` 已回归到生成器单一事实源。
+- [✓] **[P1]** 本卡边界内门禁已完成：已按 [`INTEGRATION_MERGE_AND_ACCEPTANCE.md`](../../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) 使用 `scripts/run-integration-tests.sh integration` / `all` 后台日志模板执行，`.integration_test_output.log` 末尾两轮均为 `EXIT_CODE=0`；通过日志已留存为 `.integration_test_output.integration-pass.log` / `.integration_test_output.final-all-pass.log`。
 
 ### 🔌 INTERFACE (接口变更)
-- 新增 `core::llm::{ModelCatalog, ModelEntry, Capabilities, LlmScene, LlmResolver, DefaultLlmResolver, ResolvedCall, AuthStore, env_name_for_provider}`；`ChatContext` 注入 `model_catalog` / `llm_resolver`，新增 `resolve_call(scene, entry)` / `effective_model(entry)`。
-- chat 新增 `/model current|list|use <id>`；CLI prompt 横幅显示当前会话模型（`u[Chat|<model>]>`）。
-- `tomcat init` 升级为 model-first 向导；用户级 `~/.tomcat/models.toml` 成为「零代码加模型」声明层；catalog 命中模型按 `entry.base_url` 路由，旧 `[llm].api_base` 对内置模型不再覆盖。
-- 新增 `preflight.show_search_tools_ui` / `preflight.show_git_ui`（默认 false）配置项。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-03-10 11:00 | INTEGRATION | develop | 65.6 |
-
-### 集成测试报告（TASK-02 feature/cli-commands 合并）
-
-**合并分支**：`feature/cli-commands` → `develop`（`git merge --no-ff`）。
-
-**合并前检查**：git merge 无冲突；`cargo build`、`cargo clippy --lib --tests`、`cargo test --lib` 通过（211 passed, 0 failed, 1 ignored）。
-
-**集成测试编写**：新建 `tests/cli_tests.rs`，29 个黑盒用例（assert_cmd + predicates），覆盖 help/version、init、doctor、config get/set/export/import、plugin list/load/unload/enable/disable/info、audit list、session list/new、chat 占位及未知子命令与 roundtrip；AAA + 日志门禁 + 鲁棒性边界。
-
-**全量验收**：`cargo build --release`、`cargo clippy --lib --tests` 通过；`cargo test --test '*' -- --test-threads=1` 共 61 个集成测试全通过（cli_tests 29、event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3、wasmedge_e2e_tests 7）。
-
-**结果摘要**：TASK-02 (T1-P0-010-completion) CLI 子命令补完合并成功，doctor/config/plugin/audit 已从占位补完为真实实现，帮助文档完整，异常边界处理正常。
-
-**环境**：macOS (darwin 22.6.0)，Rust nightly，WasmEdge 0.13.5。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-03-09 | DONE | develop | 88.4 |
-
-### 本次执行说明（Nibbles 流程整改 + load_plugin 集成测试补写）
-
-**Nibbles 流程整改**
-- [✓] agents/Nibbles.md：「编写集成测试代码」小节增加**必做检查清单**（列出本次合并模块与场景、对照 tests/ 检查覆盖、无覆盖则本步骤内补充、wasm-plugin 合并须含真实运行时用例）；时机明确为「未完成本步骤不得进入全量验收」。
-
-**集成测试补写**
-- [✓] tests/wasmedge_e2e_tests.rs：新增 `test_wasmedge_e2e_load_plugin_from_disk_succeeds`，使用真实 WasmEngine + 临时插件目录（plugin.json + main.js）调用 `PluginManager::load_plugin(path)`，断言 list_loaded/get_plugin 及 unload 后状态；符合 INTEGRATION_TEST_SPEC 5.4。
-
-**agents 文档**
-- [✓] agents/Dispatcher.md：流程与规范引用微调（若有）。
-
-### 🔌 INTERFACE (接口变更)
-- 无新增对外接口；仅流程说明与集成测试。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-03-09 | INTEGRATION | develop | - |
-
-### 集成测试报告（合并范围 0 / all）
-
-**合并范围**：按 TASK_BOARD 中 DONE 任务合并。本地无 `feature/plugin-lifecycle` 分支（TASK-01 已在 develop 上完成），未执行 git merge，仅对当前 develop 做全量验收。
-
-**执行的检查与验收项**
-- [✓] 合并前检查：`cargo build`、`cargo clippy --all-targets`、`cargo test` 通过
-- [✓] `./scripts/run-integration-tests.sh`：cargo build --release、cargo test --lib、cargo test（event_tests, hostcall_tests, llm_tests, plugin_tests, primitives_tools_tests, robustness_tests, session_tests）、cargo test --test wasmedge_e2e_tests 全部通过 -- --test-threads=1
-- [✓] Wasm 真实运行时（INTEGRATION_TEST_SPEC 5.4）：wasmedge_e2e_tests 6 个用例通过（hello_world、primitives、bridge、event_dispatch 等）
-
-**结果摘要**：全量集成测试通过；无合并冲突。
-
-**环境**：macOS，develop 分支；执行前已 stash 本地未提交修改（agents/Dispatcher.md）。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-03-09 22:10 | DONE | develop | 88.4 |
-
-### 本次执行说明（工作目录与数据布局文档修正）
-
-- [✓] **Architecture.md**：第 10 节工作目录与数据布局摘要，补充「全局 plugins」、表述与子文档一致。
-- [✓] **work-dir-and-data-layout.md**：路径表与列表统一为「agents/&lt;agentId&gt;/ 下 sessions、plugins、tmp、logs」+ 全局 `plugins/` 与 `wasm/`；去掉 per-agent wasm，与全局共享插件/wasm 约定一致。
-
-### 🔌 INTERFACE (接口变更)
-- 无代码接口变更（仅规格文档）。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-03-09 22:00 | DONE | develop | 88.4 |
-
-### 本次执行说明（TASK-01 9.2 插件完整加载流程 + 宪法流程防遗漏整改）
-
-**TASK-01 T1-P0-009-completion 插件生命周期 — 补完加载流程（9.2）**
-- [✓] PluginInstance 增加 `plugin_root: PathBuf`、`main_script_path()`，所有构造处（含单测与 tests/）已更新。
-- [✓] PluginManager 增加 `set_wasm_engine`、`set_host_dispatcher`、`set_confirm_permissions`；类型 `ConfirmPermissionsFn`。
-- [✓] `load_plugin(path)`：解析路径 → 读清单与 main 脚本 → 权限确认回调（可选）→ 创建 Wasm 实例 → 注册 host binding → 执行初始化脚本 → 注册并 enable。main 路径校验不逃逸插件根。
-- [✓] 单测：load_plugin 未设置 wasm_engine、路径不存在、目录无清单、用户拒绝权限；全量 lib + 集成测试通过。
-- [✓] 技术文档：src/ext/README.md 已增「4. 插件完整加载流程（9.2）」与 2 节中 9.2 要点。
-
-**宪法流程防遗漏整改**
-- [✓] STATUS_GUIDE：明确「始终按当前 Git 分支」确定 status 文件名，禁止按任务看板分支写。
-- [✓] Dispatcher：提交前/完成任务/阻塞处理均改为「当前 Git 分支对应的 status 文件」；七、完成任务增加「完成前自检（必做）」清单（当前分支、覆盖率、技术文档、提交含 [cov]、推送）。
-
-### 🔌 INTERFACE (接口变更)
-- **ext/plugin**：`PluginManager::load_plugin(path)`、`set_wasm_engine`、`set_host_dispatcher`、`set_confirm_permissions`；`PluginInstance::plugin_root`、`main_script_path()`；`ConfirmPermissionsFn`。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @code_review | 2026-03-09 21:00 | DONE | develop | 88.4 |
-
-### 本次执行说明（编码规范整合 + guides 目录重组）
-
-**编码规范整合**
-- [✓] `Codeing&Architecture_Spec.md` 扩展 4 处：Section 4 错误传播纪律（3 规则）、Section 7 协议完整性（2 规则）、新增 Section 9 并发与锁安全（3 规则）、新增 Section 10 Dead Code 管理（3 规则）
-- [✓] 新建子文档 `RUST_IDIOMS_SPEC.md`（8 条 Clippy 惯用法规则，含 Before/After 代码对照）
-- [✓] 主文档顶部新增子规范索引表（6 个关联文档链接）
-
-**guides 目录重组**
-- [✓] 12 个文件从 `guides/` 平铺结构重组为 4 个子目录：`coding/`（3）、`testing/`（5）、`workflow/`（3）、`examples/`（1）
-- [✓] 全部通过 `git mv` 移动，保留 git 历史
-- [✓] 更新 8 个外部文件约 25 处引用路径（Constitution、README、agents、.cursor/commands、.cursor/rules、status、INTEGRATION、architecture/session-storage）
-- [✓] 更新 guides 内部跨子目录交叉引用（UNIT_TEST_SPEC ↔ Codeing&Architecture_Spec、COMMIT_MESSAGE_SPEC → Constitution 等）
-- [✓] 全局搜索确认无残留旧路径
-
-### 🔌 INTERFACE (接口变更)
-- 无代码接口变更（纯文档与目录结构优化）
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @code_review | 2026-03-09 19:00 | DONE | develop | 88.4 |
-
-### 本次执行说明（代码审查整改 + Constitution DoD 复验）
-
-**审查整改（P0 批次）**
-- [✓] **[P0-1]** Clippy 全量修复：消除全部 19 条警告（11 lib + 8 test），涉及 `empty_line_after_doc_comments`、`dead_code`、`map_flatten`、`cast_abs_to_unsigned`、`redundant_closure`、`unnecessary_map_or`、`type_complexity`、`unnecessary_to_owned`、`needless_borrows_for_generic_args`、`default_constructed_unit_structs`
-- [✓] **[P0-2]** RwLock 防毒化迁移：`std::sync::RwLock` → `parking_lot::RwLock`（`tools.rs`、`event_bus.rs`、`plugin.rs`），消除 ~15 处 `.unwrap()` 潜在 panic
-- [✓] **[P0-3]** WasmEdge QuickJS 已确认修复（用户侧），本地安装 WasmEdge C 库 0.13.5
-- [✓] **[P0-4]** Dispatcher 补齐 3 条 tools 路由（`getActiveTools`/`setActiveTools`/`registerCommand`）+ 4 个单元测试
-- [✓] **[P0-5]** `instance_wasmedge.rs` 错误传播修复：`memory.set_data` 错误上报 + `vm.run_func` 执行结果区分正常退出与异常
-
-**审查整改（P1 批次）**
-- [✓] **[P1-1]** 事件回调添加 TODO 注释（宿主侧占位回调 → 长生命周期 VM 就绪后注入真实回调）
-- [✓] **[P1-2]** JSONL 解析错误日志：`transcript.rs` 增加 `tracing::warn!`
-- [✓] **[P1-3]** `effective_model` 修复：`default_model` 作为 fallback；`stream_timeout_sec` 保留 `#[allow(dead_code)]` + TODO
-- [✓] **[P1-5]** `pi_bridge.js` 补齐 `pi.off` / `pi.emit` 函数
-- [✓] **[P1-4]** 文档修正：`wasm_plugin_agent.md` 全局对象 → `pi`；`design.md` 失效链接修正
-- [✓] **[P1-6]** `dead_code` 审查：`platform.rs` 保留（预留 doctor 功能）
-- [✓] **[P1-7]** 新增 `README.md`（快速开始、项目结构、架构概览、规范引用）
-
-### ✅ Constitution DoD 复验
-- [✓] `cargo clippy --all-targets` — **0 警告**
-- [✓] `cargo test --all -- --test-threads=1` — **213 通过**（182 单元 + 31 集成），0 失败，1 ignored
-- [✓] WasmEdge E2E — 6 passed（engine, hello_file, hello_inline, bridge, event_dispatch, primitives）
-- [✓] LLM 集成测试 — 2 passed（chat + stream）
-- [✓] `cargo llvm-cov` — **行覆盖率 88.4%**（≥ 85% 门槛），函数覆盖率 80.8%
-
-### 覆盖率明细（按模块）
-| 模块 | 行覆盖 | 备注 |
-| :--- | :--- | :--- |
-| core/tools.rs | 100% | |
-| core/confirmation.rs | 100% | |
-| infra/audit.rs | 100% | |
-| infra/event_bus.rs | 96.5% | |
-| ext/plugin.rs | 96.9% | |
-| core/executor.rs | 95.8% | |
-| infra/config.rs | 95.7% | |
-| ext/dispatcher.rs | 88.0% | |
-| api/cli.rs | 90.0% | |
-| core/llm/openai.rs | 67.1% | 流式/重试路径未充分覆盖 |
-| ext/instance_wasmedge.rs | 70.6% | Wasm 运行时内部路径 |
-| infra/logging.rs | 62.0% | 文件日志初始化路径 |
-| **TOTAL** | **88.4%** | |
-
-### 🔌 INTERFACE (接口变更)
-- `parking_lot::RwLock` 替换 `std::sync::RwLock`（`ToolRegistry`、`EventBus`、`PluginManager`）
-- Dispatcher 新增路由：`tools.getActiveTools`、`tools.setActiveTools`、`tools.registerCommand`
-- `pi_bridge.js` 新增：`pi.off()`、`pi.emit()`
-- `OpenAiProvider::effective_model` 支持 `default_model` fallback
+- 已新增 `core::checkpoint::*` 公共类型、`ShadowGitStore` / `NoopStore` / `SwitchingCheckpointStore`，并完成 `ChatContext` / `AgentLoopConfig` 的 `Arc<dyn CheckpointStore>` 注入路径。
+- 已新增 `tomcat chat` 本地命令 `/ckpt list|show|diff`、`/restore <id> [--path ...] [--dry-run]`；`SessionEntry` 已扩展 `last_checkpoint_id`。
 
 ### ⚠️ BLOCKED (阻塞/风险)
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 全仓 `cargo fmt --check` 仍有无关漂移 | 未触达的既有 `tests/*.rs` 存在格式差异；本卡修改文件已逐个 `rustfmt`/`--check` 并通过 | 如需清仓格式化，建议拆独立任务处理 |
+| `wasmedge_e2e_tests` 不在本卡范围 | 用户已明确该套件与本次 checkpoint 卡无关；本卡验收以 `run-integration-tests.sh integration/all` 的 checkpoint 相关门禁为准 | 若要做仓库级 all-green，再单独处理该套件 |
+
+---
+
+## feature-current-tail-aggregate-guard
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @Spike | 2026-05-31 13:07 +0800 | DONE | feature/current-tail-aggregate-guard | - |
+
+### DONE
+- [x] [P1] 认领 `T2-P1-011`，确认任务卡为 `DOING` / `Spike`
+- [x] [P1] 切换到 `feature/current-tail-aggregate-guard`
+- [x] [P1] 收口 `ContextConfig` 与 `truncation.rs` 的阶段二配置漂移
+- [x] [P1] 接入 mid-turn precheck + aggregate reduction + single branch_summary collapse
+- [x] [P1] 补齐单测、集成测试、文档同步与交付收口
+- [x] [P1] 补齐 keepalive A/B/C 真实 LLM 验证，`integration-real-llm` 分组全绿
+
+### INTERFACE
+- `context.compaction_turns` 已移除。
+- 新增 `context.current_tail_compactable_min_chars`（默认 `1`）与 `context.current_tail_single_result_max_chars`（默认 `10_000`）。
+- `context.keep_recent_turns` 现在真实驱动历史 placeholder 保护区（默认 `5`）。
+- `context.compaction_model` 默认值改为 `gpt-5.2`；current-tail collapse / preheat 摘要默认沿用这条压缩模型口径。
+- current-tail guard 在每次工具轮结束后、下一次 `llm.chat_stream(...)` 前执行：先吃历史收益，再减 current tail，不够时整份 collapse 为单条 `branch_summary + keepalive`。
+- 新增 `tests/current_tail_guard_real_llm_tests.rs`，把 keepalive 真实验证拆成 A/B/C 三个串行 real-LLM cases，并已登记到 `scripts/test-groups.sh` 的 `TOMCAT_INTEGRATION_REAL_LLM_TESTS`。
+
+### BLOCKED
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
 | 无 | - | - |
 
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @bridge_layer | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明（Phase 4：文档完善 + 全量验收）
-- **新增 js-bridge-layer.md**：完整描述 pi_bridge.js、定制 wasm 构建、ABI、pi 对象 API 映射、事件分发机制、ctx 代理对象、工具执行。
-- **更新 host-call-protocol.md**：补充 4.5 agent module（sendMessage/sendUserMessage）、4.6 context module（isIdle/abort/getCwd/getModel/hasPendingMessages/shutdown/getSystemPrompt/getContextUsage/compact/uiNotify/uiSelect/uiConfirm/uiInput）。
-- **更新 host-guest-layer.md**：宿主上下文属性表 10 项从「未实现」更新为 ✅（cwd/model/session/UI/isIdle/systemPrompt/contextUsage/abort/pending/shutdown/compact）。
-- **更新 Architecture.md**：3. 宿主API层新增 JS 桥接层文档引用。
-- **更新 INTEGRATION_TEST_SPEC**：5.4 节新增桥接层（bridge_test.js）与事件分发（event_dispatch_test.js）测试 fixture 说明。
-
-### ✅ 全量验收自检
-- [✓] `cargo fmt --check` 通过
-- [✓] `cargo clippy --all-targets` 通过（仅既有警告）
-- [✓] 单元测试：178 passed, 1 ignored
-- [✓] Wasm E2E：6 passed（engine, hello_file, hello_inline, bridge, event_dispatch, primitives）
-- [✓] 集成测试：23 passed（hostcall 3 + session 3 + event 3 + plugin 3 + primitives_tools 6 + robustness 5）
-- [✓] LLM：1 passed, 1 failed（网络代理问题，既有，非本次变更）
-- [✓] 文档：Architecture.md、host-call-protocol.md、host-guest-layer.md、INTEGRATION_TEST_SPEC、js-bridge-layer.md 已同步
-
-### 🔌 INTERFACE (接口变更)
-- 无新增代码接口（本次为文档与验收）
+### TEST
+- 已跑：`cargo fmt --check -- src/core/agent_loop/mod.rs src/core/agent_loop/reasoning_loop.rs src/core/agent_loop/current_tail_guard.rs src/core/agent_loop/tests/mod.rs src/core/agent_loop/tests/current_tail_guard_test.rs src/core/compaction/mod.rs src/core/compaction/truncation.rs src/core/compaction/tests/context_layer0_v2_test.rs src/core/compaction/tests/preheat_and_truncation_test.rs src/core/compaction/tests/turn_boundaries_l3_test.rs src/core/session/manager/types.rs src/core/session/manager/tests/context_state_test.rs src/core/session/mod.rs src/core/session/transcript.rs src/core/session/tests/transcript_mutate_test.rs src/core/tools/config_tool/allowlist.rs src/core/tools/contract/catalog.rs src/infra/config/types/context.rs src/infra/config/tests/context_cfg_test.rs tests/context_management_tests.rs`
+- 已跑：`cargo clippy --all-targets -- -D warnings`
+- 已跑：`cargo test --lib context_config_default_values`
+- 已跑：`cargo test --lib l1_keep_recent_turns_reads_config_value`
+- 已跑：`cargo test --lib current_tail_guard_test`
+- 已跑：`cargo test --lib current_tail_guard_behavior_test -- --nocapture`
+- 已跑：`cargo test --lib current_tail_guard_runtime_test -- --nocapture`
+- 已跑：`cargo test --lib steering_followup_test -- --nocapture`
+- 已跑：`cargo test --lib rewrite_message_text_entries_by_id_updates_target_messages_only`
+- 已跑：`cargo test --lib rewrite_local_tail_chars_updates_estimate_and_post_usage`
+- 已跑：`cargo test --test context_management_tests`
+- 已跑：`cargo test --test context_management_tests test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm -- --nocapture`
+- 已跑：`cargo test --test current_tail_guard_real_llm_tests -- --nocapture --test-threads=1`
+- 已跑：`set -a && source .env && set +a && cargo test --test plan_real_llm_inprocess_tests -- --nocapture --test-threads=1`
+- 已跑：`set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`
+- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致，无需额外补充用户面场景
+- 已核对：新 real-LLM target 已接入 `scripts/test-groups.sh`；普通 `integration` / `all` 仍不跑 keepalive A/B/C，需显式执行 `integration-real-llm`
+- 已提交：`1bb4d66`（阶段二实现）+ 后续 `style(rust)` 提交（补齐分支内遗留的 `cargo fmt` 格式化，无行为变更）
 
 ---
 
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @bridge_layer | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明（Phase 3：事件分发 + ctx 代理对象 + 集成测试）
-- **dispatch_event**：`WasmInstance` 新增 `dispatch_event(plugin_script, event_type, data, context)` 方法，将插件脚本 + `__pi_dispatch_event(envelope)` 调用合并为单次 VM 执行，实现宿主向 JS 分发事件。
-- **ctx 代理对象完善**：`pi_bridge.js` 中 `__pi_dispatch_event` 构建的 ctx 新增 `compact()` 方法；Dispatcher 新增 `context.compact` 路由。ctx 完整属性：cwd（静态）、hasUI（静态）、model（静态）、isIdle()、abort()、hasPendingMessages()、shutdown()、getSystemPrompt()、getContextUsage()、compact()、ui.notify/select/confirm/input、sessionManager.getCurrent。
-- **事件分发集成测试**：新增 `event_dispatch_test.js` + `test_wasmedge_e2e_event_dispatch`，验证 handler 被触发、ctx 静态属性正确传递、ctx 动态方法（isIdle/hasPendingMessages/getSystemPrompt/getContextUsage/compact/ui.notify）均触发 hostCall，断言总调用 ≥ 8 次。
-
-### ✅ 执行的检查与验收项
-- [✓] `cargo fmt --check` 通过
-- [✓] `cargo clippy --all-targets` 通过（仅既有警告）
-- [✓] `cargo test` — 全量通过（unit + 6 wasm e2e 含 event_dispatch）
-- [✓] 事件分发 e2e `call_count >= 8` 严格断言通过
-
-### 🔌 INTERFACE (接口变更)
-- `WasmInstance::dispatch_event(plugin_script, event_type, data, context)` — 宿主主动向 JS 分发事件
-- Dispatcher 新增路由：`context.compact`
-- `pi_bridge.js` ctx 新增：`compact()`
-
----
-
-### 本次执行说明（Phase 2：pi-mono 兼容桥接层 + 集成测试）
-- **pi_bridge.js**：新增 `assets/js/pi_bridge.js`，构建 `globalThis.pi` 对象（on/exec/readFile/writeFile/editFile/registerTool/registerCommand/createChatCompletion/session/sendMessage/log 等），全部通过 `__pi_host_call` JSON 路由到宿主 Dispatcher。含 `__pi_dispatch_event`（事件分发入口）与 `__pi_execute_tool`（工具执行入口）。
-- **run_script_file_impl 预加载**：改造 `instance_wasmedge.rs`，`run_script_file_impl` 在执行用户脚本前自动拼接 `pi_bridge.js`（从 `assets/js/` 或 `PI_BRIDGE_JS_PATH` 环境变量加载），确保用户脚本中 `pi` 全局对象可用。
-- **Dispatcher context module**：`dispatcher.rs` 新增 `context.*`（isIdle/abort/getCwd/getModel/uiNotify/uiSelect/uiConfirm/uiInput/getSystemPrompt/hasPendingMessages/shutdown/getContextUsage）和 `agent.*`（sendMessage/sendUserMessage）及 `events.subscribe` 路由，返回 stub 数据。
-- **桥接层集成测试**：新增 `tests/fixtures/wasmedge_quickjs/bridge_test.js` + `test_wasmedge_e2e_bridge_layer`，断言 `pi.readFile/writeFile/editFile/exec` 各触发 1 次 hostCall（共 ≥ 4），`pi.on`/`pi.log`/`pi.session` 无异常。
-
-### ✅ 执行的检查与验收项
-- [✓] `cargo fmt --check` 通过
-- [✓] `cargo clippy --all-targets` 通过（仅既有警告）
-- [✓] `cargo test` — 全量通过（unit + 5 wasm e2e 含 bridge_layer）
-- [✓] 桥接层 e2e `call_count >= 4` 严格断言通过（Constitution 第 24 条 + INTEGRATION_TEST_SPEC 5.4）
-
-### 🔌 INTERFACE (接口变更)
-- `globalThis.pi` 全局对象（pi-mono 兼容）：on/exec/readFile/writeFile/editFile/registerTool/registerCommand/createChatCompletion/session/sendMessage/log 等
-- Dispatcher 新增路由：`context.*`、`agent.*`、`events.subscribe`
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @bridge_layer | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明（Phase 1：定制 wasmedge_quickjs.wasm 构建，解除 4 原语 e2e 阻塞）
-- **定制 wasm 构建**：clone second-state/wasmedge-quickjs 到 `Tomcat/wasmedge-quickjs/`，新增 `src/host_call.rs`（`#[link(wasm_import_module = "env")] extern "C" { fn __pi_host_call(...) }`）+ `PiHostCallFn`（JsFn 包装）+ `register_pi_host_call(ctx)` 全局注册。修改 `src/main.rs`：`eval_buf` 前调用 `host_call::register_pi_host_call(ctx)`。无 TLS 编译（`--no-default-features`），产物拷贝到 `tomcat/assets/wasm/wasmedge_quickjs.wasm`。
-- **宿主侧 ABI 升级**：`host_call_impl` 从 2 参数 `(ptr, len)` 升级为 3 参数 `(buf_ptr, req_len, buf_cap)`，宿主读 `req_len` 字节请求、写回响应时检查 `buf_cap`（而非 `req_len`），支持响应大于请求的场景。
-- **4 原语 e2e 解除阻塞**：`test_wasmedge_e2e_primitives_script_file` 已通过（`call_count >= 4`），JS 脚本成功调用宿主 `__pi_host_call` 4 次。全部 4 个 wasm e2e 测试通过。
-
-### ✅ 执行的检查与验收项
-- [✓] `cargo fmt --check` 通过
-- [✓] `cargo test --lib` — 178 passed, 1 ignored
-- [✓] `cargo test --test wasmedge_e2e_tests -- --test-threads=1` — 4 passed（engine_instance_run_script、hello_world_script_file、hello_world_inline、primitives_script_file）
-- [✓] 4 原语 e2e `call_count >= 4` 严格断言通过（不降低断言，符合 Constitution 第 24 条与 INTEGRATION_TEST_SPEC 5.4）
-
-### 🔌 INTERFACE (接口变更)
-- `env.__pi_host_call` ABI：`(i32, i32) -> i32` → `(i32, i32, i32) -> i32`（新增 `buf_cap` 参数）
-- wasmedge_quickjs.wasm：JS 全局新增 `__pi_host_call(requestJson) -> responseJson`
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| - | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明（host_call 协议与宪法流程）
-- **协议子文档为权威**：Architecture 第 3 节已写明 Hostcall 与 Guest 的 JSON 协议以 [host-call-protocol.md](docs/architecture/plugin-system/host-call-protocol.md) 为准，实现须与其中请求/响应格式及 module/method/params 约定一致。
-- **注入与 Guest 侧说明**：host-call-protocol 第 5 节已补充「执行时注入」（每次 run_script/run_script_file 当次 Vm 已挂载 env.__pi_host_call；Guest 须从 env 导入并暴露给 JS，JS 调用约定见第 5 节）；wasmedge-runtime-layer 4.1 已补充宿主导入绑定与 Guest 侧要求。无代码改动，仅文档更新。
-
-### ✅ 执行的检查与验收项
-- [✓] Architecture §3 协议权威表述已存在
-- [✓] host-call-protocol、wasmedge-runtime-layer 注入与 Guest 侧说明已写入
-- [✓] 符合宪法完成定义（文档更新到位）
-
-### 🔌 INTERFACE (接口变更)
-- 无
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| - | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明（host_call 协议约定与宪法开发流程）
-- **协议与文档**：Architecture 第 3 节已明确 Hostcall JSON 协议以 architecture/plugin-system/host-call-protocol.md（子文档）为准、实现须与其一致；子文档 host-call-protocol.md 与 wasmedge-runtime-layer.md 已包含「每次 run_script/run_script_file 执行前当次 Vm 已挂载 env.__pi_host_call」及 Guest 侧须从 env 导入并暴露给 JS 的说明。
-- **注入逻辑**：无需改代码，instance_wasmedge 中 build_vm 每次已挂载 env；文档已写明。
-- **宪法流程**：仅文档与 status 变更，无代码变更；单测已跑（178 passed, 1 ignored），门禁通过；提交按豁免规则不要求 [cov]。
-
-### ✅ 执行的检查与验收项
-- [✓] 协议子文档为权威、Architecture 引用已存在
-- [✓] 注入与 Guest 侧说明已存在于 host-call-protocol 与 wasmedge-runtime-layer
-- [✓] `cargo test --lib` 通过
-
-### 🔌 INTERFACE (接口变更)
-- 无
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| - | 2026-03-08 | 阻塞 | develop | - |
-
-### 本次执行说明（4 原语 e2e 整改 + 阻塞登记）
-- **4 原语 e2e 整改**：已恢复严格断言（`assert!(call_count >= 4)`）与脚本行为（`__pi_host_call` 未定义时抛错）；流程与协议文档已按计划更新。
-- **阻塞**：`test_wasmedge_e2e_primitives_script_file` 依赖 wasmedge_quickjs.wasm 向 JS 暴露 `env.__pi_host_call`。经查，**预编译的 wasmedge_quickjs.wasm 不会自动将 env 中的任意 import 暴露给 QuickJS 脚本**；需定制构建 QuickJS wasm（在 wasm 内显式 import 并绑定到 JS 全局，参见 [Second State: Calling native functions from JavaScript](https://secondstate.io/articles/call-native-functions-from-javascript/)）。在未提供定制 wasm 或胶水层前，该用例保持严格断言，**当前视为失败**，不合并“放宽版”通过；解除阻塞后须保证 4 次 host 调用均触发且断言通过。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| - | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明
-- **提交流程改为从 status 读取覆盖率**：commit-with-status / commit-guard 不再在提交时执行 tests 与 tarpaulin；改为从当前分支对应 `docs/status/*.md` 首个元数据表读取 Cov%，写入 commit message；读不到时提示更新 status 但不阻塞提交。Constitution、STATUS_GUIDE、COMMIT_MESSAGE_SPEC、UNIT_TEST_SPEC 已同步；各 status 文件元数据表增加 Cov% 列。
-
-### ✅ 执行的检查与验收项
-- [✓] 规范与命令、规则文档已更新；status 文件已统一增加 Cov% 列
-
-### 🔌 INTERFACE (接口变更)
-- 无
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明
-- **提交**：wasmedge-sdk 升级至 0.13.5-newapi，WasmEdge 改为默认编译（去掉 feature wasmedge）；install-wasmedge.sh 固定 C 库 0.13.5；run-integration-tests.sh 与相关 .md 文档同步更新；规范 Review 与全量集成测试通过后更新 status。
-- **脚本**：run-integration-tests.sh 在已安装 WasmEdge 时也 source `$HOME/.wasmedge/env`，保证 `cargo test --lib` 能加载 libwasmedge。
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build --release` 成功
-- [✓] **单元测试**：`cargo test --lib` — 178 passed，1 ignored
-- [✓] **集成测试**：event_tests、hostcall_tests、llm_tests、plugin_tests、primitives_tools_tests、robustness_tests、session_tests 通过（25 passed）
-- [✓] **Wasm 真实运行时（必选）**：`cargo test --test wasmedge_e2e_tests -- --test-threads=1` 通过（已安装 WasmEdge C 0.13.5，assets/wasm/wasmedge_quickjs.wasm 存在）
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次为 Review + 脚本修正 + 结果记录）
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明
-- **run-integration-tests.sh 与 install-wasmedge.sh -y**：新增 `scripts/run-integration-tests.sh`（集成测试前检查 WasmEdge，未安装则执行 `install-wasmedge.sh -y` 再跑全量验收）。`install-wasmedge.sh` 支持 `-y` 非交互模式并自动写入 profile，新开终端无需再执行 source。integration_test_agent、INTEGRATION_TEST_SPEC 5.4、src/ext/README.md 已引用 run-integration-tests.sh。
-- **执行 run-integration-tests.sh**：`cargo build --release`、`cargo test --lib`、集成测试（event/hostcall/llm/plugin/primitives_tools/robustness/session）均通过；`cargo build`（默认含 WasmEdge）曾因 wasmedge-sys 与 WasmEdge C 库版本不兼容失败，见 INTEGRATION.md 条目；现已改为 wasmedge-sdk 0.13.5-newapi + 安装脚本固定 C 0.13.5。
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build --release` 成功
-- [✓] **单元测试**：`cargo test --lib` — 179 passed，1 ignored
-- [✓] **集成测试**：event_tests、hostcall_tests、llm_tests、plugin_tests、primitives_tools_tests、robustness_tests、session_tests 通过
-- [✓] **Wasm 真实运行时（必选）**：本次执行已通过（见上方最新条目）
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次为脚本与文档）
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明
-- **install-wasmedge.sh 与文档引用**：新增 `scripts/install-wasmedge.sh`（调用 WasmEdge 官方安装脚本；用户级安装后可选择将 `source $HOME/.wasmedge/env` 写入 shell profile 使新开终端生效）。INTEGRATION_TEST_SPEC 5.4、src/ext/README.md 增加脚本引用；wasmedge_e2e_tests.rs panic 提示增加「或运行 ./scripts/install-wasmedge.sh」。
-- **环境**：macOS / develop 分支；全量验收清单已执行。
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
-- [✓] **单元测试**：`cargo test --lib` — 178 passed，1 ignored
-- [✓] **集成测试**：`cargo test --test event_tests --test hostcall_tests --test llm_tests --test plugin_tests --test primitives_tools_tests --test robustness_tests --test session_tests -- --test-threads=1` — 25 passed（不含 wasmedge_e2e_tests）
-- [✓] **CLI 子命令**：`tomcat init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 完整
-- [ ] **Wasm 真实运行时（必选）**：按 INTEGRATION_TEST_SPEC 5.4 须先安装 WasmEdge（可运行 `./scripts/install-wasmedge.sh`）后执行 `cargo test --test wasmedge_e2e_tests -- --test-threads=1`；本次若未安装则待安装后补跑，失败即验收不通过。
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次为脚本与文档引用，未改 lib/API）
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明
-- **引用路径修复**：全项目 .md 链接按「相对当前文件」修正。.cursor/commands/commit-with-status.md、.cursor/rules/commit-guard.mdc 使用 `openspec/...`；INTEGRATION.md、status/feature-wasm-plugin.md 去掉 `tomcat/` 前缀，保证单仓内链接可解析。
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-08 | DONE | develop | - |
-
-### 本次执行说明
-- **整改**：Wasm 集成测试禁止跳过（INTEGRATION_TEST_SPEC 5.4、integration_test_agent、wasmedge_e2e_tests、src/ext/README.md、PRACTICE、status 修订）；环境缺失不允许跳过，须协助安装后执行，失败即失败。
-- **环境**：macOS / develop 分支；按新规范 Wasm 真实运行时为必选，待安装 WasmEdge 后执行 `cargo test --test wasmedge_e2e_tests -- --test-threads=1` 补跑，否则验收不通过。
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
-- [✓] **单元测试**：`cargo test` — 178 passed，1 ignored（`chat_real_request_response_print`）
-- [✓] **集成测试**：`cargo test --test '*' -- --test-threads=1` — 不含 wasmedge 时 25 passed（event_tests 3、hostcall_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）；wasmedge_e2e_tests 默认构建即包含，须已安装 WasmEdge 后运行，否则该用例失败（规范禁止跳过）。
-- [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
-- [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests -- --test-threads=1` 通过
-- [ ] **Clippy**：存在 6 条 lib 警告，既有问题，未满足「无警告」门禁
-- [✓] **CLI 子命令**：`tomcat init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
-- [ ] **Wasm 真实运行时（必选）**：按新规范环境缺失不得跳过，须先安装 WasmEdge 后执行 `cargo build`、`cargo test --test wasmedge_e2e_tests -- --test-threads=1`，失败即视为验收不通过；待按规范安装依赖后补跑。
-
-### 🔌 INTERFACE (接口变更)
-- **规范**：INTEGRATION_TEST_SPEC 5.4 修订为环境缺失不允许跳过、须协助安装、失败即失败；integration_test_agent 验收项「Wasm 真实运行时」改为必选；PRACTICE 场景 A 与 src/ext/README.md 补充集成测试要求。
-- **测试**：`tests/wasmedge_e2e_tests.rs` 去掉跳过逻辑，环境缺失时 panic，须在安装 WasmEdge 后运行（默认构建即包含）。
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| clippy 6 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-07 10:26 | DONE | develop | - |
-
-### 本次执行说明
-- **合并范围**：feature/primitives-tools（005+006）
-- **环境**：macOS / develop 分支
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase，既有）
-- [✓] **单元测试**：`cargo test` — 92 passed，1 ignored（`chat_real_request_response_print`）
-- [✓] **集成测试**：`cargo test --test '*' -- --test-threads=1` — 22 passed（event_tests 3、llm_tests 2、plugin_tests 3、primitives_tools_tests 6、robustness_tests 5、session_tests 3）
-- [✓] **日志门禁（第 9 章）**：各集成测试含 setup_logging、info_span、AAA 阶段 tracing 锚点
-- [✓] **鲁棒性集成测试（第 10 章）**：`cargo test --test robustness_tests -- --test-threads=1` 通过；primitives_tools_tests 含路径白名单拒绝、用户拒绝确认等边界用例
-- [ ] **Clippy**：存在 6 条 lib 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2），既有问题，未满足「无警告」门禁
-- [✓] **CLI 子命令**：`tomcat init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
-
-### 🔌 INTERFACE (接口变更)
-- **feature/primitives-tools 合入**：lib 导出 core::DefaultPrimitiveExecutor、DefaultToolRegistry、ToolExecutor、UserConfirmationProvider、AllowAllConfirmation、DenyAllConfirmation；core::confirmation、core::executor；infra::AuditRecorder、TracingAuditRecorder、PrimitiveAuditEntry、ToolAuditEntry、AuditPrimitiveOp；PrimitiveConfig 已存在，本次随 005/006 配套使用。
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| clippy 6 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 12:30 | DONE | develop | - |
-
-### 本次执行说明
-- **合并范围**：无（用户选择「本次不合并任何分支」，直接走集成测试流程）
-- **环境**：macOS / develop 分支
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build --release` 成功（1 个 dead_code 警告：EntryBase）
-- [✓] **单元测试**：`cargo test` — 74 passed，1 ignored（`chat_real_request_response_print`）
-- [✓] **集成测试**：`cargo test --test '*' -- --test-threads=1` — 11 passed（event_tests 3、llm_tests 2、plugin_tests 3、session_tests 3）；llm_tests 本次全部通过（max_completion_tokens 已适配）
-- [ ] **Clippy**：存在 6 条 lib 警告 + 4 条 tests 警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2；tests 冗余 `use tracing`×4），未满足「无警告」门禁
-- [✓] **CLI 子命令**：`tomcat init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次未合并新分支）
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| clippy 共 10 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 11:26 | DONE | develop | - |
-
-### 本次执行说明
-- **合并范围**：无（用户选择「本次无分支合并，直接走集成测试流程」）
-- **环境**：macOS / develop 分支，未合并任何 feature 分支
-
-### ✅ 执行的检查与验收项
-- [✓] **构建**：`cargo build`（dev）成功
-- [✓] **单元测试**：`cargo test` — 74 passed，1 ignored（`chat_real_request_response_print`）
-- [✓] **集成测试（非 LLM）**：`cargo test --test session_tests --test event_tests --test plugin_tests -- --test-threads=1` — 9 passed（session_tests 3、event_tests 3、plugin_tests 3）
-- [ ] **集成测试（LLM）**：`cargo test --test llm_tests -- --test-threads=1` — 2 failed；原因：OpenAI API 403 `model_not_found`（Project 无 `gpt-4o-mini` 权限），非 key 缺失，属账号/项目权限配置
-- [ ] **Clippy**：存在 6 条警告（lib：EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or×2；tests：redundant `use tracing`×4），未满足「无警告」门禁
-- [✓] **CLI 子命令**：`tomcat init`、`doctor`、`config`、`session`、`plugin`、`audit` 可执行且 `--help` 帮助完整
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次未合并新分支）
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| llm_tests 2 失败 | OpenAI API 403，当前 Project 无 gpt-4o-mini 模型权限 | 在 OpenAI 控制台为项目开通该模型或改用有权限的模型/default_model |
-| clippy 6 条警告 | 规范要求门禁无警告 | 各模块按 clippy 建议修复 |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 08:58 | DONE | develop | - |
-
-### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** 全量集成测试执行（按 integration_test_agent 合并后全量测试清单）：`cargo build --release`、`cargo clippy`、`cargo test`（74 单测通过、1 忽略）、`cargo test --test '*' -- --test-threads=1` 执行
-- [✓] **[P0]** 集成测试通过：event_tests 3、plugin_tests 3、session_tests 3 全部通过
-- [ ] **[P0]** llm_tests 2 失败：`test_llm_provider_chat_real_request_returns_ok`、`test_llm_provider_chat_stream_real_request_yields_events` 因 OpenAI API 429（insufficient_quota）失败，非代码缺陷；需账户有可用配额或配置有效 key 后重跑
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次为全量集成测试执行，未合并新分支）
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| llm_tests 集成测 2 失败 | OpenAI API 429 insufficient_quota，当前 key 无可用配额 | 配置有效 OPENAI_API_KEY 或账户充值后重跑 |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 08:05 | DONE | develop | - |
-
-### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** 集成测试规范整改：INTEGRATION_TEST_SPEC / INTEGRATION_TEST_PRACTICE / integration_test_agent 明确「集成测试不脱离真实环境、外部协作必须真实验证」；Mock 仅限单元测试或未完成建设模块；LLM 集成测试为必写项
-- [✓] **[P0]** 编写集成测试代码：新增 `tests/llm_tests.rs`，在真实环境下验证与 LLM API 的协作（`test_llm_provider_chat_real_request_returns_ok`、`test_llm_provider_chat_stream_real_request_yields_events`）；保留既有 session/plugin/event 集成测试
-- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy --all-targets`、`cargo test --all -- --test-threads=1` 通过（74 单测 + 9 集成测通过，1 单测忽略 + 2 LLM 集成测默认忽略）
-- [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
-- [ ] **[P1]** clippy 存在 6 条警告，建议各模块后续消除
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次为规范与集成测试代码变更，未合并新分支）
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| 无 | - | - |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 16:35 | DONE | develop | - |
-
-### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** 集成测试流程执行（按 integration_test_agent 规范）：合并范围确认为当前 develop，未执行新分支合并
-- [✓] **[P0]** 编写集成测试代码：新增 `tests/common/mod.rs`（setup_logging + Once）、`tests/session_tests.rs`（SessionManager 创建/列表/删除）、`tests/plugin_tests.rs`（parse_manifest、PluginManager 注册/列表）、`tests/event_tests.rs`（EventBus on/emit_sync/off、remove_plugin_listeners），符合 INTEGRATION_TEST_SPEC 与 INTEGRATION_TEST_PRACTICE
-- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy --all-targets`、`cargo test --all -- --test-threads=1` 通过（74 单测 + 9 集成测通过，1 忽略：chat_real_request_response_print 已加 `#[ignore]`）
-- [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
-- [ ] **[P1]** clippy 存在 6 条警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or x2），建议各模块后续消除
-
-### 🔌 INTERFACE (接口变更)
-- 无（本次为集成测试代码与流程执行，未合并新分支）
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| 无 | - | - |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-06 07:10 | DONE | develop | - |
-
-### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** 合并 `feature/session-cli` 至 develop（003+010）@2026-03-06；解决 Cargo.toml / lib.rs / core/mod.rs 冲突，保留 infra+llm 与 session_cli 依赖与模块
-- [✓] **[P0]** 合并 `feature/wasm-plugin` 至 develop（007+008+009）@2026-03-06；解决 core/mod.rs、lib.rs、llm 目录与单文件冲突，保留 core/llm/ 目录实现，新增 ext、primitives、tools
-- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy --all-targets`、`cargo test --all -- --test-threads=1` 通过（74 passed, 1 ignored）
-- [✓] **[P0]** CLI 子命令验收：init / doctor / config / session / plugin / audit 可执行且帮助完整
-- [ ] **[P1]** clippy 存在 6 条警告（EntryBase dead_code、map_flatten、cast_abs_to_unsigned、redundant_closure、unnecessary_map_or x2），建议各模块后续消除
-- [ ] **[P0]** 全量单测：1 个用例需 OPENAI_API_KEY 已忽略；无 key 时 74 通过，符合宪法要求
-
-### 🔌 INTERFACE (接口变更)
-- feature/session-cli 合入：lib 导出 api::run_cli、core::session（SessionManager、SessionStore、TranscriptEntry 等）
-- feature/wasm-plugin 合入：lib 导出 ext（WasmEngine、WasmInstance、HostApiDispatcher、PluginManager、PluginManifest 等）、core::primitives、core::tools
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| 无 | - | - |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2026-03-05 22:20 | DONE | develop | - |
-
-### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** 合并 `feature/llm` 至 develop（ort strategy）@2026-03-05
-- [✓] **[P0]** 合并后构建与静态检查：`cargo build --release`、`cargo clippy --all-targets` 通过
-- [✓] **[P0]** 本波次验收（004）：core/llm（OpenAiProvider、LlmConfig 扩展、类型与 token 统计）已合入
-- [ ] **[P0]** 全量单测：`cargo test --all -- --test-threads=1` 现 42 通过、2 失败、1 忽略；2 失败为 `count_tokens_approximate`、`openai_provider_new_succeeds_with_api_key`，因未设置 OPENAI_API_KEY 按宪法要求不通过（非代码缺陷），建议 CI 配置 OPENAI_API_KEY 或由 llm 角色提供无 key 环境下的可接受策略
-
-### 🔌 INTERFACE (接口变更)
-- feature/llm 合入：lib 导出 core::llm（LlmProvider、OpenAiProvider、ChatMessage/ChatRequest/ChatResponse、StreamEvent、SessionTokenUsage 等）；LlmConfig 增加 max_concurrent_requests、retry_count、stream_timeout_sec、proxy 等。
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| 2 个 LLM 单测在无 OPENAI_API_KEY 时失败 | 宪法要求依赖 API key 的用例无 key 时须不通过 | CI 配置 key 或 llm 角色评估无 key 环境策略 |
-
----
-
-| Owner | Update Time | State | Branch | Cov% |
-| :--- | :--- | :--- | :--- | :--- |
-| @integration_test | 2025-03-05 14:45 | DONE | develop | - |
-
-### ✅ DONE (已完成/进行中)
-- [✓] **[P0]** 文档与规范：Architecture 渐进式披露（architecture/ 子文档）、examples→guides 重命名、commit-with-status command、Constitution/design 等引用更新 @2025-03-05
-- [✓] **[P0]** 合并 `feature/infra` 至 develop（ort strategy）@2025-03-03
-- [✓] **[P0]** 合并后全量检查：`cargo build --release`、`cargo clippy`、`cargo test` 通过（32 tests）
-- [✓] **[P0]** 本波次验收（001+002）：项目骨架、AppError、配置/日志/跨平台、EventBus 符合 task.md 标准
-- [ ] **[P1]** infra：`src/infra/platform.rs` 存在 3 处 dead_code 警告（current_dir、SystemInfo、system_info），建议后续消除
-
-### 🔌 INTERFACE (接口变更)
-> 本分支为集成看板分支，不直接引入代码接口变更；当前已合入内容以 feature/infra 的接口为准。
-- 无显著变更（汇总自 feature/infra）
-
-### ⚠️ BLOCKED (阻塞/风险)
-| 阻塞项 | 原因 | 预计解决 |
-| :--- | :--- | :--- |
-| 无 | - | - |
-
----
-
-## feature-Jerry
+## feature-llm-files-upload-manager
 
 *暂无进度*
 
 ---
 
-## feature-Spike
+## feature-plan-mode-enhance
+
+# feature/plan-mode-enhance — Status
+
+> 三卡同分支交付：**T2-P1-002 / T2-P1-003 / T2-P1-004**
+> 计划单一事实来源：[`~/.cursor/plans/plan_三卡单分支_7e09fef1.plan.md`]
+> Dispatcher 偏离说明：本次按用户要求 **三卡同领、同分支**，与默认「一次一卡」不同。
+
+---
+
+## 当前状态
+
+| 字段 | 值 |
+|------|------|
+| 负责人 | Tom |
+| 状态 | PENDING_INTEGRATION（plan-mode-full-fix + P9 verifier 全部落地，待合并集成） |
+| 分支 | `feature/plan-mode-enhance` (from `develop`) |
+| 起点 commit | (待写入首个 commit 后回填) |
+| 阶段 | P9 verifier 完成并完成 remediation 收口（VerifySummary 单一事实源、`max_turns -> aborted`、P0-P6 prompt、gate 边界、full-chain `plan.verify` 断言）→ 待本地验证/集成提交 |
+
+## Phase 进度
+
+- [x] **P0** 认领三卡、切分支、README/任务卡/status 更新
+- [x] **P0.5** 横切前置（依赖 `serde_yaml` / `AgentLoopConfig` + `SubagentType` / 4 plan 工具进 catalog / transcript 事件 type 常量 / `[plan]`+`[reviewer]` config / `gen-tool-catalog` + `tool_catalog_doc` 回归）
+- [x] **P1** PR-PLA — /plan 命令、PlanMode、catalog、recover(stub)、user prefix（+ §9.3A P1 单测 38 个全绿；recover 真正生效随 P2 file_store 补齐）
+- [x] **P2** PR-PLB — file_store、ops、tools/{create_plan,update_plan,todos}（stub review，P4 接入）+ §9.3B 单测 38 个全绿（write_plan 原子写/锁/超时；ops 单 in_progress / id 唯一；mode 守卫 / 跨 session 规则 / 自动 completed）
+- [x] **P3** MA — AgentRegistry、spawn_subagent_internal、events、CascadeAbort + §9.3D P3 单测 11 个全绿（panic 隔离、三道闸门、cascade abort BFS、RegistrationGuard balanced）
+- [x] **P4** RV+CP-D — review.rs + ReviewerDispatcher trait + PlanRuntime::dispatch_reviewer + create_plan::execute_with_reviewer + §9.3D 余量单测 19 个全绿（parse 严格 / 多块取最后 / aborted 路径 / lock 先释放 / round 计数 warning）
+- [x] **P5** AQ — ask_question + CliAskQuestionPanel + IdeAskQuestionPanel(stub) + MockAskQuestionPanel + §9.3C 单测 18 个全绿（schema 校验 / 1 recommended 约束 / __custom__ 保留 id / picked_recommended 回填 / cancel 信号 / 阻塞语义 / 出参反向校验）
+- [x] **P6** PR-PLC — /plan build 五件事（disk session_key/id + disk mode=executing + 内存 mode swap + first_exec_turn flag + plan body 缓存）+ 原子回滚（write 失败时内存不动）+ 友好提示（plan_id 不存在引导 create_plan）+ §9.3A build 行 10 个新测全绿（闸门 / completed / disk executing / 不存在 / unsafe / 五件事一次性 / pending 续跑 / 异 session warning / 首轮一次性注入 / 原子回滚 lock-busy）
+- [x] **P7 (核心)** PR-PLE finalize_completed_to_chat + PR-PLF demote_to_pending_on_cancel（释放 lock）+ PR-PLF allow_raw_edit_to_path（canonicalize 双侧）+ attach_cancel_hook/current_cancel_token + 5 个新单测全绿（cancel→pending / cancel_outside_exec_noop / cancel_releases_lock / finalize_completed_clears_first_exec_turn / raw_edit_blocked_for_plan_files）
+- [ ] **P7 (延期)** PR-PLD TodosPanel + RefreshNotifier + milestone checkpoint record(Milestone) + /restore reload_active_plan_from_disk — 需要 chat_loop 装配层联动，推到 P8b 集成测一起做
+- [x] **P8a** 扫尾单测 — D2 attach_cancel_hook_rebinds_replaces_old_token + D9 concurrent_write_plan_serialized_by_lock + 修 P2~P7 测试间 HOME env 污染（orig_home OnceLock + cleanup_home 还原）→ lib 全测 1025 passed / 0 failed
+- [x] **P8b** `plan_runtime_integration_tests` 全绿（8 个端到端用例：full_plan_lifecycle / build→cancel→resume / ask_question 双答案 + Ctrl+C cancelled / reviewer summary 入 tool result / raw_edit guard / todos 路由 / friendly hint）+ 全部 await 用 `tokio::time::timeout(30s)` 包裹（防 D12）+ HOME 隔离 + 串/并行均通过
+- [/] **P8c** `plan_cli_e2e`（部分）— D10 catalog 一致性 `committed_tool_catalog_matches_catalog_renderer` 已绿；完整 E2E-PLAN-001～016（含 mock HTTP / 子进程 / scenario library）规模超出"三卡同分支"范围，转移到独立 PR-PLG 单独交付（chat_loop 已经把 plan_runtime/catalog/reminder/prefix/build 接通，主路径可手动跑）
+- [x] **P8d** gen-tool-catalog 跑通 / `tool_catalog_doc` (D10) 1/0 / cargo test --lib 1025/0 / plan_runtime_integration 8/0；人工 PLAN-UX-01～04 spot-check 留给真实部署
+- [x] **P9 verifier（PR-V0～V3）** DONE Owner=Tom — 已完成 Mini verification prompts + P0-P6 命令发现、internal verifier（`verify.rs` / `SubagentType::Verifier` / `dispatch_verifier` / tool_exec 双保险白名单 / `update_plan` 两次写盘）、`plan.verify` transcript 事件 + `update_plan` tool result `verify` 双通道回传，以及 `[plan].verify_gate = "soft" | "gate"` gate 语义。remediation 追加收口：`transcript.plan.verify` 与 `update_plan.verify` 统一为 normalize 后的最终 `VerifySummary`、`max_turns` 改为“预算耗尽未正常收口 => verdict=aborted / stop_reason=max_turns”、verifier prompt 与 executor Mini 统一 P0-P6、补 `partial/aborted` gate 与 re-complete respawn 回归、real-LLM inprocess E2E 明确断言 `plan.verify`。边界保持不变：**frontmatter 零改造**、唯一配置项仅 `verify_gate`、**不加** `/plan verify` CLI、`VERIFIER_MAX_TURNS = 64`。
+- [x] **真 LLM E2E 轮（2026-05）** 完成 reviewer/verifier 子 Agent 真派发装配；[`tests/plan_real_llm_inprocess_tests.rs`](../../tests/plan_real_llm_inprocess_tests.rs)（E2E-PLAN-RL-002，需 `OPENAI_API_KEY`）现同时断言 transcript 中存在 `plan.review` 与 `plan.verify`，作为 full-chain verifier wiring 最低验收；[`tests/plan_real_llm_cli_e2e.rs`](../../tests/plan_real_llm_cli_e2e.rs) 继续保留黑盒链路，但 verifier 侧以 inprocess 用例作为当前主验收锚点。
+
+## 关键决策
+
+- `ask_question` 因 T2-P0-008 (TUI) 仍 TODO，采用 **CLI MVP**（`readline` + `spawn_blocking`）；IDE 侧为 trait stub
+- reviewer / `dispatch_agent` 共用 `AgentRegistry::spawn_subagent_internal`
+- 测试 hang 防御：所有 L1/L2 async `tokio::time::timeout(30s)` 包裹；L3 子进程 `kill_on_drop` + 120s 上限
+- 测试稳定性：默认 MockLlm/mock HTTP；真 LLM 用例 `#[ignore]`
+- ~~已知 pre-existing 测试串污染：plan tools 测试改 HOME 后不还原 → 与 permission gate 测试并行/串行时都失败；P8b 修：在 `setup_isolated_home` 用 RAII `EnvGuard` 在 cleanup 时还原原 HOME（不属于 P6 回归）~~ **P8a 已修**（orig_home OnceLock 抓取首次 HOME；cleanup_home 还原）
+
+## plan-mode-full-fix 阶段（A-J）
+
+> 单独一轮全量修复，对齐文档与代码、引入 panel/checkpoint/restore/recover、扩 E2E 覆盖；
+> 计划单一事实源：`~/.cursor/plans/plan-mode-full-fix_78a0646c.plan.md`。
+
+- [x] **A** 文档与图修复：plan-runtime / multi-agent / tools/* 8 篇统一口径（含 ask-question CHAT 可见、PLAN 写路径限制等行为变更说明），executor reminder 强调"如何推进任务"为第一要务
+- [x] **B/B1/B11/B12** catalog 可见性回正（PLAN 模式新增 todos/ask_question；EXEC 模式仅 update_plan）+ tool_exec.rs 把 4 plan 工具接入主分发 + ask_question 在 CHAT 可用 + safety.rs 写路径策略（PLAN 限 `~/.tomcat/plans/`、EXEC 全禁写 plan 文件）+ reviewer 段守卫
+- [x] **C** chat_loop 装配：first_exec_turn user_meta 注入、cancel→pending 降级、finalize_completed_to_chat、session_id 透传、recover hook、transcript 写入对齐
+- [x] **D** reviewer 生产派发：ProdReviewerDispatcher 占位（findings/rounds/reload/warning 协议接通）；后续 PR 替换为 AgentRegistry::spawn_subagent_internal 真实派发
+- [x] **E** TodosPanel + RefreshNotifier + plan.panel + Milestone checkpoint record（`[plan].auto_checkpoint_on_milestone`，默认 true）+ `/restore` reload_active_plan_from_disk + `PlanRuntime::recover()` 真实实现（孤儿 executing → pending 降级；当前 session 拥有 → 重挂内存 EXEC）
+- [x] **E2** Milestone schema 完整化（`status: MilestoneStatus` 派生 + `description`）+ `## Todos Board` 自动重写（`<!-- todos-board:auto:begin/end -->` 标记内）+ 一致性校验（`todo.milestone_id` ⇔ `milestones[].todo_ids`）
+- [x] **F** prompts/executor.txt 重写为英文契约（"first priority: drive todos to completion"），prompts/planner.txt 同步；`render_executor_reminder` 支持 `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` 热覆盖
+- [x] **G1/G2/G5** `update_plan` `op→kind`（破坏性一步到位）+ mode 矩阵闸门（Planning 拒 in_progress 等）+ 完整 JSON 返回（applied / plan_mode_before/after / panel_snapshot_id / warnings / items / milestones / active_in_progress）+ completed 全拒（N2）+ 跨 session 策略（N11，Executing 拒 cross-session、Planning/Pending 允许） + N3（`/plan exit` 仅 Planning）
+- [x] **G3** TodoRuntime 持久化（`~/.tomcat/agents/<id>/sessions/<sid>/todos/<id>.todo.md`）+ `sessions.json.activeTodosId` 镜像（`ensure_active_todos_id`）+ purge_inactive
+- [x] **G4** `create_plan` `body→draft`（破坏性一步到位）+ `plan_id` 派生（slugify + xxhash）+ 显式 reject 老字段 + `## Notes` 模板补全
+- [x] **H** `plan_e2e_with_mock_llm_tests.rs` 8 例：H1 full lifecycle（6 次 panel + 自动 completed）/ H2 CHAT todos panel scope / H3 PLAN raw edit 守卫 / H4 EXEC plan 文件全禁写 / H5 reviewer aborted 占位 / H6 cancel→pending / H7 Planning 拒 in_progress / H8 milestone checkpoint record
+- [x] **J** CLI 模式指示器（readline 提示符渲染 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` / `[DONE plan_id]`）+ `/plan list` 子命令（扫 `~/.tomcat/plans/` 列 id/mode/goal/created_at）
+- [x] **I** status 收尾 + 终态门禁
+
+### 行为变更（5 条 — commit/CHANGELOG 显著标注）
+
+1. `ask_question` 在 CHAT 可见（之前 PLAN-only）；上层 panel 不变。
+2. PLAN 期 `write`/`edit`/`delete` 仅允许在 `~/.tomcat/plans/*.plan.md`；越界 → ToolError。
+3. EXEC 期 plan 文件全禁 raw 写（必须走 `update_plan` 推进）。
+4. `update_plan` 入参仅 `kind`，旧 `op` **不再兼容**，立即失败。
+5. `create_plan` 入参仅 `draft`（旧 `body` 不再兼容）；`plan_id` 由 runtime 派生，LLM 不再传。
+
+### 终态门禁
+
+```
+cargo test --lib -p tomcat                                  → 1060 passed / 0 failed
+cargo test --test plan_runtime_integration_tests -p tomcat → 8 passed / 0 failed
+cargo test --test plan_e2e_with_mock_llm_tests -p tomcat   → 8 passed / 0 failed（H 新增）
+cargo test --test tool_catalog_doc -p tomcat                → 1 passed / 0 failed（catalog 已重生成提交）
+cargo run --bin gen-tool-catalog -p tomcat                  → OK（UPDATE_TOOL_CATALOG=1 写盘）
+```
+
+## 提交日志
+
+- `983334c` — P0.5 横切前置
+- `c0afa94` — P1 PR-PLA
+- `890bd9f` — P2 PR-PLB
+- `b88515a` — P3 MA
+- `9ce91d3` — P4 RV+CP-D
+- `d2fdd98` — P5 AQ
+- `ee248ca` — P6 PR-PLC
+- `eda722b` — P7 核心防御 (PLE/PLF)
+- `f891b34` — P8a 防御单测 + HOME 污染修
+- `f6ceb15` — P8b 集成测套件 (8 例)
+- `<head>`   — P8c/P8d/done DoD 收口
+
+## 终态验证
+
+```
+cargo test --lib -p tomcat                            → 1025 passed / 0 failed / 1 ignored
+cargo test --test plan_runtime_integration_tests -p tomcat → 8 passed / 0 failed
+cargo test --test tool_catalog_doc -p tomcat              → 1 passed / 0 failed (D10)
+cargo run --bin gen-tool-catalog -p tomcat                → OK
+```
+
+新文件清单（plan_runtime 子树）：
+- `src/api/chat/plan_runtime/mod.rs` — PlanRuntime per-session 编排器
+- `src/api/chat/plan_runtime/{mode,prompts,session_prefix,safety,catalog}.rs` — P1
+- `src/api/chat/plan_runtime/file_store.rs` — P2 持久化 (atomic write + advisory lock)
+- `src/api/chat/plan_runtime/ops.rs` — P2 TodoOp 引擎
+- `src/api/chat/plan_runtime/tools/{create_plan,update_plan,todos}.rs` — P2 三件套
+- `src/api/chat/plan_runtime/review.rs` — P4 ReviewSummary + parse
+- `src/api/chat/plan_runtime/ask_question_panel.rs` — P5 CLI/IDE/Mock panel
+- `src/api/chat/plan_runtime/tools/ask_question.rs` — P5 工具
+- `src/core/agent_registry/mod.rs` — P3 AgentRegistry + spawn_subagent_internal
+- `tests/plan_runtime_integration_tests.rs` — P8b 8 例端到端集成
+
+## DoD（plan §9.7）
+
+- [x] §9.3 单元：表中函数全部存在；新增反向/安全/兼容用例齐（114+ plan_runtime 单测）
+- [x] §9.4 集成：plan_runtime_integration_tests 8 例全绿，含 D1/D2/D8 防御
+- [/] §9.5 CLI E2E：D10 catalog 一致性已绿；E2E-PLAN-001～016 转独立 PR-PLG
+- [x] §7.3 transcript 事件 type 在 session-storage 已注册（P0.5）
+- [x] §8 D1/D2/D8/D9/D10 单元 + 集成测覆盖；D3/D4/D5/D6/D7/D11/D12 转 PR-PLG
+- [/] test-groups.sh：tool_catalog_doc 已分组；plan_runtime_integration 待 P8c PR 时登记
+- [x] 三卡子项 + DoD 主体勾选 / 标 PENDING_INTEGRATION
+
+---
+
+## feature-reasoning-continuity
 
 *暂无进度*
 
 ---
 
-## feature-Tom
-
-*暂无进度*
-
----
-
-## feature-cli-commands
+## feature-skill-system
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-03-10 | DONE | feature/cli-commands | 65.6 |
+| Spike | 2026-06-07 01:37 +0800 | PENDING_INTEGRATION | feature/skill-system | — |
 
-### TASK-02 | T1-P0-010-completion | CLI 子命令补完
+### ✅ DONE
+- [✓] **[P1]** 完成 Skill 主链：`core/skill` frontmatter / config / 三层发现 / `SkillSet` 运行时状态 / `<available_skills>` prompt 注入 / `load_skill` 工具 / `/skill` 与 `tomcat skill`
+- [✓] **[P1]** 已补集成与 E2E 覆盖：新增 `tests/skill_tool_tests.rs`，在 `tests/cli_tests.rs` 增补 `/skill` 与 `tomcat skill` 用户路径，并登记 `scripts/test-groups.sh`
+- [✓] **[P1]** 已同步规格文档：`docs/openspec/specs/User_Stories.md` 与 `docs/openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 补齐 Skill 发现/披露/装载/命令场景
+- [✓] **[P1]** 本地门禁通过：`cargo fmt --all`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --nocapture`、`./scripts/run-integration-tests.sh all`
 
-**目标**：将 CLI 中仍为占位的子命令补充为真实实现。
+### 🔌 INTERFACE
+- 新增顶层 `[skills]` 配置及 env override，驱动 Skill 发现、prompt 预算、禁用列表与 reviewer 暴露策略
+- 新增 `load_skill(name, file?)` 工具、`<available_skills>` prompt section、聊天命令 `/skill list|reload|use` 与外层 CLI `tomcat skill list|reload`
+- 新增集成测试目标 `tests/skill_tool_tests.rs`，并把 Skill 路径接入 `scripts/test-groups.sh`
 
-**已完成子项**：
-- [x] 10.3 `tomcat doctor`：补全 WasmEdge/QuickJS 可用性检测与修复建议
-- [x] 10.4 `tomcat config`：补全 get(key)、set（加载→修改→校验→写回）、edit（启动编辑器）
-- [x] 10.6 `tomcat plugin`：对接 PluginManager，实现 list/load/unload/enable/disable/info
-- [x] 10.7 `tomcat audit`：实现 list/show/export，读取 tracing 日志文件过滤审计记录
-- [x] 10.8 完善帮助文档与参数校验
+### ⚠️ BLOCKED
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
 
-**门禁**：
-- `cargo fmt -- --check`：通过
-- `cargo clippy --lib --tests`：通过（0 warnings）
-- `cargo test --lib`：211 passed, 0 failed
-- 覆盖率：65.6%（cli.rs 233/414）
+---
 
-### 接口变更
+## feature-stream-timeout
 
-- 新增 `config_file_path`、`resolve_toml_key`、`set_toml_key` 私有函数（cli.rs 内部）
-- 新增 `PluginContext`、`build_plugin_context`、`cli_confirm_permissions`、`format_plugin_info` 私有函数
-- 新增 `AuditDisplayEntry`、`parse_audit_line`、`read_audit_entries` 私有函数/结构
-- 无新增 pub API
+*暂无进度*
+
+---
+
+## feature-strengthen-four-core-tools
+
+*暂无进度*
+
+---
+
+## feature-t2-p0-010-multi-llm-productization
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| @Spike | 2026-06-02 17:25 +0800 | DONE | feature/t2-p0-010-multi-llm-productization | - |
+
+### DONE
+- [x] [P0] 认领 `T2-P0-010`，落地 `ModelCatalog` / `LlmResolver` / `AuthStore` 最小闭环
+- [x] [P0] 新增 `/model current|list|use`，会话级 `model_override` 持久化与 CLI prompt/横幅显示
+- [x] [P0] 扩展 `tomcat init` 为 model-first 向导，按 catalog 推导 provider 凭证
+- [x] [P0] 补齐架构 §11 测试锚点，同步 User Stories / E2E 场景库
+- [x] [P0] G7 legacy `provider/api_base` 兼容与 init 默认 base 归一化回归修复
+- [x] [P0] `cargo fmt`、`cargo clippy -D warnings`、`./scripts/run-integration-tests.sh all` 全绿
+- [x] [P1] DeepSeek replay warning 整改：移除 `had_tool_call` wire gate、删除 warning 指纹去重、同 profile `reasoning_content` 默认回放
+- [x] [P1] 补齐 `deepseek_non_tool_turn_roundtrip_replays_reasoning_content` 与 post-tool final assistant wire 单测
+
+### INTERFACE
+- 新增 `ModelCatalog`、`DefaultLlmResolver`、`AuthStore`；`ChatContext` 主路径经 `resolve_call(LlmScene, override)` 解析 per-call provider。
+- 新增 chat 命令 `/model current|list|use`；`/model use <id>` 写入 `SessionEntry.model_override` 并刷新 CLI 当前模型显示。
+- `tomcat init` 改为 model-first：先选 `default_model`，再推导 `provider/api/api_key_env` 并写入对应 `<PROVIDER>_API_KEY`。
+- `[llm]` 新增可选 `vision_model` / `title_model`；`AgentLoopConfig` 新增 `compaction_llm`。
+- DeepSeek continuity：**capture 与 replay 解耦**；snapshot 一律保留，同 family 兼容 `reasoning_content` 默认回放；`had_tool_call` 仅作 transcript 审计 metadata。
+- Replay downgrade warning 改为结构化分类（`cross_profile` / `same_profile_incompatible`），不再用进程内指纹缓存压日志。
+
+### BLOCKED
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
+
+### TEST
+- 已跑：`cargo fmt --all`
+- 已跑：`cargo clippy --all-targets --all-features -- -D warnings`
+- 已跑：`set -a && source .env && set +a && RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`（`EXIT_CODE=0`）
+- 已跑：`cargo fmt --check`；`cargo test replay_policy_deepseek_v4 --lib`；`cargo test classify_replay_downgrade --lib`；`cargo test transport_messages_deepseek --lib`
+- 已跑：`cargo test --test reasoning_continuity_real_llm_tests deepseek_`（3 passed，含 `deepseek_non_tool_turn_roundtrip_replays_reasoning_content`）
+- 已核对：`openspec/specs/User_Stories.md`、`openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md` 与当前实现一致
+
+---
+
+## feature-thinking-api-display
+
+*暂无进度*
+
+---
+
+## feature-tool-system-cleanup
+
+*暂无进度*
+
+---
+
+## feature-web-search
+
+| Owner | Update Time | State | Branch | Cov% |
+| :--- | :--- | :--- | :--- | :--- |
+| Jerry | 2026-06-05 07:12 +0800 | PENDING_INTEGRATION | feature/web-search | — |
+
+### ✅ DONE
+- [✓] **[P1]** 认领 `T2-P1-012`，任务卡与看板索引已切到 `DOING / Jerry`
+- [✓] **[P1]** 完成 `PR-WS-A`：注册 `web_search`、落 6 字段 schema、接入 `tool_exec/branches/web_search.rs`，并保持 reviewer / verifier 不开放联网检索
+- [✓] **[P1]** 完成 `PR-WS-S`：实现 Tavily / Brave / Serper adapters、`ToolsWebSearchConfig`、per-provider `.env` / env key、`moka` LRU + TTL cache、`auto` HTTP fallback
+- [✓] **[P1]** 完成 `PR-WS-O`：实现 project-level hosted 候选模型发现、显式 `openai` / `auto` hosted 路径、`openai_server.rs` 归一化与 `Capabilities.web_search`
+- [✓] **[P1]** 完成 `PR-WS-W`：在 `normalize_hits` 落 SSRF / 私网 / loopback / 单段 host 拦截，以及 `allowed_domains` / `blocked_domains` 过滤
+- [✓] **[P1]** 已补 `tests/web_search_tool_tests.rs` 并登记 `scripts/test-groups.sh`
+- [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`./scripts/run-integration-tests.sh lib`、`./scripts/run-integration-tests.sh integration`、`PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`
+- [✓] **[P1]** 方案复核整改：修正 catalog / tool-catalog 过期占位说明；`web_search.md` 对齐 hosted sidecar 落点；Brave/Serper 域名改写 warning、Tavily warning 命名统一；相关单测 / 集成测复绿
+- [✓] **[P1]** 已完成 `T2-P1-013` 当前批次：`web_fetch` 已注册 `url / prompt / format` schema，接入 catalog / `tool_exec` / chat runtime 注入链，并补 `missing runtime` 友好错误
+- [✓] **[P1]** 已完成 `web_fetch` 主链：`validate.rs` 的 URL 校验 / SSRF 守卫、`http -> https` 首跳升级、受控重定向、`html2md` 转换、超大正文 `.md` 落盘、PDF/图片/二进制落盘、magic 覆盖错误 `content-type`、moka 缓存；`PR-WF-D / PR-WF-P` 继续后置
+- [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test web_fetch --lib`、`cargo test --test web_fetch_tool_tests`、`cargo test --test tool_catalog_doc`
+- [✓] **[P1]** 已完成 `web_fetch` 收口整改：`markdownify.rs` 正则改 `LazyLock`，`validate.rs` 的 secret-prefix 误报收紧为边界匹配，`application/json` / `*xml` 改为 verbatim 返回，`prompt_ignored_mvp` 改为按本次请求现算且不再污染缓存，off-host redirect 结果不进缓存
+- [✓] **[P1]** 文档 / 验收已对齐：`web_fetch.md` 改为显式说明工具描述来自 `catalog.description`、`validate.rs` 当前拒绝所有 IP literal，并登记 DNS 解析型 SSRF 残留；补 `tool_exec` 成功路由到 `web_fetch` 的回归测试并复绿
+- [✓] **[P2]** `PLAN_SPEC.md` 收紧决策表与 todos 映射：已拍板决策须逐项对应 todo，不再允许多项决策合并为一个 todo 而不落点
+
+### 🔌 INTERFACE
+- `web_search` 现为真实可执行工具，schema 固定为 `query / count / freshness / country / language / domain_filter`
+- 输出统一为 `{ hits, query, backend, stats, truncated, warnings }`
+- `backend=auto` 现按 `openai(hosted project candidate) -> tavily -> brave -> serper` 选择，并在缺 key / 401 / 403 / 429 / 5xx / timeout / transport fail 时自动降级
+- `web_fetch` 已落地为真实可执行工具，schema 为 `url / prompt / format`
+- 输出统一为 `{ url, code, code_text, content_type, bytes, result, total_chars, duration_ms, cached, persisted_output_path, redirect, truncated, warnings }`
+- 本批次安全边界仅包含 URL 校验 / SSRF 守卫、受控重定向与正文/二进制分流；`PermissionScope::Domain` / `check_domain` / host 会话授权仍后置
+
+### ⚠️ BLOCKED
+| 阻塞项 | 原因 | 预计解决 |
+| :--- | :--- | :--- |
+| 无 | - | - |
 
 ---

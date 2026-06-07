@@ -11,6 +11,8 @@
 │       ├── agent/                     # 身份与凭据
 │       │   ├── auth-profiles.json     # 认证配置（API key/OAuth）
 │       │   └── models.json            # 模型配置
+│       ├── skills/                    # Agent 专属技能（P1）
+│       │   └── <skillName>/SKILL.md   # 当前 agent 可见的专属 skill
 │       ├── sessions/                  # 会话记录
 │       │   ├── sessions.json          # 会话索引
 │       │   └── <sessionId>.jsonl      # 会话 transcript
@@ -30,8 +32,6 @@
 │   ├── memory.md                      # 长期记忆（备选名）
 │   ├── memory/                        # 记忆子目录
 │   │   └── YYYY-MM-DD.md             # 按日记忆
-│   ├── skills/                        # 工作区技能（优先级最高；详见 skill-system.md）
-│   │   └── <skillName>/SKILL.md      # 各技能定义文件
 │   └── .tomcat/
 │       └── workspace-state.json       # 工作区状态（若启用；与 pi-mono `.pi/` 命名空间区分）
 ├── workspace-<agentId>/               # 非默认 agent 的工作区（结构同上）
@@ -92,7 +92,8 @@
 - **`~/.tomcat/tomcat.config.toml`**：总控配置文件（与树形图顶部一致）。
 - **`agent_workspace_dir`**：用户启动 `tomcat chat` 时 shell 的 `pwd`，不在 `~/.tomcat` 数据根内（`agent_workspace_dir` 通常为项目目录）。用户说“当前目录”“这个项目”“相对路径”时，优先解释为该目录；但它不自动获得文件访问权限，访问时仍需 `workspace.workspace_roots` 或会话授权。
 - **`agent_definition_dir`**：指向 `workspace-main/` / `workspace-<agentId>/`，存放主 Agent 的行为规则与个性化配置，属于「设计态」数据，是权限系统的默认可写根；但不能被 Prompt 描述成用户当前目录。
-- **`agent_trail_dir`**：指向 `agents/<agentId>/`，存放 Agent 的「运行态」数据（会话、日志、审计、临时文件、Layer0 `tool-results` 等），正常工具只读。当前 MVP 仅一个 agent，agentId 固定为 `main`。
+- **`agent_trail_dir`**：指向 `agents/<agentId>/`，存放 Agent 的「运行态」数据（agent 级 `skills/`、会话、日志、审计、临时文件、Layer0 `tool-results` 等），正常工具只读。当前 MVP 仅一个 agent，agentId 固定为 `main`。
+- **Project Skill Root（P0）**：不在 `~/.tomcat` 数据根内，而是在 `agent_workspace_dir/.tomcat/skills/`（也就是用户当前项目目录下的 `.tomcat/skills/`）。这是最高优先级技能根，详见 [`skill-system.md`](./skill-system.md)。
 - **`plugins/`**（根级）：全局共享插件，所有 agent 均可加载。`agents/<agentId>/plugins/` 为 agent 专属插件。
 - **`assets/`**：全局资源目录；内嵌资源释放目标（`wasm/`、`modules/`）与敏感配置（`.env`）。主配置 **`tomcat.config.toml`** 位于 `work_dir` 根部（不在 `assets/`）。详见 [init-experience-and-embedded-assets](../../../docs/reports/init-experience-and-embedded-assets.md)。
 - **`assets/.env`**：存放 API Key 等敏感配置，`tomcat init` 自动生成模板，`run_cli` 启动时通过 dotenvy 自动加载。

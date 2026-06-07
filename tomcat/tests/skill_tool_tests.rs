@@ -390,12 +390,11 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     let system_text = build_system_text(&ctx, &skill_set);
 
     let mut state = init_context_state(&ctx.session, &ctx.config.context, &system_text).unwrap();
-    let prompt = format!(
-        "Choose the available skill whose description matches creating a git commit. \
+    let prompt = "Choose the available skill whose description matches creating a git commit. \
 Before answering, you MUST load that skill via the load_skill tool and read its full body. \
 After the tool returns, reply with exactly two lines: first the secret token from the loaded skill body, then `SKILL_LIVE_OK`. \
 Do not use any tool other than load_skill."
-    );
+        .to_string();
 
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(180),

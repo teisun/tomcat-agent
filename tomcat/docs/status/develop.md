@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-05 08:40 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-07 07:34 +0800 | ACTIVE | develop | — |
+
+### 2026-06-07 | merge `feature/skill-system` → develop（T2-P1-014 集成验收）
+
+- **合并范围**：按用户要求将 `feature/skill-system` fast-forward 合入 `develop`（`63150d4 -> 90e1c60`），随后在 develop 侧完成全量 review，并补齐集成过程中暴露的 develop-side 收口：`Skill` 现保留 `allowed_tools` 元数据；`skills.enabled=false` 时不再渲染 `<available_skills>`；`directory-structure.md`、`skill-system.md`、`E2E_SCENARIO_LIBRARY.md`、`Product_Brief.md` 等文档回写到当前实现。
+- **全量 review**：围绕 `core/skill`、`system_prompt`、`tool_exec`、`api/chat/commands/cmd_skill.rs`、`api/cli/skill_cmd.rs`、`infra/config`、`tool-catalog.md` 与 Skill 相关 OpenSpec/架构文档做 develop 侧复核；确认三层发现、`<available_skills>` 渐进式披露、`load_skill` 权限闸门、`/skill`/`tomcat skill` 命令面闭环一致，并修正文档里的 P0/P1 技能根、测试矩阵与 env-gated 场景漂移。
+- **§4 全量验收（develop 侧复跑）**：以 **clean env** 执行 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 全绿（release / clippy / lib / integration-parallel / integration-serial，覆盖 `skill_tool_tests` 与 `cli_tests`）；显式 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-wasm` 通过。集成期先发现一处真实 develop-side 门禁问题：`tests/skill_tool_tests.rs` 的 `useless_format` 触发 clippy，已改为 `.to_string()`；另确认 **不应**在整轮 `all` 前全局 `source .env`，否则会把默认门禁之外的环境分支一并打开，产生失真红灯。
+- **结论**：`feature/skill-system` 已在 develop 侧完成合并、review 与验收；`T2-P1-014` 置为 `DONE`，相关状态/任务索引/OpenSpec 已同步。未推送远端。
 
 ### 2026-06-05 | merge `feature/web-search` → develop（T2-P1-012 / T2-P1-013 集成验收）
 

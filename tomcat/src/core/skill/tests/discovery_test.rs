@@ -110,6 +110,35 @@ fn discover_keeps_diagnostics_for_bad_skill_without_blocking_good_ones() {
 }
 
 #[test]
+fn discover_preserves_allowed_tools_metadata() {
+    let temp = temp_dir("allowed_tools");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+
+    write_raw(
+        &project
+            .join(".tomcat")
+            .join("skills")
+            .join("commit")
+            .join("SKILL.md"),
+        "---\nname: commit\ndescription: commit helper\nallowed-tools:\n  - bash\n  - read\n---\n# commit\n",
+    );
+
+    let set = discover(&cfg, &project);
+    let commit = set
+        .by_name
+        .get("commit")
+        .expect("commit skill should exist");
+    assert_eq!(
+        commit.allowed_tools.as_deref(),
+        Some(&["bash".to_string(), "read".to_string()][..])
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn discover_ignores_loose_markdown_files_in_project_root() {
     let temp = temp_dir("ignore_loose_markdown");
     let project = temp.join("project");

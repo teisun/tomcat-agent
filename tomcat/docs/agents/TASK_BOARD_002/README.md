@@ -44,7 +44,7 @@
 | **T2-P1-011** | Current-Tail Aggregate Guard（阶段二预防型上下文减负） | `DONE` | Spike | `feature/current-tail-aggregate-guard` | [tasks/T2-P1-011.md](./tasks/T2-P1-011.md) |
 | **T2-P1-012** | `web_search` 工具                              | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-012.md](./tasks/T2-P1-012.md) |
 | **T2-P1-013** | `web_fetch` 工具                               | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-013.md](./tasks/T2-P1-013.md) |
-| **T2-P1-014** | Skill 系统                                     | `PENDING_INTEGRATION` | Spike | `feature/skill-system`                 | [tasks/T2-P1-014.md](./tasks/T2-P1-014.md) |
+| **T2-P1-014** | Skill 系统                                     | `DONE` | Spike | `feature/skill-system`                 | [tasks/T2-P1-014.md](./tasks/T2-P1-014.md) |
 
 
 ## 5. 开放任务依赖（概览）

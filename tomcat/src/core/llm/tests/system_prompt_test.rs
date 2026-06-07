@@ -360,6 +360,22 @@ fn disabled_skill_absent_from_prompt() {
 }
 
 #[test]
+fn skills_disabled_omits_available_skills_section() {
+    let prompt = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&fixture_skill_set()),
+        Some(&SkillsConfig {
+            enabled: false,
+            ..SkillsConfig::default()
+        }),
+        400_000,
+    );
+    assert!(!prompt.contains("<available_skills>"));
+    assert!(!prompt.contains("<skill name=\"commit\">"));
+}
+
+#[test]
 fn available_skills_section_sits_before_workspace_state() {
     let prompt = build_system_prompt_with_state_and_skills(
         fixture_context(),
@@ -388,6 +404,7 @@ fn fixture_skill_set() -> SkillSet {
             file_path: PathBuf::from("/tmp/commit/SKILL.md"),
             base_dir: PathBuf::from("/tmp/commit"),
             source: SkillSource::Project,
+            allowed_tools: Some(vec!["bash".into(), "read".into()]),
             disable_model_invocation: false,
         },
     );
@@ -399,6 +416,7 @@ fn fixture_skill_set() -> SkillSet {
             file_path: PathBuf::from("/tmp/hidden-review/SKILL.md"),
             base_dir: PathBuf::from("/tmp/hidden-review"),
             source: SkillSource::Project,
+            allowed_tools: None,
             disable_model_invocation: true,
         },
     );

@@ -699,6 +699,7 @@ fn skill_set_with_single_skill(
             file_path,
             base_dir,
             source: SkillSource::Project,
+            allowed_tools: None,
             disable_model_invocation,
         },
     );

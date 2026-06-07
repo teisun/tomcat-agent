@@ -110,7 +110,7 @@
 - [ ] `/model current|list|use <id>` 可查看当前模型、列出 catalog，并把当前会话模型选择持久化到 session；程序重启或 `--resume` 后仍生效，且不覆盖全局 `default_model`
 - [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] Agent 可在对话中调用内置 `web_search` / `web_fetch` 工具完成联网检索与单 URL 抓取：搜索结果需结构归一并做域/SSRF 过滤，抓取结果需返回正文或 `tool-results/` 落盘路径；对应场景见 `E2E-CLI-064` / `E2E-CLI-065`
-- [ ] Skill 系统可在 chat 会话中完成发现 / 披露 / 按名装载闭环：首轮 prompt 注入 `<available_skills>` 元数据，模型可按名调用 `load_skill`；用户可用 `/skill list|reload|use <name> "intent..."` 与外层 `tomcat skill list|reload` 管理技能；`disable-model-invocation` 的技能不出现在 prompt 但仍可被 `/skill use` 显式点名；对应场景见 `E2E-CLI-066` / `E2E-CLI-067` / `E2E-CLI-068`
+- [x] Skill 系统可在 chat 会话中完成发现 / 披露 / 按名装载闭环：首轮 prompt 注入 `<available_skills>` 元数据，模型可按名调用 `load_skill`；用户可用 `/skill list|reload|use <name> "intent..."` 与外层 `tomcat skill list|reload` 管理技能；`disable-model-invocation` 的技能不出现在 prompt 但仍可被 `/skill use` 显式点名；对应场景见 `E2E-CLI-066` / `E2E-CLI-067` / `E2E-CLI-068`
 - [ ] 实现会话管理功能，支持创建、切换、归档、删除、搜索会话，历史持久化不丢失
 - [ ] CLI prompt 与实际模式一致：user 端显示 `u[Chat|<model>]>` / `u[Plan:planning|<model>]>` / `u[Plan:executing|<model>]>` / `u[Plan:pending|<model>]>` / `u[Plan:completed|<model>]>`，agent 端显示 `agent.<id>[Plan:planning]>` / `agent.<id>[Plan:executing]>` / `agent.<id>[Plan:pending]>` / `agent.<id>[Plan:completed]>`；普通聊天维持 `agent.<id>>`
 - [ ] `/plan build <plan_id/path>` 成功后立即自动进入首个 EXEC 回合，CLI 可见 `u[Plan:executing]> start building <path>`，无需用户再手动补一句触发执行

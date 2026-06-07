@@ -27,6 +27,7 @@ pub struct Skill {
     pub file_path: PathBuf,
     pub base_dir: PathBuf,
     pub source: SkillSource,
+    pub allowed_tools: Option<Vec<String>>,
     pub disable_model_invocation: bool,
 }
 

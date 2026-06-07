@@ -73,6 +73,7 @@ fn skill(name: &str, description: &str, disable_model_invocation: bool) -> Skill
         file_path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
         base_dir: PathBuf::from(format!("/tmp/{name}")),
         source: SkillSource::Project,
+        allowed_tools: None,
         disable_model_invocation,
     }
 }

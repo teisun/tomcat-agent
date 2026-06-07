@@ -155,6 +155,9 @@ pub fn render_available_skills_prompt(
     context_budget_chars: usize,
     cfg: &crate::infra::config::SkillsConfig,
 ) -> Option<String> {
+    if !cfg.enabled {
+        return None;
+    }
     let total_budget =
         crate::core::skill::compute_skill_prompt_budget_chars(context_budget_chars, cfg);
     let overhead = render_prompt(PromptKey::SystemAvailableSkills, &[("skills_block", "")]).len();

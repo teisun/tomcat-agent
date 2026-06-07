@@ -191,6 +191,7 @@ fn inspect_skill_file(
             file_path: skill_file.to_path_buf(),
             base_dir: base_dir.to_path_buf(),
             source,
+            allowed_tools: frontmatter.allowed_tools,
             disable_model_invocation: frontmatter.disable_model_invocation,
         },
     );
