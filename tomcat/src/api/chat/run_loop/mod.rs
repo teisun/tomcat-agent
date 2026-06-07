@@ -32,7 +32,7 @@ mod rehydrate;
 mod thinking_persist;
 mod workspace_state;
 
-use self::background::{spawn_completion_subscriber, spawn_readline_waker};
+use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 use self::persist::push_turn_message;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
@@ -293,44 +293,26 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     discarded_bytes = discarded
                 );
             }
-            let readline_waker = spawn_readline_waker(ctx.follow_up_signal.clone());
             let raw = match rl.readline(&current_user_prompt(ctx)) {
                 Ok(line) => line,
                 Err(rustyline::error::ReadlineError::Eof) => {
-                    readline_waker.abort();
                     println!("\n再见！");
                     context_state.preheat.abort();
                     break;
                 }
-                Err(rustyline::error::ReadlineError::Interrupted) => {
-                    readline_waker.abort();
+                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(rustyline::error::ReadlineError::Signal(rustyline::error::Signal::Resize)) => {
                     continue;
                 }
-                Err(rustyline::error::ReadlineError::Signal(rustyline::error::Signal::Resize)) => {
-                    readline_waker.abort();
-                    if !ctx.follow_up_queue.lock().is_empty() {
-                        auto_turn_count = 0;
-                        String::new()
-                    } else {
-                        continue;
-                    }
-                }
                 Err(error) => {
-                    readline_waker.abort();
                     eprintln!("输入错误: {}", error);
                     context_state.preheat.abort();
                     break;
                 }
             };
-            readline_waker.abort();
             let trimmed = raw.trim().to_string();
             if trimmed.is_empty() {
-                if !ctx.follow_up_queue.lock().is_empty() {
-                    auto_turn_count = 0;
-                } else {
-                    continue;
-                }
-                String::new()
+                continue;
             } else {
                 let (parsed, history_line) =
                     match dispatch_chat_command(ctx, parse_chat_command(&trimmed), &mut rl).await {

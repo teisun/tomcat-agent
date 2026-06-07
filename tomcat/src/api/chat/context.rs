@@ -48,7 +48,6 @@ pub struct ChatContext {
     pub bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
     pub completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes,
-    pub follow_up_signal: Arc<tokio::sync::Notify>,
     pub delivered_completion:
         Arc<Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>>,
     pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -240,7 +239,6 @@ impl ChatContext {
             Arc::new(Mutex::new(Vec::new()));
         let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let follow_up_signal = Arc::new(tokio::sync::Notify::new());
         let delivered_completion: Arc<
             Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>,
         > = Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -364,7 +362,6 @@ impl ChatContext {
             bash_task_registry,
             follow_up_queue,
             completion_routes,
-            follow_up_signal,
             delivered_completion,
             completion_subscriber_handle,
             gate,

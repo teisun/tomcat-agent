@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use tokio::task::JoinHandle;
 use tracing::warn;
 
@@ -10,7 +8,6 @@ pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
     let registry = ctx.bash_task_registry.clone();
     let routes = ctx.completion_routes.clone();
     let queue = ctx.follow_up_queue.clone();
-    let signal = ctx.follow_up_signal.clone();
     let delivered = ctx.delivered_completion.clone();
 
     let mut rx = registry.subscribe_lifecycle();
@@ -61,7 +58,6 @@ pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
                         cmd = command.replace('"', "\\\""),
                     );
                     queue.lock().push(crate::core::llm::ChatMessage::user(text));
-                    signal.notify_one();
                     eprintln!(
                         "\n[bg] task {} finished (exit={}); queued for next turn.",
                         task_id, exit_code
@@ -80,23 +76,3 @@ pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
         }
     })
 }
-
-pub(super) fn spawn_readline_waker(signal: Arc<tokio::sync::Notify>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        signal.notified().await;
-        wake_blocking_readline();
-    })
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(super) fn wake_blocking_readline() {
-    // `rustyline` 会把 SIGWINCH 转成 `ReadlineError::Signal(Signal::Resize)`；借它把阻塞中的
-    // `readline()` 温和唤醒，让 chat loop 立刻进入 auto-drain，而不是等用户再按一次回车。
-    unsafe {
-        libc::raise(libc::SIGWINCH);
-    }
-}
-
-#[cfg(any(not(unix), target_os = "macos"))]
-// macOS 下优先保证 IME 输入稳定，宁可退回“等用户下一次交互再 drain”。
-pub(super) fn wake_blocking_readline() {}

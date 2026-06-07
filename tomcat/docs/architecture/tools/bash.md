@@ -303,11 +303,11 @@
   - [`bash_task.rs`](../../../src/core/tools/primitive/bash_task.rs)：`spawn()` 起后台 child、pump stdout/stderr 到 `bash-<task_id>.log`、`wait()` 结束后翻 `Finished { exit_code }`；**P1 新增**：每 task 一份 `tokio::sync::Notify` + registry 级 `tokio::sync::broadcast::Sender<BackgroundTaskLifecycleEvent>`、`wait_for_change(task_id, since) -> WakeReason`（按"当前文件长度 vs since"判定，先 `notified()` 再读长度的标准 race-free 顺序）、`subscribe_lifecycle()`、`tail_log(task_id, max_bytes)`；`stop()` 与 wait 任务的终态翻转都受 `lifecycle_emitted` guard 保护，broadcast **每个 task 一生只发一次**。
   - [`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)：`bash run_in_background`、`task_output`、`task_stop`、`task_list` 已全部接线；**P1 新增** `task_output(block=true, timeout_ms=...)` 特判分支：`tokio::select!` 在 `wait_for_change` / `sleep_until(deadline)` / `cancel.cancelled()` / countdown tick 之间多路复用，每 500ms 发一次 `ToolExecutionUpdate(partial_result.phase="waiting_for_output", remainingMs, timeoutMs, taskId, since)`；返回 JSON 在 `block=true` 路径**额外**写出 `wakeReason ∈ {"new_output","finished","timeout"}`；`block=false` 路径**不**写出该字段（向后兼容）。
   - [`accessors.rs`](../../../src/core/agent_loop/accessors.rs)：`follow_up(String)` 行为不变；**P1 新增** `with_shared_follow_up_queue(...)`、`with_completion_routes(...)`、`follow_up_message(ChatMessage)` 三个 builder/typed 入口。
-  - [`api/chat/mod.rs`](../../../src/api/chat/mod.rs)：**P1 新增** `ChatContext.{follow_up_queue, completion_routes, follow_up_signal, delivered_completion, completion_subscriber_handle}`；`spawn_completion_subscriber()` 在 `chat_loop` 启动时 spawn，按 claim-on-entry 状态机决定是否推 synthetic；主循环改造：`run_chat_turn` 返回后若 `follow_up_queue` 非空且 auto-turn 预算（`AUTO_TURN_BUDGET=K=8`）未耗尽则**跳过 readline**直接以 `input=""` 触发下一轮 turn，否则回 readline。`run_chat_turn` 在装配完 messages 后 drain 一次 session 级 `follow_up_queue`，让后台完成事件能在**首轮 reasoning** 之前就被注入；`reasoning_loop` 在每个非 steered、且仍将继续发下一次 LLM 请求的 tool batch 边界，也会再 drain 一次共享 `follow_up_queue`，让后台完成事件不必等整轮收敛才被模型看到。
+- [`api/chat/mod.rs`](../../../src/api/chat/mod.rs)：**P1 新增** `ChatContext.{follow_up_queue, completion_routes, delivered_completion, completion_subscriber_handle}`；`spawn_completion_subscriber()` 在 `chat_loop` 启动时 spawn，按 claim-on-entry 状态机决定是否推 synthetic；主循环改造：`run_chat_turn` 返回后若 `follow_up_queue` 非空且 auto-turn 预算（`AUTO_TURN_BUDGET=K=8`）未耗尽则**跳过 readline**直接以 `input=""` 触发下一轮 turn，否则回 readline。`run_chat_turn` 在装配完 messages 后 drain 一次 session 级 `follow_up_queue`，让后台完成事件能在**首轮 reasoning** 之前就被注入；`reasoning_loop` 在每个非 steered、且仍将继续发下一次 LLM 请求的 tool batch 边界，也会再 drain 一次共享 `follow_up_queue`，让后台完成事件不必等整轮收敛才被模型看到；若 agent 已空闲并阻塞在 `readline()`，则完成事件保留在 queue，待下一次用户交互返回主循环后再由 between-turns drain 自动喂回。
   - [`cli_turn_renderer.rs`](../../../src/api/chat/cli_turn_renderer.rs)：**P1 新增**监听 `WIRE_TOOL_EXECUTION_UPDATE`，把 `task_output(block=true)` 的倒计时渲染成一行 dim 灰行 `[tool] task_output … waiting_for_output  task=<id> remaining=<r>/<t>ms`。
   - [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)：**P1 新增** `task_output` 参数 `block: boolean`、`timeout_ms: integer (默认 5_000、上限 30_000、0 等价 block=false)`；description 教三种使用模式 + `<background-task-finished>` tag 识别契约。
   - [`system_prompt.rs`](../../../src/core/llm/system_prompt.rs)：**P1 新增** `BackgroundShellMonitorSection`（priority 30），把三种使用模式 + tag 识别 + 不鼓励的行为写进 system prompt。
-- **结论**：经过 P1 后，Tomcat 已经具备 Cursor `Shell + AwaitShell + terminal file` 同等量级的 wait/wake 体验（工具级 block=true wait slice + 完成自动回灌）；P2 进一步把"运行中新输出也提前唤醒 / 宿主级空闲 park-wake / 多任务 running 摘要"补齐，详见 [`bash-background-monitor-p2_54f23d9c.plan.md`](../../../../../.cursor/plans/bash-background-monitor-p2_54f23d9c.plan.md)。
+- **结论**：经过 P1 后，Tomcat 已经具备 Cursor `Shell + AwaitShell + terminal file` 同等量级的 wait/observe 体验（工具级 block=true wait slice + 完成自动回灌）；后续增量主要集中在"运行中新输出也提前唤醒 / 多任务 running 摘要"这类观测增强，详见 [`bash-background-monitor-p2_54f23d9c.plan.md`](../../../../../.cursor/plans/bash-background-monitor-p2_54f23d9c.plan.md)。
 
 ##### 参考实现补充对照（聚焦 completion auto-feed）
 
@@ -329,10 +329,9 @@
   - `timeout_ms` 默认 `5_000`、上限 `30_000`（超过即 cap）、`0` 等价 `block=false`。
   - 后台 shell 自然结束（或 stop）时，runtime 在 `chat_loop` 里 spawn 的 lifecycle subscriber 守护 task 监听 `subscribe_lifecycle()`，按 [§ claim-on-entry 状态机](#claim-on-entry-状态机) 决定是否推 synthetic notification 到 session 级 `follow_up_queue`，由 between-turns drain、turn 入口 drain，或 reasoning loop 的 tool-batch 边界 drain 自动喂回 agent。
   - synthetic notification 格式：`<background-task-finished task_id="..." exit_code="..." log_path="..." command="...">tail of last ≤4 KiB</background-task-finished>`，类型为 `ChatMessage::user`。
-  - CLI：`tool_execution_update` 渲染成 dim 灰行做倒计时；后台完成事件通过 `eprintln!` 一行 `[bg] task <id> finished (exit=<c>); queued for next turn.`，**不**打断 `rustyline.readline()`（idle-aware 唤醒在 P2）。
+  - CLI：`tool_execution_update` 渲染成 dim 灰行做倒计时；后台完成事件通过 `eprintln!` 一行 `[bg] task <id> finished (exit=<c>); queued for next turn.`，但**不会**打断正在阻塞的 `rustyline.readline()`；若此时 agent 已空闲在 prompt，事件会留在 queue，待下一次用户交互回到主循环后再被消费。
   - auto-turn 风暴防护：每个真实用户输入之间最多连续 K=8 次 auto-turn，超过强制回 readline。
 - **P2（待办）**：
-  - runtime 在“当前无别的工作可做”时进入 idle-aware 等待；
   - 运行中只要出现**非完成态的新输出**，也能通过 `BackgroundTaskOutputReady` / `BackgroundTasksUpdate` 之类事件提前唤醒；
   - CLI 侧显示倒计时、running 数量、任务摘要，而不是只在 `tool_execution_end` 时一次性吐出结果。
 - **为什么不是新开 `task_wait`**：
@@ -369,7 +368,7 @@ enum CompletionRoute {
 - **lifecycle subscriber（独立 tokio task；`chat_loop` 启动时 spawn，drop 时 abort）**
   - 收到 `BackgroundTaskLifecycleEvent` finished：
     1. 先看 host 内部 `delivered_completion: HashSet<BashTaskId>` 去重；
-    2. 再看 `routes.lock()`：已 `ToolWillDeliver` / `Delivered` → 丢弃；否则 `insert(Delivered)` → 取 `tail_log(task_id, 4096)` → push `ChatMessage::user("<background-task-finished ...>tail</background-task-finished>")` 到 `follow_up_queue` → `notify_one()` 唤醒主循环 → `eprintln!` 提示一行。
+    2. 再看 `routes.lock()`：已 `ToolWillDeliver` / `Delivered` → 丢弃；否则 `insert(Delivered)` → 取 `tail_log(task_id, 4096)` → push `ChatMessage::user("<background-task-finished ...>tail</background-task-finished>")` 到 `follow_up_queue` → `eprintln!` 提示一行。
 
 **正确性**：所有写操作走同一把 `routes` 锁，串行化 dispatcher entry / dispatcher exit / lifecycle subscriber 三方；map 中**至多一个** `task_id` 条目；`Delivered` 是终态；shell 在任何时点完成都被恰好交付一次。
 
