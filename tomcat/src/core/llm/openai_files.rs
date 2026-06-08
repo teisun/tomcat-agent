@@ -165,8 +165,8 @@ impl OpenAiFilesClient {
         if err.is_timeout() {
             return llm_error_with_source(
                 PROVIDER_NAME,
-                LlmErrorStage::RequestTimeout,
-                format!("OpenAI Files {op} 整次 HTTP 请求超时"),
+                LlmErrorStage::ReadTimeout,
+                format!("OpenAI Files {op} 读/空闲超时"),
                 err,
             );
         }

@@ -56,7 +56,6 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
             | LlmErrorStage::BodyRead
             | LlmErrorStage::IdleTimeout
             | LlmErrorStage::ReadTimeout => "retryable_llm_transport_stage",
-            LlmErrorStage::RequestTimeout => "fatal_llm_request_timeout_stage",
             LlmErrorStage::NonStreamStale => "fatal_llm_non_stream_stale_stage",
             LlmErrorStage::Parse => "fatal_llm_parse_stage",
         };
@@ -73,9 +72,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
             | LlmErrorStage::BodyRead
             | LlmErrorStage::IdleTimeout
             | LlmErrorStage::ReadTimeout => LoopError::Retryable(err),
-            LlmErrorStage::RequestTimeout
-            | LlmErrorStage::NonStreamStale
-            | LlmErrorStage::Parse => LoopError::Fatal(err),
+            LlmErrorStage::NonStreamStale | LlmErrorStage::Parse => LoopError::Fatal(err),
         };
     }
     if llm_http_status(&err) == Some(401) {

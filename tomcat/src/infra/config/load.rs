@@ -3,8 +3,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use tracing::warn;
-
 use super::super::brand::{DEFAULT_WORK_DIR, ENV_PREFIX};
 use super::super::error::AppError;
 use super::super::platform::normalize_path;
@@ -394,13 +392,6 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             )));
         }
     }
-    let http_timeout = cfg.llm.http_timeout_sec;
-    if http_timeout != 0 && !(60..=86_400).contains(&http_timeout) {
-        return Err(AppError::Config(format!(
-            "llm.http_timeout_sec 非法: {}（允许 0 或 [60, 86400]）",
-            http_timeout
-        )));
-    }
     let stream_idle_timeout = cfg.llm.stream_timeout_sec;
     if stream_idle_timeout != 0 && !(5..=3_600).contains(&stream_idle_timeout) {
         return Err(AppError::Config(format!(
@@ -421,14 +412,6 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             "llm.http_read_timeout_sec 非法: {}（允许 0 或 [5, 3600]）",
             http_read_timeout
         )));
-    }
-    if http_timeout != 0 && http_timeout < stream_idle_timeout.max(http_read_timeout) {
-        warn!(
-            http_timeout_sec = http_timeout,
-            stream_timeout_sec = stream_idle_timeout,
-            http_read_timeout_sec = http_read_timeout,
-            "llm.http_timeout_sec is lower than other timeout layers"
-        );
     }
     let expires = cfg.llm.files.expires_after_seconds;
     if expires != 0 && !(3_600..=2_592_000).contains(&expires) {

@@ -81,7 +81,6 @@ fn is_retryable_llm_error_matches_truth_table() {
         );
     }
     for stage in [
-        LlmErrorStage::RequestTimeout,
         LlmErrorStage::NonStreamStale,
         LlmErrorStage::Parse,
     ] {

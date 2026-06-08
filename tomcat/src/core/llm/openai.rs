@@ -47,10 +47,6 @@ fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
     )
 }
 
-fn request_timeout_summary(http_timeout_sec: u64) -> String {
-    format!("整次 HTTP 请求超时: http_timeout_sec={}s", http_timeout_sec)
-}
-
 fn non_stream_stale_timeout_error(non_stream_stale_timeout_sec: u64) -> AppError {
     llm_error(
         PROVIDER_NAME,
@@ -62,7 +58,7 @@ fn non_stream_stale_timeout_error(non_stream_stale_timeout_sec: u64) -> AppError
     )
 }
 
-fn map_send_error(prefix: &str, err: reqwest::Error, http_timeout_sec: u64) -> AppError {
+fn map_send_error(prefix: &str, err: reqwest::Error, http_read_timeout_sec: u64) -> AppError {
     if err.is_connect() {
         return llm_error_with_source(
             PROVIDER_NAME,
@@ -74,8 +70,11 @@ fn map_send_error(prefix: &str, err: reqwest::Error, http_timeout_sec: u64) -> A
     if err.is_timeout() {
         return llm_error_with_source(
             PROVIDER_NAME,
-            LlmErrorStage::RequestTimeout,
-            request_timeout_summary(http_timeout_sec),
+            LlmErrorStage::ReadTimeout,
+            format!(
+                "{prefix}读/空闲超时（等待响应头）: http_read_timeout_sec={}s",
+                http_read_timeout_sec
+            ),
             err,
         );
     }
@@ -416,7 +415,6 @@ pub struct OpenAiProvider {
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
     semaphore: Option<Semaphore>,
     retry_count: u32,
-    http_timeout_sec: u64,
     /// 流式空闲超时（秒）；0 表示关闭逐事件超时。
     stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
@@ -487,7 +485,6 @@ impl OpenAiProvider {
             default_model: config.default_model.clone(),
             semaphore,
             retry_count: config.retry_count,
-            http_timeout_sec: config.http_timeout_sec,
             stream_timeout_sec: config.stream_timeout_sec,
             non_stream_stale_timeout_sec: config.non_stream_stale_timeout_sec,
             http_read_timeout_sec: config.http_read_timeout_sec,
@@ -571,7 +568,7 @@ impl OpenAiProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| map_send_error("请求", e, self.http_timeout_sec))?;
+            .map_err(|e| map_send_error("请求", e, self.http_read_timeout_sec))?;
 
         let status = resp.status();
         let bytes = resp
@@ -613,7 +610,7 @@ impl OpenAiProvider {
             .json(body)
             .send()
             .await
-            .map_err(|e| map_send_error("流式请求", e, self.http_timeout_sec))?;
+            .map_err(|e| map_send_error("流式请求", e, self.http_read_timeout_sec))?;
         let status = resp.status();
         if !status.is_success() {
             let bytes = resp

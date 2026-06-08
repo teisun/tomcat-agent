@@ -83,12 +83,8 @@ fn classify_error_idle_timeout_stage_is_retryable() {
 }
 
 #[test]
-fn classify_error_request_timeout_stage_is_fatal() {
-    let e = llm_error(
-        "openai",
-        LlmErrorStage::RequestTimeout,
-        "整次 HTTP 请求超时",
-    );
+fn classify_error_read_timeout_stage_is_retryable() {
+    let e = llm_error("openai", LlmErrorStage::ReadTimeout, "读取响应超时");
     let r = classify_error(e);
-    assert!(matches!(r, LoopError::Fatal(_)));
+    assert!(matches!(r, LoopError::Retryable(_)));
 }

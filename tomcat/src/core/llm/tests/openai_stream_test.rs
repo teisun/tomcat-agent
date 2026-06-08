@@ -753,6 +753,59 @@ async fn stream_post_once_gateway_503_sets_connect_stage() {
 }
 
 #[tokio::test]
+async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
+    let mut delayed = ScriptedHttpResponse::json(
+        200,
+        r#"{"id":"chatcmpl_timeout","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop","index":0}]}"#,
+    );
+    delayed.delay_ms = 1_100;
+    let server = MockHttpServer::start(vec![delayed]).await;
+    let mut provider = stream_test_provider(server.base_url.clone(), None, 0);
+    provider.http_read_timeout_sec = 1;
+    provider.client = reqwest::Client::builder()
+        .no_proxy()
+        .read_timeout(Duration::from_secs(1))
+        .build()
+        .expect("build read-timeout reqwest client");
+    let body = OpenAiRequestBody {
+        model: "gpt-4.1".to_string(),
+        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true),
+        temperature: Some(0.0),
+        max_tokens: Some(16),
+        stream: true,
+        tools: None,
+        stream_options: Some(StreamOptionsBody {
+            include_usage: true,
+        }),
+        reasoning_effort: None,
+        thinking: None,
+    };
+    let err = provider
+        .stream_post_once(&server.base_url, &body)
+        .await
+        .expect_err("响应头迟迟不来时应命中读超时");
+    assert_eq!(llm_stage(&err), Some(LlmErrorStage::ReadTimeout));
+    assert!(OpenAiProvider::is_retriable(&err));
+    let msg = llm_summary(&err).unwrap_or_else(|| err.to_string());
+    assert!(
+        msg.contains("等待响应头"),
+        "错误文案应说明卡在响应头阶段，实际: {}",
+        msg
+    );
+    assert!(
+        msg.contains("http_read_timeout_sec=1s"),
+        "错误文案应带 read timeout 配置，实际: {}",
+        msg
+    );
+    assert!(
+        !msg.contains("1800"),
+        "短超时不应再冒名为 1800s 总超时，实际: {}",
+        msg
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn chat_stream_retries_503_before_first_delta_and_succeeds() {
     use tokio_stream::StreamExt;
 

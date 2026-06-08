@@ -134,9 +134,6 @@ pub struct LlmConfig {
     /// Agent loop 顶层指数退避基础延迟（毫秒）。
     #[serde(default = "default_agent_retry_base_delay_ms")]
     pub agent_retry_base_delay_ms: u64,
-    /// 整次 HTTP 请求总超时（秒）；0 表示不限制。
-    #[serde(default = "default_http_timeout_sec")]
-    pub http_timeout_sec: u64,
     /// 流式 SSE chunk 空闲超时（秒）；0 表示关闭。
     #[serde(default = "default_stream_timeout_sec")]
     pub stream_timeout_sec: u64,
@@ -322,7 +319,6 @@ fn default_llm_retry_count() -> u32 {
 
 pub const DEFAULT_AGENT_MAX_ATTEMPTS: u32 = 4;
 pub const DEFAULT_AGENT_RETRY_BASE_DELAY_MS: u64 = 500;
-pub const DEFAULT_LLM_HTTP_TIMEOUT_SEC: u64 = 1_800;
 pub const DEFAULT_LLM_STREAM_TIMEOUT_SEC: u64 = 180;
 pub const DEFAULT_LLM_NON_STREAM_STALE_TIMEOUT_SEC: u64 = 300;
 pub const DEFAULT_LLM_HTTP_READ_TIMEOUT_SEC: u64 = 120;
@@ -333,10 +329,6 @@ fn default_agent_max_attempts() -> u32 {
 
 fn default_agent_retry_base_delay_ms() -> u64 {
     DEFAULT_AGENT_RETRY_BASE_DELAY_MS
-}
-
-fn default_http_timeout_sec() -> u64 {
-    DEFAULT_LLM_HTTP_TIMEOUT_SEC
 }
 
 fn default_stream_timeout_sec() -> u64 {
@@ -378,7 +370,6 @@ impl Default for LlmConfig {
             retry_count: default_llm_retry_count(),
             agent_max_attempts: default_agent_max_attempts(),
             agent_retry_base_delay_ms: default_agent_retry_base_delay_ms(),
-            http_timeout_sec: default_http_timeout_sec(),
             stream_timeout_sec: default_stream_timeout_sec(),
             non_stream_stale_timeout_sec: default_non_stream_stale_timeout_sec(),
             http_read_timeout_sec: default_http_read_timeout_sec(),

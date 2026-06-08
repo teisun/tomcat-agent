@@ -8,9 +8,6 @@ pub(crate) fn build_http_client(
     proxy_override: Option<&str>,
 ) -> Result<reqwest::Client, AppError> {
     let mut builder = reqwest::Client::builder();
-    if cfg.http_timeout_sec > 0 {
-        builder = builder.timeout(Duration::from_secs(cfg.http_timeout_sec));
-    }
     if cfg.http_read_timeout_sec > 0 {
         builder = builder.read_timeout(Duration::from_secs(cfg.http_read_timeout_sec));
     }

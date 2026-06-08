@@ -12,7 +12,6 @@ pub enum LlmErrorStage {
     BodyRead,
     IdleTimeout,
     ReadTimeout,
-    RequestTimeout,
     NonStreamStale,
     Parse,
 }
@@ -25,7 +24,6 @@ impl fmt::Display for LlmErrorStage {
             Self::BodyRead => "BodyRead",
             Self::IdleTimeout => "IdleTimeout",
             Self::ReadTimeout => "ReadTimeout",
-            Self::RequestTimeout => "RequestTimeout",
             Self::NonStreamStale => "NonStreamStale",
             Self::Parse => "Parse",
         };
