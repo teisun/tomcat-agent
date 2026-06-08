@@ -1,7 +1,6 @@
 use super::super::truncation::floor_char_boundary;
 use super::super::{
-    compact_tool_results, force_drop_oldest_to_target, is_context_overflow_error,
-    layer0_persist_large_results,
+    compact_tool_results, force_drop_oldest_to_target, layer0_persist_large_results,
 };
 use super::mocks::*;
 use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
@@ -12,7 +11,7 @@ use crate::core::session::transcript::{
     append_entry, read_entries_tail, write_header, MessageEntry, SessionHeader, TranscriptEntry,
 };
 use crate::infra::config::ContextConfig;
-use crate::infra::error::AppError;
+use crate::infra::error::{is_context_overflow_text, AppError};
 use crate::infra::event_bus::{DefaultEventBus, EventBus};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -117,14 +116,14 @@ fn force_drop_oldest_to_target_below_half() {
 }
 
 #[test]
-fn is_context_overflow_error_matches() {
-    assert!(is_context_overflow_error(
+fn is_context_overflow_text_matches() {
+    assert!(is_context_overflow_text(
         "context length exceeded: 500000 tokens"
     ));
-    assert!(is_context_overflow_error(
+    assert!(is_context_overflow_text(
         "maximum context token limit reached"
     ));
-    assert!(!is_context_overflow_error("API error 429: rate limit"));
+    assert!(!is_context_overflow_text("API error 429: rate limit"));
 }
 
 #[test]

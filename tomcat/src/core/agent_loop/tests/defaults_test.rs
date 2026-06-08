@@ -4,6 +4,7 @@
 //! 这里的字段访问会立刻编译失败，提示其他构造点（`chat_loop` / 测试 fixtures）同步更新。
 
 use crate::core::agent_loop::{AgentLoopConfig, SubagentType};
+use crate::infra::config::{DEFAULT_AGENT_MAX_ATTEMPTS, DEFAULT_AGENT_RETRY_BASE_DELAY_MS};
 
 #[test]
 fn agent_loop_config_default_includes_subagent_fields() {
@@ -24,6 +25,14 @@ fn agent_loop_config_default_includes_subagent_fields() {
     assert!(
         cfg.review_kind.is_none(),
         "default review_kind should be None for non-reviewer loops"
+    );
+    assert_eq!(
+        cfg.max_attempts, DEFAULT_AGENT_MAX_ATTEMPTS,
+        "default max_attempts should track llm config defaults"
+    );
+    assert_eq!(
+        cfg.retry_base_delay_ms, DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+        "default retry_base_delay_ms should track llm config defaults"
     );
 }
 

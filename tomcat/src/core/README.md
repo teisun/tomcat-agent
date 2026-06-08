@@ -44,14 +44,14 @@ Layer 3  Reasoning Loop
 - **ChatMessage**：统一消息类型（OpenAI wire format），含 `role`/`content`/`tool_calls`/`tool_call_id` 等字段。三个 `#[serde(skip)]` 字段 `msg_id`/`kind`/`timestamp` 携带内部元数据。
 - **MessageKind**：`Normal`/`Steering`/`CompactionSummary`，区分不同语义的 user 消息。
 - **ToolCallInfo**：`{ id, name, arguments }`，仅在流式积累 + 工具执行阶段使用的临时类型。
-- **AgentLoopConfig**：`max_attempts`（默认 3）、`max_tool_rounds`（默认 `usize::MAX`，由 token 预算与工具轮次逻辑兜底）、`retry_base_delay_ms`（默认 300）、`model`、`session_id`、`tool_definitions: Vec<serde_json::Value>`（由调用方 `build_tool_definitions()` 等生成）、`context_config`。
+- **AgentLoopConfig**：`max_attempts`（默认 4，跟随 `[llm].agent_max_attempts`）、`max_tool_rounds`（默认 `usize::MAX`，由 token 预算与工具轮次逻辑兜底）、`retry_base_delay_ms`（默认 500ms，跟随 `[llm].agent_retry_base_delay_ms`，实际等待带 `±20%` jitter 且封顶 8s）、`model`、`session_id`、`tool_definitions: Vec<serde_json::Value>`（由调用方 `build_tool_definitions()` 等生成）、`context_config`。
 - **AgentRunResult**：`{ final_text: String, new_messages: Vec<ChatMessage> }`，run 成功时最后一轮 LLM 文本回复及本次产生的所有新消息。
 - **AgentLoop::new(llm, primitive, event_bus, config, abort_signal)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
 - **AgentLoop::run(&mut self, initial_messages: Vec<ChatMessage>) -> Result<AgentRunResult, AppError>**：主入口；执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。
 - **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `ChatMessage::steering(msg)`；第三层每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
 - **AgentLoop::follow_up(&self, msg: String)**：向 follow_up_queue 推入 `ChatMessage::user(msg)`；第一层循环尾部检查，非空则 drain 追加到 messages 并 continue。
 - **AgentLoop::abort(&self)**：将 `abort_signal` 置为 true；第三层每工具执行前检查，为 true 则返回 `Err` 并发布 agent_end(interrupted)。
-- **LoopError**（内部）：`Retryable(String)`、`Fatal(String)`、`Aborted`；`classify_error(AppError)` 将 429/5xx/超时/请求失败及**上下文/长度类溢出**（含 OpenAI 400 `context_length_exceeded`）归为 Retryable（后者配合 L3 截断）；**401** 与**非溢出类** **400** 归为 Fatal。
+- **LoopError**（内部）：`Retryable(AppError)`、`Fatal(AppError)`、`Aborted`；`classify_error(AppError)` 不再靠字符串猜测，而是优先基于结构化 `LlmError { stage, http_status, summary }` 判定：`401` → Fatal，`is_context_overflow(&AppError)`（如 `http_status=400 + context_length_exceeded`）→ Retryable 并触发 L3 截断，其余 `400` → Fatal，`429/500/502/503/504` 与传输阶段错误 → Retryable。
 
 ### 3.2 上下文管理 API（TASK-17）
 
@@ -69,7 +69,8 @@ Layer 3  Reasoning Loop
 | 2 | preheat + `apply_boundary` | LLM 异步摘要 + boundary switch | timing ②/⑤ |
 | 3 | `force_drop_oldest_to_target` | 强制删除最旧 turn（防御性兜底） | context overflow |
 
-- **is_context_overflow_error(err)**：检测 LLM 错误是否为 context overflow（含 "context" + "length"/"token"/"limit"）。
+- **is_context_overflow(&AppError)**：Agent Loop 生产分类入口；结构化识别 `http_status=400 + context_length_exceeded / maximum context length / reduce the length` 等上下文溢出。
+- **is_context_overflow_text(text)**：仅底层文本规则 helper；供少量纯文本场景与测试复用，不再作为 Agent Loop 生产分类入口。
 
 ## 4. core 层其它子模块（索引）
 
@@ -146,7 +147,7 @@ flowchart TD
 ```
 
 - 第一层：处理用户输入与 FollowUp；每次循环开始注入 steering_queue 中已有消息；Attempt 成功后在循环尾检查 follow_up_queue，非空则 drain 追加后 continue，否则 return。
-- 第二层：按 attempt 计数，Retryable 错误时指数退避后重试，Fatal 或 Aborted 则终止并返回 Err。**ContextOverflow 检测**：若错误匹配 `is_context_overflow_error`，触发 L3 截断后以压缩后的上下文重试。
+- 第二层：按 attempt 计数，Retryable 错误时指数退避后重试，Fatal 或 Aborted 则终止并返回 Err。**ContextOverflow 检测**：若错误命中结构化 `is_context_overflow(&AppError)`，触发 L3 截断后以压缩后的上下文重试。provider 层的流式自动重试只允许发生在**首个 delta 前**；一旦正文已开始输出，后续 `BodyRead` / `Parse` 错误必须原样上抛给第二层，避免重复出字。
 - 第三层：turn_start → chat_stream → message_start/update/end → 若有 tool_calls 则逐个 execute_tool，每工具前检查 abort、每工具后检查 steering_queue；同时**动态更新** `ContextState.estimate_context_chars`。
 
 ### 6.1 上下文管理集成流程（TASK-17）

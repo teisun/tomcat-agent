@@ -45,7 +45,7 @@ pub use config::{
     DEFAULT_TOOLS_WEB_SEARCH_TIMEOUT_MS, DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
     MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
 };
-pub use error::AppError;
+pub use error::{llm_error, llm_http_status_error, AppError, LlmError, LlmErrorStage};
 pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};
 pub use events::wire;
 pub use events::{AgentEvent, ExtensionEvent};

@@ -27,7 +27,7 @@ use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::web_fetch::{types::WebFetchOutput, WebFetchFormat, WebFetchRuntime};
 use crate::core::tools::web_search::types::{Hit, Stats, WebSearchArgs, WebSearchOutput};
 use crate::core::tools::web_search::WebSearchRuntime;
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::DefaultEventBus;
 use crate::AppConfig;
 use parking_lot::{Mutex, RwLock};
@@ -169,7 +169,7 @@ impl PrimitiveExecutor for RecordingSkillPrimitive {
 async fn handle_overflow_retry_skipped_when_not_overflow() {
     let mut agent = make_agent();
     let mut messages = vec![ChatMessage::user("hi")];
-    let err = AppError::Llm("API 错误 429: rate limit".to_string());
+    let err = llm_http_status_error("mock", 429, "rate limit");
     let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
     assert!(
         !stats.applied,
@@ -186,8 +186,11 @@ async fn handle_overflow_retry_skipped_when_not_overflow() {
 async fn handle_overflow_retry_skipped_when_no_context_state() {
     let mut agent = make_agent();
     let mut messages = vec![ChatMessage::user("hi")];
-    let err =
-        AppError::Llm(r#"API 错误 400: {"error":{"code":"context_length_exceeded"}}"#.to_string());
+    let err = llm_http_status_error(
+        "mock",
+        400,
+        r#"{"error":{"code":"context_length_exceeded"}}"#,
+    );
     let stats = handle_overflow_retry(&mut agent, &mut messages, 1, &err);
     assert!(
         !stats.applied,
@@ -1258,8 +1261,8 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
     let start_tc = ToolCallInfo {
         id: "bg-tail".into(),
         name: "bash".into(),
-        arguments: r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 5","run_in_background":true}"#
-            .into(),
+        arguments:
+            r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 5","run_in_background":true}"#.into(),
     };
     let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();

@@ -13,8 +13,13 @@
 
 use super::*;
 use crate::core::llm::provider::LlmProvider;
-use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, StreamEvent, ThinkingSource};
-use crate::infra::error::{llm_stage, llm_summary, AppError, LlmErrorStage};
+use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
+use crate::core::llm::types::{
+    ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent, ThinkingSource,
+};
+use crate::infra::error::{
+    llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError, LlmErrorStage,
+};
 use crate::infra::LlmConfig;
 
 use bytes::Bytes;
@@ -909,8 +914,10 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
 
 #[test]
 fn previous_response_id_error_detection_matches_api_error_body() {
-    let err = AppError::Llm(
-        "API 错误 400: {\"error\":{\"message\":\"invalid previous_response_id\"}}".to_string(),
+    let err = llm_http_status_error(
+        "openai-responses",
+        400,
+        r#"{"error":{"message":"invalid previous_response_id"}}"#,
     );
     assert!(is_previous_response_id_error(&err));
     assert!(request_uses_previous_response_id(&json!({
@@ -1504,15 +1511,235 @@ async fn responses_keepalive_bytes_do_not_trigger_idle_timeout() {
 
 #[test]
 fn is_retriable_detects_429_and_5xx() {
-    assert!(OpenAiResponsesProvider::is_retriable(&AppError::Llm(
-        "API 错误 429: rate limit".to_string()
-    )));
-    assert!(OpenAiResponsesProvider::is_retriable(&AppError::Llm(
-        "API 错误 503: bad gateway".to_string()
-    )));
-    assert!(!OpenAiResponsesProvider::is_retriable(&AppError::Llm(
-        "API 错误 400: bad request".to_string()
-    )));
+    assert!(OpenAiResponsesProvider::is_retriable(
+        &llm_http_status_error("openai-responses", 429, "rate limit",)
+    ));
+    assert!(OpenAiResponsesProvider::is_retriable(
+        &llm_http_status_error("openai-responses", 503, "bad gateway",)
+    ));
+    assert!(!OpenAiResponsesProvider::is_retriable(
+        &llm_http_status_error("openai-responses", 400, "bad request",)
+    ));
+}
+
+fn responses_stream_test_provider(
+    base_url: String,
+    api_base_fallback: Option<String>,
+    retry_count: u32,
+) -> OpenAiResponsesProvider {
+    let mut provider = provider_with_stub_key();
+    provider.base_url = base_url;
+    provider.api_base_fallback = api_base_fallback;
+    provider.retry_count = retry_count;
+    provider.stream_timeout_sec = 0;
+    provider.client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build no-proxy reqwest client");
+    provider
+}
+
+fn responses_stream_test_request() -> ChatRequest {
+    ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5".to_string(),
+        temperature: Some(0.0),
+        max_tokens: Some(16),
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    }
+}
+
+fn responses_sse_body(events: &[&str]) -> String {
+    let mut body = String::new();
+    for event in events {
+        body.push_str("data: ");
+        body.push_str(event);
+        body.push_str("\n\n");
+    }
+    body
+}
+
+#[tokio::test]
+async fn chat_inner_gateway_503_sets_connect_stage() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+        503,
+        r#"{"error":"upstream connect error or disconnect/reset before headers. reset reason: connection timeout"}"#,
+    )])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let body = provider.build_request_body(&responses_stream_test_request(), false);
+    let err = provider
+        .chat_inner_with_body(&body, &server.base_url)
+        .await
+        .expect_err("503 网关错误应直接返回");
+    assert_eq!(llm_http_status(&err), Some(503));
+    assert_eq!(llm_stage(&err), Some(LlmErrorStage::Connect));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responses_chat_stream_retries_503_before_first_delta_and_succeeds() {
+    use tokio_stream::StreamExt;
+
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse::json(
+            503,
+            r#"{"error":"upstream connect error or disconnect/reset before headers. reset reason: connection timeout"}"#,
+        ),
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"Hello"}"#,
+                r#"{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 1);
+    let mut stream = provider
+        .chat_stream(responses_stream_test_request())
+        .await
+        .expect("503 后应自动重试成功");
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        if let StreamEvent::ContentDelta { delta } = item.expect("ok") {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(server.request_count(), 2);
+    assert_eq!(text, "Hello");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responses_chat_stream_retry_exhaustion_returns_structured_503() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse::json(
+            503,
+            r#"{"error":"upstream connect error or disconnect/reset before headers. reset reason: connection timeout"}"#,
+        ),
+        ScriptedHttpResponse::json(
+            503,
+            r#"{"error":"upstream connect error or disconnect/reset before headers. reset reason: connection timeout"}"#,
+        ),
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 1);
+    let err = match provider.chat_stream(responses_stream_test_request()).await {
+        Ok(_) => panic!("503 重试耗尽应返回错误"),
+        Err(err) => err,
+    };
+    assert_eq!(llm_http_status(&err), Some(503));
+    assert_eq!(llm_stage(&err), Some(LlmErrorStage::Connect));
+    assert_eq!(server.request_count(), 2);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responses_chat_stream_non_retryable_401_returns_immediately() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+        401,
+        r#"{"error":"unauthorized"}"#,
+    )])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 2);
+    let err = match provider.chat_stream(responses_stream_test_request()).await {
+        Ok(_) => panic!("401 不应重试"),
+        Err(err) => err,
+    };
+    assert_eq!(llm_http_status(&err), Some(401));
+    assert_eq!(server.request_count(), 1);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responses_chat_stream_after_first_delta_body_read_error_is_not_retried() {
+    use tokio_stream::StreamExt;
+
+    let body = responses_sse_body(&[
+        r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"Hello"}"#,
+    ]);
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body,
+        delay_ms: 0,
+        declared_content_length: None,
+    }
+    .with_declared_content_length(256)])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 2);
+    let mut stream = provider
+        .chat_stream(responses_stream_test_request())
+        .await
+        .expect("首帧出 delta 后的断流应在消费阶段上抛");
+
+    match stream.next().await {
+        Some(Ok(StreamEvent::ContentDelta { delta })) => assert_eq!(delta, "Hello"),
+        other => panic!("首帧应先拿到 content delta，实际: {:?}", other),
+    }
+
+    let err = match stream.next().await {
+        Some(Err(err)) => err,
+        other => panic!("断流后应上抛错误且不重试，实际: {:?}", other),
+    };
+    assert_eq!(llm_stage(&err), Some(LlmErrorStage::BodyRead));
+    assert!(
+        llm_summary(&err)
+            .unwrap_or_else(|| err.to_string())
+            .contains("流读取"),
+        "错误摘要应保留流读取失败语义，实际: {}",
+        err
+    );
+    assert_eq!(server.request_count(), 1, "首个 delta 后不应重新建连");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responses_chat_stream_fallback_after_gateway_503_uses_secondary_base() {
+    use tokio_stream::StreamExt;
+
+    let primary = MockHttpServer::start(vec![ScriptedHttpResponse::json(
+        503,
+        r#"{"error":"upstream connect error or disconnect/reset before headers. reset reason: connection timeout"}"#,
+    )])
+    .await;
+    let fallback = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"fallback"}"#,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(
+        primary.base_url.clone(),
+        Some(fallback.base_url.clone()),
+        0,
+    );
+    let mut stream = provider
+        .chat_stream(responses_stream_test_request())
+        .await
+        .expect("fallback 应成功接管");
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        if let StreamEvent::ContentDelta { delta } = item.expect("ok") {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(primary.request_count(), 1);
+    assert_eq!(fallback.request_count(), 1);
+    assert_eq!(text, "fallback");
+    primary.shutdown().await;
+    fallback.shutdown().await;
 }
 
 // ============================================================================

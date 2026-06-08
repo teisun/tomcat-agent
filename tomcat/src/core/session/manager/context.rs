@@ -6,16 +6,15 @@ use std::time::Instant;
 use chrono::{NaiveDate, Utc};
 
 use crate::core::llm::{ChatMessage, ChatMessageRole, MessageKind};
-use crate::core::session::{
-    append_message_chain::collect_recent_chat_messages_from_tail,
-    find_dangling_tail_tool_call_ids,
-};
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
     ResumeIndexIoStats, ResumeIndexSource,
 };
 use crate::core::session::transcript::{
     read_entries_tail_with_stats, BranchSummaryEntry, TranscriptEntry, TranscriptReadStats,
+};
+use crate::core::session::{
+    append_message_chain::collect_recent_chat_messages_from_tail, find_dangling_tail_tool_call_ids,
 };
 use crate::infra::config::{compute_context_budget_chars, ContextConfig, ResumeHydrationMode};
 use crate::infra::error::AppError;

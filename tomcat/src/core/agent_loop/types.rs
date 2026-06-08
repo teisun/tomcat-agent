@@ -12,7 +12,9 @@ use crate::core::session::manager::MessageAppendSink;
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::{CheckpointStore, NoopStore};
-use crate::infra::config::ContextConfig;
+use crate::infra::config::{
+    ContextConfig, DEFAULT_AGENT_MAX_ATTEMPTS, DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
+};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 
@@ -138,9 +140,9 @@ pub struct AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 3,
+            max_attempts: DEFAULT_AGENT_MAX_ATTEMPTS,
             max_tool_rounds: usize::MAX,
-            retry_base_delay_ms: 300,
+            retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
             model: String::new(),
             session_id: String::new(),
             tool_definitions: Vec::new(),

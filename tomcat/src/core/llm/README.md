@@ -70,8 +70,9 @@
 - **账本全量 vs 出站精简**：transcript 是 continuity 的**全量账本**——hydrate（`chat_message_from_entry` 整条反序列化）与 `/model` 切换（`switch_current_model` 只改 `model_override` + 落 `model_change` 事件）都**不会**清洗历史里的 `reasoning_continuation` / `continuity`。真正的“精简”只发生在**出站 wire 克隆**上，绝不回写主账本。
 - **可 replay 窗口（出站收敛）**：wire builder 出站时按 `ReplayWindow` 收敛——只有**最新 assistant turn** 与**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque/文本 replay；更早的历史轮次一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**不转文本**、**不告警**）。这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
 - **Replay warning 语义**：逐消息 warn 已改为**每请求至多一条汇总告警**（`ReplayDowngradeReport::emit`），且只在窗口内出现「真正降级失败」时触发：**A** 同 profile 却没能 `KeepOpaque`（任何非 keep 动作都算异常 → `SameProfileIncompatible`）；**B** 跨 profile 且连 fallback 文本都救不回、落到 `StripOpaque`（continuity 彻底丢失）。跨 profile 的 `ConvertToText` 属设计内的优雅降级，**不告警**；窗口外老历史的静默 strip 仅计数、**从不告警**。不再使用进程内“问题指纹”缓存压重复 warning。
-- **非流式调用**：`provider.chat(request).await`，请求中 `model_override` 优先于 `request.model` 选模型；支持限流（Semaphore）与可重试错误的指数退避重试；当对主 api_base 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
-- **流式调用**：`provider.chat_stream(request).await` 返回 `Box<dyn Stream<Item = Result<StreamEvent, AppError>>>`，消费端可通过 drop 提前结束以释放连接；同样支持主 base 不通时自动用 `api_base_fallback` 重试。
+- **结构化错误模型**：provider 不再把 `503/429/400` 等语义只塞进一段字符串；统一构造 `LlmError { provider, stage, http_status, summary, source }`，并由 `infra/error/llm.rs` 作为 `is_retryable_llm_error` / `llm_connect_or_network` / `is_context_overflow` 的单一事实来源。
+- **非流式调用**：`provider.chat(request).await`，请求中 `model_override` 优先于 `request.model` 选模型；支持限流（Semaphore）与可重试错误的指数退避重试。provider 级退避现统一为 `500ms` 基准、`±20%` jitter、`4s` cap，并使用饱和算术避免大 `retry_count` 下的整型溢出；当对主 api_base 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
+- **流式调用**：`provider.chat_stream(request).await` 返回 `Box<dyn Stream<Item = Result<StreamEvent, AppError>>>`，消费端可通过 drop 提前结束以释放连接；同样支持主 base 不通时自动用 `api_base_fallback` 重试。**安全边界**：provider 层仅在**首个 delta 产出前**对建连/状态阶段做自动重试；一旦正文已经开始输出，后续 `BodyRead` / `Parse` 错误必须原样上抛，避免重复出字。
 - **Token 统计**：`ChatResponse.usage` / `StreamEvent::Usage` 提供单次 usage；会话级汇总由调用方使用 `SessionTokenUsage` 累加，并写入 SessionEntry（当 003 可用时）。
 
 ## 3. 会话级模型配置

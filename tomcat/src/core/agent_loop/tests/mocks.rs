@@ -53,7 +53,7 @@ impl LlmProvider for MockLlmProvider {
 
 /// `chat_stream` 直接返回 Err（用于 Fatal 401 / 503 等"系统错误"测试）。
 pub(super) struct MockLlmProviderFatal {
-    pub(super) err: String,
+    pub(super) err: Box<dyn Fn() -> AppError + Send + Sync>,
 }
 
 #[async_trait::async_trait]
@@ -71,7 +71,7 @@ impl LlmProvider for MockLlmProviderFatal {
         Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
         AppError,
     > {
-        Err(AppError::Llm(self.err.clone()))
+        Err((self.err)())
     }
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
         Ok(0)

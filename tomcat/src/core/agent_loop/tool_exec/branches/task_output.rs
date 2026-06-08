@@ -232,7 +232,10 @@ async fn finish_blocking_with(
         );
     }
     let delivered = matches!(wake, BlockingWakeKind::Finished)
-        || matches!(wake, BlockingWakeKind::NewOutput | BlockingWakeKind::Timeout) && chunk.finished;
+        || matches!(
+            wake,
+            BlockingWakeKind::NewOutput | BlockingWakeKind::Timeout
+        ) && chunk.finished;
     Ok((value.to_string(), delivered))
 }
 
@@ -350,10 +353,14 @@ mod tests {
             first.content
         );
 
-        let (text, delivered) =
-            finish_blocking_with(&registry, &ticket.task_id, first.next_offset, BlockingWakeKind::Timeout)
-                .await
-                .expect("finish_blocking_with");
+        let (text, delivered) = finish_blocking_with(
+            &registry,
+            &ticket.task_id,
+            first.next_offset,
+            BlockingWakeKind::Timeout,
+        )
+        .await
+        .expect("finish_blocking_with");
         let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
 
         assert_eq!(

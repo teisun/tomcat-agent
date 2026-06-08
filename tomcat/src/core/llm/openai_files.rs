@@ -17,10 +17,15 @@ use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::core::llm::provider::LlmProvider;
+use crate::core::llm::retry_delay::provider_retry_delay;
 use crate::infra::config::LlmFilesConfig;
-use crate::infra::error::AppError;
+use crate::infra::error::{
+    is_retryable_llm_error, llm_error_with_source, llm_http_status_error_with_summary, AppError,
+    LlmErrorStage,
+};
 
 static NEXT_FILES_CLIENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+const PROVIDER_NAME: &str = "openai-files";
 
 /// `< 1MiB`：默认走 inline（A 通道）。
 pub const INLINE_SMALL_BYTES: u64 = 1024 * 1024;
@@ -148,55 +153,120 @@ impl OpenAiFilesClient {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
 
+    fn map_send_error(op: &str, err: reqwest::Error) -> AppError {
+        if err.is_connect() {
+            return llm_error_with_source(
+                PROVIDER_NAME,
+                LlmErrorStage::Connect,
+                format!("OpenAI Files {op} 请求连接失败"),
+                err,
+            );
+        }
+        if err.is_timeout() {
+            return llm_error_with_source(
+                PROVIDER_NAME,
+                LlmErrorStage::RequestTimeout,
+                format!("OpenAI Files {op} 整次 HTTP 请求超时"),
+                err,
+            );
+        }
+        llm_error_with_source(
+            PROVIDER_NAME,
+            LlmErrorStage::Send,
+            format!("OpenAI Files {op} 请求发送失败"),
+            err,
+        )
+    }
+
+    fn map_body_read_error(op: &str, err: reqwest::Error) -> AppError {
+        if err.is_timeout() {
+            return llm_error_with_source(
+                PROVIDER_NAME,
+                LlmErrorStage::ReadTimeout,
+                format!("OpenAI Files {op} 读响应超时"),
+                err,
+            );
+        }
+        llm_error_with_source(
+            PROVIDER_NAME,
+            LlmErrorStage::BodyRead,
+            format!("OpenAI Files {op} 读响应失败"),
+            err,
+        )
+    }
+
+    fn map_parse_error(op: &str, err: impl Into<anyhow::Error>) -> AppError {
+        llm_error_with_source(
+            PROVIDER_NAME,
+            LlmErrorStage::Parse,
+            format!("OpenAI Files {op} 解析响应失败"),
+            err,
+        )
+    }
+
     fn classify_http_error(&self, status: reqwest::StatusCode, body: &str, op: &str) -> AppError {
         let lower = body.to_ascii_lowercase();
         let inline_hint =
             "建议改走 inline 通道（image_b64/file_b64）或切换支持 OpenAI Files API 的 provider";
         if status == reqwest::StatusCode::UNAUTHORIZED || lower.contains("invalid_api_key") {
-            return AppError::Llm(format!(
-                "OpenAI Files {op} 失败：API Key 无效（HTTP {}）。{}",
+            return llm_http_status_error_with_summary(
+                PROVIDER_NAME,
                 status.as_u16(),
-                inline_hint
-            ));
+                format!(
+                    "OpenAI Files {op} 失败：API Key 无效（HTTP {}）。{}",
+                    status.as_u16(),
+                    inline_hint
+                ),
+            );
         }
         if status == reqwest::StatusCode::FORBIDDEN
             || lower.contains("organization_restricted")
             || lower.contains("project")
         {
-            return AppError::Llm(format!(
-                "OpenAI Files {op} 失败：Project/组织未启用 Files（HTTP {}）。{}",
+            return llm_http_status_error_with_summary(
+                PROVIDER_NAME,
                 status.as_u16(),
-                inline_hint
-            ));
+                format!(
+                    "OpenAI Files {op} 失败：Project/组织未启用 Files（HTTP {}）。{}",
+                    status.as_u16(),
+                    inline_hint
+                ),
+            );
         }
         if status == reqwest::StatusCode::BAD_REQUEST && lower.contains("purpose") {
-            return AppError::Llm(format!(
-                "OpenAI Files {op} 失败：purpose 不被接受（HTTP {}）。{}",
+            return llm_http_status_error_with_summary(
+                PROVIDER_NAME,
                 status.as_u16(),
-                inline_hint
-            ));
+                format!(
+                    "OpenAI Files {op} 失败：purpose 不被接受（HTTP {}）。{}",
+                    status.as_u16(),
+                    inline_hint
+                ),
+            );
         }
         if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE || lower.contains("file_too_large") {
-            return AppError::Llm(format!(
-                "OpenAI Files {op} 失败：文件超过 OpenAI 上限（HTTP {}）。",
-                status.as_u16()
-            ));
+            return llm_http_status_error_with_summary(
+                PROVIDER_NAME,
+                status.as_u16(),
+                format!(
+                    "OpenAI Files {op} 失败：文件超过 OpenAI 上限（HTTP {}）。",
+                    status.as_u16()
+                ),
+            );
         }
-        AppError::Llm(format!(
-            "OpenAI Files {op} 失败（HTTP {}）：{}",
+        llm_http_status_error_with_summary(
+            PROVIDER_NAME,
             status.as_u16(),
-            body
-        ))
+            format!(
+                "OpenAI Files {op} 失败（HTTP {}）：{}",
+                status.as_u16(),
+                body
+            ),
+        )
     }
 
     pub fn is_retriable(err: &AppError) -> bool {
-        let s = err.to_string();
-        s.contains("429")
-            || s.contains("500")
-            || s.contains("502")
-            || s.contains("503")
-            || s.contains("请求失败")
-            || s.contains("超时")
+        is_retryable_llm_error(err)
     }
 
     async fn upload_once(
@@ -235,12 +305,12 @@ impl OpenAiFilesClient {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files upload 请求失败: {e}")))?;
+            .map_err(|e| Self::map_send_error("upload", e))?;
         let status = resp.status();
         let body = resp
             .bytes()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files upload 读响应失败: {e}")))?;
+            .map_err(|e| Self::map_body_read_error("upload", e))?;
         if !status.is_success() {
             return Err(self.classify_http_error(
                 status,
@@ -248,8 +318,8 @@ impl OpenAiFilesClient {
                 "upload",
             ));
         }
-        let raw: OpenAiFileObject = serde_json::from_slice(&body)
-            .map_err(|e| AppError::Llm(format!("OpenAI Files upload 解析响应失败: {e}")))?;
+        let raw: OpenAiFileObject =
+            serde_json::from_slice(&body).map_err(|e| Self::map_parse_error("upload", e))?;
         Ok(raw.into_meta())
     }
 
@@ -266,7 +336,7 @@ impl OpenAiFilesClient {
                 Ok(meta) => return Ok(meta),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                        let delay = provider_retry_delay(attempt);
                         warn!(
                             "OpenAI Files upload 失败，{}ms 后重试 ({}/{}): {}",
                             delay.as_millis(),
@@ -295,20 +365,20 @@ impl OpenAiFilesClient {
             .header(header_key, header_value)
             .send()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files get 请求失败: {e}")))?;
+            .map_err(|e| Self::map_send_error("get", e))?;
         let status = resp.status();
         let body = resp
             .bytes()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files get 读响应失败: {e}")))?;
+            .map_err(|e| Self::map_body_read_error("get", e))?;
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         if !status.is_success() {
             return Err(self.classify_http_error(status, &String::from_utf8_lossy(&body), "get"));
         }
-        let raw: OpenAiFileObject = serde_json::from_slice(&body)
-            .map_err(|e| AppError::Llm(format!("OpenAI Files get 解析响应失败: {e}")))?;
+        let raw: OpenAiFileObject =
+            serde_json::from_slice(&body).map_err(|e| Self::map_parse_error("get", e))?;
         Ok(Some(raw.into_meta()))
     }
 
@@ -319,7 +389,7 @@ impl OpenAiFilesClient {
                 Ok(meta) => return Ok(meta),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                        let delay = provider_retry_delay(attempt);
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                     } else {
@@ -341,7 +411,7 @@ impl OpenAiFilesClient {
             .header(header_key, header_value)
             .send()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files delete 请求失败: {e}")))?;
+            .map_err(|e| Self::map_send_error("delete", e))?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             // 幂等成功：404 视为已删除。
@@ -350,7 +420,7 @@ impl OpenAiFilesClient {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files delete 读响应失败: {e}")))?;
+            .map_err(|e| Self::map_body_read_error("delete", e))?;
         if !status.is_success() {
             return Err(self.classify_http_error(
                 status,
@@ -368,7 +438,7 @@ impl OpenAiFilesClient {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                        let delay = provider_retry_delay(attempt);
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                     } else {
@@ -390,17 +460,17 @@ impl OpenAiFilesClient {
             .header(header_key, header_value)
             .send()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files list 请求失败: {e}")))?;
+            .map_err(|e| Self::map_send_error("list", e))?;
         let status = resp.status();
         let body = resp
             .bytes()
             .await
-            .map_err(|e| AppError::Llm(format!("OpenAI Files list 读响应失败: {e}")))?;
+            .map_err(|e| Self::map_body_read_error("list", e))?;
         if !status.is_success() {
             return Err(self.classify_http_error(status, &String::from_utf8_lossy(&body), "list"));
         }
-        let raw: OpenAiFilesListResponse = serde_json::from_slice(&body)
-            .map_err(|e| AppError::Llm(format!("OpenAI Files list 解析响应失败: {e}")))?;
+        let raw: OpenAiFilesListResponse =
+            serde_json::from_slice(&body).map_err(|e| Self::map_parse_error("list", e))?;
         Ok(raw
             .data
             .into_iter()
@@ -427,7 +497,7 @@ impl OpenAiFilesClient {
                 }
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                        let delay = provider_retry_delay(attempt);
                         tokio::time::sleep(delay).await;
                         last_err = Some(e);
                     } else {

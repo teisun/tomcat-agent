@@ -17,10 +17,13 @@
 
 use tracing::info;
 
-use crate::core::compaction::{force_drop_oldest_to_target, is_context_overflow_error};
+use crate::core::compaction::force_drop_oldest_to_target;
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::session::manager::{build_context_from_state, estimated_tokens_from_chars};
-use crate::infra::error::{llm_stage, AppError, LlmErrorStage};
+use crate::infra::error::{
+    is_context_overflow, is_retryable_llm_error, llm_http_status, llm_stage, AppError,
+    LlmErrorStage,
+};
 use crate::infra::events::AgentEvent;
 
 use super::types::{AgentLoop, LoopError, OverflowTrimStats};
@@ -35,15 +38,14 @@ fn err_snippet(s: &str) -> String {
 /// Retryable → 触发 L3 截断路径；否则 400 会被"400 generic"分支吞掉直接 Fatal）：
 ///
 /// 1. `401`                                  → `Fatal`（鉴权失败）
-/// 2. `is_context_overflow_error(msg)`       → `Retryable`（走 L3 trim）
+/// 2. `is_context_overflow(err)`             → `Retryable`（走 L3 trim）
 /// 3. `400` 且不属于 #2                      → `Fatal`（请求体错误，重试无用）
-/// 4. `429 / 500 / 502 / 503 / 超时 / 请求失败`  → `Retryable`（限流 / 网关）
-/// 5. `context` + (`length`|`token`) 启发式 → `Retryable`（防服务端变更）
-/// 6. 其它                                    → `Fatal`（默认收紧）
+/// 4. `429 / 500 / 502 / 503 / 504 / 传输阶段` → `Retryable`（限流 / 网关 / 传输）
+/// 5. 其它                                    → `Fatal`（默认收紧）
 ///
 /// 每个分支写入 `target="tomcat_chat_diag"` 的诊断 `info!`，branch 字面值：
 /// `fatal_401 / retryable_context_overflow / fatal_400_generic / retryable_rate_or_server
-/// / retryable_context_heuristic / fatal_default`（观测面保持稳定）。
+/// / fatal_default`（观测面保持稳定）。
 pub(super) fn classify_error(err: AppError) -> LoopError {
     let s = err.to_string();
     let snippet = err_snippet(&s);
@@ -76,7 +78,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
             | LlmErrorStage::Parse => LoopError::Fatal(err),
         };
     }
-    if s.contains("401") {
+    if llm_http_status(&err) == Some(401) {
         info!(
             target: "tomcat_chat_diag",
             phase = "classify_error",
@@ -86,7 +88,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
         return LoopError::Fatal(err);
     }
     // HTTP 400 + context_length_exceeded 等：须为 Retryable，Attempt loop 才能走 L3 截断。
-    if is_context_overflow_error(&s) {
+    if is_context_overflow(&err) {
         info!(
             target: "tomcat_chat_diag",
             phase = "classify_error",
@@ -95,7 +97,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
         );
         return LoopError::Retryable(err);
     }
-    if s.contains("400") {
+    if llm_http_status(&err) == Some(400) {
         info!(
             target: "tomcat_chat_diag",
             phase = "classify_error",
@@ -104,26 +106,11 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
         );
         return LoopError::Fatal(err);
     }
-    if s.contains("429")
-        || s.contains("500")
-        || s.contains("502")
-        || s.contains("503")
-        || s.contains("请求失败")
-        || s.contains("超时")
-    {
+    if is_retryable_llm_error(&err) {
         info!(
             target: "tomcat_chat_diag",
             phase = "classify_error",
             branch = "retryable_rate_or_server",
-            snippet = %snippet
-        );
-        return LoopError::Retryable(err);
-    }
-    if s.contains("context") && (s.contains("length") || s.contains("token")) {
-        info!(
-            target: "tomcat_chat_diag",
-            phase = "classify_error",
-            branch = "retryable_context_heuristic",
             snippet = %snippet
         );
         return LoopError::Retryable(err);
@@ -168,7 +155,7 @@ pub(super) fn handle_overflow_retry(
     err: &AppError,
 ) -> OverflowTrimStats {
     let err_text = err.to_string();
-    let overflow_hit = is_context_overflow_error(&err_text);
+    let overflow_hit = is_context_overflow(err);
     let context_state_some = agent.context_state.is_some();
     let err_snip = err_snippet(&err_text);
     info!(

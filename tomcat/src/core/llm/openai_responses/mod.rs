@@ -38,10 +38,12 @@ use tracing::warn;
 use crate::core::llm::http_client::build_http_client;
 use crate::infra::config::LlmFilesConfig;
 use crate::infra::error::{
-    llm_connect_or_network, llm_error, llm_error_with_source, llm_stage, AppError, LlmErrorStage,
+    is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
+    llm_http_status_error, llm_http_status_error_with_stage, AppError, LlmErrorStage,
 };
 use crate::infra::LlmConfig;
 
+use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
@@ -143,6 +145,32 @@ fn map_parse_error(prefix: &str, err: impl Into<anyhow::Error>) -> AppError {
         format!("{prefix}失败"),
         err,
     )
+}
+
+fn gateway_http_stage(status: u16, body: &str) -> Option<LlmErrorStage> {
+    if !matches!(status, 502..=504) {
+        return None;
+    }
+    let lower = body.to_lowercase();
+    if lower.contains("upstream connect")
+        || lower.contains("disconnect/reset before headers")
+        || lower.contains("connection timeout")
+        || lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("reset reason")
+        || lower.contains("dns")
+    {
+        return Some(LlmErrorStage::Connect);
+    }
+    None
+}
+
+fn map_http_status_error(status: reqwest::StatusCode, body: &[u8]) -> AppError {
+    let message = String::from_utf8_lossy(body).into_owned();
+    if let Some(stage) = gateway_http_stage(status.as_u16(), &message) {
+        return llm_http_status_error_with_stage(PROVIDER_NAME, stage, status.as_u16(), message);
+    }
+    llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
 }
 
 /// `POST {base}/v1/responses` 适配器；与 [`OpenAiProvider`] 共享 [`LlmConfig`] 横切字段
@@ -422,12 +450,7 @@ impl OpenAiResponsesProvider {
             .map_err(|e| map_body_read_error("读取响应", e, self.http_read_timeout_sec))?;
 
         if !status.is_success() {
-            let msg = String::from_utf8_lossy(&bytes);
-            return Err(AppError::Llm(format!(
-                "API 错误 {}: {}",
-                status.as_u16(),
-                msg
-            )));
+            return Err(map_http_status_error(status, &bytes));
         }
 
         let raw: Value =
@@ -449,7 +472,7 @@ impl OpenAiResponsesProvider {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if Self::is_retriable(&e) && attempt < self.retry_count {
-                        let delay = Duration::from_millis(500 * 2u64.pow(attempt));
+                        let delay = provider_retry_delay(attempt);
                         warn!(
                             "Responses 请求失败，{}ms 后重试 ({}/{}): {}",
                             delay.as_millis(),
@@ -482,23 +505,7 @@ impl OpenAiResponsesProvider {
     }
 
     fn is_retriable(err: &AppError) -> bool {
-        if let Some(stage) = llm_stage(err) {
-            return matches!(
-                stage,
-                LlmErrorStage::Connect
-                    | LlmErrorStage::Send
-                    | LlmErrorStage::BodyRead
-                    | LlmErrorStage::IdleTimeout
-                    | LlmErrorStage::ReadTimeout
-            );
-        }
-        let s = err.to_string();
-        s.contains("429")
-            || s.contains("500")
-            || s.contains("502")
-            || s.contains("503")
-            || s.contains("请求失败")
-            || s.contains("超时")
+        is_retryable_llm_error(err)
     }
 
     fn is_connect_or_network_error(err: &AppError) -> bool {
@@ -530,32 +537,55 @@ impl OpenAiResponsesProvider {
                 .bytes()
                 .await
                 .map_err(|e| map_body_read_error("读取错误响应", e, self.http_read_timeout_sec))?;
-            let msg = String::from_utf8_lossy(&bytes);
-            return Err(AppError::Llm(format!(
-                "API 错误 {}: {}",
-                status.as_u16(),
-                msg
-            )));
+            return Err(map_http_status_error(status, &bytes));
         }
         Ok(resp)
+    }
+
+    async fn stream_post_with_retry(
+        &self,
+        base_url: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, AppError> {
+        let mut last_err = None;
+        for attempt in 0..=self.retry_count {
+            match self.stream_post_once(base_url, body).await {
+                Ok(resp) => return Ok(resp),
+                Err(err) if Self::is_retriable(&err) && attempt < self.retry_count => {
+                    let delay = provider_retry_delay(attempt);
+                    warn!(
+                        "Responses 流式建连失败，{}ms 后重试 ({}/{}): {}",
+                        delay.as_millis(),
+                        attempt + 1,
+                        self.retry_count,
+                        err
+                    );
+                    tokio::time::sleep(delay).await;
+                    last_err = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| AppError::Llm("Responses 流式建连重试耗尽".to_string())))
     }
 
     async fn stream_post_with_base_fallback(
         &self,
         body: &Value,
     ) -> Result<reqwest::Response, AppError> {
-        let resp = self.stream_post_once(&self.base_url, body).await;
-        match resp {
-            Ok(r) => Ok(r),
-            Err(e) if Self::is_connect_or_network_error(&e) && self.api_base_fallback.is_some() => {
+        match self.stream_post_with_retry(&self.base_url, body).await {
+            Ok(resp) => Ok(resp),
+            Err(err)
+                if Self::is_connect_or_network_error(&err) && self.api_base_fallback.is_some() =>
+            {
                 warn!(
                     "流式主 API 不可达，尝试 fallback: {:?}",
                     self.api_base_fallback
                 );
-                self.stream_post_once(self.api_base_fallback.as_deref().unwrap(), body)
+                self.stream_post_with_retry(self.api_base_fallback.as_deref().unwrap(), body)
                     .await
             }
-            Err(e) => Err(e),
+            Err(err) => Err(err),
         }
     }
 }

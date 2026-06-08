@@ -298,11 +298,7 @@ fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
         "TTY 倒计时应使用回车覆盖同一行: {:?}",
         err
     );
-    assert!(
-        !err.contains('\n'),
-        "TTY 倒计时不应每次追加换行: {:?}",
-        err
-    );
+    assert!(!err.contains('\n'), "TTY 倒计时不应每次追加换行: {:?}", err);
     assert!(err.contains("\x1b[90m"), "倒计时应使用 dim 灰: {:?}", err);
 }
 
