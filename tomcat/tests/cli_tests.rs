@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::core::session::DEFAULT_SESSION_KEY;
 use tomcat::{
-    init_context_state, run_chat_turn, AppConfig, AppError, BashResult, Capabilities, ChatContext,
-    ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult, EditOperation, LlmProvider,
-    LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager,
-    StreamEvent, WriteFileResult,
+    init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
+    Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult,
+    EditOperation, LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation,
+    ResolvedCall, SessionManager, StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 use wiremock::matchers::{method, path};
@@ -64,21 +64,45 @@ fn load_current_transcript_for_work_dir(work_dir: &Path) -> String {
 
 fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
     let addr = listener.local_addr().expect("local addr");
+    listener
+        .set_nonblocking(true)
+        .expect("set mock llm server nonblocking");
     let handle = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut buf = [0u8; 8192];
-        let _ = stream.read(&mut buf);
-        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
-        let first =
-            format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n");
-        let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-        stream.write_all(headers.as_bytes()).expect("write headers");
-        stream.write_all(first.as_bytes()).expect("write delta");
-        stream.write_all(finish.as_bytes()).expect("write finish");
-        stream.flush().expect("flush");
+        let mut served = 0usize;
+        let mut last_activity = Instant::now();
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    served += 1;
+                    last_activity = Instant::now();
+                    let mut buf = [0u8; 8192];
+                    let _ = stream.read(&mut buf);
+                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+                    let first = format!(
+                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n"
+                    );
+                    let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
+                    stream.write_all(headers.as_bytes()).expect("write headers");
+                    stream.write_all(first.as_bytes()).expect("write delta");
+                    stream.write_all(finish.as_bytes()).expect("write finish");
+                    stream.flush().expect("flush");
+                    if served >= 4 {
+                        break;
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    if served > 0 && last_activity.elapsed() > Duration::from_secs(1) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => panic!("accept: {err}"),
+            }
+        }
     });
     (format!("http://{addr}"), handle)
 }
@@ -2675,9 +2699,8 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     common::setup_logging();
     common::load_openai_test_env();
-    let _span =
-        info_span!("test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli")
-            .entered();
+    let _span = info_span!("test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli")
+        .entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016g_timeout_snapshot");
     let prompt = concat!(
@@ -2694,8 +2717,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     .to_string();
 
     info!("Act: tomcat chat 触发 timeout tail snapshot bounded case，timeout 90s");
-    let run =
-        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(90));
+    let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(90));
     let stdout = run.stdout;
     let stderr = run.stderr;
     info!("[tomcat chat stdout] {}", trunc(&stdout, 1800));
@@ -3581,7 +3603,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .env("no_proxy", "127.0.0.1,localhost")
         .current_dir(workspace.path())
         .write_stdin("/skill list\n/skill reload\n/skill use secret summarize current diff\n")
-        .timeout(std::time::Duration::from_secs(10));
+        .timeout(std::time::Duration::from_secs(20));
     let output = c.output().expect("chat should exit");
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -4005,11 +4027,14 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
 #[tokio::test]
 async fn test_preturn_append_invariant_heals_and_continues_same_input() {
     common::setup_logging();
-    let _span = info_span!("test_preturn_append_invariant_heals_and_continues_same_input").entered();
+    let _span =
+        info_span!("test_preturn_append_invariant_heals_and_continues_same_input").entered();
 
     const ENV_KEY: &str = "TOMCAT_PRETURN_APPEND_RETRY_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
-    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream("CONTINUE_OK")]));
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream(
+        "CONTINUE_OK",
+    )]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.primitive = Arc::new(DeterministicMockPrimitive);
 
@@ -4082,7 +4107,8 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
             continued_idx = Some(idx);
         }
     }
-    let interrupted_idx = interrupted_idx.expect("transcript should contain healed interrupted tool result");
+    let interrupted_idx =
+        interrupted_idx.expect("transcript should contain healed interrupted tool result");
     let continued_idx = continued_idx.expect("transcript should contain continued user input");
     assert!(
         interrupted_idx < continued_idx,
@@ -4100,7 +4126,9 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
 
     const ENV_KEY: &str = "TOMCAT_PRETURN_APPEND_SINGLE_INPUT_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
-    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream("CONTINUE_ONCE")]));
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream(
+        "CONTINUE_ONCE",
+    )]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.primitive = Arc::new(DeterministicMockPrimitive);
 
@@ -4144,6 +4172,137 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
         1,
         "原输入只应被消费一次，不应要求用户重输或重复 append；actual transcript: {}",
         trunc(&transcript, 800)
+    );
+
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn test_cli_chat_path_retries_gateway_503_and_recovers_same_turn() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_cli_chat_path_retries_gateway_503_and_recovers_same_turn").entered();
+
+    const ENV_KEY: &str = "TOMCAT_CLI_GATEWAY_503_RETRY_KEY";
+    let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    ctx.config.llm.agent_max_attempts = 2;
+    ctx.config.llm.agent_retry_base_delay_ms = 0;
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+        ))],
+        cli_text_stream("CLI_RETRY_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请在 503 后自动恢复",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("瞬时 503 后应完成当前轮，实际: {other:?}"),
+    };
+    assert!(
+        result.final_text.contains("CLI_RETRY_OK"),
+        "瞬时 503 后应自动恢复，实际 final_text: {:?}",
+        result.final_text
+    );
+
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[tokio::test]
+async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn")
+            .entered();
+
+    const ENV_KEY: &str = "TOMCAT_CLI_GATEWAY_503_EXHAUST_KEY";
+    let (work_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    ctx.config.llm.agent_max_attempts = 2;
+    ctx.config.llm.agent_retry_base_delay_ms = 0;
+    let failing_llm = Arc::new(DeterministicMockLlm::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+        ))],
+    ]));
+    install_fixed_resolver(&mut ctx, failing_llm, "gpt-5.4");
+    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "第一轮会失败但应保留进度",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("first run_chat_turn timeout 5s")
+    .expect("first run_chat_turn result");
+    assert!(
+        matches!(first, tomcat::AgentRunOutcome::Failed(_)),
+        "503 重试耗尽后当前轮应失败"
+    );
+    let transcript_after_fail = load_current_transcript_for_work_dir(work_dir.path());
+    assert!(
+        transcript_after_fail.contains("第一轮会失败但应保留进度"),
+        "失败轮的用户输入应已落盘保留，actual transcript: {}",
+        trunc(&transcript_after_fail, 800)
+    );
+
+    let success_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream(
+        "CLI_CONTINUE_OK",
+    )]));
+    install_fixed_resolver(&mut ctx, success_llm, "gpt-5.4");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "第二轮继续",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("second run_chat_turn timeout 5s")
+    .expect("second run_chat_turn result");
+    let result = match second {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("失败后下一轮仍应可继续，实际: {other:?}"),
+    };
+    assert!(
+        result.final_text.contains("CLI_CONTINUE_OK"),
+        "失败后下一轮应能继续完成，实际 final_text: {:?}",
+        result.final_text
     );
 
     unsafe { std::env::remove_var(ENV_KEY) };

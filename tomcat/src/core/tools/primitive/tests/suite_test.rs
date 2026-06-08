@@ -1134,6 +1134,9 @@ async fn edit_overlap_rejected() {
     assert!(r.is_err(), "重叠段必须拒绝");
     let msg = r.unwrap_err().to_string();
     assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
+    assert!(msg.contains("edits[0]"), "错误文案应指出左侧段号：{}", msg);
+    assert!(msg.contains("edits[1]"), "错误文案应指出右侧段号：{}", msg);
+    assert!(msg.contains("第 1 行"), "错误文案应给出行号：{}", msg);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         original,
@@ -1164,6 +1167,32 @@ async fn edit_overlap_adjacent_not_rejected() {
 }
 
 #[tokio::test]
+async fn edit_overlap_nested_reports_subset_hint() {
+    let dir = temp_edit_dir("tomcat_edit_overlap_nested");
+    let f = dir.join("nested.txt");
+    std::fs::write(&f, "abcdef\n").unwrap();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let err = exec
+        .edit_file(
+            &f.to_string_lossy(),
+            vec![edit_seg("abcdef", "X", false), edit_seg("abc", "Y", false)],
+            "p1",
+        )
+        .await
+        .expect_err("嵌套 edit 必须拒绝");
+    let msg = err.to_string();
+    assert!(msg.contains("Overlap"), "错误文案应含 Overlap：{}", msg);
+    assert!(msg.contains("edits[0]"), "错误文案应指出外层段号：{}", msg);
+    assert!(msg.contains("edits[1]"), "错误文案应指出内层段号：{}", msg);
+    assert!(msg.contains("嵌套包含"), "错误文案应指出嵌套特例：{}", msg);
+}
+
+#[tokio::test]
 async fn edit_validation_failure_restores_or_noop() {
     // NotFound：磁盘必须未变 + 无 .bak。
     let dir = temp_edit_dir("tomcat_edit_notfound");
@@ -1186,6 +1215,16 @@ async fn edit_validation_failure_restores_or_noop() {
     assert!(r.is_err());
     let msg = r.unwrap_err().to_string();
     assert!(msg.contains("NotFound"), "错误文案应含 NotFound：{}", msg);
+    assert!(
+        msg.contains("Stale"),
+        "NotFound 应提示 stale/重读引导：{}",
+        msg
+    );
+    assert!(
+        msg.contains("连续原文"),
+        "NotFound 应提示连续片段约束：{}",
+        msg
+    );
     assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
     assert!(!dir.join("e.bak").exists());
 
@@ -1372,6 +1411,11 @@ async fn edit_notfound_plain_missing_stays_plain_notfound() {
     assert!(
         msg.contains("escape_debug"),
         "普通 NotFound 应附 escape_debug 摘要：{}",
+        msg
+    );
+    assert!(
+        msg.contains("Stale"),
+        "普通 NotFound 也应带 stale 引导：{}",
         msg
     );
     assert_eq!(std::fs::read_to_string(&f).unwrap(), original);

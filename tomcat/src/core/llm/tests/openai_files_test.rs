@@ -11,7 +11,7 @@ use crate::core::llm::openai_files::{
     upload_decision_by_size, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime, UploadDecision,
 };
 use crate::core::llm::types::ChatMessageContentPart;
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_error, llm_http_status, llm_http_status_error, LlmErrorStage};
 
 #[derive(Debug, Clone)]
 struct ScriptedResponse {
@@ -220,15 +220,69 @@ fn registry_path_sanitizes_session_key() {
 
 #[test]
 fn is_retriable_parity_with_responses() {
-    assert!(OpenAiFilesClient::is_retriable(&AppError::Llm(
-        "API 错误 429: rate limit".to_string()
+    assert!(OpenAiFilesClient::is_retriable(&llm_http_status_error(
+        "openai-files",
+        429,
+        "rate limit",
     )));
-    assert!(OpenAiFilesClient::is_retriable(&AppError::Llm(
-        "请求失败: connection timeout".to_string()
+    assert!(OpenAiFilesClient::is_retriable(&llm_error(
+        "openai-files",
+        LlmErrorStage::Connect,
+        "connection timeout",
     )));
-    assert!(!OpenAiFilesClient::is_retriable(&AppError::Llm(
-        "API 错误 400: bad request".to_string()
+    assert!(!OpenAiFilesClient::is_retriable(&llm_http_status_error(
+        "openai-files",
+        400,
+        "bad request",
     )));
+}
+
+#[test]
+fn classify_http_error_preserves_status_and_guidance() {
+    let client = OpenAiFilesClient::new_for_test(
+        test_http_client(),
+        "https://api.openai.com".to_string(),
+        "stub".to_string(),
+        0,
+        86_400,
+    );
+    for (status, body, needle) in [
+        (
+            reqwest::StatusCode::UNAUTHORIZED,
+            r#"{"error":"invalid_api_key"}"#,
+            "API Key 无效",
+        ),
+        (
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":"organization_restricted"}"#,
+            "Project/组织未启用 Files",
+        ),
+        (
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"purpose is invalid"}"#,
+            "purpose 不被接受",
+        ),
+        (
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            r#"{"error":"file_too_large"}"#,
+            "文件超过 OpenAI 上限",
+        ),
+    ] {
+        let err = client.classify_http_error(status, body, "upload");
+        assert_eq!(llm_http_status(&err), Some(status.as_u16()));
+        assert!(
+            err.to_string().contains(needle),
+            "status={} 文案应包含 `{}`，实际: {}",
+            status,
+            needle,
+            err
+        );
+        assert!(
+            !OpenAiFilesClient::is_retriable(&err),
+            "status={} 不应被视为可重试",
+            status
+        );
+    }
 }
 
 #[test]

@@ -36,10 +36,3 @@ pub fn force_drop_oldest_to_target(state: &mut ContextState) -> (usize, usize) {
     }
     (turns_removed, chars_removed)
 }
-
-/// 检测 LLM 错误消息是否表示 context overflow。
-pub fn is_context_overflow_error(err: &str) -> bool {
-    let lower = err.to_lowercase();
-    lower.contains("context")
-        && (lower.contains("length") || lower.contains("token") || lower.contains("limit"))
-}

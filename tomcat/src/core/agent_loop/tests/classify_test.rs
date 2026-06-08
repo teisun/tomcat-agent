@@ -5,18 +5,18 @@
 
 use crate::core::agent_loop::error_classifier::classify_error;
 use crate::core::agent_loop::LoopError;
-use crate::infra::error::{llm_error, AppError, LlmErrorStage};
+use crate::infra::error::{llm_error, llm_http_status_error, LlmErrorStage};
 
 #[test]
 fn classify_error_retryable_429() {
-    let e = AppError::Llm("API 错误 429: rate limit".to_string());
+    let e = llm_http_status_error("openai", 429, "rate limit");
     let r = classify_error(e);
     assert!(matches!(r, LoopError::Retryable(_)));
 }
 
 #[test]
 fn classify_error_fatal_401() {
-    let e = AppError::Llm("API 错误 401: unauthorized".to_string());
+    let e = llm_http_status_error("openai", 401, "unauthorized");
     let r = classify_error(e);
     assert!(matches!(r, LoopError::Fatal(_)));
 }
@@ -24,7 +24,7 @@ fn classify_error_fatal_401() {
 #[test]
 fn classify_error_context_length_400_is_retryable() {
     let body = r#"{"error":{"message":"Input tokens exceed limit","type":"invalid_request_error","param":"messages","code":"context_length_exceeded"}}"#;
-    let e = AppError::Llm(format!("API 错误 400: {}", body));
+    let e = llm_http_status_error("openai", 400, body);
     let r = classify_error(e);
     assert!(
         matches!(r, LoopError::Retryable(_)),
@@ -34,10 +34,43 @@ fn classify_error_context_length_400_is_retryable() {
 
 #[test]
 fn classify_error_generic_400_stays_fatal() {
-    let e = AppError::Llm(
-        r#"API 错误 400: {"error":{"message":"invalid model","type":"invalid_request_error"}}"#
-            .to_string(),
+    let e = llm_http_status_error(
+        "openai",
+        400,
+        r#"{"error":{"message":"invalid model","type":"invalid_request_error"}}"#,
     );
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Fatal(_)));
+}
+
+#[test]
+fn classify_error_retryable_503() {
+    let e = llm_http_status_error(
+        "openai",
+        503,
+        "upstream connect error or disconnect/reset before headers",
+    );
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Retryable(_)));
+}
+
+#[test]
+fn classify_error_retryable_504() {
+    let e = llm_http_status_error("openai", 504, "gateway timeout");
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Retryable(_)));
+}
+
+#[test]
+fn classify_error_retryable_500() {
+    let e = llm_http_status_error("openai", 500, "internal error");
+    let r = classify_error(e);
+    assert!(matches!(r, LoopError::Retryable(_)));
+}
+
+#[test]
+fn classify_error_fatal_403() {
+    let e = llm_http_status_error("openai", 403, "forbidden");
     let r = classify_error(e);
     assert!(matches!(r, LoopError::Fatal(_)));
 }
@@ -50,12 +83,8 @@ fn classify_error_idle_timeout_stage_is_retryable() {
 }
 
 #[test]
-fn classify_error_request_timeout_stage_is_fatal() {
-    let e = llm_error(
-        "openai",
-        LlmErrorStage::RequestTimeout,
-        "整次 HTTP 请求超时",
-    );
+fn classify_error_read_timeout_stage_is_retryable() {
+    let e = llm_error("openai", LlmErrorStage::ReadTimeout, "读取响应超时");
     let r = classify_error(e);
-    assert!(matches!(r, LoopError::Fatal(_)));
+    assert!(matches!(r, LoopError::Retryable(_)));
 }

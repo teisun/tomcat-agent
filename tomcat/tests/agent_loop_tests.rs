@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::{
-    init_context_state, run_chat_turn, wire, AgentLoop, AgentLoopConfig, AppConfig, AppError,
-    BashResult, Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DefaultEventBus,
-    DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, LlmResolver,
-    LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, StreamEvent, WriteFileResult,
+    init_context_state, llm_http_status_error, run_chat_turn, wire, AgentLoop, AgentLoopConfig,
+    AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage, ChatRequest,
+    ChatResponse, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext,
+    LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
+    StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -106,7 +107,7 @@ impl LlmProvider for RecordingMockLlm {
 
 /// 立即返回给定错误的 LLM Mock（用于 Fatal / Retryable 测试）。
 struct MockLlmFatal {
-    error: String,
+    error: Box<dyn Fn() -> AppError + Send + Sync>,
 }
 
 #[async_trait]
@@ -115,7 +116,7 @@ impl LlmProvider for MockLlmFatal {
         "mock_fatal"
     }
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
-        Err(AppError::Llm(self.error.clone()))
+        Err((self.error)())
     }
     async fn chat_stream(
         &self,
@@ -124,7 +125,7 @@ impl LlmProvider for MockLlmFatal {
         Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
         AppError,
     > {
-        Err(AppError::Llm(self.error.clone()))
+        Err((self.error)())
     }
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
         Ok(0)
@@ -889,8 +890,10 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     info!(
         "Arrange: Stream1 返回 429 错误事件；Stream2 返回成功文本；retry_base_delay_ms=0 避免等待"
     );
-    let stream_err = vec![Err(AppError::Llm(
-        "API 错误 429: rate limit exceeded".to_string(),
+    let stream_err = vec![Err(llm_http_status_error(
+        "mock",
+        429,
+        "rate limit exceeded",
     ))];
     let stream_ok = text_stream("retried ok");
     let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
@@ -923,6 +926,105 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
         result.final_text
     );
 
+    Ok(())
+}
+
+/// [网关 503 自动重试成功] 首次返回结构化 503，第 2 次返回成功文本。
+#[tokio::test]
+async fn test_agent_loop_gateway_503_retries_and_succeeds() -> Result<(), Box<dyn std::error::Error>>
+{
+    common::setup_logging();
+    let _span = info_span!("test_agent_loop_gateway_503_retries_and_succeeds").entered();
+
+    let stream_err = vec![Err(llm_http_status_error(
+        "mock",
+        503,
+        "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+    ))];
+    let stream_ok = text_stream("retried 503 ok");
+    let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
+    let primitive = Arc::new(MockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        model: "mock-model".to_string(),
+        session_id: "sess-503-retry".to_string(),
+        max_attempts: 3,
+        retry_base_delay_ms: 0,
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        agent.run(vec![ChatMessage::user("hi")]),
+    )
+    .await
+    .map_err(|_| "run() 超时 10s")?
+    .unwrap();
+    assert_eq!(result.final_text, "retried 503 ok");
+    Ok(())
+}
+
+/// [503 耗尽] 结构化 503 达到 max_attempts 后应失败，并发出 AutoRetryEnd(success=false)。
+#[tokio::test]
+async fn test_agent_loop_retryable_503_exhaustion_emits_auto_retry_end(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let _span =
+        info_span!("test_agent_loop_retryable_503_exhaustion_emits_auto_retry_end").entered();
+
+    let llm = Arc::new(MockLlm::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+        ))],
+    ]));
+    let primitive = Arc::new(MockPrimitive);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_end_payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let retry_end_payloads_cb = Arc::clone(&retry_end_payloads);
+    event_bus.on(
+        wire::WIRE_AUTO_RETRY_END,
+        Box::new(move |ctx: EventContext| {
+            retry_end_payloads_cb
+                .lock()
+                .unwrap()
+                .push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let config = AgentLoopConfig {
+        model: "mock-model".to_string(),
+        session_id: "sess-503-fail".to_string(),
+        max_attempts: 2,
+        retry_base_delay_ms: 0,
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut agent = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        agent.run(vec![ChatMessage::user("hi")]),
+    )
+    .await
+    .map_err(|_| "run() 超时 10s")?;
+    assert!(result.is_err(), "503 耗尽后应返回 Err");
+    let payloads = retry_end_payloads.lock().unwrap();
+    let last = payloads.last().expect("应发出 auto_retry_end");
+    assert_eq!(last.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        last.get("finalError")
+            .and_then(|v| v.as_str())
+            .is_some_and(|msg| msg.contains("503")),
+        "finalError 应包含 503，实际: {:?}",
+        last
+    );
     Ok(())
 }
 
@@ -1018,7 +1120,7 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
 
     info!("Arrange: MockLlmFatal 返回 401 错误，max_attempts=3 但不应重试");
     let llm = Arc::new(MockLlmFatal {
-        error: "API 错误 401: unauthorized".to_string(),
+        error: Box::new(|| llm_http_status_error("mock", 401, "unauthorized")),
     });
     let primitive = Arc::new(MockPrimitive);
     let event_bus = Arc::new(DefaultEventBus::new());

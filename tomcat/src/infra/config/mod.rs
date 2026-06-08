@@ -33,7 +33,7 @@ pub use types::{
     LlmConfig, LlmFilesConfig, LogConfig, OpenAiResponsesConfig, PreflightConfig, PrimitiveConfig,
     ReasoningContinuityConfig, ResumeHydrationMode, SecurityConfig, SkillsConfig, SplashConfig,
     ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WasmConfig, WorkspaceConfig,
-    DEFAULT_LLM_MODEL,
+    DEFAULT_AGENT_MAX_ATTEMPTS, DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），
 // 这里先 re-export 保证 `tomcat::infra::config::PlanConfig` 可用而不污染默认 import。

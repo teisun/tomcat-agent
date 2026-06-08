@@ -128,9 +128,8 @@ fn validate_config_rejects_llm_files_expires_after_out_of_range() {
 }
 
 #[test]
-fn validate_config_accepts_four_layer_timeouts_in_range() {
+fn validate_config_accepts_three_layer_timeouts_in_range() {
     let mut cfg = AppConfig::default();
-    cfg.llm.http_timeout_sec = 1_800;
     cfg.llm.stream_timeout_sec = 180;
     cfg.llm.non_stream_stale_timeout_sec = 300;
     cfg.llm.http_read_timeout_sec = 120;
@@ -138,11 +137,7 @@ fn validate_config_accepts_four_layer_timeouts_in_range() {
 }
 
 #[test]
-fn validate_config_rejects_four_layer_timeouts_out_of_range() {
-    let mut cfg = AppConfig::default();
-    cfg.llm.http_timeout_sec = 59;
-    assert!(validate_config(&cfg).is_err());
-
+fn validate_config_rejects_three_layer_timeouts_out_of_range() {
     let mut cfg = AppConfig::default();
     cfg.llm.stream_timeout_sec = 4;
     assert!(validate_config(&cfg).is_err());

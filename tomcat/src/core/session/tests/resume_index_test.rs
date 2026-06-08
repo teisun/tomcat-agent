@@ -190,7 +190,10 @@ fn sidecar_incremental_append_rebuilds_when_cache_skips_out_of_band_entry() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.index.total_entries, 3);
-    assert_eq!(rebuilt.index.last_entry_id.as_deref(), Some(third_id.as_str()));
+    assert_eq!(
+        rebuilt.index.last_entry_id.as_deref(),
+        Some(third_id.as_str())
+    );
     assert_eq!(rebuilt.index.recent_turn_starts.len(), 2);
     assert_eq!(
         rebuilt.index.recent_turn_starts[0].entry_id.as_deref(),

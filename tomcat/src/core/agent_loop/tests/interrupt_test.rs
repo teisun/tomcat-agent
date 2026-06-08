@@ -238,7 +238,11 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
         .iter()
         .filter(|m| format!("{:?}", m.role).contains("Tool"))
         .collect();
-    assert_eq!(tool_msgs.len(), 1, "中断中的单工具调用应补一条 `[interrupted]`");
+    assert_eq!(
+        tool_msgs.len(),
+        1,
+        "中断中的单工具调用应补一条 `[interrupted]`"
+    );
     assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
     assert_eq!(tool_msgs[0].text_content(), Some("[interrupted]"));
     assert_eq!(

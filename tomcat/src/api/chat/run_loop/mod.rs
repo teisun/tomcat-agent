@@ -482,9 +482,9 @@ pub async fn run_chat_turn(
 
     let renderer = Arc::new(Mutex::new(MarkdownRenderer::new()));
     let config = AgentLoopConfig {
-        max_attempts: 3,
+        max_attempts: ctx.config.llm.agent_max_attempts,
         max_tool_rounds: usize::MAX,
-        retry_base_delay_ms: 300,
+        retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         model,
         session_id,
         tool_definitions: build_tool_definitions(ctx),

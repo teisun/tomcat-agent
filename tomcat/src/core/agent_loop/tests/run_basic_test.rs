@@ -12,9 +12,9 @@ use std::sync::Mutex;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
+use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::{ChatMessage, StreamEvent};
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
 
@@ -51,7 +51,7 @@ async fn run_returns_text_when_llm_returns_text_only() {
 /// 重试：Mock LLM 先返回 429 再返回成功 -> 自动重试后得到文本。
 #[tokio::test]
 async fn run_retries_on_429_then_succeeds() {
-    let stream_err = vec![Err(AppError::Llm("API 错误 429: rate limit".to_string()))];
+    let stream_err = vec![Err(llm_http_status_error("mock", 429, "rate limit"))];
     let stream_ok: Vec<Result<StreamEvent, AppError>> = vec![
         Ok(StreamEvent::ContentDelta {
             delta: "OK".to_string(),
@@ -74,6 +74,135 @@ async fn run_retries_on_429_then_succeeds() {
     let messages = vec![ChatMessage::user("hi")];
     let result = loop_.run(messages).await.unwrap();
     assert_eq!(result.final_text, "OK");
+}
+
+#[test]
+fn retry_delay_uses_jitter_window_and_cap() {
+    let min_delay = super::super::run::compute_retry_delay_ms(500, 2, 0);
+    let max_delay = super::super::run::compute_retry_delay_ms(500, 2, 40);
+    let capped = super::super::run::compute_retry_delay_ms(500, 20, 40);
+    assert_eq!(min_delay, 400, "attempt=2 最小 jitter 应为 base 的 80%");
+    assert_eq!(max_delay, 600, "attempt=2 最大 jitter 应为 base 的 120%");
+    assert_eq!(capped, 8_000, "指数退避应被上限 cap 到 8s");
+}
+
+#[tokio::test]
+async fn run_respects_configured_max_attempts() {
+    let llm = Arc::new(MockLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "UNREACHABLE".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ],
+    ]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        max_attempts: 2,
+        retry_base_delay_ms: 0,
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    assert!(
+        matches!(outcome, AgentRunOutcome::Failed(_)),
+        "max_attempts=2 时第 3 次成功不应被消费"
+    );
+}
+
+#[tokio::test]
+async fn run_honors_larger_configured_attempt_budget() {
+    let stream_ok: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "AFTER_RETRIES".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        vec![Err(llm_http_status_error(
+            "mock",
+            503,
+            "service unavailable",
+        ))],
+        stream_ok,
+    ]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        max_attempts: 5,
+        retry_base_delay_ms: 0,
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
+    let result = match outcome {
+        AgentRunOutcome::Completed(result) => result,
+        other => panic!("max_attempts=5 应允许第 5 次成功，实际: {other:?}"),
+    };
+    assert_eq!(result.final_text, "AFTER_RETRIES");
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_retry_sleep_is_interruptible() {
+    let llm = Arc::new(MockLlmProvider::new(vec![vec![Err(
+        llm_http_status_error("mock", 503, "service unavailable"),
+    )]]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let config = AgentLoopConfig {
+        max_attempts: 3,
+        retry_base_delay_ms: 5_000,
+        model: "gpt-4".to_string(),
+        session_id: "s1".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let cancel = abort.clone();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let task = tokio::spawn(async move { loop_.run(vec![ChatMessage::user("hi")]).await });
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    let outcome = task.await.expect("join ok");
+    assert!(
+        matches!(outcome, AgentRunOutcome::Interrupted(_)),
+        "退避 sleep 期间 cancel 应立即打断"
+    );
 }
 
 /// 工具循环：第 1 次 LLM 返回 read tool call，第 2 次返回纯文本；断言 final_text 含第 2 次文本。

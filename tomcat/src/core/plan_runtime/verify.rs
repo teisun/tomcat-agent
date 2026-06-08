@@ -355,9 +355,10 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                     });
 
                     let cfg = AgentLoopConfig {
-                        max_attempts: 3,
+                        max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
                         max_tool_rounds: turns_limit as usize,
-                        retry_base_delay_ms: 300,
+                        retry_base_delay_ms:
+                            crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
                         model,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,

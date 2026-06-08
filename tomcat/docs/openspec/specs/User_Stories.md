@@ -123,7 +123,7 @@
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
 - [ ] `tomcat chat --resume` 遇到 transcript 尾部 dangling `assistant.tool_calls` 时，hydrate 会按最后一个 tool_call block 的原顺序补齐所有缺失的 synthetic tool result `[interrupted]`；若中间混入非 `tool` role 则拒绝猜测并保留告警
 - [ ] mid-turn `Failed` / 流中断后，本轮已落盘的 `user`、完整 `assistant`、`assistant + tool_calls`、已完成 `tool_result` 仍保留在 transcript；用户下一条输入直接开启下一轮，无需 `/retry`
-- [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在、Parse、RequestTimeout / NonStreamStale 等）给出清晰的阶段化提示并终止
+- [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在、Parse、NonStreamStale 等）给出清晰的阶段化提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
 - [ ] 单条工具结果超过 `[context].layer0_single_result_max_chars`（默认 **50_000** chars，与 [context-management.md §4.4](../../docs/architecture/context-management.md) 一致）时 Layer 0 落盘 + preview，不撑爆单次请求；可观测事件见 `tool_result_truncated` / 压缩相关事件（以代码与 [events.md](../../docs/architecture/plugin-system/events.md) 为准）
 - [ ] 长对话 token 超预算时按 [context-management.md](../../docs/architecture/context-management.md) **现行**链路：**Layer 0**（同步：落盘 / compactable 区占位）→ **Layer 1**（异步预热摘要，时机 ⑤ 不阻塞）→ **Layer 2**（Boundary 延迟应用，时机 ②）→ **Layer 3**（仅 API **Context Overflow** 后 `force_drop_oldest_to_target` 兜底）；保护最近若干 turns 与水位线见文档 §4.2；压缩后继续正常对话

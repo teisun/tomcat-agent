@@ -271,6 +271,14 @@ struct EditSegment<'a> {
     replace_all: bool,
 }
 
+#[derive(Clone, Debug)]
+struct PlannedEditSpan {
+    edit_idx: usize,
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
 fn parse_segment(op: &EditOperation) -> Result<EditSegment<'_>, AppError> {
     let raw_old = op
         .old_content
@@ -334,8 +342,8 @@ fn apply_string_edits(
     let (n_text, n_to_w_map) =
         crate::core::tools::pipeline::edit_normalize::build_normalized_byte_map(&working_lf);
 
-    // 收集 (working_lf 起, working_lf 止, replacement) 区间。
-    let mut spans: Vec<(usize, usize, String)> = Vec::new();
+    // 收集 (working_lf 起, working_lf 止, replacement) 区间与来源 edits[i]。
+    let mut spans: Vec<PlannedEditSpan> = Vec::new();
     for (idx, op) in edits.iter().enumerate() {
         let seg = parse_segment(op)?;
         let n_old = crate::core::tools::pipeline::edit_normalize::normalize_for_match(seg.old);
@@ -357,7 +365,7 @@ fn apply_string_edits(
                 diagnose_line_prefix_notfound(&n_old, &n_text, &n_to_w_map, &working_lf)
             {
                 return Err(AppError::Primitive(format!(
-                    "NotFound (line_prefix_suspected): edits[{}] 的 old_content 在文件 `{}` 中未找到；检测到 old_content 像是把 read 的{}一起粘贴进来了，这些前缀只是展示噪音，不属于文件内容。请去掉前缀后重试；剥离前缀后大约在第 {} 行能对上。old_content 摘要(escape_debug)={}",
+                    "NotFound (line_prefix_suspected): edits[{}] 的 old_content 在文件 `{}` 中未找到；检测到 old_content 像是把 read 的{}一起粘贴进来了，这些前缀只是展示噪音，不属于文件内容。请去掉前缀后重试；剥离前缀后大约在第 {} 行能对上。若你刚重读过文件，请确认 old_content 确实来自当前读取范围，而且在文件里是一段连续原文。old_content 摘要(escape_debug)={}",
                     idx,
                     user_path,
                     diag.style.label(),
@@ -366,7 +374,7 @@ fn apply_string_edits(
                 )));
             }
             return Err(AppError::Primitive(format!(
-                "NotFound: edits[{}] 的 old_content 在文件 `{}` 中未找到 (已尝试 BOM/换行/引号/不可见字符归一化; 请检查上下文是否唯一或扩大上下文)。old_content 摘要(escape_debug)={}",
+                "NotFound: edits[{}] 的 old_content 在文件 `{}` 中未找到 (已尝试 BOM/换行/引号/不可见字符归一化; 请检查上下文是否唯一或扩大上下文)。如果你刚重读过文件，请确认 old_content 确实来自当前读取范围，且在文件里是一段连续原文；否则这通常是 Stale 或把多段内容拼在一起了。old_content 摘要(escape_debug)={}",
                 idx,
                 user_path,
                 old_summary
@@ -389,27 +397,53 @@ fn apply_string_edits(
             let w_end = *n_to_w_map.get(n_end).ok_or_else(|| {
                 AppError::Primitive("edit: normalize map index out of range (end)".to_string())
             })?;
-            spans.push((w_start, w_end, lf_new.clone()));
+            spans.push(PlannedEditSpan {
+                edit_idx: idx,
+                start: w_start,
+                end: w_end,
+                replacement: lf_new.clone(),
+            });
         }
     }
 
     // 重叠检测：按起点排序；s2 < e1 即拒，s2 == e1（边界相邻）允许。
-    spans.sort_by_key(|(s, _, _)| *s);
+    spans.sort_by_key(|span| (span.start, span.end, span.edit_idx));
     for w in spans.windows(2) {
-        let (s1, e1, _) = w[0];
-        let (s2, e2, _) = w[1];
+        let left = &w[0];
+        let right = &w[1];
+        let s1 = left.start;
+        let e1 = left.end;
+        let s2 = right.start;
+        let e2 = right.end;
         if s2 < e1 {
+            let left_lines = format_line_range(&working_lf, s1, e1);
+            let right_lines = format_line_range(&working_lf, s2, e2);
+            let nested_pair = if e2 <= e1 {
+                Some((left.edit_idx, right.edit_idx))
+            } else if s1 == s2 {
+                Some((right.edit_idx, left.edit_idx))
+            } else {
+                None
+            };
+            let overlap_hint = if let Some((outer_idx, inner_idx)) = nested_pair {
+                format!(
+                    "检测到嵌套包含：edits[{}] 完全覆盖了 edits[{}]；这通常说明你同时提交了“大段替换”和它内部的“子段替换”，请删除其中一段或先合并成一段。",
+                    outer_idx, inner_idx
+                )
+            } else {
+                "两段修改覆盖到了同一片原文，请合并为单段或拆成两次 edit 调用。".to_string()
+            };
             return Err(AppError::Primitive(format!(
-                "Overlap: edit 段在文件 `{}` 中存在交叠/嵌套区间 ([{}..{}) 与 [{}..{})); 请合并为单段或拆为两次 edit 调用",
-                user_path, s1, e1, s2, e2
+                "Overlap: 文件 `{}` 中 edits[{}] ({}) 与 edits[{}] ({}) 发生交叠。{}",
+                user_path, left.edit_idx, left_lines, right.edit_idx, right_lines, overlap_hint
             )));
         }
     }
 
     // 在 working_lf 上按降序 splice。
     let mut new_working_lf = working_lf.clone();
-    for (start, end, replacement) in spans.iter().rev() {
-        new_working_lf.replace_range(*start..*end, replacement);
+    for span in spans.iter().rev() {
+        new_working_lf.replace_range(span.start..span.end, &span.replacement);
     }
     let restored = restore_line_endings(kind, &new_working_lf);
     let write_back = if had_bom {
@@ -538,6 +572,17 @@ fn line_number_for_byte_offset(text: &str, byte_offset: usize) -> usize {
         .filter(|&&b| b == b'\n')
         .count()
         + 1
+}
+
+fn format_line_range(text: &str, start: usize, end: usize) -> String {
+    let start_line = line_number_for_byte_offset(text, start);
+    let end_probe = end.saturating_sub(1).min(text.len().saturating_sub(1));
+    let end_line = line_number_for_byte_offset(text, end_probe);
+    if start_line == end_line {
+        format!("第 {} 行", start_line)
+    } else {
+        format!("第 {}-{} 行", start_line, end_line)
+    }
 }
 
 fn summarize_escape_debug(text: &str) -> String {

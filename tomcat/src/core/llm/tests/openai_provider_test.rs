@@ -11,7 +11,7 @@
 use super::*;
 use crate::core::llm::tests::mocks::load_dotenv;
 use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
 
 #[test]
@@ -59,14 +59,20 @@ fn count_tokens_approximate() {
 
 #[test]
 fn is_retriable_detects_429_and_5xx() {
-    assert!(OpenAiProvider::is_retriable(&AppError::Llm(
-        "API 错误 429: rate limit".to_string()
+    assert!(OpenAiProvider::is_retriable(&llm_http_status_error(
+        "openai",
+        429,
+        "rate limit",
     )));
-    assert!(OpenAiProvider::is_retriable(&AppError::Llm(
-        "API 错误 502: bad gateway".to_string()
+    assert!(OpenAiProvider::is_retriable(&llm_http_status_error(
+        "openai",
+        502,
+        "bad gateway",
     )));
-    assert!(!OpenAiProvider::is_retriable(&AppError::Llm(
-        "API 错误 400: bad request".to_string()
+    assert!(!OpenAiProvider::is_retriable(&llm_http_status_error(
+        "openai",
+        400,
+        "bad request",
     )));
 }
 

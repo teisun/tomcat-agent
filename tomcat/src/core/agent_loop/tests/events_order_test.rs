@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::core::llm::{ChatMessage, StreamEvent, ThinkingSource};
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
 use crate::infra::{DefaultEventBus, EventContext};
@@ -76,7 +76,7 @@ async fn run_emits_events_in_correct_order() {
 #[tokio::test]
 async fn run_fatal_401_terminates_immediately() {
     let llm = Arc::new(MockLlmProviderFatal {
-        err: "API 错误 401: unauthorized".to_string(),
+        err: Box::new(|| llm_http_status_error("mock", 401, "unauthorized")),
     });
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());
@@ -273,7 +273,7 @@ async fn run_message_update_keeps_thinking_wire_shape_for_summary_and_raw() {
 #[tokio::test]
 async fn run_chat_stream_returns_err_is_classified() {
     let llm = Arc::new(MockLlmProviderFatal {
-        err: "API 错误 503: service unavailable".to_string(),
+        err: Box::new(|| llm_http_status_error("mock", 503, "service unavailable")),
     });
     let primitive = Arc::new(MockPrimitiveExecutor);
     let event_bus = Arc::new(DefaultEventBus::new());

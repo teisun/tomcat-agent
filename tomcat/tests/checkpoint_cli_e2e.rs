@@ -206,7 +206,8 @@ fn write_sse_chunk(stream: &mut std::net::TcpStream, chunk: serde_json::Value) {
 }
 
 #[cfg(unix)]
-fn spawn_tool_then_text_openai_stream_server() -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+fn spawn_tool_then_text_openai_stream_server(
+) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -214,36 +215,37 @@ fn spawn_tool_then_text_openai_stream_server() -> (String, Arc<AtomicUsize>, std
     let stage_clone = Arc::clone(&stage);
     let handle = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(15);
-        let mut served = 0usize;
-        while served < 3 && Instant::now() < deadline {
+        let mut emitted_background_tool = false;
+        let mut emitted_wait_tool = false;
+        while stage_clone.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    served += 1;
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                     let request = read_http_request(&mut stream);
-                    match served {
-                        1 => {
-                            let tool_turn = serde_json::json!({
-                                "choices": [{
-                                    "delta": {
-                                        "tool_calls": [{
-                                            "index": 0,
-                                            "id": "call_bg",
-                                            "function": {
-                                                "name": "bash",
-                                                "arguments": "{\"command\":\"sleep 5\",\"run_in_background\":true}"
-                                            }
-                                        }]
-                                    },
-                                    "finish_reason": "tool_calls"
-                                }]
-                            });
-                            write_sse_chunk(&mut stream, tool_turn);
-                            stage_clone.store(1, Ordering::SeqCst);
-                        }
-                        2 => {
-                            let task_id = extract_last_task_id_from_request(&request)
-                                .expect("second request should carry background task_id");
+                    if !emitted_background_tool {
+                        let tool_turn = serde_json::json!({
+                            "choices": [{
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": 0,
+                                        "id": "call_bg",
+                                        "function": {
+                                            "name": "bash",
+                                            "arguments": "{\"command\":\"sleep 5\",\"run_in_background\":true}"
+                                        }
+                                    }]
+                                },
+                                "finish_reason": "tool_calls"
+                            }]
+                        });
+                        write_sse_chunk(&mut stream, tool_turn);
+                        emitted_background_tool = true;
+                        stage_clone.store(1, Ordering::SeqCst);
+                        continue;
+                    }
+
+                    if !emitted_wait_tool {
+                        if let Some(task_id) = extract_last_task_id_from_request(&request) {
                             let tool_turn = serde_json::json!({
                                 "choices": [{
                                     "delta": {
@@ -263,22 +265,38 @@ fn spawn_tool_then_text_openai_stream_server() -> (String, Arc<AtomicUsize>, std
                                 }]
                             });
                             write_sse_chunk(&mut stream, tool_turn);
+                            emitted_wait_tool = true;
                             stage_clone.store(2, Ordering::SeqCst);
+                        } else {
+                            let tool_turn = serde_json::json!({
+                                "choices": [{
+                                    "delta": {
+                                        "tool_calls": [{
+                                            "index": 0,
+                                            "id": "call_bg",
+                                            "function": {
+                                                "name": "bash",
+                                                "arguments": "{\"command\":\"sleep 5\",\"run_in_background\":true}"
+                                            }
+                                        }]
+                                    },
+                                    "finish_reason": "tool_calls"
+                                }]
+                            });
+                            write_sse_chunk(&mut stream, tool_turn);
                         }
-                        3 => {
-                            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
-                            let reply =
-                                "data: {\"choices\":[{\"delta\":{\"content\":\"RECOVERED_E2E\"}}]}\n\n";
-                            let finish =
-                                "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-                            let _ = stream.write_all(headers.as_bytes());
-                            let _ = stream.write_all(reply.as_bytes());
-                            let _ = stream.write_all(finish.as_bytes());
-                            let _ = stream.flush();
-                            stage_clone.store(3, Ordering::SeqCst);
-                        }
-                        _ => {}
+                        continue;
                     }
+
+                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+                    let reply =
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"RECOVERED_E2E\"}}]}\n\n";
+                    let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(reply.as_bytes());
+                    let _ = stream.write_all(finish.as_bytes());
+                    let _ = stream.flush();
+                    stage_clone.store(3, Ordering::SeqCst);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(20));

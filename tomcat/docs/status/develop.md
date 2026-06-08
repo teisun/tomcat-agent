@@ -1,6 +1,19 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-07 07:34 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-08 14:55 +0800 | ACTIVE | develop | — |
+
+### 2026-06-08 | chore(llm,docs,test): 503/edit 复查补强
+
+- **动机**：在“瞬时 503 与 edit 报错整改”主修完成后，再做一次非阻塞复查，收口三类尾巴：provider 非流式退避与流式口径不一致、`compaction` 侧仍残留旧的纯文本 overflow helper 出口、以及“首个 delta 后断流不重试”缺显式测试与文档同步。
+- **实现**：抽出 `core/llm/retry_delay.rs` 统一 provider 级退避（`500ms` 基准、`±20%` jitter、`4s` cap、饱和算术），`openai` / `openai-responses` / `openai_files` 复用；`compaction` 不再导出 `is_context_overflow_error(&str)`，测试改直接使用 `is_context_overflow_text`；为 `openai` / `openai-responses` 各补一条“首个 delta 后 body read 断流 → 原样上抛且不重试”的流式边界单测；同步收口 `agent-loop.md`、`edit.md`、`src/core/README.md`、`src/core/llm/README.md` 与 `src/core/agent_loop/mod.rs` 注释，明确结构化 `LlmError(http_status/stage)` 单一来源、provider 流式安全重试边界、Attempt Loop 顶层退避配置，以及 `edit` 的 `Overlap/NotFound` 诊断语义。
+- **测试/门禁**：`cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib` 通过（`1530 passed, 1 ignored`）。
+
+### 2026-06-08 | fix(llm,edit): 瞬时 503 结构化收口 + edit 引导 + 门禁验收
+
+- **动机**：终端里的瞬时网关 `503` 被当成致命失败，根因是 HTTP 状态仍靠裸字符串分散判断，流式建连缺 provider 级重试，agent_loop 退避窗口过短；同时 `edit` 的 `Overlap` / `NotFound` 报错缺少段号、行号和嵌套指引，模型难以自修。
+- **实现**：`LlmError` 增加 `http_status`；新增 `llm_http_status_error*` 并删除 `parse_legacy_stage`；把 `is_retryable_llm_error` / `llm_connect_or_network` / `is_context_overflow` 收敛到 `infra/error/llm.rs` 单一来源，`openai` / `openai_responses` / `openai_files` 与 `agent_loop` 分类统一委托；为流式建连补指数退避 + jitter + cap + fallback；`agent_max_attempts` / `agent_retry_base_delay_ms` 下沉到配置；`write_edit` 的 `Overlap` / `NotFound` 报错补 `edits[i]/[j]`、行号、嵌套包含和 stale 引导；相关测试 mock 全量改为结构化错误。
+- **测试/门禁**：`cargo fmt --check` 通过；`cargo clippy --all-targets -- -D warnings` 通过；`cargo test --lib` 通过（`1526 passed, 1 ignored`，期间一次既有 `bash_task_test` flake 定点复跑通过后全量复跑绿）；`./scripts/run-integration-tests.sh integration-parallel` 通过；`./scripts/run-integration-tests.sh integration-serial` 通过。为适配新的流式重试语义，顺带把 `context_management_tests` 的 overflow mock 改为结构化 `400 + context_length_exceeded`，并补强 `cli_tests` / `checkpoint_cli_e2e` 的本地 SSE 夹具以容忍流式重连。
+- **备注**：验收中本机磁盘一度只剩约 `1Gi`，`cargo fmt` / `cargo test` 因 `target/` 写缓存失败；已通过 `cargo clean -p tomcat` 清理本地构建产物后继续完成门禁，未改源码以外的用户文件。
 
 ### 2026-06-07 | merge `feature/skill-system` → develop（T2-P1-014 集成验收）
 
@@ -132,7 +145,7 @@
 ### 2026-05-26 | feat(chat,llm): 折叠态流式显示思考摘要 + LLM 超时错误分层
 
 - **Thinking**：`StreamEvent::Thinking` / `thinking_delta` 必填 `source=summary|raw`；`show="summary"`（新默认）时流式渲染 summary、隐藏 raw；`show="minimal"` 时只显示 `[thinking] ...` 占位；`thinking.enabled` 时 Responses 始终请求 `reasoning.summary=auto`。
-- **LLM**：抽取 `http_client`、新增 `LlmError` 阶段化错误；配置补齐 `http_timeout_sec` / `http_read_timeout_sec` / `non_stream_stale_timeout_sec`。
+- **LLM**：抽取 `http_client`、新增 `LlmError` 阶段化错误；配置补齐 `stream_timeout_sec` / `http_read_timeout_sec` / `non_stream_stale_timeout_sec`。
 - **Plan**：`PlanFileFrontmatter.mode` 重命名为 `state`（`PlanFileState`），文档与单测对齐。
 - **阶段 T（门禁）**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` → `.integration_test_output.log` 末尾 `EXIT_CODE=0`（2026-05-26 16:24）。
 

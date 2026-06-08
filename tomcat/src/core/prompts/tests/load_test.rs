@@ -27,7 +27,9 @@ fn background_shell_prompt_mentions_finished_tag() {
     assert!(s.contains("wakeReason"));
     assert!(s.contains("Read `content`, `finished`, `exit_code`, and `wakeReason` together"));
     assert!(s.contains("Do not mindlessly loop forever"));
-    assert!(!s.contains("Call `task_output(block=true)` again with the same `since` to keep waiting."));
+    assert!(
+        !s.contains("Call `task_output(block=true)` again with the same `since` to keep waiting.")
+    );
 }
 
 #[test]

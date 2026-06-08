@@ -268,7 +268,7 @@ right:
 | --- | --- | --- | --- |
 | 1 | **normalize 管道** | **工作副本仅用于匹配**：`stripBom` → `normalizeToLF` 得 `working`（与 `original` **同坐标**）→ 在 `working` 上 find / 计数 / 重叠检测 → 用**同一坐标 span** 在 `original` 上构造 `new_content` → **`restoreLineEndings`** 写回磁盘语义。**不**对磁盘做静默 LF 化；与未来 **write spec** 的全仓 LF 策略**正交**。 | 只在「比对用副本」上统一换行和 BOM，写回去还按用户原来的行尾习惯。 |
 | 2 | **curly-quote / de-sanitize** | 匹配路径上对 `old_content` 与磁盘切片做**同一**规范化；de-sanitize 表在实现 PR 冻结。 | 弯引号、消毒字符这类，两边一起洗，别一边洗一边不洗。 |
-| 3 | **E5 诊断** | 至少：`NotFound`、`Ambiguous`、`Stale`、`Overlap`、`NoPriorRead`、`Oversized`、`BinaryFile`、`Notebook`、`Io`；每条附 **下一步 hint**（见 §9）。 | 每种失败都有名字，并告诉模型下一步怎么救。 |
+| 3 | **E5 诊断** | 至少：`NotFound`、`Ambiguous`、`Stale`、`Overlap`、`NoPriorRead`、`Oversized`、`BinaryFile`、`Notebook`、`Io`；每条附 **下一步 hint**（见 §9），其中 `NotFound` 需带 `escape_debug` 摘要与重读引导，`Overlap` 需带 `edits[i]/[j]` + 行号。 | 每种失败都有名字，并告诉模型下一步怎么救。 |
 | 4 | **`.ipynb`** | 命中扩展名 → 拒绝 + 固定模板（中/英策略与现 Primitive 一致）。 | 笔记本 JSON 别当纯文本硬改，直接挡。 |
 | 5 | **成功回执（轻量）** | 替换块数、可选行号摘要；**完整 structured_patch** 与 write T2（主 plan PR-G）对齐时由共享 diff 模块输出，本文不重复字段表。 | 成了也别灌一整本 diff，先给点数和摘要够用。 |
 
@@ -588,10 +588,10 @@ sequenceDiagram
 
 | 逻辑名 | 触发条件 | 模型侧恢复 | 说人话 |
 | --- | --- | --- | --- |
-| `NotFound` | 某段 `count==0`（T1：`original`；T2：`working`） | 重 `read`；检查空格/引号；T2 依赖 normalize | 文件里压根找不到你要的那段字。 |
+| `NotFound` | 某段 `count==0`（T1：`original`；T2：`working`） | 重 `read`；检查空格/引号；确认 `old_content` 来自**当前读取范围**且在文件里是一段**连续原文**（否则按 `Stale`/拼接片段处理）；T2 依赖 normalize。当前实现还会附 `old_content` 的 `escape_debug` 摘要，便于定位不可见字符/换行差异。 | 文件里压根找不到你要的那段字。 |
 | `NotFound (line_prefix_suspected)` | `old_content` 每个非空行都像 `read` 的 `cat -n` / `hashline` 展示前缀，且剥离前缀后能在文件里命中 | 去掉 `  N\t...` / `N#XX:...` 前缀后重试；必要时继续走 `read(hashline=true)` -> `hashline_edit` | 你大概率把 `read` 的展示壳一起抄进来了，正文其实能对上。 |
 | `Ambiguous` | `count>1 && !replace_all` | 扩大 `old_content` 或设 `replace_all` | 同一句话出现好几次，你没说全换就不敢动。 |
-| `Overlap` | 多段 span 相交或嵌套 | 合并为单段或拆两次 tool_call | 两段改到同一块，逻辑上打架。 |
+| `Overlap` | 多段 span 相交或嵌套（边界相邻 `s2 == e1` 不算） | 按报错里的 `edits[i]` / `edits[j]` 段号和行号定位；若提示“嵌套包含”，删除子段或合并成一段；否则拆成两次 tool_call | 两段改到同一块，逻辑上打架。 |
 | `Stale` | stamp 与 `metadata` 不一致 | **必须**重新 `read` | 磁盘上的文件已经和你脑子里的不一样了。 |
 | `NoPriorRead` | `get` 为空且策略要求先 read | 先 `read(path)` | 会话里没这条文件的 read 记录，先读再改。 |
 | `Oversized` | `new_content` 超上限 | 拆段或 `write` 整文件 | 一段塞太大，要么拆开要么整文件写。 |
@@ -602,6 +602,8 @@ sequenceDiagram
 **E5 vs E6 边界**：`NotFound`…`Oversized` 属**校验阶段**，不得触碰目标文件；`Io` 在写盘阶段可触发 `.bak` 恢复（见 §2.4.1 不变量第 4 条）。
 
 **`NotFound (line_prefix_suspected)` remediation**：该子码只升级诊断，不做静默修复、不改磁盘。错误文案会带 `escape_debug` 摘要与近似命中行号，目的是把模型明确推回「去掉展示前缀，再按真实文件内容重发 `edit`」这条路。
+
+**`Overlap` remediation**：错误文案会直接点名冲突的 `edits[i]` / `edits[j]`，并给出原文件行号范围；若属于“一段完全包住另一段”的嵌套情况，会追加“嵌套包含”提示，指导模型删除其中一段或合并成一段。
 
 ### 9.3 与 read 的交叉引用
 
@@ -628,7 +630,7 @@ sequenceDiagram
 | 命名（对齐 `read` PR-RA） | `edit_legacy_edit_file_returns_unknown_tool_error` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |
 | T1 `replace_all` | `edit_replace_all_replaces_every_match` | `suite_test.rs` | ✅ 2026-05-06 |
 | T1 原文多段 | `edit_multiple_edits_apply_against_original` | `suite_test.rs` | ✅ 2026-05-06 |
-| T1 重叠 | `edit_overlap_rejected`、`edit_overlap_adjacent_not_rejected` | `suite_test.rs` | ✅ 2026-05-06 |
+| T1 重叠 | `edit_overlap_rejected`、`edit_overlap_adjacent_not_rejected`、`edit_overlap_nested_reports_subset_hint` | `suite_test.rs` | ✅ 2026-06-08 |
 | T1 校验不写盘 | `edit_validation_failure_restores_or_noop` | `suite_test.rs` | ✅ 2026-05-06 |
 | T1 `NotFound (line_prefix_suspected)` 诊断 | `edit_notfound_with_cat_n_prefix_explains_remediation`、`edit_notfound_with_hashline_prefix_explains_remediation`、`edit_notfound_with_partial_prefix_does_not_misfire`、`edit_notfound_plain_missing_stays_plain_notfound` | `suite_test.rs` | ✅ 2026-05-26 |
 | T1 staleness | `edit_rejected_when_read_stamp_stale` | `tool_exec_dedup_test.rs` | ✅ 2026-05-06 |

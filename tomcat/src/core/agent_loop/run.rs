@@ -58,14 +58,36 @@
 //!   分别负责流消费 / 工具调度 / 工具执行 / text-only 收束。
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
-use crate::core::session::{find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT};
+use crate::core::session::{
+    find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT,
+};
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::error_classifier::handle_overflow_retry;
 use super::reasoning_loop::run_reasoning_loop;
 use super::steering_injection::inject_steering_messages;
 use super::types::{AgentLoop, AgentRunOutcome, AgentRunResult, LoopError};
+
+const RETRY_DELAY_CAP_MS: u64 = 8_000;
+
+pub(super) fn compute_retry_delay_ms(base_delay_ms: u64, attempt: u32, jitter_seed: u64) -> u64 {
+    if attempt <= 1 || base_delay_ms == 0 {
+        return 0;
+    }
+    let exp = base_delay_ms.saturating_mul(2u64.saturating_pow(attempt.saturating_sub(2)));
+    let jitter_pct = 80 + (jitter_seed % 41);
+    (exp.saturating_mul(jitter_pct) / 100).min(RETRY_DELAY_CAP_MS)
+}
+
+fn next_retry_delay_ms(base_delay_ms: u64, attempt: u32) -> u64 {
+    let jitter_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(20);
+    compute_retry_delay_ms(base_delay_ms, attempt, jitter_seed)
+}
 
 fn append_missing_interrupted_tool_results(partial_messages: &mut Vec<ChatMessage>) -> usize {
     let Ok(recent) = partial_messages
@@ -80,7 +102,10 @@ fn append_missing_interrupted_tool_results(partial_messages: &mut Vec<ChatMessag
     };
     let added = tool_call_ids.len();
     for tool_call_id in tool_call_ids {
-        partial_messages.push(ChatMessage::tool(&tool_call_id, INTERRUPTED_TOOL_RESULT_TEXT));
+        partial_messages.push(ChatMessage::tool(
+            &tool_call_id,
+            INTERRUPTED_TOOL_RESULT_TEXT,
+        ));
     }
     added
 }
@@ -233,7 +258,7 @@ impl AgentLoop {
         let mut last_err: Option<AppError> = None;
         for attempt in 1..=self.config.max_attempts {
             if attempt > 1 {
-                let delay_ms = self.config.retry_base_delay_ms * 2u64.pow(attempt - 2);
+                let delay_ms = next_retry_delay_ms(self.config.retry_base_delay_ms, attempt);
                 let err_msg = last_err
                     .as_ref()
                     .map(ToString::to_string)

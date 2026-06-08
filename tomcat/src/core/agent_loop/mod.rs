@@ -17,9 +17,9 @@
 //! │ 配置 (AgentLoopConfig)                                                        │
 //! │   model            ► LLM 模型名                                               │
 //! │   session_id       ► 会话 ID（随事件一起发布）                                  │
-//! │   max_attempts     ► Retryable 最大重试次数（默认 3）                           │
+//! │   max_attempts     ► Retryable 最大重试次数（默认 4）                           │
 //! │   max_tool_rounds  ► 单次 Attempt 工具轮次上限（默认 usize::MAX，不硬限）             │
-//! │   retry_base_delay ► 指数退避基准延迟 ms（默认 300）                            │
+//! │   retry_base_delay ► 指数退避基准延迟 ms（默认 500；含 jitter/cap）               │
 //! │   tool_definitions ► 传入 LLM 的工具 JSON Schema 列表                         │
 //! ├──────────────────────────────────────────────────────────────────────────────┤
 //! │ 运行时状态                                                                     │
@@ -93,16 +93,19 @@
 //! ## 错误分类
 //!
 //! ```text
-//!   AppError::Llm(msg)
+//!   AppError::LlmDetailed(stage/http_status/summary)
 //!     │
-//!     ├── 含 "429" / "500" / "502" / "503" / "超时" / "请求失败"
-//!     │       └──► LoopError::Retryable  →  第二层指数退避重试
+//!     ├── http_status == 401
+//!     │       └──► LoopError::Fatal      →  立即终止，agent_end(error)
 //!     │
-//!     ├── is_context_overflow_error（如 400 + context_length_exceeded）
+//!     ├── is_context_overflow(&err)
 //!     │       └──► LoopError::Retryable  →  可触发 L3 截断后再试
 //!     │
-//!     ├── 含 "401" / 含 "400" 且非上下文溢出
-//!     │       └──► LoopError::Fatal      →  立即终止，agent_end(error)
+//!     ├── http_status == 400（且非上下文溢出）
+//!     │       └──► LoopError::Fatal
+//!     │
+//!     ├── retryable stage / 429 / 500 / 502 / 503 / 504
+//!     │       └──► LoopError::Retryable  →  第二层指数退避重试
 //!     │
 //!     └── 其他
 //!             └──► LoopError::Fatal

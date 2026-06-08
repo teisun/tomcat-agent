@@ -25,4 +25,4 @@ pub(crate) use truncation::{
     is_persisted_tool_result_text, persist_tool_result_text, TOOL_RESULT_PLACEHOLDER,
 };
 
-pub use cascade::{force_drop_oldest_to_target, is_context_overflow_error};
+pub use cascade::force_drop_oldest_to_target;

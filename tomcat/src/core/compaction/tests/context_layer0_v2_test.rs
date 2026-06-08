@@ -1,12 +1,12 @@
 use super::super::truncation::TOOL_RESULT_PLACEHOLDER;
 use super::super::{
-    compact_tool_results, force_drop_oldest_to_target, is_context_overflow_error,
-    layer0_persist_large_results,
+    compact_tool_results, force_drop_oldest_to_target, layer0_persist_large_results,
 };
 use super::mocks::*;
 use crate::core::llm::ChatMessageRole;
 use crate::core::session::manager::build_context_from_state;
 use crate::infra::config::ContextConfig;
+use crate::infra::error::is_context_overflow_text;
 
 #[test]
 fn layer0_persist_skips_small() {
@@ -207,9 +207,9 @@ fn force_drop_oldest_respects_chars_not_stale_api_usage() {
 
 #[test]
 fn is_context_overflow_comprehensive() {
-    assert!(is_context_overflow_error("context length exceeded"));
-    assert!(is_context_overflow_error("maximum context token limit"));
-    assert!(is_context_overflow_error("Context limit exceeded"));
-    assert!(!is_context_overflow_error("rate limit exceeded"));
-    assert!(!is_context_overflow_error("authentication failed"));
+    assert!(is_context_overflow_text("context length exceeded"));
+    assert!(is_context_overflow_text("maximum context token limit"));
+    assert!(is_context_overflow_text("Context limit exceeded"));
+    assert!(!is_context_overflow_text("rate limit exceeded"));
+    assert!(!is_context_overflow_text("authentication failed"));
 }

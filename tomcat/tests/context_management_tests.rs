@@ -13,12 +13,12 @@ use tomcat::core::compaction::compact_tool_results;
 use tomcat::core::llm::{ChatMessageRole, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
 use tomcat::{
-    build_context_from_state, compound_turn_id, init_context_state, run_chat_turn, AgentLoop,
-    AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage,
-    ChatRequest, ChatResponse, ContextConfig, ContextState, DefaultEventBus, DirEntry,
-    EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, LlmResolver, LlmScene,
-    PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
-    WriteFileResult,
+    build_context_from_state, compound_turn_id, init_context_state, llm_http_status_error,
+    run_chat_turn, AgentLoop, AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities,
+    ChatContext, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
+    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
+    LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager,
+    StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -591,8 +591,10 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let _span = info_span!("test_context_overflow_triggers_compaction_and_retries").entered();
 
     info!("Arrange: MockLlm 首次返回 context overflow 错误，第二次返回成功文本");
-    let stream_err = vec![Err(AppError::Llm(
-        "context length exceeded: 500000 tokens".to_string(),
+    let stream_err = vec![Err(llm_http_status_error(
+        "mock",
+        400,
+        r#"{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded; reduce the length"}}"#,
     ))];
     let stream_ok = text_stream("recovered after compaction");
     let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
@@ -1343,8 +1345,10 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
     common::setup_logging();
     let _span = info_span!("test_l3_rebuild_estimate_consistent_no_phantom").entered();
 
-    let stream_err = vec![Err(AppError::Llm(
-        "context length exceeded: 500000 tokens".to_string(),
+    let stream_err = vec![Err(llm_http_status_error(
+        "mock",
+        400,
+        r#"{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded; reduce the length"}}"#,
     ))];
     let stream_ok = text_stream("recovered");
     let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
@@ -2004,8 +2008,10 @@ async fn test_context_overflow_trim_events_have_correct_payload(
     let _span = info_span!("test_context_overflow_trim_events_have_correct_payload").entered();
 
     info!("Arrange: MockLlm 首次 overflow，第二次成功");
-    let stream_err = vec![Err(AppError::Llm(
-        "context length exceeded: 500000 tokens".to_string(),
+    let stream_err = vec![Err(llm_http_status_error(
+        "mock",
+        400,
+        r#"{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded; reduce the length"}}"#,
     ))];
     let stream_ok = text_stream("ok after trim");
     let llm = Arc::new(MockLlm::new(vec![stream_err, stream_ok]));
