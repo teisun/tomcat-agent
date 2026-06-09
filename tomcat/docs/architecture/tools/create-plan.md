@@ -556,7 +556,7 @@ impl PlanRuntime {
 | 任意模式改 frontmatter `todos[]` | [`update_plan`](./update-plan.md) | 目标 PlanFile（按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随 active plan path） | LLM 仅传 ops，runtime 改 YAML；只能动 todos | 推进 plan 待办用 update_plan。 |
 | 任意模式改正文 | raw `write` / `edit` | `~/.tomcat/plans/*.plan.md`（PLAN 模式仅限本盘） | 同 PLAN 期正文约束（frontmatter 不可变） | 笔记可补，YAML 锁死。 |
 | 整盘 mode 切换 | `/plan build` + runtime；自动派生 mode=completed（由 `update_plan` 触发）/ mode=pending（cancel_token 触发） | 目标 PlanFile | runtime 写 `mode` / `session_key` / `session_id` | 用户拍板 + runtime 兜底。 |
-| 任意模式记会话级 scratchpad | [`todos`](./todos.md) | `~/.tomcat/agents/<agentId>/todos/*.todo.md` | 不写 plan.md | 写自己的 .todo.md。 |
+| 任意模式记会话级 scratchpad | [`todos`](./todos.md) | `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md` | 不写 plan.md | 写自己的 .todo.md。 |
 
 ### 8.2 frontmatter diff 硬拦截
 

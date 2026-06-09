@@ -225,7 +225,7 @@ pub fn apply_todos_op(store: &dyn TodoStore, ops: &[TodoOp]) -> Result<TodoSnaps
 pub struct SessionTodoStore { todos_id: TodosId, file: PathBuf, ... }
 pub struct PlanTodoStore    { plan_id: PlanId,  file: PathBuf, frontmatter_lock: ... }
 
-impl TodoStore for SessionTodoStore { ... }   // 写 ~/.tomcat/agents/<agentId>/todos/<id>.todo.md
+impl TodoStore for SessionTodoStore { ... }   // 写 ~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md
 impl TodoStore for PlanTodoStore    { ... }   // 写 ~/.tomcat/plans/<*>.plan.md 的 frontmatter todos[]
 ```
 

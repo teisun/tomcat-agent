@@ -286,7 +286,6 @@ CLI 默认渲染形态：
 | `TOMCAT_TODOS_PANEL_THROTTLE_MS` | `250` | TodosPanel snapshot 节流窗口 | 面板别刷太勤。 |
 | `TOMCAT_TODOS_BASH_TAIL_LINES` | `3` | panel bash 摘要保留尾行数 | 如果面板关联网 shell 任务，默认只看最后 3 行。 |
 | `TOMCAT_TODOS_FILE_LOCK_TIMEOUT_MS` | `2000` | `.todo.md` 原子写入等待上限 | 等锁最多 2 秒。 |
-| `[todos] purge_inactive_on_new_todos` | 已废弃 | 旧多文件方案遗留配置；当前单文件模型下不再生效 | 现在没有旧文件可清。 |
 
 ---
 

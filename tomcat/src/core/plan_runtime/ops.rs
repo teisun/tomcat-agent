@@ -10,7 +10,7 @@
 //!   `Vec<TodoItem>` 后再 apply，失败时丢弃即可）。
 //!
 //! op 与 [`file_store::TodoItem`] / [`file_store::TodoStatus`] 解耦，便于复用到
-//! session todo 文件（`~/.tomcat/agents/.../todos/*.todo.md`）。
+//! session todo 文件（`~/.tomcat/agents/.../todos/<session_id>.todo.md`）。
 
 use super::file_store::{TodoItem, TodoStatus};
 

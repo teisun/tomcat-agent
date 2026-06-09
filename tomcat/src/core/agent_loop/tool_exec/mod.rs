@@ -201,7 +201,7 @@ pub(super) async fn execute_tool_full(
     event_bus: Option<&Arc<dyn EventBus>>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
-    execute_tool_full_with_todos_runtime_and_policy(
+    execute_tool_full_with_policy(
         primitive,
         config_backend,
         bash_task_registry,
@@ -223,49 +223,8 @@ pub(super) async fn execute_tool_full(
     .await
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
-pub(super) async fn execute_tool_full_with_policy(
-    primitive: &Arc<dyn PrimitiveExecutor>,
-    config_backend: &Option<SharedConfigBackend>,
-    bash_task_registry: &Option<Arc<BashTaskRegistry>>,
-    read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
-    openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
-    web_fetch_runtime: Option<&Arc<crate::core::tools::web_fetch::WebFetchRuntime>>,
-    web_search_runtime: Option<&Arc<crate::core::tools::web_search::WebSearchRuntime>>,
-    plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
-    skill_set: Option<&Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
-    subagent_type: crate::core::agent_loop::types::SubagentType,
-    review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
-    expose_skills_to_reviewer: bool,
-    cancel: &tokio_util::sync::CancellationToken,
-    tc: &ToolCallInfo,
-    event_bus: Option<&Arc<dyn EventBus>>,
-    completion_routes: Option<&BackgroundCompletionRoutes>,
-) -> ToolExecOutcome {
-    execute_tool_full_with_todos_runtime_and_policy(
-        primitive,
-        config_backend,
-        bash_task_registry,
-        read_file_state,
-        openai_files_runtime,
-        web_fetch_runtime,
-        web_search_runtime,
-        None,
-        plan_runtime,
-        skill_set,
-        subagent_type,
-        review_kind,
-        expose_skills_to_reviewer,
-        cancel,
-        tc,
-        event_bus,
-        completion_routes,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn execute_tool_full_with_todos_runtime_and_policy(
+pub(super) async fn execute_tool_full_with_policy(
     primitive: &Arc<dyn PrimitiveExecutor>,
     config_backend: &Option<SharedConfigBackend>,
     bash_task_registry: &Option<Arc<BashTaskRegistry>>,

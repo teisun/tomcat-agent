@@ -89,13 +89,9 @@ impl Default for AskQuestionConfig {
 /// `[todos]` 子表：session-local todos 持久化与生命周期参数（GAP-N12 / G3）。
 ///
 /// env 覆盖：
-/// - `TOMCAT_TODOS_PURGE_INACTIVE_ON_NEW_TODOS` → `purge_inactive_on_new_todos`
 /// - `TOMCAT_TODOS_AUTO_NEW_TODOS_ON_REPLACE_AFTER_TERMINAL` → `auto_new_todos_on_replace_after_terminal`
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TodosConfig {
-    /// 新建 todos 时是否清理 session 下「无 active 项 / 历史 inactive」的旧 todos 文件。默认 true。
-    #[serde(default = "default_true")]
-    pub purge_inactive_on_new_todos: bool,
     /// 当上一个 active todos 进入 terminal（全 completed / cancelled）后，下一次 todos replace 调用是否自动
     /// 视为「new todos」开启新文件（而不是 in-place 覆盖原文件）。默认 true。
     #[serde(default = "default_true")]
@@ -105,7 +101,6 @@ pub struct TodosConfig {
 impl Default for TodosConfig {
     fn default() -> Self {
         Self {
-            purge_inactive_on_new_todos: true,
             auto_new_todos_on_replace_after_terminal: true,
         }
     }

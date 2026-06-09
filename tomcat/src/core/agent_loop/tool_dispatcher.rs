@@ -188,7 +188,7 @@ pub(super) async fn run_tool_calls(
                     .skill_set
                     .as_ref()
                     .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
-            let exec = tool_exec::execute_tool_full_with_todos_runtime_and_policy(
+            let exec = tool_exec::execute_tool_full_with_policy(
                 &agent.primitive,
                 &agent.config_backend,
                 &agent.bash_task_registry,

@@ -907,7 +907,7 @@ sequenceDiagram
         P->>P: mode = completed; swap reminder/catalog/prompt → CHAT
         P-->>F: write frontmatter.state = completed
     end
-    Note over L,T: todos tool remains available as a session-local scratchpad,<br/>writing only to ~/.tomcat/agents/<id>/todos/*.todo.md (no plan effect).
+    Note over L,T: todos tool remains available as a session-local scratchpad,<br/>writing only to ~/.tomcat/agents/<id>/todos/<session_id>.todo.md (no plan effect).
 ```
 
 **说人话**：EXEC 期推进 plan 走 `update_plan`（默认指向 `active_plan_id`）；它复用 `todos` 的 op 引擎写 `PlanFile.frontmatter.todos[]` / `milestones[]`。所有 todo 完成后，runtime 会先跑 code reviewer / verifier，再按 `verify_gate` 决定是否真正收工。`todos` 仍可用作个人 scratchpad，写自己的 `.todo.md`，不动 plan。
@@ -1021,7 +1021,6 @@ EXEC 中：
 | `[reviewer] max_rounds` | 正整数，默认 `1` | reviewer 单 plan 累计派发上限 | reviewer 不能无限挑刺。 |
 | `[reviewer] default_allow_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` 计划正文（frontmatter raw 仍拒绝） | 审稿员能不能直接修正文。 |
 | `[ask_question] timeout_ms` / `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | 默认 `300000`（5 分钟），`0` = 不超时 | `ask_question` 等待 UI 返回的硬超时 | 别让模型死等用户。 |
-| `[todos] purge_inactive_on_new_todos` | 已废弃 | 旧多文件 todo 方案遗留配置；当前单文件模型下不再生效 | 现在没有旧文件可清。 |
 | `[todos] auto_new_todos_on_replace_after_terminal` | `true/false`，默认 `true` | 全 completed/cancelled 后再 `replace_todos` 自动开新 TodoFile | 旧账翻篇。 |
 | `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` | 默认 2000ms | 计划文件 advisory lock 等待上限 | 等锁最多 2 秒。 |
 | `TOMCAT_PLANNER_REMINDER_OVERRIDE_PATH` / `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` | 可选路径 | 覆写默认 PLAN/EXEC `<system_reminder>` | 自带 prompt 写运维。 |
