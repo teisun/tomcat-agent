@@ -56,7 +56,7 @@
 - [x] **E2** Milestone schema 完整化（`status: MilestoneStatus` 派生 + `description`）+ `## Todos Board` 自动重写（`<!-- todos-board:auto:begin/end -->` 标记内）+ 一致性校验（`todo.milestone_id` ⇔ `milestones[].todo_ids`）
 - [x] **F** prompts/executor.txt 重写为英文契约（"first priority: drive todos to completion"），prompts/planner.txt 同步；`render_executor_reminder` 支持 `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` 热覆盖
 - [x] **G1/G2/G5** `update_plan` `op→kind`（破坏性一步到位）+ mode 矩阵闸门（Planning 拒 in_progress 等）+ 完整 JSON 返回（applied / plan_state_before/after / panel_snapshot_id / warnings / items / milestones / active_in_progress）+ completed 全拒（N2）+ 跨 session 策略（N11，Executing 拒 cross-session、Planning/Pending 允许） + N3（`/plan exit` 仅 Planning）
-- [x] **G3** TodoRuntime 持久化（`~/.tomcat/agents/<id>/sessions/<sid>/todos/<id>.todo.md`）+ `sessions.json.activeTodosId` 镜像（`ensure_active_todos_id`）+ purge_inactive
+- [x] **G3** TodosRuntime 持久化（`~/.tomcat/agents/<id>/todos/<session_id>.todo.md`）+ 单文件覆盖模型（`new_todos` 清空 scratchpad，但不再创建/清理额外文件）
 - [x] **G4** `create_plan` `body→draft`（破坏性一步到位）+ `plan_id` 派生（slugify + xxhash）+ 显式 reject 老字段 + `## Notes` 模板补全
 - [x] **H** `plan_e2e_with_mock_llm_tests.rs` 8 例：H1 full lifecycle（6 次 panel + 自动 completed）/ H2 CHAT todos panel scope / H3 PLAN raw edit 守卫 / H4 EXEC plan 文件全禁写 / H5 reviewer aborted 占位 / H6 cancel→pending / H7 Planning 拒 in_progress / H8 milestone checkpoint record
 - [x] **J** CLI 模式指示器（readline 提示符渲染 `[PLAN]` / `[EXEC plan_id]` / `[PENDING plan_id]` / `[DONE plan_id]`）+ `/plan list` 子命令（扫 `~/.tomcat/plans/` 列 id/mode/goal/created_at）

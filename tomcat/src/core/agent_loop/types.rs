@@ -285,6 +285,9 @@ pub struct AgentLoop {
     /// T2-P1-012：`web_search` 会话级 runtime（HTTP client + cache + model catalog）。
     /// 不注入时 `web_search` 命中返回「未启用」错误，便于独立单测保持最小装配。
     pub(super) web_search_runtime: Option<Arc<crate::core::tools::web_search::WebSearchRuntime>>,
+    /// `todos` 会话级 runtime：持有当前 session 的 base_dir + session_id，统一落盘到
+    /// `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`。不注入时 `todos` 工具只写内存。
+    pub(super) todos_runtime: Option<Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]

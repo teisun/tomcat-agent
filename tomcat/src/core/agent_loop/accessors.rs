@@ -52,6 +52,7 @@ impl AgentLoop {
             bash_task_registry: None,
             web_fetch_runtime: None,
             web_search_runtime: None,
+            todos_runtime: None,
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
@@ -104,6 +105,15 @@ impl AgentLoop {
         self
     }
 
+    /// 注入 `todos` 会话级 runtime。
+    pub fn with_todos_runtime(
+        mut self,
+        runtime: Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>,
+    ) -> Self {
+        self.todos_runtime = Some(runtime);
+        self
+    }
+
     /// P1：注入 `ChatContext` 持有的 session 级共享 `follow_up_queue`。
     ///
     /// 不调用此方法时保持原有"单次 AgentLoop 私有 queue"语义（向后兼容
@@ -153,6 +163,7 @@ impl AgentLoop {
             bash_task_registry: None,
             web_fetch_runtime: None,
             web_search_runtime: None,
+            todos_runtime: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,

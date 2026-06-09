@@ -36,10 +36,11 @@ pub struct SessionEntry {
     /// L0 落盘原始 Unicode 字符累计；与 `ContextState.session_obs.tool_result_chars_persisted` 同步（事件字段仍名 bytes）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result_chars_persisted: Option<u64>,
-    /// 当前 session_key 正在执行的轻路待办文件 id；对应 `~/.tomcat/agents/<agentId>/todos/<active_todos_id>.todo.md`。详见 [`tools/todos.md`](tools/todos.md) §3.4.2。
+    /// 旧多文件方案遗留字段。当前实现已改为固定路径
+    /// `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`，不再依赖 `active_todos_id` 定位文件。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_todos_id: Option<String>,
-    /// 本 session_key 曾创建过的 todos_id 列表（历史 + 当前）；可选，供 UI 列档。
+    /// 旧多文件方案遗留字段。`todos_ids` 从未在代码里实现，当前单文件模型下不再需要。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub todos_ids: Option<Vec<String>>,
     // 预留：channel/agent 相关字段供三期多 channel 使用

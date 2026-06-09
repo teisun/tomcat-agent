@@ -188,7 +188,7 @@ pub(super) async fn run_tool_calls(
                     .skill_set
                     .as_ref()
                     .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
-            let exec = tool_exec::execute_tool_full_with_policy(
+            let exec = tool_exec::execute_tool_full_with_todos_runtime_and_policy(
                 &agent.primitive,
                 &agent.config_backend,
                 &agent.bash_task_registry,
@@ -196,6 +196,7 @@ pub(super) async fn run_tool_calls(
                 agent.config.openai_files_runtime.as_ref(),
                 agent.web_fetch_runtime.as_ref(),
                 agent.web_search_runtime.as_ref(),
+                agent.todos_runtime.as_ref(),
                 agent.config.plan_runtime.as_ref(),
                 agent.config.skill_set.as_ref(),
                 agent.config.subagent_type,

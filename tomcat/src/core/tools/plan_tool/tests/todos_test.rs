@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::common::*;
 
 #[test]
@@ -7,6 +9,7 @@ fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
     let rt = PlanRuntime::new("session-a");
     let out = todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -34,6 +37,8 @@ fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
     assert_eq!(out["scope"], "session");
     assert_eq!(out["mode"], "chat");
     assert_eq!(out["active_in_progress"], "x1");
+    assert!(out["active_todos_id"].as_str().is_some());
+    assert!(out.get("persisted_path").is_none());
     let items = out["items"].as_array().unwrap();
     assert_eq!(items.len(), 2);
     assert_eq!(rt.snapshot_session_todos().len(), 2);
@@ -41,17 +46,18 @@ fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
 }
 
 #[test]
-fn todos_persists_to_disk_when_persist_base_configured() {
+fn todos_persists_to_disk_when_todos_runtime_is_injected() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
     let base = home.join(".tomcat").join("agents").join("main");
-    rt.set_todos_persist_base(Some(base.clone()));
+    let todos_runtime = Arc::new(TodosRuntime::new(base.clone(), "sid-a"));
     let out = todos::execute(
         &rt,
+        Some(todos_runtime.as_ref()),
         todos::TodosArgs {
             new_todos: false,
-            title: None,
+            title: Some("scratch".into()),
             replace: false,
             ops: vec![todos::TodoOpArg::Upsert {
                 id: "p1".into(),
@@ -61,15 +67,67 @@ fn todos_persists_to_disk_when_persist_base_configured() {
         },
     )
     .unwrap();
-    let active_id = out["active_todos_id"].as_str().expect("active_todos_id");
-    let expected = base
-        .join("sessions")
-        .join("session-a")
-        .join("todos")
-        .join(format!("{active_id}.todo.md"));
+    let expected = base.join("todos").join("sid-a.todo.md");
+    assert_eq!(
+        out["persisted_path"].as_str(),
+        Some(expected.to_string_lossy().as_ref())
+    );
     assert!(expected.exists(), "落盘文件应存在: {expected:?}");
     let body = std::fs::read_to_string(&expected).unwrap();
+    assert!(body.contains("session_id: sid-a"));
+    assert!(body.contains("title: scratch"));
     assert!(body.contains("p1: persist me"));
+    cleanup_home(&home);
+}
+
+#[test]
+fn todos_new_todos_overwrites_same_session_file() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let base = home.join(".tomcat").join("agents").join("main");
+    let todos_runtime = Arc::new(TodosRuntime::new(base.clone(), "sid-overwrite"));
+
+    todos::execute(
+        &rt,
+        Some(todos_runtime.as_ref()),
+        todos::TodosArgs {
+            new_todos: false,
+            title: None,
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
+                id: "old".into(),
+                content: Some("old item".into()),
+                status: Some(TodoStatus::Pending),
+            }],
+        },
+    )
+    .unwrap();
+
+    let out = todos::execute(
+        &rt,
+        Some(todos_runtime.as_ref()),
+        todos::TodosArgs {
+            new_todos: true,
+            title: Some("fresh".into()),
+            replace: false,
+            ops: vec![todos::TodoOpArg::Upsert {
+                id: "new".into(),
+                content: Some("new item".into()),
+                status: Some(TodoStatus::InProgress),
+            }],
+        },
+    )
+    .unwrap();
+
+    let expected = base.join("todos").join("sid-overwrite.todo.md");
+    assert_eq!(
+        out["persisted_path"].as_str(),
+        Some(expected.to_string_lossy().as_ref())
+    );
+    let body = std::fs::read_to_string(&expected).unwrap();
+    assert!(body.contains("new: new item"));
+    assert!(!body.contains("old: old item"));
     cleanup_home(&home);
 }
 
@@ -80,6 +138,7 @@ fn todos_never_writes_plan_file_in_chat() {
     let rt = PlanRuntime::new("session-a");
     todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -112,6 +171,7 @@ fn todos_state_enforces_single_in_progress() {
     let rt = PlanRuntime::new("session-a");
     todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -133,6 +193,7 @@ fn todos_state_enforces_single_in_progress() {
     .unwrap();
     let err = todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -145,7 +206,7 @@ fn todos_state_enforces_single_in_progress() {
         },
     )
     .expect_err("第二个 in_progress 应被 ops 引擎拒");
-    matches!(err, ToolError::Op(_));
+    assert!(matches!(err, ToolError::Op(_)));
     cleanup_home(&home);
 }
 
@@ -165,6 +226,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
 
     todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -179,6 +241,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
     .unwrap();
     let out = todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,

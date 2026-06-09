@@ -111,7 +111,7 @@
 | 维度 | 取舍 | 拒因 | 说人话 |
 |------|------|------|--------|
 | **MA1 注册表层级** | 进程级 `AgentRegistry`（`session_id` 为 key） | 塞进 `ChatContext` → 跨会话限流 / `CascadeAbort` 都做不了；与文档 §14.3.2 / §14.7.1 既有图示一致 | 全楼一张登记表。 |
-| **MA2 会话壳层级** | `ChatContextRegistry`（`session_key` → `Arc<ChatContext>`）管 [`TodoRuntime`](./plan-runtime.md#62-todoruntimechat-路径) / [`PlanRuntime`](./plan-runtime.md#63-planruntimeplanexec-路径) / mode | 与 Agent 执行树正交；混在一起会让 Phase 2 的多会话路由失语义 | 每间聊天室一个管家。 |
+| **MA2 会话壳层级** | `ChatContextRegistry`（`session_key` → `Arc<ChatContext>`）管 [`TodosRuntime`](./plan-runtime.md#62-todosruntimechat-路径) / [`PlanRuntime`](./plan-runtime.md#63-planruntimeplanexec-路径) / mode | 与 Agent 执行树正交；混在一起会让 Phase 2 的多会话路由失语义 | 每间聊天室一个管家。 |
 | **MA3 Handle 内容** | 只存 `session_id / parent_session_id / spawn_depth / abort_signal`（详见 §14.3.2 `AgentHandle`），**不存** `AgentLoop` | `AgentLoop` 每轮新建，进 `DashMap` 会泄漏且析构难；与「子 loop 跑完即 drop」语义冲突 | 登记工牌不登记工人本体。 |
 | **MA4 父子关系登记** | 子 `AgentHandle.parent_session_id = Some(parent)`；`abort_children(parent_id)` **扫表反查**（对标 openclaw `spawnedBy`） | 维护 `children: Vec` 要 register/unregister 双写一致，遇到 panic / abort 半步极易漂移 | 只记上级是谁，查孩子靠扫表。 |
 | **MA5 子 loop 启动点** | **两个唯一入口**：①  `dispatch_agent_tool::run`（LLM 工具，§14.4）；② `AgentRegistry::spawn_subagent_internal`（内部 Rust API，§14.6.1） | 在 LLM 回调或工具内部散落 `AgentLoop::new` 难审计、难做 Guard | 统一两个入口函数，其它地方禁止 new。 |
@@ -172,7 +172,7 @@ pub struct AgentHandle {
 | 维度 | `ChatContextRegistry`（详见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)） | `AgentRegistry`（§14.3.2） |
 |------|---------------------------------|---------------------------|
 | Key | `session_key`（持久 chat 会话身份，如 `"agent:main:main"`） | `session_id`（运行时实例 id，含 `:sub:<uuid>` 前缀） |
-| Value | `Arc<ChatContext>`（含 `TodoRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`） | `Arc<AgentHandle>`（仅控制面元数据 + `abort_signal`） |
+| Value | `Arc<ChatContext>`（含 `TodosRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`） | `Arc<AgentHandle>`（仅控制面元数据 + `abort_signal`） |
 | 生命周期 | 与 chat session 同寿（启动 → 退出） | **跑时注册，结束注销**（与 `AgentLoop::run` 同寿） |
 | 关心的事 | mode 切换、PlanFile/TodoFile IO、面板投影、`/plan` 命令 | 并发上限、`spawn_depth`、`CascadeAbort`、`SubAgentStart/End` 路由 |
 | 是否持有 `AgentLoop` | **否**（每轮新建） | **否**（仅持 Handle，Loop 在 `dispatch_agent_tool::run` / `spawn_subagent_internal` 栈帧内拥有） |
@@ -384,7 +384,7 @@ execute_tool("dispatch_agent", args)
 | 父 `AgentLoop` | [`chat_loop`](../../../src/api/chat/mod.rs) 每用户输入 `AgentLoop::new(...)` 然后 `run(messages)` | 同左 + `AgentRegistry::register(parent_handle)` |
 | 子 `AgentLoop` | **不存在**（无 dispatch 通路） | 仅在 `dispatch_agent_tool::run` 或 `spawn_subagent_internal` **栈帧**内 `new` |
 | `AgentRegistry` | 仅文档 | `DashMap<session_id, Arc<AgentHandle>>`（不含 `AgentLoop`） |
-| `ChatContext` | 持 `TodoRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id` | 同左；**绝不**加 `subagents[]` 或 `Map<SubagentType, Agent>` |
+| `ChatContext` | 持 `TodosRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id` | 同左；**绝不**加 `subagents[]` 或 `Map<SubagentType, Agent>` |
 
 #### 2) 唯一 `new` 点
 

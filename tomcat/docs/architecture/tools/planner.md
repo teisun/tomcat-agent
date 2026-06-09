@@ -796,7 +796,7 @@ EXEC 中：
 
 ## 15. 关联文档
 
-- 运行时编排：[plan-runtime.md](../plan-runtime.md)（PlanRuntime / TodoRuntime OOD、状态机、5 件事流程）
+- 运行时编排：[plan-runtime.md](../plan-runtime.md)（PlanRuntime / TodosRuntime OOD、状态机、5 件事流程）
 - 写计划（整盘）：[create-plan.md](./create-plan.md)
 - 写计划（增量）：[update-plan.md](./update-plan.md)
 - 结构化提问：[ask-question.md](./ask-question.md)

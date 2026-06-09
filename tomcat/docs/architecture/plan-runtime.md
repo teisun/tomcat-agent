@@ -86,7 +86,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 
 下文若仍出现 `active_plan_id`、`PlanMode`、`plan.enter / plan.exit / plan.complete / plan.pending`、`u[Plan:completed]>` 等历史草稿词汇，均以上述“生效说明 / 字段责任 / event schema / recover 流程”为准。
 
-**说人话**：这篇文档回答四件事。第一，**PLAN 模式不是 LLM 工具**——`/plan` 是本地 slash 命令切换会话状态，进入后系统注入提示词并把 catalog 切到「全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单」。第二，`/plan build <plan_id/path>` 是唯一进入执行态的入口；reviewer 仅辅助，不做 verdict gate。第三，**`todos` 和 [`update_plan`](./tools/update-plan.md) 任何模式都可见**——`todos` 写 `TodoFile`（session 本地 scratchpad），`update_plan` 写 `PlanFile.frontmatter.todos[]` / `milestones[]`（按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随当前 active plan path）；二者共享 `apply_todos_op` op 引擎，提示词分裂。**TodoRuntime / PlanRuntime 都是 per-session OOD 对象，挂在 `ChatContext` 上**。第四，reviewer 是 internal subagent dispatch（与 codex `codex_delegate.rs` 同构），由 `CreatePlan` 工具内部同步阻塞调用，**不**进 catalog。
+**说人话**：这篇文档回答四件事。第一，**PLAN 模式不是 LLM 工具**——`/plan` 是本地 slash 命令切换会话状态，进入后系统注入提示词并把 catalog 切到「全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单」。第二，`/plan build <plan_id/path>` 是唯一进入执行态的入口；reviewer 仅辅助，不做 verdict gate。第三，**`todos` 和 [`update_plan`](./tools/update-plan.md) 任何模式都可见**——`todos` 写 `TodoFile`（session 本地 scratchpad，固定到 `agents/<id>/todos/<session_id>.todo.md`），`update_plan` 写 `PlanFile.frontmatter.todos[]` / `milestones[]`（按 `plan_id` 或显式 `path` 路由；EXEC/Pending 缺省跟随当前 active plan path）；二者共享 `apply_todos_op` op 引擎，提示词分裂。**`TodosRuntime` / `PlanRuntime` 都是 per-session OOD 对象，挂在 `ChatContext` 上**。第四，reviewer 是 internal subagent dispatch（与 codex `codex_delegate.rs` 同构），由 `CreatePlan` 工具内部同步阻塞调用，**不**进 catalog。
 
 ---
 
@@ -98,7 +98,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | **TodoItem** | 最小可执行步骤 | 运行态 `TodoItem { id, content, status, milestone_id }`；存放载体由工具决定：`todos` → `TodoFile`；[`update_plan`](./tools/update-plan.md) → `PlanFile.frontmatter.todos[]` | `status ∈ {pending, in_progress, completed, cancelled}`；同一文件最多一个 `in_progress`；`id` 单文件唯一 | 真正能推进进度的是 todos。 |
 | **Milestone** | 一组 `TodoItem` 的上层分组 | `PlanFile` frontmatter `milestones` | 一条 `TodoItem` 至多属于一个 `Milestone`；状态派生 | todos 管细节，里程碑管大段落。 |
 | **PlanFile** | 持久化计划文件 | `~/.tomcat/plans/<slug>_<hash>.plan.md`；详尽 schema 见 [`tools/create-plan.md`](./tools/create-plan.md) §5 | frontmatter（机写）+ 正文（人读）；写入前 advisory file lock；frontmatter 由 `create_plan`（整盘）/ [`update_plan`](./tools/update-plan.md)（增量）/ runtime（mode、session 绑定）/ 自动派生（all completed / cancel_token）**四方协同** | 计划最终得落成一份文件。 |
-| **TodoFile** | 任意模式下的会话级轻量待办文件 | `~/.tomcat/agents/<agentId>/todos/<todos_id>.todo.md`；详见 [`tools/todos.md`](./tools/todos.md) §3.4 | 同一 session 磁盘只保留当前 active；`new_todos` 时删旧；任何模式下 `todos` 工具都写它 | 会话本地小白板，旧的就删。 |
+| **TodoFile** | 任意模式下的会话级轻量待办文件 | `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`；详见 [`tools/todos.md`](./tools/todos.md) §3.4 | 同一 session 固定这一份文件；`new_todos` 时覆盖写；任何模式下 `todos` 工具都写它 | 会话本地小白板，始终就这一份。 |
 | **PLAN 模式（Planner Mode）** | 会话内的"规划模式" | `PlanRuntime.mode == Planning` | `/plan` 进入；catalog = 全工具集 + `create_plan` + `ask_question` + `todos` + `update_plan` + 写盘路径白名单（`~/.tomcat/plans/*.plan.md`）；详见 [`tools/planner.md`](./tools/planner.md) | PLAN 模式是会话开关，不是工具调用。 |
 | **EXEC 模式（Executing）** | 推进 `PlanFile` 待办的执行态 | `PlanRuntime.mode == Executing` | `/plan build <plan_id/path>` 进入；catalog = 全工具集 + `todos` + `update_plan` − `create_plan`；first turn 注入 plan body；推进 plan 走 [`update_plan`](./tools/update-plan.md) | 真正开干。 |
 | **CHAT 模式** | 默认普通聊天 | `PlanRuntime.mode == Chat` | catalog = 全工具集 + `todos` + `update_plan` − `create_plan`；`todos` 写 TodoFile；`update_plan` 可跨 session 编辑任意 planning/pending 的 PlanFile | 不在规划也不在执行的日常。 |
@@ -107,7 +107,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | **AskQuestion** | PLAN 模式下结构化向用户提问的内置 LLM 工具 | `BUILTIN_TOOL_CATALOG` 中 `name = "ask_question"`；schema 见 [`tools/ask-question.md`](./tools/ask-question.md) | 仅 `mode == Planning` 时可见；单次 2-4 题、每题 2-4 选项 | 让模型问问题，而不是自己脑补。 |
 | **PlanState（运行态阶段）** | 当前会话在计划闭环里的阶段 | `Chat` / `Planning` / `Executing` / `Pending` + 瞬时 `Completed` | `/plan` 命令族只改变本地 chat 运行态；`PlanState` **不是** LLM 工具名 | 计划阶段是会话状态。 |
 | **Reviewer** | 由 `CreatePlan` 工具内部派发的子 Agent | `internal subagent dispatch`；不进 catalog；详见 [`tools/reviewer.md`](./tools/reviewer.md) | 同步阻塞；输出 `summary` 自由文本；**不**做 verdict gate；改稿权由 runtime 内部参数 `[reviewer].default_allow_edit` 控制 | 审稿员是子 Agent，只挑刺，不当法官。 |
-| **TodoRuntime** | 单 session 内 `TodoFile` 的内存映射与 IO 入口 | `ChatContext.todo_runtime: TodoRuntime`；详见 §6 | per-session 单实例；管 `active_todos_id` / 内存 items / 节流 panel 推送 / IO | 一个聊天会话一个 todo 大管家。 |
+| **TodosRuntime** | 单 session 内 `TodoFile` 的 IO 入口 | `ChatContext.todos_runtime: TodosRuntime`；详见 §6 | per-session 单实例；构造时绑定 `base_dir + session_id`，负责 `.todo.md` 原子写 | 一个聊天会话一个 todo 落盘管家。 |
 | **PlanRuntime** | 单 session 内 `PlanFile`、PLAN/EXEC mode、reviewer 派发、TodosPanel 投影、checkpoint hook 的编排层 | `ChatContext.plan_runtime: PlanRuntime`；详见 §6 | per-session 单实例；`mode` / `active_planning_plan_id` / `active_plan_path` / build gate 全在里面 | 一个会话一个计划大管家。 |
 | **internal subagent dispatch** | 内部 Rust API 形态的子 Agent 派发入口（对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)） | `AgentRegistry::spawn_subagent_internal(...)` | 复用 [`multi-agent.md`](./multi-agent.md) §14 基础设施；不进 catalog；`allowed_tools` 由调用方硬编码 | 内部派子 Agent，模型看不到。 |
 | **`/plan build`** | 进入执行态的唯一入口 | 本地 slash 命令 `/plan build <plan_id/path>` | runtime 写 `session_key/id`、swap reminder（PLANNER → EXECUTOR）、切换可见 prompt 与 catalog | 用户拍板开干的开关。 |
@@ -179,7 +179,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | **G6 checkpoint 单向依赖** | milestone 完成时调用 `CheckpointStore::record`；checkpoint 语义仍由 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 定义 | 计划会用 checkpoint，但不重新发明 checkpoint。 |
 | **G7 TodosPanel 复用现有 bash 状态** | TodosPanel 显示当前 todo 与 bash 任务摘要，来源于 `BashTaskRegistry`，**不**新增第二套进程管理器 | 面板只看现成任务。 |
 | **G8 PLAN 模式工具收紧** | `mode == Planning` 时 catalog = **全集（含 `create_plan` / `ask_question` / `todos` / `update_plan`）**；`write/edit/hashline_edit/delete` 仅允许 `~/.tomcat/plans/*.plan.md`；EXEC 期 plan 文件全禁写（含正文，仅 `update_plan` 推进）；frontmatter raw 改硬拦截 | 规划阶段写工具只能动 plans/；执行阶段 plan 文件锁死，进度只能走 update_plan。 |
-| **G9 Runtime per-session OOD** | `TodoRuntime` 与 `PlanRuntime` 都是 per-session 单实例，挂在 `ChatContext` 上；多 session 由未来 `ChatContextRegistry` 处理 | 每个会话各自一套大管家，不共享全局 HashMap。 |
+| **G9 Runtime per-session OOD** | `TodosRuntime` 与 `PlanRuntime` 都是 per-session 单实例，挂在 `ChatContext` 上；多 session 由未来 `ChatContextRegistry` 处理 | 每个会话各自一套大管家，不共享全局 HashMap。 |
 | **G10 CLI prompt helper** | PLAN/EXEC/CHAT 的 user/agent prompt 统一由 `src/api/chat/prompt.rs` 渲染为 `u[Chat]>` / `u[Plan:planning]>` / `u[Plan:executing]>` / `u[Plan:pending]>` / `u[Plan:completed]>` 及对应 agent prompt | prompt 文案统一生成，调用侧不再手写。 |
 
 ### 3.2 非目标
@@ -213,7 +213,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | **R7 Checkpoint 集成** | 单向：`PlanRuntime -> CheckpointStore` | 双向耦合把基础设施绑死 | 单向消费。 |
 | **R8 执行面板** | `TodosPanel` 复用 `BashTaskRegistry` 做 bash 摘要；不新增第二套进程管理 | 面板自带 subprocess registry 重复造 | 投影即可。 |
 | **R9 里程碑粒度** | `Milestone[]` 结构化字段 + 派生状态 | flat todo 难挂阶段 checkpoint | 大任务分段。 |
-| **R10 Runtime OOD** | `TodoRuntime` / `PlanRuntime` per-session，挂 `ChatContext`；多 session 由未来 `ChatContextRegistry` 解决 | 全局 HashMap 会让 mode 切换、面板刷新失去会话隔离 | 一会话一套大管家。 |
+| **R10 Runtime OOD** | `TodosRuntime` / `PlanRuntime` per-session，挂 `ChatContext`；多 session 由未来 `ChatContextRegistry` 解决 | 全局 HashMap 会让 mode 切换、面板刷新失去会话隔离 | 一会话一套大管家。 |
 | **R11 CLI prompt helper** | 所有可见 prompt 都走 `src/api/chat/prompt.rs`；CHAT agent prompt 保持 `agent.<id>>`，其余模式显示 `agent.<id>[Plan:<state>]>` | 避免调用侧硬编码 prompt | prompt 一处生成。 |
 
 ### 4.2 实施点按阶段拆分
@@ -223,7 +223,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | **PR-PLA 命令面与 PLAN/EXEC 模式骨架** | `/plan` / `/plan exit` / `/plan build <plan_id/path>` 本地命令；`PlanMode` / `PlanRuntime` per-session 对象；进入 PLAN/EXEC 时注入对应 `<system_reminder>` 到 system 区段、CLI prompt 统一走 helper；help 文案；详见 [`tools/planner.md`](./tools/planner.md) | `src/api/chat/commands/{parse.rs,cmd_help.rs,cmd_plan.rs}`、`src/api/chat/plan_runtime/{mod.rs,mode.rs}`、`src/api/chat/prompt.rs`、`src/api/chat/mod.rs` | 见 §11：`parse_plan_commands`、`plan_enter_injects_planner_reminder_into_system`、`prompt_helper_renders_plan_modes` | 先把命令族、PLAN/EXEC 模式与 prompt 渲染搭起来。 |
-| **PR-PLB `todos` / `update_plan` / `CreatePlan` / `AskQuestion` 工具与计划文件** | built-in `todos`（任何模式可见，写 TodoFile）；[`update_plan`](./tools/update-plan.md)（任何模式可见，写 PlanFile.frontmatter todos/milestones）；`CreatePlan`（详见 [`tools/create-plan.md`](./tools/create-plan.md)）；`AskQuestion`（详见 [`tools/ask-question.md`](./tools/ask-question.md)）；`TodoRuntime` / `PlanRuntime` 内部状态机 | `src/core/tools/contract/catalog.rs`、`src/core/agent_loop/tool_exec.rs`、`src/api/chat/plan_runtime/{file_store.rs,session_todos_store.rs,plan_todos_store.rs,mod.rs}`、`src/api/chat/plan_runtime/tools/{create_plan.rs,update_plan.rs,ask_question.rs,todos.rs}` | 见 §11：`todos_returns_full_items_snapshot`、`update_plan_visible_in_all_modes`、`plan_file_round_trip_frontmatter`、`create_plan_only_visible_in_planning_mode`（PENDING） | 四个工具落地，状态机串通。 |
+| **PR-PLB `todos` / `update_plan` / `CreatePlan` / `AskQuestion` 工具与计划文件** | built-in `todos`（任何模式可见，写 TodoFile）；[`update_plan`](./tools/update-plan.md)（任何模式可见，写 PlanFile.frontmatter todos/milestones）；`CreatePlan`（详见 [`tools/create-plan.md`](./tools/create-plan.md)）；`AskQuestion`（详见 [`tools/ask-question.md`](./tools/ask-question.md)）；`TodosRuntime` / `PlanRuntime` 内部状态机 | `src/core/tools/contract/catalog.rs`、`src/core/agent_loop/tool_exec.rs`、`src/core/plan_runtime/{file_store.rs,todo_runtime.rs,mod.rs}`、`src/core/tools/plan_tool/{create_plan.rs,update_plan.rs,ask_question.rs,todos.rs}` | 见 §11：`todos_returns_full_items_snapshot`、`update_plan_visible_in_all_modes`、`plan_file_round_trip_frontmatter`、`create_plan_only_visible_in_planning_mode`（PENDING） | 四个工具落地，状态机串通。 |
 | **PR-PLC reviewer 内部派发 + `/plan build` build gate** | `CreatePlan` 写入后内部派发 reviewer；reviewer 摘要落 transcript `plan.review`（**不**写 frontmatter、**不**做 gate）；`/plan build` 闸门：前置 `当前 session` 不能处于 `Executing`，`Pending` 默认续跑当前盘但允许显式切别盘，active scratchpad todos 仅 warning；详见 [`tools/reviewer.md`](./tools/reviewer.md) | `src/api/chat/plan_runtime/review.rs`、`src/core/agent_loop/dispatch.rs`、`src/api/chat/plan_runtime/tools/create_plan.rs`、`src/api/chat/commands/cmd_plan.rs` | 见 §11：`create_plan_internally_dispatches_reviewer`、`plan_build_rejects_active_executing_plan`、`plan_build_warns_but_continues_with_active_session_todos`、`completed_session_can_build_another_explicit_plan`、`pending_session_can_build_another_explicit_plan`、`reviewer_summary_lands_in_transcript_not_frontmatter`（PENDING） | reviewer 仅辅助；build gate 只看运行态。 |
 | **PR-PLD TodosPanel 与 bash 输出** | 待办面板、bash `task_id` 摘要投影；TodosPanel 协议详见 [`tools/todos.md`](./tools/todos.md) §7 | `src/api/chat/plan_runtime/panel.rs`、`src/api/chat/mod.rs`、复用 `bash_task_registry` | 见 §11：`todos_panel_reflects_bash_task_status`、`todos_tool_updates_panel_and_file`（PENDING） | TodosPanel 只做投影。 |
 | **PR-PLE 里程碑拆分与 checkpoint hook** | `Milestone[]`；milestone 完成自动 `record(Milestone{...})`；mode 派生：全 completed → `mode = completed` | `src/api/chat/plan_runtime/checkpoint.rs`、`src/core/checkpoint/store.rs`（只读） | 见 §11：`milestone_completion_can_record_checkpoint`、`all_todos_completed_promotes_mode_completed`（PENDING） | 里程碑收口才打 checkpoint。 |
@@ -275,13 +275,13 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 - **交付**：built-in `todos` 工具（schema / desc / exec 三件套，详见 [`tools/todos.md`](./tools/todos.md)）、`CreatePlan` 工具（详见 [`tools/create-plan.md`](./tools/create-plan.md)）、`AskQuestion` 工具（详见 [`tools/ask-question.md`](./tools/ask-question.md)）、`TodoItem` / `Milestone` 结构、`PlanFile` 编解码。
 - **catalog 注册（动态可见集）**：`BUILTIN_TOOL_CATALOG` 新增三个条目 `todos` / `create_plan` / `ask_question`；`tool_exec` 在每轮调用前通过 `current_mode()` 过滤可见集。**不**加入 `/plan` / `checkpoint`。
 - **`todos` 可调时机（硬约束）**：
-  - `mode == Chat` → 写 `TodoFile`（active `~/.tomcat/agents/<agentId>/todos/<todos_id>.todo.md`）；
+  - `mode == Chat` → 写 `TodoFile`（active `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`）；
   - `mode == Executing` 且 `active_plan_id != None` → 写 `PlanFile.todos[]` / `milestones[]`，并派生 `mode`（全 completed → `mode = completed`）；
   - `mode ∈ {Planning, Completed, Pending}` → catalog 不可见；强行调用 tool error；
   - **reviewer 子 Agent 上下文** → 在 internal subagent dispatch 入口硬编码 `allowed_tools`，从源头剔除 `todos`（双保险）。
 - **单写入路径（todos 工具）**：
   ```
-  validate(todos) → acquire_file_lock(active_file) → mutate(TodoRuntime/PlanRuntime)
+  validate(todos) → acquire_file_lock(active_file) → mutate(TodosRuntime/PlanRuntime)
                  → write(active file) → release_lock
                  → return ToolResult { items: <full snapshot> }
                  → panel.refresh → emit transcript plan.todos / todos.snapshot
@@ -456,7 +456,7 @@ Completed 仅为瞬时态，不作为 recover 稳态，也不作为稳定 prompt
 
 **可调时机（D 方案：所有模式可见）**：
 - `todos` 在 **`Chat` / `Planning` / `Executing` / `Completed` / `Pending`** 五种模式都可见；
-- 永远写 `TodoFile`（`~/.tomcat/agents/<agentId>/todos/<todos_id>.todo.md`），**不写** `PlanFile`；
+- 永远写 `TodoFile`（`~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`），**不写** `PlanFile`；
 - LLM 用它作「会话内 scratchpad」——任何阶段都能列自己的步骤；
 - **改 plan 内 `todos[]` / `milestones[]`** 不走 `todos`，请用 [`update_plan`](./tools/update-plan.md)（§5.3）；
 - **reviewer 子 Agent 上下文** → `allowed_tools` 默认含 `todos`（私人记录无副作用）；`update_plan` 仅在 `allow_review_edit=true` 时附加。
@@ -615,60 +615,38 @@ todos:
 
 ---
 
-## 6. TodoRuntime / PlanRuntime per-session OOD 设计
+## 6. TodosRuntime / PlanRuntime per-session OOD 设计
 
 ### 6.1 设计原则
 
 | 原则 | 内容 | 说人话 |
 |------|------|--------|
-| **per-session 单实例** | `ChatContext` 持有 `todo_runtime: TodoRuntime` 与 `plan_runtime: PlanRuntime`，每个 session 各自一份 | 一个会话一套大管家。 |
-| **不维护全局 HashMap** | 多 session 由未来 `ChatContextRegistry` 处理；TodoRuntime / PlanRuntime 自身**不**承担"按 session_key 路由"职责 | 不在 runtime 里塞会话表。 |
-| **内存映射 + 文件同步** | 每个 `TodoFile` / `PlanFile` 在内存中有一份 `TodoRuntimeState` / `PlanRuntimeState` 副本；工具写入 → 内存改 → 写盘 → 推 panel；任一失败回滚 | 内存与文件双写但走单一通道。 |
+| **per-session 单实例** | `ChatContext` 持有 `todos_runtime: TodosRuntime` 与 `plan_runtime: PlanRuntime`，每个 session 各自一份 | 一个会话一套大管家。 |
+| **不维护全局 HashMap** | 多 session 由未来 `ChatContextRegistry` 处理；`TodosRuntime` / `PlanRuntime` 自身**不**承担“按 session_key 路由”职责 | 不在 runtime 里塞会话表。 |
+| **内存映射 + 文件同步** | `PlanRuntime` 持有 session-local todos 的内存态；`TodosRuntime` 只负责把这份状态同步到 `TodoFile`；`PlanFile` 仍由 `PlanRuntime` 路径管理 | 内存和磁盘各管一层，但通道唯一。 |
 | **panel 是只读投影** | 内存状态变化时通过 channel 推 panel；panel 不回写 | 屏幕只播不录。 |
 
-### 6.2 `TodoRuntime`（CHAT 路径）
+### 6.2 `TodosRuntime`（CHAT 路径）
 
 ```rust
-pub struct TodoRuntime {
-    session_key:      String,                                   // 路由键，构造时绑定
-    agent_id:         String,
-    todos_dir:        PathBuf,                                  // ~/.tomcat/agents/<agentId>/todos/
-    sessions_json:    Arc<SessionsJsonStore>,                   // active_todos_id 主存
-    active_todos_id:  Arc<RwLock<Option<String>>>,              // 镜像主存
-    state:            Arc<RwLock<TodoState>>,                   // 当前 active TodoFile 的内存映射
-    panel_tx:         tokio::sync::watch::Sender<PanelSnapshot>,// 节流推送
+pub struct TodosRuntime {
+    base_dir:    PathBuf,   // ~/.tomcat/agents/<agentId>/
+    session_id:  String,    // 当前真实 session_id
 }
 
-pub struct TodoState {
-    todos_id:    String,
-    title:       Option<String>,
-    items:       Vec<TodoItem>,
-    milestones:  Vec<Milestone>,
-    updated_at:  DateTime<Utc>,
-}
-
-impl TodoRuntime {
-    pub fn hydrate(&self) -> Result<()> { /* 启动时 sessions.json → load TodoFile → state */ }
-    pub async fn apply_op(&self, ops: Vec<TodosOp>, replace: bool) -> Result<TodoResult> {
-        // 1. acquire <todo_path>.lock
-        // 2. validate ops（单 in_progress 等）
-        // 3. mutate state (in-memory)
-        // 4. write TodoFile（frontmatter + body）
-        // 5. emit transcript todos.snapshot
-        // 6. panel_tx.send_modify(|s| s.todos = self.state.read().items.clone())
-        // 7. return TodoResult { items: <full snapshot>, applied, panel_snapshot_id }
-    }
-    pub async fn new_todos(&self, title: Option<String>, ops: Vec<TodosOp>) -> Result<TodoResult> {
-        // 1. generate new todos_id
-        // 2. write new TodoFile
-        // 3. purge_inactive_todos(self.session_key, keep=new_id)
-        // 4. update sessions.json.activeTodosId
-        // 5. apply_op(ops, replace=true) on new file
+impl TodosRuntime {
+    pub fn new(base_dir: PathBuf, session_id: String) -> Self { /* 装配时捕获 */ }
+    pub fn persist(&self, file: &TodoFile) -> Result<PathBuf> {
+        // 1. path = base_dir/todos/<session_id>.todo.md
+        // 2. create_dir_all(path.parent())
+        // 3. write tmp with frontmatter(session_id) + body
+        // 4. rename tmp -> final
+        // 5. return final path
     }
 }
 ```
 
-**说人话**：`TodoRuntime` 就是当前 session 的「TodoFile 大管家」——构造时绑定 `session_key`，启动 hydrate，每次 `todos` 工具调用进 `apply_op`；新建一盘走 `new_todos`，旧文件由 `purge_inactive_todos` 一并删。多个 session 各自实例化各自的 `TodoRuntime`，互不影响。
+**说人话**：`TodosRuntime` 现在只是当前 session 的「TodoFile 落盘管家」——构造时一次性绑定 `base_dir + session_id`，之后每次 `todos` 工具成功调用，就把 `PlanRuntime` 里的 in-memory scratchpad 覆盖写到同一个 `todos/<session_id>.todo.md`。它不再 hydrate、多文件列举、也不再碰 `sessions.json.activeTodosId`。
 
 ### 6.3 `PlanRuntime`（PLAN/EXEC 路径）
 
@@ -705,7 +683,7 @@ impl PlanRuntime {
 
     pub async fn apply_create_plan(&self, input: CreatePlanInput) -> Result<ToolResult> { /* PR-PLB */ }
     pub async fn apply_todos_op(&self, ops: Vec<TodosOp>, replace: bool) -> Result<TodoResult> {
-        // 与 TodoRuntime.apply_op 类似，但写 PlanFile.todos[] + frontmatter
+        // 与 TodosRuntime 路径类似，但这里写的是 PlanFile.todos[] + frontmatter
         // 全 completed → self.set_mode(Completed) + reminder/catalog/prefix swap
     }
 
@@ -738,7 +716,7 @@ impl PlanRuntime {
 │ ChatContext (per-session)                                     │
 │ ┌────────────────────┐  ┌────────────────────┐               │
 │ │ todo_runtime:      │  │ plan_runtime:      │               │
-│ │   TodoRuntime      │  │   PlanRuntime      │               │
+│ │   TodosRuntime     │  │   PlanRuntime      │               │
 │ │   (session_key=…)  │  │   (session_key=…)  │               │
 │ └─────────┬──────────┘  └─────────┬──────────┘               │
 │           │                       │                            │
@@ -756,9 +734,9 @@ impl PlanRuntime {
 
 | 关系 | 说明 | 说人话 |
 |------|------|--------|
-| `ChatContext ⊃ TodoRuntime` | 每个会话独占一份 `TodoRuntime` | 每个会话一份 todo 大管家。 |
+| `ChatContext ⊃ TodosRuntime` | 每个会话独占一份 `TodosRuntime` | 每个会话一份 todo 落盘大管家。 |
 | `ChatContext ⊃ PlanRuntime` | 每个会话独占一份 `PlanRuntime` | 每个会话一份 plan 大管家。 |
-| `TodoRuntime / PlanRuntime ↔ panel_tx` | 内存改完通过 channel 推 panel | 屏幕只读。 |
+| `TodosRuntime / PlanRuntime ↔ panel_tx` | 内存改完通过 channel 推 panel | 屏幕只读。 |
 | `PlanRuntime → CheckpointStore` | 单向引用 | 计划用快照，不影响快照。 |
 | `PlanRuntime → BashTaskRegistry` | 单向引用 | 面板要看命令进度时去查。 |
 | 未来 `ChatContextRegistry` | 多 session 路由由 registry 持有 `HashMap<session_key, Arc<ChatContext>>`；与 [`multi-agent.md` §14.3.2 `AgentRegistry`](./multi-agent.md#1432-agentregistry进程级) **正交**，详见 §14.3.2.1 对照表 | 多会话路由不在 runtime 内部。 |
@@ -766,7 +744,7 @@ impl PlanRuntime {
 
 > **双注册表的边界（与 [`multi-agent.md` §14.3.0 / §14.3.2.1](./multi-agent.md#1430-落地选型决策表-ma1ma12)）**：
 >
-> - `ChatContextRegistry`：key = `session_key`（持久 chat 身份），value = `Arc<ChatContext>`，存 `TodoRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`，与 chat session 同寿。
+> - `ChatContextRegistry`：key = `session_key`（持久 chat 身份），value = `Arc<ChatContext>`，存 `TodosRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`，与 chat session 同寿。
 > - `AgentRegistry`：key = `session_id`（运行时实例 id，可含 `:sub:<uuid>`），value = `Arc<AgentHandle>`，存 `abort_signal` + `spawn_depth` + `parent_session_id`，**跑时注册结束注销**，**不**持 `AgentLoop`。
 > - 父 `AgentLoop` / 子 reviewer `AgentLoop` 都不是 `ChatContext` 的字段；它们由 `chat_loop` / `spawn_subagent_internal` 各自栈帧拥有，跑完 drop。
 >
@@ -1043,7 +1021,7 @@ EXEC 中：
 | `[reviewer] max_rounds` | 正整数，默认 `1` | reviewer 单 plan 累计派发上限 | reviewer 不能无限挑刺。 |
 | `[reviewer] default_allow_edit` | `true/false`，默认 `false` | runtime 是否允许 reviewer 直接 `edit` 计划正文（frontmatter raw 仍拒绝） | 审稿员能不能直接修正文。 |
 | `[ask_question] timeout_ms` / `TOMCAT_ASK_QUESTION_TIMEOUT_MS` | 默认 `300000`（5 分钟），`0` = 不超时 | `ask_question` 等待 UI 返回的硬超时 | 别让模型死等用户。 |
-| `[todos] purge_inactive_on_new_todos` | `true/false`，默认 `true` | 切换 active todos 时清理同 session 其它非 active 文件 | session 目录别堆垃圾。 |
+| `[todos] purge_inactive_on_new_todos` | 已废弃 | 旧多文件 todo 方案遗留配置；当前单文件模型下不再生效 | 现在没有旧文件可清。 |
 | `[todos] auto_new_todos_on_replace_after_terminal` | `true/false`，默认 `true` | 全 completed/cancelled 后再 `replace_todos` 自动开新 TodoFile | 旧账翻篇。 |
 | `TOMCAT_PLAN_FILE_LOCK_TIMEOUT_MS` | 默认 2000ms | 计划文件 advisory lock 等待上限 | 等锁最多 2 秒。 |
 | `TOMCAT_PLANNER_REMINDER_OVERRIDE_PATH` / `TOMCAT_EXECUTOR_REMINDER_OVERRIDE_PATH` | 可选路径 | 覆写默认 PLAN/EXEC `<system_reminder>` | 自带 prompt 写运维。 |
@@ -1145,7 +1123,7 @@ EXEC 中：
 | LLM 用 raw write 试图改 frontmatter | 高 | §5 `tool_exec` 硬拦截；tool error 附 usage | 写盘前先拦一刀。 |
 | LLM 以为 `reviewer accepted` 就该自己进 executing | 中 | description 明示；catalog 在 PLAN 期没有切 EXEC 的入口 | 文档 + catalog 双保险。 |
 | prompt 文案在多处手写后漂移 | 低 | 统一走 `src/api/chat/prompt.rs`，测试直接断言 helper 输出 | 不让 prompt 在不同调用点慢慢分叉。 |
-| 多 session 串扰 | 中 | `TodoRuntime` / `PlanRuntime` 都是 per-session 单实例；多会话由 `ChatContextRegistry` 路由 | 一会话一份大管家。 |
+| 多 session 串扰 | 中 | `TodosRuntime` / `PlanRuntime` 都是 per-session 单实例；多会话由 `ChatContextRegistry` 路由 | 一会话一份大管家。 |
 
 ---
 
@@ -1172,7 +1150,7 @@ EXEC 中：
 | ~~只写 markdown 复选框，不做结构化 frontmatter~~ | **否**：frontmatter 承担 source of truth。 | 机器得有机器能稳读的部分。 |
 | ~~`PlanFile.frontmatter` 包含 `review_status` / `last_review` / `active` / `last_checkpoint_id` / `updated_at`~~ | **否**：全部下线。review 走 transcript `plan.review`；active 由 `mode` 派生；checkpoint id 由 `CheckpointStore` 自管；updated_at 用 mtime 推断。 | schema 精简。 |
 | ~~`PlanFile.frontmatter` 加 `org_session_key` / `org_session_id`~~ | **否**：去掉 `org_` 前缀；改为 `session_key` / `session_id`，**仅在 `/plan build` 时写入**当前执行会话；创建期为 null。 | 不区分「创建会话」与「执行会话」。 |
-| ~~`TodoRuntime` / `PlanRuntime` 用全局 `HashMap<session_key, _>`~~ | **替代**：per-session 单实例，挂 `ChatContext`；多会话由未来 `ChatContextRegistry` 路由。 | 一会话一份大管家。 |
+| ~~`TodosRuntime` / `PlanRuntime` 用全局 `HashMap<session_key, _>`~~ | **替代**：per-session 单实例，挂 `ChatContext`；多会话由未来 `ChatContextRegistry` 路由。 | 一会话一份大管家。 |
 | ~~`todos` 工具走 `active_scope ∈ {session, plan}` 双轨~~ | **下线（D 方案）**：`todos` 永远写 `TodoFile`（session 路径）；plan 内 `todos[]` / `milestones[]` 由新增的 [`update_plan`](./tools/update-plan.md) 工具管理（任何模式可见）；两者代码共享 `apply_todos_op` op 引擎、提示词分裂。 | 工具职责单一，代码继续复用。 |
 | ~~`todos` 仅 EXEC / Chat / Completed / Pending 可见，Planning 剔除~~ | **替代（D 方案）**：`todos` **任何模式都可见**——LLM 在 PLAN 期也能用 `todos` 给自己列调研步骤；工具描述不再分模式叙述，仅保留「3+ 步骤启发」核心。 | 全模式都给个本地小白板。 |
 | ~~mode=completed 自动派生由 `todos` 触发~~ | **替代（D 方案）**：由 [`update_plan`](./tools/update-plan.md) 在 EXEC + target.state==executing + 全 completed 时触发；`todos` 永远不写 plan，自然不触发 mode 转移。 | 改 plan 的工具负责派生 mode。 |
@@ -1200,7 +1178,7 @@ EXEC 中：
 - [`multi-agent.md`](./multi-agent.md)：定义 `dispatch_agent` LLM 工具与 `AgentRegistry` / `spawn_depth` / `CascadeAbort` 基础设施；本文中 reviewer 通过 `internal subagent dispatch` 复用同一套 §14 基础设施，**不**走 `dispatch_agent` schema。
 - [`checkpoint-resume.md`](./tools/checkpoint-resume.md)：定义 checkpoint 语义、命令面和 store；本文只定义 **PlanRuntime 如何消费它**。
 - [`PLAN_SPEC.md`](../agents/plan/PLAN_SPEC.md)：定义工程师写开发计划的规范；本文定义的是**运行时** plan file 与 TodosPanel。
-- [`session-storage.md`](./session-storage.md)：transcript 自定义事件与 `sessions.json` 扩展字段（`activeTodosId` 等）。
+- [`session-storage.md`](./session-storage.md)：transcript 自定义事件与历史扩展字段说明（含已废弃的 `activeTodosId` / `todos_ids`）。
 
 ---
 
@@ -1216,4 +1194,4 @@ EXEC 中：
 - 任务与计划规范：[T2-P1-002.md](../agents/TASK_BOARD_002/tasks/T2-P1-002.md)、[PLAN_SPEC.md](../agents/plan/PLAN_SPEC.md)
 - 竞品与工具全景：[agent-tools-comparison.md](../reports/agent-tools-comparison.md)、[plan-mode-and-checkpoint-survey.md](../reports/plan-mode-and-checkpoint-survey.md)
 
-**一句话总结**：Tomcat 的 `PlanRuntime` 采用「**本地 `/plan` slash 切 PLAN/EXEC 模式与 catalog**、**`CreatePlan` LLM 工具创建 PlanFile 并内部派 reviewer**（仅辅助）、**`/plan build <plan_id/path>` 是 EXEC 唯一入口**、**built-in `todos` 改状态并返回完整 snapshot**、**计划文件做 durable source**、**cancel_token 转 pending 可续跑**、**TodoRuntime / PlanRuntime per-session OOD 挂 ChatContext**、**CLI prompt 统一显示当前模式**」的组合路线。本文是运行时主 spec，工具粒度细节散落在 [`tools/`](./tools/) 子目录。
+**一句话总结**：Tomcat 的 `PlanRuntime` 采用「**本地 `/plan` slash 切 PLAN/EXEC 模式与 catalog**、**`CreatePlan` LLM 工具创建 PlanFile 并内部派 reviewer**（仅辅助）、**`/plan build <plan_id/path>` 是 EXEC 唯一入口**、**built-in `todos` 改状态并返回完整 snapshot**、**计划文件做 durable source**、**cancel_token 转 pending 可续跑**、**`TodosRuntime` / `PlanRuntime` per-session OOD 挂 ChatContext**、**CLI prompt 统一显示当前模式**」的组合路线。本文是运行时主 spec，工具粒度细节散落在 [`tools/`](./tools/) 子目录。

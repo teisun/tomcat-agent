@@ -589,16 +589,16 @@ Parameters:
 - Destructive: `false`
 - Search hint: `todos upsert set_status remove scratchpad new_todos replace`
 
-Manage a session-local todo scratchpad and return a full snapshot of all items after each call. The list is persisted under `~/.tomcat/agents/<id>/sessions/<session_key>/todos/<todos_id>.todo.md` when persistence is configured, and it NEVER writes the active PlanFile. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.
+Manage a session-local todo scratchpad and return a full snapshot of all items after each call. When persistence is configured, the scratchpad is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`, and it NEVER writes the active PlanFile. Use `new_todos=true` to clear the current scratchpad and start a fresh one; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.
 
 Parameters:
 
 ```json
 {
-  "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results.",
+  "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. When persistence is configured, the scratchpad is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the current scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results.",
   "properties": {
     "new_todos": {
-      "description": "If true, create a new active todos file for this session before applying ops. Default false.",
+      "description": "If true, clear the current scratchpad before applying ops. The same session file `todos/<session_id>.todo.md` is overwritten; no extra file is created. Default false.",
       "type": "boolean"
     },
     "ops": {

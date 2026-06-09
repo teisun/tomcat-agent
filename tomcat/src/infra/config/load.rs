@@ -311,7 +311,7 @@ pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
 
 /// 启动时创建完整新布局目录树。若目录已存在则跳过（幂等）。
 ///
-/// 创建：`agent_dir`（可配置覆盖）、`work_dir/agents/{id}/sessions|logs|audit`、
+/// 创建：`agent_dir`（可配置覆盖）、`work_dir/agents/{id}/sessions|logs|audit|todos`、
 /// `workspace-{id}`（可配置覆盖）、全局目录 `memory|credentials|media|subagents|plugins`、
 /// 以及 `assets/wasm|modules`。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
@@ -324,6 +324,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
         "sessions",
         "logs",
         "audit",
+        "todos",
         "tmp",
         "skills",
         "tool-results",

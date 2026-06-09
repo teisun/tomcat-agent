@@ -131,7 +131,7 @@
 | RV8 `subagent_type` 枚举位 | reviewer 在内部使用 `SubagentType::Reviewer`；该值**不**出现在 `dispatch_agent` schema enum | LLM 不应知道有「reviewer」这种角色 | 内部枚举，模型看不见。 |
 | RV9 摘要落点 | `transcript.plan.review` 自定义事件 + 同步回填 `create_plan` tool result.review | 写 frontmatter 会让 frontmatter 字段膨胀；用户也不需感知 `review_status` 之类字段 | 走 transcript，frontmatter 干净。 |
 | **RV10 OOD 三层** | `ChatContextRegistry`（按 `session_key`）+ 进程级 `AgentRegistry`（按 `session_id`，[`multi-agent.md` §14.3.2](../multi-agent.md#1432-agentregistry进程级) / §14.3.2.1）+ 短命 `AgentLoop`（栈上拥有） | 全塞进 `ChatContext` 无法做跨会话并发上限与 CascadeAbort；与 §14.3.0 MA1/MA2/MA3 决策一致 | 管家、登记处、工人三层分离。 |
-| **RV11 ChatContext 不持 Agent 表** | `ChatContext` 只持 `root_session_id` + `TodoRuntime` + `PlanRuntime` + 共享 `Arc` 服务（详见 [`plan-runtime.md` §6.4](../plan-runtime.md#64-chatcontext-持有关系)） | `HashMap<SubagentType, Agent>` 与「每 spawn 新建 + 跑完即 drop」语义冲突 | 聊天室不养一群 Agent 对象。 |
+| **RV11 ChatContext 不持 Agent 表** | `ChatContext` 只持 `root_session_id` + `TodosRuntime` + `PlanRuntime` + 共享 `Arc` 服务（详见 [`plan-runtime.md` §6.4](../plan-runtime.md#64-chatcontext-持有关系)） | `HashMap<SubagentType, Agent>` 与「每 spawn 新建 + 跑完即 drop」语义冲突 | 聊天室不养一群 Agent 对象。 |
 | **RV12 reviewer 无长期 Runtime** | 每次 `create_plan` 成功 → transient spawn → await → drop handle；状态落 `PlanRuntimeState.last_review_summary` + transcript `plan.review` | 单独 `ReviewerRuntime` 长生命周期对象多余，与 `max_review_rounds` advisory 语义对不齐 | 审稿员用完即走，不养专职岗位。 |
 | **RV13 `dispatch_reviewer` 归属** | `PlanRuntime::dispatch_reviewer(allow_review_edit) -> ReviewSummary`（详见 §4.3） | 游离的 `review::dispatch_reviewer` 自由函数与 plan 编排语义割裂，难做 advisory lock 顺序与 memory reconcile | 派审稿归 PlanRuntime 管。 |
 | **RV14 写盘锁顺序** | `write_plan` 完成并**释放 plan advisory lock 之后**再 `spawn_subagent_internal`；reviewer 内 `update_plan` / `edit` 自行 acquire 同一份 lock | 父持锁 await 子 → 死锁；reviewer 调 update_plan 时会再次 acquire | 先落盘锁再放审稿进来。 |
@@ -302,7 +302,7 @@ impl PlanRuntime {
    ┌────────────────────────────── 会话壳（每会话一个，长寿） ────────────────────┐
    │  ChatContext {                                                              │
    │     root_session_id,            // 与 AgentRegistry 关联的锚点              │
-   │     TodoRuntime, PlanRuntime,                                               │
+   │     TodosRuntime, PlanRuntime,                                              │
    │     Arc<dyn LlmProvider> / Arc<dyn PrimitiveExecutor> / Arc<EventBus>       │
    │  }                                                                          │
    │  ★ 不持子 AgentLoop / 不持 subagents[]（RV11）                                │
@@ -344,7 +344,7 @@ impl PlanRuntime {
 | **并发** | 父 session 的 `create_plan` 同步 await 子 loop；与 codex one-shot 一致 |
 | **嵌套** | `spawn_depth = parent + 1`；`session_id = "{root}:sub:reviewer:{uuid}"`；`parent_session_id = Some(root)` |
 | **session 边界** | **一个** `session_key`（同一个 `ChatContext`）+ **两个** `session_id`（父/子 `AgentLoop`）+ 子 Agent **独立 transcript** |
-| **新 ChatContext？** | ❌ **否**：reviewer 复用父的 `ChatContext.{TodoRuntime, PlanRuntime, Arc<dyn …>}`；只在 `AgentRegistry` 加一条 handle |
+| **新 ChatContext？** | ❌ **否**：reviewer 复用父的 `ChatContext.{TodosRuntime, PlanRuntime, Arc<dyn …>}`；只在 `AgentRegistry` 加一条 handle |
 
 **说人话（§4.5）**：reviewer 是同一间聊天室里临时叫起来的审稿员，登记在「访客登记处」（`AgentRegistry`）而不是另开一间聊天室（`ChatContext`）；管家（`ChatContext`）的备忘录（`PlanRuntime`）借给他用，干完就走，备忘录有改动管家立刻重读一次。
 

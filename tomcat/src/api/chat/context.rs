@@ -57,6 +57,7 @@ pub struct ChatContext {
     pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
     pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
     pub web_search_runtime: Arc<crate::core::tools::web_search::WebSearchRuntime>,
+    pub todos_runtime: Arc<plan_runtime::todo_runtime::TodosRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
     pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
     pub skill_discovery_handle:
@@ -247,6 +248,10 @@ impl ChatContext {
 
         let initial_thinking_display = resolve_initial_thinking_display(&config.llm.thinking);
 
+        let todos_runtime = Arc::new(plan_runtime::todo_runtime::TodosRuntime::new(
+            agent_trail_dir.clone(),
+            current_session_entry.session_id.clone(),
+        ));
         let plan_runtime = plan_runtime::PlanRuntime::new_with_session_id(
             session.current_session_key(),
             current_session_entry.session_id.clone(),
@@ -255,7 +260,6 @@ impl ChatContext {
             .ask_question_panel
             .unwrap_or_else(|| Arc::new(panels::CliAskQuestionPanel));
         plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
-        plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
@@ -372,6 +376,7 @@ impl ChatContext {
             openai_files_runtime,
             web_fetch_runtime,
             web_search_runtime,
+            todos_runtime,
             plan_runtime,
             skill_set,
             skill_discovery_handle,
