@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -8,6 +8,9 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::store::CheckpointStore;
 use super::types::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
@@ -15,10 +18,54 @@ use super::types::{
 };
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const CHECKPOINT_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_WORKDIR_FILES: usize = 50_000;
 const TOMCAT_WORKDIR_MARKER: &str = "TOMCAT_WORKDIR";
 const METADATA_FILE: &str = "metadata.json";
 const REF_PREFIX: &str = "refs/tomcat-checkpoints";
+const DEFAULT_GIT_PROGRAM: &str = "git";
+const EXCLUDE_MARKER: &str = "# tomcat checkpoint default excludes";
+const DEFAULT_EXCLUDE_RULES: &[&str] = &[
+    "node_modules/",
+    "dist/",
+    "build/",
+    "target/",
+    "out/",
+    ".next/",
+    ".nuxt/",
+    ".vite/",
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".cache/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    "coverage/",
+    ".coverage",
+    ".venv/",
+    "venv/",
+    "env/",
+    ".git/",
+    ".hg/",
+    ".svn/",
+    ".worktrees/",
+    "*.log",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.zip",
+    "*.tar",
+    "*.tar.gz",
+    "*.tgz",
+    "*.7z",
+    "*.rar",
+    "*.iso",
+    ".env",
+    ".env.*",
+    ".env.local",
+    ".env.*.local",
+    "third_party/",
+];
 
 #[derive(Debug)]
 pub struct ShadowGitStore {
@@ -28,7 +75,12 @@ pub struct ShadowGitStore {
     metadata_path: PathBuf,
     workdir_marker_path: PathBuf,
     max_workdir_files: usize,
+    git_timeout: Duration,
+    git_program: PathBuf,
+    cooldown_until: Mutex<Option<Instant>>,
     lock: Mutex<()>,
+    #[cfg(test)]
+    file_count_calls: AtomicUsize,
 }
 
 impl ShadowGitStore {
@@ -46,7 +98,12 @@ impl ShadowGitStore {
             metadata_path,
             workdir_marker_path,
             max_workdir_files: MAX_WORKDIR_FILES,
+            git_timeout: GIT_TIMEOUT,
+            git_program: PathBuf::from(DEFAULT_GIT_PROGRAM),
+            cooldown_until: Mutex::new(None),
             lock: Mutex::new(()),
+            #[cfg(test)]
+            file_count_calls: AtomicUsize::new(0),
         }
     }
 
@@ -61,15 +118,43 @@ impl ShadowGitStore {
         store
     }
 
+    #[cfg(test)]
+    fn with_git_timeout(mut self, git_timeout: Duration) -> Self {
+        store_set_git_timeout(&mut self, git_timeout);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_git_program(mut self, git_program: PathBuf) -> Self {
+        self.git_program = git_program;
+        self
+    }
+
+    #[cfg(test)]
+    fn force_cooldown_until(&self, until: Instant) {
+        *self.cooldown_until.lock() = Some(until);
+    }
+
+    #[cfg(test)]
+    fn cooldown_until(&self) -> Option<Instant> {
+        *self.cooldown_until.lock()
+    }
+
+    #[cfg(test)]
+    fn file_count_calls(&self) -> usize {
+        self.file_count_calls.load(Ordering::SeqCst)
+    }
+
     fn ensure_repo_initialized(&self) -> Result<(), CheckpointError> {
         fs::create_dir_all(&self.checkpoints_root)?;
         if self.git_dir.join("HEAD").exists() {
             self.ensure_metadata_file()?;
             self.write_workdir_marker()?;
+            self.ensure_exclude_file()?;
             return Ok(());
         }
 
-        let output = Command::new("git")
+        let output = Command::new(&self.git_program)
             .arg("init")
             .arg("--bare")
             .arg(&self.git_dir)
@@ -77,7 +162,12 @@ impl ShadowGitStore {
             .stderr(Stdio::piped())
             .output()?;
         if !output.status.success() {
-            return Err(CheckpointError::CommandFailed(output_message(&output)));
+            return Err(CheckpointError::CommandFailed(summarize_git_failure(
+                "git init",
+                &self.work_tree,
+                None,
+                &output,
+            )));
         }
 
         self.run_git(["config", "core.bare", "false"])?;
@@ -92,6 +182,7 @@ impl ShadowGitStore {
         self.run_git(["config", "tag.gpgsign", "false"])?;
         self.ensure_metadata_file()?;
         self.write_workdir_marker()?;
+        self.ensure_exclude_file()?;
         Ok(())
     }
 
@@ -107,6 +198,48 @@ impl ShadowGitStore {
             &self.workdir_marker_path,
             self.work_tree.to_string_lossy().as_bytes(),
         )?;
+        Ok(())
+    }
+
+    fn ensure_exclude_file(&self) -> Result<(), CheckpointError> {
+        let exclude_path = self.git_dir.join("info").join("exclude");
+        let existing = match fs::read_to_string(&exclude_path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err.into()),
+        };
+        let mut lines: Vec<String> = if existing.is_empty() {
+            Vec::new()
+        } else {
+            existing.lines().map(str::to_string).collect()
+        };
+        let mut changed = false;
+
+        if !existing.contains(EXCLUDE_MARKER) {
+            if lines.last().is_some_and(|line| !line.is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(EXCLUDE_MARKER.to_string());
+            changed = true;
+        }
+
+        for rule in DEFAULT_EXCLUDE_RULES {
+            if !existing.lines().any(|line| line.trim() == *rule) {
+                lines.push((*rule).to_string());
+                changed = true;
+            }
+        }
+
+        if changed {
+            if let Some(parent) = exclude_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut content = lines.join("\n");
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            fs::write(exclude_path, content)?;
+        }
         Ok(())
     }
 
@@ -131,11 +264,17 @@ impl ShadowGitStore {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let output = self.run_git_allow_failure(args)?;
+        let args = collect_git_args(args);
+        let output = self.run_git_allow_failure_args(&args)?;
         if output.status.success() {
             return Ok(output);
         }
-        Err(CheckpointError::CommandFailed(output_message(&output)))
+        Err(CheckpointError::CommandFailed(summarize_git_failure(
+            &describe_git_command(&args),
+            &self.work_tree,
+            None,
+            &output,
+        )))
     }
 
     fn run_git_allow_failure<I, S>(&self, args: I) -> Result<Output, CheckpointError>
@@ -143,7 +282,12 @@ impl ShadowGitStore {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut cmd = Command::new("git");
+        let args = collect_git_args(args);
+        self.run_git_allow_failure_args(&args)
+    }
+
+    fn run_git_allow_failure_args(&self, args: &[OsString]) -> Result<Output, CheckpointError> {
+        let mut cmd = Command::new(&self.git_program);
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("GIT_DIR", &self.git_dir)
@@ -159,13 +303,14 @@ impl ShadowGitStore {
             if child.try_wait()?.is_some() {
                 return child.wait_with_output().map_err(CheckpointError::Io);
             }
-            if started.elapsed() >= GIT_TIMEOUT {
+            if started.elapsed() >= self.git_timeout {
                 let _ = child.kill();
                 let output = child.wait_with_output()?;
-                return Err(CheckpointError::CommandFailed(format!(
-                    "git command timed out after {}s: {}",
-                    GIT_TIMEOUT.as_secs(),
-                    output_message(&output)
+                return Err(CheckpointError::CommandTimedOut(summarize_git_failure(
+                    &describe_git_command(args),
+                    &self.work_tree,
+                    Some(self.git_timeout),
+                    &output,
                 )));
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -193,6 +338,12 @@ impl ShadowGitStore {
         } else {
             Ok(Some(commit))
         }
+    }
+
+    fn count_worktree_files_until(&self, max: usize) -> Result<usize, CheckpointError> {
+        #[cfg(test)]
+        self.file_count_calls.fetch_add(1, Ordering::SeqCst);
+        count_regular_files_until(&self.work_tree, max)
     }
 
     fn make_meta(
@@ -254,6 +405,44 @@ impl ShadowGitStore {
         }
         let head_commit = self.current_head_commit()?.or(previous_head);
         self.save_checkpoint_meta(checkpoint_id, request, head_commit)
+    }
+
+    fn record_impl(
+        &self,
+        request: CheckpointRecordRequest,
+    ) -> Result<CheckpointId, CheckpointError> {
+        self.ensure_repo_initialized()?;
+
+        let existing = self
+            .load_metadata()?
+            .into_iter()
+            .find(|meta| {
+                meta.session_id == request.session_id
+                    && meta.turn_id == request.turn_id
+                    && meta.kind == request.kind
+            })
+            .map(|meta| meta.id);
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        if self.count_worktree_files_until(self.max_workdir_files + 1)? > self.max_workdir_files {
+            return Ok(CheckpointId::null());
+        }
+
+        let previous_head = self.current_head_commit()?;
+        if !self.git_status_has_changes()? {
+            let metas = self.load_metadata()?;
+            if let Some(id) = metas.last().map(|meta| meta.id.clone()) {
+                return Ok(id);
+            }
+            if previous_head.is_none() {
+                return self.commit_index_as_checkpoint(&request, None, true);
+            }
+            return self.save_checkpoint_meta(Self::new_checkpoint_id(), &request, previous_head);
+        }
+
+        self.commit_index_as_checkpoint(&request, previous_head, false)
     }
 
     fn validate_restore_paths(&self, paths: &[PathBuf]) -> Result<Vec<PathBuf>, CheckpointError> {
@@ -363,40 +552,25 @@ impl ShadowGitStore {
 impl CheckpointStore for ShadowGitStore {
     fn record(&self, request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
         let _guard = self.lock.lock();
-        self.ensure_repo_initialized()?;
-
-        let existing = self
-            .load_metadata()?
-            .into_iter()
-            .find(|meta| {
-                meta.session_id == request.session_id
-                    && meta.turn_id == request.turn_id
-                    && meta.kind == request.kind
-            })
-            .map(|meta| meta.id);
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-
-        if count_regular_files_until(&self.work_tree, self.max_workdir_files + 1)?
-            > self.max_workdir_files
-        {
+        if matches!(
+            cooldown_decision(Instant::now(), *self.cooldown_until.lock()),
+            CooldownDecision::Skip
+        ) {
             return Ok(CheckpointId::null());
         }
 
-        let previous_head = self.current_head_commit()?;
-        if !self.git_status_has_changes()? {
-            let metas = self.load_metadata()?;
-            if let Some(id) = metas.last().map(|meta| meta.id.clone()) {
-                return Ok(id);
+        match self.record_impl(request) {
+            Ok(id) => {
+                *self.cooldown_until.lock() = None;
+                Ok(id)
             }
-            if previous_head.is_none() {
-                return self.commit_index_as_checkpoint(&request, None, true);
+            Err(err) if err.is_timeout() => {
+                *self.cooldown_until.lock() =
+                    Some(next_cooldown(Instant::now(), CHECKPOINT_COOLDOWN));
+                Err(err)
             }
-            return self.save_checkpoint_meta(Self::new_checkpoint_id(), &request, previous_head);
+            Err(err) => Err(err),
         }
-
-        self.commit_index_as_checkpoint(&request, previous_head, false)
     }
 
     fn list(
@@ -573,12 +747,84 @@ fn short_hash(seed: u64) -> String {
         .collect()
 }
 
-fn output_message(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CooldownDecision {
+    Skip,
+    Proceed,
+}
+
+fn cooldown_decision(now: Instant, until: Option<Instant>) -> CooldownDecision {
+    match until {
+        Some(until) if now < until => CooldownDecision::Skip,
+        _ => CooldownDecision::Proceed,
     }
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn next_cooldown(now: Instant, duration: Duration) -> Instant {
+    now + duration
+}
+
+fn collect_git_args<I, S>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter()
+        .map(|arg| arg.as_ref().to_os_string())
+        .collect()
+}
+
+fn describe_git_command(args: &[OsString]) -> String {
+    match args.first() {
+        Some(cmd) => format!("git {}", cmd.to_string_lossy()),
+        None => "git".to_string(),
+    }
+}
+
+fn summarize_git_failure(
+    command: &str,
+    work_tree: &Path,
+    timeout: Option<Duration>,
+    output: &Output,
+) -> String {
+    let captured_bytes = output.stdout.len() + output.stderr.len();
+    let omitted = if captured_bytes == 0 {
+        "captured output omitted".to_string()
+    } else {
+        format!("captured output omitted {captured_bytes} bytes")
+    };
+    match timeout {
+        Some(timeout) => format!(
+            "{command} timed out after {} (work_tree={}, {omitted})",
+            render_duration(timeout),
+            work_tree.display()
+        ),
+        None => format!(
+            "{command} failed ({}; work_tree={}, {omitted})",
+            render_exit_status(&output.status),
+            work_tree.display()
+        ),
+    }
+}
+
+fn render_exit_status(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => "terminated by signal".to_string(),
+    }
+}
+
+fn render_duration(duration: Duration) -> String {
+    if duration.as_millis() < 1_000 {
+        format!("{}ms", duration.as_millis())
+    } else {
+        format!("{}s", duration.as_secs())
+    }
+}
+
+#[cfg(test)]
+fn store_set_git_timeout(store: &mut ShadowGitStore, git_timeout: Duration) {
+    store.git_timeout = git_timeout;
 }
 
 fn count_regular_files_until(path: &Path, max: usize) -> Result<usize, CheckpointError> {

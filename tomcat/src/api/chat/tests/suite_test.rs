@@ -352,6 +352,108 @@ fn build_turn_checkpoint_request_skips_empty_turns() {
     );
 }
 
+#[test]
+fn checkpoint_warn_line_is_single_line() {
+    let line = checkpoint_warn_line(&CheckpointError::CommandFailed(
+        "git add failed:\nline one\nline two".to_string(),
+    ));
+    assert!(!line.contains('\n'));
+    assert!(line.contains("checkpoint record failed"));
+}
+
+#[test]
+fn checkpoint_warn_line_mentions_backoff_for_timeout() {
+    let line = checkpoint_warn_line(&CheckpointError::CommandTimedOut(
+        "git status timed out after 30s (work_tree=/tmp/demo, captured output omitted 12 bytes)"
+            .to_string(),
+    ));
+    assert!(!line.contains('\n'));
+    assert!(line.contains("temporarily reducing checkpoint frequency"));
+    assert!(line.contains("git status timed out after 30s"));
+}
+
+struct FailingRecordStore {
+    timeout: bool,
+    message: String,
+}
+
+impl CheckpointStore for FailingRecordStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        if self.timeout {
+            Err(CheckpointError::CommandTimedOut(self.message.clone()))
+        } else {
+            Err(CheckpointError::CommandFailed(self.message.clone()))
+        }
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn prune(&self, _retention: RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
+#[test]
+fn record_failure_does_not_break_turn() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_CKPT_FAIL_OPEN_KEY";
+
+    let (_dir, mut ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.checkpoint_store = Arc::new(FailingRecordStore {
+        timeout: true,
+        message:
+            "git status timed out after 30s (work_tree=/tmp/demo, captured output omitted 12 bytes)"
+                .to_string(),
+    });
+    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let messages = vec![crate::ChatMessage::assistant(
+        "checkpoint failure should be nonfatal",
+    )];
+
+    let appended_ids =
+        persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::TurnEnd).unwrap();
+
+    assert_eq!(appended_ids.len(), 1, "checkpoint 失败不应影响消息落盘");
+    assert_eq!(
+        state.messages.last().and_then(|m| m.text_content()),
+        Some("checkpoint failure should be nonfatal"),
+        "checkpoint 失败后仍应保留本轮 assistant 消息"
+    );
+
+    let detail_log = ctx
+        .agent_trail_dir
+        .join("logs")
+        .join("checkpoint-record-errors.log");
+    let detail = std::fs::read_to_string(detail_log).unwrap();
+    assert!(detail.contains("session_id="));
+    assert!(detail.contains("TurnEnd"));
+    assert!(detail.contains("CommandTimedOut"));
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
 struct PruneSpyStore {
     calls: Arc<AtomicUsize>,
     sleep: Duration,

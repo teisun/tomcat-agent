@@ -124,10 +124,18 @@ pub enum CheckpointError {
     Serialize(#[from] serde_json::Error),
     #[error("checkpoint command failed: {0}")]
     CommandFailed(String),
+    #[error("checkpoint command timed out: {0}")]
+    CommandTimedOut(String),
     #[error("checkpoint invalid path: {0}")]
     InvalidPath(String),
     #[error("checkpoint not found: {0}")]
     NotFound(String),
     #[error("checkpoint unsupported: {0}")]
     Unsupported(String),
+}
+
+impl CheckpointError {
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::CommandTimedOut(_))
+    }
 }

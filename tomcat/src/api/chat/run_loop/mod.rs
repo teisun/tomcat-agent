@@ -42,7 +42,8 @@ use self::workspace_state::compute_workspace_state;
 pub(crate) use self::cleanup::cleanup_openai_files_on_session_end;
 #[cfg(test)]
 pub(crate) use self::persist::{
-    build_turn_checkpoint_request, persist_turn_result, schedule_checkpoint_prune,
+    build_turn_checkpoint_request, checkpoint_warn_line, persist_turn_result,
+    schedule_checkpoint_prune,
 };
 #[cfg(test)]
 pub(crate) use self::rehydrate::{
