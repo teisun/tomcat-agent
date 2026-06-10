@@ -116,7 +116,10 @@ fn ensure_current_session_rebuilds_legacy_store_without_init() {
     let store = mgr.load_store().expect("load rebuilt store");
 
     assert_eq!(
-        store.current.get(mgr.current_session_key()).map(String::as_str),
+        store
+            .current
+            .get(mgr.current_session_key())
+            .map(String::as_str),
         Some(entry.session_id.as_str())
     );
     assert_eq!(store.sessions.len(), 1, "legacy data should be replaced");

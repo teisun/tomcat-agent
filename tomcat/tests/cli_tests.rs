@@ -387,7 +387,11 @@ fn deterministic_chat_context_fixture_with_config(
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
     ctx.session_runtime
         .session
         .create_session(&session_key, None)
@@ -3955,9 +3959,12 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
     ));
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
 
     info!("Act: 第一轮触发 append_message_chain invariant");
     let first = tokio::time::timeout(
@@ -4046,9 +4053,12 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
     ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     seed_dangling_tool_round(&ctx.session_runtime.session, "call_tail");
 
     let outcome = tokio::time::timeout(
@@ -4143,9 +4153,12 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
     ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     seed_dangling_tool_round(&ctx.session_runtime.session, "call_once");
 
     let outcome = tokio::time::timeout(
@@ -4212,9 +4225,12 @@ async fn test_cli_chat_path_retries_gateway_503_and_recovers_same_turn() {
     ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4268,9 +4284,12 @@ async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn
     ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4351,9 +4370,12 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4455,9 +4477,12 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4524,9 +4549,12 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
         ]));
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(&ctx, "", system_text, &mut state, CancellationToken::new()),
@@ -4581,9 +4609,12 @@ async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
     );
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(

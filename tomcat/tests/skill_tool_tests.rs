@@ -328,9 +328,12 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
     ]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        &system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -405,9 +408,12 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     *ctx.scope_services.skill_set.write() = skill_set.clone();
     let system_text = build_system_text(&ctx, &skill_set);
 
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system_text)
-            .unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        &system_text,
+    )
+    .unwrap();
     let prompt = "Choose the available skill whose description matches creating a git commit. \
 Before answering, you MUST load that skill via the load_skill tool and read its full body. \
 After the tool returns, reply with exactly two lines: first the secret token from the loaded skill body, then `SKILL_LIVE_OK`. \

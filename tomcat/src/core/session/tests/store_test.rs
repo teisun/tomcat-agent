@@ -8,7 +8,10 @@ fn load_store_missing_file_returns_empty() {
     let path = dir.join("nonexistent.json");
     let store = load_store(&path).unwrap();
     assert!(store.is_empty());
-    assert!(path.exists(), "missing store should be initialized on first load");
+    assert!(
+        path.exists(),
+        "missing store should be initialized on first load"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -87,7 +90,10 @@ fn load_store_resets_legacy_shape_to_new_store() {
     .unwrap();
 
     let loaded = load_store(&path).unwrap();
-    assert!(loaded.is_empty(), "legacy shape should be replaced directly");
+    assert!(
+        loaded.is_empty(),
+        "legacy shape should be replaced directly"
+    );
     let rewritten = std::fs::read_to_string(&path).unwrap();
     let parsed: SessionStore = serde_json::from_str(&rewritten).unwrap();
     assert!(parsed.is_empty());

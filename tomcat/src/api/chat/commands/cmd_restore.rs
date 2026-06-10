@@ -59,12 +59,14 @@ pub(crate) fn run(
         warn!(checkpoint_id = %checkpoint_id, "{message}");
         println!("警告：{message}");
     }
-    let current_session_id = ctx.session_runtime.session.current_session_id().ok().flatten();
-    let conflicts = other_session_restore_conflicts(
-        ctx,
-        current_session_id.as_deref(),
-        &restore_plan.paths,
-    );
+    let current_session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .ok()
+        .flatten();
+    let conflicts =
+        other_session_restore_conflicts(ctx, current_session_id.as_deref(), &restore_plan.paths);
     if !conflicts.is_empty() {
         let detail = render_restore_conflicts(&conflicts);
         warn!(
@@ -128,7 +130,11 @@ pub(crate) fn run(
     // E7：树恢复完成后，把内存里的 plan 模式与磁盘对齐——若磁盘 active executing
     // plan 与本 session 绑定，则把 PlanRuntime 切回 Executing；否则保持当前模式。
     // 失败仅 warning，不影响树恢复的成功结果。
-    match ctx.session_runtime.plan_runtime.reload_active_plan_from_disk() {
+    match ctx
+        .session_runtime
+        .plan_runtime
+        .reload_active_plan_from_disk()
+    {
         Ok(Some(plan_id)) => {
             println!("plan_runtime 已对齐磁盘：EXEC plan_id={plan_id}");
         }
@@ -210,13 +216,15 @@ fn finalize_restore_transcript(
 }
 
 fn record_restore_audit(ctx: &ChatContext, success: bool, detail: String) {
-    ctx.global_services.audit.record_hostcall(HostcallAuditEntry {
-        plugin_id: "chat".to_string(),
-        module: "session".to_string(),
-        method: "restore".to_string(),
-        success,
-        detail: Some(detail),
-    });
+    ctx.global_services
+        .audit
+        .record_hostcall(HostcallAuditEntry {
+            plugin_id: "chat".to_string(),
+            module: "session".to_string(),
+            method: "restore".to_string(),
+            success,
+            detail: Some(detail),
+        });
 }
 
 fn current_leaf_message_id(ctx: &ChatContext) -> Option<String> {
@@ -302,8 +310,7 @@ pub(crate) fn other_session_restore_conflicts(
     if restore_paths.is_empty() {
         return Vec::new();
     }
-    let restore_set: std::collections::BTreeSet<PathBuf> =
-        restore_paths.iter().cloned().collect();
+    let restore_set: std::collections::BTreeSet<PathBuf> = restore_paths.iter().cloned().collect();
     let Ok(entries) = ctx.session_runtime.session.list_sessions() else {
         return Vec::new();
     };

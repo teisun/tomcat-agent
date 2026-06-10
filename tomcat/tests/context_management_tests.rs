@@ -365,7 +365,11 @@ fn chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
     ctx.session_runtime
         .session
         .create_session(&session_key, None)
@@ -391,12 +395,16 @@ async fn test_failed_turn_append_invariant_rehydrates_context_and_allows_next_tu
     ]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
     ctx.global_services.primitive = Arc::new(MockPrimitiveWithLargeFile { file_size: 16 });
-    ctx.session_runtime.message_append_sink =
-        Arc::new(InjectAppendInvariantSink::new(ctx.session_runtime.session.clone()));
+    ctx.session_runtime.message_append_sink = Arc::new(InjectAppendInvariantSink::new(
+        ctx.session_runtime.session.clone(),
+    ));
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)?;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )?;
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(

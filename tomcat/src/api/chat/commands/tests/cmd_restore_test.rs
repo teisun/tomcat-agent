@@ -10,8 +10,8 @@ use crate::api::chat::commands::cmd_restore::{
 use crate::api::chat::ChatContext;
 use crate::{
     AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
-    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
-    RestoreOptions, RetentionPolicy,
+    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
+    RetentionPolicy,
 };
 
 struct EnvGuard {
@@ -81,10 +81,7 @@ struct DiffSpyStore {
 }
 
 impl CheckpointStore for DiffSpyStore {
-    fn record(
-        &self,
-        _request: CheckpointRecordRequest,
-    ) -> Result<CheckpointId, CheckpointError> {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
         Ok(CheckpointId::null())
     }
 
@@ -200,7 +197,8 @@ fn effective_restore_paths_defaults_to_current_session_changed_paths() {
     assert_eq!(narrowed.paths, vec![PathBuf::from("a.txt")]);
     assert_eq!(narrowed.warning, None);
 
-    let explicit = effective_restore_paths(&ctx, &checkpoint_a, &meta_a, &[PathBuf::from("manual.txt")]);
+    let explicit =
+        effective_restore_paths(&ctx, &checkpoint_a, &meta_a, &[PathBuf::from("manual.txt")]);
     assert_eq!(explicit.paths, vec![PathBuf::from("manual.txt")]);
     assert_eq!(explicit.warning, None);
 }
@@ -279,8 +277,14 @@ fn effective_restore_paths_warns_when_auto_narrowing_fails() {
     };
 
     let narrowed = effective_restore_paths(&ctx, &checkpoint_id, &meta, &[]);
-    assert!(narrowed.paths.is_empty(), "should continue with full-tree restore");
-    assert!(narrowed.warning.is_some(), "auto narrowing failure should only warn");
+    assert!(
+        narrowed.paths.is_empty(),
+        "should continue with full-tree restore"
+    );
+    assert!(
+        narrowed.warning.is_some(),
+        "auto narrowing failure should only warn"
+    );
 }
 
 #[test]
@@ -427,7 +431,10 @@ fn restore_keeps_other_session_owned_paths_untouched() {
         .switch_current_to_session_id(&session_a)
         .expect("switch back to session a");
     let outcome = run_restore(&ctx, checkpoint_a.to_string(), Vec::new(), false);
-    assert!(matches!(outcome, crate::api::chat::commands::parse::ChatCommandOutcome::Handled));
+    assert!(matches!(
+        outcome,
+        crate::api::chat::commands::parse::ChatCommandOutcome::Handled
+    ));
 
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("a.txt")).unwrap(),

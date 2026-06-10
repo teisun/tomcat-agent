@@ -492,7 +492,11 @@ fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, Chat
     // SAFETY: 测试使用独立 env key，作用域结束后显式清理。
     unsafe { std::env::set_var(env_key, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
     ctx.session_runtime
         .session
         .create_session(&session_key, None)
@@ -750,8 +754,11 @@ async fn test_run_chat_turn_drains_background_followup_within_same_turn(
     let subscriber = spawn_test_completion_subscriber(&ctx);
 
     let system_text = "system prompt";
-    let mut state =
-        init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)?;
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )?;
 
     info!("Act: 单次 run_chat_turn 内先起后台 bash，再跑一个延时 read 批次");
     let outcome = tokio::time::timeout(

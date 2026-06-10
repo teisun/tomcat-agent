@@ -510,7 +510,12 @@ impl ChatContext {
     }
 
     pub(crate) async fn await_skill_discovery(&self) -> crate::core::skill::SkillSet {
-        let handle = self.scope_services.skill_discovery_handle.lock().await.take();
+        let handle = self
+            .scope_services
+            .skill_discovery_handle
+            .lock()
+            .await
+            .take();
         if let Some(handle) = handle {
             match handle.await {
                 Ok(skill_set) => {
@@ -532,7 +537,13 @@ impl ChatContext {
     }
 
     pub(crate) async fn reload_skill_set(&self) -> crate::core::skill::SkillSet {
-        if let Some(handle) = self.scope_services.skill_discovery_handle.lock().await.take() {
+        if let Some(handle) = self
+            .scope_services
+            .skill_discovery_handle
+            .lock()
+            .await
+            .take()
+        {
             handle.abort();
         }
         let skill_set = if self.config.skills.enabled {

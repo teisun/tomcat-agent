@@ -6,8 +6,7 @@ use std::path::Path;
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
     resolve_quickjs_path, resolve_sessions_dir, save_store, validate_config, AppConfig, AppError,
-    SessionStore, WasmEngine, WasmEngineConfig,
-    DEFAULT_LLM_MODEL,
+    SessionStore, WasmEngine, WasmEngineConfig, DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;

@@ -46,7 +46,8 @@ fn run_init_writes_openai_responses_as_default_provider() {
 #[serial(env_lock)]
 fn run_init_resets_sessions_store_to_new_shape() {
     with_temp_home(|| {
-        let sessions_dir = crate::resolve_sessions_dir(&AppConfig::default()).expect("sessions dir");
+        let sessions_dir =
+            crate::resolve_sessions_dir(&AppConfig::default()).expect("sessions dir");
         std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
         std::fs::write(
             sessions_dir.join("sessions.json"),
@@ -65,7 +66,10 @@ fn run_init_resets_sessions_store_to_new_shape() {
             std::fs::read_to_string(sessions_dir.join("sessions.json")).expect("store text");
         let store: crate::SessionStore =
             serde_json::from_str(&store_text).expect("new session store shape");
-        assert!(store.is_empty(), "init should overwrite sessions.json with new shape");
+        assert!(
+            store.is_empty(),
+            "init should overwrite sessions.json with new shape"
+        );
     });
 }
 

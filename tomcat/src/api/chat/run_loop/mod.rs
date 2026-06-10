@@ -242,7 +242,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let model = ctx.effective_model(entry.as_ref());
 
     if resume {
-        println!("恢复会话: {}", ctx.session_runtime.session.current_session_key());
+        println!(
+            "恢复会话: {}",
+            ctx.session_runtime.session.current_session_key()
+        );
     }
     println!("tomcat 对话模式 (模型: {})", model);
     println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
@@ -528,7 +531,11 @@ pub async fn run_chat_turn(
         tool_definitions: build_tool_definitions(ctx),
         context_config: context_config.clone(),
         compaction_llm: Some(compaction_provider.clone()),
-        agent_trail_dir: ctx.scope_services.agent_trail_dir.to_string_lossy().to_string(),
+        agent_trail_dir: ctx
+            .scope_services
+            .agent_trail_dir
+            .to_string_lossy()
+            .to_string(),
         read_file_state: ctx.session_runtime.read_file_state.clone(),
         openai_files_runtime: ctx.openai_files_runtime_for(main_provider.as_ref()),
         checkpoint_store: ctx.scope_services.checkpoint_store.clone(),
@@ -551,15 +558,12 @@ pub async fn run_chat_turn(
         agent_loop = agent_loop.with_config_backend(backend);
     }
     agent_loop = agent_loop.with_bash_task_registry(ctx.session_runtime.bash_task_registry.clone());
-    agent_loop =
-        agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());
-    agent_loop =
-        agent_loop.with_web_search_runtime(ctx.global_services.web_search_runtime.clone());
+    agent_loop = agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());
+    agent_loop = agent_loop.with_web_search_runtime(ctx.global_services.web_search_runtime.clone());
     agent_loop = agent_loop.with_todos_runtime(ctx.session_runtime.todos_runtime.clone());
     agent_loop =
         agent_loop.with_shared_follow_up_queue(ctx.session_runtime.follow_up_queue.clone());
-    agent_loop =
-        agent_loop.with_completion_routes(ctx.session_runtime.completion_routes.clone());
+    agent_loop = agent_loop.with_completion_routes(ctx.session_runtime.completion_routes.clone());
 
     let previous_state = std::mem::replace(
         context_state,
@@ -590,7 +594,10 @@ pub async fn run_chat_turn(
 
     print!(
         "\n{}",
-        agent_prompt_for_mode(&ctx.config.agent.id, &ctx.session_runtime.plan_runtime.mode())
+        agent_prompt_for_mode(
+            &ctx.config.agent.id,
+            &ctx.session_runtime.plan_runtime.mode()
+        )
     );
     io::stdout().flush().map_err(AppError::Io)?;
 

@@ -572,7 +572,11 @@ async fn write_read_state_is_behaviorally_isolated_between_sessions() {
     let write_tc = make_write_tc(&write_args);
     let (msg, is_error, _) =
         execute_tool(&primitive, &None, &None, Some(&state_b), &write_tc).await;
-    assert!(is_error, "session B write without prior read must be rejected: {}", msg);
+    assert!(
+        is_error,
+        "session B write without prior read must be rejected: {}",
+        msg
+    );
     assert!(
         msg.contains("NoPriorRead"),
         "cross-session isolation should still surface NoPriorRead: {}",
@@ -588,7 +592,11 @@ async fn write_read_state_is_behaviorally_isolated_between_sessions() {
         1,
         "session A's read stamp should not be consumed or shared by session B"
     );
-    assert_eq!(state_b.len(), 0, "session B should still have no read stamp");
+    assert_eq!(
+        state_b.len(),
+        0,
+        "session B should still have no read stamp"
+    );
 }
 
 #[tokio::test]

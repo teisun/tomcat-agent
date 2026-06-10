@@ -21,17 +21,50 @@
 
 ## 0. 下载 Release 二进制直接使用
 
-适合只想尽快运行 CLI 的用户。下载当前平台的 release 二进制后，放入 `PATH` 并执行初始化即可。
+适合只想尽快运行 CLI 的用户。推荐使用一键安装脚本：它会自动识别平台、下载对应的 release 压缩包、校验 `SHA256SUMS`、解压后安装到 `~/.local/bin`。若该目录尚未加入 `PATH`，脚本会提示你写入 shell profile。
 
 ```bash
-# 1. 给二进制加执行权限并放入 PATH
-chmod +x tomcat && mv tomcat /usr/local/bin/
+# 1. 一键安装最新 release
+curl -sSf https://raw.githubusercontent.com/teisun/Tomcat/main/tomcat/scripts/install.sh | bash
 
 # 2. 初始化
+~/.local/bin/tomcat init
+# 若当前 shell 已包含 ~/.local/bin，也可直接运行：
 tomcat init
 
 # 3. 验证
+~/.local/bin/tomcat --help
+# 或
 tomcat --help
+```
+
+安装指定版本时，可在脚本后追加 `-v` 参数：
+
+```bash
+curl -sSf https://raw.githubusercontent.com/teisun/Tomcat/main/tomcat/scripts/install.sh | bash -s -- -v v0.1.3
+```
+
+如果你更希望手动下载 Release 压缩包，请先按平台选择对应的 `target`：
+
+- Apple Silicon（M1/M2/M3）：`aarch64-apple-darwin`
+- Intel Mac：`x86_64-apple-darwin`
+- Linux x86_64：`x86_64-unknown-linux-gnu`
+
+Release 资产命名格式为 `tomcat-<tag>-<target>.tar.gz`，例如 `tomcat-v0.1.3-aarch64-apple-darwin.tar.gz`。手动下载后的安装步骤如下：
+
+```bash
+# 1. 解压 release 压缩包
+tar -xzf tomcat-<tag>-<target>.tar.gz
+
+# 2. 若是 macOS 且文件来自浏览器下载，可先清除 quarantine
+xattr -dr com.apple.quarantine ./tomcat
+
+# 3. 安装到用户级 PATH 目录（免 sudo）
+mkdir -p "$HOME/.local/bin"
+install -m 755 ./tomcat "$HOME/.local/bin/tomcat"
+
+# 4. 初始化
+"$HOME/.local/bin/tomcat" init
 ```
 
 `tomcat init` 会完成默认配置写入、工作目录创建、资源部署与 API Key 配置。初始化完成后，可继续阅读 [第 2 节](#2-初始化与环境检测) 与 [第 6 节](#6-对话模式chat)。

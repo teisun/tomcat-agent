@@ -627,7 +627,11 @@ fn checkpoint_recording_test_context(
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
     ctx.session_runtime
         .session
         .create_session(&session_key, None)

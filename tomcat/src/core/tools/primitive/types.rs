@@ -43,6 +43,9 @@ pub struct BashResult {
     #[serde(rename = "code")]
     pub exit_code: i32,
     /// T2-P0-016 PR-E.3：墙钟超时被 kill 时为 `true`；正常退出 / 立即结束为 `false`。
+    /// 若主 shell 已退出、但 reader drain 阶段检测到 `cmd &` 残留后台子进程撑住管道，
+    /// 当前实现会在 `stderr` / 审计里追加 warning 并清理同进程组，但**不会**把这条字段
+    /// 置为 `true`（与真正的前台 wall-clock timeout 语义区分）。
     /// 历史 mock / 第三方 PrimitiveExecutor 反序列化兼容：缺省 `false`。
     #[serde(default)]
     pub timed_out: bool,
@@ -434,8 +437,11 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
     ///   `[tools.bash].timeout_ms`（默认 120_000）。`tool_exec` 入口已按
     ///   [`crate::infra::config::MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000 clamp，
     ///   trait 实现侧再做一次防御性 clamp。`DefaultPrimitiveExecutor` 用
-    ///   `tokio::time::timeout(..., child.wait())` 包裹等待；超时分支对 `Child` 调用
-    ///   `kill` 并 `wait` 收口，避免 `wait_with_output` 反模式（bash.md §2.4.3 / §6.2 / §9.2）。
+    ///   `tokio::time::timeout(..., child.wait())` 包裹前台等待，并用同一 deadline 继续约束
+    ///   stdout/stderr reader drain；若主 shell 已退、但 `cmd &` 残留后台子进程继续持有
+    ///   管道写端，会清理同进程组并返回 warning，而不是永久阻塞在 `read_to_end` 上。
+    ///   这样既避免 `wait_with_output` 反模式（bash.md §2.4.3 / §6.2 / §9.2），也避免
+    ///   同步 bash 被“shell 语义后台”卡死。
     ///   旧 mock / 第三方 PrimitiveExecutor 实现可忽略此参数（默认行为不变）。
     async fn execute_bash(
         &self,

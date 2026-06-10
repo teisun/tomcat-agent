@@ -250,5 +250,8 @@ fn run_plan_exit_allows_pending_back_to_chat() {
 
     let outcome = run(&ctx, PlanCommand::Exit);
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
-    assert!(matches!(ctx.session_runtime.plan_runtime.mode(), PlanState::Chat));
+    assert!(matches!(
+        ctx.session_runtime.plan_runtime.mode(),
+        PlanState::Chat
+    ));
 }

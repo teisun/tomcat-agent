@@ -105,15 +105,13 @@ fn from_config_prefers_session_cwd_when_reopening_existing_session() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
-    let expected_a =
-        std::fs::canonicalize(project_a.path()).expect("canonicalize project_a path");
+    let expected_a = std::fs::canonicalize(project_a.path()).expect("canonicalize project_a path");
 
     {
         let _cwd_guard = CurrentDirGuard::set(project_a.path());
         let ctx = ChatContext::from_config(cfg.clone()).expect("ctx from project a");
         assert_eq!(
-            ctx.scope_services.agent_workspace_dir,
-            expected_a,
+            ctx.scope_services.agent_workspace_dir, expected_a,
             "首次创建会话时应记录 project_a 作为 workspace"
         );
     }
@@ -122,8 +120,7 @@ fn from_config_prefers_session_cwd_when_reopening_existing_session() {
         let _cwd_guard = CurrentDirGuard::set(project_b.path());
         let reopened = ChatContext::from_config(cfg).expect("reopened ctx");
         assert_eq!(
-            reopened.scope_services.agent_workspace_dir,
-            expected_a,
+            reopened.scope_services.agent_workspace_dir, expected_a,
             "重进已有会话时应优先沿用 session.cwd，而不是当前进程 cwd"
         );
     }

@@ -160,7 +160,11 @@ fn same_scope_switch_keeps_current_pointer_and_history_consistent(
         .into_iter()
         .map(|(_, entry)| entry.session_id)
         .collect();
-    assert_eq!(listed_ids.len(), 2, "switch should not drop historical sessions");
+    assert_eq!(
+        listed_ids.len(),
+        2,
+        "switch should not drop historical sessions"
+    );
     assert!(listed_ids.contains(&first.session_id));
     assert!(listed_ids.contains(&second.session_id));
     Ok(())

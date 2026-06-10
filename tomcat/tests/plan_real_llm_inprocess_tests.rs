@@ -236,11 +236,20 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
 
 fn ensure_session(ctx: &ChatContext) {
     let key = ctx.session_runtime.session.current_session_key();
-    if ctx.session_runtime.session.get_session(key).unwrap().is_none() {
+    if ctx
+        .session_runtime
+        .session
+        .get_session(key)
+        .unwrap()
+        .is_none()
+    {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string());
-        ctx.session_runtime.session.create_session(key, cwd).unwrap();
+        ctx.session_runtime
+            .session
+            .create_session(key, cwd)
+            .unwrap();
     }
 }
 
@@ -535,9 +544,12 @@ async fn inprocess_full_plan_path_with_real_llm() {
         let mut diag_state = InprocessDiagState::default();
 
         let system_text = build_system_text_minimal(&ctx);
-        let mut context_state =
-            init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system_text)
-                .expect("init_context_state 失败");
+        let mut context_state = init_context_state(
+            &ctx.session_runtime.session,
+            &ctx.config.context,
+            &system_text,
+        )
+        .expect("init_context_state 失败");
 
         // 1) /plan → Planning
         ctx.session_runtime
@@ -675,7 +687,10 @@ async fn inprocess_full_plan_path_with_real_llm() {
         assert_counter_artifact(&workdir);
 
         // 6) update_plan 已在 verifier 通过后自动 finalize_completed_to_chat → Chat
-        let finalized = ctx.session_runtime.plan_runtime.finalize_completed_to_chat();
+        let finalized = ctx
+            .session_runtime
+            .plan_runtime
+            .finalize_completed_to_chat();
         assert!(
             finalized.is_none(),
             "completed 已在 update_plan 收口时自动 finalize；此处不应再次拿到 plan_id"
