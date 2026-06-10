@@ -377,6 +377,13 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             "checkpoint.retention_days 必须大于 0".to_string(),
         ));
     }
+    let session_mode = cfg.session.default_mode.trim().to_ascii_lowercase();
+    if !["code", "claw"].contains(&session_mode.as_str()) {
+        return Err(AppError::Config(format!(
+            "session.default_mode 非法: {}（允许 code / claw）",
+            cfg.session.default_mode
+        )));
+    }
     let level = cfg.log.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {
         return Err(AppError::Config(format!(

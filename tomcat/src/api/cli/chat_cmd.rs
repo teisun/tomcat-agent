@@ -1,11 +1,11 @@
-//! `tomcat chat` 子命令入口：启动交互式对话模式。
+//! 交互式对话模式共享入口：`claw` / `code` 复用同一套 Ctrl+C 与 runtime 桥接逻辑。
 //!
 //! 本模块负责 L0（进程级）中断信号到 L1（chat 会话）取消令牌的桥接，
 //! 具体分层与时序参见 `docs/architecture/interrupt-and-cancellation.md`。
 
 use std::time::{Duration, Instant};
 
-use crate::{AppConfig, AppError};
+use crate::{AppConfig, AppError, SessionMode};
 
 /// 软 vs 硬中断判定结果。`Hard` 意味着 2 秒内第二次 Ctrl+C，
 /// 调用方应走 `std::process::exit(130)`；`Soft` 则仅 cancel 当前回合 token。
@@ -33,16 +33,20 @@ pub fn check_double_tap(last: Option<Instant>, now: Instant, window: Duration) -
 /// 双击判定默认窗口。
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_secs(2);
 
-pub(super) fn run_chat(resume: bool, cfg: &AppConfig) -> Result<(), AppError> {
-    let ctx = super::super::chat::ChatContext::from_config(cfg.clone())?;
+pub(super) fn run_chat_mode(
+    resume: bool,
+    cfg: &AppConfig,
+    mode: SessionMode,
+) -> Result<(), AppError> {
+    let ctx = super::super::chat::ChatContext::from_config_with_mode(cfg.clone(), mode)?;
 
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| AppError::Config(format!("创建 tokio 运行时失败: {}", e)))?;
 
     // 桥接 L0 → L1：SIGINT → ChatContext.cancel_token.cancel() + 双击检测。
-    let cancel_token = ctx.cancel_token.clone();
-    let last_interrupt_at = ctx.last_interrupt_at.clone();
-    let append_in_flight = ctx.session.append_in_flight_counter();
+    let cancel_token = ctx.session_runtime.cancel_token.clone();
+    let last_interrupt_at = ctx.session_runtime.last_interrupt_at.clone();
+    let append_in_flight = ctx.session_runtime.session.append_in_flight_counter();
     ctrlc::set_handler(move || {
         let now = Instant::now();
         let prev = {

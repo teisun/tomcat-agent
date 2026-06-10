@@ -167,6 +167,7 @@ fn chat_message_assistant_tool_calls_null_content_when_empty() {
 #[test]
 fn effective_model_uses_session_override() {
     let entry = SessionEntry {
+        session_key: crate::DEFAULT_SESSION_KEY.to_string(),
         session_id: "s1".into(),
         updated_at: 0,
         session_file: None,
@@ -192,6 +193,7 @@ fn effective_model_uses_session_override() {
 #[test]
 fn effective_model_uses_global_when_no_override() {
     let entry = SessionEntry {
+        session_key: crate::DEFAULT_SESSION_KEY.to_string(),
         session_id: "s2".into(),
         updated_at: 0,
         session_file: None,
@@ -420,13 +422,14 @@ fn record_failure_does_not_break_turn() {
     const ENV_KEY: &str = "TOMCAT_CHAT_CKPT_FAIL_OPEN_KEY";
 
     let (_dir, mut ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
-    ctx.checkpoint_store = Arc::new(FailingRecordStore {
+    ctx.scope_services.checkpoint_store = Arc::new(FailingRecordStore {
         timeout: true,
         message:
             "git status timed out after 30s (work_tree=/tmp/demo, captured output omitted 12 bytes)"
                 .to_string(),
     });
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     let messages = vec![crate::ChatMessage::assistant(
         "checkpoint failure should be nonfatal",
     )];
@@ -442,6 +445,7 @@ fn record_failure_does_not_break_turn() {
     );
 
     let detail_log = ctx
+        .scope_services
         .agent_trail_dir
         .join("logs")
         .join("checkpoint-record-errors.log");
@@ -508,7 +512,7 @@ fn startup_prune_scheduled_without_blocking_readline() {
     unsafe { std::env::set_var(ENV_KEY, "stub") };
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     let prune_calls = Arc::new(AtomicUsize::new(0));
-    ctx.checkpoint_store = Arc::new(PruneSpyStore {
+    ctx.scope_services.checkpoint_store = Arc::new(PruneSpyStore {
         calls: prune_calls.clone(),
         sleep: Duration::from_millis(150),
     });
@@ -547,7 +551,7 @@ fn chat_context_attaches_cli_ask_question_panel() {
     unsafe { std::env::set_var(ENV_KEY, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     assert!(
-        ctx.plan_runtime.ask_question_panel().is_some(),
+        ctx.session_runtime.plan_runtime.ask_question_panel().is_some(),
         "CLI ChatContext 应默认挂载 AskQuestionPanel，避免真 LLM 调 ask_question 时直接报工具不可用"
     );
     // SAFETY: 清理测试环境变量。
@@ -623,9 +627,13 @@ fn checkpoint_recording_test_context(
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let session_key = ctx.session.current_session_key().to_string();
-    ctx.session.create_session(&session_key, None).unwrap();
+    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    ctx.session_runtime
+        .session
+        .create_session(&session_key, None)
+        .unwrap();
     let transcript_path = ctx
+        .session_runtime
         .session
         .current_transcript_path()
         .unwrap()
@@ -651,7 +659,8 @@ fn append_message_chain_rehydrate_reloads_context_from_transcript() {
     const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_KEY";
 
     let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
-    ctx.session
+    ctx.session_runtime
+        .session
         .append_message(serde_json::json!({
             "role": "assistant",
             "content": "outer tool call",
@@ -662,27 +671,31 @@ fn append_message_chain_rehydrate_reloads_context_from_transcript() {
             }]
         }))
         .unwrap();
-    ctx.session
+    ctx.session_runtime
+        .session
         .append_message(serde_json::json!({
             "role": "tool",
             "tool_call_id": "call_1",
             "content": "[interrupted]"
         }))
         .unwrap();
-    ctx.session
+    ctx.session_runtime
+        .session
         .append_message(serde_json::json!({
             "role": "user",
             "content": "nested prompt"
         }))
         .unwrap();
-    ctx.session
+    ctx.session_runtime
+        .session
         .append_message(serde_json::json!({
             "role": "assistant",
             "content": "inner done"
         }))
         .unwrap();
 
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     state.messages = vec![crate::ChatMessage::assistant_with_tool_calls(
         Some("outer tool call"),
         vec![serde_json::json!({
@@ -730,7 +743,8 @@ fn append_message_chain_rehydrate_falls_back_when_transcript_reload_fails() {
     const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_FALLBACK_KEY";
 
     let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     state.messages = vec![crate::ChatMessage::assistant_with_tool_calls(
         Some("outer tool call"),
         vec![serde_json::json!({
@@ -770,7 +784,8 @@ fn non_append_invariant_does_not_rehydrate_context() {
     const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_NOOP_KEY";
 
     let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     state.messages = vec![crate::ChatMessage::user("keep me")];
 
     let changed = super::super::try_rehydrate_context_state_after_append_invariant(
@@ -801,11 +816,12 @@ fn turn_end_writes_checkpoint() {
 
     let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
     let spy_state = Arc::new(Mutex::new(RecordSpyState::default()));
-    ctx.checkpoint_store = Arc::new(RecordSpyStore {
+    ctx.scope_services.checkpoint_store = Arc::new(RecordSpyStore {
         transcript_path,
         state: Arc::clone(&spy_state),
     });
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     let messages = vec![crate::ChatMessage::assistant("turn end reply")];
 
     let appended_ids =
@@ -839,11 +855,12 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
 
     let (_dir, mut ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
     let spy_state = Arc::new(Mutex::new(RecordSpyState::default()));
-    ctx.checkpoint_store = Arc::new(RecordSpyStore {
+    ctx.scope_services.checkpoint_store = Arc::new(RecordSpyStore {
         transcript_path,
         state: Arc::clone(&spy_state),
     });
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, "sys").unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     let tool_calls = vec![serde_json::json!({
         "id": "call_1",
         "type": "function",
@@ -949,6 +966,7 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
 
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
     let runtime = ctx
+        .session_runtime
         .openai_files_runtime
         .as_ref()
         .expect("openai-responses should expose files runtime");

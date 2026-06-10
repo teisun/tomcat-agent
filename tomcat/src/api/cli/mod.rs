@@ -1,7 +1,9 @@
-//! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认 chat。
+//! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认按配置进入 claw/code。
 
 mod audit_cmd;
 mod chat_cmd;
+mod claw_cmd;
+mod code_cmd;
 mod config_cmd;
 mod init;
 mod init_model_wizard;
@@ -21,10 +23,13 @@ use std::path::PathBuf;
 
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, init_logging, load_config,
-    normalize_path, resolve_log_dir, validate_config, AppError, CLI_NAME, DEFAULT_CONFIG_PATH,
+    normalize_path, resolve_log_dir, validate_config, AppConfig, AppError, CLI_NAME,
+    DEFAULT_CONFIG_PATH,
 };
 
 pub(crate) use audit_cmd::run_audit;
+pub(crate) use claw_cmd::run_claw;
+pub(crate) use code_cmd::run_code;
 pub(crate) use config_cmd::{config_file_path, run_config};
 pub(crate) use init::{run_doctor, run_init};
 pub(crate) use pathrules_cmd::run_pathrules;
@@ -33,10 +38,6 @@ pub(crate) use session_cmd::run_session;
 pub(crate) use skill_cmd::run_skill;
 pub(crate) use workspace_cmd::run_workspace;
 
-use chat_cmd::run_chat;
-
-#[cfg(test)]
-use crate::AppConfig;
 #[cfg(test)]
 pub(crate) use audit_cmd::{parse_audit_line, read_audit_entries};
 #[cfg(test)]
@@ -53,7 +54,7 @@ pub(crate) use plugin_cmd::{
 #[command(
     name = CLI_NAME,
     about = "Tomcat Agent CLI — 插件化 AI Agent 运行时",
-    long_about = "tomcat 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令，无参数时进入对话模式。",
+    long_about = "tomcat 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
     version
 )]
 pub struct Cli {
@@ -102,12 +103,40 @@ pub enum Commands {
         #[command(subcommand)]
         sub: PathRulesSub,
     },
-    /// 进入交互式对话模式
+    /// 进入全局会话模式（不绑定 cwd）
+    Claw {
+        /// 恢复上次会话（默认行为，显式语义）
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+    },
+    /// 进入按项目隔离的对话模式
+    Code {
+        /// 恢复上次会话（默认行为，显式语义）
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+    },
+    /// 兼容旧命令；等价于 `tomcat code`
+    #[command(hide = true)]
     Chat {
         /// 恢复上次会话（默认行为，显式语义）
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScopeArg {
+    Code,
+    Claw,
+}
+
+impl SessionScopeArg {
+    pub fn into_mode(self) -> crate::SessionMode {
+        match self {
+            Self::Code => crate::SessionMode::Code,
+            Self::Claw => crate::SessionMode::Claw,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -131,17 +160,39 @@ pub enum ConfigSub {
 #[derive(Subcommand, Debug)]
 pub enum SessionSub {
     /// 列出所有会话
-    List,
+    List {
+        #[arg(long, value_enum)]
+        scope: Option<SessionScopeArg>,
+    },
     /// 创建新会话
-    New,
+    New {
+        #[arg(long, value_enum)]
+        scope: Option<SessionScopeArg>,
+    },
     /// 切换到指定 session_id
-    Switch { session_id: String },
+    Switch {
+        session_id: String,
+        #[arg(long, value_enum)]
+        scope: Option<SessionScopeArg>,
+    },
     /// 删除会话
-    Delete { key: String },
+    Delete {
+        session_id: String,
+        #[arg(long, value_enum)]
+        scope: Option<SessionScopeArg>,
+    },
     /// 归档会话
-    Archive { key: String },
+    Archive {
+        session_id: String,
+        #[arg(long, value_enum)]
+        scope: Option<SessionScopeArg>,
+    },
     /// 搜索会话（MVP 占位：仅列出）
-    Search { query: Option<String> },
+    Search {
+        query: Option<String>,
+        #[arg(long, value_enum)]
+        scope: Option<SessionScopeArg>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -236,14 +287,13 @@ pub enum SkillSub {
     Reload,
 }
 
-/// 解析参数并执行对应子命令；无子命令时默认执行 chat。
+/// 解析参数并执行对应子命令；无子命令时按配置进入默认 session mode。
 pub fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
-    let cmd = cli.command.unwrap_or(Commands::Chat { resume: false });
 
-    match cmd {
-        Commands::Init => return run_init(),
-        Commands::Doctor => return run_doctor(),
+    match cli.command.as_ref() {
+        Some(Commands::Init) => return run_init(),
+        Some(Commands::Doctor) => return run_doctor(),
         _ => {}
     }
 
@@ -272,7 +322,17 @@ pub fn run_cli() -> Result<(), AppError> {
         },
     )?;
 
+    let cmd = match cli.command {
+        Some(cmd) => cmd,
+        None => match resolve_default_cli_session_mode(&cfg)? {
+            crate::SessionMode::Code => Commands::Code { resume: false },
+            crate::SessionMode::Claw => Commands::Claw { resume: false },
+        },
+    };
+
     match cmd {
+        Commands::Init => unreachable!("init handled before config load"),
+        Commands::Doctor => unreachable!("doctor handled before config load"),
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),
         Commands::Workspace { sub } => run_workspace(sub, &cfg),
@@ -280,7 +340,15 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Plugin { sub } => run_plugin(sub, &cfg),
         Commands::Audit { sub } => run_audit(sub, &cfg),
         Commands::Skill { sub } => run_skill(sub, &cfg),
-        Commands::Chat { resume } => run_chat(resume, &cfg),
-        _ => unreachable!(),
+        Commands::Claw { resume } => run_claw(resume, &cfg),
+        Commands::Code { resume } => run_code(resume, &cfg),
+        Commands::Chat { resume } => run_code(resume, &cfg),
     }
+}
+
+pub(crate) fn resolve_default_cli_session_mode(
+    cfg: &AppConfig,
+) -> Result<crate::SessionMode, AppError> {
+    let env_override = std::env::var("TOMCAT_SESSION_MODE").ok();
+    crate::resolve_session_mode(&cfg.session.default_mode, env_override.as_deref())
 }

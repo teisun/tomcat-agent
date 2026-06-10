@@ -39,7 +39,12 @@ fn run_session_list_empty_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let r = run_session(SessionSub::List, &cfg);
+    let r = run_session(
+        SessionSub::List {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
     assert!(r.is_ok());
 }
 
@@ -48,7 +53,12 @@ fn run_session_new_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let r = run_session(SessionSub::New, &cfg);
+    let r = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
     assert!(r.is_ok());
 }
 
@@ -57,8 +67,18 @@ fn run_session_list_after_new_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let _ = run_session(SessionSub::New, &cfg);
-    let r = run_session(SessionSub::List, &cfg);
+    let _ = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
+    let r = run_session(
+        SessionSub::List {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
     assert!(r.is_ok());
 }
 
@@ -70,6 +90,7 @@ fn run_session_switch_nonexistent_returns_ok() {
     let r = run_session(
         SessionSub::Switch {
             session_id: "nonexistent".to_string(),
+            scope: Some(SessionScopeArg::Claw),
         },
         &cfg,
     );
@@ -81,10 +102,20 @@ fn run_session_switch_existing_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let _ = run_session(SessionSub::New, &cfg);
+    let _ = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
     let mgr = crate::SessionManager::new(crate::resolve_sessions_dir(&cfg).unwrap());
     let first = mgr.current_session_id().unwrap().expect("first session id");
-    let _ = run_session(SessionSub::New, &cfg);
+    let _ = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
     let second = mgr
         .current_session_id()
         .unwrap()
@@ -93,6 +124,7 @@ fn run_session_switch_existing_returns_ok() {
     let r = run_session(
         SessionSub::Switch {
             session_id: first.clone(),
+            scope: Some(SessionScopeArg::Claw),
         },
         &cfg,
     );
@@ -109,10 +141,21 @@ fn run_session_delete_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let _ = run_session(SessionSub::New, &cfg);
+    let _ = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
+    let mgr = crate::SessionManager::new(crate::resolve_sessions_dir(&cfg).unwrap());
+    let current_id = mgr
+        .current_session_id()
+        .unwrap()
+        .expect("current session id");
     let r = run_session(
         SessionSub::Delete {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
+            session_id: current_id,
+            scope: Some(SessionScopeArg::Claw),
         },
         &cfg,
     );
@@ -124,10 +167,21 @@ fn run_session_archive_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let _ = run_session(SessionSub::New, &cfg);
+    let _ = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
+    let mgr = crate::SessionManager::new(crate::resolve_sessions_dir(&cfg).unwrap());
+    let current_id = mgr
+        .current_session_id()
+        .unwrap()
+        .expect("current session id");
     let r = run_session(
         SessionSub::Archive {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
+            session_id: current_id,
+            scope: Some(SessionScopeArg::Claw),
         },
         &cfg,
     );
@@ -151,12 +205,22 @@ fn run_session_delete_triggers_openai_files_cleanup_registry() {
     // SAFETY: 测试内部临时注入 key。
     unsafe { std::env::set_var("TOMCAT_SESSION_CLEANUP_TEST_KEY", "stub") };
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let _ = run_session(SessionSub::New, &cfg);
+    let _ = run_session(
+        SessionSub::New {
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
 
     let sessions_path = crate::resolve_sessions_dir(&cfg).unwrap();
+    let mgr = crate::SessionManager::new(sessions_path.clone());
+    let current_id = mgr
+        .current_session_id()
+        .unwrap()
+        .expect("current session id");
     let registry = crate::core::llm::openai_files::OpenAiFilesRuntime::registry_path_for_session(
         sessions_path.as_path(),
-        crate::DEFAULT_SESSION_KEY,
+        &current_id,
     );
     std::fs::write(
         &registry,
@@ -167,7 +231,8 @@ fn run_session_delete_triggers_openai_files_cleanup_registry() {
 
     let r = run_session(
         SessionSub::Delete {
-            key: crate::DEFAULT_SESSION_KEY.to_string(),
+            session_id: current_id,
+            scope: Some(SessionScopeArg::Claw),
         },
         &cfg,
     );
@@ -200,7 +265,13 @@ fn run_session_search_empty_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
-    let r = run_session(SessionSub::Search { query: None }, &cfg);
+    let r = run_session(
+        SessionSub::Search {
+            query: None,
+            scope: Some(SessionScopeArg::Claw),
+        },
+        &cfg,
+    );
     assert!(r.is_ok());
 }
 
@@ -212,6 +283,7 @@ fn run_session_search_with_query_returns_ok() {
     let r = run_session(
         SessionSub::Search {
             query: Some("q".to_string()),
+            scope: Some(SessionScopeArg::Claw),
         },
         &cfg,
     );

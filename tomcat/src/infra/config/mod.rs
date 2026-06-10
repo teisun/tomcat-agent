@@ -31,8 +31,8 @@ pub use types::WorkspaceEntry;
 pub use types::{
     compute_context_budget_chars, AgentConfig, AppConfig, CheckpointConfig, ContextConfig,
     LlmConfig, LlmFilesConfig, LogConfig, OpenAiResponsesConfig, PreflightConfig, PrimitiveConfig,
-    ReasoningContinuityConfig, ResumeHydrationMode, SecurityConfig, SkillsConfig, SplashConfig,
-    ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WasmConfig, WorkspaceConfig,
+    ReasoningContinuityConfig, ResumeHydrationMode, SecurityConfig, SessionConfig, SkillsConfig,
+    SplashConfig, ThinkingConfig, ThinkingDisplay, ToolCliVerbosity, WasmConfig, WorkspaceConfig,
     DEFAULT_AGENT_MAX_ATTEMPTS, DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），

@@ -51,7 +51,7 @@ fn usage_text() -> String {
 
 /// `/plan` 子命令分发。`ctx.plan_runtime` 在 P1 起由 `ChatContext::from_config` 注入。
 pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
-    let rt = ctx.plan_runtime.clone();
+    let rt = ctx.session_runtime.plan_runtime.clone();
     match cmd {
         PlanCommand::Enter => match rt.enter_planning() {
             Ok(()) => {
@@ -76,7 +76,7 @@ pub(crate) fn run(ctx: &ChatContext, cmd: PlanCommand) -> ChatCommandOutcome {
             }
         },
         PlanCommand::Build { plan_target } => {
-            let session_id_for_plan = match ctx.session.current_session_id() {
+            let session_id_for_plan = match ctx.session_runtime.session.current_session_id() {
                 Ok(Some(v)) => Some(v),
                 Ok(None) => {
                     eprintln!("[plan] /plan build 失败：当前无会话，无法确定 session_id");

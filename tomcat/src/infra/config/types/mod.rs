@@ -28,6 +28,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
     #[serde(default)]
+    pub session: SessionConfig,
+    #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
     pub storage: StorageConfig,

@@ -5,7 +5,8 @@
 //! - `init` 拒绝已下线的 `--config` 参数。
 //! - `doctor` / `config get` / `session list` / `plugin list` / `audit list`
 //!   能正确还原为各自的 `Commands` 枚举变体。
-//! - 无参调用 `tomcat` 时 `command` 为 `None`，由 main 入口落到默认 chat 流程。
+//! - 无参调用 `tomcat` 时 `command` 为 `None`，由 main 入口按默认 mode 解析为
+//!   `claw` 或 `code`。
 
 use super::super::*;
 
@@ -44,7 +45,21 @@ fn cli_parse_session_list() {
     assert!(matches!(
         cmd,
         Commands::Session {
-            sub: SessionSub::List
+            sub: SessionSub::List { scope: None }
+        }
+    ));
+}
+
+#[test]
+fn cli_parse_session_list_with_scope() {
+    let cli = Cli::try_parse_from(["tomcat", "session", "list", "--scope", "claw"]).unwrap();
+    let cmd = cli.command.unwrap();
+    assert!(matches!(
+        cmd,
+        Commands::Session {
+            sub: SessionSub::List {
+                scope: Some(SessionScopeArg::Claw)
+            }
         }
     ));
 }
@@ -93,7 +108,22 @@ fn skill_subcommand_parsed() {
 }
 
 #[test]
-fn cli_parse_default_chat() {
+fn cli_parse_claw() {
+    let cli = Cli::try_parse_from(["tomcat", "claw"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Claw { resume: false })
+    ));
+}
+
+#[test]
+fn cli_parse_code_resume() {
+    let cli = Cli::try_parse_from(["tomcat", "code", "--resume"]).unwrap();
+    assert!(matches!(cli.command, Some(Commands::Code { resume: true })));
+}
+
+#[test]
+fn cli_parse_default_command_is_none() {
     let cli = Cli::try_parse_from(["tomcat"]).unwrap();
     assert!(cli.command.is_none());
 }

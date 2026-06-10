@@ -7,6 +7,7 @@
 
 mod context_overrides_test;
 mod prompt_model_test;
+mod runtime_split_test;
 mod show_thinking_resolve_test;
 mod suite_test;
 mod thinking_persist_test;

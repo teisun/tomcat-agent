@@ -204,12 +204,24 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
     }
 
     let workspace_context = WorkspaceContext {
-        agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
-        agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
+        agent_workspace_dir: ctx
+            .scope_services
+            .agent_workspace_dir
+            .to_string_lossy()
+            .to_string(),
+        agent_definition_dir: ctx
+            .scope_services
+            .agent_definition_dir
+            .to_string_lossy()
+            .to_string(),
         agent_plans_dir: tomcat::core::plan_runtime::file_store::plans_dir()
             .map(|path| format_home_path(&path))
             .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
-        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+        agent_trail_dir: ctx
+            .scope_services
+            .agent_trail_dir
+            .to_string_lossy()
+            .to_string(),
         tool_lines: None,
     };
     build_system_prompt_with_state(
@@ -223,12 +235,12 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
 }
 
 fn ensure_session(ctx: &ChatContext) {
-    let key = ctx.session.current_session_key();
-    if ctx.session.get_session(key).unwrap().is_none() {
+    let key = ctx.session_runtime.session.current_session_key();
+    if ctx.session_runtime.session.get_session(key).unwrap().is_none() {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string());
-        ctx.session.create_session(key, cwd).unwrap();
+        ctx.session_runtime.session.create_session(key, cwd).unwrap();
     }
 }
 
@@ -347,7 +359,7 @@ fn push_transcript_phase_summary(
     ctx: &ChatContext,
     state: &mut InprocessDiagState,
 ) {
-    if let Ok(Some(t)) = ctx.session.current_transcript_path() {
+    if let Ok(Some(t)) = ctx.session_runtime.session.current_transcript_path() {
         if let Some(delta) = text_delta_from_file(&t, &mut state.transcript_offset) {
             let _ = std::fmt::Write::write_fmt(
                 body,
@@ -380,12 +392,15 @@ fn dump_diagnostic(
     );
     let _ = std::fmt::Write::write_fmt(
         &mut out,
-        format_args!("plan_runtime.mode = {:?}\n", ctx.plan_runtime.mode()),
+        format_args!(
+            "plan_runtime.mode = {:?}\n",
+            ctx.session_runtime.plan_runtime.mode()
+        ),
     );
 
     if full_snapshot {
         out.push_str(&format_plan_snapshot(plan_path));
-        if let Ok(Some(t)) = ctx.session.current_transcript_path() {
+        if let Ok(Some(t)) = ctx.session_runtime.session.current_transcript_path() {
             let _ = std::fmt::Write::write_fmt(
                 &mut out,
                 format_args!("---- transcript: {} (tail 80) ----\n", t.display()),
@@ -424,7 +439,10 @@ fn dump_phase_summary(
     );
     let _ = std::fmt::Write::write_fmt(
         &mut out,
-        format_args!("plan_runtime.mode = {:?}\n", ctx.plan_runtime.mode()),
+        format_args!(
+            "plan_runtime.mode = {:?}\n",
+            ctx.session_runtime.plan_runtime.mode()
+        ),
     );
 
     let mut body = String::new();
@@ -517,14 +535,19 @@ async fn inprocess_full_plan_path_with_real_llm() {
         let mut diag_state = InprocessDiagState::default();
 
         let system_text = build_system_text_minimal(&ctx);
-        let mut context_state = init_context_state(&ctx.session, &ctx.config.context, &system_text)
-            .expect("init_context_state 失败");
+        let mut context_state =
+            init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system_text)
+                .expect("init_context_state 失败");
 
         // 1) /plan → Planning
-        ctx.plan_runtime
+        ctx.session_runtime
+            .plan_runtime
             .enter_planning()
             .expect("enter_planning 失败");
-        assert!(matches!(ctx.plan_runtime.mode(), PlanState::Planning));
+        assert!(matches!(
+            ctx.session_runtime.plan_runtime.mode(),
+            PlanState::Planning
+        ));
 
         // 2) 用真 LLM 跑 PLANNING_PROMPT；期望它调 create_plan
         let planning_prompt = build_counter_planning_prompt(COUNTER_PLAN_GOAL, &workdir);
@@ -571,10 +594,11 @@ async fn inprocess_full_plan_path_with_real_llm() {
         );
 
         // 4) /plan build <plan_id/path> → Executing
-        ctx.plan_runtime
+        ctx.session_runtime
+            .plan_runtime
             .build_plan(&plan_id, Some(fresh_session.session_id.clone()))
             .expect("build_plan 失败");
-        match ctx.plan_runtime.mode() {
+        match ctx.session_runtime.plan_runtime.mode() {
             PlanState::Executing { plan_id: pid } => assert_eq!(pid, plan_id),
             other => panic!("build_plan 后期望 Executing，实际：{other:?}"),
         }
@@ -651,16 +675,20 @@ async fn inprocess_full_plan_path_with_real_llm() {
         assert_counter_artifact(&workdir);
 
         // 6) update_plan 已在 verifier 通过后自动 finalize_completed_to_chat → Chat
-        let finalized = ctx.plan_runtime.finalize_completed_to_chat();
+        let finalized = ctx.session_runtime.plan_runtime.finalize_completed_to_chat();
         assert!(
             finalized.is_none(),
             "completed 已在 update_plan 收口时自动 finalize；此处不应再次拿到 plan_id"
         );
-        assert!(matches!(ctx.plan_runtime.mode(), PlanState::Chat));
+        assert!(matches!(
+            ctx.session_runtime.plan_runtime.mode(),
+            PlanState::Chat
+        ));
 
         // 7) transcript 软断言：至少一条 plan.review + plan.code_review + plan.verify，
         //    且 code_review 早于 verify。
         let transcript_path = ctx
+            .session_runtime
             .session
             .current_transcript_path()
             .expect("current_transcript_path 失败")

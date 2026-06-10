@@ -44,7 +44,7 @@ pub(crate) fn run(
         eprintln!("✗ {}", msg);
         return ChatCommandOutcome::Handled;
     }
-    let opts = render_path_menu(&path, &*ctx.gate);
+    let opts = render_path_menu(&path, &*ctx.global_services.gate);
     let choice = render_menu_and_read(&path, &opts, rl);
     if choice != PathMenuChoice::Cancel {
         if let Err(e) = apply_menu_choice(ctx, &path, choice) {
@@ -287,7 +287,9 @@ fn apply_menu_choice(
     match choice {
         PathMenuChoice::AllowOnce => {
             let canon = precheck_read_allow(ctx, path)?;
-            ctx.gate.grant_session(canon, GrantTrigger::DraggedPathMenu);
+            ctx.global_services
+                .gate
+                .grant_session(canon, GrantTrigger::DraggedPathMenu);
             eprintln!("✓ {} 本次会话期间允许访问", path.display());
             Ok(())
         }
@@ -300,7 +302,8 @@ fn apply_menu_choice(
                 &cfg_path,
                 canon.to_string_lossy().into_owned(),
             )?;
-            ctx.gate
+            ctx.global_services
+                .gate
                 .grant_session(canon.clone(), GrantTrigger::DraggedPathMenu);
             eprintln!("✓ 已更新配置：以后允许访问 {}", canon.display());
             Ok(())
@@ -319,7 +322,7 @@ fn apply_menu_choice(
                     mode,
                 },
             )?;
-            ctx.gate.grant_path_rule(PathRule {
+            ctx.global_services.gate.grant_path_rule(PathRule {
                 path: path.to_string_lossy().into_owned(),
                 mode,
             });
@@ -340,6 +343,7 @@ fn precheck_read_allow(ctx: &ChatContext, path: &Path) -> Result<PathBuf, AppErr
     let canon = crate::infra::platform::normalize_path(&path.to_string_lossy())
         .unwrap_or_else(|_| path.to_path_buf());
     match ctx
+        .global_services
         .gate
         .check(PrimitiveOperation::Read, &canon.to_string_lossy())?
     {

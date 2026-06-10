@@ -545,6 +545,53 @@ async fn edit_no_prior_read_rejects_after_t2_p0_016() {
 }
 
 #[tokio::test]
+async fn write_read_state_is_behaviorally_isolated_between_sessions() {
+    // A 先读落 stamp；B 不读直接 write，仍必须被 NoPriorRead 拦住。
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let f = dir_path.join("isolated.txt");
+    std::fs::write(&f, b"before\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let state_a = Arc::new(ReadFileState::new());
+    let state_b = Arc::new(ReadFileState::new());
+
+    let read_args = format!(
+        r#"{{"path":{:?},"line_numbers":false}}"#,
+        f.to_string_lossy()
+    );
+    let read_tc = make_tc(&read_args);
+    let (_, read_err, _) = execute_tool(&primitive, &None, &None, Some(&state_a), &read_tc).await;
+    assert!(!read_err, "session A read should succeed");
+    assert_eq!(state_a.len(), 1, "session A should record a read stamp");
+    assert_eq!(state_b.len(), 0, "session B should still have no stamps");
+
+    let write_args = format!(
+        r#"{{"path":{:?},"content":"after\n","overwrite":true}}"#,
+        f.to_string_lossy()
+    );
+    let write_tc = make_write_tc(&write_args);
+    let (msg, is_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&state_b), &write_tc).await;
+    assert!(is_error, "session B write without prior read must be rejected: {}", msg);
+    assert!(
+        msg.contains("NoPriorRead"),
+        "cross-session isolation should still surface NoPriorRead: {}",
+        msg
+    );
+    assert_eq!(
+        std::fs::read(&f).unwrap(),
+        b"before\n",
+        "session B rejection must leave disk unchanged"
+    );
+    assert_eq!(
+        state_a.len(),
+        1,
+        "session A's read stamp should not be consumed or shared by session B"
+    );
+    assert_eq!(state_b.len(), 0, "session B should still have no read stamp");
+}
+
+#[tokio::test]
 async fn edit_rejects_ipynb_before_touching_disk() {
     // PR-H：`.ipynb` 直接拒；磁盘不应被读 / 改；无 .bak。
     let dir = tempfile::tempdir().unwrap();

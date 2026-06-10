@@ -23,6 +23,7 @@ fn read_allowlist_covers_documented_keys() {
         "primitive.path_rules",
         "agent.id",
         "log.level",
+        "session.default_mode",
         "preflight.show_search_tools_ui",
         "preflight.show_git_ui",
     ] {
@@ -49,6 +50,7 @@ fn write_allowlist_subset() {
         "primitive.path_rules",
         "primitive.bash_forbidden",
         "log.level",
+        "session.default_mode",
         "preflight.show_search_tools_ui",
         "preflight.show_git_ui",
     ] {

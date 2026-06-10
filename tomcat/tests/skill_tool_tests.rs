@@ -149,8 +149,8 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.llm = provider.clone();
-    ctx.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
+    ctx.global_services.llm = provider.clone();
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
 struct SkillReadPrimitive;
@@ -254,10 +254,22 @@ fn build_system_text(ctx: &ChatContext, skill_set: &tomcat::core::skill::SkillSe
     let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
     tomcat::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
         WorkspaceContext {
-            agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
-            agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
+            agent_workspace_dir: ctx
+                .scope_services
+                .agent_workspace_dir
+                .to_string_lossy()
+                .to_string(),
+            agent_definition_dir: ctx
+                .scope_services
+                .agent_definition_dir
+                .to_string_lossy()
+                .to_string(),
             agent_plans_dir: "~/.tomcat/plans".to_string(),
-            agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+            agent_trail_dir: ctx
+                .scope_services
+                .agent_trail_dir
+                .to_string_lossy()
+                .to_string(),
             tool_lines: Some(
                 tomcat::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
                     true,
@@ -300,22 +312,25 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
     cfg.llm.api_key_env = Some(ENV_KEY.to_string());
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
-    let skill_set = tomcat::core::skill::discover(&ctx.config, &ctx.agent_workspace_dir);
-    *ctx.skill_set.write() = skill_set.clone();
+    let skill_set =
+        tomcat::core::skill::discover(&ctx.config, &ctx.scope_services.agent_workspace_dir);
+    *ctx.scope_services.skill_set.write() = skill_set.clone();
     let system_text = build_system_text(&ctx, &skill_set);
     assert!(system_text.contains("<available_skills>"));
     assert!(system_text.contains("<skill name=\"commit\">Create a git commit</skill>"));
     assert!(!system_text.contains("hidden-review"));
     assert!(!system_text.contains("# Commit"));
 
-    ctx.primitive = Arc::new(SkillReadPrimitive);
+    ctx.global_services.primitive = Arc::new(SkillReadPrimitive);
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
         cli_tool_call_stream("call_skill", "load_skill", r#"{"name":"commit"}"#),
         cli_text_stream("SKILL_OK"),
     ]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, &system_text).unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system_text)
+            .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -385,11 +400,14 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     cfg.workspace.workspace_roots = vec![workspace.path().to_string_lossy().to_string()];
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
-    let skill_set = tomcat::core::skill::discover(&ctx.config, &ctx.agent_workspace_dir);
-    *ctx.skill_set.write() = skill_set.clone();
+    let skill_set =
+        tomcat::core::skill::discover(&ctx.config, &ctx.scope_services.agent_workspace_dir);
+    *ctx.scope_services.skill_set.write() = skill_set.clone();
     let system_text = build_system_text(&ctx, &skill_set);
 
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, &system_text).unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, &system_text)
+            .unwrap();
     let prompt = "Choose the available skill whose description matches creating a git commit. \
 Before answering, you MUST load that skill via the load_skill tool and read its full body. \
 After the tool returns, reply with exactly two lines: first the secret token from the loaded skill body, then `SKILL_LIVE_OK`. \

@@ -327,6 +327,25 @@ impl ShadowGitStore {
         Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
     }
 
+    fn staged_changed_paths(&self) -> Result<Vec<String>, CheckpointError> {
+        let output = self.run_git_allow_failure(["diff", "--cached", "--name-only", "--"])?;
+        if !output.status.success() {
+            return Err(CheckpointError::CommandFailed(summarize_git_failure(
+                "git diff --cached --name-only",
+                &self.work_tree,
+                None,
+                &output,
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .collect())
+    }
+
     fn current_head_commit(&self) -> Result<Option<String>, CheckpointError> {
         let output = self.run_git_allow_failure(["rev-parse", "--verify", "HEAD"])?;
         if !output.status.success() {
@@ -351,6 +370,7 @@ impl ShadowGitStore {
         id: CheckpointId,
         request: &CheckpointRecordRequest,
         git_commit: Option<String>,
+        notes: Option<serde_json::Value>,
     ) -> CheckpointMeta {
         CheckpointMeta {
             id,
@@ -360,7 +380,7 @@ impl ShadowGitStore {
             git_commit,
             message_anchor: request.message_anchor.clone(),
             created_at: Utc::now().to_rfc3339(),
-            notes: request.notes.clone(),
+            notes,
         }
     }
 
@@ -377,8 +397,14 @@ impl ShadowGitStore {
         checkpoint_id: CheckpointId,
         request: &CheckpointRecordRequest,
         head_commit: Option<String>,
+        changed_paths: &[String],
     ) -> Result<CheckpointId, CheckpointError> {
-        let meta = self.make_meta(checkpoint_id.clone(), request, head_commit.clone());
+        let meta = self.make_meta(
+            checkpoint_id.clone(),
+            request,
+            head_commit.clone(),
+            merge_notes_with_changed_paths(request.notes.as_ref(), changed_paths),
+        );
         let mut metas = self.load_metadata()?;
         metas.push(meta);
         self.save_metadata(&metas)?;
@@ -396,6 +422,7 @@ impl ShadowGitStore {
         allow_empty: bool,
     ) -> Result<CheckpointId, CheckpointError> {
         self.run_git(["add", "-A"])?;
+        let changed_paths = self.staged_changed_paths()?;
         let checkpoint_id = Self::new_checkpoint_id();
         let message = format!("checkpoint {}", checkpoint_id);
         if allow_empty {
@@ -404,7 +431,7 @@ impl ShadowGitStore {
             self.run_git(["commit", "-m", &message])?;
         }
         let head_commit = self.current_head_commit()?.or(previous_head);
-        self.save_checkpoint_meta(checkpoint_id, request, head_commit)
+        self.save_checkpoint_meta(checkpoint_id, request, head_commit, &changed_paths)
     }
 
     fn record_impl(
@@ -439,7 +466,12 @@ impl ShadowGitStore {
             if previous_head.is_none() {
                 return self.commit_index_as_checkpoint(&request, None, true);
             }
-            return self.save_checkpoint_meta(Self::new_checkpoint_id(), &request, previous_head);
+            return self.save_checkpoint_meta(
+                Self::new_checkpoint_id(),
+                &request,
+                previous_head,
+                &[],
+            );
         }
 
         self.commit_index_as_checkpoint(&request, previous_head, false)
@@ -730,6 +762,36 @@ fn workdir_hash(path: &Path) -> String {
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn merge_notes_with_changed_paths(
+    notes: Option<&serde_json::Value>,
+    changed_paths: &[String],
+) -> Option<serde_json::Value> {
+    if changed_paths.is_empty() {
+        return notes.cloned();
+    }
+
+    let mut object = match notes.cloned() {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(other) => {
+            let mut map = serde_json::Map::new();
+            map.insert("sourceNotes".to_string(), other);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    object.insert(
+        "changedPaths".to_string(),
+        serde_json::Value::Array(
+            changed_paths
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    Some(serde_json::Value::Object(object))
 }
 
 fn canonicalize_existing_path(path: PathBuf) -> PathBuf {

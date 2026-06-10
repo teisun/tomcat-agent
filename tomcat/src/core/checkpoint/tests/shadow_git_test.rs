@@ -1,5 +1,6 @@
 use std::fs;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -22,6 +23,16 @@ fn git_available() -> bool {
 fn request(turn_id: &str) -> CheckpointRecordRequest {
     CheckpointRecordRequest {
         session_id: "s1".to_string(),
+        turn_id: turn_id.to_string(),
+        kind: CheckpointKind::TurnEnd,
+        message_anchor: Some(format!("msg-{turn_id}")),
+        notes: None,
+    }
+}
+
+fn request_for(session_id: &str, turn_id: &str) -> CheckpointRecordRequest {
+    CheckpointRecordRequest {
+        session_id: session_id.to_string(),
         turn_id: turn_id.to_string(),
         kind: CheckpointKind::TurnEnd,
         message_anchor: Some(format!("msg-{turn_id}")),
@@ -119,6 +130,44 @@ fn record_first_no_diff_empty_worktree_creates_baseline_checkpoint() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, id);
     assert!(listed[0].git_commit.is_some());
+}
+
+#[test]
+fn concurrent_record_on_same_store_does_not_hit_index_lock_or_deadlock() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+    fs::write(worktree.join("note.txt"), "hello").unwrap();
+
+    let store = Arc::new(ShadowGitStore::new(trail, worktree));
+    let barrier = Arc::new(Barrier::new(3));
+    let mut handles = Vec::new();
+    for (session_id, turn_id) in [("s1", "t1"), ("s2", "t2")] {
+        let store = Arc::clone(&store);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            store.record(request_for(session_id, turn_id))
+        }));
+    }
+
+    barrier.wait();
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thread join"))
+        .collect();
+    for result in results {
+        let id = result.expect("concurrent record should succeed");
+        assert!(
+            !id.to_string().contains("index.lock"),
+            "checkpoint id/result should not surface index.lock failures"
+        );
+    }
 }
 
 #[test]

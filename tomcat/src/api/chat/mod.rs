@@ -6,6 +6,7 @@
 mod context;
 mod prompt;
 mod run_loop;
+mod session_runtime;
 
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,7 @@ pub mod preflight;
 
 pub use context::{ChatContext, ChatContextOverrides, CliConfirmation};
 pub use run_loop::{chat_loop, run_chat_turn};
+pub use session_runtime::{GlobalServices, ScopeServices, SessionRuntime, SessionRuntimeRegistry};
 
 #[cfg(test)]
 pub(crate) use context::resolve_initial_thinking_display;

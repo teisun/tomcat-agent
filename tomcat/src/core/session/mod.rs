@@ -4,6 +4,7 @@ mod append_message_chain;
 pub mod context_metrics;
 pub(crate) mod manager;
 pub(crate) mod resume_index;
+pub mod scope;
 pub(crate) mod store;
 pub mod transcript;
 
@@ -12,6 +13,10 @@ pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, ApiUsage,
     CompactionResult, ContextState, MessageAppendSink, PlanEventKind, PlanEventRef, SessionManager,
+};
+pub use scope::{
+    fnv1a_hex, project_root, resolve_session_mode, session_key_for, session_key_for_agent,
+    SessionMode,
 };
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 pub use transcript::{

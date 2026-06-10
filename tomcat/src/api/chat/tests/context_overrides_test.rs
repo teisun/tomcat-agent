@@ -22,6 +22,7 @@ fn chat_context_uses_injected_ask_question_panel_override() {
     )
     .expect("chat context should be created");
     let attached = ctx
+        .session_runtime
         .plan_runtime
         .ask_question_panel()
         .expect("override panel should be attached");

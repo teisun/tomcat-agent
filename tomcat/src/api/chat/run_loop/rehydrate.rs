@@ -20,6 +20,7 @@ pub(super) fn make_fallback_context_state(
         last_api_usage: None,
         post_usage_appended_chars: 0,
         transcript_path: ctx
+            .session_runtime
             .session
             .current_transcript_path()
             .ok()
@@ -67,7 +68,7 @@ pub(crate) fn try_rehydrate_context_state_after_append_invariant(
 
     let preserved_session_obs = context_state.session_obs.clone();
     let preserved_live = context_state.live.clone();
-    match init_context_state(&ctx.session, context_config, system_text) {
+    match init_context_state(&ctx.session_runtime.session, context_config, system_text) {
         Ok(fresh) => {
             *context_state = fresh;
         }

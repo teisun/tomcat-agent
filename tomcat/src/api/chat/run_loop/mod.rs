@@ -59,7 +59,7 @@ fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
     plan_runtime::catalog::visible_tools_for_mode_with_policy(
-        &ctx.plan_runtime.mode(),
+        &ctx.session_runtime.plan_runtime.mode(),
         allow_load_skill,
     )
 }
@@ -68,12 +68,24 @@ fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
     let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
-        agent_workspace_dir: ctx.agent_workspace_dir.to_string_lossy().to_string(),
-        agent_definition_dir: ctx.agent_definition_dir.to_string_lossy().to_string(),
+        agent_workspace_dir: ctx
+            .scope_services
+            .agent_workspace_dir
+            .to_string_lossy()
+            .to_string(),
+        agent_definition_dir: ctx
+            .scope_services
+            .agent_definition_dir
+            .to_string_lossy()
+            .to_string(),
         agent_plans_dir: plan_runtime::file_store::plans_dir()
             .map(|path| crate::infra::platform::format_home_path(path.as_path()))
             .unwrap_or_else(|_| "~/.tomcat/plans".to_string()),
-        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
+        agent_trail_dir: ctx
+            .scope_services
+            .agent_trail_dir
+            .to_string_lossy()
+            .to_string(),
         tool_lines: Some(
             crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
                 allow_load_skill,
@@ -112,12 +124,13 @@ const AUTO_TURN_BUDGET: u32 = 8;
 
 fn current_user_prompt(ctx: &ChatContext) -> String {
     let entry = ctx
+        .session_runtime
         .session
-        .get_session(ctx.session.current_session_key())
+        .get_session(ctx.session_runtime.session.current_session_key())
         .ok()
         .flatten();
     user_prompt_for_mode_with_model(
-        &ctx.plan_runtime.mode(),
+        &ctx.session_runtime.plan_runtime.mode(),
         &ctx.effective_model(entry.as_ref()),
     )
 }
@@ -135,7 +148,7 @@ fn append_failed_turn_message(
 
 fn drain_follow_up_messages(ctx: &ChatContext) -> Vec<ChatMessage> {
     {
-        let mut queue = ctx.follow_up_queue.lock();
+        let mut queue = ctx.session_runtime.follow_up_queue.lock();
         if queue.is_empty() {
             Vec::new()
         } else {
@@ -180,9 +193,11 @@ fn append_planned_messages_with_rehydrate_retry(
 
         let mut append_error = None;
         for message in planned_messages.iter().skip(next_pending_idx) {
-            if let Err(err) =
-                push_turn_message(&mut messages, &ctx.message_append_sink, message.clone())
-            {
+            if let Err(err) = push_turn_message(
+                &mut messages,
+                &ctx.session_runtime.message_append_sink,
+                message.clone(),
+            ) {
                 append_error = Some(err);
                 break;
             }
@@ -220,11 +235,14 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     // 启动像素风吉祥物 Splash（仅 TTY 时绘制；文本 banner 仍由下方 println 负责）。
     crate::api::cli::splash::render_mascot(&ctx.config.splash);
 
-    let entry = ctx.session.get_session(ctx.session.current_session_key())?;
+    let entry = ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())?;
     let model = ctx.effective_model(entry.as_ref());
 
     if resume {
-        println!("恢复会话: {}", ctx.session.current_session_key());
+        println!("恢复会话: {}", ctx.session_runtime.session.current_session_key());
     }
     println!("tomcat 对话模式 (模型: {})", model);
     println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
@@ -254,35 +272,42 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     // ResumePlan 目前恒为 Continue；保留 hook，未来若恢复逻辑需要 tail，可在这里恢复
     // `read_entries_tail(..., 64)` 预读。
     let _ = crate::core::compute_resume_plan(entry.as_ref(), &[]);
-    let mut context_state = init_context_state(&ctx.session, context_config, &system_text)?;
+    let mut context_state =
+        init_context_state(&ctx.session_runtime.session, context_config, &system_text)?;
     if let Err(err) = ctx
+        .session_runtime
         .plan_runtime
         .attach_from_event(context_state.latest_plan_event.clone())
     {
         tracing::warn!(error = %err, "plan_runtime attach_from_event failed; continuing with Chat mode");
     }
     let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
-        &*ctx.event_bus,
+        &*ctx.global_services.event_bus,
         search_tools_printer,
         ctx.config.preflight.show_search_tools_ui,
         ctx.config.preflight.show_git_ui,
     );
-    preflight::start_search_tools_preflight(&ctx.config, ctx.event_bus.clone());
+    preflight::start_search_tools_preflight(&ctx.config, ctx.global_services.event_bus.clone());
     preflight::start_git_preflight(
         &ctx.config,
-        ctx.event_bus.clone(),
-        ctx.checkpoint_switcher.clone(),
+        ctx.global_services.event_bus.clone(),
+        ctx.scope_services.checkpoint_switcher.clone(),
     );
 
-    if ctx.completion_subscriber_handle.lock().is_none() {
+    if ctx
+        .session_runtime
+        .completion_subscriber_handle
+        .lock()
+        .is_none()
+    {
         let handle = spawn_completion_subscriber(ctx);
-        *ctx.completion_subscriber_handle.lock() = Some(handle);
+        *ctx.session_runtime.completion_subscriber_handle.lock() = Some(handle);
     }
 
     let mut auto_turn_count: u32 = 0;
 
     loop {
-        let queued_follow_ups = !ctx.follow_up_queue.lock().is_empty();
+        let queued_follow_ups = !ctx.session_runtime.follow_up_queue.lock().is_empty();
         let auto_drain = queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET;
         if !auto_drain {
             if auto_turn_count >= AUTO_TURN_BUDGET && queued_follow_ups {
@@ -347,7 +372,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         }
 
         let turn_token = {
-            let mut guard = ctx.cancel_token.lock();
+            let mut guard = ctx.session_runtime.cancel_token.lock();
             *guard = CancellationToken::new();
             guard.clone()
         };
@@ -376,7 +401,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     context_state.preheat.abort();
                     cleanup::cleanup_openai_files_on_session_end(ctx, "chat_fatal_exit").await;
                     events::stderr::unregister_chat_session_stderr_listeners(
-                        &*ctx.event_bus,
+                        &*ctx.global_services.event_bus,
                         &session_stderr_ids,
                     );
                     return Err(error);
@@ -390,7 +415,10 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     }
 
     cleanup::cleanup_openai_files_on_session_end(ctx, "session_end").await;
-    events::stderr::unregister_chat_session_stderr_listeners(&*ctx.event_bus, &session_stderr_ids);
+    events::stderr::unregister_chat_session_stderr_listeners(
+        &*ctx.global_services.event_bus,
+        &session_stderr_ids,
+    );
     Ok(())
 }
 
@@ -401,22 +429,28 @@ pub async fn run_chat_turn(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
-    ctx.plan_runtime.attach_cancel_hook(turn_token.clone());
+    ctx.session_runtime
+        .plan_runtime
+        .attach_cancel_hook(turn_token.clone());
 
-    let entry = ctx.session.get_session(ctx.session.current_session_key())?;
+    let entry = ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())?;
     let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
     let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
     let model = main_call.model.clone();
     let session_id = ctx
+        .session_runtime
         .session
         .current_session_id()?
         .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
-    let plan_mode = ctx.plan_runtime.mode();
+    let plan_mode = ctx.session_runtime.plan_runtime.mode();
     let system_text_with_reminder = match &plan_mode {
         plan_runtime::PlanState::Planning => {
             format!(
@@ -455,9 +489,9 @@ pub async fn run_chat_turn(
         &context_state.transcript_path,
         compaction_provider.clone(),
         &context_config,
-        ctx.event_bus.clone(),
+        ctx.global_services.event_bus.clone(),
     );
-    check_before_request(context_state, &*ctx.event_bus).await;
+    check_before_request(context_state, &*ctx.global_services.event_bus).await;
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_timing2_check",
@@ -467,7 +501,7 @@ pub async fn run_chat_turn(
         compaction_count = context_state.session_obs.compaction_count
     );
     if let Err(error) = validate_capabilities(
-        &ctx.model_catalog,
+        &ctx.global_services.model_catalog,
         &ctx.config.llm.default_model,
         LlmScene::Main,
         &main_call.model,
@@ -477,7 +511,10 @@ pub async fn run_chat_turn(
         for (message, account_chars) in appended_messages {
             append_failed_turn_message(context_state, message, account_chars);
         }
-        let _ = ctx.session.persist_context_observability(context_state);
+        let _ = ctx
+            .session_runtime
+            .session
+            .persist_context_observability(context_state);
         return Ok(AgentRunOutcome::Failed(error));
     }
 
@@ -491,34 +528,38 @@ pub async fn run_chat_turn(
         tool_definitions: build_tool_definitions(ctx),
         context_config: context_config.clone(),
         compaction_llm: Some(compaction_provider.clone()),
-        agent_trail_dir: ctx.agent_trail_dir.to_string_lossy().to_string(),
-        read_file_state: ctx.read_file_state.clone(),
+        agent_trail_dir: ctx.scope_services.agent_trail_dir.to_string_lossy().to_string(),
+        read_file_state: ctx.session_runtime.read_file_state.clone(),
         openai_files_runtime: ctx.openai_files_runtime_for(main_provider.as_ref()),
-        checkpoint_store: ctx.checkpoint_store.clone(),
-        message_append_sink: Some(ctx.message_append_sink.clone()),
+        checkpoint_store: ctx.scope_services.checkpoint_store.clone(),
+        message_append_sink: Some(ctx.session_runtime.message_append_sink.clone()),
         parent_session_id: None,
         spawn_depth: 0,
         subagent_type: crate::core::agent_loop::SubagentType::User,
         review_kind: None,
-        plan_runtime: Some(ctx.plan_runtime.clone()),
-        skill_set: Some(ctx.skill_set.clone()),
+        plan_runtime: Some(ctx.session_runtime.plan_runtime.clone()),
+        skill_set: Some(ctx.scope_services.skill_set.clone()),
     };
     let mut agent_loop = AgentLoop::new(
         main_provider,
-        ctx.primitive.clone(),
-        ctx.event_bus.clone(),
+        ctx.global_services.primitive.clone(),
+        ctx.global_services.event_bus.clone(),
         config,
         turn_token,
     );
-    if let Some(backend) = ctx.config_backend.clone() {
+    if let Some(backend) = ctx.global_services.config_backend.clone() {
         agent_loop = agent_loop.with_config_backend(backend);
     }
-    agent_loop = agent_loop.with_bash_task_registry(ctx.bash_task_registry.clone());
-    agent_loop = agent_loop.with_web_fetch_runtime(ctx.web_fetch_runtime.clone());
-    agent_loop = agent_loop.with_web_search_runtime(ctx.web_search_runtime.clone());
-    agent_loop = agent_loop.with_todos_runtime(ctx.todos_runtime.clone());
-    agent_loop = agent_loop.with_shared_follow_up_queue(ctx.follow_up_queue.clone());
-    agent_loop = agent_loop.with_completion_routes(ctx.completion_routes.clone());
+    agent_loop = agent_loop.with_bash_task_registry(ctx.session_runtime.bash_task_registry.clone());
+    agent_loop =
+        agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());
+    agent_loop =
+        agent_loop.with_web_search_runtime(ctx.global_services.web_search_runtime.clone());
+    agent_loop = agent_loop.with_todos_runtime(ctx.session_runtime.todos_runtime.clone());
+    agent_loop =
+        agent_loop.with_shared_follow_up_queue(ctx.session_runtime.follow_up_queue.clone());
+    agent_loop =
+        agent_loop.with_completion_routes(ctx.session_runtime.completion_routes.clone());
 
     let previous_state = std::mem::replace(
         context_state,
@@ -528,18 +569,19 @@ pub async fn run_chat_turn(
 
     let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
         Arc::clone(&renderer),
-        Arc::clone(&ctx.thinking_display),
+        Arc::clone(&ctx.session_runtime.thinking_display),
         ctx.config.llm.thinking.print_to_stderr,
         ctx.config.llm.tool_cli_verbosity,
     );
-    let listener_ids = cli_turn_renderer.register(&*ctx.event_bus);
+    let listener_ids = cli_turn_renderer.register(&*ctx.global_services.event_bus);
     let thinking_persist_listener_ids = if ctx.config.llm.thinking.persist {
         let transcript_path = ctx
+            .session_runtime
             .session
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
         Some(thinking_persist::register_thinking_persist_listeners(
-            &*ctx.event_bus,
+            &*ctx.global_services.event_bus,
             transcript_path,
         ))
     } else {
@@ -548,7 +590,7 @@ pub async fn run_chat_turn(
 
     print!(
         "\n{}",
-        agent_prompt_for_mode(&ctx.config.agent.id, &ctx.plan_runtime.mode())
+        agent_prompt_for_mode(&ctx.config.agent.id, &ctx.session_runtime.plan_runtime.mode())
     );
     io::stdout().flush().map_err(AppError::Io)?;
 
@@ -560,9 +602,12 @@ pub async fn run_chat_turn(
     );
     let outcome = agent_loop.run(messages).await;
     if let Some(ids) = &thinking_persist_listener_ids {
-        thinking_persist::unregister_thinking_persist_listeners(&*ctx.event_bus, ids);
+        thinking_persist::unregister_thinking_persist_listeners(
+            &*ctx.global_services.event_bus,
+            ids,
+        );
     }
-    cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.event_bus, &listener_ids);
+    cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.global_services.event_bus, &listener_ids);
 
     if let Some(remaining) = renderer.lock().flush() {
         print!("{}", remaining);
@@ -570,7 +615,7 @@ pub async fn run_chat_turn(
     }
 
     let mut next_state = agent_loop.take_context_state().unwrap_or_else(|| {
-        init_context_state(&ctx.session, &context_config, system_text)
+        init_context_state(&ctx.session_runtime.session, &context_config, system_text)
             .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, &context_config))
     });
     if let AgentRunOutcome::Failed(error) = &outcome {
@@ -602,7 +647,10 @@ pub async fn run_chat_turn(
             )?;
         }
         AgentRunOutcome::Failed(_) => {
-            let _ = ctx.session.persist_context_observability(context_state);
+            let _ = ctx
+                .session_runtime
+                .session
+                .persist_context_observability(context_state);
         }
     }
 

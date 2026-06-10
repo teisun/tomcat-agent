@@ -1,5 +1,6 @@
 //! SessionManager struct and its implementation.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,9 +16,9 @@ use crate::core::session::store::{
 };
 use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
-    read_entries_tail, read_header, write_header, BranchSummaryEntry, CustomEntry, LabelEntry,
-    MessageEntry, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
-    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
+    mark_message_entries_after_anchor_superseded, read_entries_tail, read_header, write_header,
+    BranchSummaryEntry, CustomEntry, LabelEntry, MessageEntry, ModelChangeEntry, SessionHeader,
+    SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -26,6 +27,7 @@ use super::types::ContextState;
 use super::MessageAppendSink;
 
 static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
+static SESSION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
 
@@ -45,8 +47,11 @@ pub struct SessionManager {
     sessions_dir: PathBuf,
     /// sessions.json 完整路径
     store_path: PathBuf,
+    /// 当前 manager 绑定的 scope key。
+    session_key: String,
     /// 序列化 store 写入，禁止锁文件
     write_mutex: Arc<Mutex<()>>,
+    transcript_mutexes: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
     append_in_flight: Arc<AtomicUsize>,
 }
 
@@ -55,7 +60,9 @@ impl Clone for SessionManager {
         Self {
             sessions_dir: self.sessions_dir.clone(),
             store_path: self.store_path.clone(),
+            session_key: self.session_key.clone(),
             write_mutex: Arc::clone(&self.write_mutex),
+            transcript_mutexes: Arc::clone(&self.transcript_mutexes),
             append_in_flight: Arc::clone(&self.append_in_flight),
         }
     }
@@ -64,19 +71,34 @@ impl Clone for SessionManager {
 impl SessionManager {
     /// 从已展开的 sessions_dir 路径创建；内部会使用 sessions_dir/sessions.json。
     pub fn new(sessions_dir: PathBuf) -> Self {
+        Self::new_scoped(sessions_dir, DEFAULT_SESSION_KEY.to_string())
+    }
+
+    /// 从已展开的 sessions_dir 路径创建一个绑定 scope 的 manager。
+    pub fn new_scoped(sessions_dir: PathBuf, session_key: impl Into<String>) -> Self {
         let store_path = sessions_dir.join(SESSIONS_FILE);
         Self {
             sessions_dir: sessions_dir.clone(),
             store_path,
+            session_key: session_key.into(),
             write_mutex: Arc::new(Mutex::new(())),
+            transcript_mutexes: Arc::new(Mutex::new(HashMap::new())),
             append_in_flight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     /// 从配置中的 sessions_dir 字符串创建（会做 normalize_path）。
     pub fn from_sessions_dir(sessions_dir: &str) -> Result<Self, AppError> {
+        Self::from_scoped_sessions_dir(sessions_dir, DEFAULT_SESSION_KEY)
+    }
+
+    /// 从配置中的 sessions_dir 字符串创建一个绑定 scope 的 manager。
+    pub fn from_scoped_sessions_dir(
+        sessions_dir: &str,
+        session_key: impl Into<String>,
+    ) -> Result<Self, AppError> {
         let path = normalize_path(sessions_dir)?;
-        Ok(Self::new(path))
+        Ok(Self::new_scoped(path, session_key))
     }
 
     pub fn store_path(&self) -> &Path {
@@ -98,16 +120,49 @@ impl SessionManager {
 
     /// 原子写 store；内部用 Mutex 序列化。
     fn save_store(&self, store: &SessionStore) -> Result<(), AppError> {
+        save_store(&self.store_path, store)
+    }
+
+    fn with_store_mut<T>(
+        &self,
+        f: impl FnOnce(&mut SessionStore) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
         let _guard = self
             .write_mutex
             .lock()
             .map_err(|e| AppError::Config(format!("session store 写入锁异常: {}", e)))?;
-        save_store(&self.store_path, store)
+        let mut store = load_store(&self.store_path)?;
+        let output = f(&mut store)?;
+        self.save_store(&store)?;
+        Ok(output)
     }
 
-    /// 当前会话 key；MVP 固定为 DEFAULT_SESSION_KEY。
-    pub fn current_session_key(&self) -> &'static str {
-        DEFAULT_SESSION_KEY
+    fn transcript_mutex_for_path(&self, path: &Path) -> Result<Arc<Mutex<()>>, AppError> {
+        let mut registry = self
+            .transcript_mutexes
+            .lock()
+            .map_err(|e| AppError::Config(format!("transcript 锁注册表异常: {}", e)))?;
+        Ok(registry
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
+    }
+
+    fn with_transcript_lock<T>(
+        &self,
+        path: &Path,
+        f: impl FnOnce() -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let lock = self.transcript_mutex_for_path(path)?;
+        let _guard = lock
+            .lock()
+            .map_err(|e| AppError::Config(format!("transcript 写入锁异常: {}", e)))?;
+        f()
+    }
+
+    /// 当前会话 key。
+    pub fn current_session_key(&self) -> &str {
+        &self.session_key
     }
 
     /// 当前会话条目；无当前映射时返回 None。
@@ -118,6 +173,53 @@ impl SessionManager {
     /// 当前会话 session_id；无当前映射时返回 None。
     pub fn current_session_id(&self) -> Result<Option<String>, AppError> {
         Ok(self.current_session_entry()?.map(|entry| entry.session_id))
+    }
+
+    fn session_entry_for_key(store: &SessionStore, session_key: &str) -> Option<SessionEntry> {
+        let session_id = store.current.get(session_key)?;
+        store.sessions.get(session_id).cloned()
+    }
+
+    fn scope_entries(store: &SessionStore, session_key: &str) -> Vec<(String, SessionEntry)> {
+        let mut entries: Vec<(String, SessionEntry)> = store
+            .sessions
+            .iter()
+            .filter(|(_, entry)| entry.session_key == session_key)
+            .map(|(session_id, entry)| (session_id.clone(), entry.clone()))
+            .collect();
+        entries.sort_by(|(_, left), (_, right)| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.session_id.cmp(&left.session_id))
+        });
+        entries
+    }
+
+    fn repoint_current_after_removal(
+        store: &mut SessionStore,
+        session_key: &str,
+        removed_id: &str,
+    ) {
+        let current_matches = store
+            .current
+            .get(session_key)
+            .is_some_and(|current_id| current_id == removed_id);
+        if !current_matches {
+            return;
+        }
+        let replacement = Self::scope_entries(store, session_key)
+            .into_iter()
+            .map(|(session_id, _)| session_id)
+            .next();
+        match replacement {
+            Some(session_id) => {
+                store.current.insert(session_key.to_string(), session_id);
+            }
+            None => {
+                store.current.remove(session_key);
+            }
+        }
     }
 
     /// 获取某 sessionKey 的 transcript 文件路径（基于 session_id）。
@@ -143,6 +245,7 @@ impl SessionManager {
         };
         write_header(&path, &header)?;
         let entry = SessionEntry {
+            session_key: session_key.to_string(),
             session_id: session_id.clone(),
             updated_at: now,
             session_file: Some(path.to_string_lossy().to_string()),
@@ -156,9 +259,11 @@ impl SessionManager {
             tool_result_chars_persisted: None,
             last_checkpoint_id: None,
         };
-        let mut store = self.load_store()?;
-        store.insert(session_key.to_string(), entry.clone());
-        self.save_store(&store)?;
+        self.with_store_mut(|store| {
+            store.sessions.insert(session_id.clone(), entry.clone());
+            store.current.insert(session_key.to_string(), session_id);
+            Ok(())
+        })?;
         Ok(entry)
     }
 
@@ -177,31 +282,23 @@ impl SessionManager {
 
     /// 把当前固定 key 切到某个已存在的 session_id。
     pub fn switch_current_to_session_id(&self, session_id: &str) -> Result<SessionEntry, AppError> {
-        let path = self.transcript_path(session_id);
-        if !path.exists() {
-            return Err(AppError::Config(format!("会话不存在: {session_id}")));
-        }
-
-        let header = read_header(&path)?;
-        let entry = SessionEntry {
-            session_id: session_id.to_string(),
-            updated_at: Utc::now().timestamp_millis(),
-            session_file: Some(path.to_string_lossy().to_string()),
-            cwd: header.cwd,
-            thinking_level: None,
-            model_override: None,
-            input_tokens: None,
-            output_tokens: None,
-            compaction_count: None,
-            compaction_tokens_freed: None,
-            tool_result_chars_persisted: None,
-            last_checkpoint_id: None,
-        };
-
-        let mut store = self.load_store()?;
-        store.insert(self.current_session_key().to_string(), entry.clone());
-        self.save_store(&store)?;
-        Ok(entry)
+        self.with_store_mut(|store| {
+            let Some(entry) = store.sessions.get_mut(session_id) else {
+                return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            };
+            if entry.session_key != self.current_session_key() {
+                return Err(AppError::Config(format!(
+                    "会话不属于当前 scope: {session_id}"
+                )));
+            }
+            entry.updated_at = Utc::now().timestamp_millis();
+            let entry = entry.clone();
+            store.current.insert(
+                self.current_session_key().to_string(),
+                session_id.to_string(),
+            );
+            Ok(entry)
+        })
     }
 
     /// 列出 sessions 目录下所有历史 session_id（按文件名倒序，通常也是时间倒序）。
@@ -229,27 +326,31 @@ impl SessionManager {
     /// 按 sessionKey 获取元数据。
     pub fn get_session(&self, session_key: &str) -> Result<Option<SessionEntry>, AppError> {
         let store = self.load_store()?;
-        Ok(store.get(session_key).cloned())
+        Ok(Self::session_entry_for_key(&store, session_key))
     }
 
-    /// 列出所有 sessionKey 及其条目（来自 sessions.json）。
+    /// 列出当前 scope 下的所有 session（按 updated_at 倒序）。
     pub fn list_sessions(&self) -> Result<Vec<(String, SessionEntry)>, AppError> {
         let store = self.load_store()?;
-        Ok(store.into_iter().collect())
+        Ok(Self::scope_entries(&store, self.current_session_key()))
     }
 
-    /// 更新某 sessionKey 的元数据（如 model_override、cwd）。
+    /// 更新某 sessionKey 当前指向会话的元数据（如 model_override、cwd）。
     pub fn update_session(
         &self,
         session_key: &str,
         f: impl FnOnce(&mut SessionEntry),
     ) -> Result<(), AppError> {
-        let mut store = self.load_store()?;
-        if let Some(entry) = store.get_mut(session_key) {
-            entry.updated_at = Utc::now().timestamp_millis();
-            f(entry);
-        }
-        self.save_store(&store)
+        self.with_store_mut(|store| {
+            let Some(session_id) = store.current.get(session_key).cloned() else {
+                return Ok(());
+            };
+            if let Some(entry) = store.sessions.get_mut(&session_id) {
+                entry.updated_at = Utc::now().timestamp_millis();
+                f(entry);
+            }
+            Ok(())
+        })
     }
 
     /// 更新当前会话的 model_override，并落一条可审计的 model_change transcript 事件。
@@ -284,23 +385,41 @@ impl SessionManager {
     }
 
     /// 删除会话：从 store 移除并删除 transcript 文件（若存在）。
-    pub fn delete_session(&self, session_key: &str) -> Result<(), AppError> {
-        let mut store = self.load_store()?;
-        let entry = store.remove(session_key);
-        self.save_store(&store)?;
-        if let Some(e) = entry {
-            let path = self.transcript_path(&e.session_id);
-            let _ = std::fs::remove_file(&path);
-            let _ = remove_resume_index(&path);
-        }
+    pub fn delete_session(&self, session_id: &str) -> Result<(), AppError> {
+        let entry = self.with_store_mut(|store| {
+            let Some(entry) = store.sessions.get(session_id).cloned() else {
+                return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            };
+            if entry.session_key != self.current_session_key() {
+                return Err(AppError::Config(format!(
+                    "会话不属于当前 scope: {session_id}"
+                )));
+            }
+            store.sessions.remove(session_id);
+            Self::repoint_current_after_removal(store, &entry.session_key, session_id);
+            Ok(entry)
+        })?;
+        let path = self.transcript_path(&entry.session_id);
+        let _ = std::fs::remove_file(&path);
+        let _ = remove_resume_index(&path);
         Ok(())
     }
 
-    /// 归档：仅从 store 移除当前会话的 key 指向，不删文件（可选：移动文件到 archive 子目录，MVP 仅移除）。
-    pub fn archive_session(&self, session_key: &str) -> Result<(), AppError> {
-        let mut store = self.load_store()?;
-        store.remove(session_key);
-        self.save_store(&store)
+    /// 归档：仅从 store 移除会话元数据，不删 transcript 文件。
+    pub fn archive_session(&self, session_id: &str) -> Result<(), AppError> {
+        self.with_store_mut(|store| {
+            let Some(entry) = store.sessions.get(session_id).cloned() else {
+                return Err(AppError::Config(format!("会话不存在: {session_id}")));
+            };
+            if entry.session_key != self.current_session_key() {
+                return Err(AppError::Config(format!(
+                    "会话不属于当前 scope: {session_id}"
+                )));
+            }
+            store.sessions.remove(session_id);
+            Self::repoint_current_after_removal(store, &entry.session_key, session_id);
+            Ok(())
+        })
     }
 
     /// 获取当前会话的 transcript 路径；无当前会话返回 None。
@@ -338,30 +457,32 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
-        let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
-        if let Err(reason) = validate_append_message(&message, &recent_msgs) {
-            let err = AppError::invariant("append_message_chain", reason);
-            return if chain_violation_is_invariant {
-                Err(err)
-            } else {
-                Err(AppError::Config(err.to_string()))
-            };
-        }
-        let id = generate_entry_id();
-        let now = iso_ts_now()?;
-        let sync = Self::message_sync_level(&message);
-        let entry = TranscriptEntry::Message(MessageEntry {
-            id: Some(id.clone()),
-            parent_id: None,
-            timestamp: now,
-            message,
-        });
-        append_entry_with_sync(&path, &entry, sync)?;
-        Ok(id)
+        self.with_transcript_lock(&path, || {
+            let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
+            let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
+            if let Err(reason) = validate_append_message(&message, &recent_msgs) {
+                let err = AppError::invariant("append_message_chain", reason);
+                return if chain_violation_is_invariant {
+                    Err(err)
+                } else {
+                    Err(AppError::Config(err.to_string()))
+                };
+            }
+            let id = generate_entry_id();
+            let now = iso_ts_now()?;
+            let sync = Self::message_sync_level(&message);
+            let entry = TranscriptEntry::Message(MessageEntry {
+                id: Some(id.clone()),
+                parent_id: None,
+                timestamp: now,
+                message,
+            });
+            append_entry_with_sync(&path, &entry, sync)?;
+            Ok(id)
+        })
     }
 
-    // TODO: 并发 append 存在 TOCTOU 竞态，当前假设单线程串行调用；后续若引入并发需加文件锁或 Mutex
+    // 同一 transcript 文件通过 per-file mutex 串行化；不同 transcript 仍可并行追加。
     /// 追加 message 到当前会话的 transcript；返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
         self.append_message_internal(message, true)
@@ -378,13 +499,15 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::ThinkingLevelChange(ThinkingLevelChangeEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            thinking_level: Some(thinking_level.to_string()),
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::ThinkingLevelChange(ThinkingLevelChangeEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                thinking_level: Some(thinking_level.to_string()),
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加 `thinking_trace`（`llm.thinking.persist=true` 时由 chat 层调用）。
@@ -402,14 +525,16 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::ThinkingTrace(ThinkingTraceEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            text: text.to_string(),
-            signature: signature.map(str::to_string),
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::ThinkingTrace(ThinkingTraceEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                text: text.to_string(),
+                signature: signature.map(str::to_string),
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加自定义 transcript 事件（如 checkpoint.restore）。
@@ -417,13 +542,15 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::Custom(CustomEntry {
-            id: Some(generate_entry_id()),
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            extra,
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::Custom(CustomEntry {
+                id: Some(generate_entry_id()),
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                extra,
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加 model_change。
@@ -435,14 +562,16 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::ModelChange(ModelChangeEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            provider: provider.map(String::from),
-            model_id: model_id.map(String::from),
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::ModelChange(ModelChangeEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                provider: provider.map(String::from),
+                model_id: model_id.map(String::from),
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加 compaction（基本版，不含覆盖范围信息）。
@@ -450,23 +579,25 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            summary: summary.map(String::from),
-            covered_start_id: None,
-            covered_end_id: None,
-            covered_count: None,
-            is_boundary: None,
-            preheat_compaction_id: None,
-            estimated_covered_tokens_before: None,
-            estimated_summary_tokens: None,
-            estimated_tokens_saved: None,
-            error: None,
-            attempts: None,
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                summary: summary.map(String::from),
+                covered_start_id: None,
+                covered_end_id: None,
+                covered_count: None,
+                is_boundary: None,
+                preheat_compaction_id: None,
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: None,
+                attempts: None,
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加含覆盖范围的 compaction entry。
@@ -480,23 +611,25 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            summary: Some(summary.to_string()),
-            covered_start_id,
-            covered_end_id,
-            covered_count: Some(covered_count),
-            is_boundary: None,
-            preheat_compaction_id: None,
-            estimated_covered_tokens_before: None,
-            estimated_summary_tokens: None,
-            estimated_tokens_saved: None,
-            error: None,
-            attempts: None,
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                summary: Some(summary.to_string()),
+                covered_start_id,
+                covered_end_id,
+                covered_count: Some(covered_count),
+                is_boundary: None,
+                preheat_compaction_id: None,
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: None,
+                attempts: None,
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加 session_info（如会话名称）。
@@ -504,13 +637,15 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::SessionInfo(SessionInfoEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            name: Some(name.to_string()),
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::SessionInfo(SessionInfoEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                name: Some(name.to_string()),
+            });
+            append_entry(&path, &entry)
+        })
     }
 
     /// 追加 label。
@@ -518,13 +653,24 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        let entry = TranscriptEntry::Label(LabelEntry {
-            id: None,
-            parent_id: None,
-            timestamp: iso_ts_now()?,
-            label: Some(label.to_string()),
-        });
-        append_entry(&path, &entry)
+        self.with_transcript_lock(&path, || {
+            let entry = TranscriptEntry::Label(LabelEntry {
+                id: None,
+                parent_id: None,
+                timestamp: iso_ts_now()?,
+                label: Some(label.to_string()),
+            });
+            append_entry(&path, &entry)
+        })
+    }
+
+    pub fn mark_messages_after_anchor_superseded(&self, anchor: &str) -> Result<usize, AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        self.with_transcript_lock(&path, || {
+            mark_message_entries_after_anchor_superseded(&path, anchor)
+        })
     }
 
     /// 获取当前会话 transcript 中最近 cap 条 entry。
@@ -588,11 +734,17 @@ impl MessageAppendSink for SessionManager {
 }
 
 fn uuid_for_session() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    std::time::SystemTime::now().hash(&mut h);
-    format!("{:016x}", h.finish())
+    let seq = SESSION_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{:016x}{:08x}{:016x}",
+        (nanos & u64::MAX as u128) as u64,
+        std::process::id(),
+        seq
+    )
 }
 
 fn iso_ts(ms: i64) -> String {

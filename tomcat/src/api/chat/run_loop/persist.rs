@@ -34,7 +34,7 @@ pub(super) fn push_turn_message(
 }
 
 pub(crate) fn schedule_checkpoint_prune(ctx: &ChatContext) {
-    let store = ctx.checkpoint_store.clone();
+    let store = ctx.scope_services.checkpoint_store.clone();
     let retention = crate::core::RetentionPolicy {
         retention_max: ctx.config.checkpoint.retention_max,
         retention_days: ctx.config.checkpoint.retention_days,
@@ -57,6 +57,7 @@ pub(crate) fn persist_turn_result(
         let mut chat_message = message;
         if chat_message.msg_id.is_none() {
             let row_id = ctx
+                .session_runtime
                 .session
                 .append_message(serde_json::to_value(&chat_message)?)?;
             chat_message.msg_id = Some(row_id);
@@ -75,7 +76,9 @@ pub(crate) fn persist_turn_result(
             context_state.messages.push(chat_message);
         }
     }
-    ctx.session.persist_context_observability(context_state)?;
+    ctx.session_runtime
+        .session
+        .persist_context_observability(context_state)?;
     maybe_record_turn_checkpoint(ctx, kind, &appended_row_ids);
     Ok(appended_row_ids)
 }
@@ -85,13 +88,13 @@ fn maybe_record_turn_checkpoint(
     kind: CheckpointKind,
     appended_row_ids: &[String],
 ) {
-    let Ok(Some(session_id)) = ctx.session.current_session_id() else {
+    let Ok(Some(session_id)) = ctx.session_runtime.session.current_session_id() else {
         return;
     };
     let Some(request) = build_turn_checkpoint_request(&session_id, kind, appended_row_ids) else {
         return;
     };
-    if let Err(err) = ctx.checkpoint_store.record(request.clone()) {
+    if let Err(err) = ctx.scope_services.checkpoint_store.record(request.clone()) {
         append_checkpoint_error_detail(ctx, &request, &err);
         warn!("{}", checkpoint_warn_line(&err));
     }
@@ -102,7 +105,7 @@ fn append_checkpoint_error_detail(
     request: &CheckpointRecordRequest,
     err: &CheckpointError,
 ) {
-    let log_dir = ctx.agent_trail_dir.join("logs");
+    let log_dir = ctx.scope_services.agent_trail_dir.join("logs");
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }
