@@ -40,7 +40,7 @@
 //! │  }                                                                      │
 //! └────────────────────────────────────────────────────────────────────────┘
 //!                              │
-//!                              │ serde_json::to_value
+//!                              │ ScopedEventEmitter::emit* 序列化信封
 //!                              ▼
 //! ┌────────────────────────────────────────────────────────────────────────┐
 //! │  ③ Wire JSON 层（pi-mono 协议）                                          │
@@ -84,6 +84,8 @@ pub mod wire {
     pub const WIRE_LLM_NOTICE: &str = "llm_notice";
     /// `AgentEvent::ToolExecutionStart` 的 JSON `type`（pi-mono 观察向）。
     pub const WIRE_TOOL_EXECUTION_START: &str = "tool_execution_start";
+    /// `AgentEvent::ToolCallStreaming` 的 JSON `type`：tool call 参数仍在流式到达时的轻量预告。
+    pub const WIRE_TOOL_CALL_STREAMING: &str = "tool_call_streaming";
     pub const WIRE_TOOL_EXECUTION_UPDATE: &str = "tool_execution_update";
     /// `AgentEvent::ToolExecutionEnd` 的 JSON `type`（pi-mono 观察向）。
     pub const WIRE_TOOL_EXECUTION_END: &str = "tool_execution_end";
@@ -233,32 +235,55 @@ pub struct ContentBlock(pub serde_json::Value);
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageContent(pub serde_json::Value);
 
+/// 领域事件的 wire 信封：把 sessionId 作为 envelope 元数据统一附加在顶层 JSON。
+///
+/// 仅供 crate 内部 emitter 使用；外部调用方不应直接序列化该类型绕过统一发射路径。
+#[derive(Debug, Serialize)]
+pub(super) struct WireEnvelope<'a> {
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(flatten)]
+    event: &'a AgentEvent,
+}
+
+impl<'a> WireEnvelope<'a> {
+    pub(super) fn new(session_id: Option<&'a str>, event: &'a AgentEvent) -> Self {
+        Self { session_id, event }
+    }
+}
+
+/// 扩展事件的 wire 信封：与 [`WireEnvelope`] 同语义，但载荷为 [`ExtensionEvent`]。
+#[derive(Debug, Serialize)]
+pub(super) struct ExtensionWireEnvelope<'a> {
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+    #[serde(flatten)]
+    event: &'a ExtensionEvent,
+}
+
+impl<'a> ExtensionWireEnvelope<'a> {
+    pub(super) fn new(session_id: Option<&'a str>, event: &'a ExtensionEvent) -> Self {
+        Self { session_id, event }
+    }
+}
+
 /// 宿主侧流式/UI 与生命周期事件，供前端或日志消费。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// Agent 会话开始。
-    AgentStart {
-        #[serde(rename = "sessionId")]
-        session_id: String,
-    },
+    AgentStart,
     /// Agent 会话结束，含消息与可选错误。
     AgentEnd {
-        #[serde(rename = "sessionId")]
-        session_id: String,
         messages: Vec<Message>,
         error: Option<String>,
     },
     TurnStart {
-        #[serde(rename = "sessionId")]
-        session_id: String,
         #[serde(rename = "turnIndex")]
         turn_index: usize,
         timestamp: i64,
     },
     TurnEnd {
-        #[serde(rename = "sessionId")]
-        session_id: String,
         #[serde(rename = "turnIndex")]
         turn_index: usize,
         message: Message,
@@ -297,6 +322,15 @@ pub enum AgentEvent {
         #[serde(rename = "toolName")]
         tool_name: String,
         args: serde_json::Value,
+    },
+    /// 线格式 `tool_call_streaming`：参数仍在流式到达时的轻量预告；只带摘要，不带大 payload。
+    ToolCallStreaming {
+        #[serde(rename = "toolCallId")]
+        tool_call_id: String,
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        #[serde(rename = "argsPreview")]
+        args_preview: serde_json::Value,
     },
     ToolExecutionUpdate {
         #[serde(rename = "toolCallId")]
@@ -443,8 +477,6 @@ pub enum AgentEvent {
     /// 后者保留向后兼容。
     #[serde(rename = "agent_interrupted")]
     Interrupted {
-        #[serde(rename = "sessionId")]
-        session_id: String,
         /// partial assistant 累积字符数（非字节数）。
         #[serde(rename = "partialTextLen")]
         partial_text_len: usize,
@@ -493,21 +525,16 @@ pub enum ExtensionEvent {
         session_file: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    AgentStart { session_id: String },
+    AgentStart,
     #[serde(rename_all = "camelCase")]
     AgentEnd {
-        session_id: String,
         messages: Vec<Message>,
         error: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    TurnStart {
-        session_id: String,
-        turn_index: usize,
-    },
+    TurnStart { turn_index: usize },
     #[serde(rename_all = "camelCase")]
     TurnEnd {
-        session_id: String,
         turn_index: usize,
         message: AssistantMessage,
         tool_results: Vec<ToolResultMessage>,

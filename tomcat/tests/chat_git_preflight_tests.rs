@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use serial_test::serial;
 use tomcat::api::chat::preflight::start_git_preflight;
+use tomcat::infra::ScopedEventEmitter;
 use tomcat::{
     wire, AppConfig, CheckpointKind, CheckpointRecordRequest, CheckpointStore, DefaultEventBus,
     EventBus, EventContext, SwitchingCheckpointStore,
@@ -69,6 +70,10 @@ fn capture_git_preflight_statuses(
     (statuses, id)
 }
 
+fn git_preflight_emitter(bus: Arc<dyn EventBus>) -> Arc<ScopedEventEmitter> {
+    Arc::new(ScopedEventEmitter::new(bus, "sess-git-preflight"))
+}
+
 fn find_binary_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -92,7 +97,11 @@ fn git_preflight_auto_install_disabled_keeps_noop() {
     let switcher = Arc::new(SwitchingCheckpointStore::new(trail, worktree, false));
     let cfg = git_preflight_config(home.path(), false);
 
-    start_git_preflight(&cfg, Arc::clone(&bus), Arc::clone(&switcher));
+    start_git_preflight(
+        &cfg,
+        git_preflight_emitter(Arc::clone(&bus)),
+        Arc::clone(&switcher),
+    );
     std::thread::sleep(Duration::from_millis(150));
 
     assert!(
@@ -154,7 +163,11 @@ fn git_preflight_detached_spawn_does_not_block() {
     }
 
     let started = Instant::now();
-    start_git_preflight(&cfg, Arc::clone(&bus), Arc::clone(&switcher));
+    start_git_preflight(
+        &cfg,
+        git_preflight_emitter(Arc::clone(&bus)),
+        Arc::clone(&switcher),
+    );
     assert!(
         started.elapsed() < Duration::from_millis(80),
         "Unix detached git preflight 不应阻塞主线程"
@@ -220,7 +233,11 @@ fn git_preflight_install_enables_shadow_on_next_checkpoint() {
         std::env::set_var("HOME", home.path());
     }
 
-    start_git_preflight(&cfg, Arc::clone(&bus), Arc::clone(&switcher));
+    start_git_preflight(
+        &cfg,
+        git_preflight_emitter(Arc::clone(&bus)),
+        Arc::clone(&switcher),
+    );
 
     wait_until(Duration::from_secs(2), || {
         statuses.lock().unwrap().iter().any(|s| s == "detached")

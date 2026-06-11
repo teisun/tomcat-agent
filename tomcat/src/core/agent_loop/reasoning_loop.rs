@@ -54,7 +54,6 @@ pub(super) async fn run_reasoning_loop(
 
         turn_index += 1;
         agent.emit_event(AgentEvent::TurnStart {
-            session_id: agent.config.session_id.clone(),
             turn_index,
             timestamp: unix_ts_ms(),
         });
@@ -176,7 +175,6 @@ pub(super) async fn run_reasoning_loop(
 
         // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
         agent.emit_event(AgentEvent::TurnEnd {
-            session_id: agent.config.session_id.clone(),
             turn_index,
             message: Message(serde_json::json!({})),
             tool_results: dispatch.tool_results,

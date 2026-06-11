@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tomcat::core::compaction::compact_tool_results;
 use tomcat::core::llm::{ChatMessageRole, MessageKind};
 use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
+use tomcat::infra::ScopedEventEmitter;
 use tomcat::{
     build_context_from_state, compound_turn_id, init_context_state, llm_http_status_error,
     run_chat_turn, AgentLoop, AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities,
@@ -21,6 +22,10 @@ use tomcat::{
     StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
+
+fn scoped_emitter(bus: Arc<dyn EventBus>, session_id: &str) -> ScopedEventEmitter {
+    ScopedEventEmitter::new(bus, session_id)
+}
 
 // ────────────────────── Mock 实现 ──────────────────────────────────────────
 
@@ -1664,7 +1669,8 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
     assert!(state.preheat.is_finished());
 
     info!("Act: check_after_reply");
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &*event_bus);
+    let emitter = scoped_emitter(event_bus.clone(), "ctx-after-reply-boundary");
+    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
 
     info!("Assert: BoundarySwitched event received");
     assert!(switched, "should have applied boundary");
@@ -1750,7 +1756,8 @@ fn test_check_after_reply_stale_emits_compaction_error() {
     state.preheat.restore_completed(stale_result);
 
     info!("Act: check_after_reply with stale covered_end_id");
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &*event_bus);
+    let emitter = scoped_emitter(event_bus.clone(), "ctx-after-reply-stale");
+    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
 
     info!("Assert: CompactionError event received, not switched");
     assert!(!switched, "stale apply should not switch");
@@ -1823,8 +1830,8 @@ async fn test_check_before_request_emits_boundary_switched() {
     state.preheat.restore_completed(compaction_result);
 
     info!("Act: check_before_request");
-    let applied =
-        tomcat::core::compaction::apply::check_before_request(&mut state, &*event_bus).await;
+    let emitter = scoped_emitter(event_bus.clone(), "ctx-before-request-boundary");
+    let applied = tomcat::core::compaction::apply::check_before_request(&mut state, &emitter).await;
 
     info!("Assert: BoundarySwitched event + messages shortened");
     assert!(applied, "should apply boundary in check_before_request");
@@ -1975,7 +1982,8 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         let ratio_before_apply = state.usage_ratio();
         state.update_api_usage((state.estimated_token_count() as f64 * 0.90) as u32, 0);
 
-        let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &*event_bus);
+        let emitter = scoped_emitter(event_bus.clone(), "ctx-full-pipeline");
+        let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter);
         info!(
             "L2: switched={}, ratio before={:.3}, after={:.3}, messages={}",
             switched,

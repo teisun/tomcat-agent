@@ -125,3 +125,68 @@ async fn event_bus_panel_returns_cancelled_when_wait_is_aborted() {
     assert!(result.cancelled);
     assert!(result.answers.is_empty());
 }
+
+#[tokio::test]
+async fn event_bus_panel_request_event_carries_session_id() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let panel = EventBusAskQuestionPanel::new(bus.clone())
+        .with_session_id("sid-ask-question")
+        .with_request_id_prefix("wiretest");
+    let captured_ctx = Arc::new(Mutex::new(None::<EventContext>));
+    let request_ready = Arc::new(tokio::sync::Notify::new());
+
+    let captured_ctx_for_listener = captured_ctx.clone();
+    let request_ready_for_listener = request_ready.clone();
+    bus.on(
+        ask_question_request_event_name(),
+        Box::new(move |ctx| {
+            *captured_ctx_for_listener.lock() = Some(ctx);
+            request_ready_for_listener.notify_one();
+            Ok(())
+        }),
+    );
+
+    let bus_for_host = bus.clone();
+    let captured_ctx_for_host = captured_ctx.clone();
+    let host = tokio::spawn(async move {
+        request_ready.notified().await;
+        let ctx = captured_ctx_for_host
+            .lock()
+            .clone()
+            .expect("host should receive request ctx");
+        let req: AskQuestionWireRequest =
+            serde_json::from_value(ctx.payload.clone()).expect("wire request should parse");
+        let response = AskQuestionWireResponse {
+            request_id: req.request_id.clone(),
+            result: AskQuestionResult {
+                answers: vec![],
+                cancelled: true,
+            },
+        };
+        bus_for_host
+            .emit_sync(
+                &req.response_event,
+                EventContext::new(
+                    &req.response_event,
+                    serde_json::to_value(response).expect("wire response serialize"),
+                ),
+            )
+            .expect("host response emit");
+    });
+
+    let result = panel
+        .ask(vec![sample_question()], Arc::new(AtomicBool::new(false)))
+        .await;
+    host.await.expect("host task");
+
+    assert!(result.cancelled);
+    let ctx = captured_ctx
+        .lock()
+        .clone()
+        .expect("request ctx should be captured");
+    assert_eq!(ctx.session_id.as_deref(), Some("sid-ask-question"));
+    assert_eq!(
+        ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+        Some("sid-ask-question")
+    );
+}

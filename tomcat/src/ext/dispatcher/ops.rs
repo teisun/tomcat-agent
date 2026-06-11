@@ -3,7 +3,7 @@ use super::types::HostApiDispatcher;
 use crate::core::{EditOperation, StreamEvent};
 use crate::ext::host_binding::HostResponse;
 use crate::infra::error::AppError;
-use crate::infra::event_bus::{EventContext, EventListenerId};
+use crate::infra::event_bus::{EventListenerId, ScopedEventEmitter};
 use dashmap::mapref::entry::Entry;
 use futures_util::StreamExt;
 
@@ -335,8 +335,11 @@ impl HostApiDispatcher {
                     .get("payload")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
-                let ctx = EventContext::new(event_name, payload).with_plugin_id(plugin_id);
-                self.event_bus.emit_sync(event_name, ctx)?;
+                let emitter = ScopedEventEmitter::new_optional(
+                    self.event_bus.clone(),
+                    self.session_id_for_instance(plugin_id),
+                );
+                emitter.emit_payload_with_plugin_id(event_name, payload, plugin_id)?;
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
             _ => Ok(HostResponse::err(format!(
@@ -344,5 +347,16 @@ impl HostApiDispatcher {
                 method
             ))),
         }
+    }
+
+    fn session_id_for_instance(&self, instance_id: &str) -> Option<String> {
+        if let Some((session_id, _)) = instance_id.split_once('/') {
+            if !session_id.is_empty() {
+                return Some(session_id.to_string());
+            }
+        }
+        self.session
+            .as_ref()
+            .and_then(|session| session.current_session_id().ok().flatten())
     }
 }

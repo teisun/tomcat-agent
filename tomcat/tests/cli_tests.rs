@@ -3496,7 +3496,11 @@ fn test_user_searches_sessions_by_keyword() {
     );
     assert.success();
     let lines: Vec<&str> = out.lines().filter(|line| !line.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 2, "按 key 搜索应命中两条历史会话，actual: {out}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "按 key 搜索应命中两条历史会话，actual: {out}"
+    );
     assert!(
         lines.iter().all(|line| line.contains(&current_key)),
         "每条搜索结果都应带当前 scope key，actual: {out}"

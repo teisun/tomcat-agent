@@ -232,6 +232,10 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
         Arc::clone(&compaction_calls),
     ));
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let event_emitter = Arc::new(crate::infra::ScopedEventEmitter::new(
+        Arc::clone(&event_bus),
+        "sess-preheat-routing",
+    ));
     let (mut agent, mut messages) = build_agent(
         Arc::clone(&main_provider),
         Some(Arc::clone(&compaction_provider)),
@@ -247,7 +251,7 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
             &ctx_state.transcript_path,
             failing_provider,
             &agent.config.context_config,
-            Arc::clone(&event_bus),
+            Arc::clone(&event_emitter),
         ));
     }
     tokio::time::sleep(Duration::from_millis(1_700)).await;

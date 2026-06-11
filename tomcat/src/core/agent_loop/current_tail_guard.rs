@@ -275,7 +275,7 @@ fn reduce_before_next_llm(
         let Some(ctx_state) = agent.context_state.as_mut() else {
             return Ok(result);
         };
-        check_after_reply(ctx_state, &*agent.event_bus)
+        check_after_reply(ctx_state, &agent.emitter)
     };
     if applied_history {
         rebuild_messages_from_context(agent, messages);

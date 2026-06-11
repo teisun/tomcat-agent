@@ -321,3 +321,66 @@ async fn run_empty_messages_does_not_crash() {
     assert!(result.is_ok());
     assert!(result.unwrap().final_text.is_empty());
 }
+
+#[tokio::test]
+async fn run_emits_tool_call_streaming_before_tool_execution_start_for_write() {
+    let stream_tool: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".to_string()),
+            name: Some("write".to_string()),
+            arguments_delta: Some(
+                r#"{"path":"~/workspace/demo.txt","content":"hello","overwrite":false}"#
+                    .to_string(),
+            ),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let stream_text: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "done".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let llm = Arc::new(MockLlmProvider::new(vec![stream_tool, stream_text]));
+    let primitive = Arc::new(MockPrimitiveExecutor);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let observed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    for wire_name in [
+        wire::WIRE_TOOL_CALL_STREAMING,
+        wire::WIRE_TOOL_EXECUTION_START,
+        wire::WIRE_TOOL_EXECUTION_END,
+    ] {
+        let sink = Arc::clone(&observed);
+        let name = wire_name.to_string();
+        event_bus.on(
+            wire_name,
+            Box::new(move |_ctx: EventContext| {
+                sink.lock().unwrap().push(name.clone());
+                Ok(())
+            }),
+        );
+    }
+    let config = AgentLoopConfig {
+        model: "gpt-4".to_string(),
+        session_id: "s-streaming-order".to_string(),
+        ..Default::default()
+    };
+    let abort = CancellationToken::new();
+    let mut loop_ = AgentLoop::new(llm, primitive, event_bus, config, abort);
+    let messages = vec![ChatMessage::user("write demo file")];
+    let _ = loop_.run(messages).await.unwrap();
+
+    assert_eq!(
+        observed.lock().unwrap().clone(),
+        vec![
+            wire::WIRE_TOOL_CALL_STREAMING.to_string(),
+            wire::WIRE_TOOL_EXECUTION_START.to_string(),
+            wire::WIRE_TOOL_EXECUTION_END.to_string(),
+        ]
+    );
+}

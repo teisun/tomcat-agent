@@ -98,6 +98,7 @@ impl CliWriter for StdCliWriter {
 /// `CliTurnRenderer` 自身可被多个 listener 闭包共享，因此用内部 `Mutex` 保护可变态。
 pub struct CliTurnRenderer {
     md: Arc<Mutex<MarkdownRenderer>>,
+    session_id: Option<String>,
     thinking_display: Arc<AtomicU8>,
     print_to_stderr: bool,
     tool_cli_verbosity: ToolCliVerbosity,
@@ -126,12 +127,14 @@ impl CliTurnRenderer {
     pub fn new(
         md: Arc<Mutex<MarkdownRenderer>>,
         thinking_display: Arc<AtomicU8>,
+        session_id: Option<String>,
         print_to_stderr: bool,
         tool_cli_verbosity: ToolCliVerbosity,
     ) -> Arc<Self> {
         Self::with_writer(
             md,
             thinking_display,
+            session_id,
             Arc::new(StdCliWriter),
             print_to_stderr,
             tool_cli_verbosity,
@@ -142,12 +145,14 @@ impl CliTurnRenderer {
     pub fn with_writer(
         md: Arc<Mutex<MarkdownRenderer>>,
         thinking_display: Arc<AtomicU8>,
+        session_id: Option<String>,
         writer: Arc<dyn CliWriter>,
         print_to_stderr: bool,
         tool_cli_verbosity: ToolCliVerbosity,
     ) -> Arc<Self> {
         Arc::new(Self {
             md,
+            session_id,
             thinking_display,
             print_to_stderr,
             tool_cli_verbosity,
@@ -159,6 +164,16 @@ impl CliTurnRenderer {
             writer,
             tool_starts: Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    fn accepts(&self, event_session_id: Option<&str>) -> bool {
+        match self.session_id.as_deref() {
+            None => true,
+            Some(bound_session_id) => match event_session_id {
+                None => true,
+                Some(event_session_id) => event_session_id == bound_session_id,
+            },
+        }
     }
 
     /// 把所有 markdown 残余冲走（chat_loop 在 run 结束后调用）。
@@ -346,6 +361,34 @@ impl CliTurnRenderer {
         }
     }
 
+    /// 处理 `tool_call_streaming` 事件：当 write/edit 大参数仍在流式到达时，提前给一条轻量提示。
+    pub fn on_tool_call_streaming(&self, payload: &Value) {
+        if self.tool_cli_verbosity != ToolCliVerbosity::Full {
+            return;
+        }
+        let tool_name = payload
+            .get("toolName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let args_preview = payload.get("argsPreview").cloned().unwrap_or(Value::Null);
+        let summary = tool_call_streaming_summary(&args_preview);
+        if let Some(remaining) = self.md.lock().flush() {
+            self.writer.write_stdout(&remaining);
+        }
+        let mut st = self.state.lock();
+        if st.inline_tool_update_active {
+            self.writer.write_stderr("\r\x1b[2K");
+            st.inline_tool_update_active = false;
+        }
+        if st.last_kind != LastKind::None {
+            self.writer.write_stderr("\n");
+        }
+        let line = format!("\x1b[90m[tool] {}  {}\x1b[0m\n", tool_name, summary);
+        self.writer.write_stderr(&line);
+        // 预告行已经自带换行，后续真实 tool_start 不应再额外插空行。
+        st.last_kind = LastKind::None;
+    }
+
     /// 处理 `tool_execution_start` 事件。
     pub fn on_tool_start(&self, payload: &Value) {
         let tool_name = payload
@@ -507,7 +550,10 @@ impl CliTurnRenderer {
         let me = Arc::clone(self);
         let msg_start = bus.on(
             wire::WIRE_MESSAGE_START,
-            Box::new(move |_evt: EventContext| {
+            Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_message_start();
                 Ok(())
             }),
@@ -516,7 +562,21 @@ impl CliTurnRenderer {
         let msg = bus.on(
             wire::WIRE_MESSAGE_UPDATE,
             Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_message_update(&evt.payload);
+                Ok(())
+            }),
+        );
+        let me = Arc::clone(self);
+        let tool_call_streaming = bus.on(
+            wire::WIRE_TOOL_CALL_STREAMING,
+            Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
+                me.on_tool_call_streaming(&evt.payload);
                 Ok(())
             }),
         );
@@ -524,6 +584,9 @@ impl CliTurnRenderer {
         let tool_start = bus.on(
             wire::WIRE_TOOL_EXECUTION_START,
             Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_tool_start(&evt.payload);
                 Ok(())
             }),
@@ -532,6 +595,9 @@ impl CliTurnRenderer {
         let tool_update = bus.on(
             wire::WIRE_TOOL_EXECUTION_UPDATE,
             Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_tool_update(&evt.payload);
                 Ok(())
             }),
@@ -540,6 +606,9 @@ impl CliTurnRenderer {
         let tool_end = bus.on(
             wire::WIRE_TOOL_EXECUTION_END,
             Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_tool_end(&evt.payload);
                 Ok(())
             }),
@@ -548,6 +617,9 @@ impl CliTurnRenderer {
         let llm_error = bus.on(
             wire::WIRE_LLM_ERROR,
             Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_llm_error(&evt.payload);
                 Ok(())
             }),
@@ -556,6 +628,9 @@ impl CliTurnRenderer {
         let llm_notice = bus.on(
             wire::WIRE_LLM_NOTICE,
             Box::new(move |evt: EventContext| {
+                if !me.accepts(evt.session_id.as_deref()) {
+                    return Ok(());
+                }
                 me.on_llm_notice(&evt.payload);
                 Ok(())
             }),
@@ -563,6 +638,7 @@ impl CliTurnRenderer {
         CliTurnRendererListenerIds {
             msg_start,
             msg,
+            tool_call_streaming,
             tool_start,
             tool_update,
             tool_end,
@@ -574,6 +650,7 @@ impl CliTurnRenderer {
     pub fn unregister(bus: &dyn EventBus, ids: &CliTurnRendererListenerIds) {
         bus.off(ids.msg_start);
         bus.off(ids.msg);
+        bus.off(ids.tool_call_streaming);
         bus.off(ids.tool_start);
         bus.off(ids.tool_update);
         bus.off(ids.tool_end);
@@ -586,6 +663,7 @@ impl CliTurnRenderer {
 pub struct CliTurnRendererListenerIds {
     pub msg_start: EventListenerId,
     pub msg: EventListenerId,
+    pub tool_call_streaming: EventListenerId,
     pub tool_start: EventListenerId,
     pub tool_update: EventListenerId,
     pub tool_end: EventListenerId,
@@ -606,6 +684,14 @@ fn parse_thinking_source(event: &Value) -> Option<ThinkingSource> {
             );
             None
         }
+    }
+}
+
+fn tool_call_streaming_summary(args_preview: &Value) -> String {
+    if let Some(path) = args_preview.get("path").and_then(|v| v.as_str()) {
+        format!("path={}  receiving args...", expand_path_for_terminal(path))
+    } else {
+        "receiving args...".to_string()
     }
 }
 

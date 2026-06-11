@@ -211,7 +211,7 @@ pub(super) async fn run_tool_calls(
                 expose_skills_to_reviewer,
                 &cancel,
                 tc,
-                Some(&agent.event_bus),
+                Some(&agent.emitter),
                 agent.completion_routes.as_ref(),
             );
             tokio::select! {

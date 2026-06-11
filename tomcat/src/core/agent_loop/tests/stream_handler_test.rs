@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::core::agent_loop::stream_handler::run_chat_stream;
+use crate::core::agent_loop::stream_handler::{extract_path_from_partial_args, run_chat_stream};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
 use crate::core::llm::{ChatMessage, ChatRequest, StreamEvent};
 use crate::core::session::manager::ContextState;
@@ -187,5 +187,138 @@ async fn run_chat_stream_emits_llm_notice_after_message_end() {
             wire::WIRE_MESSAGE_END.to_string(),
             wire::WIRE_LLM_NOTICE.to_string()
         ]
+    );
+}
+
+#[test]
+fn extract_path_from_partial_args_handles_complete_and_partial_json() {
+    assert_eq!(
+        extract_path_from_partial_args(r#"{"path":"/tmp/demo.txt","content":"hello"}"#),
+        Some("/tmp/demo.txt".to_string())
+    );
+    assert_eq!(
+        extract_path_from_partial_args(r#"{"path":"/tmp/demo.txt","content":"AAAA""#),
+        Some("/tmp/demo.txt".to_string())
+    );
+    assert_eq!(
+        extract_path_from_partial_args(r#"{"content":"hello"}"#),
+        None
+    );
+}
+
+#[tokio::test]
+async fn run_chat_stream_emits_tool_call_streaming_for_write_once() {
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_write".to_string()),
+            name: Some("write".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/demo.txt","#.to_string()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: None,
+            name: None,
+            arguments_delta: Some(r#""content":"hello world"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let (mut agent, bus) = make_agent_with_bus(vec![stream]);
+    let observed: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_TOOL_CALL_STREAMING,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    let outcome = run_chat_stream(&mut agent, make_request())
+        .await
+        .expect("stream_handler should emit tool_call_streaming");
+
+    assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1, "write should announce exactly once");
+    assert_eq!(observed[0]["toolCallId"].as_str(), Some("call_write"));
+    assert_eq!(observed[0]["toolName"].as_str(), Some("write"));
+}
+
+#[tokio::test]
+async fn run_chat_stream_tool_call_streaming_carries_path_preview_when_available() {
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_edit".to_string()),
+            name: Some("edit".to_string()),
+            arguments_delta: Some(r#"{"path":"~/workspace/demo.txt","#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let (mut agent, bus) = make_agent_with_bus(vec![stream]);
+    let observed: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_TOOL_CALL_STREAMING,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    run_chat_stream(&mut agent, make_request())
+        .await
+        .expect("stream_handler should emit tool_call_streaming with preview");
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0]["argsPreview"]["path"].as_str(),
+        Some("~/workspace/demo.txt")
+    );
+}
+
+#[tokio::test]
+async fn run_chat_stream_tool_call_streaming_skips_small_tools() {
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_read".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/a.txt"}"#.to_string()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: Some("call_bash".to_string()),
+            name: Some("bash".to_string()),
+            arguments_delta: Some(r#"{"command":"echo hi"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let (mut agent, bus) = make_agent_with_bus(vec![stream]);
+    let observed: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+    let _listener = bus.on(
+        wire::WIRE_TOOL_CALL_STREAMING,
+        Box::new(move |ctx| {
+            sink.lock().unwrap().push(ctx.payload);
+            Ok(())
+        }),
+    );
+
+    run_chat_stream(&mut agent, make_request())
+        .await
+        .expect("small tools should not emit streaming preview");
+
+    assert!(
+        observed.lock().unwrap().is_empty(),
+        "read/bash should not emit tool_call_streaming"
     );
 }

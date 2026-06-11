@@ -19,6 +19,11 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
         tool_name: "read".into(),
         args: serde_json::json!({}),
     };
+    let streaming = AgentEvent::ToolCallStreaming {
+        tool_call_id: "c1".into(),
+        tool_name: "write".into(),
+        args_preview: serde_json::json!({"path": "~/demo.txt"}),
+    };
     let end = AgentEvent::ToolExecutionEnd {
         tool_call_id: "c1".into(),
         tool_name: "read".into(),
@@ -35,14 +40,119 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
         wire::WIRE_TOOL_EXECUTION_START
     );
     assert_eq!(
+        serde_json::to_value(&streaming).unwrap()["type"]
+            .as_str()
+            .unwrap(),
+        wire::WIRE_TOOL_CALL_STREAMING
+    );
+    assert_eq!(
         serde_json::to_value(&end).unwrap()["type"]
             .as_str()
             .unwrap(),
         wire::WIRE_TOOL_EXECUTION_END
     );
+    let streaming_payload = serde_json::to_value(&streaming).unwrap();
+    assert_eq!(streaming_payload["toolCallId"].as_str(), Some("c1"));
+    assert_eq!(streaming_payload["toolName"].as_str(), Some("write"));
+    assert_eq!(
+        streaming_payload["argsPreview"]["path"].as_str(),
+        Some("~/demo.txt")
+    );
     let payload = serde_json::to_value(&end).unwrap();
     assert_eq!(payload["display"]["kind"].as_str(), Some("file"));
     assert_eq!(payload["display"]["file"].as_str(), Some("~/demo.txt"));
+}
+
+#[test]
+fn wire_envelope_flattens_session_id_and_agent_event_fields() {
+    let event = AgentEvent::ToolExecutionStart {
+        tool_call_id: "c1".into(),
+        tool_name: "read".into(),
+        args: serde_json::json!({"path": "src/main.rs"}),
+    };
+    let payload = serde_json::to_value(WireEnvelope::new(Some("s1"), &event)).unwrap();
+    assert_eq!(
+        payload["type"].as_str(),
+        Some(wire::WIRE_TOOL_EXECUTION_START)
+    );
+    assert_eq!(payload["sessionId"].as_str(), Some("s1"));
+    assert_eq!(payload["toolCallId"].as_str(), Some("c1"));
+    assert_eq!(payload["toolName"].as_str(), Some("read"));
+    assert_eq!(payload["args"]["path"].as_str(), Some("src/main.rs"));
+    assert!(
+        payload.get("event").is_none(),
+        "flatten 后不应出现嵌套 event key"
+    );
+}
+
+#[test]
+fn wire_envelope_handles_unit_variant_without_panicking() {
+    let event = ExtensionEvent::Startup {
+        version: "1.0.0".into(),
+        session_file: None,
+    };
+    let payload = serde_json::to_value(ExtensionWireEnvelope::new(Some("s1"), &event)).unwrap();
+    assert_eq!(payload["type"].as_str(), Some(wire::WIRE_STARTUP));
+    assert_eq!(payload["sessionId"].as_str(), Some("s1"));
+    assert_eq!(payload["version"].as_str(), Some("1.0.0"));
+    assert!(
+        payload.get("event").is_none(),
+        "flatten 后不应出现嵌套 event key"
+    );
+}
+
+#[test]
+fn wire_envelope_omits_session_id_when_none() {
+    let event = AgentEvent::ToolCallStreaming {
+        tool_call_id: "c1".into(),
+        tool_name: "write".into(),
+        args_preview: serde_json::json!({"path": "~/demo.txt"}),
+    };
+    let payload = serde_json::to_value(WireEnvelope::new(None, &event)).unwrap();
+    assert_eq!(
+        payload["type"].as_str(),
+        Some(wire::WIRE_TOOL_CALL_STREAMING)
+    );
+    assert!(
+        payload.get("sessionId").is_none(),
+        "session_id=None 时不应输出 sessionId"
+    );
+}
+
+#[test]
+fn wire_envelope_preserves_agent_event_shape_plus_session_id() {
+    let event = AgentEvent::ContextMetricsUpdate {
+        input_tokens_used: 100,
+        context_utilization_ratio: 0.5,
+        compaction_count: 2,
+        compaction_tokens_freed: 128,
+        total_tool_result_bytes_persisted: 256,
+        preheat_in_progress: false,
+        preheat_result_pending: true,
+    };
+    let mut expected = serde_json::to_value(&event).unwrap();
+    expected
+        .as_object_mut()
+        .expect("agent event payload should be object")
+        .insert("sessionId".into(), serde_json::json!("s1"));
+    let actual = serde_json::to_value(WireEnvelope::new(Some("s1"), &event)).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn extension_wire_envelope_preserves_tool_call_shape_plus_session_id() {
+    let event = ExtensionEvent::ToolCall {
+        tool_name: "read".into(),
+        tool_call_id: "c1".into(),
+        input: serde_json::json!({"path": "src/main.rs"}),
+    };
+    let mut expected = serde_json::to_value(&event).unwrap();
+    expected
+        .as_object_mut()
+        .expect("extension event payload should be object")
+        .insert("sessionId".into(), serde_json::json!("s1"));
+    let actual = serde_json::to_value(ExtensionWireEnvelope::new(Some("s1"), &event)).unwrap();
+    assert_eq!(actual, expected);
 }
 
 #[test]

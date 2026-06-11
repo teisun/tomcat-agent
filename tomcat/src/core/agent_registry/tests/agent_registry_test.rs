@@ -14,10 +14,13 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use super::*;
 use crate::core::agent_loop::SubagentType;
+use crate::infra::event_bus::EventBus;
+use crate::infra::{wire, DefaultEventBus, EventContext};
 
 fn fresh_registry() -> Arc<AgentRegistry> {
     AgentRegistry::new()
@@ -361,6 +364,61 @@ async fn subagent_panic_does_not_kill_parent() {
         .await
         .unwrap();
     assert_eq!(outcome.outcome_label, SubagentOutcomeLabel::Completed);
+}
+
+#[tokio::test]
+async fn subagent_events_bind_payload_and_context_to_child_session() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let reg = fresh_registry().attach_event_bus(Arc::clone(&bus));
+    let _g = reg.register_root_for_test("root").unwrap();
+    let captured = Arc::new(StdMutex::new(Vec::<EventContext>::new()));
+    for event_name in [wire::WIRE_SUB_AGENT_START, wire::WIRE_SUB_AGENT_END] {
+        let captured_cb = Arc::clone(&captured);
+        bus.on(
+            event_name,
+            Box::new(move |ctx: EventContext| {
+                captured_cb.lock().unwrap().push(ctx);
+                Ok(())
+            }),
+        );
+    }
+
+    let outcome = reg
+        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+            SubagentOutcome {
+                child_session_id: ctx.child_session_id,
+                subagent_type: ctx.subagent_type,
+                outcome_label: SubagentOutcomeLabel::Completed,
+                error_message: None,
+            }
+        })
+        .await
+        .unwrap();
+
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(captured.len(), 2, "子 agent 应发出 start/end 两条事件");
+    for ctx in &captured {
+        assert_eq!(
+            ctx.session_id.as_deref(),
+            Some(outcome.child_session_id.as_str()),
+            "SubAgent* 的 ctx.session_id 应绑定 child session"
+        );
+        assert_eq!(
+            ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+            Some(outcome.child_session_id.as_str()),
+            "SubAgent* 的 payload.sessionId 应绑定 child session"
+        );
+        assert_eq!(
+            ctx.payload.get("parentSessionId").and_then(|v| v.as_str()),
+            Some("root"),
+            "parentSessionId 语义字段仍需保留"
+        );
+        assert_eq!(
+            ctx.payload.get("childSessionId").and_then(|v| v.as_str()),
+            Some(outcome.child_session_id.as_str()),
+            "childSessionId 语义字段仍需保留"
+        );
+    }
 }
 
 #[tokio::test]

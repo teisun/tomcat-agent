@@ -17,7 +17,9 @@ use super::{
 };
 use crate::api::render::MarkdownRenderer;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
+use crate::infra::event_bus::{DefaultEventBus, EventBus, EventContext};
 use crate::infra::events::ToolDisplay;
+use crate::infra::wire;
 
 #[derive(Default)]
 struct CapturedWriter {
@@ -74,6 +76,7 @@ fn make_renderer_with_tool_verbosity(
     let r = CliTurnRenderer::with_writer(
         md,
         flag,
+        None,
         writer.clone() as Arc<dyn CliWriter>,
         false,
         tool_cli_verbosity,
@@ -91,9 +94,28 @@ fn make_tty_renderer_with_tool_verbosity(
     let r = CliTurnRenderer::with_writer(
         md,
         flag,
+        None,
         writer.clone() as Arc<dyn CliWriter>,
         false,
         tool_cli_verbosity,
+    );
+    (r, writer)
+}
+
+fn make_session_bound_renderer(
+    display: ThinkingDisplay,
+    session_id: &str,
+) -> (Arc<CliTurnRenderer>, Arc<CapturedWriter>) {
+    let writer = CapturedWriter::new();
+    let md = Arc::new(Mutex::new(MarkdownRenderer::new()));
+    let flag = Arc::new(AtomicU8::new(display.as_u8()));
+    let r = CliTurnRenderer::with_writer(
+        md,
+        flag,
+        Some(session_id.to_string()),
+        writer.clone() as Arc<dyn CliWriter>,
+        false,
+        ToolCliVerbosity::Full,
     );
     (r, writer)
 }
@@ -730,6 +752,7 @@ fn test_user_toggles_thinking_display_modes() {
     let r = CliTurnRenderer::with_writer(
         md,
         flag.clone(),
+        None,
         writer.clone() as Arc<dyn CliWriter>,
         false,
         ToolCliVerbosity::Full,
@@ -830,6 +853,7 @@ fn thinking_display_can_flip_at_runtime() {
     let r = CliTurnRenderer::with_writer(
         md,
         flag.clone(),
+        None,
         writer.clone() as Arc<dyn CliWriter>,
         false,
         ToolCliVerbosity::Full,
@@ -850,6 +874,70 @@ fn thinking_display_can_flip_at_runtime() {
         "切换到展开后应输出 delta: {:?}",
         writer.stdout()
     );
+}
+
+#[test]
+fn session_bound_renderer_renders_matching_session_events() {
+    let (renderer, writer) = make_session_bound_renderer(ThinkingDisplay::Summary, "s1");
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let ids = renderer.register(&*bus);
+    bus.emit_sync(
+        wire::WIRE_MESSAGE_UPDATE,
+        EventContext::new(
+            wire::WIRE_MESSAGE_UPDATE,
+            json!({
+                "assistantMessageEvent": {"kind": "content_delta", "delta": "hello"}
+            }),
+        )
+        .with_session_id("s1"),
+    )
+    .unwrap();
+    renderer.flush_markdown();
+    CliTurnRenderer::unregister(&*bus, &ids);
+    assert!(writer.stdout().contains("hello"));
+}
+
+#[test]
+fn session_bound_renderer_drops_other_session_events() {
+    let (renderer, writer) = make_session_bound_renderer(ThinkingDisplay::Summary, "s1");
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let ids = renderer.register(&*bus);
+    bus.emit_sync(
+        wire::WIRE_MESSAGE_UPDATE,
+        EventContext::new(
+            wire::WIRE_MESSAGE_UPDATE,
+            json!({
+                "assistantMessageEvent": {"kind": "content_delta", "delta": "blocked"}
+            }),
+        )
+        .with_session_id("s2"),
+    )
+    .unwrap();
+    renderer.flush_markdown();
+    CliTurnRenderer::unregister(&*bus, &ids);
+    assert!(
+        !writer.stdout().contains("blocked"),
+        "他 session 事件不应被渲染"
+    );
+}
+
+#[test]
+fn session_bound_renderer_allows_global_events_without_session_id() {
+    let (renderer, writer) = make_session_bound_renderer(ThinkingDisplay::Summary, "s1");
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let ids = renderer.register(&*bus);
+    bus.emit_sync(
+        wire::WIRE_LLM_NOTICE,
+        EventContext::new(
+            wire::WIRE_LLM_NOTICE,
+            json!({
+                "message": "global notice"
+            }),
+        ),
+    )
+    .unwrap();
+    CliTurnRenderer::unregister(&*bus, &ids);
+    assert!(writer.stderr().contains("global notice"));
 }
 
 #[test]
@@ -902,6 +990,107 @@ fn tool_cli_verbosity_brief_prints_end_without_start_and_extra_lines() {
     assert!(
         !err.contains("line1"),
         "brief 档位不应展开失败 stderr 额外行: {:?}",
+        err
+    );
+}
+
+#[test]
+fn streaming_then_start_both_shown() {
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
+    r.on_tool_call_streaming(&json!({
+        "toolCallId": "c-stream",
+        "toolName": "write",
+        "argsPreview": {"path": "/tmp/demo.txt"},
+    }));
+    r.on_tool_start(&json!({
+        "toolCallId": "c-stream",
+        "toolName": "write",
+        "args": {"path": "/tmp/demo.txt", "content": "hello", "overwrite": false},
+    }));
+    r.on_tool_end(&json!({
+        "toolCallId": "c-stream",
+        "toolName": "write",
+        "result": {"bytes": 5},
+        "display": {"kind": "file", "file": "/tmp/demo.txt"},
+        "isError": false,
+    }));
+    let err = w.stderr();
+    let receive_idx = err
+        .find("receiving args...")
+        .expect("应先显示 receiving args 行");
+    let start_idx = err
+        .find("path=/tmp/demo.txt (overwrite)")
+        .expect("应保留原有 start 行");
+    let end_idx = err.find("✓").expect("应显示 end 行");
+    assert!(
+        receive_idx < start_idx && start_idx < end_idx,
+        "三行顺序应为 receiving -> start -> end: {:?}",
+        err
+    );
+    assert!(
+        err.contains("path=/tmp/demo.txt  receiving args..."),
+        "streaming 行应带 path preview: {:?}",
+        err
+    );
+    assert!(
+        err.contains("path=/tmp/demo.txt (overwrite)"),
+        "原有 start 行不应变化: {:?}",
+        err
+    );
+    assert!(
+        err.contains("ms") || err.contains("s)"),
+        "end 行仍应展示 elapsed: {:?}",
+        err
+    );
+}
+
+#[test]
+fn streaming_suppressed_when_not_full() {
+    let (brief, brief_writer) =
+        make_renderer_with_tool_verbosity(ThinkingDisplay::Summary, ToolCliVerbosity::Brief);
+    brief.on_tool_call_streaming(&json!({
+        "toolCallId": "c-brief",
+        "toolName": "write",
+        "argsPreview": {"path": "a.txt"},
+    }));
+    assert!(
+        brief_writer.stderr().is_empty(),
+        "brief 档位不应输出 streaming 行: {:?}",
+        brief_writer.stderr()
+    );
+
+    let (off, off_writer) =
+        make_renderer_with_tool_verbosity(ThinkingDisplay::Summary, ToolCliVerbosity::Off);
+    off.on_tool_call_streaming(&json!({
+        "toolCallId": "c-off",
+        "toolName": "write",
+        "argsPreview": {"path": "a.txt"},
+    }));
+    assert!(
+        off_writer.stderr().is_empty(),
+        "off 档位不应输出 streaming 行: {:?}",
+        off_writer.stderr()
+    );
+}
+
+#[test]
+fn streaming_without_path_falls_back_cleanly() {
+    let (r, w) = make_renderer(ThinkingDisplay::Summary);
+    r.on_tool_call_streaming(&json!({
+        "toolCallId": "c-nopath",
+        "toolName": "write",
+        "argsPreview": null,
+    }));
+    let err = w.stderr();
+    assert!(
+        err.contains("receiving args..."),
+        "应显示稳定文案: {:?}",
+        err
+    );
+    assert!(!err.contains("null"), "不应泄露 null 字样: {:?}", err);
+    assert!(
+        !err.contains("path="),
+        "无 path 时不应输出脏 path=: {:?}",
         err
     );
 }

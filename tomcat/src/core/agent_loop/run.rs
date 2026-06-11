@@ -120,11 +120,8 @@ impl AgentLoop {
         if self.cancel_token.is_cancelled() {
             // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted
             // 避免 chat_loop 误把"取消信号"传染给下一回合的正常输入。
-            self.emit_event(AgentEvent::AgentStart {
-                session_id: self.config.session_id.clone(),
-            });
+            self.emit_event(AgentEvent::AgentStart);
             self.emit_event(AgentEvent::AgentEnd {
-                session_id: self.config.session_id.clone(),
                 messages: vec![],
                 error: Some("interrupted".to_string()),
             });
@@ -134,15 +131,12 @@ impl AgentLoop {
             });
         }
 
-        self.emit_event(AgentEvent::AgentStart {
-            session_id: self.config.session_id.clone(),
-        });
+        self.emit_event(AgentEvent::AgentStart);
 
         let mut messages = initial_messages;
 
         if let Err(err) = inject_steering_messages(self, &mut messages) {
             self.emit_event(AgentEvent::AgentEnd {
-                session_id: self.config.session_id.clone(),
                 messages: vec![],
                 error: Some(err.to_string()),
             });
@@ -165,7 +159,6 @@ impl AgentLoop {
                         new_messages,
                     };
                     self.emit_event(AgentEvent::AgentEnd {
-                        session_id: self.config.session_id.clone(),
                         messages: vec![],
                         error: None,
                     });
@@ -198,7 +191,6 @@ impl AgentLoop {
                     let new_messages = messages[self.start_idx..].to_vec();
                     self.sync_persisted_messages_into_context(&new_messages);
                     self.emit_event(AgentEvent::AgentEnd {
-                        session_id: self.config.session_id.clone(),
                         messages: vec![],
                         error: Some(e.to_string()),
                     });
@@ -228,19 +220,16 @@ impl AgentLoop {
             }
         }
         self.sync_persisted_messages_into_context(&partial_messages);
-        let session_id = self.config.session_id.clone();
         let tool_results_count = partial_messages
             .iter()
             .filter(|m| m.role == ChatMessageRole::Tool)
             .count();
         let partial_text_len = partial_text.chars().count();
         self.emit_event(AgentEvent::Interrupted {
-            session_id: session_id.clone(),
             partial_text_len,
             tool_results_count,
         });
         self.emit_event(AgentEvent::AgentEnd {
-            session_id,
             messages: vec![],
             error: Some("interrupted".to_string()),
         });

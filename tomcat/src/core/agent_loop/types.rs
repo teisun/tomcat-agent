@@ -16,7 +16,7 @@ use crate::infra::config::{
     ContextConfig, DEFAULT_AGENT_MAX_ATTEMPTS, DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
 };
 use crate::infra::error::AppError;
-use crate::infra::event_bus::EventBus;
+use crate::infra::event_bus::ScopedEventEmitter;
 
 // ─── ToolCallInfo ─────────────────────────────────────────────────────────
 
@@ -264,7 +264,7 @@ pub type BackgroundCompletionRoutes = Arc<Mutex<HashMap<String, CompletionRoute>
 pub struct AgentLoop {
     pub(super) llm: Arc<dyn LlmProvider>,
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
-    pub(super) event_bus: Arc<dyn EventBus>,
+    pub(super) emitter: ScopedEventEmitter,
     /// 可选 `config_get` / `config_set` 后端（plan §6 / PR-7）。
     ///
     /// 注入路径：`ChatContext::from_config` 在创建 `AgentLoop` 前构造

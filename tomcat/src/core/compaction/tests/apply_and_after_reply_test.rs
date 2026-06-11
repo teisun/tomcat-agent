@@ -9,6 +9,7 @@ use crate::core::session::transcript::{
 };
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
+use crate::infra::{wire, DefaultEventBus, EventBus, EventContext};
 
 // --- TASK-20 新增测试 ---
 
@@ -109,21 +110,72 @@ fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
 #[test]
 fn check_after_reply_skips_below_085() {
     use crate::infra::event_bus::DefaultEventBus;
-    let eb = DefaultEventBus::new();
+    let eb = std::sync::Arc::new(DefaultEventBus::new());
+    let emitter = crate::infra::ScopedEventEmitter::new(eb, "s-apply-test");
     let mut state = make_state(0, 0, 1000);
     state.update_api_usage(500, 0);
-    let switched = check_after_reply(&mut state, &eb);
+    let switched = check_after_reply(&mut state, &emitter);
     assert!(!switched, "ratio 0.50 should not trigger check_after_reply");
 }
 
 #[test]
 fn check_after_reply_skips_when_no_preheat() {
     use crate::infra::event_bus::DefaultEventBus;
-    let eb = DefaultEventBus::new();
+    let eb = std::sync::Arc::new(DefaultEventBus::new());
+    let emitter = crate::infra::ScopedEventEmitter::new(eb, "s-apply-test");
     let mut state = make_state(0, 0, 1000);
     state.update_api_usage(900, 0);
-    let switched = check_after_reply(&mut state, &eb);
+    let switched = check_after_reply(&mut state, &emitter);
     assert!(!switched, "idle preheat should skip");
+}
+
+#[test]
+fn check_after_reply_boundary_switched_event_carries_session_id() {
+    let bus: std::sync::Arc<dyn EventBus> = std::sync::Arc::new(DefaultEventBus::new());
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = std::sync::Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_BOUNDARY_SWITCHED,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = crate::infra::ScopedEventEmitter::new(bus, "sid-apply-boundary");
+    let mut state = make_state(0, 1_000, 250);
+    state.update_api_usage(900, 0);
+    state.messages = vec![
+        user_msg_with_id("start", "a"),
+        user_msg_with_id("end", "b"),
+        user_msg_with_id("tail", "c"),
+    ];
+    state
+        .preheat
+        .restore_completed(crate::core::session::manager::CompactionResult {
+            summary_text: "summary".into(),
+            covered_start_id: "start".into(),
+            covered_end_id: "end".into(),
+            covered_count: 2,
+            transcript_compaction_entry_id: None,
+            estimated_covered_tokens_before: Some(10),
+            estimated_summary_tokens: Some(2),
+            estimated_tokens_saved: Some(8),
+            preheat_elapsed_ms: 0,
+        });
+
+    let switched = check_after_reply(&mut state, &emitter);
+    assert!(switched, "预热完成时应应用 boundary");
+
+    let ctx = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应捕获到 boundary_switched");
+    assert_eq!(ctx.session_id.as_deref(), Some("sid-apply-boundary"));
+    assert_eq!(
+        ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+        Some("sid-apply-boundary")
+    );
 }
 
 #[test]
@@ -173,7 +225,8 @@ fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle()
     append_entry(&path, &branch).unwrap();
     assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
 
-    let eb = DefaultEventBus::new();
+    let eb = std::sync::Arc::new(DefaultEventBus::new());
+    let emitter = crate::infra::ScopedEventEmitter::new(eb, "s-apply-test");
     let mut state = make_state(0, 0, 1000);
     state.transcript_path = path.clone();
     state.update_api_usage(900, 0);
@@ -191,7 +244,7 @@ fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle()
         preheat_elapsed_ms: 0,
     };
     state.preheat.restore_completed(stale_result);
-    let switched = check_after_reply(&mut state, &eb);
+    let switched = check_after_reply(&mut state, &emitter);
     assert!(!switched, "stale apply should not emit boundary switched");
     assert!(
         state.preheat.is_idle(),

@@ -29,15 +29,28 @@ fn should_render_preflight_ui(show_ui: bool, _status: &str) -> bool {
     show_ui
 }
 
+fn accepts_session(bound_session_id: Option<&str>, evt: &EventContext) -> bool {
+    match bound_session_id {
+        None => true,
+        Some(bound_session_id) => evt.session_id.as_deref() == Some(bound_session_id),
+    }
+}
+
 pub(crate) fn register_chat_session_stderr_listeners(
     bus: &dyn EventBus,
     search_tools_printer: Option<Arc<Mutex<Box<dyn ExternalPrinter + Send>>>>,
+    bound_session_id: Option<&str>,
     show_search_tools_ui: bool,
     show_git_ui: bool,
 ) -> ChatSessionStderrListenerIds {
+    let bound_session_id = bound_session_id.map(str::to_owned);
+    let metrics_session_id = bound_session_id.clone();
     let metrics = bus.on(
         wire::WIRE_CONTEXT_METRICS_UPDATE,
         Box::new(move |evt: EventContext| {
+            if !accepts_session(metrics_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let tokens = evt
                 .payload
                 .get("inputTokensUsed")
@@ -100,9 +113,13 @@ pub(crate) fn register_chat_session_stderr_listeners(
         }),
     );
     let printer = search_tools_printer.clone();
+    let search_tools_session_id = bound_session_id.clone();
     let search_tools = bus.on(
         wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
         Box::new(move |evt: EventContext| {
+            if !accepts_session(search_tools_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let status = evt
                 .payload
                 .get("status")
@@ -190,9 +207,13 @@ pub(crate) fn register_chat_session_stderr_listeners(
         }),
     );
     let printer = search_tools_printer;
+    let git_preflight_session_id = bound_session_id.clone();
     let git_preflight = bus.on(
         wire::WIRE_GIT_PREFLIGHT,
         Box::new(move |evt: EventContext| {
+            if !accepts_session(git_preflight_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let status = evt
                 .payload
                 .get("status")
@@ -241,18 +262,26 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
+    let l1_start_session_id = bound_session_id.clone();
     let l1_start = bus.on(
         wire::WIRE_AUTO_COMPACTION_START,
-        Box::new(|_ctx: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l1_start_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             eprintln!("\n\x1b[90m[ctx] 后台压缩已启动…\x1b[0m");
             eprintln!("\x1b[90m[ctx] Background compaction started…\x1b[0m");
             let _ = io::stderr().flush();
             Ok(())
         }),
     );
+    let l1_end_session_id = bound_session_id.clone();
     let l1_end = bus.on(
         wire::WIRE_AUTO_COMPACTION_END,
-        Box::new(|evt: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l1_end_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let before = evt
                 .payload
                 .get("estimatedCoveredTokensBefore")
@@ -280,9 +309,13 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
+    let l1_err_session_id = bound_session_id.clone();
     let l1_err = bus.on(
         wire::WIRE_COMPACTION_ERROR,
-        Box::new(|evt: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l1_err_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let source = evt
                 .payload
                 .get("source")
@@ -344,9 +377,13 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
+    let l2_session_id = bound_session_id.clone();
     let l2 = bus.on(
         wire::WIRE_BOUNDARY_SWITCHED,
-        Box::new(|evt: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l2_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let saved = evt
                 .payload
                 .get("estimatedTokensFreed")
@@ -364,18 +401,26 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
+    let l3_start_session_id = bound_session_id.clone();
     let l3_start = bus.on(
         wire::WIRE_CONTEXT_OVERFLOW_TRIM_START,
-        Box::new(|_ctx: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l3_start_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             eprintln!("\n\x1b[33m[ctx] 上下文溢出，正在截断旧消息…\x1b[0m");
             eprintln!("\x1b[33m[ctx] Context overflow; trimming older messages…\x1b[0m");
             let _ = io::stderr().flush();
             Ok(())
         }),
     );
+    let l3_end_session_id = bound_session_id.clone();
     let l3_end = bus.on(
         wire::WIRE_CONTEXT_OVERFLOW_TRIM_END,
-        Box::new(|evt: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l3_end_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let saved = evt
                 .payload
                 .get("estimatedTokensFreed")
@@ -398,9 +443,13 @@ pub(crate) fn register_chat_session_stderr_listeners(
             Ok(())
         }),
     );
+    let l0_session_id = bound_session_id;
     let l0 = bus.on(
         wire::WIRE_LAYER0_CONTEXT_RELEASE,
-        Box::new(|evt: EventContext| {
+        Box::new(move |evt: EventContext| {
+            if !accepts_session(l0_session_id.as_deref(), &evt) {
+                return Ok(());
+            }
             let p = evt
                 .payload
                 .get("persistTokensFreed")
@@ -456,7 +505,9 @@ pub(crate) fn unregister_chat_session_stderr_listeners(
 
 #[cfg(test)]
 mod tests {
-    use super::should_render_preflight_ui;
+    use super::{accepts_session, should_render_preflight_ui};
+    use crate::infra::event_bus::EventContext;
+    use serde_json::json;
 
     #[test]
     fn search_tools_preflight_ui_is_hidden_when_disabled() {
@@ -480,5 +531,24 @@ mod tests {
     fn git_preflight_ui_is_shown_when_enabled() {
         assert!(should_render_preflight_ui(true, "start"));
         assert!(should_render_preflight_ui(true, "already_installing"));
+    }
+
+    #[test]
+    fn accepts_session_allows_all_when_unbound() {
+        let evt = EventContext::new("ev", json!({})).with_session_id("s1");
+        assert!(accepts_session(None, &evt));
+    }
+
+    #[test]
+    fn accepts_session_requires_exact_bound_session_match() {
+        let evt = EventContext::new("ev", json!({})).with_session_id("s1");
+        assert!(accepts_session(Some("s1"), &evt));
+        assert!(!accepts_session(Some("s2"), &evt));
+    }
+
+    #[test]
+    fn accepts_session_rejects_global_event_for_session_bound_listener() {
+        let evt = EventContext::new("ev", json!({}));
+        assert!(!accepts_session(Some("s1"), &evt));
     }
 }
