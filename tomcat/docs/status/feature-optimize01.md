@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-11 22:49 +0800 | DONE | feature/optimize01 | - |
+| Nibbles | 2026-06-11 23:18 +0800 | ACTIVE | feature/optimize01 | - |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** release 排队优化：将 `.github/workflows/release.yml` 中 `x86_64-apple-darwin` 的 runner 从稀缺的 `macos-13` 改为 `macos-14`，利用 Apple Silicon runner 交叉编译 Intel mac 产物，避免 `publish` 被单个 Intel mac 排队长期阻塞 @2026-06-11
 - [✓] **[P1]** T2-P1-015 follow-up：将 `sessionId` 收敛到 `ScopedEventEmitter` 事件信封，统一把同一 `session_id` 写入 wire `payload.sessionId` 与 `EventContext.session_id`；同步收口 `infra/event_bus`、`infra/events`、`agent_loop`、`api/chat` 与 CLI 渲染 / ask_question / preflight 路径，并补齐 `session_envelope_test`、`event_bus` / `events` / `agent_registry` / `cli_turn_renderer` / `preflight` 等回归测试 @2026-06-11
 - [✓] **[P1]** 集成验收补漏：会话级 stderr listener 改为按 `session_id` 严格 demux；`EventContext::with_session_id()` 与 emitter 统一 trim / blank 规范；同步修正 `plugin-system/events.md` 的顶层 envelope `sessionId` 口径，并补 `chat_git_preflight_tests` / `context_management_tests` 的 `ScopedEventEmitter` 签名适配 @2026-06-11
 - [✓] **[P1]** 本分支全量验收通过：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 全绿（含 `cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`、`integration-parallel`、`integration-serial` / `cli_tests`）；`.integration_test_output.log` 末尾 `EXIT_CODE=0` @2026-06-11
