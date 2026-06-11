@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # tomcat 一键安装脚本（macOS/Linux）。
 # 默认安装最新 release 到 ~/.local/bin，并可按需将 PATH 写入 shell profile。
-# 支持 -y/--yes：非交互模式，自动追加 PATH。支持 -v VER：指定版本（接受 v0.1.3 或 0.1.3）。
+# 支持 -y/--yes：非交互模式，自动追加 PATH。支持 -v VER：指定版本（接受 v0.1.4 或 0.1.4）。
 set -euo pipefail
 
 REPO="teisun/tomcat-agent"
 INSTALL_DIR="$HOME/.local/bin"
 NON_INTERACTIVE=0
 TAG=""
+RELEASE_JSON=""
 
 usage() {
   cat <<'EOF'
@@ -15,7 +16,7 @@ Usage: install.sh [-y|--yes] [-v VERSION]
 
 Options:
   -y, --yes        非交互模式；若 ~/.local/bin 不在 PATH 中，自动写入 shell profile
-  -v VERSION       安装指定版本，例如 v0.1.3 或 0.1.3
+  -v VERSION       安装指定版本，例如 v0.1.4 或 0.1.4
   -h, --help       显示帮助
 EOF
 }
@@ -67,18 +68,152 @@ detect_target() {
   esac
 }
 
-resolve_latest_tag() {
-  local api_url body tag
-  api_url="https://api.github.com/repos/${REPO}/releases/latest"
-  body="$(curl -fsSL "${api_url}" | tr -d '\n')"
-  tag="$(printf '%s' "${body}" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p')"
+curl_fetch() {
+  curl --http1.1 --fail --silent --show-error --location \
+    --connect-timeout 15 --max-time 300 \
+    --retry 3 --retry-delay 2 --retry-all-errors \
+    -H "User-Agent: tomcat-installer" "$@"
+}
+
+load_release_metadata() {
+  local api_url tag
+
+  if [ -n "${TAG}" ]; then
+    api_url="https://api.github.com/repos/${REPO}/releases/tags/${TAG}"
+  else
+    api_url="https://api.github.com/repos/${REPO}/releases/latest"
+  fi
+
+  RELEASE_JSON="$(curl_fetch "${api_url}" | tr -d '\n')"
+  if [ -z "${RELEASE_JSON}" ]; then
+    echo "无法读取 release 元数据，请稍后重试。" >&2
+    exit 1
+  fi
+
+  if [ -n "${TAG}" ]; then
+    return 0
+  fi
+
+  tag="$(printf '%s' "${RELEASE_JSON}" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p')"
 
   if [ -z "${tag}" ]; then
     echo "无法解析最新 release 版本，请稍后重试或使用 -v 指定版本。" >&2
     exit 1
   fi
 
-  printf '%s\n' "${tag}"
+  TAG="${tag}"
+}
+
+extract_asset_metadata_with_python() {
+  local asset_name
+  asset_name="$1"
+
+  printf '%s' "${RELEASE_JSON}" | python3 -c '
+import json
+import sys
+
+asset_name = sys.argv[1]
+data = json.load(sys.stdin)
+for asset in data.get("assets", []):
+    if asset.get("name") == asset_name:
+        digest = asset.get("digest") or ""
+        if digest.startswith("sha256:"):
+            digest = digest.split(":", 1)[1]
+        print(asset.get("url", ""))
+        print(digest)
+        sys.exit(0)
+sys.exit(1)
+' "${asset_name}"
+}
+
+extract_asset_metadata_with_sed() {
+  local asset_name assets_json asset_line asset_url asset_digest
+  asset_name="$1"
+  assets_json="$(printf '%s' "${RELEASE_JSON}" | sed -n 's/.*"assets":\[\(.*\)\],"tarball_url".*/\1/p')"
+  asset_line="$(
+    printf '%s' "${assets_json}" | sed 's/},{"url":/}\n{"url":/g' \
+      | awk -v name="\"name\":\"${asset_name}\"" 'index($0, name) { print; exit }'
+  )"
+  asset_url="$(printf '%s' "${asset_line}" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
+  asset_digest="$(printf '%s' "${asset_line}" | sed -n 's/.*"digest":"sha256:\([^"]*\)".*/\1/p')"
+
+  if [ -z "${asset_url}" ] || [ -z "${asset_digest}" ]; then
+    return 1
+  fi
+
+  printf '%s\n%s\n' "${asset_url}" "${asset_digest}"
+}
+
+extract_asset_metadata() {
+  local asset_name metadata
+  asset_name="$1"
+  metadata=""
+
+  if command -v python3 >/dev/null 2>&1; then
+    metadata="$(extract_asset_metadata_with_python "${asset_name}" 2>/dev/null || true)"
+  fi
+
+  if [ -z "${metadata}" ]; then
+    metadata="$(extract_asset_metadata_with_sed "${asset_name}" 2>/dev/null || true)"
+  fi
+
+  if [ -z "${metadata}" ]; then
+    echo "无法从 release 元数据中解析 ${asset_name} 的下载地址。" >&2
+    exit 1
+  fi
+
+  printf '%s' "${metadata}"
+}
+
+download_asset_with_python() {
+  local asset_api_url asset_path attempt
+  asset_api_url="$1"
+  asset_path="$2"
+
+  for attempt in 1 2 3; do
+    if python3 -c '
+import sys
+import urllib.request
+
+url = sys.argv[1]
+path = sys.argv[2]
+req = urllib.request.Request(
+    url,
+    headers={
+        "Accept": "application/octet-stream",
+        "User-Agent": "tomcat-installer",
+    },
+)
+with urllib.request.urlopen(req, timeout=120) as response, open(path, "wb") as out:
+    while True:
+        chunk = response.read(1024 * 1024)
+        if not chunk:
+            break
+        out.write(chunk)
+' "${asset_api_url}" "${asset_path}"; then
+      return 0
+    fi
+
+    rm -f "${asset_path}"
+    sleep $((attempt * 2))
+  done
+
+  return 1
+}
+
+download_asset() {
+  local asset_api_url asset_path
+  asset_api_url="$1"
+  asset_path="$2"
+
+  if command -v python3 >/dev/null 2>&1; then
+    if download_asset_with_python "${asset_api_url}" "${asset_path}"; then
+      return 0
+    fi
+    echo "python3 下载失败，回退到 curl..." >&2
+  fi
+
+  curl_fetch -H "Accept: application/octet-stream" -o "${asset_path}" "${asset_api_url}"
 }
 
 sha256_file() {
@@ -90,14 +225,13 @@ sha256_file() {
 }
 
 verify_checksum() {
-  local checksum_file asset_path asset_name expected actual
-  checksum_file="$1"
+  local expected asset_path asset_name actual
+  expected="$1"
   asset_path="$2"
   asset_name="$(basename "${asset_path}")"
 
-  expected="$(awk -v file="${asset_name}" '$2 == file { print $1 }' "${checksum_file}")"
   if [ -z "${expected}" ]; then
-    echo "校验文件中缺少 ${asset_name} 的 SHA256 记录。" >&2
+    echo "release 元数据中缺少 ${asset_name} 的 SHA256 digest。" >&2
     exit 1
   fi
 
@@ -170,7 +304,7 @@ while [ $# -gt 0 ]; do
       ;;
     -v)
       if [ $# -lt 2 ]; then
-        echo "-v 需要传入版本号，例如 -v v0.1.3" >&2
+        echo "-v 需要传入版本号，例如 -v v0.1.4" >&2
         exit 1
       fi
       TAG="$(normalize_tag "$2")"
@@ -198,30 +332,25 @@ if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1
 fi
 
 TARGET="$(detect_target)"
-if [ -z "${TAG}" ]; then
-  TAG="$(resolve_latest_tag)"
-fi
+load_release_metadata
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 ASSET_NAME="tomcat-${TAG}-${TARGET}.tar.gz"
-ASSET_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET_NAME}"
-CHECKSUM_URL="https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS"
+ASSET_METADATA="$(extract_asset_metadata "${ASSET_NAME}")"
+ASSET_API_URL="$(printf '%s' "${ASSET_METADATA}" | sed -n '1p')"
+ASSET_DIGEST="$(printf '%s' "${ASSET_METADATA}" | sed -n '2p')"
 ASSET_PATH="${TMP_DIR}/${ASSET_NAME}"
-CHECKSUM_PATH="${TMP_DIR}/SHA256SUMS"
 
 echo "准备安装 tomcat ${TAG} (${TARGET}) 到 ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
-echo "下载校验文件..."
-curl -fsSL "${CHECKSUM_URL}" -o "${CHECKSUM_PATH}"
-
 echo "下载安装包..."
-curl -fL "${ASSET_URL}" -o "${ASSET_PATH}"
+download_asset "${ASSET_API_URL}" "${ASSET_PATH}"
 
 echo "校验 SHA256..."
-verify_checksum "${CHECKSUM_PATH}" "${ASSET_PATH}"
+verify_checksum "${ASSET_DIGEST}" "${ASSET_PATH}"
 
 echo "解压安装包..."
 tar -xzf "${ASSET_PATH}" -C "${TMP_DIR}"
