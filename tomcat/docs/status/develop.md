@@ -2,6 +2,14 @@
 | :--- | :--- | :--- | :--- | :--- |
 | Nibbles | 2026-06-08 14:55 +0800 | ACTIVE | develop | — |
 
+### 2026-06-11 | merge `feature/optimize` → develop（T2-P1-015 集成验收）
+
+- **合并范围**：按用户要求将 `feature/optimize` 本地合入 `develop`（merge commit `26301ff`），围绕会话模式 / 多会话并发、`chat -> code` 隐藏兼容别名、checkpoint restore、preheat/compaction provider 路由、todos/runtime 持久化与 CLI/session 口径做 develop 侧全量复核。未推送远端。
+- **develop 侧补漏**：验收期发现并直接修复 3 类 develop-side 问题：① `cmd_restore` 的 `other_session_restore_conflicts()` 原先只扫当前 scope，漏掉跨 scope restore 冲突；现改为遍历 store 内全部 `session_id`，并补 `test_other_session_restore_conflicts_include_other_scopes` 锁定。② `tomcat chat` 已是 `code` 别名，但多处 CLI/E2E/real-LLM 用例仍按旧 `DEFAULT_SESSION_KEY(agent:main:main)` 和默认 scope 写死；现统一改为 `SessionMode::Code` + 基于 `workdir` 的动态 `session_key`/`session_id` 断言，覆盖 `checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`cli_tests`、`plan_real_llm_cli_e2e`。③ `bash` executor 残留 2 条 clippy 红线（`unwrap_or_else(|_| Ok(()))`），已改为 `unwrap_or(Ok(()))` 收口。
+- **测试完整性补洞**：对照 `session-modes.md`、User Stories 与 E2E 场景库补强覆盖，新增/补齐 `cli_parse_chat_alias_resume`、跨 scope restore 冲突用例，以及 session list/search/delete/archive/switch 在 project-scoped `code` key 下的动态断言；文档 `user-guide.md`、`User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`INTEGRATION_MERGE_AND_ACCEPTANCE.md` 已同步改口径到 `tomcat code` / `tomcat claw`（保留 `chat` 为隐藏兼容别名），并重生 `tool-catalog.md`。
+- **全量验收**：`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`、`./scripts/run-integration-tests.sh all` 全绿；真 LLM 分组以本机 `.env` 复跑 `./scripts/run-integration-tests.sh integration-real-llm` 全绿。期间仅发现 `plan_real_llm_cli_e2e` 两条用例红灯，根因是 `chat/code` session 口径与新 prompt 格式断言陈旧；修复后定点 `cargo test --test plan_real_llm_cli_e2e -- --nocapture` 通过，再整组 real-LLM 复跑通过。
+- **遗留/结论**：无新增门禁阻塞项；`T2-P1-015` 已完成本地合并、review、测试完整性核查与全量验收（含 real-LLM），状态置 `DONE`。`tomcat chat` 继续仅作为 `code` 的隐藏兼容别名存在，相关测试与文档口径已对齐。未推送远端。
+
 ### 2026-06-08 | chore(llm,docs,test): 503/edit 复查补强
 
 - **动机**：在“瞬时 503 与 edit 报错整改”主修完成后，再做一次非阻塞复查，收口三类尾巴：provider 非流式退避与流式口径不一致、`compaction` 侧仍残留旧的纯文本 overflow helper 出口、以及“首个 delta 后断流不重试”缺显式测试与文档同步。

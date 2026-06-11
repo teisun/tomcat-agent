@@ -39,9 +39,9 @@ fn setup_fixture() -> Fixture {
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     std::fs::create_dir_all(&sessions_dir).unwrap();
-    let session = SessionManager::new(sessions_dir);
-    let key = session.current_session_key().to_string();
-    session.create_session(&key, None).unwrap();
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
+    let session = SessionManager::new_scoped(sessions_dir, session_key.clone());
+    session.create_session(&session_key, None).unwrap();
 
     Fixture {
         _home: home,
@@ -111,7 +111,7 @@ fn run_resume_trace(fx: &Fixture, extra_env: &[(&str, &str)]) -> String {
     let mut command = cmd();
     command
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -120,7 +120,7 @@ fn run_resume_trace(fx: &Fixture, extra_env: &[(&str, &str)]) -> String {
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let output = command.output().expect("chat --resume should run");
+    let output = command.output().expect("code --resume should run");
     assert!(output.status.success());
     String::from_utf8_lossy(&output.stderr).to_string()
 }

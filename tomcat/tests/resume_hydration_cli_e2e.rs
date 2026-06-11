@@ -41,9 +41,9 @@ fn setup_fixture() -> Fixture {
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     std::fs::create_dir_all(&sessions_dir).unwrap();
-    let session = SessionManager::new(sessions_dir);
-    let key = session.current_session_key().to_string();
-    session.create_session(&key, None).unwrap();
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
+    let session = SessionManager::new_scoped(sessions_dir, session_key.clone());
+    session.create_session(&session_key, None).unwrap();
     let _ = resolve_agent_trail_dir(&cfg).unwrap();
 
     Fixture {
@@ -213,14 +213,14 @@ fn resume_cli_cold_start_trace_is_bounded_with_sidecar() {
 
     let output = cmd()
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("")
         .output()
-        .expect("chat --resume should run");
+        .expect("code --resume should run");
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -270,14 +270,14 @@ fn resume_cli_plan_fastpath_reports_sidecar_plan_source() {
 
     let output = cmd()
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("")
         .output()
-        .expect("chat --resume should run");
+        .expect("code --resume should run");
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -311,14 +311,14 @@ fn resume_cli_corrupt_index_rebuilds_on_startup() {
 
     let output = cmd()
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("")
         .output()
-        .expect("chat --resume should run");
+        .expect("code --resume should run");
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -354,13 +354,13 @@ fn resume_cli_heals_dangling_tool_call_tail_without_llm() {
 
     let output = cmd()
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
         .write_stdin("")
         .output()
-        .expect("chat --resume should run");
+        .expect("code --resume should run");
     assert!(output.status.success());
 
     let entries = tomcat::core::session::read_entries_tail(&transcript_path, 8).unwrap();
@@ -440,7 +440,7 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
 
     let output = cmd()
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -449,7 +449,7 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
         .env("no_proxy", "127.0.0.1,localhost")
         .write_stdin("continue\n")
         .output()
-        .expect("chat --resume should run");
+        .expect("code --resume should run");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

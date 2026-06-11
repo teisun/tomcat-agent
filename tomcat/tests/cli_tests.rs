@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tomcat::core::session::DEFAULT_SESSION_KEY;
 use tomcat::{
     init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
     Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult,
@@ -37,6 +36,33 @@ fn cmd() -> Command {
 
 fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+fn current_code_session_key() -> String {
+    let cwd = std::env::current_dir().expect("current_dir for cli tests");
+    tomcat::session_key_for(tomcat::SessionMode::Code, &cwd)
+}
+
+fn create_session_via_cli(work_dir: &Path) -> String {
+    let output = cmd()
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
+        .args(["session", "new"])
+        .output()
+        .expect("session new should run");
+    assert!(
+        output.status.success(),
+        "session new should succeed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("已创建会话: ")
+                .and_then(|rest| rest.split_whitespace().next())
+        })
+        .expect("session new should print session id")
+        .to_string()
 }
 
 fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
@@ -1376,16 +1402,12 @@ fn test_session_delete_via_cli_removes_session() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create a session first");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let session_id = create_session_via_cli(&work_dir);
 
-    info!("Act: delete the default session key");
+    info!("Act: delete the created session");
     let mut c = cmd();
     c.env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
-    c.args(["session", "delete", "agent:main:main"]);
+    c.args(["session", "delete", session_id.as_str()]);
 
     let assert = c.assert();
 
@@ -1409,15 +1431,11 @@ fn test_session_archive_exits_ok() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session then archive");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let session_id = create_session_via_cli(&work_dir);
 
     let mut c = cmd();
     c.env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap());
-    c.args(["session", "archive", "agent:main:main"]);
+    c.args(["session", "archive", session_id.as_str()]);
 
     info!("Act: execute session archive");
     let assert = c.assert();
@@ -1500,7 +1518,7 @@ fn test_audit_export_creates_file() {
 /// [E2E-CLI-001] 新用户首次安装，完成初始化并验证环境健康
 ///
 /// 用户意图：新用户首次安装，完成初始化并验证环境健康
-/// 验证：init exit 0 + stdout 含 [1/3][2/3][3/3]、tomcat chat、PATH 自动配置；doctor exit 0 + stdout 含"配置合法"和"内嵌资源已就绪"
+/// 验证：init exit 0 + stdout 含 [1/3][2/3][3/3]、tomcat code、PATH 自动配置；doctor exit 0 + stdout 含"配置合法"和"内嵌资源已就绪"
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
@@ -1518,7 +1536,7 @@ fn test_user_first_time_setup_init_and_doctor() {
         .assert();
     let init_out = String::from_utf8_lossy(&init_assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert init: exit 0 + 三步向导 + tomcat chat；actual: {}",
+        "Assert init: exit 0 + 三步向导 + tomcat code；actual: {}",
         trunc(&init_out, 400)
     );
     init_assert
@@ -1527,7 +1545,7 @@ fn test_user_first_time_setup_init_and_doctor() {
         .stdout(predicate::str::contains("[2/3]"))
         .stdout(predicate::str::contains("[3/3]"))
         .stdout(predicate::str::contains("配置文件已写入"))
-        .stdout(predicate::str::contains("tomcat chat"))
+        .stdout(predicate::str::contains("tomcat code"))
         .stdout(predicate::str::contains("PATH"));
 
     info!("Act: tomcat doctor");
@@ -2168,7 +2186,7 @@ fn run_background_bash_p1_real_llm_chat(
     timeout: std::time::Duration,
 ) -> CliChatRunCapture {
     let mut c = cmd();
-    c.arg("chat")
+    c.arg("code")
         .current_dir(&fx.scratch)
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("OPENAI_API_KEY", &fx.api_key)
@@ -2192,7 +2210,8 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
         .join("agents")
         .join(&cfg.agent.id)
         .join("sessions");
-    let session = tomcat::SessionManager::new(sessions_dir);
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &fx.scratch);
+    let session = tomcat::SessionManager::new_scoped(sessions_dir, session_key);
     let transcript_path = session
         .current_transcript_path()
         .expect("current_transcript_path")
@@ -3298,17 +3317,9 @@ fn test_user_lists_sessions() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create a session first");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let first_id = create_session_via_cli(&work_dir);
     info!("Arrange: create a second historical session");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let second_id = create_session_via_cli(&work_dir);
 
     info!("Act: tomcat session list");
     let assert = cmd()
@@ -3317,14 +3328,20 @@ fn test_user_lists_sessions() {
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert: exit 0 + current key only appears once; actual: {}",
+        "Assert: exit 0 + one current marker + both session ids present; actual: {}",
         trunc(&out, 200)
     );
     assert.success();
+    let lines: Vec<&str> = out.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "应列出两条会话记录，actual: {out}");
     assert_eq!(
-        out.matches(DEFAULT_SESSION_KEY).count(),
+        lines.iter().filter(|line| line.starts_with('*')).count(),
         1,
-        "只有当前绑定的 session 应显示 default key，历史 session 不应都复用同一个 key"
+        "只应有一条 current 标记，actual: {out}"
+    );
+    assert!(
+        out.contains(&first_id) && out.contains(&second_id),
+        "list 应包含两条创建出的 session_id，actual: {out}"
     );
 }
 
@@ -3344,16 +3361,12 @@ fn test_user_switches_to_existing_session() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let session_id = create_session_via_cli(&work_dir);
 
-    info!("Act: tomcat session switch agent:main:main");
+    info!("Act: tomcat session switch {}", session_id);
     let assert = cmd()
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "switch", "agent:main:main"])
+        .args(["session", "switch", session_id.as_str()])
         .assert();
     info!("Assert: exit 0");
     assert.success();
@@ -3404,16 +3417,12 @@ fn test_user_deletes_session() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let session_id = create_session_via_cli(&work_dir);
 
-    info!("Act: tomcat session delete agent:main:main");
+    info!("Act: tomcat session delete {}", session_id);
     let assert = cmd()
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "delete", "agent:main:main"])
+        .args(["session", "delete", session_id.as_str()])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -3439,16 +3448,12 @@ fn test_user_archives_session() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let session_id = create_session_via_cli(&work_dir);
 
-    info!("Act: tomcat session archive agent:main:main");
+    info!("Act: tomcat session archive {}", session_id);
     let assert = cmd()
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "archive", "agent:main:main"])
+        .args(["session", "archive", session_id.as_str()])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -3474,33 +3479,31 @@ fn test_user_searches_sessions_by_keyword() {
         .unwrap_or_else(|_| dir.path().to_path_buf());
 
     info!("Arrange: create session");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let first_id = create_session_via_cli(&work_dir);
     info!("Arrange: create a second historical session");
-    cmd()
-        .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "new"])
-        .assert()
-        .success();
+    let second_id = create_session_via_cli(&work_dir);
 
-    info!("Act: tomcat session search {}", DEFAULT_SESSION_KEY);
+    let current_key = current_code_session_key();
+    info!("Act: tomcat session search {}", current_key);
     let assert = cmd()
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .args(["session", "search", DEFAULT_SESSION_KEY])
+        .args(["session", "search", current_key.as_str()])
         .assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert: exit 0 + search only reports current key once; actual: {}",
+        "Assert: exit 0 + search returns both session ids under current key; actual: {}",
         trunc(&out, 200)
     );
     assert.success();
-    assert_eq!(
-        out.matches(DEFAULT_SESSION_KEY).count(),
-        1,
-        "按 key 搜索时不应把同一个 current key 误投影到所有历史 session"
+    let lines: Vec<&str> = out.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "按 key 搜索应命中两条历史会话，actual: {out}");
+    assert!(
+        lines.iter().all(|line| line.contains(&current_key)),
+        "每条搜索结果都应带当前 scope key，actual: {out}"
+    );
+    assert!(
+        out.contains(&first_id) && out.contains(&second_id),
+        "search 应包含两条创建出的 session_id，actual: {out}"
     );
 }
 
@@ -3637,7 +3640,16 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         trunc(&stderr, 400)
     );
 
-    let transcript = load_current_transcript_for_work_dir(&work_dir);
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
+    let sessions_dir = tomcat::resolve_sessions_dir(&cfg).expect("resolve sessions dir");
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, workspace.path());
+    let session = SessionManager::new_scoped(sessions_dir, session_key);
+    let transcript_path = session
+        .current_transcript_path()
+        .expect("current_transcript_path")
+        .expect("transcript path should exist");
+    let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
     assert!(
         transcript.contains("<skill name=\\\"secret\\\""),
         "transcript should contain injected skill body, actual: {}",

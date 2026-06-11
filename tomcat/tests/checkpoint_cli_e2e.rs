@@ -61,8 +61,8 @@ fn setup_fixture() -> Fixture {
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     fs::create_dir_all(&sessions_dir).unwrap();
-    let session = SessionManager::new(sessions_dir);
-    let session_key = session.current_session_key().to_string();
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
+    let session = SessionManager::new_scoped(sessions_dir, session_key.clone());
     let session_id = session
         .create_session(&session_key, None)
         .unwrap()
@@ -371,7 +371,7 @@ fn test_resume_after_interrupt() {
     info!("Act: tomcat chat --resume + local /ckpt list");
     let assert = cmd()
         .current_dir(&fx.workdir)
-        .args(["chat", "--resume"])
+        .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -423,7 +423,7 @@ fn test_slash_restore_recovers_after_bad_edit() {
     info!("Act: tomcat chat + local /restore");
     let assert = cmd()
         .current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -496,7 +496,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
     fs::write(fx.workdir.join("note.txt"), "broken-after-turn-end").unwrap();
     cmd()
         .current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -535,7 +535,7 @@ fn test_pre_rollback_only_before_turn_end_restore() {
     fs::write(fx.workdir.join("note.txt"), "manual-bad").unwrap();
     cmd()
         .current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -573,7 +573,7 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
 
     cmd()
         .current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -625,7 +625,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
 
     let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"))
         .current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
@@ -727,7 +727,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
 
     let mut child = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"))
         .current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")

@@ -105,8 +105,8 @@
 ### Story 8: CLI工具基础对话与会话管理
 **作为用户**，我希望能通过CLI工具与Agent对话，管理会话历史，正常使用插件能力。
 **验收标准**：
-- [ ] `tomcat chat` 命令启动对话模式，支持自然语言对话，流式响应渲染
-- [ ] `tomcat chat --resume` 可恢复上次会话，历史上下文从持久化 JSONL 文件加载并注入 LLM
+- [ ] `tomcat code` 命令启动按项目隔离的对话模式，`tomcat claw` 启动全局对话模式；隐藏兼容别名 `tomcat chat` 等价于 `tomcat code`；正式文档与验收口径统一使用 `code` / `claw`
+- [ ] `tomcat code --resume` / `tomcat claw --resume` 可恢复各自 scope 的上次会话，历史上下文从持久化 JSONL 文件加载并注入 LLM
 - [ ] `/model current|list|use <id>` 可查看当前模型、列出 catalog，并把当前会话模型选择持久化到 session；程序重启或 `--resume` 后仍生效，且不覆盖全局 `default_model`
 - [ ] 支持多轮对话上下文关联，Agent 可正常调用 4 原语、注册的工具、加载的插件能力；重启后从 JSONL 恢复消息历史，不丢失上下文
 - [ ] Agent 可在对话中调用内置 `web_search` / `web_fetch` 工具完成联网检索与单 URL 抓取：搜索结果需结构归一并做域/SSRF 过滤，抓取结果需返回正文或 `tool-results/` 落盘路径；对应场景见 `E2E-CLI-064` / `E2E-CLI-065`
@@ -121,7 +121,7 @@
 - [ ] Agent 执行工具期间，用户发送新消息可触发 Steering——完成当前工具后跳过剩余工具，注入新指令并重新调用 LLM（中途换方向不需要重新创建会话）
 - [ ] Ctrl+C 可触发 Abort——当前工具执行完毕后立即终止 Agent，发布 agent_end(interrupted)
 - [ ] Agent 回答完毕后用户继续追加消息（FollowUp），在同一会话上下文中无缝继续，无需重新初始化
-- [ ] `tomcat chat --resume` 遇到 transcript 尾部 dangling `assistant.tool_calls` 时，hydrate 会按最后一个 tool_call block 的原顺序补齐所有缺失的 synthetic tool result `[interrupted]`；若中间混入非 `tool` role 则拒绝猜测并保留告警
+- [ ] `tomcat code --resume` / `tomcat claw --resume` 遇到 transcript 尾部 dangling `assistant.tool_calls` 时，hydrate 会按最后一个 tool_call block 的原顺序补齐所有缺失的 synthetic tool result `[interrupted]`；若中间混入非 `tool` role 则拒绝猜测并保留告警
 - [ ] mid-turn `Failed` / 流中断后，本轮已落盘的 `user`、完整 `assistant`、`assistant + tool_calls`、已完成 `tool_result` 仍保留在 transcript；用户下一条输入直接开启下一轮，无需 `/retry`
 - [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在、Parse、NonStreamStale 等）给出清晰的阶段化提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态

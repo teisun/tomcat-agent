@@ -800,7 +800,7 @@ Parameters:
 
 Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.
 
-Set `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round.
+Set `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round. Shell syntax like `cmd &` still runs inside the same foreground tool call and can keep stdout/stderr open; if you want a server or watcher to outlive the current tool round, use `run_in_background: true` instead of relying on `&` alone.
 
 Parameters:
 

@@ -173,6 +173,6 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests -- --nocapture --tes
 
 #### 人工验收（条件具备时）
 
-6. **对话模式**：`tomcat chat` 可进入对话；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
+6. **对话模式**：`tomcat code` / `tomcat claw` 可进入对话（隐藏兼容别名 `tomcat chat -> tomcat code`）；流式输出、多轮上下文、会话切换、4 原语/工具调用与用户确认
 7. **插件**：可加载/卸载 pi-mono 风格插件，错误隔离、工具与事件清理正常
 8. **跨平台**：若条件具备，在 Windows/macOS/Linux 至少各跑一次 build + test

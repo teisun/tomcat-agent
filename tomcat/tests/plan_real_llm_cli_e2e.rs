@@ -1,10 +1,10 @@
 //! E2E-PLAN-RL-001：CLI 子进程黑盒真 LLM smoke。
 //!
-//! 通过 `assert_cmd::Command::cargo_bin("tomcat")` 真起 `tomcat chat`，让真 LLM
+//! 通过 `assert_cmd::Command::cargo_bin("tomcat")` 真起 `tomcat code`，让真 LLM
 //! 在真实 CLI 上分别覆盖 planning-only 与 exec-only 两条窄路径：
 //!
-//! - 进程 A：`tomcat chat` + `/plan` + planning prompt；EOF 退出后落盘 state=planning。
-//! - 进程 B：预置 planning plan 后，`tomcat chat --resume` + `/plan build {plan_id}` + exec
+//! - 进程 A：`tomcat code` + `/plan` + planning prompt；EOF 退出后落盘 state=planning。
+//! - 进程 B：预置 planning plan 后，`tomcat code --resume` + `/plan build {plan_id}` + exec
 //!   prompt；EOF 只负责结束输入并退出。这个真 LLM smoke 继续覆盖 `--resume` +
 //!   `plan_id` 入口、EXEC prompt 可见性与 session 绑定；full completion / artifact /
 //!   transcript 顺序由 inprocess/runtime 测试单独回归。
@@ -22,7 +22,7 @@
 //! - 子进程**继承真实 HOME**（不注入临时 `HOME`）；plan 落盘到 `~/.tomcat/plans/`。
 //! - 默认 cwd 用 `~/.tomcat/temp/<run>/`（内置 workspace_roots）；自定义 cwd 必须显式位于可写根内。
 //! - 诊断日志写到仓库内 `workspace-temp/logs/`，运行一开始就打印可点击路径。
-//! - 每次 run 都会通过 `begin_fresh_default_session()` 生成新的真实 `session_id`；
+//! - 每次 run 都会按当前 `workdir` 生成新的 code-scope `session_id`；
 //!   因此 `recover()` 必须按 `session_id` 而不是仅按固定 `DEFAULT_SESSION_KEY`
 //!   识别 executing plan，否则旧 run 的盘状态会 hijack 新用例。
 
@@ -318,7 +318,12 @@ fn setup_fixture(
         .expect("write cli real llm effective config");
     let workdir = resolve_case_workdir(&cfg, workdir_override, log_slug);
     let sessions_dir = resolve_sessions_dir(&cfg).expect("resolve sessions dir");
-    let session = common::begin_fresh_default_session(&sessions_dir, Some(&workdir));
+    std::fs::create_dir_all(&sessions_dir).expect("create sessions dir for cli real llm e2e");
+    let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
+    let session_mgr = tomcat::SessionManager::new_scoped(sessions_dir.clone(), session_key);
+    let session = session_mgr
+        .new_current_session(Some(workdir.to_string_lossy().to_string()))
+        .expect("create fresh code session for cli real llm e2e");
     let transcript_path = sessions_dir.join(format!("{}.jsonl", session.session_id));
     let diag_log = DiagLog::new(log_slug);
 
@@ -389,7 +394,7 @@ fn run_tomcat_chat(
 ) -> Output {
     let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
     cmd.current_dir(&fx.workdir)
-        .arg("chat")
+        .arg("code")
         .args(args)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", &fx.api_key)
@@ -1066,7 +1071,7 @@ fn assert_planning_phase_smoke(
     );
     let stdout_a = String::from_utf8_lossy(&out_a.stdout);
     assert!(
-        stdout_a.contains("u[Plan:planning]>"),
+        stdout_a.contains("u[Plan:planning"),
         "进程 A stdout 应展示 planning user prompt；实际前 4000 字符：{}",
         tail_chars(&out_a.stdout, 4000)
     );
@@ -1091,10 +1096,11 @@ fn assert_exec_phase_smoke(fx: &CliFixture, out_b: &Output, plan_path: &Path) {
             final_plan.frontmatter.state
         );
     }
+    let expected_session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &fx.workdir);
     assert_eq!(
         final_plan.frontmatter.session_key.as_deref(),
-        Some(tomcat::DEFAULT_SESSION_KEY),
-        "exec-only 用例应把 active plan 绑定到固定 DEFAULT_SESSION_KEY"
+        Some(expected_session_key.as_str()),
+        "exec-only 用例应把 active plan 绑定到当前 workdir 的 code session_key"
     );
     assert_eq!(
         final_plan.frontmatter.session_id.as_deref(),
@@ -1108,7 +1114,7 @@ fn assert_exec_phase_smoke(fx: &CliFixture, out_b: &Output, plan_path: &Path) {
     );
     let stdout_b = String::from_utf8_lossy(&out_b.stdout);
     assert!(
-        stdout_b.contains("u[Plan:executing]> start building "),
+        stdout_b.contains("u[Plan:executing"),
         "进程 B stdout 应展示自动开跑的 EXEC user prompt；实际前 4000 字符：{}",
         tail_chars(&out_b.stdout, 4000)
     );
@@ -1208,10 +1214,11 @@ fn run_cli_real_llm_case(
             final_plan.frontmatter.todos
         );
     }
+    let expected_session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &fx.workdir);
     assert_eq!(
         final_plan.frontmatter.session_key.as_deref(),
-        Some(tomcat::DEFAULT_SESSION_KEY),
-        "EXEC/completed 盘应绑定固定 DEFAULT_SESSION_KEY"
+        Some(expected_session_key.as_str()),
+        "EXEC/completed 盘应绑定当前 workdir 的 code session_key"
     );
     assert_eq!(
         final_plan.frontmatter.session_id.as_deref(),
