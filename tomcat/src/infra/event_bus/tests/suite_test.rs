@@ -179,6 +179,15 @@ fn event_context_with_session_id_sets_non_empty_value() {
 }
 
 #[test]
+fn event_context_with_session_id_trims_whitespace_and_rejects_blank() {
+    let ctx = EventContext::new("ev", serde_json::json!({})).with_session_id("  s1  ");
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+
+    let blank = EventContext::new("ev", serde_json::json!({})).with_session_id("   ");
+    assert_eq!(blank.session_id, None);
+}
+
+#[test]
 fn event_context_new_defaults_session_id_to_none() {
     let ctx = EventContext::new("ev", serde_json::json!({}));
     assert_eq!(ctx.session_id, None);
@@ -234,6 +243,25 @@ fn scoped_event_emitter_normalizes_empty_session_id_to_none() {
     let ctx = captured.lock().unwrap().clone().expect("captured ctx");
     assert_eq!(ctx.session_id, None);
     assert!(ctx.payload.get("sessionId").is_none());
+}
+
+#[test]
+fn scoped_event_emitter_trims_whitespace_session_id_before_emitting() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_AGENT_START,
+        Box::new(move |ctx| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "  s1  ");
+    emitter.emit(AgentEvent::AgentStart).unwrap();
+    let ctx = captured.lock().unwrap().clone().expect("captured ctx");
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+    assert_eq!(ctx.payload["sessionId"].as_str(), Some("s1"));
 }
 
 #[test]

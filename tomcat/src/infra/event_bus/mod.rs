@@ -104,10 +104,9 @@ impl EventContext {
         }
     }
 
-    /// 设置所属 session ID；空字符串会被视为未设置，避免发出 `sessionId=""`。
+    /// 设置所属 session ID；空白字符串会被视为未设置，避免发出脏 `sessionId`。
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
-        let session_id = session_id.into();
-        if !session_id.is_empty() {
+        if let Some(session_id) = normalize_session_id(Some(session_id.into())) {
             self.session_id = Some(session_id);
         }
         self

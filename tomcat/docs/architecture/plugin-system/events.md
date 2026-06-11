@@ -7,7 +7,7 @@
 
 ### 事件分类（对齐 pi_agent_rust）
 
-事件分为两类：**AgentEvent** 供流式/UI 订阅；**ExtensionEvent** 供扩展通过 `agent.on(event_name, ...)` 注册钩子。扩展侧使用**字符串事件名**（snake_case，如 `"tool_call"`、`"session_before_switch"`、`"input"`），与 pi-mono / pi_agent_rust 一致。序列化时 `type` 为 snake_case，payload 字段为 camelCase。
+事件分为两类：**AgentEvent** 供流式/UI 订阅；**ExtensionEvent** 供扩展通过 `agent.on(event_name, ...)` 注册钩子。扩展侧使用**字符串事件名**（snake_case，如 `"tool_call"`、`"session_before_switch"`、`"input"`），与 pi-mono / pi_agent_rust 一致。序列化时 `type` 为 snake_case，payload 字段为 camelCase。自 D15 起，`sessionId` 由 `ScopedEventEmitter` 通过顶层 **wire envelope** 统一注入；Rust enum body 不再重复内嵌 `session_id`。协议/插件消费读顶层 `payload.sessionId`，进程内订阅者读 `EventContext.session_id`。
 
 #### AgentEvent（流式 / UI）
 
@@ -17,10 +17,10 @@
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    AgentStart { #[serde(rename = "sessionId")] session_id: String },
-    AgentEnd { #[serde(rename = "sessionId")] session_id: String, messages: Vec<Message>, error: Option<String> },
-    TurnStart { #[serde(rename = "sessionId")] session_id: String, #[serde(rename = "turnIndex")] turn_index: usize, timestamp: i64 },
-    TurnEnd { #[serde(rename = "sessionId")] session_id: String, #[serde(rename = "turnIndex")] turn_index: usize, message: Message, #[serde(rename = "toolResults")] tool_results: Vec<Message> },
+    AgentStart,
+    AgentEnd { messages: Vec<Message>, error: Option<String> },
+    TurnStart { #[serde(rename = "turnIndex")] turn_index: usize, timestamp: i64 },
+    TurnEnd { #[serde(rename = "turnIndex")] turn_index: usize, message: Message, #[serde(rename = "toolResults")] tool_results: Vec<Message> },
     MessageStart { message: Message },
     MessageUpdate { message: Message, #[serde(rename = "assistantMessageEvent")] assistant_message_event: AssistantMessageEvent },
     MessageEnd { message: Message },
@@ -40,6 +40,18 @@ pub enum AgentEvent {
     ContextOverflowTrimStart { reason: String, ratio: f64 },
     ContextOverflowTrimEnd { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "willRetry")] will_retry: bool, #[serde(rename = "estimatedTokensFreed")] estimated_tokens_freed: usize, #[serde(rename = "turnsRemoved")] turns_removed: usize },
     BoundarySwitched { #[serde(rename = "ratioBefore")] ratio_before: f64, #[serde(rename = "ratioAfter")] ratio_after: f64, #[serde(rename = "coveredCount")] covered_count: usize, #[serde(rename = "wasSyncWait")] was_sync_wait: bool, #[serde(rename = "estimatedTokensFreed")] estimated_tokens_freed: usize },
+    // 其余变体（如 LlmError / LlmNotice / ToolCallStreaming / Interrupted / SubAgentStart / SubAgentEnd）见源码 events/mod.rs
+}
+```
+
+对应 wire JSON 形状示例：
+
+```json
+{
+  "type": "turn_start",
+  "sessionId": "sess_123",
+  "turnIndex": 1,
+  "timestamp": 1710000000
 }
 ```
 
@@ -71,13 +83,13 @@ pub enum ExtensionEvent {
     #[serde(rename_all = "camelCase")]
     Startup { version: String, session_file: Option<String> },
     #[serde(rename_all = "camelCase")]
-    AgentStart { session_id: String },
+    AgentStart,
     #[serde(rename_all = "camelCase")]
-    AgentEnd { session_id: String, messages: Vec<Message>, error: Option<String> },
+    AgentEnd { messages: Vec<Message>, error: Option<String> },
     #[serde(rename_all = "camelCase")]
-    TurnStart { session_id: String, turn_index: usize },
+    TurnStart { turn_index: usize },
     #[serde(rename_all = "camelCase")]
-    TurnEnd { session_id: String, turn_index: usize, message: AssistantMessage, tool_results: Vec<ToolResultMessage> },
+    TurnEnd { turn_index: usize, message: AssistantMessage, tool_results: Vec<ToolResultMessage> },
     #[serde(rename_all = "camelCase")]
     ToolCall { tool_name: String, tool_call_id: String, input: Value },
     #[serde(rename_all = "camelCase")]
@@ -90,6 +102,18 @@ pub enum ExtensionEvent {
     Input { #[serde(rename = "text")] content: String, #[serde(rename = "images")] attachments: Vec<ImageContent> },
     // 保留：会话/插件/系统/4原语等扩展事件，命名同上
     // SessionCreate, SessionDestroy, SessionSwitch, PluginLoad/Unload/Enable/Disable, ToolRegister/Unregister, ToolCallError, SystemReady, SystemShutdown, ConfigChange, Custom(String) 等
+}
+```
+
+`ExtensionEvent` 的 `sessionId` 同样来自顶层 envelope，而不是 enum body：
+
+```json
+{
+  "type": "tool_call",
+  "sessionId": "sess_123",
+  "toolName": "read_file",
+  "toolCallId": "call_1",
+  "input": { "path": "README.md" }
 }
 ```
 

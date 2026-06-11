@@ -297,6 +297,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
         &*ctx.global_services.event_bus,
         search_tools_printer,
+        Some(session_id.as_str()),
         ctx.config.preflight.show_search_tools_ui,
         ctx.config.preflight.show_git_ui,
     );
