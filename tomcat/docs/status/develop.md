@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-11 16:30 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-11 23:11 +0800 | ACTIVE | develop | — |
+
+### 2026-06-11 | merge `feature/optimize01` → develop（T2-P1-015 follow-up 验收）
+
+- **合并范围**：按用户要求将 `feature/optimize01` 本地合入 `develop`（merge commit `5e9e428`），把 D15 事件信封 `sessionId` 收口及其验收期补漏一并带入 develop：会话级 stderr listener 改为按 `session_id` 严格 demux，`EventContext::with_session_id()` 与 `ScopedEventEmitter` 统一 trim / blank 规范，`plugin-system/events.md` 改回顶层 envelope `sessionId` 口径，并同步 `chat_git_preflight_tests` / `context_management_tests` 的 emitter 签名适配。未推送远端。
+- **develop 侧复核**：复查 `infra/event_bus` / `infra/events` / `api/chat` / `agent_loop` / `compaction` / `dispatcher` 与相关测试、架构文档，确认 `payload.sessionId` 与 `EventContext.session_id` 都由 `ScopedEventEmitter` 单一出口发射，CLI stderr 监听只消费当前会话事件，preflight / ask_question / child-agent / extension emit 路径口径一致；本轮未再发现 develop-only 缺口。
+- **全量验收**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all` 在 develop 侧全绿，覆盖 `cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`、`integration-parallel`、`integration-serial`（含 `checkpoint_cli_e2e`、`cli_tests`、`hostcall_tests`、`long_lived_vm_tests`、`resume_hydration_cli_e2e` 等）；`.integration_test_output.log` 末尾为 `EXIT_CODE=0`。
+- **结论**：`feature/optimize01` 已完成本地合并与 develop 侧复跑验收；`T2-P1-015` 继续保持 `DONE`，无新增本地阻塞项。
 
 ### 2026-06-11 | fix(install): 安装脚本仓库地址改为 tomcat-agent
 
