@@ -1,6 +1,17 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-11 23:11 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-11 23:26 +0800 | ACTIVE | develop | — |
+
+### 2026-06-11 | chore(release): 版本号 0.1.3 → 0.1.4
+
+- **动机**：本轮仅为 release workflow 排队优化补发一个新版本，若继续沿用 `0.1.3` 会导致 git tag、Release 名称与 `tomcat --version` 不一致，影响安装验证与问题定位。
+- **范围**：仅同步 `Cargo.toml` / `Cargo.lock` 的 `version = "0.1.4"`，无源码逻辑变更。
+
+### 2026-06-11 | chore(release): 将 Intel mac 构建迁到 macos-14
+
+- **动机**：`v0.1.3` 的 release run 被 `macos-13` Intel runner 长时间排队拖住，`publish` 因 `needs: build` 无法开始，导致 Release 资产迟迟不能生成。
+- **实现**：`.github/workflows/release.yml` 中 `x86_64-apple-darwin` 的 runner 从 `macos-13` 改为 `macos-14`，继续使用 `cargo build --target x86_64-apple-darwin` 在 Apple Silicon runner 上交叉编译 Intel mac 产物。
+- **影响**：资产命名、`install.sh` 的 target 映射与文档安装命令保持不变，仅移除对稀缺 Intel mac runner 的依赖。
 
 ### 2026-06-11 | merge `feature/optimize01` → develop（T2-P1-015 follow-up 验收）
 
