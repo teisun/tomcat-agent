@@ -48,6 +48,7 @@ use crate::core::tools::primitive::{BashTaskRegistry, PrimitiveExecutor};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::events::ToolDisplay;
+use tracing::warn;
 
 use super::config_backend::SharedConfigBackend;
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
@@ -59,6 +60,43 @@ use guard::{
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
 /// 与"插件上下文中触发的工具调用"区分，便于 hostcall 审计层分桶。
 pub(super) const AGENT_PLUGIN_ID: &str = "__agent__";
+pub(super) const NORMALIZED_TOOL_CALL_ARGUMENTS: &str = "{}";
+const RAW_ARGUMENTS_PREVIEW_CHARS: usize = 120;
+
+fn raw_arguments_preview(raw: &str) -> String {
+    let raw_chars = raw.chars().count();
+    let mut preview: String = raw.chars().take(RAW_ARGUMENTS_PREVIEW_CHARS).collect();
+    if raw_chars > RAW_ARGUMENTS_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    serde_json::to_string(&preview).unwrap_or_else(|_| "\"<preview unavailable>\"".to_string())
+}
+
+pub(super) fn persisted_tool_call_arguments(tc: &ToolCallInfo) -> String {
+    match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+        Ok(_) => tc.arguments.clone(),
+        Err(err) => {
+            warn!(
+                tool_call_id = %tc.id,
+                tool_name = %tc.name,
+                raw_arguments_len = tc.arguments.chars().count(),
+                raw_arguments_preview = %raw_arguments_preview(&tc.arguments),
+                error = %err,
+                "invalid tool_call arguments detected; persisting normalized assistant tool_call arguments"
+            );
+            NORMALIZED_TOOL_CALL_ARGUMENTS.to_string()
+        }
+    }
+}
+
+fn argument_parse_failure_message(raw: &str, err: &serde_json::Error) -> String {
+    format!(
+        "Argument parse failed (persisted tool_call arguments were normalized to {}): {}\nRaw arguments preview (truncated): {}",
+        NORMALIZED_TOOL_CALL_ARGUMENTS,
+        err,
+        raw_arguments_preview(raw),
+    )
+}
 
 /// `tool_exec` 提供给 dispatcher 的完整结果：
 /// - `model_text` 保持给 transcript / LLM
@@ -281,7 +319,13 @@ async fn execute_tool_tuple_full(
 ) -> (String, bool, Vec<crate::core::llm::ChatMessageContentPart>) {
     let args: serde_json::Value = match serde_json::from_str(&tc.arguments) {
         Ok(v) => v,
-        Err(e) => return (format!("参数解析失败: {}", e), true, Vec::new()),
+        Err(e) => {
+            return (
+                argument_parse_failure_message(&tc.arguments, &e),
+                true,
+                Vec::new(),
+            )
+        }
     };
 
     // B3-guard：reviewer 子 Agent 不允许调 catalog 白名单外的任何工具（双保险——

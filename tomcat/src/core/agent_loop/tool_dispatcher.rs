@@ -79,12 +79,18 @@ pub(super) async fn run_tool_calls(
     reasoning_continuation: Option<ReasoningContinuation>,
     continuity: Option<ContinuityMetadata>,
 ) -> Result<DispatchOutcome, LoopError> {
+    let persisted_arguments: Vec<String> = tool_calls
+        .iter()
+        .map(tool_exec::persisted_tool_call_arguments)
+        .collect();
+
     // ── 1. 计费：assistant 消息（含 tool_calls wire payload 估算） ──
     if let Some(ref mut ctx_state) = agent.context_state {
         let assistant_chars = assistant_content.len()
             + tool_calls
                 .iter()
-                .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len() + 40)
+                .zip(persisted_arguments.iter())
+                .map(|(tc, persisted_args)| tc.name.len() + persisted_args.len() + tc.id.len() + 40)
                 .sum::<usize>();
         ctx_state.on_message_appended(assistant_chars);
     }
@@ -93,13 +99,14 @@ pub(super) async fn run_tool_calls(
     {
         let tc_json: Vec<serde_json::Value> = tool_calls
             .iter()
-            .map(|tc| {
+            .zip(persisted_arguments.iter())
+            .map(|(tc, persisted_arguments)| {
                 serde_json::json!({
                     "id": tc.id,
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": tc.arguments
+                        "arguments": persisted_arguments
                     }
                 })
             })

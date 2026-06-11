@@ -24,6 +24,26 @@ fn mk_assistant_tc(ids: &[&str]) -> Value {
         .collect();
     serde_json::json!({ "role": "assistant", "tool_calls": tcs })
 }
+fn mk_assistant_tc_with_arguments(arguments: Value) -> Value {
+    serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "c1",
+            "type": "function",
+            "function": { "name": "read", "arguments": arguments }
+        }]
+    })
+}
+fn mk_assistant_tc_missing_arguments() -> Value {
+    serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "c1",
+            "type": "function",
+            "function": { "name": "read" }
+        }]
+    })
+}
 fn mk_tool(tc_id: &str) -> Value {
     serde_json::json!({ "role": "tool", "tool_call_id": tc_id, "content": "ok" })
 }
@@ -98,6 +118,43 @@ fn validate_bad_tool_calls_shape() {
         "tool_calls": [{ "id": "c1", "type": "function", "function": {} }]
     });
     assert!(validate_append_message(&bad, &[]).is_err());
+}
+
+#[test]
+fn validate_invalid_tool_call_arguments_json_is_rejected() {
+    let bad = mk_assistant_tc_with_arguments(serde_json::json!("{\"country\":\""));
+    let err = validate_append_message(&bad, &[]).expect_err("invalid JSON must be rejected");
+    assert!(
+        err.contains("tool_calls[0].function.arguments is not valid JSON"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_missing_tool_call_arguments_is_rejected() {
+    let bad = mk_assistant_tc_missing_arguments();
+    let err = validate_append_message(&bad, &[]).expect_err("missing arguments must be rejected");
+    assert!(
+        err.contains("tool_calls[0].function.arguments is missing or not a string"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_non_string_tool_call_arguments_is_rejected() {
+    let bad = mk_assistant_tc_with_arguments(serde_json::json!({ "path": "/tmp/demo" }));
+    let err =
+        validate_append_message(&bad, &[]).expect_err("non-string arguments must be rejected");
+    assert!(
+        err.contains("tool_calls[0].function.arguments is missing or not a string"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn validate_valid_tool_call_arguments_json_still_passes() {
+    let good = mk_assistant_tc_with_arguments(serde_json::json!("{\"q\":\"x\"}"));
+    assert!(validate_append_message(&good, &[]).is_ok());
 }
 
 #[test]

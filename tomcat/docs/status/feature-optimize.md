@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-10 16:35 | ACTIVE | feature/optimize | - |
+| Jerry | 2026-06-11 14:05 | ACTIVE | feature/optimize | - |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 修复非法 `tool_call.arguments` 落盘导致会话永久 400：`tool_dispatcher` 持久化前规整为 `{}`、`append_message_chain` 拒绝非法 wire、tool result 输出英文安全预览；补齐 dispatcher / append / session 回归测试 @2026-06-11
 - [✓] **[P1]** 修复多 provider 场景下 timing ⑤ `preheat` 误用主 provider 的错配问题：`turn_finalize` / `current_tail_guard` 统一改走 `AgentLoop::compaction_provider()`，`AgentLoopConfig.compaction_llm` 重命名为 `compaction_provider`，并为 accessor / timing⑤ start+restart / current-tail collapse / child-agent compaction pair 补齐路由矩阵测试 @2026-06-11
 - [✓] **[P0]** 新增 `TodosRuntime`，todos 落盘路径改为 `~/.tomcat/agents/<id>/todos/<session_id>.todo.md` @2026-06-09
 - [✓] **[P0]** 照 `WebFetchRuntime` 范式经 `ChatContext → AgentLoop → ToolExecCtx` 注入，PlanRuntime 不再参与持久化 @2026-06-09

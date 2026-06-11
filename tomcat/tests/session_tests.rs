@@ -158,6 +158,49 @@ fn test_append_message_invalid_chain_returns_invariant() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn test_append_message_invalid_tool_call_arguments_do_not_persist(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let tmp = TempDir::new()?;
+    let mgr = SessionManager::new(tmp.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, Some("/tmp".to_string()))?;
+
+    let entries_before = mgr.get_entries(10)?;
+    assert!(
+        entries_before.is_empty(),
+        "fresh session should not contain transcript messages"
+    );
+
+    let err = mgr
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": "call tool",
+            "tool_calls": [{
+                "id": "call_bad",
+                "type": "function",
+                "function": { "name": "read", "arguments": "{\"country\":\"" }
+            }]
+        }))
+        .expect_err("invalid tool_call arguments should be rejected");
+    assert!(matches!(
+        err,
+        AppError::Invariant {
+            stage: "append_message_chain",
+            ..
+        }
+    ));
+
+    let entries_after = mgr.get_entries(10)?;
+    assert_eq!(
+        entries_after.len(),
+        entries_before.len(),
+        "rejected assistant message must not be persisted"
+    );
+    Ok(())
+}
+
+#[test]
 fn test_init_context_state_heals_all_missing_tail_tool_results(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
