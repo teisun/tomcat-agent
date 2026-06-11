@@ -92,6 +92,25 @@ impl Default for CheckpointConfig {
     }
 }
 
+/// 会话入口配置：决定裸 `tomcat` / `tomcat session ...` 在未显式指定 scope 时采用的模式。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionConfig {
+    #[serde(default = "default_session_default_mode")]
+    pub default_mode: String,
+}
+
+fn default_session_default_mode() -> String {
+    "code".to_string()
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: default_session_default_mode(),
+        }
+    }
+}
+
 /// 存储配置：仅 work_dir。agent 系统子目录由 resolve 函数从 work_dir 推导。
 /// 详见 docs/architecture/work-dir-and-data-layout.md。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

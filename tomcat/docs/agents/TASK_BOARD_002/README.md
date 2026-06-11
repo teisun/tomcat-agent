@@ -45,6 +45,7 @@
 | **T2-P1-012** | `web_search` 工具                              | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-012.md](./tasks/T2-P1-012.md) |
 | **T2-P1-013** | `web_fetch` 工具                               | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-013.md](./tasks/T2-P1-013.md) |
 | **T2-P1-014** | Skill 系统                                     | `DONE` | Spike | `feature/skill-system`                 | [tasks/T2-P1-014.md](./tasks/T2-P1-014.md) |
+| **T2-P1-015** | 会话模式与多会话并发（claw/code + SessionRuntime） | `PENDING_INTEGRATION` | Jerry | `feature/optimize`                     | [tasks/T2-P1-015.md](./tasks/T2-P1-015.md) |
 
 
 ## 5. 开放任务依赖（概览）
@@ -60,6 +61,7 @@ flowchart LR
     P112[T2-P1-012<br/>web_search]
     P113[T2-P1-013<br/>web_fetch]
     P114[T2-P1-014<br/>Skill 系统]
+    P115[T2-P1-015<br/>会话模式]
     P008 -.->|TUI 增强后可并行| P109
     P112 -.->|共享 tool_exec 热区| P113
     P113 -.->|共享 tool_exec 热区| P114
@@ -70,11 +72,12 @@ flowchart LR
     P112
     P113
     P114
+    P115
 ```
 
 
 
-> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。**T2-P1-012 / T2-P1-013** 已于 2026-06-05 合入 `develop`；其实现以各自架构文档为 SSoT，共享 `tool_exec/` 热区，后续问题追踪仍回到对应任务卡。**T2-P1-014** 以 `docs/architecture/skill-system.md` 为 SSoT，本期按 §4.2 做 PR-SK-A→C，PR-SK-B（官方资产 + init）下期；与 T2-P1-012/013 共享 `tool_exec/`、`system_prompt/` 热区。
+> **注**：T2-P1-009 依赖 **T2-P0-016** bash AST 骨架（已合入 `develop`）；与 T2-P0-008 / T2-P0-009 无硬阻塞。**T2-P0-010** 以 `docs/architecture/llm-multi-llm-productization.md` 为 SSoT，建立在 **T2-P1-010** 已完成的 reasoning continuity 基础之上，但无新增开放任务硬阻塞；其热区集中在 `core/llm`、`api/chat`、`api/cli/init` 与 `session`。**T2-P1-011** 与 T2-P0-009 同属 `agent_loop/context` 热区，但无硬阻塞；认领前先同步最新 `develop` 以减少核心路径冲突。**T2-P1-012 / T2-P1-013** 已于 2026-06-05 合入 `develop`；其实现以各自架构文档为 SSoT，共享 `tool_exec/` 热区，后续问题追踪仍回到对应任务卡。**T2-P1-014** 以 `docs/architecture/skill-system.md` 为 SSoT，本期按 §4.2 做 PR-SK-A→C，PR-SK-B（官方资产 + init）下期；与 T2-P1-012/013 共享 `tool_exec/`、`system_prompt/` 热区。**T2-P1-015** 以 [`docs/architecture/session-modes.md`](../../architecture/session-modes.md) 为唯一真相（SSoT），任务卡不重复展开；当前口径为：隐藏兼容别名 `chat -> code`、开发阶段旧 `sessions.json` 直接重建、`ChatContext` 三层迁移已完成，P3 只保留 TUI/前台 demux 相关能力；热区 `core/session`、`api/chat`、`api/cli`。
 
 ---
 

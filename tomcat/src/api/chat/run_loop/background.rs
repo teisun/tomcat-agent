@@ -5,10 +5,10 @@ use crate::api::chat::ChatContext;
 use crate::core::tools::primitive::{BackgroundTaskLifecycleEvent, BashTaskStatus};
 
 pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
-    let registry = ctx.bash_task_registry.clone();
-    let routes = ctx.completion_routes.clone();
-    let queue = ctx.follow_up_queue.clone();
-    let delivered = ctx.delivered_completion.clone();
+    let registry = ctx.session_runtime.bash_task_registry.clone();
+    let routes = ctx.session_runtime.completion_routes.clone();
+    let queue = ctx.session_runtime.follow_up_queue.clone();
+    let delivered = ctx.session_runtime.delivered_completion.clone();
 
     let mut rx = registry.subscribe_lifecycle();
     tokio::spawn(async move {

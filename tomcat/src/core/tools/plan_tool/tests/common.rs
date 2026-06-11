@@ -8,6 +8,7 @@ pub(crate) use crate::core::plan_runtime::file_store::{
     PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
 pub(crate) use crate::core::plan_runtime::review::{ReviewKind, ReviewSummary};
+pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
     state::PlanState, PlanRuntime, PlanRuntimeError, ReviewerDispatcher, VerifierDispatcher,

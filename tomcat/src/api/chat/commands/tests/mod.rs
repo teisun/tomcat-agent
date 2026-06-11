@@ -9,6 +9,7 @@ mod cmd_help_test;
 mod cmd_model_test;
 mod cmd_path_test;
 mod cmd_plan_test;
+mod cmd_restore_test;
 mod cmd_skill_test;
 mod cmd_thinking_test;
 mod parse_test;

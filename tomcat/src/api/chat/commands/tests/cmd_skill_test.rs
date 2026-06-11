@@ -158,7 +158,7 @@ async fn run_skill_use_allows_user_only_skill_and_injects_body() {
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    ctx.primitive = Arc::new(SkillReadPrimitive);
+    ctx.global_services.primitive = Arc::new(SkillReadPrimitive);
     let _ = run(&ctx, SkillCommand::Reload).await;
 
     let outcome = run(

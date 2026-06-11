@@ -8,14 +8,14 @@ use crate::resolve_workspace_roots_paths;
 
 pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
     let cfg = &ctx.config;
-    let agent_definition_dir = ctx.agent_definition_dir.clone();
+    let agent_definition_dir = ctx.scope_services.agent_definition_dir.clone();
     let workspace_roots = resolve_workspace_roots_paths(cfg).unwrap_or_default();
     let agent_plans_dir = crate::infra::config::resolve_plans_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
     let agent_trail_readonly_dirs: Vec<PathBuf> = vec![
-        Some(ctx.agent_trail_dir.clone()),
+        Some(ctx.scope_services.agent_trail_dir.clone()),
         crate::infra::config::resolve_sessions_dir(cfg).ok(),
         crate::infra::config::resolve_log_dir(cfg).ok(),
         crate::infra::config::resolve_audit_dir(cfg).ok(),
@@ -41,12 +41,13 @@ pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     let session_set: HashSet<String> = ctx
+        .session_runtime
         .session_grants
         .snapshot()
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    let effective_roots = ctx.gate.effective_roots();
+    let effective_roots = ctx.global_services.gate.effective_roots();
     let mut read_write = Vec::new();
     let mut seen_rw = HashSet::new();
     for path in effective_roots.read_write {
@@ -108,7 +109,7 @@ pub(super) fn compute_workspace_state(ctx: &ChatContext) -> WorkspaceState {
         .map(|rule| rule.path.clone())
         .collect();
     let mut path_rules = Vec::new();
-    for rule in ctx.gate.effective_path_rules() {
+    for rule in ctx.global_services.gate.effective_path_rules() {
         path_rules.push(PathRuleSummary {
             path: rule.path.clone(),
             mode: match rule.mode {

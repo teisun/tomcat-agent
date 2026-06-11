@@ -311,7 +311,7 @@ pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
 
 /// 启动时创建完整新布局目录树。若目录已存在则跳过（幂等）。
 ///
-/// 创建：`agent_dir`（可配置覆盖）、`work_dir/agents/{id}/sessions|logs|audit`、
+/// 创建：`agent_dir`（可配置覆盖）、`work_dir/agents/{id}/sessions|logs|audit|todos`、
 /// `workspace-{id}`（可配置覆盖）、全局目录 `memory|credentials|media|subagents|plugins`、
 /// 以及 `assets/wasm|modules`。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
@@ -324,6 +324,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
         "sessions",
         "logs",
         "audit",
+        "todos",
         "tmp",
         "skills",
         "tool-results",
@@ -375,6 +376,13 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
         return Err(AppError::Config(
             "checkpoint.retention_days 必须大于 0".to_string(),
         ));
+    }
+    let session_mode = cfg.session.default_mode.trim().to_ascii_lowercase();
+    if !["code", "claw"].contains(&session_mode.as_str()) {
+        return Err(AppError::Config(format!(
+            "session.default_mode 非法: {}（允许 code / claw）",
+            cfg.session.default_mode
+        )));
     }
     let level = cfg.log.level.to_lowercase();
     if !["trace", "debug", "info", "warn", "error"].contains(&level.as_str()) {

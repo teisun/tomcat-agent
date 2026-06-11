@@ -75,7 +75,7 @@ TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → L
 | **preview 占位符**        | Layer 0 落盘后替换 tool_result 的短文本，包含路径 + 工具名 + 前 500 chars 预览。                                                                                                                                                               |
 | **placeholder**        | Layer 0 替换旧 turn 中 tool_result 的常量文本 `[Previous tool result replaced to save context space]`。                                                                                                                             |
 | **CompactionSummary**  | `ChatMessage` 的 `kind == MessageKind::CompactionSummary` 形态，通过 `ChatMessage::compaction_summary(text)` 构造。运行时 Layer 1 由 **`Preheat`** 封装 task、3× retry 与 `Idle`/`Running`/`ExhaustedPending`（及重载用的 **`CachedCompleted`**）；成功产物类型为 **`CompactionResult`**（文本 + `covered_*` + **`transcript_compaction_entry_id`**，与 §5.7 中 **`BranchSummaryEntry.id`（整串 `S::E`）** 一致），供 Layer 2 取出并应用。任务完成写入 transcript 时，**按 §5.7 插在 `MessageEntry.id == covered_end_id` 的行之后**（`is_boundary=false`），而非仅依赖「文件尾追加」。 |
-| **预热（Preheat）**        | Layer 1 的异步压缩任务。在 ratio >= 0.5 时启动，克隆 `messages` 后台调用 `compaction_model` 生成摘要，主线程不等待。快照边界 id 取 **message 级** `covered_start_id` / `covered_end_id`（§5.7）。                                                                |
+| **预热（Preheat）**        | Layer 1 的异步压缩任务。在 ratio >= 0.5 时启动，克隆 `messages` 后台调用 **解析后的 compaction provider + `compaction_model`** 生成摘要，主线程不等待。快照边界 id 取 **message 级** `covered_start_id` / `covered_end_id`（§5.7）。                                                                |
 | **Boundary 切换**        | Layer 2 从 **`preheat`** 取得已完成的 **`CompactionResult`** 并应用到 `messages`：按 §5.7 **`messages.splice(..=end_idx, [summary_msg])`** 用 `ChatMessage::compaction_summary(...)` 替换前缀；**更新内存中的 `start_idx`**（reasoning loop 的消息起始位置）；并按 **`transcript_compaction_entry_id`（= `BranchSummaryEntry.id` 整串 `S::E`）** **原地**将 JSONL 中对应 compaction 行的 `isBoundary` 改为 `true`（不追加第二份全文）。切换后水位从 ~~70% 瞬降至 10~~20%。                                    |
 | **compaction summary** | Layer 1 LLM 对**整个 `messages`** 生成的结构化摘要，一条 `ChatMessage::compaction_summary(text)` 替换整批 turns。                                                                                                                              |
 | **compact boundary**   | `TranscriptEntry::BranchSummary` 中的 `is_boundary: bool` 标记。每个逻辑批次在 JSONL 中 **仅一行**：预热写入 `boundary=false`（位置见 §5.7「锚点插入」；fold 时跳过）；应用 **原地升级** 为 `boundary=true`（`init_context_state` 遇到后丢弃其前所有 entry）。重载时若最后一行 compaction 仍为 `false`，`init_context_state` 通过 **`restore_completed`** 将摘要 Hydrate 回 `Preheat`（`id`/`covered_*` 须与 §5.7 字段语义一致）。                                                                     |
@@ -313,7 +313,7 @@ fn usage_ratio(state: &ContextState) -> f64:
 | ratio 档位         | 触发层       | 检查时机              | 动作                                                                      |
 | ---------------- | --------- | ----------------- | ----------------------------------------------------------------------- |
 | 每轮结束             | Layer 0   | LLM 回复后（⑤）        | 同步清理 tool_result（主线程同步但极快，用户无感知）                                          |
-| `>= 0.50`        | Layer 1   | LLM 回复后（⑤）        | `try_restart_if_pending` → 异步预热 `preheat.try_start`（若无进行中的任务），主线程不等待                                                   |
+| `>= 0.50`        | Layer 1   | LLM 回复后（⑤）        | `try_restart_if_pending` → 通过统一 `compaction_provider()` 入口异步预热 `preheat.try_start`（若无进行中的任务），主线程不等待                                                   |
 | `>= 0.70`        | Layer 2   | **发起 LLM 请求前（②）** | `try_restart_if_pending` → 检查 `preheat` 结果，完成则 Boundary 切换（非阻塞）                               |
 | `>= 0.85`        | Layer 1+2 | LLM 回复后（⑤）        | `try_restart_if_pending` → 先 `poll_result`：**已有结果则立即 Boundary 切换**（非阻塞）；再判断是否需要新一轮 `try_start`      |
 | `>= 0.98`        | Layer 2   | **发起 LLM 请求前（②）** | `try_restart_if_pending` → **已有结果则直接 Boundary 切换**（非阻塞）；仅**未完成**时 `await_result` 化异步为同步阻塞等待 |
@@ -867,13 +867,13 @@ Layer 0 处理后的新 message entry 写入 transcript（落盘的 tool_result 
 
 ### 6.2 Layer 1：异步预热
 
-Layer 0 完成后（仍在步骤⑤），先 **`preheat.try_restart_if_pending(...)`**，再计算 ratio；若 **ratio >= 0.50** 且 `preheat.try_start(...)` 接受启动，则 spawn 异步预热。
+Layer 0 完成后（仍在步骤⑤），先 **`preheat.try_restart_if_pending(...)`**，再计算 ratio；若 **ratio >= 0.50** 且 `preheat.try_start(...)` 接受启动，则通过统一的 compaction provider 访问入口 spawn 异步预热。
 
 **主线程不等待**，当前 user turn 处理完毕。异步预热在用户阅读/思考/输入期间后台运行。
 
 ```
-fn layer1_preheat(state: &mut ContextState, llm: Arc<dyn LlmProvider>, config: &ContextConfig, ...):
-    state.preheat.try_restart_if_pending(state, llm, config, ...)  # 与 ② 对称；见 §6.6
+fn layer1_preheat(state: &mut ContextState, compaction_provider: Arc<dyn LlmProvider>, config: &ContextConfig, ...):
+    state.preheat.try_restart_if_pending(state, compaction_provider, config, ...)  # 与 ② 对称；见 §6.6
 
     if state.usage_ratio() < 0.50:
         return
@@ -882,7 +882,7 @@ fn layer1_preheat(state: &mut ContextState, llm: Arc<dyn LlmProvider>, config: &
 
     # try_start 内部：Idle 且无双任务时克隆 messages snapshot、spawn task；
     # task 内 generate_summary 最多重试 3 次（§6.6）；成功且 append 成功（或无 transcript 路径）时发 AutoCompactionEnd；耗尽发 CompactionError 并转入 ExhaustedPending
-    state.preheat.try_start(state, llm, config, ...)
+    state.preheat.try_start(state, compaction_provider, config, ...)
 ```
 
 **异步任务单例性**：

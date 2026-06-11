@@ -80,10 +80,7 @@ fn is_retryable_llm_error_matches_truth_table() {
             "stage {stage} 应为可重试"
         );
     }
-    for stage in [
-        LlmErrorStage::NonStreamStale,
-        LlmErrorStage::Parse,
-    ] {
+    for stage in [LlmErrorStage::NonStreamStale, LlmErrorStage::Parse] {
         assert!(
             !is_retryable_llm_error(&llm_error("openai", stage, "fatal")),
             "stage {stage} 不应为可重试"

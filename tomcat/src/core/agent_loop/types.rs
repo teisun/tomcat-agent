@@ -94,7 +94,7 @@ pub struct AgentLoopConfig {
     pub tool_definitions: Vec<serde_json::Value>,
     pub context_config: ContextConfig,
     /// Compaction / preheat 场景专用的 provider；未设置时回落主对话 provider。
-    pub compaction_llm: Option<Arc<dyn LlmProvider>>,
+    pub compaction_provider: Option<Arc<dyn LlmProvider>>,
     /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
     pub agent_trail_dir: String,
     /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 表。
@@ -147,7 +147,7 @@ impl Default for AgentLoopConfig {
             session_id: String::new(),
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
-            compaction_llm: None,
+            compaction_provider: None,
             agent_trail_dir: String::new(),
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,
@@ -285,6 +285,9 @@ pub struct AgentLoop {
     /// T2-P1-012：`web_search` 会话级 runtime（HTTP client + cache + model catalog）。
     /// 不注入时 `web_search` 命中返回「未启用」错误，便于独立单测保持最小装配。
     pub(super) web_search_runtime: Option<Arc<crate::core::tools::web_search::WebSearchRuntime>>,
+    /// `todos` 会话级 runtime：持有当前 session 的 base_dir + session_id，统一落盘到
+    /// `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`。不注入时 `todos` 工具只写内存。
+    pub(super) todos_runtime: Option<Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]

@@ -510,6 +510,7 @@ fn h2_chat_mode_todos_tool_persists_and_emits_session_panel() {
     // CHAT 模式下直接调用 todos（无需 enter_planning）。
     let _ = todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,

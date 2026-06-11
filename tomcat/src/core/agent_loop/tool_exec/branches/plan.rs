@@ -37,7 +37,9 @@ pub(in super::super) async fn dispatch_plan_tool(
             }
         }
         "todos" => match serde_json::from_value::<plan_tools::todos::TodosArgs>(args.clone()) {
-            Ok(a) => plan_tools::todos::execute(rt, a),
+            Ok(a) => {
+                plan_tools::todos::execute(rt, ctx.todos_runtime.map(|runtime| runtime.as_ref()), a)
+            }
             Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
         },
         "ask_question" => {

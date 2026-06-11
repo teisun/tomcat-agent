@@ -1,20 +1,18 @@
-//! `TodoRuntime` — per-session todos 持久化（GAP-N12 / G3）。
+//! `TodosRuntime` — per-session todos 持久化（GAP-N12 / G3）。
 //!
 //! 设计口径（plan-runtime.md §G3）：
 //!
 //! - 每个 chat session 持有一份**当前 active TodoFile**，落盘到
-//!   `~/.tomcat/agents/<id>/sessions/<sid>/todos/<todos_id>.todo.md`；
-//! - `TodoRuntime` 不直接管理多文件历史——历史 todos 文件由 `sessions.json` 的
-//!   `activeTodosId` 指针指向当前一个；purge / 切换交由调用方控制。
-//! - 落盘格式：YAML frontmatter（id / session_key / created_at）+ markdown body
+//!   `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`；
+//! - `TodosRuntime` 不管理多文件历史；同一 session 始终覆盖写这一份文件。
+//! - 落盘格式：YAML frontmatter（id / session_id / created_at）+ markdown body
 //!   （`## Todos\n- [ ] id: content` 列表），与 `PlanFile` schema 一致风格；
 //!   解析失败时降级为 in-memory only，**不**阻塞主流程（D 防御）。
 //! - 原子写：先 `<file>.tmp` 再 `rename`，与 [`crate::core::plan_runtime::file_store::atomic_write_string`] 同口径，
 //!   避免半态。
 //!
-//! 当前 P3 实现：暴露纯 `persist` / `load` 接口，由 `tools/todos.rs` 在每次 `execute`
-//! 成功后**异步**调用；activeTodosId 指针与 `sessions.json` 集成由 C 段 chat_loop 装配
-//! 阶段接入。
+//! 当前实现：`ChatContext` 在装配阶段为当前 session 构造一份 `TodosRuntime`，
+//! `tools/todos.rs` 每次成功执行后通过它落盘；未注入时降级为内存-only。
 
 use std::path::{Path, PathBuf};
 
@@ -25,11 +23,9 @@ use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
 pub struct TodoFile {
     /// 该 todos 文件 id（区别于单条 todo 的 id）。
     pub todos_id: String,
-    /// 创建该 todos 文件的 session_key。
-    pub session_key: String,
     /// 可选标题；用于给新 scratchpad 命名。
     pub title: Option<String>,
-    /// 创建时间（RFC3339 字符串），用于 purge / 排序。
+    /// 创建时间（RFC3339 字符串）。
     pub created_at: String,
     /// items 列表。
     pub items: Vec<TodoItem>,
@@ -37,14 +33,9 @@ pub struct TodoFile {
 
 impl TodoFile {
     /// 新建空 TodoFile（`created_at` 自动取当前时间）。
-    pub fn new(
-        todos_id: impl Into<String>,
-        session_key: impl Into<String>,
-        title: Option<String>,
-    ) -> Self {
+    pub fn new(todos_id: impl Into<String>, title: Option<String>) -> Self {
         Self {
             todos_id: todos_id.into(),
-            session_key: session_key.into(),
             title,
             created_at: chrono::Local::now().to_rfc3339(),
             items: Vec::new(),
@@ -52,10 +43,10 @@ impl TodoFile {
     }
 
     /// 序列化为 markdown 文本（YAML frontmatter + body）。
-    pub fn to_markdown(&self) -> String {
+    fn to_markdown(&self, session_id: &str) -> String {
         let mut out = String::from("---\n");
         out.push_str(&format!("todos_id: {}\n", self.todos_id));
-        out.push_str(&format!("session_key: {}\n", self.session_key));
+        out.push_str(&format!("session_id: {}\n", session_id));
         if let Some(title) = &self.title {
             out.push_str(&format!("title: {}\n", title));
         }
@@ -79,73 +70,39 @@ impl TodoFile {
     }
 }
 
-/// 计算 todos 文件路径：`base_dir/sessions/<session_key>/todos/<todos_id>.todo.md`。
-///
-/// `base_dir` 通常为 `resolve_sessions_dir` 的父级（即 `~/.tomcat/agents/<id>`）。
-/// `session_key` 即 `PlanRuntime::session_key()`。
-pub fn todo_path_for(base_dir: &Path, session_key: &str, todos_id: &str) -> PathBuf {
-    base_dir
-        .join("sessions")
-        .join(session_key)
-        .join("todos")
-        .join(format!("{todos_id}.todo.md"))
+/// `todos` 会话级持久化 runtime：持有当前 session 的 base 目录与 session_id。
+#[derive(Debug, Clone)]
+pub struct TodosRuntime {
+    base_dir: PathBuf,
+    session_id: String,
 }
 
-/// 原子写：tmp → rename。父目录不存在时自动创建。
-pub fn persist(base_dir: &Path, file: &TodoFile) -> std::io::Result<PathBuf> {
-    let path = todo_path_for(base_dir, &file.session_key, &file.todos_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+impl TodosRuntime {
+    pub fn new(base_dir: PathBuf, session_id: impl Into<String>) -> Self {
+        Self {
+            base_dir,
+            session_id: session_id.into(),
+        }
     }
-    let tmp = path.with_extension("todo.md.tmp");
-    std::fs::write(&tmp, file.to_markdown())?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
+
+    fn todo_path(&self) -> PathBuf {
+        todo_path_for(&self.base_dir, &self.session_id)
+    }
+
+    /// 原子写：tmp → rename。父目录不存在时自动创建。
+    pub fn persist(&self, file: &TodoFile) -> std::io::Result<PathBuf> {
+        let path = self.todo_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("todo.md.tmp");
+        std::fs::write(&tmp, file.to_markdown(&self.session_id))?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(path)
+    }
 }
 
-/// 列出当前 session 的全部 todos 文件路径（不解析内容；仅做排序与 purge 用）。
-pub fn list_session_todos_files(
-    base_dir: &Path,
-    session_key: &str,
-) -> std::io::Result<Vec<PathBuf>> {
-    let dir = base_dir.join("sessions").join(session_key).join("todos");
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s.ends_with(".todo.md"))
-        {
-            out.push(path);
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// purge：删除除 `keep_id` 之外的所有 inactive todos 文件（GAP-N12 `purge_inactive_on_new_todos`）。
-///
-/// 调用方在生成"新 todos 文件"时按需调用。失败仅 log，不阻塞主流程。
-pub fn purge_inactive(base_dir: &Path, session_key: &str, keep_id: &str) -> std::io::Result<usize> {
-    let files = list_session_todos_files(base_dir, session_key)?;
-    let mut removed = 0;
-    for f in files {
-        let id = f
-            .file_name()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_suffix(".todo.md"))
-            .unwrap_or("");
-        if id == keep_id {
-            continue;
-        }
-        if std::fs::remove_file(&f).is_ok() {
-            removed += 1;
-        }
-    }
-    Ok(removed)
+/// 计算 todos 文件路径：`base_dir/todos/<session_id>.todo.md`。
+pub fn todo_path_for(base_dir: &Path, session_id: &str) -> PathBuf {
+    base_dir.join("todos").join(format!("{session_id}.todo.md"))
 }

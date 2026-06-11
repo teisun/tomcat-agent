@@ -4,7 +4,7 @@ use crate::core::{CheckpointKind, CheckpointMeta, ListOptions};
 use super::parse::ChatCommandOutcome;
 
 pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOutcome {
-    let session_id = match ctx.session.current_session_id() {
+    let session_id = match ctx.session_runtime.session.current_session_id() {
         Ok(Some(v)) => v,
         Ok(None) => {
             println!("暂无当前会话。");
@@ -16,6 +16,7 @@ pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOu
         }
     };
     match ctx
+        .scope_services
         .checkpoint_store
         .list(&session_id, ListOptions { limit })
     {
@@ -43,6 +44,7 @@ pub(crate) fn run_list(ctx: &ChatContext, limit: Option<usize>) -> ChatCommandOu
 
 pub(crate) fn run_show(ctx: &ChatContext, checkpoint_id: String) -> ChatCommandOutcome {
     match ctx
+        .scope_services
         .checkpoint_store
         .show(&crate::core::CheckpointId::new(checkpoint_id.clone()))
     {
@@ -55,6 +57,7 @@ pub(crate) fn run_show(ctx: &ChatContext, checkpoint_id: String) -> ChatCommandO
 
 pub(crate) fn run_diff(ctx: &ChatContext, checkpoint_id: String) -> ChatCommandOutcome {
     match ctx
+        .scope_services
         .checkpoint_store
         .diff(&crate::core::CheckpointId::new(checkpoint_id.clone()))
     {

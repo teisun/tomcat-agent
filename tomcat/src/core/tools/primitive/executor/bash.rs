@@ -30,10 +30,11 @@ use crate::infra::{
     DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_BASH_TIMEOUT_MS, MAX_TOOLS_BASH_TIMEOUT_MS,
 };
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 
 /// 解析「最终生效超时」：调用方覆盖 → executor 注入 → 兜底默认；上限统一 clamp。
 ///
@@ -209,17 +210,43 @@ async fn preflight_command_paths(
 }
 
 /// `spawn_pipe_readers` 的返回类型别名（避开 `clippy::type_complexity`）。
-type PipeReader = tokio::task::JoinHandle<std::io::Result<Vec<u8>>>;
+type PipeReader = tokio::task::JoinHandle<std::io::Result<()>>;
 
-/// 超时分支收尸：Unix 下用 `killpg(-pgid, SIGKILL)` 杀整组（含 sh 的孙子进程），
-/// Windows 退化为 `Child::kill`（CreateProcess + JOB_OBJECT 路径目前不在 Phase-E 范围）。
-/// 调用前提：`Command::process_group(0)`，使 child pid == pgid。
-async fn kill_process_tree(child: &mut Child) {
+/// 主 shell 已退出后，最多再给 reader 的自然收尾窗口。若迟迟拿不到 EOF，基本可判定为
+/// 后台子进程仍攥着 stdout/stderr；此时会 killpg 清理残留并尽快返回。该窗口还会被本次
+/// 调用剩余的 `timeout_ms` 预算再 clamp 一次，避免小超时请求被善后阶段反向拉长。
+const POST_EXIT_DRAIN_GRACE_MS: u64 = 2_000;
+
+/// kill 整个进程组之后，再给 reader 极短 grace 吃到 EOF；若仍未收尾，则 abort reader，
+/// 只回传已缓存的 partial，避免同步 bash 在“已决定放弃完整输出”后再次长时间阻塞。
+const PIPE_DRAIN_GRACE_MS: u64 = 250;
+
+struct PipeReaderState {
+    task: PipeReader,
+    captured: Arc<parking_lot::Mutex<Vec<u8>>>,
+}
+
+impl PipeReaderState {
+    fn snapshot(&self) -> Vec<u8> {
+        self.captured.lock().clone()
+    }
+
+    fn abort(&self) {
+        self.task.abort();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
+
+fn kill_process_group(process_group_id: Option<u32>) {
     #[cfg(unix)]
     {
-        if let Some(pid) = child.id() {
-            // SAFETY: `killpg` 是 POSIX 信号 API，pid 来自当前活着的 child；
-            // 错误码无意义（进程已退也会 ESRCH），下面的 wait 才是收尸的正手。
+        if let Some(pid) = process_group_id {
+            // SAFETY: `killpg` 是 POSIX 信号 API；`pid` 来自同一调用里 spawn 出来的
+            // child pid（也是 pgid）。即便 leader 已退出，向同 pgid 发信号仍能清理
+            // 同组残留子进程；若进程组已不存在，ESRCH 也无副作用。
             unsafe {
                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
             }
@@ -227,6 +254,19 @@ async fn kill_process_tree(child: &mut Child) {
     }
     #[cfg(not(unix))]
     {
+        let _ = process_group_id;
+    }
+}
+
+/// 超时 / 残留清理：Unix 下优先对整组 `killpg`（含 sh 的孙子进程），Windows 退化为
+/// `Child::kill`（CreateProcess + JOB_OBJECT 路径目前不在 Phase-E 范围）。
+/// 调用前提：`Command::process_group(0)`，使 child pid == pgid，便于按进程组收口。
+async fn kill_process_tree(child: &mut Child, process_group_id: Option<u32>) {
+    #[cfg(unix)]
+    kill_process_group(process_group_id);
+    #[cfg(not(unix))]
+    {
+        let _ = process_group_id;
         let _ = child.kill().await;
     }
     // 不论平台，wait 一次确保子进程被回收，避免僵尸 + 让 reader 端拿到 EOF。
@@ -239,26 +279,98 @@ async fn kill_process_tree(child: &mut Child) {
 /// `EndTruncatingAccumulator`）。reader 任务内部不依赖 `Child`，仅持有 `take()` 出来
 /// 的管道 `ChildStdout` / `ChildStderr`，因此 `Child` 仍可被外层 `kill()` 杀掉
 /// （`wait_with_output` 反模式是 `Child` 与 reader 同寿命）。
-fn spawn_pipe_readers(child: &mut Child) -> (PipeReader, PipeReader) {
+fn spawn_one_pipe_reader<R>(reader: Option<R>) -> PipeReaderState
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+{
+    let captured = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_for_task = captured.clone();
+    let task = tokio::spawn(async move {
+        if let Some(stream) = reader {
+            let mut reader = BufReader::new(stream);
+            let mut chunk = vec![0u8; 8192];
+            loop {
+                let n = reader.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                captured_for_task.lock().extend_from_slice(&chunk[..n]);
+            }
+        }
+        Ok(())
+    });
+    PipeReaderState { task, captured }
+}
+
+fn spawn_pipe_readers(child: &mut Child) -> (PipeReaderState, PipeReaderState) {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(s) = stdout {
-            let mut reader = BufReader::new(s);
-            reader.read_to_end(&mut buf).await?;
-        }
-        Ok(buf)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(s) = stderr {
-            let mut reader = BufReader::new(s);
-            reader.read_to_end(&mut buf).await?;
-        }
-        Ok(buf)
-    });
-    (stdout_task, stderr_task)
+    (spawn_one_pipe_reader(stdout), spawn_one_pipe_reader(stderr))
+}
+
+async fn join_pipe_readers(
+    stdout: &mut PipeReaderState,
+    stderr: &mut PipeReaderState,
+) -> (Vec<u8>, Vec<u8>) {
+    let (stdout_res, stderr_res) = tokio::join!(&mut stdout.task, &mut stderr.task);
+    let _ = stdout_res.unwrap_or(Ok(()));
+    let _ = stderr_res.unwrap_or(Ok(()));
+    (stdout.snapshot(), stderr.snapshot())
+}
+
+fn post_exit_drain_grace(deadline: Instant) -> Duration {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_millis(POST_EXIT_DRAIN_GRACE_MS))
+}
+
+async fn try_join_pipe_readers_for(
+    grace: Duration,
+    stdout: &mut PipeReaderState,
+    stderr: &mut PipeReaderState,
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if stdout.is_finished() && stderr.is_finished() {
+        return Some(join_pipe_readers(stdout, stderr).await);
+    }
+    if grace.is_zero() {
+        return None;
+    }
+    timeout(grace, join_pipe_readers(stdout, stderr)).await.ok()
+}
+
+async fn drain_pipe_readers_with_grace(
+    stdout: &mut PipeReaderState,
+    stderr: &mut PipeReaderState,
+    grace: Duration,
+) -> ((Vec<u8>, Vec<u8>), bool) {
+    if let Some(bytes) = try_join_pipe_readers_for(grace, stdout, stderr).await {
+        return (bytes, false);
+    }
+    stdout.abort();
+    stderr.abort();
+    ((stdout.snapshot(), stderr.snapshot()), true)
+}
+
+fn append_output_hint(target: &mut String, hint: &str) {
+    if target.is_empty() {
+        target.push_str(hint);
+    } else {
+        target.push('\n');
+        target.push_str(hint);
+    }
+}
+
+fn lingering_children_hint(reader_aborted: bool) -> String {
+    let mut hint = String::from(
+        "(background child processes kept stdout/stderr open after the main command exited; killed the process group",
+    );
+    if reader_aborted {
+        hint.push_str("; returned best-effort partial output");
+    } else {
+        hint.push_str(" so the foreground bash call could return");
+    }
+    hint.push_str(". If you intended a long-running command, use run_in_background=true)");
+    hint
 }
 
 pub(super) async fn execute_bash_impl(
@@ -364,14 +476,18 @@ pub(super) async fn execute_bash_impl(
             e
         ))
     })?;
+    let process_group_id = child.id();
 
     // 6. 并行 reader（与下面的 wait+timeout 解耦，便于超时分支独立 kill）
-    let (stdout_task, stderr_task) = spawn_pipe_readers(&mut child);
+    let (mut stdout_task, mut stderr_task) = spawn_pipe_readers(&mut child);
 
-    // 6'. tokio::time::timeout 包 child.wait()
+    // 6'. `deadline` 先约束前台 `child.wait()`；一旦主 shell 已退出，reader 只再给一个
+    // 短 grace 等 EOF（且不超过剩余 timeout 预算）。否则 `cmd &` 这类后台残留会把同步
+    // bash 硬拖到完整 timeout_ms，用户体感仍像“卡住了”。
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let wait_fut = child.wait();
     let timed_out;
-    let exit_code: i32 = match timeout(Duration::from_millis(timeout_ms), wait_fut).await {
+    let exit_code: i32 = match timeout_at(deadline, wait_fut).await {
         Ok(Ok(status)) => {
             timed_out = false;
             status.code().unwrap_or(-1)
@@ -379,26 +495,54 @@ pub(super) async fn execute_bash_impl(
         Ok(Err(e)) => {
             // wait 自身错误：杀不杀都没意义（进程已不可达），但保险起见抢救一次。
             let _ = child.kill().await;
+            stdout_task.abort();
+            stderr_task.abort();
             return Err(AppError::Primitive(e.to_string()));
         }
         Err(_elapsed) => {
             // Elapsed: 子进程仍在跑 → kill 整个进程组，再 wait 收口收尸。
             // 单 PID kill 在 `sh -c '...; sleep N'` 场景只杀 sh，sleep 被遗弃、撑住管道。
             timed_out = true;
-            kill_process_tree(&mut child).await;
+            kill_process_tree(&mut child, process_group_id).await;
             -1
         }
     };
 
-    // 取并行 reader 的结果（reader 在子进程退出 / kill 后会读到 EOF）。
-    let stdout_bytes = stdout_task
-        .await
-        .unwrap_or_else(|_| Ok(Vec::new()))
-        .unwrap_or_default();
-    let stderr_bytes = stderr_task
-        .await
-        .unwrap_or_else(|_| Ok(Vec::new()))
-        .unwrap_or_default();
+    let mut lingering_children = false;
+    let reader_aborted;
+    // 取并行 reader 的结果。正常路径只给主 shell 退出后的短 grace；若 reader 仍不收尾，
+    // 说明有同进程组后台子进程在攥着管道写端（典型是 `cmd &`）。此时强制 killpg，
+    // 再给一小段 post-kill grace 收尾，必要时 abort reader 并回传已缓存的 partial。
+    let (stdout_bytes, stderr_bytes) = if timed_out {
+        let ((stdout, stderr), aborted) = drain_pipe_readers_with_grace(
+            &mut stdout_task,
+            &mut stderr_task,
+            Duration::from_millis(PIPE_DRAIN_GRACE_MS),
+        )
+        .await;
+        reader_aborted = aborted;
+        (stdout, stderr)
+    } else if let Some((stdout, stderr)) = try_join_pipe_readers_for(
+        post_exit_drain_grace(deadline),
+        &mut stdout_task,
+        &mut stderr_task,
+    )
+    .await
+    {
+        reader_aborted = false;
+        (stdout, stderr)
+    } else {
+        lingering_children = true;
+        kill_process_group(process_group_id);
+        let ((stdout, stderr), aborted) = drain_pipe_readers_with_grace(
+            &mut stdout_task,
+            &mut stderr_task,
+            Duration::from_millis(PIPE_DRAIN_GRACE_MS),
+        )
+        .await;
+        reader_aborted = aborted;
+        (stdout, stderr)
+    };
 
     let raw_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     let raw_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
@@ -425,12 +569,11 @@ pub(super) async fn execute_bash_impl(
             "(timed out after {} ms; child killed; partial output above)",
             timeout_ms
         );
-        if stderr.is_empty() {
-            stderr = hint;
-        } else {
-            stderr.push('\n');
-            stderr.push_str(&hint);
-        }
+        append_output_hint(&mut stderr, &hint);
+    }
+    if lingering_children {
+        let hint = lingering_children_hint(reader_aborted);
+        append_output_hint(&mut stderr, &hint);
     }
     if truncated {
         let mut hint = format!(
@@ -441,12 +584,7 @@ pub(super) async fn execute_bash_impl(
         if let Some(ref p) = persisted_output_path {
             hint.push_str(&format!("; full output persisted to {}", p));
         }
-        if stdout.is_empty() {
-            stdout = hint;
-        } else {
-            stdout.push('\n');
-            stdout.push_str(&hint);
-        }
+        append_output_hint(&mut stdout, &hint);
     }
 
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -456,9 +594,11 @@ pub(super) async fn execute_bash_impl(
         user_approved: true,
         success: !timed_out && exit_code == 0,
         detail: Some(format!(
-            "exit_code={} timed_out={} truncated={} stdout_len={} stderr_len={} timeout_ms={} persisted={}",
+            "exit_code={} timed_out={} lingering_children={} reader_aborted={} truncated={} stdout_len={} stderr_len={} timeout_ms={} persisted={}",
             exit_code,
             timed_out,
+            lingering_children,
+            reader_aborted,
             truncated,
             stdout.len(),
             stderr.len(),

@@ -585,9 +585,9 @@ impl OpenAiFilesRuntime {
         &self.client
     }
 
-    pub fn registry_path_for_session(sessions_dir: &Path, session_key: &str) -> PathBuf {
-        let mut safe = String::with_capacity(session_key.len());
-        for ch in session_key.chars() {
+    pub fn registry_path_for_session(sessions_dir: &Path, session_id: &str) -> PathBuf {
+        let mut safe = String::with_capacity(session_id.len());
+        for ch in session_id.chars() {
             if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
                 safe.push(ch);
             } else {
@@ -981,13 +981,13 @@ pub fn build_runtime_for_provider(
     provider: &dyn LlmProvider,
     files_cfg: &LlmFilesConfig,
     sessions_dir: &Path,
-    session_key: &str,
+    session_id: &str,
 ) -> Option<OpenAiFilesRuntime> {
     if !provider.supports_openai_files_api() {
         return None;
     }
     let client = provider.openai_files_client(files_cfg)?;
-    let registry_path = OpenAiFilesRuntime::registry_path_for_session(sessions_dir, session_key);
+    let registry_path = OpenAiFilesRuntime::registry_path_for_session(sessions_dir, session_id);
     Some(OpenAiFilesRuntime::new(client, registry_path))
 }
 

@@ -13,6 +13,7 @@
 //! `transcript_mutate_test` 四个文件。
 
 mod resume_index_test;
+mod scope_test;
 mod store_test;
 mod transcript_header_test;
 mod transcript_lookup_test;

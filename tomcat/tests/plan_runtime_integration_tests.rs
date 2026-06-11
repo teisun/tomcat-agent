@@ -540,6 +540,7 @@ async fn todos_always_writes_session_never_plan_file() {
     // CHAT 模式：todos 走 session scratchpad
     todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -557,6 +558,7 @@ async fn todos_always_writes_session_never_plan_file() {
     // 闸门：把 session todo 收口为 completed，build 闸门才允许放行
     todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,
@@ -591,6 +593,7 @@ async fn todos_always_writes_session_never_plan_file() {
     let n_before = rt.snapshot_session_todos().len();
     todos::execute(
         &rt,
+        None,
         todos::TodosArgs {
             new_todos: false,
             title: None,

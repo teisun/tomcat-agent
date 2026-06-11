@@ -215,8 +215,8 @@ fn install_fixed_resolver(
     provider: Arc<dyn LlmProvider>,
     default_model: &str,
 ) {
-    ctx.llm = provider.clone();
-    ctx.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
+    ctx.global_services.llm = provider.clone();
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, default_model));
 }
 
 struct DeterministicMockPrimitive;
@@ -387,8 +387,15 @@ fn deterministic_chat_context_fixture_with_config(
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    let session_key = ctx.session.current_session_key().to_string();
-    ctx.session.create_session(&session_key, None).unwrap();
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
+    ctx.session_runtime
+        .session
+        .create_session(&session_key, None)
+        .unwrap();
     (dir, ctx)
 }
 
@@ -3946,11 +3953,18 @@ async fn test_failed_turn_append_invariant_allows_next_turn_in_same_process() {
         cli_text_stream("RECOVER_OK"),
     ]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
-    ctx.primitive = Arc::new(DeterministicMockPrimitive);
-    ctx.message_append_sink = Arc::new(CliInjectAppendInvariantSink::new(ctx.session.clone()));
+    ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
+    ctx.session_runtime.message_append_sink = Arc::new(CliInjectAppendInvariantSink::new(
+        ctx.session_runtime.session.clone(),
+    ));
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
 
     info!("Act: 第一轮触发 append_message_chain invariant");
     let first = tokio::time::timeout(
@@ -4036,11 +4050,16 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
         "CONTINUE_OK",
     )]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
-    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+    ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
-    seed_dangling_tool_round(&ctx.session, "call_tail");
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    seed_dangling_tool_round(&ctx.session_runtime.session, "call_tail");
 
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -4081,6 +4100,7 @@ async fn test_preturn_append_invariant_heals_and_continues_same_input() {
     );
 
     let transcript_path = ctx
+        .session_runtime
         .session
         .current_transcript_path()
         .expect("current_transcript_path")
@@ -4130,11 +4150,16 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
         "CONTINUE_ONCE",
     )]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
-    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+    ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
-    seed_dangling_tool_round(&ctx.session, "call_once");
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    seed_dangling_tool_round(&ctx.session_runtime.session, "call_once");
 
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -4162,6 +4187,7 @@ async fn test_preturn_append_invariant_recovers_without_user_reinput() {
     }
 
     let transcript_path = ctx
+        .session_runtime
         .session
         .current_transcript_path()
         .expect("current_transcript_path")
@@ -4196,10 +4222,15 @@ async fn test_cli_chat_path_retries_gateway_503_and_recovers_same_turn() {
         cli_text_stream("CLI_RETRY_OK"),
     ]));
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
-    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+    ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4250,10 +4281,15 @@ async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn
         ))],
     ]));
     install_fixed_resolver(&mut ctx, failing_llm, "gpt-5.4");
-    ctx.primitive = Arc::new(DeterministicMockPrimitive);
+    ctx.global_services.primitive = Arc::new(DeterministicMockPrimitive);
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4334,7 +4370,12 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4364,6 +4405,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
     assert_eq!(assistant.error_code.as_deref(), Some("server_error"));
 
     let transcript_path = ctx
+        .session_runtime
         .session
         .current_transcript_path()
         .expect("current_transcript_path")
@@ -4435,7 +4477,12 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
     install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4493,7 +4540,8 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![]));
     install_fixed_resolver(&mut ctx, mock_llm, "deepseek-v4-pro");
-    ctx.follow_up_queue
+    ctx.session_runtime
+        .follow_up_queue
         .lock()
         .push(ChatMessage::user_with_parts(vec![
             tomcat::ChatMessageContentPart::text("请分析这张图"),
@@ -4501,7 +4549,12 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
         ]));
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(&ctx, "", system_text, &mut state, CancellationToken::new()),
@@ -4544,7 +4597,7 @@ async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
 
     let metrics_payloads: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let payloads_for_listener = Arc::clone(&metrics_payloads);
-    ctx.event_bus.on(
+    ctx.global_services.event_bus.on(
         tomcat::wire::WIRE_CONTEXT_METRICS_UPDATE,
         Box::new(move |event| {
             payloads_for_listener
@@ -4556,7 +4609,12 @@ async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
     );
 
     let system_text = "system prompt";
-    let mut state = init_context_state(&ctx.session, &ctx.config.context, system_text).unwrap();
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
     let first = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         run_chat_turn(
@@ -4592,12 +4650,14 @@ async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
         "第一轮应至少发出一次 ContextMetricsUpdate"
     );
 
-    ctx.session
+    ctx.session_runtime
+        .session
         .switch_current_model(Some("openai"), Some("gpt-5.2"))
         .expect("model switch should succeed");
     assert_eq!(
-        ctx.session
-            .get_session(ctx.session.current_session_key())
+        ctx.session_runtime
+            .session
+            .get_session(ctx.session_runtime.session.current_session_key())
             .expect("session read")
             .and_then(|entry| entry.model_override),
         Some("gpt-5.2".to_string())
@@ -4678,14 +4738,16 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     }
 
     let ctx = ChatContext::from_config(cfg.clone()).expect("chat context should be created");
-    ctx.session
+    ctx.session_runtime
+        .session
         .switch_current_model(Some("deepseek"), Some("deepseek-v4-pro"))
         .expect("session model override should persist");
 
     let reopened = ChatContext::from_config(cfg).expect("reopened chat context");
     let entry = reopened
+        .session_runtime
         .session
-        .get_session(reopened.session.current_session_key())
+        .get_session(reopened.session_runtime.session.current_session_key())
         .expect("session store read")
         .expect("session entry should exist");
     assert_eq!(entry.model_override.as_deref(), Some("deepseek-v4-pro"));

@@ -16,6 +16,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   checkpoint_integration_tests
   chat_git_preflight_tests
   session_tests
+  session_concurrency_tests
   plugin_tests
   llm_tests
   openai_responses_integration_tests

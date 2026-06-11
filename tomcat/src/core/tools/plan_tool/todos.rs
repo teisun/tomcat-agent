@@ -3,7 +3,7 @@
 //! 语义（2026-05 D 方案最终态）：
 //! - 任何模式可见；返回完整 items snapshot + applied 计数。
 //! - **所有模式（含 EXEC）**：写 session 本地 `Vec<TodoItem>`（`PlanRuntime.session_todos`）
-//!   并落盘 session TodoFile（G3 持久化在 `todo_runtime.rs` 接管）。
+//!   并在注入了 `TodosRuntime` 时落盘到 agent 级 `todos/<session_id>.todo.md`。
 //! - **绝不**写入 `PlanFile.frontmatter.todos[]`——推进 PlanFile 由 `update_plan` 负责。
 
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::core::plan_runtime::{
     file_store::TodoStatus,
     state::PlanState,
-    todo_runtime::{self, TodoFile},
+    todo_runtime::{TodoFile, TodosRuntime},
     PlanRuntime,
 };
 
@@ -48,15 +48,18 @@ impl TodosArgs {
     }
 }
 
-pub fn execute(runtime: &PlanRuntime, args: TodosArgs) -> Result<serde_json::Value, ToolError> {
+pub fn execute(
+    runtime: &PlanRuntime,
+    todos_runtime: Option<&TodosRuntime>,
+    args: TodosArgs,
+) -> Result<serde_json::Value, ToolError> {
     let mode = runtime.mode();
-    // D 方案：所有模式（含 EXEC）都走 session TodoFile；PlanFile 推进由 update_plan 负责。
-    let _ = &mode;
-    session_path(runtime, args, mode)
+    session_path(runtime, todos_runtime, args, mode)
 }
 
 fn session_path(
     runtime: &PlanRuntime,
+    todos_runtime: Option<&TodosRuntime>,
     args: TodosArgs,
     mode: PlanState,
 ) -> Result<serde_json::Value, ToolError> {
@@ -68,32 +71,21 @@ fn session_path(
     apply_shared_todo_ops(&mut todos, &args.ops, args.replace)?;
     runtime.replace_session_todos(todos.clone());
 
-    // G3：若 ChatContext 已注入 todos_persist_base，落盘到
-    // `<base>/sessions/<session_key>/todos/<active_todos_id>.todo.md`。
+    // G3：若 ChatContext 已注入 TodosRuntime，覆盖写
+    // `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`。
     // 持久化失败仅日志，不阻塞主流程（D 防御：磁盘异常不影响 in-memory 推进）。
     let mut persisted_path: Option<String> = None;
-    let active_todos_id = if runtime.todos_persist_base().is_some() {
-        Some(if args.new_todos {
-            runtime.rotate_active_todos_id()
-        } else {
-            runtime.ensure_active_todos_id()
-        })
+    let active_todos_id = if args.new_todos {
+        runtime.rotate_active_todos_id()
     } else {
-        None
+        runtime.ensure_active_todos_id()
     };
-    if let (Some(base), Some(id)) = (runtime.todos_persist_base(), active_todos_id.clone()) {
-        let mut file = TodoFile::new(id.clone(), runtime.session_key(), args.title.clone());
+    if let Some(todos_runtime) = todos_runtime {
+        let mut file = TodoFile::new(active_todos_id.clone(), args.title.clone());
         file.items = todos.clone();
-        match todo_runtime::persist(&base, &file) {
+        match todos_runtime.persist(&file) {
             Ok(p) => {
                 persisted_path = Some(p.display().to_string());
-                if args.new_todos {
-                    if let Err(e) = todo_runtime::purge_inactive(&base, runtime.session_key(), &id)
-                    {
-                        tracing::warn!(target: "plan_runtime::todos",
-                            "清理旧 todos 文件失败（仅警告，不阻塞）：{e}");
-                    }
-                }
             }
             Err(e) => tracing::warn!(target: "plan_runtime::todos",
                 "持久化 session todos 失败（仅警告，不阻塞）：{e}"),
@@ -116,9 +108,7 @@ fn session_path(
     if let Some(title) = args.title {
         out["title"] = serde_json::Value::String(title);
     }
-    if let Some(id) = active_todos_id {
-        out["active_todos_id"] = serde_json::Value::String(id);
-    }
+    out["active_todos_id"] = serde_json::Value::String(active_todos_id);
     if let Some(p) = persisted_path {
         out["persisted_path"] = serde_json::Value::String(p);
     }

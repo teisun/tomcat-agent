@@ -163,7 +163,7 @@ fn run_plan_build_returns_continue_for_existing_plan() {
     }
 
     assert!(
-        matches!(ctx.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-001"),
+        matches!(ctx.session_runtime.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-001"),
         "build 成功后 runtime 应切到 Executing"
     );
 }
@@ -206,7 +206,8 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
         body: "## Draft\n- build the release\n".to_string(),
     };
     file_store::write_plan(&plan_path, &plan, DEFAULT_LOCK_TIMEOUT_MS).expect("write plan");
-    ctx.plan_runtime
+    ctx.session_runtime
+        .plan_runtime
         .set_active_planning_plan(plan_id.to_string(), plan_path.clone());
 
     let outcome = run(&ctx, PlanCommand::Build { plan_target: None });
@@ -224,7 +225,7 @@ fn run_plan_build_without_target_uses_runtime_default_source() {
         ChatCommandOutcome::Handled => panic!("/plan build 默认源成功时不应被当作 handled"),
     }
     assert!(
-        matches!(ctx.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-default")
+        matches!(ctx.session_runtime.plan_runtime.mode(), PlanState::Executing { ref plan_id } if plan_id == "ship-default")
     );
 }
 
@@ -243,9 +244,14 @@ fn run_plan_exit_allows_pending_back_to_chat() {
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(API_ENV.to_string());
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
-    ctx.plan_runtime.set_mode_pending("pending-plan".into());
+    ctx.session_runtime
+        .plan_runtime
+        .set_mode_pending("pending-plan".into());
 
     let outcome = run(&ctx, PlanCommand::Exit);
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
-    assert!(matches!(ctx.plan_runtime.mode(), PlanState::Chat));
+    assert!(matches!(
+        ctx.session_runtime.plan_runtime.mode(),
+        PlanState::Chat
+    ));
 }

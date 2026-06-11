@@ -1,6 +1,6 @@
 use std::io::{self, Write as IoWrite};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::OnceLock;
 
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -15,52 +15,22 @@ use crate::infra::{
 };
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
-    resolve_workspace_roots_paths, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry,
-    LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, Tool, ToolExecutor, ToolRegistry,
+    resolve_workspace_roots_paths, session_key_for_agent, AppConfig, DefaultPrimitiveExecutor,
+    DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
+    Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::llm::LlmScene;
 use crate::core::plan_runtime;
 
+use super::session_runtime::{GlobalServices, ScopeServices, SessionRuntime};
 use super::{panels, permission};
 
 pub struct ChatContext {
-    pub session: SessionManager,
-    pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
-    pub llm: Arc<dyn LlmProvider>,
-    pub model_catalog: Arc<crate::core::llm::ModelCatalog>,
-    pub llm_resolver: Arc<dyn crate::core::llm::LlmResolver>,
+    pub global_services: GlobalServices,
+    pub scope_services: ScopeServices,
+    pub session_runtime: SessionRuntime,
     pub config: AppConfig,
-    pub primitive: Arc<dyn PrimitiveExecutor>,
-    pub tool_registry: Arc<dyn ToolRegistry>,
-    pub event_bus: Arc<dyn EventBus>,
-    pub audit: Arc<dyn AuditRecorder>,
-    pub checkpoint_switcher: Arc<crate::core::SwitchingCheckpointStore>,
-    pub checkpoint_store: Arc<dyn crate::core::CheckpointStore>,
-    pub cancel_token: Arc<Mutex<CancellationToken>>,
-    pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
-    pub agent_workspace_dir: std::path::PathBuf,
-    pub agent_definition_dir: std::path::PathBuf,
-    pub agent_trail_dir: std::path::PathBuf,
-    pub cfg_path: std::path::PathBuf,
-    pub session_grants: crate::core::permission::SessionGrants,
-    pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
-    pub bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
-    pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
-    pub completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes,
-    pub delivered_completion:
-        Arc<Mutex<std::collections::HashSet<crate::core::tools::primitive::BashTaskId>>>,
-    pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    pub gate: Arc<dyn crate::core::permission::PermissionGate>,
-    pub read_file_state: Arc<crate::core::tools::pipeline::read_state::ReadFileState>,
-    pub thinking_display: Arc<std::sync::atomic::AtomicU8>,
-    pub openai_files_runtime: Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
-    pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
-    pub web_search_runtime: Arc<crate::core::tools::web_search::WebSearchRuntime>,
-    pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
-    pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
-    pub skill_discovery_handle:
-        Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<crate::core::skill::SkillSet>>>>,
     pub agent_registry: Arc<crate::core::agent_registry::AgentRegistry>,
     _root_agent_guard: crate::core::agent_registry::RegistrationGuard,
 }
@@ -87,34 +57,136 @@ fn git_available_for_checkpoints() -> bool {
         .unwrap_or(false)
 }
 
+fn resolve_agent_workspace_dir(
+    session_entry: &SessionEntry,
+    agent_definition_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    if let Some(cwd) = session_entry.cwd.as_deref() {
+        let path = std::path::PathBuf::from(cwd);
+        if path.exists() {
+            return path;
+        }
+        warn!(
+            cwd = %cwd,
+            "session cwd no longer exists; falling back to current shell directory"
+        );
+    }
+    std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.to_path_buf())
+}
+
+fn resolve_child_agent_compaction_runtime(
+    llm_resolver: &dyn crate::core::llm::LlmResolver,
+    base_context_config: &crate::infra::config::ContextConfig,
+    entry: Option<&SessionEntry>,
+) -> (
+    crate::infra::config::ContextConfig,
+    Option<Arc<dyn LlmProvider>>,
+) {
+    let mut context_config = base_context_config.clone();
+    let session_override = entry
+        .and_then(|e| e.model_override.as_deref())
+        .filter(|model| !model.trim().is_empty());
+    match llm_resolver.resolve(LlmScene::Compaction, session_override) {
+        Ok(call) => {
+            context_config.compaction_model = call.model;
+            (context_config, Some(call.provider_impl))
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to resolve child-agent compaction runtime; falling back to main provider"
+            );
+            (context_config, None)
+        }
+    }
+}
+
+fn checkpoint_store_cache() -> &'static RwLock<
+    std::collections::HashMap<
+        std::path::PathBuf,
+        std::sync::Weak<crate::core::SwitchingCheckpointStore>,
+    >,
+> {
+    static CACHE: OnceLock<
+        RwLock<
+            std::collections::HashMap<
+                std::path::PathBuf,
+                std::sync::Weak<crate::core::SwitchingCheckpointStore>,
+            >,
+        >,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+fn checkpoint_store_for(
+    agent_trail_dir: std::path::PathBuf,
+    work_tree: std::path::PathBuf,
+) -> Arc<crate::core::SwitchingCheckpointStore> {
+    let key = std::fs::canonicalize(&work_tree).unwrap_or(work_tree);
+    if let Some(existing) = checkpoint_store_cache()
+        .read()
+        .get(&key)
+        .and_then(std::sync::Weak::upgrade)
+    {
+        return existing;
+    }
+
+    let mut cache = checkpoint_store_cache().write();
+    if let Some(existing) = cache.get(&key).and_then(std::sync::Weak::upgrade) {
+        return existing;
+    }
+    let store = Arc::new(crate::core::SwitchingCheckpointStore::new(
+        agent_trail_dir,
+        key.clone(),
+        git_available_for_checkpoints(),
+    ));
+    cache.insert(key, Arc::downgrade(&store));
+    store
+}
+
 impl ChatContext {
     pub fn from_config(config: AppConfig) -> Result<Self, AppError> {
-        Self::from_config_with_overrides(config, ChatContextOverrides::default())
+        Self::from_config_with_mode_and_overrides(
+            config,
+            SessionMode::Claw,
+            ChatContextOverrides::default(),
+        )
+    }
+
+    pub fn from_config_with_mode(config: AppConfig, mode: SessionMode) -> Result<Self, AppError> {
+        Self::from_config_with_mode_and_overrides(config, mode, ChatContextOverrides::default())
     }
 
     pub fn from_config_with_overrides(
         config: AppConfig,
         overrides: ChatContextOverrides,
     ) -> Result<Self, AppError> {
+        Self::from_config_with_mode_and_overrides(config, SessionMode::Claw, overrides)
+    }
+
+    pub fn from_config_with_mode_and_overrides(
+        config: AppConfig,
+        mode: SessionMode,
+        overrides: ChatContextOverrides,
+    ) -> Result<Self, AppError> {
         let sessions_path = resolve_sessions_dir(&config)?;
         let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
-        let session = SessionManager::new(sessions_path);
+        let cwd_for_key = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let session_key = session_key_for_agent(&config.agent.id, mode, &cwd_for_key);
+        let session = SessionManager::new_scoped(sessions_path, session_key);
         let message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink> =
             Arc::new(session.clone());
-        let session_cwd = std::env::current_dir()
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-        let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
-
+        let session_cwd = Some(cwd_for_key.to_string_lossy().to_string());
         let agent_definition_dir = resolve_agent_definition_dir(&config)?;
         std::fs::create_dir_all(&agent_definition_dir).map_err(AppError::Io)?;
         let agent_trail_dir = resolve_agent_trail_dir(&config)?;
         std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
+        let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
         let agent_workspace_dir =
-            std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.clone());
+            resolve_agent_workspace_dir(&current_session_entry, &agent_definition_dir);
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
@@ -135,7 +207,7 @@ impl ChatContext {
             llm.as_ref(),
             &config.llm.files,
             session.sessions_dir(),
-            session.current_session_key(),
+            &current_session_entry.session_id,
         )
         .map(Arc::new);
 
@@ -206,11 +278,8 @@ impl ChatContext {
                 Err(_) => None,
             };
 
-        let checkpoint_switcher = Arc::new(crate::core::SwitchingCheckpointStore::new(
-            agent_trail_dir.clone(),
-            agent_workspace_dir.clone(),
-            git_available_for_checkpoints(),
-        ));
+        let checkpoint_switcher =
+            checkpoint_store_for(agent_trail_dir.clone(), agent_workspace_dir.clone());
         let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
 
         let tool_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
@@ -247,6 +316,10 @@ impl ChatContext {
 
         let initial_thinking_display = resolve_initial_thinking_display(&config.llm.thinking);
 
+        let todos_runtime = Arc::new(plan_runtime::todo_runtime::TodosRuntime::new(
+            agent_trail_dir.clone(),
+            current_session_entry.session_id.clone(),
+        ));
         let plan_runtime = plan_runtime::PlanRuntime::new_with_session_id(
             session.current_session_key(),
             current_session_entry.session_id.clone(),
@@ -255,7 +328,6 @@ impl ChatContext {
             .ask_question_panel
             .unwrap_or_else(|| Arc::new(panels::CliAskQuestionPanel));
         plan_runtime.set_ask_question_timeout_ms(Some(config.ask_question.timeout_ms));
-        plan_runtime.set_todos_persist_base(Some(agent_trail_dir.clone()));
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
@@ -281,6 +353,12 @@ impl ChatContext {
             .model_override
             .clone()
             .unwrap_or_else(|| config.llm.default_model.clone());
+        let (child_agent_context_config, child_agent_compaction_provider) =
+            resolve_child_agent_compaction_runtime(
+                llm_resolver.as_ref(),
+                &config.context,
+                Some(&current_session_entry),
+            );
         let read_file_state =
             Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
         let prod_reviewer = plan_runtime::prod_reviewer::ProdReviewerDispatcher::new(
@@ -289,11 +367,12 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm: llm.clone(),
+                compaction_provider: child_agent_compaction_provider.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: config.context.clone(),
+                context_config: child_agent_context_config.clone(),
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
@@ -311,11 +390,12 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm: llm.clone(),
+                compaction_provider: child_agent_compaction_provider.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: config.context.clone(),
+                context_config: child_agent_context_config.clone(),
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
@@ -328,8 +408,12 @@ impl ChatContext {
         plan_runtime.attach_verifier(Arc::new(prod_verifier));
 
         {
+            let appender_session_key = session.current_session_key().to_string();
             plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
-                let sm = SessionManager::new(sessions_path_for_appender.clone());
+                let sm = SessionManager::new_scoped(
+                    sessions_path_for_appender.clone(),
+                    appender_session_key.clone(),
+                );
                 sm.append_custom_entry(extra)
             }));
         }
@@ -338,43 +422,55 @@ impl ChatContext {
             warn!(error = %err, "plan_runtime recover failed; continuing with Chat mode");
         }
 
+        let thinking_display = Arc::new(std::sync::atomic::AtomicU8::new(
+            initial_thinking_display.as_u8(),
+        ));
+        let global_services = GlobalServices {
+            llm: llm.clone(),
+            model_catalog: model_catalog.clone(),
+            llm_resolver: llm_resolver.clone(),
+            primitive: primitive.clone(),
+            tool_registry: tool_registry.clone(),
+            event_bus: event_bus.clone(),
+            audit: audit.clone(),
+            gate: gate.clone(),
+            config_backend: config_backend.clone(),
+            web_fetch_runtime: web_fetch_runtime.clone(),
+            web_search_runtime: web_search_runtime.clone(),
+        };
+        let scope_services = ScopeServices {
+            checkpoint_switcher: checkpoint_switcher.clone(),
+            checkpoint_store: checkpoint_store.clone(),
+            agent_workspace_dir: agent_workspace_dir.clone(),
+            agent_definition_dir: agent_definition_dir.clone(),
+            agent_trail_dir: agent_trail_dir.clone(),
+            cfg_path: cfg_path_snapshot.clone(),
+            skill_set: skill_set.clone(),
+            skill_discovery_handle: skill_discovery_handle.clone(),
+        };
+        let session_runtime = SessionRuntime {
+            session: session.clone(),
+            message_append_sink: message_append_sink.clone(),
+            cancel_token: cancel_token.clone(),
+            last_interrupt_at: last_interrupt_at.clone(),
+            session_grants: session_grants.clone(),
+            bash_task_registry: bash_task_registry.clone(),
+            follow_up_queue: follow_up_queue.clone(),
+            completion_routes: completion_routes.clone(),
+            delivered_completion: delivered_completion.clone(),
+            completion_subscriber_handle: completion_subscriber_handle.clone(),
+            read_file_state: read_file_state.clone(),
+            thinking_display: thinking_display.clone(),
+            openai_files_runtime: openai_files_runtime.clone(),
+            todos_runtime: todos_runtime.clone(),
+            plan_runtime: plan_runtime.clone(),
+        };
+
         Ok(Self {
-            session,
-            message_append_sink,
-            llm,
-            model_catalog,
-            llm_resolver,
+            global_services,
+            scope_services,
+            session_runtime,
             config,
-            primitive,
-            tool_registry,
-            event_bus,
-            audit,
-            checkpoint_switcher,
-            checkpoint_store,
-            cancel_token,
-            last_interrupt_at,
-            agent_workspace_dir,
-            agent_definition_dir,
-            agent_trail_dir,
-            cfg_path: cfg_path_snapshot,
-            session_grants,
-            config_backend,
-            bash_task_registry,
-            follow_up_queue,
-            completion_routes,
-            delivered_completion,
-            completion_subscriber_handle,
-            gate,
-            read_file_state,
-            thinking_display: Arc::new(std::sync::atomic::AtomicU8::new(
-                initial_thinking_display.as_u8(),
-            )),
-            openai_files_runtime,
-            web_fetch_runtime,
-            web_search_runtime,
-            plan_runtime,
-            skill_set,
-            skill_discovery_handle,
             agent_registry,
             _root_agent_guard: root_agent_guard,
         })
@@ -396,51 +492,69 @@ impl ChatContext {
         let session_override = entry
             .and_then(|e| e.model_override.as_deref())
             .filter(|model| !model.trim().is_empty());
-        self.llm_resolver.resolve(scene, session_override)
+        self.global_services
+            .llm_resolver
+            .resolve(scene, session_override)
     }
 
     pub(crate) fn openai_files_runtime_for(
         &self,
         provider: &dyn LlmProvider,
     ) -> Option<Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>> {
+        let session_id = self
+            .session_runtime
+            .session
+            .current_session_id()
+            .ok()
+            .flatten()?;
         crate::core::llm::openai_files::build_runtime_for_provider(
             provider,
             &self.config.llm.files,
-            self.session.sessions_dir(),
-            self.session.current_session_key(),
+            self.session_runtime.session.sessions_dir(),
+            &session_id,
         )
         .map(Arc::new)
     }
 
     pub(crate) fn shutdown_completion_subscriber(&self) {
-        if let Some(handle) = self.completion_subscriber_handle.lock().take() {
+        if let Some(handle) = self
+            .session_runtime
+            .completion_subscriber_handle
+            .lock()
+            .take()
+        {
             handle.abort();
         }
     }
 
     pub(crate) fn skill_set_snapshot(&self) -> crate::core::skill::SkillSet {
-        self.skill_set.read().clone()
+        self.scope_services.skill_set.read().clone()
     }
 
     pub(crate) async fn spawn_skill_discovery_if_needed(&self) {
-        if !self.config.skills.enabled || !self.skill_set.read().is_empty() {
+        if !self.config.skills.enabled || !self.scope_services.skill_set.read().is_empty() {
             return;
         }
-        let mut handle = self.skill_discovery_handle.lock().await;
+        let mut handle = self.scope_services.skill_discovery_handle.lock().await;
         if handle.is_none() {
             *handle = Some(crate::core::skill::spawn_discovery_task(
                 self.config.clone(),
-                self.agent_workspace_dir.clone(),
+                self.scope_services.agent_workspace_dir.clone(),
             ));
         }
     }
 
     pub(crate) async fn await_skill_discovery(&self) -> crate::core::skill::SkillSet {
-        let handle = self.skill_discovery_handle.lock().await.take();
+        let handle = self
+            .scope_services
+            .skill_discovery_handle
+            .lock()
+            .await
+            .take();
         if let Some(handle) = handle {
             match handle.await {
                 Ok(skill_set) => {
-                    *self.skill_set.write() = skill_set.clone();
+                    *self.scope_services.skill_set.write() = skill_set.clone();
                     skill_set
                 }
                 Err(error) => {
@@ -448,7 +562,7 @@ impl ChatContext {
                     failed
                         .warnings
                         .push(format!("skills_discovery_join_failed:{error}"));
-                    *self.skill_set.write() = failed.clone();
+                    *self.scope_services.skill_set.write() = failed.clone();
                     failed
                 }
             }
@@ -458,15 +572,21 @@ impl ChatContext {
     }
 
     pub(crate) async fn reload_skill_set(&self) -> crate::core::skill::SkillSet {
-        if let Some(handle) = self.skill_discovery_handle.lock().await.take() {
+        if let Some(handle) = self
+            .scope_services
+            .skill_discovery_handle
+            .lock()
+            .await
+            .take()
+        {
             handle.abort();
         }
         let skill_set = if self.config.skills.enabled {
-            crate::core::skill::discover(&self.config, &self.agent_workspace_dir)
+            crate::core::skill::discover(&self.config, &self.scope_services.agent_workspace_dir)
         } else {
             crate::core::skill::SkillSet::default()
         };
-        *self.skill_set.write() = skill_set.clone();
+        *self.scope_services.skill_set.write() = skill_set.clone();
         skill_set
     }
 }
@@ -628,5 +748,101 @@ fn migrate_legacy_layer0_tool_results(
             }
             let _ = std::fs::rename(&from, &to);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serial_test::serial;
+
+    use super::resolve_child_agent_compaction_runtime;
+    use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
+    use crate::AppConfig;
+
+    #[test]
+    #[serial(env_lock)]
+    fn child_agent_compaction_runtime_preserves_resolved_model_provider_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        let mut cfg = AppConfig::default();
+        cfg.context.compaction_model = "deepseek-v4-pro".to_string();
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver: Arc<dyn LlmResolver> =
+            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "stub");
+        }
+
+        let (context_config, provider) =
+            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
+        assert!(
+            provider.is_some(),
+            "应把解析成功的 compaction provider 注入给子 Agent"
+        );
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+    }
+
+    #[test]
+    #[serial(env_lock)]
+    fn child_agent_compaction_runtime_preserves_fallback_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        let mut cfg = AppConfig::default();
+        cfg.llm.default_model = "deepseek-v4-pro".to_string();
+        cfg.context.compaction_model = "gpt-5.4".to_string();
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver: Arc<dyn LlmResolver> =
+            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "stub");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let (context_config, provider) =
+            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
+        assert!(
+            provider.is_some(),
+            "fallback 成功时也应把 fallback 后的 provider 一起注入"
+        );
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+    }
+
+    #[test]
+    #[serial(env_lock)]
+    fn child_agent_compaction_runtime_keeps_compat_fallback_boundary_when_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        let mut cfg = AppConfig::default();
+        cfg.llm.default_model = "deepseek-v4-pro".to_string();
+        cfg.context.compaction_model = "gpt-5.4".to_string();
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver: Arc<dyn LlmResolver> =
+            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let (context_config, provider) =
+            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+
+        assert!(provider.is_none(), "无法解析 pair 时应保留兼容回退边界");
+        assert_eq!(
+            context_config.compaction_model, "gpt-5.4",
+            "未解析成功时不应偷偷改写 compaction_model"
+        );
     }
 }

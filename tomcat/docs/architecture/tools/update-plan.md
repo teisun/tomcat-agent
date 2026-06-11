@@ -55,7 +55,7 @@
 
 | 工具 | 写什么文件 | 模式可见性 | 语义 | 代码层 | 说人话 |
 |------|-----------|-----------|------|--------|--------|
-| **`todos`** | `~/.tomcat/agents/<agentId>/todos/<todos_id>.todo.md`（session 路径） | **任何模式**（PLAN 期也可调，做 LLM 个人 scratchpad） | 个人 / 会话级待办；**不**写 plan.md | `apply_todos_op(TodoStore)` | 聊天里随手记的清单。 |
+| **`todos`** | `~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md`（session 路径） | **任何模式**（PLAN 期也可调，做 LLM 个人 scratchpad） | 个人 / 会话级待办；**不**写 plan.md | `apply_todos_op(TodoStore)` | 聊天里随手记的清单。 |
 | **`update_plan`** | 目标 `PlanFile` 的 frontmatter `todos[]` | **任何模式** | plan 级待办的**增量**修订 | `apply_todos_op(PlanStore, target)` —— 复用 `todos` 的 op 引擎 + 不同 store + 不同 schema | 改 plan 文件的待办用这个。 |
 | **`create_plan`** | `~/.tomcat/plans/<*>.plan.md` 的**整盘**（frontmatter 初稿 + 正文 `## Goal` / `## Draft` / `## Todos`） | **仅 PLAN 模式** | 重写：把 LLM 提供的 `goal / draft / todos` 全量落盘，并同步派 reviewer | 独立实现 | 计划结构推倒重来时用。 |
 
@@ -225,7 +225,7 @@ pub fn apply_todos_op(store: &dyn TodoStore, ops: &[TodoOp]) -> Result<TodoSnaps
 pub struct SessionTodoStore { todos_id: TodosId, file: PathBuf, ... }
 pub struct PlanTodoStore    { plan_id: PlanId,  file: PathBuf, frontmatter_lock: ... }
 
-impl TodoStore for SessionTodoStore { ... }   // 写 ~/.tomcat/agents/<agentId>/todos/<id>.todo.md
+impl TodoStore for SessionTodoStore { ... }   // 写 ~/.tomcat/agents/<agentId>/todos/<session_id>.todo.md
 impl TodoStore for PlanTodoStore    { ... }   // 写 ~/.tomcat/plans/<*>.plan.md 的 frontmatter todos[]
 ```
 

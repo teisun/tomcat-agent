@@ -60,7 +60,7 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
 }
 
 pub(crate) fn run(ctx: &ChatContext, action: ThinkingAction) -> ChatCommandOutcome {
-    let new_value = apply_action(&ctx.thinking_display, action);
+    let new_value = apply_action(&ctx.session_runtime.thinking_display, action);
     println!("[thinking] 已切换到 {} 模式", display_name(new_value));
     ChatCommandOutcome::Handled
 }

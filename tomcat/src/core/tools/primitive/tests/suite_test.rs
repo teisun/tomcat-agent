@@ -280,6 +280,11 @@ async fn execute_bash_success() {
         .unwrap();
     assert_eq!(res.exit_code, 0);
     assert!(res.stdout.trim().contains("ok"));
+    assert!(
+        !res.stderr.contains("run_in_background=true"),
+        "普通前台命令不应误报后台残留提示，实际 stderr={:?}",
+        res.stderr
+    );
     let _ = std::fs::remove_dir(&dir);
 }
 
@@ -655,6 +660,122 @@ async fn bash_wallclock_timeout_kills_process() {
         "墙钟超时 50ms + kill 后整体应远小于 sleep 时长，实际 elapsed={:?}",
         elapsed
     );
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// 前台 shell 先退出、后台 `cmd &` 仍攥着 stdout/stderr 时，同步 bash 不应永久卡死。
+/// 小 timeout 场景下，主 shell 退出后的善后 grace 还应被剩余预算 clamp，不能把 80ms 调用
+/// 反向拖成多秒；同时尽量保留前台已输出的内容。
+#[tokio::test]
+async fn bash_backgrounded_pipe_holder_does_not_hang() {
+    let dir = std::env::temp_dir().join("tomcat_exec_bash_bg_pipe_holder");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        audit,
+        make_gate(&dir),
+    )
+    .with_bash_timeout_ms(80);
+
+    let started = std::time::Instant::now();
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        exec.execute_bash("sleep 30 & echo done", Some(&path_str), "p1", None, None),
+    )
+    .await
+    .expect("后台残留路径不应把测试挂死")
+    .expect("bash 应返回 Ok");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "应在测试级 timeout 前返回，实际 elapsed={:?}",
+        elapsed
+    );
+    assert!(
+        !res.timed_out,
+        "这里不是前台 wait 超时，而是 drain 检测到后台残留"
+    );
+    assert_eq!(res.exit_code, 0, "主 shell 已正常退出，应保留 exit_code=0");
+    assert!(
+        res.stdout.contains("done"),
+        "前台输出应被尽量保留，实际 stdout={:?}",
+        res.stdout
+    );
+    assert!(
+        res.stderr.contains("run_in_background=true"),
+        "stderr 应提示长任务改走后台机制，实际 stderr={:?}",
+        res.stderr
+    );
+
+    let entries = audit_entries.lock().unwrap();
+    let bash_entry = entries
+        .iter()
+        .rev()
+        .find(|entry| entry.operation == AuditPrimitiveOp::Bash)
+        .expect("应写 bash 审计");
+    let detail = bash_entry.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("lingering_children=true"),
+        "audit detail 应标记 lingering_children=true，实际 detail={}",
+        detail
+    );
+
+    let _ = std::fs::remove_dir(&dir);
+}
+
+/// 大 timeout 回归：默认/120s 级别预算下，主 shell 退出后的 lingering 检测也不应把同步
+/// bash 拖到完整 timeout_ms；应在 post-exit grace 内快速判残留并返回 warning。
+#[tokio::test]
+async fn bash_backgrounded_pipe_holder_returns_fast_under_large_timeout() {
+    let dir = std::env::temp_dir().join("tomcat_exec_bash_bg_pipe_holder_large_timeout");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    )
+    .with_bash_timeout_ms(120_000);
+
+    let started = std::time::Instant::now();
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        exec.execute_bash("sleep 30 & echo done", Some(&path_str), "p1", None, None),
+    )
+    .await
+    .expect("大 timeout 下也不应把测试挂死")
+    .expect("bash 应返回 Ok");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "大 timeout 场景也应在数秒内返回，而不是吃满 120s，实际 elapsed={:?}",
+        elapsed
+    );
+    assert!(
+        !res.timed_out,
+        "这里不是前台 wait 超时，而是 post-exit grace 检测到后台残留"
+    );
+    assert_eq!(res.exit_code, 0, "主 shell 已正常退出，应保留 exit_code=0");
+    assert!(
+        res.stdout.contains("done"),
+        "前台输出应被尽量保留，实际 stdout={:?}",
+        res.stdout
+    );
+    assert!(
+        res.stderr.contains("run_in_background=true"),
+        "stderr 应提示长任务改走后台机制，实际 stderr={:?}",
+        res.stderr
+    );
+
     let _ = std::fs::remove_dir(&dir);
 }
 

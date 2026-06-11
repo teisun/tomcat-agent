@@ -89,8 +89,13 @@ async fn run_use(ctx: &ChatContext, name: &str, intent: &str) -> ChatCommandOutc
         }
     };
 
-    match crate::core::skill::load_skill_payload(ctx.primitive.as_ref(), "__agent__", &skill, None)
-        .await
+    match crate::core::skill::load_skill_payload(
+        ctx.global_services.primitive.as_ref(),
+        "__agent__",
+        &skill,
+        None,
+    )
+    .await
     {
         Ok(payload) => ChatCommandOutcome::Continue {
             line: format!(

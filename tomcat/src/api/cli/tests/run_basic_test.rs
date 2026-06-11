@@ -43,6 +43,37 @@ fn run_init_writes_openai_responses_as_default_provider() {
 }
 
 #[test]
+#[serial(env_lock)]
+fn run_init_resets_sessions_store_to_new_shape() {
+    with_temp_home(|| {
+        let sessions_dir =
+            crate::resolve_sessions_dir(&AppConfig::default()).expect("sessions dir");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        std::fs::write(
+            sessions_dir.join("sessions.json"),
+            r#"{
+  "agent:main:main": {
+    "sessionId": "legacy_1",
+    "updatedAt": 42
+  }
+}"#,
+        )
+        .expect("seed legacy store");
+
+        run_init().expect("init should succeed");
+
+        let store_text =
+            std::fs::read_to_string(sessions_dir.join("sessions.json")).expect("store text");
+        let store: crate::SessionStore =
+            serde_json::from_str(&store_text).expect("new session store shape");
+        assert!(
+            store.is_empty(),
+            "init should overwrite sessions.json with new shape"
+        );
+    });
+}
+
+#[test]
 fn run_doctor_returns_ok() {
     let r = run_doctor();
     assert!(r.is_ok());

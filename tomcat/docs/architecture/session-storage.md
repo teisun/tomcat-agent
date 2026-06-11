@@ -4,17 +4,26 @@
 
 ### 元数据 store（sessions.json）
 
-单文件 JSON：`sessionKey -> SessionEntry`。列表与路由由此提供，不另建 SQLite 索引。
+单文件 JSON，根结构为 **`SessionStore { sessions{id→entry}, current{key→id} }`**。`sessions` 存所有会话档案，`current` 只存“每个 scope 当前指向哪一个 sessionId”。列表与路由由此提供，不另建 SQLite 索引。
 
 ```rust
 /// 会话根目录：~/.tomcat/agents/<agentId>/sessions/
-/// sessionKey 格式：agent:<agentId>:<channelKey>，MVP 单入口用 agent:main:main
-pub type SessionStore = std::collections::HashMap<String, SessionEntry>;
+/// sessionKey 格式：agent:<agentId>:<channelKey>
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionStore {
+    #[serde(default)]
+    pub sessions: std::collections::HashMap<String, SessionEntry>,
+    #[serde(default)]
+    pub current: std::collections::HashMap<String, String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
-    pub session_id: String,           // 当前 transcript 文件 id，对应 <sessionId>.jsonl 或 pi-mono 风格 <timestamp>_<uuid>.jsonl
+    #[serde(default)]
+    pub session_key: String,
+    pub session_id: String,           // 当前 transcript 文件 id，对应 <sessionId>.jsonl
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_file: Option<String>, // 可选显式 transcript 路径
@@ -30,21 +39,16 @@ pub struct SessionEntry {
     pub output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_count: Option<u32>,
-    /// 与会话内 `ContextState.session_obs.compaction_tokens_freed` 同步（估算 tok 累计）；CLI 在 user turn 结束时写回。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_tokens_freed: Option<u64>,
-    /// L0 落盘原始 Unicode 字符累计；与 `ContextState.session_obs.tool_result_chars_persisted` 同步（事件字段仍名 bytes）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result_chars_persisted: Option<u64>,
-    /// 当前 session_key 正在执行的轻路待办文件 id；对应 `~/.tomcat/agents/<agentId>/todos/<active_todos_id>.todo.md`。详见 [`tools/todos.md`](tools/todos.md) §3.4.2。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_todos_id: Option<String>,
-    /// 本 session_key 曾创建过的 todos_id 列表（历史 + 当前）；可选，供 UI 列档。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub todos_ids: Option<Vec<String>>,
-    // 预留：channel/agent 相关字段供三期多 channel 使用
+    pub last_checkpoint_id: Option<String>,
 }
 ```
+
+**开发阶段兼容口径**：当前不做旧 `sessions.json` 迁移。`tomcat init` 会直接写新结构；若用户未先 `init` 就直接使用，而本地文件是旧结构、空文件或反序列化失败，运行时也会直接重建为新结构。
 
 ### 对话 transcript（pi-mono 相容 JSONL）
 
@@ -119,9 +123,9 @@ pub struct BranchSummaryEntry {
 ```
 
 **会话路径与会话标识**
-- **会话根目录** `~/.tomcat/agents/<agentId>/sessions/`；MVP 阶段 agentId 固定为 `main`。
-- **sessionKey** (路由键，预留多channel)：`agent:<agentId>:<channelKey>`，MVP 用 `agent:main:main`，后续 channelKey 可扩展如: `agent:mybot:telegram:group:123`
-- **sessionId** 当前对话对应的 transcript 唯一 id(sessionId=<timestamp>_<uuid>)，对应文件名'<sessionId>.jsonl'; SessionEntry中'sessionId'指向改文件
+- **会话根目录** `~/.tomcat/agents/<agentId>/sessions/`；当前 agentId 固定为 `main`。
+- **sessionKey**（作用域键）：`agent:<agentId>:<channelKey>`；当前主要有 `agent:main:main`（`claw`）与 `agent:main:proj:<hash>`（`code`）。
+- **sessionId**：单次对话对应的 transcript 唯一 id（`<timestamp>_<uuid>`），对应文件名 `<sessionId>.jsonl`；`SessionEntry.session_id` 指向该文件。
 - **resume sidecar**：同目录 sibling 文件 `<sessionId>.resume-index.json`，仅保存启动恢复定位所需的 metadata，不保存完整消息正文；缺失/损坏可重建，详见 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。
 
 **Source of truth**：transcript 内容以 JSONL 文件为准；sessions.json 为元数据与路由的权威，写入时覆盖该文件。

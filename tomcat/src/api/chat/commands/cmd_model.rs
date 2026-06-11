@@ -33,7 +33,11 @@ pub(crate) fn run(ctx: &ChatContext, command: ModelCommand) -> ChatCommandOutcom
 }
 
 fn run_current(ctx: &ChatContext) -> ChatCommandOutcome {
-    let entry = match ctx.session.get_session(ctx.session.current_session_key()) {
+    let entry = match ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())
+    {
         Ok(entry) => entry,
         Err(err) => {
             println!("[model] 读取当前会话失败: {}", err);
@@ -61,7 +65,11 @@ fn run_current(ctx: &ChatContext) -> ChatCommandOutcome {
 }
 
 fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
-    let entry = match ctx.session.get_session(ctx.session.current_session_key()) {
+    let entry = match ctx
+        .session_runtime
+        .session
+        .get_session(ctx.session_runtime.session.current_session_key())
+    {
         Ok(entry) => entry,
         Err(err) => {
             println!("[model] 读取当前会话失败: {}", err);
@@ -72,7 +80,7 @@ fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
     let default_model = ctx.config.llm.default_model.as_str();
 
     println!("可用模型:");
-    for item in ctx.model_catalog.entries() {
+    for item in ctx.global_services.model_catalog.entries() {
         let mut tags = Vec::new();
         if item.id == current_model {
             tags.push("current");
@@ -104,7 +112,7 @@ fn run_use(ctx: &ChatContext, model_id: &str) -> ChatCommandOutcome {
         return ChatCommandOutcome::Handled;
     }
 
-    let entry = match ctx.model_catalog.lookup_explicit(model_id) {
+    let entry = match ctx.global_services.model_catalog.lookup_explicit(model_id) {
         Ok(entry) => entry,
         Err(err) => {
             println!("[model] {}", err);
@@ -113,6 +121,7 @@ fn run_use(ctx: &ChatContext, model_id: &str) -> ChatCommandOutcome {
     };
 
     match ctx
+        .session_runtime
         .session
         .switch_current_model(Some(&entry.provider), Some(&entry.id))
     {

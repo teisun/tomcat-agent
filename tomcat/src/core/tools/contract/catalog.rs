@@ -162,7 +162,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "bash",
         label: "Bash",
-        description: "Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.\n\nSet `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round.\n",
+        description: "Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.\n\nSet `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round. Shell syntax like `cmd &` still runs inside the same foreground tool call and can keep stdout/stderr open; if you want a server or watcher to outlive the current tool round, use `run_in_background: true` instead of relying on `&` alone.\n",
         display_summary: Some("Run an audited shell command (foreground or background)."),
         parameters: bash_parameters,
         scope: PermissionScope::Bash,
@@ -331,7 +331,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "todos",
         label: "Todos",
-        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. The list is persisted under `~/.tomcat/agents/<id>/sessions/<session_key>/todos/<todos_id>.todo.md` when persistence is configured, and it NEVER writes the active PlanFile. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.\n",
+        description: "Manage a session-local todo scratchpad and return a full snapshot of all items after each call. When persistence is configured, the scratchpad is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`, and it NEVER writes the active PlanFile. Use `new_todos=true` to clear the current scratchpad and start a fresh one; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.\n",
         display_summary: Some("Maintain a session todo scratchpad (single in_progress; returns full snapshot)."),
         parameters: todos_parameters,
         scope: PermissionScope::Write,
@@ -988,11 +988,11 @@ fn update_plan_parameters() -> Value {
 fn todos_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. Use `new_todos=true` to rotate to a new scratchpad file; use `replace=true` to replace the whole list with the provided upsert results.",
+        "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. When persistence is configured, the scratchpad is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the current scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results.",
         "properties": {
             "new_todos": {
                 "type": "boolean",
-                "description": "If true, create a new active todos file for this session before applying ops. Default false."
+                "description": "If true, clear the current scratchpad before applying ops. The same session file `todos/<session_id>.todo.md` is overwritten; no extra file is created. Default false."
             },
             "title": {
                 "type": "string",

@@ -26,7 +26,8 @@ fn create_session_and_list() {
     assert!(entry.updated_at > 0);
     let list = mgr.list_sessions().unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].0, key);
+    assert_eq!(list[0].0, entry.session_id);
+    assert_eq!(list[0].1.session_key, key);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -92,6 +93,47 @@ fn load_store_empty_when_no_file() {
 }
 
 #[test]
+fn ensure_current_session_rebuilds_legacy_store_without_init() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("sessions.json"),
+        r#"{
+  "agent:main:main": {
+    "sessionId": "legacy_1",
+    "updatedAt": 42,
+    "cwd": "/tmp/project"
+  }
+}"#,
+    )
+    .unwrap();
+
+    let mgr = SessionManager::new(dir.clone());
+    let entry = mgr
+        .ensure_current_session(Some("/tmp/new".to_string()))
+        .expect("ensure current session");
+    let store = mgr.load_store().expect("load rebuilt store");
+
+    assert_eq!(
+        store
+            .current
+            .get(mgr.current_session_key())
+            .map(String::as_str),
+        Some(entry.session_id.as_str())
+    );
+    assert_eq!(store.sessions.len(), 1, "legacy data should be replaced");
+    assert_eq!(
+        store
+            .sessions
+            .get(&entry.session_id)
+            .and_then(|entry| entry.cwd.as_deref()),
+        Some("/tmp/new")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn create_then_get_entries() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);
@@ -115,9 +157,9 @@ fn delete_session_removes_from_store() {
     std::fs::create_dir_all(&dir).unwrap();
     let mgr = SessionManager::new(dir.clone());
     let key = mgr.current_session_key();
-    mgr.create_session(key, None).unwrap();
+    let entry = mgr.create_session(key, None).unwrap();
     assert_eq!(mgr.list_sessions().unwrap().len(), 1);
-    mgr.delete_session(key).unwrap();
+    mgr.delete_session(&entry.session_id).unwrap();
     assert!(mgr.list_sessions().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }

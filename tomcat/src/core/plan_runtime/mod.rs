@@ -1,7 +1,8 @@
 //! # PlanRuntime — per-session PLAN 模式编排器（T2-P1-002/003/004）
 //!
-//! `PlanRuntime` 与 `TodoRuntime` 是 PLAN 模式的两条 per-session 状态机：前者持有当前
-//! `PlanState`、active plan id、reviewer 派发逻辑；后者持有 CHAT 模式下的纯 todo 列表。
+//! `PlanRuntime` 与 `TodosRuntime` 是 PLAN/CHAT 相关的两条 per-session 运行态：前者持有当前
+//! `PlanState`、active plan id、reviewer 派发逻辑，以及 session-local todos 的内存态；
+//! 后者只负责把这份 session-local todos 持久化到 agent 级 `.todo.md`。
 //! 它们都挂在 `ChatContext` 上，与 chat session 同生命周期（**不**每轮重建，否则 `mode`
 //! 会被重置回 Chat，丢失 PLAN/EXEC 的持续语义）。
 //!
@@ -95,9 +96,9 @@ pub struct PlanRuntime {
     /// 失效 → cancel→pending 不工作（D2 防御）。
     #[allow(dead_code)] // P7 接入
     cancel_token: Mutex<Option<CancellationToken>>,
-    /// CHAT 模式下 `todos` 工具的 session-local scratchpad，**不**落盘 plan 文件
-    /// （落盘文件路径由 P7 PR-PLD 引入 `~/.tomcat/agents/.../todos/*.todo.md`，
-    /// 当前 P2 内存即可）。EXEC/Planning/Pending 模式下 `todos` 操作走 PlanFile。
+    /// `todos` 工具的 session-local scratchpad，适用于所有模式（含 EXEC）；
+    /// **绝不**写入 `PlanFile.frontmatter.todos[]`。plan 文件推进统一由 `update_plan`
+    /// 负责；`.todo.md` 的持久化由独立的 `TodosRuntime` 接管。
     session_todos: Mutex<Vec<file_store::TodoItem>>,
     /// Planning 状态的 active plan_id。P1 的 `PlanState::Planning` 没有携带 plan_id 字段；
     /// 这里用辅助字段保留 `create_plan` 写盘后的 plan_id，供后续 `update_plan` /
@@ -130,12 +131,9 @@ pub struct PlanRuntime {
     /// `[ask_question].timeout_ms`：ask_question 等待用户回答的墙钟超时（毫秒）。
     /// `0` 表示无超时；生产由 `ChatContext::from_config` 写入；默认 0（按工具内置默认 300_000 处理）。
     ask_question_timeout_ms: std::sync::atomic::AtomicU64,
-    /// Session-local todos 持久化目录根（如 `~/.tomcat/agents/<id>/`）。`None` 时 todos
-    /// 工具仅写内存，不落盘——保留给纯单元测试与早期阶段使用。
-    todos_persist_base: Mutex<Option<std::path::PathBuf>>,
-    /// 当前 active todos 文件的 id（写入 sessions.json 的 `activeTodosId` 字段镜像）。
-    /// 由 [`Self::ensure_active_todos_id`] 在首次写盘时生成 stable id；`todos.new_todos=true`
-    /// 时可通过 [`Self::rotate_active_todos_id`] 显式切换到新文件。
+    /// 当前 active todos scratchpad 的逻辑 id（不再参与磁盘文件命名）。
+    /// `todos.new_todos=true` 时通过 [`Self::rotate_active_todos_id`] 切换，便于 tool result
+    /// / panel 在内存层感知“新白板”。
     active_todos_id: Mutex<Option<String>>,
     /// E：UI 刷新广播——todos / update_plan 成功后，runtime 把 snapshot fanout 给所有
     /// 注册的 panel。生产由 `ChatContext::from_config` 注入 CLI/IDE 适配；测试可空。
@@ -211,7 +209,6 @@ impl PlanRuntime {
             code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             ask_question_panel: Mutex::new(None),
             ask_question_timeout_ms: std::sync::atomic::AtomicU64::new(0),
-            todos_persist_base: Mutex::new(None),
             active_todos_id: Mutex::new(None),
             refresh_notifier: Arc::new(RefreshNotifier::new()),
             checkpoint_store: Mutex::new(None),
@@ -273,23 +270,12 @@ impl PlanRuntime {
         self.refresh_notifier.clone()
     }
 
-    /// 注入 session-local todos 落盘根目录（生产由 `ChatContext::from_config` 通过
-    /// `resolve_agent_trail_dir` 传入；测试与早期阶段可保持 `None`）。
-    pub fn set_todos_persist_base(&self, base: Option<std::path::PathBuf>) {
-        *self.todos_persist_base.lock() = base;
-    }
-
-    /// 读当前 todos 持久化根目录（克隆）。
-    pub fn todos_persist_base(&self) -> Option<std::path::PathBuf> {
-        self.todos_persist_base.lock().clone()
-    }
-
-    /// 当前 active todos 文件 id（mirrors `sessions.json.activeTodosId`）。
+    /// 当前 active todos scratchpad id（mirrors 历史上的 `activeTodosId` 语义，但不再是文件名）。
     pub fn active_todos_id(&self) -> Option<String> {
         self.active_todos_id.lock().clone()
     }
 
-    /// 获取或派生当前 active todos id；首次调用时按"session_key + ms 时间戳"派生。
+    /// 获取或派生当前 active todos scratchpad id；首次调用时按"session_key + ms 时间戳"派生。
     pub fn ensure_active_todos_id(&self) -> String {
         let mut g = self.active_todos_id.lock();
         if let Some(id) = g.as_ref() {
@@ -300,7 +286,7 @@ impl PlanRuntime {
         id
     }
 
-    /// 强制切到一个新的 active todos id；供 `todos.new_todos=true` 使用。
+    /// 强制切到一个新的 active todos scratchpad id；供 `todos.new_todos=true` 使用。
     pub fn rotate_active_todos_id(&self) -> String {
         let mut g = self.active_todos_id.lock();
         let id = self.fresh_todos_id();
@@ -308,6 +294,7 @@ impl PlanRuntime {
         id
     }
 
+    /// 生成一个新的内存逻辑 scratchpad id；**不**参与 `.todo.md` 文件命名。
     fn fresh_todos_id(&self) -> String {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

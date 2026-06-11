@@ -191,6 +191,15 @@ fn validate_tool_calls_shape(msg: &Value) -> Result<(), String> {
         if name.is_empty() {
             return Err(format!("tool_calls[{i}].function.name is missing or empty"));
         }
+        let arguments = func_obj
+            .get("arguments")
+            .and_then(|v| v.as_str())
+            .ok_or(format!(
+                "tool_calls[{i}].function.arguments is missing or not a string"
+            ))?;
+        serde_json::from_str::<Value>(arguments).map_err(|err| {
+            format!("tool_calls[{i}].function.arguments is not valid JSON: {err}")
+        })?;
     }
     Ok(())
 }

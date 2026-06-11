@@ -32,6 +32,21 @@ fn make_executor(definition: &Path) -> Arc<dyn PrimitiveExecutor> {
     ))
 }
 
+fn make_executor_with_bash_timeout(
+    definition: &Path,
+    timeout_ms: u64,
+) -> Arc<dyn PrimitiveExecutor> {
+    Arc::new(
+        DefaultPrimitiveExecutor::new(
+            PrimitiveConfig::default(),
+            Arc::new(AllowAllConfirmation),
+            Arc::new(TracingAuditRecorder),
+            make_gate(definition),
+        )
+        .with_bash_timeout_ms(timeout_ms),
+    )
+}
+
 #[tokio::test]
 async fn search_files_contract_ignores_empty_type_string() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -99,6 +114,47 @@ async fn bash_contract_surfaces_cwd_context_in_user_visible_error() {
     assert!(
         !text.contains("No such file or directory (os error 2)"),
         "不应再回退成裸 os error 2: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn bash_contract_returns_warning_for_background_pipe_holder_without_hanging() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().unwrap();
+    let primitive = make_executor_with_bash_timeout(&root, 80);
+    let tc = ToolCallInfo {
+        id: "tc-bash-bg-pipe-holder".to_string(),
+        name: "bash".to_string(),
+        arguments: serde_json::json!({
+            "command": "sleep 30 & echo done",
+            "cwd": root.display().to_string(),
+            "timeout_ms": 80
+        })
+        .to_string(),
+    };
+
+    let (text, is_error, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        execute_tool(&primitive, &None, &None, None, &tc),
+    )
+    .await
+    .expect("tool-exec 不应因后台残留而挂死");
+
+    assert!(
+        !is_error,
+        "后台残留清理属于带 warning 的成功回执，不应变成 tool error: {}",
+        text
+    );
+    assert!(text.contains("done"), "应保留前台 stdout，实际: {}", text);
+    assert!(
+        text.contains("run_in_background=true"),
+        "用户可见文本应提示长任务改走后台机制，实际: {}",
+        text
+    );
+    assert!(
+        text.contains("(exit code: 0)"),
+        "应保留既有 bash 展示格式，实际: {}",
         text
     );
 }
