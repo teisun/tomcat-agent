@@ -734,17 +734,19 @@ impl MessageAppendSink for SessionManager {
 }
 
 fn uuid_for_session() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     let seq = SESSION_ID_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    format!(
-        "{:016x}{:08x}{:016x}",
-        (nanos & u64::MAX as u128) as u64,
-        std::process::id(),
-        seq
-    )
+    let mut hasher = DefaultHasher::new();
+    nanos.hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    seq.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn iso_ts(ms: i64) -> String {

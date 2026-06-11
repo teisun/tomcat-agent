@@ -4,9 +4,9 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, normalize_path,
-    resolve_quickjs_path, resolve_sessions_dir, save_store, validate_config, AppConfig, AppError,
-    SessionStore, WasmEngine, WasmEngineConfig, DEFAULT_LLM_MODEL,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, load_store,
+    normalize_path, resolve_quickjs_path, resolve_sessions_dir, validate_config, AppConfig,
+    AppError, WasmEngine, WasmEngineConfig, DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;
@@ -62,8 +62,12 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     println!("  ✓ 目录结构就绪");
     let sessions_path = resolve_sessions_dir(&cfg)?.join("sessions.json");
-    save_store(&sessions_path, &SessionStore::new())?;
-    println!("  ✓ sessions.json 已重置为新结构");
+    let store = load_store(&sessions_path)?;
+    if store.is_empty() {
+        println!("  ✓ sessions.json 已初始化");
+    } else {
+        println!("  ✓ sessions.json 已保留（{} 个历史会话）", store.len());
+    }
 
     match crate::api::cli::models_toml::ensure_mimo_models_toml(&cfg)? {
         crate::api::cli::models_toml::ModelsTomlStatus::Created => {

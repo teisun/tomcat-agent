@@ -74,6 +74,56 @@ fn run_init_resets_sessions_store_to_new_shape() {
 }
 
 #[test]
+#[serial(env_lock)]
+fn run_init_keeps_existing_sessions_store() {
+    with_temp_home(|| {
+        let sessions_dir =
+            crate::resolve_sessions_dir(&AppConfig::default()).expect("sessions dir");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        std::fs::write(
+            sessions_dir.join("sessions.json"),
+            r#"{
+  "sessions": {
+    "1781192456203_deadbeefcafebabe": {
+      "sessionKey": "agent:main:proj:10c22afba719d09d",
+      "sessionId": "1781192456203_deadbeefcafebabe",
+      "updatedAt": 1781192660216,
+      "sessionFile": "/tmp/1781192456203_deadbeefcafebabe.jsonl",
+      "cwd": "/Users/demo/.tomcat/temp/project7"
+    }
+  },
+  "current": {
+    "agent:main:proj:10c22afba719d09d": "1781192456203_deadbeefcafebabe"
+  }
+}"#,
+        )
+        .expect("seed valid store");
+
+        run_init().expect("init should succeed");
+
+        let store_text =
+            std::fs::read_to_string(sessions_dir.join("sessions.json")).expect("store text");
+        let store: crate::SessionStore =
+            serde_json::from_str(&store_text).expect("existing store should remain valid");
+        assert_eq!(store.len(), 1, "init should preserve existing sessions");
+        assert_eq!(
+            store
+                .current
+                .get("agent:main:proj:10c22afba719d09d")
+                .map(String::as_str),
+            Some("1781192456203_deadbeefcafebabe")
+        );
+        assert_eq!(
+            store
+                .sessions
+                .get("1781192456203_deadbeefcafebabe")
+                .and_then(|entry| entry.cwd.as_deref()),
+            Some("/Users/demo/.tomcat/temp/project7")
+        );
+    });
+}
+
+#[test]
 fn run_doctor_returns_ok() {
     let r = run_doctor();
     assert!(r.is_ok());
