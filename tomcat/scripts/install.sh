@@ -4,7 +4,7 @@
 # 支持 -y/--yes：非交互模式，自动追加 PATH。支持 -v VER：指定版本（接受 v0.1.3 或 0.1.3）。
 set -euo pipefail
 
-REPO="teisun/Tomcat"
+REPO="teisun/tomcat-agent"
 INSTALL_DIR="$HOME/.local/bin"
 NON_INTERACTIVE=0
 TAG=""

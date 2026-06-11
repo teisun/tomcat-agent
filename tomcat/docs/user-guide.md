@@ -25,7 +25,7 @@
 
 ```bash
 # 1. 一键安装最新 release
-curl -sSf https://raw.githubusercontent.com/teisun/Tomcat/main/tomcat/scripts/install.sh | bash
+curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scripts/install.sh | bash
 
 # 2. 初始化
 ~/.local/bin/tomcat init
@@ -41,7 +41,7 @@ tomcat --help
 安装指定版本时，可在脚本后追加 `-v` 参数：
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/teisun/Tomcat/main/tomcat/scripts/install.sh | bash -s -- -v v0.1.3
+curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scripts/install.sh | bash -s -- -v v0.1.3
 ```
 
 如果你更希望手动下载 Release 压缩包，请先按平台选择对应的 `target`：

@@ -1,6 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-11 15:52 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-11 16:30 +0800 | ACTIVE | develop | — |
+
+### 2026-06-11 | fix(install): 安装脚本仓库地址改为 tomcat-agent
+
+- **动机**：仓库已从 `teisun/Tomcat` 迁移至 `teisun/tomcat-agent`，`install.sh` 与 `user-guide.md` 仍指向旧仓库名，Release 下载与 latest tag 解析会依赖 GitHub 重定向，存在一键安装失效风险。
+- **范围**：`install.sh` 的 `REPO` 常量与文档中两条 `curl ... | bash` 命令统一改为 `teisun/tomcat-agent`，无源码逻辑变更。
 
 ### 2026-06-11 | chore(release): 版本号 0.1.2 → 0.1.3
 
