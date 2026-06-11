@@ -203,6 +203,16 @@ impl AgentLoop {
         self.context_state.take()
     }
 
+    /// 返回 compaction / preheat 路径应使用的 provider。
+    ///
+    /// 优先沿用上层解析好的 compaction provider；仅在未注入时兼容回退主 provider。
+    pub(super) fn compaction_provider(&self) -> Arc<dyn LlmProvider> {
+        self.config
+            .compaction_provider
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.llm))
+    }
+
     pub(super) fn persist_message_if_needed(
         &self,
         msg: &mut ChatMessage,

@@ -52,6 +52,7 @@ pub(super) fn finalize_turn_after_text(
     )?;
 
     // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
+    let compaction_provider = agent.compaction_provider();
     let mut preheat_started: Option<(usize, f64)> = None;
     let mut layer0_release: Option<(usize, usize)> = None;
     if let Some(ref mut ctx_state) = agent.context_state {
@@ -77,7 +78,7 @@ pub(super) fn finalize_turn_after_text(
             ctx_state.usage_ratio(),
             &ctx_state.messages,
             &ctx_state.transcript_path,
-            Arc::clone(&agent.llm),
+            Arc::clone(&compaction_provider),
             &agent.config.context_config,
             Arc::clone(&agent.event_bus),
         );
@@ -94,7 +95,7 @@ pub(super) fn finalize_turn_after_text(
             ratio,
             &ctx_state.messages,
             &ctx_state.transcript_path,
-            Arc::clone(&agent.llm),
+            Arc::clone(&compaction_provider),
             &agent.config.context_config,
             Arc::clone(&agent.event_bus),
         ) {

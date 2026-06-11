@@ -530,7 +530,7 @@ pub async fn run_chat_turn(
         session_id,
         tool_definitions: build_tool_definitions(ctx),
         context_config: context_config.clone(),
-        compaction_llm: Some(compaction_provider.clone()),
+        compaction_provider: Some(compaction_provider.clone()),
         agent_trail_dir: ctx
             .scope_services
             .agent_trail_dir

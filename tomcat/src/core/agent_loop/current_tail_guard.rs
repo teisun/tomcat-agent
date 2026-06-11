@@ -578,13 +578,10 @@ async fn collapse_to_branch_summary(
         .cloned()
         .collect();
     ensure_working_message_ids(agent, &mut working)?;
+    let compaction_provider = agent.compaction_provider();
     let artifacts = build_collapse_summary_artifacts_for_test(
         &working,
-        agent
-            .config
-            .compaction_llm
-            .as_deref()
-            .unwrap_or(&*agent.llm),
+        compaction_provider.as_ref(),
         &agent.config.context_config.compaction_model,
         plan_runtime.as_deref(),
         latest_plan_event.as_ref(),

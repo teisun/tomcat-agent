@@ -235,6 +235,7 @@ pub struct ProdVerifierDeps {
     pub agent_registry: Arc<AgentRegistry>,
     pub parent_session_id: String,
     pub llm: Arc<dyn LlmProvider>,
+    pub compaction_provider: Option<Arc<dyn LlmProvider>>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub event_bus: Arc<dyn EventBus>,
     pub agent_trail_dir: String,
@@ -293,6 +294,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let turns_limit = VERIFIER_MAX_TURNS;
 
         let llm = Arc::clone(&deps.llm);
+        let compaction_provider = deps.compaction_provider.clone();
         let primitive = Arc::clone(&deps.primitive);
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
@@ -363,7 +365,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
-                        compaction_llm: None,
+                        compaction_provider,
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,

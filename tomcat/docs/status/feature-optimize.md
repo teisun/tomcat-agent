@@ -3,6 +3,7 @@
 | Jerry | 2026-06-10 16:35 | ACTIVE | feature/optimize | - |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** 修复多 provider 场景下 timing ⑤ `preheat` 误用主 provider 的错配问题：`turn_finalize` / `current_tail_guard` 统一改走 `AgentLoop::compaction_provider()`，`AgentLoopConfig.compaction_llm` 重命名为 `compaction_provider`，并为 accessor / timing⑤ start+restart / current-tail collapse / child-agent compaction pair 补齐路由矩阵测试 @2026-06-11
 - [✓] **[P0]** 新增 `TodosRuntime`，todos 落盘路径改为 `~/.tomcat/agents/<id>/todos/<session_id>.todo.md` @2026-06-09
 - [✓] **[P0]** 照 `WebFetchRuntime` 范式经 `ChatContext → AgentLoop → ToolExecCtx` 注入，PlanRuntime 不再参与持久化 @2026-06-09
 - [✓] **[P0]** 删除 `list_session_todos_files` / `purge_inactive` / `todos_persist_base` 多文件遗留机制 @2026-06-09
@@ -12,6 +13,7 @@
 - [✓] **[P1]** T2-P1-015：会话模式与多会话并发（`claw/code`、隐藏兼容别名 `chat -> code`、开发阶段旧 `sessions.json` 直接重建、`ChatContext` 三层迁移完成、checkpoint/restore 护栏与并发回归）已完成开发与验收回归，进入 `PENDING_INTEGRATION` @2026-06-10
 
 ### 🔌 INTERFACE (接口变更)
+- `AgentLoopConfig.compaction_provider`：运行时 compaction / preheat provider 注入入口（原 `compaction_llm` 更名）；`AgentLoop::compaction_provider()` 成为统一访问器。
 - `TodosRuntime::new(base_dir, session_id)` + `persist(&TodoFile)`：todos 持久化唯一入口。
 - `todos::execute(runtime, todos_runtime, args)`：新增 `todos_runtime` 参数；未注入时仅内存推进。
 - `AgentLoop::with_todos_runtime(...)`：会话级 todos runtime 注入 builder。

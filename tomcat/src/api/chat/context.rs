@@ -74,6 +74,33 @@ fn resolve_agent_workspace_dir(
     std::env::current_dir().unwrap_or_else(|_| agent_definition_dir.to_path_buf())
 }
 
+fn resolve_child_agent_compaction_runtime(
+    llm_resolver: &dyn crate::core::llm::LlmResolver,
+    base_context_config: &crate::infra::config::ContextConfig,
+    entry: Option<&SessionEntry>,
+) -> (
+    crate::infra::config::ContextConfig,
+    Option<Arc<dyn LlmProvider>>,
+) {
+    let mut context_config = base_context_config.clone();
+    let session_override = entry
+        .and_then(|e| e.model_override.as_deref())
+        .filter(|model| !model.trim().is_empty());
+    match llm_resolver.resolve(LlmScene::Compaction, session_override) {
+        Ok(call) => {
+            context_config.compaction_model = call.model;
+            (context_config, Some(call.provider_impl))
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to resolve child-agent compaction runtime; falling back to main provider"
+            );
+            (context_config, None)
+        }
+    }
+}
+
 fn checkpoint_store_cache() -> &'static RwLock<
     std::collections::HashMap<
         std::path::PathBuf,
@@ -326,6 +353,12 @@ impl ChatContext {
             .model_override
             .clone()
             .unwrap_or_else(|| config.llm.default_model.clone());
+        let (child_agent_context_config, child_agent_compaction_provider) =
+            resolve_child_agent_compaction_runtime(
+                llm_resolver.as_ref(),
+                &config.context,
+                Some(&current_session_entry),
+            );
         let read_file_state =
             Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
         let prod_reviewer = plan_runtime::prod_reviewer::ProdReviewerDispatcher::new(
@@ -334,11 +367,12 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm: llm.clone(),
+                compaction_provider: child_agent_compaction_provider.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: config.context.clone(),
+                context_config: child_agent_context_config.clone(),
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
@@ -356,11 +390,12 @@ impl ChatContext {
                 agent_registry: agent_registry.clone(),
                 parent_session_id: current_session_entry.session_id.clone(),
                 llm: llm.clone(),
+                compaction_provider: child_agent_compaction_provider.clone(),
                 primitive: primitive.clone(),
                 event_bus: event_bus.clone(),
                 agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
                 checkpoint_store: checkpoint_store.clone(),
-                context_config: config.context.clone(),
+                context_config: child_agent_context_config.clone(),
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
@@ -713,5 +748,95 @@ fn migrate_legacy_layer0_tool_results(
             }
             let _ = std::fs::rename(&from, &to);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serial_test::serial;
+
+    use super::resolve_child_agent_compaction_runtime;
+    use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
+    use crate::AppConfig;
+
+    #[test]
+    #[serial(env_lock)]
+    fn child_agent_compaction_runtime_preserves_resolved_model_provider_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        let mut cfg = AppConfig::default();
+        cfg.context.compaction_model = "deepseek-v4-pro".to_string();
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "stub");
+        }
+
+        let (context_config, provider) =
+            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
+        assert!(provider.is_some(), "应把解析成功的 compaction provider 注入给子 Agent");
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+    }
+
+    #[test]
+    #[serial(env_lock)]
+    fn child_agent_compaction_runtime_preserves_fallback_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        let mut cfg = AppConfig::default();
+        cfg.llm.default_model = "deepseek-v4-pro".to_string();
+        cfg.context.compaction_model = "gpt-5.4".to_string();
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+
+        unsafe {
+            std::env::set_var("DEEPSEEK_API_KEY", "stub");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let (context_config, provider) =
+            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+        assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
+        assert!(
+            provider.is_some(),
+            "fallback 成功时也应把 fallback 后的 provider 一起注入"
+        );
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+        }
+    }
+
+    #[test]
+    #[serial(env_lock)]
+    fn child_agent_compaction_runtime_keeps_compat_fallback_boundary_when_unresolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.toml");
+        let mut cfg = AppConfig::default();
+        cfg.llm.default_model = "deepseek-v4-pro".to_string();
+        cfg.context.compaction_model = "gpt-5.4".to_string();
+        let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+
+        unsafe {
+            std::env::remove_var("DEEPSEEK_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+
+        let (context_config, provider) =
+            resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
+
+        assert!(provider.is_none(), "无法解析 pair 时应保留兼容回退边界");
+        assert_eq!(
+            context_config.compaction_model, "gpt-5.4",
+            "未解析成功时不应偷偷改写 compaction_model"
+        );
     }
 }

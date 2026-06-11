@@ -22,7 +22,9 @@
 
 mod background_monitor_test;
 mod classify_test;
+mod compaction_provider_accessor_test;
 mod current_tail_guard_behavior_test;
+mod current_tail_provider_routing_test;
 mod current_tail_guard_runtime_test;
 mod current_tail_guard_test;
 mod defaults_test;
@@ -30,6 +32,7 @@ mod events_order_test;
 mod interrupt_test;
 mod metrics_test;
 mod mocks;
+mod preheat_provider_routing_test;
 mod run_basic_test;
 mod steering_followup_test;
 mod stream_handler_test;

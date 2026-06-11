@@ -78,6 +78,72 @@ impl LlmProvider for MockLlmProviderFatal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RecordedChatCall {
+    pub(super) provider: String,
+    pub(super) model: String,
+}
+
+/// 记录 `chat` 请求的 provider，用于断言 compaction 路由是否命中预期 provider/model。
+pub(super) struct RecordingChatLlmProvider {
+    provider_name: &'static str,
+    summary_text: String,
+    calls: Arc<Mutex<Vec<RecordedChatCall>>>,
+}
+
+impl RecordingChatLlmProvider {
+    pub(super) fn new(
+        provider_name: &'static str,
+        summary_text: impl Into<String>,
+        calls: Arc<Mutex<Vec<RecordedChatCall>>>,
+    ) -> Self {
+        Self {
+            provider_name,
+            summary_text: summary_text.into(),
+            calls,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RecordingChatLlmProvider {
+    fn provider_name(&self) -> &str {
+        self.provider_name
+    }
+
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.calls.lock().unwrap().push(RecordedChatCall {
+            provider: self.provider_name.to_string(),
+            model: req.model.clone(),
+        });
+        Ok(ChatResponse {
+            id: None,
+            choices: vec![crate::core::llm::ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant(&self.summary_text),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        Ok(Box::new(tokio_stream::iter(Vec::<
+            Result<StreamEvent, AppError>,
+        >::new())))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
 /// 默认 Primitive Mock：每个工具同步返回常量结果，无 sleep。
 pub(super) struct MockPrimitiveExecutor;
 
