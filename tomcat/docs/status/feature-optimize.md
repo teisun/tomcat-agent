@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Jerry | 2026-06-11 14:05 | ACTIVE | feature/optimize | - |
+| Jerry | 2026-06-11 14:10 | ACTIVE | feature/optimize | - |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 修复非法 `tool_call.arguments` 落盘导致会话永久 400：`tool_dispatcher` 持久化前规整为 `{}`、`append_message_chain` 拒绝非法 wire、tool result 输出英文安全预览；补齐 dispatcher / append / session 回归测试 @2026-06-11

@@ -9,9 +9,7 @@ use super::super::turn_finalize::finalize_turn_after_text;
 use super::super::{AgentLoop, AgentLoopConfig};
 use super::mocks::{MockPrimitiveExecutor, RecordedChatCall, RecordingChatLlmProvider};
 use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
-use crate::core::llm::{
-    ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent,
-};
+use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::session::manager::ContextState;
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
@@ -168,7 +166,10 @@ async fn run_timing5_try_start_case(
 async fn timing5_try_start_uses_compaction_provider_same_provider() {
     let (main_calls, compaction_calls) = run_timing5_try_start_case("openai", "openai", true).await;
 
-    assert!(main_calls.is_empty(), "主 provider 不应收到 compaction 请求");
+    assert!(
+        main_calls.is_empty(),
+        "主 provider 不应收到 compaction 请求"
+    );
     assert_eq!(compaction_calls.len(), 1);
     assert_eq!(compaction_calls[0].provider, "openai");
     assert_eq!(compaction_calls[0].model, "compaction-x");
@@ -179,7 +180,10 @@ async fn timing5_try_start_uses_compaction_provider_main_deepseek_compaction_ope
     let (main_calls, compaction_calls) =
         run_timing5_try_start_case("deepseek", "openai", true).await;
 
-    assert!(main_calls.is_empty(), "DeepSeek 主 provider 不应收到压缩模型调用");
+    assert!(
+        main_calls.is_empty(),
+        "DeepSeek 主 provider 不应收到压缩模型调用"
+    );
     assert_eq!(compaction_calls.len(), 1);
     assert_eq!(compaction_calls[0].provider, "openai");
     assert_eq!(compaction_calls[0].model, "compaction-x");
@@ -190,7 +194,10 @@ async fn timing5_try_start_uses_compaction_provider_main_openai_compaction_deeps
     let (main_calls, compaction_calls) =
         run_timing5_try_start_case("openai", "deepseek", true).await;
 
-    assert!(main_calls.is_empty(), "OpenAI 主 provider 不应收到压缩模型调用");
+    assert!(
+        main_calls.is_empty(),
+        "OpenAI 主 provider 不应收到压缩模型调用"
+    );
     assert_eq!(compaction_calls.len(), 1);
     assert_eq!(compaction_calls[0].provider, "deepseek");
     assert_eq!(compaction_calls[0].model, "compaction-x");
@@ -201,7 +208,10 @@ async fn timing5_try_start_falls_back_to_main_provider_when_compaction_provider_
     let (main_calls, compaction_calls) =
         run_timing5_try_start_case("deepseek", "openai", false).await;
 
-    assert!(compaction_calls.is_empty(), "未注入 compaction provider 时不应命中独立 provider");
+    assert!(
+        compaction_calls.is_empty(),
+        "未注入 compaction provider 时不应命中独立 provider"
+    );
     assert_eq!(main_calls.len(), 1);
     assert_eq!(main_calls[0].provider, "deepseek");
     assert_eq!(main_calls[0].model, "compaction-x");
@@ -261,7 +271,10 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
 
     let main_calls = main_calls.lock().unwrap().clone();
     let compaction_calls = compaction_calls.lock().unwrap().clone();
-    assert!(main_calls.is_empty(), "restart 也必须命中 compaction provider");
+    assert!(
+        main_calls.is_empty(),
+        "restart 也必须命中 compaction provider"
+    );
     assert_eq!(compaction_calls.len(), 1);
     assert_eq!(compaction_calls[0].provider, "deepseek");
     assert_eq!(compaction_calls[0].model, "compaction-x");

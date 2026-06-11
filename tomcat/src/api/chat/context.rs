@@ -769,7 +769,8 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.context.compaction_model = "deepseek-v4-pro".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+        let resolver: Arc<dyn LlmResolver> =
+            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
 
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "stub");
@@ -778,7 +779,10 @@ mod tests {
         let (context_config, provider) =
             resolve_child_agent_compaction_runtime(resolver.as_ref(), &cfg.context, None);
         assert_eq!(context_config.compaction_model, "deepseek-v4-pro");
-        assert!(provider.is_some(), "应把解析成功的 compaction provider 注入给子 Agent");
+        assert!(
+            provider.is_some(),
+            "应把解析成功的 compaction provider 注入给子 Agent"
+        );
 
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
@@ -794,7 +798,8 @@ mod tests {
         cfg.llm.default_model = "deepseek-v4-pro".to_string();
         cfg.context.compaction_model = "gpt-5.4".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+        let resolver: Arc<dyn LlmResolver> =
+            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
 
         unsafe {
             std::env::set_var("DEEPSEEK_API_KEY", "stub");
@@ -823,7 +828,8 @@ mod tests {
         cfg.llm.default_model = "deepseek-v4-pro".to_string();
         cfg.context.compaction_model = "gpt-5.4".to_string();
         let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
-        let resolver: Arc<dyn LlmResolver> = Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
+        let resolver: Arc<dyn LlmResolver> =
+            Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog));
 
         unsafe {
             std::env::remove_var("DEEPSEEK_API_KEY");
