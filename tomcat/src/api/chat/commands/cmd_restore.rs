@@ -311,12 +311,14 @@ pub(crate) fn other_session_restore_conflicts(
         return Vec::new();
     }
     let restore_set: std::collections::BTreeSet<PathBuf> = restore_paths.iter().cloned().collect();
-    let Ok(entries) = ctx.session_runtime.session.list_sessions() else {
+    let Ok(store) = ctx.session_runtime.session.load_store() else {
         return Vec::new();
     };
+    let mut session_ids: Vec<String> = store.sessions.keys().cloned().collect();
+    session_ids.sort();
     let mut conflicts = Vec::new();
-    for (session_id, _) in entries {
-        if current_session_id.is_some_and(|current| current == session_id) {
+    for session_id in session_ids {
+        if current_session_id.is_some_and(|current| current == session_id.as_str()) {
             continue;
         }
         let Ok(metas) = ctx

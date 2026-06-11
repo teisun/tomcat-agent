@@ -362,6 +362,91 @@ fn other_session_restore_conflicts_detect_overlapping_paths() {
 
 #[test]
 #[serial(env_lock)]
+fn other_session_restore_conflicts_include_other_scopes() {
+    if !git_available() {
+        return;
+    }
+
+    const API_ENV: &str = "TOMCAT_CMD_RESTORE_SCOPE_CONFLICT_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+
+    let current_session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .expect("current_session_id")
+        .expect("current session id");
+    std::fs::write(workspace.path().join("shared.txt"), "v1").unwrap();
+    ctx.scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: current_session_id.clone(),
+            turn_id: "turn-current".to_string(),
+            kind: CheckpointKind::Manual {
+                label: "current".to_string(),
+            },
+            message_anchor: None,
+            notes: None,
+        })
+        .expect("record checkpoint for current scope");
+
+    let current_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
+    let claw_key = crate::session_key_for(crate::SessionMode::Claw, workspace.path());
+    let code_key = crate::session_key_for(crate::SessionMode::Code, workspace.path());
+    let other_key = if current_key == claw_key {
+        code_key
+    } else {
+        claw_key
+    };
+    let other_manager = crate::SessionManager::new_scoped(
+        ctx.session_runtime.session.sessions_dir().to_path_buf(),
+        other_key,
+    );
+    let other_session = other_manager
+        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
+        .expect("other scope session");
+    std::fs::write(workspace.path().join("shared.txt"), "v2").unwrap();
+    ctx.scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: other_session.session_id.clone(),
+            turn_id: "turn-other-scope".to_string(),
+            kind: CheckpointKind::Manual {
+                label: "other-scope".to_string(),
+            },
+            message_anchor: None,
+            notes: None,
+        })
+        .expect("record checkpoint for other scope");
+
+    let conflicts = other_session_restore_conflicts(
+        &ctx,
+        Some(current_session_id.as_str()),
+        &[PathBuf::from("shared.txt")],
+    );
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].session_id, other_session.session_id);
+    assert_eq!(conflicts[0].paths, vec![PathBuf::from("shared.txt")]);
+}
+
+#[test]
+#[serial(env_lock)]
 fn restore_keeps_other_session_owned_paths_untouched() {
     if !git_available() {
         return;

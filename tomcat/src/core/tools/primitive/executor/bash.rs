@@ -313,8 +313,8 @@ async fn join_pipe_readers(
     stderr: &mut PipeReaderState,
 ) -> (Vec<u8>, Vec<u8>) {
     let (stdout_res, stderr_res) = tokio::join!(&mut stdout.task, &mut stderr.task);
-    let _ = stdout_res.unwrap_or_else(|_| Ok(()));
-    let _ = stderr_res.unwrap_or_else(|_| Ok(()));
+    let _ = stdout_res.unwrap_or(Ok(()));
+    let _ = stderr_res.unwrap_or(Ok(()));
     (stdout.snapshot(), stderr.snapshot())
 }
 

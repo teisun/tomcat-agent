@@ -123,6 +123,12 @@ fn cli_parse_code_resume() {
 }
 
 #[test]
+fn cli_parse_chat_alias_resume() {
+    let cli = Cli::try_parse_from(["tomcat", "chat", "--resume"]).unwrap();
+    assert!(matches!(cli.command, Some(Commands::Chat { resume: true })));
+}
+
+#[test]
 fn cli_parse_default_command_is_none() {
     let cli = Cli::try_parse_from(["tomcat"]).unwrap();
     assert!(cli.command.is_none());
