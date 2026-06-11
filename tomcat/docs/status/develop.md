@@ -1,6 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-08 14:55 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-06-11 15:52 +0800 | ACTIVE | develop | — |
+
+### 2026-06-11 | chore(release): 版本号 0.1.2 → 0.1.3
+
+- **动机**：`feature/optimize` 集成验收与 develop 侧补漏已收口，发布工件与 lockfile 需与当前 develop 基线对齐，便于后续 tag / release 流水线取号。
+- **范围**：仅 `Cargo.toml` / `Cargo.lock` 同步 `version = "0.1.3"`，无源码逻辑变更。
 
 ### 2026-06-11 | merge `feature/optimize` → develop（T2-P1-015 集成验收）
 
