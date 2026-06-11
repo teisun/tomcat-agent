@@ -53,6 +53,7 @@ pub(super) fn finalize_turn_after_text(
 
     // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
     let compaction_provider = agent.compaction_provider();
+    let compaction_emitter = Arc::new(agent.emitter.clone());
     let mut preheat_started: Option<(usize, f64)> = None;
     let mut layer0_release: Option<(usize, usize)> = None;
     if let Some(ref mut ctx_state) = agent.context_state {
@@ -80,12 +81,12 @@ pub(super) fn finalize_turn_after_text(
             &ctx_state.transcript_path,
             Arc::clone(&compaction_provider),
             &agent.config.context_config,
-            Arc::clone(&agent.event_bus),
+            Arc::clone(&compaction_emitter),
         );
 
         // Step 3: L2 non-blocking poll + apply boundary
         if ctx_state.usage_ratio() >= 0.85 {
-            crate::core::compaction::apply::check_after_reply(ctx_state, &*agent.event_bus);
+            crate::core::compaction::apply::check_after_reply(ctx_state, &agent.emitter);
         }
 
         // Step 4: Idle → Running (start new preheat if conditions met)
@@ -97,7 +98,7 @@ pub(super) fn finalize_turn_after_text(
             &ctx_state.transcript_path,
             Arc::clone(&compaction_provider),
             &agent.config.context_config,
-            Arc::clone(&agent.event_bus),
+            Arc::clone(&compaction_emitter),
         ) {
             preheat_started = Some((turn_count, ratio));
         }
@@ -118,7 +119,6 @@ pub(super) fn finalize_turn_after_text(
 
     agent.emit_context_metrics();
     agent.emit_event(AgentEvent::TurnEnd {
-        session_id: agent.config.session_id.clone(),
         turn_index,
         message: Message(serde_json::json!({})),
         tool_results: vec![],

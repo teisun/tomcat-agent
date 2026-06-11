@@ -1,10 +1,16 @@
 //! `preflight` 私有项单元测试（`tests/preflight_test.rs`，与同目录 `suite_test` / `cwd_lazy_prompt_test` 的 `*_test` 命名一致；由 `preflight.rs` 末尾 `#[path]` 挂载）。
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::infra::AppConfig;
+use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, ScopedEventEmitter};
+use serde_json::json;
 
-use super::{should_skip_git_preflight, should_skip_preflight, trim_for_event};
+use super::{
+    emit_git_preflight, emit_preflight, should_skip_git_preflight, should_skip_preflight,
+    trim_for_event,
+};
 
 #[test]
 fn should_skip_preflight_when_config_disables_auto_install() {
@@ -79,5 +85,66 @@ fn detached_marker_paths_are_distinct_per_preflight_kind() {
     assert_ne!(
         search_marker, git_marker,
         "search_tools 与 git 预检应使用不同 marker，避免互相误判为同一后台安装"
+    );
+}
+
+#[test]
+fn search_preflight_event_carries_session_id() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_SEARCH_TOOLS_PREFLIGHT,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(bus, "sid-preflight");
+
+    emit_preflight(
+        &emitter,
+        "ready",
+        "search tools ready",
+        json!({ "missing": [] }),
+    );
+
+    let ctx = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应收到 search_tools_preflight");
+    assert_eq!(ctx.session_id.as_deref(), Some("sid-preflight"));
+    assert_eq!(
+        ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+        Some("sid-preflight")
+    );
+}
+
+#[test]
+fn git_preflight_event_carries_session_id() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_GIT_PREFLIGHT,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(bus, "sid-git-preflight");
+
+    emit_git_preflight(&emitter, "ready", "git ready", json!({}));
+
+    let ctx = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("应收到 git_preflight");
+    assert_eq!(ctx.session_id.as_deref(), Some("sid-git-preflight"));
+    assert_eq!(
+        ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+        Some("sid-git-preflight")
     );
 }

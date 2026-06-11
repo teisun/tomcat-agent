@@ -130,7 +130,7 @@
 ### 14.3.1 设计原则
 
 - `AgentLoop` 无全局单例，可按 `session_id` 独立构造多个，天然支持并发。
-- `AgentLoopConfig.session_id` 已存在，`AgentEvent` 均携带此字段；多实例的事件在同一 `EventBus` 上以 `session_id` 区分，订阅方按需过滤。
+- `AgentLoopConfig.session_id` 已存在；会话级事件在发射时通过 `ScopedEventEmitter` 统一写入**事件信封**，因此 wire payload 顶层有 `sessionId`、`EventContext.session_id` 也同步可用；订阅方按 `ctx.session_id` 过滤即可。
 - 共享资源（`LlmProvider`、`PrimitiveExecutor`、`EventBus`）均以 `Arc<dyn ...>` 注入，内部按需持有线程安全结构，多实例并发安全。
 - 各实例的 `abort_signal: Arc<AtomicBool>` 独立，互不影响。
 
@@ -307,15 +307,18 @@ execute_tool("dispatch_agent", args)
 │
 ├─ registry.register(child_session_id, child_handle)
 │
-├─ 发布 AgentEvent::SubAgentStart { session_id, parent_session_id, task, spawn_depth }
+├─ 发布 AgentEvent::SubAgentStart { parent_session_id, child_session_id, subagent_type, spawn_depth }
+│    （事件信封上的 sessionId = child_session_id）
 │
 ├─ child_loop.run(vec![ ChatMessage::user(args.task) ]).await
 │
-│   ... 子 Agent 独立运行，所有 AgentEvent 以 session_id="S1:sub:<uuid>" 在 EventBus 发布 ...
+│   ... 子 Agent 独立运行；其会话级事件都经 ScopedEventEmitter 发出，
+│       因而 payload.sessionId == EventContext.session_id == "S1:sub:<uuid>" ...
 │
 ├─ registry.unregister(child_session_id)
 │
-├─ 发布 AgentEvent::SubAgentEnd { session_id, parent_session_id, result, is_error }
+├─ 发布 AgentEvent::SubAgentEnd { parent_session_id, child_session_id, subagent_type, outcome, error_message? }
+│    （事件信封上的 sessionId 仍 = child_session_id）
 │
 └─ 返回 ToolResult { content: child_result.final_text, is_error: false }
 ```
@@ -552,31 +555,32 @@ chat_loop ──── new ────▶ 父 AgentLoop(S1)
 
 ## 14.5 事件系统扩展
 
-在现有 [`src/infra/events.rs`](../../../src/infra/events.rs) 的 `AgentEvent` 枚举上新增两个变体（Phase 3 实现时补充）：
+在现有 [`src/infra/events.rs`](../../../src/infra/events.rs) 的 `AgentEvent` 枚举上新增两个变体（Phase 3 实现时补充）。注意：`sessionId` **不**再作为这两个变体的字段存在，而是由 `ScopedEventEmitter` 统一写到事件信封；对子 Agent 生命周期事件，信封上的 `sessionId` 固定绑定 **child session**。
 
 ```rust
 /// 子 Agent 启动时发布，用于 UI 展示嵌套任务树与进度追踪。
 SubAgentStart {
-    session_id:        String,   // 子 Agent 的 session_id
     parent_session_id: String,   // 父 Agent 的 session_id
-    task:              String,   // 子任务描述（截断到合理长度）
+    child_session_id:  String,   // 子 Agent 的 session_id
+    subagent_type:     String,   // reviewer / explore / shell / ...
     spawn_depth:       u32,      // 嵌套层数
 },
 
 /// 子 Agent 结束时发布（无论成功、失败、中止）。
 SubAgentEnd {
-    session_id:        String,
     parent_session_id: String,
-    result:            String,   // final_text 或错误描述
-    is_error:          bool,
-    elapsed_ms:        u64,      // 子 Agent 执行耗时
+    child_session_id:  String,
+    subagent_type:     String,
+    outcome:           String,   // completed / interrupted / failed
+    error_message:     Option<String>,
 },
 ```
 
 **父子事件追踪**：
 
-- `EventBus` 上所有事件均携带 `session_id`（已有），订阅方通过 `session_id.starts_with(parent_session_id)` 即可过滤整棵子树的事件。
-- 子 Agent 的 `ThinkingStart`、`ToolCallStart`、`ToolCallEnd` 等流式事件以子 `session_id` 发布，UI 层可按 `session_id` 分组展示嵌套进度树。
+- `SubAgentStart` / `SubAgentEnd` 的 `payload.sessionId` 与 `EventContext.session_id` 都等于 `child_session_id`；`parentSessionId` / `childSessionId` 继续保留在 payload 内，表达父子关系本身。
+- 子 Agent 的 `ThinkingStart`、`ToolCallStart`、`ToolCallEnd` 等流式事件同样以子 `session_id` 进入事件信封；UI / 协议层按 `ctx.session_id == child_session_id` 分组展示嵌套进度树。
+- 若父侧想观察整棵子树，不能再假设“事件字段里自带 `session_id`”；应订阅后读取 `EventContext.session_id`（或 `payload.sessionId`）并结合 `parentSessionId` / `childSessionId` 建树。
 
 ---
 
@@ -584,7 +588,7 @@ SubAgentEnd {
 
 | 章节 | 关系 |
 |------|------|
-| **第 8 节（事件系统）** | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；EventBus 共享实例，以 `session_id` 区分事件来源；订阅方通过前缀过滤追踪父子关系。 |
+| **第 8 节（事件系统）** | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；事件通过 envelope 统一携带 `sessionId`，其中子生命周期事件的 envelope `sessionId = child_session_id`；订阅方按 `EventContext.session_id` 过滤，并结合 `parentSessionId` / `childSessionId` 追踪父子关系。 |
 | **第 9 节（会话存储）** | `SessionEntry` 预留注释「channel/agent 相关字段供三期多 channel 使用」；本节给出 `parent_session_id` 的具体语义与写入时机（子 Agent 创建时 patch）。 |
 | **第 10 节（工作目录）** | 子 Agent session 的 transcript 路径沿用 `agents/<agentId>/sessions/` 布局，以 `child_session_id`（含冒号，需 URL encode 或替换为下划线）作为文件名。 |
 | **第 13 节（Agent Loop）** | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` / `subagent_type` / `role` 四个字段。 |

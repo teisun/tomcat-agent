@@ -14,6 +14,7 @@ use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
 use crate::infra::error::AppError;
+use crate::infra::ScopedEventEmitter;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
 
 use crate::core::plan_runtime;
@@ -284,16 +285,25 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     {
         tracing::warn!(error = %err, "plan_runtime attach_from_event failed; continuing with Chat mode");
     }
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()?
+        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+    let root_event_emitter = Arc::new(ScopedEventEmitter::new(
+        ctx.global_services.event_bus.clone(),
+        session_id.clone(),
+    ));
     let session_stderr_ids = events::stderr::register_chat_session_stderr_listeners(
         &*ctx.global_services.event_bus,
         search_tools_printer,
         ctx.config.preflight.show_search_tools_ui,
         ctx.config.preflight.show_git_ui,
     );
-    preflight::start_search_tools_preflight(&ctx.config, ctx.global_services.event_bus.clone());
+    preflight::start_search_tools_preflight(&ctx.config, Arc::clone(&root_event_emitter));
     preflight::start_git_preflight(
         &ctx.config,
-        ctx.global_services.event_bus.clone(),
+        Arc::clone(&root_event_emitter),
         ctx.scope_services.checkpoint_switcher.clone(),
     );
 
@@ -435,6 +445,15 @@ pub async fn run_chat_turn(
     ctx.session_runtime
         .plan_runtime
         .attach_cancel_hook(turn_token.clone());
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()?
+        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+    let root_event_emitter = Arc::new(ScopedEventEmitter::new(
+        ctx.global_services.event_bus.clone(),
+        session_id.clone(),
+    ));
 
     let entry = ctx
         .session_runtime
@@ -445,11 +464,6 @@ pub async fn run_chat_turn(
     let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
     let model = main_call.model.clone();
-    let session_id = ctx
-        .session_runtime
-        .session
-        .current_session_id()?
-        .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
@@ -492,9 +506,9 @@ pub async fn run_chat_turn(
         &context_state.transcript_path,
         compaction_provider.clone(),
         &context_config,
-        ctx.global_services.event_bus.clone(),
+        Arc::clone(&root_event_emitter),
     );
-    check_before_request(context_state, &*ctx.global_services.event_bus).await;
+    check_before_request(context_state, &root_event_emitter).await;
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_timing2_check",
@@ -527,7 +541,7 @@ pub async fn run_chat_turn(
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         model,
-        session_id,
+        session_id: session_id.clone(),
         tool_definitions: build_tool_definitions(ctx),
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
@@ -574,6 +588,7 @@ pub async fn run_chat_turn(
     let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
         Arc::clone(&renderer),
         Arc::clone(&ctx.session_runtime.thinking_display),
+        Some(session_id.clone()),
         ctx.config.llm.thinking.print_to_stderr,
         ctx.config.llm.tool_cli_verbosity,
     );

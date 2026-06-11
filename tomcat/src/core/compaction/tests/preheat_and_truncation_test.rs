@@ -13,6 +13,7 @@ use crate::core::session::transcript::{
 use crate::infra::config::ContextConfig;
 use crate::infra::error::{is_context_overflow_text, AppError};
 use crate::infra::event_bus::{DefaultEventBus, EventBus};
+use crate::infra::{wire, EventContext};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -217,6 +218,19 @@ async fn preheat_retries_with_exponential_backoff() {
     let (provider, calls) = AlwaysFailingProvider::new();
     let provider: Arc<dyn LlmProvider> = Arc::new(provider);
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    event_bus.on(
+        wire::WIRE_COMPACTION_ERROR,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let event_emitter = Arc::new(crate::infra::ScopedEventEmitter::new(
+        Arc::clone(&event_bus),
+        "sid-preheat-test",
+    ));
     let cfg = ContextConfig::default();
 
     let messages = vec![
@@ -233,7 +247,7 @@ async fn preheat_retries_with_exponential_backoff() {
         &dummy_path,
         provider,
         &cfg,
-        event_bus.clone(),
+        Arc::clone(&event_emitter),
     );
     assert!(
         did_start,
@@ -260,6 +274,20 @@ async fn preheat_retries_with_exponential_backoff() {
     assert!(
         elapsed < Duration::from_secs(5),
         "总等待不应包含第 3 次 sleep 或额外延时，实际 {elapsed:?}",
+    );
+    let ctx = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("耗尽后应发出 compaction_error");
+    assert_eq!(ctx.session_id.as_deref(), Some("sid-preheat-test"));
+    assert_eq!(
+        ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+        Some("sid-preheat-test")
+    );
+    assert_eq!(
+        ctx.payload.get("source").and_then(|v| v.as_str()),
+        Some("preheat")
     );
 }
 
@@ -293,6 +321,10 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
     let (provider, _) = AlwaysFailingProvider::new();
     let provider: Arc<dyn LlmProvider> = Arc::new(provider);
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let event_emitter = Arc::new(crate::infra::ScopedEventEmitter::new(
+        Arc::clone(&event_bus),
+        "sid-preheat-test",
+    ));
     let cfg = ContextConfig::default();
 
     let messages = vec![
@@ -301,7 +333,14 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
     ];
 
     let mut preheat = Preheat::new();
-    let did_start = preheat.try_start(0.95, &messages, &path, provider, &cfg, event_bus.clone());
+    let did_start = preheat.try_start(
+        0.95,
+        &messages,
+        &path,
+        provider,
+        &cfg,
+        Arc::clone(&event_emitter),
+    );
     assert!(did_start);
     let outcome = preheat.await_result(Duration::from_secs(60)).await;
     assert!(matches!(outcome, PreheatOutcome::Exhausted));

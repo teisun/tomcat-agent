@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 use crate::core::plan_runtime::panels::{AskQuestionPanel, AskQuestionResult, Question};
-use crate::infra::{wire, EventBus, EventContext};
+use crate::infra::{wire, EventBus, ScopedEventEmitter};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
 
@@ -48,6 +48,7 @@ pub fn ask_question_response_event_name(request_id: &str) -> String {
 /// `plan.ask_question`，并向 request 指定的 `response_event` 回包即可。
 pub struct EventBusAskQuestionPanel {
     event_bus: Arc<dyn EventBus>,
+    request_emitter: ScopedEventEmitter,
     next_request_seq: AtomicU64,
     request_id_prefix: String,
 }
@@ -55,10 +56,16 @@ pub struct EventBusAskQuestionPanel {
 impl EventBusAskQuestionPanel {
     pub fn new(event_bus: Arc<dyn EventBus>) -> Self {
         Self {
+            request_emitter: ScopedEventEmitter::new_optional(event_bus.clone(), None),
             event_bus,
             next_request_seq: AtomicU64::new(0),
             request_id_prefix: "askq".to_string(),
         }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.request_emitter = ScopedEventEmitter::new(self.event_bus.clone(), session_id);
+        self
     }
 
     pub fn with_request_id_prefix(mut self, prefix: impl Into<String>) -> Self {
@@ -117,11 +124,8 @@ impl AskQuestionPanel for EventBusAskQuestionPanel {
             }
         };
         if self
-            .event_bus
-            .emit_sync(
-                ask_question_request_event_name(),
-                EventContext::new(ask_question_request_event_name(), payload),
-            )
+            .request_emitter
+            .emit_payload(ask_question_request_event_name(), payload)
             .is_err()
         {
             self.event_bus.off(listener_id);

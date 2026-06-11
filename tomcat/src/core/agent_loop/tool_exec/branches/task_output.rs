@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::core::agent_loop::types::{BackgroundCompletionRoutes, CompletionRoute, ToolCallInfo};
 use crate::core::tools::primitive::{BashTaskRegistry, WakeReason};
-use crate::infra::event_bus::EventBus;
+use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::{AgentEvent, ToolOutput};
 
 use super::super::ToolExecCtx;
@@ -53,7 +53,7 @@ pub(in super::super) async fn handle_task_output(
         timeout_ms,
         ctx.cancel,
         tc,
-        ctx.event_bus,
+        ctx.event_emitter,
         ctx.completion_routes,
     )
     .await
@@ -67,7 +67,7 @@ async fn handle_task_output_blocking(
     timeout_ms: u64,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
-    event_bus: Option<&Arc<dyn EventBus>>,
+    event_emitter: Option<&ScopedEventEmitter>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> Result<String, String> {
     use std::time::Instant;
@@ -100,7 +100,7 @@ async fn handle_task_output_blocking(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     ticker.tick().await;
     emit_task_output_update(
-        event_bus,
+        event_emitter,
         tc,
         task_id,
         since_value,
@@ -137,7 +137,7 @@ async fn handle_task_output_blocking(
             _ = ticker.tick() => {
                 let remaining = timeout_ms.saturating_sub(elapsed_ms(started));
                 emit_task_output_update(
-                    event_bus,
+                        event_emitter,
                     tc,
                     task_id,
                     since_value,
@@ -246,7 +246,7 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
 
 #[allow(clippy::too_many_arguments)]
 fn emit_task_output_update(
-    event_bus: Option<&Arc<dyn EventBus>>,
+    event_emitter: Option<&ScopedEventEmitter>,
     tc: &ToolCallInfo,
     task_id: &str,
     since: u64,
@@ -255,7 +255,7 @@ fn emit_task_output_update(
     phase: &str,
     wake_reason: Option<&str>,
 ) {
-    let Some(bus) = event_bus else {
+    let Some(emitter) = event_emitter else {
         return;
     };
     let mut partial = serde_json::Map::new();
@@ -290,19 +290,13 @@ fn emit_task_output_update(
         args,
         partial_result: ToolOutput(serde_json::Value::Object(partial)),
     };
-    let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-    let event_name = payload
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("tool_execution_update")
-        .to_string();
-    let ctx = crate::infra::event_bus::EventContext::new(event_name.clone(), payload);
-    let _ = bus.emit_sync(&event_name, ctx);
+    let _ = emitter.emit(event);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::{wire, DefaultEventBus, EventBus, EventContext};
 
     #[tokio::test]
     async fn finish_blocking_with_new_output_and_finished_marks_delivered() {
@@ -401,5 +395,52 @@ mod tests {
         );
         assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
         assert!(delivered, "timeout 命中已 finished 应 claim Delivered");
+    }
+
+    #[test]
+    fn task_output_update_event_inherits_scoped_session_id() {
+        let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+        let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+        let captured_cb = Arc::clone(&captured);
+        bus.on(
+            wire::WIRE_TOOL_EXECUTION_UPDATE,
+            Box::new(move |ctx: EventContext| {
+                *captured_cb.lock().unwrap() = Some(ctx);
+                Ok(())
+            }),
+        );
+        let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "sid-task-output");
+        let tc = ToolCallInfo {
+            id: "call-task".to_string(),
+            name: "task_output".to_string(),
+            arguments: r#"{"task_id":"task-1","since":0,"block":true,"timeout_ms":150}"#
+                .to_string(),
+        };
+
+        emit_task_output_update(
+            Some(&emitter),
+            &tc,
+            "task-1",
+            0,
+            150,
+            100,
+            "waiting_for_output",
+            None,
+        );
+
+        let ctx = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("应捕获到 tool_execution_update");
+        assert_eq!(ctx.session_id.as_deref(), Some("sid-task-output"));
+        assert_eq!(
+            ctx.payload.get("sessionId").and_then(|v| v.as_str()),
+            Some("sid-task-output")
+        );
+        assert_eq!(
+            ctx.payload.get("toolName").and_then(|v| v.as_str()),
+            Some("task_output")
+        );
     }
 }

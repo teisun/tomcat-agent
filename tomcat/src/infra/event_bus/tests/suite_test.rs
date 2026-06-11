@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::super::*;
+use crate::infra::events::{AgentEvent, ExtensionEvent, ToolOutput};
 use crate::infra::wire;
 
 /// CLI 曾每轮 `run` 结束后 `off` 掉 `auto_compaction_end`；Layer1 在 `readline` 空闲时才 emit 会无人消费。
@@ -167,7 +168,162 @@ fn event_context_with_plugin_id_and_priority() {
         .with_plugin_id("plugin-1")
         .with_priority(42);
     assert_eq!(ctx.plugin_id.as_deref(), Some("plugin-1"));
+    assert_eq!(ctx.session_id, None);
     assert_eq!(ctx.priority, 42);
+}
+
+#[test]
+fn event_context_with_session_id_sets_non_empty_value() {
+    let ctx = EventContext::new("ev", serde_json::json!({})).with_session_id("s1");
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+}
+
+#[test]
+fn event_context_new_defaults_session_id_to_none() {
+    let ctx = EventContext::new("ev", serde_json::json!({}));
+    assert_eq!(ctx.session_id, None);
+}
+
+#[test]
+fn scoped_event_emitter_writes_session_id_to_payload_and_context() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_TOOL_EXECUTION_START,
+        Box::new(move |ctx| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "s1");
+    emitter
+        .emit(AgentEvent::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({"path": "src/main.rs"}),
+        })
+        .unwrap();
+    let ctx = captured.lock().unwrap().clone().expect("captured ctx");
+    assert_eq!(ctx.event_name, wire::WIRE_TOOL_EXECUTION_START);
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+    assert_eq!(ctx.payload["sessionId"].as_str(), Some("s1"));
+    assert_eq!(ctx.payload["toolCallId"].as_str(), Some("c1"));
+}
+
+#[test]
+fn scoped_event_emitter_normalizes_empty_session_id_to_none() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_TOOL_CALL_STREAMING,
+        Box::new(move |ctx| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "");
+    emitter
+        .emit(AgentEvent::ToolCallStreaming {
+            tool_call_id: "c1".into(),
+            tool_name: "write".into(),
+            args_preview: serde_json::json!({"path": "~/demo.txt"}),
+        })
+        .unwrap();
+    let ctx = captured.lock().unwrap().clone().expect("captured ctx");
+    assert_eq!(ctx.session_id, None);
+    assert!(ctx.payload.get("sessionId").is_none());
+}
+
+#[test]
+fn scoped_event_emitter_emits_extension_events_with_session_id() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_TOOL_RESULT,
+        Box::new(move |ctx| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "s1");
+    emitter
+        .emit_extension(ExtensionEvent::ToolResult {
+            tool_name: "read".into(),
+            tool_call_id: "c1".into(),
+            input: serde_json::json!({"path": "src/main.rs"}),
+            content: vec![crate::infra::events::ContentBlock(
+                serde_json::json!({"text": "ok"}),
+            )],
+            details: None,
+            is_error: false,
+        })
+        .unwrap();
+    let ctx = captured.lock().unwrap().clone().expect("captured ctx");
+    assert_eq!(ctx.event_name, wire::WIRE_TOOL_RESULT);
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+    assert_eq!(ctx.payload["sessionId"].as_str(), Some("s1"));
+}
+
+#[test]
+fn scoped_event_emitter_emits_raw_payload_with_session_id_and_plugin_id() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        "search_tools_preflight",
+        Box::new(move |ctx| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "s1");
+    emitter
+        .emit_payload_with_plugin_id(
+            "search_tools_preflight",
+            serde_json::json!({"status": "ready"}),
+            "plugin-1",
+        )
+        .unwrap();
+    let ctx = captured.lock().unwrap().clone().expect("captured ctx");
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+    assert_eq!(ctx.plugin_id.as_deref(), Some("plugin-1"));
+    assert_eq!(ctx.payload["sessionId"].as_str(), Some("s1"));
+    assert_eq!(ctx.payload["status"].as_str(), Some("ready"));
+}
+
+#[tokio::test]
+async fn scoped_event_emitter_can_be_cloned_into_spawn() {
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<EventContext>));
+    let captured_cb = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_TOOL_EXECUTION_END,
+        Box::new(move |ctx| {
+            *captured_cb.lock().unwrap() = Some(ctx);
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "s1");
+    let task_emitter = emitter.clone();
+    tokio::spawn(async move {
+        task_emitter
+            .emit(AgentEvent::ToolExecutionEnd {
+                tool_call_id: "c1".into(),
+                tool_name: "bash".into(),
+                result: ToolOutput(serde_json::json!({"stdout": "ok"})),
+                display: None,
+                is_error: false,
+            })
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let ctx = captured.lock().unwrap().clone().expect("captured ctx");
+    assert_eq!(ctx.session_id.as_deref(), Some("s1"));
+    assert_eq!(ctx.payload["sessionId"].as_str(), Some("s1"));
 }
 
 #[test]

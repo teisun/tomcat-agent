@@ -46,7 +46,7 @@ use std::sync::Arc;
 use crate::core::tools::primitive::{BashTaskRegistry, PrimitiveExecutor};
 #[cfg(test)]
 use crate::infra::error::AppError;
-use crate::infra::event_bus::EventBus;
+use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::ToolDisplay;
 use tracing::warn;
 
@@ -147,7 +147,7 @@ struct ToolExecCtx<'a> {
     review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     expose_skills_to_reviewer: bool,
     cancel: &'a tokio_util::sync::CancellationToken,
-    event_bus: Option<&'a Arc<dyn EventBus>>,
+    event_emitter: Option<&'a ScopedEventEmitter>,
     completion_routes: Option<&'a BackgroundCompletionRoutes>,
 }
 
@@ -236,7 +236,7 @@ pub(super) async fn execute_tool_full(
     // P1（bash background monitor）：传 event_bus 给 task_output(block=true) 发倒计时
     // ToolExecutionUpdate；传 completion_routes 让 dispatcher 走 claim-on-entry 去重。
     // 二者均可为 None（向后兼容独立单测/未注入路径）。
-    event_bus: Option<&Arc<dyn EventBus>>,
+    event_emitter: Option<&ScopedEventEmitter>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
     execute_tool_full_with_policy(
@@ -255,7 +255,7 @@ pub(super) async fn execute_tool_full(
         false,
         cancel,
         tc,
-        event_bus,
+        event_emitter,
         completion_routes,
     )
     .await
@@ -278,7 +278,7 @@ pub(super) async fn execute_tool_full_with_policy(
     expose_skills_to_reviewer: bool,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
-    event_bus: Option<&Arc<dyn EventBus>>,
+    event_emitter: Option<&ScopedEventEmitter>,
     completion_routes: Option<&BackgroundCompletionRoutes>,
 ) -> ToolExecOutcome {
     let mut display = None;
@@ -297,7 +297,7 @@ pub(super) async fn execute_tool_full_with_policy(
         review_kind,
         expose_skills_to_reviewer,
         cancel,
-        event_bus,
+        event_emitter,
         completion_routes,
     };
     let (model_text, is_error, follow_up_parts) =

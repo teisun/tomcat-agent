@@ -14,8 +14,9 @@
 //! 内聚后 T2-P0-003（`stream_timeout_sec`）/ T2-P0-006（Thinking delta 透出）
 //! 只需在此函数内加 `tokio::time::timeout` / `StreamEvent::Reasoning` 分支。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use regex::Regex;
 use tokio_stream::StreamExt;
 use tracing::info;
 
@@ -49,6 +50,17 @@ use super::types::{AgentLoop, LoopError, StreamOutcome, ToolCallAccumulator};
 ///   分支访问 `&mut agent.context_state` 不与流借用冲突。
 /// - 无 `block_on`、无嵌套 `spawn_blocking`；所有 await 点都被 `tokio::select!`
 ///   包裹，`biased;` 让 cancel 优先被轮询。
+pub(crate) fn extract_path_from_partial_args(args: &str) -> Option<String> {
+    static PATH_RE: OnceLock<Regex> = OnceLock::new();
+    let re = PATH_RE.get_or_init(|| {
+        Regex::new(r#""path"\s*:\s*"((?:\\.|[^"\\])*)""#)
+            .expect("path preview regex should compile")
+    });
+    let captures = re.captures(args)?;
+    let raw = captures.get(1)?.as_str();
+    serde_json::from_str::<String>(&format!("\"{}\"", raw)).ok()
+}
+
 pub(super) async fn run_chat_stream(
     agent: &mut AgentLoop,
     req: ChatRequest,
@@ -106,6 +118,7 @@ pub(super) async fn run_chat_stream(
     let mut continuity: Option<crate::core::llm::ContinuityMetadata> = None;
     let mut pending_notice: Option<(String, String)> = None;
     let mut aborted_during_stream = false;
+    let mut streaming_announced: Vec<bool> = Vec::new();
 
     agent.emit_event(AgentEvent::MessageStart {
         message: Message(serde_json::json!({})),
@@ -165,18 +178,40 @@ pub(super) async fn run_chat_stream(
                 name,
                 arguments_delta,
             }) => {
-                while tool_calls_buf.len() <= index as usize {
+                let idx = index as usize;
+                while tool_calls_buf.len() <= idx {
                     tool_calls_buf.push(ToolCallAccumulator::default());
+                    streaming_announced.push(false);
                 }
-                let acc = &mut tool_calls_buf[index as usize];
-                if let Some(id_val) = id {
-                    acc.id = id_val;
+                let mut streaming_event: Option<(String, String, serde_json::Value)> = None;
+                {
+                    let acc = &mut tool_calls_buf[idx];
+                    if let Some(id_val) = id {
+                        acc.id = id_val;
+                    }
+                    if let Some(name_val) = name {
+                        acc.name = name_val;
+                    }
+                    if let Some(args) = arguments_delta {
+                        acc.arguments.push_str(&args);
+                    }
+                    if !streaming_announced[idx]
+                        && !acc.id.is_empty()
+                        && matches!(acc.name.as_str(), "write" | "edit" | "hashline_edit")
+                    {
+                        let args_preview = extract_path_from_partial_args(&acc.arguments)
+                            .map(|path| serde_json::json!({ "path": path }))
+                            .unwrap_or(serde_json::Value::Null);
+                        streaming_event = Some((acc.id.clone(), acc.name.clone(), args_preview));
+                        streaming_announced[idx] = true;
+                    }
                 }
-                if let Some(name_val) = name {
-                    acc.name = name_val;
-                }
-                if let Some(args) = arguments_delta {
-                    acc.arguments.push_str(&args);
+                if let Some((tool_call_id, tool_name, args_preview)) = streaming_event {
+                    agent.emit_event(AgentEvent::ToolCallStreaming {
+                        tool_call_id,
+                        tool_name,
+                        args_preview,
+                    });
                 }
             }
             Ok(StreamEvent::FinishReason { reason }) => {

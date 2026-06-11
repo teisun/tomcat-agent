@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::core::agent_loop::SubagentType;
-use crate::infra::event_bus::EventContext;
+use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::AgentEvent;
 use crate::EventBus;
 
@@ -300,12 +300,15 @@ impl AgentRegistry {
         let spawn_depth = child_handle.spawn_depth;
 
         // emit SubAgentStart
-        self.emit(AgentEvent::SubAgentStart {
-            parent_session_id: parent_session_id.to_string(),
-            child_session_id: child_session_id.clone(),
-            subagent_type: subagent_type.as_str().to_string(),
-            spawn_depth,
-        });
+        self.emit(
+            Some(&child_session_id),
+            AgentEvent::SubAgentStart {
+                parent_session_id: parent_session_id.to_string(),
+                child_session_id: child_session_id.clone(),
+                subagent_type: subagent_type.as_str().to_string(),
+                spawn_depth,
+            },
+        );
 
         let ctx = SubagentSpawnContext {
             child_session_id: child_session_id.clone(),
@@ -324,24 +327,30 @@ impl AgentRegistry {
 
         match outcome_result {
             Ok(outcome) => {
-                self.emit(AgentEvent::SubAgentEnd {
-                    parent_session_id: parent_session_id.to_string(),
-                    child_session_id: outcome.child_session_id.clone(),
-                    subagent_type: outcome.subagent_type.as_str().to_string(),
-                    outcome: outcome.outcome_label.as_str().to_string(),
-                    error_message: outcome.error_message.clone(),
-                });
+                self.emit(
+                    Some(&outcome.child_session_id),
+                    AgentEvent::SubAgentEnd {
+                        parent_session_id: parent_session_id.to_string(),
+                        child_session_id: outcome.child_session_id.clone(),
+                        subagent_type: outcome.subagent_type.as_str().to_string(),
+                        outcome: outcome.outcome_label.as_str().to_string(),
+                        error_message: outcome.error_message.clone(),
+                    },
+                );
                 Ok(outcome)
             }
             Err(join_err) => {
                 let msg = format!("{join_err}");
-                self.emit(AgentEvent::SubAgentEnd {
-                    parent_session_id: parent_session_id.to_string(),
-                    child_session_id: child_session_id.clone(),
-                    subagent_type: subagent_type.as_str().to_string(),
-                    outcome: "failed".to_string(),
-                    error_message: Some(format!("panic: {msg}")),
-                });
+                self.emit(
+                    Some(&child_session_id),
+                    AgentEvent::SubAgentEnd {
+                        parent_session_id: parent_session_id.to_string(),
+                        child_session_id: child_session_id.clone(),
+                        subagent_type: subagent_type.as_str().to_string(),
+                        outcome: "failed".to_string(),
+                        error_message: Some(format!("panic: {msg}")),
+                    },
+                );
                 Err(SpawnError::Panic(msg))
             }
         }
@@ -418,18 +427,13 @@ impl AgentRegistry {
         Ok((child, parent))
     }
 
-    fn emit(&self, ev: AgentEvent) {
+    fn emit(&self, session_id: Option<&str>, ev: AgentEvent) {
         let Some(bus) = self.event_bus.as_ref() else {
             return;
         };
-        let payload = serde_json::to_value(&ev).unwrap_or(serde_json::Value::Null);
-        let event_name = payload
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let ctx = EventContext::new(event_name.clone(), payload);
-        let _ = bus.emit_sync(&event_name, ctx);
+        let emitter =
+            ScopedEventEmitter::new_optional(Arc::clone(bus), session_id.map(str::to_string));
+        let _ = emitter.emit(ev);
     }
 
     /// 构造一个顶层 root handle（spawn_depth=0、subagent_type=User）并注册。

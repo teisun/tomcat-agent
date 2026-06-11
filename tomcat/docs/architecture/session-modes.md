@@ -196,6 +196,56 @@
 | **D17 LLM 共享实例 + 并发准入** | 多会话调 LLM：每会话 new 一个，还是共享一个 + 限流？ | 采用**单一共享 `Arc<dyn LlmProvider>` + `max_concurrent_requests` 信号量做全局准入**；拒绝 per-session new provider / 全局单队列串行 | 本仓 `core/llm/provider.rs`(`LlmProvider: Send+Sync`)、`core/llm/openai.rs`(`semaphore: Option<Semaphore>`、`chat_stream` 取回流后 `_permit` 即 drop)、`infra/config/types/llm.rs`(`max_concurrent_requests`,默认4)；codex `codex-rs/core/src/client.rs`(共享 client)、openclaw lane 限流 | 设计：共享 provider，准入控制集中在信号量；理由：上游配额/费用按 API key **全局**算，per-session 实例会让预算变 N×、连接池翻 N 份且仍管不住账号级限速；流式 permit 在拿到响应头后即释放→token 外流期不占额度→多会话**不会互相卡**，信号量只压"同时发起新请求"的瞬时并发；"串台"由 D15 事件带 sessionId 解决，与 LLM 实例无关 | per-session new provider：全局预算失效(N×)、连接池浪费、且不解决串台；全局单队列串行：B 必须等 A 整条流跑完→正是要避免的"排队卡死" | 背景：担心"A 会话流式输出时 B 卡住"。解决：共享一个 LLM 客户端，用一个全局信号量做准入；流式一拿到响应头就把名额还回去，所以同时在跑的流可以远超并发数，只有"同一瞬间发起新请求"超过 `max_concurrent_requests` 才短暂等待。把它设成 ≥ 期望并发会话数即可，它是全局成本闸门、不是 per-session 节流。 |
 | **D18 checkpoint 作用域与 per-session 回退** | checkpoint 多会话怎么放、回退怎么不波及别的会话？ | 采用 **按 work_tree 缓存一个 store 实例、同项目所有会话共用**（保住总锁串行）；restore 用 `RestoreOptions.paths` **收窄为"本会话改过的文件"**；record 仍 `git add -A` 整树快照保一致性；拒绝 per-session new store | 本仓 `core/checkpoint/shadow_git.rs`(`git_dir=checkpoints_root/workdir_hash(work_tree)`、`lock: Mutex<()>` 串行 record/restore、`record_impl` 整树 `git add -A`、`restore` 走 `git checkout <commit> -- <pathspecs>`)、`core/checkpoint/types.rs`(`RestoreOptions.paths`)、`api/chat/commands/cmd_restore.rs`(已透传 paths)；codex 每 thread 维度回滚、cc-fork `src/utils/sessionStorage.ts`(按 cwd 分仓) | 设计：store 实例按项目缓存共用、回退按会话改动收窄；理由：`git_dir` 由 work_tree 推出——per-session new 会让同项目 N 个 store 指向**同一磁盘仓库却各持独立 `Mutex`**，跨会话串行失效→并发 `git commit/checkout` 撞 `index.lock`、可能损坏；共用一个实例则总锁天然串行（只排队不卡死）；restore 传 `paths=本会话改过的文件` 即只回退自己碰过的，不动别会话独占文件 | per-session new store：同项目多实例同 `git_dir`、各自独立锁→串行保证失效、git 损坏；整树无差别 restore：回退 A 时把 B 改过的文件一起退掉 | 背景：新架构下"每会话自带一个 checkpoint"反而危险，且整树回退会波及别的会话。解决：同一个项目共用一个 checkpoint 仓库实例（一把锁把并发 store 排好队，不会卡死），回滚时只挑"这个会话改过的文件"还原。**残留风险**：A、B 同时改了同一个文件时无法隔离——单工作树一个文件只有一份磁盘态，回退该文件必然丢另一会话的改动（需独立 worktree 才能根治，见 §12）。 |
 
+#### D15 补充：事件信封（envelope）与 `sessionId` 双通道
+
+专业描述：D15 不是“给若干事件字段补一个 `sessionId`”那么简单，而是把 `sessionId` 收敛为**事件信封元数据**。领域事件 (`AgentEvent` / `ExtensionEvent`) 继续只表达业务语义；真正发射时，由 `ScopedEventEmitter { bus, session_id }` 在唯一出口统一完成两件事：一是把 `sessionId` 注入 wire payload 顶层 JSON（协议 / 审计 / 插件消费）；二是把同一份 `session_id` 写入 `EventContext.session_id`（进程内路由 / UI 过滤消费）。这样可以同时满足“协议侧需要看到 `sessionId`”与“消费侧需要 O(1) 过滤”这两个目标，又避免把 `sessionId` 手工塞进每个枚举变体。
+
+说人话：现在不是每个事件自己背着一个 `sessionId` 到处跑，而是**出门前统一装进信封**。信封里有两条线：`payload.sessionId` 给“线上的 JSON 世界”看，`EventContext.session_id` 给“进程里的订阅者”看。两条线写的是同一个值，但职责不同，所以都保留。
+
+```text
+SessionRuntime / AgentLoop / AgentRegistry(child) / preflight / ask_question
+                    │
+                    │  在创建时拿到本 session 的 session_id
+                    ▼
+        ScopedEventEmitter { bus, session_id }
+                    │
+                    ├─ emit(AgentEvent / ExtensionEvent)
+                    │      └─ to_value(WireEnvelope { sessionId, ...event })
+                    │
+                    └─ emit_payload(event_name, payload)
+                    │      └─ 对原始 JSON 事件补 payload.sessionId
+                    ▼
+    EventContext {
+      event_name,
+      payload,        // wire JSON：给协议 / 审计 / 插件看，含 sessionId + type + data
+      session_id,     // 进程内路由标签：给 CLI/TUI/IDE 订阅者做 demux
+      plugin_id,
+      priority,
+    }
+                    │
+                    ▼
+                 EventBus
+                    │
+        ┌───────────┴──────────────────────────────────────┐
+        ▼                                                  ▼
+协议 / 审计 / 插件消费                              CLI / TUI / IDE 渲染消费
+读 payload.sessionId                                看 EventContext.session_id
+（序列化边界真相）                                  - 命中本 session → 渲染
+                                                    - None → 视为全局事件，放行
+                                                    - 其他 session → 丢弃
+
+子 Agent 特例：
+payload.sessionId == ctx.session_id == child_session_id
+parentSessionId / childSessionId 继续留在 payload，表达“父是谁 / 子是谁”的业务语义
+```
+
+实现约束：
+- **唯一出口**：领域事件一律经 `ScopedEventEmitter::emit` / `emit_extension` 发射；原始 JSON 事件（如 preflight / ask_question bridge）一律经 `emit_payload*` 发射。
+- **领域枚举不内嵌 `sessionId`**：`sessionId` 是 envelope 元数据，不再散落进 `AgentStart` / `TurnStart` / `SubAgentStart` 等变体字段。
+- **`EventContext.session_id` 不是冗余副本**：它是消费侧的快速路由标签，避免每个订阅者都反复解析 `payload["sessionId"]`。
+- **消费侧显式过滤**：绑定到某个会话的渲染器（如 CLI turn renderer）必须做 `accepts(ctx.session_id)` 检查；`None` 仅用于确属全局的进程级事件。
+- **child session 语义固定**：对子 Agent 生命周期事件，信封上的 `sessionId` 绑定 child，而不是 parent；`parentSessionId` / `childSessionId` 继续作为业务字段保留在 payload。
+
 ### 4.2 实施点（按阶段闭环）
 
 专业描述：`§4.1` 回答“为什么选这些设计”，`§4.2` 回答“这些设计怎么分批合进主线、每批交什么、改哪儿、拿什么验”。因此这里**不按文件流水账**写，而按**实施点 / 阶段边界**写：先给总表钉死交付边界、主要代码落点和验收锚点，再用 `§4.2.x` 小结把每一行展开成“技术要点 + ASCII”。

@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
 use crate::core::tools::primitive::PrimitiveExecutor;
-use crate::infra::event_bus::{EventBus, EventContext};
+use crate::infra::event_bus::{EventBus, ScopedEventEmitter};
 use crate::infra::events::{AgentEvent, ExtensionEvent};
 
 use super::types::{AgentLoop, AgentLoopConfig, BackgroundCompletionRoutes, LoopError};
@@ -44,10 +44,14 @@ impl AgentLoop {
         config: AgentLoopConfig,
         cancel_token: CancellationToken,
     ) -> Self {
+        let emitter = ScopedEventEmitter::new_optional(
+            Arc::clone(&event_bus),
+            Some(config.session_id.clone()),
+        );
         Self {
             llm,
             primitive,
-            event_bus,
+            emitter,
             config_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
@@ -155,10 +159,14 @@ impl AgentLoop {
         cancel_token: CancellationToken,
         steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     ) -> Self {
+        let emitter = ScopedEventEmitter::new_optional(
+            Arc::clone(&event_bus),
+            Some(config.session_id.clone()),
+        );
         Self {
             llm,
             primitive,
-            event_bus,
+            emitter,
             config_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
@@ -290,27 +298,13 @@ impl AgentLoop {
     /// 通过 `EventBus::emit_sync` 同步派发。`emit_sync` 错误被吞掉（事件总线
     /// 失败不应阻塞主流程）。
     pub(super) fn emit_event(&self, event: AgentEvent) {
-        let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-        let event_name = payload
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let ctx = EventContext::new(event_name.clone(), payload);
-        let _ = self.event_bus.emit_sync(&event_name, ctx);
+        let _ = self.emitter.emit(event);
     }
 
     /// `ExtensionEvent`（ToolCall / ToolResult 等）走与 `emit_event` 完全相同的
     /// wire 协议；分两个方法仅为类型签名清晰，运行时行为一致。
     pub(super) fn emit_extension_event(&self, event: ExtensionEvent) {
-        let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-        let event_name = payload
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let ctx = EventContext::new(event_name.clone(), payload);
-        let _ = self.event_bus.emit_sync(&event_name, ctx);
+        let _ = self.emitter.emit_extension(event);
     }
 
     /// 构造 `LoopError::Aborted`：

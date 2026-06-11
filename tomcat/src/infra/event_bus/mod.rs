@@ -63,17 +63,20 @@
 //!
 //! - `events/mod.rs`：定义事件 **类型** 与 **wire 字面量**。
 //! - 本文件：负责 **运行时分发**（订阅表 + 触发循环 + panic 隔离）。
-//! - 业务侧 emit 流程：构造 `AgentEvent::Foo` → `serde_json::to_value` →
-//!   `EventContext::new(WIRE_FOO, payload)` → `event_bus.emit_sync(WIRE_FOO, ctx)`。
+//! - 业务侧 emit 流程：构造 `AgentEvent::Foo` / 原始 payload →
+//!   `ScopedEventEmitter::emit*` 统一注入 `sessionId` →
+//!   `EventContext { payload, session_id, ... }` → `event_bus.emit_sync(...)`。
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::warn;
 
 use super::error::AppError;
+use super::events::{AgentEvent, ExtensionEvent, ExtensionWireEnvelope, WireEnvelope};
 
 /// 监听器唯一 ID，用于 [`EventBus::off`] 注销。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,6 +87,7 @@ pub struct EventListenerId(pub u64);
 pub struct EventContext {
     pub event_name: String,
     pub payload: serde_json::Value,
+    pub session_id: Option<String>,
     pub plugin_id: Option<String>,
     pub priority: i32,
 }
@@ -94,9 +98,19 @@ impl EventContext {
         Self {
             event_name: event_name.into(),
             payload,
+            session_id: None,
             plugin_id: None,
             priority: 0,
         }
+    }
+
+    /// 设置所属 session ID；空字符串会被视为未设置，避免发出 `sessionId=""`。
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        let session_id = session_id.into();
+        if !session_id.is_empty() {
+            self.session_id = Some(session_id);
+        }
+        self
     }
 
     /// 设置来源插件 ID，便于 [`EventBus::remove_plugin_listeners`] 按插件清理。
@@ -114,6 +128,121 @@ impl EventContext {
 
 /// 事件回调类型：接收 [`EventContext`]，返回 [`Result`]；需满足 `Send + Sync` 以在跨线程事件总线中使用。
 pub type EventCallback = Box<dyn FnMut(EventContext) -> Result<(), AppError> + Send + Sync>;
+
+/// 绑定某个 session 的发射器：在唯一出口统一把 `sessionId` 注入 payload/ctx。
+#[derive(Clone)]
+pub struct ScopedEventEmitter {
+    bus: Arc<dyn EventBus>,
+    session_id: Option<String>,
+}
+
+impl ScopedEventEmitter {
+    pub fn new(bus: Arc<dyn EventBus>, session_id: impl Into<String>) -> Self {
+        Self::new_optional(bus, Some(session_id.into()))
+    }
+
+    pub fn new_optional(bus: Arc<dyn EventBus>, session_id: Option<String>) -> Self {
+        Self {
+            bus,
+            session_id: normalize_session_id(session_id),
+        }
+    }
+
+    pub fn for_session(&self, session_id: impl Into<String>) -> Self {
+        Self::new(Arc::clone(&self.bus), session_id)
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn emit(&self, event: AgentEvent) -> Result<(), AppError> {
+        let payload = serde_json::to_value(WireEnvelope::new(self.session_id.as_deref(), &event))
+            .unwrap_or(serde_json::Value::Null);
+        let event_name = event_name_from_payload(&payload);
+        self.emit_context(&event_name, payload, None)
+    }
+
+    pub fn emit_extension(&self, event: ExtensionEvent) -> Result<(), AppError> {
+        let payload = serde_json::to_value(ExtensionWireEnvelope::new(
+            self.session_id.as_deref(),
+            &event,
+        ))
+        .unwrap_or(serde_json::Value::Null);
+        let event_name = event_name_from_payload(&payload);
+        self.emit_context(&event_name, payload, None)
+    }
+
+    pub fn emit_payload(
+        &self,
+        event_name: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<(), AppError> {
+        let event_name = event_name.into();
+        let payload = inject_session_id(payload, self.session_id.as_deref());
+        self.emit_context(&event_name, payload, None)
+    }
+
+    pub fn emit_payload_with_plugin_id(
+        &self,
+        event_name: impl Into<String>,
+        payload: serde_json::Value,
+        plugin_id: impl Into<String>,
+    ) -> Result<(), AppError> {
+        let event_name = event_name.into();
+        let payload = inject_session_id(payload, self.session_id.as_deref());
+        self.emit_context(&event_name, payload, Some(plugin_id.into()))
+    }
+
+    fn emit_context(
+        &self,
+        event_name: &str,
+        payload: serde_json::Value,
+        plugin_id: Option<String>,
+    ) -> Result<(), AppError> {
+        let mut ctx = EventContext::new(event_name.to_string(), payload);
+        if let Some(session_id) = self.session_id.as_deref() {
+            ctx = ctx.with_session_id(session_id);
+        }
+        if let Some(plugin_id) = plugin_id {
+            ctx = ctx.with_plugin_id(plugin_id);
+        }
+        self.bus.emit_sync(event_name, ctx)
+    }
+}
+
+fn normalize_session_id(session_id: Option<String>) -> Option<String> {
+    session_id.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn inject_session_id(payload: serde_json::Value, session_id: Option<&str>) -> serde_json::Value {
+    let Some(session_id) = session_id else {
+        return payload;
+    };
+    let mut payload = payload;
+    if let serde_json::Value::Object(ref mut map) = payload {
+        map.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        );
+    }
+    payload
+}
+
+fn event_name_from_payload(payload: &serde_json::Value) -> String {
+    payload
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
 
 struct ListenerEntry {
     id: EventListenerId,

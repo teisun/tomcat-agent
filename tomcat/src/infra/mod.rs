@@ -46,7 +46,7 @@ pub use config::{
     MAX_TOOLS_BASH_MAX_OUTPUT_CHARS, MAX_TOOLS_BASH_TIMEOUT_MS,
 };
 pub use error::{llm_error, llm_http_status_error, AppError, LlmError, LlmErrorStage};
-pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId};
+pub use event_bus::{DefaultEventBus, EventBus, EventContext, EventListenerId, ScopedEventEmitter};
 pub use events::wire;
 pub use events::{AgentEvent, ExtensionEvent};
 pub use logging::init_logging;

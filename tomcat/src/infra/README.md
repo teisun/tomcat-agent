@@ -48,7 +48,7 @@
 
 - **错误处理**：采用 `thiserror` 枚举 + `anyhow` 可选包装；禁止裸 `panic`、慎用 `unwrap()`，所有错误可追溯。
 - **配置**：多源合并（默认值 → 配置文件 → 环境变量），环境变量前缀 `TOMCAT__`、分隔符 `__`，与 config-rs 约定一致。
-- **事件总线**：发布-订阅，基于 `Arc` + `RwLock` 的 `HashMap` 存储监听器；单 listener 抛错或 panic 时通过 `catch_unwind` 捕获并打日志，其余 listener 照常执行，主流程不崩溃。
+- **事件总线**：发布-订阅，基于 `Arc` + `RwLock` 的 `HashMap` 存储监听器；单 listener 抛错或 panic 时通过 `catch_unwind` 捕获并打日志，其余 listener 照常执行，主流程不崩溃。会话级事件不直接裸 `emit_sync`，而是统一经 `ScopedEventEmitter` 发出，把 `sessionId` 收敛进事件信封（payload + `EventContext.session_id`）。
 - **线程安全**：`EventBus`、`DefaultEventBus` 要求 `Send + Sync`；回调类型 `EventCallback` 为 `Box<dyn FnMut(EventContext) -> Result<(), AppError> + Send + Sync>`。
 
 ### 2.2 与 pi-mono 插件生态对齐
@@ -133,13 +133,38 @@ pub trait EventBus: Send + Sync + 'static {
 }
 ```
 
-- **EventContext**：`event_name`、`payload`（`serde_json::Value`）、`plugin_id`、`priority`；支持 `with_plugin_id` / `with_priority` 链式构造。
+- **EventContext**：`event_name`、`payload`（`serde_json::Value`）、`session_id`、`plugin_id`、`priority`；支持 `with_session_id` / `with_plugin_id` / `with_priority` 链式构造。
 - **DefaultEventBus**：`add_listener(event_name, once, plugin_id, priority, callback)` 供插件注册时传入 `plugin_id`，便于卸载时 `remove_plugin_listeners(plugin_id)` 一键清理。
+
+#### 3.3.1 `ScopedEventEmitter` 与事件信封
+
+`ScopedEventEmitter { bus, session_id }` 是 infra 层提供的**唯一推荐发射入口**：
+
+- `emit(AgentEvent)` / `emit_extension(ExtensionEvent)`：把领域事件包进 `WireEnvelope` / `ExtensionWireEnvelope`，在序列化边界统一补 `payload.sessionId`。
+- `emit_payload*()`：给非枚举的原始 JSON 事件（如 preflight、面板 bridge）补同样的 `payload.sessionId`。
+- 发射时同时把同源值写进 `EventContext.session_id`，供进程内消费者快速做 session 过滤。
+
+```text
+AgentEvent / ExtensionEvent / raw payload
+                │
+                ▼
+    ScopedEventEmitter { bus, session_id }
+                │
+                ├─ payload.sessionId   → 给协议 / 审计 / 插件
+                └─ EventContext.session_id
+                                   → 给 CLI/TUI/IDE 订阅者做 demux
+```
+
+消费约束：
+
+- **协议/审计/插件** 读取 `payload.sessionId`。
+- **进程内渲染器**（如 CLI turn renderer）优先读取 `EventContext.session_id`：命中本 session 才渲染，`None` 仅表示全局事件可放行。
+- 子 Agent 生命周期事件使用 **child session** 作为 envelope 的 `sessionId`；`parentSessionId` / `childSessionId` 继续保留在 payload 中表达业务语义。
 
 ### 3.4 事件枚举 (AgentEvent / ExtensionEvent)
 
-- **AgentEvent**：流式/UI 相关，如 `AgentStart`、`TurnStart`、`MessageUpdate`、`ToolExecutionEnd`、`ExtensionError` 等；`type` snake_case，payload 字段 camelCase。
-- **ExtensionEvent**：扩展钩子，如 `Startup`、`ToolCall`、`ToolResult`、`SessionBeforeSwitch`、`Input` 等；与 Architecture.md 事件系统设计一致。
+- **AgentEvent**：流式/UI 相关，如 `AgentStart`、`TurnStart`、`MessageUpdate`、`ToolExecutionEnd`、`ExtensionError` 等；`type` snake_case，payload 字段 camelCase。`sessionId` 不内嵌在这些枚举变体里，而由事件信封统一注入。
+- **ExtensionEvent**：扩展钩子，如 `Startup`、`ToolCall`、`ToolResult`、`SessionBeforeSwitch`、`Input` 等；与 Architecture.md 事件系统设计一致，`sessionId` 同样来自信封层。
 
 ### 3.5 平台与日志
 
@@ -178,7 +203,7 @@ pub trait EventBus: Send + Sync + 'static {
 ### 5.2 事件总线典型流程
 
 1. **注册**：插件或宿主调用 `event_bus.on("tool_call", callback)` 或 `add_listener(..., Some(plugin_id), priority, callback)`。
-2. **触发**：某模块调用 `emit_sync("tool_call", context)` 或 `emit_async(...)`。
+2. **触发**：会话级事件优先通过 `ScopedEventEmitter::emit*` 发射；只有少数真正的全局/底层事件才直接构造 `EventContext` 后 `emit_sync(...)`。
 3. **分发**：按 `priority` 降序执行回调；单次回调返回 `Err` 或 panic 仅记录日志，不中断其他回调和主流程。
 4. **清理**：插件卸载时调用 `remove_plugin_listeners(plugin_id)`，或单次注销 `off(listener_id)`。
 
@@ -199,15 +224,18 @@ init_logging(&cfg.log)?;
 ### 6.2 注册与触发事件
 
 ```rust
-use tomcat::{DefaultEventBus, EventBus, EventContext};
+use std::sync::Arc;
 
-let bus = DefaultEventBus::new();
+use tomcat::{DefaultEventBus, EventBus, ScopedEventEmitter};
+
+let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
 let id = bus.on("tool_call", Box::new(|ctx| {
-    println!("tool_call: {}", ctx.payload);
+    println!("tool_call payload: {}", ctx.payload);
+    println!("session route tag: {:?}", ctx.session_id);
     Ok(())
 }));
-let ctx = EventContext::new("tool_call", serde_json::json!({"toolName": "read_file"}));
-let _ = bus.emit_sync("tool_call", ctx);
+let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "s1");
+let _ = emitter.emit_payload("tool_call", serde_json::json!({"toolName": "read_file"}));
 bus.off(id);
 ```
 

@@ -78,7 +78,7 @@ use crate::core::session::transcript::{
 };
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
-use crate::infra::event_bus::{EventBus, EventContext};
+use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::AgentEvent;
 
 use super::truncation::floor_char_boundary;
@@ -337,7 +337,7 @@ impl Preheat {
         transcript_path: &std::path::Path,
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
-        event_bus: Arc<dyn EventBus>,
+        emitter: Arc<ScopedEventEmitter>,
     ) -> bool {
         if !self.is_idle() {
             return false;
@@ -363,7 +363,7 @@ impl Preheat {
 
         let existing_summary = find_last_summary(&snapshot);
 
-        let eb = event_bus.clone();
+        let eb = emitter.clone();
         let handle = tokio::spawn(async move {
             let started = Instant::now();
             let mut last_error = String::new();
@@ -435,18 +435,15 @@ impl Preheat {
                         };
 
                         if append_ok {
-                            emit_agent_event(
-                                &*eb,
-                                AgentEvent::AutoCompactionEnd {
-                                    elapsed_ms,
-                                    summary_chars: result.summary_text.len(),
-                                    covered_count,
-                                    ratio_after: ratio_before,
-                                    estimated_covered_tokens_before: est_covered_tok,
-                                    estimated_summary_tokens: est_summary_tok,
-                                    estimated_tokens_saved: est_saved,
-                                },
-                            );
+                            let _ = eb.emit(AgentEvent::AutoCompactionEnd {
+                                elapsed_ms,
+                                summary_chars: result.summary_text.len(),
+                                covered_count,
+                                ratio_after: ratio_before,
+                                estimated_covered_tokens_before: est_covered_tok,
+                                estimated_summary_tokens: est_summary_tok,
+                                estimated_tokens_saved: est_saved,
+                            });
                         }
 
                         return Ok(result);
@@ -503,16 +500,13 @@ impl Preheat {
                 }
             }
 
-            emit_agent_event(
-                &*eb,
-                AgentEvent::CompactionError {
-                    exhausted_after_retries: true,
-                    attempts: MAX_PREHEAT_RETRIES,
-                    error: last_error.clone(),
-                    source: "preheat".to_string(),
-                    ratio: Some(ratio_before),
-                },
-            );
+            let _ = eb.emit(AgentEvent::CompactionError {
+                exhausted_after_retries: true,
+                attempts: MAX_PREHEAT_RETRIES,
+                error: last_error.clone(),
+                source: "preheat".to_string(),
+                ratio: Some(ratio_before),
+            });
 
             Err(AppError::Llm(format!(
                 "preheat exhausted after {} retries: {}",
@@ -543,20 +537,13 @@ impl Preheat {
         transcript_path: &std::path::Path,
         llm: Arc<dyn LlmProvider>,
         config: &ContextConfig,
-        event_bus: Arc<dyn EventBus>,
+        emitter: Arc<ScopedEventEmitter>,
     ) -> bool {
         if !self.is_exhausted_pending() {
             return false;
         }
         self.state = PreheatState::Idle;
-        self.try_start(
-            usage_ratio,
-            messages,
-            transcript_path,
-            llm,
-            config,
-            event_bus,
-        )
+        self.try_start(usage_ratio, messages, transcript_path, llm, config, emitter)
     }
 
     /// 非阻塞获取结果。CachedCompleted → Idle + Completed；
@@ -718,17 +705,6 @@ fn snapshot_message_bounds_for_preheat(messages: &[ChatMessage]) -> Option<(Stri
         }
     })?;
     Some((first_start, last_end))
-}
-
-fn emit_agent_event(event_bus: &dyn EventBus, event: AgentEvent) {
-    let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-    let event_name = payload
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let ctx = EventContext::new(event_name.clone(), payload);
-    let _ = event_bus.emit_sync(&event_name, ctx);
 }
 
 fn find_last_summary(messages: &[ChatMessage]) -> Option<String> {
