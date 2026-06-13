@@ -105,6 +105,7 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
         wasm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
+        registered_commands: vec![],
         event_listener_ids: vec![],
         config: serde_json::json!({}),
         created_at: now,

@@ -52,6 +52,7 @@ fn make_plugin_instance(id: &str) -> PluginInstance {
         wasm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
+        registered_commands: vec![],
         event_listener_ids: vec![],
         config: serde_json::json!({}),
         created_at: now,

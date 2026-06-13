@@ -341,6 +341,142 @@ async fn dispatch_send_message_with_session_returns_ok() {
 }
 
 #[tokio::test]
+async fn dispatch_session_hostcalls_are_isolated_by_instance_session_id() {
+    let bus = Arc::new(DefaultEventBus::new());
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(SessionManager::new(dir.path().to_path_buf()));
+    let key = mgr.current_session_key().to_string();
+    let first = mgr
+        .create_session(&key, Some("/workspace/alpha".to_string()))
+        .unwrap();
+    let second = mgr
+        .create_session(&key, Some("/workspace/beta".to_string()))
+        .unwrap();
+    let d = HostApiDispatcher::new(bus).with_session(Arc::clone(&mgr));
+
+    let current = d
+        .dispatch_async(
+            &format!("{}/demo-plugin", first.session_id),
+            HostRequest {
+                module: "session".to_string(),
+                method: "getCurrentSession".to_string(),
+                params: serde_json::json!({}),
+                call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(current.ok);
+    assert_eq!(
+        current
+            .data
+            .as_ref()
+            .and_then(|data| data.get("sessionId"))
+            .and_then(|value| value.as_str()),
+        Some(first.session_id.as_str()),
+        "dispatcher should resolve session from instance_id instead of current session pointer"
+    );
+
+    let cwd = d
+        .dispatch_async(
+            &format!("{}/demo-plugin", first.session_id),
+            HostRequest {
+                module: "context".to_string(),
+                method: "getCwd".to_string(),
+                params: serde_json::json!({}),
+                call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cwd.ok);
+    assert_eq!(
+        cwd.data
+            .as_ref()
+            .and_then(|data| data.get("cwd"))
+            .and_then(|value| value.as_str()),
+        Some("/workspace/alpha")
+    );
+
+    let send = d
+        .dispatch_async(
+            &format!("{}/demo-plugin", first.session_id),
+            HostRequest {
+                module: "session".to_string(),
+                method: "sendMessage".to_string(),
+                params: serde_json::json!({
+                    "message": { "role": "user", "content": "hello from alpha" }
+                }),
+                call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(send.ok);
+
+    let first_entries = mgr.get_entries_for_session(&first.session_id, 10).unwrap();
+    let second_entries = mgr.get_entries_for_session(&second.session_id, 10).unwrap();
+    assert!(
+        first_entries.iter().any(|entry| serde_json::to_value(entry)
+            .ok()
+            .and_then(|value| value.get("message").cloned())
+            .is_some()),
+        "message should be appended to the routed session transcript"
+    );
+    assert!(
+        second_entries
+            .iter()
+            .all(|entry| serde_json::to_value(entry)
+                .ok()
+                .and_then(|value| value.get("message").cloned())
+                .is_none()),
+        "neighbor session transcript should remain untouched"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_session_hostcalls_can_route_across_bound_session_managers() {
+    let bus = Arc::new(DefaultEventBus::new());
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let mgr_a = Arc::new(SessionManager::new(dir_a.path().to_path_buf()));
+    let mgr_b = Arc::new(SessionManager::new(dir_b.path().to_path_buf()));
+    let key_a = mgr_a.current_session_key().to_string();
+    let key_b = mgr_b.current_session_key().to_string();
+    let session_a = mgr_a
+        .create_session(&key_a, Some("/workspace/alpha".to_string()))
+        .unwrap();
+    let session_b = mgr_b
+        .create_session(&key_b, Some("/workspace/beta".to_string()))
+        .unwrap();
+    let d = HostApiDispatcher::new(bus).with_session(Arc::clone(&mgr_a));
+    d.bind_session(&session_a.session_id, Arc::downgrade(&mgr_a));
+    d.bind_session(&session_b.session_id, Arc::downgrade(&mgr_b));
+
+    let cwd = d
+        .dispatch_async(
+            &format!("{}/demo-plugin", session_b.session_id),
+            HostRequest {
+                module: "context".to_string(),
+                method: "getCwd".to_string(),
+                params: serde_json::json!({}),
+                call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(cwd.ok);
+    assert_eq!(
+        cwd.data
+            .as_ref()
+            .and_then(|data| data.get("cwd"))
+            .and_then(|value| value.as_str()),
+        Some("/workspace/beta"),
+        "dispatcher should use the bound session manager for the target session_id"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_unregister_tool_with_registry_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
     let d = HostApiDispatcher::new(bus).with_tools(Arc::new(MockToolRegistry));

@@ -118,7 +118,7 @@ impl ToolExecOutcome {
         }
     }
 
-    fn err(model_text: impl Into<String>) -> Self {
+    pub(super) fn err(model_text: impl Into<String>) -> Self {
         Self {
             model_text: model_text.into(),
             is_error: true,

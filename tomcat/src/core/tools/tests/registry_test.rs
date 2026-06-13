@@ -13,6 +13,7 @@ impl ToolExecutor for MockToolExecutor {
         _tool: &Tool,
         params: serde_json::Value,
         _caller_plugin_id: &str,
+        _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         Ok(
             serde_json::json!({ "output": params.get("x").cloned().unwrap_or(serde_json::Value::Null) }),
@@ -84,11 +85,27 @@ async fn call_tool_returns_content_and_details() {
         .await
         .unwrap();
     let out = reg
-        .call_tool("run", serde_json::json!({ "x": 42 }), "p1")
+        .call_tool("run", serde_json::json!({ "x": 42 }), "p1", Some("s1"))
         .await
         .unwrap();
     assert!(out.get("content").is_some());
     assert!(out.get("details").is_some());
     let content = out.get("content").unwrap();
     assert_eq!(content.get("output"), Some(&serde_json::json!(42)));
+}
+
+#[tokio::test]
+async fn register_tool_rejects_scope_name_conflict() {
+    let reg = DefaultToolRegistry::new(Arc::new(MockToolExecutor), Arc::new(TracingAuditRecorder));
+    reg.register_tool(make_tool("shared", "p1"), "p1")
+        .await
+        .unwrap();
+    let err = reg
+        .register_tool(make_tool("shared", "p2"), "p2")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("scope 内工具名冲突"),
+        "unexpected conflict error: {err}"
+    );
 }

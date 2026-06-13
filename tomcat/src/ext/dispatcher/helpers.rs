@@ -146,3 +146,10 @@ pub(super) fn parse_tool(params: &serde_json::Value, plugin_id: &str) -> Result<
         created_at,
     })
 }
+
+pub(super) fn plugin_id_from_instance(instance_id: &str) -> &str {
+    instance_id
+        .rsplit_once('/')
+        .map(|(_, plugin_id)| plugin_id)
+        .unwrap_or(instance_id)
+}

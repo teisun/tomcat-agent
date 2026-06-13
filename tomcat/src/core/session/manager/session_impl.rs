@@ -329,6 +329,12 @@ impl SessionManager {
         Ok(Self::session_entry_for_key(&store, session_key))
     }
 
+    /// 按 session_id 获取元数据。
+    pub fn get_session_by_id(&self, session_id: &str) -> Result<Option<SessionEntry>, AppError> {
+        let store = self.load_store()?;
+        Ok(store.sessions.get(session_id).cloned())
+    }
+
     /// 列出当前 scope 下的所有 session（按 updated_at 倒序）。
     pub fn list_sessions(&self) -> Result<Vec<(String, SessionEntry)>, AppError> {
         let store = self.load_store()?;
@@ -492,6 +498,42 @@ impl SessionManager {
     /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn try_append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
         self.append_message_internal(message, false)
+    }
+
+    /// 追加 message 到指定 session 的 transcript（插件多实例路由）。
+    pub fn try_append_message_to_session(
+        &self,
+        session_id: &str,
+        message: serde_json::Value,
+    ) -> Result<String, AppError> {
+        self.append_in_flight.fetch_add(1, Ordering::SeqCst);
+        let _guard = AppendInFlightGuard {
+            counter: Arc::clone(&self.append_in_flight),
+        };
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        let path = self.transcript_path(session_id);
+        self.with_transcript_lock(&path, || {
+            let recent = read_entries_tail(&path, VALIDATE_TAIL_CAP).unwrap_or_default();
+            let recent_msgs = collect_recent_chat_messages_from_tail(&recent);
+            if let Err(reason) = validate_append_message(&message, &recent_msgs) {
+                return Err(AppError::Config(
+                    AppError::invariant("append_message_chain", reason).to_string(),
+                ));
+            }
+            let id = generate_entry_id();
+            let now = iso_ts_now()?;
+            let sync = Self::message_sync_level(&message);
+            let entry = TranscriptEntry::Message(MessageEntry {
+                id: Some(id.clone()),
+                parent_id: None,
+                timestamp: now,
+                message,
+            });
+            append_entry_with_sync(&path, &entry, sync)?;
+            Ok(id)
+        })
     }
 
     /// 追加 thinking_level_change。
@@ -717,6 +759,53 @@ impl SessionManager {
         get_branch(&path, leaf_id, super::BRANCH_MAX_ENTRIES)
     }
 
+    pub fn get_entries_for_session(
+        &self,
+        session_id: &str,
+        cap: usize,
+    ) -> Result<Vec<TranscriptEntry>, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        read_entries_tail(&self.transcript_path(session_id), cap)
+    }
+
+    pub fn get_entry_for_session(
+        &self,
+        session_id: &str,
+        id: &str,
+    ) -> Result<Option<TranscriptEntry>, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        get_entry(&self.transcript_path(session_id), id)
+    }
+
+    pub fn get_leaf_entry_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<TranscriptEntry>, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        get_leaf_entry(&self.transcript_path(session_id))
+    }
+
+    pub fn get_branch_for_session(
+        &self,
+        session_id: &str,
+        leaf_id: &str,
+    ) -> Result<Vec<TranscriptEntry>, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        get_branch(
+            &self.transcript_path(session_id),
+            leaf_id,
+            super::BRANCH_MAX_ENTRIES,
+        )
+    }
+
     /// 读取当前会话 transcript 的 header。
     pub fn read_session_header(&self) -> Result<Option<SessionHeader>, AppError> {
         let path = match self.current_transcript_path()? {
@@ -724,6 +813,16 @@ impl SessionManager {
             None => return Ok(None),
         };
         read_header(&path).map(Some)
+    }
+
+    pub fn read_session_header_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionHeader>, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Ok(None);
+        }
+        read_header(&self.transcript_path(session_id)).map(Some)
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serial_test::serial;
 
-use crate::{api::chat::ChatContext, AppConfig};
+use crate::{api::chat::ChatContext, AppConfig, SessionMode};
 
 struct EnvGuard {
     key: &'static str,
@@ -81,6 +81,41 @@ fn from_config_reuses_scope_services_and_isolates_session_runtime_state() {
         "同一 work_tree 下应复用 checkpoint store"
     );
     assert!(
+        Arc::ptr_eq(
+            &ctx1.global_services.tool_registry,
+            &ctx2.global_services.tool_registry
+        ),
+        "同一 work_tree 下应复用插件 ToolRegistry"
+    );
+    assert!(
+        Arc::ptr_eq(
+            &ctx1.global_services.event_bus,
+            &ctx2.global_services.event_bus
+        ),
+        "同一 work_tree 下应复用 scope 事件总线"
+    );
+    let pm1 = ctx1
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("ctx1 plugin manager");
+    let pm2 = ctx2
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("ctx2 plugin manager");
+    assert!(
+        Arc::ptr_eq(pm1, pm2),
+        "同一 work_tree 下应复用 PluginManager"
+    );
+    assert!(
+        Arc::ptr_eq(
+            &ctx1.scope_services.skill_set,
+            &ctx2.scope_services.skill_set
+        ),
+        "同一 work_tree 下应复用 scope 级 skill_set"
+    );
+    assert!(
         !Arc::ptr_eq(
             &ctx1.session_runtime.read_file_state,
             &ctx2.session_runtime.read_file_state
@@ -124,4 +159,67 @@ fn from_config_prefers_session_cwd_when_reopening_existing_session() {
             "重进已有会话时应优先沿用 session.cwd，而不是当前进程 cwd"
         );
     }
+}
+
+#[test]
+#[serial(env_lock)]
+fn from_config_with_code_mode_isolates_scope_runtime_between_projects() {
+    const API_ENV: &str = "TOMCAT_RUNTIME_SCOPE_ISOLATION_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project_a = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+
+    let ctx_a = {
+        let _cwd_guard = CurrentDirGuard::set(project_a.path());
+        ChatContext::from_config_with_mode(cfg.clone(), SessionMode::Code).expect("ctx_a")
+    };
+    let ctx_b = {
+        let _cwd_guard = CurrentDirGuard::set(project_b.path());
+        ChatContext::from_config_with_mode(cfg, SessionMode::Code).expect("ctx_b")
+    };
+
+    assert!(
+        !Arc::ptr_eq(
+            &ctx_a.global_services.tool_registry,
+            &ctx_b.global_services.tool_registry
+        ),
+        "不同 project scope 不应共享 ToolRegistry"
+    );
+    assert!(
+        !Arc::ptr_eq(
+            &ctx_a.global_services.event_bus,
+            &ctx_b.global_services.event_bus
+        ),
+        "不同 project scope 不应共享事件总线"
+    );
+    assert!(
+        !Arc::ptr_eq(
+            &ctx_a.scope_services.skill_set,
+            &ctx_b.scope_services.skill_set
+        ),
+        "不同 project scope 不应共享 skill_set"
+    );
+    let pm_a = ctx_a
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("ctx_a plugin manager");
+    let pm_b = ctx_b
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("ctx_b plugin manager");
+    assert!(
+        !Arc::ptr_eq(pm_a, pm_b),
+        "不同 project scope 不应共享 PluginManager"
+    );
 }

@@ -6,6 +6,13 @@
 (function () {
   'use strict';
 
+  globalThis.__pi_last_fatal_error = null;
+
+  function markFatal(err) {
+    globalThis.__pi_last_fatal_error = String(err);
+    return err;
+  }
+
   // -- Node.js polyfills for extensions that reference process.platform --------
   if (typeof globalThis.process === 'undefined') {
     globalThis.process = { platform: 'linux', env: {}, argv: [], pid: 1, exit: function () {}, cwd: function () { return '/'; }, kill: function () {} };
@@ -201,7 +208,7 @@
         description: options.description || '',
         handler: options.handler || null
       };
-      return hostCall('tools', 'registerCommand', {
+      return hostCall('commands', 'registerCommand', {
         name: name,
         description: options.description
       });
@@ -543,6 +550,7 @@
         handlers[i].fn(eventData, ctx);
       } catch (e) {
         try { pi.log('pi_bridge: handler error for ' + eventType + ': ' + e); } catch (_) {}
+        throw markFatal(e);
       }
     }
   };
@@ -584,58 +592,55 @@
       return JSON.stringify({ ok: false, error: 'tool not found: ' + call.toolName });
     }
     try {
-      var result = handler.execute(call.toolCallId, call.params, undefined, undefined, null);
+      var result = handler.execute(call.toolCallId, call.params, undefined, undefined, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        return JSON.stringify({ ok: false, error: 'tool returned Promise; use __pi_execute_tool_async' });
+      }
       return JSON.stringify({ ok: true, data: result });
     } catch (e) {
       return JSON.stringify({ ok: false, error: String(e) });
     }
   };
 
-  // -- Long-lived VM session event loop (Phase 2) -----------------------------
-  // Called by host when VM actor receives Init command.
-  // Uses setTimeout(loop, 0) to yield control after each event dispatch,
-  // allowing QuickJS run_loop_without_io() to drain Promises and tick tasks
-  // before blocking again on waitForEvent.
-  //
-  // Two-layer collaboration:
-  //   JS layer: setTimeout(loop, 0) schedules next iteration as a tick task
-  //   Rust layer: run_loop_without_io() processes pending Promises + tick tasks
-  //   Net effect: all async work resolves between consecutive waitForEvent calls.
-  // 使用带超时的 waitForEvent：超时返回 type=__tick，让 QuickJS 在两次宿主调用之间处理 setInterval/setTimeout。
-  // 纯阻塞 recv + setTimeout(loop,0) 会导致 loop() 返回后同步脚本结束，_start 退出、VM 变 Stopped。
-  globalThis.__pi_start_event_loop = function () {
-    // Neutralize timer APIs so QuickJS's internal js_std_loop drains
-    // after the event loop exits. Without this, a setTimeout chain
-    // (e.g. setTimeout(tick, 200) inside tick()) keeps _start alive forever.
-    function neutralizeTimers() {
-      globalThis.setTimeout = function () {};
-      globalThis.setInterval = function () {};
+  globalThis.__pi_execute_tool_async = async function (toolCallJson) {
+    var call = JSON.parse(toolCallJson);
+    var handler = __pi_tools[call.toolName];
+    if (!handler || !handler.execute) {
+      return { ok: false, error: 'tool not found: ' + call.toolName };
     }
+    try {
+      var result = handler.execute(call.toolCallId, call.params, undefined, undefined, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        result = await result;
+      }
+      return { ok: true, data: result };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  };
 
+  // -- Long-lived VM session event loop (rquickjs async mode) -----------------
+  // Host exposes `__pi_wait_for_event(timeoutMs)` as a Promise-returning async
+  // function. That lets the VM keep timers / Promise chains alive while still
+  // blocking on host events between dispatches.
+  globalThis.__pi_start_event_loop = async function () {
     for (;;) {
       var raw;
       try {
-        raw = __pi_host_call(JSON.stringify({
-          module: '__session',
-          method: 'waitForEvent',
-          params: { timeoutMs: 50 }
-        }));
+        raw = await __pi_wait_for_event(50);
       } catch (hostErr) {
         try { pi.log('[event_loop] exiting: hostErr=' + hostErr); } catch (_) {}
-        neutralizeTimers();
         return;
       }
       var res = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
       if (!res.ok) {
         try { pi.log('[event_loop] exiting: !res.ok'); } catch (_) {}
-        neutralizeTimers();
         return;
       }
 
       if (res.data && res.data.type === '__shutdown') {
         try { pi.log('[event_loop] exiting: __shutdown received'); } catch (_) {}
-        neutralizeTimers();
         return;
       }
 
@@ -644,16 +649,20 @@
       }
 
       // command_invoke: store pending command and exit the event loop so the
-      // async main loop can await the handler with run_loop_without_io active.
+      // async main loop can await the handler before waiting for the next event.
       if (res.data && res.data.type === 'command_invoke') {
         globalThis.__pi_pending_command_invoke = res.data;
         return;
       }
 
       try {
+        if (typeof __pi_budget_reset === 'function') {
+          __pi_budget_reset();
+        }
         __pi_dispatch_event(JSON.stringify(res.data));
       } catch (e) {
         try { pi.log('event_loop error: ' + e); } catch (_) {}
+        throw markFatal(e);
       }
     }
   };

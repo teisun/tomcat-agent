@@ -25,6 +25,7 @@ impl ToolExecutor for NoopToolExecutor {
         tool: &Tool,
         _params: serde_json::Value,
         _caller_plugin_id: &str,
+        _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         Err(AppError::Config(format!(
             "CLI 模式下不支持工具执行: {}",
@@ -93,6 +94,8 @@ fn format_plugin_info(info: &crate::PluginInfo) {
     println!("  权限:      {:?}", info.manifest.required_permissions);
     println!("  API 版本:  {}", info.manifest.required_api_version);
     println!("  注册工具:  {:?}", info.registered_tools);
+    println!("  注册命令:  {:?}", info.registered_commands);
+    println!("  事件监听:  {:?}", info.event_listener_ids);
     println!("  加载时间:  {}", info.loaded_at);
 }
 

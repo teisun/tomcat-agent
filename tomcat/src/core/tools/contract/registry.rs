@@ -1,5 +1,6 @@
 //! # 工具注册中心 Trait 与类型（与 design CODE_BLOCK_P1_007 一致）
 
+use super::catalog::builtin_tool_by_name;
 use crate::infra::error::AppError;
 use crate::infra::{AuditRecorder, ToolAuditEntry};
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ pub trait ToolExecutor: Send + Sync + 'static {
         tool: &Tool,
         params: serde_json::Value,
         caller_plugin_id: &str,
+        session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError>;
 }
 
@@ -44,7 +46,8 @@ pub trait ToolRegistry: Send + Sync + 'static {
         &self,
         tool_name: &str,
         params: serde_json::Value,
-        plugin_id: &str,
+        caller_plugin_id: &str,
+        session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError>;
     fn unregister_plugin_tools(&self, plugin_id: &str);
 }
@@ -79,18 +82,32 @@ impl DefaultToolRegistry {
             audit,
         }
     }
-}
 
-fn get_tool_from_map(map: &HashMap<String, Tool>, tool_name: &str) -> Option<Tool> {
-    map.values()
-        .find(|t| t.name == tool_name && t.is_enabled)
-        .cloned()
-}
-
-#[async_trait]
-impl ToolRegistry for DefaultToolRegistry {
-    async fn register_tool(&self, tool: Tool, plugin_id: &str) -> Result<(), AppError> {
+    pub fn register_tool_local(&self, tool: Tool, plugin_id: &str) -> Result<(), AppError> {
+        if builtin_tool_by_name(&tool.name).is_some() {
+            return Err(AppError::Tool(format!(
+                "工具名与内置工具冲突: {}",
+                tool.name
+            )));
+        }
         let key = tool_key(plugin_id, &tool.name);
+        {
+            let guard = self.tools.read();
+            if let Some(conflict) = guard
+                .values()
+                .find(|existing| {
+                    existing.is_enabled
+                        && existing.name == tool.name
+                        && existing.plugin_id != plugin_id
+                })
+                .cloned()
+            {
+                return Err(AppError::Tool(format!(
+                    "scope 内工具名冲突: '{}' 已由插件 '{}' 注册",
+                    conflict.name, conflict.plugin_id
+                )));
+            }
+        }
         let mut t = tool;
         t.plugin_id = plugin_id.to_string();
         t.created_at = std::time::SystemTime::now()
@@ -99,6 +116,30 @@ impl ToolRegistry for DefaultToolRegistry {
             .unwrap_or(0);
         self.tools.write().insert(key, t);
         Ok(())
+    }
+}
+
+fn get_tool_from_map(map: &HashMap<String, Tool>, tool_name: &str) -> Option<Tool> {
+    map.values()
+        .find(|t| t.name == tool_name && t.is_enabled)
+        .cloned()
+}
+
+pub fn tool_to_function_definition(tool: &Tool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        }
+    })
+}
+
+#[async_trait]
+impl ToolRegistry for DefaultToolRegistry {
+    async fn register_tool(&self, tool: Tool, plugin_id: &str) -> Result<(), AppError> {
+        self.register_tool_local(tool, plugin_id)
     }
 
     async fn unregister_tool(&self, tool_name: &str, plugin_id: &str) -> Result<(), AppError> {
@@ -128,19 +169,20 @@ impl ToolRegistry for DefaultToolRegistry {
         &self,
         tool_name: &str,
         params: serde_json::Value,
-        plugin_id: &str,
+        caller_plugin_id: &str,
+        session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         let tool = self.get_tool(tool_name).await?;
         let result = self
             .executor
-            .execute(&tool, params.clone(), plugin_id)
+            .execute(&tool, params.clone(), caller_plugin_id, session_id)
             .await;
         match result {
             Ok(out) => {
                 self.audit.record_tool_call(ToolAuditEntry {
                     tool_name: tool_name.to_string(),
                     plugin_id: tool.plugin_id.clone(),
-                    caller_plugin_id: plugin_id.to_string(),
+                    caller_plugin_id: caller_plugin_id.to_string(),
                     success: true,
                     detail: None,
                 });
@@ -150,7 +192,7 @@ impl ToolRegistry for DefaultToolRegistry {
                 self.audit.record_tool_call(ToolAuditEntry {
                     tool_name: tool_name.to_string(),
                     plugin_id: tool.plugin_id.clone(),
-                    caller_plugin_id: plugin_id.to_string(),
+                    caller_plugin_id: caller_plugin_id.to_string(),
                     success: false,
                     detail: Some(e.to_string()),
                 });

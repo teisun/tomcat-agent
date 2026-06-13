@@ -71,15 +71,17 @@ use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::ext::runtime_manager::{SharedRuntimeManager, VmRuntimeKey};
 use crate::ext::ts_compiler::transpile_pi_plugin_for_quickjs;
-use crate::ext::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmCommand};
-use crate::ext::{invoke_host_func_with, HostApiDispatcher, WasmEngine};
+use crate::ext::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmActorState, VmCommand};
+use crate::ext::{
+    invoke_host_func_with, HostApiDispatcher, WasmEngine, DEFAULT_PLUGIN_IDLE_TTL_MS,
+};
 
 use super::types::parse_manifest;
 
@@ -243,19 +245,25 @@ impl PluginManager {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let manifest_tool_names = manifest
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
         let plugin_instance = PluginInstance {
             id: manifest.id.clone(),
             manifest: manifest.clone(),
             wasm_instance: Some(instance),
             status: PluginStatus::Loaded,
-            registered_tools: vec![],
+            registered_tools: manifest_tool_names,
+            registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::Value::Null,
             created_at: now,
             loaded_at: now,
             plugin_root: plugin_root.clone(),
         };
-        if let Err(e) = self.register_plugin(plugin_instance) {
+        if let Err(e) = self.register_loaded_plugin(plugin_instance) {
             if let Some(ref a) = self.audit {
                 a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                     plugin_id: manifest.id.clone(),
@@ -297,9 +305,9 @@ impl PluginManager {
                 .canonicalize()
                 .map_err(|e| AppError::Plugin(format!("插件目录无效: {}", e)))?;
             let manifest_path = root
-                .join("plugin.json")
+                .join("pi-plugin.json")
                 .canonicalize()
-                .or_else(|_| root.join("pi-plugin.json").canonicalize())
+                .or_else(|_| root.join("plugin.json").canonicalize())
                 .map_err(|_| {
                     AppError::Plugin("插件目录下未找到 plugin.json 或 pi-plugin.json".to_string())
                 })?;
@@ -365,8 +373,80 @@ impl PluginManager {
         Ok(())
     }
 
+    /// 仅基于 manifest 编目插件，不执行主脚本；供静态 tools[]/懒加载路径使用。
+    pub fn register_catalog_plugin(
+        &self,
+        plugin_root: impl AsRef<Path>,
+        manifest: PluginManifest,
+    ) -> Result<(), AppError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let manifest_tool_names = manifest
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let instance = PluginInstance {
+            id: manifest.id.clone(),
+            manifest,
+            wasm_instance: None,
+            status: PluginStatus::Enabled,
+            registered_tools: manifest_tool_names,
+            registered_commands: vec![],
+            event_listener_ids: vec![],
+            config: serde_json::Value::Null,
+            created_at: now,
+            loaded_at: 0,
+            plugin_root: plugin_root.as_ref().to_path_buf(),
+        };
+        self.register_or_refresh_catalog_stub(instance)
+    }
+
+    fn register_loaded_plugin(&self, instance: PluginInstance) -> Result<(), AppError> {
+        let id = instance.id.clone();
+        let mut map = self.plugins.write();
+        match map.entry(id.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(instance);
+                Ok(())
+            }
+            Entry::Occupied(mut slot) => {
+                let existing = slot.get();
+                if existing.wasm_instance.is_none() && existing.plugin_root == instance.plugin_root
+                {
+                    slot.insert(instance);
+                    Ok(())
+                } else {
+                    Err(AppError::Plugin(format!("plugin already loaded: {}", id)))
+                }
+            }
+        }
+    }
+
+    fn register_or_refresh_catalog_stub(&self, instance: PluginInstance) -> Result<(), AppError> {
+        let id = instance.id.clone();
+        let mut map = self.plugins.write();
+        match map.entry(id.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(instance);
+                Ok(())
+            }
+            Entry::Occupied(mut slot) => {
+                if slot.get().wasm_instance.is_none() {
+                    slot.insert(instance);
+                    Ok(())
+                } else {
+                    Err(AppError::Plugin(format!("plugin already loaded: {}", id)))
+                }
+            }
+        }
+    }
+
     /// 按 ID 获取插件信息（只读，不含 Wasm 实例）。
     pub fn get_plugin(&self, plugin_id: &str) -> Option<PluginInfo> {
+        self.sync_registered_capabilities(plugin_id);
         let map = self.plugins.read();
         map.get(plugin_id).map(|i| i.to_info())
     }
@@ -459,8 +539,27 @@ impl PluginManager {
             .as_ref()
             .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
 
+        for (expired_key, expired_handle) in
+            rm.reap_idle(std::time::Duration::from_millis(DEFAULT_PLUGIN_IDLE_TTL_MS))
+        {
+            let _ = expired_handle.shutdown().await;
+            if let Some(ref dispatcher) = self.host_dispatcher {
+                dispatcher.cleanup_instance(&expired_key.to_string());
+            }
+        }
+
         if let Some(existing) = rm.get(&key) {
-            return Ok(existing);
+            match existing.current_state() {
+                VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
+                    return Ok(existing);
+                }
+                VmActorState::ShuttingDown | VmActorState::Stopped | VmActorState::Error => {
+                    let _ = rm.remove(&key);
+                    if let Some(ref dispatcher) = self.host_dispatcher {
+                        dispatcher.cleanup_instance(&key.to_string());
+                    }
+                }
+            }
         }
 
         let _plugin_info = self
@@ -496,13 +595,20 @@ impl PluginManager {
                 })?
         };
 
-        let (handle, _event_tx) =
-            VmActor::spawn(wasm_instance, plugin_root, self.event_channel_capacity);
+        let handle = VmActor::spawn(wasm_instance, plugin_root, self.event_channel_capacity);
 
         handle.dispatch(VmCommand::Init).await?;
+        self.sync_registered_capabilities(plugin_id);
 
         rm.insert(key, handle.clone());
         Ok(handle)
+    }
+
+    pub fn has_session_vm(&self, session_id: &str, plugin_id: &str) -> bool {
+        let Some(runtime_manager) = &self.runtime_manager else {
+            return false;
+        };
+        runtime_manager.contains(&VmRuntimeKey::new(session_id, plugin_id))
     }
 
     /// 向指定会话的 VM actor 投递事件。
@@ -515,6 +621,24 @@ impl PluginManager {
         context: serde_json::Value,
     ) -> Result<(), AppError> {
         let key = VmRuntimeKey::new(session_id, plugin_id);
+        if let Some(rm) = &self.runtime_manager {
+            if let Some(handle) = rm.get(&key) {
+                match handle.current_state() {
+                    VmActorState::Error | VmActorState::Stopped | VmActorState::ShuttingDown => {
+                        let _ = rm.remove(&key);
+                        if let Some(ref dispatcher) = self.host_dispatcher {
+                            dispatcher.cleanup_instance(&key.to_string());
+                        }
+                        return Err(AppError::Plugin(format!(
+                            "plugin runtime '{key}' is not healthy; call start_session_vm to rebuild"
+                        )));
+                    }
+                    VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
+                        let _ = rm.touch(&key);
+                    }
+                }
+            }
+        }
 
         let dispatcher = self
             .host_dispatcher
@@ -596,6 +720,9 @@ impl PluginManager {
         if let Some(ref t) = self.tools {
             t.unregister_plugin_tools(plugin_id);
         }
+        if let Some(ref dispatcher) = self.host_dispatcher {
+            dispatcher.cleanup_plugin_capabilities(plugin_id);
+        }
         if let Some(wasm) = instance.wasm_instance {
             wasm.destroy();
         }
@@ -608,5 +735,40 @@ impl PluginManager {
             });
         }
         Ok(())
+    }
+
+    fn sync_registered_capabilities(&self, plugin_id: &str) {
+        let Some(dispatcher) = &self.host_dispatcher else {
+            return;
+        };
+        let mut registered_tools = {
+            let map = self.plugins.read();
+            map.get(plugin_id)
+                .map(|instance| {
+                    instance
+                        .manifest
+                        .tools
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        for dynamic_tool in dispatcher.registered_plugin_tools(plugin_id) {
+            if !registered_tools.iter().any(|tool| tool == &dynamic_tool) {
+                registered_tools.push(dynamic_tool);
+            }
+        }
+        let registered_commands = dispatcher
+            .registered_plugin_commands(plugin_id)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let event_listener_ids = dispatcher.registered_plugin_listener_ids(plugin_id);
+        if let Some(instance) = self.plugins.write().get_mut(plugin_id) {
+            instance.registered_tools = registered_tools;
+            instance.registered_commands = registered_commands;
+            instance.event_listener_ids = event_listener_ids;
+        }
     }
 }

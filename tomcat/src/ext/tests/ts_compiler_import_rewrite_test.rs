@@ -112,3 +112,27 @@ const t = TypeBox.Type.String();
     assert!(out.contains("globalThis.__pi_typebox"));
     assert!(!out.contains("from \"@sinclair"));
 }
+
+#[test]
+fn rewrite_tier_a_node_imports() {
+    let src = r#"
+import path from "node:path";
+import { format } from "util";
+import { EventEmitter } from "events";
+import { Buffer } from "buffer";
+
+const joined = path.join("a", "b");
+const msg = format("%s:%s", joined, "ok");
+const ee = new EventEmitter();
+const buf = Buffer.from(msg);
+"#;
+    let out = transpile_typescript(src, "test.ts").unwrap();
+    assert!(out.contains("globalThis.__node_path"));
+    assert!(out.contains("globalThis.__node_util"));
+    assert!(out.contains("globalThis.__node_events"));
+    assert!(out.contains("globalThis.__node_buffer"));
+    assert!(!out.contains("from \"node:path\""));
+    assert!(!out.contains("from \"util\""));
+    assert!(!out.contains("from \"events\""));
+    assert!(!out.contains("from \"buffer\""));
+}

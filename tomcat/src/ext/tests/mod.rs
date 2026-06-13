@@ -14,6 +14,7 @@
 //! 上抬后保留拆分但加 `ts_compiler_` 前缀。
 
 mod host_binding_test;
+mod instance_rquickjs_shim_test;
 mod instance_stub_test;
 mod runtime_manager_test;
 mod ts_compiler_import_rewrite_test;

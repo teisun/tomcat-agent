@@ -1,11 +1,37 @@
 use crate::infra::error::AppError;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::ext::WasmInstance;
 use crate::infra::event_bus::EventListenerId;
 
 /// 插件清单（与 design CODE_BLOCK_P1_008 一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PluginActivation {
+    #[default]
+    Lazy,
+    Session,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_manifest_tool_parameters")]
+    pub parameters: Value,
+}
+
+fn default_manifest_tool_parameters() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {},
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -18,6 +44,12 @@ pub struct PluginManifest {
     pub required_permissions: Vec<String>,
     pub required_api_version: String,
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<ManifestTool>,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub activation: PluginActivation,
 }
 
 /// 插件运行状态。
@@ -40,6 +72,7 @@ pub struct PluginInstance {
     pub wasm_instance: Option<WasmInstance>,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
+    pub registered_commands: Vec<String>,
     pub event_listener_ids: Vec<EventListenerId>,
     pub config: serde_json::Value,
     pub created_at: i64,
@@ -55,9 +88,12 @@ pub struct PluginInfo {
     pub manifest: PluginManifest,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
+    pub registered_commands: Vec<String>,
+    pub event_listener_ids: Vec<EventListenerId>,
     pub config: serde_json::Value,
     pub created_at: i64,
     pub loaded_at: i64,
+    pub plugin_root: PathBuf,
 }
 
 impl PluginInstance {
@@ -76,9 +112,12 @@ impl PluginInstance {
             manifest: self.manifest.clone(),
             status: self.status,
             registered_tools: self.registered_tools.clone(),
+            registered_commands: self.registered_commands.clone(),
+            event_listener_ids: self.event_listener_ids.clone(),
             config: self.config.clone(),
             created_at: self.created_at,
             loaded_at: self.loaded_at,
+            plugin_root: self.plugin_root.clone(),
         }
     }
 }
@@ -106,6 +145,19 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
         return Err(AppError::Plugin(
             "manifest.required_api_version is required".to_string(),
         ));
+    }
+    for tool in &m.tools {
+        if tool.name.trim().is_empty() {
+            return Err(AppError::Plugin(
+                "manifest.tools[].name is required".to_string(),
+            ));
+        }
+        if !tool.parameters.is_object() {
+            return Err(AppError::Plugin(format!(
+                "manifest.tools[{}].parameters must be an object",
+                tool.name
+            )));
+        }
     }
     Ok(())
 }

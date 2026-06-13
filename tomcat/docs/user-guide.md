@@ -791,6 +791,18 @@ tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信
   "author": "me",
   "main": "main.js",
   "requiredPermissions": [],
+  "tools": [
+    {
+      "name": "hello_world",
+      "description": "返回一条问候语",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ],
+  "events": ["session_start"],
+  "activation": "lazy",
   "requiredApiVersion": "1.0",
   "tags": []
 }
@@ -799,8 +811,17 @@ tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信
 `main.js`：
 
 ```js
+pi.on("session_start", function () {
+  pi.log("my-plugin: session_start");
+});
+
 pi.log("my-plugin: 已加载");
 ```
+
+说明：
+
+- 敏感能力一律走 `pi.*`，例如读写文件用 `pi.readFile()` / `pi.writeFile()`，执行命令用 `pi.exec()`。
+- `node:fs`、`node:child_process` 等 Node 内置模块不会直接暴露给插件；当前只保留 `path`、`util.format`、`events.EventEmitter`、`Buffer`、`crypto` 这 5 块轻量兼容能力。
 
 ```bash
 tomcat plugin load ~/tomcat-plugins/my-plugin

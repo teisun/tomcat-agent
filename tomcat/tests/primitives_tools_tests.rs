@@ -39,6 +39,7 @@ impl ToolExecutor for StubToolExecutor {
         _tool: &Tool,
         params: serde_json::Value,
         _caller_plugin_id: &str,
+        _session_id: Option<&str>,
     ) -> Result<serde_json::Value, tomcat::AppError> {
         Ok(serde_json::json!({ "result": "ok", "params": params }))
     }
@@ -78,7 +79,12 @@ async fn test_tool_registry_register_list_and_call_returns_ok(
     let list = registry.list_tools(None).await?;
     assert!(!list.is_empty(), "list_tools 应包含已注册工具");
     let out = registry
-        .call_tool("echo", serde_json::json!({ "x": 1 }), "plugin_a")
+        .call_tool(
+            "echo",
+            serde_json::json!({ "x": 1 }),
+            "plugin_a",
+            Some("s1"),
+        )
         .await?;
     tracing::info!("Assert: call_tool 返回 content/details 结构");
     assert!(out.get("content").is_some());

@@ -1,14 +1,14 @@
 use crate::core::{LlmProvider, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
-use crate::infra::event_bus::EventBus;
+use crate::infra::event_bus::{EventBus, EventListenerId};
 use crate::infra::AuditRecorder;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::sync::Semaphore;
+use tokio::sync::{oneshot, Semaphore};
 
 /// 异步 Hostcall 任务状态。
 pub enum AsyncCallStatus {
@@ -27,6 +27,7 @@ pub struct HostApiDispatcher {
     pub(super) tools: Option<Arc<dyn ToolRegistry>>,
     pub(super) llm: Option<Arc<dyn LlmProvider>>,
     pub(super) session: Option<Arc<SessionManager>>,
+    pub(super) session_registry: Arc<DashMap<String, Weak<SessionManager>>>,
     pub(super) audit: Option<Arc<dyn AuditRecorder>>,
     pub(super) async_results: Arc<DashMap<String, AsyncCallStatus>>,
     /// instance_id -> [callId, ...] 映射，用于实例销毁时清理 pending 任务。
@@ -46,8 +47,15 @@ pub struct HostApiDispatcher {
     pub(super) command_completed_count: Arc<AtomicU32>,
     /// `context.commandFailed` 调用次数（测试断言用）。
     pub(super) command_failed_count: Arc<AtomicU32>,
-    /// 插件实例已注册的 slash 命令：(name, description)，handler 仅存于 JS `__pi_commands`。
+    /// 插件已注册的 slash 命令：(name, description)，handler 仅存于 JS `__pi_commands`。
     pub(super) plugin_commands: Arc<DashMap<String, Vec<(String, String)>>>,
+    /// 插件已注册的工具名（按 plugin_id 聚合）。
+    pub(super) plugin_tools: Arc<DashMap<String, Vec<String>>>,
+    /// 插件已注册的宿主事件监听 ID（按 plugin_id 聚合）。
+    pub(super) plugin_event_listeners: Arc<DashMap<String, Vec<EventListenerId>>>,
+    /// command/tool invoke 的宿主侧结果等待者：call_id -> oneshot sender。
+    pub(super) command_waiters:
+        Arc<DashMap<String, oneshot::Sender<Result<serde_json::Value, String>>>>,
 }
 
 impl HostApiDispatcher {
@@ -61,6 +69,7 @@ impl HostApiDispatcher {
             tools: None,
             llm: None,
             session: None,
+            session_registry: Arc::new(DashMap::new()),
             audit: None,
             async_results: Arc::new(DashMap::new()),
             instance_calls: Arc::new(DashMap::new()),
@@ -73,15 +82,60 @@ impl HostApiDispatcher {
             command_completed_count: Arc::new(AtomicU32::new(0)),
             command_failed_count: Arc::new(AtomicU32::new(0)),
             plugin_commands: Arc::new(DashMap::new()),
+            plugin_tools: Arc::new(DashMap::new()),
+            plugin_event_listeners: Arc::new(DashMap::new()),
+            command_waiters: Arc::new(DashMap::new()),
         }
     }
 
-    /// 返回某 Wasm 实例在宿主侧登记的 `registerCommand` 元数据（不含 JS handler）。
-    pub fn registered_plugin_commands(&self, instance_id: &str) -> Vec<(String, String)> {
+    /// 返回某插件在宿主侧登记的 `registerCommand` 元数据（不含 JS handler）。
+    pub fn registered_plugin_commands(&self, instance_or_plugin_id: &str) -> Vec<(String, String)> {
+        let plugin_id = instance_or_plugin_id
+            .rsplit_once('/')
+            .map(|(_, plugin_id)| plugin_id)
+            .unwrap_or(instance_or_plugin_id);
         self.plugin_commands
-            .get(instance_id)
+            .get(plugin_id)
             .map(|e| e.value().clone())
             .unwrap_or_default()
+    }
+
+    pub fn registered_plugin_tools(&self, instance_or_plugin_id: &str) -> Vec<String> {
+        let plugin_id = instance_or_plugin_id
+            .rsplit_once('/')
+            .map(|(_, plugin_id)| plugin_id)
+            .unwrap_or(instance_or_plugin_id);
+        self.plugin_tools
+            .get(plugin_id)
+            .map(|e| e.value().clone())
+            .unwrap_or_default()
+    }
+
+    pub fn registered_plugin_listener_ids(
+        &self,
+        instance_or_plugin_id: &str,
+    ) -> Vec<EventListenerId> {
+        let plugin_id = instance_or_plugin_id
+            .rsplit_once('/')
+            .map(|(_, plugin_id)| plugin_id)
+            .unwrap_or(instance_or_plugin_id);
+        self.plugin_event_listeners
+            .get(plugin_id)
+            .map(|e| e.value().clone())
+            .unwrap_or_default()
+    }
+
+    pub fn register_command_waiter(
+        &self,
+        call_id: &str,
+    ) -> oneshot::Receiver<Result<serde_json::Value, String>> {
+        let (tx, rx) = oneshot::channel();
+        self.command_waiters.insert(call_id.to_string(), tx);
+        rx
+    }
+
+    pub fn drop_command_waiter(&self, call_id: &str) {
+        self.command_waiters.remove(call_id);
     }
 
     /// 注入 `uiNotify` 调用计数器（E2E / 集成测试）。
@@ -122,6 +176,11 @@ impl HostApiDispatcher {
     pub fn with_session(mut self, s: Arc<SessionManager>) -> Self {
         self.session = Some(s);
         self
+    }
+
+    pub fn bind_session(&self, session_id: &str, session: Weak<SessionManager>) {
+        self.session_registry
+            .insert(session_id.to_string(), session);
     }
 
     /// 注入审计记录器（每笔 Hostcall 记录）。

@@ -6,7 +6,9 @@ use crate::core::agent_loop::tool_dispatcher::run_tool_calls;
 use crate::core::agent_loop::tool_exec::{execute_tool, NORMALIZED_TOOL_CALL_ARGUMENTS};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, ToolCallInfo};
 use crate::core::llm::ChatMessage;
+use crate::core::tools::contract::registry::{Tool, ToolRegistry};
 use crate::core::tools::primitive::PrimitiveExecutor;
+use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
@@ -21,6 +23,57 @@ fn make_agent() -> AgentLoop {
         ..Default::default()
     };
     AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new())
+}
+
+struct MockPluginToolRegistry;
+
+#[async_trait::async_trait]
+impl ToolRegistry for MockPluginToolRegistry {
+    async fn register_tool(&self, _tool: Tool, _plugin_id: &str) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    async fn unregister_tool(&self, _tool_name: &str, _plugin_id: &str) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    async fn get_tool(&self, tool_name: &str) -> Result<Tool, AppError> {
+        if tool_name == "plugin_echo" {
+            Ok(Tool {
+                name: "plugin_echo".to_string(),
+                label: "Plugin Echo".to_string(),
+                description: "plugin echo".to_string(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+                plugin_id: "demo-plugin".to_string(),
+                is_enabled: true,
+                created_at: 0,
+            })
+        } else {
+            Err(AppError::Tool("not found".to_string()))
+        }
+    }
+
+    async fn list_tools(&self, _plugin_id: Option<&str>) -> Result<Vec<Tool>, AppError> {
+        Ok(vec![])
+    }
+
+    async fn call_tool(
+        &self,
+        tool_name: &str,
+        params: serde_json::Value,
+        caller_plugin_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<serde_json::Value, AppError> {
+        assert_eq!(tool_name, "plugin_echo");
+        assert_eq!(caller_plugin_id, "__agent__");
+        assert_eq!(session_id, Some("s-tool-call-args"));
+        Ok(serde_json::json!({
+            "content": format!("plugin says {}", params.get("x").and_then(|v| v.as_i64()).unwrap_or_default()),
+            "details": null
+        }))
+    }
+
+    fn unregister_plugin_tools(&self, _plugin_id: &str) {}
 }
 
 #[tokio::test]
@@ -187,4 +240,37 @@ async fn execute_tool_invalid_arguments_preview_escapes_control_characters() {
     assert!(is_error, "invalid arguments must report is_error=true");
     assert!(msg.contains("Argument parse failed"));
     assert!(msg.contains(r#"Raw arguments preview (truncated): "{\"query\":\"line\n\t""#));
+}
+
+#[tokio::test]
+async fn run_tool_calls_dispatches_registered_plugin_tool_through_registry() {
+    let mut agent = make_agent().with_tool_registry(Arc::new(MockPluginToolRegistry));
+    let mut messages = Vec::<ChatMessage>::new();
+    let tool_calls = vec![ToolCallInfo {
+        id: "call_plugin".into(),
+        name: "plugin_echo".into(),
+        arguments: r#"{"x":7}"#.into(),
+    }];
+
+    let dispatch = run_tool_calls(
+        &mut agent,
+        &mut messages,
+        &tool_calls,
+        "",
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("plugin tool should execute through ToolRegistry");
+
+    assert_eq!(dispatch.tool_results.len(), 1);
+    let tool_text = messages[1]
+        .text_content()
+        .expect("tool result text should be present");
+    assert_eq!(tool_text, "plugin says 7");
 }

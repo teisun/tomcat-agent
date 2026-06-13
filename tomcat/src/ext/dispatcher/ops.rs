@@ -1,4 +1,4 @@
-use super::helpers::{parse_chat_request, parse_tool};
+use super::helpers::{parse_chat_request, parse_tool, plugin_id_from_instance};
 use super::types::HostApiDispatcher;
 use crate::core::{EditOperation, StreamEvent};
 use crate::ext::host_binding::HostResponse;
@@ -151,8 +151,8 @@ impl HostApiDispatcher {
         Ok(HostResponse::ok(serde_json::json!({ "content": content })))
     }
 
-    pub(super) fn do_llm_get_model() -> HostResponse {
-        HostResponse::ok(serde_json::json!({ "model": serde_json::Value::Null }))
+    pub(super) fn do_llm_get_model(&self, instance_id: &str) -> HostResponse {
+        self.do_context_get_model(instance_id)
     }
 
     pub(super) fn do_llm_set_model(params: &serde_json::Value) -> HostResponse {
@@ -163,33 +163,53 @@ impl HostApiDispatcher {
 
     pub(super) async fn do_register_tool(
         &self,
-        plugin_id: &str,
+        instance_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
         let tools = match &self.tools {
             None => return Ok(HostResponse::err("ToolRegistry not configured (006)")),
             Some(t) => t,
         };
+        let plugin_id = plugin_id_from_instance(instance_id);
         let tool = parse_tool(params, plugin_id)?;
         tools.register_tool(tool, plugin_id).await?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Plugin("registerTool: missing name".to_string()))?;
+        match self.plugin_tools.entry(plugin_id.to_string()) {
+            Entry::Occupied(mut ent) => {
+                let tools = ent.get_mut();
+                if !tools.iter().any(|existing| existing == name) {
+                    tools.push(name.to_string());
+                }
+            }
+            Entry::Vacant(ent) => {
+                ent.insert(vec![name.to_string()]);
+            }
+        }
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
     pub(super) async fn do_unregister_tool(
         &self,
-        plugin_id: &str,
+        instance_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
         let tools = match &self.tools {
             None => return Ok(HostResponse::err("ToolRegistry not configured (006)")),
             Some(t) => t,
         };
+        let plugin_id = plugin_id_from_instance(instance_id);
         let name = params
             .get("toolName")
             .or_else(|| params.get("tool_name"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| AppError::Plugin("unregisterTool: missing toolName".to_string()))?;
         tools.unregister_tool(name, plugin_id).await?;
+        if let Some(mut entry) = self.plugin_tools.get_mut(plugin_id) {
+            entry.retain(|existing| existing != name);
+        }
         Ok(HostResponse::ok(serde_json::Value::Null))
     }
 
@@ -211,13 +231,15 @@ impl HostApiDispatcher {
 
     pub(super) async fn do_call_tool(
         &self,
-        plugin_id: &str,
+        instance_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
         let tools = match &self.tools {
             None => return Ok(HostResponse::err("ToolRegistry not configured (006)")),
             Some(t) => t,
         };
+        let caller_plugin_id = plugin_id_from_instance(instance_id);
+        let session_id = self.session_id_for_instance(instance_id);
         let name = params
             .get("toolName")
             .or_else(|| params.get("tool_name"))
@@ -227,7 +249,9 @@ impl HostApiDispatcher {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        let result = tools.call_tool(name, tool_params, plugin_id).await?;
+        let result = tools
+            .call_tool(name, tool_params, caller_plugin_id, session_id.as_deref())
+            .await?;
         Ok(HostResponse::ok(result))
     }
 
@@ -265,9 +289,10 @@ impl HostApiDispatcher {
 
     pub(super) async fn do_register_command(
         &self,
-        plugin_id: &str,
+        instance_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
+        let plugin_id = plugin_id_from_instance(instance_id);
         let name = params
             .get("name")
             .and_then(|v| v.as_str())
@@ -300,10 +325,11 @@ impl HostApiDispatcher {
 
     pub(super) async fn do_events(
         &self,
-        plugin_id: &str,
+        instance_id: &str,
         method: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
+        let plugin_id = plugin_id_from_instance(instance_id);
         let event_name = params
             .get("eventName")
             .or_else(|| params.get("event_name"))
@@ -311,11 +337,27 @@ impl HostApiDispatcher {
             .ok_or_else(|| AppError::Plugin("events: missing eventName".to_string()))?;
         match method {
             "on" => {
-                let id = self.event_bus.on(event_name, Box::new(|_| Ok(())));
+                let id = self
+                    .event_bus
+                    .on_plugin(event_name, plugin_id, Box::new(|_| Ok(())));
+                match self.plugin_event_listeners.entry(plugin_id.to_string()) {
+                    Entry::Occupied(mut ent) => ent.get_mut().push(id),
+                    Entry::Vacant(ent) => {
+                        ent.insert(vec![id]);
+                    }
+                }
                 Ok(HostResponse::ok(serde_json::json!({ "listenerId": id.0 })))
             }
             "once" => {
-                let id = self.event_bus.once(event_name, Box::new(|_| Ok(())));
+                let id = self
+                    .event_bus
+                    .once_plugin(event_name, plugin_id, Box::new(|_| Ok(())));
+                match self.plugin_event_listeners.entry(plugin_id.to_string()) {
+                    Entry::Occupied(mut ent) => ent.get_mut().push(id),
+                    Entry::Vacant(ent) => {
+                        ent.insert(vec![id]);
+                    }
+                }
                 Ok(HostResponse::ok(serde_json::json!({ "listenerId": id.0 })))
             }
             "off" => {
@@ -328,6 +370,9 @@ impl HostApiDispatcher {
                         AppError::Plugin("events.off: missing listenerId".to_string())
                     })?;
                 self.event_bus.off(id);
+                if let Some(mut entry) = self.plugin_event_listeners.get_mut(plugin_id) {
+                    entry.retain(|existing| *existing != id);
+                }
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
             "emit" => {
@@ -337,7 +382,7 @@ impl HostApiDispatcher {
                     .unwrap_or(serde_json::Value::Null);
                 let emitter = ScopedEventEmitter::new_optional(
                     self.event_bus.clone(),
-                    self.session_id_for_instance(plugin_id),
+                    self.session_id_for_instance(instance_id),
                 );
                 emitter.emit_payload_with_plugin_id(event_name, payload, plugin_id)?;
                 Ok(HostResponse::ok(serde_json::Value::Null))
@@ -349,7 +394,7 @@ impl HostApiDispatcher {
         }
     }
 
-    fn session_id_for_instance(&self, instance_id: &str) -> Option<String> {
+    pub(super) fn session_id_for_instance(&self, instance_id: &str) -> Option<String> {
         if let Some((session_id, _)) = instance_id.split_once('/') {
             if !session_id.is_empty() {
                 return Some(session_id.to_string());
@@ -358,5 +403,25 @@ impl HostApiDispatcher {
         self.session
             .as_ref()
             .and_then(|session| session.current_session_id().ok().flatten())
+    }
+
+    pub(super) fn session_for_id(
+        &self,
+        session_id: &str,
+    ) -> Option<std::sync::Arc<crate::core::SessionManager>> {
+        if let Some(entry) = self.session_registry.get(session_id) {
+            if let Some(session) = entry.value().upgrade() {
+                return Some(session);
+            }
+        }
+        self.session.clone()
+    }
+
+    pub(super) fn session_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Option<std::sync::Arc<crate::core::SessionManager>> {
+        let session_id = self.session_id_for_instance(instance_id)?;
+        self.session_for_id(&session_id)
     }
 }

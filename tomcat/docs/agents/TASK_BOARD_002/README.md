@@ -46,7 +46,7 @@
 | **T2-P1-013** | `web_fetch` 工具                               | `DONE` | Jerry | `feature/web-search`                   | [tasks/T2-P1-013.md](./tasks/T2-P1-013.md) |
 | **T2-P1-014** | Skill 系统                                     | `DONE` | Spike | `feature/skill-system`                 | [tasks/T2-P1-014.md](./tasks/T2-P1-014.md) |
 | **T2-P1-015** | 会话模式与多会话并发（claw/code + SessionRuntime） | `DONE` | Jerry | `feature/optimize`                     | [tasks/T2-P1-015.md](./tasks/T2-P1-015.md) |
-| **T2-P1-016** | 插件系统（rquickjs 迁移）                           | `TODO` | —     | `feature/plugin-rquickjs`              | [tasks/T2-P1-016.md](./tasks/T2-P1-016.md) |
+| **T2-P1-016** | 插件系统（rquickjs 迁移）                           | `PENDING_INTEGRATION` | Tom   | `feature/plugin-rquickjs`              | [tasks/T2-P1-016.md](./tasks/T2-P1-016.md) |
 
 ## 5. 开放任务依赖（概览）
 
