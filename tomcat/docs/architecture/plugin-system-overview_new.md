@@ -1,0 +1,1035 @@
+本文为 [Architecture](../Architecture.md) 中「5.5 插件系统全貌」的**新版**详细设计，描述**剥离 WasmEdge、迁移到进程内嵌入式 rquickjs**后的插件体系。旧版（WasmEdge + `wasmedge_quickjs.wasm`）见 [plugin-system-overview.md](plugin-system-overview.md)，本文取代其运行时与兼容性章节。
+
+> 配套计划：`.cursor/plans/wasmedge_可选与插件_sdk_对比_be3167e3.plan.md`（剥离 WasmEdge 迁移 rquickjs）。
+
+## 摘要
+
+旧版插件运行在 **WasmEdge + 定制 `wasmedge_quickjs.wasm`** 沙箱里，并维护一整套 Node.js 兼容层以兼容 pi-mono / npm 生态；代价是**强制外部 C 运行时依赖**、定制 wasm 构建链、以及与 WasmEdge 深度耦合。
+
+新版做三件事：
+
+1. **运行时**：用进程内嵌入式 `**rquickjs`** 取代 WasmEdge，用户无需安装任何外部运行时。
+2. **兼容性**：**放弃 pi-mono 插件硬兼容**，沿用并裁剪现有 `pi.`* hostcall（自有 manifest + 精简 API 子集）。
+3. **能力边界**：敏感能力（fs/net/exec/会话）一律走 `pi.`* hostcall + 权限闸；**不做 Node 兼容层**，只从 pi_agent_rust 移植少量纯工具垫片（crypto/buffer/path/events/util）。
+
+**说人话**：以前是「带一份 JS wasm 剧本 + 租 WasmEdge 放映机 + 背一整套 npm 道具库」。新版把 **QuickJS 焊进 tomcat 自己肚子里**，插件直接在里面跑；要读盘/上网就敲 `pi.`* 小窗口（宿主记账、可拒绝）；只随身带几样最常用的小工具，不再背 pi-mono 和 npm 那一大箱道具。
+
+---
+
+## 文首导读：方案导图集
+
+### 本版关键设计点（先读这段，了解来龙去脉）
+
+> **背景**：tomcat 不是「一次只跑一个会话」的工具——它的架构允许**多个 session 同时并发执行**。这意味着插件系统天生要面对「多个插件同时在干活」「同一个插件被好几个会话同时用」的局面。本版在「剥离 WasmEdge、迁到进程内 rquickjs」这条主线之外，又把下面几个**容易踩坑、且和并发强相关**的设计点显式钉死（详见 §4.1 决策表与 §4.3）。这里用人话先讲清楚每个点「为什么要管、怎么解」。
+
+1. **运行时换芯（主线）**：把插件从「外部 WasmEdge + wasm 文件」搬进「编译进 tomcat 自己进程的 rquickjs」。好处是用户装完即用、无外部依赖；代价是丢了 Wasm 的内存硬墙，隔离要靠软手段（见下一条）。→ §3、§4.1 运行时行。
+2. **崩溃/作恶隔离**：同进程跑别人的代码，最怕「一个插件崩了/死循环了，把整个 tomcat 带塌」。解法是四层兜底——**每个运行中的插件实例（即每个 `(session_id, plugin_id)` 活体）单独开一条专属线程**、Rust 层 `catch_unwind` 接住 panic、单次执行超时+中断预算掐死循环、出事就把那个插件标成 `Error` 关掉。**底层 C 级崩溃（段错误）兜不住**，这是相对旧版的明确弱化，已写进风险。→ §4.3.1、§10。
+3. **多实例并发模型**（本轮重点）：同一个插件被会话 A 和会话 B 同时用，**各发一份独立的「活体」**（独立 JS 内存 + 独立事件信箱），互不串状态——这就是「面向对象多实例」，且**现状代码已经是这么做的**（`RuntimeManager` 按 `会话+插件` 双键索引）。注意区分**三阶段**和**两类 VM**：阶段一只编目（静态 `tools[]` 不跑码即可知，待 scope 首次激活零跑码 materialize 才对该 scope 的 LLM 可见）；阶段二是**条件子步骤**，**仅对没有静态 `tools[]` 的 legacy 插件**，在会话进入 / scope 首次激活时用一个「短命校验 VM」跑一遍初始化、把工具登记到 **project scope 共享表**（有静态 `tools[]` 的插件完全跳过阶段二）；阶段三才是「长命事件循环 VM」按会话多实例真正干活。现状代码里 `load_plugin` 的 `run_script` 是短命校验证据，生产长跑走 `start_session_vm`。→ §4.3.4、§4.1 并发/实例模型行。
+4. **事件的 sessionId 流转**（本轮重点）：事件投递已经按 `会话/插件` 信箱隔离（不会投错）；但插件读「当前会话」时，现状代码读的是一个**全局变量**，多会话并发会**读串**——本版改成「看信箱上写的是哪个会话号，就取哪个会话的数据」。→ §4.3.2、§10。
+5. **插件 = 能力容器，不是工具本身**（本轮重点）：插件是「装好后会注册东西的程序」，它把 0..N 个**工具**登记进共享工具表（这叫「贡献工具」），还可挂事件钩子、注册命令。这些工具和内置工具混在同一张表里给 LLM 用，LLM 直接 function-call——**和 skill 那套「把目录塞进提示词、模型挑了再读正文」是两条不同的通道**。加载路径则可以**继承 skill 的三层磁盘根**（项目 > agent > 全局）。→ §4.3.3、§4.1 插件 vs 工具 / 能力注入 LLM / 加载路径行。
+6. **作用域 = per-project scope，同 scope 内多 session 共享**（本轮重点，含一处设计修正）：`ToolRegistry`/`plugins` 的作用域不是“单个 session”，也不是“永远进程全局一份”，而是**一个 project = 一个 scope**。同一 scope 内的所有 sessions 看到同一张插件表/工具表；不同 project scopes 在**同一进程内也应并发隔离**。发现根分层 **global + agent + project**（与 skill 一致，project 层随工作区变），每个 scope 都基于自己的 `project_root/.tomcat/plugins` 构建插件视图。也就是说：**我们不做“每个 session 各看各的 tools”，但本期要做到“一进程并发多项目，每个项目一个 scope，同 scope 会话共享”。** 针对「插件很多别一开机全量加载」：开机只读 manifest 建轻量 Catalog，工具信息优先用 manifest **静态 `tools[]`**（不跑码即可见），运行 `VmActor` **首次用到才建、闲了回收**。竞品里 openclaw 在“manifest 声明工具 + 按需子集加载”上最成熟，pi-mono/pi_agent_rust 对启用集仍 eager 全量（反面）。→ §4.3.5、§4.3.6、§4.1 注册面作用域 / 加载策略行。
+
+> 一句话串起来：**换引擎（rquickjs）→ 同进程所以要软隔离 + 崩溃隔离 → 多会话并发所以要多实例 + sessionId 不串台 → 插件靠「贡献工具」融入既有 tool-calling，而非自成一条披露通道 → 注册面按 project scope 共享、运行实例按会话懒加载，插件再多也只读名册、用到才加载。**
+
+
+
+### A.0 Mermaid 时序图（插件注册：从磁盘到共享工具表）
+
+> 专业：此图画的是**三阶段**，但**注意不是线性必经**：**阶段一 编目**（启动/发现期，只读 manifest、不跑插件代码；先形成 `PluginCatalog` 底座，等某个 scope 视图 materialize 时再把静态 `tools[]` 零跑码写入该 scope 的 `ToolRegistry`，从而对该 scope 的 LLM 可见）；**阶段二 激活/注册**是个**条件子步骤**，**仅对没有静态 `tools[]` 的 legacy 插件**才发生，触发点在**会话进入 / scope 首次激活**（用短命校验 VM 跑一遍命令式补登工具，使其对 LLM 可见——不能拖到 `tool_call`，否则 LLM 根本看不见）；**阶段三 运行**（长命事件循环 VM，LLM 真发 `tool_call` 时按会话多实例起/复用并干活）。它要回答三个问题：① `ToolRegistry`/`plugins` 表的作用域（**per-project scope**，同 scope 内所有 sessions 共享）；② 插件很多时为什么不一上来全量加载；③ `PluginManifest`、Catalog、短命 `PluginVmInstance`、长命 `VmActor`、`ToolRegistry`、`PluginInstance` 分别何时出现、存什么。
+> 说人话：先按项目把插件编成一张轻量目录；同一个项目下开的会话共用这一张目录和工具表。只有当某插件**真的被用到**，才把它的代码拉起来跑一下补登工具；如果随后真的执行，就继续进入长跑 VM。注意：编目阶段**不跑代码**；作用域单位是 **project scope**，不是单个 session。
+
+```mermaid
+sequenceDiagram
+    participant Disk as 磁盘(三层根:项目>agent>全局)
+    participant LLM as LLM
+    participant Sess as 会话入口(SessionRuntime)
+    participant AL as AgentLoop(execute_tool 总闸)
+    participant PM as PluginManager(PluginToolExecutor)
+    participant Cat as PluginCatalog(进程级发现+静态元信息,不可变)
+    participant VM as 短命PluginVmInstance(懒,首次激活)
+    participant RM as RuntimeManager
+    participant LVM as 长命VmActor(session期)
+    participant Disp as HostApiDispatcher
+    participant Reg as ToolRegistry(scope 共享)
+    participant Map as plugins表(per-scope 管理态,可变)
+
+    rect rgb(235,245,255)
+    Note over Disk,Reg: 阶段一 编目/预填(触发分两拍: 进程启动先扫 global/agent；进入某 project scope 时再补扫该 project overlay；全程只读 manifest 不跑码)
+    Disk->>PM: 进程启动先扫 global/agent roots + 同名 first-wins
+    PM->>PM: 读 pi-plugin.json -> PluginManifest{id,name,version,main,permissions, tools[], events[]/activation}
+    PM->>Cat: pre-seed PluginCatalog 条目(immutable: id/version/root/manifest + declared tools[]/events[])
+    Note over Cat: 这就是「扫盘即填满」的那张表(不可变元信息层); ≠内置 BUILTIN_TOOL_CATALOG(那是编译期 const, 内置工具规格单一事实源)
+    alt manifest 静态声明 tools[](目标态,首选)
+        PM->>Cat: 记下 declared tool meta(待某 scope 命中时零跑码 materialize 到该 scope 的 ToolRegistry)
+        Note over Cat: 冷启动最省; events[] 也可静态读到, 但它只是事件名声明, 不决定是否 session 入口预启动
+    else 无静态 tools[](legacy)
+        Note over Cat: 标记 needs_activation; 工具留到 scope 激活期跑码补登
+    end
+    end
+
+    rect rgb(245,240,255)
+    Note over Sess,Map: 会话进入 / scope 首次激活(从 Catalog 命中集 seed per-scope 管理态; 「阶段二」与事件预启动也在此; 但 seed 表行≠跑码)
+    Sess->>PM: 首次进入该 project scope 时补扫 project_root/.tomcat/plugins overlay(只读 manifest, 不跑码)
+    Sess->>Cat: 合并出该 project scope 命中插件集(global/agent 共享 + project overlay)
+    Sess->>Map: seed per-scope plugins表条目(轻量: status=Cataloged, 引用 Catalog 元信息, 账本字段空; 不读 main 不跑码)
+    Note over Map: plugins表=per-scope「管理态层」, 记本 scope 的 status/config/registered_tools/event_listener_ids/VM句柄; 其中 registered_tools 原则上直接镜像 manifest.tools[]（暴露给 LLM 的唯一契约面）, 后续可再加一致性校验。event_listener_ids 则不是 manifest 里的 events[]; 它是运行时真向宿主 EventBus 注册 on/once 后返回的 listener_id。Catalog(底座) + 本表(overlay) = 该 scope 下插件完整视图; 是 enable/disable/unload 清理的依据
+    Note over Sess,LVM: 下面是两条【正交】决策(非三选一): A=工具可见性(看有无静态 tools[]); B=VM 生命周期(看 activation)。activation 与 tools[] 互不蕴含, 同一插件各走 A、B 一次
+    alt A 有静态 tools[](目标态首选)
+        Sess->>Reg: 零跑码 materialize manifest.tools[] -> 对该 scope 的 LLM 可见
+    else A 无静态 tools[](legacy)
+        opt 且 activation=lazy(不会被 B 预启动, 否则没人跑码登记工具)
+            Sess->>VM: 「阶段二」短命 create_instance + run_script(manifest.main)
+            VM->>Disp: hostCall('tools','registerTool', {name,...})
+            Disp->>Reg: register_tool(跑码后才可见; execute 留 JS)
+            VM-->>Sess: run_script ok(短命校验完即弃)
+        end
+        Note over Reg: 若 activation=session, 工具登记交给 B 预启动的长 VM 顺带完成, 不另起短命 VM
+    end
+    alt B activation="session"(生命周期型: 要接 session_start/定时器/订阅事件)
+        Sess->>PM: 预启动 start_session_vm(session_id, plugin_id) (长跑 VM)
+        PM->>RM: 建 actor + Init -> LVM 进 waitForEvent
+        Sess->>Disp: deliver_event(session_start)
+        Disp-->>LVM: waitForEvent() 取到 session_start
+        PM->>Map: 置 status=Enabled(无静态 tools[] 时, 长 VM 启动代码里的 registerTool 在此一并登记; event_listener_ids 待运行期挂 on/once 再回填)
+        Note over LVM: 必须此刻在场; 否则永久错过 session_start(不能拖到 tool_call)
+    else B activation=lazy(默认: 纯按需)
+        Note over RM: 不预启动长 VM; 等 LLM 首次 tool_call 进阶段三
+    end
+    end
+
+    rect rgb(235,255,240)
+    Note over LLM,LVM: 阶段三 运行(这里懒的是“长跑 VM 起机”; 触发=LLM 真发 tool_call。前提:该工具已对 LLM 可见——要么阶段一静态 tools[]，要么会话进入时已补跑过阶段二)
+    Note over LLM,Reg: 进入本块前, ToolRegistry 中已必须有该工具(来源=阶段一静态 tools[] 或会话进入期补跑的阶段二); LLM 看不见的工具不可能被 tool_call
+    LLM-->>AL: 返回 tool_calls(toolName, args)
+    Note over AL: execute_tool 总闸统一分发: 内置工具→PrimitiveExecutor; 插件工具→走下面这条插件分支(PluginToolExecutor)
+    AL->>Reg: call_tool(toolName, params)
+    Reg->>Reg: get_tool(toolName) -> Tool{plugin_id}（按名反查归属插件）
+    Reg->>PM: PluginToolExecutor.execute(tool{plugin_id}, params, session_id)
+    PM->>RM: ensure/start_session_vm(session_id, plugin_id)
+    RM->>RM: get(key=session_id/plugin_id)? 命中复用; 未命中才新建
+    RM->>LVM: spawn actor + send Init (actor 内部再 init_vm + 注入 bridge/shim + _start)
+    LVM-->>RM: ready(已进入 waitForEvent loop；目标态建议显式握手)
+    RM-->>PM: vm ready / handle
+    alt 工具调用(执行 LLM 选中的那个插件工具)
+        PM->>LVM: invoke __pi_execute_tool({toolName, params})
+        Note over LVM: VM 内按裸 toolName 查 __pi_tools[toolName] 执行(单插件内不会撞名)
+        LVM->>Disp: hostCall(...)
+        Disp-->>LVM: tool result
+        LVM-->>PM: tool result
+        PM-->>Reg: result
+        Reg-->>AL: 封装为 {content, details}
+        AL-->>LLM: tool result 回传(进入下一轮)
+    else 事件投递(非 LLM tool_call 路径)
+        PM->>Disp: deliver_event(instance_id, envelope)
+        Disp-->>LVM: waitForEvent() 取到 event payload
+    end
+    Note over RM,LVM: session_end 或 idle TTL 时回收; 同 key 重复使用直接复用
+    Note over PM,Map: unload_plugin(id) 时: 删该 scope 的 plugins表条 + 据 registered_tools 调 Reg.unregister_plugin_tools；事件监听现状主要按 plugin_id 批量 remove_plugin_listeners，event_listener_ids 仅是运行态 listener 句柄；RM.evict VM
+    end
+```
+
+> **三个“加载点”（按是否跑码区分，直接回答“阶段二到底什么时候触发”）。** 只有 1 个不跑码入口 + 真正跑码的入口落在会话相关时点：
+> - **① 程序启动（阶段一编目/预填，不跑码）**：先只读 manifest，**扫 global/agent 两层**，pre-seed `PluginCatalog` 的共享底座（不可变元信息层，含 `tools[]`/`events[]`/`activation`）。启动期**不跑任何插件代码**。可选优化（回答你的 Q2）：此刻可顺带把 global/agent 的静态 `tools[]` **预计算成一份进程级 `base` 工具元信息集**（纯缓存）；但它不是哪个 scope 的 `ToolRegistry`——某 scope 的 `ToolRegistry = base ⊕ project overlay ⊕ 本 scope 的启停/legacy 注册`，要等 scope materialize 时才算出来并成为权威可见集。注意 `PluginCatalog` 与内置工具的编译期 `BUILTIN_TOOL_CATALOG` 是两张不同的表，最终都要汇进某个具体 scope 的 `ToolRegistry` 给 LLM。
+> - **② 会话进入 / scope 首次激活**：先**补扫该 project scope 的 project overlay**、合并 scope 视图，然后走**两条正交决策（不是三选一，回答你的 Q3）**：
+>   - **A 工具可见性（看有无静态 `tools[]`）**：有静态 `tools[]` → 由 `base ⊕ overlay` **零跑码 materialize** 到该 scope 的 `ToolRegistry`，立即可见；无静态 `tools[]`（legacy）→ 只有当它**同时是 `activation=lazy`** 时，才需在此补跑「阶段二」短命 VM 调 `registerTool` 让工具可见。
+>   - **B VM 生命周期（看 `activation`）**：`activation:"session"` → **预启动长跑 VM** 并投 `session_start`（否则永久错过）；默认 `activation:"lazy"` → 不预启动，等首次 `tool_call`。
+>   - 两轴独立组合出 4 种行为，其中只有 **(lazy ∧ 无静态 `tools[]`)** 这一格才单独起阶段二短命 VM；**(session ∧ 无静态 `tools[]`)** 的工具登记由 B 预启动的长 VM 启动代码顺带完成，不另起短命 VM。
+> - **③ 首次 `tool_call`（执行期跑码）**：工具已可见后，LLM 真点名调用时才**起/复用长跑 VM** 执行（对 `activation=lazy` 的插件而言，这是它长跑 VM 的首次起机）。
+>
+> **所以“阶段二”不是线性中间阶段，而是个条件子步骤。** 它**只对没有静态 `tools[]` 的 legacy 插件**存在，触发时点是**会话进入 / scope 首次激活**——既不是“程序启动时跑码”（启动只编目），也**不能拖到 `tool_call`**（鸡生蛋：没注册→LLM 看不见→不会调用）。**有静态 `tools[]` 的插件根本不经过阶段二**：在该 scope 进入时由 manifest `tools[]` 零跑码 materialize 到 `ToolRegistry`，随后 LLM 首次 `tool_call` 直接进阶段三。目标态里，对 LLM 暴露的工具面以 manifest `tools[]` 为准；若仍有 `registerTool`，也只视为 legacy 兼容/实现自报，不再额外长出第二套可调用工具清单。
+
+> **谁发起 / 谁串联（对应你的两个疑问）。** 阶段三的发起者是 **LLM**：它在回合里返回 `tool_calls(toolName, args)`，由 **Agent Loop 的 `execute_tool` 总闸** 统一接住——这是内置工具与插件工具共用的**同一个入口**（保证中断/引导/审计/结果封装一致）。总闸判断该工具属于插件后，转入**插件分支**：经 `ToolRegistry.call_tool(toolName, params)` 用 `toolName` 反查出 `Tool{plugin_id}`，再交给注入的 **`PluginToolExecutor.execute(tool, params, session_id)`**。**阶段三的“ensure VM → ready → `__pi_execute_tool` → hostcall → 收结果”这一整条链，正是收敛在 `PluginToolExecutor.execute` 这一处**（即你说的 “execute plugin tool”），而不是散落在 `PluginManager` 各处、也不另起一条旁路 Agent Loop 的并行通道。详见 §4.1 决策表「工具调用执行路径」一行。
+>
+> **这几步是串行依赖，不是并列并发。** 在 `PluginToolExecutor.execute` 内部，顺序应是：① 先 `ensure/start_session_vm(session_id, plugin_id)`，保证这个 `(session, plugin)` 的长跑 VM 已存在；② 若是首次使用，就建 actor、发 `Init`、等 VM 进入事件循环；③ **拿到 ready / handle 后**，才真正调 `__pi_execute_tool({toolName, params})` 执行。两条分叉里，**事件投递**可通过已注册的 channel 入队，再由 `waitForEvent()` 取走；**工具调用**则直接回到该 VM 调 `__pi_execute_tool(...)`。现状代码里 `start_session_vm()` 只 `await handle.dispatch(VmCommand::Init)`，还没有显式 `ready` 握手；因此文档这里按**目标态**把“ready 屏障”写明，避免误解成“发完 Init 马上就一定能安全执行工具”。
+>
+> **一个插件多工具、怎么指定调哪个（对应你的第二个疑问）。** `ensure/start_session_vm` 本身**不注册工具**，它只保证一个 `(session_id, plugin_id)` 的 VM 就绪；工具注册发生在阶段二（`pi.registerTool` → `ToolRegistry`）。一个插件可注册 0..N 个工具，定位“某插件的某工具”靠这条路由链：`toolName → ToolRegistry.get_tool → Tool.plugin_id →（当前回合 session_id + plugin_id）→ RuntimeManager 取/起 VM → __pi_execute_tool({toolName, params})`；进入 VM 后再按**裸 `toolName`** 查 `__pi_tools[toolName]`（单个插件内部不会撞名）。前提是**暴露给 LLM 的工具名在 scope 内全局唯一**——现状 `get_tool` 仅按裸名取“首个启用项”，跨插件重名会静默路由到错误插件，需在注册期加唯一性约束。详见 §4.1 决策表「工具→插件路由 / 命名」一行。
+
+
+
+`toolDef` **到底哪来的？**
+
+- 来自 `**plugin_code` 自己执行**。也就是 manifest 里的 `main` 指向的入口文件（再加自动注入的 bridge/shim）跑起来后，JS 引擎在**运行时**创建了这个对象。
+- 这个对象可能是**内联对象字面量**，也可能是**先 `const toolDef = ...` 再传进去**，还可能是**调用某个函数 `buildToolDef()` 动态算出来**。
+- **不是**宿主去读 `plugin_code` 字符串、做正则/AST，把工具定义“解析”出来。宿主完全不知道源码里怎么写；它只知道：插件代码跑起来后，真的调用了一次 `pi.registerTool(...)`，于是桥接层收到了一个 JS 对象。
+
+最常见的两种写法：
+
+```ts
+// 写法 A：直接内联传对象
+pi.registerTool({
+  name: "translate",
+  label: "Translate",
+  description: "Translate input text",
+  parameters: {
+    type: "object",
+    properties: {
+      text: { type: "string" }
+    },
+    required: ["text"]
+  },
+  execute(toolCallId, params) {
+    return { content: [{ type: "text", text: "..." }] };
+  }
+})
+
+// 写法 B：先在插件代码里构造对象，再传进去
+const toolDef = {
+  name: "translate",
+  label: "Translate",
+  description: "Translate input text",
+  parameters: { /* ... */ },
+  execute(toolCallId, params) {
+    return { content: [{ type: "text", text: "..." }] };
+  }
+}
+pi.registerTool(toolDef)
+```
+
+拆开看就不绕了：
+
+- `name / label / description / parameters`：这是**工具元信息**，注册时会通过 hostcall 发给宿主，进入 `ToolRegistry`，供 LLM 看见和选择。
+- `execute(...)`：这是**工具真正干活的 JS 函数**。它**不会**在注册时发给宿主，而是留在插件 VM 里的 `__pi_tools[name]` 里。
+- 所以注册阶段的本质是：**“把工具说明书报给宿主，把工具实现留在插件自己体内。”**
+
+再说白一点：
+
+- `plugin_code` 里如果**没有**调用 `pi.registerTool(...)`，那宿主就**不会知道**这个插件提供任何工具。
+- `plugin_code` 里如果调用了 **两次** `pi.registerTool(...)`，那宿主就会看到这个插件**贡献了两个工具**。
+- 所以“有哪些工具”是**运行插件代码的结果**，不是 manifest 的静态内容。
+
+补一句“以后谁去跑 `execute(...)`”：
+
+- 当 LLM 以后真的调用这个工具时，宿主会先按 `toolName` 在 `ToolRegistry` 里找到这把工具的 **meta**，然后**回到插件 VM** 调 `globalThis.__pi_execute_tool(toolCallJson)`；桥接层再从 `__pi_tools[toolName]` 里取出之前留着的 `execute(...)` 真正执行。也就是说：**注册时留实现，调用时再回 VM 跑实现。**
+
+这里真正跑的**不是某个固定内置 JS 文件**，而是：
+
+1. 先取 manifest 里的 `main`，也就是插件目录中**作者指定的入口文件**（`main.ts` / `main.js`）；
+2. 如果是 `ts/tsx`，先转译成 JS；
+3. 运行时再把 `pi_bridge.js` 和一些 shim **自动注入到前面**；
+4. 最后执行的是这份“**桥接代码 + 用户入口文件**”拼起来的合成脚本。
+
+也就是说：**固定的是 bridge/shim，业务逻辑取的是插件自己目录里 `manifest.main` 指向的那个入口文件。**
+
+> **关键区别**：上图阶段二里的 `run_script` 是**激活/注册期短命校验 VM**，作用是“跑一遍初始化 + 登记工具 + 验脚本能否加载”；真正进 session 后，才会走 `start_session_vm(session_id, plugin_id)` 打开**长生命周期 VM**，在 `VmActor` 里长期 `waitForEvent` 干活。现状代码证据在 `load_plugin`，但目标态会把这一步推迟到需要时再跑。也就是说：**注册期跑一下，不等于运行期长跑。**
+
+> **为什么不能只读 manifest？（以及怎么变成「能只读 manifest」）** 现状插件**不是**“声明式工具清单”设计：manifest 里只有 `id/name/version/main/permissions`，**没有 `tools[]` 字段**；工具是插件代码运行时通过 `pi.registerTool({... execute ...})` 命令式报上来的，所以现状下宿主必须先把代码跑一遍才知道它注册了什么。**本版的优化结论**（见 §4.3.6）正是：给 manifest 加上**静态 `tools[]` 声明**，并把它视为**对 LLM 暴露工具面的唯一契约**——这样阶段一编目即可「不跑码就看见工具」（对齐 openclaw `contracts.tools`），把 `run_script` 推迟到「插件首次被用到」时才跑（懒加载）。`registerTool` 在目标态不再承担“发现第二套工具清单”的职责，而是 legacy 兼容/实现期自报；原则上它与 manifest `tools[]` 应完全一致，后续可再补一致性校验。详见 §4.3.3、§4.3.4、§4.3.5、§4.3.6。
+
+### A.1 抽象 ASCII 总图（职责 / 事实源 / 分叉）
+
+> 专业：钉死「插件 JS 与宿主之间只有三条通路」与「单入口 hostcall 多路复用 + 权限闸」的事实源；运行时由外部 WasmEdge 改为进程内 JS 引擎，但 hostcall 协议与 Processor 路由不变。
+> 说人话：先看这事本质——插件能做的事分三类，只有「敏感那类」才会真正穿过宿主的安检口；引擎换了，但安检口和分流逻辑没换。
+
+```text
+                         ┌──────────────────────── tomcat 进程（单进程） ────────────────────────┐
+   插件作者              │                                                                        │
+   pi-plugin.json  ──加载─┼─► [发现/加载] ──► [JS 运行时(嵌入式)] ── 插件 JS/TS 在此执行           │
+   main.ts               │                          │                                            │
+                         │        ┌─────────────────┼──────────────────┐                         │
+                         │        │ ①纯计算          │ ②同步原生         │ ③异步+需权限            │
+                         │        ▼                  ▼                   ▼                         │
+                         │   纯 JS 垫片         同步原生全局函数      单入口 hostcall              │
+                         │  path/util/events    crypto(hash/random)   __pi_host_call(json)        │
+                         │   （不进 Rust）       （不进 dispatcher）        │                      │
+                         │                                                  ▼                      │
+                         │                                      [HostApiDispatcher] (单入口路由)   │
+                         │                                                  │ (module, method)     │
+                         │                                                  ▼                      │
+                         │                                          [权限闸 + 审计]                │
+                         │                                                  │                      │
+                         │            ┌──────────┬──────────┬──────────┬────┴─────┬──────────┐    │
+                         │            ▼          ▼          ▼          ▼          ▼          ▼    │
+                         │          fs(4原语)    llm        tools      events     session   ...   │
+                         │            │          │          │          │          │              │
+                         │            └──────────┴────► 结果回注 Agent Loop（ToolResult / Event）─┘
+                         └────────────────────────────────────────────────────────────────────────┘
+
+  单一事实源：
+   - hostcall 协议 = HostRequest/HostResponse（src/ext/host_binding.rs）
+   - 路由扇出     = HostApiDispatcher.dispatch（src/ext/dispatcher/dispatch.rs）
+   - 关键分叉     = ① 纯计算不进 Rust / ② 同步原生不进 dispatcher / ③ 异步进 submit/poll
+```
+
+### A.2 具体 ASCII 总图（落到真实对象）
+
+> 专业：把 A.1 的三类通路落到 `src/ext` 真实对象。运行时层 `PluginEngine`/`PluginVmInstance`（替换 `engine_wasmedge`/`instance_wasmedge`）通过 `rquickjs` 实例化；`VmActor` 在专属线程跑插件事件循环；`HostApiDispatcher` 与 `RuntimeManager` 保持不变。
+> 说人话：这张图告诉你「代码里到底谁是谁」——换掉的只有引擎实例那两块（图中 `★`），外圈的 actor、分发器、运行时管理器原样复用。
+
+```text
+  磁盘 plugin/                       tomcat 进程内
+  ├─ pi-plugin.json   load_plugin()  ┌───────────────────────────────────────────────┐
+  └─ main.ts ──transpile_ts──────────► PluginManager (src/ext/plugin/manager.rs)      │
+                                      │   set_plugin_engine / set_host_dispatcher / ...│
+                                      │           │ create_instance(id)                │
+                                      │           ▼                                    │
+                                  ★ PluginEngine (engine_rquickjs.rs)  ──► ★ PluginVmInstance (instance_rquickjs.rs)
+                                      │           │ register_host_binding(invoke_fn)   │
+                                      │           │ run_script / 事件循环 / destroy     │
+                                      │           ▼                                    │
+                                      │   VmActor (vm_actor.rs)  ── spawn_blocking ──┐ │
+                                      │     VmCommand::{Init,DispatchEvent,Shutdown} │ │
+                                      │           │                                  │ │
+                                      │  RuntimeManager (runtime_manager.rs)         │ │
+                                      │     key = session_id + plugin_id             │ │
+                                      │           │                                  │ │
+                                      │  globalThis.pi ──__pi_host_call(json)──┐     │ │
+                                      │                                        ▼     │ │
+                                      │   HostApiDispatcher (dispatcher/dispatch.rs) │ │
+                                      │     Processors: primitive/llm/tools/         │ │
+                                      │                 event_bus/session/audit      │ │
+                                      │     async_results / instance_calls           │ │
+                                      └───────────────────────────────────────────────┘
+   ★ = 本次新增/替换（其余复用）。垫片：crypto_shim/buffer_shim/path/events/util 由 PluginVmInstance 初始化时注入。
+  注：PluginVmInstance 的 run_script 走两种生命周期——激活/注册期短命校验 VM（目标态；现状代码证据在 load 期）vs session 期长命事件循环 VM（VmActor 内长跑）。详见 §4.3.4。
+```
+
+> 图后阅读顺序：A.1 先建立「三类边界 + 单入口路由」心智，A.2 告诉你这三类在 `src/ext` 的真实落点；本次改动集中在 `★` 两块（引擎/实例），分发与 actor 不动。下面 B 组四图把异步 hostcall 的生命周期摊开。
+
+### B. ASCII 核心四图
+
+#### B.1 结构示意（运行时栈 + 注入组件）
+
+```text
+┌──────────────────────────── 嵌入式 JS 运行时（rquickjs）────────────────────────────┐
+│ 运行时最小基线(目标态): console / timers(setTimeout,setInterval)                      │
+│ 宿主注入/模块能力: TextEncoder / TextDecoder / path / util.format / EventEmitter / Buffer │
+│ 同步原生函数: __pi_crypto_*_native（hash/hmac/random/aes-gcm/ed25519）               │
+│ globalThis.pi: readFile/writeFile/editFile/executeBash/createChatCompletion/on/emit  │
+│        │ 仅敏感/异步类经此                                                            │
+│        ▼                                                                              │
+│  __pi_host_call(request_json)  ── invoke_host_func_with(dispatcher, instance_id, …)  │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────── HostApiDispatcher ────────────────────────────┐
+│ Processor(Option):  primitive · llm · tools · event_bus · session · audit  │
+│ 异步基础设施:  async_results<callId,Status> · instance_calls<id,[callId]>   │
+│                tokio_handle(block_on/spawn) · llm_semaphore · async_timeout │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+> 这里的 **baseline** 指新 `rquickjs` 方案里**宿主要保证的最小运行时能力**，不是说现代码今天已经无条件自带全部对象。`TextEncoder` / `TextDecoder` 是标准编码 API：前者把字符串编码成 `Uint8Array`，后者把字节解码回字符串，常给 `Buffer`、HTTP、crypto、文件读写配套使用。现仓库里已经有它们的实现（`assets/modules/encoding.js`），但文档不应把它们写成“天然就有”；更准确地说，它们属于**要明确注入/保证的编码能力**。
+
+#### B.2 调用流（四类分叉）
+
+```text
+插件 JS 调用
+   │
+   ├─ path.join / 本地 EventEmitter.emit .......► 纯 JS 垫片，沙箱内返回（不进 Rust）
+   │
+   ├─ crypto.createHash(...).digest() ..........► __pi_crypto_hash_native（同步原生 Func，不进 dispatcher）
+   │
+   ├─ pi.emit / pi.on / pi.off .................► __pi_host_call(json)
+   │                                              │
+   │                                         dispatch(instance_id, request)
+   │                                              └─ do_events / event_bus / session 路由
+   │
+   └─ pi.readFile / pi.createChatCompletion ....► __pi_host_call(json)
+                                                     │
+                                                dispatch(instance_id, request)
+                                                     ├─ module=="__async" && method=="poll" ─► do_async_poll(callId)
+                                                     ├─ has callId ─► submit_async（Pending + spawn timeout）
+                                                     └─ 无 callId ─► block_on(dispatch_async → do_*)
+```
+
+> **别把两个 `emit` 混了**：`EventEmitter.emit()` 只是**本地 JS 事件发射器**，只会触发沙箱内自己挂的监听器，**不会**把事件发给宿主；真正要把事件发到宿主 / event bus / 其它订阅者，走的是 `pi.emit()`，它会经 `__pi_host_call` 进入 Rust 的 `events.emit` 路由。
+
+#### B.3 时序（异步 hostcall 的 submit/poll，引擎无关）
+
+```text
+插件(JS)              dispatch()            async_results        Tokio任务
+   │ pi.xxx(...,callId)   │                      │                  │
+   │────────────────────►│ submit_async         │                  │
+   │                     │─────────────────────►│ insert(Pending)  │
+   │                     │──────────────────────────────────────►  │ spawn(timeout(dispatch_async))
+   │ {pending:true}      │                      │                  │
+   │◄────────────────────│                      │                  │
+   │ __async.poll(callId)│                      │                  │
+   │────────────────────►│ do_async_poll        │                  │
+   │                     │─────────────────────►│ get(callId)      │
+   │                     │                      │◄─────────────────│ insert(Done/Error)
+   │ {ready,result}      │ remove(callId)       │                  │
+   │◄────────────────────│─────────────────────►│                  │
+```
+
+> 说人话：B.3 与旧版**完全一致**——异步「先拿 pending、再轮询拿 ready」的协议是引擎无关的，换 rquickjs 不影响它。变的只是「谁在跑 JS、内存怎么传」（旧版是 Wasm 线性内存回填，新版是 rquickjs 直接传 Rust 值）。
+
+#### B.4 全链路闭环（结果回注主回路）
+
+```text
+插件 JS / globalThis.pi
+   │ __pi_host_call(json)         （或 同步原生 / 纯垫片直接返回）
+   ▼
+HostApiDispatcher.dispatch  ── 权限闸/审计 ── do_*（fs/llm/tools/events/session）
+   ▼
+HostResponse → ToolResult / EventPayload
+   ▼
+AgentLoop.messages.push(ToolResult)        ← 插件子回路并入主编排的唯一关键动作
+   ▼
+Reasoning Loop 下一轮推理 / 事件继续传播
+```
+
+### C. mermaid（IDE 渲染）
+
+```mermaid
+flowchart TB
+  subgraph proc [tomcat 进程]
+    Core["对话/LLM/工具/会话 核心"]
+    subgraph qjs [嵌入式 rquickjs]
+      PluginJS["插件 JS/TS"]
+      Shims["纯 JS 垫片 path/Buffer/util/EventEmitter"]
+      NativeCrypto["同步原生 crypto"]
+      PiObj["globalThis.pi"]
+    end
+    Dispatcher["HostApiDispatcher"]
+    Gate["权限闸 + 审计"]
+  end
+  PluginJS --> Shims
+  PluginJS --> NativeCrypto
+  PluginJS --> PiObj
+  PiObj -->|"__pi_host_call(json)"| Dispatcher
+  Dispatcher --> Gate
+  Gate --> Core
+  Shims -.->|"不进 Rust"| PluginJS
+  NativeCrypto -.->|"不进 dispatcher"| PluginJS
+```
+
+
+
+### D. 状态机
+
+#### D.1 插件生命周期（PluginManager）
+
+```text
+┌────────┐ load_plugin ┌────────┐ enable ┌─────────┐ start_session_vm ┌────────┐
+│ 磁盘   │────────────►│ Loaded │───────►│ Enabled │─────────────────►│ Active │
+└────────┘             └────────┘        └─────────┘                  └───┬────┘
+                                              ▲ end_session                │
+                                              └────────────────────────────┘
+   disable_plugin: Enabled/Active → Disabled ; unload_plugin: 任意 → 移除 + 全副作用清理
+```
+
+#### D.2 VM actor 状态（vm_actor.rs，不变）
+
+
+> 这张表是**状态转移表**：左列是“当前状态”；第二列是“在该状态下收到的命令，或运行中发生的结果”；满足后会转到第三列状态，并执行第四列动作。注意：`_start` **不是发给 actor 的命令**，而是 VM 启动后一直在跑的那个入口函数；它一旦返回，就表示这次长跑结束了。
+
+| 当前状态    | 在该状态下收到/发生                          | 转到状态    | 执行动作                            | 说人话                               |
+| ------- | ----------------------------------- | ------- | --------------------------------- | --------------------------------- |
+| Created | 收到 `VmCommand::Init`                  | Running | `set_state(Running)`；随后构建 JS 实例并进入长跑 `_start` | 收到启动信号后，先标记 Running，再真正建引擎、进事件循环。 |
+| Created | `Shutdown`/通道关闭                       | Stopped | `set_state(Stopped)`；直接收尾          | 还没启动就被叫停，干净退出。                    |
+| Running | 长跑中的 `_start` 正常返回（如事件循环自然退出） | Stopped | `set_state(Stopped)`              | 不是“收到一个 `_start`”，而是前面一直在跑的 `_start` 已经结束，所以正常停机。 |
+| Running | 长跑中的 `_start` 出错，或 actor 线程 panic | Error   | `set_state(Error)`；记录错误           | 插件长跑崩了，标记错误但不拖垮主进程。             |
+
+
+---
+
+## 1. 术语统一
+
+
+| 术语                          | 语义                             | 数据载体 / 位置                                                                                         | 行为约束                                                                            | 说人话                            |
+| --------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------ |
+| **嵌入式 JS 运行时**              | 编译进 tomcat 的进程内 JS 引擎          | `rquickjs::{AsyncRuntime, AsyncContext}`；新建 `src/ext/engine_rquickjs.rs` / `instance_rquickjs.rs` | 进程内、无外部依赖；取代 WasmEdge                                                           | 把 QuickJS 焊进自己进程，不再租外部放映机。     |
+| **PluginEngine / PluginVmInstance**   | 运行时引擎与单运行实例                    | 替换 `WasmEngine`/`WasmInstance`（`engine_wasmedge`/`instance_wasmedge`）                             | 接口保持 `create_instance/register_host_binding/run_script/destroy`                 | 引擎换芯，外部调用签名尽量不变。               |
+| **Hostcall**                | 插件向宿主发起的一次请求                   | `globalThis.pi.*` → `__pi_host_call(json)`                                                        | 仅「敏感/异步」类经此；纯计算与同步 crypto 不经此                                                   | 插件敲宿主的「单一安检窗口」。                |
+| **HostApiDispatcher**       | 单入口路由器                         | `src/ext/dispatcher/dispatch.rs`；`HostRequest.{module,method}`                                    | 按 (module,method) 路由到 Processor；未注入返回明确错误                                       | 安检窗口后面的「分流台」。                  |
+| **Processor**               | 某类 hostcall 的执行者               | `primitive/llm/tools/event_bus/session/audit`                                                     | 宿主注入；未注入时报错                                                                     | 每条业务线的实际办事员。                   |
+| **同步原生函数**                  | 直接挂在 JS 全局的同步 Rust 函数          | `rquickjs` `Func::from`；如 `__pi_crypto_hash_native`                                               | 纯计算 + 需原生能力（速度/熵）；**不进 dispatcher**                                             | 太琐碎、纯算的活，直接在柜台办，不走分流台。         |
+| **纯 JS 垫片**                 | 沙箱内纯 JS 实现的小工具                 | `path/util.format/EventEmitter/Buffer`                                                            | 完全不出沙箱、不进 Rust                                                                  | 随身小工具，自己就能用完。                  |
+| **VmActor**                 | 单运行实例（通常对应一个 `(session,plugin)`）的专属线程封装 | `src/ext/vm_actor.rs`；`spawn_blocking`                                                            | `VmCommand::{Init,DispatchEvent,Shutdown}`                                      | 每个运行中的插件实例一间专属放映厅，外面发命令进去。    |
+| **RuntimeManager**          | 按 `session_id+plugin_id` 管理 VM | `src/ext/runtime_manager.rs`；`VmRuntimeKey`                                                       | 多会话隔离、lazy init、session 级批量清理                                                   | 哪个会话哪个插件用哪个放映厅的登记册。            |
+| **软隔离**                     | 同进程内靠超时/中断/重建做的隔离              | interrupt budget + 单次超时 + fail-open + 运行时重建                                                       | 无 Wasm 线性内存硬墙                                                                   | 没有物理隔墙，靠「超时就掐、崩了就重建」兜底。        |
+| **崩溃隔离**                    | 插件 panic/抛错不拖垮宿主的机制            | `spawn_blocking` 专属线程 + `catch_unwind`（`vm_actor.rs:129,165`）→ `VmActorState::Error`              | 只兜 Rust panic，**不兜 C 级段错误/UB**（见 §10）                                           | 一插件崩了标红关掉，不连累隔壁和主程序。           |
+| **插件（能力容器）**                | 注册若干工具/事件/命令的 JS/TS 模块         | `PluginManager`；`pi.registerTool`/`pi.on`/`registerCommand`                                       | **插件 ≠ 工具**；插件在激活/注册时贡献 0..N 个工具进 `ToolRegistry`                                  | 插件是「能力包」，进去摆好几件工具+事件+命令。       |
+| **工具注入 LLM**                | 插件注册的工具如何被 LLM 使用              | 进共享 `ToolRegistry` → tool spec → LLM 工具列表（同内置工具）                                                  | 与内置工具同 tool-calling 通道；**不**走 skill 渐进披露；manifest 不进 LLM                        | 插件工具跟内置工具混在工具架上，LLM 直接调。       |
+| **instance_id / sessionId** | VM 与事件通道的隔离键 = 会话+插件           | `instance_id = session_id/plugin_id`（`VmRuntimeKey`）                                              | 事件按 instance_id 隔离；session 类 hostcall 须按 session_id 取数（本期修正）                    | 信箱号 = 会话号/插件号，多会话不串台。          |
+| **激活/注册路径**                 | 短命校验 VM：目标态在需要时跑一遍初始化 + 登记工具 | 现状代码证据在 `load_plugin`→`run_script`（`manager.rs:228`，短生命周期；`instance_wasmedge.rs:104` 标注「仅用于加载校验」）；目标态将其推迟到首次激活 | 跑完即弃；把 `registerTool` 声明登记进 project scope 级共享的 `ToolRegistry`；若 manifest 静态 `tools[]` 已齐，则无需先跑这步才可见工具 | 不是“启动全量跑”，而是需要时补登记 + 验脚本。      |
+| **运行路径（生产）**                | 长命事件循环 VM：按会话多实例真正干活           | `start_session_vm`→`VmActor`+`PluginVmInstance`（`manager.rs:451`/`vm_actor.rs:207`，长生命周期）               | 每 `(session,plugin)` 一实例，`_start` 阻塞在 `waitForEvent`；这才是生产长跑                    | 真正干活的长跑，每会话一份。                 |
+| **多实例（面向对象）**               | 同插件被多会话用 = 多个独立活体              | `RuntimeManager: DashMap<VmRuntimeKey, VmActorHandle>`                                            | 每 `(session,plugin)` 一实例；命中复用、未命中新建；`end_session` 批量回收                          | 一个插件被几个会话用，就发几份独立的它。           |
+| **PluginCatalog（进程级发现层）** | 三层根扫描出的轻量插件目录（只元信息，不跑码）        | `plugin-source-scan-register-load.md`(`GlobalCatalog`，待实现)；现状目录直载                                 | 进程启动先扫 global/agent，共享；进入 scope 时再补扫 project overlay，合并成该 scope 视图                                    | 一张「全进程共享底座 + 项目 overlay」的轻名册，不含代码。 |
+| **运行实例懒加载**                 | `VmActor` 首次使用才建、闲置回收          | `RuntimeManager`(命中复用/未命中新建)；`end_session` 批量回收 + idle TTL 回收                                     | 常驻 = 轻量 Catalog + 在用 VM，不随插件总数线性增长                                              | 用到谁才开谁，闲了就关，内存只为在用的买单。         |
+| **pi-mono 兼容（已放弃）**         | 让 pi-mono/npm 插件零修改运行          | 旧版 `assets/modules/` + `js-api-alignment.md`                                                      | 新版**不再追求**；自有 manifest + 精简 `pi.*`                                              | 不再硬背别人家的插件生态。                  |
+
+
+---
+
+## 2. 竞品 / 选型对比（调研）
+
+> 专业：对比各 agent 的「扩展运行时形态、宿主能力暴露方式、隔离模型、JS/Node 生态依赖」，作为 §4 选型证据链。
+> 说人话：先看看别人家插件是怎么跑、怎么管权限的，再决定我们抄谁、不抄谁。
+
+
+| 竞品                | 扩展形态                                    | 运行时 / 隔离                                                                           | 宿主能力暴露                                                                                       | JS/Node 生态                                                                | 我们借鉴的点                                 | 说人话                                           |
+| ----------------- | --------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------- |
+| **pi_agent_rust** | JS/TS 扩展                                | **进程内 `rquickjs`**，软隔离（`src/extensions_js.rs`）                                     | 单入口 hostcall（`Func` 注入 + `pi.*`），crypto 走同步原生（`src/crypto_shim.rs`）                          | 维护 ~105 个虚拟模块（38 Node + 67 npm，`extensions_js.rs` 30k 行）                  | **运行时方案直接借鉴**；crypto/buffer 垫片移植；软隔离手段 | 跟我们目标最近：嵌入式 QJS。它兼容生态，我们不要那部分。                |
+| **pi-mono**       | JS/TS 扩展                                | Node.js / 浏览器宿主                                                                    | `ExtensionAPI`（全量事件 + UI 渲染）                                                                 | 原生 Node + npm                                                             | 仅 API 命名习惯（裁剪沿用 `pi.*`）                | 原始出处，但太重、要 Node 全家桶，不硬兼容。                     |
+| **openclaw**      | JS/TS 插件                                | Node 宿主                                                                            | `OpenClawPluginApi`（更宽：channel/gateway/memory）                                               | 原生 Node + npm                                                             | 注册面分类思路                                | 能力面更宽，但同样依赖 Node，不照搬。                         |
+| **codex**         | ① Rust 内置 Extension ② 声明式 Plugin bundle | ①进程内 trait 直调；②skills/hooks/MCP **子进程**（`codex-rs/core-plugins/src/loader.rs:556`） | **Rust trait 注入**（`codex-rs/ext/extension-api/src/contributors.rs:123`），非 hostcall；外部工具走 MCP | 无 Node 插件 API；V8 仅 code-mode（`codex-rs/code-mode/src/runtime/mod.rs:256`） | 「敏感能力走子进程 + OS 沙箱 + approval」的权限分层     | 它根本不让插件写 JS 跑在宿主里，靠 MCP/子进程 + OS 沙箱，安全但开发体验重。 |
+| **hermes-agent**  | Python 进程内插件 + MCP                      | **进程内 Python importlib**，无代码沙箱（`hermes_cli/plugins.py:1474`）                       | `PluginContext` 直接 Python 调用（`hermes_cli/plugins.py:316`），非 hostcall                         | 无嵌入式 JS；npm 仅经 MCP `npx` 子进程                                              | opt-in 白名单 + hook 拦截的治理模型              | 同进程无沙箱，靠「默认不启用 + 钩子拦截」治理，可借鉴治理思路。             |
+
+
+**为什么选 rquickjs（嵌入式 JS）而不是其他路线（3–5 条）**：
+
+1. **要保留 JS/TS 插件 + 进程内体验** → 排除 codex 的「Rust 内置 trait」（插件不能用 JS 写）与「纯 MCP 子进程」（开发/分发太重）。
+2. **要去掉外部运行时依赖** → 排除 WasmEdge（强制 C 库 + 定制 wasm 构建）；rquickjs 静态编入二进制。
+3. **不要 Node 全家桶** → 排除 pi-mono/openclaw 的 Node 宿主；rquickjs 是裸 QuickJS，按需注入。
+4. **已有最近参照** → pi_agent_rust 已用 rquickjs 跑通同款架构（hostcall + 软隔离 + crypto 原生），迁移风险最低。
+5. **安全治理可借鉴而非照抄** → 吸收 codex 的「敏感能力收口」与 hermes 的「opt-in + hook 拦截」，落到 `pi.*` hostcall + 权限闸。
+
+---
+
+## 3. 目标与设计原则
+
+
+| 目标                       | 观察指标（落地后可感知）                                                                                                 | 说人话                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------ | -------------------------------- |
+| G1 零外部运行时                | `tomcat doctor` 不再检查/要求 WasmEdge；裸机 `tomcat` 即可加载并运行插件                                                       | 装完就能跑插件，不用再装 WasmEdge。           |
+| G2 hostcall 协议不变         | `HostRequest/HostResponse` 字段与 submit/poll 时序保持；现有 dispatcher 测试绿                                            | 换引擎不换协议，分发层测试照样过。                |
+| G3 三类边界清晰                | 纯计算不进 Rust；crypto 同步原生不进 dispatcher；敏感能力必过权限闸                                                                | 该在沙箱算的别打扰宿主，该安检的一个都不漏。           |
+| G4 工具垫片可用                | 插件内 `path.join`/`Buffer`/`crypto.createHash`/`EventEmitter` 可用且有 e2e 覆盖                                      | 常用小工具开箱即用。                       |
+| G5 软隔离兜底                 | 单运行实例死循环触发 interrupt budget/超时，主进程不挂；崩溃后可重建运行时                                                             | 某个插件实例跑飞了能掐掉，不连累主程序。              |
+| G6 崩溃隔离                  | 单运行实例 panic/抛错 → 仅该 `VmActor` 进 `Error` 态，其它插件实例与 Agent Loop 继续；有 e2e 覆盖                                     | 一个插件实例崩了，别的照跑、主程序不挂。              |
+| G7 多 session 不串台         | 两会话并发跑同插件，事件各投各的；`getCurrentSession/getMessages` 各读各的会话                                                      | 多个会话同时跑，互相不读串、不投错。               |
+| G8 多实例并发隔离               | 同插件被两会话用 = 两个独立 `VmActor` 实例，JS 全局状态互不可见；多插件可并发；同会话同插件复用单实例                                                  | 一个插件被几个会话用各跑各的，状态不串。             |
+| G9 注册面按 project scope 共享 | `ToolRegistry`/`plugins` 绑定一个 project scope；同 scope 所有 sessions 工具表一致；不同 scopes 可在一进程内并发隔离；运行实例才 per-session | 工具表按项目 scope 一份，同 scope 会话看到的一样。 |
+| G10 编目省内存（不全量加载）         | 启动只读 manifest 建轻量 Catalog；运行 `VmActor` 首次使用才建、闲置回收；装 N 插件内存不随 N 线性涨                                          | 插件再多，开机也只读名册，用到才加载。              |
+
+
+
+| 非目标                           | 推给 / 说明                            | 说人话            |
+| ----------------------------- | ---------------------------------- | -------------- |
+| pi-mono / npm 插件零修改运行         | 本期放弃；插件按裁剪 `pi.*` + 自有 manifest 重写 | 不再硬兼容别人家的插件。   |
+| Node 兼容层（fs/http/stream/tls…） | 敏感类走 hostcall；其余不提供                | 不再背 Node 全家桶。  |
+| 每插件独立进程 / OS 沙箱               | 预留扩展点，本期用软隔离                       | 物理隔墙以后再说，先用软的。 |
+| TS 类型检查                       | 仅转译（SWC），不做类型检查                    | 只翻译不挑类型错。      |
+
+
+设计原则：**单入口 hostcall 不变**、**能力默认收口（敏感全走权限闸）**、**纯计算就地解决**、**引擎可替换（trait 化，保留未来 Wasm 后端可能）**。
+
+---
+
+## 4. 落地选型与实施（已定稿）
+
+> 文档内 `## 4` 对应 ARCHITECTURE_SPEC §4：§4.1 七列决策表 + §4.2 五列实施点表。
+
+### 4.1 落地选型决策表
+
+
+| 维度                     | 关切                                              | 决策                                                                                                                                                                                              | 取自                                                                                                                                                                                                                                                                                                                                                                                           | 入选理由                                                                                                                                                                                                                                                                 | 未入选 + 拒因                                                                                                                     | 说人话                                                                                                                                          |
+| ---------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| 运行时                    | 进程内 JS 引擎选谁                                     | **采用 rquickjs；拒绝 WasmEdge / Wasmtime**                                                                                                                                                          | tomcat `src/ext/engine_wasmedge.rs`（现状）；`pi_agent_rust/Cargo.toml`(`rquickjs`)、`src/extensions_js.rs`                                                                                                                                                                                                                                                                                        | 设计：静态编入二进制的嵌入式 QJS；理由：去外部依赖、有 pi_agent_rust 同款先例、迁移风险最低                                                                                                                                                                                                              | WasmEdge：强制 C 库 + 定制 wasm 构建，与运行时深耦（`docs/reports/wasm_runtime_migration_analysis.md`）；Wasmtime：`wasmedge_quickjs.wasm` 不可移植 | 换成焊进肚子里的 QJS，不再依赖外部放映机。                                                                                                                      |
+| 隔离（防作恶/跑飞）             | 同进程怎么防插件作恶/死循环                                  | **采用软隔离（超时+中断预算+重建）；拒绝强制硬隔离**（崩溃隔离见下一行）                                                                                                                                                         | tomcat `src/ext/vm_actor.rs`(panic catch)；`pi_agent_rust/src/extensions_js.rs`(interrupt budget)                                                                                                                                                                                                                                                                                             | 设计：interrupt budget+单次超时+fail-open+运行时重建；理由：QJS 无 Wasm 内存墙，软隔离成本低且够用                                                                                                                                                                                                 | 每插件独立进程 / OS 沙箱：IPC 与启动成本高，本期过重（预留扩展点）                                                                                       | 没物理墙，靠超时和重建兜底。                                                                                                                               |
+| 崩溃隔离                   | 插件崩了/panic 了怎么不拖垮宿主                             | **采用 每个运行中插件实例专属线程 + `catch_unwind` + 错误态降级；拒绝 让插件错误冒泡到主线程**                                                                                                                                        | tomcat `src/ext/vm_actor.rs:129,165,195`(spawn_blocking 专属线程 + catch_unwind→`VmActorState::Error`)；codex `codex-rs/hooks/src/engine/command_runner.rs`(子进程隔离 hook)                                                                                                                                                                                                                           | 设计：每个运行中插件实例单 `VmActor` 跑在专属 `spawn_blocking` 线程，`run_vm` 用 `catch_unwind` 兜 panic 进 `Error` 态，channel 断开→`__shutdown`，不影响其它插件实例与 Agent Loop；理由：rquickjs 同进程必须靠「线程+panic 捕获+超时」三层兜                                                                                           | codex 全程 OS 沙箱/子进程：IPC 与开发体验重，本期插件量级不需要；裸进程内无 catch：一个 panic 拖垮整进程                                                           | 每个运行中的插件实例单独开间房跑，崩了就标红关掉，不连累隔壁和主程序。                                                                                                      |
+| 并发 / 实例模型              | 支持多插件同时跑吗？同插件被多 session 用怎么办                    | **采用 面向对象多实例：运行期 VM 按 `(session_id, plugin_id)` 一键一实例；注册面（tools/commands）按 project scope 只注册一次；同 scope 内多 sessions 共享注册面，不同 scopes 可并发隔离；拒绝 全局单 VM 跑所有插件/所有会话**                                 | tomcat `src/ext/runtime_manager.rs`(`VmRuntimeKey{session_id,plugin_id}`→`VmActorHandle`，`DashMap`)、`plugin/manager.rs:451`(`start_session_vm` 命中复用/未命中新建)、`:140`(`load_plugin` 现状证据)、`:536`(`end_session` 批量清理)；`src/core/session/scope.rs:49`(Code 模式已有 project scope key)；pi_agent_rust `src/extensions.rs`(per-extension 实例)                                                 | 设计：① 同插件被 N 个会话用 = N 个独立 `VmActor` 实例（JS 堆/状态/事件信箱互隔离）；② 多个不同插件各自独立实例并发；③ 工具/命令在 **project scope 内只注册一次**并由同 scope sessions 共享（现状代码证据：`load_plugin -> run_script` 短命校验 VM 补注册；目标态首选 manifest 静态 `tools[]`，在该 scope 首次激活时**零跑码 materialize** 即可见，仅 legacy 无 `tools[]` 的插件才需短命 VM 补注册——见「注册面作用域」「四张表分层」两行）；④ 同一进程内若有多个项目 scopes，则各自维护独立注册面；理由：既能并发多项目，又不需要“单个 session 各看各的工具” | 全局单 VM 跑所有会话/插件：状态互染、并发串台、一崩全崩；per-session 各存一份 ToolRegistry：重复注册、内存翻倍、列表漂移                                                  | 同一个插件被几个会话用，就给每个会话发一份「独立的它」；但它登记的工具不是每会话一份，而是“同一个项目 scope 共享一份”。                                                                             |
+| 多 session 事件路由         | 多会话同时跑，事件/会话调用怎么不串台                             | **采用 `instance_id = session_id/plugin_id` 作 VM 与事件通道键，并把 session_id 透传到 session 类 hostcall；拒绝 全局 current session**                                                                              | tomcat `src/ext/runtime_manager.rs`(`VmRuntimeKey{session_id,plugin_id}`)、`dispatcher/dispatch.rs:197,294`(按 instance_id 注册/投递事件)、`dispatcher/session_ops.rs:16`(`current_session_key()` — 现状缺陷)；pi_agent_rust `src/extensions.rs`(per-extension 隔离)                                                                                                                                         | 设计：VM 与事件通道已按 `session_id+plugin_id` 双键隔离；新增从 `instance_id` 解析 `session_id` 注入 `session_ops`，按会话取数；理由：架构本就多 session 并发，事件已隔离但会话读写仍走全局 current，必须修正                                                                                                                   | 全局单 current session：多 session 并发会读串/写错会话（现状 `session_ops` 缺陷）；每 session 独立 dispatcher：重复基础设施、浪费                              | 每个会话+插件有独立放映厅和事件信箱；但「读当前会话」现在用全局变量，并发会读串，得改成按信箱上的会话号取。                                                                                       |
+| 插件 vs 工具               | 插件本身就是一个工具吗                                     | **采用 插件=能力容器（贡献 tools/events/commands）；拒绝 插件=单个工具**                                                                                                                                             | tomcat `docs/architecture/plugin-system/plugin-source-scan-register-load.md:343-347`（「插件注册表与工具系统分层；插件贡献工具才进注册域」）、`src/ext/dispatcher/ops.rs:164`(`do_register_tool`)、`src/ext/plugin/manager.rs`(`set_tool_registry`/`unregister_plugin_tools`)；pi-mono 同文档:131-136（handlers/tools/commands 三注册面）                                                                                            | 设计：插件加载时经 `pi.registerTool` 向共享 `ToolRegistry` 注册 0..N 个工具，并可 `pi.on` 注册事件、`registerCommand` 注册命令；理由：与 pi-mono/openclaw/pi_agent_rust/hermes 一致，一个插件可贡献多种能力                                                                                                          | 「一插件=一工具」：无法表达事件钩子/多工具/命令，且与既有 `ToolRegistry` 分层冲突                                                                           | 插件是个「能力包」，进去能注册好几个工具+事件+命令，不是单个工具。                                                                                                           |
+| 能力注入 LLM               | 插件清单怎么给 LLM、LLM 怎么用，跟工具一样吗                      | **采用 插件注册的工具走共享 `ToolRegistry`，与内置工具同一 tool-calling 通道注入 LLM；拒绝 像 skill 那样把插件清单做渐进式披露**                                                                                                         | tomcat `src/ext/dispatcher/ops.rs:174`(`tools.register_tool`)、`src/api/chat/context.rs:286`(`DefaultToolRegistry`)、`docs/architecture/skill-system.md`(skill 走 `<available_skills>` 渐进披露 — 对比)；pi_agent_rust `src/extensions.rs`(`RegisterPayload` tools)                                                                                                                                    | 设计：插件 manifest 本身不进 LLM；其注册的工具以 tool spec 形式进 LLM 工具列表，LLM 按需 function-call，与内置工具完全同路；理由：复用既有 tool-calling，无需为插件单造披露通道                                                                                                                                               | 把 manifest name+desc 注入系统提示（skill 渐进披露路线）：插件能力是「可执行工具」而非「惰性指令正文」，更适合 tool-calling；codex Rust `ToolContributor`：插件不能用 JS 写    | 插件注册的工具跟内置工具一样塞进 LLM 工具清单，LLM 直接 function-call；清单本身不当提示词喂模型（那是 skill 的玩法）。                                                                   |
+| 工具调用事件 / 生命周期观察      | 第三阶段插件工具调用要发哪些事件？只复用 start/end 够不够？                    | **采用 复用现有两套事件语义，不新造 `tool_call_start` / `tool_call_end` 字面量；阶段三最小完整集为 `tool_execution_start`(AgentEvent, UI/观察) → `tool_call`(ExtensionEvent, 执行前钩子) → `[可选] tool_execution_update`(长耗时/分段进度) → `tool_result`(ExtensionEvent, 执行后结果，含 `isError`) → `tool_execution_end`(AgentEvent, 生命周期收口，含 `isError`)；`tool_call_streaming` 仅作 LLM 参数流式到齐前的预告，非阶段三必需；拒绝 只发 start/end 两个事件 或 另造 `tool_call_error` / `tool_call_cancelled` / `tool_call_start` / `tool_call_end` 并行命名体系** | tomcat `docs/architecture/plugin-system/events.md:120-147`（观察向 `tool_execution_*` 与钩子向 `tool_call` / `tool_result` 分离、顺序明示）、`src/infra/events/mod.rs:85-95`(`WIRE_TOOL_EXECUTION_START/END/UPDATE`、`WIRE_TOOL_CALL`、`WIRE_TOOL_RESULT`、`WIRE_TOOL_CALL_STREAMING`)、`src/core/agent_loop/tool_dispatcher.rs:40-54,170-180,217-229,238-255`（现状事件时序与 cancel 时至少发 `tool_execution_end` 配平 UI） | 设计：阶段三插件工具调用与内置工具调用应共享同一套事件口径，便于 UI/日志/审计/插件 hook 一起复用；`tool_execution_start/end` 负责**观察**生命周期，`tool_call`/`tool_result` 负责**业务钩子**语义，长任务再按需补 `tool_execution_update`；失败不另起事件，用 `tool_result.isError` 与 `tool_execution_end.isError` 表达；中断场景至少保证 `tool_execution_end` 收口配对，必要时结果文本写 `[interrupted]` | 只发 start/end：看得到开闭但拿不到前置钩子和结果 payload；另造 `tool_call_start/end`：与现有 `tool_execution_*` / `tool_call` / `tool_result` 语义重复，割裂消费者；再拆 `tool_call_error` / `tool_call_cancelled`：状态面膨胀、与现有 `isError` / interrupted 收口重复 | 要发，但别另造一套方言。沿用系统现成的五步语义就行：开始、开跑前通知、过程更新（可选）、结果、结束。失败塞进 `isError`，中断至少补一个 `end` 把 UI 和日志配平。 |
+| 工具调用执行路径               | LLM 返回 tool_call 后插件工具怎么执行？要不要单独 `execute_plugin_tool`，阶段三步骤是否都串在一个函数里 | **采用 统一 tool-calling 入口（Agent Loop `execute_tool` 单点分发）+ 插件分支专属 `PluginToolExecutor`（即 `ToolExecutor` 的插件实现）；插件工具的「ensure VM → `__pi_execute_tool` → hostcall → 封装结果」全链路收敛在 `PluginToolExecutor.execute` 一处；拒绝 让插件工具旁路 Agent Loop 自起并行执行通道 / 把阶段三步骤散在 `PluginManager` 各处** | tomcat `src/core/tools/contract/registry.rs:24-34,43-48,127-160`(`ToolExecutor::execute` / `ToolRegistry::call_tool` 注入式执行)、`src/core/agent_loop/`(`execute_tool` 统一入口)、`src/ext/runtime_manager.rs`(`get_or_start` VM)、`assets/.../pi_bridge.js`(`__pi_execute_tool`)；pi_agent_rust `src/extensions.rs`(per-extension execute) | 设计：LLM 的 tool_call 一律先进 Agent Loop `execute_tool` 总闸；内置工具→`PrimitiveExecutor`，插件工具→经 `ToolRegistry.call_tool` 落到注入的 `PluginToolExecutor.execute`，阶段三 VM 生命周期全在这一处串联；理由：统一入口才能让内置/插件工具共享同一套中断(abort)、引导(steering)、审计、展示与结果封装，插件特有的 VM 编排对 Agent Loop 透明 | 旁路 Agent Loop 自起执行通道：丢失统一中断/审计/展示，且要重复实现工具结果协议；把阶段三步骤散在 `PluginManager` 各处串：职责漂移、难测 | LLM 喊工具名，统一从 Agent Loop 那个「执行工具」总闸进；是插件工具就转给「插件执行器」一把梭——确保 VM 在 → 调 `__pi_execute_tool` → 收结果，全在这一个函数里串完，不另开野路子。 |
+| 工具→插件路由 / 命名           | 一个插件可注册多个工具、多插件可能重名，调用时怎么定位到「某 plugin 的某 tool」并落到对的 VM | **采用 注册期工具名在 scope 内全局唯一（撞名即拒/告警）；调用期路由链 `toolName → ToolRegistry.get_tool → Tool.plugin_id →（当前回合 session_id + plugin_id）→ RuntimeManager 取/起 VM → __pi_execute_tool({toolName, params})`；VM 内部按裸 `toolName` 查 `__pi_tools`（单插件内不撞）；拒绝 让 LLM 直面 `plugin_id::tool` 复合名 / 靠 `get_tool` 取首个匹配蒙** | tomcat `src/core/tools/contract/registry.rs:13-22`(`Tool.plugin_id`)、`:52-54`(`plugin_id::name` 键)、`:84-88`(`get_tool` 现状按裸名取首个=撞名隐患)、`:110-114,127-160`(`get_tool`/`call_tool`)、`src/ext/runtime_manager.rs`(`VmRuntimeKey{session_id,plugin_id}`)、`assets/.../pi_bridge.js`(`__pi_execute_tool` 用 `__pi_tools[toolName]`) | 设计：`Tool` 自带 `plugin_id` 且按 `plugin_id::name` 存储，天然可由 `toolName` 反查归属插件；只要暴露给 LLM 的名字在 scope 内唯一，host 即可用 name→plugin_id 精确定位，再以当前回合 `session_id` 合成 `VmRuntimeKey` 投到正确会话的 VM；`ensure/start_session_vm` 只保证 VM 就绪、**不**注册工具（注册在阶段二） | 让 LLM 面对 `plugin::tool` 复合名：污染 tool spec、对模型不友好；`get_tool` 现状「按裸名取首个启用项」：跨插件重名会静默路由到错误插件（须改为唯一性约束） | 一个插件能注册好几个工具；调用时靠「工具名」反查它属于哪个插件，再用「会话号+插件号」找到对应那间放映厅，把工具名递进去执行。前提是同项目里工具名别重，真撞了注册时就报错，而不是闷头调第一个。 |
+| 插件加载路径                 | 是否参考 skill 三层加载                                 | **采用 继承 skill 三层磁盘根发现（P0 project > P1 agent > P2 managed）+ `PluginCatalog`/ScopeRegistry 分层；进程启动先扫 global/agent，共享底座；进入某 scope 时再补扫 project overlay；拒绝 仅目录直载**                                                                                                  | tomcat `docs/architecture/skill-system.md`(P0→P2 三层 first-wins)、`plugin-source-scan-register-load.md:237-263`(GlobalCatalog+AgentRegistry+SessionContext 推荐，待实现)、`src/ext/plugin/manager.rs:140`(现状目录直载)；openclaw 同文档:47(bundled/workspace/global/config 多源)                                                                                                                                 | 设计：发现层复用 skill 三层磁盘根 + 同名 first-wins；global/agent 结果可进程级共享，project 层因依赖 `project_root` 在 scope 进入时补扫并形成 overlay；再叠 **project ScopeRegistry**（按 `project_root/scope_key` 承载 `ToolRegistry/plugins`）。理由：既与 skill 发现一致，又避免进程启动时不知道未来会进入哪些 project scopes                                                                                  | 方案 A 目录直载（现状）：缺 catalog/策略层，多项目 scope 隔离弱；方案 B 进程启动就扫所有 project：scope 未知、也不现实；方案 C 全局单 registry：跨项目状态污染                                                          | 插件也按「项目>agent>全局」三层找，但不是一开机就把所有项目都扫完：先把全局/agent 公共部分记下来，真正进某个项目时再补扫这个项目自己的那层。                                                                               |
+| 注册面作用域 / 多 session 可见性 | ToolRegistry 和 plugins 表是每个 session 各看各的，还是共享一份；Catalog 呢；能不能预算一份 base ToolRegistry | **采用 分层作用域：`PluginCatalog` 发现层＝进程级（global/agent 共享 + project overlay）；`ToolRegistry` 与 `plugins表` 管理/可见层＝per-project scope（一个 project = 一个 scope，同 scope 内所有 sessions 共享一份）；运行实例 `VmActor` 才 per-`(session,plugin)` 隔离；不同 scopes 同进程并发隔离。**可选优化（回答 Q2）：进程启动可预计算一份 `base` 工具元信息集（global/agent 静态 `tools[]`，纯缓存），各 scope 的 `ToolRegistry = base ⊕ project overlay ⊕ 本 scope 启停/legacy 注册`；`base` 不是任何 scope 的权威可见集**；拒绝 per-session 各存一份工具表 / 把 Catalog 也按 scope 重复全量重建 / 把 `base` 直接当某 scope 的 ToolRegistry 用** | `src/core/session/scope.rs:49`(Code 模式已有 project scope key)、`src/core/skill/discovery.rs:21`(project 根=`agent_workspace_dir/.tomcat`，可自然外推到插件 project 根)、`src/api/chat/session_runtime.rs:64`(`SessionRuntimeRegistry` 已有 registry 形态占位)、`src/api/chat/context.rs:286`(现状 `ToolRegistry` 由 chat 侧持有)                                                                                         | 设计：发现是「磁盘上有谁」与项目无关（global/agent 层），适合进程级共享 + project 层 overlay，避免每 scope 重扫重建；可见(ToolRegistry)与管理(plugins表)是「本项目启用了什么、是什么状态」，天然 per-project scope。`base` 预算（Q2）只是把 global/agent 静态工具 meta 算一次给各 scope 复用的缓存，省去每 scope 重复解析；但因 scope 还要叠 project overlay、per-scope 启停与撞名解析，**权威可见集必须在 scope 级算出**，base 不能直接当成可见集。既满足「一进程并发多项目」，又避免“单个 session 各看各的 tools”这种过细分作用域                                                                                                            | per-session 各存一份 ToolRegistry：重复注册、内存翻倍、列表会话间漂移；全进程单 registry：跨项目污染；Catalog 也 per-scope 全量重建：global/agent 层重复扫盘浪费                                                          | 发现层（磁盘上有哪些插件）全进程共一份；但“这个项目启用了哪些、给模型看哪些”是每个项目各一份；真正跑起来的 VM 再细到「会话+插件」。我们不做“每个 session 各看各的工具”。                                                                             |
+| 四张表分层 / plugins表 写入时机          | `plugins表` 是干嘛的？跟 Catalog/ToolRegistry/RuntimeManager 啥区别？什么时候写？manifest 静态声明后能不能扫盘就填满？ | **采用 分层四表：① `PluginCatalog`(进程级发现+静态元信息, **不可变**)：进程启动先扫 global/agent 预填共享底座，进入某 scope 时再补扫 project overlay；含 `id/version/root/manifest` 与 manifest 静态 `tools[]/events[]/activation`；不跑码。② `plugins表`(**per-scope 管理态**, 可变)：scope 激活时从 Catalog 命中集 seed 出每插件一条，存 `status(Cataloged/Enabled/Disabled/Error)/config/registered_tools/event_listener_ids/VM句柄`；其中 **`registered_tools` 保持单份**，原则上直接镜像 manifest `tools[]`；**`event_listener_ids` 不是 manifest 里的 `events[]`，而是运行期真向宿主 EventBus 注册 `on/once` 后返回的 listener_id，seed 时应为空**。③ `ToolRegistry`(per-scope 可见层)：**不是进程启动就写满，而是在 scope 视图 materialize 时由 manifest `tools[]` 零跑码填入**。④ `RuntimeManager`(per-(session,plugin) 活体 VM)。拒绝 把 `events[]` 与 `event_listener_ids` 混为一谈 / 把 `registered_tools` 一分为二 / 把不可变元信息塞进可变管理态 / 进程启动就把 per-scope 管理态全量实例化** | tomcat `src/ext/plugin/manager.rs:90`(`plugins: RwLock<HashMap<String,PluginInstance>>` 现状单层全局——待拆 Catalog/per-scope)、`:246-258`(`load_plugin` 现状即造实例+`register_plugin`)、`:358-366`、`:380-408`(`enable`/`disable` 翻 status)、`:595-597`(`unload` 现状按 plugin_id 批量 `remove_plugin_listeners` + `unregister_plugin_tools`)、`types.rs:37-49`(`PluginInstance` 字段)、`infra/event_bus/mod.rs:297-332,397-416`(`add_listener` 返回 `EventListenerId`; `remove_plugin_listeners(plugin_id)` 批量清)、`src/core/session/scope.rs:49`(per-project scope key)、`src/core/tools/contract/catalog.rs:91`(内置 `BUILTIN_TOOL_CATALOG`=编译期 const, 与本表无关) | 设计：把「不可变(manifest 派生, 可共享, 扫盘即知)」与「可变(状态/配置/清理账本, per-scope)」分层后，**你的两个观察都能各取其对**——(1) 扫盘确实分“启动先扫 global/agent + 进入 scope 再补扫 project”两拍；(2) `events[]` 扫盘时就知道，但那只是事件名/订阅意图，不是运行时 listener 句柄。`registered_tools` 只保留一份，语义就是“本插件对 LLM 暴露/注册的工具集合”；目标态它应与 manifest `tools[]` 完全一致。静态工具对 LLM 可见的落点是“某个 scope 视图 materialize 时写入该 scope 的 `ToolRegistry`”，而不是裸进程启动瞬间。`event_listener_ids` 则只在插件运行期真挂上宿主 EventBus 时才有值；而现状卸载主要靠 `plugin_id` 批量 remove，不靠逐个 ID 清理 | 单层全局 plugins表(现状)：多 scope 状态/配置互染、无法 per-scope 启停；进程启动全量实例化 per-scope 管理态：还没进项目就为所有 scope 建表，浪费且 scope 未知；把 `events[]` 当成 `event_listener_ids`：把“声明想吃什么事件”与“运行时真正挂上的监听句柄”混成一层；把 `registered_tools` 拆成 declared/runtime 两本账：对 LLM 的暴露面出现双真相，后续一致性和清理都变复杂 | 拆成「底座 + 贴纸」两层：开机先把全局/agent 插件的“身份证 + 它声明的工具/事件/activation”读进**不可变底座(PluginCatalog)**；进某个项目时，再补扫这个项目自己的那层，然后贴一层**这个项目专属的可变管理态(plugins表)**，并把 manifest `tools[]` 零跑码写进这个项目自己的 `ToolRegistry`。`events[]` 像“订阅意向清单”，扫盘就知道；`event_listener_ids` 像“真正领到的座位号”，只有运行时真去 EventBus 挂监听才会拿到，seed 那一刻当然还是空的。 |
+| 加载策略 / 资源占用（插件很多）      | 插件很多时启动就全量加载进内存是否太重、怎么省                         | **采用 三段式「发现编目(只读 manifest,不跑码) → 工具元信息(manifest 静态 `tools[]` 直接作为 LLM 契约面) → 运行实例懒加载(VmActor 首次使用才建)+idle 回收」；legacy `registerTool` 仅作兼容迁移/实现自报，不再作为第二套工具来源；拒绝 启动对所有插件 eager 跑 `run_script` 全量加载**                                | openclaw `src/plugins/discovery.ts`+`manifest-registry.ts`(只读 manifest 建 catalog)、`loader.ts:1348`(`loadModules:false`)、`tools.ts:671`(optional tool 首次调用懒加载单插件)；pi_agent_rust `src/resources.rs:348`(发现只收路径)；pi-mono `resource-loader.ts:348`(启用集 eager 全量——反例)；tomcat `plugin-source-scan-register-load.md:237-263`(GlobalCatalog 已规划)、`runtime_manager.rs`(VmActor 已按需建/`end_session` 回收) | 设计：① 编目只读 JSON 建轻量 Catalog（不 import、不跑 JS）；② 工具元信息以 manifest 静态声明为准（不跑码即可见，对齐 openclaw `contracts.tools`）；③ 运行实例（VmActor）维持「首次使用才建、命中复用、`end_session` 回收」懒加载并加 idle TTL。常驻内存只有轻量 Catalog + 少数在用 VM，不随插件总数线性膨胀；legacy `registerTool` 只是迁移兜底，不再和 manifest 并列成两套真相                               | 启动 eager 全量跑 `run_script`（pi-mono/pi_agent_rust 启用集做法）：插件多时启动慢、内存高                                                           | 别一开机就把所有插件代码都拉起来跑。开机只读每个插件「身份证(manifest)」建一张轻量目录；工具信息就以 manifest 里静态报的那份为准（不跑码就知道有啥）；真正的「活体 VM」等到某会话用到才开、闲了就回收。这样装一百个插件，内存里也只有目录 + 正在用的那几个。 |
+| 加载/激活的触发时机（启动 vs 会话进入 vs 首次使用） | 插件到底什么时候加载？「阶段二」到底什么时候触发？ | **采用 三个加载点（仅 1 个不跑码 + 2 个跑码），不把「阶段二」当线性中间阶段：① 程序启动＝阶段一编目，只读 manifest 先扫 global/agent 建 `PluginCatalog` 共享底座、绝不跑码；② 会话进入 / scope 首次激活＝先补扫该 project overlay，并把命中插件的 manifest `tools[]` **零跑码 materialize 到该 scope 的 `ToolRegistry`**，从这一步起静态工具才对该 scope 的 LLM 可见；然后同时承载 (a) **仅 `activation:"session"`** 的生命周期型插件预启动长跑 VM + 投 `session_start`（`events[]` 只声明事件名，不是预启动开关），与 (b) **无静态 `tools[]` 的 legacy 插件在此补跑「阶段二」**（短命 VM 跑 `registerTool` 登记工具）；③ 首次 `tool_call`＝执行期，已可见的工具被 LLM 点名时起/复用长跑 VM 执行。「阶段二」是**仅对 legacy（无静态 `tools[]`）插件的条件子步骤**，触发点固定在②；拒绝 把阶段二画成必经中间阶段、拒绝 说它"程序启动跑码"、也拒绝 把它拖到 `tool_call`（没注册→LLM 看不见→不会调用，鸡生蛋）** | tomcat `src/ext/plugin/manager.rs:140`(现状 load 即 `run_script`——待改懒激活)、`:451`(`start_session_vm` 命中复用/未命中新建)、`:509`(`dispatch_session_event`→`deliver_event`)、`src/ext/plugin/types.rs:11-21`(manifest 现状无 `tools[]`/`events[]`/`activation`，待加)、`vm_actor.rs:138-204`(`_start`→`waitForEvent` 长阻塞)、`docs/architecture/plugin-system/phase2-long-lived-vm.md`(session_start lazy create / session_end shutdown)、`infra/event_bus/mod.rs:297-332,397-416`(`EventListenerId` 运行时分配；按 plugin_id 批量 remove)、openclaw `contracts.tools`(静态声明工具不跑码即可见)、`src/core/session/scope.rs:49`(scope key) | 设计：把"加载点"按是否跑码拆清后矛盾自消——启动只编目且只先扫共享层；进入 scope 时再补 project overlay，并把静态 `tools[]` materialize 到这个 scope 自己的 `ToolRegistry`，这才是“阶段一让工具对该 scope 的 LLM 可见”的准确落点；有静态 `tools[]` 的插件**完全不经过阶段二**，LLM 首次 `tool_call` 直接进阶段三；只有 legacy 插件因工具不可见，必须在会话进入/scope 激活时补跑阶段二一次让其可见；生命周期型插件是否预启动只看 `activation:"session"`，无论 `events[]` 列了几个事件名，都不改变这个开关 | 把阶段二画成"一→二→三"必经线性阶段：误导（静态 `tools[]` 时它根本不发生）；说阶段二在"程序启动"跑码：启动只编目；把 `events[]` 当预启动开关：混淆“吃哪些事件”与“何时必须起 VM”；把阶段二拖到 `tool_call`：鸡生蛋，时序不成立；会话进入期对**所有**插件预启动：退化成 per-session eager 全量、浪费 | 三个加载点：开机先把全局/agent 那部分名册读进来（不跑代码）；真正进某个项目时，再补扫这个项目自己的插件层，并把清单里静态报出来的工具填进这个项目自己的工具表，所以从这时起模型才看得到它们；然后只有 `activation:"session"` 的插件会被提前叫醒接 `session_start`，清单里报不出工具的 legacy 插件也在这时先跑一遍把工具登记上；最后模型真点名某工具时，才把那台长跑 VM 拉起来干活。 |
+| 插件“类型”判别 / `activation` 与 `tools[]` 正交 | `activation:"session"` 也可能没有静态 `tools[]`，纯工具型 vs 生命周期型怎么区分？要不要加一个“类型”标识？ | **采用 不引入 plugin `type` 单一枚举；用两个**正交** manifest 字段判别：`tools[]`(有无→工具可见性 + 是否要跑阶段二) 与 `activation`(`"session"` vs 默认 `"lazy"`→长跑 VM 是否在 scope 进入时预启动)。二者互不蕴含，组合出 4 种行为；其中只有 `(activation=lazy ∧ 无静态 tools[])` 需单独起「阶段二」短命 VM，`(activation=session ∧ 无静态 tools[])` 的工具登记由预启动的长 VM 顺带完成。`events[]` 只是“订阅哪些事件名”的声明，不参与这两个判别；拒绝 用 `{tool｜lifecycle}` 单一类型枚举（会和“既给工具又订阅事件”的插件冲突）/ 拒绝 用 `events[]` 是否非空当预启动开关** | tomcat `src/ext/plugin/types.rs:11-21`(manifest 待加 `tools[]`/`activation`)、`src/ext/plugin/manager.rs:451`(`start_session_vm` 预启动)、`docs/architecture/plugin-system/phase2-long-lived-vm.md`(session_start lazy create)、`infra/event_bus/mod.rs:81-83`(`EventListenerId`)、openclaw `contracts.tools`/`activation` | 设计：插件本就可能**同时**贡献工具与订阅生命周期事件，单一类型枚举无法表达这种叠加；改用两条独立开关后，4 种组合(static×{session,lazy} / legacy×{session,lazy})都自洽，且把“阶段二短命 VM”精确收敛到唯一一格(lazy∧legacy)。`activation` 是“何时必须让常驻 VM 在场”的权威开关，`tools[]` 是“对 LLM 暴露面”的权威契约，互不替代 | 单一 `type:{tool,lifecycle}` 枚举：无法表达“既给工具又听事件”，且与 `tools[]`/`activation` 语义重叠；用 `events[]` 非空当预启动开关：把“想吃什么事件”误当“何时起 VM”，且无法表达“只想首个 tool_call 才起、但运行期也会 on 事件”的插件 | 别给插件贴“它是工具还是生命周期”这种单一标签——一个插件完全可能既给工具又要听事件。改用两个独立开关：①“清单里报没报工具”决定模型看不看得见它、要不要先跑一遍把工具登记上；②“`activation` 是不是 session”决定要不要一进项目就把它的常驻 VM 叫醒。两个开关各判一次，4 种组合都说得通；`events[]` 只是“我想听这些事件”的清单，不管前面两件事。 |
+| 能力暴露                   | 敏感能力怎么给插件                                       | **采用 `pi.*` 单入口 hostcall + 权限闸；拒绝 ambient Node 模块**                                                                                                                                             | tomcat `src/ext/dispatcher/dispatch.rs`、`host_binding.rs`；codex `codex-rs/core/src/mcp_tool_call.rs:702`(sandbox 收口)                                                                                                                                                                                                                                                                         | 设计：fs/net/exec 全经 dispatcher 过闸审计；理由：可审计、可拒绝，符合最小权限                                                                                                                                                                                                                  | 直接给 `node:fs`/`node:http`：ambient 授权破坏沙箱（pi_agent_rust 也将其经 hostcall）                                                        | 敏感活只能敲安检窗口，不发万能钥匙。                                                                                                                           |
+| 工具垫片                   | 纯计算工具放哪                                         | **采用纯 JS 垫片（不进 Rust）+ crypto 同步原生（不进 dispatcher）**                                                                                                                                              | tomcat 计划 §4；`pi_agent_rust/src/crypto_shim.rs`(register_crypto_hostcalls)、`buffer_shim.rs`                                                                                                                                                                                                                                                                                                  | 设计：path/util/events 纯 JS；crypto 用 `Func::from` 同步原生；理由：往返 dispatcher 对纯算是浪费                                                                                                                                                                                          | 全部走异步 hostcall：拼字符串还往返 Rust，性能与复杂度都亏                                                                                         | 小算盘自己打，别每次都跑去柜台。                                                                                                                             |
+| 运行时全局能力分层注入          | B.1 那批"宿主注入函数"（console/timers/TextEncoder/Buffer…）算哪一类、由谁保证、写进决策了吗 | **采用 四层注入分类，运行实例初始化时按①②③一次性装好：① 运行时最小基线（引擎初始化保证）：`console` / `timers(setTimeout/setInterval)`；② 编码与模块能力（注入垫片保证）：`TextEncoder`/`TextDecoder` + `path`/`util.format`/`EventEmitter`/`Buffer`；③ 同步原生函数（`Func::from` 挂全局、**不进 dispatcher**）：`__pi_crypto_*_native`(hash/hmac/random/aes-gcm/ed25519)；④ 敏感/异步能力（`globalThis.pi.*`→`__pi_host_call` 过权限闸）。拒绝 把①②写成"rquickjs 天然自带" / 让 crypto 走 dispatcher / 把敏感能力做成 ambient 全局** | tomcat 本文 B.1(293-299)、§4.2 P2(运行时最小基线 + 宿主注入能力)/P4(垫片 + crypto 同步原生)、正文(310 编码注入说明)、`assets/modules/encoding.js`(现有 TextEncoder/Decoder)；`pi_agent_rust/src/crypto_shim.rs`(register_crypto_hostcalls) | 设计：把"宿主注入函数"按"谁来保证 + 走不走 dispatcher"分四档——基线靠引擎初始化、编码/模块靠注入垫片、crypto 走同步原生、唯有敏感/异步才走单入口 hostcall；理由：与「工具垫片」「能力暴露」两行的开销/安全分流对齐，并消除"以为 QJS 天然就有"的隐性依赖（rquickjs 裸运行时并不无条件提供 console/编码 API） | 把 console/TextEncoder 当 QJS 天然自带：裸运行时不提供，运行期才崩；crypto 走 dispatcher：纯算往返浪费（见"工具垫片"行）；敏感能力做 ambient：破坏沙箱（见"能力暴露"行） | 插件里能直接用的全局分四档：①开机引擎保证的（console、定时器）；②注入的编码/小工具（TextEncoder、path、Buffer、EventEmitter）；③直接挂全局的同步原生（crypto 算哈希/随机，不绕柜台）；④敏感又异步的（读写文件/执行命令）才敲 `pi.*` 安检窗口。都在实例起来那一刻一次性塞好。 |
+| Node 兼容                | 要不要兼容层                                          | **采用「只移植 Tier A 5 块」；拒绝整套 Node 兼容层**                                                                                                                                                            | tomcat 旧 `assets/modules/`；`pi_agent_rust/src/extensions_js.rs`(105 模块)                                                                                                                                                                                                                                                                                                                      | 设计：仅 crypto/buffer/path/events/util；理由：放弃 pi-mono 后兼容层失去主要价值，30k 行维护负担                                                                                                                                                                                               | 搬整套 105 模块：与「放弃 pi-mono」自相矛盾、维护重                                                                                             | 只带 5 样常用小工具，不搬整箱道具。                                                                                                                          |
+| pi-mono 对齐             | 是否硬兼容其插件                                        | **拒绝硬兼容；自有 manifest + 裁剪 `pi.*`**                                                                                                                                                               | tomcat `docs/architecture/plugin-system/js-api-alignment.md`、`pi-mono-compat-strategy.md`                                                                                                                                                                                                                                                                                                    | 设计：保留 `pi.*` 命名习惯但裁剪子集；理由：自由设计、去耦、减面                                                                                                                                                                                                                                 | 全量对齐 `ExtensionAPI`：30+ 事件 + UI 渲染面，超出 tomcat 需要                                                                             | 借个顺手的名字，但不照搬人家整套规矩。                                                                                                                          |
+
+
+### 4.2 实施点（已闭环）
+
+
+| 实施点                            | 交付范围（含交付物）                                                                                                                                                                             | 主要代码落点（含落地点）                                                                                                                                                                                                                                                              | 验收锚点（示例）                                                                                                                                                                                                                                           | 说人话                                         |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| P1 引入 rquickjs / 隔离 wasmedge   | `rquickjs` 依赖入 `Cargo.toml`；`wasmedge-sdk`/`standalone` feature gate 掉；项目可编译                                                                                                           | `tomcat/Cargo.toml`；`src/ext/mod.rs`(feature 切换)                                                                                                                                                                                                                          | `cargo build` 默认 feature 通过；见 §9                                                                                                                                                                                                                   | 先把新引擎装上、把旧的隔离掉，保证能编译。                       |
+| P2 运行时实例                       | `PluginEngine`/`PluginVmInstance`：`run_script`/`register_host_binding`/事件循环/`destroy`；运行时最小基线 + 宿主注入能力                                                                                      | 新建 `src/ext/engine_rquickjs.rs`、`instance_rquickjs.rs`；改 `src/ext/mod.rs` 导出                                                                                                                                                                                              | `quickjs_e2e_tests::run_script_console`                                                                                                                                                                                                            | 用 rquickjs 把「能跑一段 JS + console + 定时器」打通。    |
+| P3 hostcall 桥接                 | 注入 `globalThis.pi`，复用 dispatcher 真实项，裁剪桩项                                                                                                                                              | `instance_rquickjs.rs`(注入)；`src/ext/dispatcher/dispatch.rs`(裁剪)                                                                                                                                                                                                           | `quickjs_e2e_tests::pi_readfile_llm`                                                                                                                                                                                                               | 把 `pi.*` 接到老分发器上，删掉没用的桩。                    |
+| P4 垫片 + crypto                 | 移植 path/util/events/Buffer 纯 JS 垫片 + crypto 同步原生函数                                                                                                                                     | `src/ext/shims/`（新）；`src/ext/crypto_native.rs`（新，照搬 `crypto_shim.rs`）                                                                                                                                                                                                     | `quickjs_e2e_tests::shims_and_crypto`                                                                                                                                                                                                              | 把 5 样常用小工具搬进来。                              |
+| P5 删除 wasmedge 资产              | 移除 wasm 文件 / `assets/modules/` / 定制构建脚本 / 相关 build.rs 逻辑                                                                                                                               | `tomcat/assets/wasm/`、`tomcat/assets/modules/`、`scripts/build-custom-quickjs.sh`、`scripts/install-wasmedge.sh`、`build.rs`                                                                                                                                                 | `cargo build` 无缺资产报错；见 §9                                                                                                                                                                                                                          | 把旧放映机和整箱道具清出去。                              |
+| P6 init/doctor/文档/测试           | doctor 去 WasmEdge 项；改写 overview/Architecture；重写 e2e；删减兼容文档                                                                                                                             | `src/api/cli/init.rs`、`docs/user-guide.md`、本文件、`tests/`、`docs/.../INTEGRATION_TEST_SPEC.md`                                                                                                                                                                               | `cli_tests::doctor_*`；见 §9                                                                                                                                                                                                                         | 文档、体检、测试一起对齐到新世界。                           |
+| P7 sessionId 透传修正              | 把 `session_id` 从 `instance_id` 解析后注入 session 类 hostcall，按会话取数（不再用全局 current）                                                                                                           | `src/ext/dispatcher/dispatch.rs`(透传 session_id)、`session_ops.rs`(`do_get_current_session`/`do_get_messages` 改按 session_id)                                                                                                                                                | `dispatcher::tests::session_scoped_hostcall_isolation`                                                                                                                                                                                             | 修掉多会话并发读串当前会话的坑。                            |
+| P8 插件来源扫描/编目（继承 skill 三层）      | 三层磁盘根发现（global+agent+project，加 project 层 `project_root/.tomcat/plugins`）+ scope 级 Catalog 懒加载激活 + manifest 可选静态 `tools[]`                                                              | 新 `src/ext/plugin/{source_scan,catalog,scope_registry}.rs`；改 `manager.rs`(从目录直载→编目+懒激活)、`types.rs`(manifest 加 `tools[]`)                                                                                                                                                  | `plugin::tests::discover_three_tier_first_wins`、`manifest_static_tools_visible_without_vm`                                                                                                                                                         | 插件像 skill 一样三层找、按项目 scope 建目录；工具先看清单、用到再激活。 |
+| P9 project scope 容器 / chat 侧绑定 | 以 `project_root` 为单位建立 **ScopeRegistry**；`scope_key -> {Catalog, ToolRegistry, plugins表, skill_set, PluginManager ...}`；session 入场先解析/绑定 scope，同 scope 复用、跨 scope 隔离，支持一进程并发多项目 scopes | `src/api/chat/context.rs`(resolve current session → bind scope)、`src/api/chat/session_runtime.rs`(将现有 `SessionRuntimeRegistry` 落成真正的 scope 容器注册表)、`src/core/session/scope.rs`(复用 `project_root/scope_key`)、`src/api/chat/run_loop/`*(从 scope 容器取 tool_registry/skill_set) | `chat::tests::sessions_in_same_project_share_scope_container`、`chat::tests::different_projects_get_distinct_scope_containers`、`plugin::tests::registry_shared_across_sessions_same_scope`、`plugin::tests::registry_isolated_across_project_scopes` | 项目才是作用域单位，不是单个会话；同项目会话共用一套插件表/工具表。          |
+| P10 软隔离 / 崩溃隔离 / 空闲回收          | interrupt budget + `call_timeout_ms` + `catch_unwind` + `VmActorState::Error` + **idle TTL 回收**；把“跑飞掐掉、panic 隔离、闲久关厅”落成明确机制                                                            | `src/ext/vm_actor.rs`(panic 捕获/状态机)、`src/ext/dispatcher/dispatch.rs`(async timeout)、`src/ext/runtime_manager.rs`(last_used/idle TTL/reap)、`src/ext/plugin/manager.rs`(scope/plugin cleanup)                                                                               | `tests/quickjs_e2e_tests.rs::runaway_plugin_interrupted`、`tests/quickjs_e2e_tests.rs::panicking_plugin_isolated`、`runtime_manager::tests::idle_vm_reclaimed_after_ttl`                                                                             | 插件跑飞就掐、崩了就隔离、长时间闲着就回收，不让内存一直涨。              |
+
+
+---
+
+### 4.3 关键设计补充
+
+> 本节展开三个易被忽略的设计点（与 §4.1 新增三类决策行对应）：崩溃隔离、多 session 事件的 sessionId 流转、插件即能力容器与对 LLM 的注入。
+
+#### 4.3.1 崩溃隔离：插件崩了也不能拖垮宿主
+
+> 专业：rquickjs 与宿主同进程，没有 Wasm 的线性内存硬墙，因此「崩溃隔离」必须靠运行时结构而非内存墙——每插件专属线程 + Rust panic 捕获 + 单次执行超时/中断预算 + 错误态降级，四层兜底。
+> 说人话：同一个进程里跑别人的代码，最怕它把整栋楼带塌。我们的办法是「一插件一间房 + 出事就地按住 + 跑太久就掐 + 标红关掉」，绝不让它的错冒泡到主线程。
+
+四层兜底（前三层现状已具备，复用）：
+
+```text
+① 专属线程隔离   VmActor::spawn → tokio spawn_blocking 独立线程跑 _start（vm_actor.rs:129）
+                 → 一个插件阻塞/重活不占 Tokio worker，也不阻塞其它插件
+② panic 捕获     run_vm 外包 catch_unwind（vm_actor.rs:165）
+                 → Rust 层 panic 不冒泡，转 VmActorState::Error；其它插件与 Agent Loop 不受影响
+③ 超时 + 中断预算 单次 hostcall async_timeout（dispatch.rs:139）；JS 死循环用 rquickjs interrupt handler + budget
+                 → 死循环/长任务被中断，fail-open 返回
+④ 错误态降级     状态进 Error/Stopped；channel 断开→投递 __shutdown（dispatch.rs:162）
+                 → 坏插件停摆，宿主与其余插件继续；必要时 cold rebuild 运行时
+```
+
+**残余风险（必须在 §10 标注）**：`catch_unwind` 只能兜 **Rust panic**，**兜不住 rquickjs 底层 C（`rquickjs-sys`）的段错误 / UB**。对策：依赖 rquickjs 的安全封装 + 单实例堆上限（`js_heap_mb`）+ 不向插件暴露 unsafe FFI；高危场景预留「可选 Wasm/子进程后端」扩展点（本期不做）。这是相对旧版 WasmEdge 硬隔离的**明确弱化**，需在威胁模型中写清。
+
+#### 4.3.2 多 session 并发：sessionId 怎么流转
+
+> 专业：tomcat 架构允许多 session 并发执行，插件的 VM 与事件通道已按 `instance_id = session_id/plugin_id` 双键隔离（`RuntimeManager`/`register_event_channel`/`deliver_event`），但 `session_ops` 的会话读写仍走全局 `current_session_key()`，并发下会读错会话——本期修正为「从 instance_id 解析 session_id 后按会话取数」。
+> 说人话：每个「会话+插件」本来就有独立的放映厅（VM）和事件信箱（channel），事件不会投错。但插件调 `getCurrentSession/getMessages` 时，宿主现在读的是「全局当前会话」这个变量——两个会话同时跑就会读串。要改成「看信箱上写的是哪个会话号，就取哪个会话」。
+
+sessionId 流转（修正后）：
+
+```text
+                       session_id 是事实源，全程随 instance_id 流转
+  start_session_vm(session_id, plugin_id)
+        │  instance_id = VmRuntimeKey{session_id,plugin_id}.to_string()  = "S1/pluginA"
+        ▼
+  register_event_channel(instance_id)        ── 事件通道按 instance_id 建（已隔离）✔
+  VmActor.spawn(...)                          ── 专属线程持 instance_id（已隔离）✔
+        │
+  插件运行期 __pi_host_call(json)             ── 宿主侧 dispatch(instance_id, request)
+        │
+        ├─ 事件类  deliver_event(instance_id, …) / waitForEvent(instance_id)   ── 按 instance_id ✔
+        │
+        └─ 会话类  do_get_current_session(...)  ✘ 现状：用全局 current_session_key()
+                   ─────────► 修正：parse session_id from instance_id → session.get_session(session_id)
+```
+
+并发示意（两会话同插件）：
+
+```text
+  S1/pluginA ─┐ 独立 VmActor + 独立 event channel ┌─► 事件互不串台（✔ 现状已隔离）
+  S2/pluginA ─┘                                    └─► getCurrentSession 必须各读各的（✘→✔ 本期修）
+```
+
+#### 4.3.3 插件 = 能力容器；其工具与内置工具同路注入 LLM
+
+> 专业：插件不是「一个工具」，而是一个 JS/TS 模块，在激活/注册时通过 `pi.registerTool` 向**共享 `ToolRegistry`** 贡献 0..N 个工具，并可注册事件钩子（`pi.on`）与命令（`registerCommand`）。这些工具随后以 tool spec 形式进入 LLM 工具列表，与内置工具**走同一 tool-calling 通道**；插件 manifest 本身**不**注入 LLM。这与 skill 的「name+desc 渐进式披露 + `load_skill` 装载正文」是**两条不同的通道**。
+> 说人话：插件像个「能力包」，装进来后会往工具架上摆几件工具、挂几个事件钩子。LLM 看到的是工具架上的工具（跟内置的混在一起），直接 function-call；它根本不需要知道「这是哪个插件提供的」。skill 那套「把目录塞进提示词、模型挑了再读正文」是另一回事，不适用于插件。
+
+**「插件贡献工具」到底是什么意思？**（这是最容易被误读的一句）
+
+- **不是**「插件本身就是一个工具」。插件是一段会注册东西的程序，它在激活/注册时执行顶层代码，调用 `pi.registerTool({name, description, parameters, execute})`，把**一个或多个工具定义**「登记/添加」进系统**共享的工具注册表 `ToolRegistry`**。这个「登记/添加」的动作就是「贡献（contribute）」。
+- 一个插件可以贡献 **0 个、1 个或多个**工具，外加事件钩子（`pi.on`）和命令（`registerCommand`）——所以叫它「能力容器」。
+- 登记完之后，这些工具就和内置工具（`readFile`/`executeBash`/…）**混在同一张工具表里**；LLM 看到的是整张工具表，**不知道也不关心**某个工具来自哪个插件。
+- **类比**：插件像手机里装的一个 App；App 装好后会往系统里注册几个「快捷指令 / 分享入口」。系统和用户用的是那些快捷指令，App 本身并不是某一个快捷指令。「App 贡献快捷指令」=「插件贡献工具」。
+
+```text
+插件 main.ts（顶层）
+  pi.registerTool({ name:"translate", description:"翻译文本", parameters:{...}, execute(params){...} })
+  pi.registerTool({ name:"summarize", ... })   ← 一个插件贡献了 2 个工具
+  pi.on("session_start", ...)                          ← 顺带挂了 1 个事件钩子
+        │  （登记 = 贡献）
+        ▼
+  共享 ToolRegistry: [ readFile, executeBash, …(内置), translate, summarize(插件贡献) ]
+        │
+        ▼  LLM 看到的就是这张混合工具表，按需 function-call("translate")
+```
+
+两条通道对比（关键区别）：
+
+
+| 维度               | 插件（本方案）                                                  | skill（对比）                                   |
+| ---------------- | -------------------------------------------------------- | ------------------------------------------- |
+| 注入 LLM 的内容       | 注册的**工具 spec**（name/description/参数 schema）               | `<available_skills>` 的 **name+description** |
+| 注入通道             | tool-calling 工具列表（同内置工具）                                 | 系统提示渐进式披露                                   |
+| LLM 如何用          | 直接 function-call                                         | 先 `load_skill(name)` 装载正文，再照做               |
+| 载体               | `ToolRegistry`（`do_register_tool`→`tools.register_tool`） | `SkillSet`→`AvailableSkillsSection`         |
+| manifest 是否进 LLM | 否（仅其注册的工具进）                                              | 否（仅 name+desc 进）                            |
+
+
+链路（插件工具如何到 LLM）：
+
+```text
+插件加载  →  pi.registerTool(spec)  →  HostApiDispatcher.do_register_tool(plugin_id)
+   →  ToolRegistry.register_tool(tool, plugin_id)        （src/ext/dispatcher/ops.rs:174）
+        │
+        ▼  与内置工具同表
+  Agent Loop 构造请求时收集 ToolRegistry 工具 → 注入 LLM 工具列表（与内置工具同路）
+        │
+        ▼
+  LLM function-call → 工具执行 → ToolResult 回注 Agent Loop
+  （插件卸载时 unregister_plugin_tools(plugin_id) 清理，src/ext/plugin/manager.rs:597）
+```
+
+**老架构能继承吗？能。** `PluginManager.set_tool_registry` + `dispatcher.tools.`* + `plugin-source-scan-register-load.md`（GlobalCatalog+AgentRegistry，待实现）已具备这套分层；本方案直接继承，仅把运行时引擎换成 rquickjs、加载层落实三层发现。
+
+**其他 agent 怎么做**（佐证「插件贡献工具」是主流）：
+
+- **pi-mono / openclaw / pi_agent_rust**：扩展加载时 `registerTool`/`RegisterPayload.tools`，工具进模型工具列表（`plugin-source-scan-register-load.md:131-136`；`pi_agent_rust/src/extensions.rs`）。
+- **codex**：Rust `ToolContributor::tools()` 贡献工具（`codex-rs/ext/extension-api/src/contributors.rs:123`），外部工具走 MCP；插件不能用 JS 写。
+- **hermes-agent**：`PluginContext.register_tool()` 注册进全局 `ToolRegistry`（`hermes_cli/plugins.py:316`）。
+
+#### 4.3.4 并发与多实例模型：多插件、同插件多会话怎么跑
+
+> 专业：tomcat 是多 session 并发架构，必然出现「多个插件同时工作」与「同一个插件被多个 session 同时使用」。设计采用**面向对象多实例**，并把插件实例分成两条**生命周期不同**的路径：
+>
+> - **激活/注册路径（project scope 级一次；目标态为懒激活）**：当插件第一次被真实用到、且 manifest 静态 `tools[]` 不足以覆盖其工具声明时，创建一个**短生命周期** VM，`run_script` 跑一遍插件初始化——执行顶层代码、把 `registerTool`/`registerCommand` 声明登记进**该 project scope 共享**的 `ToolRegistry`，并顺带**校验脚本能正常加载**；跑完即弃（VM 不长期持有）。**现状代码证据**在 `load_plugin -> run_script`（`manager.rs:228`；`instance_wasmedge.rs:104-105` 注释写明「仅用于加载校验」），但**目标态**会把这一步从 load 时推迟到首次激活时。
+> - **运行路径（长命事件循环 VM，按会话多实例）**：`start_session_vm(session_id, plugin_id)` 对每个 `(session_id, plugin_id)` 建**独立长生命周期** `VmActor`+`PluginVmInstance`（专属线程、独立 JS 堆、独立事件信箱），`init_vm` 建持久 Vm 后 `_start` **阻塞在 `waitForEvent` 事件循环**（`vm_actor.rs:207`）；由 `RuntimeManager` 用 `VmRuntimeKey` 索引、命中复用、未命中新建；`end_session` 按会话批量回收。**这才是生产运行路径。**
+>
+> 说人话：插件有两种「跑」。第一种是**短命补注册**：需要时跑一下，把「我有哪些工具」补登记到**该项目 scope 的共享工具表**里，再顺便验脚本没坏；如果 manifest 已经静态写了 `tools[]`，这一步甚至可以推迟到第一次真正执行时再补。第二种才是**真正干活的长跑**：某个会话用到这插件时，给它单独开一个长生命周期 VM，在专属线程里一直 `waitForEvent` 等事件、处理事件——每个会话各开一个，互不串。现状代码里这条短命路径挂在 `load_plugin:228`，但本版目标态不是“启动就全量跑”，而是“需要时才补跑”。
+
+```text
+                         ┌─ 激活/注册路径（短命校验 VM；目标态首次用到且需补注册时） ─┐
+  first_use(P)     ─────►│ 短生命周期 VM: run_script 跑一遍初始化                    │
+ (现状证据在 load_plugin)│   pi.registerTool / registerCommand → 校验后即弃          │
+                         │        └─► 共享 ToolRegistry（同 scope 会话共享）         │
+                         │   作用：补登记动态工具 + 校验脚本可加载                    │
+                         └─────────────────────────────────────────────────────────┘
+
+                         ┌─ 运行路径（长命事件循环 VM，按会话多实例）── 生产路径 ──┐
+  start_session_vm(S1,P)─► VmActor 实例#1  key=S1/P   _start→waitForEvent 长阻塞   │
+  start_session_vm(S2,P)─► VmActor 实例#2  key=S2/P   独立 JS 堆 + 独立事件信箱    │ ← 同插件 P 被两会话用 = 两个独立活体
+  start_session_vm(S1,Q)─► VmActor 实例#3  key=S1/Q   ← 另一个插件 Q，并发跑       │
+                         │  RuntimeManager: DashMap<VmRuntimeKey, VmActorHandle>   │
+                         │   - get(key) 命中复用；未命中才 create_instance+spawn   │
+                         │   - end_session(S1) → remove_session 批量清 S1/* 实例   │
+                         └─────────────────────────────────────────────────────────┘
+```
+
+> **新架构（rquickjs）设计权衡（结论已定）**：上面「短命校验 VM」在 rquickjs 下是否保留、何时跑？  
+>
+> - 方案①（沿用现状）：每个插件 load 时都跑一次 `run_script` 收集工具注册——好处是无 session 也能列工具、能校验脚本；**代价是插件多时启动 eager 全量跑码、内存高**（见 §4.3.6）。  
+> - 方案②（load 只静态校验，注册推迟到首个 session VM）：更省一次 VM 启动，但「无 session 时工具不可见」需另解。  
+> - **方案③（本版结论，推荐）**：给 manifest 加**静态 `tools[]`**，并把它视为**对 LLM 暴露工具面的唯一契约**——编目期不跑码即可见工具（解决方案②的可见性缺口），把 `run_script` 推迟到**插件首次被用到**才跑（懒加载）；`registerTool` 仅保留 legacy 兼容/实现自报职责，原则上必须与 manifest 一致。这样既保留方案①的可见性，又拿到方案②的省启动。详见 §4.3.6。  
+> 无论选哪种，都建议把「短命校验/注册」与「长跑运行」在代码里显式区分命名（如 `validate_and_register` vs `start_session_vm`），避免再被误读为测试路径。详见 §4.2 P2/P3/P8 实施点。
+>
+> **会不会浪费资源？** 结论：**这样设计是合适的**，但前提是配套**懒加载 + 同 key 复用 + 空闲 TTL 回收**。不建议为了省一个 `rquickjs` 实例，就把多个 `(session, plugin)` 塞进同一 VM；那样省下的是一点堆和启动成本，丢掉的却是**状态隔离、session 不串台、异常/死循环不连坐**。所以本版的省资源手段不是“多插件共用一个 VM”，而是**只在首次使用时创建、用完闲置后回收**；资源增长跟“当前活跃的 `(session, plugin)` 数”相关，不跟“装了多少插件”线性绑定。
+
+要点对照：
+
+
+| 问题                       | 答案                                                          | 落点                                                |
+| ------------------------ | ----------------------------------------------------------- | ------------------------------------------------- |
+| 支持多插件同时运行吗               | 支持。不同 `plugin_id` = 不同实例，各跑各的（异步 + 每实例专属线程）                 | `runtime_manager.rs`、`vm_actor.rs`                |
+| 同插件被多个 session 用呢        | 多实例：每个 `(session, plugin)` 一份独立实例，状态/事件隔离                   | `manager.rs:451` `start_session_vm`               |
+| 同会话重复用同插件                | 复用同一实例（`rm.get(key)` 命中即返回，不重复开）                            | `manager.rs:462`                                  |
+| 工具是不是也每会话一份              | 否。工具/命令按 project scope 共享；若 manifest 无静态 `tools[]`，则在激活/注册期由短命校验 VM 补注册一次 | `manager.rs:228`(现状短命校验证据)、`dispatcher` `tools.*` |
+| load 期那个 run_script 是干嘛的 | 短命校验 VM：跑一遍初始化登记工具 + 验脚本可加载，**不是长跑**（长跑见上一行）                | `instance_wasmedge.rs:104`(注释)、`manager.rs:228`   |
+| 会话结束怎么回收                 | `end_session(session_id)` 批量关闭该会话所有实例 + 清 dispatcher 通道     | `manager.rs:536`、`dispatch.rs` `cleanup_instance` |
+
+
+> **一句话**：实例是「每会话一个对象」；工具登记是「每个 project scope 一次」。两者分开，才能既并发隔离、又不重复注册。
+
+#### 4.3.5 注册面作用域：ToolRegistry / plugins 表谁看得见（修正：per-project scope）
+
+> 专业：作用域的正确表述应是 **per-project scope**。也就是：**一个 project = 一个 scope 域**；同一 scope 内所有 sessions 共享一份 `ToolRegistry`/`plugins`，不同 scopes 在同一进程内也要隔离。这里的关键不是“单个 session 带不带 cwd”，而是**session 先归属到哪个 project scope**。代码侧已有两个可复用锚点：① Code 模式已有按 `project_root(cwd)` 计算的 scope key（`src/core/session/scope.rs:49`）；② `SessionRuntimeRegistry` 已留 registry 形态占位（`session_runtime.rs:64`）。本期设计就是把它们收敛成一个真正的 **ScopeRegistry**：`scope_key -> { project_root, Catalog, ToolRegistry, plugins表, skill_set ... }`。这样，一进程内可以并发多个 projects/scopes；session 进入时先 resolve `scope_key`，命中则复用该 scope 容器，未命中则初始化一份。**我们明确不做“每个 session 各看各的 tools”。**
+> 说人话：项目才是插件/工具作用域的单位，不是会话。你开了 10 个会话，只要它们都属于同一个项目 scope，就该看到同一张插件表；如果另 10 个会话属于另一个项目 scope，就该看到另一张。两个 scope 就像同一栋楼里的两层，各自有自己的工具间；同层的房间共用，同楼不同层隔开。
+
+发现根的**三层**与 skill 完全对齐（`src/core/skill/discovery.rs:21`）：
+
+
+| 层                    | 根目录                                        | 作用域          | 随项目变？ |
+| -------------------- | ------------------------------------------ | ------------ | ----- |
+| **global / managed** | `work_dir/skills`（插件对应 `work_dir/plugins`） | 全局共享         | 否     |
+| **agent**            | `work_dir/agents/{id}/...`                 | 按 agent      | 否     |
+| **project**          | `agent_workspace_dir/.tomcat/...`          | **按项目（cwd）** | **是** |
+
+
+所以有效集合 = `global + agent + project(该 scope 的 project_root)`，正是你提的「全局 + agent + project」分层。
+
+再把「声明」和「执行」分两层看：
+
+
+| 层       | 是什么                     | 作用域                                                 | 载体                                          | 为什么这样                                       |
+| ------- | ----------------------- | --------------------------------------------------- | ------------------------------------------- | ------------------------------------------- |
+| 发现/编目   | 该 project scope 能找到哪些插件 | 三层根（global+agent 在 work_dir；project 随 project_root） | `Catalog`（待实现）/ 现状目录直载                      | project 插件天然跟工作区走                           |
+| 注册面（声明） | 有哪些插件、有哪些工具             | **per-project scope 共享**，该 scope 内所有 sessions 一致    | `plugins` 表 + `ToolRegistry`（绑定一个 scope 容器） | 工具「声明」是项目级事实，与单个 session 无关；共享 → 列表一致、不重复注册 |
+| 运行面（执行） | 插件正在哪个会话里活着             | **per-`(session,plugin)`** 隔离                       | `RuntimeManager` 的 `VmActor` 多实例            | 执行才有会话上下文、需并发隔离                             |
+
+
+**需不需要改设计？答案是：要改，而且本期就做，但只做到“per-project scope”，不做到“per-session 各看各的”。**
+
+- **本期要做到**：在 chat 侧补一个真正的 **ScopeRegistry**，按 `scope_key(project_root)` 管 `Catalog + ToolRegistry + plugins表 + skills`；session 绑定 scope，而不是自己单独带一份工具表。这样同一进程可以并发多个 projects/scopes，同 scope 会话共享，跨 scope 隔离。→ §4.2 P8。
+- **本期不做**：单个 session 有自己独立的 tools/plugins 视图。也就是，不做“同一 scope 下 A 会话看得到插件 X，B 会话看不到”的粒度。
+- **实现上最小改动路径**：复用现有 `project_root`/`scope_key` 概念，把当前偏单实例的 `ChatContext/ScopeServices` 抬成“**scope 容器**”；`PluginManager` 不再只挂一份，而是挂到对应的 scope 容器上。
+
+> **一句话**：作用域 = 「一个 project 一个 scope」；同 scope 会话共享，跨 scope 隔离；本期就做到“一进程并发多项目 scopes”，但不做“单个 session 各看各的 tools”。 
+
+#### 4.3.6 加载与内存策略：插件很多时怎么不全量加载
+
+> 专业：现状 `load_plugin` 对每个插件 eager 跑 `run_script`（短命 VM）以发现工具；插件规模变大时，这会带来「启动期全量跑码 + 常驻内存随插件数线性增长」的开销。本版结论是三段式：**发现编目（只读 manifest、不跑码）→ 工具元信息（manifest 静态 `tools[]` 直接作为 LLM 契约面）→ 运行实例懒加载（`VmActor` 首次使用才建、`end_session`/idle 回收）**。常驻内存只剩「轻量 Catalog + 少数在用 VM」，不随插件总数膨胀；legacy `registerTool` 仅作迁移兼容，不再与 manifest 并列成第二套工具真相。
+> 说人话：别一开机就把一百个插件的代码全拉起来跑。先只读「身份证(manifest)」建轻目录；工具信息优先让插件在 manifest 里静态报一份（不跑码就知道有啥）；真正的「活体 VM」等到某会话用到它才开，闲了/会话结束就回收。
+
+三段式策略：
+
+```text
+① 发现编目(启动, 不跑码)   扫三层根(global/agent/project) → 读 pi-plugin.json → 建轻量 Catalog
+   （只读 JSON, 零 VM）      每个 project scope 只读本 scope 下可见的 manifest
+② 工具元信息(唯一契约面)    ├─ manifest 静态 tools[]: 不跑码即填 ToolRegistry(对齐 openclaw contracts.tools)
+                            └─ pi.registerTool(兼容): legacy 迁移/实现自报, 原则上应与 manifest.tools[] 一致
+③ 运行实例(懒加载)          start_session_vm 首次用到才建 VmActor; 命中复用; end_session 批量回收 + idle TTL 关闲置
+   （现状已是 lazy create）  → 常驻 = 轻量 Catalog + 正在用的少数 VM, 不随插件总数线性增长
+```
+
+**懒加载到底懒在哪**（两个层次，别混）：
+
+1. **发现层懒**：不预读全部插件代码，只读 manifest 建内存目录；用到某插件再读它的代码。
+2. **实例层懒**：`VmActor` 只在 `(session, plugin)` 首次被用到时创建（现状 `RuntimeManager` 已是「命中复用、未命中新建」），`end_session` 回收，再加 **idle TTL** 关闭长期空闲实例。
+
+竞品对照（三家都「发现轻、但运行重」，openclaw 最成熟）：
+
+
+| 维度              | openclaw（最成熟）                                                                     | pi_agent_rust                               | pi-mono                              | tomcat（本版结论）                         |
+| --------------- | --------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------ | ------------------------------------ |
+| 发现期跑码           | 否，只读 `package.json`+`openclaw.plugin.json`                                        | 否，只读 manifest/路径                            | 否，只读路径/`pi.extensions`               | 否，只读 manifest 建内存 Catalog            |
+| manifest 静态声明工具 | **是**（`contracts.tools`/`toolMetadata`，不跑码可知）                                     | 否（compat 静态扫描仅推断名字，`callable:false`）        | 否                                    | **目标态：是**（可选 `tools[]`）              |
+| 运行期加载粒度         | 按需子集（`onlyPluginIds`/`loadModules:false`/setup-only），optional tool **首次调用懒加载单插件** | 会话启动对**启用集 eager 全量** `load_all_extensions` | 启动对**启用集 eager 全量** import+factory   | 运行实例 `VmActor` **首次使用懒建**、命中复用、回收    |
+| 实例模型            | 进程内、按需                                                                            | 单运行时共享、有内存上限                                | 同进程、无隔离、无卸载                          | per-`(session,plugin)` 多实例 + idle 回收 |
+| 减量手段            | 配置裁剪 + 多模式 loader + 静态 manifest                                                   | settings 排除 / `-e` / `--no-extensions`      | settings 禁用 / `--no-extensions`（仅治标） | 编目 + 静态声明 + 懒加载                      |
+
+
+> **结论**：openclaw 给出的范式是「**Catalog 可以全量但轻量，runtime 内存里的实例是按需子集**」。tomcat 取其精华：发现编目只读 manifest、工具元信息优先 manifest 静态声明、运行实例维持懒加载并加 idle 回收。pi-mono/pi_agent_rust 对「启用集」仍是 eager 全量，是我们要避开的反面。
+>
+> **一句话**：装一百个插件，开机也只读一百张「身份证」建目录；谁被用到才把谁拉起来跑，闲了就回收——内存只为「正在用的」买单。
+
+---
+
+## 5. 协议
+
+> 单一事实源：`src/ext/host_binding.rs`（`HostRequest`/`HostResponse`）。hostcall 协议**与旧版一致**，迁移引擎不改 wire。
+
+### 5.1 HostRequest（插件 → 宿主，`__pi_host_call` 入参 JSON）
+
+
+| 字段       | JSON 类型 | 必填  | 默认值   | 说明                                                             | 说人话       |
+| -------- | ------- | --- | ----- | -------------------------------------------------------------- | --------- |
+| `module` | string  | 是   | —     | 模块标识：`fs`/`llm`/`tools`/`events`/`session`/`context`/`__async` | 找哪条业务线。   |
+| `method` | string  | 是   | —     | 方法名：`readFile`/`createChatCompletion`/`poll`…                  | 这条线上做哪件事。 |
+| `params` | object  | 否   | `{}`  | 方法参数（camelCase）                                                | 具体参数。     |
+| `callId` | string  | 否   | 缺省=同步 | 异步关联 ID；传则走 submit/poll                                        | 异步活的取件号。  |
+
+
+### 5.2 HostResponse（宿主 → 插件）
+
+
+| 字段       | JSON 类型 | 必填  | 默认值 | 说明                                   | 说人话     |
+| -------- | ------- | --- | --- | ------------------------------------ | ------- |
+| `ok`     | bool    | 是   | —   | 是否成功                                 | 成没成。    |
+| `data`   | any     | 否   | 缺省  | 成功结果（异步 pending 时为 `{pending:true}`） | 结果在这。   |
+| `error`  | string  | 否   | 缺省  | 失败信息                                 | 出错说明。   |
+| `callId` | string  | 否   | 缺省  | 异步回传关联                               | 对应的取件号。 |
+
+
+调用样例（jsonc）：
+
+```jsonc
+// 异步 submit：读文件
+// → __pi_host_call('{"module":"fs","method":"readFile","params":{"path":"a.txt"},"callId":"c1"}')
+// ← { "ok": true, "data": { "pending": true }, "callId": "c1" }
+// 轮询：
+// → __pi_host_call('{"module":"__async","method":"poll","params":{"callId":"c1"}}')
+// ← { "ok": true, "data": { "ready": true, "result": "file contents" }, "callId": "c1" }
+```
+
+### 5.3 同步原生 crypto（不经 dispatcher，直接挂全局）
+
+
+| 全局函数                              | 入参                                  | 出参         | 说明                      | 说人话        |
+| --------------------------------- | ----------------------------------- | ---------- | ----------------------- | ---------- |
+| `__pi_crypto_hash_native`         | `(algo, data:Uint8Array, encoding)` | string     | sha256/384/512/sha1/md5 | 算哈希，原生速度。  |
+| `__pi_crypto_random_uuid_native`  | `()`                                | string     | v4 UUID（OS 熵源）          | 发个随机 UUID。 |
+| `__pi_crypto_random_bytes_native` | `(size)`                            | hex string | 随机字节（≤10MB）             | 来 n 个随机字节。 |
+
+
+> 这些由 `Func::from` 直接绑在 JS 全局上，JS 侧 `crypto` 垫片薄包装成 `createHash`/`randomUUID` 等。照搬 `pi_agent_rust/src/crypto_shim.rs` 模式。
+
+### 5.4 插件清单 manifest（自有，裁剪）
+
+清单文件名 `pi-plugin.json`（兼容 `plugin.json`），由 `src/ext/plugin/types.rs::parse_manifest` 解析。最小字段：`id`、`name`、`version`、`main`（入口 ts/js）、`permissions`（敏感能力声明，供权限闸）。**不要求** pi-mono 的 `pi.extensions` 结构。
+
+**可选静态 `tools[]` 声明（本版新增，省内存关键，见 §4.3.6）**：manifest 可选带 `tools[]`（每项 `{name, description, parameters}`，**不含 `execute`**）。声明后，**编目期不跑码即可把工具元信息填入 `ToolRegistry`**（对齐 openclaw `contracts.tools`），从而把 `run_script` 推迟到「插件首次被用到」时才跑（懒加载）。两条来源并存：
+
+- **manifest 静态 `tools[]`**：冷启动不跑码即可见，首选。
+- `**pi.registerTool` 兼容**：legacy 迁移/实现自报；原则上不应偏离 manifest `tools[]` 这份对 LLM 的契约面。
+
+> 说人话：manifest 是插件的「身份证 + 申报单」——叫啥、入口在哪、想用哪些敏感能力。**现状**它不列工具，工具全靠加载后跑码 `pi.registerTool` 报上来；**本版**允许在 manifest 里**可选地静态报一份工具清单**，这样开机不跑码就知道有哪些工具（省得为「看一眼工具」就把每个插件都拉起来跑）。注意：即便声明了 `tools[]`，里面也**只有说明书没有实现**——`execute` 永远留在插件代码里，调用时才回 VM 跑。manifest 本身仍**不喂给 LLM**（喂给 LLM 的是它声明/注册出来的工具 spec）。
+
+---
+
+## 6. 文件职责总览（One-Glance Map）
+
+> ★=新增/替换；☆=裁剪；其余复用。配套测试见各节点下 `[…/tests/]`。
+
+```text
+tomcat/Cargo.toml ☆
+  │  + rquickjs (features futures/loader)；- wasmedge-sdk/standalone(gate)
+  ▼
+src/ext/mod.rs ☆
+  │  feature 切换：导出 PluginEngine/PluginVmInstance（替换 WasmEngine/WasmInstance）
+  ├─────────────────────────────────────────────────────────────┐
+  ▼                                                               ▼
+src/ext/engine_rquickjs.rs ★                            src/ext/instance_rquickjs.rs ★
+  │  PluginEngine::create_instance(id)                         │  run_script / register_host_binding
+  │  按实例创建 Runtime/Context（不与别的 `(session,plugin)` 共用 VM） │  init_vm / 事件循环(setTimeout) / destroy
+  │  [删除] engine_wasmedge.rs / instance_wasmedge.rs ☆   │  注入: console/timers/TextEncoder/pi/垫片/crypto
+  ▼                                                               ▼
+src/ext/shims/ ★ (path.js/util.js/events.js/buffer.js)   src/ext/crypto_native.rs ★
+  │  纯 JS 垫片(include_str! 注入)                          │  register_crypto_natives(global) (照搬 crypto_shim.rs)
+  ▼
+src/ext/vm_actor.rs  (复用)
+  │  VmActor::spawn → spawn_blocking → run_vm() 调 PluginVmInstance
+  │  VmCommand::{Init,DispatchEvent,Shutdown}；VmActorState 状态机
+  │  [src/ext/tests/vm_actor_test.rs]
+  ▼
+src/ext/runtime_manager.rs  (复用)
+  │  VmRuntimeKey{session_id,plugin_id} → VmActorHandle；remove_session 批量清理
+  │  [src/ext/tests/runtime_manager_test.rs]
+  ▼
+src/api/chat/session_runtime.rs ☆
+  │  ScopeRegistry / ScopeServices：scope_key → {Catalog, ToolRegistry, SkillSet, PluginManager ...}
+  │  一进程并发多项目 scope 的承载点
+  ▼
+src/api/chat/context.rs ☆
+  │  resolve current session / project_root → bind scope；同 scope 复用、跨 scope 隔离
+  │  chat 对话期从 scope 容器暴露 tool_registry / skill_set / plugin manager
+  ▼
+src/ext/plugin/manager.rs ☆
+  │  load_plugin/enable/disable/unload/start_session_vm/end_session
+  │  6 注入: tools/audit/plugin_engine/host_dispatcher/confirm_permissions/runtime_manager
+  │  set_wasm_engine → set_plugin_engine（重命名）
+  │  [src/ext/plugin/tests/suite_test.rs]
+  ▼
+src/ext/host_binding.rs  (复用，协议不变)
+  │  HostRequest/HostResponse；invoke_host_func_with(dispatcher,instance_id,json)
+  │  [src/ext/tests/host_binding_test.rs]
+  ▼
+src/ext/dispatcher/dispatch.rs ☆
+  │  dispatch → sync block_on / async submit_async / __async.poll
+  │  Processor: primitive/llm/tools/event_bus/session/audit
+  │  ☆ 删桩: tools.registerFlag/registerShortcut、context.ui*、llm.setThinkingLevel 等
+  │  [src/ext/dispatcher/tests/*]
+  ▼
+src/ext/ts_compiler.rs  (复用)
+  │  transpile_pi_plugin_for_quickjs（SWC 转译，无类型检查）
+  │  [src/ext/tests/ts_compiler_*_test.rs]
+
+src/api/cli/init.rs ☆           tests/quickjs_e2e_tests.rs ★（替换 wasmedge_e2e_tests.rs ☆）
+  │  run_doctor_checks 去 WasmEdge/QuickJS-wasm 项     │  run_script / pi.* / 事件 / 垫片 / crypto e2e
+
+[删除] tomcat/assets/wasm/wasmedge_quickjs.wasm ☆
+[删除] tomcat/assets/modules/（~78 Node shim）☆
+[删除] scripts/build-custom-quickjs.sh / install-wasmedge.sh ☆
+```
+
+> 阅读顺序：自顶向下即一次插件加载链路——Cargo 装引擎 → mod 切换导出 → PluginEngine 造实例并注入(pi/垫片/crypto) → VmActor 起线程跑 → 插件经 host_binding/dispatcher 调宿主 → 结果回注 Loop。**说人话**：改动集中在「引擎实例 + 垫片 + 删旧资产」，中间的 actor/runtime/dispatcher/host_binding 几乎原样复用。
+
+---
+
+## 7. 配置与环境变量
+
+总则：**env > config > 默认**。
+
+
+| 变量 / 配置                           | 取值                                  | 含义                                 | 优先级     | 说人话              |
+| --------------------------------- | ----------------------------------- | ---------------------------------- | ------- | ---------------- |
+| `[plugin] js_heap_mb`             | int（默认沿用 `DEFAULT_QUICKJS_HEAP_MB`） | rquickjs 单实例堆上限                    | config  | 一个插件最多吃多少内存。     |
+| `[plugin] call_timeout_ms`        | int（默认 30000）                       | 异步 hostcall 超时（沿用 `async_timeout`） | config  | 异步活多久不回就掐。       |
+| `[plugin] interrupt_budget`       | int                                 | 单次 JS 执行的中断预算（软隔离）                 | config  | 跑太久就中断，防死循环。     |
+| `[plugin] event_channel_capacity` | int（默认 64）                          | VM actor 事件通道容量                    | config  | 事件队列多深。          |
+| `[plugin] idle_ttl_ms`            | int（默认 300000；`0`=禁用）               | session VM 空闲多久后自动回收               | config  | 放映厅空多久就自动关门。     |
+| `[plugin] idle_reap_interval_ms`  | int（默认 30000）                       | 空闲 VM 回收扫描周期                       | config  | 多久巡逻一圈，把闲置放映厅关掉。 |
+| `PI_PLUGIN_DISABLE`               | `1`/`true`                          | 全局禁用插件加载                           | env（最高） | 一键关掉所有插件。        |
+
+
+> 已删除：所有 WasmEdge / `wasmedge_quickjs.wasm` 路径相关 env 与 config（如 `PI_WASMEDGE`_*、自定义 wasm 路径）。
+
+---
+
+## 8. 错误模型 / 隔离结局
+
+```text
+manifest 解析失败 / main 越界 → Err(AppError::Plugin | Permission)（加载即失败，写审计）
+权限确认被拒          → Err(AppError::Permission)（用户拒绝授权）
+JS 运行时构建失败     → Err(AppError::Plugin)（create_instance 失败）
+插件初始化脚本抛错    → Err + instance.destroy()（不留半初始化实例）
+_start 运行期 panic   → catch_unwind → VmActorState::Error（主进程不挂）
+单次执行超时/中断预算耗尽 → 中断该次执行 + fail-open（必要时 cold rebuild 运行时）
+hostcall 参数/权限错误 → HostResponse{ok:false,error}（不抛 Err，回插件）
+异步任务超时          → async_results 写 Error，poll 取出后 remove
+```
+
+> 说人话：发现/激活期错误「直接拒绝并记账」；运行期错误「就地兜住，标记 Error，绝不拖垮主进程」；hostcall 业务错误「以 `ok:false` 回插件，让插件自己处理」。
+
+---
+
+## 9. 测试矩阵（验收）
+
+
+| 维度   | 用例 / 编号                                                                      | 状态                       | 说人话                                 |
+| ---- | ---------------------------------------------------------------------------- | ------------------------ | ----------------------------------- |
+| 单元   | `engine_rquickjs`/`instance_rquickjs` mod tests（实例创建/销毁/堆限）                  | PENDING                  | 引擎实例本身的小测。                          |
+| 单元   | `crypto_native::tests`（照搬 `crypto_shim.rs` 的 KAT：sha256/hmac/uuid）           | PENDING                  | 哈希/随机数已知答案测试。                       |
+| 集成   | `src/ext/dispatcher/tests/*`（async_calls/events/dispatch_with_extension）     | ✅ 复用                     | 分发层协议不变，老测试继续锁。                     |
+| 集成   | `src/ext/plugin/tests/suite_test.rs`（load/enable/unload + 副作用清理）             | PENDING（改 set_plugin_engine） | 生命周期与清理。                            |
+| E2E  | `tests/quickjs_e2e_tests.rs::run_script_console`（G2/G4）                      | PENDING                  | 能跑 JS + console。                    |
+| E2E  | `tests/quickjs_e2e_tests.rs::pi_readfile_llm`（G2/G3）                         | PENDING                  | `pi.*` 异步 hostcall 跑通。              |
+| E2E  | `tests/quickjs_e2e_tests.rs::shims_and_crypto`（G4）                           | PENDING                  | path/Buffer/EventEmitter/crypto 可用。 |
+| E2E  | `tests/quickjs_e2e_tests.rs::runaway_plugin_interrupted`（G5）                 | PENDING                  | 死循环被中断、主进程存活。                       |
+| E2E  | `tests/quickjs_e2e_tests.rs::panicking_plugin_isolated`（G6）                  | PENDING                  | 一个插件 panic，其它插件与主回路继续。              |
+| 集成   | `dispatcher::tests::session_scoped_hostcall_isolation`（G7）                   | PENDING                  | 两会话并发，getCurrentSession 各读各的。       |
+| 集成   | `runtime_manager::tests::same_plugin_two_sessions_isolated_instances`（G8）    | PENDING                  | 同插件两会话两实例、状态隔离、同会话复用单实例。            |
+| 集成   | `plugin::tests::discover_three_tier_first_wins`（加载路径）                        | PENDING                  | 三层根发现 + 同名 first-wins。              |
+| 集成   | `plugin::tests::registered_tool_surfaces_to_tool_registry`（插件即工具贡献者）         | PENDING                  | 插件注册的工具进 ToolRegistry、可被 LLM 调。     |
+| 集成   | `chat::tests::sessions_in_same_project_share_scope_container`（G9 scope 绑定）   | PENDING                  | 同项目会话命中同一个 scope 容器。                |
+| 集成   | `chat::tests::different_projects_get_distinct_scope_containers`（G9 scope 绑定） | PENDING                  | 同进程不同项目命中不同 scope 容器。               |
+| 集成   | `plugin::tests::registry_shared_across_sessions_same_scope`（G9 作用域）          | PENDING                  | 同 project scope 两会话查到的工具表/插件表完全一致。  |
+| 集成   | `plugin::tests::registry_isolated_across_project_scopes`（G9 作用域）             | PENDING                  | 同进程两个 project scopes 的工具表/插件表互不串。   |
+| 集成   | `plugin::tests::manifest_static_tools_visible_without_vm`（G10 静态声明）          | PENDING                  | manifest 声明 tools[] 时不启动 VM 即可见工具。  |
+| 集成   | `plugin::tests::vm_instance_lazy_created_on_first_use`（G10 懒加载）              | PENDING                  | 仅被用到的插件才建 VmActor，闲置可回收。            |
+| 集成   | `runtime_manager::tests::idle_vm_reclaimed_after_ttl`（G10 idle 回收）           | PENDING                  | 超过 `idle_ttl_ms` 的闲置 VM 会被自动回收。     |
+| 观察指标 | `tests/cli_tests.rs::doctor_*` 不含 WasmEdge 断言（G1）                            | PENDING                  | 体检不再要 WasmEdge。                     |
+| 文档   | 本文定稿 + `plugin-system-overview.md`/`Architecture.md` 同步 + 删减兼容文档（§11）        | PENDING                  | 字和代码别两张皮。                           |
+
+
+---
+
+## 10. 风险与应对
+
+
+| 风险                                                    | 影响  | 应对（具体动作）                                                                                                      | 说人话                                       |
+| ----------------------------------------------------- | --- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| 软隔离弱于 Wasm 硬墙                                         | 高   | 落实 interrupt budget + 单次 `call_timeout_ms` 超时 + panic `catch_unwind` + cold rebuild；威胁模型写入文档                  | 没物理墙，靠超时/中断/重建兜住。                         |
+| **C 级崩溃兜不住**（rquickjs-sys 段错误/UB）                     | 高   | `catch_unwind` 只兜 Rust panic；靠 rquickjs 安全封装 + 单实例 `js_heap_mb` 上限 + 不暴露 unsafe FFI；高危场景预留可选 Wasm/子进程后端（本期不做） | QJS 底层 C 崩了 Rust 抓不住，靠堆上限和安全封装压住，极端情况留后门。 |
+| **多 session 读串当前会话**（现状 `session_ops` 用全局 current）    | 高   | P7：从 `instance_id` 解析 `session_id` 注入 session 类 hostcall，按会话取数；加 `session_scoped_hostcall_isolation` 测试       | 并发会话别读错；按信箱上的会话号取数并加测试锁住。                 |
+| `rquickjs-sys` 跨平台编译                                  | 中   | 参考 pi_agent_rust 平台 gate（FreeBSD/Android 用 `bindgen`）；CI 加目标平台构建                                              | 各平台编译先在 CI 锁住。                            |
+| 生态断裂（旧 pi-mono/npm 插件失效）                              | 中   | 在 user-guide/迁移说明显式标注「不兼容」；提供裁剪 `pi.`* 迁移指南                                                                   | 老插件不能跑，文档讲清怎么改写。                          |
+| 删除资产误伤 build.rs/打包                                    | 中   | P5 单独 PR；`cargo build` + 打包冒烟；保留 git 历史可回滚                                                                    | 清旧资产单独一刀，先冒烟再合。                           |
+| **大规模插件发现/加载开销**（现状 load 期对每个插件 eager 跑 `run_script`） | 中   | §4.3.6：发现编目只读 manifest（不跑码）+ manifest 静态 `tools[]` + 运行实例懒加载/idle 回收；避免启动全量跑码                                 | 插件多别一开机全跑起来；先读名册、用到才加载。                   |
+| 事件循环/Promise 语义差异                                     | 中   | e2e 覆盖 setTimeout/Promise/microtask + submit/poll；对齐 pi_agent_rust 事件循环                                       | 异步行为用 e2e 钉死。                             |
+| crypto 熵源不可用                                          | 低   | `getrandom` 失败按 pi_agent_rust 抛 JS 错误，不静默返回弱随机                                                                | 没熵就报错，绝不发假随机。                             |
+
+
+---
+
+## 11. 历史决策 / 跨文档修订
+
+- ~~WasmEdge + 定制 `wasmedge_quickjs.wasm` 作为插件沙箱~~ → 否：强制外部 C 库 + 定制 wasm 构建 + 深度耦合，运行时不可移植（见 `docs/reports/wasm_runtime_migration_analysis.md`）。改为进程内 rquickjs。
+- ~~维护 Node 兼容层（`assets/modules/`）以兼容 pi-mono/npm 插件~~ → 否：放弃 pi-mono 硬兼容后兼容层失去主要价值，30k 行维护负担。改为只移植 5 块纯工具垫片。
+- ~~`WasmEngine`/`WasmInstance` 命名与 `set_wasm_engine` 注入~~ → 改：重命名 `PluginEngine`/`PluginVmInstance`/`set_plugin_engine`（不留兼容 shim）。
+
+**跨文档修订（需同步）**：
+
+- [plugin-system-overview.md](plugin-system-overview.md)：旧版总览，运行时/兼容章节由本文取代。
+- [Architecture.md](../Architecture.md) §5.5：「WasmEdge 沙箱 + 每插件 Wasm 实例」→「rquickjs 嵌入式 + 软隔离 + hostcall 权限闸」。
+- [plugin-system/wasmedge-runtime-layer.md](plugin-system/wasmedge-runtime-layer.md)、[host-guest-layer.md](plugin-system/host-guest-layer.md)：WasmEdge 专属内容改写为 rquickjs。
+- [plugin-system/js-api-alignment.md](plugin-system/js-api-alignment.md)、[plugin-system/pi-mono-compat-strategy.md](plugin-system/pi-mono-compat-strategy.md)：大幅删减，去掉「对齐 pi-mono」目标。
+- [docs/user-guide.md](../user-guide.md)：删除 WasmEdge 安装/检查段落，更新目录结构。
+
+---
+
+## 一句话总结
+
+把插件运行时从「外部 WasmEdge + 定制 wasm + Node 兼容层」换成「进程内 rquickjs + 单入口 `pi.`* hostcall + 少量纯工具垫片」：**引擎换芯、协议不变、能力收口、生态减负**——纯计算就地算、crypto 走同步原生、敏感能力一律过权限闸，放弃 pi-mono 硬兼容以换取零外部依赖与更小的攻击面。
+
+因为是**多 session 并发**架构，再补四件事：①**崩溃隔离**——每插件专属线程 + `catch_unwind` + 超时中断，崩了只标红关掉、不拖垮宿主（底层 C 级崩溃兜不住，已列风险）；②**多实例模型**——同插件被多会话用就发多份独立活体（`(session,plugin)` 一实例），而工具/命令注册面按 **project scope** 共享一次；③**sessionId 流转**——事件按信箱隔离已对，会话读写要从全局 current 改成按会话号取（修现状缺陷）；④**插件即能力容器**——插件「贡献」若干工具进共享 `ToolRegistry`，与内置工具同一 tool-calling 通道给 LLM，而非 skill 的渐进式披露；加载路径继承 skill 三层磁盘根。
