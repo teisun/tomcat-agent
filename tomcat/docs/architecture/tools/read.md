@@ -8,15 +8,332 @@
 
 ---
 
+## 先看总图：文首导读
+
+### 阅读顺序建议
+
+1. **抽象 ASCII 总图（A.1）**：先钉死 `read` 收口哪四条约束——**准入门 → 类型分路 → 单窗体量控制 → dedup/staleness 回灌**。
+2. **具体 ASCII 总图（A.2）**：把同一条链落到真实模块：`catalog.rs` / `system_prompt.rs` → `tool_exec.rs` / `read_state.rs` → `executor/read.rs` → `types.rs` helper。
+3. **核心四图（B）**：结构示意 → 调用流（dedup 分叉 / 类型路由）→ 时序（首读 / dedup / 整轮 / read_impl 生命周期）→ 全链路闭环。
+4. **mermaid 时序（C）**：在 IDE 渲染 edit 前陈旧检查的判定边界。
+5. **状态机（D）**：dedup 命中 / 失配 / stub 的状态流与会话表字段。
+6. **再下钻正文**：想看对外契约跳 §5；想看配置 / 错误模型跳 §7 / §8；想看验收跳 §9。
+
+### A.1 抽象 ASCII 总图
+
+```text
+输入：LLM / 用户发起 read 请求
+   │   契约：path + offset/limit + line_numbers/hashline
+   │
+   │  ① 准入：权限 + 体量门
+   ▼
+PermissionGate(Read) + metadata size 门
+   ├─ 同窗未变 ──────────────► FILE_UNCHANGED stub（省 token，链路短路）
+   │
+   │  ② 类型与体量分叉
+   ▼
+按内容类型路由
+   ├─ 文本     ─► 分页 / 128 KiB 后读预算 / cat-n 或 hashline / resume 尾注
+   ├─ 图 / PDF ─► tool 占位文本 + 下一条 user 注入 Parts
+   └─ 非 UTF-8 / 超门限 ─► 结构化 Tool 错误（带 hint）
+   │
+   │  ③ 记指纹（单一事实源）
+   ▼
+ReadStamp / read_state（mtime + size，供 dedup 与写前对表）
+   │
+   │  终局
+   ▼
+结果回灌下一轮推理；edit / write 前用指纹挡陈旧
+```
+
+这张抽象图只讲**职责、分叉与归一化结局**，故意不落到实现文件：`read` 的核心不是“把文件读出来”这么简单，而是同时收口**体量控制、类型路由、重复读省 token、写前陈旧检测**四条约束。它回答的是“为什么 read 要分这么多支”，不是“哪几个 `.rs` 在实现它”。
+
+**说人话**：先过门，再按文本/图/PDF 分路；重复读能短路，写之前能对指纹，别把一个 `read` 误会成单纯 `cat` 一下。
+
+### A.2 具体 ASCII 总图
+
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│ system_prompt.rs / catalog.rs                                             │
+│ • 对外只暴露 `read`                                                       │
+│ • system prompt 引导 offset/limit/hashline                                │
+└───────────────────────────────┬────────────────────────────────────────────┘
+                                │
+                                ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│ tool_exec.rs                                                              │
+│ • 解析 path/offset/limit/hashline                                         │
+│ • 越界早失败                                                              │
+│ • 先查 read_state.rs 做 dedup                                             │
+└───────────────────────┬───────────────────────────────┬────────────────────┘
+                        │                               │
+                        │ dedup hit                     │ miss
+                        ▼                               ▼
+           FileUnchanged stub            ┌───────────────────────────────────┐
+                                         │ primitive/executor/read.rs        │
+                                         │ • gate + metadata size gate       │
+                                         │ • route Text | Image | Pdf        │
+                                         │ • text: 分块扫行 + 128 KiB 护栏    │
+                                         └──────────────┬────────────────────┘
+                                                        │
+                              ┌─────────────────────────┴────────────────────────┐
+                              ▼                                                  ▼
+                 Text(content + resume hint)                      Image/Pdf metadata
+                              │                                                  │
+                              │                                                  ▼
+                              │                              src/core/llm/types.rs helper
+                              │                              • image_b64 / file_b64
+                              │                              • 下一条 user Parts 注入
+                              ▼
+                    read_state.rs put_stamp
+                    • 供下次 dedup
+                    • 供 edit/write stale check
+```
+
+这张具体图把抽象链路**落到真实模块与关键实现边界**：入口在 `catalog/system_prompt`，真正的分叉和短路在 `tool_exec`，真读盘与后读预算在 `executor/read.rs`，图/PDF 编码只在 `types.rs` helper 一处做。它回答的是“这条链在代码里是怎么串的”。
+
+**说人话**：先在工具层拦越界和重复读，再进 executor 真读盘；文本在那儿切窗和控体重，图/PDF 则从 helper 走到下一条 user Parts。
+
+### B. ASCII 核心四图
+
+在 A.1 / A.2 两张总图之后，把关键结构、分叉、生命周期、回流路径继续摊成「结构示意 → 调用流 → 时序 → 全链路闭环」四连图。
+
+#### B.1 结构示意（模块与对象）
+
+```text
+┌──────────────── 入口：catalog.rs / system_prompt.rs ─────────────────┐
+│ 对外只暴露 `read`；system prompt 引导 offset/limit/hashline           │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                ▼
+┌──────────────── 工具层：agent_loop/tool_exec（branches/read.rs） ─────┐
+│ 解析 path/offset/limit/hashline · 越界早失败 · 查 read_state 做 dedup │
+└──────────────┬───────────────────────────────┬───────────────────────┘
+               │ dedup hit                      │ miss
+               ▼                                ▼
+        FileUnchanged stub      ┌──────────── primitive/executor/read.rs ───────────┐
+                                │ gate + metadata size 门 · route Text|Image|Pdf     │
+                                │ text: 流式扫行 + 128 KiB 后读预算                   │
+                                └───────────────┬───────────────────────────────────┘
+                                                ▼
+                                   types.rs helper（image_b64 / file_b64）
+                                   read_state.rs put_stamp（mtime+size 指纹）
+```
+
+#### B.2 调用流（dedup 分叉 / 类型路由）
+
+```text
+read(args)
+   │
+   ▼ tool_exec：校验 offset/limit，查 read_state
+   ├─ 同 key 且 mtime/size 未变 ─► FILE_UNCHANGED stub（不调 executor）
+   └─ 失配 / 首读 ─► executor/read：gate + metadata size 门
+                       ├─ 超 max_bytes 且无窗口 ─► 结构化 Tool 错误
+                       └─ 路由内容类型
+                            ├─ Text  ─► 流式扫行 + 128 KiB 预算 ─► content + resume hint
+                            ├─ Image ─► metadata ─► types.rs image_b64 ─► 下一条 user Parts
+                            └─ Pdf   ─► metadata ─► types.rs file_b64  ─► 下一条 user Parts
+                       └─ put_stamp（写回指纹，供下次 dedup / 写前对表）
+```
+
+#### B.3 时序（生命周期）
+
+**① 首次 read（文本窗口）**
+
+```text
+LLM          tool_exec              executor/read           read_state
+ │               │                       │                    │
+ │ read(args)    │                       │                    │
+ │──────────────>│ 校验 offset/limit      │                    │
+ │               │──────────────────────>│ gate + open       │
+ │               │                       │ 流式扫行/拼 content │
+ │               │                       │───────────────────>│ put_stamp
+ │               │<──────────────────────│ ReadResult::Text   │
+ │<──────────────│ tool 消息文本         │                    │
+```
+
+**说人话**：第一次读走全链路，读完把指纹写进表。
+
+**② 同窗口第二次 read（dedup）**
+
+```text
+LLM          tool_exec                       read_state
+ │               │                               │
+ │ read(同路径同窗口) │ lookup：mtime+size 未变      │
+ │──────────────>│──────────────────────────────>│
+ │               │<──────────────────────────────│ hit
+ │               │ 组装 FileUnchanged（不调 executor）
+ │<──────────────│ stub 文本
+```
+
+**说人话**：同路径同窗且 mtime/size 没变，第二次不调 executor，直接 stub。
+
+**③ Agent 整轮交互：LLM 调 read 与 128 KiB 护栏**
+
+说人话：用户发一句话后，Agent 先调 LLM；LLM 若决定 `read`，工具层会把结果截在 128 KiB 以内再塞回上下文，然后 LLM 继续生成——不会再出现「一次 read 塞 690KB 把整轮打爆」的旧路径。
+
+```text
+  User                api::chat              AgentLoop                 LLM Provider
+   │                      │                      │                          │
+   │  "帮我读这个大文件"   │                      │                          │
+   ├─────────────────────►│  AgentLoop::run()    │                          │
+   │                      ├─────────────────────►│                          │
+   │                      │                      │  run.rs                  │
+   │                      │                      │  ├─ Conversation Loop    │
+   │                      │                      │  └─ Attempt Loop         │
+   │                      │                      │       │                  │
+   │                      │                      │  reasoning_loop.rs       │
+   │                      │                      │  ├─ TurnStart            │
+   │                      │                      │  ├─ chat_stream ────────►│
+   │                      │                      │  │   stream_handler.rs    │
+   │                      │                      │  │   MessageStart/Update  │
+   │                      │                      │  │◄─ ContentDelta*       │
+   │                      │                      │  │◄─ ToolCallDelta(read) │
+   │                      │                      │  │◄─ FinishReason        │  ← 只记录，不 break
+   │                      │                      │  │◄─ Usage (trailing)     │  ← 继续吃完
+   │                      │                      │  │   MessageEnd             │
+   │                      │                      │  │   → StreamOutcome        │
+   │                      │                      │  │                        │
+   │                      │                      │  tool_dispatcher.rs       │
+   │                      │                      │  └─ run_tool_calls        │
+   │                      │                      │       │                  │
+   │                      │                      │  tool_exec/mod.rs         │
+   │                      │                      │  └─ branches/read.rs     │
+   │                      │                      │       │                  │
+   │                      │                      │  primitive/executor/      │
+   │                      │                      │  └─ read.rs::read_impl   │
+   │                      │                      │       │                  │
+   │                      │                      │       ├─ read_window_     │
+   │                      │                      │       │  blocking()      │
+   │                      │                      │       │  128KiB 边读边算   │
+   │                      │                      │       │  完整行边界截断    │
+   │                      │                      │       └─ ReadTextResult   │
+   │                      │                      │          ≤128KiB + hint    │
+   │                      │                      │                          │
+   │                      │                      │  messages += tool_result │
+   │                      │                      │  (单窗不再原样灌进上下文)  │
+   │                      │                      │                          │
+   │                      │                      │  下一轮 chat_stream ─────►│
+   │                      │                      │◄─ text-only 收束 ────────│
+   │                      │◄─────────────────────┤  turn_finalize.rs        │
+   │◄─────────────────────┤  回复用户             │                          │
+```
+
+**说人话**：上面这张图看「整轮怎么串」；流尾细节跳 [`llm-stream-events-cli-pipeline.md`](../llm-stream-events-cli-pipeline.md) §5.4。
+
+**④ read_impl 内部处理时序（后读预算）**
+
+说人话：不是「整窗读完再称重」，而是扫每一行时就累加渲染字节，够了就在行边界切页；首行自己就过胖则直接结构化报错。
+
+```text
+read_impl (read.rs)
+  │
+  ├─ metadata 检查 (无 offset/limit 且 > max_bytes → 拒)
+  │
+  ├─ spawn_blocking ──► read_window_blocking()
+  │                         │
+  │    loop: read chunk ──► memchr 找 \n
+  │                         │
+  │    每行: rendered_line_len = 前缀(行号/hashline) + 行字节
+  │                         │
+  │    ┌─ 首行 rendered > 128KiB ──► FirstLineTooLong → Err(结构化)
+  │    │
+  │    ├─ 累计 rendered_output_bytes >= 128KiB
+  │    │     且已在完整行边界 ──► OutputBudget { next_offset }
+  │    │     且行未读完      ──► 先读完当前行再停
+  │    │
+  │    └─ window_lines >= limit ──► Limit { remaining_lines, next_offset }
+  │
+  ├─ 格式化: format_with_line_numbers / format_with_hashlines
+  │
+  └─ 拼尾注:
+       "... [output truncated at 131072 bytes post-read budget;
+            resume with offset=<next>, limit=<原limit>]"
+       或首行超限 Err: "Narrow offset/limit ..."
+```
+
+**说人话**：`read_window_blocking` 在 blocking 线程里边扫边算；`read_impl` 负责格式化与尾注拼装，对外仍是 `ReadResult::Text`。
+
+#### B.4 全链路闭环
+
+```text
+read 请求 ──► tool_exec（dedup 检查）
+   │                 │
+   │ miss            └─ hit ─► FILE_UNCHANGED stub ─┐
+   ▼                                                │
+executor/read：gate + 类型路由 + 128 KiB 预算        │
+   │                                                │
+   ▼ put_stamp（写回 mtime+size 指纹）               │
+read_state（事实源）◄────────────────────────────────┘
+   │
+   ▼ 结果回灌
+LLM 下一轮推理
+   │
+   ▼ edit / write 前
+check_stamp（指纹不一致 → 拦截，要求先 read）
+```
+
+### C. mermaid 时序
+
+> edit 前陈旧检查的判定边界，便于在 IDE 内渲染。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as LLM
+    participant E as tool_exec
+    participant S as read_state
+
+    L->>E: edit(path, ...)
+    E->>S: check_stamp(path)
+    alt mtime+size 等与 stamp 一致
+        S-->>E: ok
+    else 不一致
+        S-->>E: stale
+        E-->>L: 请重新 read
+    end
+```
+
+**说人话**：edit 前先对表里指纹；磁盘变了就拦下来让你先 `read`，别按旧内容改。
+
+### D. 状态机与会话表
+
+**dedup 命中**（简化条件，完整见 `ReadStamp::matches_request`）：
+
+```text
+           ┌─────────────┐
+  首次 read │  no record  │
+           └──────┬──────┘
+                  │ put_stamp
+                  ▼
+           ┌─────────────┐
+  再次 read │  key 对齐   │──mtime/size 变──▶ 全量重读 + 更新 stamp
+           │  且磁盘未变 │
+           └──────┬──────┘
+                  │ 同窗口 + 未变
+                  ▼
+           ┌─────────────┐
+           │ FILE_UNCHANGED stub
+           └─────────────┘
+```
+
+**说人话**：没记录就记；有记录且没变就 stub；变了就重读更新表。
+
+| 字段 / 概念             | 作用                                         | 说人话 |
+| ------------------- | ------------------------------------------ | ------ |
+| `mtime_ms` + `size` | dedup 快路径：未变才允许短路                          | 先看大小和时间戳快不快。 |
+| `content_hash`      | 存储供诊断与后续 hashline_edit；**dedup 命中不强制重算比对** | 深度校验留给 edit，dedup 不强制重读。 |
+| `is_partial_view`   | 分窗读与整文件读不互相 dedup                          | 半窗和全文件别互相 dedup。 |
+
 ## 目录
 
+- [先看总图：文首导读](#先看总图文首导读)（A.1 抽象 / A.2 具体 ASCII 总图 · B 核心四图 · C mermaid · D 状态机与会话表）
 - [1. 术语统一](#1-术语统一)
 - [2. 竞品 / 选型对比（调研）](#2-竞品--选型对比调研)
   - [2.1 Agent 读文件的典型关切](#21-agent-读文件的典型关切)
   - [2.2 常见实现横向对比](#22-常见实现横向对比)
   - [2.2.1 维度词典（R1–R6）](#221-维度词典r1r6)
 - [3. 目标与设计原则](#3-目标与设计原则)
-  - [3.1 观察指标表（与 §11 验收一一对应）](#31-观察指标表与-11-验收一一对应)
+  - [3.1 观察指标表（与 §9 验收一一对应）](#31-观察指标表与-9-验收一一对应)
   - [3.2 非目标](#32-非目标)
 - [4. 落地选型与实施（已定稿）](#4-落地选型与实施已定稿)
   - [4.1 落地选型决策表（维度取舍）](#41-落地选型决策表维度取舍)
@@ -29,17 +346,13 @@
   - [4.2.6 PR-RS：文档](#426-pr-rs文档)
 - [5. 协议（入参 / 出参 / Schema）](#5-协议入参--出参--schema)
 - [6. One-Glance Map（文件职责总览）](#6-one-glance-map文件职责总览)
-- [7. 调度时序（运行时图）](#7-调度时序运行时图)
-  - [7.4 Agent 整轮交互：LLM 调 read 与 128 KiB 护栏](#74-agent-整轮交互llm-调-read-与-128-kib-护栏)
-  - [7.5 read_impl 内部处理时序（后读预算）](#75-read_impl-内部处理时序后读预算)
-- [8. 状态机与会话表](#8-状态机与会话表)
-- [9. 配置与环境变量](#9-配置与环境变量)
-- [10. 错误模型 / 截断 / Stub](#10-错误模型--截断--stub)
-- [11. 测试矩阵（验收）](#11-测试矩阵验收)
-  - [11.1 测试分层（后读预算）](#111-测试分层后读预算)
-- [12. 风险与应对](#12-风险与应对)
-- [13. 历史决策（已被本方案取代）](#13-历史决策已被本方案取代)
-- [14. 关联文档](#14-关联文档)
+- [7. 配置与环境变量](#7-配置与环境变量)
+- [8. 错误模型 / 截断 / Stub](#8-错误模型--截断--stub)
+- [9. 测试矩阵（验收）](#9-测试矩阵验收)
+  - [9.1 测试分层（后读预算）](#91-测试分层后读预算)
+- [10. 风险与应对](#10-风险与应对)
+- [11. 历史决策（已被本方案取代）](#11-历史决策已被本方案取代)
+- [12. 关联文档](#12-关联文档)
 - [附录：旧节号 → 本版对照](#附录旧节号--本版对照)
 
 ---
@@ -123,7 +436,7 @@
 | **陈旧检测底座**         | `read_state` 存上次成功 read 的指纹；`write` / `edit` 入口可比对，防止按旧上下文误改                                           | 指纹表给写改前对表用。 |
 
 
-### 3.1 观察指标表（与 §11 验收一一对应）
+### 3.1 观察指标表（与 §9 验收一一对应）
 
 
 | 目标            | 观察指标（落地后可核对）                                           | 说人话 |
@@ -215,7 +528,7 @@
 
 #### 4.2.2 PR-RB（T1）+ 阶段一加固：分页、二进制 hint、流式抽窗、后读预算与裸读上限
 
-- **`offset` / `limit`**：1-based 行窗口；截断时在正文尾附带续读提示（见 [§5](#5-协议入参--出参--schema)、[§10](#10-错误模型--截断--stub)）。
+- **`offset` / `limit`**：1-based 行窗口；截断时在正文尾附带续读提示（见 [§5](#5-协议入参--出参--schema)、[§8](#8-错误模型--截断--stub)）。
 - **流式与内存**：分块读盘 + `memchr` 找换行，**单循环**抽出窗口内行，避免先把整文件读进 `String` 再切行（wasm / 大文件友好）。
 - **后读预算护栏**：在读取/格式化过程中累计**最终渲染输出字节数**；达到 **128 KiB** 后就在完整行边界停止，并返回 `offset=<next>`。若首个返回行本身就超过预算，返回结构化错误要求缩小 `offset` / `limit`，而不是把超大单行直接塞进上下文。
 - **`[tools.read] max_bytes`**：默认 25 MiB；**仅当** primitive 入参里 **`offset` / `limit` 均未显式出现**（`has_window = offset.is_some() || limit.is_some()` 为假）时，在 metadata 阶段用 `len()` 拒绝过大文本路径；**显式传 `offset` 或 `limit` 之一**即可绕过，用于「只窥一角」读大文件。
@@ -293,7 +606,7 @@
 
 #### 4.2.6 PR-RS：文档
 
-- 将冻结 spec 合入 `docs/architecture/tools/read.md`，并与 tool catalog、看板、集成测试登记交叉引用（见 [§14](#14-关联文档)）。
+- 将冻结 spec 合入 `docs/architecture/tools/read.md`，并与 tool catalog、看板、集成测试登记交叉引用（见 [§12](#12-关联文档)）。
 
 **说人话**：文档和 catalog、测试分组对得上号，避免「写了 spec 门禁没登记」。
 
@@ -414,207 +727,7 @@ ReadResult
 
 ---
 
-## 7. 调度时序（运行时图）
-
-### 7.1 首次 read（文本窗口）
-
-```text
-LLM          tool_exec              executor/read           read_state
- │               │                       │                    │
- │ read(args)    │                       │                    │
- │──────────────>│ 校验 offset/limit      │                    │
- │               │──────────────────────>│ gate + open       │
- │               │                       │ 流式扫行/拼 content │
- │               │                       │───────────────────>│ put_stamp
- │               │<──────────────────────│ ReadResult::Text   │
- │<──────────────│ tool 消息文本         │                    │
-```
-
-**说人话**：第一次读走全链路，读完把指纹写进表。
-
-### 7.2 同窗口第二次 read（dedup）{#sec-read-dedup}
-
-```text
-LLM          tool_exec                       read_state
- │               │                               │
- │ read(同路径同窗口) │ lookup：mtime+size 未变      │
- │──────────────>│──────────────────────────────>│
- │               │<──────────────────────────────│ hit
- │               │ 组装 FileUnchanged（不调 executor）
- │<──────────────│ stub 文本
-```
-
-**说人话**：同路径同窗且 mtime/size 没变，第二次不调 executor，直接 stub。
-
-### 7.3 edit 前陈旧检查（概念）
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as LLM
-    participant E as tool_exec
-    participant S as read_state
-
-    L->>E: edit(path, ...)
-    E->>S: check_stamp(path)
-    alt mtime+size 等与 stamp 一致
-        S-->>E: ok
-    else 不一致
-        S-->>E: stale
-        E-->>L: 请重新 read
-    end
-```
-
-**说人话**：edit 前先对表里指纹；磁盘变了就拦下来让你先 `read`，别按旧内容改。
-
-### 7.4 Agent 整轮交互：LLM 调 read 与 128 KiB 护栏
-
-说人话：用户发一句话后，Agent 先调 LLM；LLM 若决定 `read`，工具层会把结果截在 128 KiB 以内再塞回上下文，然后 LLM 继续生成——不会再出现「一次 read 塞 690KB 把整轮打爆」的旧路径。
-
-```text
-  User                api::chat              AgentLoop                 LLM Provider
-   │                      │                      │                          │
-   │  "帮我读这个大文件"   │                      │                          │
-   ├─────────────────────►│  AgentLoop::run()    │                          │
-   │                      ├─────────────────────►│                          │
-   │                      │                      │  run.rs                  │
-   │                      │                      │  ├─ Conversation Loop    │
-   │                      │                      │  └─ Attempt Loop         │
-   │                      │                      │       │                  │
-   │                      │                      │  reasoning_loop.rs       │
-   │                      │                      │  ├─ TurnStart            │
-   │                      │                      │  ├─ chat_stream ────────►│
-   │                      │                      │  │   stream_handler.rs    │
-   │                      │                      │  │   MessageStart/Update  │
-   │                      │                      │  │◄─ ContentDelta*       │
-   │                      │                      │  │◄─ ToolCallDelta(read) │
-   │                      │                      │  │◄─ FinishReason        │  ← 只记录，不 break
-   │                      │                      │  │◄─ Usage (trailing)     │  ← 继续吃完
-   │                      │                      │  │   MessageEnd             │
-   │                      │                      │  │   → StreamOutcome        │
-   │                      │                      │  │                        │
-   │                      │                      │  tool_dispatcher.rs       │
-   │                      │                      │  └─ run_tool_calls        │
-   │                      │                      │       │                  │
-   │                      │                      │  tool_exec/mod.rs         │
-   │                      │                      │  └─ branches/read.rs     │
-   │                      │                      │       │                  │
-   │                      │                      │  primitive/executor/      │
-   │                      │                      │  └─ read.rs::read_impl   │
-   │                      │                      │       │                  │
-   │                      │                      │       ├─ read_window_     │
-   │                      │                      │       │  blocking()      │
-   │                      │                      │       │  128KiB 边读边算   │
-   │                      │                      │       │  完整行边界截断    │
-   │                      │                      │       └─ ReadTextResult   │
-   │                      │                      │          ≤128KiB + hint    │
-   │                      │                      │                          │
-   │                      │                      │  messages += tool_result │
-   │                      │                      │  (单窗不再原样灌进上下文)  │
-   │                      │                      │                          │
-   │                      │                      │  下一轮 chat_stream ─────►│
-   │                      │                      │◄─ text-only 收束 ────────│
-   │                      │◄─────────────────────┤  turn_finalize.rs        │
-   │◄─────────────────────┤  回复用户             │                          │
-```
-
-**对应 `.rs` 文件地图（阶段一加固）**：
-
-```text
-src/core/agent_loop/
-├── run.rs                    ← 顶层 Conversation + Attempt 两层
-├── reasoning_loop.rs         ← 单 turn：调 stream → 调 tool → 收束
-├── stream_handler.rs         ← 流消费：FinishReason 不 break（见 llm-stream-events-cli-pipeline.md §5.4）
-├── types.rs                  ← StreamOutcome { finish_reason }
-├── tool_dispatcher.rs        ← 批量调度 tool_calls
-├── tool_exec/
-│   ├── mod.rs                ← execute_tool 路由
-│   └── branches/read.rs      ← read 分支 → PrimitiveExecutor
-└── tests/
-    └── stream_handler_test.rs ← finish_reason + trailing Usage 单测
-
-src/core/tools/primitive/
-├── executor/
-│   ├── mod.rs                ← DefaultPrimitiveExecutor::read()
-│   └── read.rs               ← read_impl + read_window_blocking + 128KiB
-├── types.rs                  ← ReadTextResult { truncated, remaining_lines }
-└── tests/
-    └── read_window_test.rs   ← 护栏单测（白盒）
-
-tests/
-└── read_tool_tests.rs        ← 护栏集成测（黑盒）
-```
-
-**说人话**：上面第一张图看「整轮怎么串」；第二张图是「改哪些文件」的索引，流尾细节跳 [`llm-stream-events-cli-pipeline.md`](../llm-stream-events-cli-pipeline.md) §5.4。
-
-### 7.5 read_impl 内部处理时序（后读预算）
-
-说人话：不是「整窗读完再称重」，而是扫每一行时就累加渲染字节，够了就在行边界切页；首行自己就过胖则直接结构化报错。
-
-```text
-read_impl (read.rs)
-  │
-  ├─ metadata 检查 (无 offset/limit 且 > max_bytes → 拒)
-  │
-  ├─ spawn_blocking ──► read_window_blocking()
-  │                         │
-  │    loop: read chunk ──► memchr 找 \n
-  │                         │
-  │    每行: rendered_line_len = 前缀(行号/hashline) + 行字节
-  │                         │
-  │    ┌─ 首行 rendered > 128KiB ──► FirstLineTooLong → Err(结构化)
-  │    │
-  │    ├─ 累计 rendered_output_bytes >= 128KiB
-  │    │     且已在完整行边界 ──► OutputBudget { next_offset }
-  │    │     且行未读完      ──► 先读完当前行再停
-  │    │
-  │    └─ window_lines >= limit ──► Limit { remaining_lines, next_offset }
-  │
-  ├─ 格式化: format_with_line_numbers / format_with_hashlines
-  │
-  └─ 拼尾注:
-       "... [output truncated at 131072 bytes post-read budget;
-            resume with offset=<next>, limit=<原limit>]"
-       或首行超限 Err: "Narrow offset/limit ..."
-```
-
-**说人话**：`read_window_blocking` 在 blocking 线程里边扫边算；`read_impl` 负责格式化与尾注拼装，对外仍是 `ReadResult::Text`。
-
----
-
-## 8. 状态机与会话表
-
-**dedup 命中**（简化条件，完整见 `ReadStamp::matches_request`）：
-
-```text
-           ┌─────────────┐
-  首次 read │  no record  │
-           └──────┬──────┘
-                  │ put_stamp
-                  ▼
-           ┌─────────────┐
-  再次 read │  key 对齐   │──mtime/size 变──▶ 全量重读 + 更新 stamp
-           │  且磁盘未变 │
-           └──────┬──────┘
-                  │ 同窗口 + 未变
-                  ▼
-           ┌─────────────┐
-           │ FILE_UNCHANGED stub
-           └─────────────┘
-```
-
-**说人话**：没记录就记；有记录且没变就 stub；变了就重读更新表。
-
-| 字段 / 概念             | 作用                                         | 说人话 |
-| ------------------- | ------------------------------------------ | ------ |
-| `mtime_ms` + `size` | dedup 快路径：未变才允许短路                          | 先看大小和时间戳快不快。 |
-| `content_hash`      | 存储供诊断与后续 hashline_edit；**dedup 命中不强制重算比对** | 深度校验留给 edit，dedup 不强制重读。 |
-| `is_partial_view`   | 分窗读与整文件读不互相 dedup                          | 半窗和全文件别互相 dedup。 |
-
-
----
-
-## 9. 配置与环境变量
+## 7. 配置与环境变量
 
 **总则**：`env > config > 默认`（本工具相关项当前以 **config / 代码常量 / 测试注入** 为主；若某 env 未实现则表中不列）。
 
@@ -630,7 +743,7 @@ read_impl (read.rs)
 
 ---
 
-## 10. 错误模型 / 截断 / Stub
+## 8. 错误模型 / 截断 / Stub
 
 ```text
                     read 请求
@@ -659,9 +772,9 @@ read_impl (read.rs)
 
 ---
 
-## 11. 测试矩阵（验收）
+## 9. 测试矩阵（验收）
 
-### 11.1 测试分层（后读预算）
+### 9.1 测试分层（后读预算）
 
 说人话：流尾语义在 Agent Loop 文档里测；这里只画 `read` 128 KiB 护栏的分层——白盒钉内部字段，黑盒钉对外字符串，场景库做文档对齐。
 
@@ -705,7 +818,7 @@ read_impl (read.rs)
 
 ---
 
-## 12. 风险与应对
+## 10. 风险与应对
 
 
 | 风险                | 影响          | 应对（已实现或约定）                                             | 说人话 |
@@ -713,15 +826,15 @@ read_impl (read.rs)
 | 模型坚持传 `read_file` | 工具调用失败      | catalog 仅 `read`；`submodules_test` 锁未知工具语义；prompt 写明短名 | 老名当拼错，测和 prompt 一起钉死。 |
 | 大文件 OOM           | wasm / 主机内存 | metadata 门 + 分块扫行；禁止整文件读后再判大小                          | 先量再流式扫，别整文件进 String。 |
 | OpenAI tool 消息塞图片 | API 拒收 / 浪费 | 图 / PDF **仅**注入下一条 `user` Parts；单测锁注入行为                | 图别塞 tool 正文，走 user Parts。 |
-| `mtime` 欺骗式不变     | 陈旧漏判        | 存 `content_hash` + hashline 给 edit 侧纵深；[§8](#8-状态机与会话表) 写明边界         | dedup 快路径认 mtime；写改侧还有纵深。 |
+| `mtime` 欺骗式不变     | 陈旧漏判        | 存 `content_hash` + hashline 给 edit 侧纵深；[文首导读 D 状态机与会话表](#d-状态机与会话表) 写明边界         | dedup 快路径认 mtime；写改侧还有纵深。 |
 | 重复 read 烧 token   | 成本          | dedup stub；`ReadFileState` 按会话释放                       | 同窗没变就 stub，会话结束清表。 |
 
 
 ---
 
-## 13. 历史决策（已被本方案取代）
+## 11. 历史决策（已被本方案取代）
 
-与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§13** 同构：删除线表示旧案，**结论**列钉死取舍，末列口语扫读。
+与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§11** 同构：删除线表示旧案，**结论**列钉死取舍，末列口语扫读。
 
 | 旧方案 | 结论 | 说人话 |
 |--------|------|--------|
@@ -733,13 +846,13 @@ read_impl (read.rs)
 
 ---
 
-## 14. 关联文档
+## 12. 关联文档
 
 - 兄弟工具：[search_files.md](search_files.md) · [bash.md](bash.md)
 - 流尾语义（FinishReason / trailing Usage）：[../llm-stream-events-cli-pipeline.md](../llm-stream-events-cli-pipeline.md) §5.4
 - 权限：[../permission-system.md](../permission-system.md)
 - 派生工具目录：[../../../../docs/tool-catalog.md](../../../../docs/tool-catalog.md)
-- 结构标杆：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§13**（本文节号与之对齐）。
+- 结构标杆：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **文首导读 + §1→§11**；本文据此落成 **文首导读 + §1→§12**（图集章节含 A.1/A.2/B/C/D，正文节号与之对齐）。
 
 **说人话**：想跳别的工具 spec、权限、catalog，从上面链走；章节骨架以规范为准。
 
@@ -751,7 +864,7 @@ read_impl (read.rs)
 
 ## 附录：旧节号 → 本版对照
 
-仓库里部分 `//!` / 错误文案仍写「`read.md` §2.x / §3.x」（计划期编号）。本版章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§1→§5** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议），按下表跳转即可。
+仓库里部分 `//!` / 错误文案仍写「`read.md` §2.x / §3.x」（计划期编号）。本版章节顺序对齐 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **文首导读 + §1→§5** 骨架（术语 → 竞品调研 → 目标 → 已定稿选型与实施 → 协议），按下表跳转即可。
 
 | 旧锚点 / 说法 | 本版位置 |
 | ------------- | -------- |
@@ -760,11 +873,11 @@ read_impl (read.rs)
 | 上一版「## 3 术语」 | [§1](#1-术语统一) |
 | 上一版「## 4 协议」 | [§5](#5-协议入参--出参--schema) |
 | 上一版「## 5 One-Glance」 | [§6](#6-one-glance-map文件职责总览) |
-| 上一版「## 6 调度」 | [§7](#7-调度时序运行时图) |
-| 上一版「## 7 状态机」 | [§8](#8-状态机与会话表) |
-| 上一版「## 8 配置」 | [§9](#9-配置与环境变量) |
-| 上一版「## 9 错误」 | [§10](#10-错误模型--截断--stub) |
-| 上一版「## 10 测试」 | [§11](#11-测试矩阵验收) |
+| 上一版「## 6 调度」 | [文首导读 B.3 时序](#b3-时序生命周期) |
+| 上一版「## 7 状态机」 | [文首导读 D 状态机与会话表](#d-状态机与会话表) |
+| 上一版「## 8 配置」 | [§7](#7-配置与环境变量) |
+| 上一版「## 9 错误」 | [§8](#8-错误模型--截断--stub) |
+| 上一版「## 10 测试」 | [§9](#9-测试矩阵验收) |
 | §0 / §0.A 对标与决策表 | [§2](#2-竞品--选型对比调研) + [§4](#4-落地选型与实施已定稿) |
 | `read.md#41-入参` 等旧 fragment | 以本节左列「本版位置」为准更新书签 |
 

@@ -4,7 +4,54 @@
 
 ---
 
-## 先看总图：ASCII 方案总图
+## 先看总图：文首导读
+
+### 阅读顺序建议
+
+1. **抽象 ASCII 总图（A.1）**：先钉死职责、事实源与关键分叉——**发现 / 编目 → 渐进式披露 → LLM 决策 → 按名装载 → 零特权执行**。
+2. **具体 ASCII 总图（A.2）**：把同一条链路落到真实对象与约束：P0→P2 roots、`SkillSet`、`AvailableSkillsSection`、`load_skill`、`PermissionGate`。
+3. **核心四图（B）**：结构示意 → 调用流（分叉 / 路由）→ 时序（启动期 / 工具调用期生命周期）→ 全链路闭环。
+4. **mermaid 时序（C）**：在 IDE 渲染「目录注入 → 模型决策 → 按名装载」的串行边界。
+5. **状态机（D）**：单条技能解析（admitted / shadowed / rejected）与 `load_skill` 调用结局。
+6. **再下钻正文**：想看“为什么这么选”跳 §2 / §4；想看配置 / 错误模型跳 §7 / §8；想看验收跳 §9。
+
+### A.1 抽象 ASCII 总图
+
+```text
+输入：启动触发 + 每轮用户请求
+   │   契约：技能根（Project ▸ Agent ▸ Managed）+ <name>/SKILL.md
+   │
+   │  ① 发现 / 编目（启动后台扫一次，首次披露前 await）
+   ▼
+技能来源 Project ▸ Agent ▸ Managed（同名 first-wins 去重）
+   │   └─ 只读「卡片」(name + description)，不读正文
+   ▼
+SkillSet ── 单一事实源：仅元数据，常驻内存
+   │
+   │  ② 渐进式披露（目录进 prompt，正文不进；预算封顶可降级）
+   ▼
+<available_skills> 注入系统提示，连同用户输入一起发给模型
+   │
+   │  ③ 模型决策（关键分叉：由模型自己挑，不是系统自动匹配）
+   ▼
+LLM 看目录判断这轮用不用技能
+   ├─ 不用 ──────────────► 正常回答 / 调别的工具（技能链路结束）
+   └─ 用   ──► load_skill(name[, file])
+   │
+   │  ④ 按名装载（过 guard + 权限闸门，取「这一条」正文）
+   ▼
+按名取正文 → PermissionGate(Read) → <skill> 回灌模型
+   │
+   │  终局：零特权执行
+   ▼
+模型照 SKILL.md 执行；每个副作用仍逐次过权限闸门
+```
+
+这张抽象图只讲**职责、事实源与关键分叉**，故意不落到文件名或具体函数：稳定心智模型是 `SkillSet` / `<available_skills>` / `load_skill` 三段式，关键边界是**目录先披露、正文后装载**。它回答的是“Skill 系统在干什么、为什么要分两段装载”，而不是“哪几个 `.rs` 在实现它”。
+
+**说人话**：先把技能整理成目录卡，再让模型自己挑；真要用时，才按名字把那条正文取出来，且技能本身没有任何额外特权。
+
+### A.2 具体 ASCII 总图
 
 ```text
 ┌─ 触发点 / 输入 ─────────────────────────────────────────────────────────────────────────┐
@@ -45,7 +92,7 @@
 │        先把描述截短，再不够就只留技能名——宁可描述短，也保证每条技能都还看得见。            │
 │ 伪代码：<available_skills><skill><name/><description/></skill>…</available_skills>           │
 └───────┬─────────────────────────────────────────────────────────────────────────────────┘
-        │ system prompt（含技能目录，无正文）+ 用户输入  ──►  一起发给 LLM
+        │ system prompt（含技能目录，无正文）+ 用户输入  ──► 一起发给 LLM
         ▼  ③ LLM 自主决策（关键：由模型挑，不是系统自动匹配）
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
 │ 专业：LLM 读完 <available_skills> + 用户请求，自行判断这次要不要用、用哪条技能              │
@@ -69,14 +116,204 @@
 └───────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+这张具体图把抽象链路**落到真实对象、关键模块与运行时约束**：P0→P2 roots、`SkillSet`、`<available_skills>`、`load_skill`、`PermissionGate` 都被点名，便于 reviewer 直接把“方案为什么成立”映射回 `catalog/discovery/tool_exec` 等正文小节。它回答的是“这条链在系统里到底怎么串起来”。
+
 **看图顺序（说人话）／四步心智模型**：①**发现 / 编目**——技能在启动时按 P0→P2 三层磁盘根（project `.tomcat/skills` → agent `~/.tomcat/agents/<id>/skills` → managed `~/.tomcat/skills`）被「发现」成一张只含名字+描述的目录卡片表（不读正文，省 token），去重后成 `SkillSet`；官方内置 skill 文件不再单列 P3，而是由 `tomcat init` 从 `tomcat/assets/skills/` 写入 P2 Managed；②**渐进式披露**——这张卡片表每轮通过一个系统提示 section 注入给模型，连同用户输入一起发出，让模型知道「有哪些技能、什么时候该用」（正文不进）；③**LLM 自主决策**——模型看完目录和用户请求，自己判断要不要用、用哪条；用不上就不碰，要用就发起 `load_skill(name)`；④**按需装载 → 执行**——`load_skill` 过 guard + 权限闸门，把那一条的 **完整正文** 拉进上下文，模型照着做；正文里要做的事仍逐次过权限闸门，技能零特权。
 
-> **一句话抓住心智模型**：**发现/编目 → 渐进式披露 → LLM 决策 → 按名装载执行**（贯穿一条"技能零特权"安全底座）。注意顺序是**串行**：先把「技能目录」注入 prompt 发给模型，**模型决定**后才 `load_skill` 取正文——不是系统并行地预先装载。这条「全量披露目录 + 由模型自己挑」与主流一致：codex / openclaw / pi 同样把所有技能元数据注入、让模型决策，预算靠**压缩描述 / 降级 / 截断**而非系统侧筛选；唯一在系统侧做自动匹配的是 GenericAgent（服务端**语义检索** over ~10 万技能卡，返回 top-K 再交模型挑，见 §2.2）。tomcat 取同样的「披露给模型、模型决策」路线：更可审计、误命中可控；运行时只认三层磁盘根 P0→P2，官方自带 skill 先由 `tomcat init` 写入 `~/.tomcat/skills/` 再参与发现；**①′ 选择层**（技能爆量时起一个**筛选子 Agent** 挑 top-n 再披露）列为 P2 后续增强、**本期不做**（仅当技能规模爆预算 / 稀释注意力时启用，且 `must_include` 永不被筛掉、由主模型做最终决策，见 §13）。预算超限本期用 **A+D 两级降级**（截描述 → 降级 name-only，丢描述不丢技能）。
+> **一句话抓住心智模型**：先用**抽象总图**记住“发现/编目 → 渐进式披露 → LLM 决策 → 按名装载执行”这条主链，再用**具体总图**对上 `SkillSet` / `AvailableSkillsSection` / `load_skill` / `PermissionGate` 四个关键落点。注意顺序是**串行**：先把「技能目录」注入 prompt 发给模型，**模型决定**后才 `load_skill` 取正文——不是系统并行地预先装载。这条「全量披露目录 + 由模型自己挑」与主流一致：codex / openclaw / pi 同样把所有技能元数据注入、让模型决策，预算靠**压缩描述 / 降级 / 截断**而非系统侧筛选；唯一在系统侧做自动匹配的是 GenericAgent（服务端**语义检索** over ~10 万技能卡，返回 top-K 再交模型挑，见 §2.2）。tomcat 取同样的「披露给模型、模型决策」路线：更可审计、误命中可控；运行时只认三层磁盘根 P0→P2，官方自带 skill 先由 `tomcat init` 写入 `~/.tomcat/skills/` 再参与发现；**①′ 选择层**（技能爆量时起一个**筛选子 Agent** 挑 top-n 再披露）列为 P2 后续增强、**本期不做**（仅当技能规模爆预算 / 稀释注意力时启用，且 `must_include` 永不被筛掉、由主模型做最终决策，见 §11）。预算超限本期用 **A+D 两级降级**（截描述 → 降级 name-only，丢描述不丢技能）。
+
+### B. ASCII 核心四图
+
+在 A.1 / A.2 两张总图之后，把关键结构、分叉、生命周期、回流路径继续摊成「结构示意 → 调用流 → 时序 → 全链路闭环」四连图。
+
+#### B.1 结构示意（模块与对象）
+
+```text
+┌──────────────────────── core/skill（新模块） ────────────────────────┐
+│ discovery.rs   skill_roots() P0>P1>P2 · walk <name>/SKILL.md（深度1）  │
+│ frontmatter.rs parse → SkillFrontmatter（name / description 必填）     │
+│ catalog.rs     merge(first-wins) → SkillSet · render_available_block() │
+│ model.rs       Skill{ name, description, file_path, source } · SkillSet │
+│ embedded.rs    assets/skills/** 编译嵌入，init 写入 P2 Managed          │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │ SkillSet（仅元数据，常驻进程）
+        ┌───────────────────────┼───────────────────────────┐
+        ▼                       ▼                           ▼
+ llm/system_prompt        tools/contract/catalog       agent_loop/tool_exec
+ AvailableSkillsSection   load_skill 条目(JSON schema)  branches/load_skill.rs
+ （渐进式披露，预算封顶）                                guard.rs（审查子 Agent 默认拒）
+                                                             │ gate_check_path(Read)
+                                                             ▼
+                                                       permission/gate.rs
+```
+
+#### B.2 调用流（分叉 / 路由）
+
+```text
+启动 spawn discovery ──► SkillSet（内存事实源）
+        │
+        ▼ 每轮构造 prompt：render_available_skills_block()
+<available_skills> 注入 system_prompt
+        │
+        ▼ 模型决策
+   ┌────┴───────────────────────────┐
+   ▼                                ▼
+ 不用技能                       load_skill(name)
+ 正常回答 / 调别的工具               │
+                                   ▼ tool_exec → guard
+                           ┌────────┴────────┐
+                           ▼                 ▼
+                  reviewer/verifier?      普通上下文
+                  默认拒(is_error)        SkillSet.resolve(name)
+                                       ┌────────┴─────────┐
+                                       ▼                  ▼
+                                未知/歧义/disabled       命中
+                                Err 结构化(列可用名)   gate_check_path(Read)
+                                                          │
+                                                          ▼ <skill> 正文回灌
+```
+
+#### B.3 时序（启动期 / 工具调用期生命周期）
+
+**① 启动期：后台发现 → 首轮 await → 注入**
+
+```text
+run_loop      discovery task(后台)   skill::catalog      system_prompt        LLM
+ │                  │                    │                  │                 │
+ │ 装配 chat        │                    │                  │                 │
+ │ tokio::spawn ───▶│ skill_roots()      │                  │                 │
+ │ (存 JoinHandle)  │ walk SKILL.md(深度1)│                  │                 │
+ │ ……并行其它初始化  │ frontmatter.parse  │                  │                 │
+ │  (不阻塞)        │───────────────────▶│ merge(first-wins)│                 │
+ │                  │                    │ → SkillSet       │                 │
+ ▼ 用户首条消息 → 构造首轮 prompt        │                  │                 │
+ │ await JoinHandle ────────────────────▶│ (未完成则阻塞一次)│                 │
+ │◀──────────────── SkillSet ────────────│                  │                 │
+ │ build_system_prompt_with_state(.., skills=SkillSet)      │                 │
+ │─────────────────────────────────────────────────────────▶│ AvailableSkills │
+ │                  │                    │  render_available_skills_block(budget)
+ │                  │                    │                  │ <available_skills>
+ │◀─────────────────────────────────────────────────────────│ system prompt   │
+ │ system message（含技能元数据，无正文） ─────────────────────────────────────▶│
+```
+
+> 后续 `/skill reload`（聊天内）或配置变更 → 重跑发现任务、原子替换 `SkillSet`（OS 文件监听热重载列 P2）。
+
+**② 工具调用期：按名装载**
+
+```text
+LLM            tool_exec/mod          guard            branches/load_skill     permission/gate
+ │                  │                   │                    │                     │
+ │ load_skill(name) │                   │                    │                     │
+ │─────────────────▶│ parse args        │                    │                     │
+ │                  │ reviewer/verifier?│                    │                     │
+ │                  │──────────────────▶│ whitelisted?       │                     │
+ │                  │◀──────────────────│ no → is_error(拒)  │                     │
+ │                  │ (allowed) ────────────────────────────▶│ SkillSet.resolve()  │
+ │                  │                   │                    │ 未知/歧义/disabled  │
+ │                  │                   │                    │   → Err 结构化       │
+ │                  │                   │                    │ gate_check_path(Read)│
+ │                  │                   │                    │────────────────────▶│ Allow/Deny
+ │                  │                   │                    │◀────────────────────│
+ │                  │                   │                    │ read SKILL.md        │
+ │                  │                   │                    │ strip frontmatter    │
+ │                  │◀───────────────────────────────────────│ <skill>..</skill>    │
+ │◀─────────────────│ tool 消息文本（正文进上下文）            │                     │
+```
+
+**两条路径在 `tool_exec` 出口处归一**：无论装载成功（`<skill>` 文本）还是失败（错误描述），都按 tool 消息文本回灌 LLM；下游不区分技能来源（project / agent / managed）。
+
+#### B.4 全链路闭环
+
+```text
+discovery → SkillSet（仅元数据）
+   │
+   ▼ 每轮注入
+<available_skills>（目录进 prompt，正文不进）
+   │
+   ▼ 模型决策
+load_skill(name) ──► guard ──► resolve ──► gate ──► <skill> 正文
+   │
+   ▼ 回灌
+LLM 照 SKILL.md 执行下一步
+   │
+   ▼ 每个副作用仍逐次过 PermissionGate（技能零特权）
+read / write / bash … 经既有工具完成 ──┐
+   ▲                                  │
+   └──────────── 下一轮对话 ◀──────────┘
+```
+
+### C. mermaid 时序
+
+> 与 B.3 的 ASCII 时序同构，便于在 IDE 内渲染「目录注入 → 模型决策 → 按名装载」的**串行**边界。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 用户
+    participant L as run_loop
+    participant D as discovery(后台)
+    participant P as system_prompt
+    participant M as LLM
+    participant T as tool_exec/load_skill
+    participant G as PermissionGate
+
+    L->>D: tokio::spawn 扫 P0>P1>P2
+    D-->>L: SkillSet（仅元数据）
+    U->>L: 首条消息
+    L->>P: build_system_prompt(skills=SkillSet)
+    P-->>M: <available_skills>（目录卡，无正文）
+    M-->>M: 决策：这轮用不用技能？
+    alt 用某条技能
+        M->>T: load_skill(name)
+        T->>G: gate_check_path(Read)
+        G-->>T: Allow
+        T-->>M: <skill> 正文（tool 消息）
+        M-->>U: 照 SKILL.md 执行（副作用各自过 Gate）
+    else 不用技能
+        M-->>U: 正常回答 / 调别的工具
+    end
+```
+
+### D. 状态机
+
+#### D.1 单条技能解析状态
+
+```text
+┌──────────┐ read+parse ┌──────────┐  name 唯一  ┌──────────┐
+│ on disk  │───────────▶│ parsed   │────────────▶│ admitted │
+│ SKILL.md │            └────┬─────┘             └──────────┘
+└──────────┘                 │
+     │ 缺 frontmatter /        │ 同名已存在(更高优先级)
+     │ 缺 name/description     ▼
+     ▼                   ┌──────────┐
+┌──────────┐            │ shadowed │ warnings += skill_shadowed:<name>
+│ rejected │            └──────────┘
+└──────────┘ diagnostics += {path, reason}
+```
+
+| 当前状态    | 事件                                   | 目标状态     | 副作用                                      | 说人话            |
+| ------- | ------------------------------------ | -------- | ---------------------------------------- | -------------- |
+| on disk | parse 成功 + name 未占用                  | admitted | 入 `SkillSet.by_name`                     | 解析通过、名字没被占就收下。 |
+| on disk | 缺 frontmatter / 缺 name 或 description | rejected | `diagnostics += {path,reason}`，**不阻断**其余 | 坏文件记一笔，跳过。     |
+| parsed  | 同名已被更高优先级占用                          | shadowed | `warnings += skill_shadowed`，丢弃低优先级      | 撞名输给优先级高的，记一笔。 |
+
+#### D.2 `load_skill` 调用结局
+
+| 当前状态                  | 事件                                  | 目标状态      | 副作用                                                   | 说人话           |
+| --------------------- | ----------------------------------- | --------- | ----------------------------------------------------- | ------------- |
+| 收到 `load_skill(name)` | reviewer/verifier 且未放开              | rejected  | `is_error`：`load_skill not available in this context` | 审查小弟默认不让用。    |
+| 已过 guard              | name 命中且非 disabled                  | loaded    | gate 读正文 → `<skill>` 文本                               | 找到、过安检、给正文。   |
+| 已过 guard              | name 未知                             | unknown   | `is_error`：列出可用技能名                                    | 没这技能，告诉它有哪些。  |
+| 已过 guard              | name 命中但 `disable_model_invocation` | forbidden | `is_error`：技能仅用户可用                                    | 这条不让模型点。      |
+| 已过 guard              | `file` 越出 `base_dir`                | denied    | `Err`（gate 或路径校验）                                     | 想读技能目录外的文件，拒。 |
+| 读正文阶段                 | gate Deny / IO 失败                   | failed    | `Err`（权限或 IO 描述）                                      | 读不了就如实报错；项目根未授权时也走这里。 |
 
 ---
 
 ## 目录
 
+- [先看总图：文首导读](#先看总图文首导读)（A.1 抽象 / A.2 具体 ASCII 总图 · B 核心四图 · C mermaid · D 状态机）
 - [1. 术语统一](#1-术语统一)
 - [2. 竞品 / 选型对比（调研）](#2-竞品--选型对比调研)
 - [3. 目标与设计原则](#3-目标与设计原则)
@@ -85,13 +322,11 @@
   - [4.2 实施点（路线图）](#42-实施点路线图)
 - [5. 协议（SKILL.md / load_skill / available_skills / 配置）](#5-协议skillmd--load_skill--available_skills--配置)
 - [6. One-Glance Map（文件职责总览）](#6-one-glance-map文件职责总览)
-- [7. 调度时序（运行时图）](#7-调度时序运行时图)
-- [8. 状态机（技能解析与发现去重）](#8-状态机技能解析与发现去重)
-- [9. 配置与环境变量](#9-配置与环境变量)
-- [10. 错误模型 / 截断 / 警告](#10-错误模型--截断--警告)
-- [11. 测试矩阵（验收）](#11-测试矩阵验收)
-- [12. 风险与应对](#12-风险与应对)
-- [13. 历史决策 / 跨文档修订](#13-历史决策--跨文档修订)
+- [7. 配置与环境变量](#7-配置与环境变量)
+- [8. 错误模型 / 截断 / 警告](#8-错误模型--截断--警告)
+- [9. 测试矩阵（验收）](#9-测试矩阵验收)
+- [10. 风险与应对](#10-风险与应对)
+- [11. 历史决策 / 跨文档修订](#11-历史决策--跨文档修订)
 - [附录 A：下期官方内置 skill 资产候选（PR-SK-B）](#附录-a下期官方内置-skill-资产候选pr-sk-b)
 
 ---
@@ -166,13 +401,13 @@
 - **C2 元数据进 prompt、正文按需载入**（摘要与正文分离）→ A 的渐进式披露（§3 G2）。
 - **C3 多来源 + 同名去重 / 优先级是刚需** → A 三层根 P0→P2 first-wins（官方内置 skill 由 `init` 写入 P2 Managed，不单列发现根，§4.1）。
 - **C4 frontmatter 至少 `name` + `description`** → A 二者必填、未知键忽略（§5.1）。
-- **C5 坏文件 / 重名 / 超预算必须可观测**（绝不静默、绝不 panic）→ A 的 `diagnostics` / `warnings`（§10）。
+- **C5 坏文件 / 重名 / 超预算必须可观测**（绝不静默、绝不 panic）→ A 的 `diagnostics` / `warnings`（§8）。
 - **C6 技能 = 提示资产，可执行能力交给插件 / 扩展** → A 技能零特权、可执行推给 `ext/plugin`（§3 G5）。
-- **C7（分歧点）触发方式各家不同**：codex/openclaw 自动 selection、cc-fork/hermes 专用工具、codex/pi 裸 `read` → A 取「专用 `load_skill` 按名装载」，自动匹配留 P2 后续（§13）。
+- **C7（分歧点）触发方式各家不同**：codex/openclaw 自动 selection、cc-fork/hermes 专用工具、codex/pi 裸 `read` → A 取「专用 `load_skill` 按名装载」，自动匹配留 P2 后续（§11）。
 
 ## 3. 目标与设计原则
 
-### 3.1 观察指标表（与 §11 验收一一对应）
+### 3.1 观察指标表（与 §9 验收一一对应）
 
 
 | 目标         | 观察指标（落地后可核对）                                                                                                                                             | 说人话                         |
@@ -193,7 +428,7 @@
 | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | 技能用量统计 / 老化归档（Curator）                    | P4 自进化（参考 hermes `skill_usage.py` / `curator.py`）                                                                                                   | 用得多/久没用就归档，这期不做。                    |
 | 自总结生成 SKILL.md（self-evolution / workshop） | P4（`[Product_Brief.md](../openspec/specs/Product_Brief.md)` P4）；落地时**先 proposal 审核、禁止直接写入 trusted 根**（对齐 openclaw workshop / GenericAgent 自结晶的安全取舍） | 让 agent 自己写技能，先走提案审核、不直接落盘，留给以后。    |
-| 系统自动匹配 / 隐式触发选中技能（auto-selection）         | P2 后续（见 §13；届时叠加阈值 + 可解释理由日志）                                                                                                                       | 让系统自动猜该用哪条技能，本期先靠模型显式 `load_skill`。 |
+| 系统自动匹配 / 隐式触发选中技能（auto-selection）         | P2 后续（见 §11；届时叠加阈值 + 可解释理由日志）                                                                                                                       | 让系统自动猜该用哪条技能，本期先靠模型显式 `load_skill`。 |
 | 来源信任分级（source→trust 细分可见 / 自动性）           | P2 后续（参考 openclaw `SkillTrustLevel`）                                                                                                                | 把技能按来源分信任档，本期先用来源优先级，不做细分信任。        |
 | 海量技能语义检索（embedding / 远程检索）                | P2 后续 / P3（参考 GenericAgent `skill_search`）                                                                                                          | 上千条技能再上检索，先做静态清单。                   |
 | 可执行技能 / 技能注册自定义工具                         | `ext/plugin`（Wasm 插件，`[plugin-system-overview.md](./plugin-system-overview.md)`）                                                                    | 要跑代码的走插件，不在技能里塞可执行逻辑。               |
@@ -383,14 +618,14 @@ pub struct SkillFrontmatter {
 // 另：ALLOWED_SKILL_FRONTMATTER 白名单常量；解析缺 name/description → SkillParseError
 ```
 
-> **刻意不入 v1 类型**：来源信任分级 `SkillTrustLevel`、自动匹配 `SkillSelector` 为 **P2 后续**（见 §3.2 / §13）——v1 用 `SkillSource` 的来源优先级即可，不提前引入信任维度，避免类型与本期非目标自相矛盾。
+> **刻意不入 v1 类型**：来源信任分级 `SkillTrustLevel`、自动匹配 `SkillSelector` 为 **P2 后续**（见 §3.2 / §11）——v1 用 `SkillSource` 的来源优先级即可，不提前引入信任维度，避免类型与本期非目标自相矛盾。
 
 ### 5.1 SKILL.md frontmatter 字段
 
 
 | 字段                         | YAML 类型           | 必填    | 默认      | 适用场景                   | 说明                                                              | 说人话              |
 | -------------------------- | ----------------- | ----- | ------- | ---------------------- | --------------------------------------------------------------- | ---------------- |
-| `name`                     | string            | **是** | —       | 技能身份                   | `[a-z0-9-]+`，≤64 字；唯一性见 §8 去重；缺失 → 跳过 + diagnostic              | 技能的唯一名字。         |
+| `name`                     | string            | **是** | —       | 技能身份                   | `[a-z0-9-]+`，≤64 字；唯一性见文首导读 D 状态机（发现去重）；缺失 → 跳过 + diagnostic              | 技能的唯一名字。         |
 | `description`              | string            | **是** | —       | 进 `<available_skills>` | ≤1024 字（prompt 中再按 250 截断）；缺失 → 跳过 + diagnostic                 | 一句话说清这技能干嘛、何时用。  |
 | `license`                  | string            | 否     | null    | 元信息                    | 仅记录，不影响装载                                                       | 许可证，存着备查。        |
 | `compatibility`            | string            | 否     | null    | 元信息                    | 仅记录                                                             | 兼容性说明。           |
@@ -550,99 +785,7 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 
 **阅读顺序（说人话）**：配置 `SkillsConfig` 决定开不开、预算多大；启动时 `core/skill/discovery` 按 P0→P2 三层根扫出技能，`catalog` 去重建成 `SkillSet`；`system_prompt` 的 `AvailableSkillsSection` 把 `SkillSet` 的「名字+描述」按预算注入系统提示（不含正文，也不含路径）；模型要用时调 `load_skill`，`tool_exec` 经 `guard` 门控后到 `branches/load_skill`，按名解析、过 `gate` 读正文、包成 `<skill>` 回给模型；整条链上技能从不获得额外权限，正文里要做的事仍各自过 `permission/gate`。
 
-## 7. 调度时序（运行时图）
-
-### 7.1 启动期：后台发现 → 首轮 await → 注入
-
-```text
-run_loop      discovery task(后台)   skill::catalog      system_prompt        LLM
- │                  │                    │                  │                 │
- │ 装配 chat        │                    │                  │                 │
- │ tokio::spawn ───▶│ skill_roots()      │                  │                 │
- │ (存 JoinHandle)  │ walk SKILL.md(深度1)│                  │                 │
- │ ……并行其它初始化  │ frontmatter.parse  │                  │                 │
- │  (不阻塞)        │───────────────────▶│ merge(first-wins)│                 │
- │                  │                    │ → SkillSet       │                 │
- ▼ 用户首条消息 → 构造首轮 prompt        │                  │                 │
- │ await JoinHandle ────────────────────▶│ (未完成则阻塞一次)│                 │
- │◀──────────────── SkillSet ────────────│                  │                 │
- │ build_system_prompt_with_state(.., skills=SkillSet)      │                 │
- │─────────────────────────────────────────────────────────▶│ AvailableSkills │
- │                  │                    │  render_available_skills_block(budget)
- │                  │                    │                  │ <available_skills>
- │◀─────────────────────────────────────────────────────────│ system prompt   │
- │ system message（含技能元数据，无正文） ─────────────────────────────────────▶│
-```
-
-> 后续 `/skill reload`（聊天内）或配置变更 → 重跑发现任务、原子替换 `SkillSet`（OS 文件监听热重载列 P2）。
-
-### 7.2 工具调用期：按名装载
-
-```text
-LLM            tool_exec/mod          guard            branches/load_skill     permission/gate
- │                  │                   │                    │                     │
- │ load_skill(name) │                   │                    │                     │
- │─────────────────▶│ parse args        │                    │                     │
- │                  │ reviewer/verifier?│                    │                     │
- │                  │──────────────────▶│ whitelisted?       │                     │
- │                  │◀──────────────────│ no → is_error(拒)  │                     │
- │                  │ (allowed) ────────────────────────────▶│ SkillSet.resolve()  │
- │                  │                   │                    │ 未知/歧义/disabled  │
- │                  │                   │                    │   → Err 结构化       │
- │                  │                   │                    │ gate_check_path(Read)│
- │                  │                   │                    │────────────────────▶│ Allow/Deny
- │                  │                   │                    │◀────────────────────│
- │                  │                   │                    │ read SKILL.md        │
- │                  │                   │                    │ strip frontmatter    │
- │                  │◀───────────────────────────────────────│ <skill>..</skill>    │
- │◀─────────────────│ tool 消息文本（正文进上下文）            │                     │
-```
-
-**两条路径在 `tool_exec` 出口处归一**：无论装载成功（`<skill>` 文本）还是失败（错误描述），都按 tool 消息文本回灌 LLM；下游不区分技能来源（project / agent / managed）。
-
----
-
-## 8. 状态机（技能解析与发现去重）
-
-### 8.1 单条技能解析状态
-
-```text
-┌──────────┐ read+parse ┌──────────┐  name 唯一  ┌──────────┐
-│ on disk  │───────────▶│ parsed   │────────────▶│ admitted │
-│ SKILL.md │            └────┬─────┘             └──────────┘
-└──────────┘                 │
-     │ 缺 frontmatter /        │ 同名已存在(更高优先级)
-     │ 缺 name/description     ▼
-     ▼                   ┌──────────┐
-┌──────────┐            │ shadowed │ warnings += skill_shadowed:<name>
-│ rejected │            └──────────┘
-└──────────┘ diagnostics += {path, reason}
-```
-
-
-| 当前状态    | 事件                                   | 目标状态     | 副作用                                      | 说人话            |
-| ------- | ------------------------------------ | -------- | ---------------------------------------- | -------------- |
-| on disk | parse 成功 + name 未占用                  | admitted | 入 `SkillSet.by_name`                     | 解析通过、名字没被占就收下。 |
-| on disk | 缺 frontmatter / 缺 name 或 description | rejected | `diagnostics += {path,reason}`，**不阻断**其余 | 坏文件记一笔，跳过。     |
-| parsed  | 同名已被更高优先级占用                          | shadowed | `warnings += skill_shadowed`，丢弃低优先级      | 撞名输给优先级高的，记一笔。 |
-
-
-### 8.2 `load_skill` 调用结局
-
-
-| 当前状态                  | 事件                                  | 目标状态      | 副作用                                                   | 说人话           |
-| --------------------- | ----------------------------------- | --------- | ----------------------------------------------------- | ------------- |
-| 收到 `load_skill(name)` | reviewer/verifier 且未放开              | rejected  | `is_error`：`load_skill not available in this context` | 审查小弟默认不让用。    |
-| 已过 guard              | name 命中且非 disabled                  | loaded    | gate 读正文 → `<skill>` 文本                               | 找到、过安检、给正文。   |
-| 已过 guard              | name 未知                             | unknown   | `is_error`：列出可用技能名                                    | 没这技能，告诉它有哪些。  |
-| 已过 guard              | name 命中但 `disable_model_invocation` | forbidden | `is_error`：技能仅用户可用                                    | 这条不让模型点。      |
-| 已过 guard              | `file` 越出 `base_dir`                | denied    | `Err`（gate 或路径校验）                                     | 想读技能目录外的文件，拒。 |
-| 读正文阶段                 | gate Deny / IO 失败                   | failed    | `Err`（权限或 IO 描述）                                      | 读不了就如实报错；项目根未授权时也走这里。 |
-
-
----
-
-## 9. 配置与环境变量
+## 7. 配置与环境变量
 
 **总则**：`env > config > 默认`。
 
@@ -665,7 +808,7 @@ LLM            tool_exec/mod          guard            branches/load_skill     p
 > **技能不读 env override 正文**：与 `prompts/mod.rs` 同口径，`SKILL.md` 正文从磁盘读但不支持 env 注入；env 仅控制开关 / 预算 / 路径。
 > **能否「纯配置接入新技能」**：能——往当前 project 的 `.tomcat/skills/<name>/SKILL.md` 放一个文件即可，无需改码（与「新增工具要改 `catalog.rs`」不同）。这是技能相对内置工具的核心扩展性优势。
 
-## 10. 错误模型 / 截断 / 警告
+## 8. 错误模型 / 截断 / 警告
 
 ```text
                         技能子系统
@@ -697,11 +840,11 @@ LLM            tool_exec/mod          guard            branches/load_skill     p
 - `**load_skill` 未知/歧义/disabled** → `is_error=true` + 友好描述（列出可用技能名）。
 - `**load_skill` gate Deny / IO 失败 / `file` 越界** → `Err`（权限或路径描述）。
 
-`**tool_exec` 视角**：`Ok(<skill> 文本)` → tool 消息文本；`Err(_)` → tool 消息为错误描述（`is_error=true`）。§3 G1–G7 的「锁死它的测试」全部位于 §11。
+`**tool_exec` 视角**：`Ok(<skill> 文本)` → tool 消息文本；`Err(_)` → tool 消息为错误描述（`is_error=true`）。§3 G1–G7 的「锁死它的测试」全部位于 §9。
 
 ---
 
-## 11. 测试矩阵（验收）
+## 9. 测试矩阵（验收）
 
 **当前状态（2026-06-07）**：`PR-SK-A / D / P / T / C` 已在本分支落地并回写验收状态；仅 `PR-SK-B`（官方内置 skill 资产 + `tomcat init` 写入 Managed）保留 **PENDING（下期）**。
 
@@ -728,7 +871,7 @@ LLM            tool_exec/mod          guard            branches/load_skill     p
 
 ---
 
-## 12. 风险与应对
+## 10. 风险与应对
 
 
 | 风险                        | 影响                                | 应对（具体动作）                                                                                                                                                                                                                                             | 说人话                          |
@@ -744,7 +887,7 @@ LLM            tool_exec/mod          guard            branches/load_skill     p
 
 ---
 
-## 13. 历史决策 / 跨文档修订
+## 11. 历史决策 / 跨文档修订
 
 - ~~技能正文随元数据一起常驻 system prompt~~ → **否**：技能正文动辄上千字，常驻会爆上下文。**改渐进式披露**：仅 name+description 常驻，正文经 `load_skill` 按需装载（对齐 codex/openclaw/pi）。
 - ~~用裸 `read(<SKILL.md 绝对路径>)` 装载（codex/pi 路线）~~ → **否**：内嵌技能无磁盘路径、托管技能在 `agent_definition_dir` 可写集判定之外、project 本地技能路径又依赖当前 cwd，模型易猜错路径。**改专用 `load_skill(name)` 按名装载**，统一覆盖三类来源且可被 guard 门控。
