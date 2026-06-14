@@ -34,6 +34,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   checkpoint_cli_e2e
   openai_files_integration_tests
   resume_hydration_cli_e2e
+  quickjs_e2e_tests
   wasmedge_e2e_tests
   long_lived_vm_tests
   js_api_alignment_tests

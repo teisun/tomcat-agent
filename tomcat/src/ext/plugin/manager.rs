@@ -88,10 +88,10 @@ use super::types::parse_manifest;
 /// 插件管理器：加载/卸载/启用/禁用，卸载时调用 EventBus.remove_plugin_listeners、ToolRegistry.unregister_plugin_tools。
 pub struct PluginManager {
     event_bus: Arc<dyn EventBus>,
-    tools: Option<Arc<dyn ToolRegistry>>,
+    tools: RwLock<Option<Arc<dyn ToolRegistry>>>,
     plugins: RwLock<HashMap<String, PluginInstance>>,
     wasm_engine: Option<Arc<WasmEngine>>,
-    host_dispatcher: Option<Arc<HostApiDispatcher>>,
+    host_dispatcher: RwLock<Option<Arc<HostApiDispatcher>>>,
     confirm_permissions: Option<Arc<ConfirmPermissionsFn>>,
     audit: Option<Arc<dyn AuditRecorder>>,
     runtime_manager: Option<SharedRuntimeManager>,
@@ -102,10 +102,10 @@ impl PluginManager {
     pub fn new(event_bus: Arc<dyn EventBus>) -> Self {
         Self {
             event_bus,
-            tools: None,
+            tools: RwLock::new(None),
             plugins: RwLock::new(HashMap::new()),
             wasm_engine: None,
-            host_dispatcher: None,
+            host_dispatcher: RwLock::new(None),
             confirm_permissions: None,
             audit: None,
             runtime_manager: None,
@@ -114,8 +114,8 @@ impl PluginManager {
     }
 
     /// 注入 ToolRegistry（006 就绪后调用）；卸载时用于 unregister_plugin_tools。
-    pub fn set_tool_registry(&mut self, t: Arc<dyn ToolRegistry>) {
-        self.tools = Some(t);
+    pub fn set_tool_registry(&self, t: Arc<dyn ToolRegistry>) {
+        *self.tools.write() = Some(t);
     }
 
     /// 注入审计记录器；未设置时 load/enable/disable/unload 不写审计。
@@ -129,8 +129,8 @@ impl PluginManager {
     }
 
     /// 注入 HostApiDispatcher；未设置时 load_plugin 仍可执行，插件内 host 调用走桩响应。
-    pub fn set_host_dispatcher(&mut self, dispatcher: Arc<HostApiDispatcher>) {
-        self.host_dispatcher = Some(dispatcher);
+    pub fn set_host_dispatcher(&self, dispatcher: Arc<HostApiDispatcher>) {
+        *self.host_dispatcher.write() = Some(dispatcher);
     }
 
     /// 注入权限确认回调；未设置时 load_plugin 不调用确认、视为同意。
@@ -207,7 +207,7 @@ impl PluginManager {
         };
 
         let instance_id = manifest.id.clone();
-        let dispatcher_opt = self.host_dispatcher.clone();
+        let dispatcher_opt = self.host_dispatcher.read().clone();
         let invoke_fn = move |request_json: &str| {
             let resp =
                 invoke_host_func_with(dispatcher_opt.as_deref(), &instance_id, request_json)?;
@@ -543,7 +543,7 @@ impl PluginManager {
             rm.reap_idle(std::time::Duration::from_millis(DEFAULT_PLUGIN_IDLE_TTL_MS))
         {
             let _ = expired_handle.shutdown().await;
-            if let Some(ref dispatcher) = self.host_dispatcher {
+            if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                 dispatcher.cleanup_instance(&expired_key.to_string());
             }
         }
@@ -555,7 +555,7 @@ impl PluginManager {
                 }
                 VmActorState::ShuttingDown | VmActorState::Stopped | VmActorState::Error => {
                     let _ = rm.remove(&key);
-                    if let Some(ref dispatcher) = self.host_dispatcher {
+                    if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                         dispatcher.cleanup_instance(&key.to_string());
                     }
                 }
@@ -574,7 +574,7 @@ impl PluginManager {
         let instance_id = key.to_string();
         let mut wasm_instance = engine.create_instance(&instance_id)?;
 
-        let dispatcher_opt = self.host_dispatcher.clone();
+        let dispatcher_opt = self.host_dispatcher.read().clone();
         let iid = instance_id.clone();
         let invoke_fn = move |request_json: &str| {
             let resp = invoke_host_func_with(dispatcher_opt.as_deref(), &iid, request_json)?;
@@ -582,7 +582,7 @@ impl PluginManager {
         };
         wasm_instance.register_host_binding(invoke_fn)?;
 
-        if let Some(ref dispatcher) = self.host_dispatcher {
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             dispatcher.register_event_channel(&instance_id, self.event_channel_capacity);
         }
 
@@ -626,7 +626,7 @@ impl PluginManager {
                 match handle.current_state() {
                     VmActorState::Error | VmActorState::Stopped | VmActorState::ShuttingDown => {
                         let _ = rm.remove(&key);
-                        if let Some(ref dispatcher) = self.host_dispatcher {
+                        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                             dispatcher.cleanup_instance(&key.to_string());
                         }
                         return Err(AppError::Plugin(format!(
@@ -642,7 +642,8 @@ impl PluginManager {
 
         let dispatcher = self
             .host_dispatcher
-            .as_ref()
+            .read()
+            .clone()
             .ok_or_else(|| AppError::Plugin("host_dispatcher not set".into()))?;
 
         let instance_id = key.to_string();
@@ -679,7 +680,7 @@ impl PluginManager {
             t0.elapsed().as_millis()
         );
 
-        if let Some(ref dispatcher) = self.host_dispatcher {
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             let map = self.plugins.read();
             for pid in map.keys() {
                 let instance_id = format!("{session_id}/{pid}");
@@ -717,11 +718,19 @@ impl PluginManager {
         };
 
         self.event_bus.remove_plugin_listeners(plugin_id);
-        if let Some(ref t) = self.tools {
+        if let Some(t) = self.tools.read().clone() {
             t.unregister_plugin_tools(plugin_id);
         }
-        if let Some(ref dispatcher) = self.host_dispatcher {
+        if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             dispatcher.cleanup_plugin_capabilities(plugin_id);
+        }
+        if let Some(runtime_manager) = &self.runtime_manager {
+            let removed = runtime_manager.remove_plugin(plugin_id);
+            if let Some(dispatcher) = self.host_dispatcher.read().clone() {
+                for (key, _handle) in removed {
+                    dispatcher.cleanup_instance(&key.to_string());
+                }
+            }
         }
         if let Some(wasm) = instance.wasm_instance {
             wasm.destroy();
@@ -738,7 +747,7 @@ impl PluginManager {
     }
 
     fn sync_registered_capabilities(&self, plugin_id: &str) {
-        let Some(dispatcher) = &self.host_dispatcher else {
+        let Some(dispatcher) = self.host_dispatcher.read().clone() else {
             return;
         };
         let mut registered_tools = {

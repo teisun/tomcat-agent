@@ -3,6 +3,7 @@
 //! 全局 Engine、独立 VM 实例、宿主导入绑定骨架。
 //! 当前真实实现基于 `rquickjs`；历史 WasmEdge 文件保留作迁移参考。
 
+mod crypto_native;
 pub mod dispatcher;
 mod engine_rquickjs;
 #[allow(dead_code)]

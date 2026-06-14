@@ -379,19 +379,18 @@ impl ChatContext {
                 let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
                     continue;
                 };
-                if info.manifest.tools.is_empty()
-                    && info.manifest.activation == crate::ext::PluginActivation::Lazy
-                    && info.loaded_at == 0
-                {
+                if info.manifest.tools.is_empty() && info.loaded_at == 0 {
                     if let Err(err) = plugin_manager_ref.load_plugin(&info.plugin_root) {
                         warn!(
                             plugin = %plugin_id,
                             path = %info.plugin_root.display(),
                             error = %err,
-                            "scope activation failed to pre-register legacy lazy plugin"
+                            "scope activation failed to pre-register legacy dynamic plugin"
                         );
                     }
-                    continue;
+                    if info.manifest.activation == crate::ext::PluginActivation::Lazy {
+                        continue;
+                    }
                 }
                 if info.manifest.activation != crate::ext::PluginActivation::Session {
                     continue;
@@ -832,6 +831,12 @@ fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+type PluginRuntimeParts = (
+    Arc<dyn ToolRegistry>,
+    Option<Arc<PluginManager>>,
+    Arc<HostApiDispatcher>,
+);
+
 fn build_plugin_runtime(
     config: &AppConfig,
     agent_workspace_dir: &std::path::Path,
@@ -840,22 +845,20 @@ fn build_plugin_runtime(
     llm: Arc<dyn LlmProvider>,
     primitive: Arc<dyn PrimitiveExecutor>,
     session: Arc<SessionManager>,
-) -> Result<
-    (
-        Arc<dyn ToolRegistry>,
-        Option<Arc<PluginManager>>,
-        Arc<HostApiDispatcher>,
-    ),
-    AppError,
-> {
+) -> Result<PluginRuntimeParts, AppError> {
     let mut plugin_manager = Arc::new(PluginManager::new(event_bus.clone()));
-    if let Some(inner) = Arc::get_mut(&mut plugin_manager) {
-        inner.set_wasm_engine(WasmEngine::global(None)?);
-        let runtime_manager: SharedRuntimeManager = Arc::new(RuntimeManager::new());
-        inner.set_runtime_manager(runtime_manager);
-        inner.set_audit_recorder(audit.clone());
-        inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
-    }
+    let plugin_manager_strong_count = Arc::strong_count(&plugin_manager);
+    let inner = Arc::get_mut(&mut plugin_manager).ok_or_else(|| {
+        AppError::Plugin(format!(
+            "plugin_manager unexpectedly shared before runtime init (strong_count={})",
+            plugin_manager_strong_count
+        ))
+    })?;
+    inner.set_wasm_engine(WasmEngine::global(None)?);
+    let runtime_manager: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+    inner.set_runtime_manager(runtime_manager);
+    inner.set_audit_recorder(audit.clone());
+    inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
 
     let executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
@@ -869,11 +872,8 @@ fn build_plugin_runtime(
             .with_audit(audit),
     );
     executor.attach_dispatcher(Arc::downgrade(&dispatcher));
-
-    if let Some(inner) = Arc::get_mut(&mut plugin_manager) {
-        inner.set_tool_registry(tool_registry.clone());
-        inner.set_host_dispatcher(dispatcher.clone());
-    }
+    plugin_manager.set_tool_registry(tool_registry.clone());
+    plugin_manager.set_host_dispatcher(dispatcher.clone());
 
     let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
     for (plugin_id, entry) in catalog.iter() {

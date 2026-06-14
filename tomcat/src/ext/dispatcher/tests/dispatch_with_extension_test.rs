@@ -341,7 +341,7 @@ async fn dispatch_send_message_with_session_returns_ok() {
 }
 
 #[tokio::test]
-async fn dispatch_session_hostcalls_are_isolated_by_instance_session_id() {
+async fn session_scoped_hostcall_isolation() {
     let bus = Arc::new(DefaultEventBus::new());
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(SessionManager::new(dir.path().to_path_buf()));
@@ -413,6 +413,52 @@ async fn dispatch_session_hostcalls_are_isolated_by_instance_session_id() {
         .await
         .unwrap();
     assert!(send.ok);
+
+    let first_messages = d
+        .dispatch_async(
+            &format!("{}/demo-plugin", first.session_id),
+            HostRequest {
+                module: "session".to_string(),
+                method: "getMessages".to_string(),
+                params: serde_json::json!({ "cap": 10 }),
+                call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(first_messages.ok);
+    assert!(
+        first_messages
+            .data
+            .as_ref()
+            .and_then(|data| data.as_array())
+            .map(|messages| !messages.is_empty())
+            .unwrap_or(false),
+        "routed session should expose its own appended messages"
+    );
+
+    let second_messages = d
+        .dispatch_async(
+            &format!("{}/demo-plugin", second.session_id),
+            HostRequest {
+                module: "session".to_string(),
+                method: "getMessages".to_string(),
+                params: serde_json::json!({ "cap": 10 }),
+                call_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(second_messages.ok);
+    assert!(
+        second_messages
+            .data
+            .as_ref()
+            .and_then(|data| data.as_array())
+            .map(|messages| messages.is_empty())
+            .unwrap_or(false),
+        "neighbor session should not observe routed messages"
+    );
 
     let first_entries = mgr.get_entries_for_session(&first.session_id, 10).unwrap();
     let second_entries = mgr.get_entries_for_session(&second.session_id, 10).unwrap();

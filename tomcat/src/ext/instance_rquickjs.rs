@@ -6,20 +6,17 @@
 
 use crate::ext::HostRequest;
 use crate::infra::error::AppError;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine as _;
-use getrandom::fill as fill_random;
 use parking_lot::Mutex;
 use rquickjs::function::{Async, Func};
-use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function, Object};
-use sha2::{Digest, Sha256, Sha384, Sha512};
+use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function};
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
+use super::crypto_native::register_crypto_globals;
 use super::engine_stub::WasmEngineConfig;
 
 const PI_RUNTIME_PRELUDE: &str = include_str!("../../assets/js/pi_runtime_prelude.js");
@@ -236,12 +233,7 @@ impl WasmInstance {
         let heap_limit_bytes = self.config.quickjs_heap_mb as usize * 1024 * 1024;
         let guard = Arc::new(ExecutionGuardState::new(timeout, interrupt_budget));
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(AppError::Io)?;
-
-        runtime.block_on(async move {
+        run_with_local_runtime(move || async move {
             guard.reset();
             let js_runtime = AsyncRuntime::new().map_err(to_app_js_error)?;
             js_runtime.set_memory_limit(heap_limit_bytes).await;
@@ -409,64 +401,6 @@ fn install_host_globals<'js>(
     Ok(())
 }
 
-fn register_crypto_globals<'js>(globals: &Object<'js>) -> rquickjs::Result<()> {
-    globals.set(
-        "__pi_crypto_hash_native",
-        Func::from(
-            move |algo: String, data_base64: String| -> rquickjs::Result<String> {
-                let data = BASE64_STANDARD.decode(data_base64).map_err(|error| {
-                    js_runtime_error(format!("invalid base64 input for crypto hash: {error}"))
-                })?;
-                hash_bytes_hex(&algo, &data).map_err(js_runtime_error)
-            },
-        ),
-    )?;
-    globals.set(
-        "__pi_crypto_random_uuid_native",
-        Func::from(move || -> rquickjs::Result<String> { Ok(Uuid::new_v4().to_string()) }),
-    )?;
-    globals.set(
-        "__pi_crypto_random_bytes_native",
-        Func::from(move |size: u32| -> rquickjs::Result<String> {
-            let size = size as usize;
-            if size > 10 * 1024 * 1024 {
-                return Err(js_runtime_error(format!(
-                    "randomBytes size exceeds limit: {size}"
-                )));
-            }
-            let mut bytes = vec![0_u8; size];
-            fill_random(&mut bytes)
-                .map_err(|error| js_runtime_error(format!("fill random bytes failed: {error}")))?;
-            Ok(bytes_to_hex(&bytes))
-        }),
-    )?;
-    Ok(())
-}
-
-fn hash_bytes_hex(algo: &str, bytes: &[u8]) -> Result<String, String> {
-    let normalized = algo.trim().to_ascii_lowercase();
-    let digest = match normalized.as_str() {
-        "sha256" => Sha256::digest(bytes).to_vec(),
-        "sha384" => Sha384::digest(bytes).to_vec(),
-        "sha512" => Sha512::digest(bytes).to_vec(),
-        unsupported => {
-            return Err(format!(
-                "unsupported hash algorithm '{unsupported}', expected sha256/sha384/sha512"
-            ))
-        }
-    };
-    Ok(bytes_to_hex(&digest))
-}
-
-fn bytes_to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
-
 fn to_app_js_error(err: rquickjs::Error) -> AppError {
     AppError::QuickJS(err.to_string())
 }
@@ -489,6 +423,31 @@ fn temp_js_file(code: &str) -> Result<(PathBuf, tempfile::TempDir), AppError> {
     Ok((path, dir))
 }
 
+fn run_with_local_runtime<C, F, T>(build_future: C) -> Result<T, AppError>
+where
+    C: FnOnce() -> F + Send + 'static,
+    F: Future<Output = Result<T, AppError>> + 'static,
+    T: Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(AppError::Io)?;
+            runtime.block_on(build_future())
+        })
+        .join()
+        .map_err(|_| AppError::QuickJS("quickjs runtime worker panicked".to_string()))?;
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(AppError::Io)?;
+    runtime.block_on(build_future())
+}
+
 fn get_bridge_js_content() -> std::borrow::Cow<'static, str> {
     if let Ok(path) = std::env::var("PI_BRIDGE_JS_PATH") {
         match std::fs::read_to_string(&path) {
@@ -503,4 +462,118 @@ fn get_bridge_js_content() -> std::borrow::Cow<'static, str> {
         }
     }
     std::borrow::Cow::Borrowed(EMBEDDED_BRIDGE_JS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WasmEngineConfig, WasmInstance};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn run_script_file_reports_missing_path() {
+        let mut instance =
+            WasmInstance::new(WasmEngineConfig::default(), "missing-script".to_string())
+                .expect("create quickjs instance");
+        let missing = std::path::Path::new("/definitely/missing/plugin.js");
+        let err = instance
+            .run_script_file(missing)
+            .expect_err("missing script should fail");
+        assert!(
+            err.to_string().contains("script file not found"),
+            "missing script error should mention path resolution: {err}"
+        );
+    }
+
+    #[test]
+    fn build_combined_script_appends_main_loop_for_session_vm() {
+        let instance =
+            WasmInstance::new(WasmEngineConfig::default(), "combined-script".to_string())
+                .expect("create quickjs instance");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let script_path = dir.path().join("main.js");
+        std::fs::write(&script_path, "pi.log('ready');\n").expect("write user script");
+
+        let combined = instance
+            .build_combined_script(&script_path, true)
+            .expect("build combined script");
+        assert!(
+            combined.contains("// --- pi_main_loop.js ---"),
+            "session VM should inject main loop when plugin does not start it explicitly"
+        );
+        assert!(
+            combined.contains("__pi_start_event_loop"),
+            "combined script should include event loop bootstrap"
+        );
+    }
+
+    #[test]
+    fn run_script_reaches_registered_host_binding() {
+        let mut instance =
+            WasmInstance::new(WasmEngineConfig::default(), "host-binding".to_string())
+                .expect("create quickjs instance");
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&call_count);
+        instance
+            .register_host_binding(move |_request_json| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({ "ok": true, "data": null }).to_string())
+            })
+            .expect("register host binding");
+
+        instance
+            .run_script("pi.log('hello from inline test');")
+            .expect("run inline script");
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 1,
+            "pi.log should route through the host binding"
+        );
+    }
+
+    #[test]
+    fn heap_limit_rejects_large_allocation() {
+        let script = r#"
+globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
+"#;
+        let mut tight = WasmInstance::new(
+            WasmEngineConfig {
+                quickjs_heap_mb: 1,
+                call_timeout_ms: 1_000,
+                interrupt_budget: 1_000_000,
+                ..Default::default()
+            },
+            "heap-limit".to_string(),
+        )
+        .expect("create quickjs instance");
+
+        let err = tight
+            .run_script(script)
+            .expect_err("allocation above heap limit should fail");
+        let mut roomy = WasmInstance::new(
+            WasmEngineConfig {
+                quickjs_heap_mb: 8,
+                call_timeout_ms: 1_000,
+                interrupt_budget: 1_000_000,
+                ..Default::default()
+            },
+            "heap-roomy".to_string(),
+        )
+        .expect("create roomy quickjs instance");
+        roomy
+            .run_script(script)
+            .expect("same allocation should fit once heap budget is raised");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("QuickJS") || message.contains("JS执行错误"),
+            "heap guard should surface a QuickJS-side failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn destroy_consumes_instance_without_side_effects() {
+        let instance = WasmInstance::new(WasmEngineConfig::default(), "destroy".to_string())
+            .expect("create quickjs instance");
+        instance.destroy();
+    }
 }

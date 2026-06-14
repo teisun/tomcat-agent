@@ -54,7 +54,7 @@ pub(crate) use plugin_cmd::{
 #[command(
     name = CLI_NAME,
     about = "Tomcat Agent CLI — 插件化 AI Agent 运行时",
-    long_about = "tomcat 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
+    long_about = "tomcat 是基于 rquickjs 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
     version
 )]
 pub struct Cli {
@@ -66,7 +66,7 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化配置，引导 LLM 与安全策略，生成配置文件
     Init,
-    /// 检测运行环境、WasmEdge/QuickJS、配置合法性，输出修复建议
+    /// 检测运行环境、QuickJS 资源与配置合法性，输出修复建议
     Doctor,
     /// 配置管理：get/set/edit
     Config {

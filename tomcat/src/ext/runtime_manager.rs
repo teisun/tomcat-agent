@@ -116,6 +116,25 @@ impl RuntimeManager {
             .collect()
     }
 
+    /// 移除指定插件在所有 session 下的 VM actor，返回被移除的 key + handle。
+    pub fn remove_plugin(&self, plugin_id: &str) -> Vec<(VmRuntimeKey, VmActorHandle)> {
+        let keys_to_remove: Vec<VmRuntimeKey> = self
+            .handles
+            .iter()
+            .filter(|entry| entry.key().plugin_id == plugin_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        keys_to_remove
+            .into_iter()
+            .filter_map(|key| {
+                self.handles
+                    .remove(&key)
+                    .map(|(_, entry)| (key, entry.handle))
+            })
+            .collect()
+    }
+
     /// 回收空闲超过 TTL 的运行时实例。
     pub fn reap_idle(&self, ttl: Duration) -> Vec<(VmRuntimeKey, VmActorHandle)> {
         let now = now_ms();

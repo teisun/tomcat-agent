@@ -139,7 +139,7 @@ my_project/
 `audit_tests`、`event_tests`、`agent_loop_tests`、`bash_assignment_deny`、`system_prompt_cwd_priority`、`path_command_e2e`、`cwd_lazy_prompt_e2e`、`search_files_tests`、`session_tests`、`plugin_tests`、`llm_tests`、`openai_responses_integration_tests`、`context_management_tests`、`robustness_tests`、`read_tool_tests`、`web_search_tool_tests`、`web_fetch_tool_tests`。
 
 **必须串行组**（强制 `-j 1 --test-threads=1`；与 `TOMCAT_INTEGRATION_SERIAL_TESTS` 对齐）：
-`cli_tests`、`wasmedge_e2e_tests`、`long_lived_vm_tests`、`js_api_alignment_tests`、`hostcall_tests`、`primitives_tools_tests`、`tool_catalog_doc`。
+`cli_tests`、`quickjs_e2e_tests`、`wasmedge_e2e_tests`、`long_lived_vm_tests`、`js_api_alignment_tests`、`hostcall_tests`、`primitives_tools_tests`、`tool_catalog_doc`。
 
 **真实 Wasm 组**（与 `TOMCAT_WASMEDGE_TESTS` 对齐；默认 `integration` / `all` 不执行）：
 `wasmedge_e2e_tests`、`js_api_alignment_tests`。

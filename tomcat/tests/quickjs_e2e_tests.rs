@@ -1,12 +1,17 @@
 mod common;
 
+use async_trait::async_trait;
+use futures_util::stream;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tomcat::{
-    parse_manifest, DefaultEventBus, HostApiDispatcher, PluginInstance, PluginManager,
-    PluginStatus, RuntimeManager, SharedRuntimeManager, VmActorHandle, VmActorState, WasmEngine,
-    WasmEngineConfig,
+    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    DefaultEventBus, DirEntry, EditFileResult, EditOperation, HostApiDispatcher, LlmProvider,
+    PluginInstance, PluginManager, PluginStatus, PrimitiveExecutor, PrimitiveOperation,
+    RuntimeManager, SharedRuntimeManager, StreamEvent, VmActorHandle, VmActorState, WasmEngine,
+    WasmEngineConfig, WriteFileResult,
 };
 
 fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
@@ -60,6 +65,13 @@ fn make_manager() -> (PluginManager, SharedRuntimeManager) {
     let dispatcher = Arc::new(
         HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
     );
+    make_manager_with_dispatcher(bus, dispatcher)
+}
+
+fn make_manager_with_dispatcher(
+    bus: Arc<DefaultEventBus>,
+    dispatcher: Arc<HostApiDispatcher>,
+) -> (PluginManager, SharedRuntimeManager) {
     let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
     let engine = WasmEngine::global(Some(WasmEngineConfig {
         call_timeout_ms: 500,
@@ -74,6 +86,114 @@ fn make_manager() -> (PluginManager, SharedRuntimeManager) {
     manager.set_runtime_manager(rm.clone());
     manager.set_event_channel_capacity(16);
     (manager, rm)
+}
+
+struct MockPrimitive;
+
+#[async_trait]
+impl PrimitiveExecutor for MockPrimitive {
+    async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, tomcat::AppError> {
+        Ok("mock_content".to_string())
+    }
+
+    async fn list_dir(
+        &self,
+        _path: &str,
+        _plugin_id: &str,
+    ) -> Result<Vec<DirEntry>, tomcat::AppError> {
+        Ok(vec![])
+    }
+
+    async fn write_file(
+        &self,
+        path: &str,
+        _content: &str,
+        _overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<WriteFileResult, tomcat::AppError> {
+        Ok(WriteFileResult {
+            path: path.to_string(),
+            written: true,
+            bytes_written: 0,
+            diff_hint: None,
+        })
+    }
+
+    async fn edit_file(
+        &self,
+        path: &str,
+        _edits: Vec<EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, tomcat::AppError> {
+        Ok(EditFileResult {
+            path: path.to_string(),
+            applied: true,
+        })
+    }
+
+    async fn execute_bash(
+        &self,
+        _command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _argv: Option<&[String]>,
+        _timeout_ms: Option<u64>,
+    ) -> Result<BashResult, tomcat::AppError> {
+        Ok(BashResult {
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            ..Default::default()
+        })
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _op: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, tomcat::AppError> {
+        Ok(true)
+    }
+}
+
+struct MockLlm;
+
+#[async_trait]
+impl LlmProvider for MockLlm {
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, tomcat::AppError> {
+        Ok(ChatResponse {
+            id: Some("quickjs-e2e".to_string()),
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant("hi"),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, tomcat::AppError>> + Send + Unpin>,
+        tomcat::AppError,
+    > {
+        Ok(Box::new(stream::iter(vec![Ok(
+            StreamEvent::ContentDelta {
+                delta: "hi".to_string(),
+            },
+        )])))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, tomcat::AppError> {
+        Ok(0)
+    }
 }
 
 async fn wait_for_state(handle: &VmActorHandle, expected: VmActorState) -> bool {
@@ -113,6 +233,45 @@ fn quickjs_engine_runs_bridge_and_hostcall() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+#[test]
+fn run_script_console() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let engine = WasmEngine::global(None)?;
+    let mut instance = engine.create_instance("quickjs-console")?;
+    let logs = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&logs);
+
+    instance.register_host_binding(move |request_json: &str| {
+        let req: serde_json::Value = serde_json::from_str(request_json).unwrap();
+        if req.get("method").and_then(|m| m.as_str()) == Some("log") {
+            if let Some(message) = req
+                .get("params")
+                .and_then(|params| params.get("message"))
+                .and_then(|value| value.as_str())
+            {
+                sink.lock().unwrap().push(message.to_string());
+            }
+        }
+        Ok(serde_json::json!({"ok": true, "data": null}).to_string())
+    })?;
+
+    instance.run_script(
+        r#"
+console.log("hello", { value: 2 });
+console.error("boom");
+Promise.resolve().then(function () { console.warn("microtask-fired"); });
+setTimeout(function () { console.info("timer-fired"); }, 5);
+"#,
+    )?;
+
+    let logs = logs.lock().unwrap();
+    assert!(logs.iter().any(|line| line.contains("[log] hello")));
+    assert!(logs.iter().any(|line| line.contains("[error] boom")));
+    assert!(logs.iter().any(|line| line.contains("microtask-fired")));
+    assert!(logs.iter().any(|line| line.contains("timer-fired")));
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shims_and_crypto_work_in_session_vm() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
@@ -136,6 +295,12 @@ pi.on("session_start", function () {
   const digest = crypto.createHash("sha256").update("abc").digest("hex");
   if (digest !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
     throw new Error("crypto mismatch");
+  }
+  const mac = crypto.createHmac("sha256", "key")
+    .update("The quick brown fox jumps over the lazy dog")
+    .digest("hex");
+  if (mac !== "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8") {
+    throw new Error("hmac mismatch");
   }
   const bytes = crypto.randomBytes(8);
   if (!Buffer.isBuffer(bytes) || bytes.length !== 8) {
@@ -177,7 +342,65 @@ __pi_start_event_loop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn runaway_plugin_interrupted_and_rebuilt() -> Result<(), Box<dyn std::error::Error>> {
+async fn pi_readfile_llm() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let plugin_dir = create_plugin_dir(
+        "readfile-llm-plugin",
+        r#"
+pi.on("session_start", async function () {
+  const text = await pi.readFile("/tmp/demo.txt");
+  if (text !== "mock_content") {
+    throw new Error("readFile mismatch: " + text);
+  }
+  const reply = await pi.complete("say hi");
+  if (reply !== "hi") {
+    throw new Error("llm mismatch: " + reply);
+  }
+  console.log("readfile-llm-ok");
+});
+__pi_start_event_loop();
+"#,
+    );
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone())
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_primitive(Arc::new(MockPrimitive))
+            .with_llm(Arc::new(MockLlm)),
+    );
+    let (manager, rm) = make_manager_with_dispatcher(bus, dispatcher);
+    register_plugin(&manager, plugin_dir.path(), "readfile-llm-plugin");
+
+    let handle = manager
+        .start_session_vm("s1", "readfile-llm-plugin")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    manager.dispatch_session_event(
+        "s1",
+        "readfile-llm-plugin",
+        "session_start",
+        serde_json::json!({}),
+        serde_json::json!({}),
+    )?;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        matches!(
+            handle.current_state(),
+            VmActorState::Created | VmActorState::Running | VmActorState::Idle
+        ),
+        "readFile + llm hostcalls should keep the session VM healthy"
+    );
+
+    manager.end_session("s1").await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "end_session should clear RuntimeManager");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runaway_plugin_interrupted() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let runaway_dir = create_plugin_dir(
         "runaway-plugin",

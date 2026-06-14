@@ -39,7 +39,7 @@ fn parse_manifest_supports_static_tools_and_activation() {
 }
 
 #[test]
-fn catalog_discovers_three_tier_plugins_first_wins() {
+fn discover_three_tier_first_wins() {
     let work_dir = tempfile::tempdir().expect("create work dir");
     let project_dir = tempfile::tempdir().expect("create project dir");
 

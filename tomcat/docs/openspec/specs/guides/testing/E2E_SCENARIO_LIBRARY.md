@@ -5,10 +5,11 @@
 ## 用例编号规则
 
 
-| 前缀           | 含义                                             |
-| ------------ | ---------------------------------------------- |
-| E2E-CLI-NNN  | CLI 子进程 E2E 用例（`tests/cli_tests.rs`）           |
-| E2E-WASM-NNN | Wasm 运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`） |
+| 前缀           | 含义                                                         |
+| ------------ | ---------------------------------------------------------- |
+| E2E-CLI-NNN  | CLI 子进程 E2E 用例（`tests/cli_tests.rs`）                       |
+| E2E-QJS-NNN  | rquickjs 插件运行时 E2E 用例（`tests/quickjs_e2e_tests.rs`）         |
+| E2E-WASM-NNN | 历史 Wasm 兼容验收 / 可选验证（`tests/wasmedge_e2e_tests.rs`） |
 
 
 ---
@@ -19,7 +20,7 @@
 
 | 取值 | 含义 |
 | --- | --- |
-| 自动 | 以 `cargo test`（`cli_tests` / `wasmedge_e2e_tests`）通过为准即可。 |
+| 自动 | 以 `cargo test`（`cli_tests` / `quickjs_e2e_tests` / `wasmedge_e2e_tests`）通过为准即可。 |
 | 人工 | 建议在**真实终端、本机环境**下再执行等价操作，补验观感、确认流、路径与依赖；与 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) §4「人工验收」及跨平台（Windows/macOS/Linux）要求配合使用。 |
 
 **说明**：标为「人工」的用例**通常已有**自动化测试；该标记表示交付前仍建议人工过一遍，避免仅依赖子进程 E2E 的断言盲区。
@@ -39,10 +40,10 @@
 | E2E-CLI-003 | 自动 | `test_user_views_full_config`                | 用户查看当前全部配置                          | `tomcat config get`                     | exit 0；stdout 含配置段关键字                                              |
 | E2E-CLI-004 | 自动 | `test_workspace_add_list_remove_e2e`         | 用户授权工作区目录（add/list/remove，持久化 `tomcat.config.toml` `[workspace] workspace_roots`） | `tomcat init` → `tomcat workspace add <path>` → `tomcat workspace list` → `tomcat workspace remove`（`HOME` 隔离） | add/remove exit 0 且 stdout 含「已添加/已移除」；list 含路径；最终 list 提示无已授权工作区 |
 | E2E-CLI-005 | 自动 | `test_init_auto_adds_path_to_shell_profile` | init 将 PATH 写入隔离 `HOME` 下 shell 配置 | `tomcat init`（`HOME`+`SHELL=/bin/zsh`） | `$HOME/.zshrc` 含 `# Added by tomcat init` 与 `export PATH=` |
-| E2E-CLI-006 | 自动 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 WasmEdge/QuickJS 可用性 | `tomcat doctor`                         | exit 0；stdout 含 WasmEdge/配置/✓/内嵌资源/.env 检查项                       |
+| E2E-CLI-006 | 自动 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 QuickJS/rquickjs 环境 | `tomcat doctor`                         | exit 0；stdout 含 rquickjs/配置/✓/内嵌资源/.env 检查项                       |
 | E2E-CLI-007 | 自动 | `test_init_creates_env_file`                 | init 后配置文件包含 LLM 配置段并落到默认 provider 路径                | `tomcat init`                           | exit 0；config 文件存在且含 `[llm]`，并包含 `provider = "openai-responses"`、`default_model = "gpt-5.4"`、`api_key_env = "OPENAI_API_KEY"` |
 | E2E-CLI-008 | 自动 | `test_init_creates_env_with_correct_permissions` | init 后 .env 权限为 0600（Unix）       | `tomcat init` → 检查 .env 权限              | .env 存在时 mode=0600                                                 |
-| E2E-CLI-009 | 自动 | `test_doctor_reports_all_checks`             | doctor 输出含全部检查项                     | `tomcat init` → `tomcat doctor`             | exit 0；stdout 含 配置合法/内嵌资源/QuickJS wasm/WasmEdge                   |
+| E2E-CLI-009 | 自动 | `test_doctor_reports_all_checks`             | doctor 输出含全部检查项                     | `tomcat init` → `tomcat doctor`             | exit 0；stdout 含 配置合法/内嵌资源/QuickJS wasm/rquickjs                   |
 | E2E-CLI-010 | 自动 | `test_init_idempotent`                       | 连续两次 init，第二次以现有配置为基线继续运行 model-first 向导               | `tomcat init` × 2（同 `HOME`）           | 两次均 exit 0；第二次 stdout 含「已存在配置文件」或「已更新配置文件」 |
 | E2E-CLI-017 | 自动 | `test_workspace_add_cwd_e2e`                 | `tomcat workspace add --cwd` 添加当前目录           | `tomcat init` → `cd` 至临时目录 → `tomcat workspace add --cwd` → `tomcat workspace list` | add exit 0；list 含该目录绝对路径 |
 
@@ -111,17 +112,18 @@
 
 ---
 
-## Story 4 — Node.js 兼容层（Wasm E2E）（5 条）
+## Story 4 — rquickjs 插件运行时与兼容层（QuickJS E2E）（5 条）
 
-> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`、`tests/js_api_alignment_tests.rs`）。须 `--features wasmedge` 才编译/运行；默认 `./scripts/run-integration-tests.sh all` 跳过 Wasm 组（与 commit `f613708` 之后 no-wasm 默认编译路径一致），显式 Wasm 验收用 `./scripts/run-integration-tests.sh integration-wasm`。
+> 主验收入口为 `tests/quickjs_e2e_tests.rs`；对应架构实施点见 [plugin-system-overview_new.md](../../../../architecture/plugin-system-overview_new.md) 中 P2/P3/P4/P10。事件语义补充见 [plugin-system/events.md](../../../../architecture/plugin-system/events.md)。
+> 历史 Wasm 兼容验收仍保留在 `tests/wasmedge_e2e_tests.rs` / `tests/js_api_alignment_tests.rs`，且只在 `./scripts/run-integration-tests.sh integration-wasm` 中显式执行。
 
-| 编号           | 验收 | 用例名                                              | 用户意图                                           | 操作序列                                                  | 必须断言                                                           |
-| ------------ | -- | ------------------------------------------------ | ---------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
-| E2E-WASM-001 | 自动 | `test_wasmedge_e2e_hello_world_inline`           | 插件 JS 可执行内联脚本                                  | WasmEngine + `run_script("print('Hello World');")`    | Ok；无崩溃                                                         |
-| E2E-WASM-002 | 自动 | `test_wasmedge_e2e_hello_world_script_file`      | 插件 JS 可执行 .js 文件                               | `run_script_file(hello.js)`                           | Ok                                                             |
-| E2E-WASM-003 | 自动 | `test_wasmedge_e2e_bridge_layer`                 | 插件 JS 可通过 globalThis.pi 桥接调用全部 4 原语                      | `run_script_file(bridge_test.js)`                     | host_call 次数 ≥4（readFile/writeFile/editFile/executeBash 各 1 次） |
-| E2E-WASM-004 | 自动 | `test_wasmedge_e2e_require_path_modules_preopen` | `require('path')` 可用（WASI `./modules` preopen） | `run_script_file(require_path_test.js)`               | Ok；`path.join('a','b')` 不抛错                                    |
-| E2E-WASM-005 | 自动 | `test_wasmedge_e2e_tps_transpile_run_script_poc` | SWC 转译后 tps 示例插件可加载                         | `transpile_pi_plugin_for_quickjs` + `run_script_file` | Ok；不崩溃                                                         |
+| 编号          | 验收 | 用例名                                  | 用户意图                                   | 操作序列                                                                 | 必须断言                                                                 |
+| ----------- | -- | ------------------------------------ | -------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-QJS-001 | 自动 | `run_script_console`                 | 插件脚本可在 rquickjs 中使用 `console` / microtask / timer | `WasmEngine.create_instance()` → `run_script()` 执行 `console.log/error`、`Promise.resolve()`、`setTimeout()` | host binding 收到 `log/error/microtask/timer` 四类日志；脚本无崩溃 |
+| E2E-QJS-002 | 自动 | `pi_readfile_llm`                    | 插件通过 `pi.readFile()` 与 `pi.complete()` 走宿主 bridge | `start_session_vm` → `dispatch_session_event(session_start)`，脚本内 `await pi.readFile()` + `await pi.complete()` | VM 保持 `Running/Idle`；`readFile` 返回 mock 内容；LLM 返回 mock `"hi"` |
+| E2E-QJS-003 | 自动 | `shims_and_crypto_work_in_session_vm` | Tier-A 垫片与同步 crypto 在 session VM 内可用 | `start_session_vm` → `dispatch_session_event(session_start)`，脚本验证 `path/util/events/Buffer/crypto` | `sha256/hmac/randomBytes` 正常；VM 健康；`end_session` 后 RuntimeManager 为空 |
+| E2E-QJS-004 | 自动 | `runaway_plugin_interrupted`         | 插件跑飞后被 interrupt budget / timeout 掐断并可重建 | `start_session_vm` → `dispatch_session_event(loop)` 触发死循环 → 再次 `start_session_vm` | 首个 VM 进入 `Error`；再次启动返回新 handle 且可恢复 `Running/Idle` |
+| E2E-QJS-005 | 自动 | `panicking_plugin_isolated`          | 一个插件抛错后不连坐同 session 下其他插件         | 同 session 启动 crashy + healthy 两个插件 → 仅向 crashy 分发异常事件        | crashy 进入 `Error`；healthy 保持 `Running`；`end_session` 后 RuntimeManager 清空 |
 
 
 ---

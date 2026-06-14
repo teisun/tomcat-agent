@@ -225,7 +225,7 @@ pub(crate) fn run_doctor_checks(
         }
     }
 
-    // --- WasmEdge 运行时 ---
+    // --- rquickjs 运行时 ---
     let wasm_cfg = WasmEngineConfig {
         quickjs_path: resolved_qjs
             .as_ref()
@@ -234,15 +234,10 @@ pub(crate) fn run_doctor_checks(
         ..Default::default()
     };
     match WasmEngine::global(Some(wasm_cfg)) {
-        Ok(_) => println!("✓ WasmEdge 运行时：可用"),
+        Ok(_) => println!("✓ rquickjs 运行时：可用"),
         Err(e) => {
-            println!("✗ WasmEdge 运行时：不可用 ({})", e);
-            #[cfg(feature = "wasmedge")]
-            println!("  → 安装 WasmEdge: https://wasmedge.org/docs/start/install");
-            #[cfg(not(feature = "wasmedge"))]
-            println!(
-                "  → 当前构建未启用 Wasm/插件能力；如需扩展功能，请使用 `cargo build --features wasmedge` 或 `--features standalone` 重新编译"
-            );
+            println!("✗ rquickjs 运行时：初始化失败 ({})", e);
+            println!("  → 重新运行 tomcat init；若问题持续，请检查嵌入资源与本地构建产物");
         }
     }
 

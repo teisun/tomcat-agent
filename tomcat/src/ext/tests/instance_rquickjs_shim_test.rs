@@ -34,6 +34,13 @@ if (digest !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
   throw new Error("sha256 mismatch: " + digest);
 }
 
+const mac = crypto.createHmac("sha256", "key")
+  .update("The quick brown fox jumps over the lazy dog")
+  .digest("hex");
+if (mac !== "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8") {
+  throw new Error("hmac mismatch: " + mac);
+}
+
 const bytes = crypto.randomBytes(16);
 if (!Buffer.isBuffer(bytes) || bytes.length !== 16) {
   throw new Error("randomBytes failed");

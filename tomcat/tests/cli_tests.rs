@@ -1604,10 +1604,10 @@ fn test_user_views_full_config() {
     );
 }
 
-/// [E2E-CLI-006] 用户运行 doctor 检测 WasmEdge/QuickJS 可用性
+/// [E2E-CLI-006] 用户运行 doctor 检测 QuickJS/rquickjs 环境
 ///
 /// 用户意图：运行 doctor 检测环境
-/// 验证：exit 0；stdout 含环境检测项（WasmEdge/配置/✓）
+/// 验证：exit 0；stdout 含环境检测项（rquickjs/配置/✓）
 #[test]
 fn test_user_doctor_detects_environment() {
     common::setup_logging();
@@ -1618,11 +1618,11 @@ fn test_user_doctor_detects_environment() {
     let assert = cmd().args(["doctor"]).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert: exit 0 + stdout 含 WasmEdge / 配置 / 内嵌资源 / .env 检查项；actual: {}",
+        "Assert: exit 0 + stdout 含 rquickjs / 配置 / 内嵌资源 / .env 检查项；actual: {}",
         trunc(&out, 500)
     );
     assert.success().stdout(
-        predicate::str::contains("WasmEdge")
+        predicate::str::contains("rquickjs")
             .or(predicate::str::contains("配置"))
             .or(predicate::str::contains("✓"))
             .or(predicate::str::contains("内嵌资源"))
@@ -1705,7 +1705,7 @@ fn test_init_creates_env_with_correct_permissions() {
 
 /// [TASK-06] doctor 对完整环境报告所有检查项
 ///
-/// 验证：先 init 再 doctor，输出含 配置合法 / 内嵌资源 / QuickJS wasm / WasmEdge / 资源版本
+/// 验证：先 init 再 doctor，输出含 配置合法 / 内嵌资源 / QuickJS wasm / rquickjs / 资源版本
 #[test]
 fn test_doctor_reports_all_checks() {
     common::setup_logging();
@@ -1733,7 +1733,7 @@ fn test_doctor_reports_all_checks() {
         .stdout(predicate::str::contains("配置合法"))
         .stdout(predicate::str::contains("内嵌资源"))
         .stdout(predicate::str::contains("QuickJS wasm"))
-        .stdout(predicate::str::contains("WasmEdge"));
+        .stdout(predicate::str::contains("rquickjs"));
 }
 
 /// [E2E-CLI-010] init 幂等：第二次不覆盖配置并给出提示

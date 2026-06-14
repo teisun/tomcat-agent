@@ -37,6 +37,26 @@ fn plugin_tool_model_text(result: &serde_json::Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(result).unwrap_or_else(|_| String::from("{}")))
 }
 
+fn emit_interrupted_tool_events(agent: &mut AgentLoop, tc: &ToolCallInfo, args: serde_json::Value) {
+    agent.emit_extension_event(ExtensionEvent::ToolResult {
+        tool_name: tc.name.clone(),
+        tool_call_id: tc.id.clone(),
+        input: args,
+        content: vec![ContentBlock(
+            serde_json::json!({ "text": INTERRUPTED_TOOL_RESULT_TEXT }),
+        )],
+        details: None,
+        is_error: true,
+    });
+    agent.emit_event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.name.clone(),
+        result: ToolOutput(serde_json::json!(INTERRUPTED_TOOL_RESULT_TEXT)),
+        display: None,
+        is_error: true,
+    });
+}
+
 /// 逐个派工具执行、发事件、塞结果回 `messages`；返回 `(tool_results, steered)`。
 ///
 /// ## 参数语义（**严禁混淆**，混淆即 T-017 类 token 水位漂移的孪生 bug）
@@ -197,23 +217,30 @@ pub(super) async fn run_tool_calls(
         // push 一条 `ChatMessage::user_with_parts(parts)` 实现。
         let outcome = if let Some(registry) = agent.tool_registry.clone() {
             match registry.get_tool(tc.name.as_str()).await {
-                Ok(_) => match registry
-                    .call_tool(
+                Ok(_) => {
+                    let exec = registry.call_tool(
                         tc.name.as_str(),
                         args.clone(),
                         tool_exec::AGENT_PLUGIN_ID,
                         Some(agent.config.session_id.as_str()),
-                    )
-                    .await
-                {
-                    Ok(result) => tool_exec::ToolExecOutcome {
-                        model_text: plugin_tool_model_text(&result),
-                        is_error: false,
-                        follow_up_parts: Vec::new(),
-                        display: None,
-                    },
-                    Err(err) => tool_exec::ToolExecOutcome::err(err.to_string()),
-                },
+                    );
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            emit_interrupted_tool_events(agent, tc, args.clone());
+                            return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
+                        }
+                        result = exec => match result {
+                            Ok(result) => tool_exec::ToolExecOutcome {
+                                model_text: plugin_tool_model_text(&result),
+                                is_error: false,
+                                follow_up_parts: Vec::new(),
+                                display: None,
+                            },
+                            Err(err) => tool_exec::ToolExecOutcome::err(err.to_string()),
+                        },
+                    }
+                }
                 Err(AppError::Tool(_)) => {
                     let expose_skills_to_reviewer =
                         agent
@@ -246,13 +273,7 @@ pub(super) async fn run_tool_calls(
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
-                            agent.emit_event(AgentEvent::ToolExecutionEnd {
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                result: ToolOutput(serde_json::json!(INTERRUPTED_TOOL_RESULT_TEXT)),
-                                display: None,
-                                is_error: true,
-                            });
+                            emit_interrupted_tool_events(agent, tc, args.clone());
                             return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
                         }
                         out = exec => out,
@@ -293,13 +314,7 @@ pub(super) async fn run_tool_calls(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    agent.emit_event(AgentEvent::ToolExecutionEnd {
-                        tool_call_id: tc.id.clone(),
-                        tool_name: tc.name.clone(),
-                        result: ToolOutput(serde_json::json!(INTERRUPTED_TOOL_RESULT_TEXT)),
-                        display: None,
-                        is_error: true,
-                    });
+                    emit_interrupted_tool_events(agent, tc, args.clone());
                     return Err(agent.make_aborted(messages, partial_text_for_abort.to_string()));
                 }
                 out = exec => out,

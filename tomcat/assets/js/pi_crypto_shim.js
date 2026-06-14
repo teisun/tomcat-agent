@@ -30,6 +30,31 @@
     };
   }
 
+  function createHmac(algo, key) {
+    var chunks = [];
+    var normalizedAlgo = String(algo || 'sha256').toLowerCase();
+    var keyBytes = globalThis.Buffer.from(key);
+    return {
+      update: function (input, encoding) {
+        chunks.push(globalThis.Buffer.from(input, encoding));
+        return this;
+      },
+      digest: function (encoding) {
+        ensureNative('__pi_crypto_hmac_native');
+        var merged = globalThis.Buffer.concat(chunks);
+        var hex = globalThis.__pi_crypto_hmac_native(
+          normalizedAlgo,
+          keyBytes.toString('base64'),
+          merged.toString('base64')
+        );
+        if (typeof encoding === 'undefined') {
+          return globalThis.Buffer.from(hex, 'hex');
+        }
+        return globalThis.Buffer.from(hex, 'hex').toString(encoding);
+      }
+    };
+  }
+
   function randomBytes(size) {
     ensureNative('__pi_crypto_random_bytes_native');
     return globalThis.Buffer.from(
@@ -45,6 +70,7 @@
 
   var crypto = globalThis.crypto || {};
   crypto.createHash = createHash;
+  crypto.createHmac = createHmac;
   crypto.randomBytes = randomBytes;
   crypto.randomUUID = randomUUID;
   crypto["default"] = crypto;
