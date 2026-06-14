@@ -38,7 +38,7 @@ pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, transpile_pi_plugin_for_quickjs,
     transpile_typescript, EventEnvelope, HostApiDispatcher, HostRequest, HostResponse,
     PluginEngine, PluginEngineConfig, PluginInfo, PluginInstance, PluginManager, PluginManifest,
-    PluginRuntimeKey, PluginRuntimeManager, PluginStatus, PluginVmInstance,
+    PluginRuntimeKey, PluginRuntimeManager, PluginStatus, PluginToolExecutor, PluginVmInstance,
     SharedPluginRuntimeManager, VmActorHandle, VmActorState, VmCommand,
 };
 pub use infra::{

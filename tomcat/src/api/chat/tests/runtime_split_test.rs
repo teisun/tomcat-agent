@@ -337,7 +337,34 @@ fn write_plugin_fixture(
     tools: &[&str],
     script: &str,
 ) {
-    write_plugin_fixture_with_permissions(workspace, plugin_id, activation, tools, &[], script);
+    write_plugin_fixture_with_permissions_and_events(
+        workspace,
+        plugin_id,
+        activation,
+        tools,
+        &[],
+        &[],
+        script,
+    );
+}
+
+fn write_plugin_fixture_with_events(
+    workspace: &Path,
+    plugin_id: &str,
+    activation: &str,
+    tools: &[&str],
+    events: &[&str],
+    script: &str,
+) {
+    write_plugin_fixture_with_permissions_and_events(
+        workspace,
+        plugin_id,
+        activation,
+        tools,
+        &[],
+        events,
+        script,
+    );
 }
 
 fn write_plugin_fixture_with_permissions(
@@ -346,6 +373,26 @@ fn write_plugin_fixture_with_permissions(
     activation: &str,
     tools: &[&str],
     required_permissions: &[&str],
+    script: &str,
+) {
+    write_plugin_fixture_with_permissions_and_events(
+        workspace,
+        plugin_id,
+        activation,
+        tools,
+        required_permissions,
+        &[],
+        script,
+    );
+}
+
+fn write_plugin_fixture_with_permissions_and_events(
+    workspace: &Path,
+    plugin_id: &str,
+    activation: &str,
+    tools: &[&str],
+    required_permissions: &[&str],
+    events: &[&str],
     script: &str,
 ) {
     let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
@@ -377,7 +424,7 @@ fn write_plugin_fixture_with_permissions(
         "requiredApiVersion": "1.0",
         "tags": [],
         "tools": tool_defs,
-        "events": [],
+        "events": events,
         "activation": activation
     });
     fs::write(
@@ -1010,6 +1057,88 @@ pi.registerTool({
     assert!(
         has_vm_after,
         "first tool call should lazily create the plugin VM"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn session_activation_delivers_session_start_before_first_tool_call() {
+    const API_ENV: &str = "TOMCAT_SESSION_START_DELIVERY_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_plugin_fixture_with_events(
+        workspace.path(),
+        "session-start-probe-plugin",
+        "session",
+        &["session_probe"],
+        &["session_start"],
+        r#"
+let started = false;
+
+pi.on("session_start", function () {
+  started = true;
+});
+
+pi.registerTool({
+  name: "session_probe",
+  description: "session_start delivery probe",
+  parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+  execute: function (_callId, params) {
+    return { plugin: "session-start-probe-plugin", echo: params.text, started: started };
+  }
+});
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let session_id = current_session_id(&ctx);
+    let pm = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+    assert!(
+        pm.has_session_vm(&session_id, "session-start-probe-plugin"),
+        "activation=session plugin should be prestarted during scope activation"
+    );
+
+    let call_outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        ctx.global_services.tool_registry.call_tool(
+            "session_probe",
+            json!({ "text": "probe" }),
+            "__test__",
+            Some(&session_id),
+        ),
+    )
+    .await;
+    pm.end_session(&session_id)
+        .await
+        .expect("end session_start probe session");
+
+    let result = call_outcome
+        .expect("session-start probe tool call should not hang")
+        .expect("call session_start probe tool");
+    assert_eq!(
+        result
+            .get("content")
+            .and_then(|value| value.get("plugin"))
+            .and_then(|value| value.as_str()),
+        Some("session-start-probe-plugin")
+    );
+    assert_eq!(
+        result
+            .get("content")
+            .and_then(|value| value.get("started"))
+            .and_then(|value| value.as_bool()),
+        Some(true),
+        "session_start should flip module state before the first tool call observes it"
     );
 }
 

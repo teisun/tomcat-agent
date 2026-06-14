@@ -2,31 +2,45 @@ mod common;
 
 use async_trait::async_trait;
 use futures_util::stream;
+use serde_json::json;
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tomcat::{
-    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, HostApiDispatcher, LlmProvider,
-    PluginEngine, PluginEngineConfig, PluginInstance, PluginManager, PluginRuntimeManager,
-    PluginStatus, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent,
-    VmActorHandle, VmActorState, WriteFileResult,
+    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DefaultEventBus,
+    DefaultToolRegistry, DirEntry, EditFileResult, EditOperation, HostApiDispatcher, LlmProvider,
+    PluginEngine, PluginEngineConfig, PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus,
+    PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent, Tool,
+    ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
 };
 
 fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
+    create_plugin_dir_with_manifest(
+        json!({
+            "id": id,
+            "name": id,
+            "version": "0.1.0",
+            "description": "quickjs test plugin",
+            "author": "tests",
+            "main": "main.js",
+            "requiredPermissions": [],
+            "requiredApiVersion": "1.0",
+            "tags": [],
+            "tools": [],
+            "events": [],
+            "activation": "lazy"
+        }),
+        script,
+    )
+}
+
+fn create_plugin_dir_with_manifest(
+    manifest: serde_json::Value,
+    script: &str,
+) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("create temp plugin dir");
-    let manifest = serde_json::json!({
-        "id": id,
-        "name": id,
-        "version": "0.1.0",
-        "description": "quickjs test plugin",
-        "author": "tests",
-        "main": "main.js",
-        "requiredPermissions": [],
-        "requiredApiVersion": "1.0",
-        "tags": []
-    });
     std::fs::write(
         tmp.path().join("plugin.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -39,6 +53,11 @@ fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
 fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin_id: &str) {
     let manifest_json = std::fs::read_to_string(plugin_dir.join("plugin.json")).unwrap();
     let manifest = parse_manifest(&manifest_json).unwrap();
+    let manifest_tool_names = manifest
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -49,7 +68,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
             manifest,
             plugin_vm_instance: None,
             status: PluginStatus::Loaded,
-            registered_tools: vec![],
+            registered_tools: manifest_tool_names,
             registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::json!({}),
@@ -58,6 +77,59 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
             plugin_root: plugin_dir.to_path_buf(),
         })
         .unwrap();
+}
+
+fn make_tool(tool_name: &str, plugin_id: &str) -> Tool {
+    Tool {
+        name: tool_name.to_string(),
+        label: tool_name.to_string(),
+        description: format!("{plugin_id}::{tool_name}"),
+        parameters: json!({
+            "type": "object",
+            "properties": {},
+        }),
+        plugin_id: plugin_id.to_string(),
+        is_enabled: true,
+        created_at: 0,
+    }
+}
+
+fn make_tool_manager(
+    plugin_dir: &Path,
+) -> (
+    Arc<PluginToolExecutor>,
+    Arc<PluginManager>,
+    Arc<HostApiDispatcher>,
+    SharedPluginRuntimeManager,
+) {
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let mut manager = Arc::new(PluginManager::new(event_bus.clone()));
+    let runtime_manager: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
+
+    let inner = Arc::get_mut(&mut manager).expect("plugin manager should be uniquely owned");
+    inner.set_plugin_engine(PluginEngine::global(None).expect("create quickjs engine"));
+    inner.set_plugin_runtime_manager(runtime_manager.clone());
+    inner.set_audit_recorder(Arc::new(TracingAuditRecorder));
+
+    let executor = PluginToolExecutor::new(Arc::downgrade(&manager));
+    let registry_impl = Arc::new(DefaultToolRegistry::new(
+        executor.clone(),
+        Arc::new(TracingAuditRecorder),
+    ));
+    let registry: Arc<dyn ToolRegistry> = registry_impl.clone();
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(event_bus.clone())
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_tools(registry.clone()),
+    );
+    executor.attach_dispatcher(Arc::downgrade(&dispatcher));
+    manager.set_tool_registry(registry);
+    manager.set_host_dispatcher(dispatcher.clone());
+    manager
+        .load_plugin(plugin_dir)
+        .expect("load real plugin fixture");
+
+    (executor, manager, dispatcher, runtime_manager)
 }
 
 fn make_manager() -> (PluginManager, SharedPluginRuntimeManager) {
@@ -225,6 +297,19 @@ async fn wait_for_state(handle: &VmActorHandle, expected: VmActorState) -> bool 
             return false;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_counter(counter: &AtomicU32, expected: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if counter.load(Ordering::SeqCst) >= expected {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -432,6 +517,257 @@ __pi_start_event_loop();
         ),
         "readFile + llm hostcalls should keep the session VM healthy"
     );
+
+    manager.end_session("s1").await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "end_session should clear RuntimeManager");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pure_tool_plugin_executes_via_real_tool_harness(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let plugin_dir = create_plugin_dir_with_manifest(
+        json!({
+            "id": "pure-tool-plugin",
+            "name": "pure-tool-plugin",
+            "version": "0.1.0",
+            "description": "pure tool fixture",
+            "author": "tests",
+            "main": "main.js",
+            "requiredPermissions": [],
+            "requiredApiVersion": "1.0",
+            "tags": [],
+            "tools": [{
+                "name": "plugin_add",
+                "description": "add two numbers",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "a": { "type": "number" },
+                        "b": { "type": "number" }
+                    },
+                    "required": ["a", "b"]
+                }
+            }],
+            "events": [],
+            "activation": "lazy"
+        }),
+        r#"
+pi.registerTool({
+  name: "plugin_add",
+  description: "add two numbers",
+  parameters: {
+    type: "object",
+    properties: {
+      a: { type: "number" },
+      b: { type: "number" }
+    },
+    required: ["a", "b"]
+  },
+  execute: function (_callId, params) {
+    return params.a + params.b;
+  }
+});
+"#,
+    );
+
+    let (executor, manager, dispatcher, rm) = make_tool_manager(plugin_dir.path());
+    let info = manager
+        .get_plugin("pure-tool-plugin")
+        .expect("pure tool plugin info");
+    assert!(
+        info.registered_tools.iter().any(|tool| tool == "plugin_add"),
+        "manifest-declared tool should be visible after loading"
+    );
+    assert!(
+        !manager.has_session_vm("s1", "pure-tool-plugin"),
+        "lazy pure-tool plugin should not prestart a session VM"
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        executor.execute(
+            &make_tool("plugin_add", "pure-tool-plugin"),
+            json!({ "a": 2, "b": 3 }),
+            "__test__",
+            Some("s1"),
+        ),
+    )
+    .await?
+    .expect("execute pure tool");
+
+    assert_eq!(result, json!(5));
+    assert!(
+        dispatcher.command_completed_count() >= 1,
+        "commandCompleted should be emitted for successful tool execution"
+    );
+
+    manager.end_session("s1").await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "end_session should clear RuntimeManager");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_vm_preserves_state_across_custom_events(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let plugin_dir = create_plugin_dir_with_manifest(
+        json!({
+            "id": "phase-session-plugin",
+            "name": "phase-session-plugin",
+            "version": "0.1.0",
+            "description": "session lifecycle fixture",
+            "author": "tests",
+            "main": "main.js",
+            "requiredPermissions": [],
+            "requiredApiVersion": "1.0",
+            "tags": [],
+            "tools": [],
+            "events": ["phase_a", "phase_b"],
+            "activation": "session"
+        }),
+        r#"
+let seen = 0;
+pi.on("phase_a", function (_data, ctx) {
+  seen += 1;
+  ctx.ui.notify("phase_a", "info");
+});
+pi.on("phase_b", function (_data, ctx) {
+  if (seen !== 1) {
+    throw new Error("state not preserved before phase_b: " + seen);
+  }
+  seen += 1;
+  ctx.ui.notify("phase_b", "info");
+});
+__pi_start_event_loop();
+"#,
+    );
+
+    let notify_count = Arc::new(AtomicU32::new(0));
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone())
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_ui_notify_counter(notify_count.clone()),
+    );
+    let (manager, rm) = make_manager_with_dispatcher(bus, dispatcher);
+    register_plugin(&manager, plugin_dir.path(), "phase-session-plugin");
+
+    let handle = manager
+        .start_session_vm("s1", "phase-session-plugin")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    manager.dispatch_session_event(
+        "s1",
+        "phase-session-plugin",
+        "phase_a",
+        json!({}),
+        json!({ "sessionId": "s1" }),
+    )?;
+    manager.dispatch_session_event(
+        "s1",
+        "phase-session-plugin",
+        "phase_b",
+        json!({}),
+        json!({ "sessionId": "s1" }),
+    )?;
+
+    assert!(
+        wait_for_counter(notify_count.as_ref(), 2).await,
+        "both lifecycle events should be processed by the same long-lived VM"
+    );
+    assert!(
+        matches!(
+            handle.current_state(),
+            VmActorState::Running | VmActorState::Idle
+        ),
+        "session VM should remain healthy after multiple custom events"
+    );
+
+    manager.end_session("s1").await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "end_session should clear RuntimeManager");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_toolbox_plugin_discovers_dynamic_tools_and_executes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let plugin_dir = create_plugin_dir(
+        "legacy-toolbox-plugin",
+        r#"
+pi.registerTool({
+  name: "plugin_upper",
+  description: "uppercase text",
+  parameters: {
+    type: "object",
+    properties: {
+      text: { type: "string" }
+    },
+    required: ["text"]
+  },
+  execute: function (_callId, params) {
+    return params.text.toUpperCase();
+  }
+});
+
+pi.registerTool({
+  name: "plugin_len",
+  description: "text length",
+  parameters: {
+    type: "object",
+    properties: {
+      text: { type: "string" }
+    },
+    required: ["text"]
+  },
+  execute: function (_callId, params) {
+    return params.text.length;
+  }
+});
+"#,
+    );
+
+    let (executor, manager, dispatcher, rm) = make_tool_manager(plugin_dir.path());
+    let info = manager
+        .get_plugin("legacy-toolbox-plugin")
+        .expect("legacy toolbox plugin info");
+    let mut dynamic_tools = dispatcher.registered_plugin_tools("legacy-toolbox-plugin");
+    dynamic_tools.sort();
+
+    assert!(
+        info.manifest.tools.is_empty(),
+        "legacy toolbox fixture should not declare static tools[]"
+    );
+    assert_eq!(
+        dynamic_tools,
+        vec!["plugin_len".to_string(), "plugin_upper".to_string()],
+        "runtime registration should discover both dynamic tools"
+    );
+    let mut registered_tools = info.registered_tools.clone();
+    registered_tools.sort();
+    assert_eq!(
+        registered_tools, dynamic_tools,
+        "get_plugin should surface the dynamically discovered tool set"
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        executor.execute(
+            &make_tool("plugin_upper", "legacy-toolbox-plugin"),
+            json!({ "text": "hi" }),
+            "__test__",
+            Some("s1"),
+        ),
+    )
+    .await?
+    .expect("execute legacy toolbox tool");
+
+    assert_eq!(result, json!("HI"));
 
     manager.end_session("s1").await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
