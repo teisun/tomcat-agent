@@ -1,6 +1,8 @@
 //! Tests for `commands::parse` — slash-command recognition contract.
 
-use super::super::{parse_chat_command, ChatCommand, PlanCommand, SkillCommand};
+use super::super::{
+    parse_chat_command, ChatCommand, InstallCommand, InstallTarget, PlanCommand, SkillCommand,
+};
 
 fn assert_not_command(input: &str) {
     assert!(matches!(
@@ -136,4 +138,33 @@ fn skill_use_list_reload_parsed() {
             intent: "ship release".to_string(),
         })
     );
+}
+
+#[test]
+fn install_command_parses_explicit_target_and_default_prompt_mode() {
+    assert_eq!(
+        parse_chat_command("/install ./fixtures/plugin"),
+        ChatCommand::Install(InstallCommand {
+            source: "./fixtures/plugin".to_string(),
+            target: None,
+        })
+    );
+    assert_eq!(
+        parse_chat_command("/install ./fixtures/plugin current-project"),
+        ChatCommand::Install(InstallCommand {
+            source: "./fixtures/plugin".to_string(),
+            target: Some(InstallTarget::CurrentProject),
+        })
+    );
+    assert_eq!(
+        parse_chat_command("/install ./fixtures/plugin agent"),
+        ChatCommand::Install(InstallCommand {
+            source: "./fixtures/plugin".to_string(),
+            target: Some(InstallTarget::Agent),
+        })
+    );
+    assert!(matches!(
+        parse_chat_command("/install ./fixtures/plugin unknown"),
+        ChatCommand::UsageError { .. }
+    ));
 }

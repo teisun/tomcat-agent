@@ -111,6 +111,20 @@
 
 ---
 
+## Story 3b — PackageManager 统一安装（4 条）
+
+> 主验收入口为 `tests/cli_tests.rs`。027–030 覆盖 shell CLI 的 install / packages / uninstall 黑盒路径；真实 TTY chooser/cancel/shadow warning 与 code/claw 会话内 `/install` live refresh 观感仍需按人工清单补验。
+
+| 编号          | 验收 | 用例名                                                | 用户意图                                            | 操作序列                                                                 | 必须断言                                                                 |
+| ----------- | -- | -------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-CLI-027 | 自动 | `test_user_installs_scope_package_and_lists_layered_packages` | 用户把 package 安装到当前项目，并确认三层 package 视图可见 | `tomcat install <package_dir> --scope-root <project>`（非交互默认 scope）→ `tomcat packages --scope-root <project>` | install exit 0；scope 层 `plugins/`、`skills/`、`packages/registry.json`、`plugins/registry.json` 均落盘；packages 输出含 `scope/agent/global` 三层与资源摘要 |
+| E2E-CLI-028 | 自动 | `test_user_installs_bare_plugin_to_agent_layer`     | 用户把 bare plugin 安装到 agent 私有层                  | `tomcat install <plugin_dir> --visibility agent --scope-root <project>` → `tomcat packages --visibility agent --scope-root <project>` | install exit 0；agent 层 package/plugin registry 写入成功；packages 输出含 `[barePlugin]` 与 `plugin:<id>` |
+| E2E-CLI-029 | 自动 | `test_user_installs_bare_skill_to_global_layer`     | 用户把 bare skill 安装到全局共享层                        | `tomcat install <skill_dir> --visibility global --scope-root <project>` → `tomcat packages --visibility global --scope-root <project>` | install exit 0；global 层 `skills/` 与 `packages/registry.json` 落盘；packages 输出含 `[bareSkill]` 与 `skill:<name>` |
+| E2E-CLI-030 | 自动 | `test_user_uninstalls_scope_package_and_cleans_scope_layer` | 用户卸载 scope package 后，资源与账本被精准清理               | 先 `tomcat install <package_dir> --visibility scope --scope-root <project>` → 再 `tomcat uninstall <package_name> --visibility scope --scope-root <project>` → `tomcat packages --visibility scope --scope-root <project>` | uninstall exit 0；scope 层 plugin/skill 目录消失；`packages/registry.json` 与 `plugins/registry.json` 清空；packages 回到 `(none)` |
+
+
+---
+
 ## Story 4 — rquickjs 插件运行时与兼容层（5 条）
 
 > 主验收入口为 `tests/quickjs_e2e_tests.rs` 与 `tests/long_lived_vm_tests.rs`；对应架构实施点见 [plugin-system-overview_new.md](../../../../architecture/plugin-system-overview_new.md) 中 P2/P3/P4/P10。事件语义补充见 [plugin-system/events.md](../../../../architecture/plugin-system/events.md)。

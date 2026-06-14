@@ -95,7 +95,10 @@ fn plugin_engine_defaults_match_app_config_defaults() {
         crate::ext::DEFAULT_PLUGIN_INTERRUPT_BUDGET,
         cfg.plugin.interrupt_budget
     );
-    assert_eq!(crate::ext::DEFAULT_PLUGIN_IDLE_TTL_MS, cfg.plugin.idle_ttl_ms);
+    assert_eq!(
+        crate::ext::DEFAULT_PLUGIN_IDLE_TTL_MS,
+        cfg.plugin.idle_ttl_ms
+    );
 }
 
 #[test]

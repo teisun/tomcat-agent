@@ -2,6 +2,7 @@
 
 mod cmd_ckpt;
 mod cmd_help;
+mod cmd_install;
 mod cmd_model;
 mod cmd_path;
 mod cmd_plan;
@@ -10,6 +11,7 @@ mod cmd_skill;
 mod cmd_thinking;
 mod parse;
 
+pub use cmd_install::{InstallCommand, InstallTarget};
 pub use cmd_plan::PlanCommand;
 
 #[cfg(test)]

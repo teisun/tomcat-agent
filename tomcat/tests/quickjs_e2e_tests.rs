@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tomcat::{
-    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DefaultEventBus,
-    DefaultToolRegistry, DirEntry, EditFileResult, EditOperation, HostApiDispatcher, LlmProvider,
-    PluginEngine, PluginEngineConfig, PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus,
-    PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent, Tool,
-    ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
+    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult, EditOperation,
+    HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig, PluginInstance,
+    PluginManager, PluginRuntimeManager, PluginStatus, PluginToolExecutor, PrimitiveExecutor,
+    PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
+    TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
 };
 
 fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
@@ -36,10 +37,7 @@ fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
     )
 }
 
-fn create_plugin_dir_with_manifest(
-    manifest: serde_json::Value,
-    script: &str,
-) -> tempfile::TempDir {
+fn create_plugin_dir_with_manifest(manifest: serde_json::Value, script: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("create temp plugin dir");
     std::fs::write(
         tmp.path().join("plugin.json"),
@@ -525,8 +523,8 @@ __pi_start_event_loop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pure_tool_plugin_executes_via_real_tool_harness(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn pure_tool_plugin_executes_via_real_tool_harness() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let plugin_dir = create_plugin_dir_with_manifest(
         json!({
@@ -578,7 +576,9 @@ pi.registerTool({
         .get_plugin("pure-tool-plugin")
         .expect("pure tool plugin info");
     assert!(
-        info.registered_tools.iter().any(|tool| tool == "plugin_add"),
+        info.registered_tools
+            .iter()
+            .any(|tool| tool == "plugin_add"),
         "manifest-declared tool should be visible after loading"
     );
     assert!(
@@ -611,8 +611,8 @@ pi.registerTool({
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_vm_preserves_state_across_custom_events(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn session_vm_preserves_state_across_custom_events() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     let plugin_dir = create_plugin_dir_with_manifest(
         json!({

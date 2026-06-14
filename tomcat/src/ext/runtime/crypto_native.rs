@@ -461,9 +461,7 @@ mod tests {
 
     #[test]
     fn aes256_gcm_known_answer_roundtrip() {
-        let key = decode_hex(
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        );
+        let key = decode_hex("0000000000000000000000000000000000000000000000000000000000000000");
         let iv = decode_hex("000000000000000000000000");
         let plaintext = decode_hex("00000000000000000000000000000000");
         let sealed = aes_gcm_encrypt(&key, &iv, &plaintext, b"").expect("aes-256-gcm encrypt kat");
@@ -538,8 +536,16 @@ mod tests {
     fn ed25519_generate_keypair_without_seed_succeeds() {
         let (public_key, secret_key) =
             ed25519_generate_keypair(None).expect("generate random ed25519 keypair");
-        assert_eq!(public_key.len(), 32, "ed25519 public key should be 32 bytes");
-        assert_eq!(secret_key.len(), 32, "ed25519 secret key should be 32 bytes");
+        assert_eq!(
+            public_key.len(),
+            32,
+            "ed25519 public key should be 32 bytes"
+        );
+        assert_eq!(
+            secret_key.len(),
+            32,
+            "ed25519 secret key should be 32 bytes"
+        );
 
         let signature = ed25519_sign(&secret_key, b"plugin-signature").expect("sign test payload");
         assert!(

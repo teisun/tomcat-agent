@@ -14,6 +14,8 @@
 
 **说人话**：以前是「带一份 JS wasm 剧本 + 租 WasmEdge 放映机 + 背一整套 npm 道具库」。新版把 **QuickJS 焊进 tomcat 自己肚子里**，插件直接在里面跑；要读盘/上网就敲 `pi.`* 小窗口（宿主记账、可拒绝）；只随身带几样最常用的小工具，不再背 pi-mono 和 npm 那一大箱道具。
 
+> **安装入口补充（T2-P1-017 PackageManager）**：plugin 的 runtime 发现链路仍是 `project(.tomcat/plugins) > agent(agents/<id>/plugins) > global(work_dir/plugins)`，但安装/卸载/列包已经统一收口到 `PackageManager`：shell 走 `tomcat install` / `tomcat uninstall` / `tomcat packages`，会话内走 `/install`。安装成功后只会写三层 `plugins/` 正文目录与 per-layer `plugins/registry.json` / `packages/registry.json`；当前 code/claw 会话若通过 `/install` 安装，则只刷新 plugin catalog stub 与静态 `manifest.tools` 可见集，**不会**在 install 路径调用 `load_plugin()`、不会启动 session VM，也不会热替换已加载实例。
+
 ---
 
 ## 文首导读：方案导图集

@@ -88,7 +88,12 @@ fn real_executor_harness(
 async fn plugin_tool_executor_requires_session_id() {
     let executor = PluginToolExecutor::new(std::sync::Weak::new());
     let err = executor
-        .execute(&make_tool("plugin_echo", "plugin-a"), json!({}), "__test__", None)
+        .execute(
+            &make_tool("plugin_echo", "plugin-a"),
+            json!({}),
+            "__test__",
+            None,
+        )
         .await
         .expect_err("missing session_id should fail before any runtime access");
     assert!(

@@ -264,15 +264,12 @@ pub(crate) fn run_doctor_checks(
     Ok(())
 }
 
-pub(crate) fn doctor_plugin_runtime_lines(
-    probe: Result<(), AppError>,
-) -> Vec<String> {
+pub(crate) fn doctor_plugin_runtime_lines(probe: Result<(), AppError>) -> Vec<String> {
     match probe {
         Ok(()) => vec!["✓ rquickjs 运行时：可用".to_string()],
         Err(e) => vec![
             format!("✗ rquickjs 运行时：初始化失败 ({})", e),
-            "  → 重新运行 tomcat init；若问题持续，请检查嵌入资源与本地构建产物"
-                .to_string(),
+            "  → 重新运行 tomcat init；若问题持续，请检查嵌入资源与本地构建产物".to_string(),
         ],
     }
 }
@@ -290,10 +287,7 @@ pub(crate) fn run_doctor() -> Result<(), AppError> {
         Ok(cfg) => cfg,
         Err(e) => {
             println!("✗ 配置加载失败: {}", e);
-            println!(
-                "  → 运行 tomcat init 重新生成或手动修复 {}",
-                path.display()
-            );
+            println!("  → 运行 tomcat init 重新生成或手动修复 {}", path.display());
             return Ok(());
         }
     };

@@ -443,6 +443,60 @@ tomcat workspace remove /path/to/project
 # 已移除工作区: /path/to/project
 ```
 
+### PackageManager 安装
+
+从 T2-P1-017 开始，plugin / skill 的**正式安装入口**统一为 `PackageManager`。它只做本地 source 的静态校验、三层落盘和账本维护；真正的 runtime 发现仍然复用现有的 `plugins/` / `skills/` 三层扫描。
+
+支持的 source 形态：
+
+- `package.json` 顶层带 `tomcat` 块的 package 目录。
+- bare plugin：带 `plugin.json` 的目录。
+- bare skill：带 `SKILL.md` 的目录。
+
+三层可见范围：
+
+- `scope`：当前项目，落到 `<scope_root>/.tomcat/{plugins,skills,packages}`。
+- `agent`：当前 agent，落到 `~/.tomcat/agents/<id>/{plugins,skills,packages}`。
+- `global`：全局共享层，落到 `~/.tomcat/{plugins,skills,packages}`。
+
+shell CLI：
+
+```bash
+# 安装到当前项目（非交互 shell 缺省即 scope；交互式 TTY 未传时会弹 chooser）
+tomcat install ./my-package --visibility scope
+
+# 安装到 agent / global
+tomcat install ./my-plugin --visibility agent
+tomcat install ./my-skill --visibility global
+
+# 显式指定 scope 根
+tomcat install ./my-package --visibility scope --scope-root /path/to/project
+
+# 同层已有同名资源时允许覆盖
+tomcat install ./my-package --visibility scope --force
+
+# 查看已安装 package 账本（缺省列出当前 scope + agent + global）
+tomcat packages
+tomcat packages --visibility agent
+
+# 按 package 名称卸载某层资源与账本
+tomcat uninstall my-package --visibility scope
+```
+
+对话内安装：
+
+```text
+/install ./my-package
+/install ./my-plugin agent
+/install ./my-skill current-project
+```
+
+说明：
+
+- `/install` 里的 `current-project` 只是用户标签，内部映射到 `scope`。
+- code/claw 会话里 `/install` 成功后，当前会话会立即刷新 `SkillSet` 与 plugin catalog/static tool 清单，因此新装的 skill / 静态 plugin 能力无需重进会话即可可见。
+- 这个 live refresh **不会**在安装路径执行插件代码，也**不会**热替换已经加载的 plugin 实例；若当前会话里某个 plugin 已在跑，它会继续沿用旧实例，直到后续正常 runtime 路径重新激活。
+
 ---
 
 ## 6. 对话模式
@@ -828,6 +882,6 @@ tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
 
-注册信息会写入 `{work_dir}/plugins/registry.json`。`tomcat plugin load` 会执行一次短生命周期初始化校验；真正的长生命周期 session VM 则在会话里首次用到该插件时按需创建。
+`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。真正的长生命周期 session VM 仍只会在会话里首次用到该插件时按需创建。
 
 实现细节见 [src/ext/README.md](../src/ext/README.md)。

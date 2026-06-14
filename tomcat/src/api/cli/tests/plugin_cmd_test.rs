@@ -10,6 +10,29 @@
 use super::super::*;
 use super::mocks::test_config;
 
+struct CurrentDirGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: std::path::PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let lock = crate::test_support::cwd_lock().lock().unwrap();
+        let previous = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(path).expect("set_current_dir");
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
 #[test]
 fn plugin_registry_load_save_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
@@ -203,4 +226,114 @@ fn run_plugin_load_defaults_to_allow_permissions() {
             .any(|entry| entry.id == "perm-allow-plugin"),
         "默认放行权限后应成功写入注册表"
     );
+}
+
+#[test]
+fn plugin_disable_targets_highest_priority_registry_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    let cfg = test_config(dir.path());
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+
+    let scope_registry_path = workspace.path().join(".tomcat/plugins/registry.json");
+    let global_registry_path = crate::resolve_plugins_dir(&cfg)
+        .unwrap()
+        .join("registry.json");
+    save_plugin_registry(
+        &scope_registry_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "dup-plugin".to_string(),
+                path: workspace
+                    .path()
+                    .join(".tomcat/plugins/dup-plugin")
+                    .display()
+                    .to_string(),
+                enabled: true,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+    save_plugin_registry(
+        &global_registry_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "dup-plugin".to_string(),
+                path: dir.path().join("plugins/dup-plugin").display().to_string(),
+                enabled: true,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+
+    run_plugin(
+        PluginSub::Disable {
+            id: "dup-plugin".to_string(),
+        },
+        &cfg,
+    )
+    .unwrap();
+
+    let scope_registry = load_plugin_registry(&scope_registry_path);
+    let global_registry = load_plugin_registry(&global_registry_path);
+    assert!(!scope_registry.plugins[0].enabled);
+    assert!(global_registry.plugins[0].enabled);
+}
+
+#[test]
+fn plugin_unload_removes_scope_entry_before_global_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    let cfg = test_config(dir.path());
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+
+    let scope_registry_path = workspace.path().join(".tomcat/plugins/registry.json");
+    let global_registry_path = crate::resolve_plugins_dir(&cfg)
+        .unwrap()
+        .join("registry.json");
+    save_plugin_registry(
+        &scope_registry_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "dup-plugin".to_string(),
+                path: workspace
+                    .path()
+                    .join(".tomcat/plugins/dup-plugin")
+                    .display()
+                    .to_string(),
+                enabled: true,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+    save_plugin_registry(
+        &global_registry_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "dup-plugin".to_string(),
+                path: dir.path().join("plugins/dup-plugin").display().to_string(),
+                enabled: true,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+
+    run_plugin(
+        PluginSub::Unload {
+            id: "dup-plugin".to_string(),
+        },
+        &cfg,
+    )
+    .unwrap();
+
+    assert!(load_plugin_registry(&scope_registry_path)
+        .plugins
+        .is_empty());
+    assert_eq!(load_plugin_registry(&global_registry_path).plugins.len(), 1);
 }

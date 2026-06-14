@@ -313,6 +313,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
         "todos",
         "tmp",
         "skills",
+        "packages",
         "tool-results",
         "checkpoints",
     ] {
@@ -328,6 +329,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
         "media",
         "subagents",
         "plugins",
+        "packages",
         "skills",
     ] {
         std::fs::create_dir_all(work.join(dir)).map_err(AppError::Io)?;

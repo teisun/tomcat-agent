@@ -192,9 +192,12 @@ pi.registerTool({
     let session_id = current_session_id(&ctx);
     let err = tokio::time::timeout(
         Duration::from_secs(5),
-        ctx.global_services
-            .tool_registry
-            .call_tool("alloc_echo", json!({}), "__test__", Some(&session_id)),
+        ctx.global_services.tool_registry.call_tool(
+            "alloc_echo",
+            json!({}),
+            "__test__",
+            Some(&session_id),
+        ),
     )
     .await
     .expect("heap-limited tool call should not hang")
@@ -246,9 +249,12 @@ pi.registerTool({
     let session_id = current_session_id(&ctx);
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        ctx.global_services
-            .tool_registry
-            .call_tool("alloc_echo", json!({}), "__test__", Some(&session_id)),
+        ctx.global_services.tool_registry.call_tool(
+            "alloc_echo",
+            json!({}),
+            "__test__",
+            Some(&session_id),
+        ),
     )
     .await
     .expect("unbounded heap tool call should not hang")
@@ -303,9 +309,17 @@ pi.registerTool({
     loaded.sort();
 
     assert_eq!(loaded, vec!["catalog-plugin".to_string()]);
-    assert_eq!(list_tool_names(&ctx).await, vec!["catalog_echo".to_string()]);
-    let info = pm.get_plugin("catalog-plugin").expect("catalog plugin info");
-    assert_eq!(info.loaded_at, 0, "catalog discovery should register a stub only");
+    assert_eq!(
+        list_tool_names(&ctx).await,
+        vec!["catalog_echo".to_string()]
+    );
+    let info = pm
+        .get_plugin("catalog-plugin")
+        .expect("catalog plugin info");
+    assert_eq!(
+        info.loaded_at, 0,
+        "catalog discovery should register a stub only"
+    );
 }
 
 fn current_session_id(ctx: &ChatContext) -> String {
@@ -475,7 +489,10 @@ pi.registerTool({
         .as_ref()
         .expect("plugin manager");
 
-    assert_eq!(list_tool_names(&ctx).await, vec!["permission_echo".to_string()]);
+    assert_eq!(
+        list_tool_names(&ctx).await,
+        vec!["permission_echo".to_string()]
+    );
     let info = pm
         .get_plugin("permission-auto-load")
         .expect("auto-loaded permission plugin");

@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-14 16:45 | ACTIVE | feature/plugin-rquickjs | 66.2 |
+| Tom | 2026-06-15 00:01 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 移除 WasmEdge 运行时、资产与脚本，统一 Plugin 命名 @2026-06-14
@@ -12,6 +12,13 @@
 - [✓] **[P2]** 并发测试 cwd_lock 消除 PoisonError @2026-06-14
 - [✓] **[P2]** 文档与配置表更新（plugin-system-overview、user-guide、tomcat.config.toml） @2026-06-14
 - [✓] **[P1]** 三类真实插件测试：纯工具型 E2E、session_start 集成探针、legacy 工具箱 E2E、跨事件 VM 状态 @2026-06-14
+- [✓] **[P1]** PackageManager 统一安装：三层 package/plugin/skill 安装与卸载、`/install` live refresh、黑盒/集成/E2E/文档收口 @2026-06-15
+
+### 2026-06-15 | feat(package): PackageManager 统一安装收口
+
+- **交付**：新增 `core/package` 事务层，打通 `tomcat install` / `tomcat uninstall` / `tomcat packages` 与会话内 `/install`，落地 `scope|agent|global` 三层 `packages/registry.json` / `plugins/registry.json`，并补齐 `code` / `claw` 会话内 skill 与静态 plugin catalog 的即时可见性。
+- **验证**：`cargo fmt --all`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --lib`、`cargo test --test cli_tests`、`./scripts/run-integration-tests.sh integration` 全通过；真实 TTY chooser/cancel/shadow warning 与真实 `tomcat code` 会话 `/install` live refresh 已完成人工补验。
+- **覆盖**：状态页沿用当前分支既有 `66.2%` baseline；本次新增 `src/core/package/tests/`、CLI/chat 单测、`tests/cli_tests.rs` 黑盒场景与 `E2E_SCENARIO_LIBRARY.md` 场景登记，覆盖 scope/agent/global 安装、卸载、shadow warning、live refresh 与“不热替换已加载 plugin”边界。
 
 ### 🔌 INTERFACE (接口变更)
 - `crate::ext::runtime/`：引擎/实例/crypto 迁入子模块，对外仍通过 `crate::ext::PluginEngine` 等再导出。

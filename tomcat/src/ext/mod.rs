@@ -13,11 +13,11 @@ pub mod ts_compiler;
 pub mod vm_actor;
 
 pub use dispatcher::{AsyncCallStatus, HostApiDispatcher};
-pub use runtime::{
-    PluginEngineConfig, DEFAULT_PLUGIN_CALL_TIMEOUT_MS, DEFAULT_PLUGIN_IDLE_TTL_MS,
-    DEFAULT_PLUGIN_INTERRUPT_BUDGET, DEFAULT_QUICKJS_HEAP_MB, PluginEngine, PluginVmInstance,
-};
 pub use host_binding::{invoke_host_func, invoke_host_func_with, HostRequest, HostResponse};
+pub use runtime::{
+    PluginEngine, PluginEngineConfig, PluginVmInstance, DEFAULT_PLUGIN_CALL_TIMEOUT_MS,
+    DEFAULT_PLUGIN_IDLE_TTL_MS, DEFAULT_PLUGIN_INTERRUPT_BUDGET, DEFAULT_QUICKJS_HEAP_MB,
+};
 pub use ts_compiler::{transpile_pi_plugin_for_quickjs, transpile_typescript};
 
 pub use plugin::{

@@ -108,6 +108,59 @@ fn skill_subcommand_parsed() {
 }
 
 #[test]
+fn cli_parse_install_visibility_scope_root() {
+    let cli = Cli::try_parse_from([
+        "tomcat",
+        "install",
+        "./fixtures/pkg",
+        "--visibility",
+        "scope",
+        "--scope-root",
+        "/tmp/demo",
+        "--force",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Install {
+            source,
+            visibility: Some(PackageVisibilityArg::Scope),
+            scope_root: Some(scope_root),
+            force: true,
+        }) if source == "./fixtures/pkg" && scope_root == "/tmp/demo"
+    ));
+}
+
+#[test]
+fn cli_parse_packages_and_uninstall() {
+    let uninstall = Cli::try_parse_from([
+        "tomcat",
+        "uninstall",
+        "demo-package",
+        "--visibility",
+        "agent",
+    ])
+    .unwrap();
+    assert!(matches!(
+        uninstall.command,
+        Some(Commands::Uninstall {
+            package,
+            visibility: Some(PackageVisibilityArg::Agent),
+            scope_root: None,
+        }) if package == "demo-package"
+    ));
+
+    let packages = Cli::try_parse_from(["tomcat", "packages"]).unwrap();
+    assert!(matches!(
+        packages.command,
+        Some(Commands::Packages {
+            visibility: None,
+            scope_root: None
+        })
+    ));
+}
+
+#[test]
 fn cli_parse_claw() {
     let cli = Cli::try_parse_from(["tomcat", "claw"]).unwrap();
     assert!(matches!(

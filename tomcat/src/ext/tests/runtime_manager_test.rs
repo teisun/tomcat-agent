@@ -127,7 +127,10 @@ fn reap_configured_idle_noops_when_ttl_zero() {
 
     std::thread::sleep(Duration::from_millis(20));
     let reaped = mgr.reap_configured_idle();
-    assert!(reaped.is_empty(), "zero TTL should disable opportunistic reaping");
+    assert!(
+        reaped.is_empty(),
+        "zero TTL should disable opportunistic reaping"
+    );
     assert!(
         mgr.contains(&stale),
         "runtime should remain registered when configured TTL is zero"
@@ -141,7 +144,10 @@ fn touch_refreshes_idle_deadline() {
     mgr.insert(key.clone(), make_stub_handle());
 
     std::thread::sleep(Duration::from_millis(10));
-    assert!(mgr.touch(&key), "touch should succeed for registered runtime");
+    assert!(
+        mgr.touch(&key),
+        "touch should succeed for registered runtime"
+    );
 
     std::thread::sleep(Duration::from_millis(5));
     let reaped = mgr.reap_idle(Duration::from_millis(10));
@@ -149,7 +155,10 @@ fn touch_refreshes_idle_deadline() {
         reaped.is_empty(),
         "touch should refresh last_used so the runtime is not reaped yet"
     );
-    assert!(mgr.contains(&key), "runtime should remain after a fresh touch");
+    assert!(
+        mgr.contains(&key),
+        "runtime should remain after a fresh touch"
+    );
 }
 
 #[test]

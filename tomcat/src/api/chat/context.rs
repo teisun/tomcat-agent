@@ -738,6 +738,91 @@ impl ChatContext {
         *self.scope_services.skill_set.write() = skill_set.clone();
         skill_set
     }
+
+    pub(crate) async fn refresh_plugin_catalog_inventory(&self) -> Result<Vec<String>, AppError> {
+        let Some(plugin_manager) = self.global_services.plugin_manager.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let current_session_id = self
+            .session_runtime
+            .session
+            .current_session_id()
+            .ok()
+            .flatten();
+
+        let catalog =
+            PluginCatalog::discover(&self.config, &self.scope_services.agent_workspace_dir)?;
+        let discovered_ids = catalog
+            .iter()
+            .map(|(plugin_id, _)| plugin_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        for existing_id in plugin_manager.list_loaded() {
+            let Some(info) = plugin_manager.get_plugin(&existing_id) else {
+                continue;
+            };
+            let has_session_vm = current_session_id
+                .as_deref()
+                .map(|session_id| plugin_manager.has_session_vm(session_id, &existing_id))
+                .unwrap_or(false);
+            if info.loaded_at != 0 || has_session_vm {
+                continue;
+            }
+            if discovered_ids.contains(&existing_id) {
+                continue;
+            }
+            self.global_services
+                .tool_registry
+                .unregister_plugin_tools(&existing_id);
+            let _ = plugin_manager.unload_plugin(&existing_id);
+        }
+
+        for (plugin_id, entry) in catalog.iter() {
+            let loaded = plugin_manager
+                .get_plugin(plugin_id)
+                .map(|info| info.loaded_at > 0)
+                .unwrap_or(false);
+            let has_session_vm = current_session_id
+                .as_deref()
+                .map(|session_id| plugin_manager.has_session_vm(session_id, plugin_id))
+                .unwrap_or(false);
+            if loaded || has_session_vm {
+                continue;
+            }
+
+            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
+            self.global_services
+                .tool_registry
+                .unregister_plugin_tools(plugin_id);
+            for manifest_tool in &entry.manifest.tools {
+                self.global_services
+                    .tool_registry
+                    .register_tool(
+                        Tool {
+                            name: manifest_tool.name.clone(),
+                            label: manifest_tool.name.clone(),
+                            description: manifest_tool.description.clone(),
+                            parameters: manifest_tool.parameters.clone(),
+                            plugin_id: plugin_id.clone(),
+                            is_enabled: true,
+                            created_at: 0,
+                        },
+                        plugin_id,
+                    )
+                    .await?;
+            }
+        }
+
+        let mut warnings = catalog.warnings.clone();
+        warnings.extend(catalog.diagnostics.iter().map(|diagnostic| {
+            format!(
+                "plugin catalog ignored {}: {}",
+                diagnostic.path.display(),
+                diagnostic.reason
+            )
+        }));
+        Ok(warnings)
+    }
 }
 
 impl Drop for ChatContext {

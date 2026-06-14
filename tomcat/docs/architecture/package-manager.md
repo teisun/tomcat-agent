@@ -237,10 +237,17 @@ PackageManager.install()
    └─ 写 layer registries
    │
    ▼
-后续进入某个 scope
+可见性收口
    │
-   ├─ plugin: build_plugin_runtime() → PluginCatalog::discover() → scope 命中 roots
-   └─ skill : reload_skill_set()/spawn_discovery_task() → discover() → scope 命中 roots
+   ├─ shell `tomcat install`
+   │    └─ 后续进入某个 scope
+   │         ├─ plugin: build_plugin_runtime() → PluginCatalog::discover() → scope 命中 roots
+   │         └─ skill : reload_skill_set()/spawn_discovery_task() → discover() → scope 命中 roots
+   │
+   └─ code/claw 会话内 `/install`
+        ├─ skill : 当前 session 直接 `reload_skill_set()`
+        ├─ plugin: 当前 session refresh catalog stub + static tools
+        └─ 边界：不调用 `load_plugin()` / 不启动 session VM / 不热替换已加载实例
    │
    ▼
 LLM / 用户只看到当前 scope 有效视图
@@ -260,6 +267,7 @@ sequenceDiagram
     participant PM as PackageManager
     participant Paths as LayerPaths
     participant Reg as LayerRegistry
+    participant Sess as SessionRefresh
     participant Disc as DiscoveryRuntime
 
     Shell->>Front: tomcat install(source, visibility?, scopeRoot?, force)
@@ -272,11 +280,16 @@ sequenceDiagram
     PM->>PM: validate + shadow analysis
     PM->>Reg: write package/plugin registry
     PM->>Front: Installed + warnings
+    alt slash install in active session
+        Front->>Sess: refresh current session inventory
+        Sess->>Disc: reload_skill_set / PluginCatalog::discover
+        Disc-->>Sess: updated skill/plugin inventory
+        Note over Sess: no load_plugin / no session VM start
+    else shell install or no active session
+        Note over Disc: visible on next scope entry
+    end
     Front-->>Shell: print result
     Front-->>Slash: print result
-    Note over Disc: later, when a scope is entered
-    Disc->>Disc: plugin_roots / skill_roots scan scope > agent > global
-    Disc-->>Front: package contents become visible to runtime
 ```
 
 ### D. 状态机（package 安装生命周期）
@@ -285,7 +298,7 @@ sequenceDiagram
 ┌──────────┐ detect ok + target resolved ┌──────────┐ prepare ok ┌──────────┐ copy ok   ┌────────────┐
 │ detected │────────────────────────────▶│ prepared │────────────▶│ staging  │──────────▶│ registered │
 └────┬─────┘            └────┬─────┘           └────┬─────┘           └─────┬──────┘
-     │ detect fail            │ prepare fail         │ copy/write fail          │ discover
+     │ detect fail            │ prepare fail         │ copy/write fail          │ discover / live_refresh
      ▼                        ▼                      ▼                          ▼
 ┌──────────┐            ┌──────────┐         ┌──────────────┐           ┌─────────┐
 │ rejected │            │ rejected │         │ rollbacking  │──────────▶│ visible  │
@@ -302,7 +315,7 @@ sequenceDiagram
 | `detected` | source 被识别且目标层已显式给出或已选定 | `prepared` | 归一成 package / bare plugin / bare skill；必要时弹出目标层 chooser | 先搞清楚你给我的是什么，再确定这次装到哪层。 |
 | `prepared` | 路径与冲突预检通过 | `staging` | 解析层路径、准备复制清单 | 目标层和要拷哪些文件都算清楚了。 |
 | `staging` | 文件复制与写 registry 成功 | `registered` | 更新 `packages/registry.json` 与 `plugins/registry.json` | 文件已经放好，也记到账本里了。 |
-| `registered` | runtime 下一次扫描命中 | `visible` | 进入 plugin/skill 发现视图 | 真正“被看见”发生在后续 scope 进入时。 |
+| `registered` | 当前 session live refresh 或 runtime 后续扫描命中 | `visible` | code/claw 会话内刷新当前缓存；其他入口在后续 scope 进入时进入 plugin/skill 发现视图 | 会话里能立刻看见，外层 shell 则等下次进入 scope。 |
 | `staging` | 任一步写入失败 | `rollbacking` | 删除已复制目录、回滚 registry 修改 | 装一半失败就尽量恢复现场。 |
 | `rollbacking` | 回滚也失败 | `dirtyState` | 返回错误并附带 dirty warning | 最坏情况是失败了且现场没完全收干净。 |
 
@@ -389,6 +402,7 @@ sequenceDiagram
 | R7 package 清单承载位 | package 清单标准放哪儿，`package.json` 之外还要不要别名文件？ | 采用**一套字段、一个文件名**：package 清单唯一文件名是 **`package.json`**，唯一承载位是其顶层 `tomcat` 块。检测只认 `package.json[tomcat]`；plain `package.json` 若无顶层 `tomcat` 块，不算 Tomcat package；`tomcat.name` / `tomcat.version` 缺失时可回退继承外层 `package.json.name` / `package.json.version`。不支持 `tomcat-package.json`，也不支持 `pi-package.json`。 | npm 生态中 `package.json` 顶层命名空间字段惯例（如 `eslint` / `jest` / `prettier` / `pnpm`）；本方案 `§5.2` 的 `PackageManifest` / source 归一规则 | 设计：把 package 清单文件名也收敛到一个，和“未来以 npm 包分发”的方向完全对齐。理由：若再保留 `tomcat-package.json` 这种别名，纯资源包、脚手架、校验器、示例仓库和 CI 模板都要同时记两个名字；统一只认 `package.json` 后，所有 package 无论是不是纯资源包，都只需要带一个最小 `package.json`。 | 继续支持 `package.json[tomcat]` + `tomcat-package.json` 双文件名未入选；拒因：同一协议不值得保留两套文件名。只认 `tomcat-package.json` 未入选；拒因：与未来 npm 分发方向相悖。`pi-package.json` 历史兼容写法未入选；拒因：与“放弃 pi-mono 硬兼容”冲突。 | 包清单也只留一个名字：`package.json`；哪怕是纯资源包，也老老实实带一个最小 `package.json`。 |
 | R8 runtime 集成方式 | 安装后要不要再加一套新的发现/索引流程？ | 安装后继续复用 `plugin_roots` / `skill_roots`，不新增第四套发现协议；`PackageRegistry` 也**不直接进内存**，它只服务安装管理面。 | `Tomcat/src/ext/plugin/source_scan.rs`、`Tomcat/src/core/skill/discovery.rs`、`Tomcat/src/api/chat/context.rs::build_plugin_runtime`；`pi_agent_rust/src/resources.rs` | 设计：PackageManager 只负责写三层文件根与分层 registry，runtime 下一次 scope 进入/skill reload 时自然命中。内存里仍然是 `PluginCatalog/PluginManager` 与 `SkillSet` 两套对象。理由：发现事实源已经存在且稳定，没必要再平行造一张“安装专用可见表”。 | 额外引入 package-only discovery index 未入选；拒因：会让“磁盘真实内容”和“安装索引”出现双真相。把 package 直接 materialize 成第三套 runtime 对象也未入选；拒因：会把概念面越搞越厚。 | 装包时可以统一，跑起来时还是 plugin 和 skill 各走各的。 |
 | R9 列表与卸载语义 | `packages` / `plugin list` 是只看全局，还是理解 layered precedence？ | `packages` 按层分组展示；`plugin list/enable/disable/unload` 改为能读 layered plugin registry，并在需要时提示 shadow 信息。 | `Tomcat/src/api/cli/plugin_cmd.rs::run_plugin`；`pi_agent_rust/src/main.rs::handle_package_list_blocking`、`pi_agent_rust/src/package_manager.rs::ResolvedPaths` | 设计：包列表强调“装在哪层”，插件列表强调“这一层装了什么 + 当前可见结果”；理由：package 的关切是管理账本，plugin 的关切是最终运行可见集，二者应各自说清楚。 | 只保留现有“仅全局”的 `plugin list` 未入选；拒因：scope/agent 安装的 plugin 会在管理面上“失踪”。`packages` 只做 merged visible view 也未入选；拒因：会把“装在哪层”这个排障关键信息折叠掉。 | 列表不能只告诉你“看得见什么”，还要告诉你“它装在哪层”。 |
+| R10 当前会话可见性 | code/claw 内 `/install` 成功后，要不要立刻刷新当前会话的 skill/plugin 清单？ | 会话内 `/install` 成功后，**只刷新当前 session 的 skill / plugin 静态清单**；shell `tomcat install` 仍保持 disk-only。刷新复用 `reload_skill_set()` 与 `PluginCatalog::discover()` 语义；明确**不**在刷新路径调用 `load_plugin()`、不启动 session VM、不热替换已加载实例。 | `Tomcat/src/api/chat/context.rs::reload_skill_set`、`Tomcat/src/api/chat/context.rs::build_plugin_runtime`、`Tomcat/src/ext/plugin/catalog.rs::PluginCatalog::discover`、`Tomcat/src/core/tools/contract/registry.rs::unregister_plugin_tools` | 设计：当前 `code/claw` scope runtime 会缓存 `SkillSet` / `PluginManager` / `ToolRegistry`；若只写磁盘不刷新，用户会遇到“装好了但当前会话看不见”。把 refresh 限制在清单层，既补体验闭环，又不把 install 扩成执行第三方代码。 | 完全不 refresh 未入选；拒因：交互式会话体验断裂，用户必须猜测去 `/skill reload` 或重开会话。安装成功即 `load_plugin()` / 热起 session VM 未入选；拒因：违背 R4，把文件事务变成运行时执行路径，也会让失败边界和回滚语义复杂化。 | 装完要马上看得见，但“看得见”只等于当前清单刷新，不等于热执行插件。 |
 
 ### 4.2 实施点（定稿拆分）
 
@@ -398,7 +412,7 @@ sequenceDiagram
 |--------|----------------------|--------------------------|------------------|--------|
 | P1 PackageCore | 新增 package 模型、visibility 枚举、layer path 解析、per-layer registry schema | `src/core/package/model.rs`、`src/core/package/paths.rs`、`src/core/package/mod.rs` | 见 §9：`resolve_visibility_roots_global_agent_scope`、`detect_bare_plugin_and_bare_skill`、`detect_package_manifest_requires_package_json_tomcat_block` | 先把“包是什么、三层路径怎么算、账本长什么样”定义清楚。 |
 | P2 InstallTxn | 完整 install/uninstall/list 事务：source 识别、预检、复制、回滚、warning 输出 | `src/core/package/manager.rs` | 见 §9：`install_scope_package_writes_layer_registries`、`install_failure_rolls_back_copied_dirs` | 真正干活的安装引擎在这一层。 |
-| P3 FrontdoorsAndPluginRegistry | 顶层 CLI 接线 + 会话内 `/install` 接线；`plugin_cmd.rs` 改为 layered registry 管理；`packages` 命令可按层列出 | `src/api/cli/mod.rs`、`src/api/cli/package_cmd.rs`、`src/api/chat/commands/parse.rs`、`src/api/chat/commands/cmd_install.rs`、`src/api/cli/plugin_cmd.rs` | 见 §9：`cli_parse_install_visibility_scope_root`、`install_command_prompts_visibility_when_omitted`、`plugin_list_merges_layered_registries`、`test_packages_lists_all_layers` | 让用户既能在 shell 里装，也能在当前会话里装。 |
+| P3 FrontdoorsAndPluginRegistry | 顶层 CLI 接线 + 会话内 `/install` 接线；`plugin_cmd.rs` 改为 layered registry 管理；code/claw 当前 session live refresh；`packages` 命令可按层列出 | `src/api/cli/mod.rs`、`src/api/cli/package_cmd.rs`、`src/api/chat/commands/parse.rs`、`src/api/chat/commands/cmd_install.rs`、`src/api/chat/context.rs`、`src/api/cli/plugin_cmd.rs` | 见 §9：`cli_parse_install_visibility_scope_root`、`install_command_prompts_visibility_when_omitted`、`install_command_refreshes_current_session_inventory`、`install_live_refresh_does_not_execute_plugin`、`plugin_list_merges_layered_registries`、`test_packages_lists_all_layers` | 让用户既能在 shell 里装，也能在当前会话里装，而且装完不用靠猜去手动 reload。 |
 | P4 TestsAndDocs | 单元/CLI/E2E 覆盖；同步相邻架构文档与 user guide | `src/api/cli/tests/package_cmd_test.rs`、`src/api/cli/tests/parse_cli_test.rs`、`tests/cli_tests.rs`、相邻 docs | 见 §9：文档与测试行 | 最后把行为钉死，别让 spec 和代码走散。 |
 
 #### 4.2.1 P1 PackageCore
@@ -433,12 +447,14 @@ sequenceDiagram
 
 专业：这一阶段把新 PackageManager 同时接到外层 CLI 与会话内 slash command，同时把现有 `plugin_cmd.rs` 从“仅全局 registry”推广到 layered registry 读取与更新。
 
-**说人话**：如果 package 能装到 scope/agent，但 `plugin list` 还只看全局，或者会话里不能直接 `/install`，用户都会觉得“系统明明支持三层，为什么用起来像半成品”。这一层就是把前门和管理面一起补齐。
+**说人话**：如果 package 能装到 scope/agent，但 `plugin list` 还只看全局，或者会话里不能直接 `/install`，或者 `/install` 完成后当前 session 还看不见新资源，用户都会觉得“系统明明支持三层，为什么用起来像半成品”。这一层就是把前门、管理面和当前会话可见性一起补齐。
 
 技术要点：
 
 - `install/uninstall/packages` 放在顶层，与 `pi_agent_rust` 的命令面相似，但增加 `--visibility` 与 `--scope-root`。
 - 会话内新增 `/install`，沿用 `parse.rs -> cmd_xxx.rs -> ChatContext` 现有 slash-command 组织方式。
+- `/install` 成功后，当前 code/claw session 立即 refresh skill set 与 plugin catalog-backed static tool inventory。
+- refresh 只更新内存清单，不调用 `load_plugin()`、不启动 `session VM`、不热替换已加载实例。
 - `plugin list` 输出应区分“当前可见集”和“分层安装位置”，避免把 shadow 关系吞掉。
 - `plugin unload` 与 `uninstall` 的职责分离：前者是运行态/注册态清理，后者是文件与 package 账本清理。
 
@@ -501,6 +517,7 @@ tomcat install ./skills/release-checklist --scope-root /repo/app
 - `/install` 不单独暴露 `--scope-root`；当前会话的 `agent_workspace_dir` 就是默认 `current-project` 根。
 - 若用户想装到**另一个** project scope，可走外层 shell CLI 并显式传 `--scope-root`。
 - 若 chooser 被用户取消，则本次 `/install` 直接结束，不写任何磁盘状态。
+- `/install` 成功后，当前 code/claw session 会立即刷新 skill inventory 与 plugin 静态清单；若这一步刷新失败，安装结果仍保留，但必须显式打印 warning，提示“已安装，当前会话刷新失败，下次进入 scope 或手动 reload 后可见”。
 
 ### 5.2 两种 manifest：package manifest 与 plugin manifest
 
@@ -746,20 +763,22 @@ src/ext/plugin/source_scan.rs【未改，复用】   src/core/skill/discovery.rs
       │                              │                                   │
       └───────────────┬──────────────┴───────────────────────────────────┘
                       ▼
-src/api/chat/context.rs【未改，复用】
+src/api/chat/context.rs【改】
   - scope_runtime_for()：把“当前项目目录”当成 scope 身份；同项目复用、不同项目隔离
-  - build_plugin_runtime()/reload_skill_set()：进入该项目时拼出 scope/agent/global 三层可见集
+  - reload_skill_set()：`/install` 成功后刷新当前 session 的 SkillSet
+  - refresh plugin inventory：重跑 catalog stub/static tools，但不执行 plugin 代码
 
 [tests]
   - src/api/cli/tests/parse_cli_test.rs【改】
   - src/api/cli/tests/package_cmd_test.rs【新增】
   - src/api/cli/tests/plugin_cmd_test.rs【改】
+  - src/api/chat/commands/tests/cmd_install_test.rs【新增】
   - tests/cli_tests.rs【改】
 ```
 
-阅读顺序：先看 `core/package/model.rs` 与 `paths.rs`，因为它们定义“包是什么、三层路径怎么算”；再看 `manager.rs`，因为 install/uninstall 的事务边界都在那里；最后看两个前门适配层 `api/cli/package_cmd.rs` 与 `api/chat/commands/cmd_install.rs`，以及分层管理面 `plugin_cmd.rs`。
+阅读顺序：先看 `core/package/model.rs` 与 `paths.rs`，因为它们定义“包是什么、三层路径怎么算”；再看 `manager.rs`，因为 install/uninstall 的事务边界都在那里；然后看 `api/chat/context.rs`，因为会话内 `/install` 的立即可见性在这里收口；最后再看两个前门适配层 `api/cli/package_cmd.rs` 与 `api/chat/commands/cmd_install.rs`，以及分层管理面 `plugin_cmd.rs`。
 
-**说人话**：真正的新东西在 `core/package`；shell CLI 和会话内 `/install` 只是两块门牌，runtime 只是继续复用现有发现。这样职责边界清楚，后续加别的入口也不会再复制一遍安装逻辑。
+**说人话**：真正的新东西在 `core/package`；shell CLI 和会话内 `/install` 只是两块门牌，但 code/claw 当前会话还要补一层“轻量 refresh 当前清单”的收口。即便如此，runtime 依然复用现有发现事实源，没有再造第四套协议。
 
 ## 7. 配置与环境变量
 
@@ -777,6 +796,7 @@ src/api/chat/context.rs【未改，复用】
 
 ```text
 正常安装         → Ok + "Installed" + 可选 warnings(shadowed_by, canonicalized_scope_root)
+会话内 refresh 失败 → Ok + "Installed" + warning(current_session_refresh_failed)
 交互式 chooser 取消 → Handled / aborted（不写磁盘）
 同层同名冲突     → Err（提示 --force）
 跨层同名遮蔽     → Ok + warnings（不抛 Err）
@@ -793,6 +813,7 @@ packages list 无结果 → Ok + 空列表 / 友好提示
 | 结局 | 触发 | 行为 | 说人话 |
 |------|------|------|--------|
 | 正常成功 | source 合法、复制成功、registry 成功 | 返回 `Ok`，打印安装结果 | 一切正常就直接装好。 |
+| `warning(current_session_refresh_failed)` | 会话内 `/install` 已成功落盘，但当前 session 刷新 skill/plugin 清单失败 | 仍返回成功安装结果，但显式提示当前会话未刷新；下次进入 scope 或手动 reload 后可见 | 装已经装好了，只是当前会话没来得及看见。 |
 | `Handled(cancelled_by_user)` | 交互式 chooser 被取消 | 直接结束，不写文件、不写账本 | 用户说算了，那就真的什么都别动。 |
 | `Err(conflict_same_layer)` | 同层已有同名 package 或同名资源且未 `--force` | 拒绝进入复制阶段 | 同层重名最危险，先别动。 |
 | `warning(shadowed_by_higher_layer)` | 更高优先级层已有同名 plugin/skill | 允许继续安装，但显式提示 | 能装，但当前 scope 不一定马上看见。 |
@@ -815,9 +836,12 @@ packages list 无结果 → Ok + 空列表 / 友好提示
 | 单元 | `api::cli::tests::plugin_cmd_test::plugin_list_merges_layered_registries` | PENDING | plugin CLI 不能再只认识全局那层。 |
 | 解析 | `api::cli::tests::parse_cli_test::cli_parse_install_visibility_scope_root` | PENDING | 顶层命令与新 flag 的 clap 语义要锁死。 |
 | 解析 | `api::chat::commands::tests::install_command_prompts_visibility_when_omitted` | PENDING | `/install` 不传目标层时必须走 chooser。 |
+| 单元 | `api::chat::commands::tests::install_command_refreshes_current_session_inventory` | PENDING | `/install` 成功后当前会话不该还看旧 skill/plugin 清单。 |
+| 单元 | `api::chat::commands::tests::install_live_refresh_does_not_execute_plugin` | PENDING | 立即可见不能变成“顺手热执行插件”。 |
 | 集成 | `tests/cli_tests.rs::test_install_scope_package_visible_in_packages_list` | PENDING | 从真实二进制看，scope 层至少要能装、能列。 |
 | 集成 | `tests/cli_tests.rs::test_install_agent_package_survives_scope_switch` | PENDING | agent 层不能因为换了项目目录就消失。 |
 | 集成 | `tests/cli_tests.rs::test_uninstall_scope_package_cleans_layer_dirs_and_registries` | PENDING | 卸载要删目录，也要删账本。 |
+| E2E | `tests/cli_tests.rs::test_slash_install_refreshes_current_session_inventory` | PENDING | code/claw 内 `/install` 后无需重进当前会话即可看到新资源。 |
 | 观察指标 | `G1-G6` 对应上述单元/集成用例 | PENDING | §3 里吹的牛，最终都得靠这些测试来兜底。 |
 | 文档 | 本文 + `work-dir-and-data-layout.md` + `skill-system.md` + `plugin-system-overview_new.md` 同步修订 | PENDING | 代码改了，周边文档也要一起更新。 |
 
@@ -829,6 +853,7 @@ packages list 无结果 → Ok + 空列表 / 友好提示
 | 现有 `plugin_cmd.rs` 只读全局 registry | 高 | 在 P3 中把 registry helper 抽成 layered 读写与 merge；`plugin list` 输出分层来源 | 不把 plugin 管理面补齐，scope/agent 安装就会像没装一样。 |
 | 安装事务部分失败留下半成品 | 高 | 采用 `prepare → copy → registry` 顺序；失败时逆序回滚；对 rollback 失败显式 `dirty_state` warning | 最怕装一半，必须把“怎么收拾残局”写进设计。 |
 | 跨层同名导致用户误判“安装没生效” | 中 | install 成功时打印 shadow warning；`packages` 分层展示；`plugin list` 标明来源层 | 不是没装，而是被更高一层盖住了，要把这件事讲清楚。 |
+| 当前 session live refresh 误把 install 升级成 runtime 执行 | 高 | refresh 只重跑 `discover()` / `PluginCatalog::discover()` 与静态工具注册；禁止 `load_plugin()`、`start_session_vm()` 与已加载实例热替换，并用专门测试锁死边界 | 马上可见可以做，但不能把安装偷偷变成执行第三方代码。 |
 | 静态校验弱于 runtime 校验 | 中 | 静态校验至少覆盖 manifest/frontmatter、入口文件存在性、UTF-8/JSON；必要时后续再加显式 runtime validate 命令 | 第一版别为了“强校验”把安装变成执行器。 |
 | 文档与现有路径约定不一致 | 中 | 实施时同步更新 `work-dir-and-data-layout.md` 中 `packages/registry.json` 与三层目录说明 | 这类文档一旦不同步，用户会被旧说明带偏。 |
 | 交互式 chooser 与非交互 fallback 行为不清 | 中 | CLI help、`/help`、user guide 都明确“交互式先弹 chooser，非交互 shell fallback current-project(scope)”；安装成功时打印目标层路径 | 最怕用户不知道系统到底是自动选的，还是在问他选。 |

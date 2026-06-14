@@ -2929,6 +2929,78 @@ fn make_plugin_dir(id: &str) -> tempfile::TempDir {
     tmp
 }
 
+fn write_skill_markdown(skill_dir: &Path, name: &str, description: &str) {
+    let skill_md = format!(
+        "---\nname: {name}\ndescription: {description}\n---\n# {name}\n1. Follow the steps.\n"
+    );
+    std::fs::write(skill_dir.join("SKILL.md"), skill_md).expect("write SKILL.md");
+}
+
+fn make_bare_skill_dir(name: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    write_skill_markdown(tmp.path(), name, "E2E test skill");
+    tmp
+}
+
+fn make_package_dir(
+    package_name: &str,
+    version: &str,
+    plugin_id: &str,
+    skill_name: &str,
+) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugin_dir = tmp.path().join("plugins").join(plugin_id);
+    let skill_dir = tmp.path().join("skills").join(skill_name);
+    std::fs::create_dir_all(&plugin_dir).expect("create package plugin dir");
+    std::fs::create_dir_all(&skill_dir).expect("create package skill dir");
+
+    let package_json = format!(
+        r#"{{
+  "name": "{package_name}",
+  "version": "{version}",
+  "description": "E2E package {package_name}",
+  "tomcat": {{
+    "plugins": ["plugins/{plugin_id}"],
+    "skills": ["skills/{skill_name}"]
+  }}
+}}"#
+    );
+    std::fs::write(tmp.path().join("package.json"), package_json).expect("write package.json");
+
+    let plugin_json = format!(
+        r#"{{
+  "id": "{plugin_id}",
+  "name": "Package Plugin {plugin_id}",
+  "version": "{version}",
+  "description": "Plugin resource from package",
+  "author": "nibbles",
+  "main": "main.js",
+  "requiredPermissions": [],
+  "requiredApiVersion": "1.0",
+  "tags": []
+}}"#
+    );
+    std::fs::write(plugin_dir.join("plugin.json"), plugin_json)
+        .expect("write package plugin manifest");
+    std::fs::write(
+        plugin_dir.join("main.js"),
+        "// package plugin init\n1 + 1;\n",
+    )
+    .expect("write package plugin main");
+    write_skill_markdown(&skill_dir, skill_name, "Skill resource from package");
+    tmp
+}
+
+fn read_package_registry(path: &Path) -> tomcat::core::PackageRegistryFile {
+    let content = std::fs::read_to_string(path).expect("read package registry");
+    serde_json::from_str(&content).expect("parse package registry")
+}
+
+fn read_plugin_registry(path: &Path) -> tomcat::core::PluginRegistryFile {
+    let content = std::fs::read_to_string(path).expect("read plugin registry");
+    serde_json::from_str(&content).expect("parse plugin registry")
+}
+
 /// [E2E-CLI-021] 用户从路径加载插件并查看已加载列表
 ///
 /// 用户意图：加载插件并验证命令正常执行
@@ -3146,6 +3218,407 @@ fn test_user_loads_nonexistent_plugin_path_shows_error() {
             .or(predicate::str::contains("Error"))
             .or(predicate::str::contains("找不到")),
     );
+}
+
+// ──────────────────── Story 4: PackageManager 统一安装（E2E-CLI-027~030） ────────────────────
+
+/// [E2E-CLI-027] 用户把 package 安装到当前项目并在 packages 中看到三层视图
+///
+/// 用户意图：通过统一入口把 package 安装到当前项目，并立即确认 scope 层账本与资源落盘
+/// 验证：install 默认落 scope；packages 默认输出 scope/agent/global 三层；scope 层 package/plugin ledger 与资源目录存在
+#[test]
+fn test_user_installs_scope_package_and_lists_layered_packages() {
+    common::setup_logging();
+    let _span = info_span!("test_user_installs_scope_package_and_lists_layered_packages").entered();
+
+    let package_dir = make_package_dir(
+        "e2e-scope-package",
+        "0.2.0",
+        "e2e-scope-plugin",
+        "e2e-scope-skill",
+    );
+    let home = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    let scope_root = home.path().join("project");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    std::fs::create_dir_all(&scope_root).unwrap();
+
+    let package_src = package_dir.path().to_str().unwrap();
+    let work_dir_str = work_dir.to_str().unwrap();
+    let scope_root_str = scope_root.to_str().unwrap();
+
+    info!(
+        "Act: tomcat install <package> --scope-root <project>（未传 visibility，非交互默认 scope）"
+    );
+    let install_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args(["install", package_src, "--scope-root", scope_root_str])
+        .assert();
+    let install_out =
+        String::from_utf8_lossy(&install_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert install: exit 0 + stdout 含 package 名；actual: {}",
+        trunc(&install_out, 240)
+    );
+    install_assert.success().stdout(
+        predicate::str::contains("已安装 package")
+            .and(predicate::str::contains("e2e-scope-package")),
+    );
+
+    info!("Act: tomcat packages --scope-root <project>");
+    let list_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args(["packages", "--scope-root", scope_root_str])
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert packages: 默认输出三层且 scope 含 package；actual: {}",
+        trunc(&list_out, 400)
+    );
+    list_assert.success().stdout(
+        predicate::str::contains("scope:")
+            .and(predicate::str::contains("agent:"))
+            .and(predicate::str::contains("global:"))
+            .and(predicate::str::contains("e2e-scope-package@0.2.0"))
+            .and(predicate::str::contains("plugin:e2e-scope-plugin"))
+            .and(predicate::str::contains("skill:e2e-scope-skill")),
+    );
+
+    let scope_tomcat = scope_root.join(".tomcat");
+    assert!(
+        scope_tomcat
+            .join("plugins")
+            .join("e2e-scope-plugin")
+            .join("plugin.json")
+            .exists(),
+        "scope plugin 应已落盘"
+    );
+    assert!(
+        scope_tomcat
+            .join("skills")
+            .join("e2e-scope-skill")
+            .join("SKILL.md")
+            .exists(),
+        "scope skill 应已落盘"
+    );
+
+    let package_registry =
+        read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
+    assert_eq!(
+        package_registry.packages.len(),
+        1,
+        "scope package registry 应只有 1 条记录"
+    );
+    assert_eq!(package_registry.packages[0].name, "e2e-scope-package");
+
+    let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
+    assert!(
+        plugin_registry
+            .plugins
+            .iter()
+            .any(|entry| entry.id == "e2e-scope-plugin" && entry.enabled),
+        "scope plugin registry 应登记 e2e-scope-plugin"
+    );
+}
+
+/// [E2E-CLI-028] 用户把 bare plugin 安装到 agent 层并只查看 agent ledger
+///
+/// 用户意图：把 plugin 作为 package 资源安装到 agent 私有层
+/// 验证：agent 层 package/plugin registry 写入成功；packages --visibility agent 仅展示该层记录
+#[test]
+fn test_user_installs_bare_plugin_to_agent_layer() {
+    common::setup_logging();
+    let _span = info_span!("test_user_installs_bare_plugin_to_agent_layer").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-agent-plugin");
+    let home = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    let scope_root = home.path().join("project");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    std::fs::create_dir_all(&scope_root).unwrap();
+
+    let plugin_src = plugin_dir.path().to_str().unwrap();
+    let work_dir_str = work_dir.to_str().unwrap();
+    let scope_root_str = scope_root.to_str().unwrap();
+
+    info!("Act: tomcat install <plugin> --visibility agent");
+    let install_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "install",
+            plugin_src,
+            "--visibility",
+            "agent",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert();
+    let install_out =
+        String::from_utf8_lossy(&install_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert install: exit 0 + stdout 指向 agent；actual: {}",
+        trunc(&install_out, 240)
+    );
+    install_assert
+        .success()
+        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("agent")));
+
+    info!("Act: tomcat packages --visibility agent");
+    let list_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "packages",
+            "--visibility",
+            "agent",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert packages: agent 层含 bare plugin；actual: {}",
+        trunc(&list_out, 320)
+    );
+    list_assert.success().stdout(
+        predicate::str::contains("agent:")
+            .and(predicate::str::contains("e2e-agent-plugin@0.1.0"))
+            .and(predicate::str::contains("[barePlugin]"))
+            .and(predicate::str::contains("plugin:e2e-agent-plugin")),
+    );
+
+    let agent_root = work_dir.join("agents").join("main");
+    assert!(
+        agent_root
+            .join("plugins")
+            .join("e2e-agent-plugin")
+            .join("plugin.json")
+            .exists(),
+        "agent plugin 应已落盘"
+    );
+
+    let package_registry =
+        read_package_registry(&agent_root.join("packages").join("registry.json"));
+    assert_eq!(
+        package_registry.packages.len(),
+        1,
+        "agent package registry 应只有 1 条记录"
+    );
+    assert_eq!(package_registry.packages[0].name, "e2e-agent-plugin");
+
+    let plugin_registry = read_plugin_registry(&agent_root.join("plugins").join("registry.json"));
+    assert!(
+        plugin_registry
+            .plugins
+            .iter()
+            .any(|entry| entry.id == "e2e-agent-plugin" && entry.enabled),
+        "agent plugin registry 应登记 e2e-agent-plugin"
+    );
+}
+
+/// [E2E-CLI-029] 用户把 bare skill 安装到 global 层并列出 global package
+///
+/// 用户意图：通过统一入口把 skill 安装到全局共享层
+/// 验证：global 层 skill/package 落盘；packages --visibility global 能看到 bareSkill 记录
+#[test]
+fn test_user_installs_bare_skill_to_global_layer() {
+    common::setup_logging();
+    let _span = info_span!("test_user_installs_bare_skill_to_global_layer").entered();
+
+    let skill_dir = make_bare_skill_dir("e2e-global-skill");
+    let home = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    let scope_root = home.path().join("project");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    std::fs::create_dir_all(&scope_root).unwrap();
+
+    let skill_src = skill_dir.path().to_str().unwrap();
+    let work_dir_str = work_dir.to_str().unwrap();
+    let scope_root_str = scope_root.to_str().unwrap();
+
+    info!("Act: tomcat install <skill> --visibility global");
+    let install_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "install",
+            skill_src,
+            "--visibility",
+            "global",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert();
+    let install_out =
+        String::from_utf8_lossy(&install_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert install: exit 0 + stdout 指向 global；actual: {}",
+        trunc(&install_out, 240)
+    );
+    install_assert
+        .success()
+        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("global")));
+
+    info!("Act: tomcat packages --visibility global");
+    let list_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "packages",
+            "--visibility",
+            "global",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert packages: global 层含 bare skill；actual: {}",
+        trunc(&list_out, 320)
+    );
+    list_assert.success().stdout(
+        predicate::str::contains("global:")
+            .and(predicate::str::contains("e2e-global-skill@0.0.0"))
+            .and(predicate::str::contains("[bareSkill]"))
+            .and(predicate::str::contains("skill:e2e-global-skill")),
+    );
+
+    assert!(
+        work_dir
+            .join("skills")
+            .join("e2e-global-skill")
+            .join("SKILL.md")
+            .exists(),
+        "global skill 应已落盘"
+    );
+
+    let package_registry = read_package_registry(&work_dir.join("packages").join("registry.json"));
+    assert_eq!(
+        package_registry.packages.len(),
+        1,
+        "global package registry 应只有 1 条记录"
+    );
+    assert_eq!(package_registry.packages[0].name, "e2e-global-skill");
+}
+
+/// [E2E-CLI-030] 用户卸载 scope package 后资源与账本被精准清理
+///
+/// 用户意图：卸载一个通过统一入口安装到当前项目的 package
+/// 验证：plugin/skill 目录与 scope 层 package/plugin registry 均移除；packages --visibility scope 回到空列表
+#[test]
+fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
+    common::setup_logging();
+    let _span = info_span!("test_user_uninstalls_scope_package_and_cleans_scope_layer").entered();
+
+    let package_dir = make_package_dir(
+        "e2e-uninstall-package",
+        "0.3.0",
+        "e2e-uninstall-plugin",
+        "e2e-uninstall-skill",
+    );
+    let home = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    let scope_root = home.path().join("project");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    std::fs::create_dir_all(&scope_root).unwrap();
+
+    let package_src = package_dir.path().to_str().unwrap();
+    let work_dir_str = work_dir.to_str().unwrap();
+    let scope_root_str = scope_root.to_str().unwrap();
+
+    info!("Arrange: 先安装一个 scope package");
+    cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "install",
+            package_src,
+            "--visibility",
+            "scope",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert()
+        .success();
+
+    info!("Act: tomcat uninstall <package> --visibility scope");
+    let uninstall_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "uninstall",
+            "e2e-uninstall-package",
+            "--visibility",
+            "scope",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert();
+    let uninstall_out =
+        String::from_utf8_lossy(&uninstall_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert uninstall: exit 0 + stdout 含 package 名；actual: {}",
+        trunc(&uninstall_out, 260)
+    );
+    uninstall_assert.success().stdout(
+        predicate::str::contains("已卸载 package")
+            .and(predicate::str::contains("e2e-uninstall-package")),
+    );
+
+    let scope_tomcat = scope_root.join(".tomcat");
+    assert!(
+        !scope_tomcat
+            .join("plugins")
+            .join("e2e-uninstall-plugin")
+            .join("plugin.json")
+            .exists(),
+        "scope plugin 目录应被清理"
+    );
+    assert!(
+        !scope_tomcat
+            .join("skills")
+            .join("e2e-uninstall-skill")
+            .join("SKILL.md")
+            .exists(),
+        "scope skill 目录应被清理"
+    );
+
+    let package_registry =
+        read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
+    assert!(
+        package_registry.packages.is_empty(),
+        "scope package registry 卸载后应为空"
+    );
+
+    let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
+    assert!(
+        plugin_registry.plugins.is_empty(),
+        "scope plugin registry 卸载后应为空"
+    );
+
+    info!("Act: tomcat packages --visibility scope");
+    let list_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "packages",
+            "--visibility",
+            "scope",
+            "--scope-root",
+            scope_root_str,
+        ])
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert packages: scope 层回到空列表；actual: {}",
+        trunc(&list_out, 200)
+    );
+    list_assert
+        .success()
+        .stdout(predicate::str::contains("scope:").and(predicate::str::contains("(none)")));
 }
 
 // ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 OPENAI_API_KEY） ────────────────────
