@@ -53,6 +53,52 @@ fn llm_timeout_defaults_match_three_layer_policy() {
 }
 
 #[test]
+fn plugin_config_defaults_are_wired_into_app_config() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.plugin.auto_load, Vec::<String>::new());
+    assert_eq!(cfg.plugin.js_heap_mb, 16);
+    assert_eq!(cfg.plugin.call_timeout_ms, 30_000);
+    assert_eq!(cfg.plugin.interrupt_budget, 5_000_000);
+    assert_eq!(cfg.plugin.event_channel_capacity, 64);
+    assert_eq!(cfg.plugin.idle_ttl_ms, 5 * 60 * 1000);
+}
+
+#[test]
+fn plugin_config_toml_overrides_parse_correctly() {
+    let toml_src = r#"
+[plugin]
+auto_load = ["demo"]
+js_heap_mb = 8
+call_timeout_ms = 1234
+interrupt_budget = 777
+event_channel_capacity = 9
+idle_ttl_ms = 4567
+"#;
+    let cfg: AppConfig = toml::from_str(toml_src).expect("plugin config toml should parse");
+    assert_eq!(cfg.plugin.auto_load, vec!["demo".to_string()]);
+    assert_eq!(cfg.plugin.js_heap_mb, 8);
+    assert_eq!(cfg.plugin.call_timeout_ms, 1234);
+    assert_eq!(cfg.plugin.interrupt_budget, 777);
+    assert_eq!(cfg.plugin.event_channel_capacity, 9);
+    assert_eq!(cfg.plugin.idle_ttl_ms, 4567);
+}
+
+#[test]
+fn plugin_engine_defaults_match_app_config_defaults() {
+    let cfg = AppConfig::default();
+    assert_eq!(crate::ext::DEFAULT_QUICKJS_HEAP_MB, cfg.plugin.js_heap_mb);
+    assert_eq!(
+        crate::ext::DEFAULT_PLUGIN_CALL_TIMEOUT_MS,
+        cfg.plugin.call_timeout_ms
+    );
+    assert_eq!(
+        crate::ext::DEFAULT_PLUGIN_INTERRUPT_BUDGET,
+        cfg.plugin.interrupt_budget
+    );
+    assert_eq!(crate::ext::DEFAULT_PLUGIN_IDLE_TTL_MS, cfg.plugin.idle_ttl_ms);
+}
+
+#[test]
 fn checkpoint_config_defaults_are_wired_into_app_config() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.checkpoint.retention_max, 50);

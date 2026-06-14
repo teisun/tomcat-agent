@@ -17,12 +17,9 @@ use swc_ecma_parser::{Parser as SwcParser, StringInput, Syntax, TsSyntax};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_transforms_typescript::strip;
 
-/// Known npm package → globalThis property mapping for QuickJS script-mode import rewriting.
-/// Each package has a corresponding `assets/js/<name>_shim.js` injected by `build_combined_script`.
+/// Supported package/import → globalThis property mapping for QuickJS script-mode import rewriting.
+/// Only packages with runtime shims or fail-closed aliases should be listed here.
 const NPM_SHIM_MAP: &[(&str, &str)] = &[
-    ("@mariozechner/pi-tui", "__pi_tui"),
-    ("@mariozechner/pi-coding-agent", "__pi_coding_agent"),
-    ("@mariozechner/pi-ai", "__pi_ai"),
     ("@sinclair/typebox", "__pi_typebox"),
     // Node.js built-in modules
     ("fs", "__node_fs"),
@@ -43,11 +40,8 @@ const NPM_SHIM_MAP: &[(&str, &str)] = &[
     ("node:os", "__node_os"),
     ("crypto", "__node_crypto"),
     ("node:crypto", "__node_crypto"),
-    // External npm packages
-    ("@anthropic-ai/sandbox-runtime", "__pi_sandbox_runtime"),
+    // Tiny utility packages we explicitly support in QuickJS plugins.
     ("ms", "__pi_ms"),
-    // Subagent local import
-    ("./agents.js", "__pi_subagent_agents"),
 ];
 
 /// 将 TypeScript 模块源码转译为 ES 模块风格 JS（仍含 `import` / `export` 时由调用方处理）。

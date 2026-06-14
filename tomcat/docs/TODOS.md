@@ -21,7 +21,7 @@
 | **P4** | 自进化 / 学习 | 自总结生成 Skill、学习回路（Feedback → SKILL/MEMORY）、自举 AI 编程 Agent；业界学习（Codex / Harmony / Candle / llm-chain / swarms / coworker 等） | 未启动 |
 | **P5** | 多 Agent + 安全 + 多会话 | 多 Agent 编排 / 邮箱 / 独立 VM / 安全体系 9 条 / 多会话管理 | 未启动 |
 | **P6** | 插件系统（冻结区） | 插件管线收尾、VMActor 修复、WAPM / 预热 / 关闭 AOT、插件自举闭环（仅维护） | 冻结 |
-| **P7** | 跨平台 | WasmEdge standalone 下载与链接、install 脚本、Android、openclaw 兼容 | 未启动 |
+| **P7** | 跨平台 | 平台适配、Android、openclaw 兼容与安装体验收口 | 未启动 |
 | **P8** | 多 IM / 多 LLM 适配 | 多 LLM 适配（Anthropic/Gemini/local-llm）、IM 网关（Telegram/Slack/企微/邮件/Webhook）、商米场景 | 未启动 |
 | **P9** | UI | Tauri+React Web 桌面端、Android 端、插件/Skill/Agent 管理可视化 | 未启动 |
 
@@ -178,8 +178,8 @@
 | 编号 | 分类 | 条目 | 说明/备注 |
 |------|------|------|-----------|
 | T-104-plat | 平台 | 兼容 openclaw 生态 | |
-| T-105 | 平台 | Standalone WasmEdge 下载和链接 | |
-| T-106 | 平台 | install-wasmedge.sh 脚本 | |
+| T-105 | 平台 | 历史 WasmEdge standalone 下载/链接链路清理（已废弃） | 迁移到 `rquickjs` 后不再作为现行能力 |
+| T-106 | 平台 | 历史 install-wasmedge.sh 安装脚本清理（已废弃） | 迁移到 `rquickjs` 后不再作为现行能力 |
 | T-107 | 平台 | Android 支持 | |
 
 ### P8 — 多 IM / 多 LLM 适配（~5 条）
@@ -414,15 +414,15 @@
 - [ ] **[P6]** `#T-065` 维护 10 个 VM 的 LRU 算法清理策略
   - 关联模块：`src/ext/runtime_manager.rs`
 - [ ] **[P6]** `#T-066` 初始化时搬放 js 配置文件和其他文件
-- [ ] **[P6]** `#T-067` 接受 WAPM .wasm 包的加载运行
+- [ ] **[P6]** `#T-067` 接受 JS/TS 插件包的加载运行
 - [ ] **[P6]** `#T-068` 简易沙箱
-- [ ] **[P6]** `#T-069` Wasm 预热
-- [ ] **[P6]** `#T-070-wasm` 关闭 LLVM 和 AOT 预编译 aot.wasm
-  - 关联模块：`src/ext/engine_wasmedge.rs`
-- [ ] **[P6]** `#T-133` WasmEdge / JS API 测试迁移到长生命周期 VM
-  - 11 处测试用例：`tests/wasmedge_e2e_tests.rs` 第 153/211/317/363/429/485/547/605/675 行、`tests/js_api_alignment_tests.rs` 第 67/124 行
+- [ ] **[P6]** `#T-069` 插件 VM 预热
+- [x] **[P6]** `#T-070` 清理历史 AOT / `.wasm` 预编译链路
+  - 迁移后现行运行时为 `rquickjs`，不再维护 LLVM/AOT 预编译链路
+- [x] **[P6]** `#T-133` 插件运行时 / JS API 测试迁移到当前入口
+  - 真实锚点：`tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs`、`src/ext/plugin/tests/suite_test.rs`
 - [ ] **[P6]** `#T-134` 清理已弃用的 `dispatch_event`
-  - 来源：`src/ext/instance_wasmedge.rs:221-231`
+  - 来源：`src/ext/instance_rquickjs.rs`
 
 ---
 
@@ -508,13 +508,11 @@
 
 - [ ] **[P7] `[REF]`** `#T-104-plat` 兼容 openclaw 生态
 
-- [ ] **[P7] `[REF]`** `#T-105` Standalone WasmEdge 下载和链接
-  - 从哪里下 `wasmEdge-0.13.5-darwin_x86_64.tar.gz`
-  - 怎么动态链接 `libwasmedge.0.0.3.dylib`
-  - 关联报告：[wasmedge-standalone-build-and-linking.md](reports/wasmedge-standalone-build-and-linking.md)
+- [x] **[P7] `[REF]`** `#T-105` 归档历史 WasmEdge 下载与链接方案
+  - `rquickjs` 迁移后不再需要 standalone WasmEdge 安装链路
 
-- [ ] **[P7] `[REF]`** `#T-106` 让用户用 install-wasmedge.sh 脚本安装
-  - 内连到二进制里
+- [x] **[P7] `[REF]`** `#T-106` 归档历史 install-wasmedge.sh 安装脚本
+  - 脚本已删除；保留历史背景仅供溯源
 
 - [ ] **[P7] `[REF]`** `#T-107` Android 支持
   - 学操作 SAAS 的 skill；通过 adb 或 Android API 操作

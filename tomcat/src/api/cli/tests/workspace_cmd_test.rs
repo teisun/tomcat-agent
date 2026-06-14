@@ -105,6 +105,7 @@ fn run_workspace_add_cwd_adds_current_dir() {
 
         let target = tempfile::tempdir().unwrap();
         let canon = std::fs::canonicalize(target.path()).unwrap();
+        let _cwd_lock = crate::test_support::cwd_lock().lock().unwrap();
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(target.path()).unwrap();
         let r = run_workspace(

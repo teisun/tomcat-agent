@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::ext::WasmInstance;
+use crate::ext::PluginVmInstance;
 use crate::infra::event_bus::EventListenerId;
 
 /// 插件清单（与 design CODE_BLOCK_P1_008 一致）。
@@ -64,12 +64,12 @@ pub enum PluginStatus {
     Error,
 }
 
-/// 单插件实例：持有 Wasm 实例、状态、注册的工具与事件监听 ID，卸载时清理。
+/// 单插件实例：持有插件 VM 实例、状态、注册的工具与事件监听 ID，卸载时清理。
 #[derive(Debug)]
 pub struct PluginInstance {
     pub id: String,
     pub manifest: PluginManifest,
-    pub wasm_instance: Option<WasmInstance>,
+    pub plugin_vm_instance: Option<PluginVmInstance>,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
     pub registered_commands: Vec<String>,
@@ -81,7 +81,7 @@ pub struct PluginInstance {
     pub plugin_root: PathBuf,
 }
 
-/// 只读插件信息（不含 Wasm 实例），用于 get_plugin 等查询。
+/// 只读插件信息（不含插件 VM 实例），用于 get_plugin 等查询。
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     pub id: String,

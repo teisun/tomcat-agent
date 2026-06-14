@@ -9,9 +9,9 @@ use std::time::Duration;
 use tomcat::{
     parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
     DefaultEventBus, DirEntry, EditFileResult, EditOperation, HostApiDispatcher, LlmProvider,
-    PluginInstance, PluginManager, PluginStatus, PrimitiveExecutor, PrimitiveOperation,
-    RuntimeManager, SharedRuntimeManager, StreamEvent, VmActorHandle, VmActorState, WasmEngine,
-    WasmEngineConfig, WriteFileResult,
+    PluginEngine, PluginEngineConfig, PluginInstance, PluginManager, PluginRuntimeManager,
+    PluginStatus, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent,
+    VmActorHandle, VmActorState, WriteFileResult,
 };
 
 fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
@@ -47,7 +47,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
         .register_plugin(PluginInstance {
             id: plugin_id.to_string(),
             manifest,
-            wasm_instance: None,
+            plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: vec![],
             registered_commands: vec![],
@@ -60,30 +60,49 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
         .unwrap();
 }
 
-fn make_manager() -> (PluginManager, SharedRuntimeManager) {
+fn make_manager() -> (PluginManager, SharedPluginRuntimeManager) {
     let bus = Arc::new(DefaultEventBus::new());
     let dispatcher = Arc::new(
         HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
     );
-    make_manager_with_dispatcher(bus, dispatcher)
+    make_manager_with_dispatcher_and_config(
+        bus,
+        dispatcher,
+        PluginEngineConfig {
+            call_timeout_ms: 500,
+            interrupt_budget: 50_000,
+            ..Default::default()
+        },
+    )
 }
 
 fn make_manager_with_dispatcher(
     bus: Arc<DefaultEventBus>,
     dispatcher: Arc<HostApiDispatcher>,
-) -> (PluginManager, SharedRuntimeManager) {
-    let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
-    let engine = WasmEngine::global(Some(WasmEngineConfig {
-        call_timeout_ms: 500,
-        interrupt_budget: 50_000,
-        ..Default::default()
-    }))
-    .expect("create quickjs engine");
+) -> (PluginManager, SharedPluginRuntimeManager) {
+    make_manager_with_dispatcher_and_config(
+        bus,
+        dispatcher,
+        PluginEngineConfig {
+            call_timeout_ms: 500,
+            interrupt_budget: 50_000,
+            ..Default::default()
+        },
+    )
+}
+
+fn make_manager_with_dispatcher_and_config(
+    bus: Arc<DefaultEventBus>,
+    dispatcher: Arc<HostApiDispatcher>,
+    engine_config: PluginEngineConfig,
+) -> (PluginManager, SharedPluginRuntimeManager) {
+    let rm: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
+    let engine = PluginEngine::global(Some(engine_config)).expect("create quickjs engine");
 
     let mut manager = PluginManager::new(bus);
-    manager.set_wasm_engine(engine);
+    manager.set_plugin_engine(engine);
     manager.set_host_dispatcher(dispatcher);
-    manager.set_runtime_manager(rm.clone());
+    manager.set_plugin_runtime_manager(rm.clone());
     manager.set_event_channel_capacity(16);
     (manager, rm)
 }
@@ -212,7 +231,7 @@ async fn wait_for_state(handle: &VmActorHandle, expected: VmActorState) -> bool 
 #[test]
 fn quickjs_engine_runs_bridge_and_hostcall() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let engine = WasmEngine::global(None)?;
+    let engine = PluginEngine::global(None)?;
     let mut instance = engine.create_instance("quickjs-smoke")?;
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = Arc::clone(&call_count);
@@ -236,7 +255,7 @@ fn quickjs_engine_runs_bridge_and_hostcall() -> Result<(), Box<dyn std::error::E
 #[test]
 fn run_script_console() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
-    let engine = WasmEngine::global(None)?;
+    let engine = PluginEngine::global(None)?;
     let mut instance = engine.create_instance("quickjs-console")?;
     let logs = Arc::new(Mutex::new(Vec::<String>::new()));
     let sink = Arc::clone(&logs);
@@ -305,6 +324,27 @@ pi.on("session_start", function () {
   const bytes = crypto.randomBytes(8);
   if (!Buffer.isBuffer(bytes) || bytes.length !== 8) {
     throw new Error("randomBytes mismatch");
+  }
+
+  const aesKey = Buffer.from("00000000000000000000000000000000", "hex");
+  const aesIv = Buffer.from("000000000000000000000000", "hex");
+  const aesPlaintext = Buffer.from("00000000000000000000000000000000", "hex");
+  const aesSealed = crypto.aesGcmEncrypt(aesKey, aesIv, aesPlaintext);
+  if (aesSealed.toString("hex") !== "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf") {
+    throw new Error("aes-gcm mismatch");
+  }
+  if (crypto.aesGcmDecrypt(aesKey, aesIv, aesSealed).toString("hex") !== aesPlaintext.toString("hex")) {
+    throw new Error("aes-gcm decrypt mismatch");
+  }
+
+  const edSeed = Buffer.from(
+    "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "hex"
+  );
+  const edPair = crypto.ed25519GenerateKeyPair(edSeed);
+  const edSignature = crypto.ed25519Sign(edPair.secretKey, Buffer.alloc(0));
+  if (!crypto.ed25519Verify(edPair.publicKey, Buffer.alloc(0), edSignature)) {
+    throw new Error("ed25519 verify mismatch");
   }
 });
 __pi_start_event_loop();
@@ -443,6 +483,75 @@ __pi_start_event_loop();
     assert!(
         !Arc::ptr_eq(&handle.state, &rebuilt.state),
         "rebuild should allocate a fresh VmActor handle"
+    );
+
+    manager.end_session("s1").await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(rm.is_empty(), "end_session should clear RuntimeManager");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runaway_plugin_timeout_interrupts_when_budget_disabled(
+) -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    let runaway_dir = create_plugin_dir(
+        "runaway-timeout-plugin",
+        r#"
+pi.on('loop', function () {
+  while (true) {}
+});
+__pi_start_event_loop();
+"#,
+    );
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(bus.clone()).with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let (manager, rm) = make_manager_with_dispatcher_and_config(
+        bus,
+        dispatcher,
+        PluginEngineConfig {
+            call_timeout_ms: 50,
+            interrupt_budget: 0,
+            ..Default::default()
+        },
+    );
+    register_plugin(&manager, runaway_dir.path(), "runaway-timeout-plugin");
+
+    let handle = manager
+        .start_session_vm("s1", "runaway-timeout-plugin")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    manager.dispatch_session_event(
+        "s1",
+        "runaway-timeout-plugin",
+        "loop",
+        serde_json::json!({}),
+        serde_json::json!({}),
+    )?;
+
+    assert!(
+        wait_for_state(&handle, VmActorState::Error).await,
+        "runaway plugin should enter Error when only call_timeout_ms is left enabled"
+    );
+
+    let rebuilt = manager
+        .start_session_vm("s1", "runaway-timeout-plugin")
+        .await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        matches!(
+            rebuilt.current_state(),
+            VmActorState::Created | VmActorState::Running | VmActorState::Idle
+        ),
+        "timed-out runtime should be cold-rebuilt on next start_session_vm"
+    );
+    assert!(
+        !Arc::ptr_eq(&handle.state, &rebuilt.state),
+        "timeout rebuild should allocate a fresh VmActor handle"
     );
 
     manager.end_session("s1").await?;

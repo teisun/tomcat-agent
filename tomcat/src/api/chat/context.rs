@@ -10,8 +10,8 @@ use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmati
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::ext::plugin::PluginCatalog;
 use crate::ext::{
-    HostApiDispatcher, PluginManager, PluginToolExecutor, RuntimeManager, SharedRuntimeManager,
-    WasmEngine,
+    HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginManager, PluginRuntimeManager,
+    PluginToolExecutor, SharedPluginRuntimeManager,
 };
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
@@ -846,6 +846,22 @@ fn build_plugin_runtime(
     primitive: Arc<dyn PrimitiveExecutor>,
     session: Arc<SessionManager>,
 ) -> Result<PluginRuntimeParts, AppError> {
+    if plugin_runtime_disabled_via_env() {
+        warn!("PI_PLUGIN_DISABLE enabled; skipping plugin runtime initialization");
+        let executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let tool_registry: Arc<dyn ToolRegistry> =
+            Arc::new(DefaultToolRegistry::new(executor, audit.clone()));
+        let dispatcher = Arc::new(
+            HostApiDispatcher::new(event_bus.clone())
+                .with_tools(tool_registry.clone())
+                .with_session(session)
+                .with_llm(llm)
+                .with_primitive(primitive)
+                .with_audit(audit),
+        );
+        return Ok((tool_registry, None, dispatcher));
+    }
+
     let mut plugin_manager = Arc::new(PluginManager::new(event_bus.clone()));
     let plugin_manager_strong_count = Arc::strong_count(&plugin_manager);
     let inner = Arc::get_mut(&mut plugin_manager).ok_or_else(|| {
@@ -854,10 +870,19 @@ fn build_plugin_runtime(
             plugin_manager_strong_count
         ))
     })?;
-    inner.set_wasm_engine(WasmEngine::global(None)?);
-    let runtime_manager: SharedRuntimeManager = Arc::new(RuntimeManager::new());
-    inner.set_runtime_manager(runtime_manager);
+    inner.set_plugin_engine(PluginEngine::global(Some(PluginEngineConfig {
+        quickjs_heap_mb: config.plugin.js_heap_mb,
+        call_timeout_ms: config.plugin.call_timeout_ms,
+        interrupt_budget: config.plugin.interrupt_budget,
+        idle_ttl_ms: config.plugin.idle_ttl_ms,
+    }))?);
+    let runtime_manager: SharedPluginRuntimeManager =
+        Arc::new(PluginRuntimeManager::with_idle_ttl(
+            std::time::Duration::from_millis(config.plugin.idle_ttl_ms),
+        ));
+    inner.set_plugin_runtime_manager(runtime_manager);
     inner.set_audit_recorder(audit.clone());
+    inner.set_event_channel_capacity(config.plugin.event_channel_capacity);
     inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
 
     let executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
@@ -937,6 +962,16 @@ fn build_plugin_runtime(
     }
 
     Ok((tool_registry, Some(plugin_manager), dispatcher))
+}
+
+fn plugin_runtime_disabled_via_env() -> bool {
+    match std::env::var("PI_PLUGIN_DISABLE") {
+        Ok(raw) => matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 #[allow(dead_code)]

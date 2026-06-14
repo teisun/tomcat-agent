@@ -217,6 +217,26 @@ fn run_doctor_is_always_ok() {
 }
 
 #[test]
+fn doctor_plugin_runtime_lines_report_success_exactly() {
+    let lines = crate::api::cli::init::doctor_plugin_runtime_lines(Ok(()));
+    assert_eq!(lines, vec!["✓ rquickjs 运行时：可用".to_string()]);
+}
+
+#[test]
+fn doctor_plugin_runtime_lines_report_failure_and_hint() {
+    let lines = crate::api::cli::init::doctor_plugin_runtime_lines(Err(AppError::Plugin(
+        "boom".to_string(),
+    )));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "✗ rquickjs 运行时：初始化失败 (插件错误: boom)");
+    assert!(
+        lines[1].contains("重新运行 tomcat init"),
+        "failure hint should guide the user toward recovery: {}",
+        lines[1]
+    );
+}
+
+#[test]
 #[serial(env_lock)]
 fn run_doctor_after_init_returns_ok() {
     with_temp_home(|| {

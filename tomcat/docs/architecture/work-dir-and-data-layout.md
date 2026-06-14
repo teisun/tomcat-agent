@@ -25,8 +25,7 @@
 | `media/` | 媒体文件 |
 | `subagents/` | 子 agent 注册表 |
 | `plugins/` | **全局**共享插件目录（所有 agent 均可加载） |
-| `assets/wasm/` | **全局** wasm 运行时引擎（共享的 wasmedge_quickjs.wasm 等，内嵌资源自动释放） |
-| `assets/modules/` | **全局** JS 兼容模块（内嵌资源自动释放，79 个 Node.js 兼容 shim） |
+| `assets/js/` | **全局** JS runtime/shim 资源（如 `pi_bridge.js`、`pi_crypto_shim.js`、`pi_node_shim.js` 等） |
 | `assets/.env` | 敏感配置（API Key 等），`tomcat init` 生成，权限 0600，`run_cli` 启动时 dotenvy 加载 |
 | `assets/.versions.json` | 内嵌资源版本记录（SHA-256 + extracted_at），`ensure_embedded_assets` 写入 |
 | `assets/.lock` | 并发写入保护文件锁（fs2 exclusive lock），`ensure_embedded_assets` 使用 |
@@ -50,7 +49,7 @@
   - `work_dir/workspace-main`（根级工作区，可配置覆盖）
   - `work_dir/memory`、`credentials`、`media`、`subagents`
   - `work_dir/plugins`（全局共享插件）
-  - `work_dir/assets/wasm`、`assets/modules`（全局资源）
+  - `work_dir/assets/js`（全局 runtime/shim 资源）
 
 ## 4. run_script 与临时文件
 

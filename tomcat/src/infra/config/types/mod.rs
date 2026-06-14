@@ -18,7 +18,7 @@ pub use tools::*;
 
 use serde::{Deserialize, Serialize};
 
-/// 应用顶层配置，聚合 log / llm / storage / agent / plugin / security / primitive / wasm 子配置。
+/// 应用顶层配置，聚合 log / llm / storage / agent / plugin / security / primitive 等子配置。
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -49,8 +49,6 @@ pub struct AppConfig {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
-    #[serde(default)]
-    pub wasm: WasmConfig,
     /// PLAN 模式运行时全局参数（T2-P1-002 PR-PLA/PLB）。
     #[serde(default)]
     pub plan: PlanConfig,

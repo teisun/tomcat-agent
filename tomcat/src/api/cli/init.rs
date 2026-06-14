@@ -5,8 +5,8 @@ use std::path::Path;
 
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, load_store,
-    normalize_path, resolve_quickjs_path, resolve_sessions_dir, validate_config, AppConfig,
-    AppError, WasmEngine, WasmEngineConfig, DEFAULT_LLM_MODEL,
+    normalize_path, resolve_sessions_dir, validate_config, AppConfig, AppError, PluginEngine,
+    DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;
@@ -82,7 +82,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     }
 
     ensure_embedded_assets(&cfg)?;
-    println!("  ✓ 内嵌资源已释放（wasm + modules）");
+    println!("  ✓ 内嵌资源目录已就绪");
 
     match std::env::current_exe() {
         Ok(exe) => {
@@ -215,50 +215,14 @@ pub(crate) fn run_doctor_checks(
         println!("✓ 内嵌资源已就绪");
     }
 
-    // --- QuickJS wasm ---
-    let resolved_qjs = resolve_quickjs_path(cfg);
-    match &resolved_qjs {
-        Some(p) => println!("✓ QuickJS wasm：{}", p.display()),
-        None => {
-            println!("✗ QuickJS wasm 未找到");
-            println!("  → 运行 tomcat init 释放内嵌资源");
-        }
-    }
-
     // --- rquickjs 运行时 ---
-    let wasm_cfg = WasmEngineConfig {
-        quickjs_path: resolved_qjs
-            .as_ref()
-            .and_then(|p| p.to_str())
-            .map(String::from),
-        ..Default::default()
-    };
-    match WasmEngine::global(Some(wasm_cfg)) {
-        Ok(_) => println!("✓ rquickjs 运行时：可用"),
-        Err(e) => {
-            println!("✗ rquickjs 运行时：初始化失败 ({})", e);
-            println!("  → 重新运行 tomcat init；若问题持续，请检查嵌入资源与本地构建产物");
-        }
-    }
-
-    // --- .versions.json SHA-256 ---
-    let work_dir = get_work_dir(cfg)?;
-    let versions_path = work_dir.join("assets").join(".versions.json");
-    if versions_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&versions_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                let wasm_sha = v["wasm_sha256"].as_str().unwrap_or("N/A");
-                let modules_sha = v["modules_sha256"].as_str().unwrap_or("N/A");
-                println!(
-                    "  资源版本: wasm={:.12}… modules={:.12}…",
-                    wasm_sha, modules_sha
-                );
-            }
-        }
+    for line in doctor_plugin_runtime_lines(PluginEngine::global(None).map(|_| ())) {
+        println!("{line}");
     }
 
     if !skip_api_key {
         // --- .env 检查 ---
+        let work_dir = get_work_dir(cfg)?;
         let env_path = work_dir.join("assets").join(".env");
         if env_path.exists() {
             #[cfg(unix)]
@@ -300,6 +264,19 @@ pub(crate) fn run_doctor_checks(
     Ok(())
 }
 
+pub(crate) fn doctor_plugin_runtime_lines(
+    probe: Result<(), AppError>,
+) -> Vec<String> {
+    match probe {
+        Ok(()) => vec!["✓ rquickjs 运行时：可用".to_string()],
+        Err(e) => vec![
+            format!("✗ rquickjs 运行时：初始化失败 ({})", e),
+            "  → 重新运行 tomcat init；若问题持续，请检查嵌入资源与本地构建产物"
+                .to_string(),
+        ],
+    }
+}
+
 pub(crate) fn run_doctor() -> Result<(), AppError> {
     let path = match normalize_path(DEFAULT_CONFIG_PATH) {
         Ok(p) if p.exists() => p,
@@ -309,7 +286,17 @@ pub(crate) fn run_doctor() -> Result<(), AppError> {
             return Ok(());
         }
     };
-    let cfg = load_config(Some(path.as_path()))?;
+    let cfg = match load_config(Some(path.as_path())) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            println!("✗ 配置加载失败: {}", e);
+            println!(
+                "  → 运行 tomcat init 重新生成或手动修复 {}",
+                path.display()
+            );
+            return Ok(());
+        }
+    };
     run_doctor_checks(&cfg, path.as_path(), false)?;
     Ok(())
 }

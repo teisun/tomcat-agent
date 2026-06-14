@@ -15,7 +15,7 @@
 - [6. 对话模式](#6-对话模式)
 - [7. 审计日志](#7-审计日志)
 - [8. 附录](#8-附录)
-- [9. Wasm / WasmEdge 与插件（建设中）](#9-wasm--wasmedge-与插件建设中)
+- [9. rquickjs 插件运行时](#9-rquickjs-插件运行时)
 
 ---
 
@@ -127,7 +127,7 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 │   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
 │   ├── .lock                      # 并发写入保护锁
 │   └── modules/                   # 内嵌资源自动释放（预留）
-├── plugins/                       # 插件目录（Wasm 能力建设中，见第 9 节）
+├── plugins/                       # 插件目录（见第 9 节）
 └── memory/                        # 向量检索索引
 ```
 
@@ -223,7 +223,7 @@ doctor 逐项检查环境并给出可执行的修复建议：
 | .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
 | API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
-每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。Wasm / 插件相关检查见 [第 9 节](#9-wasm--wasmedge-与插件建设中)（能力建设中）。
+每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。插件运行时相关检查见 [第 9 节](#9-rquickjs-插件运行时)。
 
 ---
 
@@ -610,7 +610,7 @@ tomcat code
 
 ## 7. 审计日志
 
-tomcat 将 4 原语操作、工具调用等记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。（插件相关审计类型见 [第 9 节](#9-wasm--wasmedge-与插件建设中)，能力建设中。）
+tomcat 将 4 原语操作、工具调用等记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。（插件相关审计类型见 [第 9 节](#9-rquickjs-插件运行时)。）
 
 **说明**：当前审计日志为明文存储；加密存储为后续 TODO。
 
@@ -753,30 +753,25 @@ tomcat code
 
 ---
 
-## 9. Wasm / WasmEdge 与插件（建设中）
+## 9. rquickjs 插件运行时
 
-> **状态**：Wasm 沙箱插件与 WasmEdge 运行时集成**尚未完成产品化建设**。默认 `cargo build --release` 为 no-wasm 构建，`tomcat plugin *` 与 `doctor` 中的 WasmEdge / QuickJS 检查仅在与 `--features wasmedge` 或 `standalone` 编译时才有意义。下文为规划中的操作预览，供后续验收参考。
+> **状态**：插件系统当前走**进程内 `rquickjs`**，不再依赖 WasmEdge、QuickJS wasm 文件或额外 C 运行时安装。`tomcat doctor` 只检查当前构建与 `rquickjs` 运行时是否可用。
 
-### 构建与依赖（预览）
+### 运行时特性
 
-| 依赖 | 版本要求 | 用途 |
-|------|----------|------|
-| WasmEdge C 库 | 0.13.5 | `--features wasmedge`（`scripts/install-wasmedge.sh`） |
-| CMake + C 编译器 | 任意 | `--features standalone`（构建时自动链接 WasmEdge） |
-
-```bash
-cd tomcat
-# cargo build --release --features wasmedge
-# cargo build --release --features standalone
-bash scripts/install-wasmedge.sh -y
-source $HOME/.wasmedge/env
-```
-
-`tomcat doctor` 在启用 Wasm feature 时会检查 QuickJS wasm（`~/.tomcat/assets/wasm/wasmedge_quickjs.wasm`）与 WasmEdge 运行时；默认构建会提示「当前构建未启用 Wasm/插件能力」，属预期。
-
-### 插件 CLI（预览）
-
-tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信息写入 `{work_dir}/plugins/registry.json`；进程内需 `plugin load` 载入 VM。
+- 入口仍是 `plugin.json` / `pi-plugin.json` + `main.js` / `main.ts`。
+- 敏感能力统一走 `pi.*` hostcall，例如 `pi.readFile()`、`pi.writeFile()`、`pi.editFile()`、`pi.exec()`。
+- `node:fs`、`node:child_process`、`node:os` 不会直接暴露给插件；会返回明确的 fail-closed 错误。
+- 当前默认提供的轻量能力包括：
+  - `path`
+  - `util.format`
+  - `events.EventEmitter`
+  - `Buffer`
+  - `crypto`（含 `hash` / `hmac` / `randomBytes` / `randomUUID` / `aes-gcm` / `ed25519`）
+  - `@sinclair/typebox`
+  - `ms`
+- 可用环境变量：
+  - `PI_PLUGIN_DISABLE=1|true|yes|on`：整套插件运行时入口短路。
 
 **最小插件示例**
 
@@ -821,7 +816,8 @@ pi.log("my-plugin: 已加载");
 说明：
 
 - 敏感能力一律走 `pi.*`，例如读写文件用 `pi.readFile()` / `pi.writeFile()`，执行命令用 `pi.exec()`。
-- `node:fs`、`node:child_process` 等 Node 内置模块不会直接暴露给插件；当前只保留 `path`、`util.format`、`events.EventEmitter`、`Buffer`、`crypto` 这 5 块轻量兼容能力。
+- `node:fs`、`node:child_process` 等 Node 内置模块不会直接暴露给插件；当前只保留少量轻量能力与 fail-closed alias。
+- 加载期 `requiredPermissions` 本期默认放行，但真正敏感的文件/命令/会话能力仍由 `pi.*` 路由统一鉴权与审计。
 
 ```bash
 tomcat plugin load ~/tomcat-plugins/my-plugin
@@ -831,5 +827,7 @@ tomcat plugin disable my-plugin
 tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
+
+注册信息会写入 `{work_dir}/plugins/registry.json`。`tomcat plugin load` 会执行一次短生命周期初始化校验；真正的长生命周期 session VM 则在会话里首次用到该插件时按需创建。
 
 实现细节见 [src/ext/README.md](../src/ext/README.md)。

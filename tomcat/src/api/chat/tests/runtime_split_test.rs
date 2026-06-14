@@ -41,14 +41,19 @@ impl Drop for EnvGuard {
 }
 
 struct CurrentDirGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
     previous: PathBuf,
 }
 
 impl CurrentDirGuard {
     fn set(path: &Path) -> Self {
+        let lock = crate::test_support::cwd_lock().lock().unwrap();
         let previous = std::env::current_dir().expect("current_dir");
         std::env::set_current_dir(path).expect("set_current_dir");
-        Self { previous }
+        Self {
+            _lock: lock,
+            previous,
+        }
     }
 }
 
@@ -63,6 +68,244 @@ fn make_config(work_dir: &Path, api_env: &str) -> AppConfig {
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(api_env.to_string());
     cfg
+}
+
+async fn assert_plugin_runtime_disabled_for_env_value(raw: &str) {
+    const API_ENV: &str = "TOMCAT_PLUGIN_DISABLE_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _disable_guard = EnvGuard::set("PI_PLUGIN_DISABLE", raw);
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_plugin_fixture(
+        workspace.path(),
+        "disabled-plugin",
+        "lazy",
+        &["disabled_tool"],
+        r#"
+pi.registerTool({
+  name: "disabled_tool",
+  description: "should not load",
+  parameters: { type: "object", properties: {} },
+  execute: function () { return { ok: true }; }
+});
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    assert!(
+        ctx.global_services.plugin_manager.is_none(),
+        "PI_PLUGIN_DISABLE={raw} 时不应初始化 PluginManager"
+    );
+    assert!(
+        list_tool_names(&ctx).await.is_empty(),
+        "禁用插件运行时后不应物化任何插件工具"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn plugin_runtime_can_be_disabled_via_env() {
+    for raw in ["1", "true", "yes", "on"] {
+        assert_plugin_runtime_disabled_for_env_value(raw).await;
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn plugin_runtime_uses_plugin_config_values() {
+    const API_ENV: &str = "TOMCAT_PLUGIN_CONFIG_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    let mut cfg = make_config(work_dir.path(), API_ENV);
+    cfg.plugin.js_heap_mb = 8;
+    cfg.plugin.call_timeout_ms = 1_234;
+    cfg.plugin.interrupt_budget = 9_876;
+    cfg.plugin.event_channel_capacity = 7;
+    cfg.plugin.idle_ttl_ms = 4_321;
+
+    let ctx = ChatContext::from_config(cfg).expect("ctx");
+    let plugin_manager = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+    let engine_cfg = plugin_manager
+        .configured_engine_config()
+        .expect("configured engine");
+    assert_eq!(engine_cfg.quickjs_heap_mb, 8);
+    assert_eq!(engine_cfg.call_timeout_ms, 1_234);
+    assert_eq!(engine_cfg.interrupt_budget, 9_876);
+    assert_eq!(engine_cfg.idle_ttl_ms, 4_321);
+    assert_eq!(plugin_manager.configured_event_channel_capacity(), 7);
+    assert_eq!(
+        plugin_manager.configured_idle_ttl(),
+        Some(Duration::from_millis(4_321))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn configured_js_heap_mb_enforces_memory_limit() {
+    const API_ENV: &str = "TOMCAT_HEAP_LIMIT_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_plugin_fixture(
+        workspace.path(),
+        "heap-limit-plugin",
+        "lazy",
+        &["alloc_echo"],
+        r#"
+pi.registerTool({
+  name: "alloc_echo",
+  description: "allocate a large buffer",
+  parameters: { type: "object", properties: {} },
+  execute: function () {
+    globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
+    return { allocated: globalThis.__hold.length };
+  }
+});
+"#,
+    );
+
+    let mut cfg = make_config(work_dir.path(), API_ENV);
+    cfg.plugin.js_heap_mb = 1;
+
+    let ctx = ChatContext::from_config(cfg).expect("ctx");
+    let session_id = current_session_id(&ctx);
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        ctx.global_services
+            .tool_registry
+            .call_tool("alloc_echo", json!({}), "__test__", Some(&session_id)),
+    )
+    .await
+    .expect("heap-limited tool call should not hang")
+    .expect_err("1MB heap should reject a 4MB allocation");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("QuickJS")
+            || message.contains("JS执行错误")
+            || message.to_ascii_lowercase().contains("memory"),
+        "heap limit failure should surface as a QuickJS-side error, got: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn configured_js_heap_zero_disables_memory_limit() {
+    const API_ENV: &str = "TOMCAT_HEAP_UNLIMITED_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_plugin_fixture(
+        workspace.path(),
+        "heap-unlimited-plugin",
+        "lazy",
+        &["alloc_echo"],
+        r#"
+pi.registerTool({
+  name: "alloc_echo",
+  description: "allocate a large buffer",
+  parameters: { type: "object", properties: {} },
+  execute: function () {
+    globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
+    return { allocated: globalThis.__hold.length };
+  }
+});
+"#,
+    );
+
+    let mut cfg = make_config(work_dir.path(), API_ENV);
+    cfg.plugin.js_heap_mb = 0;
+
+    let ctx = ChatContext::from_config(cfg).expect("ctx");
+    let session_id = current_session_id(&ctx);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        ctx.global_services
+            .tool_registry
+            .call_tool("alloc_echo", json!({}), "__test__", Some(&session_id)),
+    )
+    .await
+    .expect("unbounded heap tool call should not hang")
+    .expect("heap=0 should disable the memory limit");
+
+    assert_eq!(
+        result
+            .get("content")
+            .and_then(|value| value.get("allocated"))
+            .and_then(|value| value.as_u64()),
+        Some(4 * 1024 * 1024),
+        "heap=0 should allow the full allocation to succeed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn chat_context_discovers_workspace_catalog_plugins() {
+    const API_ENV: &str = "TOMCAT_CATALOG_DISCOVERY_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_plugin_fixture(
+        workspace.path(),
+        "catalog-plugin",
+        "lazy",
+        &["catalog_echo"],
+        r#"
+pi.registerTool({
+  name: "catalog_echo",
+  description: "catalog tool",
+  parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+  execute: function (_callId, params) {
+    return { plugin: "catalog-plugin", echo: params.text };
+  }
+});
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let pm = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+    let mut loaded = pm.list_loaded();
+    loaded.sort();
+
+    assert_eq!(loaded, vec!["catalog-plugin".to_string()]);
+    assert_eq!(list_tool_names(&ctx).await, vec!["catalog_echo".to_string()]);
+    let info = pm.get_plugin("catalog-plugin").expect("catalog plugin info");
+    assert_eq!(info.loaded_at, 0, "catalog discovery should register a stub only");
 }
 
 fn current_session_id(ctx: &ChatContext) -> String {
@@ -94,6 +337,17 @@ fn write_plugin_fixture(
     tools: &[&str],
     script: &str,
 ) {
+    write_plugin_fixture_with_permissions(workspace, plugin_id, activation, tools, &[], script);
+}
+
+fn write_plugin_fixture_with_permissions(
+    workspace: &Path,
+    plugin_id: &str,
+    activation: &str,
+    tools: &[&str],
+    required_permissions: &[&str],
+    script: &str,
+) {
     let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let tool_defs = tools
@@ -119,7 +373,7 @@ fn write_plugin_fixture(
         "description": format!("fixture {plugin_id}"),
         "author": "tests",
         "main": "main.js",
-        "requiredPermissions": [],
+        "requiredPermissions": required_permissions,
         "requiredApiVersion": "1.0",
         "tags": [],
         "tools": tool_defs,
@@ -132,6 +386,56 @@ fn write_plugin_fixture(
     )
     .expect("write plugin manifest");
     fs::write(plugin_dir.join("main.js"), script).expect("write plugin main");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn chat_context_loads_auto_load_plugin_with_permissions_by_default() {
+    const API_ENV: &str = "TOMCAT_PERMISSION_AUTOLOAD_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_plugin_fixture_with_permissions(
+        workspace.path(),
+        "permission-auto-load",
+        "lazy",
+        &[],
+        &["read", "bash"],
+        r#"
+pi.registerTool({
+  name: "permission_echo",
+  description: "autoload permission-gated tool",
+  parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+  execute: function (_callId, params) {
+    return { plugin: "permission-auto-load", echo: params.text };
+  }
+});
+"#,
+    );
+
+    let mut cfg = make_config(work_dir.path(), API_ENV);
+    cfg.plugin.auto_load = vec!["permission-auto-load".to_string()];
+
+    let ctx = ChatContext::from_config(cfg).expect("ctx");
+    let pm = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+
+    assert_eq!(list_tool_names(&ctx).await, vec!["permission_echo".to_string()]);
+    let info = pm
+        .get_plugin("permission-auto-load")
+        .expect("auto-loaded permission plugin");
+    assert!(
+        info.loaded_at > 0,
+        "auto-load should execute the plugin even when requiredPermissions is non-empty"
+    );
 }
 
 #[test]

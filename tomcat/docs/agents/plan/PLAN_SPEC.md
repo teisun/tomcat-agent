@@ -219,7 +219,7 @@ todos:
 
 - 对应的 [E2E_SCENARIO_LIBRARY.md](../../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md) 场景或待新增项；
 - `tests/` 下的集成测试落点；
-- 必要时 `tests/cli_tests.rs` / `tests/wasmedge_e2e_tests.rs` 的覆盖点；
+- 必要时 `tests/cli_tests.rs` / `tests/quickjs_e2e_tests.rs` / 其他当前有效插件运行时测试入口的覆盖点；
 - 交付前全量门禁按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../INTEGRATION_MERGE_AND_ACCEPTANCE.md) 执行。
 
 纯内部重构可以写“不适用”，但必须补一句理由。

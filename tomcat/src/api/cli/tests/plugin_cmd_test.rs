@@ -95,6 +95,43 @@ fn run_plugin_unload_not_found_returns_ok() {
 }
 
 #[test]
+fn run_plugin_unload_removes_registered_entry_even_without_live_manager_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(dir.path());
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+
+    let reg_path = crate::resolve_plugins_dir(&cfg)
+        .unwrap()
+        .join("registry.json");
+    save_plugin_registry(
+        &reg_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "registered-only-plugin".to_string(),
+                path: "/tmp/registered-only-plugin".to_string(),
+                enabled: true,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .expect("seed registry");
+
+    let r = run_plugin(
+        PluginSub::Unload {
+            id: "registered-only-plugin".to_string(),
+        },
+        &cfg,
+    );
+    assert!(r.is_ok());
+
+    let registry = load_plugin_registry(&reg_path);
+    assert!(
+        registry.plugins.is_empty(),
+        "unload should clear registry-only entries even when no live PluginManager state exists"
+    );
+}
+
+#[test]
 fn run_plugin_enable_not_found_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = test_config(dir.path());
@@ -120,4 +157,50 @@ fn run_plugin_disable_not_found_returns_ok() {
         &cfg,
     );
     assert!(r.is_ok());
+}
+
+#[test]
+fn run_plugin_load_defaults_to_allow_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(dir.path());
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+
+    let plugin_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        plugin_dir.path().join("plugin.json"),
+        r#"{
+  "id": "perm-allow-plugin",
+  "name": "Perm Allow Plugin",
+  "version": "0.1.0",
+  "description": "test",
+  "author": "tests",
+  "main": "main.js",
+  "requiredPermissions": ["read", "bash"],
+  "requiredApiVersion": "1.0",
+  "tags": []
+}"#,
+    )
+    .unwrap();
+    std::fs::write(plugin_dir.path().join("main.js"), "1 + 1;").unwrap();
+
+    let r = run_plugin(
+        PluginSub::Load {
+            path: plugin_dir.path().to_string_lossy().to_string(),
+        },
+        &cfg,
+    );
+    assert!(r.is_ok());
+
+    let registry = load_plugin_registry(
+        &crate::resolve_plugins_dir(&cfg)
+            .unwrap()
+            .join("registry.json"),
+    );
+    assert!(
+        registry
+            .plugins
+            .iter()
+            .any(|entry| entry.id == "perm-allow-plugin"),
+        "默认放行权限后应成功写入注册表"
+    );
 }

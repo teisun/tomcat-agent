@@ -8,11 +8,6 @@ license = "MIT"
 name = "tomcat"
 path = "src/main.rs"
 
-[features]
-default = []
-wasmedge = ["dep:wasmedge-sdk"]
-standalone = ["wasmedge", "wasmedge-sdk/standalone"]
-
 [dependencies]
 thiserror = "2.0"
 anyhow = "1.0"
@@ -40,8 +35,6 @@ dashmap = "6"
 rustyline = "18.0.0"
 syntect = "5"
 ctrlc = { version = "3", features = ["termination"] }
-# 0.13.5-newapi 对应 WasmEdge C 0.13.5，与 install-wasmedge.sh 默认版本一致
-wasmedge-sdk = { version = "0.13.5-newapi", features = ["aot"], optional = true }
 swc_common = "18.0.1"
 swc_ecma_ast = "20.0.1"
 swc_ecma_codegen = "23.0.0"
@@ -66,6 +59,8 @@ html2md = "0.2.15"
 rquickjs = { version = "0.12.0", features = ["futures"] }
 getrandom = "0.4.2"
 uuid = { version = "1.23.3", features = ["v4"] }
+aes-gcm = "0.10.3"
+ed25519-dalek = "2.2.0"
 
 # Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
 # （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。
@@ -93,12 +88,3 @@ tokio = { version = "1.0", features = ["test-util"] }
 serial_test = "3.4.0"
 wiremock = "0.6.5"
 
-[[test]]
-name = "wasmedge_e2e_tests"
-path = "tests/wasmedge_e2e_tests.rs"
-required-features = ["wasmedge"]
-
-[[test]]
-name = "js_api_alignment_tests"
-path = "tests/js_api_alignment_tests.rs"
-required-features = ["wasmedge"]

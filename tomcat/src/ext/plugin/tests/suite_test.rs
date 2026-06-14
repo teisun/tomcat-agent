@@ -6,7 +6,8 @@ use crate::core::tools::contract::registry::{
     DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry,
 };
 use crate::ext::{
-    HostApiDispatcher, RuntimeManager, SharedRuntimeManager, VmRuntimeKey, WasmEngine,
+    HostApiDispatcher, PluginEngine, PluginRuntimeKey, PluginRuntimeManager,
+    SharedPluginRuntimeManager,
 };
 use crate::infra::error::AppError;
 use crate::infra::{DefaultEventBus, TracingAuditRecorder};
@@ -67,7 +68,20 @@ fn manager_with_runtime() -> (
     PluginManager,
     Arc<HostApiDispatcher>,
     Arc<DefaultToolRegistry>,
-    SharedRuntimeManager,
+    SharedPluginRuntimeManager,
+) {
+    manager_with_runtime_and_idle_ttl(Duration::from_millis(
+        crate::ext::DEFAULT_PLUGIN_IDLE_TTL_MS,
+    ))
+}
+
+fn manager_with_runtime_and_idle_ttl(
+    idle_ttl: Duration,
+) -> (
+    PluginManager,
+    Arc<HostApiDispatcher>,
+    Arc<DefaultToolRegistry>,
+    SharedPluginRuntimeManager,
 ) {
     let bus = Arc::new(DefaultEventBus::new());
     let tool_registry = Arc::new(DefaultToolRegistry::new(
@@ -76,10 +90,11 @@ fn manager_with_runtime() -> (
     ));
     let dispatcher =
         Arc::new(HostApiDispatcher::new(bus.clone()).with_tools(tool_registry.clone()));
-    let runtime_manager: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+    let runtime_manager: SharedPluginRuntimeManager =
+        Arc::new(PluginRuntimeManager::with_idle_ttl(idle_ttl));
     let mut manager = PluginManager::new(bus);
-    manager.set_wasm_engine(WasmEngine::global(None).expect("create quickjs engine"));
-    manager.set_runtime_manager(runtime_manager.clone());
+    manager.set_plugin_engine(PluginEngine::global(None).expect("create quickjs engine"));
+    manager.set_plugin_runtime_manager(runtime_manager.clone());
     manager.set_tool_registry(tool_registry.clone());
     manager.set_host_dispatcher(dispatcher.clone());
     manager.set_audit_recorder(Arc::new(TracingAuditRecorder));
@@ -142,7 +157,7 @@ fn manager_register_and_unload() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
         registered_commands: vec![],
@@ -178,7 +193,7 @@ fn get_plugin_returns_some_after_register_none_for_unknown() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
         registered_commands: vec![],
@@ -216,7 +231,7 @@ fn register_plugin_duplicate_returns_err() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
         registered_commands: vec![],
@@ -243,7 +258,7 @@ fn register_plugin_duplicate_returns_err() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
         registered_commands: vec![],
@@ -278,7 +293,7 @@ fn enable_disable_changes_status() {
             events: vec![],
             activation: PluginActivation::Lazy,
         },
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
         registered_commands: vec![],
@@ -337,7 +352,7 @@ fn load_plugin_without_wasm_engine_returns_err() {
     std::fs::write(tmp.path().join("index.js"), "// empty").unwrap();
     let r = manager.load_plugin(tmp.path());
     assert!(r.is_err());
-    assert!(r.unwrap_err().to_string().contains("set_wasm_engine"));
+    assert!(r.unwrap_err().to_string().contains("set_plugin_engine"));
 }
 
 #[test]
@@ -353,7 +368,7 @@ fn load_plugin_nonexistent_path_returns_err() {
 fn load_plugin_dir_without_manifest_returns_err() {
     let bus = Arc::new(DefaultEventBus::new());
     let mut manager = PluginManager::new(bus);
-    let _ = crate::ext::WasmEngine::global(None).map(|e| manager.set_wasm_engine(e));
+    let _ = crate::ext::PluginEngine::global(None).map(|e| manager.set_plugin_engine(e));
     let tmp = tempfile::tempdir().unwrap();
     let r = manager.load_plugin(tmp.path());
     assert!(r.is_err());
@@ -369,11 +384,11 @@ fn load_plugin_dir_without_manifest_returns_err() {
 fn load_plugin_user_deny_returns_permission_err() {
     let bus = Arc::new(DefaultEventBus::new());
     let mut manager = PluginManager::new(bus);
-    let engine = match crate::ext::WasmEngine::global(None) {
+    let engine = match crate::ext::PluginEngine::global(None) {
         Ok(e) => e,
         Err(_) => return,
     };
-    manager.set_wasm_engine(engine);
+    manager.set_plugin_engine(engine);
     manager.set_confirm_permissions(Arc::new(|_| Ok(false)));
 
     let tmp = tempfile::tempdir().unwrap();
@@ -459,7 +474,7 @@ pi.on("cleanup_evt", function () {});
         "plugin should register at least one event listener side effect"
     );
 
-    let vm_key = VmRuntimeKey::new("suite-session", "cleanup-plugin");
+    let vm_key = PluginRuntimeKey::new("suite-session", "cleanup-plugin");
     manager
         .start_session_vm("suite-session", "cleanup-plugin")
         .await
@@ -550,4 +565,59 @@ pi.registerTool({
         .expect("surface tool should be discoverable");
     assert_eq!(tool.plugin_id, "surface-plugin");
     assert_eq!(tool.name, "surface_echo");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_session_vm_opportunistically_reaps_expired_runtime() {
+    let stale_fixture = plugin_fixture(
+        "stale-plugin",
+        serde_json::json!([]),
+        PluginActivation::Lazy,
+        "pi.on('noop', function () {});",
+    );
+    let fresh_fixture = plugin_fixture(
+        "fresh-plugin",
+        serde_json::json!([]),
+        PluginActivation::Lazy,
+        "pi.on('noop', function () {});",
+    );
+    let (manager, _dispatcher, _tool_registry, runtime_manager) =
+        manager_with_runtime_and_idle_ttl(Duration::from_millis(5));
+
+    manager
+        .load_plugin(stale_fixture.path())
+        .expect("load stale plugin");
+    manager
+        .load_plugin(fresh_fixture.path())
+        .expect("load fresh plugin");
+
+    let stale_key = PluginRuntimeKey::new("stale-session", "stale-plugin");
+    manager
+        .start_session_vm("stale-session", "stale-plugin")
+        .await
+        .expect("start stale session vm");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        runtime_manager.contains(&stale_key),
+        "stale runtime should exist before opportunistic reap"
+    );
+
+    manager
+        .start_session_vm("fresh-session", "fresh-plugin")
+        .await
+        .expect("start fresh session vm");
+
+    assert!(
+        !runtime_manager.contains(&stale_key),
+        "starting another plugin session should opportunistically reap expired runtimes"
+    );
+
+    manager
+        .end_session("fresh-session")
+        .await
+        .expect("cleanup fresh session");
+    manager
+        .end_session("stale-session")
+        .await
+        .expect("cleanup stale session");
 }

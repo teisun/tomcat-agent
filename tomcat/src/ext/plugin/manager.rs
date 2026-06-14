@@ -1,6 +1,6 @@
 //! # PluginManager 插件生命周期管理
 //!
-//! WASM 插件的全生命周期管理器：从磁盘加载 manifest + 主脚本（TS→QuickJS），
+//! 插件的全生命周期管理器：从磁盘加载 manifest + 主脚本（TS→QuickJS），
 //! 注册到内存表，按需启用/禁用，会话级启动专属 VmActor 并桥接 hostcall，
 //! 卸载时清理所有副作用（EventBus listeners / ToolRegistry / VM / async 票据）。
 //!
@@ -12,7 +12,7 @@
 //! │  ① 磁盘                                                                  │
 //! │   plugin/                                                                │
 //! │   ├─ pi-plugin.json    ─┐                                                │
-//! │   └─ <main>.{ts,js,wasm}┴──► load_plugin(path)                           │
+//! │   └─ <main>.{ts,js}   ────► load_plugin(path)                           │
 //! │                                  │ resolve_manifest_and_root             │
 //! │                                  │ read_main_script + transpile_ts      │
 //! │                                  ▼                                      │
@@ -24,9 +24,9 @@
 //! │                       start_session_vm(plugin_id, sid)  │                │
 //! │                                                         ▼                │
 //! │  ④ Active   VmActor + VmActorHandle 注册到 plugins[id].sessions[sid]    │
-//! │                ├─ wasm_engine 创建 instance                              │
+//! │                ├─ plugin_engine 创建 instance                            │
 //! │                ├─ host_dispatcher 注册 EventChannel                       │
-//! │                └─ confirm_permissions 询问敏感能力                        │
+//! │                └─ confirm_permissions 可选确认（默认放行）                 │
 //! │                                                         │                │
 //! │              dispatch_session_event ─► VmCommand ─► VmActor ─► JS 钩子   │
 //! │                                                         │                │
@@ -40,7 +40,7 @@
 //! │                  ├─ event_bus.remove_plugin_listeners(id)                │
 //! │                  ├─ tools.unregister_plugin_tools(id)                    │
 //! │                  ├─ host_dispatcher.cleanup_instance(id)                 │
-//! │                  └─ runtime_manager.evict(VmRuntimeKey)                  │
+//! │                  └─ plugin_runtime_manager.evict(PluginRuntimeKey)       │
 //! │                                                                          │
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -51,17 +51,17 @@
 //! | --------------------- | ----------------------------------------- |
 //! | `tools`               | `ToolRegistry`：注册/注销插件工具         |
 //! | `audit`               | `AuditRecorder`：插件生命周期审计         |
-//! | `wasm_engine`         | `WasmEngine`：WASM 实例化与 host_func 注册 |
+//! | `plugin_engine`       | `PluginEngine`：插件 VM 实例化与 host_func 注册 |
 //! | `host_dispatcher`     | `HostApiDispatcher`：插件→宿主 hostcall    |
-//! | `confirm_permissions` | 敏感权限交互回调（CLI / TUI 二选一）       |
-//! | `runtime_manager`     | 复用 QuickJS / WASM 实例池                |
+//! | `confirm_permissions` | 加载期权限确认扩展点（默认可不注入/默认放行） |
+//! | `plugin_runtime_manager` | 复用插件 VM 实例池                    |
 //!
 //! ## 与同族子模块的边界
 //!
 //! - **本文件**：生命周期 + 实例表 + 事件分发入口。
 //! - `types.rs`：`PluginInstance` / `PluginManifest` / `PluginStatus` / `PluginInfo`。
 //! - 跨 actor：`vm_actor::{VmActor, VmCommand, EventEnvelope}` 提供单插件单 VM 的
-//!   消息隔离；`runtime_manager` 跨插件共享 QuickJS / WASM engine。
+//!   消息隔离；`runtime_manager` 跨插件共享插件 VM 实例。
 
 use super::types::{
     ConfirmPermissionsFn, PluginInfo, PluginInstance, PluginManifest, PluginStatus,
@@ -76,12 +76,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::ext::runtime_manager::{SharedRuntimeManager, VmRuntimeKey};
+use crate::ext::runtime_manager::{PluginRuntimeKey, SharedPluginRuntimeManager};
 use crate::ext::ts_compiler::transpile_pi_plugin_for_quickjs;
 use crate::ext::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmActorState, VmCommand};
-use crate::ext::{
-    invoke_host_func_with, HostApiDispatcher, WasmEngine, DEFAULT_PLUGIN_IDLE_TTL_MS,
-};
+use crate::ext::{invoke_host_func_with, HostApiDispatcher, PluginEngine};
 
 use super::types::parse_manifest;
 
@@ -90,11 +88,11 @@ pub struct PluginManager {
     event_bus: Arc<dyn EventBus>,
     tools: RwLock<Option<Arc<dyn ToolRegistry>>>,
     plugins: RwLock<HashMap<String, PluginInstance>>,
-    wasm_engine: Option<Arc<WasmEngine>>,
+    plugin_engine: Option<Arc<PluginEngine>>,
     host_dispatcher: RwLock<Option<Arc<HostApiDispatcher>>>,
     confirm_permissions: Option<Arc<ConfirmPermissionsFn>>,
     audit: Option<Arc<dyn AuditRecorder>>,
-    runtime_manager: Option<SharedRuntimeManager>,
+    plugin_runtime_manager: Option<SharedPluginRuntimeManager>,
     event_channel_capacity: usize,
 }
 
@@ -104,11 +102,11 @@ impl PluginManager {
             event_bus,
             tools: RwLock::new(None),
             plugins: RwLock::new(HashMap::new()),
-            wasm_engine: None,
+            plugin_engine: None,
             host_dispatcher: RwLock::new(None),
             confirm_permissions: None,
             audit: None,
-            runtime_manager: None,
+            plugin_runtime_manager: None,
             event_channel_capacity: 64,
         }
     }
@@ -123,9 +121,9 @@ impl PluginManager {
         self.audit = Some(a);
     }
 
-    /// 注入 WasmEngine；load_plugin 前必须设置，否则加载返回错误。
-    pub fn set_wasm_engine(&mut self, engine: Arc<WasmEngine>) {
-        self.wasm_engine = Some(engine);
+    /// 注入 PluginEngine；load_plugin 前必须设置，否则加载返回错误。
+    pub fn set_plugin_engine(&mut self, engine: Arc<PluginEngine>) {
+        self.plugin_engine = Some(engine);
     }
 
     /// 注入 HostApiDispatcher；未设置时 load_plugin 仍可执行，插件内 host 调用走桩响应。
@@ -138,7 +136,7 @@ impl PluginManager {
         self.confirm_permissions = Some(f);
     }
 
-    /// 从磁盘路径完整加载插件：读清单与 main → 权限校验与用户确认 → 创建 Wasm 实例 → 注册宿主 API → 执行初始化代码 → 注册到管理器。
+    /// 从磁盘路径完整加载插件：读清单与 main → 权限校验（可选确认） → 创建插件 VM 实例 → 注册宿主 API → 执行初始化代码 → 注册到管理器。
     pub fn load_plugin(&self, path: impl AsRef<Path>) -> Result<(), AppError> {
         let path = path.as_ref();
         let (plugin_root, manifest) = match self.resolve_manifest_and_root(path) {
@@ -186,14 +184,14 @@ impl PluginManager {
             }
         }
 
-        let engine = self.wasm_engine.as_ref().ok_or_else(|| {
-            AppError::Plugin("load_plugin 需要先调用 set_wasm_engine 注入引擎".to_string())
+        let engine = self.plugin_engine.as_ref().ok_or_else(|| {
+            AppError::Plugin("load_plugin 需要先调用 set_plugin_engine 注入引擎".to_string())
         })?;
 
         let mut instance = match engine.create_instance(&manifest.id) {
             Ok(i) => i,
             Err(e) => {
-                let err = AppError::Plugin(format!("创建 Wasm 实例失败: {}", e));
+                let err = AppError::Plugin(format!("创建插件 VM 实例失败: {}", e));
                 if let Some(ref a) = self.audit {
                     a.record_plugin_lifecycle(PluginLifecycleAuditEntry {
                         plugin_id: manifest.id.clone(),
@@ -253,7 +251,7 @@ impl PluginManager {
         let plugin_instance = PluginInstance {
             id: manifest.id.clone(),
             manifest: manifest.clone(),
-            wasm_instance: Some(instance),
+            plugin_vm_instance: Some(instance),
             status: PluginStatus::Loaded,
             registered_tools: manifest_tool_names,
             registered_commands: vec![],
@@ -391,7 +389,7 @@ impl PluginManager {
         let instance = PluginInstance {
             id: manifest.id.clone(),
             manifest,
-            wasm_instance: None,
+            plugin_vm_instance: None,
             status: PluginStatus::Enabled,
             registered_tools: manifest_tool_names,
             registered_commands: vec![],
@@ -414,7 +412,8 @@ impl PluginManager {
             }
             Entry::Occupied(mut slot) => {
                 let existing = slot.get();
-                if existing.wasm_instance.is_none() && existing.plugin_root == instance.plugin_root
+                if existing.plugin_vm_instance.is_none()
+                    && existing.plugin_root == instance.plugin_root
                 {
                     slot.insert(instance);
                     Ok(())
@@ -434,7 +433,7 @@ impl PluginManager {
                 Ok(())
             }
             Entry::Occupied(mut slot) => {
-                if slot.get().wasm_instance.is_none() {
+                if slot.get().plugin_vm_instance.is_none() {
                     slot.insert(instance);
                     Ok(())
                 } else {
@@ -444,7 +443,7 @@ impl PluginManager {
         }
     }
 
-    /// 按 ID 获取插件信息（只读，不含 Wasm 实例）。
+    /// 按 ID 获取插件信息（只读，不含插件 VM 实例）。
     pub fn get_plugin(&self, plugin_id: &str) -> Option<PluginInfo> {
         self.sync_registered_capabilities(plugin_id);
         let map = self.plugins.read();
@@ -517,9 +516,9 @@ impl PluginManager {
         Ok(())
     }
 
-    /// 注入长生命周期 VM 运行时管理器。
-    pub fn set_runtime_manager(&mut self, rm: SharedRuntimeManager) {
-        self.runtime_manager = Some(rm);
+    /// 注入长生命周期插件 VM 运行时管理器。
+    pub fn set_plugin_runtime_manager(&mut self, rm: SharedPluginRuntimeManager) {
+        self.plugin_runtime_manager = Some(rm);
     }
 
     /// 设置事件 channel 容量（默认 64）。
@@ -533,28 +532,26 @@ impl PluginManager {
         session_id: &str,
         plugin_id: &str,
     ) -> Result<VmActorHandle, AppError> {
-        let key = VmRuntimeKey::new(session_id, plugin_id);
-        let rm = self
-            .runtime_manager
+        let key = PluginRuntimeKey::new(session_id, plugin_id);
+        let runtime_manager = self
+            .plugin_runtime_manager
             .as_ref()
-            .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
+            .ok_or_else(|| AppError::Plugin("plugin_runtime_manager not set".into()))?;
 
-        for (expired_key, expired_handle) in
-            rm.reap_idle(std::time::Duration::from_millis(DEFAULT_PLUGIN_IDLE_TTL_MS))
-        {
+        for (expired_key, expired_handle) in runtime_manager.reap_configured_idle() {
             let _ = expired_handle.shutdown().await;
             if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                 dispatcher.cleanup_instance(&expired_key.to_string());
             }
         }
 
-        if let Some(existing) = rm.get(&key) {
+        if let Some(existing) = runtime_manager.get(&key) {
             match existing.current_state() {
                 VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
                     return Ok(existing);
                 }
                 VmActorState::ShuttingDown | VmActorState::Stopped | VmActorState::Error => {
-                    let _ = rm.remove(&key);
+                    let _ = runtime_manager.remove(&key);
                     if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                         dispatcher.cleanup_instance(&key.to_string());
                     }
@@ -567,12 +564,12 @@ impl PluginManager {
             .ok_or_else(|| AppError::Plugin(format!("plugin '{plugin_id}' not loaded")))?;
 
         let engine = self
-            .wasm_engine
+            .plugin_engine
             .as_ref()
-            .ok_or_else(|| AppError::Plugin("wasm_engine not set".into()))?;
+            .ok_or_else(|| AppError::Plugin("plugin_engine not set".into()))?;
 
         let instance_id = key.to_string();
-        let mut wasm_instance = engine.create_instance(&instance_id)?;
+        let mut plugin_vm_instance = engine.create_instance(&instance_id)?;
 
         let dispatcher_opt = self.host_dispatcher.read().clone();
         let iid = instance_id.clone();
@@ -580,7 +577,7 @@ impl PluginManager {
             let resp = invoke_host_func_with(dispatcher_opt.as_deref(), &iid, request_json)?;
             serde_json::to_string(&resp).map_err(AppError::from)
         };
-        wasm_instance.register_host_binding(invoke_fn)?;
+        plugin_vm_instance.register_host_binding(invoke_fn)?;
 
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             dispatcher.register_event_channel(&instance_id, self.event_channel_capacity);
@@ -595,20 +592,20 @@ impl PluginManager {
                 })?
         };
 
-        let handle = VmActor::spawn(wasm_instance, plugin_root, self.event_channel_capacity);
+        let handle = VmActor::spawn(plugin_vm_instance, plugin_root, self.event_channel_capacity);
 
         handle.dispatch(VmCommand::Init).await?;
         self.sync_registered_capabilities(plugin_id);
 
-        rm.insert(key, handle.clone());
+        runtime_manager.insert(key, handle.clone());
         Ok(handle)
     }
 
     pub fn has_session_vm(&self, session_id: &str, plugin_id: &str) -> bool {
-        let Some(runtime_manager) = &self.runtime_manager else {
+        let Some(runtime_manager) = &self.plugin_runtime_manager else {
             return false;
         };
-        runtime_manager.contains(&VmRuntimeKey::new(session_id, plugin_id))
+        runtime_manager.contains(&PluginRuntimeKey::new(session_id, plugin_id))
     }
 
     /// 向指定会话的 VM actor 投递事件。
@@ -620,12 +617,12 @@ impl PluginManager {
         data: serde_json::Value,
         context: serde_json::Value,
     ) -> Result<(), AppError> {
-        let key = VmRuntimeKey::new(session_id, plugin_id);
-        if let Some(rm) = &self.runtime_manager {
-            if let Some(handle) = rm.get(&key) {
+        let key = PluginRuntimeKey::new(session_id, plugin_id);
+        if let Some(runtime_manager) = &self.plugin_runtime_manager {
+            if let Some(handle) = runtime_manager.get(&key) {
                 match handle.current_state() {
                     VmActorState::Error | VmActorState::Stopped | VmActorState::ShuttingDown => {
-                        let _ = rm.remove(&key);
+                        let _ = runtime_manager.remove(&key);
                         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                             dispatcher.cleanup_instance(&key.to_string());
                         }
@@ -634,7 +631,7 @@ impl PluginManager {
                         )));
                     }
                     VmActorState::Created | VmActorState::Running | VmActorState::Idle => {
-                        let _ = rm.touch(&key);
+                        let _ = runtime_manager.touch(&key);
                     }
                 }
             }
@@ -661,12 +658,12 @@ impl PluginManager {
     pub async fn end_session(&self, session_id: &str) -> Result<(), AppError> {
         let t0 = Instant::now();
         tracing::debug!("[end_session] session={session_id} start");
-        let rm = self
-            .runtime_manager
+        let runtime_manager = self
+            .plugin_runtime_manager
             .as_ref()
-            .ok_or_else(|| AppError::Plugin("runtime_manager not set".into()))?;
+            .ok_or_else(|| AppError::Plugin("plugin_runtime_manager not set".into()))?;
 
-        let handles = rm.remove_session(session_id);
+        let handles = runtime_manager.remove_session(session_id);
         tracing::debug!(
             "[end_session] removed {} handles elapsed_ms={}",
             handles.len(),
@@ -696,7 +693,26 @@ impl PluginManager {
         Ok(())
     }
 
-    /// 卸载：移除事件监听、注销工具、销毁 Wasm 实例、从 map 移除。
+    #[cfg(test)]
+    pub(crate) fn configured_event_channel_capacity(&self) -> usize {
+        self.event_channel_capacity
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_engine_config(&self) -> Option<crate::ext::PluginEngineConfig> {
+        self.plugin_engine
+            .as_ref()
+            .map(|engine| engine.config().clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_idle_ttl(&self) -> Option<std::time::Duration> {
+        self.plugin_runtime_manager
+            .as_ref()
+            .map(|manager| manager.configured_idle_ttl())
+    }
+
+    /// 卸载：移除事件监听、注销工具、销毁插件 VM 实例、从 map 移除。
     pub fn unload_plugin(&self, plugin_id: &str) -> Result<(), AppError> {
         let instance = {
             let mut map = self.plugins.write();
@@ -724,7 +740,7 @@ impl PluginManager {
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             dispatcher.cleanup_plugin_capabilities(plugin_id);
         }
-        if let Some(runtime_manager) = &self.runtime_manager {
+        if let Some(runtime_manager) = &self.plugin_runtime_manager {
             let removed = runtime_manager.remove_plugin(plugin_id);
             if let Some(dispatcher) = self.host_dispatcher.read().clone() {
                 for (key, _handle) in removed {
@@ -732,8 +748,8 @@ impl PluginManager {
                 }
             }
         }
-        if let Some(wasm) = instance.wasm_instance {
-            wasm.destroy();
+        if let Some(plugin_vm_instance) = instance.plugin_vm_instance {
+            plugin_vm_instance.destroy();
         }
         if let Some(ref a) = self.audit {
             a.record_plugin_lifecycle(PluginLifecycleAuditEntry {

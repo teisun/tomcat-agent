@@ -25,6 +25,19 @@ impl PluginToolExecutor {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_timeout(
+        plugin_manager: Weak<PluginManager>,
+        timeout: Duration,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            plugin_manager,
+            dispatcher: Mutex::new(Weak::new()),
+            timeout,
+            next_call_id: AtomicU64::new(1),
+        })
+    }
+
     pub fn attach_dispatcher(&self, dispatcher: Weak<HostApiDispatcher>) {
         *self.dispatcher.lock() = dispatcher;
     }

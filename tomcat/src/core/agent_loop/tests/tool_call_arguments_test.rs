@@ -11,7 +11,7 @@ use crate::core::llm::ChatMessage;
 use crate::core::tools::contract::registry::{DefaultToolRegistry, Tool, ToolRegistry};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::ext::{
-    HostApiDispatcher, PluginManager, PluginToolExecutor, RuntimeManager, WasmEngine,
+    HostApiDispatcher, PluginEngine, PluginManager, PluginRuntimeManager, PluginToolExecutor,
 };
 use crate::infra::error::AppError;
 use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, TracingAuditRecorder};
@@ -192,8 +192,8 @@ async fn real_plugin_harness(
     let plugin_dir = plugin_tool_fixture(plugin_id, script);
     let mut manager = Arc::new(PluginManager::new(event_bus.clone()));
     let inner = Arc::get_mut(&mut manager).expect("plugin manager should be uniquely owned");
-    inner.set_wasm_engine(WasmEngine::global(None).expect("create quickjs engine"));
-    inner.set_runtime_manager(Arc::new(RuntimeManager::new()));
+    inner.set_plugin_engine(PluginEngine::global(None).expect("create quickjs engine"));
+    inner.set_plugin_runtime_manager(Arc::new(PluginRuntimeManager::new()));
     inner.set_audit_recorder(Arc::new(TracingAuditRecorder));
 
     let executor = PluginToolExecutor::new(Arc::downgrade(&manager));

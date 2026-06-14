@@ -603,7 +603,7 @@ fn test_doctor_without_config_prompts_init() {
 /// [doctor 有配置] init 后 doctor 通过配置与环境检测
 ///
 /// 验证：exit 0 且 stdout 含"配置合法"或 checkmark
-/// 意义：TASK-02 10.3 验收——doctor 检测 WasmEdge/QuickJS 可用性并输出修复建议
+/// 意义：TASK-02 10.3 验收——doctor 检测 rquickjs 与配置可用性并输出修复建议
 #[test]
 fn test_doctor_with_valid_config_checks_environment() {
     common::setup_logging();
@@ -1622,11 +1622,10 @@ fn test_user_doctor_detects_environment() {
         trunc(&out, 500)
     );
     assert.success().stdout(
-        predicate::str::contains("rquickjs")
-            .or(predicate::str::contains("配置"))
-            .or(predicate::str::contains("✓"))
-            .or(predicate::str::contains("内嵌资源"))
-            .or(predicate::str::contains(".env")),
+        predicate::str::contains("✓ rquickjs 运行时：可用")
+            .and(predicate::str::contains("配置"))
+            .and(predicate::str::contains("内嵌资源"))
+            .and(predicate::str::contains(".env")),
     );
 }
 
@@ -1705,7 +1704,7 @@ fn test_init_creates_env_with_correct_permissions() {
 
 /// [TASK-06] doctor 对完整环境报告所有检查项
 ///
-/// 验证：先 init 再 doctor，输出含 配置合法 / 内嵌资源 / QuickJS wasm / rquickjs / 资源版本
+/// 验证：先 init 再 doctor，输出含 配置合法 / 内嵌资源 / rquickjs
 #[test]
 fn test_doctor_reports_all_checks() {
     common::setup_logging();
@@ -1732,8 +1731,7 @@ fn test_doctor_reports_all_checks() {
         .success()
         .stdout(predicate::str::contains("配置合法"))
         .stdout(predicate::str::contains("内嵌资源"))
-        .stdout(predicate::str::contains("QuickJS wasm"))
-        .stdout(predicate::str::contains("rquickjs"));
+        .stdout(predicate::str::contains("✓ rquickjs 运行时：可用"));
 }
 
 /// [E2E-CLI-010] init 幂等：第二次不覆盖配置并给出提示
@@ -1767,11 +1765,11 @@ fn test_init_idempotent() {
     );
 }
 
-/// [TASK-06] ensure_embedded_assets 释放 wasm 到 work_dir
+/// [TASK-06] ensure_embedded_assets 准备 assets 目录
 ///
-/// 验证：tomcat init 后 ~/.tomcat/assets/wasm/wasmedge_quickjs.wasm 存在
+/// 验证：tomcat init 后 ~/.tomcat/assets/ 目录存在
 #[test]
-fn test_ensure_embedded_assets_extracts_wasm() {
+fn test_ensure_embedded_assets_prepares_assets_dir() {
     common::setup_logging();
     let _span = info_span!("test_ensure_embedded_assets_extracts_wasm").entered();
 
@@ -1785,13 +1783,9 @@ fn test_ensure_embedded_assets_extracts_wasm() {
         .assert()
         .success();
 
-    info!("Assert: doctor 能发现 QuickJS wasm");
-    let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
-    let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
-    info!("doctor output: {}", trunc(&out, 500));
-    assert
-        .success()
-        .stdout(predicate::str::contains("QuickJS wasm"));
+    let assets_dir = dir.path().join(".tomcat").join("assets");
+    info!("Assert: assets 目录已创建");
+    assert!(assets_dir.is_dir(), "assets dir should exist after init");
 }
 
 /// [TASK-06] ensure_embedded_assets 重复调用不报错
@@ -1825,11 +1819,11 @@ fn test_ensure_embedded_assets_idempotent() {
         .success();
 }
 
-/// [TASK-06] ensure_embedded_assets 在 SHA 不匹配时覆盖旧文件
+/// [TASK-06] ensure_embedded_assets 对已有 assets 目录保持幂等
 ///
-/// 验证：篡改 wasm 文件后，tomcat doctor 仍能正常通过（ensure_embedded_assets 覆盖了篡改文件）
+/// 验证：预先放入自定义文件后，tomcat doctor 仍能正常通过
 #[test]
-fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
+fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
     common::setup_logging();
     let _span = info_span!("test_ensure_embedded_assets_upgrades_on_sha_mismatch").entered();
 
@@ -1843,33 +1837,18 @@ fn test_ensure_embedded_assets_upgrades_on_sha_mismatch() {
         .assert()
         .success();
 
-    info!("Arrange: tamper wasm file in default work_dir");
-    let wasm_path = dir
-        .path()
-        .join(".tomcat")
-        .join("assets")
-        .join("wasm")
-        .join("wasmedge_quickjs.wasm");
-    if wasm_path.exists() {
-        let original_len = fs::metadata(&wasm_path).unwrap().len();
-        fs::write(&wasm_path, b"tampered").unwrap();
-        info!("Tampered wasm: {} bytes -> 8 bytes", original_len);
+    let sentinel = dir.path().join(".tomcat").join("assets").join("custom.txt");
+    fs::write(&sentinel, b"keep").unwrap();
 
-        info!("Act: tomcat doctor（触发 ensure_embedded_assets 覆盖）");
-        let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
-        assert.success();
+    info!("Act: tomcat doctor（触发 ensure_embedded_assets）");
+    cmd()
+        .args(["doctor"])
+        .env("HOME", dir.path())
+        .assert()
+        .success();
 
-        let restored_len = fs::metadata(&wasm_path).unwrap().len();
-        info!(
-            "Assert: wasm restored from 8 bytes to {} bytes",
-            restored_len
-        );
-        assert!(
-            restored_len > 100,
-            "wasm should be restored after SHA mismatch, got {} bytes",
-            restored_len
-        );
-    }
+    info!("Assert: 既有 assets 文件不影响 doctor");
+    assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }
 
 // ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 OPENAI_API_KEY） ────────────────────
@@ -2927,7 +2906,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     }
 }
 
-// ──────────────────── Story 3: WasmEdge+QuickJS 插件系统（E2E-CLI-021~026） ────────────────────
+// ──────────────────── Story 3: rquickjs 插件系统（E2E-CLI-021~026） ────────────────────
 
 /// 创建临时插件目录，包含 plugin.json + main.js
 fn make_plugin_dir(id: &str) -> tempfile::TempDir {
@@ -3885,7 +3864,7 @@ fn test_user_init_then_doctor_roundtrip() {
     let assert = cmd().args(["doctor"]).env("HOME", dir.path()).assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
-        "Assert: exit 0 + 含 配置合法 + 内嵌资源已就绪 + QuickJS wasm；actual: {}",
+        "Assert: exit 0 + 含 配置合法 + 内嵌资源已就绪 + rquickjs；actual: {}",
         trunc(&out, 500)
     );
     assert

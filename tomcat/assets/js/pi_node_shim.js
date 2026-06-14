@@ -101,8 +101,4 @@
   _os["default"] = _os;
   globalThis.__node_os = _os;
 
-  globalThis.__pi_subagent_agents = {
-    discoverAgents: function () { return []; },
-    "default": { discoverAgents: function () { return []; } }
-  };
 })();

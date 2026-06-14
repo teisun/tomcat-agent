@@ -1,4 +1,5 @@
 # Harness / local test output (do not commit)
+*.profraw
 tool-results/
 node_modules/
 .integration_test_output.log

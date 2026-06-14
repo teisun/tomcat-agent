@@ -23,7 +23,7 @@
 
 集成测试与 E2E 测试可能因死锁、无限循环、外部依赖超时等原因**长时间挂起不返回**。为避免浪费时间和阻塞交付流程，**所有 §2–§4 中的测试执行**必须采用以下模式。
 
-> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：分类执行（默认并发组并发，仅进程级全局资源 / 真实 WasmEdge / 长生命周期 VM / 重子进程目标进串行组用 `-j 1 --test-threads=1`）的唯一入口是 [`scripts/run-integration-tests.sh`](../../scripts/run-integration-tests.sh)；测试目标的并发/串行分组以 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 为单一事实源（详见 §7.2）。**交付前顺序**：凡新增或调整 integration 测试二进制，须先按 §7.2 更新 `test-groups.sh`（并行或串行**两组之一**登记即可，但必须登记），再跑全量集成；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这两个入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
+> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：分类执行（默认并发组并发，仅进程级全局资源 / 真实插件运行时 / 长生命周期 VM / 重子进程目标进串行组用 `-j 1 --test-threads=1`）的唯一入口是 [`scripts/run-integration-tests.sh`](../../scripts/run-integration-tests.sh)；测试目标的并发/串行分组以 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 为单一事实源（详见 §7.2）。**交付前顺序**：凡新增或调整 integration 测试二进制，须先按 §7.2 更新 `test-groups.sh`（并行或串行**两组之一**登记即可，但必须登记），再跑全量集成；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这两个入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
 
 ### 执行模式
 
@@ -57,7 +57,7 @@ TEST_PID=$!
 以下做法容易导致**看不到进度、误判卡死、或被工具中途 Abort**，与「全量集成/E2E」的真实耗时完全不匹配：
 
 1. **在前台直接跑全量 `cargo test`（尤其通过 IDE/Agent 单次调用、且带较短 block 超时）**  
-   全量会先 **长时间编译**（常达数分钟），再顺序执行 lib、多 crate 集成测试、`cli_tests`（含真实 LLM 请求的用例）、`wasmedge_e2e_tests` 等。调用方若因超时把进程 **Abort**，终端里往往**几乎没有可读的累计输出**，容易误以为「挂住」或「没跑起来」。
+   全量会先 **长时间编译**（常达数分钟），再顺序执行 lib、多 crate 集成测试、`cli_tests`（含真实 LLM 请求的用例）、`quickjs_e2e_tests` / `long_lived_vm_tests` 等。调用方若因超时把进程 **Abort**，终端里往往**几乎没有可读的累计输出**，容易误以为「挂住」或「没跑起来」。
 
 2. **用「管道 + tail」试探全量测试**（例如 `cargo test ... 2>&1 | tail -5`）  
    在进程结束之前管道下游**读不到完整流**，表现为长时间无输出；同样无法观察**当前跑到哪一个测试**。
@@ -149,8 +149,8 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests -- --nocapture --tes
 
 - **时机**：在 §1、§2 之后。
 - **依据**：[User_Stories.md](../openspec/specs/User_Stories.md)、[E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)、[E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
-- **动作**：根据场景库中与本次变更相关的用例，在 `tests/cli_tests.rs` 或 `tests/wasmedge_e2e_tests.rs` 中编写或补充 `test_user_*` / Wasm E2E 用例，与场景库对应。
-- **验证**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`；环境具备时执行 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1`。
+- **动作**：根据场景库中与本次变更相关的用例，在 `tests/cli_tests.rs`、`tests/quickjs_e2e_tests.rs` 或其他当前有效测试入口中编写或补充 `test_user_*` / `E2E-QJS-*` 用例，与场景库对应。
+- **验证**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test quickjs_e2e_tests -- --nocapture --test-threads=1`。
 
 ### §4 全量测试与验收清单
 
@@ -158,7 +158,7 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests -- --nocapture --tes
 
 以下为全量验收依据；分类执行约定（§7.1）、并发/串行组（§7.2）、CI 检查项（§7.3）、全量入口（§7.4）以及日志/鲁棒性门禁，详见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章。
 
-> **门禁与 §7 的映射**：第 1 项对应 §7.3 第 1–2 项 + §7.1 本地执行；第 3 项对应 §7.1 + §7.2（脚本内部完成分组）；第 4 项对应 §7.1 中 `cli_tests` / `wasmedge_e2e_tests` 串行组要求。本节不重复 §7.2 的目标清单；新增/移动 binary 时仅改 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 §7.2 文档，本节自动跟随。
+> **门禁与 §7 的映射**：第 1 项对应 §7.3 第 1–2 项 + §7.1 本地执行；第 3 项对应 §7.1 + §7.2（脚本内部完成分组）；第 4 项对应 §7.1 中 `cli_tests` / `quickjs_e2e_tests` 串行组要求。本节不重复 §7.2 的目标清单；新增/移动 binary 时仅改 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 §7.2 文档，本节自动跟随。
 
 #### 自动化门禁（脚本/测试，必须 pass）
 
@@ -166,10 +166,8 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests -- --nocapture --tes
 2. **CLI 子命令**：`tomcat init`、`tomcat doctor`、`tomcat config`、`tomcat session`、`tomcat plugin`、`tomcat audit` 可执行且帮助完整。
 3. **集成测试（§7.1/§7.2 分类执行 + §9/§10 门禁）**：首选 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`（脚本内并发组 cargo 默认并发、串行组 `-j 1 --test-threads=1`，覆盖日志门禁与鲁棒性集成测试）；脚本不可用时回退「测试执行策略」中的模板 B 走全量串行。**禁止**用 `cargo test --test '<某 binary>'` 序列拼凑全量集成验证。
    - 若本次变更新增了 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 里的 target（例如 keepalive A/B/C 这类真 key 用例），还必须显式执行 `set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`；该分组**不进入**普通 `integration` / `all`，避免默认门禁误耗真实 key 与配额。
-4. **E2E**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；WasmEdge 已就绪时 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1` 通过（二者均位于 §7.2 串行组，必须 `-j 1 --test-threads=1`）；须符合 E2E_TEST_SPEC §6。
-5. **Wasm 真实运行时（若任务涉及插件/Wasm）**：按 INTEGRATION_TEST_SPEC 5.4 + §7.2 串行组要求执行。
-
-**WasmEdge stderr 说明**：VM cleanup 阶段日志中可能出现 `[error] execution failed: host function failed, Code: 0x8d`（event channel 关闭后宿主调用返回错误）。**这不代表测试失败**；是否通过以 Rust test harness 输出的 `ok` / `FAILED` 为准。
+4. **E2E**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test quickjs_e2e_tests -- --nocapture --test-threads=1` 通过（均位于 §7.2 串行组，必须 `-j 1 --test-threads=1`）；须符合 E2E_TEST_SPEC §6。
+5. **真实插件运行时（若任务涉及插件）**：按 INTEGRATION_TEST_SPEC 5.4 + §7.2 串行组要求执行。
 
 #### 人工验收（条件具备时）
 

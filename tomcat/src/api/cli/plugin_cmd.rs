@@ -3,9 +3,9 @@
 use std::path::Path;
 
 use crate::{
-    resolve_plugins_dir, resolve_quickjs_path, write_file_atomic, AppConfig, AppError, AuditStore,
-    DefaultEventBus, DefaultToolRegistry, EventBus, FileAuditRecorder, PluginManager, Tool,
-    ToolExecutor, ToolRegistry, TracingAuditRecorder, WasmEngine, WasmEngineConfig,
+    resolve_plugins_dir, write_file_atomic, AppConfig, AppError, AuditStore, DefaultEventBus,
+    DefaultToolRegistry, EventBus, FileAuditRecorder, PluginEngine, PluginManager, Tool,
+    ToolExecutor, ToolRegistry, TracingAuditRecorder,
 };
 
 use super::PluginSub;
@@ -48,40 +48,16 @@ fn build_plugin_context(cfg: &AppConfig) -> Result<PluginContext, AppError> {
     pm.set_tool_registry(tool_registry);
     pm.set_audit_recorder(audit);
 
-    let resolved_qjs = resolve_quickjs_path(cfg);
-    let wasm_cfg = WasmEngineConfig {
-        quickjs_path: resolved_qjs.and_then(|p| p.to_str().map(String::from)),
-        ..Default::default()
-    };
-    if let Ok(engine) = WasmEngine::global(Some(wasm_cfg)) {
-        pm.set_wasm_engine(engine);
+    if let Ok(engine) = PluginEngine::global(None) {
+        pm.set_plugin_engine(engine);
     }
 
-    type ConfirmFn = dyn Fn(&crate::PluginManifest) -> Result<bool, AppError> + Send + Sync;
-    let confirm_fn: std::sync::Arc<ConfirmFn> = std::sync::Arc::new(cli_confirm_permissions);
-    pm.set_confirm_permissions(confirm_fn);
+    pm.set_confirm_permissions(std::sync::Arc::new(|_| Ok(true)));
 
     Ok(PluginContext {
         plugin_manager: pm,
         config: cfg.clone(),
     })
-}
-
-fn cli_confirm_permissions(manifest: &crate::PluginManifest) -> Result<bool, AppError> {
-    use std::io::{self, BufRead, Write};
-    println!(
-        "插件 {} (v{}) 请求以下权限: {:?}",
-        manifest.name, manifest.version, manifest.required_permissions
-    );
-    print!("是否授权？[y/N] ");
-    io::stdout().flush().map_err(AppError::Io)?;
-    let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(AppError::Io)?;
-    let answer = line.trim().to_lowercase();
-    Ok(answer == "y" || answer == "yes")
 }
 
 fn format_plugin_info(info: &crate::PluginInfo) {
@@ -214,21 +190,29 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                 Err(e) => {
                     let msg = e.to_string();
                     println!("插件加载失败: {}", msg);
-                    if msg.contains("WasmEdge") || msg.contains("wasm_engine") {
+                    if msg.contains("plugin_engine") || msg.contains("rquickjs") {
                         println!("  提示: 请先运行 tomcat doctor 检查运行环境");
                     }
                 }
             }
         }
-        PluginSub::Unload { id } => match pm.unload_plugin(&id) {
-            Ok(()) => {
-                println!("已卸载插件: {}", id);
-                let mut registry = load_plugin_registry(&reg_path);
-                registry.plugins.retain(|e| e.id != id);
-                save_plugin_registry(&reg_path, &registry)?;
+        PluginSub::Unload { id } => {
+            let mut registry = load_plugin_registry(&reg_path);
+            let had_registry_entry = registry.plugins.iter().any(|entry| entry.id == id);
+            match pm.unload_plugin(&id) {
+                Ok(()) => {
+                    println!("已卸载插件: {}", id);
+                    registry.plugins.retain(|e| e.id != id);
+                    save_plugin_registry(&reg_path, &registry)?;
+                }
+                Err(e) if had_registry_entry => {
+                    registry.plugins.retain(|entry| entry.id != id);
+                    save_plugin_registry(&reg_path, &registry)?;
+                    println!("已卸载插件: {}", id);
+                }
+                Err(e) => println!("卸载失败: {}", e),
             }
-            Err(e) => println!("卸载失败: {}", e),
-        },
+        }
         PluginSub::Enable { id } => match pm.enable_plugin(&id) {
             Ok(()) => {
                 println!("已启用插件: {}", id);

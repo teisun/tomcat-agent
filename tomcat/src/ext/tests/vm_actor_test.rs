@@ -1,5 +1,5 @@
 use super::super::vm_actor::*;
-use crate::ext::WasmEngine;
+use crate::ext::PluginEngine;
 use crate::infra::wire;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -45,7 +45,7 @@ fn handle_state_check() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actor_panic_is_caught_and_marked_error() {
-    let engine = WasmEngine::global(None).expect("create quickjs engine");
+    let engine = PluginEngine::global(None).expect("create quickjs engine");
     let mut instance = engine
         .create_instance("panic-actor-test")
         .expect("create quickjs instance");

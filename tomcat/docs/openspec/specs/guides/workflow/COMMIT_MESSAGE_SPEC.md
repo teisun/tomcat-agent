@@ -35,15 +35,15 @@
 **示例 1：功能类**
 
 ```
-feat(ext,infra): 将 wasmedge_quickjs 路径纳入配置
+feat(ext,config): 接线插件运行时配置到 rquickjs
 
-QuickJS wasm 路径原先仅支持环境变量，多环境与 CI 下不便统一管理。纳入 config 后可由配置文件提供默认路径，环境变量 TOMCAT__WASM__QUICKJS_PATH 覆盖，与现有 llm/storage 等配置优先级一致，便于部署与复现。
+将 js_heap_mb、call_timeout_ms 和 interrupt_budget 接到插件运行时，避免默认值散落在调用链里，也让 doctor / 文档 / 测试口径保持一致。
 
 [cov = 80.7%]
 ```
 
-- **What**：把 wasmedge_quickjs 路径放进配置（config + env）。
-- **Why**：解决仅靠环境变量带来的管理不便；统一配置语义、便于部署与复现。
+- **What**：把插件运行时配置正式接到 `rquickjs` 执行链路。
+- **Why**：减少硬编码默认值，统一配置语义并提高可观测性。
 
 **示例 2：修复类**
 

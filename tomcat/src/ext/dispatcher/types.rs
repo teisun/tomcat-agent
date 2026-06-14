@@ -138,6 +138,11 @@ impl HostApiDispatcher {
         self.command_waiters.remove(call_id);
     }
 
+    #[cfg(test)]
+    pub(crate) fn command_waiter_count(&self) -> usize {
+        self.command_waiters.len()
+    }
+
     /// 注入 `uiNotify` 调用计数器（E2E / 集成测试）。
     pub fn with_ui_notify_counter(mut self, counter: Arc<AtomicU32>) -> Self {
         self.ui_notify_count = Some(counter);

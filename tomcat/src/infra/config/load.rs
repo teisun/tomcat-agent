@@ -290,30 +290,16 @@ pub fn resolve_memory_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("memory"))
 }
 
-/// `work_dir/assets` — 全局资源目录（含 wasm/ 和 modules/ 子目录）。
+/// `work_dir/assets` — 全局资产目录。
 pub fn resolve_assets_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("assets"))
-}
-
-/// 查找 quickjs wasm：`work_dir/assets/wasm/wasmedge_quickjs.wasm`。
-pub fn resolve_quickjs_path(cfg: &AppConfig) -> Option<PathBuf> {
-    if let Ok(work) = get_work_dir(cfg) {
-        let p = work
-            .join("assets")
-            .join("wasm")
-            .join("wasmedge_quickjs.wasm");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
 }
 
 /// 启动时创建完整新布局目录树。若目录已存在则跳过（幂等）。
 ///
 /// 创建：`agent_dir`（可配置覆盖）、`work_dir/agents/{id}/sessions|logs|audit|todos`、
 /// `workspace-{id}`（可配置覆盖）、全局目录 `memory|credentials|media|subagents|plugins`、
-/// 以及 `assets/wasm|modules`。
+/// 以及 `assets/`。
 pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
     let work = get_work_dir(cfg)?;
     let agent_dir = resolve_agent_dir(cfg)?;
@@ -347,8 +333,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
         std::fs::create_dir_all(work.join(dir)).map_err(AppError::Io)?;
     }
 
-    std::fs::create_dir_all(work.join("assets").join("wasm")).map_err(AppError::Io)?;
-    std::fs::create_dir_all(work.join("assets").join("modules")).map_err(AppError::Io)?;
+    std::fs::create_dir_all(work.join("assets")).map_err(AppError::Io)?;
     std::fs::create_dir_all(resolve_dot_tomcat_temp_dir()?).map_err(AppError::Io)?;
     std::fs::create_dir_all(resolve_plans_dir()?).map_err(AppError::Io)?;
     Ok(())

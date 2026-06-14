@@ -102,7 +102,7 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
     let instance = PluginInstance {
         id: "p1".to_string(),
         manifest,
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
         registered_commands: vec![],

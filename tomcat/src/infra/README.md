@@ -84,8 +84,8 @@ pub enum AppError {
     Tool(String),
     #[error("序列化错误: {0}")]
     Serialize(#[from] serde_json::Error),
-    #[error("Wasm运行时错误: {0}")]
-    WasmEdge(String),
+    #[error("插件运行时错误: {0}")]
+    Plugin(String),
     #[error("JS执行错误: {0}")]
     QuickJS(String),
     #[error("审计日志错误: {0}")]
@@ -188,7 +188,7 @@ AgentEvent / ExtensionEvent / raw payload
 | `security.enable_audit_log` | 是否启用审计日志 | true |
 | `security.audit_log_retention_days` | 审计保留天数 | 90 |
 | **预留** `memory.profile` | low / standard / high / auto，见 [Architecture 4.5 资源与内存模式](../../docs/openspec/specs/Architecture.md#45-资源与内存模式-resource--memory-profile) | - |
-| **预留** `memory.*` | 各模式覆盖项（如 wasm_max_pages、js_heap_limit 等），同上 | - |
+| **预留** `memory.*` | 各模式覆盖项（如 `js_heap_mb`、`call_timeout_ms`、`interrupt_budget` 等），同上 | - |
 
 ---
 

@@ -1,6 +1,6 @@
 //! # VM Actor 模型
 //!
-//! 将 Wasm VM 封装在专属 `spawn_blocking` 线程中，
+//! 将插件 VM 封装在专属 `spawn_blocking` 线程中，
 //! 外部通过 `VmActorHandle` 发送命令（Init/DispatchEvent/Shutdown），
 //! 避免并发直接持有可变 Vm。
 
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::WasmInstance;
+use super::PluginVmInstance;
 
 /// VM actor 生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,9 +89,9 @@ impl VmActorHandle {
     }
 }
 
-/// VM actor：封装 WasmInstance，在专属线程中运行。
+/// VM actor：封装 `PluginVmInstance`，在专属线程中运行。
 pub struct VmActor {
-    instance: WasmInstance,
+    instance: PluginVmInstance,
     script_path: PathBuf,
     cmd_rx: tokio::sync::mpsc::Receiver<VmCommand>,
     state: Arc<AtomicU8>,
@@ -102,7 +102,7 @@ impl VmActor {
     ///
     /// `event_capacity`：有界事件 channel 容量（回压阈值）。
     pub fn spawn(
-        instance: WasmInstance,
+        instance: PluginVmInstance,
         script_path: PathBuf,
         _event_capacity: usize,
     ) -> VmActorHandle {
