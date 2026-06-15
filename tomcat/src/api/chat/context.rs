@@ -10,8 +10,9 @@ use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmati
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::ext::plugin::PluginCatalog;
 use crate::ext::{
-    HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginManager, PluginRuntimeManager,
-    PluginToolExecutor, SharedPluginRuntimeManager,
+    FunctionRegistry, HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
+    PluginManager, PluginRuntimeManager, PluginToolExecutor, RegisteredFunction,
+    SharedPluginRuntimeManager,
 };
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
@@ -19,10 +20,10 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
+    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor,
+    SessionEntry, SessionManager, SessionMode, Tool, ToolExecutor, ToolRegistry,
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_plugins_dir,
-    resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent, AppConfig,
-    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry,
-    SessionManager, SessionMode, Tool, ToolExecutor, ToolRegistry,
+    resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent,
 };
 
 use crate::core::llm::LlmScene;
@@ -149,8 +150,8 @@ fn checkpoint_store_for(
     store
 }
 
-fn scope_runtime_cache(
-) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+fn scope_runtime_cache()
+-> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
     static CACHE: OnceLock<
         RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
     > = OnceLock::new();
@@ -180,19 +181,22 @@ fn scope_runtime_for(
     }
 
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
-    let (tool_registry, plugin_manager, dispatcher) = build_plugin_runtime(
-        config,
-        &key,
-        audit,
-        event_bus.clone(),
-        llm,
-        primitive,
-        session,
-    )?;
+    let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
+        build_plugin_runtime(
+            config,
+            &key,
+            audit,
+            event_bus.clone(),
+            llm,
+            primitive,
+            session,
+        )?;
     let shared = Arc::new(ScopeContainer {
         event_bus,
         tool_registry,
+        function_registry,
         plugin_manager,
+        plugin_function_invoker,
         dispatcher,
         skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
         skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
@@ -373,7 +377,9 @@ impl ChatContext {
         );
         let event_bus = shared_scope_runtime.event_bus.clone();
         let tool_registry = shared_scope_runtime.tool_registry.clone();
+        let function_registry = shared_scope_runtime.function_registry.clone();
         let plugin_manager = shared_scope_runtime.plugin_manager.clone();
+        let plugin_function_invoker = shared_scope_runtime.plugin_function_invoker.clone();
         if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
             for plugin_id in plugin_manager_ref.list_loaded() {
                 let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
@@ -578,6 +584,7 @@ impl ChatContext {
             llm_resolver: llm_resolver.clone(),
             primitive: primitive.clone(),
             tool_registry: tool_registry.clone(),
+            function_registry: function_registry.clone(),
             event_bus: event_bus.clone(),
             audit: audit.clone(),
             gate: gate.clone(),
@@ -585,6 +592,7 @@ impl ChatContext {
             web_fetch_runtime: web_fetch_runtime.clone(),
             web_search_runtime: web_search_runtime.clone(),
             plugin_manager,
+            plugin_function_invoker,
         };
         let scope_services = ScopeServices {
             scope_container: shared_scope_runtime.clone(),
@@ -813,10 +821,20 @@ impl ChatContext {
             }
         }
 
+        let function_catalog =
+            refresh_host_function_registry(&self.config, &self.global_services.function_registry)?;
         let mut warnings = catalog.warnings.clone();
+        warnings.extend(function_catalog.warnings.clone());
         warnings.extend(catalog.diagnostics.iter().map(|diagnostic| {
             format!(
                 "plugin catalog ignored {}: {}",
+                diagnostic.path.display(),
+                diagnostic.reason
+            )
+        }));
+        warnings.extend(function_catalog.diagnostics.iter().map(|diagnostic| {
+            format!(
+                "host function catalog ignored {}: {}",
                 diagnostic.path.display(),
                 diagnostic.reason
             )
@@ -918,9 +936,44 @@ fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
 
 type PluginRuntimeParts = (
     Arc<dyn ToolRegistry>,
+    Arc<FunctionRegistry>,
     Option<Arc<PluginManager>>,
+    Option<Arc<PluginFunctionInvoker>>,
     Arc<HostApiDispatcher>,
 );
+
+fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn materialize_host_functions_from_catalog(registry: &FunctionRegistry, catalog: &PluginCatalog) {
+    let registered = catalog
+        .iter()
+        .flat_map(|(plugin_id, entry)| {
+            entry
+                .manifest
+                .functions
+                .iter()
+                .map(|function| RegisteredFunction {
+                    plugin_id: plugin_id.clone(),
+                    plugin_root: canonicalize_or_keep(&entry.plugin_root),
+                    point: function.point.clone(),
+                    function: function.function.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    registry.replace_all(registered);
+}
+
+fn refresh_host_function_registry(
+    config: &AppConfig,
+    registry: &FunctionRegistry,
+) -> Result<PluginCatalog, AppError> {
+    let catalog = PluginCatalog::discover_host_root(config)?;
+    materialize_host_functions_from_catalog(registry, &catalog);
+    Ok(catalog)
+}
 
 fn build_plugin_runtime(
     config: &AppConfig,
@@ -936,6 +989,7 @@ fn build_plugin_runtime(
         let executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
         let tool_registry: Arc<dyn ToolRegistry> =
             Arc::new(DefaultToolRegistry::new(executor, audit.clone()));
+        let function_registry = Arc::new(FunctionRegistry::new());
         let dispatcher = Arc::new(
             HostApiDispatcher::new(event_bus.clone())
                 .with_tools(tool_registry.clone())
@@ -944,7 +998,7 @@ fn build_plugin_runtime(
                 .with_primitive(primitive)
                 .with_audit(audit),
         );
-        return Ok((tool_registry, None, dispatcher));
+        return Ok((tool_registry, function_registry, None, None, dispatcher));
     }
 
     let mut plugin_manager = Arc::new(PluginManager::new(event_bus.clone()));
@@ -971,6 +1025,7 @@ fn build_plugin_runtime(
     inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
 
     let executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
+    let function_registry = Arc::new(FunctionRegistry::new());
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
     let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
     let dispatcher = Arc::new(
@@ -981,8 +1036,11 @@ fn build_plugin_runtime(
             .with_primitive(primitive)
             .with_audit(audit),
     );
+    let function_invoker = PluginFunctionInvoker::new(Arc::downgrade(&plugin_manager));
     executor.attach_dispatcher(Arc::downgrade(&dispatcher));
+    function_invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
     plugin_manager.set_tool_registry(tool_registry.clone());
+    plugin_manager.set_function_registry(function_registry.clone());
     plugin_manager.set_host_dispatcher(dispatcher.clone());
 
     let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
@@ -1025,6 +1083,14 @@ fn build_plugin_runtime(
             "plugin catalog scan ignored invalid entry"
         );
     }
+    let host_function_catalog = refresh_host_function_registry(config, &function_registry)?;
+    for diagnostic in &host_function_catalog.diagnostics {
+        warn!(
+            path = %diagnostic.path.display(),
+            reason = %diagnostic.reason,
+            "host function catalog scan ignored invalid entry"
+        );
+    }
 
     let plugins_dir = resolve_plugins_dir(config)?;
     for entry in &config.plugin.auto_load {
@@ -1046,7 +1112,13 @@ fn build_plugin_runtime(
         }
     }
 
-    Ok((tool_registry, Some(plugin_manager), dispatcher))
+    Ok((
+        tool_registry,
+        function_registry,
+        Some(plugin_manager),
+        Some(function_invoker),
+        dispatcher,
+    ))
 }
 
 fn plugin_runtime_disabled_via_env() -> bool {
@@ -1137,8 +1209,8 @@ mod tests {
     use serial_test::serial;
 
     use super::resolve_child_agent_compaction_runtime;
-    use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::AppConfig;
+    use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
 
     #[test]
     #[serial(env_lock)]

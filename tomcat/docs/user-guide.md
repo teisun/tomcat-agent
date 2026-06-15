@@ -814,6 +814,7 @@ tomcat code
 ### 运行时特性
 
 - 入口仍是 `plugin.json` + `main.js` / `main.ts`。
+- manifest 里有两条注册面：`tools[]` 给 LLM，`functions[]` 给宿主；两者都允许为空，但已声明的 `functions[]` 条目必须同时提供非空 `point` / `function`。
 - 敏感能力统一走 `pi.*` hostcall，例如 `pi.readFile()`、`pi.writeFile()`、`pi.editFile()`、`pi.exec()`。
 - `node:fs`、`node:child_process`、`node:os` 不会直接暴露给插件；会返回明确的 fail-closed 错误。
 - 当前默认提供的轻量能力包括：
@@ -870,8 +871,52 @@ pi.log("my-plugin: 已加载");
 说明：
 
 - 敏感能力一律走 `pi.*`，例如读写文件用 `pi.readFile()` / `pi.writeFile()`，执行命令用 `pi.exec()`。
+- `tools[]` 是给 LLM 的静态工具契约；`functions[]` 是给宿主自己的静态函数契约。宿主函数不会进入 `ToolRegistry`，也不会出现在喂给 LLM 的工具清单里。
+- `functions[]` 的 `point` 是宿主扩展点 ID，例如 `web_search.backend`、`test.echo`。宿主按 `point` 枚举候选函数，再回 VM 调用 `function` 字段对应的 JS 入口名。
+- `pi.registerFunction(name, handler)` 只负责把 JS 实现绑定到当前 VM；宿主能否“看见”这条能力，仍然只取决于 manifest 里的 `functions[]`。
 - `node:fs`、`node:child_process` 等 Node 内置模块不会直接暴露给插件；当前只保留少量轻量能力与 fail-closed alias。
 - 加载期 `requiredPermissions` 本期默认放行，但真正敏感的文件/命令/会话能力仍由 `pi.*` 路由统一鉴权与审计。
+
+**宿主函数最小示例**
+
+`plugin.json`：
+
+```json
+{
+  "id": "my-host-function-plugin",
+  "name": "My Host Function Plugin",
+  "version": "0.1.0",
+  "description": "给宿主提供一个 echo 扩展点",
+  "author": "me",
+  "main": "main.js",
+  "requiredPermissions": [],
+  "requiredApiVersion": "1.0",
+  "tags": [],
+  "tools": [],
+  "functions": [
+    {
+      "point": "test.echo",
+      "function": "echoHost"
+    }
+  ]
+}
+```
+
+`main.js`：
+
+```js
+pi.registerFunction("echoHost", function (params) {
+  return {
+    echoed: params && params.text ? params.text : null
+  };
+});
+```
+
+说明：
+
+- `functions[]` 只报“我提供哪个宿主扩展点、回 VM 时该调哪个 JS 函数名”，不要把插件内部默认参数、排序或厂商细节上浮到宿主。
+- 当前 host-facing function 的发现 / 安装根固定为宿主根 `~/.tomcat/{plugins,packages}`；不复用 `project > agent > global` 三层 overlay。
+- 一个插件可以同时有 `tools[]`、`functions[]`、`events[]`，也可以只有其中一类。
 
 ```bash
 tomcat plugin load ~/tomcat-plugins/my-plugin

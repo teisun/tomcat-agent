@@ -52,6 +52,32 @@
         } catch (_) {}
         continue;
       }
+      if (cmd.data && cmd.data.kind === 'function') {
+        var functionResult = await __pi_execute_function_async(JSON.stringify({
+          callId: cmd.data.callId,
+          functionName: cmd.data.functionName,
+          params: cmd.data.params,
+          ctx: ctx
+        }));
+        if (!functionResult || !functionResult.ok) {
+          try {
+            __pi_hostCall('context', 'commandFailed', {
+              name: cmd.data.functionName,
+              callId: cmd.data.callId,
+              error: functionResult && functionResult.error ? String(functionResult.error) : 'function execution failed'
+            });
+          } catch (_) {}
+          continue;
+        }
+        try {
+          __pi_hostCall('context', 'commandCompleted', {
+            name: cmd.data.functionName,
+            callId: cmd.data.callId,
+            result: functionResult.data
+          });
+        } catch (_) {}
+        continue;
+      }
 
       var cmdName = cmd.data && cmd.data.name;
       var cmdArgs = (cmd.data && cmd.data.args) || '';
@@ -63,7 +89,7 @@
       await entry.handler(cmdArgs, ctx);
       try { __pi_hostCall('context', 'commandCompleted', { name: cmdName, callId: cmd.data && cmd.data.callId }); } catch(_){}
     } catch (err) {
-      var failedName = (cmd.data && (cmd.data.toolName || cmd.data.name)) || '';
+      var failedName = (cmd.data && (cmd.data.toolName || cmd.data.functionName || cmd.data.name)) || '';
       try { __pi_hostCall('context', 'commandFailed', { name: failedName, callId: cmd.data && cmd.data.callId, error: String(err) }); } catch(_){}
       try {
         if (typeof __pi_interrupt_reason === 'function' && __pi_interrupt_reason()) {

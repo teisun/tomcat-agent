@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::{api::chat::ChatContext, AppConfig, SessionMode};
+use crate::{AppConfig, SessionMode, api::chat::ChatContext};
 
 struct EnvGuard {
     key: &'static str,
@@ -342,6 +342,106 @@ async fn list_tool_names(ctx: &ChatContext) -> Vec<String> {
         .collect::<Vec<_>>();
     names.sort();
     names
+}
+
+fn function_targets(ctx: &ChatContext, point: &str) -> Vec<crate::ext::RegisteredFunction> {
+    ctx.global_services
+        .function_registry
+        .functions_for_point(point)
+}
+
+fn function_invoker(ctx: &ChatContext) -> Arc<crate::ext::PluginFunctionInvoker> {
+    ctx.global_services
+        .plugin_function_invoker
+        .as_ref()
+        .cloned()
+        .expect("plugin function invoker")
+}
+
+fn write_function_plugin_dir(
+    plugin_dir: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    fs::create_dir_all(plugin_dir).expect("create function plugin fixture dir");
+    let function_defs = functions
+        .iter()
+        .map(|(point, function)| {
+            json!({
+                "point": point,
+                "function": function,
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest = json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": format!("fixture {plugin_id}"),
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": function_defs,
+        "events": [],
+        "activation": "lazy"
+    });
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize function manifest"),
+    )
+    .expect("write function plugin manifest");
+    fs::write(plugin_dir.join("main.js"), script).expect("write function plugin main");
+}
+
+fn write_host_root_function_plugin(
+    work_dir: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &work_dir.join("plugins").join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
+}
+
+fn write_agent_function_plugin(
+    work_dir: &Path,
+    agent_id: &str,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &work_dir
+            .join("agents")
+            .join(agent_id)
+            .join("plugins")
+            .join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
+}
+
+fn write_project_function_plugin(
+    workspace: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
 }
 
 fn write_plugin_fixture(
@@ -1343,5 +1443,327 @@ pi.registerTool({
     assert!(
         !beta_started_after,
         "conflicting loser should remain untouched after routed execution"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn materialize_functions_into_function_registry_only() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_MATERIALIZE_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "host-function-plugin",
+        &[("test.echo", "echoHost")],
+        r#"
+pi.registerFunction("echoHost", function (params) {
+  return { echoed: params.text || null };
+});
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let targets = function_targets(&ctx, "test.echo");
+    let tool_names = list_tool_names(&ctx).await;
+
+    assert_eq!(
+        targets.len(),
+        1,
+        "manifest.functions 应物化到 FunctionRegistry"
+    );
+    assert_eq!(targets[0].plugin_id, "host-function-plugin");
+    assert!(
+        !tool_names.iter().any(|name| name == "echoHost"),
+        "host-facing function 不应进入 ToolRegistry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn runtime_register_function_without_manifest_not_discoverable() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_DISCOVERY_CONTRACT_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "js-only-register-function",
+        &[],
+        r#"
+pi.registerFunction("echoHost", function (params) {
+  return { echoed: params.text || null };
+});
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    assert!(
+        function_targets(&ctx, "test.echo").is_empty(),
+        "仅运行时 registerFunction、无 manifest.functions 时不应被宿主发现"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn manifest_declared_function_visible_before_first_call() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_VISIBLE_BEFORE_CALL_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "visible-before-call",
+        &[("test.echo", "echoHost")],
+        r#"
+pi.registerFunction("echoHost", function () {
+  return { ok: true };
+});
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let session_id = current_session_id(&ctx);
+    let pm = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+
+    assert_eq!(function_targets(&ctx, "test.echo").len(), 1);
+    assert!(
+        !pm.has_session_vm(&session_id, "visible-before-call"),
+        "discoverability 应来自 manifest，而不是第一次调用时补发现"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn function_discovery_reads_only_host_root() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_HOST_ROOT_ONLY_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    let cfg = make_config(work_dir.path(), API_ENV);
+
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "host-only-function",
+        &[("test.echo", "echoHost")],
+        r#"pi.registerFunction("echoHost", function () { return { source: "host" }; });"#,
+    );
+    write_agent_function_plugin(
+        work_dir.path(),
+        &cfg.agent.id,
+        "agent-function",
+        &[("test.echo", "agentEcho")],
+        r#"pi.registerFunction("agentEcho", function () { return { source: "agent" }; });"#,
+    );
+    write_project_function_plugin(
+        workspace.path(),
+        "project-function",
+        &[("test.echo", "projectEcho")],
+        r#"pi.registerFunction("projectEcho", function () { return { source: "project" }; });"#,
+    );
+
+    let ctx = ChatContext::from_config(cfg).expect("ctx");
+    let plugin_ids = function_targets(&ctx, "test.echo")
+        .into_iter()
+        .map(|entry| entry.plugin_id)
+        .collect::<Vec<_>>();
+    assert_eq!(plugin_ids, vec!["host-only-function".to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn host_root_catalog_order_is_stable() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_ORDER_STABLE_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "alpha-function",
+        &[("test.echo", "echoAlpha")],
+        r#"pi.registerFunction("echoAlpha", function () { return { source: "alpha" }; });"#,
+    );
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "beta-function",
+        &[("test.echo", "echoBeta")],
+        r#"pi.registerFunction("echoBeta", function () { return { source: "beta" }; });"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let plugin_ids = function_targets(&ctx, "test.echo")
+        .into_iter()
+        .map(|entry| entry.plugin_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        plugin_ids,
+        vec!["alpha-function".to_string(), "beta-function".to_string()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn plugin_unload_removes_function_entries() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_UNLOAD_CLEANUP_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "cleanup-function-plugin",
+        &[("test.echo", "echoHost")],
+        r#"pi.registerFunction("echoHost", function () { return { ok: true }; });"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let pm = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+    assert_eq!(function_targets(&ctx, "test.echo").len(), 1);
+    pm.unload_plugin("cleanup-function-plugin")
+        .expect("unload plugin");
+    assert!(
+        function_targets(&ctx, "test.echo").is_empty(),
+        "unload 后不应残留宿主函数来源项"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn catalog_refresh_does_not_duplicate_function_entries() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_REFRESH_DEDUP_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "refresh-function-plugin",
+        &[("test.echo", "echoHost")],
+        r#"pi.registerFunction("echoHost", function () { return { ok: true }; });"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    assert_eq!(function_targets(&ctx, "test.echo").len(), 1);
+    ctx.refresh_plugin_catalog_inventory()
+        .await
+        .expect("refresh plugin catalog");
+    ctx.refresh_plugin_catalog_inventory()
+        .await
+        .expect("refresh plugin catalog twice");
+    assert_eq!(
+        function_targets(&ctx, "test.echo").len(),
+        1,
+        "重复 refresh 不应堆出重复宿主函数入口"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn manifest_js_name_mismatch_surfaces_clear_error() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_MISMATCH_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "mismatch-function-plugin",
+        &[("test.echo", "echoHost")],
+        r#"pi.registerFunction("otherName", function () { return { ok: true }; });"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let session_id = current_session_id(&ctx);
+    let invoker = function_invoker(&ctx);
+    let target = function_targets(&ctx, "test.echo")
+        .into_iter()
+        .next()
+        .expect("manifest target");
+
+    let err = invoker
+        .execute(&target, json!({ "text": "hi" }), Some(&session_id))
+        .await
+        .expect_err("manifest/js mismatch should fail");
+    assert!(
+        err.to_string().contains("function not found: echoHost"),
+        "错误信息应直接指向缺失的 handler 名称: {err}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn host_function_not_exposed_to_llm_tool_list() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_HIDDEN_FROM_LLM_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "hidden-function-plugin",
+        &[("test.echo", "echoHost"), ("test.counter", "nextCount")],
+        r#"
+pi.registerFunction("echoHost", function () { return { ok: true }; });
+pi.registerFunction("nextCount", function () { return { count: 1 }; });
+"#,
+    );
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let tool_names = list_tool_names(&ctx).await;
+    assert!(
+        !tool_names
+            .iter()
+            .any(|name| name == "echoHost" || name == "nextCount"),
+        "host-facing function 不应出现在喂给 LLM 的工具清单"
     );
 }

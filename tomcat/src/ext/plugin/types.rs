@@ -32,6 +32,13 @@ fn default_manifest_tool_parameters() -> Value {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestFunction {
+    pub point: String,
+    pub function: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginManifest {
@@ -46,6 +53,8 @@ pub struct PluginManifest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub tools: Vec<ManifestTool>,
+    #[serde(default)]
+    pub functions: Vec<ManifestFunction>,
     #[serde(default)]
     pub events: Vec<String>,
     #[serde(default)]
@@ -72,6 +81,7 @@ pub struct PluginInstance {
     pub plugin_vm_instance: Option<PluginVmInstance>,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
+    pub registered_functions: Vec<ManifestFunction>,
     pub registered_commands: Vec<String>,
     pub event_listener_ids: Vec<EventListenerId>,
     pub config: serde_json::Value,
@@ -88,6 +98,7 @@ pub struct PluginInfo {
     pub manifest: PluginManifest,
     pub status: PluginStatus,
     pub registered_tools: Vec<String>,
+    pub registered_functions: Vec<ManifestFunction>,
     pub registered_commands: Vec<String>,
     pub event_listener_ids: Vec<EventListenerId>,
     pub config: serde_json::Value,
@@ -112,6 +123,7 @@ impl PluginInstance {
             manifest: self.manifest.clone(),
             status: self.status,
             registered_tools: self.registered_tools.clone(),
+            registered_functions: self.registered_functions.clone(),
             registered_commands: self.registered_commands.clone(),
             event_listener_ids: self.event_listener_ids.clone(),
             config: self.config.clone(),
@@ -157,6 +169,18 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
                 "manifest.tools[{}].parameters must be an object",
                 tool.name
             )));
+        }
+    }
+    for function in &m.functions {
+        if function.point.trim().is_empty() {
+            return Err(AppError::Plugin(
+                "manifest.functions[].point is required".to_string(),
+            ));
+        }
+        if function.function.trim().is_empty() {
+            return Err(AppError::Plugin(
+                "manifest.functions[].function is required".to_string(),
+            ));
         }
     }
     Ok(())

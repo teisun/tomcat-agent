@@ -8,12 +8,12 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tomcat::{
-    parse_manifest, wire, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
-    PluginManager, PluginRuntimeKey, PluginRuntimeManager, PluginStatus,
-    SharedPluginRuntimeManager, VmActorHandle, VmActorState, VmCommand,
+    DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance, PluginManager,
+    PluginRuntimeKey, PluginRuntimeManager, PluginStatus, SharedPluginRuntimeManager,
+    VmActorHandle, VmActorState, VmCommand, parse_manifest, wire,
 };
 
 fn stub_handle() -> VmActorHandle {
@@ -52,6 +52,7 @@ fn make_plugin_instance(id: &str) -> PluginInstance {
         plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
+        registered_functions: vec![],
         registered_commands: vec![],
         event_listener_ids: vec![],
         config: serde_json::json!({}),
@@ -265,8 +266,8 @@ fn test_session_cleanup_removes_all_handles_for_session() -> Result<(), Box<dyn 
 ///
 /// 验收标准：关闭流程无悬挂线程、无 pending 泄漏 — end_session 正确清理。
 #[tokio::test]
-async fn test_plugin_manager_end_session_cleans_runtime_manager(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_plugin_manager_end_session_cleans_runtime_manager()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_plugin_manager_end_session_cleans_runtime_manager").entered();
@@ -331,8 +332,8 @@ async fn test_start_session_vm_without_engine_returns_err() -> Result<(), Box<dy
 
 /// [start_session_vm 无 PluginRuntimeManager] 未注入运行时管理器时返回明确错误
 #[tokio::test]
-async fn test_start_session_vm_without_runtime_manager_returns_err(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_start_session_vm_without_runtime_manager_returns_err()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_start_session_vm_without_runtime_manager_returns_err").entered();
@@ -358,8 +359,8 @@ async fn test_start_session_vm_without_runtime_manager_returns_err(
 
 /// [dispatch_session_event 无 dispatcher] 未注入 HostApiDispatcher 时返回错误
 #[test]
-fn test_dispatch_session_event_without_dispatcher_returns_err(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_dispatch_session_event_without_dispatcher_returns_err()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_dispatch_session_event_without_dispatcher_returns_err").entered();
@@ -443,7 +444,9 @@ fn test_dispatcher_event_channel_register_and_deliver() -> Result<(), Box<dyn st
         },
     )?;
 
-    tracing::info!("Assert: 通过 tx 对应的 rx 可接收到事件（由 register_event_channel 返回的 tx 侧验证 channel 联通）");
+    tracing::info!(
+        "Assert: 通过 tx 对应的 rx 可接收到事件（由 register_event_channel 返回的 tx 侧验证 channel 联通）"
+    );
     // deliver_event 写入的是 dispatcher 内部维护的 tx，这里验证不返回错误即通过
     // 更深入的验证：channel 满时返回回压错误
     Ok(())

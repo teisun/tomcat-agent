@@ -1,0 +1,24 @@
+{
+  "id": "function-echo-plugin",
+  "name": "function-echo-plugin",
+  "version": "0.1.0",
+  "description": "fixture plugin for host-facing function tests",
+  "author": "tests",
+  "main": "main.js",
+  "requiredPermissions": [],
+  "requiredApiVersion": "1.0",
+  "tags": [],
+  "tools": [],
+  "functions": [
+    {
+      "point": "test.echo",
+      "function": "echoHost"
+    },
+    {
+      "point": "test.counter",
+      "function": "nextCount"
+    }
+  ],
+  "events": [],
+  "activation": "lazy"
+}

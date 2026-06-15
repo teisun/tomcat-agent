@@ -7,15 +7,15 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::BackgroundCompletionRoutes;
-use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::ModelCatalog;
+use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::plan_runtime;
 use crate::core::tools::contract::registry::ToolRegistry;
 use crate::core::tools::primitive::{BashTaskId, BashTaskRegistry, PrimitiveExecutor};
 use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::tools::web_search::WebSearchRuntime;
 use crate::core::{CheckpointStore, LlmProvider, LlmResolver, SessionManager};
-use crate::ext::{HostApiDispatcher, PluginManager};
+use crate::ext::{FunctionRegistry, HostApiDispatcher, PluginFunctionInvoker, PluginManager};
 use crate::infra::{AuditRecorder, EventBus};
 
 pub struct GlobalServices {
@@ -24,6 +24,7 @@ pub struct GlobalServices {
     pub llm_resolver: Arc<dyn LlmResolver>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
+    pub function_registry: Arc<FunctionRegistry>,
     pub event_bus: Arc<dyn EventBus>,
     pub audit: Arc<dyn AuditRecorder>,
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
@@ -31,12 +32,15 @@ pub struct GlobalServices {
     pub web_fetch_runtime: Arc<WebFetchRuntime>,
     pub web_search_runtime: Arc<WebSearchRuntime>,
     pub plugin_manager: Option<Arc<PluginManager>>,
+    pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
 }
 
 pub struct ScopeContainer {
     pub event_bus: Arc<dyn EventBus>,
     pub tool_registry: Arc<dyn ToolRegistry>,
+    pub function_registry: Arc<FunctionRegistry>,
     pub plugin_manager: Option<Arc<PluginManager>>,
+    pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
     pub dispatcher: Arc<HostApiDispatcher>,
     pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
     pub skill_discovery_handle:

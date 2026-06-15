@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 use tomcat::{
-    parse_manifest, AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
+    AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus, parse_manifest,
 };
 
 /// [非法 JSON] parse_manifest 遇到非法 JSON 返回 Err 不 panic
@@ -92,8 +92,8 @@ fn test_parse_manifest_missing_main_returns_plugin_error() {
 /// 验证：50 轮 register+unload 后 list_loaded 始终在 unload 后为空
 /// 意义：鲁棒性——资源/状态一致性，防止内存泄漏或状态残留
 #[test]
-fn test_plugin_manager_repeated_register_unload_state_consistent(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_plugin_manager_repeated_register_unload_state_consistent()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_plugin_manager_repeated_register_unload_state_consistent")
@@ -127,6 +127,7 @@ fn test_plugin_manager_repeated_register_unload_state_consistent(
             plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: vec![],
+            registered_functions: vec![],
             registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::json!({}),

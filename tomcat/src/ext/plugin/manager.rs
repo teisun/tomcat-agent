@@ -63,6 +63,7 @@
 //! - 跨 actor：`vm_actor::{VmActor, VmCommand, EventEnvelope}` 提供单插件单 VM 的
 //!   消息隔离；`runtime_manager` 跨插件共享插件 VM 实例。
 
+use super::FunctionRegistry;
 use super::types::{
     ConfirmPermissionsFn, PluginInfo, PluginInstance, PluginManifest, PluginStatus,
 };
@@ -71,7 +72,7 @@ use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use parking_lot::RwLock;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -79,7 +80,7 @@ use std::time::Instant;
 use crate::ext::runtime_manager::{PluginRuntimeKey, SharedPluginRuntimeManager};
 use crate::ext::ts_compiler::transpile_pi_plugin_for_quickjs;
 use crate::ext::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmActorState, VmCommand};
-use crate::ext::{invoke_host_func_with, HostApiDispatcher, PluginEngine};
+use crate::ext::{HostApiDispatcher, PluginEngine, invoke_host_func_with};
 
 use super::types::parse_manifest;
 
@@ -87,6 +88,7 @@ use super::types::parse_manifest;
 pub struct PluginManager {
     event_bus: Arc<dyn EventBus>,
     tools: RwLock<Option<Arc<dyn ToolRegistry>>>,
+    functions: RwLock<Option<Arc<FunctionRegistry>>>,
     plugins: RwLock<HashMap<String, PluginInstance>>,
     plugin_engine: Option<Arc<PluginEngine>>,
     host_dispatcher: RwLock<Option<Arc<HostApiDispatcher>>>,
@@ -101,6 +103,7 @@ impl PluginManager {
         Self {
             event_bus,
             tools: RwLock::new(None),
+            functions: RwLock::new(None),
             plugins: RwLock::new(HashMap::new()),
             plugin_engine: None,
             host_dispatcher: RwLock::new(None),
@@ -114,6 +117,10 @@ impl PluginManager {
     /// 注入 ToolRegistry（006 就绪后调用）；卸载时用于 unregister_plugin_tools。
     pub fn set_tool_registry(&self, t: Arc<dyn ToolRegistry>) {
         *self.tools.write() = Some(t);
+    }
+
+    pub fn set_function_registry(&self, registry: Arc<FunctionRegistry>) {
+        *self.functions.write() = Some(registry);
     }
 
     /// 注入审计记录器；未设置时 load/enable/disable/unload 不写审计。
@@ -248,12 +255,14 @@ impl PluginManager {
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
+        let manifest_functions = manifest.functions.clone();
         let plugin_instance = PluginInstance {
             id: manifest.id.clone(),
             manifest: manifest.clone(),
             plugin_vm_instance: Some(instance),
             status: PluginStatus::Loaded,
             registered_tools: manifest_tool_names,
+            registered_functions: manifest_functions,
             registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::Value::Null,
@@ -305,9 +314,7 @@ impl PluginManager {
             let manifest_path = root
                 .join("plugin.json")
                 .canonicalize()
-                .map_err(|_| {
-                    AppError::Plugin("插件目录下未找到 plugin.json".to_string())
-                })?;
+                .map_err(|_| AppError::Plugin("插件目录下未找到 plugin.json".to_string()))?;
             (root, manifest_path)
         } else {
             let manifest_path = path
@@ -376,6 +383,10 @@ impl PluginManager {
         plugin_root: impl AsRef<Path>,
         manifest: PluginManifest,
     ) -> Result<(), AppError> {
+        let plugin_root = plugin_root
+            .as_ref()
+            .canonicalize()
+            .unwrap_or_else(|_| plugin_root.as_ref().to_path_buf());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
@@ -385,18 +396,20 @@ impl PluginManager {
             .iter()
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
+        let manifest_functions = manifest.functions.clone();
         let instance = PluginInstance {
             id: manifest.id.clone(),
             manifest,
             plugin_vm_instance: None,
             status: PluginStatus::Enabled,
             registered_tools: manifest_tool_names,
+            registered_functions: manifest_functions,
             registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::Value::Null,
             created_at: now,
             loaded_at: 0,
-            plugin_root: plugin_root.as_ref().to_path_buf(),
+            plugin_root,
         };
         self.register_or_refresh_catalog_stub(instance)
     }
@@ -736,6 +749,9 @@ impl PluginManager {
         if let Some(t) = self.tools.read().clone() {
             t.unregister_plugin_tools(plugin_id);
         }
+        if let Some(functions) = self.functions.read().clone() {
+            functions.remove_by_plugin(plugin_id);
+        }
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             dispatcher.cleanup_plugin_capabilities(plugin_id);
         }
@@ -778,6 +794,12 @@ impl PluginManager {
                 })
                 .unwrap_or_default()
         };
+        let registered_functions = {
+            let map = self.plugins.read();
+            map.get(plugin_id)
+                .map(|instance| instance.manifest.functions.clone())
+                .unwrap_or_default()
+        };
         for dynamic_tool in dispatcher.registered_plugin_tools(plugin_id) {
             if !registered_tools.iter().any(|tool| tool == &dynamic_tool) {
                 registered_tools.push(dynamic_tool);
@@ -791,6 +813,7 @@ impl PluginManager {
         let event_listener_ids = dispatcher.registered_plugin_listener_ids(plugin_id);
         if let Some(instance) = self.plugins.write().get_mut(plugin_id) {
             instance.registered_tools = registered_tools;
+            instance.registered_functions = registered_functions;
             instance.registered_commands = registered_commands;
             instance.event_listener_ids = event_listener_ids;
         }

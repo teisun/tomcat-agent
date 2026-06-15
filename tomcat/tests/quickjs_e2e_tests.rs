@@ -3,19 +3,29 @@ mod common;
 use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::json;
-use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tomcat::{
-    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
-    DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult, EditOperation,
-    HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig, PluginInstance,
-    PluginManager, PluginRuntimeManager, PluginStatus, PluginToolExecutor, PrimitiveExecutor,
-    PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent, Tool, ToolExecutor, ToolRegistry,
-    TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
+    BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DefaultEventBus,
+    DefaultToolRegistry, DirEntry, EditFileResult, EditOperation, FunctionRegistry,
+    HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
+    PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus, PluginToolExecutor,
+    PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent, Tool,
+    ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
+    parse_manifest,
 };
+
+type FunctionManagerHarness = (
+    Arc<PluginFunctionInvoker>,
+    Arc<FunctionRegistry>,
+    Arc<DefaultToolRegistry>,
+    Arc<PluginManager>,
+    Arc<HostApiDispatcher>,
+    SharedPluginRuntimeManager,
+);
 
 fn create_plugin_dir(id: &str, script: &str) -> tempfile::TempDir {
     create_plugin_dir_with_manifest(
@@ -56,6 +66,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
         .iter()
         .map(|tool| tool.name.clone())
         .collect::<Vec<_>>();
+    let manifest_functions = manifest.functions.clone();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -67,6 +78,7 @@ fn register_plugin(manager: &PluginManager, plugin_dir: &std::path::Path, plugin
             plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: manifest_tool_names,
+            registered_functions: manifest_functions,
             registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::json!({}),
@@ -128,6 +140,73 @@ fn make_tool_manager(
         .expect("load real plugin fixture");
 
     (executor, manager, dispatcher, runtime_manager)
+}
+
+fn real_function_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("function_echo_plugin")
+}
+
+fn install_real_function_fixture(work_dir: &Path) -> PathBuf {
+    let src = real_function_fixture_dir();
+    let dst = work_dir.join("function-echo-plugin");
+    std::fs::create_dir_all(&dst).expect("create function fixture dir");
+    for name in ["plugin.json", "main.js"] {
+        std::fs::copy(src.join(name), dst.join(name)).expect("copy function fixture file");
+    }
+    dst
+}
+
+fn make_function_manager(plugin_dir: &Path) -> FunctionManagerHarness {
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let mut manager = Arc::new(PluginManager::new(event_bus.clone()));
+    let runtime_manager: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
+
+    let inner = Arc::get_mut(&mut manager).expect("plugin manager should be uniquely owned");
+    inner.set_plugin_engine(PluginEngine::global(None).expect("create quickjs engine"));
+    inner.set_plugin_runtime_manager(runtime_manager.clone());
+    inner.set_audit_recorder(Arc::new(TracingAuditRecorder));
+
+    let tool_executor = PluginToolExecutor::new(Arc::downgrade(&manager));
+    let tool_registry = Arc::new(DefaultToolRegistry::new(
+        tool_executor.clone(),
+        Arc::new(TracingAuditRecorder),
+    ));
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(event_bus.clone())
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_tools(tool_registry.clone()),
+    );
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let function_invoker = PluginFunctionInvoker::new(Arc::downgrade(&manager));
+
+    tool_executor.attach_dispatcher(Arc::downgrade(&dispatcher));
+    function_invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
+    manager.set_tool_registry(tool_registry.clone());
+    manager.set_function_registry(function_registry.clone());
+    manager.set_host_dispatcher(dispatcher.clone());
+
+    let manifest_json =
+        std::fs::read_to_string(plugin_dir.join("plugin.json")).expect("read function manifest");
+    let manifest = parse_manifest(&manifest_json).expect("parse function manifest");
+    function_registry.register_plugin_functions(&manifest.id, plugin_dir, &manifest.functions);
+    manager
+        .register_catalog_plugin(plugin_dir, manifest)
+        .expect("register catalog stub");
+    manager
+        .load_plugin(plugin_dir)
+        .expect("load real function plugin fixture");
+
+    (
+        function_invoker,
+        function_registry,
+        tool_registry,
+        manager,
+        dispatcher,
+        runtime_manager,
+    )
 }
 
 fn make_manager() -> (PluginManager, SharedPluginRuntimeManager) {
@@ -694,8 +773,8 @@ __pi_start_event_loop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_toolbox_plugin_discovers_dynamic_tools_and_executes(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn legacy_toolbox_plugin_discovers_dynamic_tools_and_executes()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let plugin_dir = create_plugin_dir(
         "legacy-toolbox-plugin",
@@ -828,8 +907,8 @@ __pi_start_event_loop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn runaway_plugin_timeout_interrupts_when_budget_disabled(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn runaway_plugin_timeout_interrupts_when_budget_disabled()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let runaway_dir = create_plugin_dir(
         "runaway-timeout-plugin",
@@ -958,4 +1037,143 @@ __pi_start_event_loop();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(rm.is_empty(), "end_session should clear RuntimeManager");
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_real_function_plugin_roundtrip() {
+    common::setup_logging();
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let plugin_dir = install_real_function_fixture(work_dir.path());
+    let (invoker, function_registry, _tool_registry, manager, _dispatcher, _runtime_manager) =
+        make_function_manager(&plugin_dir);
+
+    let target = function_registry
+        .functions_for_point("test.echo")
+        .into_iter()
+        .next()
+        .expect("echo target");
+    let result = invoker
+        .execute(&target, json!({ "text": "hello" }), Some("s1"))
+        .await
+        .expect("roundtrip function call");
+
+    assert_eq!(result["plugin"], "function-echo-plugin");
+    assert_eq!(result["point"], "test.echo");
+    assert_eq!(result["echoed"], "hello");
+
+    manager.end_session("s1").await.expect("end session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_real_function_plugin_supports_multi_point() {
+    common::setup_logging();
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let plugin_dir = install_real_function_fixture(work_dir.path());
+    let (invoker, function_registry, _tool_registry, manager, _dispatcher, _runtime_manager) =
+        make_function_manager(&plugin_dir);
+
+    let echo_target = function_registry
+        .functions_for_point("test.echo")
+        .into_iter()
+        .next()
+        .expect("echo target");
+    let counter_target = function_registry
+        .functions_for_point("test.counter")
+        .into_iter()
+        .next()
+        .expect("counter target");
+
+    let echo_result = invoker
+        .execute(&echo_target, json!({ "text": "multi" }), Some("s1"))
+        .await
+        .expect("echo function");
+    let counter_result = invoker
+        .execute(&counter_target, json!({ "label": "first" }), Some("s1"))
+        .await
+        .expect("counter function");
+
+    assert_eq!(echo_result["point"], "test.echo");
+    assert_eq!(counter_result["point"], "test.counter");
+    assert_eq!(counter_result["count"], 1);
+
+    manager.end_session("s1").await.expect("end session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_real_function_plugin_reuses_state_within_session() {
+    common::setup_logging();
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let plugin_dir = install_real_function_fixture(work_dir.path());
+    let (invoker, function_registry, _tool_registry, manager, _dispatcher, _runtime_manager) =
+        make_function_manager(&plugin_dir);
+
+    let target = function_registry
+        .functions_for_point("test.counter")
+        .into_iter()
+        .next()
+        .expect("counter target");
+    let first = invoker
+        .execute(&target, json!({ "label": "first" }), Some("s1"))
+        .await
+        .expect("first counter call");
+    let second = invoker
+        .execute(&target, json!({ "label": "second" }), Some("s1"))
+        .await
+        .expect("second counter call");
+
+    assert_eq!(first["count"], 1);
+    assert_eq!(second["count"], 2);
+
+    manager.end_session("s1").await.expect("end session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_real_function_plugin_isolates_state_across_sessions() {
+    common::setup_logging();
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let plugin_dir = install_real_function_fixture(work_dir.path());
+    let (invoker, function_registry, _tool_registry, manager, _dispatcher, _runtime_manager) =
+        make_function_manager(&plugin_dir);
+
+    let target = function_registry
+        .functions_for_point("test.counter")
+        .into_iter()
+        .next()
+        .expect("counter target");
+    let first_session = invoker
+        .execute(&target, json!({ "label": "s1" }), Some("s1"))
+        .await
+        .expect("session one counter call");
+    let second_session = invoker
+        .execute(&target, json!({ "label": "s2" }), Some("s2"))
+        .await
+        .expect("session two counter call");
+
+    assert_eq!(first_session["count"], 1);
+    assert_eq!(second_session["count"], 1);
+
+    manager.end_session("s1").await.expect("end session s1");
+    manager.end_session("s2").await.expect("end session s2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_real_function_plugin_hidden_from_tool_registry() {
+    common::setup_logging();
+    let work_dir = tempfile::tempdir().expect("work dir");
+    let plugin_dir = install_real_function_fixture(work_dir.path());
+    let (_invoker, function_registry, tool_registry, manager, _dispatcher, _runtime_manager) =
+        make_function_manager(&plugin_dir);
+
+    let tools = tool_registry.list_tools(None).await.expect("list tools");
+    assert!(
+        tools.is_empty(),
+        "host-facing function fixture should not register LLM tools"
+    );
+    assert_eq!(function_registry.functions_for_point("test.echo").len(), 1);
+    assert_eq!(
+        function_registry.functions_for_point("test.counter").len(),
+        1
+    );
+
+    manager.end_session("s1").await.expect("end session");
 }

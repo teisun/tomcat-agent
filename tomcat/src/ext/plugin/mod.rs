@@ -3,6 +3,7 @@
 //! PluginManifest、PluginInstance、PluginStatus、加载/启用/禁用/卸载及与 EventBus、ToolRegistry 的清理对接。
 
 mod catalog;
+mod function_registry;
 mod manager;
 mod source_scan;
 mod types;
@@ -11,8 +12,9 @@ mod types;
 mod tests;
 
 pub use catalog::{CatalogEntry, PluginCatalog, PluginCatalogDiagnostic, PluginSource};
+pub use function_registry::{FunctionRegistry, RegisteredFunction};
 pub use manager::PluginManager;
 pub use types::{
-    parse_manifest, ConfirmPermissionsFn, ManifestTool, PluginActivation, PluginInfo,
-    PluginInstance, PluginManifest, PluginStatus,
+    ConfirmPermissionsFn, ManifestFunction, ManifestTool, PluginActivation, PluginInfo,
+    PluginInstance, PluginManifest, PluginStatus, parse_manifest,
 };

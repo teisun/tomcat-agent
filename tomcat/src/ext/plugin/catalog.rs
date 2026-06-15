@@ -1,7 +1,7 @@
-use super::source_scan::plugin_roots;
-use super::{parse_manifest, PluginManifest};
-use crate::infra::error::AppError;
+use super::source_scan::{host_root_plugin_dir, plugin_roots};
+use super::{PluginManifest, parse_manifest};
 use crate::AppConfig;
+use crate::infra::error::AppError;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +49,16 @@ impl PluginCatalog {
         for (source, root) in plugin_roots(cfg, agent_workspace_dir)? {
             scan_root(&root, source, &mut catalog);
         }
+        Ok(catalog)
+    }
+
+    pub fn discover_host_root(cfg: &AppConfig) -> Result<Self, AppError> {
+        let mut catalog = Self::default();
+        scan_root(
+            &host_root_plugin_dir(cfg)?,
+            PluginSource::Managed,
+            &mut catalog,
+        );
         Ok(catalog)
     }
 

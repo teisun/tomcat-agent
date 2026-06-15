@@ -27,13 +27,21 @@ fn parse_manifest_supports_static_tools_and_activation() {
                 }
             }
         ],
+        "functions": [
+            {
+                "point": "test.echo",
+                "function": "echoHost"
+            }
+        ],
         "events": ["session_start"],
         "activation": "session"
     }"#;
 
     let manifest = super::super::parse_manifest(json).expect("manifest should parse");
     assert_eq!(manifest.tools.len(), 1);
+    assert_eq!(manifest.functions.len(), 1);
     assert_eq!(manifest.tools[0].name, "echo");
+    assert_eq!(manifest.functions[0].point, "test.echo");
     assert_eq!(manifest.events, vec!["session_start"]);
     assert_eq!(manifest.activation, PluginActivation::Session);
 }
@@ -47,7 +55,11 @@ fn discover_three_tier_first_wins() {
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
     cfg.agent.id = "agent-a".to_string();
 
-    write_plugin(&work_dir.path().join("plugins").join("demo"), "demo", "managed");
+    write_plugin(
+        &work_dir.path().join("plugins").join("demo"),
+        "demo",
+        "managed",
+    );
     write_plugin(
         &work_dir
             .path()
@@ -89,6 +101,51 @@ fn discover_three_tier_first_wins() {
 
     let managed_only = catalog.get("managed-only").expect("managed-only entry");
     assert_eq!(managed_only.source, PluginSource::Managed);
+}
+
+#[test]
+fn discover_host_root_ignores_project_and_agent_layers_for_functions() {
+    let work_dir = tempfile::tempdir().expect("create work dir");
+    let project_dir = tempfile::tempdir().expect("create project dir");
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+    cfg.agent.id = "agent-a".to_string();
+
+    write_plugin(
+        &work_dir.path().join("plugins").join("host-function-plugin"),
+        "host-function-plugin",
+        "managed",
+    );
+    write_plugin(
+        &work_dir
+            .path()
+            .join("agents")
+            .join("agent-a")
+            .join("plugins")
+            .join("agent-function-plugin"),
+        "agent-function-plugin",
+        "agent",
+    );
+    write_plugin(
+        &project_dir
+            .path()
+            .join(".tomcat")
+            .join("plugins")
+            .join("project-function-plugin"),
+        "project-function-plugin",
+        "project",
+    );
+
+    let catalog = PluginCatalog::discover_host_root(&cfg).expect("discover host-root catalog");
+    assert_eq!(catalog.len(), 1);
+    let only = catalog
+        .get("host-function-plugin")
+        .expect("host-root entry should exist");
+    assert_eq!(only.source, PluginSource::Managed);
+    assert_eq!(only.manifest.description, "managed");
+    assert!(catalog.get("agent-function-plugin").is_none());
+    assert!(catalog.get("project-function-plugin").is_none());
 }
 
 fn write_plugin(root: &Path, plugin_id: &str, description: &str) {

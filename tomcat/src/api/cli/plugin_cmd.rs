@@ -2,15 +2,15 @@
 
 use std::path::Path;
 
+use crate::core::package::{PackageVisibility, resolve_runtime_layer_paths};
 pub(crate) use crate::core::package::{
-    load_plugin_registry, save_plugin_registry, PluginRegistryEntry, PluginRegistryFile,
+    PluginRegistryEntry, PluginRegistryFile, load_plugin_registry, save_plugin_registry,
 };
-use crate::core::package::{resolve_runtime_layer_paths, PackageVisibility};
 use crate::ext::parse_manifest;
 use crate::{
-    resolve_plugins_dir, AppConfig, AppError, AuditStore, DefaultEventBus, DefaultToolRegistry,
-    EventBus, FileAuditRecorder, PluginEngine, PluginManager, Tool, ToolExecutor, ToolRegistry,
-    TracingAuditRecorder,
+    AppConfig, AppError, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
+    FileAuditRecorder, PluginEngine, PluginManager, Tool, ToolExecutor, ToolRegistry,
+    TracingAuditRecorder, resolve_plugins_dir,
 };
 use std::fmt::Write as _;
 
@@ -67,6 +67,11 @@ fn build_plugin_context(cfg: &AppConfig) -> Result<PluginContext, AppError> {
 }
 
 fn format_plugin_info(info: &crate::PluginInfo) {
+    let registered_functions = info
+        .registered_functions
+        .iter()
+        .map(|function| format!("{} -> {}", function.point, function.function))
+        .collect::<Vec<_>>();
     println!("  ID:        {}", info.id);
     println!("  名称:      {}", info.manifest.name);
     println!("  版本:      {}", info.manifest.version);
@@ -76,6 +81,7 @@ fn format_plugin_info(info: &crate::PluginInfo) {
     println!("  权限:      {:?}", info.manifest.required_permissions);
     println!("  API 版本:  {}", info.manifest.required_api_version);
     println!("  注册工具:  {:?}", info.registered_tools);
+    println!("  注册函数:  {:?}", registered_functions);
     println!("  注册命令:  {:?}", info.registered_commands);
     println!("  事件监听:  {:?}", info.event_listener_ids);
     println!("  加载时间:  {}", info.loaded_at);
@@ -184,7 +190,11 @@ fn render_plugin_list_from_registries(
         return out;
     }
 
-    let _ = writeln!(out, "{:<24} {:<10} {:<8} {:<12}", "ID", "层", "启用", "状态");
+    let _ = writeln!(
+        out,
+        "{:<24} {:<10} {:<8} {:<12}",
+        "ID", "层", "启用", "状态"
+    );
     let _ = writeln!(out, "{}", "-".repeat(72));
     for item in &visible {
         let _ = writeln!(

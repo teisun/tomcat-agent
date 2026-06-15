@@ -82,6 +82,7 @@
   // -- Internal registries ----------------------------------------------------
   var __pi_hooks = {};   // eventName -> [{id, fn}, ...]
   var __pi_tools = {};   // toolName  -> handler
+  var __pi_functions = {}; // functionName -> handler
   var __pi_commands = {}; // commandName -> { description, handler }
   var __pi_nextId = 1;
 
@@ -197,6 +198,13 @@
     unregisterTool: function (name) {
       if (name && __pi_tools[name]) delete __pi_tools[name];
       return hostCall('tools', 'unregisterTool', { toolName: name });
+    },
+
+    registerFunction: function (name, handler) {
+      if (name) {
+        __pi_functions[name] = handler;
+      }
+      return null;
     },
 
     // =========================================================================
@@ -535,6 +543,7 @@
   // -- Expose internals needed by the async main loop injected in instance_wasmedge.rs --
   globalThis.__pi_build_ctx = __pi_build_ctx;
   globalThis.__pi_hostCall = hostCall;
+  globalThis.__pi_functions = __pi_functions;
   globalThis.__pi_commands = __pi_commands;
 
   // -- Event dispatch entry (called by host via __pi_dispatch_event) ----------
@@ -610,6 +619,40 @@
     }
     try {
       var result = handler.execute(call.toolCallId, call.params, undefined, undefined, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        result = await result;
+      }
+      return { ok: true, data: result };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  };
+
+  globalThis.__pi_execute_function = function (functionCallJson) {
+    var call = JSON.parse(functionCallJson);
+    var handler = __pi_functions[call.functionName];
+    if (typeof handler !== 'function') {
+      return JSON.stringify({ ok: false, error: 'function not found: ' + call.functionName });
+    }
+    try {
+      var result = handler(call.params, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        return JSON.stringify({ ok: false, error: 'function returned Promise; use __pi_execute_function_async' });
+      }
+      return JSON.stringify({ ok: true, data: result });
+    } catch (e) {
+      return JSON.stringify({ ok: false, error: String(e) });
+    }
+  };
+
+  globalThis.__pi_execute_function_async = async function (functionCallJson) {
+    var call = JSON.parse(functionCallJson);
+    var handler = __pi_functions[call.functionName];
+    if (typeof handler !== 'function') {
+      return { ok: false, error: 'function not found: ' + call.functionName };
+    }
+    try {
+      var result = handler(call.params, call.ctx || null);
       if (result && typeof result.then === 'function') {
         result = await result;
       }
