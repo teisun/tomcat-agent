@@ -12,10 +12,11 @@ use crate::infra::{read_file_utf8, write_file_atomic, AppError};
 use crate::AppConfig;
 
 use super::model::{
-    DetectedPackageResource, DetectedPackageSource, InstallOutcome, PackageLayerListing,
-    PackageManifest, PackageRecord, PackageRegistryFile, PackageResource, PackageResourceKind,
-    PackageSourceKind, PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall,
-    PreparedInstallResource, UninstallOutcome,
+    DetectedPackageResource, DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome,
+    PackageLayerListing, PackageManifest, PackagePluginRecord, PackageRecord, PackageRegistryFile,
+    PackageResourceKind, PackageSkillRecord, PackageSourceKind, PackageVisibility,
+    PluginRegistryEntry, PluginRegistryFile, PreparedInstall, PreparedInstallResource,
+    UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1,
 };
 use super::paths::{resolve_layer_paths, resolve_runtime_layer_paths, LayerPaths};
 
@@ -181,27 +182,34 @@ impl<'a> PackageManager<'a> {
                 name: prepared.detected.manifest.name.clone(),
                 version: prepared.detected.manifest.version.clone(),
                 description: prepared.detected.manifest.description.clone(),
-                source_kind: prepared.detected.kind,
+                source_kind: PackageSourceKind::Local,
                 visibility: prepared.visibility,
-                source_path: prepared.detected.source_root.display().to_string(),
+                source: prepared.detected.source_root.display().to_string(),
                 scope_root: prepared
                     .layer_paths
                     .scope_root
                     .as_ref()
                     .map(|path| path.display().to_string()),
                 installed_at: installed_at.clone(),
-                resources: prepared
+                plugins: prepared
                     .resources
                     .iter()
-                    .map(|resource| {
-                        PackageResource::new(
-                            resource.kind,
-                            resource.id.clone(),
-                            resource.source_path.clone(),
-                            resource.install_subpath.clone(),
-                        )
+                    .filter(|resource| resource.kind == PackageResourceKind::Plugin)
+                    .map(|resource| PackagePluginRecord {
+                        id: resource.id.clone(),
+                        relative_dir: resource.source_path.clone(),
                     })
                     .collect(),
+                skills: prepared
+                    .resources
+                    .iter()
+                    .filter(|resource| resource.kind == PackageResourceKind::Skill)
+                    .map(|resource| PackageSkillRecord {
+                        name: resource.id.clone(),
+                        relative_dir: resource.source_path.clone(),
+                    })
+                    .collect(),
+                legacy_resources: Vec::new(),
             };
 
             package_registry.packages.push(record.clone());
@@ -270,8 +278,14 @@ impl<'a> PackageManager<'a> {
         let record = package_registry.packages.remove(index);
 
         let mut removed_paths = Vec::new();
-        for resource in record.resources.iter().rev() {
-            let path = layer_paths.layer_root.join(&resource.install_subpath);
+        for plugin in &record.plugins {
+            let path = layer_paths.plugins_dir.join(&plugin.id);
+            if remove_path_if_exists(&path)? {
+                removed_paths.push(path);
+            }
+        }
+        for skill in &record.skills {
+            let path = layer_paths.skills_dir.join(&skill.name);
             if remove_path_if_exists(&path)? {
                 removed_paths.push(path);
             }
@@ -281,10 +295,9 @@ impl<'a> PackageManager<'a> {
 
         let mut plugin_registry = load_plugin_registry(&layer_paths.plugin_registry_path);
         let plugin_ids = record
-            .resources
+            .plugins
             .iter()
-            .filter(|resource| resource.kind == PackageResourceKind::Plugin)
-            .map(|resource| resource.id.clone())
+            .map(|plugin| plugin.id.clone())
             .collect::<HashSet<_>>();
         plugin_registry
             .plugins
@@ -317,7 +330,9 @@ impl<'a> PackageManager<'a> {
 }
 
 pub fn load_package_registry(path: &Path) -> PackageRegistryFile {
-    load_registry(path).unwrap_or_default()
+    let mut registry: PackageRegistryFile = load_registry(path).unwrap_or_default();
+    registry.normalize();
+    registry
 }
 
 pub fn save_package_registry(path: &Path, registry: &PackageRegistryFile) -> Result<(), AppError> {
@@ -346,6 +361,8 @@ struct RawPackageJson {
 
 #[derive(Debug, Deserialize)]
 struct RawTomcatPackageBlock {
+    #[serde(default)]
+    schema: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -394,33 +411,87 @@ fn detect_package_manifest_file(
         .or(parsed.name)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| AppError::Config("package.tomcat.name 缺失".to_string()))?;
-    let version = tomcat
+    if tomcat.version.is_some() {
+        return Err(AppError::Config(
+            "tomcat.version 已废弃，请改用外层 package.json.version".to_string(),
+        ));
+    }
+    let version = parsed
         .version
-        .or(parsed.version)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| AppError::Config("package.tomcat.version 缺失".to_string()))?;
+        .ok_or_else(|| AppError::Config("package.json.version 缺失".to_string()))?;
     let description = tomcat.description.or(parsed.description);
+    let schema = tomcat
+        .schema
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| PACKAGE_MANIFEST_SCHEMA_V1.to_string());
+    let (plugins, skills) = if tomcat.plugins.is_empty() && tomcat.skills.is_empty() {
+        auto_detect_package_entries(&root)?
+    } else {
+        (tomcat.plugins, tomcat.skills)
+    };
 
     let manifest = PackageManifest {
+        schema,
         name,
         version,
         description,
-        plugins: tomcat.plugins,
-        skills: tomcat.skills,
+        plugins,
+        skills,
     };
     if manifest.plugins.is_empty() && manifest.skills.is_empty() {
         return Err(AppError::Config(
-            "package.tomcat.plugins / skills 不能同时为空".to_string(),
+            "package.tomcat.plugins / skills 不能同时为空，且未发现 plugins/* 或 skills/*"
+                .to_string(),
         ));
     }
 
     let resources = resolve_package_resources(&root, &manifest)?;
     Ok(Some(DetectedPackageSource {
-        kind: PackageSourceKind::Package,
+        kind: DetectedPackageSourceKind::Package,
         source_root: root,
         manifest,
         resources,
     }))
+}
+
+fn auto_detect_package_entries(root: &Path) -> Result<(Vec<String>, Vec<String>), AppError> {
+    Ok((
+        scan_package_entry_dirs(root, "plugins")?,
+        scan_package_entry_dirs(root, "skills")?,
+    ))
+}
+
+fn scan_package_entry_dirs(root: &Path, namespace: &str) -> Result<Vec<String>, AppError> {
+    let namespace_dir = root.join(namespace);
+    if !namespace_dir.exists() {
+        return Ok(Vec::new());
+    }
+    if !namespace_dir.is_dir() {
+        return Err(AppError::Config(format!(
+            "package 根目录下的 {namespace} 必须是目录: {}",
+            namespace_dir.display()
+        )));
+    }
+
+    let mut entries = fs::read_dir(&namespace_dir)
+        .map_err(AppError::Io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::Io)?;
+    entries.sort_by_key(|entry| entry.path());
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let file_type = entry.file_type().map_err(AppError::Io)?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        out.push(format!(
+            "{namespace}/{}",
+            entry.file_name().to_string_lossy()
+        ));
+    }
+    Ok(out)
 }
 
 fn detect_bare_plugin(manifest_path: &Path) -> Result<DetectedPackageSource, AppError> {
@@ -435,7 +506,7 @@ fn detect_bare_plugin(manifest_path: &Path) -> Result<DetectedPackageSource, App
     let manifest =
         PackageManifest::single_plugin(plugin_id.clone(), version, description, ".".to_string());
     Ok(DetectedPackageSource {
-        kind: PackageSourceKind::BarePlugin,
+        kind: DetectedPackageSourceKind::BarePlugin,
         source_root: plugin_root.clone(),
         manifest,
         resources: vec![DetectedPackageResource {
@@ -455,7 +526,7 @@ fn detect_bare_skill(skill_file: &Path) -> Result<DetectedPackageSource, AppErro
         ".".to_string(),
     );
     Ok(DetectedPackageSource {
-        kind: PackageSourceKind::BareSkill,
+        kind: DetectedPackageSourceKind::BareSkill,
         source_root: skill_root.clone(),
         manifest,
         resources: vec![DetectedPackageResource {

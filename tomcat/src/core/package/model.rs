@@ -4,6 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use super::paths::LayerPaths;
 
+pub const PACKAGE_REGISTRY_SCHEMA_V1: &str = "tomcat.package.registry.v1";
+pub const PACKAGE_MANIFEST_SCHEMA_V1: &str = "tomcat.package.v1";
+
+fn default_package_registry_schema() -> String {
+    PACKAGE_REGISTRY_SCHEMA_V1.to_string()
+}
+
+fn default_package_manifest_schema() -> String {
+    PACKAGE_MANIFEST_SCHEMA_V1.to_string()
+}
+
+fn default_package_source_kind() -> PackageSourceKind {
+    PackageSourceKind::Local
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PackageVisibility {
@@ -43,12 +58,27 @@ impl std::fmt::Display for PackageVisibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PackageSourceKind {
+    #[serde(alias = "package", alias = "barePlugin", alias = "bareSkill")]
+    Local,
+}
+
+impl PackageSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DetectedPackageSourceKind {
     Package,
     BarePlugin,
     BareSkill,
 }
 
-impl PackageSourceKind {
+impl DetectedPackageSourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Package => "package",
@@ -83,6 +113,8 @@ impl PackageResourceKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageManifest {
+    #[serde(default = "default_package_manifest_schema")]
+    pub schema: String,
     pub name: String,
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +133,7 @@ impl PackageManifest {
         plugin_ref: String,
     ) -> Self {
         Self {
+            schema: default_package_manifest_schema(),
             name: package_name,
             version,
             description,
@@ -115,6 +148,7 @@ impl PackageManifest {
         skill_ref: String,
     ) -> Self {
         Self {
+            schema: default_package_manifest_schema(),
             name: package_name,
             version: "0.0.0".to_string(),
             description,
@@ -125,27 +159,25 @@ impl PackageManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackageResource {
-    pub kind: PackageResourceKind,
+pub struct PackagePluginRecord {
     pub id: String,
-    pub source_path: String,
-    pub install_subpath: String,
+    pub relative_dir: String,
 }
 
-impl PackageResource {
-    pub fn new(
-        kind: PackageResourceKind,
-        id: impl Into<String>,
-        source_path: impl Into<String>,
-        install_subpath: impl Into<String>,
-    ) -> Self {
-        Self {
-            kind,
-            id: id.into(),
-            source_path: source_path.into(),
-            install_subpath: install_subpath.into(),
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageSkillRecord {
+    pub name: String,
+    pub relative_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LegacyPackageResource {
+    pub kind: PackageResourceKind,
+    pub id: String,
+    #[serde(default)]
+    pub source_path: String,
+    #[serde(default)]
+    pub install_subpath: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,20 +186,112 @@ pub struct PackageRecord {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default = "default_package_source_kind")]
     pub source_kind: PackageSourceKind,
     pub visibility: PackageVisibility,
-    pub source_path: String,
+    #[serde(alias = "source_path")]
+    pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_root: Option<String>,
     pub installed_at: String,
     #[serde(default)]
-    pub resources: Vec<PackageResource>,
+    pub plugins: Vec<PackagePluginRecord>,
+    #[serde(default)]
+    pub skills: Vec<PackageSkillRecord>,
+    #[serde(default, rename = "resources", skip_serializing)]
+    pub(crate) legacy_resources: Vec<LegacyPackageResource>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+impl PackageRecord {
+    pub fn resource_count(&self) -> usize {
+        self.plugins.len() + self.skills.len()
+    }
+
+    pub fn resource_descriptors(&self) -> Vec<(PackageResourceKind, String)> {
+        let mut out = Vec::with_capacity(self.resource_count());
+        out.extend(
+            self.plugins
+                .iter()
+                .map(|plugin| (PackageResourceKind::Plugin, plugin.id.clone())),
+        );
+        out.extend(
+            self.skills
+                .iter()
+                .map(|skill| (PackageResourceKind::Skill, skill.name.clone())),
+        );
+        out
+    }
+
+    pub(crate) fn normalize_legacy_resources(&mut self) {
+        if !self.legacy_resources.is_empty() {
+            for resource in self.legacy_resources.drain(..) {
+                let relative_dir = if resource.source_path.trim().is_empty() {
+                    legacy_relative_dir(&resource)
+                } else {
+                    resource.source_path
+                };
+                match resource.kind {
+                    PackageResourceKind::Plugin => {
+                        if self.plugins.iter().any(|plugin| plugin.id == resource.id) {
+                            continue;
+                        }
+                        self.plugins.push(PackagePluginRecord {
+                            id: resource.id,
+                            relative_dir,
+                        });
+                    }
+                    PackageResourceKind::Skill => {
+                        if self.skills.iter().any(|skill| skill.name == resource.id) {
+                            continue;
+                        }
+                        self.skills.push(PackageSkillRecord {
+                            name: resource.id,
+                            relative_dir,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn legacy_relative_dir(resource: &LegacyPackageResource) -> String {
+    if resource.install_subpath.trim().is_empty() {
+        return ".".to_string();
+    }
+    resource
+        .install_subpath
+        .split_once('/')
+        .map(|(_, suffix)| suffix.to_string())
+        .unwrap_or_else(|| ".".to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageRegistryFile {
+    #[serde(default = "default_package_registry_schema")]
+    pub schema: String,
     #[serde(default)]
     pub packages: Vec<PackageRecord>,
+}
+
+impl Default for PackageRegistryFile {
+    fn default() -> Self {
+        Self {
+            schema: default_package_registry_schema(),
+            packages: Vec::new(),
+        }
+    }
+}
+
+impl PackageRegistryFile {
+    pub fn normalize(&mut self) {
+        if self.schema.trim().is_empty() {
+            self.schema = default_package_registry_schema();
+        }
+        for record in &mut self.packages {
+            record.normalize_legacy_resources();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,7 +318,7 @@ pub struct DetectedPackageResource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedPackageSource {
-    pub kind: PackageSourceKind,
+    pub kind: DetectedPackageSourceKind,
     pub source_root: PathBuf,
     pub manifest: PackageManifest,
     pub resources: Vec<DetectedPackageResource>,

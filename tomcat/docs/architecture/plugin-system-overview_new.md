@@ -58,7 +58,7 @@ sequenceDiagram
     rect rgb(235,245,255)
     Note over Disk,Reg: 阶段一 编目/预填(触发分两拍: 进程启动先扫 global/agent；进入某 project scope 时再补扫该 project overlay；全程只读 manifest 不跑码)
     Disk->>PM: 进程启动先扫 global/agent roots + 同名 first-wins
-    PM->>PM: 读 pi-plugin.json -> PluginManifest{id,name,version,main,permissions, tools[], events[]/activation}
+    PM->>PM: 读 plugin.json -> PluginManifest{id,name,version,main,permissions, tools[], events[]/activation}
     PM->>Cat: pre-seed PluginCatalog 条目(immutable: id/version/root/manifest + declared tools[]/events[])
     Note over Cat: 这就是「扫盘即填满」的那张表(不可变元信息层); ≠内置 BUILTIN_TOOL_CATALOG(那是编译期 const, 内置工具规格单一事实源)
     alt manifest 静态声明 tools[](目标态,首选)
@@ -224,7 +224,7 @@ pi.registerTool(toolDef)
 ```text
                          ┌──────────────────────── tomcat 进程（单进程） ────────────────────────┐
    插件作者              │                                                                        │
-   pi-plugin.json  ──加载─┼─► [发现/加载] ──► [JS 运行时(嵌入式)] ── 插件 JS/TS 在此执行           │
+   plugin.json     ──加载─┼─► [发现/加载] ──► [JS 运行时(嵌入式)] ── 插件 JS/TS 在此执行           │
    main.ts               │                          │                                            │
                          │        ┌─────────────────┼──────────────────┐                         │
                          │        │ ①纯计算          │ ②同步原生         │ ③异步+需权限            │
@@ -258,7 +258,7 @@ pi.registerTool(toolDef)
 
 ```text
   磁盘 plugin/                       tomcat 进程内
-  ├─ pi-plugin.json   load_plugin()  ┌───────────────────────────────────────────────┐
+  ├─ plugin.json      load_plugin()  ┌───────────────────────────────────────────────┐
   └─ main.ts ──transpile_ts──────────► PluginManager (src/ext/plugin/manager.rs)      │
                                       │   set_plugin_engine / set_host_dispatcher / ...│
                                       │           │ create_instance(id)                │
@@ -767,7 +767,7 @@ sessionId 流转（修正后）：
 三段式策略：
 
 ```text
-① 发现编目(启动, 不跑码)   扫三层根(global/agent/project) → 读 pi-plugin.json → 建轻量 Catalog
+① 发现编目(启动, 不跑码)   扫三层根(global/agent/project) → 读 plugin.json → 建轻量 Catalog
    （只读 JSON, 零 VM）      每个 project scope 只读本 scope 下可见的 manifest
 ② 工具元信息(唯一契约面)    ├─ manifest 静态 tools[]: 不跑码即填 ToolRegistry(对齐 openclaw contracts.tools)
                             └─ pi.registerTool(兼容): legacy 迁移/实现自报, 原则上应与 manifest.tools[] 一致
@@ -849,7 +849,7 @@ sessionId 流转（修正后）：
 
 ### 5.4 插件清单 manifest（自有，裁剪）
 
-清单文件名 `pi-plugin.json`（兼容 `plugin.json`），由 `src/ext/plugin/types.rs::parse_manifest` 解析。最小字段：`id`、`name`、`version`、`main`（入口 ts/js）、`permissions`（敏感能力声明，供权限闸）。**不要求** pi-mono 的 `pi.extensions` 结构。
+清单文件名 `plugin.json`，由 `src/ext/plugin/types.rs::parse_manifest` 解析。最小字段：`id`、`name`、`version`、`main`（入口 ts/js）、`permissions`（敏感能力声明，供权限闸）。**不要求** pi-mono 的 `pi.extensions` 结构。
 
 **可选静态 `tools[]` 声明（本版新增，省内存关键，见 §4.3.6）**：manifest 可选带 `tools[]`（每项 `{name, description, parameters}`，**不含 `execute`**）。声明后，**编目期不跑码即可把工具元信息填入 `ToolRegistry`**（对齐 openclaw `contracts.tools`），从而把 `run_script` 推迟到「插件首次被用到」时才跑（懒加载）。两条来源并存：
 

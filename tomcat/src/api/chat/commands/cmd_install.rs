@@ -129,7 +129,9 @@ pub(crate) async fn run(ctx: &ChatContext, command: InstallCommand) -> ChatComma
                 warnings.append(&mut refresh_warnings);
                 println!("[install] 当前会话 plugin catalog/static tools 已刷新。");
             }
-            Err(error) => warnings.push(format!("当前会话 plugin 清单刷新失败: {error}")),
+            Err(error) => warnings.push(format!(
+                "已安装，但当前会话 plugin 清单刷新失败: {error}；下次进入 scope 或手动 reload 后可见"
+            )),
         }
     }
 
@@ -175,8 +177,8 @@ pub(crate) async fn run(ctx: &ChatContext, command: InstallCommand) -> ChatComma
         outcome.record.version,
         target.label()
     );
-    for resource in &outcome.record.resources {
-        println!("  - {}: {}", resource.kind.as_str(), resource.id);
+    for (kind, id) in outcome.record.resource_descriptors() {
+        println!("  - {}: {}", kind.as_str(), id);
     }
     if !warnings.is_empty() {
         println!("[install] warnings:");

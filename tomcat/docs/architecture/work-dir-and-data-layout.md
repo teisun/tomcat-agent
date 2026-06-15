@@ -50,6 +50,8 @@
 补充约束：
 
 - `packages/` 只存安装账本，不承载 plugin/skill 正文。
+- `packages/registry.json` 的当前账本 schema 固定为 `tomcat.package.registry.v1`；字段定义与示例以 [package-manager.md](./package-manager.md) §5.3 为准。
+- package 安装清单使用 `package.json` 顶层 `tomcat` 块，schema 默认 `tomcat.package.v1`；版本统一来自外层 `package.json.version`。
 - `scope` 层目录由 install 时按需创建；`global` 与 `agent` 层目录由 `ensure_work_dir_structure()` 预创建。
 - code/claw 会话里 `/install` 成功后，只刷新当前进程内 `SkillSet` 与 plugin catalog/static tool 清单；**不会**在安装路径执行插件代码，也不会热替换已加载 plugin 实例。
 

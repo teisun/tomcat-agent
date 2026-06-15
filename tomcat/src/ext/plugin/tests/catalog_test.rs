@@ -47,12 +47,7 @@ fn discover_three_tier_first_wins() {
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
     cfg.agent.id = "agent-a".to_string();
 
-    write_plugin(
-        &work_dir.path().join("plugins").join("demo"),
-        "pi-plugin.json",
-        "demo",
-        "managed",
-    );
+    write_plugin(&work_dir.path().join("plugins").join("demo"), "demo", "managed");
     write_plugin(
         &work_dir
             .path()
@@ -60,7 +55,6 @@ fn discover_three_tier_first_wins() {
             .join("agent-a")
             .join("plugins")
             .join("demo"),
-        "plugin.json",
         "demo",
         "agent",
     );
@@ -70,13 +64,11 @@ fn discover_three_tier_first_wins() {
             .join(".tomcat")
             .join("plugins")
             .join("demo"),
-        "plugin.json",
         "demo",
         "project",
     );
     write_plugin(
         &work_dir.path().join("plugins").join("managed-only"),
-        "plugin.json",
         "managed-only",
         "managed-only",
     );
@@ -99,10 +91,10 @@ fn discover_three_tier_first_wins() {
     assert_eq!(managed_only.source, PluginSource::Managed);
 }
 
-fn write_plugin(root: &Path, manifest_name: &str, plugin_id: &str, description: &str) {
+fn write_plugin(root: &Path, plugin_id: &str, description: &str) {
     fs::create_dir_all(root).expect("create plugin root");
     fs::write(
-        root.join(manifest_name),
+        root.join("plugin.json"),
         format!(
             r#"{{
                 "id": "{plugin_id}",

@@ -25,8 +25,8 @@ pub(crate) fn run_install(
         "已安装 package: {}@{} -> {}",
         outcome.record.name, outcome.record.version, visibility
     );
-    for resource in &outcome.record.resources {
-        println!("  - {}: {}", resource.kind.as_str(), resource.id);
+    for (kind, id) in outcome.record.resource_descriptors() {
+        println!("  - {}: {}", kind.as_str(), id);
     }
     print_warnings(&outcome.warnings);
     Ok(())
@@ -111,14 +111,14 @@ fn render_package_listings(listings: &[PackageLayerListing]) {
                 record.name,
                 record.version,
                 record.source_kind.as_str(),
-                record.source_path,
+                record.source,
                 record.installed_at
             );
-            if !record.resources.is_empty() {
-                let resources = record
-                    .resources
-                    .iter()
-                    .map(|resource| format!("{}:{}", resource.kind.as_str(), resource.id))
+            let resource_descriptors = record.resource_descriptors();
+            if !resource_descriptors.is_empty() {
+                let resources = resource_descriptors
+                    .into_iter()
+                    .map(|(kind, id)| format!("{}:{id}", kind.as_str()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 println!("    resources: {resources}");

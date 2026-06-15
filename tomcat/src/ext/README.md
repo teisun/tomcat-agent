@@ -58,7 +58,7 @@ Rust 侧 `install_host_globals()` 另外会注入：
 
 完整加载链路如下：
 
-1. 解析插件根目录与 manifest（`plugin.json` / `pi-plugin.json`）。
+1. 解析插件根目录与 manifest（`plugin.json`）。
 2. 读取 `main`，必要时做 TS → JS 转译。
 3. 执行 `confirm_permissions` 扩展点（**可选**；未注入时默认放行）。
 4. 创建短生命周期 `PluginVmInstance`。

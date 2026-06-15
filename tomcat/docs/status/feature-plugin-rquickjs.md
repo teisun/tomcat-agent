@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-15 00:01 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
+| Tom | 2026-06-15 12:00 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 移除 WasmEdge 运行时、资产与脚本，统一 Plugin 命名 @2026-06-14
@@ -13,6 +13,13 @@
 - [✓] **[P2]** 文档与配置表更新（plugin-system-overview、user-guide、tomcat.config.toml） @2026-06-14
 - [✓] **[P1]** 三类真实插件测试：纯工具型 E2E、session_start 集成探针、legacy 工具箱 E2E、跨事件 VM 状态 @2026-06-14
 - [✓] **[P1]** PackageManager 统一安装：三层 package/plugin/skill 安装与卸载、`/install` live refresh、黑盒/集成/E2E/文档收口 @2026-06-15
+- [✓] **[P1]** PackageManager 规范对齐：registry schema、严格 npm 版本、`plugin.json` 单文件名、§9 验收矩阵与文档回链 @2026-06-15
+
+### 2026-06-15 | fix(package): PackageManager 规范对齐
+
+- **交付**：`packages/registry.json` 写入 `tomcat.package.registry.v1` 并拆分 `plugins[]`/`skills[]`；版本只认外层 `package.json.version` 且拒绝 `tomcat.version`；manifest 空列表时自动扫描 `plugins/*`/`skills/*`；移除 `pi-plugin.json` 兼容；`/install` 刷新失败 warning 补齐重载指引；`plugin list` 分层遮蔽测试与 agent 跨 scope 持久化 E2E。
+- **验证**：PackageManager 回归集通过（`core::package` 单测、`package_cmd_test`、`plugin_cmd_test`、`cmd_install_test`、`cli_tests` 相关场景）；全量 `cargo test -p tomcat` 仍有 9 个真实 LLM CLI 用例因 `401 invalid_api_key` 失败，与本次改动无关。
+- **覆盖**：状态页沿用当前分支既有 `66.2%` baseline；新增版本规则、legacy registry 迁移、自动扫描与 layered plugin list 单测覆盖。
 
 ### 2026-06-15 | feat(package): PackageManager 统一安装收口
 

@@ -128,10 +128,6 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
 
 fn resolve_candidate(path: &Path, is_dir: bool) -> Option<(PathBuf, PathBuf)> {
     if is_dir {
-        let pi_manifest = path.join("pi-plugin.json");
-        if pi_manifest.is_file() {
-            return Some((pi_manifest, path.to_path_buf()));
-        }
         let manifest = path.join("plugin.json");
         if manifest.is_file() {
             return Some((manifest, path.to_path_buf()));
@@ -140,7 +136,7 @@ fn resolve_candidate(path: &Path, is_dir: bool) -> Option<(PathBuf, PathBuf)> {
     }
 
     let file_name = path.file_name()?.to_string_lossy();
-    if file_name == "pi-plugin.json" || file_name == "plugin.json" {
+    if file_name == "plugin.json" {
         return path
             .parent()
             .map(|parent| (path.to_path_buf(), parent.to_path_buf()));

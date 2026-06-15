@@ -3307,11 +3307,26 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
     let package_registry =
         read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
     assert_eq!(
+        package_registry.schema,
+        tomcat::core::PACKAGE_REGISTRY_SCHEMA_V1
+    );
+    assert_eq!(
         package_registry.packages.len(),
         1,
         "scope package registry 应只有 1 条记录"
     );
     assert_eq!(package_registry.packages[0].name, "e2e-scope-package");
+    assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
+    assert_eq!(package_registry.packages[0].plugins[0].id, "e2e-scope-plugin");
+    assert_eq!(
+        package_registry.packages[0].plugins[0].relative_dir,
+        "plugins/e2e-scope-plugin"
+    );
+    assert_eq!(package_registry.packages[0].skills[0].name, "e2e-scope-skill");
+    assert_eq!(
+        package_registry.packages[0].skills[0].relative_dir,
+        "skills/e2e-scope-skill"
+    );
 
     let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
     assert!(
@@ -3386,7 +3401,7 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
     list_assert.success().stdout(
         predicate::str::contains("agent:")
             .and(predicate::str::contains("e2e-agent-plugin@0.1.0"))
-            .and(predicate::str::contains("[barePlugin]"))
+            .and(predicate::str::contains("[local]"))
             .and(predicate::str::contains("plugin:e2e-agent-plugin")),
     );
 
@@ -3408,6 +3423,9 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
         "agent package registry 应只有 1 条记录"
     );
     assert_eq!(package_registry.packages[0].name, "e2e-agent-plugin");
+    assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
+    assert_eq!(package_registry.packages[0].plugins[0].id, "e2e-agent-plugin");
+    assert_eq!(package_registry.packages[0].plugins[0].relative_dir, ".");
 
     let plugin_registry = read_plugin_registry(&agent_root.join("plugins").join("registry.json"));
     assert!(
@@ -3417,6 +3435,80 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
             .any(|entry| entry.id == "e2e-agent-plugin" && entry.enabled),
         "agent plugin registry 应登记 e2e-agent-plugin"
     );
+}
+
+#[test]
+fn test_user_installs_agent_package_survives_scope_switch() {
+    common::setup_logging();
+    let _span = info_span!("test_user_installs_agent_package_survives_scope_switch").entered();
+
+    let plugin_dir = make_plugin_dir("e2e-agent-switch-plugin");
+    let home = tempfile::tempdir().unwrap();
+    let work_dir = home.path().join("work");
+    let project_a = home.path().join("project-a");
+    let project_b = home.path().join("project-b");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    std::fs::create_dir_all(&project_a).unwrap();
+    std::fs::create_dir_all(&project_b).unwrap();
+
+    let plugin_src = plugin_dir.path().to_str().unwrap();
+    let work_dir_str = work_dir.to_str().unwrap();
+    let project_a_str = project_a.to_str().unwrap();
+    let project_b_str = project_b.to_str().unwrap();
+
+    info!("Arrange: 从 project-a 安装 bare plugin 到 agent 层");
+    cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "install",
+            plugin_src,
+            "--visibility",
+            "agent",
+            "--scope-root",
+            project_a_str,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("已安装 package").and(predicate::str::contains("agent")));
+
+    info!("Act: 切到 project-b 后查看 agent 层 packages");
+    let list_assert = cmd()
+        .env("HOME", home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", work_dir_str)
+        .args([
+            "packages",
+            "--visibility",
+            "agent",
+            "--scope-root",
+            project_b_str,
+        ])
+        .assert();
+    let list_out = String::from_utf8_lossy(&list_assert.get_output().stdout.clone()).to_string();
+    info!(
+        "Assert packages: agent 包不受 scope 切换影响；actual: {}",
+        trunc(&list_out, 320)
+    );
+    list_assert.success().stdout(
+        predicate::str::contains("agent:")
+            .and(predicate::str::contains("e2e-agent-switch-plugin@0.1.0"))
+            .and(predicate::str::contains("[local]"))
+            .and(predicate::str::contains("plugin:e2e-agent-switch-plugin")),
+    );
+
+    let agent_root = work_dir.join("agents").join("main");
+    assert!(
+        agent_root
+            .join("plugins")
+            .join("e2e-agent-switch-plugin")
+            .join("plugin.json")
+            .exists(),
+        "切换 scope 后 agent plugin 仍应存在"
+    );
+    let package_registry =
+        read_package_registry(&agent_root.join("packages").join("registry.json"));
+    assert_eq!(package_registry.packages.len(), 1);
+    assert_eq!(package_registry.packages[0].name, "e2e-agent-switch-plugin");
 }
 
 /// [E2E-CLI-029] 用户把 bare skill 安装到 global 层并列出 global package
@@ -3482,7 +3574,7 @@ fn test_user_installs_bare_skill_to_global_layer() {
     list_assert.success().stdout(
         predicate::str::contains("global:")
             .and(predicate::str::contains("e2e-global-skill@0.0.0"))
-            .and(predicate::str::contains("[bareSkill]"))
+            .and(predicate::str::contains("[local]"))
             .and(predicate::str::contains("skill:e2e-global-skill")),
     );
 
@@ -3502,6 +3594,9 @@ fn test_user_installs_bare_skill_to_global_layer() {
         "global package registry 应只有 1 条记录"
     );
     assert_eq!(package_registry.packages[0].name, "e2e-global-skill");
+    assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
+    assert_eq!(package_registry.packages[0].skills[0].name, "e2e-global-skill");
+    assert_eq!(package_registry.packages[0].skills[0].relative_dir, ".");
 }
 
 /// [E2E-CLI-030] 用户卸载 scope package 后资源与账本被精准清理

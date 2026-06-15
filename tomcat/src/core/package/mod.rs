@@ -9,10 +9,11 @@ pub use manager::{
     PackageManager,
 };
 pub use model::{
-    DetectedPackageResource, DetectedPackageSource, InstallOutcome, PackageLayerListing,
-    PackageManifest, PackageRecord, PackageRegistryFile, PackageResource, PackageResourceKind,
-    PackageSourceKind, PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall,
-    PreparedInstallResource, UninstallOutcome,
+    DetectedPackageResource, DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome,
+    PackageLayerListing, PackageManifest, PackagePluginRecord, PackageRecord, PackageRegistryFile,
+    PackageResourceKind, PackageSkillRecord, PackageSourceKind, PackageVisibility,
+    PluginRegistryEntry, PluginRegistryFile, PreparedInstall, PreparedInstallResource,
+    UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
 };
 pub use paths::{
     canonical_scope_root, resolve_layer_paths, resolve_runtime_layer_paths, LayerPaths,

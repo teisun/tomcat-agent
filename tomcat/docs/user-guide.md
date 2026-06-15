@@ -813,7 +813,7 @@ tomcat code
 
 ### 运行时特性
 
-- 入口仍是 `plugin.json` / `pi-plugin.json` + `main.js` / `main.ts`。
+- 入口仍是 `plugin.json` + `main.js` / `main.ts`。
 - 敏感能力统一走 `pi.*` hostcall，例如 `pi.readFile()`、`pi.writeFile()`、`pi.editFile()`、`pi.exec()`。
 - `node:fs`、`node:child_process`、`node:os` 不会直接暴露给插件；会返回明确的 fail-closed 错误。
 - 当前默认提供的轻量能力包括：

@@ -399,7 +399,7 @@ sequenceDiagram
 | R4 安装期校验 | 安装时要不要直接运行插件代码做“强校验”？ | 安装期只做静态校验：manifest/frontmatter、入口文件存在性、UTF-8/JSON 结构；拒绝在安装期执行插件代码。 | `Tomcat/src/api/cli/plugin_cmd.rs::run_plugin`、`Tomcat/src/ext/plugin/manager.rs::load_plugin`；`pi_agent_rust/src/package_manager.rs`、`pi_agent_rust/src/resources.rs` | 设计：PackageManager 只验证 package 结构与资源静态合法性；理由：安装层是文件管理与账本事务，不应变成“执行第三方代码”的入口。真正的 runtime 加载仍留给现有 PluginManager。 | 复用 `PluginManager::load_plugin` 作为安装主路径未入选；拒因：它会把安装耦合到 VM 起机与 runtime 依赖，且 skill 没有对应机制。安装期跑主脚本也会扩大风险面。 | “装上去”先是文件系统动作，不是先把别人代码跑一遍。 |
 | R5 source 支持范围 | 第一版要不要一口气支持 git/http/npm？ | 第一版只支持**本地 source**：package 目录、bare plugin、bare skill；远程 source 明确后置。 | `Tomcat/Cargo.toml`（当前无专用 git clone / artifact fetch 基建）、`Tomcat/src/api/cli/plugin_cmd.rs`；`pi_agent_rust/src/package_manager.rs` | 设计：先把 visibility、layer registry、回滚事务做完整；理由：Tomcat 当前没有成熟的远程获取与 trust model，而本期的主要复杂度已经来自三层安装语义，先缩变量更稳。 | 直接照搬 `pi_agent_rust` 的 `npm/git/local` 全量模型未入选；拒因：Tomcat 还没有对应的下载、校验、索引与信任基础设施。 | 先把“本地怎么装对”做扎实，再谈“远程怎么拉过来”。 |
 | R6 manifest 职责边界 | package manifest 要不要取代 plugin manifest？plugin 清单文件名保留几个？ | 保留**两层清单**：package manifest 只描述 package 元数据与包含的 plugin/skill 相对路径；plugin 运行时元数据继续由 **`plugin.json`** 描述，并由 `parse_manifest()` 解析。安装器不把 plugin 的 runtime 字段摊平进 package manifest，也不保留 `pi-plugin.json` 这个历史别名。 | `Tomcat/src/ext/plugin/types.rs::PluginManifest`、`Tomcat/src/ext/plugin/types.rs::parse_manifest`、`Tomcat/src/core/skill/discovery.rs` | 设计：把“安装/分发清单”和“运行时清单”解耦，同时把 plugin 清单文件名收敛到一个。理由：两者关注点不同，若把 `main`、`tools`、`requiredPermissions`、`activation` 等字段搬进 package manifest，会造成重复声明与漂移；而如果 plugin 清单继续保留两个文件名，则 source 识别、文档、示例与迁移脚本都会多一套分支。 | 用一个大 manifest 同时替代 package 与 plugin 清单未入选；拒因：会把安装层和 runtime schema 强耦合。要求 package manifest 完整内联每个 plugin 的 runtime 字段也未入选；拒因：重复数据过多，维护成本高。继续支持 `pi-plugin.json` / `plugin.json` 双文件名也未入选；拒因：同一协议没必要维护两套名字。 | 装箱单和插件说明书是两张纸；说明书本身也只留一个名字：`plugin.json`。 |
-| R7 package 清单承载位 | package 清单标准放哪儿，`package.json` 之外还要不要别名文件？ | 采用**一套字段、一个文件名**：package 清单唯一文件名是 **`package.json`**，唯一承载位是其顶层 `tomcat` 块。检测只认 `package.json[tomcat]`；plain `package.json` 若无顶层 `tomcat` 块，不算 Tomcat package；`tomcat.name` / `tomcat.version` 缺失时可回退继承外层 `package.json.name` / `package.json.version`。不支持 `tomcat-package.json`，也不支持 `pi-package.json`。 | npm 生态中 `package.json` 顶层命名空间字段惯例（如 `eslint` / `jest` / `prettier` / `pnpm`）；本方案 `§5.2` 的 `PackageManifest` / source 归一规则 | 设计：把 package 清单文件名也收敛到一个，和“未来以 npm 包分发”的方向完全对齐。理由：若再保留 `tomcat-package.json` 这种别名，纯资源包、脚手架、校验器、示例仓库和 CI 模板都要同时记两个名字；统一只认 `package.json` 后，所有 package 无论是不是纯资源包，都只需要带一个最小 `package.json`。 | 继续支持 `package.json[tomcat]` + `tomcat-package.json` 双文件名未入选；拒因：同一协议不值得保留两套文件名。只认 `tomcat-package.json` 未入选；拒因：与未来 npm 分发方向相悖。`pi-package.json` 历史兼容写法未入选；拒因：与“放弃 pi-mono 硬兼容”冲突。 | 包清单也只留一个名字：`package.json`；哪怕是纯资源包，也老老实实带一个最小 `package.json`。 |
+| R7 package 清单承载位 | package 清单标准放哪儿，`package.json` 之外还要不要别名文件？ | 采用**一套字段、一个文件名**：package 清单唯一文件名是 **`package.json`**，唯一承载位是其顶层 `tomcat` 块。检测只认 `package.json[tomcat]`；plain `package.json` 若无顶层 `tomcat` 块，不算 Tomcat package；`tomcat.name` 缺失时可回退继承外层 `package.json.name`；版本统一只认外层 `package.json.version` 且必填，`tomcat.version` 不再参与解析。不支持 `tomcat-package.json`，也不支持 `pi-package.json`。 | npm 生态中 `package.json` 顶层命名空间字段惯例（如 `eslint` / `jest` / `prettier` / `pnpm`）；本方案 `§5.2` 的 `PackageManifest` / source 归一规则 | 设计：把 package 清单文件名也收敛到一个，和“未来以 npm 包分发”的方向完全对齐。理由：若再保留 `tomcat-package.json` 这种别名，纯资源包、脚手架、校验器、示例仓库和 CI 模板都要同时记两个名字；统一只认 `package.json` 后，所有 package 无论是不是纯资源包，都只需要带一个最小 `package.json`。 | 继续支持 `package.json[tomcat]` + `tomcat-package.json` 双文件名未入选；拒因：同一协议不值得保留两套文件名。只认 `tomcat-package.json` 未入选；拒因：与未来 npm 分发方向相悖。`pi-package.json` 历史兼容写法未入选；拒因：与“放弃 pi-mono 硬兼容”冲突。 | 包清单也只留一个名字：`package.json`；哪怕是纯资源包，也老老实实带一个最小 `package.json`。 |
 | R8 runtime 集成方式 | 安装后要不要再加一套新的发现/索引流程？ | 安装后继续复用 `plugin_roots` / `skill_roots`，不新增第四套发现协议；`PackageRegistry` 也**不直接进内存**，它只服务安装管理面。 | `Tomcat/src/ext/plugin/source_scan.rs`、`Tomcat/src/core/skill/discovery.rs`、`Tomcat/src/api/chat/context.rs::build_plugin_runtime`；`pi_agent_rust/src/resources.rs` | 设计：PackageManager 只负责写三层文件根与分层 registry，runtime 下一次 scope 进入/skill reload 时自然命中。内存里仍然是 `PluginCatalog/PluginManager` 与 `SkillSet` 两套对象。理由：发现事实源已经存在且稳定，没必要再平行造一张“安装专用可见表”。 | 额外引入 package-only discovery index 未入选；拒因：会让“磁盘真实内容”和“安装索引”出现双真相。把 package 直接 materialize 成第三套 runtime 对象也未入选；拒因：会把概念面越搞越厚。 | 装包时可以统一，跑起来时还是 plugin 和 skill 各走各的。 |
 | R9 列表与卸载语义 | `packages` / `plugin list` 是只看全局，还是理解 layered precedence？ | `packages` 按层分组展示；`plugin list/enable/disable/unload` 改为能读 layered plugin registry，并在需要时提示 shadow 信息。 | `Tomcat/src/api/cli/plugin_cmd.rs::run_plugin`；`pi_agent_rust/src/main.rs::handle_package_list_blocking`、`pi_agent_rust/src/package_manager.rs::ResolvedPaths` | 设计：包列表强调“装在哪层”，插件列表强调“这一层装了什么 + 当前可见结果”；理由：package 的关切是管理账本，plugin 的关切是最终运行可见集，二者应各自说清楚。 | 只保留现有“仅全局”的 `plugin list` 未入选；拒因：scope/agent 安装的 plugin 会在管理面上“失踪”。`packages` 只做 merged visible view 也未入选；拒因：会把“装在哪层”这个排障关键信息折叠掉。 | 列表不能只告诉你“看得见什么”，还要告诉你“它装在哪层”。 |
 | R10 当前会话可见性 | code/claw 内 `/install` 成功后，要不要立刻刷新当前会话的 skill/plugin 清单？ | 会话内 `/install` 成功后，**只刷新当前 session 的 skill / plugin 静态清单**；shell `tomcat install` 仍保持 disk-only。刷新复用 `reload_skill_set()` 与 `PluginCatalog::discover()` 语义；明确**不**在刷新路径调用 `load_plugin()`、不启动 session VM、不热替换已加载实例。 | `Tomcat/src/api/chat/context.rs::reload_skill_set`、`Tomcat/src/api/chat/context.rs::build_plugin_runtime`、`Tomcat/src/ext/plugin/catalog.rs::PluginCatalog::discover`、`Tomcat/src/core/tools/contract/registry.rs::unregister_plugin_tools` | 设计：当前 `code/claw` scope runtime 会缓存 `SkillSet` / `PluginManager` / `ToolRegistry`；若只写磁盘不刷新，用户会遇到“装好了但当前会话看不见”。把 refresh 限制在清单层，既补体验闭环，又不把 install 扩成执行第三方代码。 | 完全不 refresh 未入选；拒因：交互式会话体验断裂，用户必须猜测去 `/skill reload` 或重开会话。安装成功即 `load_plugin()` / 热起 session VM 未入选；拒因：违背 R4，把文件事务变成运行时执行路径，也会让失败边界和回滚语义复杂化。 | 装完要马上看得见，但“看得见”只等于当前清单刷新，不等于热执行插件。 |
@@ -588,7 +588,7 @@ acme-dev-kit/                      # package 根目录
 
 #### package manifest 示例
 
-**唯一写法 = 一组字段（`schema` / `name` / `version` / `description` / `plugins` / `skills`），唯一文件名 = `package.json`。** 这组字段标准放在 `package.json` 的顶层 `tomcat` 块里；它只做一件事：列出这个包里有哪些 plugin 目录、哪些 skill 目录（相对 package 根的路径）。它**不重复** plugin manifest 的内容。
+**唯一写法 = 一组字段（`schema` / `name` / `description` / `plugins` / `skills`），唯一文件名 = `package.json`。** 这组字段标准放在 `package.json` 的顶层 `tomcat` 块里；版本统一使用外层 `package.json.version`。`tomcat` 块只做一件事：列出这个包里有哪些 plugin 目录、哪些 skill 目录（相对 package 根的路径）。它**不重复** plugin manifest 的内容。
 
 标准形态 —— `package.json` 顶层 `tomcat` 块（推荐，未来可直接以 npm 包形态分发）：
 
@@ -603,7 +603,6 @@ acme-dev-kit/                      # package 根目录
   "tomcat": {
     "schema": "tomcat.package.v1",
     "name": "acme-dev-kit",
-    "version": "0.3.2",
     "description": "Shared plugins and skills for the acme team.",
     "plugins": ["plugins/acme.translate", "plugins/acme.review"],
     "skills": ["skills/release-checklist", "skills/triage-oncall"]
@@ -611,9 +610,10 @@ acme-dev-kit/                      # package 根目录
 }
 ```
 
-- 安装器**只读顶层 `tomcat` 块**；`scripts` / `dependencies` / `devDependencies` 等普通 npm 字段对安装器是旁路信息，继续留给 npm / pnpm / yarn。
+- 安装器以顶层 `tomcat` 块为主，同时会读取外层 `package.json.name` / `package.json.version` 作为 package 身份字段；`scripts` / `dependencies` / `devDependencies` 等普通 npm 字段仍是旁路信息，继续留给 npm / pnpm / yarn。
 - 必须是**最外层**的 `tomcat` 键（与 `name`、`version` 同级），不是 `scripts.tomcat`、`config.tomcat` 这种深层位置。
-- 若 `tomcat.name` / `tomcat.version` 缺失，回退继承外层 `package.json` 的 `name` / `version`。
+- 若 `tomcat.name` 缺失，可回退继承外层 `package.json.name`。
+- `package.json.version` 是 **唯一版本来源且必填**；`tomcat.version` 不再参与解析，写了也视为非法输入。
 - 即便是纯 skill 包或纯 plugin 包，也统一带一个最小 `package.json`；本方案不再保留 `tomcat-package.json` 这种第二文件名。
 
 字段定义（放在 `package.json` 的 `tomcat` 块里）：
@@ -622,10 +622,16 @@ acme-dev-kit/                      # package 根目录
 |------|-----------|------|--------|------|--------|
 | `schema` | string | 否 | `tomcat.package.v1` | schema 版本；仅用于识别与后续升级 | 先留一个协议版本位，别以后升级没地方放。 |
 | `name` | string | 是* | 无 | package 身份名；同层同名默认冲突（*可回退继承外层 `package.json.name`） | 这是“这包叫什么”。 |
-| `version` | string | 否 | `null`（可回退继承外层 `package.json.version`） | package 版本 | 有版本最好，没有也别挡住第一版。 |
 | `description` | string | 否 | `""` | 展示信息 | 方便列表和排障时看懂用途。 |
 | `plugins` | `string[]` | 否 | 自动扫描 `plugins/*` | 相对 package 根的 plugin 子目录列表 | 不写时就按约定目录自己找。 |
 | `skills` | `string[]` | 否 | 自动扫描 `skills/*` | 相对 package 根的 skill 子目录列表 | skill 同理。 |
+
+外层 `package.json` 仍有两个关键字段：
+
+| 字段 | 位置 | 必填 | 说明 | 说人话 |
+|------|------|------|------|--------|
+| `name` | `package.json.name` | 否 | 当 `tomcat.name` 缺失时，作为 package 名回退来源 | 没在 `tomcat` 块单独起名时，就借外层包名。 |
+| `version` | `package.json.version` | 是 | PackageManager 唯一版本来源 | 想对齐 npm，就别再搞两套 version。 |
 
 #### 为什么 package 只保留 `package.json`
 
@@ -656,6 +662,7 @@ acme-dev-kit/                      # package 根目录
     {
       "name": "acme-dev-kit",
       "version": "0.1.0",
+      "description": "Shared plugins and skills for the acme team.",
       "source_kind": "local",
       "source": "/abs/path/to/acme-dev-kit",
       "visibility": "scope",
@@ -677,7 +684,8 @@ acme-dev-kit/                      # package 根目录
 | `schema` | string | 是 | 无 | registry | 固定为 `tomcat.package.registry.v1` | 这是账本版本号。 |
 | `packages[]` | array | 是 | `[]` | registry | 当前层安装的 package 列表 | 一层一个账本，里面是一堆包。 |
 | `name` | string | 是 | 无 | package record | package 身份名 | 卸载和列表都靠它。 |
-| `version` | string / null | 否 | `null` | package record | 版本展示与排障信息 | 能记就记，不能记也别阻塞。 |
+| `version` | string | 是 | 无 | package record | 版本展示与排障信息 | 既然 package.json.version 必填，账本里也始终有版本。 |
+| `description` | string / null | 否 | `null` | package record | package 展示信息 | 看列表和排障时更容易知道这包是干嘛的。 |
 | `source_kind` | enum(`local`) | 是 | `local` | package record | 第一版只支持本地 source | 现在只承认本地。 |
 | `source` | string | 是 | 无 | package record | 用户原始或归一后的本地路径 | 回头查“这包从哪来的”靠它。 |
 | `visibility` | enum | 是 | 无 | package record | 写入层语义 | 帮列表和排障直接看懂层级。 |
@@ -824,26 +832,30 @@ packages list 无结果 → Ok + 空列表 / 友好提示
 
 ## 9. 测试矩阵（验收）
 
-> 当前状态均为 `PENDING`，因为本文先落设计文档，代码尚未实现。
+> 当前分支已实现以下行为，状态改为按实现同步维护。
 
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 |------|-------------|------|--------|
-| 单元 | `core::package::tests::resolve_visibility_roots_global_agent_scope` | PENDING | 三层路径别算错，这是后面所有行为的地基。 |
-| 单元 | `core::package::tests::detect_bare_plugin_and_bare_skill` | PENDING | bare plugin 只认 `plugin.json`，bare skill 只认 `SKILL.md`。 |
-| 单元 | `core::package::tests::detect_package_manifest_requires_package_json_tomcat_block` | PENDING | 只认 `package.json[tomcat]`，别把普通 `package.json` 误判成包。 |
-| 单元 | `api::cli::tests::package_cmd_test::install_scope_package_writes_layer_registries` | PENDING | scope 安装要同时写 package 与 plugin 账本。 |
-| 单元 | `api::cli::tests::package_cmd_test::install_failure_rolls_back_copied_dirs` | PENDING | 回滚是安装事务最容易漏的地方。 |
-| 单元 | `api::cli::tests::plugin_cmd_test::plugin_list_merges_layered_registries` | PENDING | plugin CLI 不能再只认识全局那层。 |
-| 解析 | `api::cli::tests::parse_cli_test::cli_parse_install_visibility_scope_root` | PENDING | 顶层命令与新 flag 的 clap 语义要锁死。 |
-| 解析 | `api::chat::commands::tests::install_command_prompts_visibility_when_omitted` | PENDING | `/install` 不传目标层时必须走 chooser。 |
-| 单元 | `api::chat::commands::tests::install_command_refreshes_current_session_inventory` | PENDING | `/install` 成功后当前会话不该还看旧 skill/plugin 清单。 |
-| 单元 | `api::chat::commands::tests::install_live_refresh_does_not_execute_plugin` | PENDING | 立即可见不能变成“顺手热执行插件”。 |
-| 集成 | `tests/cli_tests.rs::test_install_scope_package_visible_in_packages_list` | PENDING | 从真实二进制看，scope 层至少要能装、能列。 |
-| 集成 | `tests/cli_tests.rs::test_install_agent_package_survives_scope_switch` | PENDING | agent 层不能因为换了项目目录就消失。 |
-| 集成 | `tests/cli_tests.rs::test_uninstall_scope_package_cleans_layer_dirs_and_registries` | PENDING | 卸载要删目录，也要删账本。 |
-| E2E | `tests/cli_tests.rs::test_slash_install_refreshes_current_session_inventory` | PENDING | code/claw 内 `/install` 后无需重进当前会话即可看到新资源。 |
-| 观察指标 | `G1-G6` 对应上述单元/集成用例 | PENDING | §3 里吹的牛，最终都得靠这些测试来兜底。 |
-| 文档 | 本文 + `work-dir-and-data-layout.md` + `skill-system.md` + `plugin-system-overview_new.md` 同步修订 | PENDING | 代码改了，周边文档也要一起更新。 |
+| 单元 | `core::package::tests::resolve_visibility_roots_global_agent_scope` | PASSING | 三层路径别算错，这是后面所有行为的地基。 |
+| 单元 | `core::package::tests::detect_bare_plugin_and_bare_skill` | PASSING | bare plugin 只认 `plugin.json`，bare skill 只认 `SKILL.md`。 |
+| 单元 | `core::package::tests::detect_package_manifest_requires_package_json_tomcat_block` | PASSING | 只认 `package.json[tomcat]`，别把普通 `package.json` 误判成包。 |
+| 单元 | `core::package::tests::detect_package_manifest_requires_outer_package_json_version` | PASSING | 版本现在只认外层 `package.json.version`，缺失直接报错。 |
+| 单元 | `core::package::tests::detect_package_manifest_rejects_tomcat_version_override` | PASSING | `tomcat.version` 已废弃，继续写会被明确拒绝。 |
+| 单元 | `core::package::tests::detect_package_manifest_auto_scans_default_resource_dirs` | PASSING | `plugins/*` / `skills/*` 留空时，会按约定目录自动发现。 |
+| 单元 | `core::package::tests::install_scope_package_writes_layer_registries` | PASSING | scope 安装要同时写 package 与 plugin 账本。 |
+| 单元 | `core::package::tests::install_failure_rolls_back_copied_dirs` | PASSING | 回滚是安装事务最容易漏的地方。 |
+| 单元 | `api::cli::tests::package_cmd_test::run_install_scope_package_writes_layer_registries` | PASSING | shell CLI 前门要把同一套账本写对。 |
+| 单元 | `api::cli::tests::plugin_cmd_test::plugin_list_renders_visible_and_shadowed_layered_entries` | PASSING | plugin CLI 不能再只认识全局那层，还得把 shadow 关系讲清楚。 |
+| 解析 | `api::cli::tests::parse_cli_test::cli_parse_install_visibility_scope_root` | PASSING | 顶层命令与新 flag 的 clap 语义要锁死。 |
+| 解析 | `api::chat::commands::tests::parse_test::install_command_parses_explicit_target_and_default_prompt_mode` | PASSING | `/install` 的 slash 语法与目标层参数要能稳定解析。 |
+| 单元 | `api::chat::commands::tests::cmd_install_test::run_install_cancelled_has_no_side_effects` | PASSING | chooser 被取消时，必须真的什么都不写。 |
+| 单元 | `api::chat::commands::tests::cmd_install_test::run_install_refreshes_current_session_inventory` | PASSING | `/install` 成功后当前会话不该还看旧 skill/plugin 清单。 |
+| 单元 | `api::chat::commands::tests::cmd_install_test::install_live_refresh_does_not_execute_plugin` | PASSING | 立即可见不能变成“顺手热执行插件”。 |
+| 集成 | `tests/cli_tests.rs::test_user_installs_scope_package_and_lists_layered_packages` | PASSING | 从真实二进制看，scope 层至少要能装、能列。 |
+| 集成 | `tests/cli_tests.rs::test_user_installs_agent_package_survives_scope_switch` | PASSING | agent 层不能因为换了项目目录就消失。 |
+| 集成 | `tests/cli_tests.rs::test_user_uninstalls_scope_package_and_cleans_scope_layer` | PASSING | 卸载要删目录，也要删账本。 |
+| 观察指标 | `G1-G6` 对应上述单元/集成用例 | PASSING | §3 里吹的牛，最终都得靠这些测试来兜底。 |
+| 文档 | 本文 + `work-dir-and-data-layout.md` + `user-guide.md` 等同步修订 | PASSING | 代码改了，周边文档也要一起更新。 |
 
 ## 10. 风险与应对
 

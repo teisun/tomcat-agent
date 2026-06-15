@@ -12,6 +12,7 @@ use crate::{
     EventBus, FileAuditRecorder, PluginEngine, PluginManager, Tool, ToolExecutor, ToolRegistry,
     TracingAuditRecorder,
 };
+use std::fmt::Write as _;
 
 use super::PluginSub;
 
@@ -156,6 +157,61 @@ fn visible_and_shadowed_entries(
     (visible, shadowed)
 }
 
+pub(crate) fn render_plugin_list_output(cfg: &AppConfig) -> Result<String, AppError> {
+    let registries = layered_registries(cfg)?;
+    Ok(render_plugin_list_from_registries(
+        &registries,
+        &cfg.plugin.auto_load,
+    ))
+}
+
+fn render_plugin_list_from_registries(
+    registries: &[LayeredRegistry],
+    auto_load: &[String],
+) -> String {
+    let (visible, shadowed) = visible_and_shadowed_entries(registries);
+    let mut out = String::new();
+
+    if visible.is_empty() && shadowed.is_empty() {
+        out.push_str("当前无已注册插件。\n");
+        if !auto_load.is_empty() {
+            let _ = writeln!(
+                out,
+                "  提示: auto_load 中的插件将在对话模式启动时自动加载: {:?}",
+                auto_load
+            );
+        }
+        return out;
+    }
+
+    let _ = writeln!(out, "{:<24} {:<10} {:<8} {:<12}", "ID", "层", "启用", "状态");
+    let _ = writeln!(out, "{}", "-".repeat(72));
+    for item in &visible {
+        let _ = writeln!(
+            out,
+            "{:<24} {:<10} {:<8} {:<12}",
+            item.entry.id,
+            item.visibility.as_str(),
+            if item.entry.enabled { "是" } else { "否" },
+            "visible"
+        );
+    }
+    if !shadowed.is_empty() {
+        out.push_str("\nshadowed:\n");
+        for item in &shadowed {
+            let _ = writeln!(
+                out,
+                "  - {} @ {} ({})",
+                item.entry.id,
+                item.visibility.as_str(),
+                item.entry.path
+            );
+        }
+    }
+
+    out
+}
+
 pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError> {
     let ctx = build_plugin_context(cfg)?;
     let pm = &ctx.plugin_manager;
@@ -163,41 +219,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
 
     match sub {
         PluginSub::List => {
-            let registries = layered_registries(cfg)?;
-            let (visible, shadowed) = visible_and_shadowed_entries(&registries);
-
-            if visible.is_empty() && shadowed.is_empty() {
-                println!("当前无已注册插件。");
-                if !ctx.config.plugin.auto_load.is_empty() {
-                    println!(
-                        "  提示: auto_load 中的插件将在对话模式启动时自动加载: {:?}",
-                        ctx.config.plugin.auto_load
-                    );
-                }
-            } else {
-                println!("{:<24} {:<10} {:<8} {:<12}", "ID", "层", "启用", "状态");
-                println!("{}", "-".repeat(72));
-                for item in &visible {
-                    println!(
-                        "{:<24} {:<10} {:<8} {:<12}",
-                        item.entry.id,
-                        item.visibility.as_str(),
-                        if item.entry.enabled { "是" } else { "否" },
-                        "visible"
-                    );
-                }
-                if !shadowed.is_empty() {
-                    println!("\nshadowed:");
-                    for item in &shadowed {
-                        println!(
-                            "  - {} @ {} ({})",
-                            item.entry.id,
-                            item.visibility.as_str(),
-                            item.entry.path
-                        );
-                    }
-                }
-            }
+            print!("{}", render_plugin_list_output(&ctx.config)?);
         }
         PluginSub::Load { path } => {
             let p = std::path::Path::new(&path);

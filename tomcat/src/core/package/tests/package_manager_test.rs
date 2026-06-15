@@ -119,6 +119,95 @@ fn detect_package_manifest_requires_package_json_tomcat_block() {
 }
 
 #[test]
+fn detect_package_manifest_requires_outer_package_json_version() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    write_skill(&pkg_dir.path().join("skills/commit"), "commit", "Create a commit.");
+    std::fs::write(
+        pkg_dir.path().join("package.json"),
+        serde_json::to_string_pretty(&json!({
+            "name": "versionless-package",
+            "tomcat": {
+                "skills": ["skills/commit"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = manager.detect_source(pkg_dir.path()).unwrap_err().to_string();
+    assert!(
+        error.contains("package.json.version"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn detect_package_manifest_rejects_tomcat_version_override() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    write_skill(&pkg_dir.path().join("skills/commit"), "commit", "Create a commit.");
+    std::fs::write(
+        pkg_dir.path().join("package.json"),
+        serde_json::to_string_pretty(&json!({
+            "name": "bad-version-package",
+            "version": "1.0.0",
+            "tomcat": {
+                "version": "9.9.9",
+                "skills": ["skills/commit"]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = manager.detect_source(pkg_dir.path()).unwrap_err().to_string();
+    assert!(error.contains("tomcat.version"), "unexpected error: {error}");
+}
+
+#[test]
+fn detect_package_manifest_auto_scans_default_resource_dirs() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    write_plugin(
+        &pkg_dir.path().join("plugins/auto-plugin"),
+        "auto-plugin",
+        "1.2.3",
+        "auto_tool",
+    );
+    write_skill(
+        &pkg_dir.path().join("skills/auto-skill"),
+        "auto-skill",
+        "Auto discovered skill",
+    );
+    std::fs::write(
+        pkg_dir.path().join("package.json"),
+        serde_json::to_string_pretty(&json!({
+            "name": "auto-package",
+            "version": "1.2.3",
+            "tomcat": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let detected = manager.detect_source(pkg_dir.path()).unwrap();
+    assert_eq!(detected.manifest.schema, crate::core::PACKAGE_MANIFEST_SCHEMA_V1);
+    assert_eq!(detected.manifest.plugins, vec!["plugins/auto-plugin"]);
+    assert_eq!(detected.manifest.skills, vec!["skills/auto-skill"]);
+    assert_eq!(detected.resources.len(), 2);
+}
+
+#[test]
 fn prepare_install_rejects_same_layer_conflict_without_force() {
     let work_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -214,7 +303,16 @@ fn install_scope_package_writes_layer_registries() {
         .unwrap();
     let outcome = manager.install(prepared).unwrap();
     assert_eq!(outcome.record.name, "combo-package");
-    assert_eq!(outcome.record.resources.len(), 2);
+    assert_eq!(outcome.record.resource_count(), 2);
+    assert_eq!(outcome.record.plugins.len(), 1);
+    assert_eq!(outcome.record.plugins[0].id, "release-plugin");
+    assert_eq!(
+        outcome.record.plugins[0].relative_dir,
+        "plugins/release-plugin"
+    );
+    assert_eq!(outcome.record.skills.len(), 1);
+    assert_eq!(outcome.record.skills[0].name, "commit");
+    assert_eq!(outcome.record.skills[0].relative_dir, "skills/commit");
 
     let scope_paths =
         resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
@@ -222,8 +320,15 @@ fn install_scope_package_writes_layer_registries() {
     assert!(scope_paths.skills_dir.join("commit").is_dir());
 
     let package_registry = load_package_registry(&scope_paths.package_registry_path);
+    assert_eq!(
+        package_registry.schema,
+        crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1
+    );
     assert_eq!(package_registry.packages.len(), 1);
     assert_eq!(package_registry.packages[0].name, "combo-package");
+    assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
+    assert_eq!(package_registry.packages[0].plugins.len(), 1);
+    assert_eq!(package_registry.packages[0].skills.len(), 1);
 
     let plugin_registry = load_plugin_registry(&scope_paths.plugin_registry_path);
     assert_eq!(plugin_registry.plugins.len(), 1);
@@ -267,6 +372,54 @@ fn install_failure_rolls_back_copied_dirs() {
         !scope_paths.package_registry_path.exists(),
         "package registry should be restored to non-existent state"
     );
+}
+
+#[test]
+fn load_package_registry_migrates_legacy_resource_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json!({
+            "packages": [{
+                "name": "legacy-package",
+                "version": "1.0.0",
+                "description": "legacy format",
+                "source_kind": "barePlugin",
+                "visibility": "scope",
+                "source_path": "/tmp/legacy-package",
+                "scope_root": "/tmp/project",
+                "installed_at": "2026-01-01T00:00:00Z",
+                "resources": [
+                    {
+                        "kind": "plugin",
+                        "id": "legacy-plugin",
+                        "source_path": "plugins/legacy-plugin",
+                        "install_subpath": "plugins/legacy-plugin"
+                    },
+                    {
+                        "kind": "skill",
+                        "id": "legacy-skill",
+                        "source_path": "skills/legacy-skill",
+                        "install_subpath": "skills/legacy-skill"
+                    }
+                ]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let registry = load_package_registry(&path);
+    assert_eq!(registry.schema, crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1);
+    assert_eq!(registry.packages.len(), 1);
+    let record = &registry.packages[0];
+    assert_eq!(record.source_kind.as_str(), "local");
+    assert_eq!(record.source, "/tmp/legacy-package");
+    assert_eq!(record.plugins.len(), 1);
+    assert_eq!(record.plugins[0].id, "legacy-plugin");
+    assert_eq!(record.skills.len(), 1);
+    assert_eq!(record.skills[0].name, "legacy-skill");
 }
 
 #[test]

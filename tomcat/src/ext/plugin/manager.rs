@@ -11,7 +11,7 @@
 //! │                                                                          │
 //! │  ① 磁盘                                                                  │
 //! │   plugin/                                                                │
-//! │   ├─ pi-plugin.json    ─┐                                                │
+//! │   ├─ plugin.json       ─┐                                                │
 //! │   └─ <main>.{ts,js}   ────► load_plugin(path)                           │
 //! │                                  │ resolve_manifest_and_root             │
 //! │                                  │ read_main_script + transpile_ts      │
@@ -303,11 +303,10 @@ impl PluginManager {
                 .canonicalize()
                 .map_err(|e| AppError::Plugin(format!("插件目录无效: {}", e)))?;
             let manifest_path = root
-                .join("pi-plugin.json")
+                .join("plugin.json")
                 .canonicalize()
-                .or_else(|_| root.join("plugin.json").canonicalize())
                 .map_err(|_| {
-                    AppError::Plugin("插件目录下未找到 plugin.json 或 pi-plugin.json".to_string())
+                    AppError::Plugin("插件目录下未找到 plugin.json".to_string())
                 })?;
             (root, manifest_path)
         } else {

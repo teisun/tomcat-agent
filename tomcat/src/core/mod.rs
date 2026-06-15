@@ -34,10 +34,11 @@ pub use llm::{
 pub use package::{
     canonical_scope_root, load_package_registry, load_plugin_registry, resolve_layer_paths,
     resolve_runtime_layer_paths, save_package_registry, save_plugin_registry,
-    DetectedPackageSource, InstallOutcome, LayerPaths, PackageLayerListing, PackageManager,
-    PackageManifest, PackageRecord, PackageRegistryFile, PackageResource, PackageResourceKind,
-    PackageSourceKind, PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall,
-    UninstallOutcome,
+    DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome, LayerPaths,
+    PackageLayerListing, PackageManager, PackageManifest, PackagePluginRecord, PackageRecord,
+    PackageRegistryFile, PackageResourceKind, PackageSkillRecord, PackageSourceKind,
+    PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall,
+    UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,

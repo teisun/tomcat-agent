@@ -9,6 +9,7 @@
 
 use super::super::*;
 use super::mocks::test_config;
+use crate::api::cli::plugin_cmd::render_plugin_list_output;
 
 struct CurrentDirGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -281,6 +282,55 @@ fn plugin_disable_targets_highest_priority_registry_layer() {
     let global_registry = load_plugin_registry(&global_registry_path);
     assert!(!scope_registry.plugins[0].enabled);
     assert!(global_registry.plugins[0].enabled);
+}
+
+#[test]
+fn plugin_list_renders_visible_and_shadowed_layered_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    let cfg = test_config(dir.path());
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+
+    let scope_registry_path = workspace.path().join(".tomcat/plugins/registry.json");
+    let global_registry_path = crate::resolve_plugins_dir(&cfg)
+        .unwrap()
+        .join("registry.json");
+    save_plugin_registry(
+        &scope_registry_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "dup-plugin".to_string(),
+                path: workspace
+                    .path()
+                    .join(".tomcat/plugins/dup-plugin")
+                    .display()
+                    .to_string(),
+                enabled: true,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+    save_plugin_registry(
+        &global_registry_path,
+        &PluginRegistryFile {
+            plugins: vec![PluginRegistryEntry {
+                id: "dup-plugin".to_string(),
+                path: dir.path().join("plugins/dup-plugin").display().to_string(),
+                enabled: false,
+                loaded_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+        },
+    )
+    .unwrap();
+
+    let output = render_plugin_list_output(&cfg).unwrap();
+    assert!(output.contains("dup-plugin"));
+    assert!(output.contains("scope"));
+    assert!(output.contains("visible"));
+    assert!(output.contains("shadowed:"));
+    assert!(output.contains("dup-plugin @ global"));
 }
 
 #[test]

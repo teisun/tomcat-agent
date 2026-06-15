@@ -110,6 +110,10 @@ fn run_install_scope_package_writes_layer_registries() {
         1
     );
     assert_eq!(
+        load_package_registry(&scope_paths.package_registry_path).schema,
+        crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1
+    );
+    assert_eq!(
         load_plugin_registry(&scope_paths.plugin_registry_path)
             .plugins
             .len(),
