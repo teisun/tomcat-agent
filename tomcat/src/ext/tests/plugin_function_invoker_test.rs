@@ -716,6 +716,73 @@ async fn official_web_search_backend_function_maps_mimo_annotations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn official_web_search_backend_function_auto_prefers_mimo_from_config() {
+    let plugin_dir = builtin_web_search_backends_fixture_with_main_suffix(
+        r#"
+searchWithMimo = async function (req) {
+  return {
+    backend: req.backend,
+    hits: [{ title: "MiMo", url: "https://mimo.example.com" }],
+    warnings: ["auto_prefers_mimo"]
+  };
+};
+searchWithTavily = async function (req) {
+  return {
+    backend: req.backend,
+    hits: [{ title: "Tavily", url: "https://tavily.example.com" }],
+    warnings: []
+  };
+};
+backends.mimo = searchWithMimo;
+backends.tavily = searchWithTavily;
+"#,
+    );
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(Arc::new(DefaultEventBus::new()))
+            .with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let (invoker, function_registry, manager, _dispatcher) =
+        function_search_harness(dispatcher, Duration::from_secs(1));
+
+    function_registry.register_plugin_functions(
+        "tomcat.web-search-backends",
+        plugin_dir.path(),
+        &[manifest_function("web_search.backend", "webSearchBackend")],
+    );
+    manager
+        .load_plugin(plugin_dir.path())
+        .expect("load builtin web_search plugin");
+
+    let result = invoker
+        .execute(
+            &registered_function(
+                &plugin_dir,
+                "tomcat.web-search-backends",
+                "web_search.backend",
+                "webSearchBackend",
+            ),
+            json!({
+                "backend": "auto",
+                "query": "reqwest rust",
+                "count": 3
+            }),
+            Some("s1"),
+        )
+        .await
+        .expect("builtin web_search function call");
+
+    assert_eq!(result["backend"], "mimo");
+    assert_eq!(result["hits"][0]["url"], json!("https://mimo.example.com"));
+    assert!(result["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .any(|warning| warning == "auto_prefers_mimo"));
+
+    manager.end_session("s1").await.expect("end session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn official_web_search_backend_function_returns_missing_key_sentinel_for_tavily() {
     let plugin_dir = builtin_web_search_backends_fixture();

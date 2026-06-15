@@ -1,6 +1,8 @@
 // pi_bridge.js — pi-mono compatible bridge layer for tomcat
 // Constructs globalThis.pi object that routes API calls through __pi_host_call.
 // Loaded by run_script_file_impl before user plugin scripts.
+// Authoring note: plugin source should not import this file directly; use
+// assets/types/tomcat-plugin.d.ts for IDE hints and let the host inject `pi`.
 // See: architecture/plugin-system/js-bridge-layer.md, architecture/plugin-system/host-call-protocol.md,
 //      architecture/plugin-system/js-api-alignment.md, architecture/plugin-system/async-hostcall-event-loop.md
 (function () {

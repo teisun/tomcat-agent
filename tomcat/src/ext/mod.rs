@@ -6,6 +6,7 @@
 pub mod dispatcher;
 pub mod host_binding;
 pub mod plugin;
+pub mod plugin_bundle;
 mod plugin_function_invoker;
 mod plugin_search_invoker;
 mod plugin_tool_executor;
@@ -16,6 +17,9 @@ pub mod vm_actor;
 
 pub use dispatcher::{AsyncCallStatus, HostApiDispatcher};
 pub use host_binding::{invoke_host_func, invoke_host_func_with, HostRequest, HostResponse};
+pub use plugin_bundle::{
+    bundle_plugin_from_path, write_plugin_bundle_from_path, PluginBundleResult,
+};
 pub use runtime::{
     PluginEngine, PluginEngineConfig, PluginVmInstance, DEFAULT_PLUGIN_CALL_TIMEOUT_MS,
     DEFAULT_PLUGIN_IDLE_TTL_MS, DEFAULT_PLUGIN_INTERRUPT_BUDGET, DEFAULT_QUICKJS_HEAP_MB,

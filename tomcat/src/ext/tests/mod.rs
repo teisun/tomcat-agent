@@ -10,6 +10,7 @@
 
 mod host_binding_test;
 mod instance_shim_test;
+mod plugin_bundle_test;
 mod plugin_function_invoker_test;
 mod plugin_tool_executor_test;
 mod runtime_manager_test;

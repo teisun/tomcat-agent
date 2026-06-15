@@ -70,7 +70,8 @@ tomcat init
       └─ ~/.tomcat/plugins/web-search-backends/
          ├─ plugin.json
          │    functions = [{ point:"web_search.backend", function:"webSearchBackend" }]
-         ├─ main.js
+         ├─ main.js        # 运行时读取的单文件产物
+         ├─ src/           # 仓库内作者源码；安装后默认不分发
          └─ README.md
 
 宿主启动 / catalog refresh
@@ -748,7 +749,7 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 > **server-side 资格不在 `[tools.web_search]` 里配**：`auto` 是否有 hosted 首选，取决于**合并后的 model catalog** 中是否存在 `capabilities.web_search == true` 的条目；若有多个，按顺序取首个作为 hostedCandidateModel。`capabilities.web_search` 是**新增能力位**（[`catalog.rs` Capabilities](../../../src/core/llm/catalog.rs)，默认 `false`），与现有 `vision/files/tools/reasoning` 并列；**登记前必须先查该厂商/该模型的官方文档**（见 §13），不得仅凭「endpoint 兼容 Responses wire」就置 `true`。`[tools.web_search] backend` 只能在「资格已具备」时把 `auto` 收窄/或强制走 HTTP，**不能**反向赋予一个不支持的模型 server-side 能力。**当前对话模型无论是不是 Responses，都不再影响 `auto` 是否尝试 hosted 首选。**
 
-> **能否「纯配置接入新 backend」**（回应选型期提问）：现在的默认答案更接近“**优先改插件，不优先改宿主**”。Tavily / Brave / Serper 这类已托管后端可以只靠 `[tools.web_search] *_base_url` + 对应 API key 覆盖网关；但如果要接入一套**全新异构搜索供应商**，优先是在 `web-search-backends/main.js` + `plugin.json` 里新增后端与权限声明。只有当它需要新的宿主能力时，才需要再改 Rust。
+> **能否「纯配置接入新 backend」**（回应选型期提问）：现在的默认答案更接近“**优先改插件，不优先改宿主**”。Tavily / Brave / Serper 这类已托管后端可以只靠 `[tools.web_search] *_base_url` + 对应 API key 覆盖网关；但如果要接入一套**全新异构搜索供应商**，优先是在 `web-search-backends/src/` + `plugin.json` 里新增后端与权限声明，再通过 `tomcat plugin build` 生成 `main.js`。只有当它需要新的宿主能力时，才需要再改 Rust。
 
 ---
 

@@ -1,4 +1,4 @@
-//! `tomcat plugin` 子命令实现：list / load / unload / enable / disable / info。
+//! `tomcat plugin` 子命令实现：list / load / build / unload / enable / disable / info。
 
 use std::path::Path;
 
@@ -6,7 +6,7 @@ pub(crate) use crate::core::package::{
     load_plugin_registry, save_plugin_registry, PluginRegistryEntry, PluginRegistryFile,
 };
 use crate::core::package::{resolve_runtime_layer_paths, PackageVisibility};
-use crate::ext::parse_manifest;
+use crate::ext::{parse_manifest, write_plugin_bundle_from_path};
 use crate::{
     resolve_plugins_dir, AppConfig, AppError, AuditStore, DefaultEventBus, DefaultToolRegistry,
     EventBus, FileAuditRecorder, PluginEngine, PluginManager, Tool, ToolExecutor, ToolRegistry,
@@ -264,6 +264,30 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                     if msg.contains("plugin_engine") || msg.contains("rquickjs") {
                         println!("  提示: 请先运行 tomcat doctor 检查运行环境");
                     }
+                }
+            }
+        }
+        PluginSub::Build { path } => {
+            let p = std::path::Path::new(&path);
+            if !p.exists() {
+                println!("插件路径不存在: {}", path);
+                return Ok(());
+            }
+            match write_plugin_bundle_from_path(p) {
+                Ok(result) => {
+                    println!("插件构建成功: {}", result.output_path.display());
+                    println!(
+                        "  源码目录:  {}",
+                        result
+                            .src_dir
+                            .strip_prefix(&result.plugin_root)
+                            .unwrap_or(&result.src_dir)
+                            .display()
+                    );
+                    println!("  源文件数:  {}", result.sources.len());
+                }
+                Err(error) => {
+                    println!("插件构建失败: {}", error);
                 }
             }
         }

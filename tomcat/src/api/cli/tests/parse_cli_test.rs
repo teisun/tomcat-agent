@@ -77,6 +77,18 @@ fn cli_parse_plugin_list() {
 }
 
 #[test]
+fn cli_parse_plugin_build() {
+    let cli = Cli::try_parse_from(["tomcat", "plugin", "build", "./plugin"]).unwrap();
+    let cmd = cli.command.unwrap();
+    assert!(matches!(
+        cmd,
+        Commands::Plugin {
+            sub: PluginSub::Build { path }
+        } if path == "./plugin"
+    ));
+}
+
+#[test]
 fn cli_parse_audit_list() {
     let cli = Cli::try_parse_from(["tomcat", "audit", "list"]).unwrap();
     let cmd = cli.command.unwrap();

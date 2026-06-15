@@ -1,4 +1,5 @@
 use super::{ensure_builtin_plugins, merge_manifest_fields, BuiltinPluginsStatus};
+use crate::ext::bundle_plugin_from_path;
 use crate::AppConfig;
 
 fn test_config(work_dir: &std::path::Path) -> AppConfig {
@@ -38,6 +39,19 @@ fn ensure_builtin_plugins_creates_web_search_backends_bundle() {
         .expect("allowedHosts array")
         .iter()
         .any(|item| item == "api.tavily.com"));
+
+    let committed_main = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("plugins")
+            .join("web-search-backends")
+            .join("main.js"),
+    )
+    .expect("read committed builtin main.js");
+    assert_eq!(
+        std::fs::read_to_string(plugin_dir.join("main.js")).expect("read installed main.js"),
+        committed_main
+    );
 }
 
 #[test]
@@ -87,5 +101,19 @@ fn merge_manifest_fields_backfills_required_arrays_without_overwriting_existing_
     assert_eq!(
         existing["allowedHosts"],
         serde_json::json!(["api.tavily.com", "api.search.brave.com"])
+    );
+}
+
+#[test]
+fn committed_main_js_matches_freshly_bundled_src() {
+    let plugin_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("plugins")
+        .join("web-search-backends");
+    let bundled = bundle_plugin_from_path(&plugin_dir).expect("bundle builtin src");
+    let committed = std::fs::read_to_string(plugin_dir.join("main.js")).expect("read committed");
+    assert_eq!(
+        committed, bundled.output,
+        "builtin web-search-backends/main.js 与 src/ 构建产物不一致，请重新运行构建"
     );
 }

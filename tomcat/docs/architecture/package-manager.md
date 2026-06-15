@@ -541,10 +541,12 @@ acme-dev-kit/                      # package 根目录
 ├─ plugins/
 │  ├─ acme.translate/
 │  │  ├─ plugin.json              # ← plugin manifest（插件说明书）
-│  │  └─ index.js                 # 插件入口（manifest.main 指向它）
+│  │  ├─ main.js                  # 交付态入口（manifest.main 指向它）
+│  │  └─ src/                     # 可选：作者侧源码目录，构建后产出 main.js
 │  └─ acme.review/
 │     ├─ plugin.json
-│     └─ index.js
+│     ├─ main.js
+│     └─ src/
 └─ skills/
    ├─ release-checklist/
    │  └─ SKILL.md                 # skill 没有 JSON manifest，用 SKILL.md
@@ -594,6 +596,12 @@ acme-dev-kit/                      # package 根目录
 - `requiredSecrets` 只声明“允许宿主注入哪些密钥名”，不等于把密钥明文发给插件。插件仍然只能在请求 `headers/body` 里通过 `{{secret:NAME}}` 占位符让宿主注入，`url/query` 不允许放 secret。
 
 **说人话**：plugin manifest 现在不只是在描述“我有哪些 tool / function”，也在描述“我最多能连到哪、最多能拿哪些密钥”。这样宿主才能在 `pi.fetch` 这种高风险能力上做运行期闸门。
+
+如果插件作者采用“`src/` 多文件源码 + 单 `main.js` 交付物”的写法，构建发生在**作者侧**，不是安装期、也不是运行时：
+
+- 官方仓库内置插件可在仓库根运行 `npm run build:web-search-backends`
+- 通用插件作者可运行 `tomcat plugin build <plugin-dir>`
+- 运行时依然只读取 `plugin.json.main` 指向的单个产物文件，不会直接加载 `src/`
 
 #### package manifest 示例
 
@@ -735,7 +743,7 @@ acme-dev-kit/                      # package 根目录
 
 ### 5.7 `web_search.backend` 用例
 
-`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。当前官方插件 `tomcat.web-search-backends` 还会额外声明 `net:fetch`、`requiredSecrets`、`allowedHosts`，因为它内部已经托管了 `tavily` / `brave` / `serper` 这些真实 REST 后端。
+`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。当前官方插件 `tomcat.web-search-backends` 还会额外声明 `net:fetch`、`requiredSecrets`、`allowedHosts`，因为它内部已经托管了 `tavily` / `brave` / `serper` 这些真实 REST 后端；其源码虽然已拆到 `src/`，但安装与运行时仍只消费构建后的 `main.js`。
 
 ```json
 {

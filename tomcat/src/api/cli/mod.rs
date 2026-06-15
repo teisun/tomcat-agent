@@ -81,7 +81,7 @@ pub enum Commands {
         #[command(subcommand)]
         sub: SessionSub,
     },
-    /// 插件管理：list/load/unload/enable/disable/info
+    /// 插件管理：list/load/build/unload/enable/disable/info
     Plugin {
         #[command(subcommand)]
         sub: PluginSub,
@@ -288,6 +288,11 @@ pub enum PluginSub {
     List,
     /// 从磁盘路径加载插件
     Load {
+        /// 插件根目录路径或清单文件（plugin.json）路径
+        path: String,
+    },
+    /// 从 src/ 构建插件交付产物
+    Build {
         /// 插件根目录路径或清单文件（plugin.json）路径
         path: String,
     },
