@@ -1,10 +1,8 @@
 pub(crate) mod backend;
-mod brave;
 mod cache;
+mod legacy_http;
 pub mod openai_server;
 pub mod plugin_backend;
-pub mod serper;
-pub mod tavily;
 pub mod types;
 
 #[cfg(test)]
@@ -21,11 +19,9 @@ use self::backend::{
     discover_hosted_candidate, pick_backend, BackendFailure, BackendName, BackendPlan,
     BackendSearchResponse, HostedCandidateModel, WebSearchBackend,
 };
-use self::brave::BraveBackend;
 use self::cache::{CacheKey, WebSearchCache};
+use self::legacy_http::{BraveBackend, SerperBackend, TavilyBackend};
 use self::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
-use self::serper::SerperBackend;
-use self::tavily::TavilyBackend;
 use self::types::{normalize_hits, Stats, WebSearchArgs, WebSearchOutput, WebSearchRequest};
 
 #[derive(Clone)]
@@ -77,7 +73,11 @@ impl WebSearchRuntime {
         }
 
         let hosted_candidate = discover_hosted_candidate(&self.model_catalog);
-        let plan = pick_backend(request.backend.clone(), hosted_candidate)?;
+        let plan = pick_backend(
+            request.backend.clone(),
+            hosted_candidate,
+            self.config.legacy_http_backends,
+        )?;
         let output = match plan {
             BackendPlan::Auto {
                 hosted_candidate,
@@ -141,8 +141,16 @@ impl WebSearchRuntime {
                     .last()
                     .map(|backend| backend.as_str().to_string())
             })
+            .or_else(|| {
+                if plugin_slot {
+                    Some("auto".to_string())
+                } else {
+                    None
+                }
+            })
             .unwrap_or_else(|| BackendName::Tavily.as_str().to_string());
         let mut all_http_missing_keys = true;
+        let first_fallback = next_auto_fallback(http_chain, plugin_slot);
 
         if let Some(candidate) = hosted_candidate {
             last_backend = BackendName::Openai.as_str().to_string();
@@ -150,19 +158,17 @@ impl WebSearchRuntime {
                 Ok(output) => return Ok(output),
                 Err(BackendFailure::Incompatible { .. }) => warnings.push(format!(
                     "hosted_candidate_unavailable, fallback={}",
-                    http_chain[0].as_str()
+                    first_fallback.unwrap_or("auto")
                 )),
                 Err(failure) if failure.is_retryable_unavailable() => {
                     warnings.push(format!(
                         "openai_unavailable, fallback={}",
-                        http_chain[0].as_str()
+                        first_fallback.unwrap_or("auto")
                     ));
                     extend_unique(
                         &mut warnings,
-                        failure.auto_fallback_warnings(
-                            BackendName::Openai.as_str(),
-                            http_chain.first().map(|backend| backend.as_str()),
-                        ),
+                        failure
+                            .auto_fallback_warnings(BackendName::Openai.as_str(), first_fallback),
                     );
                 }
                 Err(failure) => return Err(failure.to_tool_error(BackendName::Openai.as_str())),
@@ -478,4 +484,11 @@ fn looks_like_unsupported_hosted_tool(detail: &str) -> bool {
             || lower.contains("not support")
             || lower.contains("unknown tool")
             || lower.contains("invalid tool"))
+}
+
+fn next_auto_fallback(http_chain: &[BackendName], plugin_slot: bool) -> Option<&str> {
+    http_chain
+        .first()
+        .map(|backend| backend.as_str())
+        .or(if plugin_slot { Some("auto") } else { None })
 }

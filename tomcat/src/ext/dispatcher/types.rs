@@ -1,9 +1,14 @@
 use crate::core::{LlmProvider, LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
+use crate::ext::PluginManager;
 use crate::infra::event_bus::{EventBus, EventListenerId};
-use crate::infra::AuditRecorder;
+use crate::infra::{
+    net_guard::PublicIpDnsResolver, AuditRecorder, DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES,
+    DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS,
+};
 use dashmap::DashMap;
+use reqwest::redirect::Policy;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -36,6 +41,10 @@ pub struct HostApiDispatcher {
     pub(super) tokio_handle: Option<Handle>,
     pub(super) async_timeout: Duration,
     pub(super) llm_semaphore: Arc<Semaphore>,
+    pub(super) fetch_client: reqwest::Client,
+    pub(super) fetch_semaphore: Arc<Semaphore>,
+    pub(super) fetch_max_body_bytes: usize,
+    pub(super) plugin_manager: Option<Weak<PluginManager>>,
     /// 长生命周期 VM 的事件队列：instance_id -> event Receiver（Mutex 保证 Sync）。
     /// waitForEvent 路由从此 channel 阻塞接收事件。
     pub(super) event_receivers:
@@ -64,6 +73,12 @@ impl HostApiDispatcher {
     /// Tokio Handle 默认通过 `Handle::try_current()` 自动获取；
     /// 可通过 `with_tokio_handle()` 显式注入。
     pub fn new(event_bus: Arc<dyn EventBus>) -> Self {
+        let fetch_client = reqwest::Client::builder()
+            .dns_resolver(Arc::new(PublicIpDnsResolver))
+            .redirect(Policy::none())
+            .timeout(Duration::from_millis(DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS))
+            .build()
+            .expect("create default net.fetch client");
         Self {
             event_bus,
             primitive: None,
@@ -78,6 +93,10 @@ impl HostApiDispatcher {
             tokio_handle: Handle::try_current().ok(),
             async_timeout: Duration::from_secs(120),
             llm_semaphore: Arc::new(Semaphore::new(5)),
+            fetch_client,
+            fetch_semaphore: Arc::new(Semaphore::new(5)),
+            fetch_max_body_bytes: DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES,
+            plugin_manager: None,
             event_receivers: Arc::new(DashMap::new()),
             event_senders: Arc::new(DashMap::new()),
             ui_notify_count: None,
@@ -217,6 +236,26 @@ impl HostApiDispatcher {
     /// 设置 LLM 最大并发请求数（默认 5）。
     pub fn with_llm_concurrency(mut self, max: usize) -> Self {
         self.llm_semaphore = Arc::new(Semaphore::new(max));
+        self
+    }
+
+    pub fn with_fetch_http_client(mut self, client: reqwest::Client) -> Self {
+        self.fetch_client = client;
+        self
+    }
+
+    pub fn with_fetch_concurrency(mut self, max: usize) -> Self {
+        self.fetch_semaphore = Arc::new(Semaphore::new(max));
+        self
+    }
+
+    pub fn with_fetch_max_body_bytes(mut self, max: usize) -> Self {
+        self.fetch_max_body_bytes = max;
+        self
+    }
+
+    pub fn with_plugin_manager(mut self, manager: Weak<PluginManager>) -> Self {
+        self.plugin_manager = Some(manager);
         self
     }
 }

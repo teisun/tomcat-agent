@@ -71,10 +71,26 @@ auto_confirm = true
 max_bytes = 26214400
 
 [tools.web_search]
-# `auto` 会先尝试项目级 hosted web_search 模型，再走 HTTP 内置链，最后落到插件后端槽。
+# `auto` 会先尝试项目级 hosted web_search 模型；
+# 若没有可用 hosted 候选，则默认交给官方 `web-search-backends` 插件，
+# 再由插件内部 `autoOrder` 决定先试 mimo / tavily / brave / serper。
 backend = "auto"
 # 若想直接走官方插件里的 MiMo 后端，可改成：
 # backend = "mimo"
+# 若想直接点名插件里的 REST 后端，也可以写：
+# backend = "tavily"
+# backend = "brave"
+# backend = "serper"
+#
+# 过渡期回滚开关：打开后，backend=tavily/brave/serper 以及 auto 的 HTTP 链
+# 会优先走 Rust legacy HTTP 后端，而不是插件里的同名后端。
+# legacy_http_backends = true
 count = 5
 # MiMo 通过 models.toml 里的 provider="mimo" 读取凭证：
 # export MIMO_API_KEY="your-mimo-api-key"
+# 插件里的 REST 后端通过 `pi.fetch` 读取凭证：
+# export TAVILY_API_KEY="your-tavily-api-key"
+# export BRAVE_API_KEY="your-brave-api-key"
+# export SERPER_API_KEY="your-serper-api-key"
+# 这些密钥不会进入 JS 沙箱明文，只能由插件 manifest 先报备后在 headers/body 中
+# 用 `{{secret:NAME}}` 占位符请求宿主注入。

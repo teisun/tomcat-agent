@@ -35,6 +35,26 @@ impl PluginWebSearchBackend {
             session_id: session_id.into(),
         }
     }
+
+    fn classify_warning_failure(&self, warnings: &[String]) -> Option<BackendFailure> {
+        for warning in warnings {
+            if let Some(raw_env_name) = warning.strip_prefix("__missing_key__:") {
+                let env_name = raw_env_name.trim();
+                return Some(if env_name.is_empty() {
+                    BackendFailure::missing_key_for(&self.backend)
+                } else {
+                    BackendFailure::MissingKey {
+                        env_name: env_name.to_string(),
+                    }
+                });
+            }
+            if let Some(raw_status) = warning.strip_prefix("__unauthorized__:") {
+                let status = raw_status.trim().parse::<u16>().unwrap_or(401);
+                return Some(BackendFailure::Unauthorized { status });
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +96,9 @@ impl WebSearchBackend for PluginWebSearchBackend {
             "country": request.country,
             "language": request.language,
             "domainFilter": request.domain_filter,
+            "tavilyBaseUrl": request.tavily_base_url,
+            "braveBaseUrl": request.brave_base_url,
+            "serperBaseUrl": request.serper_base_url,
         });
         let raw = self
             .invoker
@@ -92,6 +115,9 @@ impl WebSearchBackend for PluginWebSearchBackend {
                     self.backend
                 ),
             });
+        }
+        if let Some(failure) = self.classify_warning_failure(&parsed.warnings) {
+            return Err(failure);
         }
         Ok(BackendSearchResponse {
             backend_label: parsed.backend,

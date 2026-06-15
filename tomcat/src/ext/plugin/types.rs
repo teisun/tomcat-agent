@@ -48,7 +48,12 @@ pub struct PluginManifest {
     pub description: String,
     pub author: String,
     pub main: String,
+    #[serde(default)]
     pub required_permissions: Vec<String>,
+    #[serde(default)]
+    pub required_secrets: Vec<String>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
     pub required_api_version: String,
     pub tags: Vec<String>,
     #[serde(default)]
@@ -182,6 +187,16 @@ fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
                 "manifest.functions[].function is required".to_string(),
             ));
         }
+    }
+    if m.required_permissions
+        .iter()
+        .any(|perm| perm == "net:fetch")
+        && m.allowed_hosts.is_empty()
+    {
+        return Err(AppError::Plugin(
+            "manifest.allowedHosts is required when manifest.requiredPermissions contains net:fetch"
+                .to_string(),
+        ));
     }
     Ok(())
 }

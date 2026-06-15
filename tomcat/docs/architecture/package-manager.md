@@ -566,6 +566,8 @@ acme-dev-kit/                      # package 根目录
   "main": "index.js",
   "requiredApiVersion": "1.x",
   "requiredPermissions": ["net:fetch"],
+  "requiredSecrets": ["ACME_TRANSLATE_API_KEY"],
+  "allowedHosts": ["translate.acme.internal"],
   "tags": ["i18n", "text"],
   "activation": "lazy",
   "tools": [
@@ -585,6 +587,13 @@ acme-dev-kit/                      # package 根目录
   "events": []
 }
 ```
+
+如果插件声明了 `requiredPermissions: ["net:fetch"]`，运行时还要满足两条额外约束：
+
+- `allowedHosts` 不能为空。它是宿主侧出网白名单，插件只能访问这里报备过的 host。
+- `requiredSecrets` 只声明“允许宿主注入哪些密钥名”，不等于把密钥明文发给插件。插件仍然只能在请求 `headers/body` 里通过 `{{secret:NAME}}` 占位符让宿主注入，`url/query` 不允许放 secret。
+
+**说人话**：plugin manifest 现在不只是在描述“我有哪些 tool / function”，也在描述“我最多能连到哪、最多能拿哪些密钥”。这样宿主才能在 `pi.fetch` 这种高风险能力上做运行期闸门。
 
 #### package manifest 示例
 
@@ -726,11 +735,22 @@ acme-dev-kit/                      # package 根目录
 
 ### 5.7 `web_search.backend` 用例
 
-`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。
+`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。当前官方插件 `tomcat.web-search-backends` 还会额外声明 `net:fetch`、`requiredSecrets`、`allowedHosts`，因为它内部已经托管了 `tavily` / `brave` / `serper` 这些真实 REST 后端。
 
 ```json
 {
   "id": "tomcat.web-search-backends",
+  "requiredPermissions": ["net:fetch"],
+  "requiredSecrets": [
+    "TAVILY_API_KEY",
+    "BRAVE_API_KEY",
+    "SERPER_API_KEY"
+  ],
+  "allowedHosts": [
+    "api.tavily.com",
+    "api.search.brave.com",
+    "google.serper.dev"
+  ],
   "functions": [
     {
       "point": "web_search.backend",
@@ -746,8 +766,9 @@ acme-dev-kit/                      # package 根目录
 - `FunctionRegistry` 会把它登记到扩展点 `web_search.backend`
 - `ToolRegistry` **不会**出现 `webSearchBackend`
 - `WebSearchRuntime` 通过宿主调用链触发 `PluginFunctionInvoker.execute(..., session_id)`
+- 插件若调用 `pi.fetch`，宿主会在运行期再次校验 `requiredPermissions` / `requiredSecrets` / `allowedHosts`
 
-**说人话**：安装面它就是个普通插件目录；运行面它不是给模型看的工具，而是给宿主自己调的后端扩展点。
+**说人话**：安装面它就是个普通插件目录；运行面它不是给模型看的工具，而是给宿主自己调的后端扩展点。`web_search` 现在默认把 Tavily / Brave / Serper 这些后端也交给这个插件拥有，宿主自己只保留调度、缓存、过滤和安全闸门。
 
 ## 6. 文件职责总览（One-Glance Map）
 

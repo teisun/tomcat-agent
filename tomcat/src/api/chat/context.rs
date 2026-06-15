@@ -1050,6 +1050,22 @@ fn build_plugin_runtime(
     let function_registry = Arc::new(FunctionRegistry::new());
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
     let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
+    let mut fetch_client_builder = reqwest::Client::builder()
+        .dns_resolver(Arc::new(crate::infra::net_guard::PublicIpDnsResolver))
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_millis(
+            config.tools.web_fetch.fetch_timeout_ms,
+        ));
+    if let Some(proxy_url) = config.llm.proxy.as_deref() {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
+        fetch_client_builder = fetch_client_builder.proxy(proxy);
+    } else {
+        fetch_client_builder = fetch_client_builder.no_proxy();
+    }
+    let fetch_client = fetch_client_builder
+        .build()
+        .map_err(|e| AppError::Tool(format!("创建 plugin net.fetch HTTP 客户端失败: {}", e)))?;
     let dispatcher = Arc::new(
         HostApiDispatcher::new(event_bus.clone())
             .with_tools(tool_registry.clone())
@@ -1057,6 +1073,9 @@ fn build_plugin_runtime(
             .with_llm(llm)
             .with_llm_resolver(llm_resolver)
             .with_primitive(primitive)
+            .with_plugin_manager(Arc::downgrade(&plugin_manager))
+            .with_fetch_http_client(fetch_client)
+            .with_fetch_max_body_bytes(config.tools.web_fetch.max_http_content_bytes)
             .with_audit(audit),
     );
     let function_invoker = PluginFunctionInvoker::new(Arc::downgrade(&plugin_manager));

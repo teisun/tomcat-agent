@@ -28,6 +28,7 @@
 
 mod dispatch;
 mod helpers;
+mod net;
 mod ops;
 mod session_ops;
 mod types;

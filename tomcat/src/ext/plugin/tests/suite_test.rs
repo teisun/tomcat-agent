@@ -1,6 +1,7 @@
 use super::super::manager::PluginManager;
 use super::super::types::{
-    parse_manifest, PluginActivation, PluginInstance, PluginManifest, PluginStatus,
+    parse_manifest, ManifestFunction, PluginActivation, PluginInstance, PluginManifest,
+    PluginStatus,
 };
 use crate::core::tools::contract::registry::{
     DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry,
@@ -117,6 +118,69 @@ fn parse_manifest_valid() {
     let m = parse_manifest(json).unwrap();
     assert_eq!(m.id, "test-plugin");
     assert_eq!(m.required_api_version, "1.0");
+    assert!(m.required_secrets.is_empty());
+    assert!(m.allowed_hosts.is_empty());
+}
+
+#[test]
+fn parse_manifest_net_fetch_requires_allowed_hosts() {
+    let json = r#"{
+        "id": "test-plugin",
+        "name": "Test",
+        "version": "0.1.0",
+        "description": "d",
+        "author": "a",
+        "main": "index.js",
+        "requiredPermissions": ["net:fetch"],
+        "requiredApiVersion": "1.0",
+        "tags": []
+    }"#;
+    let err = parse_manifest(json).expect_err("should reject missing allowedHosts");
+    assert!(err.to_string().contains("allowedHosts"));
+}
+
+#[test]
+fn parse_manifest_roundtrips_required_secrets_and_allowed_hosts() {
+    let manifest = PluginManifest {
+        id: "net-fetch-plugin".to_string(),
+        name: "Net Fetch Plugin".to_string(),
+        version: "0.1.0".to_string(),
+        description: "fixture".to_string(),
+        author: "tests".to_string(),
+        main: "main.js".to_string(),
+        required_permissions: vec!["net:fetch".to_string()],
+        required_secrets: vec!["TAVILY_API_KEY".to_string(), "BRAVE_API_KEY".to_string()],
+        allowed_hosts: vec![
+            "api.tavily.com".to_string(),
+            "api.search.brave.com".to_string(),
+        ],
+        required_api_version: "1.0".to_string(),
+        tags: vec!["web".to_string()],
+        tools: vec![],
+        functions: vec![ManifestFunction {
+            point: "web_search.backend".to_string(),
+            function: "webSearchBackend".to_string(),
+        }],
+        events: vec![],
+        activation: PluginActivation::Lazy,
+    };
+    let json = serde_json::to_string(&manifest).expect("serialize manifest");
+    let reparsed = parse_manifest(&json).expect("reparse manifest");
+
+    assert_eq!(reparsed.required_permissions, vec!["net:fetch".to_string()]);
+    assert_eq!(
+        reparsed.required_secrets,
+        vec!["TAVILY_API_KEY".to_string(), "BRAVE_API_KEY".to_string()]
+    );
+    assert_eq!(
+        reparsed.allowed_hosts,
+        vec![
+            "api.tavily.com".to_string(),
+            "api.search.brave.com".to_string()
+        ]
+    );
+    assert_eq!(reparsed.functions.len(), 1);
+    assert_eq!(reparsed.functions[0].point, "web_search.backend");
 }
 
 #[test]
@@ -151,6 +215,8 @@ fn manager_register_and_unload() {
             author: String::new(),
             main: "index.js".to_string(),
             required_permissions: vec![],
+            required_secrets: vec![],
+            allowed_hosts: vec![],
             required_api_version: "1.0".to_string(),
             tags: vec![],
             tools: vec![],
@@ -189,6 +255,8 @@ fn get_plugin_returns_some_after_register_none_for_unknown() {
             author: String::new(),
             main: "index.js".to_string(),
             required_permissions: vec![],
+            required_secrets: vec![],
+            allowed_hosts: vec![],
             required_api_version: "1.0".to_string(),
             tags: vec![],
             tools: vec![],
@@ -229,6 +297,8 @@ fn register_plugin_duplicate_returns_err() {
             author: String::new(),
             main: "index.js".to_string(),
             required_permissions: vec![],
+            required_secrets: vec![],
+            allowed_hosts: vec![],
             required_api_version: "1.0".to_string(),
             tags: vec![],
             tools: vec![],
@@ -258,6 +328,8 @@ fn register_plugin_duplicate_returns_err() {
             author: String::new(),
             main: "index.js".to_string(),
             required_permissions: vec![],
+            required_secrets: vec![],
+            allowed_hosts: vec![],
             required_api_version: "1.0".to_string(),
             tags: vec![],
             tools: vec![],
@@ -295,6 +367,8 @@ fn enable_disable_changes_status() {
             author: String::new(),
             main: "index.js".to_string(),
             required_permissions: vec![],
+            required_secrets: vec![],
+            allowed_hosts: vec![],
             required_api_version: "1.0".to_string(),
             tags: vec![],
             tools: vec![],
@@ -575,6 +649,57 @@ pi.registerTool({
         .expect("surface tool should be discoverable");
     assert_eq!(tool.plugin_id, "surface-plugin");
     assert_eq!(tool.name, "surface_echo");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_facing_function_plugin_does_not_surface_into_tool_registry() {
+    let tmp = tempfile::tempdir().expect("create function-only plugin");
+    let manifest = serde_json::json!({
+        "id": "host-function-plugin",
+        "name": "Host Function Plugin",
+        "version": "0.1.0",
+        "description": "function-only fixture",
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": [
+            {
+                "point": "web_search.backend",
+                "function": "webSearchBackend"
+            }
+        ]
+    });
+    std::fs::write(
+        tmp.path().join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize plugin manifest"),
+    )
+    .expect("write plugin manifest");
+    std::fs::write(
+        tmp.path().join("main.js"),
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  return { backend: "tavily", hits: [], warnings: [] };
+});
+"#,
+    )
+    .expect("write plugin main.js");
+
+    let (manager, _dispatcher, tool_registry, _runtime_manager) = manager_with_runtime();
+    manager
+        .load_plugin(tmp.path())
+        .expect("load function-only plugin");
+
+    let tools = tool_registry
+        .list_tools(None)
+        .await
+        .expect("list shared tools");
+    assert!(
+        tools.iter().all(|tool| tool.name != "webSearchBackend"),
+        "host-facing functions must not be published into ToolRegistry"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

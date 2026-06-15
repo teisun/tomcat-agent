@@ -335,7 +335,7 @@ async fn dispatch_chat_with_llm_returns_ok() {
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
-        params: serde_json::json!({ "messages": [], "model": "gpt-4" }),
+        params: serde_json::json!({ "messages": [], "model": "default" }),
         call_id: None,
     };
     let res = d.dispatch_async("inst-1", req).await.unwrap();
@@ -420,7 +420,7 @@ async fn dispatch_chat_stream_with_llm_returns_ok() {
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletionStream".to_string(),
-        params: serde_json::json!({ "messages": [], "model": "gpt-4" }),
+        params: serde_json::json!({ "messages": [], "model": "default" }),
         call_id: None,
     };
     let res = d.dispatch_async("inst-1", req).await.unwrap();

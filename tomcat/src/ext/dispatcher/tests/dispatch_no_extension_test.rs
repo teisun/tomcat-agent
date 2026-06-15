@@ -152,7 +152,7 @@ async fn dispatch_llm_without_provider_returns_err() {
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
-        params: serde_json::json!({ "messages": [], "model": "gpt-4" }),
+        params: serde_json::json!({ "messages": [], "model": "default" }),
         call_id: None,
     };
     let res = d.dispatch_async("inst-1", req).await.unwrap();

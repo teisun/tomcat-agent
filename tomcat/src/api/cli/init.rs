@@ -85,8 +85,8 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         crate::api::cli::builtin_plugins::BuiltinPluginsStatus::Created => {
             println!("  ✓ 已安装官方插件 web-search-backends")
         }
-        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::UpdatedMissingFiles => {
-            println!("  ✓ 已补齐官方插件 web-search-backends 缺失文件")
+        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::UpdatedExistingPlugin => {
+            println!("  ✓ 已更新官方插件 web-search-backends 的缺失文件/关键 manifest 字段")
         }
         crate::api::cli::builtin_plugins::BuiltinPluginsStatus::AlreadyPresent => {
             println!("  ✓ 官方插件 web-search-backends 已就绪")

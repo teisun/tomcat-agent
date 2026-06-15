@@ -26,7 +26,7 @@
 >    - **capability（能力）= 模型是否真支持 hosted `web_search` tool**：**事实源是各厂商官方文档**，登记到 [`models.toml` 的 `capabilities`](../../../src/core/llm/catalog.rs)（新增 `web_search` 位，默认 `false`）。
 >
 >    **正确规则 = 项目里存在 hostedCandidateModel → `auto` 先尝试 `openai(hosted)`；项目里不存在 hostedCandidateModel → 直接进入 HTTP `auto` 链（优先 Tavily，再 Brave，再 Serper）**。当前对话模型的 `api` 是否 `openai-responses` **不再参与** `auto` 资格判断。若 hostedCandidateModel 自身配置错误或运行时不可用，`auto` 再回 HTTP 链；显式 `openai` 则报错。**只看当前模型 wire 会错**：用户可能正用 DeepSeek / Chat Completions 对话，但项目里已经单独配置了一个可做 hosted `web_search` 的模型；这时 `auto` 仍应先用那个项目级 hosted 候选，而不是因为当前模型不是 Responses 就放弃 hosted。
-> 9. **插件后端槽已落地**：`BackendMode` 现接受任意后端名并把未知值解释为 `Plugin(name)`；运行时在 hosted + HTTP `auto` 链末尾追加一个 **plugin slot**，通过宿主扩展点 `web_search.backend` 调用函数 `webSearchBackend(params)`。官方插件 `tomcat.web-search-backends` 由 `tomcat init` 幂等写入 `~/.tomcat/plugins/web-search-backends/`，首发提供 `backend="mimo"`。
+> 9. **插件后端已扩成多后端所有者**：官方插件 `tomcat.web-search-backends` 不再只首发 `mimo`，而是同时拥有 `mimo` / `tavily` / `brave` / `serper` 四个后端；`auto` 默认在 hosted 不可用时交给插件内部 `autoOrder` 决策。Rust 侧仍保留 `legacy_http_backends` 回滚开关，仅用于双轨迁移、parity 测试和紧急回退。
 
 ---
 
@@ -88,14 +88,13 @@ Agent / LLM
               ├─ cache hit -> WebSearchOutput
               └─ cache miss -> pick_backend(...)
                   ├─ explicit openai   -> hosted path
-                  ├─ explicit tavily   -> Rust HTTP backend
-                  ├─ explicit brave    -> Rust HTTP backend
-                  ├─ explicit serper   -> Rust HTTP backend
-                  ├─ explicit mimo     -> Plugin("mimo")
+                ├─ explicit tavily   -> Plugin("tavily")
+                ├─ explicit brave    -> Plugin("brave")
+                ├─ explicit serper   -> Plugin("serper")
+                ├─ explicit mimo     -> Plugin("mimo")
                   └─ auto
                       ├─ hosted candidate
-                      ├─ tavily -> brave -> serper
-                      └─ plugin slot (backend="auto")
+                    └─ plugin slot (backend="auto" -> autoOrder)
 
 
 [插件后端路径]
@@ -114,7 +113,11 @@ PluginWebSearchBackend
                       │         model: "mimo-v2.5-pro",
                       │         tools: [{ type:"web_search", ... }]
                       │       })
-                      └─ return {
+                    ├─ backend == "tavily/brave/serper"
+                    │    └─ pi.fetch({
+                    │         url, method, headers, body
+                    │       })
+                    └─ return {
                            backend,
                            hits,
                            warnings,
@@ -143,20 +146,20 @@ MiMo choices[0].message.annotations[]
               └─ 返回统一 WebSearchOutput
 ```
 
-**说人话**：Rust 现在负责“选谁跑、如何回退、如何过滤与缓存”；插件只负责“怎么向具体后端拿结果”。`webSearchBackend` 是宿主函数，不是给模型看的 tool；MiMo 的联网结果通过 `annotations[]` 回流成统一 `hits[]`。
+**说人话**：Rust 现在负责“选谁跑、如何回退、如何过滤与缓存”；官方插件负责“具体后端怎么拿结果”。`webSearchBackend` 是宿主函数，不是给模型看的 tool；MiMo 走 `pi.createChatCompletion()`，Tavily/Brave/Serper 走 `pi.fetch()`，最后都回到统一 `hits[]`。
 
 ---
 
 ## 1. 目标与设计原则
 
-**一句话**：让模型一句 `query` 拿到一组**结构归一**、**可审计**、**可缓存**的网页 hits，**多 backend 透明切换**——只要项目级 model catalog 中存在 `capabilities.web_search == true` 的 hosted 候选模型，就把它作为 `auto` 的首选 backend，发起一笔独立的 hosted search 请求；若项目里不存在该候选，或该候选运行时不可用，则进入 HTTP `auto` 链：优先 Tavily，当前候选若缺 key、认证失败、429 / 5xx、timeout 或 transport fail，再顺序降到 Brave、Serper，最后落到插件后端槽（当前官方插件首发 `mimo`）；显式 `backend="mimo"` 等插件名则直接走宿主函数 `webSearchBackend(params)`。不抓正文（正文走 [`web_fetch.md`](web_fetch.md)）。**判定跟项目里有没有 hosted 候选走，不跟当前对话模型的 `api` / vendor 名走**——详见文首校准块第 8 条。
+**一句话**：让模型一句 `query` 拿到一组**结构归一**、**可审计**、**可缓存**的网页 hits，**多 backend 透明切换**——只要项目级 model catalog 中存在 `capabilities.web_search == true` 的 hosted 候选模型，就把它作为 `auto` 的首选 backend，发起一笔独立的 hosted search 请求；若项目里不存在该候选，或该候选运行时不可用，则默认把 `auto` 交给官方 `web-search-backends` 插件，由插件内部 `autoOrder` 决定先试 `mimo`、再试 `tavily`、`brave`、`serper`。双轨迁移期间，`legacy_http_backends=true` 可把 `tavily/brave/serper` 临时切回 Rust legacy HTTP 路径。不抓正文（正文走 [`web_fetch.md`](web_fetch.md)）。**判定跟项目里有没有 hosted 候选走，不跟当前对话模型的 `api` / vendor 名走**——详见文首校准块第 8 条。
 
 ### 1.1 观察指标表（与 §10 验收一一对应）
 
 | 目标 | 观察指标（落地后可核对） | 说人话 |
 |------|--------------------------|--------|
 | G1 query→hits 闭环 | catalog 注册 `web_search`；同一 `query` 经任一 backend 都返回相同形状的 `hits[]`（含 `title/url/snippet/position`，可选 `published_at`） | 不管换哪个 backend，模型读到的都是同一份字段。 |
-| G2 多 backend 透明切换 | `backend=auto`：若项目里存在 `capabilities.web_search == true` 的 hosted 候选模型 → `openai(hosted)` 为首选；否则进入 HTTP 链 `tavily → brave → serper → plugin-slot`；若 hosted / HTTP / plugin 当前候选缺 key、401/403、429/5xx、timeout、transport fail 则继续下一家；显式 `backend=…` 不降级；切换记 `warnings[]` | hosted 首选看项目里有没有可联网模型，不看当前聊天模型；自动模式会继续找能用的 backend，最后还能交给插件层自己决策。 |
+| G2 多 backend 透明切换 | `backend=auto`：若项目里存在 `capabilities.web_search == true` 的 hosted 候选模型 → `openai(hosted)` 为首选；否则默认进入插件 `autoOrder`（`mimo → tavily → brave → serper`）；若 hosted / plugin 当前候选缺 key、401/403、429/5xx、timeout、transport fail 则继续下一家；显式 `backend=…` 不降级。双轨迁移期间可用 `legacy_http_backends=true` 临时改回 Rust HTTP 链。 | hosted 首选看项目里有没有可联网模型，不看当前聊天模型；自动模式真正的后端顺序现在主要由插件自己决定。 |
 | G3 hits 归一化 | 输出 `{ hits, query, backend, stats, truncated, warnings }` 单一 schema；上游各 provider 的特异字段在 adapter 内吃掉 | 模型不需读三套 JSON，调用方一份解析即可。 |
 | G4 缓存命中 | 进程内 LRU + TTL（默认 5 min / 50 条）；key=`(backend, query, count, freshness, country, language, domain_filter, allowed_domains, blocked_domains)`；命中 → `stats.cached=true` 不再发 HTTP | 同会话短时间内重复检索免账单、免速率限制；配置域约束变化不复用旧缓存。 |
 | G5 SSRF 守卫 | hits.url 归一化阶段解析 + 拒任意 IP literal / loopback / 私网 / 内网保留 hostname / 无 host；`allowed_domains` / `blocked_domains` 在结果集级别过滤 | 别让模型以为 `http://127.0.0.1` 或 `https://metadata.google.internal` 是合法搜索结果。 |
@@ -444,12 +447,13 @@ MiMo choices[0].message.annotations[]
 
 #### 2.4.5 插件后端扩展槽（MiMo 首发）
 
-- **交付**：`BackendMode` 新增 `Plugin(String)`，未知 `backend` 名不再在配置期报错，而是在运行时落到插件后端；`WebSearchRuntime` 新增 `PluginSearchInvoker` 注入点，并在 `auto` 链尾追加一个单独的 **plugin slot**。
+- **交付**：`BackendMode` 新增 `Plugin(String)`，未知 `backend` 名不再在配置期报错，而是在运行时落到插件后端；`WebSearchRuntime` 新增 `PluginSearchInvoker` 注入点。到计划 3 为止，`tavily` / `brave` / `serper` 这些后端默认也走插件路径，而不是宿主内置 HTTP adapter。
 - **宿主契约**：Rust 侧统一把 `{ backend, query, count, freshness, country, language, domainFilter }` 交给宿主扩展点 `web_search.backend`；候选函数固定入口名 `webSearchBackend`，返回 `{ hits, warnings, unsupported_backend? }`。这条调用链与 LLM `tools[]` 隔离，不进入 `ToolRegistry`。
-- **官方插件**：`assets/plugins/web-search-backends/` 内置 `tomcat.web-search-backends`，由 `tomcat init` 幂等安装到 `~/.tomcat/plugins/web-search-backends/`。Phase 1 仅首发 `mimo`：插件内部通过 `pi.createChatCompletion({ model: "mimo-v2.5-pro", tools: [{ type: "web_search", ... }] })` 触发 MiMo 联网，再把 `message.annotations[]` 里的 `url_citation` 映射回统一 `hits[]`。
-- **回退语义**：显式 `backend="mimo"` 时，插件执行失败按显式 backend 规则报错或降级；`backend="auto"` 时，插件层拿到 `backend="auto"`，可在插件内部维护自己的顺序，若返回 `unsupported_backend` 则宿主继续尝试下一个 provider。
+- **官方插件**：`assets/plugins/web-search-backends/` 内置 `tomcat.web-search-backends`，由 `tomcat init` 幂等安装到 `~/.tomcat/plugins/web-search-backends/`。插件内同时托管 `mimo`、`tavily`、`brave`、`serper`：MiMo 通过 `pi.createChatCompletion()` 联网，其余三家通过 `pi.fetch()` 调宿主受控出网能力。
+- **权限与安全**：插件 manifest 必须显式声明 `requiredPermissions:["net:fetch"]`、`requiredSecrets:[...]`、`allowedHosts:[...]`；`pi.fetch` 运行期会再次校验 permission、secret 报备、host allowlist、HTTPS、SSRF 与 redirect 策略。
+- **回退语义**：显式 `backend="mimo|tavily|brave|serper"` 时，插件执行失败按显式 backend 规则报错或降级；`backend="auto"` 时，插件层拿到 `backend="auto"`，并在自己的 `autoOrder` 里决定尝试顺序。只有在开启 `legacy_http_backends=true` 的双轨回滚模式下，`tavily/brave/serper` 才会优先切回 Rust legacy HTTP 路径。
 
-**说人话**：宿主现在只管“有一个插件后端槽位”，具体 `mimo` 怎么调、以后再加别家怎么排顺序，都藏在插件 JS 里；Rust 只认同一份输入/输出契约。
+**说人话**：宿主现在只管“调度、安全、归一化”，官方插件才是真正拥有这些搜索后端的人。以后再加一家搜索供应商，优先改插件和 manifest，不用再给 Rust 宿主加一套新 HTTP 客户端。
 
 ---
 
@@ -725,14 +729,15 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 | 来源 | 键 | 含义 | 备注 | 说人话 |
 |------|-----|------|------|--------|
-| `tomcat.config.toml` | `[tools.web_search] backend` | `auto` / `tavily` / `brave` / `serper` / `openai` | 默认 `auto` | 不写就跟模型走。 |
+| `tomcat.config.toml` | `[tools.web_search] backend` | `auto` / `mimo` / `tavily` / `brave` / `serper` / `openai` | 默认 `auto`；`tavily/brave/serper/mimo` 默认都走官方插件；`legacy_http_backends=true` 时前三者可回退到 Rust legacy HTTP | 不写就先看 hosted，没有再交给插件内部顺序。 |
 | env | `TOMCAT__TOOLS__WEB_SEARCH__BACKEND` | 同上，运行时覆盖 | env > config | 容器里临时换 backend。 |
 | `tomcat.config.toml` | `[tools.web_search] tavily_base_url` / `brave_base_url` / `serper_base_url` | 各 backend 的 base URL override | 默认官方 endpoint；只改 host / base，不放 secret | 兼容自建网关或代理。 |
 | env | `TOMCAT__TOOLS__WEB_SEARCH__TAVILY_BASE_URL` 等 | 同上，运行时覆盖 | env > config | 容器里临时切网关。 |
-| runtime `.env` / process env | `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY` | per-provider HTTP key | 运行时从 `~/.tomcat/assets/.env` 或进程 env 读取 | auto 链可同时持有多家 key。 |
+| runtime `.env` / process env | `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPER_API_KEY` | 插件内 REST backend 的 key | 运行时从 `~/.tomcat/assets/.env` 或进程 env 读取；由 `pi.fetch` 按 manifest `requiredSecrets` 报备名注入 | 插件里三家 REST 搜索可以同时配好。 |
 | repo 根 `.env` | 同上 | 本地开发 / 真 API 测试用 | 由 `.env.example` 提供样板；测试会加载仓库根 `.env` | 开发时复制样板即可。 |
 | runtime `.env` / model env | hostedCandidateModel 对应的 `OPENAI_API_KEY`（或 `<PROVIDER>_API_KEY`） | OpenAI hosted 搜索凭证 | 复用 **hostedCandidateModel** 的 key source；**不**由 `[tools.web_search]` 单独配 | hosted 这条路跟项目级候选模型走，不跟当前聊天模型走。 |
 | `tomcat.config.toml` | `[tools.web_search] count` | 默认期望 hits 数 | 1..=20，默认 5 | 一次默认搜几条。 |
+| `tomcat.config.toml` | `[tools.web_search] legacy_http_backends` | 双轨迁移期回滚开关 | 默认 `false`；`true` 时 `tavily/brave/serper` 与 auto 的 HTTP fallback 可走 Rust legacy backend | 新插件出问题时可以一键退回旧路径。 |
 | `tomcat.config.toml` | `[tools.web_search] freshness` / `country` / `language` | 缺省筛选 | 入参可覆盖 | 配置层定个默认；模型可改。 |
 | `tomcat.config.toml` | `[tools.web_search] domain_filter` | 默认白名单 | 入参可叠加 | 「这台机只搜这几个站」。 |
 | `tomcat.config.toml` | `[tools.web_search] blocked_domains` | 黑名单 | 与 `domain_filter` 互补；与 `web_fetch.allowed_domains` **不共享** | 拒搜某些站。 |
@@ -743,7 +748,7 @@ tool_exec/web_search.mod   backend.rs          web_search/mod         web_search
 
 > **server-side 资格不在 `[tools.web_search]` 里配**：`auto` 是否有 hosted 首选，取决于**合并后的 model catalog** 中是否存在 `capabilities.web_search == true` 的条目；若有多个，按顺序取首个作为 hostedCandidateModel。`capabilities.web_search` 是**新增能力位**（[`catalog.rs` Capabilities](../../../src/core/llm/catalog.rs)，默认 `false`），与现有 `vision/files/tools/reasoning` 并列；**登记前必须先查该厂商/该模型的官方文档**（见 §13），不得仅凭「endpoint 兼容 Responses wire」就置 `true`。`[tools.web_search] backend` 只能在「资格已具备」时把 `auto` 收窄/或强制走 HTTP，**不能**反向赋予一个不支持的模型 server-side 能力。**当前对话模型无论是不是 Responses，都不再影响 `auto` 是否尝试 hosted 首选。**
 
-> **能否「纯配置接入新 backend」**（回应选型期提问）：**仅对 wire 同构的网关成立**。Tavily 兼容网关（同 `POST {base}/search` 形状）可仅靠 `[tools.web_search] tavily_base_url` + `TAVILY_API_KEY` 接入，无需改码；Brave / Serper 若只是换 host 也可通过各自 `*_base_url` 覆盖。但**异构 HTTP backend**（字段/鉴权/分页不同的全新供应商）仍需在 `core/tools/web_search/` 新增 adapter——这与「新增 LLM 模型仅改 `models.toml`」**不同**，因为 LLM 侧已有 `openai`/`openai-responses` 等 wire 实现可复用，而检索供应商各家 HTTP 形状不归一。
+> **能否「纯配置接入新 backend」**（回应选型期提问）：现在的默认答案更接近“**优先改插件，不优先改宿主**”。Tavily / Brave / Serper 这类已托管后端可以只靠 `[tools.web_search] *_base_url` + 对应 API key 覆盖网关；但如果要接入一套**全新异构搜索供应商**，优先是在 `web-search-backends/main.js` + `plugin.json` 里新增后端与权限声明。只有当它需要新的宿主能力时，才需要再改 Rust。
 
 ---
 

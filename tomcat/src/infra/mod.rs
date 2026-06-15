@@ -12,6 +12,7 @@ pub(crate) mod error;
 pub(crate) mod event_bus;
 pub(crate) mod events;
 pub(crate) mod logging;
+pub(crate) mod net_guard;
 pub(crate) mod platform;
 
 pub use audit::{

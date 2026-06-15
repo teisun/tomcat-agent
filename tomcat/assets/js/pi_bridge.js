@@ -68,6 +68,10 @@
           return;
         }
         if (pr.data && pr.data.ready) {
+          if (pr.data.response && typeof pr.data.response.ok === 'boolean') {
+            resolve(pr.data.response);
+            return;
+          }
           resolve({ ok: true, data: pr.data.result });
           return;
         }
@@ -77,6 +81,25 @@
       }
       setTimeout(poll, POLL_INTERVAL_MS);
     });
+  }
+
+  function toHostError(err, fallbackMessage) {
+    var raw = (err && err.message) ? String(err.message) : String(fallbackMessage || 'hostcall failed');
+    var candidate = raw;
+    var jsonStart = raw.indexOf('{');
+    if (jsonStart >= 0) {
+      candidate = raw.slice(jsonStart);
+    }
+    try {
+      var parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && parsed.code) {
+        var structured = new Error(parsed.message || parsed.code);
+        structured.code = parsed.code;
+        if (parsed.details !== undefined) structured.details = parsed.details;
+        return structured;
+      }
+    } catch (_ignored) {}
+    return err instanceof Error ? err : new Error(raw);
   }
 
   // -- Internal registries ----------------------------------------------------
@@ -230,6 +253,16 @@
         .then(function (r) {
           if (!r.ok) throw new Error(r.error || 'createChatCompletion failed');
           return r.data; // { message: {role, content}, usage?: {...} }
+        });
+    },
+
+    fetch: function (params) {
+      return hostCallAsync('net', 'fetch', params)
+        .then(function (r) {
+          if (!r.ok) throw toHostError(new Error(r.error || 'fetch failed'), 'fetch failed');
+          return r.data;
+        }, function (err) {
+          throw toHostError(err, 'fetch failed');
         });
     },
 

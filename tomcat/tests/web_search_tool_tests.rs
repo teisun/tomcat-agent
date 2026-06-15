@@ -43,6 +43,7 @@ async fn runtime_explicit_tavily_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.tavily_base_url = tavily.uri();
     let runtime = build_runtime(cfg, None);
 
@@ -96,6 +97,7 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.brave_base_url = brave.uri();
     cfg.tools.web_search.cache_ttl_secs = 60;
     cfg.tools.web_search.cache_capacity = 8;
@@ -156,6 +158,7 @@ async fn runtime_explicit_serper_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "serper".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.serper_base_url = serper.uri();
     let runtime = build_runtime(cfg, None);
 
@@ -267,6 +270,7 @@ async fn live_tavily_search_smoke() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     let runtime = build_runtime(cfg, None);
     let output = runtime
         .search(
@@ -288,6 +292,123 @@ async fn live_tavily_search_smoke() {
         !output.hits.is_empty(),
         "expected at least one Tavily hit when PI_LIVE_WEB_SEARCH=1"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn real_tavily_plugin_web_search() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_env_var("TAVILY_API_KEY", "real_tavily_plugin_web_search");
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".into();
+    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let output = harness
+        .runtime
+        .search(
+            WebSearchArgs {
+                query: "rust async runtime".into(),
+                count: Some(3),
+                freshness: Some("month".into()),
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: vec!["tokio.rs".into(), "docs.rs".into()],
+            },
+            "live-tavily-plugin-session",
+        )
+        .await
+        .expect("live tavily plugin search");
+
+    assert_eq!(output.backend, "tavily");
+    assert!(
+        !output.hits.is_empty(),
+        "expected Tavily plugin backend to return hits, warnings={:?}",
+        output.warnings
+    );
+    harness
+        .manager
+        .end_session("live-tavily-plugin-session")
+        .await
+        .expect("end live tavily plugin session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn real_brave_plugin_web_search() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_env_var("BRAVE_API_KEY", "real_brave_plugin_web_search");
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "brave".into();
+    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let output = harness
+        .runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(3),
+                freshness: Some("month".into()),
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: Vec::new(),
+            },
+            "live-brave-plugin-session",
+        )
+        .await
+        .expect("live brave plugin search");
+
+    assert_eq!(output.backend, "brave");
+    assert!(
+        !output.hits.is_empty(),
+        "expected Brave plugin backend to return hits, warnings={:?}",
+        output.warnings
+    );
+    harness
+        .manager
+        .end_session("live-brave-plugin-session")
+        .await
+        .expect("end live brave plugin session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn real_serper_plugin_web_search() {
+    common::setup_logging();
+    common::load_openai_test_env();
+    require_env_var("SERPER_API_KEY", "real_serper_plugin_web_search");
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "serper".into();
+    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let output = harness
+        .runtime
+        .search(
+            WebSearchArgs {
+                query: "rust programming language".into(),
+                count: Some(5),
+                freshness: None,
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: Vec::new(),
+            },
+            "live-serper-plugin-session",
+        )
+        .await
+        .expect("live serper plugin search");
+
+    assert_eq!(output.backend, "serper");
+    assert!(
+        !output.hits.is_empty(),
+        "expected Serper plugin backend to return hits, warnings={:?}",
+        output.warnings
+    );
+    harness
+        .manager
+        .end_session("live-serper-plugin-session")
+        .await
+        .expect("end live serper plugin session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -414,6 +535,67 @@ fn build_runtime(config: AppConfig, models_toml: Option<String>) -> WebSearchRun
     let catalog =
         Arc::new(ModelCatalog::load_from_path(&config, path).expect("load model catalog"));
     WebSearchRuntime::new(&config, catalog).expect("build runtime")
+}
+
+struct PluginRuntimeHarness {
+    runtime: WebSearchRuntime,
+    manager: Arc<PluginManager>,
+    _temp: tempfile::TempDir,
+}
+
+fn build_runtime_with_builtin_plugin(
+    config: AppConfig,
+    models_toml: Option<String>,
+) -> PluginRuntimeHarness {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("models.toml");
+    if let Some(contents) = models_toml {
+        std::fs::write(&path, contents).expect("write models.toml");
+    }
+    let catalog =
+        Arc::new(ModelCatalog::load_from_path(&config, path).expect("load model catalog"));
+    let runtime = WebSearchRuntime::new(&config, catalog.clone()).expect("build runtime");
+
+    let plugin_root = install_builtin_web_search_plugin(temp.path());
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let mut manager = Arc::new(PluginManager::new(event_bus.clone()));
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let inner = Arc::get_mut(&mut manager).expect("plugin manager should be uniquely owned");
+    inner.set_plugin_engine(PluginEngine::global(None).expect("create quickjs engine"));
+    inner.set_plugin_runtime_manager(Arc::new(PluginRuntimeManager::new()));
+    inner.set_audit_recorder(Arc::new(TracingAuditRecorder));
+    inner.set_function_registry(function_registry.clone());
+
+    let invoker = PluginFunctionInvoker::new(Arc::downgrade(&manager));
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(event_bus.clone())
+            .with_tokio_handle(tokio::runtime::Handle::current())
+            .with_plugin_manager(Arc::downgrade(&manager))
+            .with_llm_resolver(Arc::new(DefaultLlmResolver::new(
+                config.clone(),
+                catalog.clone(),
+            ))),
+    );
+    invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
+    manager.set_host_dispatcher(dispatcher);
+    function_registry.register_plugin_functions(
+        "tomcat.web-search-backends",
+        &plugin_root,
+        &[ManifestFunction {
+            point: "web_search.backend".to_string(),
+            function: "webSearchBackend".to_string(),
+        }],
+    );
+    manager
+        .load_plugin(&plugin_root)
+        .expect("load builtin web_search plugin");
+    runtime.set_plugin_invoker(ExtPluginSearchInvoker::new(function_registry, invoker));
+
+    PluginRuntimeHarness {
+        runtime,
+        manager,
+        _temp: temp,
+    }
 }
 
 fn install_builtin_web_search_plugin(dest_root: &Path) -> PathBuf {

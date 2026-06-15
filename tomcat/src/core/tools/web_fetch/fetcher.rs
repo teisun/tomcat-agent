@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::time::Instant;
 
-use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT};
 use reqwest::{Client, Url};
 
+use crate::infra::net_guard::read_body_limited;
 use crate::infra::{AppError, ToolsWebFetchConfig};
 
 use super::elapsed_ms;
@@ -132,7 +132,7 @@ pub(crate) async fn fetch_url(
             ));
         }
 
-        let body = read_body_limited(response, config.max_http_content_bytes).await?;
+        let body = read_body_limited(response, config.max_http_content_bytes, "web_fetch").await?;
         if body.timed_out {
             warnings.push("timeout".to_string());
         }
@@ -294,50 +294,4 @@ fn extend_unique(target: &mut Vec<String>, extra: Vec<String>) {
             target.push(warning);
         }
     }
-}
-
-struct BodyReadResult {
-    bytes: Vec<u8>,
-    truncated: bool,
-    timed_out: bool,
-}
-
-async fn read_body_limited(
-    response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<BodyReadResult, AppError> {
-    let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut timed_out = false;
-    let mut stream = response.bytes_stream();
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(chunk) => {
-                let remaining = max_bytes.saturating_sub(bytes.len());
-                if chunk.len() > remaining {
-                    bytes.extend_from_slice(&chunk[..remaining]);
-                    truncated = true;
-                    break;
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            Err(err) if err.is_timeout() => {
-                timed_out = true;
-                break;
-            }
-            Err(err) => {
-                return Err(AppError::Tool(format!(
-                    "web_fetch: 响应体读取失败: {}",
-                    err
-                )));
-            }
-        }
-    }
-
-    Ok(BodyReadResult {
-        bytes,
-        truncated,
-        timed_out,
-    })
 }

@@ -87,4 +87,6 @@ dotenvy = "0.15"
 tokio = { version = "1.0", features = ["test-util"] }
 serial_test = "3.4.0"
 wiremock = "0.6.5"
+tokio-rustls = "0.26.4"
+rcgen = "0.14.8"
 
