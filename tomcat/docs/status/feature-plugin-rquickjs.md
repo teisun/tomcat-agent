@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-15 12:00 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
+| Tom | 2026-06-15 12:30 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 移除 WasmEdge 运行时、资产与脚本，统一 Plugin 命名 @2026-06-14
@@ -14,6 +14,14 @@
 - [✓] **[P1]** 三类真实插件测试：纯工具型 E2E、session_start 集成探针、legacy 工具箱 E2E、跨事件 VM 状态 @2026-06-14
 - [✓] **[P1]** PackageManager 统一安装：三层 package/plugin/skill 安装与卸载、`/install` live refresh、黑盒/集成/E2E/文档收口 @2026-06-15
 - [✓] **[P1]** PackageManager 规范对齐：registry schema、严格 npm 版本、`plugin.json` 单文件名、§9 验收矩阵与文档回链 @2026-06-15
+
+- [✓] **[P2]** 清理 vendored OpenSpec Cursor skills（`openspec-*`） @2026-06-15
+
+### 2026-06-15 | chore(cursor): 移除 vendored OpenSpec skills
+
+- **交付**：删除 `tomcat/.cursor/skills/openspec-{apply-change,archive-change,explore,propose}/SKILL.md`，避免仓库内重复维护 OpenSpec 工作流技能副本。
+- **验证**：纯文档/技能清理，无代码路径变更。
+- **覆盖**：状态页沿用当前分支既有 `66.2%` baseline。
 
 ### 2026-06-15 | fix(package): PackageManager 规范对齐
 
